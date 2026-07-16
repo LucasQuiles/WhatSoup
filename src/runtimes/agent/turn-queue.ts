@@ -25,9 +25,16 @@ export interface QueuedTurn {
   inboundSeq?: number;
 }
 
+/**
+ * Distinct admission-rejection reasons (#1750). Threaded through onReject so
+ * the finalizer can stamp a distinct failure_class rather than collapsing every
+ * reject to 'unknown'. The names are a subset of core AdmissionRejectClass.
+ */
+export type TurnRejectReason = 'queue_closed' | 'queue_halted' | 'queue_full';
+
 export interface TurnQueueOpts {
   maxDepth?: number;
-  onReject?: (turn: QueuedTurn) => void;
+  onReject?: (turn: QueuedTurn, reason: TurnRejectReason) => void;
   onProcessorError?: (turn: QueuedTurn, error: unknown) => void | Promise<void>;
 }
 
@@ -40,7 +47,7 @@ export class TurnQueue {
   private halted = false;
   private haltError: unknown;
   private readonly maxDepth: number;
-  private readonly onReject?: (turn: QueuedTurn) => void;
+  private readonly onReject?: (turn: QueuedTurn, reason: TurnRejectReason) => void;
   private readonly onProcessorError?: (turn: QueuedTurn, error: unknown) => void | Promise<void>;
 
   constructor(opts?: TurnQueueOpts) {
@@ -58,18 +65,18 @@ export class TurnQueue {
   enqueue(turn: QueuedTurn): boolean {
     if (!this.accepting) {
       log.warn({ chatJid: turn.chatJid }, 'turn rejected — queue admissions are closed');
-      this.onReject?.(turn);
+      this.onReject?.(turn, 'queue_closed');
       return false;
     }
     if (this.halted) {
       log.error({ chatJid: turn.chatJid }, 'turn rejected — queue is halted after finalization failure');
-      this.onReject?.(turn);
+      this.onReject?.(turn, 'queue_halted');
       return false;
     }
     if (this.queue.length >= this.maxDepth) {
       log.warn({ chatJid: turn.chatJid, maxDepth: this.maxDepth, pending: this.queue.length },
         'turn rejected — queue depth cap reached');
-      this.onReject?.(turn);
+      this.onReject?.(turn, 'queue_full');
       return false;
     }
     this.queue.push(turn);

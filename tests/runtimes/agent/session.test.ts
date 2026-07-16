@@ -42,9 +42,13 @@ function makeMockChild(pid = 12345) {
 
   const killFn = vi.fn();
   const onFn = vi.fn((event: string, cb: (...args: unknown[]) => void) => {
-    // Store exit handler so tests can trigger it
+    // Store exit and drained-close handlers independently so tests can model
+    // the complete child-process lifecycle.
     if (event === 'exit') {
       (child as unknown as { _exitCb: (...args: unknown[]) => void })._exitCb = cb;
+    }
+    if (event === 'close') {
+      (child as unknown as { _closeCb: (...args: unknown[]) => void })._closeCb = cb;
     }
   });
 
@@ -56,6 +60,7 @@ function makeMockChild(pid = 12345) {
     kill: killFn,
     on: onFn,
     _exitCb: null as ((...args: unknown[]) => void) | null,
+    _closeCb: null as ((...args: unknown[]) => void) | null,
   };
 
   return child;
@@ -66,7 +71,10 @@ type MockChild = ReturnType<typeof makeMockChild>;
 function exitOnSigkill(child: MockChild): void {
   child.kill.mockImplementation((signal: NodeJS.Signals | number) => {
     if (signal === 'SIGKILL') {
-      queueMicrotask(() => child._exitCb?.(null, 'SIGKILL'));
+      queueMicrotask(() => {
+        child._exitCb?.(null, 'SIGKILL');
+        child._closeCb?.(null, 'SIGKILL');
+      });
     }
     return true;
   });
@@ -86,9 +94,28 @@ vi.mock('node:fs', () => ({
   readFileSync: vi.fn(),
 }));
 
+// Mock keyring so lookupCredential is a pure env-lookup (no fs/execFileSync
+// side effects). SERVICE_ENV_MAP and resolveProviderKeyService are preserved
+// from the real module. This prevents the node:fs mock pollution above from
+// leaking into buildChildEnv tests after the W-4 migration routed key reads
+// through resolveApiKey → lookupCredential.
+vi.mock('../../../src/lib/keyring.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/lib/keyring.ts')>();
+  return {
+    ...actual,
+    lookupCredential: vi.fn((service: string): string | null => {
+      const envVar = actual.SERVICE_ENV_MAP[service];
+      if (!envVar) return null;
+      const val = process.env[envVar];
+      return val && val.length > 0 ? val : null;
+    }),
+  };
+});
+
 // Import after mocks are registered
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { killSessionTree } from '../../../src/runtimes/agent/process-tree.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import { formatAge, TURN_WATCHDOG_MS, WATCHDOG_SOFT_MS, WATCHDOG_WARN_MS, WATCHDOG_HARD_MS, STALLED_OP_KILL_GRACE_MS, PROVIDER_DISPLAY_NAMES } from '../../../src/runtimes/agent/session.ts';
 import { OpenAIApiProvider } from '../../../src/runtimes/agent/providers/openai-api.ts';
@@ -133,6 +160,19 @@ function makeSseResponse(events: Array<Record<string, unknown> | string>): Respo
 vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   createSession: vi.fn(() => 42),
   incrementMessageCount: vi.fn(),
+  resolveResumableAgentSession: vi.fn((
+    _db: unknown,
+    input: {
+      provider: string;
+      agentSessionRowId?: number;
+      workspaceKey?: string;
+    },
+  ) => ({
+    id: input.agentSessionRowId ?? 42,
+    provider: input.provider,
+    workspace_key: input.workspaceKey ?? null,
+  })),
+  updateResumedSessionStatus: vi.fn(),
   updateSessionId: vi.fn(),
   updateSessionStatus: vi.fn(),
   updateTranscriptPath: vi.fn(),
@@ -142,6 +182,7 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
 import {
   createSession,
   incrementMessageCount,
+  updateResumedSessionStatus,
   updateSessionId,
   updateSessionStatus,
 } from '../../../src/runtimes/agent/session-db.ts';
@@ -409,6 +450,124 @@ describe('SessionManager', () => {
     });
   });
 
+  it('rejects a second provider request until the accepted terminal result clears the first owner', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    let sm!: SessionManager;
+    const onEvent = vi.fn((event: AgentEvent) => {
+      // AgentRuntime clears the provider boundary only after admitting the
+      // terminal result for the current owner.
+      if (event.type === 'result') sm.completeProviderTurn();
+    });
+    sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent });
+    await sm.spawnSession();
+
+    await sm.sendTurn('first request');
+
+    await expect(sm.sendTurn('overlapping request')).rejects.toThrow(
+      /PROVIDER_TURN_IN_FLIGHT/,
+    );
+    expect(mockChild.stdin.write).toHaveBeenCalledTimes(1);
+
+    mockChild.stdout.emit('data', Buffer.from(
+      `${JSON.stringify({ type: 'result', is_error: false, result: '' })}\n`,
+    ));
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'result' }));
+
+    await sm.sendTurn('second request');
+    expect(mockChild.stdin.write).toHaveBeenCalledTimes(2);
+  });
+
+  it('settles the exact provider-turn barrier only when that request terminalizes', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+
+    await expect(sm.waitForProviderTurnToTerminalize()).resolves.toBeUndefined();
+    await sm.sendTurn('first request');
+
+    let firstSettled = false;
+    const firstBarrier = sm.waitForProviderTurnToTerminalize().then(() => {
+      firstSettled = true;
+    });
+    await Promise.resolve();
+    expect(firstSettled).toBe(false);
+
+    sm.completeProviderTurn();
+    await firstBarrier;
+    expect(firstSettled).toBe(true);
+
+    await sm.sendTurn('second request');
+    let secondSettled = false;
+    const secondBarrier = sm.waitForProviderTurnToTerminalize().then(() => {
+      secondSettled = true;
+    });
+    await Promise.resolve();
+    expect(secondSettled).toBe(false);
+
+    sm.completeProviderTurn();
+    await secondBarrier;
+    expect(secondSettled).toBe(true);
+  });
+
+  it('acquires provider ownership before awaiting a delayed stdin write', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    let finishFirstWrite: ((err?: Error | null) => void) | undefined;
+    mockChild.stdin.write.mockImplementationOnce(
+      (_data: unknown, _encoding: unknown, callback?: (err?: Error | null) => void) => {
+        finishFirstWrite = callback;
+        return true;
+      },
+    );
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+
+    const firstTurn = sm.sendTurn('first request');
+    await vi.waitFor(() => expect(finishFirstWrite).toBeTypeOf('function'));
+
+    try {
+      await expect(sm.sendTurn('concurrent request')).rejects.toThrow(
+        /PROVIDER_TURN_IN_FLIGHT/,
+      );
+      expect(mockChild.stdin.write).toHaveBeenCalledTimes(1);
+    } finally {
+      finishFirstWrite?.();
+      await firstTurn;
+    }
+  });
+
+  it('keeps the watchdog armed when a managed provider resolves without a terminal result', async () => {
+    vi.useFakeTimers();
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+    });
+    await sm.spawnSession();
+    const state = sm as unknown as {
+      managedProviderSession: { sendTurn: ReturnType<typeof vi.fn> };
+      watchdogHard: ReturnType<typeof setTimeout> | null;
+    };
+    state.managedProviderSession.sendTurn = vi.fn(async () => {});
+
+    await sm.sendTurn('provider returns without a result');
+
+    expect(sm.getStatus().turnInFlight).toBe(true);
+    expect(state.watchdogHard).not.toBeNull();
+    await expect(sm.sendTurn('must remain closed')).rejects.toThrow(
+      /PROVIDER_TURN_IN_FLIGHT/,
+    );
+    await sm.shutdown(false);
+    vi.useRealTimers();
+  });
+
   it('handleNew kills current child, marks session ended, spawns new', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
@@ -450,7 +609,7 @@ describe('SessionManager', () => {
     expect(sentMessages[0].text).toContain('session ended');
   });
 
-  it('spawn-per-turn non-zero exit invokes crash handling and notifies the user', async () => {
+  it('spawn-per-turn non-zero close invokes crash handling and notifies the user', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const onCrash = vi.fn();
@@ -470,6 +629,7 @@ describe('SessionManager', () => {
     await sm.sendTurn('hello');
 
     mockChild._exitCb?.(1, null);
+    mockChild._closeCb?.(1, null);
     await vi.waitFor(() => expect(notifyUser).toHaveBeenCalledTimes(1));
 
     expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({
@@ -544,18 +704,27 @@ describe('SessionManager', () => {
     expect(sm.getStatus()).toEqual({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null, turnInFlight: false, durableFailureClosed: false });
   });
 
-  it('getStatus().turnInFlight tracks the turn watchdog (armed during a turn)', async () => {
+  it('watchdog rearming is separate from provider turn ownership', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
 
     const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
     await sm.spawnSession();
-    expect(sm.getStatus().turnInFlight).toBe(false); // no turn yet → watchdog not armed
+    expect(sm.getStatus().turnInFlight).toBe(false);
 
-    sm.tickWatchdog();                               // provider progress arms the watchdog (turn in flight)
+    sm.tickWatchdog();
+    expect(sm.getStatus().turnInFlight).toBe(false);
+
+    await sm.sendTurn('first request');
     expect(sm.getStatus().turnInFlight).toBe(true);
 
-    sm.clearTurnWatchdog();                          // turn end clears the watchdog
+    sm.clearTurnWatchdog();
+    expect(sm.getStatus().turnInFlight).toBe(true);
+    await expect(sm.sendTurn('overlapping request')).rejects.toThrow(
+      /PROVIDER_TURN_IN_FLIGHT/,
+    );
+
+    sm.completeProviderTurn();
     expect(sm.getStatus().turnInFlight).toBe(false);
   });
 
@@ -597,6 +766,36 @@ describe('SessionManager', () => {
     expect(state.stdoutBufferStr).toBe('');
     expect(updateSessionId).toHaveBeenCalledWith(db, 42, 'ses_buffered');
     expect(events.some((event) => event.type === 'init')).toBe(true);
+  });
+
+  it('persistent Claude stops admitting later records in a chunk after malformed JSON quarantines it', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const events: AgentEvent[] = [];
+    let shutdownPromise: Promise<void> | null = null;
+    let sm!: SessionManager;
+    sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: (event) => {
+        events.push(event);
+        if (event.type === 'parse_error') shutdownPromise = sm.shutdown(false);
+      },
+    });
+    await sm.spawnSession();
+
+    mockChild.stdout.emit('data', Buffer.from([
+      '{not valid json}',
+      JSON.stringify({ type: 'result', is_error: false, result: 'must be fenced' }),
+      '',
+    ].join('\n')));
+
+    expect(events).toEqual([
+      { type: 'parse_error', line: '{not valid json}' },
+    ]);
+    expect(shutdownPromise).not.toBeNull();
+    await shutdownPromise;
   });
 
   it('forwards every event from one multi-block provider envelope in order', async () => {
@@ -959,7 +1158,13 @@ describe('SessionManager', () => {
     await sm.spawnSession();
     await expect(sm.sendTurn('fail this turn')).rejects.toThrow('stream failed');
 
-    expect(updateSessionStatus).toHaveBeenCalledWith(db, 42, 'crashed');
+    expect(updateResumedSessionStatus).toHaveBeenCalledWith(
+      db,
+      42,
+      expect.stringMatching(/^openai-api-[0-9a-f-]{36}$/),
+      'openai-api',
+      'crashed',
+    );
     expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({
       exitCode: null,
       signal: null,
@@ -1086,7 +1291,13 @@ describe('SessionManager', () => {
     expect(err).toBeInstanceOf(Error);
     expect((err as Error).message).toBe('aborted by watchdog');
     expect(killSpy).toHaveBeenCalled();
-    expect(updateSessionStatus).toHaveBeenCalledWith(db, 42, 'crashed');
+    expect(updateResumedSessionStatus).toHaveBeenCalledWith(
+      db,
+      42,
+      expect.stringMatching(/^openai-api-[0-9a-f-]{36}$/),
+      'openai-api',
+      'crashed',
+    );
     expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: expect.stringMatching(/^openai-api-[0-9a-f-]{36}$/),
       dbRowId: 42,
@@ -1396,9 +1607,11 @@ describe('SessionManager', () => {
 
     sm.recoverStalledOperation('toolu_bash_hang', 'Bash');
 
-    // Impatient user re-prompts while the tool is hung. This resets the hard watchdog
-    // (clearTurnWatchdog + armWatchdog) but must NOT clear the stalled-op kill.
-    await sm.sendTurn('how soon until the report is ready?');
+    // Impatient user re-prompts while the tool is hung. The provider lane rejects
+    // the overlap and, critically, does not clear or postpone the exact stalled-op kill.
+    await expect(sm.sendTurn('how soon until the report is ready?')).rejects.toThrow(
+      /PROVIDER_TURN_IN_FLIGHT/,
+    );
     expect((sm as unknown as { stalledOpKill: unknown }).stalledOpKill).not.toBeNull();
 
     await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
@@ -1555,6 +1768,7 @@ describe('SessionManager', () => {
     expect(mockChild.kill).toHaveBeenCalledWith('SIGTERM');
 
     mockChild._exitCb?.(0, null);
+    mockChild._closeCb?.(0, null);
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(graceMs + 1);
 
@@ -1666,10 +1880,22 @@ describe('SessionManager', () => {
 
     await vi.waitFor(() => expect(onResumeFailedCb).toHaveBeenCalledTimes(1));
 
-    expect(updateSessionStatus).toHaveBeenCalledWith(db, 42, 'resume_failed');
+    expect(updateResumedSessionStatus).toHaveBeenCalledWith(
+      db,
+      42,
+      'some-session-id',
+      'claude-cli',
+      'resume_failed',
+    );
     expect(onResumeFailedCb).toHaveBeenCalledTimes(1);
     // Should NOT call updateSessionStatus with 'crashed' for a resume failure
-    expect(updateSessionStatus).not.toHaveBeenCalledWith(db, 42, 'crashed');
+    expect(updateResumedSessionStatus).not.toHaveBeenCalledWith(
+      db,
+      42,
+      'some-session-id',
+      'claude-cli',
+      'crashed',
+    );
   });
 
   // ─── Configurable cwd + instructionsPath ─────────────────────────────────
@@ -2148,6 +2374,8 @@ describe('Event-driven provider ready signal', () => {
     // Verify session/prompt was written with the captured sessionId
     expect(mockChild.stdin.write).toHaveBeenCalledWith(
       expect.stringContaining('sess_xyz789'),
+      'utf8',
+      expect.any(Function),
     );
   });
 
@@ -2731,7 +2959,9 @@ describe('__provider_switch_for_test', () => {
 
   it('getProviderArgs for opencode-cli returns expected base args', () => {
     const args = __provider_switch_for_test.getProviderArgs('opencode-cli', 'sys', '/cwd', undefined, undefined, []);
-    expect(args).toEqual(['run', '--format', 'json', '--pure']);
+    expect(args).toEqual([
+      'run', '--format', 'json', '--pure', '--agent', 'whatsoup-headless',
+    ]);
   });
 
   it('getProviderArgs for opencode-cli includes -m when model is set and no baseUrl', () => {
@@ -3241,7 +3471,7 @@ describe('spawn-per-turn error branches', () => {
     expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({ exitCode: null, signal: null }));
   });
 
-  it('spawn-per-turn exit code 0 does not call onCrash or notifyUser', async () => {
+  it('spawn-per-turn close code 0 without a result fails closed and notifies the user', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const notifyUser = vi.fn();
@@ -3255,15 +3485,22 @@ describe('spawn-per-turn error branches', () => {
     await sm.spawnSession();
     await sm.sendTurn('hello clean exit');
 
-    // Exit code 0 = normal turn completion
     mockChild._exitCb?.(0, null);
+    mockChild._closeCb?.(0, null);
 
     // Give setImmediate callbacks a chance to run
     await new Promise((r) => setImmediate(r));
     await new Promise((r) => setImmediate(r));
 
-    expect(onCrash).not.toHaveBeenCalled();
-    expect(notifyUser).not.toHaveBeenCalled();
+    expect(onCrash).toHaveBeenCalledTimes(1);
+    expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({
+      exitCode: 0,
+      signal: null,
+      crashClass: 'provider_stream_corrupt',
+    }));
+    expect(notifyUser).toHaveBeenCalledWith(
+      expect.stringMatching(/ended before completing the turn/i),
+    );
   });
 });
 
@@ -3994,11 +4231,15 @@ describe('session.ts uncovered-branch coverage', () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const events: AgentEvent[] = [];
-    const sm = new SessionManager({
+    let sm!: SessionManager;
+    sm = new SessionManager({
       db,
       messenger,
       chatJid: CHAT_JID,
-      onEvent: (e) => events.push(e),
+      onEvent: (e) => {
+        events.push(e);
+        if (e.type === 'result') sm.completeProviderTurn();
+      },
       provider: 'openai-api',
       providerConfig: { budget: { requestsPerMinute: 1 } },
     });
@@ -4101,6 +4342,7 @@ describe('session.ts uncovered-branch coverage', () => {
     // Mark active without ever spawning the provider session.
     (sm as unknown as { active: boolean }).active = true;
     await expect(sm.sendTurn('hi')).rejects.toThrow(/Managed provider session is not initialized/);
+    expect(sm.getStatus().turnInFlight).toBe(false);
   });
 
   // --- tickWatchdog / recoverStalledOperation / handleStalledOpKill /
@@ -4389,7 +4631,13 @@ describe('session.ts uncovered-branch coverage', () => {
     if (child._exitCb) child._exitCb(1, null);
     // onResumeFailed is called synchronously inside the exit handler.
     expect(onResumeFailed).toHaveBeenCalledTimes(1);
-    expect(updateSessionStatus).toHaveBeenCalledWith(db, 42, 'resume_failed');
+    expect(updateResumedSessionStatus).toHaveBeenCalledWith(
+      db,
+      42,
+      'expired-session-id',
+      'claude-cli',
+      'resume_failed',
+    );
   });
 
   // --- Crash path with durability engine set (lines 1342-1344, 1351-1353):
@@ -4795,7 +5043,8 @@ describe('session.ts uncovered-branch coverage', () => {
     await sm.sendTurn('go');
     const child = (sm as unknown as { child: MockChild }).child;
     if (child._exitCb) child._exitCb(1, null);
-    await vi.advanceTimersByTimeAsync(0); // flush setImmediate drain
+    if (child._closeCb) child._closeCb(1, null);
+    await vi.advanceTimersByTimeAsync(0); // flush close-boundary callbacks
     await vi.advanceTimersByTimeAsync(0); // flush notifyUnexpectedExit setImmediate
     expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({ exitCode: 1 }));
     vi.useRealTimers();
@@ -4878,13 +5127,44 @@ describe('session.ts uncovered-branch coverage', () => {
     (sm as unknown as { geminiSessionId: string | null }).geminiSessionId = 'gem-session-1';
     const child = (sm as unknown as { child: MockChild }).child;
     const writes: string[] = [];
-    (child.stdin.write as ReturnType<typeof vi.fn>).mockImplementation((data: string) => {
+    (child.stdin.write as ReturnType<typeof vi.fn>).mockImplementation((
+      data: string,
+      _encoding: unknown,
+      callback?: (err?: Error | null) => void,
+    ) => {
       writes.push(typeof data === 'string' ? data : String(data));
+      callback?.();
       return true;
     });
     await sm.sendTurn('hello gemini');
     expect(writes.some((m) => m.includes('"method":"session/prompt"'))).toBe(true);
     expect(incrementMessageCount).toHaveBeenCalledWith(db, 42);
+  });
+
+  it('gemini-cli tears down on an ambiguous session/prompt stdin error', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'gemini-cli',
+    });
+    await sm.spawnSession();
+    (sm as unknown as { geminiSessionId: string | null }).geminiSessionId = 'gem-session-1';
+    const child = (sm as unknown as { child: MockChild }).child;
+    child.stdin.write.mockImplementation(
+      (_data: unknown, _enc: unknown, cb?: (err?: Error | null) => void) => {
+        if (typeof cb === 'function') cb(new Error('EPIPE'));
+        return false;
+      },
+    );
+
+    await expect(sm.sendTurn('hello gemini')).rejects.toThrow('EPIPE');
+
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(sm.getStatus()).toMatchObject({ active: false, turnInFlight: false });
   });
 
   // --- Claude-cli stdin write timeout (lines 1860-1880).
@@ -4903,17 +5183,29 @@ describe('session.ts uncovered-branch coverage', () => {
     await vi.advanceTimersByTimeAsync(31_000);
     const err = (await turn) as Error;
     expect(err.message).toContain('STDIN_WRITE_TIMEOUT');
+    expect(mockChild.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(sm.getStatus()).toMatchObject({ active: false, turnInFlight: false });
     vi.useRealTimers();
   });
 
   // --- Claude-cli stdin write error path (line 1867).
 
-  it('claude-cli sendTurn rejects when stdin.write calls back with an error', async () => {
+  it('holds provider ownership until an ambiguous stdin error has process-tree shutdown proof', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
     await sm.spawnSession();
     const child = (sm as unknown as { child: MockChild }).child;
+    let proveShutdown: (() => void) | undefined;
+    const shutdownProof = new Promise<void>((resolve) => {
+      proveShutdown = resolve;
+    });
+    (killSessionTree as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      async (target: { kill: (signal: NodeJS.Signals) => boolean }, signal: NodeJS.Signals) => {
+        target.kill(signal);
+        await shutdownProof;
+      },
+    );
     (child.stdin.write as ReturnType<typeof vi.fn>).mockImplementation(
       (_data: unknown, _enc: unknown, cb: (err?: Error | null) => void) => {
         if (typeof _enc === 'function') (_enc as (e?: Error | null) => void)(new Error('EPIPE'));
@@ -4921,7 +5213,49 @@ describe('session.ts uncovered-branch coverage', () => {
         return false;
       },
     );
-    await expect(sm.sendTurn('boom')).rejects.toThrow('EPIPE');
+    let settled = false;
+    const turn = sm.sendTurn('boom').then(
+      () => null,
+      (err: Error) => err,
+    );
+    void turn.then(() => { settled = true; });
+
+    await vi.waitFor(() => expect(child.kill).toHaveBeenCalledWith('SIGTERM'));
+    expect(sm.getStatus().turnInFlight).toBe(true);
+    expect(settled).toBe(false);
+
+    proveShutdown?.();
+    expect((await turn)?.message).toBe('EPIPE');
+    expect(sm.getStatus()).toMatchObject({ active: false, turnInFlight: false });
+  });
+
+  it('retains provider ownership when ambiguous-write teardown is inconclusive', async () => {
+    vi.useFakeTimers();
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+    const child = (sm as unknown as { child: MockChild }).child;
+    (killSessionTree as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('process tree still alive'),
+    );
+    (child.stdin.write as ReturnType<typeof vi.fn>).mockImplementation(
+      (_data: unknown, _enc: unknown, cb: (err?: Error | null) => void) => {
+        if (typeof _enc === 'function') (_enc as (e?: Error | null) => void)(new Error('EPIPE'));
+        else if (typeof cb === 'function') cb(new Error('EPIPE'));
+        return false;
+      },
+    );
+
+    const err = await sm.sendTurn('boom').catch((error: Error) => error);
+
+    expect(err).toBeInstanceOf(AggregateError);
+    expect((err as AggregateError).errors).toEqual([
+      expect.objectContaining({ message: 'EPIPE' }),
+      expect.objectContaining({ message: 'process tree still alive' }),
+    ]);
+    expect(sm.getStatus()).toMatchObject({ active: false, turnInFlight: true });
+    vi.useRealTimers();
   });
 
   // --- Claude-cli stdin null guard (line 1860).
@@ -4934,6 +5268,7 @@ describe('session.ts uncovered-branch coverage', () => {
     // Replace child.stdin with null to hit the guard.
     (sm as unknown as { child: MockChild }).child.stdin = null as unknown as MockChild['stdin'];
     await expect(sm.sendTurn('hi')).rejects.toThrow(/Child process stdin is not available/);
+    expect(sm.getStatus().turnInFlight).toBe(false);
   });
 
   // --- handleNew shuts down and respawns (line 1893-1895).

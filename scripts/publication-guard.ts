@@ -90,7 +90,12 @@ const privatePatterns: PrivatePattern[] = [
   {
     code: 'local-home-path',
     description: 'operator-local home path',
-    regex: /\/(?:Users|home)\/(?!runner(?:\/|$)|testuser(?:\/|$)|whatsoup(?:\/|$))[A-Za-z0-9._-]+(?:\/|$)/,
+    // Matches both absolute home roots (Users/<name>, home/<name>) and the
+    // tilde-relative form (~/...). The tilde branch reuses the SAME allowlist
+    // lookahead so it stays symmetric with the absolute rule: the ~/whatsoup,
+    // ~/runner, and ~/testuser first segments are permitted just as the
+    // equivalent absolute deploy/CI usernames are.
+    regex: /(?:\/(?:Users|home)|~)\/(?!runner(?:\/|$)|testuser(?:\/|$)|whatsoup(?:\/|$))[A-Za-z0-9._-]+(?:\/|$)/,
   },
   {
     code: 'whatsapp-group-jid',

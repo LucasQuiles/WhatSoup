@@ -437,6 +437,7 @@ type TurnRecoveryStatements = {
   getStaleTurnRecoveryJobs: PreparedStatement;
   requeueStaleTurnRecoveryJob: PreparedStatement;
   exhaustStaleTurnRecoveryJob: PreparedStatement;
+  reclaimDeadDeliveryRecoveryJob: PreparedStatement;
   getRecoverableTurnRecoveryJobs: PreparedStatement;
   getOutstandingTurnRecoveryJobsForSupervisor: PreparedStatement;
   getTurnRecoverySupervisorCounts: PreparedStatement;
@@ -738,6 +739,32 @@ export class TurnRecoveryStore {
           AND claim_token = ?
           AND claim_epoch = ?
           AND attempt_count >= ${TURN_RECOVERY_MAX_ATTEMPTS}
+      `),
+      // #1749: bounded reclaim for the recovery-owner trap. When the selected
+      // delivery is provably dead (failed_permanent/quarantined) it can never
+      // echo-settle, so an open recovery job would pin admission forever. The
+      // stuck-inbound sweep drives such a pending/claimed job to the existing
+      // terminal `exhausted` state so it no longer counts toward admission. The
+      // schema requires attempt_count = 5 for `exhausted`; a reclaim is still
+      // distinguishable from genuine attempt exhaustion by its selected op's
+      // terminal non-echoed status. This mutates only claim/attempt/state fields
+      // (the immutable-envelope and assignment-epoch triggers guard other
+      // columns) and clears the requeue receipt so the coherence CHECK holds.
+      reclaimDeadDeliveryRecoveryJob: prepare(`
+        UPDATE turn_recovery_jobs
+        SET state = 'exhausted',
+            attempt_count = 5,
+            claim_epoch = 5,
+            claim_token = NULL,
+            claimed_at = NULL,
+            claim_expires_at = NULL,
+            last_requeue_claim_token_hash = NULL,
+            last_requeue_claim_epoch = NULL,
+            last_requeue_backoff_seconds = NULL,
+            next_attempt_at = datetime('now'),
+            updated_at = datetime('now')
+        WHERE id = ?
+          AND state IN ('pending', 'claimed')
       `),
       getRecoverableTurnRecoveryJobs: prepare(`
         SELECT j.* ${VALID_RECOVERY_JOB_FROM}
@@ -1361,6 +1388,20 @@ export class TurnRecoveryStore {
       if (inTransaction) this.db.raw.exec('ROLLBACK');
       throw err;
     }
+  }
+
+  /**
+   * Transaction-neutral: the caller owns the reclaim transaction (the
+   * stuck-inbound sweep). Drives a `pending`/`claimed` recovery job whose
+   * selected delivery is provably dead to the terminal `exhausted` state so it
+   * stops pinning admission. No-op (returns false) for any other state —
+   * already-`exhausted`, `blocked_unsafe`, and `completed` jobs need no mutation
+   * (none of them block admission), so the caller only fails their source
+   * inbound. #1749.
+   */
+  reclaimDeadDeliveryRecoveryJobWithinCallerTransaction(jobId: number): boolean {
+    validatePositiveSafeInteger(jobId, 'Recovery job ID');
+    return this.statements.reclaimDeadDeliveryRecoveryJob.run(jobId).changes === 1;
   }
 
   reassignPendingTurnRecoveryJob(

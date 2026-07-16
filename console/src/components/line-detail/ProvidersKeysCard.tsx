@@ -113,7 +113,35 @@ const ChainEntry: FC<{
   )
 }
 
-export const ProvidersKeysCard: FC<{ lineName: string }> = ({ lineName }) => {
+/**
+ * Staleness affordance (#1762 remediation 2). When the instance is `stale`
+ * (the health poller is currently failing — see enrichInstance in
+ * src/fleet/routes/lines.ts), the fallback counters and chain eligibility this
+ * card renders are carried forward from the last successful poll. Tag them so
+ * they are not misread as live, WITHOUT hiding the values (rem-1: link /
+ * history persistence through an outage is the point).
+ */
+const StaleTag: FC<{ observedAt: string | null }> = ({ observedAt }) => (
+  <span
+    className="inline-flex items-center gap-[var(--sp-1)] text-xs font-mono text-s-warn"
+    title={
+      observedAt
+        ? `Health carried forward — last live poll ${formatRelative(observedAt)}`
+        : 'Health data is stale — the poller is currently failing'
+    }
+  >
+    <span>stale</span>
+    {observedAt && <span className="text-text-2">as of {formatRelative(observedAt)}</span>}
+  </span>
+)
+
+export const ProvidersKeysCard: FC<{
+  lineName: string
+  /** Instance freshness flag threaded from SummaryTab (LineInstance.stale). */
+  stale?: boolean
+  /** ISO timestamp of the last live health observation (LineInstance.healthObservedAt). */
+  healthObservedAt?: string | null
+}> = ({ lineName, stale = false, healthObservedAt = null }) => {
   const { data: status, isLoading, error, refetch } = useProviderStatus(lineName)
   const { data: catalog } = useProviders()
   const [now, setNow] = useState(() => Date.now())
@@ -183,14 +211,21 @@ export const ProvidersKeysCard: FC<{ lineName: string }> = ({ lineName }) => {
               <div className="text-text-2 pt-[var(--sp-2)] text-sm">no fallback</div>
             )}
             {fallbackMetrics.length > 0 && (
-              <div className="flex flex-wrap items-center gap-[var(--sp-2)] pt-[var(--sp-1)] text-text-2 text-xs font-mono">
+              <div
+                className="flex flex-wrap items-center gap-[var(--sp-2)] pt-[var(--sp-1)] text-text-2 text-xs font-mono"
+                style={stale ? { opacity: 'var(--opacity-muted)' } : undefined}
+              >
                 {fallbackMetrics.map((metric) => (
                   <span key={metric}>{metric}</span>
                 ))}
+                {stale && <StaleTag observedAt={healthObservedAt} />}
               </div>
             )}
             {fallbackChain.length > 1 && (
-              <div className="flex flex-wrap items-center gap-[var(--sp-2)] pt-[var(--sp-1)] text-text-2 text-xs">
+              <div
+                className="flex flex-wrap items-center gap-[var(--sp-2)] pt-[var(--sp-1)] text-text-2 text-xs"
+                style={stale ? { opacity: 'var(--opacity-muted)' } : undefined}
+              >
                 <span className="c-label">chain</span>
                 {fallbackChain.map((entry, index) => (
                   <ChainEntry
@@ -199,6 +234,7 @@ export const ProvidersKeysCard: FC<{ lineName: string }> = ({ lineName }) => {
                     catalog={catalog}
                   />
                 ))}
+                {stale && <StaleTag observedAt={healthObservedAt} />}
               </div>
             )}
           </>

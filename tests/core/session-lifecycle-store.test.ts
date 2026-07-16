@@ -25,13 +25,14 @@ function insertAgentRow(
   sessionId: string | null,
   status: string,
   workspaceKey: string,
+  provider = 'claude-cli',
 ): number {
   const result = db.raw.prepare(
     `INSERT INTO agent_sessions (
        session_id, claude_pid, started_in_directory, chat_jid, workspace_key,
        started_at, status, ended_at, provider
-     ) VALUES (?, 101, '/tmp/session', ?, ?, datetime('now'), ?, datetime('now'), 'claude-cli')`,
-  ).run(sessionId, `${workspaceKey}@s.whatsapp.net`, workspaceKey, status);
+     ) VALUES (?, 101, '/tmp/session', ?, ?, datetime('now'), ?, datetime('now'), ?)`,
+  ).run(sessionId, `${workspaceKey}@s.whatsapp.net`, workspaceKey, status, provider);
   return Number(result.lastInsertRowid);
 }
 
@@ -126,6 +127,7 @@ describe('SessionLifecycleStore through DurabilityEngine', () => {
     expect(durability.reactivateSessionLifecycle({
       agentSessionRowId: rowId,
       providerSessionId: 'resume-session',
+      provider: 'claude-cli',
       pid: 414,
     })).toBe(rowId);
 
@@ -154,6 +156,7 @@ describe('SessionLifecycleStore through DurabilityEngine', () => {
 
     expect(durability.reactivateSessionLifecycle({
       providerSessionId: 'proactive-session',
+      provider: 'claude-cli',
       pid: 515,
     })).toBe(rowId);
     expect(agentRow(db, rowId)).toMatchObject({ status: 'active', ended_at: null });
@@ -169,6 +172,7 @@ describe('SessionLifecycleStore through DurabilityEngine', () => {
 
     expect(() => durability.reactivateSessionLifecycle({
       providerSessionId: 'ambiguous-session',
+      provider: 'claude-cli',
       pid: 616,
     })).toThrow(/exactly one|ambiguous/i);
     expect(agentRow(db, first).status).toBe('suspended');
@@ -178,6 +182,7 @@ describe('SessionLifecycleStore through DurabilityEngine', () => {
     expect(() => durability.reactivateSessionLifecycle({
       agentSessionRowId: first,
       providerSessionId: 'ambiguous-session',
+      provider: 'claude-cli',
       pid: 717,
     })).toThrow(/resumable|exact/i);
     expect(agentRow(db, first).status).toBe('ended');
@@ -202,6 +207,7 @@ describe('SessionLifecycleStore through DurabilityEngine', () => {
     expect(() => durability.reactivateSessionLifecycle({
       agentSessionRowId: rowId,
       providerSessionId: 'fault-resume-session',
+      provider: 'claude-cli',
       pid: 818,
     })).toThrow(/resume checkpoint fault/i);
 
@@ -230,6 +236,7 @@ describe('SessionLifecycleStore through DurabilityEngine', () => {
     durability.closeSessionLifecycleFailure({
       agentSessionRowId: rowId,
       providerSessionId: 'failed-session',
+      provider: 'claude-cli',
       conversationKey: 'failed-a',
       agentStatus: 'crashed',
     });
@@ -249,6 +256,7 @@ describe('SessionLifecycleStore through DurabilityEngine', () => {
     durability.closeSessionLifecycleFailure({
       agentSessionRowId: rowId,
       providerSessionId: null,
+      provider: 'claude-cli',
       conversationKey: 'preinit-key',
       agentStatus: 'crashed',
     });
@@ -275,6 +283,7 @@ describe('SessionLifecycleStore through DurabilityEngine', () => {
     expect(() => durability.closeSessionLifecycleFailure({
       agentSessionRowId: rowId,
       providerSessionId: 'fault-close-session',
+      provider: 'claude-cli',
       conversationKey: 'fault-close',
       agentStatus: 'crashed',
     })).toThrow(/failure checkpoint fault/i);
@@ -293,11 +302,70 @@ describe('SessionLifecycleStore through DurabilityEngine', () => {
     durability.closeSessionLifecycle({
       agentSessionRowId: rowId,
       providerSessionId: 'graceful-session',
+      provider: 'claude-cli',
       conversationKey: 'graceful-a',
       status: 'suspended',
     });
 
     expect(agentRow(db, rowId)).toMatchObject({ status: 'suspended', ended_at: null });
     expect(durability.getSessionCheckpoint('graceful-a')?.session_status).toBe('suspended');
+  });
+
+  it('rejects a foreign-provider reactivation without changing row or checkpoint bytes', () => {
+    const rowId = insertAgentRow(db, 'foreign-resume-session', 'suspended', 'foreign-resume');
+    durability.upsertSessionCheckpoint('foreign-resume', {
+      sessionId: 'foreign-resume-session',
+      sessionStatus: 'suspended',
+      claudePid: 101,
+    });
+    const beforeRow = agentRow(db, rowId);
+    const beforeCheckpoint = durability.getSessionCheckpoint('foreign-resume');
+
+    expect(() => durability.reactivateSessionLifecycle({
+      agentSessionRowId: rowId,
+      providerSessionId: 'foreign-resume-session',
+      provider: 'opencode-cli',
+      pid: 929,
+    })).toThrow(/provider|resumable|exact/i);
+
+    expect(agentRow(db, rowId)).toEqual(beforeRow);
+    expect(durability.getSessionCheckpoint('foreign-resume')).toEqual(beforeCheckpoint);
+  });
+
+  it('rejects foreign-provider failure and graceful closes without checkpoint mutation', () => {
+    const failureRow = insertAgentRow(db, 'foreign-failure-session', 'active', 'foreign-failure');
+    durability.upsertSessionCheckpoint('foreign-failure', {
+      sessionId: 'foreign-failure-session',
+      sessionStatus: 'active',
+    });
+    const gracefulRow = insertAgentRow(db, 'foreign-graceful-session', 'active', 'foreign-graceful');
+    durability.upsertSessionCheckpoint('foreign-graceful', {
+      sessionId: 'foreign-graceful-session',
+      sessionStatus: 'active',
+    });
+    const failureBefore = agentRow(db, failureRow);
+    const failureCheckpointBefore = durability.getSessionCheckpoint('foreign-failure');
+    const gracefulBefore = agentRow(db, gracefulRow);
+    const gracefulCheckpointBefore = durability.getSessionCheckpoint('foreign-graceful');
+
+    expect(() => durability.closeSessionLifecycleFailure({
+      agentSessionRowId: failureRow,
+      providerSessionId: 'foreign-failure-session',
+      provider: 'opencode-cli',
+      conversationKey: 'foreign-failure',
+      agentStatus: 'crashed',
+    })).toThrow(/provider|exact|failed/i);
+    expect(() => durability.closeSessionLifecycle({
+      agentSessionRowId: gracefulRow,
+      providerSessionId: 'foreign-graceful-session',
+      provider: 'opencode-cli',
+      conversationKey: 'foreign-graceful',
+      status: 'suspended',
+    })).toThrow(/provider|exact|closed/i);
+
+    expect(agentRow(db, failureRow)).toEqual(failureBefore);
+    expect(durability.getSessionCheckpoint('foreign-failure')).toEqual(failureCheckpointBefore);
+    expect(agentRow(db, gracefulRow)).toEqual(gracefulBefore);
+    expect(durability.getSessionCheckpoint('foreign-graceful')).toEqual(gracefulCheckpointBefore);
   });
 });

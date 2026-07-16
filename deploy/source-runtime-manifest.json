@@ -5,7 +5,7 @@
   "entrypoints": [
     {
       "path": "src/main.ts",
-      "sha256": "b3db2e3b29ce15e0c55c56e6832bb7b862d66899926f3d711b33280b3716774a",
+      "sha256": "b471c8119a6e9cea93290ab97207355e4fecbde4697dca3683d8fee2f2adcc4f",
       "mustContain": [
         "startHealthServer",
         "createConnection"
@@ -14,18 +14,9 @@
     },
     {
       "path": "src/bootstrap.ts",
-      "sha256": "2d4a27dc749ea189c835af8584ac0a0641e47e0728cfdd6d1c7d5f300163f5d1",
+      "sha256": "52394c01eb7f6ee28e735759e399449072b11312d25cfa325ea2c6cef3f9e266",
       "mustContain": [
         "bootstrapCommon"
-      ],
-      "importGraph": true
-    },
-    {
-      "path": "src/database-compatibility-bootstrap.ts",
-      "sha256": "5c20e02ce99fc8d9a31ec923c0286e26f08dc983be4d681684774f0afa7b0f61",
-      "mustContain": [
-        "databaseCompatibilityBootstrap",
-        "checkLoadedInstanceDatabase"
       ],
       "importGraph": true
     },
@@ -70,7 +61,7 @@
     },
     {
       "path": "src/runtimes/agent/session.ts",
-      "sha256": "c1b6fead5a0dee74ccb4dba9074d596dbc95af1416ec8890d9d061df8eafb8a8",
+      "sha256": "8490fb450937fedf3ff3782206b2d74e0b3dde149f3e930cffccf542c9be35b2",
       "mustContain": [
         "composeWithExactLineDedup"
       ],
@@ -78,7 +69,7 @@
     },
     {
       "path": "src/runtimes/agent/session-db.ts",
-      "sha256": "107a75242369837da3b0134ab74dcb5736d823d46081cc8ddf9af237e4eb52fc",
+      "sha256": "fd089d2199018596efa59f72f1b0059458134b71aa959ba2bf864a630e891c5c",
       "mustContain": [
         "getSessionTokenSnapshot"
       ],

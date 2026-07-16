@@ -252,7 +252,7 @@ export class ChatRuntime implements Runtime {
     let contextBlock: string | null = null;
     try {
       const contextRace = Promise.race([
-        loadContext(this.pinecone, msg.chatJid, msg.senderJid, mediaContent),
+        loadContext(this.pinecone, msg.chatJid, msg.senderJid, mediaContent, traceId),
         new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error('PINECONE_TIMEOUT')), 5_000),
         ),

@@ -564,6 +564,13 @@ describe('main bootstrap', () => {
     expect(h.mediaRetentionTimer.start).toHaveBeenCalledOnce();
     expect(h.processTmpRetentionTimer.start).toHaveBeenCalledWith(12_000);
     expect(h.databaseRetentionTimer.start).toHaveBeenCalledWith(60_000);
+    // #1445 QR-012: the retired standalone messages retention read
+    // config.retentionDays directly — confirm that knob now flows into the
+    // unified sweep's config instead of silently reverting to a hardcoded default.
+    expect(h.DatabaseRetentionTimer).toHaveBeenCalledWith(
+      h.db,
+      expect.objectContaining({ messageRetentionDays: 30 }),
+    );
     expect(h.messageScheduler.recoverStale).toHaveBeenCalledOnce();
     expect(h.messageScheduler.start).toHaveBeenCalledOnce();
     expect(h.triggerPoller.start).toHaveBeenCalledOnce();
@@ -724,13 +731,19 @@ describe('main bootstrap', () => {
 
     await vi.advanceTimersByTimeAsync(60_000);
     expect(h.backfillMetrics).toHaveBeenCalledWith(h.db);
-    expect(h.deleteOldMessages).toHaveBeenCalledWith(h.db, 30);
+    // #1445 QR-012: messages retention no longer runs from a standalone
+    // main.ts timeout — it flows through databaseRetentionTimer (asserted
+    // separately below / in the periodic-timer coverage tests).
     expect(h.collectHourlyMetrics).toHaveBeenCalledWith(h.db);
     expect(h.durability.sweepStaleSubmitted).toHaveBeenCalled();
     expect(h.checkDegradationSignals).toHaveBeenCalledWith(h.db, h.connection, h.durability, null);
 
     await vi.advanceTimersByTimeAsync(30 * 60_000);
-    expect(h.reconcileLidMappings).toHaveBeenCalledWith(h.db, '/tmp/whatsoup-main-auth');
+    expect(h.reconcileLidMappings).toHaveBeenCalledWith(
+      h.db,
+      '/tmp/whatsoup-main-auth',
+      expect.objectContaining({ lastMaxPk: expect.any(Number), knownUnresolvedLids: expect.any(Set) }),
+    );
     expect(h.connection.contactsDir.invalidateLidCache).toHaveBeenCalled();
   });
 

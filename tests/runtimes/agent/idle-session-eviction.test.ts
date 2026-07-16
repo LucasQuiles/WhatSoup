@@ -31,6 +31,7 @@ const { mockSession, mockQueue } = vi.hoisted(() => {
     })),
     shutdown: vi.fn(async () => {}),
     clearTurnWatchdog: vi.fn(() => {}),
+    completeProviderTurn: vi.fn(() => {}),
     tickWatchdog: vi.fn(() => {}),
     trackToolStart: vi.fn((_toolId: string) => {}),
     trackToolEnd: vi.fn((_toolId: string) => {}),

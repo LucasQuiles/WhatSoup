@@ -48,7 +48,9 @@ describe('AgentRuntime structural policy', () => {
     expect(exhaustedSession).toContain(
       'this.cleanupPerChatState(releaseKey, { preserveCrashHistory: true });',
     );
-    expect(lidRetirement).toContain('this.cleanupPerChatState(lidKey);');
+    expect(lidRetirement).toContain(
+      'this.cleanupPerChatState(lidKey, { preserveProviderTurnOwnership: true });',
+    );
 
     expect(generationCleanup).toContain('this.pendingTurnText.delete(mapKey);');
     expect(crashBody).toContain('this.perChatTurnContentType.delete(mapKey);');

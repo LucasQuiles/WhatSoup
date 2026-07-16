@@ -6,13 +6,17 @@ describe('DurabilityEngine — session checkpoints', () => {
   let db: Database;
   let engine: DurabilityEngine;
 
-  function insertAgentSession(sessionId: string, workspaceKey: string): number {
+  function insertAgentSession(
+    sessionId: string,
+    workspaceKey: string,
+    provider = 'claude-cli',
+  ): number {
     const result = db.raw.prepare(`
       INSERT INTO agent_sessions (
         session_id, claude_pid, started_in_directory, chat_jid,
-        workspace_key, started_at, status
-      ) VALUES (?, 1234, '/tmp', ?, ?, datetime('now'), 'active')
-    `).run(sessionId, `${workspaceKey}@s.whatsapp.net`, workspaceKey);
+        workspace_key, started_at, status, provider
+      ) VALUES (?, 1234, '/tmp', ?, ?, datetime('now'), 'active', ?)
+    `).run(sessionId, `${workspaceKey}@s.whatsapp.net`, workspaceKey, provider);
     return Number(result.lastInsertRowid);
   }
 
@@ -293,7 +297,11 @@ describe('DurabilityEngine — session checkpoints', () => {
         sessionStatus: 'active',
       });
 
-      engine.retireSessionLifecycle(targetRowId, 'shared-provider-session');
+      engine.retireSessionLifecycle({
+        agentSessionRowId: targetRowId,
+        providerSessionId: 'shared-provider-session',
+        provider: 'claude-cli',
+      });
 
       expect(db.raw.prepare(
         'SELECT status, ended_at FROM agent_sessions WHERE id = ?',
@@ -313,10 +321,11 @@ describe('DurabilityEngine — session checkpoints', () => {
         sessionStatus: 'active',
       });
 
-      expect(() => engine.retireSessionLifecycle(
-        targetRowId,
-        'missing-checkpoint-session',
-      )).toThrow(/checkpoint/i);
+      expect(() => engine.retireSessionLifecycle({
+        agentSessionRowId: targetRowId,
+        providerSessionId: 'missing-checkpoint-session',
+        provider: 'claude-cli',
+      })).toThrow(/checkpoint/i);
 
       expect(db.raw.prepare(
         'SELECT status, ended_at FROM agent_sessions WHERE id = ?',
@@ -331,10 +340,11 @@ describe('DurabilityEngine — session checkpoints', () => {
         sessionStatus: 'active',
       });
 
-      expect(() => engine.retireSessionLifecycle(
-        mismatchedRowId,
-        'checkpoint-session',
-      )).toThrow(/agent session/i);
+      expect(() => engine.retireSessionLifecycle({
+        agentSessionRowId: mismatchedRowId,
+        providerSessionId: 'checkpoint-session',
+        provider: 'claude-cli',
+      })).toThrow(/agent session/i);
 
       expect(db.raw.prepare(
         'SELECT status, ended_at FROM agent_sessions WHERE id = ?',
@@ -352,11 +362,35 @@ describe('DurabilityEngine — session checkpoints', () => {
         sessionStatus: 'active',
       });
 
-      expect(() => engine.retireSessionLifecycle(
-        endedRowId,
-        'already-ended-session',
-      )).toThrow(/agent session/i);
+      expect(() => engine.retireSessionLifecycle({
+        agentSessionRowId: endedRowId,
+        providerSessionId: 'already-ended-session',
+        provider: 'claude-cli',
+      })).toThrow(/agent session/i);
       expect(engine.getSessionCheckpoint('15550501')?.session_status).toBe('active');
+    });
+
+    it('rejects a foreign-provider retirement without repainting checkpoints', () => {
+      const targetRowId = insertAgentSession('foreign-retire-session', '15550601');
+      engine.upsertSessionCheckpoint('15550601', {
+        sessionId: 'foreign-retire-session',
+        sessionStatus: 'active',
+      });
+      const beforeRow = db.raw.prepare(
+        'SELECT status, ended_at FROM agent_sessions WHERE id = ?',
+      ).get(targetRowId);
+      const beforeCheckpoint = engine.getSessionCheckpoint('15550601');
+
+      expect(() => engine.retireSessionLifecycle({
+        agentSessionRowId: targetRowId,
+        providerSessionId: 'foreign-retire-session',
+        provider: 'opencode-cli',
+      })).toThrow(/agent session|provider|resumable/i);
+
+      expect(db.raw.prepare(
+        'SELECT status, ended_at FROM agent_sessions WHERE id = ?',
+      ).get(targetRowId)).toEqual(beforeRow);
+      expect(engine.getSessionCheckpoint('15550601')).toEqual(beforeCheckpoint);
     });
   });
 

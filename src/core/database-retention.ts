@@ -1,6 +1,7 @@
 import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import { withTransaction } from './db-tx.ts';
+import { deleteOldMessages } from './messages.ts';
 
 const log = createChildLogger('database:retention');
 
@@ -24,6 +25,16 @@ export interface DatabaseRetentionConfig {
    * well above the heal degradation-signal horizon (5 min, see core/heal.ts).
    */
   decryptionFailureDays: number;
+  /**
+   * Retention window for the `messages` table and its orphaned `receipts`
+   * rows (#1445 QR-012). Folded in from the standalone main.ts setInterval
+   * that used to call `deleteOldMessages` directly, outside this sweep —
+   * that path is retired; this is now the sole place messages/receipts
+   * retention runs. Callers that need the operator-configured window (e.g.
+   * `config.retentionDays`) must pass it through explicitly, same as every
+   * other field here — this default is just the fallback.
+   */
+  messageRetentionDays: number;
 }
 
 export interface DatabaseRetentionResult {
@@ -35,6 +46,7 @@ export interface DatabaseRetentionResult {
   factExportQueue: number;
   metricsHourly: number;
   decryptionFailures: number;
+  messages: number;
 }
 
 export const DEFAULT_DATABASE_RETENTION: DatabaseRetentionConfig = {
@@ -43,6 +55,7 @@ export const DEFAULT_DATABASE_RETENTION: DatabaseRetentionConfig = {
   exportedFactDays: 30,
   metricsHourlyDays: 180,
   decryptionFailureDays: 30,
+  messageRetentionDays: 30,
 };
 
 function daysModifier(days: number): string {
@@ -231,6 +244,12 @@ export function runDatabaseRetention(
           OR datetime(last_seen_at) < datetime('now', ?)
     `).run(decryptionFailureCutoff));
 
+    // #1445 QR-012: messages + their orphaned receipts (#1772), unified from
+    // the standalone main.ts setInterval into this single sweep. Behavior is
+    // unchanged — same cutoff math, same orphan-receipts cleanup — only the
+    // location moved.
+    const messages = deleteOldMessages(db, retention.messageRetentionDays);
+
     return {
       turnRecoveryJobs,
       turnTerminalRecords,
@@ -240,6 +259,7 @@ export function runDatabaseRetention(
       factExportQueue,
       metricsHourly,
       decryptionFailures,
+      messages,
     };
   });
   const total = Object.values(result).reduce((sum, count) => sum + count, 0);

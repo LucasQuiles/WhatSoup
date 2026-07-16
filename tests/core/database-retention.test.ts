@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import {
@@ -68,6 +69,7 @@ describe('database retention', () => {
       factExportQueue: 1,
       metricsHourly: 0,
       decryptionFailures: 0,
+      messages: 0,
     });
     expect(rowCount('inbound_events')).toBe(1);
     expect(rowCount('outbound_ops')).toBe(1);
@@ -77,6 +79,70 @@ describe('database retention', () => {
     expect(columnValues('outbound_ops', 'conversation_key')).toEqual(['young-out']);
     expect(columnValues('tool_calls', 'conversation_key')).toEqual(['young-tool']);
     expect(columnValues('fact_export_queue', 'fact_id')).toEqual(['fact-young']);
+  });
+
+  // #1445 QR-012: messages/receipts retention unification. `messages` was
+  // pruned via a standalone main.ts setInterval calling deleteOldMessages()
+  // directly, entirely outside this module's sweep. This folds that prune
+  // (and its orphan-receipts cleanup, #1772) into runDatabaseRetention so
+  // ALL retention runs through one SSOT, with no change to the effective
+  // 30-day default or the orphan-receipts behavior.
+  it('prunes old messages and their orphaned receipts via the unified sweep (#1445 QR-012)', () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const oldTs = nowSec - 31 * 86400; // 31 days ago — beyond a 30-day window
+    const youngTs = nowSec - 5 * 86400; // 5 days ago — inside the window
+
+    db.raw.prepare(`
+      INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content, timestamp)
+      VALUES ('chat@g.us', 'c1', 'sender@s.whatsapp.net', 'old-msg', 'aged out', ?)
+    `).run(oldTs);
+    db.raw.prepare(`
+      INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content, timestamp)
+      VALUES ('chat@g.us', 'c1', 'sender@s.whatsapp.net', 'young-msg', 'still live', ?)
+    `).run(youngTs);
+    // Receipt for the aged-out message — orphaned once the message is pruned.
+    db.raw.prepare(`
+      INSERT INTO receipts (message_id, recipient_jid, type)
+      VALUES ('old-msg', 'recipient@s.whatsapp.net', 'read')
+    `).run();
+    // Receipt for the still-live message — must survive regardless of its own age.
+    db.raw.prepare(`
+      INSERT INTO receipts (message_id, recipient_jid, type, timestamp)
+      VALUES ('young-msg', 'recipient@s.whatsapp.net', 'read', datetime('now', '-400 days'))
+    `).run();
+
+    const result = runDatabaseRetention(db, {
+      ...DEFAULT_DATABASE_RETENTION,
+      messageRetentionDays: 30,
+    });
+
+    expect(result.messages).toBe(1);
+    expect(rowCount('messages')).toBe(1);
+    expect(columnValues('messages', 'message_id')).toEqual(['young-msg']);
+    expect(rowCount('receipts')).toBe(1);
+    expect(columnValues('receipts', 'message_id')).toEqual(['young-msg']);
+  });
+
+  // #1445 QR-012 guard: main.ts used to run messages/receipts retention from
+  // a standalone 60s-delayed startup setTimeout plus its own branch inside
+  // the daily setInterval, both calling deleteOldMessages() directly and
+  // entirely bypassing this module. Both are retired in favor of the single
+  // unified sweep above; this is a structural (source-text) check rather
+  // than a mocked-timer assertion, per the "testable without brittle
+  // mocking" constraint — it fails loudly if the standalone path is ever
+  // reintroduced, without depending on main.ts's large mocked test harness.
+  it('main.ts no longer imports or calls deleteOldMessages directly (#1445 QR-012)', () => {
+    const source = readFileSync('src/main.ts', 'utf8');
+
+    // Not imported from core/messages.ts and not called anywhere (a comment
+    // may still reference the retired function by name for context, which
+    // this deliberately allows — only the import and call sites are banned).
+    expect(source).not.toMatch(/import\s*\{[^}]*\bdeleteOldMessages\b/);
+    expect(source).not.toContain('deleteOldMessages(db,');
+    // The config knob the retired path read must still reach the unified
+    // sweep, or a custom-configured retention window would silently revert
+    // to the hardcoded 30-day default.
+    expect(source).toContain('messageRetentionDays: config.retentionDays');
   });
 
   // #1787 mandatory coupling: adding the 'error' terminal status to tool_calls
@@ -221,6 +287,7 @@ describe('database retention', () => {
       factExportQueue: 0,
       metricsHourly: 0,
       decryptionFailures: 0,
+      messages: 0,
     });
     expect(rowCount('inbound_events')).toBe(2);
     expect(rowCount('outbound_ops')).toBe(2);
@@ -614,6 +681,7 @@ describe('database retention', () => {
         exportedFactDays: 30,
         metricsHourlyDays: 180,
         decryptionFailureDays: 30,
+        messageRetentionDays: 30,
       });
 
       insertOldCompleteInbound('immediate-in');
@@ -645,6 +713,7 @@ describe('database retention', () => {
         exportedFactDays: 30,
         metricsHourlyDays: 180,
         decryptionFailureDays: 30,
+        messageRetentionDays: 30,
       });
       const emptyResult = {
         turnRecoveryJobs: 0,
@@ -655,6 +724,7 @@ describe('database retention', () => {
         factExportQueue: 0,
         metricsHourly: 0,
         decryptionFailures: 0,
+        messages: 0,
       };
       const runSpy = vi.spyOn(timer, 'runCleanup')
         .mockRejectedValueOnce(new Error('immediate-retention-failed'))

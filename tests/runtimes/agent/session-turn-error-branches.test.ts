@@ -137,6 +137,9 @@ function makeMockChild(pid = 4242) {
     emitExit(code: number | null, signal: NodeJS.Signals | null = null) {
       handlers['exit']?.(code, signal);
     },
+    emitClose(code: number | null, signal: NodeJS.Signals | null = null) {
+      handlers['close']?.(code, signal);
+    },
   };
   return child;
 }
@@ -496,7 +499,12 @@ describe('notifyUnexpectedExit via spawn-per-turn exit handler', () => {
   it('code 0 clean exit produces no crash notification', async () => {
     const notifyUser = vi.fn();
     await startTurn({ notifyUser });
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      type: 'step_finish',
+      part: { reason: 'stop' },
+    })));
     mockChild.emitExit(0, null);
+    mockChild.emitClose(0, null);
     await flushImmediates();
     expect(notifyUser).not.toHaveBeenCalled();
   });
@@ -505,6 +513,7 @@ describe('notifyUnexpectedExit via spawn-per-turn exit handler', () => {
     const notifyUser = vi.fn();
     await startTurn({ notifyUser });
     mockChild.emitExit(1, null);
+    mockChild.emitClose(1, null);
     await flushImmediates();
     expect(notifyUser).toHaveBeenCalledTimes(1);
     expect(String(notifyUser.mock.calls[0][0])).toMatch(/exited with code 1/);
@@ -514,6 +523,7 @@ describe('notifyUnexpectedExit via spawn-per-turn exit handler', () => {
     const { messenger, sentMessages } = makeMessenger();
     await startTurn({ messenger });
     mockChild.emitExit(2, null);
+    mockChild.emitClose(2, null);
     await flushImmediates();
     expect(sentMessages).toHaveLength(1);
     expect(sentMessages[0].jid).toBe(CHAT_JID);
@@ -535,6 +545,7 @@ describe('notifyUnexpectedExit via spawn-per-turn exit handler', () => {
     const cancelPending = vi.spyOn(budget, 'cancelPending');
 
     mockChild.emitExit(null, 'SIGTERM');
+    mockChild.emitClose(null, 'SIGTERM');
     await flushImmediates();
 
     expect(cancelPending).toHaveBeenCalledTimes(1);
@@ -551,6 +562,7 @@ describe('notifyUnexpectedExit via spawn-per-turn exit handler', () => {
     const notifyUser = vi.fn();
     const sm = await startTurn({ notifyUser });
     mockChild.emitExit(1, null);
+    mockChild.emitClose(1, null);
     await flushImmediates();
     expect(notifyUser).toHaveBeenCalledTimes(1);
 
@@ -561,6 +573,7 @@ describe('notifyUnexpectedExit via spawn-per-turn exit handler', () => {
     await sm.sendTurn('again');
     sm.clearTurnWatchdog(); // disarm watchdog so the flush stays within the cooldown window
     secondChild.emitExit(1, null);
+    secondChild.emitClose(1, null);
     await flushImmediates();
     // Still only the first notification — the second is suppressed.
     expect(notifyUser).toHaveBeenCalledTimes(1);

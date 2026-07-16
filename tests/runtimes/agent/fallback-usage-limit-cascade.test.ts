@@ -325,6 +325,7 @@ describe('fallback-provider usage-limit cascade', () => {
       })),
       getDbRowId: vi.fn(() => null),
       clearTurnWatchdog: vi.fn(),
+      completeProviderTurn: vi.fn(),
       shutdown: vi.fn(async () => {}),
     };
     cv(runtime).handleEventWithContext(
@@ -337,6 +338,7 @@ describe('fallback-provider usage-limit cascade', () => {
     );
 
     expect(cv(runtime).effectiveProvider).toBe('openai-api');
+    expect(fallbackSession.completeProviderTurn).toHaveBeenCalledOnce();
     expect(cv(runtime).effectiveModel).toBe('gpt-5.5');
     expect(cv(runtime).fallbackChain.failedKeys.has('anthropic-api\u0000claude-opus-4-8')).toBe(true);
     expect(emitAlertChecked).toHaveBeenCalledWith(
@@ -379,6 +381,7 @@ describe('fallback-provider usage-limit cascade', () => {
       })),
       getDbRowId: vi.fn(() => null),
       clearTurnWatchdog: vi.fn(),
+      completeProviderTurn: vi.fn(),
       shutdown: vi.fn(async () => {}),
     };
     cv(runtime).handleEventWithContext(
@@ -391,6 +394,7 @@ describe('fallback-provider usage-limit cascade', () => {
     );
 
     expect(cv(runtime).effectiveProvider).toBe('openai-api');
+    expect(fallbackSession.completeProviderTurn).toHaveBeenCalledOnce();
     expect(cv(runtime).effectiveModel).toBe('gpt-5.5');
     expect(cv(runtime).fallbackChain.failedKeys.has('opencode-cli\u0000minimax/minimax-m2')).toBe(true);
     expect(emitAlertChecked).toHaveBeenCalledWith(

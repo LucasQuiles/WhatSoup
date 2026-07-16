@@ -2,8 +2,8 @@
 //
 // INTENDED REPO PATH: tests/runtimes/agent/session-spawn-per-turn-handlers.test.ts
 //   (new sibling file next to tests/runtimes/agent/session.test.ts — kept
-//    separate because it needs a child mock that captures the 'error' handler,
-//    which the existing session.test.ts makeMockChild only does for 'exit'.)
+//    separate because it needs a child mock that captures the 'error', 'exit',
+//    and drained 'close' handlers independently.)
 //
 // TARGET UNCOVERED LINES in src/runtimes/agent/session.ts (sendTurn,
 // spawn-per-turn / opencode-cli branch, ~lines 1606-1696):
@@ -11,8 +11,8 @@
 //                ENOENT  -> notifyUser("<binary> is not installed..."), NO onCrash
 //                other   -> notifyUser("Agent failed to start..."), onCrash(spawn_error)
 //   1642-1652  child.on('error'/'stderr') crash-preview capture + log.warn
-//   1658-1696  child.on('exit') handler: drain buffered stdout, clearTurnWatchdog,
-//                non-zero exit -> budget.cancelPending + onCrash + notifyUnexpectedExit
+//   1658-1696  child.on('close') handler: drain buffered stdout, clearTurnWatchdog,
+//                missing result/non-zero close -> budget cancellation + onCrash
 //
 // CONVENTIONS: mirrors the mocking strategy of the existing session.test.ts
 // (mock node:child_process spawn, node:fs readFileSync, node:os homedir,
@@ -59,6 +59,7 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
 }));
 
 import { spawn } from 'node:child_process';
+import { killSessionTree } from '../../../src/runtimes/agent/process-tree.ts';
 import { SessionManager } from '../../../src/runtimes/agent/session.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
@@ -67,9 +68,8 @@ import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 const CHAT_JID = 'test@s.whatsapp.net';
 
 /**
- * Mock child that captures BOTH 'error' and 'exit' handlers so tests can
- * drive the spawn-per-turn lifecycle. Extends the existing session.test.ts
- * makeMockChild (which only captured 'exit').
+ * Mock child that captures 'error', 'exit', and 'close' independently so tests
+ * can drive the complete spawn-per-turn lifecycle.
  */
 function makeHandlerChild(pid = 12345) {
   const stdin = new EventEmitter() as EventEmitter & {
@@ -92,9 +92,11 @@ function makeHandlerChild(pid = 12345) {
     kill: vi.fn(),
     _errorCb: null as ((err: NodeJS.ErrnoException) => void) | null,
     _exitCb: null as ((code: number | null, signal: NodeJS.Signals | null) => void) | null,
+    _closeCb: null as ((code: number | null, signal: NodeJS.Signals | null) => void) | null,
     on: vi.fn((event: string, cb: (...args: unknown[]) => void) => {
       if (event === 'error') child._errorCb = cb as (err: NodeJS.ErrnoException) => void;
       if (event === 'exit') child._exitCb = cb as (c: number | null, s: NodeJS.Signals | null) => void;
+      if (event === 'close') child._closeCb = cb as (c: number | null, s: NodeJS.Signals | null) => void;
       return child;
     }),
   };
@@ -188,14 +190,15 @@ describe('SessionManager spawn-per-turn child handlers (opencode-cli)', () => {
     expect(JSON.stringify(info)).toContain('spawn_error');
   });
 
-  it('non-zero exit on a spawn-per-turn turn calls onCrash with the exit code', async () => {
+  it('non-zero close on a spawn-per-turn turn calls onCrash with the exit code', async () => {
     const { sm, onCrash } = await makeOpencodeSession();
     await sm.sendTurn('hello');
 
-    expect(child._exitCb).toBeTypeOf('function');
-    child._exitCb!(7, null);
+    child._exitCb?.(7, null);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(onCrash).not.toHaveBeenCalled();
 
-    // The exit handler defers via setImmediate — let it run.
+    child._closeCb?.(7, null);
     await new Promise((resolve) => setImmediate(resolve));
 
     expect(onCrash).toHaveBeenCalledTimes(1);
@@ -203,21 +206,61 @@ describe('SessionManager spawn-per-turn child handlers (opencode-cli)', () => {
     expect(info.exitCode).toBe(7);
   });
 
-  it('clean exit (code 0) does not call onCrash', async () => {
-    const { sm, onCrash } = await makeOpencodeSession();
-    await sm.sendTurn('hello');
-
-    child._exitCb!(0, null);
-    await new Promise((resolve) => setImmediate(resolve));
-
-    expect(onCrash).not.toHaveBeenCalled();
-  });
-
-  it('clean exit drains a final non-newline-terminated result event', async () => {
+  it('drained close (code 0) without a terminal result fails closed exactly once', async () => {
     const events: AgentEvent[] = [];
-    const { sm, onCrash } = await makeOpencodeSession({ onEvent: (event: AgentEvent) => events.push(event) });
+    const { sm, notifyUser, onCrash } = await makeOpencodeSession({
+      onEvent: (event: AgentEvent) => events.push(event),
+    });
     await sm.sendTurn('hello');
     events.length = 0;
+
+    child.stdout.emit('data', Buffer.from([
+      JSON.stringify({
+        type: 'tool_use',
+        part: { callID: 'failed-call', state: { status: 'failed', output: 'tool failed' } },
+      }),
+      JSON.stringify({ type: 'step_finish', part: { reason: 'tool-calls' } }),
+      '',
+    ].join('\n')));
+
+    child._exitCb?.(0, null);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(onCrash).not.toHaveBeenCalled();
+
+    child._closeCb?.(0, null);
+    child._closeCb?.(0, null);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(events.some((event) => event.type === 'result')).toBe(false);
+    expect(onCrash).toHaveBeenCalledTimes(1);
+    expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({
+      exitCode: 0,
+      signal: null,
+      crashClass: 'provider_stream_corrupt',
+    }));
+    expect(notifyUser).toHaveBeenCalledWith(
+      expect.stringMatching(/ended before completing the turn/i),
+    );
+  });
+
+  it('tool-calls remains intermediate and drained close emits one final unterminated stop result', async () => {
+    const events: AgentEvent[] = [];
+    const { sm, notifyUser, onCrash } = await makeOpencodeSession({
+      onEvent: (event: AgentEvent) => events.push(event),
+    });
+    await sm.sendTurn('hello');
+    events.length = 0;
+
+    child.stdout.emit('data', Buffer.from([
+      JSON.stringify({
+        type: 'tool_use',
+        part: { callID: 'completed-call', state: { status: 'completed', output: 'ok' } },
+      }),
+      JSON.stringify({ type: 'step_finish', part: { reason: 'tool-calls' } }),
+      JSON.stringify({ type: 'text', part: { text: 'done' } }),
+      '',
+    ].join('\n')));
+    expect(events.some((event) => event.type === 'result')).toBe(false);
 
     const finalResultLine = JSON.stringify({
       type: 'step_finish',
@@ -228,10 +271,15 @@ describe('SessionManager spawn-per-turn child handlers (opencode-cli)', () => {
       },
     });
     child.stdout.emit('data', Buffer.from(finalResultLine));
-    child._exitCb!(0, null);
+
+    child._exitCb?.(0, null);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(events.some((event) => event.type === 'result')).toBe(false);
+
+    child._closeCb?.(0, null);
     await new Promise((resolve) => setImmediate(resolve));
 
-    expect(events).toEqual([
+    expect(events.filter((event) => event.type === 'result')).toEqual([
       expect.objectContaining({
         type: 'result',
         text: null,
@@ -241,6 +289,76 @@ describe('SessionManager spawn-per-turn child handlers (opencode-cli)', () => {
       }),
     ]);
     expect(onCrash).not.toHaveBeenCalled();
+    expect(notifyUser).not.toHaveBeenCalled();
+    expect(sm.getStatus().turnInFlight).toBe(false);
+  });
+
+  it('stops admitting later records in a chunk after a malformed record quarantines the session', async () => {
+    const events: AgentEvent[] = [];
+    let sm!: SessionManager;
+    const session = await makeOpencodeSession({
+      onEvent: (event: AgentEvent) => {
+        events.push(event);
+        if (event.type === 'parse_error') void sm.shutdown(false);
+      },
+    });
+    sm = session.sm;
+    await sm.sendTurn('hello');
+    events.length = 0;
+
+    child.stdout.emit('data', Buffer.from([
+      '{not valid json}',
+      JSON.stringify({
+        type: 'step_finish',
+        part: { reason: 'stop', tokens: { input: 1, output: 1 }, cost: 0 },
+      }),
+      '',
+    ].join('\n')));
+
+    expect(events).toEqual([
+      { type: 'parse_error', line: '{not valid json}' },
+    ]);
+  });
+
+  it('preserves the exact child handle when close-drain quarantine teardown is unproved', async () => {
+    const teardownError = new Error('process tree proof failed');
+    vi.mocked(killSessionTree).mockRejectedValueOnce(teardownError);
+    const events: AgentEvent[] = [];
+    let shutdownPromise: Promise<void> | null = null;
+    let sm!: SessionManager;
+    const session = await makeOpencodeSession({
+      onEvent: (event: AgentEvent) => {
+        events.push(event);
+        if (event.type === 'parse_error') shutdownPromise = sm.shutdown(false);
+      },
+    });
+    sm = session.sm;
+    await sm.sendTurn('hello');
+    events.length = 0;
+
+    child.stdout.emit('data', Buffer.from('{not valid json}'));
+    child._closeCb?.(0, null);
+
+    expect(events).toEqual([
+      { type: 'parse_error', line: '{not valid json}' },
+    ]);
+    expect(shutdownPromise).not.toBeNull();
+    await expect(shutdownPromise).rejects.toBe(teardownError);
+    expect((sm as unknown as { child: HandlerChild | null }).child).toBe(child);
+  });
+
+  it('spawn error followed by close settles the boundary only once', async () => {
+    const { sm, onCrash } = await makeOpencodeSession();
+    await sm.sendTurn('hello');
+
+    const err = new Error('spawn failed: unexpected') as NodeJS.ErrnoException;
+    child._errorCb!(err);
+    child._closeCb?.(0, null);
+    child._closeCb?.(0, null);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(onCrash).toHaveBeenCalledTimes(1);
+    expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({ crashClass: 'spawn_error' }));
   });
 
   it('stderr output is captured into the crash preview (no throw, warn-logged)', async () => {
@@ -256,22 +374,78 @@ describe('SessionManager spawn-per-turn child handlers (opencode-cli)', () => {
     expect(preview).toContain('boom');
   });
 
-  it('superseded child exit (this.child !== child) is ignored', async () => {
+  it('superseded child close (this.child !== child) is ignored', async () => {
     const { sm, onCrash } = await makeOpencodeSession();
     await sm.sendTurn('first');
     const firstChild = child;
+    sm.completeProviderTurn();
 
-    // Second turn spawns a new child, superseding the first.
+    // After the first terminal boundary is admitted, the second turn spawns a
+    // new child and supersedes the old process while its close is still pending.
     const secondChild = makeHandlerChild(22222);
     (spawn as ReturnType<typeof vi.fn>).mockReturnValue(secondChild);
     await sm.sendTurn('second');
 
-    // Now fire the FIRST (stale) child's non-zero exit — should be ignored.
-    firstChild._exitCb!(9, null);
+    // Now complete the FIRST (stale) child's lifecycle — it should be ignored.
+    firstChild._exitCb?.(9, null);
+    firstChild._closeCb?.(9, null);
     await new Promise((resolve) => setImmediate(resolve));
 
     expect(onCrash).not.toHaveBeenCalled();
     expect((sm as unknown as { child: HandlerChild | null }).child).toBe(secondChild);
+  });
+
+  it('does not let the replaced child close release the next provider-turn owner', async () => {
+    let sm!: SessionManager;
+    const session = await makeOpencodeSession({
+      onEvent: (event: AgentEvent) => {
+        if (event.type === 'result') sm.completeProviderTurn();
+      },
+    });
+    sm = session.sm;
+    await sm.sendTurn('first');
+    const firstChild = child;
+    firstChild.stdout.emit('data', Buffer.from(`${JSON.stringify({
+      type: 'step_finish',
+      part: { reason: 'stop', tokens: { input: 1, output: 1 }, cost: 0 },
+    })}\n`));
+    expect(sm.getStatus().turnInFlight).toBe(false);
+
+    let releaseReplacementKill!: () => void;
+    const replacementKill = new Promise<void>((resolve) => {
+      releaseReplacementKill = resolve;
+    });
+    vi.mocked(killSessionTree).mockImplementationOnce(async (target, signal) => {
+      if (typeof target !== 'number') target.kill(signal);
+      await replacementKill;
+    });
+    const secondChild = makeHandlerChild(22222);
+    vi.mocked(spawn).mockReturnValue(secondChild as unknown as ReturnType<typeof spawn>);
+
+    const secondTurn = sm.sendTurn('second');
+    await vi.waitFor(() => expect(firstChild.kill).toHaveBeenCalledWith('SIGTERM'));
+    const secondBoundary = sm.waitForProviderTurnToTerminalize();
+
+    firstChild.stdout.emit('data', Buffer.from(`${JSON.stringify({
+      type: 'step_finish',
+      part: { reason: 'stop', tokens: { input: 2, output: 2 }, cost: 0 },
+    })}\n`));
+    let secondBoundarySettled = false;
+    void secondBoundary.then(() => { secondBoundarySettled = true; });
+    await Promise.resolve();
+    expect(secondBoundarySettled).toBe(false);
+
+    firstChild._closeCb?.(0, null);
+    await Promise.resolve();
+
+    expect(secondBoundarySettled).toBe(false);
+    expect(sm.getStatus().turnInFlight).toBe(true);
+
+    releaseReplacementKill();
+    await secondTurn;
+    expect(sm.getStatus().turnInFlight).toBe(true);
+    sm.completeProviderTurn();
+    await secondBoundary;
   });
 
   it('clears an inactive exact child even after its ownership generation advances', async () => {
@@ -283,7 +457,8 @@ describe('SessionManager spawn-per-turn child handlers (opencode-cli)', () => {
     generationIdentity = { managerId: 'spawn-turn-inactive-exit', generation: 2 };
     state.active = false;
 
-    child._exitCb!(0, null);
+    child._exitCb?.(0, null);
+    child._closeCb?.(0, null);
 
     expect(state).toMatchObject({ active: false, child: null });
   });
@@ -307,7 +482,7 @@ describe('SessionManager spawn-per-turn child handlers (opencode-cli)', () => {
     expect((sm as unknown as { crashStderrPreview: string }).crashStderrPreview).toBe('');
   });
 
-  it('does not clear the current stalled-operation timer from a stale exit', async () => {
+  it('does not clear the current stalled-operation timer from a stale close', async () => {
     let generationIdentity = { managerId: 'spawn-turn-stalled-timer', generation: 1 };
     const { sm } = await makeOpencodeSession();
     sm.bindGenerationOwnership(() => generationIdentity);
@@ -317,7 +492,8 @@ describe('SessionManager spawn-per-turn child handlers (opencode-cli)', () => {
     state.stalledOpKill = currentTimer;
     generationIdentity = { managerId: 'spawn-turn-stalled-timer', generation: 2 };
 
-    child._exitCb!(9, null);
+    child._exitCb?.(9, null);
+    child._closeCb?.(9, null);
 
     expect(state.stalledOpKill).toBe(currentTimer);
   });

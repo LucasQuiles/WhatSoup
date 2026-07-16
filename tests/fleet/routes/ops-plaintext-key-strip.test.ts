@@ -7,7 +7,19 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 
 vi.mock('../../../src/fleet/mcp-client.ts', () => ({ mcpCall: vi.fn() }));
 vi.mock('../../../src/fleet/http-proxy.ts', () => ({ proxyToInstance: vi.fn() }));
-vi.mock('node:child_process', () => ({ execFile: vi.fn(), spawn: vi.fn() }));
+// Complete mock: ops.ts transitively imports fleet/index.ts and fleet/platform.ts,
+// both of which call execFileSync at module-load (git rev-parse) / keyring probe time.
+// An incomplete mock ({ execFile, spawn } only) leaves execFileSync as undefined,
+// which the keyring backend probe catches — but vitest logs a warning per call and
+// the fork worker can hang on teardown under --pool=forks (issue #1834).
+vi.mock('node:child_process', () => ({
+  execFile: vi.fn(),
+  execFileSync: vi.fn(),
+  spawn: vi.fn(),
+  spawnSync: vi.fn(),
+  exec: vi.fn(),
+  execSync: vi.fn(),
+}));
 
 import { handleConfigUpdate } from '../../../src/fleet/routes/ops.ts';
 import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';

@@ -832,17 +832,45 @@ describe('Media processing', () => {
     await handleAndDrain(handler, makeIncomingMessage({ contentType: 'audio' }));
 
     // loadContext uses the processed content
+    // QR-006: 5th arg is the per-message traceId, threaded through so
+    // the read path's logs correlate with the rest of the request.
     expect(mockLoadContext).toHaveBeenCalledWith(
       expect.anything(),
       expect.any(String),
       expect.any(String),
       processedContent,
+      expect.any(String),
     );
 
     // LLM request uses processed content
     const request = vi.mocked(primary.generate).mock.calls[0][0];
     const lastMsg = request.messages[request.messages.length - 1];
     expect(lastMsg.content).toContain(processedContent);
+  });
+
+  it('QR-006: loadContext receives the SAME traceId used for this message\'s other request-scoped logs', async () => {
+    const { handler } = makeHandler();
+
+    await handleAndDrain(handler, makeIncomingMessage());
+
+    // "rate limit check passed" is logged early in processMessage() with the
+    // per-message traceId generated in handleMessage() — reuse it as the
+    // ground truth for what loadContext should have received.
+    const rateLimitLog = mockLogInfo().mock.calls.find(
+      (c: unknown[]) => typeof c[1] === 'string' && c[1].includes('rate limit check passed'),
+    );
+    expect(rateLimitLog).toBeDefined();
+    const traceId = (rateLimitLog![0] as { traceId: string }).traceId;
+    expect(typeof traceId).toBe('string');
+    expect(traceId.length).toBeGreaterThan(0);
+
+    expect(mockLoadContext).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+      traceId,
+    );
   });
 
   it('DB content updated when processMedia returns different content than original', async () => {

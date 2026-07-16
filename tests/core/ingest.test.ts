@@ -221,6 +221,48 @@ describe('REQ-002.AC-01: message storage', () => {
     expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledOnce();
   });
 
+  it('strips the bot\'s own @mention from inbound group text before dispatch, keeping the stored copy raw (#1854)', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const handler = makeIngest(db, messenger, runtime);
+    // BOT_JID = 15551230004@s.whatsapp.net → bare number 15551230004
+    const msg = makeIncomingMessage({
+      isGroup: true,
+      content: '@15551230004 what is the weather',
+      mentionedJids: [BOT_JID],
+    });
+
+    await runIngest(handler, msg);
+
+    // The runtime (agent) sees the mention stripped…
+    expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledOnce();
+    expect(vi.mocked(runtime.handleMessage).mock.calls[0][0].content).toBe('what is the weather');
+
+    // …but the stored copy retains the raw text (strip runs after persistence).
+    const rows = getMessagesBySender(db, msg.senderJid);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].content).toBe('@15551230004 what is the weather');
+  });
+
+  it('leaves inbound group text without a self-mention structurally unchanged (#1854)', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const handler = makeIngest(db, messenger, runtime);
+    const msg = makeIncomingMessage({
+      isGroup: true,
+      content: 'line one\nline two',
+      mentionedJids: [BOT_JID],
+    });
+
+    await runIngest(handler, msg);
+
+    expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledOnce();
+    // No self-mention → newlines and content preserved verbatim.
+    expect(vi.mocked(runtime.handleMessage).mock.calls[0][0].content).toBe('line one\nline two');
+  });
+
   it('stores message even when access policy rejects it (REQ-002.AC-01)', async () => {
     const db = makeTempDb();
     const messenger = makeMessenger();

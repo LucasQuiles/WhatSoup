@@ -697,9 +697,9 @@ The operation tracker detects and recovers from stuck operations regardless of t
 
 | Mode | Progress updates | Slow warning | Stall warning |
 |------|-----------------|--------------|---------------|
-| `full` | Elapsed time every 30s | Timing details and expected duration | "Still working" with elapsed time |
-| `friendly` | One-time "working on something" per tool | Plain-language "still working on it..." | "Still working" with elapsed time |
-| `minimal` | Typing indicator only | "Still working..." | "Still working" with elapsed time |
+| `full` | Elapsed time every 30s | "taking longer than expected" (threshold notice, no live clock) | "still working — this is taking a while" (threshold notice, no live clock) |
+| `friendly` | One-time "working on something" per tool | Plain-language "still working on it..." | "still working — this is taking a while" |
+| `minimal` | Typing indicator only | Typing indicator only | Typing indicator only |
 
 ### `agentOptions`
 
@@ -824,6 +824,29 @@ so the interpolation resolves at spawn time. `apiKeyService` must name an
 inference-provider service (`PROVIDER_API_KEY_SERVICES`) and requires
 `baseUrl` (see
 [Cross-field validation rules](#cross-field-validation-rules)).
+
+**Headless permissions (opencode-cli):** the startup merge installs a reserved
+primary agent named `whatsoup-headless`, and every fresh or resumed OpenCode
+turn selects it explicitly with `--agent`. The managed agent allows ordinary
+worktree-local reads, edits, and shell commands without a prompt; denies
+interactive questions and plan transitions; sets external-directory access to
+deny; and denies reads of `.env`-style files except `.env.example`. It also
+translates the repository's required connector-mutation deny floor to
+OpenCode's actual `<server>_<tool>` names. Unrelated user agents and global
+configuration are preserved, but the reserved agent entry is replaced
+deterministically.
+
+WhatSoup does not pass `--auto`, `--yolo`, or a blanket permission-bypass flag.
+OpenCode permissions are an approval policy, not an operating-system sandbox:
+they do not establish filesystem confidentiality, process isolation, or network
+containment. Use an OS-level boundary when those properties are required. If
+OpenCode still requests a denied permission, the unattended rejection is
+classified as `provider_permission_denied` without retaining its dynamic path.
+If the provider process closes successfully without a terminal result, the turn
+now fails through the normal crash/finalization path and asks the user to retry
+instead of leaving the turn indefinitely processing. A symlink-protected
+`opencode.json` that cannot receive the reserved agent causes launch to fail; it
+does not silently fall back to an unrestricted agent.
 
 **Routing and auth (API providers):** `openai-api` / `anthropic-api` consume
 `baseUrl` directly as the endpoint of the managed HTTP loop (default

@@ -4,6 +4,10 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
+import type {
+  MarkSystemTurnInput,
+  SystemTurnLeaseToken,
+} from '../../../src/runtimes/agent/pending-system-result-tracker.ts';
 
 // ── Hoisted mocks ───────────────────────────────────────────────────────────
 
@@ -317,6 +321,88 @@ describe('F-STICKY-ACTOR: resolveExecutingActor fail-closed / executing-turn HEA
     setSession(true);
     setQueue([undefined, ADMIN]);
     expect(resolve()).toBeUndefined();
+  });
+});
+
+describe('system continuation actor ownership', () => {
+  it('removes the exact admin poll actor before a later guest turn becomes HEAD', () => {
+    const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
+    const mapKey = 'group-poll@g.us';
+    const lease = { id: 41, scopeKey: mapKey };
+    const state = runtime as unknown as {
+      perChatExecActorQueue: Map<string, Array<string | undefined>>;
+      systemTurnExecActors: Map<number, { scopeKey: string; actorJid: string | undefined }>;
+      releaseSystemTurnExecutingActor(turn: {
+        lease: typeof lease;
+        purpose: 'poll_answer_continuation';
+        owner: null;
+        blocking: boolean;
+      }): void;
+    };
+    state.perChatExecActorQueue.set(mapKey, [
+      'admin@s.whatsapp.net',
+      'guest@s.whatsapp.net',
+    ]);
+    state.systemTurnExecActors.set(lease.id, {
+      scopeKey: mapKey,
+      actorJid: 'admin@s.whatsapp.net',
+    });
+
+    state.releaseSystemTurnExecutingActor({
+      lease,
+      purpose: 'poll_answer_continuation',
+      owner: null,
+      blocking: true,
+    });
+
+    expect(state.perChatExecActorQueue.get(mapKey)).toEqual(['guest@s.whatsapp.net']);
+    expect(state.systemTurnExecActors.has(lease.id)).toBe(false);
+  });
+
+  it('releases the exact system actor after timeout teardown proof', async () => {
+    const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
+    const mapKey = 'group-timeout@g.us';
+    setOwnedTestSession(runtime, mapKey, mockSession);
+    const state = runtime as unknown as {
+      sessionEventToolScopes: WeakMap<object, string>;
+      pendingSystemResults: {
+        mark(input: MarkSystemTurnInput): SystemTurnLeaseToken;
+        cancel(lease: SystemTurnLeaseToken): boolean;
+      };
+      perChatExecActorQueue: Map<string, Array<string | undefined>>;
+      systemTurnExecActors: Map<number, { scopeKey: string; actorJid: string | undefined }>;
+      markSystemTurn(
+        session: object,
+        scopeKey: string,
+        purpose: 'poll_answer_continuation',
+        routeChatJid: string,
+      ): SystemTurnLeaseToken;
+    };
+    state.sessionEventToolScopes.set(mockSession, `${mapKey}#1`);
+    const mark = vi.spyOn(state.pendingSystemResults, 'mark');
+    const lease = state.markSystemTurn(
+      mockSession,
+      mapKey,
+      'poll_answer_continuation',
+      mapKey,
+    );
+    state.perChatExecActorQueue.set(mapKey, [
+      'admin@s.whatsapp.net',
+      'guest@s.whatsapp.net',
+    ]);
+    state.systemTurnExecActors.set(lease.id, {
+      scopeKey: mapKey,
+      actorJid: 'admin@s.whatsapp.net',
+    });
+    const input = mark.mock.calls[0]![0];
+    expect(input.onTimeout).toBeTypeOf('function');
+
+    await expect(input.onTimeout!(lease)).resolves.toBe(true);
+    state.pendingSystemResults.cancel(lease);
+
+    expect(mockSession.shutdown).toHaveBeenCalledWith(false);
+    expect(state.perChatExecActorQueue.get(mapKey)).toEqual(['guest@s.whatsapp.net']);
+    expect(state.systemTurnExecActors.has(lease.id)).toBe(false);
   });
 });
 

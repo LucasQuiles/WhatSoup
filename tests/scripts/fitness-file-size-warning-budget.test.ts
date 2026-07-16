@@ -62,6 +62,11 @@ function ceilingBumpMessage(measurement: FileSizeMeasurement, actualLines: numbe
 }
 
 const EXPECTED_FILE_SIZE_WARNING_FILES = [
+  // #1749 recovery-owner reclaim added the bucket-4 sweep query + reclaim
+  // wiring to this cohesive core durability engine, taking it just over the
+  // 2000-line arch.file-size warn budget (~2076). Grandfathered per the project
+  // norm for large core files; a durability.ts slice is a separate follow-up.
+  'src/core/durability.ts',
   'src/runtimes/agent/runtime.ts',
   'src/runtimes/agent/session.ts',
   'src/transport/connection.ts',
@@ -76,6 +81,9 @@ const EXPECTED_FILE_SIZE_WARNING_FILES = [
   'tests/fleet/routes/feed.test.ts',
   'tests/fleet/routes/ops.test.ts',
   'tests/runtimes/agent/outbound-queue.test.ts',
+  // Hang-hardening regressions reuse this suite's shared agent-runtime harness;
+  // extracting them would duplicate the setup, so the cohesive suite is grandfathered.
+  'tests/runtimes/agent/runtime-edge-coverage.test.ts',
   'tests/runtimes/agent/runtime.test.ts',
   'tests/runtimes/agent/session.test.ts',
   'tests/runtimes/chat/providers/pinecone.test.ts',
@@ -89,6 +97,43 @@ const EXPECTED_FILE_SIZE_WARNING_FILES = [
   'tests/scripts/bot-errors-health-check.test.ts',
   'tests/transport/reconnect.test.ts',
 ].sort();
+
+interface OverBudgetEntry {
+  file: string;
+  actual: number;
+  ceiling: number;
+}
+
+// Soft-collects EVERY measurement that grew past its recorded ceiling instead
+// of throwing on the first one (#1830). Aborting on the first over-ceiling file
+// masked additional violations: a PR that tripped 2+ files only ever saw the
+// first in CI. Every file is still checked <= its ceiling; the difference is
+// that all violations are gathered and reported together.
+function collectOverBudget(
+  measurements: FileSizeMeasurement[],
+  measure: (measurement: FileSizeMeasurement) => number,
+): OverBudgetEntry[] {
+  const overBudget: OverBudgetEntry[] = [];
+  for (const measurement of measurements) {
+    const actual = measure(measurement);
+    if (actual > measurement.maxLines) {
+      overBudget.push({ file: measurement.filePath, actual, ceiling: measurement.maxLines });
+    }
+  }
+  return overBudget;
+}
+
+// Enumerates the full set of over-ceiling files (each with the two-twin bump
+// ceremony) so the single failing assertion documents every violation, not
+// just the first.
+function formatOverBudgetFailure(overBudget: OverBudgetEntry[]): string {
+  return [
+    `arch.file-size ceiling exceeded by ${overBudget.length} file(s):`,
+    ...overBudget.map(({ file, actual, ceiling }) =>
+      ceilingBumpMessage({ filePath: file, lines: actual, maxLines: ceiling }, actual),
+    ),
+  ].join('\n\n');
+}
 
 describe('arch.file-size warning budget', () => {
   it('arch.file-size ESLint warning files must match the grandfathered identity set', async () => {
@@ -123,20 +168,25 @@ describe('arch.file-size warning budget', () => {
     const measurements = baseline.rules['arch.file-size']?.measurements ?? [];
     expect(measurements.length).toBeGreaterThan(0);
 
-    const shrinkWarnings: string[] = [];
-
     for (const measurement of measurements) {
       expect(
         typeof measurement.maxLines,
         `${measurement.filePath} has no recorded maxLines ceiling in .claude/fitness/baseline.json`,
       ).toBe('number');
+    }
 
-      const actualLines = countLines(resolve(repoRoot, measurement.filePath));
+    const measure = (measurement: FileSizeMeasurement): number =>
+      countLines(resolve(repoRoot, measurement.filePath));
 
-      expect(actualLines, ceilingBumpMessage(measurement, actualLines)).toBeLessThanOrEqual(
-        measurement.maxLines,
-      );
+    // Report EVERY over-ceiling file in one assertion rather than aborting on
+    // the first (#1830). Each file is still checked <= its ceiling; the only
+    // change is that all violations surface together.
+    const overBudget = collectOverBudget(measurements, measure);
+    expect(overBudget, formatOverBudgetFailure(overBudget)).toEqual([]);
 
+    const shrinkWarnings: string[] = [];
+    for (const measurement of measurements) {
+      const actualLines = measure(measurement);
       if (actualLines < measurement.maxLines) {
         shrinkWarnings.push(
           `${measurement.filePath}: shrank to ${actualLines} lines (recorded ceiling ` +
@@ -151,5 +201,35 @@ describe('arch.file-size warning budget', () => {
       // failure.
       console.warn(`arch.file-size ceiling WARN (non-blocking):\n${shrinkWarnings.join('\n')}`);
     }
+  });
+
+  it('collects and reports every over-ceiling file, not just the first (#1830)', () => {
+    // Regression guard for #1830: the ratchet used to throw on the first
+    // over-ceiling file, so a PR that tripped 2+ files only saw one in CI. The
+    // synthetic measurements below trip TWO files (with one within-budget file
+    // between them); both must be collected and both must appear in the failure
+    // message.
+    const measurements: FileSizeMeasurement[] = [
+      { filePath: 'first-over.ts', lines: 100, maxLines: 100 },
+      { filePath: 'within-budget.ts', lines: 50, maxLines: 80 },
+      { filePath: 'second-over.ts', lines: 200, maxLines: 200 },
+    ];
+    const measured: Record<string, number> = {
+      'first-over.ts': 137,
+      'within-budget.ts': 50,
+      'second-over.ts': 271,
+    };
+
+    const overBudget = collectOverBudget(measurements, (m) => measured[m.filePath]);
+
+    expect(overBudget).toEqual([
+      { file: 'first-over.ts', actual: 137, ceiling: 100 },
+      { file: 'second-over.ts', actual: 271, ceiling: 200 },
+    ]);
+
+    const message = formatOverBudgetFailure(overBudget);
+    expect(message).toContain('first-over.ts');
+    expect(message).toContain('second-over.ts');
+    expect(message).toContain('arch.file-size ceiling exceeded by 2 file(s):');
   });
 });
