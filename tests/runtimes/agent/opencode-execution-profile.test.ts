@@ -26,6 +26,12 @@ interface HeadlessPolicy {
       exactRuntimePathRequired: boolean;
       interpolationOrCompositionVerified: boolean;
     };
+    homeBinding: {
+      status: string;
+      placeholder: string;
+      exactRuntimePathRequired: boolean;
+      interpolationOrCompositionVerified: boolean;
+    };
   };
   permissions: {
     read: PolicyRule[];

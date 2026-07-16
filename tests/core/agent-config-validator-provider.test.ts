@@ -27,7 +27,9 @@ function agentRaw(provider: unknown): Record<string, unknown> {
 describe('validateInstanceConfig — agentOptions.provider (#447)', () => {
   it('accepts every canonical provider ID', () => {
     for (const id of PROVIDER_IDS) {
-      const err = validateInstanceConfig(agentRaw(id), {
+      const raw = agentRaw(id);
+      if (id === 'opencode-cli') raw['model'] = 'glm/glm-5.2';
+      const err = validateInstanceConfig(raw, {
         name: 'test-line',
         mode: 'create',
       });

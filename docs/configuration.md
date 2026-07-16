@@ -728,11 +728,11 @@ proof unless a WhatSoup-specific proof artifact says so.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `sessionScope` | string | no | `single` at runtime (`per_chat` via fleet API) | `single`, `shared`, or `per_chat`. See [Session Scopes](#session-scopes). Omitted = the runtime defaults to `single`; the fleet create/update APIs fill `per_chat` when the whole `agentOptions` block is omitted. Invalid values are rejected on every path (create, update, load, discovery). |
-| `provider` | string | no | `claude-cli` | Agent provider ID. Must be one of `claude-cli`, `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, or `anthropic-api`. |
+| `provider` | string | no | `claude-cli` | Agent provider ID. Must be one of `claude-cli`, `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, or `anthropic-api`. A primary `opencode-cli` route requires a non-empty top-level `model` or `models.conversation`; other CLI providers may use their own default model. |
 | `providerConfig` | object | no | — | Provider-specific overrides. The selected provider owns the accepted keys; unknown provider IDs are rejected before runtime startup. For `opencode-cli`, `providerConfig.executionProfile` selects an explicit OpenCode agent. `providerConfig.baseUrl` selects a custom endpoint and `providerConfig.apiKeyService` names the keyring service that authenticates it — see [OpenCode headless execution profile](#opencode-headless-execution-profile) and [Custom endpoint](#custom-endpoint-providerconfigbaseurl). |
 | `fallbackProvider` | string | no | — | Legacy single fallback provider. Prefer `fallbacks` when configuring more than one backup. Must be one of the same IDs as `provider` (`claude-cli`, `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, `anthropic-api`); unknown IDs are rejected before startup. When the primary returns a usage-limit, rate-limit, or auth-required terminal result and the selected fallback is usable, the runtime sends a short in-chat handoff notice and replays the interrupted turn on the fallback provider when no tool side effects have started. Usage-limit and rate-limit fallbacks automatically revert when the window ends; auth-required fallbacks stay armed until the primary passes a background recovery probe. Omitted = fallback disabled (unless `fallbacks` is set). See [Provider fallback behavior](#provider-fallback-behavior) for the full lifecycle: user notice, window persistence across restarts, turn telemetry, credential pre-flight, and admin override commands. |
-| `fallbackModel` | string | no | — | Model string passed to `fallbackProvider` while fallback is active (e.g. `minimax/MiniMax-M2`). The id must match the provider's model catalog **exactly, including case** — `opencode` treats `minimax/minimax-m2` and `minimax/MiniMax-M2` as different ids, and a wrong-case id fails every session with an opaque provider error. Copy the id verbatim from `opencode models` — the runtime warns at arm time (`fallback_model_unknown`) when the configured model is not found in the provider catalog. Non-empty string when present. When omitted, a CLI fallback provider runs with no `--model`/`-m` override (its own default); **required when `fallbackProvider` is `openai-api` or `anthropic-api`** (see [Cross-field validation rules](#cross-field-validation-rules)). |
-| `fallbacks` | array | no | — | Ordered fallback chain. Each entry is `{ "provider": "<provider-id>", "model": "<model-id>" }`; `model` may be omitted only for CLI providers. Do not combine with `fallbackProvider` / `fallbackModel`. At arm time the runtime selects the first entry whose required key is present, records per-entry eligibility in `/health` and provider-status (`unknown` until the first selection pass), and fails open to entry zero if no keyed entry is eligible so the operator still gets binary/model/key alerts for the first configured target. Auth-required failures skip same-provider entries because they share the failed auth surface and require an independent provider. Maximum 8 entries. |
+| `fallbackModel` | string | no | — | Model string passed to `fallbackProvider` while fallback is active (e.g. `minimax/MiniMax-M2`). The id must match the provider's model catalog **exactly, including case** — `opencode` treats `minimax/minimax-m2` and `minimax/MiniMax-M2` as different ids, and a wrong-case id fails every session with an opaque provider error. Copy the id verbatim from `opencode models` — the runtime warns at arm time (`fallback_model_unknown`) when the configured model is not found in the provider catalog. Non-empty string when present. Omission is allowed only for `claude-cli`, `codex-cli`, and `gemini-cli`, which may use their own defaults; **required when `fallbackProvider` is `opencode-cli`, `openai-api`, or `anthropic-api`** (see [Cross-field validation rules](#cross-field-validation-rules)). |
+| `fallbacks` | array | no | — | Ordered fallback chain. Each entry is `{ "provider": "<provider-id>", "model": "<model-id>" }`; `model` may be omitted only for `claude-cli`, `codex-cli`, and `gemini-cli`. OpenCode and managed API entries require it. Do not combine with `fallbackProvider` / `fallbackModel`. At arm time the runtime selects the first entry whose required key is present, records per-entry eligibility in `/health` and provider-status (`unknown` until the first selection pass), and fails open to entry zero if no keyed entry is eligible so the operator still gets binary/model/key alerts for the first configured target. Auth-required failures skip same-provider entries because they share the failed auth surface and require an independent provider. Maximum 8 entries. |
 | `cwd` | string | no | `~/.local/share/whatsoup/instances/<name>/workspace` | Working directory for the agent subprocess. Tilde is expanded (`~` → `$HOME`). Empty values are replaced with the default. |
 | `instructionsPath` | string | no | — | Path to a CLAUDE.md-style instructions file, relative to `cwd`. |
 | `sandboxPerChat` | boolean | no | `false` | Provision a separate workspace per chat. Requires `sessionScope: per_chat`. |
@@ -762,17 +762,22 @@ Beyond the per-field shapes above, the shared validator
 create/update time and at load/discovery (where the fleet surfaces them as a
 config error):
 
-- **API-type `fallbackProvider` without `fallbackModel`.** `openai-api` and
-  `anthropic-api` take their fallback-window model from `fallbackModel`;
-  without it the window would silently run on a provider-internal default the
-  operator never chose. CLI fallback providers (`claude-cli`, `codex-cli`,
-  `gemini-cli`, `opencode-cli`) may omit it and use their own default.
+- **Credential-routed `fallbackProvider` without `fallbackModel`.**
+  `openai-api` and `anthropic-api` take their fallback-window model from
+  `fallbackModel`; `opencode-cli` also needs the model prefix to select its
+  one route credential. Only `claude-cli`, `codex-cli`, and `gemini-cli` may
+  omit it and use their own default.
 - **Malformed `fallbacks`.** `agentOptions.fallbacks` must be an array of at
   most 8 entries, cannot be combined with the legacy `fallbackProvider` /
   `fallbackModel` pair, cannot contain duplicate provider/model pairs, and
   cannot point an entry at the primary provider/model pair.
-- **API-type `fallbacks[]` entry without `model`.** `openai-api` and
-  `anthropic-api` entries require an explicit `model`; CLI entries may omit it.
+- **Credential-routed `fallbacks[]` entry without `model`.** `openai-api`,
+  `anthropic-api`, and `opencode-cli` entries require an explicit `model`;
+  only `claude-cli`, `codex-cli`, and `gemini-cli` entries may omit it.
+- **Primary `provider: opencode-cli` without a resolvable model.** A non-empty
+  top-level `model` or `models.conversation` is required so OpenCode's exact
+  route credential can be selected before any session is spawned. Model
+  omission remains valid for `claude-cli`, `codex-cli`, and `gemini-cli`.
 - **`providerConfig.baseUrl` with a non-`http(s)` scheme.** The value must be
   an absolute `http://` or `https://` URL.
 - **`provider: opencode-cli` with `providerConfig.baseUrl` but no resolvable
@@ -805,6 +810,7 @@ For `opencode-cli`, set `providerConfig.executionProfile` to the dedicated
 agent name provisioned for the instance, normally `whatsoup-headless`:
 
 ```jsonc
+"model": "glm/glm-5.2",
 "agentOptions": {
   "provider": "opencode-cli",
   "providerConfig": {
@@ -863,8 +869,9 @@ omitted, the service is derived from the configured model's prefix (e.g.
 `minimax/MiniMax-M2` → `minimax`). The child environment selects exactly one
 credential service: a valid `apiKeyService` for a custom endpoint takes
 precedence; otherwise the selected model prefix must map to an inference
-provider. An absent or unmapped prefix is an explicit configuration error at
-spawn/probe time rather than a credential superset. The selected service is
+provider. An absent model is rejected during configuration admission; an
+unmapped prefix is an explicit configuration error at spawn/probe time rather
+than a credential superset. The selected service is
 the only keyring lookup and, when present, the only provider credential added
 to the child environment. A missing credential leaves that selected env var
 absent for the existing pre-flight/runtime auth diagnostics. `apiKeyService`

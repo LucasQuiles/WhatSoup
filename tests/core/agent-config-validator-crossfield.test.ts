@@ -155,21 +155,26 @@ describe('validateInstanceConfig — API fallbackProvider requires fallbackModel
     expect(err?.field).toBe('agentOptions.fallbackModel');
   });
 
-  it('still accepts a CLI fallbackProvider without fallbackModel (CLI default model applies)', () => {
-    expect(
-      validateInstanceConfig(
-        agentRaw({ provider: 'claude-cli', fallbackProvider: 'opencode-cli' }),
-        createCtx,
-      ),
-      'opencode-cli without fallbackModel must stay valid (provider default model)',
-    ).toBeNull();
-    // Control: the same shape with an API fallback provider is rejected — the
-    // rule is provider-type-scoped, not dropped.
-    const bad = validateInstanceConfig(
+  it('accepts provider-default CLI fallbacks while requiring a model for OpenCode', () => {
+    for (const fallbackProvider of ['claude-cli', 'codex-cli', 'gemini-cli']) {
+      expect(
+        validateInstanceConfig(
+          agentRaw({ provider: 'claude-cli', fallbackProvider }),
+          createCtx,
+        ),
+        `${fallbackProvider} without fallbackModel must stay valid`,
+      ).toBeNull();
+    }
+    const opencode = validateInstanceConfig(
+      agentRaw({ provider: 'claude-cli', fallbackProvider: 'opencode-cli' }),
+      createCtx,
+    );
+    expect(opencode?.field).toBe('agentOptions.fallbackModel');
+    const api = validateInstanceConfig(
       agentRaw({ provider: 'claude-cli', fallbackProvider: 'anthropic-api' }),
       createCtx,
     );
-    expect(bad?.field).toBe('agentOptions.fallbackModel');
+    expect(api?.field).toBe('agentOptions.fallbackModel');
   });
 });
 

@@ -536,6 +536,41 @@ describe('agent type rules', () => {
     expect(result?.message).toContain('openai-api');
   });
 
+  it('rejects a primary opencode-cli route without a resolved model', () => {
+    const raw = baseAgent({
+      agentOptions: { sessionScope: 'single', provider: 'opencode-cli' },
+    });
+
+    const result = validateInstanceConfig(raw, ctx('load'));
+
+    expect(result?.field).toBe('model');
+    expect(result?.message).toContain('opencode-cli');
+    expect(result?.message).toContain('models.conversation');
+  });
+
+  it.each([
+    { model: 'glm/glm-5.2' },
+    { models: { conversation: 'glm/glm-5.2' } },
+  ])('accepts a primary opencode-cli route with a resolved mapped model: %j', (modelConfig) => {
+    const raw = baseAgent({
+      ...modelConfig,
+      agentOptions: { sessionScope: 'single', provider: 'opencode-cli' },
+    });
+
+    expect(validateInstanceConfig(raw, ctx('load'))).toBeNull();
+  });
+
+  it.each(['claude-cli', 'codex-cli', 'gemini-cli'])(
+    'continues to accept a model-less %s route',
+    (provider) => {
+      const raw = baseAgent({
+        agentOptions: { sessionScope: 'single', provider },
+      });
+
+      expect(validateInstanceConfig(raw, ctx('load'))).toBeNull();
+    },
+  );
+
   it('rejects non-object providerConfig', () => {
     const raw = baseAgent({
       agentOptions: { sessionScope: 'single', providerConfig: ['array'] },
@@ -793,6 +828,50 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
     expect(result?.message).toContain('requires agentOptions.fallbackModel to be set');
   });
 
+  it('rejects opencode-cli fallbackProvider without a fallbackModel', () => {
+    const raw = baseAgent({
+      agentOptions: { sessionScope: 'single', fallbackProvider: 'opencode-cli' },
+    });
+    const result = validateInstanceConfig(raw, ctx('load'));
+    expect(result?.field).toBe('agentOptions.fallbackModel');
+    expect(result?.message).toContain('opencode-cli');
+    expect(result?.message).toContain('fallbackModel');
+  });
+
+  it('accepts opencode-cli fallbackProvider with a mapped fallbackModel', () => {
+    const raw = baseAgent({
+      agentOptions: {
+        sessionScope: 'single',
+        fallbackProvider: 'opencode-cli',
+        fallbackModel: 'glm/glm-5.2',
+      },
+    });
+    expect(validateInstanceConfig(raw, ctx('load'))).toBeNull();
+  });
+
+  it('rejects a model-less opencode-cli fallback-chain entry', () => {
+    const raw = baseAgent({
+      agentOptions: {
+        sessionScope: 'single',
+        fallbacks: [{ provider: 'opencode-cli' }],
+      },
+    });
+    const result = validateInstanceConfig(raw, ctx('load'));
+    expect(result?.field).toBe('agentOptions.fallbacks[0].model');
+    expect(result?.message).toContain('opencode-cli');
+    expect(result?.message).toContain('requires model');
+  });
+
+  it('accepts a mapped modeled opencode-cli fallback-chain entry', () => {
+    const raw = baseAgent({
+      agentOptions: {
+        sessionScope: 'single',
+        fallbacks: [{ provider: 'opencode-cli', model: 'glm/glm-5.2' }],
+      },
+    });
+    expect(validateInstanceConfig(raw, ctx('load'))).toBeNull();
+  });
+
   // ---- providerConfig.baseUrl + apiKeyService (lines 614-675) ----
   it('rejects non-string providerConfig.baseUrl', () => {
     const raw = baseAgent({
@@ -882,6 +961,7 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
 
   it('accepts a safe non-empty providerConfig.executionProfile', () => {
     const result = validateInstanceConfig(baseAgent({
+      model: 'glm/glm-5.2',
       agentOptions: {
         sessionScope: 'single',
         provider: 'opencode-cli',
