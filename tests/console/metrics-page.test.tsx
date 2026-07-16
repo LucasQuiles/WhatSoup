@@ -210,6 +210,35 @@ describe('Metrics page — KPI cells', () => {
     expect(within(kpiCard(/Tokens/)).getByText('12K')).toBeDefined();
   });
 
+  it('labels the health-state count "Lines Online" and excludes a degraded-but-connected line (#1881)', () => {
+    // #1881: "Online" (health-state) and "Connected" (transport-state) are
+    // distinct dimensions. A degraded line whose WhatsApp transport is up
+    // counts toward the Fleet transport-state "Lines Connected" KPI, but the
+    // Metrics "Lines Online" tile is a HEALTH-STATE count and must NOT include
+    // it — otherwise the label lies about what it measures.
+    const lines = [
+      makeLine({ name: 'a', status: 'online' }),
+      makeLine({
+        name: 'b',
+        status: 'degraded',
+        health: {
+          status: 'ok',
+          uptime_seconds: 1,
+          messages_total: 0,
+          whatsapp: { connected: true, connection: { state: 'connected' } },
+          sqlite: { messages_total: 0, schema_version: 5 },
+        },
+      }),
+    ];
+    renderPage({ lines });
+
+    // Health-state Online = 1 (only the status==='online' line). The degraded-
+    // but-connected line is a transport count, not a health-state one.
+    expect(within(kpiCard('Lines Online')).getByText('1')).toBeDefined();
+    // It is still surfaced as needing attention (health-state = degraded).
+    expect(within(kpiCard('Need Attention')).getByText('1')).toBeDefined();
+  });
+
   it('shows zeroed KPIs when no lines and no metrics exist', () => {
     renderPage({ lines: [], fleetMetrics: null });
 

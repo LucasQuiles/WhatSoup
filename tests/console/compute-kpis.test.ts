@@ -285,4 +285,105 @@ describe('computeKpis', () => {
     expect(result.connected).toBe(2);
     expect(result.staleExcluded).toBe(1);
   });
+
+  // ---------------------------------------------------------------------------
+  //  Transport-connectivity dimension (#1881)
+  //
+  //  "Connected" is transport connectivity, NOT health-state. A line whose
+  //  WhatsApp transport is genuinely up counts as connected even when its
+  //  control-plane health status is `degraded` (e.g. recent-disconnect churn:
+  //  src/core/health.ts marks `degraded` while `whatsapp.connected === true`
+  //  and `connection.state === 'connected'`). Counting connectivity by
+  //  `status === 'online'` alone undercounts working transports precisely when
+  //  operators most need to tell "connected but impaired" from "disconnected".
+  //
+  //  The connected count is the UNION of two branches:
+  //    (a) health-state `online` — stays visible through an outage (#1762
+  //        rem-1), so it counts regardless of staleness; online ⊆ connected
+  //        because the poller cannot classify a line online while the transport
+  //        reports disconnected.
+  //    (b) a FRESH transport-up signal (`whatsapp.connected === true` AND
+  //        `connection.state === 'connected'`) on a non-stale line. A stale
+  //        (carried-forward) connectivity body is UNKNOWN, not connected —
+  //        mirroring how unread/agentSessions body counts are gated on `stale`
+  //        (#1762 rem-2). This keeps stale/unavailable signals out of the
+  //        connected count rather than miscounting them as connected.
+  //
+  //  NOTE: the emitter (health.ts) sets `connection.state` to the real
+  //  connection state where `connected === true` REQUIRES `state ===
+  //  'connected'`, so a real degraded-but-connected line has BOTH fields set.
+  //  (Older fixtures above use `connection.state: 'open'`, which is not an
+  //  emitter value; those lines count via the `online` branch instead.)
+  // ---------------------------------------------------------------------------
+
+  function connectedHealth(overrides?: Partial<{ connected: boolean; state: string }>) {
+    return {
+      status: 'ok',
+      uptime_seconds: 1,
+      messages_total: 0,
+      whatsapp: {
+        connected: overrides?.connected ?? true,
+        connection: { state: overrides?.state ?? 'connected' },
+      },
+      sqlite: { messages_total: 0, schema_version: 5 },
+    } as LineInstance['health'];
+  }
+
+  it('counts a degraded-but-connected line as connected (transport up) AND needing attention', () => {
+    const result = computeKpis([
+      makeLine({ status: 'degraded', stale: false, health: connectedHealth() }),
+    ]);
+    // Transport is up -> connected, even though health-state is degraded.
+    expect(result.connected).toBe(1);
+    // Health-state is still degraded -> the two dimensions are separate.
+    expect(result.needAttention).toBe(1);
+  });
+
+  it('does NOT count a degraded-and-disconnected line as connected', () => {
+    const result = computeKpis([
+      makeLine({
+        status: 'degraded',
+        stale: false,
+        health: connectedHealth({ connected: false, state: 'disconnected' }),
+      }),
+    ]);
+    expect(result.connected).toBe(0);
+    expect(result.needAttention).toBe(1);
+  });
+
+  it('treats a stale carried-forward connectivity body as unknown, not connected', () => {
+    const result = computeKpis([
+      // Stale + degraded but the carried-forward body still says connected:
+      // must NOT count (the fresh transport signal is unavailable).
+      makeLine({ status: 'degraded', stale: true, health: connectedHealth() }),
+    ]);
+    expect(result.connected).toBe(0);
+    expect(result.staleExcluded).toBe(1);
+  });
+
+  it('treats an unreachable line with stale last-known connectivity as unknown, not connected', () => {
+    const result = computeKpis([
+      // #1881 acceptance case: service is currently unreachable, so its LAST
+      // known health body (carried forward, connected) is not a fresh transport
+      // signal. It counts as unknown (excluded from connected), not disconnected.
+      makeLine({ status: 'unreachable', stale: true, health: connectedHealth() }),
+    ]);
+    expect(result.connected).toBe(0);
+    expect(result.needAttention).toBe(1);
+    expect(result.staleExcluded).toBe(1);
+  });
+
+  it('does NOT count a degraded line with missing health data as connected', () => {
+    const result = computeKpis([
+      makeLine({ status: 'degraded', stale: false, health: null }),
+    ]);
+    expect(result.connected).toBe(0);
+  });
+
+  it('counts an online+connected line once (branches do not double-count)', () => {
+    const result = computeKpis([
+      makeLine({ status: 'online', stale: false, health: connectedHealth() }),
+    ]);
+    expect(result.connected).toBe(1);
+  });
 });

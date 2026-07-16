@@ -87,9 +87,16 @@ const Metrics: FC = () => {
     [fleetMetrics?.tokenUsage],
   );
 
-  // Online count reuses computeKpis' `connected` (status === 'online') so the
-  // figure can never drift from the Fleet view's "Lines Connected" KPI.
-  const onlineCount = kpis.connected;
+  // "Lines Online" is a HEALTH-STATE count (status === 'online') — a separate
+  // dimension from the Fleet view's transport-state "Lines Connected" KPI
+  // (kpis.connected, which since #1881 also counts degraded-but-connected
+  // lines). Deriving it directly from status keeps the "Online" label truthful
+  // and decoupled from transport connectivity; the two figures legitimately
+  // differ when a line is degraded but its WhatsApp transport is still up.
+  const onlineCount = useMemo(
+    () => lines.filter((l) => l.status === "online").length,
+    [lines],
+  );
 
   const meta = fleetMetrics?.meta;
   const instancesFailed = meta?.instancesFailed ?? 0;

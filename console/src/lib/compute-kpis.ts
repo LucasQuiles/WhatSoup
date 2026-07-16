@@ -1,6 +1,35 @@
 import type { LineInstance } from '../types';
 import { statusNeedsAttention } from './status-severity';
 
+/**
+ * Whether a line's WhatsApp TRANSPORT is up (#1881). This is transport
+ * connectivity, a separate dimension from control-plane health-state: a
+ * `degraded` line whose transport is genuinely connected (e.g. recent-
+ * disconnect churn — src/core/health.ts marks `degraded` while
+ * `whatsapp.connected === true` and `connection.state === 'connected'`) is
+ * still a working transport and must count as connected.
+ *
+ * The predicate is the UNION of two branches:
+ *   (a) health-state `online` — kept visible through an outage (#1762 rem-1),
+ *       so it counts regardless of staleness. `online ⊆ connected` because the
+ *       poller cannot classify a line online while its transport is down.
+ *   (b) a FRESH transport-up signal (`whatsapp.connected === true` AND
+ *       `connection.state === 'connected'`) on a non-stale line. A stale,
+ *       carried-forward connectivity body is UNKNOWN — not connected — which
+ *       mirrors how the body-derived unread/agentSessions counts are gated on
+ *       `stale` (#1762 rem-2). This keeps stale/unavailable signals out of the
+ *       count rather than miscounting them as connected or as disconnected.
+ *
+ * Shared with the Fleet "Connected" filter (SoupKitchen) so the KPI count and
+ * the filtered row set stay identical.
+ */
+export function isLineConnected(line: LineInstance): boolean {
+  if (line.status === 'online') return true;
+  if (line.stale) return false;
+  const wa = line.health?.whatsapp;
+  return wa?.connected === true && wa.connection?.state === 'connected';
+}
+
 export function computeKpis(lines: LineInstance[]): {
   connected: number;
   needAttention: number;
@@ -27,10 +56,13 @@ export function computeKpis(lines: LineInstance[]): {
   let staleExcluded = 0;
 
   for (const line of lines) {
-    // Status-derived KPIs stay visible through an outage (#1762 rem-1: the
-    // poller degrades confidence rather than hiding status). Count them for
-    // every instance, stale or not.
-    if (line.status === 'online') connected++;
+    // Transport connectivity (#1881): count a line as connected when its
+    // WhatsApp transport is up, which includes a degraded-but-connected line —
+    // not only `status === 'online'`. See isLineConnected for the branches and
+    // the stale-gate rationale. Status-derived KPIs stay visible through an
+    // outage (#1762 rem-1: the poller degrades confidence rather than hiding
+    // status).
+    if (isLineConnected(line)) connected++;
     if (statusNeedsAttention(line.status) || line.error) {
       needAttention++;
     }
