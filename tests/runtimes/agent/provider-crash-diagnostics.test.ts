@@ -28,6 +28,37 @@ describe('provider crash diagnostics', () => {
     expect(text).not.toContain(secretValue);
   });
 
+  it('redacts dynamic OpenCode permission patterns and classifies unattended rejection', () => {
+    const privatePattern = '/workspace/private/.config/opencode/credentials.json';
+    const text = sanitizeProviderCrashText(
+      `permission requested: ${privatePattern}; auto-rejecting`,
+    );
+
+    expect(text).toBe(
+      'permission requested: [REDACTED_PERMISSION_PATTERN]; auto-rejecting',
+    );
+    expect(text).not.toContain(privatePattern);
+    expect(text).not.toContain('/workspace/private');
+    expect(classifyProviderCrash(text)).toBe('provider_permission_denied');
+  });
+
+  it('redacts an OpenCode permission pattern before a split auto-reject suffix arrives', () => {
+    const privatePattern = '/workspace/private/.config/opencode/credentials.json';
+    const preview1 = appendProviderCrashPreview(
+      '',
+      `permission requested: ${privatePattern}`,
+    );
+
+    expect(preview1).toBe('permission requested: [REDACTED_PERMISSION_PATTERN]');
+    expect(preview1).not.toContain(privatePattern);
+
+    const preview2 = appendProviderCrashPreview(preview1, '; auto-rejecting');
+    expect(preview2).toBe(
+      'permission requested: [REDACTED_PERMISSION_PATTERN]; auto-rejecting',
+    );
+    expect(classifyProviderCrash(preview2)).toBe('provider_permission_denied');
+  });
+
   it('QR-112: redacts a secret that straddles a stderr chunk boundary', () => {
     // Anthropic-style key; split so the FIRST chunk holds only `sk-a` (too short
     // to match the >=12-char token rule) and the SECOND chunk completes it. The

@@ -95,6 +95,10 @@ vi.mock('../../../src/runtimes/agent/providers/binary-preflight.ts', () => ({
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
+import type {
+  MarkSystemTurnInput,
+  SystemTurnLeaseToken,
+} from '../../../src/runtimes/agent/pending-system-result-tracker.ts';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -152,15 +156,34 @@ function makeFakeQueue(chatJid = 'chat@s.whatsapp.net') {
   };
 }
 
+function makeEventSession() {
+  return {
+    clearTurnWatchdog: vi.fn(),
+    completeProviderTurn: vi.fn(),
+    getDbRowId: vi.fn(() => null),
+    getProviderId: vi.fn(() => 'claude-cli'),
+    getStatus: vi.fn(() => ({ active: true })),
+    bindGenerationOwnership: vi.fn(),
+    sendTurn: vi.fn(async () => {}),
+    shutdown: vi.fn(async () => {}),
+    tickWatchdog: vi.fn(),
+    trackToolStart: vi.fn(),
+    trackToolEnd: vi.fn(),
+  };
+}
+
 /** Bracket-access view of private runtime state. */
 type RuntimeView = {
   // Maps used by handleEventPerChat
   chatQueues: Map<string, unknown>;
   chatSessions: Map<string, unknown>;
   perChatInboundSeqQueue: Map<string, number[]>;
-  pendingSystemResults: { counts: Map<string, number> };
+  pendingSystemResults: {
+    mark(input: MarkSystemTurnInput): SystemTurnLeaseToken;
+  };
   pendingTurnText: Map<string, string>;
   pendingTurnActorJid: Map<string, string | undefined>;
+  sessionEventToolScopes: WeakMap<object, string>;
   // Singleton replay state
   currentTurnReplayText: string | null;
   currentTurnReplayActorJid: string | undefined;
@@ -169,10 +192,14 @@ type RuntimeView = {
   turnHadVisibleOutput: boolean;
   consecutivePrimaryEmptyTurns: number;
   // Methods
-  handleEventPerChat(mapKey: string, event: unknown, toolScopeKey: string): void;
-  handleEvent(event: unknown): void;
+  handleEventPerChat(sourceSession: object, event: unknown, toolScopeKey: string): void;
+  handleEvent(sourceSession: object, event: unknown): void;
   replayTurnOnFallback(args: unknown): Promise<void>;
   activateProviderFallback(resetAt: Date | null, reason?: string): unknown;
+  setOwnedPerChatSession(mapKey: string, session: object): void;
+  managerIdFor(session: object): string;
+  captureSystemTurnOwner(session: object, scopeKey: string): MarkSystemTurnInput['owner'];
+  publishLegacyProviderTurn(session: object, scopeKey: string, routeChatJid: string): unknown;
 };
 
 function v(runtime: AgentRuntime): RuntimeView {
@@ -210,9 +237,12 @@ describe('per_chat empty-output fallback — replay sees pendingTurnText', () =>
 
     const mapKey = 'chat@s.whatsapp.net';
     const queue = makeFakeQueue(mapKey);
+    const session = makeEventSession();
+    const toolScopeKey = `${mapKey}#test`;
 
-    // Wire up the per-chat queue and a minimal inbound-seq queue (no session
-    // needed — handleEventPerChat falls through to null session fine).
+    // Wire the exact current source generation and registered event scope.
+    rv.setOwnedPerChatSession(mapKey, session);
+    rv.sessionEventToolScopes.set(session, toolScopeKey);
     rv.chatQueues.set(mapKey, queue);
     rv.perChatInboundSeqQueue.set(mapKey, [1, 2]);
 
@@ -223,10 +253,11 @@ describe('per_chat empty-output fallback — replay sees pendingTurnText', () =>
 
     // Drive THRESHOLD - 1 empty turns: below threshold, no arm yet.
     for (let i = 0; i < THRESHOLD - 1; i++) {
-      rv.handleEventPerChat(mapKey, { type: 'result', text: null }, mapKey);
+      rv.publishLegacyProviderTurn(session, mapKey, mapKey);
+      rv.handleEventPerChat(session, { type: 'result', text: null }, toolScopeKey);
     }
     expect(rv.replayTurnOnFallback).not.toHaveBeenCalled();
-    // The completed unowned turn must release its replay/eviction latch after
+    // The completed turn must release its replay/eviction latch after
     // the handler has had a chance to inspect it for fallback activation.
     expect(rv.pendingTurnText.has(mapKey)).toBe(false);
     expect(rv.pendingTurnActorJid.has(mapKey)).toBe(false);
@@ -237,7 +268,8 @@ describe('per_chat empty-output fallback — replay sees pendingTurnText', () =>
     rv.pendingTurnActorJid.set(mapKey, 'user@s.whatsapp.net');
 
     // Drive the THRESHOLD-th empty turn: this must arm the fallback AND replay.
-    rv.handleEventPerChat(mapKey, { type: 'result', text: null }, mapKey);
+    rv.publishLegacyProviderTurn(session, mapKey, mapKey);
+    rv.handleEventPerChat(session, { type: 'result', text: null }, toolScopeKey);
 
     // Allow the void promise chain inside scheduleFallbackReplay to settle
     // without advancing unrelated fallback recovery timers.
@@ -264,6 +296,10 @@ describe('per_chat empty-output fallback — replay sees pendingTurnText', () =>
 
     const mapKey = 'chat@s.whatsapp.net';
     const queue = makeFakeQueue(mapKey);
+    const session = makeEventSession();
+    const toolScopeKey = `${mapKey}#test`;
+    rv.setOwnedPerChatSession(mapKey, session);
+    rv.sessionEventToolScopes.set(session, toolScopeKey);
     rv.chatQueues.set(mapKey, queue);
     rv.perChatInboundSeqQueue.set(mapKey, [1]);
 
@@ -273,7 +309,12 @@ describe('per_chat empty-output fallback — replay sees pendingTurnText', () =>
 
     // A result with real visible text: the delete guard (event.text && fallbackReason === null)
     // must be satisfied, so the entry is removed after the turn completes.
-    rv.handleEventPerChat(mapKey, { type: 'result', text: 'Here is my answer!' }, mapKey);
+    rv.publishLegacyProviderTurn(session, mapKey, mapKey);
+    rv.handleEventPerChat(
+      session,
+      { type: 'result', text: 'Here is my answer!' },
+      toolScopeKey,
+    );
 
     expect(rv.pendingTurnText.has(mapKey)).toBe(false);
     expect(rv.pendingTurnActorJid.has(mapKey)).toBe(false);
@@ -284,13 +325,26 @@ describe('per_chat empty-output fallback — replay sees pendingTurnText', () =>
     const rv = v(runtime);
 
     const mapKey = 'chat@s.whatsapp.net';
+    const session = makeEventSession();
+    const toolScopeKey = `${mapKey}#test`;
+    rv.setOwnedPerChatSession(mapKey, session);
+    rv.sessionEventToolScopes.set(session, toolScopeKey);
     rv.chatQueues.set(mapKey, makeFakeQueue(mapKey));
     rv.perChatInboundSeqQueue.set(mapKey, [1]);
     rv.pendingTurnText.set(mapKey, 'Pending user turn');
     rv.pendingTurnActorJid.set(mapKey, 'user@s.whatsapp.net');
-    rv.pendingSystemResults.counts.set(mapKey, 1);
+    rv.pendingSystemResults.mark({
+      scopeKey: mapKey,
+      purpose: 'fresh_session_context',
+      owner: rv.captureSystemTurnOwner(session, mapKey),
+      routeChatJid: mapKey,
+    });
 
-    rv.handleEventPerChat(mapKey, { type: 'result', text: 'Context restored' }, mapKey);
+    rv.handleEventPerChat(
+      session,
+      { type: 'result', text: 'Context restored' },
+      toolScopeKey,
+    );
 
     expect(rv.pendingTurnText.get(mapKey)).toBe('Pending user turn');
     expect(rv.pendingTurnActorJid.get(mapKey)).toBe('user@s.whatsapp.net');
@@ -304,7 +358,11 @@ describe('per_chat empty-output fallback — replay sees pendingTurnText', () =>
 
     // Singleton uses handleEvent and currentTurnReplayText — not pendingTurnText.
     const singletonQueue = makeFakeQueue('chat@s.whatsapp.net');
+    const session = makeEventSession();
     rv.queue = singletonQueue;
+    rv.session = session;
+    rv.managerIdFor(session);
+    rv.sessionEventToolScopes.set(session, '__global__');
     rv.turnHadVisibleOutput = false;
 
     const turnText = 'Please answer my question';
@@ -313,7 +371,8 @@ describe('per_chat empty-output fallback — replay sees pendingTurnText', () =>
 
     // Drive THRESHOLD - 1 empty singleton turns.
     for (let i = 0; i < THRESHOLD - 1; i++) {
-      rv.handleEvent({ type: 'result', text: null });
+      rv.publishLegacyProviderTurn(session, '__global__', singletonQueue.targetChatJid);
+      rv.handleEvent(session, { type: 'result', text: null });
       // Repopulate for next turn (handleEvent clears after arming).
       rv.currentTurnReplayText = turnText;
       rv.turnHadVisibleOutput = false;
@@ -321,7 +380,8 @@ describe('per_chat empty-output fallback — replay sees pendingTurnText', () =>
     expect(rv.replayTurnOnFallback).not.toHaveBeenCalled();
 
     // Drive the threshold turn.
-    rv.handleEvent({ type: 'result', text: null });
+    rv.publishLegacyProviderTurn(session, '__global__', singletonQueue.targetChatJid);
+    rv.handleEvent(session, { type: 'result', text: null });
     await Promise.resolve();
 
     expect(rv.replayTurnOnFallback).toHaveBeenCalledTimes(1);

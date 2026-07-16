@@ -1,168 +1,358 @@
+/** Runtime policy carried by an in-flight non-user provider request. */
+export type SystemTurnPurpose =
+  | 'auto_compact_silent'
+  | 'proactive_resume_context'
+  | 'proactive_resume_continuation'
+  | 'fresh_session_context'
+  | 'poll_answer_continuation'
+  | 'manual_compact_silent'
+  | 'manual_compact_notice'
+  | 'respawn_context'
+  | 'respawn_continuation'
+  | 'resume_failure_context';
+
+export interface PendingSystemTurnOwner {
+  readonly managerId: string;
+  readonly generation: number;
+  readonly toolScopeKey: string;
+}
+
+export interface SystemTurnLeaseToken {
+  readonly id: number;
+  readonly scopeKey: string;
+}
+
+export interface PendingSystemTurnSnapshot {
+  readonly lease: SystemTurnLeaseToken;
+  readonly purpose: SystemTurnPurpose;
+  readonly owner: PendingSystemTurnOwner | null;
+  readonly routeChatJid?: string;
+  readonly blocking: boolean;
+}
+
+export interface MarkSystemTurnInput {
+  readonly scopeKey: string;
+  readonly purpose: SystemTurnPurpose;
+  readonly owner: PendingSystemTurnOwner;
+  readonly routeChatJid?: string;
+  /** Absolute wall deadline measured from mark(), independent of later activity. */
+  readonly timeoutMs?: number;
+  /** Return true only after the timed-out provider request has been torn down. */
+  readonly onTimeout?: (lease: SystemTurnLeaseToken) => Promise<boolean>;
+}
+
+interface MutableSystemTurnLease {
+  readonly lease: SystemTurnLeaseToken;
+  readonly purpose: SystemTurnPurpose;
+  readonly owner: PendingSystemTurnOwner | null;
+  readonly routeChatJid?: string;
+  blocking: boolean;
+  deadlineTimer: ReturnType<typeof setTimeout> | null;
+}
+
+interface Waiter {
+  readonly ownLeaseId: number | null;
+  readonly maxPending: number | null;
+  readonly requireEmpty: boolean;
+  readonly resolve: () => void;
+}
+
 /**
- * PendingSystemResultTracker — per-scope counter of in-flight "system" turns
- * (context injection, continuation, auto-compact /compact) whose result events
- * must NOT consume a user inbound seq.
- *
- * Extracted from AgentRuntime as a god-class slice. Owns the per-scope counter map
- * and the small set of invariants around it:
- *   - mark: a system turn is about to fire (increment).
- *   - unmark: a system turn's send failed and no result will arrive — reverse the
- *     increment so a later genuine user-turn result is not misclassified as a
- *     system result. Floored at zero so the counter never goes negative.
- *   - consumeIfPending: a result arrived; if a system turn is outstanding, consume
- *     one (it belongs to that system turn) and report true, else report false (the
- *     result belongs to a user turn).
- *   - releaseBlockingMark: a timed-out system turn stops blocking later dispatch,
- *     but keeps its FIFO classification slot until its late result arrives.
- *   - count: peek without consuming (used by the auto-compact next-turn gate, which
- *     only measures genuine user turns).
- *
- * The raw `counts` map is exposed (public readonly) so AgentRuntime's per-chat
- * cleanup / shutdown can drop or clear entries in line with the other per-chat
- * maps, mirroring the ImageCoalescer.buffers pattern. See the system-result coverage
- * in tests/runtimes/agent/runtime.test.ts and fallback-empty-turn.test.ts
- * (system-result suppression on result/token_usage, GLOBAL-scope shared-mode path,
- * unmark-on-send-failure, cleanup).
+ * Per-scope FIFO of provider results belonging to explicit system requests.
+ * Every live lease remains both dispatch-blocking and result-classifying. A
+ * deadline cancels its exact lease only after provider teardown is proven.
  */
 export class PendingSystemResultTracker {
-  /**
-   * scopeKey → count of outstanding system turns. Public readonly so AgentRuntime's
-   * cleanupPerChatState / shutdown can delete/clear entries alongside the sibling
-   * per-chat maps; all increment/decrement logic goes through the methods below.
-   */
+  /** Compatibility/read-only count view. Event admission never trusts it. */
   readonly counts = new Map<string, number>();
-  private readonly blockingCounts = new Map<string, number>();
-  private readonly releasedResultCounts = new Map<string, number>();
-  private readonly waiters = new Map<string, Set<{ maxPending: number; resolve: () => void }>>();
+  private readonly leases = new Map<string, MutableSystemTurnLease[]>();
+  /** Current scope for each exact token; survives a LID-to-canonical rekey. */
+  private readonly leaseScopes = new Map<number, string>();
+  private readonly waiters = new Map<string, Set<Waiter>>();
+  private nextLeaseId = 1;
 
-  private settleEligibleWaiters(scopeKey: string): void {
-    const waiters = this.waiters.get(scopeKey);
-    if (!waiters) return;
-    const pending = this.blockingCount(scopeKey);
-    for (const waiter of waiters) {
-      if (pending > waiter.maxPending) continue;
-      waiters.delete(waiter);
-      waiter.resolve();
+  mark(input: MarkSystemTurnInput): SystemTurnLeaseToken;
+  /** Compatibility overload for characterization tests; it carries no owner. */
+  mark(scopeKey: string | undefined, purpose?: SystemTurnPurpose): SystemTurnLeaseToken | null;
+  mark(
+    inputOrScopeKey: MarkSystemTurnInput | string | undefined,
+    compatibilityPurpose: SystemTurnPurpose = 'fresh_session_context',
+  ): SystemTurnLeaseToken | null {
+    if (inputOrScopeKey === undefined) return null;
+    const input: MarkSystemTurnInput | null = typeof inputOrScopeKey === 'string'
+      ? null
+      : inputOrScopeKey;
+    const scopeKey = typeof inputOrScopeKey === 'string'
+      ? inputOrScopeKey
+      : inputOrScopeKey.scopeKey;
+    const lease = Object.freeze({ id: this.nextLeaseId++, scopeKey });
+    const queue = this.leases.get(scopeKey) ?? [];
+    const entry: MutableSystemTurnLease = {
+      lease,
+      purpose: input?.purpose ?? compatibilityPurpose,
+      owner: input?.owner ? Object.freeze({ ...input.owner }) : null,
+      ...(input?.routeChatJid !== undefined ? { routeChatJid: input.routeChatJid } : {}),
+      blocking: true,
+      deadlineTimer: null,
+    };
+    queue.push(entry);
+    this.leases.set(scopeKey, queue);
+    this.leaseScopes.set(lease.id, scopeKey);
+    this.counts.set(scopeKey, queue.length);
+    if (input?.timeoutMs !== undefined && input.onTimeout !== undefined) {
+      this.armDeadline(entry, input.timeoutMs, input.onTimeout);
     }
-    if (waiters.size === 0) this.waiters.delete(scopeKey);
+    return lease;
   }
 
-  /** A system turn is about to fire for this scope — increment. No-op for undefined. */
-  mark(scopeKey: string | undefined): void {
-    if (scopeKey === undefined) return;
-    this.counts.set(scopeKey, (this.counts.get(scopeKey) ?? 0) + 1);
-    this.blockingCounts.set(scopeKey, this.blockingCount(scopeKey) + 1);
-  }
-
-  /**
-   * Reverse a mark when the system turn's send failed and no result event will
-   * arrive. Guarded so the counter never goes negative. No-op for undefined.
-   */
-  unmark(scopeKey: string | undefined): void {
-    if (scopeKey === undefined) return;
-    const pending = this.counts.get(scopeKey) ?? 0;
-    if (pending > 0) this.counts.set(scopeKey, pending - 1);
-    const blocking = this.blockingCount(scopeKey);
-    if (blocking > 0) {
-      this.blockingCounts.set(scopeKey, blocking - 1);
-    } else {
-      const released = this.releasedResultCounts.get(scopeKey) ?? 0;
-      if (released > 0) this.releasedResultCounts.set(scopeKey, released - 1);
-    }
-    this.settleEligibleWaiters(scopeKey);
-  }
-
-  /** Outstanding system-turn count for this scope (peek; does not consume). */
   count(scopeKey: string): number {
     return this.counts.get(scopeKey) ?? 0;
   }
 
-  /** Outstanding system turns that still block dispatch of a following turn. */
   blockingCount(scopeKey: string): number {
-    return this.blockingCounts.get(scopeKey) ?? 0;
+    return this.leases.get(scopeKey)?.filter((lease) => lease.blocking).length ?? 0;
   }
 
-  /**
-   * Release the oldest system turn as a dispatch barrier while retaining its
-   * result-classification slot. FIFO result consumption removes that released
-   * slot before touching any later blocking mark.
-   */
-  releaseBlockingMark(scopeKey: string): void {
-    const blocking = this.blockingCount(scopeKey);
-    if (blocking === 0) return;
-    this.blockingCounts.set(scopeKey, blocking - 1);
-    this.releasedResultCounts.set(
-      scopeKey,
-      (this.releasedResultCounts.get(scopeKey) ?? 0) + 1,
-    );
-    this.settleEligibleWaiters(scopeKey);
+  peek(scopeKey: string): PendingSystemTurnSnapshot | null {
+    const current = this.leases.get(scopeKey)?.[0];
+    return current ? this.snapshot(current) : null;
   }
 
-  /** Cancel a previously released result slot without touching newer blocking marks. */
-  unmarkReleased(scopeKey: string): boolean {
-    const released = this.releasedResultCounts.get(scopeKey) ?? 0;
-    if (released === 0) return false;
-    this.releasedResultCounts.set(scopeKey, released - 1);
-    const pending = this.count(scopeKey);
-    if (pending > 0) this.counts.set(scopeKey, pending - 1);
+  /** Compatibility projection. New admission uses peek() and verifies owner. */
+  peekPurpose(scopeKey: string): SystemTurnPurpose | null {
+    return this.peek(scopeKey)?.purpose ?? null;
+  }
+
+  /** Consume only when the supplied exact lease is still the FIFO head. */
+  consumeResult(lease: SystemTurnLeaseToken): PendingSystemTurnSnapshot | null {
+    const scopeKey = this.leaseScopes.get(lease.id) ?? lease.scopeKey;
+    const queue = this.leases.get(scopeKey);
+    const current = queue?.[0];
+    if (!current || current.lease.id !== lease.id) return null;
+    this.clearDeadline(current);
+    queue!.shift();
+    this.leaseScopes.delete(lease.id);
+    this.updateScopeAfterMutation(scopeKey, queue!);
+    return this.snapshot(current);
+  }
+
+  /** Compatibility consumer used by older result-handler tests. */
+  consumePurposeIfPending(scopeKey: string): SystemTurnPurpose | null {
+    const current = this.peek(scopeKey);
+    if (!current) return null;
+    return this.consumeResult(current.lease)?.purpose ?? null;
+  }
+
+  /** Compatibility boolean wrapper; direct counter mutation grants no typed owner. */
+  consumeIfPending(scopeKey: string): boolean {
+    const current = this.peek(scopeKey);
+    if (current) return this.consumeResult(current.lease) !== null;
+    const compatibilityCount = this.counts.get(scopeKey) ?? 0;
+    if (compatibilityCount === 0) return false;
+    this.counts.set(scopeKey, compatibilityCount - 1);
     this.settleEligibleWaiters(scopeKey);
     return true;
   }
 
+  /** Remove one exact request whether it is blocking or timeout-released. */
+  cancel(lease: SystemTurnLeaseToken | null | undefined): boolean {
+    if (!lease) return false;
+    const scopeKey = this.leaseScopes.get(lease.id) ?? lease.scopeKey;
+    const queue = this.leases.get(scopeKey);
+    const index = queue?.findIndex((candidate) => candidate.lease.id === lease.id) ?? -1;
+    if (index < 0) return false;
+    this.clearDeadline(queue![index]!);
+    queue!.splice(index, 1);
+    this.leaseScopes.delete(lease.id);
+    this.updateScopeAfterMutation(scopeKey, queue!);
+    return true;
+  }
+
   /**
-   * A result arrived for this scope. If a system turn is outstanding, consume one
-   * and return true (the result belongs to that system turn, not a user turn);
-   * otherwise return false.
+   * A user dispatch waits for every blocking lease. A system sender carrying its
+   * own lease waits only for blocking entries ahead of that exact lease.
    */
-  consumeIfPending(scopeKey: string): boolean {
-    const pending = this.counts.get(scopeKey) ?? 0;
-    if (pending > 0) {
-      this.counts.set(scopeKey, pending - 1);
-      const released = this.releasedResultCounts.get(scopeKey) ?? 0;
-      if (released > 0) {
-        this.releasedResultCounts.set(scopeKey, released - 1);
-      } else {
-        const blocking = this.blockingCount(scopeKey);
-        if (blocking > 0) this.blockingCounts.set(scopeKey, blocking - 1);
-      }
-      this.settleEligibleWaiters(scopeKey);
-      return true;
-    }
-    return false;
-  }
-
-  /** Wait until every blocking system turn has a result, failed send, or explicit timeout release. */
-  waitForDrain(scopeKey: string): Promise<void> {
-    return this.waitForCountAtMost(scopeKey, 0);
-  }
-
-  /** Wait while earlier system turns drain, allowing the caller's own existing mark. */
-  waitForCountAtMost(scopeKey: string, maxPending: number): Promise<void> {
-    if (this.blockingCount(scopeKey) <= maxPending) return Promise.resolve();
+  waitUntilDispatchable(
+    scopeKey: string,
+    ownLease?: SystemTurnLeaseToken,
+  ): Promise<void> {
+    if (this.isDispatchable(scopeKey, ownLease?.id ?? null)) return Promise.resolve();
     return new Promise<void>((resolve) => {
-      const waiters = this.waiters.get(scopeKey)
-        ?? new Set<{ maxPending: number; resolve: () => void }>();
-      waiters.add({ maxPending, resolve });
-      this.waiters.set(scopeKey, waiters);
+      const scopeWaiters = this.waiters.get(scopeKey) ?? new Set<Waiter>();
+      scopeWaiters.add({
+        ownLeaseId: ownLease?.id ?? null,
+        maxPending: null,
+        requireEmpty: false,
+        resolve,
+      });
+      this.waiters.set(scopeKey, scopeWaiters);
     });
   }
 
-  /** Drop one dead/replaced scope and release callers that were waiting on its old child. */
+  /** Compatibility wait used by existing collaborators. */
+  waitForDrain(scopeKey: string): Promise<void> {
+    return this.waitUntilDispatchable(scopeKey);
+  }
+
+  /** Wait until no classification lease remains, including nonblocking leases. */
+  waitUntilEmpty(scopeKey: string): Promise<void> {
+    if (this.count(scopeKey) === 0) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const scopeWaiters = this.waiters.get(scopeKey) ?? new Set<Waiter>();
+      scopeWaiters.add({
+        ownLeaseId: null,
+        maxPending: null,
+        requireEmpty: true,
+        resolve,
+      });
+      this.waiters.set(scopeKey, scopeWaiters);
+    });
+  }
+
+  /** Compatibility count threshold used only while callers migrate to leases. */
+  waitForCountAtMost(scopeKey: string, maxPending: number): Promise<void> {
+    if (this.blockingCount(scopeKey) <= maxPending) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const scopeWaiters = this.waiters.get(scopeKey) ?? new Set<Waiter>();
+      scopeWaiters.add({ ownLeaseId: null, maxPending, requireEmpty: false, resolve });
+      this.waiters.set(scopeKey, scopeWaiters);
+    });
+  }
+
   clearScope(scopeKey: string): void {
+    for (const entry of this.leases.get(scopeKey) ?? []) {
+      this.clearDeadline(entry);
+      this.leaseScopes.delete(entry.lease.id);
+    }
+    this.leases.delete(scopeKey);
     this.counts.delete(scopeKey);
-    this.blockingCounts.delete(scopeKey);
-    this.releasedResultCounts.delete(scopeKey);
-    this.settleEligibleWaiters(scopeKey);
+    const scopeWaiters = this.waiters.get(scopeKey);
+    this.waiters.delete(scopeKey);
+    for (const waiter of scopeWaiters ?? []) waiter.resolve();
   }
 
   clear(): void {
     for (const scopeKey of new Set([
+      ...this.leases.keys(),
       ...this.counts.keys(),
-      ...this.blockingCounts.keys(),
-      ...this.releasedResultCounts.keys(),
       ...this.waiters.keys(),
     ])) {
       this.clearScope(scopeKey);
     }
+  }
+
+  /**
+   * Atomically move one serialized provider lane to its canonical scope while
+   * retaining exact token identity for senders that still hold pre-rekey leases.
+   */
+  rekeyScope(fromScopeKey: string, toScopeKey: string): void {
+    if (fromScopeKey === toScopeKey) return;
+    const source = this.leases.get(fromScopeKey);
+    const sourceWaiters = this.waiters.get(fromScopeKey);
+    const hasSourceState = source !== undefined
+      || this.counts.has(fromScopeKey)
+      || sourceWaiters !== undefined;
+    if (!hasSourceState) return;
+    if (
+      this.leases.has(toScopeKey)
+      || this.counts.has(toScopeKey)
+      || this.waiters.has(toScopeKey)
+    ) {
+      throw new Error(`Cannot rekey system turns onto occupied scope "${toScopeKey}"`);
+    }
+    this.leases.delete(fromScopeKey);
+    this.counts.delete(fromScopeKey);
+    this.waiters.delete(fromScopeKey);
+    if (source !== undefined) {
+      this.leases.set(toScopeKey, source);
+      this.counts.set(toScopeKey, source.length);
+      for (const entry of source) this.leaseScopes.set(entry.lease.id, toScopeKey);
+    }
+    if (sourceWaiters !== undefined) this.waiters.set(toScopeKey, sourceWaiters);
+    this.settleEligibleWaiters(toScopeKey);
+  }
+
+  private isDispatchable(scopeKey: string, ownLeaseId: number | null): boolean {
+    const queue = this.leases.get(scopeKey) ?? [];
+    if (ownLeaseId === null) return queue.every((lease) => !lease.blocking);
+    const ownIndex = queue.findIndex((lease) => lease.lease.id === ownLeaseId);
+    if (ownIndex < 0) return queue.every((lease) => !lease.blocking);
+    return queue.slice(0, ownIndex).every((lease) => !lease.blocking);
+  }
+
+  private settleEligibleWaiters(scopeKey: string): void {
+    const scopeWaiters = this.waiters.get(scopeKey);
+    if (!scopeWaiters) return;
+    for (const waiter of [...scopeWaiters]) {
+      const eligible = waiter.requireEmpty
+        ? this.count(scopeKey) === 0
+        : waiter.maxPending === null
+          ? this.isDispatchable(scopeKey, waiter.ownLeaseId)
+          : this.blockingCount(scopeKey) <= waiter.maxPending;
+      if (!eligible) continue;
+      scopeWaiters.delete(waiter);
+      waiter.resolve();
+    }
+    if (scopeWaiters.size === 0) this.waiters.delete(scopeKey);
+  }
+
+  private updateScopeAfterMutation(
+    scopeKey: string,
+    queue: MutableSystemTurnLease[],
+  ): void {
+    if (queue.length === 0) {
+      this.leases.delete(scopeKey);
+      this.counts.set(scopeKey, 0);
+    } else {
+      this.counts.set(scopeKey, queue.length);
+    }
+    this.settleEligibleWaiters(scopeKey);
+  }
+
+  private armDeadline(
+    entry: MutableSystemTurnLease,
+    timeoutMs: number,
+    onTimeout: (lease: SystemTurnLeaseToken) => Promise<boolean>,
+  ): void {
+    const timer = setTimeout(() => {
+      entry.deadlineTimer = null;
+      void this.handleDeadline(entry, onTimeout);
+    }, timeoutMs);
+    timer.unref?.();
+    entry.deadlineTimer = timer;
+  }
+
+  private async handleDeadline(
+    entry: MutableSystemTurnLease,
+    onTimeout: (lease: SystemTurnLeaseToken) => Promise<boolean>,
+  ): Promise<void> {
+    if (!this.isLive(entry)) return;
+    try {
+      const teardownSucceeded = await onTimeout(entry.lease);
+      if (teardownSucceeded) this.cancel(entry.lease);
+    } catch {
+      // Fail closed: an unproven teardown retains both classification and blocking.
+    }
+  }
+
+  private isLive(entry: MutableSystemTurnLease): boolean {
+    const scopeKey = this.leaseScopes.get(entry.lease.id);
+    return scopeKey !== undefined && this.leases.get(scopeKey)?.includes(entry) === true;
+  }
+
+  private clearDeadline(entry: MutableSystemTurnLease): void {
+    if (entry.deadlineTimer === null) return;
+    clearTimeout(entry.deadlineTimer);
+    entry.deadlineTimer = null;
+  }
+
+  private snapshot(lease: MutableSystemTurnLease): PendingSystemTurnSnapshot {
+    return Object.freeze({
+      lease: lease.lease,
+      purpose: lease.purpose,
+      owner: lease.owner ? Object.freeze({ ...lease.owner }) : null,
+      ...(lease.routeChatJid !== undefined ? { routeChatJid: lease.routeChatJid } : {}),
+      blocking: lease.blocking,
+    });
   }
 }

@@ -75,7 +75,7 @@ function lifecycleRow(
   sessionId: string | null,
   status: string,
   conversationKey = CONVERSATION_KEY,
-  provider = 'claude-cli',
+  provider: string | null = 'claude-cli',
 ): number {
   const result = db.raw.prepare(
     `INSERT INTO agent_sessions (
@@ -84,6 +84,20 @@ function lifecycleRow(
      ) VALUES (?, 0, '/mock/home', ?, ?, datetime('now'), ?, ?)`,
   ).run(sessionId, CHAT_JID, conversationKey, status, provider);
   return Number(result.lastInsertRowid);
+}
+
+function resumeStateSnapshot(db: Database): unknown {
+  return {
+    agentSessions: db.raw.prepare(
+      `SELECT id, session_id, claude_pid, workspace_key, status, provider, ended_at
+       FROM agent_sessions ORDER BY id`,
+    ).all(),
+    checkpoints: db.raw.prepare(
+      `SELECT conversation_key, session_id, claude_pid, session_status,
+              checkpoint_version, updated_at
+       FROM session_checkpoints ORDER BY conversation_key`,
+    ).all(),
+  };
 }
 
 describe('SessionManager durable error lifecycle', () => {
@@ -246,6 +260,7 @@ describe('SessionManager durable error lifecycle', () => {
     if (rowId === null) throw new Error('spawn-per-turn session row was not created');
     await sm.sendTurn('hello');
     child.emit('exit', 7, null);
+    child.emit('close', 7, null);
     await new Promise((resolve) => setImmediate(resolve));
 
     expect(rowStatus(db, rowId)).toBe('crashed');
@@ -532,5 +547,123 @@ describe('SessionManager durable error lifecycle', () => {
     expect(args).toContain('--session');
     expect(args).toContain('opencode-resume-id');
     expect(rowStatus(db, rowId)).toBe('active');
+  });
+
+  it.each([
+    {
+      name: 'foreign provider row',
+      setup: (database: Database, engine: DurabilityEngine) => {
+        const rowId = lifecycleRow(
+          database,
+          'foreign-provider-resume',
+          'suspended',
+          CONVERSATION_KEY,
+          'opencode-cli',
+        );
+        engine.upsertSessionCheckpoint(CONVERSATION_KEY, {
+          sessionId: 'foreign-provider-resume',
+          sessionStatus: 'suspended',
+        });
+        return { rowId, sessionId: 'foreign-provider-resume' };
+      },
+    },
+    {
+      name: 'legacy null-provider persisted ID',
+      setup: (database: Database, engine: DurabilityEngine) => {
+        const rowId = lifecycleRow(
+          database,
+          'legacy-provider-resume',
+          'suspended',
+          CONVERSATION_KEY,
+          null,
+        );
+        engine.upsertSessionCheckpoint(CONVERSATION_KEY, {
+          sessionId: 'legacy-provider-resume',
+          sessionStatus: 'suspended',
+        });
+        return { rowId, sessionId: 'legacy-provider-resume' };
+      },
+    },
+    {
+      name: 'cross-provider duplicate opaque ID',
+      setup: (database: Database, engine: DurabilityEngine) => {
+        const rowId = lifecycleRow(
+          database,
+          'duplicate-provider-resume',
+          'suspended',
+          CONVERSATION_KEY,
+          'claude-cli',
+        );
+        lifecycleRow(
+          database,
+          'duplicate-provider-resume',
+          'orphaned',
+          CONVERSATION_KEY,
+          'opencode-cli',
+        );
+        engine.upsertSessionCheckpoint(CONVERSATION_KEY, {
+          sessionId: 'duplicate-provider-resume',
+          sessionStatus: 'suspended',
+        });
+        return { rowId, sessionId: 'duplicate-provider-resume' };
+      },
+    },
+    {
+      name: 'conversation mismatch',
+      setup: (database: Database, engine: DurabilityEngine) => {
+        const rowId = lifecycleRow(
+          database,
+          'conversation-provider-resume',
+          'suspended',
+          'different-conversation',
+          'claude-cli',
+        );
+        engine.upsertSessionCheckpoint('different-conversation', {
+          sessionId: 'conversation-provider-resume',
+          sessionStatus: 'suspended',
+        });
+        return { rowId, sessionId: 'conversation-provider-resume' };
+      },
+    },
+    {
+      name: 'missing exact checkpoint',
+      setup: (database: Database) => ({
+        rowId: lifecycleRow(
+          database,
+          'missing-checkpoint-resume',
+          'suspended',
+          CONVERSATION_KEY,
+          'claude-cli',
+        ),
+        sessionId: 'missing-checkpoint-resume',
+      }),
+    },
+  ])('rejects $name before child spawn and leaves persistence unchanged', async ({ setup }) => {
+    const { rowId, sessionId } = setup(db, durability);
+    const before = resumeStateSnapshot(db);
+    const child = makeChild(17120);
+    vi.mocked(spawn).mockReturnValue(child as never);
+    vi.mocked(killSessionTree).mockImplementationOnce(async () => {
+      child.exitCode = 1;
+      child.emit('exit', 1, 'SIGKILL');
+    });
+    const sm = new SessionManager({
+      db,
+      messenger: makeMessenger(),
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'claude-cli',
+    });
+    sm.setDurability(durability);
+
+    await expect(sm.spawnSession(sessionId, rowId)).rejects.toThrow(
+      /provider|ownership|ambiguous|resumable|conversation|checkpoint/i,
+    );
+
+    expect(spawn).not.toHaveBeenCalled();
+    expect(killSessionTree).not.toHaveBeenCalled();
+    expect(resumeStateSnapshot(db)).toEqual(before);
+    expect(sm.getStatus()).toMatchObject({ active: false, sessionId: null });
+    expect(sm.getDbRowId()).toBeNull();
   });
 });

@@ -81,6 +81,9 @@ const EXPECTED_FILE_SIZE_WARNING_FILES = [
   'tests/fleet/routes/feed.test.ts',
   'tests/fleet/routes/ops.test.ts',
   'tests/runtimes/agent/outbound-queue.test.ts',
+  // Hang-hardening regressions reuse this suite's shared agent-runtime harness;
+  // extracting them would duplicate the setup, so the cohesive suite is grandfathered.
+  'tests/runtimes/agent/runtime-edge-coverage.test.ts',
   'tests/runtimes/agent/runtime.test.ts',
   'tests/runtimes/agent/session.test.ts',
   'tests/runtimes/chat/providers/pinecone.test.ts',

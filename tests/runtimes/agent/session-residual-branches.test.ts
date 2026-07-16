@@ -61,6 +61,15 @@ vi.mock('node:fs', () => ({
 vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   createSession: vi.fn(() => 42),
   incrementMessageCount: vi.fn(),
+  resolveResumableAgentSession: vi.fn((
+    _db: unknown,
+    input: { provider: string; agentSessionRowId?: number; workspaceKey?: string },
+  ) => ({
+    id: input.agentSessionRowId ?? 42,
+    provider: input.provider,
+    workspace_key: input.workspaceKey ?? null,
+  })),
+  updateResumedSessionStatus: vi.fn(),
   updateSessionId: vi.fn(),
   updateSessionStatus: vi.fn(),
   updateTranscriptPath: vi.fn(),

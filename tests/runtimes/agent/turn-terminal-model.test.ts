@@ -91,6 +91,7 @@ describe('turn-finalization persistence mapping', () => {
     ['processor_throw', 'unknown'],
     ['crash', 'session_crash'],
     ['unknown_terminal', 'unknown'],
+    ['provider_stream_corrupt', 'provider_failure'],
   ] as const)(
     'keeps exact terminal class %s while mapping bounded inbound class',
     (failureClass, expected) => {

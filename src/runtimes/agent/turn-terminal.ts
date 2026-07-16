@@ -25,7 +25,7 @@ export type AttemptOutcome =
   | { readonly kind: 'completed' }
   | {
     readonly kind: 'failed';
-    readonly class: ProviderFailureKind | 'crash' | 'processor_throw' | 'unknown_terminal';
+    readonly class: ProviderFailureKind | 'crash' | 'processor_throw' | 'unknown_terminal' | 'provider_stream_corrupt';
   }
   | { readonly kind: 'suppressed_by_policy' }
   | {

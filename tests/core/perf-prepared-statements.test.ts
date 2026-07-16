@@ -102,8 +102,9 @@ describe('prepared statement caching', () => {
     // Insert a dummy agent_sessions row so insertTokenEvent FK constraint is satisfied.
     // Use exec (not prepare) to avoid triggering the prepareSpy.
     db.raw.exec(
-      `INSERT INTO agent_sessions (id, claude_pid, started_in_directory, started_at, status)
-       VALUES (999, 0, '/tmp', datetime('now'), 'active')`,
+      `INSERT INTO agent_sessions (
+         id, claude_pid, started_in_directory, started_at, status, provider
+       ) VALUES (999, 0, '/tmp', datetime('now'), 'active', 'claude-cli')`,
     );
     engine.completeTurn({
       sessionTokens: {
@@ -150,7 +151,11 @@ describe('prepared statement caching', () => {
     db.raw.exec(
       `UPDATE agent_sessions SET session_id = 'sess-1', status = 'active' WHERE id = 999`,
     );
-    engine.retireSessionLifecycle(999, 'sess-1');
+    engine.retireSessionLifecycle({
+      agentSessionRowId: 999,
+      providerSessionId: 'sess-1',
+      provider: 'claude-cli',
+    });
 
     expect(prepareSpy).not.toHaveBeenCalled();
   });
