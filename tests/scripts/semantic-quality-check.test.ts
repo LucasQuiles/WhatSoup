@@ -259,6 +259,40 @@ describe('semantic quality receipt', () => {
 });
 
 describe('semantic quality CLI', () => {
+  it('reports the delegation receipt export while its module remains production-reachable', () => {
+    const repo = initRepo();
+    writePolicy(repo);
+    write(repo, 'src/main.ts', `
+import { emitRouteEvent } from './runtimes/agent/route-events.ts';
+emitRouteEvent();
+`);
+    write(repo, 'src/runtimes/agent/route-events.ts', `
+export function emitRouteEvent(): void {}
+export function emitDelegationReceipt(): void {}
+`);
+    const head = commit(repo, 'reachable route events with orphaned delegation receipt');
+
+    const result = runCli(repo, [
+      '--scope', 'tree',
+      '--head', head,
+      '--mode', 'shadow',
+      '--format', 'json',
+      '--no-receipt',
+    ]);
+    const parsed = JSON.parse(result.stdout) as BoundaryReceipt;
+    const ownership = parsed.findings.find((finding) => finding.ruleId === 'semantic.export-ownership');
+
+    expect(result.status).toBe(0);
+    expect(parsed.decision).toBe('warn');
+    expect(parsed.findings).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ ruleId: 'semantic.production-reachability' }),
+    ]));
+    expect(ownership?.observed).toContainEqual({
+      label: 'unowned_export',
+      value: 'src/runtimes/agent/route-events.ts#emitDelegationReceipt',
+    });
+  });
+
   it('passes the wired current shape and blocks its historical disconnected shape', () => {
     const { repo, baseOid, disconnectedOid, integratedOid } = makeHistory();
 
