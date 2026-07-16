@@ -1044,6 +1044,38 @@ def _declares_best_effort(host_entry: dict) -> bool:
     )
 
 
+def _load_tracked_manifest(mod) -> dict:
+    """Load the checked-in SSOT manifest (deploy/bot-errors-expected-fleet.json)."""
+    return json.loads(
+        (mod.REPO_ROOT / "deploy" / "bot-errors-expected-fleet.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+
+def _best_effort_hosts(mod, fleet: dict) -> set[str]:
+    return {
+        mod._norm(h.get("host"))
+        for h in fleet.get("hosts", [])
+        if isinstance(h, dict) and _declares_best_effort(h)
+    }
+
+
+def _collector_membership(mod, fleet: dict) -> set[str]:
+    """Hosts the collector is declared (SSOT ``collectorRemote``) to remotely probe.
+
+    There is no collector function that maps a manifest to membership (the
+    collector's remotes come from CLI/env, not this file); ``collectorRemote`` is
+    the manifest's per-host SSOT for whether the collector treats a host as an
+    active remote. That is exactly the field the parity contract must agree with.
+    """
+    return {
+        mod._norm(h.get("host"))
+        for h in fleet.get("hosts", [])
+        if isinstance(h, dict) and h.get("collectorRemote") is True
+    }
+
+
 def test_policy_for_target_reads_best_effort(mod):
     # best_effort resolves to itself, NOT to None (the old unknown-value path).
     host = _host("gupta", policy="best_effort", instances=[_inst("clanka")])
@@ -1070,20 +1102,121 @@ def test_best_effort_overrides_launchagent_label(mod):
 def test_tracked_manifest_best_effort_row_not_reenrolled(mod):
     # Regression against the checked-in SSOT (deploy/bot-errors-expected-fleet.json):
     # every declared best_effort host must be absent from the GUI-session targets.
-    manifest = json.loads(
-        (mod.REPO_ROOT / "deploy" / "bot-errors-expected-fleet.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    best_effort_hosts = {
-        mod._norm(h.get("host"))
-        for h in manifest.get("hosts", [])
-        if isinstance(h, dict) and _declares_best_effort(h)
-    }
+    manifest = _load_tracked_manifest(mod)
+    best_effort_hosts = _best_effort_hosts(mod, manifest)
     assert best_effort_hosts, "tracked manifest should carry a best_effort row (#1874 fixture)"
     target_hosts = {t["host"] for t in mod.gui_targets_from_fleet(manifest)}
     overlap = best_effort_hosts & target_hosts
     assert not overlap, f"best_effort hosts re-enrolled as GUI targets: {overlap}"
+
+
+# ---------------------------------------------------------------------------
+# Test 20c: cross-monitor parity — collector and GUI-session membership must
+# AGREE for a best_effort host (both EXCLUDE it). The pre-fix defect re-enrolled
+# gupta into GUI-session monitoring while the collector (collectorRemote:false)
+# excluded it, so the two monitoring paths disagreed about the same declared
+# policy. Uses the tracked manifest row. Regression for #1874.
+# ---------------------------------------------------------------------------
+
+
+def test_cross_monitor_parity_best_effort_excluded_by_both(mod):
+    manifest = _load_tracked_manifest(mod)
+    best_effort = _best_effort_hosts(mod, manifest)
+    assert best_effort, "tracked manifest should carry a best_effort row (#1874 fixture)"
+
+    gui_members = {t["host"] for t in mod.gui_targets_from_fleet(manifest)}
+    collector_members = _collector_membership(mod, manifest)
+
+    gui_overlap = best_effort & gui_members
+    collector_overlap = best_effort & collector_members
+    assert not gui_overlap, f"GUI monitor enrolled best_effort host(s): {gui_overlap}"
+    assert not collector_overlap, f"collector enrolled best_effort host(s): {collector_overlap}"
+
+    # Parity: the two monitors must not disagree about the best_effort host —
+    # each membership's intersection with the best_effort set is empty (both exclude).
+    assert (best_effort & gui_members) == (best_effort & collector_members) == set()
+
+
+def test_cross_monitor_parity_holds_across_all_declared_policies(mod):
+    # No host may be simultaneously GUI-monitored AND declared best_effort — the
+    # exclusion is honored regardless of which monitor reads the manifest.
+    manifest = _load_tracked_manifest(mod)
+    gui_members = {t["host"] for t in mod.gui_targets_from_fleet(manifest)}
+    for host_entry in manifest.get("hosts", []):
+        if isinstance(host_entry, dict) and _declares_best_effort(host_entry):
+            host = mod._norm(host_entry.get("host"))
+            assert host not in gui_members, f"best_effort host still GUI-monitored: {host}"
+            assert host_entry.get("collectorRemote") is not True, (
+                f"best_effort host still an active collector remote: {host}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Test 20d: manifest validation rejects UNKNOWN guiSessionExpected policy
+# values. A typo'd / retired enum must fail config validation LOUDLY rather
+# than silently falling through to the fail-closed default and changing
+# monitor membership. A MISSING policy is NOT an error (that is the intended
+# fail-closed default). Regression for #1874 acceptance criterion.
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_policy_values_flags_host_level_typo(mod):
+    fleet = {"hosts": [
+        _host("botbox", role="bot-host", policy="alwys_aqua",  # typo
+              instances=[_inst("x-bot")]),
+    ]}
+    offenders = mod.unknown_policy_values(fleet)
+    assert [o["value"] for o in offenders] == ["alwys_aqua"]
+    assert offenders[0]["host"] == "botbox"
+
+
+def test_unknown_policy_values_flags_instance_level_typo(mod):
+    host = _host("botbox", role="bot-host", policy="always_aqua",
+                 instances=[_inst("special", policy="handless_ok")])  # typo
+    offenders = mod.unknown_policy_values({"hosts": [host]})
+    assert len(offenders) == 1
+    assert offenders[0]["value"] == "handless_ok"
+    assert offenders[0]["instance"] == "special"
+
+
+def test_unknown_policy_values_ignores_missing_policy(mod):
+    # Missing policy is the intended fail-closed default, NOT a validation error.
+    fleet = {"hosts": [_host("botbox", role="bot-host", policy=None,
+                             instances=[_inst("x-bot")])]}
+    assert mod.unknown_policy_values(fleet) == []
+
+
+def test_unknown_policy_values_accepts_every_known_policy(mod):
+    fleet = {"hosts": [
+        _host("a", policy="always_aqua", instances=[_inst("x")]),
+        _host("b", policy="headless_ok", instances=[_inst("y")]),
+        _host("c", policy="not_applicable", instances=[_inst("z")]),
+        _host("d", policy="best_effort", instances=[_inst("w")]),
+    ]}
+    assert mod.unknown_policy_values(fleet) == []
+
+
+def test_unknown_policy_values_clean_for_tracked_manifest(mod):
+    # CI-level guard: the checked-in SSOT must never carry an unknown policy value.
+    assert mod.unknown_policy_values(_load_tracked_manifest(mod)) == []
+
+
+def test_config_check_rejects_unknown_policy_value(mod, tmp_path, monkeypatch, capsys):
+    # A typo'd policy that would otherwise be silently re-enrolled by the
+    # fail-closed default must instead FAIL config_check loudly (exit 2).
+    fleet_file = tmp_path / "fleet-typo.json"
+    fleet_file.write_text(
+        '{"hosts":[{"host":"botbox","role":"bot-host","guiSessionExpected":"alwys_aqua",'
+        '"instances":[{"name":"x-bot","expected":"always_on","service":"com.whatsoup.x-bot"}]}]}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(mod, "fleet_path", lambda: fleet_file)
+    monkeypatch.delenv("BOT_ERRORS_EXPECTED_FLEET", raising=False)
+
+    assert mod.config_check() == 2
+    captured = capsys.readouterr()
+    assert "unknown guiSessionExpected policy value" in captured.err
+    assert "alwys_aqua" in captured.err
 
 
 # ---------------------------------------------------------------------------

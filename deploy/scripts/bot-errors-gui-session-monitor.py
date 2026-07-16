@@ -325,6 +325,48 @@ def policy_for_target(host_entry: dict, instance: dict):
     return None
 
 
+def unknown_policy_values(fleet: dict) -> list[dict]:
+    """Collect declared ``guiSessionExpected`` values that are not recognized.
+
+    A PRESENT-but-unrecognized policy (a typo or a retired enum) is a config
+    error: ``policy_for_target`` resolves it to ``None`` and it then silently
+    falls through to the fail-closed default in ``gui_targets_from_fleet``,
+    changing monitor membership without an auditable SSOT decision (the #1874
+    class of defect). A MISSING policy is NOT flagged — absence is the
+    intentional fail-closed default, not a typo.
+
+    Returns one record per offending declaration:
+    ``{"host": str, "instance": str | None, "value": str}`` (host-level
+    declarations carry ``instance=None``). Order is deterministic:
+    host-level first, then each instance in declaration order.
+    """
+    offenders: list[dict] = []
+    hosts = fleet.get("hosts")
+    if not isinstance(hosts, list):
+        return offenders
+    for host_entry in hosts:
+        if not isinstance(host_entry, dict):
+            continue
+        host = _norm(host_entry.get("host")) or "<unnamed-host>"
+        host_value = _norm(host_entry.get("guiSessionExpected"))
+        if host_value and host_value not in KNOWN_GUI_SESSION_POLICIES:
+            offenders.append({"host": host, "instance": None, "value": host_value})
+        instances = host_entry.get("instances")
+        if not isinstance(instances, list):
+            continue
+        for instance in instances:
+            if not isinstance(instance, dict):
+                continue
+            inst_value = _norm(instance.get("guiSessionExpected"))
+            if inst_value and inst_value not in KNOWN_GUI_SESSION_POLICIES:
+                offenders.append({
+                    "host": host,
+                    "instance": _norm(instance.get("name")) or None,
+                    "value": inst_value,
+                })
+    return offenders
+
+
 def gui_targets_from_fleet(fleet: dict) -> list[dict]:
     """Enumerate GUI-session monitor targets from the expected-fleet SSOT.
 
@@ -643,6 +685,19 @@ def config_check() -> int:
         return 2
     if not isinstance(data, dict):
         print(f"expected fleet file must contain a JSON object: {path}", file=sys.stderr)
+        return 2
+
+    unknown = unknown_policy_values(data)
+    if unknown:
+        detail = ", ".join(
+            f"{o['host']}" + (f"/{o['instance']}" if o["instance"] else "") + f"={o['value']!r}"
+            for o in unknown
+        )
+        print(
+            "expected fleet file declares unknown guiSessionExpected policy value(s): "
+            f"{detail}; known values: {sorted(KNOWN_GUI_SESSION_POLICIES)}: {path}",
+            file=sys.stderr,
+        )
         return 2
 
     private_override_error = private_override_contract_error(data)
