@@ -1785,6 +1785,83 @@ describe('OutboundQueue', () => {
     expect(calls).toHaveLength(callCountBefore); // no new message added
   });
 
+  it('suppresses an identical terminal result already streamed in the same turn', async () => {
+    mockLog.info.mockClear();
+    const { messenger, calls } = makeMessenger();
+    const durability = makeDurabilityStub();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(durability);
+    queue.setInboundSeq(41);
+
+    queue.enqueueStreamingText('Fleet check complete.');
+    queue.endTurn();
+    queue.enqueueResultText('Fleet check complete.');
+    await vi.runAllTimersAsync();
+
+    expect(calls).toEqual(['Fleet check complete.']);
+    expect(durability.createOutboundOp).toHaveBeenCalledTimes(1);
+    expect(mockLog.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourcePaths: ['assistant_text', 'result'],
+        payloadHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+      'suppressed duplicate same-turn final payload',
+    );
+    expect(JSON.stringify(mockLog.info.mock.calls)).not.toContain('Fleet check complete.');
+  });
+
+  it('suppresses a newline and outer-whitespace equivalent streamed result', async () => {
+    const { messenger, calls } = makeMessenger();
+    const durability = makeDurabilityStub();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(durability);
+
+    queue.enqueueStreamingText('Line one\r\n');
+    queue.enqueueStreamingText('Line two');
+    queue.endTurn();
+    queue.enqueueResultText('  Line one\nLine two\n');
+    await vi.runAllTimersAsync();
+
+    expect(calls).toEqual(['Line one\r\nLine two']);
+    expect(durability.createOutboundOp).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a distinct terminal result visible', async () => {
+    const { messenger, calls } = makeMessenger();
+    const durability = makeDurabilityStub();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(durability);
+
+    queue.enqueueStreamingText('First answer.');
+    queue.endTurn();
+    queue.enqueueResultText('Distinct follow-up.');
+    await vi.runAllTimersAsync();
+
+    expect(calls).toEqual(['First answer.', 'Distinct follow-up.']);
+    expect(durability.createOutboundOp).toHaveBeenCalledTimes(2);
+  });
+
+  it('allows the same answer in a later inbound turn', async () => {
+    const { messenger, calls } = makeMessenger();
+    const durability = makeDurabilityStub();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(durability);
+
+    queue.setInboundSeq(51);
+    queue.enqueueStreamingText('Repeatable answer.');
+    queue.endTurn();
+    queue.enqueueResultText('Repeatable answer.');
+    await vi.runAllTimersAsync();
+
+    queue.setInboundSeq(52);
+    queue.endTurn();
+    queue.enqueueResultText('Repeatable answer.');
+    await vi.runAllTimersAsync();
+
+    expect(calls).toEqual(['Repeatable answer.', 'Repeatable answer.']);
+    expect(durability.createOutboundOp).toHaveBeenCalledTimes(2);
+  });
+
   // ─── shouldShowMinimal: all switch branches ───────────────────────────────
 
   it('shouldShowMinimal: searching with "Checking my notes" prefix passes through in minimal mode', async () => {

@@ -339,6 +339,14 @@ export class OutboundQueue implements IOutboundQueue {
   private lastSubmittedTextDedupeKey: string | undefined;
   /** Recent terminal text sends. Only terminalized text can suppress a later duplicate. */
   private readonly recentTerminalTextKeys = new Map<string, TerminalTextDedupeEntry>();
+  /** Answer payloads streamed during the active turn, retained as hashes only. */
+  private readonly activeStreamedAnswerPayloadHashes = new Set<string>();
+  /** Concatenated streamed answer text, needed to match providers whose result repeats the whole turn. */
+  private activeStreamedAnswerText = '';
+  /** Frozen streamed-answer hashes captured by endTurn before the terminal result is handled. */
+  private completedStreamedAnswerPayloadHashes = new Set<string>();
+  private completedStreamedTurnId: string | undefined;
+  private completedStreamSnapshotReady = false;
   /** Rendered progress-placeholder text → timestamp of last enqueue, for short-window coalescing. */
   private readonly recentProgressTextAt = new Map<string, number>();
   /**
@@ -497,6 +505,7 @@ export class OutboundQueue implements IOutboundQueue {
   }
 
   setInboundSeq(seq: number | undefined): void {
+    this.resetSameTurnFinalPayloadTracking();
     this.currentInboundSeq = seq;
   }
 
@@ -513,6 +522,7 @@ export class OutboundQueue implements IOutboundQueue {
     if (this.completedTurnEvidence?.turnId === turnId) {
       throw new Error(`Turn evidence for ${turnId} was already completed`);
     }
+    this.resetSameTurnFinalPayloadTracking();
     this.completedTurnEvidence = undefined;
     this.activeTurnEvidence = {
       turnId,
@@ -696,6 +706,7 @@ export class OutboundQueue implements IOutboundQueue {
    */
   enqueueStreamingText(text: string, role: OutboundMessageRole = 'answer'): void {
     if (!text) return;
+    if (role === 'answer') this.activeStreamedAnswerText += text;
     this.turnHasVisibleText = true;
     this.streamBufferParts.push({ text, ...this.snapshotAttribution(role) });
     this.startTyping();
@@ -719,6 +730,9 @@ export class OutboundQueue implements IOutboundQueue {
       const { text: _firstText, ...attribution } = group[0];
       const text = group.map((part) => part.text).join('');
       if (text.trim() !== '') {
+        if (attribution.role === 'answer') {
+          this.activeStreamedAnswerPayloadHashes.add(this.sameTurnFinalPayloadHash(text));
+        }
         this.enqueuePreparedText(text, attribution);
       }
       group = [];
@@ -741,6 +755,7 @@ export class OutboundQueue implements IOutboundQueue {
    */
   enqueueResultText(text: string, role: OutboundMessageRole = 'answer'): void {
     if (!text || text.trim() === '') return;
+    if (role === 'answer' && this.suppressDuplicateSameTurnFinalPayload(text)) return;
     if (this.toolUpdateMode === 'minimal' && this.turnHasVisibleText) {
       // Suppress — the user already got the real response during the turn
       return;
@@ -1032,6 +1047,7 @@ export class OutboundQueue implements IOutboundQueue {
     this.friendlyProgressSent.clear();
     this.recentProgressTextAt.clear();
     this.turnHasVisibleText = false;
+    this.resetSameTurnFinalPayloadTracking();
     this.stopTyping(false);
     // PR-E: crash path — reset per-turn status-cap state so the replacement/next
     // turn starts with a full budget (same reset as endTurn()).
@@ -1121,6 +1137,7 @@ export class OutboundQueue implements IOutboundQueue {
    */
   endTurn(): void {
     this.flushStreamBuffer();
+    this.captureCompletedStreamedAnswerPayloads();
     this.stopTyping();
     // PR-E: reset the per-turn status-cap state on the UNCONDITIONAL turn-end
     // choke (incl. early-break provider-failure branches that never reach
@@ -1471,6 +1488,52 @@ export class OutboundQueue implements IOutboundQueue {
       windowMs: TERMINAL_TEXT_DEDUPE_WINDOW_MS,
     }, 'suppressed duplicate outbound terminal text');
     return true;
+  }
+
+  private captureCompletedStreamedAnswerPayloads(): void {
+    if (this.completedStreamSnapshotReady) return;
+    const hashes = new Set(this.activeStreamedAnswerPayloadHashes);
+    if (this.activeStreamedAnswerText.trim() !== '') {
+      hashes.add(this.sameTurnFinalPayloadHash(this.activeStreamedAnswerText));
+    }
+    this.completedStreamedAnswerPayloadHashes = hashes;
+    this.completedStreamedTurnId = this.activeTurnEvidence?.turnId;
+    this.completedStreamSnapshotReady = true;
+    this.activeStreamedAnswerPayloadHashes.clear();
+    this.activeStreamedAnswerText = '';
+  }
+
+  private suppressDuplicateSameTurnFinalPayload(text: string): boolean {
+    const payloadHash = this.sameTurnFinalPayloadHash(text);
+    const activeMatch = this.activeStreamedAnswerPayloadHashes.has(payloadHash)
+      || (
+        this.activeStreamedAnswerText.trim() !== ''
+        && this.sameTurnFinalPayloadHash(this.activeStreamedAnswerText) === payloadHash
+      );
+    if (!activeMatch && !this.completedStreamedAnswerPayloadHashes.has(payloadHash)) return false;
+
+    log.info({
+      sourcePaths: ['assistant_text', 'result'],
+      payloadHash,
+      conversationKeyHash: this.terminalTextPayloadHash(this.conversationKey),
+      ...(this.completedStreamedTurnId === undefined
+        ? {}
+        : { turnIdHash: this.terminalTextPayloadHash(this.completedStreamedTurnId) }),
+    }, 'suppressed duplicate same-turn final payload');
+    return true;
+  }
+
+  private resetSameTurnFinalPayloadTracking(): void {
+    this.activeStreamedAnswerPayloadHashes.clear();
+    this.activeStreamedAnswerText = '';
+    this.completedStreamedAnswerPayloadHashes.clear();
+    this.completedStreamedTurnId = undefined;
+    this.completedStreamSnapshotReady = false;
+  }
+
+  private sameTurnFinalPayloadHash(text: string): string {
+    const normalized = text.replace(/\r\n?/g, '\n').trim();
+    return this.terminalTextPayloadHash(normalized);
   }
 
   private pruneTerminalTextDedupe(now: number): void {

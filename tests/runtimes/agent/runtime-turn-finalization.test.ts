@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { OutboundDeliverySnapshot } from '../../../src/core/durability.ts';
+import type { DurabilityEngine, OutboundDeliverySnapshot } from '../../../src/core/durability.ts';
+import type { Messenger } from '../../../src/core/types.ts';
+import { OutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
 import { finalizeQueuedRuntimeTurn } from '../../../src/runtimes/agent/runtime-turn-finalization.ts';
 import { createRuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 
@@ -94,6 +96,81 @@ describe('queued runtime turn finalization', () => {
     expect(durability.getOutboundDeliverySnapshot.mock.calls.map(([opId]) => opId)).toEqual([101, 102]);
     expect(durability.getOutboundDeliverySnapshot).not.toHaveBeenCalledWith(201, expect.anything());
     expect(durability.getOutboundDeliverySnapshot).not.toHaveBeenCalledWith(301, expect.anything());
+  });
+
+  it('terminalizes the sole streamed answer when an identical result is suppressed', async () => {
+    const turnContext = context();
+    const messenger: Messenger = {
+      sendMessage: vi.fn(async () => ({ waMessageId: null })),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
+      setTyping: vi.fn(async () => undefined),
+    };
+    const finalizeTurnTerminal = vi.fn(() => ({
+      applied: true,
+      winnerMatchesRequest: true,
+      recordId: 1,
+      duplicateFinalizeCount: 0,
+      replyGuaranteeDisarmed: true,
+      effectiveReplyGuaranteeDisarmed: true,
+    }));
+    const durability = {
+      createOutboundOp: vi.fn(() => 101),
+      markSending: vi.fn(),
+      markSubmitted: vi.fn(),
+      markMaybeSent: vi.fn(),
+      markFailedPermanent: vi.fn(),
+      markTerminal: vi.fn(),
+      getOutboundDeliverySnapshot: vi.fn((): OutboundDeliverySnapshot => ({
+        opId: 101,
+        conversationKey: turnContext.identity.conversationKey,
+        deliveryJid: turnContext.identity.deliveryJid,
+        sourceInboundSeq: turnContext.identity.inboundSeq,
+        status: 'echoed',
+      })),
+      finalizeTurnTerminal,
+    };
+    const queue = new OutboundQueue(
+      messenger,
+      turnContext.identity.deliveryJid,
+      { conversationKey: turnContext.identity.conversationKey },
+    );
+    queue.setDurability(durability as unknown as DurabilityEngine);
+    queue.setInboundSeq(turnContext.identity.inboundSeq ?? undefined);
+    queue.beginTurnEvidence(turnContext.identity.logicalTurnId);
+
+    queue.enqueueStreamingText('Fleet check complete.');
+    queue.endTurn();
+    queue.enqueueResultText('Fleet check complete.');
+
+    const result = await finalizeQueuedRuntimeTurn({
+      instanceName: 'personal',
+      durability,
+      queue,
+      context: turnContext,
+      attemptOutcome: { kind: 'completed' },
+    });
+
+    expect(messenger.sendMessage).toHaveBeenCalledOnce();
+    expect(durability.createOutboundOp).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      kind: 'terminal',
+      terminal: {
+        inboundDisposition: 'finalized_replied',
+        deliveryEvidence: { kind: 'echoed', opId: 101 },
+      },
+    });
+    expect(finalizeTurnTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      terminal: expect.objectContaining({
+        inboundDisposition: 'finalized_replied',
+        deliveryKind: 'echoed',
+        deliveryOpId: 101,
+      }),
+      inbound: {
+        kind: 'complete',
+        seq: turnContext.identity.inboundSeq,
+        terminalReason: 'response_echoed',
+      },
+    }));
   });
 
   it('turns a queue durability/drain rejection into failed evidence without fake op ids', async () => {
