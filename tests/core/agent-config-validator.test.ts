@@ -943,8 +943,18 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
     expect(result?.message).toContain('baseUrl is not');
   });
 
-  it.each([null, 7, '', '   ', '--auto', 'nested/profile'])(
-    'rejects unsafe providerConfig.executionProfile value %j when provided',
+  it.each([
+    null,
+    7,
+    '',
+    '   ',
+    '--auto',
+    'nested/profile',
+    'auto',
+    'fullstack-lead',
+    'other-safe-agent-name',
+  ])(
+    'rejects non-reserved providerConfig.executionProfile value %j when provided',
     (executionProfile) => {
       const result = validateInstanceConfig(baseAgent({
         agentOptions: {
@@ -955,11 +965,11 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
       }), ctx('load'));
 
       expect(result?.field).toBe('agentOptions.providerConfig.executionProfile');
-      expect(result?.message).toContain('executionProfile');
+      expect(result?.message).toContain('exactly "whatsoup-headless"');
     },
   );
 
-  it('accepts a safe non-empty providerConfig.executionProfile', () => {
+  it('accepts the reserved providerConfig.executionProfile', () => {
     const result = validateInstanceConfig(baseAgent({
       model: 'glm/glm-5.2',
       agentOptions: {

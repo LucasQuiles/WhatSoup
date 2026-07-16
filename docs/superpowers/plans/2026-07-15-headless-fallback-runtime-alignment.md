@@ -978,9 +978,9 @@ edges.
 |---|---|---|---|---|---|
 | A00 / setup | lead | Correct worktree; pinned installs | Capture pinned baseline | Named suites execute; exit 0; `artifacts/primary/focused-baseline.txt` | Any failure blocks all production packets; diagnose then rerun from clean evidence |
 | A01 / T1 | provider owner | A00; installed CLI help and config flow | Characterize supported profile-selection interface | Sanitized version/argv/config fixture exists; `artifacts/task-01/interface.txt` | Unsupported remains fail-closed; blocks A03, A15 |
-| A02 / T1 | test owner | A01; current argv/env seams | Add failing profile/policy/credential-env matrix | Missing selector, q-pi policy mismatch, credential/privilege superset, and unknown secret-key failures observed; `artifacts/task-01/red.txt` | Wrong/no failure blocks implementation; repair fixture and rerun |
-| A03 / T1 | provider owner | A02 red proof | Implement explicit profile, versioned q-pi contract, and one-credential allowlisted env | A02 turns green; no ambient `default_agent`, static model, privileged env, or unrelated mutation authority; `artifacts/task-01/green.txt` | Revert packet diff if unrelated provider behavior changes; depends A01-A02 |
-| A04 / T1 | docs owner | A03 green | Document selector, policy, env, and non-sandbox contract | Validator/writer/doc drift tests pass; attestation exposes key names only; `artifacts/task-01/docs.txt` | Retry after contract mismatch; rollback doc plus code together |
+| A02 / T1 | test owner | A01; current argv/env seams | Add failing profile-ownership/credential-env matrix | Missing selector, non-reserved configured profile, inline-policy synthesis, credential/privilege superset, and unknown secret-key failures observed; `artifacts/task-01/red.txt` | Wrong/no failure blocks implementation; repair fixture and rerun |
+| A03 / T1 | provider owner | A02 red proof | Implement the explicit reserved profile selector, preserve fleet-owned policy, and build a one-credential allowlisted env | A02 turns green; no ambient `default_agent`, inline agent policy, privileged env, unrelated mutation authority, or non-reserved configured selector; `artifacts/task-01/green.txt` | Revert packet diff if unrelated provider behavior changes; depends A01-A02 |
+| A04 / T1 | docs owner | A03 green | Document selector, fleet-policy ownership, env, and non-sandbox contract | Validator/writer/doc drift tests pass; attestation exposes key names only; `artifacts/task-01/docs.txt` | Retry after contract mismatch; rollback doc plus code together |
 | A05 / T2 | test owner | A00; rejected-tool fixtures | Add failing parser/render corpus | Tool identity/detail and non-empty bullet assertions fail for expected reason; `artifacts/task-02/red.txt` | Blocks A06 on fabricated/unrelated failure |
 | A06 / T2 | messaging owner | A05 red proof | Implement safe failed-tool propagation | Parser/classifier/renderer corpus passes; `artifacts/task-02/green.txt` | Revert only T2 files; preserve provider event compatibility |
 | A07 / T3 | lifecycle owner | A00; preserved cleanup worktree | Audit reusable finalizer delta | Coupling and rejection rationale recorded; `artifacts/task-03/reuse.txt` | Missing source selects fresh implementation; blocks blind copy |
@@ -1181,7 +1181,7 @@ resolved, unresolved risks, and a current verdict using only the four evidence v
 | Does S5 source proof establish fleet alignment? | No. S5 proves the source schema and gates; only fresh qFleet observations can satisfy fleet exit. |
 | Are readiness states interchangeable with evidence verdicts? | No. Readiness controls the next action; evidence records claim quality. A dependent gate is `Not Ready` for either `Blocked` or `Inconclusive` evidence. |
 | Does Task 9A authorize a deployment or restart? | No. It implements and tests an injected lifecycle seam; live host mutation remains outside this run and requires a separately authorized qFleet deployment. |
-| Does the tracked OpenCode policy fixture prove an installed agent? | No. It is the versioned source contract. Static resolved-profile attestation plus the parsed edit-and-bash canary prove an installed lane. |
+| Does WhatSoup carry or install the OpenCode agent policy? | No. WhatSoup owns only the exact reserved selector and preserves the `agent` map. The fleet-policy package owns the deliberately non-deployable versioned artifact; static resolved-profile attestation plus the parsed edit-and-bash canary prove an installed lane. |
 | Does use of the test-integrity skill conflict with disabling the plugin? | No. The skill is limited to development/test-authoring lanes; the operational runtime policy explicitly excludes the plugin and resolved test-authoring hooks. |
 | Can existing generic PATCH or direct qFleet writes satisfy normalization? | No. Only the versioned Task 9A two-file CAS/lifecycle seam may produce a normalization receipt. |
 | Can static deny patterns compensate for privileged environment inheritance? | No. A fresh allowlisted child environment is independently required; any credential superset, mutation-authority flag, or privileged key blocks admission. |
@@ -1202,7 +1202,8 @@ prose, source-green tests, or a fallback may not hide it.
 
 - Create: `src/runtimes/agent/providers/opencode-execution-profile.ts`
 - Create: `tests/runtimes/agent/opencode-execution-profile.test.ts`
-- Create: `docs/reliability-runner/opencode-headless-policy.json`
+- Delete: `docs/reliability-runner/opencode-headless-policy.json` (duplicate policy source; fleet policy owns the artifact)
+- Modify: `src/core/provider-mcp-config.ts`
 - Modify: `src/runtimes/agent/session.ts`
 - Modify: `src/runtimes/agent/providers/primary-model-usability-adapters.ts`
 - Modify: `src/core/agent-config-validator.ts`
@@ -1211,13 +1212,15 @@ prose, source-green tests, or a fallback may not hide it.
 - Modify: `tests/core/agent-config-validator.test.ts`
 - Modify: `docs/configuration.md`
 
-- [ ] Add failing tests for a pure resolver whose accepted config is a non-empty safe `providerConfig.executionProfile` string and whose operational contract is explicit:
+- [ ] Add failing tests for a pure resolver whose only configured value is the reserved `providerConfig.executionProfile: "whatsoup-headless"` and whose operational contract is explicit:
 
   ```ts
   expect(resolveOpenCodeExecutionProfile({ executionProfile: 'whatsoup-headless' }))
     .toBe('whatsoup-headless');
   expect(() => resolveOpenCodeExecutionProfile({ executionProfile: '  ' }))
     .toThrow(/executionProfile/);
+  expect(() => resolveOpenCodeExecutionProfile({ executionProfile: 'fullstack-lead' }))
+    .toThrow(/whatsoup-headless/);
   expect(openCodeAgentArgs({ executionProfile: 'whatsoup-headless' }))
     .toEqual(['--agent', 'whatsoup-headless']);
   ```
@@ -1235,17 +1238,13 @@ prose, source-green tests, or a fallback may not hide it.
   unknown secret-shaped key. Attestation and logs may list allowed key **names** only;
   they must never emit values.
 
-- [ ] Add a checked, versioned `whatsoup-headless` policy fixture and resolver tests for
-  the q-pi Layer-2 contract. The dedicated agent has an explicit selector and no static
-  model (the route selects the model); allows non-interactive `bash`; confines `edit` to
-  the approved workspace/LAB roots; hard-denies edits to OpenCode config, SSH, GitHub,
-  and secret locations; hard-denies reads of secret directories; and hard-denies
-  `question`, `task`, `webfetch`, `websearch`, and `external_directory`. Its dispatcher
-  command policy hard-denies `sudo`, `git push`, `gh`, `ssh`, `scp`, `tailscale`, and
-  `ufw`. Pattern rules are dispatcher policy, not an operating-system sandbox, and are
-  insufficient if privileged environment such as `SUDO_ASKPASS` reaches the child.
-  This fixture is the source-of-truth contract, not proof that any host has installed or
-  selected the agent.
+- [ ] Remove WhatSoup's duplicate policy template and inline `opencode.json` agent
+  provisioning. The fleet-policy package is the sole owner of the versioned
+  `whatsoup-headless` artifact and keeps it non-deployable until exact workspace and
+  supported-version proof exist. WhatSoup must preserve unrelated and fleet-owned
+  `agent` entries verbatim while refreshing MCP/custom-endpoint blocks. Add failing
+  merge/write tests proving no inline policy appears. Dispatcher policy remains distinct
+  from operating-system isolation and installed capability proof.
 
 - [ ] Run the new tests and confirm failures are for missing resolver/selector and the existing credential superset.
 
@@ -1261,7 +1260,7 @@ prose, source-green tests, or a fallback may not hide it.
   allowlisted object rather than spreading `process.env`; retain only keys characterized
   by a table-driven test as required for the selected route and service context.
 
-- [ ] Validate `executionProfile` type/format on instance load and document it for OpenCode CLI providers. The first source rollout may leave enforcement report-only at fallback admission, but every command that has a configured profile must select it exactly once.
+- [ ] Validate that configured `executionProfile` is exactly `whatsoup-headless` on instance load and in the runtime resolver. The first source rollout may leave absence report-only at fallback admission, but every configured command must select the reserved profile exactly once and no code may infer `default_agent`.
 
 - [ ] Run:
 
@@ -1815,7 +1814,7 @@ contract evidence exist, the current review verdict remains `Inconclusive`.
 
 | Surface | Required documentation or DevOps deliverable | Reproduction and acceptance rule | Blocking condition | Owner and evidence |
 |---|---|---|---|---|
-| Configuration and policy | Update `docs/configuration.md` and the committed reliability-runner policy examples for the headless profile, deny rules, credential allowlist, provider role/policy version, plugin/hook exclusions, static attestation inputs, and effective workspace context. | A fresh operator can derive the same canonical config/settings fingerprints and distinguish requested from observed state without reading implementation code. | Undocumented field/default, ambiguous merge precedence, secret-bearing example, or unsupported OpenCode interface is `Blocked` for rollout. | Task 1/9 owner; config diffs, schema tests, and `artifacts/task-09/config-doc-review.md` |
+| Configuration and policy | Update `docs/configuration.md` for the exact reserved selector, fleet-owned agent policy, credential allowlist, provider role/policy version, plugin/hook exclusions, static attestation inputs, and effective workspace context. WhatSoup must not carry a second policy template or synthesize an inline agent. | A fresh operator can derive the same canonical config/settings fingerprints and distinguish requested from observed state without reading implementation code. | Undocumented field/default, duplicate/ambiguous policy ownership, secret-bearing example, or unsupported OpenCode interface is `Blocked` for rollout. | Task 1/9 owner; config diffs, schema tests, and `artifacts/task-09/config-doc-review.md` |
 | Public and health contracts | Update `docs/public-surface.md` for additive A-F health, route identity, lifecycle, staleness, redaction, and readiness semantics. | Run exact-shape consumer, redaction, doc-drift, public-surface, and publication guards on the final SHA; missing/stale fields must never imply hardening. | Breaking or sensitive field, undocumented consumer impact, or nonzero/masked guard is `Fail`. | Task 9B/publication owner; `artifacts/task-09/health-consumers.txt` and documentation-guard output |
 | Operator runbooks | Update `docs/runbooks/fleet-bot-hardening-standard.md` and `docs/runbooks/error-response-workflows.md` with preflight, canary, phased rollout, quarantine, rollback, recovery from mixed-lane/resume errors, non-empty client error handling, and wrong-host escalation. | A clean-room operator can follow target host/user/workspace prerequisites and stable command identifiers; client-visible text never contains a pasteable target-host command or `[internal-path]` placeholder presented as one. | Missing host/user prerequisite, direct-file workaround, destructive rollback, client shell instruction, or unowned recovery step is `Blocked`. | Tasks 9A/10 owner; runbook rehearsal and outbound-safety evidence |
 | Dashboards and alerts | Register the required events, A-F capability fields, runtime generation, config/settings fingerprints, route/session correlations, reason codes, staleness window, and fleet numerator/denominator on the provider-status/parity surfaces. Define alerts for rejected tools, invalid resume identity, mixed managers, stale/unknown attestation, normalization failure, and blank client error detail. | Replay the named failure fixtures and show that each alert identifies the affected line, route, generation, stage, and safe operator action without exposing paths, prompts, tokens, or environment values. | A silent condition, false-aligned dashboard, missing correlation, unbounded-cardinality field, or sensitive output is `Fail`. | Observability and Task 9B owners; telemetry/replay records and `artifacts/task-11/dashboard-alert-review.md` |

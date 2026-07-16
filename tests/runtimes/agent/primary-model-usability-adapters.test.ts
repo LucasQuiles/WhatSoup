@@ -200,6 +200,24 @@ describe('createPrimaryModelProbeAdapters', () => {
     );
   });
 
+  it('rejects a non-reserved OpenCode profile before the model probe spawns', async () => {
+    const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+    const adapters = createPrimaryModelProbeAdapters(
+      { executionProfile: 'fullstack-lead' },
+      {
+        cwd: '/agent-cwd',
+        buildChildEnv: vi.fn(() => ({ PATH: '/usr/bin' })),
+        getProviderBinary: vi.fn(() => 'opencode'),
+        probeBinaryCommand,
+      },
+    );
+
+    await expect(
+      adapters.probeBinaryModel?.({ provider: 'opencode-cli', model: 'configured-primary' }),
+    ).rejects.toThrow(/exactly "whatsoup-headless"/);
+    expect(probeBinaryCommand).not.toHaveBeenCalled();
+  });
+
   it('probes OpenCode default model (null) with -m omitted, mirroring turn argv', async () => {
     const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
     const adapters = createPrimaryModelProbeAdapters(undefined, {

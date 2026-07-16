@@ -301,6 +301,20 @@ describe('AgentRuntime startup MCP config dual-write', () => {
     );
   });
 
+  it('fails runtime startup closed when the OpenCode config target is a symlink', async () => {
+    const cwd = tmp();
+    const decoyDir = tmp();
+    symlinkSync(join(decoyDir, 'decoy-opencode.json'), join(cwd, 'opencode.json'));
+    mockConfig.agentProvider = 'opencode-cli';
+
+    await expect(startRuntime(cwd, 'glm/glm-5.2'))
+      .rejects.toThrow(/OpenCode configuration.*non-symlink/i);
+    expect(mockRuntimeLogger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error) }),
+      'failed to initialize global MCP socket resources',
+    );
+  });
+
   it('writes .mcp.json for a claude fallback when the primary is openai-api', async () => {
     const cwd = tmp();
     mockConfig.agentProvider = 'openai-api';
@@ -535,20 +549,15 @@ describe('opencode MCP config write hardening', () => {
     expect((parsed.mcp as Record<string, unknown>).whatsoup).toBeDefined();
   });
 
-  it('skips symlinked opencode.json with a warning and does not throw', () => {
+  it('fails closed on symlinked opencode.json without touching the target', () => {
     const dir = tmp();
     const decoyDir = tmp();
     const decoyTarget = join(decoyDir, 'attacker-opencode.json');
     symlinkSync(decoyTarget, join(dir, 'opencode.json'));
 
-    const written = writeProviderMcpConfig('opencode-cli', dir, socketPath, proxyScript);
-
-    expect(written).toBeNull();
+    expect(() => writeProviderMcpConfig('opencode-cli', dir, socketPath, proxyScript))
+      .toThrow(/OpenCode configuration.*non-symlink/i);
     expect(existsSync(decoyTarget)).toBe(false);
-    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
-      expect.objectContaining({ target: join(dir, 'opencode.json') }),
-      expect.stringContaining('skipping opencode MCP config write'),
-    );
   });
 
   it('removes the managed whatsoup-cloud provider (including its apiKey) and model when baseUrl is no longer configured', () => {

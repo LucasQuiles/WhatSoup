@@ -121,8 +121,10 @@ armed. An exit from a superseded generation cannot clear a newer child.
 ## Decision 4: Dedicated Headless OpenCode Profile
 
 Operational and probe argv select one configured execution profile explicitly. The
-fleet baseline name is `whatsoup-headless`; WhatSoup treats the name as configuration and
-does not depend on the account's `default_agent`.
+fleet baseline name is `whatsoup-headless`; WhatSoup accepts exactly that reserved name
+as configuration and does not depend on the account's `default_agent`. The fleet-policy
+package owns the versioned agent artifact. WhatSoup preserves the `agent` map while
+merging its MCP/custom-endpoint blocks and never provisions an inline policy.
 
 The profile contract is:
 

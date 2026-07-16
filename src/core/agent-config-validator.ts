@@ -24,6 +24,10 @@ import { fallbackEntryKey, isSameAsPrimaryFallbackEntry, type AgentFallbackEntry
 import { DEFAULT_TRANSPORT_ID, isTransportId, TRANSPORT_IDS } from '../transport/registry.ts';
 import { ACCOUNT_RE } from './transport-refs.ts';
 import { E164_RE } from '../transport/twilio/types.ts';
+import {
+  isWhatSoupHeadlessExecutionProfile,
+  WHATSOUP_HEADLESS_EXECUTION_PROFILE,
+} from '../lib/opencode-execution-profile-contract.ts';
 
 export const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
 export const ACCESS_MODES = [
@@ -54,8 +58,6 @@ const FALLBACK_MODEL_REQUIRED_PROVIDER_IDS: ReadonlySet<string> = new Set([
   ...API_PROVIDER_IDS,
   'opencode-cli',
 ]);
-const OPENCODE_EXECUTION_PROFILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-
 export interface ValidationError {
   /** Dotted path of the offending field (e.g. "agentOptions.sessionScope"). */
   field: string;
@@ -829,13 +831,12 @@ function validateAgentOptions(
     if (
       pc['executionProfile'] !== undefined
       && (
-        typeof pc['executionProfile'] !== 'string'
-        || !OPENCODE_EXECUTION_PROFILE_RE.test(pc['executionProfile'])
+        !isWhatSoupHeadlessExecutionProfile(pc['executionProfile'])
       )
     ) {
       return err(
         'agentOptions.providerConfig.executionProfile',
-        'agentOptions.providerConfig.executionProfile must be a non-empty OpenCode agent name containing only letters, digits, dot, underscore, or hyphen',
+        `agentOptions.providerConfig.executionProfile must be exactly "${WHATSOUP_HEADLESS_EXECUTION_PROFILE}" when configured`,
       );
     }
     // AGENT-ONLY: budget shape (not part of the shared baseUrl/apiKeyService

@@ -46,15 +46,11 @@ vi.mock('node:fs', async (importOriginal) => {
 });
 
 import {
-  buildManagedOpencodeAgentConfig,
   generateMcpConfigFile,
   mergeOpencodeConfig,
-  OPENCODE_REQUIRED_DENY,
-  WHATSOUP_OPENCODE_AGENT_ID,
   writeProviderMcpConfig,
   writeProviderMcpConfigTarget,
 } from '../../src/core/provider-mcp-config.ts';
-import { REQUIRED_DENY } from '../../src/core/settings-template.ts';
 
 const SOCKET = '/tmp/whatsoup-test.sock';
 const PROXY = '/opt/whatsoup/deploy/mcp/whatsoup-proxy.ts';
@@ -163,73 +159,42 @@ describe('generateMcpConfigFile', () => {
 // path on the unset branch.
 // ---------------------------------------------------------------------------
 describe('mergeOpencodeConfig', () => {
-  it('seeds mcp.whatsoup and the reserved WhatSoup headless agent when existing is null', () => {
+  it('seeds only mcp.whatsoup and never synthesizes an inline agent policy', () => {
     const merged = mergeOpencodeConfig(null, generated());
-    expect(Object.keys(merged)).toEqual(['mcp', 'agent']);
+    expect(Object.keys(merged)).toEqual(['mcp']);
     expect(merged.mcp).toHaveProperty('whatsoup');
-
-    const agents = merged.agent as Record<string, Record<string, unknown>>;
-    expect(WHATSOUP_OPENCODE_AGENT_ID).toBe('whatsoup-headless');
-    expect(Object.keys(agents)).toEqual([WHATSOUP_OPENCODE_AGENT_ID]);
-    expect(agents[WHATSOUP_OPENCODE_AGENT_ID]).toEqual(buildManagedOpencodeAgentConfig());
-    expect(agents[WHATSOUP_OPENCODE_AGENT_ID]).toMatchObject({ mode: 'primary' });
-    expect(agents[WHATSOUP_OPENCODE_AGENT_ID].permission).toMatchObject({
-      '*': 'allow',
-      question: 'deny',
-      plan_enter: 'deny',
-      plan_exit: 'deny',
-      external_directory: 'deny',
-      doom_loop: 'allow',
-      read: {
-        '*': 'allow',
-        '*.env': 'deny',
-        '*.env.*': 'deny',
-        '*.env.example': 'allow',
-      },
-    });
+    expect(merged).not.toHaveProperty('agent');
   });
 
-  it('translates the Claude mutation deny floor into collision-free OpenCode tool names', () => {
-    const merged = mergeOpencodeConfig(null, generated());
-    const agents = merged.agent as Record<string, Record<string, unknown>>;
-    const permission = agents['whatsoup-headless'].permission as Record<string, unknown>;
-
-    expect(OPENCODE_REQUIRED_DENY).toHaveLength(REQUIRED_DENY.length);
-    expect(new Set(OPENCODE_REQUIRED_DENY).size).toBe(REQUIRED_DENY.length);
-    expect(OPENCODE_REQUIRED_DENY[0]).toBe('claude_ai_Gmail_create_draft');
-    expect(OPENCODE_REQUIRED_DENY).toContain(
-      'plugin_microsoft_365_microsoft_365_send-mail',
-    );
-    expect(OPENCODE_REQUIRED_DENY.every((entry) => !entry.startsWith('mcp_'))).toBe(true);
-    for (const toolName of OPENCODE_REQUIRED_DENY) expect(permission[toolName]).toBe('deny');
-  });
-
-  it('preserves user agents and global permissions while replacing only the reserved agent', () => {
+  it('preserves user and fleet-owned agents plus global permissions verbatim', () => {
     const userAgent = {
       description: 'user-owned',
       mode: 'subagent',
       permission: { '*': 'ask' },
+    };
+    const fleetAgent = {
+      description: 'fleet-owned',
+      mode: 'primary',
+      permission: { edit: 'deny', bash: 'allow' },
     };
     const globalPermission = { '*': 'deny', read: 'allow' };
     const merged = mergeOpencodeConfig({
       permission: globalPermission,
       agent: {
         personal: userAgent,
-        'whatsoup-headless': { description: 'stale managed config', permission: { '*': 'deny' } },
+        'whatsoup-headless': fleetAgent,
       },
     }, generated());
 
     expect(merged.permission).toEqual(globalPermission);
     const agents = merged.agent as Record<string, Record<string, unknown>>;
     expect(agents.personal).toEqual(userAgent);
-    expect(agents['whatsoup-headless']).not.toHaveProperty('description', 'stale managed config');
-    expect(agents['whatsoup-headless']).toMatchObject({ mode: 'primary' });
+    expect(agents['whatsoup-headless']).toEqual(fleetAgent);
   });
 
-  it.each(['broken', [], null])('treats corrupt agent value %j as empty', (agent) => {
+  it.each(['broken', [], null])('preserves unrelated agent value %j without normalizing it', (agent) => {
     const merged = mergeOpencodeConfig({ agent: agent as never }, generated());
-    const agents = merged.agent as Record<string, Record<string, unknown>>;
-    expect(Object.keys(agents)).toEqual(['whatsoup-headless']);
+    expect(merged.agent).toEqual(agent);
   });
 
   it('tolerates a generated object without an mcp key (?? {} fallback)', () => {
@@ -451,9 +416,9 @@ describe('writeProviderMcpConfig', () => {
     const target = writeProviderMcpConfig('opencode-cli', '/agent', SOCKET, PROXY);
     expect(target).toBe(join('/agent', 'opencode.json'));
     const parsed = JSON.parse(mockWritePrivate.mock.calls[0][1]);
-    expect(Object.keys(parsed)).toEqual(['mcp', 'agent']);
+    expect(Object.keys(parsed)).toEqual(['mcp']);
     expect(parsed.mcp.whatsoup.environment).toEqual({ WHATSOUP_SOCKET: SOCKET });
-    expect(parsed.agent['whatsoup-headless']).toMatchObject({ mode: 'primary' });
+    expect(parsed).not.toHaveProperty('agent');
     expect(mockLogWarn).not.toHaveBeenCalled();
   });
 
@@ -503,28 +468,28 @@ describe('writeProviderMcpConfig', () => {
     expect(parsed.mcp).toHaveProperty('whatsoup');
   });
 
-  it('skips the write and returns null when opencode.json is a symlink (lstat path)', () => {
+  it('fails closed when opencode.json is a symlink (lstat path)', () => {
     mockLstatSync.mockReturnValue({ isSymbolicLink: () => true });
-    const target = writeProviderMcpConfig('opencode-cli', '/agent', SOCKET, PROXY);
-    expect(target).toBeNull();
+    let thrown: NodeJS.ErrnoException | undefined;
+    try {
+      writeProviderMcpConfig('opencode-cli', '/agent', SOCKET, PROXY);
+    } catch (err) {
+      thrown = err as NodeJS.ErrnoException;
+    }
+
+    expect(thrown?.message).toBe('OpenCode configuration must be a regular non-symlink file');
+    expect(thrown?.message).not.toContain('/agent');
+    expect(thrown?.code).toBe('ELOOP');
     expect(mockWritePrivate).not.toHaveBeenCalled();
-    expect(mockLogWarn).toHaveBeenCalledWith(
-      expect.objectContaining({ target: join('/agent', 'opencode.json') }),
-      'skipping opencode MCP config write because opencode.json is a symlink',
-    );
   });
 
-  it('skips the write and returns null when lstat fails with ELOOP', () => {
+  it('fails closed when lstat fails with ELOOP', () => {
     mockLstatSync.mockImplementation(() => {
       throw Object.assign(new Error('too many symlinks'), { code: 'ELOOP' });
     });
-    const target = writeProviderMcpConfig('opencode-cli', '/agent', SOCKET, PROXY);
-    expect(target).toBeNull();
+    expect(() => writeProviderMcpConfig('opencode-cli', '/agent', SOCKET, PROXY))
+      .toThrow(/OpenCode configuration.*non-symlink/i);
     expect(mockWritePrivate).not.toHaveBeenCalled();
-    expect(mockLogWarn).toHaveBeenCalledWith(
-      expect.objectContaining({ target: join('/agent', 'opencode.json') }),
-      'skipping opencode MCP config write after file stat failed',
-    );
   });
 
   it('rethrows when lstat fails with a non-ENOENT, non-ELOOP errno', () => {
@@ -535,18 +500,14 @@ describe('writeProviderMcpConfig', () => {
       .toThrow(/permission denied/);
   });
 
-  it('skips the write and returns null when writePrivateFileSync throws ELOOP', () => {
+  it('fails closed when writePrivateFileSync throws ELOOP', () => {
     mockLstatSync.mockReturnValue({ isSymbolicLink: () => false });
     mockExistsSync.mockReturnValue(false);
     mockWritePrivate.mockImplementation(() => {
       throw Object.assign(new Error('ELOOP after write'), { code: 'ELOOP' });
     });
-    const target = writeProviderMcpConfig('opencode-cli', '/agent', SOCKET, PROXY);
-    expect(target).toBeNull();
-    expect(mockLogWarn).toHaveBeenCalledWith(
-      expect.objectContaining({ target: join('/agent', 'opencode.json') }),
-      'skipping opencode MCP config write because opencode.json is a symlink',
-    );
+    expect(() => writeProviderMcpConfig('opencode-cli', '/agent', SOCKET, PROXY))
+      .toThrow(/OpenCode configuration.*non-symlink/i);
   });
 
   it('rethrows non-ELOOP errors from writePrivateFileSync', () => {
@@ -569,7 +530,7 @@ describe('writeProviderMcpConfig', () => {
       model: 'm',
     });
     const parsed = JSON.parse(mockWritePrivate.mock.calls[0][1]);
-    expect(Object.keys(parsed)).toEqual(['mcp', 'agent', 'provider', 'model']);
+    expect(Object.keys(parsed)).toEqual(['mcp', 'provider', 'model']);
     expect(parsed.model).toBe('whatsoup-cloud/m');
     const provider = parsed.provider as Record<string, Record<string, Record<string, unknown>>>;
     expect(provider['whatsoup-cloud'].options.baseURL).toBe('https://api.example.com/v1');

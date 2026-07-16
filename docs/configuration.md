@@ -795,10 +795,9 @@ config error):
 - **`providerConfig.apiKeyService` without `providerConfig.baseUrl`.** The key
   service only authenticates a custom endpoint; without one it would be
   silently inert.
-- **Malformed `providerConfig.executionProfile`.** When present, the OpenCode
-  agent name must be non-empty and contain only letters, digits, dot,
-  underscore, or hyphen. Values that could be parsed as options or paths are
-  rejected.
+- **Unsupported `providerConfig.executionProfile`.** When present, the value
+  must be exactly `whatsoup-headless`. Arbitrary safe-looking agent names are
+  rejected so a config cannot silently select a user/default policy.
 
 A missing `sessionScope` is **not** an error: the runtime defaults it to
 `single`, so load and discovery accept the omission rather than flagging a
@@ -806,8 +805,8 @@ config that would boot fine.
 
 #### OpenCode headless execution profile
 
-For `opencode-cli`, set `providerConfig.executionProfile` to the dedicated
-agent name provisioned for the instance, normally `whatsoup-headless`:
+For `opencode-cli`, set `providerConfig.executionProfile` to the reserved
+agent name provisioned for the instance, `whatsoup-headless`:
 
 ```jsonc
 "model": "glm/glm-5.2",
@@ -824,15 +823,17 @@ configured passes exactly one `--agent whatsoup-headless` selector. WhatSoup
 does not read OpenCode's `default_agent` and never adds `--auto`. An absent
 field remains a legacy, report-only state during the first source rollout;
 later hardened fallback admission treats that state as not aligned. A present
-but malformed field fails config validation.
+value other than `whatsoup-headless` fails config validation and the runtime
+resolver also rejects it before spawn.
 
-The checked policy contract is
-`docs/reliability-runner/opencode-headless-policy.json`. It is intentionally a
-`non_deployable_template`: its exact runtime workspace binding is unresolved,
-its supported-version list is empty, and it proves neither installation nor
-live tool capability. The permission rules are dispatcher policy, not an
-operating-system sandbox. A fleet lane becomes eligible only after separate
+WhatSoup owns only the reserved selector contract. The fleet-policy package is
+the single source for the versioned `whatsoup-headless` agent artifact and its
+deployment; this repository does not synthesize an `agent` entry in
+`opencode.json` or carry a second permission-policy template. The fleet source
+is deliberately non-deployable until it has an exact workspace binding and
+supported-version proof. A fleet lane becomes eligible only after separate
 static resolution and an edit-plus-shell canary prove the installed profile.
+Its permission rules are dispatcher policy, not an operating-system sandbox.
 
 OpenCode children use a fresh positive environment allowlist. The non-secret
 base is `PATH`, `HOME`, `USER`, `SHELL`, `LANG`, `TERM`, `NODE_PATH`,
@@ -879,17 +880,13 @@ must name an inference-provider service (`PROVIDER_API_KEY_SERVICES`) and
 requires `baseUrl` (see
 [Cross-field validation rules](#cross-field-validation-rules)).
 
-**Headless permissions (opencode-cli):** the startup merge installs a reserved
-primary agent named `whatsoup-headless`. A route with
-`providerConfig.executionProfile: "whatsoup-headless"` selects it explicitly
-for every fresh, resumed, and model-usability turn. The managed agent allows ordinary
-worktree-local reads, edits, and shell commands without a prompt; denies
-interactive questions and plan transitions; sets external-directory access to
-deny; and denies reads of `.env`-style files except `.env.example`. It also
-translates the repository's required connector-mutation deny floor to
-OpenCode's actual `<server>_<tool>` names. Unrelated user agents and global
-configuration are preserved, but the reserved agent entry is replaced
-deterministically.
+**Headless permissions (opencode-cli):** WhatSoup's startup merge owns only the
+generated MCP and optional custom-endpoint blocks. It preserves every existing
+`agent` entry verbatim and never creates or replaces `whatsoup-headless`; the
+fleet-policy package owns that artifact. A route with
+`providerConfig.executionProfile: "whatsoup-headless"` selects the externally
+provisioned profile explicitly for every fresh, resumed, and model-usability
+turn. Any other configured profile name is rejected.
 
 WhatSoup does not infer this selector from OpenCode's `default_agent`, and does
 not pass `--auto`, `--yolo`, or a blanket permission-bypass flag. A legacy
@@ -903,8 +900,9 @@ classified as `provider_permission_denied` without retaining its dynamic path.
 If the provider process closes successfully without a terminal result, the turn
 now fails through the normal crash/finalization path and asks the user to retry
 instead of leaving the turn indefinitely processing. A symlink-protected
-`opencode.json` that cannot receive the reserved agent causes launch to fail; it
-does not silently fall back to an unrestricted agent.
+`opencode.json` causes config writing, workspace provisioning, and runtime
+startup to fail with a bounded non-secret configuration error; it does not
+continue with an unwritten MCP configuration or an implicit agent.
 
 **Routing and auth (API providers):** `openai-api` / `anthropic-api` consume
 `baseUrl` directly as the endpoint of the managed HTTP loop (default

@@ -1,4 +1,9 @@
-const EXECUTION_PROFILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+import {
+  isWhatSoupHeadlessExecutionProfile,
+  WHATSOUP_HEADLESS_EXECUTION_PROFILE,
+} from '../../../lib/opencode-execution-profile-contract.ts';
+
+export { WHATSOUP_HEADLESS_EXECUTION_PROFILE };
 
 export interface OpenCodeExecutionProfileConfig {
   executionProfile?: unknown;
@@ -6,14 +11,16 @@ export interface OpenCodeExecutionProfileConfig {
   [key: string]: unknown;
 }
 
-export function isSafeOpenCodeExecutionProfile(value: unknown): value is string {
-  return typeof value === 'string' && EXECUTION_PROFILE_RE.test(value);
+export function isSafeOpenCodeExecutionProfile(
+  value: unknown,
+): value is typeof WHATSOUP_HEADLESS_EXECUTION_PROFILE {
+  return isWhatSoupHeadlessExecutionProfile(value);
 }
 
 export function resolveOpenCodeExecutionProfile(config: OpenCodeExecutionProfileConfig): string {
   if (!isSafeOpenCodeExecutionProfile(config.executionProfile)) {
     throw new Error(
-      'providerConfig.executionProfile must be a non-empty OpenCode agent name containing only letters, digits, dot, underscore, or hyphen',
+      `providerConfig.executionProfile must be exactly "${WHATSOUP_HEADLESS_EXECUTION_PROFILE}" when configured`,
     );
   }
   return config.executionProfile;
