@@ -1,6 +1,6 @@
 # Boundary Core History-Mining and Implementation Notes
 
-**Status:** Evidence captured; PR B implementation authorized but not yet started
+**Status:** PR B implemented and focused validation complete; final branch gate and SSH push pending
 **Date:** 2026-07-16
 **Owner:** Lucas Quiles
 **Branch:** `experiment/jul16-boundary-core-history`
@@ -225,6 +225,71 @@ no remote setting or stored disposition migration is required.
 
 ## Implementation Record
 
-Append exact test commands, commit OIDs, focused timing, frozen-corpus results, reviewer findings,
-and remaining limitations here during implementation. Do not convert skipped provider, external
-producer, CI, or supply-chain validation into a clean claim.
+The implementation is split into reviewable, single-purpose commits on top of
+`a15b3d953589641c81fd8c228e34afeb1cba2d39`:
+
+| Commit | Outcome |
+|---|---|
+| `3c57c7350a945b663fd9105e976cbe6d920316ac` | Approved implementation plan |
+| `749f06accacfd141370254f6ffb535ca54eb332a` | Correct evaluator replay commands |
+| `163de746bb2005edcf580c76a9fd275759edcad6` | Refresh work index for the plan |
+| `0eadecce3971008c6ec94c8eb41460a4e5b8d1be` | Canonical proposal and task fingerprints |
+| `3f3d0182c1c3005d020f822f9e638e5bdf2d4173` | Bounded, completeness-reporting history provider |
+| `1bc848d969a767b81343887a66fa10be8ac85968` | Shared history time validation |
+| `b35bc14449b9ca96df911ebd15f630f38197c520` | Exact-history and disposition-aware re-entry policy |
+| `b4294a8d81884bd8cf526422ca1a532e2164f6a0` | Shared repository-path normalization |
+| `1aabf787642fa817642a0ebdd73cab593f98f639` | Upstream provenance classification |
+| `a915311ee06bb10d0cded4c5a11150f2f2d0a856` | Situationally accurate boundary feedback |
+| `82d6c71dbfce6e62282d261b116e041dc5d50d34` | Evaluator delegation to the production core |
+| `c6c69cb5a75490cbc22981ed982a3f70b1d28fdd` | Evaluator path/blob type alignment |
+| `effce90ace20ce33eda4e4800dc221c58feebcfa` | Boundary history evidence redaction |
+| `eee2032dd6081a4004550eac09eeca40b1615f46` | Reviewer-driven fail-closed evidence fixes |
+
+### Measured Result
+
+Strict replay used the evaluator's real parser contract and enabled Git inspection for every
+Git-backed corpus:
+
+- baseline: 13/40 exact decisions, 19 missed critical cases, zero false blocks;
+- candidate: 39/40 exact decisions (97.5%), zero missed critical cases, zero false blocks;
+- holdout: 18/18 exact decisions, zero missed critical cases, zero false blocks;
+- feedback completeness: 100% for candidate and holdout receipts.
+
+The earlier 40/40 candidate claim was rejected during review. The `synthetic-issue-similar` case
+had been adapted into an exact issue identity, which made the score look perfect without measuring
+semantic similarity. The evaluator now predicts `pass` for that warning-only case because PR B has
+no live similarity provider. This honest 39/40 result still exceeds the 90% experiment target and
+does not hide a false blocker or missed critical case. A prior command that omitted `--verify-git`
+was piped through a successful formatter and is explicitly inconclusive; it is not validation
+evidence.
+
+### Verification Evidence
+
+The post-review focused command ran six test files serially and passed 132/132 tests. Both
+`typecheck:scripts` and `typecheck:all` exited zero. The changed-test integrity scan returned no
+findings. The repository test-integrity baseline remained six known findings, zero new findings,
+and zero drifted findings. The source fitness gate exited zero with 202 known warnings and zero
+errors; those warnings are visible baseline debt, not a clean-lint claim.
+
+### Review Corrections
+
+Independent review and lead verification added negative controls for these fail-open paths:
+
+- a receipt with limitations but no finding is now `inconclusive`, including enforce-mode exit 2;
+- complete PR history requires path/blob identity, and complete issue history requires task
+  identity;
+- a re-entry override is accepted only when its owner is supplied through verified authority
+  evidence;
+- a material re-entry packet must prove its named production owner changed in the candidate;
+- remote/local tracking identity is validated before any downstream provenance evidence;
+- positive ahead/behind counts must be consistent with the head, remote tip, and merge base;
+- generic receipt values redact secret-like data, credentialed/query URLs, and local paths;
+- evaluator Git object identities are validated instead of synthesized from malformed shorthand.
+
+### Remaining Boundaries
+
+PR B deliberately does not include or claim validation of a live GitHub history provider, a
+remote-tip adapter, hook or workflow composition, an external issue/PR producer, a hosted CI run,
+or supply-chain enforcement. No GitHub issue, pull request, comment, review, merge, label, workflow
+run, or ruleset was mutated. Those surfaces remain separate promotion tranches with their own
+unsafe, neighboring-safe, and false-positive fixtures.

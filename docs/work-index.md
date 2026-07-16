@@ -25,7 +25,7 @@ scoped markdown files currently on disk.
 | Dimension | Breakdown |
 |---|---|
 | Kind | handoff=6, plan=33, review=3, spec=23, state=1 |
-| Status | active=9, closed=4, completed=32, deferred=7, pending=12, unknown=2 |
+| Status | active=9, closed=4, completed=32, deferred=7, pending=13, unknown=1 |
 | Status source | body-marker=65, state-md-status=1 |
 
 ## Inconsistencies
@@ -48,11 +48,10 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | tasks | body-marker |
 
-### Unknown-status — triage needed (2)
+### Unknown-status — triage needed (1)
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
-| `docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md` | handoff | boundary-core-history-mining | 2026-07-16 |
 | `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | spec | turn-lifecycle-fitness-extraction-design | 2026-07-11 |
 
 ### Cross-tree topic clusters (4)
@@ -104,7 +103,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-project-statement.md` | handoff | deferred | body-marker | fleet-charts-project-statement | 2026-04-24 |  |
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-sop.md` | handoff | deferred | body-marker | fleet-charts-sop | 2026-05-12 |  |
 | `docs/superpowers/handoffs/2026-07-15-semantic-boundary-hygiene-implementation-notes.md` | handoff | completed | body-marker | semantic-boundary-hygiene-implementation-notes | 2026-07-16 |  |
-| `docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md` | handoff | unknown | body-marker | boundary-core-history-mining | 2026-07-16 |  |
+| `docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md` | handoff | pending | body-marker | boundary-core-history-mining | 2026-07-16 |  |
 
 ### docs/superpowers/plans  _(33 entries)_
 
@@ -193,4 +192,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-16T05:47:52Z from commit `749f06accacfd141370254f6ffb535ca54eb332a`
+- Generated at 2026-07-16T07:14:45Z from commit `eee2032dd6081a4004550eac09eeca40b1615f46`
