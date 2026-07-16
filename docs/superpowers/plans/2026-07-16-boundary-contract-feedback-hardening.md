@@ -1021,7 +1021,7 @@ operation, the helper also exclusively writes canonical `run_init.json` and its 
 `run_init.sha256` lock before returning success. `RunInitAnchor` freezes the init-owned projection:
 run/task/profile/phase/creation time, entry head/snapshot digest, helper identity, all path sets,
 required attempt/child sets and child pins, completion flags, tool capability rows, reserved roots,
-entry-test-roster digest, and the canonical document-hash digest. Every later operation and both
+the nullable predecessor pin/tree digest, entry-test-roster digest, and the canonical document-hash digest. Every later operation and both
 active/finalized verification modes recompute that projection from the manifest and require exact
 anchor bytes plus lock. Neither file is ever rewritten. A caller that consistently substitutes the
 pin array, imported child, expected CLI fields, and predecessor row still fails the init-anchor
@@ -1061,7 +1061,7 @@ The exact schema-1 object key sets are:
 | Object | Exact keys |
 |---|---|
 | `RunManifest` | `schemaVersion`, `manifestState`, `run`, `entrySnapshot`, `currentSnapshot`, `attempts`, `artifacts`, `children`, `predecessor`, `entryTestRoster`, `reviews`, `lifecycle`, `documentHashes`, `upstream`, `overallVerdict` |
-| `RunInitAnchor` | `schemaVersion`, `runId`, `taskId`, `profileId`, `phase`, `createdAtUtc`, `entryHead`, `entrySnapshotDigestSha256`, `helperCommit`, `helperSha256`, `allowedPaths`, `allowedUntrackedPaths`, `preservedOwnerPaths`, `requiredAttemptIds`, `requiredChildAliases`, `requiredChildPins`, `mayComplete`, `chainAppend`, `requestedTools`, `observedTools`, `reservedDerivedRoots`, `entryTestRosterDigestSha256`, `documentHashesDigestSha256` |
+| `RunInitAnchor` | `schemaVersion`, `runId`, `taskId`, `profileId`, `phase`, `createdAtUtc`, `entryHead`, `entrySnapshotDigestSha256`, `helperCommit`, `helperSha256`, `allowedPaths`, `allowedUntrackedPaths`, `preservedOwnerPaths`, `requiredAttemptIds`, `requiredChildAliases`, `requiredChildPins`, `predecessorPin`, `predecessorTreeDigestSha256`, `mayComplete`, `chainAppend`, `requestedTools`, `observedTools`, `reservedDerivedRoots`, `entryTestRosterDigestSha256`, `documentHashesDigestSha256` |
 | `run` | `runId`, `taskId`, `profileId`, `phase`, `createdAtUtc`, `finalizedAtUtc`, `entryHead`, `terminalHead`, `reconciledBase`, `helperCommit`, `helperSha256`, `allowedPaths`, `allowedUntrackedPaths`, `preservedOwnerPaths`, `requiredAttemptIds`, `requiredChildAliases`, `requiredChildPins`, `transitionCount`, `mayComplete`, `chainAppend`, `requestedTools`, `observedTools`, `reservedDerivedRoots` |
 | `snapshot` | `head`, `indexTreeOid`, `trackedPatchSha256`, `unstagedPatchSha256`, `allowedUntracked`, `preservedOwner`, `digestSha256` |
 | `snapshotPath` | `path`, `type`, `mode`, `bytes`, `sha256` |
@@ -1095,9 +1095,11 @@ types are not interchangeable.
   active|finalized|verified-pass-closeout-rejected`; the named object fields; arrays of their named
   row type; nullable `predecessor`; and root `overallVerdict: Verdict`.
 - `RunInitAnchor` has integer `schemaVersion: 1`, exact copies of the named init-owned scalar and
-  set-valued fields, the same closed child-pin/tool/reserved-root row types, and three `Sha256`
-  projection digests. Its path arrays and row arrays use the same canonical order as the manifest.
-  Its lock is exactly `<sha256>  run_init.json\n`.
+  set-valued fields, the same closed child-pin/predecessor-pin/tool/reserved-root row types, three
+  required `Sha256` projection digests, and the nullable predecessor-tree `Sha256`. Its path arrays
+  and row arrays use the same canonical order as the manifest.
+  Observation uses exact null/null predecessor fields; every other profile copies the closed
+  predecessor pin and imported-tree digest. Its lock is exactly `<sha256>  run_init.json\n`.
 - `run` uses `Id` for run/profile, a literal task ID from the profile table, and profile-derived
   `phase: observation|reconciliation|task01|task02|task03|task04|task05|task06|task07|review|reproduction|docs-a|docs-b|final`.
   Creation/finalization are `Time`/`null|Time`; entry/helper commits are `Oid`; terminal head is
