@@ -51,6 +51,9 @@ const GUARD_CORE = join(REPO_ROOT, 'scripts/lib/guard-core.ts');
 const GIT_ENV = join(REPO_ROOT, 'src/lib/git-env.ts');
 const TYPE_GUARDS = join(REPO_ROOT, 'src/lib/type-guards.ts');
 const RESTART_SAFETY_CHECK = join(REPO_ROOT, 'scripts/restart-safety-preflight.ts');
+const INSTRUCTIONS_PATH_CHECK = join(REPO_ROOT, 'scripts/instructions-path-preflight.ts');
+const AGENT_INSTRUCTIONS_PATH = join(REPO_ROOT, 'src/core/agent-instructions-path.ts');
+const TYPE_GUARDS_SOURCE = join(REPO_ROOT, 'src/lib/type-guards.ts');
 const SOURCE_RUNTIME_MANIFEST = join(REPO_ROOT, 'deploy/source-runtime-manifest.json');
 const SPAWN_TIMEOUT_MS = 15_000;
 
@@ -111,6 +114,11 @@ function makeFixtureTree(
   );
   mkdirSync(join(root, 'scripts'), { recursive: true });
   copyFileSync(RESTART_SAFETY_CHECK, join(root, 'scripts', 'restart-safety-preflight.ts'));
+  copyFileSync(INSTRUCTIONS_PATH_CHECK, join(root, 'scripts', 'instructions-path-preflight.ts'));
+  mkdirSync(join(root, 'src', 'core'), { recursive: true });
+  mkdirSync(join(root, 'src', 'lib'), { recursive: true });
+  copyFileSync(AGENT_INSTRUCTIONS_PATH, join(root, 'src', 'core', 'agent-instructions-path.ts'));
+  copyFileSync(TYPE_GUARDS_SOURCE, join(root, 'src', 'lib', 'type-guards.ts'));
   for (const [rel, contents] of Object.entries(extraFiles)) {
     const abs = join(root, rel);
     mkdirSync(dirname(abs), { recursive: true });
@@ -162,6 +170,18 @@ function runPreflight(
     effectiveEnv.XDG_DATA_HOME = makeTmpDir();
     createRestartSafetyFixture(effectiveEnv.XDG_DATA_HOME, instance);
   }
+  if (instance && effectiveEnv.XDG_CONFIG_HOME === undefined) {
+    const configHome = makeTmpDir();
+    const instanceConfigRoot = join(configHome, 'whatsoup', 'instances', instance);
+    mkdirSync(instanceConfigRoot, { recursive: true });
+    writeFileSync(
+      join(instanceConfigRoot, 'config.json'),
+      JSON.stringify({ name: instance, type: 'passive', agentOptions: {} }),
+      { mode: 0o600 },
+    );
+    effectiveEnv.XDG_CONFIG_HOME = configHome;
+  }
+  if (instance && effectiveEnv.HOME === undefined) effectiveEnv.HOME = process.env.HOME ?? makeTmpDir();
   const result = spawnSync('bash', [PREFLIGHT, repoRoot, instance], {
     encoding: 'utf8',
     env: { ...cleanGitEnv(), WHATSOUP_NODE: PINNED_NODE, ...effectiveEnv },
@@ -416,6 +436,34 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — restart-safety gate
     expect(stderr).toContain('REFUSING TO START');
   });
 
+  it('blocks restart when a configured instructions file is missing', () => {
+    const root = makeFixtureTree('export const mainOk = true;\n');
+    const home = makeTmpDir();
+    const configHome = makeTmpDir();
+    const cwd = join(home, 'workspace');
+    mkdirSync(cwd);
+    const instanceRoot = join(configHome, 'whatsoup', 'instances', 'q-bot');
+    mkdirSync(instanceRoot, { recursive: true });
+    writeFileSync(
+      join(instanceRoot, 'config.json'),
+      JSON.stringify({
+        name: 'q-bot',
+        type: 'agent',
+        agentOptions: { cwd, instructionsPath: 'missing.md' },
+      }),
+      { mode: 0o600 },
+    );
+
+    const { status, stderr } = runPreflight(root, 'q-bot', {
+      HOME: home,
+      XDG_CONFIG_HOME: configHome,
+    });
+
+    expect(status).toBe(3);
+    expect(stderr).toContain('configured instructions-path gate');
+    expect(stderr).toContain('"reason":"missing"');
+  });
+
   it('allows unsafe maybe-sent debt but reports it without replaying', () => {
     const root = makeFixtureTree('export const mainOk = true;\n');
     const dataHome = makeTmpDir();
@@ -462,6 +510,16 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — restart-safety gate
 
     expect(status).toBe(1);
     expect(stderr).toContain('restart-safety checker not found');
+  });
+
+  it('fails closed when the instructions-path checker is missing', () => {
+    const root = makeFixtureTree('export const mainOk = true;\n');
+    rmSync(join(root, 'scripts', 'instructions-path-preflight.ts'));
+
+    const { status, stderr } = runPreflight(root, 'q-bot');
+
+    expect(status).toBe(1);
+    expect(stderr).toContain('instructions-path checker not found');
   });
 
   it('fails closed when the required database compatibility entrypoint is missing', () => {

@@ -481,6 +481,7 @@ export async function handleConfigUpdate(
           mode: 'patch',
           ...(portInventory ? { existingHealthPorts: portInventory.ports } : {}),
           originalType: existing.type,
+          filesystem: { homeDirectory: os.homedir() },
         });
         if (validationError) {
           emitValidationError(validationError, res);
@@ -1112,7 +1113,12 @@ export async function handleCreateLine(
   {
     const validationError = validateInstanceConfig(
       { ...config, claudeMd: body.claudeMd },
-      { name, mode: 'create', existingHealthPorts: portInventory.ports },
+      {
+        name,
+        mode: 'create',
+        existingHealthPorts: portInventory.ports,
+        filesystem: { homeDirectory: os.homedir() },
+      },
     );
     if (validationError) {
       jsonResponse(res, validationError.status ?? 400, { error: validationError.message });

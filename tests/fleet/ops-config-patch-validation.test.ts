@@ -309,6 +309,20 @@ describe('handleConfigUpdate PATCH agentOptions validation (#249)', () => {
     expect(JSON.parse(res._body).error).toMatch(/instructionsPath must be a string/);
   });
 
+  it('rejects a missing instructionsPath with 400 and preserves the config', async () => {
+    const cfg = writeAgentConfig();
+    const before = fs.readFileSync(cfg, 'utf8');
+    const inst = fakeInstance(cfg, { name: 'test-agent', type: 'agent' });
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({ agentOptions: { instructionsPath: 'missing.md' } })),
+      res, makeDeps(inst), { name: 'test-agent' },
+    );
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/readable regular file/);
+    expect(fs.readFileSync(cfg, 'utf8')).toBe(before);
+  });
+
   it('rejects systemPrompt on passive instance with 400', async () => {
     const dir = path.join(tmpDir, 'whatsoup', 'instances', 'test-passive');
     fs.mkdirSync(dir, { recursive: true });

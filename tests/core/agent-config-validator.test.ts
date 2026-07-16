@@ -6,6 +6,9 @@
  * across the 4 modes (create/patch/load/discovery) and the type-specific rules
  * (chat/agent/passive) and cross-field constraints (sessionScope/accessMode).
  */
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   VALID_TYPES,
@@ -588,6 +591,31 @@ describe('agent type rules', () => {
     const result = validateInstanceConfig(raw, ctx('create'));
     expect(result?.field).toBe('agentOptions.instructionsPath');
     expect(result?.message).toContain('must be a string');
+  });
+
+  it('keeps schema-only validation filesystem-independent but rejects missing live instructions', () => {
+    const home = mkdtempSync(path.join(tmpdir(), 'whatsoup-validator-home-'));
+    const cwd = path.join(home, 'workspace');
+    mkdirSync(cwd);
+    const raw = baseAgent({
+      agentOptions: {
+        sessionScope: 'single',
+        cwd,
+        instructionsPath: 'missing.md',
+      },
+    });
+    try {
+      expect(validateInstanceConfig(raw, ctx('load'))).toBeNull();
+      const result = validateInstanceConfig(raw, {
+        ...ctx('load'),
+        filesystem: { homeDirectory: home },
+      });
+      expect(result?.field).toBe('agentOptions.instructionsPath');
+      expect(result?.message).toContain('readable regular file');
+      expect(result?.message).not.toContain(home);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it('accepts minimal valid agent on create (any accessMode with or without agentOptions)', () => {

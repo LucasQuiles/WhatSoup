@@ -24,6 +24,7 @@ import { fallbackEntryKey, isSameAsPrimaryFallbackEntry, type AgentFallbackEntry
 import { DEFAULT_TRANSPORT_ID, isTransportId, TRANSPORT_IDS } from '../transport/registry.ts';
 import { ACCOUNT_RE } from './transport-refs.ts';
 import { E164_RE } from '../transport/twilio/types.ts';
+import { validateAgentInstructionsPath } from './agent-instructions-path.ts';
 
 export const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
 export const ACCESS_MODES = [
@@ -77,6 +78,11 @@ export interface ValidatorContext {
   originalType?: unknown;
   /** When true (loader auth-only flow), skip agentOptions/systemPrompt-shape rules. */
   authOnly?: boolean;
+  /** Present only at live save/load/lint/restart boundaries. Omission is schema-only. */
+  filesystem?: {
+    /** Home directory of the user that will run the instance. */
+    homeDirectory: string;
+  };
 }
 
 function err(field: string, message: string, status = 400): ValidationError {
@@ -584,6 +590,19 @@ function validateAgentOptions(
   // instructionsPath must be a string when present.
   if (opts['instructionsPath'] !== undefined && typeof opts['instructionsPath'] !== 'string') {
     return err('agentOptions.instructionsPath', 'agentOptions.instructionsPath must be a string');
+  }
+  if (typeof opts['instructionsPath'] === 'string' && ctx.filesystem) {
+    const pathResult = validateAgentInstructionsPath({
+      instructionsPath: opts['instructionsPath'],
+      cwd: typeof opts['cwd'] === 'string' ? opts['cwd'] : undefined,
+      homeDirectory: ctx.filesystem.homeDirectory,
+    });
+    if (!pathResult.ok) {
+      return err(
+        'agentOptions.instructionsPath',
+        'agentOptions.instructionsPath must resolve within the service-user home to a readable regular file',
+      );
+    }
   }
 
   // pluginDirs: array of strings (home-confinement check is route-specific).

@@ -259,6 +259,10 @@ function validateConfig(raw: Record<string, unknown>, name: string): string | nu
   // Thin wrapper around the shared validator. Discovery stays aligned with
   // load-time validation so scans do not mark a config valid when restart would
   // reject it. Invalid configs are still surfaced with configError in the UI.
-  const error = validateInstanceConfig(raw, { name, mode: 'discovery' });
+  const error = validateInstanceConfig(raw, {
+    name,
+    mode: 'discovery',
+    filesystem: { homeDirectory: os.homedir() },
+  });
   return error ? error.message : null;
 }

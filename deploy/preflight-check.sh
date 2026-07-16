@@ -135,6 +135,49 @@ fi
 # the database. A genuinely new instance requires the private marker written by
 # the fleet CREATE path — a missing database without that proof fails closed.
 if [ -n "$INSTANCE" ]; then
+  INSTRUCTIONS_PATH_CHECK="$REPO_ROOT/scripts/instructions-path-preflight.ts"
+  if [ ! -f "$INSTRUCTIONS_PATH_CHECK" ] || [ -L "$INSTRUCTIONS_PATH_CHECK" ]; then
+    echo "PREFLIGHT-ERROR: instructions-path checker not found or unsafe: $INSTRUCTIONS_PATH_CHECK" >&2
+    exit 1
+  fi
+  XDG_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
+  INSTANCE_CONFIG="$XDG_CONFIG/whatsoup/instances/$INSTANCE/config.json"
+
+  set +e
+  instructions_path_out="$(
+    "$NODE" \
+      --disable-warning=ExperimentalWarning \
+      --experimental-strip-types \
+      "$INSTRUCTIONS_PATH_CHECK" \
+      --config "$INSTANCE_CONFIG" \
+      --home "$HOME" \
+      --json
+  )"
+  instructions_path_rc=$?
+  set -e
+
+  if ! "$NODE" -e '
+    const verdict = JSON.parse(process.argv[1]);
+    if (verdict?.schemaVersion !== 1 || verdict?.decision !== "allow" || verdict?.ok !== true) {
+      process.exit(1);
+    }
+  ' "$instructions_path_out" >/dev/null 2>&1; then
+    {
+      echo "PREFLIGHT-FAIL: REFUSING TO START — configured instructions-path gate blocked the instance."
+      [ -n "$instructions_path_out" ] && echo "  $instructions_path_out"
+      echo "  The running process, if any, was left untouched."
+    } >&2
+    exit 3
+  fi
+  if [ "$instructions_path_rc" -ne 0 ]; then
+    {
+      echo "PREFLIGHT-FAIL: REFUSING TO START — instructions-path checker returned rc=$instructions_path_rc."
+      [ -n "$instructions_path_out" ] && echo "  $instructions_path_out"
+    } >&2
+    exit 3
+  fi
+  echo "PREFLIGHT-INSTRUCTIONS-PATH: $instructions_path_out" >&2
+
   RESTART_SAFETY_CHECK="$REPO_ROOT/scripts/restart-safety-preflight.ts"
   if [ ! -f "$RESTART_SAFETY_CHECK" ] || [ -L "$RESTART_SAFETY_CHECK" ]; then
     echo "PREFLIGHT-ERROR: restart-safety checker not found or unsafe: $RESTART_SAFETY_CHECK" >&2
@@ -181,7 +224,8 @@ if [ -n "$INSTANCE" ]; then
     exit 3
   fi
   echo "PREFLIGHT-RESTART-SAFETY: $restart_safety_out" >&2
-  unset RESTART_SAFETY_CHECK XDG_DATA INSTANCE_DATA_ROOT RESTART_DB \
+  unset INSTRUCTIONS_PATH_CHECK XDG_CONFIG INSTANCE_CONFIG instructions_path_out \
+    instructions_path_rc RESTART_SAFETY_CHECK XDG_DATA INSTANCE_DATA_ROOT RESTART_DB \
     INITIAL_DATABASE_MARKER restart_safety_out restart_safety_rc
 fi
 

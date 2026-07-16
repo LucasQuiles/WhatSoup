@@ -30,6 +30,7 @@
  */
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
@@ -87,7 +88,13 @@ export interface CheckOptions {
    * are flagged rather than silently passing.
    */
   defaultPort?: number;
+  /** Enables filesystem-aware instructionsPath validation for live config roots. */
+  filesystemHome?: string;
 }
+
+type PortCheckOptions = Required<
+  Pick<CheckOptions, 'fleetPort' | 'portMin' | 'portMax' | 'defaultPort'>
+>;
 
 type PortConfig = { instance: string; filePath: string; healthPort?: number };
 
@@ -215,7 +222,7 @@ export function checkMemoryIntegrity(
  */
 export function checkPortMap(
   configs: PortConfig[],
-  options: Required<CheckOptions>,
+  options: PortCheckOptions,
 ): ConfigFinding[] {
   const findings: ConfigFinding[] = [];
   const byPort = new Map<number, { instance: string; filePath: string; explicit: boolean }[]>();
@@ -288,10 +295,12 @@ export function checkSchema(
   raw: Record<string, unknown>,
   instance: string,
   filePath: string,
+  filesystemHome?: string,
 ): ConfigFinding[] {
   const err: ValidationError | null = validateInstanceConfig(raw, {
     name: instance,
     mode: 'load',
+    ...(filesystemHome ? { filesystem: { homeDirectory: filesystemHome } } : {}),
   });
   if (!err) return [];
   return [
@@ -314,7 +323,7 @@ function parseConfig(filePath: string): Record<string, unknown> {
   return parsed;
 }
 
-function defaultCheckOptions(options: CheckOptions = {}): Required<CheckOptions> {
+function defaultCheckOptions(options: CheckOptions = {}): PortCheckOptions {
   return {
     fleetPort: options.fleetPort ?? DEFAULT_FLEET_PORT,
     portMin: options.portMin ?? INSTANCE_HEALTH_PORT_MIN,
@@ -390,7 +399,7 @@ export function checkInstanceConfigs(
     scanned.push({ instance: name, filePath, healthPort });
     portConfigs.push({ instance: name, filePath, healthPort });
 
-    findings.push(...checkSchema(raw, name, filePath));
+    findings.push(...checkSchema(raw, name, filePath, options.filesystemHome));
     findings.push(...checkMemoryIntegrity(raw, name, filePath));
   }
 
@@ -573,6 +582,7 @@ export function run(
     fleetPort: args.fleetPort,
     portMin: args.portMin,
     portMax: args.portMax,
+    filesystemHome: args.explicitRoot ? homedir() : undefined,
   };
   const instanceResult = checkInstanceConfigs(args.root, options);
   const result = args.explicitRoot

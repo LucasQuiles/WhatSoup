@@ -903,6 +903,46 @@ describe('handleCreateLine', () => {
     expect(fs.readFileSync(initialDatabaseMarker, 'utf8')).toBe('mode-agent\n');
   });
 
+  it('rejects a missing instructionsPath before creating the instance config', async () => {
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+    });
+    const res = mockRes();
+
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'missing-instructions-agent',
+        type: 'agent',
+        adminPhones: ['15551234567'],
+        agentOptions: {
+          cwd: agentCwd,
+          sessionScope: 'per_chat',
+          instructionsPath: 'missing.md',
+        },
+      })),
+      res,
+      deps,
+    );
+
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/readable regular file/);
+    expect(
+      fs.existsSync(
+        path.join(
+          process.env.XDG_CONFIG_HOME!,
+          'whatsoup',
+          'instances',
+          'missing-instructions-agent',
+          'config.json',
+        ),
+      ),
+    ).toBe(false);
+  });
+
   it('defaults an empty agent cwd to a home-confined workspace during create', async () => {
     const homeDir = path.join(tmpDir, 'home');
     fs.mkdirSync(homeDir, { recursive: true, mode: 0o700 });

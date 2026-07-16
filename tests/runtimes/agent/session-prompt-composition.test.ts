@@ -69,6 +69,24 @@ describe('SessionManager system prompt composition', () => {
     expect(prompt.match(new RegExp(identityLine.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))).toHaveLength(1);
   });
 
+  it('reads an absolute instructionsPath without prefixing the configured cwd', () => {
+    const cwd = makeTempRoot();
+    const instructionsRoot = makeTempRoot();
+    const instructionsPath = join(instructionsRoot, 'agent-instructions.md');
+    writeFileSync(instructionsPath, 'Absolute file instruction.\n', 'utf8');
+
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger(),
+      chatJid: CHAT_JID,
+      onEvent: () => undefined,
+      cwd,
+      instructionsPath,
+    });
+
+    expect(sm.buildSystemPrompt()).toContain('Absolute file instruction.');
+  });
+
   it('fails closed when a configured instructionsPath is missing', () => {
     const cwd = makeTempRoot();
     const instructionsPath = `no-such-instructions-${randomUUID()}.md`;

@@ -3,6 +3,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as os from 'node:os';
 import { configRoot as fleetConfigRoot, instancePaths, type InstancePaths } from './fleet/paths.ts';
 import {
   validateInstanceConfig,
@@ -118,6 +119,7 @@ function validateInstance(raw: Record<string, unknown>, name: string, authOnly =
     name,
     mode: 'load',
     authOnly,
+    filesystem: { homeDirectory: os.homedir() },
   });
   if (error) {
     throw new Error(error.message);

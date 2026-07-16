@@ -116,6 +116,35 @@ describe('check-instance-config — committed examples (self-run gate)', () => {
     expect(result.findings).toEqual([]);
     expect(result.scanned.length).toBeGreaterThanOrEqual(10);
   });
+
+  it('uses schema-only mode by default and filesystem-aware mode for a live root', () => {
+    const home = mkdtempSync(path.join(tmpdir(), 'whatsoup-live-config-home-'));
+    const cwd = path.join(home, 'workspace');
+    mkdirSync(cwd);
+    const root = makeRoot({
+      'live-agent': {
+        name: 'live-agent',
+        type: 'agent',
+        accessMode: 'self_only',
+        adminPhones: ['15555550100'],
+        healthPort: 9095,
+        agentOptions: {
+          sessionScope: 'single',
+          cwd,
+          instructionsPath: 'missing.md',
+        },
+      },
+    });
+
+    expect(checkInstanceConfigs(root).findings).toEqual([]);
+    const result = checkInstanceConfigs(root, { filesystemHome: home });
+    expect(result.findings).toContainEqual(
+      expect.objectContaining({
+        instance: 'live-agent',
+        field: 'agentOptions.instructionsPath',
+      }),
+    );
+  });
 });
 
 describe('Class A — memory-config integrity', () => {

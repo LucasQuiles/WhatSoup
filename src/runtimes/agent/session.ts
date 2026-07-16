@@ -11,6 +11,7 @@ import type { Messenger } from '../../core/types.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
 import type { SessionContext } from '../../mcp/types.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
+import { resolveAgentInstructionsPath } from '../../core/agent-instructions-path.ts';
 import { WHATSOUP_OPENCODE_AGENT_ID } from '../../core/provider-mcp-config.ts';
 import { createChildLogger } from '../../logger.ts';
 import {
@@ -746,7 +747,11 @@ export class SessionManager {
     }
 
     if (this.instructionsPath) {
-      const fullInstructionsPath = join(cwd, this.instructionsPath);
+      const fullInstructionsPath = resolveAgentInstructionsPath({
+        instructionsPath: this.instructionsPath,
+        cwd,
+        homeDirectory: homedir(),
+      });
       let instructionsContent: string;
       try {
         instructionsContent = readFileSync(fullInstructionsPath, 'utf8');
