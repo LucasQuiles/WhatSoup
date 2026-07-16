@@ -94,11 +94,7 @@ describe('semantic history provider collection', () => {
 
     expect(result).toEqual({
       repository: REPOSITORY,
-      observedAt: [
-        '2026-07-16T05:00:00Z',
-        '2026-07-16T05:01:00-04:00',
-        '2026-07-16T05:02:00Z',
-      ],
+      observedAt: ['2026-07-16T05:00:00Z', '2026-07-16T05:01:00-04:00', '2026-07-16T05:02:00Z'],
       artifacts: [
         expect.objectContaining({ kind: 'issue', number: 31 }),
         expect.objectContaining({ kind: 'pull-request', number: 1838 }),
@@ -142,9 +138,7 @@ describe('semantic history provider collection', () => {
     expect(result.complete).toBe(false);
     expect(result.artifacts.map((item) => item.number)).toEqual([1838]);
     expect(result.observedAt).toEqual(['2026-07-16T05:00:00Z']);
-    expect(result.limitations).toEqual([
-      expect.stringMatching(/^history\.repository-mismatch:/),
-    ]);
+    expect(result.limitations).toEqual([expect.stringMatching(/^history\.repository-mismatch:/)]);
   });
 
   it('detects a repeated cursor without issuing another provider read', async () => {
@@ -171,9 +165,7 @@ describe('semantic history provider collection', () => {
 
     expect(result.complete).toBe(false);
     expect(result.artifacts.map((item) => item.number)).toEqual([1838]);
-    expect(result.limitations).toEqual([
-      expect.stringMatching(/^history\.invalid-observed-at:/),
-    ]);
+    expect(result.limitations).toEqual([expect.stringMatching(/^history\.invalid-observed-at:/)]);
   });
 
   it('rejects conflicting evidence for the same artifact identity', async () => {
@@ -187,16 +179,11 @@ describe('semantic history provider collection', () => {
     expect(result.complete).toBe(false);
     expect(result.artifacts).toEqual([expect.objectContaining({ number: 1838 })]);
     expect(result.artifacts[0]?.state).toBe('closed-unmerged');
-    expect(result.limitations).toEqual([
-      expect.stringMatching(/^history\.conflicting-artifact:/),
-    ]);
+    expect(result.limitations).toEqual([expect.stringMatching(/^history\.conflicting-artifact:/)]);
   });
 
   it('deduplicates identical page-boundary evidence without reporting a conflict', async () => {
-    const fixture = providerFor([
-      page([artifact(1838)], 'page-2'),
-      page([artifact(1838)], null),
-    ]);
+    const fixture = providerFor([page([artifact(1838)], 'page-2'), page([artifact(1838)], null)]);
 
     const result = await collectHistory({
       repository: REPOSITORY,
@@ -268,9 +255,47 @@ describe('semantic history provider collection', () => {
 
     expect(result.complete).toBe(false);
     expect(result.artifacts).toEqual([]);
-    expect(result.limitations).toEqual([
-      expect.stringMatching(/^history\.invalid-artifact:/),
+    expect(result.limitations).toEqual([expect.stringMatching(/^history\.invalid-artifact:/)]);
+    expectBoundedLimitations(result.limitations);
+  });
+
+  it.each([
+    [
+      'credential-bearing artifact URL',
+      {
+        url: [
+          'https://agent:',
+          'token=abcdefghijklmnop',
+          '@',
+          'github.com/LucasQuiles/WhatSoup/pull/1838',
+        ].join(''),
+      },
+    ],
+    ['wrong-repository artifact URL', { url: 'https://github.com/Other/Repository/pull/1838' }],
+    [
+      'secret-bearing disposition condition',
+      {
+        disposition: {
+          category: 'production-unreachable',
+          artifactRefs: [`https://github.com/${REPOSITORY}/pull/1838`],
+          reentryConditions: ['supply token=abcdefghijklmnop'],
+          recordedAt: '2026-07-16T05:00:00Z',
+        },
+      },
+    ],
+  ])('rejects a %s without retaining its sensitive value', async (_label, invalid) => {
+    const fixture = providerFor([
+      page([artifact(1838, invalid as Partial<HistoryArtifactRecord>)], null),
     ]);
+
+    const result = await collectHistory({ repository: REPOSITORY, provider: fixture.provider });
+    const resultText = JSON.stringify(result);
+
+    expect(result.complete).toBe(false);
+    expect(result.artifacts).toEqual([]);
+    expect(result.limitations).toEqual([expect.stringMatching(/^history\.invalid-artifact:/)]);
+    expect(resultText).not.toContain('abcdefghijklmnop');
+    expect(resultText).not.toContain('Other/Repository');
     expectBoundedLimitations(result.limitations);
   });
 });

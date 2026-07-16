@@ -1,3 +1,5 @@
+import { assertNoSecretLike } from '../../artifact-redaction.ts';
+
 import type {
   BoundaryAction,
   BoundaryArtifact,
@@ -29,11 +31,35 @@ const GIT_OID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 const REPOSITORY_RE = /^[^/\s]+\/[^/\s]+$/;
 
 function bounded(value: unknown): string {
-  return String(value)
+  const text = String(value)
     .replace(/[\u0000-\u001f\u007f]+/g, ' ')
     .replace(/\s+/gu, ' ')
     .trim()
     .slice(0, 240);
+  try {
+    assertNoSecretLike(text, 'provenance evidence');
+    return text;
+  } catch {
+    return 'redacted-sensitive-value';
+  }
+}
+
+function sourceReference(value: unknown): string {
+  const text = bounded(value);
+  if (text === 'redacted-sensitive-value' || text.length === 0) {
+    return 'upstream-provenance:redacted';
+  }
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) {
+    try {
+      const parsed = new URL(text);
+      if (parsed.username || parsed.password || parsed.search) {
+        return 'upstream-provenance:redacted';
+      }
+    } catch {
+      return 'upstream-provenance:redacted';
+    }
+  }
+  return text;
 }
 
 function uniqueSorted(values: Iterable<string>): string[] {
@@ -104,7 +130,7 @@ function unavailable(
       'Recompute the merge base, revision counts, and changed paths from the same remote observation.',
     ],
     rerun: RERUN,
-    sourceRefs: [observation.evidenceSource || 'upstream-provenance:unknown'],
+    sourceRefs: [sourceReference(observation.evidenceSource || 'upstream-provenance:unknown')],
   };
 }
 
@@ -120,9 +146,7 @@ export function evaluateProvenance(input: {
   const observation = input.observation;
   if (!observation || typeof observation !== 'object') {
     return [
-      unavailable(input.action, {} as ProvenanceObservation, [
-        'provenance observation is missing',
-      ]),
+      unavailable(input.action, {} as ProvenanceObservation, ['provenance observation is missing']),
     ];
   }
   if (!validLimitations(observation.limitations)) {
@@ -197,7 +221,7 @@ export function evaluateProvenance(input: {
           'Recompute the merge base, revision counts, changed paths, and semantic boundary receipt.',
         ],
         rerun: RERUN,
-        sourceRefs: [observation.evidenceSource],
+        sourceRefs: [sourceReference(observation.evidenceSource)],
       },
     ];
   }
@@ -262,7 +286,7 @@ export function evaluateProvenance(input: {
           'Rerun tests for every named overlap or high-coupling path before rerunning the boundary check.',
         ],
         rerun: RERUN,
-        sourceRefs: [observation.evidenceSource],
+        sourceRefs: [sourceReference(observation.evidenceSource)],
       },
     ];
   }
@@ -287,7 +311,7 @@ export function evaluateProvenance(input: {
         'Rebase or merge when required by branch policy, then rerun the boundary check.',
       ],
       rerun: RERUN,
-      sourceRefs: [observation.evidenceSource],
+      sourceRefs: [sourceReference(observation.evidenceSource)],
     },
   ];
 }

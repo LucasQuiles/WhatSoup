@@ -78,7 +78,8 @@ function candidate(input: {
 }
 
 function candidateFromArtifact(artifact: FixtureArtifact): Candidate {
-  if (!artifact.pathBlobSet) throw new Error(`fixture artifact ${artifact.number} has no path blobs`);
+  if (!artifact.pathBlobSet)
+    throw new Error(`fixture artifact ${artifact.number} has no path blobs`);
   return candidate({
     records: artifact.pathBlobSet,
     patchIdStable: artifact.patchIdStable,
@@ -135,8 +136,7 @@ describe('exact and related history classification', () => {
             id: '1838',
             url: prior.url,
             state: 'open',
-            fingerprintSha256:
-              '1e27927ab1b22973ecca0d38f41b17293e1cf6a6e2303098f5fb8db9064b3479',
+            fingerprintSha256: '1e27927ab1b22973ecca0d38f41b17293e1cf6a6e2303098f5fb8db9064b3479',
           },
         ],
         correction: [
@@ -237,8 +237,18 @@ describe('exact and related history classification', () => {
       blobOid: 'cccccccccccccccccccccccccccccccccccccccc',
     };
     const artifacts = [
-      { ...fixtureArtifact(1838), number: 2001, pathBlobSet: [one] },
-      { ...fixtureArtifact(1848), number: 2002, pathBlobSet: [one, two, three] },
+      {
+        ...fixtureArtifact(1838),
+        number: 2001,
+        url: `https://github.com/${REPOSITORY}/pull/2001`,
+        pathBlobSet: [one],
+      },
+      {
+        ...fixtureArtifact(1848),
+        number: 2002,
+        url: `https://github.com/${REPOSITORY}/pull/2002`,
+        pathBlobSet: [one, two, three],
+      },
     ];
 
     const findings = evaluate({ candidate: candidate({ records: [one, two] }), artifacts });
@@ -247,7 +257,10 @@ describe('exact and related history classification', () => {
       expect.objectContaining({
         ruleId: 'history.blob-subset',
         decision: 'warn',
-        matchedArtifacts: [expect.objectContaining({ id: '2001' }), expect.objectContaining({ id: '2002' })],
+        matchedArtifacts: [
+          expect.objectContaining({ id: '2001' }),
+          expect.objectContaining({ id: '2002' }),
+        ],
       }),
     ]);
   });
@@ -314,41 +327,44 @@ describe('exact and related history classification', () => {
       },
     });
 
-    expect(
-      evaluate({ candidate: proposal, artifacts: [sameFilename, titleOnlyIssue] }),
-    ).toEqual([]);
+    expect(evaluate({ candidate: proposal, artifacts: [sameFilename, titleOnlyIssue] })).toEqual(
+      [],
+    );
   });
 
   it.each([
     ['open-issue' as const, 'block'],
     ['open-pr' as const, 'warn'],
-  ])('classifies exact issue identity as %s context for the requested action', (action, decision) => {
-    const prior = fixtureArtifact(1783);
-    const proposal = candidate({
-      records: [
-        {
-          status: 'modified',
-          path: 'docs/issue-context.md',
-          blobOid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  ])(
+    'classifies exact issue identity as %s context for the requested action',
+    (action, decision) => {
+      const prior = fixtureArtifact(1783);
+      const proposal = candidate({
+        records: [
+          {
+            status: 'modified',
+            path: 'docs/issue-context.md',
+            blobOid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          },
+        ],
+        task: {
+          title: 'Prevent duplicate issue',
+          body: 'Reuse the existing issue owner.',
         },
-      ],
-      task: {
-        title: 'Prevent duplicate issue',
-        body: 'Reuse the existing issue owner.',
-      },
-    });
+      });
 
-    const findings = evaluate({ action, candidate: proposal, artifacts: [prior] });
+      const findings = evaluate({ action, candidate: proposal, artifacts: [prior] });
 
-    expect(findings).toEqual([
-      expect.objectContaining({
-        ruleId: 'history.exact-issue',
-        decision,
-        action,
-        matchedArtifacts: [expect.objectContaining({ id: '1783' })],
-      }),
-    ]);
-  });
+      expect(findings).toEqual([
+        expect.objectContaining({
+          ruleId: 'history.exact-issue',
+          decision,
+          action,
+          matchedArtifacts: [expect.objectContaining({ id: '1783' })],
+        }),
+      ]);
+    },
+  );
 
   it('returns one inconclusive finding before using partial provider evidence', () => {
     const prior = fixtureArtifact(1838);
@@ -375,6 +391,28 @@ describe('exact and related history classification', () => {
         matchedArtifacts: [],
       }),
     ]);
+  });
+
+  it('fails closed if a complete collection bypasses the provider with an unsafe artifact URL', () => {
+    const prior = fixtureArtifact(1838);
+    prior.url = [
+      'https://agent:',
+      'token=abcdefghijklmnop',
+      '@',
+      'github.com/LucasQuiles/WhatSoup/pull/1838',
+    ].join('');
+
+    const findings = evaluate({ candidate: candidateFromArtifact(prior), artifacts: [prior] });
+    const receiptText = JSON.stringify(findings);
+
+    expect(findings).toEqual([
+      expect.objectContaining({
+        ruleId: 'history.evidence-incomplete',
+        decision: 'inconclusive',
+        observed: [expect.objectContaining({ value: expect.stringMatching(/artifact URL/i) })],
+      }),
+    ]);
+    expect(receiptText).not.toContain('abcdefghijklmnop');
   });
 });
 
@@ -423,10 +461,7 @@ describe('disposition-aware re-entry', () => {
       reentry: prior.reentry,
     });
 
-    expect(ruleIds(findings)).toEqual([
-      'history.exact-closed-pr',
-      'history.incomplete-reentry',
-    ]);
+    expect(ruleIds(findings)).toEqual(['history.exact-closed-pr', 'history.incomplete-reentry']);
     expect(findings[1]).toMatchObject({
       decision: 'block',
       observed: expect.arrayContaining([

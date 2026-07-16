@@ -67,7 +67,10 @@ const ISO_TIMESTAMP_RE =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|([+-])(\d{2}):(\d{2}))$/;
 
 function safeText(value: unknown): string {
-  const text = String(value).replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/gu, ' ').trim();
+  const text = String(value)
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
   try {
     assertNoSecretLike(text, 'history limitation');
     return text;
@@ -84,8 +87,20 @@ export function isValidHistoryTimestamp(value: unknown): value is string {
   if (typeof value !== 'string') return false;
   const match = ISO_TIMESTAMP_RE.exec(value);
   if (!match) return false;
-  const [, yearText, monthText, dayText, hourText, minuteText, secondText, , , , offsetHourText, offsetMinuteText] =
-    match;
+  const [
+    ,
+    yearText,
+    monthText,
+    dayText,
+    hourText,
+    minuteText,
+    secondText,
+    ,
+    ,
+    ,
+    offsetHourText,
+    offsetMinuteText,
+  ] = match;
   const year = Number(yearText);
   const month = Number(monthText);
   const day = Number(dayText);
@@ -110,11 +125,28 @@ export function isValidHistoryTimestamp(value: unknown): value is string {
   return Number.isFinite(Date.parse(value));
 }
 
-function validUrl(value: unknown): value is string {
+function validArtifactUrl(
+  value: unknown,
+  repository: string,
+  kind: HistoryArtifactRecord['kind'],
+  number: number,
+): value is string {
   if (typeof value !== 'string' || value.length === 0) return false;
   try {
+    assertNoSecretLike(value, 'history artifact URL');
     const parsed = new URL(value);
-    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+    const route = kind === 'pull-request' ? 'pull' : 'issues';
+    const expectedPath = `/${repository}/${route}/${number}`;
+    return (
+      parsed.protocol === 'https:' &&
+      parsed.hostname === 'github.com' &&
+      parsed.port === '' &&
+      parsed.username === '' &&
+      parsed.password === '' &&
+      parsed.search === '' &&
+      parsed.hash === '' &&
+      parsed.pathname.replace(/\/$/, '') === expectedPath
+    );
   } catch {
     return false;
   }
@@ -126,7 +158,14 @@ function canonicalStringSet(value: unknown, field: string): string[] {
     if (typeof entry !== 'string' || entry.trim().length === 0) {
       throw new Error(`${field}[${index}] must be a non-empty string`);
     }
-    return entry.trim();
+    const text = entry.trim();
+    if (text.length > 500) throw new Error(`${field}[${index}] is too long`);
+    try {
+      assertNoSecretLike(text, field);
+    } catch {
+      throw new Error(`${field}[${index}] contains prohibited sensitive text`);
+    }
+    return text;
   });
   const unique = [...new Set(entries)];
   if (unique.length !== entries.length) throw new Error(`${field} contains duplicate entries`);
@@ -161,7 +200,10 @@ function optionalOid(value: unknown, field: string): string | null | undefined {
   return value.toLowerCase();
 }
 
-function canonicalArtifact(value: unknown, repository: string): HistoryArtifactRecord {
+export function canonicalHistoryArtifact(
+  value: unknown,
+  repository: string,
+): HistoryArtifactRecord {
   if (!value || typeof value !== 'object') throw new Error('artifact must be an object');
   const record = value as Partial<HistoryArtifactRecord>;
   if (record.repository !== repository) throw new Error('artifact repository does not match query');
@@ -177,7 +219,16 @@ function canonicalArtifact(value: unknown, repository: string): HistoryArtifactR
   if (record.kind === 'issue' && record.state === 'merged') {
     throw new Error('an issue cannot advertise merged state');
   }
-  if (!validUrl(record.url)) throw new Error('artifact URL is invalid');
+  if (
+    !validArtifactUrl(
+      record.url,
+      repository,
+      record.kind as HistoryArtifactRecord['kind'],
+      record.number as number,
+    )
+  ) {
+    throw new Error('artifact URL is invalid or does not match its repository identity');
+  }
 
   const result: HistoryArtifactRecord = {
     repository,
@@ -187,7 +238,8 @@ function canonicalArtifact(value: unknown, repository: string): HistoryArtifactR
     url: record.url,
   };
   if (record.pathBlobSet !== undefined) {
-    if (record.kind !== 'pull-request') throw new Error('only pull requests can advertise path blobs');
+    if (record.kind !== 'pull-request')
+      throw new Error('only pull requests can advertise path blobs');
     if (!Array.isArray(record.pathBlobSet) || record.pathBlobSet.length === 0) {
       throw new Error('advertised path/blob evidence must be a non-empty array');
     }
@@ -208,7 +260,8 @@ function canonicalArtifact(value: unknown, repository: string): HistoryArtifactR
     result.taskFingerprintSha256 = record.taskFingerprintSha256?.toLowerCase() ?? null;
   }
   if (record.disposition !== undefined) {
-    result.disposition = record.disposition === null ? null : canonicalDisposition(record.disposition);
+    result.disposition =
+      record.disposition === null ? null : canonicalDisposition(record.disposition);
   }
   return result;
 }
@@ -290,7 +343,10 @@ export async function collectHistory(input: CollectHistoryInput): Promise<Histor
     }
     if (input.signal?.aborted) {
       result.limitations.push(
-        limitation('history.aborted', `request was aborted while reading page ${result.pageCount + 1}`),
+        limitation(
+          'history.aborted',
+          `request was aborted while reading page ${result.pageCount + 1}`,
+        ),
       );
       break;
     }
@@ -344,7 +400,7 @@ export async function collectHistory(input: CollectHistoryInput): Promise<Histor
       }
       let candidate: HistoryArtifactRecord;
       try {
-        candidate = canonicalArtifact(page.items[index], repository);
+        candidate = canonicalHistoryArtifact(page.items[index], repository);
       } catch (error) {
         result.limitations.push(
           limitation(

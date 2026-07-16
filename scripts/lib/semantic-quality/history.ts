@@ -11,14 +11,11 @@ import {
   type ProposalIdentity,
 } from './fingerprint.ts';
 import {
+  canonicalHistoryArtifact,
   isValidHistoryTimestamp,
   type HistoryCollection,
 } from './history-provider.ts';
-import type {
-  DispositionCategory,
-  DispositionRecord,
-  HistoryArtifactRecord,
-} from './history-types.ts';
+import type { HistoryArtifactRecord } from './history-types.ts';
 
 export interface ReentryPacket {
   priorArtifactRefs: string[];
@@ -45,15 +42,6 @@ interface PreparedArtifact {
 const RERUN = 'npm run verify:boundary';
 const SHA256_RE = /^[0-9a-f]{64}$/;
 const GIT_OID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
-const DISPOSITION_CATEGORIES = new Set<DispositionCategory>([
-  'duplicate-existing-mechanism',
-  'reproduced-correctness-defect',
-  'production-unreachable',
-  'out-of-scope',
-  'needs-specific-repro',
-  'superseded',
-  'accepted-for-reentry',
-]);
 
 function uniqueSorted(values: Iterable<string>): string[] {
   return [...new Set(values)].sort();
@@ -77,36 +65,19 @@ function validStringArray(value: unknown): value is string[] {
   );
 }
 
-function dispositionProblem(value: unknown): string | null {
-  if (!value || typeof value !== 'object') return 'disposition is not an object';
-  const disposition = value as Partial<DispositionRecord>;
-  if (!DISPOSITION_CATEGORIES.has(disposition.category as DispositionCategory)) {
-    return 'disposition category is invalid';
-  }
-  if (!validStringArray(disposition.artifactRefs)) return 'disposition artifactRefs are invalid';
-  if (!validStringArray(disposition.reentryConditions)) {
-    return 'disposition reentryConditions are invalid';
-  }
-  if (!isValidHistoryTimestamp(disposition.recordedAt)) {
-    return 'disposition recordedAt is invalid';
-  }
-  return null;
-}
-
 function recordKey(record: PathBlobRecord): string {
   return JSON.stringify(record);
 }
 
 function prepareArtifact(artifact: HistoryArtifactRecord): PreparedArtifact {
-  const records = artifact.pathBlobSet
-    ? canonicalPathBlobRecords(artifact.pathBlobSet)
-    : [];
+  const records = artifact.pathBlobSet ? canonicalPathBlobRecords(artifact.pathBlobSet) : [];
   return {
     artifact,
-    contentFingerprintSha256:
-      records.length > 0 ? contentFingerprintSha256(records) : null,
+    contentFingerprintSha256: records.length > 0 ? contentFingerprintSha256(records) : null,
     recordKeys: new Set(records.map(recordKey)),
-    paths: new Set(records.flatMap((record) => [record.oldPath, record.path].filter(Boolean) as string[])),
+    paths: new Set(
+      records.flatMap((record) => [record.oldPath, record.path].filter(Boolean) as string[]),
+    ),
   };
 }
 
@@ -141,20 +112,18 @@ function dispositionEvidence(matches: PreparedArtifact[]): BoundaryEvidenceRecor
   );
 }
 
-function finding(
-  input: {
-    action: BoundaryAction;
-    ruleId: string;
-    decision: BoundaryFinding['decision'];
-    summary: string;
-    why: string;
-    observed: BoundaryEvidenceRecord[];
-    matches?: PreparedArtifact[];
-    fingerprint?: (match: PreparedArtifact) => string | null | undefined;
-    correction: string[];
-    sourceRefs?: string[];
-  },
-): BoundaryFinding {
+function finding(input: {
+  action: BoundaryAction;
+  ruleId: string;
+  decision: BoundaryFinding['decision'];
+  summary: string;
+  why: string;
+  observed: BoundaryEvidenceRecord[];
+  matches?: PreparedArtifact[];
+  fingerprint?: (match: PreparedArtifact) => string | null | undefined;
+  correction: string[];
+  sourceRefs?: string[];
+}): BoundaryFinding {
   const matches = input.matches ?? [];
   return {
     ruleId: input.ruleId,
@@ -163,9 +132,7 @@ function finding(
     summary: input.summary,
     why: input.why,
     observed: input.observed,
-    matchedArtifacts: matches.map((match) =>
-      toBoundaryArtifact(match, input.fingerprint?.(match)),
-    ),
+    matchedArtifacts: matches.map((match) => toBoundaryArtifact(match, input.fingerprint?.(match))),
     correction: input.correction,
     rerun: RERUN,
     sourceRefs: input.sourceRefs ?? sourceRefs(matches),
@@ -177,9 +144,8 @@ function incompleteFinding(
   collection: HistoryCollection,
   limitations: string[],
 ): BoundaryFinding {
-  const observed = (limitations.length > 0
-    ? limitations
-    : ['history collection did not prove a terminal page']
+  const observed = (
+    limitations.length > 0 ? limitations : ['history collection did not prove a terminal page']
   ).map((value) => ({ label: 'limitation', value }));
   return finding({
     action,
@@ -354,9 +320,7 @@ function reentryFinding(input: {
       overrideFailures.push('prior artifact scope is incomplete');
     }
     if (overrideFailures.length === 0) return null;
-    observed.push(
-      ...overrideFailures.map((value) => ({ label: 'override_error', value })),
-    );
+    observed.push(...overrideFailures.map((value) => ({ label: 'override_error', value })));
   } else {
     const ownerPresent =
       typeof packet.productionOwner === 'string' && packet.productionOwner.trim().length > 0;
@@ -409,10 +373,7 @@ export function evaluateHistory(input: {
     if (candidateFingerprint !== input.candidate.contentFingerprintSha256) {
       throw new Error('candidate content fingerprint does not match its path/blob evidence');
     }
-    if (
-      input.candidate.patchIdStable != null &&
-      !GIT_OID_RE.test(input.candidate.patchIdStable)
-    ) {
+    if (input.candidate.patchIdStable != null && !GIT_OID_RE.test(input.candidate.patchIdStable)) {
       throw new Error('candidate stable patch identity is invalid');
     }
     if (
@@ -422,19 +383,15 @@ export function evaluateHistory(input: {
       throw new Error('candidate task fingerprint is invalid');
     }
     const identities = new Set<string>();
-    prepared = [...input.collection.artifacts].sort(compareArtifacts).map((artifact) => {
-      if (artifact.repository !== input.collection.repository) {
-        throw new Error(`artifact ${artifact.number} repository does not match collection`);
-      }
-      const key = artifactKey(artifact);
-      if (identities.has(key)) throw new Error(`duplicate artifact identity ${key}`);
-      identities.add(key);
-      if (artifact.disposition != null) {
-        const problem = dispositionProblem(artifact.disposition);
-        if (problem) throw new Error(`artifact ${artifact.number} ${problem}`);
-      }
-      return prepareArtifact(artifact);
-    });
+    prepared = input.collection.artifacts
+      .map((artifact) => canonicalHistoryArtifact(artifact, input.collection.repository))
+      .sort(compareArtifacts)
+      .map((artifact) => {
+        const key = artifactKey(artifact);
+        if (identities.has(key)) throw new Error(`duplicate artifact identity ${key}`);
+        identities.add(key);
+        return prepareArtifact(artifact);
+      });
   } catch (error) {
     return [
       incompleteFinding(input.action, input.collection, [
@@ -449,8 +406,7 @@ export function evaluateHistory(input: {
   for (const state of ['open', 'closed-unmerged', 'merged'] as const) {
     const matches = pullRequests.filter(
       (item) =>
-        item.artifact.state === state &&
-        item.contentFingerprintSha256 === candidateFingerprint,
+        item.artifact.state === state && item.contentFingerprintSha256 === candidateFingerprint,
     );
     if (matches.length > 0) {
       findings.push(exactFinding(input.action, state, matches, candidateFingerprint));
@@ -521,8 +477,7 @@ export function evaluateHistory(input: {
   }
 
   const pathMatches = pullRequests.filter(
-    (item) =>
-      !reported.has(artifactKey(item.artifact)) && intersects(candidatePaths, item.paths),
+    (item) => !reported.has(artifactKey(item.artifact)) && intersects(candidatePaths, item.paths),
   );
   if (pathMatches.length > 0) {
     findings.push(
@@ -573,9 +528,7 @@ export function evaluateHistory(input: {
                 'Continue on the existing issue instead of creating another issue.',
                 'If acceptance criteria differ, update the task body so the material distinction is explicit.',
               ]
-            : [
-                'Link the existing issue and map this change to its acceptance criteria.',
-              ],
+            : ['Link the existing issue and map this change to its acceptance criteria.'],
         }),
       );
     }

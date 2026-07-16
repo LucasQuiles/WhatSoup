@@ -64,6 +64,31 @@ describe('upstream provenance evidence validation', () => {
     ]);
   });
 
+  it('redacts secret-like limitations and credential-bearing source references', () => {
+    const secret = ['token', 'abcdefghijklmnop'].join('=');
+    const findings = evaluateProvenance({
+      action: 'push',
+      observation: observation({
+        remoteTipOid: null,
+        complete: false,
+        limitations: [`remote failed with ${secret}`],
+        evidenceSource: `https://agent:${secret}@github.com/LucasQuiles/WhatSoup.git?auth=${secret}`,
+      }),
+    });
+    const receiptText = JSON.stringify(findings);
+
+    expect(findings).toEqual([
+      expect.objectContaining({
+        ruleId: 'provenance.unavailable',
+        decision: 'inconclusive',
+        observed: [{ label: 'limitation', value: 'redacted-sensitive-value' }],
+        sourceRefs: ['upstream-provenance:redacted'],
+      }),
+    ]);
+    expect(receiptText).not.toContain('abcdefghijklmnop');
+    expect(receiptText).not.toContain('?auth=');
+  });
+
   it.each([
     ['candidate paths', { candidatePaths: null }],
     ['upstream paths', { upstreamPaths: null }],
