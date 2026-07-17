@@ -1218,6 +1218,83 @@ describe('fleet bot hardening parity guard', () => {
       ]));
     });
 
+    it.each(['2026/06/18', '2026'])(
+      'fails with invalid-row-receipt-captured-at when receipt.capturedAt (%s) is Date.parse-able but not ISO-8601',
+      (capturedAt) => {
+        const root = makeRoot();
+        writeFixtureStandard(root);
+        const bundle = makeFixtureReceiptBundle();
+        const { relPath, digest } = writeFixtureReceiptFile(root, 'reference-incident-bot', bundle);
+
+        writeFixtureManifest(root, {
+          rows: [
+            {
+              id: 'reference-incident-bot',
+              status: 'hardened',
+              capabilities: {
+                'turn-capability-health': 'proven',
+                'primary-model-usability-probe': 'proven',
+                'release-drift-check-job': 'proven',
+                'fallback-chain': 'proven',
+              },
+              evidence: ['fixture evidence'],
+              verifiedAt: '2026-06-18',
+              receipt: { digest, capturedAt, path: relPath },
+            },
+          ],
+          scope: { description: 'fixture', inventoryPolicy: 'redacted', cohortSize: 1 },
+          summary: { total: 1, hardened: 1, pendingRollout: 0, blocked: 0, acceptedException: 0 },
+        });
+
+        // Both fixtures are accepted by the raw `Date.parse` this guard used
+        // to rely on exclusively (Node happily parses `2026/06/18` as local
+        // midnight and `2026` as a bare-year UTC timestamp), so a
+        // Date.parse-only check would wrongly accept them even though the
+        // finding message promises "ISO-8601". The guard must reject both
+        // via an explicit ISO-8601 shape pre-check.
+        const now = new Date('2026-06-20T00:00:00Z');
+        const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
+
+        expect(result.ok).toBe(false);
+        expect(result.runtimeParity.findings).toEqual(expect.arrayContaining([
+          expect.objectContaining({ code: 'invalid-row-receipt-captured-at' }),
+        ]));
+      },
+    );
+
+    it('accepts receipt.capturedAt with a numeric UTC offset (design-valid ISO-8601 shape, not just literal Z)', () => {
+      const root = makeRoot();
+      writeFixtureStandard(root);
+      const bundle = makeFixtureReceiptBundle();
+      const { relPath, digest } = writeFixtureReceiptFile(root, 'reference-incident-bot', bundle);
+
+      writeFixtureManifest(root, {
+        rows: [
+          {
+            id: 'reference-incident-bot',
+            status: 'hardened',
+            capabilities: {
+              'turn-capability-health': 'proven',
+              'primary-model-usability-probe': 'proven',
+              'release-drift-check-job': 'proven',
+              'fallback-chain': 'proven',
+            },
+            evidence: ['fixture evidence'],
+            verifiedAt: '2026-06-18',
+            receipt: { digest, capturedAt: '2026-06-18T00:00:00+00:00', path: relPath },
+          },
+        ],
+        scope: { description: 'fixture', inventoryPolicy: 'redacted', cohortSize: 1 },
+        summary: { total: 1, hardened: 1, pendingRollout: 0, blocked: 0, acceptedException: 0 },
+      });
+
+      const now = new Date('2026-06-20T00:00:00Z');
+      const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
+
+      expect(result.ok).toBe(true);
+      expect(result.findings).toEqual([]);
+    });
+
     it('fails with invalid-row-receipt-digest when receipt.digest does not match ^sha256:[0-9a-f]{64}$', () => {
       const root = makeRoot();
       writeFixtureStandard(root);
@@ -1323,7 +1400,8 @@ describe('fleet bot hardening parity guard', () => {
         summary: { total: 1, hardened: 1, pendingRollout: 0, blocked: 0, acceptedException: 0 },
       });
 
-      const result = checkFleetBotHardeningParity(root);
+      const now = new Date('2026-06-20T00:00:00Z');
+      const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
 
       expect(result.ok).toBe(false);
       expect(result.runtimeParity.findings).toEqual(expect.arrayContaining([
@@ -1484,6 +1562,48 @@ describe('fleet bot hardening parity guard', () => {
       writeFixtureStandard(root);
       const relPath = 'docs/reliability-runner/fleet-bot-hardening-receipts/reference-incident-bot.json';
       writeFixtureFile(root, relPath, 'not valid json{{{');
+
+      writeFixtureManifest(root, {
+        rows: [
+          {
+            id: 'reference-incident-bot',
+            status: 'hardened',
+            capabilities: {
+              'turn-capability-health': 'proven',
+              'primary-model-usability-probe': 'proven',
+              'release-drift-check-job': 'proven',
+              'fallback-chain': 'proven',
+            },
+            evidence: ['fixture evidence'],
+            verifiedAt: '2026-06-18',
+            receipt: { digest: `sha256:${'a'.repeat(64)}`, capturedAt: '2026-06-18T00:00:00Z', path: relPath },
+          },
+        ],
+        scope: { description: 'fixture', inventoryPolicy: 'redacted', cohortSize: 1 },
+        summary: { total: 1, hardened: 1, pendingRollout: 0, blocked: 0, acceptedException: 0 },
+      });
+
+      const now = new Date('2026-06-20T00:00:00Z');
+      const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
+
+      expect(result.ok).toBe(false);
+      expect(result.runtimeParity.findings).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'receipt-digest-mismatch' }),
+      ]));
+    });
+
+    it('fails closed with receipt-digest-mismatch when the receipt file is valid JSON but missing an identity field (e.g. no commit)', () => {
+      const root = makeRoot();
+      writeFixtureStandard(root);
+      // Deliberately distinct from the JSON-parse-failure fixture above:
+      // this file parses cleanly as JSON (`{}` is valid JSON), so the
+      // guard's `JSON.parse` call succeeds and it is only
+      // `receiptCapabilityDigest`'s own fail-closed validation (throwing
+      // `ReceiptDigestError` because `commit` etc. are absent) that lands in
+      // the shared `catch` block below. Without this test, that path was
+      // only ever exercised indirectly by the JSON-parse-failure case.
+      const relPath = 'docs/reliability-runner/fleet-bot-hardening-receipts/reference-incident-bot.json';
+      writeFixtureFile(root, relPath, `${JSON.stringify({}, null, 2)}\n`);
 
       writeFixtureManifest(root, {
         rows: [

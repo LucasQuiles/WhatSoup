@@ -161,6 +161,27 @@ function isSafeRepoRelativePath(filePath: string): boolean {
   return parts.every((part) => part !== '' && part !== '.' && part !== '..');
 }
 
+// Repo-relative-path escape check shared by the receipt-file lookup
+// (`validateRows`'s `receipt.path` branch) and the source-anchor file lookup
+// (`validateSourceAnchors`). Resolves `filePath` against `cwd` only when it
+// is BOTH a syntactically safe repo-relative path (`isSafeRepoRelativePath`)
+// AND its resolved absolute path stays within `cwd`. Returns `null` for
+// either failure mode -- the `isSafeRepoRelativePath` check already rejects
+// `..` components, absolute paths, and other unsafe shapes, so the
+// resolve-and-compare check below is deliberate defense-in-depth (mirrors
+// the sentinel/watchdog "never trust, always recompute" pattern used
+// elsewhere in this file), not the primary gate. Callers own their own
+// finding code/message and any subsequent existence check.
+function resolveSafeRepoPath(cwd: string, filePath: string): string | null {
+  if (!isSafeRepoRelativePath(filePath)) return null;
+  const absolutePath = path.resolve(cwd, filePath);
+  const cwdResolved = path.resolve(cwd);
+  if (absolutePath !== cwdResolved && !absolutePath.startsWith(cwdResolved + path.sep)) {
+    return null;
+  }
+  return absolutePath;
+}
+
 function arrayOfStrings(value: unknown): string[] | null {
   return Array.isArray(value) && value.every((item) => typeof item === 'string')
     ? value
@@ -179,6 +200,18 @@ const FULL_GIT_SHA_RE = /^[0-9a-f]{40}$/;
 // plus lowercase 64-hex, so the guard can reject a malformed digest string
 // cheaply before ever trying to open the referenced receipt file.
 const RECEIPT_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+
+// Shape of a manifest row's `receipt.capturedAt` (design §6, "ISO-8601
+// timestamp", e.g. `2026-07-16T03:00:00Z`): `YYYY-MM-DDTHH:MM:SS`, an
+// optional fractional-seconds component, and a mandatory `Z` or numeric
+// UTC-offset suffix. Raw `Date.parse` alone is not a shape check -- it also
+// accepts strings like `2026/06/18` or the bare year `2026`, which would
+// silently pass a check whose finding message promises "ISO-8601". This
+// regex is a pre-check in front of `Date.parse`, not a replacement for it:
+// it only enforces the timestamp's shape, so a value that matches but is
+// still not a real calendar date/time (e.g. month 13) is left for
+// `Date.parse` to reject.
+const ISO_8601_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
 
 // Parse a `YYYY-MM-DD` manifest date as UTC midnight. Returns null when the
 // value is not that exact shape or is not a real calendar date, so callers can
@@ -453,6 +486,11 @@ function validateRows(
             'invalid-row-receipt-captured-at',
             `${context}.receipt.capturedAt must be a string`,
           ));
+        } else if (!ISO_8601_TIMESTAMP_RE.test(capturedAt)) {
+          findings.push(finding(
+            'invalid-row-receipt-captured-at',
+            `${context}.receipt.capturedAt must be an ISO-8601 timestamp (e.g. 2026-07-16T03:00:00Z)`,
+          ));
         } else {
           const capturedMs = Date.parse(capturedAt);
           if (Number.isNaN(capturedMs)) {
@@ -480,28 +518,26 @@ function validateRows(
         }
 
         let resolvedReceiptPath: string | null = null;
-        if (typeof receiptPath !== 'string' || !isSafeRepoRelativePath(receiptPath)) {
+        if (typeof receiptPath !== 'string') {
           findings.push(finding(
             'receipt-file-missing',
             `${context}.receipt.path must be a safe repo-relative path`,
           ));
         } else {
-          const absolutePath = path.resolve(cwd, receiptPath);
-          const cwdResolved = path.resolve(cwd);
-          if (!absolutePath.startsWith(cwdResolved + path.sep) && absolutePath !== cwdResolved) {
+          const safeReceiptPath = resolveSafeRepoPath(cwd, receiptPath);
+          if (safeReceiptPath === null) {
             findings.push(finding(
               'receipt-file-missing',
-              `${context}.receipt.path escapes repository: ${receiptPath}`,
-              receiptPath,
+              `${context}.receipt.path must be a safe repo-relative path`,
             ));
-          } else if (!existsSync(absolutePath)) {
+          } else if (!existsSync(safeReceiptPath)) {
             findings.push(finding(
               'receipt-file-missing',
               `receipt file is missing: ${receiptPath}`,
               receiptPath,
             ));
           } else {
-            resolvedReceiptPath = absolutePath;
+            resolvedReceiptPath = safeReceiptPath;
           }
         }
 
@@ -579,13 +615,13 @@ function validateSourceAnchors(
       continue;
     }
     const filePath = rawAnchor['file'];
-    if (typeof filePath !== 'string' || !isSafeRepoRelativePath(filePath)) {
+    if (typeof filePath !== 'string') {
       findings.push(finding('source-anchor-unsafe-path', `${context}.file must be a safe repo-relative path`));
       continue;
     }
-    const absolutePath = path.resolve(cwd, filePath);
-    if (!absolutePath.startsWith(path.resolve(cwd) + path.sep) && absolutePath !== path.resolve(cwd)) {
-      findings.push(finding('source-anchor-unsafe-path', `${filePath} escapes repository`, filePath));
+    const absolutePath = resolveSafeRepoPath(cwd, filePath);
+    if (absolutePath === null) {
+      findings.push(finding('source-anchor-unsafe-path', `${context}.file must be a safe repo-relative path`));
       continue;
     }
     if (!existsSync(absolutePath)) {
