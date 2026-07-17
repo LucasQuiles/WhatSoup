@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+"""Runtime-receipt capture producer (#1867 criterion 1, producer half).
+
+Emits receipt bundles conforming byte-for-byte to the guard-side digest
+contract in `scripts/lib/fleet-receipt-digest.ts`
+(`receiptCapabilityIdentity`/`receiptCapabilityDigest`), so a bundle produced
+here and validated there agree on the same sha256 digest. See design
+`1867-runtime-proof-producer-design.md` §2 (capture), §3 (redaction), §4
+(digest), §10 (phasing) -- this is a fixtures-only increment: no live fleet
+queries in tests, no receipt file written under `docs/reliability-runner/...`
+yet (that wiring is a later phase, gated on the storage-model owner decision
+in the design's §9 D1).
+
+Deliberately placed under `deploy/scripts/receipts/` -- a subdirectory
+OUTSIDE the non-recursive `deploy/scripts/*.py` + `deploy/scripts/lib/*.py`
+manifest glob `scripts/check-bot-errors-runtime-manifest.ts` scans, so this
+module does not trip that guard before it is pinned into the manifest at a
+later migration phase.
+
+Three pure functions form the contract surface, unit-tested on fixtures:
+
+- `capability_projection` / `capability_digest` -- byte-for-byte mirrors of
+  `receiptCapabilityIdentity` / `receiptCapabilityDigest`
+  (`scripts/lib/fleet-receipt-digest.ts:100-164`). Fail-closed
+  (`ReceiptProjectionError`) on any missing/ill-typed identity field, same
+  fields, same rules, proven identical by the cross-language lockstep test
+  `tests/scripts/lib/capture-runtime-receipt-lockstep.test.ts`.
+- `redact_bundle` -- reuses `deploy/scripts/lib/bot_errors_redaction.py`
+  exactly as-is (`redact_json_value` + `redact_bot_errors_text`); no
+  hand-rolled scrubbing here. Redaction is security-critical (design §3):
+  these receipts are meant to be safe to store/commit operator-side.
+
+`capture(...)` assembles a full receipt bundle from already-fetched/injected
+sources (never queries a live instance itself) -- see its docstring for the
+seam. It is NOT exercised against a real fleet by this increment's tests;
+it exists so a later phase (deploy-time / periodic / restart-triggered
+wiring, design §2.2) has a single call to make once live I/O is wired in.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import sys
+from pathlib import Path
+from typing import Any, Callable, Union
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+DEPLOY_SCRIPTS_DIR = SCRIPT_DIR.parent
+if str(DEPLOY_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(DEPLOY_SCRIPTS_DIR))
+
+from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value  # noqa: E402
+
+
+class ReceiptProjectionError(ValueError):
+    """Raised when a receipt bundle cannot be reduced to the
+    capability-identity projection -- mirrors `ReceiptDigestError`
+    (`scripts/lib/fleet-receipt-digest.ts`). Fail-closed: a bundle this
+    cannot project must never be silently hashed as if it matched.
+    """
+
+
+def _require_non_empty_string(value: Any, field: str) -> str:
+    if not isinstance(value, str) or value.strip() == "":
+        raise ReceiptProjectionError(f"receipt.{field} must be a non-empty string")
+    return value
+
+
+def _require_non_negative_int(value: Any, field: str) -> int:
+    # bool is an int subclass in Python; TS's `typeof x !== 'number'` already
+    # excludes booleans, so exclude them here too rather than silently
+    # accepting True/False as 1/0.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ReceiptProjectionError(f"receipt.{field} must be a non-negative integer")
+    if isinstance(value, float) and not value.is_integer():
+        raise ReceiptProjectionError(f"receipt.{field} must be a non-negative integer")
+    ivalue = int(value)
+    if ivalue < 0:
+        raise ReceiptProjectionError(f"receipt.{field} must be a non-negative integer")
+    return ivalue
+
+
+def capability_projection(bundle: Any) -> dict:
+    """Reduce a receipt bundle to its capability-identity projection.
+
+    Byte-for-byte mirror of `receiptCapabilityIdentity`
+    (`scripts/lib/fleet-receipt-digest.ts:100-150`): same six output fields,
+    same validation rules, same fail-closed behavior. Any extra/volatile
+    field on `bundle` (uptime, timestamps, counters) is ignored, never
+    hashed. `fallbackChain` order is preserved exactly as given -- it is
+    semantic priority, not sorted.
+    """
+    if not isinstance(bundle, dict):
+        raise ReceiptProjectionError("receipt must be a JSON object")
+
+    commit = _require_non_empty_string(bundle.get("commit"), "commit")
+    provider = _require_non_empty_string(bundle.get("provider"), "provider")
+    model_usability_status = _require_non_empty_string(
+        bundle.get("modelUsabilityStatus"), "modelUsabilityStatus"
+    )
+    schema_migration = _require_non_negative_int(bundle.get("schemaMigration"), "schemaMigration")
+
+    raw_fallback_chain = bundle.get("fallbackChain")
+    if not isinstance(raw_fallback_chain, list):
+        raise ReceiptProjectionError("receipt.fallbackChain must be an array")
+    fallback_chain: list[dict] = []
+    for index, entry in enumerate(raw_fallback_chain):
+        if not isinstance(entry, dict):
+            raise ReceiptProjectionError(f"receipt.fallbackChain[{index}] must be an object")
+        entry_provider = entry.get("provider")
+        entry_model = entry.get("model")
+        entry_eligible = entry.get("eligible")
+        if not isinstance(entry_provider, str):
+            raise ReceiptProjectionError(f"receipt.fallbackChain[{index}].provider must be a string")
+        if not isinstance(entry_model, str):
+            raise ReceiptProjectionError(f"receipt.fallbackChain[{index}].model must be a string")
+        if not isinstance(entry_eligible, bool):
+            raise ReceiptProjectionError(f"receipt.fallbackChain[{index}].eligible must be a boolean")
+        fallback_chain.append({"provider": entry_provider, "model": entry_model, "eligible": entry_eligible})
+
+    drift_check = bundle.get("driftCheck")
+    if not isinstance(drift_check, dict) or not isinstance(drift_check.get("ok"), bool):
+        raise ReceiptProjectionError("receipt.driftCheck.ok must be a boolean")
+
+    return {
+        "commit": commit,
+        "schemaMigration": schema_migration,
+        "provider": provider,
+        "modelUsabilityStatus": model_usability_status,
+        "fallbackChain": fallback_chain,
+        "driftOk": drift_check["ok"],
+    }
+
+
+def capability_digest(bundle: Any) -> str:
+    """`sha256(json.dumps(capability_projection(bundle), sort_keys=True,
+    separators=(",", ":"), ensure_ascii=True))`, hex digest, no `sha256:`
+    prefix -- byte-identical call shape to `receiptCapabilityDigest`
+    (`scripts/lib/fleet-receipt-digest.ts:160-164`), proven by the
+    cross-language lockstep test
+    `tests/scripts/lib/capture-runtime-receipt-lockstep.test.ts`.
+    """
+    projection = capability_projection(bundle)
+    material = json.dumps(projection, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _redact_text(value: Any) -> str:
+    return redact_bot_errors_text(value, credential_path_marker="[REDACTED CREDENTIAL PATH]")
+
+
+def redact_bundle(bundle: dict) -> dict:
+    """Run every string-valued field of `bundle` (recursively, through dicts
+    and lists) through the shared BOT ERRORS scrubber
+    (`deploy/scripts/lib/bot_errors_redaction.py`). Reuse only -- no
+    hand-rolled scrubbing here (design §3: "any hand-rolled scrubber is a
+    rejection").
+
+    Identity-tagged fields (commit sha, provider name, model name, status
+    enum, schema int, eligible bool) are not phone/credential-shaped and
+    pass through unchanged; volatile/free-text fields containing phone
+    numbers, credential paths, JIDs, etc. are scrubbed.
+    """
+    return redact_json_value(bundle, _redact_text)
+
+
+def _sanitize_auth_bond(auth_bond: Any) -> dict | None:
+    """Structural exclusion (design §3, point 2): `creds.path` (a full
+    filesystem path) and raw `authDir`/`stateRoot`/`dataRoot` are dropped
+    entirely rather than redacted-in-place, mirroring how `formatAuthBond`
+    (health.ts) already truncates hashes instead of emitting them in full.
+    """
+    if not isinstance(auth_bond, dict):
+        return None
+    sanitized = dict(auth_bond)
+    creds = sanitized.get("creds")
+    if isinstance(creds, dict):
+        creds = dict(creds)
+        creds.pop("path", None)
+        sanitized["creds"] = creds
+    for unsafe_key in ("authDir", "stateRoot", "dataRoot"):
+        sanitized.pop(unsafe_key, None)
+    return sanitized
+
+
+CaptureSource = Union[dict, Callable[[], dict]]
+
+
+def _resolve_source(source: "CaptureSource | None") -> dict:
+    if source is None:
+        return {}
+    resolved = source() if callable(source) else source
+    if not isinstance(resolved, dict):
+        raise ReceiptProjectionError("capture source must resolve to a JSON object")
+    return resolved
+
+
+def capture(
+    *,
+    health: CaptureSource,
+    drift_check: "CaptureSource | None" = None,
+    service_active_enter_timestamp: "str | Callable[[], str | None] | None" = None,
+    captured_at: "str | Callable[[], str] | None" = None,
+) -> dict:
+    """Assemble a redacted receipt bundle from already-fetched/injected
+    sources (design §2.1).
+
+    Never performs I/O itself: every source is either an already-fetched
+    dict or a zero-arg callable the CALLER wires to real I/O (an HTTP GET of
+    `/health`, a `systemctl ... show` shell-out, the drift-check job's
+    result file). This keeps the pure capture-assembly logic testable on
+    fixtures while the live wiring (deploy-time / periodic / restart
+    triggered, design §2.2) is a thin caller-supplied seam -- tests in this
+    increment only ever pass plain dicts/lambdas, never touching a real
+    fleet.
+
+    Does NOT write anything to disk -- committing a receipt under
+    `docs/reliability-runner/...` is a later phase (design §10), gated on
+    the storage-model decision (D1).
+    """
+    health_data = _resolve_source(health)
+    instance = health_data.get("instance") if isinstance(health_data.get("instance"), dict) else {}
+    sqlite = health_data.get("sqlite") if isinstance(health_data.get("sqlite"), dict) else {}
+    whatsapp = health_data.get("whatsapp") if isinstance(health_data.get("whatsapp"), dict) else {}
+    runtime = health_data.get("runtime") if isinstance(health_data.get("runtime"), dict) else {}
+    agent_runtime = runtime.get("agent") if isinstance(runtime.get("agent"), dict) else {}
+    turn_capability = (
+        agent_runtime.get("turnCapability") if isinstance(agent_runtime.get("turnCapability"), dict) else {}
+    )
+
+    drift = _resolve_source(drift_check)
+
+    if callable(service_active_enter_timestamp):
+        service_active_enter_timestamp = service_active_enter_timestamp()
+    if callable(captured_at):
+        captured_at = captured_at()
+
+    bundle: dict[str, Any] = {
+        # Identity-tagged (hashed via capability_digest, design §4).
+        "commit": instance.get("commit"),
+        "provider": instance.get("provider"),
+        "modelUsabilityStatus": turn_capability.get("modelUsabilityStatus"),
+        "schemaMigration": sqlite.get("schema_migration_latest"),
+        "fallbackChain": instance.get("fallbackChain"),
+        "driftCheck": {"ok": drift.get("ok")},
+        # Volatile -- carried for operator inspection, never hashed (design §4).
+        "branch": instance.get("branch"),
+        "generatedAt": health_data.get("generated_at"),
+        "uptimeSeconds": health_data.get("uptime_seconds"),
+        "authBond": _sanitize_auth_bond(whatsapp.get("auth_bond")),
+        "credentialLifecycle": whatsapp.get("credential_lifecycle"),
+        "driftCheckedAt": drift.get("checkedAt"),
+        "driftIssues": drift.get("issues"),
+        "serviceActiveEnterTimestamp": service_active_enter_timestamp,
+        "capturedAt": captured_at,
+    }
+    return redact_bundle(bundle)
