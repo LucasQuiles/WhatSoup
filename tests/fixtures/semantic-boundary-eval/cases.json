@@ -1,0 +1,233 @@
+{
+  "schemaVersion": 1,
+  "lockedAt": "2026-07-15T22:15:00Z",
+  "primaryMetric": "exact decision accuracy",
+  "target": {
+    "minimumAccuracy": 0.9,
+    "maximumFalseBlocks": 0
+  },
+  "productionRoots": [
+    "src/main.ts",
+    "src/bootstrap.ts",
+    "src/bootstrap-auth.ts",
+    "src/fleet/standalone.ts",
+    "src/transport/auth.ts"
+  ],
+  "graphs": {
+    "integrated": {
+      "src/main.ts": "import { feature } from './lib/feature.ts';\nfeature();",
+      "src/lib/feature.ts": "export function feature() { return 'live'; }"
+    },
+    "testOnly": {
+      "src/main.ts": "export const main = true;",
+      "src/lib/feature.ts": "export function feature() { return 'island'; }",
+      "tests/lib/feature.test.ts": "import { feature } from '../../src/lib/feature.ts';\nfeature();"
+    },
+    "commentAndString": {
+      "src/main.ts": "// import './lib/feature.ts'\nconst mentioned = \"./lib/feature.ts\";",
+      "src/lib/feature.ts": "export const feature = true;"
+    },
+    "disconnected": {
+      "src/main.ts": "export const main = true;",
+      "src/island/a.ts": "export { b } from './b.ts';",
+      "src/island/b.ts": "export const b = true;"
+    },
+    "literalDynamic": {
+      "src/main.ts": "await import('./lib/feature.ts');",
+      "src/lib/feature.ts": "export const feature = true;"
+    },
+    "unresolvedDynamic": {
+      "src/main.ts": "const target = './lib/feature.ts';\nawait import(target);",
+      "src/lib/feature.ts": "export const feature = true;"
+    }
+  },
+  "cases": [
+    {
+      "id": "visible-pr-1835-historical",
+      "cohort": "visible-pr",
+      "evidence": "detector-backed",
+      "expected": "block",
+      "currentDecision": "pass",
+      "rationale": "The green historical head added a production module that was imported only by tests and still had reproduced fail-open defects.",
+      "sourceRefs": [
+        "https://github.com/LucasQuiles/WhatSoup/pull/1835",
+        "https://github.com/LucasQuiles/WhatSoup/commit/f4eefeb4d23b76899da241e8c0fe936e00532087"
+      ],
+      "semantic": {
+        "kind": "git",
+        "revision": "f4eefeb4d23b76899da241e8c0fe936e00532087",
+        "changedModules": ["src/lib/capability-grant.ts"]
+      }
+    },
+    {
+      "id": "visible-pr-1838",
+      "cohort": "visible-pr",
+      "evidence": "detector-backed",
+      "expected": "block",
+      "currentDecision": "pass",
+      "rationale": "The added echo cache was a production island despite green required checks.",
+      "sourceRefs": ["https://github.com/LucasQuiles/WhatSoup/pull/1838"],
+      "semantic": {
+        "kind": "git",
+        "revision": "369e2fdae9aeacef1674958339b6c6931ffb544d",
+        "changedModules": ["src/lib/echo-cache.ts"]
+      },
+      "proposal": {
+        "number": 1838,
+        "state": "closed-unmerged",
+        "pathBlobSet": [
+          {"status": "added", "path": "src/lib/echo-cache.ts", "blobOid": "53f346cb59f176abdb967c1be71f1c58720d7729"},
+          {"status": "added", "path": "tests/lib/echo-cache.test.ts", "blobOid": "60835a7e3d88ae886f801b170c8c68f4dd927ae9"}
+        ]
+      }
+    },
+    {
+      "id": "visible-pr-1845",
+      "cohort": "visible-pr",
+      "evidence": "manual-visible",
+      "expected": "pass",
+      "currentDecision": "pass",
+      "rationale": "Legitimate publication-guard fix with a neighboring negative-control test.",
+      "sourceRefs": ["https://github.com/LucasQuiles/WhatSoup/pull/1845"]
+    },
+    {
+      "id": "visible-pr-1846",
+      "cohort": "visible-pr",
+      "evidence": "manual-visible",
+      "expected": "pass",
+      "currentDecision": "pass",
+      "rationale": "Legitimate symlinked-worktree fail-closed fix with a focused regression test.",
+      "sourceRefs": ["https://github.com/LucasQuiles/WhatSoup/pull/1846"]
+    },
+    {
+      "id": "visible-pr-1848",
+      "cohort": "visible-pr",
+      "evidence": "detector-backed",
+      "expected": "block",
+      "currentDecision": "pass",
+      "rationale": "The path/blob set is byte-identical to closed-unmerged PR #1838.",
+      "sourceRefs": [
+        "https://github.com/LucasQuiles/WhatSoup/pull/1848",
+        "https://github.com/LucasQuiles/WhatSoup/issues/1873#issuecomment-4985939553"
+      ],
+      "semantic": {
+        "kind": "git",
+        "revision": "1c6b0de90d8f6a437b783b011ded185b37441794",
+        "changedModules": ["src/lib/echo-cache.ts"]
+      },
+      "proposal": {
+        "number": 1848,
+        "state": "closed-unmerged",
+        "pathBlobSet": [
+          {"status": "added", "path": "src/lib/echo-cache.ts", "blobOid": "53f346cb59f176abdb967c1be71f1c58720d7729"},
+          {"status": "added", "path": "tests/lib/echo-cache.test.ts", "blobOid": "60835a7e3d88ae886f801b170c8c68f4dd927ae9"}
+        ]
+      }
+    },
+    {
+      "id": "visible-pr-1854",
+      "cohort": "visible-pr",
+      "evidence": "detector-backed",
+      "expected": "pass",
+      "currentDecision": "pass",
+      "rationale": "Positive control: the added helper is reached from the existing ingest owner.",
+      "sourceRefs": ["https://github.com/LucasQuiles/WhatSoup/pull/1854"],
+      "semantic": {
+        "kind": "git",
+        "revision": "17b5744f62662a8f63c25984781da843bffc18f9",
+        "changedModules": ["src/lib/self-mention-strip.ts"]
+      }
+    },
+    {
+      "id": "visible-pr-1857",
+      "cohort": "visible-pr",
+      "evidence": "manual-visible",
+      "expected": "block",
+      "currentDecision": "pass",
+      "rationale": "A cosmetic/hygiene resubmission did not address the recorded production-wiring disposition.",
+      "sourceRefs": [
+        "https://github.com/LucasQuiles/WhatSoup/pull/1857",
+        "https://github.com/LucasQuiles/WhatSoup/issues/1873#issuecomment-4985939553"
+      ],
+      "semantic": {
+        "kind": "git",
+        "revision": "ca887b024a419fd359f6384edea4239c1e42ce02",
+        "changedModules": ["src/lib/oauth-refresh-diagnostics.ts"]
+      },
+      "reentry": {
+        "priorDisposition": "production-unreachable",
+        "delta": "cosmetic",
+        "packetComplete": false,
+        "ownerOverride": false
+      }
+    },
+    {
+      "id": "visible-pr-1858",
+      "cohort": "visible-pr",
+      "evidence": "detector-backed",
+      "expected": "block",
+      "currentDecision": "pass",
+      "rationale": "The added inbound mention gate is unreachable from production roots.",
+      "sourceRefs": ["https://github.com/LucasQuiles/WhatSoup/pull/1858"],
+      "semantic": {
+        "kind": "git",
+        "revision": "34ee2de782090725dc4072f82f7bbce0a2373017",
+        "changedModules": ["src/lib/inbound-mention-gating.ts"]
+      }
+    },
+    {
+      "id": "visible-pr-1859",
+      "cohort": "visible-pr",
+      "evidence": "detector-backed",
+      "expected": "block",
+      "currentDecision": "pass",
+      "rationale": "The added task-status formatter is unreachable from production roots.",
+      "sourceRefs": ["https://github.com/LucasQuiles/WhatSoup/pull/1859"],
+      "semantic": {
+        "kind": "git",
+        "revision": "67414fda609e6f29f3648c0f416ae04915416403",
+        "changedModules": ["src/lib/task-status-snapshot.ts"]
+      }
+    },
+    {
+      "id": "visible-pr-1860",
+      "cohort": "visible-pr",
+      "evidence": "manual-visible",
+      "expected": "pass",
+      "currentDecision": "pass",
+      "rationale": "Positive control: bounded test teardown fix with no new production island.",
+      "sourceRefs": ["https://github.com/LucasQuiles/WhatSoup/pull/1860"]
+    },
+
+    {"id":"synthetic-semantic-integrated","cohort":"synthetic","evidence":"synthetic","expected":"pass","currentDecision":"pass","rationale":"A new module with a production call path is legitimate.","sourceRefs":["fixture:graphs.integrated"],"semantic":{"kind":"fixture","graph":"integrated","changedModules":["src/lib/feature.ts"]}},
+    {"id":"synthetic-semantic-test-only","cohort":"synthetic","evidence":"synthetic","expected":"block","currentDecision":"pass","rationale":"Test-only imports do not establish production reachability.","sourceRefs":["fixture:graphs.testOnly"],"semantic":{"kind":"fixture","graph":"testOnly","changedModules":["src/lib/feature.ts"]}},
+    {"id":"synthetic-semantic-comment-string","cohort":"synthetic","evidence":"synthetic","expected":"block","currentDecision":"pass","rationale":"Comments and string literals do not establish reachability.","sourceRefs":["fixture:graphs.commentAndString"],"semantic":{"kind":"fixture","graph":"commentAndString","changedModules":["src/lib/feature.ts"]}},
+    {"id":"synthetic-semantic-disconnected-island","cohort":"synthetic","evidence":"synthetic","expected":"block","currentDecision":"pass","rationale":"A connected island that has no root path remains unreachable.","sourceRefs":["fixture:graphs.disconnected"],"semantic":{"kind":"fixture","graph":"disconnected","changedModules":["src/island/a.ts","src/island/b.ts"]}},
+    {"id":"synthetic-semantic-literal-dynamic","cohort":"synthetic","evidence":"synthetic","expected":"pass","currentDecision":"pass","rationale":"A literal dynamic import is a statically provable production edge.","sourceRefs":["fixture:graphs.literalDynamic"],"semantic":{"kind":"fixture","graph":"literalDynamic","changedModules":["src/lib/feature.ts"]}},
+    {"id":"synthetic-semantic-unresolved-dynamic","cohort":"synthetic","evidence":"synthetic","expected":"block","currentDecision":"pass","rationale":"A computed dynamic import cannot prove the added module is reachable.","sourceRefs":["fixture:graphs.unresolvedDynamic"],"semantic":{"kind":"fixture","graph":"unresolvedDynamic","changedModules":["src/lib/feature.ts"]}},
+    {"id":"synthetic-history-exact-closed","cohort":"synthetic","evidence":"synthetic","expected":"block","currentDecision":"pass","rationale":"Exact content matching a closed-unmerged PR is rejected.","sourceRefs":["fixture:history.exactClosed"],"history":{"exactMatch":"closed-unmerged","matchedPr":101}},
+    {"id":"synthetic-history-exact-open","cohort":"synthetic","evidence":"synthetic","expected":"block","currentDecision":"pass","rationale":"Exact content matching an open PR routes work to the existing PR.","sourceRefs":["fixture:history.exactOpen"],"history":{"exactMatch":"open","matchedPr":102}},
+    {"id":"synthetic-history-subset","cohort":"synthetic","evidence":"synthetic","expected":"warn","currentDecision":"pass","rationale":"Subset blob reuse may be a legitimate shared refactor.","sourceRefs":["fixture:history.subset"],"history":{"subsetMatch":true,"matchedPr":103}},
+    {"id":"synthetic-history-renamed-patch","cohort":"synthetic","evidence":"synthetic","expected":"block","currentDecision":"pass","rationale":"A stable patch match survives path renaming.","sourceRefs":["fixture:history.renamedPatch"],"history":{"renamedPatchClosed":true,"matchedPr":104}},
+    {"id":"synthetic-history-path-overlap","cohort":"synthetic","evidence":"synthetic","expected":"warn","currentDecision":"pass","rationale":"Path overlap without exact content is contextual evidence, not a blocker.","sourceRefs":["fixture:history.pathOverlap"],"history":{"pathOverlap":true,"matchedPr":105}},
+    {"id":"synthetic-reentry-cosmetic","cohort":"synthetic","evidence":"synthetic","expected":"block","currentDecision":"pass","rationale":"Cosmetic changes do not satisfy an architectural re-entry condition.","sourceRefs":["fixture:reentry.cosmetic"],"reentry":{"priorDisposition":"production-unreachable","delta":"cosmetic","packetComplete":false,"ownerOverride":false}},
+    {"id":"synthetic-reentry-material","cohort":"synthetic","evidence":"synthetic","expected":"pass","currentDecision":"pass","rationale":"A material correction with a complete packet is eligible for re-entry.","sourceRefs":["fixture:reentry.material"],"reentry":{"priorDisposition":"production-unreachable","delta":"material","packetComplete":true,"ownerOverride":false}},
+    {"id":"synthetic-reentry-owner-override","cohort":"synthetic","evidence":"synthetic","expected":"pass","currentDecision":"pass","rationale":"A scoped owner override permits the exact fingerprint.","sourceRefs":["fixture:reentry.override"],"reentry":{"priorDisposition":"production-unreachable","delta":"cosmetic","packetComplete":false,"ownerOverride":true}},
+    {"id":"synthetic-history-unrelated-same-path","cohort":"synthetic","evidence":"synthetic","expected":"pass","currentDecision":"pass","rationale":"Sharing a filename without content or symbol overlap is not evidence of duplication.","sourceRefs":["fixture:history.samePathOnly"],"history":{"sameFilenameOnly":true}},
+    {"id":"synthetic-issue-exact","cohort":"synthetic","evidence":"synthetic","expected":"block","currentDecision":"pass","rationale":"An exact normalized issue fingerprint is blocked at the producer boundary.","sourceRefs":["fixture:issue.exact"],"history":{"exactIssue":true,"matchedIssue":201}},
+    {"id":"synthetic-issue-similar","cohort":"synthetic","evidence":"synthetic","expected":"warn","currentDecision":"pass","rationale":"Issue similarity is heuristic and starts warning-only.","sourceRefs":["fixture:issue.similar"],"history":{"similarIssue":true,"matchedIssue":202}},
+    {"id":"synthetic-provenance-current","cohort":"synthetic","evidence":"synthetic","expected":"pass","currentDecision":"pass","rationale":"Remote tip, tracking ref, and merge base are all proven current.","sourceRefs":["fixture:provenance.current"],"provenance":{"remoteAvailable":true,"trackingMatches":true,"mergeBaseAvailable":true,"olderBase":false,"overlap":false,"highCoupling":false}},
+    {"id":"synthetic-provenance-stale-tracking","cohort":"synthetic","evidence":"synthetic","expected":"block","currentDecision":"pass","rationale":"A stale local tracking ref invalidates downstream comparisons.","sourceRefs":["fixture:provenance.staleTracking"],"provenance":{"remoteAvailable":true,"trackingMatches":false,"mergeBaseAvailable":true,"olderBase":true,"overlap":false,"highCoupling":false}},
+    {"id":"synthetic-provenance-stale-disjoint","cohort":"synthetic","evidence":"synthetic","expected":"warn","currentDecision":"pass","rationale":"A proven older base with disjoint changes warns rather than blocks.","sourceRefs":["fixture:provenance.staleDisjoint"],"provenance":{"remoteAvailable":true,"trackingMatches":true,"mergeBaseAvailable":true,"olderBase":true,"overlap":false,"highCoupling":false}},
+    {"id":"synthetic-provenance-stale-overlap","cohort":"synthetic","evidence":"synthetic","expected":"block","currentDecision":"pass","rationale":"Overlapping upstream changes make the older base unsafe.","sourceRefs":["fixture:provenance.staleOverlap"],"provenance":{"remoteAvailable":true,"trackingMatches":true,"mergeBaseAvailable":true,"olderBase":true,"overlap":true,"highCoupling":false}},
+    {"id":"synthetic-provenance-unavailable","cohort":"synthetic","evidence":"synthetic","expected":"inconclusive","currentDecision":"pass","rationale":"Unavailable remote evidence is unknown, not clean.","sourceRefs":["fixture:provenance.unavailable"],"provenance":{"remoteAvailable":false,"trackingMatches":false,"mergeBaseAvailable":false,"olderBase":false,"overlap":false,"highCoupling":false}},
+    {"id":"synthetic-supply-mutable-action","cohort":"synthetic","evidence":"synthetic","expected":"block","currentDecision":"pass","rationale":"A mutable action tag is not an immutable upstream pin.","sourceRefs":["fixture:supply.mutableAction"],"supply":{"actionRefs":["actions/checkout@v4"]}},
+    {"id":"synthetic-supply-immutable-action","cohort":"synthetic","evidence":"synthetic","expected":"pass","currentDecision":"pass","rationale":"A full action commit SHA with release provenance is immutable.","sourceRefs":["fixture:supply.immutableAction"],"supply":{"actionRefs":["actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"],"provenanceManifest":true}},
+    {"id":"synthetic-supply-docker-no-digest","cohort":"synthetic","evidence":"synthetic","expected":"block","currentDecision":"pass","rationale":"A patch-pinned base image without a digest remains mutable.","sourceRefs":["fixture:supply.dockerNoDigest"],"supply":{"dockerBases":["node:24.15.0-slim"]}},
+    {"id":"synthetic-supply-docker-digest","cohort":"synthetic","evidence":"synthetic","expected":"pass","currentDecision":"pass","rationale":"A canonical Node patch plus image digest is immutable.","sourceRefs":["fixture:supply.dockerDigest"],"supply":{"dockerBases":["node:24.15.0-slim@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"provenanceManifest":true}},
+    {"id":"synthetic-supply-floating-runner","cohort":"synthetic","evidence":"synthetic","expected":"warn","currentDecision":"pass","rationale":"Floating runner labels begin warning-only during calibration.","sourceRefs":["fixture:supply.floatingRunner"],"supply":{"runnerLabels":["ubuntu-latest"]}},
+    {"id":"synthetic-process-unbounded","cohort":"synthetic","evidence":"synthetic","expected":"warn","currentDecision":"pass","rationale":"An unbounded process primitive needs a watchdog and owned cleanup.","sourceRefs":["fixture:process.unbounded"],"process":{"bounded":false,"ownsProcessGroup":false}},
+    {"id":"synthetic-guard-no-negative-fixture","cohort":"synthetic","evidence":"synthetic","expected":"warn","currentDecision":"pass","rationale":"A guard change without a neighboring negative-control fixture is warning-only during calibration.","sourceRefs":["fixture:guard.noNegative"],"guardChange":{"negativeControlChanged":false}},
+    {"id":"synthetic-boundary-timeout","cohort":"synthetic","evidence":"synthetic","expected":"inconclusive","currentDecision":"inconclusive","rationale":"A timed-out boundary run is inconclusive and blocking at the boundary.","sourceRefs":["fixture:process.timeout"],"timeout":true}
+  ]
+}
