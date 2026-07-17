@@ -63,10 +63,7 @@ Insert this test near the start of `describe('boundary run validator', ...)`:
 Immediately before the `rawCases` array, add:
 
 ```typescript
-    const canonicalLines = canonical.split('\n');
-    expect(canonicalLines.length).toBeGreaterThan(2);
-    const canonicalWithCrLf = canonicalLines.join('\r\n');
-    expect(canonicalWithCrLf.split('\r\n')).toHaveLength(canonicalLines.length);
+    const canonicalWithCrLf = canonical.replaceAll('\n', '\r\n');
 ```
 
 Replace the flagged raw case with:
