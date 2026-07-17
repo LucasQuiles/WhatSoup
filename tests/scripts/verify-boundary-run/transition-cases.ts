@@ -323,17 +323,25 @@ export function registerTransitionCases(): void {
     execFileSync('git', ['clone', '--shared', process.cwd(), clone], { stdio: 'ignore' });
     git(clone, ['config', 'user.name', 'WhatSoup Test']);
     git(clone, ['config', 'user.email', FIXTURE_EMAIL]);
-    const pinnedMerge = git(clone, ['rev-list', '--first-parent', '--merges', 'HEAD'])
+    const branchHead = git(clone, ['rev-parse', 'HEAD']);
+    const baseHead = git(clone, ['rev-parse', 'origin/main']);
+    const pullRequestMergeHead = execFileSync(
+      'git',
+      ['commit-tree', `${branchHead}^{tree}`, '-p', baseHead, '-p', branchHead],
+      { cwd: clone, encoding: 'utf8', input: 'test: synthetic pull request merge\n' },
+    ).trim();
+    git(clone, ['update-ref', 'refs/testing/pull-request-merge', pullRequestMergeHead]);
+    git(clone, ['switch', '--detach', pullRequestMergeHead]);
+    const pinnedMerge = git(clone, ['rev-list', '--merges', 'HEAD'])
       .split('\n')
       .filter(Boolean)
       .find((commit) => {
         const parents = git(clone, ['show', '-s', '--format=%P', commit]).split(' ');
         return parents.length === 2 && parents[1] === BOUNDARY_PINNED_GENERATED_INDEX_PARENT;
       });
-    if (pinnedMerge !== undefined) {
-      const [historicalFirstParent] = git(clone, ['show', '-s', '--format=%P', pinnedMerge]).split(' ');
-      git(clone, ['switch', '-c', 'pinned-conflict-base', historicalFirstParent!]);
-    }
+    if (pinnedMerge === undefined) throw new Error('pinned generated-index merge is not reachable from the fixture head');
+    const [historicalFirstParent] = git(clone, ['show', '-s', '--format=%P', pinnedMerge]).split(' ');
+    git(clone, ['switch', '-c', 'pinned-conflict-base', historicalFirstParent!]);
     const validatorPaths = [
       'scripts/lib/verification/boundary-run-manifest.ts',
       'scripts/verify-boundary-run.ts',
