@@ -434,6 +434,19 @@ on a distinct branch, commits this amendment with newly generated index artifact
 index after commit, and uses new observation/reconciliation IDs. No prior Pass attempt substitutes
 for the failed required gate.
 
+## 2026-07-17 nested-console capability recovery
+
+Reconciliation run `bcf00-reconciliation-02c955ca4-20260717a` created helper-owned merge
+`9abc8d11aadce6e1ad621b8c912fdeaeb2177035` and passed the corrected work-index check, postmerge
+validator admission, focused suites, typechecks, and locked evaluator predicates. Its required
+branch gate later exited 1 when `console` shadow lint could not resolve
+`eslint-plugin-react-hooks`. Root dependency installation does not materialize the separate
+`console/package-lock.json` tree. Preserve that run, merge, logs, and branch as Inconclusive.
+Recovery starts from `02c955ca41444ca6a1d616abda4bb5607e00c61b` on another branch, installs
+both root and console lockfiles through the pinned wrapper before run initialization, and verifies
+the missing package is readable. Those setup checks are not BCF Pass evidence. The full immutable
+observation/reconciliation and branch gate must run again under new IDs.
+
 ## Authorization Boundary
 
 The planning packet's initial approval authorized writing and committing the local specification,

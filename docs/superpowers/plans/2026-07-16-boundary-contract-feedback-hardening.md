@@ -2576,6 +2576,27 @@ branch, commit this plan/notes amendment with regenerated work-index artifacts, 
 clean after commit, and rerun observation/reconciliation under new IDs. The failed gate is never
 retried or promoted.
 
+Fifth recovery note for preserved reconciliation run
+`bcf00-reconciliation-02c955ca4-20260717a`: helper-owned merge
+`9abc8d11aadce6e1ad621b8c912fdeaeb2177035` passed the corrected work-index gate plus the
+postmerge validator, focused suites, typechecks, evaluators, and earlier branch checks. The branch
+gate later exited 1 at `console` shadow lint because root dependency installation had not installed
+the nested `console/package-lock.json`; ESLint could not resolve `eslint-plugin-react-hooks`.
+Preserve the run and branch as Inconclusive. Recover from
+`02c955ca41444ca6a1d616abda4bb5607e00c61b` on a distinct branch and, before initializing any run,
+execute both pinned lockfile installs:
+
+```bash
+bash scripts/run-with-pinned-npm.sh ci
+bash scripts/run-with-pinned-npm.sh --prefix console ci
+test -r console/node_modules/eslint-plugin-react-hooks/package.json
+```
+
+These are setup capability preflights, not accepted BCF evidence. A later guard tranche should move
+the nested-workspace dependency check to the beginning of the branch gate so agents receive the
+actionable failure before expensive checks. Re-run observation/reconciliation under new IDs; never
+retry or promote the failed gate.
+
 ```bash
 git rev-parse --show-toplevel
 git rev-parse HEAD
