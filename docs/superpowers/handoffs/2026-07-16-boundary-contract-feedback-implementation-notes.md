@@ -482,6 +482,25 @@ row. Any mismatched digest or byte count, a structured result that aliases anoth
 or an unrelated duplicate path remains fail-closed. A fresh observation/reconciliation chain is
 required before the next BCF-01 import attempt.
 
+## 2026-07-17 profile-owned work-transition recovery
+
+Recovery4 finalized BCF-00 Pass at merge `b17f65e2c39b7c79d0a6ec172717185c2dc8218e` and pushed
+`experiment/jul17-boundary-contract-feedback-hardening-recovery4`. The first BCF-01 initialization
+successfully imported that predecessor. After the profile-owned parser tests were edited, the
+reserved `parser-red` command was rejected before spawn as `attempt-pre-snapshot-drift`. A second
+initialization after the edit correctly rejected the finalized predecessor because read-only
+source verification observed the live edit. Together those results prove the documented
+clean-init, edit, RED-command sequence is unreachable under exact pre-snapshot equality; the same
+equality would also reject the later unstaged-to-staged representation change before commit.
+
+Preserve recovery4, its finalized BCF-00 evidence, the failed successor evidence, and its local RED
+test tranche. Recovery5 starts from `26468adb50fac15ab52e3a8addd0f23ecc5aeb16`. Predecessor
+verification remains exact. The bounded correction admits only profile-owned unstaged tracked
+deltas before commands and only a hash-identical unstaged-to-staged transfer before commit.
+Regressions must reject foreign tracked paths, index drift before commands, owner/untracked drift,
+and any staged bytes that differ from the last accepted unstaged snapshot. A fresh immutable
+BCF-00 chain is required before BCF-01 is recreated.
+
 ## Authorization Boundary
 
 The planning packet's initial approval authorized writing and committing the local specification,

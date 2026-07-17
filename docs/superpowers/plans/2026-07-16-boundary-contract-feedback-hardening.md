@@ -2624,6 +2624,30 @@ once; a different digest, byte count, or cross-attempt path remains rejected. Co
 helper/test correction with subject `fix(quality): admit exact structured stream aliases`, then
 re-run the full immutable BCF-00 chain before BCF-01.
 
+Eighth recovery note for finalized reconciliation run
+`bcf00-reconciliation-26468adb5-20260717a`: helper-owned merge
+`b17f65e2c39b7c79d0a6ec172717185c2dc8218e` passed every BCF-00 requirement, finalized, verified,
+and was pushed on its preserved recovery branch. Its BCF-01 predecessor import then succeeded, but
+the first planned RED edit exposed an unreachable state transition: initializing the successor at
+the clean predecessor snapshot makes the profile-owned test edit fail `record-command` with
+`attempt-pre-snapshot-drift`, while initializing after the edit correctly fails predecessor
+read-only verification. The same exact-snapshot check would later reject `git add` even when it
+only moves the already-tested bytes from the unstaged patch into the index.
+
+Preserve the finalized BCF-00 run, pushed branch, failed successor run, and uncommitted RED test
+tranche. Recover from pre-merge validator commit
+`26468adb50fac15ab52e3a8addd0f23ecc5aeb16` on a distinct branch. Do not weaken predecessor
+verification. Add focused RED/GREEN regressions so command pre-admission accepts a changed live
+snapshot only when HEAD, index tree, staged patch, allowed-untracked records, and owner records
+remain bound and every changed tracked path is inside the selected profile's closed path set.
+Foreign paths, index changes, owner changes, and untracked changes remain rejected before spawn.
+For a commit transition, admit only a byte-equivalent staging move: the prior unstaged patch hash
+must equal the live staged patch hash, both opposite patch channels must be empty, metadata must be
+stable, and the live staged/changed paths must equal the exact profile allowlist. A content change
+between the last accepted check and staging remains rejected. Commit the bounded helper/test
+correction with subject `fix(quality): admit profile-owned work transitions`, then rerun the full
+immutable BCF-00 chain before recreating BCF-01 and its RED tranche.
+
 ```bash
 git rev-parse --show-toplevel
 git rev-parse HEAD
