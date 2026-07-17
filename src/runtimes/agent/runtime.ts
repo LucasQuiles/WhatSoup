@@ -7247,6 +7247,14 @@ export class AgentRuntime implements Runtime {
     purpose: SystemTurnPurpose,
     routeChatJid?: string,
   ): SystemTurnLeaseToken {
+    // One retry window per lease before quarantine: a production 240s expiry
+    // was a claude-cli subprocess merely slow to start under host I/O pressure
+    // (zero stderr), and immediate teardown killed the session under the
+    // queued user turn ('No active session'). The stream still has no request
+    // IDs, so the request is never re-sent — the lease keeps blocking while
+    // one more full window lets the slow result land; a second consecutive
+    // expiry quarantines exactly as before.
+    let retryWindowGranted = false;
     return this.pendingSystemResults.mark({
       scopeKey,
       purpose,
@@ -7256,7 +7264,15 @@ export class AgentRuntime implements Runtime {
         ? {}
         : {
             timeoutMs: SYSTEM_TURN_TIMEOUT_MS,
-            onTimeout: async (lease: SystemTurnLeaseToken): Promise<boolean> => {
+            onTimeout: async (lease: SystemTurnLeaseToken): Promise<boolean | 'retry'> => {
+              if (!retryWindowGranted) {
+                retryWindowGranted = true;
+                log.warn(
+                  { scopeKey, leaseId: lease.id, purpose, timeoutMs: SYSTEM_TURN_TIMEOUT_MS },
+                  'system provider request timed out — retrying once before quarantine',
+                );
+                return 'retry';
+              }
               log.error(
                 { scopeKey, leaseId: lease.id, purpose, timeoutMs: SYSTEM_TURN_TIMEOUT_MS },
                 'system provider request timed out — quarantining source generation',
