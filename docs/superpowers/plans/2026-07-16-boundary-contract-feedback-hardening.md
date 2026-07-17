@@ -2717,15 +2717,17 @@ Twelfth recovery note for preserved reconciliation run
 `669e6b42856bb6f0ccb237ad42d56c71e184e8bc` passed the committed 62-test validator, focused
 semantic suites, both typecheck lanes, and all three evaluator predicates. The strict branch gate
 then exited 1 at the unfiltered test-integrity check with one new `js-no-expect` finding on the
-expanded `[BCF00-N06]` test. The test contains expectations and its focused behavior passed, but the
-large combined case crossed the scanner's structural heuristic; no baseline update, skip, or gate
-bypass can relabel that finding clean. The run is preserved as
+expanded `[BCF00-N06]` test. The test contains expectations and its focused behavior passed, but its
+`expect.stringMatching` absolute-path regex contains adjacent slash delimiters that the scanner's
+balanced-parenthesis heuristic treats as a line comment, truncating the detected test block before
+the first expectation. No baseline update, skip, or gate bypass can relabel that finding clean. The run is preserved as
 `deferred`/`inconclusive`/`current`, verifies structurally, and rejects Pass-only finalization.
 
 Recover from pre-merge validator commit
 `7ce846e1f0c5dbfbb6bd6c7eb3554ad299287c7c` on a distinct branch. Keep the exact U06/N06
-capability assertions bounded and move the longer fake-executable fallback/rejection neighbors into
-one dedicated unmarked test with direct expectations. Run the focused validator pair, full
+capability assertions bounded, express absolute-path validation without the scanner-ambiguous regex,
+and move the longer fake-executable fallback/rejection neighbors into one dedicated unmarked test
+with direct expectations. Run the focused validator pair, full
 validator suite, scripts typecheck, and unfiltered test-integrity check; the latter must report no
 new finding before commit. Do not edit the test-integrity baseline. Commit the test-only correction
 with subject `test(quality): keep capability controls scanner-legible`, then rerun the complete
