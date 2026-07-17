@@ -4317,8 +4317,7 @@ export class AgentRuntime implements Runtime {
     await this.pendingSystemResults.waitUntilDispatchable(systemScopeKey, systemTurnLease);
     if (dispatchCancelled()) return;
 
-    // Assembled on fresh spawn, merged into the user text only at the provider
-    // boundary — never into replay/journal capture.
+    // Fresh-spawn history preamble; provider-boundary merge only (see below).
     let contextPreamble: string | null = null;
     const wasInactive = !session.getStatus().active;
     if (wasInactive) {
@@ -4361,22 +4360,15 @@ export class AgentRuntime implements Runtime {
       // Successful spawn after a crash — decay the crash counter
       this.decrementCrashCount(effectiveMapKey ?? crashScopeKey);
 
-      // Carry recent chat history into the user turn as a preamble so the agent
-      // has conversational context on every fresh session spawn. Skipped when
-      // handleResumeFailed manages its own context recovery to avoid two
-      // context blocks in the same fresh session.
-      //
-      // Deliberately NOT a fresh_session_context system turn: the admission
-      // gate rejects every effect from that owner (purpose_disallows_effect),
-      // so an action-heavy context block makes the injected turn burn its
-      // entire deadline attempting effects it can never apply, and the timeout
-      // quarantine then kills the session under the queued user turn (observed
-      // twice on the owner DM, 2026-07-17). Merging the context into the user
-      // turn removes the extra provider round-trip, the deadline race, and the
-      // effect-blocked channel by construction — and there is no separate
-      // context result, so the QR-095 phantom-reply channel no longer exists on
-      // this path. Replay/journal capture keeps the pure user text because the
-      // merge happens only at the provider boundary below.
+      // Recent-history preamble for fresh spawns — merged into the USER turn
+      // at the provider boundary, deliberately NOT a fresh_session_context
+      // system turn: the admission gate rejects that owner's effects
+      // (purpose_disallows_effect), so an action-heavy context block burned its
+      // whole deadline and the timeout quarantine killed the session under the
+      // queued user turn (2x on the owner DM, 2026-07-17). Merging removes the
+      // deadline race and the QR-095 phantom-reply channel by construction;
+      // replay/journal capture keeps the pure user text. Skipped when
+      // handleResumeFailed owns context recovery (avoids double blocks).
       const resumeFailedOwnsContext = mapKeyForChat !== undefined && this.resumeFailedHandling.has(mapKeyForChat);
       if (!resumeFailedOwnsContext) {
         try {
