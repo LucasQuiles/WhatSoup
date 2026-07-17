@@ -331,13 +331,20 @@ export function childClosurePaths(manifest: BoundaryRunManifest): string[] {
     }
   }
   for (const artifact of manifest.artifacts) {
-    const structuredResult = attemptsById.get(artifact.producerAttemptId)?.structuredResult;
+    const producerAttempt = attemptsById.get(artifact.producerAttemptId);
+    const structuredResult = producerAttempt?.structuredResult;
     const isExactStructuredResultAlias = structuredResult !== null
       && structuredResult !== undefined
       && artifact.path === structuredResult.path
       && artifact.sha256 === structuredResult.sha256
       && artifact.bytes === structuredResult.bytes;
-    if (!isExactStructuredResultAlias) paths.push(artifact.path);
+    const isExactAttemptStreamAlias = producerAttempt !== undefined
+      && [producerAttempt.stdout, producerAttempt.stderr].some((stream) => (
+        artifact.path === stream.path
+        && artifact.sha256 === stream.sha256
+        && artifact.bytes === stream.bytes
+      ));
+    if (!isExactStructuredResultAlias && !isExactAttemptStreamAlias) paths.push(artifact.path);
   }
   for (const review of manifest.reviews) {
     paths.push(review.reportPath, review.metaPath, review.stderrPath);

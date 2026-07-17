@@ -2796,6 +2796,21 @@ absent/materialized/foreign-path regression, refresh the work index after this n
 bounded helper/test fix with subject `fix(quality): admit declared create paths`. Then rerun BCF-00
 and BCF-01 under fresh IDs before recreating BCF-02 with all four new paths declared untracked.
 
+Seventeenth recovery note for finalized Recovery13 BCF-00, BCF-01, and BCF-02: successor BCF-03
+initialization rejected the verified BCF-02 predecessor because the registered catalog inventory
+artifact intentionally names its producer attempt's exact stdout path. The immutable closure counted
+that one physical file once as attempt evidence and again as an artifact, then rejected the duplicate
+logical path. The failed BCF-03 init created no run and no transition; the finalized BCF-02 receipt
+remains valid in isolation but cannot advance the chain.
+
+Preserve Recovery13 and its three finalized receipts. Recover from pre-merge helper commit
+`7dc7aeafd3a6f006c6380f793a164588ee575ac0` on a distinct branch. Closure construction must
+coalesce an artifact only when producer ID, path, SHA-256, and byte count exactly match the owning
+attempt stdout, stderr, or structured result; a different producer, digest, or size must retain the
+duplicate-path rejection. Add the exact catalog-stdout alias plus all three nearest-invalid
+neighbors to the closure regression, commit the bounded helper/test/index correction, and rerun the
+complete BCF-00, BCF-01, and BCF-02 chains under fresh IDs before initializing BCF-03.
+
 ```bash
 git rev-parse --show-toplevel
 git rev-parse HEAD

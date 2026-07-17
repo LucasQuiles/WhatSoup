@@ -94,20 +94,40 @@ export function registerJoinCases(): void {
       stderr: validStream('attempts/predecessor-baseline-eval/stderr.log'),
       structuredResult: structuredClone(evaluatorStdout),
     };
-    manifest.attempts = [readinessAttempt, evaluatorAttempt];
-    manifest.artifacts = [{
-      path: 'readiness.json',
-      role: 'receipt',
-      producerAttemptId: 'readiness-check',
-      sha256: SHA,
-      bytes: 1,
-    }];
+    const inventoryStdout = validStream('attempts/catalog-inventory-sort/stdout.log');
+    const inventoryAttempt = {
+      ...validAttempt(),
+      id: 'catalog-inventory-sort',
+      stdout: inventoryStdout,
+      stderr: validStream('attempts/catalog-inventory-sort/stderr.log'),
+      structuredResult: null,
+    };
+    manifest.attempts = [readinessAttempt, evaluatorAttempt, inventoryAttempt];
+    manifest.artifacts = [
+      {
+        path: 'readiness.json',
+        role: 'receipt',
+        producerAttemptId: 'readiness-check',
+        sha256: SHA,
+        bytes: 1,
+      },
+      {
+        path: inventoryStdout.path,
+        role: 'output',
+        producerAttemptId: 'catalog-inventory-sort',
+        sha256: inventoryStdout.sha256,
+        bytes: inventoryStdout.bytes,
+      },
+    ];
 
     expect(childClosurePaths(manifest).filter((entry) => entry === 'readiness.json')).toEqual([
       'readiness.json',
     ]);
     expect(childClosurePaths(manifest).filter((entry) => entry === evaluatorStdout.path)).toEqual([
       evaluatorStdout.path,
+    ]);
+    expect(childClosurePaths(manifest).filter((entry) => entry === inventoryStdout.path)).toEqual([
+      inventoryStdout.path,
     ]);
 
     for (const artifact of [
@@ -117,6 +137,16 @@ export function registerJoinCases(): void {
     ]) {
       const invalid = structuredClone(manifest);
       invalid.artifacts = [artifact];
+      expect(() => childClosurePaths(invalid)).toThrow('child closure contains duplicate logical paths');
+    }
+
+    for (const artifact of [
+      { ...manifest.artifacts[1]!, producerAttemptId: 'other-attempt' },
+      { ...manifest.artifacts[1]!, sha256: SHA_B },
+      { ...manifest.artifacts[1]!, bytes: 2 },
+    ]) {
+      const invalid = structuredClone(manifest);
+      invalid.artifacts[1] = artifact;
       expect(() => childClosurePaths(invalid)).toThrow('child closure contains duplicate logical paths');
     }
 
