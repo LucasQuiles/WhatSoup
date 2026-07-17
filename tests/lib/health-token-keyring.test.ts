@@ -160,6 +160,28 @@ describe('health token keyring canonical service', () => {
     );
   });
 
+  it('does not discover the local macOS account when a scoped migration alias has a supplied account', () => {
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    mockedUserInfo.mockImplementationOnce(() => { throw new Error('local account unavailable'); });
+    mockedExecFileSync.mockImplementationOnce(() => { throw new Error('missing canonical'); });
+    mockedExecFileSync.mockReturnValueOnce(Buffer.from('legacy-secret\n'));
+
+    expect(lookupCredential('whatsoup-health-token', { user: 'test-user' })).toBe('legacy-secret');
+    expect(mockedUserInfo).not.toHaveBeenCalled();
+    expect(mockedExecFileSync).toHaveBeenNthCalledWith(
+      1,
+      'security',
+      ['find-generic-password', '-s', 'whatsoup-health-token', '-a', 'test-user', '-w'],
+      expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
+    );
+    expect(mockedExecFileSync).toHaveBeenNthCalledWith(
+      2,
+      'security',
+      ['find-generic-password', '-s', 'whatsoup_health', '-a', 'test-user', '-w'],
+      expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
+    );
+  });
+
   it('uses legacy whatsoup_health only as migration fallback', () => {
     Object.defineProperty(process, 'platform', { value: 'linux' });
     mockedExecFileSync.mockReturnValueOnce(Buffer.from(''));

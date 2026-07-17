@@ -518,6 +518,41 @@ def test_credential_presence_scoped_darwin_alias_keeps_requested_user(monkeypatc
     ]
 
 
+def test_credential_presence_scoped_darwin_does_not_discover_local_account(monkeypatch):
+    commands = []
+    home_calls = []
+    monkeypatch.setattr(_mod, "HOST_PLATFORM", "darwin")
+    monkeypatch.setattr(_mod, "service_env_var", lambda _service: "ZAI_API_KEY")
+    monkeypatch.setattr(_mod, "dry_credential_status", lambda _service: None)
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+    monkeypatch.delenv("USER", raising=False)
+    monkeypatch.setattr(_mod, "whatsoup_keyfile_present", lambda _service: False)
+
+    class PathProbe:
+        @staticmethod
+        def home():
+            home_calls.append(True)
+            return type("Home", (), {"name": "local-user"})()
+
+    def fake_run(cmd, *_args, **_kwargs):
+        commands.append(cmd)
+        if "zai-api-key" in cmd:
+            return _FakeProc(0, "alias-secret")
+        return _FakeProc(1, "")
+
+    monkeypatch.setattr(_mod, "Path", PathProbe)
+    monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+
+    present, source, status = _mod.provider_credential_presence("glm", 15, user="bot")
+
+    assert (present, source, status) == (True, "macos_keychain", "present")
+    assert home_calls == []
+    assert commands == [
+        ["security", "find-generic-password", "-s", "glm", "-a", "bot", "-w"],
+        ["security", "find-generic-password", "-s", "zai-api-key", "-a", "bot", "-w"],
+    ]
+
+
 def test_credential_presence_scoped_secret_tool_alias_keeps_requested_user(monkeypatch):
     commands = []
     monkeypatch.setattr(_mod, "HOST_PLATFORM", "linux")

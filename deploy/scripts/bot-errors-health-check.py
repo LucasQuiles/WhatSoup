@@ -3009,7 +3009,7 @@ def provider_credential_presence(
 
     candidates = [service, *SERVICE_KEYCHAIN_FALLBACKS.get(service, [])]
     if HOST_PLATFORM == "darwin":
-        account = os.environ.get("USER") or Path.home().name or "unknown"
+        account = user if user is not None else (os.environ.get("USER") or Path.home().name or "unknown")
         keyring_source = "macos_keychain"
         keyring_status = _keychain_secret_status(candidates, account, timeout_seconds, user)
     elif shutil.which("secret-tool"):

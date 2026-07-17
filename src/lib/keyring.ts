@@ -225,10 +225,9 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
 
   if (backend === 'macos-keychain') {
     try {
-      const username = os.userInfo().username;
+      const account = options.user ?? os.userInfo().username;
       for (const [index, candidate] of services.entries()) {
         try {
-          const account = options.user ?? username;
           const raw = execFileSync(
             'security',
             ['find-generic-password', '-s', candidate, '-a', account, '-w'],
