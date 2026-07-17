@@ -239,10 +239,17 @@ function getPausedChatBypassRegexes(): RegExp[] {
   return regexes;
 }
 
+// Operator patterns run against member-supplied content from paused (usually
+// bot-noise) groups, so bound the tested window: a backtracking-heavy pattern
+// against a crafted long message must not stall ingest. Directed-traffic
+// markers sit at the head of a message in practice.
+const PAUSED_CHAT_BYPASS_SCAN_LIMIT = 4096;
+
 /** True when paused-chat content matches a configured bypass pattern. Null/absent content (media) never matches. */
 function matchesPausedChatBypass(content: string | null | undefined): boolean {
   if (!content) return false;
-  return getPausedChatBypassRegexes().some((re) => re.test(content));
+  const scanWindow = content.slice(0, PAUSED_CHAT_BYPASS_SCAN_LIMIT);
+  return getPausedChatBypassRegexes().some((re) => re.test(scanWindow));
 }
 
 /**

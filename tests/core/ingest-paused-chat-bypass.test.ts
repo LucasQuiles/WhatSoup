@@ -341,4 +341,35 @@ describe('pausedChatBypassPatterns — paused chat dispatch bypass', () => {
     expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
     expect(durability.markInboundSkipped).toHaveBeenCalledWith(42, 'chat_paused');
   });
+
+  // -------------------------------------------------------------------------
+  // (g) Bounded scan window: member-supplied content only feeds the operator
+  // regexes through the first 4096 chars, so a crafted long message cannot
+  // drive pathological backtracking over unbounded input.
+  // -------------------------------------------------------------------------
+  it('matches a bypass marker inside the scan window of a long message', async () => {
+    setConfigProp('pausedChats', new Set([PAUSED_GROUP]));
+    setConfigProp('pausedChatBypassPatterns', ['-> Q']);
+
+    const { handler, runtime } = makeIngest();
+    const msg = makePausedGroupMsg({ content: `Codex -> Q / gate nudge\n${'x'.repeat(10_000)}` });
+
+    await runIngest(handler, msg);
+
+    expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledOnce();
+  });
+
+  it('does not match a bypass marker positioned beyond the scan window', async () => {
+    setConfigProp('pausedChats', new Set([PAUSED_GROUP]));
+    setConfigProp('pausedChatBypassPatterns', ['-> Q']);
+
+    const durability = makeDurability();
+    const { handler, runtime } = makeIngest({ durability });
+    const msg = makePausedGroupMsg({ content: `${'x'.repeat(5_000)}\nCodex -> Q / gate nudge` });
+
+    await runIngest(handler, msg);
+
+    expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
+    expect(durability.markInboundSkipped).toHaveBeenCalledWith(42, 'chat_paused');
+  });
 });
