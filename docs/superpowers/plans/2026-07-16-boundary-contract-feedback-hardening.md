@@ -2762,6 +2762,18 @@ Recover from pre-merge validator commit `e71b6f58a492716535133755cca3a266197019f
 branch, carry forward the catalog output declaration and regression, and rerun BCF-00 before
 recreating BCF-01 and BCF-02. The observation, reconciliation, and successor runs all use new IDs.
 
+Fifteenth recovery note for preserved reconciliation run
+`bcf00-reconciliation-3baf6d791-20260717a`: helper-owned merge
+`81b3fe669e9be6cb1931f075d00c2f438c3d7f7d` passed the validator, focused suites, both typecheck
+lanes, and all evaluator predicates. The strict branch gate then exited 1 because the added
+recovery doctrine made `docs/work-index.json` stale. No skip or stale generated index can satisfy
+the documentation guard; the run is preserved as deferred/Inconclusive/current.
+
+Recover from pre-merge commit `3baf6d791b15ce0ccbea4a6b9ea88f891cc5dff2` on a distinct
+branch. Regenerate both tracked work-index artifacts after this note, require `guard:work-index` to
+pass, commit the bounded documentation/index correction, and rerun the complete BCF-00 chain under
+fresh IDs before BCF-01 or BCF-02.
+
 ```bash
 git rev-parse --show-toplevel
 git rev-parse HEAD
