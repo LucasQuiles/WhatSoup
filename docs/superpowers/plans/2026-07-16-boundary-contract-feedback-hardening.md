@@ -2648,6 +2648,26 @@ between the last accepted check and staging remains rejected. Commit the bounded
 correction with subject `fix(quality): admit profile-owned work transitions`, then rerun the full
 immutable BCF-00 chain before recreating BCF-01 and its RED tranche.
 
+Ninth recovery note for preserved reconciliation run
+`bcf00-reconciliation-19b75bb78-20260717a`: helper-owned merge
+`92614ea365c2dd5820d7093fca864a1be41fef26` passed the committed validator, focused semantic
+suites, both typecheck lanes, and all three evaluator predicates. Its strict branch-gate wrapper
+did not launch the gate: load1 was 54.48 against the 28 ceiling and remained 37.28 after the full
+120-second admission budget, so `loadgate` exited 75 with an unchanged pre/post snapshot. The
+helper recorded the required attempt Inconclusive; the run was set to
+`deferred`/`inconclusive`/`current`, verified structurally, and correctly refused Pass-only
+finalization. The branch was pushed. Its later pre-push gate passed at the same merge after host
+capacity eased, but that separate success cannot replace or retry the immutable failed attempt.
+
+Preserve the active Inconclusive run and pushed branch. Recovery starts from pre-merge validator
+commit `19b75bb7871b313e4bdcab9af01bfab55cb67427` on a distinct branch. Before initializing fresh
+run IDs, replay both pinned dependency installations and require a setup-only strict loadgate canary
+to admit `true`; the canary is capacity evidence only and never BCF Pass evidence. Commit this
+plan/notes/index amendment with subject `docs(quality): record loadgate recovery`, then rerun the
+entire immutable observation/reconciliation chain. Do not alter the 120-second/28-ceiling branch
+contract merely to fit current load, do not append another attempt to the failed run, and do not
+promote the later unbound pre-push result into it.
+
 ```bash
 git rev-parse --show-toplevel
 git rev-parse HEAD

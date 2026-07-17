@@ -501,6 +501,22 @@ Regressions must reject foreign tracked paths, index drift before commands, owne
 and any staged bytes that differ from the last accepted unstaged snapshot. A fresh immutable
 BCF-00 chain is required before BCF-01 is recreated.
 
+## 2026-07-17 loadgate-capacity recovery
+
+Recovery5 merged at `92614ea365c2dd5820d7093fca864a1be41fef26` after the validator and all
+focused, typecheck, and evaluator attempts passed. The required branch gate itself never started:
+its strict loadgate measured load1 54.48 above the 28 ceiling, waited the full 120 seconds, then
+still measured 37.28 and exited 75. The helper recorded empty stdout, the bounded refusal on
+stderr, raw exit 75, and identical pre/post snapshots. The run now has a deferred/inconclusive/current
+lifecycle and verifies as Inconclusive; Pass-only finalization correctly rejected it.
+
+The same merge later passed the repository pre-push gate once capacity eased and was pushed on
+`experiment/jul17-boundary-contract-feedback-hardening-recovery5`. That is useful root-cause
+corroboration, not substitute BCF evidence. Recovery6 starts from
+`19b75bb7871b313e4bdcab9af01bfab55cb67427`, replays both pinned dependency installs, and requires
+a strict setup-only load canary before creating new observation/reconciliation IDs. No threshold,
+timeout, required-attempt set, or failed-run record is edited.
+
 ## Authorization Boundary
 
 The planning packet's initial approval authorized writing and committing the local specification,
