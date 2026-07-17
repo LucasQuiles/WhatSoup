@@ -28,8 +28,14 @@ import {
 } from '../../src/lib/private-fs.ts';
 
 let tmpRoot = '';
+const originalGetuidDescriptor = Object.getOwnPropertyDescriptor(process, 'getuid');
 
 afterEach(() => {
+  if (originalGetuidDescriptor) {
+    Object.defineProperty(process, 'getuid', originalGetuidDescriptor);
+  } else {
+    delete (process as NodeJS.Process & { getuid?: () => number }).getuid;
+  }
   vi.doUnmock('node:crypto');
   vi.doUnmock('node:fs');
   vi.resetModules();
@@ -40,6 +46,46 @@ afterEach(() => {
 function makeTmp(): string {
   tmpRoot = mkdtempSync(join(tmpdir(), 'private-fs-test-'));
   return tmpRoot;
+}
+
+function setTestUid(uid: number): void {
+  Object.defineProperty(process, 'getuid', {
+    configurable: true,
+    value: () => uid,
+  });
+}
+
+function mockedPrivateStat(
+  type: 'directory' | 'file',
+  uid: number,
+): ReturnType<typeof lstatSync> {
+  return {
+    uid,
+    mode: type === 'directory' ? 0o700 : 0o600,
+    size: 0,
+    isSymbolicLink: () => false,
+    isDirectory: () => type === 'directory',
+    isFile: () => type === 'file',
+  } as ReturnType<typeof lstatSync>;
+}
+
+async function importWithMockedOwnership(
+  dirPath: string,
+  filePath: string,
+  dirUid: number,
+  fileUid: number,
+): Promise<typeof import('../../src/lib/private-fs.ts')> {
+  const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
+  vi.resetModules();
+  vi.doMock('node:fs', () => ({
+    ...actual,
+    lstatSync: vi.fn((path: string) => {
+      if (path === dirPath) return mockedPrivateStat('directory', dirUid);
+      if (path === filePath) return mockedPrivateStat('file', fileUid);
+      return actual.lstatSync(path);
+    }),
+  }));
+  return import('../../src/lib/private-fs.ts');
 }
 
 describe('writePrivateFileSync', () => {
@@ -318,6 +364,18 @@ describe('assertWritablePrivateFileSync', () => {
     expect(caught?.message).toBe('refusing to write config.json through symlink');
   });
 
+  it('refuses a dangling target symlink instead of treating it as missing', () => {
+    const root = makeTmp();
+    const target = join(root, 'dangling.key');
+    symlinkSync(join(root, 'missing.key'), target);
+
+    let caught: NodeJS.ErrnoException | undefined;
+    try { assertWritablePrivateFileSync(target, 'credential'); } catch (err) { caught = err as NodeJS.ErrnoException; }
+
+    expect(caught?.code).toBe('ELOOP');
+    expect(caught?.message).toBe('refusing to write credential through symlink');
+  });
+
   it('refuses a non-regular target (EINVAL) with the supplied label', () => {
     const root = makeTmp();
     const dir = join(root, 'priv');
@@ -403,22 +461,21 @@ describe('writePrivateJsonMarkerSync', () => {
     const markerPath = join(dir, 'state.marker');
 
     vi.resetModules();
-    let existsCalls = 0;
+    let targetLstatCalls = 0;
     vi.doMock('node:fs', async (importOriginal) => {
       const actual = await importOriginal<typeof import('node:fs')>();
       return {
         ...actual,
-        existsSync: vi.fn((p: string) => {
-          if (p === markerPath) {
-            existsCalls += 1;
-            // First target assert (pre-write): absent. Second assert
-            // (post-write, pre-rename): a symlink raced into place.
-            return existsCalls >= 2;
-          }
-          return actual.existsSync(p);
-        }),
         lstatSync: vi.fn((p: string) => {
           if (p === markerPath) {
+            targetLstatCalls += 1;
+            // First target assert (pre-write): absent. Second assert
+            // (post-write, pre-rename): a symlink raced into place.
+            if (targetLstatCalls === 1) {
+              const err = new Error('missing') as NodeJS.ErrnoException;
+              err.code = 'ENOENT';
+              throw err;
+            }
             return { isSymbolicLink: () => true, isFile: () => false } as any;
           }
           return actual.lstatSync(p);
@@ -606,6 +663,82 @@ describe('atomic private-file primitives', () => {
     chmodSync(dir, 0o755);
 
     expect(() => readPrivateFileSync(join(dir, 'credential.key'), { label: 'credential', maxBytes: 32 })).toThrow(/non-private permissions/);
+  });
+
+  it('rejects a read through a foreign-owned directory with a sanitized EACCES error', async () => {
+    setTestUid(1000);
+    const dir = '/private-fixture/foreign-directory';
+    const target = join(dir, 'credential.key');
+    const { readPrivateFileSync: readForeignDirectory } = await importWithMockedOwnership(
+      dir,
+      target,
+      2000,
+      1000,
+    );
+
+    let caught: NodeJS.ErrnoException | undefined;
+    try { readForeignDirectory(target, { label: 'credential', maxBytes: 32 }); } catch (err) { caught = err as NodeJS.ErrnoException; }
+
+    expect(caught?.code).toBe('EACCES');
+    expect(caught?.message).toBe('refusing to use credential directory not owned by current user');
+    expect(caught?.message).not.toContain(target);
+  });
+
+  it('rejects a foreign-owned file read with a sanitized EACCES error', async () => {
+    setTestUid(1000);
+    const dir = '/private-fixture/owned-directory';
+    const target = join(dir, 'credential.key');
+    const { readPrivateFileSync: readForeignFile } = await importWithMockedOwnership(
+      dir,
+      target,
+      1000,
+      2000,
+    );
+
+    let caught: NodeJS.ErrnoException | undefined;
+    try { readForeignFile(target, { label: 'credential', maxBytes: 32 }); } catch (err) { caught = err as NodeJS.ErrnoException; }
+
+    expect(caught?.code).toBe('EACCES');
+    expect(caught?.message).toBe('refusing to read credential not owned by current user');
+    expect(caught?.message).not.toContain(target);
+  });
+
+  it('rejects deletion through a foreign-owned directory with a sanitized EACCES error', async () => {
+    setTestUid(1000);
+    const dir = '/private-fixture/foreign-delete-directory';
+    const target = join(dir, 'credential.key');
+    const { deletePrivateFileSync: deleteForeignDirectory } = await importWithMockedOwnership(
+      dir,
+      target,
+      2000,
+      1000,
+    );
+
+    let caught: NodeJS.ErrnoException | undefined;
+    try { deleteForeignDirectory(target, 'credential'); } catch (err) { caught = err as NodeJS.ErrnoException; }
+
+    expect(caught?.code).toBe('EACCES');
+    expect(caught?.message).toBe('refusing to use credential directory not owned by current user');
+    expect(caught?.message).not.toContain(target);
+  });
+
+  it('rejects deletion of a foreign-owned file with a sanitized EACCES error', async () => {
+    setTestUid(1000);
+    const dir = '/private-fixture/owned-delete-directory';
+    const target = join(dir, 'credential.key');
+    const { deletePrivateFileSync: deleteForeignFile } = await importWithMockedOwnership(
+      dir,
+      target,
+      1000,
+      2000,
+    );
+
+    let caught: NodeJS.ErrnoException | undefined;
+    try { deleteForeignFile(target, 'credential'); } catch (err) { caught = err as NodeJS.ErrnoException; }
+
+    expect(caught?.code).toBe('EACCES');
+    expect(caught?.message).toBe('refusing to delete credential not owned by current user');
+    expect(caught?.message).not.toContain(target);
   });
 
   it('fsyncs the parent directory after deleting a private file', async () => {

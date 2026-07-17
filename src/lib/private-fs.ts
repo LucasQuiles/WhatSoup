@@ -12,7 +12,6 @@ import {
   chmodSync,
   closeSync,
   constants,
-  existsSync,
   fchmodSync,
   fstatSync,
   fsyncSync,
@@ -196,8 +195,19 @@ function assertStrictPrivateDirectorySync(dirPath: string, label: string): void 
   if (!stat.isDirectory()) {
     throw privateWriteError(`refusing to use ${label} directory over non-directory path`, 'EINVAL');
   }
+  assertCurrentUserOwnsPrivatePath(
+    stat,
+    `refusing to use ${label} directory not owned by current user`,
+  );
   if ((stat.mode & 0o077) !== 0) {
     throw privateWriteError(`refusing to use ${label} directory with non-private permissions`, 'EACCES');
+  }
+}
+
+function assertCurrentUserOwnsPrivatePath(stat: Stats, message: string): void {
+  const currentUserId = typeof process.getuid === 'function' ? process.getuid() : null;
+  if (currentUserId !== null && stat.uid !== currentUserId) {
+    throw privateWriteError(message, 'EACCES');
   }
 }
 
@@ -212,6 +222,10 @@ function assertReadablePrivateFileStat(
   if (!stat.isFile()) {
     throw privateWriteError(`refusing to read ${label} from non-regular path`, 'EINVAL');
   }
+  assertCurrentUserOwnsPrivatePath(
+    stat,
+    `refusing to read ${label} not owned by current user`,
+  );
   if ((stat.mode & 0o077) !== 0) {
     throw privateWriteError(`refusing to read ${label} with non-private permissions`, 'EACCES');
   }
@@ -291,6 +305,10 @@ export function deletePrivateFileSync(filePath: string, label = 'private file'):
   if (!stat.isFile()) {
     throw privateWriteError(`refusing to delete ${label} from non-regular path`, 'EINVAL');
   }
+  assertCurrentUserOwnsPrivatePath(
+    stat,
+    `refusing to delete ${label} not owned by current user`,
+  );
 
   unlinkSync(filePath);
   fsyncDirectory(dir);
@@ -308,8 +326,13 @@ export function deletePrivateFileSync(filePath: string, label = 'private file'):
  * writers; it does NOT open or write the file.
  */
 export function assertWritablePrivateFileSync(filePath: string, label = 'private file'): void {
-  if (!existsSync(filePath)) return;
-  const stat = lstatSync(filePath);
+  let stat: Stats;
+  try {
+    stat = lstatSync(filePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw err;
+  }
   if (stat.isSymbolicLink()) {
     throw privateWriteError(`refusing to write ${label} through symlink`, 'ELOOP');
   }
