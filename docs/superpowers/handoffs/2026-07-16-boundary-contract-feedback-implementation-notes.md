@@ -517,6 +517,25 @@ corroboration, not substitute BCF evidence. Recovery6 starts from
 a strict setup-only load canary before creating new observation/reconciliation IDs. No threshold,
 timeout, required-attempt set, or failed-run record is edited.
 
+## 2026-07-17 RED-selection predicate recovery
+
+Recovery6 finalized and verified BCF-00 Pass at merge
+`a1a7bb027f1dcd368bd62ee31bbf1793ae0f96fc`, then pushed
+`experiment/jul17-boundary-contract-feedback-hardening-recovery6`. Its BCF-01 successor imported
+that exact predecessor. A raw focused preflight proved six exact unsafe sentinel failures and one
+passing safe control, but the helper-owned `parser-red` attempt classified 41 assertions excluded
+by its own `--testNamePattern` as selected pending/unregistered failures. Vitest's JSON report keeps
+those unselected legacy and neighbor assertions as `skipped` rows and counts them as pending, so
+the current predicate makes every planned RED attempt unreachable.
+
+Preserve the failed attempt and active Inconclusive successor; its lifecycle cannot be closed
+without the profile-owned commit transition. Recovery7 starts from
+`19b75bb7871b313e4bdcab9af01bfab55cb67427`, carries forward the loadgate amendment, and binds RED
+validation to selected U/S assertions while still rejecting a selected skip/todo, an unknown BCF
+marker, or any report-count mismatch. GREEN remains strict over every collected assertion. The
+BCF-01 test tranche is preserved in the named stash
+`bcf01 markers after red predicate failure` until a fresh finalized BCF-00 chain can import it.
+
 ## Authorization Boundary
 
 The planning packet's initial approval authorized writing and committing the local specification,

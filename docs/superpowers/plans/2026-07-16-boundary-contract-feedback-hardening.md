@@ -2668,6 +2668,29 @@ entire immutable observation/reconciliation chain. Do not alter the 120-second/2
 contract merely to fit current load, do not append another attempt to the failed run, and do not
 promote the later unbound pre-push result into it.
 
+Tenth recovery note for finalized reconciliation run
+`bcf00-reconciliation-5ff942bde-20260717a`: helper-owned merge
+`a1a7bb027f1dcd368bd62ee31bbf1793ae0f96fc` passed every BCF-00 requirement, finalized, verified,
+and was pushed on its preserved recovery branch. BCF-01 initialized from that exact predecessor and
+the raw focused RED preflight produced exactly six unsafe sentinel failures plus one passing safe
+control. The reserved `parser-red` attempt then preserved the same selected results but the helper
+classified all 41 reporter-generated rows excluded by its own `--testNamePattern` as forbidden
+pending tests and unregistered selected assertions. The immutable attempt is Inconclusive and its
+run remains active because the profile correctly prohibits lifecycle closure without its required
+commit transition.
+
+Preserve recovery6, the finalized BCF-00 evidence, the failed successor run, and the exact BCF-01
+test tranche in a named stash. Recover from pre-merge validator commit
+`19b75bb7871b313e4bdcab9af01bfab55cb67427` on a distinct branch after carrying forward the
+loadgate amendment. Add a focused validator regression whose RED report contains selected unsafe
+failures and a safe pass together with reporter-generated skipped neighbor and unmarked legacy
+rows. In RED, only selected U/S rows contribute to the marker roster and pass/fail predicate;
+selected skipped/todo rows and every unknown BCF marker still fail closed. Reconcile total,
+passed, failed, pending, and todo report counts against every assertion row, and continue to reject
+any count drift. GREEN still rejects every skipped, todo, pending, or failed row. Commit the bounded
+helper/test correction with subject `fix(quality): bind red predicates to selected tests`, then
+rerun the full immutable BCF-00 chain before recreating BCF-01 under a new run ID.
+
 ```bash
 git rev-parse --show-toplevel
 git rev-parse HEAD
