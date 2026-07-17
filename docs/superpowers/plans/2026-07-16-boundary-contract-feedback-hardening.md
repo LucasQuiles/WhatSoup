@@ -2611,6 +2611,19 @@ duplicate remains rejected, then commit the bounded helper/test correction with 
 `fix(quality): admit exact structured artifact aliases`. Re-run the full validator suite,
 typecheck, observation, and reconciliation under new immutable IDs before BCF-01.
 
+Seventh recovery note for finalized reconciliation run
+`bcf00-reconciliation-96c81767b-20260717a`: helper-owned merge
+`247e0eaf2297f0caa5dbfe8355f84dd5f21efc94` passed every BCF-00 requirement and proved the exact
+structured-result/artifact correction, but successor import exposed three additional duplicates.
+The baseline, candidate, and holdout evaluator attempts each intentionally parse their JSON stdout
+as the structured result, so each attempt's congruent stdout and structured-result records name one
+physical file with identical path, digest, and byte count. Preserve the finalized run and pushed
+branch. Recover from `96c81767bd392319ec8e3278d17a326640bd7b42` on a distinct branch and add
+the nearest-neighbor regression: only an attempt's exact own-stdout/structured-result alias counts
+once; a different digest, byte count, or cross-attempt path remains rejected. Commit the bounded
+helper/test correction with subject `fix(quality): admit exact structured stream aliases`, then
+re-run the full immutable BCF-00 chain before BCF-01.
+
 ```bash
 git rev-parse --show-toplevel
 git rev-parse HEAD

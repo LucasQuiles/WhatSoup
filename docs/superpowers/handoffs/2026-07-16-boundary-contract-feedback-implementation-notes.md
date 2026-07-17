@@ -466,6 +466,22 @@ same-producer structured-result/artifact alias to contribute one closure row. Di
 digests, byte counts, or any unrelated repeated path remain fail-closed. Then rerun the complete
 BCF-00 observation/reconciliation chain under fresh IDs before another BCF-01 initialization.
 
+## 2026-07-17 structured-stream alias recovery
+
+Recovery3 finalized BCF-00 Pass at merge `247e0eaf2297f0caa5dbfe8355f84dd5f21efc94` and pushed
+`experiment/jul17-boundary-contract-feedback-hardening-recovery3`. Its first BCF-01 initialization
+again created no successor run. The corrected closure admitted `readiness.json`, then reported the
+remaining duplicate paths at the baseline, candidate, and holdout evaluator stdout logs. Each
+evaluator's closed contract uses the exact JSON stdout stream as its structured result; path,
+SHA-256, byte count, and producing attempt all agree.
+
+Preserve the finalized run and pushed branch. Recovery4 starts from pre-merge validator commit
+`96c81767bd392319ec8e3278d17a326640bd7b42` with both dependency preflights replayed. The next
+focused regression admits only an attempt's exact own-stdout/structured-result alias as one closure
+row. Any mismatched digest or byte count, a structured result that aliases another attempt's stream,
+or an unrelated duplicate path remains fail-closed. A fresh observation/reconciliation chain is
+required before the next BCF-01 import attempt.
+
 ## Authorization Boundary
 
 The planning packet's initial approval authorized writing and committing the local specification,
