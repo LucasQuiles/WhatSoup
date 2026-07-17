@@ -6771,12 +6771,13 @@ describe('AgentRuntime', () => {
     expect(pendingSystemResults(runtime).count(chatJid)).toBe(0);
   });
 
-  // QR-095: in single/shared mode the context-injection system turn must be
-  // marked under GLOBAL_TOOL_SCOPE_KEY (the key the single/shared result handler
-  // consumes), NOT under an undefined mapKey (which is a no-op → the injected
-  // '[Recent chat context]' turn's result would be mis-classified as a USER turn
-  // and leak to the user).
-  it('single/shared: context-injection system turn is marked under the global scope (QR-095)', async () => {
+  // QR-095 successor (P4): fresh-spawn context is merged into the user turn at
+  // the provider boundary — no fresh_session_context system turn exists, so the
+  // phantom-reply channel QR-095 guarded (a context result mis-classified as a
+  // USER turn) is gone by construction, and the effect-blocked context turn can
+  // no longer burn its deadline and quarantine the session under the queued
+  // user turn (production drops 2026-07-17, inbound seqs 49207/49219).
+  it('single/shared: fresh-spawn context merges into the user turn — no system turn (QR-095 successor)', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger); // single/shared (no sessionScope)
@@ -6800,21 +6801,21 @@ describe('AgentRuntime', () => {
     await runtime.start();
     const markSpy = vi.spyOn(state.pendingSystemResults, 'mark');
     await runtime.handleMessage(makeMsg({ chatJid, senderJid: chatJid, content: 'hello' }));
-    await vi.waitFor(() => expect(markSpy).toHaveBeenCalled());
+    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalled());
 
-    const markedInputs = markSpy.mock.calls.map((call) => call[0]);
-    // RED pre-fix: the injection marked `undefined` (a no-op → phantom leak).
-    expect(markedInputs).not.toContain(undefined);
-    // GREEN post-fix: marked under the global scope the single/shared handler consumes.
-    expect(markedInputs).toContainEqual(expect.objectContaining({
-      scopeKey: '__global__',
-      owner: expect.objectContaining({ toolScopeKey: '__global__' }),
-    }));
+    // No fresh_session_context system turn exists on this path anymore.
+    expect(markSpy.mock.calls.map((call) => call[0])).not.toContainEqual(
+      expect.objectContaining({ purpose: 'fresh_session_context' }),
+    );
+    // The single provider send carries the context preamble plus the user text.
+    expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+    const sent = (vi.mocked(mockSession.sendTurn).mock.calls[0] as unknown as [string])[0];
+    expect(sent).toMatch(/^\[Recent chat context — read before responding\]\n/);
+    expect(sent).toContain('earlier message');
+    expect(sent).toMatch(/\n\n\[Current message\]\nhello$/);
 
-    // Release the context-injection result, then complete the user turn so the
-    // queued test work does not outlive this test.
-    capturedOnEventRef.current!({ type: 'result', text: null });
-    await waitForProviderDispatch(runtime);
+    // Complete the (single) user turn so the queued test work does not outlive
+    // this test.
     capturedOnEventRef.current!({ type: 'result', text: null });
     await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
   });
