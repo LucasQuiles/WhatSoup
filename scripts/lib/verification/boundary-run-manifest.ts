@@ -17,6 +17,7 @@ import {
 import path from 'node:path';
 
 import { cleanGitEnv } from '../../../src/lib/git-env.ts';
+import { isRecord } from '../../../src/lib/type-guards.ts';
 
 export const BOUNDARY_RUN_SCHEMA = 1 as const;
 
@@ -510,7 +511,7 @@ const attemptEntries: Array<readonly [string, BoundaryAttemptContract]> = [
   ['upstream-ahead-behind', commandContract(['git', 'rev-list', '--left-right', '--count', 'origin/main...HEAD'], { stdoutPredicate: 'ahead-behind' })],
   ['upstream-remote-diff', commandContract(['git', 'diff', '--name-status', '<observed-merge-base>...origin/main'])],
   ['upstream-local-diff', commandContract(['git', 'diff', '--name-status', '<observed-merge-base>...HEAD'])],
-  ['merge-preview', commandContract(['git', 'merge-tree', '--write-tree', 'HEAD', 'origin/main'], {
+  ['merge-preview', commandContract(['git', 'merge-tree', '--write-tree', '--messages', 'HEAD', 'origin/main'], {
     expectedExit: '0,1', stdoutPredicate: 'merge-preview',
   })],
 
@@ -1578,10 +1579,6 @@ export const RUN_WIRE_SCHEMAS = {
   CloseoutNegativeCase: CLOSEOUT_NEGATIVE_CASE_KEYS,
   CloseoutReceipt: CLOSEOUT_RECEIPT_KEYS,
 } as const;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
   const actual = Object.keys(value).sort();

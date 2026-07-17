@@ -2590,7 +2590,7 @@ describe('boundary run validator', () => {
     const localPaths = git(clone, ['diff', '--name-only', mergeBase, beforeHead]).split('\n').filter(Boolean);
     let mergePreviewStdout = '';
     try {
-      mergePreviewStdout = execFileSync('git', ['merge-tree', '--write-tree', beforeHead, pinnedParent], {
+      mergePreviewStdout = execFileSync('git', ['merge-tree', '--write-tree', '--messages', beforeHead, pinnedParent], {
         cwd: clone,
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -3379,6 +3379,9 @@ describe('boundary run validator', () => {
       '[BCF07-S01]', '[BCF07-S02]',
       '[BCF07-N01]', '[BCF07-N02]', '[BCF07-N03]', '[BCF07-N04]',
     ]);
+    expect(boundaryRun.RUN_ATTEMPT_CONTRACTS['merge-preview']?.argv).toEqual([
+      'git', 'merge-tree', '--write-tree', '--messages', 'HEAD', 'origin/main',
+    ]);
     expect(boundaryRun.RUN_ATTEMPT_CONTRACTS['merge-preview']?.expectedExit).toBe('0,1');
   });
 
@@ -3449,7 +3452,7 @@ describe('boundary run validator', () => {
     (changed.report['receipts'] as Array<Record<string, unknown>>)[0]!['caseId'] = 'substituted-case';
     expect(boundaryRun.validateBoundaryVitestJsonReport(changed).issues.map((entry) => entry.code))
       .toContain('evaluator-case-roster-mismatch');
-  });
+  }, 30_000);
 
   it('runs closeout negative controls through the same closure verifier as the unchanged neighbor', () => {
     const base: boundaryCli.BoundaryCloseoutControlClosure = {

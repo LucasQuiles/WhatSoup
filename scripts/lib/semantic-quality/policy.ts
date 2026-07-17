@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
+import { isRecord } from '../../../src/lib/type-guards.ts';
+
 import {
   analyzeExportOwnership,
   analyzeReachability,
@@ -54,10 +56,6 @@ const ALLOWLIST_KEYS = new Set([
   'expiresOn',
   'reentryCondition',
 ]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function nonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;

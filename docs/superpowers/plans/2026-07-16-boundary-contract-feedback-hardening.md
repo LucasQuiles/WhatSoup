@@ -2522,7 +2522,7 @@ foreign-head, expectation, review-join, and lifecycle mutation controls on sibli
 require their declared nonzero statuses. Record exact spec/plan/notes/helper hashes. Only after
 those controls pass, record through the helper:
 
-The direct `git merge-tree --write-tree HEAD origin/main` preview has the closed expected-exit set
+The direct `git merge-tree --write-tree --messages HEAD origin/main` preview has the closed expected-exit set
 `0,1`: exit 0 requires stdout to be exactly one tree OID, while exit 1 requires a leading tree OID,
 one or more complete stage-1/2/3 rows, and conflict diagnostics whose canonical path set equals the
 stage-row path set. A signal, any other exit, missing stage, malformed row, path disagreement, or
@@ -2564,7 +2564,7 @@ git merge-base HEAD origin/main
 git rev-list --left-right --count origin/main...HEAD
 git diff --name-status <observed-merge-base>...origin/main
 git diff --name-status <observed-merge-base>...HEAD
-git merge-tree --write-tree HEAD origin/main
+git merge-tree --write-tree --messages HEAD origin/main
 ```
 
 Map those displayed commands in order to `upstream-root`, `upstream-head`, `upstream-status`,
