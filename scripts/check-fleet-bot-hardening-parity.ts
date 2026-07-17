@@ -4,6 +4,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { isRecord } from '../src/lib/type-guards.ts';
+import { receiptCapabilityDigest } from './lib/fleet-receipt-digest.ts';
 import { rosterEpoch, rosterInventory } from './lib/fleet-roster-inventory.ts';
 
 export const DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH =
@@ -117,7 +118,14 @@ export type FleetBotHardeningParityFindingCode =
   | 'roster-instance-count-mismatch'
   | 'future-roster-epoch'
   | 'invalid-row-release-commit'
-  | 'invalid-row-release-identity';
+  | 'invalid-row-release-identity'
+  | 'invalid-row-receipt'
+  | 'invalid-row-receipt-digest'
+  | 'invalid-row-receipt-captured-at'
+  | 'future-row-receipt-captured-at'
+  | 'stale-row-receipt'
+  | 'receipt-file-missing'
+  | 'receipt-digest-mismatch';
 
 export interface FleetBotHardeningParityFinding {
   code: FleetBotHardeningParityFindingCode;
@@ -166,6 +174,11 @@ function arrayOfStrings(value: unknown): string[] | null {
 // `/^[0-9a-f]{64}$/` check above) since committed manifest identity fields are
 // expected to already be canonical lowercase.
 const FULL_GIT_SHA_RE = /^[0-9a-f]{40}$/;
+
+// Shape of a manifest row's `receipt.digest` (design §6): `sha256:` prefix
+// plus lowercase 64-hex, so the guard can reject a malformed digest string
+// cheaply before ever trying to open the referenced receipt file.
+const RECEIPT_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
 
 // Parse a `YYYY-MM-DD` manifest date as UTC midnight. Returns null when the
 // value is not that exact shape or is not a real calendar date, so callers can
@@ -253,6 +266,7 @@ function validateCapabilities(payload: Record<string, unknown>, findings: FleetB
 }
 
 function validateRows(
+  cwd: string,
   payload: Record<string, unknown>,
   findings: FleetBotHardeningParityFinding[],
   now: Date,
@@ -398,6 +412,122 @@ function validateRows(
             'invalid-row-release-identity',
             `${context}.releaseIdentity.provider must be a non-empty string`,
           ));
+        }
+      }
+    }
+
+    // Runtime receipt reference (#1867 criterion 1, guard-side half; design
+    // §6/§7.2, storage Option B). Validate-when-present: a row that omits
+    // `receipt` gets no finding at all -- the tracked manifest's rows do not
+    // declare this field yet, and requiring it on hardened rows is a
+    // deferred, separate change (the manifest-migration increment). Whenever
+    // a row *does* declare a receipt, its shape/format must be
+    // fail-closed-correct, and -- because the referenced receipt file is
+    // committed (Option B) -- the guard never trusts the declared digest: it
+    // independently recomputes the capability-identity digest
+    // (`fleet-receipt-digest.ts`, mirroring the roster digest recompute in
+    // `validateInventoryBinding` below) from the file's own bytes and rejects
+    // on mismatch. This increment deliberately does NOT cross-check `receipt`
+    // against `releaseIdentity` (`release-identity-receipt-mismatch` /
+    // `verified-before-service-restart` per design §7.3) -- that needs both
+    // fields meaningfully populated on real rows, which is a later increment.
+    const receipt = rawRow['receipt'];
+    if (receipt !== undefined) {
+      if (!isRecord(receipt)) {
+        findings.push(finding('invalid-row-receipt', `${context}.receipt must be an object`));
+      } else {
+        const receiptDigest = receipt['digest'];
+        const capturedAt = receipt['capturedAt'];
+        const receiptPath = receipt['path'];
+
+        const receiptDigestOk = typeof receiptDigest === 'string' && RECEIPT_DIGEST_RE.test(receiptDigest);
+        if (!receiptDigestOk) {
+          findings.push(finding(
+            'invalid-row-receipt-digest',
+            `${context}.receipt.digest must match ^sha256:[0-9a-f]{64}$`,
+          ));
+        }
+
+        if (typeof capturedAt !== 'string') {
+          findings.push(finding(
+            'invalid-row-receipt-captured-at',
+            `${context}.receipt.capturedAt must be a string`,
+          ));
+        } else {
+          const capturedMs = Date.parse(capturedAt);
+          if (Number.isNaN(capturedMs)) {
+            findings.push(finding(
+              'invalid-row-receipt-captured-at',
+              `${context}.receipt.capturedAt must be a parseable ISO-8601 timestamp`,
+            ));
+          } else if (capturedMs > now.getTime()) {
+            findings.push(finding(
+              'future-row-receipt-captured-at',
+              `${context}.receipt.capturedAt ${capturedAt} is in the future`,
+            ));
+          } else if (now.getTime() - capturedMs > FLEET_BOT_HARDENING_PARITY_MAX_AGE_MS) {
+            // CI-loose freshness budget (design §7.6): this reuses the same
+            // 90-day cadence as `verifiedAt`/`updated`, matching human commit
+            // cadence, NOT the hours/day-scale operator-side capture-time
+            // gate that belongs in the (separate, not-yet-built) receipt
+            // producer. Collapsing the two into one budget would make this
+            // CI guard go red on unrelated pushes.
+            findings.push(finding(
+              'stale-row-receipt',
+              `${context}.receipt.capturedAt ${capturedAt} is older than the ${FLEET_BOT_HARDENING_PARITY_MAX_AGE_DAYS}-day freshness budget`,
+            ));
+          }
+        }
+
+        let resolvedReceiptPath: string | null = null;
+        if (typeof receiptPath !== 'string' || !isSafeRepoRelativePath(receiptPath)) {
+          findings.push(finding(
+            'receipt-file-missing',
+            `${context}.receipt.path must be a safe repo-relative path`,
+          ));
+        } else {
+          const absolutePath = path.resolve(cwd, receiptPath);
+          const cwdResolved = path.resolve(cwd);
+          if (!absolutePath.startsWith(cwdResolved + path.sep) && absolutePath !== cwdResolved) {
+            findings.push(finding(
+              'receipt-file-missing',
+              `${context}.receipt.path escapes repository: ${receiptPath}`,
+              receiptPath,
+            ));
+          } else if (!existsSync(absolutePath)) {
+            findings.push(finding(
+              'receipt-file-missing',
+              `receipt file is missing: ${receiptPath}`,
+              receiptPath,
+            ));
+          } else {
+            resolvedReceiptPath = absolutePath;
+          }
+        }
+
+        // Only attempt the recompute-and-compare once we have a
+        // well-formed declared digest AND a real file to read -- a
+        // malformed digest string or a missing file is already reported by
+        // the checks above, and re-reporting the same problem as a
+        // "mismatch" would be noise, not a distinct fact.
+        if (receiptDigestOk && resolvedReceiptPath) {
+          try {
+            const receiptFileData: unknown = JSON.parse(readFileSync(resolvedReceiptPath, 'utf8'));
+            const recomputedDigest = `sha256:${receiptCapabilityDigest(receiptFileData)}`;
+            if (recomputedDigest !== receiptDigest) {
+              findings.push(finding(
+                'receipt-digest-mismatch',
+                `${context}.receipt.digest=${String(receiptDigest)} does not match recomputed capability-identity digest=${recomputedDigest}`,
+                receiptPath as string,
+              ));
+            }
+          } catch (err) {
+            findings.push(finding(
+              'receipt-digest-mismatch',
+              `cannot recompute capability-identity digest from receipt file ${String(receiptPath)}: ${(err as Error).message}`,
+              receiptPath as string,
+            ));
+          }
         }
       }
     }
@@ -641,7 +771,7 @@ export function checkFleetBotHardeningParity(
 
   recordPrivateLabelFindings(runtimeFindings, payload, '$');
   validateCapabilities(payload, runtimeFindings);
-  const rows = validateRows(payload, runtimeFindings, now);
+  const rows = validateRows(cwd, payload, runtimeFindings, now);
   validateSummary(payload, rows, runtimeFindings);
   if (isRecord(scope) && typeof scope['cohortSize'] === 'number' && scope['cohortSize'] !== rows.length) {
     runtimeFindings.push(finding(
