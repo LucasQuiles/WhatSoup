@@ -65,6 +65,7 @@ import {
   type BoundaryRunManifest,
   type BoundaryValidationIssue,
   type BoundaryValidationResult,
+  type BoundaryWorktreeSnapshot,
 } from '../boundary-run-manifest.ts';
 import { cleanGitEnv } from '../../../../src/lib/git-env.ts';
 
@@ -386,6 +387,46 @@ export function strictCanonicalObject(bytes: Buffer, label: string): Record<stri
 export function gitPathSet(cwd: string, args: readonly string[]): string[] {
   const stdout = gitText(cwd, args);
   return canonicalSet(stdout === '' ? [] : stdout.split('\n').filter((entry) => entry !== ''));
+}
+
+function snapshotPathRecordsMatch(
+  left: BoundaryWorktreeSnapshot,
+  right: BoundaryWorktreeSnapshot,
+): boolean {
+  return canonicalizeBoundaryRun(left.allowedUntracked) === canonicalizeBoundaryRun(right.allowedUntracked)
+    && canonicalizeBoundaryRun(left.preservedOwner) === canonicalizeBoundaryRun(right.preservedOwner);
+}
+
+export function admitsProfileOwnedCommandWork(
+  cwd: string,
+  previous: BoundaryWorktreeSnapshot,
+  current: BoundaryWorktreeSnapshot,
+  allowedPaths: readonly string[],
+): boolean {
+  if (canonicalizeBoundaryRun(previous) === canonicalizeBoundaryRun(current)) return true;
+  if (
+    previous.head !== current.head
+    || previous.indexTreeOid !== current.indexTreeOid
+    || previous.trackedPatchSha256 !== current.trackedPatchSha256
+    || !snapshotPathRecordsMatch(previous, current)
+  ) return false;
+  const allowed = new Set(allowedPaths);
+  return gitPathSet(cwd, ['diff', '--name-only', 'HEAD', '--'])
+    .every((relativePath) => allowed.has(relativePath));
+}
+
+export function admitsByteEquivalentCommitStaging(
+  previous: BoundaryWorktreeSnapshot,
+  current: BoundaryWorktreeSnapshot,
+  expectedHeadTreeOid: string,
+): boolean {
+  const emptyPatchSha256 = sha256('');
+  return previous.head === current.head
+    && previous.indexTreeOid === expectedHeadTreeOid
+    && previous.trackedPatchSha256 === emptyPatchSha256
+    && current.unstagedPatchSha256 === emptyPatchSha256
+    && previous.unstagedPatchSha256 === current.trackedPatchSha256
+    && snapshotPathRecordsMatch(previous, current);
 }
 
 export function acceptedAttemptStdout(manifest: BoundaryRunManifest, runDir: string, attemptId: string): string {

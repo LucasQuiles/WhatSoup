@@ -146,16 +146,16 @@ export function registerTransitionCases(): void {
     run['chainAppend'] = profile.chainAppend;
     writeFileSync(path.join(fixture.repo, 'scripts/semantic-quality-check.ts'), 'export const fixture = false;\n');
     writeFileSync(path.join(fixture.repo, 'tests/scripts/semantic-quality-check.test.ts'), 'test changed fixture\n');
-    git(fixture.repo, ['add', ...profile.allowedPaths]);
-    const stagedSnapshot = boundaryRun.captureBoundaryWorktreeSnapshot(fixture.repo, {
+    const testedSnapshot = boundaryRun.captureBoundaryWorktreeSnapshot(fixture.repo, {
       allowedUntrackedPaths: [],
       preservedOwnerPaths: ['owner.tsv'],
     });
-    expect(stagedSnapshot).toMatchObject({ ok: true });
-    expect(stagedSnapshot.snapshot).not.toBeNull();
-    manifest['currentSnapshot'] = structuredClone(stagedSnapshot.snapshot);
+    expect(testedSnapshot).toMatchObject({ ok: true });
+    expect(testedSnapshot.snapshot).not.toBeNull();
+    manifest['currentSnapshot'] = structuredClone(testedSnapshot.snapshot);
     writeFileSync(manifestPath, boundaryRun.canonicalizeBoundaryRun(manifest));
     writeSyntheticRunInitAnchor(fixture.runDir, manifest);
+    git(fixture.repo, ['add', ...profile.allowedPaths]);
 
     const beforeHead = git(fixture.repo, ['rev-parse', 'HEAD']);
     const wrongSubject = await api.runBoundaryRunCli([
@@ -165,6 +165,22 @@ export function registerTransitionCases(): void {
     expect(wrongSubject).toMatchObject({ ok: false, exitCode: 2, verdict: 'Inconclusive' });
     expect(git(fixture.repo, ['rev-parse', 'HEAD'])).toBe(beforeHead);
     expect(existsSync(path.join(fixture.runDir, 'attempts/parser-commit-transition'))).toBe(false);
+
+    writeFileSync(path.join(fixture.repo, 'scripts/semantic-quality-check.ts'), 'export const substituted = true;\n');
+    git(fixture.repo, ['add', 'scripts/semantic-quality-check.ts']);
+    const substitutedBytes = await api.runBoundaryRunCli([
+      'record-git-transition', '--run-dir', fixture.runDir, '--attempt', 'parser-commit-transition',
+      '--kind', 'commit', '--expect-before', beforeHead,
+      '--message-subject', 'fix(quality): fail closed on invalid semantic options',
+    ], fixture.repo);
+    expect(substitutedBytes).toMatchObject({
+      ok: false,
+      issues: [expect.objectContaining({ code: 'transition-pre-snapshot-drift' })],
+    });
+    expect(git(fixture.repo, ['rev-parse', 'HEAD'])).toBe(beforeHead);
+    expect(existsSync(path.join(fixture.runDir, 'attempts/parser-commit-transition'))).toBe(false);
+    writeFileSync(path.join(fixture.repo, 'scripts/semantic-quality-check.ts'), 'export const fixture = false;\n');
+    git(fixture.repo, ['add', 'scripts/semantic-quality-check.ts']);
 
     const recorded = await api.runBoundaryRunCli([
       'record-git-transition', '--run-dir', fixture.runDir, '--attempt', 'parser-commit-transition',

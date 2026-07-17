@@ -121,6 +121,77 @@ export function registerAttemptCases(): void {
     ], fixture.repo)).toMatchObject({ ok: false, exitCode: 2 });
   });
 
+  it('admits profile-owned unstaged work before a command and rejects foreign drift before spawn', async () => {
+    const api = boundaryCli as unknown as {
+      runBoundaryRunCli?: (argv: readonly string[], cwd?: string) => Promise<ReturnType<typeof validateBoundaryRun>>;
+    };
+    expect(typeof api.runBoundaryRunCli).toBe('function');
+    if (!api.runBoundaryRunCli) return;
+    const fixture = makeCliRepo();
+    const predecessor = await createFinalizedSyntheticReconciliation(fixture.repo, api.runBoundaryRunCli, 'parser-work');
+    const predecessorPin = [
+      'BCF-00', 'bcf00-reconciliation', predecessor.runId, predecessor.terminalHead,
+      predecessor.manifestSha256, predecessor.completionReceiptSha256, predecessor.ledgerSha256,
+    ].join(',');
+    const runDir = path.join(fixture.repo, 'evidence/task01/parser-work-successor');
+    const profile = boundaryRun.RUN_CONTRACT_PROFILES['bcf01-parser'];
+    expect(await api.runBoundaryRunCli([
+      'init', '--run-dir', runDir, '--task', 'BCF-01', '--profile', 'bcf01-parser',
+      '--predecessor-run-dir', predecessor.runDir, '--predecessor-pin', predecessorPin,
+      ...profile.allowedPaths.flatMap((relativePath) => ['--allow-path', relativePath]),
+      '--preserve-owner-path', 'owner.tsv',
+    ], fixture.repo)).toMatchObject({ ok: true, exitCode: 0 });
+
+    writeFileSync(path.join(fixture.repo, 'tests/scripts/semantic-quality-check.test.ts'), 'test red fixture\n');
+    const recorded = await api.runBoundaryRunCli([
+      'record-command', '--run-dir', runDir, '--attempt', 'parser-typecheck', '--expect-exit', '0', '--',
+      'bash', 'scripts/run-with-pinned-npm.sh', 'run', 'typecheck:scripts',
+    ], fixture.repo);
+    expect(recorded, JSON.stringify(recorded)).toMatchObject({ ok: true, exitCode: 0, verdict: 'Pass' });
+    const manifest = JSON.parse(readFileSync(path.join(runDir, 'run_manifest.json'), 'utf8')) as {
+      entrySnapshot: { indexTreeOid: string; unstagedPatchSha256: string };
+      attempts: Array<{ id: string; preSnapshot: { indexTreeOid: string; unstagedPatchSha256: string } }>;
+    };
+    const attempt = manifest.attempts.find((entry) => entry.id === 'parser-typecheck');
+    expect(attempt?.preSnapshot.indexTreeOid).toBe(manifest.entrySnapshot.indexTreeOid);
+    expect(attempt?.preSnapshot.unstagedPatchSha256).not.toBe(manifest.entrySnapshot.unstagedPatchSha256);
+
+    const recordParserRed = () => api.runBoundaryRunCli!([
+      'record-command', '--run-dir', runDir, '--attempt', 'parser-red', '--expect-exit', 'nonzero', '--',
+      'bash', 'scripts/run-with-pinned-npm.sh', 'test', '--',
+      'tests/scripts/semantic-quality-check.test.ts', '--pool=forks', '--fileParallelism=false',
+    ], fixture.repo);
+
+    writeFileSync(path.join(fixture.repo, '.gitignore'), 'evidence/\nforeign-drift/\n');
+    expect(await recordParserRed()).toMatchObject({
+      ok: false,
+      issues: [expect.objectContaining({ code: 'attempt-pre-snapshot-drift' })],
+    });
+    expect(existsSync(path.join(runDir, 'attempts/parser-red'))).toBe(false);
+
+    writeFileSync(path.join(fixture.repo, '.gitignore'), 'evidence/\n');
+    writeFileSync(path.join(fixture.repo, 'owner.tsv'), 'mutated owner\n');
+    expect(await recordParserRed()).toMatchObject({
+      ok: false,
+      issues: [expect.objectContaining({ code: 'attempt-pre-snapshot-drift' })],
+    });
+    writeFileSync(path.join(fixture.repo, 'owner.tsv'), 'owner\n');
+
+    writeFileSync(path.join(fixture.repo, 'unexpected.txt'), 'unexpected\n');
+    expect(await recordParserRed()).toMatchObject({
+      ok: false,
+      issues: [expect.objectContaining({ code: 'snapshot-unexpected-untracked' })],
+    });
+    rmSync(path.join(fixture.repo, 'unexpected.txt'));
+
+    git(fixture.repo, ['add', 'tests/scripts/semantic-quality-check.test.ts']);
+    expect(await recordParserRed()).toMatchObject({
+      ok: false,
+      issues: [expect.objectContaining({ code: 'attempt-pre-snapshot-drift' })],
+    });
+    expect(existsSync(path.join(runDir, 'attempts/parser-red'))).toBe(false);
+  });
+
 
   it('[BCF00-U03] rejects unsafe or raced derived roots', () => {
     type Reservation = Record<string, unknown>;

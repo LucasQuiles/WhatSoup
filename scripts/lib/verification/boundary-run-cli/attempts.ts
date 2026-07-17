@@ -77,6 +77,7 @@ import {
 } from './invocation.ts';
 import {
   acceptedAttemptStdout,
+  admitsProfileOwnedCommandWork,
   BoundaryRunLoadError,
   canonicalSet,
   capabilityForManifest,
@@ -191,7 +192,7 @@ export async function recordCommand(invocation: BoundaryRunInvocation, cwd: stri
     preservedOwnerPaths: manifest.run.preservedOwnerPaths,
   });
   if (!before.ok || before.snapshot === null) return operationResult(before.issues);
-  if (canonicalizeBoundaryRun(before.snapshot) !== canonicalizeBoundaryRun(manifest.currentSnapshot)) {
+  if (!admitsProfileOwnedCommandWork(cwd, manifest.currentSnapshot, before.snapshot, manifest.run.allowedPaths)) {
     return operationResult([{ code: 'attempt-pre-snapshot-drift', message: 'worktree changed before command execution' }]);
   }
   const attemptDir = path.join(runDir, 'attempts', attemptId);

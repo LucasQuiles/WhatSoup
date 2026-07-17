@@ -77,6 +77,7 @@ import {
 } from './invocation.ts';
 import {
   acceptedAttemptStdout,
+  admitsByteEquivalentCommitStaging,
   BoundaryRunLoadError,
   canonicalSet,
   capabilityForManifest,
@@ -173,7 +174,13 @@ export async function recordGitTransition(
     preservedOwnerPaths: manifest.run.preservedOwnerPaths,
   });
   if (!before.ok || before.snapshot === null) return operationResult(before.issues);
-  if (canonicalizeBoundaryRun(before.snapshot) !== canonicalizeBoundaryRun(manifest.currentSnapshot)) {
+  const exactPreSnapshot = canonicalizeBoundaryRun(before.snapshot) === canonicalizeBoundaryRun(manifest.currentSnapshot);
+  const byteEquivalentCommitStaging = kind === 'commit' && admitsByteEquivalentCommitStaging(
+    manifest.currentSnapshot,
+    before.snapshot,
+    gitText(cwd, ['rev-parse', `${beforeHead}^{tree}`]),
+  );
+  if (!exactPreSnapshot && !byteEquivalentCommitStaging) {
     return operationResult([{ code: 'transition-pre-snapshot-drift', message: 'worktree changed before Git transition' }]);
   }
   const allowedPaths = canonicalSet(manifest.run.allowedPaths);
