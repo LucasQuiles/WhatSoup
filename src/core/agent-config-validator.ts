@@ -327,6 +327,25 @@ export function validateInstanceConfig(
     }
   }
 
+  // --- pausedChatBypassPatterns (shape + regex compile) ---
+  const bypassPatterns = raw['pausedChatBypassPatterns'];
+  if (bypassPatterns !== undefined) {
+    if (!Array.isArray(bypassPatterns)) {
+      return err('pausedChatBypassPatterns', 'pausedChatBypassPatterns must be an array of regex source strings');
+    }
+    for (const pattern of bypassPatterns) {
+      if (!nonBlankString(pattern)) {
+        return err('pausedChatBypassPatterns', 'pausedChatBypassPatterns must contain only non-empty regex source strings');
+      }
+      try {
+        // Compiled case-insensitively at runtime — validate the same way.
+        new RegExp(pattern as string, 'i');
+      } catch {
+        return err('pausedChatBypassPatterns', `pausedChatBypassPatterns contains an invalid regular expression: ${pattern}`);
+      }
+    }
+  }
+
   // --- claudeMd size cap (write paths only — loader does not store it) ---
   if ((ctx.mode === 'create' || ctx.mode === 'patch') && typeof raw['claudeMd'] === 'string') {
     if ((raw['claudeMd'] as string).length > 32_768) {

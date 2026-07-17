@@ -1020,6 +1020,14 @@ export const config = {
       .filter((j: unknown) => typeof j === 'string' && (j as string).trim() !== ''),
   ),
 
+  // Paused-chat dispatch bypass — case-insensitive regex sources matched
+  // against inbound content in a paused chat. A match dispatches the message
+  // as if the chat were not paused, so operator-directed traffic (e.g.
+  // escalations) survives pausing a busy bot-noise group. Default [] keeps
+  // paused-chat behavior unchanged. Invalid regex entries are rejected by the
+  // instance-config validator and skipped defensively at runtime.
+  pausedChatBypassPatterns: stringArrayProp(instance, 'pausedChatBypassPatterns'),
+
   // Media
   mediaDir,
   tmpDir: processTmpDir,

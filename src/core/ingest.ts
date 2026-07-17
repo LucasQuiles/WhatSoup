@@ -213,6 +213,38 @@ function releaseSlot(): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Paused-chat dispatch bypass — compiled once per config value
+// ---------------------------------------------------------------------------
+
+// Cache keyed on the config array reference: patterns compile once at first
+// use (or after a config swap), never per-message. An entry that fails to
+// compile is dropped with a single warn here — the validator rejects bad
+// regex at startup, this is the defensive runtime backstop so a bad entry
+// can never throw inside ingest.
+let pausedChatBypassCache: { source: readonly string[]; regexes: RegExp[] } | null = null;
+
+function getPausedChatBypassRegexes(): RegExp[] {
+  const source = config.pausedChatBypassPatterns ?? [];
+  if (pausedChatBypassCache?.source === source) return pausedChatBypassCache.regexes;
+  const regexes: RegExp[] = [];
+  for (const pattern of source) {
+    try {
+      regexes.push(new RegExp(pattern, 'i'));
+    } catch (err) {
+      log.warn({ err, pattern }, 'invalid pausedChatBypassPatterns entry — skipping');
+    }
+  }
+  pausedChatBypassCache = { source, regexes };
+  return regexes;
+}
+
+/** True when paused-chat content matches a configured bypass pattern. Null/absent content (media) never matches. */
+function matchesPausedChatBypass(content: string | null | undefined): boolean {
+  if (!content) return false;
+  return getPausedChatBypassRegexes().some((re) => re.test(content));
+}
+
 /**
  * Create a fire-and-forget ingest handler that routes incoming messages
  * through the shared pipeline before dispatching eligible messages to the
@@ -355,13 +387,19 @@ export function createIngestHandler(
         const pausedChats = config.pausedChats ?? new Set<string>();
 
         // 1b++. Paused chat short-circuit — message stored above, skip dispatch entirely.
+        // Exception: content matching a configured bypass pattern dispatches through
+        // the normal path, so operator-directed traffic survives pausing a busy group.
         if ((pausedChats.has(conversationKey) || pausedChats.has(msg.chatJid)) && !getAdminCommand()) {
-          log.info({ chatJid: msg.chatJid, messageId: msg.messageId }, 'chat paused — skipping dispatch');
-          if (durability) {
-            const seq = durability.journalInbound(msg.messageId, conversationKey, msg.chatJid, 'none');
-            durability.markInboundSkipped(seq, 'chat_paused');
+          if (matchesPausedChatBypass(msg.content)) {
+            log.info({ chatJid: msg.chatJid, messageId: msg.messageId }, 'paused chat bypass matched — dispatching');
+          } else {
+            log.info({ chatJid: msg.chatJid, messageId: msg.messageId }, 'chat paused — skipping dispatch');
+            if (durability) {
+              const seq = durability.journalInbound(msg.messageId, conversationKey, msg.chatJid, 'none');
+              durability.markInboundSkipped(seq, 'chat_paused');
+            }
+            return;
           }
-          return;
         }
 
         // 1c. Passive short-circuit — store message, journal as complete, no dispatch
