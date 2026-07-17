@@ -15,6 +15,7 @@
 - Do not dismiss, suppress, or reclassify a CodeQL alert.
 - Preserve `experiment-results.tsv` byte-for-byte and never stage or commit it.
 - Do not bypass commit, pre-push, publication, security, or required-status gates.
+- Run every npm command through `scripts/run-with-pinned-npm.sh`; ambient npm currently resolves Node 26.4.0 while this repository pins Node 24.15.0.
 - Use the existing `origin` SSH remote; do not change it to HTTPS.
 - Execute inline in this session; no worker delegation is authorized by the current runtime receipts.
 
@@ -79,7 +80,7 @@ Replace the flagged raw case with:
 Run:
 
 ```bash
-npm test -- tests/scripts/verify-boundary-run.test.ts \
+bash scripts/run-with-pinned-npm.sh test -- tests/scripts/verify-boundary-run.test.ts \
   -t "parses expected exits in linear bounded form" \
   --pool=forks --fileParallelism=false
 ```
@@ -147,7 +148,7 @@ reproduction branch with:
 Run:
 
 ```bash
-npm test -- tests/scripts/verify-boundary-run.test.ts \
+bash scripts/run-with-pinned-npm.sh test -- tests/scripts/verify-boundary-run.test.ts \
   -t "parses expected exits in linear bounded form" \
   --pool=forks --fileParallelism=false
 ```
@@ -159,7 +160,7 @@ Expected: one matching test passes with exit 0.
 Run:
 
 ```bash
-npm test -- tests/scripts/verify-boundary-run.test.ts --pool=forks --fileParallelism=false
+bash scripts/run-with-pinned-npm.sh test -- tests/scripts/verify-boundary-run.test.ts --pool=forks --fileParallelism=false
 ```
 
 Expected: every test passes with exit 0; the canonical CRLF case still reports the
@@ -170,8 +171,8 @@ expected `invalid-json-byte` issue inside its assertion.
 Run:
 
 ```bash
-npm run typecheck:scripts
-npm run typecheck:all
+bash scripts/run-with-pinned-npm.sh run typecheck:scripts
+bash scripts/run-with-pinned-npm.sh run typecheck:all
 git diff --check
 shasum -a 256 experiment-results.tsv
 ```
@@ -188,8 +189,8 @@ git add scripts/lib/verification/boundary-run-manifest.ts \
   scripts/verify-boundary-run.ts \
   tests/scripts/verify-boundary-run.test.ts
 git diff --cached --check
-npm run guard:repo:staged
-npm run guard:publication:staged
+bash scripts/run-with-pinned-npm.sh run guard:repo:staged
+bash scripts/run-with-pinned-npm.sh run guard:publication:staged
 ```
 
 Expected: the three named paths are staged, the owner artifact is not staged, and all
@@ -222,7 +223,7 @@ remediation paths.
 Run:
 
 ```bash
-npm run verify:push:branch
+bash scripts/run-with-pinned-npm.sh run verify:push:branch
 ```
 
 Expected: exit 0 with no masked failure. Advisory baseline warnings must remain explicitly
