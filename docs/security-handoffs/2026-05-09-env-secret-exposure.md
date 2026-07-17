@@ -17,8 +17,8 @@ Phase letters map to the W-1..W-6 wave nomenclature used in the kickoff doc's Co
 | W-2 / Phase B | Provider boundary migration (one provider per PR) | in-progress | OpenAI API + Anthropic API providers: [#370](https://github.com/LucasQuiles/WhatSoup/pull/370), SHA `a4bcb536`, merged 2026-05-12. ElevenLabs provider: routed through `lookupCredential('elevenlabs')` in `src/runtimes/chat/providers/elevenlabs.ts:20`, SHA `ef20d66d`, merged 2026-04-06 (predates this handoff). Whisper provider: routed through `resolveApiKey()` in `src/runtimes/chat/providers/transcription/openai-whisper.ts:9,24-29`, [#1683](https://github.com/LucasQuiles/WhatSoup/pull/1683), SHA `6ad7606d`, merged 2026-07-07. Pinecone + Knowledge MCP (coupled migration): [#1800](https://github.com/LucasQuiles/WhatSoup/pull/1800), merged 2026-07-14. Health auth: [#1804](https://github.com/LucasQuiles/WhatSoup/pull/1804), merged 2026-07-14. Pattern B reason-code taxonomy: [#1803](https://github.com/LucasQuiles/WhatSoup/pull/1803), merged 2026-07-14 | Model advisor ([#1801](https://github.com/LucasQuiles/WhatSoup/pull/1801) open) |
 | W-3 / Phase C | Reverse the precedence (resolver-first, env-fallback) | in-progress | — | [#1807](https://github.com/LucasQuiles/WhatSoup/pull/1807) open (`allowEnvFallback` flag on `resolveApiKey`) |
 | W-4 / Phase D | Stop child env inheritance | in-progress | — | [#1808](https://github.com/LucasQuiles/WhatSoup/pull/1808) open (`buildChildEnv` key reads routed through `resolveApiKey`) |
-| W-5 / Phase E | Health token migration (move off `tokens.env`) | in-progress | Health auth routed through `lookupCredential`: [#1804](https://github.com/LucasQuiles/WhatSoup/pull/1804), merged 2026-07-14 | Wrapper export removal at `deploy/whatsoup:174-182` (coupled to W-6); `tokens.env` file removal |
-| W-6 / Phase F | Wrapper-chain removal (deploy cleanup, terminal phase) | in-progress | D-3 scope resolved: `secrets.env` folds into W-6 (not W-5); keyring-presence check tooling: [#1806](https://github.com/LucasQuiles/WhatSoup/pull/1806), open | Wrapper chain removal; `secrets.env` + `tokens.env` `EnvironmentFile` lines removal |
+| W-5 / Phase E | Health token migration | in-progress | Health auth routed through `lookupCredential`: [#1804](https://github.com/LucasQuiles/WhatSoup/pull/1804), merged 2026-07-14; descriptor-safe wrapper preload from canonical per-instance `tokens.env` | Remove plaintext `WHATSOUP_HEALTH_TOKEN` duplication from older launchd plists after controlled deployment; retain `tokens.env` until fleet discovery migrates to the same scoped source |
+| W-6 / Phase F | Wrapper-chain removal (deploy cleanup, terminal phase) | in-progress | D-3 scope resolved: `secrets.env` folds into W-6 (not W-5); keyring-presence check tooling: [#1806](https://github.com/LucasQuiles/WhatSoup/pull/1806), open | Wrapper chain removal and `secrets.env` removal; `tokens.env` removal remains blocked on W-5 fleet-source migration |
 
 Phase B notes: PR #370 routed OpenAI and Anthropic API providers through `lookupCredential(apiKeyService)` with env fallback preserved. ElevenLabs is ALSO already migrated: `src/runtimes/chat/providers/elevenlabs.ts:20` resolves its key via `lookupCredential('elevenlabs')` (env-first with keyring fallback), landed in SHA `ef20d66d` on 2026-04-06 — before this handoff was written — so its prior `pending` listing was a documentation staleness error, corrected in the 2026-07-01 re-grounding below. Whisper was migrated to `resolveApiKey()` by PR #1683 (SHA `6ad7606d`, 2026-07-07), corrected in the 2026-07-14 re-grounding below. Pinecone + Knowledge MCP were migrated together by PR #1800 (merged 2026-07-14), preserving the configurable `apiKeyEnv` and Knowledge MCP's fail-open `return null`. Health auth was migrated by PR #1804 (merged 2026-07-14). Pattern B reason-code taxonomy landed in PR #1803 (merged 2026-07-14). **Phase B is now 7 of 7 providers migrated or in-flight** — only model-advisor remains (PR #1801 open).
 
@@ -55,7 +55,14 @@ This handoff was re-verified against `origin/main` (SHA `b6c088a5`) after a burs
 
 **Phase D (W-4) is in flight.** PR #1808 routes the four flagged `buildChildEnv` direct reads (`session.ts:188,191,199,200`) through `resolveApiKey()`. The W-2 static guard (PR #1805) has line-level allowlist entries for these; when #1808 merges, those entries must be removed (the stale-entry detector enforces this).
 
-**Phase E (W-5) is partially merged.** PR #1804 (health auth through `lookupCredential`) is merged. Remaining: the wrapper export at `deploy/whatsoup:174-182` still reads the health token into process env — its removal is coupled to W-6.
+**Phase E (W-5) is partially merged.** PR #1804 (health auth through `lookupCredential`) is merged. The launcher now preserves a preloaded value, reads canonical per-instance `tokens.env` through a bounded no-follow descriptor, then falls back to the scoped Keychain entry and the legacy shared entry. Older launchd plists that duplicate the token in `EnvironmentVariables` should remove that plaintext duplication only after controlled deployment of this wrapper. Keep `tokens.env` until fleet discovery migrates to the same scoped source.
+
+The two private-file paths have different scopes. Unscoped resolver mirrors live
+at `$XDG_CONFIG_HOME/whatsoup/credentials/<service>.key`; an account-scoped
+lookup never uses them. The health token file lives at
+`$XDG_CONFIG_HOME/whatsoup/instances/<instance>/tokens.env` and is explicitly
+per-instance. A stale unscoped `.key` file must be audited separately and cannot
+satisfy a scoped health-token lookup.
 
 **Phase F (W-6) is scoped.** D-3 (the `secrets.env` scope gap) is resolved: `secrets.env` folds into W-6, not W-5. PR #1806 adds `deploy/check-keyring-presence.sh` (pre-flight tooling) and migration notes on the `EnvironmentFile` line. The wrapper chain removal itself is terminal-phase work that depends on W-3 landing first.
 
@@ -122,9 +129,10 @@ Start the bead with these files:
    - `buildChildEnv()` must not include API keys for Claude, Codex, OpenCode, Gemini, or other child agent processes.
    - CLI providers should use their native auth or be rejected for env-key-only modes.
 
-5. Move health tokens out of env files.
-   - Store per-instance health tokens as keyring entries, for example `service=whatsoup_health`, `account=<instance>`.
-   - Stop writing and loading `tokens.env` after migration.
+5. Remove health-token environment duplication in stages.
+   - Keep the canonical per-instance `tokens.env` file private and descriptor-read while fleet discovery remains file-backed.
+   - Mirror per-instance health tokens as scoped entries: macOS uses `service=whatsoup-health-token`, `account=<instance>`; Linux uses `service=whatsoup-health-token`, `user=<instance>`.
+   - After the descriptor-safe wrapper is deployed, remove plaintext `WHATSOUP_HEALTH_TOKEN` entries from launchd; do not remove `tokens.env` until fleet discovery migrates.
 
 6. Remove wrapper-chain deployment.
    - launchd should run the normal WhatSoup command directly with non-secret `HOME` and `PATH`.
