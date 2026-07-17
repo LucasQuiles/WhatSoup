@@ -165,19 +165,25 @@ def redact_bundle(bundle: dict) -> dict:
 
 
 def _sanitize_auth_bond(auth_bond: Any) -> dict | None:
-    """Structural exclusion (design §3, point 2): `creds.path` (a full
-    filesystem path) and raw `authDir`/`stateRoot`/`dataRoot` are dropped
-    entirely rather than redacted-in-place, mirroring how `formatAuthBond`
-    (health.ts) already truncates hashes instead of emitting them in full.
+    """Structural exclusion (design §3, point 2): raw filesystem paths are
+    dropped entirely rather than redacted-in-place, mirroring how
+    `formatAuthBond` (health.ts:420-459) already truncates hashes instead of
+    emitting them in full. `formatAuthBond`'s real output shape nests TWO
+    raw-path fields -- `creds.path` and `auth_dir.path` (health.ts:427,
+    :437) -- not a top-level `authDir` key on the auth-bond object itself;
+    both are stripped here. `stateRoot`/`dataRoot` are also dropped
+    defensively in case a future health.ts revision surfaces them directly
+    on this object, but they are not part of today's `formatAuthBond` shape.
     """
     if not isinstance(auth_bond, dict):
         return None
     sanitized = dict(auth_bond)
-    creds = sanitized.get("creds")
-    if isinstance(creds, dict):
-        creds = dict(creds)
-        creds.pop("path", None)
-        sanitized["creds"] = creds
+    for path_holder_key in ("creds", "auth_dir"):
+        path_holder = sanitized.get(path_holder_key)
+        if isinstance(path_holder, dict) and "path" in path_holder:
+            path_holder = dict(path_holder)
+            path_holder.pop("path", None)
+            sanitized[path_holder_key] = path_holder
     for unsafe_key in ("authDir", "stateRoot", "dataRoot"):
         sanitized.pop(unsafe_key, None)
     return sanitized

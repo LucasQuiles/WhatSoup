@@ -248,9 +248,16 @@ def test_capture_assembles_a_bundle_from_injected_sources_without_live_io():
         "sqlite": {"schema_migration_latest": 44},
         "runtime": {"agent": {"turnCapability": {"modelUsabilityStatus": "usable"}}},
         "whatsapp": {
+            # Real shape per `formatAuthBond` (health.ts:420-459): TWO nested
+            # raw-path fields, `creds.path` AND `auth_dir.path` -- both must
+            # be structurally excluded, not just one.
             "auth_bond": {
                 "status": "ok",
-                "creds": {"path": "/Users/testuser/.local/share/whatsoup/instances/q/auth", "hash": "abc123"},
+                "auth_dir": {"path": "/Users/testuser/.local/share/whatsoup/instances/q/auth", "exists": True},
+                "creds": {
+                    "path": "/Users/testuser/.local/share/whatsoup/instances/q/auth/creds.json",
+                    "hash": "abc123",
+                },
             },
             "credential_lifecycle": {"status": "stable"},
         },
@@ -277,7 +284,9 @@ def test_capture_assembles_a_bundle_from_injected_sources_without_live_io():
     assert bundle["serviceActiveEnterTimestamp"] == "2026-07-16T01:00:00Z"
     assert bundle["capturedAt"] == "2026-07-16T03:00:00Z"
 
-    # Structural exclusion (design §3): the raw credential path never
-    # survives, redacted or otherwise.
+    # Structural exclusion (design §3): BOTH raw-path fields on the real
+    # `formatAuthBond` shape (`creds.path` and `auth_dir.path`) never
+    # survive, redacted or otherwise.
     assert "path" not in bundle["authBond"]["creds"]
+    assert "path" not in bundle["authBond"]["auth_dir"]
     assert "/Users/testuser" not in json.dumps(bundle)
