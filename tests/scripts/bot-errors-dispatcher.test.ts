@@ -1504,3 +1504,127 @@ describe('release-proof drill: two-run alert/clear traversal', () => {
     expect(rendered).toContain('release-proof drill alert');
   });
 });
+
+describe('still-open reminder exponential backoff', () => {
+  // Production defect (2026-07-17, fleet coordinator host): "ESCALATED still open" reminders for
+  // long-open incidents (release drift, degraded health) re-paged at the fixed
+  // renotify interval indefinitely, drowning the BOT ERRORS group. The reminder
+  // cadence must back off exponentially per incident_key — first reminder after
+  // the base interval as today, doubling per sent reminder, capped — and the
+  // backoff must persist in incident-state.json so restarts do not reset it
+  // (every dispatchBackoff() call below IS a fresh dispatcher process).
+  const BACKOFF_SOURCE = 'backoff_drill';
+  const BACKOFF_INSTANCE = 'drill-backoff';
+  const TEST_SIGNAL_ENV_KEYS = ['VITEST', 'VITEST_WORKER_ID', 'JEST_WORKER_ID', 'PYTEST_CURRENT_TEST'];
+
+  function emitBackoffAlert(root: string): void {
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      BOT_ERRORS_STATE_DIR: root,
+      BOT_ERRORS_INLINE_LOG_TAIL: '0',
+    };
+    for (const key of TEST_SIGNAL_ENV_KEYS) delete env[key];
+    execFileSync('python3', ['deploy/scripts/bot-errors-emit.py',
+      '--severity', 'warning',
+      '--source', BACKOFF_SOURCE,
+      '--instance', BACKOFF_INSTANCE,
+      '--summary', 'backoff drill alert',
+    ], { cwd: process.cwd(), env });
+  }
+
+  function dispatchBackoff(root: string, capture: string, extraEnv: Record<string, string> = {}): string {
+    return execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: root,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capture,
+        BOT_ERRORS_INLINE_LOG_TAIL: '0',
+        BOT_ERRORS_INCIDENT_RENOTIFY_SECONDS: '60',
+        ...extraEnv,
+      },
+    });
+  }
+
+  type OpenRecord = Record<string, unknown> & { renotifyIntervalSeconds?: number };
+
+  function readIncidentState(root: string): { openIncidents: Record<string, OpenRecord> } {
+    return JSON.parse(readFileSync(join(root, 'incident-state.json'), 'utf8'));
+  }
+
+  function patchOpenRecord(root: string, key: string, patch: Record<string, unknown>): void {
+    const statePath = join(root, 'incident-state.json');
+    const state = JSON.parse(readFileSync(statePath, 'utf8')) as { openIncidents: Record<string, OpenRecord> };
+    state.openIncidents[key] = { ...state.openIncidents[key], ...patch };
+    writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+  }
+
+  it('doubles the still-open reminder interval per incident and persists it across dispatcher runs', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-backoff-'));
+    const capture = join(tmpRoot, 'capture.jsonl');
+
+    // Initial escalation is immediate, exactly as today.
+    emitBackoffAlert(tmpRoot);
+    expect(JSON.parse(dispatchBackoff(tmpRoot, capture))).toMatchObject({ processed: 1, sent: 1, suppressed: 0 });
+    const key = Object.keys(readIncidentState(tmpRoot).openIncidents)[0]!;
+    expect(key).toContain(BACKOFF_SOURCE);
+
+    // Make the incident long-open (escalated) and due for its FIRST reminder:
+    // 90s since last notification >= 60s base interval.
+    let now = Math.floor(Date.now() / 1000);
+    patchOpenRecord(tmpRoot, key, { openedAt: now - 100000, lastNotifiedAt: now - 90, lastSentAt: now - 90 });
+    emitBackoffAlert(tmpRoot);
+    expect(JSON.parse(dispatchBackoff(tmpRoot, capture))).toMatchObject({ processed: 1, sent: 1, suppressed: 0 });
+    const reminders = captureMessages(capture).filter((text) => text.includes('ESCALATED still open'));
+    expect(reminders).toHaveLength(1);
+    // The doubled interval is durably recorded on the open incident record.
+    expect(readIncidentState(tmpRoot).openIncidents[key]!.renotifyIntervalSeconds).toBe(120);
+
+    // 90s since the first reminder: past the fixed 60s cadence (the old defect
+    // re-paged here every cycle) but inside the doubled 120s interval -> suppressed.
+    now = Math.floor(Date.now() / 1000);
+    patchOpenRecord(tmpRoot, key, { lastNotifiedAt: now - 90, lastSentAt: now - 90 });
+    emitBackoffAlert(tmpRoot);
+    expect(JSON.parse(dispatchBackoff(tmpRoot, capture))).toMatchObject({ processed: 1, sent: 0, suppressed: 1 });
+    expect(captureMessages(capture).filter((text) => text.includes('ESCALATED still open'))).toHaveLength(1);
+
+    // 130s since the first reminder: past the doubled interval -> second
+    // reminder sends and the interval doubles again.
+    now = Math.floor(Date.now() / 1000);
+    patchOpenRecord(tmpRoot, key, { lastNotifiedAt: now - 130, lastSentAt: now - 130 });
+    emitBackoffAlert(tmpRoot);
+    expect(JSON.parse(dispatchBackoff(tmpRoot, capture))).toMatchObject({ processed: 1, sent: 1, suppressed: 0 });
+    expect(captureMessages(capture).filter((text) => text.includes('ESCALATED still open'))).toHaveLength(2);
+    expect(readIncidentState(tmpRoot).openIncidents[key]!.renotifyIntervalSeconds).toBe(240);
+  });
+
+  it('caps the reminder backoff at the configured ceiling', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-backoff-'));
+    const capture = join(tmpRoot, 'capture.jsonl');
+    const capEnv = { BOT_ERRORS_INCIDENT_RENOTIFY_CAP_SECONDS: '180' };
+
+    emitBackoffAlert(tmpRoot);
+    expect(JSON.parse(dispatchBackoff(tmpRoot, capture, capEnv))).toMatchObject({ processed: 1, sent: 1 });
+    const key = Object.keys(readIncidentState(tmpRoot).openIncidents)[0]!;
+
+    // Stored interval above the cap is clamped: due after 200s >= cap 180s.
+    let now = Math.floor(Date.now() / 1000);
+    patchOpenRecord(tmpRoot, key, {
+      openedAt: now - 100000,
+      lastNotifiedAt: now - 200,
+      lastSentAt: now - 200,
+      renotifyIntervalSeconds: 960,
+    });
+    emitBackoffAlert(tmpRoot);
+    expect(JSON.parse(dispatchBackoff(tmpRoot, capture, capEnv))).toMatchObject({ processed: 1, sent: 1, suppressed: 0 });
+    // Advancing from the cap stays at the cap.
+    expect(readIncidentState(tmpRoot).openIncidents[key]!.renotifyIntervalSeconds).toBe(180);
+
+    // Inside the capped interval -> suppressed even though far past the base interval.
+    now = Math.floor(Date.now() / 1000);
+    patchOpenRecord(tmpRoot, key, { lastNotifiedAt: now - 170, lastSentAt: now - 170 });
+    emitBackoffAlert(tmpRoot);
+    expect(JSON.parse(dispatchBackoff(tmpRoot, capture, capEnv))).toMatchObject({ processed: 1, sent: 0, suppressed: 1 });
+  });
+});
