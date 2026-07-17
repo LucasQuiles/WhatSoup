@@ -322,7 +322,12 @@ export function childClosurePaths(manifest: BoundaryRunManifest): string[] {
   const attemptsById = new Map(manifest.attempts.map((attempt) => [attempt.id, attempt]));
   for (const attempt of manifest.attempts) {
     paths.push(attempt.stdout.path, attempt.stderr.path);
-    if (attempt.structuredResult !== null) paths.push(attempt.structuredResult.path);
+    if (attempt.structuredResult !== null) {
+      const isExactStdoutAlias = attempt.structuredResult.path === attempt.stdout.path
+        && attempt.structuredResult.sha256 === attempt.stdout.sha256
+        && attempt.structuredResult.bytes === attempt.stdout.bytes;
+      if (!isExactStdoutAlias) paths.push(attempt.structuredResult.path);
+    }
   }
   for (const artifact of manifest.artifacts) {
     const structuredResult = attemptsById.get(artifact.producerAttemptId)?.structuredResult;

@@ -77,15 +77,24 @@ import {
 } from './support.ts';
 
 export function registerJoinCases(): void {
-  it('counts an exact structured-result artifact alias once and rejects neighboring collisions', () => {
+  it('counts exact structured-result aliases once and rejects neighboring collisions', () => {
     const manifest = validManifest();
-    manifest.attempts = [{
+    const readinessAttempt = {
       ...validAttempt(),
       id: 'readiness-check',
       stdout: validStream('attempts/readiness-check/stdout.log'),
       stderr: validStream('attempts/readiness-check/stderr.log'),
       structuredResult: validStream('readiness.json'),
-    }];
+    };
+    const evaluatorStdout = validStream('attempts/predecessor-baseline-eval/stdout.log');
+    const evaluatorAttempt = {
+      ...validAttempt(),
+      id: 'predecessor-baseline-eval',
+      stdout: evaluatorStdout,
+      stderr: validStream('attempts/predecessor-baseline-eval/stderr.log'),
+      structuredResult: structuredClone(evaluatorStdout),
+    };
+    manifest.attempts = [readinessAttempt, evaluatorAttempt];
     manifest.artifacts = [{
       path: 'readiness.json',
       role: 'receipt',
@@ -97,6 +106,9 @@ export function registerJoinCases(): void {
     expect(childClosurePaths(manifest).filter((entry) => entry === 'readiness.json')).toEqual([
       'readiness.json',
     ]);
+    expect(childClosurePaths(manifest).filter((entry) => entry === evaluatorStdout.path)).toEqual([
+      evaluatorStdout.path,
+    ]);
 
     for (const artifact of [
       { ...manifest.artifacts[0]!, producerAttemptId: 'other-attempt' },
@@ -105,6 +117,16 @@ export function registerJoinCases(): void {
     ]) {
       const invalid = structuredClone(manifest);
       invalid.artifacts = [artifact];
+      expect(() => childClosurePaths(invalid)).toThrow('child closure contains duplicate logical paths');
+    }
+
+    for (const structuredResult of [
+      { ...evaluatorStdout, sha256: SHA_B },
+      { ...evaluatorStdout, bytes: 2 },
+      structuredClone(readinessAttempt.stdout),
+    ]) {
+      const invalid = structuredClone(manifest);
+      invalid.attempts[1]!.structuredResult = structuredResult;
       expect(() => childClosurePaths(invalid)).toThrow('child closure contains duplicate logical paths');
     }
   });
