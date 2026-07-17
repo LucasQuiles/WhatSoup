@@ -1901,6 +1901,14 @@ describe('AgentRuntime', () => {
         '15550001111@s.whatsapp.net',
       );
 
+      // First expiry grants exactly one retry window (P3): no teardown yet,
+      // and the lease keeps blocking dispatch while the slow request finishes.
+      await vi.advanceTimersByTimeAsync(4 * 60 * 1000);
+
+      expect(mockSession.shutdown).not.toHaveBeenCalled();
+      expect(pendingSystemResults(runtime).count('__global__')).toBe(1);
+
+      // Second consecutive expiry quarantines exactly as before.
       await vi.advanceTimersByTimeAsync(4 * 60 * 1000);
 
       expect(mockSession.shutdown).toHaveBeenCalledOnce();
@@ -2966,7 +2974,13 @@ describe('AgentRuntime', () => {
         attemptFailureClass: 'crash',
       }),
     }));
-    expect(durability.markContinuityCandidateIfNoTerminalOutbound).not.toHaveBeenCalled();
+    // Reply-guarantee breach marking: a crash landing failed_terminal with no
+    // delivery durably marks the inbound as a continuity candidate.
+    expect(durability.markContinuityCandidateIfNoTerminalOutbound).toHaveBeenCalledWith(
+      77,
+      'runtime_fault_no_terminal_outbound',
+      'runtime_fault_disarm',
+    );
     expect(durability.markInboundFailed).not.toHaveBeenCalled();
     expect((runtime as unknown as { perChatInboundSeqQueue: Map<string, number[]> }).perChatInboundSeqQueue.has('test@s.whatsapp.net')).toBe(false);
     expect((runtime as unknown as { pendingTurnText: Map<string, string> }).pendingTurnText.get('test@s.whatsapp.net')).toBe('hello');
@@ -3053,7 +3067,12 @@ describe('AgentRuntime', () => {
         attemptFailureClass: 'crash',
       }),
     }));
-    expect(durability.markContinuityCandidateIfNoTerminalOutbound).not.toHaveBeenCalled();
+    // Reply-guarantee breach marking (see per_chat variant above).
+    expect(durability.markContinuityCandidateIfNoTerminalOutbound).toHaveBeenCalledWith(
+      88,
+      'runtime_fault_no_terminal_outbound',
+      'runtime_fault_disarm',
+    );
     expect(durability.markInboundFailed).not.toHaveBeenCalled();
     expect((runtime as unknown as { currentInboundSeq: number | undefined }).currentInboundSeq).toBeUndefined();
   });
@@ -5157,7 +5176,13 @@ describe('AgentRuntime', () => {
         attemptFailureClass: 'processor_throw',
       }),
     }));
-    expect(durability.markContinuityCandidateIfNoTerminalOutbound).not.toHaveBeenCalled();
+    // Reply-guarantee breach marking: processor_throw with no delivery marks
+    // the inbound as a continuity candidate.
+    expect(durability.markContinuityCandidateIfNoTerminalOutbound).toHaveBeenCalledWith(
+      89,
+      'runtime_fault_no_terminal_outbound',
+      'runtime_fault_disarm',
+    );
     expect(durability.markInboundFailed).not.toHaveBeenCalled();
   });
 
