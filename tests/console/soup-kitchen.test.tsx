@@ -390,10 +390,11 @@ describe('SoupKitchen KPI cards with data', () => {
     expect(kpis.agentSessions).toBe(2);
   });
 
-  it('renders all 7 KPI cards with the expected labels', () => {
+  it('renders all 8 KPI cards with the expected labels', () => {
     renderPage({ lines });
     const expected = [
       'Lines Connected',
+      'Connectivity Unknown',
       'Need Attention',
       'Messages Sent',
       'Messages Received',
@@ -404,6 +405,18 @@ describe('SoupKitchen KPI cards with data', () => {
     for (const label of expected) {
       expect(getKpiCard(label)).toBeDefined();
     }
+  });
+
+  it('surfaces the transport-connectivity denominator explicitly (#1881 criterion 5)', () => {
+    // Fixture: alpha (online) + bravo (online) confirmed connected; charlie
+    // (degraded), delta (unreachable), echo (logged_out) all have NO health
+    // body at all (missing health data) — none is a confirmed disconnect, so
+    // all three land in the "Connectivity Unknown" coverage count, out of the
+    // fleet's 5 total lines.
+    renderPage({ lines });
+    const unknownCard = getKpiCard('Connectivity Unknown');
+    expect(within(unknownCard).getByText('3')).toBeDefined();
+    expect(within(unknownCard).getByText('of 5')).toBeDefined();
   });
 
   it('renders the computed KPI values on the cards', () => {
@@ -1054,6 +1067,31 @@ describe('SoupKitchen filter behavior', () => {
     fireEvent.click(getKpiCard('Lines Connected'));
     expect(visibleTableLineNames(lines)).toEqual(['alpha', 'bravo', 'echo']);
     expect(getKpiCard('Lines Connected').getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('keeps a degraded-but-connected line in the "Lines Connected" filtered view (#1881)', () => {
+    // The literal symptom #1881 fixes: a line whose WhatsApp transport is
+    // genuinely up (fresh whatsapp.connected===true + connection.state
+    // 'connected') must NOT disappear from the "Connected" filter just
+    // because its control-plane health status is 'degraded'. This is a
+    // regression guard on the shared isLineConnected predicate, not a new
+    // behavior — it should already pass.
+    const degradedConnectedLine = makeLine({
+      name: 'foxtrot',
+      status: 'degraded',
+      stale: false,
+      health: {
+        status: 'ok',
+        uptime_seconds: 1,
+        messages_total: 0,
+        whatsapp: { connected: true, connection: { state: 'connected' } },
+        sqlite: { messages_total: 0, schema_version: 5 },
+      },
+    });
+    const withDegradedConnected = [...lines, degradedConnectedLine];
+    renderPage({ lines: withDegradedConnected });
+    fireEvent.click(getKpiCard('Lines Connected'));
+    expect(visibleTableLineNames(withDegradedConnected)).toEqual(['alpha', 'bravo', 'echo', 'foxtrot']);
   });
 
   it('clicking "Need Attention" KPI filters to non-online lines and errored online lines', () => {

@@ -19,7 +19,7 @@ import { useTransportStatus } from "../hooks/use-transport-status";
 import EmptyState from "../components/EmptyState";
 import { useDrawerPlacement } from "../hooks/useViewportPlacement";
 import { useFleetMetrics } from "../hooks/use-metrics";
-import { computeKpis } from "../lib/compute-kpis";
+import { computeKpis, isLineConnected } from "../lib/compute-kpis";
 import {
   deriveFleetMessageSparklines,
   deriveFleetSessionSparklines,
@@ -484,7 +484,10 @@ const SoupKitchen: FC = () => {
     let result = lines;
 
     if (activeKpi === "connected")
-      result = result.filter((l) => l.status === "online");
+      // Transport connectivity, not health-state (#1881): shared with the KPI
+      // count so the filtered rows equal the "Connected" tile. Includes a
+      // degraded-but-connected line.
+      result = result.filter((l) => isLineConnected(l));
     else if (activeKpi === "attention")
       result = result.filter(
         (l) => statusNeedsAttention(l.status) || l.error
@@ -748,6 +751,17 @@ const SoupKitchen: FC = () => {
           color="text-s-ok"
           onClick={() => toggleKpi("connected")}
           active={activeKpi === "connected"}
+        />
+        {/* #1881 criterion 5: "Connected" collapses a confirmed disconnect and
+            an unproven row (stale / missing health data) into one "not
+            connected" remainder. Surface the coverage count so the
+            denominator is explicit — display-only, not a filter, mirroring
+            the Metrics "Total Lines" tile (KpiCard without onClick/active). */}
+        <KpiCard
+          value={kpis.connectivityUnknown}
+          label="Connectivity Unknown"
+          color="neutral"
+          suffix={`of ${lines.length}`}
         />
         <KpiCard
           value={kpis.needAttention}
