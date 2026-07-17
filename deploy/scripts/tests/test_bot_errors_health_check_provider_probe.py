@@ -393,9 +393,9 @@ def test_required_credential_inventory_rejects_group_read_permissions(tmp_path):
     assert "mode=440" in lines[0]
 
 
-# --- provider_credential_presence: mirror lookupCredential (env -> keyring + migration -> .key store) ---
+# --- provider_credential_presence: mirror scoped and unscoped lookupCredential ordering ---
 # 2026-06-23 fleet audit: provider keys live in ~/.config/whatsoup/credentials/<svc>.key (the file
-# store lookupCredential consults after a keyring miss, keyring.ts:209), NOT the keychain, and NOT
+# store unscoped lookupCredential consults before keyring, NOT the keychain, and NOT
 # the ocw ~/.config/secrets/<svc>.env store. The health-check must check the .key store or it
 # reports a runtime-resolvable key as missing (false negative — worst for glm, which has only
 # glm.key). It must also try the glm->zai-api-key keyring migration the runtime uses.
@@ -407,34 +407,89 @@ class _FakeProc:
 
 
 def _arm_presence(monkeypatch, *, ocw_env_present, keychain_returncode, keychain_stdout, keyfile_present=False):
+    keychain_calls = []
+    keyfile_checks = []
     monkeypatch.setattr(_mod, "HOST_PLATFORM", "darwin")
     monkeypatch.setattr(_mod, "service_env_var", lambda _service: "DEEPSEEK_API_KEY")
     monkeypatch.setattr(_mod, "dry_credential_status", lambda _service: None)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.setattr(_mod, "secret_file_has_service_key", lambda _service, _env_key: ocw_env_present)
-    monkeypatch.setattr(_mod, "whatsoup_keyfile_present", lambda _service: keyfile_present)
-    monkeypatch.setattr(
-        _mod.subprocess,
-        "run",
-        lambda *_a, **_k: _FakeProc(keychain_returncode, keychain_stdout),
+    def fake_keyfile(service):
+        keyfile_checks.append(service)
+        return keyfile_present
+
+    def fake_run(*args, **kwargs):
+        keychain_calls.append((args, kwargs))
+        return _FakeProc(keychain_returncode, keychain_stdout)
+
+    monkeypatch.setattr(_mod, "whatsoup_keyfile_present", fake_keyfile)
+    monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+    return keychain_calls, keyfile_checks
+
+
+def test_credential_presence_unscoped_keyfile_short_circuits_keychain(monkeypatch):
+    keychain_calls, keyfile_checks = _arm_presence(
+        monkeypatch,
+        ocw_env_present=True,
+        keychain_returncode=0,
+        keychain_stdout="secret-value",
+        keyfile_present=True,
     )
-
-
-def test_credential_presence_keychain_present_wins(monkeypatch):
-    _arm_presence(monkeypatch, ocw_env_present=True, keychain_returncode=0, keychain_stdout="secret-value", keyfile_present=True)
     present, source, status = _mod.provider_credential_presence("deepseek", 15)
     assert present is True
-    assert source == "macos_keychain"
+    assert source == "whatsoup_keyfile"
     assert status == "present"
+    assert keyfile_checks == ["deepseek"]
+    assert keychain_calls == []
 
 
 def test_credential_presence_keyfile_resolves_when_keychain_empty(monkeypatch):
-    # THE FIX: the .key file store is the runtime's real backend -> RESOLVABLE even with empty keychain.
+    # The .key file store is the runtime's first unscoped durable backend.
     _arm_presence(monkeypatch, ocw_env_present=False, keychain_returncode=1, keychain_stdout="", keyfile_present=True)
     present, source, status = _mod.provider_credential_presence("deepseek", 15)
     assert present is True
     assert source == "whatsoup_keyfile"
     assert status == "present"
+
+
+def test_credential_presence_scoped_miss_excludes_unscoped_keyfile(monkeypatch):
+    keychain_calls, keyfile_checks = _arm_presence(
+        monkeypatch,
+        ocw_env_present=False,
+        keychain_returncode=1,
+        keychain_stdout="",
+        keyfile_present=True,
+    )
+
+    present, source, status = _mod.provider_credential_presence("deepseek", 15, user="bot")
+
+    assert present is False
+    assert source == "macos_keychain"
+    assert status == "missing"
+    assert keyfile_checks == []
+    assert len(keychain_calls) == 1
+    args, kwargs = keychain_calls[0]
+    assert args[0] == ["security", "find-generic-password", "-s", "deepseek", "-a", "bot", "-w"]
+    assert kwargs["timeout"] == 3
+
+
+def test_credential_presence_scoped_env_is_checked_after_keychain_miss(monkeypatch):
+    keychain_calls, keyfile_checks = _arm_presence(
+        monkeypatch,
+        ocw_env_present=False,
+        keychain_returncode=1,
+        keychain_stdout="",
+        keyfile_present=True,
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "scoped-env-value")
+
+    present, source, status = _mod.provider_credential_presence("deepseek", 15, user="bot")
+
+    assert present is True
+    assert source == "env"
+    assert status == "present"
+    assert keyfile_checks == []
+    assert len(keychain_calls) == 1
 
 
 def test_credential_presence_ocw_env_only_is_not_provisioned(monkeypatch):

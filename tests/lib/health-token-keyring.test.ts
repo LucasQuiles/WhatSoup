@@ -61,7 +61,7 @@ describe('health token keyring canonical service', () => {
       2,
       'secret-tool',
       ['lookup', 'service', 'whatsoup-health-token', 'user', 'mwlab'],
-      expect.any(Object),
+      expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
     );
   });
 
@@ -76,7 +76,7 @@ describe('health token keyring canonical service', () => {
       2,
       'secret-tool',
       ['lookup', 'service', 'whatsoup-health-token', 'user', 'mwlab'],
-      expect.any(Object),
+      expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
     );
   });
 
@@ -92,13 +92,13 @@ describe('health token keyring canonical service', () => {
       2,
       'secret-tool',
       ['lookup', 'service', 'whatsoup-health-token', 'user', 'mwlab'],
-      expect.any(Object),
+      expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
     );
     expect(mockedExecFileSync).toHaveBeenNthCalledWith(
       3,
       'secret-tool',
       ['lookup', 'service', 'whatsoup_health'],
-      expect.any(Object),
+      expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
     );
   });
 
@@ -114,7 +114,7 @@ describe('health token keyring canonical service', () => {
       2,
       'secret-tool',
       ['lookup', 'service', 'whatsoup-health-token', 'user', 'mwlab'],
-      expect.any(Object),
+      expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
     );
   });
 
@@ -130,13 +130,13 @@ describe('health token keyring canonical service', () => {
       2,
       'secret-tool',
       ['lookup', 'service', 'whatsoup-health-token', 'user', 'mwlab'],
-      expect.any(Object),
+      expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
     );
     expect(mockedExecFileSync).toHaveBeenNthCalledWith(
       3,
       'secret-tool',
       ['lookup', 'service', 'whatsoup_health'],
-      expect.any(Object),
+      expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
     );
   });
 
@@ -150,13 +150,13 @@ describe('health token keyring canonical service', () => {
       1,
       'security',
       ['find-generic-password', '-s', 'whatsoup-health-token', '-a', 'test-user', '-w'],
-      expect.any(Object),
+      expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
     );
     expect(mockedExecFileSync).toHaveBeenNthCalledWith(
       2,
       'security',
       ['find-generic-password', '-s', 'whatsoup_health', '-a', 'local-user', '-w'],
-      expect.any(Object),
+      expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
     );
   });
 
@@ -171,13 +171,13 @@ describe('health token keyring canonical service', () => {
       2,
       'secret-tool',
       ['lookup', 'service', 'whatsoup-health-token', 'user', 'mwlab'],
-      expect.any(Object),
+      expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
     );
     expect(mockedExecFileSync).toHaveBeenNthCalledWith(
       3,
       'secret-tool',
       ['lookup', 'service', 'whatsoup_health'],
-      expect.any(Object),
+      expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
     );
   });
 });
