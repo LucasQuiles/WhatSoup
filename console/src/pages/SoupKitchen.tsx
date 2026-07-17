@@ -752,6 +752,17 @@ const SoupKitchen: FC = () => {
           onClick={() => toggleKpi("connected")}
           active={activeKpi === "connected"}
         />
+        {/* #1881 criterion 5: "Connected" collapses a confirmed disconnect and
+            an unproven row (stale / missing health data) into one "not
+            connected" remainder. Surface the coverage count so the
+            denominator is explicit — display-only, not a filter, mirroring
+            the Metrics "Total Lines" tile (KpiCard without onClick/active). */}
+        <KpiCard
+          value={kpis.connectivityUnknown}
+          label="Connectivity Unknown"
+          color="neutral"
+          suffix={`of ${lines.length}`}
+        />
         <KpiCard
           value={kpis.needAttention}
           label="Need Attention"

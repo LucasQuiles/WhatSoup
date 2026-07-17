@@ -44,6 +44,7 @@ const zeroKpis = {
   totalReceived: 0,
   totalMedia: 0,
   staleExcluded: 0,
+  connectivityUnknown: 0,
 };
 
 describe('computeKpis', () => {
@@ -213,6 +214,10 @@ describe('computeKpis', () => {
       totalReceived: 6,
       totalMedia: 3,
       staleExcluded: 0,
+      // The degraded line has no health body at all (missing health data) —
+      // an unproven row, not a confirmed disconnect. See the coverage
+      // dimension tests below (#1881 criterion 5).
+      connectivityUnknown: 1,
     });
   });
 
@@ -359,6 +364,7 @@ describe('computeKpis', () => {
     ]);
     expect(result.connected).toBe(0);
     expect(result.staleExcluded).toBe(1);
+    expect(result.connectivityUnknown).toBe(1);
   });
 
   it('treats an unreachable line with stale last-known connectivity as unknown, not connected', () => {
@@ -371,6 +377,7 @@ describe('computeKpis', () => {
     expect(result.connected).toBe(0);
     expect(result.needAttention).toBe(1);
     expect(result.staleExcluded).toBe(1);
+    expect(result.connectivityUnknown).toBe(1);
   });
 
   it('does NOT count a degraded line with missing health data as connected', () => {
@@ -385,5 +392,60 @@ describe('computeKpis', () => {
       makeLine({ status: 'online', stale: false, health: connectedHealth() }),
     ]);
     expect(result.connected).toBe(1);
+  });
+
+  // ---------------------------------------------------------------------------
+  //  Connectivity coverage dimension (#1881 criterion 5)
+  //
+  //  `isLineConnected` returning `false` collapses two different situations
+  //  into one "not connected" bucket: a genuine fresh disconnect signal, and
+  //  an unproven row (stale or missing health data) that was never actually
+  //  read as disconnected. Without a separate counter, an operator staring at
+  //  "N Connected" out of a fleet of size M cannot tell how many of the
+  //  remaining `M - N` are confirmed-disconnected versus simply unproven —
+  //  the denominator is implicit. `connectivityUnknown` makes it explicit.
+  // ---------------------------------------------------------------------------
+
+  it('all-known: connectivityUnknown is 0 when every line has a decisive signal', () => {
+    const result = computeKpis([
+      makeLine({ status: 'online' }), // confirmed connected (health-state)
+      makeLine({
+        status: 'degraded',
+        stale: false,
+        health: connectedHealth({ connected: false, state: 'disconnected' }),
+      }), // confirmed disconnected (fresh signal)
+    ]);
+    expect(result.connected).toBe(1);
+    expect(result.connectivityUnknown).toBe(0);
+  });
+
+  it('some-stale: a stale non-online line is unknown; a stale ONLINE line stays confirmed connected', () => {
+    const result = computeKpis([
+      makeLine({ status: 'degraded', stale: true, health: connectedHealth() }), // unknown
+      makeLine({ status: 'online', stale: true, health: null }), // online overrides staleness
+    ]);
+    expect(result.connected).toBe(1);
+    expect(result.connectivityUnknown).toBe(1);
+  });
+
+  it('some-missing-health: a non-stale line with no health body is unknown, not a confirmed disconnect', () => {
+    const result = computeKpis([
+      makeLine({ status: 'degraded', stale: false, health: null }),
+      makeLine({ status: 'online' }),
+    ]);
+    expect(result.connected).toBe(1);
+    expect(result.connectivityUnknown).toBe(1);
+  });
+
+  it('does not mark a confirmed disconnect (fresh signal) as unknown', () => {
+    const result = computeKpis([
+      makeLine({
+        status: 'degraded',
+        stale: false,
+        health: connectedHealth({ connected: false, state: 'disconnected' }),
+      }),
+    ]);
+    expect(result.connected).toBe(0);
+    expect(result.connectivityUnknown).toBe(0);
   });
 });
