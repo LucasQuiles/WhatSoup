@@ -809,6 +809,17 @@ const SoupKitchen: FC = () => {
           active={activeKpi === "media"}
           sparkData={messageSparklines?.media}
         />
+        {/* #1879 crit 3: Messages Sent/Received/Media Processed are summed
+            from messageStats, which can be a faulted-DB fallback rather than
+            a real zero. Surface the coverage count so the denominator is
+            explicit — display-only, mirroring the Connectivity Unknown
+            idiom above. */}
+        <KpiCard
+          value={kpis.metricsUnavailable}
+          label="Metrics Unavailable"
+          color="neutral"
+          suffix={`of ${lines.length}`}
+        />
         </Card>
       </motion.div>
 
