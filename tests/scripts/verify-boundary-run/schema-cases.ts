@@ -692,19 +692,6 @@ export function registerSchemaCases(): void {
         verdict: 'Inconclusive',
       });
     }
-    const fakeToolRoot = mkdtempSync(path.join(tmpdir(), 'boundary-capability-reject-'));
-    fixtureRoots.push(fakeToolRoot);
-    const fakeRg = path.join(fakeToolRoot, 'rg');
-    writeFileSync(fakeRg, '#!/bin/sh\nexit 64\n', 'utf8');
-    chmodSync(fakeRg, 0o755);
-    const originalPath = process.env['PATH'];
-    process.env['PATH'] = fakeToolRoot;
-    try {
-      expect(() => api.resolveBoundaryToolCapability!('rg')).toThrow();
-    } finally {
-      if (originalPath === undefined) delete process.env['PATH'];
-      else process.env['PATH'] = originalPath;
-    }
     for (const values of [
       [],
       [`upstream-observation,${OID},observation-run,${SHA}`, `other,${OID},other-run,${SHA_B}`],
@@ -759,33 +746,15 @@ export function registerSchemaCases(): void {
       headAnchor: 'entry',
     })).toMatchObject({ ok: true, exitCode: 0, verdict: 'Pass' });
 
-    const fakeToolRoot = mkdtempSync(path.join(tmpdir(), 'boundary-capability-fallback-'));
-    fixtureRoots.push(fakeToolRoot);
-    const fakeTr = path.join(fakeToolRoot, 'tr');
-    writeFileSync(fakeTr, '#!/bin/sh\nexit 64\n', 'utf8');
-    chmodSync(fakeTr, 0o755);
-    const originalPath = process.env['PATH'];
-    process.env['PATH'] = fakeToolRoot;
-    try {
-      const capability = api.resolveBoundaryToolCapability('tr');
-      expect(capability).toMatchObject({
-        name: 'tr',
-        realPath: realpathSync(fakeTr),
-        sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
-      });
-      expect(capability['version']).toBe(`content-sha256:${capability['sha256']}`);
-    } finally {
-      if (originalPath === undefined) delete process.env['PATH'];
-      else process.env['PATH'] = originalPath;
-    }
-
     for (const name of ['rg', 'tr', 'sort', 'wc']) {
-      expect(api.resolveBoundaryToolCapability(name), name).toMatchObject({
+      const capability = api.resolveBoundaryToolCapability(name);
+      expect(capability, name).toMatchObject({
         name,
-        realPath: expect.stringMatching(/^\//),
+        realPath: expect.any(String),
         version: expect.stringMatching(/^.{1,256}$/),
         sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
       });
+      expect(path.isAbsolute(String(capability['realPath'])), name).toBe(true);
     }
     expect(api.parseBoundaryChildPins('bcf00-reconciliation', OID, [
       `upstream-observation,${OID},observation-run,${SHA}`,
@@ -797,6 +766,39 @@ export function registerSchemaCases(): void {
       result: { ok: true, exitCode: 0, verdict: 'Pass' },
       pins: [],
     });
+  });
+
+  it('binds versionless capability fallback to the exact executable hash', () => {
+    const api = boundaryRun as unknown as {
+      BOUNDARY_VERSIONLESS_TOOLS?: readonly string[];
+      resolveBoundaryToolCapability?: (name: string) => Record<string, unknown>;
+    };
+    expect(api.BOUNDARY_VERSIONLESS_TOOLS).toEqual(['kill', 'test', 'tr', 'wc']);
+    expect(typeof api.resolveBoundaryToolCapability).toBe('function');
+    if (!api.resolveBoundaryToolCapability) return;
+
+    const fakeToolRoot = mkdtempSync(path.join(tmpdir(), 'boundary-capability-probes-'));
+    fixtureRoots.push(fakeToolRoot);
+    for (const name of ['rg', 'tr']) {
+      const executable = path.join(fakeToolRoot, name);
+      writeFileSync(executable, '#!/bin/sh\nexit 64\n', 'utf8');
+      chmodSync(executable, 0o755);
+    }
+    const originalPath = process.env['PATH'];
+    process.env['PATH'] = fakeToolRoot;
+    try {
+      const capability = api.resolveBoundaryToolCapability('tr');
+      expect(capability).toMatchObject({
+        name: 'tr',
+        realPath: realpathSync(path.join(fakeToolRoot, 'tr')),
+        sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      });
+      expect(capability['version']).toBe(`content-sha256:${capability['sha256']}`);
+      expect(() => api.resolveBoundaryToolCapability!('rg')).toThrow();
+    } finally {
+      if (originalPath === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = originalPath;
+    }
   });
 
   it('covers every profile-owned internal-check name with one implemented helper contract', () => {
