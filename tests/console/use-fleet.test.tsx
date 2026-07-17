@@ -8,7 +8,11 @@
  *   query-key-isolation
  *
  * Source surprises:
- *   - useRealtime().connected gates polling: connected=true → refetchInterval=false
+ *   - useRealtime().connected gates polling: connected=true → refetchInterval=false,
+ *     EXCEPT useLines/useLine, which drop to a bounded POLL_LINES_WS_BACKSTOP
+ *     (15s) instead of disabling entirely — #1877: a successful online→online
+ *     poll updates server health/counters with no WS event, so a connected
+ *     tab needs a backstop refresh.
  *   - All hooks with a `name` (or name+conversationKey) arg use `enabled: !!name`
  *   - api module wraps every call in withFallback (dev build auto-fallback)
  *   - computeKpis is re-exported from use-fleet (pass-through export)
@@ -389,7 +393,13 @@ describe('useLines', () => {
     expect(result.current.error?.message).toBe('network error');
   });
 
-  it('disables polling when WS is connected (refetchInterval=false)', async () => {
+  it('keeps a bounded WS backstop poll when connected instead of disabling refetch (#1877 crit 1)', async () => {
+    // Supersedes the old "disables polling when WS is connected" contract:
+    // an online→online poll updates server health/counters with no WS event
+    // (#1877), so a connected tab still needs a bounded backstop refetch.
+    // The advance window (20s) is deliberately NOT the 15s bound itself, to
+    // avoid a boundary race, while staying under 2x the bound so exactly one
+    // extra fetch is expected.
     vi.useFakeTimers();
     wsConnected = true;
     apiMocks.getLines.mockResolvedValue([LINE_1]);
@@ -397,8 +407,8 @@ describe('useLines', () => {
     const { result } = renderHook(() => useLines(), { wrapper: wrapper(client) });
     await vi.waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(apiMocks.getLines).toHaveBeenCalledTimes(1);
-    await advanceQueryTimers(15_000);
-    expect(apiMocks.getLines).toHaveBeenCalledTimes(1);
+    await advanceQueryTimers(20_000);
+    expect(apiMocks.getLines).toHaveBeenCalledTimes(2);
   });
 
   it('refetches after 5000ms when WS is disconnected', async () => {
@@ -410,6 +420,56 @@ describe('useLines', () => {
     await vi.waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(apiMocks.getLines).toHaveBeenCalledTimes(1);
     await advanceQueryTimers(5_000);
+    expect(apiMocks.getLines).toHaveBeenCalledTimes(2);
+  });
+
+  it('delivers a refreshed healthObservedAt/health/counters after the WS backstop bound (#1877 crit 3)', async () => {
+    vi.useFakeTimers();
+    wsConnected = true;
+    const initial: LineInstance = {
+      ...LINE_1,
+      healthObservedAt: '2026-05-12T00:00:00Z',
+      messagesTotal: 50,
+    };
+    const refreshed: LineInstance = {
+      ...LINE_1,
+      healthObservedAt: '2026-05-12T00:05:00Z',
+      messagesTotal: 62,
+    };
+    apiMocks.getLines.mockResolvedValueOnce([initial]).mockResolvedValueOnce([refreshed]);
+    const client = makeClient();
+    const { result } = renderHook(() => useLines(), { wrapper: wrapper(client) });
+    await vi.waitFor(() => expect(result.current.data).toEqual([initial]));
+    await advanceQueryTimers(20_000);
+    await vi.waitFor(() => expect(result.current.data).toEqual([refreshed]));
+    expect(apiMocks.getLines).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not burst-fetch across a reconnect flicker — cadence changes alone never trigger a fetch (#1877 crit 4)', async () => {
+    vi.useFakeTimers();
+    wsConnected = true;
+    apiMocks.getLines.mockResolvedValue([LINE_1]);
+    const client = makeClient();
+    const { result, rerender } = renderHook(() => useLines(), { wrapper: wrapper(client) });
+    await vi.waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(apiMocks.getLines).toHaveBeenCalledTimes(1);
+
+    // Flicker disconnect -> reconnect several times with no time elapsed.
+    // Only elapsed time against the active interval should ever cause a
+    // fetch — re-deriving refetchInterval on every render must not.
+    wsConnected = false;
+    rerender();
+    wsConnected = true;
+    rerender();
+    wsConnected = false;
+    rerender();
+    wsConnected = true;
+    rerender();
+    expect(apiMocks.getLines).toHaveBeenCalledTimes(1);
+
+    // Settled reconnected: still bounded to one fetch per backstop window,
+    // not one per flicker.
+    await advanceQueryTimers(20_000);
     expect(apiMocks.getLines).toHaveBeenCalledTimes(2);
   });
 });
@@ -444,7 +504,9 @@ describe('useLine', () => {
     expect(result.current.error?.message).toBe('not found');
   });
 
-  it('disables polling when WS connected', async () => {
+  it('keeps a bounded WS backstop poll when connected instead of disabling refetch (#1877 crit 1)', async () => {
+    // Mirrors the useLines rewrite above — the 20s advance is deliberately
+    // NOT the 15s bound itself, to avoid a boundary race.
     vi.useFakeTimers();
     wsConnected = true;
     apiMocks.getLine.mockResolvedValue(LINE_1);
@@ -452,8 +514,8 @@ describe('useLine', () => {
     const { result } = renderHook(() => useLine('alpha'), { wrapper: wrapper(client) });
     await vi.waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(apiMocks.getLine).toHaveBeenCalledTimes(1);
-    await advanceQueryTimers(15_000);
-    expect(apiMocks.getLine).toHaveBeenCalledTimes(1);
+    await advanceQueryTimers(20_000);
+    expect(apiMocks.getLine).toHaveBeenCalledTimes(2);
   });
 
   it('refetches after 5000ms when WS disconnected', async () => {
