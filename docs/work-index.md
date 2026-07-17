@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 71
+**Total entries:** 72
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=7, plan=35, review=3, spec=25, state=1 |
-| Status | active=13, closed=4, completed=32, deferred=7, pending=14, unknown=1 |
-| Status source | body-marker=70, state-md-status=1 |
+| Kind | handoff=7, plan=36, review=3, spec=25, state=1 |
+| Status | active=13, closed=4, completed=32, deferred=7, pending=14, unknown=2 |
+| Status source | body-marker=70, fallback=1, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -52,10 +52,11 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | tasks | body-marker |
 
-### Unknown-status — triage needed (1)
+### Unknown-status — triage needed (2)
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
+| `docs/superpowers/plans/2026-07-17-boundary-validator-ci-refactor.md` | plan | boundary-validator-ci-refactor | 2026-07-17 |
 | `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | spec | turn-lifecycle-fitness-extraction-design | 2026-07-11 |
 
 ### Cross-tree topic clusters (4)
@@ -110,7 +111,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-07-16-boundary-contract-feedback-implementation-notes.md` | handoff | active | body-marker | boundary-contract-feedback-implementation-notes | 2026-07-16 |  |
 | `docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md` | handoff | pending | body-marker | boundary-core-history-mining | 2026-07-16 |  |
 
-### docs/superpowers/plans  _(35 entries)_
+### docs/superpowers/plans  _(36 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -149,6 +150,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-07-16-boundary-contract-feedback-hardening.md` | plan | pending | body-marker | boundary-contract-feedback-hardening | 2026-07-16 |  |
 | `docs/superpowers/plans/2026-07-16-boundary-core-history-provenance.md` | plan | pending | body-marker | boundary-core-history-provenance | 2026-07-16 |  |
 | `docs/superpowers/plans/2026-07-17-boundary-exit-parser-codeql-hardening.md` | plan | active | body-marker | boundary-exit-parser-codeql-hardening | 2026-07-17 |  |
+| `docs/superpowers/plans/2026-07-17-boundary-validator-ci-refactor.md` | plan | unknown | fallback | boundary-validator-ci-refactor | 2026-07-17 |  |
 
 ### docs/superpowers/reviews  _(3 entries)_
 
@@ -201,4 +203,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-17T15:24:17Z from commit `2d1fad7ede7c15ceace221d296bf29df02b4cd80`
+- Generated at 2026-07-17T15:29:01Z from commit `f7f6d8418d1800afeea461113070c7a6f22dc5ac`

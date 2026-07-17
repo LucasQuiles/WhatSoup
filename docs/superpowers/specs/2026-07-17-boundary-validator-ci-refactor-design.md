@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-17
 **Status:** active
-**Approval:** Architecture approved; written-spec review pending
+**Approval:** Approved for implementation
 
 ## Context
 
