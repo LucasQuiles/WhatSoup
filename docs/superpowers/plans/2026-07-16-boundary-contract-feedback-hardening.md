@@ -2563,6 +2563,19 @@ the frozen registry, and commit only that test correction with subject
 a fresh observation ID anchored at the corrective commit; neither the prior child exit nor its
 structured result may be promoted.
 
+Fourth recovery note for preserved reconciliation run
+`bcf00-reconciliation-3e4b6bf21-20260717a`: helper-owned merge
+`25a18f7b7eb0147daad946c321144f1dfb229320` correctly joined corrective commit
+`3e4b6bf21a195867d5e53a0e9ae2c5a8b620831d` to pinned upstream
+`2862bc0e6bd4157449503bd9c405e67d34cf0256`; postmerge validator, typechecks, focused suites, and
+all three evaluator predicates passed. The branch gate then exited 1 at `guard:work-index` because
+the handoff row retained `last_modified: 2026-07-16` after its July 17 documentation commit. Exact
+scanner comparison found no other row, coverage, cross-tree, or inconsistency drift. Preserve that
+run and branch at the merge. Recover from `3e4b6bf21a195867d5e53a0e9ae2c5a8b620831d` on a distinct
+branch, commit this plan/notes amendment with regenerated work-index artifacts, prove the index
+clean after commit, and rerun observation/reconciliation under new IDs. The failed gate is never
+retried or promoted.
+
 ```bash
 git rev-parse --show-toplevel
 git rev-parse HEAD

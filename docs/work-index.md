@@ -108,7 +108,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-project-statement.md` | handoff | deferred | body-marker | fleet-charts-project-statement | 2026-04-24 |  |
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-sop.md` | handoff | deferred | body-marker | fleet-charts-sop | 2026-05-12 |  |
 | `docs/superpowers/handoffs/2026-07-15-semantic-boundary-hygiene-implementation-notes.md` | handoff | completed | body-marker | semantic-boundary-hygiene-implementation-notes | 2026-07-16 |  |
-| `docs/superpowers/handoffs/2026-07-16-boundary-contract-feedback-implementation-notes.md` | handoff | active | body-marker | boundary-contract-feedback-implementation-notes | 2026-07-16 |  |
+| `docs/superpowers/handoffs/2026-07-16-boundary-contract-feedback-implementation-notes.md` | handoff | active | body-marker | boundary-contract-feedback-implementation-notes | 2026-07-17 |  |
 | `docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md` | handoff | pending | body-marker | boundary-core-history-mining | 2026-07-16 |  |
 
 ### docs/superpowers/plans  _(36 entries)_
@@ -203,4 +203,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-17T19:02:57Z from commit `ccfec0770ba4ea766614f28f187bf0870f955d53`
+- Generated at 2026-07-17T19:15:20Z from commit `3e4b6bf21a195867d5e53a0e9ae2c5a8b620831d`

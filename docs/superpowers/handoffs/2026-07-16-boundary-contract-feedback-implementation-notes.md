@@ -419,6 +419,21 @@ only the extra marker, and its focused GREEN passed all 59 assertions. A fresh o
 re-run the suite and typecheck after the corrective commit; the failed run is never retried or
 promoted.
 
+## 2026-07-17 work-index gate recovery
+
+Reconciliation run `bcf00-reconciliation-3e4b6bf21-20260717a` created the exact helper-owned merge
+`25a18f7b7eb0147daad946c321144f1dfb229320` with corrective commit
+`3e4b6bf21a195867d5e53a0e9ae2c5a8b620831d` first and pinned upstream
+`2862bc0e6bd4157449503bd9c405e67d34cf0256` second. Postmerge validator admission, both typechecks,
+the focused predecessor suites, and the 13/40, 39/40, and 18/18 evaluator predicates passed. The
+required branch gate exited 1 at `guard:work-index`: scanner comparison found only the handoff row's
+checked-in `last_modified: 2026-07-16` versus Git-derived `2026-07-17`. This occurred because the
+index was regenerated before the documentation commit that advanced that date. Preserve the run,
+gate logs, merge, and original branch as Inconclusive. Recovery starts from `3e4b6bf21a195867d5e53a0e9ae2c5a8b620831d`
+on a distinct branch, commits this amendment with newly generated index artifacts, verifies the
+index after commit, and uses new observation/reconciliation IDs. No prior Pass attempt substitutes
+for the failed required gate.
+
 ## Authorization Boundary
 
 The planning packet's initial approval authorized writing and committing the local specification,
