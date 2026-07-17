@@ -324,4 +324,3 @@ export function parseBoundaryRunInvocation(argv: readonly string[]): BoundaryRun
   validateInvocationOptions(invocation);
   return invocation;
 }
-

@@ -362,4 +362,3 @@ export interface BoundaryRunInitAnchor {
   entryTestRosterDigestSha256: string;
   documentHashesDigestSha256: string;
 }
-

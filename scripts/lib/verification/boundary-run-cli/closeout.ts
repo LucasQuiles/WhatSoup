@@ -579,4 +579,3 @@ export function verifyCloseout(invocation: BoundaryRunInvocation, cwd: string): 
     return operationResult([{ code: 'verify-closeout-failed', message: (error as Error).message }]);
   }
 }
-

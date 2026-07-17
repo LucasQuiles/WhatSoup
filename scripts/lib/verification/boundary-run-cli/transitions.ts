@@ -585,4 +585,3 @@ export async function recordGitTransition(
   const issues = [...outcome.result.issues, ...abortIssues, ...statusValidation.issues, ...postconditionIssues];
   return operationResult(issues, issues.length === 0 ? 0 : 1, verdict);
 }
-

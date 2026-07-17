@@ -1110,4 +1110,3 @@ export function recordInternalCheck(invocation: BoundaryRunInvocation, cwd: stri
   const issues = [...evaluated.result.issues, ...statusValidation.issues];
   return operationResult(issues, issues.length === 0 ? 0 : 1, verdict);
 }
-

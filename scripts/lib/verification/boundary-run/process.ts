@@ -386,4 +386,3 @@ export function validateBoundaryOuterWatchdogRecord(
   }
   return snapshotResult(issues);
 }
-
