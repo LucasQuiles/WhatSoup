@@ -76,7 +76,25 @@ import {
 } from './support.ts';
 
 export function registerSchemaCases(): void {
-  it('[BCF00-S01] parses expected exits in linear bounded form', () => {
+  it('keeps the executable BCF-00 marker roster equal to the frozen contract', () => {
+    const listed = JSON.parse(execFileSync(process.execPath, [
+      'node_modules/vitest/vitest.mjs', 'list',
+      'tests/scripts/verify-boundary-run.test.ts', '--json',
+      '--pool=forks', '--fileParallelism=false',
+    ], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      timeout: 60_000,
+      maxBuffer: 16 * 1024 * 1024,
+    })) as Array<{ name: string }>;
+    const observed = listed.flatMap((entry) => (
+      entry.name.match(/\[BCF00-[BUSN]\d{2}\]/g) ?? []
+    )).sort();
+
+    expect(observed).toEqual([...expectedBcf00Markers].sort());
+  });
+
+  it('parses expected exits in linear bounded form', () => {
     const api = boundaryRun as unknown as {
       parseBoundaryExpectedExit?: (value: string) => Set<number> | 'nonzero' | null;
     };
