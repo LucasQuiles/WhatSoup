@@ -84,6 +84,7 @@ const REQUIRED_SCRIPTS = [
   'guard:lint:src',
   'guard:claude-settings',
   'guard:agent-decision-polls',
+  'guard:semantic-quality',
   'guard:safeguard-diagnostics',
   'guard:fleet-bot-hardening-parity',
   'guard:bot-errors-runtime-manifest',
@@ -92,6 +93,8 @@ const REQUIRED_SCRIPTS = [
   'test:browser:motion',
   'verify:console-design',
   'verify:console-browser',
+  'verify:semantic',
+  'verify:semantic:shadow',
   'verify:push:branch',
   'verify:release',
   'verify:publish',
@@ -138,6 +141,7 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'npm run guard:claude-settings',
       'npm run guard:agent-decision-polls',
       'npm run guard:safeguard-diagnostics',
+      'npm run verify:semantic:shadow',
       'npm run guard:test-integrity',
       'npm run guard:boundaries',
       'npm run guard:lint:src',
@@ -175,6 +179,7 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'npm run guard:claude-settings',
       'npm run guard:agent-decision-polls',
       'npm run guard:safeguard-diagnostics',
+      'npm run verify:semantic:shadow',
       'npm run guard:test-integrity:required',
       'npm run guard:boundaries',
       'npm run guard:fail-closed-gate',
@@ -391,6 +396,15 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
       'baseline --check --ci',
     ],
     remediation: 'Restore CI fail-closed behavior for missing test-integrity tooling.',
+  },
+  {
+    id: 'quality-ci-semantic-shadow',
+    category: 'guard-chain',
+    file: '.github/workflows/quality.yml',
+    anchors: [],
+    validate: qualityCiSemanticShadowFailures,
+    remediation:
+      'Restore the single Node 24 semantic shadow step, isolated receipt, read-only permissions, and pre-suite ordering in quality.yml.',
   },
   {
     id: 'quality-ci-console-design-chain',
@@ -763,6 +777,84 @@ function parseWorkflow(text: string, label: string): { root: Record<string, unkn
       failures: [`${label} YAML conversion failed: ${error instanceof Error ? error.message : String(error)}`],
     };
   }
+}
+
+function qualityCiSemanticShadowFailures(text: string): string[] {
+  const { root, failures: parseFailures } = parseWorkflow(text, 'quality workflow');
+  if (!root) return parseFailures;
+  const failures: string[] = [];
+  const triggers = asRecord(root.on);
+  if (triggers && hasOwn(triggers, 'pull_request_target')) {
+    failures.push('quality workflow must not use pull_request_target');
+  }
+  const permissions = asRecord(root.permissions);
+  if (!permissions
+    || permissions.contents !== 'read'
+    || Object.keys(permissions).some((key) => key !== 'contents')) {
+    failures.push('quality workflow permissions must be exactly contents: read');
+  }
+
+  const jobs = asRecord(root.jobs);
+  const quality = asRecord(jobs?.quality);
+  if (!quality || !Array.isArray(quality.steps)) {
+    failures.push('workflow must declare jobs.quality.steps as an array');
+    return failures;
+  }
+  const steps = quality.steps.map(asRecord);
+  if (steps.some((step) => step === null)) {
+    failures.push('every quality-job step must be a mapping');
+    return failures;
+  }
+  const stepRecords = steps as Record<string, unknown>[];
+  const semanticSteps = stepRecords.filter((step) => step.name === 'Semantic quality (shadow)');
+  if (semanticSteps.length !== 1) {
+    failures.push(`quality job must contain exactly one Semantic quality (shadow) step (found ${semanticSteps.length})`);
+    return failures;
+  }
+  const semantic = semanticSteps[0]!;
+  const semanticIndex = stepRecords.indexOf(semantic);
+  const integrityIndex = stepRecords.findIndex((step) => step.name === 'Install test-integrity plugin');
+  const suiteIndex = stepRecords.findIndex((step) => step.name === 'Test suite + coverage thresholds');
+  if (integrityIndex < 0 || semanticIndex > integrityIndex) {
+    failures.push('Semantic quality (shadow) must run before Install test-integrity plugin');
+  }
+  if (suiteIndex < 0 || semanticIndex > suiteIndex) {
+    failures.push('Semantic quality (shadow) must run before Test suite + coverage thresholds');
+  }
+  if (semantic.if !== "matrix.node == '24.x'") {
+    failures.push("Semantic quality (shadow) must be gated by matrix.node == '24.x'");
+  }
+  if (hasOwn(semantic, 'continue-on-error') || hasOwn(semantic, 'uses')) {
+    failures.push('Semantic quality (shadow) must use a blocking run step without continue-on-error');
+  }
+  for (const key of ['shell', 'working-directory', 'background']) {
+    if (hasOwn(semantic, key)) failures.push(`Semantic quality (shadow) must not declare ${key}`);
+  }
+
+  const env = asRecord(semantic.env);
+  if (!env || env.SEMANTIC_RECEIPT !== '${{ runner.temp }}/semantic-quality.json') {
+    failures.push('Semantic quality (shadow) receipt must live under runner.temp');
+  }
+  const run = typeof semantic.run === 'string' ? semantic.run : '';
+  for (const required of [
+    'base="origin/$GITHUB_BASE_REF"',
+    'base="HEAD^"',
+    'npm run guard:semantic-quality -- --mode shadow --base "$base" --receipt "$SEMANTIC_RECEIPT"',
+    'process.env.SEMANTIC_RECEIPT',
+    'r.decision',
+    'r.findings.length',
+    '>> "$GITHUB_STEP_SUMMARY"',
+  ]) {
+    if (!run.includes(required)) failures.push(`Semantic quality (shadow) run script is missing ${required}`);
+  }
+
+  const uploadsSemanticReceipt = stepRecords.some((step) => (
+    typeof step.uses === 'string'
+    && step.uses.includes('actions/upload-artifact')
+    && collectStringValues(step).some((value) => value.includes('semantic-quality'))
+  ));
+  if (uploadsSemanticReceipt) failures.push('semantic quality receipts must not be uploaded as artifacts');
+  return failures;
 }
 
 function qualityCiPlaywrightTimeoutFailures(text: string): string[] {

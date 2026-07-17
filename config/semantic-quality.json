@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "roots": [
+    "src/main.ts",
+    "src/bootstrap.ts",
+    "src/bootstrap-auth.ts",
+    "src/fleet/standalone.ts",
+    "src/transport/auth.ts"
+  ],
+  "sourcePrefixes": ["src/"],
+  "excludedSuffixes": [".d.ts"],
+  "allowlist": []
+}

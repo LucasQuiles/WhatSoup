@@ -1,0 +1,14 @@
+{
+  "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "schemaMigration": 44,
+  "provider": "claude-cli",
+  "modelUsabilityStatus": "usable",
+  "fallbackChain": [
+    { "provider": "openai", "model": "gpt-fallback", "eligible": true, "turnCount": 3 },
+    { "provider": "google", "model": "gemini-fallback", "eligible": false, "turnCount": 0 }
+  ],
+  "driftCheck": { "ok": true, "releasePath": "docs/reliability-runner/fake-release.json" },
+  "generatedAt": "2026-07-16T03:00:00Z",
+  "uptimeSeconds": 123456,
+  "lastProbeAt": "2026-07-16T02:59:00Z"
+}
