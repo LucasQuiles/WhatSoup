@@ -235,6 +235,55 @@ def test_redact_bundle_reuses_the_shared_scrubber_and_preserves_identity_fields(
     assert _mod.capability_digest(redacted) == _mod.capability_digest(unredacted_equivalent)
 
 
+def test_redact_bundle_preserves_a_phone_shaped_model_id_verbatim():
+    # Regression for the identity-corruption defect (independent review,
+    # 2026-07-17). Real, currently-shipping Anthropic model ids are
+    # date-suffixed -- e.g. `claude-opus-4-1-20250805` is exactly ten
+    # dash-joined digits, which the shared scrubber's phone-like regex flags.
+    # A digest-projected identity field must survive redaction VERBATIM by
+    # construction, never by luck that its value happens not to collide with a
+    # scrubber pattern. Before the fix this went RED: the model was mangled to
+    # `claude-opus-[REDACTED PHONE]`, changing the projection and breaking
+    # digest agreement with the guard.
+    receipt = _receipt(
+        provider="anthropic",
+        modelUsabilityStatus="usable",
+        fallbackChain=[
+            {"provider": "anthropic", "model": "claude-opus-4-1-20250805", "eligible": True},
+            {"provider": "openai", "model": "gpt-fallback", "eligible": False},
+        ],
+    )
+
+    redacted = _mod.redact_bundle(receipt)
+
+    # The real invariant: redaction may not alter ANY hashed identity field.
+    assert _mod.capability_projection(redacted) == _mod.capability_projection(receipt)
+    # And specifically the phone-shaped model id came through untouched.
+    assert redacted["fallbackChain"][0]["model"] == "claude-opus-4-1-20250805"
+    assert _mod.capability_digest(redacted) == _mod.capability_digest(receipt)
+
+
+def test_redact_bundle_fails_closed_if_redaction_alters_an_unrestored_identity_field(monkeypatch):
+    # Defense-in-depth beyond the verbatim restore: the restore heals the
+    # STRING identity fields it knows about, but the projection self-check is
+    # the backstop for ANY projected field drifting -- including one the
+    # restore list does not cover (here `schemaMigration`, an int the string
+    # restore deliberately never touches). If a future change to the SHARED
+    # scrubber (it serves many consumers) ever mutated such a field, this
+    # producer must refuse to emit a receipt with an identity that no longer
+    # matches what was captured, not silently commit corrupted identity.
+    receipt = _receipt()
+
+    def _corrupting_redactor(bundle, redact_text):
+        corrupted = {str(key): value for key, value in bundle.items()}
+        corrupted["schemaMigration"] = bundle["schemaMigration"] + 1
+        return corrupted
+
+    monkeypatch.setattr(_mod, "redact_json_value", _corrupting_redactor)
+    with pytest.raises(_mod.ReceiptProjectionError):
+        _mod.redact_bundle(receipt)
+
+
 def test_capture_assembles_a_bundle_from_injected_sources_without_live_io():
     health = {
         "generated_at": "2026-07-16T03:00:00Z",

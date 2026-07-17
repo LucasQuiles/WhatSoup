@@ -149,19 +149,69 @@ def _redact_text(value: Any) -> str:
     return redact_bot_errors_text(value, credential_path_marker="[REDACTED CREDENTIAL PATH]")
 
 
-def redact_bundle(bundle: dict) -> dict:
-    """Run every string-valued field of `bundle` (recursively, through dicts
-    and lists) through the shared BOT ERRORS scrubber
-    (`deploy/scripts/lib/bot_errors_redaction.py`). Reuse only -- no
-    hand-rolled scrubbing here (design §3: "any hand-rolled scrubber is a
-    rejection").
+# The digest-projected identity fields that are STRING-valued and can thus be
+# mutated by the free-text scrubber (a date-suffixed model id can look
+# phone-like). The int/bool projected fields (schemaMigration, each entry's
+# eligible, driftCheck.ok) are never touched by a text scrubber, so they need
+# no restoration.
+_IDENTITY_STRING_FIELDS = ("commit", "provider", "modelUsabilityStatus")
 
-    Identity-tagged fields (commit sha, provider name, model name, status
-    enum, schema int, eligible bool) are not phone/credential-shaped and
-    pass through unchanged; volatile/free-text fields containing phone
-    numbers, credential paths, JIDs, etc. are scrubbed.
+
+def _restore_identity_fields(redacted: dict, raw: dict) -> None:
+    """Copy the digest-projected STRING identity fields from `raw` back onto
+    `redacted` verbatim, undoing any scrubber mutation of a phone/credential
+    shaped identity value. `fallbackChain` entries are restored positionally
+    (`redact_json_value` preserves list order and length) -- each entry's
+    `provider` and `model`; `eligible` and any volatile per-entry counters are
+    left as the scrubber returned them.
     """
-    return redact_json_value(bundle, _redact_text)
+    for field in _IDENTITY_STRING_FIELDS:
+        if field in raw:
+            redacted[field] = raw[field]
+    raw_chain = raw.get("fallbackChain")
+    redacted_chain = redacted.get("fallbackChain")
+    if (
+        isinstance(raw_chain, list)
+        and isinstance(redacted_chain, list)
+        and len(raw_chain) == len(redacted_chain)
+    ):
+        for redacted_entry, raw_entry in zip(redacted_chain, raw_chain):
+            if isinstance(redacted_entry, dict) and isinstance(raw_entry, dict):
+                for key in ("provider", "model"):
+                    if key in raw_entry:
+                        redacted_entry[key] = raw_entry[key]
+
+
+def redact_bundle(bundle: dict) -> dict:
+    """Scrub every string-valued field of `bundle` (recursively, through dicts
+    and lists) through the shared BOT ERRORS scrubber
+    (`deploy/scripts/lib/bot_errors_redaction.py`), then restore the
+    digest-projected identity fields VERBATIM. Reuse only -- no hand-rolled
+    scrubbing (design §3: "any hand-rolled scrubber is a rejection").
+
+    The scrubber is a generic free-text redactor; it does not know which
+    fields are identity, and some legitimate identity values collide with its
+    patterns -- e.g. a date-suffixed model id like `claude-opus-4-1-20250805`
+    (ten dash-joined digits) trips the phone-like regex. Those fields are
+    HASHED into the receipt digest (design §4), so any mutation would break
+    digest agreement with the guard (`scripts/lib/fleet-receipt-digest.ts`).
+    The projected identity fields (commit, provider, modelUsabilityStatus, and
+    each fallbackChain entry's provider/model) are therefore restored from the
+    pre-redaction values after scrubbing, and a fail-closed self-check raises
+    `ReceiptProjectionError` if the capability projection changed at all --
+    identity is exact by construction, never by regex-non-collision luck.
+    Genuinely volatile/free-text fields (timestamps, uptime, drift issues,
+    credential paths, JIDs) are still fully scrubbed.
+
+    Requires `bundle` to be projectable, and raises `ReceiptProjectionError`
+    otherwise -- an incompletely captured bundle must never yield a receipt.
+    """
+    identity_before = capability_projection(bundle)
+    redacted = redact_json_value(bundle, _redact_text)
+    _restore_identity_fields(redacted, bundle)
+    if capability_projection(redacted) != identity_before:
+        raise ReceiptProjectionError("redaction altered capability-identity fields")
+    return redacted
 
 
 def _sanitize_auth_bond(auth_bond: Any) -> dict | None:
