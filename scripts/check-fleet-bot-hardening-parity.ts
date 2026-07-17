@@ -4,6 +4,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { isRecord } from '../src/lib/type-guards.ts';
+import { receiptCapabilityDigest } from './lib/fleet-receipt-digest.ts';
 import { rosterEpoch, rosterInventory } from './lib/fleet-roster-inventory.ts';
 
 export const DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH =
@@ -117,7 +118,14 @@ export type FleetBotHardeningParityFindingCode =
   | 'roster-instance-count-mismatch'
   | 'future-roster-epoch'
   | 'invalid-row-release-commit'
-  | 'invalid-row-release-identity';
+  | 'invalid-row-release-identity'
+  | 'invalid-row-receipt'
+  | 'invalid-row-receipt-digest'
+  | 'invalid-row-receipt-captured-at'
+  | 'future-row-receipt-captured-at'
+  | 'stale-row-receipt'
+  | 'receipt-file-missing'
+  | 'receipt-digest-mismatch';
 
 export interface FleetBotHardeningParityFinding {
   code: FleetBotHardeningParityFindingCode;
@@ -153,6 +161,27 @@ function isSafeRepoRelativePath(filePath: string): boolean {
   return parts.every((part) => part !== '' && part !== '.' && part !== '..');
 }
 
+// Repo-relative-path escape check shared by the receipt-file lookup
+// (`validateRows`'s `receipt.path` branch) and the source-anchor file lookup
+// (`validateSourceAnchors`). Resolves `filePath` against `cwd` only when it
+// is BOTH a syntactically safe repo-relative path (`isSafeRepoRelativePath`)
+// AND its resolved absolute path stays within `cwd`. Returns `null` for
+// either failure mode -- the `isSafeRepoRelativePath` check already rejects
+// `..` components, absolute paths, and other unsafe shapes, so the
+// resolve-and-compare check below is deliberate defense-in-depth (mirrors
+// the sentinel/watchdog "never trust, always recompute" pattern used
+// elsewhere in this file), not the primary gate. Callers own their own
+// finding code/message and any subsequent existence check.
+function resolveSafeRepoPath(cwd: string, filePath: string): string | null {
+  if (!isSafeRepoRelativePath(filePath)) return null;
+  const absolutePath = path.resolve(cwd, filePath);
+  const cwdResolved = path.resolve(cwd);
+  if (absolutePath !== cwdResolved && !absolutePath.startsWith(cwdResolved + path.sep)) {
+    return null;
+  }
+  return absolutePath;
+}
+
 function arrayOfStrings(value: unknown): string[] | null {
   return Array.isArray(value) && value.every((item) => typeof item === 'string')
     ? value
@@ -166,6 +195,23 @@ function arrayOfStrings(value: unknown): string[] | null {
 // `/^[0-9a-f]{64}$/` check above) since committed manifest identity fields are
 // expected to already be canonical lowercase.
 const FULL_GIT_SHA_RE = /^[0-9a-f]{40}$/;
+
+// Shape of a manifest row's `receipt.digest` (design §6): `sha256:` prefix
+// plus lowercase 64-hex, so the guard can reject a malformed digest string
+// cheaply before ever trying to open the referenced receipt file.
+const RECEIPT_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+
+// Shape of a manifest row's `receipt.capturedAt` (design §6, "ISO-8601
+// timestamp", e.g. `2026-07-16T03:00:00Z`): `YYYY-MM-DDTHH:MM:SS`, an
+// optional fractional-seconds component, and a mandatory `Z` or numeric
+// UTC-offset suffix. Raw `Date.parse` alone is not a shape check -- it also
+// accepts strings like `2026/06/18` or the bare year `2026`, which would
+// silently pass a check whose finding message promises "ISO-8601". This
+// regex is a pre-check in front of `Date.parse`, not a replacement for it:
+// it only enforces the timestamp's shape, so a value that matches but is
+// still not a real calendar date/time (e.g. month 13) is left for
+// `Date.parse` to reject.
+const ISO_8601_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
 
 // Parse a `YYYY-MM-DD` manifest date as UTC midnight. Returns null when the
 // value is not that exact shape or is not a real calendar date, so callers can
@@ -253,6 +299,7 @@ function validateCapabilities(payload: Record<string, unknown>, findings: FleetB
 }
 
 function validateRows(
+  cwd: string,
   payload: Record<string, unknown>,
   findings: FleetBotHardeningParityFinding[],
   now: Date,
@@ -402,6 +449,125 @@ function validateRows(
       }
     }
 
+    // Runtime receipt reference (#1867 criterion 1, guard-side half; design
+    // §6/§7.2, storage Option B). Validate-when-present: a row that omits
+    // `receipt` gets no finding at all -- the tracked manifest's rows do not
+    // declare this field yet, and requiring it on hardened rows is a
+    // deferred, separate change (the manifest-migration increment). Whenever
+    // a row *does* declare a receipt, its shape/format must be
+    // fail-closed-correct, and -- because the referenced receipt file is
+    // committed (Option B) -- the guard never trusts the declared digest: it
+    // independently recomputes the capability-identity digest
+    // (`fleet-receipt-digest.ts`, mirroring the roster digest recompute in
+    // `validateInventoryBinding` below) from the file's own bytes and rejects
+    // on mismatch. This increment deliberately does NOT cross-check `receipt`
+    // against `releaseIdentity` (`release-identity-receipt-mismatch` /
+    // `verified-before-service-restart` per design §7.3) -- that needs both
+    // fields meaningfully populated on real rows, which is a later increment.
+    const receipt = rawRow['receipt'];
+    if (receipt !== undefined) {
+      if (!isRecord(receipt)) {
+        findings.push(finding('invalid-row-receipt', `${context}.receipt must be an object`));
+      } else {
+        const receiptDigest = receipt['digest'];
+        const capturedAt = receipt['capturedAt'];
+        const receiptPath = receipt['path'];
+
+        const receiptDigestOk = typeof receiptDigest === 'string' && RECEIPT_DIGEST_RE.test(receiptDigest);
+        if (!receiptDigestOk) {
+          findings.push(finding(
+            'invalid-row-receipt-digest',
+            `${context}.receipt.digest must match ^sha256:[0-9a-f]{64}$`,
+          ));
+        }
+
+        if (typeof capturedAt !== 'string') {
+          findings.push(finding(
+            'invalid-row-receipt-captured-at',
+            `${context}.receipt.capturedAt must be a string`,
+          ));
+        } else if (!ISO_8601_TIMESTAMP_RE.test(capturedAt)) {
+          findings.push(finding(
+            'invalid-row-receipt-captured-at',
+            `${context}.receipt.capturedAt must be an ISO-8601 timestamp (e.g. 2026-07-16T03:00:00Z)`,
+          ));
+        } else {
+          const capturedMs = Date.parse(capturedAt);
+          if (Number.isNaN(capturedMs)) {
+            findings.push(finding(
+              'invalid-row-receipt-captured-at',
+              `${context}.receipt.capturedAt must be a parseable ISO-8601 timestamp`,
+            ));
+          } else if (capturedMs > now.getTime()) {
+            findings.push(finding(
+              'future-row-receipt-captured-at',
+              `${context}.receipt.capturedAt ${capturedAt} is in the future`,
+            ));
+          } else if (now.getTime() - capturedMs > FLEET_BOT_HARDENING_PARITY_MAX_AGE_MS) {
+            // CI-loose freshness budget (design §7.6): this reuses the same
+            // 90-day cadence as `verifiedAt`/`updated`, matching human commit
+            // cadence, NOT the hours/day-scale operator-side capture-time
+            // gate that belongs in the (separate, not-yet-built) receipt
+            // producer. Collapsing the two into one budget would make this
+            // CI guard go red on unrelated pushes.
+            findings.push(finding(
+              'stale-row-receipt',
+              `${context}.receipt.capturedAt ${capturedAt} is older than the ${FLEET_BOT_HARDENING_PARITY_MAX_AGE_DAYS}-day freshness budget`,
+            ));
+          }
+        }
+
+        let resolvedReceiptPath: string | null = null;
+        if (typeof receiptPath !== 'string') {
+          findings.push(finding(
+            'receipt-file-missing',
+            `${context}.receipt.path must be a safe repo-relative path`,
+          ));
+        } else {
+          const safeReceiptPath = resolveSafeRepoPath(cwd, receiptPath);
+          if (safeReceiptPath === null) {
+            findings.push(finding(
+              'receipt-file-missing',
+              `${context}.receipt.path must be a safe repo-relative path`,
+            ));
+          } else if (!existsSync(safeReceiptPath)) {
+            findings.push(finding(
+              'receipt-file-missing',
+              `receipt file is missing: ${receiptPath}`,
+              receiptPath,
+            ));
+          } else {
+            resolvedReceiptPath = safeReceiptPath;
+          }
+        }
+
+        // Only attempt the recompute-and-compare once we have a
+        // well-formed declared digest AND a real file to read -- a
+        // malformed digest string or a missing file is already reported by
+        // the checks above, and re-reporting the same problem as a
+        // "mismatch" would be noise, not a distinct fact.
+        if (receiptDigestOk && resolvedReceiptPath) {
+          try {
+            const receiptFileData: unknown = JSON.parse(readFileSync(resolvedReceiptPath, 'utf8'));
+            const recomputedDigest = `sha256:${receiptCapabilityDigest(receiptFileData)}`;
+            if (recomputedDigest !== receiptDigest) {
+              findings.push(finding(
+                'receipt-digest-mismatch',
+                `${context}.receipt.digest=${String(receiptDigest)} does not match recomputed capability-identity digest=${recomputedDigest}`,
+                receiptPath as string,
+              ));
+            }
+          } catch (err) {
+            findings.push(finding(
+              'receipt-digest-mismatch',
+              `cannot recompute capability-identity digest from receipt file ${String(receiptPath)}: ${(err as Error).message}`,
+              receiptPath as string,
+            ));
+          }
+        }
+      }
+    }
+
     if (status === 'hardened') {
       if (provenCount !== REQUIRED_FLEET_BOT_HARDENING_CAPABILITIES.length || gapCount !== 0) {
         findings.push(finding('hardened-row-not-proven', `${context} is hardened but not all capabilities are proven`));
@@ -449,13 +615,13 @@ function validateSourceAnchors(
       continue;
     }
     const filePath = rawAnchor['file'];
-    if (typeof filePath !== 'string' || !isSafeRepoRelativePath(filePath)) {
+    if (typeof filePath !== 'string') {
       findings.push(finding('source-anchor-unsafe-path', `${context}.file must be a safe repo-relative path`));
       continue;
     }
-    const absolutePath = path.resolve(cwd, filePath);
-    if (!absolutePath.startsWith(path.resolve(cwd) + path.sep) && absolutePath !== path.resolve(cwd)) {
-      findings.push(finding('source-anchor-unsafe-path', `${filePath} escapes repository`, filePath));
+    const absolutePath = resolveSafeRepoPath(cwd, filePath);
+    if (absolutePath === null) {
+      findings.push(finding('source-anchor-unsafe-path', `${context}.file must be a safe repo-relative path`));
       continue;
     }
     if (!existsSync(absolutePath)) {
@@ -641,7 +807,7 @@ export function checkFleetBotHardeningParity(
 
   recordPrivateLabelFindings(runtimeFindings, payload, '$');
   validateCapabilities(payload, runtimeFindings);
-  const rows = validateRows(payload, runtimeFindings, now);
+  const rows = validateRows(cwd, payload, runtimeFindings, now);
   validateSummary(payload, rows, runtimeFindings);
   if (isRecord(scope) && typeof scope['cohortSize'] === 'number' && scope['cohortSize'] !== rows.length) {
     runtimeFindings.push(finding(

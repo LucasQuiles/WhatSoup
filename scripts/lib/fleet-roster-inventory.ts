@@ -204,7 +204,12 @@ function pyJsonEncodeString(value: string): string {
   return out;
 }
 
-function pyJsonStringify(value: unknown): string {
+// Exported so other guard-side digest consumers (e.g. `fleet-receipt-digest.ts`,
+// #1867 criterion 1) reuse this exact encoder rather than hand-rolling a
+// second one. A later Python receipt-capture producer must compute the same
+// digest over the same projection shape, so every TS-side digest consumer in
+// this repo hashes through this single implementation.
+export function pyJsonStringify(value: unknown): string {
   if (value === null || value === undefined) return 'null';
   if (typeof value === 'boolean') return value ? 'true' : 'false';
   if (typeof value === 'number') {
