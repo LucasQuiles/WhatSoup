@@ -2712,6 +2712,25 @@ plus live resolution of every BCF-02 inventory tool. Commit the bounded helper/t
 subject `fix(quality): bind versionless tool capabilities`, then rerun the full BCF-00 and BCF-01
 chains under fresh IDs before BCF-02 is recreated.
 
+Twelfth recovery note for preserved reconciliation run
+`bcf00-reconciliation-7ce846e1f-20260717a`: helper-owned merge
+`669e6b42856bb6f0ccb237ad42d56c71e184e8bc` passed the committed 62-test validator, focused
+semantic suites, both typecheck lanes, and all three evaluator predicates. The strict branch gate
+then exited 1 at the unfiltered test-integrity check with one new `js-no-expect` finding on the
+expanded `[BCF00-N06]` test. The test contains expectations and its focused behavior passed, but the
+large combined case crossed the scanner's structural heuristic; no baseline update, skip, or gate
+bypass can relabel that finding clean. The run is preserved as
+`deferred`/`inconclusive`/`current`, verifies structurally, and rejects Pass-only finalization.
+
+Recover from pre-merge validator commit
+`7ce846e1f0c5dbfbb6bd6c7eb3554ad299287c7c` on a distinct branch. Keep the exact U06/N06
+capability assertions bounded and move the longer fake-executable fallback/rejection neighbors into
+one dedicated unmarked test with direct expectations. Run the focused validator pair, full
+validator suite, scripts typecheck, and unfiltered test-integrity check; the latter must report no
+new finding before commit. Do not edit the test-integrity baseline. Commit the test-only correction
+with subject `test(quality): keep capability controls scanner-legible`, then rerun the complete
+BCF-00 and BCF-01 chains under fresh IDs before BCF-02.
+
 ```bash
 git rev-parse --show-toplevel
 git rev-parse HEAD

@@ -552,6 +552,21 @@ SHA-256 binding for every tool. Only `kill`, `test`, `tr`, and `wc` may use the 
 still require a successful nonempty version string, and GNU timeout identity remains mandatory.
 Fresh BCF-00 and BCF-01 chains are required before BCF-02 can be initialized again.
 
+## 2026-07-17 capability-test integrity recovery
+
+Recovery8 merged at `669e6b42856bb6f0ccb237ad42d56c71e184e8bc` after the committed validator,
+focused semantic suites, both typechecks, and all evaluator predicates passed. The required branch
+gate failed at the unfiltered test-integrity check because the expanded `[BCF00-N06]` case produced
+one new `js-no-expect` finding. The case contains direct expectations and passes focused Vitest, but
+its enlarged combined structure is outside the scanner's accepted shape. The run is preserved as
+deferred/inconclusive/current and Pass-only finalization was rejected as the intended negative
+control; that rejected command is not positive evidence.
+
+Recovery9 starts from `7ce846e1f0c5dbfbb6bd6c7eb3554ad299287c7c`. It keeps the marker-owned
+capability checks small and moves fake-executable fallback/rejection checks into a dedicated test
+with direct assertions. The test-integrity baseline is not changed. A fresh unfiltered integrity
+scan and complete BCF-00/01 replay are required before BCF-02 resumes.
+
 ## Authorization Boundary
 
 The planning packet's initial approval authorized writing and committing the local specification,
