@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 70
+**Total entries:** 71
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=7, plan=35, review=3, spec=24, state=1 |
-| Status | active=12, closed=4, completed=32, deferred=7, pending=14, unknown=1 |
-| Status source | body-marker=69, state-md-status=1 |
+| Kind | handoff=7, plan=35, review=3, spec=25, state=1 |
+| Status | active=13, closed=4, completed=32, deferred=7, pending=14, unknown=1 |
+| Status source | body-marker=70, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -34,7 +34,7 @@ scoped markdown files currently on disk.
 
 ## Synthesis
 
-### Active (12)
+### Active (13)
 
 | Path | Kind | Topic | Status source |
 |------|------|-------|---------------|
@@ -45,6 +45,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/2026-07-11-central-hub-release-proof-pilot-design.md` | spec | central-hub-release-proof-pilot-design | body-marker |
 | `docs/superpowers/specs/2026-07-15-semantic-boundary-hygiene-design.md` | spec | semantic-boundary-hygiene-design | body-marker |
 | `docs/superpowers/specs/2026-07-17-boundary-exit-parser-codeql-hardening-design.md` | spec | boundary-exit-parser-codeql-hardening-design | body-marker |
+| `docs/superpowers/specs/2026-07-17-boundary-validator-ci-refactor-design.md` | spec | boundary-validator-ci-refactor-design | body-marker |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/design.md` | spec | design | body-marker |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/design.md` | spec | design | body-marker |
@@ -157,7 +158,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | review | completed | body-marker | bot-errors-tool-call-audit | 2026-06-20 |  |
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | review | completed | body-marker | wall-to-wall-audit-pr-briefs | 2026-07-10 |  |
 
-### docs/superpowers/specs  _(18 entries)_
+### docs/superpowers/specs  _(19 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -179,6 +180,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | spec | unknown | body-marker | turn-lifecycle-fitness-extraction-design | 2026-07-11 |  |
 | `docs/superpowers/specs/2026-07-15-semantic-boundary-hygiene-design.md` | spec | active | body-marker | semantic-boundary-hygiene-design | 2026-07-16 |  |
 | `docs/superpowers/specs/2026-07-17-boundary-exit-parser-codeql-hardening-design.md` | spec | active | body-marker | boundary-exit-parser-codeql-hardening-design | 2026-07-17 |  |
+| `docs/superpowers/specs/2026-07-17-boundary-validator-ci-refactor-design.md` | spec | active | body-marker | boundary-validator-ci-refactor-design | 2026-07-17 |  |
 
 ### docs/superpowers/specs/kill-session-transactional-cancellation  _(3 entries)_
 
@@ -199,4 +201,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-17T14:46:24Z from commit `c94850b3523b9ccde4e23c636c59baa502503e9b`
+- Generated at 2026-07-17T15:24:17Z from commit `2d1fad7ede7c15ceace221d296bf29df02b4cd80`
