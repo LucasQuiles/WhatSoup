@@ -191,7 +191,10 @@ export function captureBoundaryWorktreeSnapshot(
     }
     if (issues.length > 0) return { ok: false, snapshot: null, issues };
 
-    const allowedUntracked = declarations.allowedUntrackedPaths.map((entry) => capturePathRecord(repo, entry));
+    const untrackedSet = new Set(untracked);
+    const allowedUntracked = declarations.allowedUntrackedPaths
+      .filter((entry) => untrackedSet.has(entry))
+      .map((entry) => capturePathRecord(repo, entry));
     const preservedOwner = declarations.preservedOwnerPaths.map((entry) => capturePathRecord(repo, entry));
     const withoutDigest = {
       head: gitText(repo, ['rev-parse', 'HEAD']),

@@ -1,5 +1,7 @@
 import { expect, it } from 'vitest';
 
+import { admitsProfileOwnedCommandWork } from '../../../scripts/lib/verification/boundary-run-cli/shared.ts';
+
 import {
   BOUNDARY_PINNED_GENERATED_INDEX_PARENT,
   EXPECTED_CHILD_CONTRACT_ROWS,
@@ -222,6 +224,41 @@ export function registerSchemaCases(): void {
       exitCode: 0,
       verdict: 'Pass',
     });
+  });
+
+  it('admits a declared create path only after bounded materialization', () => {
+    const repo = makeSnapshotRepo();
+    const createPath = path.join(repo, 'scratch/result.json');
+    rmSync(createPath);
+    const declarations = {
+      allowedUntrackedPaths: ['scratch/result.json'],
+      preservedOwnerPaths: ['owner.tsv'],
+    };
+
+    const absent = boundaryRun.captureBoundaryWorktreeSnapshot(repo, declarations);
+    expect(absent.ok, absent.issues.map((entry) => entry.code).join(', ')).toBe(true);
+    expect(absent.snapshot?.allowedUntracked).toEqual([]);
+
+    writeFileSync(createPath, '{"created":true}\n');
+    const materialized = boundaryRun.captureBoundaryWorktreeSnapshot(repo, declarations);
+    expect(materialized.ok, materialized.issues.map((entry) => entry.code).join(', ')).toBe(true);
+    expect(materialized.snapshot?.allowedUntracked).toEqual([
+      expect.objectContaining({ path: 'scratch/result.json', type: 'regular' }),
+    ]);
+    expect(absent.snapshot).not.toBeNull();
+    expect(materialized.snapshot).not.toBeNull();
+    if (absent.snapshot === null || materialized.snapshot === null) return;
+    expect(admitsProfileOwnedCommandWork(
+      repo,
+      absent.snapshot,
+      materialized.snapshot,
+      ['scratch/result.json'],
+    )).toBe(true);
+
+    writeFileSync(path.join(repo, 'foreign.txt'), 'foreign\n');
+    const foreign = boundaryRun.captureBoundaryWorktreeSnapshot(repo, declarations);
+    expect(foreign.ok).toBe(false);
+    expect(foreign.issues.map((entry) => entry.code)).toContain('snapshot-unexpected-untracked');
   });
 
   it('[BCF00-U13] rejects non-closed manifest wire shapes', () => {

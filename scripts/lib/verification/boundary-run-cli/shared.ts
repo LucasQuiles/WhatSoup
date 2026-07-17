@@ -389,12 +389,11 @@ export function gitPathSet(cwd: string, args: readonly string[]): string[] {
   return canonicalSet(stdout === '' ? [] : stdout.split('\n').filter((entry) => entry !== ''));
 }
 
-function snapshotPathRecordsMatch(
+function preservedOwnerRecordsMatch(
   left: BoundaryWorktreeSnapshot,
   right: BoundaryWorktreeSnapshot,
 ): boolean {
-  return canonicalizeBoundaryRun(left.allowedUntracked) === canonicalizeBoundaryRun(right.allowedUntracked)
-    && canonicalizeBoundaryRun(left.preservedOwner) === canonicalizeBoundaryRun(right.preservedOwner);
+  return canonicalizeBoundaryRun(left.preservedOwner) === canonicalizeBoundaryRun(right.preservedOwner);
 }
 
 export function admitsProfileOwnedCommandWork(
@@ -408,11 +407,13 @@ export function admitsProfileOwnedCommandWork(
     previous.head !== current.head
     || previous.indexTreeOid !== current.indexTreeOid
     || previous.trackedPatchSha256 !== current.trackedPatchSha256
-    || !snapshotPathRecordsMatch(previous, current)
+    || !preservedOwnerRecordsMatch(previous, current)
   ) return false;
   const allowed = new Set(allowedPaths);
   return gitPathSet(cwd, ['diff', '--name-only', 'HEAD', '--'])
-    .every((relativePath) => allowed.has(relativePath));
+    .every((relativePath) => allowed.has(relativePath))
+    && [...previous.allowedUntracked, ...current.allowedUntracked]
+      .every((entry) => allowed.has(entry.path));
 }
 
 export function admitsByteEquivalentCommitStaging(
@@ -426,7 +427,8 @@ export function admitsByteEquivalentCommitStaging(
     && previous.trackedPatchSha256 === emptyPatchSha256
     && current.unstagedPatchSha256 === emptyPatchSha256
     && previous.unstagedPatchSha256 === current.trackedPatchSha256
-    && snapshotPathRecordsMatch(previous, current);
+    && canonicalizeBoundaryRun(previous.allowedUntracked) === canonicalizeBoundaryRun(current.allowedUntracked)
+    && preservedOwnerRecordsMatch(previous, current);
 }
 
 export function acceptedAttemptStdout(manifest: BoundaryRunManifest, runDir: string, attemptId: string): string {
