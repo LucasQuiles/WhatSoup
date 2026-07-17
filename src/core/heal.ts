@@ -21,6 +21,36 @@ const GLOBAL_VALVE_WINDOW_MS = 60 * 60 * 1000; // 1 hour
 const ACTIVE_REPORT_STATES = ['attempt_1', 'cooldown', 'attempt_2', 'escalated', 'queued'] as const;
 export const HEAL_ACTIVE_STALE_MS = RESOLUTION_WINDOW_MS;
 
+// A missing Q control peer is persistent CONFIG STATE, not a per-report event:
+// config.controlPeers is built once at module load (src/config.ts) and nothing
+// mutates it mid-process (the fleet PATCH route rewrites config.json for the
+// NEXT boot), so once the peer is absent it stays absent for the process
+// lifetime. Without a latch every heal report on an unconfigured fleet fires
+// its own heal_delivery_unavailable critical, forever. Alert once per process
+// and count the suppressed occurrences; GET /health surfaces both under
+// control_peer (see startHealthServer).
+let deliveryUnavailableAlerted = false;
+let suppressedDeliveryUnavailableAlerts = 0;
+
+export interface ControlPeerWiring {
+  configured: boolean;
+  suppressedUnavailableAlerts: number;
+}
+
+/** Q control-peer wiring state for GET /health's control_peer block. */
+export function getControlPeerWiring(): ControlPeerWiring {
+  return {
+    configured: config.controlPeers.has('q'),
+    suppressedUnavailableAlerts: suppressedDeliveryUnavailableAlerts,
+  };
+}
+
+/** Reset the per-process delivery-unavailable latch (for tests). */
+export function resetDeliveryUnavailableLatch(): void {
+  deliveryUnavailableAlerted = false;
+  suppressedDeliveryUnavailableAlerts = 0;
+}
+
 export interface HealReportData {
   type: 'crash' | 'degraded' | 'service_crash';
   chatJid?: string;
@@ -160,13 +190,23 @@ export function emitHealReport(
   if (!qPhone) {
     // #1754: missing/partial control-peer config must never silently drop the
     // report — telemetry delivery is guaranteed-or-alerted. Route through the
-    // same durable-outbox fallback the global valve uses above.
+    // same durable-outbox fallback the global valve uses above. The critical
+    // latches to one per process (see deliveryUnavailableAlerted above): the
+    // config state was already alerted, so later reports warn + count only.
     log.warn({ reportId }, 'no Q control peer configured — routing heal report through BOT ERRORS fallback');
+    if (deliveryUnavailableAlerted) {
+      suppressedDeliveryUnavailableAlerts++;
+      return reportId;
+    }
+    deliveryUnavailableAlerted = true;
     emitAlertChecked(
       config.botName,
       'heal_delivery_unavailable',
       `whatsoup@${config.botName} heal report ${reportId} could not reach Q — no control peer configured`,
-      buildHealEvidenceLines(data, errorClass),
+      [
+        buildHealEvidenceLines(data, errorClass),
+        'further occurrences are latched for this process — suppressed count at /health control_peer.suppressed_unavailable_alerts',
+      ].join('\n'),
     );
     return reportId;
   }

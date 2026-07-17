@@ -32,6 +32,7 @@ import {
 import { UnknownProfileError, type ProfileRegistry } from './profiles.ts';
 import type { OutboundSendsWriter } from './outbound-sends.ts';
 import { normalizeErrorClass } from './heal-protocol.ts';
+import { getControlPeerWiring } from './heal.ts';
 import { markConversationRead } from './mark-read.ts';
 import type { Runtime } from '../runtimes/types.ts';
 import type { ConnectionRecentDisconnects, ConnectionStateSnapshot } from '../transport/connection.ts';
@@ -1276,6 +1277,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // fallback provider and when that window expires.
       const fallbackState = deps.runtime?.getFallbackState?.() ?? null;
 
+      const controlPeerWiring = getControlPeerWiring();
+
       // Mode-specific runtime block for control-plane
       let runtimeBlock: Record<string, unknown> = {};
       if (runtimeSnapshot) {
@@ -1409,6 +1412,13 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         },
         model_advisories: getModelAdvisories(),
         durability: deps.durability?.getHealthStats() ?? null,
+        // Q control-peer wiring. The heal_delivery_unavailable critical latches
+        // to one emission per process; this counter is where the suppressed
+        // occurrences are visible afterward (see emitHealReport in heal.ts).
+        control_peer: {
+          configured: controlPeerWiring.configured,
+          suppressed_unavailable_alerts: controlPeerWiring.suppressedUnavailableAlerts,
+        },
         turn_capability: turnCapability,
         runtime: runtimeBlock,
         event_loop: {

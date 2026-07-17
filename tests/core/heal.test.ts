@@ -28,13 +28,22 @@ vi.mock('../../src/config.ts', () => ({
   },
 }));
 
+// heal.ts's own logger ('heal') is a stable shared instance so the latch tests
+// can assert the per-report warn keeps firing while the alert is suppressed.
+// Every other component keeps a fresh throwaway logger per call — otherwise
+// unrelated warn/info calls (e.g. database.ts) would pollute mockHealLogger.
+const mockHealLogger = vi.hoisted(() => ({
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
+}));
+
 vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
+  createChildLogger: (component: string) =>
+    component === 'heal'
+      ? mockHealLogger
+      : { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
 vi.mock('../../src/lib/emit-alert.ts', () => {
@@ -71,8 +80,10 @@ import {
   handleHealComplete,
   handleHealEscalate,
   getActiveReportForClass,
+  getControlPeerWiring,
   dequeueNextReport,
   reconcileStaleHealReports,
+  resetDeliveryUnavailableLatch,
   getGlobalValveCount,
   GLOBAL_VALVE_LIMIT,
   parseHealContext,
@@ -98,6 +109,9 @@ function makeMessenger(): Messenger {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // The delivery-unavailable latch is per-process module state — re-arm it so
+  // no-peer tests are order-independent.
+  resetDeliveryUnavailableLatch();
 });
 
 // ---------------------------------------------------------------------------
@@ -845,6 +859,100 @@ describe('heal.ts uncovered-branch coverage', () => {
     // recentLogs truthy branch (formatHealReport line 387)
     expect(message).toContain('Recent logs:');
     expect(message).toContain('log line 3');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// heal_delivery_unavailable latch — a missing Q control peer is persistent
+// CONFIG STATE, not a per-report event: config.controlPeers is built once at
+// module load, so once absent it stays absent for the process lifetime. The
+// critical must fire ONCE per process; every report still gets its row and
+// per-report warn (the #1754 guaranteed-or-alerted routing is unchanged).
+// ---------------------------------------------------------------------------
+
+describe('heal_delivery_unavailable latch', () => {
+  beforeEach(() => {
+    config.controlPeers.delete('q');
+  });
+
+  afterEach(() => {
+    config.controlPeers.set('q', '15559998888');
+  });
+
+  it('emits the critical once across consecutive distinct-class no-peer reports, still creating and fallback-routing every report', () => {
+    const db = makeDb();
+    const messenger = makeMessenger();
+
+    const first = emitHealReport(db, messenger, null, { type: 'crash', stderr: 'LatchAlpha: boom' });
+    const second = emitHealReport(db, messenger, null, { type: 'crash', stderr: 'LatchBeta: other boom' });
+
+    // Both reports are still created and fallback-routed exactly as before —
+    // only the alert spam latches.
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    for (const id of [first, second]) {
+      const row = db.raw.prepare('SELECT state FROM heal_reports WHERE report_id = ?').get(id) as { state: string };
+      expect(row.state).toBe('attempt_1');
+    }
+    expect(vi.mocked(sendTracked)).not.toHaveBeenCalled();
+
+    // ONE critical for the config state, not one per report.
+    expect(vi.mocked(emitAlert)).toHaveBeenCalledOnce();
+    const [, source, summary] = vi.mocked(emitAlert).mock.calls[0]!;
+    expect(source).toBe('heal_delivery_unavailable');
+    expect(summary).toContain(first);
+  });
+
+  it('logs the per-report warn for every no-peer report, including latched ones', () => {
+    const db = makeDb();
+    const messenger = makeMessenger();
+
+    emitHealReport(db, messenger, null, { type: 'crash', stderr: 'LatchWarnA: boom' });
+    emitHealReport(db, messenger, null, { type: 'crash', stderr: 'LatchWarnB: boom' });
+
+    const warns = mockHealLogger.warn.mock.calls.filter(
+      (call) => String(call[1]).includes('no Q control peer configured'),
+    );
+    expect(warns).toHaveLength(2);
+  });
+
+  it('points the first alert at the latch and the health counter field', () => {
+    const db = makeDb();
+    const messenger = makeMessenger();
+
+    emitHealReport(db, messenger, null, { type: 'crash', stderr: 'LatchEvidence: boom' });
+
+    expect(vi.mocked(emitAlert)).toHaveBeenCalledOnce();
+    const evidence = vi.mocked(emitAlert).mock.calls[0]![3] as string;
+    expect(evidence).toMatch(/latched/);
+    expect(evidence).toMatch(/control_peer\.suppressed_unavailable_alerts/);
+  });
+
+  it('counts suppressed occurrences in the control-peer wiring state', () => {
+    const db = makeDb();
+    const messenger = makeMessenger();
+
+    expect(getControlPeerWiring()).toEqual({ configured: false, suppressedUnavailableAlerts: 0 });
+
+    // First no-peer report alerts; it is not itself "suppressed".
+    emitHealReport(db, messenger, null, { type: 'crash', stderr: 'LatchCountA: boom' });
+    expect(getControlPeerWiring()).toEqual({ configured: false, suppressedUnavailableAlerts: 0 });
+
+    emitHealReport(db, messenger, null, { type: 'crash', stderr: 'LatchCountB: boom' });
+    emitHealReport(db, messenger, null, { type: 'crash', stderr: 'LatchCountC: boom' });
+    expect(getControlPeerWiring()).toEqual({ configured: false, suppressedUnavailableAlerts: 2 });
+  });
+
+  it('with a configured peer: no alert, no suppression counting, configured:true', () => {
+    const db = makeDb();
+    const messenger = makeMessenger();
+    config.controlPeers.set('q', '15559998888');
+
+    const reportId = emitHealReport(db, messenger, null, { type: 'crash', stderr: 'ConfiguredPeer: boom' });
+
+    expect(reportId).not.toBeNull();
+    expect(vi.mocked(emitAlert)).not.toHaveBeenCalled();
+    expect(getControlPeerWiring()).toEqual({ configured: true, suppressedUnavailableAlerts: 0 });
   });
 });
 
