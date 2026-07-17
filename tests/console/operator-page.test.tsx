@@ -259,6 +259,9 @@ describe('Ops page fleet states', () => {
         phone: '+15550002222',
         mode: 'chat',
         status: 'degraded',
+        // Explicit fresh transport signal so this fixture isolates the
+        // needAttention count (connectivityUnknown covered separately below).
+        health: { status: 'degraded', uptime_seconds: 60, messages_total: 8, whatsapp: { connected: false, connection: { state: 'disconnected' } }, sqlite: { messages_total: 8, schema_version: 1 } },
         queueDepth: 4,
         enrichmentUnprocessed: 1,
         messagesToday: 8,
@@ -268,20 +271,27 @@ describe('Ops page fleet states', () => {
         phone: '+15550003333',
         mode: 'agent',
         status: 'unreachable',
+        health: { status: 'unreachable', uptime_seconds: 0, messages_total: 0, whatsapp: { connected: false, connection: { state: 'disconnected' } }, sqlite: { messages_total: 0, schema_version: 1 } },
         activeSessions: 1,
         messagesToday: 0,
       }),
     ]
+    // Historical feed alerts (criterion 2) — deliberately DIFFERENT count from
+    // the line-derived unhealthy count below, proving the two are independent.
     const feed: FeedEvent[] = [
       { time: '2026-06-15T01:00:00.000Z', mode: 'agent', text: 'beta degraded', isError: true },
       { time: '2026-06-15T01:01:00.000Z', mode: 'chat', text: 'gamma unreachable', isError: true },
+      { time: '2026-06-15T00:00:00.000Z', mode: 'passive', text: 'alpha reconnect blip', isError: true },
     ]
 
     renderOps({ lines, feed })
 
-    expect(screen.getByText('2 alerts')).toBeDefined()
+    // Historical feed alert count (criterion 2) — separate label, separate number.
+    expect(screen.getByText('3 feed alerts')).toBeDefined()
     expect(screen.getByText('3 Lines')).toBeDefined()
     expect(screen.getByText('1 online')).toBeDefined()
+    // Current-line-health headline (criterion 1) — derived from line status,
+    // NOT from the feed's 3 alerts above.
     expect(screen.getByText('2 unhealthy')).toBeDefined()
     expect(screen.getByText('5 msgs')).toBeDefined()
     expect(screen.getByText('2 unread')).toBeDefined()
@@ -302,6 +312,139 @@ describe('Ops page fleet states', () => {
     expect(screen.getAllByText('bravo').length).toBeGreaterThanOrEqual(1)
     expect(screen.getByText('2 Lines')).toBeDefined()
     expect(screen.getByText('2 online')).toBeDefined()
+  })
+})
+
+// #1882 — the "all healthy" / "N unhealthy" headline must come from the
+// CURRENT line snapshot (computeKpis), never from feed.filter(isError). The
+// five scenarios below are the acceptance-criteria list verbatim.
+describe('Ops page — health summary derived from current line state, not the feed (#1882)', () => {
+  it('scenario 1: current degraded state renders correctly with an EMPTY feed', () => {
+    const lines = [
+      makeLine({ name: 'alpha', status: 'online' }),
+      makeLine({ name: 'beta', phone: '+15550002222', status: 'degraded' }),
+    ]
+    renderOps({ lines, feed: [] })
+
+    // The feed has NOTHING; feed.filter(isError) would have wrongly shown
+    // "all healthy". The line snapshot says otherwise.
+    expect(screen.getByText('1 unhealthy')).toBeDefined()
+    expect(screen.queryByText('all healthy')).toBeNull()
+  })
+
+  it('scenario 2: recovered lines render "all healthy" despite an OLD error feed entry', () => {
+    const lines = [
+      makeLine({ name: 'alpha', status: 'online' }),
+      makeLine({ name: 'beta', phone: '+15550002222', status: 'online' }),
+    ]
+    const feed: FeedEvent[] = [
+      { time: '2020-01-01T00:00:00.000Z', mode: 'chat', text: 'beta: old disconnect', isError: true },
+    ]
+    renderOps({ lines, feed })
+
+    // Both lines are online NOW — the headline reflects that even though a
+    // stale error entry still sits in the feed.
+    expect(screen.getByText('all healthy')).toBeDefined()
+    expect(screen.queryByText(/unhealthy/)).toBeNull()
+    // The old entry still surfaces, but labeled historical, never "unhealthy".
+    expect(screen.getByText('1 feed alert')).toBeDefined()
+  })
+
+  it('scenario 3: unrelated feed warnings never count toward "unhealthy"', () => {
+    const lines = [makeLine({ name: 'alpha', status: 'online' })]
+    const feed: FeedEvent[] = [
+      { time: '2026-06-15T01:00:00.000Z', mode: 'passive', text: 'alpha: queue backlog warning', isError: true },
+      { time: '2026-06-15T01:01:00.000Z', mode: 'passive', text: 'alpha: tool error reported', isError: true },
+    ]
+    renderOps({ lines, feed })
+
+    expect(screen.getByText('all healthy')).toBeDefined()
+    expect(screen.getByText('2 feed alerts')).toBeDefined()
+  })
+
+  it('scenario 4: a degrade/recover cycle is reflected on rerender even though the feed missed it', () => {
+    const onlineLines = [makeLine({ name: 'alpha', status: 'online' })]
+    const { rerender } = renderOps({ lines: onlineLines, feed: [] })
+    expect(screen.getByText('all healthy')).toBeDefined()
+
+    // Simulate the exact defect this issue reports: the line degrades and
+    // recovers, but the feed's request-timed synthesis never captured either
+    // transition (feed stays [] throughout — the historical list is
+    // genuinely blind here). The summary must still track it because it
+    // never depended on the feed to begin with.
+    useLinesMock.mockReturnValue({
+      data: [makeLine({ name: 'alpha', status: 'degraded' })],
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    })
+    rerender(
+      <ToastContext.Provider value={makeToast()}>
+        <Ops />
+      </ToastContext.Provider>,
+    )
+    expect(screen.getByText('1 unhealthy')).toBeDefined()
+
+    useLinesMock.mockReturnValue({ data: onlineLines, isLoading: false, error: null, refetch: vi.fn() })
+    rerender(
+      <ToastContext.Provider value={makeToast()}>
+        <Ops />
+      </ToastContext.Provider>,
+    )
+    expect(screen.getByText('all healthy')).toBeDefined()
+  })
+
+  it('scenario 5: two concurrent renders of the same line snapshot agree with each other', () => {
+    const lines = [makeLine({ name: 'alpha', status: 'degraded' })]
+
+    // Two independent "clients" (renders) reading the SAME lines snapshot.
+    // The old feed-diff mechanism raced concurrent requests against one
+    // shared process-global previousStatuses map; computeKpis is a pure
+    // function of `lines`, so both clients must agree regardless of order.
+    useLinesMock.mockReturnValue({ data: lines, isLoading: false, error: null, refetch: vi.fn() })
+    useFeedMock.mockReturnValue({ data: [], error: null, refetch: vi.fn() })
+    useLogsMock.mockImplementation(() => ({ data: [], error: null, refetch: vi.fn() }))
+
+    const clientA = render(
+      <ToastContext.Provider value={makeToast()}>
+        <Ops />
+      </ToastContext.Provider>,
+    )
+    const clientB = render(
+      <ToastContext.Provider value={makeToast()}>
+        <Ops />
+      </ToastContext.Provider>,
+    )
+
+    expect(within(clientA.container).getByText('1 unhealthy')).toBeDefined()
+    expect(within(clientB.container).getByText('1 unhealthy')).toBeDefined()
+
+    clientA.unmount()
+    clientB.unmount()
+  })
+
+  it('connectivity-unknown coverage surfaces beside the unhealthy count, not folded into it', () => {
+    const lines = [
+      makeLine({ name: 'alpha', status: 'online' }),
+      makeLine({
+        name: 'beta',
+        phone: '+15550002222',
+        status: 'degraded',
+        // No whatsapp.connected in the health body — transport state unproven
+        // this poll (#1881 isLineConnectivityUnknown), distinct from needAttention.
+        health: {
+          status: 'degraded',
+          uptime_seconds: 5,
+          messages_total: 0,
+          whatsapp: { connection: { state: 'connecting' } },
+          sqlite: { messages_total: 0, schema_version: 1 },
+        },
+      }),
+    ]
+    renderOps({ lines })
+
+    expect(screen.getByText('1 unhealthy')).toBeDefined()
+    expect(screen.getByText('1 unknown')).toBeDefined()
   })
 })
 

@@ -150,7 +150,12 @@ export function getInvalidationKeys(event: WsInvalidationEvent): QueryKey[] {
 
   switch (type) {
     case 'instance_status':
-      return [['lines'], ['lines', instance], ['provider-status', instance]];
+      // #1882 criterion 4: the activity feed synthesizes a health-transition
+      // entry for this same status change (src/fleet/routes/feed.ts), so a
+      // connected client's feed query must refresh alongside the line
+      // queries — otherwise the historical alert list only catches up on the
+      // next unrelated feed-triggering event.
+      return [['lines'], ['lines', instance], ['provider-status', instance], ['feed']];
     case 'message_received':
       return [['messages', instance], ['chats', instance], ['search', instance]];
     case 'chat_updated':

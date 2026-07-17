@@ -63,9 +63,11 @@ describe('getFleetWebSocketUrl', () => {
 });
 
 describe('getInvalidationKeys', () => {
-  it('maps instance_status to lines and provider-status queries', () => {
+  it('maps instance_status to lines, provider-status, and feed queries (#1882 criterion 4)', () => {
     const keys = getInvalidationKeys({ type: 'instance_status', instance: 'q' });
-    expect(keys).toEqual([['lines'], ['lines', 'q'], ['provider-status', 'q']]);
+    // The feed also carries a synthesized transition for this status change
+    // (src/fleet/routes/feed.ts), so it must invalidate alongside the lines.
+    expect(keys).toEqual([['lines'], ['lines', 'q'], ['provider-status', 'q'], ['feed']]);
   });
 
   it('maps message_received to messages, chats, and history search', () => {
