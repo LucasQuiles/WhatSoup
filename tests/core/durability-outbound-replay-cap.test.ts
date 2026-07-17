@@ -265,3 +265,77 @@ describe('drainPendingOutbound() — replay termination (M1)', () => {
     expect(sends.sort()).toEqual(['ser1@s.whatsapp.net', 'ser2@s.whatsapp.net']);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Production storm shape
+// ---------------------------------------------------------------------------
+
+describe('drainPendingOutbound() — production storm shape (359 ops / 118 distinct / 241 duplicates)', () => {
+  let db: Database;
+  let engine: DurabilityEngine;
+
+  beforeEach(() => {
+    db = makeDb();
+    engine = new DurabilityEngine(db);
+    emitAlert.mockClear();
+    clearAlertSource.mockClear();
+  });
+
+  afterEach(() => { db.close(); });
+
+  // Live incident (fleet, one DM): a single inbound produced 359 outbound ops
+  // of which only 118 carried distinct payloads — 241 were true duplicate
+  // re-sends of payloads the user had ALREADY received. This test reproduces
+  // that exact backlog shape: one echoed (delivered) op per distinct payload,
+  // plus 241 pending duplicate copies distributed across those payloads. The
+  // fixed drain must suppress every duplicate via the durable
+  // (chat_jid, payload_hash) delivered-set — zero re-sends — and a second
+  // drain pass must find nothing left to do (the storm terminates instead of
+  // looping). Pre-fix, the drain re-sent all 241 pending copies.
+  it('suppresses all 241 pending duplicates of already-delivered payloads — zero re-sends, storm terminates', async () => {
+    const chatJid = 'storm-victim@s.whatsapp.net';
+    const DISTINCT = 118;
+    const TOTAL_OPS = 359;
+    const DUPLICATES = TOTAL_OPS - DISTINCT; // 241
+
+    // One delivered (echoed) op per distinct payload — the copies the user got.
+    const echoedIds: number[] = [];
+    for (let i = 0; i < DISTINCT; i++) {
+      echoedIds.push(makeEchoedOp(engine, chatJid, `storm payload ${i}`, `WA_STORM_${i}`));
+    }
+
+    // 241 pending duplicate copies, cycling across the distinct payloads —
+    // the replay-loop backlog that produced the duplicate sends in production.
+    const pendingIds: number[] = [];
+    for (let j = 0; j < DUPLICATES; j++) {
+      pendingIds.push(makePendingTextOp(engine, { chatJid, text: `storm payload ${j % DISTINCT}` }));
+    }
+    expect(echoedIds.length + pendingIds.length).toBe(TOTAL_OPS);
+
+    const messenger = makeMessenger(async () => ({ waMessageId: 'SHOULD_NEVER_SEND' }));
+    const resent = await drainPendingOutbound(messenger, engine);
+
+    // Zero duplicate deliveries — the durable delivered-set gates every copy.
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+    expect(resent).toBe(0);
+
+    // Every duplicate terminalized against an echoed twin, none left pending.
+    const rows = db.raw.prepare(
+      `SELECT status, error FROM outbound_ops WHERE id IN (${pendingIds.join(',')})`,
+    ).all() as Array<{ status: string; error: string | null }>;
+    expect(rows).toHaveLength(DUPLICATES);
+    expect(rows.every((r) => r.status === 'failed_permanent')).toBe(true);
+    expect(rows.every((r) => String(r.error).startsWith('duplicate_suppressed:'))).toBe(true);
+
+    // The delivered copies are untouched.
+    const echoedRows = db.raw.prepare(
+      `SELECT COUNT(*) AS n FROM outbound_ops WHERE status = 'echoed'`,
+    ).get() as { n: number };
+    expect(echoedRows.n).toBe(DISTINCT);
+
+    // Second pass: the storm is terminal — nothing pending, nothing sent.
+    const secondPass = await drainPendingOutbound(messenger, engine);
+    expect(secondPass).toBe(0);
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+  });
+});
