@@ -519,7 +519,10 @@ const attemptEntries: Array<readonly [string, BoundaryAttemptContract]> = [
     'scripts/experiments/semantic-boundary-eval.ts',
   ])],
   ['catalog-inventory-strip', commandContract(['tr', '-d', "'"], { stdinSource: 'catalog-inventory-raw' })],
-  ['catalog-inventory-sort', commandContract(['sort', '-u'], { stdinSource: 'catalog-inventory-strip' })],
+  ['catalog-inventory-sort', commandContract(['sort', '-u'], {
+    stdinSource: 'catalog-inventory-strip',
+    outputPaths: ['attempts/catalog-inventory-sort/stdout.log'],
+  })],
   ['catalog-inventory-count', commandContract(['wc', '-l'], { stdinSource: 'catalog-inventory-sort', stdoutPredicate: 'decimal-equals-29' })],
   ['catalog-red', commandContract(CATALOG_TEST, { expectedExit: 'nonzero', deadlineMs: 900_000, resultPredicate: 'bcf02-red' })],
   ['catalog-green', commandContract(CATALOG_TEST, { deadlineMs: 900_000, resultPredicate: 'bcf02-green' })],

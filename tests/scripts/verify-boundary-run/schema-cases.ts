@@ -714,6 +714,7 @@ export function registerSchemaCases(): void {
     const api = boundaryRun as unknown as {
       BOUNDARY_VERSIONLESS_TOOLS?: readonly string[];
       RUN_CONTRACT_PROFILES?: Record<string, Record<string, unknown>>;
+      RUN_ATTEMPT_CONTRACTS?: Record<string, Record<string, unknown>>;
       resolveBoundaryToolCapability?: (name: string) => Record<string, unknown>;
       validateBoundaryProfileSelection?: (input: Record<string, unknown>) => ReturnType<typeof validateBoundaryRun>;
       validateBoundaryAttemptInvocation?: (id: string, input: Record<string, unknown>) => ReturnType<typeof validateBoundaryRun>;
@@ -723,12 +724,13 @@ export function registerSchemaCases(): void {
       };
     };
     expect(api.RUN_CONTRACT_PROFILES).toBeDefined();
+    expect(api.RUN_ATTEMPT_CONTRACTS).toBeDefined();
     expect(api.BOUNDARY_VERSIONLESS_TOOLS).toEqual(['kill', 'test', 'tr', 'wc']);
     expect(typeof api.resolveBoundaryToolCapability).toBe('function');
     expect(typeof api.validateBoundaryProfileSelection).toBe('function');
     expect(typeof api.validateBoundaryAttemptInvocation).toBe('function');
     expect(typeof api.parseBoundaryChildPins).toBe('function');
-    if (!api.RUN_CONTRACT_PROFILES || !api.resolveBoundaryToolCapability || !api.validateBoundaryProfileSelection || !api.validateBoundaryAttemptInvocation || !api.parseBoundaryChildPins) return;
+    if (!api.RUN_CONTRACT_PROFILES || !api.RUN_ATTEMPT_CONTRACTS || !api.resolveBoundaryToolCapability || !api.validateBoundaryProfileSelection || !api.validateBoundaryAttemptInvocation || !api.parseBoundaryChildPins) return;
 
     const profile = structuredClone(api.RUN_CONTRACT_PROFILES['bcf00-observation']!);
     expect(api.validateBoundaryProfileSelection(profile)).toMatchObject({ ok: true, exitCode: 0, verdict: 'Pass' });
@@ -745,6 +747,10 @@ export function registerSchemaCases(): void {
       outputPaths: [],
       headAnchor: 'entry',
     })).toMatchObject({ ok: true, exitCode: 0, verdict: 'Pass' });
+
+    expect(api.RUN_ATTEMPT_CONTRACTS['catalog-inventory-sort']?.['outputPaths']).toEqual([
+      'attempts/catalog-inventory-sort/stdout.log',
+    ]);
 
     for (const name of ['rg', 'tr', 'sort', 'wc']) {
       const capability = api.resolveBoundaryToolCapability(name);
