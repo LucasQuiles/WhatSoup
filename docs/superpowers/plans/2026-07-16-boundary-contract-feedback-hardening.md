@@ -2733,6 +2733,23 @@ new finding before commit. Do not edit the test-integrity baseline. Commit the t
 with subject `test(quality): keep capability controls scanner-legible`, then rerun the complete
 BCF-00 and BCF-01 chains under fresh IDs before BCF-02.
 
+Thirteenth recovery note for finalized reconciliation run
+`bcf00-reconciliation-e71b6f58a-20260717a` and finalized parser run
+`bcf01-parser-bf548d8e3-20260717a`: helper-owned merge
+`bf548d8e30579023c7c228ff6ab4a9deb79c0495` and parser transition
+`7030008a3597d99940e622473ae799aca18fabfe` both passed, finalized, verified, and were pushed.
+The first BCF-02 run then recorded all four exact inventory commands and proved the count was 29,
+but `record-artifact` rejected the sort attempt's helper-owned stdout because the closed attempt
+contract declared no output path. The run remains active/Inconclusive with no Git transition;
+transition profiles correctly reject a terminal lifecycle before their required commit.
+
+Preserve recovery9 and the incomplete BCF-02 run. Recover from the finalized BCF-01 head on a
+distinct branch. Declare only `attempts/catalog-inventory-sort/stdout.log` as the sort attempt's
+output, require that exact `--output-path` at invocation, and add a generated-contract regression
+that fails if the declaration disappears or changes. Commit the bounded helper/test correction
+with subject `fix(quality): bind catalog inventory output`, then rerun the complete BCF-00 and
+BCF-01 chains under fresh IDs before recreating BCF-02.
+
 ```bash
 git rev-parse --show-toplevel
 git rev-parse HEAD
@@ -3012,7 +3029,9 @@ wc -l
 Invoke them as attempts `catalog-inventory-raw`, `catalog-inventory-strip`,
 `catalog-inventory-sort`, and `catalog-inventory-count`. Require all four direct statuses zero and
 the final stdout predicate to pass. The sort attempt's owned stdout is the immutable
-`rule-producer-inventory.txt` logical artifact; register that exact log without copying it.
+`rule-producer-inventory.txt` logical artifact. Its invocation includes
+`--output-path attempts/catalog-inventory-sort/stdout.log`; register that exact helper-owned log
+without copying it.
 
 Expected at the planning baseline: 29 current producer IDs, including the evaluator-only
 `boundary.timeout`, three `supply-chain.*` IDs, `process.unbounded-primitive`, and
