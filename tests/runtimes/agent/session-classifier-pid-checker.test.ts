@@ -93,6 +93,7 @@ describe('defaultPidOwnershipChecker', () => {
     expect(defaultPidOwnershipChecker(5678)).toEqual({ alive: true, owned: true });
     expect(mocks.execFileSync).toHaveBeenCalledWith('ps', ['-o', 'ppid=,comm=', '-p', '5678'], {
       timeout: 2_000,
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
   });
 
@@ -114,5 +115,46 @@ describe('defaultPidOwnershipChecker', () => {
     });
 
     expect(defaultPidOwnershipChecker(7890)).toEqual({ alive: true, owned: false });
+  });
+
+  // Production 2026-07-17: a cleared/invalid claude_pid reached the ps fallback
+  // and procps rejected it with "error: process ID out of range" + usage text on
+  // the service's inherited stderr. Invalid pids must never reach any probe:
+  // pid<=0 also has process-group semantics in kill(), so the guard must sit
+  // before process.kill, not just before ps.
+  describe('invalid pid guard', () => {
+    it.each([
+      ['undefined', undefined],
+      ['null', null],
+      ['NaN', Number.NaN],
+      ['Infinity', Number.POSITIVE_INFINITY],
+      ['zero', 0],
+      ['negative', -1],
+      ['float', 12.5],
+      ['string garbage', 'garbage'],
+    ])('never probes and resolves dead+unowned for %s pid', (_label, pid) => {
+      mocks.readFileSync.mockImplementation(() => {
+        throw new Error('no procfs');
+      });
+
+      expect(defaultPidOwnershipChecker(pid as unknown as number)).toEqual({
+        alive: false,
+        owned: false,
+      });
+      expect(killSpy).not.toHaveBeenCalled();
+      expect(mocks.readFileSync).not.toHaveBeenCalled();
+      expect(mocks.execFileSync).not.toHaveBeenCalled();
+    });
+
+    it('still probes a valid pid', () => {
+      mocks.readFileSync.mockImplementation(() => {
+        throw new Error('no procfs');
+      });
+      mocks.execFileSync.mockReturnValue(Buffer.from(`${process.pid} claude\n`));
+
+      expect(defaultPidOwnershipChecker(4242)).toEqual({ alive: true, owned: true });
+      expect(killSpy).toHaveBeenCalledWith(4242, 0);
+      expect(mocks.execFileSync).toHaveBeenCalledTimes(1);
+    });
   });
 });

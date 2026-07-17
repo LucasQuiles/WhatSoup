@@ -79,6 +79,18 @@ export type PidOwnershipChecker = (pid: number) => PidCheckResult;
  * Falls back to alive-only on non-Linux or read errors.
  */
 export function defaultPidOwnershipChecker(pid: number): PidCheckResult {
+  // Step 0: Reject invalid PIDs before ANY probe. agent_sessions.claude_pid can
+  // be null/0 for a row whose subprocess was already torn down; pid<=0 is not a
+  // single process to kill(2) (0 = own process group, negative = process group),
+  // so kill(pid, 0) "succeeds" and the probe falls through to ps, where procps
+  // rejects the argument with "error: process ID out of range" + usage text on
+  // the service's stderr (production 2026-07-17). An invalid pid cannot name a
+  // live session — treat it as dead.
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    log.debug({ pid }, 'pid probe skipped: invalid pid, treating as dead');
+    return { alive: false, owned: false };
+  }
+
   // Step 1: Is the PID alive?
   try {
     process.kill(pid, 0);
@@ -111,8 +123,12 @@ export function defaultPidOwnershipChecker(pid: number): PidCheckResult {
 
   // Fallback: use ps for platforms without /proc (macOS, FreeBSD)
   try {
+    // stderr 'pipe' (not the execFileSync default of inheriting the service's
+    // stderr): any ps complaint must land on the thrown error, never as raw
+    // non-JSON lines in the service log stream.
     const psOut = execFileSync('ps', ['-o', 'ppid=,comm=', '-p', String(pid)], {
       timeout: 2_000,
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
     const line = (typeof psOut === 'string' ? psOut : psOut.toString('utf-8')).trim();
     const [ppidStr, ...commParts] = line.split(/\s+/);
