@@ -447,6 +447,25 @@ both root and console lockfiles through the pinned wrapper before run initializa
 the missing package is readable. Those setup checks are not BCF Pass evidence. The full immutable
 observation/reconciliation and branch gate must run again under new IDs.
 
+## 2026-07-17 predecessor-closure alias recovery
+
+Fresh reconciliation run `bcf00-reconciliation-75e3290bc-20260717a` finalized Pass at merge
+`303ff8dbcc3194219a10e3cfff9ef0dc78a88c1c` after all required validator, typecheck, focused,
+evaluator, branch-gate, readiness, lifecycle, lock, and verification checks passed. That exact head
+was pushed on `experiment/jul17-boundary-contract-feedback-hardening-recovery2`. The first BCF-01
+`init` correctly created no successor run, but rejected predecessor admission because its closure
+contained the same `readiness.json` physical file through two congruent manifest roles: the
+`readiness-check` structured result and its registered artifact. Both records have the same
+producer, path, SHA-256, and byte count; the current closure builder nevertheless reports a
+duplicate logical path.
+
+Preserve the finalized BCF-00 run and pushed branch. Recovery starts from pre-merge documentation
+commit `75e3290bc94e88f5ef75f9d1f5783883c5e34d76` on a new branch, after replaying both pinned root
+and console dependency installations. Add a focused RED/GREEN regression and permit only an exact
+same-producer structured-result/artifact alias to contribute one closure row. Different producers,
+digests, byte counts, or any unrelated repeated path remain fail-closed. Then rerun the complete
+BCF-00 observation/reconciliation chain under fresh IDs before another BCF-01 initialization.
+
 ## Authorization Boundary
 
 The planning packet's initial approval authorized writing and committing the local specification,

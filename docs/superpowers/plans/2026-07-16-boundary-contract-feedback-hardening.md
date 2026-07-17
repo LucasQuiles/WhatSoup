@@ -2597,6 +2597,20 @@ the nested-workspace dependency check to the beginning of the branch gate so age
 actionable failure before expensive checks. Re-run observation/reconciliation under new IDs; never
 retry or promote the failed gate.
 
+Sixth recovery note for finalized reconciliation run
+`bcf00-reconciliation-75e3290bc-20260717a`: helper-owned merge
+`303ff8dbcc3194219a10e3cfff9ef0dc78a88c1c` passed every required attempt, completed BCF-00, and
+was pushed on its preserved recovery branch. The first BCF-01 initialization then failed before
+creating a successor run because predecessor closure assembly counted `readiness.json` twice: once
+as the `readiness-check` attempt's structured result and once as the exact registered artifact from
+that same producing attempt, with identical path, digest, and byte count. Preserve the passing
+BCF-00 run and branch; do not rewrite or promote an unimportable predecessor. Recover from
+`75e3290bc94e88f5ef75f9d1f5783883c5e34d76` on a distinct branch. Add one regression that admits
+only this exact same-producer structured-result/artifact alias while a cross-producer or mismatched
+duplicate remains rejected, then commit the bounded helper/test correction with subject
+`fix(quality): admit exact structured artifact aliases`. Re-run the full validator suite,
+typecheck, observation, and reconciliation under new immutable IDs before BCF-01.
+
 ```bash
 git rev-parse --show-toplevel
 git rev-parse HEAD
