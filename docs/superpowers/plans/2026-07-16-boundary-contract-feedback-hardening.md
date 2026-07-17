@@ -2750,6 +2750,18 @@ that fails if the declaration disappears or changes. Commit the bounded helper/t
 with subject `fix(quality): bind catalog inventory output`, then rerun the complete BCF-00 and
 BCF-01 chains under fresh IDs before recreating BCF-02.
 
+Fourteenth recovery note for finalized observation run
+`bcf00-observation-707056900-20260717a`: Recovery10 was incorrectly based on the already reconciled
+BCF-01 head. Its observation passed and proved the pinned upstream OID was already an ancestor,
+with behind count zero and an empty remote path set. The required reconciliation profile therefore
+could not produce its one merge transition; an already-up-to-date result or synthetic empty merge
+cannot substitute for the profile contract.
+
+Preserve Recovery10 and its finalized observation without initializing a reconciliation run.
+Recover from pre-merge validator commit `e71b6f58a492716535133755cca3a266197019f0` on a distinct
+branch, carry forward the catalog output declaration and regression, and rerun BCF-00 before
+recreating BCF-01 and BCF-02. The observation, reconciliation, and successor runs all use new IDs.
+
 ```bash
 git rev-parse --show-toplevel
 git rev-parse HEAD
