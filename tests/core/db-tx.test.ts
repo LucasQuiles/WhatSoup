@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { unlinkSync, existsSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { Database } from '../../src/core/database.ts';
-import { withTransaction } from '../../src/core/db-tx.ts';
+import { withTransaction, getTransactionRunner } from '../../src/core/db-tx.ts';
 
 // Covers the canonical BEGIN/COMMIT/ROLLBACK wrapper introduced in
 // src/core/db-tx.ts. The two real-DB cases exercise the happy path and the
@@ -148,5 +148,78 @@ describe('withTransaction', () => {
 
     expect(thrown).toBe(callbackError);
     expect(rollbackSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('caches and reuses the transaction runner per database instance', () => {
+    const { db: db1, path: path1 } = makeRealDb();
+    const { db: db2, path: path2 } = makeRealDb();
+    try {
+      const runner1a = getTransactionRunner(db1);
+      const runner1b = getTransactionRunner(db1);
+      const runner2 = getTransactionRunner(db2);
+
+      expect(runner1a).toBe(runner1b);
+      expect(runner1a).not.toBe(runner2);
+
+      runner1a(() => {
+        db1.raw.prepare("INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp) VALUES ('x', 'x', 'x', 'TX-CACHE1', 'text', 0, 1)").run();
+        return undefined;
+      });
+
+      runner2(() => {
+        db2.raw.prepare("INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp) VALUES ('y', 'y', 'y', 'TX-CACHE2', 'text', 0, 1)").run();
+        return undefined;
+      });
+
+      expect((db1.raw.prepare('SELECT COUNT(*) as c FROM messages').get() as { c: number }).c).toBe(1);
+      expect((db2.raw.prepare('SELECT COUNT(*) as c FROM messages').get() as { c: number }).c).toBe(1);
+    } finally {
+      db1.close();
+      db2.close();
+      cleanup(path1);
+      cleanup(path2);
+    }
+  });
+
+  it('handles nested transaction attempts (does not nest, just runs sequentially)', () => {
+    const result1 = withTransaction(db, () => {
+      db.raw.prepare("INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp) VALUES ('x', 'x', 'x', 'TX-NESTED1', 'text', 0, 1)").run();
+      return 'outer';
+    });
+    const result2 = withTransaction(db, () => {
+      db.raw.prepare("INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp) VALUES ('x', 'x', 'x', 'TX-NESTED2', 'text', 0, 1)").run();
+      return 'inner';
+    });
+
+    expect(result1).toBe('outer');
+    expect(result2).toBe('inner');
+    const count = (db.raw.prepare('SELECT COUNT(*) as c FROM messages').get() as { c: number }).c;
+    expect(count).toBe(2);
+  });
+
+  it('preserves callback return value of various types', () => {
+    const objResult = withTransaction(db, () => ({ x: 1 }));
+    expect(objResult).toEqual({ x: 1 });
+
+    const arrayResult = withTransaction(db, () => [1, 2, 3]);
+    expect(arrayResult).toEqual([1, 2, 3]);
+
+    const nullResult = withTransaction(db, () => null);
+    expect(nullResult).toBeNull();
+
+    const undefinedResult = withTransaction(db, () => undefined);
+    expect(undefinedResult).toBeUndefined();
+  });
+
+  it('converts COMMIT error to include rollback attempt details', () => {
+    const commitErr = new Error('COMMIT failed: disk full');
+    const rollbackSpy = vi.fn();
+    const fakeDb = stubDb({
+      COMMIT: () => { throw commitErr; },
+      ROLLBACK: rollbackSpy,
+    });
+
+    expect(() => withTransaction(fakeDb, () => 'executed')).toThrow('COMMIT failed: disk full');
+    expect(rollbackSpy).toHaveBeenCalled();
   });
 });
