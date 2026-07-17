@@ -123,6 +123,25 @@ export function hasDirectStatus(rawExit: unknown, rawSignal: unknown, expectedEx
   return expectedExit === null || (rawExit === expectedExit && rawSignal === null);
 }
 
+export function snapshotResult(issues: BoundaryValidationIssue[]): BoundaryValidationResult {
+  return {
+    ok: issues.length === 0,
+    exitCode: issues.length === 0 ? 0 : 1,
+    verdict: issues.length === 0 ? 'Pass' : 'Inconclusive',
+    issues,
+  };
+}
+
+export function isSortedUniqueStrings(
+  value: unknown,
+  predicate: (entry: string) => boolean,
+): value is string[] {
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string' || !predicate(entry))) return false;
+  const sorted = [...value].sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
+  return new Set(value).size === value.length
+    && canonicalizeBoundaryRun(value) === canonicalizeBoundaryRun(sorted);
+}
+
 export function durableExclusiveWrite(filePath: string, content: string): void {
   writeFileSync(filePath, content, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
   const descriptor = openSync(filePath, 'r');
