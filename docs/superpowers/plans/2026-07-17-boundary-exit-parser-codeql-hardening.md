@@ -8,6 +8,8 @@
 
 **Tech Stack:** TypeScript 5.9, Node.js 24.15.0, Vitest 4.1.8, GitHub CodeQL, repository commit/pre-push hooks.
 
+**Status:** active
+
 ## Global Constraints
 
 - Accept only `nonzero`, or a strictly increasing comma-separated list of unique decimal integers in `0..255` with no leading zeroes.
@@ -214,6 +216,18 @@ remediation paths.
 **Interfaces:**
 - Consumes: the Task 2 remediation commit and existing PR #1899.
 - Produces: a pushed head for which repository gates and all GitHub required checks pass.
+
+- [ ] **Step 0: Regenerate the work index for the new design and plan**
+
+Run:
+
+```bash
+bash scripts/run-with-pinned-npm.sh run work-index:regen
+bash scripts/run-with-pinned-npm.sh run guard:work-index
+```
+
+Expected: the generated JSON and Markdown indexes include both 2026-07-17 CodeQL
+hardening artifacts, and the guard exits 0.
 
 - [ ] **Step 1: Run the complete local branch gate**
 

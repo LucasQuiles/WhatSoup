@@ -1,7 +1,8 @@
 # Boundary Exit Parser CodeQL Hardening Design
 
 **Date:** 2026-07-17
-**Status:** Approved for implementation
+**Status:** active
+**Approval:** Approved for implementation
 
 ## Context
 
