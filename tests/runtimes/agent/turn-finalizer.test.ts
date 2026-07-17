@@ -73,6 +73,9 @@ interface Harness {
   durability: RuntimeTurnFinalizerDurability;
   getOutboundDeliverySnapshot: ReturnType<typeof vi.fn<RuntimeTurnFinalizerDurability['getOutboundDeliverySnapshot']>>;
   finalizeTurnTerminal: ReturnType<typeof vi.fn<RuntimeTurnFinalizerDurability['finalizeTurnTerminal']>>;
+  markContinuityCandidateIfNoTerminalOutbound: ReturnType<
+    typeof vi.fn<RuntimeTurnFinalizerDurability['markContinuityCandidateIfNoTerminalOutbound']>
+  >;
 }
 
 function harness(
@@ -88,10 +91,18 @@ function harness(
   const finalizeTurnTerminal = vi.fn<RuntimeTurnFinalizerDurability['finalizeTurnTerminal']>(
     () => receipt,
   );
+  const markContinuityCandidateIfNoTerminalOutbound = vi.fn<
+    RuntimeTurnFinalizerDurability['markContinuityCandidateIfNoTerminalOutbound']
+  >(() => true);
   return {
-    durability: { getOutboundDeliverySnapshot, finalizeTurnTerminal },
+    durability: {
+      getOutboundDeliverySnapshot,
+      finalizeTurnTerminal,
+      markContinuityCandidateIfNoTerminalOutbound,
+    },
     getOutboundDeliverySnapshot,
     finalizeTurnTerminal,
+    markContinuityCandidateIfNoTerminalOutbound,
   };
 }
 
@@ -790,5 +801,93 @@ describe('runtime turn finalization failure sink', () => {
     expect(evidence.length).toBeLessThanOrEqual(512);
     expect(evidence).toContain('scope=per_chat');
     expect(evidence).toContain('inbound_seq=41');
+  });
+});
+
+describe('reply guarantee breach visibility', () => {
+  const FAILED_RECEIPT: FinalizeTurnTerminalResult = {
+    ...APPLIED_RECEIPT,
+    replyGuaranteeDisarmed: false,
+    effectiveReplyGuaranteeDisarmed: false,
+  };
+
+  it('emits a durable breach alert and marks a continuity candidate for a failed turn with no delivery', () => {
+    const h = harness({}, FAILED_RECEIPT);
+    const result = run(h.durability, {
+      attemptOutcome: { kind: 'failed', class: 'processor_throw' },
+      answerOpIds: [],
+    });
+
+    const terminal = terminalResult(result);
+    expect(terminal.terminal.inboundDisposition).toBe('failed_terminal');
+
+    expect(h.markContinuityCandidateIfNoTerminalOutbound).toHaveBeenCalledExactlyOnceWith(
+      IDENTITY.inboundSeq,
+      'runtime_fault_no_terminal_outbound',
+      'runtime_fault_disarm',
+    );
+    // The guarded statement refuses to mark once a terminal record exists, so
+    // the candidate mark must land before terminal persistence.
+    expect(h.markContinuityCandidateIfNoTerminalOutbound.mock.invocationCallOrder[0]!)
+      .toBeLessThan(h.finalizeTurnTerminal.mock.invocationCallOrder[0]!);
+
+    expect(emitAlertMock).toHaveBeenCalledTimes(1);
+    expect(emitAlertMock).toHaveBeenCalledWith(
+      'agent-alpha',
+      'agent_reply_guarantee_breach',
+      expect.any(String),
+      expect.any(String),
+    );
+    const evidence = emitAlertMock.mock.calls[0]?.[3] as string;
+    expect(evidence).toContain('attempt_failure_class=processor_throw');
+    expect(evidence).toContain('inbound_seq=41');
+    expect(evidence).toContain('reply_guarantee_disarmed=false');
+    expect(evidence).toContain('continuity_marked=true');
+    expect(evidence).not.toContain(IDENTITY.conversationKey);
+  });
+
+  it('keeps the terminal result when the breach alert throws', () => {
+    const h = harness({}, FAILED_RECEIPT);
+    emitAlertMock.mockImplementation(() => {
+      throw new Error('sink unavailable');
+    });
+    const result = run(h.durability, {
+      attemptOutcome: { kind: 'failed', class: 'crash' },
+      answerOpIds: [],
+    });
+    expect(result.kind).toBe('terminal');
+  });
+
+  it('keeps the terminal result and reports continuity_marked=false when the candidate mark throws', () => {
+    const h = harness({}, FAILED_RECEIPT);
+    h.markContinuityCandidateIfNoTerminalOutbound.mockImplementation(() => {
+      throw new Error('db locked');
+    });
+    const result = run(h.durability, {
+      attemptOutcome: { kind: 'failed', class: 'processor_throw' },
+      answerOpIds: [],
+    });
+    expect(result.kind).toBe('terminal');
+    expect(emitAlertMock).toHaveBeenCalledTimes(1);
+    expect(emitAlertMock.mock.calls[0]?.[3]).toContain('continuity_marked=false');
+  });
+
+  it('does not fire for admission-rejected sheds (#1750 shed/fault separation)', () => {
+    const h = harness({}, FAILED_RECEIPT);
+    const result = run(h.durability, {
+      attemptOutcome: { kind: 'admission_rejected', class: 'queue_full' },
+      answerOpIds: [],
+    });
+    expect(result.kind).toBe('terminal');
+    expect(emitAlertMock).not.toHaveBeenCalled();
+    expect(h.markContinuityCandidateIfNoTerminalOutbound).not.toHaveBeenCalled();
+  });
+
+  it('does not fire for a delivered turn', () => {
+    const h = harness({ 7: 'echoed' });
+    const result = run(h.durability, { answerOpIds: [7] });
+    expect(terminalResult(result).terminal.inboundDisposition).toBe('finalized_replied');
+    expect(emitAlertMock).not.toHaveBeenCalled();
+    expect(h.markContinuityCandidateIfNoTerminalOutbound).not.toHaveBeenCalled();
   });
 });

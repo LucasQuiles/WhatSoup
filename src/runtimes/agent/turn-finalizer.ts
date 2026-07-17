@@ -21,9 +21,13 @@ import {
 const TURN_FINALIZATION_ALERT_SOURCE = 'agent_turn_finalization_failed';
 const TURN_FINALIZATION_ALERT_SUMMARY = 'Agent turn finalization could not reach durable terminal state';
 
+const REPLY_GUARANTEE_BREACH_ALERT_SOURCE = 'agent_reply_guarantee_breach';
+const REPLY_GUARANTEE_BREACH_ALERT_SUMMARY =
+  'Agent turn failed terminally with no delivery — the inbound message was dropped without a reply';
+
 export type RuntimeTurnFinalizerDurability = Pick<
   DurabilityEngine,
-  'getOutboundDeliverySnapshot' | 'finalizeTurnTerminal'
+  'getOutboundDeliverySnapshot' | 'finalizeTurnTerminal' | 'markContinuityCandidateIfNoTerminalOutbound'
 >;
 
 export type RuntimeAnswerEvidence =
@@ -192,6 +196,28 @@ function boundedIncidentEvidence(
   ].join('\n');
 }
 
+function boundedBreachEvidence(
+  params: FinalizeRuntimeTurnParams,
+  attemptFailureClass: string,
+  receipt: FinalizeTurnTerminalResult,
+  continuityMarked: boolean,
+): string {
+  const { identity } = params;
+  return [
+    'runtime_source=turn-finalizer',
+    `attempt_failure_class=${attemptFailureClass}`,
+    `scope=${identity.scope}`,
+    `inbound_seq=${identity.inboundSeq ?? 'none'}`,
+    `generation=${identity.generation}`,
+    `reply_guarantee_disarmed=${receipt.effectiveReplyGuaranteeDisarmed}`,
+    `continuity_marked=${continuityMarked}`,
+    `conversation_key_hash=${shortHash(identity.conversationKey)}`,
+    `delivery_jid_hash=${shortHash(identity.deliveryJid)}`,
+    `logical_turn_hash=${shortHash(identity.logicalTurnId)}`,
+    `manager_hash=${shortHash(identity.managerId)}`,
+  ].join('\n');
+}
+
 function emitFailureIncident(
   params: FinalizeRuntimeTurnParams,
   failureStage: 'delivery_proof' | 'terminal_finalize',
@@ -279,6 +305,33 @@ export function finalizeRuntimeTurn(
       throw new Error('A transferred runtime turn requires a recovery owner and replay envelope');
     }
 
+    // A failed attempt that never produced delivery evidence finalizes with the
+    // reply guarantee still armed and no recovery owner: the inbound is dropped.
+    // That drop must not be silent (owner-directed messages have died this way),
+    // so it gets a durable continuity-candidate mark plus a breach alert below.
+    // Admission-rejected sheds are excluded — #1750 keeps backpressure separable
+    // from faults so breach alerting cannot false-positive on capacity sheds.
+    const replyGuaranteeBreach =
+      terminal.inboundDisposition === 'failed_terminal' &&
+      attemptOutcome.kind === 'failed' &&
+      params.identity.inboundSeq !== null;
+    let continuityMarked = false;
+    if (replyGuaranteeBreach) {
+      // The guarded statement refuses to mark once a turn_terminal_records row
+      // exists for the seq, so this must land before terminal persistence. A
+      // marking failure must not block finalization — it is reported through
+      // the breach alert evidence instead.
+      try {
+        continuityMarked = params.durability.markContinuityCandidateIfNoTerminalOutbound(
+          params.identity.inboundSeq!,
+          'runtime_fault_no_terminal_outbound',
+          'runtime_fault_disarm',
+        );
+      } catch {
+        continuityMarked = false;
+      }
+    }
+
     const persistence = toTurnFinalizationPersistence(terminal, recoveryOwner);
     const recoveryJob = terminal.inboundDisposition === 'transferred_to_recovery_owner'
       ? toTurnRecoveryJobPersistence(terminal, recoveryOwner!, params.replay!)
@@ -290,6 +343,20 @@ export function finalizeRuntimeTurn(
     });
     if (!receipt.winnerMatchesRequest) {
       throw new Error('Durable terminal winner conflicts with the requested terminal identity');
+    }
+    if (replyGuaranteeBreach && attemptOutcome.kind === 'failed') {
+      // Best-effort visibility: the terminal state is already durable, so an
+      // alert-sink failure must not convert a finalized turn into an incident.
+      try {
+        emitAlert(
+          params.instanceName,
+          REPLY_GUARANTEE_BREACH_ALERT_SOURCE,
+          REPLY_GUARANTEE_BREACH_ALERT_SUMMARY,
+          boundedBreachEvidence(params, attemptOutcome.class ?? 'unknown', receipt, continuityMarked),
+        );
+      } catch {
+        // Swallowed by design — see comment above.
+      }
     }
     return {
       kind: 'terminal',
