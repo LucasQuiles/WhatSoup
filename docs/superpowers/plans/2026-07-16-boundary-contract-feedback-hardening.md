@@ -2811,6 +2811,20 @@ duplicate-path rejection. Add the exact catalog-stdout alias plus all three near
 neighbors to the closure regression, commit the bounded helper/test/index correction, and rerun the
 complete BCF-00, BCF-01, and BCF-02 chains under fresh IDs before initializing BCF-03.
 
+Eighteenth recovery note for finalized Recovery14 BCF-00, BCF-01, and BCF-02: the repaired closure
+successfully admitted the BCF-02 predecessor, then BCF-03 initialization rejected its owned
+`tests/scripts/semantic-boundary-contract.test.ts` because the Task 2 compile-only scaffold listed
+zero tests. The profile freezes an executable entry roster at init, so a zero-row placeholder cannot
+become the registered BCF-03 RED/GREEN suite later. The failed init created no run or transition.
+
+Preserve Recovery14 and its finalized receipts. Recover from pre-merge helper commit
+`ac893abf40d1e6f1cb478a74e2a32bf7c7572e54` on a distinct branch. Task 2's compile-only contract
+test scaffold must contain the registered `[BCF03-S01]` safe-control row asserting only that the
+placeholder surface is callable; it must not accept canonicalization behavior. BCF-03 retains that
+exact safe row while adding U01–10 and N01–10. Update the generated work index, commit this recovery
+doctrine, rerun BCF-00 and BCF-01 under fresh IDs, and include the safe scaffold row in the fresh
+BCF-02 profile-owned commit before initializing BCF-03.
+
 ```bash
 git rev-parse --show-toplevel
 git rev-parse HEAD
