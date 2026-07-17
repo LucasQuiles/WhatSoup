@@ -27,31 +27,7 @@ macos_keychain_lookup() {
   local service="$1"
   local account="$2"
   [ -n "${NODE:-}" ] || return 1
-
-  "$NODE" - "$service" "$account" <<'NODE'
-const { execFileSync } = require('node:child_process');
-
-const service = process.argv[2];
-const account = process.argv[3];
-if (!service || !account) process.exit(64);
-
-try {
-  const value = execFileSync(
-    'security',
-    ['find-generic-password', '-s', service, '-a', account, '-w'],
-    {
-      encoding: 'utf8',
-      timeout: 3_000,
-      killSignal: 'SIGKILL',
-      maxBuffer: 4_096,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    },
-  );
-  process.stdout.write(value);
-} catch {
-  process.exit(1);
-}
-NODE
+  "$NODE" "$SCRIPT_DIR/lib/read-keychain-secret.mjs" "$service" "$account"
 }
 
 keyring_lookup() {

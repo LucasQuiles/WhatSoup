@@ -74,7 +74,7 @@ function runKeyringLookupProbe(
   writeExecutable(path.join(binDir, 'secret-tool'), `#!/usr/bin/env bash\nprintf 'secret-tool %s\\n' "$*" >> "$LOG_PATH"\nif [ "$SCENARIO" = "canonical-hit" ] && [ "$1" = "lookup" ] && [ "$3" = "whatsoup-health-token" ] && [ "$4" = "user" ] && [ "$5" = "test-instance" ]; then\n  printf 'canonical-secret\\n'\n  exit 0\nfi\nif [ "$SCENARIO" = "canonical-miss-legacy-hit" ] && [ "$1" = "lookup" ] && [ "$3" = "whatsoup_health" ]; then\n  printf 'legacy-keyring-token\\n'\n  exit 0\nfi\nexit 1\n`);
 
   const scriptPath = path.join(tmpDir, 'probe.sh');
-  fs.writeFileSync(scriptPath, `#!/usr/bin/env bash\nset -euo pipefail\nPATH="${binDir}:$PATH"\nexport LOG_PATH="${logPath}"\nexport SCENARIO="${scenario}"\nUSER=local-user\nNODE="${process.execPath}"\nWHATSOUP_HEALTH_TOKEN=shared-env-token\n${extractKeyringLookup(source)}\nTOKEN="$(keyring_lookup whatsoup-health-token "" user test-instance)"\nif [ -z "$TOKEN" ]; then\n  TOKEN="$(keyring_lookup whatsoup_health WHATSOUP_HEALTH_TOKEN)"\nfi\nprintf '%s\\n' "$TOKEN"\n`, 'utf8');
+  fs.writeFileSync(scriptPath, `#!/usr/bin/env bash\nset -euo pipefail\nPATH="${binDir}:$PATH"\nexport LOG_PATH="${logPath}"\nexport SCENARIO="${scenario}"\nUSER=local-user\nNODE="${process.execPath}"\nSCRIPT_DIR="${path.resolve('deploy')}"\nWHATSOUP_HEALTH_TOKEN=shared-env-token\n${extractKeyringLookup(source)}\nTOKEN="$(keyring_lookup whatsoup-health-token "" user test-instance)"\nif [ -z "$TOKEN" ]; then\n  TOKEN="$(keyring_lookup whatsoup_health WHATSOUP_HEALTH_TOKEN)"\nfi\nprintf '%s\\n' "$TOKEN"\n`, 'utf8');
   fs.chmodSync(scriptPath, 0o700);
 
   const stdout = execFileSync('bash', [scriptPath], { encoding: 'utf8' }).trim();
@@ -213,6 +213,74 @@ printf 'resolved=%s\\n' "\${WHATSOUP_HEALTH_TOKEN-}"
   fs.chmodSync(scriptPath, 0o700);
 
   const result = spawnSync('/bin/bash', [scriptPath], { encoding: 'utf8', timeout: 5_000 });
+  return {
+    status: result.status,
+    stdout: result.stdout.trim(),
+    stderr: result.stderr.trim(),
+    log: fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8') : '',
+  };
+}
+
+function runHealthTokenCheckerProbe(): {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  log: string;
+} {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-health-token-checker-'));
+  tmpDirs.push(tmpDir);
+  const binDir = path.join(tmpDir, 'bin');
+  const configRoot = path.join(tmpDir, 'config');
+  const instanceDir = path.join(configRoot, 'whatsoup', 'instances', 'fixture-checker');
+  const tokenPath = path.join(instanceDir, 'tokens.env');
+  const logPath = path.join(tmpDir, 'calls.log');
+  fs.mkdirSync(binDir);
+  fs.mkdirSync(instanceDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(
+    tokenPath,
+    `WHATSOUP_HEALTH_TOKEN=${'a'.repeat(64)}\n`,
+    { mode: 0o600 },
+  );
+  fs.chmodSync(instanceDir, 0o700);
+  fs.chmodSync(tokenPath, 0o600);
+
+  writeExecutable(path.join(binDir, 'uname'), `#!/usr/bin/env bash\nprintf 'Darwin\\n'\n`);
+  writeExecutable(path.join(binDir, 'security'), `#!/usr/bin/env bash\nprintf 'security %s\\n' "$*" >> "$LOG_PATH"\nsleep 30\n`);
+  writeExecutable(path.join(binDir, 'stat'), `#!/usr/bin/env bash
+set -euo pipefail
+case "$1:$2" in
+  '-f:%u') printf '%s\n' "$(id -u)" ;;
+  '-f:%Lp') printf '700\n' ;;
+  *) exit 64 ;;
+esac
+`);
+  const pinnedNode = path.join(binDir, 'pinned-node');
+  writeExecutable(pinnedNode, `#!/usr/bin/env bash
+case "\${1-}" in
+  -e) printf '26' ;;
+  -p) printf '24' ;;
+  --version) printf 'v24.15.0\n' ;;
+  *) exec "${process.execPath}" "$@" ;;
+esac
+`);
+
+  const result = spawnSync(
+    '/bin/bash',
+    ['deploy/check-health-token-keyring.sh', 'fixture-checker'],
+    {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        LOG_PATH: logPath,
+        PATH: `${binDir}:${process.env.PATH ?? ''}`,
+        WHATSOUP_NODE: pinnedNode,
+        XDG_CONFIG_HOME: configRoot,
+      },
+      timeout: 5_000,
+    },
+  );
+
   return {
     status: result.status,
     stdout: result.stdout.trim(),
@@ -432,6 +500,35 @@ describe('health token shell wrappers', () => {
       'security find-generic-password -s whatsoup-health-token -a fixture-bot -w',
     );
   }, 8_000);
+
+  it('bounds a hanging Darwin keychain child in the parity checker', () => {
+    const result = runHealthTokenCheckerProbe();
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('scoped keyring mirror is missing');
+    expect(result.stderr).toBe('');
+    expect(result.log.trim()).toBe(
+      'security find-generic-password -s whatsoup-health-token -a fixture-checker -w',
+    );
+    expect(`${result.stdout}\n${result.stderr}\n${result.log}`).not.toContain('a'.repeat(64));
+  }, 8_000);
+
+  it('uses one bounded pinned-Node helper for Darwin keychain reads', () => {
+    const helper = fs.readFileSync('deploy/lib/read-keychain-secret.mjs', 'utf8');
+    const wrapper = fs.readFileSync('deploy/whatsoup', 'utf8');
+    const checker = fs.readFileSync('deploy/check-health-token-keyring.sh', 'utf8');
+
+    expect(wrapper).toContain('"$SCRIPT_DIR/lib/read-keychain-secret.mjs"');
+    expect(checker).toContain('"$SCRIPT_DIR/lib/read-keychain-secret.mjs"');
+    expect(checker).toContain('. "$SCRIPT_DIR/lib/resolve-node.sh"');
+    expect(checker).toContain('whatsoup_resolve_node "$REPO_ROOT"');
+    expect(checker).not.toContain('command -v node');
+    expect(helper).toContain("['find-generic-password', '-s', service, '-a', account, '-w']");
+    expect(helper).toContain('timeout: 3_000');
+    expect(helper).toContain("killSignal: 'SIGKILL'");
+    expect(helper).toContain('maxBuffer: 4_096');
+    expect(helper).toContain("stdio: ['ignore', 'pipe', 'ignore']");
+  });
 
   it.each(['Darwin', 'Linux'] as const)(
     'deploy/whatsoup falls back to an instance-scoped %s keyring token when tokens.env is absent',

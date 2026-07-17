@@ -33,18 +33,9 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-NODE="${WHATSOUP_NODE:-}"
-if [ -z "$NODE" ]; then
-  PINNED_VERSION="$(tr -d '[:space:]' < "$REPO_ROOT/.nvmrc" 2>/dev/null || true)"
-  PINNED_NODE="$HOME/.nvm/versions/node/v${PINNED_VERSION}/bin/node"
-  if [ -n "$PINNED_VERSION" ] && [ -x "$PINNED_NODE" ]; then
-    NODE="$PINNED_NODE"
-  else
-    NODE="$(command -v node 2>/dev/null || true)"
-  fi
-fi
-if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
-  echo "FATAL: Node runtime is unavailable" >&2
+# shellcheck source=deploy/lib/resolve-node.sh
+. "$SCRIPT_DIR/lib/resolve-node.sh"
+if ! NODE="$(whatsoup_resolve_node "$REPO_ROOT")"; then
   exit 2
 fi
 # shellcheck source=deploy/lib/read-private-health-token.sh
@@ -53,10 +44,8 @@ fi
 read_scoped_keyring_token() {
   case "$(uname -s)" in
     Darwin)
-      security find-generic-password \
-        -s "$SERVICE" \
-        -a "$INSTANCE" \
-        -w 2>/dev/null || true
+      "$NODE" "$SCRIPT_DIR/lib/read-keychain-secret.mjs" \
+        "$SERVICE" "$INSTANCE" || true
       ;;
     *)
       timeout 3s secret-tool lookup \
