@@ -549,7 +549,11 @@ export function validateBoundaryVitestJsonReport(input: Record<string, unknown>)
   if (countKeys.some((key) => !Number.isSafeInteger(report[key]) || Number(report[key]) < 0)) {
     issues.push(issue('test-report-count-invalid', 'Vitest report counts must be nonnegative safe integers'));
   }
-  if (report['numPendingTestSuites'] !== 0 || report['numPendingTests'] !== 0 || report['numTodoTests'] !== 0) {
+  if (
+    report['numPendingTestSuites'] !== 0
+    || report['numTodoTests'] !== 0
+    || (predicateContract.mode === 'green' && report['numPendingTests'] !== 0)
+  ) {
     issues.push(issue('test-report-nonpass', 'Vitest report contains a skip, todo, or pending result'));
   }
   if (predicateContract.mode === 'green') {
@@ -592,6 +596,8 @@ export function validateBoundaryVitestJsonReport(input: Record<string, unknown>)
   let assertionCount = 0;
   let passedCount = 0;
   let failedCount = 0;
+  let skippedCount = 0;
+  let todoCount = 0;
   const observedFiles: string[] = [];
   for (const row of testResults) {
     const testFile = row as Record<string, unknown>;
@@ -623,24 +629,41 @@ export function validateBoundaryVitestJsonReport(input: Record<string, unknown>)
       assertionCount += 1;
       const fullName = assertion['fullName'];
       titles.push(fullName);
+      const status = assertion['status'];
+      if (!['passed', 'failed', 'skipped', 'todo'].includes(String(status))) {
+        issues.push(issue('test-report-shape', 'Vitest assertion status is malformed'));
+        continue;
+      }
+      if (status === 'passed') passedCount += 1;
+      if (status === 'failed') failedCount += 1;
+      if (status === 'skipped') skippedCount += 1;
+      if (status === 'todo') todoCount += 1;
       const markerMatches = fullName.match(/\[BCF\d{2}-(?:B|U|S|N)\d{2}\]/g) ?? [];
       if (markerMatches.length > 1) {
         issues.push(issue('test-marker-roster-mismatch', 'one assertion contains multiple registered markers'));
         continue;
       }
       const observedMarker = markerMatches[0] ?? null;
-      if (observedMarker !== null) observedMarkers.push(observedMarker);
-      const status = assertion['status'];
       const failures = assertion['failureMessages'] as unknown[];
-      if (status === 'passed') passedCount += 1;
-      if (status === 'failed') failedCount += 1;
       if (predicateContract.mode === 'green') {
+        if (observedMarker !== null) observedMarkers.push(observedMarker);
         if (status !== 'passed' || failures.length !== 0) {
           issues.push(issue('test-report-nonpass', `GREEN assertion is not a clean pass: ${assertion['title']}`));
         }
-      } else if (observedMarker === null || !selectedMarkers.includes(observedMarker)) {
-        issues.push(issue('test-marker-roster-mismatch', 'RED selected an unregistered or unmarked assertion'));
-      } else if (safeMarkers.has(observedMarker)) {
+        continue;
+      }
+      if (observedMarker !== null && !registeredMarkers.includes(observedMarker)) {
+        issues.push(issue('test-marker-roster-mismatch', 'RED report contains an unknown contract marker'));
+        continue;
+      }
+      if (observedMarker === null || !selectedMarkers.includes(observedMarker)) {
+        if (status !== 'skipped') {
+          issues.push(issue('test-marker-roster-mismatch', 'RED selected an unregistered or unmarked assertion'));
+        }
+        continue;
+      }
+      observedMarkers.push(observedMarker);
+      if (safeMarkers.has(observedMarker)) {
         if (status !== 'passed' || failures.length !== 0) {
           issues.push(issue('test-red-safe-control-failed', `RED safe control did not pass: ${observedMarker}`));
         }
@@ -678,7 +701,9 @@ export function validateBoundaryVitestJsonReport(input: Record<string, unknown>)
     report['numTotalTests'] !== assertionCount
     || report['numPassedTests'] !== passedCount
     || report['numFailedTests'] !== failedCount
-    || passedCount + failedCount !== assertionCount
+    || report['numPendingTests'] !== skippedCount
+    || report['numTodoTests'] !== todoCount
+    || passedCount + failedCount + skippedCount + todoCount !== assertionCount
   ) issues.push(issue('test-report-count-invalid', 'Vitest report totals differ from its assertion rows'));
   return snapshotResult(issues);
 }

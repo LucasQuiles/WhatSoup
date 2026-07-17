@@ -1042,6 +1042,117 @@ export function registerSchemaCases(): void {
       .toContain('test-entry-roster-mismatch');
   });
 
+  it('binds RED predicates to selected rows while reconciling reporter-generated skips', () => {
+    const api = boundaryRun as unknown as {
+      RUN_TEST_CONTRACTS?: {
+        bcf01: {
+          unsafeMarkerIds: readonly string[];
+          safeMarkerIds: readonly string[];
+          neighborMarkerIds: readonly string[];
+        };
+      };
+      validateBoundaryVitestJsonReport?: (
+        input: Record<string, unknown>,
+      ) => ReturnType<typeof validateBoundaryRun>;
+    };
+    expect(typeof api.validateBoundaryVitestJsonReport).toBe('function');
+    expect(api.RUN_TEST_CONTRACTS?.bcf01).toBeDefined();
+    if (!api.validateBoundaryVitestJsonReport || !api.RUN_TEST_CONTRACTS) return;
+
+    const contract = api.RUN_TEST_CONTRACTS.bcf01;
+    const assertions = [
+      ...contract.unsafeMarkerIds.map((markerId) => ({
+        ancestorTitles: ['semantic quality CLI'],
+        fullName: `semantic quality CLI ${markerId} unsafe case`,
+        status: 'failed',
+        title: `${markerId} unsafe case`,
+        failureMessages: [
+          `AssertionError: BCF_EXPECTATION_UNMET:${markerId.slice(1, 6)}-${markerId.slice(-3, -1)}`,
+        ],
+      })),
+      ...contract.safeMarkerIds.map((markerId) => ({
+        ancestorTitles: ['semantic quality CLI'],
+        fullName: `semantic quality CLI ${markerId} safe control`,
+        status: 'passed',
+        title: `${markerId} safe control`,
+        failureMessages: [],
+      })),
+      {
+        ancestorTitles: ['semantic quality CLI'],
+        fullName: `semantic quality CLI ${contract.neighborMarkerIds[0]} valid neighbor`,
+        status: 'skipped',
+        title: `${contract.neighborMarkerIds[0]} valid neighbor`,
+        failureMessages: [],
+      },
+      {
+        ancestorTitles: ['semantic quality receipt'],
+        fullName: 'semantic quality receipt preserves a legacy behavior',
+        status: 'skipped',
+        title: 'preserves a legacy behavior',
+        failureMessages: [],
+      },
+    ];
+    const input = {
+      predicate: 'bcf01-red',
+      cwd: '/repo',
+      entryTestRoster: {
+        files: [{
+          path: 'tests/scripts/semantic-quality-check.test.ts',
+          state: 'present',
+          testNames: assertions.map((entry) => entry.fullName).sort(),
+        }],
+        digestSha256: SHA,
+      },
+      report: {
+        numFailedTestSuites: 1,
+        numFailedTests: contract.unsafeMarkerIds.length,
+        numPassedTestSuites: 1,
+        numPassedTests: contract.safeMarkerIds.length,
+        numPendingTestSuites: 0,
+        numPendingTests: 2,
+        numTodoTests: 0,
+        numTotalTestSuites: 2,
+        numTotalTests: assertions.length,
+        snapshot: {},
+        startTime: 1,
+        success: false,
+        testResults: [{
+          name: '/repo/tests/scripts/semantic-quality-check.test.ts',
+          status: 'failed',
+          assertionResults: assertions,
+        }],
+      },
+    };
+
+    expect(api.validateBoundaryVitestJsonReport(input)).toMatchObject({ ok: true, verdict: 'Pass' });
+
+    for (const status of ['skipped', 'todo'] as const) {
+      const selectedNonterminal = structuredClone(input);
+      const assertion = selectedNonterminal.report.testResults[0]!.assertionResults[0]!;
+      assertion.status = status;
+      assertion.failureMessages = [];
+      selectedNonterminal.report.numFailedTests -= 1;
+      if (status === 'skipped') selectedNonterminal.report.numPendingTests += 1;
+      else selectedNonterminal.report.numTodoTests += 1;
+      expect(
+        api.validateBoundaryVitestJsonReport(selectedNonterminal).issues.map((entry) => entry.code),
+        status,
+      ).toContain('test-red-sentinel-mismatch');
+    }
+
+    const unknownMarker = structuredClone(input);
+    const unmarked = unknownMarker.report.testResults[0]!.assertionResults.at(-1)!;
+    unmarked.fullName = 'semantic quality receipt [BCF01-U99] unknown marker';
+    unmarked.title = '[BCF01-U99] unknown marker';
+    expect(api.validateBoundaryVitestJsonReport(unknownMarker).issues.map((entry) => entry.code))
+      .toContain('test-marker-roster-mismatch');
+
+    const countDrift = structuredClone(input);
+    countDrift.report.numPendingTests -= 1;
+    expect(api.validateBoundaryVitestJsonReport(countDrift).issues.map((entry) => entry.code))
+      .toContain('test-report-count-invalid');
+  });
+
   it('enforces each closed command stdout predicate without caller-selected parsing', () => {
     const api = boundaryRun as unknown as {
       validateBoundaryStdoutPredicate?: (
