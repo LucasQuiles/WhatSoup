@@ -536,6 +536,22 @@ marker, or any report-count mismatch. GREEN remains strict over every collected 
 BCF-01 test tranche is preserved in the named stash
 `bcf01 markers after red predicate failure` until a fresh finalized BCF-00 chain can import it.
 
+## 2026-07-17 versionless capability recovery
+
+Recovery7 finalized and pushed BCF-00 Pass at
+`4b56d9a7d51e8cfbb30b46a5700e4376a1d4ce7d`, then completed, finalized, verified, and pushed
+BCF-01 at `2f0eabe49f9ef0aaac17c1dcc5db0c0c6fc5f045`. BCF-02 initialization failed before a run was
+created because the helper resolves its required `tr` capability by invoking `--version`.
+macOS `/usr/bin/tr` rejects that GNU-only option; `/usr/bin/wc`, `/usr/bin/test`, and
+`/usr/bin/kill` have the same portability boundary for later closed profiles.
+
+Recovery8 starts from pre-merge validator commit
+`56b1e28e5cb1eca817fb0704a5bb189daacb5b36`. The correction keeps realpath and complete executable
+SHA-256 binding for every tool. Only `kill`, `test`, `tr`, and `wc` may use the deterministic
+`content-sha256:<digest>` version surrogate after a nonzero or empty version probe; all other tools
+still require a successful nonempty version string, and GNU timeout identity remains mandatory.
+Fresh BCF-00 and BCF-01 chains are required before BCF-02 can be initialized again.
+
 ## Authorization Boundary
 
 The planning packet's initial approval authorized writing and committing the local specification,

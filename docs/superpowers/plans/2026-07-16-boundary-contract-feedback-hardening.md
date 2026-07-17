@@ -2691,6 +2691,27 @@ any count drift. GREEN still rejects every skipped, todo, pending, or failed row
 helper/test correction with subject `fix(quality): bind red predicates to selected tests`, then
 rerun the full immutable BCF-00 chain before recreating BCF-01 under a new run ID.
 
+Eleventh recovery note for finalized reconciliation run
+`bcf00-reconciliation-56b1e28e5-20260717b`: helper-owned merge
+`4b56d9a7d51e8cfbb30b46a5700e4376a1d4ce7d` passed every BCF-00 requirement, finalized, verified,
+and was pushed. Its BCF-01 successor then recorded exact RED/GREEN/typecheck/scope evidence,
+committed through the profile-owned transition at
+`2f0eabe49f9ef0aaac17c1dcc5db0c0c6fc5f045`, finalized Pass, and was pushed. BCF-02 initialization
+failed before creating a successor run because capability discovery unconditionally invoked
+`/usr/bin/tr --version`; the macOS BSD executable rejects that option even though the exact closed
+`tr -d "'"` inventory operation is available.
+
+Preserve recovery7 and both finalized chains. Recover from pre-merge validator commit
+`56b1e28e5cb1eca817fb0704a5bb189daacb5b36` on a distinct branch. Capability discovery still
+requires an executable realpath and complete file SHA-256. Only the closed POSIX primitives
+`kill|test|tr|wc` may replace an unsupported, nonzero, or empty `--version` probe with the exact
+bounded string `content-sha256:<executable-sha256>`; every other tool retains a successful nonempty
+version requirement, and `gnu-timeout` still must identify GNU coreutils. Add deterministic fake
+executable regressions proving the permitted fallback and the neighboring non-permitted rejection,
+plus live resolution of every BCF-02 inventory tool. Commit the bounded helper/test correction with
+subject `fix(quality): bind versionless tool capabilities`, then rerun the full BCF-00 and BCF-01
+chains under fresh IDs before BCF-02 is recreated.
+
 ```bash
 git rev-parse --show-toplevel
 git rev-parse HEAD
