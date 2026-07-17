@@ -201,6 +201,15 @@ def _resolve_source(source: "CaptureSource | None") -> dict:
     return resolved
 
 
+def _nested_dict(parent: dict, key: str) -> dict:
+    """`parent.get(key)` narrowed to a dict, or `{}` if absent/ill-typed --
+    lets every nested `/health` lookup in `capture()` chain `.get(...)` calls
+    without a repeated isinstance-or-empty-dict ternary at each level.
+    """
+    value = parent.get(key)
+    return value if isinstance(value, dict) else {}
+
+
 def capture(
     *,
     health: CaptureSource,
@@ -225,14 +234,12 @@ def capture(
     the storage-model decision (D1).
     """
     health_data = _resolve_source(health)
-    instance = health_data.get("instance") if isinstance(health_data.get("instance"), dict) else {}
-    sqlite = health_data.get("sqlite") if isinstance(health_data.get("sqlite"), dict) else {}
-    whatsapp = health_data.get("whatsapp") if isinstance(health_data.get("whatsapp"), dict) else {}
-    runtime = health_data.get("runtime") if isinstance(health_data.get("runtime"), dict) else {}
-    agent_runtime = runtime.get("agent") if isinstance(runtime.get("agent"), dict) else {}
-    turn_capability = (
-        agent_runtime.get("turnCapability") if isinstance(agent_runtime.get("turnCapability"), dict) else {}
-    )
+    instance = _nested_dict(health_data, "instance")
+    sqlite = _nested_dict(health_data, "sqlite")
+    whatsapp = _nested_dict(health_data, "whatsapp")
+    runtime = _nested_dict(health_data, "runtime")
+    agent_runtime = _nested_dict(runtime, "agent")
+    turn_capability = _nested_dict(agent_runtime, "turnCapability")
 
     drift = _resolve_source(drift_check)
 
