@@ -1,5 +1,7 @@
 import { expect, it } from 'vitest';
 
+import { childClosurePaths } from '../../../scripts/lib/verification/boundary-run-cli/shared.ts';
+
 import {
   BOUNDARY_PINNED_GENERATED_INDEX_PARENT,
   EXPECTED_CHILD_CONTRACT_ROWS,
@@ -75,6 +77,38 @@ import {
 } from './support.ts';
 
 export function registerJoinCases(): void {
+  it('counts an exact structured-result artifact alias once and rejects neighboring collisions', () => {
+    const manifest = validManifest();
+    manifest.attempts = [{
+      ...validAttempt(),
+      id: 'readiness-check',
+      stdout: validStream('attempts/readiness-check/stdout.log'),
+      stderr: validStream('attempts/readiness-check/stderr.log'),
+      structuredResult: validStream('readiness.json'),
+    }];
+    manifest.artifacts = [{
+      path: 'readiness.json',
+      role: 'receipt',
+      producerAttemptId: 'readiness-check',
+      sha256: SHA,
+      bytes: 1,
+    }];
+
+    expect(childClosurePaths(manifest).filter((entry) => entry === 'readiness.json')).toEqual([
+      'readiness.json',
+    ]);
+
+    for (const artifact of [
+      { ...manifest.artifacts[0]!, producerAttemptId: 'other-attempt' },
+      { ...manifest.artifacts[0]!, sha256: SHA_B },
+      { ...manifest.artifacts[0]!, bytes: 2 },
+    ]) {
+      const invalid = structuredClone(manifest);
+      invalid.artifacts = [artifact];
+      expect(() => childClosurePaths(invalid)).toThrow('child closure contains duplicate logical paths');
+    }
+  });
+
   it('initializes a non-observation run only from one verified pinned predecessor closure', async () => {
     const api = boundaryCli as unknown as {
       runBoundaryRunCli?: (argv: readonly string[], cwd?: string) => Promise<ReturnType<typeof validateBoundaryRun>>;

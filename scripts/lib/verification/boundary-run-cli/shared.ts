@@ -319,11 +319,20 @@ export function readConfinedRegularFile(root: string, relativePath: string): Buf
 
 export function childClosurePaths(manifest: BoundaryRunManifest): string[] {
   const paths = ['run_init.json', 'run_init.sha256', 'run_manifest.json', 'run_manifest.sha256'];
+  const attemptsById = new Map(manifest.attempts.map((attempt) => [attempt.id, attempt]));
   for (const attempt of manifest.attempts) {
     paths.push(attempt.stdout.path, attempt.stderr.path);
     if (attempt.structuredResult !== null) paths.push(attempt.structuredResult.path);
   }
-  for (const artifact of manifest.artifacts) paths.push(artifact.path);
+  for (const artifact of manifest.artifacts) {
+    const structuredResult = attemptsById.get(artifact.producerAttemptId)?.structuredResult;
+    const isExactStructuredResultAlias = structuredResult !== null
+      && structuredResult !== undefined
+      && artifact.path === structuredResult.path
+      && artifact.sha256 === structuredResult.sha256
+      && artifact.bytes === structuredResult.bytes;
+    if (!isExactStructuredResultAlias) paths.push(artifact.path);
+  }
   for (const review of manifest.reviews) {
     paths.push(review.reportPath, review.metaPath, review.stderrPath);
     for (const finding of review.findings) paths.push(finding.evidencePath);
