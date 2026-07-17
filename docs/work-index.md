@@ -147,7 +147,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-07-09-privacy-erasure-and-media-confinement.md` | plan | pending | body-marker | privacy-erasure-and-media-confinement | 2026-07-10 |  |
 | `docs/superpowers/plans/2026-07-11-central-hub-release-proof-pilot.md` | plan | active | body-marker | central-hub-release-proof-pilot | 2026-07-12 |  |
 | `docs/superpowers/plans/2026-07-15-semantic-boundary-foundation.md` | plan | pending | body-marker | semantic-boundary-foundation | 2026-07-16 |  |
-| `docs/superpowers/plans/2026-07-16-boundary-contract-feedback-hardening.md` | plan | pending | body-marker | boundary-contract-feedback-hardening | 2026-07-16 |  |
+| `docs/superpowers/plans/2026-07-16-boundary-contract-feedback-hardening.md` | plan | pending | body-marker | boundary-contract-feedback-hardening | 2026-07-17 |  |
 | `docs/superpowers/plans/2026-07-16-boundary-core-history-provenance.md` | plan | pending | body-marker | boundary-core-history-provenance | 2026-07-16 |  |
 | `docs/superpowers/plans/2026-07-17-boundary-exit-parser-codeql-hardening.md` | plan | active | body-marker | boundary-exit-parser-codeql-hardening | 2026-07-17 |  |
 | `docs/superpowers/plans/2026-07-17-boundary-validator-ci-refactor.md` | plan | unknown | fallback | boundary-validator-ci-refactor | 2026-07-17 |  |
@@ -203,4 +203,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-17T15:54:04Z from commit `d7c56d24a8dbd9ee4984523497b098e50e9c1411`
+- Generated at 2026-07-17T16:35:03Z from commit `b3bfee28a238ab1f5fc62de095654d3200a631c5`
