@@ -115,7 +115,9 @@ export type FleetBotHardeningParityFindingCode =
   | 'roster-unreadable'
   | 'roster-digest-mismatch'
   | 'roster-instance-count-mismatch'
-  | 'future-roster-epoch';
+  | 'future-roster-epoch'
+  | 'invalid-row-release-commit'
+  | 'invalid-row-release-identity';
 
 export interface FleetBotHardeningParityFinding {
   code: FleetBotHardeningParityFindingCode;
@@ -156,6 +158,14 @@ function arrayOfStrings(value: unknown): string[] | null {
     ? value
     : null;
 }
+
+// Same 40-hex full-git-sha shape `FULL_GIT_SHA_RE` enforces in
+// `src/lib/git-env.ts:33`, mirrored here (that constant is not exported) but
+// lowercase-only rather than case-insensitive, matching this file's existing
+// lowercase-only hex conventions (e.g. `inventoryBinding.rosterDigest`'s
+// `/^[0-9a-f]{64}$/` check above) since committed manifest identity fields are
+// expected to already be canonical lowercase.
+const FULL_GIT_SHA_RE = /^[0-9a-f]{40}$/;
 
 // Parse a `YYYY-MM-DD` manifest date as UTC midnight. Returns null when the
 // value is not that exact shape or is not a real calendar date, so callers can
@@ -338,6 +348,57 @@ function validateRows(
           'stale-row-verified-at',
           `${context}.verifiedAt ${verifiedAt} is older than the ${FLEET_BOT_HARDENING_PARITY_MAX_AGE_DAYS}-day freshness budget`,
         ));
+      }
+    }
+
+    // Row-level release/config identity (#1867 criterion 2, partial;
+    // design §6/§7.3). Validate-when-present: a row that omits
+    // `releaseIdentity` gets no finding at all -- the tracked manifest's rows
+    // do not declare this field yet, and requiring it is a deferred,
+    // separate change (the later manifest-migration increment). Whenever a
+    // row *does* declare it, its shape/format must be fail-closed-correct:
+    // `commit` must look like a real full git sha (mirroring
+    // `FULL_GIT_SHA_RE` above), and `schemaMigration`/`provider` must be
+    // present with the right type. This increment deliberately does NOT
+    // cross-check the declared identity against a captured runtime receipt
+    // (`release-identity-receipt-mismatch` / `verified-before-service-restart`
+    // per design §7.3) -- that needs the receipt, which is a later increment.
+    const releaseIdentity = rawRow['releaseIdentity'];
+    if (releaseIdentity !== undefined) {
+      if (!isRecord(releaseIdentity)) {
+        findings.push(finding('invalid-row-release-identity', `${context}.releaseIdentity must be an object`));
+      } else {
+        const commit = releaseIdentity['commit'];
+        const schemaMigration = releaseIdentity['schemaMigration'];
+        const provider = releaseIdentity['provider'];
+
+        if (typeof commit === 'string') {
+          if (!FULL_GIT_SHA_RE.test(commit)) {
+            findings.push(finding(
+              'invalid-row-release-commit',
+              `${context}.releaseIdentity.commit must be a full 40-hex git sha`,
+            ));
+          }
+        } else {
+          findings.push(finding(
+            'invalid-row-release-identity',
+            `${context}.releaseIdentity.commit must be a string`,
+          ));
+        }
+
+        if (typeof schemaMigration !== 'number' || !Number.isInteger(schemaMigration) || schemaMigration < 0) {
+          findings.push(finding(
+            'invalid-row-release-identity',
+            `${context}.releaseIdentity.schemaMigration must be a non-negative integer`,
+          ));
+        }
+
+        if (typeof provider !== 'string' || provider.trim() === '') {
+          findings.push(finding(
+            'invalid-row-release-identity',
+            `${context}.releaseIdentity.provider must be a non-empty string`,
+          ));
+        }
       }
     }
 

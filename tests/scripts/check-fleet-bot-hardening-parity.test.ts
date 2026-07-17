@@ -736,4 +736,240 @@ describe('fleet bot hardening parity guard', () => {
       ]));
     });
   });
+
+  // Release/config identity binding (#1867 criterion 2, partial). Row-level
+  // `releaseIdentity` shape/format checks only, validate-when-present -- a
+  // row that omits it emits no finding (protects the tracked manifest, whose
+  // rows do not yet declare this field). The receipt cross-check
+  // (`release-identity-receipt-mismatch` / `verified-before-service-restart`)
+  // is explicitly deferred to a later increment that needs the runtime
+  // receipt; not implemented here.
+  describe('release/config identity binding (#1867 criterion 2, partial)', () => {
+    it('emits no finding when releaseIdentity is absent (validate-when-present; protects the tracked manifest)', () => {
+      const root = makeRoot();
+      writeFixtureStandard(root);
+      writeFixtureManifest(root);
+
+      const now = new Date('2026-06-20T00:00:00Z');
+      const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
+
+      expect(result.ok).toBe(true);
+      expect(result.findings).toEqual([]);
+      expect(result.runtimeParity.findings).toEqual([]);
+    });
+
+    it('accepts a row whose releaseIdentity is well-formed (40-hex commit, numeric schemaMigration, non-empty provider)', () => {
+      const root = makeRoot();
+      writeFixtureStandard(root);
+      writeFixtureManifest(root, {
+        rows: [
+          {
+            id: 'reference-incident-bot',
+            status: 'hardened',
+            capabilities: {
+              'turn-capability-health': 'proven',
+              'primary-model-usability-probe': 'proven',
+              'release-drift-check-job': 'proven',
+              'fallback-chain': 'proven',
+            },
+            evidence: ['fixture evidence'],
+            verifiedAt: '2026-06-18',
+            releaseIdentity: {
+              commit: 'a'.repeat(40),
+              schemaMigration: 44,
+              provider: 'claude-cli',
+            },
+          },
+        ],
+        scope: { description: 'fixture', inventoryPolicy: 'redacted', cohortSize: 1 },
+        summary: { total: 1, hardened: 1, pendingRollout: 0, blocked: 0, acceptedException: 0 },
+      });
+
+      const now = new Date('2026-06-20T00:00:00Z');
+      const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
+
+      expect(result.ok).toBe(true);
+      expect(result.findings).toEqual([]);
+    });
+
+    it('fails with invalid-row-release-commit when releaseIdentity.commit is not a full 40-hex sha', () => {
+      const root = makeRoot();
+      writeFixtureStandard(root);
+      writeFixtureManifest(root, {
+        rows: [
+          {
+            id: 'reference-incident-bot',
+            status: 'hardened',
+            capabilities: {
+              'turn-capability-health': 'proven',
+              'primary-model-usability-probe': 'proven',
+              'release-drift-check-job': 'proven',
+              'fallback-chain': 'proven',
+            },
+            evidence: ['fixture evidence'],
+            verifiedAt: '2026-06-18',
+            releaseIdentity: {
+              commit: 'not-a-sha',
+              schemaMigration: 44,
+              provider: 'claude-cli',
+            },
+          },
+        ],
+        scope: { description: 'fixture', inventoryPolicy: 'redacted', cohortSize: 1 },
+        summary: { total: 1, hardened: 1, pendingRollout: 0, blocked: 0, acceptedException: 0 },
+      });
+
+      const now = new Date('2026-06-20T00:00:00Z');
+      const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
+
+      expect(result.ok).toBe(false);
+      expect(result.runtimeParity.findings).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'invalid-row-release-commit' }),
+      ]));
+      expect(result.runtimeParity.findings).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'invalid-row-release-identity' }),
+      ]));
+    });
+
+    it('fails with invalid-row-release-identity when releaseIdentity is present but missing schemaMigration', () => {
+      const root = makeRoot();
+      writeFixtureStandard(root);
+      writeFixtureManifest(root, {
+        rows: [
+          {
+            id: 'reference-incident-bot',
+            status: 'hardened',
+            capabilities: {
+              'turn-capability-health': 'proven',
+              'primary-model-usability-probe': 'proven',
+              'release-drift-check-job': 'proven',
+              'fallback-chain': 'proven',
+            },
+            evidence: ['fixture evidence'],
+            verifiedAt: '2026-06-18',
+            releaseIdentity: {
+              commit: 'a'.repeat(40),
+              provider: 'claude-cli',
+            },
+          },
+        ],
+        scope: { description: 'fixture', inventoryPolicy: 'redacted', cohortSize: 1 },
+        summary: { total: 1, hardened: 1, pendingRollout: 0, blocked: 0, acceptedException: 0 },
+      });
+
+      const now = new Date('2026-06-20T00:00:00Z');
+      const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
+
+      expect(result.ok).toBe(false);
+      expect(result.runtimeParity.findings).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'invalid-row-release-identity' }),
+      ]));
+    });
+
+    it('fails with invalid-row-release-identity when releaseIdentity.provider is an empty string', () => {
+      const root = makeRoot();
+      writeFixtureStandard(root);
+      writeFixtureManifest(root, {
+        rows: [
+          {
+            id: 'reference-incident-bot',
+            status: 'hardened',
+            capabilities: {
+              'turn-capability-health': 'proven',
+              'primary-model-usability-probe': 'proven',
+              'release-drift-check-job': 'proven',
+              'fallback-chain': 'proven',
+            },
+            evidence: ['fixture evidence'],
+            verifiedAt: '2026-06-18',
+            releaseIdentity: {
+              commit: 'a'.repeat(40),
+              schemaMigration: 44,
+              provider: '',
+            },
+          },
+        ],
+        scope: { description: 'fixture', inventoryPolicy: 'redacted', cohortSize: 1 },
+        summary: { total: 1, hardened: 1, pendingRollout: 0, blocked: 0, acceptedException: 0 },
+      });
+
+      const now = new Date('2026-06-20T00:00:00Z');
+      const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
+
+      expect(result.ok).toBe(false);
+      expect(result.runtimeParity.findings).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'invalid-row-release-identity' }),
+      ]));
+    });
+
+    it('fails with invalid-row-release-identity when releaseIdentity.commit is absent (missing, not merely malformed)', () => {
+      const root = makeRoot();
+      writeFixtureStandard(root);
+      writeFixtureManifest(root, {
+        rows: [
+          {
+            id: 'reference-incident-bot',
+            status: 'hardened',
+            capabilities: {
+              'turn-capability-health': 'proven',
+              'primary-model-usability-probe': 'proven',
+              'release-drift-check-job': 'proven',
+              'fallback-chain': 'proven',
+            },
+            evidence: ['fixture evidence'],
+            verifiedAt: '2026-06-18',
+            releaseIdentity: {
+              schemaMigration: 44,
+              provider: 'claude-cli',
+            },
+          },
+        ],
+        scope: { description: 'fixture', inventoryPolicy: 'redacted', cohortSize: 1 },
+        summary: { total: 1, hardened: 1, pendingRollout: 0, blocked: 0, acceptedException: 0 },
+      });
+
+      const now = new Date('2026-06-20T00:00:00Z');
+      const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
+
+      expect(result.ok).toBe(false);
+      expect(result.runtimeParity.findings).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'invalid-row-release-identity' }),
+      ]));
+      expect(result.runtimeParity.findings).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'invalid-row-release-commit' }),
+      ]));
+    });
+
+    it('fails with invalid-row-release-identity when releaseIdentity is present but not an object', () => {
+      const root = makeRoot();
+      writeFixtureStandard(root);
+      writeFixtureManifest(root, {
+        rows: [
+          {
+            id: 'reference-incident-bot',
+            status: 'hardened',
+            capabilities: {
+              'turn-capability-health': 'proven',
+              'primary-model-usability-probe': 'proven',
+              'release-drift-check-job': 'proven',
+              'fallback-chain': 'proven',
+            },
+            evidence: ['fixture evidence'],
+            verifiedAt: '2026-06-18',
+            releaseIdentity: 'not-an-object',
+          },
+        ],
+        scope: { description: 'fixture', inventoryPolicy: 'redacted', cohortSize: 1 },
+        summary: { total: 1, hardened: 1, pendingRollout: 0, blocked: 0, acceptedException: 0 },
+      });
+
+      const now = new Date('2026-06-20T00:00:00Z');
+      const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
+
+      expect(result.ok).toBe(false);
+      expect(result.runtimeParity.findings).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'invalid-row-release-identity' }),
+      ]));
+    });
+  });
 });
