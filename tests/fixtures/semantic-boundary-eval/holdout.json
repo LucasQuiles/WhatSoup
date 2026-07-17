@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "lockedAt": "2026-07-15T22:50:00Z",
+  "primaryMetric": "exact decision accuracy",
+  "target": {
+    "minimumAccuracy": 0.9,
+    "maximumFalseBlocks": 0
+  },
+  "productionRoots": [
+    "src/main.ts",
+    "src/bootstrap.ts",
+    "src/bootstrap-auth.ts",
+    "src/fleet/standalone.ts",
+    "src/transport/auth.ts"
+  ],
+  "graphs": {
+    "typeOnlyImport": {
+      "src/main.ts": "import type { Feature } from './lib/feature.ts';\nexport type MainFeature = Feature;",
+      "src/lib/feature.ts": "export interface Feature { enabled: boolean }"
+    },
+    "sideEffectImport": {
+      "src/main.ts": "import './lib/feature.ts';",
+      "src/lib/feature.ts": "globalThis.__holdoutFeature = true;"
+    },
+    "mixedTypeValueImport": {
+      "src/main.ts": "import { type Feature, createFeature } from './lib/feature.ts';\ncreateFeature();",
+      "src/lib/feature.ts": "export interface Feature { enabled: boolean }\nexport function createFeature(): Feature { return { enabled: true }; }"
+    },
+    "typeOnlyReexport": {
+      "src/main.ts": "export type { Feature } from './lib/feature.ts';",
+      "src/lib/feature.ts": "export interface Feature { enabled: boolean }"
+    },
+    "indexResolution": {
+      "src/main.ts": "import { feature } from './feature';\nfeature();",
+      "src/feature/index.ts": "export function feature() { return true; }"
+    },
+    "jsToTsResolution": {
+      "src/main.ts": "import { feature } from './lib/feature.js';\nfeature();",
+      "src/lib/feature.ts": "export function feature() { return true; }"
+    }
+  },
+  "cases": [
+    {"id":"holdout-semantic-type-only-import","cohort":"synthetic","evidence":"synthetic","expected":"block","currentDecision":"pass","rationale":"A type-only import is erased and cannot prove runtime integration.","sourceRefs":["holdout:graphs.typeOnlyImport"],"semantic":{"kind":"fixture","graph":"typeOnlyImport","changedModules":["src/lib/feature.ts"]}},
+    {"id":"holdout-semantic-side-effect-import","cohort":"synthetic","evidence":"synthetic","expected":"pass","currentDecision":"pass","rationale":"A side-effect import is a real production execution edge.","sourceRefs":["holdout:graphs.sideEffectImport"],"semantic":{"kind":"fixture","graph":"sideEffectImport","changedModules":["src/lib/feature.ts"]}},
+    {"id":"holdout-semantic-mixed-import","cohort":"synthetic","evidence":"synthetic","expected":"pass","currentDecision":"pass","rationale":"A mixed type/value import retains the runtime value edge.","sourceRefs":["holdout:graphs.mixedTypeValueImport"],"semantic":{"kind":"fixture","graph":"mixedTypeValueImport","changedModules":["src/lib/feature.ts"]}},
+    {"id":"holdout-semantic-type-only-reexport","cohort":"synthetic","evidence":"synthetic","expected":"block","currentDecision":"pass","rationale":"A type-only re-export is erased and cannot prove execution.","sourceRefs":["holdout:graphs.typeOnlyReexport"],"semantic":{"kind":"fixture","graph":"typeOnlyReexport","changedModules":["src/lib/feature.ts"]}},
+    {"id":"holdout-semantic-index-resolution","cohort":"synthetic","evidence":"synthetic","expected":"pass","currentDecision":"pass","rationale":"Extensionless directory imports resolve through index.ts.","sourceRefs":["holdout:graphs.indexResolution"],"semantic":{"kind":"fixture","graph":"indexResolution","changedModules":["src/feature/index.ts"]}},
+    {"id":"holdout-semantic-js-to-ts-resolution","cohort":"synthetic","evidence":"synthetic","expected":"pass","currentDecision":"pass","rationale":"NodeNext JavaScript specifiers can resolve to TypeScript source modules.","sourceRefs":["holdout:graphs.jsToTsResolution"],"semantic":{"kind":"fixture","graph":"jsToTsResolution","changedModules":["src/lib/feature.ts"]}},
+    {"id":"holdout-provenance-high-coupling","cohort":"synthetic","evidence":"synthetic","expected":"block","currentDecision":"pass","rationale":"An older base touching a declared high-coupling surface blocks without direct path overlap.","sourceRefs":["holdout:provenance.highCoupling"],"provenance":{"remoteAvailable":true,"trackingMatches":true,"mergeBaseAvailable":true,"olderBase":true,"overlap":false,"highCoupling":true}},
+    {"id":"holdout-provenance-no-merge-base","cohort":"synthetic","evidence":"synthetic","expected":"inconclusive","currentDecision":"pass","rationale":"A reachable remote without a proven merge base remains inconclusive.","sourceRefs":["holdout:provenance.noMergeBase"],"provenance":{"remoteAvailable":true,"trackingMatches":true,"mergeBaseAvailable":false,"olderBase":false,"overlap":false,"highCoupling":false}},
+    {"id":"holdout-supply-short-action-sha","cohort":"synthetic","evidence":"synthetic","expected":"block","currentDecision":"pass","rationale":"A 39-character action identifier is not a full immutable Git commit SHA.","sourceRefs":["holdout:supply.shortActionSha"],"supply":{"actionRefs":["actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af68"]}},
+    {"id":"holdout-supply-malformed-image-digest","cohort":"synthetic","evidence":"synthetic","expected":"block","currentDecision":"pass","rationale":"A truncated Docker digest does not identify immutable upstream bytes.","sourceRefs":["holdout:supply.malformedDigest"],"supply":{"dockerBases":["node:24.15.0-slim@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}},
+    {"id":"holdout-supply-explicit-runner","cohort":"synthetic","evidence":"synthetic","expected":"pass","currentDecision":"pass","rationale":"An explicit Ubuntu runner generation does not trigger the floating-label warning.","sourceRefs":["holdout:supply.explicitRunner"],"supply":{"runnerLabels":["ubuntu-24.04"]}},
+    {"id":"holdout-process-bounded-unowned","cohort":"synthetic","evidence":"synthetic","expected":"warn","currentDecision":"pass","rationale":"A deadline without owned process-group cleanup can still leak descendants.","sourceRefs":["holdout:process.boundedUnowned"],"process":{"bounded":true,"ownsProcessGroup":false}},
+    {"id":"holdout-guard-negative-control-present","cohort":"synthetic","evidence":"synthetic","expected":"pass","currentDecision":"pass","rationale":"A guard change with an executable negative-control fixture is a legitimate control.","sourceRefs":["holdout:guard.negativePresent"],"guardChange":{"negativeControlChanged":true}},
+    {"id":"holdout-reentry-material-incomplete","cohort":"synthetic","evidence":"synthetic","expected":"block","currentDecision":"pass","rationale":"A material delta still needs the durable re-entry evidence packet.","sourceRefs":["holdout:reentry.materialIncomplete"],"reentry":{"priorDisposition":"production-unreachable","delta":"material","packetComplete":false,"ownerOverride":false}},
+    {"id":"holdout-current-pr-1835-wired","cohort":"visible-pr","evidence":"detector-backed","expected":"pass","currentDecision":"inconclusive","rationale":"The current PR head now reaches capability-grant through src/main.ts and must not be blocked as a production island.","sourceRefs":["https://github.com/LucasQuiles/WhatSoup/pull/1835"],"semantic":{"kind":"git","revision":"3c2ce7bbde4018264fcef31743318fef7aeb5b5a","changedModules":["src/lib/capability-grant.ts","src/core/capability-grant-adapter.ts"]}},
+    {"id":"holdout-fingerprint-first","cohort":"synthetic","evidence":"synthetic","expected":"pass","currentDecision":"pass","rationale":"The first novel proposal establishes history but is not its own duplicate.","sourceRefs":["holdout:fingerprint.first"],"proposal":{"number":900,"state":"closed-unmerged","pathBlobSet":[{"status":"modified","path":"src/a.ts","blobOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},{"status":"added","path":"src/b.ts","blobOid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}},
+    {"id":"holdout-fingerprint-reordered-duplicate","cohort":"synthetic","evidence":"synthetic","expected":"block","currentDecision":"pass","rationale":"Record ordering must not hide an exact duplicate of a prior proposal.","sourceRefs":["holdout:fingerprint.reordered"],"proposal":{"number":901,"state":"open","pathBlobSet":[{"status":"added","path":"src/b.ts","blobOid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},{"status":"modified","path":"src/a.ts","blobOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}},
+    {"id":"holdout-fingerprint-same-blobs-new-path","cohort":"synthetic","evidence":"synthetic","expected":"pass","currentDecision":"pass","rationale":"Reusing blob identifiers at a materially different path is not an exact path/blob proposal match.","sourceRefs":["holdout:fingerprint.newPath"],"proposal":{"number":902,"state":"open","pathBlobSet":[{"status":"modified","path":"src/c.ts","blobOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},{"status":"added","path":"src/d.ts","blobOid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}}
+  ]
+}

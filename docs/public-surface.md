@@ -309,6 +309,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.guard-bot-errors-simulation-matrix` | `npm run guard:bot-errors-simulation-matrix` | `package.json` | internal | active | Verify BOT ERRORS/Q-loop disaster scenarios are backed by executable fixture anchors |
 | `cli:npm.guard-claude-settings` | `npm run guard:claude-settings` | `package.json` | stable | active | Verify tracked `.claude/settings.json` matches generated agent defaults |
 | `cli:npm.guard-agent-decision-polls` | `npm run guard:agent-decision-polls` | `package.json` | stable | active | Verify AskUser poll protocol wiring across prompts, MCP schema, sandbox diagnostics, docs, and release gates |
+| `cli:npm.guard-semantic-quality` | `npm run guard:semantic-quality` | `package.json` | beta | active | Exact-commit semantic production-reachability and export-ownership engine; local receipts default under Git metadata |
 | `cli:npm.guard-safeguard-diagnostics` | `npm run guard:safeguard-diagnostics` | `package.json` | stable | active | Deterministic diagnostic map for guard-chain wiring, sensitive-publication anchors, runtime-boundary anchors, public-exposure guards, and portability blockers |
 | `cli:npm.guard-guard-test-coverage` | `npm run guard:guard-test-coverage` | `package.json` | stable | active | Meta-guard: every guard-family script (`scripts/*guard*.ts`, `scripts/check-*.ts`) must ship a companion test wired into `verify:push:branch`, or carry a `// meta-guard:no-test <reason>` opt-out |
 | `cli:npm.guard-test-integrity` | `npm run guard:test-integrity` | `package.json` | internal | active | CI wrapper for test-integrity baseline check (refs #511); skips when the plugin is absent only outside CI |
@@ -318,6 +319,8 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.work-index-regen` | `npm run work-index:regen` | `package.json` | stable | active | Regenerate `docs/work-index.md` |
 | `cli:npm.verify-console-design` | `npm run verify:console-design` | `package.json` | stable | active | Shared console design-system verification chain used by push and release gates |
 | `cli:npm.verify-console-browser` | `npm run verify:console-browser` | `package.json` | stable | active | Shared browser proof chain (`test:browser` + `test:browser:motion`) used by release/tag gates |
+| `cli:npm.verify-semantic` | `npm run verify:semantic` | `package.json` | beta | active | Manual enforcement adapter for semantic quality; not composed into required gates until a separately approved promotion |
+| `cli:npm.verify-semantic-shadow` | `npm run verify:semantic:shadow` | `package.json` | beta | active | Local/CI shadow adapter; emits findings and may retain a would-block receipt decision while exiting zero |
 | `cli:npm.verify-push-branch` | `npm run verify:push:branch` | `package.json` | stable | active | Composite verifier run before pushing a branch |
 | `cli:npm.verify-release` | `npm run verify:release` | `package.json` | beta | active | Release-readiness verifier; surface still settling |
 | `cli:npm.verify-publish` | `npm run verify:publish` | `package.json` | beta | active | Strict public-publication prep gate; expected to fail until `PRIVATE-ARCHIVE` rows are removed, sanitized, or reclassified |

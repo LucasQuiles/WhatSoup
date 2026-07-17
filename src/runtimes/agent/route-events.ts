@@ -2,9 +2,8 @@ import { appendFileSync, mkdirSync, renameSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
- * Fail-closed route-event + delegation-receipt sidecar (slice 4 — full
- * taxonomy per the grounding appendix §10/§5; the minimal shape landed in
- * slice 2).
+ * Fail-closed route-event sidecar (slice 4 — full taxonomy per the grounding
+ * appendix §10/§5; the minimal shape landed in slice 2).
  *
  * Contract: append-only per-instance NDJSON inside the trusted per-instance
  * boundary (same boundary as bot.db). Events carry route METADATA only —
@@ -114,64 +113,4 @@ export function emitRouteEvent(
     return;
   }
   appendBounded(dir, 'route-events.ndjson', JSON.stringify(ev) + '\n', warn, maxBytes);
-}
-
-export type DelegationReason =
-  | 'runtime-safety-review'
-  | 'complex-research'
-  | 'code-review'
-  | 'user-requested-review';
-
-const DELEGATION_REASONS: ReadonlySet<string> = new Set([
-  'runtime-safety-review',
-  'complex-research',
-  'code-review',
-  'user-requested-review',
-]);
-
-/**
- * Receipt for a delegated (reviewer/worker) pass — makes delegation visible,
- * never magical (B2 §5). Workers are advisory only; a receipt is a record of
- * what advised, not an authorization of anything.
- */
-export interface DelegationReceipt {
-  ts: number;
-  instance: string;
-  conversationKey: string | null;
-  delegationUsed: true;
-  reason: DelegationReason;
-  workers: string[];
-  modelsOrHarnesses: string[];
-  authority: 'advisory_only';
-  /** Never claim without evidence (UH-017): callers set true only after the
-   *  lead actually verified the worker output. */
-  leadVerified: boolean;
-  /** The `/why`-renderable summary; a receipt without one is observability-
-   *  incomplete and is rejected at emit. */
-  userVisibleSummary: string;
-}
-
-function receiptProblem(r: DelegationReceipt): string | null {
-  if (!DELEGATION_REASONS.has(r.reason)) return `unknown reason: ${String(r.reason).slice(0, 40)}`;
-  if (!Array.isArray(r.workers) || r.workers.length === 0) return 'empty workers';
-  if (typeof r.instance !== 'string' || r.instance.length === 0) return 'empty instance';
-  if (r.authority !== 'advisory_only') return 'delegation is advisory_only';
-  if (typeof r.userVisibleSummary !== 'string' || r.userVisibleSummary.trim().length === 0) {
-    return 'missing userVisibleSummary (observability-incomplete, UH-017)';
-  }
-  return null;
-}
-
-export function emitDelegationReceipt(
-  dir: string,
-  receipt: DelegationReceipt,
-  warn: (msg: string) => void,
-  maxBytes: number = ROUTE_EVENTS_MAX_BYTES,
-): void {
-  const problem = receiptProblem(receipt);
-  if (problem) {
-    warn(`delegation-receipt rejected (${problem}) - not written (UH-018)`);
-    return;
-  }
-  appendBounded(dir, 'delegation-receipts.ndjson', JSON.stringify(receipt) + '\n', warn, maxBytes);
 }

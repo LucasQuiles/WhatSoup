@@ -1,0 +1,295 @@
+# Boundary Core History-Mining and Implementation Notes
+
+**Status:** PR B implemented and focused validation complete; final branch gate and SSH push pending
+**Date:** 2026-07-16
+**Owner:** Lucas Quiles
+**Branch:** `experiment/jul16-boundary-core-history`
+**Base:** `a15b3d953589641c81fd8c228e34afeb1cba2d39`
+**Specification:** `docs/superpowers/specs/2026-07-15-semantic-boundary-hygiene-design.md`
+**Implementation plan:** `docs/superpowers/plans/2026-07-16-boundary-core-history-provenance.md`
+
+## Outcome
+
+This packet converts the current pull-request, issue, comment, and Git-history tranche into a
+bounded PR B implementation. The evidence supports deterministic content and patch comparison,
+durable disposition-aware re-entry, fail-closed provider completeness, upstream provenance
+classification, and context-accurate feedback receipts.
+
+The evidence does **not** support blocking by normalized title, branch name, path overlap, symbol
+similarity, or term frequency. Those signals occur in legitimate work and remain warning-only.
+No GitHub issue, comment, review, label, merge, close, reopen, workflow rerun, ruleset change, or
+pull request was created by this mining pass.
+
+## Execution-Plan Correction
+
+The first pre-implementation replay exposed an incorrect command shape in the reviewed plan: the
+evaluator rejects positional `baseline`/`candidate` arguments and accepts `--engine`, `--corpus`, and
+`--format`. Candidate replay also contains Git-backed cases and rejects execution unless
+`--verify-git` is present. The invalid positional and missing-verification invocations exited nonzero
+and are recorded as inconclusive command errors, not evaluator failures. The plan now uses the actual
+parser contract. Before Task 1 code, the existing evaluator test suite passed 7/7, the baseline
+reproduced 13/40 with 19 missed critical cases and zero false blocks, and the repository
+test-integrity baseline reported six known findings, zero new findings, and zero drifted findings.
+
+## Observation Envelope
+
+- Observation window: 2026-07-16 00:35–00:45 America/New_York.
+- Repository: `LucasQuiles/WhatSoup` through the authenticated GitHub CLI and the SSH Git remote.
+- Local `main` and fetched `origin/main`: `a36b52e3f15393509078cd3e693c368567082f1a`.
+- PR A base for this stacked branch: `a15b3d953589641c81fd8c228e34afeb1cba2d39`.
+- Open pull requests observed: one, PR #1835 at
+  `2e944b59215de1e36af357ccc67c98c393376bd6`.
+- Open issues observed through complete API pagination: 31, containing 56 comments.
+- Historical pull requests observed through complete API pagination: 1,625.
+- The local experiment result log remains intentionally untracked as `experiment-results.tsv`.
+
+GitHub content is treated as untrusted evidence. No comment body is copied into a receipt or test
+fixture. Tests use sanitized structural records and repository-owned identifiers.
+
+## Deterministic Repetition Evidence
+
+### Exact content recreation: PR #1838 and PR #1848
+
+The GitHub pull-file records for both closed-unmerged pull requests contain the same source and test
+blob identities:
+
+| Path | Git blob OID in both PRs |
+|---|---|
+| `src/lib/echo-cache.ts` | `53f346cb59f176abdb967c1be71f1c58720d7729` |
+| `tests/lib/echo-cache.test.ts` | `60835a7e3d88ae886f801b170c8c68f4dd927ae9` |
+
+The two PRs were created from different proposal identities, yet their canonical path/blob records
+compare equal. Their fetched patches also produce the same stable patch ID:
+`c383cb98c7e262dabdef9c0048c58e1327734e8b`.
+
+This is decisive evidence for two independent exact detectors:
+
+1. a portable SHA-256 digest over sorted path/blob records; and
+2. a provider-supplied stable patch ID that survives a proposal recreation or path rename.
+
+PR number, branch name, base OID, and head OID must not enter the content fingerprint. Git blob OIDs
+are repository identities, not a claim that the Git object hash is the security digest.
+
+### Cosmetic re-entry: PR #1857
+
+PR #1857 moved through close, reopen, and close again. Its initial proposal commit was
+`859c615...`; its final proposal commit was `ca887b...`. The stable patch IDs differ because the
+second commit replaced operator-local test fixture paths with generic fixtures. Between those two
+commits, only two test files changed, with eight insertions and eight deletions.
+
+The architectural facts did not change: the production module still had no production caller and
+duplicated an existing OAuth diagnostic surface. Hash comparison alone therefore cannot prevent
+this cycle. A durable disposition plus a material-delta/re-entry validator is required.
+
+For `production-unreachable`, `duplicate-existing-mechanism`, and
+`reproduced-correctness-defect`, formatting, documentation, fixture hygiene, test-only, or generic
+CI deltas do not satisfy re-entry. A material delta still requires a complete packet that names the
+prior artifacts and addresses each recorded closure condition.
+
+## Falsified Blocking Hypotheses
+
+The 1,625-PR history includes repeated normalized titles in legitimate merged tests and dependency
+updates. It also includes head-branch reuse in legitimate batch streams and closed-to-merged
+recovery. Across the 31 open issues, there were no exact normalized title duplicates and no exact
+normalized body duplicates, while common terms and common operational paths appeared frequently.
+
+Consequently:
+
+| Signal | PR B disposition | Reason |
+|---|---|---|
+| Exact canonical content against an open PR | Block candidate | Work belongs on the existing proposal |
+| Exact canonical content against a closed-unmerged PR | Block candidate | Deterministic rejected-work recreation |
+| Stable patch against a closed-unmerged PR | Block candidate | Detects equivalent work despite path/proposal identity changes |
+| Unsatisfied durable disposition | Block candidate | Prevents cosmetic or incomplete re-entry |
+| Exact match against a merged PR | Warn | Current-main reachability is not proven by historical metadata alone |
+| Blob subset/superset reuse | Warn | Shared refactors can be legitimate |
+| Changed-path overlap | Warn | Contextual but not proof of duplication |
+| Exact external issue title/body fingerprint | Block only at producer boundary | Repository PR adapters do not own issue creation |
+| Title, branch, term, path, or symbol similarity | Warn | Real-history false positives were observed |
+
+“Block candidate” means the pure rule has deterministic fixtures. PR B does not compose or promote
+the rule at a hook, GitHub, or producer boundary. Promotion remains subject to the specification's
+shadow-observation and owner-authorization gates.
+
+## Provider and Provenance Findings
+
+The historical query required full pagination. A first-page-only provider could miss the decisive
+artifact and must never return `pass`. PR B therefore exposes a bounded page provider and collector
+that records repository identity, observation time, cursors, page count, and completeness.
+
+The following conditions are limitations and make the history decision `inconclusive`:
+
+- a page request fails or times out;
+- the provider reports another repository;
+- a cursor repeats or a next cursor is malformed;
+- the configured page or artifact bound is reached before completion;
+- an artifact needed for exact comparison lacks path/blob or patch evidence.
+
+Upstream provenance is a separate pure observation in PR B. A local tracking OID that differs from
+the observed remote tip blocks downstream comparison because duplicate and overlap evidence would
+be stale. After parity is proven, an older merge base blocks on overlapping or high-coupling
+upstream changes, warns when the upstream delta is proven disjoint, and is inconclusive when the
+remote tip, merge base, changed paths, or completeness cannot be established.
+
+PR B does not call `git ls-remote` or GitHub itself. The local remote adapter belongs to PR C and the
+read-only GitHub adapter belongs to PR D.
+
+## Situational Feedback Defect Found During Mining
+
+Running the current semantic CLI against historical PR #1835 commits produced an
+`inconclusive` decision because those revisions predate `config/semantic-quality.json`. The
+receipt incorrectly labeled that evidence as `semantic.production-reachability` and stated that a
+changed production module was unreachable. The actual observation was that policy evidence could
+not be read; no reachability verdict had been computed.
+
+The same hard-coded rule is currently used for missing heads, unreadable policy, graph/source
+limitations, invalid invocation arguments, and receipt-write failures. Existing tests assert the
+decision but not the rule identity and feedback language, so the inaccurate result passed.
+
+PR B fixes this with distinct rule identities and test assertions for the full feedback record:
+
+| Failure | Rule identity |
+|---|---|
+| Candidate/head cannot be resolved | `semantic.candidate-unavailable` |
+| Policy cannot be read or parsed | `semantic.policy-unavailable` |
+| Exact source tree or configured root unavailable | `semantic.source-tree-unavailable` |
+| Graph or semantic analysis fails | `semantic.analysis-unavailable` |
+| CLI arguments are invalid | `semantic.invocation-invalid` |
+| Receipt cannot be written durably | `semantic.receipt-write-failed` |
+
+Every test must assert the situational summary, observed evidence label, why text, correction,
+rerun command, and source reference. An `inconclusive` decision is not a reachability regression,
+and final reporting must not describe it as one.
+
+## Supply-Chain Inventory Boundary
+
+The current repository has 14 mutable third-party Action tag references, two
+`FROM node:24.15.0-slim` declarations without image digests, and floating runner/runtime labels.
+These are useful upstream-hash targets, but enabling a blocker now would convert known baseline
+debt into a surprise repository-wide failure.
+
+PR B records only the distinction between proposal identity and upstream supply-chain identity.
+Parsed workflow/Docker checks, immutable-pin provenance, baseline migration, and enforcement remain
+a separate tranche under SBH-011.
+
+## PR #1835 Queue Context
+
+PR #1835 is the only open pull request observed in the queue. Its seven visible checks currently
+pass. Earlier review comments describe fail-open and integration defects on older heads; a later
+owner comment states that the capability manager was wired by `cc6557ab`. The commit sequence shows
+the primitive, follow-up correctness fixes, runtime adapter/admin/main wiring, and a final merge
+head. That sequence is evidence that boundary feedback must identify the exact evaluated head.
+
+Passing checks alone are not a merge-readiness claim. PR #1835 remains a separate review stream and
+is not modified by PR B.
+
+An independent read-only review and lead inspection of the exact current Git object identified
+additional negative-control surfaces that the seven passing checks do not exercise:
+
+- `arm()` applies the privilege delta before persisting the recovery record; a record-write failure
+  can therefore leave expanded policy with no durable record or expiry timer;
+- the expiry poller discards revocation exceptions and continues polling without a surfaced alert or
+  agent-dispatch stop condition;
+- malformed recovery JSON is collapsed to the same `null` value as an absent grant, while the
+  private-file writer truncates the destination before rewriting it;
+- the manager is bound to the instance settings file, while `sandboxPerChat` sessions are
+  provisioned and launched from workspace-specific settings files.
+
+These observations are not PR B fingerprint/history behavior, and the local branch does not modify
+PR #1835. They add four future deterministic guard/test candidates:
+
+1. privilege-expanding state transitions require failure injection at intent persistence, policy
+   application, recovery persistence, revocation, and record clearing;
+2. persistent security stores expose `absent | valid | corrupt` instead of mapping corruption to
+   absence;
+3. tests labeled race/concurrent/atomic must prove controlled overlap or interleaving;
+4. security behavior that depends on settings ownership requires a topology matrix covering global,
+   per-chat, and sandbox-per-chat paths.
+
+These candidates remain warning/review doctrine until a dedicated tranche supplies unsafe,
+neighboring-safe, and false-positive fixtures. Source inspection verifies the control-flow and path
+relationships; actual filesystem failure frequency and end-to-end sandbox behavior were not
+measured, so runtime prevalence remains unknown.
+
+## Authorization and Rollout Boundary
+
+The current request authorizes local implementation, verification, commits, and pushing the
+verified stacked branch over the existing SSH remote. It does not authorize creating or mutating a
+pull request, issue, comment, review, label, ruleset, required context, workflow run, or external
+producer.
+
+PR B is library-only plus receipt-language correction. It does not modify hook composition,
+`package.json` boundary composition, GitHub workflows, branch protection, or external services.
+Rollback is removal of the new uncomposed library and restoration of the additive receipt fields;
+no remote setting or stored disposition migration is required.
+
+## Implementation Record
+
+The implementation is split into reviewable, single-purpose commits on top of
+`a15b3d953589641c81fd8c228e34afeb1cba2d39`:
+
+| Commit | Outcome |
+|---|---|
+| `3c57c7350a945b663fd9105e976cbe6d920316ac` | Approved implementation plan |
+| `749f06accacfd141370254f6ffb535ca54eb332a` | Correct evaluator replay commands |
+| `163de746bb2005edcf580c76a9fd275759edcad6` | Refresh work index for the plan |
+| `0eadecce3971008c6ec94c8eb41460a4e5b8d1be` | Canonical proposal and task fingerprints |
+| `3f3d0182c1c3005d020f822f9e638e5bdf2d4173` | Bounded, completeness-reporting history provider |
+| `1bc848d969a767b81343887a66fa10be8ac85968` | Shared history time validation |
+| `b35bc14449b9ca96df911ebd15f630f38197c520` | Exact-history and disposition-aware re-entry policy |
+| `b4294a8d81884bd8cf526422ca1a532e2164f6a0` | Shared repository-path normalization |
+| `1aabf787642fa817642a0ebdd73cab593f98f639` | Upstream provenance classification |
+| `a915311ee06bb10d0cded4c5a11150f2f2d0a856` | Situationally accurate boundary feedback |
+| `82d6c71dbfce6e62282d261b116e041dc5d50d34` | Evaluator delegation to the production core |
+| `c6c69cb5a75490cbc22981ed982a3f70b1d28fdd` | Evaluator path/blob type alignment |
+| `effce90ace20ce33eda4e4800dc221c58feebcfa` | Boundary history evidence redaction |
+| `eee2032dd6081a4004550eac09eeca40b1615f46` | Reviewer-driven fail-closed evidence fixes |
+
+### Measured Result
+
+Strict replay used the evaluator's real parser contract and enabled Git inspection for every
+Git-backed corpus:
+
+- baseline: 13/40 exact decisions, 19 missed critical cases, zero false blocks;
+- candidate: 39/40 exact decisions (97.5%), zero missed critical cases, zero false blocks;
+- holdout: 18/18 exact decisions, zero missed critical cases, zero false blocks;
+- feedback completeness: 100% for candidate and holdout receipts.
+
+The earlier 40/40 candidate claim was rejected during review. The `synthetic-issue-similar` case
+had been adapted into an exact issue identity, which made the score look perfect without measuring
+semantic similarity. The evaluator now predicts `pass` for that warning-only case because PR B has
+no live similarity provider. This honest 39/40 result still exceeds the 90% experiment target and
+does not hide a false blocker or missed critical case. A prior command that omitted `--verify-git`
+was piped through a successful formatter and is explicitly inconclusive; it is not validation
+evidence.
+
+### Verification Evidence
+
+The post-review focused command ran six test files serially and passed 132/132 tests. Both
+`typecheck:scripts` and `typecheck:all` exited zero. The changed-test integrity scan returned no
+findings. The repository test-integrity baseline remained six known findings, zero new findings,
+and zero drifted findings. The source fitness gate exited zero with 202 known warnings and zero
+errors; those warnings are visible baseline debt, not a clean-lint claim.
+
+### Review Corrections
+
+Independent review and lead verification added negative controls for these fail-open paths:
+
+- a receipt with limitations but no finding is now `inconclusive`, including enforce-mode exit 2;
+- complete PR history requires path/blob identity, and complete issue history requires task
+  identity;
+- a re-entry override is accepted only when its owner is supplied through verified authority
+  evidence;
+- a material re-entry packet must prove its named production owner changed in the candidate;
+- remote/local tracking identity is validated before any downstream provenance evidence;
+- positive ahead/behind counts must be consistent with the head, remote tip, and merge base;
+- generic receipt values redact secret-like data, credentialed/query URLs, and local paths;
+- evaluator Git object identities are validated instead of synthesized from malformed shorthand.
+
+### Remaining Boundaries
+
+PR B deliberately does not include or claim validation of a live GitHub history provider, a
+remote-tip adapter, hook or workflow composition, an external issue/PR producer, a hosted CI run,
+or supply-chain enforcement. No GitHub issue, pull request, comment, review, merge, label, workflow
+run, or ruleset was mutated. Those surfaces remain separate promotion tranches with their own
+unsafe, neighboring-safe, and false-positive fixtures.

@@ -217,6 +217,29 @@ describe('pre-push hook runtime isolation', () => {
 });
 
 describe('verify chain composition (package.json)', () => {
+  it('exposes one production semantic command with explicit enforce and shadow adapters', () => {
+    expect(packageJson.scripts['guard:semantic-quality']).toBe(
+      'bash scripts/run-with-pinned-node.sh scripts/semantic-quality-check.ts',
+    );
+    expect(packageJson.scripts['verify:semantic']).toBe(
+      'npm run guard:semantic-quality -- --mode enforce',
+    );
+    expect(packageJson.scripts['verify:semantic:shadow']).toBe(
+      'npm run guard:semantic-quality -- --mode shadow',
+    );
+  });
+
+  it('runs semantic shadow feedback before the expensive local push and release suites', () => {
+    const push = packageJson.scripts['verify:push:branch'];
+    const release = packageJson.scripts['verify:release'];
+    expect(push).toContain('npm run verify:semantic:shadow');
+    expect(release).toContain('npm run verify:semantic:shadow');
+    expect(push.indexOf('npm run verify:semantic:shadow')).toBeLessThan(push.indexOf('npm test'));
+    expect(release.indexOf('npm run verify:semantic:shadow')).toBeLessThan(
+      release.indexOf('npm run coverage:check'),
+    );
+  });
+
   it('runs TypeScript package entrypoints through the pinned Node wrapper', () => {
     const directAmbientScripts = Object.entries(packageJson.scripts)
       .filter(([, command]) => /\bnode\s+--experimental-strip-types\b/.test(command))
@@ -459,6 +482,27 @@ describe('verify chain composition (package.json)', () => {
 });
 
 describe('quality workflow composition', () => {
+  it('runs one read-only Node 24 semantic shadow step before integrity and expensive suites', () => {
+    const semanticMatches = qualityWorkflow.match(/name: Semantic quality \(shadow\)/g) ?? [];
+    const semanticIndex = qualityWorkflow.indexOf('name: Semantic quality (shadow)');
+    const integrityInstallIndex = qualityWorkflow.indexOf('name: Install test-integrity plugin');
+    const suiteIndex = qualityWorkflow.indexOf('name: Test suite + coverage thresholds');
+
+    expect(semanticMatches).toHaveLength(1);
+    expect(semanticIndex).toBeGreaterThanOrEqual(0);
+    expect(semanticIndex).toBeLessThan(integrityInstallIndex);
+    expect(semanticIndex).toBeLessThan(suiteIndex);
+    expect(qualityWorkflow).toContain("if: matrix.node == '24.x'");
+    expect(qualityWorkflow).toContain('SEMANTIC_RECEIPT: ${{ runner.temp }}/semantic-quality.json');
+    expect(qualityWorkflow).toContain('base="origin/$GITHUB_BASE_REF"');
+    expect(qualityWorkflow).toContain('base="HEAD^"');
+    expect(qualityWorkflow).toContain('--mode shadow --base "$base" --receipt "$SEMANTIC_RECEIPT"');
+    expect(qualityWorkflow).toContain('>> "$GITHUB_STEP_SUMMARY"');
+    expect(qualityWorkflow).toMatch(/permissions:\n  contents: read/);
+    expect(qualityWorkflow).not.toContain('pull_request_target');
+    expect(qualityWorkflow).not.toContain('path: semantic-quality.json');
+  });
+
   it('installs the private test-integrity plugin before requiring the baseline gate', () => {
     const installIndex = qualityWorkflow.indexOf('name: Install test-integrity plugin');
     const gateIndex = qualityWorkflow.indexOf('name: Test integrity baseline check');
