@@ -359,6 +359,8 @@ export interface BoundaryToolCapability {
   sha256: string;
 }
 
+export const BOUNDARY_VERSIONLESS_TOOLS = ['kill', 'test', 'tr', 'wc'] as const;
+
 export function resolveBoundaryToolCapability(name: string): BoundaryToolCapability {
   if (!/^[a-z][a-z0-9-]{0,63}$/.test(name)) throw new Error(`unsupported tool name: ${name}`);
   const candidates = (process.env['PATH'] ?? '').split(path.delimiter).filter(Boolean);
@@ -378,11 +380,19 @@ export function resolveBoundaryToolCapability(name: string): BoundaryToolCapabil
     if (executable !== null) break;
   }
   if (executable === null) throw new Error(`required tool is unavailable: ${name}`);
-  const version = execFileSync(executable, ['--version'], {
-    encoding: 'utf8',
-    env: cleanGitEnv(),
-    stdio: ['ignore', 'pipe', 'pipe'],
-  }).split(/\r?\n/, 1)[0]!.trim();
+  const executableSha256 = sha256Bytes(readFileSync(executable));
+  let version: string;
+  try {
+    version = execFileSync(executable, ['--version'], {
+      encoding: 'utf8',
+      env: cleanGitEnv(),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).split(/\r?\n/, 1)[0]!.trim();
+    if (version.length === 0) throw new Error(`tool version is empty: ${name}`);
+  } catch (error) {
+    if (!(BOUNDARY_VERSIONLESS_TOOLS as readonly string[]).includes(name)) throw error;
+    version = `content-sha256:${executableSha256}`;
+  }
   if (name === 'gnu-timeout' && !version.includes('GNU coreutils')) {
     throw new Error('resolved timeout executable is not GNU coreutils');
   }
@@ -391,7 +401,7 @@ export function resolveBoundaryToolCapability(name: string): BoundaryToolCapabil
     name,
     realPath: executable,
     version,
-    sha256: sha256Bytes(readFileSync(executable)),
+    sha256: executableSha256,
   };
 }
 

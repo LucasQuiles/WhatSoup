@@ -605,6 +605,7 @@ export function registerSchemaCases(): void {
 
   it('[BCF00-U06] rejects profile-set and reserved-attempt contract substitutions', () => {
     const api = boundaryRun as unknown as {
+      BOUNDARY_VERSIONLESS_TOOLS?: readonly string[];
       RUN_CONTRACT_PROFILES?: Record<string, Record<string, unknown>>;
       RUN_ATTEMPT_CONTRACTS?: Record<string, Record<string, unknown>>;
       RUN_CHILD_CONTRACTS?: Record<string, Record<string, unknown>>;
@@ -617,6 +618,7 @@ export function registerSchemaCases(): void {
       };
     };
     expect(api.RUN_CONTRACT_PROFILES).toBeDefined();
+    expect(api.BOUNDARY_VERSIONLESS_TOOLS).toEqual(['kill', 'test', 'tr', 'wc']);
     expect(api.RUN_ATTEMPT_CONTRACTS).toBeDefined();
     expect(api.RUN_CHILD_CONTRACTS).toBeDefined();
     expect(typeof api.resolveBoundaryToolCapability).toBe('function');
@@ -690,6 +692,19 @@ export function registerSchemaCases(): void {
         verdict: 'Inconclusive',
       });
     }
+    const fakeToolRoot = mkdtempSync(path.join(tmpdir(), 'boundary-capability-reject-'));
+    fixtureRoots.push(fakeToolRoot);
+    const fakeRg = path.join(fakeToolRoot, 'rg');
+    writeFileSync(fakeRg, '#!/bin/sh\nexit 64\n', 'utf8');
+    chmodSync(fakeRg, 0o755);
+    const originalPath = process.env['PATH'];
+    process.env['PATH'] = fakeToolRoot;
+    try {
+      expect(() => api.resolveBoundaryToolCapability!('rg')).toThrow();
+    } finally {
+      if (originalPath === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = originalPath;
+    }
     for (const values of [
       [],
       [`upstream-observation,${OID},observation-run,${SHA}`, `other,${OID},other-run,${SHA_B}`],
@@ -710,6 +725,7 @@ export function registerSchemaCases(): void {
 
   it('[BCF00-N06] accepts the exact generated profile and reserved attempt contract', () => {
     const api = boundaryRun as unknown as {
+      BOUNDARY_VERSIONLESS_TOOLS?: readonly string[];
       RUN_CONTRACT_PROFILES?: Record<string, Record<string, unknown>>;
       resolveBoundaryToolCapability?: (name: string) => Record<string, unknown>;
       validateBoundaryProfileSelection?: (input: Record<string, unknown>) => ReturnType<typeof validateBoundaryRun>;
@@ -720,6 +736,7 @@ export function registerSchemaCases(): void {
       };
     };
     expect(api.RUN_CONTRACT_PROFILES).toBeDefined();
+    expect(api.BOUNDARY_VERSIONLESS_TOOLS).toEqual(['kill', 'test', 'tr', 'wc']);
     expect(typeof api.resolveBoundaryToolCapability).toBe('function');
     expect(typeof api.validateBoundaryProfileSelection).toBe('function');
     expect(typeof api.validateBoundaryAttemptInvocation).toBe('function');
@@ -741,6 +758,35 @@ export function registerSchemaCases(): void {
       outputPaths: [],
       headAnchor: 'entry',
     })).toMatchObject({ ok: true, exitCode: 0, verdict: 'Pass' });
+
+    const fakeToolRoot = mkdtempSync(path.join(tmpdir(), 'boundary-capability-fallback-'));
+    fixtureRoots.push(fakeToolRoot);
+    const fakeTr = path.join(fakeToolRoot, 'tr');
+    writeFileSync(fakeTr, '#!/bin/sh\nexit 64\n', 'utf8');
+    chmodSync(fakeTr, 0o755);
+    const originalPath = process.env['PATH'];
+    process.env['PATH'] = fakeToolRoot;
+    try {
+      const capability = api.resolveBoundaryToolCapability('tr');
+      expect(capability).toMatchObject({
+        name: 'tr',
+        realPath: realpathSync(fakeTr),
+        sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      });
+      expect(capability['version']).toBe(`content-sha256:${capability['sha256']}`);
+    } finally {
+      if (originalPath === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = originalPath;
+    }
+
+    for (const name of ['rg', 'tr', 'sort', 'wc']) {
+      expect(api.resolveBoundaryToolCapability(name), name).toMatchObject({
+        name,
+        realPath: expect.stringMatching(/^\//),
+        version: expect.stringMatching(/^.{1,256}$/),
+        sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      });
+    }
     expect(api.parseBoundaryChildPins('bcf00-reconciliation', OID, [
       `upstream-observation,${OID},observation-run,${SHA}`,
     ])).toMatchObject({
