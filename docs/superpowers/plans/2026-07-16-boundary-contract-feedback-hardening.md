@@ -1015,6 +1015,12 @@ canonical `run.requiredChildPins` array, sorted by alias, and requires its alias
 `alias`, `head`, `runId`, and `manifestSha256`; no sidecar, environment value, or later import option
 may replace or edit the manifest-bound pins.
 
+A profile-owned `Create:` path is supplied through both `--allow-path` and `--allow-untracked`.
+It may be absent at init; the entry snapshot records only declared untracked paths that exist.
+Later materialization is admitted only when every tracked and declared-untracked delta belongs to
+the profile-owned set. Any undeclared untracked path still fails snapshot capture, and the scope
+attempt must refresh the exact snapshot after the new files are staged before the commit transition.
+
 Canonical active-manifest storage is not the immutability boundary. During the same exclusive init
 operation, the helper also exclusively writes canonical `run_init.json` and its exact
 `run_init.sha256` lock before returning success. `RunInitAnchor` freezes the init-owned projection:
@@ -2773,6 +2779,22 @@ Recover from pre-merge commit `3baf6d791b15ce0ccbea4a6b9ea88f891cc5dff2` on a di
 branch. Regenerate both tracked work-index artifacts after this note, require `guard:work-index` to
 pass, commit the bounded documentation/index correction, and rerun the complete BCF-00 chain under
 fresh IDs before BCF-01 or BCF-02.
+
+Sixteenth recovery note for finalized BCF-00/BCF-01 Recovery12 and preserved BCF-02 run
+`bcf02-catalog-6d6a5aff8-20260717a`: all four inventory attempts and exact stdout admission passed,
+but catalog RED was rejected before execution because the four new scaffold paths were not
+declared untracked. A second init then proved the deeper seam: successor init verifies a clean
+predecessor before snapshot capture, while declared untracked paths were required to already exist.
+That made every profile-owned `Create:` path impossible to introduce without invalidating the
+predecessor. Neither failed init recorded a test result or Git transition.
+
+Preserve the incomplete catalog runs and their named catalog-tranche stash. Recover from pre-merge
+commit `030d4f1593390d7a33fb278fdca6482e02b2e3f0` on a distinct branch. Snapshot capture must accept
+an absent declared create path, record it only after materialization, admit its change only inside
+the profile-owned set, and continue rejecting every undeclared untracked path. Add a direct
+absent/materialized/foreign-path regression, refresh the work index after this note, and commit the
+bounded helper/test fix with subject `fix(quality): admit declared create paths`. Then rerun BCF-00
+and BCF-01 under fresh IDs before recreating BCF-02 with all four new paths declared untracked.
 
 ```bash
 git rev-parse --show-toplevel
