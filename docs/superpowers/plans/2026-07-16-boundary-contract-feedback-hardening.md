@@ -2553,6 +2553,16 @@ parent of a reachable merge whose second parent is the profile-owned pinned OID,
 otherwise retain the current premerge head. Re-run the full observation and reconciliation under
 new run IDs; only their fresh immutable receipts may advance BCF-00.
 
+Third recovery note for preserved run `bcf00-observation-ccfec077-20260717a`: its validator child
+exited zero with 58 passing assertions and an unchanged snapshot, but structured admission correctly
+rejected the executable marker roster because later exit-parser regression `[BCF00-S01]` was not in
+the frozen 33-marker BCF-00 registry. Preserve that run as Inconclusive. Keep the exit-parser
+regression unmarked, add a bounded `vitest list` guard that compares executable reserved markers to
+the frozen registry, and commit only that test correction with subject
+`test(quality): bind validator marker roster`. Re-run the full 59-test suite and typecheck, then use
+a fresh observation ID anchored at the corrective commit; neither the prior child exit nor its
+structured result may be promoted.
+
 ```bash
 git rev-parse --show-toplevel
 git rev-parse HEAD

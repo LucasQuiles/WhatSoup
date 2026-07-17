@@ -407,6 +407,18 @@ OID and make the regression select the historical merge's first parent before bu
 fixture. Then create new observation and reconciliation run IDs; no result from the failed run may
 be promoted or overwritten.
 
+## 2026-07-17 executable-marker recovery
+
+Fresh run `bcf00-observation-ccfec077-20260717a` preserved a zero-exit validator child with 58
+passing assertions and identical pre/post snapshots, then correctly remained Inconclusive because
+structured admission found reserved marker `[BCF00-S01]` outside the frozen 33-marker registry. The
+marker was introduced by the later exit-parser regression; expanding the registry would contradict
+the approved contract. Preserve the failed run. The corrective commit keeps that regression
+unmarked and adds a bounded executable-roster check through `vitest list`. Its focused RED showed
+only the extra marker, and its focused GREEN passed all 59 assertions. A fresh observation must
+re-run the suite and typecheck after the corrective commit; the failed run is never retried or
+promoted.
+
 ## Authorization Boundary
 
 The planning packet's initial approval authorized writing and committing the local specification,
