@@ -150,6 +150,8 @@ function isSecretToolUsageHelpExit(err: unknown): boolean {
  * Returns the trimmed value, or null if unavailable.
  */
 export function lookupCredential(service: string, options: CredentialLookupOptions = {}): string | null {
+  if (!isValidCredentialService(service)) return null;
+
   const lookupEnv = (): string | null => {
     const envKey = SERVICE_ENV_MAP[service];
     if (!envKey) return null;
@@ -195,9 +197,9 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
     service,
     ...(options.skipMigrationFallbacks === true ? [] : (SERVICE_MIGRATION_FALLBACKS[service] ?? [])),
   ];
-  const secretToolArgs = (candidate: string, includeOptions: boolean): string[] => {
+  const secretToolArgs = (candidate: string): string[] => {
     const args = ['lookup', 'service', candidate];
-    if (includeOptions && options.user) args.push('user', options.user);
+    if (options.user !== undefined) args.push('user', options.user);
     return args;
   };
 
@@ -206,7 +208,7 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
       try {
         const raw = execFileSync(
           'secret-tool',
-          secretToolArgs(candidate, index === 0),
+          secretToolArgs(candidate),
           keyringExecOptions,
         );
         const val = (typeof raw === 'string' ? raw : raw.toString('utf-8')).trim();
@@ -226,7 +228,7 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
       const username = os.userInfo().username;
       for (const [index, candidate] of services.entries()) {
         try {
-          const account = index === 0 && options.user ? options.user : username;
+          const account = options.user ?? username;
           const raw = execFileSync(
             'security',
             ['find-generic-password', '-s', candidate, '-a', account, '-w'],
@@ -374,17 +376,13 @@ export function writeCredential(
   value: string,
   options: { user?: string } = {},
 ): CredentialWriteResult {
+  if (!isValidCredentialService(service)) {
+    throw new KeyringWriteError('KEYRING_WRITE_FAILED', 'credential write failed for invalid service');
+  }
   const backend = detectKeyringBackend();
   const account = options.user ?? os.userInfo().username;
 
   if (backend === 'macos-keychain') {
-    if (options.user === undefined) {
-      try {
-        assertValidFileStoreService(service);
-      } catch {
-        throw new KeyringWriteError('KEYRING_WRITE_FAILED', `credential mirror failed for service ${service}`);
-      }
-    }
     try {
       // CRED-1: never put the secret on argv (world-visible via `ps -ww` for the exec
       // lifetime). `-w` as the LAST option makes `security` prompt for the password on
@@ -462,13 +460,15 @@ function fileStorePath(service: string): string {
   return path.join(fileStoreDir(), `${service}.key`);
 }
 
+function isValidCredentialService(service: string): boolean {
+  return service.length > 0 &&
+    !service.includes('/') &&
+    !service.includes('\\') &&
+    !service.includes('\0');
+}
+
 function assertValidFileStoreService(service: string): void {
-  if (
-    service.length === 0 ||
-    service.includes('/') ||
-    service.includes('\\') ||
-    service.includes('\0')
-  ) {
+  if (!isValidCredentialService(service)) {
     throw new Error('invalid credential service name');
   }
 }
@@ -557,6 +557,7 @@ export function deleteCredential(
   options: { user?: string } = {},
 ): CredentialDeleteResult {
   const backend = detectKeyringBackend();
+  if (!isValidCredentialService(service)) return { deleted: false, backend };
   const account = options.user ?? os.userInfo().username;
 
   if (backend === 'macos-keychain') {

@@ -2932,8 +2932,8 @@ def _keychain_secret_status(
 ) -> str:
     """darwin keychain read for the first resolvable candidate.
     Returns 'present' | 'missing' | 'timeout' | 'probe_error_<detail>'."""
-    for index, candidate in enumerate(candidates):
-        candidate_account = user if index == 0 and user is not None else account
+    for candidate in candidates:
+        candidate_account = user if user is not None else account
         try:
             proc = subprocess.run(
                 ["security", "find-generic-password", "-s", candidate, "-a", candidate_account, "-w"],
@@ -2960,9 +2960,9 @@ def _secret_tool_status(
     """linux secret-tool read for the first resolvable candidate.
     Returns 'present' | 'missing' | 'empty' | 'timeout' | 'probe_error_<detail>'."""
     saw_empty = False
-    for index, candidate in enumerate(candidates):
+    for candidate in candidates:
         args = ["secret-tool", "lookup", "service", candidate]
-        if index == 0 and user is not None:
+        if user is not None:
             args.extend(["user", user])
         try:
             proc = subprocess.run(

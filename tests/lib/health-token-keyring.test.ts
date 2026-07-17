@@ -80,24 +80,24 @@ describe('health token keyring canonical service', () => {
     );
   });
 
-  it('can try legacy keyring before shared env after a scoped canonical miss', () => {
+  it('keeps the requested user on a secret-tool migration alias after a scoped canonical miss', () => {
     Object.defineProperty(process, 'platform', { value: 'linux' });
     process.env.WHATSOUP_HEALTH_TOKEN = 'shared-env-token';
     mockedExecFileSync.mockReturnValueOnce(Buffer.from(''));
     mockedExecFileSync.mockImplementationOnce(() => { throw new Error('missing canonical'); });
     mockedExecFileSync.mockReturnValueOnce(Buffer.from('legacy-secret\n'));
 
-    expect(lookupCredential('whatsoup-health-token', { user: 'mwlab', skipEnv: true })).toBe('legacy-secret');
+    expect(lookupCredential('whatsoup-health-token', { user: 'test-user', skipEnv: true })).toBe('legacy-secret');
     expect(mockedExecFileSync).toHaveBeenNthCalledWith(
       2,
       'secret-tool',
-      ['lookup', 'service', 'whatsoup-health-token', 'user', 'mwlab'],
+      ['lookup', 'service', 'whatsoup-health-token', 'user', 'test-user'],
       expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
     );
     expect(mockedExecFileSync).toHaveBeenNthCalledWith(
       3,
       'secret-tool',
-      ['lookup', 'service', 'whatsoup_health'],
+      ['lookup', 'service', 'whatsoup_health', 'user', 'test-user'],
       expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
     );
   });
@@ -125,22 +125,22 @@ describe('health token keyring canonical service', () => {
     mockedExecFileSync.mockImplementationOnce(() => { throw new Error('missing canonical'); });
     mockedExecFileSync.mockImplementationOnce(() => { throw new Error('missing legacy'); });
 
-    expect(lookupCredential('whatsoup-health-token', { user: 'mwlab' })).toBe('shared-env-token');
+    expect(lookupCredential('whatsoup-health-token', { user: 'test-user' })).toBe('shared-env-token');
     expect(mockedExecFileSync).toHaveBeenNthCalledWith(
       2,
       'secret-tool',
-      ['lookup', 'service', 'whatsoup-health-token', 'user', 'mwlab'],
+      ['lookup', 'service', 'whatsoup-health-token', 'user', 'test-user'],
       expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
     );
     expect(mockedExecFileSync).toHaveBeenNthCalledWith(
       3,
       'secret-tool',
-      ['lookup', 'service', 'whatsoup_health'],
+      ['lookup', 'service', 'whatsoup_health', 'user', 'test-user'],
       expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
     );
   });
 
-  it('checks canonical macOS keychain account with instance user before legacy local-account fallback', () => {
+  it('keeps the requested macOS account on a migration alias after a scoped canonical miss', () => {
     Object.defineProperty(process, 'platform', { value: 'darwin' });
     mockedExecFileSync.mockImplementationOnce(() => { throw new Error('missing canonical'); });
     mockedExecFileSync.mockReturnValueOnce(Buffer.from('legacy-secret\n'));
@@ -155,7 +155,7 @@ describe('health token keyring canonical service', () => {
     expect(mockedExecFileSync).toHaveBeenNthCalledWith(
       2,
       'security',
-      ['find-generic-password', '-s', 'whatsoup_health', '-a', 'local-user', '-w'],
+      ['find-generic-password', '-s', 'whatsoup_health', '-a', 'test-user', '-w'],
       expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
     );
   });
@@ -166,17 +166,17 @@ describe('health token keyring canonical service', () => {
     mockedExecFileSync.mockImplementationOnce(() => { throw new Error('missing canonical'); });
     mockedExecFileSync.mockReturnValueOnce(Buffer.from('legacy-secret\n'));
 
-    expect(lookupCredential('whatsoup-health-token', { user: 'mwlab' })).toBe('legacy-secret');
+    expect(lookupCredential('whatsoup-health-token', { user: 'test-user' })).toBe('legacy-secret');
     expect(mockedExecFileSync).toHaveBeenNthCalledWith(
       2,
       'secret-tool',
-      ['lookup', 'service', 'whatsoup-health-token', 'user', 'mwlab'],
+      ['lookup', 'service', 'whatsoup-health-token', 'user', 'test-user'],
       expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
     );
     expect(mockedExecFileSync).toHaveBeenNthCalledWith(
       3,
       'secret-tool',
-      ['lookup', 'service', 'whatsoup_health'],
+      ['lookup', 'service', 'whatsoup_health', 'user', 'test-user'],
       expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
     );
   });

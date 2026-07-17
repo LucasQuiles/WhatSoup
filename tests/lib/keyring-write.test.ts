@@ -12,6 +12,7 @@ import {
   KeyringWriteError,
   _resetBackendCache,
   _setFileStoreDirForTests,
+  _setOpenCodeAuthDirForTests,
   lookupCredential,
 } from '../../src/lib/keyring.ts';
 import * as os from 'node:os';
@@ -277,5 +278,63 @@ describe('lookupCredential — flag-injection guards', () => {
     lookupCredential('deepseek', { skipEnv: true });
     const call = execFileSyncMock.mock.calls.find((c) => c[0] === 'security');
     expect(call![1]).toEqual(['find-generic-password', '-s', 'deepseek', '-a', os.userInfo().username, '-w']);
+  });
+});
+
+const INVALID_SERVICES = ['', 'nested/service', 'nested\\service', 'nul\0service'] as const;
+
+describe.each([
+  { platform: 'darwin' as const, backend: 'macos-keychain' as const },
+  { platform: 'linux' as const, backend: 'secret-tool' as const },
+])('invalid service IDs — $platform', ({ platform, backend }) => {
+  let authDir: string;
+
+  beforeEach(() => {
+    _resetBackendCache();
+    vi.stubGlobal('process', { ...process, platform, env: { ...process.env } } as unknown as NodeJS.Process);
+    execFileSyncMock.mockReset();
+    execFileSyncMock.mockReturnValue(Buffer.from(''));
+    authDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-invalid-auth-'));
+    _setOpenCodeAuthDirForTests(authDir);
+    fs.writeFileSync(
+      path.join(authDir, 'auth.json'),
+      JSON.stringify(Object.fromEntries(INVALID_SERVICES.map((service) => [service, { key: 'opencode-value' }]))),
+      { mode: 0o600 },
+    );
+  });
+
+  afterEach(() => {
+    _setOpenCodeAuthDirForTests(null);
+    fs.rmSync(authDir, { recursive: true, force: true });
+    vi.unstubAllGlobals();
+  });
+
+  it.each(INVALID_SERVICES)('returns null for invalid lookup %j without child or OpenCode access', (service) => {
+    expect(lookupCredential(service, { skipEnv: true })).toBeNull();
+    expect(execFileSyncMock).not.toHaveBeenCalled();
+  });
+
+  it.each(INVALID_SERVICES)('throws a sanitized write error for invalid service %j without child access', (service) => {
+    let caught: unknown;
+    try { writeCredential(service, 'sensitive-invalid-value', { user: 'bot' }); } catch (err) { caught = err; }
+
+    expect(caught).toBeInstanceOf(KeyringWriteError);
+    expect((caught as KeyringWriteError).code).toBe('KEYRING_WRITE_FAILED');
+    expect(JSON.stringify(caught)).not.toContain('sensitive-invalid-value');
+    expect(execFileSyncMock).not.toHaveBeenCalled();
+  });
+
+  it.each(INVALID_SERVICES)('returns false for invalid delete %j without forwarding it to the backend', (service) => {
+    expect(deleteCredential(service, { user: 'bot' })).toEqual({ deleted: false, backend });
+    if (platform === 'darwin') {
+      expect(execFileSyncMock).not.toHaveBeenCalled();
+    } else {
+      expect(execFileSyncMock).toHaveBeenCalledTimes(1);
+      expect(execFileSyncMock).toHaveBeenCalledWith(
+        'secret-tool',
+        ['--help'],
+        expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
+      );
+    }
   });
 });

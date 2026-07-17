@@ -492,6 +492,59 @@ def test_credential_presence_scoped_env_is_checked_after_keychain_miss(monkeypat
     assert len(keychain_calls) == 1
 
 
+def test_credential_presence_scoped_darwin_alias_keeps_requested_user(monkeypatch):
+    commands = []
+    monkeypatch.setattr(_mod, "HOST_PLATFORM", "darwin")
+    monkeypatch.setattr(_mod, "service_env_var", lambda _service: "ZAI_API_KEY")
+    monkeypatch.setattr(_mod, "dry_credential_status", lambda _service: None)
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+    monkeypatch.setattr(_mod, "secret_file_has_service_key", lambda _service, _env_key: False)
+    monkeypatch.setattr(_mod, "whatsoup_keyfile_present", lambda _service: False)
+
+    def fake_run(cmd, *_args, **_kwargs):
+        commands.append(cmd)
+        if "zai-api-key" in cmd:
+            return _FakeProc(0, "alias-secret")
+        return _FakeProc(1, "")
+
+    monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+
+    present, source, status = _mod.provider_credential_presence("glm", 15, user="bot")
+
+    assert (present, source, status) == (True, "macos_keychain", "present")
+    assert commands == [
+        ["security", "find-generic-password", "-s", "glm", "-a", "bot", "-w"],
+        ["security", "find-generic-password", "-s", "zai-api-key", "-a", "bot", "-w"],
+    ]
+
+
+def test_credential_presence_scoped_secret_tool_alias_keeps_requested_user(monkeypatch):
+    commands = []
+    monkeypatch.setattr(_mod, "HOST_PLATFORM", "linux")
+    monkeypatch.setattr(_mod.shutil, "which", lambda _command: "/usr/bin/secret-tool")
+    monkeypatch.setattr(_mod, "service_env_var", lambda _service: "ZAI_API_KEY")
+    monkeypatch.setattr(_mod, "dry_credential_status", lambda _service: None)
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+    monkeypatch.setattr(_mod, "secret_file_has_service_key", lambda _service, _env_key: False)
+    monkeypatch.setattr(_mod, "whatsoup_keyfile_present", lambda _service: False)
+
+    def fake_run(cmd, *_args, **_kwargs):
+        commands.append(cmd)
+        if "zai-api-key" in cmd:
+            return _FakeProc(0, "alias-secret")
+        return _FakeProc(1, "")
+
+    monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+
+    present, source, status = _mod.provider_credential_presence("glm", 15, user="bot")
+
+    assert (present, source, status) == (True, "secret_tool", "present")
+    assert commands == [
+        ["secret-tool", "lookup", "service", "glm", "user", "bot"],
+        ["secret-tool", "lookup", "service", "zai-api-key", "user", "bot"],
+    ]
+
+
 def test_credential_presence_ocw_env_only_is_not_provisioned(monkeypatch):
     # ocw .env present but no keychain and no .key store -> NOT runtime-resolvable; diagnostic only.
     _arm_presence(monkeypatch, ocw_env_present=True, keychain_returncode=1, keychain_stdout="", keyfile_present=False)
