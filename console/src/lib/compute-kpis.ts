@@ -51,6 +51,16 @@ export function isLineConnected(line: LineInstance): boolean {
  * A non-stale line with an explicit `whatsapp.connected === false` (or a
  * `connection.state` other than `connected`) IS a confirmed disconnect, not
  * unknown — that fresh signal is decisive.
+ *
+ * Edge case: a body with `whatsapp.connected === true` but a
+ * `connection.state` other than `connected` also lands in the confirmed-
+ * disconnect remainder here (neither connected nor unknown), since this
+ * function only checks whether `connected` is present, not whether it
+ * agrees with `connection.state` — that agreement is `isLineConnected`'s
+ * job. Safe today because the ONE emitter (src/core/health.ts) sets
+ * `connected` only when `connection.state === 'connected'` also holds (see
+ * `isLineConnected`'s branch (b)), so the two fields never actually
+ * disagree. Revisit this predicate if a future emitter ever decouples them.
  */
 export function isLineConnectivityUnknown(line: LineInstance): boolean {
   if (line.status === 'online') return false;

@@ -1069,6 +1069,31 @@ describe('SoupKitchen filter behavior', () => {
     expect(getKpiCard('Lines Connected').getAttribute('aria-pressed')).toBe('true');
   });
 
+  it('keeps a degraded-but-connected line in the "Lines Connected" filtered view (#1881)', () => {
+    // The literal symptom #1881 fixes: a line whose WhatsApp transport is
+    // genuinely up (fresh whatsapp.connected===true + connection.state
+    // 'connected') must NOT disappear from the "Connected" filter just
+    // because its control-plane health status is 'degraded'. This is a
+    // regression guard on the shared isLineConnected predicate, not a new
+    // behavior — it should already pass.
+    const degradedConnectedLine = makeLine({
+      name: 'foxtrot',
+      status: 'degraded',
+      stale: false,
+      health: {
+        status: 'ok',
+        uptime_seconds: 1,
+        messages_total: 0,
+        whatsapp: { connected: true, connection: { state: 'connected' } },
+        sqlite: { messages_total: 0, schema_version: 5 },
+      },
+    });
+    const withDegradedConnected = [...lines, degradedConnectedLine];
+    renderPage({ lines: withDegradedConnected });
+    fireEvent.click(getKpiCard('Lines Connected'));
+    expect(visibleTableLineNames(withDegradedConnected)).toEqual(['alpha', 'bravo', 'echo', 'foxtrot']);
+  });
+
   it('clicking "Need Attention" KPI filters to non-online lines and errored online lines', () => {
     const attentionLines = [
       ...lines,
