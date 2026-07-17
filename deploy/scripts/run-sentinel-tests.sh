@@ -29,4 +29,6 @@ echo "== selfcheck installer static guard =="
 bash deploy/scripts/tests/test_selfcheck_installer.sh | tee "$tmp/selfcheck_installer.out" | grep -q SELFCHECK_INSTALLER_PASS || { echo "selfcheck installer FAIL"; cat "$tmp/selfcheck_installer.out"; exit 1; }
 echo "== sentinel installer static guard =="
 bash deploy/scripts/tests/test_sentinel_installer.sh | tee "$tmp/sentinel_installer.out" | grep -q SENTINEL_INSTALLER_PASS || { echo "sentinel installer FAIL"; cat "$tmp/sentinel_installer.out"; exit 1; }
+echo "== runtime-receipt capture producer gate (#1867) =="
+"${PYTEST_CMD[@]}" deploy/scripts/receipts/tests/test_capture_runtime_receipt.py --import-mode=importlib -q
 echo "ALL_SENTINEL_PLAN1_PLAN2_TESTS_PASS"
