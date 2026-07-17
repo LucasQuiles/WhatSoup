@@ -1166,6 +1166,28 @@ function validPredecessorChainInput() {
 }
 
 describe('boundary run validator', () => {
+  it('[BCF00-S01] parses expected exits in linear bounded form', () => {
+    const api = boundaryRun as unknown as {
+      parseBoundaryExpectedExit?: (value: string) => Set<number> | 'nonzero' | null;
+    };
+    expect(typeof api.parseBoundaryExpectedExit).toBe('function');
+    if (!api.parseBoundaryExpectedExit) return;
+
+    expect(api.parseBoundaryExpectedExit('nonzero')).toBe('nonzero');
+    expect(api.parseBoundaryExpectedExit('0')).toEqual(new Set([0]));
+    expect(api.parseBoundaryExpectedExit('0,1,255')).toEqual(new Set([0, 1, 255]));
+
+    for (const value of [
+      '', '00', '01', '256', '1,1', '2,1', '0,', '1,,2',
+      ' 1', '1 ', '+1', '1.0', '1\n2',
+    ]) {
+      expect(api.parseBoundaryExpectedExit(value), value).toBeNull();
+    }
+
+    const adversarial = `${Array.from({ length: 10_000 }, () => '0,1').join(',')},x`;
+    expect(api.parseBoundaryExpectedExit(adversarial)).toBeNull();
+  });
+
   it('[BCF00-B01] accepts the complete active manifest wire contract', () => {
     const result = validateBoundaryRun(validManifest());
 
@@ -1373,6 +1395,7 @@ describe('boundary run validator', () => {
     }
 
     const canonical = canonicalJson(validManifest());
+    const canonicalWithCrLf = canonical.replaceAll('\n', '\r\n');
     const rawCases = [
       {
         bytes: Buffer.from(canonical.replace('"artifacts":[]', '"artifacts":[],"artifacts":[]')),
@@ -1383,7 +1406,7 @@ describe('boundary run validator', () => {
         code: 'duplicate-json-key',
       },
       { bytes: Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(canonical)]), code: 'invalid-json-byte' },
-      { bytes: Buffer.from(canonical.replace('\n', '\r\n')), code: 'invalid-json-byte' },
+      { bytes: Buffer.from(canonicalWithCrLf), code: 'invalid-json-byte' },
       { bytes: Uint8Array.from([0xff, ...Buffer.from(canonical)]), code: 'invalid-json' },
       { bytes: Buffer.from(canonical.replace('"parentDevice":1', '"parentDevice":-0')), code: 'invalid-json-number' },
       { bytes: Buffer.from(` ${canonical}`), code: 'noncanonical-json' },

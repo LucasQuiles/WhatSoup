@@ -2184,10 +2184,20 @@ export function createBoundaryDerivedRoot(reservation: BoundaryDerivedRootReserv
   }
 }
 
-function parseExpectedExit(value: string): Set<number> | 'nonzero' | null {
+export function parseBoundaryExpectedExit(value: string): Set<number> | 'nonzero' | null {
   if (value === 'nonzero') return 'nonzero';
-  if (!/^(?:0|[1-9]\d?\d?)(?:,(?:0|[1-9]\d?\d?))*$/.test(value)) return null;
-  const statuses = value.split(',').map(Number);
+  const tokens = value.split(',');
+  if (tokens.some((token) => {
+    if (token === '0') return false;
+    if (token.length === 0 || token.length > 3) return true;
+    const first = token.charCodeAt(0);
+    if (first < 49 || first > 57) return true;
+    return [...token].some((character) => {
+      const code = character.charCodeAt(0);
+      return code < 48 || code > 57;
+    });
+  })) return null;
+  const statuses = tokens.map(Number);
   if (
     statuses.some((status) => status > 255)
     || new Set(statuses).size !== statuses.length
@@ -2216,7 +2226,7 @@ export function validateBoundaryAttemptStatus(
   if (recorded.rawSignal !== null && !/^SIG[A-Z0-9]+$/.test(recorded.rawSignal)) {
     issues.push(issue('attempt-signal-invalid', 'raw signal must be a POSIX signal name'));
   }
-  const expected = parseExpectedExit(recorded.expectedExit);
+  const expected = parseBoundaryExpectedExit(recorded.expectedExit);
   if (expected === null) {
     issues.push(issue('attempt-expected-exit-invalid', 'expected exit declaration is not normalized'));
   }
@@ -3341,7 +3351,7 @@ export function validateBoundaryReviewInput(input: unknown): BoundaryValidationR
       'reproduction-contract-argv-invalid',
       `${base}.argv`,
     );
-    check(typeof contract['expectedExit'] === 'string' && parseExpectedExit(contract['expectedExit']) !== null, issues, 'reproduction-contract-exit-invalid', `${base}.expectedExit`);
+    check(typeof contract['expectedExit'] === 'string' && parseBoundaryExpectedExit(contract['expectedExit']) !== null, issues, 'reproduction-contract-exit-invalid', `${base}.expectedExit`);
     check(isOperationalReviewId(contract['toolName']), issues, 'reproduction-contract-tool-invalid', `${base}.toolName`);
     check(contract['deadlineMs'] === 900_000, issues, 'reproduction-contract-deadline-invalid', `${base}.deadlineMs`);
     check(contract['killGraceMs'] === 30_000, issues, 'reproduction-contract-grace-invalid', `${base}.killGraceMs`);
@@ -4006,7 +4016,7 @@ async function executeBoundaryWatchdog(
   if (spawnError !== null) issues.push(issue('watchdog-spawn-failed', spawnError));
   if (timedOut) issues.push(issue('watchdog-timeout', 'child exceeded the helper-owned monotonic deadline'));
   if (rawSignal !== null) issues.push(issue('watchdog-signal', `child terminated by ${rawSignal}`));
-  const expected = parseExpectedExit(options.expectedExit);
+  const expected = parseBoundaryExpectedExit(options.expectedExit);
   const expectationMet = rawExit !== null && expected !== null
     ? expected === 'nonzero' ? rawExit !== 0 : expected.has(rawExit)
     : false;

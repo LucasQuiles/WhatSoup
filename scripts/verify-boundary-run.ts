@@ -36,6 +36,7 @@ import {
   captureBoundaryWorktreeSnapshot,
   createBoundaryRunInitAnchor,
   createBoundaryDerivedRoot,
+  parseBoundaryExpectedExit,
   parseBoundaryChildPins,
   parseBoundaryJsonBytes,
   parseBoundaryMergePreviewStdout,
@@ -1045,13 +1046,7 @@ async function recordCommand(invocation: BoundaryRunInvocation, cwd: string): Pr
   } else {
     const commandArgv = invocation.commandArgv ?? [];
     const toolName = commandArgv[0];
-    const statuses = expectedExit === 'nonzero' ? [] : expectedExit.split(',').map(Number);
-    const normalizedExit = expectedExit === 'nonzero'
-      || (
-        /^(?:0|[1-9]\d?\d?)(?:,(?:0|[1-9]\d?\d?))*$/.test(expectedExit)
-        && statuses.every((status) => status <= 255)
-        && statuses.every((status, index) => index === 0 || status > statuses[index - 1]!)
-      );
+    const normalizedExit = parseBoundaryExpectedExit(expectedExit) !== null;
     if (
       manifest.run.profileId !== 'bcf-reproduction'
       || toolName === undefined
