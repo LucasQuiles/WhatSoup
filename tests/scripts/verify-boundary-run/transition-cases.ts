@@ -324,7 +324,11 @@ export function registerTransitionCases(): void {
     git(clone, ['config', 'user.name', 'WhatSoup Test']);
     git(clone, ['config', 'user.email', FIXTURE_EMAIL]);
     const branchHead = git(clone, ['rev-parse', 'HEAD']);
-    const baseHead = git(clone, ['rev-parse', 'origin/main']);
+    git(clone, ['update-ref', '-d', 'refs/remotes/origin/main']);
+    expect(git(clone, ['for-each-ref', '--format=%(refname)', 'refs/remotes/origin/main'])).toBe('');
+    const baseHead = git(clone, [
+      'commit-tree', `${branchHead}^{tree}`, '-m', 'test: synthetic pull request base',
+    ]);
     const pullRequestMergeHead = execFileSync(
       'git',
       ['commit-tree', `${branchHead}^{tree}`, '-p', baseHead, '-p', branchHead],
