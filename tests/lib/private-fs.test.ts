@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -16,9 +17,12 @@ import {
   appendPrivateJsonLineSync,
   assertPrivateDirectorySync,
   assertWritablePrivateFileSync,
+  deletePrivateFileSync,
   ensurePrivateDirectorySync,
   forceEnsurePrivateDirectorySync,
+  readPrivateFileSync,
   readFreshMarkerSync,
+  writeAtomicPrivateFileSync,
   writePrivateFileSync,
   writePrivateJsonMarkerSync,
 } from '../../src/lib/private-fs.ts';
@@ -26,6 +30,7 @@ import {
 let tmpRoot = '';
 
 afterEach(() => {
+  vi.doUnmock('node:crypto');
   vi.doUnmock('node:fs');
   vi.resetModules();
   if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
@@ -426,6 +431,215 @@ describe('writePrivateJsonMarkerSync', () => {
     // No leftover temp files in the directory.
     const { readdirSync } = await import('node:fs');
     expect(readdirSync(dir).filter((f) => f.includes('.tmp'))).toEqual([]);
+  });
+});
+
+describe('atomic private-file primitives', () => {
+  it('refuses a pre-existing temp symlink without changing its target', async () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    const target = join(dir, 'credential.key');
+    const decoy = join(root, 'decoy.key');
+    const fixedId = 'fixed-temp-id';
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(decoy, 'unchanged', { mode: 0o600 });
+    const tempPath = join(dir, `.credential.key.${process.pid}.${fixedId}.tmp`);
+    symlinkSync(decoy, tempPath);
+
+    vi.resetModules();
+    vi.doMock('node:crypto', async (importOriginal) => ({
+      ...(await importOriginal<typeof import('node:crypto')>()),
+      randomUUID: () => fixedId,
+    }));
+    const { writeAtomicPrivateFileSync: writeWithFixedTemp } = await import('../../src/lib/private-fs.ts');
+
+    let caught: NodeJS.ErrnoException | undefined;
+    try { writeWithFixedTemp(target, 'replacement', 'credential'); } catch (err) { caught = err as NodeJS.ErrnoException; }
+
+    expect(caught?.code).toBe('EEXIST');
+    expect(readFileSync(decoy, 'utf-8')).toBe('unchanged');
+    expect(lstatSync(tempPath).isSymbolicLink()).toBe(true);
+  });
+
+  it('fsyncs the file before rename and the parent directory after rename', async () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    const target = join(dir, 'credential.key');
+    const events: string[] = [];
+    const openedPaths = new Map<number, string>();
+    const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
+
+    vi.resetModules();
+    vi.doMock('node:fs', () => ({
+      ...actual,
+      openSync: vi.fn((filePath: Parameters<typeof actual.openSync>[0], flags: Parameters<typeof actual.openSync>[1], mode?: number) => {
+        const fd = actual.openSync(filePath, flags, mode);
+        openedPaths.set(fd, String(filePath));
+        return fd;
+      }),
+      fsyncSync: vi.fn((fd: number) => {
+        events.push(openedPaths.get(fd) === dir ? 'parent-fsync' : 'file-fsync');
+        return actual.fsyncSync(fd);
+      }),
+      renameSync: vi.fn((from: string, to: string) => {
+        events.push('rename');
+        return actual.renameSync(from, to);
+      }),
+    }));
+    const { writeAtomicPrivateFileSync: writeObserved } = await import('../../src/lib/private-fs.ts');
+
+    writeObserved(target, 'credential', 'credential');
+
+    expect(events).toEqual(['file-fsync', 'rename', 'parent-fsync']);
+    expect(statSync(target).mode & 0o777).toBe(0o600);
+  });
+
+  it('removes its temp file when rename fails', async () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    const target = join(dir, 'credential.key');
+    const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
+
+    vi.resetModules();
+    vi.doMock('node:fs', () => ({
+      ...actual,
+      renameSync: vi.fn(() => {
+        throw new Error('simulated rename failure');
+      }),
+    }));
+    const { writeAtomicPrivateFileSync: writeWithRenameFailure } = await import('../../src/lib/private-fs.ts');
+
+    expect(() => writeWithRenameFailure(target, 'credential', 'credential')).toThrow(/simulated rename failure/);
+    expect(readdirSync(dir).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it('does not publish a target and removes its temp file when file fsync fails', async () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    const target = join(dir, 'credential.key');
+    const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
+
+    vi.resetModules();
+    vi.doMock('node:fs', () => ({
+      ...actual,
+      fsyncSync: vi.fn(() => {
+        throw new Error('simulated file fsync failure');
+      }),
+    }));
+    const { writeAtomicPrivateFileSync: writeWithFsyncFailure } = await import('../../src/lib/private-fs.ts');
+
+    expect(() => writeWithFsyncFailure(target, 'credential', 'credential')).toThrow(/simulated file fsync failure/);
+    expect(actual.existsSync(target)).toBe(false);
+    expect(readdirSync(dir).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it('rejects a symlink read', () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const decoy = join(root, 'decoy.key');
+    const target = join(dir, 'symlink.key');
+    writeFileSync(decoy, 'credential', { mode: 0o600 });
+    symlinkSync(decoy, target);
+
+    expect(() => readPrivateFileSync(target, { label: 'credential', maxBytes: 32 })).toThrow(/symlink/);
+  });
+
+  it('rejects a directory read', () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    const target = join(dir, 'directory.key');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    mkdirSync(target, { mode: 0o700 });
+
+    expect(() => readPrivateFileSync(target, { label: 'credential', maxBytes: 32 })).toThrow(/non-regular/);
+  });
+
+  it('rejects a FIFO read without blocking', async () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    const target = join(dir, 'fifo.key');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+
+    const { execFileSync } = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+    execFileSync('mkfifo', [target]);
+
+    expect(() => readPrivateFileSync(target, { label: 'credential', maxBytes: 32 })).toThrow(/non-regular/);
+  });
+
+  it('rejects an oversized read', () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    const target = join(dir, 'oversized.key');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(target, 'x'.repeat(33), { mode: 0o600 });
+
+    expect(() => readPrivateFileSync(target, { label: 'credential', maxBytes: 32 })).toThrow(/maximum size/);
+  });
+
+  it('rejects a non-private file read', () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    const target = join(dir, 'public.key');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(target, 'credential', { mode: 0o644 });
+
+    expect(() => readPrivateFileSync(target, { label: 'credential', maxBytes: 32 })).toThrow(/non-private permissions/);
+  });
+
+  it('rejects a read through a symlinked directory', () => {
+    const root = makeTmp();
+    const realDir = join(root, 'real');
+    const linkDir = join(root, 'link');
+    mkdirSync(realDir, { mode: 0o700 });
+    writeFileSync(join(realDir, 'credential.key'), 'credential', { mode: 0o600 });
+    symlinkSync(realDir, linkDir, 'dir');
+
+    expect(() => readPrivateFileSync(join(linkDir, 'credential.key'), { label: 'credential', maxBytes: 32 })).toThrow(/symlink/);
+  });
+
+  it('rejects a read through a non-private directory', () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    mkdirSync(dir, { mode: 0o700 });
+    writeFileSync(join(dir, 'credential.key'), 'credential', { mode: 0o600 });
+    chmodSync(dir, 0o755);
+
+    expect(() => readPrivateFileSync(join(dir, 'credential.key'), { label: 'credential', maxBytes: 32 })).toThrow(/non-private permissions/);
+  });
+
+  it('fsyncs the parent directory after deleting a private file', async () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    const target = join(dir, 'credential.key');
+    mkdirSync(dir, { mode: 0o700 });
+    writeFileSync(target, 'credential', { mode: 0o600 });
+    const events: string[] = [];
+    const openedPaths = new Map<number, string>();
+    const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
+
+    vi.resetModules();
+    vi.doMock('node:fs', () => ({
+      ...actual,
+      openSync: vi.fn((filePath: Parameters<typeof actual.openSync>[0], flags: Parameters<typeof actual.openSync>[1], mode?: number) => {
+        const fd = actual.openSync(filePath, flags, mode);
+        openedPaths.set(fd, String(filePath));
+        return fd;
+      }),
+      unlinkSync: vi.fn((filePath: string) => {
+        events.push('unlink');
+        return actual.unlinkSync(filePath);
+      }),
+      fsyncSync: vi.fn((fd: number) => {
+        if (openedPaths.get(fd) === dir) events.push('parent-fsync');
+        return actual.fsyncSync(fd);
+      }),
+    }));
+    const { deletePrivateFileSync: deleteObserved } = await import('../../src/lib/private-fs.ts');
+
+    expect(deleteObserved(target, 'credential')).toBe(true);
+    expect(events).toEqual(['unlink', 'parent-fsync']);
+    expect(actual.existsSync(target)).toBe(false);
   });
 });
 

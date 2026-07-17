@@ -7,6 +7,7 @@
 //   forceEnsurePrivateDirectorySync (auth-bond / bot-errors pattern):
 //     mkdir-then-force-chmod. Refuses symlinks after mkdir.
 
+import { randomUUID } from 'node:crypto';
 import {
   chmodSync,
   closeSync,
@@ -20,10 +21,12 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   renameSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
+import type { Stats } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 
 export function privateWriteError(message: string, code: string): NodeJS.ErrnoException {
@@ -124,6 +127,177 @@ export function writePrivateFileSync(
 }
 
 /**
+ * Atomically replace a private file with a mode-0600 payload.
+ *
+ * The sibling temp is collision-resistant and opened exclusively with
+ * O_NOFOLLOW, then fsynced before rename. After rename, a best-effort parent
+ * directory fsync asks supported filesystems to persist the new entry.
+ */
+export function writeAtomicPrivateFileSync(
+  filePath: string,
+  data: string | Buffer,
+  label = 'private file',
+): void {
+  const dir = dirname(filePath);
+  forceEnsurePrivateDirectorySync(dir, `${label} directory`);
+  assertWritablePrivateFileSync(filePath, label);
+
+  const tmpPath = join(dir, `.${basename(filePath)}.${process.pid}.${randomUUID()}.tmp`);
+  let fd: number | null = null;
+  let tempCreated = false;
+  try {
+    fd = openSync(
+      tmpPath,
+      constants.O_WRONLY |
+        constants.O_CREAT |
+        constants.O_EXCL |
+        constants.O_NOFOLLOW |
+        constants.O_NONBLOCK,
+      0o600,
+    );
+    tempCreated = true;
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) {
+      throw privateWriteError(`refusing to write ${label} over non-regular path`, 'EINVAL');
+    }
+    fchmodSync(fd, 0o600);
+    if (typeof data === 'string') writeFileSync(fd, data, { encoding: 'utf-8' });
+    else writeFileSync(fd, data);
+    fchmodSync(fd, 0o600);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
+
+    assertWritablePrivateFileSync(filePath, label);
+    renameSync(tmpPath, filePath);
+    tempCreated = false;
+    fsyncDirectory(dir);
+  } catch (err) {
+    if (fd !== null) {
+      try { closeSync(fd); } catch { /* preserve the original failure */ }
+    }
+    if (tempCreated) {
+      try { unlinkSync(tmpPath); } catch { /* preserve the original failure */ }
+    }
+    throw err;
+  }
+}
+
+export interface PrivateReadOptions {
+  label?: string;
+  maxBytes: number;
+}
+
+function assertStrictPrivateDirectorySync(dirPath: string, label: string): void {
+  const stat = lstatSync(dirPath);
+  if (stat.isSymbolicLink()) {
+    throw privateWriteError(`refusing to use ${label} directory through symlink`, 'ELOOP');
+  }
+  if (!stat.isDirectory()) {
+    throw privateWriteError(`refusing to use ${label} directory over non-directory path`, 'EINVAL');
+  }
+  if ((stat.mode & 0o077) !== 0) {
+    throw privateWriteError(`refusing to use ${label} directory with non-private permissions`, 'EACCES');
+  }
+}
+
+function assertReadablePrivateFileStat(
+  stat: Stats,
+  label: string,
+  maxBytes: number,
+): void {
+  if (stat.isSymbolicLink()) {
+    throw privateWriteError(`refusing to read ${label} through symlink`, 'ELOOP');
+  }
+  if (!stat.isFile()) {
+    throw privateWriteError(`refusing to read ${label} from non-regular path`, 'EINVAL');
+  }
+  if ((stat.mode & 0o077) !== 0) {
+    throw privateWriteError(`refusing to read ${label} with non-private permissions`, 'EACCES');
+  }
+  if (stat.size > maxBytes) {
+    throw privateWriteError(`refusing to read ${label} above maximum size`, 'EFBIG');
+  }
+}
+
+/** Read a bounded private regular file without following symlinks or FIFOs. */
+export function readPrivateFileSync(filePath: string, options: PrivateReadOptions): string | null {
+  if (!Number.isSafeInteger(options.maxBytes) || options.maxBytes < 1) {
+    throw new RangeError('maxBytes must be a positive safe integer');
+  }
+  const label = options.label ?? 'private file';
+  const dir = dirname(filePath);
+  try {
+    assertStrictPrivateDirectorySync(dir, label);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+
+  let pathStat: Stats;
+  try {
+    pathStat = lstatSync(filePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+  assertReadablePrivateFileStat(pathStat, label, options.maxBytes);
+
+  let fd: number | null = null;
+  try {
+    fd = openSync(
+      filePath,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+    const openedStat = fstatSync(fd);
+    assertReadablePrivateFileStat(openedStat, label, options.maxBytes);
+
+    const data = Buffer.alloc(options.maxBytes + 1);
+    let length = 0;
+    while (length < data.length) {
+      const count = readSync(fd, data, length, data.length - length, null);
+      if (count === 0) break;
+      length += count;
+    }
+    if (length > options.maxBytes) {
+      throw privateWriteError(`refusing to read ${label} above maximum size`, 'EFBIG');
+    }
+    return data.subarray(0, length).toString('utf-8');
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+}
+
+/** Delete a private regular file and attempt to settle the parent directory entry. */
+export function deletePrivateFileSync(filePath: string, label = 'private file'): boolean {
+  const dir = dirname(filePath);
+  try {
+    assertStrictPrivateDirectorySync(dir, label);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw err;
+  }
+
+  let stat: Stats;
+  try {
+    stat = lstatSync(filePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw err;
+  }
+  if (stat.isSymbolicLink()) {
+    throw privateWriteError(`refusing to delete ${label} through symlink`, 'ELOOP');
+  }
+  if (!stat.isFile()) {
+    throw privateWriteError(`refusing to delete ${label} from non-regular path`, 'EINVAL');
+  }
+
+  unlinkSync(filePath);
+  fsyncDirectory(dir);
+  return true;
+}
+
+/**
  * Assert that a private file path is safe to write through: lstat the target and
  * refuse a symlink (ELOOP) or any non-regular file (EINVAL). A missing target
  * (ENOENT) is fine — the file may not exist yet. The caller-supplied `label` is
@@ -159,31 +333,7 @@ export function assertWritablePrivateFileSync(filePath: string, label = 'private
  * `JSON.stringify(value, null, 2) + '\n'`.
  */
 export function writePrivateJsonMarkerSync(filePath: string, value: unknown): void {
-  const dir = dirname(filePath);
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  assertPrivateDirectorySync(dir);
-  chmodSync(dir, 0o700);
-  assertWritablePrivateFileSync(filePath, 'marker');
-
-  const tmpPath = join(dir, `.${basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
-  let fd: number | null = null;
-  try {
-    fd = openSync(tmpPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-    writeFileSync(fd, JSON.stringify(value, null, 2) + '\n', 'utf-8');
-    fsyncSync(fd);
-    closeSync(fd);
-    fd = null;
-    assertWritablePrivateFileSync(filePath, 'marker');
-    renameSync(tmpPath, filePath);
-    chmodSync(filePath, 0o600);
-    fsyncDirectory(dir);
-  } catch (err) {
-    if (fd !== null) {
-      try { closeSync(fd); } catch { /* best effort */ }
-    }
-    try { unlinkSync(tmpPath); } catch { /* best effort */ }
-    throw err;
-  }
+  writeAtomicPrivateFileSync(filePath, JSON.stringify(value, null, 2) + '\n', 'marker');
 }
 
 /**
