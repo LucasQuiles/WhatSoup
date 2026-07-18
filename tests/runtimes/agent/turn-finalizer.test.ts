@@ -24,6 +24,10 @@ const emitAlertMock = vi.hoisted(() => vi.fn());
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
   emitAlert: emitAlertMock,
+  emitAlertChecked: (...args: unknown[]) => {
+    const result = emitAlertMock(...args) as AlertEmissionResult;
+    return result.ok;
+  },
 }));
 
 const IDENTITY: TurnIdentity = {
