@@ -2,6 +2,23 @@ export type BoundaryDecision = 'pass' | 'warn' | 'block' | 'inconclusive';
 
 export type BoundaryAction = 'commit' | 'push' | 'open-pr' | 'reopen-pr' | 'open-issue';
 
+export type EvidenceState = 'observed' | 'absent' | 'invalid' | 'unavailable' | 'stale' | 'unknown';
+
+export interface BoundaryCorrectionStep {
+  operation: 'edit' | 'reuse' | 'refresh' | 'retry';
+  target: string;
+  expected: string;
+}
+
+export interface BoundaryCommand {
+  command: string;
+  args: string[];
+}
+
+export interface BoundaryVerificationStep extends BoundaryCommand {
+  expected: string;
+}
+
 export interface BoundaryArtifact {
   kind: 'pull-request' | 'issue' | 'commit' | 'path';
   repository: string;
