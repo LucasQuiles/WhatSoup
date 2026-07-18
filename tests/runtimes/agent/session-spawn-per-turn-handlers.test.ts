@@ -293,6 +293,51 @@ describe('SessionManager spawn-per-turn child handlers (opencode-cli)', () => {
     expect(sm.getStatus().turnInFlight).toBe(false);
   });
 
+  it('a delivered terminal result followed by a SIGTERM teardown is not a crash (#1870)', async () => {
+    const events: AgentEvent[] = [];
+    const { sm, notifyUser, onCrash } = await makeOpencodeSession({
+      onEvent: (event: AgentEvent) => events.push(event),
+    });
+    await sm.sendTurn('hello');
+    events.length = 0;
+
+    // The provider streams its terminal stop result, then the process is torn
+    // down by SIGTERM (code null, signal set) — the normal spawn-per-turn exit
+    // after a delivered reply. The close-drain flushes the buffered result
+    // before exit classification runs, so sawResult is true by then.
+    child.stdout.emit('data', Buffer.from(JSON.stringify({
+      type: 'step_finish',
+      part: { reason: 'stop', tokens: { input: 11, output: 13 }, cost: 0.001 },
+    })));
+
+    child._exitCb?.(null, 'SIGTERM');
+    child._closeCb?.(null, 'SIGTERM');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // The turn succeeded; the trailing signal must not inflate crash telemetry
+    // or notify the user of a failure.
+    expect(events.filter((event) => event.type === 'result')).toHaveLength(1);
+    expect(onCrash).not.toHaveBeenCalled();
+    expect(notifyUser).not.toHaveBeenCalled();
+    expect(sm.getStatus().turnInFlight).toBe(false);
+  });
+
+  it('a SIGTERM with no terminal result is still a crash (#1870 control)', async () => {
+    const { sm, onCrash } = await makeOpencodeSession();
+    await sm.sendTurn('hello');
+
+    // No result was produced before the signal exit — this is a genuine crash
+    // and must still be classified as one (the fix must not over-suppress).
+    child._exitCb?.(null, 'SIGTERM');
+    child._closeCb?.(null, 'SIGTERM');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(onCrash).toHaveBeenCalledTimes(1);
+    const info = onCrash.mock.calls[0]![0] as Record<string, unknown>;
+    expect(info.exitCode).toBeNull();
+    expect(info.signal).toBe('SIGTERM');
+  });
+
   it('stops admitting later records in a chunk after a malformed record quarantines the session', async () => {
     const events: AgentEvent[] = [];
     let sm!: SessionManager;
