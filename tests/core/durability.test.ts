@@ -158,6 +158,26 @@ describe('DurabilityEngine', () => {
       expect(row.status).toBe('maybe_sent');
       expect(row.error).toBe('EPIPE');
     });
+
+    it('getHealthStats surfaces the maybe_sent count and oldest submission age (#1865)', () => {
+      expect(engine.getHealthStats().maybeSentOutbound).toBe(0);
+      expect(engine.getHealthStats().oldestMaybeSentAt).toBeNull();
+
+      const id = engine.createOutboundOp({ conversationKey: 'k', chatJid: 'j', opType: 'text', payload: '{}', replayPolicy: 'unsafe' });
+      engine.markSending(id);
+      engine.markSubmitted(id, 'WA_MSG_1865');
+      engine.markMaybeSent(id, 'echo_timeout');
+      // Back-date submission to one hour ago to simulate a long-unresolved ambiguous delivery.
+      db.raw
+        .prepare(`UPDATE outbound_ops SET submitted_at = datetime('now', '-3600 seconds') WHERE id = ?`)
+        .run(id);
+
+      const stats = engine.getHealthStats();
+      expect(stats.maybeSentOutbound).toBe(1);
+      expect(stats.oldestMaybeSentAt).not.toBeNull();
+      const ageMs = Date.now() - Date.parse((stats.oldestMaybeSentAt as string).replace(' ', 'T') + 'Z');
+      expect(ageMs).toBeGreaterThan(30 * 60 * 1000);
+    });
   });
 
   describe('sweepStaleSubmitted()', () => {

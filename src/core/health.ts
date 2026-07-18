@@ -284,6 +284,11 @@ const RECENT_DISCONNECT_DEGRADED_THRESHOLD = 3;
 //    a genuinely-broken model is still caught independently by model_usable===false.
 const EMPTY_OUTPUT_DEGRADE_DEBOUNCE_MS = 60 * 1000; // 1 minute
 const EMPTY_OUTPUT_STALE_MS = 15 * 60 * 1000; // 15 minutes
+// An ambiguous outbound delivery (maybe_sent) should resolve within the echo
+// timeout + a recovery cycle. One left unresolved past this window is a
+// long-lived continuity risk that must degrade /health rather than read green
+// (#1865). Generous enough not to flap on transient reconciliation.
+const DURABILITY_STALE_MAYBE_SENT_MS = 30 * 60 * 1000; // 30 minutes
 
 // S-04a — stale model-usability evidence must not read as a healthy green.
 // A bot whose usability probe went stale WHILE it was actively turning has a
@@ -1212,6 +1217,19 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         || authFailureClass === 'serverside_logout_irreversible'
         || authFailureClass === 'local_corruption_unrestorable';
       const authFailureIsDegraded = authFailureClass !== 'none';
+      // Durability debt: an outbound delivery stuck in maybe_sent past the stale
+      // window is a long-lived continuity risk that /health must surface rather
+      // than read green (#1865). submitted_at is SQLite datetime('now') (UTC,
+      // space-separated, no zone) — normalize to ISO-UTC before parsing.
+      const durabilityStats = deps.durability?.getHealthStats() ?? null;
+      const oldestMaybeSentMs =
+        durabilityStats?.oldestMaybeSentAt != null && durabilityStats.oldestMaybeSentAt !== ''
+          ? Date.parse(durabilityStats.oldestMaybeSentAt.replace(' ', 'T') + 'Z')
+          : Number.NaN;
+      const durabilityDebtIsDegraded =
+        Number.isFinite(oldestMaybeSentMs)
+        && Date.now() - oldestMaybeSentMs > DURABILITY_STALE_MAYBE_SENT_MS;
+
       let status: 'healthy' | 'degraded' | 'unhealthy';
       if (authFailureIsUnhealthy) {
         status = 'unhealthy';
@@ -1228,7 +1246,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         outboundFloodIsDegraded ||
         agentRuntimeStatus === 'degraded' ||
         turnCapabilityIsDegraded ||
-        loopLag.locallyStarved
+        loopLag.locallyStarved ||
+        durabilityDebtIsDegraded
       ) {
         status = 'degraded';
       } else {
@@ -1434,7 +1453,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           fallback: config.models.fallback,
         },
         model_advisories: getModelAdvisories(),
-        durability: deps.durability?.getHealthStats() ?? null,
+        durability: durabilityStats,
         turn_capability: turnCapability,
         runtime: runtimeBlock,
         event_loop: {

@@ -23,6 +23,13 @@ _resolve_symlinks() {
 # Cross-platform keyring lookup.
 # Normal lookups prefer env vars. Scoped lookups prefer the keyring first so a
 # shared env var cannot shadow an instance-specific token.
+macos_keychain_lookup() {
+  local service="$1"
+  local account="$2"
+  [ -n "${NODE:-}" ] || return 1
+  "$NODE" "$SCRIPT_DIR/lib/read-keychain-secret.mjs" "$service" "$account"
+}
+
 keyring_lookup() {
   local service="$1"
   local envvar="${2:-}"
@@ -43,8 +50,16 @@ keyring_lookup() {
   fi
   local keyring_value=""
   case "$(uname -s)" in
-    Darwin) keyring_value="$(security find-generic-password -s "$service" -a "$account" -w 2>/dev/null || true)" ;;
-    *)      keyring_value="$(timeout 3s secret-tool lookup service "$service" "$@" 2>/dev/null || true)" ;;
+    Darwin)
+      if ! keyring_value="$(macos_keychain_lookup "$service" "$account")"; then
+        keyring_value=""
+      fi
+      ;;
+    *)
+      if ! keyring_value="$(timeout 3s secret-tool lookup service "$service" "$@" 2>/dev/null)"; then
+        keyring_value=""
+      fi
+      ;;
   esac
   if [ -n "$keyring_value" ]; then
     echo "$keyring_value"
@@ -74,6 +89,8 @@ if ! NODE="$(whatsoup_resolve_node "$REPO_ROOT")"; then
   # whatsoup_resolve_node already printed a FATAL line describing the failure.
   exit 1
 fi
+# shellcheck source=deploy/lib/read-private-health-token.sh
+. "$SCRIPT_DIR/lib/read-private-health-token.sh"
 
 DATABASE_BOOTSTRAP_TS="$REPO_ROOT/src/database-compatibility-bootstrap.ts"
 if [ -L "$DATABASE_BOOTSTRAP_TS" ]; then
@@ -217,8 +234,26 @@ if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   export WHATSOUP_GIT_BRANCH
   unset _branch
 else
-  unset WHATSOUP_GIT_SHA WHATSOUP_GIT_BRANCH
-  echo "WARN: $REPO_ROOT is not a git work tree or git is unavailable; WHATSOUP_GIT_SHA/WHATSOUP_GIT_BRANCH unset" >&2
+  # Non-git release snapshot: fall back to the release manifest's source.commit
+  # (written by scripts/release-snapshot-plan.ts) so /health can still report
+  # which code the service is running. Best-effort — a missing or malformed
+  # manifest must not block startup (#1868).
+  _release_manifest="$REPO_ROOT/.whatsoup-release-manifest.json"
+  WHATSOUP_GIT_SHA=""
+  _branch=""
+  if [ -f "$_release_manifest" ]; then
+    WHATSOUP_GIT_SHA="$("$NODE" -e 'try{const m=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));const c=m&&m.source&&m.source.commit;process.stdout.write(typeof c==="string"?c:"")}catch{}' "$_release_manifest" 2>/dev/null || true)"
+    _branch="$("$NODE" -e 'try{const m=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));const r=m&&m.source&&m.source.ref;process.stdout.write(typeof r==="string"?r:"")}catch{}' "$_release_manifest" 2>/dev/null || true)"
+  fi
+  if printf '%s' "$WHATSOUP_GIT_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+    export WHATSOUP_GIT_SHA
+    WHATSOUP_GIT_BRANCH="${_branch:-release-manifest}"
+    export WHATSOUP_GIT_BRANCH
+    unset _release_manifest _branch
+  else
+    unset WHATSOUP_GIT_SHA WHATSOUP_GIT_BRANCH _release_manifest _branch
+    echo "WARN: $REPO_ROOT is not a git work tree and no valid release manifest source.commit; WHATSOUP_GIT_SHA/WHATSOUP_GIT_BRANCH unset" >&2
+  fi
 fi
 
 # Ensure PATH includes locations needed by agent instances (claude CLI, tools)
@@ -282,27 +317,27 @@ else
 fi
 
 # Health server auth token — used by POST /heal and POST /send on all instances.
-# Prefer an already-loaded value (e.g. from EnvironmentFile=tokens.env in the systemd unit) so a
-# missing or unresponsive platform keyring cannot delay startup.
-#
-# W-5 migration: health.ts (line 484) now resolves the token at request time via
-# lookupCredential('whatsoup-health-token') — keyring-first, env-fallback (PR #1804).
-# This wrapper export is redundant when the token is in the keyring. Once the
-# per-instance token is stored in the keyring (service=whatsoup-health-token,
-# account=<instance>), this block AND the tokens.env EnvironmentFile line in the
-# systemd unit can both be removed. Use deploy/check-health-token-keyring.sh
-# <instance> to verify readiness.
+# Preserve an already-loaded value first. Otherwise read the canonical private
+# per-instance tokens.env through a verified descriptor, then use the scoped
+# Keychain/secret-tool entry and finally the legacy shared Keychain entry.
+# An unsafe existing file is a startup error; only an absent file falls back.
+# Use deploy/check-health-token-keyring.sh <instance> to inspect migration state.
 # Migration tracking: docs/security-handoffs/2026-05-09-env-secret-exposure.md
 # Phase E (W-5).
 if [ -z "${WHATSOUP_HEALTH_TOKEN:-}" ]; then
-  WHATSOUP_HEALTH_TOKEN="$(keyring_lookup whatsoup-health-token "" user "$INSTANCE")"
-  if [ -z "$WHATSOUP_HEALTH_TOKEN" ]; then
-    WHATSOUP_HEALTH_TOKEN="$(keyring_lookup whatsoup_health WHATSOUP_HEALTH_TOKEN)"
+  HEALTH_TOKEN_FILE="$XDG_CONFIG/whatsoup/instances/$INSTANCE/tokens.env"
+  if [ -e "$HEALTH_TOKEN_FILE" ] || [ -L "$HEALTH_TOKEN_FILE" ]; then
+    WHATSOUP_HEALTH_TOKEN="$(whatsoup_read_private_health_token \
+      "$NODE" "$SCRIPT_DIR/lib/read-private-health-token.mjs" "$HEALTH_TOKEN_FILE")"
   fi
 fi
-if [ -n "$WHATSOUP_HEALTH_TOKEN" ]; then
-  export WHATSOUP_HEALTH_TOKEN
+if [ -z "${WHATSOUP_HEALTH_TOKEN:-}" ]; then
+  WHATSOUP_HEALTH_TOKEN="$(keyring_lookup whatsoup-health-token "" user "$INSTANCE")"
 fi
+if [ -z "${WHATSOUP_HEALTH_TOKEN:-}" ]; then
+  WHATSOUP_HEALTH_TOKEN="$(keyring_lookup whatsoup_health WHATSOUP_HEALTH_TOKEN)"
+fi
+[ -z "${WHATSOUP_HEALTH_TOKEN:-}" ] || export WHATSOUP_HEALTH_TOKEN
 
 # Import-only mode is reserved for deploy/preflight-probe.ts. Never inherit it
 # into the real service process: an ambient/systemd value must not turn a valid

@@ -161,10 +161,50 @@ probe_line="$(printf '%s\n' "$probe_out" | grep -m1 '^PREFLIGHT-PROBE:' || true)
 [ -n "$probe_line" ] && echo "$probe_line" >&2
 
 if [ "$probe_rc" -eq 0 ]; then
+  # The import probe proves the on-disk tree LINKS. It runs against empty temp
+  # config/data/state roots, so it does NOT prove the named instance's real
+  # configuration is loadable or semantically valid. Report the two checks
+  # distinctly so an operator can tell an import-clean tree from a valid instance.
+  echo "PREFLIGHT-OK: import graph is link-clean" >&2
+
   if [ -n "$INSTANCE" ]; then
-    echo "PREFLIGHT-OK: import graph is link-clean — safe to start (instance: $INSTANCE)" >&2
-  else
-    echo "PREFLIGHT-OK: import graph is link-clean — safe to start" >&2
+    # #1862: validate the exact named instance's real configuration through a
+    # side-effect-free path and fail closed BEFORE the service is stopped/replaced.
+    # A missing instance or a config runtime startup would reject (e.g. an agent
+    # cwd that resolves to the user home directory) must block the restart here,
+    # not surface only after the service mutation begins.
+    INSTANCE_CHECK_TS="$SCRIPT_DIR/preflight-instance-check.ts"
+    if [ ! -f "$INSTANCE_CHECK_TS" ]; then
+      echo "PREFLIGHT-ERROR: instance-config probe not found: $INSTANCE_CHECK_TS" >&2
+      exit 1
+    fi
+    set +e
+    instance_out="$(
+      "$NODE" \
+        --disable-warning=ExperimentalWarning \
+        --experimental-strip-types \
+        "$INSTANCE_CHECK_TS" "$INSTANCE" 2>&1
+    )"
+    instance_rc=$?
+    set -e
+
+    instance_line="$(printf '%s\n' "$instance_out" | grep -m1 '^PREFLIGHT-INSTANCE:' || true)"
+    [ -n "$instance_line" ] && echo "$instance_line" >&2
+
+    if [ "$instance_rc" -ne 0 ]; then
+      {
+        echo "PREFLIGHT-FAIL: REFUSING TO START — instance configuration is invalid or missing."
+        echo "  The on-disk tree links, but instance '$INSTANCE' did not pass configuration validation."
+        # Surface any NON-marker probe output (stack traces etc.) indented. grep -v
+        # returns 1 when every line is a marker line (nothing to show); `|| true`
+        # keeps that from tripping `set -e`/pipefail and masking `exit 3` below.
+        printf '%s\n' "$instance_out" | { grep -v '^PREFLIGHT-INSTANCE:' || true; } | sed 's/^/    /'
+        echo "  A restart would first discover this after stopping the service. Fix the instance"
+        echo "  configuration, then re-run preflight."
+      } >&2
+      exit 3
+    fi
+    echo "PREFLIGHT-OK: instance '$INSTANCE' configuration is valid — safe to start" >&2
   fi
   exit 0
 fi

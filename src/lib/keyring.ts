@@ -4,13 +4,18 @@
  * Supports:
  *  - Linux: GNOME Keyring via secret-tool
  *  - macOS: Keychain via security CLI
- *  - Fallback: environment variables
+ *  - Private credential files and environment/OpenCode fallbacks
  */
 import { execFileSync } from 'node:child_process';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createChildLogger } from '../logger.ts';
+import {
+  deletePrivateFileSync,
+  readPrivateFileSync,
+  writeAtomicPrivateFileSync,
+} from './private-fs.ts';
 
 export type KeyringBackend = 'secret-tool' | 'macos-keychain' | 'env-only';
 
@@ -46,6 +51,18 @@ export interface CredentialLookupOptions {
 }
 
 let _cachedBackend: KeyringBackend | undefined;
+const KEYRING_COMMAND_TIMEOUT_MS = 3_000;
+const FILE_STORE_MAX_BYTES = 4_096;
+const warnedKeyringReadServices = new Set<string>();
+const keyringExecOptions = {
+  timeout: KEYRING_COMMAND_TIMEOUT_MS,
+  killSignal: 'SIGKILL' as const,
+};
+// Credential reads return the value on stdout; bound it to the same 4 KiB the
+// pinned-Node keychain helper enforces (deploy/lib/read-keychain-secret.mjs).
+// Detection, writes, and deletes keep the base options — backend detection's
+// `secret-tool --help` banner can legitimately exceed 4 KiB.
+const keyringReadExecOptions = { ...keyringExecOptions, maxBuffer: FILE_STORE_MAX_BYTES };
 
 // Lazy logger — avoids any risk of a cycle during module initialisation while
 // still giving us structured log output once the module is fully loaded.
@@ -67,7 +84,7 @@ export function detectKeyringBackend(): KeyringBackend {
   // libsecret builds print a valid usage banner but exit 2. Treat that exact
   // usage response as presence; other non-zero exits still mean probe failure.
   try {
-    execFileSync('secret-tool', ['--help'], { timeout: 2_000 });
+    execFileSync('secret-tool', ['--help'], keyringExecOptions);
     _cachedBackend = 'secret-tool';
   } catch (err) {
     if (isSecretToolUsageHelpExit(err)) {
@@ -130,15 +147,16 @@ function isSecretToolUsageHelpExit(err: unknown): boolean {
  * Look up a credential by service name.
  *
  * Resolution order:
- *  1. Environment variable (if mapped)
- *  2. Platform keyring (secret-tool or macOS Keychain)
+ *  - Unscoped: environment, private file, platform keyring, OpenCode
+ *  - User-scoped: platform keyring, environment, OpenCode
  *
- * User-scoped lookups invert that order so a shared process env var cannot
- * shadow an instance-specific keyring entry.
+ * User-scoped lookups never consult the unscoped private file.
  *
  * Returns the trimmed value, or null if unavailable.
  */
 export function lookupCredential(service: string, options: CredentialLookupOptions = {}): string | null {
+  if (!isValidCredentialService(service)) return null;
+
   const lookupEnv = (): string | null => {
     const envKey = SERVICE_ENV_MAP[service];
     if (!envKey) return null;
@@ -153,12 +171,18 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
     return null;
   };
 
-  // 1. Check environment variable first for normal service-wide lookups.
+  // Unscoped lookups prefer process env, then the private file, before invoking
+  // a platform keyring that may block in a headless process.
   const envFirst = options.user === undefined && options.skipEnv !== true;
   if (envFirst) {
     const envVal = lookupEnv();
     if (envVal) return envVal;
   }
+  if (options.user === undefined) {
+    const fileVal = fileStoreRead(service);
+    if (fileVal) return fileVal;
+  }
+
   const lookupEnvAfterKeyringMiss = (): string | null => {
     const envVal = (envFirst || options.skipEnv === true) ? null : lookupEnv();
     if (envVal) return envVal;
@@ -170,88 +194,82 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
     return readOpenCodeAuthKey(service);
   };
 
-  // 2. Try platform keyring
+  // Scoped lookups reach this point before env and never consult the unscoped
+  // private file. Unscoped lookups reach it only after env and file misses.
   const backend = detectKeyringBackend();
 
   const services = [
     service,
     ...(options.skipMigrationFallbacks === true ? [] : (SERVICE_MIGRATION_FALLBACKS[service] ?? [])),
   ];
-  const secretToolArgs = (candidate: string, includeOptions: boolean): string[] => {
+  const secretToolArgs = (candidate: string): string[] => {
     const args = ['lookup', 'service', candidate];
-    if (includeOptions && options.user) args.push('user', options.user);
+    if (options.user !== undefined) args.push('user', options.user);
     return args;
   };
 
   if (backend === 'secret-tool') {
-    try {
-      for (const [index, candidate] of services.entries()) {
-        try {
-          const raw = execFileSync('secret-tool', secretToolArgs(candidate, index === 0), { timeout: 5_000 });
-          const val = (typeof raw === 'string' ? raw : raw.toString('utf-8')).trim();
-          if (val) return val;
-        } catch (err) {
-          // Warn on primary candidate failure; migration fallback misses are expected.
-          if (index === 0) {
-            getLog().warn(
-              { service, backend, err: errorMessage(err) },
-              'keyring read failed — falling back to env lookup',
-            );
-          }
+    for (const [index, candidate] of services.entries()) {
+      try {
+        const raw = execFileSync(
+          'secret-tool',
+          secretToolArgs(candidate),
+          keyringReadExecOptions,
+        );
+        const val = (typeof raw === 'string' ? raw : raw.toString('utf-8')).trim();
+        if (val) return val;
+      } catch (err) {
+        // Warn on primary candidate failure; migration fallback misses are expected.
+        if (index === 0) {
+          warnKeyringReadFailure(service, backend, err);
         }
       }
-      const fileVal1 = fileStoreRead(service);
-      if (fileVal1) return fileVal1;
-      return lookupEnvAfterKeyringMiss();
-    } catch {
-      const fileVal2 = fileStoreRead(service);
-      if (fileVal2) return fileVal2;
-      return lookupEnvAfterKeyringMiss();
     }
+    return lookupEnvAfterKeyringMiss();
   }
 
   if (backend === 'macos-keychain') {
     try {
-      const username = os.userInfo().username;
+      const account = options.user ?? os.userInfo().username;
       for (const [index, candidate] of services.entries()) {
         try {
-          const account = index === 0 && options.user ? options.user : username;
           const raw = execFileSync(
             'security',
             ['find-generic-password', '-s', candidate, '-a', account, '-w'],
-            { timeout: 5_000 },
+            keyringReadExecOptions,
           );
           const val = (typeof raw === 'string' ? raw : raw.toString('utf-8')).trim();
           if (val) return val;
         } catch (err) {
           // Warn on primary candidate failure; migration fallback misses are expected.
           if (index === 0) {
-            getLog().warn(
-              { service, backend, err: errorMessage(err) },
-              'keyring read failed — falling back to env lookup',
-            );
+            warnKeyringReadFailure(service, backend, err);
           }
         }
       }
-      const fileVal3 = fileStoreRead(service);
-      if (fileVal3) return fileVal3;
-      return lookupEnvAfterKeyringMiss();
     } catch {
-      const fileVal4 = fileStoreRead(service);
-      if (fileVal4) return fileVal4;
-      return lookupEnvAfterKeyringMiss();
+      // Account discovery failures preserve the terminal env/OpenCode fallback.
     }
+    return lookupEnvAfterKeyringMiss();
   }
 
-  // env-only or scoped keyring miss: consult the file store, then env.
-  const fileVal = fileStoreRead(service);
-  if (fileVal) return fileVal;
+  // env-only or platform-keyring miss: scoped env, then terminal OpenCode.
   return lookupEnvAfterKeyringMiss();
+}
+
+function warnKeyringReadFailure(service: string, backend: KeyringBackend, err: unknown): void {
+  if (warnedKeyringReadServices.has(service)) return;
+  warnedKeyringReadServices.add(service);
+  getLog().warn(
+    { service, backend, err: errorMessage(err) },
+    'keyring read failed — falling back to env lookup',
+  );
 }
 
 /** Reset cached backend detection (for testing). */
 export function _resetBackendCache(): void {
   _cachedBackend = undefined;
+  warnedKeyringReadServices.clear();
 }
 
 // ─── Typed lookup with closed-id gate (W-1 / Pattern A) ───────────────────────
@@ -362,6 +380,9 @@ export function writeCredential(
   value: string,
   options: { user?: string } = {},
 ): CredentialWriteResult {
+  if (!isValidCredentialService(service)) {
+    throw new KeyringWriteError('KEYRING_WRITE_FAILED', 'credential write failed for invalid service');
+  }
   const backend = detectKeyringBackend();
   const account = options.user ?? os.userInfo().username;
 
@@ -380,17 +401,29 @@ export function writeCredential(
       execFileSync(
         'security',
         ['add-generic-password', '-U', '-s', service, '-a', account, '-w'],
-        { timeout: 5_000, input: `${value}\n${value}\n`, stdio: ['pipe', 'ignore', 'pipe'] },
+        {
+          ...keyringExecOptions,
+          input: `${value}\n${value}\n`,
+          stdio: ['pipe', 'ignore', 'pipe'],
+        },
       );
-      return { backend };
     } catch (err) {
       throw new KeyringWriteError(classifyDarwinWriteError(err), `keychain write failed for service ${service}`);
     }
+    if (options.user === undefined) {
+      try {
+        fileStoreWrite(service, value);
+      } catch {
+        fileStoreDelete(service);
+        throw new KeyringWriteError('KEYRING_WRITE_FAILED', `credential mirror failed for service ${service}`);
+      }
+    }
+    return { backend };
   }
   if (backend === 'secret-tool') {
     try {
       execFileSync('secret-tool', ['store', `--label=whatsoup ${service}`, 'service', service], {
-        timeout: 5_000,
+        ...keyringExecOptions,
         input: value,
         stdio: ['pipe', 'ignore', 'pipe'],
       });
@@ -408,10 +441,11 @@ export function writeCredential(
   }
 }
 
-// ─── File-store backend (hosts with no OS keyring) ───────────────────────────
+// ─── Private credential file store ──────────────────────────────────────────
 // Per-service 0600 files mirror the OS keyring's per-entry isolation; the
-// directory layout follows the token-storage.ts precedent (0600 under
-// ~/.config/whatsoup/). Used ONLY when detectKeyringBackend() === 'env-only'.
+// directory layout follows the token-storage.ts private-config precedent.
+// Unscoped macOS writes mirror here; env-only hosts use it as their durable
+// backend. User-scoped operations never access it.
 
 let _fileStoreDirOverride: string | null = null;
 /** Test hook — point the file store at a temp dir (null restores default). */
@@ -426,12 +460,30 @@ function fileStoreDir(): string {
 }
 
 function fileStorePath(service: string): string {
+  assertValidFileStoreService(service);
   return path.join(fileStoreDir(), `${service}.key`);
+}
+
+function isValidCredentialService(service: string): boolean {
+  return service.length > 0 &&
+    !service.includes('/') &&
+    !service.includes('\\') &&
+    !service.includes('\0');
+}
+
+function assertValidFileStoreService(service: string): void {
+  if (!isValidCredentialService(service)) {
+    throw new Error('invalid credential service name');
+  }
 }
 
 function fileStoreRead(service: string): string | null {
   try {
-    const val = fs.readFileSync(fileStorePath(service), 'utf-8').trim();
+    const raw = readPrivateFileSync(fileStorePath(service), {
+      label: 'credential',
+      maxBytes: FILE_STORE_MAX_BYTES,
+    });
+    const val = raw?.trim();
     return val || null;
   } catch {
     return null;
@@ -478,21 +530,26 @@ export function readOpenCodeAuthKey(provider: string): string | null {
 }
 
 function fileStoreWrite(service: string, value: string): void {
-  const dir = fileStoreDir();
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const target = fileStorePath(service);
-  // Sibling temp file — same directory, so renameSync can never hit EXDEV.
-  const tmp = `${target}.tmp-${process.pid}`;
-  fs.writeFileSync(tmp, value, { mode: 0o600 });
-  fs.renameSync(tmp, target);
+  if (Buffer.byteLength(value) > FILE_STORE_MAX_BYTES) {
+    throw new Error('credential exceeds file-store maximum size');
+  }
+  writeAtomicPrivateFileSync(fileStorePath(service), value, 'credential');
 }
 
 function fileStoreDelete(service: string): boolean {
   try {
-    fs.unlinkSync(fileStorePath(service));
-    return true;
+    return deletePrivateFileSync(fileStorePath(service), 'credential');
   } catch {
     return false;
+  }
+}
+
+function fileStoreIsAbsent(service: string): boolean {
+  try {
+    fs.lstatSync(fileStorePath(service));
+    return false;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT';
   }
 }
 
@@ -504,22 +561,37 @@ export function deleteCredential(
   options: { user?: string } = {},
 ): CredentialDeleteResult {
   const backend = detectKeyringBackend();
+  if (!isValidCredentialService(service)) return { deleted: false, backend };
   const account = options.user ?? os.userInfo().username;
 
   if (backend === 'macos-keychain') {
+    let keychainDeleted = false;
     try {
       execFileSync('security', ['delete-generic-password', '-s', service, '-a', account], {
-        timeout: 5_000,
+        ...keyringExecOptions,
         stdio: ['ignore', 'ignore', 'pipe'],
       });
-      return { deleted: true, backend };
+      keychainDeleted = true;
     } catch {
-      return { deleted: false, backend };
+      keychainDeleted = false;
     }
+    if (options.user !== undefined) return { deleted: keychainDeleted, backend };
+
+    let fileAbsent = false;
+    try {
+      fileStoreDelete(service);
+      fileAbsent = fileStoreIsAbsent(service);
+    } catch {
+      fileAbsent = false;
+    }
+    return { deleted: keychainDeleted && fileAbsent, backend };
   }
   if (backend === 'secret-tool') {
     try {
-      execFileSync('secret-tool', ['clear', 'service', service], { timeout: 5_000, stdio: ['ignore', 'ignore', 'pipe'] });
+      execFileSync('secret-tool', ['clear', 'service', service], {
+        ...keyringExecOptions,
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
       return { deleted: true, backend };
     } catch {
       return { deleted: false, backend };

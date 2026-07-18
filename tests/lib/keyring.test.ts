@@ -31,6 +31,7 @@ describe('keyring', () => {
   beforeEach(() => {
     _resetBackendCache();
     vi.clearAllMocks();
+    mockedExecFileSync.mockReset();
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.OPENAI_API_KEY;
     delete process.env.ELEVENLABS_API_KEY;
@@ -53,7 +54,11 @@ describe('keyring', () => {
       // Some builds exit 0 for --help; others exit 2 with a usage banner.
       mockedExecFileSync.mockReturnValueOnce(Buffer.from(''));
       expect(detectKeyringBackend()).toBe('secret-tool');
-      expect(mockedExecFileSync).toHaveBeenCalledWith('secret-tool', ['--help'], expect.any(Object));
+      expect(mockedExecFileSync).toHaveBeenCalledWith(
+        'secret-tool',
+        ['--help'],
+        expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
+      );
     });
 
     it('returns secret-tool when --help prints usage but exits 2', () => {
@@ -123,7 +128,7 @@ describe('keyring', () => {
       expect(mockedExecFileSync).toHaveBeenCalledWith(
         'secret-tool',
         ['lookup', 'service', 'anthropic'],
-        expect.any(Object),
+        expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
       );
     });
 
@@ -135,7 +140,7 @@ describe('keyring', () => {
       expect(mockedExecFileSync).toHaveBeenCalledWith(
         'security',
         ['find-generic-password', '-s', 'anthropic', '-a', expect.any(String), '-w'],
-        expect.any(Object),
+        expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL', maxBuffer: 4_096 }),
       );
     });
 
@@ -252,6 +257,7 @@ describe('keyring.ts uncovered-branch coverage', () => {
   beforeEach(() => {
     _resetBackendCache();
     vi.clearAllMocks();
+    mockedExecFileSync.mockReset();
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.OPENAI_API_KEY;
     delete process.env.WHATSOUP_HEALTH_TOKEN;
@@ -297,6 +303,14 @@ describe('keyring.ts uncovered-branch coverage', () => {
   });
 
   describe('lookupCredential — file store, migration, and user-scope branches', () => {
+    it('reads an unscoped private file before consulting the macOS keychain', () => {
+      Object.defineProperty(process, 'platform', { value: 'darwin' });
+      fs.writeFileSync(path.join(tmpDir, 'anthropic.key'), 'private-file-value\n', { mode: 0o600 });
+
+      expect(lookupCredential('anthropic', { skipEnv: true })).toBe('private-file-value');
+      expect(mockedExecFileSync).not.toHaveBeenCalled();
+    });
+
     it('reads from file store on env-only backend when env var is absent', () => {
       Object.defineProperty(process, 'platform', { value: 'linux' });
       const enoent = Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' });
@@ -350,12 +364,13 @@ describe('keyring.ts uncovered-branch coverage', () => {
       expect(lookupCredential('anthropic', { user: 'operator', skipEnv: true })).toBeNull();
     });
 
-    it('reads from macOS keychain with explicit user account, then file-store fallback', () => {
+    it('does not use an unscoped private file after a user-scoped macOS keychain miss', () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' });
       mockedExecFileSync.mockImplementationOnce(() => { throw new Error('keychain miss'); });
       fs.mkdirSync(tmpDir, { recursive: true });
       fs.writeFileSync(path.join(tmpDir, 'anthropic.key'), 'mac-fallback-val', { mode: 0o600 });
-      expect(lookupCredential('anthropic', { user: 'bot', skipEnv: true })).toBe('mac-fallback-val');
+      expect(lookupCredential('anthropic', { user: 'bot', skipEnv: true })).toBeNull();
+      expect(fs.readFileSync(path.join(tmpDir, 'anthropic.key'), 'utf-8')).toBe('mac-fallback-val');
     });
 
     it('secret-tool lookup with user passes user on primary candidate', () => {
@@ -366,7 +381,7 @@ describe('keyring.ts uncovered-branch coverage', () => {
       expect(mockedExecFileSync).toHaveBeenCalledWith(
         'secret-tool',
         ['lookup', 'service', 'anthropic', 'user', 'alice'],
-        expect.any(Object),
+        expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
       );
     });
   });
@@ -502,7 +517,7 @@ describe('keyring.ts uncovered-branch coverage', () => {
       expect(mockedExecFileSync).toHaveBeenCalledWith(
         'security',
         ['delete-generic-password', '-s', 'anthropic', '-a', 'bot'],
-        expect.any(Object),
+        expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
       );
     });
   });

@@ -18,6 +18,7 @@ import {
 } from '@whiskeysockets/baileys';
 import { shortHash } from '../lib/short-hash.ts';
 import { isRecord } from '../lib/type-guards.ts';
+import { createTypingStartGuard, type TypingStartGuard } from '../lib/typing-start-guard.ts';
 import { appendPrivateJsonLineSync, readFreshMarkerSync, writePrivateJsonMarkerSync } from '../lib/private-fs.ts';
 
 import { config } from '../config.ts';
@@ -232,16 +233,37 @@ export interface CredentialLifecycleSnapshot {
 /** Maximum time to wait for a send operation before aborting. */
 const SEND_TIMEOUT_MS = 30_000;
 
+/**
+ * #1872: consecutive presence (typing-indicator) failures before the typing
+ * circuit breaker trips and stops hitting the backend until the next reconnect.
+ * Small so a failing presence backend self-heals sends quickly; fail-open —
+ * typing is best-effort and skipping it is always safe.
+ */
+export const TYPING_BREAKER_MAX_CONSECUTIVE_FAILURES = 3;
+
+/**
+ * #1872: bound a single presence call so a slow backend cannot materially delay
+ * message delivery. Much shorter than the send timeout — a typing indicator that
+ * takes seconds is already useless, and a timeout counts as a failure toward the
+ * breaker trip.
+ */
+export const TYPING_PRESENCE_TIMEOUT_MS = 5_000;
+
 /** Wrap a promise with a timeout. Rejects with a descriptive error if it takes too long. */
-function withSendTimeout<T>(promise: Promise<T>, operation: string): Promise<T> {
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, operation: string): Promise<T> {
   let handle: ReturnType<typeof setTimeout>;
   const timeout = new Promise<never>((_, reject) => {
     handle = setTimeout(
-      () => reject(new WhatSoupError(`${operation} timed out after ${SEND_TIMEOUT_MS / 1000}s`, 'SEND_TIMEOUT')),
-      SEND_TIMEOUT_MS,
+      () => reject(new WhatSoupError(`${operation} timed out after ${timeoutMs / 1000}s`, 'SEND_TIMEOUT')),
+      timeoutMs,
     );
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(handle!));
+}
+
+/** Wrap a send operation with the standard send timeout. */
+function withSendTimeout<T>(promise: Promise<T>, operation: string): Promise<T> {
+  return withTimeout(promise, SEND_TIMEOUT_MS, operation);
 }
 
 function toIso(value: number | null): string | null {
@@ -559,6 +581,27 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private static readonly CREDENTIAL_LIFECYCLE_EVENT_LIMIT = 40;
 
   private readonly log = createChildLogger('connection');
+
+  /**
+   * #1872: one canonical typing-indicator circuit breaker. All presence
+   * (composing/paused) traffic funnels through setTyping, which routes the raw
+   * presence call through this guard so consecutive failures actually trip it —
+   * unlike the old path that swallowed every rejection before any guard could
+   * observe it. Fail-open: once tripped it skips the backend entirely (no delay
+   * to real sends) until reset() on the next reconnect.
+   */
+  private readonly typingGuard: TypingStartGuard = createTypingStartGuard({
+    isSealed: () => this.sock === null,
+    maxConsecutiveFailures: TYPING_BREAKER_MAX_CONSECUTIVE_FAILURES,
+    onStartError: (err) =>
+      // best-effort — presence failures must never surface to callers
+      this.log.debug({ op: 'sendPresenceUpdate', error: errorMessage(err) }, 'transport_op_swallowed'),
+    onTrip: () =>
+      this.log.warn(
+        { maxConsecutiveFailures: TYPING_BREAKER_MAX_CONSECUTIVE_FAILURES },
+        'typing_breaker_tripped — skipping typing indicators until reconnect',
+      ),
+  });
 
   /** The bot's own JID (phone@s.whatsapp.net) — populated on connection open. */
   botJid: string | null = null;
@@ -940,12 +983,21 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
   async setTyping(chatJid: string, typing: TypingState): Promise<void> {
     if (!this.sock) return;
-    try {
-      await this.sock.sendPresenceUpdate(resolveTypingState(typing), chatJid);
-    } catch (err) {
-      // best-effort — presence failures must never surface to callers
-      this.log.debug({ op: 'sendPresenceUpdate', error: (err as Error).message }, 'transport_op_swallowed');
-    }
+    const sock = this.sock;
+    // #1872: route presence through the one canonical typing breaker. It observes
+    // the raw sendPresenceUpdate rejection (the old inline catch swallowed it, so
+    // the merged breaker could never trip), bounds a slow call by
+    // TYPING_PRESENCE_TIMEOUT_MS, and once tripped skips the backend entirely so a
+    // failing or slow presence backend cannot delay real message delivery. Errors
+    // stay swallowed (onStartError logs transport_op_swallowed at debug); the
+    // guard result is intentionally best-effort and ignored.
+    await this.typingGuard.run(() =>
+      withTimeout(
+        sock.sendPresenceUpdate(resolveTypingState(typing), chatJid),
+        TYPING_PRESENCE_TIMEOUT_MS,
+        'setTyping',
+      ),
+    );
   }
 
   async sendMedia(chatJid: string, media: OutboundMedia): Promise<SubmissionReceipt> {
@@ -1965,6 +2017,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.unclassified401ReconnectSpent = false;
       this.localAuthAlertEmitted = false;
       this.gracefulReconnectInFlight = false;
+      // #1872: a fresh connection gets a fresh typing breaker — give the presence
+      // backend another chance after any prior trip.
+      this.typingGuard.reset();
       if (this.cooldownTimer !== null) {
         clearTimeout(this.cooldownTimer);
         this.cooldownTimer = null;
