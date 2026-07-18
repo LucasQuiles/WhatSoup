@@ -15,7 +15,7 @@ def build_parser() -> argparse.ArgumentParser:
     return argparse.ArgumentParser(
         prog="qsesh",
         description=(
-            "qSesh: deterministic, local-first, read-only index of Claude Code, "
+            "qSesh: deterministic, local-first, read-only index of Claude, "
             "Codex, and OpenCode sessions."
         ),
         epilog=f"qsesh {__version__}",
