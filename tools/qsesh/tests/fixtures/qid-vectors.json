@@ -1,0 +1,98 @@
+{
+  "boundary_pairs": [
+    {
+      "naive_concatenation_equal": true,
+      "preimages_distinct": true,
+      "vector_names": [
+        "boundary-left",
+        "boundary-right"
+      ]
+    }
+  ],
+  "invalid_cases": [
+    {
+      "error_code": "QS-E-QID",
+      "field": "native_id",
+      "harness": "opencode",
+      "host_id": "host-test-001",
+      "native_id": ""
+    }
+  ],
+  "reference_algorithm": {
+    "base32": "RFC4648 lowercase unpadded first 10 characters",
+    "digest": "BLAKE2b-256",
+    "domain_hex": "71736573682d7169642d763100",
+    "field_encoding": "4-byte unsigned big-endian UTF-8 byte length followed by bytes",
+    "field_order": [
+      "host_id",
+      "harness",
+      "native_id"
+    ]
+  },
+  "schema_version": 1,
+  "vectors": [
+    {
+      "digest_hex": "7c2a0a402337c802e1934ae6a85031f9ed5da0d650baa4c45c333596b9b6d5cc",
+      "harness": "claude",
+      "host_id": "host-test-001",
+      "name": "claude-basic",
+      "native_id": "session-claude-001",
+      "preimage_hex": "71736573682d7169642d7631000000000d686f73742d746573742d30303100000006636c617564650000001273657373696f6e2d636c617564652d303031",
+      "qid": "qs-pqvauqbdg7"
+    },
+    {
+      "digest_hex": "335a19ca1b493a0cdceb091d6c1b2d26a7b155adde4fb142dd9d8c449c1be8b2",
+      "harness": "codex",
+      "host_id": "host-test-001",
+      "name": "codex-basic",
+      "native_id": "session-codex-001",
+      "preimage_hex": "71736573682d7169642d7631000000000d686f73742d746573742d30303100000005636f6465780000001173657373696f6e2d636f6465782d303031",
+      "qid": "qs-gnnbtsq3je"
+    },
+    {
+      "digest_hex": "48450096d2fb2d11410eac75dcc9aa5a437ed4f233ed4e20373cefaad3e2cf19",
+      "harness": "opencode",
+      "host_id": "host-test-001",
+      "name": "opencode-basic",
+      "native_id": "ses_opencode_001",
+      "preimage_hex": "71736573682d7169642d7631000000000d686f73742d746573742d303031000000086f70656e636f6465000000107365735f6f70656e636f64655f303031",
+      "qid": "qs-jbcqbfws7m"
+    },
+    {
+      "digest_hex": "f2adb6dbc08abd4e15f50aaaa1823abab379229aac53799d51ea60e94047f57c",
+      "harness": "claude",
+      "host_id": "host-test-001",
+      "name": "separator-native",
+      "native_id": "alpha|beta/../gamma\\delta",
+      "preimage_hex": "71736573682d7169642d7631000000000d686f73742d746573742d30303100000006636c6175646500000019616c7068617c626574612f2e2e2f67616d6d615c64656c7461",
+      "qid": "qs-6kw3nw6ark"
+    },
+    {
+      "digest_hex": "7b730d099460030e1d73f8509464b73bd31b76ae7acbb17f3ed0baecc3fca6fb",
+      "harness": "codex",
+      "host_id": "host-test-001",
+      "name": "unicode-native",
+      "native_id": "séssion-東京-🚀",
+      "preimage_hex": "71736573682d7169642d7631000000000d686f73742d746573742d30303100000005636f6465780000001473c3a97373696f6e2de69db1e4baac2df09f9a80",
+      "qid": "qs-pnzq2cmuma"
+    },
+    {
+      "digest_hex": "9c8c156c9408107d04cd3288525fde41473245e8b906e5eb972e38d1421d08ec",
+      "harness": "claude",
+      "host_id": "host",
+      "name": "boundary-left",
+      "native_id": "xclaudey",
+      "preimage_hex": "71736573682d7169642d76310000000004686f737400000006636c617564650000000878636c6175646579",
+      "qid": "qs-tsgbk3euba"
+    },
+    {
+      "digest_hex": "4f790e4f6e37accb96e3b4cb7a807a66ff6e1030ed7f8b90ef5bc05e4133c11f",
+      "harness": "claude",
+      "host_id": "hostclaudex",
+      "name": "boundary-right",
+      "native_id": "y",
+      "preimage_hex": "71736573682d7169642d7631000000000b686f7374636c617564657800000006636c617564650000000179",
+      "qid": "qs-j54q4t3og6"
+    }
+  ]
+}

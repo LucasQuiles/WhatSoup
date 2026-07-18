@@ -83,6 +83,19 @@ jobs:
       - name: Install Python test dependencies
         run: python3 -m pip install --user pytest pytest-cov
 
+      # qSesh Python lane (tools/qsesh): pinned Ruff + ShellCheck, then the
+      # lint/test package scripts. Requires the Setup Python 3.12 step above.
+      - name: Install qSesh Python quality tools
+        run: |
+          python3 -m pip install --user ruff==0.15.10
+          sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: qSesh lint
+        run: npm run lint:qsesh
+
+      - name: qSesh tests
+        run: npm run test:qsesh
+
       # ripgrep is a hard requirement of console/scripts/design-regression.sh
       # (the design:regression gate + tests/scripts/design-regression-guards).
       # It is not on the default runner image, so install it explicitly;
