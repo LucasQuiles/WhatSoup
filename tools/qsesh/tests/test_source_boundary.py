@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import select
 import stat
 import subprocess
 import time
@@ -818,8 +819,23 @@ def test_descendant_held_pipe_times_out_and_the_process_group_is_reaped(
     _assert_error(caught.value, code="QS-E-TIMEOUT", phase="opencode-command")
     child_pid = int((runner.private_workspace / "home/descendant.pid").read_text())
     assert elapsed < 2.0
-    with pytest.raises(ProcessLookupError):
-        os.kill(child_pid, 0)
+    # The runner SIGKILLs the whole process group, but the backgrounded
+    # descendant is reparented to init and reaped asynchronously — the
+    # zombie-reap window is nonzero on Linux, so wait on the condition that the
+    # descendant has disappeared rather than requiring it the instant run()
+    # returns. select() provides the bounded, non-busy poll delay; the 5s bound
+    # stays well below the descendant's own `sleep 10`, so a genuinely
+    # un-reaped process still fails this assertion closed.
+    reaped = False
+    reap_deadline = time.monotonic() + 5.0
+    while time.monotonic() < reap_deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            reaped = True
+            break
+        select.select([], [], [], 0.05)
+    assert reaped, f"descendant pid {child_pid} was not reaped within 5s"
 
 
 def test_signal_termination_is_a_typed_failure_without_partial_output(
