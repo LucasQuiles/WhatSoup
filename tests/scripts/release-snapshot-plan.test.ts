@@ -66,7 +66,7 @@ describe('release snapshot planning', () => {
     });
 
     expect(plan.manifest).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
       source: {
         commit: 'abc123def4567890',
         ref: 'main',
@@ -131,6 +131,71 @@ describe('release snapshot planning', () => {
       expect.objectContaining({ kind: 'file-sha256-drift', path: 'src/main.ts' }),
       expect.objectContaining({ kind: 'extra-file', path: 'src/hotpatch.ts' }),
     ]);
+  });
+
+  it('flags a declared required build output that is absent from the release', () => {
+    // A release that ships without its built console assets (untracked by git,
+    // so never in the file manifest) previously drifted CLEAN — the packaging
+    // blind spot behind the mini7 console 404. requiredOutputs closes it.
+    const sourceRoot = makeFixtureSource();
+    const releaseRoot = path.join(tmpRoot, 'releases');
+    const plan = createReleaseSnapshotPlan({
+      sourceRoot,
+      sourceRef: 'main',
+      sourceCommit: 'abc123def4567890',
+      releaseRoot,
+      buildTime: '2026-06-13T06:00:00.000Z',
+      trackedFiles: ['package.json', 'src/main.ts'],
+      requiredOutputs: ['dist/index.html'],
+    });
+    expect(plan.manifest.requiredOutputs).toEqual(['dist/index.html']);
+    const releasePath = plan.manifest.release.path;
+    mkdirSync(path.join(releasePath, 'src'), { recursive: true });
+    writeFileSync(path.join(releasePath, 'package.json'), readFileSync(path.join(sourceRoot, 'package.json')));
+    writeFileSync(path.join(releasePath, 'src/main.ts'), readFileSync(path.join(sourceRoot, 'src/main.ts')));
+    // dist/index.html deliberately NOT written — the release omits the console build.
+
+    expect(collectReleaseSnapshotDrift(releasePath, plan.manifest)).toEqual([
+      expect.objectContaining({ kind: 'required-output-missing', path: 'dist/index.html' }),
+    ]);
+  });
+
+  it('passes drift when the declared required output is present', () => {
+    const sourceRoot = makeFixtureSource();
+    const releaseRoot = path.join(tmpRoot, 'releases');
+    const plan = createReleaseSnapshotPlan({
+      sourceRoot,
+      sourceRef: 'main',
+      sourceCommit: 'abc123def4567890',
+      releaseRoot,
+      buildTime: '2026-06-13T06:00:00.000Z',
+      trackedFiles: ['package.json', 'src/main.ts'],
+      requiredOutputs: ['dist/index.html'],
+    });
+    const releasePath = plan.manifest.release.path;
+    mkdirSync(path.join(releasePath, 'src'), { recursive: true });
+    mkdirSync(path.join(releasePath, 'dist'), { recursive: true });
+    writeFileSync(path.join(releasePath, 'package.json'), readFileSync(path.join(sourceRoot, 'package.json')));
+    writeFileSync(path.join(releasePath, 'src/main.ts'), readFileSync(path.join(sourceRoot, 'src/main.ts')));
+    writeFileSync(path.join(releasePath, 'dist/index.html'), '<!doctype html><html></html>', 'utf8');
+
+    expect(collectReleaseSnapshotDrift(releasePath, plan.manifest)).toEqual([]);
+  });
+
+  it('accepts a legacy v1 manifest with no requiredOutputs (back-compat)', () => {
+    const manifest = parseReleaseSnapshotManifest({
+      schemaVersion: 1,
+      source: { commit: 'abc123', ref: 'main' },
+      release: {
+        path: '/tmp/whatsoup-legacy/releases/legacy',
+        createdAt: '2026-06-13T06:00:00.000Z',
+        mutablePathExcludes: [],
+      },
+      rollback: { path: '/tmp/whatsoup-legacy/rollback/legacy-before' },
+      files: [],
+    });
+    expect(manifest.schemaVersion).toBe(1);
+    expect(manifest.requiredOutputs).toEqual([]);
   });
 
   it('flags manifest path mismatches and non-regular release files', () => {
