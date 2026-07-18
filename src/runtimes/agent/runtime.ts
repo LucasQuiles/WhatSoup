@@ -6937,13 +6937,32 @@ export class AgentRuntime implements Runtime {
         ...this.chatQueues.keys(),
         ...this.imageCoalesce.buffers.keys(),
       ]);
-      for (const [chatJid, session] of this.chatSessions) {
-        try {
-          await session.shutdown();
-        } catch (err) {
+      // #1755: shut the per_chat sessions down CONCURRENTLY. Each session.shutdown()
+      // touches only its own per-session state, synchronous (event-loop-serialized)
+      // SQLite on its own rows, and its own distinct process tree — so the kill-grace
+      // waits OVERLAP instead of stacking linearly against the service manager's stop
+      // timeout (the observed cause of SIGTERM-timeout SIGKILLs). Each task captures
+      // its own error so the batch never rejects; runtime state (shutdownFailures,
+      // failedPerChatSessions) is reconciled sequentially AFTER settle, never
+      // mutated concurrently. Per-chat outcome + duration is logged for attribution.
+      const perChatOutcomes = await Promise.all(
+        [...this.chatSessions].map(async ([chatJid, session]) => {
+          const startedAt = Date.now();
+          try {
+            await session.shutdown();
+            return { chatJid, session, err: null as unknown, durationMs: Date.now() - startedAt };
+          } catch (err) {
+            return { chatJid, session, err, durationMs: Date.now() - startedAt };
+          }
+        }),
+      );
+      for (const { chatJid, session, err, durationMs } of perChatOutcomes) {
+        if (err !== null) {
           shutdownFailures.push(err);
           failedPerChatSessions.set(chatJid, session);
-          log.warn({ err, chatJid }, 'per_chat session shutdown failed');
+          log.warn({ err, chatJid, durationMs }, 'per_chat session shutdown failed');
+        } else {
+          log.debug({ chatJid, durationMs }, 'per_chat session shutdown ok');
         }
       }
     }
