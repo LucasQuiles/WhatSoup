@@ -212,11 +212,18 @@
     },
     {
       "host": "mini11",
-      "role": "no-bot",
-      "guiSessionExpected": "not_applicable",
+      "role": "bot-host",
+      "guiSessionExpected": "always_aqua",
       "profile": "mini11.json",
       "collectorRemote": true,
-      "instances": []
+      "instances": [
+        {
+          "name": "ph-bot",
+          "expected": "always_on",
+          "service": "com.whatsoup.ph-bot",
+          "healthPort": 9090
+        }
+      ]
     }
   ]
 }
