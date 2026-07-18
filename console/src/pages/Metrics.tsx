@@ -15,6 +15,7 @@ import { FleetMetricsChart } from "../components/FleetMetricsChart";
 import { FleetTokenChart } from "../components/FleetTokenChart";
 import { Button, Card, ToolbarTimeRange, type TimeRangeOption } from "../components/primitives";
 import { formatCount, formatCompact } from "../lib/text-utils";
+import { formatRelative } from "../lib/format-time";
 import { RotateCw } from "lucide-react";
 
 const ease = [0.22, 1, 0.36, 1] as const;
@@ -75,6 +76,7 @@ const Metrics: FC = () => {
     isLoading: metricsLoading,
     isError: metricsError,
     refetch: metricsRefetch,
+    freshness: metricsFreshness,
   } = useFleetMetrics(chartRange);
 
   const kpis = useMemo(() => computeKpis(lines), [lines]);
@@ -149,6 +151,21 @@ const Metrics: FC = () => {
         <div className="flex items-center justify-between">
           <h2 className="c-heading-lg">Fleet Metrics</h2>
           <div className="flex items-center gap-[var(--sp-2)]">
+            {/* GUI-5: label carried/aged fleet metrics — never silently green. */}
+            {metricsFreshness && metricsFreshness.observedAt !== null && (
+              <span
+                className={`c-label${metricsFreshness.stale ? ' text-s-warn' : ''}`}
+                title={
+                  metricsFreshness.stale
+                    ? `Fleet metrics carried forward — last successful fetch ${formatRelative(new Date(metricsFreshness.observedAt).toISOString())}`
+                    : `Last successful fleet metrics fetch ${formatRelative(new Date(metricsFreshness.observedAt).toISOString())}`
+                }
+              >
+                {metricsFreshness.stale
+                  ? `stale · ${formatRelative(new Date(metricsFreshness.observedAt).toISOString())}`
+                  : `observed ${formatRelative(new Date(metricsFreshness.observedAt).toISOString())}`}
+              </span>
+            )}
             {(linesError || metricsError) && (
               <Button
                 variant="ghost"

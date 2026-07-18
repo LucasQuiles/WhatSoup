@@ -583,3 +583,72 @@ describe('MetricsTab — Model Configuration card', () => {
     expect(screen.queryByText('Model Configuration')).toBeNull();
   });
 });
+
+describe('MetricsTab freshness marker (GUI-5)', () => {
+  it('labels carried data stale with the amber idiom, payload still rendered', () => {
+    render(
+      <MetricsTab
+        metrics={buildMetrics()}
+        metricsLoading={false}
+        metricsError={null}
+        metricsRange="24h"
+        setMetricsRange={() => {}}
+        metricsFreshness={{ observedAt: Date.now() - 121_000, stale: true }}
+      />,
+    )
+
+    const marker = screen.getByText(/^stale · /)
+    expect(marker.className).toContain('c-label')
+    expect(marker.className).toContain('text-s-warn')
+    // stale labels, never hides: the payload charts still render
+    expect(screen.getAllByTestId('metrics-chart').length).toBeGreaterThan(0)
+  })
+
+  it('shows a quiet observation age for fresh data without the warn styling', () => {
+    render(
+      <MetricsTab
+        metrics={buildMetrics()}
+        metricsLoading={false}
+        metricsError={null}
+        metricsRange="24h"
+        setMetricsRange={() => {}}
+        metricsFreshness={{ observedAt: Date.now() - 5_000, stale: false }}
+      />,
+    )
+
+    const marker = screen.getByText(/^observed /)
+    expect(marker.className).toContain('c-label')
+    expect(marker.className).not.toContain('text-s-warn')
+  })
+
+  it('renders no freshness marker before the first observation', () => {
+    render(
+      <MetricsTab
+        metrics={buildMetrics()}
+        metricsLoading={false}
+        metricsError={null}
+        metricsRange="24h"
+        setMetricsRange={() => {}}
+        metricsFreshness={{ observedAt: null, stale: false }}
+      />,
+    )
+
+    expect(screen.queryByText(/^stale · /)).toBeNull()
+    expect(screen.queryByText(/^observed /)).toBeNull()
+  })
+
+  it('renders no marker when the prop is omitted (legacy callers)', () => {
+    render(
+      <MetricsTab
+        metrics={buildMetrics()}
+        metricsLoading={false}
+        metricsError={null}
+        metricsRange="24h"
+        setMetricsRange={() => {}}
+      />,
+    )
+
+    expect(screen.queryByText(/^stale · /)).toBeNull()
+    expect(screen.queryByText(/^observed /)).toBeNull()
+  })
+})

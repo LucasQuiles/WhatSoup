@@ -84,7 +84,7 @@ export default function LineDetail() {
     error: logsError,
     refetch: refetchLogs,
   } = useLogs(name || '')
-  const { data: metrics, isLoading: metricsLoading, error: metricsError, refetch: refetchMetrics } = useMetrics(name || '', metricsRange)
+  const { data: metrics, isLoading: metricsLoading, error: metricsError, refetch: refetchMetrics, freshness: metricsFreshness } = useMetrics(name || '', metricsRange)
   const { data: typingData } = useTyping()
   const typingJids = React.useMemo(() =>
     new Set((typingData ?? []).filter(t => t.instance === name).map(t => t.jid)),
@@ -330,6 +330,7 @@ export default function LineDetail() {
                   lineName={name}
                   line={line}
                   onRetry={refetchMetrics}
+                  metricsFreshness={metricsFreshness}
                 />
               )}
               {activeTab === 'scheduled' && (
