@@ -149,3 +149,90 @@ describe('process-tree fail-closed safety', () => {
     expect(killSpy).not.toHaveBeenCalled();
   });
 });
+
+// #1755: kill-time ambiguity must resolve-or-record, never throw-and-abort (which
+// burned the full grace per chat and drove SIGTERM-timeout SIGKILLs). The safety
+// invariant is unchanged: an ambiguous PID is never signaled.
+describe('#1755 kill-time ambiguity resolution', () => {
+  // Two identical CHILD rows → inspectOwned marks CHILD_PID ambiguous; root absent.
+  function ambiguousChild(): string {
+    return census([
+      { pid: process.pid, ppid: 1, pgid: process.pid, command: 'vitest-parent' },
+      { pid: CHILD_PID, ppid: ROOT_PID, pgid: ROOT_PID, command: 'provider-child' },
+      { pid: CHILD_PID, ppid: ROOT_PID, pgid: ROOT_PID, command: 'provider-child' },
+    ]);
+  }
+  function selfOnly(): string {
+    return census([{ pid: process.pid, ppid: 1, pgid: process.pid, command: 'vitest-parent' }]);
+  }
+
+  it('soft-records a persistently-ambiguous survivor instead of throwing, and never SIGKILLs it', async () => {
+    execFileSyncMock
+      .mockReturnValueOnce(rootRows()) // entry snapshot: root + child owned
+      .mockReturnValueOnce(rootRows()) // pre-signal: clean → SIGTERM both
+      .mockReturnValue(ambiguousChild()); // TERM check + escalation re-census + final: child ambiguous
+
+    const outcomes: Array<{ outcome: string; ambiguousPids: readonly number[] }> = [];
+    await expect(
+      killSessionTree(ROOT_PID, 'SIGTERM', {
+        generationMarker: 'persistent-ambiguous',
+        termGraceMs: 0,
+        killGraceMs: 0,
+        ambiguityResolveMs: 0,
+        onOutcome: (o) => outcomes.push(o),
+      }),
+    ).resolves.toBeUndefined();
+
+    // Safety invariant: the ambiguous child is never escalated to SIGKILL.
+    expect(killSpy.mock.calls.some((c: unknown[]) => c[0] === CHILD_PID && c[1] === 'SIGKILL')).toBe(false);
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0].outcome).toBe('unresolved_ambiguous');
+    expect(outcomes[0].ambiguousPids).toContain(CHILD_PID);
+  });
+
+  it('reports outcome=terminated when the tree exits within the grace (no escalation)', async () => {
+    execFileSyncMock
+      .mockReturnValueOnce(rootRows()) // entry
+      .mockReturnValueOnce(rootRows()) // pre-signal SIGTERM
+      .mockReturnValue(selfOnly()); // TERM check + final: all gone
+
+    const outcomes: Array<{ outcome: string; escalated: boolean }> = [];
+    await expect(
+      killSessionTree(ROOT_PID, 'SIGTERM', {
+        generationMarker: 'clean-terminate',
+        termGraceMs: 0,
+        killGraceMs: 0,
+        ambiguityResolveMs: 0,
+        onOutcome: (o) => outcomes.push(o),
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(outcomes[0].outcome).toBe('terminated');
+    expect(outcomes[0].escalated).toBe(false);
+  });
+
+  it('reports outcome=escalated when a confirmed survivor is SIGKILLed', async () => {
+    execFileSyncMock
+      .mockReturnValueOnce(rootRows()) // entry
+      .mockReturnValueOnce(rootRows()) // pre-signal SIGTERM
+      .mockReturnValueOnce(rootRows()) // TERM check: still alive → survivors
+      .mockReturnValueOnce(rootRows()) // escalation re-census: confirmed → SIGKILL
+      .mockReturnValue(selfOnly()); // final: gone
+
+    const outcomes: Array<{ outcome: string; escalated: boolean }> = [];
+    await expect(
+      killSessionTree(ROOT_PID, 'SIGTERM', {
+        generationMarker: 'escalate-confirmed',
+        termGraceMs: 0,
+        killGraceMs: 0,
+        ambiguityResolveMs: 0,
+        onOutcome: (o) => outcomes.push(o),
+      }),
+    ).resolves.toBeUndefined();
+
+    // Escalation is a process-group SIGKILL (negative pgid) when root leads its group.
+    expect(killSpy.mock.calls.some((c: unknown[]) => c[1] === 'SIGKILL')).toBe(true);
+    expect(outcomes[0].outcome).toBe('escalated');
+    expect(outcomes[0].escalated).toBe(true);
+  });
+});
