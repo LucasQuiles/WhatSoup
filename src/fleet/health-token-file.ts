@@ -103,10 +103,6 @@ export function parseCanonicalHealthTokenFile(contents: string): CanonicalHealth
   return isCanonicalHealthToken(token) ? token : null;
 }
 
-export function serializeCanonicalHealthTokenFile(token: CanonicalHealthToken): string {
-  return `${HEALTH_TOKEN_PREFIX}${token}\n`;
-}
-
 /**
  * Read the transitional per-instance token file through a verified descriptor.
  * A missing file is the only absent case; every unsafe or malformed existing
