@@ -2847,6 +2847,23 @@ renamed predecessor tests, selected skips/todos, and marker-count drift remain f
 two-file cumulative BCF-04 RED/GREEN regression, commit the bounded helper/test/doctrine fix, and
 rerun BCF-00 through BCF-03 under fresh IDs before recreating BCF-04.
 
+Twentieth recovery note for Recovery16: observation run
+`bcf00-observation-c30b3b805-20260717a` preserved ten passing upstream probes but rejected
+`merge-preview` before spawn because the invocation declared expected exit `0` instead of the
+profile-owned `0,1`. Fresh observation `bcf00-observation-c30b3b805-20260717b` then finalized and
+verified Pass. Reconciliation `bcf00-reconciliation-c30b3b805-20260717a` created merge
+`953259363b8ee8721d9670a05103afa168cd3bfb`; every external validator, typecheck, evaluator, and
+branch-gate attempt passed, but `readiness-check` correctly emitted `Not Ready` because lifecycle
+remained `active/not-run/not-applicable`. The operator had invoked readiness before the Step 7
+`set-lifecycle completed/pass/current` declaration. A later lifecycle command cannot repair the
+already failed required attempt, so finalization remained rejected and the run is Inconclusive.
+
+Preserve both failed run directories and the pushed Recovery16 merge. Recovery17 starts again from
+pre-merge commit `c30b3b805f0f377ac2f7f7ccb4c31c2fad6f9c2d`, uses new observation and
+reconciliation IDs, and follows the already normative Step 7 order exactly: declare
+`completed/pass/current` while readiness is absent, invoke `readiness-check` once, then finalize and
+verify. No helper or product change is justified by this operator-order failure.
+
 ```bash
 git rev-parse --show-toplevel
 git rev-parse HEAD

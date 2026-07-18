@@ -580,6 +580,20 @@ failed run and its scaffold stash are preserved. Recovery16 fixes only marker ad
 entry-roster predecessor tests remain mandatory, while only current registered markers satisfy the
 current predicate. A foreign or renamed marker still fails.
 
+## 2026-07-17 readiness-order recovery
+
+Recovery16 committed and pushed the cumulative-marker correction at `c30b3b805`, then preserved an
+observation invocation rejected for declaring `merge-preview` exit `0` instead of `0,1`. Its fresh
+observation finalized Pass. Reconciliation merge `953259363` passed every external validator,
+typecheck, evaluator, and branch-gate attempt, but readiness was invoked while lifecycle remained
+`active/not-run/not-applicable`; the internal check correctly returned `Not Ready`. Because a failed
+required attempt is single-use, later lifecycle mutation could not promote the run. The merge and
+failed evidence remain preserved on the pushed Recovery16 branch.
+
+Recovery17 restarts from `c30b3b805` with no helper or product change. It must use new run IDs and
+the plan's existing Step 7 order: `set-lifecycle completed/pass/current`, then the one
+`readiness-check`, then finalization and read-only verification.
+
 ## Authorization Boundary
 
 The planning packet's initial approval authorized writing and committing the local specification,
