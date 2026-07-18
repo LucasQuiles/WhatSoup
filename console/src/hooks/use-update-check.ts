@@ -27,7 +27,7 @@ export function useUpdateCheck() {
   useEffect(() => {
     if (query.data?.updateAvailable && !notifiedRef.current) {
       notifiedRef.current = true;
-      toast.info('A new version is available. Click the update button in the nav bar to install.');
+      toast.info('A new version is available. Deploy a new release to update this instance — in-place update has been retired.');
     }
     if (query.data && !query.data.updateAvailable) {
       notifiedRef.current = false;
