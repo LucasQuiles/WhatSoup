@@ -26,7 +26,10 @@ export interface LineInstance {
     // Matches the ONE /health emitter (src/core/health.ts): connection state
     // nests under whatsapp.connection, never top-level. See #1763 — the
     // CONNECTION card read a top-level `connection` no emitter ever produced.
-    whatsapp: { connection: { state: string } };
+    // `connected` is the emitter's composed transport-up signal
+    // (`connectionState.connected && state === 'connected'`); it distinguishes
+    // a degraded-but-connected line from a disconnected one (#1881).
+    whatsapp: { connected?: boolean; connection: { state: string } };
     sqlite: { messages_total: number; schema_version: number };
     runtime?: {
       passive?: { unreadCount: number; lastActivityAt: string | null };

@@ -20,6 +20,7 @@ import { useToast } from '../hooks/toast-context'
 import { useQueryClient } from '@tanstack/react-query'
 import { displayInstanceName } from '../lib/text-utils'
 import { statusWashClass, statusSeverity } from '../lib/status-severity'
+import { computeKpis } from '../lib/compute-kpis'
 const RelinkModal = lazy(() => import('../components/RelinkModal'))
 
 type LevelFilter = 'all' | 'error' | 'warn' | 'info' | 'debug'
@@ -82,7 +83,25 @@ export default function Operator() {
     return acc
   }, [logs])
 
-  const alerts = useMemo(() => feed.filter(e => e.isError), [feed])
+  // Historical activity-feed alerts (#1882 criterion 2): warning/error log
+  // lines the feed parsed, kept SEPARATE from the current-health headline
+  // below. These are useful as a recent-activity trail — but a line can
+  // recover while an old error entry still lingers here, or degrade before
+  // anything reaches the feed — so this count must never be relabeled as
+  // "current unhealthy lines".
+  const feedAlerts = useMemo(() => feed.filter(e => e.isError), [feed])
+
+  // Current-line-health headline (#1882 criterion 1): reuses the SAME
+  // computeKpis the Fleet page KPI strip reads (#1881), so "unhealthy" and
+  // the stale/unknown coverage can't drift into a second, disagreeing
+  // definition of "healthy". needAttention is status-derived (always live —
+  // #1762 rem-1 keeps status visible through an outage); connectivityUnknown
+  // flags lines whose transport state couldn't be confirmed this poll.
+  // connectivityUnknown is 0 whenever needAttention is 0 (isLineConnectivityUnknown
+  // only fires for a non-online status), but both are checked explicitly so the
+  // green state can never mask an unresolved coverage gap.
+  const kpis = useMemo(() => computeKpis(lines), [lines])
+  const isHealthy = kpis.needAttention === 0 && kpis.connectivityUnknown === 0
 
   const ease = [0.22, 1, 0.36, 1] as const
 
@@ -104,22 +123,26 @@ export default function Operator() {
           className="flex items-center justify-between flex-shrink-0 bg-surface-raised c-toolbar c-border-b min-h-[var(--toolbar-h)]"
         >
           <span className="c-heading">Fleet Status</span>
-          {feedError ? (
-            <span className="flex items-center font-mono text-s-crit gap-[var(--sp-1)] text-label">
-              <AlertTriangle size={12} strokeWidth={1.75} />
-              alerts unavailable
-            </span>
-          ) : alerts.length > 0 ? (
-            <span className="flex items-center font-mono text-s-crit gap-[var(--sp-1)] text-label">
-              <AlertTriangle size={12} strokeWidth={1.75} />
-              {alerts.length} alert{alerts.length !== 1 ? 's' : ''}
-            </span>
-          ) : (
-            <span className="flex items-center font-mono text-s-ok gap-[var(--sp-1)] text-label">
-              <CheckCircle2 size={12} strokeWidth={1.75} />
-              all healthy
-            </span>
-          )}
+          <div className="flex items-center gap-[var(--sp-3)]">
+            {isHealthy ? (
+              <span className="flex items-center font-mono text-s-ok gap-[var(--sp-1)] text-label">
+                <CheckCircle2 size={12} strokeWidth={1.75} />
+                all healthy
+              </span>
+            ) : (
+              <span className="flex items-center font-mono text-s-crit gap-[var(--sp-1)] text-label">
+                <AlertTriangle size={12} strokeWidth={1.75} />
+                {kpis.needAttention > 0 && <span>{kpis.needAttention} unhealthy</span>}
+                {kpis.connectivityUnknown > 0 && <span>{kpis.connectivityUnknown} unknown</span>}
+              </span>
+            )}
+            {feedError && (
+              <span className="flex items-center font-mono text-s-crit gap-[var(--sp-1)] text-label">
+                <AlertTriangle size={12} strokeWidth={1.75} />
+                alerts unavailable
+              </span>
+            )}
+          </div>
         </div>
 
         {/* Row 2: Summary stats — matches column header row */}
@@ -129,9 +152,9 @@ export default function Operator() {
           <div className="flex items-center gap-[var(--sp-3)]">
             <span className="c-label">{lines.length} Lines</span>
             <span className="c-label">{lines.filter(l => l.status === 'online').length} online</span>
-            {alerts.length > 0 && (
-              <span className="font-mono text-s-crit text-label">
-                {alerts.length} unhealthy
+            {feedAlerts.length > 0 && (
+              <span className="font-mono text-s-warn text-label">
+                {feedAlerts.length} feed alert{feedAlerts.length !== 1 ? 's' : ''}
               </span>
             )}
             {feedError && (
