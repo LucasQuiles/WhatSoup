@@ -13,18 +13,39 @@ import {
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 
 import { assertNoSecretLike } from '../../artifact-redaction.ts';
 import { cleanGitEnv } from '../../../src/lib/git-env.ts';
 import { fsyncDirectory, privateWriteError } from '../../../src/lib/private-fs.ts';
 import type {
   BoundaryAction,
+  BoundaryActionV1,
   BoundaryArtifact,
   BoundaryDecision,
   BoundaryFinding,
+  BoundaryFindingInput,
+  BoundaryOverflow,
+  BoundaryReceiptBase,
+  BoundaryTarget,
+  CanonicalBoundaryFinding,
 } from './boundary-types.ts';
+import {
+  assertReceiptWithinBudgets,
+  DEFAULT_BOUNDARY_BUDGETS,
+  canonicalBoundaryFinding,
+  canonicalBoundaryLimitations,
+  canonicalBoundaryTarget,
+  canonicalEnforcementMode,
+  evidenceDigestSha256,
+} from './boundary-contract.ts';
 import type { CandidateTree } from './git-tree.ts';
-import type { SemanticPolicyFinding } from './policy.ts';
+import { isValidHistoryTimestamp } from './history-provider.ts';
+import {
+  semanticPolicyEvidenceState,
+  type SemanticPolicyFinding,
+} from './policy.ts';
+import { evidenceStateForRule, ruleCatalogDigestSha256 } from './rule-guidance.ts';
 
 export type {
   BoundaryAction,
@@ -33,13 +54,14 @@ export type {
   BoundaryEvidenceRecord,
   BoundaryFinding,
 } from './boundary-types.ts';
-export type EnforcementMode = 'shadow' | 'enforce';
+export type { EnforcementMode } from './boundary-types.ts';
+import type { EnforcementMode } from './boundary-types.ts';
 
-export interface BoundaryReceipt {
+export interface BoundaryReceiptV1 {
   schemaVersion: 1;
   repository: 'LucasQuiles/WhatSoup';
   invocation: string;
-  action?: BoundaryAction;
+  action?: BoundaryActionV1;
   correlationIdSha256?: string;
   enforcementMode: EnforcementMode;
   decision: BoundaryDecision;
@@ -54,13 +76,38 @@ export interface BoundaryReceipt {
   limitations: string[];
 }
 
+export interface BoundaryReceiptV2 {
+  schemaVersion: 2;
+  repository: 'LucasQuiles/WhatSoup';
+  invocation: string;
+  action: BoundaryAction;
+  target: BoundaryTarget;
+  observedAt: string;
+  validUntil: string | null;
+  correlationIdSha256: string;
+  ruleCatalogDigestSha256: string;
+  evidenceDigestSha256: string;
+  enforcementMode: EnforcementMode;
+  decision: BoundaryDecision;
+  base: BoundaryReceiptBase;
+  fingerprints: Record<string, string | null>;
+  findings: CanonicalBoundaryFinding[];
+  limitations: string[];
+  overflow: BoundaryOverflow | null;
+}
+
+export type BoundaryReceipt = BoundaryReceiptV1 | BoundaryReceiptV2;
+
 export interface BuildBoundaryReceiptInput {
   invocation: string;
   action: BoundaryAction;
+  target: BoundaryTarget;
+  observedAt: string;
+  validUntil?: string | null;
   enforcementMode: EnforcementMode;
-  base: BoundaryReceipt['base'];
+  base: BoundaryReceiptBase;
   fingerprints?: Record<string, string | null>;
-  findings: BoundaryFinding[];
+  findings: BoundaryFindingInput[];
   limitations?: string[];
 }
 
@@ -70,127 +117,67 @@ export interface BuildSemanticReceiptInput {
   enforcementMode: EnforcementMode;
   evidenceSource: string;
   limitations?: string[];
+  now?: Date;
+  targetRef: string | null;
 }
 
 interface FindingLanguage {
   summary: string;
   why: string;
-  correction: string[];
 }
 
 const FINDING_LANGUAGE: Record<SemanticPolicyFinding['ruleId'], FindingLanguage> = {
   'semantic.production-reachability': {
     summary: 'A changed production module is not reachable from a declared runtime root.',
     why: 'Tests or isolated declarations do not prove that a production composition path owns this module.',
-    correction: [
-      'Integrate the module through one declared production root and add a behavior test through that owner.',
-      'If the module is intentionally non-runtime, move it outside src/ or add a scoped, expiring owner allowlist record.',
-    ],
   },
   'semantic.export-ownership': {
     summary: 'A reachable module exposes a runtime export without a production owner.',
     why: 'An exported declaration can survive refactoring even after every runtime caller has been removed.',
-    correction: [
-      'Remove the orphaned export or call it through the production module that owns the behavior.',
-      'Keep public entrypoints explicit and document their external owner before promotion to enforcement.',
-    ],
   },
   'semantic.unresolved-runtime-edge': {
     summary: 'A changed production module contains an unresolved relative runtime edge.',
     why: 'An unresolved literal import prevents the exact runtime graph from proving the intended production path.',
-    correction: [
-      'Correct the relative specifier or add the missing committed TypeScript/TSX target.',
-      'If the edge is intentionally computed at runtime, replace the literal with the reviewed composition mechanism.',
-    ],
   },
   'semantic.invalid-allowlist': {
     summary: 'The semantic quality allowlist is missing, malformed, duplicated, or expired.',
     why: 'An invalid override record could hide evidence without a current owner, reason, expiry, and re-entry condition.',
-    correction: [
-      'Remove the invalid override or replace it with a path-qualified owner record whose expiry and re-entry condition are current.',
-      'Do not use environment variables or source comments as semantic-quality bypasses.',
-    ],
   },
   'semantic.candidate-unavailable': {
     summary: 'The requested candidate revision could not be resolved.',
     why: 'Without an exact candidate tree and head identity, semantic reachability and ownership analysis cannot produce a clean result.',
-    correction: [
-      'Fetch the requested revision and verify the --head value resolves to a committed candidate.',
-      'Rerun only after the candidate tree and changed-path evidence are readable.',
-    ],
   },
   'semantic.policy-unavailable': {
     summary: 'The semantic quality policy could not be read or parsed.',
     why: 'Unreadable policy evidence leaves production roots, source scope, and owner exceptions unknown.',
-    correction: [
-      'Restore config/semantic-quality.json at the candidate revision and validate its JSON encoding.',
-      'Keep a readable but semantically invalid policy on the existing invalid-allowlist blocker path.',
-    ],
   },
   'semantic.source-tree-unavailable': {
     summary: 'The candidate source tree or a configured production root is incomplete.',
     why: 'A missing source inventory or runtime root prevents the graph from proving which production composition paths exist.',
-    correction: [
-      'Restore the missing TypeScript source tree or correct the configured production root.',
-      'Rerun after every declared root is present in the exact candidate tree.',
-    ],
   },
   'semantic.analysis-unavailable': {
     summary: 'Semantic graph analysis could not complete.',
     why: 'A parse, graph, reachability, or ownership failure makes partial semantic conclusions unsafe.',
-    correction: [
-      'Correct the named source or analysis failure and rerun the semantic boundary.',
-      'Do not treat partial graph results as proof of reachability or ownership.',
-    ],
   },
   'semantic.invocation-invalid': {
     summary: 'The semantic quality invocation is invalid.',
     why: 'Unknown, conflicting, or missing CLI arguments mean the requested boundary scope was not established.',
-    correction: [
-      'Correct the named CLI argument and rerun with an explicit scope, head, base, mode, and receipt choice.',
-    ],
   },
   'semantic.receipt-write-failed': {
     summary: 'The boundary receipt could not be written durably.',
     why: 'Analysis without an atomic durable receipt cannot prove what evidence and decision reached the enforcement boundary.',
-    correction: [
-      'Choose a writable non-symlink receipt path and verify its parent directory is private and durable.',
-      'Rerun the complete boundary action; do not reuse an in-memory decision as durable proof.',
-    ],
   },
 };
 
-const POLICY_SOURCE_RULES = new Set<SemanticPolicyFinding['ruleId']>([
-  'semantic.production-reachability',
-  'semantic.export-ownership',
-  'semantic.unresolved-runtime-edge',
-  'semantic.invalid-allowlist',
-  'semantic.policy-unavailable',
-  'semantic.source-tree-unavailable',
-  'semantic.analysis-unavailable',
-]);
-
-function semanticSourceRefs(
-  finding: SemanticPolicyFinding,
-  evidenceSource: string,
-): string[] {
-  const sources = [evidenceSource, ...finding.paths];
-  if (POLICY_SOURCE_RULES.has(finding.ruleId)) sources.push('config/semantic-quality.json');
-  if (finding.ruleId === 'semantic.invocation-invalid') sources.push('semantic-quality-cli');
-  if (finding.ruleId === 'semantic.receipt-write-failed') sources.push('local-receipt-writer');
-  return sources;
-}
-
 function findingFromPolicy(
   finding: SemanticPolicyFinding,
-  evidenceSource: string,
-): BoundaryFinding {
+): BoundaryFindingInput {
   const language = FINDING_LANGUAGE[finding.ruleId];
-  const sourceRefs = semanticSourceRefs(finding, evidenceSource);
   return {
     ruleId: finding.ruleId,
     decision: finding.decision,
     action: 'push',
+    evidenceState: semanticPolicyEvidenceState(finding),
     summary: language.summary,
     why: language.why,
     observed: [
@@ -198,14 +185,8 @@ function findingFromPolicy(
       ...finding.evidence,
     ],
     matchedArtifacts: [],
-    correction: [...language.correction],
-    rerun: 'npm run verify:semantic -- --base origin/main',
-    sourceRefs,
+    limitations: [],
   };
-}
-
-function sortedUnique(values: ReadonlyArray<string>): string[] {
-  return [...new Set(values)].sort();
 }
 
 function receiptText(value: string): string {
@@ -240,145 +221,393 @@ function receiptReference(value: string): string {
   return text;
 }
 
-function receiptDiagnostic(value: string): string {
-  const text = receiptText(value);
-  return /(?:^|\s)\/(?:Users|home|private|tmp|var\/folders)\/\S+/.test(text)
-    ? 'redacted-local-path'
-    : text;
-}
-
-function receiptIdentity(value: string): string {
-  return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value)
-    ? value.toLowerCase()
-    : receiptText(value);
-}
-
 function sortedFingerprints(
   fingerprints: Record<string, string | null> | undefined,
 ): Record<string, string | null> {
-  return Object.fromEntries(
-    Object.entries(fingerprints ?? {})
-      .map(([key, value]) =>
-        [receiptText(key), value === null ? null : receiptIdentity(value)] as const)
-      .sort(([left], [right]) => left.localeCompare(right)),
-  );
-}
-
-function compareArtifacts(left: BoundaryArtifact, right: BoundaryArtifact): number {
-  return (
-    left.kind.localeCompare(right.kind) ||
-    left.repository.localeCompare(right.repository) ||
-    left.id.localeCompare(right.id)
-  );
-}
-
-function canonicalFinding(item: BoundaryFinding): BoundaryFinding {
-  return {
-    ...item,
-    ruleId: receiptText(item.ruleId),
-    summary: receiptText(item.summary),
-    why: receiptText(item.why),
-    observed: item.observed.map((evidence) => ({
-      label: receiptText(evidence.label),
-      value: receiptDiagnostic(evidence.value),
-    })),
-    matchedArtifacts: item.matchedArtifacts
-      .map((artifact) => ({
-        ...artifact,
-        repository: receiptText(artifact.repository),
-        id: receiptText(artifact.id),
-        ...(artifact.url === undefined ? {} : { url: receiptReference(artifact.url) }),
-        ...(artifact.state === undefined ? {} : { state: receiptText(artifact.state) }),
-        ...(artifact.fingerprintSha256 === undefined
-          ? {}
-          : { fingerprintSha256: receiptIdentity(artifact.fingerprintSha256) }),
-      }))
-      .sort(compareArtifacts),
-    correction: item.correction.map(receiptText),
-    rerun: receiptText(item.rerun),
-    sourceRefs: sortedUnique(item.sourceRefs.map(receiptReference)),
-  };
+  const entries = Object.entries(fingerprints ?? {}).map(([key, value]) => {
+    const canonicalKey = receiptText(key);
+    if (canonicalKey !== key || canonicalKey.length === 0) invalidContract(`fingerprints.${key}`);
+    if (value !== null && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value)) {
+      invalidContract(`fingerprints.${key}`);
+    }
+    return [canonicalKey, value] as const;
+  });
+  entries.sort(([left], [right]) => left.localeCompare(right));
+  return Object.fromEntries(entries);
 }
 
 function correlationIdSha256(input: {
   invocation: string;
   action: BoundaryAction;
   enforcementMode: EnforcementMode;
-  base: BoundaryReceipt['base'];
-  fingerprints: Record<string, string | null>;
-  findings: BoundaryFinding[];
+  target: BoundaryTarget;
+  evidenceDigestSha256: string;
 }): string {
   const tuple = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     repository: 'LucasQuiles/WhatSoup',
     invocation: input.invocation,
     action: input.action,
     enforcementMode: input.enforcementMode,
-    base: {
-      headOid: input.base.headOid,
-      baseOid: input.base.baseOid,
-      mergeBaseOid: input.base.mergeBaseOid,
-    },
-    fingerprints: input.fingerprints,
-    ruleIds: sortedUnique(input.findings.map((finding) => finding.ruleId)),
+    target: input.target,
+    evidenceDigestSha256: input.evidenceDigestSha256,
   };
   return createHash('sha256').update(JSON.stringify(tuple)).digest('hex');
 }
 
-export function buildBoundaryReceipt(input: BuildBoundaryReceiptInput): BoundaryReceipt {
-  if (typeof input.invocation !== 'string' || input.invocation.trim().length === 0) {
-    throw new Error('boundary receipt invocation is required');
+function invalidContract(_fieldPath: string): never {
+  return canonicalEnforcementMode('__boundary_contract_invalid__' as never) as never;
+}
+
+function ownDataRecord(value: unknown, fieldPath: string): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)
+    || Object.getPrototypeOf(value) !== Object.prototype) {
+    invalidContract(fieldPath);
   }
-  for (const item of input.findings) {
-    if (item.action !== input.action) {
-      throw new Error(
-        `boundary finding action ${item.action} does not match receipt action ${input.action}`,
-      );
-    }
-    if (!isBoundaryFindingComplete(item)) {
-      throw new Error(`boundary finding ${item.ruleId || '<missing>'} is incomplete`);
-    }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  for (const [key, descriptor] of Object.entries(descriptors)) {
+    if (!descriptor.enumerable || !('value' in descriptor)) invalidContract(`${fieldPath}.${key}`);
   }
-  const fingerprints = sortedFingerprints(input.fingerprints);
-  const findings = input.findings
-    .map(canonicalFinding)
-    .sort((left, right) => left.ruleId.localeCompare(right.ruleId));
-  const limitations = sortedUnique((input.limitations ?? []).map(receiptDiagnostic));
-  const findingDecision = aggregateBoundaryDecision(findings);
-  const base = {
-    headOid: input.base.headOid === null ? null : receiptIdentity(input.base.headOid),
-    baseOid: input.base.baseOid === null ? null : receiptIdentity(input.base.baseOid),
-    mergeBaseOid:
-      input.base.mergeBaseOid === null ? null : receiptIdentity(input.base.mergeBaseOid),
-    evidenceSource: receiptReference(input.base.evidenceSource),
-  };
+  return Object.fromEntries(
+    Object.entries(descriptors).map(([key, descriptor]) => [key, descriptor.value]),
+  );
+}
+
+function exactKeys(record: Record<string, unknown>, allowed: ReadonlySet<string>, field: string): void {
+  for (const key of Object.keys(record)) {
+    if (!allowed.has(key)) invalidContract(`${field}.${key}`);
+  }
+}
+
+function canonicalTimestamp(value: unknown, fieldPath: string): string {
+  if (!isValidHistoryTimestamp(value)) invalidContract(fieldPath);
+  return new Date(value).toISOString();
+}
+
+function canonicalOid(value: unknown, fieldPath: string): string | null {
+  if (value === null) return null;
+  if (typeof value !== 'string' || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value)) {
+    invalidContract(fieldPath);
+  }
+  return value;
+}
+
+function canonicalBase(input: unknown): BoundaryReceiptBase {
+  const record = ownDataRecord(input, 'base');
+  exactKeys(record, new Set(['headOid', 'baseOid', 'mergeBaseOid', 'evidenceSource']), 'base');
+  if (!Object.hasOwn(record, 'headOid') || !Object.hasOwn(record, 'baseOid')
+    || !Object.hasOwn(record, 'mergeBaseOid') || !Object.hasOwn(record, 'evidenceSource')) {
+    invalidContract('base');
+  }
+  if (typeof record.evidenceSource !== 'string'
+    || receiptReference(record.evidenceSource) !== record.evidenceSource) {
+    invalidContract('base.evidenceSource');
+  }
   return {
-    schemaVersion: 1,
-    repository: 'LucasQuiles/WhatSoup',
-    invocation: receiptText(input.invocation),
-    action: input.action,
-    correlationIdSha256: correlationIdSha256({
-      invocation: receiptText(input.invocation),
-      action: input.action,
-      enforcementMode: input.enforcementMode,
-      base,
-      fingerprints,
-      findings,
-    }),
-    enforcementMode: input.enforcementMode,
-    decision:
-      findingDecision === 'pass' && limitations.length > 0 ? 'inconclusive' : findingDecision,
+    headOid: canonicalOid(record.headOid, 'base.headOid'),
+    baseOid: canonicalOid(record.baseOid, 'base.baseOid'),
+    mergeBaseOid: canonicalOid(record.mergeBaseOid, 'base.mergeBaseOid'),
+    evidenceSource: record.evidenceSource,
+  };
+}
+
+function findingInput(item: CanonicalBoundaryFinding): BoundaryFindingInput {
+  const record = item as unknown as Record<string, unknown>;
+  const ruleId = String(record.ruleId ?? '');
+  const limitations = Array.isArray(record.limitations) ? record.limitations : [];
+  return {
+    ruleId,
+    decision: record.decision as BoundaryFindingInput['decision'],
+    action: record.action as BoundaryAction,
+    evidenceState: record.evidenceState as BoundaryFindingInput['evidenceState'],
+    summary: record.summary as string,
+    why: record.why as string,
+    observed: record.observed as BoundaryFindingInput['observed'],
+    matchedArtifacts: record.matchedArtifacts as BoundaryFindingInput['matchedArtifacts'],
+    limitations: limitations as string[],
+  };
+}
+
+function canonicalFindings(
+  input: BoundaryFindingInput[],
+  action: BoundaryAction,
+  limitations: string[],
+): CanonicalBoundaryFinding[] {
+  const findings = input.map((item) => canonicalBoundaryFinding(item));
+  for (const finding of findings) {
+    if (finding.action !== action) invalidContract('findings.action');
+    if (finding.limitations.length > 0 && finding.decision !== 'inconclusive') {
+      invalidContract('findings.limitations');
+    }
+  }
+  if (limitations.length > 0
+    && !findings.some((finding) => finding.ruleId === 'boundary.evidence-incomplete')) {
+    const limitationDigest = createHash('sha256')
+      .update(JSON.stringify(limitations))
+      .digest('hex');
+    findings.push(canonicalBoundaryFinding({
+      ruleId: 'boundary.evidence-incomplete',
+      decision: 'inconclusive',
+      action,
+      evidenceState: evidenceStateForRule('boundary.evidence-incomplete'),
+      summary: 'Boundary evidence collection is incomplete.',
+      why: 'One or more collection-wide limitations prevent a complete decision.',
+      observed: [
+        { label: 'limitation_count', value: String(limitations.length) },
+        { label: 'limitation_digest_sha256', value: limitationDigest },
+      ],
+      matchedArtifacts: [],
+      limitations: [],
+    }));
+  }
+  findings.sort((left, right) => left.ruleId.localeCompare(right.ruleId)
+    || left.findingDigestSha256.localeCompare(right.findingDigestSha256));
+  for (let index = 1; index < findings.length; index += 1) {
+    const left = findings[index - 1]!;
+    const right = findings[index]!;
+    if (left.ruleId === right.ruleId
+      && left.findingDigestSha256 === right.findingDigestSha256) {
+      invalidContract('findings.identity');
+    }
+  }
+  return findings;
+}
+
+const BUILD_INPUT_KEYS = new Set([
+  'invocation', 'action', 'target', 'observedAt', 'validUntil', 'enforcementMode',
+  'base', 'fingerprints', 'findings', 'limitations',
+]);
+
+export function buildBoundaryReceipt(input: BuildBoundaryReceiptInput): BoundaryReceiptV2 {
+  const inputRecord = ownDataRecord(input, 'receiptInput');
+  exactKeys(inputRecord, BUILD_INPUT_KEYS, 'receiptInput');
+  if (typeof input.invocation !== 'string' || receiptText(input.invocation) !== input.invocation
+    || input.invocation.length === 0) {
+    invalidContract('invocation');
+  }
+  const enforcementMode = canonicalEnforcementMode(input.enforcementMode);
+  const target = canonicalBoundaryTarget(input.action, input.target);
+  const observedAt = canonicalTimestamp(input.observedAt, 'observedAt');
+  const validUntil = input.validUntil == null
+    ? null
+    : canonicalTimestamp(input.validUntil, 'validUntil');
+  if (validUntil !== null && validUntil < observedAt) invalidContract('validUntil');
+  const fingerprints = sortedFingerprints(input.fingerprints);
+  const limitations = canonicalBoundaryLimitations(input.limitations ?? []);
+  const findings = canonicalFindings(input.findings, input.action, limitations);
+  const base = canonicalBase(input.base);
+  if (input.action !== 'config-write' && target.headOid !== base.headOid) {
+    invalidContract('target.headOid');
+  }
+  const catalogDigest = ruleCatalogDigestSha256();
+  const evidenceDigest = evidenceDigestSha256({
+    target,
+    observedAt,
+    validUntil,
     base,
     fingerprints,
     findings,
     limitations,
+    ruleCatalogDigestSha256: catalogDigest,
+  });
+  const receipt: BoundaryReceiptV2 = {
+    schemaVersion: 2,
+    repository: 'LucasQuiles/WhatSoup',
+    invocation: input.invocation,
+    action: input.action,
+    target,
+    observedAt,
+    validUntil,
+    correlationIdSha256: correlationIdSha256({
+      invocation: input.invocation,
+      action: input.action,
+      enforcementMode,
+      target,
+      evidenceDigestSha256: evidenceDigest,
+    }),
+    ruleCatalogDigestSha256: catalogDigest,
+    evidenceDigestSha256: evidenceDigest,
+    enforcementMode,
+    decision: aggregateBoundaryDecision(findings, limitations),
+    base,
+    fingerprints,
+    findings,
+    limitations,
+    overflow: null,
   };
+  assertReceiptWithinBudgets(receipt);
+  return receipt;
+}
+
+const RECEIPT_V1_KEYS = new Set([
+  'schemaVersion', 'repository', 'invocation', 'action', 'correlationIdSha256',
+  'enforcementMode', 'decision', 'base', 'fingerprints', 'findings', 'limitations',
+]);
+const RECEIPT_V2_KEYS = new Set([
+  'schemaVersion', 'repository', 'invocation', 'action', 'target', 'observedAt',
+  'validUntil', 'correlationIdSha256', 'ruleCatalogDigestSha256',
+  'evidenceDigestSha256', 'enforcementMode', 'decision', 'base', 'fingerprints',
+  'findings', 'limitations', 'overflow',
+]);
+const RECEIPT_V1_ACTIONS = new Set<BoundaryActionV1>([
+  'commit', 'push', 'open-pr', 'reopen-pr', 'open-issue',
+]);
+const RECEIPT_DECISIONS = new Set<BoundaryDecision>([
+  'pass', 'warn', 'block', 'inconclusive',
+]);
+const LEGACY_FINDING_KEYS = new Set([
+  'ruleId', 'decision', 'action', 'summary', 'why', 'observed', 'matchedArtifacts',
+  'correction', 'rerun', 'sourceRefs',
+]);
+
+function legacyText(value: unknown, fieldPath: string, reference = false): string {
+  if (typeof value !== 'string' || value.length === 0) invalidContract(fieldPath);
+  const canonical = reference ? receiptReference(value) : receiptText(value);
+  if (canonical !== value) invalidContract(fieldPath);
+  return value;
+}
+
+function legacyStringArray(value: unknown, fieldPath: string, reference = false): string[] {
+  if (!Array.isArray(value)) invalidContract(fieldPath);
+  return value.map((item, index) => legacyText(item, `${fieldPath}[${index}]`, reference));
+}
+
+function parseLegacyFinding(value: unknown, index: number): BoundaryFinding {
+  const fieldPath = `findings[${index}]`;
+  const record = ownDataRecord(value, fieldPath);
+  exactKeys(record, LEGACY_FINDING_KEYS, fieldPath);
+  if (Object.keys(record).length !== LEGACY_FINDING_KEYS.size) invalidContract(fieldPath);
+  if (!RECEIPT_V1_ACTIONS.has(record.action as BoundaryActionV1)) {
+    invalidContract(`${fieldPath}.action`);
+  }
+  if (!['warn', 'block', 'inconclusive'].includes(String(record.decision))) {
+    invalidContract(`${fieldPath}.decision`);
+  }
+  if (!Array.isArray(record.observed) || !Array.isArray(record.matchedArtifacts)) {
+    invalidContract(fieldPath);
+  }
+  const observed = record.observed.map((item, itemIndex) => {
+    const itemRecord = ownDataRecord(item, `${fieldPath}.observed[${itemIndex}]`);
+    exactKeys(itemRecord, new Set(['label', 'value']), `${fieldPath}.observed[${itemIndex}]`);
+    if (Object.keys(itemRecord).length !== 2) invalidContract(`${fieldPath}.observed[${itemIndex}]`);
+    return {
+      label: legacyText(itemRecord.label, `${fieldPath}.observed[${itemIndex}].label`),
+      value: legacyText(itemRecord.value, `${fieldPath}.observed[${itemIndex}].value`),
+    };
+  });
+  const matchedArtifacts = record.matchedArtifacts.map((item, itemIndex) => {
+    const artifactPath = `${fieldPath}.matchedArtifacts[${itemIndex}]`;
+    const artifact = ownDataRecord(item, artifactPath);
+    exactKeys(artifact, new Set([
+      'kind', 'repository', 'id', 'url', 'state', 'fingerprintSha256',
+    ]), artifactPath);
+    if (!['pull-request', 'issue', 'commit', 'path'].includes(String(artifact.kind))
+      || artifact.repository !== 'LucasQuiles/WhatSoup') invalidContract(artifactPath);
+    const parsed: BoundaryArtifact = {
+      kind: artifact.kind as BoundaryArtifact['kind'],
+      repository: 'LucasQuiles/WhatSoup',
+      id: legacyText(artifact.id, `${artifactPath}.id`),
+    };
+    if (artifact.url !== undefined) parsed.url = legacyText(artifact.url, `${artifactPath}.url`, true);
+    if (artifact.state !== undefined) parsed.state = legacyText(artifact.state, `${artifactPath}.state`);
+    if (artifact.fingerprintSha256 !== undefined) {
+      if (typeof artifact.fingerprintSha256 !== 'string'
+        || !/^[0-9a-f]{64}$/.test(artifact.fingerprintSha256)) invalidContract(`${artifactPath}.fingerprintSha256`);
+      parsed.fingerprintSha256 = artifact.fingerprintSha256;
+    }
+    return parsed;
+  });
+  const finding: BoundaryFinding = {
+    ruleId: legacyText(record.ruleId, `${fieldPath}.ruleId`),
+    decision: record.decision as BoundaryFinding['decision'],
+    action: record.action as BoundaryActionV1,
+    summary: legacyText(record.summary, `${fieldPath}.summary`),
+    why: legacyText(record.why, `${fieldPath}.why`),
+    observed,
+    matchedArtifacts,
+    correction: legacyStringArray(record.correction, `${fieldPath}.correction`),
+    rerun: legacyText(record.rerun, `${fieldPath}.rerun`),
+    sourceRefs: legacyStringArray(record.sourceRefs, `${fieldPath}.sourceRefs`, true),
+  };
+  if (!isBoundaryFindingComplete(finding)) invalidContract(fieldPath);
+  return finding;
+}
+
+function parseBoundaryReceiptV1(record: Record<string, unknown>): BoundaryReceiptV1 {
+  exactKeys(record, RECEIPT_V1_KEYS, 'receipt');
+  const required = [...RECEIPT_V1_KEYS]
+    .filter((key) => key !== 'action' && key !== 'correlationIdSha256');
+  if (required.some((key) => !Object.hasOwn(record, key))) invalidContract('receipt');
+  if (record.repository !== 'LucasQuiles/WhatSoup') invalidContract('receipt.repository');
+  if (record.action !== undefined && !RECEIPT_V1_ACTIONS.has(record.action as BoundaryActionV1)) {
+    invalidContract('receipt.action');
+  }
+  if (record.correlationIdSha256 !== undefined
+    && (typeof record.correlationIdSha256 !== 'string'
+      || !/^[0-9a-f]{64}$/.test(record.correlationIdSha256))) {
+    invalidContract('receipt.correlationIdSha256');
+  }
+  const mode = canonicalEnforcementMode(record.enforcementMode);
+  if (!RECEIPT_DECISIONS.has(record.decision as BoundaryDecision)) invalidContract('receipt.decision');
+  if (!Array.isArray(record.findings)) invalidContract('receipt.findings');
+  const receipt: BoundaryReceiptV1 = {
+    schemaVersion: 1,
+    repository: 'LucasQuiles/WhatSoup',
+    invocation: legacyText(record.invocation, 'receipt.invocation'),
+    ...(record.action === undefined ? {} : { action: record.action as BoundaryActionV1 }),
+    ...(record.correlationIdSha256 === undefined
+      ? {}
+      : { correlationIdSha256: record.correlationIdSha256 as string }),
+    enforcementMode: mode,
+    decision: record.decision as BoundaryDecision,
+    base: canonicalBase(record.base),
+    fingerprints: sortedFingerprints(record.fingerprints as Record<string, string | null>),
+    findings: record.findings.map(parseLegacyFinding),
+    limitations: legacyStringArray(record.limitations, 'receipt.limitations'),
+  };
+  if (receipt.findings.length > DEFAULT_BOUNDARY_BUDGETS.maxFindings
+    || receipt.limitations.length > DEFAULT_BOUNDARY_BUDGETS.maxTopLevelLimitations) {
+    invalidContract('receipt');
+  }
+  return receipt;
+}
+
+function parseBoundaryReceiptV2(record: Record<string, unknown>): BoundaryReceiptV2 {
+  exactKeys(record, RECEIPT_V2_KEYS, 'receipt');
+  if ([...RECEIPT_V2_KEYS].some((key) => !Object.hasOwn(record, key))) invalidContract('receipt');
+  if (record.overflow !== null) invalidContract('receipt.overflow');
+  if (!Array.isArray(record.findings) || !Array.isArray(record.limitations)) {
+    invalidContract('receipt');
+  }
+  const rebuilt = buildBoundaryReceipt({
+    invocation: record.invocation as string,
+    action: record.action as BoundaryAction,
+    target: record.target as BoundaryTarget,
+    observedAt: record.observedAt as string,
+    validUntil: record.validUntil as string | null,
+    enforcementMode: record.enforcementMode as EnforcementMode,
+    base: record.base as BoundaryReceiptBase,
+    fingerprints: record.fingerprints as Record<string, string | null>,
+    findings: (record.findings as CanonicalBoundaryFinding[]).map(findingInput),
+    limitations: record.limitations as string[],
+  });
+  if (!isDeepStrictEqual(rebuilt, record)) invalidContract('receipt.derivedIdentity');
+  return rebuilt;
+}
+
+export function parseBoundaryReceipt(input: unknown): BoundaryReceipt {
+  const record = ownDataRecord(input, 'receipt');
+  if (record.schemaVersion === 1) return parseBoundaryReceiptV1(record);
+  if (record.schemaVersion === 2) return parseBoundaryReceiptV2(record);
+  return invalidContract('receipt.schemaVersion');
 }
 
 export function aggregateBoundaryDecision(
   findings: ReadonlyArray<{ decision: BoundaryDecision }>,
+  limitations: ReadonlyArray<string> = [],
 ): BoundaryDecision {
   if (findings.some((finding) => finding.decision === 'block')) return 'block';
+  if (limitations.length > 0) return 'inconclusive';
   if (findings.some((finding) => finding.decision === 'inconclusive')) return 'inconclusive';
   if (findings.some((finding) => finding.decision === 'warn')) return 'warn';
   return 'pass';
@@ -390,8 +619,8 @@ export function isBoundaryFindingComplete(item: {
   summary: string;
   why: string;
   observed: ReadonlyArray<unknown>;
-  correction: ReadonlyArray<string>;
-  rerun: string;
+  correction: ReadonlyArray<string | { operation: string; target: string; expected: string }>;
+  rerun: string | { command: string; args: ReadonlyArray<string> };
   sourceRefs: ReadonlyArray<string>;
 }): boolean {
   return Boolean(
@@ -401,15 +630,57 @@ export function isBoundaryFindingComplete(item: {
       && item.why
       && item.observed.length > 0
       && item.correction.length > 0
-      && item.rerun
+      && (typeof item.rerun === 'string' ? item.rerun.length > 0 : item.rerun.command.length > 0)
       && item.sourceRefs.length > 0,
   );
 }
 
-export function buildSemanticReceipt(input: BuildSemanticReceiptInput): BoundaryReceipt {
+export function buildSemanticReceipt(input: BuildSemanticReceiptInput): BoundaryReceiptV2 {
+  const now = input.now ?? new Date();
+  if (!(now instanceof Date) || !Number.isFinite(now.getTime())) invalidContract('now');
+  const target = input.tree.headOid && input.targetRef !== null
+    ? {
+        repository: 'LucasQuiles/WhatSoup' as const,
+        actionTarget: `ref:${input.targetRef}`,
+        headOid: input.tree.headOid,
+      }
+    : {
+        repository: 'LucasQuiles/WhatSoup' as const,
+        actionTarget: 'unresolved:push',
+        headOid: null,
+      };
+  if (target.headOid === null) {
+    const findings = input.policyFindings.map((finding) =>
+      findingFromPolicy(finding));
+    if (!findings.some((finding) => finding.ruleId === 'boundary.action-identity-unproven')) {
+      findings.push({
+        ruleId: 'boundary.action-identity-unproven',
+        decision: 'inconclusive',
+        action: 'push',
+        evidenceState: evidenceStateForRule('boundary.action-identity-unproven'),
+        summary: 'The push destination identity could not be proven.',
+        why: 'A candidate commit cannot stand in for the independently resolved mutation target.',
+        observed: [
+          { label: 'action_target', value: target.actionTarget },
+          { label: 'head_oid', value: 'unresolved' },
+        ],
+        matchedArtifacts: [],
+        limitations: [],
+      });
+    }
+    return buildDiagnosticReceipt({
+      ...input,
+      now,
+      target,
+      findings,
+    });
+  }
   return buildBoundaryReceipt({
     invocation: 'semantic-quality',
     action: 'push',
+    target,
+    observedAt: now.toISOString(),
+    validUntil: null,
     enforcementMode: input.enforcementMode,
     base: {
       headOid: input.tree.headOid || null,
@@ -419,10 +690,71 @@ export function buildSemanticReceipt(input: BuildSemanticReceiptInput): Boundary
     },
     fingerprints: {},
     findings: input.policyFindings.map((finding) =>
-      findingFromPolicy(finding, input.evidenceSource),
+      findingFromPolicy(finding),
     ),
     limitations: [...new Set([...input.tree.limitations, ...(input.limitations ?? [])])],
   });
+}
+
+function buildDiagnosticReceipt(input: BuildSemanticReceiptInput & {
+  now: Date;
+  target: BoundaryTarget;
+  findings: BoundaryFindingInput[];
+}): BoundaryReceiptV2 {
+  const limitations = canonicalBoundaryLimitations(
+    [...new Set([...input.tree.limitations, ...(input.limitations ?? [])])],
+  );
+  const findings = canonicalFindings(input.findings, 'push', limitations);
+  const base: BoundaryReceiptBase = {
+    headOid: null,
+    baseOid: input.tree.baseOid && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(input.tree.baseOid)
+      ? input.tree.baseOid
+      : null,
+    mergeBaseOid: input.tree.mergeBaseOid
+      && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(input.tree.mergeBaseOid)
+      ? input.tree.mergeBaseOid
+      : null,
+    evidenceSource: receiptReference(input.evidenceSource),
+  };
+  const observedAt = input.now.toISOString();
+  const catalogDigest = ruleCatalogDigestSha256();
+  const evidenceDigest = evidenceDigestSha256({
+    target: input.target,
+    observedAt,
+    validUntil: null,
+    base,
+    fingerprints: {},
+    findings,
+    limitations,
+    ruleCatalogDigestSha256: catalogDigest,
+  });
+  const receipt: BoundaryReceiptV2 = {
+    schemaVersion: 2,
+    repository: 'LucasQuiles/WhatSoup',
+    invocation: 'semantic-quality',
+    action: 'push',
+    target: input.target,
+    observedAt,
+    validUntil: null,
+    correlationIdSha256: correlationIdSha256({
+      invocation: 'semantic-quality',
+      action: 'push',
+      enforcementMode: input.enforcementMode,
+      target: input.target,
+      evidenceDigestSha256: evidenceDigest,
+    }),
+    ruleCatalogDigestSha256: catalogDigest,
+    evidenceDigestSha256: evidenceDigest,
+    enforcementMode: canonicalEnforcementMode(input.enforcementMode),
+    decision: aggregateBoundaryDecision(findings, limitations),
+    base,
+    fingerprints: {},
+    findings,
+    limitations,
+    overflow: null,
+  };
+  assertReceiptWithinBudgets(receipt);
+  return receipt;
 }
 
 export function renderSemanticReceipt(receipt: BoundaryReceipt): string {
@@ -454,8 +786,12 @@ export function renderSemanticReceipt(receipt: BoundaryReceipt): string {
     }
     lines.push(`Why: ${finding.why}`);
     lines.push('Correction:');
-    for (const item of finding.correction) lines.push(`  - ${item}`);
-    lines.push(`Rerun: ${finding.rerun}`);
+    for (const item of finding.correction) {
+      lines.push(`  - ${typeof item === 'string' ? item : `${item.operation} ${item.target}: ${item.expected}`}`);
+    }
+    lines.push(`Rerun: ${typeof finding.rerun === 'string'
+      ? finding.rerun
+      : [finding.rerun.command, ...finding.rerun.args].join(' ')}`);
     lines.push('Sources:');
     for (const item of finding.sourceRefs) lines.push(`  - ${item}`);
   }

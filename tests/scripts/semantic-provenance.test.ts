@@ -50,16 +50,12 @@ describe('upstream provenance evidence validation', () => {
         ruleId: 'provenance.unavailable',
         decision: 'inconclusive',
         action: 'push',
+        evidenceState: 'unavailable',
         summary: 'Upstream provenance could not be proven.',
         why: 'A clean boundary result requires a complete remote tip, tracking ref, merge base, revision count, and path observation.',
         observed: [{ label: 'limitation', value: 'remote tip read timed out' }],
         matchedArtifacts: [],
-        correction: [
-          'Restore read access to the configured upstream and fetch its current tip.',
-          'Recompute the merge base, revision counts, and changed paths from the same remote observation.',
-        ],
-        rerun: 'npm run verify:boundary',
-        sourceRefs: ['git:ls-remote:origin/main'],
+        limitations: ['remote tip read timed out'],
       },
     ]);
   });
@@ -81,8 +77,9 @@ describe('upstream provenance evidence validation', () => {
       expect.objectContaining({
         ruleId: 'provenance.unavailable',
         decision: 'inconclusive',
+        evidenceState: 'unavailable',
         observed: [{ label: 'limitation', value: 'redacted-sensitive-value' }],
-        sourceRefs: ['upstream-provenance:redacted'],
+        limitations: ['redacted-sensitive-value'],
       }),
     ]);
     expect(receiptText).not.toContain('abcdefghijklmnop');

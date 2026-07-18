@@ -4,10 +4,11 @@ import type {
   BoundaryAction,
   BoundaryArtifact,
   BoundaryEvidenceRecord,
-  BoundaryFinding,
+  BoundaryFindingInput,
 } from './boundary-types.ts';
 import { canonicalRepositoryPath } from './fingerprint.ts';
 import { isValidHistoryTimestamp } from './history-provider.ts';
+import { evidenceStateForRule } from './rule-guidance.ts';
 
 export interface ProvenanceObservation {
   repository: string;
@@ -26,7 +27,6 @@ export interface ProvenanceObservation {
   limitations: string[];
 }
 
-const RERUN = 'npm run verify:boundary';
 const GIT_OID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 const REPOSITORY_RE = /^[^/\s]+\/[^/\s]+$/;
 
@@ -42,24 +42,6 @@ function bounded(value: unknown): string {
   } catch {
     return 'redacted-sensitive-value';
   }
-}
-
-function sourceReference(value: unknown): string {
-  const text = bounded(value);
-  if (text === 'redacted-sensitive-value' || text.length === 0) {
-    return 'upstream-provenance:redacted';
-  }
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) {
-    try {
-      const parsed = new URL(text);
-      if (parsed.username || parsed.password || parsed.search) {
-        return 'upstream-provenance:redacted';
-      }
-    } catch {
-      return 'upstream-provenance:redacted';
-    }
-  }
-  return text;
 }
 
 function uniqueSorted(values: Iterable<string>): string[] {
@@ -116,21 +98,17 @@ function unavailable(
   action: BoundaryAction,
   observation: ProvenanceObservation,
   limitations: string[],
-): BoundaryFinding {
+): BoundaryFindingInput {
   return {
     ruleId: 'provenance.unavailable',
     decision: 'inconclusive',
     action,
+    evidenceState: evidenceStateForRule('provenance.unavailable'),
     summary: 'Upstream provenance could not be proven.',
     why: 'A clean boundary result requires a complete remote tip, tracking ref, merge base, revision count, and path observation.',
     observed: limitations.map((value) => ({ label: 'limitation', value: bounded(value) })),
     matchedArtifacts: [],
-    correction: [
-      'Restore read access to the configured upstream and fetch its current tip.',
-      'Recompute the merge base, revision counts, and changed paths from the same remote observation.',
-    ],
-    rerun: RERUN,
-    sourceRefs: [sourceReference(observation.evidenceSource || 'upstream-provenance:unknown')],
+    limitations: limitations.map(bounded),
   };
 }
 
@@ -142,7 +120,7 @@ function intersects(left: string[], right: string[]): string[] {
 export function evaluateProvenance(input: {
   action: BoundaryAction;
   observation: ProvenanceObservation;
-}): BoundaryFinding[] {
+}): BoundaryFindingInput[] {
   const observation = input.observation;
   if (!observation || typeof observation !== 'object') {
     return [
@@ -195,6 +173,7 @@ export function evaluateProvenance(input: {
         ruleId: 'provenance.stale-tracking-ref',
         decision: 'block',
         action: input.action,
+        evidenceState: evidenceStateForRule('provenance.stale-tracking-ref'),
         summary: 'The local tracking ref differs from the remotely observed tip.',
         why: 'A stale local tracking identity invalidates every downstream merge-base, overlap, and duplicate comparison.',
         observed: [
@@ -203,12 +182,7 @@ export function evaluateProvenance(input: {
           { label: 'observed_at', value: observation.observedAt },
         ],
         matchedArtifacts: [],
-        correction: [
-          'Fetch the configured upstream and verify the local tracking ref now equals the observed remote tip.',
-          'Recompute the merge base, revision counts, changed paths, and semantic boundary receipt.',
-        ],
-        rerun: RERUN,
-        sourceRefs: [sourceReference(observation.evidenceSource)],
+        limitations: [],
       },
     ];
   }
@@ -289,6 +263,7 @@ export function evaluateProvenance(input: {
         ruleId: 'provenance.stale-overlap',
         decision: 'block',
         action: input.action,
+        evidenceState: evidenceStateForRule('provenance.stale-overlap'),
         summary: 'The candidate base is older and intersects safety-relevant upstream changes.',
         why: 'Direct path overlap or an upstream change on a declared high-coupling surface requires deliberate reconciliation before boundary actions continue.',
         observed,
@@ -297,12 +272,7 @@ export function evaluateProvenance(input: {
           overlapPaths,
           changedHighCouplingPaths,
         ),
-        correction: [
-          'Fetch the remote tip and deliberately rebase or merge the upstream delta.',
-          'Rerun tests for every named overlap or high-coupling path before rerunning the boundary check.',
-        ],
-        rerun: RERUN,
-        sourceRefs: [sourceReference(observation.evidenceSource)],
+        limitations: [],
       },
     ];
   }
@@ -312,6 +282,7 @@ export function evaluateProvenance(input: {
       ruleId: 'provenance.stale-disjoint',
       decision: 'warn',
       action: input.action,
+      evidenceState: evidenceStateForRule('provenance.stale-disjoint'),
       summary: 'The candidate base is older, but the observed upstream delta is disjoint.',
       why: 'Disjoint repository paths reduce immediate collision risk but do not make the older base invisible.',
       observed: [
@@ -322,12 +293,7 @@ export function evaluateProvenance(input: {
         { label: 'path_overlap', value: 'false' },
       ],
       matchedArtifacts: [],
-      correction: [
-        'Fetch and review the upstream delta before the next material edit.',
-        'Rebase or merge when required by branch policy, then rerun the boundary check.',
-      ],
-      rerun: RERUN,
-      sourceRefs: [sourceReference(observation.evidenceSource)],
+      limitations: [],
     },
   ];
 }

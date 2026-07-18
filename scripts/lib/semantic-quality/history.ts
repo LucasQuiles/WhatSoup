@@ -2,7 +2,8 @@ import type {
   BoundaryAction,
   BoundaryArtifact,
   BoundaryEvidenceRecord,
-  BoundaryFinding,
+  BoundaryFindingInput,
+  FindingDecision,
 } from './boundary-types.ts';
 import {
   canonicalRepositoryPath,
@@ -17,6 +18,7 @@ import {
   type HistoryCollection,
 } from './history-provider.ts';
 import type { HistoryArtifactRecord } from './history-types.ts';
+import { evidenceStateForRule } from './rule-guidance.ts';
 
 export interface ReentryPacket {
   priorArtifactRefs: string[];
@@ -40,7 +42,6 @@ interface PreparedArtifact {
   paths: Set<string>;
 }
 
-const RERUN = 'npm run verify:boundary';
 const SHA256_RE = /^[0-9a-f]{64}$/;
 const GIT_OID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
@@ -96,10 +97,6 @@ function toBoundaryArtifact(
   };
 }
 
-function sourceRefs(matches: PreparedArtifact[]): string[] {
-  return uniqueSorted(matches.map((match) => match.artifact.url));
-}
-
 function dispositionEvidence(matches: PreparedArtifact[]): BoundaryEvidenceRecord[] {
   return matches.flatMap((match) =>
     match.artifact.disposition
@@ -116,27 +113,25 @@ function dispositionEvidence(matches: PreparedArtifact[]): BoundaryEvidenceRecor
 function finding(input: {
   action: BoundaryAction;
   ruleId: string;
-  decision: BoundaryFinding['decision'];
+  decision: FindingDecision;
   summary: string;
   why: string;
   observed: BoundaryEvidenceRecord[];
   matches?: PreparedArtifact[];
   fingerprint?: (match: PreparedArtifact) => string | null | undefined;
-  correction: string[];
-  sourceRefs?: string[];
-}): BoundaryFinding {
+  limitations?: string[];
+}): BoundaryFindingInput {
   const matches = input.matches ?? [];
   return {
     ruleId: input.ruleId,
     decision: input.decision,
     action: input.action,
+    evidenceState: evidenceStateForRule(input.ruleId),
     summary: input.summary,
     why: input.why,
     observed: input.observed,
     matchedArtifacts: matches.map((match) => toBoundaryArtifact(match, input.fingerprint?.(match))),
-    correction: input.correction,
-    rerun: RERUN,
-    sourceRefs: input.sourceRefs ?? sourceRefs(matches),
+    limitations: input.limitations ?? [],
   };
 }
 
@@ -144,7 +139,7 @@ function incompleteFinding(
   action: BoundaryAction,
   collection: HistoryCollection,
   limitations: string[],
-): BoundaryFinding {
+): BoundaryFindingInput {
   const observed = (
     limitations.length > 0 ? limitations : ['history collection did not prove a terminal page']
   ).map((value) => ({ label: 'limitation', value }));
@@ -155,11 +150,7 @@ function incompleteFinding(
     summary: 'Repository history evidence is incomplete.',
     why: 'A bounded history read must prove repository identity and a terminal cursor before it can authorize a clean boundary result.',
     observed,
-    correction: [
-      'Repair the provider failure or increase the explicit bound, then rerun the read-only history check.',
-      'Do not treat retained partial artifacts as proof that no duplicate exists.',
-    ],
-    sourceRefs: collection.observedAt.map((value) => `history-observed:${value}`),
+    limitations,
   });
 }
 
@@ -168,10 +159,9 @@ function exactFinding(
   state: HistoryArtifactRecord['state'],
   matches: PreparedArtifact[],
   candidateFingerprint: string,
-): BoundaryFinding {
+): BoundaryFindingInput {
   const count = matches.length;
   const noun = count === 1 ? 'pull request' : 'pull requests';
-  const hasDisposition = matches.some((match) => match.artifact.disposition != null);
   if (state === 'open') {
     return finding({
       action,
@@ -186,10 +176,6 @@ function exactFinding(
       ],
       matches,
       fingerprint: () => candidateFingerprint,
-      correction: [
-        'Continue through the existing open pull request instead of creating another artifact.',
-        'If the work is materially different, change the implementation and rerun the boundary check.',
-      ],
     });
   }
   if (state === 'merged') {
@@ -205,10 +191,6 @@ function exactFinding(
       ],
       matches,
       fingerprint: () => candidateFingerprint,
-      correction: [
-        'Prove the behavior is absent from current main and show production reachability before recreating it.',
-        'Link the merged artifact and explain the new material delta.',
-      ],
     });
   }
   return finding({
@@ -224,14 +206,6 @@ function exactFinding(
     ],
     matches,
     fingerprint: () => candidateFingerprint,
-    correction: hasDisposition
-      ? [
-          'Satisfy every recorded disposition with a material re-entry packet before recreating this work.',
-          'Name the production owner and cite every prior artifact and required condition.',
-        ]
-      : [
-          'Continue from the existing artifact or provide a material re-entry packet that proves the implementation changed.',
-        ],
   });
 }
 
@@ -251,7 +225,7 @@ function reentryFinding(input: {
   now: Date;
   verifiedOverrideOwners: ReadonlySet<string>;
   candidatePaths: ReadonlySet<string>;
-}): BoundaryFinding | null {
+}): BoundaryFindingInput | null {
   const observed: BoundaryEvidenceRecord[] = dispositionEvidence(input.matches);
   const packet = input.reentry as Partial<ReentryPacket>;
   const priorRefsValid = validStringArray(packet.priorArtifactRefs);
@@ -354,10 +328,6 @@ function reentryFinding(input: {
     observed,
     matches: input.matches,
     fingerprint: (match) => match.contentFingerprintSha256,
-    correction: [
-      'Cite every prior artifact and address every recorded re-entry condition.',
-      'Provide a material implementation delta and name its production owner, or attach a current owner override scoped to this rule and proposal fingerprint.',
-    ],
   });
 }
 
@@ -368,7 +338,7 @@ export function evaluateHistory(input: {
   reentry?: ReentryPacket | null;
   verifiedOverrideOwners?: string[];
   now: Date;
-}): BoundaryFinding[] {
+}): BoundaryFindingInput[] {
   if (!input.collection.complete) {
     return [incompleteFinding(input.action, input.collection, input.collection.limitations)];
   }
@@ -423,7 +393,7 @@ export function evaluateHistory(input: {
     ];
   }
 
-  const findings: BoundaryFinding[] = [];
+  const findings: BoundaryFindingInput[] = [];
   const reported = new Set<string>();
   const pullRequests = prepared.filter((item) => item.artifact.kind === 'pull-request');
   for (const state of ['open', 'closed-unmerged', 'merged'] as const) {
@@ -458,10 +428,6 @@ export function evaluateHistory(input: {
             ...dispositionEvidence(matches),
           ],
           matches,
-          correction: [
-            'Review and satisfy the prior disposition before recreating this patch.',
-            'If the new implementation is materially different, ensure its stable patch identity changes and explain why.',
-          ],
         }),
       );
       matches.forEach((match) => reported.add(artifactKey(match.artifact)));
@@ -490,10 +456,6 @@ export function evaluateHistory(input: {
         observed: [{ label: 'match_count', value: String(subsetMatches.length) }],
         matches: subsetMatches,
         fingerprint: (match) => match.contentFingerprintSha256,
-        correction: [
-          'Link each prior artifact and explain which reused blobs are intentional.',
-          'Confirm the new production owner does not duplicate an existing mechanism.',
-        ],
       }),
     );
     subsetMatches.forEach((match) => reported.add(artifactKey(match.artifact)));
@@ -513,10 +475,6 @@ export function evaluateHistory(input: {
         observed: [{ label: 'match_count', value: String(pathMatches.length) }],
         matches: pathMatches,
         fingerprint: (match) => match.contentFingerprintSha256,
-        correction: [
-          'Link the overlapping artifact and describe the behavior-level distinction.',
-          'Do not infer duplication from a shared filename or branch label alone.',
-        ],
       }),
     );
     pathMatches.forEach((match) => reported.add(artifactKey(match.artifact)));
@@ -546,12 +504,6 @@ export function evaluateHistory(input: {
           ],
           matches: issueMatches,
           fingerprint: () => input.candidate.taskFingerprintSha256,
-          correction: openingIssue
-            ? [
-                'Continue on the existing issue instead of creating another issue.',
-                'If acceptance criteria differ, update the task body so the material distinction is explicit.',
-              ]
-            : ['Link the existing issue and map this change to its acceptance criteria.'],
         }),
       );
     }

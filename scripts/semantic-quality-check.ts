@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -21,6 +22,7 @@ import {
   type BoundaryReceipt,
   type EnforcementMode,
 } from './lib/semantic-quality/receipt.ts';
+import { cleanGitEnv } from '../src/lib/git-env.ts';
 
 type OutputFormat = 'human' | 'json';
 
@@ -187,7 +189,9 @@ function invalidPolicyFinding(message: string): SemanticPolicyFinding {
 function evaluateInvocation(
   options: SemanticQualityCliOptions,
   cwd: string,
+  now: Date,
 ): { receipt: BoundaryReceipt; tree: CandidateTree } {
+  const targetRef = options.targetRef ?? resolveTargetRef(cwd);
   let tree: CandidateTree;
   try {
     tree = readCandidateTree({
@@ -212,6 +216,8 @@ function evaluateInvocation(
         ],
         enforcementMode: options.mode,
         evidenceSource: `git:${options.head}`,
+        now,
+        targetRef,
       }),
     };
   }
@@ -250,8 +256,25 @@ function evaluateInvocation(
       policyFindings,
       enforcementMode: options.mode,
       evidenceSource: `git:${tree.headOid || options.head}`,
+      now,
+      targetRef,
     }),
   };
+}
+
+function resolveTargetRef(cwd: string): string | null {
+  try {
+    const ref = execFileSync('git', ['symbolic-ref', '--quiet', 'HEAD'], {
+      cwd,
+      encoding: 'utf8',
+      env: cleanGitEnv(),
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 5_000,
+    }).trim();
+    return ref || null;
+  } catch {
+    return null;
+  }
 }
 
 function addReceiptWriteFailure(
@@ -259,6 +282,10 @@ function addReceiptWriteFailure(
   tree: CandidateTree,
   message: string,
 ): BoundaryReceipt {
+  const now = receipt.schemaVersion === 2 ? new Date(receipt.observedAt) : new Date();
+  const targetRef = receipt.schemaVersion === 2 && receipt.target.actionTarget.startsWith('ref:')
+    ? receipt.target.actionTarget.slice(4)
+    : null;
   const failedWrite = buildSemanticReceipt({
     tree,
     policyFindings: [
@@ -271,14 +298,30 @@ function addReceiptWriteFailure(
     enforcementMode: receipt.enforcementMode,
     evidenceSource: receipt.base.evidenceSource,
     limitations: [message],
+    now,
+    targetRef,
   });
+  if (receipt.schemaVersion !== 2) return failedWrite;
   return buildBoundaryReceipt({
     invocation: receipt.invocation,
-    action: receipt.action ?? 'push',
+    action: receipt.action,
+    target: receipt.target,
+    observedAt: receipt.observedAt,
+    validUntil: receipt.validUntil,
     enforcementMode: receipt.enforcementMode,
     base: receipt.base,
     fingerprints: receipt.fingerprints,
-    findings: [...receipt.findings, ...failedWrite.findings],
+    findings: [...receipt.findings, ...failedWrite.findings].map((finding) => ({
+      ruleId: finding.ruleId,
+      decision: finding.decision,
+      action: finding.action,
+      evidenceState: finding.evidenceState,
+      summary: finding.summary,
+      why: finding.why,
+      observed: finding.observed,
+      matchedArtifacts: finding.matchedArtifacts,
+      limitations: finding.limitations,
+    })),
     limitations: [...new Set([...receipt.limitations, message])],
   });
 }
@@ -319,6 +362,7 @@ export function runSemanticQuality(
   argv: string[] = process.argv.slice(2),
   cwd = process.cwd(),
 ): SemanticQualityRunResult {
+  const now = new Date();
   let options: SemanticQualityCliOptions;
   let tree!: CandidateTree;
   let receipt: BoundaryReceipt | null = null;
@@ -340,12 +384,14 @@ export function runSemanticQuality(
       ],
       enforcementMode: options.mode,
       evidenceSource: 'semantic-quality-cli',
+      now,
+      targetRef: null,
     });
   }
 
   if (receipt === null) {
     try {
-    const evaluated = evaluateInvocation(options, cwd);
+    const evaluated = evaluateInvocation(options, cwd, now);
     ({ tree, receipt } = evaluated);
     } catch (error) {
       const message = boundedMessage(error);
@@ -359,8 +405,10 @@ export function runSemanticQuality(
             message,
           ),
         ],
-        enforcementMode: options.mode,
-        evidenceSource: `git:${options.head}`,
+          enforcementMode: options.mode,
+          evidenceSource: `git:${options.head}`,
+          now,
+          targetRef: options.targetRef ?? resolveTargetRef(cwd),
       });
     }
   }

@@ -8,6 +8,12 @@ import {
   canonicalBoundaryTarget,
   canonicalEnforcementMode,
 } from '../../scripts/lib/semantic-quality/boundary-contract.ts';
+import {
+  buildBoundaryReceipt,
+  parseBoundaryReceipt,
+  renderSemanticReceipt,
+  semanticExitCode,
+} from '../../scripts/lib/semantic-quality/receipt.ts';
 import { evidenceStateForRule } from '../../scripts/lib/semantic-quality/rule-guidance.ts';
 import type {
   BoundaryAction,
@@ -246,4 +252,240 @@ it('[BCF03-N10] keeps finding identity stable across summary-only changes', () =
   const baseline = canonicalBoundaryFinding(VALID_FINDING);
   const changed = canonicalBoundaryFinding({ ...VALID_FINDING, summary: 'Different public prose.' });
   expect(changed.findingDigestSha256).toBe(baseline.findingDigestSha256);
+});
+
+const RECEIPT_OBSERVED_AT = '2026-07-17T12:00:00.000Z';
+const RECEIPT_INPUT = {
+  invocation: 'boundary-history',
+  action: 'push',
+  target: target('ref:refs/heads/main'),
+  observedAt: RECEIPT_OBSERVED_AT,
+  validUntil: null,
+  enforcementMode: 'enforce',
+  base: {
+    headOid: OID40,
+    baseOid: OID40,
+    mergeBaseOid: OID40,
+    evidenceSource: 'git:boundary-contract-fixture',
+  },
+  fingerprints: {},
+  findings: [VALID_FINDING],
+  limitations: [],
+};
+
+const LEGACY_FINDING = {
+  ruleId: 'semantic.production-reachability',
+  decision: 'warn',
+  action: 'push',
+  summary: 'Legacy summary.',
+  why: 'Legacy rationale.',
+  observed: [{ label: 'path', value: 'src/legacy.ts' }],
+  matchedArtifacts: [],
+  correction: ['Connect the production owner.'],
+  rerun: 'npm run verify:semantic',
+  sourceRefs: ['git:legacy-fixture'],
+} as const;
+
+const buildReceipt = (overrides: Record<string, unknown> = {}) => buildBoundaryReceipt({
+  ...RECEIPT_INPUT,
+  ...overrides,
+} as never);
+
+const receiptField = (receipt: unknown, field: string): unknown =>
+  (receipt as Record<string, unknown>)[field];
+
+const proveReceiptUnsafe = (id: string, assertion: () => void): void => {
+  try {
+    assertion();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`BCF_EXPECTATION_UNMET:BCF04-${id}: ${message}`, { cause: error });
+  }
+};
+
+it('[BCF04-U01] emits the exact schema-two evidence receipt', () => {
+  proveReceiptUnsafe('01', () => {
+    const built = buildReceipt();
+    expect(built.schemaVersion).toBe(2);
+    expect(receiptField(built, 'target')).toEqual(RECEIPT_INPUT.target);
+    expect(receiptField(built, 'evidenceDigestSha256')).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+it('[BCF04-U02] makes a warning plus collection limitation inconclusive', () => {
+  proveReceiptUnsafe('02', () => {
+    const built = buildReceipt({
+      findings: [{ ...VALID_FINDING, decision: 'warn' }],
+      limitations: ['history page two did not complete'],
+    });
+    expect(built.decision).toBe('inconclusive');
+    expect(semanticExitCode(built)).toBe(2);
+  });
+});
+
+it('[BCF04-U03] weakens a finding only when its own evidence is limited', () => {
+  proveReceiptUnsafe('03', () => {
+    const built = buildReceipt({
+      findings: [{ ...VALID_FINDING, limitations: ['comparison unavailable'] }],
+    });
+    expect(built.findings[0]?.decision).toBe('inconclusive');
+    expect(built.decision).toBe('inconclusive');
+  });
+});
+
+it('[BCF04-U04] binds evidence changes but excludes summary prose from the digest', () => {
+  proveReceiptUnsafe('04', () => {
+    const baseline = buildReceipt();
+    const changedEvidence = buildReceipt({ limitations: ['different limitation'] });
+    const changedSummary = buildReceipt({
+      findings: [{ ...VALID_FINDING, summary: 'Different public prose.' }],
+    });
+    expect(receiptField(changedEvidence, 'evidenceDigestSha256'))
+      .not.toBe(receiptField(baseline, 'evidenceDigestSha256'));
+    expect(receiptField(changedSummary, 'evidenceDigestSha256'))
+      .toBe(receiptField(baseline, 'evidenceDigestSha256'));
+  });
+});
+
+it('[BCF04-U05] rejects duplicate finding identities independent of input order', () => {
+  proveReceiptUnsafe('05', () => {
+    expect(() => buildReceipt({ findings: [VALID_FINDING, structuredClone(VALID_FINDING)] }))
+      .toThrow(BoundaryContractError);
+  });
+});
+
+it('[BCF04-U06] binds action target independently from the candidate head', () => {
+  proveReceiptUnsafe('06', () => {
+    const main = buildReceipt({ target: target('ref:refs/heads/main') });
+    const release = buildReceipt({ target: target('ref:refs/heads/release') });
+    expect(receiptField(main, 'evidenceDigestSha256'))
+      .not.toBe(receiptField(release, 'evidenceDigestSha256'));
+  });
+});
+
+it('[BCF04-U07] rejects producer-owned enforcement and overflow fields', () => {
+  proveReceiptUnsafe('07', () => {
+    expect(() => buildReceipt({ enforcementMode: 'audit' })).toThrow(BoundaryContractError);
+    expect(() => buildReceipt({ overflow: { reason: 'caller-owned' } }))
+      .toThrow(BoundaryContractError);
+  });
+});
+
+it('[BCF04-U08] canonicalizes offset timestamps and rejects reverse validity', () => {
+  proveReceiptUnsafe('08', () => {
+    const built = buildReceipt({ observedAt: '2026-07-17T08:00:00-04:00' });
+    expect(receiptField(built, 'observedAt')).toBe(RECEIPT_OBSERVED_AT);
+    expect(() => buildReceipt({
+      observedAt: RECEIPT_OBSERVED_AT,
+      validUntil: '2026-07-17T11:59:59.000Z',
+    })).toThrow(BoundaryContractError);
+  });
+});
+
+it('[BCF04-U09] rejects unknown producer keys instead of storing a malicious receipt', () => {
+  proveReceiptUnsafe('09', () => {
+    expect(() => buildReceipt({ ruleCatalogDigestSha256: OID64 }))
+      .toThrow(BoundaryContractError);
+  });
+});
+
+it('[BCF04-S01] preserves the frozen schema-one renderer', () => {
+  const legacy = {
+    schemaVersion: 1,
+    repository: 'LucasQuiles/WhatSoup',
+    invocation: 'legacy-fixture',
+    action: 'push',
+    correlationIdSha256: OID64,
+    enforcementMode: 'enforce',
+    decision: 'warn',
+    base: {
+      headOid: OID40,
+      baseOid: OID40,
+      mergeBaseOid: OID40,
+      evidenceSource: 'git:legacy-fixture',
+    },
+    fingerprints: {},
+    findings: [LEGACY_FINDING],
+    limitations: [],
+  };
+  const parsed = parseBoundaryReceipt(JSON.parse(JSON.stringify(legacy)) as unknown);
+  expect(parsed).toEqual(legacy);
+  const output = renderSemanticReceipt(parsed);
+  expect(output).toContain('WARN [semantic.production-reachability] while push');
+  expect(() => parseBoundaryReceipt({ ...legacy, deployment: 'production' }))
+    .toThrow(BoundaryContractError);
+});
+
+it('[BCF04-N01] accepts a complete schema-two warning receipt', () => {
+  const built = buildReceipt({ findings: [{ ...VALID_FINDING, decision: 'warn' }] });
+  expect(built).toMatchObject({ schemaVersion: 2, decision: 'warn' });
+  expect(parseBoundaryReceipt(JSON.parse(JSON.stringify(built)) as unknown)).toEqual(built);
+  expect(() => parseBoundaryReceipt({ ...built, evidenceDigestSha256: OID64 }))
+    .toThrow(BoundaryContractError);
+  expect(() => parseBoundaryReceipt({ ...built, deployment: 'production' }))
+    .toThrow(BoundaryContractError);
+});
+
+it('[BCF04-N02] preserves a complete block despite an unrelated collection limitation', () => {
+  const built = buildReceipt({ limitations: ['history summary is incomplete'] });
+  expect(built.decision).toBe('block');
+});
+
+it('[BCF04-N03] preserves evidence identity across summary-only changes', () => {
+  const baseline = buildReceipt();
+  const changed = buildReceipt({
+    findings: [{ ...VALID_FINDING, summary: 'Different summary prose.' }],
+  });
+  expect(receiptField(changed, 'evidenceDigestSha256'))
+    .toBe(receiptField(baseline, 'evidenceDigestSha256'));
+});
+
+it('[BCF04-N04] is byte-stable when distinct findings are reversed', () => {
+  const second = {
+    ...VALID_FINDING,
+    ruleId: 'semantic.export-ownership',
+    evidenceState: evidenceStateForRule('semantic.export-ownership'),
+    summary: 'A runtime export has no production owner.',
+  };
+  expect(JSON.stringify(buildReceipt({ findings: [VALID_FINDING, second] })))
+    .toBe(JSON.stringify(buildReceipt({ findings: [second, VALID_FINDING] })));
+});
+
+it('[BCF04-N05] accepts only both closed enforcement modes', () => {
+  expect(canonicalEnforcementMode('shadow')).toBe('shadow');
+  expect(canonicalEnforcementMode('enforce')).toBe('enforce');
+});
+
+it('[BCF04-N06] accepts and preserves a canonical UTC observation timestamp', () => {
+  expect(receiptField(buildReceipt(), 'observedAt')).toBe(RECEIPT_OBSERVED_AT);
+});
+
+it('[BCF04-N07] canonicalizes a neighboring positive UTC offset', () => {
+  expect(receiptField(
+    buildReceipt({ observedAt: '2026-07-17T14:00:00+02:00' }),
+    'observedAt',
+  )).toBe(RECEIPT_OBSERVED_AT);
+});
+
+it('[BCF04-N08] accepts lowercase 40- and 64-hex commit candidate identities', () => {
+  for (const oid of [OID40, OID64]) {
+    const finding = { ...VALID_FINDING, action: 'commit' };
+    const built = buildReceipt({
+      action: 'commit',
+      target: target(`commit:${oid}`, oid),
+      base: { ...RECEIPT_INPUT.base, headOid: oid },
+      findings: [finding],
+    });
+    expect(receiptField(receiptField(built, 'target'), 'headOid')).toBe(oid);
+  }
+});
+
+it('[BCF04-N09] accepts a resolved config target without a Git candidate head', () => {
+  const built = buildReceipt({
+    action: 'config-write',
+    target: target(`config:${OID64}`, null),
+    base: { ...RECEIPT_INPUT.base, headOid: null },
+    findings: [{ ...VALID_FINDING, action: 'config-write' }],
+  });
+  expect(receiptField(receiptField(built, 'target'), 'headOid')).toBeNull();
 });

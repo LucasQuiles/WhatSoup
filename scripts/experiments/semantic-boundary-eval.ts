@@ -25,7 +25,12 @@ import {
   evaluateProvenance,
   type ProvenanceObservation,
 } from '../lib/semantic-quality/provenance.ts';
-import type { BoundaryFinding } from '../lib/semantic-quality/boundary-types.ts';
+import type {
+  BoundaryFindingInput,
+  CanonicalBoundaryFinding,
+} from '../lib/semantic-quality/boundary-types.ts';
+import { canonicalBoundaryFinding } from '../lib/semantic-quality/boundary-contract.ts';
+import { evidenceStateForRule } from '../lib/semantic-quality/rule-guidance.ts';
 import {
   aggregateBoundaryDecision,
   isBoundaryFindingComplete,
@@ -129,7 +134,7 @@ export interface BoundaryReceipt {
   repository: 'LucasQuiles/WhatSoup';
   invocation: 'semantic-boundary-experiment';
   decision: BoundaryDecision;
-  findings: BoundaryFinding[];
+  findings: CanonicalBoundaryFinding[];
   limitations: string[];
 }
 
@@ -312,13 +317,6 @@ function artifactUrl(kind: 'pull-request' | 'issue', number: number): string {
   return `https://github.com/${REPOSITORY}/${route}/${number}`;
 }
 
-function withFixtureSources(item: EvaluationCase, findings: BoundaryFinding[]): BoundaryFinding[] {
-  return findings.map((result) => ({
-    ...result,
-    sourceRefs: [...new Set([...result.sourceRefs, ...item.sourceRefs])].sort(),
-  }));
-}
-
 function historyArtifact(input: {
   kind?: 'pull-request' | 'issue';
   number: number;
@@ -348,7 +346,7 @@ function evaluateHistoryFixtures(
   item: EvaluationCase,
   corpus: Corpus,
   priorProposals: HistoryArtifactRecord[],
-): BoundaryFinding[] {
+): BoundaryFindingInput[] {
   const inputs: Array<{
     action: 'open-pr' | 'open-issue' | 'reopen-pr';
     candidate: CandidateIdentity;
@@ -581,19 +579,14 @@ function evaluateHistoryFixtures(
     });
   }
 
-  return inputs.flatMap((input) =>
-    withFixtureSources(
-      item,
-      evaluateHistory({
-        action: input.action,
-        candidate: input.candidate,
-        collection: completeHistory(corpus, input.artifacts),
-        reentry: input.reentry,
-        verifiedOverrideOwners: input.verifiedOverrideOwners,
-        now: new Date(corpus.lockedAt),
-      }),
-    ),
-  );
+  return inputs.flatMap((input) => evaluateHistory({
+    action: input.action,
+    candidate: input.candidate,
+    collection: completeHistory(corpus, input.artifacts),
+    reentry: input.reentry,
+    verifiedOverrideOwners: input.verifiedOverrideOwners,
+    now: new Date(corpus.lockedAt),
+  }));
 }
 
 function fixtureProvenance(item: EvaluationCase, corpus: Corpus): ProvenanceObservation | null {
@@ -650,15 +643,21 @@ function fixtureProvenance(item: EvaluationCase, corpus: Corpus): ProvenanceObse
 }
 
 function finding(
-  item: EvaluationCase,
-  input: Omit<BoundaryFinding, 'sourceRefs' | 'matchedArtifacts'> & {
-    matchedArtifacts?: BoundaryFinding['matchedArtifacts'];
+  _item: EvaluationCase,
+  input: Omit<BoundaryFindingInput, 'evidenceState' | 'matchedArtifacts' | 'limitations'> & {
+    matchedArtifacts?: BoundaryFindingInput['matchedArtifacts'];
   },
-): BoundaryFinding {
+): BoundaryFindingInput {
   return {
-    ...input,
+    ruleId: input.ruleId,
+    decision: input.decision,
+    action: input.action,
+    evidenceState: evidenceStateForRule(input.ruleId),
+    summary: input.summary,
+    why: input.why,
+    observed: input.observed,
     matchedArtifacts: input.matchedArtifacts ?? [],
-    sourceRefs: item.sourceRefs,
+    limitations: [],
   };
 }
 
@@ -670,7 +669,7 @@ function candidateReceipt(
   cwd: string,
   detectorCounts: { revisions: number; modulesChecked: number },
 ): BoundaryReceipt {
-  const findings: BoundaryFinding[] = [];
+  const findings: BoundaryFindingInput[] = [];
 
   if (item.timeout) {
     findings.push(
@@ -681,8 +680,6 @@ function candidateReceipt(
         summary: 'The boundary process exceeded its owned deadline.',
         why: 'A timeout supplies no clean verdict and must fail closed at the boundary.',
         observed: [{ label: 'case', value: item.id }],
-        correction: ['Inspect the active phase, terminate the owned process group, and rerun.'],
-        rerun: 'npm run verify:boundary',
       }),
     );
   }
@@ -690,7 +687,7 @@ function candidateReceipt(
   const provenance = fixtureProvenance(item, corpus);
   if (provenance) {
     findings.push(
-      ...withFixtureSources(item, evaluateProvenance({ action: 'push', observation: provenance })),
+      ...evaluateProvenance({ action: 'push', observation: provenance }),
     );
   }
   findings.push(...evaluateHistoryFixtures(item, corpus, priorProposals));
@@ -729,10 +726,6 @@ function candidateReceipt(
           summary: 'Added production modules are unreachable from every production root.',
           why: 'Tests, comments, strings, and disconnected islands do not prove runtime integration.',
           observed: [{ label: 'unreachable_modules', value: unreachable.join(', ') }],
-          correction: [
-            'Integrate through the named production owner and add a behavior test through that owner.',
-          ],
-          rerun: 'npm run verify:semantic',
         }),
       );
     }
@@ -748,8 +741,6 @@ function candidateReceipt(
           summary: `${actionRef} uses a mutable action reference.`,
           why: 'Release tags can move and do not identify reviewed upstream content immutably.',
           observed: [{ label: 'uses', value: actionRef }],
-          correction: ['Pin the reviewed release to its full commit SHA and update provenance.'],
-          rerun: 'npm run guard:upstream-pins',
         }),
       );
     }
@@ -764,8 +755,6 @@ function candidateReceipt(
           summary: `${dockerBase} lacks an immutable image digest.`,
           why: 'A patch tag alone can resolve to different upstream bytes over time.',
           observed: [{ label: 'base_image', value: dockerBase }],
-          correction: ['Add the verified sha256 digest and update the provenance manifest.'],
-          rerun: 'npm run guard:upstream-pins',
         }),
       );
     }
@@ -779,10 +768,6 @@ function candidateReceipt(
         summary: 'The workflow uses a floating runner label.',
         why: 'Runner image drift should remain visible until the support policy is explicit.',
         observed: [{ label: 'runner', value: item.supply.runnerLabels.join(', ') }],
-        correction: [
-          'Record the intended runner support window or pin an explicit image generation.',
-        ],
-        rerun: 'npm run guard:upstream-pins',
       }),
     );
   }
@@ -801,10 +786,6 @@ function candidateReceipt(
             value: String(item.process.ownsProcessGroup),
           },
         ],
-        correction: [
-          'Wrap the command in an external deadline that owns and reaps its process group.',
-        ],
-        rerun: 'npm run verify:boundary',
       }),
     );
   }
@@ -817,22 +798,19 @@ function candidateReceipt(
         summary: 'Guard behavior changed without a neighboring negative-control fixture.',
         why: 'A wired test name does not prove the guard rejects its target failure mode.',
         observed: [{ label: 'negative_control_changed', value: 'false' }],
-        correction: [
-          'Add a fixture that triggers the unsafe input and assert the guard rejects it.',
-        ],
-        rerun: 'npm test -- tests/scripts/<guard>.test.ts',
       }),
     );
   }
 
-  const decision = aggregateBoundaryDecision(findings);
+  const canonicalFindings = findings.map(canonicalBoundaryFinding);
+  const decision = aggregateBoundaryDecision(canonicalFindings);
   return {
     schemaVersion: 1,
     caseId: item.id,
     repository: 'LucasQuiles/WhatSoup',
     invocation: 'semantic-boundary-experiment',
     decision,
-    findings,
+    findings: canonicalFindings,
     limitations: verifyGit ? [] : ['Git-backed visible cases require --verify-git.'],
   };
 }

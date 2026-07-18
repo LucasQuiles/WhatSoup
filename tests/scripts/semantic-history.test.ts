@@ -122,6 +122,7 @@ describe('exact and related history classification', () => {
         ruleId: 'history.exact-open-pr',
         decision: 'block',
         action: 'open-pr',
+        evidenceState: 'observed',
         summary: 'Candidate content exactly matches 1 open pull request.',
         why: 'The canonical changed path/blob identity is identical, independent of branch or proposal identity.',
         observed: [
@@ -141,12 +142,7 @@ describe('exact and related history classification', () => {
             fingerprintSha256: '1e27927ab1b22973ecca0d38f41b17293e1cf6a6e2303098f5fb8db9064b3479',
           },
         ],
-        correction: [
-          'Continue through the existing open pull request instead of creating another artifact.',
-          'If the work is materially different, change the implementation and rerun the boundary check.',
-        ],
-        rerun: 'npm run verify:boundary',
-        sourceRefs: [prior.url],
+        limitations: [],
       },
     ]);
   });
@@ -181,9 +177,8 @@ describe('exact and related history classification', () => {
       observed: expect.arrayContaining([
         { label: 'prior_disposition_1857', value: 'duplicate-existing-mechanism' },
       ]),
-      correction: expect.arrayContaining([
-        expect.stringMatching(/recorded disposition.*material re-entry packet/i),
-      ]),
+      evidenceState: 'observed',
+      limitations: [],
     });
   });
 
@@ -217,7 +212,8 @@ describe('exact and related history classification', () => {
       expect.objectContaining({
         ruleId: 'history.exact-merged-pr',
         decision: 'warn',
-        correction: expect.arrayContaining([expect.stringMatching(/current main.*reachability/i)]),
+        evidenceState: 'observed',
+        limitations: [],
       }),
     ]);
   });

@@ -12,6 +12,7 @@ import {
 import {
   evaluateSemanticPolicy,
   loadSemanticPolicy,
+  semanticPolicyEvidenceState,
   type SemanticPolicyFinding,
   type SemanticQualityPolicy,
 } from '../../scripts/lib/semantic-quality/policy.ts';
@@ -84,6 +85,13 @@ function writePolicy(repo: string, payload: unknown): void {
 
 afterEach(() => {
   for (const repo of repos.splice(0)) rmSync(repo, { recursive: true, force: true });
+});
+
+it('derives producer evidence certainty from the closed rule catalog', () => {
+  expect(semanticPolicyEvidenceState({ ruleId: 'semantic.production-reachability' }))
+    .toBe('observed');
+  expect(semanticPolicyEvidenceState({ ruleId: 'semantic.policy-unavailable' }))
+    .toBe('unavailable');
 });
 
 describe('exact candidate Git tree', () => {

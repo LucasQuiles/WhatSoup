@@ -191,12 +191,14 @@ describe('semantic boundary experiment candidate', () => {
     expect(receipt?.findings[0]).toMatchObject({
       ruleId: 'semantic.production-reachability',
       action: 'push',
-      rerun: 'npm run verify:semantic',
+      rerun: expect.objectContaining({ command: 'bash' }),
     });
     expect(receipt?.findings[0]?.observed.map((item) => item.value).join(' ')).toContain(
       'src/lib/feature.ts',
     );
     expect(receipt?.findings[0]?.correction.length).toBeGreaterThan(0);
-    expect(receipt?.findings[0]?.sourceRefs).toEqual(['fixture:graphs.testOnly']);
+    expect(receipt?.findings[0]?.sourceRefs).toEqual([
+      'scripts/lib/semantic-quality/policy.ts',
+    ]);
   });
 });

@@ -9,6 +9,8 @@ import {
   buildModuleGraph,
 } from './module-graph.ts';
 import { readGitTextAtRevision, type CandidateTree } from './git-tree.ts';
+import { evidenceStateForRule } from './rule-guidance.ts';
+import type { EvidenceState } from './boundary-types.ts';
 
 export interface SemanticQualityPolicy {
   schemaVersion: 1;
@@ -39,6 +41,12 @@ export interface SemanticPolicyFinding {
   decision: 'warn' | 'block' | 'inconclusive';
   paths: string[];
   evidence: Array<{ label: string; value: string }>;
+}
+
+export function semanticPolicyEvidenceState(
+  finding: Pick<SemanticPolicyFinding, 'ruleId'>,
+): EvidenceState {
+  return evidenceStateForRule(finding.ruleId);
 }
 
 const TOP_LEVEL_KEYS = new Set([
