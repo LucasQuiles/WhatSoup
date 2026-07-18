@@ -1,6 +1,20 @@
+import { createHash } from 'node:crypto';
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  fsyncSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
+import path from 'node:path';
+
 import { expect, it } from 'vitest';
 
 import {
+  assertReceiptWithinBudgets,
   BoundaryContractError,
   DEFAULT_BOUNDARY_BUDGETS,
   canonicalBoundaryFinding,
@@ -14,6 +28,7 @@ import {
   renderSemanticReceipt,
   semanticExitCode,
 } from '../../scripts/lib/semantic-quality/receipt.ts';
+import { captureBoundaryWorktreeSnapshot } from '../../scripts/lib/verification/boundary-run-manifest.ts';
 import { evidenceStateForRule } from '../../scripts/lib/semantic-quality/rule-guidance.ts';
 import type {
   BoundaryAction,
@@ -488,4 +503,475 @@ it('[BCF04-N09] accepts a resolved config target without a Git candidate head', 
     findings: [{ ...VALID_FINDING, action: 'config-write' }],
   });
   expect(receiptField(receiptField(built, 'target'), 'headOid')).toBeNull();
+});
+
+const feedbackUnsafe = (id: string, assertion: () => void): void => {
+  try {
+    assertion();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`BCF_EXPECTATION_UNMET:BCF05-${id}: ${message}`, { cause: error });
+  }
+};
+
+const feedbackFinding = (
+  index: number,
+  decision: BoundaryFindingInput['decision'] = 'warn',
+): BoundaryFindingInput => ({
+  ...VALID_FINDING,
+  decision,
+  observed: [{ label: 'candidate', value: `src/feedback-${String(index).padStart(3, '0')}.ts` }],
+});
+
+const feedbackLabels = [
+  'Observed:',
+  'Expected invariant:',
+  'Why this matters:',
+  'Safe control:',
+  'Correction:',
+  'Verification:',
+  'Rerun:',
+  'Sources:',
+  'Limitations:',
+  'Receipt evidence:',
+];
+
+const expectFeedbackSequence = (output: string): void => {
+  for (const label of feedbackLabels) expect(output).toContain(label);
+  for (let index = 1; index < feedbackLabels.length; index += 1) {
+    expect(output.indexOf(feedbackLabels[index]!))
+      .toBeGreaterThan(output.indexOf(feedbackLabels[index - 1]!));
+  }
+};
+
+const feedbackSha256 = (value: string | Buffer): string =>
+  createHash('sha256').update(value).digest('hex');
+
+const feedbackOutputCounts = (output: string): {
+  detailedFindings: number;
+  omittedFindings: number;
+  renderedObservations: number;
+  omittedObservations: number;
+} => {
+  const count = (label: string): number => {
+    const match = output.match(new RegExp(`^${label}: (\\d+)$`, 'm'));
+    if (match === null) throw new Error(`missing feedback measurement: ${label}`);
+    return Number(match[1]);
+  };
+  return {
+    detailedFindings: count('Rendered findings'),
+    omittedFindings: count('Omitted findings'),
+    renderedObservations: count('Rendered observations'),
+    omittedObservations: count('Omitted observations'),
+  };
+};
+
+const exactJsonProbe = (bytes: number): Record<string, unknown> => {
+  const probe = { findings: [], limitations: [], fingerprints: {}, padding: '' };
+  const fixedBytes = Buffer.byteLength(JSON.stringify(probe), 'utf8');
+  if (bytes < fixedBytes) throw new Error('JSON probe is smaller than its fixed structure');
+  return { ...probe, padding: 'x'.repeat(bytes - fixedBytes) };
+};
+
+function writeFeedbackMeasurements(ordinary: ReturnType<typeof buildReceipt>): void {
+  const measurementPath = process.env.BCF_MEASUREMENT_PATH;
+  const token = process.env.BCF_MEASUREMENT_TOKEN;
+  if (measurementPath === undefined && token === undefined) return;
+  if (measurementPath === undefined || token === undefined || token.length === 0) {
+    throw new Error('incomplete feedback measurement channel');
+  }
+  if (!path.isAbsolute(measurementPath)
+    || path.basename(measurementPath) !== 'feedback-measurements.json') {
+    throw new Error('feedback measurement path is not canonical');
+  }
+
+  const manifest = JSON.parse(readFileSync(
+    path.join(path.dirname(measurementPath), 'run_manifest.json'),
+    'utf8',
+  )) as { run?: Record<string, unknown> };
+  const run = manifest.run;
+  if (run === undefined
+    || !Array.isArray(run.allowedUntrackedPaths)
+    || !Array.isArray(run.preservedOwnerPaths)) {
+    throw new Error('feedback measurement run identity is unavailable');
+  }
+  const snapshot = captureBoundaryWorktreeSnapshot(process.cwd(), {
+    allowedUntrackedPaths: run.allowedUntrackedPaths.map(String),
+    preservedOwnerPaths: run.preservedOwnerPaths.map(String),
+  });
+  if (!snapshot.ok || snapshot.snapshot === null) {
+    throw new Error('feedback measurement snapshot could not be captured');
+  }
+
+  const atLimit = buildReceipt({
+    findings: Array.from(
+      { length: DEFAULT_BOUNDARY_BUDGETS.maxFindings },
+      (_, index) => feedbackFinding(index),
+    ),
+  });
+  const oneOver = buildReceipt({
+    findings: Array.from(
+      { length: DEFAULT_BOUNDARY_BUDGETS.maxFindings + 1 },
+      (_, index) => feedbackFinding(index),
+    ),
+  });
+  const multibyte = buildReceipt({
+    findings: [{
+      ...feedbackFinding(0),
+      observed: [{ label: 'utf8_candidate', value: 'évidence-境界' }],
+    }],
+  });
+  if (oneOver.overflow === null || oneOver.decision !== 'inconclusive') {
+    throw new Error('one-over evidence did not produce the diagnostic receipt');
+  }
+
+  const exactJson = exactJsonProbe(DEFAULT_BOUNDARY_BUDGETS.maxJsonBytes);
+  const oneOverJson = exactJsonProbe(DEFAULT_BOUNDARY_BUDGETS.maxJsonBytes + 1);
+  assertReceiptWithinBudgets(exactJson);
+  let jsonOverflow: BoundaryContractError | null = null;
+  try {
+    assertReceiptWithinBudgets(oneOverJson);
+  } catch (error) {
+    if (error instanceof BoundaryContractError
+      && error.code === 'boundary.evidence-volume-exceeded'
+      && error.overflow !== null) {
+      jsonOverflow = error;
+    } else {
+      throw error;
+    }
+  }
+  if (jsonOverflow === null) throw new Error('one-over JSON probe was accepted');
+
+  const ordinaryOutput = renderSemanticReceipt(ordinary);
+  const atLimitOutput = renderSemanticReceipt(atLimit);
+  const oneOverOutput = renderSemanticReceipt(oneOver);
+  const multibyteOutput = renderSemanticReceipt(multibyte);
+  const ordinaryCounts = feedbackOutputCounts(ordinaryOutput);
+  const atLimitCounts = feedbackOutputCounts(atLimitOutput);
+  const oneOverCounts = feedbackOutputCounts(oneOverOutput);
+  const multibyteCounts = feedbackOutputCounts(multibyteOutput);
+  const scenarioDigest = (scenario: string, inputBytes: number, evidenceDigest: string): string =>
+    feedbackSha256(JSON.stringify({ scenario, inputBytes, evidenceDigest }));
+  const jsonBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), 'utf8');
+  const humanBytes = (value: string): number => Buffer.byteLength(value, 'utf8');
+  const scenario = (
+    ordinal: number,
+    name: string,
+    subject: 'aggregate' | 'public-text' | 'canonical-json' | 'utf8-text',
+    inputBytes: number,
+    limitBytes: number,
+    output: string,
+    receipt: ReturnType<typeof buildReceipt>,
+    counts: ReturnType<typeof feedbackOutputCounts>,
+    disposition: 'accepted' | 'diagnostic-inconclusive',
+    descriptorDigestSha256: string,
+    measuredJsonBytes = jsonBytes(receipt),
+  ) => ({
+    ordinal,
+    scenario: name,
+    subject,
+    inputBytes,
+    limitBytes,
+    humanBytes: humanBytes(output),
+    jsonBytes: measuredJsonBytes,
+    ...counts,
+    evidenceDigestSha256: receipt.evidenceDigestSha256,
+    descriptorDigestSha256,
+    expectedDisposition: disposition,
+    observedDisposition: disposition,
+  });
+  const scenarios = [
+    scenario(
+      1,
+      'ordinary',
+      'aggregate',
+      jsonBytes(ordinary),
+      DEFAULT_BOUNDARY_BUDGETS.maxJsonBytes,
+      ordinaryOutput,
+      ordinary,
+      ordinaryCounts,
+      'accepted',
+      scenarioDigest('ordinary', jsonBytes(ordinary), ordinary.evidenceDigestSha256),
+    ),
+    scenario(
+      2,
+      'human-at-limit',
+      'public-text',
+      DEFAULT_BOUNDARY_BUDGETS.maxHumanBytes,
+      DEFAULT_BOUNDARY_BUDGETS.maxHumanBytes,
+      atLimitOutput,
+      atLimit,
+      atLimitCounts,
+      'accepted',
+      scenarioDigest('human-at-limit', DEFAULT_BOUNDARY_BUDGETS.maxHumanBytes, atLimit.evidenceDigestSha256),
+    ),
+    scenario(
+      3,
+      'human-one-over',
+      'public-text',
+      DEFAULT_BOUNDARY_BUDGETS.maxHumanBytes + 1,
+      DEFAULT_BOUNDARY_BUDGETS.maxHumanBytes,
+      oneOverOutput,
+      oneOver,
+      oneOverCounts,
+      'diagnostic-inconclusive',
+      oneOver.overflow.descriptorDigestSha256,
+    ),
+    scenario(
+      4,
+      'json-at-limit',
+      'canonical-json',
+      DEFAULT_BOUNDARY_BUDGETS.maxJsonBytes,
+      DEFAULT_BOUNDARY_BUDGETS.maxJsonBytes,
+      ordinaryOutput,
+      ordinary,
+      ordinaryCounts,
+      'accepted',
+      feedbackSha256(JSON.stringify(exactJson)),
+      DEFAULT_BOUNDARY_BUDGETS.maxJsonBytes,
+    ),
+    scenario(
+      5,
+      'json-one-over',
+      'canonical-json',
+      DEFAULT_BOUNDARY_BUDGETS.maxJsonBytes + 1,
+      DEFAULT_BOUNDARY_BUDGETS.maxJsonBytes,
+      oneOverOutput,
+      oneOver,
+      oneOverCounts,
+      'diagnostic-inconclusive',
+      jsonOverflow.overflow!.descriptorDigestSha256,
+    ),
+    scenario(
+      6,
+      'multibyte',
+      'utf8-text',
+      Buffer.byteLength('évidence-境界', 'utf8'),
+      DEFAULT_BOUNDARY_BUDGETS.maxPublicTextBytes,
+      multibyteOutput,
+      multibyte,
+      multibyteCounts,
+      'accepted',
+      scenarioDigest('multibyte', Buffer.byteLength('évidence-境界', 'utf8'), multibyte.evidenceDigestSha256),
+    ),
+  ];
+  const measurements = {
+    schemaVersion: 1,
+    runId: run.runId,
+    taskId: run.taskId,
+    profileId: run.profileId,
+    producerAttemptId: 'feedback-green',
+    head: run.entryHead,
+    snapshotDigestSha256: snapshot.snapshot.digestSha256,
+    tokenSha256: feedbackSha256(token),
+    budgets: { ...DEFAULT_BOUNDARY_BUDGETS },
+    scenarios,
+    overallVerdict: 'Pass',
+  };
+
+  const before = lstatSync(measurementPath);
+  if (!before.isFile() || before.isSymbolicLink() || before.size !== 0) {
+    throw new Error('feedback measurement channel is not an empty regular file');
+  }
+  const descriptor = openSync(measurementPath, constants.O_WRONLY | constants.O_NOFOLLOW);
+  try {
+    const opened = fstatSync(descriptor);
+    if (!opened.isFile()
+      || opened.dev !== before.dev
+      || opened.ino !== before.ino
+      || opened.mode !== before.mode) {
+      throw new Error('feedback measurement channel identity changed before write');
+    }
+    writeFileSync(descriptor, `${JSON.stringify(measurements)}\n`, 'utf8');
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+it('[BCF05-U01] renders complete ordered warning guidance', () => {
+  feedbackUnsafe('01', () => expectFeedbackSequence(renderSemanticReceipt(buildReceipt({
+    findings: [feedbackFinding(1, 'warn')],
+  }))));
+});
+
+it('[BCF05-U02] renders complete ordered blocking guidance', () => {
+  feedbackUnsafe('02', () => expectFeedbackSequence(renderSemanticReceipt(buildReceipt({
+    findings: [feedbackFinding(2, 'block')],
+  }))));
+});
+
+it('[BCF05-U03] renders complete ordered inconclusive guidance', () => {
+  feedbackUnsafe('03', () => expectFeedbackSequence(renderSemanticReceipt(buildReceipt({
+    findings: [{ ...feedbackFinding(3), limitations: ['comparison provider unavailable'] }],
+  }))));
+});
+
+it('[BCF05-U04] keeps collection limitations visible beside a complete block', () => {
+  feedbackUnsafe('04', () => {
+    const output = renderSemanticReceipt(buildReceipt({
+      findings: [feedbackFinding(4, 'block')],
+      limitations: ['history page settlement was incomplete'],
+    }));
+    expect(output).toContain('history page settlement was incomplete');
+    expect(output).toContain('BLOCK [semantic.production-reachability]');
+  });
+});
+
+it('[BCF05-U05] labels a generic pass with its invocation and action', () => {
+  feedbackUnsafe('05', () => {
+    const built = buildReceipt({
+      invocation: 'boundary-history',
+      action: 'open-pr',
+      target: target('pr-create:refs/heads/main..refs/heads/feedback'),
+      findings: [],
+    });
+    expect(renderSemanticReceipt(built)).toBe('PASS boundary-history while open-pr\n');
+  });
+});
+
+it('[BCF05-U06] caps detailed findings and reports the omitted evidence', () => {
+  feedbackUnsafe('06', () => {
+    const output = renderSemanticReceipt(buildReceipt({
+      findings: Array.from({ length: 45 }, (_, index) => feedbackFinding(index)),
+    }));
+    expect(output).toContain('Rendered findings: 12');
+    expect(output).toContain('Omitted findings: 33');
+    expect(output).toMatch(/Omitted evidence digest: [0-9a-f]{64}/);
+  });
+});
+
+it('[BCF05-U07] never exceeds the newline-inclusive human byte budget', () => {
+  feedbackUnsafe('07', () => {
+    const atLimit = buildReceipt({
+      findings: Array.from({ length: 128 }, (_, index) => feedbackFinding(index)),
+    });
+    const output = renderSemanticReceipt(atLimit);
+    expect(Buffer.byteLength(output, 'utf8')).toBeLessThanOrEqual(DEFAULT_BOUNDARY_BUDGETS.maxHumanBytes);
+    expect(output.endsWith('\n')).toBe(true);
+
+    const oneOver = buildReceipt({
+      findings: Array.from({ length: 129 }, (_, index) => feedbackFinding(index)),
+    });
+    expect(oneOver).toMatchObject({
+      decision: 'inconclusive',
+      overflow: {
+        reason: 'boundary.evidence-volume-exceeded',
+        digestCoverage: 'bounded-structural-descriptor',
+      },
+    });
+    expect(semanticExitCode(oneOver)).toBe(2);
+    expect(Buffer.byteLength(renderSemanticReceipt(oneOver), 'utf8'))
+      .toBeLessThanOrEqual(DEFAULT_BOUNDARY_BUDGETS.maxHumanBytes);
+    expect(parseBoundaryReceipt(JSON.parse(JSON.stringify(oneOver)) as unknown)).toEqual(oneOver);
+
+    const alternateTarget = buildReceipt({
+      target: target('ref:refs/heads/feedback'),
+      findings: Array.from({ length: 129 }, (_, index) => feedbackFinding(index)),
+    });
+    expect(alternateTarget.overflow?.descriptorDigestSha256)
+      .toBe(oneOver.overflow?.descriptorDigestSha256);
+    expect(alternateTarget.evidenceDigestSha256).not.toBe(oneOver.evidenceDigestSha256);
+  });
+});
+
+it('[BCF05-U08] groups repeated guidance without discarding distinct observations', () => {
+  feedbackUnsafe('08', () => {
+    const output = renderSemanticReceipt(buildReceipt({
+      findings: Array.from({ length: 45 }, (_, index) => feedbackFinding(index)),
+    }));
+    expect(output).toContain('Finding group: 45 findings');
+    expect(output).toContain('src/feedback-000.ts');
+  });
+});
+
+it('[BCF05-U09] labels schema-one rendering as legacy evidence', () => {
+  feedbackUnsafe('09', () => {
+    const legacy = parseBoundaryReceipt({
+      schemaVersion: 1,
+      repository: 'LucasQuiles/WhatSoup',
+      invocation: 'semantic-quality',
+      enforcementMode: 'shadow',
+      decision: 'pass',
+      base: RECEIPT_INPUT.base,
+      fingerprints: {},
+      findings: [],
+      limitations: [],
+    });
+    expect(renderSemanticReceipt(legacy)).toContain('legacy receipt schema=1');
+  });
+});
+
+it('[BCF05-U10] binds human feedback to the retained receipt evidence', () => {
+  feedbackUnsafe('10', () => {
+    const built = buildReceipt({ findings: [feedbackFinding(10)] });
+    const output = renderSemanticReceipt(built);
+    expect(output).toContain('Receipt evidence:');
+    expect(output).toContain(built.evidenceDigestSha256);
+    expect(() => buildReceipt({ overflow: built.overflow })).toThrow(BoundaryContractError);
+  });
+});
+
+it('[BCF05-S01] preserves a bounded neighboring pass receipt', () => {
+  const output = renderSemanticReceipt(buildReceipt({ findings: [] }));
+  expect(output).toContain('PASS');
+  expect(output.endsWith('\n')).toBe(true);
+});
+
+it('[BCF05-N01] retains the action in non-pass feedback', () => {
+  expect(renderSemanticReceipt(buildReceipt({ findings: [feedbackFinding(1)] })))
+    .toContain('while push');
+});
+
+it('[BCF05-N02] retains canonical observations in human feedback', () => {
+  expect(renderSemanticReceipt(buildReceipt({ findings: [feedbackFinding(2)] })))
+    .toContain('src/feedback-002.ts');
+});
+
+it('[BCF05-N03] retains catalog corrections in human feedback', () => {
+  expect(renderSemanticReceipt(buildReceipt({ findings: [feedbackFinding(3)] })))
+    .toContain('Correction:');
+});
+
+it('[BCF05-N04] retains catalog source references in human feedback', () => {
+  expect(renderSemanticReceipt(buildReceipt({ findings: [feedbackFinding(4)] })))
+    .toContain('Sources:');
+});
+
+it('[BCF05-N05] emits one final newline', () => {
+  const output = renderSemanticReceipt(buildReceipt({ findings: [feedbackFinding(5)] }));
+  expect(output.endsWith('\n')).toBe(true);
+  expect(output.endsWith('\n\n')).toBe(false);
+});
+
+it('[BCF05-N06] keeps an unrelated limitation from weakening a complete block', () => {
+  expect(buildReceipt({
+    findings: [feedbackFinding(6, 'block')],
+    limitations: ['unrelated provider limitation'],
+  }).decision).toBe('block');
+});
+
+it('[BCF05-N07] keeps feedback byte-stable across input finding order', () => {
+  const first = feedbackFinding(7);
+  const second = feedbackFinding(8);
+  expect(renderSemanticReceipt(buildReceipt({ findings: [first, second] })))
+    .toBe(renderSemanticReceipt(buildReceipt({ findings: [second, first] })));
+});
+
+it('[BCF05-N08] retains the enforce exit for inconclusive evidence', () => {
+  expect(semanticExitCode(buildReceipt({
+    findings: [{ ...feedbackFinding(8), limitations: ['provider unavailable'] }],
+  }))).toBe(2);
+});
+
+it('[BCF05-N09] keeps ordinary canonical JSON inside its declared budget', () => {
+  const built = buildReceipt({ findings: [feedbackFinding(9)] });
+  expect(Buffer.byteLength(JSON.stringify(built), 'utf8'))
+    .toBeLessThanOrEqual(DEFAULT_BOUNDARY_BUDGETS.maxJsonBytes);
+});
+
+it('[BCF05-N10] retains a stable evidence digest for rendered feedback', () => {
+  const built = buildReceipt({ findings: [feedbackFinding(10)] });
+  expect(built.evidenceDigestSha256).toMatch(/^[0-9a-f]{64}$/);
+  writeFeedbackMeasurements(built);
 });

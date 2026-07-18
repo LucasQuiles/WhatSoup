@@ -32,6 +32,7 @@ import type {
 } from './boundary-types.ts';
 import {
   assertReceiptWithinBudgets,
+  BoundaryContractError,
   DEFAULT_BOUNDARY_BUDGETS,
   canonicalBoundaryFinding,
   canonicalBoundaryLimitations,
@@ -378,7 +379,34 @@ const BUILD_INPUT_KEYS = new Set([
   'base', 'fingerprints', 'findings', 'limitations',
 ]);
 
-export function buildBoundaryReceipt(input: BuildBoundaryReceiptInput): BoundaryReceiptV2 {
+function volumeExceededFinding(
+  action: BoundaryAction,
+  overflow: BoundaryOverflow,
+): BoundaryFindingInput {
+  return {
+    ruleId: 'boundary.evidence-volume-exceeded',
+    decision: 'inconclusive',
+    action,
+    evidenceState: evidenceStateForRule('boundary.evidence-volume-exceeded'),
+    summary: 'Boundary evidence exceeded the declared receipt budget.',
+    why: 'Rejected evidence cannot be silently truncated or treated as a complete clean result.',
+    observed: [
+      { label: 'finding_count', value: String(overflow.inputCounts.findings) },
+      { label: 'observation_count', value: String(overflow.inputCounts.observed) },
+      { label: 'artifact_count', value: String(overflow.inputCounts.artifacts) },
+      { label: 'rejected_bytes', value: String(overflow.rejectedBytes ?? 'not-materialized') },
+      { label: 'descriptor_sha256', value: overflow.descriptorDigestSha256 },
+      { label: 'digest_coverage', value: overflow.digestCoverage },
+    ],
+    matchedArtifacts: [],
+    limitations: ['The rejected evidence was not admitted into the canonical receipt.'],
+  };
+}
+
+function buildBoundaryReceiptStrict(
+  input: BuildBoundaryReceiptInput,
+  overflow: BoundaryOverflow | null,
+): BoundaryReceiptV2 {
   const inputRecord = ownDataRecord(input, 'receiptInput');
   exactKeys(inputRecord, BUILD_INPUT_KEYS, 'receiptInput');
   if (typeof input.invocation !== 'string' || receiptText(input.invocation) !== input.invocation
@@ -433,10 +461,35 @@ export function buildBoundaryReceipt(input: BuildBoundaryReceiptInput): Boundary
     fingerprints,
     findings,
     limitations,
-    overflow: null,
+    overflow,
   };
   assertReceiptWithinBudgets(receipt);
   return receipt;
+}
+
+function buildVolumeExceededReceipt(
+  input: BuildBoundaryReceiptInput,
+  overflow: BoundaryOverflow,
+): BoundaryReceiptV2 {
+  return buildBoundaryReceiptStrict({
+    ...input,
+    fingerprints: {},
+    findings: [volumeExceededFinding(input.action, overflow)],
+    limitations: [],
+  }, overflow);
+}
+
+export function buildBoundaryReceipt(input: BuildBoundaryReceiptInput): BoundaryReceiptV2 {
+  try {
+    return buildBoundaryReceiptStrict(input, null);
+  } catch (error) {
+    if (!(error instanceof BoundaryContractError)
+      || error.code !== 'boundary.evidence-volume-exceeded'
+      || error.overflow === null) {
+      throw error;
+    }
+    return buildVolumeExceededReceipt(input, error.overflow);
+  }
 }
 
 const RECEIPT_V1_KEYS = new Set([
@@ -448,6 +501,13 @@ const RECEIPT_V2_KEYS = new Set([
   'validUntil', 'correlationIdSha256', 'ruleCatalogDigestSha256',
   'evidenceDigestSha256', 'enforcementMode', 'decision', 'base', 'fingerprints',
   'findings', 'limitations', 'overflow',
+]);
+const RECEIPT_OVERFLOW_KEYS = new Set([
+  'reason', 'inputCounts', 'rejectedBytes', 'descriptorDigestSha256', 'digestCoverage',
+]);
+const RECEIPT_OVERFLOW_COUNT_KEYS = new Set([
+  'findings', 'observed', 'artifacts', 'limitations', 'fingerprints', 'corrections',
+  'verification', 'sources', 'canonicalRecords',
 ]);
 const RECEIPT_V1_ACTIONS = new Set<BoundaryActionV1>([
   'commit', 'push', 'open-pr', 'reopen-pr', 'open-issue',
@@ -572,14 +632,44 @@ function parseBoundaryReceiptV1(record: Record<string, unknown>): BoundaryReceip
   return receipt;
 }
 
+function parseBoundaryOverflow(value: unknown): BoundaryOverflow | null {
+  if (value === null) return null;
+  const record = ownDataRecord(value, 'receipt.overflow');
+  exactKeys(record, RECEIPT_OVERFLOW_KEYS, 'receipt.overflow');
+  const counts = ownDataRecord(record.inputCounts, 'receipt.overflow.inputCounts');
+  exactKeys(counts, RECEIPT_OVERFLOW_COUNT_KEYS, 'receipt.overflow.inputCounts');
+  if (record.reason !== 'boundary.evidence-volume-exceeded'
+    || record.digestCoverage !== 'bounded-structural-descriptor'
+    || typeof record.descriptorDigestSha256 !== 'string'
+    || !/^[0-9a-f]{64}$/.test(record.descriptorDigestSha256)
+    || (record.rejectedBytes !== null
+      && (!Number.isSafeInteger(record.rejectedBytes) || Number(record.rejectedBytes) < 0))) {
+    invalidContract('receipt.overflow');
+  }
+  for (const key of RECEIPT_OVERFLOW_COUNT_KEYS) {
+    if (!Number.isSafeInteger(counts[key]) || Number(counts[key]) < 0) {
+      invalidContract(`receipt.overflow.inputCounts.${key}`);
+    }
+  }
+  return {
+    reason: 'boundary.evidence-volume-exceeded',
+    inputCounts: Object.fromEntries(
+      [...RECEIPT_OVERFLOW_COUNT_KEYS].map((key) => [key, Number(counts[key])]),
+    ) as unknown as BoundaryOverflow['inputCounts'],
+    rejectedBytes: record.rejectedBytes === null ? null : Number(record.rejectedBytes),
+    descriptorDigestSha256: record.descriptorDigestSha256,
+    digestCoverage: 'bounded-structural-descriptor',
+  };
+}
+
 function parseBoundaryReceiptV2(record: Record<string, unknown>): BoundaryReceiptV2 {
   exactKeys(record, RECEIPT_V2_KEYS, 'receipt');
   if ([...RECEIPT_V2_KEYS].some((key) => !Object.hasOwn(record, key))) invalidContract('receipt');
-  if (record.overflow !== null) invalidContract('receipt.overflow');
   if (!Array.isArray(record.findings) || !Array.isArray(record.limitations)) {
     invalidContract('receipt');
   }
-  const rebuilt = buildBoundaryReceipt({
+  const overflow = parseBoundaryOverflow(record.overflow);
+  const rebuildInput: BuildBoundaryReceiptInput = {
     invocation: record.invocation as string,
     action: record.action as BoundaryAction,
     target: record.target as BoundaryTarget,
@@ -590,7 +680,10 @@ function parseBoundaryReceiptV2(record: Record<string, unknown>): BoundaryReceip
     fingerprints: record.fingerprints as Record<string, string | null>,
     findings: (record.findings as CanonicalBoundaryFinding[]).map(findingInput),
     limitations: record.limitations as string[],
-  });
+  };
+  const rebuilt = overflow === null
+    ? buildBoundaryReceipt(rebuildInput)
+    : buildVolumeExceededReceipt(rebuildInput, overflow);
   if (!isDeepStrictEqual(rebuilt, record)) invalidContract('receipt.derivedIdentity');
   return rebuilt;
 }
@@ -757,11 +850,10 @@ function buildDiagnosticReceipt(input: BuildSemanticReceiptInput & {
   return receipt;
 }
 
-export function renderSemanticReceipt(receipt: BoundaryReceipt): string {
+function renderLegacyReceipt(receipt: BoundaryReceiptV1): string {
   if (receipt.decision === 'pass') {
-    return `PASS semantic quality head=${receipt.base.headOid ?? 'unknown'}\n`;
+    return `PASS semantic quality head=${receipt.base.headOid ?? 'unknown'} legacy receipt schema=1\n`;
   }
-
   const lines: string[] = [];
   for (const finding of receipt.findings) {
     if (lines.length > 0) lines.push('');
@@ -787,11 +879,9 @@ export function renderSemanticReceipt(receipt: BoundaryReceipt): string {
     lines.push(`Why: ${finding.why}`);
     lines.push('Correction:');
     for (const item of finding.correction) {
-      lines.push(`  - ${typeof item === 'string' ? item : `${item.operation} ${item.target}: ${item.expected}`}`);
+      lines.push(`  - ${item}`);
     }
-    lines.push(`Rerun: ${typeof finding.rerun === 'string'
-      ? finding.rerun
-      : [finding.rerun.command, ...finding.rerun.args].join(' ')}`);
+    lines.push(`Rerun: ${finding.rerun}`);
     lines.push('Sources:');
     for (const item of finding.sourceRefs) lines.push(`  - ${item}`);
   }
@@ -803,8 +893,222 @@ export function renderSemanticReceipt(receipt: BoundaryReceipt): string {
     lines.push('Observed:');
     for (const limitation of receipt.limitations) lines.push(`  - limitation: ${limitation}`);
   }
+  lines.push('', 'legacy receipt schema=1');
   return `${lines.join('\n')}\n`;
 }
+
+interface BoundaryFeedbackGroup {
+  key: string;
+  findings: CanonicalBoundaryFinding[];
+}
+
+function byteCompare(left: string, right: string): number {
+  return Buffer.from(left).compare(Buffer.from(right));
+}
+
+function feedbackGroupKey(finding: CanonicalBoundaryFinding): string {
+  return JSON.stringify({
+    ruleId: finding.ruleId,
+    ruleVersion: finding.ruleVersion,
+    decision: finding.decision,
+    action: finding.action,
+    summary: finding.summary,
+    why: finding.why,
+    expected: finding.expected,
+    impact: finding.impact,
+    safeControls: finding.safeControls,
+    correction: finding.correction,
+    verification: finding.verification,
+    rerun: finding.rerun,
+    rerunPurpose: finding.rerunPurpose,
+    limitations: finding.limitations,
+  });
+}
+
+function feedbackGroups(findings: readonly CanonicalBoundaryFinding[]): BoundaryFeedbackGroup[] {
+  const grouped = new Map<string, CanonicalBoundaryFinding[]>();
+  for (const finding of findings) {
+    const key = feedbackGroupKey(finding);
+    grouped.set(key, [...(grouped.get(key) ?? []), finding]);
+  }
+  return [...grouped.entries()]
+    .sort(([left], [right]) => byteCompare(left, right))
+    .map(([key, members]) => ({
+      key,
+      findings: [...members].sort((left, right) => byteCompare(
+        JSON.stringify([left.observed, left.matchedArtifacts, left.findingDigestSha256]),
+        JSON.stringify([right.observed, right.matchedArtifacts, right.findingDigestSha256]),
+      )),
+    }));
+}
+
+function uniqueCanonical<T>(items: readonly T[]): T[] {
+  const values = new Map<string, T>();
+  for (const item of items) values.set(JSON.stringify(item), item);
+  return [...values.entries()]
+    .sort(([left], [right]) => byteCompare(left, right))
+    .map(([, value]) => value);
+}
+
+function renderFeedbackGroup(
+  receipt: BoundaryReceiptV2,
+  group: BoundaryFeedbackGroup,
+  selected: readonly CanonicalBoundaryFinding[],
+  observationLimit: number,
+  artifactLimit: number,
+): string {
+  const finding = group.findings[0]!;
+  const observations = uniqueCanonical(selected.flatMap((item) => item.observed))
+    .slice(0, observationLimit);
+  const artifacts = uniqueCanonical(selected.flatMap((item) => item.matchedArtifacts))
+    .slice(0, artifactLimit);
+  const limitations = [...new Set([
+    ...finding.limitations,
+    ...receipt.limitations,
+  ])].sort(byteCompare);
+  const lines = [
+    `${finding.decision.toUpperCase()} [${finding.ruleId}] while ${finding.action}`,
+  ];
+  if (group.findings.length > 1) {
+    lines.push(`Finding group: ${group.findings.length} findings`);
+  }
+  lines.push(`Correlation: ${receipt.correlationIdSha256.slice(0, 12)}`);
+  lines.push(`Summary: ${finding.summary}`);
+  lines.push('Observed:');
+  if (observations.length === 0) lines.push('  - retained in canonical JSON only');
+  for (const item of observations) lines.push(`  - ${item.label}: ${item.value}`);
+  if (artifacts.length > 0) {
+    lines.push('Matched artifacts:');
+    for (const item of artifacts) {
+      const details = [
+        `${item.kind} ${item.repository}#${item.id}`,
+        item.state ? `state=${item.state}` : '',
+        item.url ?? '',
+        item.fingerprintSha256 ? `fingerprint=${item.fingerprintSha256}` : '',
+      ].filter(Boolean);
+      lines.push(`  - ${details.join(' ')}`);
+    }
+  }
+  lines.push('Expected invariant:');
+  for (const item of finding.expected) lines.push(`  - ${item}`);
+  lines.push('Why this matters:');
+  lines.push(`  - ${finding.why}`);
+  for (const item of finding.impact) lines.push(`  - ${item}`);
+  lines.push(`Why: ${finding.why}`);
+  lines.push('Safe control:');
+  for (const item of finding.safeControls) lines.push(`  - ${item}`);
+  lines.push('Correction:');
+  for (const item of finding.correction) {
+    lines.push(`  - ${item.operation} ${item.target}: ${item.expected}`);
+  }
+  lines.push('Verification:');
+  for (const item of finding.verification) {
+    lines.push(`  - ${[item.command, ...item.args].join(' ')} => ${item.expected}`);
+  }
+  lines.push('Rerun:');
+  lines.push(`  - ${[finding.rerun.command, ...finding.rerun.args].join(' ')}`);
+  lines.push(`  - purpose: ${finding.rerunPurpose === 'integration-boundary'
+    ? 'integration boundary'
+    : 'focused family replay'}`);
+  lines.push('Sources:');
+  for (const item of finding.sourceRefs) lines.push(`  - ${item}`);
+  lines.push('Limitations:');
+  if (limitations.length === 0) lines.push('  - none declared');
+  for (const limitation of limitations) lines.push(`  - ${limitation}`);
+  lines.push(`Receipt evidence: ${receipt.evidenceDigestSha256}`);
+  return lines.join('\n');
+}
+
+export function renderBoundaryReceipt(receipt: BoundaryReceipt): string {
+  if (receipt.schemaVersion === 1) return renderLegacyReceipt(receipt);
+  if (receipt.decision === 'pass') {
+    return `PASS ${receipt.invocation} while ${receipt.action}\n`;
+  }
+
+  const detailLimit = DEFAULT_BOUNDARY_BUDGETS.maxHumanBytes
+    - DEFAULT_BOUNDARY_BUDGETS.maxHumanReservedSummaryBytes;
+  const groups = feedbackGroups(receipt.findings);
+  const blocks: string[] = [];
+  const renderedFindingDigests = new Set<string>();
+  let renderedObservations = 0;
+  let detailedFindings = 0;
+  for (const group of groups) {
+    const available = DEFAULT_BOUNDARY_BUDGETS.maxHumanDetailedFindings - detailedFindings;
+    let selectedCount = Math.min(group.findings.length, available);
+    let accepted: {
+      block: string;
+      selected: CanonicalBoundaryFinding[];
+      observationCount: number;
+    } | null = null;
+    while (selectedCount > 0 && accepted === null) {
+      const selected = group.findings.slice(0, selectedCount);
+      const observations = uniqueCanonical(selected.flatMap((item) => item.observed));
+      const artifacts = uniqueCanonical(selected.flatMap((item) => item.matchedArtifacts));
+      let observationLimit = observations.length;
+      let artifactLimit = artifacts.length;
+      for (;;) {
+        const block = renderFeedbackGroup(
+          receipt,
+          group,
+          selected,
+          observationLimit,
+          artifactLimit,
+        );
+        const candidate = [...blocks, block].join('\n\n');
+        if (Buffer.byteLength(candidate, 'utf8') <= detailLimit) {
+          accepted = { block, selected, observationCount: observationLimit };
+          break;
+        }
+        if (artifactLimit > 0) artifactLimit -= 1;
+        else if (observationLimit > 0) observationLimit -= 1;
+        else break;
+      }
+      if (accepted === null) selectedCount -= 1;
+    }
+    if (accepted !== null) {
+      blocks.push(accepted.block);
+      for (const finding of accepted.selected) {
+        renderedFindingDigests.add(finding.findingDigestSha256);
+      }
+      detailedFindings += accepted.selected.length;
+      renderedObservations += accepted.observationCount;
+    }
+    if (detailedFindings >= DEFAULT_BOUNDARY_BUDGETS.maxHumanDetailedFindings) break;
+  }
+
+  const omittedFindings = receipt.findings.filter(
+    (finding) => !renderedFindingDigests.has(finding.findingDigestSha256),
+  );
+  const totalObservations = receipt.findings.reduce(
+    (total, finding) => total + finding.observed.length,
+    0,
+  );
+  const omittedObservations = Math.max(0, totalObservations - renderedObservations);
+  const omittedEvidenceDigest = createHash('sha256').update(JSON.stringify({
+    findingDigests: omittedFindings.map((finding) => finding.findingDigestSha256).sort(byteCompare),
+    omittedObservations,
+  })).digest('hex');
+  const footer = [
+    'Feedback summary:',
+    `Rendered findings: ${detailedFindings}`,
+    `Omitted findings: ${omittedFindings.length}`,
+    `Rendered observations: ${renderedObservations}`,
+    `Omitted observations: ${omittedObservations}`,
+    `Omitted evidence digest: ${omittedEvidenceDigest}`,
+    `Receipt evidence: ${receipt.evidenceDigestSha256}`,
+  ].join('\n');
+  if (Buffer.byteLength(`${footer}\n`, 'utf8')
+    > DEFAULT_BOUNDARY_BUDGETS.maxHumanReservedSummaryBytes) {
+    throw new Error('boundary feedback footer exceeds its reserved byte budget');
+  }
+  const output = `${[...blocks, footer].join('\n\n')}\n`;
+  if (Buffer.byteLength(output, 'utf8') > DEFAULT_BOUNDARY_BUDGETS.maxHumanBytes) {
+    throw new Error('boundary feedback exceeds its declared human byte budget');
+  }
+  return output;
+}
+
+export const renderSemanticReceipt = renderBoundaryReceipt;
 
 export function semanticExitCode(receipt: BoundaryReceipt): 0 | 1 | 2 {
   if (receipt.enforcementMode === 'shadow') return 0;

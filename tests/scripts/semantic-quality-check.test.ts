@@ -322,7 +322,7 @@ describe('semantic quality receipt', () => {
     });
 
     expect(renderSemanticReceipt(built).trim().split('\n')).toEqual([
-      `PASS semantic quality head=${TREE.headOid}`,
+      'PASS semantic-quality while push',
     ]);
   });
 
@@ -537,7 +537,9 @@ describe('generic boundary receipt', () => {
       action: legacy.action ?? null,
       correlationIdSha256: legacy.correlationIdSha256 ?? null,
     }).toEqual({ action: null, correlationIdSha256: null });
-    expect(renderSemanticReceipt(legacy)).toBe(`PASS semantic quality head=${TREE.headOid}\n`);
+    expect(renderSemanticReceipt(legacy)).toBe(
+      `PASS semantic quality head=${TREE.headOid} legacy receipt schema=1\n`,
+    );
     expect(semanticExitCode(legacy)).toBe(0);
   });
 });
@@ -723,7 +725,7 @@ export function emitDelegationReceipt(): void {}
     expect(result.status).toBe(0);
     expect(result.stderr).toBe('');
     expect(result.stdout.trim().split('\n')).toEqual([
-      `PASS semantic quality head=${integratedOid} receipt=${receiptPath}`,
+      `PASS semantic-quality while push receipt=${receiptPath}`,
     ]);
     expect(JSON.parse(readFileSync(receiptPath, 'utf8'))).toMatchObject({ decision: 'pass' });
   });
