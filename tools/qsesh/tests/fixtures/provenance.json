@@ -1,0 +1,132 @@
+{
+  "corpus": [
+    {
+      "absence_checks": [
+        "absolute-home-or-work-path",
+        "credential-pattern",
+        "live-native-id",
+        "non-allowlisted-prose",
+        "raw-source-hash",
+        "raw-source-path"
+      ],
+      "coverage": [
+        "attachment_meta",
+        "compaction",
+        "malformed",
+        "mcp_tool",
+        "missing_cost_token",
+        "skill",
+        "subagent",
+        "timestamp_offset",
+        "tool",
+        "unknown_kind"
+      ],
+      "expected_path": "claude/expected-semantics.json",
+      "expected_result_derivation": "hand-authored-before-extractor",
+      "expected_sha256": "619f969a8eef51a3bc8eb4c9079f40d97488774915c7443a3689249e3d91edf0",
+      "harness": "claude",
+      "input_format": "jsonl",
+      "input_path": "claude/session.json",
+      "input_sha256": "e4ecb1a8518d3879e439cc4a855eca973139f58f72400368b10944bc572efff5",
+      "malformed_path": "claude/malformed.json",
+      "malformed_sha256": "999671f03820458bbd699526153236006928728d32296aa661c1c58b69ab7489",
+      "observed_schema_fingerprint": "3b974511186301c11dd9c67a724b8e83fc6b4a42f9fb1029c0dd9b9b1603eaf3",
+      "provenance_type": "production-derived",
+      "representativeness": "minimized real-shape records plus one-fault synthetic boundaries",
+      "reviewer": "lead-byte-review",
+      "source_kind": "owner-scoped metadata-only schema observation"
+    },
+    {
+      "absence_checks": [
+        "absolute-home-or-work-path",
+        "credential-pattern",
+        "live-native-id",
+        "non-allowlisted-prose",
+        "raw-source-hash",
+        "raw-source-path"
+      ],
+      "coverage": [
+        "attachment_meta",
+        "compaction",
+        "malformed",
+        "mcp_tool",
+        "missing_cost_token",
+        "skill",
+        "subagent",
+        "timestamp_offset",
+        "tool",
+        "unknown_kind"
+      ],
+      "expected_path": "codex/expected-semantics.json",
+      "expected_result_derivation": "hand-authored-before-extractor",
+      "expected_sha256": "f68a07dc2039e9d5e4bb248bbd44e4996d5c656974087af50d27e03a4af391e2",
+      "harness": "codex",
+      "input_format": "jsonl",
+      "input_path": "codex/session.json",
+      "input_sha256": "6a3269707b2e23ba70798a69b74349ffa5f7fd4160d6bb265825e6c92f582955",
+      "malformed_path": "codex/malformed.json",
+      "malformed_sha256": "3d0a244f647a50dc71dc5f71c0183db4a5aa6d4bd5d872e29e9e2e45c9afba3a",
+      "observed_schema_fingerprint": "d60edba4b9c2f506e0dc6c2f9fb3d4fdea57253a2ab9109d85a876dab71f9b12",
+      "provenance_type": "production-derived",
+      "representativeness": "minimized real-shape records plus one-fault synthetic boundaries",
+      "reviewer": "lead-byte-review",
+      "source_kind": "owner-scoped metadata-only schema observation"
+    },
+    {
+      "absence_checks": [
+        "absolute-home-or-work-path",
+        "credential-pattern",
+        "live-native-id",
+        "non-allowlisted-prose",
+        "raw-source-hash",
+        "raw-source-path"
+      ],
+      "coverage": [
+        "attachment_meta",
+        "compaction",
+        "malformed",
+        "mcp_tool",
+        "missing_cost_token",
+        "skill",
+        "subagent",
+        "tool",
+        "unknown_kind"
+      ],
+      "expected_path": "opencode/expected-semantics.json",
+      "expected_result_derivation": "hand-authored-before-extractor",
+      "expected_sha256": "417e21a88fb343cb469655ec86bde533623e0fc290b9be688ec72dfcb82df27c",
+      "harness": "opencode",
+      "input_format": "opencode-export-json",
+      "input_path": "opencode/session.json",
+      "input_sha256": "7ac8b17cf6030a4409c81b3a54f0b71a2208d2a25fb7f05a410d3c84c479331c",
+      "malformed_path": "opencode/malformed.json",
+      "malformed_sha256": "18e2d191e02183d2c93d2bda8996a81ae76ac99e4e3a6d39f6f893fa2ad6770f",
+      "observed_schema_fingerprint": "5a6076f647ae5fcc6ba74d82940712985341e3d803b649e65e29824c35e46721",
+      "provenance_type": "production-derived",
+      "representativeness": "minimized real-shape export plus one-fault synthetic boundaries",
+      "reviewer": "lead-byte-review",
+      "source_kind": "owner-scoped metadata-only schema observation"
+    }
+  ],
+  "observations": {
+    "claude": {
+      "fingerprint_sha256": "3b974511186301c11dd9c67a724b8e83fc6b4a42f9fb1029c0dd9b9b1603eaf3",
+      "record_count": 93,
+      "receipt": "commands/T06-1-metadata-schema-probe-attempt7.json"
+    },
+    "codex": {
+      "fingerprint_sha256": "d60edba4b9c2f506e0dc6c2f9fb3d4fdea57253a2ab9109d85a876dab71f9b12",
+      "record_count": 805,
+      "receipt": "commands/T06-1-metadata-schema-probe-attempt7.json"
+    },
+    "opencode": {
+      "fingerprint_sha256": "5a6076f647ae5fcc6ba74d82940712985341e3d803b649e65e29824c35e46721",
+      "parts_fingerprint_sha256": "af2bfdb1f0659a9b9e1863ce2b5b80029a290a4183174281fdba295c45022850",
+      "parts_receipt": "commands/T06-1-metadata-opencode-parts-attempt1.json",
+      "receipt": "commands/T06-1-metadata-schema-probe-attempt7.json",
+      "version": "1.17.15"
+    }
+  },
+  "sanitizer_version": "structural-allowlist-v1",
+  "schema_version": 1
+}

@@ -1,0 +1,49 @@
+{
+  "info": {
+    "cost": 0,
+    "directory": "project-alpha",
+    "id": "ses_opencode_001",
+    "projectID": "project-alpha",
+    "time": {"created": 1767341045000, "updated": 1767341055000},
+    "title": "USER_ALPHA",
+    "tokens": {"input": 7, "output": 11},
+    "version": "1.17.15"
+  },
+  "messages": [
+    {
+      "info": {
+        "id": "message-opencode-001",
+        "role": "user",
+        "sessionID": "ses_opencode_001",
+        "time": {"created": 1767341046000}
+      },
+      "parts": [
+        {"id": "part-opencode-001", "messageID": "message-opencode-001", "sessionID": "ses_opencode_001", "synthetic": true, "text": "USER_ALPHA", "type": "text"}
+      ]
+    },
+    {
+      "info": {
+        "agent": "fixture-agent",
+        "cost": 0,
+        "id": "message-opencode-002",
+        "modelID": "fixture-model",
+        "parentID": "message-opencode-001",
+        "providerID": "fixture-provider",
+        "role": "assistant",
+        "sessionID": "ses_opencode_001",
+        "time": {"created": 1767341047000},
+        "tokens": {"input": 7, "output": 11}
+      },
+      "parts": [
+        {"id": "part-opencode-002", "messageID": "message-opencode-002", "sessionID": "ses_opencode_001", "text": "REASONING_GAMMA", "type": "reasoning"},
+        {"id": "part-opencode-003", "messageID": "message-opencode-002", "sessionID": "ses_opencode_001", "text": "ASSISTANT_BETA", "type": "text"},
+        {"id": "part-opencode-004", "messageID": "message-opencode-002", "sessionID": "ses_opencode_001", "state": {"input": {"file": "src/example.py"}, "output": "USER_ALPHA", "status": "completed"}, "tool": "mcp__fixture__lookup", "type": "tool"},
+        {"id": "part-opencode-005", "messageID": "message-opencode-002", "sessionID": "ses_opencode_001", "state": {"input": {"name": "brainstorming"}, "status": "completed"}, "tool": "skill", "type": "tool"},
+        {"agent": "fixture-agent", "id": "part-opencode-006", "messageID": "message-opencode-002", "prompt": "USER_ALPHA", "sessionID": "ses_opencode_001", "type": "subtask"},
+        {"id": "part-opencode-007", "messageID": "message-opencode-002", "sessionID": "ses_opencode_001", "text": "REASONING_GAMMA", "type": "compaction"},
+        {"file": {"name": "fixture.txt"}, "id": "part-opencode-008", "messageID": "message-opencode-002", "sessionID": "ses_opencode_001", "type": "file"},
+        {"id": "part-opencode-009", "messageID": "message-opencode-002", "sessionID": "ses_opencode_001", "text": "USER_ALPHA", "type": "fixture_unknown"}
+      ]
+    }
+  ]
+}
