@@ -4300,9 +4300,8 @@ git add scripts/lib/semantic-quality/receipt.ts \
   tests/scripts/semantic-history.test.ts \
   tests/scripts/semantic-provenance.test.ts \
   tests/scripts/semantic-boundary-eval.test.ts
-bash scripts/run-with-pinned-node.sh scripts/verify-boundary-run.ts record-command \
-  --run-dir "$BCF_TASK_RUN_DIR" --attempt receipt-staged-scope --expect-exit 0 -- \
-  git diff --cached --name-only
+bash scripts/run-with-pinned-node.sh scripts/verify-boundary-run.ts record-internal-check \
+  --run-dir "$BCF_TASK_RUN_DIR" --attempt receipt-staged-scope
 bash scripts/run-with-pinned-node.sh scripts/verify-boundary-run.ts verify \
   --run-dir "$BCF_TASK_RUN_DIR" --expect-staged-allowlist
 bash scripts/run-with-pinned-node.sh scripts/verify-boundary-run.ts record-git-transition \
@@ -4311,9 +4310,10 @@ bash scripts/run-with-pinned-node.sh scripts/verify-boundary-run.ts record-git-t
   --message-subject "feat(quality): bind boundary receipts to evidence"
 ```
 
-The `receipt-staged-scope` stdout predicate requires the sorted exact 12-path profile allowlist;
-the helper-owned stdout is the staged-path receipt. No redirected count file or outer-shell status
-can substitute for `verify --expect-staged-allowlist`.
+The helper-owned `receipt-staged-scope` internal check requires the sorted exact 12-path profile
+allowlist with no unstaged delta and records the staged-path receipt while advancing the manifest
+to the staged snapshot. No redirected count file or outer-shell status can substitute for
+`verify --expect-staged-allowlist`.
 
 ---
 

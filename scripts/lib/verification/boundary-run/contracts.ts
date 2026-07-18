@@ -540,7 +540,7 @@ const attemptEntries: Array<readonly [string, BoundaryAttemptContract]> = [
   ['receipt-green', commandContract(RECEIPT_TEST, { deadlineMs: 900_000, resultPredicate: 'bcf04-green' })],
   ['receipt-typecheck', commandContract(TYPECHECK_SCRIPTS, { deadlineMs: 900_000 })],
   ['receipt-producer-scan', internalCheckContract('producer-inventory-contract', 'entry', 'rg', ['consumer-version-decision.json'])],
-  ['receipt-staged-scope', commandContract(['git', 'diff', '--cached', '--name-only'], { stdoutPredicate: 'exact-profile-allowlist' })],
+  ['receipt-staged-scope', internalCheckContract('staged-scope')],
   ['receipt-commit-transition', transitionContract('commit', 'feat(quality): bind boundary receipts to evidence')],
 
   ['feedback-red', commandContract(RECEIPT_TEST, { expectedExit: 'nonzero', deadlineMs: 900_000, resultPredicate: 'bcf05-red' })],

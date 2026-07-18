@@ -78,6 +78,17 @@ import {
 } from './support.ts';
 
 export function registerSchemaCases(): void {
+  it('owns receipt staging with the same internal scope contract as documentation commits', () => {
+    expect(boundaryRun.RUN_ATTEMPT_CONTRACTS['receipt-staged-scope']).toMatchObject({
+      operation: 'internal-check',
+      argv: [],
+      internalCheck: 'staged-scope',
+      stdoutPredicate: null,
+    });
+    expect(boundaryRun.RUN_ATTEMPT_CONTRACTS['receipt-staged-scope'])
+      .toEqual(boundaryRun.RUN_ATTEMPT_CONTRACTS['docs-staged-scope']);
+  });
+
   it('keeps the executable BCF-00 marker roster equal to the frozen contract', () => {
     const listed = JSON.parse(execFileSync(process.execPath, [
       'node_modules/vitest/vitest.mjs', 'list',
