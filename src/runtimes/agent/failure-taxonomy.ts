@@ -125,6 +125,14 @@ export const LIMIT_NAME_TOKENS: readonly string[] = [
  * away to exclude it. On the STREAMING channel the version-required banner mirror
  * (TIER_LIMIT_BANNER_PATTERN) keeps such un-versioned prose ambient (delivered), so
  * nothing is silently suppressed.
+ *
+ * SHAPE SCOPE: matches only the possessive "<verb> your <tier>[ <ver>] limit" form.
+ * Name-first ("<Tier> <ver> limit reached") and set-to-$0 ("<Tier> <ver> is set to
+ * $0") VERSIONED shapes are intentionally not matched here (the bare-name forms are
+ * still covered by the ${name} constructions over LIMIT_NAME_TOKENS below). No live
+ * evidence the CLI emits versioned tiers in those shapes; if one slips through, the
+ * consecutive-unknown-terminal fail-safe (maybeArmFallbackAfterUnknownTerminal) is
+ * the backstop rather than a widened regex.
  */
 const TIER_LIMIT_TERMINAL_PATTERN = /\b(?:hit|reached|exceeded) your \S+(?: [\d.]+)? limit\b/i;
 

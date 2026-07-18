@@ -148,12 +148,8 @@ export function providerTransientRetryNotice(): string {
  * no-fallback path. Distinct from {@link providerUnknownTerminalNotice}: a
  * server error is a transient backend fault (resend can succeed), and NO ops
  * alert fires on that path — so this copy names the transient cause and asks the
- * user to resend WITHOUT claiming an operator was notified.
- *
- * NOTE (Lane 3): defined but NOT wired — the server-error no-fallback call sites
- * live in runtime-turn-result-handler.ts (~:429 / ~:975), which this lane does
- * not own. Wiring it (replacing providerUnknownTerminalNotice at those sites) is
- * the handler edit flagged to the team lead; until then this remains dead code.
+ * user to resend WITHOUT claiming an operator was notified. Wired at the
+ * server-error no-fallback sites in runtime-turn-result-handler.ts.
  */
 export function providerServerErrorNoFallbackNotice(): string {
   return "_The model backend had a temporary error and automatic retry didn't recover — please resend shortly._";
