@@ -1061,6 +1061,15 @@ if (event.text) {
         return;
       }
       queue.enqueueText(providerUnknownTerminalNotice());
+      // Below threshold / no eligible fallback: the generic notice IS the visible
+      // reply for this errored turn — return like every sibling terminal branch
+      // (usage-limit/rate-limit/server-error/…). Falling through instead would let
+      // the '_(no response)_' empty-output guard fire a second, contradictory
+      // message (recordTurnFailure('unknown-terminal') already recorded the
+      // capability failure at the top of this branch, so the finalizer's
+      // empty-output arm/record path is redundant here).
+      host.singleTurnHadToolActivity = false;
+      return;
     } else {
       queue.enqueueResultText(host.withHandoffPrefix(queue.targetChatJid, event.text));
       host.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe();

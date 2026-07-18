@@ -445,4 +445,23 @@ describe('unknown-terminal arms provider fallback (single/shared path)', () => {
     // from the empty-output path, which never shuts down).
     expect(session.shutdown).toHaveBeenCalled();
   });
+
+  it('a single below-threshold unknown-terminal turn enqueues ONLY the notice — no trailing "_(no response)_" (regression: single/shared double-send)', () => {
+    const runtime = makeRuntime(FALLBACK);
+    const queue = makeFakeQueue();
+    const session = makeEventSession();
+
+    driveGlobalUnknown(runtime, queue, session);
+
+    // Below threshold: fallback not armed; the generic notice is shown once.
+    expect(runtime.getFallbackState().fallbackActiveUntil).toBeNull();
+    const texts = enqueuedTexts(queue);
+    expect(texts.some((t) => t.includes(UNKNOWN_NOTICE_FRAGMENT))).toBe(true);
+    // CONFIRMED code-review defect: the single/shared finalizer's
+    // '_(no response)_' guard fired AFTER the unknown-terminal notice because
+    // the branch fell through instead of returning like every sibling terminal
+    // branch (usage-limit/rate-limit/…). Two enqueued messages = the double-send.
+    expect(texts.some((t) => t.includes('(no response)'))).toBe(false);
+    expect(texts.length).toBe(1);
+  });
 });
