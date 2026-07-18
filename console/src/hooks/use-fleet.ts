@@ -2,8 +2,10 @@
 //  WhatSoup Console — Fleet Data Hooks
 //  Uses TanStack Query with real fleet API calls.
 //  Most polling is disabled while WebSocket is connected (realtime push).
-//  Provider-status keeps a short poll because fallback health fields can change
-//  while the instance_status label remains stable.
+//  Provider-status and lines keep a bounded poll instead of disabling
+//  entirely: fallback health fields (provider-status) and line
+//  health/counters (#1877) can both change while the instance_status label
+//  remains stable, so the server never emits an event for them.
 // ---------------------------------------------------------------------------
 
 import { queryOptions, useQuery } from '@tanstack/react-query';
@@ -29,6 +31,17 @@ const POLL_MESSAGES = 3000;
 const POLL_LOGS = 3000;
 const POLL_TYPING = 2000;
 const POLL_FEED = 5000;
+
+/**
+ * Bounded backstop poll for useLines/useLine while WS is connected (#1877).
+ * The server publishes `instance_status` only on a coarse status-label
+ * CHANGE, so a successful online→online poll can update health,
+ * healthObservedAt, and DB counters with no event reaching the browser.
+ * Slower than the disconnected POLL_LINES (5000) since WS still delivers
+ * status transitions promptly — this interval only backstops freshness for
+ * everything else in the payload.
+ */
+const POLL_LINES_WS_BACKSTOP = 15_000;
 
 // ---------------------------------------------------------------------------
 // Query option factories (static — no hook dependency)
@@ -83,12 +96,18 @@ export function getMessagesQueryOptions(name: string, conversationKey: string, p
 
 export function useLines() {
   const { connected } = useRealtime();
-  return useQuery(getLinesQueryOptions(connected ? false : POLL_LINES));
+  // #1877 crit 2: message-derived counters (getMessageStats, getChatCounts,
+  // getTotalSessions, getTokenStats, getLastMessageTime) are server-cached
+  // for 60s (DAILY_CACHE_TTL, src/fleet/routes/lines.ts), so this bounded
+  // poll — not a per-message ['lines'] invalidation — is what surfaces
+  // counter changes on a connected tab without re-requesting cached data.
+  return useQuery(getLinesQueryOptions(connected ? POLL_LINES_WS_BACKSTOP : POLL_LINES));
 }
 
 export function useLine(name: string) {
   const { connected } = useRealtime();
-  return useQuery(getLineQueryOptions(name, connected ? false : POLL_LINES));
+  // Same #1877 backstop rationale as useLines above.
+  return useQuery(getLineQueryOptions(name, connected ? POLL_LINES_WS_BACKSTOP : POLL_LINES));
 }
 
 export function useChats(name: string) {

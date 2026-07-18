@@ -486,6 +486,55 @@ describe('SoupKitchen instance table rendering', () => {
     }
   });
 
+  it('surfaces the health-observation age on a stale line row, styled as stale (#1877 crit 5)', () => {
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60_000).toISOString();
+    const staleLine = makeLine({
+      name: 'stale-line',
+      status: 'degraded',
+      stale: true,
+      healthObservedAt: fiveMinutesAgo,
+    });
+    renderPage({ lines: [...lines, staleLine] });
+    // Scoped to the table (not screen-global): a degraded line also raises
+    // an AlertBanner entry showing the same raw name, which would otherwise
+    // collide with a global getByText query.
+    const row = within(tableBody()).getByText(displayInstanceName('stale-line')).closest('tr') as HTMLElement;
+    // Binary stale-or-not is not enough — the AGE of the last live
+    // observation must be visible, not just the word "stale".
+    const tag = within(tableCell(row, 1)).getByText(/stale.*5m ago/);
+    expect(tag).not.toBeNull();
+    expect(tag.className).toMatch(/text-s-warn/);
+  });
+
+  it('surfaces the health-observation age on a FRESH (non-stale) connected line too — this is the core #1877 scenario: a connected tab can still be showing an aging snapshot even though the server has not flagged it stale', () => {
+    const tenSecondsAgo = new Date(Date.now() - 10_000).toISOString();
+    const freshLine = makeLine({
+      name: 'fresh-line',
+      status: 'online',
+      stale: false,
+      healthObservedAt: tenSecondsAgo,
+    });
+    renderPage({ lines: [...lines, freshLine] });
+    const row = within(tableBody()).getByText(displayInstanceName('fresh-line')).closest('tr') as HTMLElement;
+    const tag = within(tableCell(row, 1)).getByText(/observed.*just now/);
+    expect(tag).not.toBeNull();
+    // Non-stale rows must not borrow the stale warning styling.
+    expect(tag.className).not.toMatch(/text-s-warn/);
+  });
+
+  it('renders no age tag when a line has never had a live health observation', () => {
+    // Uses "no-history" as the fixture name (not e.g. "never-observed") so it
+    // cannot collide with the age tag's own "observed" wording via substring
+    // text matching — the assertion below wants to prove the tag is ABSENT.
+    const noHistoryLine = makeLine({ name: 'no-history', stale: false, healthObservedAt: null });
+    renderPage({ lines: [...lines, noHistoryLine] });
+    const row = within(tableBody()).getByText(displayInstanceName('no-history')).closest('tr') as HTMLElement;
+    // Only the phone sub-label should exist alongside the StatusCell — no
+    // third c-label span for a health-age tag.
+    const labels = tableCell(row, 1).querySelectorAll('.c-label');
+    expect(labels.length).toBe(1);
+  });
+
   it('displays instance name via displayInstanceName', () => {
     expect(displayInstanceName('primary-line')).toBe('primary-line');
     expect(displayInstanceName('A')).toBe('A');

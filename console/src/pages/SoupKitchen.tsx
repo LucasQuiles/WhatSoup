@@ -1195,6 +1195,36 @@ const SoupKitchen: FC = () => {
                             <span className="c-label">
                               {formatPhone(line.phone)}
                             </span>
+                            {/* #1877 crit 5: surface the AGE of the last live
+                                health observation on the line-list surface
+                                itself, not only the ProvidersKeysCard detail
+                                (#1762 seam — same stale/healthObservedAt
+                                fields, same "as of Xm ago" idiom). This must
+                                render even when the server has NOT flagged
+                                the line stale: a connected tab's displayed
+                                health/counters can still be up to
+                                POLL_LINES_WS_BACKSTOP old, and the issue's
+                                point is that an operator can't tell that from
+                                the "connected" indicator alone. `stale` only
+                                changes the styling/wording (carried-forward
+                                vs. live-poll framing), not whether the age
+                                shows at all. */}
+                            {(line.stale || line.healthObservedAt) && (
+                              <span
+                                className={`c-label${line.stale ? ' text-s-warn' : ''}`}
+                                title={
+                                  line.stale
+                                    ? (line.healthObservedAt
+                                        ? `Health carried forward — last live poll ${formatRelative(line.healthObservedAt)}`
+                                        : 'Health data is stale — the poller is currently failing')
+                                    : `Last live health poll ${formatRelative(line.healthObservedAt)}`
+                                }
+                              >
+                                {line.stale
+                                  ? `stale · ${line.healthObservedAt ? formatRelative(line.healthObservedAt) : 'unknown'}`
+                                  : `observed ${formatRelative(line.healthObservedAt)}`}
+                              </span>
+                            )}
                           </TableCell>
                           {/* Col 2: Mode badge kept as separate column */}
                           <TableCell>
