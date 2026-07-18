@@ -9,7 +9,7 @@ import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 
 const CHAT_JID = 'test@s.whatsapp.net';
-const BASE_TRANSPORT_PROMPT_BYTES = 1463;
+const BASE_TRANSPORT_PROMPT_BYTES = 1753;
 
 const tempRoots: string[] = [];
 
@@ -146,7 +146,8 @@ describe('SessionManager system prompt composition', () => {
 
     expect(prompt).toContain('reply text emitted after your turn ends is dropped by the transport');
     expect(prompt).toContain('deliver its result with the MCP send_message tool');
-    expect(prompt).toContain('Never say work is dispatched or running unless the dispatching tool call is in the same message');
+    expect(prompt).toContain('do not also restate a result you already delivered via send_message');
+    expect(prompt).toContain('Never say work is dispatched or running unless the dispatching tool call happened in the same turn');
   });
 
   it('keeps the no-extra-instructions prompt within the recorded byte budget', () => {

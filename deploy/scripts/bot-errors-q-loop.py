@@ -67,13 +67,23 @@ IDLE_WAIT_SECONDS = 5 * 60
 # stale alert. 480s leaves a 120s margin under the 600s watchdog deadline.
 # Enforced by tests/scripts/bot-errors-q-loop.test.ts.
 MAX_IDLE_WAIT_SECONDS = 8 * 60
-# The loop's own reminder frames must never re-arm the awaiting-Q clock:
-# each nudge re-arming the clock turns one unanswered ask into a permanent
-# 15/30-minute stale/recovered sawtooth at the heartbeat watchdog.
+# Frame headers are single-sourced: the composers below and the self-reminder
+# exclusion both derive from these constants so they cannot drift apart.
+BOOTSTRAP_HEADER = "Codex -> Q / durable coordination loop online"
+NUDGE_HEADER = "Codex -> Q / gate nudge"
+CHECKPOINT_HEADER = "Codex -> Q / hourly SDLC checkpoint"
+
+# The loop's own REPEATING reminder frames must never re-arm the awaiting-Q
+# clock: each nudge re-arming the clock turns one unanswered ask into a
+# permanent 15/30-minute stale/recovered sawtooth at the heartbeat watchdog.
+# Own frames always continue "<header>\n\n"; matching the bare header would
+# also swallow legitimate asks that extend it ("... gate nudge escalation").
+# The one-shot bootstrap frame is deliberately NOT excluded: it carries the
+# original ask, and history replay after a state reset must be able to
+# reconstruct the awaiting clock from it.
 SELF_REMINDER_PREFIXES = (
-    "Codex -> Q / gate nudge",
-    "Codex -> Q / hourly SDLC checkpoint",
-    "Codex -> Q / durable coordination loop online",
+    NUDGE_HEADER + "\n\n",
+    CHECKPOINT_HEADER + "\n\n",
 )
 
 NUDGE_AFTER_SECONDS = 20 * 60
@@ -708,7 +718,7 @@ def maybe_send_bootstrap(state: dict[str, Any], socket_path: str) -> bool:
     if state["sent"].get("daemon_online"):
         return False
     text = (
-        "Codex -> Q / durable coordination loop online\n\n"
+        BOOTSTRAP_HEADER + "\n\n"
         "I installed a supervised dynamic polling loop for BOT ERRORS coordination. "
         "It records chat activity, SDLC phase state, outbound asks, Q approvals/blocks, "
         "and adjusts wait time based on activity: 15s while active, 30s while waiting on Q, "
@@ -737,7 +747,7 @@ def maybe_send_nudge(state: dict[str, Any], socket_path: str) -> bool:
     if current - int(state.get("last_nudge_at", 0)) < NUDGE_COOLDOWN_SECONDS:
         return False
     text = (
-        "Codex -> Q / gate nudge\n\n"
+        NUDGE_HEADER + "\n\n"
         "The BOT ERRORS reliability work is still inside the approved SDLC gate. "
         "Please reply with APPROVED, BLOCKED, or the next concrete critique for the current gate. "
         "The loop will keep polling and will not mark this complete without evidence and Q validation."
@@ -759,7 +769,7 @@ def maybe_send_checkpoint(state: dict[str, Any], socket_path: str) -> bool:
         return False
     phase = state.get("phase", "unknown")
     text = (
-        "Codex -> Q / hourly SDLC checkpoint\n\n"
+        CHECKPOINT_HEADER + "\n\n"
         f"Current phase: {phase}. "
         "Completion remains blocked until the approved design, pre-slice checks, Slice 1 evidence, "
         "adversarial review, and per-machine rollout gates are all green. "

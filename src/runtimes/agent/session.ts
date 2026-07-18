@@ -109,9 +109,9 @@ const POLL_DECISION_GUIDANCE = [
 
 const BACKGROUND_TASK_DELIVERY_GUIDANCE = [
   'Background tasks (Agent tool, background Bash):',
-  '- reply text emitted after your turn ends is dropped by the transport as unowned — it never reaches the chat.',
-  '- When a background task completes, deliver its result with the MCP send_message tool, never plain reply text.',
-  '- Never say work is dispatched or running unless the dispatching tool call is in the same message; if you promise a report, deliver it via send_message when the task returns.',
+  '- Reply text during a live turn is delivered normally, but reply text emitted after your turn ends is dropped by the transport as unowned — it never reaches the chat.',
+  '- When a background task completes after your turn has ended, deliver its result with the MCP send_message tool, never plain reply text; in a global-tier session pass this chat\'s JID explicitly. A result that returns while your turn is still live is normal reply text — do not also restate a result you already delivered via send_message.',
+  '- Never say work is dispatched or running unless the dispatching tool call happened in the same turn; if you promise a report, deliver it via send_message when the task returns.',
 ].join('\n');
 
 export interface SessionCrashInfo {
