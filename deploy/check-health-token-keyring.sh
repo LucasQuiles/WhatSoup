@@ -55,28 +55,28 @@ read_scoped_keyring_token() {
   esac
 }
 
+fail() {
+  echo "  ✗ $1"
+  echo "❌ Parity check failed. Do not remove tokens.env or its launcher/service wiring."
+  exit 1
+}
+
 echo "Checking health-token file/keyring parity (instance: $INSTANCE)..."
 
 if ! FILE_TOKEN="$(whatsoup_read_private_health_token \
   "$NODE" \
   "$SCRIPT_DIR/lib/read-private-health-token.mjs" \
   "$TOKEN_FILE")"; then
-  echo "  ✗ tokens.env is missing, unsafe, or non-canonical"
-  echo "❌ Parity check failed. Do not remove tokens.env or its launcher/service wiring."
-  exit 1
+  fail "tokens.env is missing, unsafe, or non-canonical"
 fi
 
 KEYRING_TOKEN="$(read_scoped_keyring_token)"
 if [ -z "$KEYRING_TOKEN" ]; then
-  echo "  ✗ scoped keyring mirror is missing"
-  echo "❌ Parity check failed. Do not remove tokens.env or its launcher/service wiring."
-  exit 1
+  fail "scoped keyring mirror is missing"
 fi
 
 if [ "$FILE_TOKEN" != "$KEYRING_TOKEN" ]; then
-  echo "  ✗ scoped keyring mirror does not match canonical tokens.env"
-  echo "❌ Parity check failed. Do not remove tokens.env or its launcher/service wiring."
-  exit 1
+  fail "scoped keyring mirror does not match canonical tokens.env"
 fi
 
 echo "  ✓ scoped keyring mirror matches canonical tokens.env"
