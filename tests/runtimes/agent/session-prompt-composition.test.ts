@@ -9,7 +9,7 @@ import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 
 const CHAT_JID = 'test@s.whatsapp.net';
-const BASE_TRANSPORT_PROMPT_BYTES = 970;
+const BASE_TRANSPORT_PROMPT_BYTES = 1463;
 
 const tempRoots: string[] = [];
 
@@ -131,6 +131,22 @@ describe('SessionManager system prompt composition', () => {
     expect(prompt).toContain('AskUserQuestion works in both DMs and groups. In groups, first vote resolves by default.');
     expect(prompt).toContain('send_poll supports resolution strategies: first-vote-wins (default), admin-only, admin-wins, majority-after-timeout.');
     expect(prompt).toContain('send_poll supports awaitResult: true to block and wait for the poll result.');
+  });
+
+  it('adds the background-task delivery protocol to the transport prelude', () => {
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger(),
+      chatJid: CHAT_JID,
+      onEvent: () => undefined,
+      cwd: '/mock/home',
+    });
+
+    const prompt = sm.buildSystemPrompt();
+
+    expect(prompt).toContain('reply text emitted after your turn ends is dropped by the transport');
+    expect(prompt).toContain('deliver its result with the MCP send_message tool');
+    expect(prompt).toContain('Never say work is dispatched or running unless the dispatching tool call is in the same message');
   });
 
   it('keeps the no-extra-instructions prompt within the recorded byte budget', () => {

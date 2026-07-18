@@ -107,6 +107,13 @@ const POLL_DECISION_GUIDANCE = [
   '- Do not ask the user to type "I voted". Wait for the poll vote, or accept exact option label/number on delivery failure.',
 ].join('\n');
 
+const BACKGROUND_TASK_DELIVERY_GUIDANCE = [
+  'Background tasks (Agent tool, background Bash):',
+  '- reply text emitted after your turn ends is dropped by the transport as unowned — it never reaches the chat.',
+  '- When a background task completes, deliver its result with the MCP send_message tool, never plain reply text.',
+  '- Never say work is dispatched or running unless the dispatching tool call is in the same message; if you promise a report, deliver it via send_message when the task returns.',
+].join('\n');
+
 export interface SessionCrashInfo {
   exitCode: number | null;
   signal: NodeJS.Signals | null;
@@ -726,6 +733,7 @@ export class SessionManager {
       'You have full access to the local machine via bypassPermissions mode.',
       `Working directory: ${cwd}`,
       POLL_DECISION_GUIDANCE,
+      BACKGROUND_TASK_DELIVERY_GUIDANCE,
     ].join('\n');
     const sources = [transportPrelude];
 
