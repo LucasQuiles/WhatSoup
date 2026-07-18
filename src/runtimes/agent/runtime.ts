@@ -327,7 +327,7 @@ function isProviderFallbackReason(value: unknown): value is ProviderFallbackReas
   return value === 'usage-limit' || value === 'rate-limit'
     || value === 'auth-required' || value === 'model-unavailable'
     || value === 'server-error' || value === 'empty-output'
-    || value === 'probe-unusable';
+    || value === 'probe-unusable' || value === 'unknown-terminal-repeated';
 }
 
 /**
@@ -340,6 +340,20 @@ function isProviderFallbackReason(value: unknown): value is ProviderFallbackReas
  * {@link AgentRuntime.maybeArmFallbackAfterEmptyPrimaryTurn}.
  */
 const EMPTY_OUTPUT_FALLBACK_THRESHOLD = 2;
+
+/**
+ * Consecutive unclassified-terminal PRIMARY user turns that force a provider
+ * fallback. An UNKNOWN terminal provider error (is_error result whose text
+ * classifyProviderFailure() cannot place in any known class) has historically
+ * only surfaced a generic notice + ops alert and armed NO fallback, so a broken
+ * primary throwing them turn after turn stalled on the primary while an eligible
+ * fallback sat idle. A single one is treated as transient (keep the session); a
+ * bounded run fails over. Dedicated constant — it intentionally tracks the value
+ * of {@link EMPTY_OUTPUT_FALLBACK_THRESHOLD} today, but is kept separate so tuning
+ * the empty-output threshold cannot silently move the unknown-terminal one. See
+ * {@link AgentRuntime.maybeArmFallbackAfterUnknownTerminal}.
+ */
+const UNKNOWN_TERMINAL_FALLBACK_THRESHOLD = 2;
 
 /**
  * Startup grace for empty-output fallback arming. The boot/recovery sequence
@@ -604,10 +618,17 @@ function fallbackRequiresPrimaryProbe(reason: ProviderFallbackReason): boolean {
   // "resets 9am" is parsed as a daily clock time — so we must re-probe the
   // primary and revert the moment it recovers rather than blind-waiting for the
   // window to elapse. Routing semantics are unchanged; only the recovery path widens.
+  //
+  // unknown-terminal-repeated joins the recovery-probe set (NOT the
+  // independent-probe set): an unclassified terminal error has NO parseable
+  // reset estimate, so without a recovery probe the window blind-waits. It is
+  // deliberately kept OUT of fallbackRequiresIndependentProbe so an operator's
+  // same-provider downgrade rung (e.g. claude-cli/opus) stays selectable.
   return (
     fallbackRequiresIndependentProbe(reason) ||
     reason === 'usage-limit' ||
-    reason === 'rate-limit'
+    reason === 'rate-limit' ||
+    reason === 'unknown-terminal-repeated'
   );
 }
 
@@ -689,10 +710,16 @@ export function extractUsageLimitResetTime(text: string, now: Date = new Date())
 // `isPromptTooLongMessage` lives in `./failure-taxonomy.ts` (imported + re-exported above).
 
 function templateForFallbackReason(reason: ProviderFallbackReason): UserTemplateId {
-  // empty-output / probe-unusable are transient primary failovers from the
-  // user's perspective (no hard auth/usage fault) — they reuse the existing
-  // 'transient' user copy rather than minting new user-facing templates (#1421).
-  if (reason === 'server-error' || reason === 'empty-output' || reason === 'probe-unusable') {
+  // empty-output / probe-unusable / unknown-terminal-repeated are transient
+  // primary failovers from the user's perspective (no hard auth/usage fault) —
+  // they reuse the existing 'transient' user copy rather than minting new
+  // user-facing templates (#1421).
+  if (
+    reason === 'server-error'
+    || reason === 'empty-output'
+    || reason === 'probe-unusable'
+    || reason === 'unknown-terminal-repeated'
+  ) {
     return 'transient';
   }
   return reason;
@@ -827,6 +854,13 @@ export class AgentRuntime implements Runtime {
    *  or when an empty-output fallback is armed. Drives the empty-output fallback
    *  trigger — see maybeArmFallbackAfterEmptyPrimaryTurn. */
   private consecutivePrimaryEmptyTurns = 0;
+  /** Consecutive unclassified-terminal (is_error, classifyProviderFailure→null)
+   *  PRIMARY user turns; reset on any successful turn or when the unknown-terminal
+   *  fallback is armed. Drives the unknown-terminal fallback trigger — see
+   *  maybeArmFallbackAfterUnknownTerminal. Kept SEPARATE from
+   *  consecutivePrimaryEmptyTurns (short-circuited on this path) and from the
+   *  cumulative errorCounts['unknown-terminal'] (which is not consecutive). */
+  private consecutiveUnknownTerminalTurns = 0;
   /** Monotonic construction timestamp (performance.now()), used for the
    *  empty-output arming startup grace — see EMPTY_OUTPUT_ARM_STARTUP_GRACE_MS.
    *  Using performance.now() rather than Date.now() so NTP steps and
@@ -2393,6 +2427,8 @@ export class AgentRuntime implements Runtime {
         runtime.recordFallbackTurnOutcome(queue, hadVisibleOutput, hadToolWork, session),
       maybeArmFallbackAfterEmptyPrimaryTurn: (queue, session, turnHadToolWork, mapKey) =>
         runtime.maybeArmFallbackAfterEmptyPrimaryTurn(queue, session, turnHadToolWork, mapKey),
+      maybeArmFallbackAfterUnknownTerminal: (queue, session, turnHadToolWork, mapKey, isUserTurnResult, evidenceText) =>
+        runtime.maybeArmFallbackAfterUnknownTerminal(queue, session, turnHadToolWork, mapKey, isUserTurnResult, evidenceText),
       enqueueAutoSwitchNotice: (queue, text, logChatJid, mode) =>
         runtime.enqueueAutoSwitchNotice(queue, text, logChatJid, mode),
       withHandoffPrefix: (chatJid, text) => runtime.withHandoffPrefix(chatJid, text),
@@ -8503,6 +8539,94 @@ export class AgentRuntime implements Runtime {
     return true;
   }
 
+  /**
+   * Arm provider fallback when the PRIMARY provider returns REPEATED unclassified
+   * terminal errors — the default-deny "unknown-terminal" case (an is_error result
+   * whose text {@link classifyProviderFailure} cannot place in any known class).
+   * Such a turn produces no arming provider-failure MESSAGE, so the text-driven
+   * ladders never fire and (unlike empty output) the failure is masked behind a
+   * generic notice; a broken primary throwing them stalled turn after turn while
+   * an eligible fallback sat idle.
+   *
+   * A single unknown-terminal is transient (the caller keeps the session and
+   * surfaces the generic notice). After {@link UNKNOWN_TERMINAL_FALLBACK_THRESHOLD}
+   * consecutive occurrences on REAL user turns this fails over exactly like the
+   * sibling terminal classes: activate + replay + notify, with reason
+   * 'unknown-terminal-repeated'. Selection does NOT force an independent provider
+   * (unknown-terminal-repeated is absent from fallbackRequiresIndependentProbe),
+   * so an operator-configured same-provider downgrade rung stays eligible; the
+   * revert is still gated on a fresh primary probe (fallbackRequiresPrimaryProbe)
+   * because there is no parseable reset estimate.
+   *
+   * Gated exactly like {@link maybeArmFallbackAfterEmptyPrimaryTurn}: only real
+   * user turns count (isUserTurnResult), never while a window is already active,
+   * never without a configured fallback, and never for the synthetic
+   * control/repair session (control@heal.internal) — whose emptiness/errors must
+   * not cross-contaminate the real-chat counter. Returns true only when it armed
+   * a window this call; the counter resets on activation and on any successful turn.
+   */
+  private maybeArmFallbackAfterUnknownTerminal(
+    queue: IOutboundQueue,
+    session: SessionManager | null,
+    turnHadToolWork: boolean,
+    mapKey: string | undefined,
+    isUserTurnResult: boolean,
+    evidenceText: string,
+  ): boolean {
+    // System/heal/synthetic turns must never advance or trip the consecutive
+    // threshold. Unlike the empty-output arming call-site (already inside the
+    // is-user-turn guard), this branch runs in the result.text path regardless of
+    // isSystemResult, so the guard is explicit here.
+    if (!isUserTurnResult) return false;
+    if (this.isFallbackWindowActive) return false;
+    if (this.agentFallbacks.length === 0) return false;
+    // control@heal.internal repair-probe exclusion — mirrors
+    // maybeArmFallbackAfterEmptyPrimaryTurn (ml-bot false-failover class): the
+    // controlSession !== null guard avoids the null===null trap (per-chat turns
+    // pass session=null, and controlSession also defaults to null).
+    if ((this.controlSession !== null && session === this.controlSession) || mapKey === 'control@heal.internal') {
+      return false;
+    }
+
+    this.consecutiveUnknownTerminalTurns += 1;
+    if (this.consecutiveUnknownTerminalTurns < UNKNOWN_TERMINAL_FALLBACK_THRESHOLD) return false;
+
+    log.warn(
+      {
+        instanceName: this.instanceName,
+        primaryProvider: this.agentProvider,
+        consecutiveUnknownTerminalTurns: this.consecutiveUnknownTerminalTurns,
+      },
+      'primary provider returned repeated unclassified terminal errors — arming provider fallback',
+    );
+
+    const activation = this.activateProviderFallbackAfterTerminalResult(
+      null,
+      'unknown-terminal-repeated',
+      session,
+      evidenceText,
+    );
+    if (!activation) return false;
+
+    const replayScheduled = this.scheduleFallbackReplay({
+      activation,
+      chatJid: queue.targetChatJid,
+      mapKey,
+      oldSession: session,
+      hadToolActivity: turnHadToolWork,
+    });
+    this.notifyProviderFallbackActivated(queue, activation, {
+      replayScheduled,
+      blockedByToolActivity: turnHadToolWork,
+    });
+    // No replay took over (tool activity already started, or nothing to replay):
+    // the primary session actually errored, so tear it down like the sibling
+    // terminal branches — the active window routes the next turn to the fallback.
+    if (!replayScheduled) session?.shutdown();
+    this.consecutiveUnknownTerminalTurns = 0;
+    return true;
+  }
+
   private activateProviderFallbackAfterTerminalResult(
     resetAt: Date | null,
     reason: ProviderFallbackReason,
@@ -8630,6 +8754,7 @@ export class AgentRuntime implements Runtime {
     if (!isUserTurnResult) return;
     this.turnCapabilityTracker.recordSuccess();
     this.consecutivePrimaryEmptyTurns = 0;
+    this.consecutiveUnknownTerminalTurns = 0;
   }
 
   private recordTurnCapabilityFailure(
