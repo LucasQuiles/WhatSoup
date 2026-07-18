@@ -67,6 +67,15 @@ IDLE_WAIT_SECONDS = 5 * 60
 # stale alert. 480s leaves a 120s margin under the 600s watchdog deadline.
 # Enforced by tests/scripts/bot-errors-q-loop.test.ts.
 MAX_IDLE_WAIT_SECONDS = 8 * 60
+# The loop's own reminder frames must never re-arm the awaiting-Q clock:
+# each nudge re-arming the clock turns one unanswered ask into a permanent
+# 15/30-minute stale/recovered sawtooth at the heartbeat watchdog.
+SELF_REMINDER_PREFIXES = (
+    "Codex -> Q / gate nudge",
+    "Codex -> Q / hourly SDLC checkpoint",
+    "Codex -> Q / durable coordination loop online",
+)
+
 NUDGE_AFTER_SECONDS = 20 * 60
 NUDGE_COOLDOWN_SECONDS = 45 * 60
 CHECKPOINT_AFTER_SECONDS = 60 * 60
@@ -687,7 +696,10 @@ def classify_activity(state: dict[str, Any], messages: list[dict[str, Any]], per
                 persist_activity_state(state, "q_monitoring", persist_state)
         if role in {"codex", "lucas", "outbound"}:
             state["last_outbound_at"] = max(int(state.get("last_outbound_at", 0)), ts)
-            if "reply" in body.lower() or "approve" in body.lower() or "blocked" in body.lower():
+            if (
+                ("reply" in body.lower() or "approve" in body.lower() or "blocked" in body.lower())
+                and not body.startswith(SELF_REMINDER_PREFIXES)
+            ):
                 state["awaiting_q_since"] = ts
                 persist_activity_state(state, "outbound_awaiting_q", persist_state)
 

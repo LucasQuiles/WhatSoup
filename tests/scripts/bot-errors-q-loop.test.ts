@@ -272,4 +272,59 @@ print(json.dumps(m.q_response_wait_diagnostic(state, current=1000 + (25 * 60)), 
       status: 'stale_awaiting_q',
     });
   });
+
+  it('does not re-arm the awaiting-Q clock from the loop’s own reminder frames', () => {
+    const root = tmpRoot();
+    const result = python(`${importModulePrelude()}
+root = Path(${JSON.stringify(root)})
+root.mkdir(parents=True, exist_ok=True)
+m.STATE_DIR = root
+m.STATE_FILE = root / "state.json"
+m.EVENT_LOG = root / "events.jsonl"
+m.ACTIVITY_LOG = root / "activity.jsonl"
+m.LOCK_FILE = root / "loop.lock"
+state = m.default_state()
+state["phase"] = "monitoring"
+state["awaiting_q_since"] = 1000
+for body in (
+    "Codex -> Q / gate nudge\\n\\nStill inside the approved SDLC gate. Please reply with APPROVED or BLOCKED.",
+    "Codex -> Q / hourly SDLC checkpoint\\n\\nNo reply yet; the gate remains blocked until Q approves.",
+    "Codex -> Q / durable coordination loop online\\n\\nCompletion remains blocked until Q verifies each gate.",
+):
+    m.classify_activity(state, [{
+      "pk": 2,
+      "body": body,
+      "timestamp": 5000,
+      "is_from_me": 1,
+      "sender_name": "personal",
+    }])
+print(state["awaiting_q_since"])
+`);
+    expect(result).toBe('1000');
+  });
+
+  it('still arms the awaiting-Q clock for a fresh non-reminder Codex ask', () => {
+    const root = tmpRoot();
+    const result = python(`${importModulePrelude()}
+root = Path(${JSON.stringify(root)})
+root.mkdir(parents=True, exist_ok=True)
+m.STATE_DIR = root
+m.STATE_FILE = root / "state.json"
+m.EVENT_LOG = root / "events.jsonl"
+m.ACTIVITY_LOG = root / "activity.jsonl"
+m.LOCK_FILE = root / "loop.lock"
+state = m.default_state()
+state["phase"] = "monitoring"
+state["awaiting_q_since"] = 0
+m.classify_activity(state, [{
+  "pk": 3,
+  "body": "Codex -> Q / slice 2 review request\\n\\nSpec attached. Please reply with APPROVED or BLOCKED.",
+  "timestamp": 6000,
+  "is_from_me": 1,
+  "sender_name": "personal",
+}])
+print(state["awaiting_q_since"])
+`);
+    expect(result).toBe('6000');
+  });
 });
