@@ -241,7 +241,7 @@ function driveSystemUnknown(runtime: AgentRuntime, queue: ReturnType<typeof make
   );
 }
 
-const UNKNOWN_NOTICE_FRAGMENT = 'an operator has been notified';
+const UNKNOWN_NOTICE_FRAGMENT = 'automatic recovery failed';
 const ACTIVATION_FRAGMENT = 'Switching to OpenCode / minimax/minimax-m2';
 
 function fallbackActivatedAlerts(): Array<[string, string, string, string, string?]> {

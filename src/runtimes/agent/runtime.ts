@@ -8876,11 +8876,19 @@ export class AgentRuntime implements Runtime {
     return fallbackKeyPresentFor(provider, model, this.agentProvider, this.agentProviderConfig);
   }
 
-  /** User-facing notice for a usage-limit teardown when no fallback replay can run. */
+  /**
+   * User-facing notice for a usage-limit teardown when no fallback replay can
+   * run. A per-model-tier usage cap is NOT cleared by waiting — the remedy is
+   * operator action (add credits or switch the model), so the copy names that
+   * call to action rather than telling the user to "try again after the limit
+   * resets". No ops alert fires on either branch, so the copy does not claim an
+   * operator was already notified. Pure factory (single source of copy);
+   * redaction-safe (no provider text, no PII).
+   */
   private usageLimitNotice(): string {
     return this.agentFallbacks.length > 0
-      ? '_Primary model hit a token/quota limit, but the backup could not continue this turn. An operator has been notified._'
-      : '_Primary model hit a token/quota limit. Please try again after the limit resets._';
+      ? "_I've reached a model usage limit and the backup couldn't continue this turn. An operator needs to add credits or switch my model._"
+      : "_I've reached a model usage limit and couldn't switch automatically. An operator needs to add credits or switch my model._";
   }
 
   /**
@@ -8908,6 +8916,16 @@ export class AgentRuntime implements Runtime {
     this.recentNoFallbackReauthNotices.set(noticeKey, now);
     this.capDedupeMap(this.recentNoFallbackReauthNotices);
     queue.enqueueText('_The agent needs re-authentication before it can reply here. An operator has been notified._');
+    // Back the "operator has been notified" claim: no result-path alert fires on
+    // the no-fallback auth-required teardown (fallback alerts fire only when a
+    // fallback activates), so without this the notice claim would be unbacked.
+    // Fires at notice cadence — the dedup early-return above gates both.
+    emitAlertChecked(
+      this.instanceName,
+      'provider_auth_required_no_fallback',
+      'Agent needs re-authentication and no fallback is available',
+      `chat=${queue.targetChatJid}`,
+    );
   }
 
   /**

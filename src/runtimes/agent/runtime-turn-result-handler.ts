@@ -7,7 +7,12 @@ import type { DurabilityEngine } from '../../core/durability.ts';
 import { config } from '../../config.ts';
 import { GLOBAL_CONVERSATION_KEY, toConversationKey } from '../../core/conversation-key.ts';
 import { classifyProviderFailure } from './failure-taxonomy.ts';
-import { providerUnknownTerminalNotice, renderUserMessage } from './response-templates.ts';
+import {
+  providerServerErrorNoFallbackNotice,
+  providerTransientRetryNotice,
+  providerUnknownTerminalNotice,
+  renderUserMessage,
+} from './response-templates.ts';
 import { emitAlertChecked } from '../../lib/emit-alert.ts';
 import { accumulateTokensWithEvent, markSessionCompacted } from './session-db.ts';
 import { createChildLogger } from '../../logger.ts';
@@ -366,6 +371,9 @@ if (event.text && !hasPendingPoll) {
   if (providerFailureKind === 'policy-block') {
     recordTurnFailure(providerFailureKind);
     log.error({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider policy-block message from result — session will be killed');
+    // Deliberate silence: a policy block is not an operational fault to notify or
+    // recover from, and any user notice here would coach around the block. Log +
+    // shut down, no user-facing message and no fallback.
     session?.shutdown();
     return;
   }
@@ -426,7 +434,7 @@ if (event.text && !hasPendingPoll) {
       });
     }
     if (!replayScheduled) {
-      if (!activation && providerFailureKind === 'server-error') queue.enqueueText(providerUnknownTerminalNotice());
+      if (!activation && providerFailureKind === 'server-error') queue.enqueueText(providerServerErrorNoFallbackNotice());
       if (!activation && providerFailureKind === 'rate-limit') {
         enqueueNoFallbackTerminalNotice(queue, providerFailureKind);
       }
@@ -479,7 +487,7 @@ if (event.text && !hasPendingPoll) {
       event.text.slice(0, 400),
       'warning',
     );
-    queue.enqueueText(providerUnknownTerminalNotice());
+    queue.enqueueText(providerTransientRetryNotice());
     return;
   }
   if (!wasSilentCompact) {
@@ -913,6 +921,8 @@ if (event.text) {
   if (providerFailureKind === 'policy-block') {
     recordTurnFailure(providerFailureKind);
     log.error({ chatJid: host.shared ? host.currentTurnChatJid : host.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider policy-block message from result — session will be killed');
+    // Deliberate silence (see the per-chat policy-block branch): no user notice,
+    // no fallback — a policy block is not an operational fault to recover from.
     host.session?.shutdown();
     return;
   }
@@ -972,7 +982,7 @@ if (event.text) {
       });
     }
     if (!replayScheduled) {
-      if (!activation && providerFailureKind === 'server-error') queue.enqueueText(providerUnknownTerminalNotice());
+      if (!activation && providerFailureKind === 'server-error') queue.enqueueText(providerServerErrorNoFallbackNotice());
       if (!activation && providerFailureKind === 'rate-limit') {
         enqueueNoFallbackTerminalNotice(queue, providerFailureKind);
       }
@@ -1026,7 +1036,7 @@ if (event.text) {
       event.text.slice(0, 400),
       'warning',
     );
-    queue.enqueueText(providerUnknownTerminalNotice());
+    queue.enqueueText(providerTransientRetryNotice());
     host.singleTurnHadToolActivity = false;
     return;
   }

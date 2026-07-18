@@ -121,10 +121,40 @@ export function autoSwitchNoticeMessage(notice: AutoSwitchNoticeView): string {
 }
 
 /**
- * Terminal notice enqueued when a turn could not be completed and an operator
- * has been alerted. Pure string template relocated from AgentRuntime
- * (god-class decomposition slice BEAD-PURE-3).
+ * Terminal notice for an UNCLASSIFIED terminal provider error (is_error result,
+ * no recognised failure class) after automatic recovery has been exhausted —
+ * the fallback net (maybeArmFallbackAfterUnknownTerminal) has either armed and
+ * this is the below-threshold case or no eligible fallback exists. The ops alert
+ * DOES fire on this path (provider_unknown_terminal), so the "alerted" claim is
+ * backed. Deliberately drops the "try again / /new" advice: this is a terminal
+ * fault, retry does not resolve it (contrast providerTransientRetryNotice).
  */
 export function providerUnknownTerminalNotice(): string {
-  return '_I hit a problem completing that — an operator has been notified. Please try again, or send /new to start fresh._';
+  return '_I couldn’t complete that and automatic recovery failed. An operator has been alerted._';
+}
+
+/**
+ * Notice for a TRANSIENT provider connection drop — recoverable, the next
+ * message respawns the session. Retry IS the correct remedy here, so this copy
+ * asks the user to resend and, unlike the unknown-terminal notice, makes no
+ * "operator alerted" claim (only a non-paging WARNING fires on this path).
+ */
+export function providerTransientRetryNotice(): string {
+  return '_I hit a temporary connection problem — please resend and it should go through._';
+}
+
+/**
+ * Class-appropriate notice for a provider SERVER-ERROR terminal result on the
+ * no-fallback path. Distinct from {@link providerUnknownTerminalNotice}: a
+ * server error is a transient backend fault (resend can succeed), and NO ops
+ * alert fires on that path — so this copy names the transient cause and asks the
+ * user to resend WITHOUT claiming an operator was notified.
+ *
+ * NOTE (Lane 3): defined but NOT wired — the server-error no-fallback call sites
+ * live in runtime-turn-result-handler.ts (~:429 / ~:975), which this lane does
+ * not own. Wiring it (replacing providerUnknownTerminalNotice at those sites) is
+ * the handler edit flagged to the team lead; until then this remains dead code.
+ */
+export function providerServerErrorNoFallbackNotice(): string {
+  return "_The model backend had a temporary error and automatic retry didn't recover — please resend shortly._";
 }
