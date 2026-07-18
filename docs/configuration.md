@@ -232,13 +232,35 @@ These have no effect when `INSTANCE_CONFIG` is set (multi-instance mode).
 |----------|------|---------|-------------|
 | `REQUIRE_OS_KEYRING` | string (presence) | (unset) | When set to any non-empty value, an **errored** OS keyring backend probe (e.g. `secret-tool` timeout/EACCES, not a genuinely-absent keyring) becomes fatal instead of silently downgrading to plaintext file credential storage (`src/lib/keyring.ts:66`). A genuinely-absent keyring (ENOENT) is still allowed to fall back to env-only lookup. macOS always uses the Keychain backend, so this guard applies to the Linux/WSL `secret-tool` probe path. |
 
+Unscoped credential lookups use the mapped environment variable first, then
+the owner-private file
+`$XDG_CONFIG_HOME/whatsoup/credentials/<service>.key`, then the bounded OS
+Keychain or `secret-tool` backend, and finally the existing OpenCode fallback.
+The credentials directory must be owned by the current user with mode `0700`;
+each regular, non-symlinked `.key` file must be owned by that user with mode
+`0600` and is read through a bounded descriptor. Account-scoped lookups never
+consult this unscoped file store: they use the account-specific Keychain or
+`secret-tool` entry before any allowed environment or OpenCode fallback.
+
+The health-token launch path is intentionally separate. Its transitional,
+account-specific file is
+`$XDG_CONFIG_HOME/whatsoup/instances/<instance>/tokens.env`, not a
+`credentials/<service>.key` file. `deploy/whatsoup` preserves an already-loaded
+`WHATSOUP_HEALTH_TOKEN`, then reads this per-instance file, then checks the
+scoped `whatsoup-health-token` Keychain/`secret-tool` entry, and finally the
+legacy shared entry. A present unsafe file fails startup; only an absent file
+falls back. The file is exactly one
+`WHATSOUP_HEALTH_TOKEN=<64-lowercase-hex>` assignment, owned by the current UID
+with mode `0600`, under a real owner-controlled directory that is not group- or
+world-writable.
+
 ### Health Server
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `HEALTH_PORT` | integer | `9090` | Port for the HTTP health server (`GET /health`, `POST /send`, `POST /agent/compact`). |
 | `HEALTH_BIND_ADDRESS` | string | `127.0.0.1` | Bind address for the health server. Set to `0.0.0.0` in Docker to allow host-exposed health checks. |
-| `WHATSOUP_HEALTH_TOKEN` | string | (empty) | Bearer token for health-server mutation endpoints such as `POST /send`, `POST /access`, `POST /mark-read`, `POST /heal`, and `POST /agent/compact`. Requests without a matching `Authorization: Bearer <token>` header receive `401`. If unset, mutation endpoints fail closed with `401`. |
+| `WHATSOUP_HEALTH_TOKEN` | string | (empty) | Bearer token for health-server mutation endpoints such as `POST /send`, `POST /access`, `POST /mark-read`, `POST /heal`, and `POST /agent/compact`. Requests without a matching `Authorization: Bearer <token>` header receive `401`. If unset, mutation endpoints fail closed with `401`. On managed instances, use the per-instance `tokens.env` contract described under Credential Storage instead of duplicating this secret in launchd `EnvironmentVariables`. |
 | `WHATSOUP_SCHEDULE_ROOT` | string | (unset) | Filesystem root that `POST /schedule` bounds media file paths to. When unset the route fails closed with `409`; when set, a `filePath` must resolve (fd-pinned, symlink-safe per QR-090) inside this directory or the request is rejected. |
 | `WHATSOUP_REPO_ROOT` | path | `process.cwd()` | Repository root scanned for the ARC binding file reported under the `arc` key of `GET /health` (`src/core/health.ts:1059`); a missing/unparseable file degrades to `{loaded:false,reason}` without failing the process. Only needed when the process CWD is not the repo checkout. |
 | `WHATSOUP_GIT_SHA` | string | `null` in `/health` | Full 40-character git commit SHA for the running checkout. Normally exported by `deploy/whatsoup` after restart preflight and consumed by `src/core/health.ts` for `/health.instance.commit`; `src/transport/connection.ts` reuses the same helper for lifecycle audit `codeSha`. Invalid or short values are ignored. |

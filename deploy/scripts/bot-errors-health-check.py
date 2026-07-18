@@ -2910,11 +2910,11 @@ SERVICE_KEYCHAIN_FALLBACKS: dict[str, list[str]] = {
 def whatsoup_keyfile_present(service: str) -> bool:
     """True when ~/.config/whatsoup/credentials/<service>.key holds a non-empty value.
 
-    This is the file store lookupCredential consults after a keyring miss (keyring.ts
-    fileStoreRead — reached even on the macos-keychain backend). It is the store the live fleet is
-    actually provisioned into, so the health-check MUST check it or it reports a runtime-resolvable
-    key as missing (false negative). NOTE: lookupCredential's file store keys on the ORIGINAL
-    service name only (no migration), so we do too.
+    This is the file store unscoped lookupCredential consults before a keyring. It is the store the
+    live fleet is actually provisioned into, so the health-check MUST check it or it reports a
+    runtime-resolvable key as missing (false negative). Scoped lookup excludes this store because
+    it has no account dimension. NOTE: lookupCredential's file store keys on the ORIGINAL service
+    name only (no migration), so we do too.
     """
     base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
     path = Path(base) / "whatsoup" / "credentials" / f"{service}.key"
@@ -2924,17 +2924,23 @@ def whatsoup_keyfile_present(service: str) -> bool:
         return False
 
 
-def _keychain_secret_status(candidates: list[str], account: str, timeout_seconds: int) -> str:
+def _keychain_secret_status(
+    candidates: list[str],
+    account: str,
+    timeout_seconds: int,
+    user: str | None = None,
+) -> str:
     """darwin keychain read for the first resolvable candidate.
     Returns 'present' | 'missing' | 'timeout' | 'probe_error_<detail>'."""
     for candidate in candidates:
+        candidate_account = user if user is not None else account
         try:
             proc = subprocess.run(
-                ["security", "find-generic-password", "-s", candidate, "-a", account, "-w"],
+                ["security", "find-generic-password", "-s", candidate, "-a", candidate_account, "-w"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
-                timeout=min(timeout_seconds, 5),
+                timeout=min(timeout_seconds, 3),
                 check=False,
             )
         except subprocess.TimeoutExpired:
@@ -2946,18 +2952,25 @@ def _keychain_secret_status(candidates: list[str], account: str, timeout_seconds
     return "missing"
 
 
-def _secret_tool_status(candidates: list[str], timeout_seconds: int) -> str:
+def _secret_tool_status(
+    candidates: list[str],
+    timeout_seconds: int,
+    user: str | None = None,
+) -> str:
     """linux secret-tool read for the first resolvable candidate.
     Returns 'present' | 'missing' | 'empty' | 'timeout' | 'probe_error_<detail>'."""
     saw_empty = False
     for candidate in candidates:
+        args = ["secret-tool", "lookup", "service", candidate]
+        if user is not None:
+            args.extend(["user", user])
         try:
             proc = subprocess.run(
-                ["secret-tool", "lookup", "service", candidate],
+                args,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
-                timeout=min(timeout_seconds, 5),
+                timeout=min(timeout_seconds, 3),
                 check=False,
             )
         except subprocess.TimeoutExpired:
@@ -2971,10 +2984,15 @@ def _secret_tool_status(candidates: list[str], timeout_seconds: int) -> str:
     return "empty" if saw_empty else "missing"
 
 
-def provider_credential_presence(service: str, timeout_seconds: int) -> tuple[bool, str, str]:
+def provider_credential_presence(
+    service: str,
+    timeout_seconds: int,
+    user: str | None = None,
+) -> tuple[bool, str, str]:
     # Mirror src/lib/keyring.ts lookupCredential resolution EXACTLY so a key the runtime can
     # resolve is never reported missing (and vice-versa):
-    #   env var -> OS keyring (service + migration fallbacks) -> ~/.config/whatsoup/credentials/<svc>.key
+    #   unscoped: env var -> ~/.config/whatsoup/credentials/<svc>.key -> OS keyring
+    #   scoped:   OS keyring -> env var, with no unscoped .key access
     # NOTE: ~/.config/secrets/<svc>.env is the `ocw` worker store; the WhatSoup runtime does NOT
     # source it, so it is reported as a diagnostic negative only, never as provisioned. (2026-06-23:
     # the fleet is provisioned via the .key file store, not the keychain — checking only env/.env/
@@ -2984,17 +3002,19 @@ def provider_credential_presence(service: str, timeout_seconds: int) -> tuple[bo
     if dry_status is not None:
         present = dry_status in {"present", "ok", "true", "1"}
         return present, "dry", dry_status
-    if env_key and os.environ.get(env_key):
+    if user is None and env_key and os.environ.get(env_key):
         return True, "env", "present"
+    if user is None and whatsoup_keyfile_present(service):
+        return True, "whatsoup_keyfile", "present"
 
     candidates = [service, *SERVICE_KEYCHAIN_FALLBACKS.get(service, [])]
     if HOST_PLATFORM == "darwin":
-        account = os.environ.get("USER") or Path.home().name or "unknown"
+        account = user if user is not None else (os.environ.get("USER") or Path.home().name or "unknown")
         keyring_source = "macos_keychain"
-        keyring_status = _keychain_secret_status(candidates, account, timeout_seconds)
+        keyring_status = _keychain_secret_status(candidates, account, timeout_seconds, user)
     elif shutil.which("secret-tool"):
         keyring_source = "secret_tool"
-        keyring_status = _secret_tool_status(candidates, timeout_seconds)
+        keyring_status = _secret_tool_status(candidates, timeout_seconds, user)
     else:
         keyring_source = "none"
         keyring_status = "missing"
@@ -3002,10 +3022,8 @@ def provider_credential_presence(service: str, timeout_seconds: int) -> tuple[bo
     if keyring_status == "present":
         return True, keyring_source, "present"
 
-    # Keyring miss -> the runtime's next backend: the whatsoup .key file store (the de-facto fleet
-    # provisioning store). Presence here means the runtime CAN resolve the key.
-    if whatsoup_keyfile_present(service):
-        return True, "whatsoup_keyfile", "present"
+    if user is not None and env_key and os.environ.get(env_key):
+        return True, "env", "present"
 
     # Not resolvable by the runtime. A populated ocw .env is a misplacement diagnostic only.
     if secret_file_has_service_key(service, env_key):
