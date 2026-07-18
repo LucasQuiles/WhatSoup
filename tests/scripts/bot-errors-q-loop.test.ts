@@ -302,6 +302,37 @@ print(state["awaiting_q_since"])
     expect(result).toBe('1000');
   });
 
+  it('does not arm the awaiting-Q clock from dispatcher alert banners containing trigger words', () => {
+    const root = tmpRoot();
+    const result = python(`${importModulePrelude()}
+root = Path(${JSON.stringify(root)})
+root.mkdir(parents=True, exist_ok=True)
+m.STATE_DIR = root
+m.STATE_FILE = root / "state.json"
+m.EVENT_LOG = root / "events.jsonl"
+m.ACTIVITY_LOG = root / "activity.jsonl"
+m.LOCK_FILE = root / "loop.lock"
+state = m.default_state()
+state["phase"] = "monitoring"
+state["awaiting_q_since"] = 0
+for body in (
+    "BOT ERROR - ESCALATED still open: whatsoup at loops has 17 bead proposals past review_by_at (threshold 10)\\n  > remediation: approve or retire the backlog",
+    "BOT WARNING - heartbeat watchdog stale: please reply on the incident channel",
+    "BOT INFO - Auto-closed 3 non-actionable stale incident(s); no approval needed",
+    "BOT RECOVERY - alert source cleared: reply latency back under threshold",
+):
+    m.classify_activity(state, [{
+      "pk": 6,
+      "body": body,
+      "timestamp": 9000,
+      "is_from_me": 1,
+      "sender_name": "personal",
+    }])
+print(state["awaiting_q_since"])
+`);
+    expect(result).toBe('0');
+  });
+
   it('arms the awaiting-Q clock for a legitimate ask that extends a reminder header', () => {
     const root = tmpRoot();
     const result = python(`${importModulePrelude()}

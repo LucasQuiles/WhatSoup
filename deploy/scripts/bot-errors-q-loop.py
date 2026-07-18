@@ -86,6 +86,20 @@ SELF_REMINDER_PREFIXES = (
     CHECKPOINT_HEADER + "\n\n",
 )
 
+# Dispatcher/bridge alert banners are machine frames, not asks: they routinely
+# contain "reply"/"approve"/"blocked" in remediation text (observed live
+# 2026-07-18 19:16:49Z — an ESCALATED bead-backlog alert armed the clock and
+# restarted the nudge cycle on a non-ask). They must never arm awaiting-Q.
+ALERT_BANNER_PREFIXES = (
+    "BOT ERROR",
+    "BOT WARNING",
+    "BOT INFO",
+    "BOT RECOVERY",
+    "\U0001f534",  # red-circle bridge lines
+    "\u2705",      # check-mark bridge resolves
+    "\u26a0",      # warning-sign bridge lines
+)
+
 NUDGE_AFTER_SECONDS = 20 * 60
 NUDGE_COOLDOWN_SECONDS = 45 * 60
 CHECKPOINT_AFTER_SECONDS = 60 * 60
@@ -709,6 +723,7 @@ def classify_activity(state: dict[str, Any], messages: list[dict[str, Any]], per
             if (
                 ("reply" in body.lower() or "approve" in body.lower() or "blocked" in body.lower())
                 and not body.startswith(SELF_REMINDER_PREFIXES)
+                and not body.startswith(ALERT_BANNER_PREFIXES)
             ):
                 state["awaiting_q_since"] = ts
                 persist_activity_state(state, "outbound_awaiting_q", persist_state)

@@ -148,7 +148,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-q-loop.py",
-      "sha256": "eb87d66e4d1f06fd7fc7010ab9c4f86edf0f94047c4364fbd36ef6caf19a9dbb",
+      "sha256": "763d865311156bb0c9a9fef2ef11cf354c63b4f0e7d5917998db93e69965e8ce",
       "mustContain": [
         "q_unavailable_reason",
         "session_limit",
