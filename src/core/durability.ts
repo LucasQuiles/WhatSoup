@@ -266,6 +266,8 @@ type DurabilityStatements = {
   sweepStaleSubmitted: PreparedStatement;
   getPendingOutboundCount: PreparedStatement;
   getQuarantinedOutboundCount: PreparedStatement;
+  getMaybeSentOutboundCount: PreparedStatement;
+  getOldestMaybeSentSubmittedAt: PreparedStatement;
   getLastRecoveryRunCompletedAt: PreparedStatement;
   insertRecoveryRun: PreparedStatement;
   selectNow: PreparedStatement;
@@ -649,6 +651,12 @@ export class DurabilityEngine {
       ),
       getPendingOutboundCount: prepare(
         `SELECT COUNT(*) as count FROM outbound_ops WHERE status IN ('pending', 'sending', 'submitted', 'maybe_sent')`,
+      ),
+      getMaybeSentOutboundCount: prepare(
+        `SELECT COUNT(*) as count FROM outbound_ops WHERE status = 'maybe_sent'`,
+      ),
+      getOldestMaybeSentSubmittedAt: prepare(
+        `SELECT MIN(submitted_at) as at FROM outbound_ops WHERE status = 'maybe_sent' AND submitted_at IS NOT NULL`,
       ),
       getQuarantinedOutboundCount: prepare(
         `SELECT COUNT(*) as count FROM outbound_ops WHERE status = 'quarantined'`,
@@ -1894,17 +1902,25 @@ export class DurabilityEngine {
   getHealthStats(): {
     pendingOutbound: number;
     quarantinedOutbound: number;
+    maybeSentOutbound: number;
+    oldestMaybeSentAt: string | null;
     lastRecoveryAt: string | null;
     openRecoveries: number;
   } {
     const pending = this.statements.getPendingOutboundCount.get() as { count: number };
     const quarantined = this.statements.getQuarantinedOutboundCount.get() as { count: number };
+    const maybeSent = this.statements.getMaybeSentOutboundCount.get() as { count: number };
+    const oldestMaybeSent = this.statements.getOldestMaybeSentSubmittedAt.get() as
+      | { at: string | null }
+      | undefined;
     const lastRecovery = this.statements.getLastRecoveryRunCompletedAt.get() as
       | { completed_at: string }
       | undefined;
     return {
       pendingOutbound: pending.count,
       quarantinedOutbound: quarantined.count,
+      maybeSentOutbound: maybeSent.count,
+      oldestMaybeSentAt: oldestMaybeSent?.at ?? null,
       lastRecoveryAt: lastRecovery?.completed_at ?? null,
       openRecoveries: this.recoveryEvidence.countOpen(),
     };
