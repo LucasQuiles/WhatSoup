@@ -234,8 +234,26 @@ if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   export WHATSOUP_GIT_BRANCH
   unset _branch
 else
-  unset WHATSOUP_GIT_SHA WHATSOUP_GIT_BRANCH
-  echo "WARN: $REPO_ROOT is not a git work tree or git is unavailable; WHATSOUP_GIT_SHA/WHATSOUP_GIT_BRANCH unset" >&2
+  # Non-git release snapshot: fall back to the release manifest's source.commit
+  # (written by scripts/release-snapshot-plan.ts) so /health can still report
+  # which code the service is running. Best-effort — a missing or malformed
+  # manifest must not block startup (#1868).
+  _release_manifest="$REPO_ROOT/.whatsoup-release-manifest.json"
+  WHATSOUP_GIT_SHA=""
+  _branch=""
+  if [ -f "$_release_manifest" ]; then
+    WHATSOUP_GIT_SHA="$("$NODE" -e 'try{const m=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));const c=m&&m.source&&m.source.commit;process.stdout.write(typeof c==="string"?c:"")}catch{}' "$_release_manifest" 2>/dev/null || true)"
+    _branch="$("$NODE" -e 'try{const m=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));const r=m&&m.source&&m.source.ref;process.stdout.write(typeof r==="string"?r:"")}catch{}' "$_release_manifest" 2>/dev/null || true)"
+  fi
+  if printf '%s' "$WHATSOUP_GIT_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+    export WHATSOUP_GIT_SHA
+    WHATSOUP_GIT_BRANCH="${_branch:-release-manifest}"
+    export WHATSOUP_GIT_BRANCH
+    unset _release_manifest _branch
+  else
+    unset WHATSOUP_GIT_SHA WHATSOUP_GIT_BRANCH _release_manifest _branch
+    echo "WARN: $REPO_ROOT is not a git work tree and no valid release manifest source.commit; WHATSOUP_GIT_SHA/WHATSOUP_GIT_BRANCH unset" >&2
+  fi
 fi
 
 # Ensure PATH includes locations needed by agent instances (claude CLI, tools)
