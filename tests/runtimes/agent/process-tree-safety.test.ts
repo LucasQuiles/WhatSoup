@@ -235,4 +235,34 @@ describe('#1755 kill-time ambiguity resolution', () => {
     expect(outcomes[0].outcome).toBe('escalated');
     expect(outcomes[0].escalated).toBe(true);
   });
+
+  it('suppresses the process-group broadcast when an ambiguous sibling shares the root group, never signaling it', async () => {
+    // root leads its group; a duplicate-row (ambiguous) child shares root.pgid.
+    const rootWithAmbiguousChild = census([
+      { pid: process.pid, ppid: 1, pgid: process.pid, command: 'vitest-parent' },
+      { pid: ROOT_PID, ppid: process.pid, pgid: ROOT_PID, command: 'provider-root' },
+      { pid: CHILD_PID, ppid: ROOT_PID, pgid: ROOT_PID, command: 'provider-child' },
+      { pid: CHILD_PID, ppid: ROOT_PID, pgid: ROOT_PID, command: 'provider-child' },
+    ]);
+    execFileSyncMock
+      .mockReturnValueOnce(rootWithAmbiguousChild) // entry: owned = root + ambiguous child
+      .mockReturnValueOnce(rootWithAmbiguousChild) // pre-signal: root survivor, child ambiguous
+      .mockReturnValue(ambiguousChild()); // TERM check + final: root gone, child still ambiguous
+
+    await expect(
+      killSessionTree(ROOT_PID, 'SIGTERM', {
+        generationMarker: 'ambiguous-sibling-in-group',
+        termGraceMs: 0,
+        killGraceMs: 0,
+        ambiguityResolveMs: 0,
+      }),
+    ).resolves.toBeUndefined();
+
+    // No process-group broadcast (a negative pid) fires while a sibling is ambiguous:
+    // that broadcast is indiscriminate and would reach the ambiguous child.
+    expect(killSpy.mock.calls.some((c: unknown[]) => typeof c[0] === 'number' && (c[0] as number) < 0)).toBe(false);
+    // The confirmed root survivor is signaled per-PID; the ambiguous child never is.
+    expect(killSpy).toHaveBeenCalledWith(ROOT_PID, 'SIGTERM');
+    expect(killSpy.mock.calls.some((c: unknown[]) => c[0] === CHILD_PID)).toBe(false);
+  });
 });

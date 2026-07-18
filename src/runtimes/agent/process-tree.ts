@@ -207,16 +207,29 @@ function signalOwned(
   owned: readonly OwnedProcessIdentity[],
   signal: NodeJS.Signals,
   generationMarker: string,
+  ambiguous: readonly OwnedProcessIdentity[] = [],
 ): void {
   const root = uniqueRowForPid(rows, rootPid);
   const ownedRoot = owned.find((identity) => identity.pid === rootPid) ?? null;
   const self = uniqueRowForPid(rows, process.pid);
+  // #1755: the process-group broadcast below is indiscriminate over root.pgid.
+  // Never let it reach an AMBIGUOUS owned PID that happens to share the root's
+  // group — that would signal a PID we could not confirm as `sameProcess`. When
+  // any ambiguous member sits in the root group, fall back to per-PID signaling
+  // of the confirmed survivors only, preserving the never-signal-an-ambiguous-PID
+  // invariant (and still avoiding the old throw-and-burn-grace behaviour).
+  const ambiguousInRootGroup =
+    root !== null &&
+    ambiguous.some((identity) =>
+      rows.some((row) => row.pid === identity.pid && row.pgid === root.pgid),
+    );
   const safeGroup = root !== null &&
     ownedRoot !== null &&
     sameProcess(root, ownedRoot, generationMarker) &&
     self !== null &&
     root.pgid === root.pid &&
-    root.pgid !== self.pgid;
+    root.pgid !== self.pgid &&
+    !ambiguousInRootGroup;
   let groupSignalled = false;
 
   if (safeGroup) {
@@ -336,7 +349,7 @@ async function runTermination(
     );
   }
   if (first.survivors.length > 0) {
-    signalOwned(target, rootPid, first.rows, first.survivors, signal, generationMarker);
+    signalOwned(target, rootPid, first.rows, first.survivors, signal, generationMarker, first.ambiguous);
   }
 
   if (signal === 'SIGTERM') {
@@ -360,7 +373,7 @@ async function runTermination(
       }
       if (kill.survivors.length > 0) {
         escalated = true;
-        signalOwned(target, rootPid, kill.rows, kill.survivors, 'SIGKILL', generationMarker);
+        signalOwned(target, rootPid, kill.rows, kill.survivors, 'SIGKILL', generationMarker, kill.ambiguous);
       }
     }
   }
