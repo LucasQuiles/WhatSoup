@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 72
+**Total entries:** 74
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=7, plan=36, review=3, spec=25, state=1 |
-| Status | active=13, closed=4, completed=32, deferred=7, pending=14, unknown=2 |
-| Status source | body-marker=70, fallback=1, state-md-status=1 |
+| Kind | handoff=7, plan=37, review=3, spec=26, state=1 |
+| Status | active=13, closed=4, completed=32, deferred=7, pending=14, unknown=4 |
+| Status source | body-marker=70, fallback=3, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -52,12 +52,14 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | tasks | body-marker |
 
-### Unknown-status — triage needed (2)
+### Unknown-status — triage needed (4)
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
 | `docs/superpowers/plans/2026-07-17-boundary-validator-ci-refactor.md` | plan | boundary-validator-ci-refactor | 2026-07-17 |
+| `docs/superpowers/plans/2026-07-17-macos-credential-durability.md` | plan | macos-credential-durability | 2026-07-17 |
 | `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | spec | turn-lifecycle-fitness-extraction-design | 2026-07-11 |
+| `docs/superpowers/specs/2026-07-17-macos-credential-durability-design.md` | spec | macos-credential-durability-design | 2026-07-17 |
 
 ### Cross-tree topic clusters (4)
 
@@ -111,7 +113,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-07-16-boundary-contract-feedback-implementation-notes.md` | handoff | active | body-marker | boundary-contract-feedback-implementation-notes | 2026-07-16 |  |
 | `docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md` | handoff | pending | body-marker | boundary-core-history-mining | 2026-07-16 |  |
 
-### docs/superpowers/plans  _(36 entries)_
+### docs/superpowers/plans  _(37 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -151,6 +153,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-07-16-boundary-core-history-provenance.md` | plan | pending | body-marker | boundary-core-history-provenance | 2026-07-16 |  |
 | `docs/superpowers/plans/2026-07-17-boundary-exit-parser-codeql-hardening.md` | plan | active | body-marker | boundary-exit-parser-codeql-hardening | 2026-07-17 |  |
 | `docs/superpowers/plans/2026-07-17-boundary-validator-ci-refactor.md` | plan | unknown | fallback | boundary-validator-ci-refactor | 2026-07-17 |  |
+| `docs/superpowers/plans/2026-07-17-macos-credential-durability.md` | plan | unknown | fallback | macos-credential-durability | 2026-07-17 |  |
 
 ### docs/superpowers/reviews  _(3 entries)_
 
@@ -160,7 +163,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | review | completed | body-marker | bot-errors-tool-call-audit | 2026-06-20 |  |
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | review | completed | body-marker | wall-to-wall-audit-pr-briefs | 2026-07-10 |  |
 
-### docs/superpowers/specs  _(19 entries)_
+### docs/superpowers/specs  _(20 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -183,6 +186,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-07-15-semantic-boundary-hygiene-design.md` | spec | active | body-marker | semantic-boundary-hygiene-design | 2026-07-16 |  |
 | `docs/superpowers/specs/2026-07-17-boundary-exit-parser-codeql-hardening-design.md` | spec | active | body-marker | boundary-exit-parser-codeql-hardening-design | 2026-07-17 |  |
 | `docs/superpowers/specs/2026-07-17-boundary-validator-ci-refactor-design.md` | spec | active | body-marker | boundary-validator-ci-refactor-design | 2026-07-17 |  |
+| `docs/superpowers/specs/2026-07-17-macos-credential-durability-design.md` | spec | unknown | fallback | macos-credential-durability-design | 2026-07-17 |  |
 
 ### docs/superpowers/specs/kill-session-transactional-cancellation  _(3 entries)_
 
@@ -203,4 +207,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-17T16:35:03Z from commit `b3bfee28a238ab1f5fc62de095654d3200a631c5`
+- Generated at 2026-07-18T01:52:16Z from commit `83d5c7f25f634d875b13440c0aa889933ae88cbc`

@@ -109,11 +109,31 @@ Per-instance configs live in `~/.config/whatsoup/instances/<instance>/`.
 - `config.json` - instance schema, access mode, health port, agent options,
   memory config, and `enabled`.
 - `tokens.env` - transitional per-instance health-token file used by fleet
-  discovery. Prefer keyring-backed scoped health tokens where available; if a
-  file is required, keep it mode `0600`, owned by the instance operator, and
-  outside tracked paths.
+  discovery and the launch wrapper. It contains exactly one canonical
+  `WHATSOUP_HEALTH_TOKEN=<64-lowercase-hex>` assignment. Keep it a regular
+  non-symlink file, mode `0600`, owned by the instance operator, and outside
+  tracked paths. The instance directory must also be real, operator-owned, and
+  not group- or world-writable. The wrapper fails startup on an unsafe existing
+  file and falls back only when the file is absent.
 - `auth/` - Baileys session credentials.
 - `stdout.log`, `stderr.log` - service output when the plist redirects logs.
+
+Do not confuse per-instance `tokens.env` with the unscoped credential mirror at
+`$XDG_CONFIG_HOME/whatsoup/credentials/<service>.key`. An unscoped lookup may
+use its strict `.key` file before the OS Keychain; an account-scoped lookup never
+uses that file. Health-token startup instead uses this order: an already-loaded
+environment value, per-instance `tokens.env`, the scoped Keychain item with
+service `whatsoup-health-token` and account `<instance>`, then the legacy shared
+Keychain item.
+
+After the descriptor-safe wrapper is deployed, remove any plaintext
+`WHATSOUP_HEALTH_TOKEN` duplication from the plist's `EnvironmentVariables`.
+Retain the canonical per-instance `tokens.env` file during this migration; the
+wrapper reads it directly, so launchd does not need to copy the token into the
+process environment before startup. `deploy/check-health-token-keyring.sh
+<instance>` compares the file with its scoped Keychain mirror without printing
+either value. A passing check does not authorize removing `tokens.env` or the
+launcher file load.
 
 Instances with `enabled: false` are skipped by fleet discovery but keep their
 config and auth state on disk.

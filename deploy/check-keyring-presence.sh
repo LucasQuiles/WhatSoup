@@ -26,13 +26,29 @@ SERVICES=(
   "pinecone"
 )
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# On macOS, security(1) has no timeout and can hang inside a launchd process when
+# the login keychain cannot present UI. Route the read through the pinned-Node
+# helper, which bounds it with a 3s SIGKILL (same seam as check-health-token-keyring.sh
+# and deploy/whatsoup). Linux keeps the native `timeout 3s secret-tool`.
+NODE=""
+if [ "$(uname -s)" = "Darwin" ]; then
+  # shellcheck source=deploy/lib/resolve-node.sh
+  . "$SCRIPT_DIR/lib/resolve-node.sh"
+  if ! NODE="$(whatsoup_resolve_node "$REPO_ROOT")"; then
+    echo "FATAL: cannot resolve pinned Node to bound the macOS keychain read" >&2
+    exit 2
+  fi
+fi
+
 # Detect the keyring backend (mirrors src/lib/keyring.ts detectKeyringBackend).
 keyring_present() {
   local service="$1"
   local value=""
   case "$(uname -s)" in
     Darwin)
-      value="$(security find-generic-password -s "$service" -a "$USER" -w 2>/dev/null || true)"
+      value="$("$NODE" "$SCRIPT_DIR/lib/read-keychain-secret.mjs" "$service" "$USER" || true)"
       ;;
     *)
       value="$(timeout 3s secret-tool lookup service "$service" 2>/dev/null || true)"
