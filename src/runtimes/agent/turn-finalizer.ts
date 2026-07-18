@@ -5,7 +5,7 @@ import type {
   OutboundDeliverySnapshot,
   TurnFinalizationBookkeepingParams,
 } from '../../core/durability.ts';
-import { emitAlert, type AlertEmissionStatus } from '../../lib/emit-alert.ts';
+import { emitAlert, emitAlertChecked, type AlertEmissionStatus } from '../../lib/emit-alert.ts';
 import { shortHash } from '../../lib/short-hash.ts';
 import {
   toTurnFinalizationPersistence,
@@ -348,7 +348,7 @@ export function finalizeRuntimeTurn(
       // Best-effort visibility: the terminal state is already durable, so an
       // alert-sink failure must not convert a finalized turn into an incident.
       try {
-        emitAlert(
+        emitAlertChecked(
           params.instanceName,
           REPLY_GUARANTEE_BREACH_ALERT_SOURCE,
           REPLY_GUARANTEE_BREACH_ALERT_SUMMARY,
