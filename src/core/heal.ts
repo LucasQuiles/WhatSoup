@@ -40,7 +40,7 @@ export interface ControlPeerWiring {
 /** Q control-peer wiring state for GET /health's control_peer block. */
 export function getControlPeerWiring(): ControlPeerWiring {
   return {
-    configured: config.controlPeers.has('q'),
+    configured: config.controlPeers?.has('q') ?? false,
     suppressedUnavailableAlerts: suppressedDeliveryUnavailableAlerts,
   };
 }
