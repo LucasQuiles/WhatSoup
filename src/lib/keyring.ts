@@ -58,6 +58,11 @@ const keyringExecOptions = {
   timeout: KEYRING_COMMAND_TIMEOUT_MS,
   killSignal: 'SIGKILL' as const,
 };
+// Credential reads return the value on stdout; bound it to the same 4 KiB the
+// pinned-Node keychain helper enforces (deploy/lib/read-keychain-secret.mjs).
+// Detection, writes, and deletes keep the base options — backend detection's
+// `secret-tool --help` banner can legitimately exceed 4 KiB.
+const keyringReadExecOptions = { ...keyringExecOptions, maxBuffer: FILE_STORE_MAX_BYTES };
 
 // Lazy logger — avoids any risk of a cycle during module initialisation while
 // still giving us structured log output once the module is fully loaded.
@@ -209,7 +214,7 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
         const raw = execFileSync(
           'secret-tool',
           secretToolArgs(candidate),
-          keyringExecOptions,
+          keyringReadExecOptions,
         );
         const val = (typeof raw === 'string' ? raw : raw.toString('utf-8')).trim();
         if (val) return val;
@@ -231,7 +236,7 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
           const raw = execFileSync(
             'security',
             ['find-generic-password', '-s', candidate, '-a', account, '-w'],
-            keyringExecOptions,
+            keyringReadExecOptions,
           );
           const val = (typeof raw === 'string' ? raw : raw.toString('utf-8')).trim();
           if (val) return val;
