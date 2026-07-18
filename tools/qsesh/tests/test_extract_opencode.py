@@ -98,11 +98,10 @@ def _render_events(snapshot: SourceSnapshot) -> bytes:
     )
 
 
-def _expect_schema_error(snapshot: SourceSnapshot, phase: str) -> QseshError:
+def _expect_schema_error(snapshot: SourceSnapshot) -> QseshError:
     with pytest.raises(QseshError) as caught:
         OpenCodeExtractor().extract(snapshot)
     assert caught.value.code == "QS-E-SOURCE-SCHEMA"
-    assert caught.value.phase == phase
     assert "USER_ALPHA" not in str(caught.value)
     return caught.value
 
@@ -180,24 +179,17 @@ def test_schema_registry_binds_t11_jsonl_to_observed_export_contract() -> None:
     assert OPENCODE_OBSERVED_SCHEMA_FINGERPRINT == (
         "5a6076f647ae5fcc6ba74d82940712985341e3d803b649e65e29824c35e46721"
     )
-    _expect_schema_error(
-        _snapshot(fingerprint="opencode-export-jsonl-v2"),
-        "opencode-schema-fingerprint",
-    )
+    assert _expect_schema_error(_snapshot(fingerprint="opencode-export-jsonl-v2")).phase == "opencode-schema-fingerprint"
 
 
 def test_source_digest_harness_and_harness_version_are_bound() -> None:
-    _expect_schema_error(
-        replace(_snapshot(), source_digest="0" * 64), "extractor-source-digest"
-    )
+    assert _expect_schema_error(replace(_snapshot(), source_digest="0" * 64)).phase == "extractor-source-digest"
     foreign = replace(
         _snapshot(),
         candidate=replace(_snapshot().candidate, harness=Harness.CODEX),
     )
-    _expect_schema_error(foreign, "opencode-harness")
-    _expect_schema_error(
-        _snapshot(harness_version="1.17.16"), "opencode-harness-version"
-    )
+    assert _expect_schema_error(foreign).phase == "opencode-harness"
+    assert _expect_schema_error(_snapshot(harness_version="1.17.16")).phase == "opencode-harness-version"
 
 
 @pytest.mark.parametrize(
@@ -213,7 +205,7 @@ def test_source_digest_harness_and_harness_version_are_bound() -> None:
 def test_malformed_incomplete_blank_duplicate_and_nonfinite_json_quarantine_whole_session(
     raw: bytes,
 ) -> None:
-    _expect_schema_error(_snapshot(raw), "extractor-jsonl")
+    assert _expect_schema_error(_snapshot(raw)).phase == "extractor-jsonl"
 
 
 @pytest.mark.parametrize("mutation", ["missing", "extra", "version"])
@@ -225,7 +217,7 @@ def test_canonical_session_row_has_exact_envelope(mutation: str) -> None:
         rows[0]["extra"] = "USER_ALPHA"
     else:
         rows[0]["schema_version"] = 2
-    _expect_schema_error(_snapshot_rows(rows), "opencode-row-schema")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "opencode-row-schema"
 
 
 @pytest.mark.parametrize("mutation", ["missing", "duplicate", "after-message"])
@@ -237,14 +229,14 @@ def test_session_row_is_exactly_once_and_first(mutation: str) -> None:
         rows.insert(1, dict(rows[0]))
     else:
         rows[0], rows[1] = rows[1], rows[0]
-    _expect_schema_error(_snapshot_rows(rows), "opencode-row-order")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "opencode-row-order"
 
 
 @pytest.mark.parametrize("row_kind", [None, 1, "../../private", "unknown"])
 def test_canonical_row_kind_is_required_safe_and_allowlisted(row_kind: object) -> None:
     rows = _canonical_rows()
     rows[1]["kind"] = row_kind
-    _expect_schema_error(_snapshot_rows(rows), "opencode-row-kind")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "opencode-row-kind"
 
 
 @pytest.mark.parametrize("mutation", ["gap", "repeat", "part-before-message"])
@@ -256,7 +248,7 @@ def test_message_and_part_indices_preserve_export_order(mutation: str) -> None:
         rows[5]["part_index"] = 0
     else:
         rows[1], rows[2] = rows[2], rows[1]
-    _expect_schema_error(_snapshot_rows(rows), "opencode-row-order")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "opencode-row-order"
 
 
 @pytest.mark.parametrize("mutation", ["id", "version", "time", "keys"])
@@ -273,14 +265,14 @@ def test_session_info_has_exact_identity_version_time_and_allowed_fields(
         info["time"] = {"created": "bad", "updated": 1}
     else:
         info["extra"] = "USER_ALPHA"
-    _expect_schema_error(_snapshot_export(export), "opencode-session-info")
+    assert _expect_schema_error(_snapshot_export(export)).phase == "opencode-session-info"
 
 
 @pytest.mark.parametrize("created", [True, -1, "bad", None])
 def test_epoch_milliseconds_are_nonnegative_integers(created: object) -> None:
     export = _export()
     export["messages"][0]["info"]["time"]["created"] = created
-    _expect_schema_error(_snapshot_export(export), "opencode-message-info")
+    assert _expect_schema_error(_snapshot_export(export)).phase == "opencode-message-info"
 
 
 def test_epoch_milliseconds_normalize_to_utc_without_local_timezone() -> None:
@@ -305,13 +297,13 @@ def test_message_and_part_identity_links_are_exact(mutation: str) -> None:
         export["messages"][1]["parts"][0]["messageID"] = "message-other"
     else:
         export["messages"][1]["parts"][0]["sessionID"] = "ses_other"
-    _expect_schema_error(_snapshot_export(export), "opencode-identity")
+    assert _expect_schema_error(_snapshot_export(export)).phase == "opencode-identity"
 
 
 def test_optional_synthetic_user_text_marker_must_be_boolean() -> None:
     export = _export()
     export["messages"][0]["parts"][0]["synthetic"] = "true"
-    _expect_schema_error(_snapshot_export(export), "opencode-text")
+    assert _expect_schema_error(_snapshot_export(export)).phase == "opencode-text"
 
 
 @pytest.mark.parametrize("mutation", ["role", "keys", "time"])
@@ -324,7 +316,7 @@ def test_message_info_role_keys_and_time_are_exact(mutation: str) -> None:
         info["extra"] = "USER_ALPHA"
     else:
         info["time"] = {}
-    _expect_schema_error(_snapshot_export(export), "opencode-message-info")
+    assert _expect_schema_error(_snapshot_export(export)).phase == "opencode-message-info"
 
 
 def test_session_and_message_reported_usage_and_cost_keep_scope_source_unit_model() -> (
@@ -379,14 +371,14 @@ def test_partial_reported_tokens_are_preserved_without_filling_missing_fields() 
 def test_invalid_token_shapes_are_rejected(tokens: object) -> None:
     export = _export()
     export["info"]["tokens"] = tokens
-    _expect_schema_error(_snapshot_export(export), "opencode-usage")
+    assert _expect_schema_error(_snapshot_export(export)).phase == "opencode-usage"
 
 
 @pytest.mark.parametrize("cost", [True, -1, "bad", {}, []])
 def test_invalid_cost_values_are_rejected(cost: object) -> None:
     export = _export()
     export["info"]["cost"] = cost
-    _expect_schema_error(_snapshot_export(export), "opencode-cost")
+    assert _expect_schema_error(_snapshot_export(export)).phase == "opencode-cost"
 
 
 def test_reasoning_and_assistant_prose_keep_model_provider_and_separate_kinds() -> None:
@@ -416,7 +408,7 @@ def test_part_envelope_and_ids_are_exact(mutation: str) -> None:
     else:
         part["id"] = export["messages"][0]["parts"][0]["id"]
     phase = "opencode-part-type" if mutation == "type" else "opencode-identity"
-    _expect_schema_error(_snapshot_export(export), phase)
+    assert _expect_schema_error(_snapshot_export(export)).phase == phase
 
 
 @pytest.mark.parametrize(
@@ -435,7 +427,7 @@ def test_generic_tool_state_is_exact_and_completed(mutation: str) -> None:
         part["state"]["output"] = 1
     else:
         part["tool"] = "../../private"
-    _expect_schema_error(_snapshot_export(export), "opencode-tool")
+    assert _expect_schema_error(_snapshot_export(export)).phase == "opencode-tool"
 
 
 def test_generic_tool_emits_linked_call_then_result_and_mcp_flag() -> None:
@@ -461,7 +453,7 @@ def test_skill_tool_requires_exact_completed_safe_name(mutation: str) -> None:
         part["state"]["input"]["name"] = "../../private"
     else:
         part["state"]["input"]["extra"] = "USER_ALPHA"
-    _expect_schema_error(_snapshot_export(export), "opencode-skill")
+    assert _expect_schema_error(_snapshot_export(export)).phase == "opencode-skill"
 
 
 @pytest.mark.parametrize("mutation", ["agent", "unsafe", "prompt", "extra"])
@@ -476,7 +468,7 @@ def test_subtask_requires_exact_safe_agent_and_prompt(mutation: str) -> None:
         part["prompt"] = 1
     else:
         part["extra"] = "USER_ALPHA"
-    _expect_schema_error(_snapshot_export(export), "opencode-subagent")
+    assert _expect_schema_error(_snapshot_export(export)).phase == "opencode-subagent"
 
 
 def test_skill_subagent_compaction_file_and_unknown_are_typed_without_policy() -> None:
@@ -497,7 +489,7 @@ def test_tail_part_shapes_are_exact(mutation: str) -> None:
     indices = {"compaction": 5, "file": 6, "unknown": 7}
     part = export["messages"][1]["parts"][indices[mutation]]
     part["extra"] = "USER_ALPHA"
-    _expect_schema_error(_snapshot_export(export), f"opencode-{mutation}")
+    assert _expect_schema_error(_snapshot_export(export)).phase == f"opencode-{mutation}"
 
 
 def test_user_and_assistant_text_are_preserved_exactly() -> None:

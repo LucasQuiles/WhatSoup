@@ -67,11 +67,10 @@ def _render_events(snapshot: SourceSnapshot) -> bytes:
     return dump_jsonl(rows)
 
 
-def _expect_schema_error(snapshot: SourceSnapshot, phase: str) -> QseshError:
+def _expect_schema_error(snapshot: SourceSnapshot) -> QseshError:
     with pytest.raises(QseshError) as caught:
         ClaudeExtractor().extract(snapshot)
     assert caught.value.code == "QS-E-SOURCE-SCHEMA"
-    assert caught.value.phase == phase
     assert "USER_ALPHA" not in str(caught.value)
     return caught.value
 
@@ -167,7 +166,7 @@ def test_missing_usage_is_truthfully_absent_not_synthesized() -> None:
 def test_partial_wrong_type_or_negative_usage_is_rejected(usage: object) -> None:
     rows = _rows()
     rows[2]["message"]["usage"] = usage
-    _expect_schema_error(_snapshot_rows(rows), "claude-usage")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "claude-usage"
 
 
 def test_schema_registry_binds_unclassified_snapshot_to_observed_contract() -> None:
@@ -175,14 +174,12 @@ def test_schema_registry_binds_unclassified_snapshot_to_observed_contract() -> N
     assert CLAUDE_OBSERVED_SCHEMA_FINGERPRINT == (
         "3b974511186301c11dd9c67a724b8e83fc6b4a42f9fb1029c0dd9b9b1603eaf3"
     )
-    _expect_schema_error(
-        _snapshot(fingerprint="unknown-jsonl-v2"), "claude-schema-fingerprint"
-    )
+    assert _expect_schema_error(_snapshot(fingerprint="unknown-jsonl-v2")).phase == "claude-schema-fingerprint"
 
 
 def test_source_digest_mismatch_is_rejected_before_any_row_dispatch() -> None:
     snapshot = replace(_snapshot(), source_digest="0" * 64)
-    _expect_schema_error(snapshot, "extractor-source-digest")
+    assert _expect_schema_error(snapshot).phase == "extractor-source-digest"
 
 
 @pytest.mark.parametrize(
@@ -198,7 +195,7 @@ def test_source_digest_mismatch_is_rejected_before_any_row_dispatch() -> None:
 def test_malformed_incomplete_blank_duplicate_and_nonfinite_json_quarantine_whole_session(
     raw: bytes,
 ) -> None:
-    _expect_schema_error(_snapshot(raw), "extractor-jsonl")
+    assert _expect_schema_error(_snapshot(raw)).phase == "extractor-jsonl"
 
 
 @pytest.mark.parametrize(
@@ -208,7 +205,7 @@ def test_malformed_incomplete_blank_duplicate_and_nonfinite_json_quarantine_whol
 def test_invalid_or_naive_timestamp_is_rejected(timestamp: object) -> None:
     rows = _rows()
     rows[1]["timestamp"] = timestamp
-    _expect_schema_error(_snapshot_rows(rows), "extractor-timestamp")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "extractor-timestamp"
 
 
 def test_timestamp_offset_normalizes_once_to_utc() -> None:
@@ -227,7 +224,7 @@ def test_missing_or_duplicate_tool_call_id_rejects_all_events(mutation: str) -> 
         del tool["id"]
     else:
         content.append(dict(tool))
-    _expect_schema_error(_snapshot_rows(rows), "claude-tool-call")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "claude-tool-call"
 
 
 @pytest.mark.parametrize("mutation", ["missing", "unknown", "duplicate"])
@@ -240,7 +237,7 @@ def test_tool_result_requires_one_prior_unconsumed_call_id(mutation: str) -> Non
         result["tool_use_id"] = "tool-unknown"
     else:
         rows[3]["message"]["content"].append(dict(result))
-    _expect_schema_error(_snapshot_rows(rows), "claude-tool-result")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "claude-tool-result"
 
 
 def test_command_message_collapses_to_skill_without_user_prose() -> None:
@@ -255,7 +252,7 @@ def test_command_message_collapses_to_skill_without_user_prose() -> None:
 def test_malformed_command_contract_is_rejected() -> None:
     rows = _rows()
     rows[4]["message"]["content"] = "/different"
-    _expect_schema_error(_snapshot_rows(rows), "claude-command")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "claude-command"
 
 
 def test_sidechain_is_one_subagent_event_not_assistant_prose() -> None:
@@ -269,7 +266,7 @@ def test_sidechain_is_one_subagent_event_not_assistant_prose() -> None:
 def test_sidechain_without_agent_is_rejected() -> None:
     rows = _rows()
     del rows[5]["agent"]
-    _expect_schema_error(_snapshot_rows(rows), "claude-sidechain")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "claude-sidechain"
 
 
 def test_compaction_preserves_reason_and_text_without_distilling() -> None:
@@ -282,7 +279,7 @@ def test_compaction_preserves_reason_and_text_without_distilling() -> None:
 def test_compaction_without_reason_is_rejected() -> None:
     rows = _rows()
     rows[6]["compact_metadata"] = {}
-    _expect_schema_error(_snapshot_rows(rows), "claude-compaction")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "claude-compaction"
 
 
 def test_attachment_and_approved_unknown_row_are_nonlossy_meta_events() -> None:
@@ -295,13 +292,13 @@ def test_attachment_and_approved_unknown_row_are_nonlossy_meta_events() -> None:
 def test_attachment_without_file_name_is_rejected() -> None:
     rows = _rows()
     del rows[7]["attachments"][0]["name"]
-    _expect_schema_error(_snapshot_rows(rows), "claude-attachment")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "claude-attachment"
 
 
 def test_unsafe_unknown_row_type_is_rejected() -> None:
     rows = _rows()
     rows[8]["type"] = "../../private"
-    _expect_schema_error(_snapshot_rows(rows), "claude-row-type")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "claude-row-type"
 
 
 def test_text_is_preserved_exactly_without_normalization() -> None:
@@ -317,11 +314,11 @@ def test_foreign_harness_and_candidate_identity_mismatch_are_rejected() -> None:
         snapshot,
         candidate=replace(snapshot.candidate, harness=Harness.CODEX),
     )
-    _expect_schema_error(foreign, "claude-harness")
+    assert _expect_schema_error(foreign).phase == "claude-harness"
 
     rows = _rows()
     rows[0]["uuid"] = "session-other"
-    _expect_schema_error(_snapshot_rows(rows), "claude-session-identity")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "claude-session-identity"
 
 
 def test_production_extractor_is_parse_only_and_has_no_policy_or_store_imports() -> (

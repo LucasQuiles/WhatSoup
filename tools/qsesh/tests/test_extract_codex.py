@@ -67,11 +67,10 @@ def _render_events(snapshot: SourceSnapshot) -> bytes:
     return dump_jsonl(rows)
 
 
-def _expect_schema_error(snapshot: SourceSnapshot, phase: str) -> QseshError:
+def _expect_schema_error(snapshot: SourceSnapshot) -> QseshError:
     with pytest.raises(QseshError) as caught:
         CodexExtractor().extract(snapshot)
     assert caught.value.code == "QS-E-SOURCE-SCHEMA"
-    assert caught.value.phase == phase
     assert "USER_ALPHA" not in str(caught.value)
     return caught.value
 
@@ -109,15 +108,11 @@ def test_schema_registry_binds_jsonl_snapshot_to_observed_contract() -> None:
     assert CODEX_OBSERVED_SCHEMA_FINGERPRINT == (
         "d60edba4b9c2f506e0dc6c2f9fb3d4fdea57253a2ab9109d85a876dab71f9b12"
     )
-    _expect_schema_error(
-        _snapshot(fingerprint="unknown-jsonl-v2"), "codex-schema-fingerprint"
-    )
+    assert _expect_schema_error(_snapshot(fingerprint="unknown-jsonl-v2")).phase == "codex-schema-fingerprint"
 
 
 def test_source_digest_mismatch_is_rejected_before_dispatch() -> None:
-    _expect_schema_error(
-        replace(_snapshot(), source_digest="0" * 64), "extractor-source-digest"
-    )
+    assert _expect_schema_error(replace(_snapshot(), source_digest="0" * 64)).phase == "extractor-source-digest"
 
 
 @pytest.mark.parametrize(
@@ -133,14 +128,14 @@ def test_source_digest_mismatch_is_rejected_before_dispatch() -> None:
 def test_malformed_incomplete_blank_duplicate_and_nonfinite_json_quarantine_whole_session(
     raw: bytes,
 ) -> None:
-    _expect_schema_error(_snapshot(raw), "extractor-jsonl")
+    assert _expect_schema_error(_snapshot(raw)).phase == "extractor-jsonl"
 
 
 @pytest.mark.parametrize("timestamp", ["2026-01-02T08:04:06", "bad", 1, None])
 def test_invalid_or_naive_timestamp_is_rejected(timestamp: object) -> None:
     rows = _rows()
     rows[1]["timestamp"] = timestamp
-    _expect_schema_error(_snapshot_rows(rows), "extractor-timestamp")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "extractor-timestamp"
 
 
 def test_timestamp_offset_uses_only_the_shared_normalizer() -> None:
@@ -157,14 +152,14 @@ def test_top_level_keys_are_exact_for_every_row(mutation: str) -> None:
         del rows[1]["payload"]
     else:
         rows[1]["extra"] = "USER_ALPHA"
-    _expect_schema_error(_snapshot_rows(rows), "codex-row-keys")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "codex-row-keys"
 
 
 @pytest.mark.parametrize("raw_type", [None, 1, "../../private", "unknown_top"])
 def test_top_level_type_is_required_safe_and_allowlisted(raw_type: object) -> None:
     rows = _rows()
     rows[1]["type"] = raw_type
-    _expect_schema_error(_snapshot_rows(rows), "codex-row-type")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "codex-row-type"
 
 
 @pytest.mark.parametrize("mutation", ["id", "session_id", "model", "cwd", "extra"])
@@ -177,7 +172,7 @@ def test_session_metadata_has_exact_identity_and_string_contract(mutation: str) 
         payload[mutation] = "session-other"
     else:
         payload[mutation] = 1
-    _expect_schema_error(_snapshot_rows(rows), "codex-session-meta")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "codex-session-meta"
 
 
 @pytest.mark.parametrize(
@@ -197,14 +192,14 @@ def test_user_message_payload_contract_is_exact(mutation: str, phase: str) -> No
         payload["type"] = "other"
     else:
         payload["message"] = 1
-    _expect_schema_error(_snapshot_rows(rows), phase)
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == phase
 
 
 @pytest.mark.parametrize("raw_summary", [[], {}, [{"type": "other", "text": "x"}]])
 def test_reasoning_summary_requires_typed_ordered_items(raw_summary: object) -> None:
     rows = _rows()
     rows[2]["payload"]["summary"] = raw_summary
-    _expect_schema_error(_snapshot_rows(rows), "codex-reasoning")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "codex-reasoning"
 
 
 def test_reasoning_stays_reasoning_and_never_becomes_assistant_prose() -> None:
@@ -228,7 +223,7 @@ def test_assistant_message_and_content_keys_are_exact(mutation: str) -> None:
         payload["content"][0]["type"] = "input_text"
     else:
         payload["content"][0]["extra"] = "USER_ALPHA"
-    _expect_schema_error(_snapshot_rows(rows), "codex-assistant-message")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "codex-assistant-message"
 
 
 @pytest.mark.parametrize(
@@ -238,7 +233,7 @@ def test_assistant_message_and_content_keys_are_exact(mutation: str) -> None:
 def test_tool_arguments_must_be_a_strict_json_object(arguments: str) -> None:
     rows = _rows()
     rows[4]["payload"]["arguments"] = arguments
-    _expect_schema_error(_snapshot_rows(rows), "codex-tool-call")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "codex-tool-call"
 
 
 @pytest.mark.parametrize("mutation", ["missing", "duplicate"])
@@ -248,7 +243,7 @@ def test_tool_calls_require_unique_nonempty_call_ids(mutation: str) -> None:
         del rows[4]["payload"]["call_id"]
     else:
         rows.insert(5, dict(rows[4]))
-    _expect_schema_error(_snapshot_rows(rows), "codex-tool-call")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "codex-tool-call"
 
 
 @pytest.mark.parametrize("mutation", ["missing", "unknown", "duplicate"])
@@ -261,7 +256,7 @@ def test_tool_results_require_one_prior_unconsumed_call(mutation: str) -> None:
         result["call_id"] = "tool-unknown"
     else:
         rows.insert(6, dict(rows[5]))
-    _expect_schema_error(_snapshot_rows(rows), "codex-tool-result")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "codex-tool-result"
 
 
 @pytest.mark.parametrize(
@@ -270,7 +265,7 @@ def test_tool_results_require_one_prior_unconsumed_call(mutation: str) -> None:
 def test_skill_call_requires_exact_safe_name_argument(arguments: str) -> None:
     rows = _rows()
     rows[6]["payload"]["arguments"] = arguments
-    _expect_schema_error(_snapshot_rows(rows), "codex-skill")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "codex-skill"
 
 
 def test_skill_is_not_counted_as_a_generic_tool_call() -> None:
@@ -295,7 +290,7 @@ def test_skill_is_not_counted_as_a_generic_tool_call() -> None:
 def test_subagent_call_requires_exact_agent_and_prompt(arguments: str) -> None:
     rows = _rows()
     rows[7]["payload"]["arguments"] = arguments
-    _expect_schema_error(_snapshot_rows(rows), "codex-subagent")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "codex-subagent"
 
 
 def test_subagent_call_is_one_activity_not_assistant_or_tool_prose() -> None:
@@ -309,7 +304,7 @@ def test_subagent_call_is_one_activity_not_assistant_or_tool_prose() -> None:
 def test_compaction_requires_typed_ordered_summary(summary: object) -> None:
     rows = _rows()
     rows[8]["payload"]["summary"] = summary
-    _expect_schema_error(_snapshot_rows(rows), "codex-compaction")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "codex-compaction"
 
 
 @pytest.mark.parametrize("mutation", ["attachment_type", "id", "extra"])
@@ -322,7 +317,7 @@ def test_attachment_payload_contract_is_exact(mutation: str) -> None:
         attachment["id"] = 1
     else:
         attachment["extra"] = "USER_ALPHA"
-    _expect_schema_error(_snapshot_rows(rows), "codex-attachment")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "codex-attachment"
 
 
 def test_approved_safe_unknown_payload_is_a_content_free_meta_event() -> None:
@@ -338,7 +333,7 @@ def test_unknown_payload_type_must_still_be_a_safe_discriminator(
 ) -> None:
     rows = _rows()
     rows[10]["payload"]["type"] = payload_type
-    _expect_schema_error(_snapshot_rows(rows), "codex-payload-type")
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "codex-payload-type"
 
 
 def test_missing_cost_and_token_fields_remain_absent_without_synthesis() -> None:
@@ -360,7 +355,7 @@ def test_foreign_harness_is_rejected() -> None:
     foreign = replace(
         snapshot, candidate=replace(snapshot.candidate, harness=Harness.CLAUDE)
     )
-    _expect_schema_error(foreign, "codex-harness")
+    assert _expect_schema_error(foreign).phase == "codex-harness"
 
 
 def test_production_extractor_is_parse_only_and_uses_shared_timestamp_helper() -> None:
