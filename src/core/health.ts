@@ -285,6 +285,30 @@ const RECENT_DISCONNECT_DEGRADED_THRESHOLD = 3;
 const EMPTY_OUTPUT_DEGRADE_DEBOUNCE_MS = 60 * 1000; // 1 minute
 const EMPTY_OUTPUT_STALE_MS = 15 * 60 * 1000; // 15 minutes
 
+// S-04a — stale model-usability evidence must not read as a healthy green.
+// A bot whose usability probe went stale WHILE it was actively turning has a
+// genuine probe-refresh failure and should degrade. A legitimately idle bot,
+// however, has naturally stale evidence (no turn to refresh it) and must stay
+// healthy — so the degrade is gated on recent turn reliance, not staleness
+// alone (owner decision 2026-07-17). A bot that has never turned is treated as
+// idle: its stale evidence is benign here (the usability probe still catches a
+// hard failure via model_usable===false independently).
+export const MODEL_STALE_RELIANCE_MS = 30 * 60 * 1000; // 30 minutes
+
+export function modelEvidenceStaleWhileRelied(
+  tc: {
+    model_usable_stale: boolean | null;
+    last_successful_turn_at: number | null;
+    last_turn_error_at: number | null;
+  } | null,
+  now: number,
+): boolean {
+  if (tc === null || tc.model_usable_stale !== true) return false;
+  const lastTurnActivityAt = Math.max(tc.last_successful_turn_at ?? 0, tc.last_turn_error_at ?? 0);
+  if (lastTurnActivityAt <= 0) return false; // never turned → idle → benign
+  return now - lastTurnActivityAt <= MODEL_STALE_RELIANCE_MS;
+}
+
 type AuthFailureClass =
   | 'none'
   | 'pairing_required'
@@ -1175,7 +1199,9 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         (emptyOutputError ? emptyOutputIsDegrading : true);
       const turnCapabilityIsDegraded =
         turnCapability !== null &&
-        (turnCapability.model_usable === false || turnCapabilityErrorIsDegraded);
+        (turnCapability.model_usable === false
+          || turnCapabilityErrorIsDegraded
+          || modelEvidenceStaleWhileRelied(turnCapability, Date.now()));
 
       // Determine health status.
       // Enrichment staleness only matters if enrichment has actually run before

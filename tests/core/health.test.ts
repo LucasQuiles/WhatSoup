@@ -1270,6 +1270,46 @@ describe('GET /health', () => {
     db2.close();
   });
 
+  it('degrades top-level status when model evidence is stale AND a turn was recently attempted (S-04a)', async () => {
+    // Stale usability evidence WHILE the model was recently relied upon is a
+    // genuine probe-refresh failure — it must not read as a healthy green. (A
+    // never-turned idle bot with stale evidence stays healthy; that case is the
+    // #1392 test above, which asserts field threading without a degrade.)
+    db.close();
+    const db2 = makeDb();
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'healthy',
+        details: {
+          active: true,
+          turnCapability: {
+            modelUsable: null,
+            modelUsableStale: true,
+            modelUsableCheckedAt: Date.now() - 60 * 60 * 1000,
+            modelUsabilityStatus: 'usable',
+            lastSuccessfulTurnAt: Date.now() - 60_000, // relied upon 1 min ago
+            lastTurnErrorClass: null,
+            lastTurnErrorAt: null,
+          },
+        },
+      }),
+      getFallbackState: () => null,
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.status).toBe('degraded');
+    expect(json.turn_capability.model_usable_stale).toBe(true);
+    db2.close();
+  });
+
   it('propagates degraded runtime snapshots to the top-level health status', async () => {
     db.close();
     const db2 = makeDb();
