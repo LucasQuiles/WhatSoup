@@ -338,6 +338,32 @@ describe('SessionManager spawn-per-turn child handlers (opencode-cli)', () => {
     expect(info.signal).toBe('SIGTERM');
   });
 
+  it('a clean spawn-per-turn exit clears the child so the next turn does not reap the dead one (#1861)', async () => {
+    const spawnMock = spawn as ReturnType<typeof vi.fn>;
+    const { sm } = await makeOpencodeSession();
+    const firstChild = child;
+
+    // Turn 1: deliver a terminal result, then a clean (code 0) exit.
+    await sm.sendTurn('one');
+    firstChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      type: 'step_finish', part: { reason: 'stop', tokens: { input: 1, output: 1 }, cost: 0 },
+    })));
+    firstChild._closeCb?.(0, null);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(firstChild.kill).not.toHaveBeenCalled();
+
+    // Turn 2: a fresh child. A clean exit must terminally retire this.child, so
+    // the turn-start guard does NOT try to reap the already-exited first tree
+    // (which on a real host can fail with "Cannot replace provider while prior
+    // process-tree cleanup is inconclusive").
+    const secondChild = makeHandlerChild(23456);
+    spawnMock.mockReturnValue(secondChild);
+    await sm.sendTurn('two');
+
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+    expect(firstChild.kill).not.toHaveBeenCalled();
+  });
+
   it('stops admitting later records in a chunk after a malformed record quarantines the session', async () => {
     const events: AgentEvent[] = [];
     let sm!: SessionManager;
