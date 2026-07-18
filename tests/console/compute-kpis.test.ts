@@ -45,6 +45,7 @@ const zeroKpis = {
   totalMedia: 0,
   staleExcluded: 0,
   connectivityUnknown: 0,
+  metricsUnavailable: 0,
 };
 
 describe('computeKpis', () => {
@@ -218,6 +219,9 @@ describe('computeKpis', () => {
       // an unproven row, not a confirmed disconnect. See the coverage
       // dimension tests below (#1881 criterion 5).
       connectivityUnknown: 1,
+      // None of these fixtures set metricAvailability — back-compat lines
+      // never trip the #1879 coverage counter.
+      metricsUnavailable: 0,
     });
   });
 
@@ -447,5 +451,58 @@ describe('computeKpis', () => {
     ]);
     expect(result.connected).toBe(0);
     expect(result.connectivityUnknown).toBe(0);
+  });
+
+  // ---------------------------------------------------------------------------
+  //  DB metric availability coverage (#1879 crit 3)
+  //
+  //  /api/lines used to turn a faulted DB read into an ordinary zero and
+  //  cache it, so a locked/schema-gapped DB lowered the fleet's message
+  //  totals exactly like a legitimately idle instance. `metricAvailability`
+  //  (enrichInstance, src/fleet/routes/lines.ts) tags each observation with
+  //  its status; computeKpis SKIPS an `unavailable` messageStats observation
+  //  out of totalSent/totalReceived/totalMedia and tallies it into
+  //  metricsUnavailable instead of folding it in as a real zero. A true zero
+  //  (status `available`) still counts normally — the exclusion is keyed on
+  //  status, not on the value happening to be zero.
+  // ---------------------------------------------------------------------------
+
+  it('excludes an unavailable messageStats observation from message totals and counts it as coverage', () => {
+    const result = computeKpis([
+      makeLine({
+        messageStats: { sent: 0, received: 0, images: 0, audio: 0, documents: 0 },
+        metricAvailability: { messageStats: 'unavailable' },
+      }),
+      makeLine({
+        messageStats: { sent: 10, received: 5, images: 1, audio: 0, documents: 0 },
+        metricAvailability: { messageStats: 'available' },
+      }),
+    ]);
+    expect(result.totalSent).toBe(10);
+    expect(result.totalReceived).toBe(5);
+    expect(result.totalMedia).toBe(1);
+    expect(result.metricsUnavailable).toBe(1);
+  });
+
+  it('counts a true zero (available) messageStats observation in totals, not as coverage', () => {
+    const result = computeKpis([
+      makeLine({
+        messageStats: { sent: 0, received: 0, images: 0, audio: 0, documents: 0 },
+        metricAvailability: { messageStats: 'available' },
+      }),
+    ]);
+    expect(result.totalSent).toBe(0);
+    expect(result.totalReceived).toBe(0);
+    expect(result.totalMedia).toBe(0);
+    expect(result.metricsUnavailable).toBe(0);
+  });
+
+  it('does not count metricsUnavailable when metricAvailability is absent (back-compat)', () => {
+    const result = computeKpis([
+      makeLine({ messageStats: { sent: 3, received: 2, images: 0, audio: 0, documents: 0 } }),
+    ]);
+    expect(result.totalSent).toBe(3);
+    expect(result.totalReceived).toBe(2);
+    expect(result.metricsUnavailable).toBe(0);
   });
 });

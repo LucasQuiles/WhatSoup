@@ -77,20 +77,41 @@ interface MessageStats {
 const DAILY_CACHE_TTL = 60_000; // 60 seconds
 
 /**
- * Generic cache-with-TTL helper. Returns the cached value if fresh, otherwise
- * calls queryFn, stores the result, and returns it.
+ * Per-metric DB availability (#1879). `available` is a genuine read (which
+ * may legitimately carry a zero/null value); `unavailable` is a failed or
+ * faulted read (locked DB, missing table/column) that must never be
+ * displayed or cached as if it were a real zero; `not_applicable` is a
+ * structurally-absent metric (e.g. session counts on a non-agent instance).
+ */
+type MetricAvailability = 'available' | 'unavailable' | 'not_applicable';
+
+/** A metric's value alongside the availability that produced it. */
+interface Observation<T> {
+  status: MetricAvailability;
+  value: T | null;
+}
+
+/**
+ * Generic cache-with-TTL helper. Returns the cached observation if fresh,
+ * otherwise calls queryFn and returns its result. Only stable states
+ * (`available` / `not_applicable`) are written to the cache — an
+ * `unavailable` observation is never cached (#1879 crit 2), so the next
+ * request re-probes immediately instead of replaying a stale failure for the
+ * remainder of the TTL window.
  */
 function cachedQuery<T>(
-  cache: Map<string, { data: T; cachedAt: number }>,
+  cache: Map<string, { data: Observation<T>; cachedAt: number }>,
   key: string,
   ttl: number,
-  queryFn: () => T,
-): T {
+  queryFn: () => Observation<T>,
+): Observation<T> {
   const now = Date.now();
   const cached = cache.get(key);
   if (cached && now - cached.cachedAt < ttl) return cached.data;
   const data = queryFn();
-  cache.set(key, { data, cachedAt: now });
+  if (data.status !== 'unavailable') {
+    cache.set(key, { data, cachedAt: now });
+  }
   return data;
 }
 
@@ -105,26 +126,29 @@ function pruneStaleCache<T>(
   }
 }
 
-const messageStatsCache = new Map<string, { data: MessageStats; cachedAt: number }>();
-const sessionCountCache = new Map<string, { data: number; cachedAt: number }>();
+const messageStatsCache = new Map<string, { data: Observation<MessageStats>; cachedAt: number }>();
+const sessionCountCache = new Map<string, { data: Observation<number>; cachedAt: number }>();
 
 /** Total lifetime agent sessions — 60s cache. */
-function getTotalSessions(dbReader: FleetDbReader, inst: DiscoveredInstance): number {
-  if (inst.type !== 'agent') return 0;
+function getTotalSessions(dbReader: FleetDbReader, inst: DiscoveredInstance): Observation<number> {
+  // Structurally absent, not a failed read — session counts don't apply to
+  // non-agent instances, so skip the DB entirely rather than probing it.
+  if (inst.type !== 'agent') return { status: 'not_applicable', value: 0 };
   return cachedQuery(sessionCountCache, inst.name, DAILY_CACHE_TTL, () => {
     const result = dbReader.query(inst.name, inst.dbPath, (db) => {
-      try {
-        const row = db.prepare('SELECT COUNT(*) as cnt FROM agent_sessions').get() as { cnt: number } | undefined;
-        return row?.cnt ?? 0;
-      } catch {
-        return 0; // table may not exist for non-agent instances
-      }
+      const row = db.prepare('SELECT COUNT(*) as cnt FROM agent_sessions').get() as { cnt: number } | undefined;
+      return row?.cnt ?? 0;
     });
-    return result.ok ? result.data : 0;
+    // #1879: a missing agent_sessions table used to be caught internally and
+    // reported as a legitimate 0. That catch is removed — the exception now
+    // reaches FleetDbReader.query's own try/catch (src/fleet/db-reader.ts),
+    // which reports it as the fault it is.
+    if (!result.ok) return { status: 'unavailable', value: null };
+    return { status: 'available', value: result.data };
   });
 }
 
-function getMessageStats(dbReader: FleetDbReader, inst: DiscoveredInstance): MessageStats {
+function getMessageStats(dbReader: FleetDbReader, inst: DiscoveredInstance): Observation<MessageStats> {
   return cachedQuery(messageStatsCache, inst.name, DAILY_CACHE_TTL, () => {
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
@@ -137,17 +161,17 @@ function getMessageStats(dbReader: FleetDbReader, inst: DiscoveredInstance): Mes
       return rows;
     });
 
+    if (!result.ok) return { status: 'unavailable', value: null };
+
     const stats: MessageStats = { sent: 0, received: 0, images: 0, audio: 0, documents: 0 };
-    if (result.ok) {
-      for (const row of result.data) {
-        if (row.is_from_me === 1) stats.sent += row.cnt;
-        else stats.received += row.cnt;
-        if (row.content_type === 'image') stats.images += row.cnt;
-        else if (row.content_type === 'audio') stats.audio += row.cnt;
-        else if (row.content_type === 'document') stats.documents += row.cnt;
-      }
+    for (const row of result.data) {
+      if (row.is_from_me === 1) stats.sent += row.cnt;
+      else stats.received += row.cnt;
+      if (row.content_type === 'image') stats.images += row.cnt;
+      else if (row.content_type === 'audio') stats.audio += row.cnt;
+      else if (row.content_type === 'document') stats.documents += row.cnt;
     }
-    return stats;
+    return { status: 'available', value: stats };
   });
 }
 
@@ -295,9 +319,9 @@ interface ChatCounts {
   groups: number;
 }
 
-const chatCountsCache = new Map<string, { data: ChatCounts; cachedAt: number }>();
+const chatCountsCache = new Map<string, { data: Observation<ChatCounts>; cachedAt: number }>();
 
-function getChatCounts(dbReader: FleetDbReader, inst: DiscoveredInstance): ChatCounts {
+function getChatCounts(dbReader: FleetDbReader, inst: DiscoveredInstance): Observation<ChatCounts> {
   return cachedQuery(chatCountsCache, inst.name, DAILY_CACHE_TTL, () => {
     const result = dbReader.query(inst.name, inst.dbPath, (db) => {
       const row = db.prepare(`
@@ -308,7 +332,8 @@ function getChatCounts(dbReader: FleetDbReader, inst: DiscoveredInstance): ChatC
       `).get() as { total: number; groups: number } | undefined;
       return { chats: (row?.total ?? 0) - (row?.groups ?? 0), groups: row?.groups ?? 0 };
     });
-    return result.ok ? result.data : { chats: 0, groups: 0 };
+    if (!result.ok) return { status: 'unavailable', value: null };
+    return { status: 'available', value: result.data };
   });
 }
 
@@ -317,20 +342,22 @@ interface TokenStats {
   output: number;
 }
 
-const tokenStatsCache = new Map<string, { data: TokenStats; cachedAt: number }>();
+const tokenStatsCache = new Map<string, { data: Observation<TokenStats>; cachedAt: number }>();
 
-function getTokenStats(dbReader: FleetDbReader, inst: DiscoveredInstance): TokenStats {
+function getTokenStats(dbReader: FleetDbReader, inst: DiscoveredInstance): Observation<TokenStats> {
   return cachedQuery(tokenStatsCache, inst.name, DAILY_CACHE_TTL, () => {
     const result = dbReader.query(inst.name, inst.dbPath, (db) => {
-      // Sum tokens from messages (chat runtime)
-      let msgInput = 0, msgOutput = 0;
-      try {
-        const row = db.prepare(
-          'SELECT COALESCE(SUM(input_tokens), 0) as i, COALESCE(SUM(output_tokens), 0) as o FROM messages'
-        ).get() as { i: number; o: number } | undefined;
-        msgInput = row?.i ?? 0;
-        msgOutput = row?.o ?? 0;
-      } catch { /* column may not exist yet */ }
+      // Sum tokens from messages (chat runtime). #1879: a missing
+      // input_tokens/output_tokens column (older schema) used to be caught
+      // internally and reported as a legitimate 0 — that catch is removed so
+      // the exception reaches FleetDbReader.query's own try/catch instead,
+      // reporting the whole tokenStats observation as unavailable rather
+      // than silently zeroing part of it.
+      const msgRow = db.prepare(
+        'SELECT COALESCE(SUM(input_tokens), 0) as i, COALESCE(SUM(output_tokens), 0) as o FROM messages'
+      ).get() as { i: number; o: number } | undefined;
+      const msgInput = msgRow?.i ?? 0;
+      const msgOutput = msgRow?.o ?? 0;
 
       // Sum tokens from agent_sessions (agent runtime). #1774: as of the
       // total_input_tokens/total_cache_read_tokens split, this dashboard
@@ -339,22 +366,20 @@ function getTokenStats(dbReader: FleetDbReader, inst: DiscoveredInstance): Token
       // genuinely-new-input figure. No consumer of this endpoint enforces a
       // budget/quota against it, so becoming smaller and accurate is a
       // straight improvement, not a behavior change requiring recalibration.
-      let sesInput = 0, sesOutput = 0;
-      try {
-        const row = db.prepare(
-          'SELECT COALESCE(SUM(total_input_tokens), 0) as i, COALESCE(SUM(total_output_tokens), 0) as o FROM agent_sessions'
-        ).get() as { i: number; o: number } | undefined;
-        sesInput = row?.i ?? 0;
-        sesOutput = row?.o ?? 0;
-      } catch { /* column may not exist yet */ }
+      const sesRow = db.prepare(
+        'SELECT COALESCE(SUM(total_input_tokens), 0) as i, COALESCE(SUM(total_output_tokens), 0) as o FROM agent_sessions'
+      ).get() as { i: number; o: number } | undefined;
+      const sesInput = sesRow?.i ?? 0;
+      const sesOutput = sesRow?.o ?? 0;
 
       return { input: msgInput + sesInput, output: msgOutput + sesOutput };
     });
-    return result.ok ? result.data : { input: 0, output: 0 };
+    if (!result.ok) return { status: 'unavailable', value: null };
+    return { status: 'available', value: result.data };
   });
 }
 
-const lastActiveCache = new Map<string, { data: string | null; cachedAt: number }>();
+const lastActiveCache = new Map<string, { data: Observation<string | null>; cachedAt: number }>();
 
 function pruneLineCaches(validNames: Set<string>): void {
   pruneStaleCache(messageStatsCache, validNames);
@@ -389,7 +414,7 @@ export function _resetLineCaches(): void {
 }
 
 /** Most recent message timestamp for an instance — 60s cache. */
-function getLastMessageTime(dbReader: FleetDbReader, inst: DiscoveredInstance): string | null {
+function getLastMessageTime(dbReader: FleetDbReader, inst: DiscoveredInstance): Observation<string | null> {
   return cachedQuery(lastActiveCache, inst.name, DAILY_CACHE_TTL, () => {
     const result = dbReader.query(inst.name, inst.dbPath, (db) => {
       const row = db.prepare(
@@ -398,17 +423,23 @@ function getLastMessageTime(dbReader: FleetDbReader, inst: DiscoveredInstance): 
       if (!row?.ts) return null;
       return toIsoFromUnix(row.ts);
     });
-    return result.ok ? result.data : null;
+    if (!result.ok) return { status: 'unavailable', value: null };
+    // A successful query with no messages yet is a genuine `null` — distinct
+    // from a failed query, which is also `null` but tagged `unavailable`.
+    return { status: 'available', value: result.data };
   });
 }
 
+/** Display-safe zero fallback for a failed/absent messageStats observation. */
+const ZERO_MESSAGE_STATS: MessageStats = { sent: 0, received: 0, images: 0, audio: 0, documents: 0 };
+
 interface EnrichOpts {
   messagesToday?: number;
-  messageStats?: MessageStats;
-  totalSessions?: number;
-  chatCounts?: ChatCounts;
-  tokenStats?: TokenStats;
-  lastMessageTime?: string | null;
+  messageStats?: Observation<MessageStats>;
+  totalSessions?: Observation<number>;
+  chatCounts?: Observation<ChatCounts>;
+  tokenStats?: Observation<TokenStats>;
+  lastMessageTime?: Observation<string | null>;
 }
 
 /** Build the enriched LineInstance object the console expects. */
@@ -446,6 +477,21 @@ export function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | 
     ?? (poll?.status === 'online' ? 'idle' : poll?.status === 'unreachable' ? 'error' : undefined)
     ?? null;
 
+  // Per-metric DB availability (#1879): one entry per DB-derived metric
+  // group, present only for groups this call site actually queried. The
+  // numeric/timestamp fields below keep their pre-existing shape (a
+  // display-safe fallback on failure) so existing consumers don't break —
+  // the availability lives alongside, not instead of, the value.
+  const metricAvailability: Partial<Record<
+    'messageStats' | 'sessions' | 'chatCounts' | 'tokenStats' | 'lastActivity',
+    MetricAvailability
+  >> = {};
+  if (opts.messageStats) metricAvailability.messageStats = opts.messageStats.status;
+  if (opts.totalSessions) metricAvailability.sessions = opts.totalSessions.status;
+  if (opts.chatCounts) metricAvailability.chatCounts = opts.chatCounts.status;
+  if (opts.tokenStats) metricAvailability.tokenStats = opts.tokenStats.status;
+  if (opts.lastMessageTime) metricAvailability.lastActivity = opts.lastMessageTime.status;
+
   return {
     // Discovery fields
     name: inst.name,
@@ -477,7 +523,7 @@ export function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | 
     lastActive: normalizeTimestamp(
       (dig(h, 'runtime', 'passive', 'lastActivityAt') as string | undefined)
       ?? (dig(h, 'runtime', 'agent', 'lastSessionStartedAt') as string | undefined)
-      ?? opts.lastMessageTime
+      ?? opts.lastMessageTime?.value
       ?? null
     ),
     unread: unread ?? 0,
@@ -485,17 +531,18 @@ export function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | 
     enrichmentUnprocessed: enrichmentUnprocessed ?? 0,
     activeSessions: activeSessions ?? 0,
     lastSessionStatus,
-    messageStats: opts.messageStats ?? null,
+    messageStats: opts.messageStats ? (opts.messageStats.value ?? ZERO_MESSAGE_STATS) : null,
     linkedStatus: linkedStatus.status,
     linkedStatusConfidence: linkedStatus.confidence,
     linkedStatusReason: linkedStatus.reason,
     linkedStatusEvidence: linkedStatus.evidence,
-    totalSessions: opts.totalSessions ?? 0,
+    totalSessions: opts.totalSessions?.value ?? 0,
     models: inst.models ?? null,
     sandboxPerChat: inst.sandboxPerChat ?? false,
-    chatCounts: opts.chatCounts ?? { chats: 0, groups: 0 },
-    tokenUsage: opts.tokenStats ?? { input: 0, output: 0 },
+    chatCounts: opts.chatCounts?.value ?? { chats: 0, groups: 0 },
+    tokenUsage: opts.tokenStats?.value ?? { input: 0, output: 0 },
     provider: inst.provider ?? 'claude-cli',
+    metricAvailability,
   };
 }
 
@@ -516,7 +563,8 @@ export function handleGetLines(
   const lines = Array.from(instances.values()).map((inst) => {
     const poll = statuses.get(inst.name);
     const stats = getMessageStats(deps.dbReader, inst);
-    const todayCount = stats.sent + stats.received;
+    const statsValue = stats.value ?? ZERO_MESSAGE_STATS;
+    const todayCount = statsValue.sent + statsValue.received;
     const totalSessions = getTotalSessions(deps.dbReader, inst);
     const chatCounts = getChatCounts(deps.dbReader, inst);
     const tokenStats = getTokenStats(deps.dbReader, inst);
@@ -554,7 +602,8 @@ export async function handleGetLine(
   } catch { /* config unreadable */ }
 
   // Compute real messagesToday for detail view (derived from stats)
-  const todayCount = stats.sent + stats.received;
+  const statsValue = stats.value ?? ZERO_MESSAGE_STATS;
+  const todayCount = statsValue.sent + statsValue.received;
 
   // Resolve LID admin phones to display-friendly phone numbers via lid_mappings DB.
   const adminPhones = instanceConfig.adminPhones as string[] | undefined;
