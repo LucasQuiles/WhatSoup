@@ -130,6 +130,56 @@ export function registerJoinCases(): void {
       inventoryStdout.path,
     ]);
 
+    const measurement = validStream('feedback-measurements.json');
+    const measurementProducer = {
+      ...validAttempt(),
+      id: 'feedback-green',
+      stdout: validStream('attempts/feedback-green/stdout.log'),
+      stderr: validStream('attempts/feedback-green/stderr.log'),
+      declaredOutputs: [measurement.path],
+      outputAdmissions: [{
+        path: measurement.path,
+        state: 'admitted' as const,
+        role: 'measurement' as const,
+        sha256: measurement.sha256,
+        bytes: measurement.bytes,
+      }],
+      structuredResult: validStream('attempts/feedback-green/structured-result.json'),
+    };
+    const measurementConsumer = {
+      ...validAttempt(),
+      id: 'feedback-budget',
+      stdout: validStream('attempts/feedback-budget/stdout.log'),
+      stderr: validStream('attempts/feedback-budget/stderr.log'),
+      declaredOutputs: [],
+      outputAdmissions: [],
+      structuredResult: structuredClone(measurement),
+    };
+    const measurementManifest = validManifest();
+    measurementManifest.attempts = [measurementProducer, measurementConsumer];
+    measurementManifest.artifacts = [{
+      path: measurement.path,
+      role: 'measurement',
+      producerAttemptId: measurementProducer.id,
+      sha256: measurement.sha256,
+      bytes: measurement.bytes,
+    }];
+    expect(childClosurePaths(measurementManifest).filter((entry) => entry === measurement.path))
+      .toEqual([measurement.path]);
+
+    for (const artifact of [
+      { ...measurementManifest.artifacts[0]!, producerAttemptId: 'other-attempt' },
+      { ...measurementManifest.artifacts[0]!, role: 'output' as const },
+      { ...measurementManifest.artifacts[0]!, sha256: SHA_B },
+      { ...measurementManifest.artifacts[0]!, bytes: 2 },
+    ]) {
+      const invalid = structuredClone(measurementManifest);
+      invalid.artifacts = [artifact];
+      expect(() => childClosurePaths(invalid)).toThrow(
+        'child closure contains duplicate logical paths',
+      );
+    }
+
     for (const artifact of [
       { ...manifest.artifacts[0]!, producerAttemptId: 'other-attempt' },
       { ...manifest.artifacts[0]!, sha256: SHA_B },

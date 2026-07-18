@@ -344,7 +344,20 @@ export function childClosurePaths(manifest: BoundaryRunManifest): string[] {
         && artifact.sha256 === stream.sha256
         && artifact.bytes === stream.bytes
       ));
-    if (!isExactStructuredResultAlias && !isExactAttemptStreamAlias) paths.push(artifact.path);
+    const isExactAdmittedOutputAlias = producerAttempt !== undefined
+      && paths.includes(artifact.path)
+      && producerAttempt.outputAdmissions.some((output) => (
+        output.state === 'admitted'
+        && artifact.path === output.path
+        && artifact.role === output.role
+        && artifact.sha256 === output.sha256
+        && artifact.bytes === output.bytes
+      ));
+    if (!isExactStructuredResultAlias
+      && !isExactAttemptStreamAlias
+      && !isExactAdmittedOutputAlias) {
+      paths.push(artifact.path);
+    }
   }
   for (const review of manifest.reviews) {
     paths.push(review.reportPath, review.metaPath, review.stderrPath);
