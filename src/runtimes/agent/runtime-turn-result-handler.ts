@@ -170,6 +170,7 @@ export interface RuntimeResultHandlerPort {
     hadVisibleOutput: boolean,
     hadToolWork?: boolean,
     session?: SessionManager | null,
+    wasUnclassifiedError?: boolean,
   ): void;
   maybeArmFallbackAfterEmptyPrimaryTurn(
     queue: IOutboundQueue,
@@ -586,6 +587,13 @@ if (wasSilentCompact || hadCompactBoundary) {
       hadVisible || hadSuppressedReplySatisfaction,
       turnHadToolWork,
       session,
+      // An unclassified terminal error reached here (classified kinds return
+      // earlier): its non-empty raw error text made hadVisible true. Flag it as
+      // unproductive so a dead fallback entry advances — but ONLY when no real
+      // assistant text was streamed first (responseText empty). A turn that
+      // streamed a genuine partial reply and THEN errored still delivered output,
+      // so it must NOT count toward advancing past a working-but-flaky entry.
+      event.isError === true && responseText.trim() === '',
     );
     // Empty/tool-only turn: surface any still-pending handoff notice
     // standalone rather than deferring it to the next reply.
@@ -1066,8 +1074,16 @@ if (event.text) {
       // (usage-limit/rate-limit/server-error/…). Falling through instead would let
       // the '_(no response)_' empty-output guard fire a second, contradictory
       // message (recordTurnFailure('unknown-terminal') already recorded the
-      // capability failure at the top of this branch, so the finalizer's
-      // empty-output arm/record path is redundant here).
+      // capability failure at the top of this branch).
+      // If a fallback WINDOW is active, this error came from the fallback ENTRY,
+      // not the primary — route it through the dead-entry advance so we don't pin
+      // on a broken entry (no-op when no window is active; recordFallbackTurnOutcome
+      // early-returns). Pass the REAL turnHadVisibleOutput: when it is false (raw
+      // error suppressed, nothing streamed) the entry produced no output and the
+      // empty-advance path fires; when a genuine partial reply WAS streamed first
+      // (turnHadVisibleOutput true), the entry delivered output and must not be
+      // advanced past — so no wasUnclassifiedError override here.
+      host.recordFallbackTurnOutcome(queue, host.turnHadVisibleOutput, turnHadToolWork, host.session);
       host.singleTurnHadToolActivity = false;
       return;
     } else {

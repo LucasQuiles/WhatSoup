@@ -2423,8 +2423,8 @@ export class AgentRuntime implements Runtime {
       recordTurnCapabilitySuccess: (isUserTurnResult) => runtime.recordTurnCapabilitySuccess(isUserTurnResult),
       recordTurnCapabilityFailure: (isUserTurnResult, errorClass) =>
         runtime.recordTurnCapabilityFailure(isUserTurnResult, errorClass),
-      recordFallbackTurnOutcome: (queue, hadVisibleOutput, hadToolWork, session) =>
-        runtime.recordFallbackTurnOutcome(queue, hadVisibleOutput, hadToolWork, session),
+      recordFallbackTurnOutcome: (queue, hadVisibleOutput, hadToolWork, session, wasUnclassifiedError) =>
+        runtime.recordFallbackTurnOutcome(queue, hadVisibleOutput, hadToolWork, session, wasUnclassifiedError),
       maybeArmFallbackAfterEmptyPrimaryTurn: (queue, session, turnHadToolWork, mapKey) =>
         runtime.maybeArmFallbackAfterEmptyPrimaryTurn(queue, session, turnHadToolWork, mapKey),
       maybeArmFallbackAfterUnknownTerminal: (queue, session, turnHadToolWork, mapKey, isUserTurnResult, evidenceText) =>
@@ -8965,10 +8965,17 @@ export class AgentRuntime implements Runtime {
     hadVisibleOutput: boolean,
     hadToolWork: boolean = false,
     session: SessionManager | null = null,
+    wasUnclassifiedError: boolean = false,
   ): void {
     if (!this.isFallbackWindowActive) return;
     this.fallbackMetrics.recordServedTurn();
-    if (hadVisibleOutput || hadToolWork) {
+    // An UNCLASSIFIED terminal error from the active fallback ENTRY carries
+    // non-empty raw error text (suppressed from the user, replaced by a notice),
+    // so hadVisibleOutput is true even though the turn produced no usable reply.
+    // Treat it as unproductive like a structurally-empty turn — otherwise the
+    // reset below wipes the advance run every turn and the bot pins forever on a
+    // dead entry while a working entry waits behind it in the chain.
+    if ((hadVisibleOutput || hadToolWork) && !wasUnclassifiedError) {
       // The active entry produced a real reply — it is healthy. Clear the
       // empty-advance accounting so a later isolated empty turn starts fresh.
       this.fallbackEmptyAdvance.reset();
