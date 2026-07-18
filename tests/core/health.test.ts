@@ -58,6 +58,7 @@ vi.mock('../../src/logger.ts', () => ({
 // ---------------------------------------------------------------------------
 
 import { CURRENT_SCHEMA_MIGRATION, Database } from '../../src/core/database.ts';
+import { DurabilityEngine } from '../../src/core/durability.ts';
 import { seedChatAliases } from '../../src/core/chats-resolver.ts';
 import { createProfileRegistry } from '../../src/core/profiles.ts';
 import { createOutboundSendsWriter } from '../../src/core/outbound-sends.ts';
@@ -233,6 +234,34 @@ describe('GET /health', () => {
     expect(Number.isNaN(generatedAt)).toBe(false);
     expect(generatedAt).toBeGreaterThanOrEqual(requestedAt);
     expect(generatedAt).toBeLessThanOrEqual(receivedAt);
+  });
+
+  it('degrades and surfaces durability debt when an outbound delivery is stuck in maybe_sent past the stale window (#1865)', async () => {
+    const db2 = makeDb();
+    const durability = new DurabilityEngine(db2);
+    const id = durability.createOutboundOp({ conversationKey: 'k', chatJid: 'j', opType: 'text', payload: '{}', replayPolicy: 'unsafe' });
+    durability.markSending(id);
+    durability.markSubmitted(id, 'WA_MSG_1865');
+    durability.markMaybeSent(id, 'echo_timeout');
+    // One hour unresolved — well past the stale window.
+    db2.raw
+      .prepare(`UPDATE outbound_ops SET submitted_at = datetime('now', '-3600 seconds') WHERE id = ?`)
+      .run(id);
+
+    const { server: server2, port: port2 } = await buildTestServer(makeDeps(db2, { durability }));
+    try {
+      const { status, body } = await httpReq(port2, '/health', 'GET');
+      const json = JSON.parse(body);
+      // A connected instance is otherwise healthy; the stale maybe_sent must degrade it
+      // rather than read green (#1865). Degraded still returns 200.
+      expect(status).toBe(200);
+      expect(json.status).toBe('degraded');
+      expect(json.durability.maybeSentOutbound).toBe(1);
+      expect(json.durability.oldestMaybeSentAt).not.toBeNull();
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+      db2.close();
+    }
   });
 
   it('surfaces safe ARC binding metadata from runtime health', async () => {
