@@ -1775,6 +1775,13 @@ pass, require nonzero collected tests and no skip/todo/collection/unhandled erro
 additional or missing contract marker. Thus a generic “all BCF00” name match cannot hide an omitted
 negative or neighbor.
 
+Task test files are cumulative. For a task-specific RED/GREEN predicate, markers retained in the
+frozen entry roster from an earlier task must remain present and reach the reporter-generated state,
+but they do not enter the current predicate's marker count. RED accepts an earlier marker only when
+its exact entry-roster title is skipped by the current `--testNamePattern`; GREEN requires that title
+to pass cleanly. A current marker, a renamed predecessor title, or a newly added foreign marker can
+never use this exclusion.
+
 | RED / GREEN attempt | Exact test file set | Exact unsafe/safe marker roster and ordered case classes |
 |---|---|---|
 | `parser-red` / `parser-green` | `semantic-quality-check.test.ts` | `[BCF01-U01–U06]`: mode case, missing value, duplicate mode, duplicate head, duplicate no-receipt, duplicate target-ref; `[BCF01-S01]` preserves a current valid no-op invocation; `[BCF01-N01–N06]` are lowercase valid mode, present value, and one occurrence of each singleton including one full target ref |
@@ -2824,6 +2831,21 @@ placeholder surface is callable; it must not accept canonicalization behavior. B
 exact safe row while adding U01–10 and N01–10. Update the generated work index, commit this recovery
 doctrine, rerun BCF-00 and BCF-01 under fresh IDs, and include the safe scaffold row in the fresh
 BCF-02 profile-owned commit before initializing BCF-03.
+
+Nineteenth recovery note for finalized Recovery15 BCF-00 through BCF-03: BCF-04 initialization and
+producer inventory passed, but `receipt-red` rejected every reporter-skipped BCF-01/BCF-03 marker
+retained in its two cumulative test files as an unknown current marker. The same predicate would
+also count those predecessor markers during GREEN while simultaneously requiring their exact entry
+titles to remain, making the BCF-04 contract unreachable. No product assertion was accepted and no
+BCF-04 transition ran.
+
+Preserve Recovery15, its four finalized task receipts, and the failed BCF-04 run. Recover from
+pre-merge commit `1f650d41c5b3aecaee107a34764314a257f46b74` on a distinct branch. RED must ignore only an
+exact entry-roster predecessor marker that the current pattern skipped; GREEN must require every
+predecessor title to pass but count only current registered markers. Newly added foreign markers,
+renamed predecessor tests, selected skips/todos, and marker-count drift remain failures. Add a
+two-file cumulative BCF-04 RED/GREEN regression, commit the bounded helper/test/doctrine fix, and
+rerun BCF-00 through BCF-03 under fresh IDs before recreating BCF-04.
 
 ```bash
 git rev-parse --show-toplevel

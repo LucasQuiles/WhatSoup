@@ -570,6 +570,16 @@ fake-executable fallback/rejection checks into a dedicated test with direct asse
 test-integrity baseline is not changed. A fresh unfiltered integrity
 scan and complete BCF-00/01 replay are required before BCF-02 resumes.
 
+## 2026-07-17 cumulative marker recovery
+
+Recovery15 finalized and pushed BCF-00 through BCF-03, ending at
+`04134aaec9366c2e47e2e761f4dc533467505518`. BCF-04 then exposed an impossible helper contract:
+Vitest reports prior-task markers from cumulative files, RED rejected their reporter-generated skips
+as foreign, and GREEN counted them while also requiring their exact entry titles to remain. The
+failed run and its scaffold stash are preserved. Recovery16 fixes only marker admission: exact
+entry-roster predecessor tests remain mandatory, while only current registered markers satisfy the
+current predicate. A foreign or renamed marker still fails.
+
 ## Authorization Boundary
 
 The planning packet's initial approval authorized writing and committing the local specification,

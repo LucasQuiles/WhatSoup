@@ -620,6 +620,9 @@ export function validateBoundaryVitestJsonReport(input: Record<string, unknown>)
       continue;
     }
     observedFiles.push(observedPath);
+    const retainedAtEntry = new Set(
+      ((entryFiles.get(observedPath)?.['testNames'] as unknown[] | undefined) ?? []).map(String),
+    );
     const assertions = testFile['assertionResults'];
     if (!Array.isArray(assertions) || assertions.length === 0) {
       issues.push(issue('test-zero-collected', `Vitest report collected zero assertions for ${observedPath}`));
@@ -656,17 +659,27 @@ export function validateBoundaryVitestJsonReport(input: Record<string, unknown>)
       const observedMarker = markerMatches[0] ?? null;
       const failures = assertion['failureMessages'] as unknown[];
       if (predicateContract.mode === 'green') {
-        if (observedMarker !== null) observedMarkers.push(observedMarker);
+        if (observedMarker !== null && registeredMarkers.includes(observedMarker)) {
+          observedMarkers.push(observedMarker);
+        }
         if (status !== 'passed' || failures.length !== 0) {
           issues.push(issue('test-report-nonpass', `GREEN assertion is not a clean pass: ${assertion['title']}`));
         }
         continue;
       }
       if (observedMarker !== null && !registeredMarkers.includes(observedMarker)) {
-        issues.push(issue('test-marker-roster-mismatch', 'RED report contains an unknown contract marker'));
+        if (status !== 'skipped' || !retainedAtEntry.has(fullName)) {
+          issues.push(issue('test-marker-roster-mismatch', 'RED report contains an unknown contract marker'));
+        }
         continue;
       }
-      if (observedMarker === null || !selectedMarkers.includes(observedMarker)) {
+      if (observedMarker === null) {
+        if (status !== 'skipped' || !retainedAtEntry.has(fullName)) {
+          issues.push(issue('test-marker-roster-mismatch', 'RED selected an unregistered or unmarked assertion'));
+        }
+        continue;
+      }
+      if (!selectedMarkers.includes(observedMarker)) {
         if (status !== 'skipped') {
           issues.push(issue('test-marker-roster-mismatch', 'RED selected an unregistered or unmarked assertion'));
         }

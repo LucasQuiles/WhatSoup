@@ -1244,6 +1244,125 @@ export function registerSchemaCases(): void {
       .toContain('test-report-count-invalid');
   });
 
+  it('keeps cumulative predecessor markers without admitting them to the current predicate', () => {
+    const api = boundaryRun as unknown as {
+      RUN_TEST_CONTRACTS?: {
+        bcf04: {
+          unsafeMarkerIds: readonly string[];
+          safeMarkerIds: readonly string[];
+          neighborMarkerIds: readonly string[];
+        };
+      };
+      validateBoundaryVitestJsonReport?: (
+        input: Record<string, unknown>,
+      ) => ReturnType<typeof validateBoundaryRun>;
+    };
+    expect(typeof api.validateBoundaryVitestJsonReport).toBe('function');
+    expect(api.RUN_TEST_CONTRACTS?.bcf04).toBeDefined();
+    if (!api.validateBoundaryVitestJsonReport || !api.RUN_TEST_CONTRACTS) return;
+
+    const contract = api.RUN_TEST_CONTRACTS.bcf04;
+    const retainedContract = {
+      ancestorTitles: ['boundary contract'],
+      fullName: 'boundary contract [BCF03-U01] retained predecessor marker',
+      status: 'passed',
+      title: '[BCF03-U01] retained predecessor marker',
+      failureMessages: [] as string[],
+    };
+    const retainedCli = {
+      ancestorTitles: ['semantic quality CLI'],
+      fullName: 'semantic quality CLI [BCF01-U01] retained predecessor marker',
+      status: 'passed',
+      title: '[BCF01-U01] retained predecessor marker',
+      failureMessages: [] as string[],
+    };
+    const currentAssertions = [
+      ...contract.unsafeMarkerIds,
+      ...contract.safeMarkerIds,
+      ...contract.neighborMarkerIds,
+    ].map((markerId) => ({
+      ancestorTitles: ['boundary receipt'],
+      fullName: `boundary receipt ${markerId} current case`,
+      status: 'passed',
+      title: `${markerId} current case`,
+      failureMessages: [] as string[],
+    }));
+    const greenAssertions = [retainedContract, ...currentAssertions];
+    const greenInput = {
+      predicate: 'bcf04-green',
+      cwd: '/repo',
+      entryTestRoster: {
+        files: [
+          {
+            path: 'tests/scripts/semantic-boundary-contract.test.ts',
+            state: 'present',
+            testNames: [retainedContract.fullName],
+          },
+          {
+            path: 'tests/scripts/semantic-quality-check.test.ts',
+            state: 'present',
+            testNames: [retainedCli.fullName],
+          },
+        ],
+        digestSha256: SHA,
+      },
+      report: {
+        numFailedTestSuites: 0,
+        numFailedTests: 0,
+        numPassedTestSuites: 2,
+        numPassedTests: greenAssertions.length + 1,
+        numPendingTestSuites: 0,
+        numPendingTests: 0,
+        numTodoTests: 0,
+        numTotalTestSuites: 2,
+        numTotalTests: greenAssertions.length + 1,
+        snapshot: {},
+        startTime: 1,
+        success: true,
+        testResults: [
+          {
+            name: '/repo/tests/scripts/semantic-boundary-contract.test.ts',
+            status: 'passed',
+            assertionResults: greenAssertions,
+          },
+          {
+            name: '/repo/tests/scripts/semantic-quality-check.test.ts',
+            status: 'passed',
+            assertionResults: [retainedCli],
+          },
+        ],
+      },
+    };
+    expect(api.validateBoundaryVitestJsonReport(greenInput))
+      .toMatchObject({ ok: true, verdict: 'Pass' });
+
+    const redInput = structuredClone(greenInput);
+    redInput.predicate = 'bcf04-red';
+    const redRows = redInput.report.testResults[0]!.assertionResults;
+    for (const assertion of redRows) {
+      const markerId = assertion.title.match(/\[BCF04-[USN]\d{2}\]/)?.[0];
+      if (markerId === undefined || markerId.includes('-N')) {
+        assertion.status = 'skipped';
+      } else if (markerId.includes('-U')) {
+        assertion.status = 'failed';
+        assertion.failureMessages = [
+          `AssertionError: BCF_EXPECTATION_UNMET:${markerId.slice(1, 6)}-${markerId.slice(-3, -1)}`,
+        ];
+      }
+    }
+    redInput.report.testResults[1]!.assertionResults[0]!.status = 'skipped';
+    redInput.report.testResults[0]!.status = 'failed';
+    redInput.report.testResults[1]!.status = 'skipped';
+    redInput.report.numFailedTestSuites = 1;
+    redInput.report.numFailedTests = contract.unsafeMarkerIds.length;
+    redInput.report.numPassedTestSuites = 1;
+    redInput.report.numPassedTests = contract.safeMarkerIds.length;
+    redInput.report.numPendingTests = contract.neighborMarkerIds.length + 2;
+    redInput.report.success = false;
+    expect(api.validateBoundaryVitestJsonReport(redInput))
+      .toMatchObject({ ok: true, verdict: 'Pass' });
+  });
+
   it('enforces each closed command stdout predicate without caller-selected parsing', () => {
     const api = boundaryRun as unknown as {
       validateBoundaryStdoutPredicate?: (
