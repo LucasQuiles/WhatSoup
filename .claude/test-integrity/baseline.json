@@ -338,9 +338,9 @@
     {
       "content_signature": "3dc269ef8818746649544baf2a45ade99b90578816983892779658d91e220bfd",
       "file": "tools/qsesh/tests/test_extract_opencode.py",
-      "line": 459,
+      "line": 474,
       "rule_id": "py-property-test-suggestion",
-      "signature": "c6d88e51a2e535755add1fe1ce70277b8fb7fba67628cf580aacf70ed1862577",
+      "signature": "516941c83955315cab10018c65767173b57af795f5918cc539d95530af107a48",
       "owner": "q",
       "reason": "advisory-suggestion: test_subtask_requires_exact_safe_agent_and_prompt enumerates 4 discrete literal cases ('agent', 'unsafe', 'prompt', 'extra'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize."
     },

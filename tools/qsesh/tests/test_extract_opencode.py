@@ -179,17 +179,26 @@ def test_schema_registry_binds_t11_jsonl_to_observed_export_contract() -> None:
     assert OPENCODE_OBSERVED_SCHEMA_FINGERPRINT == (
         "5a6076f647ae5fcc6ba74d82940712985341e3d803b649e65e29824c35e46721"
     )
-    assert _expect_schema_error(_snapshot(fingerprint="opencode-export-jsonl-v2")).phase == "opencode-schema-fingerprint"
+    assert (
+        _expect_schema_error(_snapshot(fingerprint="opencode-export-jsonl-v2")).phase
+        == "opencode-schema-fingerprint"
+    )
 
 
 def test_source_digest_harness_and_harness_version_are_bound() -> None:
-    assert _expect_schema_error(replace(_snapshot(), source_digest="0" * 64)).phase == "extractor-source-digest"
+    assert (
+        _expect_schema_error(replace(_snapshot(), source_digest="0" * 64)).phase
+        == "extractor-source-digest"
+    )
     foreign = replace(
         _snapshot(),
         candidate=replace(_snapshot().candidate, harness=Harness.CODEX),
     )
     assert _expect_schema_error(foreign).phase == "opencode-harness"
-    assert _expect_schema_error(_snapshot(harness_version="1.17.16")).phase == "opencode-harness-version"
+    assert (
+        _expect_schema_error(_snapshot(harness_version="1.17.16")).phase
+        == "opencode-harness-version"
+    )
 
 
 @pytest.mark.parametrize(
@@ -265,14 +274,18 @@ def test_session_info_has_exact_identity_version_time_and_allowed_fields(
         info["time"] = {"created": "bad", "updated": 1}
     else:
         info["extra"] = "USER_ALPHA"
-    assert _expect_schema_error(_snapshot_export(export)).phase == "opencode-session-info"
+    assert (
+        _expect_schema_error(_snapshot_export(export)).phase == "opencode-session-info"
+    )
 
 
 @pytest.mark.parametrize("created", [True, -1, "bad", None])
 def test_epoch_milliseconds_are_nonnegative_integers(created: object) -> None:
     export = _export()
     export["messages"][0]["info"]["time"]["created"] = created
-    assert _expect_schema_error(_snapshot_export(export)).phase == "opencode-message-info"
+    assert (
+        _expect_schema_error(_snapshot_export(export)).phase == "opencode-message-info"
+    )
 
 
 def test_epoch_milliseconds_normalize_to_utc_without_local_timezone() -> None:
@@ -316,7 +329,9 @@ def test_message_info_role_keys_and_time_are_exact(mutation: str) -> None:
         info["extra"] = "USER_ALPHA"
     else:
         info["time"] = {}
-    assert _expect_schema_error(_snapshot_export(export)).phase == "opencode-message-info"
+    assert (
+        _expect_schema_error(_snapshot_export(export)).phase == "opencode-message-info"
+    )
 
 
 def test_session_and_message_reported_usage_and_cost_keep_scope_source_unit_model() -> (
@@ -489,7 +504,9 @@ def test_tail_part_shapes_are_exact(mutation: str) -> None:
     indices = {"compaction": 5, "file": 6, "unknown": 7}
     part = export["messages"][1]["parts"][indices[mutation]]
     part["extra"] = "USER_ALPHA"
-    assert _expect_schema_error(_snapshot_export(export)).phase == f"opencode-{mutation}"
+    assert (
+        _expect_schema_error(_snapshot_export(export)).phase == f"opencode-{mutation}"
+    )
 
 
 def test_user_and_assistant_text_are_preserved_exactly() -> None:
