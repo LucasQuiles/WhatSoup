@@ -12,6 +12,7 @@ import type { CapabilityGrantManager } from '../lib/capability-grant.ts';
 import { classifyErrorForInbound } from './inbound-failure-class.ts';
 import { storeMessageIfNew } from './messages.ts';
 import { stripLoneSurrogates } from './sanitize-surrogates.ts';
+import RE2 from 're2';
 import { isAdminMessage, parseAdminCommand } from './command-router.ts';
 import { handleAdminCommand, handleFallbackCommand, handleGrantCommand, sendApprovalRequest } from './admin.ts';
 import { shouldRespond } from './access-policy.ts';
@@ -230,7 +231,11 @@ function getPausedChatBypassRegexes(): RegExp[] {
   const regexes: RegExp[] = [];
   for (const pattern of source) {
     try {
-      regexes.push(new RegExp(pattern, 'i'));
+      // RE2 (linear-time, no backtracking): operator patterns run against
+      // member-supplied content, so the match engine must be ReDoS-safe. The
+      // validator compiles with the same engine, so a validated config always
+      // lands here — this try/catch stays as the defensive runtime backstop.
+      regexes.push(new RE2(pattern, 'i'));
     } catch (err) {
       log.warn({ err, pattern }, 'invalid pausedChatBypassPatterns entry — skipping');
     }

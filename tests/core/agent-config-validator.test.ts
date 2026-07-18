@@ -397,6 +397,19 @@ describe('pausedChatBypassPatterns validation', () => {
     expect(result?.message).toContain('at most 200 characters');
   });
 
+  it('rejects lookaround/backreference patterns unsupported by the safe RE2 engine', () => {
+    // Lookaround and backreferences compile under native RegExp but require
+    // backtracking; RE2 (used at validate + match time) rejects them, so the
+    // engine that guards config also guards runtime — no ReDoS from operator
+    // sources, and no validator/runtime compile mismatch. (Nested quantifiers
+    // like (a+)+ stay accepted: RE2 runs them in linear time.)
+    for (const pattern of ['(?=secret)', '(\\w)\\1']) {
+      const result = validateInstanceConfig(baseChat({ pausedChatBypassPatterns: [pattern] }), ctx('create'));
+      expect(result?.field).toBe('pausedChatBypassPatterns');
+      expect(result?.message).toContain('invalid regular expression');
+    }
+  });
+
   it('accepts absent pausedChatBypassPatterns', () => {
     const raw = baseChat({});
     expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
