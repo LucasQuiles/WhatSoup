@@ -4,15 +4,15 @@
 
 Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`, `docs/superpowers/`, `docs/plans/`, `docs/cutover/`, `docs/research/`, `docs/specs/` (selected), `docs/work-index*`, `docs/current-program.md`, `docs/handoff-*.md`, `HANDOFF-*.md`, `docs/project-status-*.md`, `docs/audit-*.md`, `tmp/`.
 
-**Total classification rows:** 106
+**Total classification rows:** 119
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 0 |
-| PRIVATE-ARCHIVE | 106 |
+| PRIVATE-ARCHIVE | 119 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 106 |
+| Total | 119 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -60,6 +60,9 @@ Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`,
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-kickoff.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-project-statement.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-sop.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/handoffs/2026-07-15-semantic-boundary-hygiene-implementation-notes.md` | PRIVATE-ARCHIVE | Internal semantic-boundary measurements, implementation evidence, limitations, and promotion decision; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md` | PRIVATE-ARCHIVE | Internal boundary-core GitHub and Git-history evidence, implementation notes, limitations, and rollout boundary; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/handoffs/2026-07-16-boundary-contract-feedback-implementation-notes.md` | PRIVATE-ARCHIVE | Internal boundary-contract falsifiers, implementation ledger, output measurements, limitations, and authorization boundary; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-04-04-colony-orchestration-phase1.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-04-05-phase4-m2-websocket-console.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-04-05-phase4-realtime-performance.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
@@ -91,6 +94,12 @@ Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`,
 | `docs/superpowers/plans/2026-07-09-outbound-governor-and-flood-observability.md` | PRIVATE-ARCHIVE | Internal audit remediation plan; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-07-09-privacy-erasure-and-media-confinement.md` | PRIVATE-ARCHIVE | Internal audit remediation plan; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-07-11-central-hub-release-proof-pilot.md` | PRIVATE-ARCHIVE | Internal release-proof pilot implementation plan; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-07-15-semantic-boundary-foundation.md` | PRIVATE-ARCHIVE | Internal semantic-boundary foundation implementation plan; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-07-16-boundary-contract-feedback-hardening.md` | PRIVATE-ARCHIVE | Internal fail-closed boundary-contract, evidence-receipt, feedback-bounding, and provider-deadline implementation plan; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-07-16-boundary-core-history-provenance.md` | PRIVATE-ARCHIVE | Internal boundary-core fingerprint, history, disposition, provenance, and receipt implementation plan; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-07-17-boundary-exit-parser-codeql-hardening.md` | PRIVATE-ARCHIVE | Internal security remediation implementation plan; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-07-17-boundary-validator-ci-refactor.md` | PRIVATE-ARCHIVE | Internal behavior-preserving CI and fitness remediation implementation plan; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-07-17-macos-credential-durability.md` | PRIVATE-ARCHIVE | Internal credential durability implementation plan; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | PRIVATE-ARCHIVE | Internal copy-ready PR briefs from the audit; retained in the repository but excluded from public publication by default. |
@@ -110,6 +119,10 @@ Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`,
 | `docs/superpowers/specs/2026-07-09-wall-to-wall-audit-remediation-design.md` | PRIVATE-ARCHIVE | Internal audit remediation design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-11-central-hub-release-proof-pilot-design.md` | PRIVATE-ARCHIVE | Internal release-proof pilot design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | PRIVATE-ARCHIVE | Internal behavior-preserving fitness remediation design; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/2026-07-15-semantic-boundary-hygiene-design.md` | PRIVATE-ARCHIVE | Internal semantic quality and boundary-enforcement design; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/2026-07-17-boundary-exit-parser-codeql-hardening-design.md` | PRIVATE-ARCHIVE | Internal security remediation design; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/2026-07-17-boundary-validator-ci-refactor-design.md` | PRIVATE-ARCHIVE | Internal behavior-preserving CI and fitness remediation design; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/2026-07-17-macos-credential-durability-design.md` | PRIVATE-ARCHIVE | Internal credential durability design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/design.md` | PRIVATE-ARCHIVE | Internal targeted-cancellation protocol design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/requirements.md` | PRIVATE-ARCHIVE | Internal targeted-cancellation protocol requirements; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/tasks.md` | PRIVATE-ARCHIVE | Internal targeted-cancellation implementation plan; retained in the repository but excluded from public publication by default. |

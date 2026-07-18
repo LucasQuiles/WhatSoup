@@ -1,6 +1,6 @@
 /**
- * Fail-closed route-event + delegation-receipt sidecar tests (slice-2 B3
- * minimal shape; slice-4 full taxonomy, validation, retention, receipts):
+ * Fail-closed route-event sidecar tests (slice-2 B3 minimal shape; slice-4
+ * full taxonomy, validation, and retention):
  * append-only NDJSON, dir auto-creation, degrade-to-warn on an unwritable
  * sink, invalid events NOT written (UH-018), size-bounded rotation, and a
  * schema guard that events carry no message bodies or sender identities.
@@ -11,9 +11,7 @@ import { join } from 'node:path';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import {
   deriveChatScope,
-  emitDelegationReceipt,
   emitRouteEvent,
-  type DelegationReceipt,
   type ModelRouteEvent,
   type RouteEventType,
 } from '../../../src/runtimes/agent/route-events.ts';
@@ -32,22 +30,6 @@ function ev(overrides: Partial<ModelRouteEvent> = {}): ModelRouteEvent {
     authority: 'advisory_only',
     userVisible: false,
     reasonCode: 'user_pin',
-    ...overrides,
-  };
-}
-
-function receipt(overrides: Partial<DelegationReceipt> = {}): DelegationReceipt {
-  return {
-    ts: 1_700_000_000_000,
-    instance: 'test',
-    conversationKey: '15550000001',
-    delegationUsed: true,
-    reason: 'user-requested-review',
-    workers: ['reviewer'],
-    modelsOrHarnesses: ['opencode-cli'],
-    authority: 'advisory_only',
-    leadVerified: true,
-    userVisibleSummary: 'I double-checked the risky part with a reviewer model.',
     ...overrides,
   };
 }
@@ -165,43 +147,5 @@ describe('deriveChatScope', () => {
     expect(deriveChatScope('111222333_at_g.us')).toBe('group');
     expect(deriveChatScope(toConversationKey('15550000001@s.whatsapp.net'))).toBe('dm');
     expect(deriveChatScope('15550000001')).toBe('dm');
-  });
-});
-
-describe('emitDelegationReceipt', () => {
-  it('writes a valid receipt to its own sidecar', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'route-ev-'));
-    const warn = vi.fn();
-    emitDelegationReceipt(dir, receipt(), warn);
-    const lines = readFileSync(join(dir, 'delegation-receipts.ndjson'), 'utf8').trim().split('\n');
-    expect(lines).toHaveLength(1);
-    expect(JSON.parse(lines[0]).authority).toBe('advisory_only');
-    expect(warn).not.toHaveBeenCalled();
-  });
-
-  it('rejects a receipt without a user-visible summary (observability-incomplete, UH-017)', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'route-ev-'));
-    const warn = vi.fn();
-    emitDelegationReceipt(dir, receipt({ userVisibleSummary: '  ' }), warn);
-    expect(warn).toHaveBeenCalledOnce();
-    expect(existsSync(join(dir, 'delegation-receipts.ndjson'))).toBe(false);
-  });
-
-  it('rejects empty workers, unknown reasons, and non-advisory authority', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'route-ev-'));
-    const warn = vi.fn();
-    emitDelegationReceipt(dir, receipt({ workers: [] }), warn);
-    emitDelegationReceipt(dir, receipt({ reason: 'because' as DelegationReceipt['reason'] }), warn);
-    emitDelegationReceipt(dir, receipt({ authority: 'executor' as 'advisory_only' }), warn);
-    expect(warn).toHaveBeenCalledTimes(3);
-    expect(existsSync(join(dir, 'delegation-receipts.ndjson'))).toBe(false);
-  });
-
-  it('rejects a receipt with an empty instance', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'route-ev-'));
-    const warn = vi.fn();
-    emitDelegationReceipt(dir, receipt({ instance: '' }), warn);
-    expect(warn).toHaveBeenCalledOnce();
-    expect(existsSync(join(dir, 'delegation-receipts.ndjson'))).toBe(false);
   });
 });

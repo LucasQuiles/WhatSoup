@@ -14,6 +14,13 @@ npm run guard:design-system-hygiene
 npm run guard:node-pin-consistency
 npm run guard:claude-settings
 
+# qSesh Python lane — only when qSesh, package, hook, or workflow surfaces are
+# staged. Fail-closed: set -e above makes any lint/test failure block the commit.
+if git diff --cached --name-only | grep -Eq '^tools/qsesh/|^scripts/run-qsesh-pytests\.sh$|^package\.json$|^\.husky/|^\.github/workflows/quality\.yml$'; then
+  npm run lint:qsesh
+  npm run test:qsesh
+fi
+
 # Theme parity only when token file is staged — avoids console dep for unrelated commits.
 if git diff --cached --name-only | grep -q 'console/src/styles/tokens\.semantic\.css'; then
   npm --prefix console run design:theme-parity

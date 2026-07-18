@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -9,6 +9,8 @@ import {
   findGuardsMissingTests,
   run,
 } from '../../scripts/guard-test-coverage-check.ts';
+
+const fixtureDirs: string[] = [];
 
 /**
  * Build a minimal repo fixture with a `scripts/` dir, a `tests/scripts/` dir,
@@ -28,9 +30,11 @@ function makeFixture(
     /** Override the wired test path (to model the alias). */
     wiredPath?: string;
     allowlist?: string;
+    testBody?: string;
   }[],
 ): string {
   const dir = mkdtempSync(path.join(tmpdir(), 'guard-test-coverage-'));
+  fixtureDirs.push(dir);
   mkdirSync(path.join(dir, 'scripts'), { recursive: true });
   mkdirSync(path.join(dir, 'tests', 'scripts'), { recursive: true });
 
@@ -39,14 +43,21 @@ function makeFixture(
   for (const guard of guards) {
     const guardBody = guard.allowlist
       ? `// meta-guard:no-test ${guard.allowlist}\nexport const x = 1;\n`
-      : 'export const x = 1;\n';
+      : [
+          'export function analyzeGuard(input: string) {',
+          "  return input === 'safe' ? { ok: true, findings: [] } : { ok: false, findings: ['unsafe'] };",
+          '}',
+          "export function scanGuard(input: string) { return analyzeGuard(input).findings; }",
+          "export function runGuard(input: string) { return analyzeGuard(input).ok ? 0 : 1; }",
+          '',
+        ].join('\n');
     writeFileSync(path.join(dir, 'scripts', guard.file), guardBody, 'utf8');
 
     if (guard.writeTest) {
       const base = guard.testBasename ?? guard.file.replace(/\.ts$/, '');
       writeFileSync(
         path.join(dir, 'tests', 'scripts', `${base}.test.ts`),
-        'import { it } from "vitest"; it("noop", () => {});\n',
+        guard.testBody ?? 'import { it } from "vitest"; it("noop", () => {});\n',
         'utf8',
       );
     }
@@ -77,6 +88,7 @@ describe('guard-test-coverage meta-guard', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     process.exitCode = undefined;
+    for (const dir of fixtureDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   });
 
   it('enumerates *guard*.ts and check-*.ts but ignores unrelated scripts', () => {
@@ -95,6 +107,7 @@ describe('guard-test-coverage meta-guard', () => {
 
   it('fails closed when the scripts directory cannot be scanned', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'guard-test-coverage-missing-scripts-'));
+    fixtureDirs.push(dir);
     writeFileSync(
       path.join(dir, 'package.json'),
       JSON.stringify({ name: 'fixture', scripts: { 'verify:push:branch': 'npm test --' } }),
@@ -209,6 +222,258 @@ describe('guard-test-coverage meta-guard', () => {
 
     expect(process.exitCode).not.toBe(1);
     expect(logSpy.mock.calls.flat().join('\n')).toContain('guard-test-coverage check passed');
+  });
+
+  it('does not count a comment or string containing the guard name as import/invocation proof', () => {
+    const dir = makeFixture([{
+      file: 'sample-guard.ts',
+      writeTest: true,
+      wired: true,
+      testBody: [
+        `import { expect, it } from 'vitest';`,
+        `it('mentions a guard', () => {`,
+        `  // import { analyzeGuard } from '../../scripts/sample-guard.ts'; analyzeGuard('unsafe');`,
+        `  const note = "../../scripts/sample-guard.ts analyzeGuard('unsafe')";`,
+        `  expect(note).toContain('sample-guard');`,
+        `});`,
+      ].join('\n'),
+    }]);
+
+    expect(findGuardsMissingTests({ cwd: dir }).semanticGaps).toContainEqual(
+      expect.objectContaining({
+        guard: 'scripts/sample-guard.ts',
+        reason: 'test-does-not-import-or-invoke-guard',
+      }),
+    );
+  });
+
+  it('does not count an imported guard binding that is never called', () => {
+    const dir = makeFixture([{
+      file: 'sample-guard.ts',
+      writeTest: true,
+      wired: true,
+      testBody: [
+        `import { expect, it } from 'vitest';`,
+        `import { analyzeGuard } from '../../scripts/sample-guard.ts';`,
+        `it('imports only', () => { expect(analyzeGuard).toBeDefined(); });`,
+      ].join('\n'),
+    }]);
+
+    expect(findGuardsMissingTests({ cwd: dir }).semanticGaps).toContainEqual(
+      expect.objectContaining({ reason: 'test-does-not-import-or-invoke-guard' }),
+    );
+  });
+
+  it('does not count a guard call with success-only assertions', () => {
+    const dir = makeFixture([{
+      file: 'sample-guard.ts',
+      writeTest: true,
+      wired: true,
+      testBody: [
+        `import { expect, it } from 'vitest';`,
+        `import { analyzeGuard } from '../../scripts/sample-guard.ts';`,
+        `it('checks only success', () => {`,
+        `  const result = analyzeGuard('safe');`,
+        `  expect(result.ok).toBe(true);`,
+        `  expect(result.findings).toHaveLength(0);`,
+        `});`,
+      ].join('\n'),
+    }]);
+
+    expect(findGuardsMissingTests({ cwd: dir }).semanticGaps).toContainEqual(
+      expect.objectContaining({ reason: 'test-does-not-exercise-failure' }),
+    );
+  });
+
+  it('does not count a guard call made outside an it/test body', () => {
+    const dir = makeFixture([{
+      file: 'sample-guard.ts',
+      writeTest: true,
+      wired: true,
+      testBody: [
+        `import { expect, it } from 'vitest';`,
+        `import { analyzeGuard } from '../../scripts/sample-guard.ts';`,
+        `const result = analyzeGuard('unsafe');`,
+        `it('asserts a top-level result', () => {`,
+        `  expect(result.findings).not.toHaveLength(0);`,
+        `});`,
+      ].join('\n'),
+    }]);
+
+    expect(findGuardsMissingTests({ cwd: dir }).semanticGaps).toContainEqual(
+      expect.objectContaining({ reason: 'test-does-not-import-or-invoke-guard' }),
+    );
+  });
+
+  it('does not count a negative control inside a skipped test', () => {
+    const dir = makeFixture([{
+      file: 'sample-guard.ts',
+      writeTest: true,
+      wired: true,
+      testBody: [
+        `import { expect, it } from 'vitest';`,
+        `import { analyzeGuard } from '../../scripts/sample-guard.ts';`,
+        [`it`, `.skip('disabled proof', () => {`].join(''),
+        `  const result = analyzeGuard('unsafe');`,
+        `  expect(result.findings).not.toHaveLength(0);`,
+        `});`,
+      ].join('\n'),
+    }]);
+
+    expect(findGuardsMissingTests({ cwd: dir }).semanticGaps).toContainEqual(
+      expect.objectContaining({ reason: 'test-does-not-import-or-invoke-guard' }),
+    );
+  });
+
+  it('accepts an unsafe analyzer call with a non-empty findings assertion', () => {
+    const dir = makeFixture([{
+      file: 'sample-guard.ts',
+      writeTest: true,
+      wired: true,
+      testBody: [
+        `import { expect, it } from 'vitest';`,
+        `import { analyzeGuard } from '../../scripts/sample-guard.ts';`,
+        `it('proves the unsafe case', () => {`,
+        `  const result = analyzeGuard('unsafe');`,
+        `  expect(result.ok).toBe(false);`,
+        `  expect(result.findings).not.toHaveLength(0);`,
+        `});`,
+      ].join('\n'),
+    }]);
+
+    expect(findGuardsMissingTests({ cwd: dir }).semanticGaps).toEqual([]);
+  });
+
+  it('accepts a linked throw assertion for an imported guard call', () => {
+    const dir = makeFixture([{
+      file: 'sample-guard.ts',
+      writeTest: true,
+      wired: true,
+      testBody: [
+        `import { expect, it } from 'vitest';`,
+        `import { analyzeGuard } from '../../scripts/sample-guard.ts';`,
+        `it('proves a rejection', () => {`,
+        `  expect(() => analyzeGuard('unsafe')).toThrow();`,
+        `});`,
+      ].join('\n'),
+    }]);
+
+    expect(findGuardsMissingTests({ cwd: dir }).semanticGaps).toEqual([]);
+  });
+
+  it('accepts a direct non-empty finding-array assertion', () => {
+    const dir = makeFixture([{
+      file: 'sample-guard.ts',
+      writeTest: true,
+      wired: true,
+      testBody: [
+        `import { expect, it } from 'vitest';`,
+        `import { scanGuard } from '../../scripts/sample-guard.ts';`,
+        `it('proves a returned violation', () => {`,
+        `  expect(scanGuard('unsafe')).toHaveLength(1);`,
+        `});`,
+      ].join('\n'),
+    }]);
+
+    expect(findGuardsMissingTests({ cwd: dir }).semanticGaps).toEqual([]);
+  });
+
+  it('accepts a linked findings.some(...) assertion', () => {
+    const dir = makeFixture([{
+      file: 'sample-guard.ts',
+      writeTest: true,
+      wired: true,
+      testBody: [
+        `import { expect, it } from 'vitest';`,
+        `import { analyzeGuard } from '../../scripts/sample-guard.ts';`,
+        `it('proves a matching finding', () => {`,
+        `  const result = analyzeGuard('unsafe');`,
+        `  expect(result.findings.some((finding) => finding === 'unsafe')).toBe(true);`,
+        `});`,
+      ].join('\n'),
+    }]);
+
+    expect(findGuardsMissingTests({ cwd: dir }).semanticGaps).toEqual([]);
+  });
+
+  it('accepts a direct nonzero run result', () => {
+    const dir = makeFixture([{
+      file: 'sample-guard.ts',
+      writeTest: true,
+      wired: true,
+      testBody: [
+        `import { expect, it } from 'vitest';`,
+        `import { runGuard } from '../../scripts/sample-guard.ts';`,
+        `it('proves a blocking exit', () => {`,
+        `  expect(runGuard('unsafe')).toBe(1);`,
+        `});`,
+      ].join('\n'),
+    }]);
+
+    expect(findGuardsMissingTests({ cwd: dir }).semanticGaps).toEqual([]);
+  });
+
+  it('rejects a guard subprocess invocation whose status is never asserted', () => {
+    const dir = makeFixture([{
+      file: 'sample-guard.ts',
+      writeTest: true,
+      wired: true,
+      testBody: [
+        `import { spawnSync } from 'node:child_process';`,
+        `import { expect, it } from 'vitest';`,
+        `it('runs without checking failure', () => {`,
+        `  const result = spawnSync(process.execPath, ['scripts/sample-guard.ts']);`,
+        `  expect(result.stdout).toBeDefined();`,
+        `});`,
+      ].join('\n'),
+    }]);
+
+    expect(findGuardsMissingTests({ cwd: dir }).semanticGaps).toContainEqual(
+      expect.objectContaining({ reason: 'test-does-not-exercise-failure' }),
+    );
+  });
+
+  it('accepts a guard subprocess invocation with a nonzero status assertion', () => {
+    const dir = makeFixture([{
+      file: 'sample-guard.ts',
+      writeTest: true,
+      wired: true,
+      testBody: [
+        `import { spawnSync } from 'node:child_process';`,
+        `import { expect, it } from 'vitest';`,
+        `it('proves process failure', () => {`,
+        `  const result = spawnSync(process.execPath, ['scripts/sample-guard.ts', '--unsafe']);`,
+        `  expect(result.status).not.toBe(0);`,
+        `});`,
+      ].join('\n'),
+    }]);
+
+    expect(findGuardsMissingTests({ cwd: dir }).semanticGaps).toEqual([]);
+  });
+
+  it('reports semantic gaps without changing the process exit in shadow mode', () => {
+    const dir = makeFixture([
+      { file: 'sample-guard.ts', writeTest: true, wired: true },
+    ]);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const result = run(['--semantic-mode', 'shadow'], dir, {});
+
+    expect(result.semanticGaps).toHaveLength(1);
+    expect(process.exitCode).toBeUndefined();
+    expect(errorSpy.mock.calls.flat().join('\n')).toContain('SEMANTIC-TEST-GAP');
+  });
+
+  it('exits nonzero for the same semantic gap in enforce mode', () => {
+    const dir = makeFixture([
+      { file: 'sample-guard.ts', writeTest: true, wired: true },
+    ]);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const result = run(['--semantic-mode', 'enforce'], dir, {});
+
+    expect(result.semanticGaps).toHaveLength(1);
+    expect(process.exitCode).toBe(1);
   });
 });
 

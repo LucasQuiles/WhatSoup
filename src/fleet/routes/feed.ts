@@ -322,6 +322,21 @@ export function parsePinoLine(line: string, ctx: ParseContext): FeedEvent | null
 
 // ---------------------------------------------------------------------------
 // Health-change events (synthesized from poller status)
+//
+// #1882 residual (accepted): this comparison still runs at request time
+// against one process-global `previousStatuses` baseline, so a degrade/
+// recover cycle between two /api/feed requests can be missed, and two
+// requests arriving close together can each observe a different diff as
+// they race to advance the same baseline. The Ops page's headline health
+// summary (console/src/pages/Operator.tsx) no longer reads this output at
+// all — it derives "all healthy" / "N unhealthy" from the CURRENT line
+// snapshot via computeKpis, so that number is immune to both defects. What
+// remains dependent on this synthesis is the HISTORICAL activity feed's
+// health-transition entries — a best-effort recent-activity trail, not an
+// authoritative current-state count — so an occasionally-missed or
+// differently-ordered entry there is a lower-severity residual than the
+// summary regression this issue reports. See the brief's criterion 3 "OR
+// document why the residual is acceptable once the summary is decoupled".
 // ---------------------------------------------------------------------------
 
 const previousStatuses = new Map<string, string>();

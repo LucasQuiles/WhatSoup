@@ -448,23 +448,26 @@ describe('handleGetLines', () => {
   it('prunes stale line caches for deleted instances before responding', () => {
     const caches = _getLineCachesForTests();
     const staleCachedAt = Date.now();
+    // Cache entries hold an Observation ({status, value}), not a bare value
+    // (#1879) — only stable (`available`/`not_applicable`) states are ever
+    // written, so every poked fixture here uses `status: 'available'`.
     caches.messageStatsCache.set('alpha', {
-      data: { sent: 1, received: 2, images: 0, audio: 0, documents: 0 },
+      data: { status: 'available', value: { sent: 1, received: 2, images: 0, audio: 0, documents: 0 } },
       cachedAt: staleCachedAt,
     });
-    caches.sessionCountCache.set('alpha', { data: 3, cachedAt: staleCachedAt });
-    caches.chatCountsCache.set('alpha', { data: { chats: 4, groups: 1 }, cachedAt: staleCachedAt });
-    caches.tokenStatsCache.set('alpha', { data: { input: 5, output: 6 }, cachedAt: staleCachedAt });
-    caches.lastActiveCache.set('alpha', { data: '2026-04-01T00:00:00.000Z', cachedAt: staleCachedAt });
+    caches.sessionCountCache.set('alpha', { data: { status: 'available', value: 3 }, cachedAt: staleCachedAt });
+    caches.chatCountsCache.set('alpha', { data: { status: 'available', value: { chats: 4, groups: 1 } }, cachedAt: staleCachedAt });
+    caches.tokenStatsCache.set('alpha', { data: { status: 'available', value: { input: 5, output: 6 } }, cachedAt: staleCachedAt });
+    caches.lastActiveCache.set('alpha', { data: { status: 'available', value: '2026-04-01T00:00:00.000Z' }, cachedAt: staleCachedAt });
 
     caches.messageStatsCache.set('ghost', {
-      data: { sent: 9, received: 9, images: 9, audio: 9, documents: 9 },
+      data: { status: 'available', value: { sent: 9, received: 9, images: 9, audio: 9, documents: 9 } },
       cachedAt: staleCachedAt,
     });
-    caches.sessionCountCache.set('ghost', { data: 9, cachedAt: staleCachedAt });
-    caches.chatCountsCache.set('ghost', { data: { chats: 9, groups: 9 }, cachedAt: staleCachedAt });
-    caches.tokenStatsCache.set('ghost', { data: { input: 9, output: 9 }, cachedAt: staleCachedAt });
-    caches.lastActiveCache.set('ghost', { data: '2026-04-02T00:00:00.000Z', cachedAt: staleCachedAt });
+    caches.sessionCountCache.set('ghost', { data: { status: 'available', value: 9 }, cachedAt: staleCachedAt });
+    caches.chatCountsCache.set('ghost', { data: { status: 'available', value: { chats: 9, groups: 9 } }, cachedAt: staleCachedAt });
+    caches.tokenStatsCache.set('ghost', { data: { status: 'available', value: { input: 9, output: 9 } }, cachedAt: staleCachedAt });
+    caches.lastActiveCache.set('ghost', { data: { status: 'available', value: '2026-04-02T00:00:00.000Z' }, cachedAt: staleCachedAt });
 
     const inst = fakeInstance({ name: 'alpha' });
     const deps = makeDeps({
@@ -766,6 +769,9 @@ describe('handleGetLines message stats row processing', () => {
       documents: 2,
     });
     expect(line.messagesToday).toBe(12);
+    // #1879 crit 4: a successfully queried result — even a legitimate 0 —
+    // reports `available`, distinct from an `unavailable` failure fallback.
+    expect(line.metricAvailability.messageStats).toBe('available');
   });
 
   it('returns zero stats when the db query fails', () => {
@@ -789,6 +795,8 @@ describe('handleGetLines message stats row processing', () => {
     const line = JSON.parse(res._body)[0];
     expect(line.messageStats).toMatchObject({ sent: 0, received: 0, images: 0, audio: 0, documents: 0 });
     expect(line.messagesToday).toBe(0);
+    // #1879 crit 1: a db-locked failure is `unavailable`, not a masked zero.
+    expect(line.metricAvailability.messageStats).toBe('unavailable');
   });
 });
 
@@ -832,6 +840,8 @@ describe('handleGetLines totalSessions', () => {
     expect(line.totalSessions).toBe(0);
     // The session-count COUNT(*) query is never issued for non-agent instances.
     expect(issuedSql.some((s) => s.includes('COUNT(*) as cnt FROM agent_sessions'))).toBe(false);
+    // #1879: structurally absent (not an agent), not a failed read.
+    expect(line.metricAvailability.sessions).toBe('not_applicable');
   });
 
   it('queries agent_sessions count for agent instances', () => {
@@ -861,6 +871,7 @@ describe('handleGetLines totalSessions', () => {
     handleGetLines(mockReq(), res, deps);
     const line = JSON.parse(res._body)[0];
     expect(line.totalSessions).toBe(7);
+    expect(line.metricAvailability.sessions).toBe('available');
   });
 
   it('returns 0 total sessions when the agent_sessions query fails', () => {
@@ -880,6 +891,7 @@ describe('handleGetLines totalSessions', () => {
     handleGetLines(mockReq(), res, deps);
     const line = JSON.parse(res._body)[0];
     expect(line.totalSessions).toBe(0);
+    expect(line.metricAvailability.sessions).toBe('unavailable');
   });
 
   it('returns 0 when agent_sessions table does not exist (caught exception path)', () => {
@@ -898,17 +910,29 @@ describe('handleGetLines totalSessions', () => {
         query: vi.fn((_name, _dbPath, fn) => {
           callCount++;
           // First call is getMessageStats (.all()), subsequent calls include
-          // getTotalSessions (.get() on agent_sessions — must throw).
+          // getTotalSessions (.get() on agent_sessions — must throw). Match
+          // the exact sessions COUNT(*) statement (not any 'agent_sessions'
+          // substring) so this fixture doesn't also trip getTokenStats' own
+          // agent_sessions sub-select — that cross-metric interaction is
+          // covered separately by the missing-column test below.
           const isSessionsQuery = callCount > 1;
           const fakeDb = {
             prepare: vi.fn((sql: string) => {
-              if (isSessionsQuery && sql.includes('agent_sessions')) {
+              if (isSessionsQuery && sql.includes('COUNT(*) as cnt FROM agent_sessions')) {
                 throw new Error('no such table: agent_sessions');
               }
               return { all: vi.fn(() => []), get: vi.fn(() => ({ ts: null, i: 0, o: 0, total: 0, groups: 0 })) };
             }),
           };
-          return { ok: true, data: fn(fakeDb as any) };
+          // #1879: getTotalSessions no longer swallows this exception itself
+          // — it now relies on the same outer try/catch FleetDbReader.query
+          // provides in production (src/fleet/db-reader.ts), so the mock
+          // must mirror that layer instead of letting the throw escape.
+          try {
+            return { ok: true, data: fn(fakeDb as any) };
+          } catch (err) {
+            return { ok: false, error: String(err) };
+          }
         }),
       } as any,
     });
@@ -916,6 +940,9 @@ describe('handleGetLines totalSessions', () => {
     handleGetLines(mockReq(), res, deps);
     const line = JSON.parse(res._body)[0];
     expect(line.totalSessions).toBe(0);
+    // #1879 crit 1: a missing-table exception must surface as `unavailable`,
+    // not be masked internally as a legitimate zero.
+    expect(line.metricAvailability.sessions).toBe('unavailable');
   });
 });
 
@@ -993,6 +1020,9 @@ describe('handleGetLines lastMessageTime from DB', () => {
     expect(line.lastActive).toBeNull();
     // status is still emitted — only lastActive is absent
     expect(line.status).toBe('online');
+    // #1879 crit 4: a successful query with no rows is a legitimate `null`,
+    // not a failure — distinct from the query-failure case just below.
+    expect(line.metricAvailability.lastActivity).toBe('available');
   });
 
   it('returns null lastActive when lastMessageTime db query fails', () => {
@@ -1017,6 +1047,7 @@ describe('handleGetLines lastMessageTime from DB', () => {
     expect(line.lastActive).toBeNull();
     // status is still correctly emitted even when the db query fails
     expect(line.status).toBe('online');
+    expect(line.metricAvailability.lastActivity).toBe('unavailable');
   });
 });
 
@@ -1042,6 +1073,7 @@ describe('handleGetLines chatCounts', () => {
     handleGetLines(mockReq(), res, deps);
     const line = JSON.parse(res._body)[0];
     expect(line.chatCounts).toEqual({ chats: 0, groups: 0 });
+    expect(line.metricAvailability.chatCounts).toBe('unavailable');
   });
 
   it('returns token usage zero when db query fails', () => {
@@ -1061,6 +1093,7 @@ describe('handleGetLines chatCounts', () => {
     handleGetLines(mockReq(), res, deps);
     const line = JSON.parse(res._body)[0];
     expect(line.tokenUsage).toEqual({ input: 0, output: 0 });
+    expect(line.metricAvailability.tokenStats).toBe('unavailable');
   });
 });
 
@@ -1099,6 +1132,147 @@ describe('handleGetLines tokenStats live db', () => {
     // Both message tokens and session tokens contribute: 100+100=200, 50+50=100
     expect(line.tokenUsage.input).toBeGreaterThan(0);
     expect(line.tokenUsage.output).toBeGreaterThan(0);
+    expect(line.metricAvailability.tokenStats).toBe('available');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #1879 — per-metric DB availability
+//
+// GET /api/lines used to turn every DB read/schema failure into an ordinary
+// zero/null and cache it for 60s, so a faulted DB lowered fleet totals
+// exactly like a legitimately idle instance. These tests pin the fix: each
+// DB-derived metric group (messageStats, sessions, chatCounts, tokenStats,
+// lastActivity) now reports a `metricAvailability` status alongside its
+// display value, distinguishing `available` / `unavailable` / `not_applicable`
+// from a true zero, and failures are never cached (so recovery is immediate).
+// ---------------------------------------------------------------------------
+
+describe('handleGetLines legitimate zero vs unavailable (#1879 crit 4)', () => {
+  it('reports available + true zero/null for a legitimately empty database, distinct from a failed read', () => {
+    const inst = fakeInstance({ name: 'quiet1' });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['quiet1', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: { getStatuses: vi.fn(() => new Map()), getStatus: vi.fn() } as any,
+      // makeLiveDbReader([]) executes the real callback against a live-shaped
+      // fake db that legitimately has no rows — every .get() call returns
+      // undefined, every .all() call returns [] — the successful-but-empty
+      // case, not a failure.
+      dbReader: makeLiveDbReader([]),
+    });
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+    const line = JSON.parse(res._body)[0];
+    expect(line.messageStats).toEqual({ sent: 0, received: 0, images: 0, audio: 0, documents: 0 });
+    expect(line.chatCounts).toEqual({ chats: 0, groups: 0 });
+    expect(line.tokenUsage).toEqual({ input: 0, output: 0 });
+    expect(line.lastActive).toBeNull();
+    expect(line.metricAvailability).toMatchObject({
+      messageStats: 'available',
+      chatCounts: 'available',
+      tokenStats: 'available',
+      lastActivity: 'available',
+    });
+  });
+});
+
+describe('handleGetLines tokenStats missing-column path (#1879)', () => {
+  it('reports unavailable, not a masked 0, when a token column is missing from an older schema', () => {
+    const inst = fakeInstance({ name: 'tokcol' });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['tokcol', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: { getStatuses: vi.fn(() => new Map()), getStatus: vi.fn() } as any,
+      dbReader: {
+        getSummaryStats: vi.fn(() => ({ ok: true, data: {} })),
+        query: vi.fn((_name, _dbPath, fn) => {
+          const fakeDb = {
+            prepare: vi.fn((sql: string) => {
+              // #1879: getTokenStats no longer swallows this internally — the
+              // exception must reach the same outer try/catch FleetDbReader.
+              // query provides in production, which this mock mirrors below.
+              if (sql.includes('input_tokens')) {
+                throw new Error('no such column: input_tokens');
+              }
+              return { all: vi.fn(() => []), get: vi.fn(() => ({ ts: null, total: 0, groups: 0 })) };
+            }),
+          };
+          try {
+            return { ok: true, data: fn(fakeDb as any) };
+          } catch (err) {
+            return { ok: false, error: String(err) };
+          }
+        }),
+      } as any,
+    });
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+    const line = JSON.parse(res._body)[0];
+    expect(line.tokenUsage).toEqual({ input: 0, output: 0 });
+    expect(line.metricAvailability.tokenStats).toBe('unavailable');
+  });
+});
+
+describe('handleGetLines cache stability on failure (#1879 crit 2)', () => {
+  it('does not cache an unavailable observation; the next request re-probes and returns the recovered value', () => {
+    const inst = fakeInstance({ name: 'recover1' });
+    let messageStatsCalls = 0;
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['recover1', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: { getStatuses: vi.fn(() => new Map()), getStatus: vi.fn() } as any,
+      dbReader: {
+        getSummaryStats: vi.fn(() => ({ ok: true, data: {} })),
+        query: vi.fn((_name, _dbPath, fn) => {
+          const fakeDb = {
+            prepare: vi.fn((sql: string) => {
+              if (sql.includes('GROUP BY content_type')) {
+                messageStatsCalls++;
+                // Fail only the first attempt — a transient lock, not a
+                // permanent schema gap.
+                if (messageStatsCalls === 1) {
+                  throw new Error('database is locked');
+                }
+              }
+              return {
+                all: vi.fn(() => []),
+                get: vi.fn(() => ({ ts: null, i: 0, o: 0, total: 0, groups: 0 })),
+              };
+            }),
+          };
+          try {
+            return { ok: true, data: fn(fakeDb as any) };
+          } catch (err) {
+            return { ok: false, error: String(err) };
+          }
+        }),
+      } as any,
+    });
+
+    const res1 = mockRes();
+    handleGetLines(mockReq(), res1, deps);
+    const line1 = JSON.parse(res1._body)[0];
+    expect(line1.metricAvailability.messageStats).toBe('unavailable');
+
+    // A second request inside the 60s TTL window must NOT replay a cached
+    // failure — cachedQuery only writes stable (available/not_applicable)
+    // states to the cache, so this call re-probes instead of returning a
+    // stale `unavailable`.
+    const res2 = mockRes();
+    handleGetLines(mockReq(), res2, deps);
+    const line2 = JSON.parse(res2._body)[0];
+    expect(line2.metricAvailability.messageStats).toBe('available');
+    // Exactly one failed probe + one successful re-probe — proves the
+    // failure was never cached (an old buggy cache-everything implementation
+    // would have short-circuited the second call and left this at 1).
+    expect(messageStatsCalls).toBe(2);
   });
 });
 

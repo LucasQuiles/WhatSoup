@@ -9,6 +9,7 @@ import { FleetDiscovery } from './discovery.ts';
 import { HealthPoller } from './health-poller.ts';
 import { FleetDbReader } from './db-reader.ts';
 import { createStaticHandler } from './static.ts';
+import { createLivenessHandler } from './livez.ts';
 import { handleGetLines, handleGetLine, handleGetLineProviderStatus } from './routes/lines.ts';
 import { handleGetProviders } from './routes/providers.ts';
 import { handlePutCredential, handleDeleteCredential, handleVerifyCredential, handleGetCredential, setExtraCredentialServices, type CredentialDeps } from './routes/credentials.ts';
@@ -752,6 +753,7 @@ export function createFleetServer(deps: FleetDeps) {
   }
 
   const staticHandler = createStaticHandler(distDir, getVersion);
+  const livenessHandler = createLivenessHandler({ selfName: deps.selfName, startedAtMs: Date.now() });
   // Realtime publisher is wired after wsServer creation — use a deferred reference
   let realtimePublish: (event: import('./websocket-server.ts').WsEvent) => void = () => {};
   const realtime: FleetRealtimePublisher = { publish: (event) => realtimePublish(event) };
@@ -850,6 +852,13 @@ export function createFleetServer(deps: FleetDeps) {
     const method = req.method ?? 'GET';
     const url = req.url ?? '/';
     const pathname = url.split('?')[0];
+
+    // Dashboard-independent liveness (`/livez`): answers from process state
+    // alone, before auth and before any static-asset dependency, so a watchdog
+    // can tell "process serving" from "console assets missing" without the
+    // root-`/` 404 that a build-omitted release produces. Loopback-bound like
+    // the rest of the server; intentionally unauthenticated.
+    if (livenessHandler(req, res)) return;
 
     // API routes require auth
     if (pathname.startsWith('/api/')) {

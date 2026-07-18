@@ -58,6 +58,7 @@ vi.mock('../../src/logger.ts', () => ({
 // ---------------------------------------------------------------------------
 
 import { CURRENT_SCHEMA_MIGRATION, Database } from '../../src/core/database.ts';
+import { DurabilityEngine } from '../../src/core/durability.ts';
 import { seedChatAliases } from '../../src/core/chats-resolver.ts';
 import { createProfileRegistry } from '../../src/core/profiles.ts';
 import { createOutboundSendsWriter } from '../../src/core/outbound-sends.ts';
@@ -233,6 +234,34 @@ describe('GET /health', () => {
     expect(Number.isNaN(generatedAt)).toBe(false);
     expect(generatedAt).toBeGreaterThanOrEqual(requestedAt);
     expect(generatedAt).toBeLessThanOrEqual(receivedAt);
+  });
+
+  it('degrades and surfaces durability debt when an outbound delivery is stuck in maybe_sent past the stale window (#1865)', async () => {
+    const db2 = makeDb();
+    const durability = new DurabilityEngine(db2);
+    const id = durability.createOutboundOp({ conversationKey: 'k', chatJid: 'j', opType: 'text', payload: '{}', replayPolicy: 'unsafe' });
+    durability.markSending(id);
+    durability.markSubmitted(id, 'WA_MSG_1865');
+    durability.markMaybeSent(id, 'echo_timeout');
+    // One hour unresolved — well past the stale window.
+    db2.raw
+      .prepare(`UPDATE outbound_ops SET submitted_at = datetime('now', '-3600 seconds') WHERE id = ?`)
+      .run(id);
+
+    const { server: server2, port: port2 } = await buildTestServer(makeDeps(db2, { durability }));
+    try {
+      const { status, body } = await httpReq(port2, '/health', 'GET');
+      const json = JSON.parse(body);
+      // A connected instance is otherwise healthy; the stale maybe_sent must degrade it
+      // rather than read green (#1865). Degraded still returns 200.
+      expect(status).toBe(200);
+      expect(json.status).toBe('degraded');
+      expect(json.durability.maybeSentOutbound).toBe(1);
+      expect(json.durability.oldestMaybeSentAt).not.toBeNull();
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+      db2.close();
+    }
   });
 
   it('surfaces safe ARC binding metadata from runtime health', async () => {
@@ -1267,6 +1296,46 @@ describe('GET /health', () => {
     expect(json.turn_capability.model_usable_checked_at).toBe(checkedAt);
     // existing fields preserved
     expect(json.turn_capability.model_usable).toBe(null);
+    db2.close();
+  });
+
+  it('degrades top-level status when model evidence is stale AND a turn was recently attempted (S-04a)', async () => {
+    // Stale usability evidence WHILE the model was recently relied upon is a
+    // genuine probe-refresh failure — it must not read as a healthy green. (A
+    // never-turned idle bot with stale evidence stays healthy; that case is the
+    // #1392 test above, which asserts field threading without a degrade.)
+    db.close();
+    const db2 = makeDb();
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'healthy',
+        details: {
+          active: true,
+          turnCapability: {
+            modelUsable: null,
+            modelUsableStale: true,
+            modelUsableCheckedAt: Date.now() - 60 * 60 * 1000,
+            modelUsabilityStatus: 'usable',
+            lastSuccessfulTurnAt: Date.now() - 60_000, // relied upon 1 min ago
+            lastTurnErrorClass: null,
+            lastTurnErrorAt: null,
+          },
+        },
+      }),
+      getFallbackState: () => null,
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.status).toBe('degraded');
+    expect(json.turn_capability.model_usable_stale).toBe(true);
     db2.close();
   });
 

@@ -6,6 +6,8 @@
  * across the 4 modes (create/patch/load/discovery) and the type-specific rules
  * (chat/agent/passive) and cross-field constraints (sessionScope/accessMode).
  */
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   VALID_TYPES,
@@ -46,6 +48,43 @@ const ctx = (mode: ValidatorContext['mode'], over: Partial<ValidatorContext> = {
   name: 'alpha',
   mode,
   ...over,
+});
+
+// #1862: the home-root working-directory invariant — AgentRuntime.start() rejects
+// an explicitly-configured cwd that resolves to the user home directory
+// (runtime.ts). The validator must enforce the SAME invariant so config load,
+// preflight, and API writes all fail closed before a restart mutates the service.
+describe('agentOptions.cwd home-root invariant (#1862)', () => {
+  it('rejects an explicit cwd that resolves to the user home directory', () => {
+    const result = validateInstanceConfig(
+      baseAgent({ agentOptions: { sessionScope: 'single', cwd: os.homedir() } }),
+      ctx('load'),
+    );
+    expect(result).not.toBeNull();
+    expect(result?.field).toBe('agentOptions.cwd');
+  });
+
+  it('accepts an explicit cwd under home (a subdirectory is not the home root)', () => {
+    const result = validateInstanceConfig(
+      baseAgent({
+        agentOptions: {
+          sessionScope: 'single',
+          cwd: path.join(os.homedir(), 'whatsoup-agent-workdir-1862'),
+        },
+      }),
+      ctx('load'),
+    );
+    expect(result).toBeNull();
+    // The home-root rule must not fire for a subdirectory of home.
+    expect(result?.field).not.toBe('agentOptions.cwd');
+  });
+
+  it('accepts a config with no explicit cwd (runtime home fallback stays legal)', () => {
+    const result = validateInstanceConfig(baseAgent(), ctx('load'));
+    expect(result).toBeNull();
+    // An absent cwd must not trip the home-root rule (unset -> homedir at runtime).
+    expect(result?.field).not.toBe('agentOptions.cwd');
+  });
 });
 
 describe('VALID_* sets', () => {

@@ -152,6 +152,28 @@ describe('keyring fail-loud logging', () => {
         expect(callStr).not.toContain('test-api-key-value-xyz');
       }
     });
+
+    it('warns at most once per service while preserving warnings for distinct services', () => {
+      Object.defineProperty(process, 'platform', { value: 'darwin', writable: true });
+      mockedExecFileSync.mockImplementation(() => { throw new Error('keychain error'); });
+
+      lookupCredential('anthropic', { skipEnv: true });
+      lookupCredential('anthropic', { skipEnv: true });
+      lookupCredential('openai', { skipEnv: true });
+
+      expect(logWarn).toHaveBeenCalledTimes(2);
+    });
+
+    it('clears warning deduplication through the backend reset seam', () => {
+      Object.defineProperty(process, 'platform', { value: 'darwin', writable: true });
+      mockedExecFileSync.mockImplementation(() => { throw new Error('keychain error'); });
+
+      lookupCredential('anthropic', { skipEnv: true });
+      _resetBackendCache();
+      lookupCredential('anthropic', { skipEnv: true });
+
+      expect(logWarn).toHaveBeenCalledTimes(2);
+    });
   });
 
   // CRED-2: a probe that ERRORS (timeout, EACCES, unexpected exit) silently

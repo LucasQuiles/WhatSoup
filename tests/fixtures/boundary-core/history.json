@@ -1,0 +1,139 @@
+{
+  "schemaVersion": 1,
+  "repository": "LucasQuiles/WhatSoup",
+  "artifacts": [
+    {
+      "kind": "pull-request",
+      "number": 1838,
+      "state": "closed-unmerged",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/1838",
+      "baseOid": "21e7919273f3d5f64702bf25ad10aaa9800b806d",
+      "headOid": "369e2fdae9aeacef1674958339b6c6931ffb544d",
+      "patchIdStable": "c383cb98c7e262dabdef9c0048c58e1327734e8b",
+      "pathBlobSet": [
+        {
+          "status": "added",
+          "path": "src/lib/echo-cache.ts",
+          "blobOid": "53f346cb59f176abdb967c1be71f1c58720d7729"
+        },
+        {
+          "status": "added",
+          "path": "tests/lib/echo-cache.test.ts",
+          "blobOid": "60835a7e3d88ae886f801b170c8c68f4dd927ae9"
+        }
+      ],
+      "disposition": null
+    },
+    {
+      "kind": "pull-request",
+      "number": 1848,
+      "state": "closed-unmerged",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/1848",
+      "baseOid": "9f905edb2d9f4dd4903120c65856142941155597",
+      "headOid": "1c6b0de90d8f6a437b783b011ded185b37441794",
+      "patchIdStable": "c383cb98c7e262dabdef9c0048c58e1327734e8b",
+      "pathBlobSet": [
+        {
+          "status": "added",
+          "path": "src/lib/echo-cache.ts",
+          "blobOid": "53f346cb59f176abdb967c1be71f1c58720d7729"
+        },
+        {
+          "status": "added",
+          "path": "tests/lib/echo-cache.test.ts",
+          "blobOid": "60835a7e3d88ae886f801b170c8c68f4dd927ae9"
+        }
+      ],
+      "disposition": null
+    },
+    {
+      "kind": "pull-request",
+      "number": 1857,
+      "state": "closed-unmerged",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/1857",
+      "baseOid": "1c807370e4a9af2e933affe0817df41c074b0cfc",
+      "priorHeadOid": "859c61514a1da6b981a2be0f1935b40f92a517d3",
+      "headOid": "ca887b024a419fd359f6384edea4239c1e42ce02",
+      "priorPatchIdStable": "8fb8fb6bc0722cd9fd57869e68618be43513d2bb",
+      "patchIdStable": "07abd8da3fb26b5bd05f4ac414e2cc5b658cee68",
+      "pathBlobSet": [
+        {
+          "status": "added",
+          "path": "src/lib/oauth-refresh-diagnostics.ts",
+          "blobOid": "9a0bed1c390b17a862e8929f97b29e37d663219f"
+        },
+        {
+          "status": "added",
+          "path": "tests/lib/oauth-refresh-diagnostics.test.ts",
+          "blobOid": "7a8ba2b6564bad42081d210c509f26953ee6884e"
+        }
+      ],
+      "disposition": {
+        "category": "duplicate-existing-mechanism",
+        "artifactRefs": [
+          "https://github.com/LucasQuiles/WhatSoup/pull/1857"
+        ],
+        "reentryConditions": [
+          "integrate-through-production-owner",
+          "remove-duplicate-existing-mechanism"
+        ],
+        "recordedAt": "2026-07-16T00:40:00Z"
+      },
+      "reentry": {
+        "priorArtifactRefs": [
+          "https://github.com/LucasQuiles/WhatSoup/pull/1857"
+        ],
+        "addressedConditions": [],
+        "deltaKind": "fixture-hygiene",
+        "productionOwner": null
+      }
+    },
+    {
+      "kind": "pull-request",
+      "number": 1900,
+      "state": "merged",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/1900",
+      "baseOid": "ffffffffffffffffffffffffffffffffffffffff",
+      "headOid": "1111111111111111111111111111111111111111",
+      "patchIdStable": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "pathBlobSet": [
+        {
+          "status": "modified",
+          "path": "src/lib/shared-refactor.ts",
+          "blobOid": "cccccccccccccccccccccccccccccccccccccccc"
+        },
+        {
+          "status": "modified",
+          "path": "tests/lib/shared-refactor.test.ts",
+          "blobOid": "dddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "disposition": null
+    },
+    {
+      "kind": "pull-request",
+      "number": 1901,
+      "state": "closed-unmerged",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/1901",
+      "baseOid": "4444444444444444444444444444444444444444",
+      "headOid": "5555555555555555555555555555555555555555",
+      "patchIdStable": "3333333333333333333333333333333333333333",
+      "pathBlobSet": [
+        {
+          "status": "added",
+          "path": "examples/shared-refactor.ts",
+          "blobOid": "2222222222222222222222222222222222222222"
+        }
+      ],
+      "disposition": null
+    },
+    {
+      "kind": "issue",
+      "number": 1783,
+      "state": "open",
+      "url": "https://github.com/LucasQuiles/WhatSoup/issues/1783",
+      "taskFingerprintSha256": "ca2a383af7f56efc1da64477e626cffd5939b1bb0f7c6b653c6c96c0f5d22706",
+      "disposition": null
+    }
+  ]
+}

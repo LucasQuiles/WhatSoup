@@ -394,7 +394,7 @@ describe('useUpdateCheck — toast notification', () => {
     )
   })
 
-  it('toast message mentions the nav bar update button', async () => {
+  it('toast message directs the operator to deploy a new release', async () => {
     const { api } = await import('../../console/src/lib/api')
     ;(api.getVersion as Mock).mockResolvedValueOnce(makeUpdateState(true))
 
@@ -406,9 +406,11 @@ describe('useUpdateCheck — toast notification', () => {
 
     await waitFor(() => expect(toastCtx.info).toHaveBeenCalledTimes(1))
 
-    // Source: toast.info('A new version is available. Click the update button in the nav bar to install.')
+    // In-place update was retired (S-03); the toast no longer points at an
+    // install button. Source: toast.info('A new version is available. Deploy a
+    // new release to update this instance — in-place update has been retired.')
     expect(toastCtx.info).toHaveBeenCalledWith(
-      expect.stringContaining('nav bar'),
+      expect.stringContaining('Deploy a new release'),
     )
   })
 

@@ -2393,7 +2393,15 @@ export class SessionManager {
         this.clearTurnWatchdog();
         this.child = null;
 
-        const exitedWithError = (code !== 0 && code !== null) || signal !== null;
+        // A signal exit AFTER the turn delivered its terminal result is the
+        // normal spawn-per-turn teardown (the provider emits its result, then
+        // the process tree is torn down with SIGTERM). Only treat a signal exit
+        // as an error when no result was seen — otherwise a delivered reply is
+        // misclassified as a crash, inflating crash/heal telemetry and firing a
+        // false onCrash + unexpected-exit notification (#1870). A non-zero exit
+        // code still counts as an error even with a result, as it is a stronger
+        // failure signal than a teardown SIGTERM.
+        const exitedWithError = (code !== 0 && code !== null) || (signal !== null && !sawResult);
         const missingTerminalResult = code === 0 && signal === null && !sawResult;
         if (exitedWithError || missingTerminalResult) {
           this.completeProviderTurn(providerTurnToken);

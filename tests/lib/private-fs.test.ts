@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -16,16 +17,26 @@ import {
   appendPrivateJsonLineSync,
   assertPrivateDirectorySync,
   assertWritablePrivateFileSync,
+  deletePrivateFileSync,
   ensurePrivateDirectorySync,
   forceEnsurePrivateDirectorySync,
+  readPrivateFileSync,
   readFreshMarkerSync,
+  writeAtomicPrivateFileSync,
   writePrivateFileSync,
   writePrivateJsonMarkerSync,
 } from '../../src/lib/private-fs.ts';
 
 let tmpRoot = '';
+const originalGetuidDescriptor = Object.getOwnPropertyDescriptor(process, 'getuid');
 
 afterEach(() => {
+  if (originalGetuidDescriptor) {
+    Object.defineProperty(process, 'getuid', originalGetuidDescriptor);
+  } else {
+    delete (process as NodeJS.Process & { getuid?: () => number }).getuid;
+  }
+  vi.doUnmock('node:crypto');
   vi.doUnmock('node:fs');
   vi.resetModules();
   if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
@@ -35,6 +46,46 @@ afterEach(() => {
 function makeTmp(): string {
   tmpRoot = mkdtempSync(join(tmpdir(), 'private-fs-test-'));
   return tmpRoot;
+}
+
+function setTestUid(uid: number): void {
+  Object.defineProperty(process, 'getuid', {
+    configurable: true,
+    value: () => uid,
+  });
+}
+
+function mockedPrivateStat(
+  type: 'directory' | 'file',
+  uid: number,
+): ReturnType<typeof lstatSync> {
+  return {
+    uid,
+    mode: type === 'directory' ? 0o700 : 0o600,
+    size: 0,
+    isSymbolicLink: () => false,
+    isDirectory: () => type === 'directory',
+    isFile: () => type === 'file',
+  } as ReturnType<typeof lstatSync>;
+}
+
+async function importWithMockedOwnership(
+  dirPath: string,
+  filePath: string,
+  dirUid: number,
+  fileUid: number,
+): Promise<typeof import('../../src/lib/private-fs.ts')> {
+  const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
+  vi.resetModules();
+  vi.doMock('node:fs', () => ({
+    ...actual,
+    lstatSync: vi.fn((path: string) => {
+      if (path === dirPath) return mockedPrivateStat('directory', dirUid);
+      if (path === filePath) return mockedPrivateStat('file', fileUid);
+      return actual.lstatSync(path);
+    }),
+  }));
+  return import('../../src/lib/private-fs.ts');
 }
 
 describe('writePrivateFileSync', () => {
@@ -313,6 +364,18 @@ describe('assertWritablePrivateFileSync', () => {
     expect(caught?.message).toBe('refusing to write config.json through symlink');
   });
 
+  it('refuses a dangling target symlink instead of treating it as missing', () => {
+    const root = makeTmp();
+    const target = join(root, 'dangling.key');
+    symlinkSync(join(root, 'missing.key'), target);
+
+    let caught: NodeJS.ErrnoException | undefined;
+    try { assertWritablePrivateFileSync(target, 'credential'); } catch (err) { caught = err as NodeJS.ErrnoException; }
+
+    expect(caught?.code).toBe('ELOOP');
+    expect(caught?.message).toBe('refusing to write credential through symlink');
+  });
+
   it('refuses a non-regular target (EINVAL) with the supplied label', () => {
     const root = makeTmp();
     const dir = join(root, 'priv');
@@ -398,22 +461,21 @@ describe('writePrivateJsonMarkerSync', () => {
     const markerPath = join(dir, 'state.marker');
 
     vi.resetModules();
-    let existsCalls = 0;
+    let targetLstatCalls = 0;
     vi.doMock('node:fs', async (importOriginal) => {
       const actual = await importOriginal<typeof import('node:fs')>();
       return {
         ...actual,
-        existsSync: vi.fn((p: string) => {
-          if (p === markerPath) {
-            existsCalls += 1;
-            // First target assert (pre-write): absent. Second assert
-            // (post-write, pre-rename): a symlink raced into place.
-            return existsCalls >= 2;
-          }
-          return actual.existsSync(p);
-        }),
         lstatSync: vi.fn((p: string) => {
           if (p === markerPath) {
+            targetLstatCalls += 1;
+            // First target assert (pre-write): absent. Second assert
+            // (post-write, pre-rename): a symlink raced into place.
+            if (targetLstatCalls === 1) {
+              const err = new Error('missing') as NodeJS.ErrnoException;
+              err.code = 'ENOENT';
+              throw err;
+            }
             return { isSymbolicLink: () => true, isFile: () => false } as any;
           }
           return actual.lstatSync(p);
@@ -426,6 +488,291 @@ describe('writePrivateJsonMarkerSync', () => {
     // No leftover temp files in the directory.
     const { readdirSync } = await import('node:fs');
     expect(readdirSync(dir).filter((f) => f.includes('.tmp'))).toEqual([]);
+  });
+});
+
+describe('atomic private-file primitives', () => {
+  it('refuses a pre-existing temp symlink without changing its target', async () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    const target = join(dir, 'credential.key');
+    const decoy = join(root, 'decoy.key');
+    const fixedId = 'fixed-temp-id';
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(decoy, 'unchanged', { mode: 0o600 });
+    const tempPath = join(dir, `.credential.key.${process.pid}.${fixedId}.tmp`);
+    symlinkSync(decoy, tempPath);
+
+    vi.resetModules();
+    vi.doMock('node:crypto', async (importOriginal) => ({
+      ...(await importOriginal<typeof import('node:crypto')>()),
+      randomUUID: () => fixedId,
+    }));
+    const { writeAtomicPrivateFileSync: writeWithFixedTemp } = await import('../../src/lib/private-fs.ts');
+
+    let caught: NodeJS.ErrnoException | undefined;
+    try { writeWithFixedTemp(target, 'replacement', 'credential'); } catch (err) { caught = err as NodeJS.ErrnoException; }
+
+    expect(caught?.code).toBe('EEXIST');
+    expect(readFileSync(decoy, 'utf-8')).toBe('unchanged');
+    expect(lstatSync(tempPath).isSymbolicLink()).toBe(true);
+  });
+
+  it('fsyncs the file before rename and the parent directory after rename', async () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    const target = join(dir, 'credential.key');
+    const events: string[] = [];
+    const openedPaths = new Map<number, string>();
+    const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
+
+    vi.resetModules();
+    vi.doMock('node:fs', () => ({
+      ...actual,
+      openSync: vi.fn((filePath: Parameters<typeof actual.openSync>[0], flags: Parameters<typeof actual.openSync>[1], mode?: number) => {
+        const fd = actual.openSync(filePath, flags, mode);
+        openedPaths.set(fd, String(filePath));
+        return fd;
+      }),
+      fsyncSync: vi.fn((fd: number) => {
+        events.push(openedPaths.get(fd) === dir ? 'parent-fsync' : 'file-fsync');
+        return actual.fsyncSync(fd);
+      }),
+      renameSync: vi.fn((from: string, to: string) => {
+        events.push('rename');
+        return actual.renameSync(from, to);
+      }),
+    }));
+    const { writeAtomicPrivateFileSync: writeObserved } = await import('../../src/lib/private-fs.ts');
+
+    writeObserved(target, 'credential', 'credential');
+
+    expect(events).toEqual(['file-fsync', 'rename', 'parent-fsync']);
+    expect(statSync(target).mode & 0o777).toBe(0o600);
+  });
+
+  it('removes its temp file when rename fails', async () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    const target = join(dir, 'credential.key');
+    const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
+
+    vi.resetModules();
+    vi.doMock('node:fs', () => ({
+      ...actual,
+      renameSync: vi.fn(() => {
+        throw new Error('simulated rename failure');
+      }),
+    }));
+    const { writeAtomicPrivateFileSync: writeWithRenameFailure } = await import('../../src/lib/private-fs.ts');
+
+    expect(() => writeWithRenameFailure(target, 'credential', 'credential')).toThrow(/simulated rename failure/);
+    expect(readdirSync(dir).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it('does not publish a target and removes its temp file when file fsync fails', async () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    const target = join(dir, 'credential.key');
+    const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
+
+    vi.resetModules();
+    vi.doMock('node:fs', () => ({
+      ...actual,
+      fsyncSync: vi.fn(() => {
+        throw new Error('simulated file fsync failure');
+      }),
+    }));
+    const { writeAtomicPrivateFileSync: writeWithFsyncFailure } = await import('../../src/lib/private-fs.ts');
+
+    expect(() => writeWithFsyncFailure(target, 'credential', 'credential')).toThrow(/simulated file fsync failure/);
+    expect(actual.existsSync(target)).toBe(false);
+    expect(readdirSync(dir).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it('rejects a symlink read', () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const decoy = join(root, 'decoy.key');
+    const target = join(dir, 'symlink.key');
+    writeFileSync(decoy, 'credential', { mode: 0o600 });
+    symlinkSync(decoy, target);
+
+    expect(() => readPrivateFileSync(target, { label: 'credential', maxBytes: 32 })).toThrow(/symlink/);
+  });
+
+  it('rejects a directory read', () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    const target = join(dir, 'directory.key');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    mkdirSync(target, { mode: 0o700 });
+
+    expect(() => readPrivateFileSync(target, { label: 'credential', maxBytes: 32 })).toThrow(/non-regular/);
+  });
+
+  it('rejects a FIFO read without blocking', async () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    const target = join(dir, 'fifo.key');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+
+    const { execFileSync } = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+    execFileSync('mkfifo', [target]);
+
+    expect(() => readPrivateFileSync(target, { label: 'credential', maxBytes: 32 })).toThrow(/non-regular/);
+  });
+
+  it('rejects an oversized read', () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    const target = join(dir, 'oversized.key');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(target, 'x'.repeat(33), { mode: 0o600 });
+
+    expect(() => readPrivateFileSync(target, { label: 'credential', maxBytes: 32 })).toThrow(/maximum size/);
+  });
+
+  it('rejects a non-private file read', () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    const target = join(dir, 'public.key');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(target, 'credential', { mode: 0o644 });
+
+    expect(() => readPrivateFileSync(target, { label: 'credential', maxBytes: 32 })).toThrow(/non-private permissions/);
+  });
+
+  it('rejects a read through a symlinked directory', () => {
+    const root = makeTmp();
+    const realDir = join(root, 'real');
+    const linkDir = join(root, 'link');
+    mkdirSync(realDir, { mode: 0o700 });
+    writeFileSync(join(realDir, 'credential.key'), 'credential', { mode: 0o600 });
+    symlinkSync(realDir, linkDir, 'dir');
+
+    expect(() => readPrivateFileSync(join(linkDir, 'credential.key'), { label: 'credential', maxBytes: 32 })).toThrow(/symlink/);
+  });
+
+  it('rejects a read through a non-private directory', () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    mkdirSync(dir, { mode: 0o700 });
+    writeFileSync(join(dir, 'credential.key'), 'credential', { mode: 0o600 });
+    chmodSync(dir, 0o755);
+
+    expect(() => readPrivateFileSync(join(dir, 'credential.key'), { label: 'credential', maxBytes: 32 })).toThrow(/non-private permissions/);
+  });
+
+  it('rejects a read through a foreign-owned directory with a sanitized EACCES error', async () => {
+    setTestUid(1000);
+    const dir = '/private-fixture/foreign-directory';
+    const target = join(dir, 'credential.key');
+    const { readPrivateFileSync: readForeignDirectory } = await importWithMockedOwnership(
+      dir,
+      target,
+      2000,
+      1000,
+    );
+
+    let caught: NodeJS.ErrnoException | undefined;
+    try { readForeignDirectory(target, { label: 'credential', maxBytes: 32 }); } catch (err) { caught = err as NodeJS.ErrnoException; }
+
+    expect(caught?.code).toBe('EACCES');
+    expect(caught?.message).toBe('refusing to use credential directory not owned by current user');
+    expect(caught?.message).not.toContain(target);
+  });
+
+  it('rejects a foreign-owned file read with a sanitized EACCES error', async () => {
+    setTestUid(1000);
+    const dir = '/private-fixture/owned-directory';
+    const target = join(dir, 'credential.key');
+    const { readPrivateFileSync: readForeignFile } = await importWithMockedOwnership(
+      dir,
+      target,
+      1000,
+      2000,
+    );
+
+    let caught: NodeJS.ErrnoException | undefined;
+    try { readForeignFile(target, { label: 'credential', maxBytes: 32 }); } catch (err) { caught = err as NodeJS.ErrnoException; }
+
+    expect(caught?.code).toBe('EACCES');
+    expect(caught?.message).toBe('refusing to read credential not owned by current user');
+    expect(caught?.message).not.toContain(target);
+  });
+
+  it('rejects deletion through a foreign-owned directory with a sanitized EACCES error', async () => {
+    setTestUid(1000);
+    const dir = '/private-fixture/foreign-delete-directory';
+    const target = join(dir, 'credential.key');
+    const { deletePrivateFileSync: deleteForeignDirectory } = await importWithMockedOwnership(
+      dir,
+      target,
+      2000,
+      1000,
+    );
+
+    let caught: NodeJS.ErrnoException | undefined;
+    try { deleteForeignDirectory(target, 'credential'); } catch (err) { caught = err as NodeJS.ErrnoException; }
+
+    expect(caught?.code).toBe('EACCES');
+    expect(caught?.message).toBe('refusing to use credential directory not owned by current user');
+    expect(caught?.message).not.toContain(target);
+  });
+
+  it('rejects deletion of a foreign-owned file with a sanitized EACCES error', async () => {
+    setTestUid(1000);
+    const dir = '/private-fixture/owned-delete-directory';
+    const target = join(dir, 'credential.key');
+    const { deletePrivateFileSync: deleteForeignFile } = await importWithMockedOwnership(
+      dir,
+      target,
+      1000,
+      2000,
+    );
+
+    let caught: NodeJS.ErrnoException | undefined;
+    try { deleteForeignFile(target, 'credential'); } catch (err) { caught = err as NodeJS.ErrnoException; }
+
+    expect(caught?.code).toBe('EACCES');
+    expect(caught?.message).toBe('refusing to delete credential not owned by current user');
+    expect(caught?.message).not.toContain(target);
+  });
+
+  it('fsyncs the parent directory after deleting a private file', async () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    const target = join(dir, 'credential.key');
+    mkdirSync(dir, { mode: 0o700 });
+    writeFileSync(target, 'credential', { mode: 0o600 });
+    const events: string[] = [];
+    const openedPaths = new Map<number, string>();
+    const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
+
+    vi.resetModules();
+    vi.doMock('node:fs', () => ({
+      ...actual,
+      openSync: vi.fn((filePath: Parameters<typeof actual.openSync>[0], flags: Parameters<typeof actual.openSync>[1], mode?: number) => {
+        const fd = actual.openSync(filePath, flags, mode);
+        openedPaths.set(fd, String(filePath));
+        return fd;
+      }),
+      unlinkSync: vi.fn((filePath: string) => {
+        events.push('unlink');
+        return actual.unlinkSync(filePath);
+      }),
+      fsyncSync: vi.fn((fd: number) => {
+        if (openedPaths.get(fd) === dir) events.push('parent-fsync');
+        return actual.fsyncSync(fd);
+      }),
+    }));
+    const { deletePrivateFileSync: deleteObserved } = await import('../../src/lib/private-fs.ts');
+
+    expect(deleteObserved(target, 'credential')).toBe(true);
+    expect(events).toEqual(['unlink', 'parent-fsync']);
+    expect(actual.existsSync(target)).toBe(false);
   });
 });
 

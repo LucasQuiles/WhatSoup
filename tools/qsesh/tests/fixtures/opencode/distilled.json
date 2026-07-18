@@ -1,0 +1,43 @@
+{
+  "compactions": [{"count": 1, "event_indices": [12], "reasons": []}],
+  "files": [],
+  "record": {
+    "compaction_count": 1,
+    "cost_totals": [{"model": null, "provider": null, "scope": "session", "source": "opencode", "unit": "opencode_native", "value": 0}],
+    "duration_us": 2000000,
+    "ended_at_utc": "2026-01-02T08:04:07Z",
+    "event_counts": {"assistant_msg": 1, "compaction": 1, "meta": 6, "reasoning": 1, "session_meta": 1, "skill_invocation": 1, "subagent_activity": 1, "tool_call": 1, "tool_result": 1, "user_msg": 1},
+    "file_count": 0,
+    "git_branch": null,
+    "harness": "opencode",
+    "harness_version": "1.17.15",
+    "host_id": "host-test-001",
+    "identity_digest": "48450096d2fb2d11410eac75dcc9aa5a437ed4f233ed4e20373cefaad3e2cf19",
+    "meta_counts": {"attachment": 1, "cost": 2, "unknown": 1, "usage": 2},
+    "models": ["fixture-model"],
+    "native_id": "ses_opencode_001",
+    "project": "project-alpha",
+    "qid": "qs-jbcqbfws7m",
+    "raw_pointer": "raw-pointer-test",
+    "reported_costs": [{"model": null, "provider": null, "scope": "session", "source": "opencode", "unit": "opencode_native", "value": 0}, {"model": "fixture-model", "provider": "fixture-provider", "scope": "message", "source": "opencode", "unit": "opencode_native", "value": 0}],
+    "reported_usage": [{"model": null, "provider": null, "scope": "session", "source": "opencode", "unit": "tokens", "values": {"input": 7, "output": 11}}, {"model": "fixture-model", "provider": "fixture-provider", "scope": "message", "source": "opencode", "unit": "tokens", "values": {"input": 7, "output": 11}}],
+    "skill_invocation_count": 1,
+    "source_digest": "2facf01ab6b8915643d28daa5e16cf144419c48137eeb487b38541bc4e70beb3",
+    "source_pointer": "source-pointer-test",
+    "started_at_utc": "2026-01-02T08:04:05Z",
+    "subagent_dispatch_count": 1,
+    "title": "USER_ALPHA",
+    "token_totals": [{"model": null, "provider": null, "scope": "session", "source": "opencode", "unit": "tokens", "values": {"input": 7, "output": 11}}],
+    "tool_call_count": 1,
+    "tool_result_count": 1,
+    "turn_counts": {"assistant": 1, "clean": 3, "clean_assistant": 1, "clean_user": 2, "reasoning": 1, "user": 1}
+  },
+  "skills": [{"count": 1, "name": "brainstorming"}],
+  "subagents": [{"agent": "fixture-agent", "count": 1, "sidechain_count": 0}],
+  "tools": [{"call_ids": ["part-opencode-004"], "count": 1, "is_mcp": true, "name": "mcp__fixture__lookup"}],
+  "turns": [
+    {"role": "user", "text": "USER_ALPHA", "timestamp_utc": "2026-01-02T08:04:06Z", "turn_index": 0},
+    {"role": "assistant", "text": "ASSISTANT_BETA", "timestamp_utc": "2026-01-02T08:04:07Z", "turn_index": 1},
+    {"role": "user", "text": "invoked /brainstorming", "timestamp_utc": "2026-01-02T08:04:07Z", "turn_index": 2}
+  ]
+}

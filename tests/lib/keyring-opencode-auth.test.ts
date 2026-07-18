@@ -99,6 +99,13 @@ describe('opencode auth.json credential fallback (BE-G3)', () => {
       expect(lookupCredential('minimax')).toBe('mm-from-filestore');
     });
 
+    it('excludes the unscoped file for a user-scoped lookup and reaches opencode auth.json', () => {
+      fs.writeFileSync(path.join(storeDir, 'minimax.key'), 'mm-from-unscoped-file', { mode: 0o600 });
+      writeAuth({ minimax: { type: 'api', key: 'mm-from-opencode' } });
+
+      expect(lookupCredential('minimax', { user: 'bot', skipEnv: true })).toBe('mm-from-opencode');
+    });
+
     it('does not leak opencode keys for an unrelated service not in auth.json', () => {
       writeAuth({ minimax: { type: 'api', key: 'mm' } });
       expect(lookupCredential('some-unrelated-service')).toBeNull();

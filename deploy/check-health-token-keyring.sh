@@ -1,73 +1,86 @@
 #!/usr/bin/env bash
 #
-# check-health-token-keyring.sh — verify an instance's health token is in keyring
+# check-health-token-keyring.sh — verify file/keyring health-token parity
 #
-# Pre-flight check for the W-5 health-token migration. Returns 0 (ready) when
-# the per-instance health token is findable in the OS keyring under the
-# service name 'whatsoup-health-token' with account=<instance>, meaning the
-# tokens.env EnvironmentFile line AND the WHATSOUP_HEALTH_TOKEN export block in deploy/whatsoup
-# can both be safely removed. Returns 1 (not ready) if the token is missing.
+# Fleet discovery is still file-backed. This check proves that the canonical
+# per-instance tokens.env value has an exact keyring mirror; it does not make
+# tokens.env, the systemd EnvironmentFile, or the launcher file load removable.
+# After the descriptor-safe launcher is deployed, remove any duplicate plaintext
+# WHATSOUP_HEALTH_TOKEN entry from launchd while retaining canonical tokens.env.
+# Values are compared only in memory and are never printed.
 #
 # Usage: deploy/check-health-token-keyring.sh <instance-name>
 #
-# This script does NOT read or print token values — it only checks presence
-# (keyring lookup returns non-empty). Safe to run in any environment.
-#
 # Migration tracking: docs/security-handoffs/2026-05-09-env-secret-exposure.md
-# Phase E (W-5). Companion to deploy/check-keyring-presence.sh (W-6).
-# PR #1804 routed the health auth read site through lookupCredential; this
-# script verifies the deploy-side removal is safe.
+# Phase E (W-5).
 set -euo pipefail
 
-if [ $# -lt 1 ]; then
+if [ "$#" -ne 1 ]; then
   echo "Usage: $0 <instance-name>" >&2
-  echo "  Checks whether the instance's health token is in the OS keyring." >&2
-  echo "  The token must be stored as service=whatsoup-health-token, account=<instance-name>." >&2
+  echo "  Verifies exact parity between tokens.env and its scoped keyring mirror." >&2
   exit 2
 fi
 
 INSTANCE="$1"
 SERVICE="whatsoup-health-token"
+CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+TOKEN_FILE="$CONFIG_HOME/whatsoup/instances/$INSTANCE/tokens.env"
 
-# Detect the keyring backend (mirrors src/lib/keyring.ts detectKeyringBackend).
-# Health tokens are scoped per-instance via the account parameter.
-keyring_present() {
-  local service="$1"
-  local account="$2"
-  local value=""
+if [[ ! "$INSTANCE" =~ ^[a-z][a-z0-9-]*$ ]] || [ "${#INSTANCE}" -gt 30 ]; then
+  echo "Invalid instance name" >&2
+  exit 2
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=deploy/lib/resolve-node.sh
+. "$SCRIPT_DIR/lib/resolve-node.sh"
+if ! NODE="$(whatsoup_resolve_node "$REPO_ROOT")"; then
+  exit 2
+fi
+# shellcheck source=deploy/lib/read-private-health-token.sh
+. "$SCRIPT_DIR/lib/read-private-health-token.sh"
+
+read_scoped_keyring_token() {
   case "$(uname -s)" in
     Darwin)
-      value="$(security find-generic-password -s "$service" -a "$account" -w 2>/dev/null || true)"
+      "$NODE" "$SCRIPT_DIR/lib/read-keychain-secret.mjs" \
+        "$SERVICE" "$INSTANCE" || true
       ;;
     *)
-      value="$(timeout 3s secret-tool lookup service "$service" account "$account" 2>/dev/null || true)"
+      timeout 3s secret-tool lookup \
+        service "$SERVICE" \
+        user "$INSTANCE" 2>/dev/null || true
       ;;
   esac
-  # Return 0 if non-empty, 1 if empty. NEVER print the value.
-  [ -n "$value" ]
 }
 
-echo "Checking OS keyring for health token (instance: $INSTANCE)..."
-echo "  service: $SERVICE"
-echo "  account: $INSTANCE"
-echo
-
-if keyring_present "$SERVICE" "$INSTANCE"; then
-  echo "  ✓ Health token present in keyring for instance '$INSTANCE'"
-  echo
-  echo "✅ Ready for W-5 migration."
-  echo "   The following can be removed:"
-  echo "     1. EnvironmentFile line in deploy/whatsoup@.service (tokens.env)"
-  echo "     2. WHATSOUP_HEALTH_TOKEN export block in deploy/whatsoup"
-  echo "   health.ts resolves the token at request time via lookupCredential."
-  exit 0
-else
-  echo "  ✗ Health token NOT in keyring for instance '$INSTANCE'"
-  echo
-  echo "❌ Not ready for W-5 migration."
-  echo "   Store the token before removing tokens.env, or health auth will break."
-  echo "   Store it with:"
-  echo "     Linux:  secret-tool store --label='WhatSoup health token' service $SERVICE account $INSTANCE"
-  echo "     macOS:  security add-generic-password -s $SERVICE -a $INSTANCE -w"
+fail() {
+  echo "  ✗ $1"
+  echo "❌ Parity check failed. Do not remove tokens.env or its launcher/service wiring."
   exit 1
+}
+
+echo "Checking health-token file/keyring parity (instance: $INSTANCE)..."
+
+if ! FILE_TOKEN="$(whatsoup_read_private_health_token \
+  "$NODE" \
+  "$SCRIPT_DIR/lib/read-private-health-token.mjs" \
+  "$TOKEN_FILE")"; then
+  fail "tokens.env is missing, unsafe, or non-canonical"
 fi
+
+KEYRING_TOKEN="$(read_scoped_keyring_token)"
+if [ -z "$KEYRING_TOKEN" ]; then
+  fail "scoped keyring mirror is missing"
+fi
+
+if [ "$FILE_TOKEN" != "$KEYRING_TOKEN" ]; then
+  fail "scoped keyring mirror does not match canonical tokens.env"
+fi
+
+echo "  ✓ scoped keyring mirror matches canonical tokens.env"
+echo "✅ Parity check passed for the current file-backed deployment."
+echo "   Do not remove tokens.env, the systemd EnvironmentFile, or the launcher file load."
+echo "   After deploying the descriptor-safe launcher, remove duplicate plaintext"
+echo "   WHATSOUP_HEALTH_TOKEN entries from launchd and retain canonical tokens.env."

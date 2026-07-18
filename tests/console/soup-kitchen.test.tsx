@@ -390,20 +390,63 @@ describe('SoupKitchen KPI cards with data', () => {
     expect(kpis.agentSessions).toBe(2);
   });
 
-  it('renders all 7 KPI cards with the expected labels', () => {
+  it('renders all 9 KPI cards with the expected labels', () => {
     renderPage({ lines });
     const expected = [
       'Lines Connected',
+      'Connectivity Unknown',
       'Need Attention',
       'Messages Sent',
       'Messages Received',
       'Agent Sessions',
       'Unread',
       'Media Processed',
+      'Metrics Unavailable',
     ];
     for (const label of expected) {
       expect(getKpiCard(label)).toBeDefined();
     }
+  });
+
+  it('surfaces the transport-connectivity denominator explicitly (#1881 criterion 5)', () => {
+    // Fixture: alpha (online) + bravo (online) confirmed connected; charlie
+    // (degraded), delta (unreachable), echo (logged_out) all have NO health
+    // body at all (missing health data) — none is a confirmed disconnect, so
+    // all three land in the "Connectivity Unknown" coverage count, out of the
+    // fleet's 5 total lines.
+    renderPage({ lines });
+    const unknownCard = getKpiCard('Connectivity Unknown');
+    expect(within(unknownCard).getByText('3')).toBeDefined();
+    expect(within(unknownCard).getByText('of 5')).toBeDefined();
+  });
+
+  it('surfaces the DB metric availability denominator explicitly (#1879 crit 3)', () => {
+    // None of this fixture's lines set metricAvailability — back-compat
+    // lines never trip the coverage counter.
+    renderPage({ lines });
+    const unavailableCard = getKpiCard('Metrics Unavailable');
+    expect(within(unavailableCard).getByText('0')).toBeDefined();
+    expect(within(unavailableCard).getByText('of 5')).toBeDefined();
+  });
+
+  it('counts a faulted messageStats read into Metrics Unavailable, out of the message totals', () => {
+    const withFault: LineInstance[] = [
+      ...lines,
+      makeLine({
+        name: 'foxtrot',
+        status: 'online',
+        mode: 'chat',
+        messageStats: { sent: 0, received: 0, images: 0, audio: 0, documents: 0 },
+        metricAvailability: { messageStats: 'unavailable' },
+      }),
+    ];
+    renderPage({ lines: withFault });
+    const unavailableCard = getKpiCard('Metrics Unavailable');
+    expect(within(unavailableCard).getByText('1')).toBeDefined();
+    expect(within(unavailableCard).getByText('of 6')).toBeDefined();
+    // The faulted line's zero-value fallback does not inflate/deflate the
+    // totals — its contribution is skipped, not summed as a real zero.
+    expect(within(getKpiCard('Messages Sent')).getByText('170')).toBeDefined();
   });
 
   it('renders the computed KPI values on the cards', () => {
@@ -471,6 +514,55 @@ describe('SoupKitchen instance table rendering', () => {
       // StatusCell renders a span.soup-status-cell containing a shape span + label
       expect(cell.querySelector('.soup-status-cell')).not.toBeNull();
     }
+  });
+
+  it('surfaces the health-observation age on a stale line row, styled as stale (#1877 crit 5)', () => {
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60_000).toISOString();
+    const staleLine = makeLine({
+      name: 'stale-line',
+      status: 'degraded',
+      stale: true,
+      healthObservedAt: fiveMinutesAgo,
+    });
+    renderPage({ lines: [...lines, staleLine] });
+    // Scoped to the table (not screen-global): a degraded line also raises
+    // an AlertBanner entry showing the same raw name, which would otherwise
+    // collide with a global getByText query.
+    const row = within(tableBody()).getByText(displayInstanceName('stale-line')).closest('tr') as HTMLElement;
+    // Binary stale-or-not is not enough — the AGE of the last live
+    // observation must be visible, not just the word "stale".
+    const tag = within(tableCell(row, 1)).getByText(/stale.*5m ago/);
+    expect(tag).not.toBeNull();
+    expect(tag.className).toMatch(/text-s-warn/);
+  });
+
+  it('surfaces the health-observation age on a FRESH (non-stale) connected line too — this is the core #1877 scenario: a connected tab can still be showing an aging snapshot even though the server has not flagged it stale', () => {
+    const tenSecondsAgo = new Date(Date.now() - 10_000).toISOString();
+    const freshLine = makeLine({
+      name: 'fresh-line',
+      status: 'online',
+      stale: false,
+      healthObservedAt: tenSecondsAgo,
+    });
+    renderPage({ lines: [...lines, freshLine] });
+    const row = within(tableBody()).getByText(displayInstanceName('fresh-line')).closest('tr') as HTMLElement;
+    const tag = within(tableCell(row, 1)).getByText(/observed.*just now/);
+    expect(tag).not.toBeNull();
+    // Non-stale rows must not borrow the stale warning styling.
+    expect(tag.className).not.toMatch(/text-s-warn/);
+  });
+
+  it('renders no age tag when a line has never had a live health observation', () => {
+    // Uses "no-history" as the fixture name (not e.g. "never-observed") so it
+    // cannot collide with the age tag's own "observed" wording via substring
+    // text matching — the assertion below wants to prove the tag is ABSENT.
+    const noHistoryLine = makeLine({ name: 'no-history', stale: false, healthObservedAt: null });
+    renderPage({ lines: [...lines, noHistoryLine] });
+    const row = within(tableBody()).getByText(displayInstanceName('no-history')).closest('tr') as HTMLElement;
+    // Only the phone sub-label should exist alongside the StatusCell — no
+    // third c-label span for a health-age tag.
+    const labels = tableCell(row, 1).querySelectorAll('.c-label');
+    expect(labels.length).toBe(1);
   });
 
   it('displays instance name via displayInstanceName', () => {
@@ -1054,6 +1146,31 @@ describe('SoupKitchen filter behavior', () => {
     fireEvent.click(getKpiCard('Lines Connected'));
     expect(visibleTableLineNames(lines)).toEqual(['alpha', 'bravo', 'echo']);
     expect(getKpiCard('Lines Connected').getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('keeps a degraded-but-connected line in the "Lines Connected" filtered view (#1881)', () => {
+    // The literal symptom #1881 fixes: a line whose WhatsApp transport is
+    // genuinely up (fresh whatsapp.connected===true + connection.state
+    // 'connected') must NOT disappear from the "Connected" filter just
+    // because its control-plane health status is 'degraded'. This is a
+    // regression guard on the shared isLineConnected predicate, not a new
+    // behavior — it should already pass.
+    const degradedConnectedLine = makeLine({
+      name: 'foxtrot',
+      status: 'degraded',
+      stale: false,
+      health: {
+        status: 'ok',
+        uptime_seconds: 1,
+        messages_total: 0,
+        whatsapp: { connected: true, connection: { state: 'connected' } },
+        sqlite: { messages_total: 0, schema_version: 5 },
+      },
+    });
+    const withDegradedConnected = [...lines, degradedConnectedLine];
+    renderPage({ lines: withDegradedConnected });
+    fireEvent.click(getKpiCard('Lines Connected'));
+    expect(visibleTableLineNames(withDegradedConnected)).toEqual(['alpha', 'bravo', 'echo', 'foxtrot']);
   });
 
   it('clicking "Need Attention" KPI filters to non-online lines and errored online lines', () => {

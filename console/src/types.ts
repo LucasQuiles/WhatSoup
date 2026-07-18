@@ -6,6 +6,25 @@ export type Mode = 'passive' | 'chat' | 'agent';
 export type Status = 'online' | 'degraded' | 'unreachable' | 'logged_out' | 'config_error' | 'unknown';
 export type StatusConfidence = 'confirmed' | 'inferred' | 'ambiguous';
 
+/**
+ * Per-metric DB read availability (#1879). Mirrors the server's discriminator
+ * (src/fleet/routes/lines.ts): `available` is a genuine read (which may
+ * legitimately carry a zero/null value), `unavailable` is a failed/faulted
+ * read that must be excluded from fleet totals rather than counted as a real
+ * zero, and `not_applicable` is a structurally-absent metric (e.g. session
+ * counts on a non-agent instance).
+ */
+export type MetricAvailability = 'available' | 'unavailable' | 'not_applicable';
+
+/** One entry per DB-derived metric group enrichInstance can observe. */
+export interface MetricAvailabilityMap {
+  messageStats?: MetricAvailability;
+  sessions?: MetricAvailability;
+  chatCounts?: MetricAvailability;
+  tokenStats?: MetricAvailability;
+  lastActivity?: MetricAvailability;
+}
+
 export interface LineInstance {
   name: string;
   phone: string;
@@ -26,7 +45,10 @@ export interface LineInstance {
     // Matches the ONE /health emitter (src/core/health.ts): connection state
     // nests under whatsapp.connection, never top-level. See #1763 — the
     // CONNECTION card read a top-level `connection` no emitter ever produced.
-    whatsapp: { connection: { state: string } };
+    // `connected` is the emitter's composed transport-up signal
+    // (`connectionState.connected && state === 'connected'`); it distinguishes
+    // a degraded-but-connected line from a disconnected one (#1881).
+    whatsapp: { connected?: boolean; connection: { state: string } };
     sqlite: { messages_total: number; schema_version: number };
     runtime?: {
       passive?: { unreadCount: number; lastActivityAt: string | null };
@@ -83,6 +105,7 @@ export interface LineInstance {
   sandboxPerChat?: boolean;
   chatCounts?: { chats: number; groups: number };
   tokenUsage?: { input: number; output: number };
+  metricAvailability?: MetricAvailabilityMap;
 }
 
 export interface ChatItem {

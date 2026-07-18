@@ -1,0 +1,11 @@
+{"payload":{"cwd":"project-alpha","id":"session-codex-001","model":"fixture-model","session_id":"session-codex-001"},"timestamp":"2026-01-02T03:04:05-05:00","type":"session_meta"}
+{"payload":{"message":"USER_ALPHA","type":"user_message"},"timestamp":"2026-01-02T08:04:06Z","type":"event_msg"}
+{"payload":{"summary":[{"text":"REASONING_GAMMA","type":"summary_text"}],"type":"reasoning"},"timestamp":"2026-01-02T08:04:07Z","type":"response_item"}
+{"payload":{"content":[{"text":"ASSISTANT_BETA","type":"output_text"}],"role":"assistant","type":"message"},"timestamp":"2026-01-02T08:04:08Z","type":"response_item"}
+{"payload":{"arguments":"{\"file\":\"src/example.py\"}","call_id":"tool-codex-001","name":"mcp__fixture__lookup","type":"function_call"},"timestamp":"2026-01-02T08:04:09Z","type":"response_item"}
+{"payload":{"call_id":"tool-codex-001","output":"USER_ALPHA","type":"function_call_output"},"timestamp":"2026-01-02T08:04:10Z","type":"response_item"}
+{"payload":{"arguments":"{\"name\":\"brainstorming\"}","call_id":"skill-codex-001","name":"Skill","type":"function_call"},"timestamp":"2026-01-02T08:04:11Z","type":"response_item"}
+{"payload":{"arguments":"{\"agent\":\"fixture-agent\",\"prompt\":\"USER_ALPHA\"}","call_id":"subagent-codex-001","name":"spawn_agent","type":"function_call"},"timestamp":"2026-01-02T08:04:12Z","type":"response_item"}
+{"payload":{"summary":[{"text":"REASONING_GAMMA","type":"summary_text"}],"type":"compaction"},"timestamp":"2026-01-02T08:04:13Z","type":"response_item"}
+{"payload":{"attachment":{"id":"attachment-codex-001","type":"file"},"type":"attachment"},"timestamp":"2026-01-02T08:04:14Z","type":"event_msg"}
+{"payload":{"message":"USER_ALPHA","type":"fixture_unknown"},"timestamp":"2026-01-02T08:04:15Z","type":"response_item"}

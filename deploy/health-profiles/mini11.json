@@ -1,10 +1,25 @@
 {
-  "role": "no-bot",
+  "role": "bot-host",
   "expectDispatcher": false,
   "expectQLoop": false,
   "expectPersonalSocket": false,
   "expectPersonalTools": false,
-  "expectConfigInventory": false,
-  "instances": [],
-  "expectPrimaryPhoneVerification": false
+  "expectConfigInventory": true,
+  "requiredConfigMaxMode": "600",
+  "expectAlertTarget": true,
+  "expectRuntimeManifest": true,
+  "expectPrimaryPhoneVerification": true,
+  "requiredCredentialFiles": [
+    "fleet-tokens.json",
+    "instances/ph-bot/tokens.env"
+  ],
+  "instances": [
+    {
+      "name": "ph-bot",
+      "expected": "always_on",
+      "service": "com.whatsoup.ph-bot",
+      "healthPort": 9090,
+      "primaryPhoneOwner": "instance:ph-bot"
+    }
+  ]
 }

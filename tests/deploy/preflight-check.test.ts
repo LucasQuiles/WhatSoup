@@ -29,7 +29,7 @@ import {
   rmSync,
   symlinkSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -45,6 +45,7 @@ const REPO_ROOT = resolve(__dirname, '../..');
 const PREFLIGHT = join(REPO_ROOT, 'deploy/preflight-check.sh');
 const WRAPPER = join(REPO_ROOT, 'deploy/whatsoup');
 const RESOLVE_NODE_LIB = join(REPO_ROOT, 'deploy/lib/resolve-node.sh');
+const READ_PRIVATE_HEALTH_TOKEN_LIB = join(REPO_ROOT, 'deploy/lib/read-private-health-token.sh');
 const SOURCE_RUNTIME_CHECK = join(REPO_ROOT, 'scripts/source-runtime-drift-check.ts');
 const GUARD_CORE = join(REPO_ROOT, 'scripts/lib/guard-core.ts');
 const GIT_ENV = join(REPO_ROOT, 'src/lib/git-env.ts');
@@ -172,6 +173,7 @@ function makeWrapperFixture(): WrapperFixture {
   copyFileSync(WRAPPER, wrapper);
   chmodSync(wrapper, 0o755);
   copyFileSync(RESOLVE_NODE_LIB, join(lib, 'resolve-node.sh'));
+  copyFileSync(READ_PRIVATE_HEALTH_TOKEN_LIB, join(lib, 'read-private-health-token.sh'));
   copyFileSync(SOURCE_RUNTIME_CHECK, trustChecker);
   copyFileSync(GUARD_CORE, join(scriptsLib, 'guard-core.ts'));
   copyFileSync(GIT_ENV, join(srcLib, 'git-env.ts'));
@@ -519,6 +521,85 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — restart-safety gate
     expect(status).toBe(0);
     expect(stderr).toContain('PREFLIGHT-WARN');
     expect(stderr).toMatch(/uncommitted|untracked/);
+  });
+});
+
+// #1862: the import probe proves the tree LINKS; the instance-config gate proves
+// the NAMED instance's real configuration is loadable/valid. An import-clean tree
+// with a missing or runtime-rejected instance config must still fail closed.
+function writeInstanceConfig(configHome: string, name: string, config: unknown): void {
+  const dir = join(configHome, 'whatsoup', 'instances', name);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'config.json'), JSON.stringify(config), 'utf8');
+}
+
+const validInstanceConfig = {
+  name: 'q-bot',
+  type: 'agent',
+  accessMode: 'self_only',
+  adminPhones: ['15551234567'],
+  agentOptions: { sessionScope: 'single' },
+};
+
+// @skip-env the instance-config gate shells through the pinned preflight and the
+// real validator import graph; out-of-pin Node is covered by node-pin-consistency.
+describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — instance-config gate (#1862)', () => {
+  it('fails closed on a nonexistent named instance even when the tree links', () => {
+    const root = makeFixtureTree(
+      "import { ok } from './helper.ts';\nconsole.log(ok);\n",
+      { 'src/helper.ts': 'export const ok = true;\n' },
+    );
+    const configHome = makeTmpDir(); // empty — instance 'q-bot' is not configured
+    const { status, stderr } = runPreflight(root, 'q-bot', { XDG_CONFIG_HOME: configHome });
+
+    expect(status).toBe(3);
+    // The import check passed and is reported distinctly from the instance check...
+    expect(stderr).toContain('PREFLIGHT-OK: import graph is link-clean');
+    // ...but the missing instance config fails the restart closed.
+    expect(stderr).toContain('PREFLIGHT-FAIL');
+    expect(stderr).toContain('instance configuration is invalid or missing');
+  });
+
+  it('fails closed when the instance agent cwd resolves to the user home directory', () => {
+    const root = makeFixtureTree(
+      "import { ok } from './helper.ts';\nconsole.log(ok);\n",
+      { 'src/helper.ts': 'export const ok = true;\n' },
+    );
+    const configHome = makeTmpDir();
+    writeInstanceConfig(configHome, 'q-bot', {
+      ...validInstanceConfig,
+      agentOptions: { sessionScope: 'single', cwd: homedir() },
+    });
+    const { status, stderr } = runPreflight(root, 'q-bot', { XDG_CONFIG_HOME: configHome });
+
+    expect(status).toBe(3);
+    expect(stderr).toContain('PREFLIGHT-FAIL');
+    expect(stderr).toContain('agentOptions.cwd');
+  });
+
+  it('passes an import-clean tree with a valid named instance and reports both checks', () => {
+    const root = makeFixtureTree(
+      "import { ok } from './helper.ts';\nconsole.log(ok);\n",
+      { 'src/helper.ts': 'export const ok = true;\n' },
+    );
+    const configHome = makeTmpDir();
+    writeInstanceConfig(configHome, 'q-bot', validInstanceConfig);
+    const { status, stderr } = runPreflight(root, 'q-bot', { XDG_CONFIG_HOME: configHome });
+
+    expect(status, stderr).toBe(0);
+    expect(stderr).toContain('PREFLIGHT-OK: import graph is link-clean');
+    expect(stderr).toContain("instance 'q-bot' configuration is valid");
+  });
+
+  it('still reports import-clean and exits 0 when no instance name is supplied', () => {
+    const root = makeFixtureTree(
+      "import { ok } from './helper.ts';\nconsole.log(ok);\n",
+      { 'src/helper.ts': 'export const ok = true;\n' },
+    );
+    const { status, stderr } = runPreflight(root);
+
+    expect(status).toBe(0);
+    expect(stderr).toContain('PREFLIGHT-OK: import graph is link-clean');
   });
 });
 
@@ -948,5 +1029,16 @@ describe('deploy/whatsoup — source wiring', () => {
   it('shares node-pin logic via deploy/lib/resolve-node.sh (DRY with wrapper)', () => {
     expect(readFileSync(WRAPPER, 'utf8')).toContain('lib/resolve-node.sh');
     expect(readFileSync(PREFLIGHT, 'utf8')).toContain('lib/resolve-node.sh');
+  });
+
+  it('runs the instance-config gate after the import probe succeeds (#1862)', () => {
+    const preflight = readFileSync(PREFLIGHT, 'utf8');
+    const importOk = preflight.indexOf('PREFLIGHT-OK: import graph is link-clean');
+    const instanceCheck = preflight.indexOf('preflight-instance-check.ts');
+    expect(importOk).toBeGreaterThan(-1);
+    expect(instanceCheck).toBeGreaterThan(importOk);
+    // The instance-config failure is reported distinctly and fails closed.
+    expect(preflight).toContain('instance configuration is invalid or missing');
+    expect(existsSync(join(REPO_ROOT, 'deploy/preflight-instance-check.ts'))).toBe(true);
   });
 });

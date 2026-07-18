@@ -67,8 +67,34 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Semantic quality (shadow)
+        if: matrix.node == '24.x'
+        env:
+          SEMANTIC_RECEIPT: ${{ runner.temp }}/semantic-quality.json
+        run: |
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            base="origin/$GITHUB_BASE_REF"
+          else
+            base="HEAD^"
+          fi
+          npm run guard:semantic-quality -- --mode shadow --base "$base" --receipt "$SEMANTIC_RECEIPT"
+          node -e 'const fs=require("fs"); const r=JSON.parse(fs.readFileSync(process.env.SEMANTIC_RECEIPT,"utf8")); process.stdout.write(`### Semantic quality (shadow)\n\nDecision: **${r.decision}**\n\nFindings: ${r.findings.length}\n`)' >> "$GITHUB_STEP_SUMMARY"
+
       - name: Install Python test dependencies
         run: python3 -m pip install --user pytest pytest-cov
+
+      # qSesh Python lane (tools/qsesh): pinned Ruff + ShellCheck, then the
+      # lint/test package scripts. Requires the Setup Python 3.12 step above.
+      - name: Install qSesh Python quality tools
+        run: |
+          python3 -m pip install --user ruff==0.15.10
+          sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: qSesh lint
+        run: npm run lint:qsesh
+
+      - name: qSesh tests
+        run: npm run test:qsesh
 
       # ripgrep is a hard requirement of console/scripts/design-regression.sh
       # (the design:regression gate + tests/scripts/design-regression-guards).
