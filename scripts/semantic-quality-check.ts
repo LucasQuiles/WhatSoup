@@ -28,6 +28,7 @@ export interface SemanticQualityCliOptions {
   scope: SemanticScope;
   head: string;
   base: string;
+  targetRef: string | null;
   mode: EnforcementMode;
   format: OutputFormat;
   receiptPath: string | null;
@@ -39,9 +40,21 @@ export interface SemanticQualityRunResult {
   receiptPath: string | null;
 }
 
+const SINGLETON_FLAGS = new Set([
+  '--scope', '--head', '--base', '--target-ref', '--mode', '--format', '--receipt', '--no-receipt',
+]);
+
+function markSingleton(seen: Set<string>, flag: string): void {
+  if (!SINGLETON_FLAGS.has(flag)) return;
+  if (seen.has(flag)) throw new Error(`${flag} may be supplied only once`);
+  seen.add(flag);
+}
+
 function requiredValue(argv: string[], index: number, flag: string): string {
   const value = argv[index + 1];
-  if (value === undefined) throw new Error(`${flag} requires a value`);
+  if (value === undefined || value.startsWith('--')) {
+    throw new Error(`${flag} requires a value`);
+  }
   return value;
 }
 
@@ -57,14 +70,17 @@ export function parseSemanticQualityArgs(argv: string[]): SemanticQualityCliOpti
     scope: 'branch',
     head: 'HEAD',
     base: 'origin/main',
+    targetRef: null,
     mode: 'shadow',
     format: 'human',
     receiptPath: null,
     noReceipt: false,
   };
+  const seen = new Set<string>();
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]!;
+    markSingleton(seen, arg);
     if (arg === '--scope') {
       options.scope = choice(arg, requiredValue(argv, index, arg), ['branch', 'tree']);
       index += 1;
@@ -73,6 +89,9 @@ export function parseSemanticQualityArgs(argv: string[]): SemanticQualityCliOpti
       index += 1;
     } else if (arg === '--base') {
       options.base = requiredValue(argv, index, arg);
+      index += 1;
+    } else if (arg === '--target-ref') {
+      options.targetRef = requiredValue(argv, index, arg);
       index += 1;
     } else if (arg === '--mode') {
       options.mode = choice(arg, requiredValue(argv, index, arg), ['shadow', 'enforce']);
@@ -101,18 +120,19 @@ function rawValue(argv: string[], flag: string): string | undefined {
   return index >= 0 ? argv[index + 1] : undefined;
 }
 
-function fallbackOptions(argv: string[]): SemanticQualityCliOptions {
-  const modeValue = rawValue(argv, '--mode');
-  const formatValue = rawValue(argv, '--format');
-  const scopeValue = rawValue(argv, '--scope');
+function fallbackDiagnosticOptions(argv: string[]): SemanticQualityCliOptions {
+  const exactFormat = argv.filter((value) => value === '--format').length === 1
+    ? rawValue(argv, '--format')
+    : undefined;
   return {
-    scope: scopeValue === 'tree' ? 'tree' : 'branch',
-    head: rawValue(argv, '--head') ?? 'HEAD',
-    base: rawValue(argv, '--base') ?? 'origin/main',
-    mode: modeValue === 'enforce' ? 'enforce' : 'shadow',
-    format: formatValue === 'json' ? 'json' : 'human',
-    receiptPath: rawValue(argv, '--receipt') ?? null,
-    noReceipt: argv.includes('--no-receipt'),
+    scope: 'branch',
+    head: 'HEAD',
+    base: 'origin/main',
+    targetRef: null,
+    mode: 'enforce',
+    format: exactFormat === 'json' ? 'json' : 'human',
+    receiptPath: null,
+    noReceipt: true,
   };
 }
 
@@ -306,7 +326,7 @@ export function runSemanticQuality(
   try {
     options = parseSemanticQualityArgs(argv);
   } catch (error) {
-    options = fallbackOptions(argv);
+    options = fallbackDiagnosticOptions(argv);
     const message = boundedMessage(error);
     tree = emptyTree(message);
     receipt = buildSemanticReceipt({

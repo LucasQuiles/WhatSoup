@@ -518,6 +518,88 @@ describe('generic boundary receipt', () => {
 });
 
 describe('semantic quality CLI', () => {
+  it.each([
+    ['[BCF01-U01] rejects mode case typos', ['--mode', 'ENFORCE', '--format', 'json', '--no-receipt']],
+    ['[BCF01-U02] rejects missing singleton values', ['--mode', '--format', 'json', '--no-receipt']],
+    [
+      '[BCF01-U03] rejects duplicate mode flags',
+      ['--mode', 'enforce', '--mode', 'shadow', '--format', 'json', '--no-receipt'],
+    ],
+    [
+      '[BCF01-U04] rejects duplicate head flags',
+      ['--head', 'HEAD', '--head', 'refs/heads/main', '--format', 'json', '--no-receipt'],
+    ],
+    [
+      '[BCF01-U05] rejects duplicate no-receipt flags',
+      ['--no-receipt', '--no-receipt', '--format', 'json'],
+    ],
+    [
+      '[BCF01-U06] rejects duplicate target-ref flags',
+      ['--target-ref', 'refs/heads/a', '--target-ref', 'refs/heads/b', '--format', 'json', '--no-receipt'],
+    ],
+  ] as const)('%s', (name, args) => {
+    const { repo } = makeHistory();
+    const marker = name.match(/\[BCF01-U(\d{2})\]/)?.[1];
+    const sentinel = `BCF_EXPECTATION_UNMET:BCF01-${marker}`;
+    const result = runCli(repo, [...args]);
+
+    expect(result.status, sentinel).toBe(2);
+    const parsed = JSON.parse(result.stdout) as BoundaryReceipt;
+    expect(parsed, sentinel).toMatchObject({
+      decision: 'inconclusive',
+      enforcementMode: 'enforce',
+      findings: [expect.objectContaining({ ruleId: 'semantic.invocation-invalid' })],
+    });
+  });
+
+  it('[BCF01-S01] preserves the current valid no-op invocation', () => {
+    const { repo, integratedOid } = makeHistory();
+    const result = runCli(repo, [
+      '--scope', 'tree', '--head', integratedOid, '--mode', 'shadow',
+      '--format', 'json', '--no-receipt',
+    ]);
+
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).not.toMatchObject({
+      findings: [expect.objectContaining({ ruleId: 'semantic.invocation-invalid' })],
+    });
+  });
+
+  it.each([
+    [
+      '[BCF01-N01] accepts a lowercase mode',
+      ['--scope', 'tree', '--head', '<head>', '--mode', 'shadow', '--format', 'json', '--no-receipt'],
+    ],
+    [
+      '[BCF01-N02] accepts a present scope value',
+      ['--scope', 'tree', '--head', '<head>', '--mode', 'shadow', '--format', 'json', '--no-receipt'],
+    ],
+    [
+      '[BCF01-N03] accepts one head flag',
+      ['--scope', 'tree', '--head', '<head>', '--mode', 'shadow', '--format', 'json', '--no-receipt'],
+    ],
+    [
+      '[BCF01-N04] accepts one base flag',
+      ['--scope', 'branch', '--head', '<head>', '--base', 'HEAD~1', '--mode', 'shadow', '--format', 'json', '--no-receipt'],
+    ],
+    [
+      '[BCF01-N05] accepts one no-receipt flag',
+      ['--scope', 'tree', '--head', '<head>', '--mode', 'shadow', '--format', 'json', '--no-receipt'],
+    ],
+    [
+      '[BCF01-N06] accepts one full target ref',
+      ['--scope', 'tree', '--head', '<head>', '--target-ref', 'refs/heads/main', '--mode', 'shadow', '--format', 'json', '--no-receipt'],
+    ],
+  ] as const)('%s', (_name, args) => {
+    const { repo, integratedOid } = makeHistory();
+    const result = runCli(repo, args.map((value) => value === '<head>' ? integratedOid : value));
+
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).not.toMatchObject({
+      findings: [expect.objectContaining({ ruleId: 'semantic.invocation-invalid' })],
+    });
+  });
+
   it('reports the delegation receipt export while its module remains production-reachable', () => {
     const repo = initRepo();
     writePolicy(repo);
