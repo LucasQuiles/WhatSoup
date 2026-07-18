@@ -37,7 +37,7 @@ describe('queryFreshness (GUI-5 metrics-plane freshness)', () => {
   it('never flags a first load with no observation yet (no false-stale)', () => {
     const f = queryFreshness({ dataUpdatedAt: 0, refetchFailed: false, now: NOW })
     expect(f.stale).toBe(false)
-    expect(f.observedAt).toBeNull()
+    expect(f.observedAt).toBe(null)
   })
 
   it('honours a custom threshold', () => {
