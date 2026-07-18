@@ -289,7 +289,9 @@ esac
   };
 }
 
-function runVersionExposureProbe(scenario: 'main' | 'detached' | 'non-git' | 'git-error'): {
+function runVersionExposureProbe(
+  scenario: 'main' | 'detached' | 'non-git' | 'git-error' | 'non-git-manifest' | 'non-git-manifest-malformed',
+): {
   status: number | null;
   stdout: string;
   stderr: string;
@@ -300,6 +302,22 @@ function runVersionExposureProbe(scenario: 'main' | 'detached' | 'non-git' | 'gi
   const repoRoot = path.join(tmpDir, 'repo');
   fs.mkdirSync(binDir);
   fs.mkdirSync(repoRoot);
+
+  // Non-git release snapshots carry provenance in .whatsoup-release-manifest.json
+  // (written by scripts/release-snapshot-plan.ts as { source: { ref, commit } }).
+  if (scenario === 'non-git-manifest') {
+    fs.writeFileSync(
+      path.join(repoRoot, '.whatsoup-release-manifest.json'),
+      JSON.stringify({ source: { ref: 'release/v1', commit: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0' } }),
+      'utf8',
+    );
+  } else if (scenario === 'non-git-manifest-malformed') {
+    fs.writeFileSync(
+      path.join(repoRoot, '.whatsoup-release-manifest.json'),
+      '{ this is not valid json',
+      'utf8',
+    );
+  }
 
   writeExecutable(path.join(binDir, 'git'), `#!/usr/bin/env bash
 set -euo pipefail
@@ -322,7 +340,7 @@ case "$SCENARIO:$*" in
   "detached:symbolic-ref --quiet --short HEAD")
     exit 1
     ;;
-  "non-git:rev-parse --is-inside-work-tree")
+  "non-git:rev-parse --is-inside-work-tree"|"non-git-manifest:rev-parse --is-inside-work-tree"|"non-git-manifest-malformed:rev-parse --is-inside-work-tree")
     exit 1
     ;;
   "git-error:rev-parse --is-inside-work-tree")
@@ -343,6 +361,7 @@ set -euo pipefail
 PATH="${binDir}:$PATH"
 export SCENARIO="${scenario}"
 REPO_ROOT="${repoRoot}"
+NODE="${process.execPath}"
 ${extractVersionExposureBlock(source)}
 printf 'sha=%s\\nbranch=%s\\n' "\${WHATSOUP_GIT_SHA-}" "\${WHATSOUP_GIT_BRANCH-}"
 `,
@@ -660,6 +679,20 @@ describe('health token shell wrappers', () => {
     expect(gitError.status).toBe(0);
     expect(gitError.stdout).toBe('sha=\nbranch=');
     expect(gitError.stderr).toContain('WARN:');
+  });
+
+  it('deploy/whatsoup falls back to the release-manifest source.commit on a non-git snapshot (#1868)', () => {
+    const withManifest = runVersionExposureProbe('non-git-manifest');
+    expect(withManifest.status).toBe(0);
+    expect(withManifest.stdout).toBe(
+      'sha=a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0\nbranch=release/v1',
+    );
+
+    // A malformed manifest must not surface a bogus sha and must not block startup.
+    const malformed = runVersionExposureProbe('non-git-manifest-malformed');
+    expect(malformed.status).toBe(0);
+    expect(malformed.stdout).toBe('sha=\nbranch=');
+    expect(malformed.stderr).toContain('WARN:');
   });
 
   it('heal-notify checks canonical health token before legacy fallback', () => {
