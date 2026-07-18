@@ -327,15 +327,26 @@ export function validateInstanceConfig(
     }
   }
 
-  // --- pausedChatBypassPatterns (shape + regex compile) ---
+  // --- pausedChatBypassPatterns (shape + bounds + regex compile) ---
+  // Operator-supplied regex sources are compiled and matched at runtime. Bound
+  // the count and each source's length so a config cannot grow the compiled
+  // pattern set or a single source's backtracking cost without limit — a
+  // defense-in-depth ceiling on the ReDoS surface of compiling config-supplied
+  // regexes.
   const bypassPatterns = raw['pausedChatBypassPatterns'];
   if (bypassPatterns !== undefined) {
     if (!Array.isArray(bypassPatterns)) {
       return err('pausedChatBypassPatterns', 'pausedChatBypassPatterns must be an array of regex source strings');
     }
+    if (bypassPatterns.length > 32) {
+      return err('pausedChatBypassPatterns', 'pausedChatBypassPatterns must contain at most 32 patterns');
+    }
     for (const pattern of bypassPatterns) {
       if (!nonBlankString(pattern)) {
         return err('pausedChatBypassPatterns', 'pausedChatBypassPatterns must contain only non-empty regex source strings');
+      }
+      if ((pattern as string).length > 200) {
+        return err('pausedChatBypassPatterns', 'pausedChatBypassPatterns entries must be at most 200 characters');
       }
       try {
         // Compiled case-insensitively at runtime — validate the same way.

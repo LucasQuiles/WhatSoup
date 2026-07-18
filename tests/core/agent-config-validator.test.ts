@@ -344,6 +344,20 @@ describe('pausedChatBypassPatterns validation', () => {
     expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
   });
 
+  it('rejects more than the maximum number of patterns', () => {
+    const raw = baseChat({ pausedChatBypassPatterns: Array.from({ length: 33 }, (_, i) => `p${i}`) });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('pausedChatBypassPatterns');
+    expect(result?.message).toContain('at most 32');
+  });
+
+  it('rejects a pattern longer than the maximum length', () => {
+    const raw = baseChat({ pausedChatBypassPatterns: ['a'.repeat(201)] });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('pausedChatBypassPatterns');
+    expect(result?.message).toContain('at most 200 characters');
+  });
+
   it('accepts absent pausedChatBypassPatterns', () => {
     const raw = baseChat({});
     expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
