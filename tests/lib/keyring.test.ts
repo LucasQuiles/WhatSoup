@@ -140,7 +140,7 @@ describe('keyring', () => {
       expect(mockedExecFileSync).toHaveBeenCalledWith(
         'security',
         ['find-generic-password', '-s', 'anthropic', '-a', expect.any(String), '-w'],
-        expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL' }),
+        expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL', maxBuffer: 4_096 }),
       );
     });
 
