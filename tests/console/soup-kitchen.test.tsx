@@ -390,7 +390,7 @@ describe('SoupKitchen KPI cards with data', () => {
     expect(kpis.agentSessions).toBe(2);
   });
 
-  it('renders all 8 KPI cards with the expected labels', () => {
+  it('renders all 9 KPI cards with the expected labels', () => {
     renderPage({ lines });
     const expected = [
       'Lines Connected',
@@ -401,6 +401,7 @@ describe('SoupKitchen KPI cards with data', () => {
       'Agent Sessions',
       'Unread',
       'Media Processed',
+      'Metrics Unavailable',
     ];
     for (const label of expected) {
       expect(getKpiCard(label)).toBeDefined();
@@ -417,6 +418,35 @@ describe('SoupKitchen KPI cards with data', () => {
     const unknownCard = getKpiCard('Connectivity Unknown');
     expect(within(unknownCard).getByText('3')).toBeDefined();
     expect(within(unknownCard).getByText('of 5')).toBeDefined();
+  });
+
+  it('surfaces the DB metric availability denominator explicitly (#1879 crit 3)', () => {
+    // None of this fixture's lines set metricAvailability — back-compat
+    // lines never trip the coverage counter.
+    renderPage({ lines });
+    const unavailableCard = getKpiCard('Metrics Unavailable');
+    expect(within(unavailableCard).getByText('0')).toBeDefined();
+    expect(within(unavailableCard).getByText('of 5')).toBeDefined();
+  });
+
+  it('counts a faulted messageStats read into Metrics Unavailable, out of the message totals', () => {
+    const withFault: LineInstance[] = [
+      ...lines,
+      makeLine({
+        name: 'foxtrot',
+        status: 'online',
+        mode: 'chat',
+        messageStats: { sent: 0, received: 0, images: 0, audio: 0, documents: 0 },
+        metricAvailability: { messageStats: 'unavailable' },
+      }),
+    ];
+    renderPage({ lines: withFault });
+    const unavailableCard = getKpiCard('Metrics Unavailable');
+    expect(within(unavailableCard).getByText('1')).toBeDefined();
+    expect(within(unavailableCard).getByText('of 6')).toBeDefined();
+    // The faulted line's zero-value fallback does not inflate/deflate the
+    // totals — its contribution is skipped, not summed as a real zero.
+    expect(within(getKpiCard('Messages Sent')).getByText('170')).toBeDefined();
   });
 
   it('renders the computed KPI values on the cards', () => {

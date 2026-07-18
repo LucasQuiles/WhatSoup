@@ -91,6 +91,14 @@ export function computeKpis(lines: LineInstance[]): {
    * inside the same "not connected" remainder.
    */
   connectivityUnknown: number;
+  /**
+   * Count of instances whose messageStats DB read was `unavailable` this poll
+   * (#1879) — a faulted/locked/schema-gapped read, excluded from
+   * totalSent/totalReceived/totalMedia rather than folded in as a
+   * legitimate zero. Surfaced so the message totals' denominator is
+   * explicit, mirroring the connectivityUnknown idiom above.
+   */
+  metricsUnavailable: number;
 } {
   let connected = 0;
   let needAttention = 0;
@@ -101,6 +109,7 @@ export function computeKpis(lines: LineInstance[]): {
   let totalMedia = 0;
   let staleExcluded = 0;
   let connectivityUnknown = 0;
+  let metricsUnavailable = 0;
 
   for (const line of lines) {
     // Transport connectivity (#1881): count a line as connected when its
@@ -129,8 +138,14 @@ export function computeKpis(lines: LineInstance[]): {
     }
 
     // messageStats is DB-derived (fleet-side SQLite aggregation), not the
-    // carried-forward health body, so it persists correctly through an outage.
-    if (line.messageStats) {
+    // carried-forward health body, so it persists correctly through an
+    // outage. #1879: an `unavailable` observation is a faulted read, not a
+    // legitimate empty inbox — skip it out of the totals and tally it
+    // instead, so a faulted DB can't silently lower the fleet count the way
+    // a real zero would.
+    if (line.metricAvailability?.messageStats === 'unavailable') {
+      metricsUnavailable++;
+    } else if (line.messageStats) {
       totalSent += line.messageStats.sent;
       totalReceived += line.messageStats.received;
       totalMedia += line.messageStats.images + line.messageStats.audio + line.messageStats.documents;
@@ -147,5 +162,6 @@ export function computeKpis(lines: LineInstance[]): {
     totalMedia,
     staleExcluded,
     connectivityUnknown,
+    metricsUnavailable,
   };
 }
