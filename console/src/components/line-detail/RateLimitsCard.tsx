@@ -93,7 +93,7 @@ export const RateLimitsCard: FC<{ lineName: string }> = ({ lineName }) => {
             ) : (
               <div className="flex flex-col">
                 {data.topSenders.map((s) => (
-                  <div key={s.senderJid} className="flex items-center justify-between py-[var(--sp-1h)]">
+                  <div key={s.senderJid} className="flex items-center justify-between py-[var(--sp-1)]">
                     <span className="font-mono text-data" title={s.senderJid}>
                       {senderTail(s.senderJid)}
                     </span>
