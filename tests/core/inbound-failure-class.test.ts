@@ -27,6 +27,9 @@ describe('inbound-failure-class — vocabulary', () => {
         'queue_closed',
         'pre_dispatch_error',
         'scope_blocked_recovery',
+        // Turn-processor exception, split out of 'unknown' so reply-guarantee
+        // breaches are mineable by driver.
+        'processor_throw',
         'unknown',
       ].sort(),
     );

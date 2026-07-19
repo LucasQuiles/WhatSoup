@@ -88,7 +88,7 @@ describe('turn-finalization persistence mapping', () => {
 
   it.each([
     ['rate-limit', 'provider_failure'],
-    ['processor_throw', 'unknown'],
+    ['processor_throw', 'processor_throw'],
     ['crash', 'session_crash'],
     ['unknown_terminal', 'unknown'],
     ['provider_stream_corrupt', 'provider_failure'],

@@ -143,6 +143,7 @@ interface RenderOptions {
   metricsLoading?: boolean;
   metricsError?: boolean;
   metricsRefetch?: ReturnType<typeof vi.fn>;
+  metricsFreshness?: { observedAt: number | null; stale: boolean };
 }
 
 function renderPage(opts: RenderOptions = {}) {
@@ -163,6 +164,7 @@ function renderPage(opts: RenderOptions = {}) {
     isLoading: Boolean(opts.metricsLoading),
     isError: Boolean(opts.metricsError),
     refetch: opts.metricsRefetch ?? vi.fn(),
+    freshness: opts.metricsFreshness,
   });
 
   return render(
@@ -295,5 +297,27 @@ describe('Metrics page — charts', () => {
     renderPage({ lines: [], linesError: new Error('boom') });
 
     expect(screen.getByText(/Fleet data unavailable: boom/)).toBeDefined();
+  });
+});
+
+describe('Metrics page — freshness caption (GUI-5)', () => {
+  it('labels carried fleet metrics with an amber stale caption', () => {
+    renderPage({ metricsFreshness: { observedAt: Date.now() - 300_000, stale: true } });
+    const marker = screen.getByText(/^stale · /);
+    expect(marker.className).toContain('c-label');
+    expect(marker.className).toContain('text-s-warn');
+  });
+
+  it('shows a quiet observation caption for fresh fleet metrics', () => {
+    renderPage({ metricsFreshness: { observedAt: Date.now() - 5_000, stale: false } });
+    const marker = screen.getByText(/^observed /);
+    expect(marker.className).toContain('c-label');
+    expect(marker.className).not.toContain('text-s-warn');
+  });
+
+  it('renders no caption when freshness is unavailable', () => {
+    renderPage();
+    expect(screen.queryByText(/^stale · /)).toBeNull();
+    expect(screen.queryByText(/^observed /)).toBeNull();
   });
 });

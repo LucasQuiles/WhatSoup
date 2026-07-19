@@ -63,6 +63,7 @@ describe('queued runtime turn finalization', () => {
     ]);
     const durability = {
       getOutboundDeliverySnapshot: vi.fn((opId: number) => snapshots.get(opId)),
+      markContinuityCandidateIfNoTerminalOutbound: vi.fn(() => true),
       finalizeTurnTerminal: vi.fn(() => ({
         applied: true,
         winnerMatchesRequest: true,
@@ -100,6 +101,7 @@ describe('queued runtime turn finalization', () => {
     const flushFailure = new Error('outbound evidence durability failed');
     const durability = {
       getOutboundDeliverySnapshot: vi.fn(),
+      markContinuityCandidateIfNoTerminalOutbound: vi.fn(() => true),
       finalizeTurnTerminal: vi.fn(),
     };
     const queue = {

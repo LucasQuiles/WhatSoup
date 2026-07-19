@@ -4317,6 +4317,8 @@ export class AgentRuntime implements Runtime {
     await this.pendingSystemResults.waitUntilDispatchable(systemScopeKey, systemTurnLease);
     if (dispatchCancelled()) return;
 
+    // Fresh-spawn history preamble; provider-boundary merge only (see below).
+    let contextPreamble: string | null = null;
     const wasInactive = !session.getStatus().active;
     if (wasInactive) {
       const spawnOwnership = effectiveMapKey !== undefined
@@ -4358,42 +4360,26 @@ export class AgentRuntime implements Runtime {
       // Successful spawn after a crash — decay the crash counter
       this.decrementCrashCount(effectiveMapKey ?? crashScopeKey);
 
-      // Inject recent chat history so the agent has conversational context.
-      // This runs on every fresh session spawn (not just resume failures),
-      // giving the agent awareness of what's been discussed recently.
-      // Skipped when handleResumeFailed manages its own context recovery to
-      // avoid sending two context blocks to the same fresh session.
+      // Recent-history preamble for fresh spawns — merged into the USER turn
+      // at the provider boundary, deliberately NOT a fresh_session_context
+      // system turn: the admission gate rejects that owner's effects
+      // (purpose_disallows_effect), so an action-heavy context block burned its
+      // whole deadline and the timeout quarantine killed the session under the
+      // queued user turn (2x on the owner DM, 2026-07-17). Merging removes the
+      // deadline race and the QR-095 phantom-reply channel by construction;
+      // replay/journal capture keeps the pure user text. Skipped when
+      // handleResumeFailed owns context recovery (avoids double blocks).
       const resumeFailedOwnsContext = mapKeyForChat !== undefined && this.resumeFailedHandling.has(mapKeyForChat);
       if (!resumeFailedOwnsContext) {
-        let contextLease: SystemTurnLeaseToken | null = null;
         try {
           const convKey = canonicalConversationKey(chatJid, this.db);
           const recent = getRecentMessages(this.db, convKey, 20);
           if (recent.length > 0) {
             const lines = this.formatContextLines(recent.reverse());
-            // QR-095: mark under the SAME scope the single/shared result handler
-            // consumes (GLOBAL_TOOL_SCOPE_KEY). mapKey is undefined for single/
-            // shared callers (sendTurnNonShared), so mark(mapKey) would be a no-op
-            // and the injected system turn's result would be mis-classified as a
-            // USER turn (phantom '[Recent chat context]' reply leaks to the user +
-            // wrong post-turn gate). In per_chat mapKey is defined so this is a
-            // no-op there (consumed by the per_chat consumeIfPending(mapKey)).
-            contextLease = this.markSystemTurn(
-              session,
-              effectiveMapKey ?? GLOBAL_TOOL_SCOPE_KEY,
-              'fresh_session_context',
-              chatJid,
-            );
-            await session.sendTurn(`[Recent chat context — read before responding]\n${lines}`);
+            contextPreamble = `[Recent chat context — read before responding]\n${lines}`;
           }
         } catch (err) {
-          log.warn({ err, chatJid }, 'chat context injection failed — proceeding without context');
-          await this.settleFailedSystemTurnDispatch(
-            session,
-            systemScopeKey,
-            contextLease,
-            err,
-          );
+          log.warn({ err, chatJid }, 'chat context assembly failed — proceeding without context');
         }
       }
     }
@@ -4438,7 +4424,9 @@ export class AgentRuntime implements Runtime {
     if (queue) queue.indicateTyping();
 
     try {
-      await session.sendTurn(text);
+      await session.sendTurn(
+        contextPreamble === null ? text : `${contextPreamble}\n\n[Current message]\n${text}`,
+      );
     } catch (err) {
       if (actorPushed && effectiveMapKey !== undefined) {
         this.removeFailedExecutingActor(effectiveMapKey, actorJid, systemTurnLease);
@@ -6937,13 +6925,32 @@ export class AgentRuntime implements Runtime {
         ...this.chatQueues.keys(),
         ...this.imageCoalesce.buffers.keys(),
       ]);
-      for (const [chatJid, session] of this.chatSessions) {
-        try {
-          await session.shutdown();
-        } catch (err) {
+      // #1755: shut the per_chat sessions down CONCURRENTLY. Each session.shutdown()
+      // touches only its own per-session state, synchronous (event-loop-serialized)
+      // SQLite on its own rows, and its own distinct process tree — so the kill-grace
+      // waits OVERLAP instead of stacking linearly against the service manager's stop
+      // timeout (the observed cause of SIGTERM-timeout SIGKILLs). Each task captures
+      // its own error so the batch never rejects; runtime state (shutdownFailures,
+      // failedPerChatSessions) is reconciled sequentially AFTER settle, never
+      // mutated concurrently. Per-chat outcome + duration is logged for attribution.
+      const perChatOutcomes = await Promise.all(
+        [...this.chatSessions].map(async ([chatJid, session]) => {
+          const startedAt = Date.now();
+          try {
+            await session.shutdown();
+            return { chatJid, session, err: null as unknown, durationMs: Date.now() - startedAt };
+          } catch (err) {
+            return { chatJid, session, err, durationMs: Date.now() - startedAt };
+          }
+        }),
+      );
+      for (const { chatJid, session, err, durationMs } of perChatOutcomes) {
+        if (err !== null) {
           shutdownFailures.push(err);
           failedPerChatSessions.set(chatJid, session);
-          log.warn({ err, chatJid }, 'per_chat session shutdown failed');
+          log.warn({ err, chatJid, durationMs }, 'per_chat session shutdown failed');
+        } else {
+          log.debug({ chatJid, durationMs }, 'per_chat session shutdown ok');
         }
       }
     }
@@ -7247,6 +7254,14 @@ export class AgentRuntime implements Runtime {
     purpose: SystemTurnPurpose,
     routeChatJid?: string,
   ): SystemTurnLeaseToken {
+    // One retry window per lease before quarantine: a production 240s expiry
+    // was a claude-cli subprocess merely slow to start under host I/O pressure
+    // (zero stderr), and immediate teardown killed the session under the
+    // queued user turn ('No active session'). The stream still has no request
+    // IDs, so the request is never re-sent — the lease keeps blocking while
+    // one more full window lets the slow result land; a second consecutive
+    // expiry quarantines exactly as before.
+    let retryWindowGranted = false;
     return this.pendingSystemResults.mark({
       scopeKey,
       purpose,
@@ -7256,7 +7271,15 @@ export class AgentRuntime implements Runtime {
         ? {}
         : {
             timeoutMs: SYSTEM_TURN_TIMEOUT_MS,
-            onTimeout: async (lease: SystemTurnLeaseToken): Promise<boolean> => {
+            onTimeout: async (lease: SystemTurnLeaseToken): Promise<boolean | 'retry'> => {
+              if (!retryWindowGranted) {
+                retryWindowGranted = true;
+                log.warn(
+                  { scopeKey, leaseId: lease.id, purpose, timeoutMs: SYSTEM_TURN_TIMEOUT_MS },
+                  'system provider request timed out — retrying once before quarantine',
+                );
+                return 'retry';
+              }
               log.error(
                 { scopeKey, leaseId: lease.id, purpose, timeoutMs: SYSTEM_TURN_TIMEOUT_MS },
                 'system provider request timed out — quarantining source generation',

@@ -67,7 +67,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "67c9c317645c48e31a3c9e2f10dc4d5a4c493fae9008f9ea4ba106c0e7117172",
+      "sha256": "512463cbb735d56eb80d599cbdcf06a2e3974eec8cda6fef04530afa6ebd9d3a",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -118,7 +118,19 @@
         "daily_summary_severity",
         "_DAILY_INFRA_FAIL_PREFIXES",
         "redact_bot_errors_text",
-        "redact_event_text"
+        "redact_event_text",
+        "health_body_malformed",
+        "health_body_nonobject",
+        "health_unexpected_status",
+        "health_status_missing",
+        "health_status_unknown",
+        "health_generated_at_missing",
+        "health_generated_at_unparseable",
+        "health_generated_at_stale",
+        "health_generated_at_future_skew",
+        "health_identity_missing",
+        "BOT_ERRORS_HEALTH_BODY_MAX_AGE_SECONDS",
+        "BOT_ERRORS_HEALTH_BODY_MAX_FUTURE_SKEW_SECONDS"
       ]
     },
     {

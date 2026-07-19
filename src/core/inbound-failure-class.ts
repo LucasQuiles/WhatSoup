@@ -37,6 +37,10 @@ export type InboundFailureClass =
   // Recovery-owner reclaim (#1749): a terminally non-echoed recovery-owned
   // inbound released by the stuck-inbound sweep (bucket 4).
   | 'recovery_owner_reclaimed'
+  // Turn-processor exception (e.g. a queued turn dispatched into a session
+  // torn down by a system-request quarantine). Previously collapsed into
+  // 'unknown', which hid the reply-guarantee-breach driver from mining.
+  | 'processor_throw'
   | 'unknown';
 
 export const INBOUND_FAILURE_CLASSES: ReadonlySet<string> = new Set<string>([
@@ -55,6 +59,7 @@ export const INBOUND_FAILURE_CLASSES: ReadonlySet<string> = new Set<string>([
   'pre_dispatch_error',
   'scope_blocked_recovery',
   'recovery_owner_reclaimed',
+  'processor_throw',
   'unknown',
 ]);
 

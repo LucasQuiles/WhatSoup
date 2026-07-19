@@ -7,6 +7,8 @@ import { ActiveHoursHeatmap } from '../ActiveHoursHeatmap'
 import EmptyState from '../EmptyState'
 import { metricsToCSV, downloadCSV } from '../../lib/csv-export'
 import { formatCount } from '../../lib/text-utils'
+import { formatRelative } from '../../lib/format-time'
+import type { Freshness } from '../../lib/freshness'
 import { Card, ToolbarTimeRange, Tabs, Tab, TabPanel } from '../primitives'
 import { Button } from '../primitives/Button'
 import type { MetricsRange, LineMetrics, LineInstance } from './types'
@@ -22,6 +24,7 @@ export function MetricsTab({
   lineName,
   line,
   onRetry,
+  metricsFreshness,
 }: {
   metrics: LineMetrics | undefined
   metricsLoading: boolean
@@ -31,6 +34,7 @@ export function MetricsTab({
   lineName?: string
   line?: LineInstance
   onRetry?: () => void
+  metricsFreshness?: Freshness
 }) {
   const [detailTab, setDetailTab] = useState<DetailTab>('tokens')
   const hasAnyData = metrics?.hasMessageData || metrics?.hasTokenData || metrics?.hasSessionData
@@ -58,6 +62,22 @@ export function MetricsTab({
           value={metricsRange}
           onChange={(v) => setMetricsRange(v as MetricsRange)}
         />
+        {/* GUI-5: label carried/aged metrics data — never silently green.
+            Mirrors the SoupKitchen freshness idiom (c-label + text-s-warn). */}
+        {metricsFreshness && metricsFreshness.observedAt !== null && (
+          <span
+            className={`c-label${metricsFreshness.stale ? ' text-s-warn' : ''}`}
+            title={
+              metricsFreshness.stale
+                ? `Metrics carried forward — last successful fetch ${formatRelative(new Date(metricsFreshness.observedAt).toISOString())}`
+                : `Last successful metrics fetch ${formatRelative(new Date(metricsFreshness.observedAt).toISOString())}`
+            }
+          >
+            {metricsFreshness.stale
+              ? `stale · ${formatRelative(new Date(metricsFreshness.observedAt).toISOString())}`
+              : `observed ${formatRelative(new Date(metricsFreshness.observedAt).toISOString())}`}
+          </span>
+        )}
         {metrics?.messageVolume && metrics.messageVolume.length > 0 && (
           <Button
             variant="ghost"

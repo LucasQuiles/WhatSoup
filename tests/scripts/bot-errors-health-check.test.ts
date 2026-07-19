@@ -3678,6 +3678,8 @@ print(m.probe_health(9092))
         BOT_ERRORS_DRY_HEALTH_STATUS: '200',
         BOT_ERRORS_DRY_HEALTH_RESPONSE_JSON: JSON.stringify({
           status: 'healthy',
+          generated_at: new Date().toISOString(),
+          instance: { name: 'primary-bot' },
           whatsapp: {
             connected: true,
             connection: {
@@ -3754,6 +3756,8 @@ print(m.probe_health(9092))
         BOT_ERRORS_DRY_HEALTH_STATUS: '200',
         BOT_ERRORS_DRY_HEALTH_RESPONSE_JSON: JSON.stringify({
           status: 'healthy',
+          generated_at: '2026-06-09T09:00:05Z',
+          instance: { name: 'primary-bot' },
           whatsapp: {
             connected: true,
             connection: {
@@ -4013,6 +4017,90 @@ print(m.probe_health(9092))
     }
     expect(event.severity).toBe('critical');
     expect(event.evidence).toContain('health primary-bot: FAIL 401 http://127.0.0.1:9090/health health_probe_auth_failed');
+  });
+
+  describe('health body validation (#1878)', () => {
+    function probeLine(status: number, body: string, expectedName?: string): string {
+      const nameArg = expectedName === undefined ? 'None' : JSON.stringify(expectedName);
+      return python([
+        importHealthModulePrelude(),
+        `print(m.format_health_probe('http://127.0.0.1:9090/health', ${status}, ${JSON.stringify(body)}, ${nameArg}))`,
+      ].join('\n'));
+    }
+
+    function healthyBody(overrides: Record<string, unknown> = {}): string {
+      return JSON.stringify({
+        status: 'healthy',
+        generated_at: new Date().toISOString(),
+        instance: { name: 'primary-bot' },
+        whatsapp: { connected: true },
+        ...overrides,
+      });
+    }
+
+    it('rejects a malformed JSON health body instead of reporting green', () => {
+      expect(probeLine(200, '{not json', 'primary-bot')).toMatch(/^FAIL 200 .*health_body_malformed/);
+    });
+
+    it('rejects a non-object JSON health body instead of reporting green', () => {
+      expect(probeLine(200, '[1,2,3]', 'primary-bot')).toMatch(/^FAIL 200 .*health_body_nonobject/);
+    });
+
+    it('rejects a stale generated_at health body instead of reporting green', () => {
+      expect(probeLine(200, healthyBody({ generated_at: '2000-01-01T00:00:00Z' }), 'primary-bot'))
+        .toMatch(/^FAIL 200 .*health_generated_at_stale/);
+    });
+
+    it('rejects a future-skewed generated_at health body instead of reporting green', () => {
+      const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      expect(probeLine(200, healthyBody({ generated_at: future }), 'primary-bot'))
+        .toMatch(/^FAIL 200 .*health_generated_at_future_skew/);
+    });
+
+    it('rejects a health body missing instance identity when a name is configured', () => {
+      const body = JSON.stringify({ status: 'healthy', generated_at: new Date().toISOString() });
+      expect(probeLine(200, body, 'primary-bot')).toMatch(/^FAIL 200 .*health_identity_missing/);
+    });
+
+    it('flags a health body missing generated_at as inconclusive, never green', () => {
+      const body = JSON.stringify({ status: 'healthy', instance: { name: 'primary-bot' } });
+      expect(probeLine(200, body, 'primary-bot')).toMatch(/^WARN 200 .*health_generated_at_missing/);
+    });
+
+    it('flags an unparseable generated_at as inconclusive, never green', () => {
+      expect(probeLine(200, healthyBody({ generated_at: 'not-a-timestamp' }), 'primary-bot'))
+        .toMatch(/^WARN 200 .*health_generated_at_unparseable/);
+    });
+
+    it('flags a missing status field as inconclusive, never green', () => {
+      const body = JSON.stringify({
+        generated_at: new Date().toISOString(),
+        instance: { name: 'primary-bot' },
+      });
+      expect(probeLine(200, body, 'primary-bot')).toMatch(/^WARN 200 .*health_status_missing/);
+    });
+
+    it('flags an unknown status value as inconclusive, never green', () => {
+      expect(probeLine(200, healthyBody({ status: 'spinning' }), 'primary-bot'))
+        .toMatch(/^WARN 200 .*health_status_unknown/);
+    });
+
+    it('rejects an unexpected HTTP status instead of reporting green', () => {
+      expect(probeLine(404, healthyBody(), 'primary-bot')).toMatch(/^FAIL 404 .*health_unexpected_status/);
+    });
+
+    it('keeps an instance identity mismatch as a failure', () => {
+      expect(probeLine(200, healthyBody({ instance: { name: 'other-bot' } }), 'primary-bot'))
+        .toMatch(/^FAIL 200 .*health_identity_mismatch/);
+    });
+
+    it('accepts a fresh canonical healthy body with matching identity', () => {
+      const line = probeLine(200, healthyBody(), 'primary-bot');
+      expect(line).not.toMatch(/^(FAIL|WARN) /);
+      expect(line).toMatch(/^200 http:\/\/127\.0\.0\.1:9090\/health /);
+      expect(line).toContain('status=healthy');
+      expect(line).toContain('instance_name=primary-bot');
+    });
   });
 
   it('fails daily health when local auth bond permissions are too open', () => {
@@ -4487,6 +4575,8 @@ print(m.probe_health(9092))
         BOT_ERRORS_DRY_HEALTH_STATUS: '200',
         BOT_ERRORS_DRY_HEALTH_RESPONSE_JSON: JSON.stringify({
           status: 'degraded',
+          generated_at: new Date().toISOString(),
+          instance: { name: 'q' },
           whatsapp: {
             connected: true,
             connection: { state: 'connected' },
@@ -4559,6 +4649,8 @@ print(m.probe_health(9092))
         BOT_ERRORS_DRY_HEALTH_STATUS: '200',
         BOT_ERRORS_DRY_HEALTH_RESPONSE_JSON: JSON.stringify({
           status: 'healthy',
+          generated_at: new Date().toISOString(),
+          instance: { name: 'eh-bot' },
           whatsapp: {
             connected: true,
             connection: { state: 'connected', auth_failure_class: 'none' },
@@ -4728,6 +4820,7 @@ print(m.probe_health(9092))
         BOT_ERRORS_DRY_HEALTH_STATUS: '200',
         BOT_ERRORS_DRY_HEALTH_RESPONSE_JSON: JSON.stringify({
           status: 'healthy',
+          generated_at: new Date().toISOString(),
           instance: { name: 'agent-alpha', provider: 'openai-api' },
           whatsapp: {
             connected: true,
@@ -5240,6 +5333,7 @@ print(m.probe_health(9092))
         BOT_ERRORS_DRY_HEALTH_STATUS: '200',
         BOT_ERRORS_DRY_HEALTH_RESPONSE_JSON: JSON.stringify({
           status: 'healthy',
+          generated_at: new Date().toISOString(),
           instance: { name: 'agent-alpha', provider: 'claude-cli', effectiveProvider: 'claude-cli' },
           whatsapp: {
             connected: true,
@@ -5470,6 +5564,7 @@ print(m.probe_health(9092))
         BOT_ERRORS_DRY_HEALTH_STATUS: '200',
         BOT_ERRORS_DRY_HEALTH_RESPONSE_JSON: JSON.stringify({
           status: 'healthy',
+          generated_at: '2026-06-12T02:59:58Z',
           instance: {
             name: 'agent-alpha',
             provider: 'claude-cli',
@@ -5604,6 +5699,7 @@ print(m.probe_health(9092))
         BOT_ERRORS_DRY_HEALTH_STATUS: '200',
         BOT_ERRORS_DRY_HEALTH_RESPONSE_JSON: JSON.stringify({
           status: 'healthy',
+          generated_at: new Date().toISOString(),
           instance: { name: 'agent-alpha', provider: 'claude-cli' },
           whatsapp: {
             connected: true,
@@ -5723,6 +5819,7 @@ print(m.probe_health(9092))
         BOT_ERRORS_DRY_HEALTH_STATUS: '200',
         BOT_ERRORS_DRY_HEALTH_RESPONSE_JSON: JSON.stringify({
           status: 'healthy',
+          generated_at: '2026-06-12T04:01:04Z',
           instance: { name: 'eh-bot', provider: 'claude-cli' },
           whatsapp: {
             connected: true,
@@ -5858,6 +5955,7 @@ print(m.probe_health(9092))
         BOT_ERRORS_DRY_HEALTH_STATUS: '200',
         BOT_ERRORS_DRY_HEALTH_RESPONSE_JSON: JSON.stringify({
           status: 'healthy',
+          generated_at: '2026-06-12T04:01:04Z',
           instance: { name: 'eh-bot', provider: 'claude-cli' },
           whatsapp: {
             connected: true,
@@ -6058,6 +6156,8 @@ print(m.probe_health(9092))
         BOT_ERRORS_DRY_HEALTH_STATUS: '200',
         BOT_ERRORS_DRY_HEALTH_RESPONSE_JSON: JSON.stringify({
           status: 'healthy',
+          generated_at: new Date().toISOString(),
+          instance: { name: 'primary-bot' },
           whatsapp: {
             connected: true,
             connection: { state: 'connected' },
@@ -6150,6 +6250,7 @@ print(m.probe_health(9092))
         BOT_ERRORS_DRY_HEALTH_STATUS: '200',
         BOT_ERRORS_DRY_HEALTH_RESPONSE_JSON: JSON.stringify({
           status: 'healthy',
+          generated_at: new Date().toISOString(),
           instance: { name: 'primary-bot' },
           whatsapp: {
             connected: true,
@@ -6312,6 +6413,8 @@ print(m.probe_health(9092))
         BOT_ERRORS_DRY_HEALTH_STATUS: '200',
         BOT_ERRORS_DRY_HEALTH_RESPONSE_JSON: JSON.stringify({
           status: 'healthy',
+          generated_at: new Date().toISOString(),
+          instance: { name: 'primary-bot' },
           whatsapp: {
             connected: true,
             connection: { state: 'connected' },

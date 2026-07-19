@@ -34,7 +34,14 @@ export interface ReleaseSnapshotFile {
 }
 
 export interface ReleaseSnapshotManifest {
-  schemaVersion: 1;
+  /**
+   * v1: files-only manifest (git-tracked files). v2: adds `requiredOutputs`,
+   * release-relative paths that must exist in the release even though they are
+   * not git-tracked — e.g. the built console assets under `dist/`, which are
+   * gitignored and so never appear in the file list. A v1 manifest parses with
+   * `requiredOutputs: []` (no required-output enforcement) for back-compat.
+   */
+  schemaVersion: 1 | 2;
   source: {
     ref: string;
     commit: string;
@@ -48,6 +55,8 @@ export interface ReleaseSnapshotManifest {
     path: string;
   };
   files: ReleaseSnapshotFile[];
+  /** Release-relative build outputs that must exist (empty on legacy v1). */
+  requiredOutputs: string[];
 }
 
 export type ReleaseSnapshotAction =
@@ -70,7 +79,8 @@ export type ReleaseSnapshotDriftKind =
   | 'file-missing'
   | 'file-type-drift'
   | 'file-sha256-drift'
-  | 'extra-file';
+  | 'extra-file'
+  | 'required-output-missing';
 
 export interface ReleaseSnapshotDriftIssue {
   kind: ReleaseSnapshotDriftKind;
@@ -99,6 +109,8 @@ export interface CreateReleaseSnapshotPlanOptions {
   buildTime: string;
   trackedFiles: string[];
   mutablePathExcludes?: readonly string[];
+  /** Release-relative build outputs that must exist (e.g. `dist/index.html`). */
+  requiredOutputs?: readonly string[];
 }
 
 interface ParsedArgs {
@@ -178,8 +190,9 @@ function parseFileEntry(value: unknown, index: number): ReleaseSnapshotFile {
 
 export function parseReleaseSnapshotManifest(payload: unknown): ReleaseSnapshotManifest {
   if (!isRecord(payload)) throw new Error('release snapshot manifest must be an object');
-  if (payload['schemaVersion'] !== 1) {
-    throw new Error(`unsupported release snapshot manifest schemaVersion=${String(payload['schemaVersion'])}`);
+  const schemaVersion = payload['schemaVersion'];
+  if (schemaVersion !== 1 && schemaVersion !== 2) {
+    throw new Error(`unsupported release snapshot manifest schemaVersion=${String(schemaVersion)}`);
   }
   if (!isRecord(payload['source'])) throw new Error('release manifest source must be an object');
   if (!isRecord(payload['release'])) throw new Error('release manifest release must be an object');
@@ -195,8 +208,15 @@ export function parseReleaseSnapshotManifest(payload: unknown): ReleaseSnapshotM
     seen.add(file.path);
   }
 
+  // requiredOutputs is v2-only; a v1 manifest (or a v2 without the key) yields []
+  // — no required-output enforcement, preserving legacy behavior. Each entry is
+  // validated as repo-relative to reject absolute paths / traversal.
+  const requiredOutputs = payload['requiredOutputs'] === undefined
+    ? []
+    : readStringList(payload, 'requiredOutputs').map(normalizeRepoPath);
+
   return {
-    schemaVersion: 1,
+    schemaVersion,
     source: {
       ref: readString(payload['source'], 'ref'),
       commit: readString(payload['source'], 'commit'),
@@ -208,6 +228,7 @@ export function parseReleaseSnapshotManifest(payload: unknown): ReleaseSnapshotM
     },
     rollback: { path: rollbackPath },
     files,
+    requiredOutputs,
   };
 }
 
@@ -224,8 +245,10 @@ export function createReleaseSnapshotPlan(options: CreateReleaseSnapshotPlanOpti
     .sort()
     .map((filePath) => readSourceFile(sourceRoot, filePath));
 
+  const requiredOutputs = [...new Set((options.requiredOutputs ?? []).map(normalizeRepoPath))].sort();
+
   const manifest: ReleaseSnapshotManifest = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     source: {
       ref: options.sourceRef,
       commit: options.sourceCommit,
@@ -237,6 +260,7 @@ export function createReleaseSnapshotPlan(options: CreateReleaseSnapshotPlanOpti
     },
     rollback: { path: rollbackPath },
     files,
+    requiredOutputs,
   };
 
   return {
@@ -356,9 +380,27 @@ export function collectReleaseSnapshotDrift(
     }
   }
 
+  // Required outputs are expected-but-untracked, so they must not read as
+  // extra files even though they are absent from `files`.
+  const requiredOutputSet = new Set(manifest.requiredOutputs);
   for (const relPath of listFiles(absoluteReleasePath, manifest.release.mutablePathExcludes)) {
-    if (!expected.has(relPath)) {
+    if (!expected.has(relPath) && !requiredOutputSet.has(relPath)) {
       issues.push({ kind: 'extra-file', path: relPath, message: `release file is not in manifest: ${relPath}` });
+    }
+  }
+
+  // Required build outputs (v2): declared release-relative products (e.g. the
+  // built console assets) that must exist even though they are not git-tracked
+  // and so never appear in `files`. Their absence is the packaging blind spot a
+  // files-only manifest cannot see — a release that omits the console build
+  // reads clean without this check.
+  for (const relPath of manifest.requiredOutputs) {
+    if (!existsSync(path.join(absoluteReleasePath, relPath))) {
+      issues.push({
+        kind: 'required-output-missing',
+        path: relPath,
+        message: `required build output missing from release: ${relPath}`,
+      });
     }
   }
 

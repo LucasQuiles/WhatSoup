@@ -379,9 +379,12 @@ describe('per-chat /new ownership transition', () => {
       releaseSpawn();
       expect(await waitUntil(() => routedTurns.length === 1, 2_000)).toBe(true);
       await new Promise<void>((resolve) => setImmediate(resolve));
+      // P4: context is merged into the single user turn — no fresh_session_context
+      // lease exists, so the rekey-following property is witnessed through the
+      // exec-actor queue landing under the ACTIVATED key instead.
       expect(routedTurns).toHaveLength(1);
-      expect(state.pendingSystemResults.counts.get(canonicalKey) ?? 0).toBe(1);
-      expect(state.perChatExecActorQueue.has(canonicalKey)).toBe(false);
+      expect(state.pendingSystemResults.counts.get(canonicalKey) ?? 0).toBe(0);
+      expect(state.perChatExecActorQueue.get(canonicalKey)).toEqual([lidJid]);
 
       releaseContextResult();
       await turn;
@@ -402,15 +405,10 @@ describe('per-chat /new ownership transition', () => {
       expect(state.pendingSystemResults.counts.has(lidKey)).toBe(false);
       expect(state.perChatExecActorQueue.get(canonicalKey)).toEqual([lidJid]);
       expect(state.perChatExecActorQueue.has(lidKey)).toBe(false);
-      expect(routedTurns).toHaveLength(2);
-      expect(routedTurns[0]).toMatchObject({
-        mapKey: canonicalKey,
-        text: expect.stringContaining('[Recent chat context'),
-      });
-      expect(routedTurns[1]).toEqual({
-        mapKey: canonicalKey,
-        text: 'turn crossing a LID rekey',
-      });
+      expect(routedTurns).toHaveLength(1);
+      expect(routedTurns[0]?.mapKey).toBe(canonicalKey);
+      expect(routedTurns[0]?.text).toMatch(/^\[Recent chat context — read before responding\]\n/);
+      expect(routedTurns[0]?.text).toMatch(/\n\n\[Current message\]\nturn crossing a LID rekey$/);
     } finally {
       releaseSpawn();
       releaseContextResult();

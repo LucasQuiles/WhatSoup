@@ -903,3 +903,94 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
     });
   });
 });
+
+// ─── P4: fresh-spawn context preamble (effect-free by construction) ─────────
+//
+// The old contract sent recent history as a fresh_session_context SYSTEM turn.
+// The admission gate rejects every effect from that owner
+// (purpose_disallows_effect), so an action-heavy context block burned the whole
+// 240s deadline attempting effects it could never apply; the timeout quarantine
+// then killed the session under the queued user turn (observed twice on the
+// production owner DM, 2026-07-17 — inbound seqs 49207/49219 dropped). The new
+// contract merges context into the user turn at the provider boundary: one
+// send, no system lease, no deadline race.
+
+import { getRecentMessages } from '../../../src/core/messages.ts';
+
+describe('fresh-spawn context preamble (P4 — effect-free by construction)', () => {
+  const chatJid = '15550002222@s.whatsapp.net';
+
+  beforeEach(() => {
+    vi.mocked(mockSession.sendTurn).mockClear();
+    vi.mocked(getRecentMessages).mockReset();
+    vi.mocked(getRecentMessages).mockReturnValue([]);
+  });
+
+  function recentRows() {
+    return [
+      { timestamp: 1_784_300_000, senderName: 'Lucas', senderJid: chatJid, content: 'earlier message two' },
+      { timestamp: 1_784_299_000, senderName: 'q', senderJid: '15550003333@s.whatsapp.net', content: 'earlier message one' },
+    ];
+  }
+
+  it('merges recent context into the user turn — no fresh_session_context system turn, no barrier race', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test');
+    const state = runtime as unknown as PollRuntimeState & {
+      sendTurnToSession(session: typeof mockSession, chatJid: string, text: string): Promise<void>;
+      currentTurnReplayText: string | null;
+    };
+    await runtime.start();
+    vi.mocked(getRecentMessages).mockReturnValue(recentRows() as ReturnType<typeof getRecentMessages>);
+    const mark = vi.spyOn(state.pendingSystemResults, 'mark');
+
+    await state.sendTurnToSession(mockSession, chatJid, 'Continue');
+
+    expect(mark).not.toHaveBeenCalledWith(
+      expect.objectContaining({ purpose: 'fresh_session_context' }),
+    );
+    // Replay/journal capture must keep the pure user text — the preamble exists
+    // only at the provider boundary.
+    expect(state.currentTurnReplayText).toBeNull();
+    expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+    const sent = (vi.mocked(mockSession.sendTurn).mock.calls[0] as unknown as [string])[0];
+    expect(sent).toMatch(/^\[Recent chat context — read before responding\]\n/);
+    expect(sent).toContain('earlier message one');
+    expect(sent).toMatch(/\n\n\[Current message\]\nContinue$/);
+  });
+
+  it('sends the plain user text when no recent history exists', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test');
+    const state = runtime as unknown as PollRuntimeState & {
+      sendTurnToSession(session: typeof mockSession, chatJid: string, text: string): Promise<void>;
+    };
+    await runtime.start();
+    vi.mocked(getRecentMessages).mockReturnValue([]);
+
+    await state.sendTurnToSession(mockSession, chatJid, 'Continue');
+
+    expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+    expect(mockSession.sendTurn).toHaveBeenCalledWith('Continue');
+  });
+
+  it('proceeds with the plain user text when context assembly throws', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test');
+    const state = runtime as unknown as PollRuntimeState & {
+      sendTurnToSession(session: typeof mockSession, chatJid: string, text: string): Promise<void>;
+    };
+    await runtime.start();
+    vi.mocked(getRecentMessages).mockImplementation(() => {
+      throw new Error('db read failed');
+    });
+
+    await state.sendTurnToSession(mockSession, chatJid, 'Continue');
+
+    expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+    expect(mockSession.sendTurn).toHaveBeenCalledWith('Continue');
+  });
+});

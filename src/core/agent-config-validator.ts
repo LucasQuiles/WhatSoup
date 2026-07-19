@@ -6,7 +6,10 @@
  * can map it to either a thrown Error (loader), a string (discovery), or a
  * 4xx HTTP response (CREATE/PATCH).
  *
- * CONSTRAINT: Only Node built-ins. No HTTP, no logger. Pure validation.
+ * CONSTRAINT: Only Node built-ins. No HTTP, no logger. Validation is pure apart
+ * from one filesystem identity read for the agentOptions.cwd home-root invariant
+ * (#1862) — the same device/inode check AgentRuntime.start() performs, shared here
+ * so config load / API writes / preflight all fail closed on it before a restart.
  */
 
 // Canonical enum sets — kept HERE (no import from instance-loader.ts) so the
@@ -16,14 +19,17 @@
 //
 // PROVIDER_IDS is the single source of truth for agentOptions.provider —
 // see src/runtimes/agent/providers/index.ts and issue #447.
+import { homedir } from 'node:os';
 import { PROVIDER_IDS } from '../runtimes/agent/providers/index.ts';
 import { PROVIDER_API_KEY_SERVICES } from '../lib/provider-key-service.ts';
 import { isRecord } from '../lib/type-guards.ts';
+import { isSamePhysicalDirectory } from '../lib/home-path.ts';
 import { resolveAgentModel } from './agent-model.ts';
 import { fallbackEntryKey, isSameAsPrimaryFallbackEntry, type AgentFallbackEntry } from './fallback-chain.ts';
 import { DEFAULT_TRANSPORT_ID, isTransportId, TRANSPORT_IDS } from '../transport/registry.ts';
 import { ACCOUNT_RE } from './transport-refs.ts';
 import { E164_RE } from '../transport/twilio/types.ts';
+import RE2 from 're2';
 
 export const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
 export const ACCESS_MODES = [
@@ -327,6 +333,38 @@ export function validateInstanceConfig(
     }
   }
 
+  // --- pausedChatBypassPatterns (shape + bounds + safe-regex compile) ---
+  // Operator-supplied regex sources are compiled and matched (src/core/ingest.ts)
+  // with RE2 — a linear-time engine with no catastrophic backtracking — so a
+  // config cannot introduce a ReDoS. Supported syntax is RE2's safe subset:
+  // NO lookaround and NO backreferences (both require backtracking). The same
+  // engine guards config-time and match-time, so a pattern that validates here
+  // always compiles at runtime. The count/length caps are defense-in-depth.
+  const bypassPatterns = raw['pausedChatBypassPatterns'];
+  if (bypassPatterns !== undefined) {
+    if (!Array.isArray(bypassPatterns)) {
+      return err('pausedChatBypassPatterns', 'pausedChatBypassPatterns must be an array of regex source strings');
+    }
+    if (bypassPatterns.length > 32) {
+      return err('pausedChatBypassPatterns', 'pausedChatBypassPatterns must contain at most 32 patterns');
+    }
+    for (const pattern of bypassPatterns) {
+      if (!nonBlankString(pattern)) {
+        return err('pausedChatBypassPatterns', 'pausedChatBypassPatterns must contain only non-empty regex source strings');
+      }
+      if ((pattern as string).length > 200) {
+        return err('pausedChatBypassPatterns', 'pausedChatBypassPatterns entries must be at most 200 characters');
+      }
+      try {
+        // Validate with RE2 (the same engine used at match time). Lookaround and
+        // backreferences are unsupported by RE2 and rejected here as invalid.
+        new RE2(pattern as string, 'i');
+      } catch {
+        return err('pausedChatBypassPatterns', `pausedChatBypassPatterns contains an invalid regular expression: ${pattern}`);
+      }
+    }
+  }
+
   // --- claudeMd size cap (write paths only — loader does not store it) ---
   if ((ctx.mode === 'create' || ctx.mode === 'patch') && typeof raw['claudeMd'] === 'string') {
     if ((raw['claudeMd'] as string).length > 32_768) {
@@ -579,6 +617,26 @@ function validateAgentOptions(
   // cwd must be a string when provided.
   if (opts['cwd'] !== undefined && typeof opts['cwd'] !== 'string') {
     return err('agentOptions.cwd', 'agentOptions.cwd must be a string when provided');
+  }
+
+  // cwd, when explicitly configured, must not resolve to the user home directory.
+  // AgentRuntime.start() throws on exactly this (`this.cwd &&
+  // isSamePhysicalDirectory(this.cwd, homedir())`, runtime.ts), so config load,
+  // API writes, and preflight must fail closed on the SAME device/inode check
+  // before a restart mutates the service — rather than discovering it only after
+  // startup begins (#1862). An absent cwd legitimately falls back to homedir() at
+  // runtime and stays allowed; only an explicit home-root cwd is rejected.
+  if (typeof opts['cwd'] === 'string') {
+    let cwdResolvesToHome: boolean;
+    try {
+      cwdResolvesToHome = isSamePhysicalDirectory(opts['cwd'], homedir());
+    } catch {
+      // Ambiguous/dangling path identity — fail closed, matching the runtime guard.
+      return err('agentOptions.cwd', 'agentOptions.cwd could not be resolved to a physical directory');
+    }
+    if (cwdResolvesToHome) {
+      return err('agentOptions.cwd', 'agentOptions.cwd must not resolve to the user home directory');
+    }
   }
 
   // instructionsPath must be a string when present.

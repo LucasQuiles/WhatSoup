@@ -2446,21 +2446,31 @@ def rustdesk_inventory(profile: dict[str, Any]) -> list[str]:
 
 
 def health_probe_details(status: int, body: str, expected_name: str | None = None) -> str:
-    try:
-        data = json.loads(body)
-    except Exception:
-        return ""
-    if not isinstance(data, dict):
-        return ""
-    whatsapp = data.get("whatsapp") if isinstance(data.get("whatsapp"), dict) else {}
-    connection = whatsapp.get("connection") if isinstance(whatsapp.get("connection"), dict) else {}
     details: list[str] = []
     def add_marker(marker: str) -> None:
         if marker not in details:
             details.insert(0, marker)
 
+    try:
+        data = json.loads(body)
+    except Exception:
+        data = None
+    if status == 200:
+        if data is None:
+            add_marker("health_body_malformed")
+            return " ".join(details)
+        if not isinstance(data, dict):
+            add_marker("health_body_nonobject")
+            return " ".join(details)
+    if data is None or not isinstance(data, dict):
+        return ""
+    whatsapp = data.get("whatsapp") if isinstance(data.get("whatsapp"), dict) else {}
+    connection = whatsapp.get("connection") if isinstance(whatsapp.get("connection"), dict) else {}
+
     if status in {401, 403}:
         add_marker("health_probe_auth_failed")
+    elif status != 200 and status < 500:
+        add_marker("health_unexpected_status")
 
     status_text = data.get("status")
     if isinstance(status_text, str) and status_text:
@@ -2469,6 +2479,27 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
             add_marker("health_degraded")
         elif status_text == "unhealthy":
             add_marker("health_unhealthy")
+        elif status == 200 and status_text != "healthy":
+            add_marker("health_status_unknown")
+    elif status == 200:
+        add_marker("health_status_missing")
+    if status == 200:
+        generated_at = data.get("generated_at")
+        generated_at_epoch = parse_iso_epoch(generated_at)
+        if generated_at is None:
+            add_marker("health_generated_at_missing")
+        elif generated_at_epoch is None:
+            add_marker("health_generated_at_unparseable")
+        else:
+            append_evidence_field(details, "generated_at", generated_at)
+            generated_at_age = current_epoch() - generated_at_epoch
+            details.append(f"generated_at_age_seconds={generated_at_age}")
+            max_age = env_int("BOT_ERRORS_HEALTH_BODY_MAX_AGE_SECONDS", 30)
+            max_future_skew = env_int("BOT_ERRORS_HEALTH_BODY_MAX_FUTURE_SKEW_SECONDS", 5)
+            if generated_at_age > max_age:
+                add_marker("health_generated_at_stale")
+            elif generated_at_age < -max_future_skew:
+                add_marker("health_generated_at_future_skew")
     connected = whatsapp.get("connected")
     if isinstance(connected, bool):
         details.append(f"wa_connected={str(connected).lower()}")
@@ -2562,6 +2593,9 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
     append_evidence_field(details, "instance_fallback_recovery_probe_required", instance_meta.get("fallbackRecoveryProbeRequired"))
     if provider_fallback_active(instance_provider, instance_effective_provider, instance_fallback_active_until):
         add_marker("runtime_agent_fallback_active")
+    if status == 200 and expected_name and not instance_name:
+        add_marker("health_identity_missing")
+        append_evidence_field(details, "expected_instance", expected_name)
     if expected_name and instance_name and instance_name != expected_name:
         add_marker("health_identity_mismatch")
         append_evidence_field(details, "expected_instance", expected_name)
@@ -2743,6 +2777,12 @@ def format_health_probe(url: str, status: int, body: str = "", expected_name: st
         status >= 500
         or "health_probe_auth_failed" in details
         or "health_identity_mismatch" in details
+        or "health_identity_missing" in details
+        or "health_body_malformed" in details
+        or "health_body_nonobject" in details
+        or "health_unexpected_status" in details
+        or "health_generated_at_stale" in details
+        or "health_generated_at_future_skew" in details
         or "auth_bond_at_risk" in details
         or "physical_intervention_required" in details
         or "health_unhealthy" in details
@@ -2750,6 +2790,10 @@ def format_health_probe(url: str, status: int, body: str = "", expected_name: st
         prefix = "FAIL "
     elif (
         "health_degraded" in details
+        or "health_status_missing" in details
+        or "health_status_unknown" in details
+        or "health_generated_at_missing" in details
+        or "health_generated_at_unparseable" in details
         or "runtime_agent_at_risk" in details
         or "runtime_agent_fallback_active" in details
         or "auth_bond_restore_canary_failed" in details

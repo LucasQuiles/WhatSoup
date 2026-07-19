@@ -359,7 +359,7 @@ describe('system continuation actor ownership', () => {
     expect(state.systemTurnExecActors.has(lease.id)).toBe(false);
   });
 
-  it('releases the exact system actor after timeout teardown proof', async () => {
+  it('releases the exact system actor after the timeout retry window exhausts', async () => {
     const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
     const mapKey = 'group-timeout@g.us';
     setOwnedTestSession(runtime, mapKey, mockSession);
@@ -396,6 +396,10 @@ describe('system continuation actor ownership', () => {
     });
     const input = mark.mock.calls[0]![0];
     expect(input.onTimeout).toBeTypeOf('function');
+
+    await expect(input.onTimeout!(lease)).resolves.toBe('retry');
+    expect(mockSession.shutdown).not.toHaveBeenCalled();
+    expect(state.systemTurnExecActors.has(lease.id)).toBe(true);
 
     await expect(input.onTimeout!(lease)).resolves.toBe(true);
     state.pendingSystemResults.cancel(lease);

@@ -1999,6 +1999,30 @@ describe('config — siblingPhones, pausedChats, echoGuard', () => {
     expect(config.pausedChats.has('111111100000000002@g.us')).toBe(false);
   });
 
+  it('populates pausedChatBypassPatterns from instance config', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      pausedChatBypassPatterns: ['-> Q', 'escalate to owner'],
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.pausedChatBypassPatterns).toEqual(['-> Q', 'escalate to owner']);
+  });
+
+  it('filters blank and non-string entries from pausedChatBypassPatterns', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      pausedChatBypassPatterns: ['-> Q', '', '  ', 42],
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.pausedChatBypassPatterns).toEqual(['-> Q']);
+  });
+
+  it('defaults pausedChatBypassPatterns to empty array when field is absent or not an array', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      pausedChatBypassPatterns: 'not-an-array',
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.pausedChatBypassPatterns).toEqual([]);
+  });
+
   it('echoGuard defaults to enabled with 1000ms cooldown', async () => {
     process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({}));
     const { config } = await import('../src/config.ts');
