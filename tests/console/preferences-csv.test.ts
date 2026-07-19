@@ -72,6 +72,9 @@ vi.mock('../../console/src/hooks/use-fleet', () => ({
   useAccess: () => ({ data: [] }),
   useLogs: () => ({ data: [] }),
   useTyping: () => ({ data: [] }),
+  // LineDetail on this branch renders the Approvals tab (D-4) — the hook
+  // must exist on the mock or the page render throws at load.
+  useApprovals: () => ({ data: undefined, isLoading: false, freshness: { observedAt: null, stale: false } }),
   // Agent-mode SummaryTab embeds ProvidersKeysCard, which reads these hooks.
   useProviders: () => ({ data: [] }),
   useProviderStatus: () => ({

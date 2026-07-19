@@ -89,8 +89,17 @@ Current baseline measurements:
 
 | rule | path | lines | ceiling |
 |------|------|-------|---------|
-| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 11467 | 11467 |
+| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 11629 | 11629 |
 | `arch.file-size` | `tests/runtimes/agent/runtime.test.ts` | 15049 | 15049 |
+
+Intentional bump 2026-07-19 (both twins, per protocol): +162 lines in
+`src/runtimes/agent/runtime.ts` (11467 → 11629) for the D-4 console approval queue
+(`resolvePollDecisionFromConsole` + the v1.1 textFallback branch + boot-time
+`consumeQueuedPollDecisions` — all state-interleaved with the runtime's poll-resolution
+machinery, deliberately reusing the existing vote/typed-answer paths rather than new
+subsystems). Slicing considered; the code IS the poll-resolution path's own class.
+(Note: #1910's independent 11448 → 11587 bump lives on its own branch; this branch's
+ceiling derives from main's 11467.)
 
 The `ceiling` column (the `maxLines` field on each measurement in `baseline.json`) is a **blocking
 growth ceiling**. `tests/scripts/fitness-file-size-warning-budget.test.ts` measures each file's

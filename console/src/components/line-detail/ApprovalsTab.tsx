@@ -114,6 +114,7 @@ export function ApprovalsTab({ payload, isLoading, freshness, lineName }: {
           <ApprovalCard
             key={entry.mapKey}
             entry={entry}
+            observedAt={payload ? new Date(payload.observedAt).getTime() : 0}
             onDecide={(questionIndex, selectedOptions) => setPendingDecision({ entry, questionIndex, selectedOptions })}
           />
         ))
@@ -143,8 +144,11 @@ export function ApprovalsTab({ payload, isLoading, freshness, lineName }: {
   )
 }
 
-function ApprovalCard({ entry, onDecide }: {
+function ApprovalCard({ entry, observedAt, onDecide }: {
   entry: ApprovalEntry;
+  /** Fleet-stamped observation time (payload.observedAt) — the amber
+   *  threshold derives from props, never wall-clock (react-hooks/purity). */
+  observedAt: number;
   onDecide: (questionIndex: number, selectedOptions: string[]) => void;
 }) {
   const answeredCount = Object.keys(entry.answersCollected).length
@@ -161,7 +165,7 @@ function ApprovalCard({ entry, onDecide }: {
           )}
           {entry.hardClosesAt !== null && (
             <span
-              className={`c-label${entry.hardClosesAt - Date.now() < 60_000 ? ' text-s-warn' : ''}`}
+              className={`c-label${entry.hardClosesAt - observedAt < 60_000 ? ' text-s-warn' : ''}`}
               title={new Date(entry.hardClosesAt).toISOString()}
             >
               {`closes ${formatRelative(new Date(entry.hardClosesAt).toISOString())}`}
@@ -225,18 +229,16 @@ function QuestionBlock({ questionIndex, question, answered, isCurrent, readOnly,
         <>
           <div className="flex items-center flex-wrap gap-[var(--sp-2)]">
             {question.options.map((o) => (
-              <button
+              <Button
                 key={o.label}
-                type="button"
+                size="xs"
+                variant={selected.has(o.label) ? 'primary' : 'neutral'}
                 title={o.description}
                 onClick={() => toggle(o.label)}
                 aria-pressed={selected.has(o.label)}
-                className={`px-[var(--sp-2)] py-[var(--sp-1)] rounded-[var(--radius-md)] border c-border font-mono text-data cursor-pointer ${
-                  selected.has(o.label) ? 'bg-surface-inset text-s-ok' : 'bg-transparent'
-                }`}
               >
                 {o.label}
-              </button>
+              </Button>
             ))}
           </div>
           <Button
