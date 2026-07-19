@@ -3743,6 +3743,14 @@ export class AgentRuntime implements Runtime {
           { command: spec.name, senderJid: msg.senderJid, outcome: 'denied', errorClass: 'not-authorized' },
           'command denied: sender not authorized',
         );
+        // B21-A F1: this return bypasses the R14 post-switch completion below,
+        // so the denied inbound must be finalized HERE — same shape as the
+        // 'empty_content' skip in handleMessageInner — or the row strands in
+        // 'processing' until the stuck-inbound sweep falsely reclaims an authz
+        // denial as a processing FAILURE (stale_reclaim).
+        if (this.durability && msg.inboundSeq !== undefined) {
+          this.durability.markInboundSkipped(msg.inboundSeq, 'not_authorized');
+        }
         return;
       }
       try {

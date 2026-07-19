@@ -2827,9 +2827,9 @@ describe('AgentRuntime', () => {
   // complete/'local_command_handled' when no forward happens, and this PR wraps
   // the switch in try/catch so a throwing handler cannot escape to the turnChain
   // catch-all (which would falsely stamp the row failed/'error'); the completion
-  // still runs after the catch. Early-`return` paths inside the switch (e.g.
-  // admin-denied /new) bypass the completion — those rows are reclaimed by this
-  // PR's stuck-inbound sweep as failed/'stale_reclaim' within the sweep window.
+  // still runs after the catch. The gate's deny path returns BEFORE the switch,
+  // so it finalizes its row itself (markInboundSkipped/'not_authorized', B21-A F1)
+  // — no early-return path may leave a row stranded in 'processing'.
   describe('local-command inbound finalization (W2a)', () => {
     it('finalizes the journaled inbound row for a /help local command', async () => {
       const db = makeDb();
@@ -2853,15 +2853,15 @@ describe('AgentRuntime', () => {
       duraDb.close();
     });
 
-    it('admin-denied early return leaves the row processing; the stuck-inbound sweep reclaims it as stale_reclaim', async () => {
+    it('admin-denied gated command finalizes the row terminally — never strands it in processing (B21-A F1)', async () => {
       const db = makeDb();
       const { messenger } = makeMessenger();
-      // Non-admin sender (admin is 15550100001 in mockConfig): /sessions hits a
-      // bare `return` inside the switch, BYPASSING the R14 post-switch completion
-      // (merged-design contract). The row stays 'processing' — and this PR's own
-      // stuck-inbound sweep is the designed reclaim path: after the 24h window it
-      // fails the row with failure_class 'stale_reclaim'. This test pins BOTH
-      // halves of that contract.
+      // Non-admin sender (admin is 15550100001 in mockConfig): /sessions is
+      // denied. The deny path returns BEFORE the R14 post-switch completion, so
+      // it must finalize the row ITSELF — markInboundSkipped/'not_authorized',
+      // mirroring the 'empty_content' skip — otherwise the row strands in
+      // 'processing' until the stuck-inbound sweep falsely reclaims it as a
+      // FAILURE (stale_reclaim), counting an authz denial as a processing fault.
       const runtime = new AgentRuntime(db, messenger);
       const duraDb = new RealDatabase(':memory:');
       duraDb.open();
@@ -2876,22 +2876,15 @@ describe('AgentRuntime', () => {
         inboundSeq: seq,
       }));
 
-      const before = duraDb.raw.prepare(
-        'SELECT processing_status FROM inbound_events WHERE seq = ?',
-      ).get(seq) as { processing_status: string };
-      expect(before.processing_status).toBe('processing'); // bare return bypassed R14 completion
+      const row = duraDb.raw.prepare(
+        'SELECT processing_status, terminal_reason FROM inbound_events WHERE seq = ?',
+      ).get(seq) as { processing_status: string; terminal_reason: string | null };
+      expect(row.processing_status).toBe('complete'); // terminal — NOT 'processing'
+      expect(row.terminal_reason).toBe('not_authorized');
 
-      // The designed reclaim path: backdate past the sweep window, run the sweep.
+      // Nothing left for the stuck-inbound sweep to reclaim as a false failure.
       duraDb.raw.prepare(`UPDATE inbound_events SET received_at = datetime('now', '-25 hours') WHERE seq = ?`).run(seq);
-      const sweep = durability.sweepStuckInbound();
-      expect(sweep.failedStale).toBe(1);
-
-      const after = duraDb.raw.prepare(
-        'SELECT processing_status, terminal_reason, failure_class FROM inbound_events WHERE seq = ?',
-      ).get(seq) as { processing_status: string; terminal_reason: string | null; failure_class: string | null };
-      expect(after.processing_status).toBe('failed');
-      expect(after.terminal_reason).toBe('error');
-      expect(after.failure_class).toBe('stale_reclaim');
+      expect(durability.sweepStuckInbound().failedStale).toBe(0);
 
       duraDb.close();
     });
