@@ -248,6 +248,45 @@ describe('StatusCell shape law', () => {
 });
 
 // ---------------------------------------------------------------------------
+// StatusCell — carried (stale health) contract (D-3/F-UX-4: never green
+// without a fresh observation; carried crit stays crit)
+// ---------------------------------------------------------------------------
+
+describe('StatusCell carried (stale health) contract', () => {
+  it('carried + online demotes the ok disc to the warn diamond, keeps the carried label', () => {
+    render(<StatusCell status="online" carried />);
+    // Label text stays the carried (last-known) status — status stays visible
+    expect(screen.getByText('online')).toBeTruthy();
+    // Shape no longer claims fresh-green
+    expect(document.querySelector('.soup-shape--ok')).toBeNull();
+    expect(document.querySelector('.soup-shape--warn')).not.toBeNull();
+    // Accessible name qualifies the carried provenance
+    const shape = document.querySelector('[role="img"]');
+    expect(shape!.getAttribute('aria-label')).toBe('online, carried forward');
+  });
+
+  it('carried suppresses the live halo even when live=true', () => {
+    render(<StatusCell status="online" live carried />);
+    expect(document.querySelector('.soup-shape--live')).toBeNull();
+  });
+
+  it('carried + unreachable keeps the crit square — a carried alarm stays an alarm', () => {
+    render(<StatusCell status="unreachable" carried />);
+    expect(document.querySelector('.soup-shape--crit')).not.toBeNull();
+    expect(document.querySelector('.soup-shape--warn')).toBeNull();
+    const shape = document.querySelector('[role="img"]');
+    expect(shape!.getAttribute('aria-label')).toBe('unreachable');
+  });
+
+  it('carried=false (and omitted) leaves the default render byte-identical', () => {
+    render(<StatusCell status="online" carried={false} />);
+    expect(document.querySelector('.soup-shape--ok')).not.toBeNull();
+    const shape = document.querySelector('[role="img"]');
+    expect(shape!.getAttribute('aria-label')).toBe('online');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // ModeBadge primitive
 // ---------------------------------------------------------------------------
 
