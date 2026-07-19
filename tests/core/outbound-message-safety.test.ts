@@ -675,7 +675,8 @@ const OWNER_PHONE_JID = `${OWNER_PHONE}@s.whatsapp.net`;
 const OWNER_LID = `${'16566225701'}`;
 const OWNER_LID_JID = `${OWNER_LID}@lid`;
 const UNMAPPED_LID_JID = `${'19999999901'}@lid`;
-const NON_ADMIN_PHONE_JID = `${'15559990001'}@s.whatsapp.net`;
+const NON_ADMIN_PHONE = `${'15559990001'}`;
+const NON_ADMIN_PHONE_JID = `${NON_ADMIN_PHONE}@s.whatsapp.net`;
 const ADMIN_PHONES = new Set([OWNER_PHONE]);
 
 function openDbWithLidMapping(): Database {
@@ -776,6 +777,43 @@ describe('isOperatorDmPeer', () => {
       const { text } = redactInternalArtifacts(operatorPathText, audience);
       expect(text).not.toContain('/Users/testuser/LAB/whatsoup/instances/q');
       expect(text).toContain('[internal-path]');
+    } finally {
+      db.close();
+    }
+  });
+
+  // F1F2 fast-follow (lead-required, non-blocking): the QR-143 @sms guard
+  // above returns false for EVERY @sms chatJid, including a spoof attempt
+  // that bears admin-like digits. That silent denial is exactly the kind of
+  // audience-elevation non-event the @lid never-silent convention (WG-7) and
+  // NFR-3 ("gate denials log unsampled, always") say must be observable — so
+  // the spoof-attempt SUBSET (unauthenticated + admin-shaped digits) warns.
+  // Every OTHER @sms rejection (a benign SMS-bridge chat, not admin-shaped)
+  // must stay silent — warning there would be noise on ordinary traffic.
+  it('[never-silent, WG-7 fast-follow] a spoofed <admin-digits>@sms chatJid returns false AND logs outbound-audience/spoof-attempt-denied (id-only, N14)', () => {
+    const db = openDbWithLidMapping();
+    try {
+      const spoofedSmsJid = `${OWNER_PHONE}@sms`;
+      const result = isOperatorDmPeer(spoofedSmsJid, false, db, ADMIN_PHONES);
+      expect(result).toBe(false);
+      expect(mockAudienceLog.warn).toHaveBeenCalledTimes(1);
+      const [payload, message] = mockAudienceLog.warn.mock.calls[0] as [Record<string, unknown>, string];
+      expect(payload).toMatchObject({ chatJidForm: 'sms', outcome: 'spoof-attempt-denied' });
+      // N14: never the raw chatJid/phone digits in the log line.
+      expect(JSON.stringify(payload)).not.toContain(OWNER_PHONE);
+      expect(message).toMatch(/sms peer/i);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('[noise guard] a non-admin @sms chatJid returns false and does NOT warn (benign SMS-bridge chat)', () => {
+    const db = openDbWithLidMapping();
+    try {
+      const nonAdminSmsJid = `${NON_ADMIN_PHONE}@sms`;
+      const result = isOperatorDmPeer(nonAdminSmsJid, false, db, ADMIN_PHONES);
+      expect(result).toBe(false);
+      expect(mockAudienceLog.warn).not.toHaveBeenCalled();
     } finally {
       db.close();
     }

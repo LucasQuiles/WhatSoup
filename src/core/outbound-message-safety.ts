@@ -51,6 +51,14 @@ const audienceLog = createChildLogger('outbound-audience');
  * which will not match `adminPhones`), a single warn is logged — component-
  * tagged and id-only (N14: never the chatJid/lid value) — so a lid-thread
  * audience decision is always observable, never a silent client fall-through.
+ *
+ * Same convention applies to the QR-143 @sms guard's spoof-attempt SUBSET
+ * (fast-follow): an unauthenticated peer that BEARS ADMIN DIGITS — i.e.
+ * would resolve to an admin phone were the transport trusted — is a spoof
+ * attempt, not ordinary traffic, so it warns per NFR-3 ("gate denials log
+ * unsampled, always"). Every OTHER @sms rejection (a benign SMS-bridge chat
+ * with no admin-shaped digits) stays silent — warning on every one would be
+ * noise, not signal.
  */
 export function isOperatorDmPeer(
   chatJid: string,
@@ -64,7 +72,18 @@ export function isOperatorDmPeer(
   // isWhatsAppAuthenticatedJid doc in jid-constants.ts) and resolvePhoneFromJid
   // collapses it to the SAME bare phone digits as a real admin JID — without
   // this guard, a spoofed `<admin-digits>@sms` chatJid would elevate.
-  if (!isWhatsAppAuthenticatedJid(chatJid)) return false;
+  if (!isWhatsAppAuthenticatedJid(chatJid)) {
+    // Fast-follow: warn ONLY on the spoof-attempt subset (bears admin digits).
+    // Do NOT warn on every @sms rejection — that fires on every benign
+    // SMS-bridge chat and would be noise, not a never-silent signal.
+    if (isAdminPhone(resolvePhoneFromJid(chatJid, db), adminPhones)) {
+      audienceLog.warn(
+        { chatJidForm: 'sms', outcome: 'spoof-attempt-denied' },
+        'operator-DM sms peer bore admin-like digits but is not WhatsApp-authenticated — spoof attempt denied',
+      );
+    }
+    return false;
+  }
   const isAdmin = isAdminPhone(resolvePhoneFromJid(chatJid, db), adminPhones);
   if (!isAdmin && isLidJid(chatJid)) {
     audienceLog.warn(
