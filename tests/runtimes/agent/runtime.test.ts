@@ -14348,6 +14348,51 @@ describe('AgentRuntime', () => {
       expect(listText).toContain('1. unknown');
     });
 
+    it('/sessions (single scope) renders the resolved chat name via the choke point, not the raw JID (B27)', async () => {
+      // Parity lock with the per_chat listing (B23/B25 F2/F3): the
+      // single-scope branch must route its chat ref through
+      // formatChatRefForOwner too — the live identifier sweep flagged this
+      // surface, and the per_chat assertions above never covered it.
+      // SQL-dispatching prepare mock (established pattern): the DM has a
+      // contacts.display_name row.
+      const db = makeDb();
+      (db.raw.prepare as ReturnType<typeof vi.fn>).mockImplementation((sql: string) => {
+        if (sql.includes('FROM contacts')) {
+          return { run: vi.fn(), get: vi.fn(() => ({ display_name: 'Lucas', notify_name: null })), all: vi.fn(() => []) };
+        }
+        if (sql.includes('FROM agent_sessions')) {
+          return { run: vi.fn(), get: vi.fn(() => ({ total_input_tokens: 1500, total_output_tokens: 700 })), all: vi.fn(() => []) };
+        }
+        return { run: vi.fn(), get: vi.fn(), all: vi.fn(() => []) };
+      });
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+
+      const state = runtime as unknown as {
+        session: typeof mockSession;
+        activeChatJid: string | null;
+      };
+      mockSession.getStatus.mockReturnValue({
+        active: true,
+        pid: 323,
+        sessionId: 'sess-single-3',
+        startedAt: new Date(Date.now() - 60_000).toISOString(),
+        messageCount: 5,
+        lastMessageAt: null,
+      });
+      mockSession.getDbRowId.mockReturnValue(42);
+      state.session = mockSession;
+      state.activeChatJid = '15550001111@s.whatsapp.net';
+
+      await sendAndDrain(runtime, makeMsg({ content: '/sessions', senderJid: adminSender }));
+
+      const listText = sentMessages.map((m) => m.text).find((t) => t.includes('Active Sessions'));
+      // Resolved name + the B25 F3 stable ref suffix, never the raw JID.
+      expect(listText).toContain('1. Lucas (…1111)');
+      expect(listText).not.toContain('15550001111');
+    });
+
     it('/sessions (single scope) reports no active sessions when session inactive', async () => {
       const db = makeDb();
       const { messenger, sentMessages } = makeMessenger();
