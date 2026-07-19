@@ -65,3 +65,109 @@ export function modelModifierTags(
   if (tiers?.fastest && tiers.fastest === provider) tags.push('fastest');
   return tags;
 }
+
+/** Cap on catalogue ids rendered in `/config model` — ONE constant across all
+ *  harnesses (Q ruling 2026-07-19: no per-harness tuning). 12 fits the WhatsApp
+ *  narrow column; larger sets truncate with an honest `showing N of M` line. */
+export const MODEL_CATALOGUE_CAP = 12;
+
+/** Input for {@link formatAvailableModels}. All values are already config- or
+ *  catalogue-derived and sanitize-safe; this layer only shapes strings. */
+export interface AvailableModelsInput {
+  /** Configured/pinned model id — ranked first and marked `[current]`, if in the set. */
+  currentModelId: string | null;
+  /** Configured fallback model ids — ranked after the current model, in order. */
+  fallbackModelIds: readonly string[];
+  /** The harness's self-reported catalogue (from listModelCatalog). */
+  listing: { status: 'ok' | 'unavailable'; ids: readonly string[] };
+  /** Optional case-insensitive substring filter from `/config model <filter>`. */
+  filter: string | null;
+  /** Max ids to render before truncating (pass {@link MODEL_CATALOGUE_CAP}). */
+  cap: number;
+  /** Human as-of label for degrade/truncation lines, e.g. 'just now'. */
+  asOfLabel: string;
+}
+
+/**
+ * Render the dynamic PER-HARNESS available-models section for `/config model`
+ * (Q ruling 2026-07-19, CONFIG-MODEL-RENDER-SPEC.md). The caller renders the
+ * config-derived pin/primary block ABOVE this — so this section degrades
+ * INDEPENDENTLY and its failure never takes the "what am I on" answer down.
+ *
+ * Four load-bearing constraints:
+ *  1. (caller's job) pin renders first/unconditionally above this section.
+ *  2. Ranked head: current → configured fallbacks → rest (catalogue order),
+ *     deduped. When nothing config-derived ranks the head, the truncation line
+ *     SAYS it is catalogue order rather than implying it is "the top".
+ *  3. `showing N of M` ONLY when M > cap (a "showing 12 of 12" line trains
+ *     people to ignore exactly the line they must read).
+ *  4. Filter-miss (`no match for 'x' in M models`) is rendered distinctly from
+ *     catalogue-unavailable — same slot, opposite meaning (dead-knob defense).
+ *
+ * Pure and stateless. Never throws.
+ */
+export function formatAvailableModels(input: AvailableModelsInput): string {
+  const { currentModelId, fallbackModelIds, listing, filter, cap, asOfLabel } = input;
+
+  // Constraint 4 (half): catalogue unreachable → honest degrade. The pin is the
+  // caller's config-derived block above, so it survives this (constraint 1).
+  if (listing.status === 'unavailable') {
+    return `*Available models:* catalogue unavailable (as of ${asOfLabel})`;
+  }
+
+  // Optional case-insensitive substring filter over the full catalogue.
+  let pool: readonly string[] = listing.ids;
+  if (filter !== null) {
+    const needle = filter.toLowerCase();
+    const matched = listing.ids.filter((id) => id.toLowerCase().includes(needle));
+    if (matched.length === 0) {
+      // Constraint 4 (other half): filter-miss is NOT catalogue-unavailable —
+      // count the full catalogue that was searched.
+      return `*Available models:* no match for '${filter}' in ${listing.ids.length} models (as of ${asOfLabel})`;
+    }
+    pool = matched;
+  }
+
+  // Constraint 2: rank current → fallbacks → rest (catalogue order), deduped.
+  // A pin/fallback present in the pool is the "meaningful rank" signal.
+  const seen = new Set<string>();
+  const ranked: string[] = [];
+  const push = (id: string): void => {
+    if (!seen.has(id)) {
+      seen.add(id);
+      ranked.push(id);
+    }
+  };
+  const currentInPool = currentModelId !== null && pool.includes(currentModelId);
+  if (currentInPool && currentModelId !== null) push(currentModelId);
+  let fallbackInPool = false;
+  for (const fb of fallbackModelIds) {
+    if (pool.includes(fb)) {
+      fallbackInPool = true;
+      push(fb);
+    }
+  }
+  for (const id of pool) push(id);
+
+  const total = ranked.length;
+  const shown = ranked.slice(0, cap);
+  const header =
+    filter !== null
+      ? `*Available models* matching '${filter}' (as of ${asOfLabel})`
+      : `*Available models* (as of ${asOfLabel})`;
+  const bullets = shown.map(
+    (id) => `${OWNER_BULLET}${id}${id === currentModelId ? modifierSuffix(['current']) : ''}`,
+  );
+
+  const lines = [header, ...bullets];
+  if (total > cap) {
+    // Constraint 3: truncation line ONLY when it truncates. Constraint 2: if no
+    // preference ranked the head, say it is catalogue order, not "the top".
+    lines.push(
+      currentInPool || fallbackInPool
+        ? `showing ${cap} of ${total}`
+        : `showing first ${cap} of ${total} (catalogue order — no configured preference to rank by)`,
+    );
+  }
+  return lines.join('\n');
+}
