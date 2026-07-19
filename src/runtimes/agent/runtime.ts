@@ -8362,17 +8362,23 @@ export class AgentRuntime implements Runtime {
           : '') +
         ' — steers new sessions'
       : 'Preference: none';
+    // B25 F8: the active-window and Next lines were model-blind — a
+    // same-provider window pinning a DIFFERENT model rendered without the
+    // model and suppressed the Next line entirely. Render "provider (model)"
+    // and compare provider AND model in the suppress guard.
+    const nextRouteLabel = next.model ? `${nextProvider} (${next.model})` : nextProvider;
     const fallbackLine = this.isFallbackWindowActive
-      ? `Fallback: active — new sessions route via ${nextProvider}`
+      ? `Fallback: active — new sessions route via ${nextRouteLabel}`
       : this.agentFallbacks.length > 0
         // B23: entries may share a provider and differ only by model — render
         // "provider (model)" when a model is pinned so distinct configured
         // entries never collapse to indistinguishable labels.
         ? `Fallback chain (configured): ${this.agentFallbacks.map((e) => (e.model ? `${e.provider} (${e.model})` : e.provider)).join(' → ')}`
         : 'Fallback: none configured';
-    const nextLine = live && live.provider !== nextProvider
-      ? `\nNext session: ${nextProvider}`
-      : '';
+    const nextLine =
+      live && (live.provider !== nextProvider || (live.model ?? null) !== (next.model ?? null))
+        ? `\nNext session: ${nextRouteLabel}`
+        : '';
     return (
       `*Current route:* ${provider}${live ? '' : ' (no live session — next session route)'}\n` +
       `Model: ${model}\n` +

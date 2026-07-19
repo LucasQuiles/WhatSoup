@@ -15697,6 +15697,60 @@ describe('NL routing handlers (nlRouting flag)', () => {
     );
   });
 
+  it('/model status shows the model on the active-window and Next lines when the fallback differs only by model (B25 F8)', async () => {
+    // A same-provider fallback entry that pins a DIFFERENT model previously
+    // suppressed the 'Next session' line entirely (provider-only guard) and
+    // rendered the active-window line model-blind — the owner could not see
+    // that new sessions route to a different model.
+    cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'haiku-fast' }];
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    mockSession.getStatus.mockReturnValue({
+      active: true,
+      pid: 555,
+      sessionId: 'sess-live',
+      startedAt: new Date().toISOString(),
+      messageCount: 1,
+      lastMessageAt: null,
+    });
+    mockSession.getProviderId.mockReturnValue('claude-cli');
+    (mockSession as unknown as Record<string, unknown>).getModelRef = vi.fn(() => 'opus-main');
+    const state = runtime as unknown as {
+      session: typeof mockSession;
+      fallbackWindow: { activeUntil: number | null; activeEntry: unknown };
+    };
+    state.session = mockSession;
+    state.fallbackWindow.activeUntil = Date.now() + 60_000;
+    state.fallbackWindow.activeEntry = { provider: 'claude-cli', model: 'haiku-fast' };
+
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toBeDefined();
+    expect(status).toContain('Fallback: active — new sessions route via claude-cli (haiku-fast)');
+    expect(status).toContain('Next session: claude-cli (haiku-fast)');
+  });
+
+  it('/model status suppresses the Next line when the live route matches provider AND model (B25 F8)', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    mockSession.getStatus.mockReturnValue({
+      active: true,
+      pid: 556,
+      sessionId: 'sess-live-2',
+      startedAt: new Date().toISOString(),
+      messageCount: 1,
+      lastMessageAt: null,
+    });
+    mockSession.getProviderId.mockReturnValue('claude-cli');
+    (mockSession as unknown as Record<string, unknown>).getModelRef = vi.fn(() => undefined);
+    (runtime as unknown as { session: typeof mockSession }).session = mockSession;
+
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toBeDefined();
+    expect(status).not.toContain('Next session:');
+  });
+
   it('/model status keeps the bare provider label for model-less fallback entries (B23)', async () => {
     cfgAny().agentFallbacks = [
       { provider: 'codex-cli' },
