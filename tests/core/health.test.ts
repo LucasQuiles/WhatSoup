@@ -18,6 +18,8 @@ import path from 'node:path';
 vi.mock('../../src/config.ts', () => ({
   config: {
     adminPhones: new Set(['15550100001']),
+    // Q control peer: name 'q' → phone '15559998888' (control_peer wiring tests)
+    controlPeers: new Map<string, string>([['q', '15559998888']]),
     dbPath: ':memory:',
     mediaDir: '/tmp',
     botName: 'WhatSoup',
@@ -53,12 +55,24 @@ vi.mock('../../src/logger.ts', () => ({
       : { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
+// The control_peer wiring tests drive heal.ts's emitHealReport directly; mock
+// the alert sink so no real BOT ERRORS outbox event is written from a test.
+vi.mock('../../src/lib/emit-alert.ts', () => ({
+  emitAlert: vi.fn(() => true),
+  emitAlertChecked: vi.fn(() => true),
+  clearAlertSource: vi.fn(() => true),
+  clearAlertSourceChecked: vi.fn(() => true),
+}));
+
 // ---------------------------------------------------------------------------
 // Imports
 // ---------------------------------------------------------------------------
 
 import { CURRENT_SCHEMA_MIGRATION, Database } from '../../src/core/database.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
+import { config } from '../../src/config.ts';
+import { emitHealReport, resetDeliveryUnavailableLatch } from '../../src/core/heal.ts';
+import type { Messenger } from '../../src/core/types.ts';
 import { seedChatAliases } from '../../src/core/chats-resolver.ts';
 import { createProfileRegistry } from '../../src/core/profiles.ts';
 import { createOutboundSendsWriter } from '../../src/core/outbound-sends.ts';
@@ -264,6 +278,41 @@ describe('GET /health', () => {
     }
   });
 
+  it('surfaces control-peer wiring under control_peer when the Q peer is configured', async () => {
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.control_peer).toEqual({
+      configured: true,
+      suppressed_unavailable_alerts: 0,
+    });
+  });
+
+  it('reflects a missing Q peer and the suppressed-alert count after latched heal reports', async () => {
+    resetDeliveryUnavailableLatch();
+    config.controlPeers.delete('q');
+    try {
+      const messenger: Messenger = {
+        sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+        sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+      };
+      // Two distinct-class reports: the first fires the (mocked) critical and
+      // arms the latch, the second is suppressed and counted.
+      emitHealReport(db, messenger, null, { type: 'crash', stderr: 'HealthLatchA: boom' });
+      emitHealReport(db, messenger, null, { type: 'crash', stderr: 'HealthLatchB: boom' });
+
+      const { status, body } = await httpReq(port, '/health', 'GET');
+      expect(status).toBe(200);
+      const json = JSON.parse(body);
+      expect(json.control_peer).toEqual({
+        configured: false,
+        suppressed_unavailable_alerts: 1,
+      });
+    } finally {
+      config.controlPeers.set('q', '15559998888');
+      resetDeliveryUnavailableLatch();
+    }
+  });
   it('surfaces safe ARC binding metadata from runtime health', async () => {
     const repoRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup-health-arc.'));
     mkdirSync(path.join(repoRoot, '.arc'));
