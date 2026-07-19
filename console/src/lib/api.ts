@@ -38,6 +38,7 @@ import type {
   GroupInfo,
   LineInstance,
   LineMetrics,
+  ApprovalsPayload,
   LogEntry,
   Message,
   MetricsRange,
@@ -436,6 +437,16 @@ export const api = {
 
   getProviderStatus: (name: string) =>
     apiFetch<ProviderStatus>(`/api/lines/${encodeURIComponent(name)}/provider-status`),
+
+  getApprovals: (name: string) =>
+    apiFetch<ApprovalsPayload>(`/api/lines/${encodeURIComponent(name)}/approvals`),
+
+  postApprovalDecision: (name: string, decision: { mapKey: string; questionIndex: number; selectedOptions: string[] }) =>
+    apiFetch<{ status: string }>(`/api/lines/${encodeURIComponent(name)}/approvals/decision`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(decision),
+    }),
 
   // ── MCP proxy operations ──
 
