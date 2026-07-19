@@ -19,6 +19,7 @@ import { handleSend, handleAccessUpdate, handleSaveContact, handleRestart, handl
 import { handleGetFeed } from './routes/feed.ts';
 import { handleGetMetrics } from './routes/metrics.ts';
 import { handleGetFleetMetrics } from './routes/fleet-metrics.ts';
+import { handleGetRateLimits } from './routes/rate-limits.ts';
 import { handleGetVersion, handleUpdate } from './routes/update.ts';
 import { createServiceManager, type ServiceManager } from './platform.ts';
 import {
@@ -113,6 +114,7 @@ type RouteParamsByHandler = {
   getLines: EmptyRouteParams;
   getLine: NameRouteParams;
   getLineProviderStatus: NameRouteParams;
+  getRateLimits: NameRouteParams;
   getSilences: EmptyRouteParams;
   addSilence: EmptyRouteParams;
   removeSilence: NameRouteParams;
@@ -181,6 +183,7 @@ const EMPTY_ROUTE_PARAMS: EmptyRouteParams = {};
 const NAME_ROUTE_HANDLERS = new Set<NamedRouteKey>([
   'getLine',
   'getLineProviderStatus',
+  'getRateLimits',
   'putCredential',
   'deleteCredential',
   'verifyCredential',
@@ -239,6 +242,7 @@ const handlers: { [K in RouteKey]: RouteHandler<K> } = {
   getLines:     (req, res, deps, _params) => handleGetLines(req, res, deps),
   getLine:      (req, res, deps, params) => handleGetLine(req, res, deps, params),
   getLineProviderStatus: (req, res, deps, params) => handleGetLineProviderStatus(req, res, deps, params),
+  getRateLimits: (req, res, deps, params) => handleGetRateLimits(req, res, deps, params),
   getSilences:  (req, res, _deps, _params) => handleGetSilences(req, res),
   addSilence:   (req, res, _deps, _params) => handleAddSilence(req, res),
   removeSilence: (req, res, _deps, params) => handleRemoveSilence(req, res, { instance: params.name }),
@@ -333,6 +337,7 @@ const ROUTES = [
   { method: 'POST',  path: /^\/api\/lines$/, handler: 'createLine' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/exists$/, handler: 'checkExists' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/provider-status$/, handler: 'getLineProviderStatus' },
+  { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/rate-limits$/, handler: 'getRateLimits' },
   { method: 'DELETE', path: /^\/api\/lines\/(?<name>[^/]+)$/, handler: 'deleteLine' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)$/, handler: 'getLine' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/chats$/, handler: 'getChats' },

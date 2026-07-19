@@ -297,6 +297,30 @@ export interface ProviderCatalogEntry {
 }
 
 /** One provider slot (primary or fallback) in the provider-status response. */
+/** Windowed per-sender throttle aggregate for one line (D-5) —
+ *  `rate_limits` is per-SENDER chat throttling, not provider quota. */
+export interface RateLimitsPayload {
+  observedAt: string;
+  /** False when the instance tables are absent (legacy DB) — the card hides. */
+  supported: boolean;
+  /** Effective limit the buckets were computed against. */
+  limit: number;
+  /** Which seam supplied limit/window: instance config.json or documented
+   *  defaults. ENV overrides are fleet-invisible (declared, not hidden). */
+  limitSource: 'config' | 'default';
+  windowMs: number;
+  throttled: number;
+  nearLimit: number;
+  topSenders: Array<{ senderJid: string; count: number }>;
+  windowedResponses: number;
+  windowedAttempts: number;
+  /** max(0, attempts − responses) — retry/token-storm waste (#1864 class). */
+  excessAttempts: number;
+  /** Present and true only on a fleet read failure — render "unavailable",
+   *  never a fake-zero calm state (fail-closed, PDR-3). */
+  readError?: boolean;
+}
+
 export interface ProviderSlotStatus {
   provider: string | null;
   model: string | null;
