@@ -108,7 +108,11 @@ describe('createPrimaryModelProbeAdapters', () => {
   });
 
   it('omits proxy vars from the Claude CLI probe env when no egress proxy port is set (F6)', async () => {
-    const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+    // Typed params (matching probeBinaryCommand's signature) so `.mock.calls[0][2]`
+    // — the env arg — is index-checkable under typecheck:all (strict tuple).
+    const probeBinaryCommand = vi.fn(
+      async (_binary: string, _args: string[], _env: NodeJS.ProcessEnv) => ({ status: 'ok' as const, output: 'OK' }),
+    );
     const adapters = createPrimaryModelProbeAdapters(undefined, {
       getProviderBinary: vi.fn(() => 'claude'),
       probeBinaryCommand,
