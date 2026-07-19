@@ -56,7 +56,7 @@ command -v rg >/dev/null 2>&1 || { echo "FATAL: ripgrep (rg) not found on PATH; 
 #   - Check 9: theme-parity promoted via design:theme-parity path.
 #   - Check 11: utility-smell; warn-on-changed-files ceiling only.
 #   - Checks 18,20: post-C2 alias consolidation gate.
-EXIT_ON_FAIL=(1 2 6 8 10 12 13 14 15 16 17 19)
+EXIT_ON_FAIL=(1 2 6 8 10 11 12 13 14 15 16 17 19)
 
 FAILED_CHECKS=()
 PASS=0
@@ -321,8 +321,12 @@ C11_COUNT=$((C11A_COUNT + C11B_COUNT))
 echo "    w-[N]/h-[N] matches: $C11A_COUNT"
 echo "    rounded-[N] matches: $C11B_COUNT"
 echo "    Total: $C11_COUNT"
-echo "    Expectation: only waivered"
-check_result "11" "$C11_COUNT" "only waivered" "WARN"
+echo "    Expectation: zero (last hit burned 2026-07-20 — MessageContent radius corners rewritten token-explicit)"
+if [ "$C11_COUNT" -eq 0 ]; then
+  check_result "11" "$C11_COUNT" "zero" "OK"
+else
+  check_result "11" "$C11_COUNT" "zero — NEW non-token arbitrary values are forbidden" "WARN"
+fi
 
 # ---------------------------------------------------------------------------
 # Check 12: Focus suppression (outline-none without focus-visible:)
