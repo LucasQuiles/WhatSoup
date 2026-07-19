@@ -83,6 +83,12 @@ const CONNECT_BAD_GATEWAY = 'HTTP/1.1 502 Bad Gateway\r\n\r\n';
 export function egressHostAllowed(allowedEgress: string[], host: string, port: number): boolean {
   const targetHost = host.toLowerCase();
   for (const entry of allowedEgress) {
+    // Defense in depth (F3): a live-edited policy can carry a non-string
+    // element (e.g. an operator adds `443` or an object). Skip it rather than
+    // throw a TypeError on `.lastIndexOf`/`.toLowerCase` — this call site is
+    // outside adjudicate()'s try/catch, so an uncaught throw here crashes the
+    // whole proxy process. The runtime policy reader also filters to strings.
+    if (typeof entry !== 'string') continue;
     const sep = entry.lastIndexOf(':');
     if (sep === -1) {
       if (entry.toLowerCase() === targetHost) return true;
@@ -160,8 +166,18 @@ function handleForward(opts: EgressProxyOptions, req: IncomingMessage, res: Serv
       agent: false,
     },
     (upstreamRes) => {
-      res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
-      upstreamRes.pipe(res);
+      // Class defense (F5): this 'response' listener is catch-less; a
+      // synchronous throw from writeHead (e.g. an invalid upstream header
+      // value) would otherwise be uncaught and kill the process. Turn it into
+      // a clean 502 + end instead.
+      try {
+        res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
+        upstreamRes.pipe(res);
+      } catch {
+        if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain' });
+        res.end();
+        upstreamRes.destroy();
+      }
     },
   );
 
@@ -180,7 +196,12 @@ function parseConnectTarget(url: string): { host: string; port: number } | null 
   if (sep === -1) return null;
   const host = url.slice(0, sep);
   const port = Number(url.slice(sep + 1));
-  if (!host || !Number.isInteger(port) || port <= 0) return null;
+  // Reject out-of-range ports (F2): a port > 65535 (or <= 0) is not a valid
+  // TCP port. Without the upper bound it reaches netConnect(port, host), which
+  // throws ERR_SOCKET_BAD_PORT synchronously inside the catch-less connect
+  // listener — an uncaught throw that kills the whole proxy process. Returning
+  // null routes it through the malformed-target deny path instead.
+  if (!host || !Number.isInteger(port) || port <= 0 || port > 65535) return null;
   return { host, port };
 }
 
@@ -216,59 +237,70 @@ export function handleConnect(
   // `destroy()` is idempotent.
   clientSocket.on('error', () => clientSocket.destroy());
 
-  const rawTarget = req.url ?? '';
-  const parsed = parseConnectTarget(rawTarget);
-  if (!parsed) {
-    opts.log({ event: 'sandbox_egress_deny', host: rawTarget, port: 0, reason: 'malformed-target' });
-    clientSocket.write(CONNECT_FORBIDDEN, () => clientSocket.destroy());
-    return;
-  }
-  // Normalized once here (see handleForward) — the raw CONNECT authority is
-  // never run through URL parsing, so unlike the forward path this is the
-  // only place case gets normalized before adjudication/logging/connect.
-  const host = parsed.host.toLowerCase();
-  const { port } = parsed;
-
-  if (!adjudicate(opts, host, port)) {
-    clientSocket.write(CONNECT_FORBIDDEN, () => clientSocket.destroy());
-    return;
-  }
-
-  const upstream = netConnect(port, host);
-  tunnels.add(clientSocket);
-  tunnels.add(upstream);
-
-  // Set once the 200 banner has actually been written, so the upstream
-  // error handler below knows whether it's still safe to write a 502
-  // status line (never write after the tunnel is already established).
-  let established = false;
-
-  const teardown = () => {
-    tunnels.delete(clientSocket);
-    tunnels.delete(upstream);
-    clientSocket.destroy();
-    upstream.destroy();
-  };
-
-  clientSocket.on('error', teardown);
-  clientSocket.on('close', teardown);
-  upstream.on('close', teardown);
-
-  upstream.on('error', () => {
-    if (!established && !clientSocket.destroyed && clientSocket.writable) {
-      clientSocket.write(CONNECT_BAD_GATEWAY, () => teardown());
+  // Class defense (F2): wrap parse → adjudicate → netConnect so ANY synchronous
+  // throw (a malformed adjudication, an ERR_SOCKET_BAD_PORT from netConnect, a
+  // throwing policy reader that escapes adjudicate) becomes a clean deny+destroy
+  // rather than an uncaught exception that kills the process. The sandboxed
+  // agent is this proxy's only client, so it could otherwise take down its own
+  // containment boundary on demand.
+  try {
+    const rawTarget = req.url ?? '';
+    const parsed = parseConnectTarget(rawTarget);
+    if (!parsed) {
+      opts.log({ event: 'sandbox_egress_deny', host: rawTarget, port: 0, reason: 'malformed-target' });
+      clientSocket.write(CONNECT_FORBIDDEN, () => clientSocket.destroy());
       return;
     }
-    teardown();
-  });
+    // Normalized once here (see handleForward) — the raw CONNECT authority is
+    // never run through URL parsing, so unlike the forward path this is the
+    // only place case gets normalized before adjudication/logging/connect.
+    const host = parsed.host.toLowerCase();
+    const { port } = parsed;
 
-  upstream.on('connect', () => {
-    established = true;
-    clientSocket.write(CONNECT_ESTABLISHED);
-    if (head.length > 0) upstream.write(head);
-    clientSocket.pipe(upstream);
-    upstream.pipe(clientSocket);
-  });
+    if (!adjudicate(opts, host, port)) {
+      clientSocket.write(CONNECT_FORBIDDEN, () => clientSocket.destroy());
+      return;
+    }
+
+    const upstream = netConnect(port, host);
+    tunnels.add(clientSocket);
+    tunnels.add(upstream);
+
+    // Set once the 200 banner has actually been written, so the upstream
+    // error handler below knows whether it's still safe to write a 502
+    // status line (never write after the tunnel is already established).
+    let established = false;
+
+    const teardown = () => {
+      tunnels.delete(clientSocket);
+      tunnels.delete(upstream);
+      clientSocket.destroy();
+      upstream.destroy();
+    };
+
+    clientSocket.on('error', teardown);
+    clientSocket.on('close', teardown);
+    upstream.on('close', teardown);
+
+    upstream.on('error', () => {
+      if (!established && !clientSocket.destroyed && clientSocket.writable) {
+        clientSocket.write(CONNECT_BAD_GATEWAY, () => teardown());
+        return;
+      }
+      teardown();
+    });
+
+    upstream.on('connect', () => {
+      established = true;
+      clientSocket.write(CONNECT_ESTABLISHED);
+      if (head.length > 0) upstream.write(head);
+      clientSocket.pipe(upstream);
+      upstream.pipe(clientSocket);
+    });
+  } catch {
+    opts.log({ event: 'sandbox_egress_deny', host: '', port: 0, reason: 'connect-error' });
+    if (!clientSocket.destroyed) clientSocket.destroy();
+  }
 }
 
 export class EgressProxy {
@@ -311,6 +343,13 @@ export class EgressProxy {
       socket.destroy();
     }
     this.tunnels.clear();
+    // Force-close active/keep-alive FORWARD connections (F8): server.close()
+    // stops accepting but does NOT terminate in-flight or idle keep-alive
+    // sockets, so a live plain-HTTP transfer could stall shutdown indefinitely.
+    // closeAllConnections() (Node 18.2+) tears them down. The tunnel destroy
+    // loop above already handles CONNECT sockets, which are hijacked away from
+    // the server's own connection tracking.
+    this.server.closeAllConnections();
     await new Promise<void>((resolve) => {
       this.server.close(() => resolve());
     });

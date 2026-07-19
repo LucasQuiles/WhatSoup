@@ -9,7 +9,7 @@
  * contacted.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { createServer as createHttpServer, request as httpRequest } from 'node:http';
+import { createServer as createHttpServer, request as httpRequest, Agent } from 'node:http';
 import type { Server as HttpServer, IncomingMessage, ServerResponse } from 'node:http';
 import { connect as netConnect } from 'node:net';
 import type { Socket } from 'node:net';
@@ -441,5 +441,153 @@ describe('EgressProxy', () => {
 
     // unrelated host in the list does not match
     expect(egressHostAllowed(['other.example'], 'example.com', 80)).toBe(false);
+  });
+
+  it('egressHostAllowed skips non-string entries instead of throwing (F3)', () => {
+    // A live-edited policy can carry a non-string element (operator adds `443`
+    // or an object). Pre-fix, `entry.lastIndexOf`/`entry.toLowerCase` threw an
+    // uncaught TypeError at the adjudicate call site (outside its try/catch),
+    // crashing the whole proxy. Now non-strings are skipped.
+    const allowlist = [443 as unknown as string, { host: 'x' } as unknown as string, 'example.com'];
+    expect(() => egressHostAllowed(allowlist, 'example.com', 80)).not.toThrow();
+    expect(egressHostAllowed(allowlist, 'example.com', 80)).toBe(true);
+    // No usable string entry ⇒ deny (never a crash, never a false allow).
+    expect(egressHostAllowed([443 as unknown as string], 'example.com', 80)).toBe(false);
+  });
+
+  it('a non-string allowlist entry does not crash per-request adjudication (F3)', async () => {
+    const { server: target, port: targetPort } = await startTargetServer();
+    const log = vi.fn<(event: EgressLogEvent) => void>();
+    // Numeric entry + a valid host string: the numeric is skipped, the host
+    // still matches — proving the read → adjudicate path tolerates the bad type.
+    const policy: EgressPolicySource = {
+      read: () => ({ allowedEgress: [443 as unknown as string, '127.0.0.1'] }),
+    };
+    const proxy = await EgressProxy.start({ policy, log });
+
+    try {
+      const { statusCode, body } = await forwardGet(proxy.port, targetPort);
+      expect(statusCode).toBe(200);
+      expect(body).toBe('ok');
+    } finally {
+      await proxy.close();
+      await closeServer(target);
+    }
+  });
+
+  it('out-of-range CONNECT port (>65535) is denied and the proxy stays up (F2)', async () => {
+    const { server: target, port: targetPort } = await startTargetServer();
+    const log = vi.fn<(event: EgressLogEvent) => void>();
+    const proxy = await EgressProxy.start({
+      policy: makePolicy(['127.0.0.1', `127.0.0.1:${targetPort}`]),
+      log,
+    });
+
+    let tunnelSocket: Socket | undefined;
+    try {
+      // Pre-fix, port 99999 reached netConnect(99999, host), which throws
+      // ERR_SOCKET_BAD_PORT synchronously in the catch-less connect listener →
+      // whole process exits. Now it is rejected as a malformed target (403).
+      const socket = netConnect(proxy.port, '127.0.0.1');
+      tunnelSocket = socket;
+      let buf = '';
+      socket.on('data', (chunk: Buffer) => {
+        buf += chunk.toString();
+      });
+      await new Promise<void>((resolve, reject) => {
+        socket.on('connect', () => socket.write('CONNECT 127.0.0.1:99999 HTTP/1.1\r\n\r\n'));
+        socket.on('close', () => resolve());
+        socket.on('error', reject);
+      });
+      expect(buf.startsWith('HTTP/1.1 403 Forbidden')).toBe(true);
+      expect(log).toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'sandbox_egress_deny', reason: 'malformed-target' }),
+      );
+
+      // Proxy STAYS UP: a subsequent allowed forward request still succeeds,
+      // proving the out-of-range port did not crash the process.
+      const { statusCode, body } = await forwardGet(proxy.port, targetPort);
+      expect(statusCode).toBe(200);
+      expect(body).toBe('ok');
+    } finally {
+      tunnelSocket?.destroy();
+      await proxy.close();
+      await closeServer(target);
+    }
+  });
+
+  it('a synchronous throw during CONNECT handling is caught: clean deny+destroy, no crash (F2 class defense)', () => {
+    // Belt-and-suspenders wrap: any synchronous throw between parse and
+    // netConnect must become a clean deny+destroy, not an uncaught exception.
+    // Driven directly with a req whose `url` getter throws, standing in for any
+    // future synchronous fault on this hijacked-socket path.
+    const clientSocket = new PassThrough();
+    const log = vi.fn<(event: EgressLogEvent) => void>();
+    const req = {} as unknown as IncomingMessage;
+    Object.defineProperty(req, 'url', {
+      get() {
+        throw new Error('synthetic synchronous fault');
+      },
+    });
+
+    expect(() =>
+      handleConnect(
+        { policy: makePolicy(['127.0.0.1']), log },
+        new Set(),
+        req,
+        clientSocket,
+        Buffer.alloc(0),
+      ),
+    ).not.toThrow();
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({ event: 'sandbox_egress_deny', reason: 'connect-error' }),
+    );
+    expect(clientSocket.destroyed).toBe(true);
+  });
+
+  it('close() force-closes idle keep-alive forward connections (F8)', async () => {
+    const { server: target, port: targetPort } = await startTargetServer();
+    const proxy = await EgressProxy.start({ policy: makePolicy(['127.0.0.1']), log: vi.fn() });
+
+    // Drive one forward request over a keep-alive agent, then hold the socket
+    // idle-open. server.close() alone waits for such sockets to idle out, so a
+    // live/idle transfer could stall shutdown indefinitely; closeAllConnections
+    // (F8) force-closes them.
+    const agent = new Agent({ keepAlive: true, maxSockets: 1 });
+    let clientSocket: Socket | undefined;
+    await new Promise<void>((resolve, reject) => {
+      const req = httpRequest(
+        {
+          host: '127.0.0.1',
+          port: proxy.port,
+          method: 'GET',
+          path: `http://127.0.0.1:${targetPort}/`,
+          headers: { Host: `127.0.0.1:${targetPort}`, Connection: 'keep-alive' },
+          agent,
+        },
+        (res) => {
+          res.resume();
+          res.on('end', () => resolve());
+        },
+      );
+      req.on('socket', (s) => {
+        clientSocket = s as Socket;
+      });
+      req.on('error', reject);
+      req.end();
+    });
+
+    // Idle keep-alive socket is still open (not destroyed) before shutdown.
+    expect(clientSocket?.destroyed).toBe(false);
+    await closeServer(target);
+
+    // Without F8 this await (and proxy.close()) would hang until the vitest
+    // timeout; with closeAllConnections the server tears the socket down and
+    // 'close' fires. Attach the waiter before close() so the listener is armed.
+    const clientClosed = waitForClose(clientSocket as Socket);
+    await proxy.close();
+    await clientClosed;
+    expect(clientSocket?.destroyed).toBe(true);
+    agent.destroy();
   });
 });
