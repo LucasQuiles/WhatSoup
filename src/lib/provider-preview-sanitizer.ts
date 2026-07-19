@@ -241,11 +241,28 @@ function redactEmailLikeTokens(
   return out + text.slice(cursor);
 }
 
+export interface ProviderPreviewSanitizerOptions {
+  preserveWhatsAppJids?: boolean;
+  preserveWhatsAppMentions?: boolean;
+  /**
+   * B25 chat-scope (owner ruling 2026-07-19): email redaction is a
+   * BACKGROUND-ONLY function — for text handed to third-party providers
+   * (previews, structured logs, handoff summarizers). Default TRUE, so every
+   * background caller keeps full behavior with zero changes. Chat egress
+   * (redactInternalArtifacts) passes FALSE, which skips the email-class pass
+   * ENTIRELY — token path, quoted-local path, and dangling-local alike —
+   * while secret/token/credential masking stays fully active. When false,
+   * the two preserve* flags are inert (they only parameterize the email pass).
+   */
+  redactEmailLike?: boolean;
+}
+
 export function sanitizeProviderPreviewText(
   text: string,
-  options: { preserveWhatsAppJids?: boolean; preserveWhatsAppMentions?: boolean } = {},
+  options: ProviderPreviewSanitizerOptions = {},
 ): string {
   const sanitized = sanitizeProviderSecrets(text);
+  if (options.redactEmailLike === false) return sanitized;
   return redactEmailLikeTokens(
     sanitized,
     options.preserveWhatsAppJids === true,
