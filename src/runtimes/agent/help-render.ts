@@ -19,16 +19,22 @@
 // field drives a STATIC SECTION split (end-user section, then an operator
 // section) — BOTH sections render to EVERYONE. No sender identity is read, so
 // the render stays a pure function of (registry, {nlRouting}) — R3c-1.3 holds.
-// `gate !== 'none'` drives a SEPARATE axis: the inline `_(admin)_` tag,
-// composed independently of the section (D4 — e.g. `new` is gate:'admin' but
-// visibility:'end-user', so it renders in the end-user section WITH the tag —
-// discoverable, GRANT-denied on use, W04 3/11 tag-don't-hide). Audience-based
-// SUPPRESSION (non-admins don't see the operator section at all) is deferred
-// to W2/T9c when the render audience is threaded through — E2's full fix is a
-// two-stage rollout: T5 = registry-derived section/tag structure (this file),
-// W2/T9c = true per-sender suppression.
+// The gate VALUE drives a SEPARATE axis: the inline gate tag (a
+// GATE_PRESENTATION lookup — scope-accurate per value, G34), composed
+// independently of the section (D4 — e.g. `new` is gate:'admin-shared-scope'
+// but visibility:'end-user', so it renders in the end-user section WITH its
+// tag — discoverable, GRANT-denied on use, W04 3/11 tag-don't-hide).
+// Audience-based SUPPRESSION (non-admins don't see the operator section at
+// all) is deferred to W2/T9c when the render audience is threaded through —
+// E2's full fix is a two-stage rollout: T5 = registry-derived section/tag
+// structure (this file), W2/T9c = true per-sender suppression.
 
-import { COMMAND_REGISTRY, type CommandSpec } from './command-registry.ts';
+import {
+  COMMAND_REGISTRY,
+  GATE_PRESENTATION,
+  getCommandSpec,
+  type CommandSpec,
+} from './command-registry.ts';
 
 // Widen the narrow `as const` tuple to the interface array so optional-field
 // reads (routingAlias) typecheck on entries that omit them — same pattern as
@@ -40,16 +46,16 @@ function findSpec(name: string): CommandSpec | undefined {
 }
 
 function toListLine(c: CommandSpec): string {
-  const adminTag = c.gate !== 'none' ? ' _(admin)_' : '';
-  return `*/${c.name}* — ${c.summary}${adminTag}`;
+  return `*/${c.name}* — ${c.summary}${GATE_PRESENTATION[c.gate].listTag}`;
 }
 
 /**
  * Render the /help command list, SECTIONED by the registry's static
  * `visibility` field (ruling B — see module header): an end-user section,
  * then an operator section, both shown to every reader. Within each section,
- * one bold-name line per command, tagged `_(admin)_` when `gate !== 'none'`
- * (a separate axis from the section — composed independently, D4).
+ * one bold-name line per command, tagged with its gate value's list tag
+ * (GATE_PRESENTATION — scope-accurate per value, G34; a separate axis from
+ * the section, composed independently, D4).
  * Routing-alias commands (/model /why /reset) only appear when `nlRouting`
  * is on (byte-identical-off contract, D7). No placeholder/syntax in the list
  * — see module header.
@@ -65,38 +71,52 @@ export function renderHelp({ nlRouting }: { nlRouting: boolean }): string {
   }
 
   // Pull the /help command's own syntax from the registry (DRY — no second
-  // hand-copy of the placeholder grammar) and backtick-wrap it so the [command]
-  // placeholder survives markdownToWhatsApp (E1/V30).
-  const helpSpec = findSpec('help');
-  const detailHint = helpSpec ? `\`${helpSpec.syntax}\` for detail` : '`/help [command]` for detail';
+  // hand-copy of the placeholder grammar; getCommandSpec fails closed, so a
+  // missing 'help' entry is loud registry drift, not a silent fallback) and
+  // backtick-wrap it so the [command] placeholder survives markdownToWhatsApp
+  // (E1/V30).
+  const detailHint = `\`${getCommandSpec('help').syntax}\` for detail`;
 
-  return [...sections, '', '_Any other message is forwarded._', `(${detailHint})`].join('\n');
+  return [
+    ...sections,
+    '',
+    '_Any other message is forwarded._',
+    // Passthrough discoverability (restores the base-/help trailer the W1-T5
+    // rewrite dropped). Provider-neutral wording: the model-attribution
+    // hygiene rule bans the agent-CLI product name in new repo text.
+    'Other slash commands (e.g. `/compact`) are passed through to the agent.',
+    `(${detailHint})`,
+  ].join('\n');
 }
 
 /**
  * Render the /help <cmd> detail: the command's usage `syntax` wrapped in a
  * backtick span (so `[N]`-style placeholders survive markdownToWhatsApp —
- * E1/V30), its summary, and a gate note. Unknown commands return an
- * invalid-arg hint string — this NEVER throws (fail-open UX; contrast with
+ * E1/V30), its summary, and the gate value's detail note (GATE_PRESENTATION
+ * — value-specific wording, G34; the Record over the CommandGate union is
+ * truly exhaustive, so a future gate value without a table row is a compile
+ * error rather than a silent render gap). The raw arg is normalized first —
+ * first whitespace token, backticks removed, leading '/' stripped, lowercased
+ * — so '/help Status', '/help /new', '/help kill-session 1' all resolve.
+ * Takes the same `nlRouting` input renderHelp does: routing-alias commands
+ * (/model /why /reset) are LOCAL only when the flag is on (byte-identical-off
+ * contract, D7) — flag off they forward, so their local semantics must not
+ * render and they fall to the unknown/forwarded hint. Unknown commands return
+ * an invalid-arg hint string — this NEVER throws (fail-open UX; contrast with
  * command-registry.ts's getCommandSpec, which fails closed for internal
  * drift-detection callers).
  */
-export function renderHelpDetail(name: string): string {
-  const spec = findSpec(name);
-  if (!spec) {
-    return `Unknown command \`/${name}\`. Not a command — try \`/help\` for the full list.`;
+export function renderHelpDetail(name: string, { nlRouting }: { nlRouting: boolean }): string {
+  // Backtick removal doubles as the E1-class echo guard: the normalized token
+  // is what gets interpolated inside the unknown-echo's `…` span below, and a
+  // backtick there would break the span pairing.
+  const query = (name.trim().split(/\s+/)[0] ?? '')
+    .replaceAll('`', '')
+    .replace(/^\//, '')
+    .toLowerCase();
+  const spec = findSpec(query);
+  if (!spec || (spec.routingAlias === true && !nlRouting)) {
+    return `Unknown command \`/${query}\`. Not a command — try \`/help\` for the full list.`;
   }
-  // Value-specific, not `gate !== 'none'` (G34): 'admin-shared-scope' is NOT
-  // admin-only — it's ungated in a 1:1 DM, only admin-gated where it hits
-  // shared/group state (owner ruling, WG-5). A single "(admin only)" note
-  // for any non-none gate would misrepresent that. Exhaustive over
-  // CommandGate ('none' | 'admin' | 'admin-shared-scope') so a future gate
-  // value fails to typecheck here rather than silently rendering nothing.
-  const gateNote: string =
-    spec.gate === 'admin'
-      ? ' (admin only)'
-      : spec.gate === 'admin-shared-scope'
-        ? ' (admin in groups & shared sessions)'
-        : '';
-  return `\`${spec.syntax}\`\n${spec.summary}${gateNote}`;
+  return `\`${spec.syntax}\`\n${spec.summary}${GATE_PRESENTATION[spec.gate].detailNote}`;
 }

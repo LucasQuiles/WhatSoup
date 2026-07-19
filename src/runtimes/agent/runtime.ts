@@ -3922,11 +3922,11 @@ export class AgentRuntime implements Runtime {
           }
 
           case 'help': {
-            // W1-T5: registry-derived render (help-render.ts) replaces the
-            // freehand literal — pure functions of (registry, {nlRouting}),
-            // no runtime reads inside the renderer (R3c-1.3).
+            // W1-T5: registry-derived render (help-render.ts), pure functions
+            // of (registry, {nlRouting}) — no runtime reads (R3c-1.3). Detail
+            // shares the flag: alias commands hide local semantics when off (D7).
             const helpText = classified.args
-              ? renderHelpDetail(classified.args)
+              ? renderHelpDetail(classified.args, { nlRouting: config.nlRouting === true })
               : renderHelp({ nlRouting: config.nlRouting === true });
             this.sendDirect(chatJid, helpText);
             break;

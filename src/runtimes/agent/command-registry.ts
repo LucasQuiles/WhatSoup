@@ -25,6 +25,23 @@
  *                           — enforced in runtime.ts, not by isAdminMessage. */
 export type CommandGate = 'none' | 'admin' | 'admin-shared-scope';
 
+/** /help presentation strings per gate value — the renderer's single lookup
+ *  for the LIST tag and the DETAIL gate note (SSOT; replaces the two
+ *  hand-synced branch sites help-render.ts used to carry). A Record over the
+ *  CommandGate union is TRULY exhaustive: adding a gate value without a row
+ *  here is a compile error, so presentation can never silently lag the union.
+ *  Wording is value-specific (G34): 'admin-shared-scope' is NOT "admin only" —
+ *  it is ungated in a per_chat 1:1 DM and admin-gated only where the effect
+ *  hits groups/shared sessions (WG-5), and both its tag and note say so. */
+export const GATE_PRESENTATION: Record<CommandGate, { listTag: string; detailNote: string }> = {
+  'none': { listTag: '', detailNote: '' },
+  'admin': { listTag: ' _(admin)_', detailNote: ' (admin only)' },
+  'admin-shared-scope': {
+    listTag: ' _(admin in groups & shared sessions)_',
+    detailNote: ' (admin in groups & shared sessions)',
+  },
+};
+
 /** N17 venue gate — WHERE a command may execute, independent of WHO (`gate`).
  *  God-priv commands (spawn/harness/model-switch/kill) require a DM or an
  *  owner-named admin group — NEVER a shared project group — in ADDITION to the
