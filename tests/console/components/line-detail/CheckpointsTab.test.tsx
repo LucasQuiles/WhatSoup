@@ -243,7 +243,7 @@ describe('CheckpointsTab — Live session column (terminal stage A)', () => {
     renderTab(<CheckpointsTab lineName={LINE} payload={payload()} isLoading={false} freshness={FRESH} liveSessions={LIVE_PAYLOAD} />)
     const row = screen.getByTitle('15550000001@s.whatsapp.net').closest('tr') as HTMLElement
     const live = within(row).getByTitle(/alive — pid 4321 \(Ss\), up 2h0m/)
-    expect(live).toBeTruthy()
+    expect(live.textContent).toContain('Ss')
   })
 
   it('flags anomalies in warn — a live pid on an ended row is the #1861 retention surface', () => {
