@@ -1946,8 +1946,148 @@ describe('GET /health', () => {
     db2.close();
   });
 
-  it('degrades agent health on a non-empty-output error class even before the first successful turn', async () => {
-    // The boot-grace relaxation is scoped to empty-output ONLY. A real provider
+  it('keeps agent health healthy on a STALE transient-network blip with no successful turn since (B21-D)', async () => {
+    // W1-T6 regression: adding 'transient-network' to HEALTH_TURN_ERROR_CLASSES
+    // made a single self-resolved network blip degrade /health immediately and
+    // indefinitely — an idle bot has no later turn to clear the trailing error.
+    // failure-taxonomy documents transient-network as needing no provider-level
+    // action; it must get the same staleness self-clear empty-output has.
+    db.close();
+    const db2 = makeDb();
+    const now = Date.now();
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            turnCapability: {
+              modelUsable: null,
+              modelUsabilityStatus: 'usable',
+              lastSuccessfulTurnAt: now - 92 * 60 * 1000,
+              lastTurnErrorClass: 'transient-network',
+              lastTurnErrorAt: now - 90 * 60 * 1000, // 90m idle → stale → benign
+            },
+          },
+        }),
+      } as any,
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('healthy');
+    // Visibility (the W1-T6 intent) is preserved: the class still surfaces.
+    expect(json.turn_capability.last_turn_error_class).toBe('transient-network');
+    db2.close();
+  });
+
+  it('keeps agent health healthy on a STALE server-error with no successful turn since (B21-D)', async () => {
+    // Same W1-T6 regression for the second backfilled class: one 5xx blip must
+    // not pin an idle instance degraded for hours.
+    db.close();
+    const db2 = makeDb();
+    const now = Date.now();
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            turnCapability: {
+              modelUsable: null,
+              modelUsabilityStatus: 'usable',
+              lastSuccessfulTurnAt: now - 92 * 60 * 1000,
+              lastTurnErrorClass: 'server-error',
+              lastTurnErrorAt: now - 90 * 60 * 1000, // 90m idle → stale → benign
+            },
+          },
+        }),
+      } as any,
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('healthy');
+    expect(json.turn_capability.last_turn_error_class).toBe('server-error');
+    db2.close();
+  });
+
+  it('degrades agent health on a CURRENT, SUSTAINED transient-network failure after a successful turn (B21-D parity)', async () => {
+    // Parity with empty-output (#1433): a transient-network error that came after
+    // a proven turn and persisted past the debounce but is still recent (inside
+    // the staleness bound) is a live stall and must degrade.
+    db.close();
+    const db2 = makeDb();
+    const now = Date.now();
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            turnCapability: {
+              modelUsable: null,
+              modelUsabilityStatus: 'usable',
+              lastSuccessfulTurnAt: now - 5 * 60 * 1000,
+              lastTurnErrorClass: 'transient-network',
+              lastTurnErrorAt: now - 3 * 60 * 1000, // 3m old: past 1m debounce, under 15m stale
+            },
+          },
+        }),
+      } as any,
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('degraded');
+    db2.close();
+  });
+
+  it('keeps agent health healthy on a fresh transient-network error within the debounce window (B21-D damp)', async () => {
+    // A single just-now network blip that has not yet persisted past the debounce
+    // must not trip degraded — the next turn is given a chance to succeed.
+    db.close();
+    const db2 = makeDb();
+    const now = Date.now();
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            turnCapability: {
+              modelUsable: null,
+              modelUsabilityStatus: 'usable',
+              lastSuccessfulTurnAt: now - 2 * 60 * 1000,
+              lastTurnErrorClass: 'transient-network',
+              lastTurnErrorAt: now - 10 * 1000, // 10s old: still inside the 1m debounce
+            },
+          },
+        }),
+      } as any,
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('healthy');
+    db2.close();
+  });
+
+  it('degrades agent health on a non-transient error class even before the first successful turn', async () => {
+    // The boot-grace relaxation is scoped to the transient self-clearing classes
+    // (empty-output, transient-network, server-error) ONLY. A real provider
     // failure at boot (e.g. auth-required) must still degrade.
     db.close();
     const db2 = makeDb();
