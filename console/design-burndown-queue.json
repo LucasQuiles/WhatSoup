@@ -106,7 +106,7 @@
           "path": "src/components/line-detail/CheckpointsTab.tsx",
           "count": 1,
           "lines": [
-            163
+            221
           ]
         },
         {
@@ -145,8 +145,8 @@
           "path": "src/components/line-detail/SummaryTab.tsx",
           "count": 2,
           "lines": [
-            243,
-            253
+            226,
+            236
           ]
         },
         {
@@ -237,8 +237,8 @@
             621,
             628,
             666,
-            759,
-            844
+            762,
+            847
           ]
         },
         {
