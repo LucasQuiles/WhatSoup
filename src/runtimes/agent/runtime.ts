@@ -38,7 +38,7 @@ import { ensureHandoffArtifactSchema, getHandoffArtifact, deleteHandoffArtifact 
 import { buildHandoffPrelude } from './handoff-prelude.ts';
 import type { AgentProvider } from './providers/types.ts';
 import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
-import { buildRestartSelfTool, triggerSelfRestart, type ServiceRestarter } from './self-restart.ts';
+import { buildRestartSelfTool, triggerSelfRestart, assertRestartSelfAdmin, type ServiceRestarter } from './self-restart.ts';
 import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
 import { sendTracked } from '../../core/durability.ts';
 import { classifyErrorForInbound } from '../../core/inbound-failure-class.ts';
@@ -105,7 +105,7 @@ import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
 import { formatChatRefForOwner } from '../../core/chat-display-name.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
-import { toPersonalJid, isGroupJid, isWhatsAppAuthenticatedJid } from '../../core/jid-constants.ts';
+import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
 import { TurnQueue, type QueuedTurn, type TurnRejectReason } from './turn-queue.ts';
@@ -161,7 +161,7 @@ import { PendingPollPersistence } from './pending-poll-persistence.ts';
 import { HandoffDistillCoordinator } from './handoff-distill-coordinator.ts';
 import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } from './handoff-distill-config.ts';
 import { config } from '../../config.ts';
-import { canonicalConversationKey, resolvePhoneFromJid } from '../../core/access-list.ts';
+import { canonicalConversationKey, resolvePhoneFromJid, resolvePhoneFromJidForGrant } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
 import { getCommandSpec } from './command-registry.ts';
 import { matchImperative, extractImperativeTarget } from '../../core/substrate/inline-extractor.ts';
@@ -3421,15 +3421,10 @@ export class AgentRuntime implements Runtime {
         },
         serviceManager: serviceRestarter,
         trigger: triggerSelfRestart,
-        // QR-047: admin gate, same resolve+isAdminPhone check the other admin paths use.
-        assertAdmin: (session) => {
-          const phone = session.actorJid ? resolvePhoneFromJid(session.actorJid, this.db) : null;
-          if (!phone || !isAdminPhone(phone, config.adminPhones)) {
-            throw new Error(
-              `restart_self is admin-only: caller "${phone ?? 'unresolved'}" is not on the instance admin list`,
-            );
-          }
-        },
+        // QR-047 + QR-143: admin gate hoisted to assertRestartSelfAdmin — gates on
+        // authenticated transport BEFORE the phone match, so a spoofed @sms actor
+        // that collapses to admin digits cannot induce a restart.
+        assertAdmin: (session) => assertRestartSelfAdmin(session, { db: this.db, adminPhones: config.adminPhones }),
       }));
     }
 
@@ -3563,12 +3558,16 @@ export class AgentRuntime implements Runtime {
     // agent turn fails downstream. The bead lands as status='proposed' so a
     // drowsy or misfired match doesn't silently commit real work to the task list.
     try {
+      // senderPhone stays on the PLAIN resolver — it feeds the bead's ownerJid
+      // attribution (display-side, below), which is transport-agnostic.
       const senderPhone = resolvePhoneFromJid(msg.senderJid, this.db);
-      // Skip the inline imperative extractor for synthetic agent-job turns —
-      // otherwise a scheduled prompt would spawn a proposed task bead on every
-      // fire. The job is already a durable agent_job bead; it is not an ad-hoc
-      // imperative to capture.
-      if (isAdminPhone(senderPhone, config.adminPhones) && !msg.isSyntheticJob) {
+      // QR-143 (B4): the admin GRANT (auto-creating a proposed bead) routes
+      // through the grant primitive, which returns null for a spoofable
+      // <admin-digits>@sms transport — so it cannot induce an admin-attributed
+      // proposal. Skip synthetic agent-job turns (already durable agent_job
+      // beads, not ad-hoc imperatives to capture).
+      const grantPhone = resolvePhoneFromJidForGrant(msg.senderJid, this.db);
+      if (grantPhone !== null && isAdminPhone(grantPhone, config.adminPhones) && !msg.isSyntheticJob) {
         const hit = matchImperative(content);
         if (hit) {
           const target = extractImperativeTarget(content);
@@ -3743,9 +3742,14 @@ export class AgentRuntime implements Runtime {
       //                           only — plain 'admin' commands were admin-gated on base
       //                           and stay denied when no admin is configured.
       // Lazy so gate:'none' commands never pay the resolvePhoneFromJid DB read.
-      const isAuthenticatedAdmin = (): boolean =>
-        isWhatsAppAuthenticatedJid(msg.senderJid) &&
-        isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones);
+      // B4: the grant primitive gates authenticated-transport-FIRST then resolves;
+      // a non-authenticated (@sms) sender yields null and is denied. Behaviour is
+      // identical to the prior isWhatsAppAuthenticatedJid && isAdminPhone(...) form
+      // (isAdminPhone(null) === false).
+      const isAuthenticatedAdmin = (): boolean => {
+        const phone = resolvePhoneFromJidForGrant(msg.senderJid, this.db);
+        return phone !== null && isAdminPhone(phone, config.adminPhones);
+      };
       const denied =
         spec.gate === 'admin'
           ? !isAuthenticatedAdmin()
