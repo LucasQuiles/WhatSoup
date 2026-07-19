@@ -6,6 +6,7 @@ import {
   evaluateOutboundMessageSafety,
   resolveOutboundAudience,
   isOperatorDmPeer,
+  resetSpoofWarnDedupe,
   CLIENT_TEMPORARY_ISSUE_TEXT,
 } from '../../src/core/outbound-message-safety.ts';
 import { Database } from '../../src/core/database.ts';
@@ -693,6 +694,9 @@ function openDbWithLidMapping(): Database {
 describe('isOperatorDmPeer', () => {
   afterEach(() => {
     mockAudienceLog.warn.mockClear();
+    // B21-C: the spoof-warn TTL dedupe map is module-level; reset it so each
+    // test observes first-warn behavior regardless of ordering.
+    resetSpoofWarnDedupe();
   });
 
   it('[gate test 5, phone form] returns true for the owner DM peer in phone-JID form', () => {
@@ -837,6 +841,54 @@ describe('isOperatorDmPeer', () => {
       const result = isOperatorDmPeer(nonAdminSmsJid, false, db, ADMIN_PHONES);
       expect(result).toBe(false);
       expect(mockAudienceLog.warn).not.toHaveBeenCalled();
+    } finally {
+      db.close();
+    }
+  });
+
+  // B21-C flood guard: isOperatorDmPeer runs on EVERY outbound send
+  // (messaging.ts, media.ts, runtime call sites), so a legitimate operator
+  // SMS-interop DM (peer = admin digits @sms) would emit one spoof-attempt
+  // warn per bot reply — a sustained flood mislabeled as an attack. The WARN
+  // is deduped per chatJid on a TTL; the deny RETURN VALUE is never deduped.
+  it('[B21-C dedupe] two consecutive calls for the SAME chatJid emit exactly one warn; both still return false', () => {
+    const db = openDbWithLidMapping();
+    try {
+      const spoofedSmsJid = `${OWNER_PHONE}@sms`;
+      expect(isOperatorDmPeer(spoofedSmsJid, false, db, ADMIN_PHONES)).toBe(false);
+      expect(isOperatorDmPeer(spoofedSmsJid, false, db, ADMIN_PHONES)).toBe(false);
+      expect(mockAudienceLog.warn).toHaveBeenCalledTimes(1);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('[B21-C dedupe] a DIFFERENT chatJid warns independently within the TTL window', () => {
+    const db = openDbWithLidMapping();
+    try {
+      // Same admin digits, two distinct chatJid strings — dedupe keys on the
+      // chatJid, so each distinct chat warns once (never-silent per chat).
+      expect(isOperatorDmPeer(`${OWNER_PHONE}@sms`, false, db, ADMIN_PHONES)).toBe(false);
+      expect(isOperatorDmPeer(`${OWNER_PHONE}@c.us`, false, db, ADMIN_PHONES)).toBe(false);
+      expect(mockAudienceLog.warn).toHaveBeenCalledTimes(2);
+      const forms = mockAudienceLog.warn.mock.calls.map(
+        (call) => (call[0] as Record<string, unknown>)['chatJidForm'],
+      );
+      expect(forms).toEqual(['sms', 'c.us']);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('[B21-C dedupe] after resetSpoofWarnDedupe() the same chatJid warns again', () => {
+    const db = openDbWithLidMapping();
+    try {
+      const spoofedSmsJid = `${OWNER_PHONE}@sms`;
+      expect(isOperatorDmPeer(spoofedSmsJid, false, db, ADMIN_PHONES)).toBe(false);
+      expect(mockAudienceLog.warn).toHaveBeenCalledTimes(1);
+      resetSpoofWarnDedupe();
+      expect(isOperatorDmPeer(spoofedSmsJid, false, db, ADMIN_PHONES)).toBe(false);
+      expect(mockAudienceLog.warn).toHaveBeenCalledTimes(2);
     } finally {
       db.close();
     }

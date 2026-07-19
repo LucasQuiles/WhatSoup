@@ -35,6 +35,42 @@ import type { Database } from './database.ts';
 
 const audienceLog = createChildLogger('outbound-audience');
 
+// ---------------------------------------------------------------------------
+// B21-C: spoof-attempt warn dedupe.
+//
+// isOperatorDmPeer is evaluated on EVERY outbound send (messaging.ts,
+// media.ts, runtime call sites), so a legitimate operator SMS-interop DM
+// (peer = admin digits @sms) would emit one 'spoof attempt denied' warn per
+// bot reply — a sustained log flood mislabeled as an attack. The WARN is
+// deduped per chatJid on a TTL (pattern mirrors emit-alert's throttle map);
+// the deny DECISION is never deduped, and NFR-3 never-silent still holds:
+// every distinct chatJid warns, only repeats within the TTL are suppressed.
+// ---------------------------------------------------------------------------
+const SPOOF_WARN_TTL_MS = 10 * 60 * 1000;
+
+/** Maps chatJid → epoch ms of the last emitted spoof-attempt warn. */
+const spoofWarnLastLoggedAt = new Map<string, number>();
+
+/** Reset the spoof-attempt warn dedupe map (for tests). */
+export function resetSpoofWarnDedupe(): void {
+  spoofWarnLastLoggedAt.clear();
+}
+
+/** True when a spoof-attempt warn for `chatJid` should be emitted now. */
+function shouldWarnSpoofAttempt(chatJid: string, now: number): boolean {
+  const lastLoggedAt = spoofWarnLastLoggedAt.get(chatJid);
+  if (lastLoggedAt !== undefined && now - lastLoggedAt < SPOOF_WARN_TTL_MS) {
+    return false;
+  }
+  // Prune expired entries on insert so the map stays bounded to chatJids
+  // seen within the last TTL window.
+  for (const [jid, loggedAt] of spoofWarnLastLoggedAt) {
+    if (now - loggedAt >= SPOOF_WARN_TTL_MS) spoofWarnLastLoggedAt.delete(jid);
+  }
+  spoofWarnLastLoggedAt.set(chatJid, now);
+  return true;
+}
+
 /**
  * True iff `chatJid` is a 1:1 DM whose peer is a config admin (T8-F1).
  *
@@ -58,7 +94,10 @@ const audienceLog = createChildLogger('outbound-audience');
  * attempt, not ordinary traffic, so it warns per NFR-3 ("gate denials log
  * unsampled, always"). Every OTHER @sms rejection (a benign SMS-bridge chat
  * with no admin-shaped digits) stays silent — warning on every one would be
- * noise, not signal.
+ * noise, not signal. B21-C: because this predicate runs on every outbound
+ * send, the spoof warn itself is deduped per chatJid on a TTL (see
+ * `shouldWarnSpoofAttempt`) — never-silent per chat, not per send; the deny
+ * return value is never deduped.
  */
 export function isOperatorDmPeer(
   chatJid: string,
@@ -76,7 +115,10 @@ export function isOperatorDmPeer(
     // Fast-follow: warn ONLY on the spoof-attempt subset (bears admin digits).
     // Do NOT warn on every @sms rejection — that fires on every benign
     // SMS-bridge chat and would be noise, not a never-silent signal.
-    if (isAdminPhone(resolvePhoneFromJid(chatJid, db), adminPhones)) {
+    if (
+      isAdminPhone(resolvePhoneFromJid(chatJid, db), adminPhones)
+      && shouldWarnSpoofAttempt(chatJid, Date.now())
+    ) {
       // This branch catches EVERY non-WhatsApp-authenticated form (@sms,
       // @c.us, @broadcast, …), so log the ACTUAL form — the '@' suffix —
       // not a hardcoded 'sms' label. Still id-only (N14): the suffix is the
