@@ -14417,7 +14417,8 @@ describe('AgentRuntime', () => {
       expect(state.chatSessions.has(groupKey)).toBe(false);
       expect(state.chatQueues.has(groupKey)).toBe(false);
       const text = sentMessages.map((m) => m.text).find((t) => t.includes('Session killed:'));
-      expect(text).toBe(`_Session killed: ${groupKey} (Group)_`);
+      // B25 F3: the ack carries the stable ref suffix — the kill evidence.
+      expect(text).toBe(`_Session killed: ${groupKey} (…0100) (Group)_`);
     });
 
     // Regression: /kill-session dropped the SessionManager and the outbound queue
@@ -14471,8 +14472,9 @@ describe('AgentRuntime', () => {
       expect(targetSession.shutdown).toHaveBeenCalledWith(false);
       const text = sentMessages.map((m) => m.text).find((t) => t.includes('Session killed:'));
       // B23: with no name metadata in the DB, a numeric DM key renders as a
-      // formatted phone (ladder step 4) — not the bare conversation key.
-      expect(text).toBe(`_Session killed: +${dmKey} (DM)_`);
+      // formatted phone (ladder step) — not the bare conversation key.
+      // B25 F3: plus the stable ref suffix as kill evidence.
+      expect(text).toBe(`_Session killed: +${dmKey} (…2222) (DM)_`);
     });
 
     it('/sessions (per_chat scope) renders chat names from the DB, not raw JIDs (B23)', async () => {
@@ -14507,8 +14509,13 @@ describe('AgentRuntime', () => {
       await sendAndDrain(runtime, makeMsg({ content: '/sessions', senderJid: adminSender }));
 
       const listText = sentMessages.map((m) => m.text).find((t) => t.includes('Active Sessions'));
-      expect(listText).toContain('1. Lucas (DM)');
-      expect(listText).toContain('2. Loopicus Ops (Group)');
+      // B25 F3: names carry a short stable ref suffix — deterministic, so
+      // identical resolved names stay distinguishable and the later
+      // /kill-session ack proves WHICH chat died (TOCTOU evidence). The B23
+      // ruling was names-not-RAW-JIDs; a 4-char disambiguator tail is
+      // compatible with it and required for safe kills.
+      expect(listText).toContain('1. Lucas (…1111) (DM)');
+      expect(listText).toContain('2. Loopicus Ops (…5666) (Group)');
       expect(listText).not.toContain('15550001111');
       expect(listText).not.toContain('111222333444555666');
     });
@@ -14536,7 +14543,180 @@ describe('AgentRuntime', () => {
       await sendAndDrain(runtime, makeMsg({ content: '/kill-session 1', senderJid: adminSender }));
 
       const text = sentMessages.map((m) => m.text).find((t) => t.includes('Session killed:'));
-      expect(text).toBe('_Session killed: Lucas (DM)_');
+      // B25 F3: same suffix form as the /sessions list — the ack must prove
+      // which chat died, not just repeat a (possibly colliding) name.
+      expect(text).toBe('_Session killed: Lucas (…1111) (DM)_');
+    });
+
+    it('/sessions sanitizes remote-controlled names: newline cannot forge a row, markdown is stripped (B25 F2)', async () => {
+      // Push names / group subjects are attacker-controlled. A '\n' in a name
+      // previously forged additional /sessions rows (kill-wrong-session
+      // vector); '*_`~' broke the WhatsApp markdown the list renders in.
+      const db = makeDb();
+      (db.raw.prepare as ReturnType<typeof vi.fn>).mockImplementation((sql: string) => {
+        if (sql.includes('FROM contacts')) {
+          return {
+            run: vi.fn(),
+            get: vi.fn(() => ({
+              display_name: 'Evil\n2. Ghost (DM) — 9m, 9 msgs, 9 tokens *p* `q` ~r~',
+              notify_name: null,
+            })),
+            all: vi.fn(() => []),
+          };
+        }
+        return { run: vi.fn(), get: vi.fn(), all: vi.fn(() => []) };
+      });
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await runtime.start();
+
+      const state = runtime as unknown as {
+        chatSessions: Map<string, ReturnType<typeof makePerChatSession>>;
+      };
+      state.chatSessions.set('15550001111', makePerChatSession(true, 11, new Date().toISOString()));
+
+      await sendAndDrain(runtime, makeMsg({ content: '/sessions', senderJid: adminSender }));
+
+      const listText = sentMessages.map((m) => m.text).find((t) => t.includes('Active Sessions'));
+      expect(listText).toContain('Active Sessions (1)');
+      // No newline-forged second row, no markdown metachars, capped length.
+      expect(listText).not.toContain('\n2. Ghost');
+      expect(listText).not.toContain('*p*');
+      expect(listText).not.toContain('`');
+      expect(listText).not.toContain('~');
+      // The stable ref suffix survives as the identity evidence.
+      expect(listText).toContain('(…1111)');
+    });
+
+    it('/kill-session ack strips markdown metachars so the italic wrapper stays balanced (B25 F2)', async () => {
+      const db = makeDb();
+      (db.raw.prepare as ReturnType<typeof vi.fn>).mockImplementation((sql: string) => {
+        if (sql.includes('FROM contacts')) {
+          return { run: vi.fn(), get: vi.fn(() => ({ display_name: 'x_y_z', notify_name: null })), all: vi.fn(() => []) };
+        }
+        return { run: vi.fn(), get: vi.fn(), all: vi.fn(() => []) };
+      });
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await runtime.start();
+
+      const state = runtime as unknown as {
+        chatSessions: Map<string, ReturnType<typeof makePerChatSession>>;
+        chatQueues: Map<string, IOutboundQueue>;
+      };
+      state.chatSessions.set('15550001111', makePerChatSession(true, 11, new Date().toISOString()));
+      state.chatQueues.set('15550001111', makeQueueMock('dm@s.whatsapp.net'));
+
+      await sendAndDrain(runtime, makeMsg({ content: '/kill-session 1', senderJid: adminSender }));
+
+      const text = sentMessages.map((m) => m.text).find((t) => t.includes('Session killed:'));
+      expect(text).toBe('_Session killed: xyz (…1111) (DM)_');
+    });
+
+    it('/sessions disambiguates identical resolved names with the stable ref suffix (B25 F3)', async () => {
+      const db = makeDb();
+      (db.raw.prepare as ReturnType<typeof vi.fn>).mockImplementation((sql: string) => {
+        if (sql.includes('FROM contacts')) {
+          return { run: vi.fn(), get: vi.fn(() => ({ display_name: 'Lucas', notify_name: null })), all: vi.fn(() => []) };
+        }
+        return { run: vi.fn(), get: vi.fn(), all: vi.fn(() => []) };
+      });
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await runtime.start();
+
+      const state = runtime as unknown as {
+        chatSessions: Map<string, ReturnType<typeof makePerChatSession>>;
+      };
+      const startedAt = new Date().toISOString();
+      state.chatSessions.set('15550001111', makePerChatSession(true, 11, startedAt));
+      state.chatSessions.set('15550002222', makePerChatSession(true, 12, startedAt));
+
+      await sendAndDrain(runtime, makeMsg({ content: '/sessions', senderJid: adminSender }));
+
+      const listText = sentMessages.map((m) => m.text).find((t) => t.includes('Active Sessions'));
+      // Same name, distinguishable rows — the suffix is the discriminator.
+      expect(listText).toContain('1. Lucas (…1111) (DM)');
+      expect(listText).toContain('2. Lucas (…2222) (DM)');
+    });
+
+    it('/kill-session (single scope) with a wrong index does NOT kill the lone session (B25 F4)', async () => {
+      // The parsed index was IGNORED in the shared branch: any N>=1 killed
+      // the only session. Bounds-check must mirror per_chat's reply.
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+
+      mockSession.getStatus.mockReturnValue({
+        active: true,
+        pid: 321,
+        sessionId: 'sess-single',
+        startedAt: new Date().toISOString(),
+        messageCount: 1,
+        lastMessageAt: null,
+      });
+      (runtime as unknown as { session: typeof mockSession }).session = mockSession;
+
+      await sendAndDrain(runtime, makeMsg({ content: '/kill-session 3', senderJid: adminSender }));
+
+      expect(mockSession.shutdown).not.toHaveBeenCalled();
+      const text = sentMessages.map((m) => m.text).find((t) => t.includes('Invalid session number'));
+      expect(text).toBe('_Invalid session number. 1 active._');
+    });
+
+    it('/kill-session rejects trailing-garbage indices like "2x" everywhere (B25 F4)', async () => {
+      // parseInt('2x') === 2 silently accepted garbage and killed session 2.
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await runtime.start();
+
+      const state = runtime as unknown as {
+        chatSessions: Map<string, ReturnType<typeof makePerChatSession>>;
+        chatQueues: Map<string, IOutboundQueue>;
+      };
+      const s1 = makePerChatSession(true, 11, new Date().toISOString());
+      const s2 = makePerChatSession(true, 12, new Date().toISOString());
+      state.chatSessions.set('15550001111', s1);
+      state.chatSessions.set('15550002222', s2);
+      state.chatQueues.set('15550002222', makeQueueMock('dm@s.whatsapp.net'));
+
+      await sendAndDrain(runtime, makeMsg({ content: '/kill-session 2x', senderJid: adminSender }));
+
+      expect(s1.shutdown).not.toHaveBeenCalled();
+      expect(s2.shutdown).not.toHaveBeenCalled();
+      const text = sentMessages.map((m) => m.text).find((t) => t.includes('Usage: /kill-session'));
+      expect(text).toContain('Run /sessions first');
+    });
+
+    it('/kill-session (single scope) ack names the killed chat via the choke point (B25 F4)', async () => {
+      // '_Session killed._' was identity-less — worthless as kill evidence.
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+
+      mockSession.getStatus.mockReturnValue({
+        active: true,
+        pid: 321,
+        sessionId: 'sess-single',
+        startedAt: new Date().toISOString(),
+        messageCount: 1,
+        lastMessageAt: null,
+      });
+      const state = runtime as unknown as {
+        session: typeof mockSession | null;
+        activeChatJid: string | null;
+      };
+      state.session = mockSession;
+      state.activeChatJid = '15550001111@s.whatsapp.net';
+
+      await sendAndDrain(runtime, makeMsg({ content: '/kill-session 1', senderJid: adminSender }));
+
+      expect(mockSession.shutdown).toHaveBeenCalledWith(false);
+      const text = sentMessages.map((m) => m.text).find((t) => t.includes('Session killed'));
+      expect(text).toBe('_Session killed: +15550001111 (…1111)_');
     });
 
     // W1-T3: gate convergence security proof matrix (isAdminMessage hoisted
@@ -15515,6 +15695,60 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(status).toContain(
       'Fallback chain (configured): opencode-cli (glm-4.7) → opencode-cli (kimi-k3)',
     );
+  });
+
+  it('/model status shows the model on the active-window and Next lines when the fallback differs only by model (B25 F8)', async () => {
+    // A same-provider fallback entry that pins a DIFFERENT model previously
+    // suppressed the 'Next session' line entirely (provider-only guard) and
+    // rendered the active-window line model-blind — the owner could not see
+    // that new sessions route to a different model.
+    cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'haiku-fast' }];
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    mockSession.getStatus.mockReturnValue({
+      active: true,
+      pid: 555,
+      sessionId: 'sess-live',
+      startedAt: new Date().toISOString(),
+      messageCount: 1,
+      lastMessageAt: null,
+    });
+    mockSession.getProviderId.mockReturnValue('claude-cli');
+    (mockSession as unknown as Record<string, unknown>).getModelRef = vi.fn(() => 'opus-main');
+    const state = runtime as unknown as {
+      session: typeof mockSession;
+      fallbackWindow: { activeUntil: number | null; activeEntry: unknown };
+    };
+    state.session = mockSession;
+    state.fallbackWindow.activeUntil = Date.now() + 60_000;
+    state.fallbackWindow.activeEntry = { provider: 'claude-cli', model: 'haiku-fast' };
+
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toBeDefined();
+    expect(status).toContain('Fallback: active — new sessions route via claude-cli (haiku-fast)');
+    expect(status).toContain('Next session: claude-cli (haiku-fast)');
+  });
+
+  it('/model status suppresses the Next line when the live route matches provider AND model (B25 F8)', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    mockSession.getStatus.mockReturnValue({
+      active: true,
+      pid: 556,
+      sessionId: 'sess-live-2',
+      startedAt: new Date().toISOString(),
+      messageCount: 1,
+      lastMessageAt: null,
+    });
+    mockSession.getProviderId.mockReturnValue('claude-cli');
+    (mockSession as unknown as Record<string, unknown>).getModelRef = vi.fn(() => undefined);
+    (runtime as unknown as { session: typeof mockSession }).session = mockSession;
+
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toBeDefined();
+    expect(status).not.toContain('Next session:');
   });
 
   it('/model status keeps the bare provider label for model-less fallback entries (B23)', async () => {

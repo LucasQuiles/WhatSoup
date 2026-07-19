@@ -103,7 +103,7 @@ import { buildRoutingPromptContract, extractRouteIntents } from './route-intent.
 import { isProviderId } from './providers/index.ts';
 import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
-import { resolveChatDisplayName } from '../../core/chat-display-name.ts';
+import { formatChatRefForOwner } from '../../core/chat-display-name.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
 import { toPersonalJid, isGroupJid, isWhatsAppAuthenticatedJid } from '../../core/jid-constants.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
@@ -3990,7 +3990,7 @@ export class AgentRuntime implements Runtime {
                 // B23 owner ruling: render the resolved chat name (alias →
                 // group subject/chat name → contact name → formatted phone),
                 // raw key only as last resort. Local DB reads only — cheap.
-                entries.push(`${idx}. ${resolveChatDisplayName(this.db.raw, mapKey)} (${label}) — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
+                entries.push(`${idx}. ${formatChatRefForOwner(this.db, mapKey)} (${label}) — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
                 idx++;
               }
             } else {
@@ -4008,7 +4008,7 @@ export class AgentRuntime implements Runtime {
                     tkStr = tkTotal > 1000 ? `${(tkTotal / 1000).toFixed(1)}k` : String(tkTotal);
                   }
                 }
-                entries.push(`1. ${this.activeChatJid ? resolveChatDisplayName(this.db.raw, this.activeChatJid) : 'unknown'} — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
+                entries.push(`1. ${this.activeChatJid ? formatChatRefForOwner(this.db, this.activeChatJid) : 'unknown'} — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
               }
             }
             const sessionsText = entries.length > 0
@@ -4019,8 +4019,12 @@ export class AgentRuntime implements Runtime {
           }
 
           case 'kill-session': {
-            const targetIdx = parseInt(classified.args ?? '', 10);
-            if (isNaN(targetIdx) || targetIdx < 1) {
+            // B25 F4: strict integer parse — parseInt('2x') === 2 silently
+            // accepted trailing garbage and killed a session the admin never
+            // named. Digits only, everywhere.
+            const rawIdxArg = (classified.args ?? '').trim();
+            const targetIdx = /^\d+$/.test(rawIdxArg) ? Number(rawIdxArg) : NaN;
+            if (!Number.isInteger(targetIdx) || targetIdx < 1) {
               this.sendDirect(chatJid, '_Usage: /kill-session <number>_\nRun /sessions first to see the list.', true);
               break;
             }
@@ -4052,12 +4056,22 @@ export class AgentRuntime implements Runtime {
                 ? ''
                 : '\n_⚠️ some in-flight turns could not be finalized — see logs_';
               // B23: same name resolution as the /sessions list above.
-              this.sendDirect(chatJid, `_Session killed: ${resolveChatDisplayName(this.db.raw, mapKey)} (${killLabel})_${killSuffix}`, true);
+              this.sendDirect(chatJid, `_Session killed: ${formatChatRefForOwner(this.db, mapKey)} (${killLabel})_${killSuffix}`, true);
             } else {
               if (!this.session?.getStatus().active) {
                 this.sendDirect(chatJid, '_No active session to kill._', true);
                 break;
               }
+              // B25 F4: the parsed index was IGNORED here — any N>=1 killed
+              // the lone session. Exactly one session exists in this scope,
+              // so only index 1 is valid; mirror per_chat's invalid reply.
+              if (targetIdx !== 1) {
+                this.sendDirect(chatJid, '_Invalid session number. 1 active._', true);
+                break;
+              }
+              // Capture the chat identity BEFORE teardown nulls it — the ack
+              // must prove which chat died (same choke point as /sessions).
+              const killedRef = this.activeChatJid;
               this.getActiveQueue()?.abortTurn();
               this.operationTracker?.shutdown();
               this.operationTracker = null;
@@ -4066,7 +4080,13 @@ export class AgentRuntime implements Runtime {
               this.session = null;
               this.queue = null;
               this.activeChatJid = null;
-              this.sendDirect(chatJid, '_Session killed._', true);
+              this.sendDirect(
+                chatJid,
+                killedRef
+                  ? `_Session killed: ${formatChatRefForOwner(this.db, killedRef)}_`
+                  : '_Session killed._',
+                true,
+              );
             }
             break;
           }
@@ -8342,17 +8362,23 @@ export class AgentRuntime implements Runtime {
           : '') +
         ' — steers new sessions'
       : 'Preference: none';
+    // B25 F8: the active-window and Next lines were model-blind — a
+    // same-provider window pinning a DIFFERENT model rendered without the
+    // model and suppressed the Next line entirely. Render "provider (model)"
+    // and compare provider AND model in the suppress guard.
+    const nextRouteLabel = next.model ? `${nextProvider} (${next.model})` : nextProvider;
     const fallbackLine = this.isFallbackWindowActive
-      ? `Fallback: active — new sessions route via ${nextProvider}`
+      ? `Fallback: active — new sessions route via ${nextRouteLabel}`
       : this.agentFallbacks.length > 0
         // B23: entries may share a provider and differ only by model — render
         // "provider (model)" when a model is pinned so distinct configured
         // entries never collapse to indistinguishable labels.
         ? `Fallback chain (configured): ${this.agentFallbacks.map((e) => (e.model ? `${e.provider} (${e.model})` : e.provider)).join(' → ')}`
         : 'Fallback: none configured';
-    const nextLine = live && live.provider !== nextProvider
-      ? `\nNext session: ${nextProvider}`
-      : '';
+    const nextLine =
+      live && (live.provider !== nextProvider || (live.model ?? null) !== (next.model ?? null))
+        ? `\nNext session: ${nextRouteLabel}`
+        : '';
     return (
       `*Current route:* ${provider}${live ? '' : ' (no live session — next session route)'}\n` +
       `Model: ${model}\n` +
