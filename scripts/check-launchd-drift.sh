@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # check-launchd-drift.sh — macOS sibling of scripts/check-unit-drift.sh (systemd).
-# Compares installed ~/Library/LaunchAgents/com.whatsoup.* surfaces against their
+# Compares installed $HOME/Library/LaunchAgents com.whatsoup.* surfaces against their
 # checked-in templates. No launchd surface is byte-identical to the repo: templates
 # carry __WHATSOUP_REPO_ROOT__/__HOME__/__BOT_NAME__/__INSTANCE__ install-time
 # placeholders, so every comparison is substitute-then-compare, failing CLOSED if
