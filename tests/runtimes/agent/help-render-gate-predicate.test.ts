@@ -55,16 +55,25 @@ vi.mock('../../../src/runtimes/agent/command-registry.ts', () => ({
 
 const { renderHelp, renderHelpDetail } = await import('../../../src/runtimes/agent/help-render.ts');
 
+// G34: the gate NOTE (renderHelpDetail's trailing text) is scope-accurate per
+// gate VALUE, not a single "(admin only)" fired by `gate !== 'none'` — that
+// wording is wrong for 'admin-shared-scope' (admin only in groups/shared
+// sessions; OPEN in a 1:1 DM). The `_(admin)_` LIST tag stays keyed off
+// `gate !== 'none'` (D4, untouched by G34) — expectTag covers that axis;
+// gateNote covers the detail-note axis, checked exhaustively below so a
+// value can only pass by rendering EXACTLY its own note, never another's.
+const ALL_GATE_NOTES = [' (admin only)', ' (admin in groups & shared sessions)'] as const;
+
 const CASES = [
-  { name: 'plain', expectTag: false },
-  { name: 'admin-only', expectTag: true },
-  { name: 'future-gated', expectTag: true }, // T3's future gate value — see mock comment above
+  { name: 'plain', expectTag: false, gateNote: '' },
+  { name: 'admin-only', expectTag: true, gateNote: ' (admin only)' },
+  { name: 'future-gated', expectTag: true, gateNote: ' (admin in groups & shared sessions)' }, // T3's admin-shared-scope gate value — see mock comment above
 ] as const;
 
 describe('_(admin)_ tag predicate over a fixture registry (RED bed, packet §W1-T5 step 3 / §W1-T3 ripple line 509)', () => {
   it.each(CASES)(
-    '$name: _(admin)_ tag present iff gate !== "none" (expectTag=$expectTag)',
-    ({ name, expectTag }) => {
+    '$name: _(admin)_ tag present iff gate !== "none" (expectTag=$expectTag); gate note is scope-accurate per gate value (G34)',
+    ({ name, expectTag, gateNote }) => {
       const list = renderHelp({ nlRouting: false });
       const line = list.split('\n').find((l) => l.includes(`*/${name}*`));
       expect(line).toBeDefined();
@@ -74,8 +83,13 @@ describe('_(admin)_ tag predicate over a fixture registry (RED bed, packet §W1-
       // fixture summaries are scrubbed of "admin" (see mock above) so this
       // assertion can only pass via the :89 gateNote predicate itself, not
       // by accidentally matching the summary text (non-vacuous check).
+      // Exhaustive over ALL known note wordings: a case can only pass by
+      // rendering its OWN note and NEITHER other note (e.g. 'admin-shared-
+      // scope' must NOT render the bare "(admin only)" — G34).
       const detail = renderHelpDetail(name);
-      expect(detail.includes('(admin only)')).toBe(expectTag);
+      for (const note of ALL_GATE_NOTES) {
+        expect(detail.includes(note)).toBe(note === gateNote);
+      }
     },
   );
 });

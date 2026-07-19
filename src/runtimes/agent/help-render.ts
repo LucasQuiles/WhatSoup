@@ -86,6 +86,17 @@ export function renderHelpDetail(name: string): string {
   if (!spec) {
     return `Unknown command \`/${name}\`. Not a command — try \`/help\` for the full list.`;
   }
-  const gateNote = spec.gate !== 'none' ? ' (admin only)' : '';
+  // Value-specific, not `gate !== 'none'` (G34): 'admin-shared-scope' is NOT
+  // admin-only — it's ungated in a 1:1 DM, only admin-gated where it hits
+  // shared/group state (owner ruling, WG-5). A single "(admin only)" note
+  // for any non-none gate would misrepresent that. Exhaustive over
+  // CommandGate ('none' | 'admin' | 'admin-shared-scope') so a future gate
+  // value fails to typecheck here rather than silently rendering nothing.
+  const gateNote: string =
+    spec.gate === 'admin'
+      ? ' (admin only)'
+      : spec.gate === 'admin-shared-scope'
+        ? ' (admin in groups & shared sessions)'
+        : '';
   return `\`${spec.syntax}\`\n${spec.summary}${gateNote}`;
 }
