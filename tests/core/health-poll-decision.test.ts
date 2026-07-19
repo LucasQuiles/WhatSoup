@@ -35,7 +35,7 @@ import { Database } from '../../src/core/database.ts';
 import type { HealthDeps } from '../../src/core/health.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';
 
-const AUTH_TOKEN = 'test-health-token-0123456789abcdef';
+const AUTH_TOKEN = 'test-token';
 const AUTH_HEADER = { authorization: `Bearer ${AUTH_TOKEN}` };
 
 function createDb(): Database {

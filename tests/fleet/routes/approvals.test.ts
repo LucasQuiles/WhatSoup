@@ -215,7 +215,7 @@ describe('GET /api/lines/:name/approvals (handleGetApprovals)', () => {
     expect(body.approvals).toHaveLength(1);
     expect(body.approvals[0].mapKey).toBe('agent:chat:1');
     expect(body.observedAt).toMatch(/^\d{4}-/);
-    expect(body.readError).toBeUndefined();
+    expect(body).not.toHaveProperty('readError');
   });
 
   it('fails closed on read error: 200 + readError, never a fake-empty queue', async () => {
@@ -226,7 +226,7 @@ describe('GET /api/lines/:name/approvals (handleGetApprovals)', () => {
     expect(res._status).toBe(200);
     const body = JSON.parse(res._body);
     expect(body.readError).toBe(true);
-    expect(body.approvals).toBeUndefined();
+    expect(body).not.toHaveProperty('approvals');
   });
 });
 
