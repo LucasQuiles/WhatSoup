@@ -749,6 +749,140 @@ describe('database retention', () => {
     }
   });
 
+  // Landed from preserve/wave8-coverage-20260715 (wave 8 branch-coverage
+  // extension). The three configs below had `messageRetentionDays` added
+  // (matching DEFAULT_DATABASE_RETENTION) since main's DatabaseRetentionConfig
+  // made that field required after this suite was originally written.
+  it('custom exportedFactDays reduces retention window', () => {
+    db.raw.prepare(`
+      INSERT INTO fact_export_queue (fact_id, chat_jid, payload_json, status, created_at, exported_at)
+      VALUES ('18d-old', 'chat@g.us', '{}', 'exported', datetime('now', '-20 days'), datetime('now', '-18 days'))
+    `).run();
+
+    const result = runDatabaseRetention(db, {
+      intervalMs: 1000,
+      terminalDurabilityDays: 30,
+      exportedFactDays: 15,
+      metricsHourlyDays: 180,
+      decryptionFailureDays: 7,
+      messageRetentionDays: 30,
+    });
+    expect(result.factExportQueue).toBe(1);
+  });
+
+  it('daysModifier fractional days floor correctly', () => {
+    db.raw.prepare(`
+      INSERT INTO inbound_events (message_id, conversation_key, chat_jid, processing_status, completed_at)
+      VALUES ('test', 'c1', 'chat@g.us', 'complete', datetime('now', '-2 days'))
+    `).run();
+    const result = runDatabaseRetention(db, {
+      intervalMs: 1000,
+      terminalDurabilityDays: 0.5,
+      exportedFactDays: 30,
+      metricsHourlyDays: 180,
+      decryptionFailureDays: 30,
+      messageRetentionDays: 30,
+    });
+    expect(result.inboundEvents).toBe(1);
+  });
+
+  it('negative days clamps to 1 day minimum', () => {
+    db.raw.prepare(`
+      INSERT INTO inbound_events (message_id, conversation_key, chat_jid, processing_status, completed_at)
+      VALUES ('recent', 'c1', 'chat@g.us', 'complete', datetime('now', '-2 hours'))
+    `).run();
+    const result = runDatabaseRetention(db, {
+      intervalMs: 1000,
+      terminalDurabilityDays: -10,
+      exportedFactDays: 30,
+      metricsHourlyDays: 180,
+      decryptionFailureDays: 30,
+      messageRetentionDays: 30,
+    });
+    expect(result.inboundEvents).toBe(0);
+  });
+
+  it('changes() converts bigint to number', () => {
+    db.raw.prepare(`
+      INSERT INTO inbound_events (message_id, conversation_key, chat_jid, processing_status, completed_at)
+      VALUES ('old', 'c1', 'chat@g.us', 'complete', datetime('now', '-40 days'))
+    `).run();
+    const result = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+    expect(typeof result.inboundEvents).toBe('number');
+  });
+
+  it('timer does not double-start', async () => {
+    vi.useFakeTimers();
+    try {
+      const timer = new DatabaseRetentionTimer(db, {
+        intervalMs: 100,
+        terminalDurabilityDays: 30,
+        exportedFactDays: 30,
+        metricsHourlyDays: 180,
+        decryptionFailureDays: 30,
+        messageRetentionDays: 30,
+      });
+      insertOldCompleteInbound('old-in');
+      timer.start();
+      timer.start();
+      await Promise.resolve();
+      expect(rowCount('inbound_events')).toBe(0);
+      timer.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('timer stop is idempotent', () => {
+    const timer = new DatabaseRetentionTimer(db, DEFAULT_DATABASE_RETENTION);
+    expect(() => {
+      timer.stop();
+      timer.stop();
+    }).not.toThrow();
+  });
+
+  it('empty database returns all zeros', () => {
+    const result = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+    expect(result.inboundEvents).toBe(0);
+    expect(result.outboundOps).toBe(0);
+    expect(result.toolCalls).toBe(0);
+  });
+
+  it('zero deletions when data within retention window', () => {
+    const now = db.raw.prepare("SELECT datetime('now') AS ts").get() as { ts: string };
+    db.raw.prepare(`
+      INSERT INTO inbound_events (message_id, conversation_key, chat_jid, processing_status, received_at)
+      VALUES ('young', 'c1', 'chat@g.us', 'processing', ?)
+    `).run(now.ts);
+    const result = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+    expect(result.inboundEvents).toBe(0);
+  });
+
+  it('prunes metrics_hourly with empty-string malformed bucket', () => {
+    db.raw.prepare(`INSERT INTO metrics_hourly (bucket, metric, value) VALUES ('', 'm', 1)`).run();
+    const result = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+    expect(result.metricsHourly).toBe(1);
+  });
+
+  it('keeps decryption_failures at exact boundary (strict <)', () => {
+    const cutoff = (db.raw.prepare(`SELECT strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now', '-30 days') AS b`).get() as { b: string }).b;
+    db.raw.prepare(`
+      INSERT INTO decryption_failures (message_id, chat_jid, conversation_key, sender_jid, error_message, raw_key, last_seen_at)
+      VALUES ('df', 'chat@g.us', 'c1', 's@s.whatsapp.net', 'e', '{}', ?)
+    `).run(cutoff);
+    const result = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+    expect(result.decryptionFailures).toBe(0);
+  });
+
+  it('retains queued fact exports regardless of age', () => {
+    db.raw.prepare(`
+      INSERT INTO fact_export_queue (fact_id, chat_jid, payload_json, status, created_at)
+      VALUES ('f', 'chat@g.us', '{}', 'queued', datetime('now', '-100 days'))
+    `).run();
+    const result = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+    expect(result.factExportQueue).toBe(0);
+  });
+
   function rowCount(tableName: string): number {
     const row = db.raw.prepare(`SELECT COUNT(*) AS count FROM ${tableName}`).get() as { count: number };
     return row.count;
