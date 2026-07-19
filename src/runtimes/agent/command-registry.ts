@@ -48,6 +48,14 @@ export const GATE_PRESENTATION: Record<CommandGate, { listTag: string; detailNot
   },
 };
 
+/** Registry-carried pass-through wording (GATE_PRESENTATION class, SSOT —
+ *  arch.ssot-presentation-literals). Both renderHelp's trailer and
+ *  renderHelpDetail's alias-off note must COMPOSE this one constant; the
+ *  phrase used to be hand-typed in both render sites and the two copies are a
+ *  re-fork risk (the guard scripts/ssot-pattern-guard.ts blocks a new literal
+ *  copy anywhere in src/ outside this module). */
+export const PASSTHROUGH_PHRASE = 'passed through to the agent';
+
 /** N17 venue gate — WHERE a command may execute, independent of WHO (`gate`).
  *  God-priv commands (spawn/harness/model-switch/kill) require a DM or an
  *  owner-named admin group — NEVER a shared project group — in ADDITION to the
