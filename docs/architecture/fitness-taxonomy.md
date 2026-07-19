@@ -89,8 +89,17 @@ Current baseline measurements:
 
 | rule | path | lines | ceiling |
 |------|------|-------|---------|
-| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 11448 | 11448 |
-| `arch.file-size` | `tests/runtimes/agent/runtime.test.ts` | 15049 | 15049 |
+| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 11587 | 11587 |
+| `arch.file-size` | `tests/runtimes/agent/runtime.test.ts` | 15080 | 15080 |
+
+Intentional bump 2026-07-19 (both twins, per this section's own protocol): +139 lines in
+`src/runtimes/agent/runtime.ts` (11448 → 11587) and +31 in its test twin (15049 → 15080) for the
+versioned usage-limit classification (#1910: UNKNOWN_TERMINAL_FALLBACK_THRESHOLD + the
+consecutive-unknown-terminal counter woven into the turn-error state machine). Slicing was
+considered per this doc's guidance: the new code is state-interleaved with the runtime class
+(counter property + threshold check on the class itself), and an extraction refactor in the
+re2-blocked local zone would ship without local test coverage — the small documented bump is the
+honest move; the extraction is a candidate for a future CI-covered pass.
 
 The `ceiling` column (the `maxLines` field on each measurement in `baseline.json`) is a **blocking
 growth ceiling**. `tests/scripts/fitness-file-size-warning-budget.test.ts` measures each file's
