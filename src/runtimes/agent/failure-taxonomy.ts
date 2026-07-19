@@ -82,6 +82,22 @@ export type ProviderFailureKind =
   // session. Does NOT arm fallback (no provider-level action needed).
   | 'transient-network';
 
+/** Runtime-enumerable SSOT of ProviderFailureKind. The Record presence table
+ *  makes every union member mandatory — adding a kind without listing it here
+ *  is a compile error, so the runtime list can never silently omit a member. */
+const PROVIDER_FAILURE_KIND_PRESENCE: Record<ProviderFailureKind, true> = {
+  'usage-limit': true,
+  'rate-limit': true,
+  'auth-required': true,
+  'model-unavailable': true,
+  'policy-block': true,
+  'context-overflow': true,
+  'server-error': true,
+  'transient-network': true,
+};
+export const PROVIDER_FAILURE_KINDS: readonly ProviderFailureKind[] =
+  Object.keys(PROVIDER_FAILURE_KIND_PRESENCE) as ProviderFailureKind[];
+
 /**
  * SSOT registry of the terminal limit-name tokens the agent provider CLI emits.
  * Its limit-name map covers the 5-hour session cap, the 7-day weekly cap, the

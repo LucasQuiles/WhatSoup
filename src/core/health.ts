@@ -191,13 +191,14 @@ const HEALTH_MODEL_USABILITY_STATUSES = new Set([
   'unknown',
 ]);
 
-const HEALTH_TURN_ERROR_CLASSES = new Set([
+export const HEALTH_TURN_ERROR_CLASSES = new Set([
   'usage-limit',
   'rate-limit',
   'auth-required',
   'model-unavailable',
   'policy-block',
   'context-overflow',
+  'server-error', 'transient-network',   // W1-T6: were missing → last_turn_error_class nulled on /health
   'unknown-terminal',
   'empty-output',
 ]);
