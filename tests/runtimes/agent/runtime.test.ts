@@ -15840,6 +15840,72 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(status).toContain('Model: provider default (not configured)');
   });
 
+  // ── B26 item 2: /model list — the config-derived model catalogue ──────────
+  // Rendered ENTIRELY from config (the primary, the fallback chain, the tier
+  // vocabulary) — the served weight is unobservable, so nothing here claims
+  // to be it. When nlRoutingTiers is absent the catalogue says so honestly
+  // instead of implying strongest/fastest resolve somewhere specific.
+
+  it('B26: /model list renders the configured primary, every fallback entry, and the pin syntax', async () => {
+    cfgAny().agentFallbacks = [
+      { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
+      { provider: 'opencode-cli', model: 'glm/glm-5.2' },
+    ];
+    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
+    expect(catalogue).toBeDefined();
+    expect(catalogue).toContain('Primary: claude-cli (claude-opus-4-8 — configured)');
+    expect(catalogue).toContain('opencode-cli (kimi/kimi-k3) → opencode-cli (glm/glm-5.2)');
+    expect(catalogue).toContain('/model provider-id');
+    expect(catalogue).toContain('/reset');
+  });
+
+  it('B26: /model list says tiers are not configured on this line rather than implying they resolve (honesty)', async () => {
+    // Canary shape: nlRoutingTiers ABSENT — strongest/fastest fall to the
+    // default route, and the catalogue must say so.
+    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
+    expect(catalogue).toBeDefined();
+    expect(catalogue).toContain('tiers not configured on this line — default routing only');
+    expect(catalogue).not.toContain('strongest →');
+  });
+
+  it('B26: /model list renders the nlRoutingTiers mappings when configured', async () => {
+    cfgAny().nlRoutingTiers = { strongest: 'anthropic-api' };
+    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
+    expect(catalogue).toBeDefined();
+    expect(catalogue).toContain('strongest → anthropic-api');
+    expect(catalogue).toContain('fastest → not configured (default route)');
+    expect(catalogue).not.toContain('tiers not configured on this line');
+  });
+
+  it('B26: /model list stays honest when no primary model and no fallbacks are configured', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
+    expect(catalogue).toBeDefined();
+    expect(catalogue).toContain('Primary: claude-cli (provider default — no model configured)');
+    expect(catalogue).toContain('Fallbacks: none configured');
+  });
+
+  it('B26: bare /model appends the catalogue affordance line; explicit /model status does not', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
+    const bare = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(bare).toBeDefined();
+    expect(bare).toContain('/model list — see what you can pick');
+    mockQueue.enqueueText.mockClear();
+    sentMessages.length = 0;
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status', messageId: 'msg-2' }));
+    const explicit = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(explicit).toBeDefined();
+    expect(explicit).not.toContain('/model list — see what you can pick');
+  });
+
   it('B26: /model status keeps the fallback-entry model bare while a fallback window is live (existing behavior)', async () => {
     cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'haiku-fast' }];
     const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });

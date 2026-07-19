@@ -3883,7 +3883,21 @@ export class AgentRuntime implements Runtime {
               } catch (err) {
                 log.warn({ err, instance: this.instanceName }, 'pruneExpired failed during /model status - continuing');
               }
-              this.sendDirect(chatJid, this.renderRouteStatus(chatJid, msg.senderJid));
+              // B26: bare /model gets ONE discoverability affordance line for
+              // the catalogue; an explicit /model status stays as-is.
+              const routeStatus = this.renderRouteStatus(chatJid, msg.senderJid);
+              this.sendDirect(
+                chatJid,
+                classified.args === undefined
+                  ? `${routeStatus}\n_/model list — see what you can pick_`
+                  : routeStatus,
+              );
+              break;
+            }
+            if (sub === 'list') {
+              // B26: the model catalogue — config-derived only (see
+              // renderModelCatalogue for the honesty contract).
+              this.sendDirect(chatJid, this.renderModelCatalogue());
               break;
             }
             if (sub === 'default') {
@@ -8365,6 +8379,41 @@ export class AgentRuntime implements Runtime {
       return `${this.model} (configured)`;
     }
     return 'provider default (not configured)';
+  }
+
+  /**
+   * B26 /model list — the model catalogue. Rendered ENTIRELY from config
+   * (honesty contract: the served weight is unobservable, so nothing here is
+   * presented as what actually serves — the primary and every fallback entry
+   * are configuration, and the tier vocabulary maps to nlRoutingTiers or is
+   * honestly declared unconfigured). Names follow the shipped F8 convention:
+   * provider (model).
+   */
+  private renderModelCatalogue(): string {
+    const primary = this.model !== undefined
+      ? `${this.agentProvider} (${this.model} — configured)`
+      : `${this.agentProvider} (provider default — no model configured)`;
+    const fallbackLine = this.agentFallbacks.length > 0
+      ? `Fallbacks (configured): ${this.agentFallbacks
+          .map((e) => (e.model ? `${e.provider} (${e.model})` : e.provider))
+          .join(' → ')}`
+      : 'Fallbacks: none configured';
+    // Tier vocabulary: default always exists (the primary route). strongest/
+    // fastest resolve ONLY through nlRoutingTiers — absent map means they
+    // degrade to the default route, and the catalogue must say so rather than
+    // imply they resolve somewhere specific (canary shape: tiers unset).
+    const tiers = config.nlRoutingTiers;
+    const tiersConfigured = tiers !== null && tiers !== undefined && (tiers.strongest !== undefined || tiers.fastest !== undefined);
+    const tierLine = tiersConfigured
+      ? `Tiers: default → primary route; strongest → ${tiers.strongest ?? 'not configured (default route)'}; fastest → ${tiers.fastest ?? 'not configured (default route)'}`
+      : 'Tiers: default → primary route; strongest/fastest: tiers not configured on this line — default routing only';
+    return [
+      '*Models on this line* (from config — which weight actually serves is not observable here)',
+      `Primary: ${primary}`,
+      fallbackLine,
+      tierLine,
+      'Pin: `/model provider-id` — prefers it for you in this chat (24h). Back: `/model default` or `/reset`.',
+    ].join('\n');
   }
 
   /**

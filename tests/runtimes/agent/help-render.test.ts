@@ -79,7 +79,7 @@ describe('B21-B /help fixes (RED-first)', () => {
     // (B23 refines the flag-off wording to an honest pass-through note — see
     // the B23 describe below — but the D7 no-local-semantics bar is unchanged.)
     const on = renderHelpDetail('model', { nlRouting: true });
-    expect(on).toContain('`/model [status|default|strongest|fastest|provider-id]`');
+    expect(on).toContain('`/model [status|list|default|strongest|fastest|provider-id]`'); // B26: list verb
     const off = renderHelpDetail('model', { nlRouting: false });
     expect(off).not.toContain('`/model [status');
     expect(renderHelpDetail('reset', { nlRouting: true })).toContain('`/reset`');
@@ -140,6 +140,6 @@ describe('B23 UX polish — honest alias-off /help detail', () => {
   it('alias detail with nlRouting ON is untouched by the B23 wording', () => {
     const on = renderHelpDetail('model', { nlRouting: true });
     expect(on).not.toContain('is not active here');
-    expect(on).toContain('`/model [status|default|strongest|fastest|provider-id]`');
+    expect(on).toContain('`/model [status|list|default|strongest|fastest|provider-id]`'); // B26: list verb
   });
 });

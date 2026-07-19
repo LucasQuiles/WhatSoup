@@ -234,7 +234,7 @@ export const COMMAND_REGISTRY = [
   {
     name: 'model',
     summary: 'route status; /model strongest|fastest|default|provider-id',
-    syntax: '/model [status|default|strongest|fastest|provider-id]', // E1: no `<...>`
+    syntax: '/model [status|list|default|strongest|fastest|provider-id]', // E1: no `<...>`; B26: list = config-derived catalogue
     tier: 'transport-local',
     gate: 'none', // Phase-1 route-preference is ungated; W3's gated /model <id> is a SEPARATE entry
     venue: 'any', // read/set own route preference; the W3 god-priv model-switch entry is venue:'admin-group'
@@ -243,7 +243,7 @@ export const COMMAND_REGISTRY = [
     errorClasses: ['invalid-arg', 'provider-unsupported', 'internal'],
     renderContract: { asOf: true, fields: { activeModel: 'verified-runtime', pinState: 'verified-runtime' } },
     routingAlias: true,
-    subVerbs: ['status', 'default', 'strongest', 'fastest'],
+    subVerbs: ['status', 'list', 'default', 'strongest', 'fastest'], // B26: 'list' renders the config-derived model catalogue
   },
   {
     name: 'why',
