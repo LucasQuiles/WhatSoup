@@ -1,92 +1,70 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
+import { renderHelp, renderHelpDetail } from '../../../src/runtimes/agent/help-render.ts';
+import { COMMAND_REGISTRY } from '../../../src/runtimes/agent/command-registry.ts';
 
-// RED-first fixture for the T5 tag-predicate bounce (packet §W1-T5 step 3,
-// line 811, and the §W1-T3 ripple, line 509: "…so `/new` keeps its tag").
-// help-render.ts's `_(admin)_` tag predicate must be `gate !== 'none'`, not
-// `gate === 'admin'` — the latter silently drops the tag for any FUTURE gate
-// value (T3 regrades `/new`'s gate to `'admin-shared-scope'`; a value outside
-// today's CommandGate union — 'none' | 'admin', command-registry.ts:15).
+// B21-B (QB-7 premise refresh + GATE_PRESENTATION conversion): this file
+// originally MOCKED command-registry.ts to smuggle a gate value beyond the
+// then-2-value CommandGate union ('none' | 'admin') and prove the tag
+// predicate handled a future gate at runtime. Both premises are stale:
+//  - since T3 the union has THREE values and the real registry exercises
+//    every one ('status' → 'none', 'sessions' → 'admin', 'new' →
+//    'admin-shared-scope'), so no synthetic future-gate fixture is needed
+//    to reach the third branch; and
+//  - gate presentation is now a single GATE_PRESENTATION table (a Record
+//    over the CommandGate union, command-registry.ts), so "a future gate
+//    value renders correctly" is a COMPILE-TIME guarantee — adding a gate
+//    value without a table row is a type error, not a silent render gap.
+// The mock harness is therefore obsolete; this file now drives the REAL
+// registry and asserts each gate value renders EXACTLY its own list tag and
+// detail note (G34 wording), never another's.
 //
-// The real COMMAND_REGISTRY has no entry with a third gate value to exercise
-// this, so this file mocks command-registry.ts's COMMAND_REGISTRY export and
-// drives the PRODUCTION renderHelp/renderHelpDetail against a controlled
-// 3-row fixture (gate: 'none' / 'admin' / a future non-none-non-admin value).
-// vi.mock's factory return isn't type-checked against the real module shape,
-// so no CommandGate cast is needed to hold the future gate literal — the
-// fixture below is plain data, not constructed against the CommandSpec type.
-vi.mock('../../../src/runtimes/agent/command-registry.ts', () => ({
-  COMMAND_REGISTRY: [
-    {
-      name: 'plain',
-      summary: 'fixture: no gate',
-      syntax: '/plain',
-      tier: 'transport-local',
-      gate: 'none',
-      visibility: 'end-user',
-      errorClasses: [],
-    },
-    {
-      name: 'admin-only',
-      // Summary deliberately avoids the substring "admin" so the detail
-      // assertion below (checking for the literal gateNote text) can't
-      // pass vacuously off the summary text instead of the predicate.
-      summary: 'fixture: restricted-gate command',
-      syntax: '/admin-only',
-      tier: 'transport-local',
-      gate: 'admin',
-      visibility: 'end-user',
-      errorClasses: [],
-    },
-    {
-      // T3's future gate value for /new (packet §W1-T3 ripple, line 509) —
-      // outside today's CommandGate union. Proves the predicate is
-      // correct-by-construction for any future gate, not just 'admin'.
-      // Summary again avoids "admin" for the same reason as above.
-      name: 'future-gated',
-      summary: 'fixture: future non-none, restricted-gate command',
-      syntax: '/future-gated',
-      tier: 'transport-local',
-      gate: 'admin-shared-scope',
-      visibility: 'end-user',
-      errorClasses: [],
-    },
-  ],
-}));
-
-const { renderHelp, renderHelpDetail } = await import('../../../src/runtimes/agent/help-render.ts');
-
-// G34: the gate NOTE (renderHelpDetail's trailing text) is scope-accurate per
-// gate VALUE, not a single "(admin only)" fired by `gate !== 'none'` — that
-// wording is wrong for 'admin-shared-scope' (admin only in groups/shared
-// sessions; OPEN in a 1:1 DM). The `_(admin)_` LIST tag stays keyed off
-// `gate !== 'none'` (D4, untouched by G34) — expectTag covers that axis;
-// gateNote covers the detail-note axis, checked exhaustively below so a
-// value can only pass by rendering EXACTLY its own note, never another's.
+// Non-vacuity: the assertions below check the exact tag/note strings, and no
+// real command summary contains ' (admin' or '_(admin' — so a case can only
+// pass via the GATE_PRESENTATION lookup itself, not summary text.
+const ALL_LIST_TAGS = [' _(admin)_', ' _(admin in groups & shared sessions)_'] as const;
 const ALL_GATE_NOTES = [' (admin only)', ' (admin in groups & shared sessions)'] as const;
 
 const CASES = [
-  { name: 'plain', expectTag: false, gateNote: '' },
-  { name: 'admin-only', expectTag: true, gateNote: ' (admin only)' },
-  { name: 'future-gated', expectTag: true, gateNote: ' (admin in groups & shared sessions)' }, // T3's admin-shared-scope gate value — see mock comment above
+  { name: 'status', gate: 'none', listTag: '', gateNote: '' },
+  { name: 'sessions', gate: 'admin', listTag: ' _(admin)_', gateNote: ' (admin only)' },
+  {
+    name: 'new',
+    gate: 'admin-shared-scope',
+    listTag: ' _(admin in groups & shared sessions)_',
+    gateNote: ' (admin in groups & shared sessions)',
+  },
 ] as const;
 
-describe('_(admin)_ tag predicate over a fixture registry (RED bed, packet §W1-T5 step 3 / §W1-T3 ripple line 509)', () => {
+describe('gate presentation over the real registry (B21-B, ex-mock harness)', () => {
+  it('fixture adequacy: the real registry covers all three CommandGate values', () => {
+    // Guards the conversion premise: if a regrade ever drops a gate value
+    // from the live registry, this test's coverage claim dies loudly instead
+    // of silently thinning to two branches.
+    expect(new Set(COMMAND_REGISTRY.map((c) => c.gate))).toEqual(
+      new Set(['none', 'admin', 'admin-shared-scope']),
+    );
+  });
+
   it.each(CASES)(
-    '$name: _(admin)_ tag present iff gate !== "none" (expectTag=$expectTag); gate note is scope-accurate per gate value (G34)',
-    ({ name, expectTag, gateNote }) => {
+    '$name (gate: $gate): list line and detail render EXACTLY their own tag/note',
+    ({ name, gate, listTag, gateNote }) => {
+      // Pin the case's gate to the live registry row so a regrade can't let
+      // an expectation drift silently.
+      expect(COMMAND_REGISTRY.find((c) => c.name === name)?.gate).toBe(gate);
+
       const list = renderHelp({ nlRouting: false });
       const line = list.split('\n').find((l) => l.includes(`*/${name}*`));
       expect(line).toBeDefined();
-      expect(line?.includes('_(admin)_')).toBe(expectTag);
+      // Exhaustive over ALL known tag wordings: a case passes only by
+      // rendering its OWN tag and NEITHER other — e.g. 'admin-shared-scope'
+      // must NOT render the bare '_(admin)_' (the list-side G34 analogue).
+      for (const tag of ALL_LIST_TAGS) {
+        expect(line?.includes(tag)).toBe(tag === listTag);
+      }
 
-      // Check the exact gateNote text, not a bare "admin" substring — the
-      // fixture summaries are scrubbed of "admin" (see mock above) so this
-      // assertion can only pass via the :89 gateNote predicate itself, not
-      // by accidentally matching the summary text (non-vacuous check).
-      // Exhaustive over ALL known note wordings: a case can only pass by
-      // rendering its OWN note and NEITHER other note (e.g. 'admin-shared-
-      // scope' must NOT render the bare "(admin only)" — G34).
-      const detail = renderHelpDetail(name);
+      const detail = renderHelpDetail(name, { nlRouting: false });
+      // Same exhaustive check on the detail-note axis (G34): exact note text,
+      // never another value's note.
       for (const note of ALL_GATE_NOTES) {
         expect(detail.includes(note)).toBe(note === gateNote);
       }
