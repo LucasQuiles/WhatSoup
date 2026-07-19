@@ -147,7 +147,9 @@ export function SummaryTab({
   const fallbackModelRaw = String(getValueAtPath(rawConfig, 'agentOptions.fallbackModel') ?? '')
 
   return (
-    <div className="flex flex-col gap-[var(--sp-3)]">
+    // soup-summary-split: container-query root for the Row-3 fold law
+    // (DD-18r — Config/Actions stack below the 600px stress threshold).
+    <div className="soup-summary-split flex flex-col gap-[var(--sp-3)]">
       {/* Row 1: KPI cards — 6-wide single row */}
       <div
         className="grid gap-[var(--sp-2)] bg-surface-inset c-border rounded-lg p-[var(--sp-2)]"
@@ -198,8 +200,9 @@ export function SummaryTab({
         </Card>
       </motion.div>
 
-      {/* Row 3: Config + Actions side-by-side */}
-      <div className="flex gap-[var(--sp-3)]">
+      {/* Row 3: Config + Actions side-by-side — folds to a vertical stack
+          below the 600px container stress threshold (DD-18r side-panel law). */}
+      <div className="soup-summary-split__row flex gap-[var(--sp-3)]">
         {/* Configuration panel */}
         <motion.div
           initial={{ opacity: 0, y: 8 }}
@@ -261,7 +264,7 @@ export function SummaryTab({
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.4, delay: 0.3, ease: [0.22, 1, 0.36, 1] }}
-          className="w-[var(--panel-actions)] flex-shrink-0"
+          className="soup-summary-split__panel w-[var(--panel-actions)] flex-shrink-0"
         >
           <Card variant="base" className="overflow-hidden h-full">
           <div className="c-toolbar bg-surface-raised c-border-b">

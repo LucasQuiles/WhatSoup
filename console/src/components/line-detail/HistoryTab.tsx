@@ -251,12 +251,15 @@ export function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode, 
 }) {
   const outgoingBg = mode === 'agent' ? 'var(--m-agt-soft)' : 'var(--m-cht-soft)'
   return (
+    // soup-history-split: container-query root for the split-fold law
+    // (DD-18r — list + thread stack below the 640px stress threshold).
+    <div className="soup-history-split h-full">
     <div
-      className="flex overflow-hidden h-full c-border rounded-lg"
+      className="soup-history-split__row flex overflow-hidden h-full c-border rounded-lg"
     >
       {/* Chat list */}
       <div
-        className="flex-shrink-0 flex flex-col w-[var(--panel-history)] c-border-r bg-surface-inset"
+        className="soup-history-split__list flex-shrink-0 flex flex-col w-[var(--panel-history)] c-border-r bg-surface-inset"
       >
         {/* Chat list header */}
         <div
@@ -298,6 +301,7 @@ export function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode, 
           </div>
         )}
       </div>
+    </div>
     </div>
   )
 }

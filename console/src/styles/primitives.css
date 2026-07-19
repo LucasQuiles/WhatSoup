@@ -2755,3 +2755,48 @@ details[open] > .soup-accordion__summary .soup-accordion__chev {
     transform: translateX(var(--hc-tx));
   }
 }
+
+/* --------------------------------------------------------------------------
+   SIDE-PANEL FOLD BAND — soup-summary-split / soup-history-split (DD-18r,
+   non-Fleet side-panel law). Container-query idiom on the stressed container
+   (layout-density §5) — third/fourth use after soup-drawer-layout (900px
+   squeeze) and soup-inbox-layout (1080px contact-pane collapse). Thresholds
+   are content-driven, named after the stress:
+     600px = actions 260 (--panel-actions) + ~330px readable config + gap;
+     640px = chat list 288 (--panel-history) + ~340px readable thread + chrome.
+   Below the fold each split stacks vertically; the fixed panel goes full-width
+   (chat list capped at 40dvh — the §26 reachable-on-narrow principle; dvh per the viewport-height-unit law). CSS-only:
+   no React state is touched and re-growing the container restores the identical
+   side-by-side layout (§6.1 ethos, mirroring the inbox collapse).
+   -------------------------------------------------------------------------- */
+
+.soup-summary-split {
+  container-type: inline-size;
+}
+
+@container (max-width: 599px) {
+  .soup-summary-split .soup-summary-split__row {
+    flex-direction: column;
+  }
+  .soup-summary-split .soup-summary-split__panel {
+    width: 100%;
+    flex-shrink: 1;
+  }
+}
+
+.soup-history-split {
+  container-type: inline-size;
+}
+
+@container (max-width: 639px) {
+  .soup-history-split .soup-history-split__row {
+    flex-direction: column;
+  }
+  .soup-history-split .soup-history-split__list {
+    width: 100%;
+    flex-shrink: 1;
+    max-height: 40dvh;
+    border-right: 0;
+    border-bottom: var(--bw) solid var(--border-hairline);
+  }
+}
