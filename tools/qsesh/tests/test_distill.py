@@ -28,6 +28,7 @@ from qsesh.model import (
 FIXTURES = Path(__file__).parent / "fixtures"
 SOURCE_POINTER = "source-pointer-test"
 RAW_POINTER = "raw-pointer-test"
+_GZIP_BYTES = 128
 
 
 def _snapshot(
@@ -118,6 +119,7 @@ def _distilled(extracted: ExtractedSession) -> DistilledSession:
         extracted,
         source_pointer=SOURCE_POINTER,
         raw_pointer=RAW_POINTER,
+        gzip_bytes=_GZIP_BYTES,
     )
 
 
@@ -151,6 +153,45 @@ def test_each_harness_matches_its_independently_authored_distilled_golden(
     assert actual == expected
     assert golden_path.read_text().endswith("\n")
     assert dumps_json(expected) == dumps_json(actual)
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex", "opencode"])
+def test_size_and_inventory_metrics_are_wired_into_the_record(harness: str) -> None:
+    extracted = _cases()[harness]
+    result = _distilled(extracted)
+    record = result.record
+
+    size = record["size_metrics"]
+    inventory = record["inventory_counts"]
+    assert isinstance(size, dict)
+    assert isinstance(inventory, dict)
+    assert size["metrics_version"] == "qsesh-metrics-v1"
+    assert inventory["metrics_version"] == "qsesh-metrics-v1"
+    assert size["metrics_version"] == inventory["metrics_version"]
+
+    assert (
+        inventory["native_tools"]["total"] + inventory["mcp_tools"]["total"]
+        == record["tool_call_count"]
+    )
+
+    for dimension in ("char", "line", "word", "token"):
+        assert size["content_original"][dimension] == sum(
+            kind_counts[dimension] for kind_counts in size["content_by_kind"].values()
+        )
+
+    assert size["raw_source"]["gzip_bytes"] == _GZIP_BYTES
+    assert size["raw_source"]["bytes"] == len(extracted.snapshot.raw_bytes)
+
+    new_keys = {"size_metrics", "inventory_counts"}
+    live = {key: value for key, value in record.items() if key not in new_keys}
+    golden_record = json.loads((FIXTURES / harness / "distilled.json").read_text())[
+        "record"
+    ]
+    golden = {key: value for key, value in golden_record.items() if key not in new_keys}
+    assert live == golden
+
+    assert not hasattr(result, "size_metrics")
+    assert not hasattr(result, "inventory_counts")
 
 
 @pytest.mark.parametrize("harness", ["claude", "codex", "opencode"])
@@ -295,6 +336,7 @@ def test_source_and_raw_pointers_are_consumed_exactly_not_derived_as_paths() -> 
                 _cases()["codex"],
                 source_pointer=source_pointer,
                 raw_pointer=raw_pointer,
+                gzip_bytes=_GZIP_BYTES,
             )
         assert caught.value.code == "QS-E-DISTILL"
         assert caught.value.phase == "distill-pointer"
