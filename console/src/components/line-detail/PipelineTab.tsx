@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
 import { Button } from '../primitives/Button'
 import { formatCount } from '../../lib/text-utils'
+import { formatRelative } from '../../lib/format-time'
 import type { Mode, LineInstance } from './types'
 
 /* Pipeline Node — compact inline pill */
@@ -186,6 +187,27 @@ export function PipelineTab({ mode, line, modeColor }: { mode: Mode; line: LineI
   const [selectedNode, setSelectedNode] = useState<string | null>(null)
   const isOnline = line.status === 'online'
 
+  // GUI-5: pipeline telemetry reflects the same fleet health snapshot — when it
+  // is carried forward, label it (never silently green). Mirrors SoupKitchen.
+  const freshnessNote = (line.stale || line.healthObservedAt) && (
+    <div>
+      <span
+        className={`c-label${line.stale ? ' text-s-warn' : ''}`}
+        title={
+          line.stale
+            ? (line.healthObservedAt
+                ? `Pipeline telemetry carried forward — last live poll ${formatRelative(line.healthObservedAt)}`
+                : 'Pipeline telemetry is stale — the poller is currently failing')
+            : `Last live health poll ${formatRelative(line.healthObservedAt)}`
+        }
+      >
+        {line.stale
+          ? `stale · ${line.healthObservedAt ? formatRelative(line.healthObservedAt) : 'unknown'}`
+          : `observed ${formatRelative(line.healthObservedAt)}`}
+      </span>
+    </div>
+  )
+
   const toggleNode = (label: string) => {
     setSelectedNode((prev) => (prev === label ? null : label))
   }
@@ -195,6 +217,7 @@ export function PipelineTab({ mode, line, modeColor }: { mode: Mode; line: LineI
   if (mode === 'passive') {
     return (
       <div className="c-section">
+        {freshnessNote}
         <div className="flex items-center justify-center gap-2 py-12">
           <PipelineNode label="Inbound" color={modeColor} active={isOnline} selected={selectedNode === 'Inbound'} onClick={() => toggleNode('Inbound')} />
           <PipelineArrow />
@@ -212,6 +235,7 @@ export function PipelineTab({ mode, line, modeColor }: { mode: Mode; line: LineI
     const enrichUnproc = line.enrichmentUnprocessed ?? 0
     return (
       <div className="c-section">
+        {freshnessNote}
         <div className="flex items-center justify-center gap-2 py-12 flex-wrap">
           <PipelineNode label="Inbound" color={modeColor} active={isOnline} selected={selectedNode === 'Inbound'} onClick={() => toggleNode('Inbound')} />
           <PipelineArrow />
@@ -234,6 +258,7 @@ export function PipelineTab({ mode, line, modeColor }: { mode: Mode; line: LineI
   const sessions = line.activeSessions ?? 0
   return (
     <div className="c-section">
+        {freshnessNote}
       <div className="flex items-center justify-center gap-2 py-12 flex-wrap">
         <PipelineNode label="Inbound" color={modeColor} active={isOnline} selected={selectedNode === 'Inbound'} onClick={() => toggleNode('Inbound')} />
         <PipelineArrow />

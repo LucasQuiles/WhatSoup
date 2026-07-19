@@ -1,5 +1,6 @@
 import { queryOptions, useQuery } from '@tanstack/react-query';
 import { api } from '../lib/api.js';
+import { queryFreshness } from '../lib/freshness.js';
 import type { FleetMetrics, LineMetrics, MetricsRange } from '../types.js';
 
 export function getMetricsQueryOptions(name: string, range: MetricsRange) {
@@ -12,7 +13,14 @@ export function getMetricsQueryOptions(name: string, range: MetricsRange) {
 }
 
 export function useMetrics(name: string, range: MetricsRange) {
-  return useQuery(getMetricsQueryOptions(name, range));
+  const query = useQuery(getMetricsQueryOptions(name, range));
+  return {
+    ...query,
+    freshness: queryFreshness({
+      dataUpdatedAt: query.dataUpdatedAt,
+      refetchFailed: query.isRefetchError,
+    }),
+  };
 }
 
 export function getFleetMetricsQueryOptions(range: MetricsRange) {
@@ -24,5 +32,12 @@ export function getFleetMetricsQueryOptions(range: MetricsRange) {
 }
 
 export function useFleetMetrics(range: MetricsRange = '24h') {
-  return useQuery(getFleetMetricsQueryOptions(range));
+  const query = useQuery(getFleetMetricsQueryOptions(range));
+  return {
+    ...query,
+    freshness: queryFreshness({
+      dataUpdatedAt: query.dataUpdatedAt,
+      refetchFailed: query.isRefetchError,
+    }),
+  };
 }

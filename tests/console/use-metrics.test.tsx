@@ -218,3 +218,61 @@ describe('useFleetMetrics', () => {
     expect(getFleetMetricsMock).toHaveBeenCalledWith('7d')
   })
 })
+
+describe('useMetrics freshness (GUI-5)', () => {
+  it('reports a fresh observation after a successful fetch', async () => {
+    getMetricsMock.mockResolvedValue(lineMetrics)
+
+    const { result } = renderHook(() => useMetrics('support', '24h'), {
+      wrapper: createWrapper(),
+    })
+
+    await waitFor(() => expect(result.current.data).toBe(lineMetrics))
+    expect(result.current.freshness.stale).toBe(false)
+    expect(result.current.freshness.observedAt).toBeGreaterThan(0)
+  })
+
+  it('flags carried data after a failed refetch, then clears on recovery', async () => {
+    getMetricsMock.mockResolvedValueOnce(lineMetrics)
+
+    const { result } = renderHook(() => useMetrics('support', '24h'), {
+      wrapper: createWrapper(),
+    })
+
+    await waitFor(() => expect(result.current.data).toBe(lineMetrics))
+    expect(result.current.freshness.stale).toBe(false)
+
+    getMetricsMock.mockRejectedValueOnce(new Error('boom'))
+    await result.current.refetch()
+    await waitFor(() => expect(result.current.isRefetchError).toBe(true))
+    expect(result.current.data).toBe(lineMetrics) // payload stays visible
+    expect(result.current.freshness.stale).toBe(true)
+
+    getMetricsMock.mockResolvedValueOnce(lineMetrics)
+    await result.current.refetch()
+    await waitFor(() => expect(result.current.isRefetchError).toBe(false))
+    expect(result.current.freshness.stale).toBe(false)
+  })
+
+  it('does not flag first load before any observation', () => {
+    getMetricsMock.mockReturnValue(new Promise(() => {}))
+
+    const { result } = renderHook(() => useMetrics('support', '24h'), {
+      wrapper: createWrapper(),
+    })
+
+    expect(result.current.freshness).toEqual({ observedAt: null, stale: false })
+  })
+
+  it('exposes freshness from useFleetMetrics as well', async () => {
+    getFleetMetricsMock.mockResolvedValue(fleetMetrics)
+
+    const { result } = renderHook(() => useFleetMetrics('7d'), {
+      wrapper: createWrapper(),
+    })
+
+    await waitFor(() => expect(result.current.data).toBe(fleetMetrics))
+    expect(result.current.freshness.stale).toBe(false)
+    expect(result.current.freshness.observedAt).toBeGreaterThan(0)
+  })
+})
