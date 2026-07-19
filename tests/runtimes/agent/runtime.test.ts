@@ -15433,6 +15433,35 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(block).not.toContain('current provider: claude-cli');
   });
 
+  it('/model status disambiguates configured fallback entries that share a provider (B23)', async () => {
+    // Live exhibit: two DISTINCT configured fallback entries rendered
+    // "opencode-cli → opencode-cli" — indistinguishable. When an entry
+    // carries a model, the chain must render "provider (model)"; model-less
+    // entries keep the bare provider label.
+    cfgAny().agentFallbacks = [
+      { provider: 'opencode-cli', model: 'glm-4.7' },
+      { provider: 'opencode-cli', model: 'kimi-k3' },
+    ];
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toBeDefined();
+    expect(status).toContain(
+      'Fallback chain (configured): opencode-cli (glm-4.7) → opencode-cli (kimi-k3)',
+    );
+  });
+
+  it('/model status keeps the bare provider label for model-less fallback entries (B23)', async () => {
+    cfgAny().agentFallbacks = [
+      { provider: 'codex-cli' },
+      { provider: 'opencode-cli', model: 'kimi-k3' },
+    ];
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toContain('Fallback chain (configured): codex-cli → opencode-cli (kimi-k3)');
+  });
+
   it('/model status reports the PINNED provider as the next-session route, not the default (R7)', async () => {
     cfgAny().agentFallbacks = [{ provider: 'codex-cli' }];
     const { runtime, sentMessages } = makeRoutingRuntime();

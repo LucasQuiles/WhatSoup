@@ -8340,7 +8340,10 @@ export class AgentRuntime implements Runtime {
     const fallbackLine = this.isFallbackWindowActive
       ? `Fallback: active — new sessions route via ${nextProvider}`
       : this.agentFallbacks.length > 0
-        ? `Fallback chain (configured): ${this.agentFallbacks.map((e) => e.provider).join(' → ')}`
+        // B23: entries may share a provider and differ only by model — render
+        // "provider (model)" when a model is pinned so distinct configured
+        // entries never collapse to indistinguishable labels.
+        ? `Fallback chain (configured): ${this.agentFallbacks.map((e) => (e.model ? `${e.provider} (${e.model})` : e.provider)).join(' → ')}`
         : 'Fallback: none configured';
     const nextLine = live && live.provider !== nextProvider
       ? `\nNext session: ${nextProvider}`
