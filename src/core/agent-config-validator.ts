@@ -1021,7 +1021,7 @@ function validateAgentOptions(
     ) {
       return err(
         'agentOptions.providerConfig.baseUrl',
-        'agentOptions.providerConfig.baseUrl is set but no model is configured — without a top-level "model" or "models.conversation" the custom endpoint would never be used; set one that routes to it',
+        'agentOptions.providerConfig.baseUrl is set but no model is configured — without an "agentOptions.model", top-level "model", or "models.conversation" the custom endpoint would never be used; set one that routes to it',
       );
     }
   }

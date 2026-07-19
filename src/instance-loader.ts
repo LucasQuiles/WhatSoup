@@ -41,6 +41,12 @@ interface AgentOptionsSandbox {
 interface AgentOptions {
   sessionScope: SessionScope;
   cwd: string;
+  /**
+   * Agent-scoped model override. Highest-precedence input to
+   * resolveAgentModel (before top-level `model` and `models.conversation`);
+   * passed to the provider CLI as `--model` at spawn.
+   */
+  model?: string;
   instructionsPath?: string;
   sandbox?: AgentOptionsSandbox;
   mcp?: unknown;
