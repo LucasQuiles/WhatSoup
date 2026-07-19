@@ -3557,12 +3557,18 @@ export class AgentRuntime implements Runtime {
     // agent turn fails downstream. The bead lands as status='proposed' so a
     // drowsy or misfired match doesn't silently commit real work to the task list.
     try {
+      // senderPhone stays on the PLAIN resolver — it feeds the bead's ownerJid
+      // attribution (display-side, below), which is transport-agnostic.
       const senderPhone = resolvePhoneFromJid(msg.senderJid, this.db);
       // Skip the inline imperative extractor for synthetic agent-job turns —
       // otherwise a scheduled prompt would spawn a proposed task bead on every
       // fire. The job is already a durable agent_job bead; it is not an ad-hoc
       // imperative to capture.
-      if (isAdminPhone(senderPhone, config.adminPhones) && !msg.isSyntheticJob) {
+      // QR-143: the admin GRANT (auto-creating a proposed bead) must gate on
+      // authenticated transport BEFORE the phone match — a spoofed
+      // <admin-digits>@sms collapses to the admin phone but is spoofable, so it
+      // must not induce an admin-attributed proposal.
+      if (isWhatsAppAuthenticatedJid(msg.senderJid) && isAdminPhone(senderPhone, config.adminPhones) && !msg.isSyntheticJob) {
         const hit = matchImperative(content);
         if (hit) {
           const target = extractImperativeTarget(content);

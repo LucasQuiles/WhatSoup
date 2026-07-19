@@ -15466,3 +15466,54 @@ describe('NL routing handlers (nlRouting flag)', () => {
   });
 
 });
+
+// ── B3 / QR-143: inline imperative extractor admin-grant transport gate ───────
+// The extractor auto-creates a status:'proposed' task bead for admin-authored
+// imperatives. The admin GRANT must gate on authenticated transport BEFORE the
+// phone match — resolvePhoneFromJid collapses <admin-digits>@sms to the admin
+// phone, but @sms is spoofable, so it must not induce an admin-attributed
+// proposal. Both directions proven against a REAL in-memory beads table.
+describe('B3 inline imperative extractor — QR-143 transport gate', () => {
+  const ADMIN_PN = '15550100001@s.whatsapp.net'; // config mock admin phone
+  const ADMIN_SMS = '+15550100001@sms'; // spoofable: same bare digits as admin
+  const IMPERATIVE = 'remind me to call Alex Friday';
+
+  function makeRealDb(): RealDatabase {
+    const db = new RealDatabase(':memory:');
+    db.open();
+    return db;
+  }
+  function proposedCount(db: RealDatabase): number {
+    return (db.raw.prepare("SELECT COUNT(*) AS c FROM beads WHERE status = 'proposed'").get() as { c: number }).c;
+  }
+
+  it('ALLOWS an authenticated WhatsApp admin: imperative → proposed bead created (preserved)', async () => {
+    const restoreMemory = setMockMemoryConfig();
+    const db = makeRealDb();
+    try {
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await sendAndDrain(runtime, makeMsg({ senderJid: ADMIN_PN, chatJid: ADMIN_PN, content: IMPERATIVE, messageId: 'b3-admin' }));
+      expect(proposedCount(db)).toBe(1);
+      await runtime.shutdown();
+    } finally {
+      db.close();
+      restoreMemory();
+    }
+  });
+
+  it('DENIES a spoofed <admin-digits>@sms: imperative → NO proposed bead (new)', async () => {
+    const restoreMemory = setMockMemoryConfig();
+    const db = makeRealDb();
+    try {
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await sendAndDrain(runtime, makeMsg({ senderJid: ADMIN_SMS, chatJid: ADMIN_SMS, content: IMPERATIVE, messageId: 'b3-sms' }));
+      expect(proposedCount(db)).toBe(0);
+      await runtime.shutdown();
+    } finally {
+      db.close();
+      restoreMemory();
+    }
+  });
+});
