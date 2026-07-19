@@ -28,6 +28,11 @@
  */
 import { OutboundRateLimiter } from './outbound-rate-limiter.ts';
 import { WhatSoupError } from '../errors.ts';
+import {
+  adjudicateOutboundContent,
+  OUTBOUND_CONTENT_EGRESS_REDACTED_LOG,
+  type OutboundBannerClassifier,
+} from './outbound-content-egress.ts';
 
 /** Log line consumed by PR-G's flood detector — keep the wording stable. */
 export const OUTBOUND_GOVERNOR_SHED_LOG = 'outbound governor ceiling exceeded';
@@ -175,6 +180,13 @@ export interface WrapOutboundGovernorOptions {
   resolveDest: (jid: string) => string;
   /** Optional structured logger; the shed log line feeds PR-G. */
   log?: GovernorLog;
+  /**
+   * Injected send-seam content classifier (#1783). When provided, a text send
+   * whose body is a raw provider-error BANNER is redacted before the wire. Wired
+   * by the composition root (src/main.ts) from the runtimes classifier; absent in
+   * unit tests that do not exercise content-egress.
+   */
+  classifyProviderBanner?: OutboundBannerClassifier;
 }
 
 /** Minimal shape the governor needs — a socket with a `sendMessage` method. */
@@ -207,6 +219,7 @@ export function wrapWithOutboundGovernor<S extends object>(
     content: unknown,
     ...rest: unknown[]
   ): Promise<unknown> {
+    let outbound = content;
     if (classifyOutbound(content) === 'text') {
       const dest = opts.resolveDest(jid);
       const shed = await opts.governor.gate(dest);
@@ -214,8 +227,19 @@ export function wrapWithOutboundGovernor<S extends object>(
         opts.log?.warn({ dest, reason: shed }, OUTBOUND_GOVERNOR_SHED_LOG);
         throw new WhatSoupError(OUTBOUND_GOVERNOR_SHED_LOG, 'OUTBOUND_GOVERNOR_SHED');
       }
+      // #1783 — send-seam content-egress: redact a raw provider-error BANNER at
+      // this ONE convergence point before it reaches the wire. Positive-match
+      // only; ambient prose about an error and normal text pass unchanged. Runs
+      // only when the classifier is wired (composition root); no-ops otherwise.
+      if (opts.classifyProviderBanner) {
+        const egress = adjudicateOutboundContent(content, opts.classifyProviderBanner);
+        if (egress.redacted) {
+          opts.log?.warn({ dest, kind: egress.kind }, OUTBOUND_CONTENT_EGRESS_REDACTED_LOG);
+          outbound = egress.content;
+        }
+      }
     }
-    return realSend(jid, content, ...rest);
+    return realSend(jid, outbound, ...rest);
   };
 
   // Transparent wrapper: copy the underlying fn's own-property descriptors onto
