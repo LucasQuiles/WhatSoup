@@ -2,6 +2,7 @@
 // Shared real child fixture for the B1, B2, and X6 lifecycle probes.
 import { spawn } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
+import { isOrphaned } from './orphan-predicate.ts';
 
 const config = JSON.parse(process.argv[2] ?? '{}');
 const runId = config.runId ?? 'unknown';
@@ -24,9 +25,19 @@ emitInit(sessionId);
 let g1 = null;
 let g2 = null;
 if (config.spawnGrandchildren) {
+  // B25 2b: TTL-only backstop for the grandchild programs. If this fixture
+  // dies WITHOUT running selfExpire (crashAfterMs / external SIGKILL) while
+  // the vitest worker also dies, nothing else ever reaps the SIGTERM-ignoring
+  // grandchildren — the exact orphan class the fixture-level self-expiry
+  // closes, one level down. TTL ONLY, deliberately NO ppid watch (see the
+  // scope note below): the default sits above the fixture's own 30-minute
+  // TTL so the reaping suites always observe live grandchildren at test
+  // timescales and the fixture's selfExpire stays the primary reaper.
+  const grandchildTtlMs = positiveMsOr(35 * 60 * 1_000, process.env.FAKE_PROVIDER_GRANDCHILD_TTL_MS);
+  const grandchildTtl = `setTimeout(() => process.exit(0), ${grandchildTtlMs})`;
   const grandchildProgram = config.grandchildrenIgnoreSigterm
-    ? "process.on('SIGTERM',()=>{}); setInterval(()=>{}, 1000)"
-    : 'setInterval(()=>{}, 1000)';
+    ? `process.on('SIGTERM',()=>{}); ${grandchildTtl}; setInterval(()=>{}, 1000)`
+    : `${grandchildTtl}; setInterval(()=>{}, 1000)`;
   const spawnGrandchild = (tag, detached) =>
     spawn(process.execPath, ['-e', grandchildProgram, `AUDIT_X6_${runId}_${tag}`], {
       detached,
@@ -76,7 +87,10 @@ setInterval(() => {}, 1_000);
 // grandchild `-e` programs above deliberately get NO ppid-watch of their own
 // (self-exit there would fake a pass for the reaper), while grandchildren ARE
 // reaped here when the fixture itself self-expires, so an expiring fixture
-// never strands its own tree.
+// never strands its own tree. B25 2b adds a TTL-ONLY backstop to the
+// grandchild programs (default far above any suite run, so the reaper still
+// finds live grandchildren at test timescales) for the one remaining strand
+// path: the fixture dying without selfExpire while the worker also dies.
 function selfExpire() {
   for (const grandchild of [g1, g2]) {
     if (!grandchild?.pid) continue;
@@ -96,8 +110,16 @@ function positiveMsOr(fallbackMs, raw) {
 
 // Both timers are unref'd: self-expiry must never keep the fixture alive on
 // its own — the keep-alive interval above is the only thing holding the loop.
+//
+// B25 2a: orphan signal = "ppid CHANGED from its startup value" (see
+// orphan-predicate.ts). The old `process.ppid === 1` form was macOS-only in
+// practice: under Linux child-subreapers (systemd --user — the fleet's
+// Linux deploy-gate environment; docker-init; CI shims) an orphan reparents
+// to the subreaper, never to init, so the watch never fired and the TTL was
+// the only working backstop there.
+const startupPpid = process.ppid;
 const orphanTimer = setInterval(() => {
-  if (process.ppid === 1) selfExpire();
+  if (isOrphaned(startupPpid, process.ppid)) selfExpire();
 }, positiveMsOr(1_000, process.env.FAKE_PROVIDER_ORPHAN_POLL_MS));
 orphanTimer.unref();
 
