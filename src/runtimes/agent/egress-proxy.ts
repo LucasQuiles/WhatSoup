@@ -272,11 +272,18 @@ export function handleConnect(
 }
 
 export class EgressProxy {
-  private constructor(
-    private readonly server: HttpServer,
-    private readonly tunnels: Set<Duplex>,
-    public readonly port: number,
-  ) {}
+  // Explicit fields (not constructor parameter properties): the runtime uses
+  // Node's --experimental-strip-types (strip-only mode, no build), which rejects
+  // parameter properties. See tests/strip-types-compat.test.ts.
+  private readonly server: HttpServer;
+  private readonly tunnels: Set<Duplex>;
+  public readonly port: number;
+
+  private constructor(server: HttpServer, tunnels: Set<Duplex>, port: number) {
+    this.server = server;
+    this.tunnels = tunnels;
+    this.port = port;
+  }
 
   static async start(opts: EgressProxyOptions): Promise<EgressProxy> {
     const server = createHttpServer();
