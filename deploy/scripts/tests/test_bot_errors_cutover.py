@@ -774,6 +774,159 @@ def test_gate_e_missing_health_port_in_profile_fails_closed(tmp_path: Path):
     assert len(result.failures) == 1
 
 
+def test_gate_f_raising_live_probe_fails_closed(tmp_path: Path):
+    mod = _load_module()
+    inventory_path = _write_inventory(
+        tmp_path,
+        [
+            {
+                "host": "h1",
+                "role": "bot-host",
+                "guiSessionExpected": "always_aqua",
+                "profile": "h1.json",
+                "collectorRemote": True,
+                "instances": [
+                    {
+                        "name": "svc1",
+                        "expected": "blocked",
+                        "service": "com.whatsoup.svc1",
+                        "healthPort": 9099,
+                    }
+                ],
+            }
+        ],
+    )
+    profiles_dir = tmp_path / "health-profiles"
+    _write_profile(
+        profiles_dir,
+        "h1.json",
+        {
+            "role": "bot-host",
+            "instances": [
+                {
+                    "name": "svc1",
+                    "expected": "blocked",
+                    "service": "com.whatsoup.svc1",
+                    "healthPort": 9099,
+                }
+            ],
+        },
+    )
+
+    def _raising_probe(host: str, name: str) -> dict:
+        raise RuntimeError("probe-boom-9099")
+
+    result = mod.cutover_gate(
+        "h1",
+        "svc1",
+        inventory_path=inventory_path,
+        profiles_dir=profiles_dir,
+        live_probe=_raising_probe,
+    )
+
+    assert result.ok is False
+    assert result.failures != []
+    assert any("probe-boom-9099" in f for f in result.failures)
+
+
+def test_gate_g_malformed_profile_json_fails_closed(tmp_path: Path):
+    mod = _load_module()
+    inventory_path = _write_inventory(
+        tmp_path,
+        [
+            {
+                "host": "h1",
+                "role": "bot-host",
+                "guiSessionExpected": "always_aqua",
+                "profile": "h1.json",
+                "collectorRemote": True,
+                "instances": [
+                    {
+                        "name": "svc1",
+                        "expected": "blocked",
+                        "service": "com.whatsoup.svc1",
+                        "healthPort": 9099,
+                    }
+                ],
+            }
+        ],
+    )
+    profiles_dir = tmp_path / "health-profiles"
+    profiles_dir.mkdir(parents=True, exist_ok=True)
+    profile_path = profiles_dir / "h1.json"
+    profile_path.write_text("{not valid json", encoding="utf-8")
+
+    result = mod.cutover_gate(
+        "h1",
+        "svc1",
+        inventory_path=inventory_path,
+        profiles_dir=profiles_dir,
+        # active+healthy so a broken fail-closed contract that somehow
+        # limped past the malformed profile would have something to
+        # disagree about -- proving ok=False came from the JSON parse
+        # failure, not from an inert probe result.
+        live_probe=_probe(active=True, healthy=True),
+    )
+
+    assert result.ok is False
+    lowered = [f.lower() for f in result.failures]
+    assert any("parse" in f for f in lowered)
+    assert any("json" in f for f in lowered)
+
+
+def test_gate_h_absent_instance_fails_closed(tmp_path: Path):
+    mod = _load_module()
+    inventory_path = _write_inventory(
+        tmp_path,
+        [
+            {
+                "host": "h1",
+                "role": "bot-host",
+                "guiSessionExpected": "always_aqua",
+                "profile": "h1.json",
+                "collectorRemote": True,
+                "instances": [
+                    {
+                        "name": "svc1",
+                        "expected": "blocked",
+                        "service": "com.whatsoup.svc1",
+                        "healthPort": 9099,
+                    }
+                ],
+            }
+        ],
+    )
+    profiles_dir = tmp_path / "health-profiles"
+    _write_profile(
+        profiles_dir,
+        "h1.json",
+        {
+            "role": "bot-host",
+            "instances": [
+                {
+                    "name": "svc1",
+                    "expected": "blocked",
+                    "service": "com.whatsoup.svc1",
+                    "healthPort": 9099,
+                }
+            ],
+        },
+    )
+
+    result = mod.cutover_gate(
+        "h1",
+        "does-not-exist",
+        inventory_path=inventory_path,
+        profiles_dir=profiles_dir,
+        live_probe=_probe(active=True, healthy=True),
+    )
+
+    assert result.ok is False
+    lowered = [f.lower() for f in result.failures]
+    assert any("not found" in f for f in lowered)
+    assert any("does-not-exist" in f for f in lowered)
+
+
 def test_asymmetric_repair_profile_already_always_on(tmp_path: Path):
     mod = _load_module()
     inventory_path = _write_inventory(
@@ -825,3 +978,68 @@ def test_asymmetric_repair_profile_already_always_on(tmp_path: Path):
 
     profile_after = json.loads(profile_path.read_text(encoding="utf-8"))
     assert profile_after["instances"][0]["expected"] == "always_on"
+
+
+# ---------------------------------------------------------------------------
+# Case 9: idempotent rerun -- both surfaces are ALREADY "always_on" (e.g. the
+# operator reruns the repair after a previous successful call, or after the
+# cutover_gate above already reported ok=True). Neither flip flag should
+# claim a repair happened, and both files must still read "always_on"
+# afterward -- a rerun must be a safe no-op flip-wise, not a divergence.
+# ---------------------------------------------------------------------------
+
+
+def test_rerun_when_both_surfaces_already_always_on_is_a_noop(tmp_path: Path):
+    mod = _load_module()
+    inventory_path = _write_inventory(
+        tmp_path,
+        [
+            {
+                "host": "h1",
+                "role": "bot-host",
+                "guiSessionExpected": "always_aqua",
+                "profile": "h1.json",
+                "collectorRemote": True,
+                "instances": [
+                    {
+                        "name": "svc1",
+                        "expected": "always_on",
+                        "service": "com.whatsoup.svc1",
+                        "healthPort": 9099,
+                    }
+                ],
+            }
+        ],
+    )
+    profiles_dir = tmp_path / "health-profiles"
+    profile_path = _write_profile(
+        profiles_dir,
+        "h1.json",
+        {
+            "role": "bot-host",
+            "instances": [
+                {
+                    "name": "svc1",
+                    "expected": "always_on",
+                    "service": "com.whatsoup.svc1",
+                    "healthPort": 9099,
+                }
+            ],
+        },
+    )
+
+    summary = mod.restore_service_to_always_on(
+        "h1", "svc1", inventory_path=inventory_path, profiles_dir=profiles_dir
+    )
+
+    assert summary["inventoryRepaired"] is False
+    assert summary["profileRepaired"] is False
+    assert summary["healthPort"] == 9099
+
+    inventory_after = json.loads(inventory_path.read_text(encoding="utf-8"))
+    assert inventory_after["hosts"][0]["instances"][0]["expected"] == "always_on"
+    assert inventory_after["hosts"][0]["instances"][0]["healthPort"] == 9099
+
+    profile_after = json.loads(profile_path.read_text(encoding="utf-8"))
+    assert profile_after["instances"][0]["expected"] == "always_on"
+    assert profile_after["instances"][0]["healthPort"] == 9099
