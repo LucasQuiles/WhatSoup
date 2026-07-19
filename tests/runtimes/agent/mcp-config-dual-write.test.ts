@@ -18,6 +18,8 @@ const { mockConfig, mockRuntimeLogger } = vi.hoisted(() => ({
     toolUpdateMode: 'full' as const,
     toolUpdateRedirectJid: null as string | null,
     textAggregateDelayMs: 0,
+    stateRoot: '/tmp/whatsoup-test-state-mcpdual',
+    restartLoopGuard: { enabled: true, maxRestarts: 3, windowMs: 300_000 },
     mediaDir: '/tmp/whatsoup-test-media',
     pineconeAllowedIndexes: [] as string[],
     voiceReply: 'never' as const,
