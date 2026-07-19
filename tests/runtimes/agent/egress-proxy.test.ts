@@ -200,10 +200,20 @@ describe('EgressProxy', () => {
 
     let tunnelSocket: Socket | undefined;
     try {
-      const { socket, statusLine } = await rawConnect(proxy.port, `127.0.0.1:${targetPort}`);
+      const socket = netConnect(proxy.port, '127.0.0.1');
       tunnelSocket = socket;
-      expect(statusLine).toBe('HTTP/1.1 403 Forbidden');
-      await waitForClose(socket);
+      let buf = '';
+      socket.on('data', (chunk: Buffer) => {
+        buf += chunk.toString();
+      });
+      await new Promise<void>((resolve, reject) => {
+        socket.on('connect', () => socket.write(`CONNECT 127.0.0.1:${targetPort} HTTP/1.1\r\n\r\n`));
+        socket.on('close', () => resolve());
+        socket.on('error', reject);
+      });
+      // Same short body as the forward-path 403 ('403 Forbidden').
+      expect(buf.startsWith('HTTP/1.1 403 Forbidden')).toBe(true);
+      expect(buf.endsWith('403 Forbidden')).toBe(true);
       expect(socket.destroyed).toBe(true);
       expect(log).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -217,6 +227,55 @@ describe('EgressProxy', () => {
       tunnelSocket?.destroy();
       await proxy.close();
       await closeServer(target);
+    }
+  });
+
+  it('malformed CONNECT target denies with logged reason', async () => {
+    const log = vi.fn<(event: EgressLogEvent) => void>();
+    const proxy = await EgressProxy.start({ policy: makePolicy([]), log });
+
+    let tunnelSocket: Socket | undefined;
+    try {
+      const socket = netConnect(proxy.port, '127.0.0.1');
+      tunnelSocket = socket;
+      await new Promise<void>((resolve, reject) => {
+        socket.on('connect', () => socket.write('CONNECT not-a-valid-target HTTP/1.1\r\n\r\n'));
+        socket.on('data', () => resolve());
+        socket.on('error', reject);
+      });
+      expect(log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: 'sandbox_egress_deny',
+          host: 'not-a-valid-target',
+          port: 0,
+          reason: 'malformed-target',
+        }),
+      );
+    } finally {
+      tunnelSocket?.destroy();
+      await proxy.close();
+    }
+  });
+
+  it('allowed CONNECT to an unreachable upstream returns 502', async () => {
+    const { server: target, port: targetPort } = await startTargetServer();
+    await closeServer(target);
+    const log = vi.fn<(event: EgressLogEvent) => void>();
+    const proxy = await EgressProxy.start({
+      policy: makePolicy([`127.0.0.1:${targetPort}`]),
+      log,
+    });
+
+    let tunnelSocket: Socket | undefined;
+    try {
+      const { socket, statusLine } = await rawConnect(proxy.port, `127.0.0.1:${targetPort}`);
+      tunnelSocket = socket;
+      expect(statusLine).toBe('HTTP/1.1 502 Bad Gateway');
+      await waitForClose(socket);
+      expect(socket.destroyed).toBe(true);
+    } finally {
+      tunnelSocket?.destroy();
+      await proxy.close();
     }
   });
 
@@ -250,6 +309,34 @@ describe('EgressProxy', () => {
       expect(log).toHaveBeenCalledWith(
         expect.objectContaining({
           event: 'sandbox_egress_deny',
+          host: '127.0.0.1',
+          port: targetPort,
+          reason: 'policy-unreadable',
+        }),
+      );
+    } finally {
+      await proxy.close();
+      await closeServer(target);
+    }
+  });
+
+  it('failOpen=true allows when policy read throws (fail-open policy-unreadable parity)', async () => {
+    const { server: target, port: targetPort } = await startTargetServer();
+    const log = vi.fn<(event: EgressLogEvent) => void>();
+    const policy: EgressPolicySource = {
+      read: () => {
+        throw new Error('policy file corrupt');
+      },
+    };
+    const proxy = await EgressProxy.start({ policy, log, failOpen: true });
+
+    try {
+      const { statusCode, body } = await forwardGet(proxy.port, targetPort);
+      expect(statusCode).toBe(200);
+      expect(body).toBe('ok');
+      expect(log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: 'sandbox_egress_fail_open',
           host: '127.0.0.1',
           port: targetPort,
           reason: 'policy-unreadable',

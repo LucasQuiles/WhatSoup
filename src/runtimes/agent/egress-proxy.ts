@@ -14,14 +14,18 @@
  *
  * Fail-closed by construction: an empty (or unset) allowlist denies
  * everything, and a throwing `policy.read()` — a corrupt or unreadable
- * policy file, surfaced by the caller's `EgressPolicySource` — ALWAYS denies
- * with reason `policy-unreadable`, regardless of `failOpen`. `failOpen` only
- * changes what happens when the policy is readable but the host/port is not
- * on the allowlist: normally that denies, with `failOpen: true` it allows
- * and logs `sandbox_egress_fail_open` instead of `sandbox_egress_deny` (the
- * WHATSOUP_SANDBOX_FAIL_OPEN=1 escape-valve parity from
- * `deploy/hooks/agent-sandbox.sh`, resolved by the CALLER — this module never
- * reads `process.env`).
+ * policy file, surfaced by the caller's `EgressPolicySource` — denies with
+ * reason `policy-unreadable`, UNLESS `failOpen` is true, in which case it
+ * allows and logs `sandbox_egress_fail_open` with reason `policy-unreadable`
+ * instead. This is the same shape as the missing-`sandbox-policy.json`
+ * handling in `deploy/hooks/agent-sandbox.sh:22-25`: that hook treats an
+ * unreadable (there, absent) policy as the trigger for
+ * `WHATSOUP_SANDBOX_FAIL_OPEN=1` to allow, and this module mirrors it for the
+ * policy-throws case. `failOpen` likewise relaxes the plain "policy read fine
+ * but host/port is not on the allowlist" denial: normally that denies, with
+ * `failOpen: true` it allows and logs `sandbox_egress_fail_open` instead of
+ * `sandbox_egress_deny` (resolved by the CALLER — this module never reads
+ * `process.env`).
  *
  * The policy is re-read on every single request (not cached at start()) so a
  * live policy edit takes effect immediately and a policy that goes corrupt
@@ -51,15 +55,22 @@ export interface EgressProxyOptions {
   log: (event: EgressLogEvent) => void;
   /**
    * WHATSOUP_SANDBOX_FAIL_OPEN=1 parity — resolved by the CALLER, never read
-   * from process.env here. Only relaxes "host not on the allowlist" denials;
-   * a policy-read failure still denies unconditionally (see module docs).
+   * from process.env here. Relaxes both a not-on-the-allowlist denial and a
+   * policy-read failure into an allow (see module docs).
    */
   failOpen?: boolean;
 }
 
 const HTTP_DENY_BODY = '403 Forbidden';
 const CONNECT_ESTABLISHED = 'HTTP/1.1 200 Connection Established\r\n\r\n';
-const CONNECT_FORBIDDEN = 'HTTP/1.1 403 Forbidden\r\n\r\n';
+// Same short body as the forward-path 403 (HTTP_DENY_BODY), so a CONNECT
+// deny and a forward deny are indistinguishable to the caller by body text.
+const CONNECT_FORBIDDEN =
+  `HTTP/1.1 403 Forbidden\r\nContent-Length: ${Buffer.byteLength(HTTP_DENY_BODY)}\r\nConnection: close\r\n\r\n${HTTP_DENY_BODY}`;
+// No body: sent only when adjudication already allowed the tunnel and the
+// upstream TCP connect itself failed — there is nothing upstream to relay a
+// body from, and the 200 banner has not been sent yet (see handleConnect).
+const CONNECT_BAD_GATEWAY = 'HTTP/1.1 502 Bad Gateway\r\n\r\n';
 
 /**
  * Pure allowlist match, exported so the future firewall backstop can reuse
@@ -93,6 +104,10 @@ function adjudicate(opts: EgressProxyOptions, host: string, port: number): boole
   try {
     policy = opts.policy.read();
   } catch {
+    if (opts.failOpen) {
+      opts.log({ event: 'sandbox_egress_fail_open', host, port, reason: 'policy-unreadable' });
+      return true;
+    }
     opts.log({ event: 'sandbox_egress_deny', host, port, reason: 'policy-unreadable' });
     return false;
   }
@@ -112,16 +127,21 @@ function adjudicate(opts: EgressProxyOptions, host: string, port: number): boole
 }
 
 function handleForward(opts: EgressProxyOptions, req: IncomingMessage, res: ServerResponse): void {
+  const rawUrl = req.url ?? '';
   let target: URL;
   try {
-    target = new URL(req.url ?? '');
+    target = new URL(rawUrl);
   } catch {
+    opts.log({ event: 'sandbox_egress_deny', host: rawUrl, port: 0, reason: 'malformed-target' });
     res.writeHead(400, { 'Content-Type': 'text/plain' });
     res.end('400 Bad Request: absolute-URI required');
     return;
   }
 
-  const host = target.hostname;
+  // Normalized once here so adjudication and every log event below carry the
+  // same lowercase host (URL already lowercases http/https hostnames, but we
+  // don't rely on that — see the CONNECT path, which has no such guarantee).
+  const host = target.hostname.toLowerCase();
   const port = target.port ? Number(target.port) : target.protocol === 'https:' ? 443 : 80;
 
   if (!adjudicate(opts, host, port)) {
@@ -171,12 +191,18 @@ function handleConnect(
   clientSocket: Duplex,
   head: Buffer,
 ): void {
-  const target = parseConnectTarget(req.url ?? '');
-  if (!target) {
+  const rawTarget = req.url ?? '';
+  const parsed = parseConnectTarget(rawTarget);
+  if (!parsed) {
+    opts.log({ event: 'sandbox_egress_deny', host: rawTarget, port: 0, reason: 'malformed-target' });
     clientSocket.write(CONNECT_FORBIDDEN, () => clientSocket.destroy());
     return;
   }
-  const { host, port } = target;
+  // Normalized once here (see handleForward) — the raw CONNECT authority is
+  // never run through URL parsing, so unlike the forward path this is the
+  // only place case gets normalized before adjudication/logging/connect.
+  const host = parsed.host.toLowerCase();
+  const { port } = parsed;
 
   if (!adjudicate(opts, host, port)) {
     clientSocket.write(CONNECT_FORBIDDEN, () => clientSocket.destroy());
@@ -187,6 +213,11 @@ function handleConnect(
   tunnels.add(clientSocket);
   tunnels.add(upstream);
 
+  // Set once the 200 banner has actually been written, so the upstream
+  // error handler below knows whether it's still safe to write a 502
+  // status line (never write after the tunnel is already established).
+  let established = false;
+
   const teardown = () => {
     tunnels.delete(clientSocket);
     tunnels.delete(upstream);
@@ -196,10 +227,18 @@ function handleConnect(
 
   clientSocket.on('error', teardown);
   clientSocket.on('close', teardown);
-  upstream.on('error', teardown);
   upstream.on('close', teardown);
 
+  upstream.on('error', () => {
+    if (!established && !clientSocket.destroyed && clientSocket.writable) {
+      clientSocket.write(CONNECT_BAD_GATEWAY, () => teardown());
+      return;
+    }
+    teardown();
+  });
+
   upstream.on('connect', () => {
+    established = true;
     clientSocket.write(CONNECT_ESTABLISHED);
     if (head.length > 0) upstream.write(head);
     clientSocket.pipe(upstream);
