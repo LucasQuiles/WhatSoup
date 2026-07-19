@@ -6,15 +6,33 @@
       "measurements": [
         {
           "filePath": "src/runtimes/agent/runtime.ts",
-          "lines": 11691,
-          "maxLines": 11691
+          "lines": 11717,
+          "maxLines": 11717
         },
         {
           "filePath": "tests/runtimes/agent/runtime.test.ts",
-          "lines": 15563,
-          "maxLines": 15563
+          "lines": 15797,
+          "maxLines": 15797
         }
       ]
+    },
+    "arch.ssot-lid-reads": {
+      "violationCount": 6
+    },
+    "arch.ssot-jid-construction": {
+      "violationCount": 7
+    },
+    "arch.ssot-name-ladder": {
+      "violationCount": 5
+    },
+    "arch.ssot-phone-shape": {
+      "violationCount": 7
+    },
+    "arch.ssot-presentation-literals": {
+      "violationCount": 0
+    },
+    "arch.ring-boundaries": {
+      "violationCount": 57
     }
   }
 }

@@ -32,6 +32,7 @@
 import {
   COMMAND_REGISTRY,
   GATE_PRESENTATION,
+  PASSTHROUGH_PHRASE,
   getCommandSpec,
   type CommandSpec,
 } from './command-registry.ts';
@@ -83,8 +84,10 @@ export function renderHelp({ nlRouting }: { nlRouting: boolean }): string {
     '_Any other message is forwarded._',
     // Passthrough discoverability (restores the base-/help trailer the W1-T5
     // rewrite dropped). Provider-neutral wording: the model-attribution
-    // hygiene rule bans the agent-CLI product name in new repo text.
-    'Other slash commands (e.g. `/compact`) are passed through to the agent.',
+    // hygiene rule bans the agent-CLI product name in new repo text. The
+    // phrase itself is registry-carried (PASSTHROUGH_PHRASE — SSOT,
+    // arch.ssot-presentation-literals; renderHelpDetail composes the same one).
+    `Other slash commands (e.g. \`/compact\`) are ${PASSTHROUGH_PHRASE}.`,
     `(${detailHint})`,
   ].join('\n');
 }
@@ -120,8 +123,9 @@ export function renderHelpDetail(name: string, { nlRouting }: { nlRouting: boole
     // Alias off ≠ unknown: the command still FORWARDS to the agent
     // (byte-identical-off, D7), so the honest detail names the pass-through
     // — without rendering the local semantics the flag disables (B23).
-    // Wording matches renderHelp's "passed through to the agent" trailer.
-    return `\`/${query}\` is not active here — it is passed through to the agent. See \`/help\` for the full list.`;
+    // Wording matches renderHelp's trailer BY CONSTRUCTION: both compose the
+    // registry-carried PASSTHROUGH_PHRASE (SSOT, arch.ssot-presentation-literals).
+    return `\`/${query}\` is not active here — it is ${PASSTHROUGH_PHRASE}. See \`/help\` for the full list.`;
   }
   if (!spec) {
     return `Unknown command \`/${query}\`. Not a command — try \`/help\` for the full list.`;
