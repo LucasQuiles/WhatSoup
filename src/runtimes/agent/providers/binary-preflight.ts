@@ -237,14 +237,73 @@ export async function probeModelCatalog(
   model: string,
   spawnImpl: typeof spawn = spawn,
 ): Promise<ModelCatalogResult> {
-  return new Promise<ModelCatalogResult>((resolve) => {
+  const catalogIds = await collectModelCatalogIds(binary, spawnImpl);
+  // null (could not run) and [] (clean close, no ids) are indistinguishable
+  // from a misbehaving binary → fail open rather than cry wolf.
+  if (catalogIds === null || catalogIds.length === 0) {
+    return { status: 'unknown', suggestion: null };
+  }
+  if (catalogIds.includes(model)) {
+    return { status: 'found', suggestion: null };
+  }
+  const lowerModel = model.toLowerCase();
+  const caseInsensitive = catalogIds.find((id) => id.toLowerCase() === lowerModel) ?? null;
+  return { status: 'not_found', suggestion: caseInsensitive };
+}
+
+/** Result of {@link listModelCatalog}: the harness's dynamic model catalogue. */
+export type ModelCatalogListing = {
+  /** 'ok' when the binary returned ≥1 catalog id; 'unavailable' on any failure
+   *  or empty output — the render must degrade honestly (as-of), never a
+   *  hardcoded/stale list (CONFIG-SURFACE-MAP.md #4). */
+  status: 'ok' | 'unavailable';
+  /** Catalog ids in the binary's own order (trimmed, blanks dropped); [] when unavailable. */
+  ids: string[];
+};
+
+/**
+ * List the model catalogue a provider binary self-reports via `<binary> models`
+ * — the dynamic, PER-HARNESS source for the `/config model` catalogue render
+ * (owner ask 2026-07-19). Same spawn + 5 s kill-timer discipline as
+ * probeModelCatalog, but returns the full id list instead of a match verdict.
+ *
+ * Honest-degrade contract: anything that is not a clean close with ≥1 id
+ * (spawn error, timeout, synchronous throw, empty/whitespace output) →
+ * `{ status: 'unavailable', ids: [] }` so the caller renders "catalogue
+ * unavailable (as of …)" rather than an empty or fake list. Never throws.
+ */
+export async function listModelCatalog(
+  binary: string,
+  spawnImpl: typeof spawn = spawn,
+): Promise<ModelCatalogListing> {
+  const catalogIds = await collectModelCatalogIds(binary, spawnImpl);
+  if (catalogIds === null || catalogIds.length === 0) {
+    return { status: 'unavailable', ids: [] };
+  }
+  return { status: 'ok', ids: catalogIds };
+}
+
+/**
+ * Shared spawn+parse core for `<binary> models`, consumed by both
+ * probeModelCatalog (match verdict) and listModelCatalog (full list). Spawns
+ * the command with a 5 s kill-timer, collects stdout, and resolves to:
+ *  - the trimmed, non-empty catalog id lines (in order) on a clean close
+ *    (possibly `[]` when output was blank), or
+ *  - `null` when the command could not be run to completion (synchronous spawn
+ *    throw, spawn 'error' event, or timeout).
+ * Never throws. `killTimer` is declared before `settle` captures it so a
+ * synchronous spawn throw cannot hit a TDZ (same hazard as probeFallbackBinary).
+ */
+function collectModelCatalogIds(
+  binary: string,
+  spawnImpl: typeof spawn,
+): Promise<string[] | null> {
+  return new Promise<string[] | null>((resolve) => {
     let settled = false;
     let stdoutBuffer = '';
-    // Declared before settle() captures it so a synchronous spawn throw cannot
-    // hit a TDZ (same hazard as probeFallbackBinary above).
     let killTimer: ReturnType<typeof setTimeout> | undefined;
 
-    const settle = (result: ModelCatalogResult): void => {
+    const settle = (result: string[] | null): void => {
       if (settled) return;
       settled = true;
       clearTimeout(killTimer);
@@ -257,15 +316,13 @@ export async function probeModelCatalog(
         stdio: ['ignore', 'pipe', 'ignore'],
       } as SpawnOptionsWithoutStdio);
     } catch {
-      // Synchronous throw from spawn itself — binary presence is the binary
-      // probe's question, not ours; fail open.
-      settle({ status: 'unknown', suggestion: null });
+      settle(null);
       return;
     }
 
     killTimer = setTimeout(() => {
       try { child.kill(); } catch { /* ignore kill errors */ }
-      settle({ status: 'unknown', suggestion: null });
+      settle(null);
     }, PROBE_TIMEOUT_MS);
 
     child.stdout?.on('data', (chunk: Buffer) => {
@@ -273,28 +330,16 @@ export async function probeModelCatalog(
     });
 
     child.on('error', () => {
-      settle({ status: 'unknown', suggestion: null });
+      settle(null);
     });
 
     child.on('close', () => {
-      if (settled) return;
-      const catalogIds = stdoutBuffer
-        .split('\n')
-        .map((line) => line.trim())
-        .filter((line) => line.length > 0);
-      if (catalogIds.length === 0) {
-        // Empty catalog output is indistinguishable from a misbehaving
-        // binary — fail open rather than cry wolf.
-        settle({ status: 'unknown', suggestion: null });
-        return;
-      }
-      if (catalogIds.includes(model)) {
-        settle({ status: 'found', suggestion: null });
-        return;
-      }
-      const lowerModel = model.toLowerCase();
-      const caseInsensitive = catalogIds.find((id) => id.toLowerCase() === lowerModel) ?? null;
-      settle({ status: 'not_found', suggestion: caseInsensitive });
+      settle(
+        stdoutBuffer
+          .split('\n')
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0),
+      );
     });
   });
 }

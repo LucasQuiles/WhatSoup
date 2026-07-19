@@ -18,7 +18,7 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { probeModelCatalog } from '../../../src/runtimes/agent/providers/binary-preflight.ts';
+import { probeModelCatalog, listModelCatalog } from '../../../src/runtimes/agent/providers/binary-preflight.ts';
 
 // ─── Fake child process builder ───────────────────────────────────────────────
 
@@ -181,5 +181,89 @@ describe('probeModelCatalog', () => {
     await expect(
       probeModelCatalog('opencode', 'minimax/MiniMax-M2', throwingSpawnImpl),
     ).resolves.toStrictEqual({ status: 'unknown', suggestion: null });
+  });
+});
+
+// ─── listModelCatalog: dynamic per-harness catalogue LISTER ───────────────────
+// Same `<binary> models` spawn + 5 s kill-timer discipline as probeModelCatalog,
+// but returns the FULL id list (not a found/not_found verdict) for the /config
+// model catalogue render. Honest-degrade contract (CONFIG-SURFACE-MAP.md #4):
+// anything that isn't a clean close with ≥1 id → { status: 'unavailable', ids: [] }
+// so the render says "catalogue unavailable (as of …)", never a fake/stale list.
+
+describe('listModelCatalog', () => {
+  it('returns ok with the catalog ids in order for a normal catalog', async () => {
+    const spawnImpl = makeSpawnImpl({
+      stdoutChunks: ['minimax/MiniMax-M2\nminimax/MiniMax-Text-01\ndeepseek/deepseek-chat\n'],
+    });
+    const result = await listModelCatalog('opencode', spawnImpl);
+    expect(result).toStrictEqual({
+      status: 'ok',
+      ids: ['minimax/MiniMax-M2', 'minimax/MiniMax-Text-01', 'deepseek/deepseek-chat'],
+    });
+  });
+
+  it('spawns `<binary> models` with the binary under listing', async () => {
+    const spawnSpy = vi.fn((_binary: string, _args: string[]) =>
+      makeFakeChild({ stdoutChunks: ['claude-opus-4-8\n'] }));
+    await listModelCatalog('claude', spawnSpy as unknown as SpawnImpl);
+    expect(spawnSpy).toHaveBeenCalledWith('claude', ['models'], expect.anything());
+  });
+
+  it('trims whitespace, drops blank lines, and joins split chunks while preserving order', async () => {
+    const spawnImpl = makeSpawnImpl({
+      stdoutChunks: ['\n  deepseek/deepseek-chat  \n\n', '  minimax/MiniM', 'ax-M2\t\n\n'],
+    });
+    const result = await listModelCatalog('opencode', spawnImpl);
+    expect(result).toStrictEqual({
+      status: 'ok',
+      ids: ['deepseek/deepseek-chat', 'minimax/MiniMax-M2'],
+    });
+  });
+
+  it('returns unavailable when the catalog command produces no output', async () => {
+    const result = await listModelCatalog('opencode', makeSpawnImpl({ stdoutChunks: [] }));
+    expect(result).toStrictEqual({ status: 'unavailable', ids: [] });
+  });
+
+  it('returns unavailable when stdout is only whitespace', async () => {
+    const result = await listModelCatalog('opencode', makeSpawnImpl({ stdoutChunks: ['\n   \n\n'] }));
+    expect(result).toStrictEqual({ status: 'unavailable', ids: [] });
+  });
+
+  it('returns unavailable on an ENOENT spawn error', async () => {
+    const result = await listModelCatalog('opencode', makeSpawnImpl({ errorCode: 'ENOENT' }));
+    expect(result).toStrictEqual({ status: 'unavailable', ids: [] });
+  });
+
+  it('returns unavailable on a non-ENOENT spawn error', async () => {
+    const result = await listModelCatalog('opencode', makeSpawnImpl({ errorCode: 'EACCES' }));
+    expect(result).toStrictEqual({ status: 'unavailable', ids: [] });
+  });
+
+  it('returns unavailable and kills the child when the listing times out', async () => {
+    vi.useFakeTimers();
+    const fakeChild = makeFakeChild({ neverCloses: true });
+    const spawnImpl = ((_binary: string, _args: string[]) => fakeChild) as unknown as SpawnImpl;
+
+    const listPromise = listModelCatalog('opencode', spawnImpl);
+    await vi.advanceTimersByTimeAsync(5_001);
+
+    expect(await listPromise).toStrictEqual({ status: 'unavailable', ids: [] });
+    expect(fakeChild.kill).toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it('never rejects even when spawnImpl synchronously throws', async () => {
+    const throwingSpawnImpl = (() => {
+      const err: NodeJS.ErrnoException = new Error('ENOENT');
+      err.code = 'ENOENT';
+      throw err;
+    }) as unknown as SpawnImpl;
+
+    await expect(listModelCatalog('opencode', throwingSpawnImpl)).resolves.toStrictEqual({
+      status: 'unavailable',
+      ids: [],
+    });
   });
 });
