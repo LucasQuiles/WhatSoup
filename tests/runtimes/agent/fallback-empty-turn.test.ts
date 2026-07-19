@@ -205,11 +205,13 @@ type RuntimeView = {
     isSystemResult?: boolean,
   ): void;
   handleEvent(sourceSession: object, event: unknown): void;
+  perChatTurnText: Map<string, string>;
   recordFallbackTurnOutcome(
     queue: unknown,
     hadVisibleOutput: boolean,
     hadToolWork: boolean,
     session: unknown,
+    wasUnclassifiedError?: boolean,
   ): void;
   managerIdFor(session: object): string;
   captureSystemTurnOwner(session: object, scopeKey: string): MarkSystemTurnInput['owner'];
