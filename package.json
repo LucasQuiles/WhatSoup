@@ -91,7 +91,7 @@
     "test:bot-errors-health:hermeticity": "vitest run tests/scripts/bot-errors-health-check.test.ts -t \"macOS clock\" --pool=forks --fileParallelism=false --retry=0",
     "test:tokenomics": "bash scripts/run-tokenomics-pytests.sh",
     "test:qsesh": "bash scripts/run-qsesh-pytests.sh",
-    "lint:qsesh": "ruff check tools/qsesh && shellcheck scripts/run-qsesh-pytests.sh",
+    "lint:qsesh": "ruff check tools/qsesh && ruff format --check tools/qsesh && shellcheck scripts/run-qsesh-pytests.sh",
     "test:drills": "bash tests/drills/bot-errors-failure-drills.sh",
     "coverage": "vitest run --coverage",
     "coverage:check": "bash scripts/run-coverage-check.sh",

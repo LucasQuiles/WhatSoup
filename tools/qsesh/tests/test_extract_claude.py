@@ -174,7 +174,10 @@ def test_schema_registry_binds_unclassified_snapshot_to_observed_contract() -> N
     assert CLAUDE_OBSERVED_SCHEMA_FINGERPRINT == (
         "3b974511186301c11dd9c67a724b8e83fc6b4a42f9fb1029c0dd9b9b1603eaf3"
     )
-    assert _expect_schema_error(_snapshot(fingerprint="unknown-jsonl-v2")).phase == "claude-schema-fingerprint"
+    assert (
+        _expect_schema_error(_snapshot(fingerprint="unknown-jsonl-v2")).phase
+        == "claude-schema-fingerprint"
+    )
 
 
 def test_source_digest_mismatch_is_rejected_before_any_row_dispatch() -> None:
