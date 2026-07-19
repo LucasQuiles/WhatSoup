@@ -335,3 +335,29 @@ export interface ProviderStatus {
   /** True only when the latest poll reached the line's health endpoint. */
   lineReachable: boolean;
 }
+
+/** Checkpoint browser (LineDetail › Checkpoints tab) — server shape of
+ *  GET /api/lines/:name/checkpoints (src/fleet/routes/checkpoints.ts). */
+export interface CheckpointRow {
+  conversationKey: string;
+  sessionId: string | null;
+  sessionStatus: string;
+  checkpointVersion: number;
+  claudePid: number | null;
+  workspacePath: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedScope: string | null;
+  completedDeliveryJid: string | null;
+  completedLogicalTurnId: string | null;
+  /** Server-computed with the durability engine's exact resume filter. */
+  resumable: boolean;
+}
+
+export interface CheckpointsPayload {
+  observedAt: string;
+  checkpoints: CheckpointRow[];
+  /** Present and true only when the fleet could not read the instance DB —
+   *  render "unavailable", never a fake empty state (fail-closed, PDR-3). */
+  readError?: boolean;
+}

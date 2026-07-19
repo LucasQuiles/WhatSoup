@@ -138,6 +138,9 @@ describe('FleetDbReader.getCheckpoints', () => {
       completedLogicalTurnId: 'lt-conv-1',
       resumable: true,
     });
+    // SQLite 'YYYY-MM-DD HH:MM:SS' is normalized to ISO-8601 UTC for the console.
+    expect(row?.createdAt).toBe('2026-07-18T00:00:00Z');
+    expect(row?.updatedAt).toBe('2026-07-19T01:00:00Z');
   });
 
   it('caps the result set at 500 rows', () => {
@@ -191,8 +194,8 @@ const SAMPLE_ROW = {
   checkpointVersion: 7,
   claudePid: 4321,
   workspacePath: '/workspaces/conv-1',
-  createdAt: '2026-07-18 00:00:00',
-  updatedAt: '2026-07-19 01:00:00',
+  createdAt: '2026-07-18T00:00:00Z',
+  updatedAt: '2026-07-19T01:00:00Z',
   completedScope: 'per_chat',
   completedDeliveryJid: '15550000001@s.whatsapp.net',
   completedLogicalTurnId: 'lt-conv-1',

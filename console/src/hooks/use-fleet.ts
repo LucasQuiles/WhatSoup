@@ -11,6 +11,7 @@
 import { queryOptions, useQuery } from '@tanstack/react-query';
 import { api } from '../lib/api.js';
 import { computeKpis } from '../lib/compute-kpis.js';
+import { queryFreshness } from '../lib/freshness.js';
 import {
   shareChatsByConversationKey,
   shareLineByName,
@@ -177,4 +178,21 @@ export function useProviderStatus(name: string) {
     refetchInterval: POLL_LINES,
     enabled: !!name,
   });
+}
+
+/** Checkpoint browser rows for a line (LineDetail › Checkpoints tab). */
+export function useCheckpoints(name: string) {
+  const query = useQuery({
+    queryKey: ['checkpoints', name],
+    queryFn: () => api.getCheckpoints(name),
+    refetchInterval: POLL_LINES,
+    enabled: !!name,
+  });
+  return {
+    ...query,
+    freshness: queryFreshness({
+      dataUpdatedAt: query.dataUpdatedAt,
+      refetchFailed: query.isRefetchError,
+    }),
+  };
 }

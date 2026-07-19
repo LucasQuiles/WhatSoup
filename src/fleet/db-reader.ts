@@ -52,6 +52,12 @@ export interface DbStats {
 
 export type DbResult<T> = { ok: true; data: T } | { ok: false; error: string };
 
+/** SQLite `datetime('now')` emits 'YYYY-MM-DD HH:MM:SS' (UTC, no marker).
+ *  Normalize to ISO-8601 UTC so browser `new Date()` parsing is unambiguous. */
+function sqliteUtcToIso(value: string): string {
+  return `${value.replace(' ', 'T')}Z`;
+}
+
 /** Row shape for the checkpoint browser surface (GET /api/lines/:name/checkpoints). */
 export interface CheckpointRow {
   conversationKey: string;
@@ -214,20 +220,20 @@ export class FleetDbReader {
         FROM session_checkpoints
         ORDER BY updated_at DESC
         LIMIT 500
-      `).all() as any[];
+      `).all() as Array<Record<string, unknown>>;
 
       return rows.map((r) => ({
-        conversationKey: r.conversation_key,
-        sessionId: r.session_id,
-        sessionStatus: r.session_status,
-        checkpointVersion: r.checkpoint_version,
-        claudePid: r.claude_pid,
-        workspacePath: r.workspace_path,
-        createdAt: r.created_at,
-        updatedAt: r.updated_at,
-        completedScope: r.completed_scope,
-        completedDeliveryJid: r.completed_delivery_jid,
-        completedLogicalTurnId: r.completed_logical_turn_id,
+        conversationKey: String(r.conversation_key),
+        sessionId: r.session_id === null ? null : String(r.session_id),
+        sessionStatus: String(r.session_status),
+        checkpointVersion: Number(r.checkpoint_version),
+        claudePid: r.claude_pid === null ? null : Number(r.claude_pid),
+        workspacePath: r.workspace_path === null ? null : String(r.workspace_path),
+        createdAt: sqliteUtcToIso(String(r.created_at)),
+        updatedAt: sqliteUtcToIso(String(r.updated_at)),
+        completedScope: r.completed_scope === null ? null : String(r.completed_scope),
+        completedDeliveryJid: r.completed_delivery_jid === null ? null : String(r.completed_delivery_jid),
+        completedLogicalTurnId: r.completed_logical_turn_id === null ? null : String(r.completed_logical_turn_id),
         resumable: r.resumable === 1,
       }));
     });

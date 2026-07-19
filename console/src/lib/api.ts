@@ -31,6 +31,7 @@ function mockFallbackEnabled(): boolean {
 import type {
   AccessEntry,
   ChatItem,
+  CheckpointsPayload,
   ContactResult,
   FeedEvent,
   FleetMetrics,
@@ -351,6 +352,9 @@ export const api = {
     () => apiFetch<LogEntry[]>(`/api/lines/${encodeURIComponent(name)}/logs`),
     async () => (await loadMockData()).getLogs(name),
   ),
+  // Checkpoint browser — plain apiFetch (getProviderStatus precedent: no mock lane).
+  getCheckpoints: (name: string) =>
+    apiFetch<CheckpointsPayload>(`/api/lines/${encodeURIComponent(name)}/checkpoints`),
   getFeed: () => withFallback(
     () => apiFetch<FeedEvent[]>('/api/feed'),
     async () => (await loadMockData()).getFeed(),
