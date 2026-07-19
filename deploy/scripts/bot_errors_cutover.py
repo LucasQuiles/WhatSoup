@@ -110,8 +110,9 @@ def restore_service_to_always_on(
 
     Raises ``CutoverError`` -- before writing anything -- if:
     - the host or the named instance is absent from either surface,
-    - the inventory instance's ``expected`` is not in
-      ``{"blocked", "always_on"}`` (only blocked->always_on is legal), or
+    - either the inventory instance's or the profile instance's ``expected``
+      is not in ``{"blocked", "always_on"}`` (only blocked->always_on is
+      legal, on EITHER surface), or
     - ``healthPort`` is missing from both surfaces and cannot be sourced.
     """
     inventory_path = Path(inventory_path)
@@ -136,6 +137,13 @@ def restore_service_to_always_on(
     profile = _load_json(profile_path, what="profile")
     profile_instance = _find_instance(profile, name, where=f"profile {profile_path}")
 
+    profile_expected = profile_instance.get("expected")
+    if profile_expected not in _LEGAL_EXPECTED_STATES:
+        raise CutoverError(
+            f"{host}/{name}: profile expected={profile_expected!r} is not a "
+            "legal blocked->always_on transition"
+        )
+
     health_port = inv_instance.get("healthPort")
     if health_port is None:
         health_port = profile_instance.get("healthPort")
@@ -146,7 +154,7 @@ def restore_service_to_always_on(
         )
 
     inventory_repaired = inv_expected == "blocked"
-    profile_repaired = profile_instance.get("expected") == "blocked"
+    profile_repaired = profile_expected == "blocked"
 
     inv_instance["healthPort"] = health_port
     inv_instance["expected"] = "always_on"

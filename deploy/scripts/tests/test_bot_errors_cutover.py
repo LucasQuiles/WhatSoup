@@ -290,3 +290,243 @@ def test_absent_instance_fails_closed(tmp_path: Path):
         mod.restore_service_to_always_on(
             "no-such-host", "svc1", inventory_path=inventory_path, profiles_dir=profiles_dir
         )
+
+
+# ---------------------------------------------------------------------------
+# Case 5: the inventory's expected is a legal "blocked", but the deployed
+# profile's own expected is something else entirely (e.g. "none"). The
+# profile side must be validated too -- only blocked->always_on is a legal
+# transition on EITHER surface -- and a healthPort is present here so an
+# unfixed writer that only checks the inventory would actually mutate and
+# write both files instead of raising.
+# ---------------------------------------------------------------------------
+
+
+def test_profile_expected_outside_legal_states_fails_closed(tmp_path: Path):
+    mod = _load_module()
+    inventory_path = _write_inventory(
+        tmp_path,
+        [
+            {
+                "host": "h1",
+                "role": "bot-host",
+                "guiSessionExpected": "always_aqua",
+                "profile": "h1.json",
+                "collectorRemote": True,
+                "instances": [
+                    {
+                        "name": "svc1",
+                        "expected": "blocked",
+                        "service": "com.whatsoup.svc1",
+                        "healthPort": 9099,
+                    }
+                ],
+            }
+        ],
+    )
+    profiles_dir = tmp_path / "health-profiles"
+    profile_path = _write_profile(
+        profiles_dir,
+        "h1.json",
+        {
+            "role": "bot-host",
+            "instances": [
+                {
+                    "name": "svc1",
+                    "expected": "none",
+                    "service": "com.whatsoup.svc1",
+                }
+            ],
+        },
+    )
+    inventory_before = inventory_path.read_bytes()
+    profile_before = profile_path.read_bytes()
+
+    with pytest.raises(mod.CutoverError, match="profile"):
+        mod.restore_service_to_always_on(
+            "h1", "svc1", inventory_path=inventory_path, profiles_dir=profiles_dir
+        )
+
+    assert inventory_path.read_bytes() == inventory_before
+    assert profile_path.read_bytes() == profile_before
+
+
+# ---------------------------------------------------------------------------
+# Case 6: the inventory instance has no healthPort, but the deployed
+# profile's instance does -- the repair must succeed, source the port from
+# the profile, and end up with that port in BOTH files.
+# ---------------------------------------------------------------------------
+
+
+def test_health_port_sourced_from_profile_when_inventory_lacks_it(tmp_path: Path):
+    mod = _load_module()
+    inventory_path = _write_inventory(
+        tmp_path,
+        [
+            {
+                "host": "h1",
+                "role": "bot-host",
+                "guiSessionExpected": "always_aqua",
+                "profile": "h1.json",
+                "collectorRemote": True,
+                "instances": [
+                    {
+                        "name": "svc1",
+                        "expected": "blocked",
+                        "service": "com.whatsoup.svc1",
+                    }
+                ],
+            }
+        ],
+    )
+    profiles_dir = tmp_path / "health-profiles"
+    profile_path = _write_profile(
+        profiles_dir,
+        "h1.json",
+        {
+            "role": "bot-host",
+            "instances": [
+                {
+                    "name": "svc1",
+                    "expected": "blocked",
+                    "service": "com.whatsoup.svc1",
+                    "healthPort": 9100,
+                }
+            ],
+        },
+    )
+
+    summary = mod.restore_service_to_always_on(
+        "h1", "svc1", inventory_path=inventory_path, profiles_dir=profiles_dir
+    )
+
+    assert summary == {
+        "host": "h1",
+        "name": "svc1",
+        "healthPort": 9100,
+        "inventoryRepaired": True,
+        "profileRepaired": True,
+    }
+
+    inventory_after = json.loads(inventory_path.read_text(encoding="utf-8"))
+    inv_instance = inventory_after["hosts"][0]["instances"][0]
+    assert inv_instance["healthPort"] == 9100
+    assert inv_instance["expected"] == "always_on"
+
+    profile_after = json.loads(profile_path.read_text(encoding="utf-8"))
+    prof_instance = profile_after["instances"][0]
+    assert prof_instance["healthPort"] == 9100
+    assert prof_instance["expected"] == "always_on"
+
+
+# ---------------------------------------------------------------------------
+# Case 7/8: asymmetric repair -- one surface is already "always_on" while
+# the other is still "blocked". The summary flags must report which surface
+# actually flipped, and both files must end up "always_on" regardless.
+# ---------------------------------------------------------------------------
+
+
+def test_asymmetric_repair_inventory_already_always_on(tmp_path: Path):
+    mod = _load_module()
+    inventory_path = _write_inventory(
+        tmp_path,
+        [
+            {
+                "host": "h1",
+                "role": "bot-host",
+                "guiSessionExpected": "always_aqua",
+                "profile": "h1.json",
+                "collectorRemote": True,
+                "instances": [
+                    {
+                        "name": "svc1",
+                        "expected": "always_on",
+                        "service": "com.whatsoup.svc1",
+                        "healthPort": 9099,
+                    }
+                ],
+            }
+        ],
+    )
+    profiles_dir = tmp_path / "health-profiles"
+    profile_path = _write_profile(
+        profiles_dir,
+        "h1.json",
+        {
+            "role": "bot-host",
+            "instances": [
+                {
+                    "name": "svc1",
+                    "expected": "blocked",
+                    "service": "com.whatsoup.svc1",
+                    "healthPort": 9099,
+                }
+            ],
+        },
+    )
+
+    summary = mod.restore_service_to_always_on(
+        "h1", "svc1", inventory_path=inventory_path, profiles_dir=profiles_dir
+    )
+
+    assert summary["inventoryRepaired"] is False
+    assert summary["profileRepaired"] is True
+
+    inventory_after = json.loads(inventory_path.read_text(encoding="utf-8"))
+    assert inventory_after["hosts"][0]["instances"][0]["expected"] == "always_on"
+
+    profile_after = json.loads(profile_path.read_text(encoding="utf-8"))
+    assert profile_after["instances"][0]["expected"] == "always_on"
+
+
+def test_asymmetric_repair_profile_already_always_on(tmp_path: Path):
+    mod = _load_module()
+    inventory_path = _write_inventory(
+        tmp_path,
+        [
+            {
+                "host": "h1",
+                "role": "bot-host",
+                "guiSessionExpected": "always_aqua",
+                "profile": "h1.json",
+                "collectorRemote": True,
+                "instances": [
+                    {
+                        "name": "svc1",
+                        "expected": "blocked",
+                        "service": "com.whatsoup.svc1",
+                        "healthPort": 9099,
+                    }
+                ],
+            }
+        ],
+    )
+    profiles_dir = tmp_path / "health-profiles"
+    profile_path = _write_profile(
+        profiles_dir,
+        "h1.json",
+        {
+            "role": "bot-host",
+            "instances": [
+                {
+                    "name": "svc1",
+                    "expected": "always_on",
+                    "service": "com.whatsoup.svc1",
+                    "healthPort": 9099,
+                }
+            ],
+        },
+    )
+
+    summary = mod.restore_service_to_always_on(
+        "h1", "svc1", inventory_path=inventory_path, profiles_dir=profiles_dir
+    )
+
+    assert summary["inventoryRepaired"] is True
+    assert summary["profileRepaired"] is False
+
+    inventory_after = json.loads(inventory_path.read_text(encoding="utf-8"))
+    assert inventory_after["hosts"][0]["instances"][0]["expected"] == "always_on"
+
+    profile_after = json.loads(profile_path.read_text(encoding="utf-8"))
+    assert profile_after["instances"][0]["expected"] == "always_on"
