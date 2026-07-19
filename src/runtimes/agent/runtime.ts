@@ -3410,6 +3410,7 @@ export class AgentRuntime implements Runtime {
     // and active AskUserQuestion polls survive a restart. Errors logged inside;
     // never throws.
     await this.rehydratePendingPolls();
+    await this.consumeQueuedPollDecisions();
 
     log.info({
       instanceName: this.instanceName,
@@ -5431,6 +5432,77 @@ export class AgentRuntime implements Runtime {
    * Persistence errors are logged and swallowed; rehydration always succeeds
    * structurally even if some rows are unreadable.
    */
+  /**
+   * D-4 v1.1: consume console decisions that were queued durably while the
+   * instance was down (pending_poll_decisions, written by the fleet's
+   * approvals route — write-while-down discipline). Each queued decision
+   * resolves through resolvePollDecisionFromConsole — the same poll-
+   * resolution path as a live console decision or a WhatsApp vote. Rows for
+   * polls that expired/resolved while down are deleted as moot (fail-visible
+   * log, never silently kept); rows that fail validation stay for operator
+   * retry. Runs once at boot, after rehydratePendingPolls.
+   */
+  private async consumeQueuedPollDecisions(): Promise<void> {
+    try {
+      const tables = new Set(
+        (this.db.raw.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>)
+          .map((r) => r.name),
+      );
+      if (!tables.has('pending_poll_decisions')) return;
+      const rows = this.db.raw.prepare(`
+        SELECT map_key, question_index, selected_options, via
+        FROM pending_poll_decisions
+        ORDER BY created_at ASC, rowid ASC
+      `).all() as Array<{ map_key: string; question_index: number; selected_options: string; via: string }>;
+      if (rows.length === 0) return;
+
+      let consumed = 0;
+      let moot = 0;
+      for (const row of rows) {
+        const deleteRow = () => this.db.raw.prepare(`
+          DELETE FROM pending_poll_decisions
+          WHERE map_key = ? AND question_index = ?
+        `).run(row.map_key, row.question_index);
+
+        if (!this.pendingPolls.questions.has(row.map_key)) {
+          // The poll expired or resolved while the instance was down — the
+          // queued decision is moot; drop it visibly rather than keeping a
+          // phantom queue.
+          log.info({ mapKey: row.map_key }, 'queued console decision dropped as moot (poll not pending at boot)');
+          deleteRow();
+          moot += 1;
+          continue;
+        }
+        let selectedOptions: string[];
+        try {
+          selectedOptions = JSON.parse(row.selected_options) as string[];
+        } catch {
+          log.warn({ mapKey: row.map_key }, 'queued console decision has unparseable options; dropped');
+          deleteRow();
+          moot += 1;
+          continue;
+        }
+        const result = await this.resolvePollDecisionFromConsole({
+          mapKey: row.map_key,
+          questionIndex: row.question_index,
+          selectedOptions,
+        });
+        if (result.ok || result.code === 'stale' || result.code === 'not_found') {
+          if (result.ok) consumed += 1;
+          else moot += 1;
+          deleteRow();
+        }
+        // 'invalid' rows stay for operator retry (validation may depend on
+        // post-boot state, e.g. a poll still re-sending its message).
+      }
+      if (consumed > 0 || moot > 0) {
+        log.info({ consumed, moot }, 'queued console decisions consumed at boot');
+      }
+    } catch (err) {
+      log.error({ err }, 'consumeQueuedPollDecisions: unhandled error (queued rows kept for next boot)');
+    }
+  }
+
   private async rehydratePendingPolls(): Promise<void> {
     const rows = this.pollPersistence.loadRows();
     if (rows.length === 0) return;
@@ -6141,17 +6213,50 @@ export class AgentRuntime implements Runtime {
    * POST /poll-decision, proxied by the fleet approvals route. Never writes
    * the pending_polls row directly.
    */
-  public resolvePollDecisionFromConsole(decision: {
+  public async resolvePollDecisionFromConsole(decision: {
     mapKey: string;
     questionIndex: number;
     selectedOptions: string[];
-  }): { ok: true } | { ok: false; error: string; code: 'not_found' | 'stale' | 'invalid' } {
+  }): Promise<{ ok: true } | { ok: false; error: string; code: 'not_found' | 'stale' | 'invalid' }> {
     const pending = this.pendingPolls.questions.get(decision.mapKey);
     if (!pending) {
       return { ok: false, error: 'pending poll not found (already resolved or expired)', code: 'not_found' };
     }
+    if (pending.mode === 'textFallback') {
+      // v1.1: console decisions for text-fallback pendings mirror the typed-
+      // answer path verbatim (answer collect → index advance → persistence →
+      // stage + inject when fully answered). completeConsumedPerChatInbound is
+      // deliberately skipped: a console decision has no inbound WhatsApp
+      // message to consume.
+      const question = pending.questions[decision.questionIndex];
+      if (!question) {
+        return { ok: false, error: 'question index out of range', code: 'invalid' };
+      }
+      if (pending.answersCollected[decision.questionIndex] !== undefined) {
+        return { ok: false, error: 'already resolved', code: 'stale' };
+      }
+      const validLabels = new Set(question.options.map((o) => o.label));
+      if (decision.selectedOptions.length !== 1 || !validLabels.has(decision.selectedOptions[0]!)) {
+        return { ok: false, error: 'text-fallback decisions take exactly one valid option', code: 'invalid' };
+      }
+      pending.answersCollected[decision.questionIndex] = resolveTypedPollAnswer(decision.selectedOptions[0]!, question);
+      removePollIdsForQuestion(pending, decision.questionIndex);
+      pending.currentQuestionIndex = Math.max(pending.currentQuestionIndex, decision.questionIndex + 1);
+      advancePendingPollIndex(pending);
+      this.pollPersistence.save(decision.mapKey, pending);
+      log.info(
+        { mapKey: decision.mapKey, questionIndex: decision.questionIndex, via: 'console' },
+        'text-fallback decision delivered from the console approval queue',
+      );
+      if (Object.keys(pending.answersCollected).length >= pending.questions.length) {
+        this.stageResolvedAskUserPoll(decision.mapKey, pending);
+        const actorJid = pending.adminJids?.values().next().value ?? pending.chatJid;
+        await this.injectPollAnswers(decision.mapKey, pending, actorJid);
+      }
+      return { ok: true };
+    }
     if (pending.mode !== 'poll') {
-      return { ok: false, error: 'this decision fell back to chat text — answer in WhatsApp', code: 'invalid' };
+      return { ok: false, error: 'unsupported pending mode', code: 'invalid' };
     }
     if (pending.answersCollected[decision.questionIndex] !== undefined) {
       return { ok: false, error: 'already resolved', code: 'stale' };

@@ -21,6 +21,7 @@
  * minimal environments.
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { DatabaseSync } from 'node:sqlite';
 import { jsonResponse, readBody, requireInstance } from '../../lib/http.ts';
 import { proxyToInstance } from '../http-proxy.ts';
 import type { FleetDiscovery } from '../discovery.ts';
@@ -94,11 +95,47 @@ export async function handlePostApprovalDecision(
   );
 
   if (proxy.status === 502) {
-    jsonResponse(res, 502, {
-      error: `line ${instance.name} is offline or unreachable — decision NOT delivered; retry when the line is up`,
-      instance: instance.name,
-    });
-    return;
+    // v1.1 offline durable fallback (design D2(b)): queue the decision in the
+    // instance's own DB for boot-time consumption. Write-while-down is the
+    // same discipline as checkpoint-restore — the 502 says the runtime is not
+    // serving, so a direct row write cannot race it; its boot rehydrate
+    // consumes the row through the same poll-resolution path. If the write
+    // itself fails we fall back to the honest 502 (never fake-queue).
+    try {
+      const db = new DatabaseSync(instance.dbPath);
+      try {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS pending_poll_decisions (
+            map_key TEXT NOT NULL,
+            question_index INTEGER NOT NULL,
+            selected_options TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            via TEXT NOT NULL,
+            PRIMARY KEY (map_key, question_index)
+          );
+        `);
+        db.prepare(`
+          INSERT OR REPLACE INTO pending_poll_decisions
+            (map_key, question_index, selected_options, via)
+          VALUES (?, ?, ?, ?)
+        `).run(decision.mapKey, decision.questionIndex, JSON.stringify(decision.selectedOptions), 'console');
+      } finally {
+        db.close();
+      }
+      jsonResponse(res, 202, {
+        status: 'decision_queued',
+        instance: instance.name,
+        mapKey: decision.mapKey,
+        notice: `line ${instance.name} is unreachable — decision queued durably and consumed at the line's next boot; if the line is actually up, retry instead`,
+      });
+      return;
+    } catch {
+      jsonResponse(res, 502, {
+        error: `line ${instance.name} is offline or unreachable — decision NOT delivered (durable queue write also failed); retry when the line is up`,
+        instance: instance.name,
+      });
+      return;
+    }
   }
   if (proxy.status === 409) {
     // Already resolved elsewhere (WhatsApp vote or another console) — relay

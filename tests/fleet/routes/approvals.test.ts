@@ -270,9 +270,35 @@ describe('POST /api/lines/:name/approvals/decision (handlePostApprovalDecision)'
     expect(JSON.parse(res._body).error).toMatch(/already resolved/);
   });
 
-  it('502s honestly when the instance is unreachable — decision NOT delivered', async () => {
+  it('v1.1: on 502 the decision is QUEUED durably (write-while-down) — 202 decision_queued, row present', async () => {
     proxyMock.mockResolvedValue({ status: 502, body: JSON.stringify({ error: 'proxy error: connect ECONNREFUSED' }) });
-    const deps = makeDeps(fakeInstance(), vi.fn());
+    const queueDbPath = tmpFile();
+    const deps = makeDeps(fakeInstance({ dbPath: queueDbPath }), vi.fn());
+    const res = mockRes();
+    await handlePostApprovalDecision(
+      mockReq({ method: 'POST', body: JSON.stringify({ mapKey: 'agent:chat:1', questionIndex: 0, selectedOptions: ['Deploy now'] }) }),
+      res, deps, { name: 'agent-line' },
+    );
+    expect(res._status).toBe(202);
+    const body = JSON.parse(res._body);
+    expect(body.status).toBe('decision_queued');
+    expect(body.notice).toMatch(/next boot|queued/i);
+    // The durable row exists for the runtime's boot-time consumption
+    const db = new DatabaseSync(queueDbPath, { readOnly: true });
+    const row = db.prepare(`SELECT map_key, question_index, selected_options, via FROM pending_poll_decisions WHERE map_key = ?`)
+      .get('agent:chat:1') as { map_key: string; question_index: number; selected_options: string; via: string } | undefined;
+    db.close();
+    expect(row).toBeDefined();
+    expect(row!.question_index).toBe(0);
+    expect(JSON.parse(row!.selected_options)).toEqual(['Deploy now']);
+    expect(row!.via).toBe('console');
+    cleanup(queueDbPath);
+  });
+
+  it('v1.1: falls back to the honest 502 when the instance is unreachable AND the durable queue write fails', async () => {
+    proxyMock.mockResolvedValue({ status: 502, body: JSON.stringify({ error: 'proxy error: connect ECONNREFUSED' }) });
+    const missingPath = join(tmpdir(), `no-such-dir-${randomBytes(6).toString('hex')}`, 'bot.db');
+    const deps = makeDeps(fakeInstance({ dbPath: missingPath }), vi.fn());
     const res = mockRes();
     await handlePostApprovalDecision(
       mockReq({ method: 'POST', body: JSON.stringify({ mapKey: 'agent:chat:1', questionIndex: 0, selectedOptions: ['Deploy now'] }) }),

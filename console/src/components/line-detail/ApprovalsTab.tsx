@@ -148,7 +148,6 @@ function ApprovalCard({ entry, onDecide }: {
   onDecide: (questionIndex: number, selectedOptions: string[]) => void;
 }) {
   const answeredCount = Object.keys(entry.answersCollected).length
-  const readOnly = entry.mode === 'textFallback'
 
   return (
     <Card variant="base" className="overflow-hidden">
@@ -178,16 +177,16 @@ function ApprovalCard({ entry, onDecide }: {
             question={q}
             answered={entry.answersCollected[qi] !== undefined}
             isCurrent={qi === entry.currentQuestionIndex}
-            readOnly={readOnly}
+            readOnly={false}
             onDecide={onDecide}
           />
         ))}
         {answeredCount > 0 && (
           <span className="c-label text-text-2">{`${answeredCount} of ${entry.questions.length} answered`}</span>
         )}
-        {readOnly && (
-          <span className="c-label text-s-warn">
-            This question fell back to chat text — answer in WhatsApp (console decisions for text-fallback land in a follow-up).
+        {entry.mode === 'textFallback' && (
+          <span className="c-label text-text-2">
+            Chat-text fallback mode — your decision is delivered as the typed answer through the same poll-resolution path.
           </span>
         )}
       </div>
