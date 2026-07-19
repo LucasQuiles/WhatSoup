@@ -189,3 +189,27 @@ describe('PipelineTab — offline state', () => {
     expect(screen.queryByText('Queue depth')).toBeNull()
   })
 })
+
+describe('PipelineTab — freshness note (GUI-5)', () => {
+  it('labels pipeline telemetry stale when the line health snapshot is carried forward', () => {
+    renderTab('passive', makeLine({ status: 'online', unread: 0, stale: true, healthObservedAt: new Date(Date.now() - 300_000).toISOString() }), 'pas')
+    const marker = screen.getByText(/^stale · /)
+    expect(marker.className).toContain('c-label')
+    expect(marker.className).toContain('text-s-warn')
+    // telemetry stays visible — stale labels, never hides
+    expect(screen.getByRole('button', { name: /^Inbound$/ })).toBeTruthy()
+  })
+
+  it('shows a quiet observation age when the snapshot is fresh', () => {
+    renderTab('passive', makeLine({ status: 'online', unread: 0, stale: false, healthObservedAt: new Date(Date.now() - 5_000).toISOString() }), 'pas')
+    const marker = screen.getByText(/^observed /)
+    expect(marker.className).toContain('c-label')
+    expect(marker.className).not.toContain('text-s-warn')
+  })
+
+  it('renders no note when the line carries no freshness data', () => {
+    renderTab('passive', makeLine({ status: 'online', unread: 0 }), 'pas')
+    expect(screen.queryByText(/^stale · /)).toBeNull()
+    expect(screen.queryByText(/^observed /)).toBeNull()
+  })
+})
