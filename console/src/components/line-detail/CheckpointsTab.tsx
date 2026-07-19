@@ -60,7 +60,9 @@ export function CheckpointsTab({ payload, isLoading, freshness }: {
   isLoading: boolean;
   freshness: Freshness;
 }) {
-  const rows = payload?.checkpoints ?? []
+  // Wrapped in useMemo per exhaustive-deps: the `?? []` fallback would
+  // otherwise give sortedRows' useMemo a new dep identity every render.
+  const rows = useMemo(() => payload?.checkpoints ?? [], [payload])
   const resumableCount = rows.filter((r) => r.resumable).length
 
   // SoupKitchen sort idiom: the primitive's tri-state cycle (none/asc/desc)
