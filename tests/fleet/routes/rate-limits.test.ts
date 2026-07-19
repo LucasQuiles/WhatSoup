@@ -240,7 +240,7 @@ describe('GET /api/lines/:name/rate-limits (handleGetRateLimits)', () => {
     expect(res._status).toBe(200);
     const body = JSON.parse(res._body);
     expect(body.readError).toBe(true);
-    expect(body.throttled).toBeUndefined();
-    expect(body.topSenders).toBeUndefined();
+    expect(body).not.toHaveProperty('throttled');
+    expect(body).not.toHaveProperty('topSenders');
   });
 });

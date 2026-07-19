@@ -105,7 +105,7 @@ describe('RateLimitsCard', () => {
       data: payload({ supported: false }),
     }))
     const { container } = render(<RateLimitsCard lineName="chat-line" />)
-    expect(container.firstChild).toBeNull()
+    expect(container.innerHTML).toBe('')
   })
 
   it('marks the freshness stale when the observation is carried', () => {
