@@ -28,7 +28,11 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { resolveChatDisplayName as resolveImpl } from '../../src/core/chat-display-name.ts';
+import {
+  resolveChatDisplayName as resolveImpl,
+  formatChatRefForOwner as formatImpl,
+  sanitizeDisplayNameForRender,
+} from '../../src/core/chat-display-name.ts';
 import { setLidAuthDir } from '../../src/core/lid-resolver.ts';
 import type { Database } from '../../src/core/database.ts';
 
@@ -37,6 +41,10 @@ import type { Database } from '../../src/core/database.ts';
 // minimal structural wrapper, the same shape runtime tests fake.
 function resolveChatDisplayName(raw: DatabaseSync, ref: string): string {
   return resolveImpl({ raw } as unknown as Database, ref);
+}
+
+function formatChatRefForOwner(raw: DatabaseSync, ref: string): string {
+  return formatImpl({ raw } as unknown as Database, ref);
 }
 
 // --- Helpers ---------------------------------------------------------------
@@ -359,5 +367,52 @@ describe('resolveChatDisplayName — B23 ladder', () => {
     expect(resolveChatDisplayName(bare, GROUP_JID)).toBe(GROUP_JID);
     // Phone formatting is a pure string step, so it still applies.
     expect(resolveChatDisplayName(bare, '15551112222')).toBe('+15551112222');
+  });
+});
+
+// B25 F2/F3: the render choke point — names are remote-controlled, so every
+// owner-facing interpolation sanitizes AND disambiguates in ONE place.
+describe('sanitizeDisplayNameForRender / formatChatRefForOwner — B25 F2/F3', () => {
+  let db: DatabaseSync;
+
+  beforeEach(() => {
+    db = makeDb();
+  });
+
+  it('strips control chars, newlines and markdown metachars; collapses whitespace', () => {
+    expect(sanitizeDisplayNameForRender('Evil\n2. Ghost *p* `q` ~r~ _s_')).toBe('Evil 2. Ghost p q r s');
+    expect(sanitizeDisplayNameForRender('a\u0007b\u2028c\rd')).toBe('a b c d');
+  });
+
+  it('caps the length at 40 with an ellipsis', () => {
+    const out = sanitizeDisplayNameForRender('x'.repeat(60));
+    expect(out.length).toBe(40);
+    expect(out.endsWith('…')).toBe(true);
+  });
+
+  it('formats the resolved name with the stable ref suffix from the RAW key', () => {
+    db.prepare('INSERT INTO contacts (jid, canonical_phone, display_name) VALUES (?, ?, ?)')
+      .run(DM_JID, DM_KEY, 'Lucas');
+    expect(formatChatRefForOwner(db, DM_KEY)).toBe('Lucas (…1111)');
+    expect(formatChatRefForOwner(db, DM_JID)).toBe('Lucas (…1111)');
+    // Device suffix never leaks into the suffix.
+    expect(formatChatRefForOwner(db, '15550001111:5@s.whatsapp.net')).toBe('Lucas (…1111)');
+  });
+
+  it('group refs get the suffix from the group id local part', () => {
+    db.prepare('INSERT INTO groups (jid, subject) VALUES (?, ?)').run(GROUP_JID, 'Loopicus Ops');
+    expect(formatChatRefForOwner(db, GROUP_KEY)).toBe('Loopicus Ops (…5666)');
+    expect(formatChatRefForOwner(db, GROUP_JID)).toBe('Loopicus Ops (…5666)');
+  });
+
+  it('a name that sanitizes to empty falls back to the sanitized ref, never an empty render', () => {
+    db.prepare('INSERT INTO contacts (jid, canonical_phone, display_name) VALUES (?, ?, ?)')
+      .run(DM_JID, DM_KEY, '***');
+    expect(formatChatRefForOwner(db, DM_KEY)).toBe('15550001111 (…1111)');
+  });
+
+  it('never throws on a table-less handle and keeps the suffix', () => {
+    const bare = new DatabaseSync(':memory:');
+    expect(formatChatRefForOwner(bare, DM_KEY)).toBe('+15550001111 (…1111)');
   });
 });

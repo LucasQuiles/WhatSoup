@@ -103,7 +103,7 @@ import { buildRoutingPromptContract, extractRouteIntents } from './route-intent.
 import { isProviderId } from './providers/index.ts';
 import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
-import { resolveChatDisplayName } from '../../core/chat-display-name.ts';
+import { formatChatRefForOwner } from '../../core/chat-display-name.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
 import { toPersonalJid, isGroupJid, isWhatsAppAuthenticatedJid } from '../../core/jid-constants.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
@@ -3990,7 +3990,7 @@ export class AgentRuntime implements Runtime {
                 // B23 owner ruling: render the resolved chat name (alias →
                 // group subject/chat name → contact name → formatted phone),
                 // raw key only as last resort. Local DB reads only — cheap.
-                entries.push(`${idx}. ${resolveChatDisplayName(this.db, mapKey)} (${label}) — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
+                entries.push(`${idx}. ${formatChatRefForOwner(this.db, mapKey)} (${label}) — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
                 idx++;
               }
             } else {
@@ -4008,7 +4008,7 @@ export class AgentRuntime implements Runtime {
                     tkStr = tkTotal > 1000 ? `${(tkTotal / 1000).toFixed(1)}k` : String(tkTotal);
                   }
                 }
-                entries.push(`1. ${this.activeChatJid ? resolveChatDisplayName(this.db, this.activeChatJid) : 'unknown'} — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
+                entries.push(`1. ${this.activeChatJid ? formatChatRefForOwner(this.db, this.activeChatJid) : 'unknown'} — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
               }
             }
             const sessionsText = entries.length > 0
@@ -4052,7 +4052,7 @@ export class AgentRuntime implements Runtime {
                 ? ''
                 : '\n_⚠️ some in-flight turns could not be finalized — see logs_';
               // B23: same name resolution as the /sessions list above.
-              this.sendDirect(chatJid, `_Session killed: ${resolveChatDisplayName(this.db, mapKey)} (${killLabel})_${killSuffix}`, true);
+              this.sendDirect(chatJid, `_Session killed: ${formatChatRefForOwner(this.db, mapKey)} (${killLabel})_${killSuffix}`, true);
             } else {
               if (!this.session?.getStatus().active) {
                 this.sendDirect(chatJid, '_No active session to kill._', true);

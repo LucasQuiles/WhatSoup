@@ -332,3 +332,56 @@ function resolveLadder(db: Database, ref: string): string | null {
 
   return null; // 6. caller falls back to the raw ref
 }
+
+// ── Owner-facing render (B25 F2/F3) ─────────────────────────────────────────
+
+/** Render length cap for a display name (before the ref suffix). */
+const DISPLAY_NAME_MAX = 40;
+
+/**
+ * Make a resolved display name safe to interpolate into owner-facing
+ * WhatsApp-markdown renders. Names (push names, group subjects) are
+ * REMOTE-CONTROLLED: any chat peer picks them. Strips control characters
+ * (a '\n' forged extra /sessions rows — a kill-wrong-session vector) and
+ * WhatsApp markdown metachars (* _ ~ `), collapses whitespace, and caps the
+ * length. Stripping over escaping: WhatsApp has no escape syntax, and a
+ * literal metachar in a name is cosmetic, not identity.
+ */
+export function sanitizeDisplayNameForRender(name: string): string {
+  let safe = name.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ');
+  safe = safe.replace(/[*_~`]/g, '');
+  safe = safe.replace(/\s+/g, ' ').trim();
+  if (safe.length > DISPLAY_NAME_MAX) {
+    safe = `${safe.slice(0, DISPLAY_NAME_MAX - 1).trimEnd()}…`;
+  }
+  return safe;
+}
+
+/**
+ * Short stable suffix derived from the RAW ref (last 4 local chars) — never
+ * from the resolved name, so it survives name changes and collisions.
+ */
+function refSuffix(ref: string): string {
+  let local = bareNumber(ref);
+  const enc = local.indexOf('_at_');
+  if (enc >= 0) local = local.slice(0, enc);
+  return normalizeLid(local).slice(-4);
+}
+
+/**
+ * The ONE choke point for owner-facing chat references (/sessions rows, the
+ * /kill-session ack): resolves the display name, sanitizes it for render,
+ * and ALWAYS appends a short stable ref suffix — e.g. "Lucas (…0919)".
+ * Deterministic (not collision-triggered): identical resolved names stay
+ * distinguishable, and the kill ack proves WHICH chat died even if names
+ * changed between /sessions and /kill-session (TOCTOU evidence). Per-call-site
+ * sanitization opt-in is the wrong altitude — route every owner render here.
+ */
+export function formatChatRefForOwner(db: Database, ref: string): string {
+  const name =
+    sanitizeDisplayNameForRender(resolveChatDisplayName(db, ref)) ||
+    sanitizeDisplayNameForRender(ref) ||
+    'unknown';
+  const suffix = refSuffix(ref);
+  return suffix ? `${name} (…${suffix})` : name;
+}
