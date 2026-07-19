@@ -552,7 +552,7 @@ import {
   type AskUserQuestion,
   type AskUserOption,
 } from './poll-resolution.ts';
-import { resolveOutboundAudience } from '../../core/outbound-message-safety.ts';
+import { resolveOutboundAudience, isOperatorDmPeer, type OutboundAudience } from '../../core/outbound-message-safety.ts';
 
 // Tool_use → ToolUpdate formatting, tool-error classification, and operator-alert
 // gating extracted to ./tool-update.ts (module-level FILE-reduction slice). Re-exported
@@ -2455,6 +2455,7 @@ export class AgentRuntime implements Runtime {
         register: (pollId, chatJid, options, resolution, timeoutMs, abortSignal) =>
           this.registerSendPollAwaiter(pollId, chatJid, options, resolution, timeoutMs, abortSignal),
       },
+      fallbackActive: () => this.isFallbackWindowActive, // T8-F2: mirrors the outbound queue's fallback signal
     });
   }
 
@@ -2483,8 +2484,11 @@ export class AgentRuntime implements Runtime {
     const conversationKey = canonicalConversationKey(chatJid, this.db);
     // QR-069: inherit a prior queue's echo-guard token when one exists.
     const priorToken = this.priorSenderTokenForChat(chatJid);
-    const q = new OutboundQueue(this.messenger, chatJid,
-      { conversationKey, ...(priorToken === undefined ? {} : { senderToken: priorToken }) });
+    const q = new OutboundQueue(this.messenger, chatJid, { // T8-F1+F2: inject admin-peer + fallback-window queries
+      conversationKey, ...(priorToken === undefined ? {} : { senderToken: priorToken }),
+      peerIsAdmin: (jid) => isOperatorDmPeer(jid, isGroupJid(jid), this.db, config.adminPhones),
+      fallbackActive: () => this.isFallbackWindowActive,
+    });
     if (this.durability) q.setDurability(this.durability);
     q.setToolUpdateMode(config.toolUpdateMode);
     q.setToolUpdateRedirectJid(config.toolUpdateRedirectJid);
@@ -5575,10 +5579,17 @@ export class AgentRuntime implements Runtime {
     }
   }
 
+  /** T8-F1+F2: shared operator-DM elevation ctx for direct sends/polls. */
+  private resolveSendAudience(chatJid: string, isGroup: boolean): OutboundAudience {
+    const peerIsAdmin = isOperatorDmPeer(chatJid, isGroup, this.db, config.adminPhones);
+    return resolveOutboundAudience(chatJid, { isGroup, peerIsAdmin, fallbackActive: this.isFallbackWindowActive });
+  }
+
   private sendUnansweredPollTextFallback(
     pending: PendingPollQuestion,
     intro: string,
   ): void {
+    const audience = this.resolveSendAudience(pending.chatJid, isGroupJid(pending.chatJid));
     const unanswered = unansweredPollQuestions(pending);
     unanswered.forEach(({ question }, fallbackIndex) => {
       this.sendDirect(
@@ -5587,7 +5598,7 @@ export class AgentRuntime implements Runtime {
           question,
           fallbackIndex === 0 ? intro : 'Remaining decision question:',
           undefined,
-          resolveOutboundAudience(pending.chatJid),
+          audience,
         ),
       );
     });
@@ -5968,7 +5979,7 @@ export class AgentRuntime implements Runtime {
 
     const pollMessageIds: string[] = [];
     let allHaveSecret = true;
-    const pollAudience = resolveOutboundAudience(chatJid);
+    const pollAudience = this.resolveSendAudience(chatJid, isGroup); // T8-F1+F2
     const formattedQuestions = normalizedQuestions.map((q, index) => ({
       index,
       question: q,

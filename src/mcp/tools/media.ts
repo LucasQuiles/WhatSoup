@@ -19,7 +19,8 @@ import { isBaileysEncryptedTmpEnoent, createMediaReadStream } from '../../transp
 import type { OutboundMedia } from '../../core/types.ts';
 import { destroyOutboundMediaStream } from '../../core/media-stream.ts';
 import { errorMessage } from '../../lib/error-message.ts';
-import { redactInternalArtifacts, resolveOutboundAudience } from '../../core/outbound-message-safety.ts';
+import { redactInternalArtifacts, resolveOutboundAudience, isOperatorDmPeer } from '../../core/outbound-message-safety.ts';
+import { isGroupJid } from '../../core/jid-constants.ts';
 
 const log = createChildLogger('mcp:media');
 
@@ -34,6 +35,21 @@ function errorResult<T extends Record<string, unknown>>(payload: T) {
 export interface MediaDeps {
   connection: RuntimeConnection;
   db: Database;
+  /**
+   * T8-F1: config admin phones — required (mirrors substrate.ts's
+   * dbWrapper/adminPhones pattern) so send_media's caption redaction can
+   * resolve isOperatorDmPeer(chatJid, ..., db, adminPhones) the same way
+   * every other send path does. A caller that genuinely has no admin list
+   * (there is none in this codebase) would pass an empty Set — never elevates.
+   */
+  adminPhones: Set<string>;
+  /**
+   * T8-F2: query whether the runtime is currently in a fallback-provider
+   * window. OPTIONAL — PassiveRuntime has no agent/fallback-provider concept
+   * at all, so it omits this; the caption redaction then fails closed
+   * (treats as active — full scrub) rather than silently elevating.
+   */
+  fallbackActive?: () => boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -117,8 +133,17 @@ export function registerMediaTools(
       // recipient, so mask internal-artifact leaks (redaction-only — there is no
       // sensible "divert" for a media send). Audience-scoped by the shared
       // redactor: client → full scrub, internal → secrets/emails only, ops → verbatim.
+      // T8-F1+F2: an admin's 1:1 DM on the trusted primary is ALSO an
+      // operator channel — fallbackActive fails closed when the runtime
+      // didn't inject a fallback-provider query (see MediaDeps).
+      const captionIsGroup = isGroupJid(chatJid);
+      const captionAudience = resolveOutboundAudience(chatJid, {
+        isGroup: captionIsGroup,
+        peerIsAdmin: isOperatorDmPeer(chatJid, captionIsGroup, db, deps.adminPhones),
+        fallbackActive: deps.fallbackActive ? deps.fallbackActive() : true,
+      });
       const caption = rawCaption !== undefined
-        ? redactInternalArtifacts(rawCaption, resolveOutboundAudience(chatJid)).text
+        ? redactInternalArtifacts(rawCaption, captionAudience).text
         : rawCaption;
       const filenameOverride = params['filename'] as string | undefined;
       const ptt = params['ptt'] as boolean | undefined;

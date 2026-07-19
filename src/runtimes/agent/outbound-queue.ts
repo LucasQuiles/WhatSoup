@@ -10,6 +10,7 @@ import { jitteredDelay } from '../../core/retry.ts';
 import { canSendToGroup, recordGroupOutbound } from '../../core/echo-guard.ts';
 import { isOutboundGovernorShed } from '../../transport/outbound-governor.ts';
 import { redactInternalArtifacts, resolveOutboundAudience } from '../../core/outbound-message-safety.ts';
+import { isGroupJid } from '../../core/jid-constants.ts';
 import { config } from '../../config.ts';
 import { markdownToWhatsApp, repairChunkFormatting } from './whatsapp-format.ts';
 import type { ToolCategory } from './providers/tool-mapping.ts';
@@ -37,6 +38,21 @@ export interface OutboundQueueOptions {
   readonly conversationKey: string;
   /** Echo-guard token inherited by a replacement queue. */
   readonly senderToken?: string;
+  /**
+   * T8-F2: query whether the runtime is currently in a fallback-provider
+   * window. Injected — the queue owns no fallback state itself (the runtime
+   * does, via its private `isFallbackWindowActive` getter). Omitted only when
+   * genuinely unavailable; the queue then fails closed (treats as active —
+   * full scrub), per resolveOutboundAudience's fail-closed contract.
+   */
+  readonly fallbackActive?: () => boolean;
+  /**
+   * T8-F1: resolve whether a chatJid's peer is a config admin (lid-aware —
+   * `isOperatorDmPeer`). Injected so the queue stays decoupled from
+   * `Database`/access-list internals (SoC) — the runtime, which already owns
+   * `db` and `config.adminPhones`, computes this.
+   */
+  readonly peerIsAdmin?: (chatJid: string) => boolean;
 }
 
 interface MutableTurnDeliveryEvidence {
@@ -408,6 +424,11 @@ export class OutboundQueue implements IOutboundQueue {
    */
   private readonly senderToken: string;
 
+  /** T8-F2: injected fallback-window query (see OutboundQueueOptions). */
+  private readonly fallbackActiveFn: (() => boolean) | undefined;
+  /** T8-F1: injected admin-peer resolver (see OutboundQueueOptions). */
+  private readonly peerIsAdminFn: ((chatJid: string) => boolean) | undefined;
+
   constructor(
     messenger: Messenger,
     deliveryJid: string,
@@ -424,6 +445,8 @@ export class OutboundQueue implements IOutboundQueue {
     // flood-suppressed by the predecessor's still-active group cooldown. Falls
     // back to a fresh token for a genuinely new queue.
     this.senderToken = options?.senderToken ?? crypto.randomUUID();
+    this.fallbackActiveFn = options?.fallbackActive;
+    this.peerIsAdminFn = options?.peerIsAdmin;
   }
 
   /** The echo-guard token for this queue (QR-069: inherited by a replacement). */
@@ -681,7 +704,22 @@ export class OutboundQueue implements IOutboundQueue {
     // chunks (boundary-safe). Audience-scoped: operator-owned internal groups keep
     // the fleet's coordination vocabulary (paths, hook names, bead `Files:` lists)
     // and only have secrets/emails masked — client chats get the full scrub.
-    const safe = redactInternalArtifacts(text, resolveOutboundAudience(attribution.chatJid)).text;
+    //
+    // T8-F1+F2: an admin's 1:1 DM chat on the trusted primary (no fallback
+    // window) is ALSO an operator channel — ctx is optional and only present
+    // when the runtime injected both callbacks at construction (see
+    // OutboundQueueOptions). fallbackActive fails CLOSED (missing callback ⇒
+    // treated as active ⇒ full scrub) so an un-injected queue never silently
+    // elevates.
+    const isGroup = isGroupJid(attribution.chatJid);
+    const ctx = this.peerIsAdminFn
+      ? {
+          isGroup,
+          peerIsAdmin: this.peerIsAdminFn(attribution.chatJid),
+          fallbackActive: this.fallbackActiveFn ? this.fallbackActiveFn() : true,
+        }
+      : undefined;
+    const safe = redactInternalArtifacts(text, resolveOutboundAudience(attribution.chatJid, ctx)).text;
     const chunks = repairChunkFormatting(splitMessage(preprocessText(safe)));
     for (const chunk of chunks) {
       this.enqueue(chunk, attribution);

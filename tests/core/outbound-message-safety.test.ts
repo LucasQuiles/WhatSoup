@@ -1,12 +1,32 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   redactInternalArtifacts,
   classifyAssistantTextEgress,
   classifyInfraStatusClaim,
   evaluateOutboundMessageSafety,
   resolveOutboundAudience,
+  isOperatorDmPeer,
   CLIENT_TEMPORARY_ISSUE_TEXT,
 } from '../../src/core/outbound-message-safety.ts';
+import { Database } from '../../src/core/database.ts';
+
+// T8-F1+F2: isOperatorDmPeer logs (never-silent, WG-7) via the module's own
+// child logger. Hoisted so the mock factory (which vitest hoists above these
+// imports) can close over a stable object the tests assert against.
+const { mockAudienceLog } = vi.hoisted(() => ({
+  mockAudienceLog: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() },
+}));
+vi.mock('../../src/logger.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/logger.ts')>();
+  return {
+    ...actual,
+    // Only the module-under-test's 'outbound-audience' child logger is
+    // captured — every other component (e.g. Database's own child logger)
+    // keeps the REAL logger so this mock never masks unrelated warnings.
+    createChildLogger: (name: string) =>
+      name === 'outbound-audience' ? mockAudienceLog : actual.createChildLogger(name),
+  };
+});
 
 // All fixtures use neutral placeholders. `/Users/testuser` and `/home/testuser`
 // are allow-listed by the repo-hygiene guard yet still match the guardrail's
@@ -639,5 +659,176 @@ describe('resolveOutboundAudience', () => {
     expect(resolveOutboundAudience('111@g.us')).toBe('client');
     delete process.env['WHATSOUP_INTERNAL_JIDS'];
     expect(resolveOutboundAudience('111@g.us')).toBe('client');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T8-F1+F2 — operator-DM audience tier, trusted-primary-only
+// ---------------------------------------------------------------------------
+
+// Neutral admin/owner fixtures — assembled at runtime so no literal phone/lid
+// appears in committed source (repo-hygiene guard), matching the FAKE_* style
+// above. Shapes mirror the OBSERVED-LIVE owner DM (V32): phone-form
+// `@s.whatsapp.net` and lid-form `@lid` are two JIDs for the SAME operator.
+const OWNER_PHONE = `${'18459780901'}`;
+const OWNER_PHONE_JID = `${OWNER_PHONE}@s.whatsapp.net`;
+const OWNER_LID = `${'16566225701'}`;
+const OWNER_LID_JID = `${OWNER_LID}@lid`;
+const UNMAPPED_LID_JID = `${'19999999901'}@lid`;
+const NON_ADMIN_PHONE_JID = `${'15559990001'}@s.whatsapp.net`;
+const ADMIN_PHONES = new Set([OWNER_PHONE]);
+
+function openDbWithLidMapping(): Database {
+  const db = new Database(':memory:');
+  db.open();
+  // Mirrors admin.test.ts's seed pattern: lid_mappings.phone_jid stores the
+  // FULL phone JID; resolveLid/resolvePhoneFromJid strip it to bare digits.
+  db.raw.prepare(
+    "INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, datetime('now'))",
+  ).run(OWNER_LID, OWNER_PHONE_JID);
+  return db;
+}
+
+describe('isOperatorDmPeer', () => {
+  afterEach(() => {
+    mockAudienceLog.warn.mockClear();
+  });
+
+  it('[gate test 5, phone form] returns true for the owner DM peer in phone-JID form', () => {
+    const db = openDbWithLidMapping();
+    try {
+      expect(isOperatorDmPeer(OWNER_PHONE_JID, false, db, ADMIN_PHONES)).toBe(true);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('[gate test 5, lid form — the PRIMARY case, V32] returns true for the owner DM peer in lid-JID form via a resolveLid fixture mapping', () => {
+    const db = openDbWithLidMapping();
+    try {
+      expect(isOperatorDmPeer(OWNER_LID_JID, false, db, ADMIN_PHONES)).toBe(true);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('[never-silent, WG-7] an unresolved lid peer returns false AND logs outbound-audience/not-elevated (id-only, N14)', () => {
+    const db = openDbWithLidMapping();
+    try {
+      const result = isOperatorDmPeer(UNMAPPED_LID_JID, false, db, ADMIN_PHONES);
+      expect(result).toBe(false);
+      expect(mockAudienceLog.warn).toHaveBeenCalledTimes(1);
+      const [payload, message] = mockAudienceLog.warn.mock.calls[0] as [Record<string, unknown>, string];
+      expect(payload).toMatchObject({ chatJidForm: 'lid', outcome: 'not-elevated' });
+      // N14: never the raw chatJid/lid value in the log line.
+      expect(JSON.stringify(payload)).not.toContain(UNMAPPED_LID_JID.split('@')[0]);
+      expect(message).toMatch(/lid peer/i);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('[group] returns false for a group chat even when the sender would otherwise resolve admin', () => {
+    const db = openDbWithLidMapping();
+    try {
+      expect(isOperatorDmPeer(OWNER_PHONE_JID, true, db, ADMIN_PHONES)).toBe(false);
+      expect(isOperatorDmPeer(OWNER_LID_JID, true, db, ADMIN_PHONES)).toBe(false);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('returns false for a non-admin phone-form DM peer, and does not log (only lid non-resolution logs)', () => {
+    const db = openDbWithLidMapping();
+    try {
+      expect(isOperatorDmPeer(NON_ADMIN_PHONE_JID, false, db, ADMIN_PHONES)).toBe(false);
+      expect(mockAudienceLog.warn).not.toHaveBeenCalled();
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe('resolveOutboundAudience — ctx (F1+F2, operator-DM elevation)', () => {
+  const savedBotErrors = process.env['BOT_ERRORS_JID'];
+  const savedInternal = process.env['WHATSOUP_INTERNAL_JIDS'];
+  const restore = (key: string, saved: string | undefined) => {
+    if (saved === undefined) delete process.env[key];
+    else process.env[key] = saved;
+  };
+  afterEach(() => {
+    restore('BOT_ERRORS_JID', savedBotErrors);
+    restore('WHATSOUP_INTERNAL_JIDS', savedInternal);
+  });
+
+  it('[env-absent] WHATSOUP_INTERNAL_JIDS unset + owner DM ctx (not fallback) → internal (F1 supersedes the env stopgap)', () => {
+    delete process.env['BOT_ERRORS_JID'];
+    delete process.env['WHATSOUP_INTERNAL_JIDS'];
+    const audience = resolveOutboundAudience(OWNER_LID_JID, {
+      isGroup: false,
+      peerIsAdmin: true,
+      fallbackActive: false,
+    });
+    expect(audience).toBe('internal');
+  });
+
+  it('[gate test 4 / INV-3] fallback window active ⇒ operator DM stays client (full scrub), never elevated', () => {
+    const audience = resolveOutboundAudience(OWNER_PHONE_JID, {
+      isGroup: false,
+      peerIsAdmin: true,
+      fallbackActive: true,
+    });
+    expect(audience).toBe('client');
+  });
+
+  it('group + admin peer → NOT elevated (isGroup gates elevation regardless of peerIsAdmin)', () => {
+    const audience = resolveOutboundAudience(OWNER_PHONE_JID, {
+      isGroup: true,
+      peerIsAdmin: true,
+      fallbackActive: false,
+    });
+    expect(audience).toBe('client');
+  });
+
+  it('[gate test 6] external non-admin DM peer stays client regardless of ctx', () => {
+    const audience = resolveOutboundAudience(NON_ADMIN_PHONE_JID, {
+      isGroup: false,
+      peerIsAdmin: false,
+      fallbackActive: false,
+    });
+    expect(audience).toBe('client');
+  });
+
+  it('omitted ctx preserves exact pre-F1F2 behavior (non-ctx callers unaffected)', () => {
+    delete process.env['BOT_ERRORS_JID'];
+    delete process.env['WHATSOUP_INTERNAL_JIDS'];
+    expect(resolveOutboundAudience(OWNER_PHONE_JID)).toBe('client');
+  });
+
+  it('ops (BOT_ERRORS_JID) still wins over ctx elevation', () => {
+    process.env['BOT_ERRORS_JID'] = OWNER_PHONE_JID;
+    const audience = resolveOutboundAudience(OWNER_PHONE_JID, {
+      isGroup: false,
+      peerIsAdmin: true,
+      fallbackActive: false,
+    });
+    expect(audience).toBe('ops');
+  });
+
+  it('INV-2: elevated operator DM still masks secrets, and internal tier still masks credential paths (non-credential operator path visible)', () => {
+    const audience = resolveOutboundAudience(OWNER_LID_JID, {
+      isGroup: false,
+      peerIsAdmin: true,
+      fallbackActive: false,
+    });
+    expect(audience).toBe('internal');
+    const secretText = `session=${'abc123def456ghi789'}`;
+    expect(redactInternalArtifacts(secretText, audience).text).not.toContain('abc123def456ghi789');
+    const credentialPathText = 'the key is at /Users/testuser/.ssh/id_ed25519 — check it';
+    expect(redactInternalArtifacts(credentialPathText, audience).text).not.toContain('.ssh/id_ed25519');
+    const operatorPathText = 'restart via /Users/testuser/LAB/whatsoup/instances/q';
+    expect(redactInternalArtifacts(operatorPathText, audience).text).toContain(
+      '/Users/testuser/LAB/whatsoup/instances/q',
+    );
   });
 });

@@ -12,8 +12,12 @@
 //   B. classifyInfraStatusClaim — detect a false self-infra-failure claim so a
 //      caller can divert it to ops instead of the client.
 //
-// This file performs NO logging, NO sending, and NO I/O. Callers (the MCP
-// send_message path) decide what to do with a decision.
+// This file performs NO sending and NO other I/O, and stays pure otherwise.
+// Callers (the MCP send_message path) decide what to do with a decision. The
+// ONE exception (T8-F1, WG-7): `isOperatorDmPeer` logs a single component-
+// tagged, id-only warn when a lid-form peer does not resolve to an admin
+// phone, so an audience-elevation decision is never silent (see the function
+// doc). Nothing else in this file logs.
 //
 // SSOT note: the secret/token/email masking is reused from
 // `sanitizeProviderPreviewText`. The internal-path / identifier / PII shapes
@@ -23,6 +27,47 @@
 
 import { sanitizeProviderPreviewText } from '../lib/provider-preview-sanitizer.ts';
 import { jidPattern } from '../lib/redaction-patterns.ts';
+import { isAdminPhone } from '../lib/phone.ts';
+import { isLidJid } from './jid-constants.ts';
+import { resolvePhoneFromJid } from './access-list.ts';
+import { createChildLogger } from '../logger.ts';
+import type { Database } from './database.ts';
+
+const audienceLog = createChildLogger('outbound-audience');
+
+/**
+ * True iff `chatJid` is a 1:1 DM whose peer is a config admin (T8-F1).
+ *
+ * Keys on the CHATJID (the conversation peer), NOT a sender JID — an OUTBOUND
+ * message has no meaningful sender (the bot is sending), so the operator
+ * identity is the chat itself. Resolves `@lid` → phone via
+ * `resolvePhoneFromJid` (which consults `lid_mappings`): the owner-DM
+ * outbound `chatJid` on the deployed q instance is OBSERVED-LIVE to be the
+ * lid form (V32), so lid resolution is the PRIMARY case here, not
+ * defense-in-depth.
+ *
+ * NEVER silent: when a lid-form peer does not resolve to an admin phone
+ * (unmapped lid → `resolvePhoneFromJid` falls back to the raw LID digits,
+ * which will not match `adminPhones`), a single warn is logged — component-
+ * tagged and id-only (N14: never the chatJid/lid value) — so a lid-thread
+ * audience decision is always observable, never a silent client fall-through.
+ */
+export function isOperatorDmPeer(
+  chatJid: string,
+  isGroup: boolean,
+  db: Database,
+  adminPhones: Set<string>,
+): boolean {
+  if (isGroup) return false;
+  const isAdmin = isAdminPhone(resolvePhoneFromJid(chatJid, db), adminPhones);
+  if (!isAdmin && isLidJid(chatJid)) {
+    audienceLog.warn(
+      { chatJidForm: 'lid', outcome: 'not-elevated' },
+      'operator-DM lid peer did not resolve to an admin phone — not elevated',
+    );
+  }
+  return isAdmin;
+}
 
 export type OutboundAudience = 'client' | 'ops' | 'internal';
 
@@ -174,9 +219,11 @@ export function classifyAssistantTextEgress(text: string): AssistantTextEgressDe
  *   - `ops`      — the configured BOT ERRORS channel (`BOT_ERRORS_JID`);
  *                  verbatim diagnostics preserved.
  *   - `internal` — an operator-owned agent-coordination group listed in
- *                  `WHATSOUP_INTERNAL_JIDS`; the fleet's own vocabulary (home/`~`
- *                  paths, `.claude/`, hook-event names, bead `Files:` lists) is
- *                  legitimate content there, so it is NOT scrubbed as a leak.
+ *                  `WHATSOUP_INTERNAL_JIDS`, OR (T8-F1+F2) an admin's 1:1 DM
+ *                  on the trusted primary (see `ctx` below); the fleet's own
+ *                  vocabulary (home/`~` paths, `.claude/`, hook-event names,
+ *                  bead `Files:` lists) is legitimate content there, so it is
+ *                  NOT scrubbed as a leak.
  *   - `client`   — everything else; the conservative default, since a false
  *                  redaction on an operator message is low-harm while a leak to
  *                  a real client is high-harm.
@@ -184,8 +231,24 @@ export function classifyAssistantTextEgress(text: string): AssistantTextEgressDe
  * is a bypass.
  *
  * Reads `process.env.BOT_ERRORS_JID` and `process.env.WHATSOUP_INTERNAL_JIDS` —
- * the only runtime dependencies in this otherwise pure module; kept here so
+ * the only env dependencies in this otherwise pure module; kept here so
  * audience policy has a single home.
+ *
+ * `ctx` (T8-F1+F2, OPTIONAL — omitting it preserves the exact pre-F1+F2
+ * behavior for every existing caller):
+ *   - `isGroup`       — the target is a group chat (never elevated).
+ *   - `peerIsAdmin`   — `isOperatorDmPeer(chatJid, isGroup, db, adminPhones)`,
+ *                       computed by the caller (this function stays boolean-in,
+ *                       no DB access here — SoC).
+ *   - `fallbackActive`— true while a FALLBACK (non-trusted-primary) provider
+ *                       window is active. FAIL-CLOSED: a caller that cannot
+ *                       determine this MUST pass `true` (full scrub), never
+ *                       default `false` — `false` here elevates an operator DM
+ *                       to `internal`, and an unknown-state elevation during a
+ *                       degraded/fallback model is the exact leak this guards.
+ * Elevation requires ALL THREE: `!isGroup && peerIsAdmin && !fallbackActive`.
+ * `ops`/env-`internal` are checked first and still win (ctx never downgrades
+ * an already-internal/ops chat).
  */
 const EMPTY_JID_SET: ReadonlySet<string> = new Set();
 
@@ -199,10 +262,18 @@ function internalGroupJids(): ReadonlySet<string> {
   return new Set(raw.split(',').map((j) => j.trim()).filter(Boolean));
 }
 
-export function resolveOutboundAudience(chatJid: string): OutboundAudience {
+export function resolveOutboundAudience(
+  chatJid: string,
+  ctx?: { isGroup: boolean; peerIsAdmin: boolean; fallbackActive: boolean },
+): OutboundAudience {
   const opsJid = process.env['BOT_ERRORS_JID']?.trim();
   if (opsJid && chatJid === opsJid) return 'ops';
   if (internalGroupJids().has(chatJid)) return 'internal';
+  // T8-F1+F2: an admin's 1:1 DM on the trusted primary (no fallback window) is
+  // an operator channel. This SUPERSEDES the WHATSOUP_INTERNAL_JIDS owner-DM
+  // stopgap entry (which stays group-oriented going forward) — an env-absent
+  // owner DM still resolves `internal` via this branch.
+  if (ctx && !ctx.isGroup && ctx.peerIsAdmin && !ctx.fallbackActive) return 'internal';
   return 'client';
 }
 
