@@ -1,79 +1,14 @@
 // tests/core/chat-display-name.test.ts
 //
-// B23 UX polish — owner ruling (verbatim): "sessions should show contact
-// names, group names, etc — not unrecognizable JID/LID mappings or phone
-// numbers". Contract tests for the display-name resolution ladder used by
-// the /sessions list and the /kill-session ack:
-//
-//   1. chat_aliases.alias      — the owner's own name for the chat
-//                                (config chatAliases seeds this table,
-//                                main.ts → seedChatAliases)
-//   2. groups.subject          — WhatsApp group subject
-//      then chats.name         — chat-level name (chat-sync)
-//   3. contacts.display_name / notify_name — contact address-book/push name
-//      (via lid_mappings indirection for @lid refs)
-//   4. formatted phone (+digits) for DMs
-//   5. the raw ref, unchanged  — last resort; NEVER throws on a miss
-//
-// Inputs may be a conversation_key ('123_at_g.us' / bare phone) or a raw JID
-// ('123@g.us' / '123@s.whatsapp.net' / '123@lid') — the runtime's session
-// map keys carry both shapes.
+// Contract tests for the display-name resolution ladder used by the
+// /sessions list and the /kill-session ack. The ladder itself — owner
+// ruling, step order, accepted input shapes — is documented at the source
+// module: src/core/chat-display-name.ts.
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
+import { Database as RealDatabase } from '../../src/core/database.ts';
 import { resolveChatDisplayName } from '../../src/core/chat-display-name.ts';
-
-// --- Helpers ---------------------------------------------------------------
-
-// Schema mirrors src/core/database.ts (chat_aliases / groups / chats /
-// contacts / lid_mappings — the columns the resolver reads).
-function makeDb(): DatabaseSync {
-  const db = new DatabaseSync(':memory:');
-  db.exec(`
-    CREATE TABLE chat_aliases (
-      alias TEXT NOT NULL PRIMARY KEY,
-      chat_jid TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE TABLE groups (
-      jid TEXT PRIMARY KEY,
-      subject TEXT,
-      description TEXT,
-      owner TEXT,
-      creation_time INTEGER,
-      participant_count INTEGER,
-      restrict_mode INTEGER DEFAULT 0,
-      announce_mode INTEGER DEFAULT 0,
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE TABLE chats (
-      jid TEXT PRIMARY KEY,
-      conversation_key TEXT NOT NULL,
-      name TEXT,
-      unread_count INTEGER DEFAULT 0,
-      is_archived INTEGER DEFAULT 0,
-      is_pinned INTEGER DEFAULT 0,
-      mute_until TEXT,
-      ephemeral_duration INTEGER,
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE TABLE contacts (
-      jid TEXT PRIMARY KEY,
-      canonical_phone TEXT,
-      display_name TEXT,
-      notify_name TEXT,
-      first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
-      last_seen_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE TABLE lid_mappings (
-      lid TEXT PRIMARY KEY,
-      phone_jid TEXT NOT NULL,
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-  `);
-  return db;
-}
 
 const GROUP_JID = '111222333444555666@g.us';
 const GROUP_KEY = '111222333444555666_at_g.us';
@@ -81,10 +16,23 @@ const DM_JID = '15550001111@s.whatsapp.net';
 const DM_KEY = '15550001111';
 
 describe('resolveChatDisplayName — B23 ladder', () => {
+  // Real schema (B25 3c): this suite used to hand-mirror five CREATE TABLE
+  // blocks, so drift in src/core/database.ts could false-green it. The real
+  // Database migration chain is the schema authority; the resolver reads
+  // through the raw node:sqlite handle exactly as the runtime does (the
+  // `new RealDatabase(':memory:')` + `db.raw` idiom from
+  // command-gate-contract.test.ts).
+  let realDb: RealDatabase;
   let db: DatabaseSync;
 
   beforeEach(() => {
-    db = makeDb();
+    realDb = new RealDatabase(':memory:');
+    realDb.open();
+    db = realDb.raw;
+  });
+
+  afterEach(() => {
+    realDb.close();
   });
 
   it('owner chatAlias wins over group subject and everything else', () => {
@@ -103,9 +51,9 @@ describe('resolveChatDisplayName — B23 ladder', () => {
   });
 
   it('group subject when no alias exists (both jid and conversation_key inputs)', () => {
-    db.prepare('INSERT INTO groups (jid, subject) VALUES (?, ?)').run(GROUP_JID, 'Loopicus Ops');
-    expect(resolveChatDisplayName(db, GROUP_JID)).toBe('Loopicus Ops');
-    expect(resolveChatDisplayName(db, GROUP_KEY)).toBe('Loopicus Ops');
+    db.prepare('INSERT INTO groups (jid, subject) VALUES (?, ?)').run(GROUP_JID, 'Ops Crew Test');
+    expect(resolveChatDisplayName(db, GROUP_JID)).toBe('Ops Crew Test');
+    expect(resolveChatDisplayName(db, GROUP_KEY)).toBe('Ops Crew Test');
   });
 
   it('chats.name when there is no groups row', () => {
@@ -171,9 +119,13 @@ describe('resolveChatDisplayName — B23 ladder', () => {
 
   it('NEVER throws — a db with no tables at all degrades to the string ladder', () => {
     const bare = new DatabaseSync(':memory:');
-    expect(() => resolveChatDisplayName(bare, GROUP_JID)).not.toThrow();
-    expect(resolveChatDisplayName(bare, GROUP_JID)).toBe(GROUP_JID);
-    // Phone formatting is a pure string step, so it still applies.
-    expect(resolveChatDisplayName(bare, '15551112222')).toBe('+15551112222');
+    try {
+      expect(() => resolveChatDisplayName(bare, GROUP_JID)).not.toThrow();
+      expect(resolveChatDisplayName(bare, GROUP_JID)).toBe(GROUP_JID);
+      // Phone formatting is a pure string step, so it still applies.
+      expect(resolveChatDisplayName(bare, '15551112222')).toBe('+15551112222');
+    } finally {
+      bare.close();
+    }
   });
 });

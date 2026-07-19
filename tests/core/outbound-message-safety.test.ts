@@ -10,6 +10,7 @@ import {
   CLIENT_TEMPORARY_ISSUE_TEXT,
 } from '../../src/core/outbound-message-safety.ts';
 import { Database } from '../../src/core/database.ts';
+import { E9_BARE_AT_MESSAGE } from '../fixtures/e9-strings.ts';
 
 // T8-F1+F2: isOperatorDmPeer logs (never-silent, WG-7) via the module's own
 // child logger. Hoisted so the mock factory (which vitest hoists above these
@@ -481,7 +482,7 @@ describe('redactInternalArtifacts — audience scoping', () => {
     // Live evidence: an internal-tier DM explaining this very bug had its own
     // bare '@' re-redacted to [REDACTED_EMAIL]. A whitespace-flanked '@' has no
     // local part and no domain part — it is not email-shaped.
-    const input = 'meet @ 5pm to review the deck';
+    const input = E9_BARE_AT_MESSAGE;
     expect(redactInternalArtifacts(input, 'client').text).toBe(input);
     expect(redactInternalArtifacts(input, 'internal').text).toBe(input);
   });

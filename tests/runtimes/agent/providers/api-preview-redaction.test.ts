@@ -5,6 +5,7 @@ import type { AgentEvent } from '../../../../src/runtimes/agent/stream-parser.ts
 import { AnthropicApiProvider } from '../../../../src/runtimes/agent/providers/anthropic-api.ts';
 import { OpenAIApiProvider } from '../../../../src/runtimes/agent/providers/openai-api.ts';
 import { providerPreview, sanitizeProviderPreviewText } from '../../../../src/runtimes/agent/provider-preview-sanitizer.ts';
+import { E9_BARE_AT_MESSAGE } from '../../../fixtures/e9-strings.ts';
 
 const { errorMock, warnMock } = vi.hoisted(() => ({
   errorMock: vi.fn(),
@@ -318,8 +319,7 @@ describe('QR-128: email redaction is linear and does not under-redact', () => {
 // are PII on surfaces that did not opt in), so the flag keeps its meaning.
 describe('E9 (packet D5): a bare "@" is not email-shaped and must survive', () => {
   it('a bare "@" between words survives (the word "at")', () => {
-    const input = 'meet @ 5pm to review the deck';
-    expect(sanitizeProviderPreviewText(input)).toBe(input);
+    expect(sanitizeProviderPreviewText(E9_BARE_AT_MESSAGE)).toBe(E9_BARE_AT_MESSAGE);
   });
 
   it('"@ 5pm" at the start of a message survives', () => {
@@ -427,7 +427,7 @@ describe('B25: quoted-local domain gate, dotted mention bodies, dangling-local f
   });
 
   it('1c guard: E9 protected cases stay protected — truly-bare "@" runs still pass', () => {
-    for (const input of ['meet @ 5pm to review the deck', '@ 5pm works for me', 'ordered 3 @ $5 each']) {
+    for (const input of [E9_BARE_AT_MESSAGE, '@ 5pm works for me', 'ordered 3 @ $5 each']) {
       expect(sanitizeProviderPreviewText(input)).toBe(input);
     }
   });
