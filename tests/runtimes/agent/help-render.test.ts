@@ -76,12 +76,12 @@ describe('B21-B /help fixes (RED-first)', () => {
   it('#2: routing-alias detail renders local semantics ONLY when nlRouting is on', () => {
     // Flag off, /model|/why|/reset FORWARD (byte-identical-off, D7) — so
     // /help must not describe local-routing semantics the command won't have.
+    // (B23 refines the flag-off wording to an honest pass-through note — see
+    // the B23 describe below — but the D7 no-local-semantics bar is unchanged.)
     const on = renderHelpDetail('model', { nlRouting: true });
     expect(on).toContain('`/model [status|default|strongest|fastest|provider-id]`');
     const off = renderHelpDetail('model', { nlRouting: false });
-    expect(off).toMatch(/unknown|not a command/i);
     expect(off).not.toContain('`/model [status');
-    expect(renderHelpDetail('why', { nlRouting: false })).toMatch(/unknown|not a command/i);
     expect(renderHelpDetail('reset', { nlRouting: true })).toContain('`/reset`');
   });
 
@@ -111,5 +111,35 @@ describe('B21-B /help fixes (RED-first)', () => {
     const detail = renderHelpDetail('`whoami`', { nlRouting: false });
     expect(detail).toContain('`/whoami`');
     expect(detail).not.toContain('``');
+  });
+});
+
+describe('B23 UX polish — honest alias-off /help detail', () => {
+  it('alias-off detail says the command is passed through, NOT that it is unknown', () => {
+    // With nlRouting off the routing aliases still FORWARD to the agent
+    // (byte-identical-off, D7) — so `/help model` calling /model "Unknown"
+    // is dishonest about a command that demonstrably does something. The
+    // alias-off branch must name the pass-through instead, while STILL not
+    // rendering the local semantics the flag disables.
+    for (const alias of ['model', 'why', 'reset']) {
+      const off = renderHelpDetail(alias, { nlRouting: false });
+      expect(off).toContain(`\`/${alias}\` is not active here`);
+      expect(off).toContain('passed through to the agent');
+      expect(off).toContain('`/help`');
+      expect(off).not.toMatch(/unknown command/i);
+      expect(off).not.toContain(`\`/${alias} [`); // no local syntax leaks (D7)
+    }
+  });
+  it('genuinely-unknown commands keep the unknown-command hint on BOTH flag states', () => {
+    for (const nlRouting of [false, true]) {
+      const detail = renderHelpDetail('nope', { nlRouting });
+      expect(detail).toContain('Unknown command `/nope`');
+      expect(detail).not.toContain('passed through to the agent');
+    }
+  });
+  it('alias detail with nlRouting ON is untouched by the B23 wording', () => {
+    const on = renderHelpDetail('model', { nlRouting: true });
+    expect(on).not.toContain('is not active here');
+    expect(on).toContain('`/model [status|default|strongest|fastest|provider-id]`');
   });
 });

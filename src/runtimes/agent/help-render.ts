@@ -101,10 +101,11 @@ export function renderHelp({ nlRouting }: { nlRouting: boolean }): string {
  * Takes the same `nlRouting` input renderHelp does: routing-alias commands
  * (/model /why /reset) are LOCAL only when the flag is on (byte-identical-off
  * contract, D7) — flag off they forward, so their local semantics must not
- * render and they fall to the unknown/forwarded hint. Unknown commands return
- * an invalid-arg hint string — this NEVER throws (fail-open UX; contrast with
- * command-registry.ts's getCommandSpec, which fails closed for internal
- * drift-detection callers).
+ * render; they get an honest pass-through note instead (B23 — the command
+ * DOES forward, so calling it "Unknown" was a lie). Genuinely-unknown
+ * commands return an invalid-arg hint string — this NEVER throws (fail-open
+ * UX; contrast with command-registry.ts's getCommandSpec, which fails closed
+ * for internal drift-detection callers).
  */
 export function renderHelpDetail(name: string, { nlRouting }: { nlRouting: boolean }): string {
   // Backtick removal doubles as the E1-class echo guard: the normalized token
@@ -115,7 +116,14 @@ export function renderHelpDetail(name: string, { nlRouting }: { nlRouting: boole
     .replace(/^\//, '')
     .toLowerCase();
   const spec = findSpec(query);
-  if (!spec || (spec.routingAlias === true && !nlRouting)) {
+  if (spec !== undefined && spec.routingAlias === true && !nlRouting) {
+    // Alias off ≠ unknown: the command still FORWARDS to the agent
+    // (byte-identical-off, D7), so the honest detail names the pass-through
+    // — without rendering the local semantics the flag disables (B23).
+    // Wording matches renderHelp's "passed through to the agent" trailer.
+    return `\`/${query}\` is not active here — it is passed through to the agent. See \`/help\` for the full list.`;
+  }
+  if (!spec) {
     return `Unknown command \`/${query}\`. Not a command — try \`/help\` for the full list.`;
   }
   return `\`${spec.syntax}\`\n${spec.summary}${GATE_PRESENTATION[spec.gate].detailNote}`;
