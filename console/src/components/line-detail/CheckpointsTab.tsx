@@ -74,7 +74,9 @@ export function CheckpointsTab({ payload, isLoading, freshness, lineName, liveSe
    *  conversationKey; absent rows render '—', never fabricated liveness. */
   liveSessions?: LiveSessionsPayload;
 }) {
-  const rows = payload?.checkpoints ?? []
+  // Wrapped in useMemo per exhaustive-deps: the `?? []` fallback would
+  // otherwise give sortedRows' useMemo a new dep identity every render.
+  const rows = useMemo(() => payload?.checkpoints ?? [], [payload])
   const resumableCount = rows.filter((r) => r.resumable).length
   const liveByKey = new Map((liveSessions?.sessions ?? []).map((s) => [s.conversationKey, s]))
 
