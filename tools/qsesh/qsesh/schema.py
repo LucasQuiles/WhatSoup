@@ -1,4 +1,4 @@
-"""Schema-v1 DDL, checksum, and fail-closed SQLite connection invariants."""
+"""Schema-v2 DDL, checksum, migration, and fail-closed SQLite connection invariants."""
 
 from __future__ import annotations
 
@@ -6,22 +6,25 @@ import hashlib
 import os
 import sqlite3
 import stat
+import time
 from pathlib import Path
 
 from .errors import QseshError
 from .paths import ensure_private_dir
 
 APPLICATION_ID = 0x51534553
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 BUSY_TIMEOUT_MS = 5_000
-SCHEMA_SHA256 = "0bdb585c87f3020325985ac99a89101fc68aeb048a7af8607692346e5d6ee48c"
+V1_SCHEMA_SHA256 = "0bdb585c87f3020325985ac99a89101fc68aeb048a7af8607692346e5d6ee48c"
+SCHEMA_SHA256 = "54750f703858ca3d7088c1e5c9e1024920142f043716df9ea62bba01b4c4eb30"
+_MIGRATION_2_NAME = "0002-session-size-metrics"
 
 _QID_CHECK = (
     "length(qid)=13 AND substr(qid,1,3)='qs-' AND substr(qid,4) NOT GLOB '*[^a-z2-7]*'"
 )
 _HEX64 = "length({field})=64 AND {field} NOT GLOB '*[^0-9a-f]*'"
 
-DDL = (
+_V1_DDL = (
     f"""CREATE TABLE archives(
         relpath TEXT PRIMARY KEY,
         harness TEXT NOT NULL CHECK(harness IN ('claude','codex','opencode')),
@@ -186,6 +189,47 @@ DDL = (
     ) STRICT""",
 )
 
+_V2_ADDITIONS = (
+    """CREATE TABLE session_size_metrics(
+        qid TEXT NOT NULL REFERENCES sessions(qid) ON DELETE CASCADE,
+        side TEXT NOT NULL,
+        dimension TEXT NOT NULL CHECK(dimension IN ('char','line','word','token','bytes','gzip_bytes')),
+        value INTEGER NOT NULL CHECK(value>=0),
+        metrics_version TEXT NOT NULL CHECK(length(metrics_version)>0),
+        PRIMARY KEY(qid,side,dimension)
+    )""",
+    """CREATE VIEW session_content_reduction AS
+    SELECT o.qid AS qid, o.metrics_version AS metrics_version, o.dimension AS dimension,
+           o.value AS original, c.value AS clean, o.value-c.value AS delta,
+           CASE WHEN o.value=0 THEN NULL ELSE CAST(o.value-c.value AS REAL)/o.value END AS reduction_ratio
+    FROM session_size_metrics o JOIN session_size_metrics c
+      ON o.qid=c.qid AND o.metrics_version=c.metrics_version AND o.dimension=c.dimension
+    WHERE o.side='content_original' AND c.side='content_clean'""",
+    """CREATE VIEW corpus_size_totals AS
+    SELECT metrics_version, dimension, side, SUM(value) AS total
+    FROM session_size_metrics GROUP BY metrics_version, dimension, side""",
+    """CREATE VIEW corpus_reduction_by_harness AS
+    SELECT o.metrics_version AS metrics_version, s.harness AS harness, o.dimension AS dimension,
+           SUM(o.value) AS original, SUM(c.value) AS clean, SUM(o.value)-SUM(c.value) AS delta,
+           CASE WHEN SUM(o.value)=0 THEN NULL ELSE CAST(SUM(o.value)-SUM(c.value) AS REAL)/SUM(o.value) END AS reduction_ratio
+    FROM session_size_metrics o JOIN session_size_metrics c
+      ON o.qid=c.qid AND o.metrics_version=c.metrics_version AND o.dimension=c.dimension
+    JOIN sessions s ON s.qid=o.qid
+    WHERE o.side='content_original' AND c.side='content_clean'
+    GROUP BY o.metrics_version, s.harness, o.dimension""",
+    """CREATE VIEW corpus_reduction_by_project AS
+    SELECT o.metrics_version AS metrics_version, s.project AS project, o.dimension AS dimension,
+           SUM(o.value) AS original, SUM(c.value) AS clean, SUM(o.value)-SUM(c.value) AS delta,
+           CASE WHEN SUM(o.value)=0 THEN NULL ELSE CAST(SUM(o.value)-SUM(c.value) AS REAL)/SUM(o.value) END AS reduction_ratio
+    FROM session_size_metrics o JOIN session_size_metrics c
+      ON o.qid=c.qid AND o.metrics_version=c.metrics_version AND o.dimension=c.dimension
+    JOIN sessions s ON s.qid=o.qid
+    WHERE o.side='content_original' AND c.side='content_clean'
+    GROUP BY o.metrics_version, s.project, o.dimension""",
+)
+
+DDL = _V1_DDL + _V2_ADDITIONS
+
 
 def _fail(phase: str, error: BaseException | None = None) -> QseshError:
     failure = QseshError("QS-E-MIGRATION", phase=phase)
@@ -270,15 +314,17 @@ def open_database(path: Path) -> sqlite3.Connection:
             raise _fail("schema-application-id")
         if user_version > CURRENT_SCHEMA_VERSION:
             raise _fail("schema-newer-version")
-        if application_id == APPLICATION_ID and user_version != CURRENT_SCHEMA_VERSION:
-            raise _fail("schema-drift")
+        if application_id == APPLICATION_ID:
+            if user_version == CURRENT_SCHEMA_VERSION:
+                expected_checksum = SCHEMA_SHA256
+            elif user_version == 1:
+                expected_checksum = V1_SCHEMA_SHA256
+            else:
+                raise _fail("schema-drift")
+            if schema_checksum(connection) != expected_checksum:
+                raise _fail("schema-drift")
         if application_id == 0 and user_version != 0:
             raise _fail("schema-application-id")
-        if (
-            application_id == APPLICATION_ID
-            and schema_checksum(connection) != SCHEMA_SHA256
-        ):
-            raise _fail("schema-drift")
 
         _configure(connection)
         if application_id == 0:
@@ -294,6 +340,32 @@ def open_database(path: Path) -> sqlite3.Connection:
                     raise _fail("schema-quick-check")
                 if schema_checksum(connection) != SCHEMA_SHA256:
                     raise _fail("schema-checksum")
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+        elif application_id == APPLICATION_ID and user_version == 1:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                for statement in _V2_ADDITIONS:
+                    connection.execute(statement)
+                applied_at_us = time.time_ns() // 1_000
+                connection.execute(
+                    "INSERT INTO migrations(version,name,checksum,applied_at_us) VALUES(?,?,?,?)",
+                    (
+                        CURRENT_SCHEMA_VERSION,
+                        _MIGRATION_2_NAME,
+                        SCHEMA_SHA256,
+                        applied_at_us,
+                    ),
+                )
+                connection.execute(f"PRAGMA user_version={CURRENT_SCHEMA_VERSION}")
+                if connection.execute("PRAGMA foreign_key_check").fetchall():
+                    raise _fail("migration-foreign-key-check")
+                if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                    raise _fail("migration-quick-check")
+                if schema_checksum(connection) != SCHEMA_SHA256:
+                    raise _fail("migration-checksum")
                 connection.commit()
             except BaseException:
                 connection.rollback()
