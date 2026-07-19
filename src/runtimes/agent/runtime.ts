@@ -3728,11 +3728,18 @@ export class AgentRuntime implements Runtime {
       //                           :760); a per_chat 1:1 DM reset touches only the sender's
       //                           own conversation → ungated. Group-permitting (an admin may
       //                           /new in a group) AND @sms-closing (authenticated-JID check).
+      //                           With EMPTY adminPhones /new stays ungated too (B21-A F2,
+      //                           base parity): a no-admin instance has no other reset path,
+      //                           so deny-everyone would be a total /new lockout, not a
+      //                           security posture. The empty-set exemption is THIS gate
+      //                           only — plain 'admin' commands were admin-gated on base
+      //                           and stay denied when no admin is configured.
       const denied =
         spec.gate === 'admin'
           ? !isAdminMessage(msg, this.db)
           : spec.gate === 'admin-shared-scope'
             ? (this.sessionScope !== 'per_chat' || msg.isGroup) &&
+              config.adminPhones.size > 0 &&
               !(isWhatsAppAuthenticatedJid(msg.senderJid) &&
                 isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones))
             : false;

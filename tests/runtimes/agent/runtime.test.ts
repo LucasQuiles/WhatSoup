@@ -8984,6 +8984,55 @@ describe('AgentRuntime', () => {
     expect(mockQueue.enqueueText).not.toHaveBeenCalled();
   });
 
+  it('single mode: /new with EMPTY adminPhones is allowed for any sender (no-admin instance keeps its only reset path, B21-A F2)', async () => {
+    // The admin-shared-scope denied-predicate would otherwise deny EVERY sender
+    // when config.adminPhones is empty — but on the pre-registry base,
+    // single-mode /new was ungated ("non-shared: /new is allowed for any
+    // sender"), and an instance with no admin configured has NO other reset
+    // path: denying everyone is a total /new lockout, not a security posture.
+    // Empty adminPhones therefore leaves 'admin-shared-scope' ungated (base
+    // parity); plain 'admin'-gated commands stay denied (see sibling test).
+    mockConfig.adminPhones = new Set<string>();
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const runtime = new AgentRuntime(db, messenger); // default: single scope, non-shared
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ content: 'hello', senderJid: '15559998888@s.whatsapp.net' }));
+    await emitAgentResultWithoutTokens('done');
+    mockQueue.enqueueText.mockClear();
+    mockSession.handleNew.mockClear();
+
+    await sendAndDrain(runtime, makeMsg({
+      content: '/new',
+      senderJid: '15559998888@s.whatsapp.net', // any sender — no admin exists to authorize
+    }));
+
+    expect(mockSession.handleNew).toHaveBeenCalled();
+    const enqueuedTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
+    expect(enqueuedTexts.some((t) => /new session/i.test(t))).toBe(true);
+  });
+
+  it('single mode: /sessions with EMPTY adminPhones stays DENIED (empty-set relaxation is admin-shared-scope ONLY, B21-A F2)', async () => {
+    // The lockout exemption must NOT leak into the plain 'admin' gate: with no
+    // admin configured there is legitimately nobody who may run cross-session
+    // admin surfaces (/sessions, /kill-session) — they were admin-gated on the
+    // pre-registry base too.
+    mockConfig.adminPhones = new Set<string>();
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({
+      content: '/sessions',
+      senderJid: '15559998888@s.whatsapp.net',
+    }));
+
+    expect(sentMessages.map((m) => m.text).some((t) => t.includes('Active Sessions'))).toBe(false);
+    expect(sentMessages.map((m) => m.text).some((t) => t.includes('No active sessions'))).toBe(false);
+  });
+
   it('non-sandboxed per_chat serializes same-chat messages while spawnSession is pending', async () => {
     const { SessionManager: MockSessionManagerCtor } = await import('../../../src/runtimes/agent/session.ts');
     const db = makeDb();
