@@ -328,6 +328,51 @@ describe('config — startup gates', () => {
     expect(config.startupNotifications).toBe(true);
     expect(config.proactiveResumeOnStartup).toBe(false);
   });
+});
+
+// ---------------------------------------------------------------------------
+// C5 restart-loop guard knobs (src/runtimes/agent/restart-loop-guard.ts)
+// ---------------------------------------------------------------------------
+
+describe('config — restartLoopGuard', () => {
+  const makeMinimal = (overrides: Record<string, unknown>) => ({
+    name: 'guard-bot',
+    type: 'agent',
+    paths: {
+      configRoot: path.join(tmpDir, 'rlg-config'),
+      dataRoot: path.join(tmpDir, 'rlg-data'),
+      stateRoot: path.join(tmpDir, 'rlg-state'),
+      authDir: path.join(tmpDir, 'rlg-config', 'auth_info'),
+      dbPath: path.join(tmpDir, 'rlg-data', 'bot.db'),
+      logDir: path.join(tmpDir, 'rlg-data', 'logs'),
+      lockPath: path.join(tmpDir, 'rlg-state', 'bot.lock'),
+      mediaDir: path.join(tmpDir, 'rlg-data', 'media', 'tmp'),
+    },
+    ...overrides,
+  });
+
+  it('defaults to enabled with the spec thresholds (3 crashy boots / 300s)', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeMinimal({}));
+    const { config } = await import('../src/config.ts');
+    expect(config.restartLoopGuard).toEqual({ enabled: true, maxRestarts: 3, windowMs: 300_000 });
+  });
+
+  it('honors instance.json overrides', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(
+      makeMinimal({ restartLoopGuard: { enabled: false, maxRestarts: 5, windowMs: 60_000 } }),
+    );
+    const { config } = await import('../src/config.ts');
+    expect(config.restartLoopGuard).toEqual({ enabled: false, maxRestarts: 5, windowMs: 60_000 });
+  });
+
+  it('falls back to defaults for non-positive numbers', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(
+      makeMinimal({ restartLoopGuard: { maxRestarts: 0, windowMs: -1 } }),
+    );
+    const { config } = await import('../src/config.ts');
+    expect(config.restartLoopGuard.maxRestarts).toBe(3);
+    expect(config.restartLoopGuard.windowMs).toBe(300_000);
+  });
 
   it('non-boolean gate values fall back to the default (true)', async () => {
     process.env.INSTANCE_CONFIG = JSON.stringify(
