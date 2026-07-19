@@ -365,11 +365,70 @@ describe('E9 (packet D5): a bare "@" is not email-shaped and must survive', () =
     expect(sanitizeProviderPreviewText('ping @15555550001 now')).toBe('ping [REDACTED_EMAIL] now');
   });
 
-  it('edge decision "x@": empty domain part is not email-shaped and passes through', () => {
-    // Decision (documented): 'user@' has no domain, so it is not an address —
-    // redacting it protects nothing (the bare word 'user' would survive alone)
-    // while re-creating the E9 false-positive class for "qty@" / "name@" typos.
-    const input = 'assign user@ then continue';
+  it('edge decision "x@" REVERSED (B25): a dangling local is an ADDRESS FRAGMENT and redacts', () => {
+    // Original E9 ruling said "redacting it protects nothing" — the B25
+    // review proved the opposite for fragments: on CLIENT egress there is no
+    // downstream phone masking (unlike the handoff/ops surfaces), so a
+    // dangling local ('15551234567@', 'user@') carries the whole PII payload
+    // by itself. A dangling-local token — non-empty local + trailing '@' +
+    // EMPTY domain — now redacts (the local is masked); the E9 exemption
+    // narrows to truly-bare '@' runs ('meet @ 5pm', '3 @ $5 each').
+    expect(sanitizeProviderPreviewText('assign user@ then continue'))
+      .toBe('assign [REDACTED_EMAIL] then continue');
+  });
+});
+
+// B25 review (fix/b25-sanitizer-fixture): three execution-verified defects in
+// the E9 predicate family. Each fixture string below reproduced the defect
+// verbatim against the pre-fix sanitizer (recorded in the branch evidence):
+//   1a. 'she said "hi"@ 5pm'      -> 'she said [REDACTED_EMAIL] 5pm'   (over-redaction)
+//   1b. '@foo.bar' + mentions flag -> '[REDACTED_EMAIL]'               (flag ignored)
+//   1c. 'reach them at 15551234567@' -> passed VERBATIM                (PII leak)
+describe('B25: quoted-local domain gate, dotted mention bodies, dangling-local fragments', () => {
+  it('1a: quoted speech followed by "@" (empty domain) survives — the quoted-local branch is email-shape-gated', () => {
+    // The quoted-local branch redacted after scanning ZERO domain chars. The
+    // same email-shaped requirement (non-empty domain) that gates the token
+    // scanner must gate this branch: '"hi"@ 5pm' is quoted speech + the word
+    // "at", not an address.
+    const input = 'she said "hi"@ 5pm';
     expect(sanitizeProviderPreviewText(input)).toBe(input);
+  });
+
+  it('1a guard: a quoted local with a NON-empty domain still redacts (gate must not disable the branch)', () => {
+    const at = '@';
+    expect(sanitizeProviderPreviewText(`"hi"${at}example.com`)).toBe('[REDACTED_EMAIL]');
+    expect(sanitizeProviderPreviewText(`"hi"${at}[127.0.0.1]`)).toBe('[REDACTED_EMAIL]');
+  });
+
+  it('1b: a dotted mention body is preserved WITH preserveWhatsAppMentions and still masked without it', () => {
+    // Direction ruling (documented in the sanitizer): the PRESERVE regex
+    // accepts dotted mention bodies; dotted mention-shaped tokens stay
+    // redacted by default. See the sanitizer comment for why this direction
+    // cannot leak a real email.
+    expect(sanitizeProviderPreviewText('@foo.bar', { preserveWhatsAppMentions: true })).toBe('@foo.bar');
+    expect(sanitizeProviderPreviewText('@foo.bar')).toBe('[REDACTED_EMAIL]');
+  });
+
+  it('1b guard: a digit-dot mention body stays masked even WITH the flag (phone-fragment PII, fail-closed)', () => {
+    expect(sanitizeProviderPreviewText('@1234.5678', { preserveWhatsAppMentions: true }))
+      .toBe('[REDACTED_EMAIL]');
+  });
+
+  it('1c: a dangling phone-local fragment redacts (client egress has no downstream phone masking)', () => {
+    expect(sanitizeProviderPreviewText('reach them at 15551234567@'))
+      .toBe('reach them at [REDACTED_EMAIL]');
+  });
+
+  it('1c: a space-split address masks the local half', () => {
+    // Shape from the review finding (a real address typed with a space after
+    // the '@'); fixture synthesized — no real identity in committed source.
+    expect(sanitizeProviderPreviewText('first.last@ example-corp.com'))
+      .toBe('[REDACTED_EMAIL] example-corp.com');
+  });
+
+  it('1c guard: E9 protected cases stay protected — truly-bare "@" runs still pass', () => {
+    for (const input of ['meet @ 5pm to review the deck', '@ 5pm works for me', 'ordered 3 @ $5 each']) {
+      expect(sanitizeProviderPreviewText(input)).toBe(input);
+    }
   });
 });
