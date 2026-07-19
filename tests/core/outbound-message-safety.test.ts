@@ -747,6 +747,39 @@ describe('isOperatorDmPeer', () => {
       db.close();
     }
   });
+
+  it('[ADVERSARIAL, QR-143] a spoofed <admin-digits>@sms chatJid does NOT elevate — resolvePhoneFromJid collapses it to the bare admin phone with no authenticated-JID guard', () => {
+    const db = openDbWithLidMapping();
+    try {
+      // smsJidToPhone strips the '@sms' suffix down to the same bare digits as
+      // OWNER_PHONE_JID's phone form — an attacker who can present ANY chatJid
+      // ending '@sms' with the admin's digits (SMS sender-ID is spoofable, see
+      // jid-constants.ts isWhatsAppAuthenticatedJid doc) must not inherit the
+      // owner's operator-DM elevation.
+      const spoofedSmsJid = `${OWNER_PHONE}@sms`;
+      const peerIsAdmin = isOperatorDmPeer(spoofedSmsJid, false, db, ADMIN_PHONES);
+      expect(peerIsAdmin).toBe(false);
+
+      // Full path: a caller wiring peerIsAdmin into resolveOutboundAudience must
+      // still land on 'client' for this chatJid — never 'internal'.
+      const audience = resolveOutboundAudience(spoofedSmsJid, {
+        isGroup: false,
+        peerIsAdmin,
+        fallbackActive: false,
+      });
+      expect(audience).toBe('client');
+
+      // And at 'client' audience, operator vocabulary that would be left
+      // unmasked at 'internal' (see the INV-2 test above) must be MASKED — the
+      // operator path must not reach a spoofed-SMS "client".
+      const operatorPathText = 'restart via /Users/testuser/LAB/whatsoup/instances/q';
+      const { text } = redactInternalArtifacts(operatorPathText, audience);
+      expect(text).not.toContain('/Users/testuser/LAB/whatsoup/instances/q');
+      expect(text).toContain('[internal-path]');
+    } finally {
+      db.close();
+    }
+  });
 });
 
 describe('resolveOutboundAudience — ctx (F1+F2, operator-DM elevation)', () => {

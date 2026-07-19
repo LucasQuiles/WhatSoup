@@ -28,7 +28,7 @@
 import { sanitizeProviderPreviewText } from '../lib/provider-preview-sanitizer.ts';
 import { jidPattern } from '../lib/redaction-patterns.ts';
 import { isAdminPhone } from '../lib/phone.ts';
-import { isLidJid } from './jid-constants.ts';
+import { isLidJid, isWhatsAppAuthenticatedJid } from './jid-constants.ts';
 import { resolvePhoneFromJid } from './access-list.ts';
 import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
@@ -59,6 +59,12 @@ export function isOperatorDmPeer(
   adminPhones: Set<string>,
 ): boolean {
   if (isGroup) return false;
+  // QR-143: only a WhatsApp-authenticated transport (@s.whatsapp.net / @lid) can
+  // carry operator identity here. @sms is spoofable (see the
+  // isWhatsAppAuthenticatedJid doc in jid-constants.ts) and resolvePhoneFromJid
+  // collapses it to the SAME bare phone digits as a real admin JID — without
+  // this guard, a spoofed `<admin-digits>@sms` chatJid would elevate.
+  if (!isWhatsAppAuthenticatedJid(chatJid)) return false;
   const isAdmin = isAdminPhone(resolvePhoneFromJid(chatJid, db), adminPhones);
   if (!isAdmin && isLidJid(chatJid)) {
     audienceLog.warn(
