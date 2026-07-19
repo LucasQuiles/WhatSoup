@@ -207,26 +207,26 @@ function renderLineDetailRoute(routeName: string) {
 // ---------------------------------------------------------------------------
 
 describe('LineDetail tablist (Tabs primitive)', () => {
-  it('renders 7 base tabs as role=tab inside a labeled tablist', async () => {
+  it('renders 8 base tabs as role=tab inside a labeled tablist', async () => {
     await act(async () => {
       renderLineDetail({ line: makeLine({ name: 'test-line', mode: 'chat' }) });
     });
     const list = screen.getByRole('tablist', { name: 'Line detail tabs' });
-    expect(within(list).getAllByRole('tab')).toHaveLength(7);
+    expect(within(list).getAllByRole('tab')).toHaveLength(8);
   });
 
-  it('renders 9 tabs when the line is MCP-capable (passive mode)', async () => {
+  it('renders 10 tabs when the line is MCP-capable (passive mode)', async () => {
     await act(async () => {
       renderLineDetail({ line: makeLine({ name: 'test-line', mode: 'passive' }) });
     });
-    expect(screen.getAllByRole('tab')).toHaveLength(9);
+    expect(screen.getAllByRole('tab')).toHaveLength(10);
   });
 
-  it('renders 9 tabs when the line is agent mode without sandboxPerChat', async () => {
+  it('renders 10 tabs when the line is agent mode without sandboxPerChat', async () => {
     await act(async () => {
       renderLineDetail({ line: makeLine({ name: 'test-line', mode: 'agent', sandboxPerChat: false }) });
     });
-    expect(screen.getAllByRole('tab')).toHaveLength(9);
+    expect(screen.getAllByRole('tab')).toHaveLength(10);
   });
 
   it('ArrowRight + Enter activates the next tab; focus alone does not switch panels', async () => {

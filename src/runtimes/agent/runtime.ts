@@ -6133,6 +6133,63 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
+   * D-4: resolve a pending poll from the console approval queue. Translates
+   * the decision into the exact vote-event shape and delegates to
+   * handlePollVoteReceived — the SAME code path a WhatsApp vote takes
+   * (first-resolution-wins, answer injection, persistence all shared
+   * verbatim; UX-20 parity). Reached via the instance health server's
+   * POST /poll-decision, proxied by the fleet approvals route. Never writes
+   * the pending_polls row directly.
+   */
+  public resolvePollDecisionFromConsole(decision: {
+    mapKey: string;
+    questionIndex: number;
+    selectedOptions: string[];
+  }): { ok: true } | { ok: false; error: string; code: 'not_found' | 'stale' | 'invalid' } {
+    const pending = this.pendingPolls.questions.get(decision.mapKey);
+    if (!pending) {
+      return { ok: false, error: 'pending poll not found (already resolved or expired)', code: 'not_found' };
+    }
+    if (pending.mode !== 'poll') {
+      return { ok: false, error: 'this decision fell back to chat text — answer in WhatsApp', code: 'invalid' };
+    }
+    if (pending.answersCollected[decision.questionIndex] !== undefined) {
+      return { ok: false, error: 'already resolved', code: 'stale' };
+    }
+    const question = pending.questions[decision.questionIndex];
+    if (!question) {
+      return { ok: false, error: 'question index out of range', code: 'invalid' };
+    }
+    const validLabels = new Set(question.options.map((o) => o.label));
+    if (decision.selectedOptions.length === 0
+        || !decision.selectedOptions.every((l) => validLabels.has(l))) {
+      return { ok: false, error: 'selected option(s) are not options of this question', code: 'invalid' };
+    }
+    const pollMessageId = Array.from(pending.pollMessageIdToQuestionIndex.entries())
+      .find(([, qi]) => qi === decision.questionIndex)?.[0];
+    if (!pollMessageId) {
+      return { ok: false, error: 'no live poll message for this question (already resolved?)', code: 'stale' };
+    }
+    const voterJid = pending.adminJids?.values().next().value ?? pending.chatJid;
+    log.info(
+      { mapKey: decision.mapKey, questionIndex: decision.questionIndex, via: 'console' },
+      'poll decision delivered from the console approval queue',
+    );
+    this.handlePollVoteReceived({
+      pollMessageId,
+      chatJid: pending.chatJid,
+      voterJid,
+      selectedOptions: decision.selectedOptions,
+    });
+    // The vote handler is fire-and-forget on duplicates/races — verify the
+    // answer actually landed before reporting delivery.
+    if (pending.answersCollected[decision.questionIndex] === undefined) {
+      return { ok: false, error: 'decision was not accepted (duplicate or raced resolution)', code: 'stale' };
+    }
+    return { ok: true };
+  }
+
+  /**
    * Inject collected poll answers back into the session as a user turn.
    * Routes through the runtime's normal turn path (sendTurnPerChat / shared
    * sendTurn) so pendingTurnText, post-turn-gate, and durability state stay

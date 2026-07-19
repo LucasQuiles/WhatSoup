@@ -11,6 +11,7 @@
 import { queryOptions, useQuery } from '@tanstack/react-query';
 import { api } from '../lib/api.js';
 import { computeKpis } from '../lib/compute-kpis.js';
+import { queryFreshness } from '../lib/freshness.js';
 import {
   shareChatsByConversationKey,
   shareLineByName,
@@ -178,3 +179,22 @@ export function useProviderStatus(name: string) {
     enabled: !!name,
   });
 }
+
+/** Pending decision queue for a line (D-4 ApprovalsTab). Carries the
+ *  #1925 freshness contract (use-metrics idiom). */
+export function useApprovals(name: string) {
+  const query = useQuery({
+    queryKey: ['approvals', name],
+    queryFn: () => api.getApprovals(name),
+    refetchInterval: POLL_LINES,
+    enabled: !!name,
+  });
+  return {
+    ...query,
+    freshness: queryFreshness({
+      dataUpdatedAt: query.dataUpdatedAt,
+      refetchFailed: query.isRefetchError,
+    }),
+  };
+}
+
