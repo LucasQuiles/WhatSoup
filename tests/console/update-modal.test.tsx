@@ -210,7 +210,7 @@ describe('UpdateModal — confirm phase', () => {
 
   it('renders the confirm phase description text', () => {
     render(<UpdateModal {...defaultProps()} />)
-    const desc = screen.getByText(/Pull latest code, rebuild, and restart the fleet server/)
+    const desc = screen.getByText(/Deploy a new release to update it/)
     expect(desc.tagName.toLowerCase()).toBe('p')
   })
 
@@ -329,7 +329,7 @@ describe('UpdateModal — updating phase (fetch-based SSE)', () => {
     const updateBtn = screen.getAllByRole('button').find(b => b.textContent?.includes('Update'))!
     fireEvent.click(updateBtn)
     await waitFor(() => expect(screen.getByText('Pulling latest code')).toBeDefined())
-    expect(screen.queryByText(/Pull latest code, rebuild/)).toBeNull()
+    expect(screen.queryByText(/Deploy a new release to update it/)).toBeNull()
   })
 
   it('POSTs to /api/update without Authorization header in the dev (non-production) path', async () => {
@@ -826,20 +826,20 @@ describe('UpdateModal — state management', () => {
     ]
     rerender(<UpdateModal {...defaultProps({ lines: newLines })} />)
     // Still in updating phase — confirm description must not appear
-    expect(screen.queryByText(/Pull latest code, rebuild/)).toBeNull()
+    expect(screen.queryByText(/Deploy a new release to update it/)).toBeNull()
     expect(screen.getByText('Pulling latest code')).toBeDefined()
   })
 
   it('resets to confirm phase when modal is closed and reopened', () => {
     const { rerender } = render(<UpdateModal {...defaultProps()} />)
     // Verify confirm phase
-    expect(screen.getByText(/Pull latest code, rebuild/)).toBeDefined()
+    expect(screen.getByText(/Deploy a new release to update it/)).toBeDefined()
     // Close
     rerender(<UpdateModal {...defaultProps({ open: false })} />)
     expect(screen.queryByRole('dialog')).toBeNull()
     // Reopen → should be confirm phase again
     rerender(<UpdateModal {...defaultProps({ open: true })} />)
-    expect(screen.getByText(/Pull latest code, rebuild/)).toBeDefined()
+    expect(screen.getByText(/Deploy a new release to update it/)).toBeDefined()
     // Update button still present after re-open
     const allButtons = screen.getAllByRole('button')
     const updateBtn = allButtons.find(b => b.textContent?.includes('Update'))

@@ -7,10 +7,35 @@ export interface ProcessTreeTarget {
   kill(signal: NodeJS.Signals): boolean;
 }
 
+/**
+ * #1755: outcome of a kill-session-tree attempt, emitted via `onOutcome` so the
+ * shutdown phase is attributable without journal archaeology.
+ *  - `terminated`: every owned process is provably gone.
+ *  - `escalated`: at least one confirmed survivor was SIGKILLed and then verified gone.
+ *  - `unresolved_ambiguous`: after bounded re-census, one or more PIDs stayed
+ *    ambiguous (never signaled — a duplicate-pid census race or a same-pid/same-start
+ *    /different-command reading); shutdown proceeds instead of burning the full grace.
+ */
+export interface KillSessionOutcome {
+  readonly outcome: 'terminated' | 'escalated' | 'unresolved_ambiguous';
+  readonly generationMarker: string;
+  readonly durationMs: number;
+  readonly escalated: boolean;
+  readonly ambiguousPids: readonly number[];
+}
+
 export interface KillSessionTreeOptions {
   readonly generationMarker: string;
   readonly termGraceMs?: number;
   readonly killGraceMs?: number;
+  /**
+   * #1755: bounded window to let a transient PID-census ambiguity (a `ps` race, a
+   * mid-exit process, or a same-pid/different-command reading) resolve to gone or
+   * re-confirm as a survivor before we record it as unresolved. Default 250ms.
+   */
+  readonly ambiguityResolveMs?: number;
+  /** #1755: per-tree shutdown outcome sink (telemetry). Best-effort; never throws. */
+  readonly onOutcome?: (outcome: KillSessionOutcome) => void;
 }
 
 interface ProcessCensusRow {
@@ -46,6 +71,10 @@ interface OwnedInspection {
 const DEFAULT_TERM_GRACE_MS = 5_000;
 const DEFAULT_KILL_GRACE_MS = 1_000;
 const RECHECK_INTERVAL_MS = 25;
+// #1755: bounded window to resolve a transient PID-census ambiguity before it is
+// recorded as unresolved (never signaled). Kept short — most ambiguity is a `ps`
+// race or a mid-exit process that clears within a read or two.
+const DEFAULT_AMBIGUITY_RESOLVE_MS = 250;
 const activeTerminations = new Map<number, TerminationContext>();
 
 function parseProcessCensus(output: string): ProcessCensusRow[] {
@@ -178,16 +207,29 @@ function signalOwned(
   owned: readonly OwnedProcessIdentity[],
   signal: NodeJS.Signals,
   generationMarker: string,
+  ambiguous: readonly OwnedProcessIdentity[] = [],
 ): void {
   const root = uniqueRowForPid(rows, rootPid);
   const ownedRoot = owned.find((identity) => identity.pid === rootPid) ?? null;
   const self = uniqueRowForPid(rows, process.pid);
+  // #1755: the process-group broadcast below is indiscriminate over root.pgid.
+  // Never let it reach an AMBIGUOUS owned PID that happens to share the root's
+  // group — that would signal a PID we could not confirm as `sameProcess`. When
+  // any ambiguous member sits in the root group, fall back to per-PID signaling
+  // of the confirmed survivors only, preserving the never-signal-an-ambiguous-PID
+  // invariant (and still avoiding the old throw-and-burn-grace behaviour).
+  const ambiguousInRootGroup =
+    root !== null &&
+    ambiguous.some((identity) =>
+      rows.some((row) => row.pid === identity.pid && row.pgid === root.pgid),
+    );
   const safeGroup = root !== null &&
     ownedRoot !== null &&
     sameProcess(root, ownedRoot, generationMarker) &&
     self !== null &&
     root.pgid === root.pid &&
-    root.pgid !== self.pgid;
+    root.pgid !== self.pgid &&
+    !ambiguousInRootGroup;
   let groupSignalled = false;
 
   if (safeGroup) {
@@ -242,6 +284,36 @@ async function waitForOwnedExit(
   } while (true);
 }
 
+interface ResolvedInspection {
+  readonly rows: readonly ProcessCensusRow[];
+  readonly survivors: readonly OwnedProcessIdentity[];
+  readonly ambiguous: readonly OwnedProcessIdentity[];
+}
+
+/**
+ * #1755: inspect the owned set and, if any PID is ambiguous, re-census over a
+ * bounded window to give a transient ambiguity — a `ps` census race, a mid-exit
+ * process, or a same-pid/same-start/different-command reading — a chance to
+ * resolve to gone or re-confirm as a `sameProcess` survivor. Throws ONLY if the
+ * census cannot be read at all (fail-closed, unchanged). Signals nothing; the
+ * caller signals only the returned (confirmed) survivors.
+ */
+async function resolveOwnedInspection(
+  owned: readonly OwnedProcessIdentity[],
+  generationMarker: string,
+  resolveMs: number,
+): Promise<ResolvedInspection> {
+  const deadline = Date.now() + Math.max(0, resolveMs);
+  let rows = readProcessCensus();
+  let inspection = inspectOwned(rows, owned, generationMarker);
+  while (inspection.ambiguous.length > 0 && Date.now() < deadline) {
+    await delay(Math.min(RECHECK_INTERVAL_MS, Math.max(1, deadline - Date.now())));
+    rows = readProcessCensus();
+    inspection = inspectOwned(rows, owned, generationMarker);
+  }
+  return { rows, survivors: inspection.survivors, ambiguous: inspection.ambiguous };
+}
+
 async function runTermination(
   target: number | ProcessTreeTarget,
   rootPid: number,
@@ -250,96 +322,97 @@ async function runTermination(
   signal: NodeJS.Signals,
   options: KillSessionTreeOptions,
 ): Promise<void> {
+  const generationMarker = options.generationMarker;
+  const resolveMs = options.ambiguityResolveMs ?? DEFAULT_AMBIGUITY_RESOLVE_MS;
+  const startedAt = Date.now();
+  let escalated = false;
+
   if (owned.length === 0) {
     const reason = preCensusAvailable ? 'root row missing or ambiguous' : 'census unavailable';
     throw new Error(
-      `Refusing to signal session process tree ${options.generationMarker}: pre-signal ${reason}`,
+      `Refusing to signal session process tree ${generationMarker}: pre-signal ${reason}`,
     );
   }
 
+  // Pre-signal. #1755: resolve transient ambiguity over a bounded window, then
+  // signal the CONFIRMED survivors only — never an ambiguous PID (a duplicate-pid
+  // census race or a same-pid/different-command reading). A census that cannot be
+  // read at all still fails closed (unchanged). Ambiguity no longer aborts the
+  // whole kill: we signal what we can confirm and record the residue below.
+  let first: ResolvedInspection;
   try {
-    const firstCensus = readProcessCensus();
-    const firstInspection = inspectOwned(firstCensus, owned, options.generationMarker);
-    if (firstInspection.ambiguous.length > 0) {
-      throw new Error(
-        `Refusing to signal session process tree ${options.generationMarker}: identity became ambiguous`,
-      );
-    }
-    signalOwned(
-      target,
-      rootPid,
-      firstCensus,
-      firstInspection.survivors,
-      signal,
-      options.generationMarker,
-    );
+    first = await resolveOwnedInspection(owned, generationMarker, resolveMs);
   } catch (error) {
     throw new Error(
-      `Refusing to signal session process tree ${options.generationMarker}: pre-signal recensus unavailable`,
+      `Refusing to signal session process tree ${generationMarker}: pre-signal recensus unavailable`,
       { cause: error },
     );
+  }
+  if (first.survivors.length > 0) {
+    signalOwned(target, rootPid, first.rows, first.survivors, signal, generationMarker, first.ambiguous);
   }
 
   if (signal === 'SIGTERM') {
     const termCheck = await waitForOwnedExit(
       owned,
-      options.generationMarker,
+      generationMarker,
       options.termGraceMs ?? DEFAULT_TERM_GRACE_MS,
     );
-    if (termCheck.ambiguous.length > 0) {
-      throw new Error(
-        `Refusing to escalate session process tree ${options.generationMarker}: identity became ambiguous`,
-      );
-    }
-    if (termCheck.survivors.length > 0) {
+    // Escalate the still-present set (survivors + any still-ambiguous), re-resolved:
+    // confirmed survivors get SIGKILL, residual ambiguous is left alone and recorded.
+    const pending = [...termCheck.survivors, ...termCheck.ambiguous];
+    if (pending.length > 0) {
+      let kill: ResolvedInspection;
       try {
-        const killCensus = readProcessCensus();
-        const killInspection = inspectOwned(
-          killCensus,
-          termCheck.survivors,
-          options.generationMarker,
-        );
-        if (killInspection.ambiguous.length > 0) {
-          throw new Error('process identity became ambiguous before escalation');
-        }
-        signalOwned(
-          target,
-          rootPid,
-          killCensus,
-          killInspection.survivors,
-          'SIGKILL',
-          options.generationMarker,
-        );
+        kill = await resolveOwnedInspection(pending, generationMarker, resolveMs);
       } catch (error) {
         throw new Error(
-          `Refusing to escalate session process tree ${options.generationMarker}: recensus unavailable`,
+          `Refusing to escalate session process tree ${generationMarker}: recensus unavailable`,
           { cause: error },
         );
+      }
+      if (kill.survivors.length > 0) {
+        escalated = true;
+        signalOwned(target, rootPid, kill.rows, kill.survivors, 'SIGKILL', generationMarker, kill.ambiguous);
       }
     }
   }
 
   const finalCheck = await waitForOwnedExit(
     owned,
-    options.generationMarker,
+    generationMarker,
     options.killGraceMs ?? DEFAULT_KILL_GRACE_MS,
   );
   if (!finalCheck.verified) {
     throw new Error(
-      `Unable to prove session process tree ${options.generationMarker} empty: final census unavailable`,
+      `Unable to prove session process tree ${generationMarker} empty: final census unavailable`,
       { cause: finalCheck.censusError },
     );
   }
-  if (finalCheck.ambiguous.length > 0) {
-    throw new Error(
-      `Unable to prove session process tree ${options.generationMarker} empty: ambiguous live identity`,
-    );
-  }
+  // A CONFIRMED survivor that outlived SIGKILL is a genuine failure (unkillable /
+  // zombie) — still fail closed. Residual AMBIGUOUS identity is NOT: it is never
+  // signaled, so recording it (below) and letting shutdown proceed is strictly
+  // better than burning the full grace and being SIGKILLed by the service manager.
   if (finalCheck.survivors.length > 0) {
     throw new Error(
-      `Session process tree ${options.generationMarker} still has live PIDs: ` +
+      `Session process tree ${generationMarker} still has live PIDs: ` +
         finalCheck.survivors.map((row) => row.pid).join(', '),
     );
+  }
+
+  const ambiguousPids = finalCheck.ambiguous.map((identity) => identity.pid);
+  const outcome: KillSessionOutcome['outcome'] =
+    ambiguousPids.length > 0 ? 'unresolved_ambiguous' : escalated ? 'escalated' : 'terminated';
+  try {
+    options.onOutcome?.({
+      outcome,
+      generationMarker,
+      durationMs: Date.now() - startedAt,
+      escalated,
+      ambiguousPids,
+    });
+  } catch {
+    // Telemetry is best-effort — never let an outcome sink failure break shutdown.
   }
 }
 
