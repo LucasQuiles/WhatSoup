@@ -17,8 +17,8 @@ import { z } from 'zod';
 import { emitAlertChecked } from '../../lib/emit-alert.ts';
 import { readFreshMarkerSync, writePrivateJsonMarkerSync } from '../../lib/private-fs.ts';
 import { createChildLogger } from '../../logger.ts';
-import { isPnJid, isGroupJid, isWhatsAppAuthenticatedJid } from '../../core/jid-constants.ts';
-import { resolvePhoneFromJid } from '../../core/access-list.ts';
+import { isPnJid, isGroupJid } from '../../core/jid-constants.ts';
+import { resolvePhoneFromJidForGrant } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
 import type { Database } from '../../core/database.ts';
 import type { SessionContext, ToolDeclaration } from '../../mcp/types.ts';
@@ -206,20 +206,17 @@ export function assertRestartSelfAdmin(
   session: SessionContext,
   deps: { db: Database; adminPhones: Set<string> },
 ): void {
-  const actorJid = session.actorJid ?? null;
-  // QR-143: authenticated-transport gate FIRST — a spoofable @sms actor that
-  // collapses to admin digits must never pass, so the transport check precedes
-  // the phone match. The explicit `=== null` also narrows actorJid to a
-  // non-null string for the resolver below.
-  if (actorJid === null || !isWhatsAppAuthenticatedJid(actorJid)) {
+  // QR-143 (B4): the grant primitive gates on authenticated transport FIRST and
+  // returns null for a spoofable @sms actor that collapses to admin digits.
+  const phone = resolvePhoneFromJidForGrant(session.actorJid ?? null, deps.db);
+  if (phone === null) {
     throw new Error(
-      `restart_self is admin-only: actor "${actorJid ?? 'unresolved'}" is on a non-WhatsApp-authenticated transport and cannot be an admin`,
+      `restart_self is admin-only: actor "${session.actorJid ?? 'unresolved'}" is on a non-WhatsApp-authenticated transport and cannot be an admin`,
     );
   }
-  const phone = resolvePhoneFromJid(actorJid, deps.db);
-  if (!phone || !isAdminPhone(phone, deps.adminPhones)) {
+  if (!isAdminPhone(phone, deps.adminPhones)) {
     throw new Error(
-      `restart_self is admin-only: caller "${phone ?? 'unresolved'}" is not on the instance admin list`,
+      `restart_self is admin-only: caller "${phone}" is not on the instance admin list`,
     );
   }
 }

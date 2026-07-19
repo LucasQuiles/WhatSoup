@@ -70,6 +70,11 @@ vi.mock('../../src/core/access-policy.ts', () => ({
 vi.mock('../../src/core/access-list.ts', () => ({
   extractLocal: vi.fn((jid: string) => jid.split('@')[0]),
   resolvePhoneFromJid: vi.fn((jid: string) => jid.split('@')[0]),
+  // QR-143 (B4): grant primitive — authenticated transports resolve to the
+  // phone; @sms and other non-authenticated transports fail closed (null).
+  resolvePhoneFromJidForGrant: vi.fn((jid: string) =>
+    jid.endsWith('@s.whatsapp.net') || jid.endsWith('@lid') ? jid.split('@')[0] : null,
+  ),
   lookupAccess: vi.fn(),
   insertPending: vi.fn(),
   updateAccess: vi.fn(),

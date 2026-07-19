@@ -104,7 +104,7 @@ import { isProviderId } from './providers/index.ts';
 import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
-import { toPersonalJid, isGroupJid, isWhatsAppAuthenticatedJid } from '../../core/jid-constants.ts';
+import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
 import { TurnQueue, type QueuedTurn, type TurnRejectReason } from './turn-queue.ts';
@@ -160,7 +160,7 @@ import { PendingPollPersistence } from './pending-poll-persistence.ts';
 import { HandoffDistillCoordinator } from './handoff-distill-coordinator.ts';
 import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } from './handoff-distill-config.ts';
 import { config } from '../../config.ts';
-import { canonicalConversationKey, resolvePhoneFromJid } from '../../core/access-list.ts';
+import { canonicalConversationKey, resolvePhoneFromJid, resolvePhoneFromJidForGrant } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
 import { getCommandSpec } from './command-registry.ts';
 import { matchImperative, extractImperativeTarget } from '../../core/substrate/inline-extractor.ts';
@@ -3560,15 +3560,13 @@ export class AgentRuntime implements Runtime {
       // senderPhone stays on the PLAIN resolver — it feeds the bead's ownerJid
       // attribution (display-side, below), which is transport-agnostic.
       const senderPhone = resolvePhoneFromJid(msg.senderJid, this.db);
-      // Skip the inline imperative extractor for synthetic agent-job turns —
-      // otherwise a scheduled prompt would spawn a proposed task bead on every
-      // fire. The job is already a durable agent_job bead; it is not an ad-hoc
-      // imperative to capture.
-      // QR-143: the admin GRANT (auto-creating a proposed bead) must gate on
-      // authenticated transport BEFORE the phone match — a spoofed
-      // <admin-digits>@sms collapses to the admin phone but is spoofable, so it
-      // must not induce an admin-attributed proposal.
-      if (isWhatsAppAuthenticatedJid(msg.senderJid) && isAdminPhone(senderPhone, config.adminPhones) && !msg.isSyntheticJob) {
+      // QR-143 (B4): the admin GRANT (auto-creating a proposed bead) routes
+      // through the grant primitive, which returns null for a spoofable
+      // <admin-digits>@sms transport — so it cannot induce an admin-attributed
+      // proposal. Skip synthetic agent-job turns (already durable agent_job
+      // beads, not ad-hoc imperatives to capture).
+      const grantPhone = resolvePhoneFromJidForGrant(msg.senderJid, this.db);
+      if (grantPhone !== null && isAdminPhone(grantPhone, config.adminPhones) && !msg.isSyntheticJob) {
         const hit = matchImperative(content);
         if (hit) {
           const target = extractImperativeTarget(content);
@@ -3743,9 +3741,14 @@ export class AgentRuntime implements Runtime {
       //                           only — plain 'admin' commands were admin-gated on base
       //                           and stay denied when no admin is configured.
       // Lazy so gate:'none' commands never pay the resolvePhoneFromJid DB read.
-      const isAuthenticatedAdmin = (): boolean =>
-        isWhatsAppAuthenticatedJid(msg.senderJid) &&
-        isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones);
+      // B4: the grant primitive gates authenticated-transport-FIRST then resolves;
+      // a non-authenticated (@sms) sender yields null and is denied. Behaviour is
+      // identical to the prior isWhatsAppAuthenticatedJid && isAdminPhone(...) form
+      // (isAdminPhone(null) === false).
+      const isAuthenticatedAdmin = (): boolean => {
+        const phone = resolvePhoneFromJidForGrant(msg.senderJid, this.db);
+        return phone !== null && isAdminPhone(phone, config.adminPhones);
+      };
       const denied =
         spec.gate === 'admin'
           ? !isAuthenticatedAdmin()

@@ -16,9 +16,9 @@ import RE2 from 're2';
 import { isAdminMessage, parseAdminCommand } from './command-router.ts';
 import { handleAdminCommand, handleFallbackCommand, handleGrantCommand, sendApprovalRequest } from './admin.ts';
 import { shouldRespond } from './access-policy.ts';
-import { resolvePhoneFromJid } from './access-list.ts';
+import { resolvePhoneFromJid, resolvePhoneFromJidForGrant } from './access-list.ts';
 import { toConversationKey } from './conversation-key.ts';
-import { isLidJid, bareNumber, isWhatsAppAuthenticatedJid } from './jid-constants.ts';
+import { isLidJid, bareNumber } from './jid-constants.ts';
 import { stripSelfMentionsFrom } from '../lib/self-mention-strip.ts';
 import { extractProtocol, extractPayload, HealCompletePayloadSchema } from './heal-protocol.ts';
 import { handleHealComplete, handleHealEscalate } from './heal.ts';
@@ -335,9 +335,9 @@ export function createIngestHandler(
           // HEAL_COMPLETE/HEAL_ESCALATE into the heal state machine, flipping
           // heal_reports.state or fabricating a Type-3-adopted row (incident-state
           // corruption in the fleet's automated-repair coordination plane).
-          const phone = isWhatsAppAuthenticatedJid(msg.senderJid)
-            ? resolvePhoneFromJid(msg.senderJid, db)
-            : null;
+          // B4: the grant primitive returns null for a non-authenticated (@sms)
+          // transport, so a spoofed control-peer number cannot match.
+          const phone = resolvePhoneFromJidForGrant(msg.senderJid, db);
           const isPeer = phone !== null && [...config.controlPeers.values()].includes(phone);
           if (isPeer) {
             const protocol = extractProtocol(msg.content);

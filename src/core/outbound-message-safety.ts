@@ -110,6 +110,18 @@ export function isOperatorDmPeer(
   // to a configured admin phone? On the unauthenticated branch it selects the
   // spoof-attempt warn subset; on the authenticated branch it IS the
   // elevation decision.
+  //
+  // B4 (QR-143): this inline `isAdminPhone(resolvePhoneFromJid(...))` is
+  // DELIBERATELY NOT migrated to `resolvePhoneFromJidForGrant`, and is
+  // allowlisted in `scripts/grant-resolver-inventory-guard.ts`. The GRANT
+  // decision here is already gated on `isWhatsAppAuthenticatedJid(chatJid)`
+  // (line ~119) before the elevation `return peerBearsAdminDigits`. The phone
+  // match is ALSO needed on the UNauthenticated branch to select the
+  // spoof-attempt warn subset (an @sms peer bearing admin digits is a spoof
+  // attempt, not noise) — routing through the grant primitive would null the
+  // phone on @sms and silence that never-silent warn (NFR-3). So the composed
+  // semantics are NOT byte-equivalent to the primitive; migrating here would
+  // regress observability.
   const peerBearsAdminDigits = isAdminPhone(resolvePhoneFromJid(chatJid, db), adminPhones);
   // QR-143: only a WhatsApp-authenticated transport (@s.whatsapp.net / @lid) can
   // carry operator identity here. @sms is spoofable (see the
