@@ -71,7 +71,9 @@ export function CheckpointsTab({ payload, isLoading, freshness, lineName }: {
   /** Owning line — the restore action's api target + invalidate key. */
   lineName: string;
 }) {
-  const rows = payload?.checkpoints ?? []
+  // Wrapped in useMemo per exhaustive-deps: the `?? []` fallback would
+  // otherwise give sortedRows' useMemo a new dep identity every render.
+  const rows = useMemo(() => payload?.checkpoints ?? [], [payload])
   const resumableCount = rows.filter((r) => r.resumable).length
 
   // Restore flow — AccessTab idiom: pending row → ConfirmDialog → api →
