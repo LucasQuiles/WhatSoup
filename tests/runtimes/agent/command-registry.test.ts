@@ -19,7 +19,7 @@ describe('COMMAND_REGISTRY', () => {
 
   it('declares every axis validly for every entry (gate/venue/tier/visibility/renderContract/errorClasses)', () => {
     for (const c of COMMAND_REGISTRY as readonly CommandSpec[]) {
-      expect(['none', 'admin']).toContain(c.gate);
+      expect(['none', 'admin', 'admin-shared-scope']).toContain(c.gate); // W1-T3 RULING: admin-shared-scope added for /new
       expect([undefined, 'dm', 'admin-group', 'any']).toContain(c.venue);    // N17 venue axis (optional)
       expect(['transport-local', 'agent-forwarded']).toContain(c.tier);      // schema-forward tier axis
       expect(['end-user', 'operator']).toContain(c.visibility);
@@ -41,10 +41,19 @@ describe('COMMAND_REGISTRY', () => {
     expect(COMMAND_REGISTRY.every((c) => c.tier === 'transport-local')).toBe(true);
   });
 
-  it('N17: god-priv session-control commands are venue-restricted to DM, read-only are venue:any', () => {
-    for (const name of ['new', 'sessions', 'kill-session'] as const) {
+  it('N17: cross-session admin surfaces are venue-restricted to DM; /new is group-permitting by design (W1-T3 RULING)', () => {
+    // /sessions and /kill-session are cross-session admin surfaces (U6) —
+    // DM-only, enforced via the venue axis (gate:'admin', venue:'dm').
+    for (const name of ['sessions', 'kill-session'] as const) {
+      expect(getCommandSpec(name).gate).toBe('admin');
       expect(getCommandSpec(name).venue).toBe('dm');
     }
+    // /new is group-permitting by design (W1-PACKET.md W1-T3 RULING: an admin
+    // may /new in a group). Its gate is scope-based ('admin-shared-scope',
+    // enforced inline via sessionScope/isGroup in runtime.ts — NOT the venue
+    // axis), so venue is 'any', not 'dm'.
+    expect(getCommandSpec('new').gate).toBe('admin-shared-scope');
+    expect(getCommandSpec('new').venue).toBe('any');
     expect(getCommandSpec('status').venue).toBe('any');
   });
 
@@ -54,9 +63,15 @@ describe('COMMAND_REGISTRY', () => {
     expect(getCommandSpec('status').renderContract?.fields).toMatchObject({ started: 'verified-runtime' });
   });
 
-  it('admin-gates exactly new/sessions/kill-session (the session-control trio, D2)', () => {
-    expect(COMMAND_REGISTRY.filter((c) => c.gate === 'admin').map((c) => c.name).sort())
-      .toEqual(['kill-session', 'new', 'sessions']);
+  it('admin-gates (admin or admin-shared-scope) exactly new/sessions/kill-session (the session-control trio, D2)', () => {
+    // W1-T3 RULING: /new moved from gate:'admin' to gate:'admin-shared-scope'
+    // (scope-based — see the N17 test above); the trio's total admin coverage
+    // is unchanged, just split across the two gate values.
+    expect(
+      COMMAND_REGISTRY.filter((c) => c.gate === 'admin' || c.gate === 'admin-shared-scope')
+        .map((c) => c.name)
+        .sort(),
+    ).toEqual(['kill-session', 'new', 'sessions']);
   });
 
   it('marks /status operator-only sensitive fields (D3: pid + sessionId) while staying ungated', () => {

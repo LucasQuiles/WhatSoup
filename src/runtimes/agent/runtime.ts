@@ -104,7 +104,7 @@ import { isProviderId } from './providers/index.ts';
 import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
-import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
+import { toPersonalJid, isGroupJid, isWhatsAppAuthenticatedJid } from '../../core/jid-constants.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
 import { TurnQueue, type QueuedTurn, type TurnRejectReason } from './turn-queue.ts';
@@ -162,6 +162,8 @@ import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } f
 import { config } from '../../config.ts';
 import { canonicalConversationKey, resolvePhoneFromJid } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
+import { isAdminMessage } from '../../core/command-router.ts';
+import { getCommandSpec } from './command-registry.ts';
 import { matchImperative, extractImperativeTarget } from '../../core/substrate/inline-extractor.ts';
 import { createBead } from '../../core/substrate/beads.ts';
 import { mkdirSync, copyFileSync, readdirSync, unlinkSync } from 'node:fs';
@@ -3716,14 +3718,36 @@ export class AgentRuntime implements Runtime {
     let forwardAfterLocalCommand: string | null = null;
 
     if (classified.type === 'local') {
+      const spec = getCommandSpec(classified.command);
+      // Gate enforcement by gate class:
+      //  - 'admin'              → isAdminMessage (authenticated + admin-phone + DM-only):
+      //                           /sessions, /kill-session.
+      //  - 'admin-shared-scope' → /new: admin required ONLY where the reset hits SHARED
+      //                           session state (single/shared mode, or a per_chat GROUP —
+      //                           WG-5; this.session is one session across ALL chats there,
+      //                           :760); a per_chat 1:1 DM reset touches only the sender's
+      //                           own conversation → ungated. Group-permitting (an admin may
+      //                           /new in a group) AND @sms-closing (authenticated-JID check).
+      const denied =
+        spec.gate === 'admin'
+          ? !isAdminMessage(msg, this.db)
+          : spec.gate === 'admin-shared-scope'
+            ? (this.sessionScope !== 'per_chat' || msg.isGroup) &&
+              !(isWhatsAppAuthenticatedJid(msg.senderJid) &&
+                isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones))
+            : false;
+      if (denied) {
+        // NFR-3: unsampled — never silent (V19). ids only, no content (U6).
+        // @check CHK-067 // @traces REQ-012.AC-06
+        log.warn(
+          { command: spec.name, senderJid: msg.senderJid, outcome: 'denied', errorClass: 'not-authorized' },
+          'command denied: sender not authorized',
+        );
+        return;
+      }
       try {
         switch (classified.command) {
           case 'new':
-            // Shared mode: /new is admin-only
-            if (this.shared && !isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones)) {
-              // @check CHK-067 // @traces REQ-012.AC-06
-              return;
-            }
             // A local reset cannot erase the immutable evidence owner of an
             // admitted user turn. Ask the caller to retry once that turn has
             // reached its terminal transaction.
@@ -3909,10 +3933,6 @@ export class AgentRuntime implements Runtime {
           }
 
           case 'sessions': {
-            // Admin-only
-            if (!isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones)) {
-              return;
-            }
             // #1774: the per-session token figures below read total_input_tokens
             // uncompensated — they now show genuinely-new input, not the old
             // inflated (cache-read-inclusive) total. This display has no
@@ -3967,10 +3987,6 @@ export class AgentRuntime implements Runtime {
           }
 
           case 'kill-session': {
-            // Admin-only
-            if (!isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones)) {
-              return;
-            }
             const targetIdx = parseInt(classified.args ?? '', 10);
             if (isNaN(targetIdx) || targetIdx < 1) {
               this.sendDirect(chatJid, '_Usage: /kill-session <number>_\nRun /sessions first to see the list.', true);

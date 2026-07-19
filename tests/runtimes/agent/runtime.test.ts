@@ -2523,7 +2523,9 @@ describe('AgentRuntime', () => {
 
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await sendAndDrain(runtime, makeMsg({ content: '/new' }));
+    // single mode: /new hits SHARED session state (this.session is one session
+    // across all chats), so it now requires admin (W1-T3 RULING).
+    await sendAndDrain(runtime, makeMsg({ content: '/new', senderJid: '15550100001@s.whatsapp.net' }));
 
     expect(mockSession.handleNew).toHaveBeenCalled();
     const enqueuedTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
@@ -2544,7 +2546,9 @@ describe('AgentRuntime', () => {
     mockSession.handleNew.mockClear();
     mockQueue.abortTurn.mockClear();
 
-    await sendAndDrain(runtime, makeMsg({ content: '/new', inboundSeq: 78 }));
+    // Admin sender: exercises the turn-active rejection, not the admin gate
+    // (single mode requires admin for /new since W1-T3's RULING).
+    await sendAndDrain(runtime, makeMsg({ content: '/new', inboundSeq: 78, senderJid: '15550100001@s.whatsapp.net' }));
 
     expect(mockSession.handleNew).not.toHaveBeenCalled();
     expect(mockQueue.abortTurn).not.toHaveBeenCalled();
@@ -2724,7 +2728,8 @@ describe('AgentRuntime', () => {
     const prepareSpy = db.raw.prepare as unknown as { mock: { calls: unknown[][] }; mockClear: () => void };
     prepareSpy.mockClear();
 
-    await sendAndDrain(runtime, makeMsg({ content: '/new' }));
+    // single mode: /new requires admin (W1-T3 RULING — SHARED session state).
+    await sendAndDrain(runtime, makeMsg({ content: '/new', senderJid: '15550100001@s.whatsapp.net' }));
 
     const sql = prepareSpy.mock.calls.map((c) => String(c[0]));
     expect(sql.some((s) => s.includes('DELETE FROM standby_notice'))).toBe(true);
@@ -2745,7 +2750,8 @@ describe('AgentRuntime', () => {
     await emitAgentResultWithoutTokens('done');
     mockQueue.abortTurn.mockClear();
 
-    await sendAndDrain(runtime, makeMsg({ content: '/new' }));
+    // single mode: /new requires admin (W1-T3 RULING — SHARED session state).
+    await sendAndDrain(runtime, makeMsg({ content: '/new', senderJid: '15550100001@s.whatsapp.net' }));
 
     expect(mockQueue.abortTurn).toHaveBeenCalledTimes(1);
   });
@@ -2766,7 +2772,8 @@ describe('AgentRuntime', () => {
     state.autoCompact.consecutiveRapidRearms.set(globalKey, 2);
     state.autoCompact.measureNextTurn.add(globalKey);
 
-    await sendAndDrain(runtime, makeMsg({ content: '/new' }));
+    // single mode: /new requires admin (W1-T3 RULING — SHARED session state).
+    await sendAndDrain(runtime, makeMsg({ content: '/new', senderJid: '15550100001@s.whatsapp.net' }));
 
     expect(state.autoCompact.cooldownUntil.has(globalKey)).toBe(false);
     expect(state.autoCompact.lastSuccessAt.has(globalKey)).toBe(false);
@@ -2907,7 +2914,8 @@ describe('AgentRuntime', () => {
       mockSession.handleNew.mockRejectedValueOnce(new Error('session reset failed'));
 
       const seq = durability.journalInbound('m-new-throw', 'k-new-throw', 'test@s.whatsapp.net', 'agent');
-      await sendAndDrain(runtime, makeMsg({ content: '/new', inboundSeq: seq }));
+      // single mode: /new requires admin (W1-T3 RULING — SHARED session state).
+      await sendAndDrain(runtime, makeMsg({ content: '/new', inboundSeq: seq, senderJid: '15550100001@s.whatsapp.net' }));
 
       expect(mockSession.handleNew).toHaveBeenCalled();
       const row = duraDb.raw.prepare(
@@ -6246,7 +6254,8 @@ describe('AgentRuntime', () => {
     await vi.waitFor(() => expect(state.rejectedTerminalTeardowns.has(mockSession)).toBe(true));
 
     mockSession.handleNew.mockClear();
-    await sendAndDrain(runtime, makeMsg({ messageId: 'blocked-new', content: '/new' }));
+    // single mode: /new requires admin (W1-T3 RULING — SHARED session state).
+    await sendAndDrain(runtime, makeMsg({ messageId: 'blocked-new', content: '/new', senderJid: '15550100001@s.whatsapp.net' }));
 
     expect(mockSession.handleNew).not.toHaveBeenCalled();
     expect(state.rejectedTerminalTeardowns.has(mockSession)).toBe(true);
@@ -8641,7 +8650,8 @@ describe('AgentRuntime', () => {
     const constructorCallsBefore = (MockOutboundQueueCtor as unknown as ReturnType<typeof vi.fn>).mock.calls.length;
 
     mockSession.getStatus.mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
-    await sendAndDrain(runtime, makeMsg({ content: '/new' }));
+    // single mode: /new requires admin (W1-T3 RULING — SHARED session state).
+    await sendAndDrain(runtime, makeMsg({ content: '/new', senderJid: '15550100001@s.whatsapp.net' }));
 
     const constructorCallsAfter = (MockOutboundQueueCtor as unknown as ReturnType<typeof vi.fn>).mock.calls.length;
     expect(constructorCallsAfter).toBeGreaterThan(constructorCallsBefore);
@@ -8958,21 +8968,27 @@ describe('AgentRuntime', () => {
     expect(texts.some((t) => t.includes('new session'))).toBe(true);
   });
 
-  it('non-shared: /new is allowed for any sender (backward compat)', async () => {
+  it('single mode: /new is DENIED for a non-admin sender (WG-5 corrected scope, INVERTS former "backward compat" invariant)', async () => {
+    // W1-T3 RULING (W1-PACKET.md :499-501): the old "any sender" invariant this
+    // test used to assert WAS the WG-5 bug. In default single/non-shared scope
+    // `this.session` is ONE session shared across ALL chats (runtime.ts:760), so
+    // a non-admin /new there wipes state others share — affectsShared is true
+    // whenever sessionScope !== 'per_chat', regardless of isGroup.
     const db = makeDb();
     const { messenger } = makeMessenger();
 
-    const runtime = new AgentRuntime(db, messenger); // default: shared=false
+    const runtime = new AgentRuntime(db, messenger); // default: single scope, non-shared
     await runtime.start();
-    await sendAndDrain(runtime, makeMsg({ content: 'hello', senderJid: '99999999@s.whatsapp.net' }));
+    await sendAndDrain(runtime, makeMsg({ content: 'hello', senderJid: '15559998888@s.whatsapp.net' }));
     await emitAgentResultWithoutTokens('done');
 
     await sendAndDrain(runtime, makeMsg({
       content: '/new',
-      senderJid: '99999999@s.whatsapp.net', // not admin, but non-shared allows it
+      senderJid: '15559998888@s.whatsapp.net', // not admin — single-mode reset now denied
     }));
 
-    expect(mockSession.handleNew).toHaveBeenCalled();
+    expect(mockSession.handleNew).not.toHaveBeenCalled();
+    expect(mockQueue.enqueueText).not.toHaveBeenCalled();
   });
 
   it('non-sandboxed per_chat serializes same-chat messages while spawnSession is pending', async () => {
@@ -14325,6 +14341,136 @@ describe('AgentRuntime', () => {
       expect(targetSession.shutdown).toHaveBeenCalledWith(false);
       const text = sentMessages.map((m) => m.text).find((t) => t.includes('Session killed:'));
       expect(text).toBe(`_Session killed: ${dmKey} (DM)_`);
+    });
+
+    // W1-T3: gate convergence security proof matrix (isAdminMessage hoisted
+    // ahead of the switch, replacing the three duplicated in-switch phone-only
+    // gates). QR-143 closes the @sms spoof hole; WG-5 makes /new's gate
+    // unconditional (removes the `this.shared &&` prefix that skipped it in
+    // per_chat scope).
+    it('denies /kill-session to an @sms sender bearing the admin phone digits', async () => {
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+      // Spoof: admin PHONE digits on a non-WhatsApp-authenticated transport JID.
+      await sendAndDrain(runtime, makeMsg({ content: '/kill-session 1', senderJid: '15550100001@sms' }));
+      // RED today: the phone-only gate (runtime.ts:3973) admits this because
+      // resolvePhoneFromJid('...@sms') collapses to the admin phone. GREEN after
+      // convergence: isAdminMessage rejects @sms (not WhatsApp-authenticated).
+      expect(sentMessages.map((m) => m.text)).toEqual([]); // denied = silent ignore
+    });
+
+    it('still allows /sessions for the real admin over an authenticated DM JID (positive regression)', async () => {
+      const db = makeDbWithTokenRow({ total_input_tokens: 1500, total_output_tokens: 700 });
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+      mockSession.getStatus.mockReturnValue({
+        active: true, pid: 321, sessionId: 'sess-single',
+        startedAt: new Date(Date.now() - 60_000).toISOString(), messageCount: 5, lastMessageAt: null,
+      });
+      mockSession.getDbRowId.mockReturnValue(42);
+      (runtime as unknown as { session: typeof mockSession; activeChatJid: string | null }).session = mockSession;
+      (runtime as unknown as { activeChatJid: string | null }).activeChatJid = 'owner@s.whatsapp.net';
+      await sendAndDrain(runtime, makeMsg({ content: '/sessions', senderJid: adminSender }));
+      expect(sentMessages.map((m) => m.text).some((t) => t.includes('Active Sessions'))).toBe(true);
+    });
+
+    it('allows /sessions for the admin over an authenticated @lid JID', async () => {
+      // @lid IS a WhatsApp-authenticated transport (isWhatsAppAuthenticatedJid =
+      // isPnJid || isLidJid), so convergence must NOT lock out lid-resolved admins.
+      // Fixture: SQL-dispatching prepare mock resolves the lid to the admin phone,
+      // matching the established pattern at :8067/:9057 (lid_mappings lookup).
+      const db = makeDb();
+      const lidLocal = '77778888';
+      (db.raw.prepare as ReturnType<typeof vi.fn>).mockImplementation((sql: string) => {
+        if (sql.includes('SELECT phone_jid FROM lid_mappings')) {
+          return { get: vi.fn(() => ({ phone_jid: '15550100001@s.whatsapp.net' })) };
+        }
+        return { run: vi.fn(), get: vi.fn(), all: vi.fn(() => []) };
+      });
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+      mockSession.getStatus.mockReturnValue({
+        active: true, pid: 321, sessionId: 'sess-lid',
+        startedAt: new Date(Date.now() - 60_000).toISOString(), messageCount: 3, lastMessageAt: null,
+      });
+      (runtime as unknown as { session: typeof mockSession; activeChatJid: string | null }).session = mockSession;
+      (runtime as unknown as { activeChatJid: string | null }).activeChatJid = 'owner@s.whatsapp.net';
+      await sendAndDrain(runtime, makeMsg({ content: '/sessions', senderJid: `${lidLocal}@lid` }));
+      // Real assertion — the lid admin is allowed, the session list renders:
+      expect(sentMessages.map((m) => m.text).some((t) => t.includes('Active Sessions'))).toBe(true);
+    });
+
+    it('denies /new to a non-admin participant in a per_chat group (WG-5)', async () => {
+      // Construct the runtime in per_chat scope; today `this.shared` is false there so
+      // the gate is SKIPPED (any participant can wipe the session). RED today, GREEN
+      // after the gate becomes unconditional via isAdminMessage.
+      // per_chat /new's non-bypass sendDirect routes through the per-chat
+      // OutboundQueue.enqueueText mock (not messenger.sendMessage/sentMessages) —
+      // observe the shared mockQueue fixture, matching the established idiom used
+      // throughout this file for per-chat queue-routed replies.
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await runtime.start();
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({
+        content: '/new',
+        senderJid: nonAdminSender,
+        chatJid: 'group-1@g.us',
+        isGroup: true,
+      }));
+      // Assert no "Starting new session" acknowledgement was enqueued (the wipe was refused).
+      const enqueuedTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
+      expect(enqueuedTexts.some((t) => /new session/i.test(t))).toBe(false);
+    });
+
+    it('per_chat 1:1 DM: /new is ALLOWED for a non-admin sender (own conversation, not shared — positive regression)', async () => {
+      // Full scope-matrix coverage (W1-PACKET.md :507): affectsShared =
+      // sessionScope !== 'per_chat' || isGroup. A per_chat 1:1 DM reset only
+      // touches the sender's own conversation, so it stays ungated — this was
+      // true both before and after T3 (Bucket B self-resolves); asserted here
+      // explicitly as the positive half of the WG-5 scope matrix.
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await runtime.start();
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({
+        content: '/new',
+        senderJid: nonAdminSender,
+        chatJid: 'dm-1@s.whatsapp.net',
+        isGroup: false,
+      }));
+      const enqueuedTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
+      expect(enqueuedTexts.some((t) => /new session/i.test(t))).toBe(true);
+    });
+
+    it('denies /new to a non-admin sender in single mode even in a group-tagged venue (WG-5 full scope matrix)', async () => {
+      // NET-NEW proof point (distinct from the per_chat-group WG-5 test above):
+      // affectsShared = (sessionScope !== 'per_chat') || isGroup — in default
+      // SINGLE scope the left disjunct is already true regardless of isGroup, so
+      // this must deny identically whether the inbound venue is a DM or a group.
+      // Captured RED against the pre-T3 gate (`this.shared && !isAdminPhone`):
+      // single-mode `this.shared` is false, so the old gate was skipped entirely
+      // for ANY venue, including a group-tagged one — old code let this through.
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger); // default: single scope
+      await runtime.start();
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({
+        content: '/new',
+        senderJid: nonAdminSender,
+        chatJid: 'group-2@g.us',
+        isGroup: true,
+      }));
+      expect(mockSession.handleNew).not.toHaveBeenCalled();
+      const enqueuedTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
+      expect(enqueuedTexts.some((t) => /new session/i.test(t))).toBe(false);
     });
   });
 

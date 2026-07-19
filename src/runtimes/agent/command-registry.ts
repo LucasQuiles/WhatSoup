@@ -9,10 +9,21 @@
 // and renderContract (N16) axes those commands need. Only Phase-1 ENTRIES are
 // seeded here (KISS/YAGNI); W2/W3/Phase-2 append entries, never re-shape the type.
 
-/** Who may EXECUTE a command (identity axis). `admin` = isAdminMessage
- *  (authenticated JID + admin-phone + DM-only, command-router.ts:9). Composes
- *  with `venue` (N17): identity is WHO, venue is WHERE — god-priv needs both. */
-export type CommandGate = 'none' | 'admin';
+/** Who may EXECUTE a command (identity axis). Composes with `venue` (N17):
+ *  identity is WHO, venue is WHERE — god-priv needs both.
+ *  - 'admin'              : isAdminMessage (authenticated JID + admin-phone +
+ *                           DM-only, command-router.ts:9). Cross-session admin
+ *                           surfaces (U6) — /sessions, /kill-session.
+ *  - 'admin-shared-scope' : admin required ONLY where the command's effect hits
+ *                           SHARED state (single/shared session-scope, or a
+ *                           per_chat GROUP — WG-5); ungated in a per_chat 1:1 DM,
+ *                           where the effect is scoped to the sender's own
+ *                           conversation. The identity check itself is
+ *                           group-permitting (an admin may act in a group,
+ *                           unlike plain `isAdminMessage`) and @sms-closing
+ *                           (requires isWhatsAppAuthenticatedJid). Used by /new
+ *                           — enforced in runtime.ts, not by isAdminMessage. */
+export type CommandGate = 'none' | 'admin' | 'admin-shared-scope';
 
 /** N17 venue gate — WHERE a command may execute, independent of WHO (`gate`).
  *  God-priv commands (spawn/harness/model-switch/kill) require a DM or an
@@ -131,8 +142,8 @@ export const COMMAND_REGISTRY = [
     summary: 'start a fresh session',
     syntax: '/new',
     tier: 'transport-local',
-    gate: 'admin',
-    venue: 'dm', // god-priv (session wipe); isAdminMessage DM-only already enforces this
+    gate: 'admin-shared-scope', // admin only where the reset hits SHARED state (WG-5); own per_chat DM stays ungated
+    venue: 'any', // group-permitting by design (admin may /new in a group); venue is enforced inline via sessionScope/isGroup, not the venue axis
     visibility: 'end-user',
     errorClasses: ['not-authorized', 'internal'],
     renderContract: { asOf: false }, // immediate ack ("Starting new session"), no state read
