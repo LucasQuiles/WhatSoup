@@ -14485,6 +14485,67 @@ describe('AgentRuntime', () => {
       expect(listText).toContain('— ?,');
     });
 
+    // ── b28 r2c: the requesting chat's own session renders "Current session" ──
+    // The row whose conversation key matches the chat that sent /sessions has
+    // its number/name identifier replaced by "Current session"; every OTHER row
+    // still routes through the sanitize choke point (formatChatRefForOwner).
+    // Kill-index semantics are unchanged (positional, not parsed from the name).
+    it('b28 r2c: /sessions (per_chat) labels the requesting chat\'s own session "Current session", others by resolved name', async () => {
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await runtime.start();
+
+      const state = runtime as unknown as {
+        chatSessions: Map<string, ReturnType<typeof makePerChatSession>>;
+        resolvePerChatMapKey(jid: string): string;
+      };
+      const startedAt = new Date(Date.now() - 5_000).toISOString();
+      // makeMsg defaults chatJid to 'test@s.whatsapp.net' — derive its canonical
+      // per-chat key the same way the runtime does, so the session keyed by it
+      // IS the requesting chat's own session.
+      const requestingKey = state.resolvePerChatMapKey('test@s.whatsapp.net');
+      state.chatSessions.set(requestingKey, makePerChatSession(true, 11, startedAt));
+      state.chatSessions.set('15551112222', makePerChatSession(true, 12, startedAt)); // a DIFFERENT chat
+
+      await sendAndDrain(runtime, makeMsg({ content: '/sessions', senderJid: adminSender }));
+
+      const listText = sentMessages.map((m) => m.text).find((t) => t.includes('Active Sessions'));
+      expect(listText).toBeDefined();
+      // Exactly the requesting chat's own row is relabelled — never every row.
+      expect(listText).toContain('Current session');
+      expect((listText!.match(/Current session/g) ?? []).length).toBe(1);
+      // Negative control: the OTHER chat still renders via the choke point — its
+      // stable ref suffix proves the sanitizer stayed in the path.
+      expect(listText).toContain('(…2222)');
+    });
+
+    it('b28 r2c: /sessions (single scope) labels the session "Current session" when the request comes from the active chat', async () => {
+      const db = makeDbWithTokenRow({ total_input_tokens: 100, total_output_tokens: 50 });
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+
+      const state = runtime as unknown as { session: typeof mockSession; activeChatJid: string | null };
+      mockSession.getStatus.mockReturnValue({
+        active: true,
+        pid: 900,
+        sessionId: 'sess-cur',
+        startedAt: new Date(Date.now() - 5_000).toISOString(),
+        messageCount: 1,
+        lastMessageAt: null,
+      });
+      mockSession.getDbRowId.mockReturnValue(9);
+      state.session = mockSession;
+      // The active chat IS the requesting chat (makeMsg default).
+      state.activeChatJid = 'test@s.whatsapp.net';
+
+      await sendAndDrain(runtime, makeMsg({ content: '/sessions', senderJid: adminSender }));
+
+      const listText = sentMessages.map((m) => m.text).find((t) => t.includes('Active Sessions'));
+      expect(listText).toContain('1. Current session');
+    });
+
     it('/kill-session is ignored for a non-admin sender', async () => {
       const db = makeDb();
       const { messenger, sentMessages } = makeMessenger();
@@ -15345,7 +15406,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(events.some((e) => e.event === 'model_preference_set' && e.reasonCode === 'intent_strongest_set')).toBe(true);
   });
 
-  it('/model status renders the recorded preference and the honest authority line', async () => {
+  it('/model status renders the recorded preference and (b28 r2b) omits the Delegation/Authority lines', async () => {
     const { runtime, sentMessages } = makeRoutingRuntime();
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model strongest' }));
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
@@ -15353,7 +15414,10 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(status).toBeDefined();
     expect(status).toContain('Preference: strongest for you in this chat');
     expect(status).toContain('steers new sessions');
-    expect(status).toContain('Authority: routing never changes what I am allowed to do');
+    // b28 r2b: the Delegation/Authority display lines were removed from this
+    // surface (the invariant lives in the system prompt + /why, not here).
+    expect(status).not.toContain('Authority:');
+    expect(status).not.toContain('Delegation:');
     expect(status).not.toContain('no live actions authorized');
   });
 
@@ -15851,9 +15915,13 @@ describe('NL routing handlers (nlRouting flag)', () => {
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
     const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
     expect(status).toBeDefined();
-    expect(status).toContain(
-      'Fallback chain (configured): opencode-cli (glm-4.7) → opencode-cli (kimi-k3)',
-    );
+    // b28 r2a: the chain is now one `• ` bullet per entry, but the B23
+    // discriminator holds — two DISTINCT same-provider entries stay
+    // distinguishable because each carries its model.
+    expect(status).toContain('Fallback chain (configured):');
+    expect(status).toContain('• opencode-cli (glm-4.7)');
+    expect(status).toContain('• opencode-cli (kimi-k3)');
+    expect(status).not.toContain('opencode-cli (glm-4.7) → opencode-cli (kimi-k3)');
   });
 
   it('/model status shows the model on the active-window and Next lines when the fallback differs only by model (B25 F8)', async () => {
@@ -15918,7 +15986,12 @@ describe('NL routing handlers (nlRouting flag)', () => {
     const { runtime, sentMessages } = makeRoutingRuntime();
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
     const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
-    expect(status).toContain('Fallback chain (configured): codex-cli → opencode-cli (kimi-k3)');
+    // b28 r2a: bulleted chain — a model-less entry keeps the bare provider
+    // label, a model-bearing entry renders "provider (model)".
+    expect(status).toContain('Fallback chain (configured):');
+    expect(status).toContain('• codex-cli');
+    expect(status).toContain('• opencode-cli (kimi-k3)');
+    expect(status).not.toContain('codex-cli → opencode-cli (kimi-k3)');
   });
 
   it('/model status reports the PINNED provider as the next-session route, not the default (R7)', async () => {
@@ -16014,10 +16087,54 @@ describe('NL routing handlers (nlRouting flag)', () => {
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
     const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
     expect(catalogue).toBeDefined();
-    expect(catalogue).toContain('Primary: claude-cli (claude-opus-4-8 — configured)');
-    expect(catalogue).toContain('opencode-cli (kimi/kimi-k3) → opencode-cli (glm/glm-5.2)');
+    // b28 r2d: one bullet per MODEL (primary + each fallback), never a joined chain.
+    expect(catalogue).toContain('• Primary: claude-cli (claude-opus-4-8 — configured)');
+    expect(catalogue).toContain('• Fallback: opencode-cli (kimi/kimi-k3)');
+    expect(catalogue).toContain('• Fallback: opencode-cli (glm/glm-5.2)');
+    expect(catalogue).not.toContain('opencode-cli (kimi/kimi-k3) → opencode-cli (glm/glm-5.2)');
     expect(catalogue).toContain('/model provider-id');
     expect(catalogue).toContain('/reset');
+  });
+
+  // ── b28 r2d: /model list is a true bulleted MODEL list ────────────────────
+  // One `• ` bullet per MODEL (primary + each fallback), each provider carrying
+  // its config-derived modifiers; the D7 caveat moves to a single trailing
+  // _italic_ line. Owner exhibit-3 shape (canary config: no primary model,
+  // kimi/glm fallbacks, no tiers) — the two third-party fallback IDs are
+  // unrecognized by the catalog and MUST carry no invented lifecycle modifier.
+  it('b28 r2d: /model list renders one bullet per model (primary + each fallback), caveat as trailing italic', async () => {
+    cfgAny().agentFallbacks = [
+      { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
+      { provider: 'opencode-cli', model: 'glm/glm-5.2' },
+    ];
+    const { runtime, sentMessages } = makeRoutingRuntime(); // canary: no primary model
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
+    expect(catalogue).toBeDefined();
+    expect(catalogue).toContain('• Primary: claude-cli (provider default — no model configured)');
+    expect(catalogue).toContain('• Fallback: opencode-cli (kimi/kimi-k3)');
+    expect(catalogue).toContain('• Fallback: opencode-cli (glm/glm-5.2)');
+    expect(catalogue).not.toContain('opencode-cli (kimi/kimi-k3) → opencode-cli (glm/glm-5.2)');
+    // D7 caveat as a single trailing _italic_ line, not baked into the header.
+    expect(catalogue).toContain('_Which weight actually serves is not observable here._');
+    // Unrecognized third-party IDs → NO invented lifecycle modifier (D7 honesty).
+    expect(catalogue).not.toContain('[newer:');
+    expect(catalogue).not.toContain('[deprecated');
+  });
+
+  it('b28 r2d: /model list tags config-derived modifiers — a legacy primary model and a configured tier target', async () => {
+    cfgAny().agentFallbacks = [{ provider: 'anthropic-api' }];
+    cfgAny().nlRoutingTiers = { strongest: 'anthropic-api' };
+    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-5' });
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
+    expect(catalogue).toBeDefined();
+    // Legacy primary → catalog advisory modifier, derived from the configured ID.
+    expect(catalogue).toContain(
+      '• Primary: claude-cli (claude-opus-4-5 — configured) [newer: claude-opus-4-8]',
+    );
+    // Fallback provider IS the configured strongest tier → tier tag (from config).
+    expect(catalogue).toContain('• Fallback: anthropic-api [strongest]');
   });
 
   it('B26: /model list says tiers are not configured on this line rather than implying they resolve (honesty)', async () => {
@@ -16079,6 +16196,42 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(status).toContain('Model: haiku-fast');
     expect(status).not.toContain('Model: haiku-fast (configured)');
     expect(status).not.toContain('claude-opus-4-8 (configured)');
+  });
+
+  // ── b28 r2b: /model status drops the Delegation + Authority DISPLAY lines ──
+  // Owner round-2 ruling: those two lines are not about model/route status.
+  // RENDER-ONLY removal — the routing-never-changes-authority invariant stays
+  // in the agent system prompt + security layer and on the /why receipt; only
+  // the two redundant status lines go.
+  it('b28 r2b: /model status no longer renders the Delegation or Authority lines', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toBeDefined();
+    expect(status).not.toContain('Delegation:');
+    expect(status).not.toContain('Authority:');
+  });
+
+  // ── b28 r2a: WhatsApp formatting — the configured fallback chain renders as
+  // one `• ` bullet per entry (WhatsApp narrow column), never a long
+  // ` → `-joined single line. Same-provider entries stay distinguishable
+  // (B23 discriminator preserved through the reformat).
+  it('b28 r2a: /model status renders the configured fallback chain as bullets, one per entry', async () => {
+    cfgAny().agentFallbacks = [
+      { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
+      { provider: 'opencode-cli', model: 'glm/glm-5.2' },
+    ];
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toBeDefined();
+    expect(status).toContain('Fallback chain (configured):');
+    expect(status).toContain('• opencode-cli (kimi/kimi-k3)');
+    expect(status).toContain('• opencode-cli (glm/glm-5.2)');
+    // The pre-b28 defect: the whole chain crammed onto one ` → `-joined line.
+    expect(status).not.toContain('opencode-cli (kimi/kimi-k3) → opencode-cli (glm/glm-5.2)');
+    const bulletLines = status!.split('\n').filter((l) => l.startsWith('• '));
+    expect(bulletLines).toHaveLength(2);
   });
 
 });

@@ -104,6 +104,7 @@ import { isProviderId } from './providers/index.ts';
 import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
 import { formatChatRefForOwner } from '../../core/chat-display-name.ts';
+import { OWNER_BULLET, bulletedSection, modelModifierTags, modifierSuffix } from './owner-render-format.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
 import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
@@ -4043,6 +4044,13 @@ export class AgentRuntime implements Runtime {
             // straight improvement.
             const entries: string[] = [];
             let idx = 1;
+            // b28 r2c: the row whose conversation key matches the chat that sent
+            // /sessions is labelled "Current session" instead of its resolved
+            // name — derived through the same canonical key the runtime dispatches
+            // on, so lid vs pn presentation cannot cause a miss.
+            const requestingKey = this.sessionScope === 'per_chat'
+              ? this.resolvePerChatMapKey(chatJid)
+              : null;
             if (this.sessionScope === 'per_chat') {
               for (const [mapKey, sess] of this.chatSessions) {
                 const st = sess.getStatus();
@@ -4064,7 +4072,11 @@ export class AgentRuntime implements Runtime {
                 // B23 owner ruling: render the resolved chat name (alias →
                 // group subject/chat name → contact name → formatted phone),
                 // raw key only as last resort. Local DB reads only — cheap.
-                entries.push(`${idx}. ${formatChatRefForOwner(this.db, mapKey)} (${label}) — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
+                // b28 r2c: the requesting chat's own row reads "Current session".
+                const identifier = mapKey === requestingKey
+                  ? 'Current session'
+                  : formatChatRefForOwner(this.db, mapKey);
+                entries.push(`${idx}. ${identifier} (${label}) — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
                 idx++;
               }
             } else {
@@ -4082,7 +4094,16 @@ export class AgentRuntime implements Runtime {
                     tkStr = tkTotal > 1000 ? `${(tkTotal / 1000).toFixed(1)}k` : String(tkTotal);
                   }
                 }
-                entries.push(`1. ${this.activeChatJid ? formatChatRefForOwner(this.db, this.activeChatJid) : 'unknown'} — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
+                // b28 r2c: when /sessions is sent from the active chat itself,
+                // the single row reads "Current session". Canonicalize BOTH
+                // sides — the request may present as @lid while activeChatJid is
+                // stored as the pn (or vice versa).
+                const requestIsActiveChat = this.activeChatJid !== null
+                  && canonicalizeChatJid(chatJid, this.db) === canonicalizeChatJid(this.activeChatJid, this.db);
+                const identifier = requestIsActiveChat
+                  ? 'Current session'
+                  : (this.activeChatJid ? formatChatRefForOwner(this.db, this.activeChatJid) : 'unknown');
+                entries.push(`1. ${identifier} — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
               }
             }
             const sessionsText = entries.length > 0
@@ -8449,11 +8470,6 @@ export class AgentRuntime implements Runtime {
     const primary = this.model !== undefined
       ? `${this.agentProvider} (${this.model} — configured)`
       : `${this.agentProvider} (provider default — no model configured)`;
-    const fallbackLine = this.agentFallbacks.length > 0
-      ? `Fallbacks (configured): ${this.agentFallbacks
-          .map((e) => (e.model ? `${e.provider} (${e.model})` : e.provider))
-          .join(' → ')}`
-      : 'Fallbacks: none configured';
     // Tier vocabulary: default always exists (the primary route). strongest/
     // fastest resolve ONLY through nlRoutingTiers — absent map means they
     // degrade to the default route, and the catalogue must say so rather than
@@ -8463,20 +8479,39 @@ export class AgentRuntime implements Runtime {
     const tierLine = tiersConfigured
       ? `Tiers: default → primary route; strongest → ${tiers.strongest ?? 'not configured (default route)'}; fastest → ${tiers.fastest ?? 'not configured (default route)'}`
       : 'Tiers: default → primary route; strongest/fastest: tiers not configured on this line — default routing only';
+    // b28 r2d: one `• ` bullet per MODEL (primary + each fallback). Each bullet
+    // carries its provider + config-derived modifiers ONLY (D7): a catalog
+    // lifecycle advisory keyed off the configured model ID (silent for IDs the
+    // catalog does not recognize, e.g. third-party kimi/glm) and a tier tag
+    // when the provider is a configured nlRoutingTiers target. The served
+    // weight stays unobservable — the caveat is the trailing _italic_ line.
+    const modelBullets: string[] = [
+      `Primary: ${primary}${modifierSuffix(modelModifierTags(this.model, this.agentProvider, tiers))}`,
+    ];
+    if (this.agentFallbacks.length > 0) {
+      for (const e of this.agentFallbacks) {
+        const label = e.model ? `${e.provider} (${e.model})` : e.provider;
+        modelBullets.push(`Fallback: ${label}${modifierSuffix(modelModifierTags(e.model, e.provider, tiers))}`);
+      }
+    } else {
+      modelBullets.push('Fallbacks: none configured');
+    }
     return [
-      '*Models on this line* (from config — which weight actually serves is not observable here)',
-      `Primary: ${primary}`,
-      fallbackLine,
+      '*Models on this line* (from config)',
+      ...modelBullets.map((b) => `${OWNER_BULLET}${b}`),
       tierLine,
-      'Pin: `/model provider-id` — prefers it for you in this chat (24h). Back: `/model default` or `/reset`.',
+      'Pin: `/model provider-id` — prefers it for you here (24h). Back: `/model default` or `/reset`.',
+      '_Which weight actually serves is not observable here._',
     ].join('\n');
   }
 
   /**
    * End-user route status (/model status). Visibility policy (capability-
-   * preserved routing): provider, model route, preference, fallback state,
-   * delegation state, and authority class only — never tool names, socket
-   * paths, pids, account JIDs, or cross-conversation metadata.
+   * preserved routing): provider, model route, preference, and fallback state
+   * only — never tool names, socket paths, pids, account JIDs, or
+   * cross-conversation metadata. (b28 r2b removed the Delegation/Authority
+   * DISPLAY lines; the invariant they described lives in the agent system
+   * prompt + security layer and the /why receipt, not this status surface.)
    */
   private renderRouteStatus(chatJid: string, senderJid: string): string {
     const { live, pref, next } = this.loadRouteView(chatJid, senderJid);
@@ -8518,23 +8553,27 @@ export class AgentRuntime implements Runtime {
       : this.agentFallbacks.length > 0
         // B23: entries may share a provider and differ only by model — render
         // "provider (model)" when a model is pinned so distinct configured
-        // entries never collapse to indistinguishable labels.
-        ? `Fallback chain (configured): ${this.agentFallbacks.map((e) => (e.model ? `${e.provider} (${e.model})` : e.provider)).join(' → ')}`
+        // entries never collapse to indistinguishable labels. b28 r2a: the
+        // chain renders one `• ` bullet per entry (WhatsApp narrow column),
+        // never a long ` → `-joined single line.
+        ? bulletedSection(
+            'Fallback chain (configured):',
+            this.agentFallbacks.map((e) => (e.model ? `${e.provider} (${e.model})` : e.provider)),
+          )
         : 'Fallback: none configured';
     const nextLine =
       live && (live.provider !== nextProvider || (live.model ?? null) !== (next.model ?? null))
         ? `\nNext session: ${nextRouteLabel}`
         : '';
+    // b28 r2b: the Delegation + Authority lines are removed from this render
+    // (owner ruling: not about model/route status). DISPLAY-only removal — the
+    // routing-never-changes-authority invariant remains in the agent system
+    // prompt + security layer and on the /why receipt (renderRouteWhy).
     return (
       `*Current route:* ${provider}${live ? '' : ' (no live session — next session route)'}\n` +
       `Model: ${model}\n` +
       `${prefLine}\n` +
-      `${fallbackLine}${nextLine}\n` +
-      'Delegation: none\n' +
-      // Capability-preserved phrasing, true on EVERY instance (F10): this
-      // surface must not claim the bot can or cannot act — only that
-      // routing choices never change what it may do.
-      'Authority: routing never changes what I am allowed to do'
+      `${fallbackLine}${nextLine}`
     );
   }
 
