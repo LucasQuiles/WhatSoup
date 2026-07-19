@@ -925,7 +925,14 @@ describe('Viewport matrix — side-panel fold (DD-18r leg 2)', () => {
     expect(window.getComputedStyle(row).flexDirection).toBe('column');
     const list = container.querySelector('.soup-history-split__list') as HTMLElement;
     expect(list).not.toBeNull();
-    expect(window.getComputedStyle(list).width).toBe(window.getComputedStyle(row).width);
+    // The list fills the row's CONTENT box — the row carries c-border (1px
+    // hairlines), so outer row width minus the border widths is the honest
+    // full-width expectation (637px at the 639px container, not 639px).
+    const rowStyle = window.getComputedStyle(row);
+    const expectedWidth = 639
+      - Number.parseFloat(rowStyle.borderLeftWidth)
+      - Number.parseFloat(rowStyle.borderRightWidth);
+    expect(Number.parseFloat(window.getComputedStyle(list).width)).toBeCloseTo(expectedWidth, 0);
     expect(window.getComputedStyle(list).maxHeight).toBe('40dvh');
   });
 
