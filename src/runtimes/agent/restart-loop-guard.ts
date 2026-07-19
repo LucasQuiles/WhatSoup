@@ -60,9 +60,9 @@ export interface RestartLoopGuardHealth extends RestartLoopGuardTrip {
   lastTripAt: number | null;
 }
 
-/** Canonical state-file location inside an instance dataRoot. */
-export function restartLoopGuardPath(dataRoot: string): string {
-  return join(dataRoot, RESTART_LOOP_GUARD_FILENAME);
+/** Canonical state-file location inside an instance state root. */
+export function restartLoopGuardPath(stateRoot: string): string {
+  return join(stateRoot, RESTART_LOOP_GUARD_FILENAME);
 }
 
 function freshState(): RestartLoopGuardState {

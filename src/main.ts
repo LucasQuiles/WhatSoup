@@ -67,6 +67,7 @@ import { createPineconeWatchSearch } from './mcp/tools/knowledge.ts';
 import { backfillMetrics, collectHourlyMetrics } from './core/metrics-collector.ts';
 import { startModelCurrencyMonitor } from './lib/model-advisor.ts';
 import { shutdownExitCode } from './main-shutdown-policy.ts';
+import { markCleanExit, restartLoopGuardPath } from './runtimes/agent/restart-loop-guard.ts';
 import { acquireProcessLock, isProcessLockError, releaseProcessLock, type ProcessLockHandle } from './lib/process-lock.ts';
 import { createServiceManager } from './fleet/platform.ts';
 
@@ -1103,6 +1104,10 @@ async function shutdown(signal: string): Promise<void> {
     await runtime.shutdown();
     connectionManager.shutdown();
     log.info('shutdown complete');
+    // C5 restart-loop guard: a completed graceful shutdown clears the crash
+    // marker — the next boot will not count as crash-interrupted. No-op for
+    // runtimes without a guard journal (chat/passive instances).
+    markCleanExit(restartLoopGuardPath(config.stateRoot));
   } catch (err) {
     log.error({ err }, 'error during shutdown');
   } finally {
