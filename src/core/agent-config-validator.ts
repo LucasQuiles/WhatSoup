@@ -29,6 +29,7 @@ import { fallbackEntryKey, isSameAsPrimaryFallbackEntry, type AgentFallbackEntry
 import { DEFAULT_TRANSPORT_ID, isTransportId, TRANSPORT_IDS } from '../transport/registry.ts';
 import { ACCOUNT_RE } from './transport-refs.ts';
 import { E164_RE } from '../transport/twilio/types.ts';
+import RE2 from 're2';
 
 export const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
 export const ACCESS_MODES = [
@@ -329,6 +330,38 @@ export function validateInstanceConfig(
         return err('chatAliases', `chatAliases contains duplicate alias after trimming: ${trimmed}`);
       }
       seen.add(trimmed);
+    }
+  }
+
+  // --- pausedChatBypassPatterns (shape + bounds + safe-regex compile) ---
+  // Operator-supplied regex sources are compiled and matched (src/core/ingest.ts)
+  // with RE2 — a linear-time engine with no catastrophic backtracking — so a
+  // config cannot introduce a ReDoS. Supported syntax is RE2's safe subset:
+  // NO lookaround and NO backreferences (both require backtracking). The same
+  // engine guards config-time and match-time, so a pattern that validates here
+  // always compiles at runtime. The count/length caps are defense-in-depth.
+  const bypassPatterns = raw['pausedChatBypassPatterns'];
+  if (bypassPatterns !== undefined) {
+    if (!Array.isArray(bypassPatterns)) {
+      return err('pausedChatBypassPatterns', 'pausedChatBypassPatterns must be an array of regex source strings');
+    }
+    if (bypassPatterns.length > 32) {
+      return err('pausedChatBypassPatterns', 'pausedChatBypassPatterns must contain at most 32 patterns');
+    }
+    for (const pattern of bypassPatterns) {
+      if (!nonBlankString(pattern)) {
+        return err('pausedChatBypassPatterns', 'pausedChatBypassPatterns must contain only non-empty regex source strings');
+      }
+      if ((pattern as string).length > 200) {
+        return err('pausedChatBypassPatterns', 'pausedChatBypassPatterns entries must be at most 200 characters');
+      }
+      try {
+        // Validate with RE2 (the same engine used at match time). Lookaround and
+        // backreferences are unsupported by RE2 and rejected here as invalid.
+        new RE2(pattern as string, 'i');
+      } catch {
+        return err('pausedChatBypassPatterns', `pausedChatBypassPatterns contains an invalid regular expression: ${pattern}`);
+      }
     }
   }
 

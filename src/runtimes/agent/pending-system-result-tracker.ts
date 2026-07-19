@@ -37,8 +37,12 @@ export interface MarkSystemTurnInput {
   readonly routeChatJid?: string;
   /** Absolute wall deadline measured from mark(), independent of later activity. */
   readonly timeoutMs?: number;
-  /** Return true only after the timed-out provider request has been torn down. */
-  readonly onTimeout?: (lease: SystemTurnLeaseToken) => Promise<boolean>;
+  /**
+   * Deadline verdict: true only after the timed-out provider request has been
+   * torn down (cancels the exact lease); 'retry' re-arms the same deadline slot
+   * for one more window without teardown; false retains the lease fail-closed.
+   */
+  readonly onTimeout?: (lease: SystemTurnLeaseToken) => Promise<boolean | 'retry'>;
 }
 
 interface MutableSystemTurnLease {
@@ -312,11 +316,11 @@ export class PendingSystemResultTracker {
   private armDeadline(
     entry: MutableSystemTurnLease,
     timeoutMs: number,
-    onTimeout: (lease: SystemTurnLeaseToken) => Promise<boolean>,
+    onTimeout: (lease: SystemTurnLeaseToken) => Promise<boolean | 'retry'>,
   ): void {
     const timer = setTimeout(() => {
       entry.deadlineTimer = null;
-      void this.handleDeadline(entry, onTimeout);
+      void this.handleDeadline(entry, timeoutMs, onTimeout);
     }, timeoutMs);
     timer.unref?.();
     entry.deadlineTimer = timer;
@@ -324,12 +328,22 @@ export class PendingSystemResultTracker {
 
   private async handleDeadline(
     entry: MutableSystemTurnLease,
-    onTimeout: (lease: SystemTurnLeaseToken) => Promise<boolean>,
+    timeoutMs: number,
+    onTimeout: (lease: SystemTurnLeaseToken) => Promise<boolean | 'retry'>,
   ): Promise<void> {
     if (!this.isLive(entry)) return;
     try {
-      const teardownSucceeded = await onTimeout(entry.lease);
-      if (teardownSucceeded) this.cancel(entry.lease);
+      const verdict = await onTimeout(entry.lease);
+      if (verdict === 'retry') {
+        // Single-slot re-arm: the fired timer already nulled deadlineTimer, so
+        // this never stacks. A lease consumed or cancelled during the verdict
+        // await stays dead — consumption/cancellation cleared its timer slot.
+        if (this.isLive(entry) && entry.deadlineTimer === null) {
+          this.armDeadline(entry, timeoutMs, onTimeout);
+        }
+        return;
+      }
+      if (verdict) this.cancel(entry.lease);
     } catch {
       // Fail closed: an unproven teardown retains both classification and blocking.
     }

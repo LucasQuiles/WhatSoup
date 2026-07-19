@@ -377,6 +377,81 @@ describe('chatAliases validation', () => {
   });
 });
 
+describe('pausedChatBypassPatterns validation', () => {
+  it('accepts an array of valid regex source strings', () => {
+    const raw = baseChat({ pausedChatBypassPatterns: ['-> Q', 'escalate to owner'] });
+    expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
+  });
+
+  it('rejects more than the maximum number of patterns', () => {
+    const raw = baseChat({ pausedChatBypassPatterns: Array.from({ length: 33 }, (_, i) => `p${i}`) });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('pausedChatBypassPatterns');
+    expect(result?.message).toContain('at most 32');
+  });
+
+  it('rejects a pattern longer than the maximum length', () => {
+    const raw = baseChat({ pausedChatBypassPatterns: ['a'.repeat(201)] });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('pausedChatBypassPatterns');
+    expect(result?.message).toContain('at most 200 characters');
+  });
+
+  it('rejects lookaround/backreference patterns unsupported by the safe RE2 engine', () => {
+    // Lookaround and backreferences compile under native RegExp but require
+    // backtracking; RE2 (used at validate + match time) rejects them, so the
+    // engine that guards config also guards runtime — no ReDoS from operator
+    // sources, and no validator/runtime compile mismatch. (Nested quantifiers
+    // like (a+)+ stay accepted: RE2 runs them in linear time.)
+    for (const pattern of ['(?=secret)', '(\\w)\\1']) {
+      const result = validateInstanceConfig(baseChat({ pausedChatBypassPatterns: [pattern] }), ctx('create'));
+      expect(result?.field).toBe('pausedChatBypassPatterns');
+      expect(result?.message).toContain('invalid regular expression');
+    }
+  });
+
+  it('accepts absent pausedChatBypassPatterns', () => {
+    const raw = baseChat({});
+    expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
+  });
+
+  it('rejects non-array pausedChatBypassPatterns', () => {
+    const raw = baseChat({ pausedChatBypassPatterns: '-> Q' });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('pausedChatBypassPatterns');
+    expect(result?.message).toContain('array of regex source strings');
+  });
+
+  it('rejects blank-string entries', () => {
+    const raw = baseChat({ pausedChatBypassPatterns: ['-> Q', '   '] });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('pausedChatBypassPatterns');
+    expect(result?.message).toContain('non-empty regex source strings');
+  });
+
+  it('rejects non-string entries', () => {
+    const raw = baseChat({ pausedChatBypassPatterns: [42] });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('pausedChatBypassPatterns');
+    expect(result?.message).toContain('non-empty regex source strings');
+  });
+
+  it('rejects entries that do not compile as regular expressions', () => {
+    const raw = baseChat({ pausedChatBypassPatterns: ['(['] });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('pausedChatBypassPatterns');
+    expect(result?.message).toContain('invalid regular expression');
+    expect(result?.message).toContain('([');
+  });
+
+  it('rejects invalid regex on load mode too', () => {
+    const raw = baseChat({ pausedChatBypassPatterns: ['*bad'] });
+    const result = validateInstanceConfig(raw, ctx('load'));
+    expect(result?.field).toBe('pausedChatBypassPatterns');
+    expect(result?.message).toContain('invalid regular expression');
+  });
+});
+
 describe('claudeMd size cap', () => {
   it('rejects claudeMd over 32KB on create', () => {
     const raw = baseAgent({ claudeMd: 'A'.repeat(32_769) });

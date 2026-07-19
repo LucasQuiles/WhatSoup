@@ -82,6 +82,96 @@ describe('PendingSystemResultTracker', () => {
     expect(tracker.blockingCount('chat-a')).toBe(1);
   });
 
+  it('re-arms one retry window on a retry verdict and completes without teardown when the result lands in it', async () => {
+    vi.useFakeTimers();
+    const tracker = new PendingSystemResultTracker();
+    const owner = { managerId: 'manager-a', generation: 1, toolScopeKey: 'chat-a#1' };
+    const onTimeout = vi.fn(async (): Promise<boolean | 'retry'> => 'retry');
+    const lease = tracker.mark({
+      scopeKey: 'chat-a',
+      purpose: 'fresh_session_context',
+      owner,
+      timeoutMs: 1_000,
+      onTimeout,
+    });
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(onTimeout).toHaveBeenCalledExactlyOnceWith(lease);
+    expect(tracker.count('chat-a')).toBe(1);
+    expect(tracker.blockingCount('chat-a')).toBe(1);
+
+    // The slow provider result arrives inside the retry window.
+    await vi.advanceTimersByTimeAsync(500);
+    expect(tracker.consumeResult(lease)?.lease.id).toBe(lease.id);
+    expect(tracker.count('chat-a')).toBe(0);
+
+    // Consumption cleared the re-armed slot — the deadline never fires again.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(onTimeout).toHaveBeenCalledTimes(1);
+  });
+
+  it('fires the deadline again after a granted retry window and cancels only on proven teardown', async () => {
+    vi.useFakeTimers();
+    const tracker = new PendingSystemResultTracker();
+    const owner = { managerId: 'manager-a', generation: 1, toolScopeKey: 'chat-a#1' };
+    const onTimeout = vi.fn<(lease: unknown) => Promise<boolean | 'retry'>>()
+      .mockResolvedValueOnce('retry')
+      .mockResolvedValue(true);
+    const lease = tracker.mark({
+      scopeKey: 'chat-a',
+      purpose: 'fresh_session_context',
+      owner,
+      timeoutMs: 1_000,
+      onTimeout,
+    });
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(onTimeout).toHaveBeenCalledTimes(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(onTimeout).toHaveBeenCalledTimes(1);
+    expect(tracker.blockingCount('chat-a')).toBe(1);
+
+    // The second window runs the full timeout again, then tears down.
+    await vi.advanceTimersByTimeAsync(999);
+    expect(onTimeout).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(onTimeout).toHaveBeenCalledTimes(2);
+    expect(onTimeout).toHaveBeenNthCalledWith(2, lease);
+    expect(tracker.count('chat-a')).toBe(0);
+    expect(tracker.blockingCount('chat-a')).toBe(0);
+
+    // Bounded: no third window exists after teardown cancelled the lease.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(onTimeout).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not re-arm a retry window for a lease that died while the verdict was pending', async () => {
+    vi.useFakeTimers();
+    const tracker = new PendingSystemResultTracker();
+    const owner = { managerId: 'manager-a', generation: 1, toolScopeKey: 'chat-a#1' };
+    let finishVerdict: ((verdict: boolean | 'retry') => void) | undefined;
+    const onTimeout = vi.fn(() => new Promise<boolean | 'retry'>((resolve) => {
+      finishVerdict = resolve;
+    }));
+    const lease = tracker.mark({
+      scopeKey: 'chat-a',
+      purpose: 'fresh_session_context',
+      owner,
+      timeoutMs: 1_000,
+      onTimeout,
+    });
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(onTimeout).toHaveBeenCalledTimes(1);
+
+    tracker.cancel(lease);
+    finishVerdict?.('retry');
+    await vi.runAllTimersAsync();
+
+    expect(tracker.count('chat-a')).toBe(0);
+    expect(onTimeout).toHaveBeenCalledTimes(1);
+  });
+
   it('clears exact deadline timers on result, cancellation, scope clear, and full clear', async () => {
     vi.useFakeTimers();
     const tracker = new PendingSystemResultTracker();

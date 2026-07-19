@@ -142,6 +142,7 @@ describe('RuntimeTurnSupervisor', () => {
     let failSecond = true;
     const durability = {
       getOutboundDeliverySnapshot: vi.fn(),
+      markContinuityCandidateIfNoTerminalOutbound: vi.fn(() => true),
       finalizeTurnTerminal: vi.fn((params: { terminal: { logicalTurnId: string } }) => {
         if (params.terminal.logicalTurnId === second.identity.logicalTurnId && failSecond) {
           throw new Error('second terminal still unavailable');
@@ -172,6 +173,7 @@ describe('RuntimeTurnSupervisor', () => {
     const refresh = vi.fn(async () => ({ kind: 'ready' as const, opIds: [] }));
     const durability = {
       getOutboundDeliverySnapshot: vi.fn(),
+      markContinuityCandidateIfNoTerminalOutbound: vi.fn(() => true),
       finalizeTurnTerminal: vi.fn(() => receipt()),
     };
     const applyRecovered = vi.fn();
@@ -197,6 +199,7 @@ describe('RuntimeTurnSupervisor', () => {
     const refresh = vi.fn();
     const durability = {
       getOutboundDeliverySnapshot: vi.fn(),
+      markContinuityCandidateIfNoTerminalOutbound: vi.fn(() => true),
       finalizeTurnTerminal: vi.fn(() => receipt()),
     };
     const supervisor = new RuntimeTurnSupervisor('personal', () => durability, vi.fn());
@@ -217,6 +220,7 @@ describe('RuntimeTurnSupervisor', () => {
     let persist = false;
     const durability = {
       getOutboundDeliverySnapshot: vi.fn(),
+      markContinuityCandidateIfNoTerminalOutbound: vi.fn(() => true),
       finalizeTurnTerminal: vi.fn(() => {
         if (!persist) throw new Error('sqlite unavailable');
         return receipt();
@@ -242,6 +246,7 @@ describe('RuntimeTurnSupervisor', () => {
   it('retains records beyond the admission high-watermark instead of dropping owned work', () => {
     const durability = {
       getOutboundDeliverySnapshot: vi.fn(),
+      markContinuityCandidateIfNoTerminalOutbound: vi.fn(() => true),
       finalizeTurnTerminal: vi.fn(() => receipt()),
     };
     const supervisor = new RuntimeTurnSupervisor('personal', () => durability, vi.fn());
@@ -260,6 +265,7 @@ describe('RuntimeTurnSupervisor', () => {
     const attemptedIds: string[] = [];
     const durability = {
       getOutboundDeliverySnapshot: vi.fn(),
+      markContinuityCandidateIfNoTerminalOutbound: vi.fn(() => true),
       finalizeTurnTerminal: vi.fn((params: { terminal: { logicalTurnId: string } }) => {
         attemptedIds.push(params.terminal.logicalTurnId);
         throw new Error('still unavailable');
@@ -290,6 +296,7 @@ describe('RuntimeTurnSupervisor', () => {
     const blocked = new Promise<void>((resolve) => { release = resolve; });
     const durability = {
       getOutboundDeliverySnapshot: vi.fn(),
+      markContinuityCandidateIfNoTerminalOutbound: vi.fn(() => true),
       finalizeTurnTerminal: vi.fn(() => receipt()),
     };
     const applyRecovered = vi.fn(async () => blocked);
@@ -310,6 +317,7 @@ describe('RuntimeTurnSupervisor', () => {
     const turn = context('turn-31', 'per_chat');
     const durability = {
       getOutboundDeliverySnapshot: vi.fn(),
+      markContinuityCandidateIfNoTerminalOutbound: vi.fn(() => true),
       finalizeTurnTerminal: vi.fn(() => receipt()),
     };
     const supervisor = new RuntimeTurnSupervisor(
@@ -328,6 +336,7 @@ describe('RuntimeTurnSupervisor', () => {
     const turn = context('turn-33', 'per_chat');
     const durability = {
       getOutboundDeliverySnapshot: vi.fn(),
+      markContinuityCandidateIfNoTerminalOutbound: vi.fn(() => true),
       finalizeTurnTerminal: vi.fn(() => ({
         ...receipt(),
         applied: false,
@@ -354,6 +363,7 @@ describe('RuntimeTurnSupervisor', () => {
     const turn = context('turn-34', 'per_chat');
     const durability = {
       getOutboundDeliverySnapshot: vi.fn(),
+      markContinuityCandidateIfNoTerminalOutbound: vi.fn(() => true),
       finalizeTurnTerminal: vi.fn(() => { throw new Error('still unavailable'); }),
     };
     const supervisor = new RuntimeTurnSupervisor('personal', () => durability, vi.fn());
@@ -389,6 +399,7 @@ describe('RuntimeTurnSupervisor', () => {
     const turn = context('turn-32');
     const durability = {
       getOutboundDeliverySnapshot: vi.fn(),
+      markContinuityCandidateIfNoTerminalOutbound: vi.fn(() => true),
       finalizeTurnTerminal: vi.fn(() => receipt()),
     };
     const supervisor = new RuntimeTurnSupervisor('personal', () => durability, vi.fn());
@@ -404,6 +415,7 @@ describe('RuntimeTurnSupervisor', () => {
     const turn = context('turn-35');
     const durability = {
       getOutboundDeliverySnapshot: vi.fn(),
+      markContinuityCandidateIfNoTerminalOutbound: vi.fn(() => true),
       finalizeTurnTerminal: vi.fn(() => receipt()),
     };
     const supervisor = new RuntimeTurnSupervisor('personal', () => durability, vi.fn());
@@ -419,6 +431,7 @@ describe('RuntimeTurnSupervisor', () => {
     const turn = context('turn-36');
     const durability = {
       getOutboundDeliverySnapshot: vi.fn(),
+      markContinuityCandidateIfNoTerminalOutbound: vi.fn(() => true),
       finalizeTurnTerminal: vi.fn(() => { throw new Error('still unavailable'); }),
     };
     const supervisor = new RuntimeTurnSupervisor('personal', () => durability, vi.fn());
@@ -436,6 +449,7 @@ describe('RuntimeTurnSupervisor', () => {
       'personal',
       () => ({
         getOutboundDeliverySnapshot: vi.fn(),
+        markContinuityCandidateIfNoTerminalOutbound: vi.fn(() => true),
         finalizeTurnTerminal: vi.fn(() => receipt()),
       }),
       vi.fn(),

@@ -233,10 +233,11 @@ function toInboundMutation(result: TurnTerminalResult): TerminalInboundMutation 
         ? admissionRejectInboundFailureClass(result.attemptOutcome.class)
         : result.attemptOutcome.class === 'crash'
           ? 'session_crash'
-          : result.attemptOutcome.class === 'processor_throw' ||
-              result.attemptOutcome.class === 'unknown_terminal'
-            ? 'unknown'
-            : 'provider_failure';
+          : result.attemptOutcome.class === 'processor_throw'
+            ? 'processor_throw'
+            : result.attemptOutcome.class === 'unknown_terminal'
+              ? 'unknown'
+              : 'provider_failure';
       return { kind: 'failed', seq, failureClass };
     }
     case 'transferred_to_recovery_owner':
