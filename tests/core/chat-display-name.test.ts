@@ -7,21 +7,37 @@
 //
 //   1. chat_aliases.alias      — the owner's own name for the chat
 //                                (config chatAliases seeds this table,
-//                                main.ts → seedChatAliases)
+//                                main.ts → seedChatAliases); most recently
+//                                updated wins; lid refs resolve to phone
+//                                forms BEFORE this rung (B25 F7)
 //   2. groups.subject          — WhatsApp group subject
 //      then chats.name         — chat-level name (chat-sync)
 //   3. contacts.display_name / notify_name — contact address-book/push name
-//      (via lid_mappings indirection for @lid refs)
-//   4. formatted phone (+digits) for DMs
-//   5. the raw ref, unchanged  — last resort; NEVER throws on a miss
+//      (via resolveLid for @lid refs, plus the '@lid'-keyed row itself)
+//   4. messages.sender_name    — most recent non-blank push name for the jid
+//   5. formatted phone (+digits) — proven phone-origin or mapped lids only;
+//      never fabricated from a bare/unmapped lid (B25 F1)
+//   6. the raw ref, unchanged  — last resort; NEVER throws on a miss
 //
 // Inputs may be a conversation_key ('123_at_g.us' / bare phone) or a raw JID
 // ('123@g.us' / '123@s.whatsapp.net' / '123@lid') — the runtime's session
 // map keys carry both shapes.
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
-import { resolveChatDisplayName } from '../../src/core/chat-display-name.ts';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { resolveChatDisplayName as resolveImpl } from '../../src/core/chat-display-name.ts';
+import { setLidAuthDir } from '../../src/core/lid-resolver.ts';
+import type { Database } from '../../src/core/database.ts';
+
+// The resolver takes the `Database` wrapper (resolveLid's contract — its L1.5
+// disk fallback writes through it). Tests drive a real raw handle through a
+// minimal structural wrapper, the same shape runtime tests fake.
+function resolveChatDisplayName(raw: DatabaseSync, ref: string): string {
+  return resolveImpl({ raw } as unknown as Database, ref);
+}
 
 // --- Helpers ---------------------------------------------------------------
 
@@ -70,6 +86,14 @@ function makeDb(): DatabaseSync {
       lid TEXT PRIMARY KEY,
       phone_jid TEXT NOT NULL,
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE messages (
+      pk INTEGER PRIMARY KEY AUTOINCREMENT,
+      chat_jid TEXT,
+      conversation_key TEXT,
+      sender_jid TEXT NOT NULL,
+      sender_name TEXT,
+      timestamp INTEGER NOT NULL
     );
   `);
   return db;
@@ -167,6 +191,166 @@ describe('resolveChatDisplayName — B23 ladder', () => {
 
   it('a non-numeric unknown DM ref falls back to the raw ref', () => {
     expect(resolveChatDisplayName(db, 'owner@s.whatsapp.net')).toBe('owner@s.whatsapp.net');
+  });
+
+  // ── B25 resolver hardening ─────────────────────────────────────────────────
+
+  it('F1: an unmapped 12+-digit bare lid-shaped key falls back to the raw ref, never a fabricated phone', () => {
+    // Execution-verified defect: '11111119876543' rendered '+11111119876543' —
+    // a fake phone minted from a bare-lid conversation key.
+    expect(resolveChatDisplayName(db, '11111119876543')).toBe('11111119876543');
+  });
+
+  it('F1: a mapped bare lid key renders the mapped phone, not "+<lid>"', () => {
+    db.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+      .run('11111119876543', DM_JID);
+    expect(resolveChatDisplayName(db, '11111119876543')).toBe('+15550001111');
+  });
+
+  it('F1: a mapped bare lid key reaches the contact name (regression guard)', () => {
+    db.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+      .run('11111119876543', DM_JID);
+    db.prepare('INSERT INTO contacts (jid, canonical_phone, display_name) VALUES (?, ?, ?)')
+      .run(DM_JID, DM_KEY, 'Lucas');
+    expect(resolveChatDisplayName(db, '11111119876543')).toBe('Lucas');
+  });
+
+  it('F7: an owner alias keyed by the phone JID wins for a lid-keyed ref', () => {
+    db.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+      .run('11111110000099', DM_JID);
+    db.prepare('INSERT INTO chat_aliases (alias, chat_jid) VALUES (?, ?)').run('boss', DM_JID);
+    expect(resolveChatDisplayName(db, '11111110000099@lid')).toBe('boss');
+    expect(resolveChatDisplayName(db, '11111110000099')).toBe('boss');
+  });
+
+  it('F6: a contact row keyed by the @lid jid is reachable for an UNMAPPED lid ref', () => {
+    // contacts-sync stores raw Baileys ids including '@lid' jids with
+    // canonical_phone = bare lid digits.
+    db.prepare('INSERT INTO contacts (jid, canonical_phone, notify_name) VALUES (?, ?, ?)')
+      .run('11111110000888@lid', '11111110000888', 'Push Name');
+    expect(resolveChatDisplayName(db, '11111110000888@lid')).toBe('Push Name');
+  });
+
+  it('F6: an @lid-keyed contact row also wins for a MAPPED lid with no phone-keyed contact', () => {
+    db.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+      .run('11111110000888', DM_JID);
+    db.prepare('INSERT INTO contacts (jid, canonical_phone, notify_name) VALUES (?, ?, ?)')
+      .run('11111110000888@lid', '11111110000888', 'Push Name');
+    expect(resolveChatDisplayName(db, '11111110000888@lid')).toBe('Push Name');
+  });
+
+  it('F9: a named contact row beats an unnamed row matching the same OR-lookup', () => {
+    // Row order must not decide the render: the NULL-named row (matched by
+    // jid) precedes the named row (matched by canonical_phone) in rowid order.
+    db.prepare('INSERT INTO contacts (jid, canonical_phone, display_name, notify_name) VALUES (?, ?, NULL, NULL)')
+      .run(DM_JID, DM_KEY);
+    db.prepare('INSERT INTO contacts (jid, canonical_phone, display_name) VALUES (?, ?, ?)')
+      .run('15550001111:2@s.whatsapp.net', DM_KEY, 'Lucas');
+    expect(resolveChatDisplayName(db, DM_JID)).toBe('Lucas');
+  });
+
+  it('F9: a named chats row beats an unnamed row matching the same OR-lookup', () => {
+    db.prepare('INSERT INTO chats (jid, conversation_key, name) VALUES (?, ?, NULL)')
+      .run(GROUP_JID, GROUP_KEY);
+    db.prepare('INSERT INTO chats (jid, conversation_key, name) VALUES (?, ?, ?)')
+      .run('secondary-device-row@g.us', GROUP_KEY, 'Family Group');
+    expect(resolveChatDisplayName(db, GROUP_KEY)).toBe('Family Group');
+  });
+
+  it('reconstructs the raw jid for ANY _at_ domain when probing chat_aliases', () => {
+    db.prepare('INSERT INTO chat_aliases (alias, chat_jid) VALUES (?, ?)')
+      .run('newsline', '123456789@newsletter');
+    expect(resolveChatDisplayName(db, '123456789_at_newsletter')).toBe('newsline');
+  });
+
+  it('picks the most recently updated alias, not the alphabetical first', () => {
+    db.prepare("INSERT INTO chat_aliases (alias, chat_jid, updated_at) VALUES ('alpha', ?, '2026-01-01 00:00:00')")
+      .run(DM_JID);
+    db.prepare("INSERT INTO chat_aliases (alias, chat_jid, updated_at) VALUES ('zulu', ?, '2026-06-01 00:00:00')")
+      .run(DM_JID);
+    expect(resolveChatDisplayName(db, DM_JID)).toBe('zulu');
+  });
+
+  it('falls back to the most recent non-blank messages.sender_name before the phone rung', () => {
+    db.prepare('INSERT INTO messages (sender_jid, sender_name, timestamp) VALUES (?, ?, ?)')
+      .run(DM_JID, 'Old Name', 100);
+    db.prepare('INSERT INTO messages (sender_jid, sender_name, timestamp) VALUES (?, ?, ?)')
+      .run(DM_JID, 'Push Lucas', 200);
+    db.prepare('INSERT INTO messages (sender_jid, sender_name, timestamp) VALUES (?, NULL, ?)')
+      .run(DM_JID, 300);
+    expect(resolveChatDisplayName(db, DM_KEY)).toBe('Push Lucas');
+  });
+
+  it('contacts beat sender_name; sender_name beats the formatted phone', () => {
+    db.prepare('INSERT INTO messages (sender_jid, sender_name, timestamp) VALUES (?, ?, ?)')
+      .run(DM_JID, 'Push Lucas', 200);
+    expect(resolveChatDisplayName(db, DM_KEY)).toBe('Push Lucas');
+    db.prepare('INSERT INTO contacts (jid, canonical_phone, display_name) VALUES (?, ?, ?)')
+      .run(DM_JID, DM_KEY, 'Lucas');
+    expect(resolveChatDisplayName(db, DM_KEY)).toBe('Lucas');
+  });
+
+  it('sender_name keyed by the lid jid is reachable for a lid ref', () => {
+    db.prepare('INSERT INTO messages (sender_jid, sender_name, timestamp) VALUES (?, ?, ?)')
+      .run('11111110000888@lid', 'Lid Sender', 100);
+    expect(resolveChatDisplayName(db, '11111110000888@lid')).toBe('Lid Sender');
+  });
+
+  // Malformed-@lid sibling fold (B25 addendum): some lids carry the PHONE as
+  // their userpart. Inherit the '<userpart>@s.whatsapp.net' identity ONLY on
+  // observed evidence (existing contacts/chats/named-sender rows keyed by that
+  // pn jid) — never on phone shape alone, which would recreate the F1 bug.
+
+  it('fold: a phone-userpart @lid WITH an observed pn contact row inherits that identity', () => {
+    // canonical_phone deliberately NULL — the inheritance must come from the
+    // pn-jid evidence probe, not the canonical_phone OR-match.
+    db.prepare('INSERT INTO contacts (jid, canonical_phone, display_name) VALUES (?, NULL, ?)')
+      .run(DM_JID, 'Lucas');
+    expect(resolveChatDisplayName(db, '15550001111@lid')).toBe('Lucas');
+  });
+
+  it('fold: a phone-userpart @lid WITH named pn sender history inherits the name', () => {
+    // Live class: '<phone>@lid' with zero lid-keyed rows but a fully-named
+    // pn-keyed message history for the same person.
+    db.prepare('INSERT INTO messages (sender_jid, sender_name, timestamp) VALUES (?, ?, ?)')
+      .run(DM_JID, 'Owner Line', 100);
+    expect(resolveChatDisplayName(db, '15550001111@lid')).toBe('Owner Line');
+  });
+
+  it('fold: a phone-shaped @lid WITHOUT sibling data stays raw — shape alone never inherits', () => {
+    expect(resolveChatDisplayName(db, '15550009999@lid')).toBe('15550009999@lid');
+  });
+
+  it('fold: an unmapped 12+-digit BARE key with named pn sender history is rescued by evidence', () => {
+    db.prepare('INSERT INTO messages (sender_jid, sender_name, timestamp) VALUES (?, ?, ?)')
+      .run('111111100777@s.whatsapp.net', 'Roamer', 100);
+    expect(resolveChatDisplayName(db, '111111100777')).toBe('Roamer');
+  });
+
+  it('F5: lid resolution rides resolveLid — the L1.5 disk fallback finds a mapping the DB lacks', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cdn-lid-'));
+    writeFileSync(join(dir, 'lid-mapping-11111110000012_reverse.json'), JSON.stringify('15550001111'));
+    setLidAuthDir(dir);
+    try {
+      db.prepare('INSERT INTO contacts (jid, canonical_phone, display_name) VALUES (?, ?, ?)')
+        .run(DM_JID, DM_KEY, 'Lucas');
+      expect(resolveChatDisplayName(db, '11111110000012@lid')).toBe('Lucas');
+    } finally {
+      setLidAuthDir('');
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('memoizes prepared statements and table-absent misses per db handle', () => {
+    const prepare = vi.fn(() => { throw new Error('no such table'); });
+    const fake = { prepare } as unknown as DatabaseSync;
+    // Table-less handle fail-opens to the pure-string phone rung (pn-origin ref).
+    expect(resolveChatDisplayName(fake, DM_JID)).toBe('+15550001111');
+    const after = prepare.mock.calls.length;
+    expect(after).toBeGreaterThan(0);
+    expect(resolveChatDisplayName(fake, DM_JID)).toBe('+15550001111');
+    // Second pass re-prepares nothing: hits AND table-absent misses memoized.
+    expect(prepare.mock.calls.length).toBe(after);
   });
 
   it('NEVER throws — a db with no tables at all degrades to the string ladder', () => {
