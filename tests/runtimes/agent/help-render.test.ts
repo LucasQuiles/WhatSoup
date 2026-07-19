@@ -143,3 +143,28 @@ describe('B23 UX polish — honest alias-off /help detail', () => {
     expect(on).toContain('`/model [status|list|default|strongest|fastest|provider-id]`'); // B26: list verb
   });
 });
+
+describe('B26 /help model-catalogue guidance (registry-derived, no hand-rolled literals)', () => {
+  // Owner ruling: 'no updated guidance under the help command either'.
+  // The guidance lives in the registry entry's summary/syntax ONLY — the
+  // renderer stays a pure function of (registry, {nlRouting}) and the D7
+  // byte-identical-off contract holds: flag off, no catalogue guidance leaks.
+
+  it('the /help list line for /model surfaces the catalogue affordance when nlRouting is on', () => {
+    const list = renderHelp({ nlRouting: true });
+    const modelLine = list.split('\n').find((l) => l.includes('*/model*'));
+    expect(modelLine).toBeDefined();
+    expect(modelLine).toContain('/model list — see what you can pick');
+  });
+
+  it('/help model detail carries the catalogue verb and the pin guidance', () => {
+    const detail = renderHelpDetail('model', { nlRouting: true });
+    expect(detail).toContain('`/model [status|list|default|strongest|fastest|provider-id]`');
+    expect(detail).toContain('/model list — see what you can pick');
+  });
+
+  it('D7: flag off renders NO catalogue guidance in list or detail', () => {
+    expect(renderHelp({ nlRouting: false })).not.toContain('/model list');
+    expect(renderHelpDetail('model', { nlRouting: false })).not.toContain('see what you can pick');
+  });
+});

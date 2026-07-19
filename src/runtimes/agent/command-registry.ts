@@ -244,7 +244,9 @@ export const COMMAND_REGISTRY = [
   },
   {
     name: 'model',
-    summary: 'route status; /model strongest|fastest|default|provider-id',
+    // B26: /help guidance surfaces the catalogue — presentation renders from
+    // this entry only (help-render stays literal-free; D7 keeps it flag-gated).
+    summary: 'route status; /model list — see what you can pick; pin strongest|fastest|default|provider-id',
     syntax: '/model [status|list|default|strongest|fastest|provider-id]', // E1: no `<...>`; B26: list = config-derived catalogue
     tier: 'transport-local',
     gate: 'none', // Phase-1 route-preference is ungated; W3's gated /model <id> is a SEPARATE entry
