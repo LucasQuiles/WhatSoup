@@ -50,7 +50,7 @@ export function CheckpointsTab({ payload, isLoading, freshness }: {
   return (
     <div>
       {/* Header: count summary + freshness marker (GUI-5 idiom: c-label + text-s-warn) */}
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 8 }}>
+      <div className="flex items-baseline gap-[var(--sp-3)] mb-[var(--sp-2)]">
         <span className="c-label">
           {rows.length} checkpoint{rows.length === 1 ? '' : 's'} · {resumableCount} resumable on restart
         </span>

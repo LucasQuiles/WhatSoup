@@ -72,6 +72,9 @@ vi.mock('../../console/src/hooks/use-fleet', () => ({
   useAccess: () => ({ data: [] }),
   useLogs: () => ({ data: [] }),
   useTyping: () => ({ data: [] }),
+  // LineDetail's checkpoint browser calls useCheckpoints() during render; the
+  // mock must expose it or the module throws before the metrics-range assertion.
+  useCheckpoints: () => ({ data: undefined, isLoading: false, freshness: undefined }),
   // Agent-mode SummaryTab embeds ProvidersKeysCard, which reads these hooks.
   useProviders: () => ({ data: [] }),
   useProviderStatus: () => ({
