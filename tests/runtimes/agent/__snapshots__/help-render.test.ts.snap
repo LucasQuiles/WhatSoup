@@ -1,0 +1,14 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`renderHelp (registry-derived, W1-T5) > lists commands with summaries and the detail hint; nlRouting off 1`] = `
+"*/new* — start a fresh session _(admin)_
+*/status* — show current session status
+*/help* — show this help
+
+_Operator commands:_
+*/sessions* — list all active sessions _(admin)_
+*/kill-session* — terminate a session by number _(admin)_
+
+_Any other message is forwarded._
+(\`/help [command]\` for detail)"
+`;

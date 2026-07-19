@@ -86,6 +86,7 @@ import {
 } from './outbound-queue.ts';
 import { ControlQueue } from './control-queue.ts';
 import { classifyInput } from './commands.ts';
+import { renderHelp, renderHelpDetail } from './help-render.ts';
 import {
   ensureChatPreferenceSchema,
   getPreference,
@@ -3897,19 +3898,12 @@ export class AgentRuntime implements Runtime {
           }
 
           case 'help': {
-            const helpText =
-              '*/new* — start a fresh session\n' +
-              '*/status* — show current session status\n' +
-              '*/sessions* — list all active sessions _(admin)_\n' +
-              '*/kill-session <N>* — terminate a session by number _(admin)_\n' +
-              '*/help* — show this help\n' +
-              (config.nlRouting
-                ? '*/model* — route status; `/model strongest|fastest|default|<provider>`\n' +
-                  '*/why* — why this model answered\n' +
-                  '*/reset* — back to the default route\n'
-                : '') +
-            '_Any other message is forwarded to Claude Code._\n' +
-            'Other slash commands (e.g. `/compact`) are passed directly to Claude Code.';
+            // W1-T5: registry-derived render (help-render.ts) replaces the
+            // freehand literal — pure functions of (registry, {nlRouting}),
+            // no runtime reads inside the renderer (R3c-1.3).
+            const helpText = classified.args
+              ? renderHelpDetail(classified.args)
+              : renderHelp({ nlRouting: config.nlRouting === true });
             this.sendDirect(chatJid, helpText);
             break;
           }
