@@ -13,9 +13,11 @@ import { createServer as createHttpServer, request as httpRequest } from 'node:h
 import type { Server as HttpServer, IncomingMessage, ServerResponse } from 'node:http';
 import { connect as netConnect } from 'node:net';
 import type { Socket } from 'node:net';
+import { PassThrough } from 'node:stream';
 import {
   EgressProxy,
   egressHostAllowed,
+  handleConnect,
   type EgressPolicySource,
   type EgressLogEvent,
 } from '../../../src/runtimes/agent/egress-proxy.ts';
@@ -255,6 +257,54 @@ describe('EgressProxy', () => {
       tunnelSocket?.destroy();
       await proxy.close();
     }
+  });
+
+  it("CONNECT deny path attaches an 'error' listener before writing, so a client RST can't crash the process", () => {
+    // Regression for a review finding: `handleConnect`'s two early-return
+    // deny writes (malformed target, policy-denied) used to call
+    // `clientSocket.write(...)` before any 'error' listener existed on the
+    // hijacked CONNECT socket. If the loopback peer — the sandboxed agent
+    // subprocess this proxy exists to contain — resets the connection in
+    // the race window between the server accepting the CONNECT and that
+    // write flushing, Node's default behavior for an unlistened 'error'
+    // event is an uncaught exception: the whole proxy process exits.
+    //
+    // This drives `handleConnect` directly with a fake Duplex instead of a
+    // real TCP socket + real RST. Empirically (~1,300 rapid-fire
+    // `resetAndDestroy()` attempts across several amplification strategies,
+    // including 300 concurrent connections under synthetic event-loop load)
+    // the natural race window on a fast loopback interface never lands the
+    // RST early enough to reproduce the crash in-process — and artificially
+    // widening that window (in an uncommitted scratch copy of this module,
+    // never shipped) reliably reproduced `UNCAUGHT: read ECONNRESET`,
+    // confirming the mechanism is real but not a reliable trigger for an
+    // automated real-socket test on this hardware. Worse, if the race DID
+    // land here, the uncaught exception would take the vitest worker
+    // process down with it rather than failing one assertion. Driving the
+    // vulnerable code path directly sidesteps both problems: deterministic
+    // pre-fix RED, deterministic post-fix GREEN.
+    const clientSocket = new PassThrough();
+    const log = vi.fn<(event: EgressLogEvent) => void>();
+
+    handleConnect(
+      { policy: makePolicy([]), log },
+      new Set(),
+      { url: 'not-a-valid-target' } as unknown as IncomingMessage,
+      clientSocket,
+      Buffer.alloc(0),
+    );
+
+    // The malformed-target path returns before `adjudicate` is ever called,
+    // so this alone proves the listener is attached at entry — ahead of
+    // parsing, not bolted on further down the allowed path.
+    expect(clientSocket.listenerCount('error')).toBeGreaterThan(0);
+
+    // Simulates the client-RST race directly: emitting 'error' on a Node
+    // EventEmitter with no listener throws synchronously (that IS the crash
+    // this finding describes); with the entry-level handler in place it
+    // must not throw, and the socket must still end up destroyed.
+    expect(() => clientSocket.emit('error', new Error('ECONNRESET'))).not.toThrow();
+    expect(clientSocket.destroyed).toBe(true);
   });
 
   it('allowed CONNECT to an unreachable upstream returns 502', async () => {

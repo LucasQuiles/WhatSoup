@@ -184,13 +184,38 @@ function parseConnectTarget(url: string): { host: string; port: number } | null 
   return { host, port };
 }
 
-function handleConnect(
+/**
+ * Exported (unlike `handleForward`, `parseConnectTarget`) so tests can drive
+ * a hijacked CONNECT socket directly and assert the entry-level 'error'
+ * listener below is in place without needing to win a real TCP RST race —
+ * see the module's test file for why that race isn't practical to trigger
+ * in-process.
+ */
+export function handleConnect(
   opts: EgressProxyOptions,
   tunnels: Set<Duplex>,
   req: IncomingMessage,
   clientSocket: Duplex,
   head: Buffer,
 ): void {
+  // Attached before anything else touches `clientSocket` — parsing,
+  // adjudication, and both early-return deny writes below all happen before
+  // any other listener exists on this socket. A CONNECT socket is handed to
+  // this function already hijacked away from http.Server's own connection
+  // management (unlike the forward path's `req`/`res`, which stay under
+  // http.Server's internal error handling for their whole lifetime — see
+  // `handleForward`). Without a listener here, a loopback peer that resets
+  // the connection in the window between the server accepting the CONNECT
+  // and a deny write flushing hits Node's default 'error' behavior on a
+  // listener-less socket: uncaught exception, whole process exits. Since
+  // this proxy's only client is the sandboxed (adversarial) agent
+  // subprocess, that subprocess could trigger this on demand and take down
+  // its own containment boundary. Left in place (not removed) once the
+  // allowed path adds its own `teardown`-bound listener below — two 'error'
+  // listeners both settling on `clientSocket.destroy()` is harmless, since
+  // `destroy()` is idempotent.
+  clientSocket.on('error', () => clientSocket.destroy());
+
   const rawTarget = req.url ?? '';
   const parsed = parseConnectTarget(rawTarget);
   if (!parsed) {
