@@ -34,6 +34,17 @@ export interface BuildBaseChildEnvOptions {
   whatsoupInstance?: string;
   whatsoupMcpSocket?: string;
   configRoot?: string;
+  /**
+   * Egress proxy port (#1607). When set to a positive port number,
+   * `buildBaseChildEnv` injects `HTTP_PROXY`/`HTTPS_PROXY` pointed at
+   * `http://127.0.0.1:<port>` plus `NO_PROXY=localhost,127.0.0.1` so the
+   * child process's outbound HTTP(S) traffic routes through the local
+   * egress-allowlist proxy (see `./egress-proxy.ts`). Unset, undefined, or
+   * a non-positive value: none of the three vars are added — today's
+   * unproxied behavior for instances that have not opted into the
+   * allowlist.
+   */
+  egressProxyPort?: number;
 }
 
 function isFailClosedEnabled(): boolean {
@@ -76,6 +87,12 @@ export function buildBaseChildEnv(opts?: BuildBaseChildEnvOptions): NodeJS.Proce
       : undefined
     : process.env.ALLOW_M365_MUTATIONS;
   const configRoots = childConfigRoots(opts);
+  const egressProxyPort =
+    typeof opts?.egressProxyPort === 'number' && opts.egressProxyPort > 0
+      ? opts.egressProxyPort
+      : undefined;
+  const egressProxyUrl =
+    egressProxyPort !== undefined ? `http://127.0.0.1:${egressProxyPort}` : undefined;
 
   return Object.fromEntries(
     Object.entries({
@@ -124,6 +141,12 @@ export function buildBaseChildEnv(opts?: BuildBaseChildEnvOptions): NodeJS.Proce
       // they are meant to use.
       WHATSOUP_INSTANCE: opts?.whatsoupInstance,
       WHATSOUP_MCP_SOCKET: opts?.whatsoupMcpSocket,
+      // Egress proxy (#1607): only present when a caller supplies a positive
+      // egressProxyPort — instances that haven't opted into the allowlist
+      // see zero change.
+      HTTP_PROXY: egressProxyUrl,
+      HTTPS_PROXY: egressProxyUrl,
+      NO_PROXY: egressProxyPort !== undefined ? 'localhost,127.0.0.1' : undefined,
     }).filter(([, v]) => v !== undefined),
   ) as NodeJS.ProcessEnv;
 }
