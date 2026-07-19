@@ -18,7 +18,7 @@ import { handleAdminCommand, handleFallbackCommand, handleGrantCommand, sendAppr
 import { shouldRespond } from './access-policy.ts';
 import { resolvePhoneFromJid } from './access-list.ts';
 import { toConversationKey } from './conversation-key.ts';
-import { isLidJid, bareNumber } from './jid-constants.ts';
+import { isLidJid, bareNumber, isWhatsAppAuthenticatedJid } from './jid-constants.ts';
 import { stripSelfMentionsFrom } from '../lib/self-mention-strip.ts';
 import { extractProtocol, extractPayload, HealCompletePayloadSchema } from './heal-protocol.ts';
 import { handleHealComplete, handleHealEscalate } from './heal.ts';
@@ -328,8 +328,17 @@ export function createIngestHandler(
 
         // 0. Control plane intercept — before any normal storage
         if (msg.content && extractProtocol(msg.content) !== null) {
-          const phone = resolvePhoneFromJid(msg.senderJid, db);
-          const isPeer = [...config.controlPeers.values()].includes(phone);
+          // QR-143: gate on authenticated transport BEFORE the control-peer phone
+          // match. resolvePhoneFromJid collapses <peer-digits>@sms to the SAME bare
+          // phone as a real control peer, but @sms sender-ID is spoofable — without
+          // this gate a spoofed SMS from a control-peer number could route a forged
+          // HEAL_COMPLETE/HEAL_ESCALATE into the heal state machine, flipping
+          // heal_reports.state or fabricating a Type-3-adopted row (incident-state
+          // corruption in the fleet's automated-repair coordination plane).
+          const phone = isWhatsAppAuthenticatedJid(msg.senderJid)
+            ? resolvePhoneFromJid(msg.senderJid, db)
+            : null;
+          const isPeer = phone !== null && [...config.controlPeers.values()].includes(phone);
           if (isPeer) {
             const protocol = extractProtocol(msg.content);
             // Store in control_messages, NOT messages
