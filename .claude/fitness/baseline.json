@@ -30,6 +30,9 @@
     },
     "arch.ssot-presentation-literals": {
       "violationCount": 0
+    },
+    "arch.ring-boundaries": {
+      "violationCount": 57
     }
   }
 }

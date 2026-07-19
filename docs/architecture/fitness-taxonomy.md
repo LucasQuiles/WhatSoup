@@ -27,7 +27,7 @@ rules into hooks, and semantic or human rules into the SDLC review flow.
 | `arch.defense-both-layers` | semantic | advisory | sdlc | Ensure service-layer protections are also threaded through route or caller boundaries. |
 | `arch.import-boundaries` | mechanical | block | guard, ci | Ratchet import direction between src/ layers so known violations can shrink but new cross-layer reach is blocked. |
 | `arch.approved-api-client` | ast | warn | eslint | Console network calls must go through the typed API client in `console/src/lib/api.ts`; direct fetch bypasses auth, timeouts, and the test surface. |
-| `arch.ring-boundaries` | ast | warn | eslint | Backend ring dependency direction is an architectural invariant; lower rings must not import higher rings. |
+| `arch.ring-boundaries` | ast | block‡ | eslint, guard | Backend ring dependency direction is an architectural invariant; lower rings must not import higher rings. Promoted 2026-07-19 to a guard-ring count ratchet (`scripts/ring-boundary-guard.ts`); the eslint ring stays a warn-only visibility mirror. |
 | `arch.ssot-lid-reads` | mechanical | block‡ | guard, ci | Raw `lid_mappings` SQL reads outside `src/core/lid-resolver.ts` fork the LID→phone resolution discipline `resolveLid()` centralizes. |
 | `arch.ssot-jid-construction` | mechanical | block‡ | guard, ci | Inline `${x}@s.whatsapp.net`-class template construction and literal `.endsWith('@lid')`-class predicates outside `src/core/jid-constants.ts` re-derive the JID domain grammar. |
 | `arch.ssot-name-ladder` | mechanical | block‡ | guard, ci | SQL touching the name columns of contacts/chats/groups/chat_aliases outside `src/core/chat-display-name.ts` forks the owner-facing name ladder. |
@@ -129,8 +129,9 @@ Run `npm run guard:boundaries -- --report` to see the full edge list and `npm ru
 The SSOT pattern rules and the promoted ring rule are **count-ratcheted**: each rule's
 `violationCount` in `.claude/fitness/baseline.json` records today's surviving violations
 (the allowlisted debt enumerated with reasons in the guard scripts). Enforcement
-(`npm run guard:ssot-patterns` → `scripts/ssot-pattern-guard.ts`, wired into
-`verify:push:branch` with its companion test in the gate's test list):
+(`npm run guard:ssot-patterns` → `scripts/ssot-pattern-guard.ts`;
+`npm run guard:ring-boundary-ratchet` → `scripts/ring-boundary-guard.ts`, both wired into
+`verify:push:branch` with companion tests in the gate's test list):
 
 - A finding outside the rule's allowlist **fails**, naming the primitive to rewire to.
 - count **above** baseline fails (new debt, even inside allowlisted files).
@@ -149,6 +150,7 @@ disagree (`| rule | count |` rows below are machine-checked):
 | `arch.ssot-name-ladder` | 5 | `scripts/ssot-pattern-guard.ts` |
 | `arch.ssot-phone-shape` | 7 | `scripts/ssot-pattern-guard.ts` |
 | `arch.ssot-presentation-literals` | 0 | `scripts/ssot-pattern-guard.ts` (pure block) |
+| `arch.ring-boundaries` | 57 | `scripts/ring-boundary-guard.ts` (ratchet, not yet a pure block) |
 
 ## ESLint Ring (live)
 
@@ -164,7 +166,7 @@ rules whose `rings` include `eslint`.
 | `arch.file-size` | built-in `max-lines` (max 2000) | advisory mirror only |
 | `arch.god-class` | `fitness/god-class` (maxClassLines 1200 **and** maxMethods 80) | composite — both thresholds must trip |
 | `arch.approved-api-client` | `fitness/approved-api-client` | console/src/**; flags direct `fetch()` outside `console/src/lib/api.ts` |
-| `arch.ring-boundaries` | `fitness/ring-boundaries` | src/**; shared→domain→adapter→runtime→composition dependency direction |
+| `arch.ring-boundaries` | `fitness/ring-boundaries` | src/**; shared→domain→adapter→runtime→composition dependency direction. Advisory mirror only since 2026-07-19 — the blocking count ratchet lives in the guard ring (`scripts/ring-boundary-guard.ts`, baseline in `.claude/fitness/baseline.json`) |
 | `invariant.fail-closed-scanner` | `fitness/fail-closed-scanner` | catch returning empty without rethrow/exitCode/emit |
 | `invariant.outbox-env-gated` | `fitness/outbox-direct-write` | fs write whose path literal names the bot-errors outbox/state dir without referencing the resolver |
 | `invariant.timer-rearm-without-clear` | `fitness/timer-rearm-without-clear` | `map.set(key, {…setTimeout/setInterval…})` inside a function with no `clearTimeout`/`clearInterval`/`clear*()`/`.get()` guard |

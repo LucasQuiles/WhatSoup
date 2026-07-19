@@ -82,9 +82,10 @@ describe('fitness rule registry', () => {
   it('has violationCount baseline entries for count-ratcheted rules', () => {
     const baseline = readBaseline();
 
-    // Count-ratcheted rules (scripts/ssot-pattern-guard.ts)
-    // record today's violation count; the guard fails above OR below it (ratchet-down).
+    // Count-ratcheted rules (scripts/ssot-pattern-guard.ts + scripts/ring-boundary-guard.ts)
+    // record today's violation count; the guards fail above OR below it (ratchet-down).
     const countRatchetIds = [
+      'arch.ring-boundaries',
       'arch.ssot-lid-reads',
       'arch.ssot-jid-construction',
       'arch.ssot-name-ladder',
@@ -106,6 +107,7 @@ describe('fitness rule registry', () => {
     expect(ratchetedRules.map((rule) => rule.id)).toEqual([
       'arch.file-size',
       'arch.import-boundaries',
+      'arch.ring-boundaries',
       'arch.ssot-lid-reads',
       'arch.ssot-jid-construction',
       'arch.ssot-name-ladder',
