@@ -23,32 +23,39 @@ describe('buildChildEnv — egress proxy env injection (#1607)', () => {
     delete process.env.WHATSOUP_EGRESS_SENTINEL;
   });
 
-  it('injects HTTP_PROXY/HTTPS_PROXY/NO_PROXY when egressProxyPort is set', () => {
+  it('injects UPPER and lower case proxy vars when egressProxyPort is set (F4)', () => {
     const env = buildChildEnv('claude-cli', { egressProxyPort: 3128 });
+    // Uppercase (historical) …
     expect(env.HTTP_PROXY).toBe('http://127.0.0.1:3128');
     expect(env.HTTPS_PROXY).toBe('http://127.0.0.1:3128');
     expect(env.NO_PROXY).toBe('localhost,127.0.0.1');
+    // … and lowercase (F4): curl reads lowercase `http_proxy` for plain HTTP
+    // (post-httpoxy) and ignores the uppercase form, so `curl http://host`
+    // would bypass the proxy entirely without these.
+    expect(env.http_proxy).toBe('http://127.0.0.1:3128');
+    expect(env.https_proxy).toBe('http://127.0.0.1:3128');
+    expect(env.no_proxy).toBe('localhost,127.0.0.1');
   });
 
-  it('omits all three proxy vars when egressProxyPort is not set (baseOpts omitted)', () => {
+  it('omits all six proxy vars when egressProxyPort is not set (baseOpts omitted)', () => {
     const env = buildChildEnv('claude-cli');
-    expect(env).not.toHaveProperty('HTTP_PROXY');
-    expect(env).not.toHaveProperty('HTTPS_PROXY');
-    expect(env).not.toHaveProperty('NO_PROXY');
+    for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy']) {
+      expect(env).not.toHaveProperty(key);
+    }
   });
 
-  it('omits all three proxy vars when baseOpts is supplied without egressProxyPort', () => {
+  it('omits all six proxy vars when baseOpts is supplied without egressProxyPort', () => {
     const env = buildChildEnv('claude-cli', { whatsoupInstance: 'line-a' });
-    expect(env).not.toHaveProperty('HTTP_PROXY');
-    expect(env).not.toHaveProperty('HTTPS_PROXY');
-    expect(env).not.toHaveProperty('NO_PROXY');
+    for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy']) {
+      expect(env).not.toHaveProperty(key);
+    }
   });
 
-  it('omits all three proxy vars when egressProxyPort is not positive (0)', () => {
+  it('omits all six proxy vars when egressProxyPort is not positive (0)', () => {
     const env = buildChildEnv('claude-cli', { egressProxyPort: 0 });
-    expect(env).not.toHaveProperty('HTTP_PROXY');
-    expect(env).not.toHaveProperty('HTTPS_PROXY');
-    expect(env).not.toHaveProperty('NO_PROXY');
+    for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy']) {
+      expect(env).not.toHaveProperty(key);
+    }
   });
 
   it('does not bleed an unrelated process.env var into the child env (allowlist invariant)', () => {

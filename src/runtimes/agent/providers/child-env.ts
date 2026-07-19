@@ -143,10 +143,16 @@ export function buildBaseChildEnv(opts?: BuildBaseChildEnvOptions): NodeJS.Proce
       WHATSOUP_MCP_SOCKET: opts?.whatsoupMcpSocket,
       // Egress proxy (#1607): only present when a caller supplies a positive
       // egressProxyPort — instances that haven't opted into the allowlist
-      // see zero change.
+      // see zero change. Both UPPER and lower case variants are set (F4):
+      // curl (post-httpoxy hardening) reads lowercase `http_proxy` for plain
+      // HTTP and ignores the uppercase form, so `curl http://host` would
+      // otherwise bypass the proxy entirely — no adjudication, no log.
       HTTP_PROXY: egressProxyUrl,
       HTTPS_PROXY: egressProxyUrl,
       NO_PROXY: egressProxyPort !== undefined ? 'localhost,127.0.0.1' : undefined,
+      http_proxy: egressProxyUrl,
+      https_proxy: egressProxyUrl,
+      no_proxy: egressProxyPort !== undefined ? 'localhost,127.0.0.1' : undefined,
     }).filter(([, v]) => v !== undefined),
   ) as NodeJS.ProcessEnv;
 }

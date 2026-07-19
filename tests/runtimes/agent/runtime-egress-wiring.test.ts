@@ -2,12 +2,13 @@
  * AgentRuntime egress-proxy lifecycle wiring (#1607).
  *
  * The sandbox policy (`SandboxPolicy.allowedEgress`) is the seam: when a
- * non-empty `allowedEgress` list is present, `start()` boots a loopback
- * `EgressProxy` after writing `.claude/sandbox-policy.json` (so the proxy's
- * own policy re-reads land on a file that already contains the allowlist),
- * and `shutdown()` tears the proxy down. No `allowedEgress` (or an empty
- * array) must be byte-identical to pre-#1607 behavior: no proxy, no env
- * injection, no `allowedEgress` key written to the policy file.
+ * PRESENT `allowedEgress` array — including `[]` (deny-all, F1) — is set,
+ * `start()` boots a loopback `EgressProxy` after writing
+ * `.claude/sandbox-policy.json` (so the proxy's own policy re-reads land on a
+ * file that already contains the allowlist), and `shutdown()` tears the proxy
+ * down. Only an ABSENT/undefined `allowedEgress` is byte-identical to
+ * pre-#1607 behavior: no proxy, no env injection, no `allowedEgress` key
+ * written to the policy file.
  *
  * Mocks mirror tests/runtimes/agent/mcp-config-dual-write.test.ts, the
  * neighboring runtime test that also runs a REAL `start()` against a real
@@ -19,6 +20,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import { connect as netConnect } from 'node:net';
+import { request as httpRequest } from 'node:http';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -264,6 +266,29 @@ function expectConnectionRefused(port: number): Promise<void> {
   });
 }
 
+// Sends an absolute-URI forward-proxy GET through `proxyPort` and resolves the
+// HTTP status. A denied host returns 403 before any upstream connect, so
+// `targetHost:targetPort` need not be reachable.
+function forwardGetStatus(proxyPort: number, targetHost: string, targetPort: number): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      {
+        host: '127.0.0.1',
+        port: proxyPort,
+        method: 'GET',
+        path: `http://${targetHost}:${targetPort}/`,
+        headers: { Host: `${targetHost}:${targetPort}` },
+      },
+      (res) => {
+        res.resume();
+        res.on('end', () => resolve(res.statusCode ?? 0));
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 describe('AgentRuntime egress proxy lifecycle (#1607)', () => {
   let tmpDirs: string[] = [];
   const startedRuntimes = new Set<AgentRuntime>();
@@ -321,7 +346,11 @@ describe('AgentRuntime egress proxy lifecycle (#1607)', () => {
     expect(policy).not.toHaveProperty('allowedEgress');
   });
 
-  it('sandbox with an empty allowedEgress array starts no proxy either', async () => {
+  it('sandbox with an empty allowedEgress array STARTS the proxy and denies all (deny-all, F1)', async () => {
+    // An empty array is the documented deny-all: a PRESENT allowlist must run
+    // the proxy (only absent/undefined opts out). Pre-fix the start gate had
+    // `.length > 0`, so `[]` started NO proxy → the child got no HTTP_PROXY →
+    // UNBOUNDED egress, the exact opposite of the documented guarantee.
     const cwd = tmp();
     const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'egress-empty-test', {
       cwd,
@@ -331,7 +360,15 @@ describe('AgentRuntime egress proxy lifecycle (#1607)', () => {
 
     await runtime.start();
 
-    expect(runtime.egressProxyPortForTest).toBeUndefined();
+    const port = runtime.egressProxyPortForTest;
+    expect(typeof port).toBe('number');
+    expect(port as number).toBeGreaterThan(0);
+
+    // deny-all: any host is refused with 403 (adjudicated against []), and the
+    // upstream is never contacted — so an unreachable target port is fine.
+    const status = await forwardGetStatus(port as number, '127.0.0.1', 9);
+    expect(status).toBe(403);
+
     const policy = readJson(join(cwd, '.claude', 'sandbox-policy.json'));
     expect(policy.allowedEgress).toEqual([]);
   });

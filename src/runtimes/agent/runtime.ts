@@ -2842,12 +2842,12 @@ export class AgentRuntime implements Runtime {
         writeSandboxArtifacts(claudeDir, resolvedPolicy, sandboxHookPath, pollLintHookPath, postToolUseLogHookPath);
         log.info({ cwd, hookPath: sandboxHookPath, pollLintHookPath, postToolUseLogHookPath }, 'wrote sandbox-policy.json and settings.json');
 
-        // Opt-in egress-allowlist proxy (#1607 / QR-008): only when the
-        // sandbox policy carries a non-empty allowedEgress. Reads the policy
-        // BACK off disk (not the in-memory resolvedPolicy) on every request,
-        // so a live edit to sandbox-policy.json takes effect without a
-        // restart; a corrupt/unreadable file fails closed (see egress-proxy.ts).
-        if (Array.isArray(this.sandbox.allowedEgress) && this.sandbox.allowedEgress.length > 0) {
+        // Opt-in egress-allowlist proxy (#1607 / QR-008): whenever the sandbox
+        // policy carries a PRESENT allowedEgress array (even []=deny-all, F1).
+        // Reads the policy BACK off disk (not the in-memory resolvedPolicy) on
+        // every request, so a live edit to sandbox-policy.json takes effect
+        // without a restart; a corrupt/unreadable file fails closed (egress-proxy.ts).
+        if (Array.isArray(this.sandbox.allowedEgress)) {
           // Own try so a proxy bind failure is labelled as such (not as a
           // sandbox-artifact write failure) — then re-throw to abort start():
           // an opted-in instance must NOT run with egress unconfined (fail-closed).
@@ -2857,7 +2857,7 @@ export class AgentRuntime implements Runtime {
               policy: {
                 read: () => {
                   const raw = JSON.parse(readFileSync(policyPath, 'utf8'));
-                  return { allowedEgress: Array.isArray(raw.allowedEgress) ? raw.allowedEgress : [] };
+                  return { allowedEgress: Array.isArray(raw.allowedEgress) ? raw.allowedEgress.filter((e: unknown) => typeof e === 'string') : [] };
                 },
               },
               failOpen: process.env['WHATSOUP_SANDBOX_FAIL_OPEN'] === '1',
@@ -9507,7 +9507,7 @@ export class AgentRuntime implements Runtime {
     };
 
     const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, {
-      cwd: this.cwd ?? homedir(),
+      cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port,
     });
     void Promise.resolve()
       .then(() => probePrimaryModelUsability(target, adapters))
@@ -9583,7 +9583,7 @@ export class AgentRuntime implements Runtime {
   private async probePrimaryProviderRecovered(): Promise<boolean> {
     const result = await probePrimaryModelUsability(
       { provider: this.agentProvider, model: this.model ?? null },
-      createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir() }),
+      createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port }),
     );
     return result.status === 'usable';
   }
@@ -9625,7 +9625,7 @@ export class AgentRuntime implements Runtime {
         },
         runPrimaryModelUsability: () => probePrimaryModelUsability(
           { provider: this.agentProvider, model: this.model ?? null },
-          createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir() }),
+          createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port }),
         ),
         runPrimaryRecoveryProbe: () => this.probePrimaryProviderRecovered(),
         accountAuthDeps: {
