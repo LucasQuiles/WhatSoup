@@ -770,6 +770,7 @@ proof unless a WhatSoup-specific proof artifact says so.
 | `nlRouting` | boolean | no | `false` | Flag-gates the NL-first routing aliases (`/model`, `/why`, `/reset`) and the per-sender route-preference store. Off = byte-identical base behavior: the three commands keep forwarding to the agent session and no preference table is created. Routing preference and visibility only — never tool or authority changes (capability-preserved routing). |
 | `nlRoutingTiers` | object | no | — | Intent→provider map for NL routing: `{ "strongest": "<provider-id>", "fastest": "<provider-id>" }`. Unset tiers resolve to the default route honestly (`/model strongest` records the preference and routing reports it as unmapped). |
 | `nlRoutingEventsDir` | string | no | per-instance config dir | Sink directory for the fail-closed `route-events.ndjson` sidecar (route metadata only — no message bodies, no raw sender JIDs; emit failure degrades to a warning and never blocks a turn). |
+| `commandSurface` | object | no | — | Per-instance command-surface policy overlay (disable commands, cosmetic defaults). See [agentOptions.commandSurface](#agentoptionscommandsurface). **Accepted but not yet enforced (enforcement lands with T9c)** — the validator warns at config-validation time. |
 
 #### Primary model usability probe
 
@@ -1154,6 +1155,12 @@ Controls which Claude Code plugins are loaded for this instance's sessions. Each
 - This value is written to `<cwd>/.claude/settings.json` during instance startup and via the PATCH API.
 
 **Context impact:** Plugin agents are eagerly loaded into the system prompt. Disabling heavy plugins like `sdlc-os` (45 agents, ~66K tokens) significantly reduces per-session context overhead.
+
+#### `agentOptions.commandSurface`
+
+Per-instance command-surface policy overlay (W1-T9b): `{ "disabled": ["<command>", …], "defaultVerbosity": "terse"|"normal", "optionDefaults": { "<command>": { "<option>": "<default>" } } }`. The block may disable commands and set cosmetic defaults only — it has no gate/venue/visibility fields by design (those flow exclusively from the command-registry catalog). Validated by `src/core/agent-config-validator.ts` on create/update/load/discovery.
+
+> **Note:** `agentOptions.commandSurface` is accepted but not yet enforced (enforcement lands with T9c) — the block validates and persists, but no runtime path consumes it yet, and the validator emits a startup warning saying so.
 
 ### `chatOptions`
 

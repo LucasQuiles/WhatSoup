@@ -9,7 +9,9 @@
  * CONSTRAINT: Only Node built-ins. No HTTP, no logger. Validation is pure apart
  * from one filesystem identity read for the agentOptions.cwd home-root invariant
  * (#1862) — the same device/inode check AgentRuntime.start() performs, shared here
- * so config load / API writes / preflight all fail closed on it before a restart.
+ * so config load / API writes / preflight all fail closed on it before a restart —
+ * and one one-time-per-instance process.emitWarning knob-honesty warning for
+ * accepted-but-not-yet-enforced agentOptions.commandSurface (T9c deferred).
  */
 
 // Canonical enum sets — kept HERE (no import from instance-loader.ts) so the
@@ -598,8 +600,31 @@ const COMMAND_SURFACE_VERBOSITIES: ReadonlySet<string> = new Set(['terse', 'norm
  * this validator does not (and structurally cannot) police them. Unknown
  * top-level keys inside the block are ignored, matching this file's
  * existing permissive convention for extraneous keys (e.g. nlRoutingTiers).
+ *
+ * KNOB HONESTY: resolveCommandSurface/getSurfacePrefs currently have NO src
+ * callers — the runtime wiring is deliberately deferred to W1-T9c — so an
+ * accepted commandSurface block changes nothing at runtime yet. Until T9c
+ * lands, a shape-valid block emits a one-time-per-instance
+ * process.emitWarning (Node's built-in warning channel — this file's
+ * CONSTRAINT bans logger.ts, and repo hygiene bans ad-hoc console calls in
+ * src/) so the config cannot silently lie about behavior. Remove the
+ * warning when T9c wires the resolver in.
  */
-function validateCommandSurfaceConfig(opts: Record<string, unknown>): ValidationError | null {
+const commandSurfaceUnenforcedWarned = new Set<string>();
+
+function warnCommandSurfaceNotEnforced(instanceName: string): void {
+  if (commandSurfaceUnenforcedWarned.has(instanceName)) return;
+  commandSurfaceUnenforcedWarned.add(instanceName);
+  process.emitWarning(
+    `agentOptions.commandSurface (instance "${instanceName}") is accepted but not yet enforced (enforcement lands with T9c) — the block validates and persists, but no runtime path consumes it yet.`,
+    { code: 'WHATSOUP_COMMAND_SURFACE_UNENFORCED' },
+  );
+}
+
+function validateCommandSurfaceConfig(
+  opts: Record<string, unknown>,
+  instanceName: string,
+): ValidationError | null {
   const cs = opts['commandSurface'];
   if (cs === undefined || cs === null) return null;
   if (typeof cs !== 'object' || Array.isArray(cs)) {
@@ -657,6 +682,9 @@ function validateCommandSurfaceConfig(opts: Record<string, unknown>): Validation
     }
   }
 
+  // Shape-valid block: accepted, but nothing consumes it until T9c — warn
+  // so the operator knows the knob is not live yet (see KNOB HONESTY above).
+  warnCommandSurfaceNotEnforced(instanceName);
   return null;
 }
 
@@ -811,7 +839,7 @@ function validateAgentOptions(
     );
   }
 
-  const commandSurfaceErr = validateCommandSurfaceConfig(opts);
+  const commandSurfaceErr = validateCommandSurfaceConfig(opts, ctx.name);
   if (commandSurfaceErr) return commandSurfaceErr;
 
   if (opts['autoCompactInputTokens'] !== undefined) {

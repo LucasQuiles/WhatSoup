@@ -9,7 +9,7 @@
  * fields — those flow only from the T1 command-registry catalog — so this
  * validator only needs to police the three fields that DO exist.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { validateInstanceConfig } from '../../src/core/agent-config-validator.ts';
 import type { ValidatorContext } from '../../src/core/agent-config-validator.ts';
 
@@ -135,6 +135,64 @@ describe('validateInstanceConfig — agentOptions.commandSurface', () => {
       const err = validateInstanceConfig(agentRaw({ optionDefaults: { model: { provider: 42 } } }), ctx);
       expect(err).not.toBeNull();
       expect(err?.field).toBe('agentOptions.commandSurface.optionDefaults');
+    });
+  });
+
+  describe('knob honesty — accepted but not yet enforced (T9c deferred)', () => {
+    // resolveCommandSurface/getSurfacePrefs have no src callers yet (T9c
+    // wiring deliberately deferred), so a green-validating commandSurface
+    // block currently changes NOTHING at runtime. Until T9c lands, the
+    // validator must say so out loud instead of silently accepting a
+    // config knob that lies about behavior.
+    function validateWithName(name: string, commandSurface: unknown): ReturnType<typeof validateInstanceConfig> {
+      const raw = { ...agentRaw(commandSurface), name };
+      return validateInstanceConfig(raw, { name, mode: 'create' });
+    }
+
+    it('emits a not-yet-enforced warning for a config carrying commandSurface', () => {
+      const warnSpy = vi.spyOn(process, 'emitWarning').mockImplementation(() => {});
+      try {
+        expect(validateWithName('warn-honesty-1', { disabled: ['status'] })).toBeNull();
+        const joined = warnSpy.mock.calls.map((call) => call.map(String).join(' '));
+        expect(
+          joined.some((line) => line.includes('accepted but not yet enforced (enforcement lands with T9c)')),
+        ).toBe(true);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('does not warn when commandSurface is absent', () => {
+      const warnSpy = vi.spyOn(process, 'emitWarning').mockImplementation(() => {});
+      try {
+        const raw = {
+          name: 'warn-honesty-2',
+          type: 'agent',
+          accessMode: 'self_only',
+          adminPhones: ['15555550123'],
+          healthPort: 9096,
+          systemPrompt: 'hi',
+          agentOptions: { sessionScope: 'single' },
+        };
+        expect(validateInstanceConfig(raw, { name: 'warn-honesty-2', mode: 'create' })).toBeNull();
+        expect(warnSpy).not.toHaveBeenCalled();
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('warns once per instance name — discovery/load re-validation does not spam the log', () => {
+      const warnSpy = vi.spyOn(process, 'emitWarning').mockImplementation(() => {});
+      try {
+        expect(validateWithName('warn-honesty-3', { disabled: ['status'] })).toBeNull();
+        expect(validateWithName('warn-honesty-3', { disabled: ['status'] })).toBeNull();
+        const matching = warnSpy.mock.calls.filter((call) =>
+          call.map(String).join(' ').includes('accepted but not yet enforced (enforcement lands with T9c)'),
+        );
+        expect(matching).toHaveLength(1);
+      } finally {
+        warnSpy.mockRestore();
+      }
     });
   });
 
