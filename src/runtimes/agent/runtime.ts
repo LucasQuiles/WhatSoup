@@ -8346,6 +8346,28 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
+   * B26 honest model label, shared by /model status and /status. The served
+   * model weight is UNOBSERVABLE (the stream is never parsed for a model
+   * field; a prior incident had an agent fabricate one) — so this renders
+   * only config-derived values, explicitly labeled:
+   *  - a route model equal to the configured primary → 'model (configured)'
+   *  - any other route model (a config fallback-entry value) → bare
+   *  - no route model but a configured primary on the primary provider →
+   *    'model (configured)'
+   *  - genuinely nothing configured (or a non-primary provider with no
+   *    entry model) → 'provider default (not configured)'
+   */
+  private describeRouteModel(routeModel: string | undefined, routeProvider: string): string {
+    if (routeModel !== undefined) {
+      return routeModel === this.model ? `${routeModel} (configured)` : routeModel;
+    }
+    if (this.model !== undefined && routeProvider === this.agentProvider) {
+      return `${this.model} (configured)`;
+    }
+    return 'provider default (not configured)';
+  }
+
+  /**
    * End-user route status (/model status). Visibility policy (capability-
    * preserved routing): provider, model route, preference, fallback state,
    * delegation state, and authority class only — never tool names, socket
@@ -8358,7 +8380,22 @@ export class AgentRuntime implements Runtime {
     // effectiveProvider, which contradicted the "steers new sessions" line.
     const nextProvider = next.provider || 'unknown-provider';
     const provider = live?.provider ?? nextProvider;
-    const model = (live ? live.model : next.model) ?? 'provider default';
+    // B26 HONESTY RULE (load-bearing): the SERVED model weight is
+    // unobservable — the provider stream is never parsed for a model field —
+    // so every value on this line is config-derived and says so. The route
+    // model (live session's spawn ref, or the resolved next-session model)
+    // comes from config/fallback entries; when it IS the configured primary
+    // it carries the '(configured)' label, a fallback-entry model stays bare
+    // (existing behavior). When the route carries NO model, fall back to the
+    // configured primary explicitly — the pre-B26 render read ONLY the
+    // live/next route model and showed 'provider default' even when
+    // agentOptions.model was set (live canary exhibit). Only a genuinely
+    // absent config renders 'provider default (not configured)'. Never
+    // present a value as the served weight; never invent one.
+    const model = this.describeRouteModel(
+      live ? live.model : next.model,
+      live ? live.provider : nextProvider,
+    );
     const prefLine = pref
       ? `Preference: ${pref.requestedProvider ?? pref.intent} for you in this chat` +
         (pref.expiresAt !== null

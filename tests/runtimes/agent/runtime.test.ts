@@ -15117,9 +15117,9 @@ describe('NL routing handlers (nlRouting flag)', () => {
     fs.rmSync(eventsDir, { recursive: true, force: true });
   });
 
-  function makeRoutingRuntime(): { runtime: AgentRuntime; sentMessages: Array<{ jid: string; text: string }> } {
+  function makeRoutingRuntime(runtimeOptions: Record<string, unknown> = {}): { runtime: AgentRuntime; sentMessages: Array<{ jid: string; text: string }> } {
     const { messenger, sentMessages } = makeMessenger();
-    const runtime = new AgentRuntime(routingDb, messenger, 'test', {});
+    const runtime = new AgentRuntime(routingDb, messenger, 'test', runtimeOptions);
     // Mirror the flag-gated schema init that runtime.start() performs in
     // production (tests do not call start(); its other side effects are
     // out of scope here).
@@ -15792,6 +15792,68 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(opts.provider).not.toBe('anthropic-api');
     const events = await readEvents();
     expect(events.some((e) => e.reasonCode === 'intent_strongest_unreachable')).toBe(true);
+  });
+
+  // ── B26 item 1: /model status must render the CONFIGURED primary model ────
+  // Live canary exhibit: agentOptions.model='claude-opus-4-8' yet /model
+  // status rendered 'Model: provider default' — runtime.ts:8361 read only the
+  // live/next route model and never this.model. HONESTY RULE: the served
+  // weight is unobservable, so the configured primary renders with an
+  // explicit '(configured)' label; a genuinely absent config renders
+  // 'provider default (not configured)'; a fallback-entry model stays bare
+  // (it comes from a config entry).
+
+  it('B26: /model status renders the configured primary model with the (configured) label when no fallback window is live', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toBeDefined();
+    expect(status).toContain('Model: claude-opus-4-8 (configured)');
+    expect(status).not.toContain('Model: provider default');
+  });
+
+  it('B26: /model status renders the configured primary even when the LIVE session carries no model ref (canary repro shape)', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+    mockSession.getStatus.mockReturnValue({
+      active: true,
+      pid: 771,
+      sessionId: 'sess-b26',
+      startedAt: new Date().toISOString(),
+      messageCount: 1,
+      lastMessageAt: null,
+    });
+    mockSession.getProviderId.mockReturnValue('claude-cli');
+    (mockSession as unknown as Record<string, unknown>).getModelRef = vi.fn(() => undefined);
+    (runtime as unknown as { session: typeof mockSession }).session = mockSession;
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toBeDefined();
+    expect(status).toContain('Model: claude-opus-4-8 (configured)');
+    expect(status).not.toContain('Model: provider default');
+  });
+
+  it('B26: /model status renders an honest not-configured label when config.model is genuinely absent', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime(); // no model option
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toBeDefined();
+    expect(status).toContain('Model: provider default (not configured)');
+  });
+
+  it('B26: /model status keeps the fallback-entry model bare while a fallback window is live (existing behavior)', async () => {
+    cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'haiku-fast' }];
+    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+    const state = runtime as unknown as {
+      fallbackWindow: { activeUntil: number | null; activeEntry: unknown };
+    };
+    state.fallbackWindow.activeUntil = Date.now() + 60_000;
+    state.fallbackWindow.activeEntry = { provider: 'claude-cli', model: 'haiku-fast' };
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toBeDefined();
+    expect(status).toContain('Model: haiku-fast');
+    expect(status).not.toContain('Model: haiku-fast (configured)');
+    expect(status).not.toContain('claude-opus-4-8 (configured)');
   });
 
 });
