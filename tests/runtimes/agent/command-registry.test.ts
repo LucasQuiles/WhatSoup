@@ -98,7 +98,8 @@ describe('COMMAND_REGISTRY', () => {
   });
 
   it('carries the /model sub-verbs as membership data (D5), matching today’s classifier set', () => {
-    expect(getCommandSpec('model').subVerbs).toEqual(['status', 'default', 'strongest', 'fastest']);
+    // B26: 'list' (the config-derived model catalogue) joined the verb set.
+    expect(getCommandSpec('model').subVerbs).toEqual(['status', 'list', 'default', 'strongest', 'fastest']);
   });
 
   it('getCommandSpec throws on an unknown command (fail-closed lookup)', () => {

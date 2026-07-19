@@ -614,6 +614,17 @@ function formatClockForUser(epochMs: number): string {
   return new Date(epochMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
+/**
+ * B26 human-scaled token count: 96_200 → '96.2k', 150_000 → '150k', 500 → '500'.
+ * Same >1000 → one-decimal 'k' formula the /sessions handler inlines, plus a
+ * trailing-'.0' strip so round budgets render '150k', not '150.0k'. The
+ * /sessions inline sites keep their exact pre-B26 output ('2.0k') — do not
+ * swap them onto this helper without updating their pinned renders.
+ */
+function formatTokenCount(count: number): string {
+  return count > 1000 ? `${(count / 1000).toFixed(1).replace(/\.0$/, '')}k` : String(count);
+}
+
 function fallbackRequiresPrimaryProbe(reason: ProviderFallbackReason): boolean {
   // Recovery-probe gating is intentionally BROADER than independent-provider
   // routing (`fallbackRequiresIndependentProbe`, used at the routing call-site).
@@ -3852,13 +3863,58 @@ export class AgentRuntime implements Runtime {
               const lastActivity = status.lastMessageAt
                 ? formatAge(status.lastMessageAt)
                 : 'none';
+              // B26 owner ruling: /status must show the model explicitly, the
+              // session's token counts, and the session limit. Model follows
+              // the SAME honesty rule as /model status (describeRouteModel:
+              // config-derived only, '(configured)' label — the served weight
+              // is unobservable). Defensive typeof mirrors the getProviderId
+              // call site at maybeStartAutoCompact.
+              const statusModelRef =
+                typeof sessionForStatus?.getModelRef === 'function'
+                  ? sessionForStatus.getModelRef()
+                  : undefined;
+              const statusProvider =
+                typeof sessionForStatus?.getProviderId === 'function'
+                  ? sessionForStatus.getProviderId()
+                  : this.agentProvider;
               text =
                 '*Session active*\n' +
                 `PID: \`${status.pid ?? 'unknown'}\`\n` +
                 `Session: \`${sessionShort}\`\n` +
+                `Model: ${this.describeRouteModel(statusModelRef, statusProvider)}\n` +
                 `Started: ${started}\n` +
                 `Messages: ${status.messageCount}\n` +
                 `Last activity: ${lastActivity}`;
+              // B26: session token counts from the agent_sessions denorm
+              // columns (same source as /sessions); omitted honestly when no
+              // row exists yet. The context line pairs the since-last-compact
+              // quantity maybeStartAutoCompact actually compares (input +
+              // cache_read minus the last-compact baseline, :1273-76) with
+              // the threshold the runtime actually applies (configured value,
+              // else DEFAULT_AUTO_COMPACT_INPUT_TOKENS) — and renders ONLY
+              // where auto-compact can genuinely run (claude-cli session,
+              // non-shared scope): a budget meter for a limit that never
+              // fires would be a lie. NO provider quota meters here — that is
+              // the /account lane.
+              const statusRowId = sessionForStatus?.getDbRowId() ?? null;
+              const statusSnap = statusRowId !== null ? getSessionTokenSnapshot(this.db, statusRowId) : null;
+              if (statusSnap) {
+                text +=
+                  `\nTokens: ${formatTokenCount(statusSnap.totalInputTokens)} in / ${formatTokenCount(statusSnap.totalOutputTokens)} out`;
+                if (
+                  statusProvider === 'claude-cli' &&
+                  this.sessionScope !== 'shared' &&
+                  this.autoCompactInputTokens !== undefined
+                ) {
+                  const contextUsed = Math.max(
+                    0,
+                    statusSnap.totalInputTokens + statusSnap.totalCacheReadTokens -
+                      (statusSnap.lastCompactInputTokens + statusSnap.lastCompactCacheReadTokens),
+                  );
+                  text +=
+                    `\nContext: ${formatTokenCount(contextUsed)} / ${formatTokenCount(this.autoCompactInputTokens)} before auto-compact`;
+                }
+              }
             } else {
               text = '_No active session._ Send a message to start one.';
             }
@@ -3883,7 +3939,21 @@ export class AgentRuntime implements Runtime {
               } catch (err) {
                 log.warn({ err, instance: this.instanceName }, 'pruneExpired failed during /model status - continuing');
               }
-              this.sendDirect(chatJid, this.renderRouteStatus(chatJid, msg.senderJid));
+              // B26: bare /model gets ONE discoverability affordance line for
+              // the catalogue; an explicit /model status stays as-is.
+              const routeStatus = this.renderRouteStatus(chatJid, msg.senderJid);
+              this.sendDirect(
+                chatJid,
+                classified.args === undefined
+                  ? `${routeStatus}\n_/model list — see what you can pick_`
+                  : routeStatus,
+              );
+              break;
+            }
+            if (sub === 'list') {
+              // B26: the model catalogue — config-derived only (see
+              // renderModelCatalogue for the honesty contract).
+              this.sendDirect(chatJid, this.renderModelCatalogue());
               break;
             }
             if (sub === 'default') {
@@ -8346,6 +8416,63 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
+   * B26 honest model label, shared by /model status and /status. The served
+   * model weight is UNOBSERVABLE (the stream is never parsed for a model
+   * field; a prior incident had an agent fabricate one) — so this renders
+   * only config-derived values, explicitly labeled:
+   *  - a route model equal to the configured primary → 'model (configured)'
+   *  - any other route model (a config fallback-entry value) → bare
+   *  - no route model but a configured primary on the primary provider →
+   *    'model (configured)'
+   *  - genuinely nothing configured (or a non-primary provider with no
+   *    entry model) → 'provider default (not configured)'
+   */
+  private describeRouteModel(routeModel: string | undefined, routeProvider: string): string {
+    if (routeModel !== undefined) {
+      return routeModel === this.model ? `${routeModel} (configured)` : routeModel;
+    }
+    if (this.model !== undefined && routeProvider === this.agentProvider) {
+      return `${this.model} (configured)`;
+    }
+    return 'provider default (not configured)';
+  }
+
+  /**
+   * B26 /model list — the model catalogue. Rendered ENTIRELY from config
+   * (honesty contract: the served weight is unobservable, so nothing here is
+   * presented as what actually serves — the primary and every fallback entry
+   * are configuration, and the tier vocabulary maps to nlRoutingTiers or is
+   * honestly declared unconfigured). Names follow the shipped F8 convention:
+   * provider (model).
+   */
+  private renderModelCatalogue(): string {
+    const primary = this.model !== undefined
+      ? `${this.agentProvider} (${this.model} — configured)`
+      : `${this.agentProvider} (provider default — no model configured)`;
+    const fallbackLine = this.agentFallbacks.length > 0
+      ? `Fallbacks (configured): ${this.agentFallbacks
+          .map((e) => (e.model ? `${e.provider} (${e.model})` : e.provider))
+          .join(' → ')}`
+      : 'Fallbacks: none configured';
+    // Tier vocabulary: default always exists (the primary route). strongest/
+    // fastest resolve ONLY through nlRoutingTiers — absent map means they
+    // degrade to the default route, and the catalogue must say so rather than
+    // imply they resolve somewhere specific (canary shape: tiers unset).
+    const tiers = config.nlRoutingTiers;
+    const tiersConfigured = tiers !== null && tiers !== undefined && (tiers.strongest !== undefined || tiers.fastest !== undefined);
+    const tierLine = tiersConfigured
+      ? `Tiers: default → primary route; strongest → ${tiers.strongest ?? 'not configured (default route)'}; fastest → ${tiers.fastest ?? 'not configured (default route)'}`
+      : 'Tiers: default → primary route; strongest/fastest: tiers not configured on this line — default routing only';
+    return [
+      '*Models on this line* (from config — which weight actually serves is not observable here)',
+      `Primary: ${primary}`,
+      fallbackLine,
+      tierLine,
+      'Pin: `/model provider-id` — prefers it for you in this chat (24h). Back: `/model default` or `/reset`.',
+    ].join('\n');
+  }
+
+  /**
    * End-user route status (/model status). Visibility policy (capability-
    * preserved routing): provider, model route, preference, fallback state,
    * delegation state, and authority class only — never tool names, socket
@@ -8358,7 +8485,22 @@ export class AgentRuntime implements Runtime {
     // effectiveProvider, which contradicted the "steers new sessions" line.
     const nextProvider = next.provider || 'unknown-provider';
     const provider = live?.provider ?? nextProvider;
-    const model = (live ? live.model : next.model) ?? 'provider default';
+    // B26 HONESTY RULE (load-bearing): the SERVED model weight is
+    // unobservable — the provider stream is never parsed for a model field —
+    // so every value on this line is config-derived and says so. The route
+    // model (live session's spawn ref, or the resolved next-session model)
+    // comes from config/fallback entries; when it IS the configured primary
+    // it carries the '(configured)' label, a fallback-entry model stays bare
+    // (existing behavior). When the route carries NO model, fall back to the
+    // configured primary explicitly — the pre-B26 render read ONLY the
+    // live/next route model and showed 'provider default' even when
+    // agentOptions.model was set (live canary exhibit). Only a genuinely
+    // absent config renders 'provider default (not configured)'. Never
+    // present a value as the served weight; never invent one.
+    const model = this.describeRouteModel(
+      live ? live.model : next.model,
+      live ? live.provider : nextProvider,
+    );
     const prefLine = pref
       ? `Preference: ${pref.requestedProvider ?? pref.intent} for you in this chat` +
         (pref.expiresAt !== null

@@ -193,9 +193,20 @@ export const COMMAND_REGISTRY = [
     errorClasses: ['source-unreachable:session', 'internal'],
     // N16: reports live runtime state → asOf render required. W1-T4 de-sensitizes
     // (drops PID); W2 /status+ implements the as-of stamp + degrade-reason (E5).
+    // B26 fields: model is config-INTENT (rendered with an explicit
+    // '(configured)' label — the served weight is unobservable); tokens are
+    // verified runtime state (agent_sessions denorm counters); the context
+    // budget denominator is config-intent (autoCompactInputTokens/default).
     renderContract: {
       asOf: true,
-      fields: { started: 'verified-runtime', messageCount: 'verified-runtime', lastActivity: 'verified-runtime' },
+      fields: {
+        started: 'verified-runtime',
+        messageCount: 'verified-runtime',
+        lastActivity: 'verified-runtime',
+        model: 'config-intent',
+        tokens: 'verified-runtime',
+        context: 'config-intent',
+      },
     },
   },
   {
@@ -241,8 +252,10 @@ export const COMMAND_REGISTRY = [
   },
   {
     name: 'model',
-    summary: 'route status; /model strongest|fastest|default|provider-id',
-    syntax: '/model [status|default|strongest|fastest|provider-id]', // E1: no `<...>`
+    // B26: /help guidance surfaces the catalogue — presentation renders from
+    // this entry only (help-render stays literal-free; D7 keeps it flag-gated).
+    summary: 'route status; /model list — see what you can pick; pin strongest|fastest|default|provider-id',
+    syntax: '/model [status|list|default|strongest|fastest|provider-id]', // E1: no `<...>`; B26: list = config-derived catalogue
     tier: 'transport-local',
     gate: 'none', // Phase-1 route-preference is ungated; W3's gated /model <id> is a SEPARATE entry
     venue: 'any', // read/set own route preference; the W3 god-priv model-switch entry is venue:'admin-group'
@@ -251,7 +264,7 @@ export const COMMAND_REGISTRY = [
     errorClasses: ['invalid-arg', 'provider-unsupported', 'internal'],
     renderContract: { asOf: true, fields: { activeModel: 'verified-runtime', pinState: 'verified-runtime' } },
     routingAlias: true,
-    subVerbs: ['status', 'default', 'strongest', 'fastest'],
+    subVerbs: ['status', 'list', 'default', 'strongest', 'fastest'], // B26: 'list' renders the config-derived model catalogue
   },
   {
     name: 'why',

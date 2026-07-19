@@ -206,6 +206,11 @@ describe('routing aliases — forwarded-capability fallthrough (F04)', () => {
     expect(classifyInput('/model claude-cli', NL)).toEqual({ type: 'local', command: 'model', args: 'claude-cli' });
   });
 
+  it('B26: /model list is local when routing aliases are ON, forwarded when OFF (D7)', () => {
+    expect(classifyInput('/model list', NL)).toEqual({ type: 'local', command: 'model', args: 'list' });
+    expect(classifyInput('/model list')).toEqual({ type: 'forwarded', text: '/model list' });
+  });
+
   it('/model with extra words forwards (recognized grammar is exactly one arg)', () => {
     expect(classifyInput('/model strongest please', NL)).toEqual({ type: 'forwarded', text: '/model strongest please' });
   });
@@ -255,9 +260,9 @@ describe('classifier sets derive from COMMAND_REGISTRY (W1-T2)', () => {
     const derived = REGISTRY.filter((c) => c.routingAlias).map((c) => c.name).sort();
     expect(derived).toEqual(['model', 'reset', 'why']);
   });
-  it('ROUTING_MODEL_VERBS membership is unchanged', () => {
+  it('ROUTING_MODEL_VERBS membership carries the B26 catalogue verb', () => {
     const model = REGISTRY.find((c) => c.name === 'model');
-    expect(model?.subVerbs).toEqual(['status', 'default', 'strongest', 'fastest']);
+    expect(model?.subVerbs).toEqual(['status', 'list', 'default', 'strongest', 'fastest']);
   });
 });
 

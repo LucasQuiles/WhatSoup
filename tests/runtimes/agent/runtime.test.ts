@@ -4618,6 +4618,120 @@ describe('AgentRuntime', () => {
     expect(text).toContain('Last activity:');
   });
 
+  // ── B26 item 3: /status shows the model, token counts, and context budget ──
+  // Owner ruling: '/status should show more than provider default — model
+  // should be explicit, show the session's current token counts, session
+  // limits'. Model follows the same honesty rule as /model status
+  // ('(configured)' label; the served weight is unobservable). Token counts
+  // come from the agent_sessions denorm columns; the context budget pairs the
+  // since-last-compact quantity maybeStartAutoCompact actually compares with
+  // the threshold the runtime actually applies (configured, else the 150k
+  // default).
+
+  it('B26: /status renders the configured model, token counts, and the auto-compact context budget', async () => {
+    const cfg = mockConfig as unknown as Record<string, unknown>;
+    cfg.agentProvider = 'claude-cli';
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      mockActiveAgentSession(42);
+      mockSession.getProviderId.mockReturnValue('claude-cli');
+      mockGetSessionTokenSnapshot.mockReturnValue({
+        totalInputTokens: 96_200,
+        totalOutputTokens: 4_100,
+        totalCacheReadTokens: 0,
+        lastCompactInputTokens: 0,
+        lastCompactOutputTokens: 0,
+        lastCompactCacheReadTokens: 0,
+      });
+      const runtime = new AgentRuntime(db, messenger, 'test', { model: 'claude-opus-4-8' });
+      await runtime.start();
+      await runtime.handleMessage(makeMsg({ content: '/status' }));
+      const text = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string)[0];
+      expect(text).toContain('Model: claude-opus-4-8 (configured)');
+      expect(text).toContain('Tokens: 96.2k in / 4.1k out');
+      // Unconfigured threshold → the default the runtime actually applies (150k).
+      expect(text).toContain('Context: 96.2k / 150k before auto-compact');
+    } finally {
+      delete cfg.agentProvider;
+      mockGetSessionTokenSnapshot.mockReturnValue(null);
+    }
+  });
+
+  it('B26: /status context budget uses the configured threshold and the since-last-compact quantity', async () => {
+    const cfg = mockConfig as unknown as Record<string, unknown>;
+    cfg.agentProvider = 'claude-cli';
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      mockActiveAgentSession(42);
+      mockSession.getProviderId.mockReturnValue('claude-cli');
+      mockGetSessionTokenSnapshot.mockReturnValue({
+        totalInputTokens: 150_000,
+        totalOutputTokens: 500,
+        totalCacheReadTokens: 50_000,
+        lastCompactInputTokens: 40_000,
+        lastCompactOutputTokens: 0,
+        lastCompactCacheReadTokens: 10_000,
+      });
+      const runtime = new AgentRuntime(db, messenger, 'test', { model: 'claude-opus-4-8', autoCompactInputTokens: 200_000 });
+      await runtime.start();
+      await runtime.handleMessage(makeMsg({ content: '/status' }));
+      const text = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string)[0];
+      // (150k + 50k) − (40k + 10k) = 150k consumed since last compact — the
+      // exact quantity the auto-compact trigger compares (runtime.ts:1273-76).
+      expect(text).toContain('Context: 150k / 200k before auto-compact');
+      expect(text).toContain('Tokens: 150k in / 500 out');
+    } finally {
+      delete cfg.agentProvider;
+      mockGetSessionTokenSnapshot.mockReturnValue(null);
+    }
+  });
+
+  it('B26: /status renders an honest not-configured model and omits token lines when no counts are recorded', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    mockActiveAgentSession(42);
+    mockSession.getProviderId.mockReturnValue('claude-cli');
+    mockGetSessionTokenSnapshot.mockReturnValue(null);
+    const runtime = new AgentRuntime(db, messenger); // no model configured
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: '/status' }));
+    const text = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string)[0];
+    expect(text).toContain('Model: provider default (not configured)');
+    expect(text).not.toContain('Tokens:');
+    expect(text).not.toContain('Context:');
+  });
+
+  it('B26: /status suppresses the context budget for a non-claude session (auto-compact cannot run there) but keeps token counts', async () => {
+    const cfg = mockConfig as unknown as Record<string, unknown>;
+    cfg.agentProvider = 'claude-cli';
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      mockActiveAgentSession(42);
+      mockSession.getProviderId.mockReturnValue('codex-cli');
+      mockGetSessionTokenSnapshot.mockReturnValue({
+        totalInputTokens: 2_000,
+        totalOutputTokens: 300,
+        totalCacheReadTokens: 0,
+        lastCompactInputTokens: 0,
+        lastCompactOutputTokens: 0,
+        lastCompactCacheReadTokens: 0,
+      });
+      const runtime = new AgentRuntime(db, messenger, 'test', { model: 'claude-opus-4-8' });
+      await runtime.start();
+      await runtime.handleMessage(makeMsg({ content: '/status' }));
+      const text = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string)[0];
+      expect(text).toContain('Tokens: 2k in / 300 out');
+      expect(text).not.toContain('before auto-compact');
+    } finally {
+      delete cfg.agentProvider;
+      mockGetSessionTokenSnapshot.mockReturnValue(null);
+      mockSession.getProviderId.mockReturnValue('claude-cli');
+    }
+  });
+
   it('/status with no session returns no-session message', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
@@ -15117,9 +15231,9 @@ describe('NL routing handlers (nlRouting flag)', () => {
     fs.rmSync(eventsDir, { recursive: true, force: true });
   });
 
-  function makeRoutingRuntime(): { runtime: AgentRuntime; sentMessages: Array<{ jid: string; text: string }> } {
+  function makeRoutingRuntime(runtimeOptions: Record<string, unknown> = {}): { runtime: AgentRuntime; sentMessages: Array<{ jid: string; text: string }> } {
     const { messenger, sentMessages } = makeMessenger();
-    const runtime = new AgentRuntime(routingDb, messenger, 'test', {});
+    const runtime = new AgentRuntime(routingDb, messenger, 'test', runtimeOptions);
     // Mirror the flag-gated schema init that runtime.start() performs in
     // production (tests do not call start(); its other side effects are
     // out of scope here).
@@ -15792,6 +15906,134 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(opts.provider).not.toBe('anthropic-api');
     const events = await readEvents();
     expect(events.some((e) => e.reasonCode === 'intent_strongest_unreachable')).toBe(true);
+  });
+
+  // ── B26 item 1: /model status must render the CONFIGURED primary model ────
+  // Live canary exhibit: agentOptions.model='claude-opus-4-8' yet /model
+  // status rendered 'Model: provider default' — runtime.ts:8361 read only the
+  // live/next route model and never this.model. HONESTY RULE: the served
+  // weight is unobservable, so the configured primary renders with an
+  // explicit '(configured)' label; a genuinely absent config renders
+  // 'provider default (not configured)'; a fallback-entry model stays bare
+  // (it comes from a config entry).
+
+  it('B26: /model status renders the configured primary model with the (configured) label when no fallback window is live', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toBeDefined();
+    expect(status).toContain('Model: claude-opus-4-8 (configured)');
+    expect(status).not.toContain('Model: provider default');
+  });
+
+  it('B26: /model status renders the configured primary even when the LIVE session carries no model ref (canary repro shape)', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+    mockSession.getStatus.mockReturnValue({
+      active: true,
+      pid: 771,
+      sessionId: 'sess-b26',
+      startedAt: new Date().toISOString(),
+      messageCount: 1,
+      lastMessageAt: null,
+    });
+    mockSession.getProviderId.mockReturnValue('claude-cli');
+    (mockSession as unknown as Record<string, unknown>).getModelRef = vi.fn(() => undefined);
+    (runtime as unknown as { session: typeof mockSession }).session = mockSession;
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toBeDefined();
+    expect(status).toContain('Model: claude-opus-4-8 (configured)');
+    expect(status).not.toContain('Model: provider default');
+  });
+
+  it('B26: /model status renders an honest not-configured label when config.model is genuinely absent', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime(); // no model option
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toBeDefined();
+    expect(status).toContain('Model: provider default (not configured)');
+  });
+
+  // ── B26 item 2: /model list — the config-derived model catalogue ──────────
+  // Rendered ENTIRELY from config (the primary, the fallback chain, the tier
+  // vocabulary) — the served weight is unobservable, so nothing here claims
+  // to be it. When nlRoutingTiers is absent the catalogue says so honestly
+  // instead of implying strongest/fastest resolve somewhere specific.
+
+  it('B26: /model list renders the configured primary, every fallback entry, and the pin syntax', async () => {
+    cfgAny().agentFallbacks = [
+      { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
+      { provider: 'opencode-cli', model: 'glm/glm-5.2' },
+    ];
+    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
+    expect(catalogue).toBeDefined();
+    expect(catalogue).toContain('Primary: claude-cli (claude-opus-4-8 — configured)');
+    expect(catalogue).toContain('opencode-cli (kimi/kimi-k3) → opencode-cli (glm/glm-5.2)');
+    expect(catalogue).toContain('/model provider-id');
+    expect(catalogue).toContain('/reset');
+  });
+
+  it('B26: /model list says tiers are not configured on this line rather than implying they resolve (honesty)', async () => {
+    // Canary shape: nlRoutingTiers ABSENT — strongest/fastest fall to the
+    // default route, and the catalogue must say so.
+    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
+    expect(catalogue).toBeDefined();
+    expect(catalogue).toContain('tiers not configured on this line — default routing only');
+    expect(catalogue).not.toContain('strongest →');
+  });
+
+  it('B26: /model list renders the nlRoutingTiers mappings when configured', async () => {
+    cfgAny().nlRoutingTiers = { strongest: 'anthropic-api' };
+    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
+    expect(catalogue).toBeDefined();
+    expect(catalogue).toContain('strongest → anthropic-api');
+    expect(catalogue).toContain('fastest → not configured (default route)');
+    expect(catalogue).not.toContain('tiers not configured on this line');
+  });
+
+  it('B26: /model list stays honest when no primary model and no fallbacks are configured', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
+    expect(catalogue).toBeDefined();
+    expect(catalogue).toContain('Primary: claude-cli (provider default — no model configured)');
+    expect(catalogue).toContain('Fallbacks: none configured');
+  });
+
+  it('B26: bare /model appends the catalogue affordance line; explicit /model status does not', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
+    const bare = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(bare).toBeDefined();
+    expect(bare).toContain('/model list — see what you can pick');
+    mockQueue.enqueueText.mockClear();
+    sentMessages.length = 0;
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status', messageId: 'msg-2' }));
+    const explicit = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(explicit).toBeDefined();
+    expect(explicit).not.toContain('/model list — see what you can pick');
+  });
+
+  it('B26: /model status keeps the fallback-entry model bare while a fallback window is live (existing behavior)', async () => {
+    cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'haiku-fast' }];
+    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+    const state = runtime as unknown as {
+      fallbackWindow: { activeUntil: number | null; activeEntry: unknown };
+    };
+    state.fallbackWindow.activeUntil = Date.now() + 60_000;
+    state.fallbackWindow.activeEntry = { provider: 'claude-cli', model: 'haiku-fast' };
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toBeDefined();
+    expect(status).toContain('Model: haiku-fast');
+    expect(status).not.toContain('Model: haiku-fast (configured)');
+    expect(status).not.toContain('claude-opus-4-8 (configured)');
   });
 
 });
