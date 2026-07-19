@@ -41,10 +41,11 @@ describe('line-detail tab components', () => {
     });
   });
 
-  it('exports exactly 12 named items', async () => {
+  it('exports exactly 13 named items', async () => {
     const mod = await import('../../console/src/components/line-detail/index.ts');
     expect(Object.keys(mod).sort()).toEqual([
       'AccessTab',
+      'ApprovalsTab',
       'ConfigEditDialog',
       'GroupsTab',
       'HistoryTab',
