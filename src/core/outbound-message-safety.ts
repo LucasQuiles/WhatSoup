@@ -106,6 +106,11 @@ export function isOperatorDmPeer(
   adminPhones: Set<string>,
 ): boolean {
   if (isGroup) return false;
+  // Shared by BOTH (mutually exclusive) branches below: does the peer resolve
+  // to a configured admin phone? On the unauthenticated branch it selects the
+  // spoof-attempt warn subset; on the authenticated branch it IS the
+  // elevation decision.
+  const peerBearsAdminDigits = isAdminPhone(resolvePhoneFromJid(chatJid, db), adminPhones);
   // QR-143: only a WhatsApp-authenticated transport (@s.whatsapp.net / @lid) can
   // carry operator identity here. @sms is spoofable (see the
   // isWhatsAppAuthenticatedJid doc in jid-constants.ts) and resolvePhoneFromJid
@@ -115,10 +120,7 @@ export function isOperatorDmPeer(
     // Fast-follow: warn ONLY on the spoof-attempt subset (bears admin digits).
     // Do NOT warn on every @sms rejection — that fires on every benign
     // SMS-bridge chat and would be noise, not a never-silent signal.
-    if (
-      isAdminPhone(resolvePhoneFromJid(chatJid, db), adminPhones)
-      && shouldWarnSpoofAttempt(chatJid, Date.now())
-    ) {
+    if (peerBearsAdminDigits && shouldWarnSpoofAttempt(chatJid, Date.now())) {
       // This branch catches EVERY non-WhatsApp-authenticated form (@sms,
       // @c.us, @broadcast, …), so log the ACTUAL form — the '@' suffix —
       // not a hardcoded 'sms' label. Still id-only (N14): the suffix is the
@@ -132,14 +134,13 @@ export function isOperatorDmPeer(
     }
     return false;
   }
-  const isAdmin = isAdminPhone(resolvePhoneFromJid(chatJid, db), adminPhones);
-  if (!isAdmin && isLidJid(chatJid)) {
+  if (!peerBearsAdminDigits && isLidJid(chatJid)) {
     audienceLog.warn(
       { chatJidForm: 'lid', outcome: 'not-elevated' },
       'operator-DM lid peer did not resolve to an admin phone — not elevated',
     );
   }
-  return isAdmin;
+  return peerBearsAdminDigits;
 }
 
 export type OutboundAudience = 'client' | 'ops' | 'internal';
