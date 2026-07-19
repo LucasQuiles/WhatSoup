@@ -933,7 +933,10 @@ describe('Viewport matrix — side-panel fold (DD-18r leg 2)', () => {
       - Number.parseFloat(rowStyle.borderLeftWidth)
       - Number.parseFloat(rowStyle.borderRightWidth);
     expect(Number.parseFloat(window.getComputedStyle(list).width)).toBeCloseTo(expectedWidth, 0);
-    expect(window.getComputedStyle(list).maxHeight).toBe('40dvh');
+    // Browsers resolve dvh to px in computed style — assert the resolved
+    // cap is 40% of the viewport height (900px here), never the raw token.
+    const maxH = Number.parseFloat(window.getComputedStyle(list).maxHeight);
+    expect(maxH).toBeCloseTo(0.4 * 900, 0);
   });
 
   it('HistoryTab split is side-by-side with the 288px chat list at 640px container', async () => {
