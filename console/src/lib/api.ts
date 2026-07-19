@@ -388,6 +388,13 @@ export const api = {
       body: JSON.stringify({ subjectType, subjectId, action }),
     }),
 
+  restoreCheckpoint: (name: string, conversationKey: string) =>
+    apiFetch<{ status: string }>(`/api/lines/${encodeURIComponent(name)}/checkpoints/restore`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversationKey }),
+    }),
+
   markRead: (name: string, conversationKey: string) =>
     apiFetch<{ ok: boolean }>(`/api/lines/${encodeURIComponent(name)}/mark-read`, {
       method: 'POST',
