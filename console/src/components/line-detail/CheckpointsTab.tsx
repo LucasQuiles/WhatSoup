@@ -1,6 +1,8 @@
+import { useMemo, useState } from 'react'
 import {
   Table, TableHeader, TableHeaderCell, TableBody, TableRow, TableCell,
   TableEmpty, TableError, TableLoading,
+  type SortState,
 } from '../primitives/Table'
 import { statusBadgeStyle, type StatusSeverity } from '../../lib/status-severity'
 import { formatRelative } from '../../lib/format-time'
@@ -9,11 +11,16 @@ import type { CheckpointRow, CheckpointsPayload } from '../../types'
 
 /**
  * CheckpointsTab — read-only browser for a line's session_checkpoints
- * (spec: oc-re/specs/2026-07-19-checkpoint-browser-ui-spec.md).
+ * (spec: oc-re/specs/2026-07-19-checkpoint-browser-ui-spec.md; sort +
+ * Delivery column: oc-re/specs/2026-07-19-checkpoints-tab-followups-spec.md).
  *
  * Shows which sessions would resume on restart (`resumable` is computed
  * server-side with the durability engine's exact filter), the lifecycle
- * status of every checkpoint, and the completed-delivery identity bundle.
+ * status of every checkpoint, and the completed-delivery identity bundle
+ * (Delivery column: truncated JID, full JID + turn id on the title — the
+ * aliasing-safe answer to "WHICH chat did this turn deliver to").
+ * Conversation and Updated are sortable (client-side, tri-state); the
+ * default view preserves the server's updated_at DESC order.
  * Fail-closed: a fleet read error renders TableError — never a fake empty
  * state (PDR-3 invariant).
  */
@@ -39,6 +46,15 @@ function workspaceTail(path: string | null): string {
   return parts[parts.length - 1] ?? path
 }
 
+function deliveryTitle(row: CheckpointRow): string | undefined {
+  if (!row.completedDeliveryJid) return undefined
+  return row.completedLogicalTurnId
+    ? `${row.completedDeliveryJid} · turn ${row.completedLogicalTurnId}`
+    : row.completedDeliveryJid
+}
+
+type SortKey = 'conversation' | 'updated' | null
+
 export function CheckpointsTab({ payload, isLoading, freshness }: {
   payload: CheckpointsPayload | undefined;
   isLoading: boolean;
@@ -46,6 +62,38 @@ export function CheckpointsTab({ payload, isLoading, freshness }: {
 }) {
   const rows = payload?.checkpoints ?? []
   const resumableCount = rows.filter((r) => r.resumable).length
+
+  // SoupKitchen sort idiom: the primitive's tri-state cycle (none/asc/desc)
+  // adapted onto two-way sortDir; 'none' clears back to the server default
+  // (updated_at DESC). Client-side over at most 500 rows.
+  const [sortKey, setSortKey] = useState<SortKey>(null)
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
+  const handleSort = (next: SortState) => {
+    if (next.dir === 'none') {
+      setSortKey(null)
+      setSortDir('desc')
+    } else {
+      setSortKey(next.key as SortKey)
+      setSortDir(next.dir === 'asc' ? 'asc' : 'desc')
+    }
+  }
+  const sortState: SortState = useMemo(
+    () => ({ key: sortKey ?? '', dir: sortKey ? sortDir : 'none' }),
+    [sortKey, sortDir],
+  )
+  const sortedRows = useMemo(() => {
+    if (!sortKey) return rows
+    const dir = sortDir === 'asc' ? 1 : -1
+    return [...rows].sort((a, b) => {
+      switch (sortKey) {
+        case 'conversation':
+          return dir * a.conversationKey.localeCompare(b.conversationKey)
+        case 'updated':
+          // updatedAt is ISO-8601 (sqliteUtcToIso) — lexicographic = chronological
+          return dir * (a.updatedAt < b.updatedAt ? -1 : a.updatedAt > b.updatedAt ? 1 : 0)
+      }
+    })
+  }, [rows, sortKey, sortDir])
 
   return (
     <div>
@@ -69,28 +117,29 @@ export function CheckpointsTab({ payload, isLoading, freshness }: {
       <Table density="compressed">
         <TableHeader>
           <TableRow>
-            <TableHeaderCell>Conversation</TableHeaderCell>
+            <TableHeaderCell sortKey="conversation" sort={sortState} onSort={handleSort}>Conversation</TableHeaderCell>
             <TableHeaderCell>Status</TableHeaderCell>
             <TableHeaderCell>Resumable</TableHeaderCell>
             <TableHeaderCell>Version</TableHeaderCell>
             <TableHeaderCell>PID</TableHeaderCell>
             <TableHeaderCell>Scope</TableHeaderCell>
-            <TableHeaderCell>Updated</TableHeaderCell>
+            <TableHeaderCell>Delivery</TableHeaderCell>
+            <TableHeaderCell sortKey="updated" sort={sortState} onSort={handleSort}>Updated</TableHeaderCell>
             <TableHeaderCell>Workspace</TableHeaderCell>
           </TableRow>
         </TableHeader>
         <TableBody>
-          {isLoading && <TableLoading colSpan={8} />}
+          {isLoading && <TableLoading colSpan={9} />}
           {!isLoading && payload?.readError && (
             <TableError
-              colSpan={8}
+              colSpan={9}
               message="Checkpoint data unavailable — the fleet could not read this instance's database. This is a read failure, not an empty instance."
             />
           )}
-          {!isLoading && !payload?.readError && rows.length === 0 && (
-            <TableEmpty colSpan={8} message="No session checkpoints recorded for this line yet." />
+          {!isLoading && !payload?.readError && sortedRows.length === 0 && (
+            <TableEmpty colSpan={9} message="No session checkpoints recorded for this line yet." />
           )}
-          {!isLoading && !payload?.readError && rows.map((row) => (
+          {!isLoading && !payload?.readError && sortedRows.map((row) => (
             <CheckpointTableRow key={row.conversationKey} row={row} />
           ))}
         </TableBody>
@@ -123,6 +172,11 @@ function CheckpointTableRow({ row }: { row: CheckpointRow }) {
       <TableCell>v{row.checkpointVersion}</TableCell>
       <TableCell>{row.claudePid ?? '—'}</TableCell>
       <TableCell>{row.completedScope ?? '—'}</TableCell>
+      <TableCell>
+        {row.completedDeliveryJid
+          ? <span title={deliveryTitle(row)}>{truncateMiddle(row.completedDeliveryJid)}</span>
+          : '—'}
+      </TableCell>
       <TableCell>
         <span title={row.updatedAt}>{formatRelative(row.updatedAt)}</span>
       </TableCell>

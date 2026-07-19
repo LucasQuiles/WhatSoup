@@ -1,12 +1,14 @@
 /**
  * CheckpointsTab — render contract for the checkpoint browser surface.
  * Spec: oc-re/specs/2026-07-19-checkpoint-browser-ui-spec.md
+ * Follow-ups (sort + Delivery column):
+ * oc-re/specs/2026-07-19-checkpoints-tab-followups-spec.md
  * The tab is props-driven (LineDetail owns useCheckpoints), so these are
  * pure render tests — no api mocks or providers needed.
  * @vitest-environment jsdom
  */
 import { afterEach, describe, expect, it } from 'vitest'
-import { cleanup, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { CheckpointsTab } from '../../../../console/src/components/line-detail/CheckpointsTab'
 import type { CheckpointsPayload } from '../../../../console/src/types'
 import type { Freshness } from '../../../../console/src/lib/freshness'
@@ -97,5 +99,91 @@ describe('CheckpointsTab', () => {
     // warn severity maps to the warn wash/color tokens — unknown statuses never render green
     expect(badge.style.background).toBeTruthy()
     expect(badge.textContent).toBe('melted')
+  })
+})
+
+describe('CheckpointsTab — sort (F-UX-1)', () => {
+  // Short keys so truncateMiddle passes them through unchanged; payload
+  // order is the server default (updated_at DESC): bravo (newer) then alpha.
+  const ROW_ALPHA = {
+    ...ROW_RESUMABLE,
+    conversationKey: 'alpha@x',
+    updatedAt: '2026-07-19T01:00:00Z',
+  }
+  const ROW_BRAVO = {
+    ...ROW_RESUMABLE,
+    conversationKey: 'bravo@x',
+    sessionId: 'sess-bravo',
+    updatedAt: '2026-07-19T03:00:00Z',
+  }
+  const serverOrder = [ROW_BRAVO, ROW_ALPHA]
+
+  function renderedConversationOrder(): string[] {
+    return screen
+      .getAllByRole('row')
+      .slice(1) // header row
+      .map((r) => within(r).getAllByRole('cell')[0]!.textContent ?? '')
+  }
+
+  it('preserves payload (server) order before any sort interaction', () => {
+    render(<CheckpointsTab payload={payload({ checkpoints: serverOrder })} isLoading={false} freshness={FRESH} />)
+    expect(renderedConversationOrder()).toEqual(['bravo@x', 'alpha@x'])
+  })
+
+  it('cycles Conversation asc → desc → cleared through the tri-state sort button', () => {
+    render(<CheckpointsTab payload={payload({ checkpoints: serverOrder })} isLoading={false} freshness={FRESH} />)
+    const btn = screen.getByRole('button', { name: /Sort by Conversation/ })
+    fireEvent.click(btn) // none → asc
+    expect(renderedConversationOrder()).toEqual(['alpha@x', 'bravo@x'])
+    fireEvent.click(btn) // asc → desc
+    expect(renderedConversationOrder()).toEqual(['bravo@x', 'alpha@x'])
+    fireEvent.click(btn) // desc → none (server order restored)
+    expect(renderedConversationOrder()).toEqual(['bravo@x', 'alpha@x'])
+  })
+
+  it('sorts Updated chronologically — ascending puts the oldest checkpoint first', () => {
+    render(<CheckpointsTab payload={payload({ checkpoints: serverOrder })} isLoading={false} freshness={FRESH} />)
+    fireEvent.click(screen.getByRole('button', { name: /Sort by Updated/ }))
+    expect(renderedConversationOrder()).toEqual(['alpha@x', 'bravo@x'])
+  })
+})
+
+describe('CheckpointsTab — Delivery column (F-UX-3)', () => {
+  it('renders the truncated delivery JID with the full JID + turn id in the title', () => {
+    const row = {
+      ...ROW_RESUMABLE,
+      conversationKey: 'conv-a',
+      completedDeliveryJid: '15550000001@s.whatsapp.net',
+      completedLogicalTurnId: 'lt-1',
+    }
+    render(<CheckpointsTab payload={payload({ checkpoints: [row] })} isLoading={false} freshness={FRESH} />)
+    // 26-char JID exceeds the truncateMiddle budget — rendered truncated…
+    const cell = screen.getByText('15550000001@s.…atsapp.net')
+    // …with the full identity bundle on the title for hover/AT
+    expect(cell.getAttribute('title')).toBe('15550000001@s.whatsapp.net · turn lt-1')
+  })
+
+  it('renders the delivery JID (not the conversation key) under JID aliasing', () => {
+    const row = {
+      ...ROW_RESUMABLE,
+      conversationKey: 'canonical:key-a',
+      completedDeliveryJid: '11122233344455@lid',
+      completedLogicalTurnId: 'lt-99',
+    }
+    render(<CheckpointsTab payload={payload({ checkpoints: [row] })} isLoading={false} freshness={FRESH} />)
+    expect(screen.getByText('11122233344455@lid')).toBeTruthy()
+    expect(screen.getByTitle('11122233344455@lid · turn lt-99')).toBeTruthy()
+  })
+
+  it('renders an em-dash when the completed-delivery identity is absent', () => {
+    const row = {
+      ...ROW_RESUMABLE, // pid/scope/workspace all non-null — the only dash is Delivery
+      conversationKey: 'conv-b',
+      completedDeliveryJid: null,
+      completedLogicalTurnId: null,
+    }
+    render(<CheckpointsTab payload={payload({ checkpoints: [row] })} isLoading={false} freshness={FRESH} />)
+    const bodyRow = screen.getAllByRole('row')[1]!
+    expect(within(bodyRow).getByText('—')).toBeTruthy()
   })
 })
