@@ -14640,6 +14640,85 @@ describe('AgentRuntime', () => {
       expect(listText).toContain('2. Lucas (…2222) (DM)');
     });
 
+    it('/kill-session (single scope) with a wrong index does NOT kill the lone session (B25 F4)', async () => {
+      // The parsed index was IGNORED in the shared branch: any N>=1 killed
+      // the only session. Bounds-check must mirror per_chat's reply.
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+
+      mockSession.getStatus.mockReturnValue({
+        active: true,
+        pid: 321,
+        sessionId: 'sess-single',
+        startedAt: new Date().toISOString(),
+        messageCount: 1,
+        lastMessageAt: null,
+      });
+      (runtime as unknown as { session: typeof mockSession }).session = mockSession;
+
+      await sendAndDrain(runtime, makeMsg({ content: '/kill-session 3', senderJid: adminSender }));
+
+      expect(mockSession.shutdown).not.toHaveBeenCalled();
+      const text = sentMessages.map((m) => m.text).find((t) => t.includes('Invalid session number'));
+      expect(text).toBe('_Invalid session number. 1 active._');
+    });
+
+    it('/kill-session rejects trailing-garbage indices like "2x" everywhere (B25 F4)', async () => {
+      // parseInt('2x') === 2 silently accepted garbage and killed session 2.
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await runtime.start();
+
+      const state = runtime as unknown as {
+        chatSessions: Map<string, ReturnType<typeof makePerChatSession>>;
+        chatQueues: Map<string, IOutboundQueue>;
+      };
+      const s1 = makePerChatSession(true, 11, new Date().toISOString());
+      const s2 = makePerChatSession(true, 12, new Date().toISOString());
+      state.chatSessions.set('15550001111', s1);
+      state.chatSessions.set('15550002222', s2);
+      state.chatQueues.set('15550002222', makeQueueMock('dm@s.whatsapp.net'));
+
+      await sendAndDrain(runtime, makeMsg({ content: '/kill-session 2x', senderJid: adminSender }));
+
+      expect(s1.shutdown).not.toHaveBeenCalled();
+      expect(s2.shutdown).not.toHaveBeenCalled();
+      const text = sentMessages.map((m) => m.text).find((t) => t.includes('Usage: /kill-session'));
+      expect(text).toContain('Run /sessions first');
+    });
+
+    it('/kill-session (single scope) ack names the killed chat via the choke point (B25 F4)', async () => {
+      // '_Session killed._' was identity-less — worthless as kill evidence.
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+
+      mockSession.getStatus.mockReturnValue({
+        active: true,
+        pid: 321,
+        sessionId: 'sess-single',
+        startedAt: new Date().toISOString(),
+        messageCount: 1,
+        lastMessageAt: null,
+      });
+      const state = runtime as unknown as {
+        session: typeof mockSession | null;
+        activeChatJid: string | null;
+      };
+      state.session = mockSession;
+      state.activeChatJid = '15550001111@s.whatsapp.net';
+
+      await sendAndDrain(runtime, makeMsg({ content: '/kill-session 1', senderJid: adminSender }));
+
+      expect(mockSession.shutdown).toHaveBeenCalledWith(false);
+      const text = sentMessages.map((m) => m.text).find((t) => t.includes('Session killed'));
+      expect(text).toBe('_Session killed: +15550001111 (…1111)_');
+    });
+
     // W1-T3: gate convergence security proof matrix (isAdminMessage hoisted
     // ahead of the switch, replacing the three duplicated in-switch phone-only
     // gates). QR-143 closes the @sms spoof hole; WG-5 makes /new's gate

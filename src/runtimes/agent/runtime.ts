@@ -4019,8 +4019,12 @@ export class AgentRuntime implements Runtime {
           }
 
           case 'kill-session': {
-            const targetIdx = parseInt(classified.args ?? '', 10);
-            if (isNaN(targetIdx) || targetIdx < 1) {
+            // B25 F4: strict integer parse — parseInt('2x') === 2 silently
+            // accepted trailing garbage and killed a session the admin never
+            // named. Digits only, everywhere.
+            const rawIdxArg = (classified.args ?? '').trim();
+            const targetIdx = /^\d+$/.test(rawIdxArg) ? Number(rawIdxArg) : NaN;
+            if (!Number.isInteger(targetIdx) || targetIdx < 1) {
               this.sendDirect(chatJid, '_Usage: /kill-session <number>_\nRun /sessions first to see the list.', true);
               break;
             }
@@ -4058,6 +4062,16 @@ export class AgentRuntime implements Runtime {
                 this.sendDirect(chatJid, '_No active session to kill._', true);
                 break;
               }
+              // B25 F4: the parsed index was IGNORED here — any N>=1 killed
+              // the lone session. Exactly one session exists in this scope,
+              // so only index 1 is valid; mirror per_chat's invalid reply.
+              if (targetIdx !== 1) {
+                this.sendDirect(chatJid, '_Invalid session number. 1 active._', true);
+                break;
+              }
+              // Capture the chat identity BEFORE teardown nulls it — the ack
+              // must prove which chat died (same choke point as /sessions).
+              const killedRef = this.activeChatJid;
               this.getActiveQueue()?.abortTurn();
               this.operationTracker?.shutdown();
               this.operationTracker = null;
@@ -4066,7 +4080,13 @@ export class AgentRuntime implements Runtime {
               this.session = null;
               this.queue = null;
               this.activeChatJid = null;
-              this.sendDirect(chatJid, '_Session killed._', true);
+              this.sendDirect(
+                chatJid,
+                killedRef
+                  ? `_Session killed: ${formatChatRefForOwner(this.db, killedRef)}_`
+                  : '_Session killed._',
+                true,
+              );
             }
             break;
           }
