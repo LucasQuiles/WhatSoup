@@ -9,6 +9,17 @@ const ASSIGNMENT_DELIMITER = /[:=]/g;
 const EMAIL_TOKEN_CHAR = /[A-Za-z0-9._%+@-]/;
 const TRAILING_EMAIL_PUNCTUATION = new Set(['.', ':']);
 
+// E9 (packet D5): an email-SHAPED core needs a NON-EMPTY local part AND a
+// non-empty domain part around an '@'. A bare whitespace-flanked '@' used as
+// the word "at" ("meet @ 5pm") and a dangling local ("user@") carry no address
+// and must pass through. Mention-shaped tokens ('@name', '@15551234567') are
+// not email-shaped either, but they stay governed by preserveWhatsAppMentions
+// below — phone mentions are PII on surfaces that did not opt in, so requiring
+// a non-empty local part for the EMAIL match must not turn that flag into
+// dead code.
+const EMAIL_SHAPED = /[^@]@+[^@]/;
+const ALL_AT_SIGNS = /^@+$/;
+
 // T8-F3 (E4 fix): shared token-prefix alternation. Defined ONCE so the known-token
 // mask (sanitizeProviderSecrets, below) and the truncation carve-out (in
 // redactKeyedSecretValues) can never drift apart — a prefix recognized by one MUST
@@ -176,6 +187,11 @@ function redactEmailLikeTokens(
     while (coreEnd > 0 && TRAILING_EMAIL_PUNCTUATION.has(token[coreEnd - 1]!)) coreEnd -= 1;
     const core = token.slice(0, coreEnd);
     const suffix = token.slice(coreEnd);
+    // E9 (packet D5): a core that is neither email-shaped (non-empty local AND
+    // domain) nor mention-shaped ('@' + content) is not redactable — leave it
+    // in place via the pending-slice cursor, like the no-'@' case above.
+    const mentionShaped = core.startsWith('@') && !ALL_AT_SIGNS.test(core);
+    if (!EMAIL_SHAPED.test(core) && !mentionShaped) continue;
     const jidMatch = preserveWhatsAppJids ? jidPattern().exec(core) : null;
     const preserve = (jidMatch?.index === 0 && jidMatch[0].length === core.length)
       || (

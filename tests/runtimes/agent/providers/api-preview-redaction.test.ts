@@ -306,3 +306,70 @@ describe('QR-128: email redaction is linear and does not under-redact', () => {
     expect(sanitizeProviderPreviewText(`a.b+c${at}sub.example.co.uk`)).toBe('[REDACTED_EMAIL]');
   });
 });
+
+// E9 (packet D5): `redactEmailLikeTokens` redacted ANY token containing '@'.
+// The mention-preserve regex requires a character AFTER the '@', so a bare
+// whitespace-flanked '@' used as the word "at" ("meet @ 5pm") ALWAYS became
+// [REDACTED_EMAIL] — live evidence: an agent's own explanation of this bug was
+// itself re-redacted in an internal-tier DM. Fix shape: only an email-SHAPED
+// core — non-empty local part AND non-empty domain part around an '@' — may be
+// redacted as an email. Mention-shaped tokens ('@name', '@15551234567') are NOT
+// email-shaped but stay governed by preserveWhatsAppMentions (phone mentions
+// are PII on surfaces that did not opt in), so the flag keeps its meaning.
+describe('E9 (packet D5): a bare "@" is not email-shaped and must survive', () => {
+  it('a bare "@" between words survives (the word "at")', () => {
+    const input = 'meet @ 5pm to review the deck';
+    expect(sanitizeProviderPreviewText(input)).toBe(input);
+  });
+
+  it('"@ 5pm" at the start of a message survives', () => {
+    const input = '@ 5pm works for me';
+    expect(sanitizeProviderPreviewText(input)).toBe(input);
+  });
+
+  it('the quantity idiom "3 @ $5 each" survives', () => {
+    const input = 'ordered 3 @ $5 each';
+    expect(sanitizeProviderPreviewText(input)).toBe(input);
+  });
+
+  it('real emails still redact: minimal a@b.c and dotted local/subdomain forms', () => {
+    // at-split idiom: no literal email address in committed source (repo-hygiene guard).
+    const at = '@';
+    expect(sanitizeProviderPreviewText(`a${at}b.c`)).toBe('[REDACTED_EMAIL]');
+    expect(sanitizeProviderPreviewText(`first.last${at}sub.domain.tld`)).toBe('[REDACTED_EMAIL]');
+  });
+
+  it('adversarial: a dangling trailing "@" does not exempt an embedded email-shaped token (a@b@ still redacts)', () => {
+    // Guards against a lazy "token ends with @ → pass through" implementation:
+    // `a@b@` still contains a non-empty-local/non-empty-domain '@' pair.
+    const out = sanitizeProviderPreviewText('a@b@');
+    expect(out).toContain('[REDACTED_EMAIL]');
+    expect(out).not.toContain('a@b');
+  });
+
+  it('@mention preservation is untouched: @alice and @15555550001 survive with preserveWhatsAppMentions', () => {
+    const options = { preserveWhatsAppMentions: true };
+    expect(sanitizeProviderPreviewText('Hi @alice!', options)).toBe('Hi @alice!');
+    expect(sanitizeProviderPreviewText('ping @15555550001 now', options)).toBe('ping @15555550001 now');
+  });
+
+  it('edge decision "@x": empty local part is mention-shaped, NOT email-shaped — preserved with the flag, still redacted without it (phone-mention PII stays fail-closed)', () => {
+    // Decision (documented): '@x' can never be an email (empty local part), but
+    // it IS mention-shaped, and mention visibility is governed by the
+    // preserveWhatsAppMentions flag — surfaces that did not opt in must keep
+    // masking mentions ('@15551234567' is a phone number). Requiring a
+    // non-empty local part for the EMAIL match must not turn the flag into
+    // dead code.
+    expect(sanitizeProviderPreviewText('cc @x please', { preserveWhatsAppMentions: true })).toBe('cc @x please');
+    expect(sanitizeProviderPreviewText('cc @x please')).toBe('cc [REDACTED_EMAIL] please');
+    expect(sanitizeProviderPreviewText('ping @15555550001 now')).toBe('ping [REDACTED_EMAIL] now');
+  });
+
+  it('edge decision "x@": empty domain part is not email-shaped and passes through', () => {
+    // Decision (documented): 'user@' has no domain, so it is not an address —
+    // redacting it protects nothing (the bare word 'user' would survive alone)
+    // while re-creating the E9 false-positive class for "qty@" / "name@" typos.
+    const input = 'assign user@ then continue';
+    expect(sanitizeProviderPreviewText(input)).toBe(input);
+  });
+});

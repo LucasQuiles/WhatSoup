@@ -477,6 +477,15 @@ describe('redactInternalArtifacts — audience scoping', () => {
     expect(redactInternalArtifacts('Hi @alice!', 'client').text).toBe('Hi @alice!');
   });
 
+  it('E9 (packet D5): a bare "@" used as the word "at" survives at client and internal audiences', () => {
+    // Live evidence: an internal-tier DM explaining this very bug had its own
+    // bare '@' re-redacted to [REDACTED_EMAIL]. A whitespace-flanked '@' has no
+    // local part and no domain part — it is not email-shaped.
+    const input = 'meet @ 5pm to review the deck';
+    expect(redactInternalArtifacts(input, 'client').text).toBe(input);
+    expect(redactInternalArtifacts(input, 'internal').text).toBe(input);
+  });
+
   it.each([
     { label: 'nested domain', input: `${FAKE_GROUP_JID}.evil.test` },
     { label: 'hyphenated domain', input: `${FAKE_GROUP_JID}-evil.test` },
