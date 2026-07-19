@@ -7,7 +7,12 @@ import type { DurabilityEngine } from '../../core/durability.ts';
 import { config } from '../../config.ts';
 import { GLOBAL_CONVERSATION_KEY, toConversationKey } from '../../core/conversation-key.ts';
 import { classifyProviderFailure } from './failure-taxonomy.ts';
-import { providerUnknownTerminalNotice, renderUserMessage } from './response-templates.ts';
+import {
+  providerServerErrorNoFallbackNotice,
+  providerTransientRetryNotice,
+  providerUnknownTerminalNotice,
+  renderUserMessage,
+} from './response-templates.ts';
 import { emitAlertChecked } from '../../lib/emit-alert.ts';
 import { accumulateTokensWithEvent, markSessionCompacted } from './session-db.ts';
 import { createChildLogger } from '../../logger.ts';
@@ -31,7 +36,8 @@ export type ProviderFallbackReason =
   | 'model-unavailable'
   | 'server-error'
   | 'empty-output'
-  | 'probe-unusable';
+  | 'probe-unusable'
+  | 'unknown-terminal-repeated';
 
 export interface ProviderFallbackActivation {
   primaryProvider: string;
@@ -103,6 +109,8 @@ function armingFailureLogMessage(reason: ProviderFallbackReason): string {
       return 'primary provider returned consecutive empty output — failing over';
     case 'probe-unusable':
       return 'primary provider usability probe flagged unusable — failing over';
+    case 'unknown-terminal-repeated':
+      return 'primary provider returned repeated unclassified terminal errors — failing over';
   }
 }
 
@@ -168,6 +176,14 @@ export interface RuntimeResultHandlerPort {
     session: SessionManager | null,
     turnHadToolWork: boolean,
     mapKey: string | undefined,
+  ): boolean;
+  maybeArmFallbackAfterUnknownTerminal(
+    queue: IOutboundQueue,
+    session: SessionManager | null,
+    turnHadToolWork: boolean,
+    mapKey: string | undefined,
+    isUserTurnResult: boolean,
+    evidenceText: string,
   ): boolean;
   enqueueAutoSwitchNotice(
     queue: IOutboundQueue,
@@ -355,6 +371,9 @@ if (event.text && !hasPendingPoll) {
   if (providerFailureKind === 'policy-block') {
     recordTurnFailure(providerFailureKind);
     log.error({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider policy-block message from result — session will be killed');
+    // Deliberate silence: a policy block is not an operational fault to notify or
+    // recover from, and any user notice here would coach around the block. Log +
+    // shut down, no user-facing message and no fallback.
     session?.shutdown();
     return;
   }
@@ -415,7 +434,7 @@ if (event.text && !hasPendingPoll) {
       });
     }
     if (!replayScheduled) {
-      if (!activation && providerFailureKind === 'server-error') queue.enqueueText(providerUnknownTerminalNotice());
+      if (!activation && providerFailureKind === 'server-error') queue.enqueueText(providerServerErrorNoFallbackNotice());
       if (!activation && providerFailureKind === 'rate-limit') {
         enqueueNoFallbackTerminalNotice(queue, providerFailureKind);
       }
@@ -468,7 +487,7 @@ if (event.text && !hasPendingPoll) {
       event.text.slice(0, 400),
       'warning',
     );
-    queue.enqueueText(providerUnknownTerminalNotice());
+    queue.enqueueText(providerTransientRetryNotice());
     return;
   }
   if (!wasSilentCompact) {
@@ -484,6 +503,15 @@ if (event.text && !hasPendingPoll) {
         'Unclassified terminal provider error suppressed from user',
         event.text.slice(0, 400),
       );
+      // Repeated unclassified terminal errors are a broken-primary signal with no
+      // parseable reset estimate. After a bounded consecutive run on real user
+      // turns, fail over like the sibling terminal classes (activate + replay +
+      // notify) — the activation notice supersedes the generic one, so return to
+      // let the fallback replay own finalization. Below threshold / no eligible
+      // fallback: keep today's generic notice.
+      if (host.maybeArmFallbackAfterUnknownTerminal(queue, session, turnHadToolWork, mapKey, isUserTurnResult, event.text)) {
+        return;
+      }
       queue.enqueueText(providerUnknownTerminalNotice());
     } else {
       queue.enqueueResultText(host.withHandoffPrefix(queue.targetChatJid, event.text));
@@ -893,6 +921,8 @@ if (event.text) {
   if (providerFailureKind === 'policy-block') {
     recordTurnFailure(providerFailureKind);
     log.error({ chatJid: host.shared ? host.currentTurnChatJid : host.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider policy-block message from result — session will be killed');
+    // Deliberate silence (see the per-chat policy-block branch): no user notice,
+    // no fallback — a policy block is not an operational fault to recover from.
     host.session?.shutdown();
     return;
   }
@@ -952,7 +982,7 @@ if (event.text) {
       });
     }
     if (!replayScheduled) {
-      if (!activation && providerFailureKind === 'server-error') queue.enqueueText(providerUnknownTerminalNotice());
+      if (!activation && providerFailureKind === 'server-error') queue.enqueueText(providerServerErrorNoFallbackNotice());
       if (!activation && providerFailureKind === 'rate-limit') {
         enqueueNoFallbackTerminalNotice(queue, providerFailureKind);
       }
@@ -1006,7 +1036,7 @@ if (event.text) {
       event.text.slice(0, 400),
       'warning',
     );
-    queue.enqueueText(providerUnknownTerminalNotice());
+    queue.enqueueText(providerTransientRetryNotice());
     host.singleTurnHadToolActivity = false;
     return;
   }
@@ -1022,6 +1052,14 @@ if (event.text) {
         'Unclassified terminal provider error suppressed from user',
         event.text.slice(0, 400),
       );
+      // See the per-chat handler: repeated unclassified terminal errors fail over
+      // after a bounded consecutive run, replacing the generic notice with a
+      // fallback activation. Mirror the sibling terminal branches on the single/
+      // shared path — reset the tool-activity flag and return.
+      if (host.maybeArmFallbackAfterUnknownTerminal(queue, host.session, turnHadToolWork, undefined, isUserTurnResult, event.text)) {
+        host.singleTurnHadToolActivity = false;
+        return;
+      }
       queue.enqueueText(providerUnknownTerminalNotice());
     } else {
       queue.enqueueResultText(host.withHandoffPrefix(queue.targetChatJid, event.text));

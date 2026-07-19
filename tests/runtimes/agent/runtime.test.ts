@@ -431,7 +431,7 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 import * as registerAllModule from '../../../src/mcp/register-all.ts';
 import { AgentRuntime, isUsageLimitMessage, serializePendingPoll, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
 import { parseGeminiAcpEvent } from '../../../src/runtimes/agent/providers/gemini-acp-parser.ts';
-import { providerUnknownTerminalNotice, renderUserMessage } from '../../../src/runtimes/agent/response-templates.ts';
+import { providerServerErrorNoFallbackNotice, providerUnknownTerminalNotice, renderUserMessage } from '../../../src/runtimes/agent/response-templates.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import { TurnQueue } from '../../../src/runtimes/agent/turn-queue.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
@@ -5638,7 +5638,7 @@ describe('AgentRuntime', () => {
     capturedOnEventRef.current!({ type: 'result', text: raw, isError: true });
 
     await vi.waitFor(() =>
-      expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('an operator has been notified')),
+      expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('automatic recovery failed')),
     );
     const forwardedRaw = mockQueue.enqueueResultText.mock.calls.map((a) => a[0] as string);
     expect(forwardedRaw).not.toContain(raw);
@@ -5710,7 +5710,7 @@ describe('AgentRuntime', () => {
     );
     // ...the user gets only the generic notice...
     const allUserText = mockQueue.enqueueText.mock.calls.map((a) => a[0] as string).join('\n');
-    expect(allUserText).toContain('an operator has been notified');
+    expect(allUserText).toContain('automatic recovery failed');
     expect(allUserText).not.toContain('secret-token-xyz789');
     // ...and the raw provider text is NEVER forwarded to the user.
     const forwardedRaw = mockQueue.enqueueResultText.mock.calls.map((a) => a[0] as string);
@@ -5772,7 +5772,7 @@ describe('AgentRuntime', () => {
     expect(forwardedRaw).not.toContain(socketText);
     // A generic notice is sent
     const allText = mockQueue.enqueueText.mock.calls.map((a) => a[0] as string).join('\n');
-    expect(allText).toMatch(/operator has been notified|try again/i);
+    expect(allText).toMatch(/temporary connection problem|resend/i);
     // Turn capability records transient-network
     const turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
     expect(turnCapability.lastTurnErrorClass).toBe('transient-network');
@@ -5873,7 +5873,7 @@ describe('AgentRuntime', () => {
     const raw = 'API Error 503: Service temporarily unavailable. overloaded_error';
     capturedOnEventRef.current!({ type: 'result', text: raw, isError: true });
 
-    await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalledWith(providerUnknownTerminalNotice()));
+    await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalledWith(providerServerErrorNoFallbackNotice()));
     expect(runtime.getFallbackState().fallbackReason).toBeNull();
     expect(mockSession.shutdown).toHaveBeenCalled();
     expect(mockQueue.enqueueResultText).not.toHaveBeenCalledWith(raw);
@@ -5901,6 +5901,64 @@ describe('AgentRuntime', () => {
     expect(mockQueue.enqueueResultText).not.toHaveBeenCalledWith(raw);
     const turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
     expect(turnCapability.lastTurnErrorClass).toBe('auth-required');
+  });
+
+  // Gap 2: emitNoFallbackReauthNotice says "An operator has been notified", but
+  // no ops alert fired on the no-fallback auth path — the only result-path
+  // alerts are provider_transient_network / provider_unknown_terminal, and
+  // fallback alerts only fire when a fallback activates. Back the claim with a
+  // real alert so the copy is truthful.
+  it('auth-required result without fallback fires an ops alert so the "operator notified" claim is backed (single path)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
+
+    mockEmitAlert.mockClear();
+    const raw = 'Authentication required. Sign in to continue.';
+    capturedOnEventRef.current!({ type: 'result', text: raw, isError: true });
+
+    await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('re-authentication')));
+    // The notice's "operator has been notified" must be backed by a real alert.
+    expect(mockEmitAlert.mock.calls.find((c) => c[1] === 'provider_auth_required_no_fallback')).toBeDefined();
+    // Redaction: raw provider text is never forwarded to the user.
+    const enqueued = mockQueue.enqueueText.mock.calls.map((a) => a[0] as string);
+    expect(enqueued.some((t) => t.includes(raw))).toBe(false);
+  });
+
+  // Gap 1: a per-model-tier usage cap is NOT resolved by waiting — the misleading
+  // "Please try again after the limit resets" masks the real remedy (an operator
+  // must add credits or switch the model). Neither branch fires an alert, so the
+  // copy must name the operator remedy as a call to action, not claim an operator
+  // was already notified.
+  it('usageLimitNotice names the operator remedy (add credits / switch model) instead of passive waiting (single path)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+
+    type NoticeHost = { agentFallbacks: unknown[]; usageLimitNotice(): string };
+    const host = runtime as unknown as NoticeHost;
+
+    // No-fallback branch: waiting cannot clear a per-tier cap.
+    host.agentFallbacks = [];
+    const noFallback = host.usageLimitNotice();
+    expect(noFallback).not.toMatch(/try again after the limit resets/i);
+    expect(noFallback.toLowerCase()).toContain('add credits');
+    expect(noFallback.toLowerCase()).toMatch(/switch my model|change my model/);
+
+    // Fallback-configured-but-could-not-continue branch: no alert fires here
+    // either, so the copy must not claim an operator was already notified.
+    host.agentFallbacks = [{ provider: 'codex-cli', model: 'x' }];
+    const withFallback = host.usageLimitNotice();
+    expect(withFallback.toLowerCase()).toContain('add credits');
+    expect(withFallback).not.toMatch(/operator has been notified/i);
+
+    // Redaction: neither branch leaks a phone/JID or raw provider text.
+    for (const msg of [noFallback, withFallback]) {
+      expect(msg).not.toMatch(/@s\.whatsapp\.net|@lid|\+?\d{7,}/);
+    }
   });
 
   it('model-unavailable result with fallback notifies and shuts down when replay is blocked (single path)', async () => {
@@ -10256,7 +10314,7 @@ describe('AgentRuntime', () => {
     const forwardedRaw = (queue.enqueueResultText as ReturnType<typeof vi.fn>).mock.calls.map((a: unknown[]) => a[0] as string);
     expect(forwardedRaw).not.toContain(socketText);
     // Generic user notice is sent
-    expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('operator has been notified'));
+    expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('resend'));
   });
 
   // QR-211: mirrors the transient-network test above (same handleEventWithContext
@@ -10462,7 +10520,7 @@ describe('AgentRuntime', () => {
         'warning',
       );
       // Generic notice reaches the user.
-      expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('operator has been notified'));
+      expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('resend'));
       // Raw provider text is not forwarded.
       const forwardedRaw = (queue.enqueueResultText as ReturnType<typeof vi.fn>).mock.calls.map((a: unknown[]) => a[0] as string);
       expect(forwardedRaw).not.toContain(SOCKET_TEXT);
