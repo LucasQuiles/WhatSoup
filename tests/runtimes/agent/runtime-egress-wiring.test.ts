@@ -41,6 +41,10 @@ const { mockConfig, mockRuntimeLogger } = vi.hoisted(() => ({
     mediaDir: '/tmp/whatsoup-test-media',
     pineconeAllowedIndexes: [] as string[],
     voiceReply: 'never' as const,
+    // Required since the C5 restart-loop guard (#1929) merged into main: start()
+    // and the health snapshot deref config.restartLoopGuard / config.stateRoot.
+    stateRoot: '/tmp/whatsoup-test-state-egress-wiring',
+    restartLoopGuard: { enabled: true, maxRestarts: 3, windowMs: 300_000 },
   },
   mockRuntimeLogger: {
     info: vi.fn(),
