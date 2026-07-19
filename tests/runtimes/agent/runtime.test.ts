@@ -14470,7 +14470,73 @@ describe('AgentRuntime', () => {
 
       expect(targetSession.shutdown).toHaveBeenCalledWith(false);
       const text = sentMessages.map((m) => m.text).find((t) => t.includes('Session killed:'));
-      expect(text).toBe(`_Session killed: ${dmKey} (DM)_`);
+      // B23: with no name metadata in the DB, a numeric DM key renders as a
+      // formatted phone (ladder step 4) — not the bare conversation key.
+      expect(text).toBe(`_Session killed: +${dmKey} (DM)_`);
+    });
+
+    it('/sessions (per_chat scope) renders chat names from the DB, not raw JIDs (B23)', async () => {
+      // Owner ruling: sessions must show contact/group names — raw JID/LID
+      // keys only as last resort. SQL-dispatching prepare mock (established
+      // pattern, see the @lid admin test below): the group has a groups.subject
+      // row, the DM has a contacts.display_name row.
+      const db = makeDb();
+      (db.raw.prepare as ReturnType<typeof vi.fn>).mockImplementation((sql: string) => {
+        if (sql.includes('FROM groups')) {
+          return { run: vi.fn(), get: vi.fn(() => ({ subject: 'Loopicus Ops' })), all: vi.fn(() => []) };
+        }
+        if (sql.includes('FROM contacts')) {
+          return { run: vi.fn(), get: vi.fn(() => ({ display_name: 'Lucas', notify_name: null })), all: vi.fn(() => []) };
+        }
+        if (sql.includes('FROM agent_sessions')) {
+          return { run: vi.fn(), get: vi.fn(() => ({ total_input_tokens: 1500, total_output_tokens: 700 })), all: vi.fn(() => []) };
+        }
+        return { run: vi.fn(), get: vi.fn(), all: vi.fn(() => []) };
+      });
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await runtime.start();
+
+      const state = runtime as unknown as {
+        chatSessions: Map<string, ReturnType<typeof makePerChatSession>>;
+      };
+      const startedAt = new Date(Date.now() - 90_000).toISOString();
+      state.chatSessions.set('15550001111', makePerChatSession(true, 11, startedAt)); // DM
+      state.chatSessions.set('111222333444555666@g.us', makePerChatSession(true, 12, startedAt)); // Group
+
+      await sendAndDrain(runtime, makeMsg({ content: '/sessions', senderJid: adminSender }));
+
+      const listText = sentMessages.map((m) => m.text).find((t) => t.includes('Active Sessions'));
+      expect(listText).toContain('1. Lucas (DM)');
+      expect(listText).toContain('2. Loopicus Ops (Group)');
+      expect(listText).not.toContain('15550001111');
+      expect(listText).not.toContain('111222333444555666');
+    });
+
+    it('/kill-session ack renders the resolved chat name, not the raw key (B23)', async () => {
+      const db = makeDb();
+      (db.raw.prepare as ReturnType<typeof vi.fn>).mockImplementation((sql: string) => {
+        if (sql.includes('FROM contacts')) {
+          return { run: vi.fn(), get: vi.fn(() => ({ display_name: 'Lucas', notify_name: null })), all: vi.fn(() => []) };
+        }
+        return { run: vi.fn(), get: vi.fn(), all: vi.fn(() => []) };
+      });
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await runtime.start();
+
+      const state = runtime as unknown as {
+        chatSessions: Map<string, ReturnType<typeof makePerChatSession>>;
+        chatQueues: Map<string, IOutboundQueue>;
+      };
+      const dmKey = '15550001111';
+      state.chatSessions.set(dmKey, makePerChatSession(true, 11, new Date().toISOString()));
+      state.chatQueues.set(dmKey, makeQueueMock('dm@s.whatsapp.net'));
+
+      await sendAndDrain(runtime, makeMsg({ content: '/kill-session 1', senderJid: adminSender }));
+
+      const text = sentMessages.map((m) => m.text).find((t) => t.includes('Session killed:'));
+      expect(text).toBe('_Session killed: Lucas (DM)_');
     });
 
     // W1-T3: gate convergence security proof matrix (isAdminMessage hoisted
