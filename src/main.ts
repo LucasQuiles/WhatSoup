@@ -9,6 +9,7 @@ import { getMessagesBySender, getMessageCount, getUnprocessedCount } from './cor
 import { processHistoryBatch, type HistoryInput } from './core/history-sync.ts';
 import { execFileSync } from 'node:child_process';
 import { createConnection } from './transport/factory.ts';
+import { classifyStreamedProviderFailure } from './runtimes/agent/failure-taxonomy.ts';
 import type { RuntimeConnection } from './transport/runtime-connection.ts';
 import { ChatRuntime } from './runtimes/chat/runtime.ts';
 import { AgentRuntime } from './runtimes/agent/runtime.ts';
@@ -296,6 +297,10 @@ const instanceType = (instanceConfig?.type as string | undefined) ?? 'chat';
 
 // 4. Connection
 const connectionManager: RuntimeConnection = createConnection(config);
+// #1783 — wire the send-seam provider-error banner classifier into the Baileys
+// outbound governor. main.ts is the composition root (may import runtimes);
+// transport receives the classifier via DI so it need not import runtimes.
+connectionManager.setOutboundContentClassifier?.(classifyStreamedProviderFailure);
 
 // 5. Runtime — selected by instance type
 let runtime: Runtime;
