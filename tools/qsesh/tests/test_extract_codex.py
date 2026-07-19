@@ -108,11 +108,17 @@ def test_schema_registry_binds_jsonl_snapshot_to_observed_contract() -> None:
     assert CODEX_OBSERVED_SCHEMA_FINGERPRINT == (
         "d60edba4b9c2f506e0dc6c2f9fb3d4fdea57253a2ab9109d85a876dab71f9b12"
     )
-    assert _expect_schema_error(_snapshot(fingerprint="unknown-jsonl-v2")).phase == "codex-schema-fingerprint"
+    assert (
+        _expect_schema_error(_snapshot(fingerprint="unknown-jsonl-v2")).phase
+        == "codex-schema-fingerprint"
+    )
 
 
 def test_source_digest_mismatch_is_rejected_before_dispatch() -> None:
-    assert _expect_schema_error(replace(_snapshot(), source_digest="0" * 64)).phase == "extractor-source-digest"
+    assert (
+        _expect_schema_error(replace(_snapshot(), source_digest="0" * 64)).phase
+        == "extractor-source-digest"
+    )
 
 
 @pytest.mark.parametrize(
