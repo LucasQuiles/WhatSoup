@@ -14472,6 +14472,25 @@ describe('AgentRuntime', () => {
       const enqueuedTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
       expect(enqueuedTexts.some((t) => /new session/i.test(t))).toBe(false);
     });
+
+    it('denies /new to an @sms sender bearing the admin phone digits (single mode — own @sms-closing clause)', async () => {
+      // /new's admin-shared-scope branch has its OWN independently-specified
+      // @sms-closing check (isWhatsAppAuthenticatedJid(msg.senderJid) &&
+      // isAdminPhone(...)) — distinct from isAdminMessage, which only closes
+      // the hole for /sessions and /kill-session (see the sibling @sms test
+      // above). Same spoof shape, aimed at /new: admin PHONE digits on a
+      // non-WhatsApp-authenticated transport JID, in an affectsShared venue
+      // (default single scope — affectsShared regardless of isGroup there).
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger); // default: single scope
+      await runtime.start();
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({ content: '/new', senderJid: '15550100001@sms' }));
+      expect(mockSession.handleNew).not.toHaveBeenCalled();
+      const enqueuedTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
+      expect(enqueuedTexts.some((t) => /new session/i.test(t))).toBe(false);
+    });
   });
 
   describe('cross-conversation binding invariant (#1095)', () => {
