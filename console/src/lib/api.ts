@@ -32,6 +32,7 @@ import type {
   AccessEntry,
   ChatItem,
   CheckpointsPayload,
+  LiveSessionsPayload,
   ContactResult,
   FeedEvent,
   FleetMetrics,
@@ -355,6 +356,9 @@ export const api = {
   // Checkpoint browser — plain apiFetch (getProviderStatus precedent: no mock lane).
   getCheckpoints: (name: string) =>
     apiFetch<CheckpointsPayload>(`/api/lines/${encodeURIComponent(name)}/checkpoints`),
+
+  getLiveSessions: (name: string) =>
+    apiFetch<LiveSessionsPayload>(`/api/lines/${encodeURIComponent(name)}/live-sessions`),
   getFeed: () => withFallback(
     () => apiFetch<FeedEvent[]>('/api/feed'),
     async () => (await loadMockData()).getFeed(),

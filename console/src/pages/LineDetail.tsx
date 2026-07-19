@@ -2,7 +2,7 @@ import React, { useState, useCallback, lazy, Suspense } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { useLine, useChats, useMessages, useAccess, useLogs, useTyping, useCheckpoints } from '../hooks/use-fleet'
+import { useLine, useChats, useMessages, useAccess, useLogs, useTyping, useCheckpoints , useLiveSessions } from '../hooks/use-fleet'
 import { useMetrics } from '../hooks/use-metrics'
 import type { MetricsRange } from '../types'
 import { getPreference, setPreference } from '../lib/preferences'
@@ -88,6 +88,7 @@ export default function LineDetail() {
   } = useLogs(name || '')
   const { data: metrics, isLoading: metricsLoading, error: metricsError, refetch: refetchMetrics, freshness: metricsFreshness } = useMetrics(name || '', metricsRange)
   const { data: checkpointsPayload, isLoading: checkpointsLoading, freshness: checkpointsFreshness } = useCheckpoints(name || '')
+  const { data: liveSessionsPayload } = useLiveSessions(name || '')
   const { data: typingData } = useTyping()
   const typingJids = React.useMemo(() =>
     new Set((typingData ?? []).filter(t => t.instance === name).map(t => t.jid)),
@@ -345,6 +346,7 @@ export default function LineDetail() {
                   isLoading={checkpointsLoading}
                   freshness={checkpointsFreshness}
                   lineName={name || ''}
+                  liveSessions={liveSessionsPayload}
                 />
               )}
               {activeTab === 'groups' && <GroupsTab lineName={name || ''} myJid={line.phone ? `${line.phone}@s.whatsapp.net` : undefined} />}
