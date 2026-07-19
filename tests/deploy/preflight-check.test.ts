@@ -108,6 +108,10 @@ function makeFixtureTree(
     'export const databaseCompatibilityBootstrapFixture = true;\n',
     'utf8',
   );
+  // Fixture roots are non-git, so preflight treats them as release exports —
+  // which must carry the release manifest (manifest gate). Tests probing the
+  // missing-manifest failure remove this file explicitly.
+  writeFileSync(join(root, '.whatsoup-release-manifest.json'), '{"files":[]}\n', 'utf8');
   for (const [rel, contents] of Object.entries(extraFiles)) {
     const abs = join(root, rel);
     mkdirSync(dirname(abs), { recursive: true });
@@ -1040,5 +1044,35 @@ describe('deploy/whatsoup — source wiring', () => {
     // The instance-config failure is reported distinctly and fails closed.
     expect(preflight).toContain('instance configuration is invalid or missing');
     expect(existsSync(join(REPO_ROOT, 'deploy/preflight-instance-check.ts'))).toBe(true);
+  });
+});
+
+// P4 follow-on (fleet incident 2026-07-16): WhatSoup-release-ee35101f shipped
+// to four hosts without .whatsoup-release-manifest.json, so every host flagged
+// release-drift (manifest-missing) forever. The manifest is written only by
+// scripts/release-snapshot-plan.ts and nothing on the restart path verified it.
+describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — release-export manifest gate', () => {
+  it('fails closed when a non-git release dir lacks the release manifest', () => {
+    const root = makeFixtureTree(
+      "import { ok } from './helper.ts';\nconsole.log(ok);\n",
+      { 'src/helper.ts': 'export const ok = true;\n' },
+    );
+    rmSync(join(root, '.whatsoup-release-manifest.json'), { force: true });
+    const { status, stderr } = runPreflight(root);
+
+    expect(status).toBe(3);
+    expect(stderr).toContain('release export lacks .whatsoup-release-manifest.json');
+  });
+
+  it('passes the manifest gate when the release manifest is present', () => {
+    const root = makeFixtureTree(
+      "import { ok } from './helper.ts';\nconsole.log(ok);\n",
+      { 'src/helper.ts': 'export const ok = true;\n' },
+    );
+    writeFileSync(join(root, '.whatsoup-release-manifest.json'), '{"files":[]}\n', 'utf8');
+    const { status, stderr } = runPreflight(root);
+
+    expect(status).toBe(0);
+    expect(stderr).toContain('PREFLIGHT-OK');
   });
 });
