@@ -28,6 +28,15 @@ rules into hooks, and semantic or human rules into the SDLC review flow.
 | `arch.import-boundaries` | mechanical | block | guard, ci | Ratchet import direction between src/ layers so known violations can shrink but new cross-layer reach is blocked. |
 | `arch.approved-api-client` | ast | warn | eslint | Console network calls must go through the typed API client in `console/src/lib/api.ts`; direct fetch bypasses auth, timeouts, and the test surface. |
 | `arch.ring-boundaries` | ast | warn | eslint | Backend ring dependency direction is an architectural invariant; lower rings must not import higher rings. |
+| `arch.ssot-lid-reads` | mechanical | block‡ | guard, ci | Raw `lid_mappings` SQL reads outside `src/core/lid-resolver.ts` fork the LID→phone resolution discipline `resolveLid()` centralizes. |
+| `arch.ssot-jid-construction` | mechanical | block‡ | guard, ci | Inline `${x}@s.whatsapp.net`-class template construction and literal `.endsWith('@lid')`-class predicates outside `src/core/jid-constants.ts` re-derive the JID domain grammar. |
+| `arch.ssot-name-ladder` | mechanical | block‡ | guard, ci | SQL touching the name columns of contacts/chats/groups/chat_aliases outside `src/core/chat-display-name.ts` forks the owner-facing name ladder. |
+| `arch.ssot-phone-shape` | mechanical | block‡ | guard, ci | Anchored phone-shape regex literals and `+${…phone…}` formatting outside `src/lib/phone.ts` fork the phone-identity discipline. |
+| `arch.ssot-presentation-literals` | mechanical | block‡ | guard, ci | Registry-carried user-facing phrases (start narrow: the pass-through phrase, `PASSTHROUGH_PHRASE` in `command-registry.ts`) must not be re-forked as literals across render modules. |
+
+‡ These rules are **count-ratcheted** through `.claude/fitness/baseline.json` (see the
+  Pattern-Count Ratchet Baseline section below). New violations block; shrinking counts
+  require lowering the baseline in the same commit; a zero-baseline rule is a pure block.
 
 † `arch.file-size` severity is `block` for the **hook, guard, and ci rings** (enforced via `.claude/fitness/baseline.json` ratchet:
   a per-file `maxLines` growth ceiling, checked against each file's actual line count).
@@ -114,6 +123,32 @@ one:
 
 `arch.import-boundaries` grandfathered violations are tracked in `.claude/fitness/boundary-baseline.json`.
 Run `npm run guard:boundaries -- --report` to see the full edge list and `npm run guard:boundaries -- --baseline-save` to ratchet down after fixing violations.
+
+### Pattern-Count Ratchet Baseline
+
+The SSOT pattern rules and the promoted ring rule are **count-ratcheted**: each rule's
+`violationCount` in `.claude/fitness/baseline.json` records today's surviving violations
+(the allowlisted debt enumerated with reasons in the guard scripts). Enforcement
+(`npm run guard:ssot-patterns` → `scripts/ssot-pattern-guard.ts`, wired into
+`verify:push:branch` with its companion test in the gate's test list):
+
+- A finding outside the rule's allowlist **fails**, naming the primitive to rewire to.
+- count **above** baseline fails (new debt, even inside allowlisted files).
+- count **below** baseline fails demanding a **ratchet-down in the same commit**: lower the
+  `violationCount` twin in `.claude/fitness/baseline.json` AND the matching row below, and
+  drop any allowlist row whose site is gone (the guard tests fail on stale rows).
+- A rule at 0 is a **pure block** (nothing left to grandfather).
+
+This table is the doc twin of the `violationCount` entries — the guard fails when the two
+disagree (`| rule | count |` rows below are machine-checked):
+
+| rule | violations (baseline) | enforcement |
+|------|-----------------------|-------------|
+| `arch.ssot-lid-reads` | 6 | `scripts/ssot-pattern-guard.ts` |
+| `arch.ssot-jid-construction` | 7 | `scripts/ssot-pattern-guard.ts` |
+| `arch.ssot-name-ladder` | 5 | `scripts/ssot-pattern-guard.ts` |
+| `arch.ssot-phone-shape` | 7 | `scripts/ssot-pattern-guard.ts` |
+| `arch.ssot-presentation-literals` | 0 | `scripts/ssot-pattern-guard.ts` (pure block) |
 
 ## ESLint Ring (live)
 

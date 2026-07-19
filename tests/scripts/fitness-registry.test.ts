@@ -17,10 +17,11 @@ interface FitnessBaseline {
   schemaVersion: number;
   generatedAt: string;
   rules: Record<string, {
-    measurements: Array<{
+    measurements?: Array<{
       filePath: string;
       lines: number;
     }>;
+    violationCount?: number;
   }>;
 }
 
@@ -37,7 +38,7 @@ describe('fitness rule registry', () => {
     const ids = fitnessRules.map((rule) => rule.id);
 
     expect(new Set(ids).size).toBe(ids.length);
-    expect(fitnessRules).toHaveLength(28);
+    expect(fitnessRules).toHaveLength(33);
 
     for (const rule of fitnessRules) {
       expect(rule.id).toMatch(/^[a-z]+\.[a-z0-9-]+$/);
@@ -70,18 +71,47 @@ describe('fitness rule registry', () => {
     const measurementRatchetIds = new Set(['arch.file-size']);
     for (const rule of fitnessRules.filter((candidate: FitnessRule) => candidate.ratchet && measurementRatchetIds.has(candidate.id))) {
       const entry = baseline.rules[rule.id];
-      expect(entry?.measurements.length).toBeGreaterThan(0);
-      for (const measurement of entry.measurements) {
+      expect(entry?.measurements?.length).toBeGreaterThan(0);
+      for (const measurement of entry?.measurements ?? []) {
         expect(measurement.filePath).toMatch(/^[^/].+/);
         expect(measurement.lines).toBeGreaterThan(0);
       }
     }
   });
 
+  it('has violationCount baseline entries for count-ratcheted rules', () => {
+    const baseline = readBaseline();
+
+    // Count-ratcheted rules (scripts/ssot-pattern-guard.ts)
+    // record today's violation count; the guard fails above OR below it (ratchet-down).
+    const countRatchetIds = [
+      'arch.ssot-lid-reads',
+      'arch.ssot-jid-construction',
+      'arch.ssot-name-ladder',
+      'arch.ssot-phone-shape',
+      'arch.ssot-presentation-literals',
+    ];
+    for (const id of countRatchetIds) {
+      const rule = fitnessRules.find((candidate: FitnessRule) => candidate.id === id);
+      expect(rule?.ratchet, `${id} must be marked ratchet in the registry`).toBe(true);
+      const value = baseline.rules[id]?.violationCount;
+      expect(Number.isInteger(value), `${id} violationCount`).toBe(true);
+      expect(value).toBeGreaterThanOrEqual(0);
+    }
+  });
+
   it('keeps ratcheted rules baseline-able', () => {
     const ratchetedRules = fitnessRules.filter((rule) => rule.ratchet);
 
-    expect(ratchetedRules.map((rule) => rule.id)).toEqual(['arch.file-size', 'arch.import-boundaries']);
+    expect(ratchetedRules.map((rule) => rule.id)).toEqual([
+      'arch.file-size',
+      'arch.import-boundaries',
+      'arch.ssot-lid-reads',
+      'arch.ssot-jid-construction',
+      'arch.ssot-name-ladder',
+      'arch.ssot-phone-shape',
+      'arch.ssot-presentation-literals',
+    ]);
     expect(ratchetedRules[0].params).toMatchObject({ maxLines: expect.any(Number) });
     expect(ratchetedRules[1].params).toMatchObject({ layers: expect.any(Object) });
   });

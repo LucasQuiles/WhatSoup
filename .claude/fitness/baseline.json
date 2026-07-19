@@ -15,6 +15,21 @@
           "maxLines": 15797
         }
       ]
+    },
+    "arch.ssot-lid-reads": {
+      "violationCount": 6
+    },
+    "arch.ssot-jid-construction": {
+      "violationCount": 7
+    },
+    "arch.ssot-name-ladder": {
+      "violationCount": 5
+    },
+    "arch.ssot-phone-shape": {
+      "violationCount": 7
+    },
+    "arch.ssot-presentation-literals": {
+      "violationCount": 0
     }
   }
 }
