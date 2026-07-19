@@ -93,7 +93,8 @@ describe('T5 — startup resume gate consults the restart-loop guard', () => {
     expect(stub.shouldSuppressProactiveResume(3)).toBe(false);
     const h = guard.readRestartLoopGuardHealth(guard.restartLoopGuardPath(config.stateRoot));
     expect(h.bootsInWindow).toBe(0);
-    expect(stub.pendingStartupMessage).toBeNull();
+    expect(h.tripped).toBe(false); // a clean boot leaves the guard untripped
+    expect(stub.pendingStartupMessage).toBe(null); // no admin notice queued on a clean boot
   });
 
   it('does not consult the journal when nothing is resumable', async () => {
@@ -126,7 +127,8 @@ describe('T5 — startup resume gate consults the restart-loop guard', () => {
     const h = guard.readRestartLoopGuardHealth(guard.restartLoopGuardPath(config.stateRoot));
     expect(h.bootsInWindow).toBe(2);
     expect(h.tripped).toBe(false);
-    expect(stub.pendingStartupMessage).toBeNull();
+    expect(h.lastTripAt).toBe(null); // below threshold ⇒ no trip timestamp recorded
+    expect(stub.pendingStartupMessage).toBe(null); // no admin notice queued below threshold
   });
 
   it('guard disabled in instance.json ⇒ never suppresses, never records', async () => {
@@ -136,6 +138,7 @@ describe('T5 — startup resume gate consults the restart-loop guard', () => {
     expect(stub.shouldSuppressProactiveResume(3)).toBe(false);
     const h = guard.readRestartLoopGuardHealth(guard.restartLoopGuardPath(config.stateRoot));
     expect(h.bootsInWindow).toBe(2); // unchanged — the method returned before recording
-    expect(stub.pendingStartupMessage).toBeNull();
+    expect(h.tripped).toBe(false); // a disabled guard never trips
+    expect(stub.pendingStartupMessage).toBe(null); // no admin notice queued when disabled
   });
 });
