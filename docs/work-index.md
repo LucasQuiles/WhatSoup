@@ -200,11 +200,11 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
-| `docs/superpowers/specs/provider-event-lifecycle/design.md` | spec | active | body-marker | design | 2026-07-14 |  |
-| `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | active | body-marker | requirements | 2026-07-14 |  |
-| `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | active | body-marker | tasks | 2026-07-14 |  |
+| `docs/superpowers/specs/provider-event-lifecycle/design.md` | spec | active | body-marker | design | 2026-07-17 |  |
+| `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | active | body-marker | requirements | 2026-07-17 |  |
+| `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | active | body-marker | tasks | 2026-07-17 |  |
 
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-19T02:48:28Z from commit `f4761cddb3163ce764dc57f3087835d19e50b70b`
+- Generated at 2026-07-19T19:02:52Z from commit `ad04518969b350b9d3d3b57a3059f4f3deb9a00c`
