@@ -44,7 +44,7 @@ describe('restart-loop guard', () => {
   });
 
   /** Simulate one full boot with resumable checkpoints pending. Returns trip state. */
-  function boot(now: number, maxRestarts = DEFAULT_MAX, windowMs = DEFAULT_WINDOW) {
+  function boot(now: number, maxRestarts: number = DEFAULT_MAX, windowMs: number = DEFAULT_WINDOW) {
     const interrupted = markBootInProgress(statePath, now);
     if (!interrupted) return { tripped: false, bootsInWindow: 0, interrupted };
     const result = checkAndRecordInterruptedBoot({ statePath, maxRestarts, windowMs, now });

@@ -21,6 +21,11 @@ import { join } from 'node:path';
 describe('T5 — startup resume gate consults the restart-loop guard', () => {
   let dir: string;
   let savedInstanceConfig: string | undefined;
+  // config.ts repoints process.env.TMPDIR into the instance data dir on import.
+  // Capture it before load() mutates it so afterEach restores the isolated
+  // TMPDIR — otherwise the next beforeEach's mkdtemp(tmpdir()) targets this
+  // test's already-removed dir and fails ENOENT.
+  let savedTmpdir: string | undefined;
 
   function instanceConfig(overrides: Record<string, unknown> = {}) {
     return {
@@ -43,6 +48,7 @@ describe('T5 — startup resume gate consults the restart-loop guard', () => {
 
   beforeEach(() => {
     savedInstanceConfig = process.env.INSTANCE_CONFIG;
+    savedTmpdir = process.env.TMPDIR;
     dir = mkdtempSync(join(tmpdir(), 'ws-rlg-gate-'));
     vi.resetModules();
   });
@@ -50,6 +56,8 @@ describe('T5 — startup resume gate consults the restart-loop guard', () => {
   afterEach(() => {
     if (savedInstanceConfig === undefined) delete process.env.INSTANCE_CONFIG;
     else process.env.INSTANCE_CONFIG = savedInstanceConfig;
+    if (savedTmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = savedTmpdir;
     rmSync(dir, { recursive: true, force: true });
     vi.resetModules();
   });
