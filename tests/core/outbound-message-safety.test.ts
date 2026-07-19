@@ -801,7 +801,30 @@ describe('isOperatorDmPeer', () => {
       expect(payload).toMatchObject({ chatJidForm: 'sms', outcome: 'spoof-attempt-denied' });
       // N14: never the raw chatJid/phone digits in the log line.
       expect(JSON.stringify(payload)).not.toContain(OWNER_PHONE);
-      expect(message).toMatch(/sms peer/i);
+      // The message is static/form-neutral (B21-C); the form lives in the
+      // structured chatJidForm field asserted above.
+      expect(message).toMatch(/unauthenticated peer/i);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('[B21-C form fidelity] a non-@sms unauthenticated form bearing admin digits logs its ACTUAL JID form (suffix after @), not a hardcoded sms label', () => {
+    const db = openDbWithLidMapping();
+    try {
+      // '@c.us' is unauthenticated (not @s.whatsapp.net/@lid) and its domain
+      // contributes no digits, so resolvePhoneFromJid + isAdminPhone still see
+      // the admin digits — the spoof-warn branch fires. The unauthenticated
+      // branch catches EVERY non-authenticated form, so the logged form must
+      // be the real '@' suffix, not a hardcoded 'sms' label.
+      const spoofedCUsJid = `${OWNER_PHONE}@c.us`;
+      const result = isOperatorDmPeer(spoofedCUsJid, false, db, ADMIN_PHONES);
+      expect(result).toBe(false);
+      expect(mockAudienceLog.warn).toHaveBeenCalledTimes(1);
+      const [payload] = mockAudienceLog.warn.mock.calls[0] as [Record<string, unknown>, string];
+      expect(payload).toMatchObject({ chatJidForm: 'c.us', outcome: 'spoof-attempt-denied' });
+      // N14: still id-only — never the raw digits.
+      expect(JSON.stringify(payload)).not.toContain(OWNER_PHONE);
     } finally {
       db.close();
     }

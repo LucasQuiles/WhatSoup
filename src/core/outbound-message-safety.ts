@@ -77,9 +77,15 @@ export function isOperatorDmPeer(
     // Do NOT warn on every @sms rejection — that fires on every benign
     // SMS-bridge chat and would be noise, not a never-silent signal.
     if (isAdminPhone(resolvePhoneFromJid(chatJid, db), adminPhones)) {
+      // This branch catches EVERY non-WhatsApp-authenticated form (@sms,
+      // @c.us, @broadcast, …), so log the ACTUAL form — the '@' suffix —
+      // not a hardcoded 'sms' label. Still id-only (N14): the suffix is the
+      // transport domain, never the peer digits.
+      const atIdx = chatJid.indexOf('@');
+      const chatJidForm = atIdx === -1 ? 'unknown' : chatJid.slice(atIdx + 1) || 'unknown';
       audienceLog.warn(
-        { chatJidForm: 'sms', outcome: 'spoof-attempt-denied' },
-        'operator-DM sms peer bore admin-like digits but is not WhatsApp-authenticated — spoof attempt denied',
+        { chatJidForm, outcome: 'spoof-attempt-denied' },
+        'operator-DM unauthenticated peer bore admin-like digits but is not WhatsApp-authenticated — spoof attempt denied',
       );
     }
     return false;
