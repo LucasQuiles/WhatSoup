@@ -389,7 +389,9 @@ const UpdateModal: FC<UpdateModalProps> = ({
         {/* Phase: confirm */}
         {phase === 'confirm' && (
           <p className="text-text-2 text-body">
-            Pull latest code, rebuild, and restart the fleet server?
+            In-place update has been retired — this instance runs an immutable
+            release. Deploy a new release to update it. Requesting an update
+            below will report the same.
           </p>
         )}
 
