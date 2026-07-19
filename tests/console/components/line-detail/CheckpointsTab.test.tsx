@@ -167,12 +167,12 @@ describe('CheckpointsTab — Delivery column (F-UX-3)', () => {
     const row = {
       ...ROW_RESUMABLE,
       conversationKey: 'canonical:key-a',
-      completedDeliveryJid: '11122233344455@lid',
+      completedDeliveryJid: '15550000999@lid',
       completedLogicalTurnId: 'lt-99',
     }
     render(<CheckpointsTab payload={payload({ checkpoints: [row] })} isLoading={false} freshness={FRESH} />)
-    expect(screen.getByText('11122233344455@lid')).toBeTruthy()
-    expect(screen.getByTitle('11122233344455@lid · turn lt-99')).toBeTruthy()
+    expect(screen.getByText('15550000999@lid')).toBeTruthy()
+    expect(screen.getByTitle('15550000999@lid · turn lt-99')).toBeTruthy()
   })
 
   it('renders an em-dash when the completed-delivery identity is absent', () => {
