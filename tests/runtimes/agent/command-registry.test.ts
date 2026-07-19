@@ -41,12 +41,16 @@ describe('COMMAND_REGISTRY', () => {
     expect(COMMAND_REGISTRY.every((c) => c.tier === 'transport-local')).toBe(true);
   });
 
-  it('N17: cross-session admin surfaces are venue-restricted to DM; /new is group-permitting by design (W1-T3 RULING)', () => {
-    // /sessions and /kill-session are cross-session admin surfaces (U6) —
-    // DM-only, enforced via the venue axis (gate:'admin', venue:'dm').
+  it('N17: cross-session admin surfaces are admin-gated and group-permitting (B21-A F3 base parity); /new is group-permitting by design (W1-T3 RULING)', () => {
+    // /sessions and /kill-session are cross-session admin surfaces (U6),
+    // identity-gated (gate:'admin'). Venue is 'any' since B21-A F3: the
+    // pre-registry phone-only gates let admins run these from groups, and the
+    // former venue:'dm' declaration leaned on isAdminMessage's DM-only clause,
+    // which the runtime gate deliberately dropped. The W3 god-priv
+    // 'admin-group' floor lands with its venue-aware gate.
     for (const name of ['sessions', 'kill-session'] as const) {
       expect(getCommandSpec(name).gate).toBe('admin');
-      expect(getCommandSpec(name).venue).toBe('dm');
+      expect(getCommandSpec(name).venue).toBe('any');
     }
     // /new is group-permitting by design (W1-PACKET.md W1-T3 RULING: an admin
     // may /new in a group). Its gate is scope-based ('admin-shared-scope',

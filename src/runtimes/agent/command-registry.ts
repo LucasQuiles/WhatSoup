@@ -11,18 +11,24 @@
 
 /** Who may EXECUTE a command (identity axis). Composes with `venue` (N17):
  *  identity is WHO, venue is WHERE — god-priv needs both.
- *  - 'admin'              : isAdminMessage (authenticated JID + admin-phone +
- *                           DM-only, command-router.ts:9). Cross-session admin
- *                           surfaces (U6) — /sessions, /kill-session.
+ *  - 'admin'              : authenticated admin (isWhatsAppAuthenticatedJid
+ *                           FIRST — QR-143 @sms-closing — then admin-phone),
+ *                           enforced inline in runtime.ts. Group-permitting
+ *                           since B21-A F3 (base parity: the pre-registry
+ *                           phone-only gates let admins run these from groups;
+ *                           isAdminMessage's DM-only clause is deliberately NOT
+ *                           used). Cross-session admin surfaces (U6) —
+ *                           /sessions, /kill-session.
  *  - 'admin-shared-scope' : admin required ONLY where the command's effect hits
  *                           SHARED state (single/shared session-scope, or a
  *                           per_chat GROUP — WG-5); ungated in a per_chat 1:1 DM,
  *                           where the effect is scoped to the sender's own
  *                           conversation. The identity check itself is
- *                           group-permitting (an admin may act in a group,
- *                           unlike plain `isAdminMessage`) and @sms-closing
- *                           (requires isWhatsAppAuthenticatedJid). Used by /new
- *                           — enforced in runtime.ts, not by isAdminMessage. */
+ *                           group-permitting (an admin may act in a group) and
+ *                           @sms-closing (requires isWhatsAppAuthenticatedJid).
+ *                           With EMPTY adminPhones the gate stays open (B21-A
+ *                           F2: a no-admin instance has no other reset path).
+ *                           Used by /new — enforced in runtime.ts. */
 export type CommandGate = 'none' | 'admin' | 'admin-shared-scope';
 
 /** /help presentation strings per gate value — the renderer's single lookup
@@ -47,9 +53,10 @@ export const GATE_PRESENTATION: Record<CommandGate, { listTag: string; detailNot
  *  owner-named admin group — NEVER a shared project group — in ADDITION to the
  *  identity gate. Read as a TRUST-FLOOR (least-restrictive venue accepted); a
  *  stricter venue always satisfies a more-permissive one (DM ⊆ admin-group):
- *  - 'dm'          : direct message only — the strictest. Already enforced by
- *                    isAdminMessage's isGroup === false clause, so Phase-1 admin
- *                    commands are venue:'dm' for free.
+ *  - 'dm'          : direct message only — the strictest. NO Phase-1 entry uses
+ *                    it since B21-A F3: the 'admin' identity gate is
+ *                    group-permitting (base parity), so a 'dm' declaration would
+ *                    need its own venue-aware enforcement to be honest.
  *  - 'admin-group' : DM OR an owner-named admin group (DM is stricter, so it also
  *                    passes) — NEVER a shared project group. This is N17's god-priv
  *                    floor. Enforcing it needs a VENUE-AWARE gate (plain
@@ -124,8 +131,9 @@ export interface CommandSpec {
   readonly tier: CommandTier;
   readonly gate: CommandGate;
   /** N17 venue gate (see CommandVenue). OPTIONAL — omitted = 'any' (read-only
-   *  default). Phase-1 admin commands set 'dm' (already enforced by
-   *  isAdminMessage's DM-only clause); W3/Phase-2 god-priv sets 'admin-group'. */
+   *  default). Phase-1 admin commands are venue:'any' (B21-A F3 base parity:
+   *  the identity gate is group-permitting and no venue-aware enforcement
+   *  exists yet); W3/Phase-2 god-priv sets 'admin-group'. */
   readonly venue?: CommandVenue;
   readonly visibility: CommandVisibility;
   /** Fields rendered operator-only; dropped from the end-user render (D3). */
@@ -199,7 +207,10 @@ export const COMMAND_REGISTRY = [
     syntax: '/sessions',
     tier: 'transport-local',
     gate: 'admin',
-    venue: 'dm', // cross-session admin surface (U6: DM+admin); isAdminMessage DM-only enforces it
+    // B21-A F3: group-permitting (base parity — the pre-registry gate was
+    // phone-only, admins could /sessions from groups). The former 'dm' relied on
+    // isAdminMessage's DM-only clause, which the gate deliberately dropped.
+    venue: 'any',
     visibility: 'operator',
     errorClasses: ['not-authorized', 'source-unreachable:agent_sessions', 'internal'],
     renderContract: {
@@ -213,7 +224,9 @@ export const COMMAND_REGISTRY = [
     syntax: '/kill-session [N]', // E1: `<N>` is eaten by WhatsApp — use [N]
     tier: 'transport-local',
     gate: 'admin',
-    venue: 'dm', // god-priv (destructive); isAdminMessage DM-only enforces it
+    // B21-A F3: group-permitting (base parity, see /sessions above). The W3
+    // god-priv 'admin-group' venue floor lands with its venue-aware gate.
+    venue: 'any',
     visibility: 'operator',
     errorClasses: ['not-authorized', 'invalid-arg', 'internal'],
     renderContract: { asOf: false }, // receipt names the killed session (old→new), no live-metric read

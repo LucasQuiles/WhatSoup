@@ -14403,6 +14403,58 @@ describe('AgentRuntime', () => {
       expect(sentMessages.map((m) => m.text)).toEqual([]); // denied = silent ignore
     });
 
+    it('allows /kill-session for an authenticated admin in a GROUP (base parity — DM-only clause removed, B21-A F3)', async () => {
+      // The deleted pre-registry gates were phone-only, so admins could
+      // /sessions and /kill-session from groups; isAdminMessage's DM-only
+      // clause silently removed that capability. The 'admin' gate must use the
+      // authenticated-admin core WITHOUT the DM restriction — the QR-143
+      // authenticated-JID check stays FIRST (see the @sms sibling below), but
+      // an authenticated admin in a group is authorized.
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+      mockSession.getStatus.mockReturnValue({
+        active: true, pid: 321, sessionId: 'sess-single',
+        startedAt: new Date(Date.now() - 60_000).toISOString(), messageCount: 5, lastMessageAt: null,
+      });
+      (runtime as unknown as { session: typeof mockSession; activeChatJid: string | null }).session = mockSession;
+      (runtime as unknown as { activeChatJid: string | null }).activeChatJid = 'owner@s.whatsapp.net';
+      await sendAndDrain(runtime, makeMsg({
+        content: '/kill-session 1',
+        senderJid: adminSender,
+        chatJid: 'group-1@g.us',
+        isGroup: true,
+      }));
+      expect(mockSession.shutdown).toHaveBeenCalledWith(false);
+      expect(sentMessages.map((m) => m.text).some((t) => t.includes('Session killed'))).toBe(true);
+    });
+
+    it('denies /kill-session to an @sms spoof of the admin digits in a GROUP (QR-143 stays closed after the DM-clause removal, B21-A F3)', async () => {
+      // Same spoof shape as the DM @sms test above, aimed at the group venue
+      // the F3 fix opens: admin PHONE digits on a non-WhatsApp-authenticated
+      // transport. The authenticated-JID check runs FIRST, so restoring group
+      // capability must NOT re-open the QR-143 hole.
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+      mockSession.getStatus.mockReturnValue({
+        active: true, pid: 321, sessionId: 'sess-single',
+        startedAt: new Date(Date.now() - 60_000).toISOString(), messageCount: 5, lastMessageAt: null,
+      });
+      (runtime as unknown as { session: typeof mockSession; activeChatJid: string | null }).session = mockSession;
+      (runtime as unknown as { activeChatJid: string | null }).activeChatJid = 'owner@s.whatsapp.net';
+      await sendAndDrain(runtime, makeMsg({
+        content: '/kill-session 1',
+        senderJid: '15550100001@sms',
+        chatJid: 'group-1@g.us',
+        isGroup: true,
+      }));
+      expect(mockSession.shutdown).not.toHaveBeenCalled();
+      expect(sentMessages.map((m) => m.text).some((t) => t.includes('Session killed'))).toBe(false);
+    });
+
     it('still allows /sessions for the real admin over an authenticated DM JID (positive regression)', async () => {
       const db = makeDbWithTokenRow({ total_input_tokens: 1500, total_output_tokens: 700 });
       const { messenger, sentMessages } = makeMessenger();

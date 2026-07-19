@@ -162,7 +162,6 @@ import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } f
 import { config } from '../../config.ts';
 import { canonicalConversationKey, resolvePhoneFromJid } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
-import { isAdminMessage } from '../../core/command-router.ts';
 import { getCommandSpec } from './command-registry.ts';
 import { matchImperative, extractImperativeTarget } from '../../core/substrate/inline-extractor.ts';
 import { createBead } from '../../core/substrate/beads.ts';
@@ -3719,9 +3718,17 @@ export class AgentRuntime implements Runtime {
 
     if (classified.type === 'local') {
       const spec = getCommandSpec(classified.command);
-      // Gate enforcement by gate class:
-      //  - 'admin'              → isAdminMessage (authenticated + admin-phone + DM-only):
-      //                           /sessions, /kill-session.
+      // Gate enforcement by gate class. Both gated classes share the same
+      // authenticated-admin core: isWhatsAppAuthenticatedJid FIRST (QR-143 —
+      // a non-authenticated transport like @sms resolves to the SAME bare
+      // phone as the WhatsApp admin but its sender-ID is spoofable, so the
+      // transport check must precede the phone match), THEN admin-phone.
+      //  - 'admin'              → authenticated admin, any venue (B21-A F3, base
+      //                           parity: the deleted pre-registry gates were
+      //                           phone-only, so admins could run these from
+      //                           groups; isAdminMessage's DM-only clause is
+      //                           deliberately NOT used here): /sessions,
+      //                           /kill-session.
       //  - 'admin-shared-scope' → /new: admin required ONLY where the reset hits SHARED
       //                           session state (single/shared mode, or a per_chat GROUP —
       //                           WG-5; this.session is one session across ALL chats there,
@@ -3734,14 +3741,17 @@ export class AgentRuntime implements Runtime {
       //                           security posture. The empty-set exemption is THIS gate
       //                           only — plain 'admin' commands were admin-gated on base
       //                           and stay denied when no admin is configured.
+      // Lazy so gate:'none' commands never pay the resolvePhoneFromJid DB read.
+      const isAuthenticatedAdmin = (): boolean =>
+        isWhatsAppAuthenticatedJid(msg.senderJid) &&
+        isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones);
       const denied =
         spec.gate === 'admin'
-          ? !isAdminMessage(msg, this.db)
+          ? !isAuthenticatedAdmin()
           : spec.gate === 'admin-shared-scope'
             ? (this.sessionScope !== 'per_chat' || msg.isGroup) &&
               config.adminPhones.size > 0 &&
-              !(isWhatsAppAuthenticatedJid(msg.senderJid) &&
-                isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones))
+              !isAuthenticatedAdmin()
             : false;
       if (denied) {
         // NFR-3: unsampled — never silent (V19). ids only, no content (U6).
