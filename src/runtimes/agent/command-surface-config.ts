@@ -56,9 +56,16 @@ export function resolveCommandSurface(
   instance: InstanceCommandSurfaceConfig,
   user: UserSurfacePrefs | null,
 ): EffectiveCommandSurface {
+  // Case-insensitive name matching: classification lowercases command names
+  // (commands.ts classifyInput), so policy lists must case-fold too —
+  // otherwise disabled:['Status'] would silently no-op against the
+  // lowercase catalog name 'status'.
+  const disabledLower = new Set((instance.disabled ?? []).map((n) => n.toLowerCase()));
+  const hiddenLower = new Set((user?.hidden ?? []).map((n) => n.toLowerCase()));
   const commands = catalog.map((spec): EffectiveCommand => {
-    const instanceEnabled = !(instance.disabled?.includes(spec.name) ?? false);
-    const userHidden = user?.hidden?.includes(spec.name) ?? false;
+    const specNameLower = spec.name.toLowerCase();
+    const instanceEnabled = !disabledLower.has(specNameLower);
+    const userHidden = hiddenLower.has(specNameLower);
     return {
       name: spec.name,
       enabled: instanceEnabled && !userHidden, // AND: user narrows only, never widens

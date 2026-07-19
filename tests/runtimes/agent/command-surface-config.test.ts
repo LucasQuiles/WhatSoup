@@ -112,6 +112,35 @@ describe('resolveCommandSurface — narrowing semantics', () => {
   });
 });
 
+describe('resolveCommandSurface — case-insensitive name matching', () => {
+  // Command classification lowercases the command name before lookup
+  // (commands.ts classifyInput: `parts[0].toLowerCase()`), so surface
+  // policy must match catalog names case-insensitively too — otherwise
+  // disabled:['Status'] silently no-ops while /Status still classifies
+  // as the status command.
+  it("instance disabled:['Status'] disables the catalog 'status' command", () => {
+    const instance: InstanceCommandSurfaceConfig = { disabled: ['Status'] };
+    const result = resolveCommandSurface(FIXTURE_CATALOG, instance, null);
+    const status = result.commands.find((c) => c.name === 'status');
+    expect(status?.enabled).toBe(false);
+  });
+
+  it("user hidden:['STATUS'] hides the catalog 'status' command", () => {
+    const user: UserSurfacePrefs = { hidden: ['STATUS'] };
+    const result = resolveCommandSurface(FIXTURE_CATALOG, {}, user);
+    const status = result.commands.find((c) => c.name === 'status');
+    expect(status?.enabled).toBe(false);
+  });
+
+  it('mixed-case entries never disable a DIFFERENT command (only the case-folded match)', () => {
+    const instance: InstanceCommandSurfaceConfig = { disabled: ['Kill-Session'] };
+    const result = resolveCommandSurface(FIXTURE_CATALOG, instance, null);
+    expect(result.commands.find((c) => c.name === 'kill-session')?.enabled).toBe(false);
+    expect(result.commands.find((c) => c.name === 'status')?.enabled).toBe(true);
+    expect(result.commands.find((c) => c.name === 'help')?.enabled).toBe(true);
+  });
+});
+
 describe('resolveCommandSurface — no widening mechanism exists for the user layer', () => {
   it('a user object cast-in with an adversarial "enabled" widening field is ignored (no such field is read)', () => {
     const instance: InstanceCommandSurfaceConfig = { disabled: ['kill-session'] };
