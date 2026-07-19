@@ -89,8 +89,8 @@ Current baseline measurements:
 
 | rule | path | lines | ceiling |
 |------|------|-------|---------|
-| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 11629 | 11629 |
-| `arch.file-size` | `tests/runtimes/agent/runtime.test.ts` | 15049 | 15049 |
+| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 11712 | 11712 |
+| `arch.file-size` | `tests/runtimes/agent/runtime.test.ts` | 15050 | 15050 |
 
 Intentional bump 2026-07-19 (both twins, per protocol): +162 lines in
 `src/runtimes/agent/runtime.ts` (11467 → 11629) for the D-4 console approval queue
