@@ -131,11 +131,11 @@ describe('ApprovalsTab', () => {
     expect(invalidateSpy).not.toHaveBeenCalled()
   })
 
-  it('textFallback entries render read-only with the WhatsApp-lane note (no decision buttons)', () => {
+  it('textFallback entries are decidable from the console (v1.1) with the typed-answer note', () => {
     renderTab(<ApprovalsTab payload={payload({ approvals: [TEXT_FALLBACK] })} isLoading={false} freshness={FRESH} lineName={LINE} />)
     expect(screen.getByText('Pick a region?')).toBeTruthy()
-    expect(screen.getByText(/answer in WhatsApp/i)).toBeTruthy()
-    expect(screen.queryByRole('button', { name: 'us-east' })).toBeNull()
+    expect(screen.getByText(/typed answer/i)).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'us-east' })).toBeTruthy()
   })
 
   it('fails closed on readError — error panel, no cards, never a fake-empty queue', () => {
