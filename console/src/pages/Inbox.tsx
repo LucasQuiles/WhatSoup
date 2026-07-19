@@ -322,7 +322,7 @@ export default function Inbox() {
                       variant="ghost"
                       size="xs"
                       onClick={() => setSearchInput('')}
-                      className="c-hover cursor-pointer text-text-3 hover:text-text-2 p-[var(--sp-1)]"
+                      className="c-hover cursor-pointer text-text-2 p-[var(--sp-1)]"
                       title="Clear search"
                       aria-label="Clear search"
                     >

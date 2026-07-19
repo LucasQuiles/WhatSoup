@@ -24,7 +24,7 @@ log (--surface-inset bed, 1px --border-hairline, flush-joins its toolbar, --type
 ```
 
 Level tags (the second non-color channel): E = crit fg + crit border + crit wash · W = warn
-fg/border/wash · I = neutral (`--text-2`, `--border-strong`) · D = `--text-3` + dashed border.
+fg/border/wash · I = neutral (`--text-2`, `--border-strong`) · D = `--text-2` + dashed border (amended 2026-07-19, DD-8 close: the letter is a sole-rendering datum carrier; the dashed border + quiet border ink keep debug distinct from info).
 
 ## Toolbar contract
 
