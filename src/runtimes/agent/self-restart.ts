@@ -17,7 +17,10 @@ import { z } from 'zod';
 import { emitAlertChecked } from '../../lib/emit-alert.ts';
 import { readFreshMarkerSync, writePrivateJsonMarkerSync } from '../../lib/private-fs.ts';
 import { createChildLogger } from '../../logger.ts';
-import { isPnJid, isGroupJid } from '../../core/jid-constants.ts';
+import { isPnJid, isGroupJid, isWhatsAppAuthenticatedJid } from '../../core/jid-constants.ts';
+import { resolvePhoneFromJid } from '../../core/access-list.ts';
+import { isAdminPhone } from '../../lib/phone.ts';
+import type { Database } from '../../core/database.ts';
 import type { SessionContext, ToolDeclaration } from '../../mcp/types.ts';
 
 const log = createChildLogger('self-restart');
@@ -183,6 +186,45 @@ export function consumeIntentionalRestartMarker(
 }
 
 // ---------------------------------------------------------------------------
+// Admin gate (QR-047 + QR-143)
+// ---------------------------------------------------------------------------
+
+/**
+ * Hard admin gate for `restart_self`. Throws unless the turn's actor is an
+ * instance admin over a WhatsApp-authenticated transport.
+ *
+ * QR-143: gate on `isWhatsAppAuthenticatedJid(actorJid)` BEFORE the phone
+ * match. `resolvePhoneFromJid` collapses `<admin-digits>@sms` to the SAME bare
+ * phone as a real WhatsApp admin, but @sms sender-ID is spoofable — without the
+ * transport gate a spoofed SMS could induce a service restart (availability
+ * DoS / instance-wide session reset). Mirrors `substrate.ts` `assertAdmin`.
+ *
+ * Exported so both directions (authenticated-admin ALLOW, @sms DENY) are
+ * unit-testable independently of the inline runtime wiring.
+ */
+export function assertRestartSelfAdmin(
+  session: SessionContext,
+  deps: { db: Database; adminPhones: Set<string> },
+): void {
+  const actorJid = session.actorJid ?? null;
+  // QR-143: authenticated-transport gate FIRST — a spoofable @sms actor that
+  // collapses to admin digits must never pass, so the transport check precedes
+  // the phone match. The explicit `=== null` also narrows actorJid to a
+  // non-null string for the resolver below.
+  if (actorJid === null || !isWhatsAppAuthenticatedJid(actorJid)) {
+    throw new Error(
+      `restart_self is admin-only: actor "${actorJid ?? 'unresolved'}" is on a non-WhatsApp-authenticated transport and cannot be an admin`,
+    );
+  }
+  const phone = resolvePhoneFromJid(actorJid, deps.db);
+  if (!phone || !isAdminPhone(phone, deps.adminPhones)) {
+    throw new Error(
+      `restart_self is admin-only: caller "${phone ?? 'unresolved'}" is not on the instance admin list`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // MCP tool factory
 // ---------------------------------------------------------------------------
 
@@ -209,10 +251,11 @@ export interface RestartSelfToolDeps {
   /** Injected for tests; defaults to the real triggerSelfRestart bound by the runtime. */
   trigger: (opts: TriggerSelfRestartOptions) => Promise<{ ok: boolean; markerPath: string }>;
   /**
-   * Admin gate (QR-047): throws if the turn's actor is not an instance admin.
-   * Wired at the composition root from the same resolvePhoneFromJid+isAdminPhone
-   * check the other admin-gated paths use, so a non-admin in an auto-responded
-   * chat cannot induce the agent to restart the service (prompt-injection DoS).
+   * Admin gate (QR-047 + QR-143): throws if the turn's actor is not an instance
+   * admin over a WhatsApp-authenticated transport. Wired at the composition root
+   * to `assertRestartSelfAdmin`, so a non-admin in an auto-responded chat — or a
+   * spoofed `<admin-digits>@sms` sender — cannot induce the agent to restart the
+   * service (prompt-injection / SMS-spoof DoS).
    */
   assertAdmin: (session: SessionContext) => void;
 }
@@ -231,10 +274,17 @@ export function buildRestartSelfTool(deps: RestartSelfToolDeps): ToolDeclaration
     targetMode: 'caller-supplied',
     replayPolicy: 'unsafe',
     core: false,
+    // QR-143 backstop: unlike every substrate admin tool, restart_self had NO
+    // `sensitive:true`, so the broken in-handler gate was the ONLY check. Marking
+    // it sensitive routes every call through the registry's central R1 authorizer
+    // (the same authenticated-admin predicate), so a spoofed @sms actor is denied
+    // even if the in-handler gate is ever bypassed — defense in depth.
+    sensitive: true,
     handler: async (params, session) => {
-      // QR-047: hard admin gate FIRST — before ack or restart. A non-admin actor
-      // (e.g. an auto-responded chat trying a prompt-injection DoS) must not be able
-      // to restart the service. Matches the assertAdmin discipline of substrate.ts.
+      // QR-047 + QR-143: hard admin gate FIRST — before ack or restart. A non-admin
+      // actor (e.g. an auto-responded chat trying a prompt-injection DoS, or a
+      // spoofed <admin-digits>@sms sender) must not be able to restart the service.
+      // Matches the assertAdmin discipline of substrate.ts.
       deps.assertAdmin(session);
       const { reason, code } = RestartSelfSchema.parse(params);
       const chatJid = deps.resolveChatJid();

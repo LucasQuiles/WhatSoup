@@ -38,7 +38,7 @@ import { ensureHandoffArtifactSchema, getHandoffArtifact, deleteHandoffArtifact 
 import { buildHandoffPrelude } from './handoff-prelude.ts';
 import type { AgentProvider } from './providers/types.ts';
 import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
-import { buildRestartSelfTool, triggerSelfRestart, type ServiceRestarter } from './self-restart.ts';
+import { buildRestartSelfTool, triggerSelfRestart, assertRestartSelfAdmin, type ServiceRestarter } from './self-restart.ts';
 import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
 import { sendTracked } from '../../core/durability.ts';
 import { classifyErrorForInbound } from '../../core/inbound-failure-class.ts';
@@ -3420,15 +3420,10 @@ export class AgentRuntime implements Runtime {
         },
         serviceManager: serviceRestarter,
         trigger: triggerSelfRestart,
-        // QR-047: admin gate, same resolve+isAdminPhone check the other admin paths use.
-        assertAdmin: (session) => {
-          const phone = session.actorJid ? resolvePhoneFromJid(session.actorJid, this.db) : null;
-          if (!phone || !isAdminPhone(phone, config.adminPhones)) {
-            throw new Error(
-              `restart_self is admin-only: caller "${phone ?? 'unresolved'}" is not on the instance admin list`,
-            );
-          }
-        },
+        // QR-047 + QR-143: admin gate hoisted to assertRestartSelfAdmin — gates on
+        // authenticated transport BEFORE the phone match, so a spoofed @sms actor
+        // that collapses to admin digits cannot induce a restart.
+        assertAdmin: (session) => assertRestartSelfAdmin(session, { db: this.db, adminPhones: config.adminPhones }),
       }));
     }
 
