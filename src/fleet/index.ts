@@ -11,6 +11,7 @@ import { FleetDbReader } from './db-reader.ts';
 import { createStaticHandler } from './static.ts';
 import { createLivenessHandler } from './livez.ts';
 import { handleGetLines, handleGetLine, handleGetLineProviderStatus } from './routes/lines.ts';
+import { handleGetLineCheckpoints } from './routes/checkpoints.ts';
 import { handleGetProviders } from './routes/providers.ts';
 import { handlePutCredential, handleDeleteCredential, handleVerifyCredential, handleGetCredential, setExtraCredentialServices, type CredentialDeps } from './routes/credentials.ts';
 import { handleGetSilences, handleAddSilence, handleRemoveSilence } from './routes/silence.ts';
@@ -113,6 +114,7 @@ type RouteParamsByHandler = {
   getLines: EmptyRouteParams;
   getLine: NameRouteParams;
   getLineProviderStatus: NameRouteParams;
+  getLineCheckpoints: NameRouteParams;
   getSilences: EmptyRouteParams;
   addSilence: EmptyRouteParams;
   removeSilence: NameRouteParams;
@@ -181,6 +183,7 @@ const EMPTY_ROUTE_PARAMS: EmptyRouteParams = {};
 const NAME_ROUTE_HANDLERS = new Set<NamedRouteKey>([
   'getLine',
   'getLineProviderStatus',
+  'getLineCheckpoints',
   'putCredential',
   'deleteCredential',
   'verifyCredential',
@@ -239,6 +242,7 @@ const handlers: { [K in RouteKey]: RouteHandler<K> } = {
   getLines:     (req, res, deps, _params) => handleGetLines(req, res, deps),
   getLine:      (req, res, deps, params) => handleGetLine(req, res, deps, params),
   getLineProviderStatus: (req, res, deps, params) => handleGetLineProviderStatus(req, res, deps, params),
+  getLineCheckpoints: (req, res, deps, params) => handleGetLineCheckpoints(req, res, deps, params),
   getSilences:  (req, res, _deps, _params) => handleGetSilences(req, res),
   addSilence:   (req, res, _deps, _params) => handleAddSilence(req, res),
   removeSilence: (req, res, _deps, params) => handleRemoveSilence(req, res, { instance: params.name }),
@@ -333,6 +337,7 @@ const ROUTES = [
   { method: 'POST',  path: /^\/api\/lines$/, handler: 'createLine' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/exists$/, handler: 'checkExists' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/provider-status$/, handler: 'getLineProviderStatus' },
+  { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/checkpoints$/, handler: 'getLineCheckpoints' },
   { method: 'DELETE', path: /^\/api\/lines\/(?<name>[^/]+)$/, handler: 'deleteLine' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)$/, handler: 'getLine' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/chats$/, handler: 'getChats' },

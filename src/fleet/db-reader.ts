@@ -52,6 +52,24 @@ export interface DbStats {
 
 export type DbResult<T> = { ok: true; data: T } | { ok: false; error: string };
 
+/** Row shape for the checkpoint browser surface (GET /api/lines/:name/checkpoints). */
+export interface CheckpointRow {
+  conversationKey: string;
+  sessionId: string | null;
+  sessionStatus: string;
+  checkpointVersion: number;
+  claudePid: number | null;
+  workspacePath: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedScope: string | null;
+  completedDeliveryJid: string | null;
+  completedLogicalTurnId: string | null;
+  /** Engine's exact resumable filter (src/core/durability.ts:501-506):
+   *  session_status IN ('active','suspended') AND session_id IS NOT NULL. */
+  resumable: boolean;
+}
+
 const READ_ONLY_DATABASE_OPTIONS: ConstructorParameters<typeof DatabaseSync>[1] = {
   readOnly: true,
 };
@@ -176,6 +194,41 @@ export class FleetDbReader {
         isGroup: !!r.is_group,
         lastMessagePreview: null,
         lastMessageSender: null,
+      }));
+    });
+  }
+
+  /** List session_checkpoints for the checkpoint browser tab — newest first,
+   *  capped at 500. Read-only; the `resumable` flag mirrors the durability
+   *  engine's exact startup-resume filter so the console never invents its
+   *  own definition of what would resume on restart. */
+  getCheckpoints(name: string, dbPath: string): DbResult<CheckpointRow[]> {
+    return this.query(name, dbPath, (db) => {
+      const rows = db.prepare(`
+        SELECT
+          conversation_key, session_id, session_status, checkpoint_version,
+          claude_pid, workspace_path, created_at, updated_at,
+          completed_scope, completed_delivery_jid, completed_logical_turn_id,
+          CASE WHEN session_status IN ('active','suspended') AND session_id IS NOT NULL
+               THEN 1 ELSE 0 END AS resumable
+        FROM session_checkpoints
+        ORDER BY updated_at DESC
+        LIMIT 500
+      `).all() as any[];
+
+      return rows.map((r) => ({
+        conversationKey: r.conversation_key,
+        sessionId: r.session_id,
+        sessionStatus: r.session_status,
+        checkpointVersion: r.checkpoint_version,
+        claudePid: r.claude_pid,
+        workspacePath: r.workspace_path,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at,
+        completedScope: r.completed_scope,
+        completedDeliveryJid: r.completed_delivery_jid,
+        completedLogicalTurnId: r.completed_logical_turn_id,
+        resumable: r.resumable === 1,
       }));
     });
   }
