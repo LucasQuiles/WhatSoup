@@ -16,9 +16,15 @@
 //      Lid refs probe the '@lid'-keyed contact row (contacts-sync stores raw
 //      Baileys ids with canonical_phone = bare lid digits, B25 F6) AND the
 //      lid_mappings-resolved phone row (via resolveLid — L1.5 disk fallback
-//      and heal-back included, B25 F5).
+//      and heal-back included, B25 F5). Phone-origin refs probe the REVERSE
+//      direction too: their known lid alias forms via resolveLidsForPhone
+//      (B27 — the real names of a phone-keyed DM often live only under the
+//      sibling '<lid>@lid' rows).
 //   4. messages.sender_name    — most recent non-blank push name observed on
-//      a message from the jid (richly populated per the B25 data survey)
+//      a message from the jid (richly populated per the B25 data survey).
+//      DIGIT-ONLY push names are rejected (B27): a name that is nothing but
+//      its own number (phone-as-push-name) is not a name — skip to the next
+//      candidate/rung instead of rendering the bare digit string.
 //   5. formatted phone (+digits) — ONLY for refs proven phone-origin or with
 //      a lid→phone mapping; never fabricated from a bare/unmapped lid (B25 F1)
 //   6. the raw ref, unchanged  — last resort; NEVER throws on a miss
@@ -51,7 +57,7 @@ import {
   bareNumber,
   normalizeLid,
 } from './jid-constants.ts';
-import { resolveLid } from './lid-resolver.ts';
+import { resolveLid, resolveLidsForPhone } from './lid-resolver.ts';
 import { isPhoneLocal } from '../lib/phone.ts';
 
 /**
@@ -71,6 +77,18 @@ const LID_SUSPECT_MIN_DIGITS = 12;
 /** Non-empty trimmed string, else null — blank DB values are misses. */
 function nonEmpty(value: unknown): string | null {
   return typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
+}
+
+/**
+ * Rung-4 guard (B27): a push name that is nothing but digits — its own
+ * number, phone-as-push-name — is not a name. Treat it as a miss so the
+ * ladder tries the next candidate jid / rung; even the terminal fallbacks
+ * (formatted '+phone', raw ref) are more honest than bare digits posing as
+ * a resolved name.
+ */
+function nonDigitName(value: unknown): string | null {
+  const name = nonEmpty(value);
+  return name !== null && /^\d+$/.test(name) ? null : name;
 }
 
 // ── Prepared-statement cache ────────────────────────────────────────────────
@@ -157,6 +175,21 @@ function lidToPhone(db: Database, lidLocal: string): string | null {
 }
 
 /**
+ * REVERSE direction (B27): the known lid alias forms of a phone-origin ref,
+ * as full '@lid' jids, via the resolution service; fail-open to none. The
+ * live defect class: a phone-keyed DM whose pn rows carry only a
+ * phone-as-push-name while every real name lives under the mapped
+ * '<lid>@lid' sibling rows.
+ */
+function phoneLidAliasJids(db: Database, phoneLocal: string): string[] {
+  try {
+    return resolveLidsForPhone(db, phoneLocal).map(toLidJid);
+  } catch {
+    return [];
+  }
+}
+
+/**
  * The typed origin of a chat ref: which keys to probe the name tables with,
  * which jids may reach the contact/sender-name rungs, and whether a formatted
  * phone may be rendered at all (B25 F1: only refs proven phone-origin, or
@@ -231,11 +264,13 @@ function classifyRef(db: Database, ref: string): RefShape {
     const local = normalizeLid(bareNumber(ref)); // device suffix stripped
     if (isLidJid(ref)) return lidShape(db, ref, local);
     if (isPnJid(ref)) {
-      // Proven phone-origin: the '@s.whatsapp.net' domain is the proof.
+      // Proven phone-origin: the '@s.whatsapp.net' domain is the proof. The
+      // known lid alias forms ride along AFTER the phone's own keys (B27).
       const pnJid = toPersonalJid(local);
+      const lidJids = phoneLidAliasJids(db, local);
       return {
-        probeKeys: dedupe([ref, pnJid, local]),
-        contactJids: [pnJid],
+        probeKeys: dedupe([ref, pnJid, local, ...lidJids]),
+        contactJids: dedupe([pnJid, ...lidJids]),
         phoneDigits: isPhoneLocal(local) ? local : null,
         isGroup: false,
       };
@@ -280,11 +315,13 @@ function classifyRef(db: Database, ref: string): RefShape {
     };
   }
   // Plausible phone (or non-numeric residue, which the isPhoneLocal gate
-  // keeps off the phone rung).
+  // keeps off the phone rung). This is the live per_chat session-map shape
+  // ('<phone>' bare), so the reverse-lid alias probe applies here too (B27).
   const pnJid = toPersonalJid(local);
+  const lidJids = phoneLidAliasJids(db, local);
   return {
-    probeKeys: dedupe([ref, pnJid]),
-    contactJids: [pnJid],
+    probeKeys: dedupe([ref, pnJid, ...lidJids]),
+    contactJids: dedupe([pnJid, ...lidJids]),
     phoneDigits: isPhoneLocal(local) ? local : null,
     isGroup: false,
   };
@@ -321,9 +358,10 @@ function resolveLadder(db: Database, ref: string): string | null {
     if (name) return name;
   }
 
-  // 4. Most recent push name observed on a message from this jid.
+  // 4. Most recent push name observed on a message from this jid. Digit-only
+  // push names (phone-as-push-name) are misses, not names (B27).
   for (const jid of shape.contactJids) {
-    const name = nonEmpty(getRow(raw, SQL_SENDER_NAME, [jid])?.sender_name);
+    const name = nonDigitName(getRow(raw, SQL_SENDER_NAME, [jid])?.sender_name);
     if (name) return name;
   }
 

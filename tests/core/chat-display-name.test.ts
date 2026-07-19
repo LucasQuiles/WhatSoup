@@ -372,6 +372,80 @@ describe('resolveChatDisplayName — B23 ladder', () => {
 
 // B25 F2/F3: the render choke point — names are remote-controlled, so every
 // owner-facing interpolation sanitizes AND disambiguates in ONE place.
+// B27 fix 2 — a live owner DM rendered as its own digit string ('<phone>
+// (…0919)') because (a) the pn jid's push name IS its own number
+// (phone-as-push-name — garbage as a display name), and (b) the REAL name
+// lives under the sibling LID identity (a named '<lid>@lid' message history,
+// mapped to the phone in lid_mappings) which the resolver never probed: it
+// only walked lid→phone, never phone→lid. Numbers below are synthetic but
+// keep the live structure exactly: 11-digit NANP-style phone local whose push
+// name equals the number, 14-digit lid sibling, one lid_mappings row.
+describe('B27 — digit push-name garbage + reverse-lid probe', () => {
+  let db: DatabaseSync;
+
+  const LIVE_PHONE = '15550990919';
+  const LIVE_PN_JID = '15550990919@s.whatsapp.net';
+  const LIVE_LID = '11111112768547';
+  const LIVE_LID_JID = '11111112768547@lid';
+
+  beforeEach(() => {
+    db = makeDb();
+  });
+
+  function seedLiveShape(): void {
+    // pn-jid history push-named with its own number (the garbage rung-4 hit).
+    db.prepare('INSERT INTO messages (sender_jid, sender_name, timestamp) VALUES (?, ?, ?)')
+      .run(LIVE_PN_JID, LIVE_PHONE, 300);
+    // The real name lives under the sibling lid identity.
+    db.prepare('INSERT INTO messages (sender_jid, sender_name, timestamp) VALUES (?, ?, ?)')
+      .run(LIVE_LID_JID, 'Lucas', 200);
+    // lid_mappings knows lid → phone; the resolver must walk it in REVERSE.
+    db.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+      .run(LIVE_LID, LIVE_PN_JID);
+  }
+
+  it('the exact live shape resolves the lid-sibling name, not the digit push name (bare key)', () => {
+    seedLiveShape();
+    expect(resolveChatDisplayName(db, LIVE_PHONE)).toBe('Lucas');
+  });
+
+  it('the exact live shape resolves for the full pn-jid ref too', () => {
+    seedLiveShape();
+    expect(resolveChatDisplayName(db, LIVE_PN_JID)).toBe('Lucas');
+  });
+
+  it('the owner render becomes "Lucas (…0919)", not the b26 digit render', () => {
+    seedLiveShape();
+    expect(formatChatRefForOwner(db, LIVE_PHONE)).toBe('Lucas (…0919)');
+  });
+
+  it('a digit-only push name with NO lid alias falls to the formatted phone, never the bare digits', () => {
+    db.prepare('INSERT INTO messages (sender_jid, sender_name, timestamp) VALUES (?, ?, ?)')
+      .run(LIVE_PN_JID, LIVE_PHONE, 300);
+    expect(resolveChatDisplayName(db, LIVE_PHONE)).toBe(`+${LIVE_PHONE}`);
+  });
+
+  it('a digit-only push name on a LID ref is also rejected (raw-ref fallback, no fake phone)', () => {
+    db.prepare('INSERT INTO messages (sender_jid, sender_name, timestamp) VALUES (?, ?, ?)')
+      .run('11111110000888@lid', '11111110000888', 100);
+    expect(resolveChatDisplayName(db, '11111110000888@lid')).toBe('11111110000888@lid');
+  });
+
+  it('an @lid-keyed CONTACT row is reachable through the reverse-lid probe', () => {
+    db.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+      .run(LIVE_LID, LIVE_PN_JID);
+    db.prepare('INSERT INTO contacts (jid, canonical_phone, display_name) VALUES (?, ?, ?)')
+      .run(LIVE_LID_JID, LIVE_LID, 'Lucas Contact');
+    expect(resolveChatDisplayName(db, LIVE_PHONE)).toBe('Lucas Contact');
+  });
+
+  it('a non-digit push name still wins rung 4 unchanged', () => {
+    db.prepare('INSERT INTO messages (sender_jid, sender_name, timestamp) VALUES (?, ?, ?)')
+      .run(LIVE_PN_JID, 'Push Lucas', 300);
+    expect(resolveChatDisplayName(db, LIVE_PHONE)).toBe('Push Lucas');
+  });
+});
+
 describe('sanitizeDisplayNameForRender / formatChatRefForOwner — B25 F2/F3', () => {
   let db: DatabaseSync;
 
