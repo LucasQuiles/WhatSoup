@@ -4618,6 +4618,120 @@ describe('AgentRuntime', () => {
     expect(text).toContain('Last activity:');
   });
 
+  // ── B26 item 3: /status shows the model, token counts, and context budget ──
+  // Owner ruling: '/status should show more than provider default — model
+  // should be explicit, show the session's current token counts, session
+  // limits'. Model follows the same honesty rule as /model status
+  // ('(configured)' label; the served weight is unobservable). Token counts
+  // come from the agent_sessions denorm columns; the context budget pairs the
+  // since-last-compact quantity maybeStartAutoCompact actually compares with
+  // the threshold the runtime actually applies (configured, else the 150k
+  // default).
+
+  it('B26: /status renders the configured model, token counts, and the auto-compact context budget', async () => {
+    const cfg = mockConfig as unknown as Record<string, unknown>;
+    cfg.agentProvider = 'claude-cli';
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      mockActiveAgentSession(42);
+      mockSession.getProviderId.mockReturnValue('claude-cli');
+      mockGetSessionTokenSnapshot.mockReturnValue({
+        totalInputTokens: 96_200,
+        totalOutputTokens: 4_100,
+        totalCacheReadTokens: 0,
+        lastCompactInputTokens: 0,
+        lastCompactOutputTokens: 0,
+        lastCompactCacheReadTokens: 0,
+      });
+      const runtime = new AgentRuntime(db, messenger, 'test', { model: 'claude-opus-4-8' });
+      await runtime.start();
+      await runtime.handleMessage(makeMsg({ content: '/status' }));
+      const text = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string)[0];
+      expect(text).toContain('Model: claude-opus-4-8 (configured)');
+      expect(text).toContain('Tokens: 96.2k in / 4.1k out');
+      // Unconfigured threshold → the default the runtime actually applies (150k).
+      expect(text).toContain('Context: 96.2k / 150k before auto-compact');
+    } finally {
+      delete cfg.agentProvider;
+      mockGetSessionTokenSnapshot.mockReturnValue(null);
+    }
+  });
+
+  it('B26: /status context budget uses the configured threshold and the since-last-compact quantity', async () => {
+    const cfg = mockConfig as unknown as Record<string, unknown>;
+    cfg.agentProvider = 'claude-cli';
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      mockActiveAgentSession(42);
+      mockSession.getProviderId.mockReturnValue('claude-cli');
+      mockGetSessionTokenSnapshot.mockReturnValue({
+        totalInputTokens: 150_000,
+        totalOutputTokens: 500,
+        totalCacheReadTokens: 50_000,
+        lastCompactInputTokens: 40_000,
+        lastCompactOutputTokens: 0,
+        lastCompactCacheReadTokens: 10_000,
+      });
+      const runtime = new AgentRuntime(db, messenger, 'test', { model: 'claude-opus-4-8', autoCompactInputTokens: 200_000 });
+      await runtime.start();
+      await runtime.handleMessage(makeMsg({ content: '/status' }));
+      const text = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string)[0];
+      // (150k + 50k) − (40k + 10k) = 150k consumed since last compact — the
+      // exact quantity the auto-compact trigger compares (runtime.ts:1273-76).
+      expect(text).toContain('Context: 150k / 200k before auto-compact');
+      expect(text).toContain('Tokens: 150k in / 500 out');
+    } finally {
+      delete cfg.agentProvider;
+      mockGetSessionTokenSnapshot.mockReturnValue(null);
+    }
+  });
+
+  it('B26: /status renders an honest not-configured model and omits token lines when no counts are recorded', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    mockActiveAgentSession(42);
+    mockSession.getProviderId.mockReturnValue('claude-cli');
+    mockGetSessionTokenSnapshot.mockReturnValue(null);
+    const runtime = new AgentRuntime(db, messenger); // no model configured
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: '/status' }));
+    const text = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string)[0];
+    expect(text).toContain('Model: provider default (not configured)');
+    expect(text).not.toContain('Tokens:');
+    expect(text).not.toContain('Context:');
+  });
+
+  it('B26: /status suppresses the context budget for a non-claude session (auto-compact cannot run there) but keeps token counts', async () => {
+    const cfg = mockConfig as unknown as Record<string, unknown>;
+    cfg.agentProvider = 'claude-cli';
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      mockActiveAgentSession(42);
+      mockSession.getProviderId.mockReturnValue('codex-cli');
+      mockGetSessionTokenSnapshot.mockReturnValue({
+        totalInputTokens: 2_000,
+        totalOutputTokens: 300,
+        totalCacheReadTokens: 0,
+        lastCompactInputTokens: 0,
+        lastCompactOutputTokens: 0,
+        lastCompactCacheReadTokens: 0,
+      });
+      const runtime = new AgentRuntime(db, messenger, 'test', { model: 'claude-opus-4-8' });
+      await runtime.start();
+      await runtime.handleMessage(makeMsg({ content: '/status' }));
+      const text = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string)[0];
+      expect(text).toContain('Tokens: 2k in / 300 out');
+      expect(text).not.toContain('before auto-compact');
+    } finally {
+      delete cfg.agentProvider;
+      mockGetSessionTokenSnapshot.mockReturnValue(null);
+      mockSession.getProviderId.mockReturnValue('claude-cli');
+    }
+  });
+
   it('/status with no session returns no-session message', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();

@@ -614,6 +614,17 @@ function formatClockForUser(epochMs: number): string {
   return new Date(epochMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
+/**
+ * B26 human-scaled token count: 96_200 → '96.2k', 150_000 → '150k', 500 → '500'.
+ * Same >1000 → one-decimal 'k' formula the /sessions handler inlines, plus a
+ * trailing-'.0' strip so round budgets render '150k', not '150.0k'. The
+ * /sessions inline sites keep their exact pre-B26 output ('2.0k') — do not
+ * swap them onto this helper without updating their pinned renders.
+ */
+function formatTokenCount(count: number): string {
+  return count > 1000 ? `${(count / 1000).toFixed(1).replace(/\.0$/, '')}k` : String(count);
+}
+
 function fallbackRequiresPrimaryProbe(reason: ProviderFallbackReason): boolean {
   // Recovery-probe gating is intentionally BROADER than independent-provider
   // routing (`fallbackRequiresIndependentProbe`, used at the routing call-site).
@@ -3852,13 +3863,58 @@ export class AgentRuntime implements Runtime {
               const lastActivity = status.lastMessageAt
                 ? formatAge(status.lastMessageAt)
                 : 'none';
+              // B26 owner ruling: /status must show the model explicitly, the
+              // session's token counts, and the session limit. Model follows
+              // the SAME honesty rule as /model status (describeRouteModel:
+              // config-derived only, '(configured)' label — the served weight
+              // is unobservable). Defensive typeof mirrors the getProviderId
+              // call site at maybeStartAutoCompact.
+              const statusModelRef =
+                typeof sessionForStatus?.getModelRef === 'function'
+                  ? sessionForStatus.getModelRef()
+                  : undefined;
+              const statusProvider =
+                typeof sessionForStatus?.getProviderId === 'function'
+                  ? sessionForStatus.getProviderId()
+                  : this.agentProvider;
               text =
                 '*Session active*\n' +
                 `PID: \`${status.pid ?? 'unknown'}\`\n` +
                 `Session: \`${sessionShort}\`\n` +
+                `Model: ${this.describeRouteModel(statusModelRef, statusProvider)}\n` +
                 `Started: ${started}\n` +
                 `Messages: ${status.messageCount}\n` +
                 `Last activity: ${lastActivity}`;
+              // B26: session token counts from the agent_sessions denorm
+              // columns (same source as /sessions); omitted honestly when no
+              // row exists yet. The context line pairs the since-last-compact
+              // quantity maybeStartAutoCompact actually compares (input +
+              // cache_read minus the last-compact baseline, :1273-76) with
+              // the threshold the runtime actually applies (configured value,
+              // else DEFAULT_AUTO_COMPACT_INPUT_TOKENS) — and renders ONLY
+              // where auto-compact can genuinely run (claude-cli session,
+              // non-shared scope): a budget meter for a limit that never
+              // fires would be a lie. NO provider quota meters here — that is
+              // the /account lane.
+              const statusRowId = sessionForStatus?.getDbRowId() ?? null;
+              const statusSnap = statusRowId !== null ? getSessionTokenSnapshot(this.db, statusRowId) : null;
+              if (statusSnap) {
+                text +=
+                  `\nTokens: ${formatTokenCount(statusSnap.totalInputTokens)} in / ${formatTokenCount(statusSnap.totalOutputTokens)} out`;
+                if (
+                  statusProvider === 'claude-cli' &&
+                  this.sessionScope !== 'shared' &&
+                  this.autoCompactInputTokens !== undefined
+                ) {
+                  const contextUsed = Math.max(
+                    0,
+                    statusSnap.totalInputTokens + statusSnap.totalCacheReadTokens -
+                      (statusSnap.lastCompactInputTokens + statusSnap.lastCompactCacheReadTokens),
+                  );
+                  text +=
+                    `\nContext: ${formatTokenCount(contextUsed)} / ${formatTokenCount(this.autoCompactInputTokens)} before auto-compact`;
+                }
+              }
             } else {
               text = '_No active session._ Send a message to start one.';
             }

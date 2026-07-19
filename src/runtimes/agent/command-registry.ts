@@ -185,9 +185,20 @@ export const COMMAND_REGISTRY = [
     errorClasses: ['source-unreachable:session', 'internal'],
     // N16: reports live runtime state → asOf render required. W1-T4 de-sensitizes
     // (drops PID); W2 /status+ implements the as-of stamp + degrade-reason (E5).
+    // B26 fields: model is config-INTENT (rendered with an explicit
+    // '(configured)' label — the served weight is unobservable); tokens are
+    // verified runtime state (agent_sessions denorm counters); the context
+    // budget denominator is config-intent (autoCompactInputTokens/default).
     renderContract: {
       asOf: true,
-      fields: { started: 'verified-runtime', messageCount: 'verified-runtime', lastActivity: 'verified-runtime' },
+      fields: {
+        started: 'verified-runtime',
+        messageCount: 'verified-runtime',
+        lastActivity: 'verified-runtime',
+        model: 'config-intent',
+        tokens: 'verified-runtime',
+        context: 'config-intent',
+      },
     },
   },
   {
