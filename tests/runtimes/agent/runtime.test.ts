@@ -315,6 +315,37 @@ vi.mock('../../../src/core/access-list.ts', async (importOriginal) => {
   return actual;
 });
 
+// B21-A F4b: overridable classifier/registry seams to simulate a FUTURE
+// COMMAND_REGISTRY entry the local-command switch has no case for. Default
+// (current == null) delegates to the real implementations, so every other
+// test sees byte-identical behavior.
+const { classifyInputOverrideRef, commandSpecOverrideRef } = vi.hoisted(() => ({
+  classifyInputOverrideRef: { current: null as null | ((text: string) => unknown) },
+  commandSpecOverrideRef: { current: null as null | ((name: string) => unknown) },
+}));
+
+vi.mock('../../../src/runtimes/agent/commands.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/runtimes/agent/commands.ts')>();
+  return {
+    ...actual,
+    classifyInput: ((text: string, opts?: { routingAliases?: boolean }) =>
+      classifyInputOverrideRef.current
+        ? classifyInputOverrideRef.current(text)
+        : actual.classifyInput(text, opts)) as typeof actual.classifyInput,
+  };
+});
+
+vi.mock('../../../src/runtimes/agent/command-registry.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/runtimes/agent/command-registry.ts')>();
+  return {
+    ...actual,
+    getCommandSpec: ((name: string) =>
+      commandSpecOverrideRef.current
+        ? commandSpecOverrideRef.current(name)
+        : actual.getCommandSpec(name as never)) as typeof actual.getCommandSpec,
+  };
+});
+
 // Mock workspace utilities so sandboxPerChat tests don't touch the filesystem
 const { mockChatJidToWorkspace, mockProvisionWorkspace } = vi.hoisted(() => ({
   mockChatJidToWorkspace: vi.fn((_instanceCwd: string, chatJid: string) => {
@@ -8919,7 +8950,7 @@ describe('AgentRuntime', () => {
 
   // @check CHK-067
 // @traces REQ-012.AC-06
-  it('shared: /new is silently ignored for non-admin senders', async () => {
+  it('shared: /new is refused for non-admin senders with a visible denial (B21-A F4a: never silent)', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
 
@@ -8932,8 +8963,9 @@ describe('AgentRuntime', () => {
 
     // handleNew should NOT have been called
     expect(mockSession.handleNew).not.toHaveBeenCalled();
-    // No response sent
-    expect(mockQueue.enqueueText).not.toHaveBeenCalled();
+    // The ONLY reply is the denial notice — no reset ack, no silent drop.
+    const enqueuedTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
+    expect(enqueuedTexts).toEqual(['_Not authorized._']);
   });
 
   // @check CHK-067
@@ -8981,7 +9013,10 @@ describe('AgentRuntime', () => {
     }));
 
     expect(mockSession.handleNew).not.toHaveBeenCalled();
-    expect(mockQueue.enqueueText).not.toHaveBeenCalled();
+    // B21-A F4a: denial is refused-but-visible — the only reply is the notice.
+    const denialTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
+    expect(denialTexts.some((t) => t.includes('Not authorized'))).toBe(true);
+    expect(denialTexts.some((t) => /new session/i.test(t))).toBe(false);
   });
 
   it('single mode: /new with EMPTY adminPhones is allowed for any sender (no-admin instance keeps its only reset path, B21-A F2)', async () => {
@@ -9031,6 +9066,59 @@ describe('AgentRuntime', () => {
 
     expect(sentMessages.map((m) => m.text).some((t) => t.includes('Active Sessions'))).toBe(false);
     expect(sentMessages.map((m) => m.text).some((t) => t.includes('No active sessions'))).toBe(false);
+  });
+
+  describe('B21-A F4: denial visibility + registry-append fall-through', () => {
+    it("replies '_Not authorized._' on a denied 'admin'-gated command (denial is user-visible, never silent)", async () => {
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({
+        content: '/sessions',
+        senderJid: '15550001111@s.whatsapp.net', // not admin
+      }));
+      // The ONLY reply is the denial notice, on the same queue-routed send
+      // path other local-command replies use.
+      const texts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
+      expect(texts).toEqual(['_Not authorized._']);
+      // The gated surface itself stayed refused — no session list on either path.
+      expect(sentMessages.map((m) => m.text)).toEqual([]);
+    });
+
+    it('a registry command with NO switch case falls through loudly as a forwarded turn (never silently swallowed)', async () => {
+      // Simulate a FUTURE COMMAND_REGISTRY entry (Phase-2 '/stats') whose
+      // handler was never added to the local-command switch. Pre-registry, an
+      // unrecognized command was forwarded to the agent CLI; the switch must
+      // preserve that via an explicit default (warn + forward) instead of
+      // swallowing the input with a bogus 'local_command_handled' completion.
+      classifyInputOverrideRef.current = () => ({ type: 'local', command: 'stats', args: undefined });
+      commandSpecOverrideRef.current = () => ({
+        name: 'stats',
+        summary: 'future command without a handler',
+        syntax: '/stats',
+        tier: 'transport-local',
+        gate: 'none',
+        visibility: 'end-user',
+        errorClasses: ['internal'],
+      });
+      try {
+        const db = makeDb();
+        const { messenger } = makeMessenger();
+        const runtime = new AgentRuntime(db, messenger);
+        await runtime.start();
+        await sendAndDrain(runtime, makeMsg({ content: '/stats' }));
+        await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith('/stats'));
+        expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+          expect.objectContaining({ command: 'stats' }),
+          expect.stringContaining('no handler'),
+        );
+      } finally {
+        classifyInputOverrideRef.current = null;
+        commandSpecOverrideRef.current = null;
+      }
+    });
   });
 
   it('non-sandboxed per_chat serializes same-chat messages while spawnSession is pending', async () => {
@@ -14397,10 +14485,10 @@ describe('AgentRuntime', () => {
       await runtime.start();
       // Spoof: admin PHONE digits on a non-WhatsApp-authenticated transport JID.
       await sendAndDrain(runtime, makeMsg({ content: '/kill-session 1', senderJid: '15550100001@sms' }));
-      // RED today: the phone-only gate (runtime.ts:3973) admits this because
-      // resolvePhoneFromJid('...@sms') collapses to the admin phone. GREEN after
-      // convergence: isAdminMessage rejects @sms (not WhatsApp-authenticated).
-      expect(sentMessages.map((m) => m.text)).toEqual([]); // denied = silent ignore
+      // The gated action is refused: nothing rides the admin bypass path
+      // (messenger.sendMessage) — no 'Session killed' receipt, no session list.
+      // (B21-A F4a: the denial itself IS user-visible, via the queue path.)
+      expect(sentMessages.map((m) => m.text)).toEqual([]);
     });
 
     it('allows /kill-session for an authenticated admin in a GROUP (base parity — DM-only clause removed, B21-A F3)', async () => {

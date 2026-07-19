@@ -3760,6 +3760,9 @@ export class AgentRuntime implements Runtime {
           { command: spec.name, senderJid: msg.senderJid, outcome: 'denied', errorClass: 'not-authorized' },
           'command denied: sender not authorized',
         );
+        // B21-A F4a: denial must be user-visible, never a silent drop — same
+        // queue-routed send path the other local-command replies use.
+        this.sendDirect(chatJid, '_Not authorized._');
         // B21-A F1: this return bypasses the R14 post-switch completion below,
         // so the denied inbound must be finalized HERE — same shape as the
         // 'empty_content' skip in handleMessageInner — or the row strands in
@@ -4060,6 +4063,24 @@ export class AgentRuntime implements Runtime {
               this.activeChatJid = null;
               this.sendDirect(chatJid, '_Session killed._', true);
             }
+            break;
+          }
+
+          default: {
+            // B21-A F4b: a COMMAND_REGISTRY entry the classifier admits but
+            // this switch has no case for must fall through LOUDLY as a
+            // forwarded turn — the pre-registry behavior for unrecognized
+            // commands — never be silently swallowed with a bogus
+            // 'local_command_handled' completion. The forwarded turn owns
+            // terminal inbound durability (same contract as the /model
+            // default fall-through above). Unreachable today (the switch
+            // covers every registry entry — `classified.command` is `never`
+            // here); this guards future registry appends without handlers.
+            log.warn(
+              { command: classified.command, chatJid },
+              'local command has no handler — forwarding to agent',
+            );
+            forwardAfterLocalCommand = content as string;
             break;
           }
         }
