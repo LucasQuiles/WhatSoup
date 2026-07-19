@@ -31,11 +31,14 @@ describe('prepared statement caching', () => {
     // exact-session lifecycle transitions, the cached BEGIN/COMMIT/ROLLBACK runner,
     // eight recovery plan/run/disposition/corroboration evidence statements,
     // the two recovery-owner reclaim statements (#1749: the bucket-4 reclaimable
-    // sweep query + the dead-delivery job reclaim update), and the two maybe_sent
+    // sweep query + the dead-delivery job reclaim update), the two maybe_sent
     // durability-debt diagnostics (#1865: the maybe_sent count + oldest-submitted-at
-    // staleness probes that drive /health degradation).
-    // Lifecycle methods must not prepare SQL per call.
-    expect(prepareSpy).toHaveBeenCalledTimes(111);
+    // staleness probes that drive /health degradation), plus 6 net M1
+    // replay-termination statements (insertOpMessageId, echo-match-any-id,
+    // message-for-op-any-id, incrementRetryCount, the two echoed-duplicate
+    // variants, stale-ephemeral expiry, minus the consolidated maybe_sent
+    // reset twin). Lifecycle methods must not prepare SQL per call.
+    expect(prepareSpy).toHaveBeenCalledTimes(117);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');

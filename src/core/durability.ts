@@ -108,6 +108,28 @@ const log = createChildLogger('durability');
 // ── Status string unions ──
 
 export type OutboundStatus = 'pending' | 'sending' | 'submitted' | 'echoed' | 'maybe_sent' | 'failed_permanent' | 'quarantined';
+
+/**
+ * Outbound replay policy. `safe`/`read_only` ops are replayed on recovery,
+ * `unsafe` ops are quarantined, and `ephemeral` ops (M1: back-online notices)
+ * are only ever sent by the process generation that created them — recovery
+ * and the drain terminalize them (`error='ephemeral_expired'`) instead of
+ * replaying, because a stale continuity ping is pure duplicate noise.
+ */
+export type OutboundReplayPolicy = 'safe' | 'unsafe' | 'read_only' | 'ephemeral';
+
+/**
+ * M1 replay-termination bounds. An op may be claimed by the pending-drain at
+ * most MAX_OUTBOUND_REPLAY_ATTEMPTS times (retry_count is incremented at the
+ * drain's markSending claim — first sends via sendTracked/OutboundQueue do not
+ * count); past the bound it terminalizes to failed_permanent with an
+ * `outbound_replay_exhausted` alert. Between attempts the drain applies
+ * exponential backoff from the op's last attempt timestamp
+ * (COALESCE(submitted_at, created_at)): base * 2^(retry_count-1), capped.
+ */
+export const MAX_OUTBOUND_REPLAY_ATTEMPTS = 5;
+export const OUTBOUND_REPLAY_BACKOFF_BASE_MS = 30_000;
+const OUTBOUND_REPLAY_BACKOFF_MAX_MS = 15 * 60_000;
 type InboundStatus = 'pending' | 'processing' | 'turn_done' | 'complete' | 'failed';
 export type SessionStatus = 'active' | 'suspended' | 'orphaned' | 'ended';
 type ToolCallStatus = 'pending' | 'executing' | 'complete' | 'error' | 'replayed' | 'quarantined';
@@ -128,11 +150,14 @@ export interface OutboundOpRow {
   chat_jid: string;
   op_type: string;
   payload: string;
+  payload_hash: string | null;
   wa_message_id: string | null;
   replay_policy: string;
+  created_at: string;
   submitted_at: string | null;
   source_inbound_seq: number | null;
   is_terminal: number;
+  retry_count: number;
 }
 
 export interface OutboundDeliveryIdentity {
@@ -207,7 +232,7 @@ export interface OutboundOpParams {
   chatJid: string;
   opType: string;
   payload: string;
-  replayPolicy: 'safe' | 'unsafe' | 'read_only';
+  replayPolicy: OutboundReplayPolicy;
   sourceInboundSeq?: number;
   isTerminal?: boolean;
 }
@@ -228,6 +253,7 @@ type DurabilityStatements = {
   createOutboundOp: PreparedStatement;
   markSending: PreparedStatement;
   markSubmitted: PreparedStatement;
+  insertOpMessageId: PreparedStatement;
   markEchoed: PreparedStatement;
   selectEchoedOutboundInbound: PreparedStatement;
   markMaybeSent: PreparedStatement;
@@ -236,6 +262,12 @@ type DurabilityStatements = {
   markTerminal: PreparedStatement;
   selectOutboundTerminalIdentity: PreparedStatement;
   selectOutboundForEchoMatch: PreparedStatement;
+  selectOutboundForEchoMatchAnyId: PreparedStatement;
+  getMessageForOpAnyId: PreparedStatement;
+  incrementRetryCount: PreparedStatement;
+  selectEchoedDuplicate: PreparedStatement;
+  selectRecentEchoedTerminalDuplicate: PreparedStatement;
+  expireStalePendingEphemeral: PreparedStatement;
   recordToolCall: PreparedStatement;
   markToolExecuting: PreparedStatement;
   markToolComplete: PreparedStatement;
@@ -261,8 +293,7 @@ type DurabilityStatements = {
   getRecoveryOwnedReclaimable: PreparedStatement;
   getStaleSubmitted: PreparedStatement;
   getMessageByWaMessageId: PreparedStatement;
-  resetMaybeSentWithWaToPending: PreparedStatement;
-  resetMaybeSentWithoutWaToPending: PreparedStatement;
+  resetMaybeSentToPending: PreparedStatement;
   sweepStaleSubmitted: PreparedStatement;
   getPendingOutboundCount: PreparedStatement;
   getQuarantinedOutboundCount: PreparedStatement;
@@ -280,6 +311,13 @@ export class DurabilityEngine {
   private readonly turnRecovery: TurnRecoveryStore;
   private readonly sessionLifecycle: SessionLifecycleStore;
   private readonly confirmedOutboundProbe: (seconds: number) => boolean;
+  /**
+   * DB-clock timestamp captured at engine construction (one engine per process
+   * boot). Ephemeral ops created before this are a previous generation's and
+   * must expire rather than replay. DB clock, not Date.now(), so comparisons
+   * against created_at never mix clock sources.
+   */
+  private readonly processStartedAt: string;
   constructor(db: Database) {
     this.db = db;
     const prepare = db.raw.prepare.bind(db.raw);
@@ -352,8 +390,16 @@ export class DurabilityEngine {
       markSending: prepare(
         `UPDATE outbound_ops SET status = 'sending' WHERE id = ? AND status = 'pending'`,
       ),
+      // M1: a late resubmit must never downgrade an op the echo path already
+      // confirmed — CASE keeps 'echoed' while still recording the latest id.
       markSubmitted: prepare(
-        `UPDATE outbound_ops SET status = 'submitted', wa_message_id = ?, submitted_at = datetime('now') WHERE id = ?`,
+        `UPDATE outbound_ops
+         SET wa_message_id = ?, submitted_at = datetime('now'),
+             status = CASE WHEN status = 'echoed' THEN status ELSE 'submitted' END
+         WHERE id = ?`,
+      ),
+      insertOpMessageId: prepare(
+        `INSERT OR IGNORE INTO outbound_op_message_ids (op_id, wa_message_id) VALUES (?, ?)`,
       ),
       markEchoed: prepare(
         `UPDATE outbound_ops
@@ -389,6 +435,43 @@ export class DurabilityEngine {
         `SELECT id FROM outbound_ops
          WHERE wa_message_id = ?
            AND status IN ('submitted', 'maybe_sent', 'quarantined', 'failed_permanent')`,
+      ),
+      // M1: an echo for ANY historical submission id confirms the op — a resend
+      // must not orphan the delivery evidence of an earlier copy. Matches the
+      // same late-echo-eligible status set as the direct wa_message_id lookup
+      // above so a since-quarantined/terminalized op still converges.
+      selectOutboundForEchoMatchAnyId: prepare(
+        `SELECT o.id AS id
+         FROM outbound_ops o
+         JOIN outbound_op_message_ids m ON m.op_id = o.id
+         WHERE m.wa_message_id = ?
+           AND o.status IN ('submitted', 'maybe_sent', 'quarantined', 'failed_permanent')
+         LIMIT 1`,
+      ),
+      getMessageForOpAnyId: prepare(
+        `SELECT msg.pk AS pk
+         FROM outbound_op_message_ids i
+         JOIN messages msg ON msg.message_id = i.wa_message_id
+         WHERE i.op_id = ?
+         LIMIT 1`,
+      ),
+      incrementRetryCount: prepare(
+        `UPDATE outbound_ops SET retry_count = retry_count + 1 WHERE id = ?`,
+      ),
+      selectEchoedDuplicate: prepare(
+        `SELECT id FROM outbound_ops
+         WHERE chat_jid = ? AND payload_hash = ? AND status = 'echoed' AND id != ?
+         LIMIT 1`,
+      ),
+      selectRecentEchoedTerminalDuplicate: prepare(
+        `SELECT id FROM outbound_ops
+         WHERE chat_jid = ? AND payload_hash = ? AND status = 'echoed' AND is_terminal = 1
+           AND echoed_at >= datetime('now', ?)
+         LIMIT 1`,
+      ),
+      expireStalePendingEphemeral: prepare(
+        `UPDATE outbound_ops SET status = 'failed_permanent', error = 'ephemeral_expired'
+         WHERE replay_policy = 'ephemeral' AND status = 'pending' AND created_at < ?`,
       ),
       recordToolCall: prepare(
         `INSERT INTO tool_calls (conversation_key, session_checkpoint_id, tool_name, tool_input, status, replay_policy)
@@ -510,7 +593,7 @@ export class DurabilityEngine {
         `SELECT seq, message_id, processing_status, routed_to FROM inbound_events WHERE processing_status IN ('pending', 'processing', 'turn_done')`,
       ),
       getOutboundByStatus: prepare(
-        `SELECT id, chat_jid, op_type, payload, wa_message_id, replay_policy, submitted_at, source_inbound_seq, is_terminal FROM outbound_ops WHERE status = ?`,
+        `SELECT id, chat_jid, op_type, payload, payload_hash, wa_message_id, replay_policy, created_at, submitted_at, source_inbound_seq, is_terminal, retry_count FROM outbound_ops WHERE status = ?`,
       ),
       getRecoverableToolCalls: prepare(
         `SELECT id, conversation_key, tool_name, replay_policy, outbound_op_id
@@ -639,10 +722,7 @@ export class DurabilityEngine {
       getMessageByWaMessageId: prepare(
         `SELECT pk FROM messages WHERE message_id = ?`,
       ),
-      resetMaybeSentWithWaToPending: prepare(
-        `UPDATE outbound_ops SET status = 'pending', error = NULL WHERE id = ?`,
-      ),
-      resetMaybeSentWithoutWaToPending: prepare(
+      resetMaybeSentToPending: prepare(
         `UPDATE outbound_ops SET status = 'pending', error = NULL WHERE id = ?`,
       ),
       sweepStaleSubmitted: prepare(
@@ -679,6 +759,7 @@ export class DurabilityEngine {
     ).now);
     this.sessionLifecycle = new SessionLifecycleStore(db);
     this.confirmedOutboundProbe = makeConfirmedOutboundProbe(db.raw);
+    this.processStartedAt = (this.statements.selectNow.get() as { now: string }).now;
   }
 
   private runUpsertSessionCheckpoint(conversationKey: string, fields: SessionCheckpointFields): void {
@@ -1220,6 +1301,12 @@ export class DurabilityEngine {
 
   markSubmitted(id: number, waMessageId: string | null): void {
     this.statements.markSubmitted.run(waMessageId, id);
+    // M1: record every historical submission id — echo reconciliation matches
+    // against ALL of them, so a resend no longer destroys the key of an
+    // earlier, possibly-delivered copy.
+    if (waMessageId !== null) {
+      this.statements.insertOpMessageId.run(id, waMessageId);
+    }
   }
 
   markEchoed(id: number): void {
@@ -1320,12 +1407,61 @@ export class DurabilityEngine {
 
   // ── Echo matching ──
   matchEcho(waMessageId: string): boolean {
-    const row = this.statements.selectOutboundForEchoMatch.get(waMessageId) as { id: number } | undefined;
+    // M1: match against ALL historical submission ids (side table) so an echo
+    // for an earlier copy still confirms an op that was since resubmitted.
+    // Legacy direct match kept as a fallback for rows predating the side table.
+    const row =
+      (this.statements.selectOutboundForEchoMatchAnyId.get(waMessageId) as { id: number } | undefined) ??
+      (this.statements.selectOutboundForEchoMatch.get(waMessageId) as { id: number } | undefined);
     if (row) {
       this.markEchoed(row.id);
       return true;
     }
     return false;
+  }
+
+  // ── M1 replay-termination primitives ──
+
+  /** Count one drain replay attempt against the op's bounded budget. */
+  incrementRetryCount(id: number): void {
+    this.statements.incrementRetryCount.run(id);
+  }
+
+  /**
+   * Durable delivery-idempotency check: id of another op in the same chat with
+   * the same payload_hash that is already `echoed` (delivered evidence), or
+   * undefined. Consulted before any replay/reset so a restart can never re-send
+   * content the user demonstrably received.
+   */
+  findEchoedDuplicateId(chatJid: string, payloadHash: string, excludeOpId: number): number | undefined {
+    const row = this.statements.selectEchoedDuplicate.get(chatJid, payloadHash, excludeOpId) as
+      | { id: number }
+      | undefined;
+    return row?.id;
+  }
+
+  /**
+   * Durable counterpart of the agent OutboundQueue's in-memory terminal-text
+   * dedupe window: was a terminal op with this (chat, payload_hash) echoed
+   * within the window? Closes the restart hole — the in-memory map dies with
+   * the process, this check does not.
+   */
+  hasRecentEchoedTerminalDuplicate(chatJid: string, payloadHash: string, windowMs: number): boolean {
+    const seconds = Math.max(0, Math.floor(windowMs / 1000));
+    const row = this.statements.selectRecentEchoedTerminalDuplicate.get(
+      chatJid, payloadHash, `-${seconds} seconds`,
+    ) as { id: number } | undefined;
+    return row !== undefined;
+  }
+
+  /** DB-clock timestamp of this engine's construction (process generation marker). */
+  getProcessStartedAt(): string {
+    return this.processStartedAt;
+  }
+
+  /** Current DB-clock time — same clock source as created_at/submitted_at. */
+  now(): string {
+    return (this.statements.selectNow.get() as { now: string }).now;
   }
 
   // ── Tool calls ──
@@ -1633,6 +1769,19 @@ export class DurabilityEngine {
       log.warn({ err }, 'postConnectRecovery: error handling stale submitted ops');
     }
 
+    // Step 1b (M1): expire pending ephemeral ops from a previous process
+    // generation. A back-online notice only makes sense in the boot that
+    // created it — replaying a stale one is pure duplicate noise.
+    try {
+      const expired = Number(this.statements.expireStalePendingEphemeral.run(this.processStartedAt).changes);
+      if (expired > 0) {
+        log.info({ expired }, 'postConnectRecovery: prior-generation pending ephemeral ops expired');
+      }
+    } catch (err) {
+      recoveryRun.recordFailure('expire_stale_pending_ephemeral', err);
+      log.warn({ err }, 'postConnectRecovery: error expiring stale pending ephemeral ops');
+    }
+
     // Step 2: Reconcile `maybe_sent` ops (includes those just promoted in Step 1)
     try {
       const maybeSent = this.getOutboundByStatus('maybe_sent');
@@ -1647,74 +1796,85 @@ export class DurabilityEngine {
           continue;
         }
 
-        if (op.wa_message_id) {
-          // Check if message was received via normal ingest (echo confirmation)
-          const found = this.statements.getMessageByWaMessageId.get(op.wa_message_id) as
-            | { pk: number }
-            | undefined;
+        // Delivery confirmation checks ANY historical submission id (M1 side
+        // table), falling back to the latest wa_message_id for legacy rows.
+        const confirmed =
+          (this.statements.getMessageForOpAnyId.get(op.id) as { pk: number } | undefined) ??
+          (op.wa_message_id
+            ? (this.statements.getMessageByWaMessageId.get(op.wa_message_id) as { pk: number } | undefined)
+            : undefined);
 
-          if (found) {
-            this.markEchoed(op.id);
-            log.info(
-              { opId: op.id, waMessageId: op.wa_message_id },
-              'postConnectRecovery: maybe_sent confirmed via messages table → echoed',
+        if (confirmed) {
+          this.markEchoed(op.id);
+          log.info(
+            { opId: op.id, waMessageId: op.wa_message_id },
+            'postConnectRecovery: maybe_sent confirmed via messages table → echoed',
+          );
+        } else if (op.replay_policy === 'ephemeral') {
+          // M1: ephemeral ops never replay across recovery — expire them.
+          this.markFailedPermanent(op.id, 'ephemeral_expired');
+          log.info(
+            { opId: op.id },
+            'postConnectRecovery: maybe_sent ephemeral op expired (never replayed)',
+          );
+        } else if (op.replay_policy === 'safe' || op.replay_policy === 'read_only') {
+          const dupId = op.payload_hash
+            ? this.findEchoedDuplicateId(op.chat_jid, op.payload_hash, op.id)
+            : undefined;
+          if (op.retry_count >= MAX_OUTBOUND_REPLAY_ATTEMPTS) {
+            // M1: the pending→maybe_sent→pending cycle is bounded — terminalize.
+            this.markFailedPermanent(op.id, `replay_attempts_exhausted:${op.retry_count}`);
+            log.warn(
+              { opId: op.id, retryCount: op.retry_count },
+              'postConnectRecovery: maybe_sent at replay cap → failed_permanent',
             );
-          } else if (op.replay_policy === 'safe' || op.replay_policy === 'read_only') {
+            const alertQueued = emitAlertChecked(
+              config.botName,
+              'outbound_replay_exhausted',
+              `whatsoup@${config.botName} outbound op ${op.id} exhausted replay attempts`,
+              `op=${op.id} retry_count=${op.retry_count} replay_policy=${op.replay_policy} chat_jid=${op.chat_jid}`,
+            );
+            if (!alertQueued) {
+              recoveryRun.recordFailure(
+                'emit_outbound_replay_exhausted_alert',
+                new Error(`outbound replay-exhausted alert could not be durably queued for op ${op.id}`),
+              );
+            }
+          } else if (dupId !== undefined) {
+            // M1: an identical payload was already delivered into this chat —
+            // resetting this copy would re-send content the user already has.
+            this.markFailedPermanent(op.id, `duplicate_suppressed:${dupId}`);
+            log.info(
+              { opId: op.id, echoedOpId: dupId },
+              'postConnectRecovery: maybe_sent duplicate of echoed payload → suppressed',
+            );
+          } else {
             // Re-enqueue for replay: reset to pending
-            this.statements.resetMaybeSentWithWaToPending.run(op.id);
+            this.statements.resetMaybeSentToPending.run(op.id);
             stats.outboundReplayed += 1;
             log.info(
-              { opId: op.id },
+              { opId: op.id, hasWaMessageId: op.wa_message_id !== null },
               'postConnectRecovery: maybe_sent not confirmed, safe/read_only → reset to pending for replay',
             );
-          } else {
-            this.markQuarantined(op.id);
-            stats.outboundQuarantined += 1;
-            log.warn(
-              { opId: op.id, replayPolicy: op.replay_policy },
-              'postConnectRecovery: maybe_sent not confirmed, non-safe → quarantined',
-            );
-            const alertQueued = emitAlertChecked(
-              config.botName,
-              'outbound_quarantined',
-              `whatsoup@${config.botName} outbound op ${op.id} quarantined`,
-              `replay_policy=${op.replay_policy} wa_message_id=${op.wa_message_id ?? 'none'} reason=not_confirmed_non_safe`,
-            );
-            if (!alertQueued) {
-              recoveryRun.recordFailure(
-                'emit_outbound_quarantine_alert',
-                new Error(`outbound quarantine alert could not be durably queued for op ${op.id}`),
-              );
-            }
           }
         } else {
-          // No wa_message_id: definitely not delivered; apply replay policy
-          if (op.replay_policy === 'safe' || op.replay_policy === 'read_only') {
-            this.statements.resetMaybeSentWithoutWaToPending.run(op.id);
-            stats.outboundReplayed += 1;
-            log.info(
-              { opId: op.id },
-              'postConnectRecovery: maybe_sent (no wa_message_id), safe/read_only → reset to pending',
+          this.markQuarantined(op.id);
+          stats.outboundQuarantined += 1;
+          log.warn(
+            { opId: op.id, replayPolicy: op.replay_policy },
+            'postConnectRecovery: maybe_sent not confirmed, non-safe → quarantined',
+          );
+          const alertQueued = emitAlertChecked(
+            config.botName,
+            'outbound_quarantined',
+            `whatsoup@${config.botName} outbound op ${op.id} quarantined`,
+            `replay_policy=${op.replay_policy} wa_message_id=${op.wa_message_id ?? 'none'} reason=${op.wa_message_id ? 'not_confirmed_non_safe' : 'no_wa_id_non_safe'}`,
+          );
+          if (!alertQueued) {
+            recoveryRun.recordFailure(
+              'emit_outbound_quarantine_alert',
+              new Error(`outbound quarantine alert could not be durably queued for op ${op.id}`),
             );
-          } else {
-            this.markQuarantined(op.id);
-            stats.outboundQuarantined += 1;
-            log.warn(
-              { opId: op.id, replayPolicy: op.replay_policy },
-              'postConnectRecovery: maybe_sent (no wa_message_id), non-safe → quarantined',
-            );
-            const alertQueued = emitAlertChecked(
-              config.botName,
-              'outbound_quarantined',
-              `whatsoup@${config.botName} outbound op ${op.id} quarantined`,
-              `replay_policy=${op.replay_policy} wa_message_id=none reason=no_wa_id_non_safe`,
-            );
-            if (!alertQueued) {
-              recoveryRun.recordFailure(
-                'emit_outbound_quarantine_alert',
-                new Error(`outbound quarantine alert could not be durably queued for op ${op.id}`),
-              );
-            }
           }
         }
       }
@@ -1958,7 +2118,7 @@ export async function sendTracked(
   chatJid: string,
   text: string,
   durability: DurabilityEngine | undefined,
-  opts: { replayPolicy: 'safe' | 'unsafe' | 'read_only'; isTerminal?: boolean; sourceInboundSeq?: number; caller?: GuardCaller },
+  opts: { replayPolicy: OutboundReplayPolicy; isTerminal?: boolean; sourceInboundSeq?: number; caller?: GuardCaller },
 ): Promise<void> {
   let opId: number | undefined;
   if (durability) {
@@ -1992,16 +2152,106 @@ export async function sendTracked(
   }
 }
 
+/** Parse an SQLite UTC datetime ('YYYY-MM-DD HH:MM:SS') to epoch ms. */
+function sqliteUtcMs(value: string): number {
+  return Date.parse(value.replace(' ', 'T') + 'Z');
+}
+
+/** Exponential replay backoff for the Nth re-attempt (retry_count >= 1). */
+function replayBackoffMs(retryCount: number): number {
+  return Math.min(
+    OUTBOUND_REPLAY_BACKOFF_BASE_MS * 2 ** (retryCount - 1),
+    OUTBOUND_REPLAY_BACKOFF_MAX_MS,
+  );
+}
+
+/**
+ * In-process serialization latch (M1, fix E): the post-connect recover callback
+ * and the 10s echo-timeout interval both invoke the drain; the markSending CAS
+ * already prevents per-op double-sends, but nothing bounded the interleaving.
+ * One drain per engine at a time — a concurrent caller returns early with 0.
+ */
+const drainsInFlight = new WeakSet<DurabilityEngine>();
+
 /** Drain replay-safe pending text ops; quarantine malformed ops and isolate failures. */
 export async function drainPendingOutbound(
   messenger: Messenger,
   durability: DurabilityEngine,
 ): Promise<number> {
+  if (drainsInFlight.has(durability)) {
+    log.debug('drainPendingOutbound: drain already in flight — skipping');
+    return 0;
+  }
+  drainsInFlight.add(durability);
+  try {
+    return await drainPendingOutboundLocked(messenger, durability);
+  } finally {
+    drainsInFlight.delete(durability);
+  }
+}
+
+async function drainPendingOutboundLocked(
+  messenger: Messenger,
+  durability: DurabilityEngine,
+): Promise<number> {
   const pending = durability.getOutboundByStatus('pending');
   let resent = 0;
+  const nowMs = sqliteUtcMs(durability.now());
 
   for (const op of pending) {
     try {
+      // M1 fix D: an ephemeral op created by a previous process generation is
+      // stale continuity noise — expire it, never re-send it.
+      if (op.replay_policy === 'ephemeral' && op.created_at < durability.getProcessStartedAt()) {
+        durability.markFailedPermanent(op.id, 'ephemeral_expired');
+        log.info(
+          { opId: op.id, createdAt: op.created_at },
+          'drainPendingOutbound: prior-generation ephemeral op expired',
+        );
+        continue;
+      }
+
+      // M1 fix A: bounded replay. Past the cap → terminalize + alert instead of
+      // cycling pending→sending→maybe_sent→pending forever.
+      if (op.retry_count >= MAX_OUTBOUND_REPLAY_ATTEMPTS) {
+        durability.markFailedPermanent(op.id, `replay_attempts_exhausted:${op.retry_count}`);
+        log.warn(
+          { opId: op.id, retryCount: op.retry_count, replayPolicy: op.replay_policy },
+          'drainPendingOutbound: op exhausted replay attempts → failed_permanent',
+        );
+        emitAlertChecked(
+          config.botName,
+          'outbound_replay_exhausted',
+          `whatsoup@${config.botName} outbound op ${op.id} exhausted replay attempts`,
+          `op=${op.id} retry_count=${op.retry_count} replay_policy=${op.replay_policy} chat_jid=${op.chat_jid}`,
+        );
+        continue;
+      }
+
+      // M1 fix B: durable delivery idempotency — if an identical payload is
+      // already echoed into this chat, re-sending is a guaranteed duplicate.
+      if (op.payload_hash) {
+        const dupId = durability.findEchoedDuplicateId(op.chat_jid, op.payload_hash, op.id);
+        if (dupId !== undefined) {
+          durability.markFailedPermanent(op.id, `duplicate_suppressed:${dupId}`);
+          log.info(
+            { opId: op.id, echoedOpId: dupId },
+            'drainPendingOutbound: pending duplicate of echoed payload → suppressed',
+          );
+          continue;
+        }
+      }
+
+      // M1 fix A: backoff — an op re-attempted too recently stays pending for a
+      // later drain pass. Last-attempt time comes from existing columns
+      // (submitted_at updates on each successful submit; created_at otherwise).
+      if (op.retry_count > 0) {
+        const lastAttemptMs = sqliteUtcMs(op.submitted_at ?? op.created_at);
+        if (nowMs < lastAttemptMs + replayBackoffMs(op.retry_count)) {
+          continue;
+        }
+      }
+
       let text: string | undefined;
       if (op.op_type === 'text') {
         try {
@@ -2036,12 +2286,13 @@ export async function drainPendingOutbound(
       }
 
       if (!durability.markSending(op.id)) {
-        // Another concurrent drain (the un-serialized recover callback vs. the
-        // echo-timeout interval) already claimed this op out of `pending` from
-        // an overlapping stale snapshot. Skip — re-sending here is the BEAD-057
-        // double-send. The winning drain owns the send.
+        // A concurrent send path (e.g. sendTracked racing the drain's stale
+        // snapshot) already claimed this op out of `pending`. Skip — re-sending
+        // here is the BEAD-057 double-send. The winning claimer owns the send.
         continue;
       }
+      // M1 fix A: count the replay attempt at the claim, success or not.
+      durability.incrementRetryCount(op.id);
       try {
         const receipt = await messenger.sendMessage(op.chat_jid, text);
         durability.markSubmitted(op.id, receipt.waMessageId);

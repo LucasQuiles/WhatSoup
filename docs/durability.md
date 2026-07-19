@@ -43,7 +43,12 @@ Every message the bot sends is journaled in `outbound_ops` before the network ca
 
 When Baileys delivers an outgoing message, WhatsApp echoes it back on the same WebSocket connection with the same `message_id` it assigned to the send. WhatSoup captures this echo via `matchEcho(waMessageId)`:
 
-1. Look up `outbound_ops` for a row with `wa_message_id = ? AND status = 'submitted'`.
+1. Look up the `outbound_op_message_ids` side table for ANY historical submission id
+   matching an op in `submitted` or `maybe_sent` (falling back to the legacy direct
+   `outbound_ops.wa_message_id = ? AND status = 'submitted'` match for rows predating the
+   side table). `markSubmitted()` records every id it is called with, so a resend no longer
+   destroys the echo key of an earlier, possibly-delivered copy — and it never downgrades an
+   op the echo path already confirmed (`echoed` is sticky).
 2. If found, call `markEchoed()`.
 3. If the op has `is_terminal = 1`, `markEchoed()` automatically calls `completeInbound()` on the linked inbound event.
 
@@ -51,19 +56,23 @@ If no echo arrives within 30 seconds after submission, the op is promoted to `ma
 
 ### 2.4 Replay Policies
 
-Every outbound op declares one of three replay policies:
+Every outbound op declares one of four replay policies:
 
 | Policy | Meaning | On unconfirmed delivery |
 |---|---|---|
 | `safe` | Re-sending is idempotent (same text produces same observable result) | Reset to `pending`, then re-sent by the pending drainer (§4.4) |
 | `unsafe` | Re-sending would cause a duplicate visible to the recipient | Quarantine — require manual resolution |
 | `read_only` | Op has no side effects visible to the recipient (e.g., presence, read receipt) | Reset to `pending`, then re-sent by the pending drainer (§4.4) |
+| `ephemeral` | Only meaningful in the process generation that created it (back-online / startup notices) | Terminalized `failed_permanent` with `error='ephemeral_expired'` — never reset, never re-sent by a later generation |
 
-**Replay duplicate-delivery tradeoff.** Because only `safe`/`read_only` ops are ever
-reset to `pending` (`unsafe` ops — including terminal user replies — are quarantined, never
-replayed), a replay that re-sends an op which *was* actually delivered produces at most a
-duplicate of an idempotent/side-effect-free message. That duplicate is the accepted tradeoff
-for guaranteeing safe/read_only ops are not silently dropped; it is never incurred for
+**Replay duplicate-delivery tradeoff (bounded).** Because only `safe`/`read_only` ops are
+ever reset to `pending` (`unsafe` ops — including terminal user replies — are quarantined,
+never replayed), a replay that re-sends an op which *was* actually delivered produces at
+most a duplicate of an idempotent/side-effect-free message. That residual duplicate window
+is now bounded three ways (M1): delivery evidence is consulted first (an op whose
+`(chat_jid, payload_hash)` is already `echoed` is suppressed, not re-sent), replays are
+capped at `MAX_OUTBOUND_REPLAY_ATTEMPTS` (5) with exponential backoff between attempts, and
+back-online-style notices are `ephemeral` (never replayed at all). It is never incurred for
 user-terminal replies.
 
 The policy is set at creation time by the caller. Autonomous bot responses (via `sendTracked`) typically use `safe` because the text is deterministic for a given conversation state. MCP tool sends are excluded from the durability journal by design (gap-matrix item 92) — those use direct Baileys calls and do not go through `sendTracked`.
@@ -225,17 +234,31 @@ Any op in `submitted` with `submitted_at < now() - 30 seconds` is promoted to `m
 
 These newly promoted ops are immediately eligible for Step 2.
 
+**Step 1b — Expire prior-generation `pending` ephemeral ops (M1)**
+
+Any `pending` op with `replay_policy = 'ephemeral'` created before this process generation
+(engine construction time, DB clock) is terminalized `failed_permanent` with
+`error='ephemeral_expired'` — a stale back-online notice is pure duplicate noise.
+
 **Step 2 — Reconcile `maybe_sent` ops**
 
-For each `maybe_sent` op (including those promoted in Step 1):
+For each `maybe_sent` op (including those promoted in Step 1), in order:
 
-- **Has `wa_message_id`**: query `messages` table for a matching `message_id`.
-  - Found: `markEchoed()` — the message was delivered and stored by normal ingest. This also completes the linked inbound event if the op is terminal.
-  - Not found + `safe`/`read_only`: reset to `pending` for replay (re-sent by the drainer, §4.4).
-  - Not found + `unsafe`: `markQuarantined()`.
-- **No `wa_message_id`** (send never reached WhatsApp): the message was definitely not delivered.
-  - `safe`/`read_only`: reset to `pending` for replay (re-sent by the drainer, §4.4).
-  - `unsafe`: `markQuarantined()`.
+- **Delivery confirmed**: query the `messages` table for ANY historical submission id of
+  this op (via `outbound_op_message_ids`; legacy fallback: the latest `wa_message_id`).
+  Found → `markEchoed()` — the message was delivered and stored by normal ingest. This also
+  completes the linked inbound event if the op is terminal.
+- **`ephemeral`**: terminalized `failed_permanent` (`error='ephemeral_expired'`) — never
+  reset, never quarantined.
+- **`safe`/`read_only`** (unconfirmed):
+  - `retry_count >= MAX_OUTBOUND_REPLAY_ATTEMPTS` (5): terminalized `failed_permanent`
+    (`error='replay_attempts_exhausted:<n>'`) + `outbound_replay_exhausted` alert — the
+    pending→maybe_sent→pending cycle is bounded.
+  - Another op in the same chat with the same `payload_hash` already `echoed`: terminalized
+    `failed_permanent` (`error='duplicate_suppressed:<echoed_op_id>'`) — the content was
+    demonstrably delivered.
+  - Otherwise: reset to `pending` for replay (re-sent by the drainer, §4.4).
+- **`unsafe`**: `markQuarantined()`.
 
 > The `stale-submitted → maybe_sent` promotion in Step 1 is **not** counted in
 > `outbound_reconciled`; Step 2 re-reads those ops as `maybe_sent` and is the single
@@ -282,25 +305,40 @@ that re-sends them. It is wired in two places (`main.ts`):
 2. **Echo-timeout interval** (every 10 s, alongside `sweepStaleSubmitted()`) — drains any op
    that lands in `pending` between reconnects, without waiting for a restart.
 
-For each op in `status='pending'`:
+Overlapping drain invocations are serialized by an in-process latch (one drain per engine
+at a time; a concurrent caller returns early with 0) — the markSending CAS still guards
+individual claims, the latch bounds the interleaving (M1, fix E).
 
-- **Reconstructable text op** — `op_type === 'text'` and `payload` parses to
-  `{ text: string }` (the exact shape `sendTracked` writes): `markSending()`, re-send via
-  `messenger.sendMessage(chat_jid, text)`, then `markSubmitted(wa_message_id)`. The op then
-  re-enters the normal `submitted → echoed` reconciliation path. If the send throws, the op
-  is set back to `maybe_sent` so it re-enters the reconnect-paced recovery loop (no inline
-  retry / tight-loop).
-- **Non-reconstructable op** — unknown `op_type`, or a `text` op whose payload does not parse
+For each op in `status='pending'`, the drain applies the M1 termination gates in order:
+
+1. **Ephemeral generation check** — an `ephemeral` op created before this process
+   generation is terminalized `failed_permanent` (`error='ephemeral_expired'`), never
+   re-sent.
+2. **Replay cap** — `retry_count >= MAX_OUTBOUND_REPLAY_ATTEMPTS` (5): terminalized
+   `failed_permanent` (`error='replay_attempts_exhausted:<n>'`) + an
+   `outbound_replay_exhausted` alert.
+3. **Durable duplicate suppression** — another op in the same chat with the same
+   `payload_hash` already `echoed`: terminalized `failed_permanent`
+   (`error='duplicate_suppressed:<echoed_op_id>'`), no send.
+4. **Backoff** — an op re-attempted too recently (base 30 s doubling per `retry_count`,
+   capped at 15 min, measured from `COALESCE(submitted_at, created_at)` on the DB clock)
+   is skipped and stays `pending` for a later pass.
+5. **Reconstructable text op** — `op_type === 'text'` and `payload` parses to
+  `{ text: string }` (the exact shape `sendTracked` writes): `markSending()` (CAS),
+  `retry_count += 1`, re-send via `messenger.sendMessage(chat_jid, text)`, then
+  `markSubmitted(wa_message_id)`. The op then re-enters the normal `submitted → echoed`
+  reconciliation path. If the send throws, the op is set back to `maybe_sent` so it
+  re-enters the reconnect-paced recovery loop (no inline retry / tight-loop).
+6. **Non-reconstructable op** — unknown `op_type`, or a `text` op whose payload does not parse
   to `{ text }`: `markQuarantined()` + an `outbound_quarantined` alert
   (`reason=pending_replay_unreconstructable`). These are **not** left `pending` forever —
   doing so would reintroduce the original silent-drop bug for non-text ops.
 
 One failing op never aborts the rest of the drain. The function returns the count of ops
-successfully re-sent. **Duplicate-delivery tradeoff:** see §2.4 — only `safe`/`read_only` ops
-ever reach `pending`, so a replay that duplicates an already-delivered message is the
-accepted tradeoff for those ops and is never incurred for user-terminal (`unsafe`) replies.
-This is the same risk `sendTracked`-created ops already carry on a `maybe_sent → reset`
-cycle; the drainer does not widen it.
+successfully re-sent. **Duplicate-delivery tradeoff:** see §2.4 — bounded by gates 1–4
+above; the residual duplicate risk applies only to `safe`/`read_only` ops below the cap
+whose duplicate was never echoed, and is never incurred for user-terminal (`unsafe`)
+replies.
 
 ### 4.5 Stuck-Inbound Reconciler (`sweepStuckInbound`)
 
@@ -581,11 +619,25 @@ delivery proof while adding auditable completion and conflict evidence.
 | `wa_message_id` | TEXT | WhatsApp-assigned message ID, populated by `markSubmitted()`. May be null if send failed before an ID was returned. |
 | `error` | TEXT | Error string for `maybe_sent`, `failed_permanent` states. |
 | `source_inbound_seq` | INTEGER | FK to `inbound_events.seq`. Links this outbound op to the message that caused it. Nullable for proactive sends. |
-| `retry_count` | INTEGER | Reserved. Currently always 0. |
+| `retry_count` | INTEGER | Drain replay attempts (M1). Incremented at each `drainPendingOutbound` claim; capped at `MAX_OUTBOUND_REPLAY_ATTEMPTS` (5), past which the op terminalizes `failed_permanent`. First sends do not count. |
 | `is_terminal` | INTEGER | Boolean (0/1). If 1, echoing this op completes the linked inbound event. |
-| `replay_policy` | TEXT NOT NULL | `'safe'`, `'unsafe'`, or `'read_only'`. Default `'unsafe'`. |
+| `replay_policy` | TEXT NOT NULL | `'safe'`, `'unsafe'`, `'read_only'`, or `'ephemeral'`. Default `'unsafe'`. |
 
-Index: `idx_outbound_ops_status` on `(status)`, `idx_outbound_ops_source` on `(source_inbound_seq)`.
+Index: `idx_outbound_ops_status` on `(status)`, `idx_outbound_ops_source` on `(source_inbound_seq)`, `idx_outbound_ops_chat_hash_status` on `(chat_jid, payload_hash, status)` (migration 45; supports the duplicate-suppression check).
+
+**`outbound_op_message_ids`** (migration 45) — every historical `wa_message_id` per op:
+
+| Column | Type | Description |
+|---|---|---|
+| `op_id` | INTEGER NOT NULL | FK to `outbound_ops.id`. |
+| `wa_message_id` | TEXT NOT NULL | A WhatsApp message id this op was submitted under. |
+| `submitted_at` | TEXT NOT NULL | When that submission happened. |
+
+Primary key `(op_id, wa_message_id)`; index `idx_outbound_op_message_ids_wa` on
+`(wa_message_id)`. Populated by every `markSubmitted()`; migration 45 backfills existing
+non-NULL `outbound_ops.wa_message_id` rows. Echo matching (§2.3) and recovery
+reconciliation (§4.2) join against it so an echo for ANY historical submission confirms the
+op.
 
 ### `turn_terminal_records` (Migration 37)
 

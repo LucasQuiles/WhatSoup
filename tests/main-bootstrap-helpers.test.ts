@@ -160,6 +160,7 @@ async function importMainWithMocks(options: {
     timestamp: string;
   } | null;
   selfRestartMarkerThrows?: boolean;
+  startupPingMarker?: { timestamp: string; pid: number } | null;
 } = {}) {
   vi.resetModules();
   vi.useFakeTimers();
@@ -411,6 +412,9 @@ async function importMainWithMocks(options: {
     collectHourlyMetrics: vi.fn(),
     startModelCurrencyMonitor: vi.fn(),
     consumeIntentionalRestartMarker,
+    consumeStartupPingMarker: vi.fn(() => options.startupPingMarker ?? null),
+    persistStartupPingMarker: vi.fn(() => '/tmp/ws-helpers-data-root/startup-ping.marker'),
+    clearStartupPingMarker: vi.fn(),
     emitAlertChecked: vi.fn(),
     createServiceManager: vi.fn(() => ({ restart: vi.fn() })),
     createPineconeWatchSearch: vi.fn(() => null),
@@ -474,6 +478,11 @@ async function importMainWithMocks(options: {
   }));
   vi.doMock('../src/runtimes/agent/self-restart.ts', () => ({
     consumeIntentionalRestartMarker: mocks.consumeIntentionalRestartMarker,
+  }));
+  vi.doMock('../src/core/startup-ping-marker.ts', () => ({
+    consumeStartupPingMarker: mocks.consumeStartupPingMarker,
+    persistStartupPingMarker: mocks.persistStartupPingMarker,
+    clearStartupPingMarker: mocks.clearStartupPingMarker,
   }));
   vi.doMock('../src/lib/emit-alert.ts', () => ({ emitAlertChecked: mocks.emitAlertChecked }));
   vi.doMock('../src/core/post-connect-recovery.ts', () => ({ waitForHistorySyncThenRecover: mocks.waitForHistorySyncThenRecover }));
@@ -1178,12 +1187,13 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       await vi.advanceTimersByTimeAsync(3_000);
 
       // Pending branch: notifyTarget = { chatJid: pending.chatJid, text: pending.text }
+      // M1: startup notices are 'ephemeral' — they must never replay across restarts.
       expect(h.sendTracked).toHaveBeenCalledWith(
         h.connection,
         '15559001@s.whatsapp.net',
         'resuming your task...',
         h.durability,
-        { replayPolicy: 'safe' },
+        { replayPolicy: 'ephemeral' },
       );
       // It must NOT fall back to the default "back online" notice.
       expect(h.sendTracked).not.toHaveBeenCalledWith(
@@ -1191,7 +1201,7 @@ describe('main.ts — uncovered helpers and signal paths', () => {
         '15551230000@s.whatsapp.net',
         '*Agent back online* ✓',
         h.durability,
-        { replayPolicy: 'safe' },
+        { replayPolicy: 'ephemeral' },
       );
       expect(h.logger.info).toHaveBeenCalledWith(
         { chatJid: '15559001@s.whatsapp.net', isResume: true },
@@ -1217,8 +1227,78 @@ describe('main.ts — uncovered helpers and signal paths', () => {
         '15551230000@s.whatsapp.net',
         '*Agent back online* ✓',
         h.durability,
-        { replayPolicy: 'safe' },
+        { replayPolicy: 'ephemeral' },
       );
+    });
+
+    // ── M1: introSent-pattern idempotency guard for the startup ping ─────────
+
+    it('persists the startup-ping marker before sending and clears it after a confirmed send', async () => {
+      const h = await importMainWithMocks({
+        instanceConfig: {
+          name: 'q',
+          type: 'agent',
+          introSent: true,
+          agentOptions: { sessionScope: 'shared' },
+        },
+        pendingStartupMessage: null,
+      });
+
+      // Persist-before-send: the marker is written before the 3s timer fires.
+      expect(h.persistStartupPingMarker).toHaveBeenCalledWith('/tmp/ws-helpers-data-root');
+      expect(h.sendTracked).not.toHaveBeenCalled();
+      expect(h.clearStartupPingMarker).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(h.sendTracked).toHaveBeenCalledWith(
+        h.connection,
+        '15551230000@s.whatsapp.net',
+        '*Agent back online* ✓',
+        h.durability,
+        { replayPolicy: 'ephemeral' },
+      );
+      expect(h.clearStartupPingMarker).toHaveBeenCalledWith('/tmp/ws-helpers-data-root');
+    });
+
+    it('skips the startup ping when a fresh marker exists (previous boot crashed around its send)', async () => {
+      const h = await importMainWithMocks({
+        instanceConfig: {
+          name: 'q',
+          type: 'agent',
+          introSent: true,
+          agentOptions: { sessionScope: 'shared' },
+        },
+        pendingStartupMessage: null,
+        startupPingMarker: { timestamp: new Date().toISOString(), pid: 999 },
+      });
+
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(h.sendTracked).not.toHaveBeenCalled();
+      expect(h.persistStartupPingMarker).not.toHaveBeenCalled();
+      expect(h.logger.info).toHaveBeenCalledWith(
+        { chatJid: '15551230000@s.whatsapp.net' },
+        'skipped startup notification (fresh startup-ping marker from previous boot)',
+      );
+    });
+
+    it('does not clear the startup-ping marker when the send fails', async () => {
+      const h = await importMainWithMocks({
+        instanceConfig: {
+          name: 'q',
+          type: 'agent',
+          introSent: true,
+          agentOptions: { sessionScope: 'shared' },
+        },
+        pendingStartupMessage: null,
+      });
+      h.sendTracked.mockRejectedValueOnce(new Error('send failed'));
+
+      h.capturedTimeouts.find((timer) => timer.ms === 3_000)!.callback();
+      await flushMicrotasks();
+
+      expect(h.clearStartupPingMarker).not.toHaveBeenCalled();
     });
 
     it('logs warn when default startup notification delivery fails', async () => {
@@ -1282,7 +1362,7 @@ describe('main.ts — uncovered helpers and signal paths', () => {
         '15559002@s.whatsapp.net',
         expect.stringContaining('Back online'),
         h.durability,
-        { replayPolicy: 'safe' },
+        { replayPolicy: 'ephemeral' },
       );
       expect(h.logger.info).toHaveBeenCalledWith(
         { chatJid: '15559002@s.whatsapp.net' },
