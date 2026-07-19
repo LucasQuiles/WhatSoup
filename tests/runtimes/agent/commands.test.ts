@@ -2,6 +2,12 @@
 // @traces REQ-005.AC-02
 import { describe, it, expect } from 'vitest';
 import { classifyInput } from '../../../src/runtimes/agent/commands.ts';
+import { COMMAND_REGISTRY, type CommandSpec } from '../../../src/runtimes/agent/command-registry.ts';
+
+// Widen the `as const` narrow tuple so optional-field reads typecheck (same
+// reason as the production derivation — the T1-worker flag; matches the cast
+// the landed command-registry.test.ts already uses).
+const REGISTRY = COMMAND_REGISTRY as readonly CommandSpec[];
 
 describe('classifyInput', () => {
   describe('local commands', () => {
@@ -235,5 +241,43 @@ describe('routing aliases — trailing whitespace grammar (R10)', () => {
 
   it('a bare slash with only whitespace still forwards (no command name)', () => {
     expect(classifyInput('/ ').type).toBe('forwarded');
+  });
+});
+
+describe('classifier sets derive from COMMAND_REGISTRY (W1-T2)', () => {
+  // These literals are the pre-refactor membership. The derivation must reproduce
+  // them exactly, or classifier behavior changed.
+  it('LOCAL_COMMANDS membership is unchanged (non-routing-alias names)', () => {
+    const derived = REGISTRY.filter((c) => !c.routingAlias).map((c) => c.name).sort();
+    expect(derived).toEqual(['help', 'kill-session', 'new', 'sessions', 'status']);
+  });
+  it('ROUTING_ALIAS_COMMANDS membership is unchanged', () => {
+    const derived = REGISTRY.filter((c) => c.routingAlias).map((c) => c.name).sort();
+    expect(derived).toEqual(['model', 'reset', 'why']);
+  });
+  it('ROUTING_MODEL_VERBS membership is unchanged', () => {
+    const model = REGISTRY.find((c) => c.name === 'model');
+    expect(model?.subVerbs).toEqual(['status', 'default', 'strongest', 'fastest']);
+  });
+});
+
+describe('nlRouting flag matrix stays byte-identical (G7/D7)', () => {
+  // FLAG OFF: routing aliases forward untouched (today’s behavior).
+  it('flag OFF — /model, /why, /reset all forward', () => {
+    for (const t of ['/model', '/model strongest', '/why', '/reset']) {
+      expect(classifyInput(t)).toEqual({ type: 'forwarded', text: t });
+    }
+  });
+  // FLAG ON: recognized grammar is claimed local; unrecognized still forwards (F04).
+  it('flag ON — bare aliases and recognized /model grammar are local', () => {
+    expect(classifyInput('/model', { routingAliases: true })).toEqual({ type: 'local', command: 'model' });
+    expect(classifyInput('/model strongest', { routingAliases: true }))
+      .toEqual({ type: 'local', command: 'model', args: 'strongest' });
+    expect(classifyInput('/why', { routingAliases: true })).toEqual({ type: 'local', command: 'why' });
+    expect(classifyInput('/reset', { routingAliases: true })).toEqual({ type: 'local', command: 'reset' });
+  });
+  it('flag ON — unrecognized /model 2nd token still forwards (F04 capability preservation)', () => {
+    expect(classifyInput('/model sonnet --verbose', { routingAliases: true }))
+      .toEqual({ type: 'forwarded', text: '/model sonnet --verbose' });
   });
 });
