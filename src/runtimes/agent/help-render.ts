@@ -19,7 +19,7 @@
 // field drives a STATIC SECTION split (end-user section, then an operator
 // section) — BOTH sections render to EVERYONE. No sender identity is read, so
 // the render stays a pure function of (registry, {nlRouting}) — R3c-1.3 holds.
-// `gate === 'admin'` drives a SEPARATE axis: the inline `_(admin)_` tag,
+// `gate !== 'none'` drives a SEPARATE axis: the inline `_(admin)_` tag,
 // composed independently of the section (D4 — e.g. `new` is gate:'admin' but
 // visibility:'end-user', so it renders in the end-user section WITH the tag —
 // discoverable, GRANT-denied on use, W04 3/11 tag-don't-hide). Audience-based
@@ -40,7 +40,7 @@ function findSpec(name: string): CommandSpec | undefined {
 }
 
 function toListLine(c: CommandSpec): string {
-  const adminTag = c.gate === 'admin' ? ' _(admin)_' : '';
+  const adminTag = c.gate !== 'none' ? ' _(admin)_' : '';
   return `*/${c.name}* — ${c.summary}${adminTag}`;
 }
 
@@ -48,7 +48,7 @@ function toListLine(c: CommandSpec): string {
  * Render the /help command list, SECTIONED by the registry's static
  * `visibility` field (ruling B — see module header): an end-user section,
  * then an operator section, both shown to every reader. Within each section,
- * one bold-name line per command, tagged `_(admin)_` when `gate === 'admin'`
+ * one bold-name line per command, tagged `_(admin)_` when `gate !== 'none'`
  * (a separate axis from the section — composed independently, D4).
  * Routing-alias commands (/model /why /reset) only appear when `nlRouting`
  * is on (byte-identical-off contract, D7). No placeholder/syntax in the list
@@ -86,6 +86,6 @@ export function renderHelpDetail(name: string): string {
   if (!spec) {
     return `Unknown command \`/${name}\`. Not a command — try \`/help\` for the full list.`;
   }
-  const gateNote = spec.gate === 'admin' ? ' (admin only)' : '';
+  const gateNote = spec.gate !== 'none' ? ' (admin only)' : '';
   return `\`${spec.syntax}\`\n${spec.summary}${gateNote}`;
 }
