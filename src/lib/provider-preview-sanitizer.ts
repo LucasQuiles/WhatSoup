@@ -26,8 +26,16 @@ const TRAILING_EMAIL_PUNCTUATION = new Set(['.', ':']);
 // downstream phone masking (unlike the handoff/ops surfaces), so the
 // fragment alone carries the whole PII payload. The E9 exemption therefore
 // narrows to truly-bare '@' runs.
-const EMAIL_SHAPED = /[^@]@+[^@]/;
-const DANGLING_LOCAL = /[^@]@+$/;
+// B25 simplification (review's "/@[^@]/" note, adjusted): with dangling
+// locals redacting, the three redactability predicates — email-shaped
+// /[^@]@+[^@]/, mention-shaped ('@' + content), dangling-local /[^@]@+$/ —
+// collapse to "the core is NOT a bare '@' run". Proof (a core always
+// contains at least one '@'): if it also has any non-'@' char, then either
+// it starts with '@' (mention-shaped) or its first '@' run is preceded by a
+// non-'@' char and is either followed by one (email-shaped) or terminal
+// (dangling local). The literal /@[^@]/ form would NOT be equivalent
+// ('user@' must redact yet has no char after its '@'), hence the
+// ALL_AT_SIGNS complement.
 const ALL_AT_SIGNS = /^@+$/;
 // B25 (1b) direction ruling: WhatsApp WIRE mentions are '@' + the numeric
 // user part of a JID (phone or lid digits); typed courtesy mentions are
@@ -216,13 +224,12 @@ function redactEmailLikeTokens(
     while (coreEnd > 0 && TRAILING_EMAIL_PUNCTUATION.has(token[coreEnd - 1]!)) coreEnd -= 1;
     const core = token.slice(0, coreEnd);
     const suffix = token.slice(coreEnd);
-    // E9 (packet D5) + B25: a core that is neither email-shaped (non-empty
-    // local AND domain) nor mention-shaped ('@' + content) nor a
-    // dangling-local address fragment (non-empty local + trailing '@') is not
-    // redactable — leave it in place via the pending-slice cursor, like the
-    // no-'@' case above. Only truly-bare '@' runs remain exempt.
-    const mentionShaped = core.startsWith('@') && !ALL_AT_SIGNS.test(core);
-    if (!EMAIL_SHAPED.test(core) && !mentionShaped && !DANGLING_LOCAL.test(core)) continue;
+    // E9 (packet D5) + B25: only a truly-bare '@' run is exempt — every
+    // other '@'-bearing core is email-shaped, mention-shaped, or a
+    // dangling-local address fragment (equivalence proven at ALL_AT_SIGNS
+    // above) and redacts unless a preserve rule below claims it. A bare run
+    // is left in place via the pending-slice cursor, like the no-'@' case.
+    if (ALL_AT_SIGNS.test(core)) continue;
     const jidMatch = preserveWhatsAppJids ? jidPattern().exec(core) : null;
     const preserve = (jidMatch?.index === 0 && jidMatch[0].length === core.length)
       || (preserveWhatsAppMentions && PRESERVABLE_MENTION.test(core));
