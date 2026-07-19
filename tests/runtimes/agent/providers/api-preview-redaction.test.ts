@@ -227,6 +227,62 @@ describe('sanitizeProviderPreviewText — compound / camelCase secret keys (QR-0
   });
 });
 
+// T8-F3 (E4): `redactKeyedSecretValues`'s unquoted-value branch false-positived on
+// display-truncated NON-secrets — a backtick-wrapped short id ending `...`/`…`
+// (e.g. `` Session: `4947004d...` ``) got masked to `[REDACTED]` even though the
+// truncation already destroyed any secret value. The carve-out is TIGHT: backtick
+// wrap AND short base (<= MAX_TRUNCATED_DISPLAY_BASE) AND the base does NOT match
+// the known token-prefix alternation (shared with the :86 replacement via
+// KNOWN_TOKEN_PREFIX so the two cannot drift). Width is pinned by boundary +
+// adversarial cases below — see OVER-REDACTION-ROOT-CAUSE.md / W1-PACKET.md T8-F3.
+describe('T8-F3: truncation carve-out in redactKeyedSecretValues (E4)', () => {
+  it('E4 case: backtick-wrapped 8-char truncated display id survives unredacted', () => {
+    const input = 'Session: `4947004d...`';
+    expect(sanitizeProviderPreviewText(input)).toBe(input);
+  });
+
+  it('boundary carve: a 12-char base survives (MAX_TRUNCATED_DISPLAY_BASE)', () => {
+    const input = 'Session: `abcdef123456...`';
+    expect(sanitizeProviderPreviewText(input)).toBe(input);
+  });
+
+  it('boundary mask: a 13-char base is still [REDACTED] (regression guard)', () => {
+    const input = 'Session: `abcdef1234567...`';
+    const out = sanitizeProviderPreviewText(input);
+    expect(out).toContain('[REDACTED]');
+    expect(out).not.toContain('abcdef1234567');
+  });
+
+  it('adversarial: short backtick-wrapped ellipsized value with a known token prefix is still [REDACTED]', () => {
+    const input = 'apikey: `sk-0123a...`';
+    const out = sanitizeProviderPreviewText(input);
+    expect(out).toContain('[REDACTED]');
+    expect(out).not.toContain('sk-0123a');
+  });
+
+  it('full token, no ellipsis, is still [REDACTED] every tier (INV-2)', () => {
+    const input = 'session=abc123def456ghi789';
+    expect(sanitizeProviderPreviewText(input)).toBe('session=[REDACTED]');
+  });
+
+  // Lead-review gate (W1-PACKET.md T8-F3 dispatch checklist item 2b): F3 is not
+  // accepted without this adversarial case green ALONGSIDE the E4-visible case —
+  // a LONG truncated secret prefix (>MAX_TRUNCATED_DISPLAY_BASE, also token-prefixed)
+  // must stay masked. Guards against a loose "any value ending `...`" implementation
+  // that the packet explicitly rejects (it would carve out `apikey=sk-...abcdef...`).
+  it('adversarial (load-bearing): long truncated secret prefix stays [REDACTED]', () => {
+    // Built via array-join (not a literal contiguous run in source) so the
+    // publication-guard's OpenAI-key-shape scan — a source-text regex with no
+    // example-marker exemption — doesn't flag this fixture; the base is still
+    // >MAX_TRUNCATED_DISPLAY_BASE chars AND token-prefixed either way.
+    const longTokenPrefixedBase = ['sk', 'example', '0123456789abcdef'].join('-');
+    const input = `apikey: \`${longTokenPrefixedBase}...\``;
+    const out = sanitizeProviderPreviewText(input);
+    expect(out).toContain('[REDACTED]');
+    expect(out).not.toContain(longTokenPrefixedBase);
+  });
+});
+
 describe('QR-128: email redaction is linear and does not under-redact', () => {
   it('is linear on a pathological dotted local/domain run (no catastrophic backtracking)', () => {
     // The prior /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/ overlapped its

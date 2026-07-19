@@ -9,6 +9,33 @@ const ASSIGNMENT_DELIMITER = /[:=]/g;
 const EMAIL_TOKEN_CHAR = /[A-Za-z0-9._%+@-]/;
 const TRAILING_EMAIL_PUNCTUATION = new Set(['.', ':']);
 
+// T8-F3 (E4 fix): shared token-prefix alternation. Defined ONCE so the known-token
+// mask (sanitizeProviderSecrets, below) and the truncation carve-out (in
+// redactKeyedSecretValues) can never drift apart — a prefix recognized by one MUST
+// be recognized by the other (packet: "SHARE that regex ... so they cannot drift").
+const KNOWN_TOKEN_PREFIX = '(?:sk|pk|rk|ghp|github_pat|xox[baprs]|ya29|AIza)';
+const KNOWN_TOKEN_RE = new RegExp(`\\b${KNOWN_TOKEN_PREFIX}[-_A-Za-z0-9]{12,}\\b`, 'g');
+const KNOWN_TOKEN_PREFIX_RE = new RegExp(`^${KNOWN_TOKEN_PREFIX}`);
+
+// T8-F3 (E4 fix): a value truncated for DISPLAY (backtick-wrapped, ending in an
+// ellipsis) has already destroyed whatever it previews — masking it protects
+// nothing and destroys operator usability (e.g. `` Session: `4947004d...` ``).
+// The carve-out is TIGHT (packet: "the WIDTH is the security decision"): the base
+// (chars before the trailing ellipsis, inside the backticks) must be SHORT
+// (<= MAX_TRUNCATED_DISPLAY_BASE) AND must NOT match a known token prefix — a
+// long truncated secret prefix (20+ chars, e.g. `sk-...` plus a long run) still
+// masks, and a short-but-token-prefixed base (e.g. `sk-...` plus a short run)
+// still masks. Anything else keeps today's behavior.
+const MAX_TRUNCATED_DISPLAY_BASE = 12;
+const TRUNCATED_DISPLAY_VALUE_RE = /^`([^`]*?)(?:\.\.\.|…)`$/;
+
+function isDisplayTruncatedNonSecret(value: string): boolean {
+  const match = TRUNCATED_DISPLAY_VALUE_RE.exec(value);
+  if (!match) return false;
+  const base = match[1]!;
+  return base.length <= MAX_TRUNCATED_DISPLAY_BASE && !KNOWN_TOKEN_PREFIX_RE.test(base);
+}
+
 function isSecretKey(key: string): boolean {
   const normalized = key.toLowerCase().replace(/[.-]+/g, '_');
   const apiKeyMarker = /api_?key/g;
@@ -74,7 +101,7 @@ function redactKeyedSecretValues(text: string): string {
     let end = valueStart;
     while (end < text.length && !/\s/.test(text[end]!)) end += 1;
     const value = text.slice(valueStart, end);
-    out += value.length > 0 ? '[REDACTED]' : value;
+    out += value.length > 0 && !isDisplayTruncatedNonSecret(value) ? '[REDACTED]' : value;
     cursor = end;
   }
   return out + text.slice(cursor);
@@ -83,7 +110,7 @@ function redactKeyedSecretValues(text: string): string {
 function sanitizeProviderSecrets(text: string): string {
   return redactKeyedSecretValues(text)
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
-    .replace(/\b(?:sk|pk|rk|ghp|github_pat|xox[baprs]|ya29|AIza)[-_A-Za-z0-9]{12,}\b/g, '[REDACTED_TOKEN]');
+    .replace(KNOWN_TOKEN_RE, '[REDACTED_TOKEN]');
 }
 
 function redactEmailLikeTokens(
