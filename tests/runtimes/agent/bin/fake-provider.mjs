@@ -59,3 +59,52 @@ if (config.crashAfterMs !== undefined) {
 }
 
 setInterval(() => {}, 1_000);
+
+// --- Fixture self-expiry: orphan watch + TTL backstop (B22) -----------------
+// The ignoreSigterm contract is about signals sent BY the harness under test:
+// a "stubborn" provider must survive the harness's SIGTERM so escalation paths
+// (SIGKILL, process-tree reaping) are actually exercised. Self-expiry is not a
+// signal response — it is the fixture noticing that no test owns it any more:
+// either its spawning vitest worker died (the fixture reparented to pid 1) or
+// it has outlived any plausible suite run. Both paths exit even when
+// ignoreSigterm is set; without them a worker crash/kill/recycle before
+// teardown strands this process forever (observed: fixtures alive 4+ days).
+//
+// Scope note: no current test kills this fixture's PARENT deliberately — the
+// process-tree reaping probes kill the fixture itself and then assert that
+// killSessionTree collects the reparented grandchildren. That is why the
+// grandchild `-e` programs above deliberately get NO ppid-watch of their own
+// (self-exit there would fake a pass for the reaper), while grandchildren ARE
+// reaped here when the fixture itself self-expires, so an expiring fixture
+// never strands its own tree.
+function selfExpire() {
+  for (const grandchild of [g1, g2]) {
+    if (!grandchild?.pid) continue;
+    try {
+      process.kill(grandchild.pid, 'SIGKILL');
+    } catch {
+      // Best effort — the grandchild may already be gone.
+    }
+  }
+  process.exit(0);
+}
+
+function positiveMsOr(fallbackMs, raw) {
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? value : fallbackMs;
+}
+
+// Both timers are unref'd: self-expiry must never keep the fixture alive on
+// its own — the keep-alive interval above is the only thing holding the loop.
+const orphanTimer = setInterval(() => {
+  if (process.ppid === 1) selfExpire();
+}, positiveMsOr(1_000, process.env.FAKE_PROVIDER_ORPHAN_POLL_MS));
+orphanTimer.unref();
+
+// Hard TTL backstop: far above any legitimate suite run, far below the
+// multi-day orphan lifetimes this guards against.
+const ttlTimer = setTimeout(
+  selfExpire,
+  positiveMsOr(30 * 60 * 1_000, process.env.FAKE_PROVIDER_MAX_LIFETIME_MS),
+);
+ttlTimer.unref();
