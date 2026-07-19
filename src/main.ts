@@ -9,6 +9,7 @@ import { getMessagesBySender, getMessageCount, getUnprocessedCount } from './cor
 import { processHistoryBatch, type HistoryInput } from './core/history-sync.ts';
 import { execFileSync } from 'node:child_process';
 import { createConnection } from './transport/factory.ts';
+import { classifyStreamedProviderFailure } from './runtimes/agent/failure-taxonomy.ts';
 import type { RuntimeConnection } from './transport/runtime-connection.ts';
 import { ChatRuntime } from './runtimes/chat/runtime.ts';
 import { AgentRuntime } from './runtimes/agent/runtime.ts';
@@ -67,6 +68,7 @@ import { createPineconeWatchSearch } from './mcp/tools/knowledge.ts';
 import { backfillMetrics, collectHourlyMetrics } from './core/metrics-collector.ts';
 import { startModelCurrencyMonitor } from './lib/model-advisor.ts';
 import { shutdownExitCode } from './main-shutdown-policy.ts';
+import { markCleanExit, restartLoopGuardPath } from './runtimes/agent/restart-loop-guard.ts';
 import { acquireProcessLock, isProcessLockError, releaseProcessLock, type ProcessLockHandle } from './lib/process-lock.ts';
 import { createServiceManager } from './fleet/platform.ts';
 
@@ -295,6 +297,10 @@ const instanceType = (instanceConfig?.type as string | undefined) ?? 'chat';
 
 // 4. Connection
 const connectionManager: RuntimeConnection = createConnection(config);
+// #1783 — wire the send-seam provider-error banner classifier into the Baileys
+// outbound governor. main.ts is the composition root (may import runtimes);
+// transport receives the classifier via DI so it need not import runtimes.
+connectionManager.setOutboundContentClassifier?.(classifyStreamedProviderFailure);
 
 // 5. Runtime — selected by instance type
 let runtime: Runtime;
@@ -1109,6 +1115,10 @@ async function shutdown(signal: string): Promise<void> {
     await runtime.shutdown();
     connectionManager.shutdown();
     log.info('shutdown complete');
+    // C5 restart-loop guard: a completed graceful shutdown clears the crash
+    // marker — the next boot will not count as crash-interrupted. No-op for
+    // runtimes without a guard journal (chat/passive instances).
+    markCleanExit(restartLoopGuardPath(config.stateRoot));
   } catch (err) {
     log.error({ err }, 'error during shutdown');
   } finally {

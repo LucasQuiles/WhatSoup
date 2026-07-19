@@ -51,6 +51,7 @@ import { jidPattern } from '../lib/redaction-patterns.ts';
 import { baileysVersionLabel, resolveBaileysVersion } from './baileys-version.ts';
 import { PollVoteDecryptor } from './poll-vote-decryptor.ts';
 import { OutboundGovernor, wrapWithOutboundGovernor } from './outbound-governor.ts';
+import type { OutboundBannerClassifier } from './outbound-content-egress.ts';
 import { readWhatsoupGitSha } from '../lib/git-env.ts';
 
 export type { IncomingMessage } from '../core/types.ts';
@@ -642,9 +643,23 @@ export class ConnectionManager extends EventEmitter implements Messenger {
    */
   private readonly outboundGovernor: OutboundGovernor | null;
 
+  /**
+   * Injected send-seam content classifier (#1783). Wired by the composition root
+   * (src/main.ts) from the runtimes `classifyStreamedProviderFailure` — transport
+   * may not import runtimes (ring boundary), so the classifier is passed in.
+   * `null` leaves the content-egress gate inert (pacing/identity guards unaffected).
+   */
+  private outboundContentClassifier: OutboundBannerClassifier | null = null;
+
   setIdentityStore(store: IdentityStore, mode: GuardMode): void {
     this.identityStore = store;
     this.identityMode = mode;
+  }
+
+  /** Wire the send-seam banner classifier (#1783). Idempotent; re-applied to the
+   *  live socket on the next reconnect. */
+  setOutboundContentClassifier(classify: OutboundBannerClassifier): void {
+    this.outboundContentClassifier = classify;
   }
 
   /** When true, incoming calls are automatically rejected via sock.rejectCall(). */
@@ -815,6 +830,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
             governor: this.outboundGovernor,
             resolveDest: (jid) => this.resolveOutboundDest(jid),
             log: this.log,
+            classifyProviderBanner: this.outboundContentClassifier ?? undefined,
           })
         : sock;
       this.recordCredentialLifecycle('socket_created', { baileysVersion: this.latestBaileysVersion });

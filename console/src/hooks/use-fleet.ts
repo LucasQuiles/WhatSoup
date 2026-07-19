@@ -102,7 +102,20 @@ export function useLines() {
   // for 60s (DAILY_CACHE_TTL, src/fleet/routes/lines.ts), so this bounded
   // poll — not a per-message ['lines'] invalidation — is what surfaces
   // counter changes on a connected tab without re-requesting cached data.
-  return useQuery(getLinesQueryOptions(connected ? POLL_LINES_WS_BACKSTOP : POLL_LINES));
+  const poll = connected ? POLL_LINES_WS_BACKSTOP : POLL_LINES;
+  const query = useQuery(getLinesQueryOptions(poll));
+  // D-3/F-UX-4: the fleet-lines plane carries the same fail-closed
+  // {observedAt, stale} contract the metrics planes got in #1925
+  // (use-metrics.ts). The threshold is poll-aware: 2 missed intervals of
+  // the ACTIVE interval.
+  return {
+    ...query,
+    freshness: queryFreshness({
+      dataUpdatedAt: query.dataUpdatedAt,
+      refetchFailed: query.isRefetchError,
+      staleAfterMs: 2 * poll,
+    }),
+  };
 }
 
 export function useLine(name: string) {

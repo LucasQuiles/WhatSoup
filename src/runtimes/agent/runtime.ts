@@ -159,6 +159,12 @@ import { PendingPollPersistence } from './pending-poll-persistence.ts';
 import { HandoffDistillCoordinator } from './handoff-distill-coordinator.ts';
 import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } from './handoff-distill-config.ts';
 import { config } from '../../config.ts';
+import {
+  checkAndRecordInterruptedBoot,
+  markBootInProgress,
+  readRestartLoopGuardHealth,
+  restartLoopGuardPath,
+} from './restart-loop-guard.ts';
 import { canonicalConversationKey, resolvePhoneFromJid } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
 import { matchImperative, extractImperativeTarget } from '../../core/substrate/inline-extractor.ts';
@@ -764,6 +770,9 @@ export class AgentRuntime implements Runtime {
   private turnChain: Promise<void> = Promise.resolve();
   private healthStatsTimer: ReturnType<typeof setInterval> | null = null;
   private proactiveResumeIdentityRejects = 0;
+  // C5 restart-loop guard: true when this boot follows an unclean exit
+  // (captured at the top of start()); consumed by the startup resume gate.
+  private restartLoopInterruptedBoot = false;
   private unownedProviderEventRejects = 0;
   private readonly providerEventRejectReasonCounts = new Map<string, number>();
   /**
@@ -1429,6 +1438,13 @@ export class AgentRuntime implements Runtime {
       recentCrashCount: this.getRecentCrashCount(),
       lastCrashAt: this.crashes.lastCrashAt,
       proactiveResumeIdentityRejects: this.proactiveResumeIdentityRejects,
+      restartLoopGuard: {
+        enabled: config.restartLoopGuard.enabled,
+        ...readRestartLoopGuardHealth(
+          restartLoopGuardPath(config.stateRoot),
+          config.restartLoopGuard.windowMs,
+        ),
+      },
       unownedProviderEventRejects: this.unownedProviderEventRejects,
       turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
       turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
@@ -1512,6 +1528,44 @@ export class AgentRuntime implements Runtime {
    * proactively resumed this pass (a live or ambiguous session was already
    * left running for that key) — only meaningful to the startup caller.
    */
+  /**
+   * C5 restart-loop guard consult for the startup resume gate. Returns true
+   * when proactive resume must be suppressed for this boot: the guard is
+   * enabled, resumable work exists, this boot follows an unclean exit, and
+   * the crashy-boot journal has reached the trip threshold. On trip, queues
+   * ONE operator notice through the startup-message channel (popped and sent
+   * by main.ts after connect). Fail-open throughout — any guard error
+   * degrades to "do not suppress".
+   */
+  private shouldSuppressProactiveResume(resumableCount: number): boolean {
+    if (!config.restartLoopGuard.enabled) return false;
+    if (resumableCount < 1) return false;
+    if (!this.restartLoopInterruptedBoot) return false;
+    const trip = checkAndRecordInterruptedBoot({
+      statePath: restartLoopGuardPath(config.stateRoot),
+      maxRestarts: config.restartLoopGuard.maxRestarts,
+      windowMs: config.restartLoopGuard.windowMs,
+    });
+    if (!trip.tripped) return false;
+    log.warn(
+      { bootsInWindow: trip.bootsInWindow, resumableCount, windowMs: config.restartLoopGuard.windowMs },
+      'restart-loop guard tripped — suppressing proactive resume for this boot',
+    );
+    const adminPhone = [...config.adminPhones][0];
+    if (adminPhone) {
+      const windowSec = Math.round(config.restartLoopGuard.windowMs / 1000);
+      this.pendingStartupMessage = {
+        chatJid: toPersonalJid(adminPhone),
+        text:
+          `*Restart-loop guard tripped* ⚠️ — ${trip.bootsInWindow} crash-interrupted boots ` +
+          `inside ${windowSec}s with resumable sessions pending. Proactive resume is ` +
+          `suppressed for this boot to break a possible resume-replay loop; sessions ` +
+          `resume on their next message. Check the journal for the implicated chat.`,
+      };
+    }
+    return true;
+  }
+
   private async sweepStaleAgentSessions(): Promise<Set<string>> {
     const proactiveResumeBlockedConversationKeys = new Set<string>();
     if (!(this.sessionScope === 'per_chat' || this.sandboxPerChat)) {
@@ -2779,6 +2833,13 @@ export class AgentRuntime implements Runtime {
   }
 
   async start(): Promise<void> {
+    // C5 restart-loop guard: mark this boot BEFORE any fallible work so a
+    // later crash leaves the marker standing. Consumed at the resume gate
+    // below; fail-open inside the guard (a broken breaker never wedges a
+    // healthy instance).
+    this.restartLoopInterruptedBoot = config.restartLoopGuard.enabled
+      ? markBootInProgress(restartLoopGuardPath(config.stateRoot))
+      : false;
     this.db.assertWritableCompatibility();
     if (this.cwd && isSamePhysicalDirectory(this.cwd, homedir())) throw new Error('configured agent cwd must not resolve to the user home directory');
     ensureAgentSchema(this.db);
@@ -2969,7 +3030,15 @@ export class AgentRuntime implements Runtime {
     // of waiting for the user to send a message after a service restart.
     // sandboxPerChat is excluded — its resume path requires workspace provisioning which happens lazily.
     if (this.sessionScope === 'per_chat' && !this.sandboxPerChat && this.durability && config.proactiveResumeOnStartup) {
-      const resumableCheckpoints = this.durability.getResumableCheckpoints();
+      const resumableCheckpointsRaw = this.durability.getResumableCheckpoints();
+      // C5 restart-loop guard: on trip, suppress proactive resume for this
+      // boot — sessions still lazy-resume on their next inbound message
+      // (the existing fail-safe for every other skip), the instance stays up
+      // serving inbound, and the operator gets one notice. An empty list
+      // makes the loop below a no-op.
+      const resumableCheckpoints = this.shouldSuppressProactiveResume(resumableCheckpointsRaw.length)
+        ? []
+        : resumableCheckpointsRaw;
       for (const cp of resumableCheckpoints) {
         const full = this.durability.getSessionCheckpoint(cp.conversation_key);
         if (!full?.session_id) continue;
@@ -6551,6 +6620,13 @@ export class AgentRuntime implements Runtime {
           autoCompactConsecutiveRapidRearmsMax: this.autoCompact.consecutiveRapidRearmsMax,
           autoCompactNextTurnOverThreshold: this.autoCompact.nextTurnOverThreshold,
           proactiveResumeIdentityRejects: this.proactiveResumeIdentityRejects,
+          restartLoopGuard: {
+            enabled: config.restartLoopGuard.enabled,
+            ...readRestartLoopGuardHealth(
+              restartLoopGuardPath(config.stateRoot),
+              config.restartLoopGuard.windowMs,
+            ),
+          },
           unownedProviderEventRejects: this.unownedProviderEventRejects,
           turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
           turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
@@ -6584,6 +6660,13 @@ export class AgentRuntime implements Runtime {
         autoCompactConsecutiveRapidRearmsMax: this.autoCompact.consecutiveRapidRearmsMax,
         autoCompactNextTurnOverThreshold: this.autoCompact.nextTurnOverThreshold,
         proactiveResumeIdentityRejects: this.proactiveResumeIdentityRejects,
+        restartLoopGuard: {
+          enabled: config.restartLoopGuard.enabled,
+          ...readRestartLoopGuardHealth(
+            restartLoopGuardPath(config.stateRoot),
+            config.restartLoopGuard.windowMs,
+          ),
+        },
         unownedProviderEventRejects: this.unownedProviderEventRejects,
         turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
         turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
