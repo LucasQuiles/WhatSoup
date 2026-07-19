@@ -1126,12 +1126,21 @@ Passed directly to agent sandbox enforcement hooks (`deploy/hooks/agent-sandbox.
 | `allowedTools` | string[] | Claude Code tools the agent may use. Empty array blocks all non-essential tools. |
 | `allowedMcpTools` | string[] | MCP tools permitted within the sandbox. |
 | `bash` | object | Bash execution policy: `{ "enabled": boolean, "pathRestricted": boolean }`. |
+| `allowedEgress` | string[] | Opt-in network egress allowlist for the filtering proxy (#1607 / QR-008). Entries are `host` (any port) or `host:port` (exact); host match is case-insensitive; no wildcards. **Absent or omitted ⇒ no proxy is started and no egress restriction applies (today's behaviour, unchanged).** A present array (including `[]`) starts a loopback filtering proxy for this instance's agent subprocesses — see **Agent egress allowlist** below. |
 
 **Missing-policy behaviour.** When the hook runs but `.claude/sandbox-policy.json` is absent it **fails closed** (denies, logs `sandbox_deny`) by default. Override with `WHATSOUP_SANDBOX_FAIL_OPEN=1` (see [Environment Variables → Internal / Bootstrap](#internal--bootstrap)).
 
 **Bash `pathRestricted` is best-effort, not a real sandbox.** When `bash.pathRestricted` is `true`, the hook scans the *raw* command string and denies obvious out-of-sandbox escapes: absolute paths outside `allowedPaths` (including quoted paths with spaces), `../` traversal, known credential paths (`.ssh/`, `.gnupg/`, `secret-tool`), tilde expansion (`~`, `~user`), `$HOME`/`$XDG_*` and their brace/quote/default-value split forms, and command substitution (`$(...)`, backticks). This raises the bar against low-effort escapes but **cannot fully contain bash** — a shell can still construct an out-of-sandbox path at runtime in ways a static string scan cannot see (e.g. values read from files, `eval`, `base64 -d`, `$IFS` tricks, env vars assigned earlier in the same command). For hard isolation, run the agent under an OS-level boundary (separate UID, container, or `sandbox-exec`/`bwrap`) in addition to this hook. The residual-bypass note in `deploy/hooks/agent-sandbox.sh` documents this scope.
 
-**Network egress is NOT confined.** This hook inspects filesystem paths in the command string only — it applies no network restriction whatsoever. Any subprocess an agent starts (`curl`, `node`, `python`, …) can open a connection to any host; **agent subprocess network egress is unbounded**. Closing this requires an OS-hard boundary (a dedicated agent UID + host-firewall egress allowlist, network namespaces, or an allowlisting proxy), which is design-gated — see QR-008 / issue #1607.
+**Network egress is NOT confined by this hook.** The sandbox hook inspects filesystem paths in the command string only — it applies no network restriction. By default, any subprocess an agent starts (`curl`, `node`, `python`, …) can open a connection to any host; **agent subprocess network egress is unbounded unless the opt-in egress allowlist below is configured.**
+
+#### Agent egress allowlist (`agentOptions.sandbox.allowedEgress`)
+
+Setting a non-empty `allowedEgress` array (see the sandbox field table above) starts a **loopback filtering forward-proxy** with the instance. The agent child processes receive `HTTP_PROXY`/`HTTPS_PROXY` pointing at it (plus `NO_PROXY=localhost,127.0.0.1`), and the proxy permits only allowlisted destinations (HTTP forward + HTTPS `CONNECT`), refusing and logging everything else (`sandbox_egress_deny`). The allowlist is read back off `.claude/sandbox-policy.json` per request, so a live edit takes effect without a restart.
+
+- **Opt-in / opt-out:** absent `allowedEgress` ⇒ no proxy, no env vars, behaviour unchanged. A present array (including `[]` = deny-all) enables the proxy for that instance.
+- **Fail-closed:** an empty/corrupt/unreadable policy denies all egress; a proxy that cannot start aborts instance start rather than running unconfined. `WHATSOUP_SANDBOX_FAIL_OPEN=1` is the single documented escape hatch (relaxes both not-on-allowlist and unreadable-policy denials, logged).
+- **Scope — defense-in-depth, not a kernel-hard boundary.** The proxy confines only proxy-aware traffic (subprocesses that honour `*_PROXY`). A subprocess that dials a raw socket or unsets the proxy env vars is **not** confined by this layer; a host-firewall egress backstop consuming the same allowlist is the planned follow-up (see QR-008 / issue #1607). Do not treat this as OS-hard containment on its own.
 
 #### `agentOptions.enabledPlugins`
 

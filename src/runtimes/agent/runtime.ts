@@ -2848,21 +2848,29 @@ export class AgentRuntime implements Runtime {
         // so a live edit to sandbox-policy.json takes effect without a
         // restart; a corrupt/unreadable file fails closed (see egress-proxy.ts).
         if (Array.isArray(this.sandbox.allowedEgress) && this.sandbox.allowedEgress.length > 0) {
-          const policyPath = join(claudeDir, 'sandbox-policy.json');
-          this.egressProxy = await EgressProxy.start({
-            policy: {
-              read: () => {
-                const raw = JSON.parse(readFileSync(policyPath, 'utf8'));
-                return { allowedEgress: Array.isArray(raw.allowedEgress) ? raw.allowedEgress : [] };
+          // Own try so a proxy bind failure is labelled as such (not as a
+          // sandbox-artifact write failure) — then re-throw to abort start():
+          // an opted-in instance must NOT run with egress unconfined (fail-closed).
+          try {
+            const policyPath = join(claudeDir, 'sandbox-policy.json');
+            this.egressProxy = await EgressProxy.start({
+              policy: {
+                read: () => {
+                  const raw = JSON.parse(readFileSync(policyPath, 'utf8'));
+                  return { allowedEgress: Array.isArray(raw.allowedEgress) ? raw.allowedEgress : [] };
+                },
               },
-            },
-            failOpen: process.env['WHATSOUP_SANDBOX_FAIL_OPEN'] === '1',
-            log: (event) => log.info(event, 'egress adjudication'),
-          });
-          log.info(
-            { port: this.egressProxy.port, allowlistSize: this.sandbox.allowedEgress.length },
-            'started egress-allowlist proxy',
-          );
+              failOpen: process.env['WHATSOUP_SANDBOX_FAIL_OPEN'] === '1',
+              log: (event) => log.info(event, 'egress adjudication'),
+            });
+            log.info(
+              { port: this.egressProxy.port, allowlistSize: this.sandbox.allowedEgress.length },
+              'started egress-allowlist proxy',
+            );
+          } catch (proxyErr) {
+            log.error({ err: proxyErr, cwd }, 'failed to start egress-allowlist proxy — aborting start (fail-closed)');
+            throw proxyErr;
+          }
         }
       } catch (err) {
         log.error({ err, cwd }, 'failed to initialize sandbox artifacts');
