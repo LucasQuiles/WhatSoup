@@ -10,6 +10,8 @@ import {
   CLIENT_TEMPORARY_ISSUE_TEXT,
 } from '../../src/core/outbound-message-safety.ts';
 import { Database } from '../../src/core/database.ts';
+import { sanitizeProviderPreviewText } from '../../src/lib/provider-preview-sanitizer.ts';
+import { E9_BARE_AT_MESSAGE } from '../fixtures/e9-strings.ts';
 
 // T8-F1+F2: isOperatorDmPeer logs (never-silent, WG-7) via the module's own
 // child logger. Hoisted so the mock factory (which vitest hoists above these
@@ -113,12 +115,15 @@ describe('redactInternalArtifacts', () => {
     expect(redactions).toHaveLength(0);
   });
 
-  it('redacts provider tokens and emails via the shared sanitizer', () => {
+  it('redacts provider tokens via the shared sanitizer; emails flow as authored (B25 chat scope)', () => {
     const { text } = redactInternalArtifacts(
       `auth failed: Bearer ${FAKE_TOKEN} for ${FAKE_EMAIL}`,
     );
     expect(text).not.toContain(FAKE_TOKEN);
-    expect(text).not.toContain(FAKE_EMAIL);
+    // B25 chat-scope owner ruling: email redaction is background-only and must
+    // never mutate chat-visible text.
+    expect(text).toContain(FAKE_EMAIL);
+    expect(text).not.toContain('[REDACTED_EMAIL]');
   });
 
   it('leaves ordinary client text unchanged with zero redactions', () => {
@@ -450,13 +455,14 @@ describe('redactInternalArtifacts — audience scoping', () => {
     expect(redactions).toHaveLength(0);
   });
 
-  it('internal audience still masks secrets and emails (third-party transport)', () => {
+  it('internal audience still masks secrets (third-party transport); emails flow as authored (B25 chat scope)', () => {
     const { text, redactions } = redactInternalArtifacts(
       `deploy: Bearer ${FAKE_TOKEN} for ${FAKE_EMAIL} — see /home/testuser/.claude/settings.json`,
       'internal',
     );
     expect(text).not.toContain(FAKE_TOKEN);
-    expect(text).not.toContain(FAKE_EMAIL);
+    // B25 chat-scope owner ruling: email masking is background-only.
+    expect(text).toContain(FAKE_EMAIL);
     // operator path preserved for the internal group
     expect(text).toContain('/home/testuser/.claude/settings.json');
     expect(redactions.map((r) => r.category)).toContain('provider_secret');
@@ -481,23 +487,38 @@ describe('redactInternalArtifacts — audience scoping', () => {
     // Live evidence: an internal-tier DM explaining this very bug had its own
     // bare '@' re-redacted to [REDACTED_EMAIL]. A whitespace-flanked '@' has no
     // local part and no domain part — it is not email-shaped.
-    const input = 'meet @ 5pm to review the deck';
+    const input = E9_BARE_AT_MESSAGE;
     expect(redactInternalArtifacts(input, 'client').text).toBe(input);
     expect(redactInternalArtifacts(input, 'internal').text).toBe(input);
   });
 
-  it.each([
+  // B25 chat scope: these email-like tokens previously redacted at internal
+  // audience. Chat egress no longer runs ANY email-class transform, so they
+  // pass through as authored; the redaction coverage moves to the provider
+  // path (same flag set the internal audience used to pass), asserted below
+  // so the sanitizer's email logic keeps this adversarial coverage.
+  const EMAIL_LIKE_JID_TOKENS = [
     { label: 'nested domain', input: `${FAKE_GROUP_JID}.evil.test` },
     { label: 'hyphenated domain', input: `${FAKE_GROUP_JID}-evil.test` },
     { label: 'repeated hyphen domain', input: `${FAKE_GROUP_JID}--evil.test` },
     { label: 'mixed punctuation domain', input: `${FAKE_GROUP_JID}.-evil.test` },
     { label: 'leading plus', input: `+${FAKE_GROUP_JID}` },
     { label: 'dotted local part', input: `x.${FAKE_GROUP_JID}` },
-  ])('internal audience redacts a JID-shaped substring inside an email-like token: $label', ({ input }) => {
+  ];
+
+  it.each(EMAIL_LIKE_JID_TOKENS)('chat egress (internal) passes an email-like token through as authored: $label', ({ input }) => {
       const { text, redactions } = redactInternalArtifacts(input, 'internal');
-      expect(text).toBe('[REDACTED_EMAIL]');
-      expect(text).not.toContain(FAKE_GROUP_JID);
-      expect(redactions.map((redaction) => redaction.category)).toContain('provider_secret');
+      expect(text).toBe(input);
+      expect(redactions).toHaveLength(0);
+  });
+
+  it.each(EMAIL_LIKE_JID_TOKENS)('provider path still redacts a JID-shaped substring inside an email-like token: $label', ({ input }) => {
+      const out = sanitizeProviderPreviewText(input, {
+        preserveWhatsAppJids: true,
+        preserveWhatsAppMentions: true,
+      });
+      expect(out).toBe('[REDACTED_EMAIL]');
+      expect(out).not.toContain(FAKE_GROUP_JID);
   });
 
   it('internal audience does not reinterpret literal JID placeholder-shaped text', () => {
@@ -542,13 +563,27 @@ describe('redactInternalArtifacts — audience scoping', () => {
   });
 
   it.each([
-    { label: 'quoted local part', input: `"${FAKE_GROUP_JID}"@evil.test`, expected: '[REDACTED_EMAIL]' },
-    { label: 'quoted domain literal', input: `"${FAKE_GROUP_JID}"@[127.0.0.1]`, expected: '[REDACTED_EMAIL]' },
+    // B25 chat scope: quoted-local shapes previously became [REDACTED_EMAIL]
+    // at internal audience; chat egress now passes them through as authored.
+    { label: 'quoted local part', input: `"${FAKE_GROUP_JID}"@evil.test`, expected: `"${FAKE_GROUP_JID}"@evil.test` },
+    { label: 'quoted domain literal', input: `"${FAKE_GROUP_JID}"@[127.0.0.1]`, expected: `"${FAKE_GROUP_JID}"@[127.0.0.1]` },
     { label: 'label delimiter', input: `target:${FAKE_GROUP_JID}`, expected: `target:${FAKE_GROUP_JID}` },
     { label: 'device JID', input: '12345:6@g.us', expected: '12345:6@g.us' },
     { label: 'agent and device JID', input: '12345-2:6@g.us', expected: '12345-2:6@g.us' },
-  ])('classifies complete JIDs without preserving an enclosing email: $label', ({ input, expected }) => {
+  ])('chat egress leaves JID and quoted-email shapes as authored: $label', ({ input, expected }) => {
     expect(redactInternalArtifacts(input, 'internal').text).toBe(expected);
+  });
+
+  it.each([
+    { label: 'quoted local part', input: `"${FAKE_GROUP_JID}"@evil.test` },
+    { label: 'quoted domain literal', input: `"${FAKE_GROUP_JID}"@[127.0.0.1]` },
+  ])('provider path still redacts a quoted JID local without JID-preserving it: $label', ({ input }) => {
+    const out = sanitizeProviderPreviewText(input, {
+      preserveWhatsAppJids: true,
+      preserveWhatsAppMentions: true,
+    });
+    expect(out).toBe('[REDACTED_EMAIL]');
+    expect(out).not.toContain(FAKE_GROUP_JID);
   });
 
   it('scans dotted email-local adversarial input in linear time', () => {

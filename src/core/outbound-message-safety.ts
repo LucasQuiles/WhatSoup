@@ -19,8 +19,12 @@
 // phone, so an audience-elevation decision is never silent (see the function
 // doc). Nothing else in this file logs.
 //
-// SSOT note: the secret/token/email masking is reused from
-// `sanitizeProviderPreviewText`. The internal-path / identifier / PII shapes
+// SSOT note: the secret/token masking is reused from
+// `sanitizeProviderPreviewText` (email masking stays enabled there for
+// background surfaces but is switched OFF for chat egress — B25 chat-scope
+// owner ruling; see redactInternalArtifacts). The ops-evidence path keeps the
+// sanitizer's full default, emails included — it feeds BOT ERRORS diagnostics,
+// a background surface. The internal-path / identifier / PII shapes
 // here overlap with `scripts/repo-hygiene-guard.ts` and the BOT ERRORS outbox
 // redactor; if a third consumer appears, extract a shared
 // `src/lib/internal-artifact-patterns.ts` (deferred per YAGNI — one consumer now).
@@ -472,13 +476,16 @@ function redactSensitivePaths(text: string, redactions: Redaction[]): string {
 
 /**
  * Mask internal artifacts in outbound text, scaled to `audience`:
- *   - `client`   — full scrub: secrets/emails, then operator paths, runtime
+ *   - `client`   — full scrub: secrets/tokens, then operator paths, runtime
  *                  identifiers, and tailnet IPs.
- *   - `internal` — secrets/emails/sensitive credential paths only; operator
+ *   - `internal` — secrets/tokens/sensitive credential paths only; operator
  *                  vocabulary is legitimate content in operator-owned agent
  *                  groups, so masking it there is over-redaction.
  *   - `ops`      — verbatim (BOT ERRORS needs raw diagnostics; its outbox
  *                  redactor scrubs secrets downstream).
+ * Email addresses are NEVER masked here (any audience): B25 chat-scope owner
+ * ruling — email redaction is background-only (provider previews, logs,
+ * handoff summarizers) and must not mutate chat-visible text.
  * Defaults to `client`, so existing single-arg callers are unchanged.
  * Returns the cleaned text plus a categorised (non-sensitive) redaction list.
  */
@@ -493,16 +500,23 @@ export function redactInternalArtifacts(
   const redactions: Redaction[] = [];
   let out = text;
 
-  // Secret/token/email masking applies to client AND internal: WhatsApp is a
+  // Secret/token masking applies to client AND internal: WhatsApp is a
   // third-party transport, so a leaked credential is exposure even in an
-  // operator-owned group. Internal WhatsApp JIDs are protected before this pass
-  // because the generic email sanitizer otherwise treats `120...@g.us` as email.
+  // operator-owned group. EMAIL masking does NOT apply here — B25 chat-scope
+  // owner ruling (2026-07-19): email redaction is a BACKGROUND-ONLY function
+  // (provider previews, logs, handoff summarizers) and must never mutate
+  // chat-visible message text (live defect: 121 outbound chat messages carried
+  // the literal '[REDACTED_EMAIL]' marker). `redactEmailLike: false` skips the
+  // whole email-class pass; the preserve* flags are kept so flipping the email
+  // flag back for any single audience restores the exact prior behavior with
+  // one edit (e.g. a future client-tier exception).
   const sanitized = sanitizeProviderPreviewText(out, {
     preserveWhatsAppJids: audience === 'internal',
     preserveWhatsAppMentions: true,
+    redactEmailLike: false,
   });
   if (sanitized !== out) {
-    redactions.push({ category: 'provider_secret', label: 'token-or-email' });
+    redactions.push({ category: 'provider_secret', label: 'token-or-credential' });
     out = sanitized;
   }
 
@@ -583,10 +597,11 @@ function sanitizeOpsEvidence(text: string): string {
 
 /**
  * Decide how a single outbound message should be handled for its audience.
- * Ops sends are never rewritten. Internal sends have secrets/emails masked but
+ * Ops sends are never rewritten. Internal sends have secrets/tokens masked but
  * keep operator vocabulary. Client sends are diverted when they make a false
  * infra-failure claim, redacted when they leak an internal artifact, and
- * otherwise allowed unchanged.
+ * otherwise allowed unchanged. Emails are never masked on chat egress (B25
+ * chat-scope owner ruling — see redactInternalArtifacts).
  */
 export function evaluateOutboundMessageSafety(
   input: OutboundMessageSafetyInput,
@@ -614,7 +629,7 @@ export function evaluateOutboundMessageSafety(
     };
   }
 
-  // Client → full scrub; internal → secrets/emails only.
+  // Client → full scrub; internal → secrets/tokens only.
   const { text: redacted, redactions } = redactInternalArtifacts(text, audience);
   if (redactions.length > 0) {
     return {

@@ -14485,7 +14485,7 @@ describe('AgentRuntime', () => {
       const db = makeDb();
       (db.raw.prepare as ReturnType<typeof vi.fn>).mockImplementation((sql: string) => {
         if (sql.includes('FROM groups')) {
-          return { run: vi.fn(), get: vi.fn(() => ({ subject: 'Loopicus Ops' })), all: vi.fn(() => []) };
+          return { run: vi.fn(), get: vi.fn(() => ({ subject: 'Ops Crew Test' })), all: vi.fn(() => []) };
         }
         if (sql.includes('FROM contacts')) {
           return { run: vi.fn(), get: vi.fn(() => ({ display_name: 'Lucas', notify_name: null })), all: vi.fn(() => []) };
@@ -14515,7 +14515,7 @@ describe('AgentRuntime', () => {
       // ruling was names-not-RAW-JIDs; a 4-char disambiguator tail is
       // compatible with it and required for safe kills.
       expect(listText).toContain('1. Lucas (…1111) (DM)');
-      expect(listText).toContain('2. Loopicus Ops (…5666) (Group)');
+      expect(listText).toContain('2. Ops Crew Test (…5666) (Group)');
       expect(listText).not.toContain('15550001111');
       expect(listText).not.toContain('111222333444555666');
     });

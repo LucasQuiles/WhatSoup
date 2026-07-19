@@ -135,9 +135,9 @@ describe('resolveChatDisplayName — B23 ladder', () => {
   });
 
   it('group subject when no alias exists (both jid and conversation_key inputs)', () => {
-    db.prepare('INSERT INTO groups (jid, subject) VALUES (?, ?)').run(GROUP_JID, 'Loopicus Ops');
-    expect(resolveChatDisplayName(db, GROUP_JID)).toBe('Loopicus Ops');
-    expect(resolveChatDisplayName(db, GROUP_KEY)).toBe('Loopicus Ops');
+    db.prepare('INSERT INTO groups (jid, subject) VALUES (?, ?)').run(GROUP_JID, 'Ops Crew Test');
+    expect(resolveChatDisplayName(db, GROUP_JID)).toBe('Ops Crew Test');
+    expect(resolveChatDisplayName(db, GROUP_KEY)).toBe('Ops Crew Test');
   });
 
   it('chats.name when there is no groups row', () => {
@@ -400,9 +400,9 @@ describe('sanitizeDisplayNameForRender / formatChatRefForOwner — B25 F2/F3', (
   });
 
   it('group refs get the suffix from the group id local part', () => {
-    db.prepare('INSERT INTO groups (jid, subject) VALUES (?, ?)').run(GROUP_JID, 'Loopicus Ops');
-    expect(formatChatRefForOwner(db, GROUP_KEY)).toBe('Loopicus Ops (…5666)');
-    expect(formatChatRefForOwner(db, GROUP_JID)).toBe('Loopicus Ops (…5666)');
+    db.prepare('INSERT INTO groups (jid, subject) VALUES (?, ?)').run(GROUP_JID, 'Ops Crew Test');
+    expect(formatChatRefForOwner(db, GROUP_KEY)).toBe('Ops Crew Test (…5666)');
+    expect(formatChatRefForOwner(db, GROUP_JID)).toBe('Ops Crew Test (…5666)');
   });
 
   it('a name that sanitizes to empty falls back to the sanitized ref, never an empty render', () => {

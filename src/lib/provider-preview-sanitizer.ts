@@ -9,16 +9,44 @@ const ASSIGNMENT_DELIMITER = /[:=]/g;
 const EMAIL_TOKEN_CHAR = /[A-Za-z0-9._%+@-]/;
 const TRAILING_EMAIL_PUNCTUATION = new Set(['.', ':']);
 
-// E9 (packet D5): an email-SHAPED core needs a NON-EMPTY local part AND a
-// non-empty domain part around an '@'. A bare whitespace-flanked '@' used as
-// the word "at" ("meet @ 5pm") and a dangling local ("user@") carry no address
-// and must pass through. Mention-shaped tokens ('@name', '@15551234567') are
-// not email-shaped either, but they stay governed by preserveWhatsAppMentions
-// below — phone mentions are PII on surfaces that did not opt in, so requiring
-// a non-empty local part for the EMAIL match must not turn that flag into
-// dead code.
-const EMAIL_SHAPED = /[^@]@+[^@]/;
+// E9 (packet D5), narrowed by B25: an email-SHAPED core needs a NON-EMPTY
+// local part AND a non-empty domain part around an '@'. A bare
+// whitespace-flanked '@' used as the word "at" ("meet @ 5pm", "3 @ $5 each")
+// carries no address and must pass through. Mention-shaped tokens ('@name',
+// '@15551234567') are not email-shaped either, but they stay governed by
+// preserveWhatsAppMentions below — phone mentions are PII on surfaces that
+// did not opt in, so requiring a non-empty local part for the EMAIL match
+// must not turn that flag into dead code.
+//
+// B25 REVERSAL of the original "x@" edge decision: a DANGLING-LOCAL token
+// (non-empty local + trailing '@' + empty domain, e.g. '15551234567@',
+// 'user@', the local half of a space-split address) is an ADDRESS FRAGMENT
+// and now REDACTS. The original ruling said "redacting it protects nothing";
+// the B25 review proved the opposite — on CLIENT egress there is no
+// downstream phone masking (unlike the handoff/ops surfaces), so the
+// fragment alone carries the whole PII payload. The E9 exemption therefore
+// narrows to truly-bare '@' runs.
+// B25 simplification (review's "/@[^@]/" note, adjusted): with dangling
+// locals redacting, the three redactability predicates — email-shaped
+// /[^@]@+[^@]/, mention-shaped ('@' + content), dangling-local /[^@]@+$/ —
+// collapse to "the core is NOT a bare '@' run". Proof (a core always
+// contains at least one '@'): if it also has any non-'@' char, then either
+// it starts with '@' (mention-shaped) or its first '@' run is preceded by a
+// non-'@' char and is either followed by one (email-shaped) or terminal
+// (dangling local). The literal /@[^@]/ form would NOT be equivalent
+// ('user@' must redact yet has no char after its '@'), hence the
+// ALL_AT_SIGNS complement.
 const ALL_AT_SIGNS = /^@+$/;
+// B25 (1b) direction ruling: WhatsApp WIRE mentions are '@' + the numeric
+// user part of a JID (phone or lid digits); typed courtesy mentions are
+// username-ish. Dotted bodies ('@team.leads', '@foo.bar') can never be a
+// deliverable email address — the local part is EMPTY — so accepting dots in
+// the PRESERVE regex cannot leak a real email (an email-shaped core has a
+// non-empty local and can never match this ^@-anchored regex). The regex
+// stays fail-closed two ways: without the preserveWhatsAppMentions flag the
+// token still redacts, and digit-led dotted bodies ('@1234.5678' — phone
+// fragments) never match even WITH the flag.
+const PRESERVABLE_MENTION = /^@(?:\+?\d{5,}|[A-Za-z][A-Za-z0-9._-]*)$/;
 
 // T8-F3 (E4 fix): shared token-prefix alternation. Defined ONCE so the known-token
 // mask (sanitizeProviderSecrets, below) and the truncation carve-out (in
@@ -152,11 +180,20 @@ function redactEmailLikeTokens(
         } else {
           while (emailEnd < text.length && /[A-Za-z0-9.-]/.test(text[emailEnd]!)) emailEnd += 1;
         }
-        out += text.slice(cursor, index);
-        out += '[REDACTED_EMAIL]';
-        cursor = emailEnd;
-        index = emailEnd;
-        continue;
+        // B25 (1a): the same email-shaped requirement that gates the token
+        // scanner below gates this branch — a NON-EMPTY domain must follow
+        // the '@'. The old code redacted after scanning ZERO domain chars,
+        // so quoted speech followed by the word "at" ('she said "hi"@ 5pm')
+        // became [REDACTED_EMAIL]. With an empty domain we fall through to
+        // the ordinary scanner, which tokenizes the quoted text and the bare
+        // '@' separately (the quote breaks the token), so nothing redacts.
+        if (emailEnd > quoteEnd + 2) {
+          out += text.slice(cursor, index);
+          out += '[REDACTED_EMAIL]';
+          cursor = emailEnd;
+          index = emailEnd;
+          continue;
+        }
       }
     }
     if (!EMAIL_TOKEN_CHAR.test(text[index]!)) {
@@ -187,17 +224,15 @@ function redactEmailLikeTokens(
     while (coreEnd > 0 && TRAILING_EMAIL_PUNCTUATION.has(token[coreEnd - 1]!)) coreEnd -= 1;
     const core = token.slice(0, coreEnd);
     const suffix = token.slice(coreEnd);
-    // E9 (packet D5): a core that is neither email-shaped (non-empty local AND
-    // domain) nor mention-shaped ('@' + content) is not redactable — leave it
-    // in place via the pending-slice cursor, like the no-'@' case above.
-    const mentionShaped = core.startsWith('@') && !ALL_AT_SIGNS.test(core);
-    if (!EMAIL_SHAPED.test(core) && !mentionShaped) continue;
+    // E9 (packet D5) + B25: only a truly-bare '@' run is exempt — every
+    // other '@'-bearing core is email-shaped, mention-shaped, or a
+    // dangling-local address fragment (equivalence proven at ALL_AT_SIGNS
+    // above) and redacts unless a preserve rule below claims it. A bare run
+    // is left in place via the pending-slice cursor, like the no-'@' case.
+    if (ALL_AT_SIGNS.test(core)) continue;
     const jidMatch = preserveWhatsAppJids ? jidPattern().exec(core) : null;
     const preserve = (jidMatch?.index === 0 && jidMatch[0].length === core.length)
-      || (
-        preserveWhatsAppMentions
-        && /^@(?:\+?\d{5,}|[A-Za-z][A-Za-z0-9_-]*)$/.test(core)
-      );
+      || (preserveWhatsAppMentions && PRESERVABLE_MENTION.test(core));
 
     out += text.slice(cursor, start);
     out += preserve ? `${core}${suffix}` : `[REDACTED_EMAIL]${suffix}`;
@@ -206,11 +241,28 @@ function redactEmailLikeTokens(
   return out + text.slice(cursor);
 }
 
+export interface ProviderPreviewSanitizerOptions {
+  preserveWhatsAppJids?: boolean;
+  preserveWhatsAppMentions?: boolean;
+  /**
+   * B25 chat-scope (owner ruling 2026-07-19): email redaction is a
+   * BACKGROUND-ONLY function — for text handed to third-party providers
+   * (previews, structured logs, handoff summarizers). Default TRUE, so every
+   * background caller keeps full behavior with zero changes. Chat egress
+   * (redactInternalArtifacts) passes FALSE, which skips the email-class pass
+   * ENTIRELY — token path, quoted-local path, and dangling-local alike —
+   * while secret/token/credential masking stays fully active. When false,
+   * the two preserve* flags are inert (they only parameterize the email pass).
+   */
+  redactEmailLike?: boolean;
+}
+
 export function sanitizeProviderPreviewText(
   text: string,
-  options: { preserveWhatsAppJids?: boolean; preserveWhatsAppMentions?: boolean } = {},
+  options: ProviderPreviewSanitizerOptions = {},
 ): string {
   const sanitized = sanitizeProviderSecrets(text);
+  if (options.redactEmailLike === false) return sanitized;
   return redactEmailLikeTokens(
     sanitized,
     options.preserveWhatsAppJids === true,
