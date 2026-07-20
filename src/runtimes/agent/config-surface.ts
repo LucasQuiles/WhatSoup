@@ -52,3 +52,55 @@ export function parseConfigCommand(rawArgs: string): ConfigAction {
   if (value.toLowerCase() === UNSET_KEYWORD) return { kind: 'unset', axis };
   return { kind: 'write', axis, value };
 }
+
+/** The stored model-pin fields (subset of ChatModelPreference) the resolver reads. */
+export interface ModelPinState {
+  requestedModel: string | null;
+  validatedProvider: string | null;
+  modelPinVerified: boolean | null;
+}
+
+/** The effective provider's catalogue outcome at resolution time. */
+export type CatalogueOutcome = { available: true; ids: readonly string[] } | { available: false };
+
+/** What to do with a stored model pin this turn (Slice C.2). */
+export type ModelPinDecision =
+  | { action: 'none' }
+  | { action: 'use'; modelId: string; revalidated?: { validatedProvider: string; verified: true } }
+  | { action: 'needs-catalogue'; modelId: string }
+  | { action: 'drop'; droppedModelId: string; reason: string }
+  | { action: 'defer'; modelId: string };
+
+/**
+ * Resolve a stored model pin against the effective provider (Q 2026-07-20,
+ * provider-qualified). A model id is only meaningful relative to a resolved
+ * harness, so the pin is trusted ONLY while verified against the CURRENT
+ * provider; every transition re-validates:
+ *   - verified + same provider  → `use` with NO catalogue fetch (the hot path);
+ *   - unverified / unvalidated / provider-changed → `needs-catalogue` (the caller
+ *     fetches the effective provider's catalogue and calls again with it);
+ *   - re-validate + present      → `use` + `revalidated` (caller persists the bit
+ *     + provider so the next turn is the hot path);
+ *   - re-validate + ABSENT       → `drop` with disclosure (closes the orphaned-pin
+ *     and the permanent-fail-open holes — an unverified pin can't ride forever);
+ *   - re-validate + catalogue DOWN → `defer` (fail-open: use it unverified, and
+ *     re-validate on the next OK read — a DEFERRAL of verification, not a waiver).
+ * Pure and total; the caller owns the catalogue fetch + the persistence.
+ */
+export function decideModelPinResolution(
+  pin: ModelPinState,
+  effectiveProvider: string,
+  catalogue?: CatalogueOutcome,
+): ModelPinDecision {
+  const modelId = pin.requestedModel;
+  if (modelId === null) return { action: 'none' };
+  if (pin.modelPinVerified === true && pin.validatedProvider === effectiveProvider) {
+    return { action: 'use', modelId };
+  }
+  if (catalogue === undefined) return { action: 'needs-catalogue', modelId };
+  if (!catalogue.available) return { action: 'defer', modelId };
+  if (catalogue.ids.includes(modelId)) {
+    return { action: 'use', modelId, revalidated: { validatedProvider: effectiveProvider, verified: true } };
+  }
+  return { action: 'drop', droppedModelId: modelId, reason: `not in ${effectiveProvider} catalogue` };
+}
