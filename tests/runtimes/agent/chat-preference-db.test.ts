@@ -45,6 +45,9 @@ function pref(overrides: Partial<ChatModelPreference> = {}): ChatModelPreference
     fallbackPermitted: false,
     updatedAt: 1_000,
     expiresAt: 2_000,
+    requestedModel: null,
+    validatedProvider: null,
+    modelPinVerified: null,
     ...overrides,
   };
 }
@@ -205,5 +208,64 @@ describe('cross-field contract (F12)', () => {
     setPreference(db, pref({ intent: 'strongest', requestedProvider: null }));
     db.raw.prepare("UPDATE chat_model_preference SET requested_provider = 'claude-cli'").run();
     expect(getPreference(db, CHAT_A, SENDER_A, NOW)).toBeNull();
+  });
+});
+
+// Model pin (Q 2026-07-20, provider-qualified). The pin carries requestedModel +
+// validatedProvider + a verified bit; the three move together, NULL model = no pin.
+describe('model pin storage', () => {
+  it('round-trips a verified model pin (model + validated provider + verified bit)', () => {
+    const p = pref({ requestedModel: 'claude-opus-4-8', validatedProvider: 'claude-cli', modelPinVerified: true });
+    setPreference(db, p);
+    expect(getPreference(db, CHAT_A, SENDER_A, NOW)).toEqual(p);
+  });
+
+  it('round-trips an UNVERIFIED pin (accepted during an outage → verified=false, deferred re-validation)', () => {
+    const p = pref({ requestedModel: 'claude-opus-4-8', validatedProvider: 'claude-cli', modelPinVerified: false });
+    setPreference(db, p);
+    expect(getPreference(db, CHAT_A, SENDER_A, NOW)?.modelPinVerified).toBe(false);
+  });
+
+  it('allows a pin with NULL validated_provider (UNVALIDATED — re-validated on resolution, never blessed as current)', () => {
+    const p = pref({ requestedModel: 'claude-opus-4-8', validatedProvider: null, modelPinVerified: false });
+    setPreference(db, p);
+    expect(getPreference(db, CHAT_A, SENDER_A, NOW)).toEqual(p);
+  });
+
+  it('a legacy row (model columns NULL) reads back as NO model pin', () => {
+    // Simulate a pre-migration row: insert without the model columns (they default NULL).
+    db.raw
+      .prepare(
+        `INSERT INTO chat_model_preference
+           (chat_jid, sender_jid, intent, requested_provider, scope, pin_strict, fallback_permitted, updated_at, expires_at)
+         VALUES (?, ?, 'strongest', NULL, 'this_thread', 1, 0, 1000, 2000)`,
+      )
+      .run(CHAT_A, SENDER_A);
+    const got = getPreference(db, CHAT_A, SENDER_A, NOW);
+    expect(got).not.toBeNull();
+    expect(got?.requestedModel).toBeNull();
+    expect(got?.validatedProvider).toBeNull();
+    expect(got?.modelPinVerified).toBeNull();
+  });
+
+  it('rejects a corrupt row: provider/verified context with NO model to attach it to', () => {
+    setPreference(db, pref());
+    db.raw.prepare("UPDATE chat_model_preference SET validated_provider = 'claude-cli'").run(); // requested_model still NULL
+    expect(getPreference(db, CHAT_A, SENDER_A, NOW)).toBeNull();
+  });
+
+  it('rejects a corrupt row: a live model pin missing its verified bit', () => {
+    setPreference(db, pref({ requestedModel: 'claude-opus-4-8', validatedProvider: 'claude-cli', modelPinVerified: true }));
+    db.raw.prepare('UPDATE chat_model_preference SET model_pin_verified = NULL').run();
+    expect(getPreference(db, CHAT_A, SENDER_A, NOW)).toBeNull();
+  });
+
+  it('migration is idempotent — model columns exist after a second ensure', () => {
+    ensureChatPreferenceSchema(db);
+    const cols = db.raw.prepare("PRAGMA table_info('chat_model_preference')").all() as Array<{ name: string }>;
+    const names = cols.map((c) => c.name);
+    expect(names).toContain('requested_model');
+    expect(names).toContain('validated_provider');
+    expect(names).toContain('model_pin_verified');
   });
 });

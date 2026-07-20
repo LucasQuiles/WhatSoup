@@ -8293,6 +8293,11 @@ export class AgentRuntime implements Runtime {
       // this_thread preferences are ephemeral by design (24h TTL);
       // sticky pins require explicit confirmation and are a later slice.
       expiresAt: now + PREFERENCE_TTL_MS,
+      // Provider-pin path — carries no MODEL pin (that arrives via the /config
+      // model // /model <N> write path in a later slice).
+      requestedModel: null,
+      validatedProvider: null,
+      modelPinVerified: null,
     });
     this.emitRouteEventChecked({
       event: 'model_preference_set',
