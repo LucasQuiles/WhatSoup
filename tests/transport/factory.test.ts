@@ -103,10 +103,42 @@ describe('createConnection factory', () => {
     ).toThrow(/unknown transport id/);
   });
 
-  it('signal transport throws a not-yet-wired error (foundation stub)', () => {
+  it('signal transport throws when signalConfig is missing (defence-in-depth)', () => {
     expect(() =>
       createConnection({ transport: 'signal' }),
-    ).toThrow(/signal.*not yet implemented|not yet wired/i);
+    ).toThrow(/signal.*signalConfig is undefined/i);
+  });
+
+  it('signal transport constructs a SignalConnection with a valid signalConfig', () => {
+    const conn = createConnection({
+      transport: 'signal',
+      signalConfig: {
+        account: 'test',
+        phoneNumber: '+15551110000',
+        inboundMode: 'poll',
+        pollIntervalMs: 60000,
+        rateLimit: { messagesPerMinute: 30 },
+      },
+    });
+    expect(conn).toBeDefined();
+    expect(typeof conn.connect).toBe('function');
+    expect(typeof conn.shutdown).toBe('function');
+    expect(conn.getSocket()).toBeNull();
+  });
+
+  it('signal transport throws when signalConfig.phoneNumber is empty', () => {
+    expect(() =>
+      createConnection({
+        transport: 'signal',
+        signalConfig: {
+          account: 'test',
+          phoneNumber: '',
+          inboundMode: 'poll',
+          pollIntervalMs: 60000,
+          rateLimit: { messagesPerMinute: 30 },
+        },
+      }),
+    ).toThrow(/missing phoneNumber/i);
   });
 
   it('imessage transport throws a not-yet-wired error (foundation stub)', () => {

@@ -1038,6 +1038,7 @@ function validateTransportConfig(
 ): ValidationError | null {
   const transport = raw['transport'];
   const twilioConfig = raw['twilioConfig'];
+  const signalConfig = raw['signalConfig'];
 
   // transport, if present, must be a known TransportId.
   if (transport !== undefined) {
@@ -1059,6 +1060,15 @@ function validateTransportConfig(
     );
   }
 
+  // signalConfig present with non-signal transport → reject as inconsistent.
+  if (signalConfig !== undefined && effectiveTransport !== 'signal') {
+    return err(
+      'signalConfig',
+      'signalConfig is inconsistent with transport ' + JSON.stringify(effectiveTransport) +
+        ' — signalConfig is only valid when transport is "signal"',
+    );
+  }
+
   // twilioConfig is REQUIRED when transport === 'twilio'.
   if (effectiveTransport === 'twilio') {
     if (twilioConfig === undefined || twilioConfig === null) {
@@ -1070,6 +1080,102 @@ function validateTransportConfig(
     const healthPort =
       typeof raw['healthPort'] === 'number' ? (raw['healthPort'] as number) : undefined;
     return validateTwilioConfig(twilioConfig as Record<string, unknown>, healthPort);
+  }
+
+  // signalConfig is REQUIRED when transport === 'signal'.
+  if (effectiveTransport === 'signal') {
+    if (signalConfig === undefined || signalConfig === null) {
+      return err('signalConfig', 'signalConfig is required when transport is "signal"');
+    }
+    if (typeof signalConfig !== 'object' || Array.isArray(signalConfig)) {
+      return err('signalConfig', 'signalConfig must be an object');
+    }
+    return validateSignalConfig(signalConfig as Record<string, unknown>);
+  }
+
+  return null;
+}
+
+function validateSignalConfig(sc: Record<string, unknown>): ValidationError | null {
+  // account: non-empty, matches ACCOUNT_RE
+  const account = sc['account'];
+  if (typeof account !== 'string' || account === '' || !ACCOUNT_RE.test(account)) {
+    return err(
+      'signalConfig.account',
+      'signalConfig.account must be a non-empty lowercase alphanumeric-and-dash string starting with a letter',
+    );
+  }
+
+  // phoneNumber: required E.164 (the linked device's own number; selfRef
+  // must be available before the first daemon round-trip).
+  const phoneNumber = sc['phoneNumber'];
+  if (typeof phoneNumber !== 'string' || !E164_RE.test(phoneNumber)) {
+    return err(
+      'signalConfig.phoneNumber',
+      'signalConfig.phoneNumber must be an E.164 number (e.g. +15559990000)',
+    );
+  }
+
+  // socketPath: optional string; when absent the default applies. Must be
+  // absolute when present (a relative socket path is a deployment bug).
+  const socketPath = sc['socketPath'];
+  if (socketPath !== undefined) {
+    if (typeof socketPath !== 'string' || socketPath === '' || !socketPath.startsWith('/')) {
+      return err(
+        'signalConfig.socketPath',
+        'signalConfig.socketPath must be an absolute path when set',
+      );
+    }
+  }
+
+  // tcpPort: optional 1-65535 integer; tcpHost optional non-empty string.
+  const tcpPort = sc['tcpPort'];
+  if (tcpPort !== undefined) {
+    if (typeof tcpPort !== 'number' || !Number.isInteger(tcpPort) || tcpPort < 1 || tcpPort > 65535) {
+      return err(
+        'signalConfig.tcpPort',
+        'signalConfig.tcpPort must be an integer between 1 and 65535',
+      );
+    }
+  }
+  const tcpHost = sc['tcpHost'];
+  if (tcpHost !== undefined && (typeof tcpHost !== 'string' || tcpHost === '')) {
+    return err('signalConfig.tcpHost', 'signalConfig.tcpHost must be a non-empty string');
+  }
+
+  // inboundMode: if present must be 'poll' or 'stream'
+  const inboundMode = sc['inboundMode'];
+  if (inboundMode !== undefined && inboundMode !== 'poll' && inboundMode !== 'stream') {
+    return err(
+      'signalConfig.inboundMode',
+      "signalConfig.inboundMode must be 'poll' or 'stream'",
+    );
+  }
+
+  // pollIntervalMs: optional positive number
+  const pollIntervalMs = sc['pollIntervalMs'];
+  if (pollIntervalMs !== undefined) {
+    if (typeof pollIntervalMs !== 'number' || !Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) {
+      return err(
+        'signalConfig.pollIntervalMs',
+        'signalConfig.pollIntervalMs must be a positive number',
+      );
+    }
+  }
+
+  // rateLimit: optional object with positive messagesPerMinute
+  const rateLimit = sc['rateLimit'];
+  if (rateLimit !== undefined) {
+    if (typeof rateLimit !== 'object' || rateLimit === null || Array.isArray(rateLimit)) {
+      return err('signalConfig.rateLimit', 'signalConfig.rateLimit must be an object');
+    }
+    const mpm = (rateLimit as Record<string, unknown>)['messagesPerMinute'];
+    if (typeof mpm !== 'number' || !Number.isFinite(mpm) || mpm <= 0) {
+      return err(
+        'signalConfig.rateLimit.messagesPerMinute',
+        'signalConfig.rateLimit.messagesPerMinute must be a positive number',
+      );
+    }
   }
 
   return null;

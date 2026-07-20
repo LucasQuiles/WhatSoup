@@ -736,3 +736,105 @@ describe('validateInstanceConfig — residual twilio branch coverage', () => {
     expect(validateInstanceConfig(raw, ctx())).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// signalConfig
+// ---------------------------------------------------------------------------
+
+function validSignalConfig(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    account: 'ops-line',
+    phoneNumber: '+15551110000',
+    inboundMode: 'poll',
+    pollIntervalMs: 15000,
+    rateLimit: { messagesPerMinute: 30 },
+    ...overrides,
+  };
+}
+
+describe('validateInstanceConfig — signalConfig', () => {
+  it('is required when transport is "signal"', () => {
+    const raw = baseRaw({ transport: 'signal' });
+    const err = validateInstanceConfig(raw, ctx());
+    expect(err?.field).toBe('signalConfig');
+    expect(err?.message).toBe('signalConfig is required when transport is "signal"');
+  });
+
+  it('is rejected as inconsistent on non-signal transports', () => {
+    const raw = baseRaw({ transport: 'twilio', twilioConfig: validTwilioConfig(), signalConfig: validSignalConfig() });
+    const err = validateInstanceConfig(raw, ctx());
+    expect(err?.field).toBe('signalConfig');
+    expect(err?.message).toMatch(/signalConfig is inconsistent with transport/);
+  });
+
+  it('rejects a non-object signalConfig', () => {
+    const raw = baseRaw({ transport: 'signal', signalConfig: 'nope' });
+    const err = validateInstanceConfig(raw, ctx());
+    expect(err?.message).toBe('signalConfig must be an object');
+  });
+
+  it('accepts a valid minimal signalConfig (defaults applied downstream)', () => {
+    const raw = baseRaw({ transport: 'signal', signalConfig: validSignalConfig() });
+    expect(validateInstanceConfig(raw, ctx())).toBeNull();
+  });
+
+  it('accepts socketPath + tcp alternatives', () => {
+    const raw = baseRaw({
+      transport: 'signal',
+      signalConfig: validSignalConfig({ socketPath: '/tmp/sc.sock', tcpPort: 7583, tcpHost: '127.0.0.1', inboundMode: 'stream' }),
+    });
+    expect(validateInstanceConfig(raw, ctx())).toBeNull();
+  });
+
+  it('rejects a bad account', () => {
+    const raw = baseRaw({ transport: 'signal', signalConfig: validSignalConfig({ account: 'Bad Acct' }) });
+    expect(validateInstanceConfig(raw, ctx())?.field).toBe('signalConfig.account');
+  });
+
+  it('rejects a missing phoneNumber', () => {
+    const raw = baseRaw({ transport: 'signal', signalConfig: validSignalConfig({ phoneNumber: '' }) });
+    expect(validateInstanceConfig(raw, ctx())?.field).toBe('signalConfig.phoneNumber');
+  });
+
+  it('rejects a non-E.164 phoneNumber', () => {
+    const raw = baseRaw({ transport: 'signal', signalConfig: validSignalConfig({ phoneNumber: '5551110000' }) });
+    expect(validateInstanceConfig(raw, ctx())?.field).toBe('signalConfig.phoneNumber');
+  });
+
+  it('rejects a relative socketPath', () => {
+    const raw = baseRaw({ transport: 'signal', signalConfig: validSignalConfig({ socketPath: 'tmp/sc.sock' }) });
+    expect(validateInstanceConfig(raw, ctx())?.field).toBe('signalConfig.socketPath');
+  });
+
+  it('rejects an out-of-range tcpPort', () => {
+    const raw = baseRaw({ transport: 'signal', signalConfig: validSignalConfig({ tcpPort: 70000 }) });
+    expect(validateInstanceConfig(raw, ctx())?.field).toBe('signalConfig.tcpPort');
+  });
+
+  it('rejects a non-integer tcpPort', () => {
+    const raw = baseRaw({ transport: 'signal', signalConfig: validSignalConfig({ tcpPort: 7583.5 }) });
+    expect(validateInstanceConfig(raw, ctx())?.field).toBe('signalConfig.tcpPort');
+  });
+
+  it('rejects an unknown inboundMode', () => {
+    const raw = baseRaw({ transport: 'signal', signalConfig: validSignalConfig({ inboundMode: 'webhook' }) });
+    const err = validateInstanceConfig(raw, ctx());
+    expect(err?.field).toBe('signalConfig.inboundMode');
+    expect(err?.message).toBe("signalConfig.inboundMode must be 'poll' or 'stream'");
+  });
+
+  it('rejects a non-positive pollIntervalMs', () => {
+    const raw = baseRaw({ transport: 'signal', signalConfig: validSignalConfig({ pollIntervalMs: 0 }) });
+    expect(validateInstanceConfig(raw, ctx())?.field).toBe('signalConfig.pollIntervalMs');
+  });
+
+  it('rejects a non-positive rateLimit.messagesPerMinute', () => {
+    const raw = baseRaw({ transport: 'signal', signalConfig: validSignalConfig({ rateLimit: { messagesPerMinute: -1 } }) });
+    expect(validateInstanceConfig(raw, ctx())?.field).toBe('signalConfig.rateLimit.messagesPerMinute');
+  });
+
+  it('rejects a non-object rateLimit', () => {
+    const raw = baseRaw({ transport: 'signal', signalConfig: validSignalConfig({ rateLimit: 30 }) });
+    expect(validateInstanceConfig(raw, ctx())?.field).toBe('signalConfig.rateLimit');
+  });
+});

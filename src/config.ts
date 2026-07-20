@@ -9,6 +9,7 @@ import { VALID_ACCESS_MODES, VALID_GROUP_SENDER_POLICIES, type AccessMode, type 
 import { DEFAULT_TRANSPORT_ID, isTransportId, type TransportId } from './transport/registry.ts';
 import { DEFAULT_FLEET_PORT, DEFAULT_INSTANCE_HEALTH_PORT } from './fleet/constants.ts';
 import { DEFAULT_TWILIO_SMS, DEFAULT_TWILIO_VOICE, type TwilioSmsConfig, type TwilioInboundMode, type TwilioWebhookConfig, type TwilioVoiceConfig } from './transport/twilio/types.ts';
+import { DEFAULT_SIGNAL, type SignalConfig, type SignalInboundMode } from './transport/signal/types.ts';
 import { normalizeFallbackEntriesFromAgentOptions } from './core/fallback-chain.ts';
 import { errorMessage } from './lib/error-message.ts';
 import { validateModelRoleValue } from './lib/model-resolver.ts';
@@ -698,6 +699,57 @@ export function resolveTwilioSmsConfig(
   };
 }
 
+// ---------------------------------------------------------------------------
+// resolveSignalConfig — resolve and apply defaults to a raw signalConfig block.
+// Returns undefined when the source is absent or missing the required 'account'
+// field. Mirrors the resolveTwilioSmsConfig pattern: record/stringProp/
+// numberProp helpers + DEFAULT_SIGNAL merging. Does NOT open any socket or
+// contact the signal-cli daemon; config data only.
+// ---------------------------------------------------------------------------
+export function resolveSignalConfig(
+  rawSource: Record<string, unknown> | null | undefined,
+): SignalConfig | undefined {
+  const src = asRecord(rawSource ?? undefined);
+  if (!src) return undefined;
+
+  // Required discriminator: abort if 'account' is absent (not a signalConfig block)
+  const account = stringProp(src, 'account');
+  if (!account) return undefined;
+
+  const phoneNumber = stringProp(src, 'phoneNumber') ?? '';
+  const socketPath = stringProp(src, 'socketPath');
+  const tcpPort = numberProp(src, 'tcpPort', 0) || undefined;
+  const tcpHost = stringProp(src, 'tcpHost');
+
+  // inboundMode: validated string, default to DEFAULT_SIGNAL.inboundMode
+  const rawMode = src['inboundMode'];
+  const inboundMode: SignalInboundMode =
+    rawMode === 'poll' || rawMode === 'stream'
+      ? rawMode
+      : DEFAULT_SIGNAL.inboundMode;
+
+  const pollIntervalMs = numberProp(src, 'pollIntervalMs', DEFAULT_SIGNAL.pollIntervalMs);
+
+  // rateLimit: nested object with messagesPerMinute
+  const rateLimitSrc = asRecord(src['rateLimit']);
+  const messagesPerMinute = numberProp(
+    rateLimitSrc,
+    'messagesPerMinute',
+    DEFAULT_SIGNAL.rateLimit.messagesPerMinute,
+  );
+
+  return {
+    account,
+    phoneNumber,
+    inboundMode,
+    pollIntervalMs,
+    rateLimit: { messagesPerMinute },
+    socketPath: socketPath ?? DEFAULT_SIGNAL.socketPath,
+    ...(tcpPort !== undefined ? { tcpPort } : {}),
+    ...(tcpHost !== undefined ? { tcpHost } : {}),
+  };
+}
+
 export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | undefined): MemoryConfig {
   const migrated = migrateLegacyMemoryConfig(rawSource ?? {}, { removeLegacy: false }).config;
   const memoryRoot = asRecord(migrated.memory);
@@ -836,6 +888,13 @@ const resolvedTransport: TransportId = (() => {
 const resolvedTwilioConfig: TwilioSmsConfig | undefined =
   resolvedTransport === 'twilio' && asRecord(instance?.twilioConfig) != null
     ? resolveTwilioSmsConfig(instance?.twilioConfig as Record<string, unknown>)
+    : undefined;
+
+// Same gating for the signal transport: validation rejects signalConfig on
+// other transports; the resolver only runs when transport === 'signal'.
+const resolvedSignalConfig: SignalConfig | undefined =
+  resolvedTransport === 'signal' && asRecord(instance?.signalConfig) != null
+    ? resolveSignalConfig(instance?.signalConfig as Record<string, unknown>)
     : undefined;
 
 const resolvedAgentOptions = (instance?.agentOptions as Record<string, unknown> | undefined) ?? {};
@@ -1212,6 +1271,11 @@ export const config = {
   // Twilio SMS config — present only when instance.twilioConfig is set.
   // Defaults for inboundMode/pollIntervalMs/rateLimit are applied by resolveTwilioSmsConfig.
   twilioConfig: resolvedTwilioConfig,
+
+  // Signal config — present only when instance.signalConfig is set.
+  // Defaults for socketPath/inboundMode/pollIntervalMs/rateLimit are applied
+  // by resolveSignalConfig.
+  signalConfig: resolvedSignalConfig,
 } as const;
 
 // Make intEnv available for external use (e.g. tests, future env-driven fields)

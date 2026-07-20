@@ -7,10 +7,14 @@ import { ConnectionManager } from './connection.ts';
 import { TwilioConnection } from './twilio/connection-bridge.ts';
 import { TwilioSmsAdapter } from './twilio/adapter.ts';
 import { SdkTwilioSmsPort } from './twilio/twilio-port.ts';
+import { SignalConnection } from './signal/connection-bridge.ts';
+import { SignalAdapter } from './signal/adapter.ts';
+import { SignalCliPort } from './signal/signal-cli-port.ts';
 import { assertNeverTransport } from './registry.ts';
 import type { RuntimeConnection } from './runtime-connection.ts';
 import type { TransportId } from './registry.ts';
 import type { TwilioSmsConfig } from './twilio/types.ts';
+import type { SignalConfig } from './signal/types.ts';
 import { TwilioWebhookServer } from './twilio/webhook-server.ts';
 import { lookupCredential } from '../lib/keyring.ts';
 
@@ -19,6 +23,7 @@ export type { RuntimeConnection };
 interface FactoryConfig {
   transport: TransportId;
   twilioConfig?: TwilioSmsConfig;
+  signalConfig?: SignalConfig;
 }
 
 /**
@@ -81,14 +86,25 @@ export function createConnection(config: FactoryConfig): RuntimeConnection {
       return new TwilioConnection(adapter, webhookServer);
     }
 
-    case 'signal':
-      // Foundation stub — adapter + port + bridge wiring lands in a follow-on
-      // phase. The case exists so the TransportId union stays exhaustive
-      // (otherwise assertNeverTransport's `never` argument fails typecheck).
-      throw new Error(
-        '[createConnection] signal transport is registered but not yet implemented. ' +
-        'Adapter/port/bridge wiring is pending; see the transport-signal-and-imessage plan.',
-      );
+    case 'signal': {
+      if (config.signalConfig === undefined) {
+        throw new Error(
+          '[createConnection] transport is "signal" but signalConfig is undefined. ' +
+          'Instance config must include a valid signalConfig block.',
+        );
+      }
+      // Validation rejects these upstream, but an unvalidated path (e.g. a
+      // hand-injected INSTANCE_CONFIG) must still fail loud, not construct a
+      // port with an empty self-number.
+      if (config.signalConfig.phoneNumber === '') {
+        throw new Error(
+          '[createConnection] signalConfig is missing phoneNumber.',
+        );
+      }
+      const port = new SignalCliPort(config.signalConfig);
+      const adapter = new SignalAdapter(config.signalConfig, port);
+      return new SignalConnection(adapter, port);
+    }
 
     case 'imessage':
       // Foundation stub — adapter + port + bridge wiring lands in a follow-on
