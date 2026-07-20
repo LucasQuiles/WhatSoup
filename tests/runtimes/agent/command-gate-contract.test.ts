@@ -195,6 +195,12 @@ const { mockConfig } = vi.hoisted(() => {
     botName: 'WhatSoup',
     accessMode: 'allowlist',
     healthPort: 0,
+    // restart-loop guard disabled: this suite starts a runtime per test (36+
+    // boots), so boot-marking is left off to avoid both filesystem writes and
+    // any cross-test trip; the full object + stateRoot still satisfy the
+    // health-snapshot reads that access it unconditionally.
+    stateRoot: '/tmp/whatsoup-test-state-contract',
+    restartLoopGuard: { enabled: false, maxRestarts: 3, windowMs: 300_000 },
     models: {
       conversation: 'claude-opus-4-5',
       extraction: 'claude-haiku-4-5',
