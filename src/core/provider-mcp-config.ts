@@ -1,12 +1,11 @@
-import { existsSync, lstatSync, readFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildMcpLaunchCommand } from './mcp-launcher.ts';
+import { WHATSOUP_HEADLESS_EXECUTION_PROFILE } from '../lib/opencode-execution-profile-contract.ts';
 import { SERVICE_ENV_MAP, resolveProviderKeyService } from '../lib/provider-key-service.ts';
 import { writePrivateFileSync } from '../lib/private-fs.ts';
-import { createChildLogger } from '../logger.ts';
-import { REQUIRED_DENY } from './settings-template.ts';
 
-const log = createChildLogger('provider-mcp-config');
+const MAX_OPENCODE_CONFIG_BYTES = 1024 * 1024;
 
 /**
  * Subset of `agentOptions.providerConfig` consumed when writing an opencode
@@ -31,62 +30,120 @@ export interface AdditionalMcpServerConfig {
 
 const DEFAULT_OPENCODE_PROVIDER_ID = 'whatsoup-cloud';
 
-/** Reserved OpenCode primary agent used only by WhatSoup's headless launcher. */
-export const WHATSOUP_OPENCODE_AGENT_ID = 'whatsoup-headless';
+function openCodeConfigSymlinkError(): NodeJS.ErrnoException {
+  const err = new Error(
+    'OpenCode configuration must be a regular non-symlink file',
+  ) as NodeJS.ErrnoException;
+  err.code = 'ELOOP';
+  return err;
+}
 
-function translateClaudeMcpPermissionToOpencodeTool(permission: string): string {
-  const qualifiedName = permission.startsWith('mcp__')
-    ? permission.slice('mcp__'.length)
-    : '';
-  const separator = qualifiedName.indexOf('__');
-  const serverName = separator > 0 ? qualifiedName.slice(0, separator) : '';
-  const toolName = separator > 0 ? qualifiedName.slice(separator + 2) : '';
-  if (!serverName || !toolName) {
-    throw new Error(`Invalid Claude MCP permission identifier: ${permission}`);
+function openCodeConfigError(message: string, code: string): NodeJS.ErrnoException {
+  const err = new Error(message) as NodeJS.ErrnoException;
+  err.code = code;
+  return err;
+}
+
+function openCodeConfigReadError(cause: unknown): NodeJS.ErrnoException {
+  const code = (cause as NodeJS.ErrnoException | undefined)?.code ?? 'EIO';
+  return openCodeConfigError('Unable to safely read existing OpenCode configuration', code);
+}
+
+function openCodeConfigWriteError(cause: unknown): NodeJS.ErrnoException {
+  const code = (cause as NodeJS.ErrnoException | undefined)?.code ?? 'EIO';
+  return openCodeConfigError('Unable to safely write OpenCode configuration', code);
+}
+
+function invalidOpenCodeConfigError(): NodeJS.ErrnoException {
+  return openCodeConfigError(
+    'Existing OpenCode configuration must be a valid JSON object',
+    'EINVAL',
+  );
+}
+
+function oversizedOpenCodeConfigError(): NodeJS.ErrnoException {
+  return openCodeConfigError(
+    'Existing OpenCode configuration exceeds the safe size limit',
+    'EFBIG',
+  );
+}
+
+function readExistingOpenCodeConfig(target: string): Record<string, unknown> | null {
+  let fd: number;
+  try {
+    fd = openSync(
+      target,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return null;
+    if (code === 'ELOOP') throw openCodeConfigSymlinkError();
+    throw openCodeConfigReadError(err);
   }
-  return [serverName, toolName]
-    .map((component) => component.replace(/[^a-zA-Z0-9_-]/g, '_'))
-    .join('_');
-}
 
-const translatedRequiredDeny = REQUIRED_DENY.map(translateClaudeMcpPermissionToOpencodeTool);
-if (new Set(translatedRequiredDeny).size !== translatedRequiredDeny.length) {
-  throw new Error('OpenCode REQUIRED_DENY translation produced duplicate tool names');
-}
+  let operationFailed = false;
+  let raw: string;
+  try {
+    let stat: ReturnType<typeof fstatSync>;
+    try {
+      stat = fstatSync(fd);
+    } catch (err) {
+      throw openCodeConfigReadError(err);
+    }
+    if (!stat.isFile()) {
+      throw openCodeConfigError(
+        'OpenCode configuration must be a regular non-symlink file',
+        'EINVAL',
+      );
+    }
+    if (!Number.isSafeInteger(stat.size) || stat.size < 0 || stat.size > MAX_OPENCODE_CONFIG_BYTES) {
+      throw oversizedOpenCodeConfigError();
+    }
 
-/** OpenCode tool names corresponding one-for-one with the Claude MCP deny floor. */
-export const OPENCODE_REQUIRED_DENY: readonly string[] = Object.freeze(translatedRequiredDeny);
+    const buffer = Buffer.allocUnsafe(MAX_OPENCODE_CONFIG_BYTES + 1);
+    let total = 0;
+    while (total <= MAX_OPENCODE_CONFIG_BYTES) {
+      let count: number;
+      try {
+        count = readSync(
+          fd,
+          buffer,
+          total,
+          MAX_OPENCODE_CONFIG_BYTES + 1 - total,
+          total,
+        );
+      } catch (err) {
+        throw openCodeConfigReadError(err);
+      }
+      if (count === 0) break;
+      total += count;
+    }
+    if (total > MAX_OPENCODE_CONFIG_BYTES) {
+      throw oversizedOpenCodeConfigError();
+    }
+    raw = buffer.subarray(0, total).toString('utf8');
+  } catch (err) {
+    operationFailed = true;
+    throw err;
+  } finally {
+    try {
+      closeSync(fd);
+    } catch (err) {
+      if (!operationFailed) throw openCodeConfigReadError(err);
+    }
+  }
 
-/**
- * Build the repo-managed OpenCode primary agent used for unattended turns.
- * This is an OpenCode permission policy, not an operating-system isolation
- * boundary: explicit denials contain known interactive, external-directory,
- * environment-file, and connector-mutation surfaces while local work remains
- * usable without the CLI's blanket --auto switch.
- */
-export function buildManagedOpencodeAgentConfig(): Record<string, unknown> {
-  const permission: Record<string, unknown> = {
-    '*': 'allow',
-    question: 'deny',
-    plan_enter: 'deny',
-    plan_exit: 'deny',
-    external_directory: 'deny',
-    doom_loop: 'allow',
-    read: {
-      '*': 'allow',
-      '*.env': 'deny',
-      '*.env.*': 'deny',
-      '*.env.example': 'allow',
-    },
-  };
-
-  for (const toolName of OPENCODE_REQUIRED_DENY) permission[toolName] = 'deny';
-
-  return {
-    description: 'WhatSoup unattended primary agent with managed permission boundaries',
-    mode: 'primary',
-    permission,
-  };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw invalidOpenCodeConfigError();
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw invalidOpenCodeConfigError();
+  }
+  return parsed as Record<string, unknown>;
 }
 
 export function writeProviderMcpConfigTarget(providerId: string, agentCwd: string): string | null {
@@ -181,10 +238,10 @@ export function writeMcpConfigToPath(
 }
 
 /**
- * Merge the generated opencode `mcp` block and WhatSoup's reserved headless
- * agent into a possibly-existing opencode.json object. Pure — does no IO.
- * Preserves every unrelated top-level key, sibling MCP server, and user agent;
- * overwrites only generated MCP entries and the reserved agent id.
+ * Merge the generated opencode `mcp` block into a possibly-existing
+ * opencode.json object. Pure — does no IO. Preserves every unrelated top-level
+ * key, sibling MCP server, and fleet/user-owned agent policy; overwrites only
+ * generated MCP entries.
  */
 export function mergeOpencodeConfig(
   existing: Record<string, unknown> | null,
@@ -199,13 +256,15 @@ export function mergeOpencodeConfig(
     : {};
   base.mcp = { ...existingMcp, ...generatedMcp };
 
-  const existingAgents = (base.agent && typeof base.agent === 'object' && !Array.isArray(base.agent))
-    ? (base.agent as Record<string, unknown>)
-    : {};
-  base.agent = {
-    ...existingAgents,
-    [WHATSOUP_OPENCODE_AGENT_ID]: buildManagedOpencodeAgentConfig(),
-  };
+  if (base.agent && typeof base.agent === 'object' && !Array.isArray(base.agent)) {
+    const existingAgents = { ...(base.agent as Record<string, unknown>) };
+    delete existingAgents[WHATSOUP_HEADLESS_EXECUTION_PROFILE];
+    if (Object.keys(existingAgents).length > 0) {
+      base.agent = existingAgents;
+    } else {
+      delete base.agent;
+    }
+  }
 
   if (providerConfig?.baseUrl) {
     const providerId = providerConfig.providerId ?? DEFAULT_OPENCODE_PROVIDER_ID;
@@ -261,9 +320,10 @@ export function mergeOpencodeConfig(
  *
  * - claude/gemini/codex -> `<agentCwd>/.mcp.json` (claude `mcpServers` shape,
  *   deterministic overwrite, exactly as before).
- * - opencode-cli -> `<agentCwd>/opencode.json` (opencode `mcp` shape plus the
- *   reserved WhatSoup headless agent), merged with any pre-existing user config
- *   while preserving unrelated keys and user-owned agents.
+ * - opencode-cli -> `<agentCwd>/opencode.json` (opencode `mcp` shape), merged
+ *   with any pre-existing user config while preserving unrelated keys and
+ *   fleet/user-owned agents. Agent-policy deployment is owned outside this
+ *   writer.
  *
  * Both paths go through {@link writePrivateFileSync} (0600, symlink-safe).
  */
@@ -282,44 +342,15 @@ export function writeProviderMcpConfig(
   if (target === null) return null;
 
   if (providerId === 'opencode-cli') {
-    try {
-      const stat = lstatSync(target);
-      if (stat.isSymbolicLink()) {
-        log.warn({ target }, 'skipping opencode MCP config write because opencode.json is a symlink');
-        return null;
-      }
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code === 'ELOOP') {
-        log.warn({ err, target }, 'skipping opencode MCP config write after file stat failed');
-        return null;
-      }
-      if (code !== 'ENOENT') throw err;
-    }
-
-    let existing: Record<string, unknown> | null = null;
-    if (existsSync(target)) {
-      try {
-        const parsed = JSON.parse(readFileSync(target, 'utf8'));
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          existing = parsed as Record<string, unknown>;
-        }
-      } catch (err) {
-        // Corrupt/unreadable user config — fall back to a fresh merge base
-        // rather than refusing to wire MCP. The whatsoup block is what matters.
-        log.warn({ err, target }, 'failed to parse existing opencode.json before MCP config write; overwriting managed entries');
-        existing = null;
-      }
-    }
+    const existing = readExistingOpenCodeConfig(target);
     const merged = mergeOpencodeConfig(existing, generated, providerConfig);
     try {
       writePrivateFileSync(target, JSON.stringify(merged, null, 2));
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ELOOP') {
-        log.warn({ err, target }, 'skipping opencode MCP config write because opencode.json is a symlink');
-        return null;
+        throw openCodeConfigSymlinkError();
       }
-      throw err;
+      throw openCodeConfigWriteError(err);
     }
     return target;
   }

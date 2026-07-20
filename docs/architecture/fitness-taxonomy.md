@@ -98,8 +98,8 @@ Current baseline measurements:
 
 | rule | path | lines | ceiling |
 |------|------|-------|---------|
-| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 12130 | 12130 |
-| `arch.file-size` | `tests/runtimes/agent/runtime.test.ts` | 16290 | 16290 |
+| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 12199 | 12199 |
+| `arch.file-size` | `tests/runtimes/agent/runtime.test.ts` | 16579 | 16579 |
 
 The `ceiling` column (the `maxLines` field on each measurement in `baseline.json`) is a **blocking
 growth ceiling**. `tests/scripts/fitness-file-size-warning-budget.test.ts` measures each file's
@@ -148,7 +148,7 @@ disagree (`| rule | count |` rows below are machine-checked):
 | `arch.ssot-lid-reads` | 6 | `scripts/ssot-pattern-guard.ts` |
 | `arch.ssot-jid-construction` | 7 | `scripts/ssot-pattern-guard.ts` |
 | `arch.ssot-name-ladder` | 5 | `scripts/ssot-pattern-guard.ts` |
-| `arch.ssot-phone-shape` | 7 | `scripts/ssot-pattern-guard.ts` |
+| `arch.ssot-phone-shape` | 9 | `scripts/ssot-pattern-guard.ts` |
 | `arch.ssot-presentation-literals` | 0 | `scripts/ssot-pattern-guard.ts` (pure block) |
 | `arch.ring-boundaries` | 57 | `scripts/ring-boundary-guard.ts` (ratchet, not yet a pure block) |
 

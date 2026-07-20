@@ -224,6 +224,7 @@ describe('SessionManager durable error lifecycle', () => {
       onEvent: vi.fn(),
       onCrash: vi.fn(),
       provider: 'opencode-cli',
+      model: 'glm/test-model',
     });
     sm.setDurability(durability);
 
@@ -252,6 +253,7 @@ describe('SessionManager durable error lifecycle', () => {
       onEvent: vi.fn(),
       onCrash: vi.fn(),
       provider: 'opencode-cli',
+      model: 'glm/test-model',
     });
     sm.setDurability(durability);
 
@@ -537,6 +539,7 @@ describe('SessionManager durable error lifecycle', () => {
       chatJid: CHAT_JID,
       onEvent: vi.fn(),
       provider: 'opencode-cli',
+      model: 'glm/test-model',
     });
     sm.setDurability(durability);
 

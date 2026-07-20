@@ -2,8 +2,9 @@
  * fallback-config.test.ts — branch coverage for the two exported helpers in
  * src/runtimes/agent/fallback-config.ts.
  *
- * `fallbackProviderConfigFor` is fully pure (4 branches):
+ * `fallbackProviderConfigFor` is fully pure (5 branches):
  *   - provider undefined                  → undefined
+ *   - provider === 'opencode-cli'         → inherit except primary endpoint fields
  *   - provider === agentProvider          → agentProviderConfig (inherit)
  *   - provider === 'openai-api'/'anthropic-api' → agentProviderConfig (inherit)
  *   - else                                → undefined
@@ -56,6 +57,22 @@ describe('fallback-config', () => {
       const cfg: Record<string, unknown> = { model: 'gpt-x', baseUrl: 'https://example.test' };
       // Terminal concrete assertion: identity (same object reference).
       expect(fallbackProviderConfigFor('anthropic', 'anthropic', cfg)).toBe(cfg);
+    });
+
+    it('strips primary endpoint fields from every OpenCode fallback execution config', () => {
+      const cfg: Record<string, unknown> = {
+        baseUrl: 'https://primary-openai.example/v1',
+        apiKeyService: 'openai',
+        executionProfile: 'whatsoup-headless',
+        budget: { requestsPerMinute: 10 },
+      };
+      const expected = {
+        executionProfile: 'whatsoup-headless',
+        budget: { requestsPerMinute: 10 },
+      };
+
+      expect(fallbackProviderConfigFor('opencode-cli', 'opencode-cli', cfg)).toEqual(expected);
+      expect(fallbackProviderConfigFor('opencode-cli', 'openai-api', cfg)).toEqual(expected);
     });
 
     it('inherits agentProviderConfig when provider is openai-api (identity)', () => {
@@ -131,6 +148,29 @@ describe('fallback-config', () => {
       // Terminal: 3rd arg to resolveProviderKeyService IS the agent config
       // (identity), and the public result reflects the present credential.
       expect(mockedResolve).toHaveBeenCalledWith('openai', 'gpt-x', cfg);
+      expect(result).toBe(true);
+    });
+
+    it('resolves an OpenCode fallback credential against the stripped execution config', () => {
+      mockedResolve.mockReturnValueOnce('minimax');
+      mockedLookup.mockReturnValueOnce('present');
+
+      const result = fallbackKeyPresent(
+        'opencode-cli',
+        'minimax/MiniMax-M2',
+        'opencode-cli',
+        {
+          baseUrl: 'https://primary-openai.example/v1',
+          apiKeyService: 'openai',
+          executionProfile: 'whatsoup-headless',
+        },
+      );
+
+      expect(mockedResolve).toHaveBeenCalledWith(
+        'opencode-cli',
+        'minimax/MiniMax-M2',
+        { executionProfile: 'whatsoup-headless' },
+      );
       expect(result).toBe(true);
     });
 
