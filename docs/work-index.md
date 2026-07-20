@@ -25,7 +25,7 @@ scoped markdown files currently on disk.
 | Dimension | Breakdown |
 |---|---|
 | Kind | handoff=7, plan=37, review=3, spec=27, state=1 |
-| Status | active=13, closed=4, completed=32, deferred=7, pending=15, unknown=4 |
+| Status | active=13, closed=4, completed=32, deferred=7, pending=14, unknown=5 |
 | Status source | body-marker=71, fallback=3, state-md-status=1 |
 
 ## Inconsistencies
@@ -52,7 +52,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | tasks | body-marker |
 
-### Unknown-status — triage needed (4)
+### Unknown-status — triage needed (5)
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
@@ -60,6 +60,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/plans/2026-07-17-macos-credential-durability.md` | plan | macos-credential-durability | 2026-07-17 |
 | `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | spec | turn-lifecycle-fitness-extraction-design | 2026-07-11 |
 | `docs/superpowers/specs/2026-07-17-macos-credential-durability-design.md` | spec | macos-credential-durability-design | 2026-07-17 |
+| `docs/superpowers/specs/2026-07-20-cicd-enforcement-control-plane-design.md` | spec | cicd-enforcement-control-plane-design | 2026-07-20 |
 
 ### Cross-tree topic clusters (4)
 
@@ -187,7 +188,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-07-17-boundary-exit-parser-codeql-hardening-design.md` | spec | active | body-marker | boundary-exit-parser-codeql-hardening-design | 2026-07-17 |  |
 | `docs/superpowers/specs/2026-07-17-boundary-validator-ci-refactor-design.md` | spec | active | body-marker | boundary-validator-ci-refactor-design | 2026-07-17 |  |
 | `docs/superpowers/specs/2026-07-17-macos-credential-durability-design.md` | spec | unknown | fallback | macos-credential-durability-design | 2026-07-17 |  |
-| `docs/superpowers/specs/2026-07-20-cicd-enforcement-control-plane-design.md` | spec | pending | body-marker | cicd-enforcement-control-plane-design | 2026-07-20 |  |
+| `docs/superpowers/specs/2026-07-20-cicd-enforcement-control-plane-design.md` | spec | unknown | body-marker | cicd-enforcement-control-plane-design | 2026-07-20 |  |
 
 ### docs/superpowers/specs/kill-session-transactional-cancellation  _(3 entries)_
 
@@ -208,4 +209,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-20T18:27:29Z from commit `24bb5e5528c7909a8df5f4d490d83e21604f3646`
+- Generated at 2026-07-20T18:47:57Z from commit `f43b877ffab07bd3b75f1be645c4552f3a127b18`

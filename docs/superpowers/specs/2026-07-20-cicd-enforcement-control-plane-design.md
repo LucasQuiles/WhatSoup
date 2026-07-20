@@ -2,14 +2,15 @@
 
 **Date:** 2026-07-20
 
-**Status:** Approved architecture; written specification pending owner review
+**Status:** Active — approved for iterative implementation
 
 **Audited control source base:** `6fd773aee4832dd9b496fb696a8a789bb33660c1`
 
-**Safety boundary:** This document authorizes specification and planning only. It does
-not authorize a live deployment, credential change, deletion or rewriting of public
-history, repository-rules change, or artifact promotion. Those mutations remain
-separate, evidence-backed execution steps.
+**Safety boundary:** The owner has authorized bounded source implementation through
+ordinary reviewed commits. This document does not authorize a live deployment,
+credential change, deletion or rewriting of public history, repository-rules change,
+artifact publication, or artifact promotion. Those mutations remain separate,
+evidence-backed execution steps with an explicit trust-boundary confirmation.
 
 ## 1. Decision
 
