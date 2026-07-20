@@ -19,6 +19,7 @@ describe('line-detail tab components', () => {
       HistoryTab: typeof mod.HistoryTab,
       LogsTab: typeof mod.LogsTab,
       MetricsTab: typeof mod.MetricsTab,
+      CheckpointsTab: typeof mod.CheckpointsTab,
     }).toEqual({
       SummaryTab: 'function',
       ModeTab: 'function',
@@ -27,6 +28,7 @@ describe('line-detail tab components', () => {
       HistoryTab: 'function',
       LogsTab: 'function',
       MetricsTab: 'function',
+      CheckpointsTab: 'function',
     });
   });
 
@@ -45,6 +47,7 @@ describe('line-detail tab components', () => {
     const mod = await import('../../console/src/components/line-detail/index.ts');
     expect(Object.keys(mod).sort()).toEqual([
       'AccessTab',
+      'CheckpointsTab',
       'ConfigEditDialog',
       'GroupsTab',
       'HistoryTab',

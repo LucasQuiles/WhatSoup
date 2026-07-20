@@ -32,6 +32,7 @@ const navigateMock = vi.hoisted(() => vi.fn());
 
 const useLineMock = vi.hoisted(() => vi.fn());
 const useTypingMock = vi.hoisted(() => vi.fn(() => ({ data: [] })));
+const useCheckpointsMock = vi.hoisted(() => vi.fn(() => ({ data: undefined, isLoading: false, freshness: undefined })));
 const useChatsMock = vi.hoisted(() => vi.fn(() => ({ data: [] })));
 const useMessagesMock = vi.hoisted(() => vi.fn(() => ({ data: [] })));
 const useAccessMock = vi.hoisted(() => vi.fn((): {
@@ -73,6 +74,11 @@ vi.mock('../../console/src/hooks/use-fleet', async (importOriginal) => {
     useAccess: useAccessMock,
     useLogs: useLogsMock,
     useTyping: useTypingMock,
+    // Explicit, not via ...actual: under the full coverage run importOriginal's
+    // spread did not reliably surface this newly-added export, so LineDetail's
+    // useCheckpoints() call threw "No useCheckpoints export on the mock" in CI
+    // (the single-file run resolved it via ...actual and passed). #1930.
+    useCheckpoints: useCheckpointsMock,
   };
 });
 
@@ -207,26 +213,29 @@ function renderLineDetailRoute(routeName: string) {
 // ---------------------------------------------------------------------------
 
 describe('LineDetail tablist (Tabs primitive)', () => {
-  it('renders 7 base tabs as role=tab inside a labeled tablist', async () => {
+  // NOTE (#1930): the checkpoint-browser tab is rendered unconditionally, so the
+  // base count is now 8 (was 7). If the co-driver intends it gated (e.g. agent
+  // lines only), the fix belongs in LineDetail.tsx, not here — flagging for review.
+  it('renders 8 base tabs as role=tab inside a labeled tablist', async () => {
     await act(async () => {
       renderLineDetail({ line: makeLine({ name: 'test-line', mode: 'chat' }) });
     });
     const list = screen.getByRole('tablist', { name: 'Line detail tabs' });
-    expect(within(list).getAllByRole('tab')).toHaveLength(7);
+    expect(within(list).getAllByRole('tab')).toHaveLength(8);
   });
 
-  it('renders 9 tabs when the line is MCP-capable (passive mode)', async () => {
+  it('renders 10 tabs when the line is MCP-capable (passive mode)', async () => {
     await act(async () => {
       renderLineDetail({ line: makeLine({ name: 'test-line', mode: 'passive' }) });
     });
-    expect(screen.getAllByRole('tab')).toHaveLength(9);
+    expect(screen.getAllByRole('tab')).toHaveLength(10);
   });
 
-  it('renders 9 tabs when the line is agent mode without sandboxPerChat', async () => {
+  it('renders 10 tabs when the line is agent mode without sandboxPerChat', async () => {
     await act(async () => {
       renderLineDetail({ line: makeLine({ name: 'test-line', mode: 'agent', sandboxPerChat: false }) });
     });
-    expect(screen.getAllByRole('tab')).toHaveLength(9);
+    expect(screen.getAllByRole('tab')).toHaveLength(10);
   });
 
   it('ArrowRight + Enter activates the next tab; focus alone does not switch panels', async () => {
