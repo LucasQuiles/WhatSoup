@@ -77,11 +77,11 @@
     {
       "content_signature": "3b90fb5f1b5fa4dcbeb732504e82a621eb3998139d977d7b687635511be16715",
       "file": "tools/qsesh/tests/test_distill.py",
-      "line": 309,
+      "line": 368,
       "owner": "q",
       "reason": "advisory-suggestion: test_invalid_canonical_invariants_fail_as_one_typed_distill_error enumerates 12 discrete literal cases (('missing-session', 'distill-session-meta'), ('duplicate-session', 'distill-session-meta'), ('missing-project', 'distill-session-meta'), ('version-mismatch',...); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
-      "signature": "32e798d639e648bd22ae5399810578b846499f2c9e8f1c94fb07aaecd2751384"
+      "signature": "f0b1d0e17599da0673f92a07262cc7569cbf6deea629f211cd540e2d25327e9d"
     },
     {
       "content_signature": "4a4ac12d3a5609e0611c21e060efdde5a5fdd0b72d3c47e63156f4213e733490",
@@ -104,11 +104,11 @@
     {
       "content_signature": "b44196b05b535fe296509cd256636afde8261c6718bd13dcdfa92616b64c0187",
       "file": "tools/qsesh/tests/test_distill.py",
-      "line": 156,
+      "line": 214,
       "owner": "q",
       "reason": "advisory-suggestion: test_clean_transcript_is_only_main_prose_plus_collapsed_skill_marker enumerates 3 discrete literal cases ('claude', 'codex', 'opencode'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
-      "signature": "4321e3910714b0b07e22f958c796265bc836ee603fdb439906235eae1e4eb1d5"
+      "signature": "5c2e680ea036ee27abaa81f28b91a9bae82b577447aff0450ff7551289f5ee60"
     },
     {
       "content_signature": "ed3ce1056d1dd5dcada198313ee354ef3662836f44f790c4ac55f2cf011e8074",
@@ -239,11 +239,11 @@
     {
       "content_signature": "4a1e7e44fe8264a7e89a8d1f72bf6678d8c6ca78f82adc978637699f9ff92cfd",
       "file": "tools/qsesh/tests/test_schema.py",
-      "line": 246,
+      "line": 340,
       "owner": "q",
       "reason": "advisory-suggestion: test_existing_wrong_or_newer_database_is_rejected_before_ddl enumerates 3 discrete literal cases ('wrong-application', 'newer-version', 'drift'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
-      "signature": "978067f2e2ef65fd53958f77c2e4ec20bf967b7521caf068cbb1134e8fd06f67"
+      "signature": "7a5cf3803267f0068d01a46792ed0c258a29eeeec2757999ee62eabfacde6f31"
     },
     {
       "content_signature": "35cd23ecf0e349f79ebd3bce16be39c81bcd283df64a8cabee640487236c9906",
@@ -257,11 +257,11 @@
     {
       "content_signature": "4e622175a7cd4a792f3aee9440bd17b120f61dace715933114f3f9ae9ff13aa9",
       "file": "tools/qsesh/tests/test_distill.py",
-      "line": 209,
+      "line": 267,
       "owner": "q",
       "reason": "advisory-suggestion: test_inventories_and_record_counts_reconcile_every_stripped_kind enumerates 3 discrete literal cases ('claude', 'codex', 'opencode'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
-      "signature": "9aa6f00304682823e97a5ba763aee227914fbf3146ebb3352c09928892830633"
+      "signature": "9343bb22194ea9a8455dfd06bb1a10375d48b78a9218fa5ef2bbb6fe840249dc"
     },
     {
       "content_signature": "50474ee358fa7cd128ea082a1eeb0395d8f4aa3e26dcac55963090228ad64016",
@@ -356,11 +356,11 @@
     {
       "content_signature": "a2dd4912bf9101bc9124fcd372c9d5e5ed2829d454de52c54d064b5126d2d961",
       "file": "tools/qsesh/tests/test_distill.py",
-      "line": 144,
+      "line": 148,
       "owner": "q",
       "reason": "advisory-suggestion: test_each_harness_matches_its_independently_authored_distilled_golden enumerates 3 discrete literal cases ('claude', 'codex', 'opencode'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
-      "signature": "d66121db199bfbbf7dd329fd133dffd4b908a4c65939fce543782cf5748a235e"
+      "signature": "c9047a50d5664cc3a8e277bf09cc7b1ec7c92b6cd2d8a3a1a243f23ca268ef04"
     },
     {
       "content_signature": "7c75279b1917473a8c9a0a5e48721e0193bc39e24f7fd54a4e764673048735d1",
@@ -451,6 +451,15 @@
       "reason": "advisory-suggestion: test_canonical_row_kind_is_required_safe_and_allowlisted enumerates 4 discrete literal cases (None, 1, '../../private', 'unknown'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "efe97cb0dae3c2f900b3c0336efed12d2c68ac240ef0df2b886fbdf135e0b6b4"
+    },
+    {
+      "content_signature": "9b8f06bafe18b269cc56634a18eff54b4bb78480fcdff1d9e13a4017d8496194",
+      "file": "tools/qsesh/tests/test_distill.py",
+      "line": 175,
+      "owner": "q",
+      "reason": "advisory-suggestion: test_size_and_inventory_metrics_are_wired_into_the_record enumerates the complete supported Harness enum ('claude','codex','opencode') across canonical integration fixtures; this is a finite adapter contract rather than a generative input domain. Property generation would obscure fixture identity without increasing supported-harness coverage. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "904ba02e75ad406d98aa8710be9e8b7babeb9f5f4fe099c88f7588c0d47de99d"
     }
   ],
   "schema_version": "1"
