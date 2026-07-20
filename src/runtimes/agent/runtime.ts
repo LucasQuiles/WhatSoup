@@ -8367,11 +8367,16 @@ export class AgentRuntime implements Runtime {
    * bookkeeping, but the eligibility DECISION lives here alone.
    */
   private isEntryCredentialed(entry: AgentFallbackEntry): boolean {
-    // Same-provider fallback tiers share the PRIMARY's credential, and the
-    // primary is unconditionally routable by design — so they inherit it rather
-    // than being re-checked (checking would de-route a tier whose own primary is
-    // still routing on the same credential). Only cross-provider entries carry a
-    // distinct credential. F07: cross-provider entries read the unified accessor
+    // INVARIANT this return depends on: `AgentFallbackEntry` carries no auth of
+    // its own (it is `{provider, model}`; `fallbackProviderConfigFor` returns the
+    // PRIMARY's config by identity for a same-provider entry). So a same-provider
+    // tier shares the primary's credential and inherits its unconditional
+    // routability rather than being re-checked — re-checking would de-route a
+    // tier whose own primary is still routing on the same credential. If an
+    // auth-bearing field is ever added to the entry, this inherit becomes a
+    // silent under-exclude and must be conditioned on "no entry-level auth
+    // override", not provider equality alone. F07: cross-provider entries (which
+    // DO carry a distinct credential) read the unified accessor
     // (eligibility projection) — replacing the old presence-only `service ?
     // lookup : true` that treated null-service providers as always credentialed;
     // now a cross-provider claude-cli fallback's expired-no-refresh OAuth is
