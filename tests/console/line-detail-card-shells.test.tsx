@@ -12,7 +12,7 @@ import type { GroupInfo, ScheduledMessage } from '../../console/src/types'
 afterEach(() => cleanup())
 
 describe('GroupCard', () => {
-  it('uses the shared c-card shell', () => {
+  it('uses the shared soup-card shell', () => {
     const group: GroupInfo = {
       id: '120363400000000000@g.us',
       subject: 'Deployments',
@@ -23,13 +23,13 @@ describe('GroupCard', () => {
     render(<GroupCard group={group} onSelect={vi.fn()} myJid="15551234567@s.whatsapp.net" />)
 
     const card = screen.getByRole('button', { name: /deployments/i }) as HTMLButtonElement
-    expect(card.className).toContain('c-card')
+    expect(card.className).toContain('soup-card')
     expect(card.textContent).toContain('2 participants')
   })
 })
 
 describe('ScheduledMessageRow', () => {
-  it('uses the shared c-card shell', () => {
+  it('uses the shared soup-card shell', () => {
     const message: ScheduledMessage = {
       id: 42,
       chatJid: '15551234567@s.whatsapp.net',
@@ -55,7 +55,7 @@ describe('ScheduledMessageRow', () => {
 
     const card = container.firstElementChild as HTMLDivElement | null
     expect(card).toBeDefined()
-    expect(card?.className).toContain('c-card')
+    expect(card?.className).toContain('soup-card')
     expect(screen.getByLabelText('Edit scheduled message')).toBeDefined()
   })
 })
