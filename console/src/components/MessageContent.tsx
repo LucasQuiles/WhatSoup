@@ -1,7 +1,7 @@
 import { type FC, type ReactElement } from 'react'
 import { Image, Film, FileAudio, FileText, HelpCircle } from 'lucide-react'
 import type { Message } from '../types'
-import { formatWhatsAppText } from '../lib/format-wa-text'
+import { formatWhatsAppText } from '../lib/format-message-text'
 
 function formatMediaDuration(seconds: number): string {
   return seconds > 0 ? `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}` : ''

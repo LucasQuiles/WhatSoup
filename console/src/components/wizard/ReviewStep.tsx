@@ -1,10 +1,12 @@
 import { type FC } from 'react'
 import { Pencil, AlertCircle } from 'lucide-react'
 import ModeBadge from '../ModeBadge'
+import TransportBadge from '../TransportBadge'
 import { getProviderConfigFields, DEFAULT_PROVIDER_ID } from '../../lib/providers'
 import { defaultAgentWorkspacePath } from '../../lib/agent-cwd'
 import { ACCESS_MODE_LABELS } from '../../lib/access-modes'
 import { formatCount } from '../../lib/text-utils'
+import { isTransportKind, TRANSPORT_MAP, type TransportKind } from '../../lib/transport-meta'
 import { Button } from '../primitives/Button'
 
 interface ReviewStepProps {
@@ -109,6 +111,8 @@ const ReviewStep: FC<ReviewStepProps> = ({
   const name = (data.name as string) ?? ''
   const description = (data.description as string) ?? ''
   const type = (data.type as string) ?? 'chat'
+  const transport: TransportKind = isTransportKind(data.transport) ? data.transport : 'baileys'
+  const transportMeta = TRANSPORT_MAP[transport]
   const adminPhones = (data.adminPhones as string[]) ?? []
   const models = data.models as Record<string, string> | undefined
   const authMethod = (data.authMethod as string) ?? 'api_key'
@@ -134,7 +138,26 @@ const ReviewStep: FC<ReviewStepProps> = ({
           label="Type"
           value={<ModeBadge mode={type as 'passive' | 'chat' | 'agent'} />}
         />
-        <KV label="Admin phones" value={`${adminPhones.length} configured`} />
+        <KV label="Admin IDs" value={`${adminPhones.length} configured`} />
+      </div>
+
+      {/* Transport card (S3 design — between Identity and Model) */}
+      <div style={cardStyle}>
+        <div style={cardHeaderStyle}>
+          <span className="font-medium text-data" style={headingStyle}>Transport</span>
+          <EditBtn onClick={() => onEditPhase(0)} />
+        </div>
+        <KV
+          label="Kind"
+          value={<TransportBadge kind={transport} />}
+        />
+        <KV label="Backend" value={transportMeta.subLabel || transportMeta.label} />
+        {transport === 'signal' && (
+          <KV label="Self number" value={(data.signalNumber as string) ?? '—'} />
+        )}
+        {transport === 'imessage' && (
+          <KV label="Backend kind" value={(data.imessageBackend as string) ?? 'bluebubbles'} />
+        )}
       </div>
 
       {/* Model card */}

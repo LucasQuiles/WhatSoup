@@ -2,7 +2,7 @@ import { type FC, type ReactNode } from "react";
 import { RotateCw, Square, Copy, ExternalLink } from "lucide-react";
 import type { FeedEvent, Mode } from "../types";
 import FeedIcon from "./FeedIcon";
-import { formatWhatsAppText } from "../lib/format-wa-text";
+import { formatWhatsAppText } from "../lib/format-message-text";
 import { getProvider } from "../lib/providers";
 import { statusAlertMessage, statusColorToken, statusSeverity } from "../lib/status-severity";
 import { Button } from "./primitives/Button";
