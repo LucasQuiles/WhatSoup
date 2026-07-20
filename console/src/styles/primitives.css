@@ -126,6 +126,40 @@
 .soup-mode__dot--unknown { background: var(--text-3); }
 
 /* --------------------------------------------------------------------------
+   TRANSPORT BADGE — dot + word, transport identity (badge.md / PR 4b).
+   Mirrors the mode-badge shape law: 6px square dot + 11px/16px label.
+   -------------------------------------------------------------------------- */
+
+.soup-transport {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--dot-badge);
+  font: 500 11px/16px var(--font-sans);
+}
+
+.soup-transport__dot {
+  width: var(--dot-feed);
+  height: var(--dot-feed);
+  border-radius: var(--radius-xs);
+  flex: none;
+}
+
+.soup-transport--baileys  { color: var(--mode-passive-solid); }
+.soup-transport--baileys  .soup-transport__dot { background: var(--mode-passive-solid); }
+
+.soup-transport--twilio   { color: var(--mode-chat-solid); }
+.soup-transport--twilio   .soup-transport__dot { background: var(--mode-chat-solid); }
+
+.soup-transport--signal   { color: var(--status-ok-solid); }
+.soup-transport--signal   .soup-transport__dot { background: var(--status-ok-solid); }
+
+.soup-transport--imessage { color: var(--mode-agent-solid); }
+.soup-transport--imessage .soup-transport__dot { background: var(--mode-agent-solid); }
+
+/* Unknown transport fallback dot — neutral text-3 (fail-visible). */
+.soup-transport__dot--unknown { background: var(--text-3); }
+
+/* --------------------------------------------------------------------------
    BUTTON PRIMITIVE — 6 variants × 3 sizes (button.md)
    Base: height --btn-h (32px), padding --sp-3, gap --sp-2, radius --r-2.
    Sizes: md (default), sm (28px), xs (24px floor).

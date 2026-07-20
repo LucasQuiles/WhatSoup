@@ -10,6 +10,7 @@ import { formatCount } from '../lib/text-utils'
 import { useToast } from '../hooks/toast-context'
 import { api } from '../lib/api'
 import ModeBadge from '../components/ModeBadge'
+import TransportBadge from '../components/TransportBadge'
 import { StatusCell, Tabs, Tab, Button, ActionButton } from '../components/primitives'
 import LineTags from '../components/LineTags'
 import HeartbeatStrip from '../components/HeartbeatStrip'
@@ -192,6 +193,7 @@ export default function LineDetail() {
             <h1 title={line.name} className="text-text-1 font-extrabold font-[family-name:var(--font-display)] tracking-[var(--tracking-tight)] text-xl truncate min-w-0 flex-1">
               {line.name}
             </h1>
+            <TransportBadge kind={line.health?.transport?.kind} />
             <ModeBadge mode={line.mode} />
             <LineTags line={line} />
           </div>
