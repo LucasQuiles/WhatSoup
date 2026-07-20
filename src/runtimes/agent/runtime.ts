@@ -53,6 +53,7 @@ import {
 } from '../../core/reply-guarantee.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../../lib/emit-alert.ts';
 import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
+import { resolveProviderCredentialState, isProviderRoutable } from '../../lib/provider-credential-eligibility.ts';
 import { createChildLogger } from '../../logger.ts';
 import {
   ensureAgentSchema,
@@ -8366,12 +8367,23 @@ export class AgentRuntime implements Runtime {
    * bookkeeping, but the eligibility DECISION lives here alone.
    */
   private isEntryCredentialed(entry: AgentFallbackEntry): boolean {
-    const service = resolveProviderKeyService(
-      entry.provider,
-      entry.model,
-      fallbackProviderConfigFor(entry.provider, this.agentProvider, this.agentProviderConfig),
+    // Same-provider fallback tiers share the PRIMARY's credential, and the
+    // primary is unconditionally routable by design — so they inherit it rather
+    // than being re-checked (checking would de-route a tier whose own primary is
+    // still routing on the same credential). Only cross-provider entries carry a
+    // distinct credential. F07: cross-provider entries read the unified accessor
+    // (eligibility projection) — replacing the old presence-only `service ?
+    // lookup : true` that treated null-service providers as always credentialed;
+    // now a cross-provider claude-cli fallback's expired-no-refresh OAuth is
+    // de-routed, while codex/gemini stay `native` → routable.
+    if (entry.provider === this.agentProvider) return true;
+    return isProviderRoutable(
+      resolveProviderCredentialState({
+        provider: entry.provider,
+        model: entry.model,
+        providerConfig: fallbackProviderConfigFor(entry.provider, this.agentProvider, this.agentProviderConfig),
+      }),
     );
-    return service ? lookupCredential(service) !== null : true;
   }
 
   /** Clear a sender's route preference — shared by `/model default` and `/reset`. */
