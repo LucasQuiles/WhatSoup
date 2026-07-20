@@ -146,7 +146,11 @@ Note: `completeInbound()` is a guarded helper — if the row is still `processin
                                                           → quarantined
 
   pending ─── drainPendingOutbound() ──► sending → submitted   (re-send, §4.4)
-            (text {text} ops; non-reconstructable → quarantined)
+            (text / status_ping {text} ops; non-reconstructable → quarantined)
+
+  pending ─── status_ping older than STATUS_OP_TTL_MS ──► quarantined  (drain TTL age-out, §4.4)
+
+  *       ─── new status_ping enqueued for same chat ──► failed_permanent  (superseded, §4.4)
 
   sending ─── process crash ──► maybe_sent  (pre-connect recovery)
 
@@ -284,23 +288,39 @@ that re-sends them. It is wired in two places (`main.ts`):
 
 For each op in `status='pending'`:
 
-- **Reconstructable text op** — `op_type === 'text'` and `payload` parses to
-  `{ text: string }` (the exact shape `sendTracked` writes): `markSending()`, re-send via
+- **Stale status ping past TTL** — an `op_type === 'status_ping'` op whose `created_at` is
+  older than `STATUS_OP_TTL_MS` (30 min): `markQuarantined()` + an `outbound_quarantined`
+  alert (`reason=status_op_ttl_expired`), never re-sent. A "back online" notice this old is
+  stale misinformation, so dropping it is correct. Checked **before** `markSending`, and
+  strictly gated on `op_type === 'status_ping'` — `text` ops have no age gate.
+- **Reconstructable text op** — `op_type === 'text'` or `'status_ping'` and `payload` parses
+  to `{ text: string }` (the exact shape `sendTracked` writes): `markSending()`, re-send via
   `messenger.sendMessage(chat_jid, text)`, then `markSubmitted(wa_message_id)`. The op then
   re-enters the normal `submitted → echoed` reconciliation path. If the send throws, the op
   is set back to `maybe_sent` so it re-enters the reconnect-paced recovery loop (no inline
   retry / tight-loop).
-- **Non-reconstructable op** — unknown `op_type`, or a `text` op whose payload does not parse
-  to `{ text }`: `markQuarantined()` + an `outbound_quarantined` alert
+- **Non-reconstructable op** — unknown `op_type`, or a `text`/`status_ping` op whose payload
+  does not parse to `{ text }`: `markQuarantined()` + an `outbound_quarantined` alert
   (`reason=pending_replay_unreconstructable`). These are **not** left `pending` forever —
   doing so would reintroduce the original silent-drop bug for non-text ops.
 
-One failing op never aborts the rest of the drain. The function returns the count of ops
-successfully re-sent. **Duplicate-delivery tradeoff:** see §2.4 — only `safe`/`read_only` ops
-ever reach `pending`, so a replay that duplicates an already-delivered message is the
-accepted tradeoff for those ops and is never incurred for user-terminal (`unsafe`) replies.
-This is the same risk `sendTracked`-created ops already carry on a `maybe_sent → reset`
-cycle; the drainer does not widen it.
+One failing op never aborts the rest of the drain. The function returns
+`{ resent, expired }`: `resent` = ops transitioned out of `pending` via `markSubmitted`;
+`expired` = `status_ping` ops aged out past the TTL. **Duplicate-delivery tradeoff:** see
+§2.4 — only `safe`/`read_only` ops ever reach `pending`, so a replay that duplicates an
+already-delivered message is the accepted tradeoff for those ops and is never incurred for
+user-terminal (`unsafe`) replies. This is the same risk `sendTracked`-created ops already
+carry on a `maybe_sent → reset` cycle; the drainer does not widen it.
+
+**Status pings (`op_type === 'status_ping'`).** The agent "back online" / self-restart pings
+(`main.ts`) are enqueued `replayPolicy: 'unsafe'` + `opType: 'status_ping'` so they are
+structurally storm-proof (PR-C): (1) **unsafe** — `postConnectRecovery` quarantines a failed
+ping instead of resetting it to `pending`, so the drain never re-sends it; (2)
+**supersede-on-enqueue** — `createOutboundOp` marks any prior non-terminal `status_ping` for
+the same chat `failed_permanent`/`error='superseded'` (retention reclaims it), bounding the
+class to one outstanding ping per chat; (3) **TTL age-out** — the drain expires a stale ping
+(above). All three are gated strictly on `op_type === 'status_ping'`; genuine `text` ops
+(user replies, admin responses, the `isResume` continuity message) are untouched.
 
 ### 4.5 Stuck-Inbound Reconciler (`sweepStuckInbound`)
 
@@ -526,7 +546,7 @@ export async function sendTracked(
   chatJid: string,
   text: string,
   durability: DurabilityEngine | undefined,
-  opts: { replayPolicy: 'safe' | 'unsafe' | 'read_only'; isTerminal?: boolean; sourceInboundSeq?: number },
+  opts: { replayPolicy: 'safe' | 'unsafe' | 'read_only'; isTerminal?: boolean; sourceInboundSeq?: number; caller?: GuardCaller; opType?: 'text' | 'status_ping' },
 ): Promise<void>
 ```
 
@@ -571,7 +591,7 @@ delivery proof while adding auditable completion and conflict evidence.
 | `id` | INTEGER PK | Auto-incrementing op identifier. |
 | `conversation_key` | TEXT NOT NULL | Canonical chat identity. |
 | `chat_jid` | TEXT NOT NULL | Raw JID used for the actual send call. |
-| `op_type` | TEXT NOT NULL | Operation type, currently always `'text'`. Reserved for future media types. |
+| `op_type` | TEXT NOT NULL | Operation type: `'text'` (default) or `'status_ping'` (back-online/self-restart notices — supersede + TTL scope key, §4.4). No DB CHECK; reserved for future media types. |
 | `payload` | TEXT NOT NULL | JSON-encoded message content. |
 | `payload_hash` | TEXT | SHA-256 of `payload`. Available for deduplication queries. |
 | `status` | TEXT NOT NULL | Lifecycle state. Default `'pending'`. |

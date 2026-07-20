@@ -1,26 +1,31 @@
 // src/runtimes/agent/commands.ts
 import { isProviderId } from './providers/index.ts';
+import { COMMAND_REGISTRY, type CommandSpec, type LocalCommandName } from './command-registry.ts';
 // Classifies incoming user input as a local command, forwarded slash command,
 // or a regular message to be passed through to the agent.
 
 export type CommandResult =
-  | { type: 'local'; command: 'new' | 'status' | 'help' | 'sessions' | 'kill-session' | 'model' | 'why' | 'reset'; args?: string }
+  | { type: 'local'; command: LocalCommandName; args?: string }
   | { type: 'forwarded'; text: string }
   | { type: 'message'; text: string };
 
+// Widen the narrow `as const` tuple to the interface array so optional-field
+// reads (routingAlias/subVerbs) typecheck on entries that omit them.
+const REGISTRY: readonly CommandSpec[] = COMMAND_REGISTRY;
+
 /** Commands handled locally by the bot runtime. */
-const LOCAL_COMMANDS = new Set(['new', 'status', 'help', 'sessions', 'kill-session']);
+const LOCAL_COMMANDS = new Set(REGISTRY.filter((c) => !c.routingAlias).map((c) => c.name));
 
 /** NL-first routing aliases (owner-approved design) — classified local ONLY
  *  when the caller enables them (nlRouting flag), so flag-off behavior stays
  *  byte-identical to today (/model etc. keep forwarding). Routing preference
  *  and visibility only, never tool/authority changes (capability-preserved). */
-const ROUTING_ALIAS_COMMANDS = new Set(['model', 'why', 'reset']);
+const ROUTING_ALIAS_COMMANDS = new Set(REGISTRY.filter((c) => c.routingAlias).map((c) => c.name));
 
 /** `/model` sub-verbs owned locally when routing aliases are on. Anything
  *  else (e.g. `/model sonnet`) falls through to `forwarded` so the base
  *  capability of driving the agent session's own /model keeps working (F04). */
-const ROUTING_MODEL_VERBS = new Set(['status', 'default', 'strongest', 'fastest']);
+const ROUTING_MODEL_VERBS = new Set(REGISTRY.find((c) => c.name === 'model')?.subVerbs ?? []);
 
 /**
  * Classify a user input string.
@@ -63,7 +68,7 @@ export function classifyInput(text: string, opts?: { routingAliases?: boolean })
     const args = parts.length > 1 ? parts.slice(1).join(' ') : undefined;
     return {
       type: 'local',
-      command: commandName as 'new' | 'status' | 'help' | 'sessions' | 'kill-session' | 'model' | 'why' | 'reset',
+      command: commandName as LocalCommandName,
       args,
     };
   }

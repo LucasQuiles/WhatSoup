@@ -33,7 +33,7 @@ describe('ensurePermissionsSettings', () => {
     expect(settings.permissions.allow.length).toBeGreaterThan(5);
   });
 
-  it('does not overwrite existing settings.json with permissions block', () => {
+  it('preserves custom permissions while repairing the deny floor without plugins', () => {
     const cwd = makeTmp();
     const claudeDir = join(cwd, '.claude');
     mkdirSync(claudeDir, { recursive: true });
@@ -51,9 +51,74 @@ describe('ensurePermissionsSettings', () => {
     ensurePermissionsSettings(claudeDir, 'agent');
 
     const settings = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
-    // Should NOT overwrite — custom settings preserved
+    // Custom settings survive, while the repo-owned safety floor is restored.
     expect(settings.permissions.allow).toEqual(['CustomTool']);
-    expect(settings.permissions.deny).toEqual(['BlockedTool']);
+    expect(settings.permissions.deny).toEqual(['BlockedTool', ...REQUIRED_DENY]);
+
+    const repaired = readFileSync(join(claudeDir, 'settings.json'), 'utf8');
+    ensurePermissionsSettings(claudeDir, 'agent');
+    expect(readFileSync(join(claudeDir, 'settings.json'), 'utf8')).toBe(repaired);
+  });
+
+  it('fails closed to generated permissions when an existing block is malformed', () => {
+    const cwd = makeTmp();
+    const claudeDir = join(cwd, '.claude');
+    mkdirSync(claudeDir, { recursive: true });
+
+    const existing = {
+      permissions: {
+        allow: 'not-an-array',
+        deny: [],
+        defaultMode: 'bypassPermissions',
+      },
+      hooks: { Stop: [{ matcher: '', hooks: [{ type: 'command', command: '/safe/stop' }] }] },
+      customSetting: 'preserve-me',
+    };
+    writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify(existing));
+
+    ensurePermissionsSettings(claudeDir, 'agent');
+
+    const settings = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+    expect(settings.permissions.allow).toContain('Bash');
+    expect(settings.permissions.deny).toEqual(REQUIRED_DENY);
+    expect(settings.permissions.defaultMode).toBe('bypassPermissions');
+    expect(settings.hooks).toEqual(existing.hooks);
+    expect(settings.customSetting).toBe('preserve-me');
+  });
+
+  it('upgrades a legacy partial fleet floor to the current deny floor', () => {
+    const cwd = makeTmp();
+    const claudeDir = join(cwd, '.claude');
+    mkdirSync(claudeDir, { recursive: true });
+
+    const legacyGoogle = REQUIRED_DENY
+      .filter((entry) => entry.startsWith('mcp__claude_ai_'))
+      .slice(0, 12);
+    const legacyMicrosoft = REQUIRED_DENY.filter((entry) =>
+      entry.startsWith('mcp__plugin_microsoft_365_microsoft_365__'));
+    const legacyDeny = [...legacyGoogle, ...legacyMicrosoft];
+    expect(legacyDeny).toHaveLength(120);
+
+    writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify({
+      permissions: {
+        allow: ['CustomTool'],
+        deny: legacyDeny,
+        defaultMode: 'bypassPermissions',
+      },
+      hooks: { Stop: [] },
+    }));
+
+    ensurePermissionsSettings(claudeDir, 'agent');
+
+    const settings = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+    expect(settings.permissions.allow).toEqual(['CustomTool']);
+    expect(settings.hooks).toEqual({ Stop: [] });
+    expect(settings.permissions.deny).toHaveLength(124);
+    expect(new Set(settings.permissions.deny)).toEqual(new Set(REQUIRED_DENY));
+    expect(settings.permissions.deny.filter((entry: string) =>
+      entry.startsWith('mcp__plugin_microsoft_365_microsoft_365__'))).toHaveLength(108);
+    expect(settings.permissions.deny.filter((entry: string) =>
+      entry.startsWith('mcp__claude_ai_'))).toHaveLength(16);
   });
 
   it('adds permissions to existing settings.json that only has hooks', () => {

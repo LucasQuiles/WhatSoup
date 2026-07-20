@@ -46,6 +46,7 @@ const PREFLIGHT = join(REPO_ROOT, 'deploy/preflight-check.sh');
 const WRAPPER = join(REPO_ROOT, 'deploy/whatsoup');
 const RESOLVE_NODE_LIB = join(REPO_ROOT, 'deploy/lib/resolve-node.sh');
 const READ_PRIVATE_HEALTH_TOKEN_LIB = join(REPO_ROOT, 'deploy/lib/read-private-health-token.sh');
+const READ_PRIVATE_HEALTH_TOKEN_READER = join(REPO_ROOT, 'deploy/lib/read-private-health-token.mjs');
 const SOURCE_RUNTIME_CHECK = join(REPO_ROOT, 'scripts/source-runtime-drift-check.ts');
 const GUARD_CORE = join(REPO_ROOT, 'scripts/lib/guard-core.ts');
 const GIT_ENV = join(REPO_ROOT, 'src/lib/git-env.ts');
@@ -108,6 +109,10 @@ function makeFixtureTree(
     'export const databaseCompatibilityBootstrapFixture = true;\n',
     'utf8',
   );
+  // Fixture roots are non-git, so preflight treats them as release exports —
+  // which must carry the release manifest (manifest gate). Tests probing the
+  // missing-manifest failure remove this file explicitly.
+  writeFileSync(join(root, '.whatsoup-release-manifest.json'), '{"files":[]}\n', 'utf8');
   for (const [rel, contents] of Object.entries(extraFiles)) {
     const abs = join(root, rel);
     mkdirSync(dirname(abs), { recursive: true });
@@ -174,6 +179,7 @@ function makeWrapperFixture(): WrapperFixture {
   chmodSync(wrapper, 0o755);
   copyFileSync(RESOLVE_NODE_LIB, join(lib, 'resolve-node.sh'));
   copyFileSync(READ_PRIVATE_HEALTH_TOKEN_LIB, join(lib, 'read-private-health-token.sh'));
+  copyFileSync(READ_PRIVATE_HEALTH_TOKEN_READER, join(lib, 'read-private-health-token.mjs'));
   copyFileSync(SOURCE_RUNTIME_CHECK, trustChecker);
   copyFileSync(GUARD_CORE, join(scriptsLib, 'guard-core.ts'));
   copyFileSync(GIT_ENV, join(srcLib, 'git-env.ts'));
@@ -1040,5 +1046,35 @@ describe('deploy/whatsoup — source wiring', () => {
     // The instance-config failure is reported distinctly and fails closed.
     expect(preflight).toContain('instance configuration is invalid or missing');
     expect(existsSync(join(REPO_ROOT, 'deploy/preflight-instance-check.ts'))).toBe(true);
+  });
+});
+
+// P4 follow-on (fleet incident 2026-07-16): WhatSoup-release-ee35101f shipped
+// to four hosts without .whatsoup-release-manifest.json, so every host flagged
+// release-drift (manifest-missing) forever. The manifest is written only by
+// scripts/release-snapshot-plan.ts and nothing on the restart path verified it.
+describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — release-export manifest gate', () => {
+  it('fails closed when a non-git release dir lacks the release manifest', () => {
+    const root = makeFixtureTree(
+      "import { ok } from './helper.ts';\nconsole.log(ok);\n",
+      { 'src/helper.ts': 'export const ok = true;\n' },
+    );
+    rmSync(join(root, '.whatsoup-release-manifest.json'), { force: true });
+    const { status, stderr } = runPreflight(root);
+
+    expect(status).toBe(3);
+    expect(stderr).toContain('release export lacks .whatsoup-release-manifest.json');
+  });
+
+  it('passes the manifest gate when the release manifest is present', () => {
+    const root = makeFixtureTree(
+      "import { ok } from './helper.ts';\nconsole.log(ok);\n",
+      { 'src/helper.ts': 'export const ok = true;\n' },
+    );
+    writeFileSync(join(root, '.whatsoup-release-manifest.json'), '{"files":[]}\n', 'utf8');
+    const { status, stderr } = runPreflight(root);
+
+    expect(status).toBe(0);
+    expect(stderr).toContain('PREFLIGHT-OK');
   });
 });

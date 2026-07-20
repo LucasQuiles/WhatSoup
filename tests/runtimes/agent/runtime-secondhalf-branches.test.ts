@@ -117,7 +117,7 @@ const { mockGetMessagesSince } = vi.hoisted(() => ({
 }));
 
 const { mockPrepareContentForAgent } = vi.hoisted(() => ({
-  mockPrepareContentForAgent: vi.fn(),
+  mockPrepareContentForAgent: vi.fn(async (msg: IncomingMessage) => msg.content ?? ''),
 }));
 
 // ─── Module mocks ───────────────────────────────────────────────────────────
@@ -142,7 +142,7 @@ vi.mock('../../../src/core/messages.ts', () => ({
 
 vi.mock('../../../src/runtimes/agent/media-prep.ts', () => ({
   prepareContentForAgent: mockPrepareContentForAgent,
-  relocateMediaToWorkspace: vi.fn(),
+  relocateMediaToWorkspace: vi.fn((content: string) => content),
 }));
 
 vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({

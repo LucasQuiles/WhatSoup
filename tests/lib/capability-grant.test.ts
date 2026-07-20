@@ -243,6 +243,39 @@ describe('createCapabilityGrantManager — arm', () => {
     if (!result.ok) throw new Error('expected ok');
     expect(result.record.addedToAllow).toEqual(['camera.clip']);
   });
+
+  it('does not mutate policy when the durable grant record cannot be written', async () => {
+    const policy = new FakePolicy();
+    policy.allow.add('preexisting.allow');
+    policy.deny.add('camera.snap');
+    policy.deny.add('preexisting.deny');
+    const store = new FakeStore();
+    vi.spyOn(store, 'write').mockRejectedValueOnce(new Error('grant store unavailable'));
+    const { manager } = makeManager({ policy, store });
+
+    await expect(manager.arm('camera', 60_000, ownerAuth))
+      .rejects.toThrow('grant store unavailable');
+
+    expect([...policy.allow].sort()).toEqual(['preexisting.allow']);
+    expect([...policy.deny].sort()).toEqual(['camera.snap', 'preexisting.deny']);
+    expect(policy.applyCount).toBe(0);
+    expect(await manager.status()).toEqual({ armed: false });
+  });
+
+  it('clears durable intent when the atomic policy apply fails', async () => {
+    const policy = new FakePolicy();
+    const store = new FakeStore();
+    vi.spyOn(policy, 'apply').mockRejectedValueOnce(new Error('policy write unavailable'));
+    const { manager } = makeManager({ policy, store });
+
+    await expect(manager.arm('camera', 60_000, ownerAuth))
+      .rejects.toThrow('policy write unavailable');
+
+    expect(store.record).toBeNull();
+    expect(store.writes).toBe(2);
+    expect(policy.allow.size).toBe(0);
+    expect(policy.deny.size).toBe(0);
+  });
 });
 
 // ─── disarm ────────────────────────────────────────────────────────────────
@@ -309,6 +342,24 @@ describe('createCapabilityGrantManager — disarm', () => {
     await manager.disarm(ownerAuth);
     expect(onDisarm).toHaveBeenCalledTimes(1);
     expect(onDisarm).toHaveBeenCalledWith(expect.objectContaining({ reason: 'manual' }));
+  });
+
+  it('keeps a completed disarm successful when its observer throws', async () => {
+    const observerError = new Error('observer unavailable');
+    const onError = vi.fn();
+    const { manager, policy, store } = makeManager({
+      onDisarm: () => { throw observerError; },
+      onError,
+    });
+    await manager.arm('camera', 60_000, ownerAuth);
+
+    await expect(manager.disarm(ownerAuth)).resolves.toEqual(
+      expect.objectContaining({ changed: true, reason: 'manual' }),
+    );
+
+    expect(policy.allow.has('camera.snap')).toBe(false);
+    expect(store.record).toBeNull();
+    expect(onError).toHaveBeenCalledWith(observerError, 'disarm-observer');
   });
 });
 
@@ -434,6 +485,67 @@ describe('createCapabilityGrantManager — expiry', () => {
     expect(onDisarm).toHaveBeenCalledWith(expect.objectContaining({ reason: 'expired' }));
     manager.stop();
     vi.useRealTimers();
+  });
+
+  it('reports an expiry revert failure, retains the record, and retries successfully', async () => {
+    vi.useFakeTimers();
+    let fakeNow = 1_000;
+    const onDisarm = vi.fn();
+    const onError = vi.fn();
+    const { manager, policy, store } = makeManager({
+      now: () => fakeNow,
+      pollIntervalMs: 50,
+      onDisarm,
+      onError,
+    });
+
+    try {
+      await manager.arm('camera', 200, ownerAuth);
+      const expiryError = new Error('policy temporarily unavailable');
+      vi.spyOn(policy, 'apply').mockRejectedValueOnce(expiryError);
+      fakeNow = 2_000;
+
+      await vi.advanceTimersByTimeAsync(50);
+
+      expect(onError).toHaveBeenCalledWith(expiryError, 'expiry-disarm');
+      expect(onDisarm).not.toHaveBeenCalled();
+      expect(store.record?.group).toBe('camera');
+      expect(policy.allow.has('camera.snap')).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(50);
+
+      expect(policy.allow.has('camera.snap')).toBe(false);
+      expect(store.record).toBeNull();
+      expect(onDisarm).toHaveBeenCalledWith(expect.objectContaining({ reason: 'expired' }));
+    } finally {
+      manager.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it('continues expiry retries when the error observer throws', async () => {
+    vi.useFakeTimers();
+    let fakeNow = 1_000;
+    const observerError = new Error('observer unavailable');
+    const { manager, policy, store } = makeManager({
+      now: () => fakeNow,
+      pollIntervalMs: 50,
+      onError: () => { throw observerError; },
+    });
+
+    try {
+      await manager.arm('camera', 200, ownerAuth);
+      vi.spyOn(policy, 'apply').mockRejectedValueOnce(new Error('policy temporarily unavailable'));
+      fakeNow = 2_000;
+
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(policy.allow.has('camera.snap')).toBe(false);
+      expect(store.record).toBeNull();
+    } finally {
+      manager.stop();
+      vi.useRealTimers();
+    }
   });
 });
 

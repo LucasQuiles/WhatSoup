@@ -125,7 +125,12 @@ export interface GrantManagerOptions {
   /** Expiry poll interval in milliseconds. Default: 15_000. */
   pollIntervalMs?: number;
   /** Called after a disarm completes (manual, expired, or superseded). */
-  onDisarm?: (result: DisarmResult) => void;
+  onDisarm?: (result: DisarmResult) => void | Promise<void>;
+  /** Called when an expiry disarm or lifecycle observer fails. */
+  onError?: (
+    error: unknown,
+    operation: 'expiry-disarm' | 'disarm-observer',
+  ) => void | Promise<void>;
   /** Injectable clock (default: Date.now). */
   now?: () => number;
   /** Injectable timers (default: global). */
@@ -243,12 +248,34 @@ export function createCapabilityGrantManager(
 ): CapabilityGrantManager {
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const onDisarm = options.onDisarm ?? (() => {});
+  const onError = options.onError ?? (() => {});
   const now = options.now ?? (() => Date.now());
   const _setTimeout = options.setTimeout ?? setTimeout;
   const _clearTimeout = options.clearTimeout ?? clearTimeout;
 
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let running = false;
+
+  const reportError = (
+    error: unknown,
+    operation: 'expiry-disarm' | 'disarm-observer',
+  ): void => {
+    try {
+      void Promise.resolve(onError(error, operation)).catch(() => {});
+    } catch {
+      // Observability must never break expiry retries or completed state changes.
+    }
+  };
+
+  const notifyDisarm = (result: DisarmResult): void => {
+    try {
+      void Promise.resolve(onDisarm(result)).catch((error: unknown) => {
+        reportError(error, 'disarm-observer');
+      });
+    } catch (error) {
+      reportError(error, 'disarm-observer');
+    }
+  };
 
   // Serialize every mutating command (arm/disarm/reconcile) and the expiry tick
   // through one chain, so the manager's own read→mutate→write of the policy+store
@@ -309,7 +336,7 @@ export function createCapabilityGrantManager(
       restored: uniqSorted(restored),
       reason,
     };
-    onDisarm(result);
+    notifyDisarm(result);
     return result;
   };
 
@@ -325,7 +352,7 @@ export function createCapabilityGrantManager(
     const fire = () => {
       pollTimer = null;
       void tick()
-        .catch(() => {})
+        .catch((error: unknown) => reportError(error, 'expiry-disarm'))
         .finally(() => {
           // Re-arm only if not stopped during tick
           if (pollTimer === null && running) {
@@ -393,15 +420,6 @@ export function createCapabilityGrantManager(
       }
     }
 
-    if (addedToAllow.length > 0 || removedFromDeny.length > 0) {
-      await options.policy.apply({
-        addAllow: addedToAllow,
-        removeAllow: [],
-        addDeny: [],
-        removeDeny: removedFromDeny,
-      });
-    }
-
     const record: GrantRecord = {
       version: 2,
       armedAtMs: nowMs,
@@ -411,7 +429,25 @@ export function createCapabilityGrantManager(
       addedToAllow: uniqSorted(addedToAllow),
       removedFromDeny: uniqSorted(removedFromDeny),
     };
+
+    // Persist the exact rollback intent before opening the capability window.
+    // If the atomic policy write fails, clear that intent because no elevation
+    // was committed. A crash after the record write is conservative: startup
+    // reconciliation sees the record and reverts any policy delta that landed.
     await options.store.write(record);
+    try {
+      if (addedToAllow.length > 0 || removedFromDeny.length > 0) {
+        await options.policy.apply({
+          addAllow: addedToAllow,
+          removeAllow: [],
+          addDeny: [],
+          removeDeny: removedFromDeny,
+        });
+      }
+    } catch (error) {
+      await options.store.write(null);
+      throw error;
+    }
     // Defence-in-depth: guarantee the expiry poller is live for a timed grant even
     // when reconcile() was never called on this manager. Without this, a wiring path
     // that arms before reconcile() would leave the privileged window open until the
