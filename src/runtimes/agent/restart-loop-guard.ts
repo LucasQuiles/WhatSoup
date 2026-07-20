@@ -49,6 +49,17 @@ interface RestartLoopGuardState {
   boots: number[];
   /** epoch-ms of the most recent trip (surfaced in health; survives clean exits). */
   lastTripAt: number | null;
+  /**
+   * Monotonic lifetime counters — NEVER pruned, NEVER reset on clean exit.
+   * They make the guard readable by a DECISION it made rather than by silence:
+   * `bootsInWindow: 0` alone cannot distinguish "no boots" from "the window
+   * rolled past them", so a restart that landed can read as if it never
+   * happened. These prove a restart landed at all (`bootsTotal`) and that the
+   * breaker was actually consulted and decided (`checksPerformed`/`lastCheckAt`).
+   */
+  bootsTotal: number;
+  checksPerformed: number;
+  lastCheckAt: number | null;
 }
 
 export interface RestartLoopGuardTrip {
@@ -58,6 +69,13 @@ export interface RestartLoopGuardTrip {
 
 export interface RestartLoopGuardHealth extends RestartLoopGuardTrip {
   lastTripAt: number | null;
+  /** The window `bootsInWindow` was computed over — without it a flat 0 is ambiguous. */
+  windowMs: number;
+  /** Monotonic: every boot (clean or crash) — proves a restart landed even after it ages out. */
+  bootsTotal: number;
+  /** Monotonic: crash-recovery decisions the breaker actually made — "asked N, allowed all N". */
+  checksPerformed: number;
+  lastCheckAt: number | null;
 }
 
 /** Canonical state-file location inside an instance state root. */
@@ -66,7 +84,12 @@ export function restartLoopGuardPath(stateRoot: string): string {
 }
 
 function freshState(): RestartLoopGuardState {
-  return { v: 1, bootInProgress: false, boots: [], lastTripAt: null };
+  return { v: 1, bootInProgress: false, boots: [], lastTripAt: null, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null };
+}
+
+/** Coerce a persisted value to a non-negative monotonic counter (back-compat: absent → 0). */
+function counterField(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
 }
 
 /** Fail-open load: ANY problem (missing, corrupt, wrong shape, fs error) → null. */
@@ -81,6 +104,11 @@ function loadState(statePath: string): RestartLoopGuardState | null {
       bootInProgress: data.bootInProgress,
       boots: data.boots.filter((t): t is number => typeof t === 'number' && Number.isFinite(t)),
       lastTripAt: typeof data.lastTripAt === 'number' && Number.isFinite(data.lastTripAt) ? data.lastTripAt : null,
+      // Back-compat: v:1 files written before observability counters existed
+      // lack these fields — default them to 0/null rather than rejecting the state.
+      bootsTotal: counterField(data.bootsTotal),
+      checksPerformed: counterField(data.checksPerformed),
+      lastCheckAt: typeof data.lastCheckAt === 'number' && Number.isFinite(data.lastCheckAt) ? data.lastCheckAt : null,
     };
   } catch (err) {
     log.warn({ err, statePath }, 'restart-loop guard: state unreadable — failing open');
@@ -110,6 +138,9 @@ export function markBootInProgress(statePath: string, now = Date.now()): boolean
   const wasInterrupted = prior?.bootInProgress === true;
   const state = prior ?? freshState();
   state.bootInProgress = true;
+  // Monotonic: count EVERY boot (clean or crash) so a restart is provably
+  // visible in health even after it ages out of the window.
+  state.bootsTotal = counterField(state.bootsTotal) + 1;
   // Prune opportunistically so the file cannot grow unbounded across crashes.
   const cutoff = now - RESTART_LOOP_GUARD_DEFAULTS.windowMs;
   state.boots = state.boots.filter((t) => t >= cutoff);
@@ -149,6 +180,11 @@ export function checkAndRecordInterruptedBoot(options: {
   if (maxRestarts <= 0) return { tripped: false, bootsInWindow: 0 };
 
   const state = loadState(options.statePath) ?? freshState();
+  // Monotonic: this IS the breaker's decision point (reached only on a
+  // crash-interrupted boot with resumable work). Counting it turns health from
+  // "nothing bad happened" into "asked N times, allowed all but the trips".
+  state.checksPerformed = counterField(state.checksPerformed) + 1;
+  state.lastCheckAt = now;
   const cutoff = now - Math.max(1, windowMs);
   state.boots = state.boots.filter((t) => t >= cutoff);
   state.boots.push(now);
@@ -179,12 +215,18 @@ export function readRestartLoopGuardHealth(
   now: number = Date.now(),
 ): RestartLoopGuardHealth {
   const state = loadState(statePath);
-  if (state === null) return { bootsInWindow: 0, tripped: false, lastTripAt: null };
+  if (state === null) {
+    return { bootsInWindow: 0, tripped: false, lastTripAt: null, windowMs, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null };
+  }
   const cutoff = now - Math.max(1, windowMs);
   const bootsInWindow = state.boots.filter((t) => t >= cutoff).length;
   return {
     bootsInWindow,
     tripped: bootsInWindow >= RESTART_LOOP_GUARD_DEFAULTS.maxRestarts,
     lastTripAt: state.lastTripAt,
+    windowMs,
+    bootsTotal: counterField(state.bootsTotal),
+    checksPerformed: counterField(state.checksPerformed),
+    lastCheckAt: typeof state.lastCheckAt === 'number' && Number.isFinite(state.lastCheckAt) ? state.lastCheckAt : null,
   };
 }
