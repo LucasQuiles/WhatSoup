@@ -2760,3 +2760,22 @@ details[open] > .soup-accordion__summary .soup-accordion__chev {
     transform: translateX(var(--hc-tx));
   }
 }
+
+/* ═══ Card — panel container primitive (DD-38 absorb). The primitive owns the
+     recipe verbatim so the card contract is enforceable in one place
+     (card.md:60 card-via-primitive); the legacy `.c-card` composite recipe was
+     deleted in the same change — zero visual change (declarations verbatim). ═══ */
+.soup-card {
+  background: var(--surface-raised);
+  border: var(--bw) solid var(--border-hairline);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-raised);
+}
+
+/* keyboard-focusable cards (e.g. interactive Card consumers) — ISM-06,
+   moved verbatim from the legacy composites focus band. */
+.soup-card[tabindex]:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: var(--bw-accent);
+  transition: none;
+}

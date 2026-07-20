@@ -1,12 +1,12 @@
 /**
  * Card.tsx — the one card-surface primitive (card.md; DD-38).
  *
- * Absorbs the raw `.c-card` recipe so the card contract is enforceable in one place
+ * Absorbed the raw `.c-card` recipe (DD-38 closeout: now `.soup-card` in primitives.css) so the card contract is enforceable in one place
  * (card-via-primitive). Visual target: showcase §18 (Card primitive family).
  *
  * Variants (mirrors §18):
  *   - base        — neutral panel container (the default; the 13 c-card consumers' shape).
- *                   Renders the existing `.c-card` recipe verbatim → zero visual change for
+ *                   Renders the absorbed recipe verbatim (`.soup-card`) → zero visual change for
  *                   migrated consumers. Optional header/footer slots.
  *   - interactive — renders a real <button> (interactive-card-is-button law, never a click
  *                   <div>): the shared `c-hover` lift + the ONE focus recipe (2px --focus-ring,
@@ -22,7 +22,7 @@
  * Note (DD-38, deferred): the §18 "lit-from-above" inset highlight is a showcase flourish with
  * no production token (dark `--shadow-raised` is `none`). Adding it touches tokens.semantic.css
  * (theme-parity + token-spec-drift + burndown) and is held for a separately-gated token step so
- * the base variant stays byte-faithful to the current `.c-card`.
+ * the base variant stays byte-faithful to the absorbed recipe.
  */
 import { createElement } from 'react';
 import type { ReactNode, HTMLAttributes } from 'react';
@@ -39,7 +39,7 @@ export interface CardProps extends HTMLAttributes<HTMLElement> {
   variant?: CardVariant;
   /**
    * Element override for the non-interactive families ('base' | 'kpi' | 'status-edge').
-   * 'section' renders a semantic <section> (unblocks the <section class="c-card"> consumers).
+   * 'section' renders a semantic <section> (the landmark-card consumers).
    * 'interactive'/'selectable' always render a <button> regardless (interactive-card-is-button);
    * an href additionally forces an <a> — neither path is reachable via 'section'. Default 'div'.
    */
@@ -95,9 +95,10 @@ export function Card({
   const tag: 'div' | 'button' | 'a' | 'section' = href ? 'a' : isInteractive || as === 'button' ? 'button' : as;
   const isButtonTag = tag === 'button';
 
-  // Token-only utility composition. `c-card` carries bg/border/radius/shadow verbatim.
+  // Token-only utility composition. `soup-card` (primitives.css) carries
+  // bg/border/radius/shadow verbatim — the absorbed DD-38 recipe.
   const composedClass = [
-    'c-card',
+    'soup-card',
     variant === 'kpi' && 'flex flex-col',
     isInteractive &&
       'c-hover cursor-pointer select-none text-left w-full focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--focus-ring)]',
