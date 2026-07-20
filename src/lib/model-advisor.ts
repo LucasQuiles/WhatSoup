@@ -174,6 +174,56 @@ export async function fetchLiveModelIds(): Promise<string[]> {
   return (await fetchLiveModelIdsWithStatus()).ids;
 }
 
+/** A vendor Models-API failure classified by HTTP CONCEPT, not render vocabulary
+ *  — 'unauthorized' (the key is not accepted), 'timeout' (no answer in time), or
+ *  'lookup-failed' (the server could not answer: 5xx / 429 / network). */
+export type ModelFetchFailureCategory = 'unauthorized' | 'timeout' | 'lookup-failed';
+
+/**
+ * Classify a {@link LiveModelFetchFailure}. This is the SINGLE status→category
+ * mapping any vendor-facing caller shares, so a 403 can never be labeled a
+ * 'timeout' by one path and 'unauthorized' by another (Q 2b: extract the
+ * classifier, don't reimplement it per call site). Render-reason translation
+ * stays in the caller (the catalogue resolver), also in one place.
+ */
+export function classifyModelFetchFailure(failure: { status?: number; reason: string }): ModelFetchFailureCategory {
+  if (failure.status === 401 || failure.status === 403) return 'unauthorized';
+  // AbortSignal.timeout rejects with a TimeoutError/AbortError and no HTTP
+  // status; fetchModelIds surfaces its (sanitized) message as `reason`.
+  if (failure.status === undefined && /timeout|abort/i.test(failure.reason)) return 'timeout';
+  // 5xx, 429, or any other non-auth failure: the server could not answer.
+  return 'lookup-failed';
+}
+
+/** Anthropic-only live model listing, classified. */
+export type AnthropicModelsResult =
+  | { status: 'ok'; ids: string[] }
+  | { status: 'no-key' }
+  | { status: 'failed'; category: ModelFetchFailureCategory };
+
+/**
+ * Fetch the anthropic org's live model catalogue for the `/config model`
+ * resolver (claude-cli harness). Reuses the internal `fetchModelIds` + the
+ * shared classifier — deliberately NOT `fetchLiveModelIdsWithStatus`, which
+ * flattens all vendors and cannot tag an id's vendor: rendering an OpenAI id
+ * under an `anthropic /v1/models` provenance label would make the source line
+ * lie (Q 2b). The returned set is the API KEY's ORG catalogue, not "what the
+ * harness can run" — the caller labels it as such.
+ */
+export async function fetchAnthropicModelIdsWithStatus(): Promise<AnthropicModelsResult> {
+  const anthropicKey = resolveApiKey({ envVar: 'ANTHROPIC_API_KEY' });
+  if (!anthropicKey) return { status: 'no-key' };
+  const result = await fetchModelIds(
+    'https://api.anthropic.com/v1/models?limit=100',
+    { 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01' },
+    'anthropic',
+  );
+  if (result.failure) {
+    return { status: 'failed', category: classifyModelFetchFailure(result.failure) };
+  }
+  return { status: 'ok', ids: result.ids };
+}
+
 // ---------------------------------------------------------------------------
 // Live-ID cache + symbolic model resolution
 //
