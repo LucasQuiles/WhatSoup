@@ -9,7 +9,7 @@
  * names from outside this module.
  */
 import { type FC } from 'react';
-import { resolveStatus, resolveMode } from '../../lib/status-map';
+import { resolveStatus, resolveMode, STATUS_MAP } from '../../lib/status-map';
 import type { Status, Mode } from '../../lib/status-map';
 
 // ---------------------------------------------------------------------------
@@ -31,6 +31,16 @@ export interface StatusCellProps {
    * 'status' — always show the status label.
    */
   labelStyle?: 'name' | 'status';
+  /**
+   * True when the shown status is CARRIED FORWARD from an older live
+   * observation (LineInstance.stale, #1762 seam) rather than freshly
+   * proven. A green/ok shape is demoted to the warn diamond (never green
+   * without a fresh observation — D-3/F-UX-4) and the shape's aria-label
+   * is qualified; the carried status label text stays visible (#1762
+   * rem-1: degrade confidence, never hide). Non-ok shapes are unchanged —
+   * a carried alarm stays an alarm (demoting crit would hide severity).
+   */
+  carried?: boolean;
 }
 
 export const StatusCell: FC<StatusCellProps> = ({
@@ -38,14 +48,19 @@ export const StatusCell: FC<StatusCellProps> = ({
   name,
   live = false,
   labelStyle,
+  carried = false,
 }) => {
   const entry = resolveStatus(status);
 
   // The map is the single rendering driver (badge.md "one canonical map"):
   // classes and tokens are defined together in STATUS_MAP, not re-derived here.
-  const shapeClass = entry.shapeClass;
-  const liveClass = (entry.shape === 'disc' && live) ? ' soup-shape--live' : '';
-  const labelInkClass = entry.labelClass;
+  // Carried demotion: only the ok/green entry demotes (to the map's own
+  // warn-diamond pairing, ink included) — every other shape renders as mapped.
+  const demoteOk = carried && entry === STATUS_MAP.online;
+  const shapeClass = demoteOk ? STATUS_MAP.unknown.shapeClass : entry.shapeClass;
+  const liveClass = (entry.shape === 'disc' && live && !carried) ? ' soup-shape--live' : '';
+  const labelInkClass = demoteOk ? STATUS_MAP.unknown.labelClass : entry.labelClass;
+  const shapeAriaLabel = demoteOk ? `${entry.label}, carried forward` : entry.label;
 
   // When a name is provided and labelStyle is not forced to 'status',
   // render the name as the prominent label and put the status label on the shape.
@@ -55,7 +70,7 @@ export const StatusCell: FC<StatusCellProps> = ({
     <span className="soup-status-cell">
       <span
         className={shapeClass + liveClass}
-        aria-label={entry.label}
+        aria-label={shapeAriaLabel}
         role="img"
       />
       {showName ? (

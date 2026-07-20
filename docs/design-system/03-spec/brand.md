@@ -175,5 +175,7 @@ the identity-showcase Candidate A mark plus 16px legibility, not by the audit al
 `console/index.html` owns document-shell brand/chrome hooks: the favicon link, PWA manifest link
 when present, and browser `theme-color`. `theme-color` initializes to the dark `--surface-base`
 semantic surface and runtime theme changes must sync it from computed `--surface-base`; it must not
-define an independent browser-chrome color scale. The document `<title>` remains a C4/P4 visible-copy
-decision until that rename packet lands.
+define an independent browser-chrome color scale. The document `<title>` is **`SOUP Console`** —
+landed 2026-07-19 with the C4 straggler packet (peripheral-audit P1; the vocabulary table in §2
+governs: SOUP for the console UI, WhatSoup for the protected boundary), pinned exactly by
+`tests/console/peripheral-brand-regression.test.ts` and `design-regression.sh` check 8.
