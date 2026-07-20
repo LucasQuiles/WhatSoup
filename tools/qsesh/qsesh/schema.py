@@ -16,7 +16,7 @@ APPLICATION_ID = 0x51534553
 CURRENT_SCHEMA_VERSION = 2
 BUSY_TIMEOUT_MS = 5_000
 V1_SCHEMA_SHA256 = "0bdb585c87f3020325985ac99a89101fc68aeb048a7af8607692346e5d6ee48c"
-SCHEMA_SHA256 = "93d55a85b5c8620d5a8ee3e480746624984b98008abcc1940b5b344a1bf88bcf"
+SCHEMA_SHA256 = "63906fa769c894ae62a824ac1414deb80966db27853dbb0320ca7470979d1295"
 _MIGRATION_2_NAME = "0002-session-size-metrics"
 
 _QID_CHECK = (
@@ -197,7 +197,7 @@ _V2_ADDITIONS = (
         value INTEGER NOT NULL CHECK(value>=0),
         metrics_version TEXT NOT NULL CHECK(length(metrics_version)>0),
         PRIMARY KEY(qid,side,dimension)
-    )""",
+    ) STRICT""",
     """CREATE VIEW session_content_reduction AS
     WITH metric_keys AS (
         SELECT qid, metrics_version, dimension

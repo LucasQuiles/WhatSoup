@@ -170,6 +170,17 @@ def size_metrics(
         or gzip_bytes < 0
     ):
         raise _fail("metrics-raw-source")
+    # gzip_bytes is caller-supplied from an archive publication receipt (CQ-11):
+    # the metrics layer cannot derive it and must not recompress. It CAN reject a
+    # value that is physically impossible for the raw payload beside it — a real
+    # gzip stream never exceeds its input by more than framing plus a bounded
+    # per-block stored overhead. Anything past that is a bad receipt (the goldens'
+    # placeholder 128 against a 0-byte payload was exactly this) and fails closed
+    # rather than being written as truth. Upper bound only: a legitimately small
+    # compressed size (including 0 for empty input) is never floored.
+    gzip_ceiling = len(raw_source_bytes) + (len(raw_source_bytes) >> 10) + 64
+    if gzip_bytes > gzip_ceiling:
+        raise _fail("metrics-gzip-implausible")
 
     content_by_kind = {kind.value: _zero_counts() for kind in EventKind}
     content_original = _zero_counts()

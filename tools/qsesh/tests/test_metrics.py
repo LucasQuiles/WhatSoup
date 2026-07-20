@@ -480,3 +480,24 @@ def test_size_metrics_records_the_unicode_version_it_counted_under() -> None:
 
     result = size_metrics((), (), b"", 0)
     assert result["unicode_version"] == unicodedata.unidata_version
+
+
+# --- v2: gzip_bytes must be physically plausible against the raw bytes ---
+
+
+def test_size_metrics_rejects_gzip_larger_than_raw_plus_overhead() -> None:
+    """gzip_bytes is caller-supplied (CQ-11): the metrics layer cannot derive it
+    from the archive, but it CAN reject a value that is physically impossible for
+    the raw payload beside it. A compressed size may exceed the raw size only by
+    a small framing overhead; anything past that is a bad receipt and must fail
+    closed rather than be enshrined (the goldens' placeholder 128 vs 0-byte raw
+    was exactly this)."""
+    with pytest.raises(QseshError) as excinfo:
+        size_metrics((), (), b"", 128)
+    assert excinfo.value.code == "QS-E-DISTILL"
+
+
+def test_size_metrics_accepts_gzip_within_overhead_of_raw() -> None:
+    raw = b"x" * 1000
+    result = size_metrics((), (), raw, 64)  # 64 <= 1000 + overhead
+    assert result["raw_source"]["gzip_bytes"] == 64

@@ -203,7 +203,7 @@ def test_fresh_schema_has_exact_objects_columns_versions_and_checksum(
         assert APPLICATION_ID == 0x51534553
         assert (
             SCHEMA_SHA256
-            == "93d55a85b5c8620d5a8ee3e480746624984b98008abcc1940b5b344a1bf88bcf"
+            == "63906fa769c894ae62a824ac1414deb80966db27853dbb0320ca7470979d1295"
         )
         assert (
             connection.execute("PRAGMA application_id").fetchone()[0] == APPLICATION_ID
@@ -1076,3 +1076,17 @@ def test_schema_module_contains_no_source_or_episodic_paths_or_dynamic_identifie
     assert "episodic" not in source
     assert "qsesh.sources" not in source
     assert "SELECT name FROM" not in source
+
+
+def test_session_size_metrics_is_strict_rejecting_text_in_value(tmp_path) -> None:
+    """value is INTEGER CHECK(value>=0); a non-STRICT table stores 'abc' as text
+    and SUM() then returns 0.0, silently corrupting corpus totals. Every sibling
+    table in this schema is STRICT; this one must be too."""
+    connection = open_database(tmp_path / "qsesh.db")
+    _seed_session(connection)
+    with pytest.raises(sqlite3.IntegrityError):
+        connection.execute(
+            "INSERT INTO session_size_metrics(qid,side,dimension,value,metrics_version)"
+            " VALUES(?,?,?,?,?)",
+            ("qs-abcdefghij", "content_original", "char", "abc", "qsesh-metrics-v2"),
+        )
