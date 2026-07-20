@@ -92,6 +92,8 @@ const {
     toolUpdateMode: 'full' as const,
     toolUpdateRedirectJid: null as string | null,
     textAggregateDelayMs: 2_000,
+    stateRoot: '/tmp/whatsoup-test-state-edge',
+    restartLoopGuard: { enabled: true, maxRestarts: 3, windowMs: 300_000 },
     startupNotifications: true,
     proactiveResumeOnStartup: true,
     mediaDir: '/tmp/whatsoup-test-media/tmp',

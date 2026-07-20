@@ -25,7 +25,7 @@ credentials — enter the fleet token on the lock screen to start a session:
 
 The console has four main pages accessible from the top navigation bar.
 
-### Soup Kitchen (Fleet Overview)
+### Fleet
 
 The landing page. Shows fleet-wide KPIs, a connection table for all instances, and a live activity feed.
 
@@ -126,7 +126,7 @@ The CSV export button (top-right of the range selector) downloads Message Volume
 
 Empty, loading, and error states each render an `EmptyState` panel: a loading panel while the request is in flight, an error panel with a Retry action when the request fails, and a "No metrics data" panel when the instance has not yet processed any messages.
 
-Data is fetched from `GET /api/lines/:name/metrics?range=24h|7d|30d` (per-line) with the fleet-wide aggregate available at `GET /api/metrics?range=24h|7d|30d` for the Soup Kitchen view.
+Data is fetched from `GET /api/lines/:name/metrics?range=24h|7d|30d` (per-line) with the fleet-wide aggregate available at `GET /api/metrics?range=24h|7d|30d` for the Fleet view.
 
 **Scheduled** — Queue of scheduled messages for this instance. The header bar shows the total count and a "New Scheduled Message" button that opens the composer modal. Each row exposes Cancel, Edit, and Duplicate actions; pending and processing messages sort to the top by send time, with sent / failed / cancelled rows below in reverse chronological order. The list polls every 30 s. Empty, loading, and error states each render an `EmptyState` panel. This tab is only shown for instances with a global MCP socket (not sandbox-per-chat). Backed by `GET/POST/DELETE /api/lines/:name/scheduled` (list, create, cancel-all) and `GET/PUT/DELETE /api/lines/:name/scheduled/:id` (fetch, update, cancel one) — see the Fleet API table in the README.
 
