@@ -50,6 +50,12 @@ export interface CatalogueSnapshotCache {
     n: number,
     opts?: { quotedMsgId?: string }
   ): CatalogueEntry | null;
+
+  /**
+   * Test helper: returns the current size of the byMsgId map.
+   * Used to verify that expired entries are pruned and growth is bounded.
+   */
+  getMsgIdMapSize(): number;
 }
 
 const TTL_MS = 15 * 60_000; // 15 minutes
@@ -76,6 +82,14 @@ export function createCatalogueSnapshotCache(): CatalogueSnapshotCache {
 
       // Store by msgId (for quoted-reply resolution)
       byMsgId.set(outboundMsgId, snapshot);
+
+      // Prune expired entries from byMsgId to prevent unbounded growth
+      // Walk through all entries and delete those older than TTL
+      for (const [msgId, snap] of byMsgId) {
+        if (isExpired(snap, now)) {
+          byMsgId.delete(msgId);
+        }
+      }
 
       // Store as latest for this chat (replaces any prior snapshot)
       latestByChat.set(chatJid, snapshot);
@@ -113,6 +127,10 @@ export function createCatalogueSnapshotCache(): CatalogueSnapshotCache {
       }
 
       return entry;
+    },
+
+    getMsgIdMapSize(): number {
+      return byMsgId.size;
     },
   };
 }

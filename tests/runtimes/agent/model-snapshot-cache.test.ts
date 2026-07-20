@@ -167,4 +167,38 @@ describe('CatalogueSnapshotCache', () => {
     });
     expect(c.resolveCataloguePick('chat-b@x', 2)).toBeNull();
   });
+
+  it('prunes expired entries from byMsgId to prevent unbounded growth', () => {
+    vi.useFakeTimers();
+    const base = new Date('2026-07-20T00:00:00.000Z').getTime();
+    vi.setSystemTime(base);
+
+    const c = createCatalogueSnapshotCache();
+
+    // Put an old snapshot
+    c.putCatalogueSnapshot('d@x', 'm-old', [
+      { providerId: 'kimi', id: 'kimi-k3' },
+    ]);
+    expect((c as any).getMsgIdMapSize()).toBe(1);
+
+    // Advance time past TTL (15 min + 1 sec)
+    vi.setSystemTime(base + 15 * 60_000 + 1_000);
+
+    // Put a new snapshot; this should trigger pruning of expired entries
+    c.putCatalogueSnapshot('d@x', 'm-new', [
+      { providerId: 'claude-cli', id: 'claude-opus-4-8' },
+    ]);
+
+    // Verify old snapshot by msgId returns null (expired)
+    expect(c.resolveCataloguePick('d@x', 1, { quotedMsgId: 'm-old' })).toBeNull();
+
+    // Verify the byMsgId map size is only 1 (only the new snapshot, old one pruned)
+    expect((c as any).getMsgIdMapSize()).toBe(1);
+
+    // Verify new snapshot resolves correctly
+    expect(c.resolveCataloguePick('d@x', 1, { quotedMsgId: 'm-new' })).toEqual({
+      providerId: 'claude-cli',
+      id: 'claude-opus-4-8',
+    });
+  });
 });
