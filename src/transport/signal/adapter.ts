@@ -178,7 +178,7 @@ export class SignalAdapter
     delete: new Set(),
   };
 
-  private readonly channelId: ChannelId;
+  public readonly channelId: ChannelId;
   private readonly self: ParticipantRef;
   private readonly port: SignalPort;
   private readonly phoneNumber: string;
