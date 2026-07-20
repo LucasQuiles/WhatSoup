@@ -70,6 +70,48 @@ describe('insecure-tempfile guard', () => {
     }
   });
 
+  it('does NOT descend into .claude/worktrees (harness isolation worktrees), yet STILL scans other .claude content', () => {
+    // Regression (2026-07-19): a parked `.claude/worktrees/<wt>` isolation worktree's
+    // red-fixture corpus (14 hits) blocked an unrelated push from THIS checkout. The
+    // fix excludes `.claude/worktrees` by relative path — but must NOT over-skip all
+    // of `.claude`, which holds real scannable content (hooks, guard scripts).
+    const scratch = mkdtempSync(join(tmpdir(), 'tempfile-guard-claude-wt-'));
+    try {
+      // A parked isolation worktree's red fixture, nested exactly as observed live.
+      const parkedRed = join(scratch, '.claude', 'worktrees', 'parked', 'tests', 'fixtures', 'insecure-tempfile', 'red');
+      mkdirSync(parkedRed, { recursive: true });
+      writeFileSync(join(parkedRed, 'leak.sh'), 'echo hi > /tmp/leak.log\n');
+      // Control 1: the same pattern OUTSIDE .claude/worktrees is still flagged.
+      writeFileSync(join(scratch, 'flagged.sh'), 'echo hi > /tmp/leak.log\n');
+      // Control 2: other .claude/ content (a hook) is NOT over-skipped — the
+      // exclusion is scoped to .claude/worktrees, not the whole .claude tree.
+      mkdirSync(join(scratch, '.claude', 'hooks'), { recursive: true });
+      writeFileSync(join(scratch, '.claude', 'hooks', 'hook.sh'), 'echo hi > /tmp/leak.log\n');
+      const findings = scanForInsecureTempfile(scratch);
+      expect(findings.map((f) => f.file).sort()).toEqual(['.claude/hooks/hook.sh', 'flagged.sh']);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('root-anchors the .claude/worktrees exclusion — a nested .claude/worktrees (not at scan root) is still scanned', () => {
+    // Q's check (2026-07-20): the exclusion must anchor at the scan ROOT, not match
+    // any path that merely CONTAINS `.claude/worktrees` deeper in a real source tree.
+    // The walk exact-compares path.relative(root, abs) against SKIP_RELPATHS, so only
+    // the root-level container is skipped; a `.claude/worktrees` nested under real
+    // source dirs must still be scanned (its relative path is not `.claude/worktrees`).
+    const scratch = mkdtempSync(join(tmpdir(), 'tempfile-guard-anchor-'));
+    try {
+      const nested = join(scratch, 'src', 'vendor', '.claude', 'worktrees', 'deep');
+      mkdirSync(nested, { recursive: true });
+      writeFileSync(join(nested, 'leak.sh'), 'echo hi > /tmp/leak.log\n');
+      const findings = scanForInsecureTempfile(scratch);
+      expect(findings.map((f) => f.file)).toEqual(['src/vendor/.claude/worktrees/deep/leak.sh']);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
   it('excludes guard fixture corpus on full-tree scan (gate-green reachable)', () => {
     // Scanning from the repo root must NOT include the guard's own intentional-
     // violation fixtures — those would make the blocking gate permanently un-greenable.

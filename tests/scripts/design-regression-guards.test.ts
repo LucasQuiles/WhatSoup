@@ -86,7 +86,7 @@ function makeDesignRegressionFixture(componentCss: string) {
   mkdirSync(join(srcDir, 'pages'), { recursive: true });
 
   copyFileSync(SCRIPT, join(scriptsDir, 'design-regression.sh'));
-  writeFileSync(join(consoleDir, 'index.html'), '<title>WhatSoup Console</title>\n');
+  writeFileSync(join(consoleDir, 'index.html'), '<title>SOUP Console</title>\n');
   writeFileSync(join(libDir, 'preferences.ts'), "export const key = 'whatsoup:preferences';\n");
   writeFileSync(join(srcDir, 'mock-data.ts'), "export const socket = '/run/whatsoup/agent.sock';\n");
   writeFileSync(join(libDir, 'agent-cwd.ts'), "export const path = 'whatsoup/instances/demo';\n");

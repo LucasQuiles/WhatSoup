@@ -51,68 +51,68 @@ server binds to `127.0.0.1:9099` by default and is gated by the root fleet token
 
 | Identifier | Method + Path | Source | Stability | Status | Notes |
 |---|---|---|---|---|---|
-| `http:fleet.providers.list` | `GET /api/providers` | `src/fleet/index.ts:327` | beta | active | Provider catalog (id, displayName, type, needsApiKey, providerConfig fields) derived from `PROVIDER_IDS` |
-| `http:fleet.credentials.set` | `PUT /api/credentials/:service` | `src/fleet/index.ts:328`, `src/fleet/routes/credentials.ts` | beta | active | Set or rotate a provider key (`{"value": string}`, single-line, ≤4096 bytes). Closed allowlist; never reads back. Returns `{ ok, service, backend, envShadowed }`. |
-| `http:fleet.credentials.delete` | `DELETE /api/credentials/:service` | `src/fleet/index.ts:329`, `src/fleet/routes/credentials.ts` | beta | active | Remove a stored provider key. Returns `{ ok, service, envShadowed, inUse }`; 404 when no key was stored. |
-| `http:fleet.credentials.verify` | `POST /api/credentials/:service/verify` | `src/fleet/index.ts:330`, `src/fleet/routes/credentials.ts` | beta | active | One live list-models probe using the stored key (never carried in the request). 10s per-service cooldown (429); returns `{ ok, service, status, envShadowed }`. |
-| `http:fleet.credentials.read-rejected` | `GET /api/credentials/:service` | `src/fleet/index.ts:331`, `src/fleet/routes/credentials.ts` | beta | active | Always `405`: credentials are write-only and never read back. |
-| `http:fleet.lines.list` | `GET /api/lines` | `src/fleet/index.ts:332` | stable | active | List instances + health |
-| `http:fleet.lines.create` | `POST /api/lines` | `src/fleet/index.ts:333` | stable | active | Create instance |
-| `http:fleet.lines.get` | `GET /api/lines/:name` | `src/fleet/index.ts:337` | stable | active | Instance detail + config |
-| `http:fleet.lines.delete` | `DELETE /api/lines/:name` | `src/fleet/index.ts:336` | stable | active | Stop + cleanup |
-| `http:fleet.lines.exists` | `GET /api/lines/:name/exists` | `src/fleet/index.ts:334` | stable | active | Registration probe |
-| `http:fleet.lines.provider-status` | `GET /api/lines/:name/provider-status` | `src/fleet/index.ts:335` | beta | active | Per-instance primary/fallback provider, key presence (boolean), resolved primary model, custom-endpoint visibility (`endpointHost` — URL host only — and `apiKeyService` on BOTH `primary` and `fallback`, attributed to the role whose provider actually consumes `providerConfig`: `openai-api`/`anthropic-api` either role, `opencode-cli` as primary only; for the API providers `apiKeyService` is the explicit `providerConfig` override (`null` = no override), for `opencode-cli` it is the model-prefix-derived service `keyPresent` checks; `null` when not consumed by that role's provider or unparseable on disk; readable by any fleet-token or `api`-audience ticket holder — the key-service name identifies the OS-keyring entry, an accepted observability tradeoff), fallback reason/model/reset/probe state, fallback window/counter state, effective provider, active fallback-chain entry, chain eligibility, and line reachability |
-| `http:fleet.lines.config-update` | `PATCH /api/lines/:name/config` | `src/fleet/index.ts:351` | stable | active | Update `config.json` |
-| `http:fleet.lines.auth-sse` | `GET /api/lines/:name/auth` | `src/fleet/index.ts:352` | stable | active | QR-code SSE stream |
-| `http:fleet.lines.restart` | `POST /api/lines/:name/restart` | `src/fleet/index.ts:349` | stable | active | Restart unit |
-| `http:fleet.lines.stop` | `POST /api/lines/:name/stop` | `src/fleet/index.ts:350` | stable | active | Stop unit |
-| `http:fleet.lines.send` | `POST /api/lines/:name/send` | `src/fleet/index.ts:345` | stable | active | Send message; accepts `chatJid` or alias `to` + optional `profile` |
-| `http:fleet.lines.access-update` | `POST /api/lines/:name/access` | `src/fleet/index.ts:347` | stable | active | Update access control |
-| `http:fleet.lines.access-view` | `GET /api/lines/:name/access` | `src/fleet/index.ts:343` | stable | active | View access list |
-| `http:fleet.lines.mark-read` | `POST /api/lines/:name/mark-read` | `src/fleet/index.ts:348` | stable | active | Zero unread + chatModify |
-| `http:fleet.lines.contacts-save` | `POST /api/lines/:name/contacts` | `src/fleet/index.ts:346` | stable | active | Save contact |
-| `http:fleet.lines.contacts-search` | `GET /api/lines/:name/contacts/search` | `src/fleet/index.ts:374` | stable | active | Search saved contacts |
-| `http:fleet.lines.chats` | `GET /api/lines/:name/chats` | `src/fleet/index.ts:338` | stable | active | List chats |
-| `http:fleet.lines.messages` | `GET /api/lines/:name/messages` | `src/fleet/index.ts:339` | stable | active | Fetch messages |
-| `http:fleet.lines.messages-search` | `GET /api/lines/:name/messages/search` | `src/fleet/index.ts:340` | stable | active | Full-text search |
-| `http:fleet.lines.metrics` | `GET /api/lines/:name/metrics` | `src/fleet/index.ts:342` | stable | active | 24h / 7d / 30d |
-| `http:fleet.lines.logs` | `GET /api/lines/:name/logs` | `src/fleet/index.ts:344` | stable | active | Instance logs |
-| `http:fleet.lines.scheduled.list` | `GET /api/lines/:name/scheduled` | `src/fleet/index.ts:353` | stable | active | List scheduled; filter `?status=` |
-| `http:fleet.lines.scheduled.create` | `POST /api/lines/:name/scheduled` | `src/fleet/index.ts:354` | stable | active | Schedule a new message |
-| `http:fleet.lines.scheduled.cancel-query` | `DELETE /api/lines/:name/scheduled` | `src/fleet/index.ts:355` | stable | active | Cancel by `?id=` |
-| `http:fleet.lines.scheduled.get` | `GET /api/lines/:name/scheduled/:id` | `src/fleet/index.ts:356` | stable | active | Single scheduled |
-| `http:fleet.lines.scheduled.update` | `PUT /api/lines/:name/scheduled/:id` | `src/fleet/index.ts:357` | stable | active | Update scheduled |
-| `http:fleet.lines.scheduled.cancel` | `DELETE /api/lines/:name/scheduled/:id` | `src/fleet/index.ts:358` | stable | active | Cancel scheduled |
-| `http:fleet.lines.groups.list` | `GET /api/lines/:name/groups` | `src/fleet/index.ts:359` | stable | active | List groups |
-| `http:fleet.lines.groups.create` | `POST /api/lines/:name/groups` | `src/fleet/index.ts:360` | stable | active | Create group |
-| `http:fleet.lines.groups.detail` | `GET /api/lines/:name/groups/:jid` | `src/fleet/index.ts:372` | stable | active | Group detail |
-| `http:fleet.lines.groups.leave` | `DELETE /api/lines/:name/groups/:jid` | `src/fleet/index.ts:373` | stable | active | Leave group |
-| `http:fleet.lines.groups.subject` | `PUT /api/lines/:name/groups/:jid/subject` | `src/fleet/index.ts:361` | stable | active | Update subject |
-| `http:fleet.lines.groups.description` | `PUT /api/lines/:name/groups/:jid/description` | `src/fleet/index.ts:362` | stable | active | Update description |
-| `http:fleet.lines.groups.participants` | `POST /api/lines/:name/groups/:jid/participants` | `src/fleet/index.ts:363` | stable | active | Add/remove/promote/demote |
-| `http:fleet.lines.groups.settings` | `PUT /api/lines/:name/groups/:jid/settings` | `src/fleet/index.ts:364` | stable | active | Announce / locked |
-| `http:fleet.lines.groups.invite` | `GET /api/lines/:name/groups/:jid/invite` | `src/fleet/index.ts:365` | stable | active | Fetch invite code |
-| `http:fleet.lines.groups.invite-revoke` | `POST /api/lines/:name/groups/:jid/invite/revoke` | `src/fleet/index.ts:366` | stable | active | Revoke + rotate |
-| `http:fleet.lines.groups.ephemeral` | `PUT /api/lines/:name/groups/:jid/ephemeral` | `src/fleet/index.ts:367` | stable | active | Disappearing-message duration |
-| `http:fleet.lines.groups.member-add-mode` | `PUT /api/lines/:name/groups/:jid/member-add-mode` | `src/fleet/index.ts:368` | stable | active | Toggle who can add members |
-| `http:fleet.lines.groups.join-approval` | `PUT /api/lines/:name/groups/:jid/join-approval` | `src/fleet/index.ts:369` | stable | active | Toggle join-approval requirement |
-| `http:fleet.lines.groups.requests.list` | `GET /api/lines/:name/groups/:jid/requests` | `src/fleet/index.ts:370` | stable | active | List pending join requests |
-| `http:fleet.lines.groups.requests.update` | `POST /api/lines/:name/groups/:jid/requests` | `src/fleet/index.ts:371` | stable | active | Approve / reject |
-| `http:fleet.feed` | `GET /api/feed` | `src/fleet/index.ts:325` | stable | active | Activity feed across instances |
-| `http:fleet.typing` | `GET /api/typing` | `src/fleet/index.ts:324` | stable | active | Currently-typing indicators |
-| `http:fleet.directories.check` | `GET /api/directories/check?path=...` | `src/fleet/index.ts:326` | stable | active | Path writable probe |
-| `http:fleet.metrics` | `GET /api/metrics` | `src/fleet/index.ts:341` | stable | active | Fleet-wide metrics |
-| `http:fleet.version` | `GET /api/version` | `src/fleet/index.ts:375` | stable | active | Build version |
-| `http:fleet.update` | `POST /api/update` | `src/fleet/index.ts:376` | stable | active | Retired in-place update: performs no mutation in any mode; returns a typed `update-by-release-deploy-required` refusal over the SSE error channel. Update by deploying a new release; read availability via `GET /api/version`. |
-| `http:fleet.lid-mappings.list` | `GET /api/lid-mappings` | `src/fleet/index.ts:377` | stable | active | List cross-instance LID mappings |
-| `http:fleet.lid-mappings.sync` | `POST /api/lid-mappings/sync` | `src/fleet/index.ts:378` | stable | active | Sync mappings between instances |
-| `http:fleet.silences.list` | `GET /api/fleet/silences` | `src/fleet/index.ts:321` | beta | active | List active fleet-wide alert silences |
-| `http:fleet.silences.add` | `POST /api/fleet/silence` | `src/fleet/index.ts:322` | beta | active | Add a silence rule (instance, duration). Persisted under `~/.config/whatsoup/fleet-silences.json`. |
-| `http:fleet.silences.remove` | `DELETE /api/fleet/silence/:name` | `src/fleet/index.ts:323` | beta | active | Remove a named silence rule |
-| `http:fleet.auth-ticket.mint` | `POST /api/auth-ticket` | `src/fleet/index.ts:909`, `src/fleet/auth-ticket.ts` | stable | active | Mint short-lived API/SSE ticket (root Bearer, or console session cookie + same-origin proof). Loopback TCP source only (C2). |
-| `http:fleet.console-session.create` | `POST /api/console-session` | `src/fleet/index.ts:872` | beta | active | Console unlock: loopback source only (C2), validates the root token + same-origin proof, sets an HttpOnly `SameSite=Strict` session cookie (24h TTL; `Secure` when the unlock arrives over TLS); the browser never holds the root token |
-| `http:fleet.console-session.delete` | `DELETE /api/console-session` | `src/fleet/index.ts:896` | beta | active | Console lock/logout: revokes the presented session and clears the cookie |
-| `http:fleet.ws-ticket.mint` | `POST /api/ws-ticket` | `src/fleet/index.ts:936`, `src/fleet/ws-ticket.ts` | stable | active | Mint short-lived WebSocket ticket (root Bearer, or console session cookie + same-origin proof). Loopback TCP source only (C2). |
+| `http:fleet.providers.list` | `GET /api/providers` | `src/fleet/index.ts:335` | beta | active | Provider catalog (id, displayName, type, needsApiKey, providerConfig fields) derived from `PROVIDER_IDS` |
+| `http:fleet.credentials.set` | `PUT /api/credentials/:service` | `src/fleet/index.ts:336`, `src/fleet/routes/credentials.ts` | beta | active | Set or rotate a provider key (`{"value": string}`, single-line, ≤4096 bytes). Closed allowlist; never reads back. Returns `{ ok, service, backend, envShadowed }`. |
+| `http:fleet.credentials.delete` | `DELETE /api/credentials/:service` | `src/fleet/index.ts:337`, `src/fleet/routes/credentials.ts` | beta | active | Remove a stored provider key. Returns `{ ok, service, envShadowed, inUse }`; 404 when no key was stored. |
+| `http:fleet.credentials.verify` | `POST /api/credentials/:service/verify` | `src/fleet/index.ts:338`, `src/fleet/routes/credentials.ts` | beta | active | One live list-models probe using the stored key (never carried in the request). 10s per-service cooldown (429); returns `{ ok, service, status, envShadowed }`. |
+| `http:fleet.credentials.read-rejected` | `GET /api/credentials/:service` | `src/fleet/index.ts:339`, `src/fleet/routes/credentials.ts` | beta | active | Always `405`: credentials are write-only and never read back. |
+| `http:fleet.lines.list` | `GET /api/lines` | `src/fleet/index.ts:340` | stable | active | List instances + health |
+| `http:fleet.lines.create` | `POST /api/lines` | `src/fleet/index.ts:341` | stable | active | Create instance |
+| `http:fleet.lines.get` | `GET /api/lines/:name` | `src/fleet/index.ts:347` | stable | active | Instance detail + config |
+| `http:fleet.lines.delete` | `DELETE /api/lines/:name` | `src/fleet/index.ts:346` | stable | active | Stop + cleanup |
+| `http:fleet.lines.exists` | `GET /api/lines/:name/exists` | `src/fleet/index.ts:342` | stable | active | Registration probe |
+| `http:fleet.lines.provider-status` | `GET /api/lines/:name/provider-status` | `src/fleet/index.ts:343` | beta | active | Per-instance primary/fallback provider, key presence (boolean), resolved primary model, custom-endpoint visibility (`endpointHost` — URL host only — and `apiKeyService` on BOTH `primary` and `fallback`, attributed to the role whose provider actually consumes `providerConfig`: `openai-api`/`anthropic-api` either role, `opencode-cli` as primary only; for the API providers `apiKeyService` is the explicit `providerConfig` override (`null` = no override), for `opencode-cli` it is the model-prefix-derived service `keyPresent` checks; `null` when not consumed by that role's provider or unparseable on disk; readable by any fleet-token or `api`-audience ticket holder — the key-service name identifies the OS-keyring entry, an accepted observability tradeoff), fallback reason/model/reset/probe state, fallback window/counter state, effective provider, active fallback-chain entry, chain eligibility, and line reachability |
+| `http:fleet.lines.config-update` | `PATCH /api/lines/:name/config` | `src/fleet/index.ts:361` | stable | active | Update `config.json` |
+| `http:fleet.lines.auth-sse` | `GET /api/lines/:name/auth` | `src/fleet/index.ts:362` | stable | active | QR-code SSE stream |
+| `http:fleet.lines.restart` | `POST /api/lines/:name/restart` | `src/fleet/index.ts:359` | stable | active | Restart unit |
+| `http:fleet.lines.stop` | `POST /api/lines/:name/stop` | `src/fleet/index.ts:360` | stable | active | Stop unit |
+| `http:fleet.lines.send` | `POST /api/lines/:name/send` | `src/fleet/index.ts:355` | stable | active | Send message; accepts `chatJid` or alias `to` + optional `profile` |
+| `http:fleet.lines.access-update` | `POST /api/lines/:name/access` | `src/fleet/index.ts:357` | stable | active | Update access control |
+| `http:fleet.lines.access-view` | `GET /api/lines/:name/access` | `src/fleet/index.ts:353` | stable | active | View access list |
+| `http:fleet.lines.mark-read` | `POST /api/lines/:name/mark-read` | `src/fleet/index.ts:358` | stable | active | Zero unread + chatModify |
+| `http:fleet.lines.contacts-save` | `POST /api/lines/:name/contacts` | `src/fleet/index.ts:356` | stable | active | Save contact |
+| `http:fleet.lines.contacts-search` | `GET /api/lines/:name/contacts/search` | `src/fleet/index.ts:384` | stable | active | Search saved contacts |
+| `http:fleet.lines.chats` | `GET /api/lines/:name/chats` | `src/fleet/index.ts:348` | stable | active | List chats |
+| `http:fleet.lines.messages` | `GET /api/lines/:name/messages` | `src/fleet/index.ts:349` | stable | active | Fetch messages |
+| `http:fleet.lines.messages-search` | `GET /api/lines/:name/messages/search` | `src/fleet/index.ts:350` | stable | active | Full-text search |
+| `http:fleet.lines.metrics` | `GET /api/lines/:name/metrics` | `src/fleet/index.ts:352` | stable | active | 24h / 7d / 30d |
+| `http:fleet.lines.logs` | `GET /api/lines/:name/logs` | `src/fleet/index.ts:354` | stable | active | Instance logs |
+| `http:fleet.lines.scheduled.list` | `GET /api/lines/:name/scheduled` | `src/fleet/index.ts:363` | stable | active | List scheduled; filter `?status=` |
+| `http:fleet.lines.scheduled.create` | `POST /api/lines/:name/scheduled` | `src/fleet/index.ts:364` | stable | active | Schedule a new message |
+| `http:fleet.lines.scheduled.cancel-query` | `DELETE /api/lines/:name/scheduled` | `src/fleet/index.ts:365` | stable | active | Cancel by `?id=` |
+| `http:fleet.lines.scheduled.get` | `GET /api/lines/:name/scheduled/:id` | `src/fleet/index.ts:366` | stable | active | Single scheduled |
+| `http:fleet.lines.scheduled.update` | `PUT /api/lines/:name/scheduled/:id` | `src/fleet/index.ts:367` | stable | active | Update scheduled |
+| `http:fleet.lines.scheduled.cancel` | `DELETE /api/lines/:name/scheduled/:id` | `src/fleet/index.ts:368` | stable | active | Cancel scheduled |
+| `http:fleet.lines.groups.list` | `GET /api/lines/:name/groups` | `src/fleet/index.ts:369` | stable | active | List groups |
+| `http:fleet.lines.groups.create` | `POST /api/lines/:name/groups` | `src/fleet/index.ts:370` | stable | active | Create group |
+| `http:fleet.lines.groups.detail` | `GET /api/lines/:name/groups/:jid` | `src/fleet/index.ts:382` | stable | active | Group detail |
+| `http:fleet.lines.groups.leave` | `DELETE /api/lines/:name/groups/:jid` | `src/fleet/index.ts:383` | stable | active | Leave group |
+| `http:fleet.lines.groups.subject` | `PUT /api/lines/:name/groups/:jid/subject` | `src/fleet/index.ts:371` | stable | active | Update subject |
+| `http:fleet.lines.groups.description` | `PUT /api/lines/:name/groups/:jid/description` | `src/fleet/index.ts:372` | stable | active | Update description |
+| `http:fleet.lines.groups.participants` | `POST /api/lines/:name/groups/:jid/participants` | `src/fleet/index.ts:373` | stable | active | Add/remove/promote/demote |
+| `http:fleet.lines.groups.settings` | `PUT /api/lines/:name/groups/:jid/settings` | `src/fleet/index.ts:374` | stable | active | Announce / locked |
+| `http:fleet.lines.groups.invite` | `GET /api/lines/:name/groups/:jid/invite` | `src/fleet/index.ts:375` | stable | active | Fetch invite code |
+| `http:fleet.lines.groups.invite-revoke` | `POST /api/lines/:name/groups/:jid/invite/revoke` | `src/fleet/index.ts:376` | stable | active | Revoke + rotate |
+| `http:fleet.lines.groups.ephemeral` | `PUT /api/lines/:name/groups/:jid/ephemeral` | `src/fleet/index.ts:377` | stable | active | Disappearing-message duration |
+| `http:fleet.lines.groups.member-add-mode` | `PUT /api/lines/:name/groups/:jid/member-add-mode` | `src/fleet/index.ts:378` | stable | active | Toggle who can add members |
+| `http:fleet.lines.groups.join-approval` | `PUT /api/lines/:name/groups/:jid/join-approval` | `src/fleet/index.ts:379` | stable | active | Toggle join-approval requirement |
+| `http:fleet.lines.groups.requests.list` | `GET /api/lines/:name/groups/:jid/requests` | `src/fleet/index.ts:380` | stable | active | List pending join requests |
+| `http:fleet.lines.groups.requests.update` | `POST /api/lines/:name/groups/:jid/requests` | `src/fleet/index.ts:381` | stable | active | Approve / reject |
+| `http:fleet.feed` | `GET /api/feed` | `src/fleet/index.ts:333` | stable | active | Activity feed across instances |
+| `http:fleet.typing` | `GET /api/typing` | `src/fleet/index.ts:332` | stable | active | Currently-typing indicators |
+| `http:fleet.directories.check` | `GET /api/directories/check?path=...` | `src/fleet/index.ts:334` | stable | active | Path writable probe |
+| `http:fleet.metrics` | `GET /api/metrics` | `src/fleet/index.ts:351` | stable | active | Fleet-wide metrics |
+| `http:fleet.version` | `GET /api/version` | `src/fleet/index.ts:385` | stable | active | Build version |
+| `http:fleet.update` | `POST /api/update` | `src/fleet/index.ts:386` | stable | active | Retired in-place update: performs no mutation in any mode; returns a typed `update-by-release-deploy-required` refusal over the SSE error channel. Update by deploying a new release; read availability via `GET /api/version`. |
+| `http:fleet.lid-mappings.list` | `GET /api/lid-mappings` | `src/fleet/index.ts:387` | stable | active | List cross-instance LID mappings |
+| `http:fleet.lid-mappings.sync` | `POST /api/lid-mappings/sync` | `src/fleet/index.ts:388` | stable | active | Sync mappings between instances |
+| `http:fleet.silences.list` | `GET /api/fleet/silences` | `src/fleet/index.ts:329` | beta | active | List active fleet-wide alert silences |
+| `http:fleet.silences.add` | `POST /api/fleet/silence` | `src/fleet/index.ts:330` | beta | active | Add a silence rule (instance, duration). Persisted under `$XDG_CONFIG_HOME/whatsoup/fleet-silences.json`. |
+| `http:fleet.silences.remove` | `DELETE /api/fleet/silence/:name` | `src/fleet/index.ts:331` | beta | active | Remove a named silence rule |
+| `http:fleet.auth-ticket.mint` | `POST /api/auth-ticket` | `src/fleet/index.ts:919`, `src/fleet/auth-ticket.ts` | stable | active | Mint short-lived API/SSE ticket (root Bearer, or console session cookie + same-origin proof). Loopback TCP source only (C2). |
+| `http:fleet.console-session.create` | `POST /api/console-session` | `src/fleet/index.ts:882` | beta | active | Console unlock: loopback source only (C2), validates the root token + same-origin proof, sets an HttpOnly `SameSite=Strict` session cookie (24h TTL; `Secure` when the unlock arrives over TLS); the browser never holds the root token |
+| `http:fleet.console-session.delete` | `DELETE /api/console-session` | `src/fleet/index.ts:906` | beta | active | Console lock/logout: revokes the presented session and clears the cookie |
+| `http:fleet.ws-ticket.mint` | `POST /api/ws-ticket` | `src/fleet/index.ts:946`, `src/fleet/ws-ticket.ts` | stable | active | Mint short-lived WebSocket ticket (root Bearer, or console session cookie + same-origin proof). Loopback TCP source only (C2). |
 | `http:fleet.legacy-query-token` | `?token=<root>` on `/api/*` and `/ws/*` | [README §Legacy authentication](../README.md#legacy-authentication-deprecated) | stable | deprecated | Deprecation notice: [2026-05-12 public-surface baseline](releases/2026-05-12-public-surface-baseline.md#deprecations). Removal target: v2.0.0 after 2026-06-30. Use `/api/auth-ticket` or Bearer. Emits one-shot `http_legacy_token_path` / `ws_legacy_token_path` warning. |
 
 ### Health server (per-instance)

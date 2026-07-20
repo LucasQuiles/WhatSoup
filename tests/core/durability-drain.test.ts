@@ -65,10 +65,10 @@ describe('drainPendingOutbound()', () => {
     expect(getOutbound(db, opId)['status']).toBe('pending');
 
     const messenger = makeMessenger(async () => ({ waMessageId: 'WA_REPLAYED_1' }));
-    const count = await drainPendingOutbound(messenger, engine);
+    const { resent } = await drainPendingOutbound(messenger, engine);
 
     expect(messenger.sendMessage).toHaveBeenCalledWith('j1@s.whatsapp.net', 'hello world');
-    expect(count).toBe(1);
+    expect(resent).toBe(1);
     const row = getOutbound(db, opId);
     expect(row['status']).toBe('submitted');
     expect(row['wa_message_id']).toBe('WA_REPLAYED_1');
@@ -81,10 +81,10 @@ describe('drainPendingOutbound()', () => {
     });
 
     const messenger = makeMessenger(async () => ({ waMessageId: 'SHOULD_NOT_BE_CALLED' }));
-    const count = await drainPendingOutbound(messenger, engine);
+    const { resent } = await drainPendingOutbound(messenger, engine);
 
     expect(messenger.sendMessage).not.toHaveBeenCalled();
-    expect(count).toBe(0);
+    expect(resent).toBe(0);
     expect(getOutbound(db, opId)['status']).toBe('quarantined');
     expect(emitAlert).toHaveBeenCalledWith(
       'Loops',
@@ -101,10 +101,10 @@ describe('drainPendingOutbound()', () => {
     });
 
     const messenger = makeMessenger(async () => ({ waMessageId: 'NOPE' }));
-    const count = await drainPendingOutbound(messenger, engine);
+    const { resent } = await drainPendingOutbound(messenger, engine);
 
     expect(messenger.sendMessage).not.toHaveBeenCalled();
-    expect(count).toBe(0);
+    expect(resent).toBe(0);
     expect(getOutbound(db, opId)['status']).toBe('quarantined');
   });
 
@@ -115,9 +115,9 @@ describe('drainPendingOutbound()', () => {
     });
 
     const messenger = makeMessenger(async () => { throw new Error('socket closed'); });
-    const count = await drainPendingOutbound(messenger, engine);
+    const { resent } = await drainPendingOutbound(messenger, engine);
 
-    expect(count).toBe(0);
+    expect(resent).toBe(0);
     const row = getOutbound(db, opId);
     expect(row['status']).toBe('maybe_sent');
     expect(row['error']).toBe('socket closed');
@@ -137,17 +137,17 @@ describe('drainPendingOutbound()', () => {
       if (chatJid === 'jfail@s.whatsapp.net') throw new Error('transient');
       return { waMessageId: 'WA_OK' };
     });
-    const count = await drainPendingOutbound(messenger, engine);
+    const { resent } = await drainPendingOutbound(messenger, engine);
 
-    expect(count).toBe(1);
+    expect(resent).toBe(1);
     expect(getOutbound(db, failId)['status']).toBe('maybe_sent');
     expect(getOutbound(db, okId)['status']).toBe('submitted');
   });
 
   it('returns 0 and sends nothing when there are no pending ops', async () => {
     const messenger = makeMessenger(async () => ({ waMessageId: 'X' }));
-    const count = await drainPendingOutbound(messenger, engine);
-    expect(count).toBe(0);
+    const { resent } = await drainPendingOutbound(messenger, engine);
+    expect(resent).toBe(0);
     expect(messenger.sendMessage).not.toHaveBeenCalled();
   });
 

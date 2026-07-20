@@ -308,6 +308,18 @@
         "redactOutboxValue(event)",
         "recordBotErrorsWritefail"
       ]
+    },
+    {
+      "path": "deploy/scripts/bot_errors_cutover.py",
+      "sha256": "dae9e37f841216837f2ec9481d4534a9bad0a27ef265c1d33fec9b1d862f6232",
+      "mustContain": [
+        "restore_service_to_always_on",
+        "cutover_gate",
+        "CutoverError",
+        "_LEGAL_EXPECTED_STATES",
+        "atomic_write_json",
+        "always_on"
+      ]
     }
   ]
 }

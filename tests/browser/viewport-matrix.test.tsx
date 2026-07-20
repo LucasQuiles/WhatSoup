@@ -105,8 +105,12 @@ const useChatsMock = vi.hoisted(() => vi.fn(() => ({ data: [] })));
 const useMessagesMock = vi.hoisted(() => vi.fn(() => ({ data: [] })));
 const useAccessMock = vi.hoisted(() => vi.fn(() => ({ data: [] })));
 const useTypingMock = vi.hoisted(() => vi.fn(() => ({ data: [] })));
+const useCheckpointsMock = vi.hoisted(() => vi.fn(() => ({ data: undefined, isLoading: false, freshness: undefined })));
 const useProvidersMock = vi.hoisted(() => vi.fn(() => ({ data: [] })));
 const useProviderStatusMock = vi.hoisted(() => vi.fn(() => ({ data: null })));
+// RateLimitsCard (SummaryTab, chat-mode) calls useRateLimits internally —
+// the explicit-shape factory must provide it or the import errors at load.
+const useRateLimitsMock = vi.hoisted(() => vi.fn(() => ({ data: undefined, isLoading: false, freshness: { observedAt: null, stale: false } })));
 
 vi.mock('../../console/src/hooks/use-fleet', () => ({
   useLines: useLinesMock,
@@ -117,8 +121,10 @@ vi.mock('../../console/src/hooks/use-fleet', () => ({
   useMessages: useMessagesMock,
   useAccess: useAccessMock,
   useTyping: useTypingMock,
+  useCheckpoints: useCheckpointsMock,
   useProviders: useProvidersMock,
   useProviderStatus: useProviderStatusMock,
+  useRateLimits: useRateLimitsMock,
   // Query option factories — not directly consumed by any component under test;
   // included to prevent "not a function" errors if the module is transitively loaded.
   getLinesQueryOptions: vi.fn(),

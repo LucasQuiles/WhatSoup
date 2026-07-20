@@ -249,7 +249,7 @@ check_result "7" "$C7_COUNT" "zero after P4 (shadow baseline)" "WARN"
 # Re-pin the EXPECTED_TITLE constant in the C4 branding flip PR.
 # ---------------------------------------------------------------------------
 check_start "8" "index.html <title> content"
-EXPECTED_TITLE="<title>WhatSoup Console</title>"
+EXPECTED_TITLE="<title>SOUP Console</title>"
 # Extract the full title tag from index.html; strip surrounding whitespace for comparison.
 ACTUAL_TITLE_RAW=$(rg -o '<title>[^<]*</title>' "$CONSOLE_DIR/index.html" 2>/dev/null || true)
 ACTUAL_TITLE=$(echo "$ACTUAL_TITLE_RAW" | tr -d ' \t')
