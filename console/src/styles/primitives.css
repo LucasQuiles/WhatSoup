@@ -1154,8 +1154,11 @@ button.soup-pill[aria-disabled="true"] {
 }
 
 /* debug — text-3 + dashed border */
+/* debug — ink promoted to --text-2 (DD-8 Option B optional leg: sole-rendering
+   datum-carrier; the dashed border + quiet text-3 BORDER keep debug distinct
+   from info — non-text channel, clears the 3:1 floor on every bed) */
 .soup-log__lvl--debug {
-  color: var(--text-3);
+  color: var(--text-2);
   border-color: var(--text-3);
   border-style: dashed;
   background: transparent;
@@ -1807,7 +1810,9 @@ button.soup-pill[aria-disabled="true"] {
   font: var(--type-overline, 500 10px/16px var(--font-sans));
   text-transform: uppercase;
   letter-spacing: 0.07em;
-  color: var(--text-3);
+  /* --text-2 (DD-8): section labels are sole carriers of their label —
+     the bare c-col-header ruling class; ghost tier was unlawful here */
+  color: var(--text-2);
   padding: var(--sp-2) var(--sp-2) var(--sp-1);
 }
 

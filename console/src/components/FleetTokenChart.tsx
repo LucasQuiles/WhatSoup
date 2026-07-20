@@ -121,7 +121,7 @@ export function FleetTokenChart({ data, byProvider, providers }: FleetTokenChart
           <tspan x="50%" dy="-0.2em" fontWeight={700}>
             {formatCompact(grandTotal)}
           </tspan>
-          <tspan x="50%" dy="1.3em" fill="var(--text-3)" fontSize="var(--text-xs)">
+          <tspan x="50%" dy="1.3em" fill="var(--text-2)" fontSize="var(--text-xs)">
             TOKENS
           </tspan>
         </text>
