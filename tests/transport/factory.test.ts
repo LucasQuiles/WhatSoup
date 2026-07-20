@@ -102,6 +102,18 @@ describe('createConnection factory', () => {
       createConnection({ transport: 'unknown-transport' as 'baileys' }),
     ).toThrow(/unknown transport id/);
   });
+
+  it('signal transport throws a not-yet-wired error (foundation stub)', () => {
+    expect(() =>
+      createConnection({ transport: 'signal' }),
+    ).toThrow(/signal.*not yet implemented|not yet wired/i);
+  });
+
+  it('imessage transport throws a not-yet-wired error (foundation stub)', () => {
+    expect(() =>
+      createConnection({ transport: 'imessage' }),
+    ).toThrow(/imessage.*not yet implemented|not yet wired/i);
+  });
 });
 
 describe('createConnection factory — webhook mode', () => {

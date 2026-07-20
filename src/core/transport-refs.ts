@@ -4,8 +4,10 @@
 export type ChannelKind =
   | 'whatsapp'
   | 'telegram'
-  | 'sms';
-  // future: 'imessage' | 'signal' | 'discord'
+  | 'sms'
+  | 'signal'
+  | 'imessage';
+  // future: 'discord'
 
 declare const __channelIdBrand: unique symbol;
 

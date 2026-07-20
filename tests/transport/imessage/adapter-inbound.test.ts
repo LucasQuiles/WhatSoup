@@ -1,0 +1,201 @@
+// tests/transport/imessage/adapter-inbound.test.ts
+import { describe, it, expect, vi } from 'vitest';
+import { ImessageAdapter } from '../../../src/transport/imessage/adapter.ts';
+import { MockImessagePort, makeImessageConfig } from './mock-port.ts';
+import type { InboundMessage } from '../../../src/transport/contract/index.ts';
+import type { InboundImessage } from '../../../src/transport/imessage/port.ts';
+
+function makeAdapter(port: MockImessagePort = new MockImessagePort()) {
+  const adapter = new ImessageAdapter(makeImessageConfig({ pollIntervalMs: 0 }), port);
+  return { adapter, port };
+}
+
+function envelope(overrides: Partial<InboundImessage> = {}): InboundImessage {
+  return {
+    guid: 'guid-default',
+    from: 'user@icloud.com',
+    to: 'bot@icloud.com',
+    body: 'hello',
+    fromMe: false,
+    kind: 'text',
+    timestamp: 1000,
+    ...overrides,
+  };
+}
+
+describe('ImessageAdapter — handleInboundRecord', () => {
+  it('emits a text envelope as InboundMessage', async () => {
+    const { adapter } = makeAdapter();
+    await adapter.connect();
+    const received: InboundMessage[] = [];
+    adapter.on('message', (m) => received.push(m));
+
+    adapter.handleInboundRecord(envelope({ guid: 'guid-1', body: 'hi' }));
+
+    expect(received).toHaveLength(1);
+    expect(received[0].text).toBe('hi');
+    expect(received[0].ref.id).toBe('guid-1');
+    expect(received[0].ingestSeq).toBe(1);
+    await adapter.disconnect();
+  });
+
+  it('keys the conversation on the peer (sender for inbound)', async () => {
+    const { adapter } = makeAdapter();
+    await adapter.connect();
+    const received: InboundMessage[] = [];
+    adapter.on('message', (m) => received.push(m));
+
+    adapter.handleInboundRecord(envelope({ from: 'peer@icloud.com', to: 'us@icloud.com', fromMe: false }));
+
+    expect(received[0].conversation.id).toBe('peer@icloud.com');
+    expect(received[0].sender.id).toBe('peer@icloud.com');
+    await adapter.disconnect();
+  });
+
+  it('keys the conversation on the peer (recipient for outbound echo)', async () => {
+    const { adapter } = makeAdapter();
+    await adapter.connect();
+    const received: InboundMessage[] = [];
+    adapter.on('message', (m) => received.push(m));
+
+    adapter.handleInboundRecord(envelope({ from: 'us@icloud.com', to: 'peer@icloud.com', fromMe: true }));
+
+    expect(received[0].conversation.id).toBe('peer@icloud.com');
+    expect(received[0].sender.id).toBe(adapter.selfRef().id);
+    expect(received[0].fromMe).toBe(true);
+    await adapter.disconnect();
+  });
+
+  it('dedupes by guid (second delivery of same guid is dropped)', async () => {
+    const { adapter } = makeAdapter();
+    await adapter.connect();
+    const received: InboundMessage[] = [];
+    adapter.on('message', (m) => received.push(m));
+
+    adapter.handleInboundRecord(envelope({ guid: 'same-guid', timestamp: 1000 }));
+    adapter.handleInboundRecord(envelope({ guid: 'same-guid', timestamp: 1000 }));
+
+    expect(received).toHaveLength(1);
+    await adapter.disconnect();
+  });
+
+  it('does not emit when disconnected', async () => {
+    const { adapter } = makeAdapter();
+    const received: InboundMessage[] = [];
+    adapter.on('message', (m) => received.push(m));
+
+    adapter.handleInboundRecord(envelope());
+    expect(received).toHaveLength(0);
+  });
+
+  it('does not emit non-text envelopes (reaction/typing/read) as messages', async () => {
+    const { adapter } = makeAdapter();
+    await adapter.connect();
+    const received: InboundMessage[] = [];
+    adapter.on('message', (m) => received.push(m));
+
+    adapter.handleInboundRecord(envelope({ kind: 'reaction', body: null }));
+    adapter.handleInboundRecord(envelope({ kind: 'typing', body: null }));
+    adapter.handleInboundRecord(envelope({ kind: 'read', body: null }));
+
+    expect(received).toHaveLength(0);
+    await adapter.disconnect();
+  });
+
+  it('does not emit a text envelope with null body', async () => {
+    const { adapter } = makeAdapter();
+    await adapter.connect();
+    const received: InboundMessage[] = [];
+    adapter.on('message', (m) => received.push(m));
+
+    adapter.handleInboundRecord(envelope({ kind: 'text', body: null }));
+    expect(received).toHaveLength(0);
+    await adapter.disconnect();
+  });
+
+  it('increments ingestSeq monotonically across emissions', async () => {
+    const { adapter } = makeAdapter();
+    await adapter.connect();
+    const received: InboundMessage[] = [];
+    adapter.on('message', (m) => received.push(m));
+
+    adapter.handleInboundRecord(envelope({ guid: 'g1', timestamp: 1 }));
+    adapter.handleInboundRecord(envelope({ guid: 'g2', timestamp: 2 }));
+    adapter.handleInboundRecord(envelope({ guid: 'g3', timestamp: 3 }));
+
+    expect(received.map((m) => m.ingestSeq)).toEqual([1, 2, 3]);
+    await adapter.disconnect();
+  });
+});
+
+describe('ImessageAdapter — pollOnce integration', () => {
+  it('emits each record returned by listInboundSince', async () => {
+    const port = new MockImessagePort({
+      nextInbound: [
+        envelope({ guid: 'g1', timestamp: 1000, body: 'one' }),
+        envelope({ guid: 'g2', timestamp: 2000, body: 'two' }),
+      ],
+    });
+    const { adapter } = makeAdapter(port);
+    await adapter.connect();
+    const received: InboundMessage[] = [];
+    adapter.on('message', (m) => received.push(m));
+
+    await adapter.pollOnce();
+    expect(received.map((m) => m.text)).toEqual(['one', 'two']);
+    await adapter.disconnect();
+  });
+
+  it('emits an error and stays connected on a transient poll failure', async () => {
+    const port = new MockImessagePort();
+    port.listInboundSince = vi.fn(async () => { throw new Error('ECONNREFUSED'); });
+    const { adapter } = makeAdapter(port);
+    await adapter.connect();
+
+    const errors: unknown[] = [];
+    adapter.on('error', (e) => errors.push(e));
+
+    await adapter.pollOnce();
+
+    expect(errors).toHaveLength(1);
+    expect(String(errors[0])).toMatch(/iMessage transient error/);
+    expect(adapter.state().state).toBe('connected');
+    await adapter.disconnect();
+  });
+
+  it('emits an error and stops the loop on an auth poll failure', async () => {
+    const port = new MockImessagePort();
+    port.listInboundSince = vi.fn(async () => {
+      throw Object.assign(new Error('Unauthorized'), { status: 401 });
+    });
+    const { adapter } = makeAdapter(port);
+    await adapter.connect();
+
+    const errors: unknown[] = [];
+    adapter.on('error', (e) => errors.push(e));
+
+    await adapter.pollOnce();
+
+    expect(errors).toHaveLength(1);
+    expect(adapter.state().state).toBe('auth_required');
+    await adapter.disconnect();
+  });
+});
+
+describe('ImessageAdapter — listener isolation', () => {
+  it('a throwing message listener does not break sibling listeners', async () => {
+    const { adapter } = makeAdapter();
+    await adapter.connect();
+    const good: InboundMessage[] = [];
+    const bad = vi.fn(() => { throw new Error('listener bug'); });
+    adapter.on('message', bad);
+    adapter.on('message', (m) => good.push(m));
+
+    adapter.handleInboundRecord(envelope({ guid: 'g1', timestamp: 7 }));
+    adapter.handleInboundRecord(envelope({ guid: 'g2', timestamp: 8 }));
+
+    expect(bad).toHaveBeenCalledTimes(2);
+    expect(good).toHaveLength(2);
+    await adapter.disconnect();
+  });
+});
