@@ -156,10 +156,21 @@ def distill(
     _exact_keys(
         session_data,
         {"project"},
-        {"git_branch", "harness_version", "model", "project_id", "title"},
+        {"cwds", "git_branch", "harness_version", "model", "project_id", "title"},
         phase="distill-session-meta",
     )
     project = _string(session_data.get("project"), phase="distill-session-meta")
+    # cwds: the ordered trail of working directories the session touched (modern
+    # synthesized session-meta). Absent on legacy init-derived meta.
+    cwds_value = session_data.get("cwds")
+    if cwds_value is None:
+        cwds: JsonValue = None
+    else:
+        if not isinstance(cwds_value, list) or not all(
+            isinstance(item, str) and item for item in cwds_value
+        ):
+            raise _fail("distill-session-meta")
+        cwds = list(cwds_value)
     git_branch = _optional_string(
         session_data.get("git_branch"), phase="distill-session-meta"
     )
@@ -176,18 +187,28 @@ def distill(
         raise _fail("distill-session-meta")
     harness_version = metadata_version or snapshot_version
 
-    parsed_times = [_timestamp(event.timestamp_utc) for event in events]
-    if any(later < earlier for earlier, later in zip(parsed_times, parsed_times[1:])):
-        raise _fail("distill-timestamp-order")
-    started_at = events[0].timestamp_utc
-    ended_at = events[-1].timestamp_utc
+    # Ordering/duration run over TIMED events only. Non-content records (control
+    # metas, and modern synthesized-session-meta prefixes) legitimately carry no
+    # timestamp; they must not gate the session clock. The timed subsequence must
+    # still be monotonic, and a session with no timestamps at all is degenerate.
+    timed = [
+        (_timestamp(event.timestamp_utc), event.timestamp_utc)
+        for event in events
+        if event.timestamp_utc is not None
+    ]
+    if not timed:
+        raise _fail("distill-timestamp")
+    # Real session files are NOT strictly chronological (interleaved sidechains,
+    # resumes, scheduled fires; 133/163 local sessions have inversions, up to
+    # hours). So monotonicity is not required -- the session clock is the min/max
+    # of observed timestamps, and duration their difference (never negative).
+    earliest, started_at = min(timed, key=lambda item: item[0])
+    latest, ended_at = max(timed, key=lambda item: item[0])
     assert started_at is not None and ended_at is not None
-    duration = parsed_times[-1] - parsed_times[0]
+    duration = latest - earliest
     duration_us = (
         duration.days * 86_400 + duration.seconds
     ) * 1_000_000 + duration.microseconds
-    if duration_us < 0:
-        raise _fail("distill-timestamp-order")
 
     event_counts: Counter[str] = Counter()
     meta_counts: Counter[str] = Counter()
@@ -310,12 +331,26 @@ def distill(
             subagent_sidechains[agent] += int(sidechain)
             continue
         if event.kind is EventKind.COMPACTION:
-            _exact_keys(event.data, set(), {"reason"})
             if event.text is None:
                 raise _fail("distill-event-data")
-            reason = event.data.get("reason")
-            if reason is not None:
-                compaction_reasons.append(_string(reason))
+            if "trigger" in event.data:
+                # Modern rich compaction: `trigger` is the reason label; the token
+                # deltas (pre/post_tokens, duration_ms, ...) are preserved on the
+                # canonical event. Rolling those into the distilled summary is a
+                # follow-up; here they are validated and the trigger recorded.
+                _exact_keys(
+                    event.data,
+                    {"trigger", "pre_tokens", "post_tokens", "duration_ms"},
+                    {"cumulative_dropped_tokens"},
+                )
+                compaction_reasons.append(
+                    _string(event.data.get("trigger"))
+                )
+            else:
+                _exact_keys(event.data, set(), {"reason"})
+                reason = event.data.get("reason")
+                if reason is not None:
+                    compaction_reasons.append(_string(reason))
             compaction_indices.append(event.event_index)
             continue
         if event.kind is not EventKind.META:
@@ -323,12 +358,9 @@ def distill(
 
         meta_type = event.data.get("meta_type")
         if meta_type == "usage":
-            value = _normalize_usage(event.data)
-            key = dumps_json(value)
-            if key in metric_keys:
-                raise _fail("distill-metric")
-            metric_keys.add(key)
-            reported_usage.append(value)
+            # No value-dedup: real sessions repeat identical token counts across
+            # messages (legitimate), and usage is aggregated (summed) below.
+            reported_usage.append(_normalize_usage(event.data))
             meta_counts["usage"] += 1
             continue
         if meta_type == "cost":
@@ -345,11 +377,29 @@ def distill(
             _string(event.data.get("file"))
             meta_counts["attachment"] += 1
             continue
-        _exact_keys(event.data, {"raw_type"})
+        if meta_type == "model_fallback":
+            _exact_keys(event.data, {"meta_type", "from_model", "to_model"})
+            _string(event.data.get("from_model"))
+            _string(event.data.get("to_model"))
+            meta_counts["model_fallback"] += 1
+            continue
+        if meta_type == "image":
+            _exact_keys(event.data, {"meta_type", "media_type"})
+            _string(event.data.get("media_type"))
+            meta_counts["image"] += 1
+            continue
+        # Passthrough metas: unknown top-level types and unknown system subtypes
+        # ({raw_type} plus an optional {subtype}). Counted together as "unknown".
+        _exact_keys(event.data, {"raw_type"}, {"subtype"})
         _string(event.data.get("raw_type"))
+        _optional_string(event.data.get("subtype"))
         meta_counts["unknown"] += 1
 
-    if set(calls) != results:
+    # Every result must reference a real call (no orphan results), but a call
+    # MAY be unresolved: real/active sessions legitimately end with a few tool
+    # calls whose results aren't written yet (observed at the tail of long
+    # sessions). So require results ⊆ calls, not equality.
+    if not results <= set(calls):
         raise _fail("distill-tool-link")
 
     tools = tuple(
@@ -394,6 +444,15 @@ def distill(
         raise _fail("distill-identity") from error
     session_usage = [value for value in reported_usage if value["scope"] == "session"]
     session_costs = [value for value in reported_costs if value["scope"] == "session"]
+    # token_totals: session-scope usage SUMMED per token dimension (a single
+    # rollup), not a per-message list -- real sessions have hundreds of messages.
+    token_totals: JsonValue = None
+    if session_usage:
+        summed: dict[str, int] = {}
+        for value in session_usage:
+            for name, count in value["values"].items():
+                summed[name] = summed.get(name, 0) + count
+        token_totals = dict(sorted(summed.items()))
     clean_user_count = sum(turn.role == "user" for turn in clean_turns)
     clean_assistant_count = sum(turn.role == "assistant" for turn in clean_turns)
     size = size_metrics(
@@ -403,6 +462,7 @@ def distill(
     record: dict[str, JsonValue] = {
         "compaction_count": len(compaction_indices),
         "cost_totals": session_costs or None,
+        "cwds": cwds,
         "duration_us": duration_us,
         "ended_at_utc": ended_at,
         "event_counts": dict(sorted(event_counts.items())),
@@ -428,7 +488,7 @@ def distill(
         "started_at_utc": started_at,
         "subagent_dispatch_count": sum(subagent_counts.values()),
         "title": title,
-        "token_totals": session_usage or None,
+        "token_totals": token_totals,
         "tool_call_count": len(calls),
         "tool_result_count": len(results),
         "turn_counts": {

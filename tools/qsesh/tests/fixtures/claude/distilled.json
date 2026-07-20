@@ -4,6 +4,7 @@
   "record": {
     "compaction_count": 1,
     "cost_totals": null,
+    "cwds": null,
     "duration_us": 8000000,
     "ended_at_utc": "2026-01-02T08:04:13Z",
     "event_counts": {"assistant_msg": 1, "compaction": 1, "meta": 3, "reasoning": 1, "session_meta": 1, "skill_invocation": 1, "subagent_activity": 1, "tool_call": 1, "tool_result": 1, "user_msg": 1},
@@ -29,7 +30,7 @@
     "started_at_utc": "2026-01-02T08:04:05Z",
     "subagent_dispatch_count": 1,
     "title": null,
-    "token_totals": [{"model": "fixture-model", "provider": null, "scope": "session", "source": "claude", "unit": "tokens", "values": {"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "input_tokens": 7, "output_tokens": 11}}],
+    "token_totals": {"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "input_tokens": 7, "output_tokens": 11},
     "tool_call_count": 1,
     "tool_result_count": 1,
     "turn_counts": {"assistant": 1, "clean": 3, "clean_assistant": 1, "clean_user": 2, "reasoning": 1, "user": 1}

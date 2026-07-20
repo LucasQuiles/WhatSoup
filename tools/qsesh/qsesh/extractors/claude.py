@@ -8,7 +8,12 @@ from types import MappingProxyType
 from qsesh.errors import QseshError
 from qsesh.model import EventKind, ExtractedSession, Harness, JsonValue, SourceSnapshot
 
-from .base import EventBuilder, normalize_timestamp, parse_jsonl_objects
+from .base import (
+    EventBuilder,
+    normalize_timestamp,
+    optional_timestamp,
+    parse_jsonl_objects,
+)
 
 CLAUDE_SNAPSHOT_FINGERPRINT = "unclassified-jsonl-v1"
 CLAUDE_OBSERVED_SCHEMA_FINGERPRINT = (
@@ -44,6 +49,34 @@ def _array(value: object, *, phase: str) -> list[JsonValue]:
     return value
 
 
+def _compaction_int(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise _schema("claude-compaction")
+    return value
+
+
+def _modern_compaction_data(metadata: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """Rich metadata from a modern ``compactMetadata`` (camelCase) object.
+
+    Captures the stable scalar signal -- trigger + token deltas + duration --
+    which is what compaction-cost metrics need. The variable nested fields
+    (``preservedMessages`` / ``preservedSegment`` / ``preCompactDiscoveredTools``)
+    are deliberately not embedded, to keep the canonical event schema-stable as
+    the source format evolves (same discipline as unknown usage keys).
+    """
+    data: dict[str, JsonValue] = {
+        "trigger": _string(metadata.get("trigger"), phase="claude-compaction"),
+        "pre_tokens": _compaction_int(metadata.get("preTokens")),
+        "post_tokens": _compaction_int(metadata.get("postTokens")),
+        "duration_ms": _compaction_int(metadata.get("durationMs")),
+    }
+    if "cumulativeDroppedTokens" in metadata:
+        data["cumulative_dropped_tokens"] = _compaction_int(
+            metadata.get("cumulativeDroppedTokens")
+        )
+    return data
+
+
 class ClaudeExtractor:
     def extract(self, snapshot: SourceSnapshot) -> ExtractedSession:
         if snapshot.candidate.harness is not Harness.CLAUDE:
@@ -54,6 +87,12 @@ class ClaudeExtractor:
         builder = EventBuilder()
         tool_calls: set[str] = set()
         tool_results: set[str] = set()
+        # Modern sessions carry no system/init record, so the init handler never
+        # emits a SESSION_META. Synthesize one (as the first event) from the
+        # session's scattered identity fields so the stream keeps the anchor the
+        # distiller requires. Legacy sessions (with init) are left untouched.
+        if not self._has_init(rows, snapshot):
+            self._synthesize_session_meta(rows, builder)
         for line_index, row in enumerate(rows, start=1):
             self._dispatch(
                 row,
@@ -64,6 +103,68 @@ class ClaudeExtractor:
                 tool_results=tool_results,
             )
         return builder.finish(snapshot)
+
+    @staticmethod
+    def _has_init(
+        rows: tuple[dict[str, JsonValue], ...], snapshot: SourceSnapshot
+    ) -> bool:
+        native_id = snapshot.candidate.native_id
+        return any(
+            row.get("type") == "system"
+            and row.get("subtype") == "init"
+            and row.get("uuid") == native_id
+            for row in rows
+        )
+
+    @staticmethod
+    def _synthesize_session_meta(
+        rows: tuple[dict[str, JsonValue], ...], builder: EventBuilder
+    ) -> None:
+        cwds: list[str] = []
+        git_branch: str | None = None
+        version: str | None = None
+        title: str | None = None
+        start_ts: str | None = None
+        for row in rows:
+            cwd = row.get("cwd")
+            if isinstance(cwd, str) and cwd and cwd not in cwds:
+                cwds.append(cwd)
+            if start_ts is None and isinstance(row.get("timestamp"), str):
+                try:
+                    start_ts = normalize_timestamp(row.get("timestamp"))
+                except QseshError:
+                    start_ts = None
+            if git_branch is None and isinstance(row.get("gitBranch"), str):
+                git_branch = row.get("gitBranch")
+            if version is None and isinstance(row.get("version"), str) and row["version"]:
+                version = row.get("version")
+            if title is None:
+                if row.get("type") == "ai-title" and isinstance(
+                    row.get("aiTitle"), str
+                ):
+                    title = row.get("aiTitle")
+                elif row.get("type") == "custom-title" and isinstance(
+                    row.get("customTitle"), str
+                ):
+                    title = row.get("customTitle")
+        if not cwds:
+            raise _schema("claude-session-identity")
+        # project = the session's starting directory; cwds = the full ordered
+        # trail of directories it touched (sessions routinely span several).
+        data: dict[str, JsonValue] = {"project": cwds[0], "cwds": cwds}
+        if git_branch is not None:
+            data["git_branch"] = git_branch
+        if version is not None:
+            data["harness_version"] = version
+        if title is not None:
+            data["title"] = title
+        builder.add(
+            EventKind.SESSION_META,
+            timestamp_utc=start_ts,
+            text=None,
+            data=data,
+            source_ref="synthetic:session",
+        )
 
     def _dispatch(
         self,
@@ -78,14 +179,17 @@ class ClaudeExtractor:
         raw_type = row.get("type")
         if not isinstance(raw_type, str) or _SAFE_KIND(raw_type) is None:
             raise _schema("claude-row-type")
-        timestamp = normalize_timestamp(row.get("timestamp"))
         source_line = f"line:{line_index}"
 
+        # Content records require a timestamp (strict). Non-content control
+        # records fall through to META, where an absent timestamp is tolerated
+        # (optional_timestamp) so modern sessions -- which interleave untimed
+        # mode/last-prompt/permission-mode/ai-title records -- extract cleanly.
         if raw_type == "system":
             self._system(
                 row,
                 source_line=source_line,
-                timestamp=timestamp,
+                timestamp=normalize_timestamp(row.get("timestamp")),
                 snapshot=snapshot,
                 builder=builder,
             )
@@ -94,7 +198,7 @@ class ClaudeExtractor:
             self._user(
                 row,
                 line_index=line_index,
-                timestamp=timestamp,
+                timestamp=normalize_timestamp(row.get("timestamp")),
                 builder=builder,
                 tool_calls=tool_calls,
                 tool_results=tool_results,
@@ -104,14 +208,15 @@ class ClaudeExtractor:
             self._assistant(
                 row,
                 line_index=line_index,
-                timestamp=timestamp,
+                timestamp=normalize_timestamp(row.get("timestamp")),
                 builder=builder,
                 tool_calls=tool_calls,
+                tool_results=tool_results,
             )
             return
         builder.add(
             EventKind.META,
-            timestamp_utc=timestamp,
+            timestamp_utc=optional_timestamp(row.get("timestamp")),
             text=None,
             data={"raw_type": raw_type},
             source_ref=source_line,
@@ -147,16 +252,27 @@ class ClaudeExtractor:
             )
             return
         if subtype == "compact_boundary":
-            metadata = _object(row.get("compact_metadata"), phase="claude-compaction")
+            text = _string(
+                row.get("content"), phase="claude-compaction", allow_empty=True
+            )
+            modern = row.get("compactMetadata")
+            if isinstance(modern, dict):
+                data = _modern_compaction_data(modern)
+            else:
+                # Legacy schema: compact_metadata (snake) with a single reason.
+                legacy = _object(
+                    row.get("compact_metadata"), phase="claude-compaction"
+                )
+                data = {
+                    "reason": _string(
+                        legacy.get("reason"), phase="claude-compaction"
+                    )
+                }
             builder.add(
                 EventKind.COMPACTION,
                 timestamp_utc=timestamp,
-                text=_string(
-                    row.get("content"), phase="claude-compaction", allow_empty=True
-                ),
-                data={
-                    "reason": _string(metadata.get("reason"), phase="claude-compaction")
-                },
+                text=text,
+                data=data,
                 source_ref=source_line,
             )
             return
@@ -184,7 +300,24 @@ class ClaudeExtractor:
                     source_ref=reference,
                 )
             return
-        raise _schema("claude-system-subtype")
+        # Unknown system subtype (turn_duration, stop_hook_summary,
+        # scheduled_task_fire, model_fallback, ...): fall through to META like an
+        # unknown top-level type rather than reject. Record the subtype when it
+        # is a safe identifier so inventory can see it.
+        builder.add(
+            EventKind.META,
+            timestamp_utc=timestamp,
+            text=None,
+            data={
+                "raw_type": "system",
+                "subtype": (
+                    subtype
+                    if isinstance(subtype, str) and _SAFE_KIND(subtype) is not None
+                    else None
+                ),
+            },
+            source_ref=source_line,
+        )
 
     def _user(
         self,
@@ -257,6 +390,23 @@ class ClaudeExtractor:
                     source_ref=source_ref,
                 )
                 continue
+            # `image` blocks carry a base64 payload; record as META with the
+            # media type only -- the payload itself is never embedded.
+            if part_type == "image":
+                source = _object(part.get("source"), phase="claude-image")
+                builder.add(
+                    EventKind.META,
+                    timestamp_utc=timestamp,
+                    text=None,
+                    data={
+                        "meta_type": "image",
+                        "media_type": _string(
+                            source.get("media_type"), phase="claude-image"
+                        ),
+                    },
+                    source_ref=source_ref,
+                )
+                continue
             raise _schema("claude-user-content")
 
     def _assistant(
@@ -267,6 +417,7 @@ class ClaudeExtractor:
         timestamp: str,
         builder: EventBuilder,
         tool_calls: set[str],
+        tool_results: set[str],
     ) -> None:
         message = _object(row.get("message"), phase="claude-assistant-message")
         if message.get("role") != "assistant":
@@ -328,7 +479,9 @@ class ClaudeExtractor:
                     source_ref=source_ref,
                 )
                 continue
-            if part_type == "tool_use":
+            # `server_tool_use` (server-side tool calls: advisor, web search) is
+            # structurally identical to `tool_use`; model both as TOOL_CALL.
+            if part_type in ("tool_use", "server_tool_use"):
                 call_id = _string(part.get("id"), phase="claude-tool-call")
                 name = _string(part.get("name"), phase="claude-tool-call")
                 inputs = _object(part.get("input"), phase="claude-tool-call")
@@ -348,6 +501,47 @@ class ClaudeExtractor:
                     source_ref=source_ref,
                 )
                 continue
+            # `advisor_tool_result` is the paired result of a `server_tool_use`
+            # call; it arrives in a later assistant message. Same pairing
+            # discipline as native tool_result (in user messages).
+            if part_type == "advisor_tool_result":
+                call_id = _string(
+                    part.get("tool_use_id"), phase="claude-tool-result"
+                )
+                if call_id not in tool_calls or call_id in tool_results:
+                    raise _schema("claude-tool-result")
+                tool_results.add(call_id)
+                result = part.get("content")
+                if not isinstance(result, (str, dict, list)):
+                    raise _schema("claude-tool-result")
+                builder.add(
+                    EventKind.TOOL_RESULT,
+                    timestamp_utc=timestamp,
+                    text=None,
+                    data={"call_id": call_id, "result": result},
+                    source_ref=source_ref,
+                )
+                continue
+            # `fallback` is a model-switch marker (from -> to); record as META.
+            if part_type == "fallback":
+                from_model = _object(part.get("from"), phase="claude-fallback")
+                to_model = _object(part.get("to"), phase="claude-fallback")
+                builder.add(
+                    EventKind.META,
+                    timestamp_utc=timestamp,
+                    text=None,
+                    data={
+                        "meta_type": "model_fallback",
+                        "from_model": _string(
+                            from_model.get("model"), phase="claude-fallback"
+                        ),
+                        "to_model": _string(
+                            to_model.get("model"), phase="claude-fallback"
+                        ),
+                    },
+                    source_ref=source_ref,
+                )
+                continue
             raise _schema("claude-assistant-content")
         usage_value = message.get("usage")
         if usage_value is not None:
@@ -358,7 +552,11 @@ class ClaudeExtractor:
                 "input_tokens",
                 "output_tokens",
             }
-            if set(usage) != allowed or any(
+            # Require and validate the known token counts; tolerate unknown keys
+            # (real usage carries cache_creation/service_tier/speed/... and the
+            # set keeps growing). Only the known counts enter the canonical event
+            # -- unknowns are ignored so output stays stable across versions.
+            if not allowed <= set(usage) or any(
                 isinstance(usage[key], bool)
                 or not isinstance(usage[key], int)
                 or usage[key] < 0
@@ -374,7 +572,7 @@ class ClaudeExtractor:
                     "model": model,
                     "source": "claude",
                     "unit": "tokens",
-                    "usage": dict(usage),
+                    "usage": {key: usage[key] for key in allowed},
                 },
                 source_ref=f"line:{line_index}/usage",
             )

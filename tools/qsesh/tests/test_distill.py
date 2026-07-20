@@ -332,8 +332,9 @@ def test_models_and_reported_metrics_are_truthful_without_cross_scope_double_cou
     assert results["codex"].record["reported_usage"] == []
     assert results["codex"].record["token_totals"] is None
     assert len(results["opencode"].record["reported_usage"]) == 2
-    assert len(results["opencode"].record["token_totals"]) == 1
-    assert results["opencode"].record["token_totals"][0]["scope"] == "session"
+    # token_totals is now the SUMMED session-scope usage (one rollup dict), not a
+    # per-message list. opencode has one session-scope usage {input:7, output:11}.
+    assert results["opencode"].record["token_totals"] == {"input": 7, "output": 11}
     assert len(results["opencode"].record["reported_costs"]) == 2
     assert len(results["opencode"].record["cost_totals"]) == 1
     assert all(
@@ -373,13 +374,20 @@ def _reindex(events: list[CanonicalEvent]) -> tuple[CanonicalEvent, ...]:
         ("missing-project", "distill-session-meta"),
         ("version-mismatch", "distill-session-meta"),
         ("duplicate-source-ref", "distill-event-order"),
-        ("negative-duration", "distill-timestamp-order"),
+        # ("negative-duration", ...) removed: out-of-order timestamps are now a
+        # tolerated contract (real files are not chronological) -- see
+        # test_distill_tolerates_out_of_order_timestamps.
         ("duplicate-call", "distill-tool-link"),
         ("unknown-result", "distill-tool-link"),
-        ("missing-result", "distill-tool-link"),
+        # ("missing-result", ...) removed: a call without a result (dangling) is
+        # now tolerated -- real sessions end with unresolved calls. Orphan results
+        # (unknown-result) and duplicate results still reject. See
+        # test_distill_tolerates_dangling_tool_call.
         ("duplicate-result", "distill-tool-link"),
         ("negative-count", "distill-event-data"),
-        ("duplicate-metric", "distill-metric"),
+        # ("duplicate-metric", ...) removed: usage metas are no longer
+        # value-deduped -- repeated token counts are legitimate and summed. See
+        # test_distill_sums_repeated_usage_into_token_totals.
     ],
 )
 def test_invalid_canonical_invariants_fail_as_one_typed_distill_error(
@@ -405,8 +413,6 @@ def test_invalid_canonical_invariants_fail_as_one_typed_distill_error(
         return
     elif mutation == "duplicate-source-ref":
         events[1] = replace(events[1], source_ref=events[0].source_ref)
-    elif mutation == "negative-duration":
-        events[-1] = replace(events[-1], timestamp_utc="2026-01-02T08:04:04Z")
     elif mutation == "duplicate-call":
         skill_index = next(
             index
@@ -429,8 +435,6 @@ def test_invalid_canonical_invariants_fail_as_one_typed_distill_error(
         events[result_index] = replace(
             events[result_index], data={"call_id": "unknown", "result": "x"}
         )
-    elif mutation == "missing-result":
-        events = [event for event in events if event.kind is not EventKind.TOOL_RESULT]
     elif mutation == "duplicate-result":
         result = next(event for event in events if event.kind is EventKind.TOOL_RESULT)
         events.insert(
@@ -447,13 +451,7 @@ def test_invalid_canonical_invariants_fail_as_one_typed_distill_error(
         data["count"] = -1
         events[call_index] = replace(events[call_index], data=data)
     else:
-        metric = next(
-            event for event in events if event.data.get("meta_type") == "usage"
-        )
-        events.insert(
-            metric.event_index + 1,
-            replace(metric, source_ref=f"{metric.source_ref}/duplicate"),
-        )
+        raise AssertionError(f"unhandled mutation: {mutation}")
     malformed = replace(extracted, events=_reindex(events))
     with pytest.raises(QseshError) as caught:
         _distilled(malformed)
@@ -489,3 +487,184 @@ def test_distiller_has_one_event_dispatcher_and_no_harness_policy_branch() -> No
     assert "qsesh.extractors" not in source
     assert "qsesh.store" not in source
     assert "qsesh.archive" not in source
+
+
+# --- modern Claude session (no init; synthesized SESSION_META; None-ts metas) ---
+def _claude_modern_extracted() -> ExtractedSession:
+    t1, t2 = "2026-01-02T08:04:06Z", "2026-01-02T08:04:07Z"
+    rows = [
+        {"type": "last-prompt", "leafUuid": "x", "sessionId": "s"},
+        {"type": "user", "cwd": "proj-A", "gitBranch": "main", "version": "2.0.0",
+         "timestamp": t1, "uuid": "u1", "parentUuid": None,
+         "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]}},
+        {"type": "assistant", "cwd": "proj-B", "timestamp": t2, "uuid": "a1",
+         "parentUuid": "u1", "isSidechain": False,
+         "message": {"role": "assistant", "model": "m",
+                     "content": [{"type": "text", "text": "yo"}]}},
+        {"type": "ai-title", "aiTitle": "My Title", "sessionId": "s"},
+    ]
+    raw = dump_jsonl(rows)
+    snap = _snapshot(Harness.CLAUDE, "11111111-1111-1111-1111-111111111111",
+                     raw, "unclassified-jsonl-v1", None)
+    return ClaudeExtractor().extract(snap)
+
+
+def test_distill_modern_claude_session_records_cwd_trail() -> None:
+    result = distill(_claude_modern_extracted(), source_pointer=SOURCE_POINTER,
+                     raw_pointer=RAW_POINTER, gzip_bytes=_GZIP_BYTES)
+    assert result.record["project"] == "proj-A"
+    assert result.record["cwds"] == ["proj-A", "proj-B"]
+    assert result.record["title"] == "My Title"
+    assert result.record["git_branch"] == "main"
+
+
+def _claude_out_of_order_extracted() -> ExtractedSession:
+    # user@t2, assistant@t1 (earlier -> inversion), user@t3
+    t1, t2, t3 = ("2026-01-02T08:04:05Z", "2026-01-02T08:04:06Z",
+                  "2026-01-02T08:04:07Z")
+    rows = [
+        {"type": "user", "cwd": "proj-A", "timestamp": t2, "uuid": "u1",
+         "parentUuid": None,
+         "message": {"role": "user", "content": [{"type": "text", "text": "a"}]}},
+        {"type": "assistant", "cwd": "proj-A", "timestamp": t1, "uuid": "a1",
+         "parentUuid": "u1", "isSidechain": False,
+         "message": {"role": "assistant", "model": "m",
+                     "content": [{"type": "text", "text": "b"}]}},
+        {"type": "user", "cwd": "proj-A", "timestamp": t3, "uuid": "u2",
+         "parentUuid": "a1",
+         "message": {"role": "user", "content": [{"type": "text", "text": "c"}]}},
+    ]
+    raw = dump_jsonl(rows)
+    snap = _snapshot(Harness.CLAUDE, "22222222-2222-2222-2222-222222222222",
+                     raw, "unclassified-jsonl-v1", None)
+    return ClaudeExtractor().extract(snap)
+
+
+def test_distill_tolerates_out_of_order_timestamps() -> None:
+    # Real session files are not strictly chronological; the session clock is the
+    # min/max of observed timestamps, not first/last event position.
+    result = distill(_claude_out_of_order_extracted(), source_pointer=SOURCE_POINTER,
+                     raw_pointer=RAW_POINTER, gzip_bytes=_GZIP_BYTES)
+    assert result.record["started_at_utc"] == "2026-01-02T08:04:05Z"
+    assert result.record["ended_at_utc"] == "2026-01-02T08:04:07Z"
+    assert result.record["duration_us"] == 2_000_000
+
+
+def _claude_new_metas_extracted() -> ExtractedSession:
+    t = "2026-01-02T08:04:06Z"
+    rows = [
+        {"type": "user", "cwd": "proj-A", "timestamp": t, "uuid": "u1",
+         "parentUuid": None,
+         "message": {"role": "user", "content": [{"type": "text", "text": "a"}]}},
+        {"type": "assistant", "cwd": "proj-A", "timestamp": t, "uuid": "a1",
+         "parentUuid": "u1", "isSidechain": False,
+         "message": {"role": "assistant", "model": "m", "content": [
+             {"type": "text", "text": "b"},
+             {"type": "fallback", "from": {"model": "m1"}, "to": {"model": "m2"}}]}},
+        {"type": "system", "subtype": "turn_duration", "timestamp": t,
+         "uuid": "s1", "content": "x"},
+        {"type": "user", "cwd": "proj-A", "timestamp": t, "uuid": "u2",
+         "parentUuid": "a1", "message": {"role": "user", "content": [
+             {"type": "image",
+              "source": {"data": "AA", "media_type": "image/png", "type": "base64"}}]}},
+    ]
+    raw = dump_jsonl(rows)
+    snap = _snapshot(Harness.CLAUDE, "33333333-3333-3333-3333-333333333333",
+                     raw, "unclassified-jsonl-v1", None)
+    return ClaudeExtractor().extract(snap)
+
+
+def test_distill_counts_new_meta_types() -> None:
+    result = distill(_claude_new_metas_extracted(), source_pointer=SOURCE_POINTER,
+                     raw_pointer=RAW_POINTER, gzip_bytes=_GZIP_BYTES)
+    mc = result.record["meta_counts"]
+    assert mc.get("model_fallback") == 1
+    assert mc.get("image") == 1
+    assert mc.get("unknown") == 1  # the turn_duration system-subtype meta
+
+
+def _claude_repeated_usage_extracted() -> ExtractedSession:
+    t1, t2 = "2026-01-02T08:04:06Z", "2026-01-02T08:04:08Z"
+    usage = {"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+             "input_tokens": 5, "output_tokens": 7}
+    def asst(uuid, parent, ts):
+        return {"type": "assistant", "cwd": "proj-A", "timestamp": ts, "uuid": uuid,
+                "parentUuid": parent, "isSidechain": False,
+                "message": {"role": "assistant", "model": "m", "usage": dict(usage),
+                            "content": [{"type": "text", "text": "x"}]}}
+    rows = [
+        {"type": "user", "cwd": "proj-A", "timestamp": t1, "uuid": "u1",
+         "parentUuid": None,
+         "message": {"role": "user", "content": [{"type": "text", "text": "a"}]}},
+        asst("a1", "u1", t1),
+        asst("a2", "a1", t2),  # IDENTICAL usage counts -> would false-dup under old dedup
+    ]
+    raw = dump_jsonl(rows)
+    snap = _snapshot(Harness.CLAUDE, "44444444-4444-4444-4444-444444444444",
+                     raw, "unclassified-jsonl-v1", None)
+    return ClaudeExtractor().extract(snap)
+
+
+def test_distill_sums_repeated_usage_into_token_totals() -> None:
+    result = distill(_claude_repeated_usage_extracted(), source_pointer=SOURCE_POINTER,
+                     raw_pointer=RAW_POINTER, gzip_bytes=_GZIP_BYTES)
+    totals = result.record["token_totals"]
+    # summed across the two identical-usage messages
+    assert totals == {"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+                      "input_tokens": 10, "output_tokens": 14}
+
+
+def _claude_modern_compaction_extracted() -> ExtractedSession:
+    t1, t2 = "2026-01-02T08:04:06Z", "2026-01-02T08:04:09Z"
+    rows = [
+        {"type": "user", "cwd": "proj-A", "timestamp": t1, "uuid": "u1",
+         "parentUuid": None,
+         "message": {"role": "user", "content": [{"type": "text", "text": "a"}]}},
+        {"type": "system", "subtype": "compact_boundary", "timestamp": t2,
+         "content": "Conversation compacted", "uuid": "c1",
+         "compactMetadata": {"trigger": "manual", "preTokens": 100, "postTokens": 10,
+                             "durationMs": 5}},
+        {"type": "assistant", "cwd": "proj-A", "timestamp": t2, "uuid": "a1",
+         "parentUuid": "u1", "isSidechain": False,
+         "message": {"role": "assistant", "model": "m",
+                     "content": [{"type": "text", "text": "b"}]}},
+    ]
+    raw = dump_jsonl(rows)
+    snap = _snapshot(Harness.CLAUDE, "55555555-5555-5555-5555-555555555555",
+                     raw, "unclassified-jsonl-v1", None)
+    return ClaudeExtractor().extract(snap)
+
+
+def test_distill_accepts_modern_rich_compaction() -> None:
+    result = distill(_claude_modern_compaction_extracted(),
+                     source_pointer=SOURCE_POINTER, raw_pointer=RAW_POINTER,
+                     gzip_bytes=_GZIP_BYTES)
+    assert result.record["compaction_count"] == 1
+    # modern trigger surfaces as the compaction reason label
+    assert result.compactions[0]["reasons"] == ["manual"]
+
+
+def _claude_dangling_call_extracted() -> ExtractedSession:
+    t = "2026-01-02T08:04:06Z"
+    rows = [
+        {"type": "user", "cwd": "proj-A", "timestamp": t, "uuid": "u1",
+         "parentUuid": None,
+         "message": {"role": "user", "content": [{"type": "text", "text": "go"}]}},
+        {"type": "assistant", "cwd": "proj-A", "timestamp": t, "uuid": "a1",
+         "parentUuid": "u1", "isSidechain": False,
+         "message": {"role": "assistant", "model": "m", "content": [
+             {"type": "tool_use", "id": "call-1", "name": "Read", "input": {}}]}},
+    ]
+    raw = dump_jsonl(rows)
+    snap = _snapshot(Harness.CLAUDE, "66666666-6666-6666-6666-666666666666",
+                     raw, "unclassified-jsonl-v1", None)
+    return ClaudeExtractor().extract(snap)
+
+
+def test_distill_tolerates_dangling_tool_call() -> None:
+    # Real/active sessions legitimately end with unresolved tool calls (result
+    # not yet written). Only ORPHAN RESULTS (result without a call) are invalid.
+    result = distill(_claude_dangling_call_extracted(), source_pointer=SOURCE_POINTER,
+                     raw_pointer=RAW_POINTER, gzip_bytes=_GZIP_BYTES)
+    assert result.record["tool_call_count"] == 1
+    assert result.record["tool_result_count"] == 0

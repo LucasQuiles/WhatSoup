@@ -21,6 +21,21 @@ class Extractor(Protocol):
     def extract(self, snapshot: SourceSnapshot) -> ExtractedSession: ...
 
 
+def optional_timestamp(value: object) -> str | None:
+    """Timestamp for records where absence is legitimate.
+
+    Modern sessions interleave non-content control records (e.g. Claude's
+    ``mode`` / ``last-prompt`` / ``permission-mode``) that carry no ``timestamp``
+    field. Those must not gate extraction, so an absent timestamp yields ``None``.
+    A present value is still validated through ``normalize_timestamp`` -- the
+    leniency covers absence, not malformed timestamps. Content records keep the
+    strict ``normalize_timestamp`` and are unaffected.
+    """
+    if value is None:
+        return None
+    return normalize_timestamp(value)
+
+
 def normalize_timestamp(value: object) -> str:
     if not isinstance(value, str) or not value:
         raise QseshError("QS-E-SOURCE-SCHEMA", phase="extractor-timestamp")
