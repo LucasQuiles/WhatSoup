@@ -15403,7 +15403,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].chat_jid).toBe(CHAT);
     expect(rows[0].sender_jid).toBe(SENDER_A);
-    expect(allReplies(sentMessages).join('\n')).toContain('Okay — preferring my strongest model');
+    expect(allReplies(sentMessages).join('\n')).toContain('Pinned my strongest model for 24h');
     const events = await readEvents();
     expect(events.some((e) => e.event === 'model_preference_set' && e.reasonCode === 'intent_strongest_set')).toBe(true);
   });
@@ -15414,7 +15414,9 @@ describe('NL routing handlers (nlRouting flag)', () => {
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
     const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
     expect(status).toBeDefined();
-    expect(status).toContain('Preference: strongest for you in this chat');
+    // D13a copy fix: chat-scoped, last-writer-wins — "for you" mis-implies
+    // per-user ownership, so the line now names the chat, not the sender.
+    expect(status).toContain('This chat is on strongest');
     expect(status).toContain('steers new sessions');
     // b28 r2b: the Delegation/Authority display lines were removed from this
     // surface (the invariant lives in the system prompt). D11: /why is gone —
@@ -15485,14 +15487,14 @@ describe('NL routing handlers (nlRouting flag)', () => {
     // /model status reflects A's pin as the chat's active preference rather
     // than "none". (Pre-D13 this test asserted 'Preference: none' for B —
     // that was the old per-sender READ contract; the owner chose
-    // last-writer-wins for the read side. The render copy still says "for
-    // you", which is now imprecise for a non-authoring viewer — a rendering
-    // nuance out of scope for this read-collapse change.)
+    // last-writer-wins for the read side. C3's copy fix closes the "for you"
+    // nuance flagged here — the render now says "This chat is on X", which
+    // is accurate for B, a non-authoring viewer, too.)
     const { runtime, sentMessages } = makeRoutingRuntime();
     await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_A, isGroup: true, content: '/model strongest' }));
     await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_B, isGroup: true, content: '/model status', messageId: 'msg-2' }));
     const bStatus = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
-    expect(bStatus).toContain('Preference: strongest for you in this chat');
+    expect(bStatus).toContain('This chat is on strongest');
     // WRITE stays per-sender — unchanged (only the read collapsed).
     const rows = prefRows();
     expect(rows).toHaveLength(1);
@@ -15512,6 +15514,27 @@ describe('NL routing handlers (nlRouting flag)', () => {
     const opts = capturedSessionManagerOptsRef.current as unknown as { provider?: string; model?: string };
     expect(opts).not.toBeNull();
     expect(opts?.provider).toBe('codex-cli');
+  });
+
+  it('carry-forward-e: sender A pins in a group, sender B /resets — the chat pin is gone for everyone (D13 chat-scoped clear)', async () => {
+    // Proves the SEMANTIC reversal on the clear command, not just the row
+    // count: A pins (chat-scoped write, still keyed to A per D13a), B — who
+    // never set anything — /resets, and the pin is gone for BOTH the read
+    // (/model status) and the next spawn, for either sender.
+    cfgAny().agentFallbacks = [{ provider: 'codex-cli' }];
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_A, isGroup: true, content: '/model codex-cli' }));
+    expect(prefRows()).toHaveLength(1);
+    await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_B, isGroup: true, content: '/reset', messageId: 'msg-2' }));
+    // D13: /reset is chat-scoped — clears EVERY sender's row for the chat,
+    // not just B's own (B never had one).
+    expect(prefRows()).toHaveLength(0);
+    await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_A, isGroup: true, content: '/model status', messageId: 'msg-3' }));
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toContain('Preference: none');
+    await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_B, isGroup: true, content: 'hello there', messageId: 'msg-4' }));
+    const opts = capturedSessionManagerOptsRef.current as unknown as { provider?: string };
+    expect(opts?.provider).toBe('claude-cli');
   });
 
   it('a blocked pin gets ONE visible notice per transition, default route, pin survives', async () => {
@@ -16088,100 +16111,320 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(status).toContain('Model: provider default (not configured)');
   });
 
-  // ── B26 item 2: /model list — the config-derived model catalogue ──────────
-  // Rendered ENTIRELY from config (the primary, the fallback chain, the tier
-  // vocabulary) — the served weight is unobservable, so nothing here claims
-  // to be it. When nlRoutingTiers is absent the catalogue says so honestly
-  // instead of implying strongest/fastest resolve somewhere specific.
+  // ── B26 item 2 / C3: /model list — the config-derived model catalogue ─────
+  // Rendered ENTIRELY from config (the primary, the fallback chain) — the
+  // served model is unobservable, so nothing here claims to be it. D15: the
+  // strongest/fastest verb mapping is hidden entirely (not just "unconfigured
+  // — default routing") when nlRoutingTiers is absent — advertising a no-op
+  // verb is worse than omitting it.
 
-  it('B26: /model list renders the configured primary, every fallback entry, and the pin syntax', async () => {
+  it('C3: /model list renders the configured primary and every fallback entry, plain language', async () => {
     cfgAny().agentFallbacks = [
       { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
       { provider: 'opencode-cli', model: 'glm/glm-5.2' },
     ];
     const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
-    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
+    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Configured models*'));
     expect(catalogue).toBeDefined();
     // b28 r2d: one bullet per MODEL (primary + each fallback), never a joined chain.
     expect(catalogue).toContain('• Primary: claude-cli (claude-opus-4-8 — configured)');
     expect(catalogue).toContain('• Fallback: opencode-cli (kimi/kimi-k3)');
     expect(catalogue).toContain('• Fallback: opencode-cli (glm/glm-5.2)');
     expect(catalogue).not.toContain('opencode-cli (kimi/kimi-k3) → opencode-cli (glm/glm-5.2)');
-    expect(catalogue).toContain('/model provider-id');
-    expect(catalogue).toContain('/reset');
+    // D6: the jargon pin hint is gone from this synchronous block — the
+    // pickable menu (with its own "reply /model N" affordance) is the
+    // dynamic follow-up section, asserted separately below.
+    expect(catalogue).not.toContain('/model provider-id');
   });
 
-  // ── b28 r2d: /model list is a true bulleted MODEL list ────────────────────
-  // One `• ` bullet per MODEL (primary + each fallback), each provider carrying
-  // its config-derived modifiers; the D7 caveat moves to a single trailing
-  // _italic_ line. Owner exhibit-3 shape (canary config: no primary model,
-  // kimi/glm fallbacks, no tiers) — the two third-party fallback IDs are
-  // unrecognized by the catalog and MUST carry no invented lifecycle modifier.
-  it('b28 r2d: /model list renders one bullet per model (primary + each fallback), caveat as trailing italic', async () => {
+  it('b28 r2d: /model list renders one bullet per model (primary + each fallback), no invented lifecycle tag for unrecognized ids', async () => {
     cfgAny().agentFallbacks = [
       { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
       { provider: 'opencode-cli', model: 'glm/glm-5.2' },
     ];
     const { runtime, sentMessages } = makeRoutingRuntime(); // canary: no primary model
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
-    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
+    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Configured models*'));
     expect(catalogue).toBeDefined();
     expect(catalogue).toContain('• Primary: claude-cli (provider default — no model configured)');
     expect(catalogue).toContain('• Fallback: opencode-cli (kimi/kimi-k3)');
     expect(catalogue).toContain('• Fallback: opencode-cli (glm/glm-5.2)');
     expect(catalogue).not.toContain('opencode-cli (kimi/kimi-k3) → opencode-cli (glm/glm-5.2)');
-    // D7 caveat as a single trailing _italic_ line, not baked into the header.
-    expect(catalogue).toContain('_Which weight actually serves is not observable here._');
+    // D6: the deleted D7 caveat line is gone — no replacement string either.
+    expect(catalogue).not.toContain('is not observable here');
     // Unrecognized third-party IDs → NO invented lifecycle modifier (D7 honesty).
     expect(catalogue).not.toContain('[newer:');
     expect(catalogue).not.toContain('[deprecated');
   });
 
-  it('b28 r2d: /model list tags config-derived modifiers — a legacy primary model and a configured tier target', async () => {
+  it('b28 r2d: /model list tags config-derived modifiers — a legacy primary model and a configured strongest target', async () => {
     cfgAny().agentFallbacks = [{ provider: 'anthropic-api' }];
     cfgAny().nlRoutingTiers = { strongest: 'anthropic-api' };
     const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-5' });
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
-    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
+    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Configured models*'));
     expect(catalogue).toBeDefined();
     // Legacy primary → catalog advisory modifier, derived from the configured ID.
     expect(catalogue).toContain(
       '• Primary: claude-cli (claude-opus-4-5 — configured) [newer: claude-opus-4-8]',
     );
-    // Fallback provider IS the configured strongest tier → tier tag (from config).
+    // Fallback provider IS the configured strongest target → tag (from config).
     expect(catalogue).toContain('• Fallback: anthropic-api [strongest]');
   });
 
-  it('B26: /model list says tiers are not configured on this line rather than implying they resolve (honesty)', async () => {
+  it('D15: /model list hides the strongest/fastest mapping entirely when no tiers are configured (no-op must not be advertised)', async () => {
     // Canary shape: nlRoutingTiers ABSENT — strongest/fastest fall to the
-    // default route, and the catalogue must say so.
+    // default route. D15: the whole line is omitted, not "unconfigured".
     const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
-    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
+    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Configured models*'));
     expect(catalogue).toBeDefined();
-    expect(catalogue).toContain('tiers not configured on this line — default routing only');
     expect(catalogue).not.toContain('strongest →');
+    expect(catalogue).not.toContain('fastest →');
+    expect(catalogue).not.toMatch(/\btier\b/i);
   });
 
   it('B26: /model list renders the nlRoutingTiers mappings when configured', async () => {
     cfgAny().nlRoutingTiers = { strongest: 'anthropic-api' };
     const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
-    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
+    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Configured models*'));
     expect(catalogue).toBeDefined();
     expect(catalogue).toContain('strongest → anthropic-api');
     expect(catalogue).toContain('fastest → not configured (default route)');
-    expect(catalogue).not.toContain('tiers not configured on this line');
   });
 
   it('B26: /model list stays honest when no primary model and no fallbacks are configured', async () => {
     const { runtime, sentMessages } = makeRoutingRuntime();
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
-    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
+    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Configured models*'));
     expect(catalogue).toBeDefined();
     expect(catalogue).toContain('Primary: claude-cli (provider default — no model configured)');
     expect(catalogue).toContain('Fallbacks: none configured');
+  });
+
+  // ── C3: plain-language guard — the banned-jargon words must never appear
+  // anywhere in a /model list reply (the D6 beta-test failure #2 fix).
+  it('C3: /model list never renders the banned jargon words (line/tier/weight)', async () => {
+    cfgAny().agentFallbacks = [
+      { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
+      { provider: 'opencode-cli', model: 'glm/glm-5.2' },
+    ];
+    cfgAny().nlRoutingTiers = { strongest: 'opencode-cli' };
+    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+    const combined = allReplies(sentMessages).join('\n');
+    expect(combined).not.toMatch(/\bline\b/i);
+    expect(combined).not.toMatch(/\btier\b/i);
+    expect(combined).not.toMatch(/\bweight\b/i);
+  });
+
+  // ── C3/D6/D16/D17: the numbered pickable menu — the dynamic follow-up
+  // section must become a genuine menu (numbers + a reply affordance), not a
+  // status readout (the beta-test's #1 failure).
+  describe('C3: pickable /model list menu + snapshot seam', () => {
+    it('renders a dense, flat, 1-based numbered menu across primary + every named fallback, with a reply affordance', async () => {
+      cfgAny().agentFallbacks = [
+        { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
+        { provider: 'opencode-cli', model: 'glm/glm-5.2' },
+      ];
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      const menu = allReplies(sentMessages).find((t) => t.includes('*Pick a model:*'));
+      expect(menu).toBeDefined();
+      expect(menu).toContain('1. claude-cli (claude-opus-4-8) (current)');
+      expect(menu).toContain('2. opencode-cli (kimi/kimi-k3)');
+      expect(menu).toContain('3. opencode-cli (glm/glm-5.2)');
+      expect(menu).toContain('Reply `/model N` to switch to that one.');
+    });
+
+    it('snapshots the SAME ordered (providerId, id) entries the numbers were rendered from (shared-entries invariant)', async () => {
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
+      const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      const snapshot = (runtime as unknown as {
+        catalogueSnapshot: { resolveCataloguePick: (jid: string, n: number) => { providerId: string; id: string } | null };
+      }).catalogueSnapshot;
+      expect(snapshot.resolveCataloguePick(CHAT, 1)).toEqual({ providerId: 'claude-cli', id: 'claude-opus-4-8' });
+      expect(snapshot.resolveCataloguePick(CHAT, 2)).toEqual({ providerId: 'opencode-cli', id: 'kimi/kimi-k3' });
+      // Out of range → miss, never a wraparound or a stale guess.
+      expect(snapshot.resolveCataloguePick(CHAT, 3)).toBeNull();
+    });
+
+    it('a fallback with no configured model does not get a number, but IS still shown as a bullet in the config block', async () => {
+      cfgAny().agentFallbacks = [{ provider: 'codex-cli' }]; // no model set
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      const config = allReplies(sentMessages).find((t) => t.includes('*Configured models*'));
+      expect(config).toContain('• Fallback: codex-cli');
+      const menu = allReplies(sentMessages).find((t) => t.includes('*Pick a model:*'));
+      expect(menu).toBeDefined();
+      expect(menu).toContain('1. claude-cli (claude-opus-4-8) (current)');
+      expect(menu).not.toContain('codex-cli');
+    });
+  });
+
+  // ── C3/D6/D10/D16: the deterministic 1-step apply — /model N resolves the
+  // snapshot and writes a MODEL-level pin in one step; /model N default pins
+  // the provider only; a miss is a DISCLOSED re-render, never a silent pick.
+  describe('C3: /model N apply — hit/miss/N-default', () => {
+    it('HIT: /model N writes a model-level pin in one step (F12 shape) and echoes the D10 affordance', async () => {
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'msg-2' }));
+      const rows = prefRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].intent).toBe('provider_specific');
+      expect(rows[0].requested_provider).toBe('opencode-cli');
+      // F12 model-pin shape: requestedModel + validatedProvider populated,
+      // modelPinVerified explicitly false (unverified — deferred to the
+      // route-resolution consumer, not asserted here; see the write→route
+      // seam note on recordRouteModelPin).
+      expect(rows[0].requested_model).toBe('kimi/kimi-k3');
+      expect(rows[0].validated_provider).toBe('opencode-cli');
+      expect(rows[0].model_pin_verified).toBe(0);
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('Pinned kimi/kimi-k3 for 24h');
+      expect(reply).toContain('reply keep to make it permanent, /reset to undo');
+      // D10: the old deferral copy must never appear anywhere in this flow.
+      expect(reply).not.toContain('applies from your next session');
+      expect(reply).not.toContain('Applies from your next session');
+    });
+
+    it('HIT round-trip: a model-level pin survives read-back through rowToPreference and renders on /model status', async () => {
+      // Proves the write survives chat-preference-db's strict cross-field
+      // validation on READ (not just the raw row asserted above), and that
+      // the D13a copy fix renders the pinned MODEL, not just the provider.
+      // NOTE (documented deferral, see recordRouteModelPin): resolveRoute
+      // does not yet consume requestedModel, so the separate "Model:" line
+      // still reflects the configured PRIMARY, not the pin — both lines are
+      // expected to appear together until a later slice wires spawn
+      // consumption; this test pins that exact, honest shape.
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'msg-2' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status', messageId: 'msg-3' }));
+      const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+      expect(status).toBeDefined();
+      expect(status).toContain('This chat is on kimi/kimi-k3');
+      // Documented deferral: the Model: line is not yet pin-aware.
+      expect(status).toContain('Model: claude-opus-4-8 (configured)');
+    });
+
+    it('MISS: /model N against an expired/absent snapshot is a DISCLOSED re-render, never a silent pick', async () => {
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      // No prior /model list in this chat — no snapshot exists yet.
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2' }));
+      expect(prefRows()).toHaveLength(0);
+      const replies = allReplies(sentMessages);
+      expect(replies.some((t) => t.includes("That list moved — here's the current one."))).toBe(true);
+      // The disclosure is followed by a fresh, pickable re-render — not silence.
+      expect(replies.some((t) => t.includes('*Configured models*'))).toBe(true);
+      expect(replies.some((t) => t.includes('*Pick a model:*'))).toBe(true);
+    });
+
+    it('MISS: an out-of-range N against a live snapshot is also a disclosed re-render, no row written', async () => {
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' }); // no fallbacks — 1 pickable entry
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 9', messageId: 'msg-2' }));
+      expect(prefRows()).toHaveLength(0);
+      const replies = allReplies(sentMessages);
+      expect(replies.some((t) => t.includes("That list moved — here's the current one."))).toBe(true);
+    });
+
+    it('N-DEFAULT HIT: /model N default resolves the snapshot and pins the PROVIDER only (no model)', async () => {
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2 default', messageId: 'msg-2' }));
+      const rows = prefRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].intent).toBe('provider_specific');
+      expect(rows[0].requested_provider).toBe('opencode-cli');
+      // Provider default — no model dimension at all (contrast with the HIT case above).
+      expect(rows[0].requested_model).toBeNull();
+      expect(rows[0].validated_provider).toBeNull();
+      expect(rows[0].model_pin_verified).toBeNull();
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('Pinned `opencode-cli` for 24h');
+      expect(reply).not.toContain('applies from your next session');
+    });
+
+    it('N-DEFAULT MISS: an unresolvable N default is a disclosed re-render, no row written', async () => {
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 9 default' }));
+      expect(prefRows()).toHaveLength(0);
+      expect(allReplies(sentMessages).some((t) => t.includes("That list moved — here's the current one."))).toBe(true);
+    });
+
+    it('the trailing letter suffix (C1 grammar) is tolerated and ignored on a HIT', async () => {
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
+      const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2b', messageId: 'msg-2' }));
+      const rows = prefRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].requested_model).toBe('kimi/kimi-k3');
+    });
+
+    it('TRANSITION: /model N then /model N default on the SAME provider clears the model dimension, not a stale "already set"', async () => {
+      // Regression guard: recordRoutePreference's dedup used to match on
+      // intent+provider alone, so a prior model-level pin (same provider)
+      // would hit the "refreshed" branch and its `{ ...existing, ... }`
+      // spread silently PRESERVED requestedModel/validatedProvider/
+      // modelPinVerified instead of clearing them to the provider default.
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'msg-2' }));
+      expect(prefRows()[0].requested_model).toBe('kimi/kimi-k3');
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2 default', messageId: 'msg-3' }));
+      const rows = prefRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].requested_provider).toBe('opencode-cli');
+      // The model dimension must be CLEARED, not carried over from the prior pin.
+      expect(rows[0].requested_model).toBeNull();
+      expect(rows[0].validated_provider).toBeNull();
+      expect(rows[0].model_pin_verified).toBeNull();
+      // The reply must be the fresh pin echo, not the misleading "already set".
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('Pinned `opencode-cli` for 24h');
+      expect(reply).not.toContain('Already set');
+    });
+  });
+
+  it('C3/D15: /help hides strongest|fastest when no tiers are configured, and shows them when they are', async () => {
+    const { runtime: withoutTiers, sentMessages: repliesA } = makeRoutingRuntime();
+    await sendAndDrain(withoutTiers, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/help model' }));
+    const detailWithout = allReplies(repliesA).find((t) => t.includes('/model'));
+    expect(detailWithout).toBeDefined();
+    expect(detailWithout).not.toContain('strongest');
+    expect(detailWithout).not.toContain('fastest');
+
+    // mockQueue.enqueueText is a SHARED mock across runtime instances — clear
+    // it (matching the existing pattern elsewhere in this file) so the second
+    // allReplies() below doesn't pick up the first runtime's reply.
+    mockQueue.enqueueText.mockClear();
+    repliesA.length = 0;
+    cfgAny().nlRoutingTiers = { strongest: 'anthropic-api' };
+    const { runtime: withTiers, sentMessages: repliesB } = makeRoutingRuntime();
+    await sendAndDrain(withTiers, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/help model' }));
+    const detailWith = allReplies(repliesB).find((t) => t.includes('/model'));
+    expect(detailWith).toContain('strongest|fastest|provider-id');
+  });
+
+  it('C3: the verb/provider-id pin echo uses the same plain D10 affordance shape, no "for you"/deferral copy', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model strongest' }));
+    const reply = allReplies(sentMessages).join('\n');
+    expect(reply).toContain('Pinned my strongest model for 24h — reply keep to make it permanent, /reset to undo.');
+    expect(reply).not.toContain('for you in this chat');
+    expect(reply).not.toContain('applies from your next session');
+    expect(reply).not.toContain('Applies from your next session');
   });
 
   it('B26: bare /model appends the catalogue affordance line; explicit /model status does not', async () => {

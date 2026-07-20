@@ -103,11 +103,13 @@ import { resolveRoute, type RouteDecision } from './route-resolution.ts';
 import { deriveChatScope, emitRouteEvent, type ModelRouteEvent } from './route-events.ts';
 import { buildRoutingPromptContract, extractRouteIntents } from './route-intent.ts';
 import { isProviderId } from './providers/index.ts';
+import type { ProviderDescriptor } from './providers/provider-descriptor.ts';
+import { configPointer, scopedCatalogue } from './model-catalogue.ts';
+import { createCatalogueSnapshotCache, type CatalogueSnapshotCache, type CatalogueEntry } from './model-snapshot-cache.ts';
 import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
 import { formatChatRefForOwner } from '../../core/chat-display-name.ts';
-import { OWNER_BULLET, bulletedSection, modelModifierTags, modifierSuffix, formatAvailableModels, MODEL_CATALOGUE_CAP } from './owner-render-format.ts';
-import { resolveModelCatalogue } from './model-catalogue-resolver.ts';
+import { OWNER_BULLET, bulletedSection, modelModifierTags, modifierSuffix, MODEL_CATALOGUE_CAP } from './owner-render-format.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
 import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
@@ -794,6 +796,11 @@ export class AgentRuntime implements Runtime {
   private readonly agentFallbacks: AgentFallbackEntry[];
   private readonly replyGuaranteeTimeoutMs: number;
   private readonly registry: ToolRegistry;
+  /** Coordinate snapshot for numbered-drill stability (D16/D17) — the exact
+   *  ordered catalogue a `/model list` render showed, so `/model N` resolves
+   *  against what the user actually saw. Not wired to any consumer besides
+   *  the /model list render + apply path added in this task. */
+  private readonly catalogueSnapshot: CatalogueSnapshotCache;
 
   // single mode: one session, one queue
   private session: SessionManager | null = null;
@@ -2393,6 +2400,7 @@ export class AgentRuntime implements Runtime {
     );
     this.registry = new ToolRegistry();
     this.registerAllTools();
+    this.catalogueSnapshot = createCatalogueSnapshotCache();
 
     this.turnQueue = new TurnQueue({
       maxDepth: config.agentMaxQueueDepth,
@@ -4082,20 +4090,57 @@ export class AgentRuntime implements Runtime {
               // The config-derived pin/primary block sends IMMEDIATELY so "what
               // am I on" never waits on — or is lost to — the catalogue probe
               // (Q 2b#1).
-              this.sendDirect(chatJid, this.renderModelCatalogue());
-              // The dynamic per-harness available-models section follows as a
-              // separate message once the bounded + cached probe resolves —
-              // fire-and-forget so a slow harness never holds the turn (Q 2b#3).
-              void this.sendDynamicModelCatalogueSection(chatJid, filter);
+              this.sendModelCatalogue(chatJid, filter);
               break;
             }
-            if (sub === 'default') {
-              // R8: clear the sender's route override, then forward /model
-              // default to the CLI so its own model reset still runs — do not
-              // shadow that base capability. The forwarded turn owns terminal
-              // inbound durability, so this path must NOT complete it locally.
-              this.clearRoutePreference(chatJid, chatKey, senderKey);
-              forwardAfterLocalCommand = content as string;
+            // D6/D16: `/model N default` — resolve N against the snapshot the
+            // user was shown, pin the PROVIDER default (no model). Checked
+            // before the bare `/model N` form (below) since both are
+            // digit-leading. `sub === 'default'` alone is unreachable — C2
+            // dropped `default` from the grammar, so a bare `/model default`
+            // now forwards to the agent before this handler ever sees it.
+            const nDefaultMatch = /^(\d+)\s+default$/.exec(sub);
+            if (nDefaultMatch) {
+              const n = parseInt(nDefaultMatch[1]!, 10);
+              const entry = this.catalogueSnapshot.resolveCataloguePick(chatJid, n);
+              if (!entry) {
+                this.sendDirect(chatJid, "_That list moved — here's the current one._");
+                this.sendModelCatalogue(chatJid, null);
+                break;
+              }
+              const outcome = this.recordRoutePreference(chatJid, chatKey, senderKey, 'provider_specific', entry.providerId);
+              if (outcome === 'refreshed') {
+                this.sendDirect(chatJid, '_Already set — extended for another 24h. /reset to go back to the default route._');
+                break;
+              }
+              if (outcome === 'sticky_kept') {
+                this.sendDirect(chatJid, '_Already set (sticky). /reset to go back to the default route._');
+                break;
+              }
+              this.sendDirect(chatJid, `_Pinned \`${entry.providerId}\` for 24h — reply keep to make it permanent, /reset to undo._`);
+              break;
+            }
+            // D6/D10/D16: `/model N` / `/model N<letter>` — a named-model pin
+            // in ONE step. The optional trailing letter (C1's structured
+            // grammar) is tolerated and ignored; the snapshot is a flat list.
+            if (/^\d+[a-z]?$/i.test(sub)) {
+              const n = parseInt(sub, 10);
+              const entry = this.catalogueSnapshot.resolveCataloguePick(chatJid, n);
+              if (!entry) {
+                this.sendDirect(chatJid, "_That list moved — here's the current one._");
+                this.sendModelCatalogue(chatJid, null);
+                break;
+              }
+              const outcome = this.recordRouteModelPin(chatJid, chatKey, senderKey, entry.providerId, entry.id);
+              if (outcome === 'refreshed') {
+                this.sendDirect(chatJid, '_Already set — extended for another 24h. /reset to go back to the default route._');
+                break;
+              }
+              if (outcome === 'sticky_kept') {
+                this.sendDirect(chatJid, '_Already set (sticky). /reset to go back to the default route._');
+                break;
+              }
+              this.sendDirect(chatJid, `_Pinned ${entry.id} for 24h — reply keep to make it permanent, /reset to undo._`);
               break;
             }
             const isIntent = sub === 'strongest' || sub === 'fastest';
@@ -4139,8 +4184,13 @@ export class AgentRuntime implements Runtime {
               this.sendDirect(chatJid, '_Already set (sticky). /reset to go back to the default route._');
               break;
             }
+            // D10: same plain, timing-neutral affordance shape as the numbered-
+            // pick paths above — no "for you" (chat-scoped, D13a) and no
+            // "applies from your next session" (the deferral beta-testers read
+            // as broken; Task G makes the switch take effect and will enrich
+            // this echo, not restate the old deferral).
             const what = isProvider ? `\`${sub}\`` : `my ${sub} model`;
-            this.sendDirect(chatJid, `_Okay — preferring ${what} for you in this chat (24h). Applies from your next session — say /new to start one now._`);
+            this.sendDirect(chatJid, `_Pinned ${what} for 24h — reply keep to make it permanent, /reset to undo._`);
             break;
           }
 
@@ -4156,9 +4206,12 @@ export class AgentRuntime implements Runtime {
             // W1-T5: registry-derived render (help-render.ts), pure functions
             // of (registry, {nlRouting}) — no runtime reads (R3c-1.3). Detail
             // shares the flag: alias commands hide local semantics when off (D7).
+            // D15: tiersConfigured is a config read, kept in the runtime layer
+            // and passed IN — help-render.ts stays a pure function of its args.
+            const helpOpts = { nlRouting: config.nlRouting === true, tiersConfigured: this.tiersConfigured() };
             const helpText = classified.args
-              ? renderHelpDetail(classified.args, { nlRouting: config.nlRouting === true })
-              : renderHelp({ nlRouting: config.nlRouting === true });
+              ? renderHelpDetail(classified.args, helpOpts)
+              : renderHelp(helpOpts);
             this.sendDirect(chatJid, helpText);
             break;
           }
@@ -8450,7 +8503,17 @@ export class AgentRuntime implements Runtime {
   ): 'set' | 'refreshed' | 'sticky_kept' {
     const now = Date.now();
     const existing = getPreference(this.db, chatKey, senderKey, now);
-    if (existing && existing.intent === intent && existing.requestedProvider === requestedProvider) {
+    // D6/D10: `existing.requestedModel === null` is part of the dedup guard —
+    // this write path always carries NO model (see below), so a re-confirm
+    // must only "refresh" a row that ALSO carries no model. Without this, a
+    // prior model-level pin (recordRouteModelPin) on the same provider would
+    // dedup-match on intent+provider alone and the refresh branch's `{
+    // ...existing, ... }` spread would silently PRESERVE the stale
+    // requestedModel/validatedProvider/modelPinVerified fields — so `/model N
+    // default` after `/model N` would say "Already set" and leave the model
+    // pin in place instead of clearing it to a provider-only default. Forcing
+    // the full-overwrite ("set") branch here correctly drops the model dimension.
+    if (existing && existing.intent === intent && existing.requestedProvider === requestedProvider && existing.requestedModel === null) {
       // Re-confirmation refreshes the TTL (F08) — "already set" must stay
       // true for a full window after the user re-asserts it. Sticky rows
       // (expiresAt null) are never demoted to ephemeral by a repeat.
@@ -8472,8 +8535,8 @@ export class AgentRuntime implements Runtime {
       // this_thread preferences are ephemeral by design (24h TTL);
       // sticky pins require explicit confirmation and are a later slice.
       expiresAt: now + PREFERENCE_TTL_MS,
-      // Provider-pin path — carries no MODEL pin (that arrives via the /config
-      // model // /model <N> write path in a later slice).
+      // Provider-pin path — carries no MODEL pin (that is recordRouteModelPin,
+      // the /model <N> write path, below).
       requestedModel: null,
       validatedProvider: null,
       modelPinVerified: null,
@@ -8486,6 +8549,78 @@ export class AgentRuntime implements Runtime {
       source: 'user',
       userVisible: true,
       reasonCode: requestedProvider ? 'user_pin_set' : `intent_${intent}_set`,
+    });
+    return 'set';
+  }
+
+  /**
+   * Model-level pin write (D6) — sibling of recordRoutePreference, for a pin
+   * resolved from a numbered `/model N` pick rather than a bare provider-id
+   * or intent verb. Mirrors the same TTL/refresh/sticky logic and event
+   * shape; the difference is the F12 model-pin fields (chat-preference-db):
+   * `requestedModel`/`validatedProvider` are populated and `modelPinVerified`
+   * is written `false` (unverified) — the picked entry came from a catalogue
+   * snapshot that can be up to 15 minutes stale (TTL), and the provider that
+   * ultimately SERVES the pin at resolution time (a fallback window, a later
+   * provider transition) is not guaranteed to still be `providerId`, so
+   * verification is deferred to the route-resolution consumer rather than
+   * asserted here.
+   *
+   * ⚠️ WRITE→ROUTE SEAM (verified, not yet closed): `resolveRoute`
+   * (route-resolution.ts) does not read `requestedModel`/`validatedProvider`/
+   * `modelPinVerified` at all today — only `requestedProvider`. This write is
+   * therefore CORRECT and durable (the F12 contract, `decideModelPinResolution`
+   * in config-surface.ts, is written against exactly this shape) but NOT YET
+   * CONSUMED: a `/model N` pin steers the provider on the next session spawn
+   * (same as a provider-id pin) but not yet the specific model. Closing that
+   * — fetching the effective provider's catalogue, calling
+   * decideModelPinResolution, and wiring the result into spawn — is Slice
+   * C.3/Task G's job ("makes the switch take effect immediately"), not this
+   * task's. See the task report for the full seam trace.
+   */
+  private recordRouteModelPin(
+    chatJid: string,
+    chatKey: string,
+    senderKey: string,
+    providerId: string,
+    model: string,
+  ): 'set' | 'refreshed' | 'sticky_kept' {
+    const now = Date.now();
+    const existing = getPreference(this.db, chatKey, senderKey, now);
+    if (
+      existing &&
+      existing.intent === 'provider_specific' &&
+      existing.requestedProvider === providerId &&
+      existing.requestedModel === model
+    ) {
+      if (existing.expiresAt !== null) {
+        setPreference(this.db, { ...existing, updatedAt: now, expiresAt: now + PREFERENCE_TTL_MS });
+        return 'refreshed';
+      }
+      return 'sticky_kept';
+    }
+    setPreference(this.db, {
+      chatJid: chatKey,
+      senderJid: senderKey,
+      intent: 'provider_specific',
+      requestedProvider: providerId,
+      scope: 'this_thread',
+      pinStrict: true,
+      fallbackPermitted: false,
+      updatedAt: now,
+      expiresAt: now + PREFERENCE_TTL_MS,
+      requestedModel: model,
+      validatedProvider: providerId,
+      modelPinVerified: false,
+    });
+    this.emitRouteEventChecked({
+      event: 'model_preference_set',
+      conversationKey: toConversationKey(chatJid),
+      provider: providerId,
+      modelRef: model,
+      source: 'user',
+      userVisible: true,
+      reasonCode: 'user_model_pin_set',
     });
     return 'set';
   }
@@ -8658,32 +8793,40 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
+   * D15: true when at least one of strongest/fastest maps to a provider via
+   * nlRoutingTiers — the single source both renderModelCatalogue and /help
+   * (help-render.ts's tiersConfigured input) read, so the two surfaces can
+   * never disagree about whether the verbs are a no-op on this instance.
+   */
+  private tiersConfigured(): boolean {
+    const tiers = config.nlRoutingTiers;
+    return tiers !== null && tiers !== undefined && (tiers.strongest !== undefined || tiers.fastest !== undefined);
+  }
+
+  /**
    * B26 /model list — the model catalogue. Rendered ENTIRELY from config
-   * (honesty contract: the served weight is unobservable, so nothing here is
+   * (honesty contract: the served model is unobservable, so nothing here is
    * presented as what actually serves — the primary and every fallback entry
-   * are configuration, and the tier vocabulary maps to nlRoutingTiers or is
-   * honestly declared unconfigured). Names follow the shipped F8 convention:
-   * provider (model).
+   * are configuration). Names follow the shipped F8 convention:
+   * provider (model). D6/D15: plain language — the words "line"/"tier"/
+   * "weight" are banned from this render; the strongest/fastest verb mapping
+   * only appears when nlRoutingTiers is actually configured (advertising a
+   * no-op is worse than omitting it).
    */
   private renderModelCatalogue(): string {
     const primary = this.model !== undefined
       ? `${this.agentProvider} (${this.model} — configured)`
       : `${this.agentProvider} (provider default — no model configured)`;
-    // Tier vocabulary: default always exists (the primary route). strongest/
-    // fastest resolve ONLY through nlRoutingTiers — absent map means they
-    // degrade to the default route, and the catalogue must say so rather than
-    // imply they resolve somewhere specific (canary shape: tiers unset).
+    // strongest/fastest resolve ONLY through nlRoutingTiers — an absent map
+    // means the verbs are a no-op on this instance, so D15 hides the whole
+    // line rather than advertising it (canary shape: tiers unset).
     const tiers = config.nlRoutingTiers;
-    const tiersConfigured = tiers !== null && tiers !== undefined && (tiers.strongest !== undefined || tiers.fastest !== undefined);
-    const tierLine = tiersConfigured
-      ? `Tiers: default → primary route; strongest → ${tiers.strongest ?? 'not configured (default route)'}; fastest → ${tiers.fastest ?? 'not configured (default route)'}`
-      : 'Tiers: default → primary route; strongest/fastest: tiers not configured on this line — default routing only';
+    const tiersConfigured = this.tiersConfigured();
     // b28 r2d: one `• ` bullet per MODEL (primary + each fallback). Each bullet
     // carries its provider + config-derived modifiers ONLY (D7): a catalog
     // lifecycle advisory keyed off the configured model ID (silent for IDs the
-    // catalog does not recognize, e.g. third-party kimi/glm) and a tier tag
-    // when the provider is a configured nlRoutingTiers target. The served
-    // weight stays unobservable — the caveat is the trailing _italic_ line.
+    // catalog does not recognize, e.g. third-party kimi/glm) and a tag when
+    // the provider is a configured strongest/fastest target.
     const modelBullets: string[] = [
       `Primary: ${primary}${modifierSuffix(modelModifierTags(this.model, this.agentProvider, tiers))}`,
     ];
@@ -8695,47 +8838,116 @@ export class AgentRuntime implements Runtime {
     } else {
       modelBullets.push('Fallbacks: none configured');
     }
-    return [
-      '*Models on this line* (from config)',
+    const lines = [
+      '*Configured models*',
       ...modelBullets.map((b) => `${OWNER_BULLET}${b}`),
-      tierLine,
-      'Pin: `/model provider-id` — prefers it for you here (24h). Back: `/model default` or `/reset`.',
-      '_Which weight actually serves is not observable here._',
-    ].join('\n');
+    ];
+    if (tiersConfigured && tiers) {
+      lines.push(`strongest → ${tiers.strongest ?? 'not configured (default route)'}; fastest → ${tiers.fastest ?? 'not configured (default route)'}`);
+    }
+    return lines.join('\n');
+  }
+
+  /** Shared by the `/model list` handler and a disclosed re-render on a
+   *  snapshot miss (D16): the config-derived block sends first (unconditional,
+   *  synchronous — Q 2b#1), then the pickable menu follows fire-and-forget. */
+  private sendModelCatalogue(chatJid: string, filter: string | null): void {
+    this.sendDirect(chatJid, this.renderModelCatalogue());
+    void this.sendDynamicModelCatalogueSection(chatJid, filter);
   }
 
   /**
-   * Send the DYNAMIC per-harness available-models section as the follow-up to
-   * the config-derived `/model list` block (which the caller already delivered).
-   * Fire-and-forget: the catalogue source (an opencode spawn or an anthropic
-   * HTTP call) is bounded + cached, but a slow harness must never hold the turn
-   * (Q 2b#3). Never throws — the resolver is total; the catch is a belt so a bug
-   * here just omits the section (the config block already went out).
+   * A fallback entry's credential state, described the same way Task A's
+   * `describeProvider` describes a bare provider id — but MODEL-aware (an
+   * entry carries `model`, which changes the resolved key service for a
+   * multi-model harness like opencode-cli). Scoped to the configured fallback
+   * chain ONLY (never a global provider sweep): probing a provider's
+   * credential this instance was never told to use would trigger a real,
+   * unmocked keyring/keychain lookup for no operational reason.
+   */
+  private fallbackProviderDescriptor(entry: AgentFallbackEntry): ProviderDescriptor {
+    // Same-provider shortcut mirrors isEntryCredentialed/routablePinTargets —
+    // a same-provider entry shares the primary's unconditional routability
+    // and is never re-probed.
+    if (entry.provider === this.agentProvider) {
+      return { id: entry.provider, configured: true, state: 'present-valid', audience: 'keyed' };
+    }
+    const state = resolveProviderCredentialState({
+      provider: entry.provider,
+      model: entry.model,
+      providerConfig: fallbackProviderConfigFor(entry.provider, this.agentProvider, this.agentProviderConfig),
+    });
+    return {
+      id: entry.provider,
+      configured: isProviderRoutable(state),
+      state,
+      audience: state === 'native' ? 'native' : 'keyed',
+    };
+  }
+
+  /**
+   * Send the DYNAMIC pickable model menu as the follow-up to the config-
+   * derived `/model list` block (which the caller already delivered).
+   * D6/D16/D17: the pickable set is the primary (if a model is configured)
+   * plus every fallback entry that names a concrete model — the exact
+   * (provider, model) pairs renderModelCatalogue already enumerates as
+   * bullets, so a numbered pick always names something the user just saw.
+   * Numbers are dense, 1-based, flat across providers.
+   *
+   * SNAPSHOT SEAM (spiked, do not deviate): sendDirect enqueues text
+   * asynchronously and returns void — there is no synchronous outbound msgId
+   * here — so the snapshot is written under `latestByChat` semantics only
+   * (a synthetic, stable, non-colliding id; never a real WhatsApp msgId).
+   * SHARED-ENTRIES INVARIANT: `entries` below is the SAME ordered list the
+   * numbers are rendered from, built exactly once.
+   *
+   * Never throws — a rendering bug here just omits the section (the config
+   * block already went out).
    */
   private async sendDynamicModelCatalogueSection(chatJid: string, filter: string | null): Promise<void> {
     try {
-      const provider = this.agentProvider;
-      const binary = getProviderBinary(provider) ?? provider;
-      const listing = await resolveModelCatalogue(provider, binary, { nowMs: Date.now() });
-      // `/model list` is a DIRECT, solicited request, so it ALWAYS renders — even
-      // on structural absence (no-adapter / no-credential), where the NAMED reason
-      // ("no catalogue adapter for codex-cli") is the true answer and silence would
-      // leave the user unable to tell "unsupported here" from "broken" (Q 2026-07-20:
-      // silence is a bad answer to a direct question). OAuth sourcing makes a healthy
-      // claude-cli harness `ok`, so a structural reason here is now rare + informative,
-      // not the permanent dead-end the earlier suppression guarded against. Suppression
-      // of structural absence belongs to a future UNSOLICITED/aggregate render (the
-      // /config overview), which gates on isStructuralCatalogueAbsence.
-      this.sendDirect(chatJid, formatAvailableModels({
-        harnessLabel: provider,
-        currentModelId: this.model ?? null,
-        fallbackModelIds: this.agentFallbacks
-          .map((e) => e.model)
-          .filter((m): m is string => m !== undefined),
-        listing,
-        filter,
-        cap: MODEL_CATALOGUE_CAP,
-      }));
+      const candidates: Array<{ provider: string; model: string }> = [];
+      if (this.model !== undefined) candidates.push({ provider: this.agentProvider, model: this.model });
+      for (const e of this.agentFallbacks) {
+        if (e.model !== undefined) candidates.push({ provider: e.provider, model: e.model });
+      }
+      const pool = filter
+        ? candidates.filter((e) => e.model.toLowerCase().includes(filter.toLowerCase()))
+        : candidates;
+      const shown = pool.slice(0, MODEL_CATALOGUE_CAP);
+
+      const entries: CatalogueEntry[] = shown.map((e) => ({ providerId: e.provider, id: e.model }));
+      this.catalogueSnapshot.putCatalogueSnapshot(chatJid, `model-list:${chatJid}`, entries);
+
+      const lines: string[] = [];
+      if (shown.length > 0) {
+        lines.push('*Pick a model:*');
+        shown.forEach((e, i) => {
+          const isCurrent = e.provider === this.agentProvider && e.model === this.model;
+          lines.push(`${i + 1}. ${e.provider} (${e.model})${isCurrent ? ' (current)' : ''}`);
+        });
+        lines.push('Reply `/model N` to switch to that one.');
+        if (pool.length > shown.length) {
+          lines.push(`showing 1–${shown.length} of ${pool.length} — /model list <text> to narrow`);
+        }
+      } else if (filter !== null) {
+        lines.push(`_No configured model matches '${filter}'._`);
+      } else {
+        lines.push('_No named models configured to pick from yet._');
+      }
+
+      // D6 discovery: a configured fallback provider whose key is missing.
+      // Deduped to the first entry per provider — one line per provider even
+      // when several fallback entries share it (e.g. two opencode-cli models).
+      const firstEntryByProvider = new Map<string, AgentFallbackEntry>();
+      for (const e of this.agentFallbacks) {
+        if (!firstEntryByProvider.has(e.provider)) firstEntryByProvider.set(e.provider, e);
+      }
+      const descriptors = [...firstEntryByProvider.values()].map((e) => this.fallbackProviderDescriptor(e));
+      const { configPointers } = scopedCatalogue(descriptors);
+      for (const id of configPointers) lines.push(`_${configPointer(id)}_`);
+
+      this.sendDirect(chatJid, lines.join('\n'));
     } catch (err) {
       log.warn({ err, instance: this.instanceName }, '/model list dynamic catalogue section failed');
     }
@@ -8774,8 +8986,14 @@ export class AgentRuntime implements Runtime {
       live ? live.model : next.model,
       live ? live.provider : nextProvider,
     );
+    // Copy fix: the read is chat-scoped, last-writer-wins (D13/D13a) — "for
+    // you" mis-implies per-user ownership even when a DIFFERENT sender set
+    // it. "This chat is on X" is accurate in both a DM and a group, and never
+    // names the setter (that would reintroduce the internal-concept leak the
+    // plain-language rule bans). A model pin shows the model; otherwise the
+    // provider/intent, as before.
     const prefLine = pref
-      ? `Preference: ${pref.requestedProvider ?? pref.intent} for you in this chat` +
+      ? `This chat is on ${pref.requestedModel ?? (pref.requestedProvider ?? pref.intent)}` +
         (pref.expiresAt !== null
           ? ` (expires in ~${Math.max(1, Math.round((pref.expiresAt - Date.now()) / 3_600_000))}h)`
           : '') +

@@ -90,6 +90,31 @@ describe('B21-B /help fixes (RED-first)', () => {
     expect(renderHelpDetail('reset', { nlRouting: true })).toContain('`/reset`');
   });
 
+  it('C3/D15: strongest|fastest are hidden from BOTH the /model list line and the /model detail when tiersConfigured is false', () => {
+    const list = renderHelp({ nlRouting: true, tiersConfigured: false });
+    expect(list).toContain('/model');
+    expect(list).not.toContain('strongest');
+    expect(list).not.toContain('fastest');
+    expect(list).toContain('pin provider-id');
+
+    const detail = renderHelpDetail('model', { nlRouting: true, tiersConfigured: false });
+    expect(detail).toContain('`/model [status|list|provider-id]`');
+    expect(detail).not.toContain('strongest');
+    expect(detail).not.toContain('fastest');
+  });
+
+  it('C3/D15: tiersConfigured defaults to true — every existing caller (omitting it) keeps showing the verbs', () => {
+    const list = renderHelp({ nlRouting: true });
+    expect(list).toContain('strongest|fastest|provider-id');
+    const detail = renderHelpDetail('model', { nlRouting: true });
+    expect(detail).toContain('strongest|fastest|provider-id');
+  });
+
+  it('C3/D15: tiersConfigured:true renders the verbs explicitly (byte-identical to the default)', () => {
+    const list = renderHelp({ nlRouting: true, tiersConfigured: true });
+    expect(list).toContain('strongest|fastest|provider-id');
+  });
+
   it('#3: detail arg is normalized — case, leading slash, first token only', () => {
     expect(renderHelpDetail('Status', { nlRouting: false })).toContain('`/status`');
     expect(renderHelpDetail('/new', { nlRouting: false })).toContain('`/new`');
