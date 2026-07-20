@@ -23,6 +23,13 @@ export const E164_RE = /^\+[1-9]\d{6,14}$/;
 export const SIGNAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
+ * Signal V2 group id shape: base64 (standard alphabet, optional padding),
+ * min 16 chars. Distinct from E.164 (leading '+') and UUID (dashes), so a
+ * destination can be classified without a resolveRecipient round-trip.
+ */
+export const SIGNAL_GROUP_ID_RE = /^[A-Za-z0-9+/]{16,}={0,2}$/;
+
+/**
  * Signal connection mode. Mirrors the Twilio inboundMode split:
  * - 'poll'    — adapter polls `receive` at pollIntervalMs
  * - 'stream'  — adapter opens a long-lived receive subscription (signal-cli

@@ -47,7 +47,7 @@ import type {
   ReactionEvent,
 } from '../contract/events.ts';
 import type { SupportsReactions, SupportsTyping, SupportsReadReceipts, SupportsDelete } from '../contract/extensions.ts';
-import { E164_RE, SIGNAL_UUID_RE, type SignalConfig } from './types.ts';
+import { E164_RE, SIGNAL_UUID_RE, SIGNAL_GROUP_ID_RE, type SignalConfig } from './types.ts';
 import type { InboundSignal, SignalPort, SignalPortError } from './port.ts';
 
 // ---------------------------------------------------------------------------
@@ -293,6 +293,16 @@ export class SignalAdapter
     return this.self;
   }
 
+  /**
+   * True iff a conversation ref addresses a Signal V2 group (base64 group id
+   * shape). Used by the connection bridge to set IncomingMessage.isGroup —
+   * the contract envelope carries no group flag, and the id shape is the
+   * only stateless discriminator (E.164 starts '+', UUID has dashes).
+   */
+  isGroupConversation(ref: ConversationRef): boolean {
+    return ref.channel === this.channelId && SIGNAL_GROUP_ID_RE.test(ref.id);
+  }
+
   // ── Send ─────────────────────────────────────────────────────────────────
 
   async sendText(
@@ -315,16 +325,17 @@ export class SignalAdapter
       });
     }
 
-    // 1b. Destination must be E.164 OR a Signal UUID. Fail before the network
-    // call rather than round-tripping to signal-cli's `resolveRecipient` for
-    // an obvious miss.
-    if (!E164_RE.test(target.id) && !SIGNAL_UUID_RE.test(target.id)) {
+    // 1b. Destination must be E.164, a Signal UUID, or a base64 V2 group id.
+    // Fail before the network call rather than round-tripping to signal-cli's
+    // `resolveRecipient` for an obvious miss.
+    const isGroupTarget = SIGNAL_GROUP_ID_RE.test(target.id);
+    if (!isGroupTarget && !E164_RE.test(target.id) && !SIGNAL_UUID_RE.test(target.id)) {
       throw new ConversationNotFoundError({
         channelId: this.channelId,
         operation: 'sendText',
         correlationId,
         scope: 'conversation',
-        message: `target id is not a valid E.164 destination or Signal UUID`,
+        message: `target id is not a valid E.164 destination, Signal UUID, or group id`,
       });
     }
 
@@ -343,7 +354,9 @@ export class SignalAdapter
 
     let timestamp: number;
     try {
-      const result = await this.port.send({ recipient: target.id, body: text });
+      const result = isGroupTarget
+        ? await this.port.send({ groupId: target.id, body: text })
+        : await this.port.send({ recipient: target.id, body: text });
       timestamp = result.timestamp;
     } catch (err) {
       throw mapPortError(err, this.channelId, 'sendText', correlationId, 'request');
@@ -596,11 +609,10 @@ export class SignalAdapter
 
   private buildInboundMessage(record: InboundSignal): InboundMessage {
     const channelId = this.channelId;
-    // For inbound messages, the peer is the sender (record.source).
-    // For outbound echoes, the peer is the recipient (record.destination).
-    // The conversation keys on the PEER so send/receive for the same remote
-    // share one thread.
-    const peer = record.fromMe ? record.destination : record.source;
+    // Group envelopes thread under the group id (all members' traffic shares
+    // one conversation). 1:1 envelopes key on the PEER: sender for inbound,
+    // recipient for our own outbound echoes.
+    const peer = record.groupId ?? (record.fromMe ? record.destination : record.source);
     const senderId = record.fromMe ? this.selfRef().id : record.source;
     const ts = new Date(record.timestamp);
     return {

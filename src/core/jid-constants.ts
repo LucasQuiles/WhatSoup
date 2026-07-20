@@ -15,6 +15,8 @@ export const DOMAIN_LID = 'lid';
 export const DOMAIN_GROUP = 'g.us';
 /** Bare domain for SMS transport JIDs (after the @) */
 export const DOMAIN_SMS = 'sms';
+/** Bare domain for Signal transport JIDs (after the @) */
+export const DOMAIN_SIGNAL = 'signal';
 
 /** WhatsApp personal chat JID suffix */
 export const JID_PERSONAL = `@${DOMAIN_PERSONAL}`;
@@ -24,6 +26,8 @@ export const JID_LID = `@${DOMAIN_LID}`;
 export const JID_GROUP = `@${DOMAIN_GROUP}`;
 /** SMS transport JID suffix */
 export const JID_SMS = `@${DOMAIN_SMS}`;
+/** Signal transport JID suffix */
+export const JID_SIGNAL = `@${DOMAIN_SIGNAL}`;
 
 export type WhatsAppDeliveryNamespace =
   | typeof DOMAIN_PERSONAL
@@ -74,6 +78,22 @@ export function fromSmsJid(jid: string): string {
   return jid.endsWith(JID_SMS) ? jid.slice(0, -JID_SMS.length) : jid;
 }
 
+/**
+ * Build a Signal JID from a Signal identifier (UUID or E.164 address).
+ * Idempotent: already-suffixed addresses are returned as-is.
+ */
+export function toSignalJid(address: string): string {
+  return address.endsWith(JID_SIGNAL) ? address : `${address}${JID_SIGNAL}`;
+}
+
+/**
+ * Strip the Signal JID suffix from an address (e.g. '<uuid>@signal' → '<uuid>').
+ * Tolerates an already-bare address.
+ */
+export function fromSignalJid(jid: string): string {
+  return jid.endsWith(JID_SIGNAL) ? jid.slice(0, -JID_SIGNAL.length) : jid;
+}
+
 // ── JID type detection ──────────────────────────────────────────────────────
 
 /** Check if a JID is a LID JID (@lid). */
@@ -89,6 +109,11 @@ export function isPnJid(jid: string | null | undefined): boolean {
 /** Check if a raw JID (not a conversation key) is a group JID. */
 export function isGroupJid(jid: string): boolean {
   return jid.endsWith(JID_GROUP);
+}
+
+/** Check if a JID is a Signal transport JID (@signal). */
+export function isSignalJid(jid: string | null | undefined): boolean {
+  return !!jid && jid.endsWith(JID_SIGNAL);
 }
 
 /** Check if a JID is an SMS JID (@sms). */

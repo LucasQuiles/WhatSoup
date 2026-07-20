@@ -210,3 +210,35 @@ describe('SignalAdapter — listener isolation', () => {
     expect(adapter.state().state).toBe('connected');  // transition succeeded regardless
   });
 });
+
+describe('SignalAdapter — group inbound', () => {
+  it('keys a group envelope conversation on the groupId, sender stays the member UUID', async () => {
+    const { adapter } = makeAdapter();
+    await adapter.connect();
+    const received: InboundMessage[] = [];
+    adapter.on('message', (m) => received.push(m));
+
+    adapter.handleInboundRecord({
+      timestamp: 5000,
+      source: 'uuid-member-1',
+      destination: 'k28v5L3zR9yX2wQvN1mP7g==',
+      groupId: 'k28v5L3zR9yX2wQvN1mP7g==',
+      body: 'group msg',
+      fromMe: false,
+      type: 'data',
+    });
+
+    expect(received).toHaveLength(1);
+    expect(received[0].conversation.id).toBe('k28v5L3zR9yX2wQvN1mP7g==');
+    expect(received[0].sender.id).toBe('uuid-member-1');
+    await adapter.disconnect();
+  });
+
+  it('isGroupConversation: true for group-id refs, false for UUID/E.164', async () => {
+    const { adapter } = makeAdapter();
+    const channelId = adapter.channelId;
+    expect(adapter.isGroupConversation({ channel: channelId, id: 'k28v5L3zR9yX2wQvN1mP7g==' })).toBe(true);
+    expect(adapter.isGroupConversation({ channel: channelId, id: '+15559990000' })).toBe(false);
+    expect(adapter.isGroupConversation({ channel: channelId, id: 'a1b2c3d4-1234-1234-1234-a1b2c3d4e5f6' })).toBe(false);
+  });
+});

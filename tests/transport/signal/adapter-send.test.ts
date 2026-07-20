@@ -69,7 +69,7 @@ describe('SignalAdapter — sendText validation', () => {
     const { adapter, channelId } = makeAdapter();
     const target = peerConversationRef(channelId, 'not-a-valid-id');
 
-    await expect(adapter.sendText(target, 'hi')).rejects.toThrow(/E\.164 destination or Signal UUID/);
+    await expect(adapter.sendText(target, 'hi')).rejects.toThrow(/not a valid E.164 destination, Signal UUID, or group id/);
   });
 
   it('rejects empty text', async () => {
@@ -146,5 +146,25 @@ describe('SignalAdapter — sendText port-error mapping', () => {
     const target = peerConversationRef(channelId, '+15559990000');
 
     await expect(adapter.sendText(target, 'hi')).rejects.toThrow(/Signal provider error/);
+  });
+});
+
+describe('SignalAdapter — group sends', () => {
+  it('routes a base64 group id via port.send({ groupId }) instead of recipient', async () => {
+    const { adapter, port, channelId } = makeAdapter();
+    const groupId = 'k28v5L3zR9yX2wQvN1mP7g==';
+    const target = peerConversationRef(channelId, groupId);
+
+    await adapter.sendText(target, 'group hello');
+
+    expect(port.sent).toHaveLength(1);
+    expect(port.sent[0]).toMatchObject({ groupId, body: 'group hello' });
+    expect(port.sent[0].recipient).toBeUndefined();
+  });
+
+  it('rejects a malformed group id (not base64 / too short)', async () => {
+    const { adapter, channelId } = makeAdapter();
+    await expect(adapter.sendText(peerConversationRef(channelId, 'short'), 'hi'))
+      .rejects.toThrow(/not a valid E.164 destination, Signal UUID, or group id/);
   });
 });
