@@ -16,7 +16,7 @@ APPLICATION_ID = 0x51534553
 CURRENT_SCHEMA_VERSION = 2
 BUSY_TIMEOUT_MS = 5_000
 V1_SCHEMA_SHA256 = "0bdb585c87f3020325985ac99a89101fc68aeb048a7af8607692346e5d6ee48c"
-SCHEMA_SHA256 = "63906fa769c894ae62a824ac1414deb80966db27853dbb0320ca7470979d1295"
+SCHEMA_SHA256 = "7af29e7d72c072d1eb7078af0d9bd89f63225dadd0e28d516f1fbe924392df66"
 _MIGRATION_2_NAME = "0002-session-size-metrics"
 
 _QID_CHECK = (
@@ -196,49 +196,61 @@ _V2_ADDITIONS = (
         dimension TEXT NOT NULL CHECK(dimension IN ('char','line','word','token','bytes','gzip_bytes')),
         value INTEGER NOT NULL CHECK(value>=0),
         metrics_version TEXT NOT NULL CHECK(length(metrics_version)>0),
+        unicode_version TEXT NOT NULL CHECK(length(unicode_version)>0),
         PRIMARY KEY(qid,side,dimension)
     ) STRICT""",
+    # unicode_version is carried through every aggregation. word/token counts
+    # resolve against the interpreter's Unicode database, so summing values from
+    # two Unicode versions under one metrics_version would average two different
+    # algorithms. It is a per-session attribute (one interpreter per distill) so
+    # it does not multiply per-session rows, but the corpus views MUST group by it
+    # or the mixing is silent.
     """CREATE VIEW session_content_reduction AS
     WITH metric_keys AS (
-        SELECT qid, metrics_version, dimension
+        SELECT qid, metrics_version, unicode_version, dimension
         FROM session_size_metrics
         WHERE side IN ('content_original','content_clean')
           AND dimension IN ('char','line','word','token')
-        GROUP BY qid, metrics_version, dimension
+        GROUP BY qid, metrics_version, unicode_version, dimension
     )
-    SELECT k.qid AS qid, k.metrics_version AS metrics_version, k.dimension AS dimension,
+    SELECT k.qid AS qid, k.metrics_version AS metrics_version,
+           k.unicode_version AS unicode_version, k.dimension AS dimension,
            o.value AS original, c.value AS clean,
            CASE WHEN o.value IS NULL OR c.value IS NULL THEN NULL ELSE o.value-c.value END AS delta,
            CASE WHEN o.value IS NULL OR c.value IS NULL OR o.value=0 THEN NULL
                 ELSE CAST(o.value-c.value AS REAL)/o.value END AS reduction_ratio
     FROM metric_keys k
     LEFT JOIN session_size_metrics o
-      ON o.qid=k.qid AND o.metrics_version=k.metrics_version AND o.dimension=k.dimension
+      ON o.qid=k.qid AND o.metrics_version=k.metrics_version
+     AND o.unicode_version=k.unicode_version AND o.dimension=k.dimension
      AND o.side='content_original'
     LEFT JOIN session_size_metrics c
-      ON c.qid=k.qid AND c.metrics_version=k.metrics_version AND c.dimension=k.dimension
+      ON c.qid=k.qid AND c.metrics_version=k.metrics_version
+     AND c.unicode_version=k.unicode_version AND c.dimension=k.dimension
      AND c.side='content_clean'""",
     """CREATE VIEW corpus_size_totals AS
-    SELECT metrics_version, dimension, side, SUM(value) AS total
-    FROM session_size_metrics GROUP BY metrics_version, dimension, side""",
+    SELECT metrics_version, unicode_version, dimension, side, SUM(value) AS total
+    FROM session_size_metrics GROUP BY metrics_version, unicode_version, dimension, side""",
     """CREATE VIEW corpus_reduction_by_harness AS
-    SELECT r.metrics_version AS metrics_version, s.harness AS harness, r.dimension AS dimension,
+    SELECT r.metrics_version AS metrics_version, r.unicode_version AS unicode_version,
+           s.harness AS harness, r.dimension AS dimension,
            SUM(r.original) AS original, SUM(r.clean) AS clean,
            CASE WHEN COUNT(r.original)=COUNT(*) AND COUNT(r.clean)=COUNT(*)
                 THEN SUM(r.original)-SUM(r.clean) ELSE NULL END AS delta,
            CASE WHEN COUNT(r.original)!=COUNT(*) OR COUNT(r.clean)!=COUNT(*) OR SUM(r.original)=0
                 THEN NULL ELSE CAST(SUM(r.original)-SUM(r.clean) AS REAL)/SUM(r.original) END AS reduction_ratio
     FROM session_content_reduction r JOIN sessions s ON s.qid=r.qid
-    GROUP BY r.metrics_version, s.harness, r.dimension""",
+    GROUP BY r.metrics_version, r.unicode_version, s.harness, r.dimension""",
     """CREATE VIEW corpus_reduction_by_project AS
-    SELECT r.metrics_version AS metrics_version, s.project AS project, r.dimension AS dimension,
+    SELECT r.metrics_version AS metrics_version, r.unicode_version AS unicode_version,
+           s.project AS project, r.dimension AS dimension,
            SUM(r.original) AS original, SUM(r.clean) AS clean,
            CASE WHEN COUNT(r.original)=COUNT(*) AND COUNT(r.clean)=COUNT(*)
                 THEN SUM(r.original)-SUM(r.clean) ELSE NULL END AS delta,
            CASE WHEN COUNT(r.original)!=COUNT(*) OR COUNT(r.clean)!=COUNT(*) OR SUM(r.original)=0
                 THEN NULL ELSE CAST(SUM(r.original)-SUM(r.clean) AS REAL)/SUM(r.original) END AS reduction_ratio
     FROM session_content_reduction r JOIN sessions s ON s.qid=r.qid
-    GROUP BY r.metrics_version, s.project, r.dimension""",
+    GROUP BY r.metrics_version, r.unicode_version, s.project, r.dimension""",
 )
 
 DDL = _V1_DDL + _V2_ADDITIONS

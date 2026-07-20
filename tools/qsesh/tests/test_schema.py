@@ -135,11 +135,11 @@ def _seed_size_metrics(
     clean: int,
 ) -> None:
     connection.execute(
-        "INSERT INTO session_size_metrics(qid,side,dimension,value,metrics_version) VALUES(?,?,?,?,?)",
+        "INSERT INTO session_size_metrics(qid,side,dimension,value,metrics_version,unicode_version) VALUES(?,?,?,?,?,'16.0.0')",
         (qid, "content_original", dimension, original, metrics_version),
     )
     connection.execute(
-        "INSERT INTO session_size_metrics(qid,side,dimension,value,metrics_version) VALUES(?,?,?,?,?)",
+        "INSERT INTO session_size_metrics(qid,side,dimension,value,metrics_version,unicode_version) VALUES(?,?,?,?,?,'16.0.0')",
         (qid, "content_clean", dimension, clean, metrics_version),
     )
 
@@ -203,7 +203,7 @@ def test_fresh_schema_has_exact_objects_columns_versions_and_checksum(
         assert APPLICATION_ID == 0x51534553
         assert (
             SCHEMA_SHA256
-            == "63906fa769c894ae62a824ac1414deb80966db27853dbb0320ca7470979d1295"
+            == "7af29e7d72c072d1eb7078af0d9bd89f63225dadd0e28d516f1fbe924392df66"
         )
         assert (
             connection.execute("PRAGMA application_id").fetchone()[0] == APPLICATION_ID
@@ -759,11 +759,11 @@ def test_reduction_views_preserve_incomplete_metric_pairs_as_null_reductions(
         _seed_session(connection, qid="qs-abcdefghij", digest=b"d" * 32, native_id="n1")
         _seed_session(connection, qid="qs-bbbbbbbbbb", digest=b"e" * 32, native_id="n2")
         connection.execute(
-            "INSERT INTO session_size_metrics(qid,side,dimension,value,metrics_version) VALUES(?,?,?,?,?)",
+            "INSERT INTO session_size_metrics(qid,side,dimension,value,metrics_version,unicode_version) VALUES(?,?,?,?,?,'16.0.0')",
             ("qs-abcdefghij", "content_original", "char", 100, "m1"),
         )
         connection.execute(
-            "INSERT INTO session_size_metrics(qid,side,dimension,value,metrics_version) VALUES(?,?,?,?,?)",
+            "INSERT INTO session_size_metrics(qid,side,dimension,value,metrics_version,unicode_version) VALUES(?,?,?,?,?,'16.0.0')",
             ("qs-bbbbbbbbbb", "content_clean", "char", 25, "m1"),
         )
 
@@ -800,11 +800,11 @@ def test_reduction_views_keep_mismatched_metrics_versions_separate(
     try:
         _seed_session(connection)
         connection.execute(
-            "INSERT INTO session_size_metrics(qid,side,dimension,value,metrics_version) VALUES(?,?,?,?,?)",
+            "INSERT INTO session_size_metrics(qid,side,dimension,value,metrics_version,unicode_version) VALUES(?,?,?,?,?,'16.0.0')",
             ("qs-abcdefghij", "content_original", "char", 100, "m1"),
         )
         connection.execute(
-            "INSERT INTO session_size_metrics(qid,side,dimension,value,metrics_version) VALUES(?,?,?,?,?)",
+            "INSERT INTO session_size_metrics(qid,side,dimension,value,metrics_version,unicode_version) VALUES(?,?,?,?,?,'16.0.0')",
             ("qs-abcdefghij", "content_clean", "char", 25, "m2"),
         )
 
@@ -975,7 +975,7 @@ def test_session_size_metrics_rejects_invalid_dimension(tmp_path: Path) -> None:
         _seed_session(connection)
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
-                "INSERT INTO session_size_metrics(qid,side,dimension,value,metrics_version) VALUES(?,?,?,?,?)",
+                "INSERT INTO session_size_metrics(qid,side,dimension,value,metrics_version,unicode_version) VALUES(?,?,?,?,?,'16.0.0')",
                 ("qs-abcdefghij", "content_original", "not-a-dimension", 10, "m1"),
             )
     finally:
@@ -988,7 +988,7 @@ def test_session_size_metrics_rejects_negative_value(tmp_path: Path) -> None:
         _seed_session(connection)
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
-                "INSERT INTO session_size_metrics(qid,side,dimension,value,metrics_version) VALUES(?,?,?,?,?)",
+                "INSERT INTO session_size_metrics(qid,side,dimension,value,metrics_version,unicode_version) VALUES(?,?,?,?,?,'16.0.0')",
                 ("qs-abcdefghij", "content_original", "char", -1, "m1"),
             )
     finally:
@@ -1001,7 +1001,7 @@ def test_session_size_metrics_rejects_empty_metrics_version(tmp_path: Path) -> N
         _seed_session(connection)
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
-                "INSERT INTO session_size_metrics(qid,side,dimension,value,metrics_version) VALUES(?,?,?,?,?)",
+                "INSERT INTO session_size_metrics(qid,side,dimension,value,metrics_version,unicode_version) VALUES(?,?,?,?,?,'16.0.0')",
                 ("qs-abcdefghij", "content_original", "char", 10, ""),
             )
     finally:
@@ -1085,8 +1085,48 @@ def test_session_size_metrics_is_strict_rejecting_text_in_value(tmp_path) -> Non
     connection = open_database(tmp_path / "qsesh.db")
     _seed_session(connection)
     with pytest.raises(sqlite3.IntegrityError):
+        # Valid unicode_version supplied so this exercises the STRICT type check
+        # on `value`, not the NOT NULL constraint on unicode_version.
         connection.execute(
-            "INSERT INTO session_size_metrics(qid,side,dimension,value,metrics_version)"
-            " VALUES(?,?,?,?,?)",
-            ("qs-abcdefghij", "content_original", "char", "abc", "qsesh-metrics-v2"),
+            "INSERT INTO session_size_metrics"
+            "(qid,side,dimension,value,metrics_version,unicode_version)"
+            " VALUES(?,?,?,?,?,?)",
+            (
+                "qs-abcdefghij",
+                "content_original",
+                "char",
+                "abc",
+                "qsesh-metrics-v2",
+                "16.0.0",
+            ),
         )
+
+
+def test_corpus_views_partition_by_unicode_version(tmp_path) -> None:
+    """word/token counts resolve against the interpreter's Unicode database, so
+    two sessions counted under different Unicode versions must NOT be summed into
+    one corpus reduction ratio — that mixes values from two different counting
+    algorithms under one metrics_version. The corpus views must group by
+    unicode_version so each version aggregates separately."""
+    connection = open_database(tmp_path / "qsesh.db")
+    _seed_session(connection, qid="qs-aaaaaaaaaa", native_id="n-a", digest=b"a" * 32)
+    _seed_session(connection, qid="qs-bbbbbbbbbb", native_id="n-b", digest=b"b" * 32)
+    for qid, uv in (("qs-aaaaaaaaaa", "15.0.0"), ("qs-bbbbbbbbbb", "16.0.0")):
+        connection.execute(
+            "INSERT INTO session_size_metrics"
+            "(qid,side,dimension,value,metrics_version,unicode_version)"
+            " VALUES(?,?,?,?,?,?)",
+            (qid, "content_original", "word", 100, "qsesh-metrics-v2", uv),
+        )
+        connection.execute(
+            "INSERT INTO session_size_metrics"
+            "(qid,side,dimension,value,metrics_version,unicode_version)"
+            " VALUES(?,?,?,?,?,?)",
+            (qid, "content_clean", "word", 40, "qsesh-metrics-v2", uv),
+        )
+    rows = connection.execute(
+        "SELECT unicode_version, original FROM corpus_reduction_by_harness"
+        " WHERE dimension='word' ORDER BY unicode_version"
+    ).fetchall()
+    # Two DISTINCT unicode versions -> two rows, NOT one merged 200-total row.
+    assert rows == [("15.0.0", 100), ("16.0.0", 100)]
