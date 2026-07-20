@@ -195,8 +195,12 @@ describe('resolveRoute precedence', () => {
       pinnedProviderEligible: true,
       configuredModelByProvider: {},
     }));
-    expect(d.provider).toBe('opencode-cli');
-    expect(d.model).toBeUndefined();
+    expect(d).toEqual({
+      provider: 'opencode-cli',
+      model: undefined,
+      source: 'preference',
+      reasonCode: 'user_pin',
+    });
   });
 
   it('an eligible tier route to a credential-required provider (opencode-cli) threads its configured model (Finding 2 — tier)', () => {
