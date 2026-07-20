@@ -74,15 +74,20 @@ describe('projections (invariant 4: one state, two projections)', () => {
 });
 
 describe('spawnFailureCredentialNote (eligible-side disclosure — HEDGE, Q round 27)', () => {
-  it('present-expired-refreshable → a HEDGED note that states the observed and does NOT assert the cause', () => {
-    const note = spawnFailureCredentialNote('present-expired-refreshable');
-    expect(note).not.toBeNull();
-    // OBSERVED: sign-in expired + a refresh was expected. Pin the hedge, not a
-    // confident cause — the failure site can't prove the refresh was the cause.
-    expect(note).toMatch(/expired/i);
-    expect(note).toMatch(/likely|try re-authenticating/i);
-    // must NOT assert the unproven cause
-    expect(note).not.toMatch(/refresh failed/i);
+  it('present-expired-refreshable → the exact HEDGED note (positive pin, Q round 28)', () => {
+    // LOAD-BEARING: assert the FULL string, not a substring. A negative "does not
+    // contain 'refresh failed'" only catches that literal phrase — "refresh
+    // expired", "token refresh error", or any confident reword would pass green
+    // while reintroducing the assert-a-cause defect. Pinning the whole string
+    // means ANY wording change breaks this and forces a look at whether the new
+    // wording asserts a cause it can't prove.
+    expect(spawnFailureCredentialNote('present-expired-refreshable')).toBe(
+      "I couldn't start a session. Your sign-in looks expired (a refresh was expected), " +
+        'so that is the likely cause — try re-authenticating if this keeps happening.',
+    );
+    // Secondary (not load-bearing): a reword that adds a confident cause is caught
+    // by the full-string pin above; this just documents the specific defect shape.
+    expect(spawnFailureCredentialNote('present-expired-refreshable')).not.toMatch(/refresh failed/i);
   });
 
   it('every other state → null (caller keeps its generic failure message)', () => {
