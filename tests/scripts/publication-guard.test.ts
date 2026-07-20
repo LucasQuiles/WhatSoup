@@ -287,17 +287,25 @@ describe('publication guard tilde-relative home paths', () => {
       scanTextForPrivateLiterals('docs/public-note.md', `Operator checkout: ${labPath}`).map((issue) => issue.code),
     ).toEqual(['local-home-path']);
 
-    const claudePath = ['~', '.claude', 'settings.json'].join('/');
+    // A workspace dir that is not a standard OS/XDG dot-dir also identifies.
+    const docsPath = ['~', 'Projects', 'secret-thing'].join('/');
     expect(
-      scanTextForPrivateLiterals('docs/public-note.md', `Agent config: ${claudePath}`).map((issue) => issue.code),
+      scanTextForPrivateLiterals('docs/public-note.md', `Repo: ${docsPath}`).map((issue) => issue.code),
     ).toEqual(['local-home-path']);
+  });
 
-    // Ambiguous XDG form: the absolute rule flags /Users/<user>/.config/whatsoup,
-    // so the tilde form flags too (symmetry with the absolute-path rule).
-    const xdgPath = ['~', '.config', 'whatsoup'].join('/');
-    expect(
-      scanTextForPrivateLiterals('docs/public-note.md', `Install path: ${xdgPath}`).map((issue) => issue.code),
-    ).toEqual(['local-home-path']);
+  it('DROPS non-identifying tilde dot-dirs and ~/Library (precision — 2026-07-20)', () => {
+    // Precision change (Q rounds 7-8): the standard XDG/OS dot-dirs and Library
+    // identify nobody — `~` already hides the username — and were ~85% of the
+    // sweep noise. A mostly-noise gate trains bypass, so these are dropped. This
+    // is a reasoned blocklist exception: a hygiene signal, not a secrets gate.
+    for (const seg of ['.config', '.local', '.claude', '.ssh', '.cache', 'Library']) {
+      const dotPath = ['~', seg, 'whatsoup'].join('/');
+      expect(
+        scanTextForPrivateLiterals('docs/public-note.md', `Path: ${dotPath}`),
+        `~/${seg}/... should not flag`,
+      ).toEqual([]);
+    }
   });
 
   it('allows tilde paths whose first segment is on the shared allowlist (symmetry with the absolute rule)', () => {
@@ -310,6 +318,28 @@ describe('publication guard tilde-relative home paths', () => {
 
   it('does not match a bare tilde used as prose', () => {
     expect(scanTextForPrivateLiterals('docs/public-note.md', 'takes ~ 5 minutes to run')).toEqual([]);
+  });
+
+  it('flags absolute /Users/<name> and /home/<name> operator paths', () => {
+    for (const root of ['Users', 'home']) {
+      const p = ['', root, 'lucas', 'LAB'].join('/');
+      expect(
+        scanTextForPrivateLiterals('docs/public-note.md', `Checkout: ${p}`).map((i) => i.code),
+        `/${root}/lucas should flag`,
+      ).toEqual(['local-home-path']);
+    }
+  });
+
+  it('prefix-leak: /home/runner is allowlisted but /home/runnerX flags (full-segment allowlist)', () => {
+    // allowlist-inside-blocklist filters leak exactly here: a substring allow
+    // for "runner" must not also whitelist "runnerX", a real operator path.
+    const allow = ['', 'home', 'runner', 'work'].join('/');
+    expect(scanTextForPrivateLiterals('docs/public-note.md', `CI: ${allow}`)).toEqual([]);
+
+    const leak = ['', 'home', 'runnerX', 'work'].join('/');
+    expect(
+      scanTextForPrivateLiterals('docs/public-note.md', `Not CI: ${leak}`).map((i) => i.code),
+    ).toEqual(['local-home-path']);
   });
 
   it('fails release mode when a PUBLIC doc contains a tilde-relative operator home path', () => {
