@@ -14,6 +14,30 @@ canary; the P0 cluster should land before live fan-out). Scope: `deploy/scripts/
 
 ## P0 — must-fix before live canary (safety: heal-storm / state-loss / fail-open)
 
+> **✅ RECONCILED 2026-07-20 (main `61f388c61`): the entire P0 cluster is resolved on
+> main — code-complete AND tested. Verified item-by-item against current source (the
+> "re-verify before fixing" note above); 183 tests green
+> (`test_bot_errors_sentinel.py` 83 + `test_bot_errors_selfcheck.py` 100). This section's
+> table below is retained for historical context; each row's status is now:**
+>
+> | P0 | Status | Implementing evidence (code + test) |
+> |---|---|---|
+> | P0-1 | ✅ done | `run_once` persists `save_state` in a `finally` (`bot-errors-sentinel.py:1653-1655`) + `cycleSeq` generation counter (`:1631`) → `test_save_state_runs_even_if_central_heartbeat_write_raises` |
+> | P0-2 | ✅ done | `acquire_instance_lock` non-blocking `fcntl.flock` (`:1695`), taken in `main` (`:1754`), exits 0 if already running |
+> | P0-3 | ✅ done | `acquire_lock`/`release_lock` switched to `fcntl.flock` (auto-releases on process death — supersedes the PID-reclaim proposal, no stale lock possible) (`bot-errors-selfcheck.py:435-458`) → `test_deployer_failure_is_reported_and_lock_is_released` |
+> | P0-4 | ✅ done | (already marked) single-use token redeem via `run_redeem` (`:1712`) → `test_redeemed_token_replay_is_rejected` |
+> | P0-5 | ✅ done | `>= config.correlated_drift_freeze_threshold` (`:957`) → `test_p05_correlated_drift_freeze_fires_at_threshold` + `test_p05_below_threshold_does_not_freeze` |
+> | P0-6 | ✅ done | `mass_unreachable_confirmed` defers `tier1_heal_candidate → defer_mass_unreachable` (`:1610-1613`) → `test_p06_mass_unreachable_suppresses_tier1_heal_candidate` |
+> | P0-7 | ✅ done | pin re-read with `current_changed` abort (`bot-errors-selfcheck.py:901-912`) |
+> | P0-8 | ✅ done | lever `stat_error` surfaced as distinct fail-CLOSED class (`bot-errors-selfcheck.py:783-789`) → `test_lever_stat_error_on_disabled_path_escalates_not_silent` + fail-closed bundle/root stat_error |
+> | P0-9 | ✅ done | `default_pull_probe` rejects stale probes by `st_mtime` (`:679`) → `test_probe_path_stale_mtime_rejected` + `test_probe_path_fresh_mtime_accepted` |
+>
+> **Consequence:** the P0 *code* gate for live O3 fan-out is satisfied. The fan-out /
+> canary GO decision remains the owner's (this reconciliation only records that the
+> safety code exists and is tested; it does not authorize deployment). The remaining
+> `#1876` gap is the **live deployment** of the sentinel (owner / live-fleet-gated) plus
+> the P1 observability items still open below.
+
 | # | Risk | Where | Fix |
 |---|---|---|---|
 | P0-1 | **`save_state` not in `try/finally`** → a crash after pop/emit but before save loses cooldown keys, resets hysteresis/flap counters, and drops the `qRemediation` pop → duplicate escalations + heal storm. Single highest-leverage fix (closes ~3 HIGH). | `bot-errors-sentinel.py:run_once ~1391` | Wrap the per-cycle body so `save_state` runs in `finally`. Add a `cycle_id`/generation so workers can detect stale events. |
@@ -31,7 +55,7 @@ canary; the P0 cluster should land before live fan-out). Scope: `deploy/scripts/
 ## P1 — observability (the sentinel/selfcheck are the only components with no telemetry)
 
 - **JSONL cycle log** on both sentinel + selfcheck (match the repo's `append_private_jsonl` `{time,component,level,...}` convention): emit per-cycle host class/action transitions, SSH probe outcomes, heal results, fleet action.
-- **Countable metrics** (in state + log): heals attempted/succeeded/failed/preflight-failed per host; escalations per tier; flap events; quorum-suppressions; `q_unavailable` total; probe exceptions; heartbeat staleness; fleet coverage (`healthy/stalled/unreachable/tier1Candidate` counts).
+- **Countable metrics** (in state + log): heals attempted/succeeded/failed/preflight-failed per host; escalations per tier; flap events; quorum-suppressions; `q_unavailable` total; probe exceptions; heartbeat staleness; fleet coverage (`healthy/stalled/unreachable/tier1Candidate` counts). — *PARTIAL: a per-cycle `metrics` block is now in the central heartbeat (`compute_cycle_metrics`): `healCandidates`, `escalations`, `flapEscalations`, `correlatedDriftFreezes`, `concurrencyDeferrals`, `massUnreachableDeferrals`, `connectivitySuppressions`, `qUnavailable`, `actionEventsEmitted`, `attentionEventsEmitted`, plus a full `byAction` distribution. The sentinel is evaluation-only, so heal EXECUTION success/failure stays selfcheck-side; still open here: per-host breakdown, probe-exception + heartbeat-staleness counts, and the SSH probe-latency / `component`+`level` log-hygiene items below.*
 - **SSH probe latency** unrecorded → wrap `ssh_runtime_probe` with `monotonic()`, add `probeLatencySeconds` to signals.
 - **Log field hygiene:** add `component` + `level` to every record; ack file missing `requestId` (breaks end-to-end action→ack tracing).
 - **`fleet_sentinel` absent from watchdog `DEFAULT_CHECKS`**; no **`selfcheck_heartbeat` watchdog** (a dead selfcheck goes unnoticed up to `heartbeat_max_age` ~45m).

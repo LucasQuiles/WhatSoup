@@ -1,4 +1,5 @@
 import type { ChatModelPreference } from './chat-preference-db.ts';
+import { FALLBACK_MODEL_REQUIRED_PROVIDER_IDS } from '../../core/fallback-chain.ts';
 
 /**
  * Pure route-resolution core (owner-approved PR-plan v2, slice 2).
@@ -32,6 +33,40 @@ export interface RouteInputs {
    *  routable must degrade to the default route, never spawn a keyless
    *  session — the strict-pin doctrine applies to tier intents too. */
   tierProviderEligible: boolean;
+  /**
+   * Provider id → that provider's validated config model (from the
+   * instance's `agentFallbacks` entries — the same array
+   * `isEntryCredentialed`/`routablePinTargets` already read to PROVE a
+   * pin/tier target eligible). `undefined` for a provider with no matching
+   * entry, or an entry that carries no model.
+   *
+   * EXECPROFILE-CI-FIX Finding 2: a route to a provider in
+   * FALLBACK_MODEL_REQUIRED_PROVIDER_IDS (opencode-cli, the managed API
+   * providers) MUST carry a model — those providers have no provider-owned
+   * default and buildChildEnv hard-throws on null. Config admission already
+   * guarantees a static fallback/tier-target entry naming one of these
+   * providers has a model; this map is how resolveRoute reaches it instead
+   * of discarding it to `undefined`.
+   */
+  configuredModelByProvider: Readonly<Record<string, string | undefined>>;
+}
+
+/**
+ * The model a route to `provider` should carry when it is NOT the instance's
+ * own primary (which keeps `effectiveModel` unconditionally — see both call
+ * sites below). Only providers that cannot resolve their own default model
+ * (FALLBACK_MODEL_REQUIRED_PROVIDER_IDS) get the config's validated model
+ * threaded through; claude-cli/codex-cli/gemini-cli resolve their own
+ * default with no `-m` flag, so `undefined` stays correct for them.
+ *
+ * Defensive/fail-closed: if a required-model provider has no entry in
+ * `configuredModelByProvider` (shouldn't happen — config-validator enforces
+ * a model on every such entry at admission), this returns `undefined` same
+ * as today, so the existing buildChildEnv null-model guard still hard-fails
+ * the spawn rather than silently forwarding a wrong/absent credential.
+ */
+function targetModel(provider: string, configuredModelByProvider: Readonly<Record<string, string | undefined>>): string | undefined {
+  return FALLBACK_MODEL_REQUIRED_PROVIDER_IDS.has(provider) ? configuredModelByProvider[provider] : undefined;
 }
 
 export interface RouteDecision {
@@ -64,8 +99,13 @@ export function resolveRoute(i: RouteInputs): RouteDecision {
       return {
         provider: i.pref.requestedProvider,
         // Pinning the instance's own primary keeps the operator-configured
-        // model; only a genuine provider change drops to the provider default.
-        model: i.pref.requestedProvider === i.agentProvider ? i.effectiveModel : undefined,
+        // model; a genuine provider change drops to the provider default —
+        // UNLESS the target can't resolve one itself (opencode-cli et al.),
+        // in which case its own validated config model is threaded through,
+        // avoiding the null buildChildEnv otherwise hard-throws on (Finding 2).
+        model: i.pref.requestedProvider === i.agentProvider
+          ? i.effectiveModel
+          : targetModel(i.pref.requestedProvider, i.configuredModelByProvider),
         source: 'preference',
         reasonCode: 'user_pin',
       };
@@ -85,7 +125,13 @@ export function resolveRoute(i: RouteInputs): RouteDecision {
     if (i.tierProviderEligible) {
       return {
         provider: tier,
-        model: undefined,
+        // Same rule as the pin branch above: a tier that (unusually) maps
+        // back to the instance's own primary keeps the operator-configured
+        // model; a tier pointing at a required-model provider (opencode-cli
+        // et al.) threads that provider's validated config model instead of
+        // discarding it (Finding 2) — every other tier target keeps
+        // `undefined` and resolves its own provider default.
+        model: tier === i.agentProvider ? i.effectiveModel : targetModel(tier, i.configuredModelByProvider),
         source: 'preference',
         reasonCode: `intent_${i.pref.intent}`,
       };

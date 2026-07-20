@@ -36,9 +36,17 @@ describe('mergeOpencodeConfig — merge without clobbering', () => {
         enabled: true,
       },
     });
-    expect(merged.agent).toMatchObject({
-      'whatsoup-headless': { mode: 'primary' },
-    });
+    expect(merged).not.toHaveProperty('agent');
+  });
+
+  it('preserves sibling agents while removing the obsolete reserved inline profile', () => {
+    const agents = {
+      personal: { mode: 'subagent', permission: { '*': 'ask' } },
+      'whatsoup-headless': { mode: 'primary', permission: { edit: 'deny' } },
+    };
+    const merged = mergeOpencodeConfig({ agent: agents }, generatedMcp());
+
+    expect(merged.agent).toEqual({ personal: agents.personal });
   });
 
   it('preserves existing top-level keys and sibling mcp servers', () => {
@@ -86,9 +94,9 @@ describe('mergeOpencodeConfig — merge without clobbering', () => {
 
   it('does NOT add a provider block when no baseUrl is set', () => {
     const merged = mergeOpencodeConfig(null, generatedMcp(), { model: 'x' });
-    // Without a baseUrl the merge contains only the managed MCP/agent blocks:
+    // Without a baseUrl the merge contains only the managed MCP block:
     // no `provider` block and no top-level `model` rewrite leaks in.
-    expect(Object.keys(merged).sort()).toEqual(['agent', 'mcp']);
+    expect(Object.keys(merged)).toEqual(['mcp']);
   });
 });
 
@@ -152,7 +160,7 @@ describe('mergeOpencodeConfig — provider block apiKey env interpolation', () =
       model: 'MiniMax-M2',
       apiKeyService: 'minimax',
     });
-    expect(Object.keys(merged).sort()).toEqual(['agent', 'mcp']);
+    expect(Object.keys(merged)).toEqual(['mcp']);
   });
 });
 

@@ -27,11 +27,20 @@ import { PROVIDER_API_KEY_SERVICES } from '../lib/provider-key-service.ts';
 import { isRecord } from '../lib/type-guards.ts';
 import { isSamePhysicalDirectory } from '../lib/home-path.ts';
 import { resolveAgentModel } from './agent-model.ts';
-import { fallbackEntryKey, isSameAsPrimaryFallbackEntry, type AgentFallbackEntry } from './fallback-chain.ts';
+import {
+  fallbackEntryKey,
+  isSameAsPrimaryFallbackEntry,
+  FALLBACK_MODEL_REQUIRED_PROVIDER_IDS,
+  type AgentFallbackEntry,
+} from './fallback-chain.ts';
 import { DEFAULT_TRANSPORT_ID, isTransportId, TRANSPORT_IDS } from '../transport/registry.ts';
 import { ACCOUNT_RE } from './transport-refs.ts';
 import { E164_RE } from '../transport/twilio/types.ts';
 import RE2 from 're2';
+import {
+  isWhatSoupHeadlessExecutionProfile,
+  WHATSOUP_HEADLESS_EXECUTION_PROFILE,
+} from '../lib/opencode-execution-profile-contract.ts';
 
 export const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
 export const ACCESS_MODES = [
@@ -54,10 +63,9 @@ export const VALID_SESSION_SCOPES: ReadonlySet<string> = new Set([
   'per_chat',
 ]);
 
-// Managed-loop API providers (no CLI binary; the runtime drives the HTTP API
-// directly). A fallbackProvider of this type needs an explicit fallbackModel.
-const API_PROVIDER_IDS: ReadonlySet<string> = new Set(['openai-api', 'anthropic-api']);
-
+// FALLBACK_MODEL_REQUIRED_PROVIDER_IDS moved to fallback-chain.ts (SSOT,
+// imported above) so route-resolution.ts can consume the same set without
+// pulling this file's heavier module graph into its pure core.
 export interface ValidationError {
   /** Dotted path of the offending field (e.g. "agentOptions.sessionScope"). */
   field: string;
@@ -908,10 +916,10 @@ function validateAgentOptions(
       if (model !== undefined && (typeof model !== 'string' || model.trim() === '')) {
         return err(`${field}.model`, `${field}.model must be a non-empty string when provided`);
       }
-      if (API_PROVIDER_IDS.has(provider) && model === undefined) {
+      if (FALLBACK_MODEL_REQUIRED_PROVIDER_IDS.has(provider) && model === undefined) {
         return err(
           `${field}.model`,
-          `${field}.provider "${provider}" is an API provider and requires model to be set`,
+          `${field}.provider "${provider}" requires model to be set`,
         );
       }
       const entry: AgentFallbackEntry = typeof model === 'string'
@@ -956,20 +964,17 @@ function validateAgentOptions(
     }
   }
 
-  // Cross-field: an API-type fallbackProvider requires an explicit
-  // fallbackModel. The managed-loop providers (openai-api / anthropic-api)
-  // take their model from fallbackModel during a fallback window; without it
-  // the window would silently run on a provider-internal default the operator
-  // never chose. CLI fallback providers keep their own default model and stay
-  // valid without one.
+  // Cross-field: managed-loop API providers take their request model from
+  // fallbackModel, and OpenCode uses its provider prefix to select exactly one
+  // route credential. Other CLI fallbacks may keep their provider-owned default.
   if (
     typeof opts['fallbackProvider'] === 'string' &&
-    API_PROVIDER_IDS.has(opts['fallbackProvider']) &&
+    FALLBACK_MODEL_REQUIRED_PROVIDER_IDS.has(opts['fallbackProvider']) &&
     opts['fallbackModel'] === undefined
   ) {
     return err(
       'agentOptions.fallbackModel',
-      `agentOptions.fallbackProvider "${opts['fallbackProvider']}" is an API provider and requires agentOptions.fallbackModel to be set`,
+      `agentOptions.fallbackProvider "${opts['fallbackProvider']}" requires agentOptions.fallbackModel to be set`,
     );
   }
 
@@ -986,6 +991,17 @@ function validateAgentOptions(
       );
     }
     const pc = opts['providerConfig'] as Record<string, unknown>;
+    if (
+      pc['executionProfile'] !== undefined
+      && (
+        !isWhatSoupHeadlessExecutionProfile(pc['executionProfile'])
+      )
+    ) {
+      return err(
+        'agentOptions.providerConfig.executionProfile',
+        `agentOptions.providerConfig.executionProfile must be exactly "${WHATSOUP_HEADLESS_EXECUTION_PROFILE}" when configured`,
+      );
+    }
     // AGENT-ONLY: budget shape (not part of the shared baseUrl/apiKeyService
     // rules chat also uses — chatOptions.openaiProviderConfig has no budget).
     if (pc['budget'] !== undefined) {
@@ -1024,6 +1040,17 @@ function validateAgentOptions(
         'agentOptions.providerConfig.baseUrl is set but no model is configured — without an "agentOptions.model", top-level "model", or "models.conversation" the custom endpoint would never be used; set one that routes to it',
       );
     }
+  }
+
+  // OpenCode's exact-credential child environment is selected from the
+  // configured model prefix. Reject model-less routes during config admission
+  // so they cannot survive until session selection/spawn. Keep provider-owned
+  // defaults valid for Claude, Codex, and Gemini CLI routes.
+  if (opts['provider'] === 'opencode-cli' && resolveAgentModel(raw) === undefined) {
+    return err(
+      'model',
+      'agentOptions.provider "opencode-cli" requires a non-empty top-level model or models.conversation so its credential route can be selected',
+    );
   }
 
   return null;
