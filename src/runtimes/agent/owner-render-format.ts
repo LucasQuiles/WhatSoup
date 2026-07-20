@@ -76,8 +76,19 @@ export const MODEL_CATALOGUE_CAP = 12;
  *  the dead-knob defect (the actionable line lies when the real cause differs). */
 export type UnavailableReason =
   | { kind: 'no-adapter'; harness: string }
+  // 'no-key' = NO anthropic credential at all — neither the claude-cli's OAuth
+  // token nor an ANTHROPIC_API_KEY. This is a STRUCTURAL absence (no source
+  // exists → the caller suppresses the section). Vocabulary is credential-
+  // neutral: the live source is an OAuth Bearer token, not necessarily a key.
   | { kind: 'no-key' }
+  // 'key-rejected' = a credential WAS presented and the server refused it
+  // (401/403) — a revoked OAuth token or a bad API key. Distinct from
+  // 'credential-expired' (a stale token that self-heals, never "rejected").
   | { kind: 'key-rejected' }
+  // 'credential-expired' = the claude-cli OAuth token is past its expiry; the
+  // CLI refreshes it on the next agent turn, so this is a benign, self-healing
+  // TRANSIENT state ("try again shortly"), NOT a rejection or a broken key.
+  | { kind: 'credential-expired' }
   | { kind: 'timeout' }
   // 'empty' = the harness ran and produced no model lines; the base line-parser
   // cannot tell a genuinely empty catalogue from an output-shape change (any
@@ -151,9 +162,11 @@ export interface AvailableModelsInput {
 function unavailableMessage(reason: UnavailableReason): string {
   switch (reason.kind) {
     case 'no-key':
-      return 'no anthropic API key reachable on this host';
+      return 'no anthropic credential reachable on this host';
     case 'key-rejected':
-      return 'anthropic API key present but rejected (401/403)';
+      return 'anthropic credential rejected (401/403)';
+    case 'credential-expired':
+      return 'anthropic OAuth credential expired — refreshes on the next agent turn, try again shortly';
     case 'timeout':
       return 'catalogue lookup timed out';
     case 'empty':

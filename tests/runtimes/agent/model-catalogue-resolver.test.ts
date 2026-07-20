@@ -111,6 +111,12 @@ describe('resolveModelCatalogue — claude-cli', () => {
     });
   });
 
+  it('maps credential-expired → credential-expired (benign self-healing transient)', async () => {
+    const anthropicFn = vi.fn().mockResolvedValue({ status: 'credential-expired' });
+    const out = await resolveModelCatalogue('claude-cli', 'claude', { nowMs: T0, anthropicFn });
+    expect(out).toStrictEqual({ status: 'unavailable', reason: { kind: 'credential-expired' }, asOfLabel: 'just now' });
+  });
+
   it('maps unauthorized → key-rejected', async () => {
     const anthropicFn = vi.fn().mockResolvedValue({ status: 'failed', category: 'unauthorized' });
     const out = await resolveModelCatalogue('claude-cli', 'claude', { nowMs: T0, anthropicFn });

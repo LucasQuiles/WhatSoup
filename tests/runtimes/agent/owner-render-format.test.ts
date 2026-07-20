@@ -188,7 +188,7 @@ describe('formatAvailableModels', () => {
     );
   });
 
-  it('unavailable no-key: actionable, named harness, distinct from a rejected key', () => {
+  it('unavailable no-key: actionable, named harness, credential-neutral wording', () => {
     const out = formatAvailableModels({
       ...base,
       harnessLabel: 'claude-cli',
@@ -196,18 +196,29 @@ describe('formatAvailableModels', () => {
       listing: { status: 'unavailable', reason: { kind: 'no-key' }, asOfLabel: 'just now' },
     });
     expect(out).toBe(
-      `*Available models:* unavailable — no anthropic API key reachable on this host (harness: claude-cli, as of just now)`,
+      `*Available models:* unavailable — no anthropic credential reachable on this host (harness: claude-cli, as of just now)`,
     );
   });
 
-  it('unavailable key-rejected: distinct message (key present but not accepted)', () => {
+  it('unavailable key-rejected: distinct message (credential presented but not accepted)', () => {
     const out = formatAvailableModels({
       ...base,
       harnessLabel: 'claude-cli',
       listing: { status: 'unavailable', reason: { kind: 'key-rejected' }, asOfLabel: 'just now' },
     });
     expect(out).toBe(
-      `*Available models:* unavailable — anthropic API key present but rejected (401/403) (harness: claude-cli, as of just now)`,
+      `*Available models:* unavailable — anthropic credential rejected (401/403) (harness: claude-cli, as of just now)`,
+    );
+  });
+
+  it('unavailable credential-expired: benign self-healing transient, not a rejection', () => {
+    const out = formatAvailableModels({
+      ...base,
+      harnessLabel: 'claude-cli',
+      listing: { status: 'unavailable', reason: { kind: 'credential-expired' }, asOfLabel: 'just now' },
+    });
+    expect(out).toBe(
+      `*Available models:* unavailable — anthropic OAuth credential expired — refreshes on the next agent turn, try again shortly (harness: claude-cli, as of just now)`,
     );
   });
 
@@ -330,6 +341,7 @@ describe('isStructuralCatalogueAbsence', () => {
   it('is FALSE for every transient reason — a source exists, "try again" is actionable', () => {
     const transient: AvailableModelsListing[] = [
       { status: 'unavailable', reason: { kind: 'key-rejected' }, asOfLabel: asOf },
+      { status: 'unavailable', reason: { kind: 'credential-expired' }, asOfLabel: asOf },
       { status: 'unavailable', reason: { kind: 'timeout' }, asOfLabel: asOf },
       { status: 'unavailable', reason: { kind: 'empty' }, asOfLabel: asOf },
       { status: 'unavailable', reason: { kind: 'unparseable' }, asOfLabel: asOf },

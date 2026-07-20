@@ -137,6 +137,9 @@ async function resolveClaude(deps: CatalogueResolveDeps): Promise<AvailableModel
   if (result.status === 'no-key') {
     return { status: 'unavailable', reason: { kind: 'no-key' }, asOfLabel: 'just now' };
   }
+  if (result.status === 'credential-expired') {
+    return { status: 'unavailable', reason: { kind: 'credential-expired' }, asOfLabel: 'just now' };
+  }
   if (result.status === 'failed') {
     return { status: 'unavailable', reason: categoryToReason(result.category), asOfLabel: 'just now' };
   }
