@@ -18,19 +18,17 @@
 // phone tied to the AppleID) and message GUIDs (BlueBubbles) / rowids
 // (imsg) which the adapter stringifies as MessageRef.id.
 //
-// Recipient identity: AppleID email (validated by APPLEID_EMAIL_RE below) or
+// Recipient identity: AppleID email (validated by APPLEID_EMAIL_RE) or
 // E.164 phone. The port accepts both forms; iMessage itself routes either to
 // the same AppleID-verified destination.
 
 /** E.164 phone shape — shared with the Twilio and Signal transports. */
 export const E164_RE = /^\+[1-9]\d{6,14}$/;
 
-/**
- * AppleID email shape — iMessage accepts iCloud / me.com / mac.com
- * addresses plus any email registered against an AppleID. We accept any
- * RFC-5322-ish shape here; the daemon/Server is the final arbiter.
- */
-export const APPLEID_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// APPLEID_EMAIL_RE is defined in src/core/transport-refs.ts (the core seam)
+// so core config validation can use it without a core→transport import edge;
+// re-exported here for transport-internal consumers.
+export { APPLEID_EMAIL_RE } from '../../core/transport-refs.ts';
 
 /** Backend implementation selector. */
 export type ImessageBackend = 'imsg' | 'bluebubbles';

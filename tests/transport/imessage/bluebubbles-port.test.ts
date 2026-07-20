@@ -32,12 +32,12 @@ class MockHttpClient {
 
 function makeConfig(overrides: Partial<ImessageConfig> = {}): ImessageConfig {
   return {
+    ...DEFAULT_IMESSAGE,
     account: 'test',
     backend: 'bluebubbles',
     bluebubblesUrl: 'https://bb.example.test',
     bluebubblesPassword: 'pw',
     sender: 'me@icloud.com',
-    ...DEFAULT_IMESSAGE,
     ...overrides,
   };
 }

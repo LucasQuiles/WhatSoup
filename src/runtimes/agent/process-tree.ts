@@ -1,4 +1,6 @@
 import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 
 export interface ProcessTreeTarget {
   readonly pid?: number;
@@ -36,6 +38,39 @@ export interface KillSessionTreeOptions {
   readonly ambiguityResolveMs?: number;
   /** #1755: per-tree shutdown outcome sink (telemetry). Best-effort; never throws. */
   readonly onOutcome?: (outcome: KillSessionOutcome) => void;
+  /**
+   * #1869: per-teardown cgroup-vs-PPID divergence sink (telemetry). Best-effort;
+   * never throws and never affects termination. The reaper owns processes by PPID
+   * descent from the provider root, but the service cgroup can hold members that
+   * reparented off that tree (e.g. workload ssh-agents that double-fork to the
+   * user manager); those are invisible to PPID descent and accumulate silently.
+   * This surfaces the raw divergence (the metric this issue's evidence used —
+   * "125 processes in the cgroup") so unbounded growth is observable before it
+   * bites, without changing what the reaper kills. See #1869.
+   */
+  readonly onCgroupDivergence?: (info: CgroupDivergenceInfo) => void;
+  /**
+   * #1869: injectable reader for the current unit's cgroup member PIDs (test seam;
+   * defaults to a fail-safe Linux cgroup.procs reader). Returns `null` when cgroup
+   * membership cannot be determined (non-Linux, cgroup v1, read/parse failure) —
+   * in which case no divergence telemetry is emitted.
+   */
+  readonly readCgroupMemberPids?: () => readonly number[] | null;
+}
+
+/**
+ * #1869: coarse, assumption-free divergence gauge emitted at each teardown.
+ * `offTreeCount` is the count of cgroup members not in this session's PPID-owned
+ * set (excluding the provider root itself) — a superset of the leaked reparented
+ * daemons (it also includes the main process and other sessions), so it is a
+ * trend gauge, NOT a per-session leak attribution. Classifying which off-tree
+ * members are session-owned-and-leaked requires a leak-signature decision that is
+ * out of scope here (tracked on #1869's reclaim design).
+ */
+export interface CgroupDivergenceInfo {
+  readonly cgroupMemberCount: number;
+  readonly ownedCount: number;
+  readonly offTreeCount: number;
 }
 
 interface ProcessCensusRow {
@@ -416,6 +451,85 @@ async function runTermination(
   }
 }
 
+/**
+ * #1869: pure divergence computation — cgroup members not in the PPID-owned set
+ * (excluding the provider root). No I/O; fully unit-testable. `cgroupPids` and
+ * `owned` are supplied by the caller (real readers in production, synthetic in
+ * tests).
+ */
+export function computeCgroupDivergence(
+  cgroupPids: readonly number[],
+  owned: readonly { readonly pid: number }[],
+  rootPid: number,
+): CgroupDivergenceInfo {
+  const ownedPids = new Set<number>(owned.map((o) => o.pid));
+  ownedPids.add(rootPid);
+  let offTreeCount = 0;
+  for (const pid of cgroupPids) {
+    if (!ownedPids.has(pid)) offTreeCount += 1;
+  }
+  return { cgroupMemberCount: cgroupPids.length, ownedCount: owned.length, offTreeCount };
+}
+
+/**
+ * #1869: fail-safe reader for the current unit's cgroup member PIDs (cgroup v2,
+ * Linux systemd). Reads `/proc/self/cgroup` for the unified path, then reads
+ * `cgroup.procs` recursively under `/sys/fs/cgroup<path>`. Returns `null` on any
+ * failure (non-Linux, cgroup v1, missing/unreadable files, parse error) so the
+ * caller emits no telemetry rather than guessing. NEVER throws.
+ */
+function readServiceCgroupMemberPids(): readonly number[] | null {
+  try {
+    if (process.platform !== 'linux') return null;
+    const selfCgroup = readFileSync('/proc/self/cgroup', 'utf8');
+    const v2 = selfCgroup.split('\n').map((line) => line.trim()).find((line) => line.startsWith('0::'));
+    if (!v2) return null;
+    const rel = v2.slice('0::'.length);
+    if (!rel.startsWith('/')) return null;
+    const base = join('/sys/fs/cgroup', rel);
+    if (!existsSync(base)) return null;
+    const pids = new Set<number>();
+    const walk = (dir: string): void => {
+      const procsFile = join(dir, 'cgroup.procs');
+      if (existsSync(procsFile)) {
+        for (const line of readFileSync(procsFile, 'utf8').split('\n')) {
+          const parsed = Number(line.trim());
+          if (Number.isInteger(parsed) && parsed > 0) pids.add(parsed);
+        }
+      }
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.isDirectory()) walk(join(dir, entry.name));
+      }
+    };
+    walk(base);
+    return [...pids];
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * #1869: best-effort emit of the cgroup-vs-PPID divergence gauge. Fully isolated
+ * so any failure is swallowed and can NEVER affect termination. No-op unless a
+ * sink is provided and cgroup membership is readable.
+ */
+export function emitCgroupDivergence(
+  owned: readonly { readonly pid: number }[],
+  rootPid: number,
+  options: KillSessionTreeOptions,
+): void {
+  const sink = options.onCgroupDivergence;
+  if (!sink) return;
+  try {
+    const reader = options.readCgroupMemberPids ?? readServiceCgroupMemberPids;
+    const cgroupPids = reader();
+    if (cgroupPids === null) return;
+    sink(computeCgroupDivergence(cgroupPids, owned, rootPid));
+  } catch {
+    // best-effort telemetry; never affect termination
+  }
+}
+
 export function killSessionTree(
   target: number | ProcessTreeTarget,
   signal: NodeJS.Signals,
@@ -449,6 +563,9 @@ export function killSessionTree(
   } catch (error) {
     owned = [];
   }
+
+  // #1869: best-effort divergence telemetry; fully isolated, never affects termination.
+  emitCgroupDivergence(owned, rootPid, options);
 
   let context: TerminationContext;
   const promise = runTermination(target, rootPid, owned, preCensusAvailable, signal, options)
