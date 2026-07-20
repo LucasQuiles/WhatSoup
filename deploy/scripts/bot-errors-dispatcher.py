@@ -58,11 +58,16 @@ def normalized_signal_key(value: str) -> str:
 
 def evidence_has_terminal_auth_failure_class(evidence: str) -> bool:
     lower = evidence.lower()
-    return any(f"auth_failure_class={auth_class}" in lower for auth_class in TERMINAL_AUTH_FAILURE_CLASSES)
+    return any(
+        f"auth_failure_class={auth_class}" in lower
+        for auth_class in TERMINAL_AUTH_FAILURE_CLASSES
+    )
 
 
 def evidence_has_logged_out_reason(evidence: str) -> bool:
-    for match in re.finditer(r"\blast_disconnect_reason=([^\s]+)", evidence, re.IGNORECASE):
+    for match in re.finditer(
+        r"\blast_disconnect_reason=([^\s]+)", evidence, re.IGNORECASE
+    ):
         if normalized_signal_key(match.group(1)) == LOGGED_OUT_REASON_KEY:
             return True
     return "loggedout" in normalized_signal_key(evidence)
@@ -85,24 +90,48 @@ def positive_env_int(name: str, default: int) -> int:
     return value
 
 
-INCIDENT_COOLDOWN_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_COOLDOWN_SECONDS", 3600)
-BOT_ERRORS_DELIVERY_MAX_ATTEMPTS = positive_env_int("BOT_ERRORS_DELIVERY_MAX_ATTEMPTS", 10)
+INCIDENT_COOLDOWN_SECONDS = positive_env_int(
+    "BOT_ERRORS_INCIDENT_COOLDOWN_SECONDS", 3600
+)
+BOT_ERRORS_DELIVERY_MAX_ATTEMPTS = positive_env_int(
+    "BOT_ERRORS_DELIVERY_MAX_ATTEMPTS", 10
+)
 # A transient WhatsApp-transport blip (send socket briefly down, "temporarily
 # disconnected") rides its own, far longer retry budget so a momentary outage
 # never burns the permanent dead-letter cap and strands a deliverable alert.
 # Default 240 transient tries × 300s ≈ 20h of coverage before fail-safe dead-letter.
-BOT_ERRORS_TRANSIENT_MAX_ATTEMPTS = positive_env_int("BOT_ERRORS_TRANSIENT_MAX_ATTEMPTS", 240)
-BOT_ERRORS_TRANSIENT_BACKOFF_SECONDS = positive_env_int("BOT_ERRORS_TRANSIENT_BACKOFF_SECONDS", 300)
+BOT_ERRORS_TRANSIENT_MAX_ATTEMPTS = positive_env_int(
+    "BOT_ERRORS_TRANSIENT_MAX_ATTEMPTS", 240
+)
+BOT_ERRORS_TRANSIENT_BACKOFF_SECONDS = positive_env_int(
+    "BOT_ERRORS_TRANSIENT_BACKOFF_SECONDS", 300
+)
 DEAD_LETTER_META_ALERT_THROTTLE_SECONDS = 3600  # at most one meta-alert per hour
 CLOCK_SKEW_TOLERANCE_SECONDS = 60  # tolerate up to 60s clock skew on clear events
-INCIDENT_RENOTIFY_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_RENOTIFY_SECONDS", 6 * 60 * 60)
-INCIDENT_RENOTIFY_CAP_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_RENOTIFY_CAP_SECONDS", 6 * 60 * 60)
-INCIDENT_ESCALATE_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_ESCALATE_SECONDS", 24 * 60 * 60)
-INCIDENT_ESCALATE_SUPPRESSED = positive_env_int("BOT_ERRORS_INCIDENT_ESCALATE_SUPPRESSED", 72)
-INCIDENT_STALE_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_STALE_SECONDS", INCIDENT_ESCALATE_SECONDS)
-INCIDENT_STALE_RENOTIFY_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_STALE_RENOTIFY_SECONDS", 24 * 60 * 60)
-INCIDENT_STALE_FAILURE_RETRY_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_STALE_FAILURE_RETRY_SECONDS", 15 * 60)
-INCIDENT_STALE_SWEEP_MAX_EVENTS = positive_env_int("BOT_ERRORS_INCIDENT_STALE_SWEEP_MAX_EVENTS", 3)
+INCIDENT_RENOTIFY_SECONDS = positive_env_int(
+    "BOT_ERRORS_INCIDENT_RENOTIFY_SECONDS", 6 * 60 * 60
+)
+INCIDENT_RENOTIFY_CAP_SECONDS = positive_env_int(
+    "BOT_ERRORS_INCIDENT_RENOTIFY_CAP_SECONDS", 6 * 60 * 60
+)
+INCIDENT_ESCALATE_SECONDS = positive_env_int(
+    "BOT_ERRORS_INCIDENT_ESCALATE_SECONDS", 24 * 60 * 60
+)
+INCIDENT_ESCALATE_SUPPRESSED = positive_env_int(
+    "BOT_ERRORS_INCIDENT_ESCALATE_SUPPRESSED", 72
+)
+INCIDENT_STALE_SECONDS = positive_env_int(
+    "BOT_ERRORS_INCIDENT_STALE_SECONDS", INCIDENT_ESCALATE_SECONDS
+)
+INCIDENT_STALE_RENOTIFY_SECONDS = positive_env_int(
+    "BOT_ERRORS_INCIDENT_STALE_RENOTIFY_SECONDS", 24 * 60 * 60
+)
+INCIDENT_STALE_FAILURE_RETRY_SECONDS = positive_env_int(
+    "BOT_ERRORS_INCIDENT_STALE_FAILURE_RETRY_SECONDS", 15 * 60
+)
+INCIDENT_STALE_SWEEP_MAX_EVENTS = positive_env_int(
+    "BOT_ERRORS_INCIDENT_STALE_SWEEP_MAX_EVENTS", 3
+)
 # Pattern A — suppress non-actionable (self-healed / no-op) stale renotify.
 # Default-on; fail-open (any classifier error falls through to send).
 SUPPRESS_STALE_INFO_RENOTIFY = env_flag("BOT_ERRORS_SUPPRESS_STALE_INFO_RENOTIFY", True)
@@ -119,10 +148,15 @@ AUTOCLOSE_LIVENESS_HOLD_CAP_SECONDS = positive_env_int(
 AUTOCLOSE_REOPEN_WINDOW_SECONDS = positive_env_int(
     "BOT_ERRORS_AUTOCLOSE_REOPEN_WINDOW_SECONDS", 30 * 24 * 60 * 60
 )
-AUTOCLOSE_REOPEN_SAMPLE_LIMIT = positive_env_int("BOT_ERRORS_AUTOCLOSE_REOPEN_SAMPLE_LIMIT", 100)
+AUTOCLOSE_REOPEN_SAMPLE_LIMIT = positive_env_int(
+    "BOT_ERRORS_AUTOCLOSE_REOPEN_SAMPLE_LIMIT", 100
+)
 AUTOCLOSE_PROTECTED_SOURCES = {
     "whatsapp_device_bond_lost",
     "instance_logged_out",
+    # Signal transport: an unregistered/unlinked signal-cli account means the
+    # monitoring path itself is down — silence is not proof of repair.
+    "signal_cli_unregistered",
 }
 AUTOCLOSE_PROTECTED_FAILURE_CODES = {
     "WA_AUTH_BOND_SERVER_REVOKED",
@@ -131,11 +165,19 @@ AUTOCLOSE_PROTECTED_FAILURE_CODES = {
 # built-in recovery/no-op pattern set and the SSOT action==none signal.
 STALE_RENOTIFY_SUPPRESS_SOURCES = {
     part.strip()
-    for part in os.environ.get("BOT_ERRORS_STALE_RENOTIFY_SUPPRESS_SOURCES", "").split(",")
+    for part in os.environ.get("BOT_ERRORS_STALE_RENOTIFY_SUPPRESS_SOURCES", "").split(
+        ","
+    )
     if part.strip()
 }
 # Recovery / no-op source signatures: definitionally non-actionable once stale.
-STALE_RENOTIFY_SUPPRESS_SUFFIXES = ("_restored", "_recovered", "_reverted", "_unknown", "_cleared")
+STALE_RENOTIFY_SUPPRESS_SUFFIXES = (
+    "_restored",
+    "_recovered",
+    "_reverted",
+    "_unknown",
+    "_cleared",
+)
 # runtime-tool-error:* — an agent's own tool call failed and was self-corrected
 # inline. These are point-in-time, auto-recovered events, NOT a persistent open
 # condition: if the agent were genuinely stuck the SAME call would re-emit FRESH
@@ -151,7 +193,11 @@ STALE_RENOTIFY_SUPPRESS_PREFIXES = ("provider_fallback_", "runtime-tool-error:")
 # genuine stuck-agent signal is flap-storm (intensity), handled earlier via
 # force_notify_level, so suppressing the time-based renotify here loses no real signal.
 # Default-on; fail-open (any classifier error falls through to send).
-SUPPRESS_OPEN_NONACTIONABLE_RENOTIFY = env_flag("BOT_ERRORS_SUPPRESS_OPEN_NONACTIONABLE_RENOTIFY", True)
+SUPPRESS_OPEN_NONACTIONABLE_RENOTIFY = env_flag(
+    "BOT_ERRORS_SUPPRESS_OPEN_NONACTIONABLE_RENOTIFY", True
+)
+
+
 # Pattern A (digest coalescing) — the auto-close summary is consolidated WITHIN a
 # single sweep run, but the sweep runs every ~30s, so a draining backlog emits one
 # "Auto-closed N" digest per tick (the digest itself becomes the noise). These are
@@ -184,12 +230,18 @@ FLAP_PROMOTE_SECONDS = positive_env_int("BOT_ERRORS_FLAP_PROMOTE_SECONDS", 1800)
 FLAP_CRITICAL_COUNT = positive_env_int("BOT_ERRORS_FLAP_CRITICAL_COUNT", 50)
 FLAP_STABLE_SECONDS = positive_env_int("BOT_ERRORS_FLAP_STABLE_SECONDS", 3600)
 FLAP_STORM_ACTION = "source unstable — investigate root cause (flap storm)"
-AWAITING_PHYSICAL_CONFIRMATIONS = positive_env_int("BOT_ERRORS_AWAITING_PHYSICAL_CONFIRMATIONS", 2)
+AWAITING_PHYSICAL_CONFIRMATIONS = positive_env_int(
+    "BOT_ERRORS_AWAITING_PHYSICAL_CONFIRMATIONS", 2
+)
 AWAITING_PHYSICAL_RENOTIFY_SECONDS = positive_env_int(
     "BOT_ERRORS_AWAITING_PHYSICAL_RENOTIFY_SECONDS",
     24 * 60 * 60,
 )
-INTERNAL_FORCE_NOTIFY_SOURCES = {"heartbeat-watchdog", "storm-collapse", "daily-health-fail"}
+INTERNAL_FORCE_NOTIFY_SOURCES = {
+    "heartbeat-watchdog",
+    "storm-collapse",
+    "daily-health-fail",
+}
 DAILY_HEALTH_WHATSAPP_RECOVERY_SOURCES = {
     "whatsapp_device_bond_lost",
     "whatsapp_auth_bond_local_failure",
@@ -289,7 +341,9 @@ MAINTENANCE_ENABLED = env_flag("BOT_ERRORS_MAINTENANCE_WINDOWS", True)
 # revoked) are never downgraded. FAIL-OPEN: gate off or any classification error
 # sends as before — a real alert is never lost to a tiering bug.
 TRANSIENT_TIERING_ENABLED = env_flag("BOT_ERRORS_TRANSIENT_TIERING", True)
-TRANSIENT_PROMOTE_SECONDS = positive_env_int("BOT_ERRORS_TRANSIENT_PROMOTE_SECONDS", 30 * 60)
+TRANSIENT_PROMOTE_SECONDS = positive_env_int(
+    "BOT_ERRORS_TRANSIENT_PROMOTE_SECONDS", 30 * 60
+)
 
 # Pattern H — relay-host flap coalescing. The collector emits a relay_host_down
 # (warning) when a peer probe misses and a paired relay_host_recovered (info) when
@@ -339,7 +393,8 @@ def _load_inhibition_map() -> dict[str, set[str]]:
     back to the pure seed — it never crashes the dispatcher.
     """
     seed: dict[str, set[str]] = {
-        root: set(symptoms) for root, symptoms in SUPERSEDED_SOURCES_BY_ALERT_SOURCE.items()
+        root: set(symptoms)
+        for root, symptoms in SUPERSEDED_SOURCES_BY_ALERT_SOURCE.items()
     }
     raw = os.environ.get("BOT_ERRORS_INHIBITION_MAP", "").strip()
     if not raw:
@@ -349,7 +404,9 @@ def _load_inhibition_map() -> dict[str, set[str]]:
         if not isinstance(parsed, dict):
             raise ValueError("BOT_ERRORS_INHIBITION_MAP must be a JSON object")
         for root, symptoms in parsed.items():
-            if not isinstance(root, str) or not isinstance(symptoms, (list, tuple, set)):
+            if not isinstance(root, str) or not isinstance(
+                symptoms, (list, tuple, set)
+            ):
                 raise ValueError(f"invalid inhibition edge for root={root!r}")
             bucket = seed.setdefault(str(root), set())
             for symptom in symptoms:
@@ -362,7 +419,10 @@ def _load_inhibition_map() -> dict[str, set[str]]:
             f"(malformed; falling back to seed): {exc}",
             file=sys.stderr,
         )
-        return {root: set(symptoms) for root, symptoms in SUPERSEDED_SOURCES_BY_ALERT_SOURCE.items()}
+        return {
+            root: set(symptoms)
+            for root, symptoms in SUPERSEDED_SOURCES_BY_ALERT_SOURCE.items()
+        }
     return seed
 
 
@@ -381,8 +441,12 @@ def symptom_source_matches(source: str, symptom_sources: set[str]) -> bool:
     if "local_health" in symptom_sources and source.startswith("local_health:"):
         return True
     return False
+
+
 GROUP_JID_RE = re.compile(r"^\d+@g\.us$")
-TEST_FIXTURE_AUTH_BOND = re.compile(r"(?:^|\s)(?:authDir|auth|creds):\s*/tmp/wa-test-auth(?:/|\s|$)", re.I)
+TEST_FIXTURE_AUTH_BOND = re.compile(
+    r"(?:^|\s)(?:authDir|auth|creds):\s*/tmp/wa-test-auth(?:/|\s|$)", re.I
+)
 
 # ---------------------------------------------------------------------------
 # Test-leak defense-in-depth (B2)
@@ -396,15 +460,16 @@ TEST_FIXTURE_AUTH_BOND = re.compile(r"(?:^|\s)(?:authDir|auth|creds):\s*/tmp/wa-
 # bot-errors/, ~/.local/state/...), so the false-drop-of-a-real-alert risk is
 # nil; the win is catching test siblings beyond the original auth-only literal.
 _TEST_LEAK_DEFAULT_PATTERNS: list[str] = [
-    r"/tmp/wa-test-",                          # /tmp/wa-test-auth and siblings
+    r"/tmp/wa-test-",  # /tmp/wa-test-auth and siblings
     # macOS user temp dirs (vitest/jest mkdtemp roots). The negative lookahead
     # exempts the dispatcher's OWN TMPDIR writefail fallback directory: real
     # macOS daily-health events embed that path in their writefail inventory
     # line, and matching it silently dropped legitimate host alerts as "test
     # leaks" (the exact silent-loss class this defense exists to prevent).
     r"/var/folders/[^/]+/[^/]+/T/(?!bot-errors-writefail(?:[/,\s]|$))",
-    r"/tmp/whatsoup-vitest-bot-errors/",       # vitest redirect outbox root
+    r"/tmp/whatsoup-vitest-bot-errors/",  # vitest redirect outbox root
 ]
+
 
 def _build_test_leak_patterns() -> list[re.Pattern[str]]:
     patterns = list(_TEST_LEAK_DEFAULT_PATTERNS)
@@ -499,7 +564,9 @@ def now_iso() -> str:
 
 
 def state_root() -> Path:
-    return Path(os.environ.get("BOT_ERRORS_STATE_DIR", Path.home() / ".local/state/bot-errors"))
+    return Path(
+        os.environ.get("BOT_ERRORS_STATE_DIR", Path.home() / ".local/state/bot-errors")
+    )
 
 
 def state_paths() -> dict[str, Path]:
@@ -532,9 +599,13 @@ def ensure_private_dir(path: Path) -> None:
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
     else:
         if path.is_symlink():
-            raise RuntimeError(f"refusing to use private directory through symlink: {path}")
+            raise RuntimeError(
+                f"refusing to use private directory through symlink: {path}"
+            )
         if not os.path.isdir(path):
-            raise RuntimeError(f"refusing to use private directory over non-directory path: {path}")
+            raise RuntimeError(
+                f"refusing to use private directory over non-directory path: {path}"
+            )
     try:
         path.chmod(0o700)
     except OSError:
@@ -665,7 +736,10 @@ def load_incident_state(paths: dict[str, Path]) -> dict[str, Any]:
             path.replace(backup)
         except Exception:
             pass
-        append_dispatch_log(paths, {"type": "incident_state_corrupt", "path": str(path), "error": str(exc)})
+        append_dispatch_log(
+            paths,
+            {"type": "incident_state_corrupt", "path": str(path), "error": str(exc)},
+        )
         return {"version": 1, "openIncidents": {}, "lastSentAt": {}}
     state = {"version": 1, "openIncidents": {}, "lastSentAt": {}}
     if isinstance(loaded.get("openIncidents"), dict):
@@ -711,7 +785,9 @@ def save_incident_state(paths: dict[str, Path], state: dict[str, Any]) -> None:
     atomic_write_json(paths["incident_state"], state)
 
 
-def record_daily_health_freshness(event: dict[str, Any], incident_state: dict[str, Any]) -> str | None:
+def record_daily_health_freshness(
+    event: dict[str, Any], incident_state: dict[str, Any]
+) -> str | None:
     """Stamp per-host daily-health liveness into the durable freshness ledger.
 
     Any ``daily-health*`` event (info cadence, ``daily-health-fail``, recovery) is
@@ -740,21 +816,30 @@ def record_daily_health_freshness(event: dict[str, Any], incident_state: dict[st
 def incident_source(event: dict[str, Any]) -> str:
     source = str(event.get("source") or "unknown")
     alert_source = str(event.get("alertSource") or "").strip()
-    if source in {"heartbeat-watchdog", "daily-health", "daily-health-fail"} and alert_source:
+    if (
+        source in {"heartbeat-watchdog", "daily-health", "daily-health-fail"}
+        and alert_source
+    ):
         return f"{source}:{alert_source}"
     diagnostics = event.get("diagnostics")
     remote = diagnostics.get("remote") if isinstance(diagnostics, dict) else None
-    if str(event.get("instance") or "") == "bot-errors-collector" and isinstance(remote, str) and remote.strip():
+    if (
+        str(event.get("instance") or "") == "bot-errors-collector"
+        and isinstance(remote, str)
+        and remote.strip()
+    ):
         return f"{source}:{remote.strip()}"
     return source
 
 
 def incident_key(event: dict[str, Any]) -> str:
-    return "|".join([
-        safe_segment(str(event.get("machine") or "unknown")),
-        safe_segment(str(event.get("instance") or "unknown")),
-        safe_segment(incident_source(event)),
-    ])
+    return "|".join(
+        [
+            safe_segment(str(event.get("machine") or "unknown")),
+            safe_segment(str(event.get("instance") or "unknown")),
+            safe_segment(incident_source(event)),
+        ]
+    )
 
 
 def legacy_unqualified_incident_key(event: dict[str, Any]) -> str | None:
@@ -762,14 +847,18 @@ def legacy_unqualified_incident_key(event: dict[str, Any]) -> str | None:
     qualified_source = incident_source(event)
     if qualified_source == source:
         return None
-    return "|".join([
-        safe_segment(str(event.get("machine") or "unknown")),
-        safe_segment(str(event.get("instance") or "unknown")),
-        safe_segment(source),
-    ])
+    return "|".join(
+        [
+            safe_segment(str(event.get("machine") or "unknown")),
+            safe_segment(str(event.get("instance") or "unknown")),
+            safe_segment(source),
+        ]
+    )
 
 
-def legacy_record_matches_alert_source(event: dict[str, Any], record: dict[str, Any] | None) -> bool:
+def legacy_record_matches_alert_source(
+    event: dict[str, Any], record: dict[str, Any] | None
+) -> bool:
     alert_source = str(event.get("alertSource") or "").strip()
     if alert_source != "source_update":
         return True
@@ -777,10 +866,12 @@ def legacy_record_matches_alert_source(event: dict[str, Any], record: dict[str, 
         return False
     if str(record.get("failureCode") or "") == "SOURCE_UPDATE_BLOCKED":
         return True
-    evidence = " ".join([
-        str(record.get("lastEvidence") or ""),
-        str(record.get("lastSummary") or ""),
-    ]).lower()
+    evidence = " ".join(
+        [
+            str(record.get("lastEvidence") or ""),
+            str(record.get("lastSummary") or ""),
+        ]
+    ).lower()
     return "source_update" in evidence and (
         "source_update_blocked" in evidence
         or "git_remote_auth_failed" in evidence
@@ -788,7 +879,9 @@ def legacy_record_matches_alert_source(event: dict[str, Any], record: dict[str, 
     )
 
 
-def migrate_legacy_unqualified_incident(event: dict[str, Any], incident_state: dict[str, Any]) -> None:
+def migrate_legacy_unqualified_incident(
+    event: dict[str, Any], incident_state: dict[str, Any]
+) -> None:
     if str(event.get("source") or "") not in {"daily-health", "heartbeat-watchdog"}:
         return
     legacy_key = legacy_unqualified_incident_key(event)
@@ -797,7 +890,9 @@ def migrate_legacy_unqualified_incident(event: dict[str, Any], incident_state: d
         return
     open_incidents = incident_state.setdefault("openIncidents", {})
     legacy_record = open_incidents.get(legacy_key)
-    if not legacy_record_matches_alert_source(event, legacy_record if isinstance(legacy_record, dict) else None):
+    if not legacy_record_matches_alert_source(
+        event, legacy_record if isinstance(legacy_record, dict) else None
+    ):
         return
     if isinstance(legacy_record, dict) and key not in open_incidents:
         open_incidents[key] = legacy_record
@@ -810,15 +905,21 @@ def migrate_legacy_unqualified_incident(event: dict[str, Any], incident_state: d
 
 
 def incident_scope(event: dict[str, Any]) -> str:
-    return "|".join([
-        safe_segment(str(event.get("machine") or "unknown")),
-        safe_segment(str(event.get("instance") or "unknown")),
-    ])
+    return "|".join(
+        [
+            safe_segment(str(event.get("machine") or "unknown")),
+            safe_segment(str(event.get("instance") or "unknown")),
+        ]
+    )
 
 
 def is_incident_alert(event: dict[str, Any]) -> bool:
     severity = str(event.get("severity") or "").lower()
-    return str(event.get("eventType") or "alert") == "alert" and severity in {"critical", "error", "warning"}
+    return str(event.get("eventType") or "alert") == "alert" and severity in {
+        "critical",
+        "error",
+        "warning",
+    }
 
 
 def is_incident_clear(event: dict[str, Any]) -> bool:
@@ -905,7 +1006,9 @@ def classify_failure_mode(event: dict[str, Any]) -> str:
     visibility). Pattern D.
     """
     source = str(event.get("source") or "")
-    diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
+    diagnostics = (
+        event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
+    )
     evidence = str(event.get("evidence") or "")
 
     # SSH timeout to a peer Tailscale still reports online: host is up, the probe
@@ -987,7 +1090,9 @@ def apply_transient_tiering(
             # direction (a real outage misread as transient).
             record["promoted"] = True
             record["promotedAt"] = int_field(record, "promotedAt", current)
-            event["severity"] = str(record.get("firstSeverity") or "critical") or "critical"
+            event["severity"] = (
+                str(record.get("firstSeverity") or "critical") or "critical"
+            )
             diagnostics["failureClass"] = "outage_promoted"
             diagnostics["transientPromoted"] = True
             return None
@@ -1032,7 +1137,9 @@ def resolve_transient_on_clear(
         return None
 
 
-def coalesce_relay_recovered(event: dict[str, Any], incident_state: dict[str, Any]) -> str | None:
+def coalesce_relay_recovered(
+    event: dict[str, Any], incident_state: dict[str, Any]
+) -> str | None:
     """Suppress a relay_host_recovered whose paired down was held silently (Pattern H).
 
     relay_host_recovered is emitted as an ``info`` alert (not a clear), so it never
@@ -1058,10 +1165,14 @@ def coalesce_relay_recovered(event: dict[str, Any], incident_state: dict[str, An
         down_key = recovered_key.replace(RELAY_RECOVERED_SOURCE, RELAY_DOWN_SOURCE, 1)
         # A surfaced (open) down means the operator saw the outage — let recovery send.
         open_incidents = incident_state.get("openIncidents")
-        if isinstance(open_incidents, dict) and isinstance(open_incidents.get(down_key), dict):
+        if isinstance(open_incidents, dict) and isinstance(
+            open_incidents.get(down_key), dict
+        ):
             return None
         transient_state = incident_state.get("transientState")
-        record = transient_state.get(down_key) if isinstance(transient_state, dict) else None
+        record = (
+            transient_state.get(down_key) if isinstance(transient_state, dict) else None
+        )
         if not isinstance(record, dict):
             return None  # no held record — fail toward visibility, send the recovery
         if record.get("promoted"):
@@ -1087,7 +1198,9 @@ def evidence_epoch(text: str, key: str) -> int | None:
     return int(parsed.timestamp())
 
 
-def is_verified_whatsapp_health_recovery(probe: str, *, require_outbound_proof: bool = False) -> bool:
+def is_verified_whatsapp_health_recovery(
+    probe: str, *, require_outbound_proof: bool = False
+) -> bool:
     if not probe.startswith("200 "):
         return False
     if "FAIL " in probe or "WARN " in probe:
@@ -1120,7 +1233,9 @@ def is_verified_whatsapp_health_recovery(probe: str, *, require_outbound_proof: 
     return evidence_epoch(probe, "outbound_success_at") is not None
 
 
-def has_post_incident_outbound_proof(probe: str, record: dict[str, Any], opened_epoch: int) -> bool:
+def has_post_incident_outbound_proof(
+    probe: str, record: dict[str, Any], opened_epoch: int
+) -> bool:
     """True iff the probe carries an outbound send timestamp strictly AFTER the
     incident opened.  This is the original proof path for AUTOCLOSE_PROTECTED
     sources: a successful outbound send after the relink proves the server-side
@@ -1218,7 +1333,9 @@ def daily_health_recovered_incident_keys(
                 status = str(record.get("status") or "open")
                 if status in {"closed", "resolved"}:
                     continue
-                opened = int_field(record, "eventCreatedAtEpoch", int_field(record, "openedAt"))
+                opened = int_field(
+                    record, "eventCreatedAtEpoch", int_field(record, "openedAt")
+                )
                 if created is None or opened <= 0 or created <= opened:
                     continue
                 if key not in seen:
@@ -1233,9 +1350,15 @@ def daily_health_recovered_incident_keys(
                 if status in {"closed", "resolved"}:
                     continue
                 opened = int_field(record, "eventCreatedAtEpoch")
-                if opened > 0 and created is not None and created < opened - CLOCK_SKEW_TOLERANCE_SECONDS:
+                if (
+                    opened > 0
+                    and created is not None
+                    and created < opened - CLOCK_SKEW_TOLERANCE_SECONDS
+                ):
                     continue
-                require_outbound_proof = source in DAILY_HEALTH_REQUIRES_OUTBOUND_PROOF_SOURCES
+                require_outbound_proof = (
+                    source in DAILY_HEALTH_REQUIRES_OUTBOUND_PROOF_SOURCES
+                )
                 if require_outbound_proof:
                     # AUTOCLOSE_PROTECTED sources need extra proof beyond base
                     # verified health.  Accept EITHER a post-incident outbound
@@ -1258,7 +1381,9 @@ def daily_health_recovered_incident_keys(
     return recovered
 
 
-def close_recovered_daily_health_incidents(event: dict[str, Any], incident_state: dict[str, Any]) -> list[str]:
+def close_recovered_daily_health_incidents(
+    event: dict[str, Any], incident_state: dict[str, Any]
+) -> list[str]:
     recovered = daily_health_recovered_incident_keys(event, incident_state)
     if not recovered:
         return []
@@ -1331,7 +1456,9 @@ def incident_renotify_interval_seconds(open_record: dict[str, Any]) -> int:
     capped at INCIDENT_RENOTIFY_CAP_SECONDS. The interval is persisted on the
     open incident record so dispatcher restarts do not reset the backoff.
     """
-    stored = int_field(open_record, "renotifyIntervalSeconds", INCIDENT_RENOTIFY_SECONDS)
+    stored = int_field(
+        open_record, "renotifyIntervalSeconds", INCIDENT_RENOTIFY_SECONDS
+    )
     if stored <= 0:
         stored = INCIDENT_RENOTIFY_SECONDS
     return min(stored, INCIDENT_RENOTIFY_CAP_SECONDS)
@@ -1357,12 +1484,19 @@ def is_autoclose_protected(event: dict[str, Any], key: str) -> bool:
     }
     if AUTOCLOSE_PROTECTED_SOURCES & sources:
         return True
-    if critical_failure_code(event).strip().upper() in AUTOCLOSE_PROTECTED_FAILURE_CODES:
+    if (
+        critical_failure_code(event).strip().upper()
+        in AUTOCLOSE_PROTECTED_FAILURE_CODES
+    ):
         return True
-    return event_has_awaiting_physical_context(event) or is_physical_intervention_signal(event)
+    return event_has_awaiting_physical_context(
+        event
+    ) or is_physical_intervention_signal(event)
 
 
-def prune_stale_autoclose_history(incident_state: dict[str, Any], current: int) -> dict[str, Any]:
+def prune_stale_autoclose_history(
+    incident_state: dict[str, Any], current: int
+) -> dict[str, Any]:
     history = incident_state.get("staleAutocloseHistory")
     if not isinstance(history, dict):
         return {}
@@ -1375,7 +1509,9 @@ def prune_stale_autoclose_history(incident_state: dict[str, Any], current: int) 
     return history
 
 
-def record_unverified_autoclose(incident_state: dict[str, Any], key: str, current: int) -> None:
+def record_unverified_autoclose(
+    incident_state: dict[str, Any], key: str, current: int
+) -> None:
     history = prune_stale_autoclose_history(incident_state, current)
     if not history:
         history = {}
@@ -1418,7 +1554,9 @@ def record_autoclose_reopen_if_recent(
         "summary": redacted_state_text(event.get("summary"), 500),
     }
     safety = incident_state.setdefault("promotionSafety", {})
-    safety["autoCloseThenReopenCount"] = int_field(safety, "autoCloseThenReopenCount") + 1
+    safety["autoCloseThenReopenCount"] = (
+        int_field(safety, "autoCloseThenReopenCount") + 1
+    )
     safety["lastAutoCloseThenReopen"] = event_record
     samples = safety.get("autoCloseThenReopen")
     if not isinstance(samples, list):
@@ -1448,8 +1586,10 @@ def is_logged_out_physical_signal(event: dict[str, Any]) -> bool:
     source = str(event.get("source") or "")
     evidence = str(event.get("evidence") or "").lower()
     return source == "instance_logged_out" and (
-        evidence_has_terminal_auth_failure_class(evidence) or (
-            "last_status_code=401" in evidence and evidence_has_logged_out_reason(evidence)
+        evidence_has_terminal_auth_failure_class(evidence)
+        or (
+            "last_status_code=401" in evidence
+            and evidence_has_logged_out_reason(evidence)
         )
     )
 
@@ -1474,21 +1614,32 @@ def is_verified_device_bond_lost_signal(event: dict[str, Any]) -> bool:
 
 
 def is_physical_intervention_signal(event: dict[str, Any]) -> bool:
-    return is_logged_out_physical_signal(event) or is_verified_device_bond_lost_signal(event)
+    return is_logged_out_physical_signal(event) or is_verified_device_bond_lost_signal(
+        event
+    )
 
 
 def physical_confirmation_threshold(event: dict[str, Any]) -> int:
-    return 1 if is_verified_device_bond_lost_signal(event) else AWAITING_PHYSICAL_CONFIRMATIONS
+    return (
+        1
+        if is_verified_device_bond_lost_signal(event)
+        else AWAITING_PHYSICAL_CONFIRMATIONS
+    )
 
 
 def event_has_awaiting_physical_context(event: dict[str, Any]) -> bool:
     if critical_recoverability(event) == "manual_relink_required":
         return True
     evidence = str(event.get("evidence") or "").lower()
-    return "incident_status=awaiting_physical" in evidence or "status=awaiting_physical" in evidence
+    return (
+        "incident_status=awaiting_physical" in evidence
+        or "status=awaiting_physical" in evidence
+    )
 
 
-def update_awaiting_physical_tracking(event: dict[str, Any], record: dict[str, Any], current: int) -> bool:
+def update_awaiting_physical_tracking(
+    event: dict[str, Any], record: dict[str, Any], current: int
+) -> bool:
     if not is_physical_intervention_signal(event):
         return False
 
@@ -1508,7 +1659,10 @@ def update_awaiting_physical_tracking(event: dict[str, Any], record: dict[str, A
     record["physicalCandidateLastEventId"] = event_id
     record["physicalCandidateLastEvidence"] = str(event.get("evidence") or "")[-1000:]
 
-    if previous_status != "awaiting_physical" and count >= physical_confirmation_threshold(event):
+    if (
+        previous_status != "awaiting_physical"
+        and count >= physical_confirmation_threshold(event)
+    ):
         record["status"] = "awaiting_physical"
         record["awaitingPhysicalAt"] = current
         record["awaitingPhysicalIso"] = now
@@ -1553,7 +1707,9 @@ def append_still_open_context(
     digest: bool = True,
 ) -> None:
     opened = int_field(open_record, "openedAt", current)
-    last_notified = int_field(open_record, "lastNotifiedAt", int_field(open_record, "lastSentAt", opened))
+    last_notified = int_field(
+        open_record, "lastNotifiedAt", int_field(open_record, "lastSentAt", opened)
+    )
     status = str(open_record.get("status") or "open")
     awaiting_physical = status == "awaiting_physical"
     additions = [
@@ -1569,21 +1725,27 @@ def append_still_open_context(
     if digest:
         additions.insert(0, "still_open_digest=true")
     if awaiting_physical:
-        additions.extend([
-            f"physical_candidate_count={int_field(open_record, 'physicalCandidateCount')}",
-            f"physical_action={physical_action_text()}",
-            f"renotify_cadence_seconds={AWAITING_PHYSICAL_RENOTIFY_SECONDS}",
-        ])
+        additions.extend(
+            [
+                f"physical_candidate_count={int_field(open_record, 'physicalCandidateCount')}",
+                f"physical_action={physical_action_text()}",
+                f"renotify_cadence_seconds={AWAITING_PHYSICAL_RENOTIFY_SECONDS}",
+            ]
+        )
     evidence = str(event.get("evidence") or "").strip()
     event["evidence"] = "\n".join(part for part in [evidence, *additions] if part)
     if awaiting_physical and digest:
         event["severity"] = "info"
         if "still-open digest" not in str(event.get("summary") or "").lower():
-            event["summary"] = f"Still-open digest, awaiting physical action: {event.get('summary') or key}"
+            event["summary"] = (
+                f"Still-open digest, awaiting physical action: {event.get('summary') or key}"
+            )
     elif awaiting_physical:
         event["severity"] = "critical"
         if "awaiting physical" not in str(event.get("summary") or "").lower():
-            event["summary"] = f"Awaiting physical action: {event.get('summary') or key}"
+            event["summary"] = (
+                f"Awaiting physical action: {event.get('summary') or key}"
+            )
     elif escalated:
         event["severity"] = "critical"
         if "escalated" not in str(event.get("summary") or "").lower():
@@ -1613,7 +1775,17 @@ def safe_filename(value: str, max_length: int = 180) -> str:
     cleaned = cleaned or "unknown"
     if len(cleaned) <= max_length:
         return cleaned
-    for suffix in (".writefail", ".processing", ".suppressed", ".collapsed", ".recovered", ".duplicate", ".poison", ".sent", ".json"):
+    for suffix in (
+        ".writefail",
+        ".processing",
+        ".suppressed",
+        ".collapsed",
+        ".recovered",
+        ".duplicate",
+        ".poison",
+        ".sent",
+        ".json",
+    ):
         if cleaned.endswith(suffix) and len(suffix) < max_length:
             stem = cleaned[: max_length - len(suffix)].rstrip("._-:")
             return f"{stem or 'unknown'}{suffix}"
@@ -1628,7 +1800,9 @@ def safe_child_path(directory: Path, name: str, max_length: int = 180) -> Path:
     if first.exists():
         stem = safe_filename(name, min(140, max_length))
         prefix = f"{int(time.time())}.{os.getpid()}"
-        candidates = [directory / f"{prefix}.{counter}.{stem}" for counter in range(1000)]
+        candidates = [
+            directory / f"{prefix}.{counter}.{stem}" for counter in range(1000)
+        ]
     for target in candidates:
         if target.resolve().parent != directory_resolved:
             raise RuntimeError(f"unsafe child path escaped {directory}: {name}")
@@ -1638,7 +1812,9 @@ def safe_child_path(directory: Path, name: str, max_length: int = 180) -> Path:
 
 
 def redact(value: Any) -> str:
-    return redact_bot_errors_text(value, credential_path_marker="[REDACTED CREDENTIAL PATH]")
+    return redact_bot_errors_text(
+        value, credential_path_marker="[REDACTED CREDENTIAL PATH]"
+    )
 
 
 def redacted_state_text(value: Any, limit: int, *, tail: bool = False) -> str:
@@ -1648,7 +1824,9 @@ def redacted_state_text(value: Any, limit: int, *, tail: bool = False) -> str:
     return truncate(text, limit)
 
 
-def json_rpc_call(socket_path: str, method: str, params: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
+def json_rpc_call(
+    socket_path: str, method: str, params: dict[str, Any], timeout: float = 15.0
+) -> dict[str, Any]:
     if not socket_path:
         raise RuntimeError("socket path missing")
     if not os.path.exists(socket_path):
@@ -1662,25 +1840,38 @@ def json_rpc_call(socket_path: str, method: str, params: dict[str, Any], timeout
         reader = sock.makefile("r", encoding="utf-8", newline="\n")
         writer = sock.makefile("w", encoding="utf-8", newline="\n")
 
-        writer.write(json.dumps({
-            "jsonrpc": "2.0",
-            "id": init_id,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "bot-errors-dispatcher", "version": "1.0.0"},
-            },
-        }) + "\n")
+        writer.write(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": init_id,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {
+                            "name": "bot-errors-dispatcher",
+                            "version": "1.0.0",
+                        },
+                    },
+                }
+            )
+            + "\n"
+        )
         writer.flush()
         wait_for_response(reader, init_id, timeout)
 
-        writer.write(json.dumps({
-            "jsonrpc": "2.0",
-            "id": call_id,
-            "method": method,
-            "params": params,
-        }) + "\n")
+        writer.write(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": call_id,
+                    "method": method,
+                    "params": params,
+                }
+            )
+            + "\n"
+        )
         writer.flush()
         return wait_for_response(reader, call_id, timeout)
 
@@ -1707,11 +1898,15 @@ def validate_bot_errors_target() -> None:
     if not BOT_ERRORS_JID:
         raise RuntimeError("BOT_ERRORS_JID is required for live dispatch")
     if not GROUP_JID_RE.match(BOT_ERRORS_JID):
-        raise RuntimeError("BOT_ERRORS_JID must be a WhatsApp group JID for live dispatch")
+        raise RuntimeError(
+            "BOT_ERRORS_JID must be a WhatsApp group JID for live dispatch"
+        )
     if BOT_ERRORS_REQUIRE_EXPECTED and not BOT_ERRORS_EXPECTED_JID:
         raise RuntimeError("BOT_ERRORS_EXPECTED_JID is required for live dispatch")
     if BOT_ERRORS_EXPECTED_JID and BOT_ERRORS_JID != BOT_ERRORS_EXPECTED_JID:
-        raise RuntimeError("BOT_ERRORS_JID does not match BOT_ERRORS_EXPECTED_JID for live dispatch")
+        raise RuntimeError(
+            "BOT_ERRORS_JID does not match BOT_ERRORS_EXPECTED_JID for live dispatch"
+        )
 
 
 def send_whatsapp(text: str, socket_path: str = DEFAULT_SOCKET) -> None:
@@ -1724,7 +1919,9 @@ def send_whatsapp(text: str, socket_path: str = DEFAULT_SOCKET) -> None:
     dry_capture = os.environ.get("BOT_ERRORS_DRY_SEND_CAPTURE")
     if dry_capture:
         capture_path = Path(dry_capture)
-        append_private_jsonl(capture_path, {"time": now_iso(), "pid": os.getpid(), "text": redact(text)})
+        append_private_jsonl(
+            capture_path, {"time": now_iso(), "pid": os.getpid(), "text": redact(text)}
+        )
         return
 
     validate_bot_errors_target()
@@ -1734,7 +1931,10 @@ def send_whatsapp(text: str, socket_path: str = DEFAULT_SOCKET) -> None:
     result = json_rpc_call(
         socket_path,
         "tools/call",
-        {"name": "send_message", "arguments": {"chatJid": BOT_ERRORS_JID, "text": text}},
+        {
+            "name": "send_message",
+            "arguments": {"chatJid": BOT_ERRORS_JID, "text": text},
+        },
     )
     if result.get("isError") is True:
         raise RuntimeError(f"send_message returned error: {result}")
@@ -1784,7 +1984,9 @@ def requested_action_text(event: dict[str, Any]) -> str:
     Returned WITHOUT the "  > requested_action: " line prefix.
     """
     severity = str(event.get("severity") or "").lower()
-    if event_has_awaiting_physical_context(event) or is_verified_device_bond_lost_signal(event):
+    if event_has_awaiting_physical_context(
+        event
+    ) or is_verified_device_bond_lost_signal(event):
         return physical_action_text()
     if is_physical_intervention_signal(event):
         return physical_candidate_action_text()
@@ -1818,7 +2020,9 @@ def stamp_delivery_freshness(event: dict[str, Any], current: int) -> None:
         if isinstance(created, str) and created.strip():
             try:
                 created_epoch = int(
-                    datetime.fromisoformat(created.strip().replace("Z", "+00:00")).timestamp()
+                    datetime.fromisoformat(
+                        created.strip().replace("Z", "+00:00")
+                    ).timestamp()
                 )
                 delivery["ageAtDeliverySeconds"] = max(0, current - created_epoch)
             except Exception:
@@ -1839,14 +2043,25 @@ def format_event(event: dict[str, Any]) -> str:
         title = "BOT WARNING"
     else:
         title = "BOT ERROR"
-    summary = truncate(redact(event.get("summary") or "unspecified bot error").replace("@", " at "), 220)
-    process_info = event.get("process") if isinstance(event.get("process"), dict) else {}
-    diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
+    summary = truncate(
+        redact(event.get("summary") or "unspecified bot error").replace("@", " at "),
+        220,
+    )
+    process_info = (
+        event.get("process") if isinstance(event.get("process"), dict) else {}
+    )
+    diagnostics = (
+        event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
+    )
     delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
     failure = critical_asset_failure(event)
     asset = critical_asset_asset(event)
     storm = event.get("storm") if isinstance(event.get("storm"), dict) else {}
-    log_hints = diagnostics.get("logHints") if isinstance(diagnostics.get("logHints"), list) else []
+    log_hints = (
+        diagnostics.get("logHints")
+        if isinstance(diagnostics.get("logHints"), list)
+        else []
+    )
     writefail_recovery = (
         diagnostics.get("writefailRecovery")
         if isinstance(diagnostics.get("writefailRecovery"), dict)
@@ -1854,7 +2069,8 @@ def format_event(event: dict[str, Any]) -> str:
     )
     writefail_harvest = (
         writefail_recovery.get("harvest")
-        if isinstance(writefail_recovery, dict) and isinstance(writefail_recovery.get("harvest"), dict)
+        if isinstance(writefail_recovery, dict)
+        and isinstance(writefail_recovery.get("harvest"), dict)
         else None
     )
 
@@ -1890,8 +2106,11 @@ def format_event(event: dict[str, Any]) -> str:
         event_line("delivery_age_seconds", delivery.get("ageAtDeliverySeconds")),
         event_line(
             "revalidated",
-            ("no — condition not re-probed before re-send (may be stale)"
-             if delivery.get("revalidated") is False else None),
+            (
+                "no — condition not re-probed before re-send (may be stale)"
+                if delivery.get("revalidated") is False
+                else None
+            ),
             120,
         ),
         event_line("platform", event.get("platform")),
@@ -1911,13 +2130,15 @@ def format_event(event: dict[str, Any]) -> str:
         lines.append(event_line(f"log_{idx}", hint, 900))
     clear_requirement = critical_clear_requirement(event)
     requested_action = f"  > requested_action: {requested_action_text(event)}"
-    lines.extend([
-        event_line("queue", diagnostics.get("queue")),
-        event_line("dispatch_log", diagnostics.get("dispatchLog")),
-        event_line("clear_requirement", clear_requirement, 900),
-        event_line("evidence", event.get("evidence"), 1800),
-        requested_action,
-    ])
+    lines.extend(
+        [
+            event_line("queue", diagnostics.get("queue")),
+            event_line("dispatch_log", diagnostics.get("dispatchLog")),
+            event_line("clear_requirement", clear_requirement, 900),
+            event_line("evidence", event.get("evidence"), 1800),
+            requested_action,
+        ]
+    )
     text = "\n".join(line for line in lines if line)
     return truncate(text, MAX_MESSAGE_CHARS)
 
@@ -1946,6 +2167,13 @@ _TRANSIENT_TRANSPORT_SIGNATURES = (
     "socket hang up",
     "websocket is not open",
     "stream errored out",
+    # Signal transport (signal-cli JSON-RPC daemon): daemon down, socket reset,
+    # or RPC timeout. These ride the same transient retry budget as the WA
+    # blips — a momentarily dead signal-cli must not burn the permanent
+    # dead-letter cap and strand deliverable alerts.
+    "signal-cli socket error",
+    "signal-cli connection closed",
+    "econnrefused",
 )
 
 
@@ -1963,7 +2191,9 @@ def mark_failure(event: dict[str, Any], error: str) -> dict[str, Any]:
     delivery["status"] = "queued"
     delivery["lastError"] = truncate(redact(error), 500)
     backoff = next_backoff(attempts)
-    delivery["nextAttemptAtEpoch"] = int(time.time()) + backoff if backoff is not None else 0
+    delivery["nextAttemptAtEpoch"] = (
+        int(time.time()) + backoff if backoff is not None else 0
+    )
     return event
 
 
@@ -1999,7 +2229,12 @@ def mark_suppressed(event: dict[str, Any], reason: str) -> dict[str, Any]:
 
 
 def reset_delivery(event: dict[str, Any]) -> None:
-    event["delivery"] = {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None}
+    event["delivery"] = {
+        "attempts": 0,
+        "status": "queued",
+        "nextAttemptAtEpoch": 0,
+        "lastError": None,
+    }
 
 
 def move_to_dead_letter(
@@ -2016,7 +2251,9 @@ def move_to_dead_letter(
     terminated_at = now_iso()
     record = {
         "event": event,
-        "delivery": delivery if isinstance(delivery, dict) else {"status": "dead_letter"},
+        "delivery": delivery
+        if isinstance(delivery, dict)
+        else {"status": "dead_letter"},
         "terminated_at": terminated_at,
     }
     dest = safe_child_path(
@@ -2032,7 +2269,9 @@ def move_to_dead_letter(
     return dest
 
 
-def dead_letter_meta_event(paths: dict[str, Path], count: int, oldest_summary: str) -> dict[str, Any]:
+def dead_letter_meta_event(
+    paths: dict[str, Path], count: int, oldest_summary: str
+) -> dict[str, Any]:
     now = int(time.time())
     return {
         "schemaVersion": 1,
@@ -2051,13 +2290,20 @@ def dead_letter_meta_event(paths: dict[str, Path], count: int, oldest_summary: s
         # would make this meta-alert self-match the test-leak filter and be silently
         # dropped in integration tests. The path is a fixed, known location; it is
         # recorded in the dispatch log instead (queue_dead_letter_meta_alert).
-        "evidence": "\n".join([
-            f"dead_letter_count={count}",
-            f"oldest_summary={redacted_state_text(oldest_summary, 200)}",
-        ]),
+        "evidence": "\n".join(
+            [
+                f"dead_letter_count={count}",
+                f"oldest_summary={redacted_state_text(oldest_summary, 200)}",
+            ]
+        ),
         "process": {"pid": os.getpid()},
         "diagnostics": {"omitDispatchLogInMessage": True},
-        "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+        "delivery": {
+            "attempts": 0,
+            "status": "queued",
+            "nextAttemptAtEpoch": 0,
+            "lastError": None,
+        },
     }
 
 
@@ -2073,11 +2319,14 @@ def queue_dead_letter_meta_alert(paths: dict[str, Path], now: int) -> int:
     state = read_meta_state(paths)
     last = int(state.get("deadLetterMetaAlertAtEpoch") or 0)
     if last and now - last < DEAD_LETTER_META_ALERT_THROTTLE_SECONDS:
-        append_dispatch_log(paths, {
-            "type": "dead_letter_meta_debounced",
-            "count": len(dl_files),
-            "throttleSeconds": DEAD_LETTER_META_ALERT_THROTTLE_SECONDS,
-        })
+        append_dispatch_log(
+            paths,
+            {
+                "type": "dead_letter_meta_debounced",
+                "count": len(dl_files),
+                "throttleSeconds": DEAD_LETTER_META_ALERT_THROTTLE_SECONDS,
+            },
+        )
         return 0
 
     oldest_summary = ""
@@ -2094,23 +2343,34 @@ def queue_dead_letter_meta_alert(paths: dict[str, Path], now: int) -> int:
     state["deadLetterMetaAlertAtEpoch"] = now
     state["deadLetterMetaAlertEventId"] = event["id"]
     write_meta_state(paths, state)
-    append_dispatch_log(paths, {
-        "type": "dead_letter_meta_queued",
-        "eventId": event["id"],
-        "count": len(dl_files),
-        "deadLetterDir": str(paths["dead_letter"]),
-    })
+    append_dispatch_log(
+        paths,
+        {
+            "type": "dead_letter_meta_queued",
+            "eventId": event["id"],
+            "count": len(dl_files),
+            "deadLetterDir": str(paths["dead_letter"]),
+        },
+    )
     return 1
 
 
-
-def archive_path(directory: Path, original_name: str, status: str, event: dict[str, Any]) -> Path:
+def archive_path(
+    directory: Path, original_name: str, status: str, event: dict[str, Any]
+) -> Path:
     _event_id = str(event.get("id") or "")
     return safe_child_path(directory, f"{original_name}.{int(time.time())}.{status}")
 
 
-def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) -> str | None:
-    if os.environ.get("BOT_ERRORS_SEND_DAILY_HEALTH_INFO", "").strip().lower() in {"1", "true", "yes", "on"}:
+def should_suppress_send(
+    event: dict[str, Any], incident_state: dict[str, Any]
+) -> str | None:
+    if os.environ.get("BOT_ERRORS_SEND_DAILY_HEALTH_INFO", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
         return None
     source = str(event.get("source") or "")
     severity = str(event.get("severity") or "").lower()
@@ -2151,7 +2411,12 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
     # consolidated flap_storm alert (emitted by the pre-collapse scan) already
     # carries the count/rate. The storm itself never routes through here
     # (it is sent directly), so this cannot suppress the storm alert.
-    if FLAP_DETECTION and is_incident_alert(event) and not is_incident_clear(event) and source != "flap_storm":
+    if (
+        FLAP_DETECTION
+        and is_incident_alert(event)
+        and not is_incident_clear(event)
+        and source != "flap_storm"
+    ):
         flap_state = incident_state.get("flapState")
         if isinstance(flap_state, dict):
             flap_rec = flap_state.get(key)
@@ -2173,7 +2438,9 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
         # transient that persists past TRANSIENT_PROMOTE_SECONDS promotes back to
         # the hard-outage tier and falls through to normal send handling.
         if TRANSIENT_TIERING_ENABLED:
-            transient_reason = apply_transient_tiering(event, incident_state, key, current)
+            transient_reason = apply_transient_tiering(
+                event, incident_state, key, current
+            )
             if transient_reason is not None:
                 return transient_reason
         open_record = open_incidents.get(key)
@@ -2186,20 +2453,37 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
             open_record["lastSeenIso"] = now_iso()
             open_record["lastEventId"] = event.get("id")
             open_record["lastSummary"] = redacted_state_text(event.get("summary"), 500)
-            open_record["lastEvidence"] = redacted_state_text(event.get("evidence"), 1000, tail=True)
+            open_record["lastEvidence"] = redacted_state_text(
+                event.get("evidence"), 1000, tail=True
+            )
             suppressed = int_field(open_record, "suppressedCount") + 1
             open_record["suppressedCount"] = suppressed
-            became_awaiting_physical = update_awaiting_physical_tracking(event, open_record, current)
+            became_awaiting_physical = update_awaiting_physical_tracking(
+                event, open_record, current
+            )
             if became_awaiting_physical:
-                append_still_open_context(event, open_record, key, current, suppressed, escalated=False, digest=False)
+                append_still_open_context(
+                    event,
+                    open_record,
+                    key,
+                    current,
+                    suppressed,
+                    escalated=False,
+                    digest=False,
+                )
                 open_record["lastNotifiedAt"] = current
                 open_record["lastNotifiedIso"] = now_iso()
                 return None
             level = force_notify_level(event)
             if level:
                 levels = open_record.setdefault("forceNotifyLevels", {})
-                last_level_sent = int(levels.get(level) or 0) if isinstance(levels, dict) else 0
-                if last_level_sent and current - last_level_sent < INCIDENT_RENOTIFY_SECONDS:
+                last_level_sent = (
+                    int(levels.get(level) or 0) if isinstance(levels, dict) else 0
+                )
+                if (
+                    last_level_sent
+                    and current - last_level_sent < INCIDENT_RENOTIFY_SECONDS
+                ):
                     return f"forceNotify cooldown active for {key} level={level}; last sent {current - last_level_sent}s ago"
                 if isinstance(levels, dict):
                     levels[level] = current
@@ -2207,10 +2491,16 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
                 open_record["lastNotifiedIso"] = now_iso()
                 return None
             opened = int_field(open_record, "openedAt", current)
-            last_notified = int_field(open_record, "lastNotifiedAt", int_field(open_record, "lastSentAt", opened))
+            last_notified = int_field(
+                open_record,
+                "lastNotifiedAt",
+                int_field(open_record, "lastSentAt", opened),
+            )
             age_seconds = max(0, current - opened)
             since_notified = max(0, current - last_notified)
-            awaiting_physical = str(open_record.get("status") or "") == "awaiting_physical"
+            awaiting_physical = (
+                str(open_record.get("status") or "") == "awaiting_physical"
+            )
             renotify_seconds = (
                 AWAITING_PHYSICAL_RENOTIFY_SECONDS
                 if awaiting_physical
@@ -2219,7 +2509,8 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
             escalated = (
                 False
                 if awaiting_physical
-                else age_seconds >= INCIDENT_ESCALATE_SECONDS or suppressed >= INCIDENT_ESCALATE_SUPPRESSED
+                else age_seconds >= INCIDENT_ESCALATE_SECONDS
+                or suppressed >= INCIDENT_ESCALATE_SUPPRESSED
             )
             if since_notified >= renotify_seconds:
                 try:
@@ -2228,7 +2519,9 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
                         and open_renotify_is_nonactionable(event, key)
                     )
                 except Exception:
-                    suppress_open_renotify = False  # fail-open: send on classifier error
+                    suppress_open_renotify = (
+                        False  # fail-open: send on classifier error
+                    )
                 if suppress_open_renotify:
                     # Absorb the fresh occurrence silently: keep the audit counter and
                     # the lastSeen bookkeeping (already updated above), but do NOT
@@ -2245,10 +2538,14 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
                     )
                 open_record["lastNotifiedAt"] = current
                 open_record["lastNotifiedIso"] = now_iso()
-                open_record["renotifyCount"] = int_field(open_record, "renotifyCount") + 1
+                open_record["renotifyCount"] = (
+                    int_field(open_record, "renotifyCount") + 1
+                )
                 if not awaiting_physical:
                     advance_incident_renotify_interval(open_record)
-                append_still_open_context(event, open_record, key, current, suppressed, escalated)
+                append_still_open_context(
+                    event, open_record, key, current, suppressed, escalated
+                )
                 return None
             return f"incident already open for {key}; duplicate suppressed"
         last_sent = int(incident_state.setdefault("lastSentAt", {}).get(key) or 0)
@@ -2271,19 +2568,27 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
             return f"clear has no open incident for {key}; stale recovery suppressed"
         opened = int_field(open_record, "eventCreatedAtEpoch")
         created = event_created_epoch(event)
-        if opened > 0 and created is not None and created < opened - CLOCK_SKEW_TOLERANCE_SECONDS:
+        if (
+            opened > 0
+            and created is not None
+            and created < opened - CLOCK_SKEW_TOLERANCE_SECONDS
+        ):
             return f"clear predates open incident for {key}; stale recovery suppressed"
     return None
 
 
 def is_test_provenance_event(event: dict[str, Any]) -> bool:
     runtime = event.get("runtime") if isinstance(event.get("runtime"), dict) else {}
-    provenance = runtime.get("provenance") if isinstance(runtime.get("provenance"), dict) else {}
+    provenance = (
+        runtime.get("provenance") if isinstance(runtime.get("provenance"), dict) else {}
+    )
     return provenance.get("test") is True
 
 
 def omit_dispatch_log_in_message(event: dict[str, Any]) -> bool:
-    diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
+    diagnostics = (
+        event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
+    )
     return diagnostics.get("omitDispatchLogInMessage") is True
 
 
@@ -2305,21 +2610,27 @@ def append_clear_context(event: dict[str, Any], incident_state: dict[str, Any]) 
     if not is_incident_clear(event):
         return
     recovered_keys = daily_health_recovered_incident_keys(event, incident_state)
-    open_record = incident_state.setdefault("openIncidents", {}).get(incident_key(event))
+    open_record = incident_state.setdefault("openIncidents", {}).get(
+        incident_key(event)
+    )
     if not isinstance(open_record, dict) and not recovered_keys:
         return
     additions: list[str] = []
     if isinstance(open_record, dict):
         suppressed = int(open_record.get("suppressedCount") or 0)
-        additions.extend([
-            f"opened={open_record.get('openedIso') or open_record.get('openedAt')}",
-            f"prior_event={open_record.get('eventId')}",
-            f"suppressed_duplicates={suppressed}",
-            f"last_seen={open_record.get('lastSeenIso') or open_record.get('lastSeenAt')}",
-        ])
+        additions.extend(
+            [
+                f"opened={open_record.get('openedIso') or open_record.get('openedAt')}",
+                f"prior_event={open_record.get('eventId')}",
+                f"suppressed_duplicates={suppressed}",
+                f"last_seen={open_record.get('lastSeenIso') or open_record.get('lastSeenAt')}",
+            ]
+        )
         # F8: clearRequirement advisory — informational only; any clear still closes the incident.
         stored_requirement = str(open_record.get("clearRequirement") or "").strip()
-        if stored_requirement and not _clear_satisfies_requirement(event, stored_requirement):
+        if stored_requirement and not _clear_satisfies_requirement(
+            event, stored_requirement
+        ):
             additions.append(
                 f"clearRequirement_mismatch=true"
                 f" clearRequirement={redacted_state_text(stored_requirement, 200)}"
@@ -2340,15 +2651,23 @@ def mark_incident_sent(event: dict[str, Any], incident_state: dict[str, Any]) ->
         incident_state.setdefault("lastSentAt", {})[key] = current
         existing = incident_state.setdefault("openIncidents", {}).get(key)
         existing_record = existing if isinstance(existing, dict) else {}
-        reopen_record = None if existing_record else record_autoclose_reopen_if_recent(
-            event, incident_state, key, current
+        reopen_record = (
+            None
+            if existing_record
+            else record_autoclose_reopen_if_recent(event, incident_state, key, current)
         )
         opened_at = int_field(existing_record, "openedAt", current)
         opened_iso = existing_record.get("openedIso") or now_iso()
         event_created_at_epoch = event_created_epoch(event) or current
         suppressed = int_field(existing_record, "suppressedCount")
-        renotify_count = int_field(existing_record, "renotifyCount") + (1 if existing_record else 0)
-        force_levels = existing_record.get("forceNotifyLevels") if isinstance(existing_record.get("forceNotifyLevels"), dict) else {}
+        renotify_count = int_field(existing_record, "renotifyCount") + (
+            1 if existing_record else 0
+        )
+        force_levels = (
+            existing_record.get("forceNotifyLevels")
+            if isinstance(existing_record.get("forceNotifyLevels"), dict)
+            else {}
+        )
         level = force_notify_level(event)
         if level:
             force_levels[level] = current
@@ -2389,16 +2708,20 @@ def mark_incident_sent(event: dict[str, Any], incident_state: dict[str, Any]) ->
             updated_record["assetInstance"] = asset_instance
         if reopen_record is not None:
             updated_record["autoCloseReopened"] = True
-            updated_record["autoCloseReopenCount"] = int_field(
-                existing_record, "autoCloseReopenCount"
-            ) + 1
+            updated_record["autoCloseReopenCount"] = (
+                int_field(existing_record, "autoCloseReopenCount") + 1
+            )
             updated_record["lastAutoCloseReopen"] = reopen_record
         update_awaiting_physical_tracking(event, updated_record, current)
         incident_state.setdefault("openIncidents", {})[key] = updated_record
         legacy_key = legacy_unqualified_incident_key(event)
         if legacy_key and legacy_key != key:
-            legacy_record = incident_state.setdefault("openIncidents", {}).get(legacy_key)
-            if legacy_record_matches_alert_source(event, legacy_record if isinstance(legacy_record, dict) else None):
+            legacy_record = incident_state.setdefault("openIncidents", {}).get(
+                legacy_key
+            )
+            if legacy_record_matches_alert_source(
+                event, legacy_record if isinstance(legacy_record, dict) else None
+            ):
                 incident_state.setdefault("openIncidents", {}).pop(legacy_key, None)
                 incident_state.setdefault("lastSentAt", {}).pop(legacy_key, None)
     elif is_incident_clear(event):
@@ -2413,7 +2736,9 @@ def mark_incident_sent(event: dict[str, Any], incident_state: dict[str, Any]) ->
         close_recovered_daily_health_incidents(event, incident_state)
 
 
-def close_superseded_incidents(event: dict[str, Any], incident_state: dict[str, Any]) -> None:
+def close_superseded_incidents(
+    event: dict[str, Any], incident_state: dict[str, Any]
+) -> None:
     source = safe_segment(str(event.get("source") or "unknown"))
     superseded_sources = SUPERSEDED_SOURCES_BY_ALERT_SOURCE.get(source)
     if not superseded_sources:
@@ -2439,7 +2764,7 @@ def close_superseded_incidents(event: dict[str, Any], incident_state: dict[str, 
             key
             for key in open_incidents
             if key.startswith(scope_prefix)
-            and symptom_source_matches(key[len(scope_prefix):], superseded_sources)
+            and symptom_source_matches(key[len(scope_prefix) :], superseded_sources)
         ]
         for key in prefixed_keys:
             open_incidents.pop(key, None)
@@ -2480,22 +2805,36 @@ def mark_suppressed_by_stronger(
     current: int,
 ) -> None:
     if is_incident_clear(event):
-        stronger_record["suppressedClearCount"] = int_field(stronger_record, "suppressedClearCount") + 1
+        stronger_record["suppressedClearCount"] = (
+            int_field(stronger_record, "suppressedClearCount") + 1
+        )
         stronger_record["lastSuppressedClearAt"] = current
         stronger_record["lastSuppressedClearIso"] = now_iso()
         stronger_record["lastSuppressedClearSource"] = incident_source(event)
-        stronger_record["lastSuppressedClearSummary"] = redacted_state_text(event.get("summary"), 500)
-        stronger_record["lastSuppressedClearReason"] = f"clear suppressed by stronger open incident {stronger_key}"
+        stronger_record["lastSuppressedClearSummary"] = redacted_state_text(
+            event.get("summary"), 500
+        )
+        stronger_record["lastSuppressedClearReason"] = (
+            f"clear suppressed by stronger open incident {stronger_key}"
+        )
         return
 
     stronger_record["lastSeenAt"] = current
     stronger_record["lastSeenIso"] = now_iso()
     stronger_record["lastSuppressedSymptomSource"] = incident_source(event)
-    stronger_record["lastSuppressedSymptomSummary"] = redacted_state_text(event.get("summary"), 500)
-    stronger_record["lastSuppressedSymptomEvidence"] = redacted_state_text(event.get("evidence"), 1000, tail=True)
+    stronger_record["lastSuppressedSymptomSummary"] = redacted_state_text(
+        event.get("summary"), 500
+    )
+    stronger_record["lastSuppressedSymptomEvidence"] = redacted_state_text(
+        event.get("evidence"), 1000, tail=True
+    )
     if critical_failure_code(event):
-        stronger_record["lastSuppressedSymptomFailureCode"] = critical_failure_code(event)
-    stronger_record["suppressedCount"] = int_field(stronger_record, "suppressedCount") + 1
+        stronger_record["lastSuppressedSymptomFailureCode"] = critical_failure_code(
+            event
+        )
+    stronger_record["suppressedCount"] = (
+        int_field(stronger_record, "suppressedCount") + 1
+    )
     # Pattern C — tag the suppressed symptom with inhibited_by:<root_source>,
     # mirroring how Pattern F tags flap_storm members. The root source is the
     # last segment of the stronger_key (scope|root_source). Auto-release is
@@ -2524,7 +2863,11 @@ def incident_event_fields_from_key(key: str) -> dict[str, str]:
     elif source.startswith("daily-health:"):
         fields["source"] = "daily-health"
         fields["alertSource"] = source.split(":", 1)[1]
-    elif instance == "bot-errors-collector" and source.startswith("remote-") and ":" in source:
+    elif (
+        instance == "bot-errors-collector"
+        and source.startswith("remote-")
+        and ":" in source
+    ):
         fields["source"], remote = source.split(":", 1)
         fields["diagnostics"] = {"remote": remote}
     return fields
@@ -2549,12 +2892,17 @@ def stale_renotify_is_nonactionable(event: dict[str, Any], key: str) -> bool:
         return False
     if is_autoclose_protected(event, key):
         return False
-    if source in STALE_RENOTIFY_SUPPRESS_SOURCES or alert_source in STALE_RENOTIFY_SUPPRESS_SOURCES:
+    if (
+        source in STALE_RENOTIFY_SUPPRESS_SOURCES
+        or alert_source in STALE_RENOTIFY_SUPPRESS_SOURCES
+    ):
         return True
     for cand in (source.lower(), alert_source.lower()):
         if not cand:
             continue
-        if cand.endswith(STALE_RENOTIFY_SUPPRESS_SUFFIXES) or cand.startswith(STALE_RENOTIFY_SUPPRESS_PREFIXES):
+        if cand.endswith(STALE_RENOTIFY_SUPPRESS_SUFFIXES) or cand.startswith(
+            STALE_RENOTIFY_SUPPRESS_PREFIXES
+        ):
             return True
     # SSOT signal: the derived action is non-actionable. This covers both the
     # plain info "none" sentinel AND the stale "verify whether it recovered —
@@ -2586,7 +2934,10 @@ def open_renotify_is_nonactionable(event: dict[str, Any], key: str) -> bool:
         return False
     if is_autoclose_protected(event, key):
         return False
-    if source in STALE_RENOTIFY_SUPPRESS_SOURCES or alert_source in STALE_RENOTIFY_SUPPRESS_SOURCES:
+    if (
+        source in STALE_RENOTIFY_SUPPRESS_SOURCES
+        or alert_source in STALE_RENOTIFY_SUPPRESS_SOURCES
+    ):
         return True
     for cand in (source.lower(), alert_source.lower()):
         if cand.startswith(STALE_RENOTIFY_SUPPRESS_PREFIXES):
@@ -2594,7 +2945,9 @@ def open_renotify_is_nonactionable(event: dict[str, Any], key: str) -> bool:
     return False
 
 
-def mark_stale_incident_suppressed(record: dict[str, Any], event: dict[str, Any], current: int) -> None:
+def mark_stale_incident_suppressed(
+    record: dict[str, Any], event: dict[str, Any], current: int
+) -> None:
     """Pattern A: record a suppressed (non-sent) stale renotify for audit.
 
     The incident stays in state (audit trail preserved); only the WhatsApp push
@@ -2646,7 +2999,12 @@ def stale_autoclose_summary_event(keys: list[str], current: int) -> dict[str, An
             "dispatchLog": str(state_paths()["logs"] / "dispatch.jsonl"),
             "queue": str(state_root()),
         },
-        "delivery": {"attempts": 1, "status": "stale-autoclose", "nextAttemptAtEpoch": 0, "lastError": None},
+        "delivery": {
+            "attempts": 1,
+            "status": "stale-autoclose",
+            "nextAttemptAtEpoch": 0,
+            "lastError": None,
+        },
     }
 
 
@@ -2673,7 +3031,9 @@ def should_emit_autoclose_digest(accum: dict[str, Any], current: int) -> bool:
         return True
 
 
-def stale_incident_event(key: str, record: dict[str, Any], current: int) -> dict[str, Any] | None:
+def stale_incident_event(
+    key: str, record: dict[str, Any], current: int
+) -> dict[str, Any] | None:
     previous_status = str(record.get("status") or "open")
     opened = int_field(record, "openedAt", current)
     last_seen = int_field(record, "lastSeenAt", opened)
@@ -2682,12 +3042,19 @@ def stale_incident_event(key: str, record: dict[str, Any], current: int) -> dict
         return None
 
     awaiting_physical = previous_status == "awaiting_physical"
-    renotify_seconds = AWAITING_PHYSICAL_RENOTIFY_SECONDS if awaiting_physical else INCIDENT_STALE_RENOTIFY_SECONDS
+    renotify_seconds = (
+        AWAITING_PHYSICAL_RENOTIFY_SECONDS
+        if awaiting_physical
+        else INCIDENT_STALE_RENOTIFY_SECONDS
+    )
     last_stale_notified = int_field(record, "lastStaleRenotifiedAt")
     if last_stale_notified and current - last_stale_notified < renotify_seconds:
         return None
     last_stale_failed = int_field(record, "lastStaleRenotifyFailedAt")
-    if last_stale_failed and current - last_stale_failed < INCIDENT_STALE_FAILURE_RETRY_SECONDS:
+    if (
+        last_stale_failed
+        and current - last_stale_failed < INCIDENT_STALE_FAILURE_RETRY_SECONDS
+    ):
         return None
 
     summary = str(record.get("lastSummary") or key)
@@ -2724,11 +3091,18 @@ def stale_incident_event(key: str, record: dict[str, Any], current: int) -> dict
         "summary": title,
         "evidence": "\n".join(additions),
         "diagnostics": {
-            "logHints": ["journalctl --user -u bot-errors-dispatcher.service --since '30 minutes ago'"],
+            "logHints": [
+                "journalctl --user -u bot-errors-dispatcher.service --since '30 minutes ago'"
+            ],
             "dispatchLog": str(state_paths()["logs"] / "dispatch.jsonl"),
             "queue": str(state_root()),
         },
-        "delivery": {"attempts": 1, "status": "stale-renotify", "nextAttemptAtEpoch": 0, "lastError": None},
+        "delivery": {
+            "attempts": 1,
+            "status": "stale-renotify",
+            "nextAttemptAtEpoch": 0,
+            "lastError": None,
+        },
     }
     failure_code = str(record.get("failureCode") or "").strip()
     recoverability = str(record.get("recoverability") or "").strip()
@@ -2743,17 +3117,24 @@ def stale_incident_event(key: str, record: dict[str, Any], current: int) -> dict
             },
             "failure": {
                 "code": failure_code or "UNKNOWN_STALE_INCIDENT",
-                "domain": "account_linkage" if (asset_kind or "").startswith("whatsapp") else "operational_reliability",
+                "domain": "account_linkage"
+                if (asset_kind or "").startswith("whatsapp")
+                else "operational_reliability",
                 "recoverability": recoverability or "unknown",
-                "confidence": "confirmed" if previous_status == "awaiting_physical" else "probable",
+                "confidence": "confirmed"
+                if previous_status == "awaiting_physical"
+                else "probable",
                 "operatorAction": action,
-                "clearRequirement": clear_requirement or "matching clear event from the original source",
+                "clearRequirement": clear_requirement
+                or "matching clear event from the original source",
             },
         }
     return event
 
 
-def mark_stale_incident_notified(record: dict[str, Any], event: dict[str, Any], current: int) -> None:
+def mark_stale_incident_notified(
+    record: dict[str, Any], event: dict[str, Any], current: int
+) -> None:
     previous_status = str(record.get("status") or "open")
     if previous_status != "awaiting_physical":
         record["status"] = "stale"
@@ -2769,7 +3150,9 @@ def mark_stale_incident_notified(record: dict[str, Any], event: dict[str, Any], 
     record.pop("lastStaleRenotifyError", None)
 
 
-def mark_stale_incident_failed(record: dict[str, Any], event: dict[str, Any], current: int, error: str) -> None:
+def mark_stale_incident_failed(
+    record: dict[str, Any], event: dict[str, Any], current: int, error: str
+) -> None:
     if not record.get("staleAt"):
         record["staleAt"] = current
         record["staleIso"] = now_iso()
@@ -2777,7 +3160,9 @@ def mark_stale_incident_failed(record: dict[str, Any], event: dict[str, Any], cu
     record["lastStaleRenotifyFailedIso"] = now_iso()
     record["lastStaleRenotifyFailedEventId"] = event.get("id")
     record["lastStaleRenotifyError"] = truncate(error, 500)
-    record["staleRenotifyFailureCount"] = int_field(record, "staleRenotifyFailureCount") + 1
+    record["staleRenotifyFailureCount"] = (
+        int_field(record, "staleRenotifyFailureCount") + 1
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2791,6 +3176,7 @@ def mark_stale_incident_failed(record: dict[str, Any], event: dict[str, Any], cu
 # dispatcher wall-clock (never author createdAt — collector clock skew, C0).
 # Trips are counted on raw INPUT before storm-collapse consumes members (C1).
 # ---------------------------------------------------------------------------
+
 
 def flap_entry(flap_state: dict[str, Any], key: str) -> dict[str, Any]:
     entry = flap_state.get(key)
@@ -2814,7 +3200,11 @@ def record_flap_trip(flap_state: dict[str, Any], key: str, now: int) -> dict[str
     """Record one raw trip for incident_key at wall-clock `now`, pruning the
     sliding window. Counts input per raw trip (C1)."""
     entry = flap_entry(flap_state, key)
-    pruned = [t for t in entry["tripTimestamps"] if isinstance(t, (int, float)) and 0 <= now - t <= FLAP_WINDOW_SECONDS]
+    pruned = [
+        t
+        for t in entry["tripTimestamps"]
+        if isinstance(t, (int, float)) and 0 <= now - t <= FLAP_WINDOW_SECONDS
+    ]
     pruned.append(now)
     entry["tripTimestamps"] = pruned
     entry["cumulativeCount"] = int(entry.get("cumulativeCount") or 0) + 1
@@ -2845,7 +3235,9 @@ def flap_evaluate(entry: dict[str, Any], now: int) -> dict[str, Any]:
             return {"emit": True, "severity": "warning", "reason": "flap_storm_opened"}
         return {"emit": False, "severity": None, "reason": "below_threshold"}
     storm_at = int(entry.get("stormAt") or now)
-    promoted = (now - storm_at >= FLAP_PROMOTE_SECONDS) or (cumulative >= FLAP_CRITICAL_COUNT)
+    promoted = (now - storm_at >= FLAP_PROMOTE_SECONDS) or (
+        cumulative >= FLAP_CRITICAL_COUNT
+    )
     new_severity = "critical" if promoted else "warning"
     escalated = new_severity == "critical" and entry.get("stormSeverity") != "critical"
     last_emit = int(entry.get("lastStormEmitAt") or storm_at)
@@ -2858,7 +3250,11 @@ def flap_evaluate(entry: dict[str, Any], now: int) -> dict[str, Any]:
             "severity": new_severity,
             "reason": "flap_storm_escalated" if escalated else "flap_storm_cadence",
         }
-    return {"emit": False, "severity": new_severity, "reason": "flap_storm_member_suppressed"}
+    return {
+        "emit": False,
+        "severity": new_severity,
+        "reason": "flap_storm_member_suppressed",
+    }
 
 
 def flap_should_resolve(entry: dict[str, Any], now: int) -> bool:
@@ -2868,10 +3264,15 @@ def flap_should_resolve(entry: dict[str, Any], now: int) -> bool:
     if not entry.get("stormAt"):
         return False
     last_trip = int(entry.get("lastTripAt") or 0)
-    return flap_trips_in_window(entry, now) == 0 and (now - last_trip) >= FLAP_STABLE_SECONDS
+    return (
+        flap_trips_in_window(entry, now) == 0
+        and (now - last_trip) >= FLAP_STABLE_SECONDS
+    )
 
 
-def flap_storm_event(key: str, entry: dict[str, Any], severity: str, now: int) -> dict[str, Any]:
+def flap_storm_event(
+    key: str, entry: dict[str, Any], severity: str, now: int
+) -> dict[str, Any]:
     """Build the consolidated flap_storm alert with Pattern E enrichment and a
     real requested_action (never 'none'); exempt from Pattern A suppression."""
     fields = incident_event_fields_from_key(key)
@@ -2890,7 +3291,8 @@ def flap_storm_event(key: str, entry: dict[str, Any], severity: str, now: int) -
         f"flap_first_seen={iso_from_epoch(first)}",
         f"flap_last_seen={iso_from_epoch(last)}",
         f"flap_rate_per_window={trips}",
-        "severity_rationale=" + (
+        "severity_rationale="
+        + (
             f"critical: sustained ≥{FLAP_PROMOTE_SECONDS}s or count ≥{FLAP_CRITICAL_COUNT}"
             if severity == "critical"
             else f"warning: ≥{FLAP_TRIP_THRESHOLD} trips in {FLAP_WINDOW_SECONDS}s"
@@ -2908,7 +3310,11 @@ def flap_storm_event(key: str, entry: dict[str, Any], severity: str, now: int) -
         "summary": f"Flap storm: {underlying} unstable — {cumulative} trips, {trips} in last {FLAP_WINDOW_SECONDS}s",
         "evidence": "\n".join(additions),
         "criticalAsset": {
-            "asset": {"kind": "monitored_source", "instance": fields.get("instance", "unknown"), "owner": "whatsoup"},
+            "asset": {
+                "kind": "monitored_source",
+                "instance": fields.get("instance", "unknown"),
+                "owner": "whatsoup",
+            },
             "failure": {
                 "code": "FLAP_STORM",
                 "domain": "operational_reliability",
@@ -2922,7 +3328,12 @@ def flap_storm_event(key: str, entry: dict[str, Any], severity: str, now: int) -
             "dispatchLog": str(state_paths()["logs"] / "dispatch.jsonl"),
             "queue": str(state_root()),
         },
-        "delivery": {"attempts": 1, "status": "flap-storm", "nextAttemptAtEpoch": 0, "lastError": None},
+        "delivery": {
+            "attempts": 1,
+            "status": "flap-storm",
+            "nextAttemptAtEpoch": 0,
+            "lastError": None,
+        },
     }
 
 
@@ -2957,7 +3368,12 @@ def flap_resolve_event(key: str, entry: dict[str, Any], now: int) -> dict[str, A
             "dispatchLog": str(state_paths()["logs"] / "dispatch.jsonl"),
             "queue": str(state_root()),
         },
-        "delivery": {"attempts": 1, "status": "flap-resolved", "nextAttemptAtEpoch": 0, "lastError": None},
+        "delivery": {
+            "attempts": 1,
+            "status": "flap-resolved",
+            "nextAttemptAtEpoch": 0,
+            "lastError": None,
+        },
     }
 
 
@@ -2996,18 +3412,28 @@ def flap_scan_outbox(paths: dict[str, Path]) -> int:
             changed = True
             decision = flap_evaluate(entry, now)
             if decision.get("emit"):
-                send_whatsapp(format_event(flap_storm_event(key, entry, str(decision["severity"]), now)))
+                send_whatsapp(
+                    format_event(
+                        flap_storm_event(key, entry, str(decision["severity"]), now)
+                    )
+                )
                 emitted += 1
-                append_dispatch_log(paths, {
-                    "type": "flap_storm",
-                    "incidentKey": key,
-                    "severity": decision.get("severity"),
-                    "reason": decision.get("reason"),
-                    "cumulativeCount": entry.get("cumulativeCount"),
-                    "tripsInWindow": flap_trips_in_window(entry, now),
-                })
+                append_dispatch_log(
+                    paths,
+                    {
+                        "type": "flap_storm",
+                        "incidentKey": key,
+                        "severity": decision.get("severity"),
+                        "reason": decision.get("reason"),
+                        "cumulativeCount": entry.get("cumulativeCount"),
+                        "tripsInWindow": flap_trips_in_window(entry, now),
+                    },
+                )
         except Exception as exc:  # noqa: BLE001 - one bad event must not block the scan
-            append_dispatch_log(paths, {"type": "flap_scan_error", "incidentKey": key, "error": str(exc)})
+            append_dispatch_log(
+                paths,
+                {"type": "flap_scan_error", "incidentKey": key, "error": str(exc)},
+            )
             continue
     if changed:
         save_incident_state(paths, incident_state)
@@ -3034,17 +3460,23 @@ def sweep_flap_storms(paths: dict[str, Path]) -> tuple[int, int]:
         try:
             if flap_should_resolve(entry, now):
                 send_whatsapp(format_event(flap_resolve_event(str(key), entry, now)))
-                append_dispatch_log(paths, {
-                    "type": "flap_storm_resolved",
-                    "incidentKey": key,
-                    "cumulativeCount": entry.get("cumulativeCount"),
-                })
+                append_dispatch_log(
+                    paths,
+                    {
+                        "type": "flap_storm_resolved",
+                        "incidentKey": key,
+                        "cumulativeCount": entry.get("cumulativeCount"),
+                    },
+                )
                 flap_state.pop(key, None)
                 resolved += 1
                 changed = True
         except Exception as exc:  # noqa: BLE001 - one bad entry must not block the sweep
             errors += 1
-            append_dispatch_log(paths, {"type": "flap_resolve_error", "incidentKey": key, "error": str(exc)})
+            append_dispatch_log(
+                paths,
+                {"type": "flap_resolve_error", "incidentKey": key, "error": str(exc)},
+            )
     if changed:
         save_incident_state(paths, incident_state)
     return resolved, errors
@@ -3075,7 +3507,10 @@ def is_whatsapp_daily_health_key(key: str) -> bool:
         return True
     tail = source.split(":")[-1] if source else ""
     prefix = source.split(":", 1)[0] if source else ""
-    if prefix in {"", "daily-health"} and tail in DAILY_HEALTH_WHATSAPP_RECOVERY_SOURCES:
+    if (
+        prefix in {"", "daily-health"}
+        and tail in DAILY_HEALTH_WHATSAPP_RECOVERY_SOURCES
+    ):
         return True
     if source in DAILY_HEALTH_WHATSAPP_RECOVERY_SOURCES:
         return True
@@ -3099,7 +3534,9 @@ def daily_health_monitoring_stale(machine: str, open_incidents: dict[str, Any]) 
     return False
 
 
-def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = None) -> tuple[int, int, str | None]:
+def sweep_stale_incidents(
+    paths: dict[str, Path], skip_keys: set[str] | None = None
+) -> tuple[int, int, str | None]:
     incident_state = load_incident_state(paths)
     open_incidents = incident_state.setdefault("openIncidents", {})
     current = int(time.time())
@@ -3123,11 +3560,14 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                 nonactionable = stale_renotify_is_nonactionable(event, str(key))
             except Exception as exc:  # fail-open: never lose a real alert to the filter
                 nonactionable = False
-                append_dispatch_log(paths, {
-                    "type": "stale_suppress_classify_error",
-                    "incidentKey": key,
-                    "error": str(exc),
-                })
+                append_dispatch_log(
+                    paths,
+                    {
+                        "type": "stale_suppress_classify_error",
+                        "incidentKey": key,
+                        "error": str(exc),
+                    },
+                )
             if nonactionable:
                 mark_stale_incident_suppressed(record, event, current)
                 suppressed += 1
@@ -3146,10 +3586,11 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                 # cap elapses (§10 C5: openIncidents must stay bounded). Fail-open.
                 if will_close and AUTOCLOSE_LIVENESS_GATE:
                     try:
-                        if _source_of_key(str(key)).startswith("daily-health") and \
-                                daily_health_monitoring_stale(
-                                    _machine_of_key(str(key)), open_incidents
-                                ):
+                        if _source_of_key(str(key)).startswith(
+                            "daily-health"
+                        ) and daily_health_monitoring_stale(
+                            _machine_of_key(str(key)), open_incidents
+                        ):
                             machine = _machine_of_key(str(key))
                             # Bound the hold from when holding BEGAN (not the
                             # incident's own age): a long-quiet incident that only
@@ -3164,27 +3605,36 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                                 held_for_liveness = True
                                 record["autocloseHeldForLiveness"] = True
                                 record["lastAutocloseHoldAt"] = current
-                                append_dispatch_log(paths, {
-                                    "type": "autoclose_held_for_liveness",
-                                    "incidentKey": key,
-                                    "machine": machine,
-                                    "reason": "daily_health_monitoring_stale",
-                                    "ageSeconds": age,
-                                    "heldSeconds": held_seconds,
-                                })
+                                append_dispatch_log(
+                                    paths,
+                                    {
+                                        "type": "autoclose_held_for_liveness",
+                                        "incidentKey": key,
+                                        "machine": machine,
+                                        "reason": "daily_health_monitoring_stale",
+                                        "ageSeconds": age,
+                                        "heldSeconds": held_seconds,
+                                    },
+                                )
                             else:
-                                append_dispatch_log(paths, {
-                                    "type": "autoclose_liveness_hold_cap_reached",
-                                    "incidentKey": key,
-                                    "machine": machine,
-                                    "heldSeconds": held_seconds,
-                                })
+                                append_dispatch_log(
+                                    paths,
+                                    {
+                                        "type": "autoclose_liveness_hold_cap_reached",
+                                        "incidentKey": key,
+                                        "machine": machine,
+                                        "heldSeconds": held_seconds,
+                                    },
+                                )
                     except Exception as exc:  # fail-open: never leak the close on a bug
-                        append_dispatch_log(paths, {
-                            "type": "autoclose_liveness_gate_error",
-                            "incidentKey": key,
-                            "error": str(exc),
-                        })
+                        append_dispatch_log(
+                            paths,
+                            {
+                                "type": "autoclose_liveness_gate_error",
+                                "incidentKey": key,
+                                "error": str(exc),
+                            },
+                        )
                 # #1429 / §10 C2: an age-out close on a daily-health incident must
                 # be gated on POSITIVE recovery proof, not elapsed time alone. If
                 # the exogenous oracle (is_verified_whatsapp_health_recovery, via
@@ -3198,18 +3648,24 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                 # bug (never leak the close). Only daily-health incidents have a
                 # WhatsApp-health oracle; other sources keep the legacy age-out close.
                 held_for_recovery = False
-                if will_close and AUTOCLOSE_LIVENESS_GATE \
-                        and is_whatsapp_daily_health_key(str(key)):
+                if (
+                    will_close
+                    and AUTOCLOSE_LIVENESS_GATE
+                    and is_whatsapp_daily_health_key(str(key))
+                ):
                     try:
                         machine = _machine_of_key(str(key))
                         if record_has_verified_health_recovery(record):
                             record["autocloseRecoveryVerified"] = True
-                            append_dispatch_log(paths, {
-                                "type": "autoclose_recovery_verified",
-                                "incidentKey": key,
-                                "machine": machine,
-                                "ageSeconds": age,
-                            })
+                            append_dispatch_log(
+                                paths,
+                                {
+                                    "type": "autoclose_recovery_verified",
+                                    "incidentKey": key,
+                                    "machine": machine,
+                                    "ageSeconds": age,
+                                },
+                            )
                         else:
                             first_held = int_field(record, "autocloseFirstHeldAt")
                             if first_held <= 0:
@@ -3221,58 +3677,75 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                                 held_for_recovery = True
                                 record["autocloseHeldForRecovery"] = True
                                 record["lastAutocloseHoldAt"] = current
-                                append_dispatch_log(paths, {
-                                    "type": "autoclose_held_for_recovery",
-                                    "incidentKey": key,
-                                    "machine": machine,
-                                    "reason": "recovery_not_verified",
-                                    "ageSeconds": age,
-                                    "heldSeconds": held_seconds,
-                                })
+                                append_dispatch_log(
+                                    paths,
+                                    {
+                                        "type": "autoclose_held_for_recovery",
+                                        "incidentKey": key,
+                                        "machine": machine,
+                                        "reason": "recovery_not_verified",
+                                        "ageSeconds": age,
+                                        "heldSeconds": held_seconds,
+                                    },
+                                )
                             else:
                                 # Bounded fallback: cap exceeded with no verified
                                 # recovery. Close, but tag it distinctly so it is
                                 # auditable and never read as a verified recovery.
                                 record["autocloseBoundedUnverified"] = True
-                                append_dispatch_log(paths, {
-                                    "type": "autoclose_bounded_unverified_cap_reached",
-                                    "incidentKey": key,
-                                    "machine": machine,
-                                    "reason": "recovery_not_verified_cap_reached",
-                                    "heldSeconds": held_seconds,
-                                })
+                                append_dispatch_log(
+                                    paths,
+                                    {
+                                        "type": "autoclose_bounded_unverified_cap_reached",
+                                        "incidentKey": key,
+                                        "machine": machine,
+                                        "reason": "recovery_not_verified_cap_reached",
+                                        "heldSeconds": held_seconds,
+                                    },
+                                )
                     except Exception as exc:  # fail-open: never leak the close on a bug
-                        append_dispatch_log(paths, {
-                            "type": "autoclose_recovery_gate_error",
-                            "incidentKey": key,
-                            "error": str(exc),
-                        })
+                        append_dispatch_log(
+                            paths,
+                            {
+                                "type": "autoclose_recovery_gate_error",
+                                "incidentKey": key,
+                                "error": str(exc),
+                            },
+                        )
                 if will_close:
                     auto_closed.append(str(key))
                 bounded_unverified = bool(record.get("autocloseBoundedUnverified"))
-                append_dispatch_log(paths, {
-                    "type": "stale_renotify_suppressed",
-                    "reason": (
-                        "bounded_unverified_autoclose_cap_reached"
-                        if (will_close and bounded_unverified)
-                        else "nonactionable_aged_out_unverified"
-                    ),
-                    "incidentKey": key,
-                    "staleSuppressedCount": record.get("staleSuppressedCount"),
-                    "ageSeconds": age,
-                    "willAutoClose": will_close,
-                    "heldForLiveness": held_for_liveness,
-                    "heldForRecovery": held_for_recovery,
-                    "boundedUnverifiedClose": bool(will_close and bounded_unverified),
-                })
+                append_dispatch_log(
+                    paths,
+                    {
+                        "type": "stale_renotify_suppressed",
+                        "reason": (
+                            "bounded_unverified_autoclose_cap_reached"
+                            if (will_close and bounded_unverified)
+                            else "nonactionable_aged_out_unverified"
+                        ),
+                        "incidentKey": key,
+                        "staleSuppressedCount": record.get("staleSuppressedCount"),
+                        "ageSeconds": age,
+                        "willAutoClose": will_close,
+                        "heldForLiveness": held_for_liveness,
+                        "heldForRecovery": held_for_recovery,
+                        "boundedUnverifiedClose": bool(
+                            will_close and bounded_unverified
+                        ),
+                    },
+                )
                 continue
         if sent + failed >= INCIDENT_STALE_SWEEP_MAX_EVENTS:
-            append_dispatch_log(paths, {
-                "type": "stale_renotify_batch_cap_reached",
-                "limit": INCIDENT_STALE_SWEEP_MAX_EVENTS,
-                "sent": sent,
-                "failed": failed,
-            })
+            append_dispatch_log(
+                paths,
+                {
+                    "type": "stale_renotify_batch_cap_reached",
+                    "limit": INCIDENT_STALE_SWEEP_MAX_EVENTS,
+                    "sent": sent,
+                    "failed": failed,
+                },
+            )
             break
         text = format_event(event)
         try:
@@ -3282,23 +3755,29 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
             last_error = str(exc)
             mark_stale_incident_failed(record, event, current, str(exc))
             changed = True
-            append_dispatch_log(paths, {
-                "type": "stale_renotify_failed",
-                "incidentKey": key,
-                "eventId": event.get("id"),
-                "error": str(exc),
-            })
+            append_dispatch_log(
+                paths,
+                {
+                    "type": "stale_renotify_failed",
+                    "incidentKey": key,
+                    "eventId": event.get("id"),
+                    "error": str(exc),
+                },
+            )
             continue
         mark_stale_incident_notified(record, event, current)
         sent += 1
         changed = True
-        append_dispatch_log(paths, {
-            "type": "stale_renotify",
-            "incidentKey": key,
-            "eventId": event.get("id"),
-            "status": record.get("status"),
-            "staleRenotifyCount": record.get("staleRenotifyCount"),
-        })
+        append_dispatch_log(
+            paths,
+            {
+                "type": "stale_renotify",
+                "incidentKey": key,
+                "eventId": event.get("id"),
+                "status": record.get("status"),
+                "staleRenotifyCount": record.get("staleRenotifyCount"),
+            },
+        )
     # Terminal removal + coalesced auto-close summary (§10 C5 + Pattern A safety
     # valve): non-actionable stale incidents past the escalate horizon are removed
     # from open state immediately (so openIncidents cannot grow unbounded and the
@@ -3340,12 +3819,15 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
             )
             try:
                 send_whatsapp(format_event(summary_event))
-                append_dispatch_log(paths, {
-                    "type": "stale_autoclosed",
-                    "count": digest_count,
-                    "keysSample": digest_keys[:20],
-                    "coalescedWindowSeconds": STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS,
-                })
+                append_dispatch_log(
+                    paths,
+                    {
+                        "type": "stale_autoclosed",
+                        "count": digest_count,
+                        "keysSample": digest_keys[:20],
+                        "coalescedWindowSeconds": STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS,
+                    },
+                )
                 accum["pendingKeys"] = []
                 accum["pendingCount"] = 0
                 accum["firstPendingAt"] = 0
@@ -3353,24 +3835,32 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
             except Exception as exc:
                 # Keep the batch pending so it retries on the next sweep (no loss).
                 last_error = str(exc)
-                append_dispatch_log(paths, {
-                    "type": "stale_autoclose_summary_failed",
-                    "count": digest_count,
-                    "error": str(exc),
-                })
+                append_dispatch_log(
+                    paths,
+                    {
+                        "type": "stale_autoclose_summary_failed",
+                        "count": digest_count,
+                        "error": str(exc),
+                    },
+                )
         else:
-            append_dispatch_log(paths, {
-                "type": "stale_autoclose_digest_coalesced",
-                "pendingCount": accum.get("pendingCount"),
-                "closedThisSweep": len(auto_closed),
-                "nextDigestInSeconds": max(
-                    0,
-                    STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS
-                    - (current - int(accum.get("lastDigestAt") or 0)),
-                ),
-            })
+            append_dispatch_log(
+                paths,
+                {
+                    "type": "stale_autoclose_digest_coalesced",
+                    "pendingCount": accum.get("pendingCount"),
+                    "closedThisSweep": len(auto_closed),
+                    "nextDigestInSeconds": max(
+                        0,
+                        STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS
+                        - (current - int(accum.get("lastDigestAt") or 0)),
+                    ),
+                },
+            )
     if suppressed:
-        append_dispatch_log(paths, {"type": "stale_renotify_suppressed_total", "suppressed": suppressed})
+        append_dispatch_log(
+            paths, {"type": "stale_renotify_suppressed_total", "suppressed": suppressed}
+        )
     if changed:
         save_incident_state(paths, incident_state)
     return sent, failed, last_error
@@ -3385,7 +3875,9 @@ def storm_window_seconds() -> int:
 
 
 def recovery_dedupe_window_seconds() -> int:
-    return max(1, env_int("BOT_ERRORS_RECOVERY_DEDUPE_WINDOW_SECONDS", storm_window_seconds()))
+    return max(
+        1, env_int("BOT_ERRORS_RECOVERY_DEDUPE_WINDOW_SECONDS", storm_window_seconds())
+    )
 
 
 def suppressed_max_files() -> int:
@@ -3463,7 +3955,9 @@ def storm_fingerprint_hash(fingerprint: str) -> str:
     return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:16]
 
 
-def find_event_path_by_id(event_id: str, paths: dict[str, Path], keys: tuple[str, ...]) -> Path | None:
+def find_event_path_by_id(
+    event_id: str, paths: dict[str, Path], keys: tuple[str, ...]
+) -> Path | None:
     if not event_id:
         return None
     for key in keys:
@@ -3544,8 +4038,14 @@ def is_recovery_episode_barrier(event: dict[str, Any]) -> bool:
 
 
 def manifest_entry(path: Path, event: dict[str, Any]) -> dict[str, Any]:
-    diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
-    log_hints = diagnostics.get("logHints") if isinstance(diagnostics.get("logHints"), list) else []
+    diagnostics = (
+        event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
+    )
+    log_hints = (
+        diagnostics.get("logHints")
+        if isinstance(diagnostics.get("logHints"), list)
+        else []
+    )
     return {
         "eventId": event.get("id"),
         "machine": event_host(event),
@@ -3560,7 +4060,9 @@ def manifest_entry(path: Path, event: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def mark_collapsed(event: dict[str, Any], digest_id: str, manifest_path: Path) -> dict[str, Any]:
+def mark_collapsed(
+    event: dict[str, Any], digest_id: str, manifest_path: Path
+) -> dict[str, Any]:
     delivery = event.setdefault("delivery", {})
     if isinstance(delivery, dict):
         delivery["status"] = "storm-collapsed"
@@ -3632,11 +4134,18 @@ def storm_digest_event(
             "manifest": str(manifest_path),
             "collapsedEvents": len(events),
         },
-        "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+        "delivery": {
+            "attempts": 0,
+            "status": "queued",
+            "nextAttemptAtEpoch": 0,
+            "lastError": None,
+        },
     }
 
 
-def storm_digest_outbox_path(paths: dict[str, Path], digest_id: str, source: str, window_start: int) -> Path:
+def storm_digest_outbox_path(
+    paths: dict[str, Path], digest_id: str, source: str, window_start: int
+) -> Path:
     created = iso_from_epoch(window_start).replace("-", "").replace(":", "")
     instance = safe_segment("storm-collapse")
     source_segment = safe_segment(source or "unknown")
@@ -3644,7 +4153,9 @@ def storm_digest_outbox_path(paths: dict[str, Path], digest_id: str, source: str
     return paths["outbox"] / f"{created}.{instance}.{source_segment}.{event_id}.json"
 
 
-def merge_manifest_entries(existing: list[Any], additions: list[dict[str, Any]]) -> list[Any]:
+def merge_manifest_entries(
+    existing: list[Any], additions: list[dict[str, Any]]
+) -> list[Any]:
     seen: set[tuple[str, str]] = set()
     merged: list[Any] = []
     for entry in existing:
@@ -3692,12 +4203,16 @@ def collapse_storm_group(
     if existing:
         existing_manifest, manifest_path = existing
         bucket_start = int(existing_manifest.get("windowStartEpoch") or requested_start)
-        bucket_end = int(existing_manifest.get("windowEndEpoch") or (bucket_start + window))
+        bucket_end = int(
+            existing_manifest.get("windowEndEpoch") or (bucket_start + window)
+        )
         manifest = existing_manifest
     else:
         bucket_start = requested_start
         bucket_end = bucket_start + window
-        manifest_path = paths["storm_manifests"] / f"{bucket_start}.{fingerprint_hash}.json"
+        manifest_path = (
+            paths["storm_manifests"] / f"{bucket_start}.{fingerprint_hash}.json"
+        )
         manifest = {}
     digest_id = f"storm-{fingerprint_hash}-{bucket_start}"
     events = [event for _, event in records]
@@ -3707,15 +4222,20 @@ def collapse_storm_group(
             manifest = read_json(manifest_path)
         except Exception:
             manifest = {}
-    existing_entries = manifest.get("entries") if isinstance(manifest.get("entries"), list) else []
+    existing_entries = (
+        manifest.get("entries") if isinstance(manifest.get("entries"), list) else []
+    )
     existing_collapsed = (
         manifest.get("entriesCollapsed")
         if isinstance(manifest.get("entriesCollapsed"), list)
         else []
     )
-    existing_hosts = manifest.get("hosts") if isinstance(manifest.get("hosts"), list) else []
+    existing_hosts = (
+        manifest.get("hosts") if isinstance(manifest.get("hosts"), list) else []
+    )
     merged_hosts = sorted(
-        {str(host) for host in existing_hosts if str(host)} | set(sorted_unique_hosts(events)),
+        {str(host) for host in existing_hosts if str(host)}
+        | set(sorted_unique_hosts(events)),
         key=lambda value: value.lower(),
     )
     manifest = {
@@ -3739,39 +4259,56 @@ def collapse_storm_group(
         ("outbox", "processing", "sent", "suppressed", "quarantine"),
     )
     digest = storm_digest_event(
-        paths, fingerprint, fingerprint_hash, bucket_start, bucket_end, events, manifest_path
+        paths,
+        fingerprint,
+        fingerprint_hash,
+        bucket_start,
+        bucket_end,
+        events,
+        manifest_path,
     )
-    digest_path = known_digest_path or storm_digest_outbox_path(paths, digest_id, str(digest.get("source")), bucket_start)
+    digest_path = known_digest_path or storm_digest_outbox_path(
+        paths, digest_id, str(digest.get("source")), bucket_start
+    )
     if known_digest_path is None:
         atomic_write_json(digest_path, digest)
-        append_dispatch_log(paths, {
-            "type": "storm_digest_queued",
-            "digestId": digest.get("id"),
-            "digestPath": str(digest_path),
-            "fingerprint": fingerprint_hash,
-            "affectedHosts": len(sorted_unique_hosts(events)),
-            "collapsedEvents": len(events),
-            "manifest": str(manifest_path),
-        })
+        append_dispatch_log(
+            paths,
+            {
+                "type": "storm_digest_queued",
+                "digestId": digest.get("id"),
+                "digestPath": str(digest_path),
+                "fingerprint": fingerprint_hash,
+                "affectedHosts": len(sorted_unique_hosts(events)),
+                "collapsedEvents": len(events),
+                "manifest": str(manifest_path),
+            },
+        )
     else:
-        append_dispatch_log(paths, {
-            "type": "storm_digest_reused",
-            "digestId": digest_id,
-            "digestPath": str(digest_path),
-            "fingerprint": fingerprint_hash,
-            "manifest": str(manifest_path),
-        })
+        append_dispatch_log(
+            paths,
+            {
+                "type": "storm_digest_reused",
+                "digestId": digest_id,
+                "digestPath": str(digest_path),
+                "fingerprint": fingerprint_hash,
+                "manifest": str(manifest_path),
+            },
+        )
     manifest["digestOutboxPath"] = str(digest_path)
 
     collapsed = 0
     collapsed_entries: list[dict[str, Any]] = []
     for path, event in records:
         if not path.exists():
-            append_dispatch_log(paths, {
-                "type": "storm_collapse_missing_source",
-                "digestId": digest.get("id"),
-                "sourcePath": str(path),
-            })
+            append_dispatch_log(
+                paths,
+                {
+                    "type": "storm_collapse_missing_source",
+                    "digestId": digest.get("id"),
+                    "sourcePath": str(path),
+                },
+            )
             continue
         event = mark_collapsed(event, str(digest.get("id")), manifest_path)
         atomic_write_json(path, event)
@@ -3780,22 +4317,29 @@ def collapse_storm_group(
         )
         os.replace(path, target)
         collapsed += 1
-        collapsed_entries.append({
-            "eventId": event.get("id"),
-            "sourcePath": str(path),
-            "collapsedPath": str(target),
-        })
-        append_dispatch_log(paths, {
-            "type": "storm_collapsed",
-            "eventId": event.get("id"),
-            "digestId": digest.get("id"),
-            "fingerprint": fingerprint_hash,
-            "sourcePath": str(path),
-            "collapsedPath": str(target),
-            "manifest": str(manifest_path),
-        })
+        collapsed_entries.append(
+            {
+                "eventId": event.get("id"),
+                "sourcePath": str(path),
+                "collapsedPath": str(target),
+            }
+        )
+        append_dispatch_log(
+            paths,
+            {
+                "type": "storm_collapsed",
+                "eventId": event.get("id"),
+                "digestId": digest.get("id"),
+                "fingerprint": fingerprint_hash,
+                "sourcePath": str(path),
+                "collapsedPath": str(target),
+                "manifest": str(manifest_path),
+            },
+        )
 
-    manifest["entriesCollapsed"] = merge_manifest_entries(existing_collapsed, collapsed_entries)
+    manifest["entriesCollapsed"] = merge_manifest_entries(
+        existing_collapsed, collapsed_entries
+    )
     atomic_write_json(manifest_path, manifest)
     return collapsed
 
@@ -3838,7 +4382,9 @@ def collapse_ready_storms(paths: dict[str, Path]) -> int:
                     [(path, event) for path, event, _ in cluster],
                 )
                 clustered_paths = {path for path, _, _ in cluster}
-                remaining = [record for record in remaining if record[0] not in clustered_paths]
+                remaining = [
+                    record for record in remaining if record[0] not in clustered_paths
+                ]
                 collapsed_window = True
                 break
             if not collapsed_window:
@@ -3856,19 +4402,26 @@ def move_suppressed_event(
 ) -> Path:
     event = mark_suppressed(event, reason)
     atomic_write_json(path, event)
-    suppressed_path = archive_path(paths["suppressed"], source_name or path.name, "suppressed", event)
+    suppressed_path = archive_path(
+        paths["suppressed"], source_name or path.name, "suppressed", event
+    )
     os.replace(path, suppressed_path)
     fsync_parent(suppressed_path)
-    append_dispatch_log(paths, {
-        "type": log_type,
-        "eventId": event.get("id"),
-        "path": str(suppressed_path),
-        "reason": reason,
-        "source": event.get("source"),
-        "severity": event.get("severity"),
-        "eventType": event.get("eventType"),
-        "attempts": event.get("delivery", {}).get("attempts") if isinstance(event.get("delivery"), dict) else None,
-    })
+    append_dispatch_log(
+        paths,
+        {
+            "type": log_type,
+            "eventId": event.get("id"),
+            "path": str(suppressed_path),
+            "reason": reason,
+            "source": event.get("source"),
+            "severity": event.get("severity"),
+            "eventType": event.get("eventType"),
+            "attempts": event.get("delivery", {}).get("attempts")
+            if isinstance(event.get("delivery"), dict)
+            else None,
+        },
+    )
     return suppressed_path
 
 
@@ -3882,25 +4435,36 @@ def suppress_ready_recovery_duplicates(paths: dict[str, Path]) -> int:
             event = read_json(path)
         except Exception:
             continue
-        if not is_recovery_dedupe_candidate(event) and not is_recovery_episode_barrier(event):
+        if not is_recovery_dedupe_candidate(event) and not is_recovery_episode_barrier(
+            event
+        ):
             continue
-        groups.setdefault(recovery_episode_fingerprint(event), []).append((path, event, created_epoch(event)))
+        groups.setdefault(recovery_episode_fingerprint(event), []).append(
+            (path, event, created_epoch(event))
+        )
 
     suppressed = 0
     for records in groups.values():
         kept_by_duplicate_fingerprint: dict[str, int] = {}
-        for path, event, epoch in sorted(records, key=lambda record: (record[2], str(record[0]))):
+        for path, event, epoch in sorted(
+            records, key=lambda record: (record[2], str(record[0]))
+        ):
             if is_recovery_episode_barrier(event):
                 kept_by_duplicate_fingerprint.clear()
-                append_dispatch_log(paths, {
-                    "type": "recovery_dedupe_barrier",
-                    "eventId": event.get("id"),
-                    "source": event.get("source"),
-                    "severity": event.get("severity"),
-                    "eventType": event.get("eventType"),
-                    "episodeFingerprint": storm_fingerprint_hash(recovery_episode_fingerprint(event)),
-                    "createdAtEpoch": epoch,
-                })
+                append_dispatch_log(
+                    paths,
+                    {
+                        "type": "recovery_dedupe_barrier",
+                        "eventId": event.get("id"),
+                        "source": event.get("source"),
+                        "severity": event.get("severity"),
+                        "eventType": event.get("eventType"),
+                        "episodeFingerprint": storm_fingerprint_hash(
+                            recovery_episode_fingerprint(event)
+                        ),
+                        "createdAtEpoch": epoch,
+                    },
+                )
                 continue
             if not is_recovery_dedupe_candidate(event):
                 continue
@@ -3934,9 +4498,18 @@ def prune_suppressed(paths: dict[str, Path]) -> int:
         # when the field is absent or unparseable (e.g. legacy/malformed files).
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-            suppressed_at = raw.get("delivery", {}).get("suppressedAt") if isinstance(raw, dict) else None
+            suppressed_at = (
+                raw.get("delivery", {}).get("suppressedAt")
+                if isinstance(raw, dict)
+                else None
+            )
             if isinstance(suppressed_at, str):
-                epoch_ns = int(datetime.fromisoformat(suppressed_at.replace("Z", "+00:00")).timestamp() * 1_000_000_000)
+                epoch_ns = int(
+                    datetime.fromisoformat(
+                        suppressed_at.replace("Z", "+00:00")
+                    ).timestamp()
+                    * 1_000_000_000
+                )
                 return epoch_ns, str(path)
         except Exception:  # noqa: BLE001
             pass
@@ -3954,12 +4527,15 @@ def prune_suppressed(paths: dict[str, Path]) -> int:
             continue
     if pruned:
         fsync_parent(paths["suppressed"] / ".prune-marker")
-        append_dispatch_log(paths, {
-            "type": "suppressed_pruned",
-            "path": str(paths["suppressed"]),
-            "maxFiles": cap,
-            "pruned": pruned,
-        })
+        append_dispatch_log(
+            paths,
+            {
+                "type": "suppressed_pruned",
+                "path": str(paths["suppressed"]),
+                "maxFiles": cap,
+                "pruned": pruned,
+            },
+        )
     return pruned
 
 
@@ -3974,7 +4550,9 @@ def write_meta_state(paths: dict[str, Path], state: dict[str, Any]) -> None:
     atomic_write_json(paths["meta_state"], state)
 
 
-def test_provenance_meta_event(paths: dict[str, Path], refused: int, window: int) -> dict[str, Any]:
+def test_provenance_meta_event(
+    paths: dict[str, Path], refused: int, window: int
+) -> dict[str, Any]:
     now = int(time.time())
     return {
         "schemaVersion": 1,
@@ -3987,15 +4565,22 @@ def test_provenance_meta_event(paths: dict[str, Path], refused: int, window: int
         "instance": "bot-errors-dispatcher",
         "source": "test-provenance-refused",
         "summary": "BOT ERRORS dispatcher refused test-provenance events",
-        "evidence": "\n".join([
-            f"refused_events:{refused}",
-            f"debounce_window_seconds:{window}",
-            "disposition: originals retained in suppressed audit state",
-            "reason: producer test-provenance event reached dispatcher backstop",
-        ]),
+        "evidence": "\n".join(
+            [
+                f"refused_events:{refused}",
+                f"debounce_window_seconds:{window}",
+                "disposition: originals retained in suppressed audit state",
+                "reason: producer test-provenance event reached dispatcher backstop",
+            ]
+        ),
         "process": {"pid": os.getpid()},
         "diagnostics": {"omitDispatchLogInMessage": True},
-        "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+        "delivery": {
+            "attempts": 0,
+            "status": "queued",
+            "nextAttemptAtEpoch": 0,
+            "lastError": None,
+        },
     }
 
 
@@ -4007,11 +4592,14 @@ def queue_test_provenance_meta_alert(paths: dict[str, Path], refused: int) -> in
     state = read_meta_state(paths)
     last = int(state.get("testProvenanceMetaAlertAtEpoch") or 0)
     if last and now - last < window:
-        append_dispatch_log(paths, {
-            "type": "test_provenance_meta_debounced",
-            "refused": refused,
-            "windowSeconds": window,
-        })
+        append_dispatch_log(
+            paths,
+            {
+                "type": "test_provenance_meta_debounced",
+                "refused": refused,
+                "windowSeconds": window,
+            },
+        )
         return 0
 
     event = test_provenance_meta_event(paths, refused, window)
@@ -4020,12 +4608,15 @@ def queue_test_provenance_meta_alert(paths: dict[str, Path], refused: int) -> in
     state["testProvenanceMetaAlertAtEpoch"] = now
     state["testProvenanceMetaAlertEventId"] = event["id"]
     write_meta_state(paths, state)
-    append_dispatch_log(paths, {
-        "type": "test_provenance_meta_queued",
-        "eventId": event["id"],
-        "refused": refused,
-        "windowSeconds": window,
-    })
+    append_dispatch_log(
+        paths,
+        {
+            "type": "test_provenance_meta_queued",
+            "eventId": event["id"],
+            "refused": refused,
+            "windowSeconds": window,
+        },
+    )
     return 1
 
 
@@ -4082,7 +4673,9 @@ def quarantine_poison(path: Path, quarantine_dir: Path, reason: str) -> Path:
         "summary": "BOT ERRORS dispatcher quarantined an unreadable event",
         "evidence": f"source={path}; quarantine={dest}; reason={reason}",
         "diagnostics": {
-            "logHints": ["journalctl --user -u bot-errors-dispatcher.service --since '30 minutes ago'"],
+            "logHints": [
+                "journalctl --user -u bot-errors-dispatcher.service --since '30 minutes ago'"
+            ],
             "queue": str(state_root()),
         },
         "delivery": {"attempts": 0, "status": "meta"},
@@ -4097,7 +4690,11 @@ def quarantine_poison(path: Path, quarantine_dir: Path, reason: str) -> Path:
     except Exception as exc:
         direct_whatsapp = "failed"
         direct_error = str(exc)
-        email_status = "accepted_unconfirmed" if email_fallback("BOT ERRORS poison event quarantine", text) else "failed"
+        email_status = (
+            "accepted_unconfirmed"
+            if email_fallback("BOT ERRORS poison event quarantine", text)
+            else "failed"
+        )
     try:
         log_record = {
             "type": "quarantine",
@@ -4135,14 +4732,20 @@ def writefail_dirs() -> list[Path]:
 
 
 def event_has_incident_identity(event: dict[str, Any]) -> bool:
-    return bool(event.get("machine") and event.get("instance") and (event.get("source") or event.get("alertSource")))
+    return bool(
+        event.get("machine")
+        and event.get("instance")
+        and (event.get("source") or event.get("alertSource"))
+    )
 
 
 def event_created_identity(event: dict[str, Any]) -> str:
     return str(event.get("createdAt") or "")
 
 
-def remember_known_event(index: dict[str, dict[str, Any]], event: dict[str, Any]) -> None:
+def remember_known_event(
+    index: dict[str, dict[str, Any]], event: dict[str, Any]
+) -> None:
     event_id = str(event.get("id") or "")
     if not event_id:
         return
@@ -4162,12 +4765,24 @@ def remember_known_event(index: dict[str, dict[str, Any]], event: dict[str, Any]
 
 
 def created_matches(known_values: set[str], created_at: str) -> bool:
-    return (not created_at) or (not known_values) or ("" in known_values) or (created_at in known_values)
+    return (
+        (not created_at)
+        or (not known_values)
+        or ("" in known_values)
+        or (created_at in known_values)
+    )
 
 
 def build_known_event_index(paths: dict[str, Path]) -> dict[str, dict[str, Any]]:
     index: dict[str, dict[str, Any]] = {}
-    for key in ("outbox", "processing", "sent", "storm_collapsed", "suppressed", "quarantine"):
+    for key in (
+        "outbox",
+        "processing",
+        "sent",
+        "storm_collapsed",
+        "suppressed",
+        "quarantine",
+    ):
         directory = paths[key]
         if not directory.exists():
             continue
@@ -4203,18 +4818,27 @@ def event_already_known(
         if created_matches(unqualified_values, created_at):
             return True
         known_created_values = incident_key_values.get(incident_key(event))
-        return isinstance(known_created_values, set) and created_matches(known_created_values, created_at)
+        return isinstance(known_created_values, set) and created_matches(
+            known_created_values, created_at
+        )
     if created_matches(unqualified_values, created_at):
         return True
-    return any(isinstance(values, set) and created_matches(values, created_at) for values in incident_key_values.values())
+    return any(
+        isinstance(values, set) and created_matches(values, created_at)
+        for values in incident_key_values.values()
+    )
 
 
 def outbox_path_for_event(event: dict[str, Any], paths: dict[str, Path]) -> Path:
     created = str(event.get("createdAt") or now_iso()).replace("-", "").replace(":", "")
     instance = safe_segment(str(event.get("instance") or "unknown"))
     source = safe_segment(str(event.get("source") or "unknown"))
-    event_id = safe_segment(str(event.get("id") or f"recovered-{int(time.time())}-{os.getpid()}"))
-    return safe_child_path(paths["outbox"], f"{created}.{instance}.{source}.{event_id}.json")
+    event_id = safe_segment(
+        str(event.get("id") or f"recovered-{int(time.time())}-{os.getpid()}")
+    )
+    return safe_child_path(
+        paths["outbox"], f"{created}.{instance}.{source}.{event_id}.json"
+    )
 
 
 def move_writefail(path: Path, target_dir: Path, suffix: str) -> Path:
@@ -4242,19 +4866,26 @@ def recover_writefail_breadcrumbs(paths: dict[str, Path], limit: int = 25) -> in
             try:
                 crumb = read_json(path)
                 if crumb.get("kind") != "outbox_write_failure":
-                    raise ValueError("writefail breadcrumb kind is not outbox_write_failure")
+                    raise ValueError(
+                        "writefail breadcrumb kind is not outbox_write_failure"
+                    )
                 event = crumb.get("event")
                 if not isinstance(event, dict):
                     raise ValueError("writefail breadcrumb missing event object")
                 event_id = str(event.get("id") or "")
                 if event_already_known(event, paths, known_index):
-                    duplicate = move_writefail(path, paths["writefail_recovered"], "duplicate")
-                    append_dispatch_log(paths, {
-                        "type": "writefail_duplicate",
-                        "eventId": event_id,
-                        "breadcrumb": str(path),
-                        "path": str(duplicate),
-                    })
+                    duplicate = move_writefail(
+                        path, paths["writefail_recovered"], "duplicate"
+                    )
+                    append_dispatch_log(
+                        paths,
+                        {
+                            "type": "writefail_duplicate",
+                            "eventId": event_id,
+                            "breadcrumb": str(path),
+                            "path": str(duplicate),
+                        },
+                    )
                     continue
                 diagnostics = event.setdefault("diagnostics", {})
                 if not isinstance(diagnostics, dict):
@@ -4263,7 +4894,9 @@ def recover_writefail_breadcrumbs(paths: dict[str, Path], limit: int = 25) -> in
                 diagnostics["writefailRecovery"] = {
                     "breadcrumb": str(path),
                     "failedTarget": crumb.get("failedTarget"),
-                    "harvest": crumb.get("harvest") if isinstance(crumb.get("harvest"), dict) else None,
+                    "harvest": crumb.get("harvest")
+                    if isinstance(crumb.get("harvest"), dict)
+                    else None,
                     "reason": crumb.get("reason"),
                     "recordedAt": crumb.get("recordedAt"),
                     "recoveredAt": now_iso(),
@@ -4278,39 +4911,55 @@ def recover_writefail_breadcrumbs(paths: dict[str, Path], limit: int = 25) -> in
                 try:
                     atomic_write_json(outbox_path, event)
                 except Exception as exc:  # noqa: BLE001 - keep breadcrumb for a later retry.
-                    append_dispatch_log(paths, {
-                        "type": "writefail_requeue_failed",
-                        "eventId": event_id,
-                        "breadcrumb": str(path),
-                        "outboxPath": str(outbox_path),
-                        "reason": str(exc),
-                    })
+                    append_dispatch_log(
+                        paths,
+                        {
+                            "type": "writefail_requeue_failed",
+                            "eventId": event_id,
+                            "breadcrumb": str(path),
+                            "outboxPath": str(outbox_path),
+                            "reason": str(exc),
+                        },
+                    )
                     return recovered
                 remember_known_event(known_index, event)
-                recovered_path = move_writefail(path, paths["writefail_recovered"], "recovered")
-                append_dispatch_log(paths, {
-                    "type": "writefail_recovered",
-                    "eventId": event_id,
-                    "breadcrumb": str(path),
-                    "path": str(recovered_path),
-                    "outboxPath": str(outbox_path),
-                })
+                recovered_path = move_writefail(
+                    path, paths["writefail_recovered"], "recovered"
+                )
+                append_dispatch_log(
+                    paths,
+                    {
+                        "type": "writefail_recovered",
+                        "eventId": event_id,
+                        "breadcrumb": str(path),
+                        "path": str(recovered_path),
+                        "outboxPath": str(outbox_path),
+                    },
+                )
                 recovered += 1
             except Exception as exc:  # noqa: BLE001 - one bad breadcrumb must not block dispatch.
                 try:
-                    quarantined = move_writefail(path, paths["writefail_quarantine"], "poison")
-                    append_dispatch_log(paths, {
-                        "type": "writefail_quarantine",
-                        "breadcrumb": str(path),
-                        "path": str(quarantined),
-                        "reason": str(exc),
-                    })
+                    quarantined = move_writefail(
+                        path, paths["writefail_quarantine"], "poison"
+                    )
+                    append_dispatch_log(
+                        paths,
+                        {
+                            "type": "writefail_quarantine",
+                            "breadcrumb": str(path),
+                            "path": str(quarantined),
+                            "reason": str(exc),
+                        },
+                    )
                 except Exception:
-                    append_dispatch_log(paths, {
-                        "type": "writefail_recovery_failed",
-                        "breadcrumb": str(path),
-                        "reason": str(exc),
-                    })
+                    append_dispatch_log(
+                        paths,
+                        {
+                            "type": "writefail_recovery_failed",
+                            "breadcrumb": str(path),
+                            "reason": str(exc),
+                        },
+                    )
     return recovered
 
 
@@ -4339,7 +4988,9 @@ def reclaim_processing(paths: dict[str, Path]) -> int:
         target = safe_child_path(paths["outbox"], original_name_from_processing(path))
         os.replace(path, target)
         fsync_parent(target)
-        append_dispatch_log(paths, {"type": "reclaim", "from": str(path), "to": str(target)})
+        append_dispatch_log(
+            paths, {"type": "reclaim", "from": str(path), "to": str(target)}
+        )
         reclaimed += 1
     return reclaimed
 
@@ -4353,7 +5004,11 @@ def record_state(paths: dict[str, Path], **updates: Any) -> None:
         "stormManifests": len(list(paths["storm_manifests"].glob("*"))),
         "suppressed": len(list(paths["suppressed"].glob("*"))),
         "quarantine": len(list(paths["quarantine"].glob("*"))),
-        "writefail": sum(len(list(path.glob("*.writefail"))) for path in writefail_dirs() if path.exists()),
+        "writefail": sum(
+            len(list(path.glob("*.writefail")))
+            for path in writefail_dirs()
+            if path.exists()
+        ),
         "writefailRecovered": len(list(paths["writefail_recovered"].glob("*"))),
         "writefailQuarantine": len(list(paths["writefail_quarantine"].glob("*"))),
     }
@@ -4372,7 +5027,9 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
     try:
         event = read_json(claimed)
     except Exception as exc:
-        quarantine_poison(claimed, paths["quarantine"], f"invalid JSON after claim: {exc}")
+        quarantine_poison(
+            claimed, paths["quarantine"], f"invalid JSON after claim: {exc}"
+        )
         return False, "poison"
 
     # --- Test-leak defense-in-depth (B2) ---
@@ -4385,13 +5042,16 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
     if matched_pattern is not None:
         testleak_path = archive_path(paths["testleak"], path.name, "testleak", event)
         os.replace(claimed, testleak_path)
-        append_dispatch_log(paths, {
-            "type": "test_leak_dropped",
-            "eventId": event.get("id"),
-            "source": event.get("source"),
-            "path": str(testleak_path),
-            "matchedPattern": matched_pattern,
-        })
+        append_dispatch_log(
+            paths,
+            {
+                "type": "test_leak_dropped",
+                "eventId": event.get("id"),
+                "source": event.get("source"),
+                "path": str(testleak_path),
+                "matchedPattern": matched_pattern,
+            },
+        )
         return False, "test_leak"
 
     diagnostics = event.setdefault("diagnostics", {})
@@ -4408,7 +5068,9 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
     # instead of the FIFO-pruned suppressed/ archive.
     record_daily_health_freshness(event, incident_state)
 
-    if str(event.get("source") or "") == "daily-health" and not is_incident_clear(event):
+    if str(event.get("source") or "") == "daily-health" and not is_incident_clear(
+        event
+    ):
         recovered = close_recovered_daily_health_incidents(event, incident_state)
         if recovered:
             diagnostics = event.setdefault("diagnostics", {})
@@ -4419,17 +5081,24 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
         event = mark_suppressed(event, suppress_reason)
         atomic_write_json(claimed, event)
         save_incident_state(paths, incident_state)
-        suppressed_path = archive_path(paths["suppressed"], path.name, "suppressed", event)
+        suppressed_path = archive_path(
+            paths["suppressed"], path.name, "suppressed", event
+        )
         os.replace(claimed, suppressed_path)
-        append_dispatch_log(paths, {
-            "type": "suppressed",
-            "eventId": event.get("id"),
-            "path": str(suppressed_path),
-            "reason": suppress_reason,
-            "source": event.get("source"),
-            "severity": event.get("severity"),
-            "attempts": event.get("delivery", {}).get("attempts") if isinstance(event.get("delivery"), dict) else None,
-        })
+        append_dispatch_log(
+            paths,
+            {
+                "type": "suppressed",
+                "eventId": event.get("id"),
+                "path": str(suppressed_path),
+                "reason": suppress_reason,
+                "source": event.get("source"),
+                "severity": event.get("severity"),
+                "attempts": event.get("delivery", {}).get("attempts")
+                if isinstance(event.get("delivery"), dict)
+                else None,
+            },
+        )
         return True, "suppressed"
 
     append_clear_context(event, incident_state)
@@ -4440,7 +5109,9 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
     except Exception as exc:
         event = mark_failure(event, str(exc))
         attempts = int(event.get("delivery", {}).get("attempts") or 0)
-        delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
+        delivery = (
+            event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
+        )
 
         # --- BE-G5: transient-transport carve-out ---
         # A momentary WhatsApp disconnect ("temporarily disconnected") is not a
@@ -4457,20 +5128,28 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
                 # This try did not advance the permanent attempt budget.
                 delivery["attempts"] = max(attempts - 1, 0)
                 delivery["status"] = "queued"
-                delivery["nextAttemptAtEpoch"] = int(time.time()) + BOT_ERRORS_TRANSIENT_BACKOFF_SECONDS
+                delivery["nextAttemptAtEpoch"] = (
+                    int(time.time()) + BOT_ERRORS_TRANSIENT_BACKOFF_SECONDS
+                )
                 atomic_write_json(claimed, event)
                 retry_path = safe_child_path(paths["outbox"], path.name)
                 os.replace(claimed, retry_path)
                 fsync_parent(retry_path)
-                append_dispatch_log(paths, {
-                    "type": "send_deferred_transient",
-                    "eventId": event.get("id"),
-                    "path": str(retry_path),
-                    "attempts": delivery["attempts"],
-                    "transientAttempts": transient_attempts,
-                    "error": str(exc),
-                })
-                return False, f"transient_transport_deferred; transientAttempts={transient_attempts}; {exc}"
+                append_dispatch_log(
+                    paths,
+                    {
+                        "type": "send_deferred_transient",
+                        "eventId": event.get("id"),
+                        "path": str(retry_path),
+                        "attempts": delivery["attempts"],
+                        "transientAttempts": transient_attempts,
+                        "error": str(exc),
+                    },
+                )
+                return (
+                    False,
+                    f"transient_transport_deferred; transientAttempts={transient_attempts}; {exc}",
+                )
             # Transient budget exhausted → fall through to the permanent path
             # (email fallback + dead-letter) as a fail-safe.
 
@@ -4486,7 +5165,10 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
             else:
                 email_status = (
                     "accepted_unconfirmed"
-                    if email_fallback(f"BOT ERRORS delivery failing: {event.get('summary', 'unknown')}", text)
+                    if email_fallback(
+                        f"BOT ERRORS delivery failing: {event.get('summary', 'unknown')}",
+                        text,
+                    )
                     else "failed"
                 )
         if isinstance(delivery, dict):
@@ -4496,28 +5178,36 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
 
         # --- F5: dead-letter if attempt cap exhausted ---
         if next_backoff(attempts) is None:
-            dead_path = move_to_dead_letter(claimed, paths, event, original_name_from_processing(claimed))
-            append_dispatch_log(paths, {
-                "type": "dead_lettered",
-                "eventId": event.get("id"),
-                "path": str(dead_path),
-                "attempts": attempts,
-                "error": str(exc),
-            })
+            dead_path = move_to_dead_letter(
+                claimed, paths, event, original_name_from_processing(claimed)
+            )
+            append_dispatch_log(
+                paths,
+                {
+                    "type": "dead_lettered",
+                    "eventId": event.get("id"),
+                    "path": str(dead_path),
+                    "attempts": attempts,
+                    "error": str(exc),
+                },
+            )
             return False, f"dead_letter; attempts={attempts}; {exc}"
 
         atomic_write_json(claimed, event)
         retry_path = safe_child_path(paths["outbox"], path.name)
         os.replace(claimed, retry_path)
         fsync_parent(retry_path)
-        append_dispatch_log(paths, {
-            "type": "send_failed",
-            "eventId": event.get("id"),
-            "path": str(retry_path),
-            "attempts": attempts,
-            "error": str(exc),
-            "emailFallback": email_status,
-        })
+        append_dispatch_log(
+            paths,
+            {
+                "type": "send_failed",
+                "eventId": event.get("id"),
+                "path": str(retry_path),
+                "attempts": attempts,
+                "error": str(exc),
+                "emailFallback": email_status,
+            },
+        )
         return False, f"{exc}; email_fallback={email_status}"
 
     mark_incident_sent(event, incident_state)
@@ -4526,12 +5216,17 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
     atomic_write_json(claimed, event)
     sent_path = archive_path(paths["sent"], path.name, "sent", event)
     os.replace(claimed, sent_path)
-    append_dispatch_log(paths, {
-        "type": "sent",
-        "eventId": event.get("id"),
-        "path": str(sent_path),
-        "attempts": event.get("delivery", {}).get("attempts") if isinstance(event.get("delivery"), dict) else None,
-    })
+    append_dispatch_log(
+        paths,
+        {
+            "type": "sent",
+            "eventId": event.get("id"),
+            "path": str(sent_path),
+            "attempts": event.get("delivery", {}).get("attempts")
+            if isinstance(event.get("delivery"), dict)
+            else None,
+        },
+    )
     return True, "sent"
 
 
@@ -4542,7 +5237,9 @@ def run_once(max_events: int) -> dict[str, Any]:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         writefail_recovered = recover_writefail_breadcrumbs(paths)
         reclaimed = reclaim_processing(paths)
-        test_provenance_suppressed, test_provenance_meta_alerted = suppress_test_provenance_events(paths)
+        test_provenance_suppressed, test_provenance_meta_alerted = (
+            suppress_test_provenance_events(paths)
+        )
         recovery_deduped = suppress_ready_recovery_duplicates(paths)
         # Pattern F (§10 C1): count flap trips on raw input BEFORE storm-collapse
         # consumes members. Emits consolidated flap_storm alerts; members are
@@ -4579,7 +5276,9 @@ def run_once(max_events: int) -> dict[str, Any]:
             else:
                 failed += 1
                 last_error = detail
-        stale_renotified, stale_failed, stale_error = sweep_stale_incidents(paths, touched_incident_keys)
+        stale_renotified, stale_failed, stale_error = sweep_stale_incidents(
+            paths, touched_incident_keys
+        )
         if stale_failed:
             failed += stale_failed
             last_error = stale_error
@@ -4594,16 +5293,21 @@ def run_once(max_events: int) -> dict[str, Any]:
         if test_leak_dropped > 0:
             incident_state = load_incident_state(paths)
             today = time.strftime("%Y-%m-%d", time.gmtime())
-            emitted = record_test_leak_daily_marker(incident_state, today, test_leak_dropped)
+            emitted = record_test_leak_daily_marker(
+                incident_state, today, test_leak_dropped
+            )
             save_incident_state(paths, incident_state)
             if emitted:
-                append_dispatch_log(paths, {
-                    "type": "test_leak_daily_summary",
-                    "date": today,
-                    "count": test_leak_dropped,
-                    "severity": "info",
-                    "source": "dispatcher",
-                })
+                append_dispatch_log(
+                    paths,
+                    {
+                        "type": "test_leak_daily_summary",
+                        "date": today,
+                        "count": test_leak_dropped,
+                        "severity": "info",
+                        "source": "dispatcher",
+                    },
+                )
 
         suppressed_pruned = prune_suppressed(paths)
 
@@ -4662,18 +5366,29 @@ def run_daemon(interval: int, max_events: int) -> None:
             print(json.dumps({"time": now_iso(), "skipped": "locked"}), flush=True)
         except Exception as exc:
             paths = setup_dirs()
-            record_state(paths, lastRunAt=now_iso(), processed=0, sent=0, failed=1, lastError=str(exc))
+            record_state(
+                paths,
+                lastRunAt=now_iso(),
+                processed=0,
+                sent=0,
+                failed=1,
+                lastError=str(exc),
+            )
             print(json.dumps({"time": now_iso(), "error": str(exc)}), flush=True)
         time.sleep(interval)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Drain local BOT ERRORS outbox")
-    parser.add_argument("--once", action="store_true", help="process ready events once and exit")
+    parser.add_argument(
+        "--once", action="store_true", help="process ready events once and exit"
+    )
     parser.add_argument("--daemon", action="store_true", help="run continuously")
     parser.add_argument("--interval", type=int, default=30)
     parser.add_argument("--max-events", type=int, default=25)
-    parser.add_argument("--format-event", help="format one event JSON file without sending")
+    parser.add_argument(
+        "--format-event", help="format one event JSON file without sending"
+    )
     args = parser.parse_args()
 
     if args.format_event:
