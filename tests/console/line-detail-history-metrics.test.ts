@@ -57,6 +57,7 @@ describe('line-detail tab components', () => {
       'ModeTab',
       'PipelineTab',
       'ProvidersKeysCard',
+      'RateLimitsCard',
       'ScheduledTab',
       'SummaryTab',
     ]);
