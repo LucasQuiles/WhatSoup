@@ -18,6 +18,8 @@ import path from 'node:path';
 vi.mock('../../src/config.ts', () => ({
   config: {
     adminPhones: new Set(['15550100001']),
+    // Q control peer: name 'q' → phone '15559998888' (control_peer wiring tests)
+    controlPeers: new Map<string, string>([['q', '15559998888']]),
     dbPath: ':memory:',
     mediaDir: '/tmp',
     botName: 'WhatSoup',
@@ -53,12 +55,24 @@ vi.mock('../../src/logger.ts', () => ({
       : { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
+// The control_peer wiring tests drive heal.ts's emitHealReport directly; mock
+// the alert sink so no real BOT ERRORS outbox event is written from a test.
+vi.mock('../../src/lib/emit-alert.ts', () => ({
+  emitAlert: vi.fn(() => true),
+  emitAlertChecked: vi.fn(() => true),
+  clearAlertSource: vi.fn(() => true),
+  clearAlertSourceChecked: vi.fn(() => true),
+}));
+
 // ---------------------------------------------------------------------------
 // Imports
 // ---------------------------------------------------------------------------
 
 import { CURRENT_SCHEMA_MIGRATION, Database } from '../../src/core/database.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
+import { config } from '../../src/config.ts';
+import { emitHealReport, resetDeliveryUnavailableLatch } from '../../src/core/heal.ts';
+import type { Messenger } from '../../src/core/types.ts';
 import { seedChatAliases } from '../../src/core/chats-resolver.ts';
 import { createProfileRegistry } from '../../src/core/profiles.ts';
 import { createOutboundSendsWriter } from '../../src/core/outbound-sends.ts';
@@ -261,6 +275,42 @@ describe('GET /health', () => {
     } finally {
       await new Promise<void>((resolve) => server2.close(() => resolve()));
       db2.close();
+    }
+  });
+
+  it('surfaces control-peer wiring under control_peer when the Q peer is configured', async () => {
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.control_peer).toEqual({
+      configured: true,
+      suppressed_unavailable_alerts: 0,
+    });
+  });
+
+  it('reflects a missing Q peer and the suppressed-alert count after latched heal reports', async () => {
+    resetDeliveryUnavailableLatch();
+    config.controlPeers.delete('q');
+    try {
+      const messenger: Messenger = {
+        sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+        sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+      };
+      // Two distinct-class reports: the first fires the (mocked) critical and
+      // arms the latch, the second is suppressed and counted.
+      emitHealReport(db, messenger, null, { type: 'crash', stderr: 'HealthLatchA: boom' });
+      emitHealReport(db, messenger, null, { type: 'crash', stderr: 'HealthLatchB: boom' });
+
+      const { status, body } = await httpReq(port, '/health', 'GET');
+      expect(status).toBe(200);
+      const json = JSON.parse(body);
+      expect(json.control_peer).toEqual({
+        configured: false,
+        suppressed_unavailable_alerts: 1,
+      });
+    } finally {
+      config.controlPeers.set('q', '15559998888');
+      resetDeliveryUnavailableLatch();
     }
   });
 
@@ -1896,8 +1946,148 @@ describe('GET /health', () => {
     db2.close();
   });
 
-  it('degrades agent health on a non-empty-output error class even before the first successful turn', async () => {
-    // The boot-grace relaxation is scoped to empty-output ONLY. A real provider
+  it('keeps agent health healthy on a STALE transient-network blip with no successful turn since (B21-D)', async () => {
+    // W1-T6 regression: adding 'transient-network' to HEALTH_TURN_ERROR_CLASSES
+    // made a single self-resolved network blip degrade /health immediately and
+    // indefinitely — an idle bot has no later turn to clear the trailing error.
+    // failure-taxonomy documents transient-network as needing no provider-level
+    // action; it must get the same staleness self-clear empty-output has.
+    db.close();
+    const db2 = makeDb();
+    const now = Date.now();
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            turnCapability: {
+              modelUsable: null,
+              modelUsabilityStatus: 'usable',
+              lastSuccessfulTurnAt: now - 92 * 60 * 1000,
+              lastTurnErrorClass: 'transient-network',
+              lastTurnErrorAt: now - 90 * 60 * 1000, // 90m idle → stale → benign
+            },
+          },
+        }),
+      } as any,
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('healthy');
+    // Visibility (the W1-T6 intent) is preserved: the class still surfaces.
+    expect(json.turn_capability.last_turn_error_class).toBe('transient-network');
+    db2.close();
+  });
+
+  it('keeps agent health healthy on a STALE server-error with no successful turn since (B21-D)', async () => {
+    // Same W1-T6 regression for the second backfilled class: one 5xx blip must
+    // not pin an idle instance degraded for hours.
+    db.close();
+    const db2 = makeDb();
+    const now = Date.now();
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            turnCapability: {
+              modelUsable: null,
+              modelUsabilityStatus: 'usable',
+              lastSuccessfulTurnAt: now - 92 * 60 * 1000,
+              lastTurnErrorClass: 'server-error',
+              lastTurnErrorAt: now - 90 * 60 * 1000, // 90m idle → stale → benign
+            },
+          },
+        }),
+      } as any,
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('healthy');
+    expect(json.turn_capability.last_turn_error_class).toBe('server-error');
+    db2.close();
+  });
+
+  it('degrades agent health on a CURRENT, SUSTAINED transient-network failure after a successful turn (B21-D parity)', async () => {
+    // Parity with empty-output (#1433): a transient-network error that came after
+    // a proven turn and persisted past the debounce but is still recent (inside
+    // the staleness bound) is a live stall and must degrade.
+    db.close();
+    const db2 = makeDb();
+    const now = Date.now();
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            turnCapability: {
+              modelUsable: null,
+              modelUsabilityStatus: 'usable',
+              lastSuccessfulTurnAt: now - 5 * 60 * 1000,
+              lastTurnErrorClass: 'transient-network',
+              lastTurnErrorAt: now - 3 * 60 * 1000, // 3m old: past 1m debounce, under 15m stale
+            },
+          },
+        }),
+      } as any,
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('degraded');
+    db2.close();
+  });
+
+  it('keeps agent health healthy on a fresh transient-network error within the debounce window (B21-D damp)', async () => {
+    // A single just-now network blip that has not yet persisted past the debounce
+    // must not trip degraded — the next turn is given a chance to succeed.
+    db.close();
+    const db2 = makeDb();
+    const now = Date.now();
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            turnCapability: {
+              modelUsable: null,
+              modelUsabilityStatus: 'usable',
+              lastSuccessfulTurnAt: now - 2 * 60 * 1000,
+              lastTurnErrorClass: 'transient-network',
+              lastTurnErrorAt: now - 10 * 1000, // 10s old: still inside the 1m debounce
+            },
+          },
+        }),
+      } as any,
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('healthy');
+    db2.close();
+  });
+
+  it('degrades agent health on a non-transient error class even before the first successful turn', async () => {
+    // The boot-grace relaxation is scoped to the transient self-clearing classes
+    // (empty-output, transient-network, server-error) ONLY. A real provider
     // failure at boot (e.g. auth-required) must still degrade.
     db.close();
     const db2 = makeDb();

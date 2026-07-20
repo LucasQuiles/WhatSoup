@@ -13,6 +13,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.mock('../../../src/config.ts', () => ({
   config: {
     botName: 'TestBot',
+    // T8-F1: chat/runtime.ts's redactInternalArtifacts ctx now reads
+    // config.adminPhones (isOperatorDmPeer) — empty so this test's fixture
+    // JIDs never resolve as operator DMs (unchanged pre-F1 behavior).
+    adminPhones: new Set<string>(),
     rateLimitNoticeWindowMs: 60_000,
     tokenBudget: 8_000,
     apiRetryDelayMs: 1_000,

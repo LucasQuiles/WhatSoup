@@ -41,12 +41,30 @@ export interface ChatModelPreference {
   updatedAt: number; // epoch ms
   /** NULL only for sticky scope; this_thread rows always carry a TTL. */
   expiresAt: number | null;
+  /**
+   * The per-chat MODEL pin (Q 2026-07-20, provider-qualified). NULL when no
+   * model is pinned. A model id is only meaningful relative to a resolved
+   * harness, so it is stored WITH the provider it was validated against and a
+   * verified bit — the three move together:
+   *   - `requestedModel`   — the pinned model id (NULL = no model pin);
+   *   - `validatedProvider`— the provider the pin was validated against; NULL =
+   *     UNVALIDATED (legacy/never-checked) — re-validate on first resolution,
+   *     never treat NULL as "validated against whatever is current" (that would
+   *     launder a stale row past the check);
+   *   - `modelPinVerified` — true once the id was found in that provider's
+   *     catalogue; false = accepted UNVERIFIED during a catalogue outage
+   *     (fail-open is a DEFERRAL, so it is re-validated on the next OK read).
+   */
+  requestedModel: string | null;
+  validatedProvider: string | null;
+  modelPinVerified: boolean | null;
 }
 
 const INTENTS: ReadonlySet<string> = new Set<string>(PREFERENCE_INTENTS);
 const SCOPES: ReadonlySet<string> = new Set(['this_thread', 'sticky']);
 
-/** Ensure the per-sender preference table exists. Idempotent. */
+/** Ensure the per-sender preference table exists, including the model-pin
+ *  columns. Idempotent. */
 export function ensureChatPreferenceSchema(db: Database): void {
   db.raw.exec(`
     CREATE TABLE IF NOT EXISTS chat_model_preference (
@@ -62,6 +80,22 @@ export function ensureChatPreferenceSchema(db: Database): void {
       PRIMARY KEY (chat_jid, sender_jid)
     )
   `);
+  // Model-pin columns (2026-07-20). CREATE IF NOT EXISTS is a no-op against a
+  // legacy table, so probe each column and add it when absent (deterministic —
+  // no blanket catch that could mask a real DDL failure). All three are
+  // nullable with no default: existing rows read back NULL = "no model pin",
+  // and a model pin with NULL validated_provider is UNVALIDATED, never blessed
+  // as current (Q migration rule).
+  for (const [name, ddl] of [
+    ['requested_model', 'requested_model TEXT'],
+    ['validated_provider', 'validated_provider TEXT'],
+    ['model_pin_verified', 'model_pin_verified INTEGER'],
+  ] as const) {
+    const present = db.raw
+      .prepare(`SELECT 1 AS present FROM pragma_table_info('chat_model_preference') WHERE name = ?`)
+      .get(name);
+    if (!present) db.raw.exec(`ALTER TABLE chat_model_preference ADD COLUMN ${ddl}`);
+  }
 }
 
 /** Persist (or replace) a sender's preference. Idempotent upsert — repeated
@@ -70,8 +104,9 @@ export function setPreference(db: Database, p: ChatModelPreference): void {
   db.raw
     .prepare(
       `INSERT INTO chat_model_preference
-         (chat_jid, sender_jid, intent, requested_provider, scope, pin_strict, fallback_permitted, updated_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         (chat_jid, sender_jid, intent, requested_provider, scope, pin_strict, fallback_permitted, updated_at, expires_at,
+          requested_model, validated_provider, model_pin_verified)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(chat_jid, sender_jid) DO UPDATE SET
          intent = excluded.intent,
          requested_provider = excluded.requested_provider,
@@ -79,7 +114,10 @@ export function setPreference(db: Database, p: ChatModelPreference): void {
          pin_strict = excluded.pin_strict,
          fallback_permitted = excluded.fallback_permitted,
          updated_at = excluded.updated_at,
-         expires_at = excluded.expires_at`,
+         expires_at = excluded.expires_at,
+         requested_model = excluded.requested_model,
+         validated_provider = excluded.validated_provider,
+         model_pin_verified = excluded.model_pin_verified`,
     )
     .run(
       p.chatJid,
@@ -91,6 +129,9 @@ export function setPreference(db: Database, p: ChatModelPreference): void {
       p.fallbackPermitted ? 1 : 0,
       p.updatedAt,
       p.expiresAt,
+      p.requestedModel,
+      p.validatedProvider,
+      p.modelPinVerified === null ? null : p.modelPinVerified ? 1 : 0,
     );
 }
 
@@ -110,7 +151,8 @@ export function getPreference(
 ): ChatModelPreference | null {
   const row = db.raw
     .prepare(
-      `SELECT chat_jid, sender_jid, intent, requested_provider, scope, pin_strict, fallback_permitted, updated_at, expires_at
+      `SELECT chat_jid, sender_jid, intent, requested_provider, scope, pin_strict, fallback_permitted, updated_at, expires_at,
+              requested_model, validated_provider, model_pin_verified
        FROM chat_model_preference WHERE chat_jid = ? AND sender_jid = ?`,
     )
     .get(chatJid, senderJid) as
@@ -124,6 +166,9 @@ export function getPreference(
         fallback_permitted: unknown;
         updated_at: unknown;
         expires_at: unknown;
+        requested_model: unknown;
+        validated_provider: unknown;
+        model_pin_verified: unknown;
       }
     | undefined;
   if (!row) return null;
@@ -140,6 +185,19 @@ export function getPreference(
   if (row.pin_strict !== 0 && row.pin_strict !== 1) return null;
   if (row.fallback_permitted !== 0 && row.fallback_permitted !== 1) return null;
   if (row.expires_at !== null && row.expires_at <= now) return null;
+  // Model-pin fields + their cross-field contract. The three move together: a
+  // pin (requested_model set) carries a verified bit, and NO model pin means no
+  // provider context or verification state. A NULL validated_provider on a live
+  // pin is legal (= UNVALIDATED, re-validated on resolution); the invalid state
+  // is a verification/context without a model to attach it to.
+  if (row.requested_model !== null && typeof row.requested_model !== 'string') return null;
+  if (row.validated_provider !== null && typeof row.validated_provider !== 'string') return null;
+  if (row.model_pin_verified !== null && row.model_pin_verified !== 0 && row.model_pin_verified !== 1) return null;
+  if (row.requested_model === null) {
+    if (row.validated_provider !== null || row.model_pin_verified !== null) return null;
+  } else if (row.model_pin_verified === null) {
+    return null; // a live model pin must carry a verified/unverified bit
+  }
   return {
     chatJid,
     senderJid,
@@ -150,6 +208,9 @@ export function getPreference(
     fallbackPermitted: row.fallback_permitted === 1,
     updatedAt: row.updated_at,
     expiresAt: row.expires_at as number | null,
+    requestedModel: row.requested_model as string | null,
+    validatedProvider: row.validated_provider as string | null,
+    modelPinVerified: row.model_pin_verified === null ? null : row.model_pin_verified === 1,
   };
 }
 

@@ -18,9 +18,26 @@
  * accounting, runtime.test.ts turnCapability snapshot assertions, health-snapshot.test.ts).
  */
 import type { ProviderFailureKind } from './failure-taxonomy.ts';
+import { PROVIDER_FAILURE_KINDS } from './failure-taxonomy.ts';
 
 /** Error classes attributed to a turn for fallback/health purposes. */
 export type TurnCapabilityErrorClass = ProviderFailureKind | 'unknown-terminal' | 'empty-output';
+
+/** Non-provider terminal classes this tracker records beyond ProviderFailureKind. */
+const NON_PROVIDER_TURN_ERROR_CLASSES = ['unknown-terminal', 'empty-output'] as const;
+
+// Compile-time exhaustiveness: if TurnCapabilityErrorClass gains a member not
+// covered by ProviderFailureKind ∪ NON_PROVIDER_TURN_ERROR_CLASSES, _covered
+// narrows to `never` and this assignment errors — forcing an update here.
+type _CoveredTurnClass = ProviderFailureKind
+  | (typeof NON_PROVIDER_TURN_ERROR_CLASSES)[number];
+const _turnClassExhaustive: [TurnCapabilityErrorClass] extends [_CoveredTurnClass] ? true : never = true;
+void _turnClassExhaustive;
+
+/** Runtime-enumerable SSOT of TurnCapabilityErrorClass = provider kinds + the
+ *  non-provider terminal classes. This is HEALTH_TURN_ERROR_CLASSES' true mirror. */
+export const TURN_CAPABILITY_ERROR_CLASSES: readonly TurnCapabilityErrorClass[] =
+  [...PROVIDER_FAILURE_KINDS, ...NON_PROVIDER_TURN_ERROR_CLASSES];
 
 export class TurnCapabilityTracker {
   /** Error class → cumulative count of user-turn failures of that class. */

@@ -125,7 +125,7 @@ describe('registerMediaTools', () => {
     registry = new ToolRegistry();
     mediaCalls = makeCalls();
     connection = makeConnection(mediaCalls);
-    deps = { connection, db: testDb };
+    deps = { connection, db: testDb, adminPhones: new Set<string>() };
     registerMediaTools(registry, deps);
     workspace = tempDir();
     dirsToClean.push(workspace);
@@ -561,7 +561,7 @@ describe('download_media', () => {
     registry = new ToolRegistry();
     mediaCalls = makeCalls();
     connection = makeConnection(mediaCalls);
-    deps = { connection, db: db };
+    deps = { connection, db: db, adminPhones: new Set<string>() };
     registerMediaTools(registry, deps);
     workspace = tempDir();
     dirsToClean.push(workspace);
@@ -797,7 +797,7 @@ describe('transcribe_audio', () => {
     registry = new ToolRegistry();
     mediaCalls = makeCalls();
     connection = makeConnection(mediaCalls);
-    deps = { connection, db: testDb };
+    deps = { connection, db: testDb, adminPhones: new Set<string>() };
     registerMediaTools(registry, deps);
   });
 
@@ -1040,7 +1040,7 @@ describe('download_media — path confinement', () => {
     registry = new ToolRegistry();
     mediaCalls = makeCalls();
     connection = makeConnection(mediaCalls);
-    deps = { connection, db };
+    deps = { connection, db, adminPhones: new Set<string>() };
     registerMediaTools(registry, deps);
     workspace = tempDir();
     dirsToClean.push(workspace);
@@ -1126,7 +1126,7 @@ describe('download_media — stale cache with raw_message fallback', () => {
     registry = new ToolRegistry();
     mediaCalls = makeCalls();
     connection = makeConnection(mediaCalls);
-    deps = { connection, db };
+    deps = { connection, db, adminPhones: new Set<string>() };
     registerMediaTools(registry, deps);
     filesToClean = [];
   });
@@ -1205,7 +1205,7 @@ describe('download_media — document MIME and extension handling', () => {
     registry = new ToolRegistry();
     mediaCalls = makeCalls();
     connection = makeConnection(mediaCalls);
-    deps = { connection, db };
+    deps = { connection, db, adminPhones: new Set<string>() };
     registerMediaTools(registry, deps);
     filesToClean = [];
   });
@@ -1347,7 +1347,7 @@ describe('download_media — coreDownloadMedia error paths', () => {
     registry = new ToolRegistry();
     mediaCalls = makeCalls();
     connection = makeConnection(mediaCalls);
-    deps = { connection, db };
+    deps = { connection, db, adminPhones: new Set<string>() };
     registerMediaTools(registry, deps);
     filesToClean = [];
   });
@@ -1499,7 +1499,7 @@ describe('transcribe_audio — execution paths', () => {
     registry = new ToolRegistry();
     mediaCalls = makeCalls();
     connection = makeConnection(mediaCalls);
-    deps = { connection, db };
+    deps = { connection, db, adminPhones: new Set<string>() };
     registerMediaTools(registry, deps);
     workspace = tempDir();
     dirsToClean.push(workspace);

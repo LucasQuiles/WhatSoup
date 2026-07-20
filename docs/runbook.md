@@ -808,8 +808,9 @@ sqlite3 $DB ".backup '${DB}.pre-recovery'"
 #
 # Immediately after, and on the live 10s echo-timeout interval,
 # drainPendingOutbound() actually re-sends the 'pending' (reset) ops:
-#    - Reconstructable text ops ({text}) → re-sent via messenger
+#    - Reconstructable text/status_ping ops ({text}) → re-sent via messenger
 #    - Non-reconstructable ops → quarantined + alerted (never left pending)
+#    - status_ping ops older than 30m → quarantined (reason=status_op_ttl_expired)
 # Turn recovery is narrower: it reconciles only an exact source inbound,
 # terminal owner, and selected unresolved delivery-op chain. It never blindly
 # replays an arbitrary prompt that happened to be open at the crash.
