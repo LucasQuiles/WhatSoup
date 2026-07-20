@@ -90,12 +90,27 @@ const privatePatterns: PrivatePattern[] = [
   {
     code: 'local-home-path',
     description: 'operator-local home path',
-    // Matches both absolute home roots (Users/<name>, home/<name>) and the
-    // tilde-relative form (~/...). The tilde branch reuses the SAME allowlist
-    // lookahead so it stays symmetric with the absolute rule: the ~/whatsoup,
-    // ~/runner, and ~/testuser first segments are permitted just as the
-    // equivalent absolute deploy/CI usernames are.
-    regex: /(?:\/(?:Users|home)|~)\/(?!runner(?:\/|$)|testuser(?:\/|$)|whatsoup(?:\/|$))[A-Za-z0-9._-]+(?:\/|$)/,
+    // Two branches, deliberately asymmetric because they identify differently:
+    //
+    //   Absolute `/Users/<name>` or `/home/<name>` — the segment after the root
+    //   IS an operator/OS username, so it identifies. Flag unless it is a shared
+    //   CI/deploy user (runner, testuser, whatsoup). The allowlist requires a
+    //   FULL-segment match (`runner(?:\/|$)`), so the `runner` allow does NOT
+    //   also permit a `runner`+suffix segment — allowlist-inside-blocklist
+    //   filters otherwise leak at prefix boundaries.
+    //
+    //   Tilde `~/<segment>` — `~` already hides the username, so the segment
+    //   identifies the operator's WORKSPACE, not their name. A chosen top-level
+    //   dir (`~/<workspace>/...`) reveals that layout and flags; the standard
+    //   XDG/OS dot-dirs (`~/.config`,
+    //   `~/.local`, `~/.claude`, `~/.ssh`) and `~/Library` identify NOBODY and
+    //   are dropped — they were ~85% of the 2026-07-20 sweep and a mostly-noise
+    //   gate trains people to bypass it. This is a reasoned blocklist exception
+    //   to the allowlist-preferred rule: this is a hygiene signal, not a secrets
+    //   gate, so precision beats exhaustiveness. The tilde branch drops dot-dirs
+    //   via its non-dot leading char class and `~/Library` via lookahead.
+    regex:
+      /(?:\/(?:Users|home)\/(?!runner(?:\/|$)|testuser(?:\/|$)|whatsoup(?:\/|$))[A-Za-z0-9._-]+|~\/(?!Library(?:\/|$)|runner(?:\/|$)|testuser(?:\/|$)|whatsoup(?:\/|$))[A-Za-z0-9_-][A-Za-z0-9._-]*)(?:\/|$)/,
   },
   {
     code: 'whatsapp-group-jid',
@@ -574,7 +589,16 @@ export function runPublicationGuard(argv = process.argv.slice(2), cwd = process.
     return 1;
   }
 
-  if (!args.json) console.log(`publication-guard passed (${args.mode}): ${issues.length - errors.length} warning(s)`);
+  if (!args.json) {
+    console.log(`publication-guard passed (${args.mode}): ${issues.length - errors.length} warning(s)`);
+    // Scope statement (honesty over convenience): staged mode scans only the
+    // lines this commit ADDS, so a clean result is not a statement about the
+    // repository. Pre-existing operator-local content already in history is
+    // invisible here — "guard clean" must not be read as "repo clean".
+    if (args.mode === 'staged') {
+      console.log('  scope: staged added lines only — pre-existing repo content is NOT scanned');
+    }
+  }
   return 0;
 }
 
