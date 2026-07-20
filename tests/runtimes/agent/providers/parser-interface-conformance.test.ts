@@ -52,7 +52,8 @@ function isAgentEvent(value: unknown): value is AgentEvent {
       return (
         typeof record['isError'] === 'boolean' &&
         typeof record['toolId'] === 'string' &&
-        typeof record['content'] === 'string'
+        typeof record['content'] === 'string' &&
+        (record['toolName'] === undefined || typeof record['toolName'] === 'string')
       );
     case 'result':
       return (
@@ -212,7 +213,7 @@ describe('parser interface conformance', () => {
       { type: 'compact_boundary' },
       { type: 'assistant_text', text: 'hello', itemId: 'item-1', complete: true },
       { type: 'tool_use', toolName: 'bash', toolId: 'tool-1', toolInput: { command: 'pwd' } },
-      { type: 'tool_result', isError: false, toolId: 'tool-1', content: 'ok' },
+      { type: 'tool_result', isError: false, toolId: 'tool-1', toolName: 'bash', content: 'ok' },
       { type: 'result', text: null, inputTokens: 1, outputTokens: 2 },
       { type: 'token_usage', inputTokens: 1, outputTokens: 2 },
       { type: 'ignored' },
@@ -232,6 +233,7 @@ describe('parser interface conformance', () => {
     expect(isAgentEvent({ type: 'assistant_text', text: 1 })).toBe(false);
     expect(isAgentEvent({ type: 'tool_use', toolName: 'bash', toolId: '1', toolInput: [] })).toBe(false);
     expect(isAgentEvent({ type: 'tool_result', isError: 'false', toolId: '1', content: 'ok' })).toBe(false);
+    expect(isAgentEvent({ type: 'tool_result', isError: false, toolId: '1', toolName: 42, content: 'ok' })).toBe(false);
     expect(isAgentEvent({ type: 'parse_error' })).toBe(false);
     expect(isAgentEvent({ type: 'new_future_event' })).toBe(false);
   });

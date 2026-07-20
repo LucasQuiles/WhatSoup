@@ -216,7 +216,7 @@ function extractQuotedContext(rawMessage?: string): { participant?: string; text
 /** Quoted message reply bar. */
 const QuotedReplyBar: FC<{ participant?: string; text?: string }> = ({ participant, text }) => (
   <div
-    className="overflow-hidden text-sm py-[var(--sp-1)] px-[var(--sp-2)] mb-[var(--sp-2)] bg-surface-raised rounded-[0_var(--radius-sm)_var(--radius-sm)_0]"
+    className="overflow-hidden text-sm py-[var(--sp-1)] px-[var(--sp-2)] mb-[var(--sp-2)] bg-surface-raised rounded-tr-[var(--radius-sm)] rounded-br-[var(--radius-sm)]"
     style={{
       borderLeftWidth: 'var(--bw-accent, 3px)',
       borderLeftStyle: 'solid',

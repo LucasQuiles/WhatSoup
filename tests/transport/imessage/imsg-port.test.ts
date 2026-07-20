@@ -34,11 +34,11 @@ class MockRpcConnection implements ImsgRpcConnection {
 
 function makeConfig(overrides: Partial<ImessageConfig> = {}): ImessageConfig {
   return {
+    ...DEFAULT_IMESSAGE,
     account: 'test',
     backend: 'imsg',
     imsgSocketPath: '/tmp/imsg-test.sock',
     sender: 'me@icloud.com',
-    ...DEFAULT_IMESSAGE,
     ...overrides,
   };
 }

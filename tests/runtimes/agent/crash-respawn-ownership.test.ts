@@ -300,6 +300,7 @@ describe('per-chat crash respawn ownership', () => {
       if (!manager) throw new Error('spawn-per-turn manager was not mapped');
 
       (manager as any).provider = 'opencode-cli';
+      (manager as any).model = 'glm/test-model';
       (manager as any).getProviderBinary = () => process.execPath;
       (manager as any).buildSpawnPerTurnArgs = () => [
         FAKE_PROVIDER,
@@ -431,6 +432,7 @@ describe('per-chat crash respawn ownership', () => {
       if (!manager) throw new Error('spawn-per-turn manager was not mapped');
 
       (manager as any).provider = 'opencode-cli';
+      (manager as any).model = 'glm/test-model';
       (manager as any).getProviderBinary = () => process.execPath;
       (manager as any).buildSpawnPerTurnArgs = () => {
         providerGeneration += 1;

@@ -6,6 +6,33 @@ export interface AgentFallbackEntry {
   model?: string;
 }
 
+/**
+ * Providers whose fallback credential/model route cannot be resolved from a
+ * provider-owned default. Managed API providers need a request model, while
+ * OpenCode needs the configured model prefix to select exactly one
+ * credential (buildChildEnv, session.ts, hard-throws on a null model for
+ * these providers).
+ *
+ * Single source of truth, consumed two places:
+ *  - agent-config-validator.ts enforces this at config admission — every
+ *    fallback/tier-target entry naming one of these providers MUST carry a
+ *    non-empty model.
+ *  - route-resolution.ts's resolveRoute() consumes the same set to decide
+ *    when a pin/tier RouteDecision may thread the target's already-validated
+ *    config model instead of discarding it to `undefined` (EXECPROFILE-CI-FIX
+ *    Finding 2: discarding it here reopens the null-model crash the config
+ *    validator exists to prevent, for a provider that has no provider-owned
+ *    default to fall back to).
+ * Defined here (not in agent-config-validator.ts) so route-resolution.ts —
+ * documented as a pure core — can import this set without pulling in the
+ * validator's heavier module graph (RE2, transport registry, Twilio types).
+ */
+export const API_PROVIDER_IDS: ReadonlySet<string> = new Set(['openai-api', 'anthropic-api']);
+export const FALLBACK_MODEL_REQUIRED_PROVIDER_IDS: ReadonlySet<string> = new Set([
+  ...API_PROVIDER_IDS,
+  'opencode-cli',
+]);
+
 function stringOrUndefined(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
 }

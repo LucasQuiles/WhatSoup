@@ -1,29 +1,4 @@
-/**
- * buildChildEnv — opencode-cli forwards the standard fleet provider keys.
- *
- * The opencode-cli branch must forward DEEPSEEK_API_KEY / MINIMAX_API_KEY
- * (resolved from the standard keychain via lookupCredential) so a session
- * launched as `opencode run -m minimax/...` or `deepseek/...` can authenticate.
- * Other providers must NOT receive these keys (per-provider credential
- * isolation — the security rationale documented on buildChildEnv).
- *
- * Additionally, the branch must derive the key service for the session's
- * configured model from its prefix (via resolveProviderKeyService) so a
- * primary/fallback model outside the standard pair (e.g. openai/gpt-4o) gets
- * its key forwarded too — and warn when the prefix resolves to a service that
- * SERVICE_ENV_MAP does not know about.
- *
- * Custom endpoints add one more lane: `providerConfig.apiKeyService` names the
- * service whose key authenticates the endpoint (the opencode.json provider
- * block references it as `{env:<ENVVAR>}`), so buildChildEnv must inject that
- * service's key on top of the defaults.
- *
- * lookupCredential is mocked at the module boundary so the test is
- * deterministic regardless of what the host machine's real keychain holds
- * (the live fleet machine genuinely has deepseek/minimax entries, which would
- * otherwise contaminate the "absent" assertions).
- */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const lookupCredentialMock = vi.fn<(service: string) => string | null>();
 
@@ -35,239 +10,194 @@ vi.mock('../../../src/lib/keyring.ts', async (importOriginal) => {
   };
 });
 
-// Capture warn calls from every child logger so the unmapped-service warning
-// emitted by buildChildEnv (logger name: session-manager) can be asserted.
-const warnMock = vi.fn();
-
-vi.mock('../../../src/logger.ts', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../../src/logger.ts')>();
-  return {
-    ...actual,
-    createChildLogger: () => ({
-      info: vi.fn(),
-      warn: (...args: unknown[]) => warnMock(...args),
-      error: vi.fn(),
-      debug: vi.fn(),
-      trace: vi.fn(),
-      fatal: vi.fn(),
-      child: vi.fn(),
-    }),
-  };
-});
-
 import { buildChildEnv } from '../../../src/runtimes/agent/session.ts';
+import { CONFIG_ROOT_ISOLATION_FLAG } from '../../../src/runtimes/agent/providers/child-env.ts';
 
-function hasKey(env: Record<string, string | undefined>, key: string): boolean {
+function hasKey(env: NodeJS.ProcessEnv, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(env, key);
 }
 
-describe('buildChildEnv — opencode-cli standard fleet keys', () => {
+const MODEL_CREDENTIAL_CASES = [
+  ['anthropic', 'ANTHROPIC_API_KEY'],
+  ['openai', 'OPENAI_API_KEY'],
+  ['deepseek', 'DEEPSEEK_API_KEY'],
+  ['minimax', 'MINIMAX_API_KEY'],
+  ['glm', 'ZAI_API_KEY'],
+  ['xai', 'XAI_API_KEY'],
+  ['groq', 'GROQ_API_KEY'],
+  ['mistral', 'MISTRAL_API_KEY'],
+  ['openrouter', 'OPENROUTER_API_KEY'],
+  ['google', 'GOOGLE_API_KEY'],
+  ['fireworks-ai', 'FIREWORKS_API_KEY'],
+  ['togetherai', 'TOGETHER_API_KEY'],
+] as const;
+
+const PROVIDER_CREDENTIAL_KEYS = MODEL_CREDENTIAL_CASES.map(([, envVar]) => envVar);
+
+const REQUIRED_PARENT_ENV = {
+  PATH: '/test/bin',
+  HOME: '/test/home',
+  USER: 'test-user',
+  SHELL: '/bin/test-shell',
+  LANG: 'C.UTF-8',
+  TERM: 'dumb',
+  NODE_PATH: '/test/node_modules',
+  XDG_RUNTIME_DIR: '/tmp/test-runtime',
+  XDG_CONFIG_HOME: '/tmp/test-config',
+  XDG_DATA_HOME: '/tmp/test-data',
+  TMPDIR: '/tmp/test-tmp',
+} as const;
+
+const DENIED_PARENT_ENV = {
+  SUDO_ASKPASS: '/tmp/test-askpass',
+  ALLOW_M365_MUTATIONS: '1',
+  CLAUDE_CONFIG_DIR: '/tmp/test-claude-config',
+  ALLOW_GITHUB_MUTATIONS: '1',
+  UNRELATED_CONNECTOR_MUTATIONS: '1',
+  UNRELATED_PROVIDER_MUTATIONS: '1',
+  GITHUB_TOKEN: 'test-github-token',
+  GH_TOKEN: 'test-gh-token',
+  OPENCODE_API_KEY: 'test-opencode-key',
+  UNKNOWN_VENDOR_SECRET_TOKEN: 'test-unknown-secret',
+  ...Object.fromEntries(PROVIDER_CREDENTIAL_KEYS.map((key) => [key, `parent-${key}`])),
+} as const;
+
+const MUTATED_ENV = {
+  ...REQUIRED_PARENT_ENV,
+  ...DENIED_PARENT_ENV,
+  [CONFIG_ROOT_ISOLATION_FLAG]: '0',
+};
+
+describe('buildChildEnv — opencode-cli least-authority environment', () => {
+  const saved: Record<string, string | undefined> = {};
+
   beforeEach(() => {
     lookupCredentialMock.mockReset();
-  });
-
-  it('forwards DEEPSEEK_API_KEY and MINIMAX_API_KEY when the keyring resolves them', () => {
-    lookupCredentialMock.mockImplementation((service: string) => {
-      if (service === 'deepseek') return 'ds-secret-123';
-      if (service === 'minimax') return 'mm-secret-456';
-      return null;
-    });
-
-    const env = buildChildEnv('opencode-cli');
-    expect(env.DEEPSEEK_API_KEY).toBe('ds-secret-123');
-    expect(env.MINIMAX_API_KEY).toBe('mm-secret-456');
-  });
-
-  it('omits DEEPSEEK_API_KEY/MINIMAX_API_KEY when the keyring resolves nothing', () => {
-    lookupCredentialMock.mockReturnValue(null);
-
-    const env = buildChildEnv('opencode-cli');
-    expect(hasKey(env, 'DEEPSEEK_API_KEY')).toBe(false);
-    expect(hasKey(env, 'MINIMAX_API_KEY')).toBe(false);
-  });
-
-  it('does NOT forward deepseek/minimax keys to a non-opencode provider (codex-cli)', () => {
-    lookupCredentialMock.mockImplementation((service: string) => {
-      if (service === 'deepseek') return 'ds-secret-123';
-      if (service === 'minimax') return 'mm-secret-456';
-      return null;
-    });
-
-    const env = buildChildEnv('codex-cli');
-    expect(hasKey(env, 'DEEPSEEK_API_KEY')).toBe(false);
-    expect(hasKey(env, 'MINIMAX_API_KEY')).toBe(false);
-    // codex-cli never consults the keyring for these services.
-    expect(lookupCredentialMock).not.toHaveBeenCalledWith('deepseek');
-  });
-});
-
-const ENV_KEYS = ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'DEEPSEEK_API_KEY', 'MINIMAX_API_KEY'] as const;
-
-describe('buildChildEnv — opencode-cli model-derived key', () => {
-  const savedEnv: Record<string, string | undefined> = {};
-
-  beforeEach(() => {
-    lookupCredentialMock.mockReset();
-    warnMock.mockReset();
-    // Isolate from the host process env — the opencode-cli branch also
-    // forwards OPENAI_API_KEY/ANTHROPIC_API_KEY straight from process.env.
-    for (const key of ENV_KEYS) {
-      savedEnv[key] = process.env[key];
-      delete process.env[key];
+    for (const [key, value] of Object.entries(MUTATED_ENV)) {
+      saved[key] = process.env[key];
+      process.env[key] = value;
     }
   });
 
   afterEach(() => {
-    for (const key of ENV_KEYS) {
-      if (savedEnv[key] === undefined) delete process.env[key];
-      else process.env[key] = savedEnv[key];
+    for (const key of Object.keys(MUTATED_ENV)) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
     }
   });
 
-  it('injects the key for the configured model prefix via SERVICE_ENV_MAP (openai/gpt-4o → OPENAI_API_KEY)', () => {
-    lookupCredentialMock.mockImplementation((service: string) =>
-      service === 'openai' ? 'oa-secret-789' : null,
+  it('constructs the characterized system/WhatSoup allowlist and one selected credential', () => {
+    lookupCredentialMock.mockImplementation((service) =>
+      service === 'glm' ? 'test-glm-key' : null,
     );
 
-    const env = buildChildEnv('opencode-cli', undefined, 'openai/gpt-4o');
-    expect(env.OPENAI_API_KEY).toBe('oa-secret-789');
-    expect(lookupCredentialMock).toHaveBeenCalledWith('openai');
-    expect(warnMock).not.toHaveBeenCalled();
-  });
-
-  it('injects no key and warns once when the model prefix resolves to a service missing from SERVICE_ENV_MAP', () => {
-    lookupCredentialMock.mockReturnValue(null);
-
-    // 'unmapped-vendor' stands in for any provider absent from SERVICE_ENV_MAP
-    // (xai, the previous fixture, is now a mapped fallback provider).
-    const env = buildChildEnv('opencode-cli', undefined, 'unmapped-vendor/model-x');
-    expect(hasKey(env, 'UNMAPPED_VENDOR_API_KEY')).toBe(false);
-    // The keyring is never consulted for a service with no env-var mapping —
-    // there is nowhere to put the result.
-    expect(lookupCredentialMock).not.toHaveBeenCalledWith('unmapped-vendor');
-
-    expect(warnMock).toHaveBeenCalledTimes(1);
-    const call = JSON.stringify(warnMock.mock.calls[0]);
-    expect(call).toContain('unmapped-vendor');
-    expect(call).toContain('SERVICE_ENV_MAP');
-
-    // The warning is emitted once per service, not once per spawn.
-    buildChildEnv('opencode-cli', undefined, 'unmapped-vendor/model-x');
-    expect(warnMock).toHaveBeenCalledTimes(1);
-  });
-
-  it('keeps deepseek/minimax forwarding unchanged and dedupes when the model prefix is one of them', () => {
-    lookupCredentialMock.mockImplementation((service: string) => {
-      if (service === 'deepseek') return 'ds-secret-123';
-      if (service === 'minimax') return 'mm-secret-456';
-      return null;
-    });
-
-    const env = buildChildEnv('opencode-cli', undefined, 'deepseek/deepseek-chat');
-    expect(env.DEEPSEEK_API_KEY).toBe('ds-secret-123');
-    expect(env.MINIMAX_API_KEY).toBe('mm-secret-456');
-    // Deduped: the same service is not resolved twice.
-    const deepseekCalls = lookupCredentialMock.mock.calls.filter(([svc]) => svc === 'deepseek');
-    expect(deepseekCalls).toHaveLength(1);
-    expect(warnMock).not.toHaveBeenCalled();
-  });
-
-  it('forwards the fleet fallback trio (deepseek/minimax/glm) when no model is provided', () => {
-    lookupCredentialMock.mockImplementation((service: string) => {
-      if (service === 'deepseek') return 'ds-secret-123';
-      if (service === 'minimax') return 'mm-secret-456';
-      if (service === 'glm') return 'zai-secret-789';
-      return null;
-    });
-
-    const env = buildChildEnv('opencode-cli');
-    expect(env.DEEPSEEK_API_KEY).toBe('ds-secret-123');
-    expect(env.MINIMAX_API_KEY).toBe('mm-secret-456');
-    expect(env.ZAI_API_KEY).toBe('zai-secret-789');
-    // W-4: opencode-cli now resolves openai + anthropic via resolveApiKey →
-    // lookupCredential (keyring-first) alongside the fleet fallback trio, so the
-    // call-list includes them even when unset. Env output above is unchanged —
-    // openai/anthropic resolve to null here and are not forwarded.
-    expect(lookupCredentialMock.mock.calls.map(([svc]) => svc).sort()).toEqual([
-      'anthropic',
-      'deepseek',
-      'glm',
-      'minimax',
-      'openai',
-    ]);
-    expect(warnMock).not.toHaveBeenCalled();
-  });
-});
-
-describe('buildChildEnv — opencode-cli providerConfig.apiKeyService key injection', () => {
-  const savedEnv: Record<string, string | undefined> = {};
-
-  beforeEach(() => {
-    lookupCredentialMock.mockReset();
-    warnMock.mockReset();
-    for (const key of ENV_KEYS) {
-      savedEnv[key] = process.env[key];
-      delete process.env[key];
-    }
-  });
-
-  afterEach(() => {
-    for (const key of ENV_KEYS) {
-      if (savedEnv[key] === undefined) delete process.env[key];
-      else process.env[key] = savedEnv[key];
-    }
-  });
-
-  it('injects the key for an explicit apiKeyService (custom endpoint auth lane)', () => {
-    lookupCredentialMock.mockImplementation((service: string) =>
-      service === 'openai' ? 'oa-endpoint-key' : null,
+    const env = buildChildEnv(
+      'opencode-cli',
+      { whatsoupInstance: 'test-line', whatsoupMcpSocket: '/tmp/test-whatsoup.sock' },
+      'glm/glm-5.2',
     );
 
-    const env = buildChildEnv('opencode-cli', undefined, 'Bare-Model-Id', {
+    expect(env).toEqual({
+      ...REQUIRED_PARENT_ENV,
+      WHATSOUP_INSTANCE: 'test-line',
+      WHATSOUP_MCP_SOCKET: '/tmp/test-whatsoup.sock',
+      ZAI_API_KEY: 'test-glm-key',
+    });
+    expect(lookupCredentialMock.mock.calls).toEqual([['glm']]);
+  });
+
+  it.each(MODEL_CREDENTIAL_CASES)(
+    'maps model prefix %s to only %s',
+    (service, envVar) => {
+      lookupCredentialMock.mockImplementation((requested) =>
+        requested === service ? `test-${service}-key` : null,
+      );
+
+      const env = buildChildEnv('opencode-cli', undefined, `${service}/test-model`);
+
+      expect(lookupCredentialMock.mock.calls).toEqual([[service]]);
+      expect(env[envVar]).toBe(`test-${service}-key`);
+      expect(PROVIDER_CREDENTIAL_KEYS.filter((key) => hasKey(env, key))).toEqual([envVar]);
+    },
+  );
+
+  it('uses a valid custom-endpoint apiKeyService instead of the model prefix', () => {
+    lookupCredentialMock.mockImplementation((service) =>
+      service === 'openai' ? 'test-custom-endpoint-key' : null,
+    );
+
+    const env = buildChildEnv('opencode-cli', undefined, 'anthropic/model-x', {
+      baseUrl: 'https://endpoint.example/v1',
       apiKeyService: 'openai',
     });
-    expect(env.OPENAI_API_KEY).toBe('oa-endpoint-key');
-    expect(lookupCredentialMock).toHaveBeenCalledWith('openai');
-    expect(warnMock).not.toHaveBeenCalled();
+
+    expect(lookupCredentialMock.mock.calls).toEqual([['openai']]);
+    expect(env.OPENAI_API_KEY).toBe('test-custom-endpoint-key');
+    expect(PROVIDER_CREDENTIAL_KEYS.filter((key) => hasKey(env, key))).toEqual(['OPENAI_API_KEY']);
   });
 
-  it('injects the apiKeyService key on top of the model-prefix key (additive, not replacing)', () => {
-    lookupCredentialMock.mockImplementation((service: string) => {
-      if (service === 'openai') return 'oa-endpoint-key';
-      if (service === 'anthropic') return 'an-model-key';
-      return null;
-    });
+  it('does not copy privilege, mutation, non-selected credential, or unknown secret-shaped keys', () => {
+    lookupCredentialMock.mockReturnValue('test-glm-key');
 
-    const env = buildChildEnv('opencode-cli', undefined, 'anthropic/claude-x', {
-      apiKeyService: 'openai',
-    });
-    expect(env.OPENAI_API_KEY).toBe('oa-endpoint-key');
-    expect(env.ANTHROPIC_API_KEY).toBe('an-model-key');
+    const env = buildChildEnv('opencode-cli', undefined, 'glm/glm-5.2');
+
+    for (const key of Object.keys(DENIED_PARENT_ENV)) {
+      if (key === 'ZAI_API_KEY') continue;
+      expect(hasKey(env, key), `${key} must be absent`).toBe(false);
+    }
+    expect(env.ZAI_API_KEY).toBe('test-glm-key');
   });
 
-  it('warns once and injects nothing for an apiKeyService missing from SERVICE_ENV_MAP', () => {
-    lookupCredentialMock.mockReturnValue(null);
+  it('uses isolated HOME/XDG roots without forwarding the controlling flag', () => {
+    process.env[CONFIG_ROOT_ISOLATION_FLAG] = '1';
+    lookupCredentialMock.mockReturnValue('test-glm-key');
 
-    buildChildEnv('opencode-cli', undefined, undefined, { apiKeyService: 'unmapped-endpoint-svc' });
-    expect(lookupCredentialMock).not.toHaveBeenCalledWith('unmapped-endpoint-svc');
-
-    expect(warnMock).toHaveBeenCalledTimes(1);
-    const call = JSON.stringify(warnMock.mock.calls[0]);
-    expect(call).toContain('unmapped-endpoint-svc');
-    expect(call).toContain('SERVICE_ENV_MAP');
-
-    // Warned once per service, not once per spawn.
-    buildChildEnv('opencode-cli', undefined, undefined, { apiKeyService: 'unmapped-endpoint-svc' });
-    expect(warnMock).toHaveBeenCalledTimes(1);
-  });
-
-  it('does NOT inject the apiKeyService key for a non-opencode provider (credential isolation pin)', () => {
-    lookupCredentialMock.mockImplementation((service: string) =>
-      service === 'minimax' ? 'mm-secret-456' : null,
+    const env = buildChildEnv(
+      'opencode-cli',
+      { configRoot: '/tmp/test-opencode-root' },
+      'glm/glm-5.2',
     );
 
-    const env = buildChildEnv('claude-cli', undefined, undefined, { apiKeyService: 'minimax' });
-    expect(hasKey(env, 'MINIMAX_API_KEY')).toBe(false);
-    expect(lookupCredentialMock).not.toHaveBeenCalledWith('minimax');
+    expect(env.HOME).toBe('/tmp/test-opencode-root');
+    expect(env.XDG_CONFIG_HOME).toBe('/tmp/test-opencode-root/.config');
+    expect(env.XDG_DATA_HOME).toBe('/tmp/test-opencode-root/.local/share');
+    expect(hasKey(env, CONFIG_ROOT_ISOLATION_FLAG)).toBe(false);
   });
+
+  it('consults only the selected service and leaves its env var absent when the credential is unavailable', () => {
+    lookupCredentialMock.mockReturnValue(null);
+
+    const env = buildChildEnv('opencode-cli', undefined, 'glm/glm-5.2');
+
+    expect(lookupCredentialMock.mock.calls).toEqual([['glm']]);
+    expect(PROVIDER_CREDENTIAL_KEYS.filter((key) => hasKey(env, key))).toEqual([]);
+  });
+
+  it('rejects apiKeyService without a custom endpoint', () => {
+    expect(() => buildChildEnv('opencode-cli', undefined, 'glm/glm-5.2', {
+      apiKeyService: 'openai',
+    })).toThrow(/apiKeyService requires.*baseUrl/);
+    expect(lookupCredentialMock).not.toHaveBeenCalled();
+  });
+
+  it.each(['pinecone', 'unknown-service', '', 7])(
+    'rejects invalid custom-endpoint apiKeyService %j',
+    (apiKeyService) => {
+      expect(() => buildChildEnv('opencode-cli', undefined, 'glm/glm-5.2', {
+        baseUrl: 'https://endpoint.example/v1',
+        apiKeyService,
+      })).toThrow(/mapped inference-provider service/);
+      expect(lookupCredentialMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([undefined, 'bare-model', 'unmapped-vendor/model-x'])(
+    'rejects a selected model without a mapped credential service: %j',
+    (model) => {
+      expect(() => buildChildEnv('opencode-cli', undefined, model)).toThrow(
+        /does not resolve to a mapped provider credential service/,
+      );
+      expect(lookupCredentialMock).not.toHaveBeenCalled();
+    },
+  );
 });
