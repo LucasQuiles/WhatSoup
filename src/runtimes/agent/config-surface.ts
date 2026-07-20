@@ -85,6 +85,17 @@ export type ModelPinDecision =
  *     and the permanent-fail-open holes — an unverified pin can't ride forever);
  *   - re-validate + catalogue DOWN → `defer` (fail-open: use it unverified, and
  *     re-validate on the next OK read — a DEFERRAL of verification, not a waiver).
+ *
+ * Why transition-only re-validation is safe (Q 2026-07-20): the pin's 24h TTL is
+ * ALSO its staleness ceiling. A verified pin can go stale mid-window (its model
+ * retired between transitions) but never indefinitely — it expires at the pin's
+ * own lifetime. So this trades no correctness for the per-turn fetch savings;
+ * whoever later "optimizes" the TTL upward is also raising the staleness bound.
+ *
+ * `drop` is only half the contract: the caller (Slice C.3) is OBLIGATED to
+ * surface the returned `reason` to the user ON THE TURN the drop happens — a
+ * silent storage mutation would make the pin vanish with no explanation. The
+ * decision therefore carries `droppedModelId` + `reason` as values to render.
  * Pure and total; the caller owns the catalogue fetch + the persistence.
  */
 export function decideModelPinResolution(
