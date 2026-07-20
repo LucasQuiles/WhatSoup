@@ -2323,3 +2323,98 @@ def test_main_default_argv_uses_sys_argv(mod, monkeypatch, tmp_path):
 
     rc = mod.main(None)
     assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# Task 3 (#1866): membership follows repaired declaration -- monitor code is
+# UNCHANGED. gui_targets_from_fleet()/load_fleet() read ONLY the checked-in
+# inventory (fleet_path() / BOT_ERRORS_EXPECTED_FLEET) -- they never consult
+# the deployed per-host profile. restore_service_to_always_on()
+# (bot_errors_cutover.py, Task 1) is the ONE authoritative writer that repairs
+# BOTH the inventory and the deployed profile in one call; this proves the
+# GUI-session monitor's target-set picks svc1 up purely because that
+# inventory-side declaration flipped from "blocked" to "always_on" -- no
+# monitor code changed. The fixture deliberately declares NO
+# guiSessionExpected policy on the host, so membership falls to the
+# fail-closed default (`expected == "always_on"` + a `com.whatsoup.*` label)
+# -- the one branch where the blocked->always_on flip is actually load-bearing.
+# ---------------------------------------------------------------------------
+
+
+def _load_cutover_module():
+    spec = importlib.util.spec_from_file_location(
+        "bot_errors_cutover_for_gui_session_monitor", _SCRIPT.parent / "bot_errors_cutover.py"
+    )
+    cutover_mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(cutover_mod)
+    return cutover_mod
+
+
+def _write_task3_inventory(tmp_path: Path, host: str, profile_filename: str, instance: dict) -> Path:
+    path = tmp_path / "bot-errors-expected-fleet.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "hosts": [
+                    {
+                        "host": host,
+                        "role": "bot-host",
+                        "profile": profile_filename,
+                        "collectorRemote": True,
+                        "instances": [instance],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_task3_profile(profiles_dir: Path, filename: str, instance: dict) -> Path:
+    profiles_dir.mkdir(parents=True, exist_ok=True)
+    path = profiles_dir / filename
+    path.write_text(
+        json.dumps({"role": "bot-host", "instances": [instance]}),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_gui_targets_follow_repaired_declaration(mod, tmp_path: Path, monkeypatch):
+    cutover_mod = _load_cutover_module()
+
+    host = "host-a"
+    profile_filename = "host-a.json"
+    instance_name = "svc1"
+    label = "com.whatsoup.svc1"
+
+    inventory_path = _write_task3_inventory(
+        tmp_path,
+        host,
+        profile_filename,
+        {"name": instance_name, "expected": "blocked", "service": label, "healthPort": 9095},
+    )
+    profiles_dir = tmp_path / "health-profiles"
+    profile_path = _write_task3_profile(
+        profiles_dir,
+        profile_filename,
+        {"name": instance_name, "expected": "blocked", "service": label},
+    )
+    monkeypatch.setattr(mod, "fleet_path", lambda: inventory_path)
+
+    # Pre-repair: svc1 is declared blocked in the inventory -- NOT a monitor
+    # target.
+    pre_targets = {t["instance"] for t in mod.gui_targets_from_fleet(mod.load_fleet())}
+    assert instance_name not in pre_targets
+
+    # Repair the declaration via the ONE authoritative writer (#1866 Task 1) --
+    # no monitor code changes; membership must follow the repaired declaration.
+    cutover_mod.restore_service_to_always_on(
+        host, instance_name, inventory_path=inventory_path, profiles_dir=profiles_dir
+    )
+
+    post_targets = {t["instance"] for t in mod.gui_targets_from_fleet(mod.load_fleet())}
+    assert instance_name in post_targets

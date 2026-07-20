@@ -348,6 +348,7 @@ const SoupKitchen: FC = () => {
     isError: linesError,
     error: linesQueryError,
     refetch: refetchLines,
+    freshness: linesFreshness,
   } = useLines();
   const {
     data: feedData,
@@ -820,6 +821,35 @@ const SoupKitchen: FC = () => {
           color="neutral"
           suffix={`of ${lines.length}`}
         />
+        {/* compute-kpis `staleExcluded` (#1762 rem-2): stale lines' carried-
+            forward health bodies are excluded from the Unread / Agent
+            Sessions totals. Surface HOW MUCH of this strip is carried data
+            so the exclusion is operator-visible, completing the coverage
+            trio (Connectivity Unknown / Metrics Unavailable / Carried
+            Health). Display-only, same idiom. */}
+        <KpiCard
+          value={kpis.staleExcluded}
+          label="Carried Health"
+          color="neutral"
+          suffix={`of ${lines.length}`}
+        />
+        {/* D-3/F-UX-4: the strip itself carries the #1925 query-plane
+            freshness marker (same idiom as Metrics.tsx) — per-row tags show
+            SERVER health-poll age; this shows the CLIENT query plane. */}
+        {linesFreshness && linesFreshness.observedAt !== null && (
+          <span
+            className={`c-label w-full${linesFreshness.stale ? ' text-s-warn' : ''}`}
+            title={
+              linesFreshness.stale
+                ? `Fleet lines carried forward — last successful fetch ${formatRelative(new Date(linesFreshness.observedAt).toISOString())}`
+                : `Last successful fleet lines fetch ${formatRelative(new Date(linesFreshness.observedAt).toISOString())}`
+            }
+          >
+            {linesFreshness.stale
+              ? `stale · ${formatRelative(new Date(linesFreshness.observedAt).toISOString())}`
+              : `observed ${formatRelative(new Date(linesFreshness.observedAt).toISOString())}`}
+          </span>
+        )}
         </Card>
       </motion.div>
 
@@ -1202,6 +1232,7 @@ const SoupKitchen: FC = () => {
                             <StatusCell
                               status={line.status}
                               name={displayInstanceName(line.name)}
+                              carried={line.stale}
                             />
                             <span className="c-label">
                               {formatPhone(line.phone)}

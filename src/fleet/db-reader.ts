@@ -52,6 +52,50 @@ export interface DbStats {
 
 export type DbResult<T> = { ok: true; data: T } | { ok: false; error: string };
 
+/** SQLite `datetime('now')` emits 'YYYY-MM-DD HH:MM:SS' (UTC, no marker).
+ *  Normalize to ISO-8601 UTC so browser `new Date()` parsing is unambiguous. */
+function sqliteUtcToIso(value: string): string {
+  return `${value.replace(' ', 'T')}Z`;
+}
+
+/** Row shape for the checkpoint browser surface (GET /api/lines/:name/checkpoints). */
+export interface CheckpointRow {
+  conversationKey: string;
+  sessionId: string | null;
+  sessionStatus: string;
+  checkpointVersion: number;
+  claudePid: number | null;
+  workspacePath: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedScope: string | null;
+  completedDeliveryJid: string | null;
+  completedLogicalTurnId: string | null;
+  /** Engine's exact resumable filter (src/core/durability.ts:501-506):
+   *  session_status IN ('active','suspended') AND session_id IS NOT NULL. */
+  resumable: boolean;
+}
+
+/** Fraction of the configured limit at which a sender counts as "near
+ *  limit" (amber band below the throttled bucket). */
+export const NEAR_LIMIT_RATIO = 0.8;
+
+/** Windowed throttle aggregate for one instance (see getRateLimits). */
+export interface RateLimitsData {
+  /** False when the rate_limits table is absent (legacy DBs). */
+  supported: boolean;
+  /** Senders whose windowed response count meets/exceeds the limit. */
+  throttled: number;
+  /** Senders at ≥ NEAR_LIMIT_RATIO of the limit but under it. */
+  nearLimit: number;
+  /** Top 5 senders by windowed count. */
+  topSenders: Array<{ senderJid: string; count: number }>;
+  windowedResponses: number;
+  windowedAttempts: number;
+  /** max(0, attempts − responses) — retry/token-storm waste (#1864 class). */
+  excessAttempts: number;
+}
+
 const READ_ONLY_DATABASE_OPTIONS: ConstructorParameters<typeof DatabaseSync>[1] = {
   readOnly: true,
 };
@@ -176,6 +220,41 @@ export class FleetDbReader {
         isGroup: !!r.is_group,
         lastMessagePreview: null,
         lastMessageSender: null,
+      }));
+    });
+  }
+
+  /** List session_checkpoints for the checkpoint browser tab — newest first,
+   *  capped at 500. Read-only; the `resumable` flag mirrors the durability
+   *  engine's exact startup-resume filter so the console never invents its
+   *  own definition of what would resume on restart. */
+  getCheckpoints(name: string, dbPath: string): DbResult<CheckpointRow[]> {
+    return this.query(name, dbPath, (db) => {
+      const rows = db.prepare(`
+        SELECT
+          conversation_key, session_id, session_status, checkpoint_version,
+          claude_pid, workspace_path, created_at, updated_at,
+          completed_scope, completed_delivery_jid, completed_logical_turn_id,
+          CASE WHEN session_status IN ('active','suspended') AND session_id IS NOT NULL
+               THEN 1 ELSE 0 END AS resumable
+        FROM session_checkpoints
+        ORDER BY updated_at DESC
+        LIMIT 500
+      `).all() as Array<Record<string, unknown>>;
+
+      return rows.map((r) => ({
+        conversationKey: String(r.conversation_key),
+        sessionId: r.session_id === null ? null : String(r.session_id),
+        sessionStatus: String(r.session_status),
+        checkpointVersion: Number(r.checkpoint_version),
+        claudePid: r.claude_pid === null ? null : Number(r.claude_pid),
+        workspacePath: r.workspace_path === null ? null : String(r.workspace_path),
+        createdAt: sqliteUtcToIso(String(r.created_at)),
+        updatedAt: sqliteUtcToIso(String(r.updated_at)),
+        completedScope: r.completed_scope === null ? null : String(r.completed_scope),
+        completedDeliveryJid: r.completed_delivery_jid === null ? null : String(r.completed_delivery_jid),
+        completedLogicalTurnId: r.completed_logical_turn_id === null ? null : String(r.completed_logical_turn_id),
+        resumable: r.resumable === 1,
       }));
     });
   }
@@ -551,6 +630,77 @@ export class FleetDbReader {
       }
 
       return { messageCount: msgCount, chatCount: chatCount, pendingAccess };
+    });
+  }
+
+  /**
+   * Windowed per-sender throttle aggregate (D-5; the `rate_limits` table
+   * is per-SENDER chat throttling — successful responses — and
+   * `llm_attempts` every LLM invocation, audit 1065). `limit`/`windowMs`
+   * are supplied by the caller (the fleet resolves them from the
+   * instance's config.json; env overrides are fleet-invisible).
+   * `excessAttempts` (attempts − responses, floored 0) is the
+   * retry/token-storm signal (#1864 class).
+   * `supported:false` (zeroed, NOT an error) when the tables are absent.
+   */
+  getRateLimits(
+    name: string,
+    dbPath: string,
+    opts: { limit: number; windowMs: number },
+  ): DbResult<RateLimitsData> {
+    return this.query(name, dbPath, (db) => {
+      const tables = new Set(
+        (db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>)
+          .map((r) => r.name),
+      );
+      const zero: RateLimitsData = {
+        supported: false,
+        throttled: 0,
+        nearLimit: 0,
+        topSenders: [],
+        windowedResponses: 0,
+        windowedAttempts: 0,
+        excessAttempts: 0,
+      };
+      if (!tables.has('rate_limits')) return zero;
+
+      const windowSec = Math.floor(opts.windowMs / 1000);
+      const offset = `-${windowSec} seconds`;
+      const perSender = db.prepare(`
+        SELECT sender_jid, COUNT(*) AS cnt
+        FROM rate_limits
+        WHERE response_at >= datetime('now', ?)
+        GROUP BY sender_jid
+        ORDER BY cnt DESC, sender_jid ASC
+      `).all(offset) as Array<{ sender_jid: string; cnt: number }>;
+
+      const nearFloor = Math.max(1, Math.floor(opts.limit * NEAR_LIMIT_RATIO));
+      let throttled = 0;
+      let nearLimit = 0;
+      for (const row of perSender) {
+        if (row.cnt >= opts.limit) throttled += 1;
+        else if (row.cnt >= nearFloor) nearLimit += 1;
+      }
+
+      const windowedResponses = perSender.reduce((sum, r) => sum + r.cnt, 0);
+      let windowedAttempts = 0;
+      if (tables.has('llm_attempts')) {
+        const attemptRow = db.prepare(`
+          SELECT COUNT(*) AS cnt FROM llm_attempts
+          WHERE attempt_at >= datetime('now', ?)
+        `).get(offset) as { cnt: number };
+        windowedAttempts = attemptRow.cnt;
+      }
+
+      return {
+        supported: true,
+        throttled,
+        nearLimit,
+        topSenders: perSender.slice(0, 5).map((r) => ({ senderJid: r.sender_jid, count: r.cnt })),
+        windowedResponses,
+        windowedAttempts,
+        excessAttempts: Math.max(0, windowedAttempts - windowedResponses),
+      };
     });
   }
 }

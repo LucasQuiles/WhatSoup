@@ -943,6 +943,17 @@ export const config = {
   startupNotifications: booleanProp(instance ?? undefined, 'startupNotifications', true),
   // Gate proactive per_chat session resume on startup. Default true preserves existing behavior.
   proactiveResumeOnStartup: booleanProp(instance ?? undefined, 'proactiveResumeOnStartup', true),
+  // C5 restart-loop guard: suppress proactive resume after repeated crashy
+  // boots (resume-replay circuit breaker; see
+  // src/runtimes/agent/restart-loop-guard.ts). Defaults trip on the 3rd
+  // crashy boot inside 300s — strictly before systemd's 10-per-300s wedge —
+  // so the instance self-heals instead of going dark. windowMs is clamped to
+  // >= 1s inside the guard; maxRestarts <= 0 disables tripping.
+  restartLoopGuard: {
+    enabled: (instance?.restartLoopGuard?.enabled as boolean | undefined) ?? true,
+    maxRestarts: positiveIntValue(instance?.restartLoopGuard?.maxRestarts, 3),
+    windowMs: positiveIntValue(instance?.restartLoopGuard?.windowMs, 300_000),
+  },
   textAggregateDelayMs: positiveIntValue(instance?.textAggregateDelayMs, 2_000),
 
   // Operation tracker: per-tool progress reporting & stall detection

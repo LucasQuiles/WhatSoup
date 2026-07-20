@@ -5,9 +5,9 @@ import { relative, resolve } from 'node:path'
 // The TSX brand-regression guard scans `console/src` only, so brand/channel copy
 // in peripheral artifacts (the document shell, PWA manifest) escapes it entirely.
 // This pins those surfaces against the same legacy strings the src guard forbids.
-// Scope note: the user-visible `<title>WhatSoup Console>` → `SOUP Console` flip is a
-// tracked rebrand item (peripheral-audit P1) and is NOT asserted here, so this guard
-// passes today and only catches *new* drift. The theme-color meta is pinned by
+// Scope note: the user-visible `<title>` flip to `SOUP Console` (peripheral-audit
+// P1, C4) is LANDED and pinned exactly below — this guard now prevents regression
+// on the title itself as well as new drift. The theme-color meta is pinned by
 // use-theme.test.tsx against the semantic surface-base tokens.
 
 const consoleRoot = resolve(import.meta.dirname, '..', '..', 'console')
@@ -115,9 +115,10 @@ describe('peripheral brand regression (artifacts outside console/src)', () => {
     })
   }
 
-  it('keeps the document shell structurally intact (title + favicon link present)', () => {
+  it('keeps the document shell structurally intact (SOUP Console title + favicon link present)', () => {
     const html = readFileSync(resolve(consoleRoot, 'index.html'), 'utf8')
-    expect(html).toMatch(/<title>[^<]+<\/title>/)
+    // Exact pin: the C4 brand flip's user-visible title (peripheral-audit P1).
+    expect(html).toMatch(/<title>SOUP Console<\/title>/)
     expect(html).toMatch(/<link[^>]+rel="icon"/)
   })
 
