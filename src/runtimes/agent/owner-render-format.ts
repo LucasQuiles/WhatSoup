@@ -79,7 +79,14 @@ export type UnavailableReason =
   | { kind: 'no-key' }
   | { kind: 'key-rejected' }
   | { kind: 'timeout' }
-  | { kind: 'empty' };
+  // 'empty' = the harness ran and produced no model lines; the base line-parser
+  // cannot tell a genuinely empty catalogue from an output-shape change (any
+  // non-blank line becomes an id), so its text does NOT assert emptiness (Q 2b).
+  | { kind: 'empty' }
+  // 'unparseable' = the resolver's shape check judged the output present but not
+  // a model list (a format regression). Its fix points at the PARSER, not the
+  // harness — the silent failure mode a bare "empty" would mask (Q 2b).
+  | { kind: 'unparseable' };
 
 /** The resolver-produced catalogue listing the formatter renders. `asOfLabel`
  *  is the CAPTURE stamp (Q 2b#1) — when the source was probed, NOT render time. */
@@ -115,7 +122,9 @@ function unavailableMessage(reason: UnavailableReason): string {
     case 'timeout':
       return 'catalogue lookup timed out';
     case 'empty':
-      return 'harness returned an empty catalogue';
+      return 'harness ran but returned no model lines';
+    case 'unparseable':
+      return 'harness output not recognizable as a model list (parser may need updating)';
     case 'no-adapter':
       return `no catalogue adapter for harness '${reason.harness}'`;
   }

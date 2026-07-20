@@ -220,13 +220,23 @@ describe('formatAvailableModels', () => {
     );
   });
 
-  it('unavailable empty: harness ran but returned nothing', () => {
+  it('unavailable empty: honest wording that does NOT assert genuine emptiness (parser cannot distinguish)', () => {
     const out = formatAvailableModels({
       ...base,
       listing: { status: 'unavailable', reason: { kind: 'empty' }, asOfLabel: 'just now' },
     });
     expect(out).toBe(
-      `*Available models:* unavailable — harness returned an empty catalogue (harness: opencode-cli, as of just now)`,
+      `*Available models:* unavailable — harness ran but returned no model lines (harness: opencode-cli, as of just now)`,
+    );
+  });
+
+  it('unavailable unparseable: points at the parser (format regression), distinct from empty', () => {
+    const out = formatAvailableModels({
+      ...base,
+      listing: { status: 'unavailable', reason: { kind: 'unparseable' }, asOfLabel: 'just now' },
+    });
+    expect(out).toBe(
+      `*Available models:* unavailable — harness output not recognizable as a model list (parser may need updating) (harness: opencode-cli, as of just now)`,
     );
   });
 
