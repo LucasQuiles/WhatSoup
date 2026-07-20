@@ -38,7 +38,7 @@ describe('fitness rule registry', () => {
     const ids = fitnessRules.map((rule) => rule.id);
 
     expect(new Set(ids).size).toBe(ids.length);
-    expect(fitnessRules).toHaveLength(33);
+    expect(fitnessRules).toHaveLength(36);
 
     for (const rule of fitnessRules) {
       expect(rule.id).toMatch(/^[a-z]+\.[a-z0-9-]+$/);
@@ -107,6 +107,9 @@ describe('fitness rule registry', () => {
     expect(ratchetedRules.map((rule) => rule.id)).toEqual([
       'arch.file-size',
       'arch.import-boundaries',
+      'hygiene.no-wa-jid-literal-in-generic-ui',
+      'hygiene.no-whatsapp-copy-in-generic-ui',
+      'hygiene.no-health-whatsapp-key-read',
       'arch.ring-boundaries',
       'arch.ssot-lid-reads',
       'arch.ssot-jid-construction',
@@ -116,5 +119,21 @@ describe('fitness rule registry', () => {
     ]);
     expect(ratchetedRules[0].params).toMatchObject({ maxLines: expect.any(Number) });
     expect(ratchetedRules[1].params).toMatchObject({ layers: expect.any(Object) });
+    // Pattern-based ratcheted rules (the hygiene transport-pattern guards) carry
+    // globs/patterns/allowlistPaths params. Count-ratcheted arch rules (ring-boundaries,
+    // ssot-*) use violationCount baselines instead and are covered by the test above.
+    const patternRatchetedIds = [
+      'hygiene.no-wa-jid-literal-in-generic-ui',
+      'hygiene.no-whatsapp-copy-in-generic-ui',
+      'hygiene.no-health-whatsapp-key-read',
+    ];
+    for (const id of patternRatchetedIds) {
+      const rule = ratchetedRules.find((candidate) => candidate.id === id);
+      expect(rule?.params).toMatchObject({
+        globs: expect.any(Array),
+        patterns: expect.any(Array),
+        allowlistPaths: expect.any(Array),
+      });
+    }
   });
 });
