@@ -4,9 +4,9 @@ This document is the human-maintained synthesis over the generated planning
 index. Treat `docs/work-index.json` and `docs/work-index.md` as the mechanical
 source of truth for scoped planning artifacts.
 
-**Last refreshed:** 2026-06-20
+**Last refreshed:** 2026-07-20
 **Index source:** `docs/work-index.json` schema v5, generated at
-`2026-06-20T16:45:49Z` from `0d9c65e1c7c302d136ee846886ad25ca75c0a205`
+`2026-07-20T20:58:18Z` from `f30052f11a86cc3ece3026ff8e8798ec207831ea`
 **Policy:** [`docs/canonical-status-policy.md`](canonical-status-policy.md)
 **Review cadence:** [`docs/runbooks/objective-tracking.md`](runbooks/objective-tracking.md)
 **Project map:** [`docs/project-map.md`](project-map.md)
@@ -20,15 +20,15 @@ matters.
 
 | Status | Count | Meaning |
 |---|---:|---|
-| active | 0 | No indexed planning artifact currently declares active work. |
-| pending | 1 | One design artifact still declares pending status. |
-| completed | 30 | Historical plans/specs marked complete or landed. |
+| active | 16 | Authored artifacts currently declare active work; the CI/CD control-plane initiative is the current lane normalized in this refresh. |
+| pending | 14 | Authored artifacts declare pending work and require their own owner disposition. |
+| completed | 32 | Historical plans/specs marked complete or landed. |
 | deferred | 7 | Fleet-charts artifacts are explicitly shelved. |
 | closed | 4 | Historical artifacts retained without claiming completion. |
-| unknown | 0 | No indexed artifact currently lacks authored status metadata. |
+| unknown | 4 | Four artifacts lack a policy-vocabulary status and remain visible for triage. |
 
-The work index has 42 total rows, zero inconsistencies, zero unknown-status
-rows, and one cross-tree topic cluster: `fleet-charts`.
+The work index has 77 total rows, zero inconsistencies, four unknown-status rows, and four
+cross-tree topic clusters: `design`, `fleet-charts`, `requirements`, and `tasks`.
 
 ## Canonical Surfaces
 
@@ -61,34 +61,19 @@ rows, and one cross-tree topic cluster: `fleet-charts`.
 
 ## Program Queue
 
-### Active
+### Current normalized lane
 
-No indexed rows currently declare `active`.
+| Path | Role | State |
+|---|---|---|
+| `docs/superpowers/specs/2026-07-20-cicd-enforcement-control-plane-design.md` | approved architecture and evidence contract | active; implementation remains unproven |
+| `docs/superpowers/plans/2026-07-20-cicd-enforcement-control-plane-program.md` | recursive dependency and trust-boundary ledger | active; future lanes require their named admission plans |
+| `docs/superpowers/plans/2026-07-20-cicd-control-foundation.md` | first executable source-only plan | active; CP-F1 is next only after terminal plan review and planning-batch commit |
 
-### Pending
-
-| Path | Reason |
-|---|---|
-| `docs/superpowers/specs/2026-04-25-transport-layer-design.md` | Still marked `pending`; needs owner disposition before it can be treated as complete, deferred, or superseded. |
-
-### Deferred
-
-The only deferred cluster is `fleet-charts`: one closed SDLC state row, one
-superpowers plan, one spec, and four handoffs. These are shelved historical
-artifacts, not current execution truth.
-
-### Closed Historical
-
-Four historical rows are intentionally `closed`: the colony-orchestration
-plan/spec pair, the old realtime umbrella plan, and the baseline-test failure
-spec. These are retained for history without treating their dated instructions
-as current implementation guidance.
-
-### Unknown
-
-No indexed rows currently resolve to `unknown`. If new unknown rows appear,
-update the artifact with a policy-vocabulary `Status:` line or a structured
-supersession marker, then regenerate `docs/work-index.*`.
+The remaining active and pending artifacts are listed mechanically in
+`docs/work-index.md`; this synthesis does not imply that they share the CI/CD initiative's
+authority or priority. Deferred and closed rows remain historical. The four unknown rows
+must receive an authored status or structured supersession marker before they can be
+treated as complete, deferred, or active.
 
 ## Sweep Notes
 

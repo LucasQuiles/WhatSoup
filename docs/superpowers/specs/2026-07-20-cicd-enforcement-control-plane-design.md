@@ -19,14 +19,24 @@ privacy, publication, semantic-quality, repository-hygiene, test-integrity, port
 build, deployment, and runtime controls. The control plane is an inventory and decision
 layer; it does not duplicate their policy engines.
 
-Every authoritative decision is bound to exact Git object identities and has one of
-three meanings:
+Every control result is bound to exact Git object identities and has exactly one outcome:
 
-- `PASS` / exit `0`: every applicable requirement completed for the exact revision.
+- `PASS` / exit `0`: complete evidence proves compliance for the exact revision.
+- `WARN` / exit `0`: a valid actionable finding is intentionally non-blocking; it remains
+  visible and cannot satisfy a required control.
 - `BLOCK` / exit `1`: a deterministic, actionable violation or failed required test
   exists.
 - `INCONCLUSIVE` / exit `2`: required assurance is missing, stale, unavailable,
-  malformed, cancelled, timed out, or cannot be trusted.
+  malformed, cancelled, timed out, produced under invalid preconditions, or cannot be
+  trusted.
+- `NOT_APPLICABLE` / exit `0`: a trusted classifier positively proved irrelevance through
+  a closed reason; absence, skip, or cancellation never qualifies.
+
+An aggregate gate derives one authoritative `PASS`, `BLOCK`, or `INCONCLUSIVE` decision
+from those outcomes. It may pass only when every required control has an exact-revision
+`PASS` or valid `NOT_APPLICABLE` receipt and every advisory warning remains separately
+visible. A deterministic required-control violation blocks. Missing, invalid, or
+untrusted assurance is inconclusive.
 
 `INCONCLUSIVE` is never converted to a warning or pass at a merge, release, publication,
 or deployment boundary. Advisory findings remain separately visible and cannot be used
@@ -114,7 +124,7 @@ exact control, file, structural location, and revision
 reachable bypass or failure path
 synthetic unsafe fixture
 adjacent safe-neighbor fixture
-expected PASS | BLOCK | INCONCLUSIVE and exit 0 | 1 | 2
+expected PASS | WARN | BLOCK | INCONCLUSIVE | NOT_APPLICABLE and exit 0 | 1 | 2
 smallest authoritative remediation
 controls and safe behavior that must remain unchanged
 focused RED and regression commands
@@ -501,12 +511,20 @@ then translates its disposition without recomputing the policy decision.
 ```json
 {
   "schemaVersion": 1,
-  "decision": "inconclusive",
+  "outcome": "inconclusive",
+  "aggregateDecision": "inconclusive",
   "exitCode": 2,
   "code": "ci.required-check.missing",
   "controlId": "policy-gate",
+  "owner": "ci-policy-owner",
+  "canonicalImplementationOwner": "scripts/lib/ci-control/result.ts",
+  "domain": "portability",
   "stage": "pull-request",
   "eventName": "pull_request",
+  "operation": "aggregate-required-checks",
+  "trustClass": "protected-policy",
+  "severity": "high",
+  "confidence": "proven",
   "surface": "ci.required-check",
   "applicability": "required",
   "applicabilityReason": null,
@@ -529,9 +547,28 @@ then translates its disposition without recomputing the policy decision.
     "digest": "sha256:..."
   },
   "platform": {
+    "runnerLabel": "ubuntu-24.04",
     "os": "linux",
     "architecture": "x64",
-    "runtime": "node@pinned-version"
+    "runtime": "node@pinned-version",
+    "observedCapabilitiesDigest": "sha256:..."
+  },
+  "preconditionReceipt": {
+    "runtimeDigest": "sha256:...",
+    "packageManagerDigest": "sha256:...",
+    "wrapperDigest": "sha256:...",
+    "installScopesDigest": "sha256:...",
+    "workspaceStateDigest": "sha256:...",
+    "hookIdentityDigest": "sha256:...",
+    "fixtureStateDigest": "sha256:...",
+    "testSelectionDigest": "sha256:...",
+    "outcome": "pass"
+  },
+  "attempt": {
+    "id": "unique-attempt-id",
+    "lifecycle": "terminal",
+    "processGroupEnded": true,
+    "historyEntryDigest": "sha256:..."
   },
   "risk": {
     "tier": "elevated",
@@ -542,7 +579,7 @@ then translates its disposition without recomputing the policy decision.
     {
       "id": "portability.native-macos",
       "applicability": "required",
-      "decision": "inconclusive",
+      "outcome": "inconclusive",
       "conclusion": "missing",
       "causeCode": "ci.portability.required-host-missing",
       "expectedPlatform": {
@@ -567,11 +604,28 @@ then translates its disposition without recomputing the policy decision.
     "name": "sanitized-location"
   },
   "why": "Specific sanitized reason.",
+  "impact": "Required native assurance is absent for the proposed merge.",
   "guidance": ["Concrete ordered repair step."],
+  "patchScope": {
+    "allowed": ["canonical portability adapter"],
+    "prohibited": ["continue-on-error", "permission broadening", "rule removal"]
+  },
   "reproduce": {
-    "command": "canonical repository command"
+    "command": "canonical repository command",
+    "preconditions": ["exact candidate and merge objects are available"]
+  },
+  "verify": {
+    "commands": ["focused unsafe fixture", "safe-neighbor fixture", "affected regression"],
+    "expected": ["unsafe blocks", "safe neighbor passes", "regression passes"]
   },
   "retryable": false,
+  "retryConditions": [],
+  "exception": {
+    "eligible": false,
+    "approvalRole": null
+  },
+  "relatedFindings": [],
+  "fingerprint": "opaque-stable-fingerprint",
   "limitations": [],
   "evidenceDigest": "sha256:...",
   "createdAt": "2026-07-20T00:00:00Z",
@@ -581,7 +635,7 @@ then translates its disposition without recomputing the policy decision.
 
 The envelope's canonical serialization, byte budgeting, hashing, CLI output, file
 output, annotations, and job summaries share one control-plane serializer. Unknown keys,
-unrecognized producer/policy identities, invalid freshness, and invalid decision/exit
+unrecognized producer/policy identities, invalid freshness, and invalid outcome/exit
 pairs are rejected.
 
 OID fields contain a valid 40-hex object ID or JSON `null`; string sentinels are forbidden.
@@ -594,17 +648,26 @@ native schema, evidence digest, and timestamps are null. Any terminal non-missin
 requires all of those fields and must match the protected manifest; null cannot satisfy a
 required check.
 
-Decision-dependent fields are exact: `pass/0` requires `findingId`, `location`, and `why`
-to be `null` and `guidance` to be empty; `block/1` and `inconclusive/2` require an opaque
-finding ID, sanitized location, specific reason, and non-empty ordered guidance. Every
-result has bounded UTC creation/freshness timestamps. A stale result cannot pass even if
-its recorded decision was pass.
+Outcome-dependent fields are exact. `pass/0` requires `findingId`, `location`, and `why`
+to be `null` and `guidance` to be empty. `warn/0`, `block/1`, and `inconclusive/2` require
+an opaque finding ID, sanitized structural location, specific causal reason, non-empty
+ordered guidance, canonical implementation owner, allowed patch scope, prohibited
+workarounds, reproduction preconditions, focused verification, retry classification,
+exception eligibility, related findings, and a stable fingerprint. `not-applicable/0`
+requires a trusted classifier receipt and closed applicability reason. Every result has
+bounded UTC creation/freshness timestamps. A stale result cannot pass even if its
+recorded outcome was pass.
+
+Aggregate envelopes additionally carry `aggregateDecision`; individual results set it to
+JSON `null`. Warnings remain visible but never satisfy a required check. Aggregate exact
+set equality is over `(control ID, expected producer, revision, policy digest)`, so an
+extra similarly named result cannot substitute for a missing requirement.
 
 ### 11.2 Error taxonomy
 
 Codes are stable, categorical, and specific:
 
-| Family | Example code | Decision | Required response |
+| Family | Example code | Outcome | Required response |
 |---|---|---|---|
 | input | `ci.input.revision-unavailable` | Inconclusive | resolve the trusted revision; do not reduce coverage |
 | classification | `ci.classification.unknown-path` | Inconclusive | add a reviewed risk rule; run system-wide coverage |
@@ -628,7 +691,7 @@ Codes are stable, categorical, and specific:
 
 Each non-pass result answers, without ambiguity:
 
-1. what control made the decision;
+1. what control made the outcome;
 2. which exact revision, stage, and safe surface were evaluated;
 3. whether it is a violation or missing assurance;
 4. why the requirement exists in task-relevant language;
@@ -675,6 +738,18 @@ Local reproduction:
 No PASS is claimed. A missing or cancelled lane is not treated as skipped success.
 ```
 
+### 11.4 Agent and reviewer evidence
+
+Agent and reviewer outputs use a separate strict schema bound to the requested task and
+bounded scope, read-only or mutation mode, inspected sources, commands, changes, schema
+version, exact result-byte digest, observed model and tool identity when available,
+confidence, risks, and claims requiring lead verification. Requested and observed model,
+effort, context, sandbox, and tool configuration are recorded separately; unknown remains
+unknown. Before use, the lead verifies the review tool's own tests and source digest,
+validates the worker result and mode, proves its process group ended, and independently
+reproduces every decisive source or test claim. Failed bootstrap, malformed output,
+progress-only output, stale lineage, or unverified tool state is inconclusive.
+
 ## 12. Cache, Dependency, and Workflow Dependency Policy
 
 Caches are performance inputs, never evidence or release artifacts. Cache identity binds
@@ -698,6 +773,52 @@ Concurrency cancels superseded pull-request runs but never merges a stale result
 current head. Deterministic foundational failures fail fast; independent security
 diagnostics continue when useful. Retry is limited to closed transient categories and
 always records the initial failure.
+
+### 12.1 Evidence-production kernel
+
+Authoritative execution is itself a security-critical control. Direct executable and
+argument arrays run in a controlled working directory with an allowlisted reconstructed
+environment, verified executable identity, pre-admission byte/count limits, and
+per-control timeouts. Authoritative shell adapters enable strict error handling, inspect
+every pipeline component, preserve the primary status across cleanup, and emit success
+only from an explicit terminal branch. Structural tests reject trailing unconditional
+success output, `|| true`, catch-and-pass, masked pipeline failures, surviving background
+children, and timeout cleanup reported as success.
+
+Every attempt carries the validated `preconditionReceipt` shown above. Failed or unproven
+preconditions are `INCONCLUSIVE`, never product `BLOCK` evidence. Related failures are
+grouped under the primary causal precondition or product finding with dependent symptoms,
+smallest repair, prohibited workarounds, focused replay, safe-neighbor proof, and
+full-regression requirement.
+
+Attempt lifecycle is `CREATED -> RUNNING -> FINALIZING -> TERMINAL`, with explicit
+`CANCELLED`, `TIMED_OUT`, and `CORRUPT` terminals. A unique attempt ID is never reused.
+Terminal receipts are written to a confined temporary file, hashed over exact emitted
+bytes, atomically renamed, appended to immutable attempt history, and accepted only after
+the owned process group is proven ended. Progress, partial logs, uploaded reports,
+mutable `latest` files, and process exit without a terminal receipt are inconclusive.
+
+Each phase acquires a lineage lease binding base, candidate, tested merge, remote-ref,
+manifest, policy, and toolchain identities plus creation time and invalidation rules. The
+invalidation matrix reruns only dependent results after upstream movement, but merge
+authorization always evaluates the final proposed merge object, release authorization
+always uses the accepted object, and push authorization revalidates every outgoing ref.
+
+Before worktree transitions, the executor inventories and later reconciles tracked,
+staged, unstaged, untracked, ignored, intent-to-add, generated,
+assume-unchanged/skip-worktree, submodule, symlink, file-type, executable-bit, and planned
+patch state. A successful stash or archive is not preservation evidence until every named
+patch path is proven present and unexpected paths are absent.
+
+Trust taint is irreversible within a job. Candidate code execution, untrusted cache
+restore, or untrusted artifact extraction prevents later receipt of write tokens, OIDC,
+signing, publication, private assurance, production network access, or trusted release
+caches. Artifacts and caches retain their producer trust class until independent
+digest-bound verification by an authorized producer promotes them.
+
+Capability state is a closed value: `absent`, `planned`, `report-only`, `advisory`,
+`canary`, `blocking`, `quarantined`, or `deprecated`. A weaker state never satisfies a
+stronger assurance claim, and an unsupported facade is not advertised as pass-capable.
 
 ## 13. Trusted Build and Artifact Identity
 
@@ -924,6 +1045,13 @@ Initial implementation establishes baselines rather than inventing thresholds. A
 review promotes measured budgets. Checks with high noise, duplicated coverage, poor
 actionability, excessive cost, or no owner are narrowed, moved, repaired, or retired
 through a reviewed manifest change. They are not silently skipped.
+
+Each remediation attempt links back to the original finding and records whether guidance
+produced closure, exposed a false positive or missing precondition, revealed a classifier
+miss or duplicate control, used an incomplete reproduction command, or caused a broader
+patch than necessary. Those causal outcomes feed reviewed updates to the taxonomy,
+classifier, canonical message catalog, test corpus, and control inventory. Message volume
+or agent consensus alone never promotes a change.
 
 ## 21. Migration and Rollback
 
