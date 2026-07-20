@@ -156,3 +156,49 @@ export function buildBaseChildEnv(opts?: BuildBaseChildEnvOptions): NodeJS.Proce
     }).filter(([, v]) => v !== undefined),
   ) as NodeJS.ProcessEnv;
 }
+
+/**
+ * Minimal non-secret environment for an OpenCode headless child. This is a
+ * separate positive allowlist: Claude-specific auth, privilege, connector,
+ * mutation, and tuning variables never enter the object.
+ */
+export function buildOpenCodeBaseChildEnv(opts?: BuildBaseChildEnvOptions): NodeJS.ProcessEnv {
+  const configRoots = childConfigRoots(opts);
+  const egressProxyPort =
+    typeof opts?.egressProxyPort === 'number' && opts.egressProxyPort > 0
+      ? opts.egressProxyPort
+      : undefined;
+  const egressProxyUrl =
+    egressProxyPort !== undefined ? `http://127.0.0.1:${egressProxyPort}` : undefined;
+
+  return Object.fromEntries(
+    Object.entries({
+      PATH: process.env.PATH,
+      HOME: configRoots?.home ?? process.env.HOME,
+      USER: process.env.USER,
+      SHELL: process.env.SHELL,
+      LANG: process.env.LANG,
+      TERM: process.env.TERM,
+      NODE_PATH: process.env.NODE_PATH,
+      XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
+      XDG_CONFIG_HOME: configRoots?.xdgConfig ?? process.env.XDG_CONFIG_HOME,
+      XDG_DATA_HOME: configRoots?.xdgData ?? process.env.XDG_DATA_HOME,
+      TMPDIR: process.env.TMPDIR,
+      WHATSOUP_INSTANCE: opts?.whatsoupInstance,
+      WHATSOUP_MCP_SOCKET: opts?.whatsoupMcpSocket,
+      // Egress proxy (#1607): threaded exactly as buildBaseChildEnv does so an
+      // opted-in instance's OpenCode children route outbound HTTP(S) through the
+      // allowlist proxy rather than escaping it. Both UPPER and lower case
+      // variants are set (F4): curl reads lowercase `http_proxy` for plain HTTP
+      // and ignores the uppercase form, so a `curl http://host` would otherwise
+      // bypass the proxy entirely. Only present when a positive port is supplied
+      // — undefined values are filtered out, preserving the unproxied default.
+      HTTP_PROXY: egressProxyUrl,
+      HTTPS_PROXY: egressProxyUrl,
+      NO_PROXY: egressProxyPort !== undefined ? 'localhost,127.0.0.1' : undefined,
+      http_proxy: egressProxyUrl,
+      https_proxy: egressProxyUrl,
+      no_proxy: egressProxyPort !== undefined ? 'localhost,127.0.0.1' : undefined,
+    }).filter(([, value]) => value !== undefined),
+  ) as NodeJS.ProcessEnv;
+}

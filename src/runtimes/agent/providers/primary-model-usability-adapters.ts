@@ -1,4 +1,5 @@
-import { buildChildEnv, getProviderBinary, opencodeUsesConfigModel } from '../session.ts';
+import { buildChildEnv, getProviderBinary } from '../session.ts';
+import { buildOpenCodeRunArgs } from './opencode-execution-profile.ts';
 import { classifyProviderFailure } from '../failure-taxonomy.ts';
 import {
   probeBinaryCommand,
@@ -119,14 +120,11 @@ function modelProbeCommand(
   providerConfig: Record<string, unknown> | undefined,
 ): string[] {
   if (provider === 'opencode-cli') {
-    return [
-      'run',
-      '--format',
-      'json',
-      '--pure',
-      ...(opencodeUsesConfigModel(providerConfig) || model === null ? [] : ['-m', model]),
-      OPENCODE_MODEL_PROBE_PROMPT,
-    ];
+    return buildOpenCodeRunArgs({
+      providerConfig,
+      model: model ?? undefined,
+      prompt: OPENCODE_MODEL_PROBE_PROMPT,
+    });
   }
   // No configured model => probe the CLI's own default (omit --model) instead of
   // never probing at all — a model-less instance must be able to recover.

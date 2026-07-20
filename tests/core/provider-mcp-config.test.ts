@@ -2,33 +2,22 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { join } from 'node:path';
 
 // ---------------------------------------------------------------------------
-// Hoisted mocks for `node:fs`. `writeProviderMcpConfig` calls
-// `lstatSync`/`existsSync`/`readFileSync` directly (for symlink detection and
-// pre-existing-config parsing), and it calls `writePrivateFileSync` from
-// `private-fs.ts` for the actual write — we mock that helper directly to keep
-// these tests off the real filesystem and to drive the ELOOP branches.
+// Hoisted mocks for `node:fs`. `writeProviderMcpConfig` descriptor-pins an
+// existing OpenCode config before parsing it, and calls `writePrivateFileSync`
+// for the actual write. Mock both boundaries to keep these tests hermetic.
 // ---------------------------------------------------------------------------
 const {
-  mockLstatSync,
-  mockExistsSync,
-  mockReadFileSync,
-  mockLogWarn,
+  mockOpenSync,
+  mockFstatSync,
+  mockReadSync,
+  mockCloseSync,
   mockWritePrivate,
 } = vi.hoisted(() => ({
-  mockLstatSync: vi.fn(),
-  mockExistsSync: vi.fn(),
-  mockReadFileSync: vi.fn(),
-  mockLogWarn: vi.fn(),
+  mockOpenSync: vi.fn(),
+  mockFstatSync: vi.fn(),
+  mockReadSync: vi.fn(),
+  mockCloseSync: vi.fn(),
   mockWritePrivate: vi.fn(),
-}));
-
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: mockLogWarn,
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
 }));
 
 vi.mock('../../src/lib/private-fs.ts', () => ({
@@ -39,22 +28,19 @@ vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {
     ...actual,
-    lstatSync: mockLstatSync,
-    existsSync: mockExistsSync,
-    readFileSync: mockReadFileSync,
+    openSync: mockOpenSync,
+    fstatSync: mockFstatSync,
+    readSync: mockReadSync,
+    closeSync: mockCloseSync,
   };
 });
 
 import {
-  buildManagedOpencodeAgentConfig,
   generateMcpConfigFile,
   mergeOpencodeConfig,
-  OPENCODE_REQUIRED_DENY,
-  WHATSOUP_OPENCODE_AGENT_ID,
   writeProviderMcpConfig,
   writeProviderMcpConfigTarget,
 } from '../../src/core/provider-mcp-config.ts';
-import { REQUIRED_DENY } from '../../src/core/settings-template.ts';
 
 const SOCKET = '/tmp/whatsoup-test.sock';
 const PROXY = '/opt/whatsoup/deploy/mcp/whatsoup-proxy.ts';
@@ -64,14 +50,38 @@ function generated(): Record<string, unknown> {
 }
 
 beforeEach(() => {
-  mockLstatSync.mockReset();
-  mockExistsSync.mockReset();
-  mockReadFileSync.mockReset();
-  mockLogWarn.mockReset();
+  mockOpenSync.mockReset();
+  mockFstatSync.mockReset();
+  mockReadSync.mockReset();
+  mockCloseSync.mockReset();
   mockWritePrivate.mockReset();
+  mockOpenSync.mockImplementation(() => {
+    throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+  });
   // Default: writePrivateFileSync succeeds (covers the happy path).
   mockWritePrivate.mockImplementation(() => undefined);
 });
+
+function mockExistingOpenCodeConfig(content: string): void {
+  const bytes = Buffer.from(content, 'utf8');
+  mockOpenSync.mockReturnValue(42);
+  mockFstatSync.mockReturnValue({
+    isFile: () => true,
+    size: bytes.length,
+  });
+  mockReadSync.mockImplementation((
+    _fd: number,
+    buffer: Buffer,
+    offset: number,
+    length: number,
+    position: number,
+  ) => {
+    if (position >= bytes.length) return 0;
+    const count = Math.min(length, bytes.length - position);
+    bytes.copy(buffer, offset, position, position + count);
+    return count;
+  });
+}
 
 // ---------------------------------------------------------------------------
 // writeProviderMcpConfigTarget — pure dispatcher; must point at the right
@@ -163,73 +173,52 @@ describe('generateMcpConfigFile', () => {
 // path on the unset branch.
 // ---------------------------------------------------------------------------
 describe('mergeOpencodeConfig', () => {
-  it('seeds mcp.whatsoup and the reserved WhatSoup headless agent when existing is null', () => {
+  it('seeds only mcp.whatsoup and never synthesizes an inline agent policy', () => {
     const merged = mergeOpencodeConfig(null, generated());
-    expect(Object.keys(merged)).toEqual(['mcp', 'agent']);
+    expect(Object.keys(merged)).toEqual(['mcp']);
     expect(merged.mcp).toHaveProperty('whatsoup');
-
-    const agents = merged.agent as Record<string, Record<string, unknown>>;
-    expect(WHATSOUP_OPENCODE_AGENT_ID).toBe('whatsoup-headless');
-    expect(Object.keys(agents)).toEqual([WHATSOUP_OPENCODE_AGENT_ID]);
-    expect(agents[WHATSOUP_OPENCODE_AGENT_ID]).toEqual(buildManagedOpencodeAgentConfig());
-    expect(agents[WHATSOUP_OPENCODE_AGENT_ID]).toMatchObject({ mode: 'primary' });
-    expect(agents[WHATSOUP_OPENCODE_AGENT_ID].permission).toMatchObject({
-      '*': 'allow',
-      question: 'deny',
-      plan_enter: 'deny',
-      plan_exit: 'deny',
-      external_directory: 'deny',
-      doom_loop: 'allow',
-      read: {
-        '*': 'allow',
-        '*.env': 'deny',
-        '*.env.*': 'deny',
-        '*.env.example': 'allow',
-      },
-    });
+    expect(merged).not.toHaveProperty('agent');
   });
 
-  it('translates the Claude mutation deny floor into collision-free OpenCode tool names', () => {
-    const merged = mergeOpencodeConfig(null, generated());
-    const agents = merged.agent as Record<string, Record<string, unknown>>;
-    const permission = agents['whatsoup-headless'].permission as Record<string, unknown>;
-
-    expect(OPENCODE_REQUIRED_DENY).toHaveLength(REQUIRED_DENY.length);
-    expect(new Set(OPENCODE_REQUIRED_DENY).size).toBe(REQUIRED_DENY.length);
-    expect(OPENCODE_REQUIRED_DENY[0]).toBe('claude_ai_Gmail_create_draft');
-    expect(OPENCODE_REQUIRED_DENY).toContain(
-      'plugin_microsoft_365_microsoft_365_send-mail',
-    );
-    expect(OPENCODE_REQUIRED_DENY.every((entry) => !entry.startsWith('mcp_'))).toBe(true);
-    for (const toolName of OPENCODE_REQUIRED_DENY) expect(permission[toolName]).toBe('deny');
-  });
-
-  it('preserves user agents and global permissions while replacing only the reserved agent', () => {
+  it('preserves sibling agents and global permissions while removing the reserved inline profile', () => {
     const userAgent = {
       description: 'user-owned',
       mode: 'subagent',
       permission: { '*': 'ask' },
+    };
+    const fleetAgent = {
+      description: 'fleet-owned',
+      mode: 'primary',
+      permission: { edit: 'deny', bash: 'allow' },
     };
     const globalPermission = { '*': 'deny', read: 'allow' };
     const merged = mergeOpencodeConfig({
       permission: globalPermission,
       agent: {
         personal: userAgent,
-        'whatsoup-headless': { description: 'stale managed config', permission: { '*': 'deny' } },
+        'whatsoup-headless': fleetAgent,
       },
     }, generated());
 
     expect(merged.permission).toEqual(globalPermission);
     const agents = merged.agent as Record<string, Record<string, unknown>>;
     expect(agents.personal).toEqual(userAgent);
-    expect(agents['whatsoup-headless']).not.toHaveProperty('description', 'stale managed config');
-    expect(agents['whatsoup-headless']).toMatchObject({ mode: 'primary' });
+    expect(agents).not.toHaveProperty('whatsoup-headless');
   });
 
-  it.each(['broken', [], null])('treats corrupt agent value %j as empty', (agent) => {
+  it('removes an empty agent map after migrating the reserved inline profile', () => {
+    const merged = mergeOpencodeConfig({
+      agent: {
+        'whatsoup-headless': { mode: 'primary' },
+      },
+    }, generated());
+
+    expect(merged).not.toHaveProperty('agent');
+  });
+
+  it.each(['broken', [], null])('preserves unrelated agent value %j without normalizing it', (agent) => {
     const merged = mergeOpencodeConfig({ agent: agent as never }, generated());
-    const agents = merged.agent as Record<string, Record<string, unknown>>;
-    expect(Object.keys(agents)).toEqual(['whatsoup-headless']);
+    expect(merged.agent).toEqual(agent);
   });
 
   it('tolerates a generated object without an mcp key (?? {} fallback)', () => {
@@ -406,10 +395,9 @@ describe('mergeOpencodeConfig', () => {
 
 // ---------------------------------------------------------------------------
 // writeProviderMcpConfig — IO boundary. We mock the private-fs writer and
-// `node:fs` so we can drive every code path including ELOOP symlink skips,
-// corrupt pre-existing JSON, and the ELOOP-after-write branch. The tests
-// assert against the return value (target path or null), the args passed to
-// `writePrivateFileSync`, and the logger warn side effects.
+// `node:fs` so we can drive every code path including descriptor type checks,
+// corrupt pre-existing JSON, and write failures. The tests assert against the
+// return value (target path or null) and the args passed to the private writer.
 // ---------------------------------------------------------------------------
 describe('writeProviderMcpConfig', () => {
   it('returns null for native-bridge providers (openai-api, anthropic-api)', () => {
@@ -444,23 +432,16 @@ describe('writeProviderMcpConfig', () => {
   });
 
   it('writes the mcp shape to opencode.json for opencode-cli (no existing file)', () => {
-    mockLstatSync.mockImplementation(() => {
-      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
-    });
-    mockExistsSync.mockReturnValue(false);
     const target = writeProviderMcpConfig('opencode-cli', '/agent', SOCKET, PROXY);
     expect(target).toBe(join('/agent', 'opencode.json'));
     const parsed = JSON.parse(mockWritePrivate.mock.calls[0][1]);
-    expect(Object.keys(parsed)).toEqual(['mcp', 'agent']);
+    expect(Object.keys(parsed)).toEqual(['mcp']);
     expect(parsed.mcp.whatsoup.environment).toEqual({ WHATSOUP_SOCKET: SOCKET });
-    expect(parsed.agent['whatsoup-headless']).toMatchObject({ mode: 'primary' });
-    expect(mockLogWarn).not.toHaveBeenCalled();
+    expect(parsed).not.toHaveProperty('agent');
   });
 
   it('merges into a pre-existing opencode.json when one is found', () => {
-    mockLstatSync.mockReturnValue({ isSymbolicLink: () => false });
-    mockExistsSync.mockReturnValue(true);
-    mockReadFileSync.mockReturnValue(JSON.stringify({ model: 'keep/me', mcp: { keep: { type: 'local', command: ['k'] } } }));
+    mockExistingOpenCodeConfig(JSON.stringify({ model: 'keep/me', mcp: { keep: { type: 'local', command: ['k'] } } }));
     const target = writeProviderMcpConfig('opencode-cli', '/agent', SOCKET, PROXY);
     expect(target).toBe(join('/agent', 'opencode.json'));
     const parsed = JSON.parse(mockWritePrivate.mock.calls[0][1]);
@@ -469,107 +450,102 @@ describe('writeProviderMcpConfig', () => {
     expect((parsed.mcp as Record<string, Record<string, unknown>>).whatsoup.environment).toEqual({ WHATSOUP_SOCKET: SOCKET });
   });
 
-  it('falls back to a fresh base when the pre-existing opencode.json is corrupt JSON', () => {
-    mockLstatSync.mockReturnValue({ isSymbolicLink: () => false });
-    mockExistsSync.mockReturnValue(true);
-    mockReadFileSync.mockReturnValue('{ this is not valid json');
-    const target = writeProviderMcpConfig('opencode-cli', '/agent', SOCKET, PROXY);
-    expect(target).toBe(join('/agent', 'opencode.json'));
-    const parsed = JSON.parse(mockWritePrivate.mock.calls[0][1]);
-    expect(parsed.mcp).toHaveProperty('whatsoup');
-    expect(mockLogWarn).toHaveBeenCalledWith(
-      expect.objectContaining({ target: join('/agent', 'opencode.json') }),
-      'failed to parse existing opencode.json before MCP config write; overwriting managed entries',
-    );
-  });
-
-  it('falls back to a fresh base when the pre-existing opencode.json is a non-object value', () => {
-    mockLstatSync.mockReturnValue({ isSymbolicLink: () => false });
-    mockExistsSync.mockReturnValue(true);
-    mockReadFileSync.mockReturnValue('"a string"');
-    const target = writeProviderMcpConfig('opencode-cli', '/agent', SOCKET, PROXY);
-    expect(target).toBe(join('/agent', 'opencode.json'));
-    const parsed = JSON.parse(mockWritePrivate.mock.calls[0][1]);
-    expect(parsed.mcp).toHaveProperty('whatsoup');
-  });
-
-  it('falls back to a fresh base when the pre-existing opencode.json is an array', () => {
-    mockLstatSync.mockReturnValue({ isSymbolicLink: () => false });
-    mockExistsSync.mockReturnValue(true);
-    mockReadFileSync.mockReturnValue('[1,2,3]');
-    const target = writeProviderMcpConfig('opencode-cli', '/agent', SOCKET, PROXY);
-    expect(target).toBe(join('/agent', 'opencode.json'));
-    const parsed = JSON.parse(mockWritePrivate.mock.calls[0][1]);
-    expect(parsed.mcp).toHaveProperty('whatsoup');
-  });
-
-  it('skips the write and returns null when opencode.json is a symlink (lstat path)', () => {
-    mockLstatSync.mockReturnValue({ isSymbolicLink: () => true });
-    const target = writeProviderMcpConfig('opencode-cli', '/agent', SOCKET, PROXY);
-    expect(target).toBeNull();
-    expect(mockWritePrivate).not.toHaveBeenCalled();
-    expect(mockLogWarn).toHaveBeenCalledWith(
-      expect.objectContaining({ target: join('/agent', 'opencode.json') }),
-      'skipping opencode MCP config write because opencode.json is a symlink',
-    );
-  });
-
-  it('skips the write and returns null when lstat fails with ELOOP', () => {
-    mockLstatSync.mockImplementation(() => {
-      throw Object.assign(new Error('too many symlinks'), { code: 'ELOOP' });
-    });
-    const target = writeProviderMcpConfig('opencode-cli', '/agent', SOCKET, PROXY);
-    expect(target).toBeNull();
-    expect(mockWritePrivate).not.toHaveBeenCalled();
-    expect(mockLogWarn).toHaveBeenCalledWith(
-      expect.objectContaining({ target: join('/agent', 'opencode.json') }),
-      'skipping opencode MCP config write after file stat failed',
-    );
-  });
-
-  it('rethrows when lstat fails with a non-ENOENT, non-ELOOP errno', () => {
-    mockLstatSync.mockImplementation(() => {
-      throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
-    });
+  it('fails closed without overwriting when the pre-existing opencode.json is corrupt JSON', () => {
+    mockExistingOpenCodeConfig('{ this is not valid json');
     expect(() => writeProviderMcpConfig('opencode-cli', '/agent', SOCKET, PROXY))
-      .toThrow(/permission denied/);
+      .toThrow('Existing OpenCode configuration must be a valid JSON object');
+    expect(mockWritePrivate).not.toHaveBeenCalled();
   });
 
-  it('skips the write and returns null when writePrivateFileSync throws ELOOP', () => {
-    mockLstatSync.mockReturnValue({ isSymbolicLink: () => false });
-    mockExistsSync.mockReturnValue(false);
+  it('fails closed without overwriting when the pre-existing opencode.json is a non-object value', () => {
+    mockExistingOpenCodeConfig('"a string"');
+    expect(() => writeProviderMcpConfig('opencode-cli', '/agent', SOCKET, PROXY))
+      .toThrow('Existing OpenCode configuration must be a valid JSON object');
+    expect(mockWritePrivate).not.toHaveBeenCalled();
+  });
+
+  it('fails closed without overwriting when the pre-existing opencode.json is an array', () => {
+    mockExistingOpenCodeConfig('[1,2,3]');
+    expect(() => writeProviderMcpConfig('opencode-cli', '/agent', SOCKET, PROXY))
+      .toThrow('Existing OpenCode configuration must be a valid JSON object');
+    expect(mockWritePrivate).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the descriptor open reports a symlink', () => {
+    mockOpenSync.mockImplementation(() => {
+      throw Object.assign(new Error('path detail must not escape'), { code: 'ELOOP' });
+    });
+    let thrown: NodeJS.ErrnoException | undefined;
+    try {
+      writeProviderMcpConfig('opencode-cli', '/agent', SOCKET, PROXY);
+    } catch (err) {
+      thrown = err as NodeJS.ErrnoException;
+    }
+
+    expect(thrown?.message).toBe('OpenCode configuration must be a regular non-symlink file');
+    expect(thrown?.message).not.toContain('/agent');
+    expect(thrown?.code).toBe('ELOOP');
+    expect(mockWritePrivate).not.toHaveBeenCalled();
+  });
+
+  it('fails closed on a non-regular descriptor without attempting a read or write', () => {
+    mockOpenSync.mockReturnValue(42);
+    mockFstatSync.mockReturnValue({ isFile: () => false, size: 0 });
+    expect(() => writeProviderMcpConfig('opencode-cli', '/agent', SOCKET, PROXY))
+      .toThrow('OpenCode configuration must be a regular non-symlink file');
+    expect(mockReadSync).not.toHaveBeenCalled();
+    expect(mockWritePrivate).not.toHaveBeenCalled();
+    expect(mockCloseSync).toHaveBeenCalledWith(42);
+  });
+
+  it('normalizes descriptor read failures without leaking paths or parser content', () => {
+    mockExistingOpenCodeConfig('{"safe":true}');
+    mockReadSync.mockImplementation(() => {
+      throw Object.assign(new Error("EACCES: '/private/fixture/opencode.json' marker-value"), { code: 'EACCES' });
+    });
+    let thrown: NodeJS.ErrnoException | undefined;
+    try {
+      writeProviderMcpConfig('opencode-cli', '/agent', SOCKET, PROXY);
+    } catch (err) {
+      thrown = err as NodeJS.ErrnoException;
+    }
+    expect(thrown?.message).toBe('Unable to safely read existing OpenCode configuration');
+    expect(thrown?.message).not.toContain('/private/fixture');
+    expect(thrown?.message).not.toContain('marker-value');
+    expect(thrown?.code).toBe('EACCES');
+    expect(mockWritePrivate).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when writePrivateFileSync throws ELOOP', () => {
     mockWritePrivate.mockImplementation(() => {
       throw Object.assign(new Error('ELOOP after write'), { code: 'ELOOP' });
     });
-    const target = writeProviderMcpConfig('opencode-cli', '/agent', SOCKET, PROXY);
-    expect(target).toBeNull();
-    expect(mockLogWarn).toHaveBeenCalledWith(
-      expect.objectContaining({ target: join('/agent', 'opencode.json') }),
-      'skipping opencode MCP config write because opencode.json is a symlink',
-    );
+    expect(() => writeProviderMcpConfig('opencode-cli', '/agent', SOCKET, PROXY))
+      .toThrow(/OpenCode configuration.*non-symlink/i);
   });
 
-  it('rethrows non-ELOOP errors from writePrivateFileSync', () => {
-    mockLstatSync.mockReturnValue({ isSymbolicLink: () => false });
-    mockExistsSync.mockReturnValue(false);
+  it('normalizes non-ELOOP write errors without leaking paths', () => {
     mockWritePrivate.mockImplementation(() => {
-      throw Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+      throw Object.assign(new Error("ENOSPC: '/private/fixture/opencode.json'"), { code: 'ENOSPC' });
     });
-    expect(() => writeProviderMcpConfig('opencode-cli', '/agent', SOCKET, PROXY))
-      .toThrow(/disk full/);
+    let thrown: NodeJS.ErrnoException | undefined;
+    try {
+      writeProviderMcpConfig('opencode-cli', '/agent', SOCKET, PROXY);
+    } catch (err) {
+      thrown = err as NodeJS.ErrnoException;
+    }
+    expect(thrown?.message).toBe('Unable to safely write OpenCode configuration');
+    expect(thrown?.message).not.toContain('/private/fixture');
+    expect(thrown?.code).toBe('ENOSPC');
   });
 
   it('writes a provider block to opencode.json when providerConfig.baseUrl is set', () => {
-    mockLstatSync.mockImplementation(() => {
-      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
-    });
-    mockExistsSync.mockReturnValue(false);
     writeProviderMcpConfig('opencode-cli', '/agent', SOCKET, PROXY, {
       baseUrl: 'https://api.example.com/v1',
       model: 'm',
     });
     const parsed = JSON.parse(mockWritePrivate.mock.calls[0][1]);
-    expect(Object.keys(parsed)).toEqual(['mcp', 'agent', 'provider', 'model']);
+    expect(Object.keys(parsed)).toEqual(['mcp', 'provider', 'model']);
     expect(parsed.model).toBe('whatsoup-cloud/m');
     const provider = parsed.provider as Record<string, Record<string, Record<string, unknown>>>;
     expect(provider['whatsoup-cloud'].options.baseURL).toBe('https://api.example.com/v1');
