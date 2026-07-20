@@ -4,15 +4,15 @@
 
 Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`, `docs/superpowers/`, `docs/plans/`, `docs/cutover/`, `docs/research/`, `docs/specs/` (selected), `docs/work-index*`, `docs/current-program.md`, `docs/handoff-*.md`, `HANDOFF-*.md`, `docs/project-status-*.md`, `docs/audit-*.md`, `tmp/`.
 
-**Total classification rows:** 119
+**Total classification rows:** 123
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 0 |
-| PRIVATE-ARCHIVE | 119 |
+| PRIVATE-ARCHIVE | 123 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 119 |
+| Total | 123 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -94,6 +94,8 @@ Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`,
 | `docs/superpowers/plans/2026-07-09-outbound-governor-and-flood-observability.md` | PRIVATE-ARCHIVE | Internal audit remediation plan; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-07-09-privacy-erasure-and-media-confinement.md` | PRIVATE-ARCHIVE | Internal audit remediation plan; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-07-11-central-hub-release-proof-pilot.md` | PRIVATE-ARCHIVE | Internal release-proof pilot implementation plan; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-07-12-microsoft365-capability-admission-integrity.md` | PRIVATE-ARCHIVE | Internal security-sensitive capability implementation plan; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-07-12-root-owned-composite-personal-release.md` | PRIVATE-ARCHIVE | Internal security-sensitive release implementation plan; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-07-15-semantic-boundary-foundation.md` | PRIVATE-ARCHIVE | Internal semantic-boundary foundation implementation plan; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-07-16-boundary-contract-feedback-hardening.md` | PRIVATE-ARCHIVE | Internal fail-closed boundary-contract, evidence-receipt, feedback-bounding, and provider-deadline implementation plan; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-07-16-boundary-core-history-provenance.md` | PRIVATE-ARCHIVE | Internal boundary-core fingerprint, history, disposition, provenance, and receipt implementation plan; retained in the repository but excluded from public publication by default. |
@@ -119,6 +121,8 @@ Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`,
 | `docs/superpowers/specs/2026-07-09-wall-to-wall-audit-remediation-design.md` | PRIVATE-ARCHIVE | Internal audit remediation design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-11-central-hub-release-proof-pilot-design.md` | PRIVATE-ARCHIVE | Internal release-proof pilot design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | PRIVATE-ARCHIVE | Internal behavior-preserving fitness remediation design; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/2026-07-12-microsoft365-capability-admission-integrity-design.md` | PRIVATE-ARCHIVE | Internal security-sensitive capability design; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/2026-07-12-root-owned-composite-personal-release-design.md` | PRIVATE-ARCHIVE | Internal security-sensitive release design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-15-semantic-boundary-hygiene-design.md` | PRIVATE-ARCHIVE | Internal semantic quality and boundary-enforcement design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-17-boundary-exit-parser-codeql-hardening-design.md` | PRIVATE-ARCHIVE | Internal security remediation design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-17-boundary-validator-ci-refactor-design.md` | PRIVATE-ARCHIVE | Internal behavior-preserving CI and fitness remediation design; retained in the repository but excluded from public publication by default. |
