@@ -6,6 +6,7 @@ import {
   modelModifierTags,
   formatAvailableModels,
   isStructuralCatalogueAbsence,
+  resolveModelSelector,
   MODEL_CATALOGUE_CAP,
   type AvailableModelsListing,
 } from '../../../src/runtimes/agent/owner-render-format.ts';
@@ -351,5 +352,35 @@ describe('isStructuralCatalogueAbsence', () => {
     for (const listing of transient) {
       expect(isStructuralCatalogueAbsence(listing)).toBe(false);
     }
+  });
+});
+
+// Q 2026-07-20: the ONE shared selector resolver — a numeric pick indexes into
+// the STABLE ordering (catalogue order; current is annotated in place, never a
+// reorder, so the number doesn't move under the write); an exact id is fail-open
+// with a shape gate (obvious typo bounces, a shape-valid id is accepted even if
+// the catalogue can't confirm it). Called by both /model <N> and /config model <N>.
+describe('resolveModelSelector', () => {
+  const ids = ['claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5-20251001'];
+
+  it('resolves a numeric selector 1-based against the stable ordering', () => {
+    expect(resolveModelSelector('1', ids)).toStrictEqual({ ok: true, id: 'claude-opus-4-8', viaSelector: true });
+    expect(resolveModelSelector('2', ids)).toStrictEqual({ ok: true, id: 'claude-sonnet-5', viaSelector: true });
+    expect(resolveModelSelector('  3  ', ids)).toStrictEqual({ ok: true, id: 'claude-haiku-4-5-20251001', viaSelector: true });
+  });
+
+  it('rejects an out-of-range number with the count (structured, never a silent mis-pick)', () => {
+    expect(resolveModelSelector('4', ids)).toStrictEqual({ ok: false, error: 'out-of-range', count: 3 });
+    expect(resolveModelSelector('0', ids)).toStrictEqual({ ok: false, error: 'out-of-range', count: 3 });
+  });
+
+  it('accepts a shape-valid exact id (fail-open) even when not in the ordered list', () => {
+    expect(resolveModelSelector('minimax/MiniMax-M2', ids)).toStrictEqual({ ok: true, id: 'minimax/MiniMax-M2', viaSelector: false });
+    expect(resolveModelSelector('claude-opus-4-8', ids)).toStrictEqual({ ok: true, id: 'claude-opus-4-8', viaSelector: false });
+  });
+
+  it('bounces an obvious typo (whitespace) or empty input as invalid-shape', () => {
+    expect(resolveModelSelector('opus 4 8', ids)).toStrictEqual({ ok: false, error: 'invalid-shape' });
+    expect(resolveModelSelector('   ', ids)).toStrictEqual({ ok: false, error: 'invalid-shape' });
   });
 });

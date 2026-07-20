@@ -144,6 +144,44 @@ export function isStructuralCatalogueAbsence(listing: AvailableModelsListing): b
   );
 }
 
+/** Outcome of resolving a user model-selection token (Q 2026-07-20). */
+export type ModelSelectorResult =
+  | { ok: true; id: string; viaSelector: boolean }
+  | { ok: false; error: 'out-of-range'; count: number }
+  | { ok: false; error: 'invalid-shape' };
+
+/**
+ * The ONE shared resolver for a human model pick (owner directive 3 + Q DRY):
+ * called by BOTH `/model <N>` and `/config model <N>` so numbers mean the same
+ * thing wherever a numbered list is rendered — a second call site inventing its
+ * own indexing is the drift this centralization prevents.
+ *
+ * A purely-numeric token is a 1-based SELECTOR into `orderedIds` — the SAME
+ * stable ordering the render numbered (catalogue order; current is annotated in
+ * place, never reordered, so the coordinate does not move under the write, Q's
+ * "write mutates its own coordinate system" catch). Out of range → structured
+ * `out-of-range` with the count, never a silent mis-pick.
+ *
+ * Any other token is an exact id, accepted FAIL-OPEN behind a shape gate (Q R2):
+ * an obvious typo (whitespace / empty) bounces as `invalid-shape`, but a
+ * shape-valid id is accepted even when the catalogue cannot confirm it — the
+ * write path tags such a pin `unverified`. Pure and total; never throws.
+ */
+export function resolveModelSelector(input: string, orderedIds: readonly string[]): ModelSelectorResult {
+  const trimmed = input.trim();
+  if (/^\d+$/.test(trimmed)) {
+    const n = Number(trimmed);
+    if (n >= 1 && n <= orderedIds.length) {
+      return { ok: true, id: orderedIds[n - 1]!, viaSelector: true };
+    }
+    return { ok: false, error: 'out-of-range', count: orderedIds.length };
+  }
+  if (trimmed.length > 0 && !/\s/.test(trimmed)) {
+    return { ok: true, id: trimmed, viaSelector: false };
+  }
+  return { ok: false, error: 'invalid-shape' };
+}
+
 /** Input for {@link formatAvailableModels}. All values are config- or
  *  catalogue-derived and sanitize-safe; this layer only shapes strings. */
 export interface AvailableModelsInput {
