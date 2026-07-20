@@ -110,7 +110,7 @@ describe('owner-render-format', () => {
 describe('formatAvailableModels', () => {
   const base = { harnessLabel: 'opencode-cli', currentModelId: null, fallbackModelIds: [], filter: null, cap: 12 } as const;
 
-  it('ok: names harness + source provenance line, ranks current→fallbacks→rest, marks current, no truncation when M ≤ cap', () => {
+  it('ok: numbers by STABLE catalogue order (no rerank), marks current IN PLACE, no truncation when M ≤ cap', () => {
     const out = formatAvailableModels({
       ...base,
       currentModelId: 'minimax/MiniMax-M2',
@@ -122,32 +122,37 @@ describe('formatAvailableModels', () => {
         asOfLabel: 'just now',
       },
     });
+    // current is index 3 and stays there (annotated), NOT hoisted to the top —
+    // ranking would move the coordinate the write is addressed in (Q 2026-07-20).
     expect(out).toBe(
       `*Available models* — harness: opencode-cli\n` +
         `_source: opencode CLI, as of just now_\n` +
-        `${OWNER_BULLET}minimax/MiniMax-M2 [current]\n` +
-        `${OWNER_BULLET}deepseek/deepseek-chat\n` +
-        `${OWNER_BULLET}openai/gpt-5.4`,
+        `1. openai/gpt-5.4\n` +
+        `2. deepseek/deepseek-chat\n` +
+        `3. minimax/MiniMax-M2 (current)`,
     );
   });
 
-  it('ok: caps the head and appends "showing N of M" when a preference ranks it and M > cap', () => {
+  it('ok: caps the browse window, DISCLOSES it, and surfaces current OUT-OF-BAND at its true index when beyond the cap', () => {
     const ids = Array.from({ length: 20 }, (_, i) => `m/model-${i}`);
     const out = formatAvailableModels({
       ...base,
-      currentModelId: 'm/model-5',
+      currentModelId: 'm/model-5', // true index 6, beyond cap 3
       cap: 3,
       listing: { status: 'ok', ids, sourceLabel: 'opencode CLI', asOfLabel: 'just now' },
     });
-    const lines = out.split('\n');
-    expect(lines[0]).toBe('*Available models* — harness: opencode-cli');
-    expect(lines[1]).toBe('_source: opencode CLI, as of just now_');
-    expect(lines[2]).toBe(`${OWNER_BULLET}m/model-5 [current]`);
-    expect(lines).toHaveLength(2 + 3 + 1); // header + source + cap bullets + truncation
-    expect(lines[lines.length - 1]).toBe('showing 3 of 20');
+    expect(out).toBe(
+      `*Available models* — harness: opencode-cli\n` +
+        `_source: opencode CLI, as of just now_\n` +
+        `1. m/model-0\n` +
+        `2. m/model-1\n` +
+        `3. m/model-2\n` +
+        `6. m/model-5 (current)\n` +
+        `showing 1–3 of 20 — any number 1–20 works; /model list <text> to narrow`,
+    );
   });
 
-  it('ok: says the head is catalogue order (not "the top") when nothing ranks it and M > cap', () => {
+  it('ok: window disclosure is value-independent (same when nothing is current)', () => {
     const ids = Array.from({ length: 20 }, (_, i) => `m/model-${i}`);
     const out = formatAvailableModels({
       ...base,
@@ -155,11 +160,13 @@ describe('formatAvailableModels', () => {
       listing: { status: 'ok', ids, sourceLabel: 'opencode CLI', asOfLabel: 'just now' },
     });
     expect(out.split('\n').pop()).toBe(
-      'showing first 3 of 20 (catalogue order — no configured preference to rank by)',
+      'showing 1–3 of 20 — any number 1–20 works; /model list <text> to narrow',
     );
+    // no current → no out-of-band line: header + source + 3 + disclosure
+    expect(out.split('\n')).toHaveLength(2 + 3 + 1);
   });
 
-  it('ok: filter matches a subset — header notes the filter, ranks within the matched set', () => {
+  it('ok: filter keeps TRUE stable indices (non-contiguous), never renumbers the subset 1..k', () => {
     const out = formatAvailableModels({
       ...base,
       filter: 'minimax',
@@ -170,11 +177,13 @@ describe('formatAvailableModels', () => {
         asOfLabel: 'just now',
       },
     });
+    // matches are catalogue indices 1 and 3 — index 2 (deepseek) filtered out, so
+    // the rendered numbers are 1 and 3, NOT 1 and 2 (Q: one number space, one meaning).
     expect(out).toBe(
       `*Available models* matching 'minimax' — harness: opencode-cli\n` +
         `_source: opencode CLI, as of just now_\n` +
-        `${OWNER_BULLET}minimax/MiniMax-M2\n` +
-        `${OWNER_BULLET}minimax/MiniMax-Text-01`,
+        `1. minimax/MiniMax-M2\n` +
+        `3. minimax/MiniMax-Text-01`,
     );
   });
 
@@ -185,7 +194,7 @@ describe('formatAvailableModels', () => {
       listing: { status: 'ok', ids: ['a', 'b', 'c'], sourceLabel: 'opencode CLI', asOfLabel: 'just now' },
     });
     expect(out).toBe(
-      `*Available models:* no match for 'zzz' in 3 models (harness: opencode-cli, source: opencode CLI, as of just now)`,
+      `*Available models:* no models match 'zzz' (3 in catalogue) (harness: opencode-cli, source: opencode CLI, as of just now)`,
     );
   });
 
@@ -295,18 +304,20 @@ describe('formatAvailableModels', () => {
     expect(out.split('\n')).toHaveLength(2 + 3); // header + source + 3 bullets, no truncation
   });
 
-  it('ok: dedups a current model that also appears in the catalogue body (listed once, first)', () => {
+  it('ok: current is annotated in place at its true index and listed exactly once (no hoist, no dedup)', () => {
     const out = formatAvailableModels({
       ...base,
       currentModelId: 'x',
       listing: { status: 'ok', ids: ['a', 'x', 'b'], sourceLabel: 'opencode CLI', asOfLabel: 'just now' },
     });
+    // Stable order: x stays at index 2 (annotated), never hoisted to the top —
+    // so it appears exactly once with no dedup step needed.
     expect(out).toBe(
       `*Available models* — harness: opencode-cli\n` +
         `_source: opencode CLI, as of just now_\n` +
-        `${OWNER_BULLET}x [current]\n` +
-        `${OWNER_BULLET}a\n` +
-        `${OWNER_BULLET}b`,
+        `1. a\n` +
+        `2. x (current)\n` +
+        `3. b`,
     );
   });
 

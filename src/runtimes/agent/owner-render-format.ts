@@ -244,7 +244,7 @@ function unavailableMessage(reason: UnavailableReason): string {
  * Pure and stateless. Never throws. Caching + time-budget live in the resolver.
  */
 export function formatAvailableModels(input: AvailableModelsInput): string {
-  const { harnessLabel, currentModelId, fallbackModelIds, listing, filter, cap } = input;
+  const { harnessLabel, currentModelId, listing, filter, cap } = input;
 
   // Unavailable → actionable, reason-specific line. The pin is the caller's
   // config-derived block above, so this degrades independently.
@@ -254,58 +254,56 @@ export function formatAvailableModels(input: AvailableModelsInput): string {
 
   const { ids, sourceLabel, asOfLabel } = listing;
 
-  // Optional case-insensitive substring filter over the full catalogue.
-  let pool: readonly string[] = ids;
+  // Each entry keeps its TRUE 1-based index in the STABLE catalogue order — the
+  // single, value-independent coordinate system (Q 2026-07-20). No reranking: a
+  // ranked order would move a number under the write that selects by it. The
+  // number is what resolveModelSelector indexes, so render and selection agree.
+  const entries = ids.map((id, i) => ({ id, n: i + 1 }));
+
+  // Optional case-insensitive substring filter. The matched subset KEEPS its true
+  // indices (non-contiguous) — it is never renumbered 1..k, or `2` would mean a
+  // different model on a filtered screen than on the unfiltered one (Q).
+  let pool = entries;
   if (filter !== null) {
     const needle = filter.toLowerCase();
-    const matched = ids.filter((id) => id.toLowerCase().includes(needle));
-    if (matched.length === 0) {
+    pool = entries.filter((e) => e.id.toLowerCase().includes(needle));
+    if (pool.length === 0) {
       // Filter-miss is NOT catalogue-unavailable — count the full catalogue that
       // was searched, and keep the provenance so the two states never collapse.
-      return `*Available models:* no match for '${filter}' in ${ids.length} models (harness: ${harnessLabel}, source: ${sourceLabel}, as of ${asOfLabel})`;
-    }
-    pool = matched;
-  }
-
-  // Rank current → fallbacks → rest (catalogue order), deduped. A pin/fallback
-  // in the pool is the "meaningful rank" signal.
-  const seen = new Set<string>();
-  const ranked: string[] = [];
-  const push = (id: string): void => {
-    if (!seen.has(id)) {
-      seen.add(id);
-      ranked.push(id);
-    }
-  };
-  const currentInPool = currentModelId !== null && pool.includes(currentModelId);
-  if (currentInPool && currentModelId !== null) push(currentModelId);
-  let fallbackInPool = false;
-  for (const fb of fallbackModelIds) {
-    if (pool.includes(fb)) {
-      fallbackInPool = true;
-      push(fb);
+      return `*Available models:* no models match '${filter}' (${ids.length} in catalogue) (harness: ${harnessLabel}, source: ${sourceLabel}, as of ${asOfLabel})`;
     }
   }
-  for (const id of pool) push(id);
 
-  const total = ranked.length;
-  const shown = ranked.slice(0, cap);
   const header =
     filter !== null
       ? `*Available models* matching '${filter}' — harness: ${harnessLabel}`
       : `*Available models* — harness: ${harnessLabel}`;
   const sourceLine = `_source: ${sourceLabel}, as of ${asOfLabel}_`;
-  const bullets = shown.map(
-    (id) => `${OWNER_BULLET}${id}${id === currentModelId ? modifierSuffix(['current']) : ''}`,
-  );
+  const renderLine = (e: { id: string; n: number }): string =>
+    `${e.n}. ${e.id}${e.id === currentModelId ? ' (current)' : ''}`;
 
-  const lines = [header, sourceLine, ...bullets];
-  if (total > cap) {
+  const shown = pool.slice(0, cap);
+  const lines = [header, sourceLine, ...shown.map(renderLine)];
+
+  // Surface the current model OUT-OF-BAND at its TRUE index when it is in scope
+  // (matches the active filter / no filter) but sits beyond the browse window —
+  // the window stays a fixed property instead of sliding to include current,
+  // which would be the coordinate-mutates-on-write bug one layer up (Q 02:20).
+  if (currentModelId !== null) {
+    const currentInPool = pool.find((e) => e.id === currentModelId);
+    const currentShown = shown.some((e) => e.id === currentModelId);
+    if (currentInPool && !currentShown) lines.push(renderLine(currentInPool));
+  }
+
+  // Disclose the window so the hidden-but-valid number space is not a guessing
+  // game (Q 02:20): under no filter the whole 1..M space is pickable.
+  if (pool.length > cap) {
     lines.push(
-      currentInPool || fallbackInPool
-        ? `showing ${cap} of ${total}`
-        : `showing first ${cap} of ${total} (catalogue order — no configured preference to rank by)`,
+      filter !== null
+        ? `showing ${cap} of ${pool.length} matches — /model list <text> to narrow further`
+        : `showing 1–${cap} of ${ids.length} — any number 1–${ids.length} works; /model list <text> to narrow`,
     );
   }
+
   return lines.join('\n');
 }
