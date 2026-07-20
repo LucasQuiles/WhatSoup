@@ -8,6 +8,7 @@ import type { ToolRegistry } from '../registry.ts';
 import { errorResult, toolError, type SessionContext } from '../types.ts';
 import type { RuntimeConnection } from '../../transport/runtime-connection.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
+import type { Database } from '../../core/database.ts';
 import {
   AliasNotFoundError,
   MissingTargetError,
@@ -25,9 +26,11 @@ import {
   evaluateOutboundMessageSafety,
   redactInternalArtifacts,
   resolveOutboundAudience,
+  isOperatorDmPeer,
   type AssistantTextSuppressionReason,
   type OutboundMessageSafetyDecision,
 } from '../../core/outbound-message-safety.ts';
+import { isGroupJid } from '../../core/jid-constants.ts';
 import { emitAlertChecked } from '../../lib/emit-alert.ts';
 import type { OutboundSendsWriter } from '../../core/outbound-sends.ts';
 import { formatMentions } from '../../core/mentions.ts';
@@ -123,11 +126,31 @@ export interface PollRegistrar {
 export interface MessagingDeps {
   connection: RuntimeConnection;
   db: DatabaseSync;
+  /**
+   * T8-F1: Database wrapper — required for LID→phone resolution in
+   * isOperatorDmPeer, mirroring substrate.ts's dbWrapper/adminPhones pattern
+   * (`@lid` JIDs must be translated through `lid_mappings` before being
+   * compared against `adminPhones`; the raw `db: DatabaseSync` above cannot
+   * do this — `resolvePhoneFromJid`/`resolveLid` need the `Database` wrapper).
+   */
+  dbWrapper: Database;
+  /**
+   * T8-F1: config admin phones — required so send/reply/edit/poll can resolve
+   * isOperatorDmPeer the same way every other send path does.
+   */
+  adminPhones: Set<string>;
   profiles?: ProfileRegistry;
   auditWriter?: OutboundSendsWriter;
   pollRegistrar?: PollRegistrar;
   /** Instance/bot name, used to attribute outbound-guard ops alerts. */
   instanceName?: string;
+  /**
+   * T8-F2: query whether the runtime is currently in a fallback-provider
+   * window. OPTIONAL — a caller that genuinely has no fallback-provider
+   * concept omits this; every T8-F1 elevation site below then fails closed
+   * (treats as active — full scrub) rather than silently elevating.
+   */
+  fallbackActive?: () => boolean;
 }
 
 const POLL_QUESTION_MAX_CHARS = 900;
@@ -192,6 +215,19 @@ export function registerMessagingTools(
     caller: 'mcp',
   });
 
+  // T8-F1+F2: shared operator-DM elevation ctx for every send/reply/edit/poll
+  // site below — an admin's 1:1 DM on the trusted primary is an operator
+  // channel. fallbackActive fails closed when the runtime didn't inject a
+  // fallback-provider query (see MessagingDeps).
+  const audienceCtx = (chatJid: string): { isGroup: boolean; peerIsAdmin: boolean; fallbackActive: boolean } => {
+    const isGroup = isGroupJid(chatJid);
+    return {
+      isGroup,
+      peerIsAdmin: isOperatorDmPeer(chatJid, isGroup, deps.dbWrapper, deps.adminPhones),
+      fallbackActive: deps.fallbackActive ? deps.fallbackActive() : true,
+    };
+  };
+
   // ── send_message ──────────────────────────────────────────────────────────
 
   registry.register({
@@ -238,7 +274,7 @@ export function registerMessagingTools(
           // routeDivertToOps (after the send) routes the sanitized diagnostic to
           // BOT ERRORS so ops learns the agent malfunctioned.
           transformPrepared(prepared: PreparedTextSend): PreparedTextSend {
-            const audience = resolveOutboundAudience(prepared.chatJid);
+            const audience = resolveOutboundAudience(prepared.chatJid, audienceCtx(prepared.chatJid));
             const decision = evaluateOutboundMessageSafety({ text: prepared.text, audience });
             guardDecision = decision;
             const reason = suppressionReason(decision);
@@ -319,7 +355,7 @@ export function registerMessagingTools(
       // guard as send_message or it is a trivial bypass.
       const replyDecision = evaluateOutboundMessageSafety({
         text,
-        audience: resolveOutboundAudience(chatJid),
+        audience: resolveOutboundAudience(chatJid, audienceCtx(chatJid)),
       });
       const replySuppressionReason = suppressionReason(replyDecision);
       if (replySuppressionReason) return suppressedResult(replySuppressionReason);
@@ -450,7 +486,7 @@ export function registerMessagingTools(
       // another agent free-text vector and must apply the same guard.
       const editDecision = evaluateOutboundMessageSafety({
         text: newText,
-        audience: resolveOutboundAudience(chatJid),
+        audience: resolveOutboundAudience(chatJid, audienceCtx(chatJid)),
       });
       const editSuppressionReason = suppressionReason(editDecision);
       if (editSuppressionReason) return suppressedResult(editSuppressionReason);
@@ -679,7 +715,7 @@ export function registerMessagingTools(
       // Redaction-only — diverting a poll to a generic sentence is nonsensical,
       // so we mask internal artifacts but keep the poll structure. Ops-channel
       // polls are left verbatim.
-      const pollAudience = resolveOutboundAudience(chatJid);
+      const pollAudience = resolveOutboundAudience(chatJid, audienceCtx(chatJid));
       const safeQuestion = pollAudience === 'client' ? redactInternalArtifacts(question).text : question;
       const safeOptions = pollAudience === 'client'
         ? options.map((option) => redactInternalArtifacts(option).text)

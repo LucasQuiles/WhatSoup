@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
   autoSwitchNoticeMessage,
+  providerServerErrorNoFallbackNotice,
+  providerUnknownTerminalNotice,
   renderUserMessage,
   type RenderContext,
 } from '../../../src/runtimes/agent/response-templates.ts';
@@ -158,6 +160,43 @@ describe('renderUserMessage — tool-activity-blocked variant', () => {
     const expected = `${base.trimEnd()} The first attempt already started an action, `
       + 'so I will not replay it automatically. Please confirm or resend the next step.';
     expect(renderUserMessage('usage-limit', ctx({ blockedByToolActivity: true }))).toBe(expected);
+  });
+});
+
+describe('providerServerErrorNoFallbackNotice', () => {
+  // Gap 3: on the no-fallback path, a server-error terminal result previously
+  // fell to the generic providerUnknownTerminalNotice ("operator has been
+  // notified"), but NO ops alert fires on that path — so that claim is unbacked
+  // and the "terminal fault" framing is wrong for a transient backend error.
+  // This class-appropriate notice names the transient cause and asks the user to
+  // resend, WITHOUT claiming an operator was notified.
+  it('names a transient backend error and asks the user to resend', () => {
+    const msg = providerServerErrorNoFallbackNotice();
+    expect(msg.toLowerCase()).toContain('temporary error');
+    expect(msg.toLowerCase()).toContain('resend');
+  });
+
+  it('does not claim an operator was notified/alerted (no alert fires on this path)', () => {
+    const msg = providerServerErrorNoFallbackNotice();
+    expect(msg).not.toMatch(/operator has been (notified|alerted)/i);
+  });
+
+  it('is byte-stable and deterministic', () => {
+    expect(providerServerErrorNoFallbackNotice()).toBe(providerServerErrorNoFallbackNotice());
+  });
+});
+
+describe('standalone notices — redaction safety', () => {
+  // The notice layer is content-free by contract: it consumes the failure CLASS,
+  // never raw provider text, and must never leak a phone number or JID.
+  const PII = /@s\.whatsapp\.net|@lid|\+?\d{7,}/;
+  it('no standalone notice embeds a phone/JID pattern', () => {
+    for (const msg of [
+      providerServerErrorNoFallbackNotice(),
+      providerUnknownTerminalNotice(),
+    ]) {
+      expect(msg).not.toMatch(PII);
+    }
   });
 });
 

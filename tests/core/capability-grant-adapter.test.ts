@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -109,16 +109,34 @@ describe('createFileGrantStore', () => {
     expect(await store.read()).toBeNull();
   });
 
-  it('fails closed to null on a malformed store file (not throw)', async () => {
+  it('fails closed by rejecting a malformed store file', async () => {
     const path = join(dir, 'grant.json');
     writeFileSync(path, '{ not valid json');
-    expect(await createFileGrantStore(path).read()).toBeNull();
+    await expect(createFileGrantStore(path).read()).rejects.toThrow('invalid capability grant store');
+  });
+
+  it('fails closed by rejecting a well-formed but invalid grant record', async () => {
+    const path = join(dir, 'grant.json');
+    writeFileSync(path, JSON.stringify({ version: 2, group: 'camera' }));
+    await expect(createFileGrantStore(path).read()).rejects.toThrow('invalid capability grant store');
   });
 
   it('writes the record with 0600 permissions', async () => {
     const path = join(dir, 'grant.json');
     await createFileGrantStore(path).write(record);
     expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+
+  it('atomically creates a missing private parent for the durable grant record', async () => {
+    const parent = join(dir, 'fresh-workspace', '.claude');
+    const path = join(parent, 'grant.json');
+
+    await createFileGrantStore(path).write(record);
+
+    expect(statSync(parent).mode & 0o777).toBe(0o700);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual(record);
+    expect(readdirSync(parent).filter((entry) => entry.endsWith('.tmp'))).toEqual([]);
   });
 });
 

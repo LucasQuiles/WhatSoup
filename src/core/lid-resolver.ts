@@ -19,7 +19,7 @@
 
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import { createChildLogger } from '../logger.ts';
 import { DOMAIN_PERSONAL, DOMAIN_GROUP, DOMAIN_LID, bareNumber, normalizeLid, isLidJid, isPnJid, isGroupJid } from './jid-constants.ts';
 import type { Database } from './database.ts';
@@ -828,6 +828,45 @@ export function resolveLidToJid(db: Database, rawLid: string): string | null {
   const phone = resolveLid(db, bareNumber(rawLid));
   if (!phone) return null;
   return `${phone}@${DOMAIN_PERSONAL}`;
+}
+
+/**
+ * REVERSE lookup (B27): all known LIDs whose mapping points at the given
+ * phone identity. Accepts bare phone digits or a full JID (domain and
+ * colon-device suffix are stripped); returns bare LID digit strings, most
+ * recently updated mapping first with a deterministic lid tie-break.
+ * Multiple LIDs can map to one phone — `lid` is the PK, `phone_jid` is not
+ * unique. resolveLid is forward-only (lid→phone); this is its sibling for
+ * phone-origin refs that need their lid alias forms (e.g. the display-name
+ * ladder probing '@lid'-keyed contact/sender-name rows for a phone-keyed
+ * chat). Cost note: `phone_jid` is unindexed, so this is a scan of the
+ * (small, mapping-sized) lid_mappings table — fine for render-path callers,
+ * not for per-message hot paths.
+ *
+ * The prepared statement is cached per raw handle, and a FAILED prepare
+ * (absent table, mock handle) is memoized as a permanent miss — degraded
+ * handles never re-prepare (the same contract chat-display-name.ts locks
+ * for its own ladder statements).
+ */
+const _lidsForPhoneStmts = new WeakMap<DatabaseSync, StatementSync | null>();
+
+export function resolveLidsForPhone(db: Database, rawPhone: string): string[] {
+  const phone = bareNumber(rawPhone);
+  if (phone === '') return [];
+  let stmt = _lidsForPhoneStmts.get(db.raw);
+  if (stmt === undefined) {
+    try {
+      stmt = db.raw.prepare(
+        'SELECT lid FROM lid_mappings WHERE phone_jid = ? ORDER BY updated_at DESC, lid',
+      );
+    } catch {
+      stmt = null;
+    }
+    _lidsForPhoneStmts.set(db.raw, stmt);
+  }
+  if (stmt === null) return [];
+  const rows = stmt.all(`${phone}@${DOMAIN_PERSONAL}`) as { lid: string }[];
+  return rows.map((row) => row.lid);
 }
 
 /**

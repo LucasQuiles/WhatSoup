@@ -1,6 +1,6 @@
 // tests/mcp/tools/messaging.test.ts
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 import { Database } from '../../../src/core/database.ts';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
@@ -170,6 +170,13 @@ function depsWithRegistrar(base: MessagingDeps, registrar: FakePollRegistrar): M
 describe('registerMessagingTools', () => {
   let registry: ToolRegistry;
   let db: DatabaseSync;
+  // T8-F1+F2: separate Database WRAPPER (distinct from the hand-rolled `db`
+  // above) — isOperatorDmPeer needs lid_mappings resolution via the wrapper's
+  // `.raw`, which the lightweight `makeDb()` fixture doesn't create. Default
+  // adminPhones is empty so every PRE-EXISTING test in this file keeps its
+  // exact prior behavior (never elevates); only the T8-F1+F2 describe block
+  // below overrides it to prove elevation.
+  let dbWrapper: Database;
   let calls: string[];
   let connection: ReturnType<typeof makeConnection>;
   let deps: MessagingDeps;
@@ -178,11 +185,15 @@ describe('registerMessagingTools', () => {
     vi.mocked(emitAlertChecked).mockClear();
     registry = new ToolRegistry();
     db = makeDb();
+    dbWrapper = new Database(':memory:');
+    dbWrapper.open();
     calls = makeCalls();
     connection = makeConnection(calls);
     deps = {
       connection,
       db,
+      dbWrapper,
+      adminPhones: new Set<string>(),
       instanceName: 'test-bot',
       profiles: createProfileRegistry({
         satellite: { prefix: '[SAT] ', tag: ' #satellite', linkPreview: 'off' },
@@ -677,6 +688,8 @@ describe('registerMessagingTools', () => {
         registerMessagingTools(auditRegistry, {
           connection: auditConnection,
           db: auditDb.raw,
+          dbWrapper: auditDb,
+          adminPhones: new Set<string>(),
           auditWriter: createOutboundSendsWriter({ db: auditDb.raw, line: 'test-line' }),
         });
 
@@ -716,6 +729,8 @@ describe('registerMessagingTools', () => {
             },
           } as never,
           db: auditDb.raw,
+          dbWrapper: auditDb,
+          adminPhones: new Set<string>(),
           auditWriter: createOutboundSendsWriter({ db: auditDb.raw, line: 'test-line' }),
         });
 
@@ -1747,6 +1762,82 @@ describe('registerMessagingTools', () => {
 
       const body = JSON.parse(result.content[0].text);
       expect(body.error).toBe('Permission denied for this operation.');
+    });
+  });
+
+  // ── T8-F1+F2: operator-DM elevation on the send_message MCP surface ──────
+  // [gate test 7] with WHATSOUP_INTERNAL_JIDS ABSENT, an MCP send_message to
+  // the owner DM still resolves `internal` — proving this call site
+  // (messaging.ts's send_message transformPrepared, the equivalent of
+  // W1-PACKET's messaging.ts:241) passes ctx, guarding the "sometimes
+  // redacted, sometimes not per send type" regression the packet names.
+  describe('T8-F1+F2: operator-DM elevation (send_message)', () => {
+    const OWNER_LID_JID = `${'16566225701'}@lid`;
+    const OWNER_PHONE = `${'18459780901'}`;
+    const OWNER_PHONE_JID = `${OWNER_PHONE}@s.whatsapp.net`;
+    const savedInternal = process.env['WHATSOUP_INTERNAL_JIDS'];
+    const savedBotErrors = process.env['BOT_ERRORS_JID'];
+
+    beforeEach(() => {
+      delete process.env['WHATSOUP_INTERNAL_JIDS'];
+      delete process.env['BOT_ERRORS_JID'];
+      // Seed the lid→phone mapping isOperatorDmPeer needs to resolve the
+      // owner DM's lid-form chatJid (the OBSERVED-LIVE primary case, V32).
+      dbWrapper.raw.prepare(
+        "INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, datetime('now'))",
+      ).run(OWNER_LID_JID.split('@')[0], OWNER_PHONE_JID);
+      deps.adminPhones.add(OWNER_PHONE);
+      // Trusted primary — NOT in a fallback window (F2 gate). Without this,
+      // fallbackActive fails closed to `true` (by design — see F2) and the
+      // owner DM correctly stays un-elevated, which is what a prior version
+      // of this fixture accidentally proved instead of the elevation path.
+      deps.fallbackActive = () => false;
+    });
+
+    afterEach(() => {
+      if (savedInternal === undefined) delete process.env['WHATSOUP_INTERNAL_JIDS'];
+      else process.env['WHATSOUP_INTERNAL_JIDS'] = savedInternal;
+      if (savedBotErrors === undefined) delete process.env['BOT_ERRORS_JID'];
+      else process.env['BOT_ERRORS_JID'] = savedBotErrors;
+    });
+
+    it('[gate test 7, env-absent] send_message to the owner DM (lid form) keeps operator vocabulary visible — internal, not client', async () => {
+      const session = chatSession(OWNER_LID_JID.split('@')[0]!, OWNER_LID_JID);
+      const result = await registry.call(
+        'send_message',
+        { text: 'restart via /Users/testuser/LAB/whatsoup/instances/q' },
+        session,
+      );
+      expect(result.isError).toBeUndefined();
+      expect(calls).toHaveLength(1);
+      const call = JSON.parse(calls[0]);
+      // `internal` tier: the operator path scrub does NOT fire (client-only).
+      expect(call.content.text).toContain('/Users/testuser/LAB/whatsoup/instances/q');
+    });
+
+    it('a real secret is STILL masked even on the elevated owner-DM send (INV-2)', async () => {
+      const session = chatSession(OWNER_LID_JID.split('@')[0]!, OWNER_LID_JID);
+      const result = await registry.call(
+        'send_message',
+        { text: `session=${'abc123def456ghi789jkl012'}` },
+        session,
+      );
+      expect(result.isError).toBeUndefined();
+      const call = JSON.parse(calls[0]);
+      expect(call.content.text).not.toContain('abc123def456ghi789jkl012');
+    });
+
+    it('the SAME operator-path message to a non-admin peer stays client-scrubbed (no regression)', async () => {
+      const nonAdminJid = '15559990001@s.whatsapp.net';
+      const session = chatSession('15559990001', nonAdminJid);
+      const result = await registry.call(
+        'send_message',
+        { text: 'restart via /Users/testuser/LAB/whatsoup/instances/q' },
+        session,
+      );
+      expect(result.isError).toBeUndefined();
+      const call = JSON.parse(calls[0]);
+      expect(call.content.text).not.toContain('/Users/testuser/LAB/whatsoup/instances/q');
     });
   });
 });

@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../src/config.ts', () => ({
   config: {
     adminPhones: new Set(['15550100001']),
+    controlPeers: new Map<string, string>(),
     dbPath: ':memory:',
     mediaDir: '/tmp',
     botName: 'WhatSoup',

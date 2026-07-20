@@ -1,6 +1,6 @@
 import type { Database } from './database.ts';
 import { toConversationKey } from './conversation-key.ts';
-import { DOMAIN_LID, DOMAIN_SMS, isLidJid, normalizeLid, smsJidToPhone } from './jid-constants.ts';
+import { DOMAIN_LID, DOMAIN_SMS, isLidJid, isWhatsAppAuthenticatedJid, normalizeLid, smsJidToPhone } from './jid-constants.ts';
 import { resolveLid } from './lid-resolver.ts';
 
 export type AccessStatus = 'allowed' | 'blocked' | 'pending' | 'seen';
@@ -179,6 +179,36 @@ export function resolvePhoneFromJid(jid: string, db: Database): string {
 
   // Personal JID or other — delegate to extractLocal
   return extractLocal(jid);
+}
+
+/**
+ * GRANT-direction phone resolution (QR-143). Returns `null` for any JID that is
+ * NOT WhatsApp-authenticated (`@sms` and every other non-`@s.whatsapp.net`/`@lid`
+ * transport), else the same value as `resolvePhoneFromJid(jid, db)`.
+ *
+ * WHY: `resolvePhoneFromJid` collapses a spoofable `<digits>@sms` JID to the SAME
+ * bare phone as a WhatsApp-authenticated admin. Every admin/allow GRANT decision
+ * MUST gate on authenticated transport BEFORE matching the phone (see the
+ * `isWhatsAppAuthenticatedJid` doc in jid-constants.ts). This primitive collapses
+ * the easy-to-forget two-step discipline (call the predicate, THEN the resolver,
+ * in the right order, every time) into a single fail-closed call, so a grant site
+ * cannot get it wrong.
+ *
+ * USE THIS at every grant site instead of the general-purpose `resolvePhoneFromJid`.
+ * The general resolver stays correct for NON-grant uses — display prefixes, rate
+ * limiting, storage keying, directory population, outbound routing — and for
+ * DENY-side (blocklist) checks, which must stay transport-agnostic. The CI
+ * inventory guard (`scripts/grant-resolver-inventory-guard.ts`) fails the build if
+ * a new inline `isAdminPhone(resolvePhoneFromJid(...))` grant composition appears
+ * outside the allowlisted deny/display sites.
+ */
+export function resolvePhoneFromJidForGrant(
+  jid: string | null | undefined,
+  db: Database,
+): string | null {
+  // Explicit null check also narrows `jid` to a non-null string for the resolver.
+  if (jid == null || !isWhatsAppAuthenticatedJid(jid)) return null;
+  return resolvePhoneFromJid(jid, db);
 }
 
 /**

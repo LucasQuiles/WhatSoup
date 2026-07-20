@@ -1,12 +1,35 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   redactInternalArtifacts,
   classifyAssistantTextEgress,
   classifyInfraStatusClaim,
   evaluateOutboundMessageSafety,
   resolveOutboundAudience,
+  isOperatorDmPeer,
+  resetSpoofWarnDedupe,
   CLIENT_TEMPORARY_ISSUE_TEXT,
 } from '../../src/core/outbound-message-safety.ts';
+import { Database } from '../../src/core/database.ts';
+import { sanitizeProviderPreviewText } from '../../src/lib/provider-preview-sanitizer.ts';
+import { E9_BARE_AT_MESSAGE } from '../fixtures/e9-strings.ts';
+
+// T8-F1+F2: isOperatorDmPeer logs (never-silent, WG-7) via the module's own
+// child logger. Hoisted so the mock factory (which vitest hoists above these
+// imports) can close over a stable object the tests assert against.
+const { mockAudienceLog } = vi.hoisted(() => ({
+  mockAudienceLog: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() },
+}));
+vi.mock('../../src/logger.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/logger.ts')>();
+  return {
+    ...actual,
+    // Only the module-under-test's 'outbound-audience' child logger is
+    // captured — every other component (e.g. Database's own child logger)
+    // keeps the REAL logger so this mock never masks unrelated warnings.
+    createChildLogger: (name: string) =>
+      name === 'outbound-audience' ? mockAudienceLog : actual.createChildLogger(name),
+  };
+});
 
 // All fixtures use neutral placeholders. `/Users/testuser` and `/home/testuser`
 // are allow-listed by the repo-hygiene guard yet still match the guardrail's
@@ -92,12 +115,15 @@ describe('redactInternalArtifacts', () => {
     expect(redactions).toHaveLength(0);
   });
 
-  it('redacts provider tokens and emails via the shared sanitizer', () => {
+  it('redacts provider tokens via the shared sanitizer; emails flow as authored (B25 chat scope)', () => {
     const { text } = redactInternalArtifacts(
       `auth failed: Bearer ${FAKE_TOKEN} for ${FAKE_EMAIL}`,
     );
     expect(text).not.toContain(FAKE_TOKEN);
-    expect(text).not.toContain(FAKE_EMAIL);
+    // B25 chat-scope owner ruling: email redaction is background-only and must
+    // never mutate chat-visible text.
+    expect(text).toContain(FAKE_EMAIL);
+    expect(text).not.toContain('[REDACTED_EMAIL]');
   });
 
   it('leaves ordinary client text unchanged with zero redactions', () => {
@@ -429,13 +455,14 @@ describe('redactInternalArtifacts — audience scoping', () => {
     expect(redactions).toHaveLength(0);
   });
 
-  it('internal audience still masks secrets and emails (third-party transport)', () => {
+  it('internal audience still masks secrets (third-party transport); emails flow as authored (B25 chat scope)', () => {
     const { text, redactions } = redactInternalArtifacts(
       `deploy: Bearer ${FAKE_TOKEN} for ${FAKE_EMAIL} — see /home/testuser/.claude/settings.json`,
       'internal',
     );
     expect(text).not.toContain(FAKE_TOKEN);
-    expect(text).not.toContain(FAKE_EMAIL);
+    // B25 chat-scope owner ruling: email masking is background-only.
+    expect(text).toContain(FAKE_EMAIL);
     // operator path preserved for the internal group
     expect(text).toContain('/home/testuser/.claude/settings.json');
     expect(redactions.map((r) => r.category)).toContain('provider_secret');
@@ -456,18 +483,42 @@ describe('redactInternalArtifacts — audience scoping', () => {
     expect(redactInternalArtifacts('Hi @alice!', 'client').text).toBe('Hi @alice!');
   });
 
-  it.each([
+  it('E9 (packet D5): a bare "@" used as the word "at" survives at client and internal audiences', () => {
+    // Live evidence: an internal-tier DM explaining this very bug had its own
+    // bare '@' re-redacted to [REDACTED_EMAIL]. A whitespace-flanked '@' has no
+    // local part and no domain part — it is not email-shaped.
+    const input = E9_BARE_AT_MESSAGE;
+    expect(redactInternalArtifacts(input, 'client').text).toBe(input);
+    expect(redactInternalArtifacts(input, 'internal').text).toBe(input);
+  });
+
+  // B25 chat scope: these email-like tokens previously redacted at internal
+  // audience. Chat egress no longer runs ANY email-class transform, so they
+  // pass through as authored; the redaction coverage moves to the provider
+  // path (same flag set the internal audience used to pass), asserted below
+  // so the sanitizer's email logic keeps this adversarial coverage.
+  const EMAIL_LIKE_JID_TOKENS = [
     { label: 'nested domain', input: `${FAKE_GROUP_JID}.evil.test` },
     { label: 'hyphenated domain', input: `${FAKE_GROUP_JID}-evil.test` },
     { label: 'repeated hyphen domain', input: `${FAKE_GROUP_JID}--evil.test` },
     { label: 'mixed punctuation domain', input: `${FAKE_GROUP_JID}.-evil.test` },
     { label: 'leading plus', input: `+${FAKE_GROUP_JID}` },
     { label: 'dotted local part', input: `x.${FAKE_GROUP_JID}` },
-  ])('internal audience redacts a JID-shaped substring inside an email-like token: $label', ({ input }) => {
+  ];
+
+  it.each(EMAIL_LIKE_JID_TOKENS)('chat egress (internal) passes an email-like token through as authored: $label', ({ input }) => {
       const { text, redactions } = redactInternalArtifacts(input, 'internal');
-      expect(text).toBe('[REDACTED_EMAIL]');
-      expect(text).not.toContain(FAKE_GROUP_JID);
-      expect(redactions.map((redaction) => redaction.category)).toContain('provider_secret');
+      expect(text).toBe(input);
+      expect(redactions).toHaveLength(0);
+  });
+
+  it.each(EMAIL_LIKE_JID_TOKENS)('provider path still redacts a JID-shaped substring inside an email-like token: $label', ({ input }) => {
+      const out = sanitizeProviderPreviewText(input, {
+        preserveWhatsAppJids: true,
+        preserveWhatsAppMentions: true,
+      });
+      expect(out).toBe('[REDACTED_EMAIL]');
+      expect(out).not.toContain(FAKE_GROUP_JID);
   });
 
   it('internal audience does not reinterpret literal JID placeholder-shaped text', () => {
@@ -512,13 +563,27 @@ describe('redactInternalArtifacts — audience scoping', () => {
   });
 
   it.each([
-    { label: 'quoted local part', input: `"${FAKE_GROUP_JID}"@evil.test`, expected: '[REDACTED_EMAIL]' },
-    { label: 'quoted domain literal', input: `"${FAKE_GROUP_JID}"@[127.0.0.1]`, expected: '[REDACTED_EMAIL]' },
+    // B25 chat scope: quoted-local shapes previously became [REDACTED_EMAIL]
+    // at internal audience; chat egress now passes them through as authored.
+    { label: 'quoted local part', input: `"${FAKE_GROUP_JID}"@evil.test`, expected: `"${FAKE_GROUP_JID}"@evil.test` },
+    { label: 'quoted domain literal', input: `"${FAKE_GROUP_JID}"@[127.0.0.1]`, expected: `"${FAKE_GROUP_JID}"@[127.0.0.1]` },
     { label: 'label delimiter', input: `target:${FAKE_GROUP_JID}`, expected: `target:${FAKE_GROUP_JID}` },
     { label: 'device JID', input: '12345:6@g.us', expected: '12345:6@g.us' },
     { label: 'agent and device JID', input: '12345-2:6@g.us', expected: '12345-2:6@g.us' },
-  ])('classifies complete JIDs without preserving an enclosing email: $label', ({ input, expected }) => {
+  ])('chat egress leaves JID and quoted-email shapes as authored: $label', ({ input, expected }) => {
     expect(redactInternalArtifacts(input, 'internal').text).toBe(expected);
+  });
+
+  it.each([
+    { label: 'quoted local part', input: `"${FAKE_GROUP_JID}"@evil.test` },
+    { label: 'quoted domain literal', input: `"${FAKE_GROUP_JID}"@[127.0.0.1]` },
+  ])('provider path still redacts a quoted JID local without JID-preserving it: $label', ({ input }) => {
+    const out = sanitizeProviderPreviewText(input, {
+      preserveWhatsAppJids: true,
+      preserveWhatsAppMentions: true,
+    });
+    expect(out).toBe('[REDACTED_EMAIL]');
+    expect(out).not.toContain(FAKE_GROUP_JID);
   });
 
   it('scans dotted email-local adversarial input in linear time', () => {
@@ -639,5 +704,321 @@ describe('resolveOutboundAudience', () => {
     expect(resolveOutboundAudience('111@g.us')).toBe('client');
     delete process.env['WHATSOUP_INTERNAL_JIDS'];
     expect(resolveOutboundAudience('111@g.us')).toBe('client');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T8-F1+F2 — operator-DM audience tier, trusted-primary-only
+// ---------------------------------------------------------------------------
+
+// Neutral admin/owner fixtures — assembled at runtime so no literal phone/lid
+// appears in committed source (repo-hygiene guard), matching the FAKE_* style
+// above. Shapes mirror the OBSERVED-LIVE owner DM (V32): phone-form
+// `@s.whatsapp.net` and lid-form `@lid` are two JIDs for the SAME operator.
+const OWNER_PHONE = `${'18459780901'}`;
+const OWNER_PHONE_JID = `${OWNER_PHONE}@s.whatsapp.net`;
+const OWNER_LID = `${'16566225701'}`;
+const OWNER_LID_JID = `${OWNER_LID}@lid`;
+const UNMAPPED_LID_JID = `${'19999999901'}@lid`;
+const NON_ADMIN_PHONE = `${'15559990001'}`;
+const NON_ADMIN_PHONE_JID = `${NON_ADMIN_PHONE}@s.whatsapp.net`;
+const ADMIN_PHONES = new Set([OWNER_PHONE]);
+
+function openDbWithLidMapping(): Database {
+  const db = new Database(':memory:');
+  db.open();
+  // Mirrors admin.test.ts's seed pattern: lid_mappings.phone_jid stores the
+  // FULL phone JID; resolveLid/resolvePhoneFromJid strip it to bare digits.
+  db.raw.prepare(
+    "INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, datetime('now'))",
+  ).run(OWNER_LID, OWNER_PHONE_JID);
+  return db;
+}
+
+describe('isOperatorDmPeer', () => {
+  afterEach(() => {
+    mockAudienceLog.warn.mockClear();
+    // B21-C: the spoof-warn TTL dedupe map is module-level; reset it so each
+    // test observes first-warn behavior regardless of ordering.
+    resetSpoofWarnDedupe();
+  });
+
+  it('[gate test 5, phone form] returns true for the owner DM peer in phone-JID form', () => {
+    const db = openDbWithLidMapping();
+    try {
+      expect(isOperatorDmPeer(OWNER_PHONE_JID, false, db, ADMIN_PHONES)).toBe(true);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('[gate test 5, lid form — the PRIMARY case, V32] returns true for the owner DM peer in lid-JID form via a resolveLid fixture mapping', () => {
+    const db = openDbWithLidMapping();
+    try {
+      expect(isOperatorDmPeer(OWNER_LID_JID, false, db, ADMIN_PHONES)).toBe(true);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('[never-silent, WG-7] an unresolved lid peer returns false AND logs outbound-audience/not-elevated (id-only, N14)', () => {
+    const db = openDbWithLidMapping();
+    try {
+      const result = isOperatorDmPeer(UNMAPPED_LID_JID, false, db, ADMIN_PHONES);
+      expect(result).toBe(false);
+      expect(mockAudienceLog.warn).toHaveBeenCalledTimes(1);
+      const [payload, message] = mockAudienceLog.warn.mock.calls[0] as [Record<string, unknown>, string];
+      expect(payload).toMatchObject({ chatJidForm: 'lid', outcome: 'not-elevated' });
+      // N14: never the raw chatJid/lid value in the log line.
+      expect(JSON.stringify(payload)).not.toContain(UNMAPPED_LID_JID.split('@')[0]);
+      expect(message).toMatch(/lid peer/i);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('[group] returns false for a group chat even when the sender would otherwise resolve admin', () => {
+    const db = openDbWithLidMapping();
+    try {
+      expect(isOperatorDmPeer(OWNER_PHONE_JID, true, db, ADMIN_PHONES)).toBe(false);
+      expect(isOperatorDmPeer(OWNER_LID_JID, true, db, ADMIN_PHONES)).toBe(false);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('returns false for a non-admin phone-form DM peer, and does not log (only lid non-resolution logs)', () => {
+    const db = openDbWithLidMapping();
+    try {
+      expect(isOperatorDmPeer(NON_ADMIN_PHONE_JID, false, db, ADMIN_PHONES)).toBe(false);
+      expect(mockAudienceLog.warn).not.toHaveBeenCalled();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('[ADVERSARIAL, QR-143] a spoofed <admin-digits>@sms chatJid does NOT elevate — resolvePhoneFromJid collapses it to the bare admin phone with no authenticated-JID guard', () => {
+    const db = openDbWithLidMapping();
+    try {
+      // smsJidToPhone strips the '@sms' suffix down to the same bare digits as
+      // OWNER_PHONE_JID's phone form — an attacker who can present ANY chatJid
+      // ending '@sms' with the admin's digits (SMS sender-ID is spoofable, see
+      // jid-constants.ts isWhatsAppAuthenticatedJid doc) must not inherit the
+      // owner's operator-DM elevation.
+      const spoofedSmsJid = `${OWNER_PHONE}@sms`;
+      const peerIsAdmin = isOperatorDmPeer(spoofedSmsJid, false, db, ADMIN_PHONES);
+      expect(peerIsAdmin).toBe(false);
+
+      // Full path: a caller wiring peerIsAdmin into resolveOutboundAudience must
+      // still land on 'client' for this chatJid — never 'internal'.
+      const audience = resolveOutboundAudience(spoofedSmsJid, {
+        isGroup: false,
+        peerIsAdmin,
+        fallbackActive: false,
+      });
+      expect(audience).toBe('client');
+
+      // And at 'client' audience, operator vocabulary that would be left
+      // unmasked at 'internal' (see the INV-2 test above) must be MASKED — the
+      // operator path must not reach a spoofed-SMS "client".
+      const operatorPathText = 'restart via /Users/testuser/LAB/whatsoup/instances/q';
+      const { text } = redactInternalArtifacts(operatorPathText, audience);
+      expect(text).not.toContain('/Users/testuser/LAB/whatsoup/instances/q');
+      expect(text).toContain('[internal-path]');
+    } finally {
+      db.close();
+    }
+  });
+
+  // F1F2 fast-follow (lead-required, non-blocking): the QR-143 @sms guard
+  // above returns false for EVERY @sms chatJid, including a spoof attempt
+  // that bears admin-like digits. That silent denial is exactly the kind of
+  // audience-elevation non-event the @lid never-silent convention (WG-7) and
+  // NFR-3 ("gate denials log unsampled, always") say must be observable — so
+  // the spoof-attempt SUBSET (unauthenticated + admin-shaped digits) warns.
+  // Every OTHER @sms rejection (a benign SMS-bridge chat, not admin-shaped)
+  // must stay silent — warning there would be noise on ordinary traffic.
+  it('[never-silent, WG-7 fast-follow] a spoofed <admin-digits>@sms chatJid returns false AND logs outbound-audience/spoof-attempt-denied (id-only, N14)', () => {
+    const db = openDbWithLidMapping();
+    try {
+      const spoofedSmsJid = `${OWNER_PHONE}@sms`;
+      const result = isOperatorDmPeer(spoofedSmsJid, false, db, ADMIN_PHONES);
+      expect(result).toBe(false);
+      expect(mockAudienceLog.warn).toHaveBeenCalledTimes(1);
+      const [payload, message] = mockAudienceLog.warn.mock.calls[0] as [Record<string, unknown>, string];
+      expect(payload).toMatchObject({ chatJidForm: 'sms', outcome: 'spoof-attempt-denied' });
+      // N14: never the raw chatJid/phone digits in the log line.
+      expect(JSON.stringify(payload)).not.toContain(OWNER_PHONE);
+      // The message is static/form-neutral (B21-C); the form lives in the
+      // structured chatJidForm field asserted above.
+      expect(message).toMatch(/unauthenticated peer/i);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('[B21-C form fidelity] a non-@sms unauthenticated form bearing admin digits logs its ACTUAL JID form (suffix after @), not a hardcoded sms label', () => {
+    const db = openDbWithLidMapping();
+    try {
+      // '@c.us' is unauthenticated (not @s.whatsapp.net/@lid) and its domain
+      // contributes no digits, so resolvePhoneFromJid + isAdminPhone still see
+      // the admin digits — the spoof-warn branch fires. The unauthenticated
+      // branch catches EVERY non-authenticated form, so the logged form must
+      // be the real '@' suffix, not a hardcoded 'sms' label.
+      const spoofedCUsJid = `${OWNER_PHONE}@c.us`;
+      const result = isOperatorDmPeer(spoofedCUsJid, false, db, ADMIN_PHONES);
+      expect(result).toBe(false);
+      expect(mockAudienceLog.warn).toHaveBeenCalledTimes(1);
+      const [payload] = mockAudienceLog.warn.mock.calls[0] as [Record<string, unknown>, string];
+      expect(payload).toMatchObject({ chatJidForm: 'c.us', outcome: 'spoof-attempt-denied' });
+      // N14: still id-only — never the raw digits.
+      expect(JSON.stringify(payload)).not.toContain(OWNER_PHONE);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('[noise guard] a non-admin @sms chatJid returns false and does NOT warn (benign SMS-bridge chat)', () => {
+    const db = openDbWithLidMapping();
+    try {
+      const nonAdminSmsJid = `${NON_ADMIN_PHONE}@sms`;
+      const result = isOperatorDmPeer(nonAdminSmsJid, false, db, ADMIN_PHONES);
+      expect(result).toBe(false);
+      expect(mockAudienceLog.warn).not.toHaveBeenCalled();
+    } finally {
+      db.close();
+    }
+  });
+
+  // B21-C flood guard: isOperatorDmPeer runs on EVERY outbound send
+  // (messaging.ts, media.ts, runtime call sites), so a legitimate operator
+  // SMS-interop DM (peer = admin digits @sms) would emit one spoof-attempt
+  // warn per bot reply — a sustained flood mislabeled as an attack. The WARN
+  // is deduped per chatJid on a TTL; the deny RETURN VALUE is never deduped.
+  it('[B21-C dedupe] two consecutive calls for the SAME chatJid emit exactly one warn; both still return false', () => {
+    const db = openDbWithLidMapping();
+    try {
+      const spoofedSmsJid = `${OWNER_PHONE}@sms`;
+      expect(isOperatorDmPeer(spoofedSmsJid, false, db, ADMIN_PHONES)).toBe(false);
+      expect(isOperatorDmPeer(spoofedSmsJid, false, db, ADMIN_PHONES)).toBe(false);
+      expect(mockAudienceLog.warn).toHaveBeenCalledTimes(1);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('[B21-C dedupe] a DIFFERENT chatJid warns independently within the TTL window', () => {
+    const db = openDbWithLidMapping();
+    try {
+      // Same admin digits, two distinct chatJid strings — dedupe keys on the
+      // chatJid, so each distinct chat warns once (never-silent per chat).
+      expect(isOperatorDmPeer(`${OWNER_PHONE}@sms`, false, db, ADMIN_PHONES)).toBe(false);
+      expect(isOperatorDmPeer(`${OWNER_PHONE}@c.us`, false, db, ADMIN_PHONES)).toBe(false);
+      expect(mockAudienceLog.warn).toHaveBeenCalledTimes(2);
+      const forms = mockAudienceLog.warn.mock.calls.map(
+        (call) => (call[0] as Record<string, unknown>)['chatJidForm'],
+      );
+      expect(forms).toEqual(['sms', 'c.us']);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('[B21-C dedupe] after resetSpoofWarnDedupe() the same chatJid warns again', () => {
+    const db = openDbWithLidMapping();
+    try {
+      const spoofedSmsJid = `${OWNER_PHONE}@sms`;
+      expect(isOperatorDmPeer(spoofedSmsJid, false, db, ADMIN_PHONES)).toBe(false);
+      expect(mockAudienceLog.warn).toHaveBeenCalledTimes(1);
+      resetSpoofWarnDedupe();
+      expect(isOperatorDmPeer(spoofedSmsJid, false, db, ADMIN_PHONES)).toBe(false);
+      expect(mockAudienceLog.warn).toHaveBeenCalledTimes(2);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe('resolveOutboundAudience — ctx (F1+F2, operator-DM elevation)', () => {
+  const savedBotErrors = process.env['BOT_ERRORS_JID'];
+  const savedInternal = process.env['WHATSOUP_INTERNAL_JIDS'];
+  const restore = (key: string, saved: string | undefined) => {
+    if (saved === undefined) delete process.env[key];
+    else process.env[key] = saved;
+  };
+  afterEach(() => {
+    restore('BOT_ERRORS_JID', savedBotErrors);
+    restore('WHATSOUP_INTERNAL_JIDS', savedInternal);
+  });
+
+  it('[env-absent] WHATSOUP_INTERNAL_JIDS unset + owner DM ctx (not fallback) → internal (F1 supersedes the env stopgap)', () => {
+    delete process.env['BOT_ERRORS_JID'];
+    delete process.env['WHATSOUP_INTERNAL_JIDS'];
+    const audience = resolveOutboundAudience(OWNER_LID_JID, {
+      isGroup: false,
+      peerIsAdmin: true,
+      fallbackActive: false,
+    });
+    expect(audience).toBe('internal');
+  });
+
+  it('[gate test 4 / INV-3] fallback window active ⇒ operator DM stays client (full scrub), never elevated', () => {
+    const audience = resolveOutboundAudience(OWNER_PHONE_JID, {
+      isGroup: false,
+      peerIsAdmin: true,
+      fallbackActive: true,
+    });
+    expect(audience).toBe('client');
+  });
+
+  it('group + admin peer → NOT elevated (isGroup gates elevation regardless of peerIsAdmin)', () => {
+    const audience = resolveOutboundAudience(OWNER_PHONE_JID, {
+      isGroup: true,
+      peerIsAdmin: true,
+      fallbackActive: false,
+    });
+    expect(audience).toBe('client');
+  });
+
+  it('[gate test 6] external non-admin DM peer stays client regardless of ctx', () => {
+    const audience = resolveOutboundAudience(NON_ADMIN_PHONE_JID, {
+      isGroup: false,
+      peerIsAdmin: false,
+      fallbackActive: false,
+    });
+    expect(audience).toBe('client');
+  });
+
+  it('omitted ctx preserves exact pre-F1F2 behavior (non-ctx callers unaffected)', () => {
+    delete process.env['BOT_ERRORS_JID'];
+    delete process.env['WHATSOUP_INTERNAL_JIDS'];
+    expect(resolveOutboundAudience(OWNER_PHONE_JID)).toBe('client');
+  });
+
+  it('ops (BOT_ERRORS_JID) still wins over ctx elevation', () => {
+    process.env['BOT_ERRORS_JID'] = OWNER_PHONE_JID;
+    const audience = resolveOutboundAudience(OWNER_PHONE_JID, {
+      isGroup: false,
+      peerIsAdmin: true,
+      fallbackActive: false,
+    });
+    expect(audience).toBe('ops');
+  });
+
+  it('INV-2: elevated operator DM still masks secrets, and internal tier still masks credential paths (non-credential operator path visible)', () => {
+    const audience = resolveOutboundAudience(OWNER_LID_JID, {
+      isGroup: false,
+      peerIsAdmin: true,
+      fallbackActive: false,
+    });
+    expect(audience).toBe('internal');
+    const secretText = `session=${'abc123def456ghi789'}`;
+    expect(redactInternalArtifacts(secretText, audience).text).not.toContain('abc123def456ghi789');
+    const credentialPathText = 'the key is at /Users/testuser/.ssh/id_ed25519 — check it';
+    expect(redactInternalArtifacts(credentialPathText, audience).text).not.toContain('.ssh/id_ed25519');
+    const operatorPathText = 'restart via /Users/testuser/LAB/whatsoup/instances/q';
+    expect(redactInternalArtifacts(operatorPathText, audience).text).toContain(
+      '/Users/testuser/LAB/whatsoup/instances/q',
+    );
   });
 });

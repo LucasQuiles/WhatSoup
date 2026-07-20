@@ -65,7 +65,7 @@ function makeRegistry(db: Database, getSock: () => WhatsAppSocket | null, conn: 
   const registry = new ToolRegistry();
   registerChatManagementTools(db, getSock, (tool) => registry.register(tool));
   registerSearchTools(db, (tool) => registry.register(tool));
-  const deps: MessagingDeps = { connection: conn, db: db.raw };
+  const deps: MessagingDeps = { connection: conn, db: db.raw, dbWrapper: db, adminPhones: new Set<string>() };
   registerMessagingTools(registry, deps);
   return registry;
 }
@@ -153,7 +153,7 @@ describe('Tool handlers with disconnected WhatsApp socket', () => {
     } as unknown as ConnectionManager;
 
     const reg = new ToolRegistry();
-    registerMessagingTools(reg, { connection: throwingConn, db: db.raw });
+    registerMessagingTools(reg, { connection: throwingConn, db: db.raw, dbWrapper: db, adminPhones: new Set<string>() });
 
     const result = await reg.call(
       'send_message',
@@ -288,7 +288,7 @@ describe('Tool handlers with missing or invalid messages', () => {
   it('reply_message with non-existent messageId → returns error field in result', async () => {
     const conn = makeMockConnection();
     const reg = new ToolRegistry();
-    registerMessagingTools(reg, { connection: conn, db: db.raw });
+    registerMessagingTools(reg, { connection: conn, db: db.raw, dbWrapper: db, adminPhones: new Set<string>() });
 
     const result = await reg.call(
       'reply_message',
@@ -310,7 +310,7 @@ describe('Tool handlers with missing or invalid messages', () => {
 
     const conn = makeMockConnection();
     const reg = new ToolRegistry();
-    registerMessagingTools(reg, { connection: conn, db: db.raw });
+    registerMessagingTools(reg, { connection: conn, db: db.raw, dbWrapper: db, adminPhones: new Set<string>() });
 
     const result = await reg.call(
       'edit_message',

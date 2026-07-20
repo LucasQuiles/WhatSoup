@@ -986,7 +986,7 @@ describe('usage-limit user notice', () => {
     );
   });
 
-  it('enqueues a plain limit notice when no fallback is configured', () => {
+  it('enqueues a plain limit notice naming the operator remedy when no fallback is configured', () => {
     const runtime = makeRuntime({});
     const queue = makeFakeQueue();
     driveView(runtime).handleEventWithContext(
@@ -994,7 +994,13 @@ describe('usage-limit user notice', () => {
       queue,
       null,
     );
+    // A per-tier usage cap is not cleared by waiting — the notice names the
+    // operator remedy (add credits / switch model) rather than telling the user
+    // to try again after the limit resets.
     expect(queue.enqueueText).toHaveBeenCalledWith(
+      expect.stringContaining('add credits or switch my model'),
+    );
+    expect(queue.enqueueText).not.toHaveBeenCalledWith(
       expect.stringContaining('try again after the limit resets'),
     );
   });
