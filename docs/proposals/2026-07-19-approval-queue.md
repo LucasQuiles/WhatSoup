@@ -1,7 +1,7 @@
 # DESIGN — Console approval queue (D-4 / PDR-2) — 2026-07-19
 
 **Status:** DESIGN for owner review — the review's gate is "design first,
-owner nod" (`/home/whatsoup/LAB/status/whatsoup-ui-ux-review-20260719.md` §D-4). No
+owner nod" (operator-local status note `whatsoup-ui-ux-review-20260719.md` §D-4). No
 build authorization is claimed here; §6 lists the explicit decision points
 the nod covers.
 **Grounding:** `oc-re/audits/2026-07-16-whatsoup-parity-debt-register.md`
