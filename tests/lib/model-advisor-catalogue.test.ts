@@ -57,19 +57,24 @@ describe('classifyModelFetchFailure', () => {
 
 describe('resolveClaudeOAuthCred', () => {
   const T = 1_000_000; // fixed clock
-  const creds = (accessToken: unknown, expiresAt: unknown) =>
-    JSON.stringify({ claudeAiOauth: { accessToken, expiresAt } });
+  const creds = (accessToken: unknown, expiresAt: unknown, refreshToken?: unknown) =>
+    JSON.stringify({ claudeAiOauth: { accessToken, expiresAt, ...(refreshToken !== undefined ? { refreshToken } : {}) } });
 
   it('returns present with the token when the file has an unexpired accessToken', () => {
     const out = resolveClaudeOAuthCred({ readFileText: () => creds('oauth-tok-live', T + 60_000), nowMs: T });
     expect(out).toStrictEqual({ status: 'present', token: 'oauth-tok-live' });
   });
 
-  it('returns expired when expiresAt is at/before now (self-heals on the next agent turn)', () => {
-    expect(resolveClaudeOAuthCred({ readFileText: () => creds('oauth-tok-stale', T - 1), nowMs: T }))
-      .toStrictEqual({ status: 'expired' });
+  it('returns expired with refresh-token presence when expiresAt is at/before now', () => {
+    // hasRefreshToken lets the credential-state accessor split expired-refreshable
+    // (routable — the CLI refreshes at spawn) from expired-no-refresh (not routable).
+    expect(resolveClaudeOAuthCred({ readFileText: () => creds('oauth-tok-stale', T - 1, 'refresh-x'), nowMs: T }))
+      .toStrictEqual({ status: 'expired', hasRefreshToken: true });
     expect(resolveClaudeOAuthCred({ readFileText: () => creds('oauth-tok-stale', T), nowMs: T }))
-      .toStrictEqual({ status: 'expired' });
+      .toStrictEqual({ status: 'expired', hasRefreshToken: false });
+    // a present-but-empty refresh token is not a usable refresh token
+    expect(resolveClaudeOAuthCred({ readFileText: () => creds('oauth-tok-stale', T - 1, ''), nowMs: T }))
+      .toStrictEqual({ status: 'expired', hasRefreshToken: false });
   });
 
   it('returns absent when the file is missing, unparseable, or has no token', () => {
@@ -102,7 +107,7 @@ describe('fetchAnthropicModelIdsWithStatus — OAuth credential path', () => {
     const fetchSpy = vi.fn();
     vi.stubGlobal('fetch', fetchSpy);
 
-    expect(await fetchAnthropicModelIdsWithStatus({ readOAuthCred: () => ({ status: 'expired' }) }))
+    expect(await fetchAnthropicModelIdsWithStatus({ readOAuthCred: () => ({ status: 'expired', hasRefreshToken: false }) }))
       .toStrictEqual({ status: 'credential-expired' });
     expect(fetchSpy).not.toHaveBeenCalled();
   });

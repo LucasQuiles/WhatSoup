@@ -215,7 +215,10 @@ const ANTHROPIC_MODELS_URL = 'https://api.anthropic.com/v1/models?limit=100';
  */
 export type ClaudeOAuthCredResult =
   | { status: 'present'; token: string }
-  | { status: 'expired' }
+  // `hasRefreshToken` distinguishes expired-refreshable (the CLI refreshes at
+  // spawn → routable) from expired-no-refresh (not routable). Presence only —
+  // a present token may still be revoked/aged, which surfaces at spawn, not here.
+  | { status: 'expired'; hasRefreshToken: boolean }
   | { status: 'absent' };
 
 /** Path to the claude-cli credentials file (honors CLAUDE_CONFIG_DIR like the CLI). */
@@ -247,7 +250,7 @@ export function resolveClaudeOAuthCred(
   const nowMs = deps.nowMs ?? Date.now();
   const raw = readFileText(claudeCredentialsPath());
   if (!raw) return { status: 'absent' };
-  let oauth: { accessToken?: unknown; expiresAt?: unknown } | undefined;
+  let oauth: { accessToken?: unknown; expiresAt?: unknown; refreshToken?: unknown } | undefined;
   try {
     oauth = (JSON.parse(raw) as { claudeAiOauth?: typeof oauth }).claudeAiOauth;
   } catch {
@@ -256,7 +259,10 @@ export function resolveClaudeOAuthCred(
   const token = oauth?.accessToken;
   if (typeof token !== 'string' || token.length === 0) return { status: 'absent' };
   const expiresAt = oauth?.expiresAt;
-  if (typeof expiresAt === 'number' && expiresAt <= nowMs) return { status: 'expired' };
+  if (typeof expiresAt === 'number' && expiresAt <= nowMs) {
+    const refresh = oauth?.refreshToken;
+    return { status: 'expired', hasRefreshToken: typeof refresh === 'string' && refresh.length > 0 };
+  }
   return { status: 'present', token };
 }
 
