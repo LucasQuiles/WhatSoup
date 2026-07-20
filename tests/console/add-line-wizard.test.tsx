@@ -644,9 +644,17 @@ describe('AddLineWizard — config and review workflow', () => {
     render(<WizardWrapper />)
 
     await advanceToReviewStep()
-    const editButtons = screen.getAllByRole('button', { name: /edit/i })
+    // Target the Config card's edit control by its heading, not by position —
+    // cards (e.g. the PR 4b-ii Transport card) can be inserted above it.
+    const configHeading = screen
+      .getAllByText('Config')
+      .find((el) => el.className.includes('text-data'))
+    expect(configHeading).toBeDefined()
+    const configEdit = within(configHeading!.parentElement as HTMLElement).getByRole('button', {
+      name: /edit/i,
+    })
     await act(async () => {
-      fireEvent.click(editButtons[2])
+      fireEvent.click(configEdit)
     })
 
     await waitFor(() => expect(screen.getByRole('tab', { name: /behavior/i })).toBeDefined())

@@ -366,6 +366,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ open, onClose }) => {
             {currentStep === 1 && (
               <LinkStep
                 lineName={formData.name as string}
+                transport={formData.transport as string | null}
                 alreadyLinked={lineLinked}
                 onComplete={() => {
                   setLineLinked(true)

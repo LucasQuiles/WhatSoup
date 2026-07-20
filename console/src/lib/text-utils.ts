@@ -63,11 +63,49 @@ export function resolveDisplayName(name: string | number | null | undefined): st
   if (/^\d{15,}$/.test(text)) return `Contact ${text.slice(-4)}`
   // If it ends with @lid, it's a Linked ID JID
   if (text.endsWith('@lid')) return `Contact ${text.split('@')[0].slice(-4)}`
+  // Signal UUID JID — truncate the UUID for display (PR 4b, S5)
+  if (text.endsWith('@signal')) {
+    const local = text.slice(0, -'@signal'.length)
+    return /^[0-9a-f-]{36}$/i.test(local) ? `Signal …${local.slice(-4)}` : formatPhone(local)
+  }
+  // iMessage AppleID JID — show the email/handle as-is (PR 4b, S5)
+  if (text.endsWith('@imessage')) {
+    const local = text.slice(0, -'@imessage'.length)
+    return local.includes('@') ? local : formatPhone(local)
+  }
   // If it's all digits (raw JID), format as phone
   if (/^\d{5,}$/.test(text)) return formatPhone(text)
   // If it ends with @g.us or @s.whatsapp.net, extract and format
   if (text.includes('@')) return formatPhone(text.split('@')[0])
   return text
+}
+
+/**
+ * Build the line's self-JID for group resolution (PR 4b, S5).
+ *
+ * Baileys: `{phone}@s.whatsapp.net` (the bot's own PN JID — the server's
+ * group roster keys on this form).
+ * Signal:  `{selfId}@signal` — selfId is the Signal number or UUID from the
+ *          line's signalConfig.
+ * iMessage: `{selfId}@imessage` — selfId is the AppleID or phone from the
+ *          line's imessageConfig.
+ * Twilio:  same as baileys (Twilio surfaces use the same WhatsApp JID space).
+ *
+ * `selfId` is the protocol-native identity (phone for baileys/twilio, number
+ * or UUID for signal, AppleID or phone for imessage). Callers pass the
+ * transport kind from the line's config / health block.
+ */
+export function buildSelfJid(
+  transportKind: string | null | undefined,
+  selfId: string | number | null | undefined,
+): string | undefined {
+  const id = textValue(selfId).trim()
+  if (!id) return undefined
+  const kind = transportKind ?? 'baileys'
+  if (kind === 'signal') return `${id}@signal`
+  if (kind === 'imessage') return `${id}@imessage`
+  // baileys + twilio + unknown → WhatsApp JID space (back-compat)
+  return `${id}@s.whatsapp.net`
 }
 
 /** Format large numbers compactly: 1234 → "1.2K", 2450000 → "2.4M" */

@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { createElement } from 'react';
 import MessageContent from '../../console/src/components/MessageContent';
-import { formatWhatsAppText } from '../../console/src/lib/format-wa-text';
+import { formatWhatsAppText } from '../../console/src/lib/format-message-text';
 import type { Message } from '../../console/src/types';
 
 afterEach(() => cleanup());

@@ -6,7 +6,7 @@ import { useLine, useChats, useMessages, useAccess, useLogs, useTyping, useCheck
 import { useMetrics } from '../hooks/use-metrics'
 import type { MetricsRange } from '../types'
 import { getPreference, setPreference } from '../lib/preferences'
-import { formatCount } from '../lib/text-utils'
+import { formatCount, buildSelfJid } from '../lib/text-utils'
 import { useToast } from '../hooks/toast-context'
 import { api } from '../lib/api'
 import ModeBadge from '../components/ModeBadge'
@@ -348,7 +348,15 @@ export default function LineDetail() {
                   freshness={checkpointsFreshness}
                 />
               )}
-              {activeTab === 'groups' && <GroupsTab lineName={name || ''} myJid={line.phone ? `${line.phone}@s.whatsapp.net` : undefined} />}
+              {activeTab === 'groups' && (
+                <GroupsTab
+                  lineName={name || ''}
+                  myJid={buildSelfJid(
+                    line.health?.transport?.kind,
+                    line.health?.transport?.selfId ?? line.phone,
+                  )}
+                />
+              )}
             </ErrorBoundary>
           </motion.div>
         </AnimatePresence>

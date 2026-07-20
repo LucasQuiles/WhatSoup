@@ -1,26 +1,40 @@
 import { type FC, useState, useEffect, useCallback, useRef } from 'react'
-import { CheckCircle2, XCircle, Loader2, Clock } from 'lucide-react'
+import { CheckCircle2, XCircle, Loader2, Clock, BookOpen, Server } from 'lucide-react'
 import QrDisplay from '../QrDisplay'
 import { parseAuthErrorMessage, parseQrPayload } from './link-step-events'
 import { getApiTicket, isProductionConsole } from '../../lib/api'
+import { isTransportKind, type TransportKind } from '../../lib/transport-meta'
 import { Button } from '../primitives/Button'
+import { Checkbox } from '../primitives/Checkbox'
 
 interface LinkStepProps {
   lineName: string
   onComplete: () => void
   alreadyLinked?: boolean
+  /** Line transport from the wizard Identity step (S3 design). */
+  transport?: TransportKind | string | null
 }
 
 type LinkStatus = 'waiting' | 'connected' | 'error'
 
-const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete, alreadyLinked = false }) => {
+const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete, alreadyLinked = false, transport }) => {
+  const kind: TransportKind = isTransportKind(transport) ? transport : 'baileys'
   const [status, setStatus] = useState<LinkStatus>(alreadyLinked ? 'connected' : 'waiting')
   const [qrValue, setQrValue] = useState('')
   const [errorMsg, setErrorMsg] = useState('')
   const [retryKey, setRetryKey] = useState(0)
   const [qrAge, setQrAge] = useState(0)
+  const [selfAttested, setSelfAttested] = useState(false)
   const qrTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const retryCountRef = useRef(0)
+
+  // Twilio has no link step — API credentials carry the auth. Auto-advance
+  // when the operator reaches this step (S3 design).
+  useEffect(() => {
+    if (kind === 'twilio' && !alreadyLinked) {
+      onComplete()
+    }
+  }, [kind, alreadyLinked, onComplete])
 
   useEffect(() => {
     let es: EventSource | null = null
@@ -179,7 +193,60 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete, alreadyLinked = fal
     )
   }
 
-  // waiting state
+  // waiting state — branch per transport (S3 design)
+  if (kind === 'signal' || kind === 'imessage') {
+    return (
+      <div className="flex flex-col items-start text-left gap-[var(--sp-4)] py-[var(--sp-4)] px-0 max-w-xl">
+        <div className="flex items-center gap-[var(--sp-3)]">
+          <Server size={32} strokeWidth={1.5} className="text-text-2" />
+          <span className="c-heading text-lg">
+            {kind === 'signal' ? 'Link signal-cli out-of-band' : 'Link iMessage backend out-of-band'}
+          </span>
+        </div>
+
+        {kind === 'signal' ? (
+          <div className="flex flex-col gap-[var(--sp-2)] text-text-2 c-body">
+            <p>This line uses Signal via signal-cli. Link signal-cli on this host first:</p>
+            <code className="block rounded-md bg-surface-raised border border-border-subtle px-3 py-2 font-mono text-sm text-text-1">
+              signal-cli -a +14155551234 link
+            </code>
+            <p>Scan the QR with your Signal app, then return here.</p>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-[var(--sp-2)] text-text-2 c-body">
+            <p>This line uses iMessage via a macOS host.</p>
+            <ol className="list-decimal pl-5 flex flex-col gap-[var(--sp-1)]">
+              <li>Install BlueBubbles Server (or imsg) on the Mac signed into iMessage.</li>
+              <li>Enable the REST API and copy the server URL + password.</li>
+              <li>Enter them in the Config step (next).</li>
+            </ol>
+          </div>
+        )}
+
+        <a
+          href={kind === 'signal' ? 'docs/runbooks/signal-transport.md' : 'docs/runbooks/imessage-transport.md'}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex items-center gap-[var(--sp-2)] text-brand-accent c-body"
+        >
+          <BookOpen size={16} />
+          Open the full {kind === 'signal' ? 'Signal' : 'iMessage'} runbook
+        </a>
+
+        <Checkbox
+          checked={selfAttested}
+          onChange={setSelfAttested}
+          label={kind === 'signal' ? 'signal-cli is linked and registered' : 'Backend is reachable'}
+          className="c-body text-text-1"
+        />
+
+        <Button variant="primary" onClick={onComplete} disabled={!selfAttested}>
+          Continue
+        </Button>
+      </div>
+    )
+  }
+
   const qrExpiring = qrAge > 45 // QR codes expire after ~60s, warn at 45
   return (
     <div
@@ -199,9 +266,13 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete, alreadyLinked = fal
       )}
 
       <div className="flex flex-col gap-[var(--sp-1)]">
-        <span className="c-heading">Scan with WhatsApp</span>
+        <span className="c-heading">
+          {kind === 'twilio' ? 'Twilio credentials carry the auth' : 'Scan with WhatsApp'}
+        </span>
         <span className="c-body text-text-2">
-          Open WhatsApp &rarr; Settings &rarr; Linked Devices &rarr; Link a Device
+          {kind === 'twilio'
+            ? 'This step is skipped — configure Twilio credentials in the next step.'
+            : 'Open WhatsApp → Settings → Linked Devices → Link a Device'}
         </span>
       </div>
 
