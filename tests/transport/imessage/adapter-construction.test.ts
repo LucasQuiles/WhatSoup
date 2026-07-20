@@ -40,7 +40,7 @@ describe('ImessageAdapter — construction', () => {
       makeImessageConfig({ account: 'mac-mini' }),
       new MockImessagePort(),
     );
-    expect(adapter.channelId).toBe(makeChannelId('imessage', 'mac-mini'));
+    expect(adapter.selfRef().channel).toBe(makeChannelId('imessage', 'mac-mini'));
     expect(adapter.capabilities.channel).toBe('imessage:mac-mini');
   });
 

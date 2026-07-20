@@ -2,14 +2,14 @@
 import { describe, it, expect } from 'vitest';
 import { ImessageAdapter } from '../../../src/transport/imessage/adapter.ts';
 import { MockImessagePort, makeImessageConfig, peerConversationRef } from './mock-port.ts';
-import type { MessageRef } from '../../../src/core/transport-refs.ts';
+import { makeChannelId, type ChannelId, type MessageRef } from '../../../src/core/transport-refs.ts';
 
 function makeAdapter(port: MockImessagePort = new MockImessagePort()) {
   const adapter = new ImessageAdapter(makeImessageConfig(), port);
-  return { adapter, port, channelId: adapter.channelId };
+  return { adapter, port, channelId: makeChannelId('imessage', 'test') };
 }
 
-function peerMessageRef(channelId: ImessageAdapter['channelId'], peerId: string, guid: string): MessageRef {
+function peerMessageRef(channelId: ChannelId, peerId: string, guid: string): MessageRef {
   return { channel: channelId, conversation: peerId, id: guid };
 }
 
@@ -41,7 +41,7 @@ describe('ImessageAdapter — SupportsReactions', () => {
   it('react() rejects a cross-channel target', async () => {
     const { adapter } = makeAdapter();
     const target: MessageRef = {
-      channel: 'imessage:nope' as ImessageAdapter['channelId'],
+      channel: 'imessage:nope' as ChannelId,
       conversation: 'u@icloud.com',
       id: 'guid-1',
     };
@@ -86,7 +86,7 @@ describe('ImessageAdapter — SupportsReadReceipts', () => {
   it('markRead() rejects a cross-channel target', async () => {
     const { adapter } = makeAdapter();
     const target: MessageRef = {
-      channel: 'imessage:nope' as ImessageAdapter['channelId'],
+      channel: 'imessage:nope' as ChannelId,
       conversation: 'u@icloud.com',
       id: 'guid-1',
     };

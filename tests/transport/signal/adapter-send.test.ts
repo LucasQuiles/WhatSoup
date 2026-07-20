@@ -7,7 +7,7 @@ import { makeChannelId, type ChannelId } from '../../../src/core/transport-refs.
 
 function makeAdapter(port: MockSignalPort = new MockSignalPort()) {
   const adapter = new SignalAdapter(makeSignalConfig(), port);
-  return { adapter, port, channelId: adapter.channelId };
+  return { adapter, port, channelId: makeChannelId('signal', 'test') };
 }
 
 describe('SignalAdapter — sendText happy path', () => {

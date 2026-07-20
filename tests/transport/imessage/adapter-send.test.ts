@@ -2,11 +2,11 @@
 import { describe, it, expect } from 'vitest';
 import { ImessageAdapter } from '../../../src/transport/imessage/adapter.ts';
 import { MockImessagePort, makeImessageConfig, peerConversationRef } from './mock-port.ts';
-import type { ChannelId } from '../../../src/core/transport-refs.ts';
+import { makeChannelId, type ChannelId } from '../../../src/core/transport-refs.ts';
 
 function makeAdapter(port: MockImessagePort = new MockImessagePort()) {
   const adapter = new ImessageAdapter(makeImessageConfig(), port);
-  return { adapter, port, channelId: adapter.channelId as ChannelId };
+  return { adapter, port, channelId: makeChannelId('imessage', 'test') };
 }
 
 describe('ImessageAdapter — sendText happy path', () => {

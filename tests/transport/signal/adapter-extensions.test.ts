@@ -4,14 +4,14 @@
 import { describe, it, expect } from 'vitest';
 import { SignalAdapter } from '../../../src/transport/signal/adapter.ts';
 import { MockSignalPort, makeSignalConfig, peerConversationRef } from './mock-port.ts';
-import type { MessageRef } from '../../../src/core/transport-refs.ts';
+import { makeChannelId, type ChannelId, type MessageRef } from '../../../src/core/transport-refs.ts';
 
 function makeAdapter(port: MockSignalPort = new MockSignalPort()) {
   const adapter = new SignalAdapter(makeSignalConfig(), port);
-  return { adapter, port, channelId: adapter.channelId };
+  return { adapter, port, channelId: makeChannelId('signal', 'test') };
 }
 
-function peerMessageRef(channelId: SignalAdapter['channelId'], peerId: string, msgTs: number): MessageRef {
+function peerMessageRef(channelId: ChannelId, peerId: string, msgTs: number): MessageRef {
   return { channel: channelId, conversation: peerId, id: String(msgTs) };
 }
 
@@ -44,7 +44,7 @@ describe('SignalAdapter — SupportsReactions', () => {
   it('react() rejects a cross-channel target', async () => {
     const { adapter } = makeAdapter();
     const target: MessageRef = {
-      channel: 'signal:wrong' as SignalAdapter['channelId'],
+      channel: 'signal:wrong' as ChannelId,
       conversation: '+15559990000',
       id: '12345',
     };
@@ -54,8 +54,7 @@ describe('SignalAdapter — SupportsReactions', () => {
 
   it('react() rejects a non-numeric message id', async () => {
     const { adapter, channelId } = makeAdapter();
-    const target = peerMessageRef(channelId, '+15559990000', NaN);
-    target.id = 'not-a-timestamp';
+    const target: MessageRef = { channel: channelId, conversation: '+15559990000', id: 'not-a-timestamp' };
 
     await expect(adapter.react(target, '👍')).rejects.toThrow(/positive epoch-ms timestamp/);
   });
@@ -97,7 +96,7 @@ describe('SignalAdapter — SupportsReadReceipts', () => {
 
   it('markRead() rejects a cross-channel target', async () => {
     const { adapter } = makeAdapter();
-    const target: MessageRef = { channel: 'signal:nope' as SignalAdapter['channelId'], conversation: '+15559990000', id: '1' };
+    const target: MessageRef = { channel: 'signal:nope' as ChannelId, conversation: '+15559990000', id: '1' };
     await expect(adapter.markRead(target)).rejects.toThrow(/does not match adapter channel/);
   });
 });

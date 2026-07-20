@@ -16,7 +16,7 @@ describe('SignalAdapter — construction', () => {
 
   it('builds a signal ChannelId from config.account', () => {
     const adapter = new SignalAdapter(makeSignalConfig({ account: 'ops-line' }), new MockSignalPort());
-    expect(adapter.channelId).toBe(makeChannelId('signal', 'ops-line'));
+    expect(adapter.selfRef().channel).toBe(makeChannelId('signal', 'ops-line'));
     expect(adapter.capabilities.channel).toBe('signal:ops-line');
   });
 
