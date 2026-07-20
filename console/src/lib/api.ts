@@ -39,6 +39,7 @@ import type {
   GroupInfo,
   LineInstance,
   LineMetrics,
+  RateLimitsPayload,
   LogEntry,
   Message,
   MetricsRange,
@@ -440,6 +441,9 @@ export const api = {
 
   getProviderStatus: (name: string) =>
     apiFetch<ProviderStatus>(`/api/lines/${encodeURIComponent(name)}/provider-status`),
+
+  getRateLimits: (name: string) =>
+    apiFetch<RateLimitsPayload>(`/api/lines/${encodeURIComponent(name)}/rate-limits`),
 
   // ── MCP proxy operations ──
 

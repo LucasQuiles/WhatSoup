@@ -20,6 +20,7 @@ import { handleSend, handleAccessUpdate, handleSaveContact, handleRestart, handl
 import { handleGetFeed } from './routes/feed.ts';
 import { handleGetMetrics } from './routes/metrics.ts';
 import { handleGetFleetMetrics } from './routes/fleet-metrics.ts';
+import { handleGetRateLimits } from './routes/rate-limits.ts';
 import { handleGetVersion, handleUpdate } from './routes/update.ts';
 import { createServiceManager, type ServiceManager } from './platform.ts';
 import {
@@ -115,6 +116,7 @@ type RouteParamsByHandler = {
   getLine: NameRouteParams;
   getLineProviderStatus: NameRouteParams;
   getLineCheckpoints: NameRouteParams;
+  getRateLimits: NameRouteParams;
   getSilences: EmptyRouteParams;
   addSilence: EmptyRouteParams;
   removeSilence: NameRouteParams;
@@ -184,6 +186,7 @@ const NAME_ROUTE_HANDLERS = new Set<NamedRouteKey>([
   'getLine',
   'getLineProviderStatus',
   'getLineCheckpoints',
+  'getRateLimits',
   'putCredential',
   'deleteCredential',
   'verifyCredential',
@@ -243,6 +246,7 @@ const handlers: { [K in RouteKey]: RouteHandler<K> } = {
   getLine:      (req, res, deps, params) => handleGetLine(req, res, deps, params),
   getLineProviderStatus: (req, res, deps, params) => handleGetLineProviderStatus(req, res, deps, params),
   getLineCheckpoints: (req, res, deps, params) => handleGetLineCheckpoints(req, res, deps, params),
+  getRateLimits: (req, res, deps, params) => handleGetRateLimits(req, res, deps, params),
   getSilences:  (req, res, _deps, _params) => handleGetSilences(req, res),
   addSilence:   (req, res, _deps, _params) => handleAddSilence(req, res),
   removeSilence: (req, res, _deps, params) => handleRemoveSilence(req, res, { instance: params.name }),
@@ -338,6 +342,7 @@ const ROUTES = [
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/exists$/, handler: 'checkExists' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/provider-status$/, handler: 'getLineProviderStatus' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/checkpoints$/, handler: 'getLineCheckpoints' },
+  { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/rate-limits$/, handler: 'getRateLimits' },
   { method: 'DELETE', path: /^\/api\/lines\/(?<name>[^/]+)$/, handler: 'deleteLine' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)$/, handler: 'getLine' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/chats$/, handler: 'getChats' },
