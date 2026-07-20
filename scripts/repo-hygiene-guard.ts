@@ -4,6 +4,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   git,
+  isDocumentationEmailFixture,
   isOperationalProtocolToken,
   normalizeRepoPath,
   operationalReleaseHygieneFiles,
@@ -112,6 +113,9 @@ const releaseHygieneFiles = [
 const allowedEnvVarNameToken = /^[A-Z][A-Z0-9_]+_(?:MUTATIONS|TOKEN|KEY|URL|PATH)$/;
 const allowedMessagingAddressRhs = /@(?:s\.whatsapp\.net|c\.us|lid)$/i;
 
+// Reserved documentation-domain fixtures are defined once in guard-core so this
+// guard and publication-guard cannot disagree about the same token.
+
 // SSOT for the fleet private-host labels: the publication detection rule below,
 // and consumers like the bot-errors collector-unit hygiene test, import this.
 export const privateHostLabels = [
@@ -180,6 +184,10 @@ const disallowedCommitAuthorPatterns: GuardPattern[] = [
 export function isAllowedPatternMatch(filePath: string, code: string, token: string): boolean {
   if (allowedEnvVarNameToken.test(token)) return true;
   if (code === 'personal-email' && allowedMessagingAddressRhs.test(token)) return true;
+  // File content only. scanCommitMessage scans with an empty filePath, and a commit
+  // message never legitimately carries an email fixture — so the documentation-domain
+  // allowance must not reach it, or history text would silently gain an email escape.
+  if (code === 'personal-email' && filePath !== '' && isDocumentationEmailFixture(token)) return true;
   if (code === 'operator-phone') {
     return allowedPhoneFixture.test(token.replace(/[\s().-]/g, ''));
   }
