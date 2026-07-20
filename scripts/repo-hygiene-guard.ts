@@ -74,8 +74,16 @@ const fixtureFiles = new Set([
 // subtree as fixtures for these hygiene SHAPE patterns; the suite's own corpus_guard /
 // sensitive_pattern_loader covers its corpus. NOTE: no external secret scanner backstops this
 // repo (the repo hooksPath shadows the global git hooks) - keep exemptions minimal.
+//
+// The iMessage transport test subtree (tests/transport/imessage/) is exempted from
+// the email-shape guards because iMessage's identity model is fundamentally email-based
+// (AppleID). Every test that exercises send/receive/react paths necessarily constructs
+// email-shaped recipient fixtures; there is no phone-only form. Other guards (secrets,
+// paths, phones) stay fully enforced.
 const isFixtureFile = (filePath: string): boolean =>
-  fixtureFiles.has(filePath) || filePath.startsWith('tools/agent-runtime-probes/');
+  fixtureFiles.has(filePath)
+  || filePath.startsWith('tools/agent-runtime-probes/')
+  || filePath.startsWith('tests/transport/imessage/');
 
 // Files that necessarily contain the operational allowlist's own private-SHAPED
 // literals: the shared allowlist source in lib, and the publication-guard test
