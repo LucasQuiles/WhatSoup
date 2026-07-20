@@ -1221,6 +1221,26 @@ async finalizePerChatProcessorError(
 ): Promise<void> {
   const context = turn.runtimeContext;
   if (!context) {
+    if (turn.inboundSeq === undefined) {
+      // A fully contextless per-chat turn — a scheduled agent job or an
+      // access-replay, both of which bypass ingest and carry no inboundSeq, so
+      // createRuntimeTurnForDispatch minted no context. There is nothing durable
+      // to finalize. Mirror finalizeSharedProcessorError: clean up and return
+      // WITHOUT throwing. Throwing here set TurnQueue.halted (which is never
+      // reset), so a single contextless processor throw silenced the chat
+      // permanently — every later message dropped as queue_halted.
+      this.host.getQueueForChat(turn.chatJid, mapKey)?.abortTurn();
+      this.host.replyGuarantee?.disarm(undefined);
+      this.host.perChatTurnText.delete(mapKey);
+      this.host.perChatTurnSourceMessageId.delete(mapKey);
+      this.host.perChatTurnContentType.delete(mapKey);
+      this.host.perChatTurnSuppressedReplySatisfaction.delete(mapKey);
+      this.host.perChatAssistantItemText.delete(mapKey);
+      this.host.perChatRouteMarkerHold.delete(mapKey);
+      return;
+    }
+    // A turn that DOES carry a seq but lost its context is a genuine accounting
+    // failure — keep failing closed (Family B), so the halt still guards it.
     throw new Error('Per-chat processor failure has no immutable runtime turn context', { cause: error });
   }
   if (

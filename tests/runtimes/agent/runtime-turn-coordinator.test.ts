@@ -142,3 +142,73 @@ describe('turnFinalizationBookkeeping — token-loss visibility (#1775)', () => 
     expect(emitAlertChecked).not.toHaveBeenCalled();
   });
 });
+
+describe('finalizePerChatProcessorError — contextless turn must not halt the chat (C-F3)', () => {
+  const MAP_KEY = 'chatA';
+  const CHAT_JID = 'chatA@s.whatsapp.net';
+
+  function makeCoordinatorWithHost() {
+    const queue = { abortTurn: vi.fn() };
+    const host = {
+      instanceName: 'cf3-test',
+      getQueueForChat: vi.fn(() => queue),
+      replyGuarantee: { disarm: vi.fn(), arm: vi.fn() },
+      perChatRuntimeTurnContexts: new Map<string, unknown>(),
+      perChatTurnText: new Map<string, string>([[MAP_KEY, 'partial']]),
+      perChatTurnSourceMessageId: new Map<string, string>([[MAP_KEY, 'wamid-x']]),
+      perChatTurnContentType: new Map<string, string>([[MAP_KEY, 'text']]),
+      perChatTurnSuppressedReplySatisfaction: new Set<string>([MAP_KEY]),
+      perChatAssistantItemText: new Map<string, unknown>([[MAP_KEY, {}]]),
+      perChatRouteMarkerHold: new Map<string, string>([[MAP_KEY, '']]),
+    } as unknown as RuntimeTurnCoordinatorPort;
+    return { coordinator: new RuntimeTurnCoordinator(host), host: host as unknown as {
+      getQueueForChat: ReturnType<typeof vi.fn>;
+      replyGuarantee: { disarm: ReturnType<typeof vi.fn> };
+      perChatTurnText: Map<string, string>;
+    }, queue };
+  }
+
+  const contextlessTurn = {
+    sourceMessageId: 'wamid-x',
+    conversationKey: MAP_KEY,
+    chatJid: CHAT_JID,
+    senderJid: 'sender@s.whatsapp.net',
+    senderName: null,
+    text: 'scheduled job',
+    isGroup: false,
+    contentType: 'text' as const,
+    // No runtimeContext, no inboundSeq — a scheduled agent job / access-replay.
+  };
+
+  it('cleans up and returns instead of throwing for a contextless per-chat turn', async () => {
+    const { coordinator, host, queue } = makeCoordinatorWithHost();
+
+    // RED before the fix: this rejects with 'has no immutable runtime turn context',
+    // which sets TurnQueue.halted (never reset) and silences the chat forever.
+    await expect(
+      (coordinator as unknown as {
+        finalizePerChatProcessorError: (k: string, t: unknown, e: unknown) => Promise<void>;
+      }).finalizePerChatProcessorError(MAP_KEY, contextlessTurn, new Error('provider dispatch failed')),
+      'a contextless processor throw must be tolerated, not halt the chat (parity with the shared path)',
+    ).resolves.toBeUndefined();
+
+    expect(queue.abortTurn, 'the aborted turn must be cleared').toHaveBeenCalled();
+    expect(host.replyGuarantee.disarm).toHaveBeenCalled();
+    expect(host.perChatTurnText.has(MAP_KEY), 'stale per-chat scratch must be cleared').toBe(false);
+  });
+
+  it('still throws for a context-bearing turn with no outbound queue (genuine halt preserved)', async () => {
+    // The tolerant branch must not swallow a real accounting failure; a turn WITH
+    // a context that cannot be finalized must still throw (Family B).
+    const { coordinator, host } = makeCoordinatorWithHost();
+    (host as unknown as { getQueueForChat: ReturnType<typeof vi.fn> }).getQueueForChat.mockReturnValue(undefined);
+    const withContext = { ...contextlessTurn, inboundSeq: 7, runtimeContext: context() };
+
+    await expect(
+      (coordinator as unknown as {
+        finalizePerChatProcessorError: (k: string, t: unknown, e: unknown) => Promise<void>;
+      }).finalizePerChatProcessorError(MAP_KEY, withContext, new Error('boom')),
+      'a context-bearing turn that cannot finalize must still halt — the guard is preserved',
+    ).rejects.toThrow();
+  });
+});
