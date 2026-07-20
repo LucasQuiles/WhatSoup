@@ -491,9 +491,11 @@ describe('handleGetLineProviderStatus', () => {
 
   it.each([
     [
-      'top-level model',
+      // B27 fix 1 (3d7d81344): agentOptions.model is the agent-scoped knob and
+      // now wins over a top-level model key — the resolver reads it first.
+      'agentOptions.model over top-level model',
       { model: 'claude-opus-4-8', agentOptions: { provider: 'claude-cli', model: 'agent-options-model' } },
-      'claude-opus-4-8',
+      'agent-options-model',
     ],
     [
       'models.conversation',

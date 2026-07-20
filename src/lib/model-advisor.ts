@@ -26,6 +26,9 @@ import {
 } from './model-resolver.ts';
 import { errorMessage } from './error-message.ts';
 import { resolveApiKey } from './api-key-resolver.ts';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 const log = createChildLogger('model-advisor');
 
@@ -172,6 +175,140 @@ export async function fetchLiveModelIdsWithStatus(): Promise<{ ids: string[]; li
 /** Fetch currently-served model IDs from vendors we have credentials for. */
 export async function fetchLiveModelIds(): Promise<string[]> {
   return (await fetchLiveModelIdsWithStatus()).ids;
+}
+
+/** A vendor Models-API failure classified by HTTP CONCEPT, not render vocabulary
+ *  — 'unauthorized' (the key is not accepted), 'timeout' (no answer in time), or
+ *  'lookup-failed' (the server could not answer: 5xx / 429 / network). */
+export type ModelFetchFailureCategory = 'unauthorized' | 'timeout' | 'lookup-failed';
+
+/**
+ * Classify a {@link LiveModelFetchFailure}. This is the SINGLE status→category
+ * mapping any vendor-facing caller shares, so a 403 can never be labeled a
+ * 'timeout' by one path and 'unauthorized' by another (Q 2b: extract the
+ * classifier, don't reimplement it per call site). Render-reason translation
+ * stays in the caller (the catalogue resolver), also in one place.
+ */
+export function classifyModelFetchFailure(failure: { status?: number; reason: string }): ModelFetchFailureCategory {
+  if (failure.status === 401 || failure.status === 403) return 'unauthorized';
+  // AbortSignal.timeout rejects with a TimeoutError/AbortError and no HTTP
+  // status; fetchModelIds surfaces its (sanitized) message as `reason`.
+  if (failure.status === undefined && /timeout|abort/i.test(failure.reason)) return 'timeout';
+  // 5xx, 429, or any other non-auth failure: the server could not answer.
+  return 'lookup-failed';
+}
+
+const ANTHROPIC_MODELS_URL = 'https://api.anthropic.com/v1/models?limit=100';
+
+/**
+ * The claude-cli's OWN OAuth credential state, read from its credentials file.
+ * The subscription CLI authenticates `/v1/models` with `Authorization: Bearer`
+ * (verified live on the WhatSoup host 2026-07-20 — a Bearer OAuth token, NOT an x-api-key,
+ * returns the org catalogue), so q needs no separate anthropic API key to list
+ * models — it reuses the credential the harness already has.
+ *   - `present` → an unexpired accessToken to send as `Bearer`;
+ *   - `expired` → an accessToken past `expiresAt`; the CLI refreshes it on the
+ *     next agent turn, so this is a benign, self-healing TRANSIENT state (never
+ *     rendered as "credential rejected");
+ *   - `absent`  → no creds file / no token → the caller falls back to an
+ *     explicit ANTHROPIC_API_KEY, and if that is also missing, `no-key`.
+ */
+export type ClaudeOAuthCredResult =
+  | { status: 'present'; token: string }
+  // `hasRefreshToken` distinguishes expired-refreshable (the CLI refreshes at
+  // spawn → routable) from expired-no-refresh (not routable). Presence only —
+  // a present token may still be revoked/aged, which surfaces at spawn, not here.
+  | { status: 'expired'; hasRefreshToken: boolean }
+  | { status: 'absent' };
+
+/** Path to the claude-cli credentials file (honors CLAUDE_CONFIG_DIR like the CLI). */
+function claudeCredentialsPath(): string {
+  const configDir = process.env['CLAUDE_CONFIG_DIR'] || join(homedir(), '.claude');
+  return join(configDir, '.credentials.json');
+}
+
+/** Default reader: the raw credentials-file text, or null if unreadable/missing. */
+function defaultReadCredentialsText(path: string): string | null {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve the claude-cli OAuth credential, read FRESH from disk each call (the
+ * CLI rewrites the refreshed token in place, so a cached token would go stale).
+ * Never logs or returns the token except in the `present` result the caller
+ * hands straight to the single `/v1/models` GET. `readFileText` + `nowMs` are
+ * injectable so unit tests need no real creds file or wall clock.
+ */
+export function resolveClaudeOAuthCred(
+  deps: { readFileText?: (path: string) => string | null; nowMs?: number } = {},
+): ClaudeOAuthCredResult {
+  const readFileText = deps.readFileText ?? defaultReadCredentialsText;
+  const nowMs = deps.nowMs ?? Date.now();
+  const raw = readFileText(claudeCredentialsPath());
+  if (!raw) return { status: 'absent' };
+  let oauth: { accessToken?: unknown; expiresAt?: unknown; refreshToken?: unknown } | undefined;
+  try {
+    oauth = (JSON.parse(raw) as { claudeAiOauth?: typeof oauth }).claudeAiOauth;
+  } catch {
+    return { status: 'absent' };
+  }
+  const token = oauth?.accessToken;
+  if (typeof token !== 'string' || token.length === 0) return { status: 'absent' };
+  const expiresAt = oauth?.expiresAt;
+  if (typeof expiresAt === 'number' && expiresAt <= nowMs) {
+    const refresh = oauth?.refreshToken;
+    return { status: 'expired', hasRefreshToken: typeof refresh === 'string' && refresh.length > 0 };
+  }
+  return { status: 'present', token };
+}
+
+/** Anthropic-only live model listing, classified. */
+export type AnthropicModelsResult =
+  | { status: 'ok'; ids: string[] }
+  | { status: 'no-key' }
+  | { status: 'credential-expired' }
+  | { status: 'failed'; category: ModelFetchFailureCategory };
+
+/**
+ * Fetch the anthropic org's live model catalogue for the `/config model`
+ * resolver (claude-cli harness). Reuses the internal `fetchModelIds` + the
+ * shared classifier — deliberately NOT `fetchLiveModelIdsWithStatus`, which
+ * flattens all vendors and cannot tag an id's vendor: rendering an OpenAI id
+ * under an `anthropic /v1/models` provenance label would make the source line
+ * lie (Q 2b).
+ *
+ * Credential precedence for the claude-cli harness (Q 2026-07-20, "this uses
+ * oauth — we don't need a key"): prefer the CLI's OWN OAuth token (`Bearer`, no
+ * separate key needed), fall back to an explicit ANTHROPIC_API_KEY (`x-api-key`).
+ * The returned set is the credential's ORG catalogue, not "what the harness can
+ * run" — the caller labels it as such. `readOAuthCred` is injectable for tests.
+ */
+export async function fetchAnthropicModelIdsWithStatus(
+  deps: { readOAuthCred?: () => ClaudeOAuthCredResult } = {},
+): Promise<AnthropicModelsResult> {
+  const cred = (deps.readOAuthCred ?? (() => resolveClaudeOAuthCred()))();
+  // Expired OAuth token → benign transient (self-heals when the CLI refreshes);
+  // do not spend a request that would 401 and read as "rejected".
+  if (cred.status === 'expired') return { status: 'credential-expired' };
+
+  let headers: Record<string, string>;
+  if (cred.status === 'present') {
+    headers = { Authorization: `Bearer ${cred.token}`, 'anthropic-version': '2023-06-01' };
+  } else {
+    const anthropicKey = resolveApiKey({ envVar: 'ANTHROPIC_API_KEY' });
+    if (!anthropicKey) return { status: 'no-key' };
+    headers = { 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01' };
+  }
+
+  const result = await fetchModelIds(ANTHROPIC_MODELS_URL, headers, 'anthropic');
+  if (result.failure) {
+    return { status: 'failed', category: classifyModelFetchFailure(result.failure) };
+  }
+  return { status: 'ok', ids: result.ids };
 }
 
 // ---------------------------------------------------------------------------

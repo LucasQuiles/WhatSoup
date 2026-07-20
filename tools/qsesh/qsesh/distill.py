@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 from .errors import QseshError
 from .jsonio import dumps_json
+from .metrics import inventory_counts, size_metrics
 from .model import (
     CleanTurn,
     DistilledSession,
@@ -132,6 +133,7 @@ def distill(
     *,
     source_pointer: str,
     raw_pointer: str,
+    gzip_bytes: int,
 ) -> DistilledSession:
     if not isinstance(extracted, ExtractedSession):
         raise _fail("distill-input")
@@ -394,6 +396,10 @@ def distill(
     session_costs = [value for value in reported_costs if value["scope"] == "session"]
     clean_user_count = sum(turn.role == "user" for turn in clean_turns)
     clean_assistant_count = sum(turn.role == "assistant" for turn in clean_turns)
+    size = size_metrics(
+        events, tuple(clean_turns), extracted.snapshot.raw_bytes, gzip_bytes
+    )
+    inventory = inventory_counts(tools, skills, files, subagents, compactions)
     record: dict[str, JsonValue] = {
         "compaction_count": len(compaction_indices),
         "cost_totals": session_costs or None,
@@ -406,6 +412,7 @@ def distill(
         "harness_version": harness_version,
         "host_id": candidate.host_id,
         "identity_digest": identity.digest.hex(),
+        "inventory_counts": inventory,
         "meta_counts": dict(sorted(meta_counts.items())),
         "models": sorted(models),
         "native_id": candidate.native_id,
@@ -414,6 +421,7 @@ def distill(
         "raw_pointer": raw_pointer,
         "reported_costs": reported_costs,
         "reported_usage": reported_usage,
+        "size_metrics": size,
         "skill_invocation_count": sum(skill_counts.values()),
         "source_digest": extracted.snapshot.source_digest,
         "source_pointer": source_pointer,

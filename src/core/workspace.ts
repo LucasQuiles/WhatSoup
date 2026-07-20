@@ -25,6 +25,7 @@ import {
   assertPrivateDirectorySync,
   ensurePrivateDirectorySync,
   writePrivateFileSync,
+  writePrivateJsonMarkerSync,
 } from '../lib/private-fs.ts';
 
 export { writePrivateFileSync } from '../lib/private-fs.ts';
@@ -195,7 +196,7 @@ export function writePermissionsSettings(
       // null or {} = reset to global inheritance; non-empty object = override
       merged.enabledPlugins = settings.enabledPlugins ?? {};
     }
-    writePrivateFileSync(settingsPath, JSON.stringify(merged, null, 2));
+    writePrivateJsonMarkerSync(settingsPath, merged, { label: 'settings.json' });
   } catch (err) {
     log.error({ err, claudeDir }, 'failed to write permissions settings');
     throw err;
@@ -236,8 +237,8 @@ function stripOrphanSandboxHook(settings: Record<string, unknown>): boolean {
  * Ensure a settings.json with a permissions block exists in claudeDir.
  * - If settings.json doesn't exist, writes the default for the instance type.
  * - If settings.json exists but has no permissions block, adds the default.
- * - If settings.json already has a permissions block, leaves it alone unless another
- *   config-driven rewrite is needed.
+ * - If settings.json already has a permissions block, preserves custom entries and
+ *   restores the repo-owned deny floor when it has drifted.
  * - For non-agent types, does nothing.
  *
  * This is the safety-net called from AgentRuntime.start() to prevent
@@ -265,28 +266,45 @@ export function ensurePermissionsSettings(
         // instance has no sandbox config, writeSandboxArtifacts never runs, so a hook
         // left over from a prior sandboxed config is unmanaged and bricks every tool
         // if its policy file goes missing. Strip it here (the always-run reconciler).
-        let strippedOrphanHook = false;
+        let settingsChanged = false;
         if (opts?.hasSandbox === false) {
-          strippedOrphanHook = stripOrphanSandboxHook(existing);
+          settingsChanged = stripOrphanSandboxHook(existing);
         }
         // Apply enabledPlugins from config — always overwrite to stay in sync
         if (enabledPlugins) {
           existing.enabledPlugins = enabledPlugins;
-          if (existing.permissions && typeof existing.permissions === 'object') {
-            const permissions = existing.permissions as PermissionsSettings['permissions'];
-            existing.permissions = {
-              ...permissions,
-              deny: applyRequiredDeny(Array.isArray(permissions.deny) ? permissions.deny : []),
-            };
-          }
-          writePrivateFileSync(settingsPath, JSON.stringify(existing, null, 2));
-          strippedOrphanHook = false; // persisted above
+          settingsChanged = true;
         }
-        if (existing.permissions) {
-          // Already has permissions — don't overwrite, but persist a hook strip if one happened.
-          if (strippedOrphanHook) writePrivateFileSync(settingsPath, JSON.stringify(existing, null, 2));
+
+        if (existing.permissions && typeof existing.permissions === 'object') {
+          const permissions = existing.permissions as Record<string, unknown>;
+          const validPermissions = Array.isArray(permissions.allow)
+            && permissions.allow.every((entry) => typeof entry === 'string')
+            && Array.isArray(permissions.deny)
+            && permissions.deny.every((entry) => typeof entry === 'string')
+            && permissions.defaultMode === 'bypassPermissions';
+          if (validPermissions) {
+            const currentDeny = permissions.deny as string[];
+            const repairedDeny = applyRequiredDeny(currentDeny);
+            if (repairedDeny.length !== currentDeny.length) {
+              existing.permissions = {
+                ...permissions,
+                deny: repairedDeny,
+              };
+              settingsChanged = true;
+            }
+          } else {
+            existing.permissions = {
+              ...defaults.permissions,
+            };
+            settingsChanged = true;
+          }
+          if (settingsChanged) {
+            writePrivateFileSync(settingsPath, JSON.stringify(existing, null, 2));
+          }
           return;
         }
+
         // Has settings (e.g. hooks) but no permissions — add them
         const merged = { ...existing, permissions: defaults.permissions };
         writePrivateFileSync(settingsPath, JSON.stringify(merged, null, 2));

@@ -317,6 +317,37 @@ vi.mock('../../../src/core/access-list.ts', async (importOriginal) => {
   return actual;
 });
 
+// B21-A F4b: overridable classifier/registry seams to simulate a FUTURE
+// COMMAND_REGISTRY entry the local-command switch has no case for. Default
+// (current == null) delegates to the real implementations, so every other
+// test sees byte-identical behavior.
+const { classifyInputOverrideRef, commandSpecOverrideRef } = vi.hoisted(() => ({
+  classifyInputOverrideRef: { current: null as null | ((text: string) => unknown) },
+  commandSpecOverrideRef: { current: null as null | ((name: string) => unknown) },
+}));
+
+vi.mock('../../../src/runtimes/agent/commands.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/runtimes/agent/commands.ts')>();
+  return {
+    ...actual,
+    classifyInput: ((text: string, opts?: { routingAliases?: boolean }) =>
+      classifyInputOverrideRef.current
+        ? classifyInputOverrideRef.current(text)
+        : actual.classifyInput(text, opts)) as typeof actual.classifyInput,
+  };
+});
+
+vi.mock('../../../src/runtimes/agent/command-registry.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/runtimes/agent/command-registry.ts')>();
+  return {
+    ...actual,
+    getCommandSpec: ((name: string) =>
+      commandSpecOverrideRef.current
+        ? commandSpecOverrideRef.current(name)
+        : actual.getCommandSpec(name as never)) as typeof actual.getCommandSpec,
+  };
+});
+
 // Mock workspace utilities so sandboxPerChat tests don't touch the filesystem
 const { mockChatJidToWorkspace, mockProvisionWorkspace } = vi.hoisted(() => ({
   mockChatJidToWorkspace: vi.fn((_instanceCwd: string, chatJid: string) => {
@@ -433,7 +464,7 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 import * as registerAllModule from '../../../src/mcp/register-all.ts';
 import { AgentRuntime, isUsageLimitMessage, serializePendingPoll, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
 import { parseGeminiAcpEvent } from '../../../src/runtimes/agent/providers/gemini-acp-parser.ts';
-import { providerUnknownTerminalNotice, renderUserMessage } from '../../../src/runtimes/agent/response-templates.ts';
+import { providerServerErrorNoFallbackNotice, providerUnknownTerminalNotice, renderUserMessage } from '../../../src/runtimes/agent/response-templates.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import { TurnQueue } from '../../../src/runtimes/agent/turn-queue.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
@@ -2525,7 +2556,9 @@ describe('AgentRuntime', () => {
 
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await sendAndDrain(runtime, makeMsg({ content: '/new' }));
+    // single mode: /new hits SHARED session state (this.session is one session
+    // across all chats), so it now requires admin (W1-T3 RULING).
+    await sendAndDrain(runtime, makeMsg({ content: '/new', senderJid: '15550100001@s.whatsapp.net' }));
 
     expect(mockSession.handleNew).toHaveBeenCalled();
     const enqueuedTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
@@ -2546,7 +2579,9 @@ describe('AgentRuntime', () => {
     mockSession.handleNew.mockClear();
     mockQueue.abortTurn.mockClear();
 
-    await sendAndDrain(runtime, makeMsg({ content: '/new', inboundSeq: 78 }));
+    // Admin sender: exercises the turn-active rejection, not the admin gate
+    // (single mode requires admin for /new since W1-T3's RULING).
+    await sendAndDrain(runtime, makeMsg({ content: '/new', inboundSeq: 78, senderJid: '15550100001@s.whatsapp.net' }));
 
     expect(mockSession.handleNew).not.toHaveBeenCalled();
     expect(mockQueue.abortTurn).not.toHaveBeenCalled();
@@ -2726,7 +2761,8 @@ describe('AgentRuntime', () => {
     const prepareSpy = db.raw.prepare as unknown as { mock: { calls: unknown[][] }; mockClear: () => void };
     prepareSpy.mockClear();
 
-    await sendAndDrain(runtime, makeMsg({ content: '/new' }));
+    // single mode: /new requires admin (W1-T3 RULING — SHARED session state).
+    await sendAndDrain(runtime, makeMsg({ content: '/new', senderJid: '15550100001@s.whatsapp.net' }));
 
     const sql = prepareSpy.mock.calls.map((c) => String(c[0]));
     expect(sql.some((s) => s.includes('DELETE FROM standby_notice'))).toBe(true);
@@ -2747,7 +2783,8 @@ describe('AgentRuntime', () => {
     await emitAgentResultWithoutTokens('done');
     mockQueue.abortTurn.mockClear();
 
-    await sendAndDrain(runtime, makeMsg({ content: '/new' }));
+    // single mode: /new requires admin (W1-T3 RULING — SHARED session state).
+    await sendAndDrain(runtime, makeMsg({ content: '/new', senderJid: '15550100001@s.whatsapp.net' }));
 
     expect(mockQueue.abortTurn).toHaveBeenCalledTimes(1);
   });
@@ -2768,7 +2805,8 @@ describe('AgentRuntime', () => {
     state.autoCompact.consecutiveRapidRearms.set(globalKey, 2);
     state.autoCompact.measureNextTurn.add(globalKey);
 
-    await sendAndDrain(runtime, makeMsg({ content: '/new' }));
+    // single mode: /new requires admin (W1-T3 RULING — SHARED session state).
+    await sendAndDrain(runtime, makeMsg({ content: '/new', senderJid: '15550100001@s.whatsapp.net' }));
 
     expect(state.autoCompact.cooldownUntil.has(globalKey)).toBe(false);
     expect(state.autoCompact.lastSuccessAt.has(globalKey)).toBe(false);
@@ -2822,9 +2860,9 @@ describe('AgentRuntime', () => {
   // complete/'local_command_handled' when no forward happens, and this PR wraps
   // the switch in try/catch so a throwing handler cannot escape to the turnChain
   // catch-all (which would falsely stamp the row failed/'error'); the completion
-  // still runs after the catch. Early-`return` paths inside the switch (e.g.
-  // admin-denied /new) bypass the completion — those rows are reclaimed by this
-  // PR's stuck-inbound sweep as failed/'stale_reclaim' within the sweep window.
+  // still runs after the catch. The gate's deny path returns BEFORE the switch,
+  // so it finalizes its row itself (markInboundSkipped/'not_authorized', B21-A F1)
+  // — no early-return path may leave a row stranded in 'processing'.
   describe('local-command inbound finalization (W2a)', () => {
     it('finalizes the journaled inbound row for a /help local command', async () => {
       const db = makeDb();
@@ -2848,15 +2886,15 @@ describe('AgentRuntime', () => {
       duraDb.close();
     });
 
-    it('admin-denied early return leaves the row processing; the stuck-inbound sweep reclaims it as stale_reclaim', async () => {
+    it('admin-denied gated command finalizes the row terminally — never strands it in processing (B21-A F1)', async () => {
       const db = makeDb();
       const { messenger } = makeMessenger();
-      // Non-admin sender (admin is 15550100001 in mockConfig): /sessions hits a
-      // bare `return` inside the switch, BYPASSING the R14 post-switch completion
-      // (merged-design contract). The row stays 'processing' — and this PR's own
-      // stuck-inbound sweep is the designed reclaim path: after the 24h window it
-      // fails the row with failure_class 'stale_reclaim'. This test pins BOTH
-      // halves of that contract.
+      // Non-admin sender (admin is 15550100001 in mockConfig): /sessions is
+      // denied. The deny path returns BEFORE the R14 post-switch completion, so
+      // it must finalize the row ITSELF — markInboundSkipped/'not_authorized',
+      // mirroring the 'empty_content' skip — otherwise the row strands in
+      // 'processing' until the stuck-inbound sweep falsely reclaims it as a
+      // FAILURE (stale_reclaim), counting an authz denial as a processing fault.
       const runtime = new AgentRuntime(db, messenger);
       const duraDb = new RealDatabase(':memory:');
       duraDb.open();
@@ -2871,22 +2909,15 @@ describe('AgentRuntime', () => {
         inboundSeq: seq,
       }));
 
-      const before = duraDb.raw.prepare(
-        'SELECT processing_status FROM inbound_events WHERE seq = ?',
-      ).get(seq) as { processing_status: string };
-      expect(before.processing_status).toBe('processing'); // bare return bypassed R14 completion
+      const row = duraDb.raw.prepare(
+        'SELECT processing_status, terminal_reason FROM inbound_events WHERE seq = ?',
+      ).get(seq) as { processing_status: string; terminal_reason: string | null };
+      expect(row.processing_status).toBe('complete'); // terminal — NOT 'processing'
+      expect(row.terminal_reason).toBe('not_authorized');
 
-      // The designed reclaim path: backdate past the sweep window, run the sweep.
+      // Nothing left for the stuck-inbound sweep to reclaim as a false failure.
       duraDb.raw.prepare(`UPDATE inbound_events SET received_at = datetime('now', '-25 hours') WHERE seq = ?`).run(seq);
-      const sweep = durability.sweepStuckInbound();
-      expect(sweep.failedStale).toBe(1);
-
-      const after = duraDb.raw.prepare(
-        'SELECT processing_status, terminal_reason, failure_class FROM inbound_events WHERE seq = ?',
-      ).get(seq) as { processing_status: string; terminal_reason: string | null; failure_class: string | null };
-      expect(after.processing_status).toBe('failed');
-      expect(after.terminal_reason).toBe('error');
-      expect(after.failure_class).toBe('stale_reclaim');
+      expect(durability.sweepStuckInbound().failedStale).toBe(0);
 
       duraDb.close();
     });
@@ -2909,7 +2940,8 @@ describe('AgentRuntime', () => {
       mockSession.handleNew.mockRejectedValueOnce(new Error('session reset failed'));
 
       const seq = durability.journalInbound('m-new-throw', 'k-new-throw', 'test@s.whatsapp.net', 'agent');
-      await sendAndDrain(runtime, makeMsg({ content: '/new', inboundSeq: seq }));
+      // single mode: /new requires admin (W1-T3 RULING — SHARED session state).
+      await sendAndDrain(runtime, makeMsg({ content: '/new', inboundSeq: seq, senderJid: '15550100001@s.whatsapp.net' }));
 
       expect(mockSession.handleNew).toHaveBeenCalled();
       const row = duraDb.raw.prepare(
@@ -4588,6 +4620,120 @@ describe('AgentRuntime', () => {
     expect(text).toContain('Last activity:');
   });
 
+  // ── B26 item 3: /status shows the model, token counts, and context budget ──
+  // Owner ruling: '/status should show more than provider default — model
+  // should be explicit, show the session's current token counts, session
+  // limits'. Model follows the same honesty rule as /model status
+  // ('(configured)' label; the served weight is unobservable). Token counts
+  // come from the agent_sessions denorm columns; the context budget pairs the
+  // since-last-compact quantity maybeStartAutoCompact actually compares with
+  // the threshold the runtime actually applies (configured, else the 150k
+  // default).
+
+  it('B26: /status renders the configured model, token counts, and the auto-compact context budget', async () => {
+    const cfg = mockConfig as unknown as Record<string, unknown>;
+    cfg.agentProvider = 'claude-cli';
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      mockActiveAgentSession(42);
+      mockSession.getProviderId.mockReturnValue('claude-cli');
+      mockGetSessionTokenSnapshot.mockReturnValue({
+        totalInputTokens: 96_200,
+        totalOutputTokens: 4_100,
+        totalCacheReadTokens: 0,
+        lastCompactInputTokens: 0,
+        lastCompactOutputTokens: 0,
+        lastCompactCacheReadTokens: 0,
+      });
+      const runtime = new AgentRuntime(db, messenger, 'test', { model: 'claude-opus-4-8' });
+      await runtime.start();
+      await runtime.handleMessage(makeMsg({ content: '/status' }));
+      const text = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string)[0];
+      expect(text).toContain('Model: claude-opus-4-8 (configured)');
+      expect(text).toContain('Tokens: 96.2k in / 4.1k out');
+      // Unconfigured threshold → the default the runtime actually applies (150k).
+      expect(text).toContain('Context: 96.2k / 150k before auto-compact');
+    } finally {
+      delete cfg.agentProvider;
+      mockGetSessionTokenSnapshot.mockReturnValue(null);
+    }
+  });
+
+  it('B26: /status context budget uses the configured threshold and the since-last-compact quantity', async () => {
+    const cfg = mockConfig as unknown as Record<string, unknown>;
+    cfg.agentProvider = 'claude-cli';
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      mockActiveAgentSession(42);
+      mockSession.getProviderId.mockReturnValue('claude-cli');
+      mockGetSessionTokenSnapshot.mockReturnValue({
+        totalInputTokens: 150_000,
+        totalOutputTokens: 500,
+        totalCacheReadTokens: 50_000,
+        lastCompactInputTokens: 40_000,
+        lastCompactOutputTokens: 0,
+        lastCompactCacheReadTokens: 10_000,
+      });
+      const runtime = new AgentRuntime(db, messenger, 'test', { model: 'claude-opus-4-8', autoCompactInputTokens: 200_000 });
+      await runtime.start();
+      await runtime.handleMessage(makeMsg({ content: '/status' }));
+      const text = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string)[0];
+      // (150k + 50k) − (40k + 10k) = 150k consumed since last compact — the
+      // exact quantity the auto-compact trigger compares (runtime.ts:1273-76).
+      expect(text).toContain('Context: 150k / 200k before auto-compact');
+      expect(text).toContain('Tokens: 150k in / 500 out');
+    } finally {
+      delete cfg.agentProvider;
+      mockGetSessionTokenSnapshot.mockReturnValue(null);
+    }
+  });
+
+  it('B26: /status renders an honest not-configured model and omits token lines when no counts are recorded', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    mockActiveAgentSession(42);
+    mockSession.getProviderId.mockReturnValue('claude-cli');
+    mockGetSessionTokenSnapshot.mockReturnValue(null);
+    const runtime = new AgentRuntime(db, messenger); // no model configured
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: '/status' }));
+    const text = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string)[0];
+    expect(text).toContain('Model: provider default (not configured)');
+    expect(text).not.toContain('Tokens:');
+    expect(text).not.toContain('Context:');
+  });
+
+  it('B26: /status suppresses the context budget for a non-claude session (auto-compact cannot run there) but keeps token counts', async () => {
+    const cfg = mockConfig as unknown as Record<string, unknown>;
+    cfg.agentProvider = 'claude-cli';
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      mockActiveAgentSession(42);
+      mockSession.getProviderId.mockReturnValue('codex-cli');
+      mockGetSessionTokenSnapshot.mockReturnValue({
+        totalInputTokens: 2_000,
+        totalOutputTokens: 300,
+        totalCacheReadTokens: 0,
+        lastCompactInputTokens: 0,
+        lastCompactOutputTokens: 0,
+        lastCompactCacheReadTokens: 0,
+      });
+      const runtime = new AgentRuntime(db, messenger, 'test', { model: 'claude-opus-4-8' });
+      await runtime.start();
+      await runtime.handleMessage(makeMsg({ content: '/status' }));
+      const text = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string)[0];
+      expect(text).toContain('Tokens: 2k in / 300 out');
+      expect(text).not.toContain('before auto-compact');
+    } finally {
+      delete cfg.agentProvider;
+      mockGetSessionTokenSnapshot.mockReturnValue(null);
+      mockSession.getProviderId.mockReturnValue('claude-cli');
+    }
+  });
+
   it('/status with no session returns no-session message', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
@@ -5640,7 +5786,7 @@ describe('AgentRuntime', () => {
     capturedOnEventRef.current!({ type: 'result', text: raw, isError: true });
 
     await vi.waitFor(() =>
-      expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('an operator has been notified')),
+      expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('automatic recovery failed')),
     );
     const forwardedRaw = mockQueue.enqueueResultText.mock.calls.map((a) => a[0] as string);
     expect(forwardedRaw).not.toContain(raw);
@@ -5712,7 +5858,7 @@ describe('AgentRuntime', () => {
     );
     // ...the user gets only the generic notice...
     const allUserText = mockQueue.enqueueText.mock.calls.map((a) => a[0] as string).join('\n');
-    expect(allUserText).toContain('an operator has been notified');
+    expect(allUserText).toContain('automatic recovery failed');
     expect(allUserText).not.toContain('secret-token-xyz789');
     // ...and the raw provider text is NEVER forwarded to the user.
     const forwardedRaw = mockQueue.enqueueResultText.mock.calls.map((a) => a[0] as string);
@@ -5774,7 +5920,7 @@ describe('AgentRuntime', () => {
     expect(forwardedRaw).not.toContain(socketText);
     // A generic notice is sent
     const allText = mockQueue.enqueueText.mock.calls.map((a) => a[0] as string).join('\n');
-    expect(allText).toMatch(/operator has been notified|try again/i);
+    expect(allText).toMatch(/temporary connection problem|resend/i);
     // Turn capability records transient-network
     const turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
     expect(turnCapability.lastTurnErrorClass).toBe('transient-network');
@@ -5875,7 +6021,7 @@ describe('AgentRuntime', () => {
     const raw = 'API Error 503: Service temporarily unavailable. overloaded_error';
     capturedOnEventRef.current!({ type: 'result', text: raw, isError: true });
 
-    await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalledWith(providerUnknownTerminalNotice()));
+    await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalledWith(providerServerErrorNoFallbackNotice()));
     expect(runtime.getFallbackState().fallbackReason).toBeNull();
     expect(mockSession.shutdown).toHaveBeenCalled();
     expect(mockQueue.enqueueResultText).not.toHaveBeenCalledWith(raw);
@@ -5903,6 +6049,64 @@ describe('AgentRuntime', () => {
     expect(mockQueue.enqueueResultText).not.toHaveBeenCalledWith(raw);
     const turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
     expect(turnCapability.lastTurnErrorClass).toBe('auth-required');
+  });
+
+  // Gap 2: emitNoFallbackReauthNotice says "An operator has been notified", but
+  // no ops alert fired on the no-fallback auth path — the only result-path
+  // alerts are provider_transient_network / provider_unknown_terminal, and
+  // fallback alerts only fire when a fallback activates. Back the claim with a
+  // real alert so the copy is truthful.
+  it('auth-required result without fallback fires an ops alert so the "operator notified" claim is backed (single path)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
+
+    mockEmitAlert.mockClear();
+    const raw = 'Authentication required. Sign in to continue.';
+    capturedOnEventRef.current!({ type: 'result', text: raw, isError: true });
+
+    await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('re-authentication')));
+    // The notice's "operator has been notified" must be backed by a real alert.
+    expect(mockEmitAlert.mock.calls.find((c) => c[1] === 'provider_auth_required_no_fallback')).toBeDefined();
+    // Redaction: raw provider text is never forwarded to the user.
+    const enqueued = mockQueue.enqueueText.mock.calls.map((a) => a[0] as string);
+    expect(enqueued.some((t) => t.includes(raw))).toBe(false);
+  });
+
+  // Gap 1: a per-model-tier usage cap is NOT resolved by waiting — the misleading
+  // "Please try again after the limit resets" masks the real remedy (an operator
+  // must add credits or switch the model). Neither branch fires an alert, so the
+  // copy must name the operator remedy as a call to action, not claim an operator
+  // was already notified.
+  it('usageLimitNotice names the operator remedy (add credits / switch model) instead of passive waiting (single path)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+
+    type NoticeHost = { agentFallbacks: unknown[]; usageLimitNotice(): string };
+    const host = runtime as unknown as NoticeHost;
+
+    // No-fallback branch: waiting cannot clear a per-tier cap.
+    host.agentFallbacks = [];
+    const noFallback = host.usageLimitNotice();
+    expect(noFallback).not.toMatch(/try again after the limit resets/i);
+    expect(noFallback.toLowerCase()).toContain('add credits');
+    expect(noFallback.toLowerCase()).toMatch(/switch my model|change my model/);
+
+    // Fallback-configured-but-could-not-continue branch: no alert fires here
+    // either, so the copy must not claim an operator was already notified.
+    host.agentFallbacks = [{ provider: 'codex-cli', model: 'x' }];
+    const withFallback = host.usageLimitNotice();
+    expect(withFallback.toLowerCase()).toContain('add credits');
+    expect(withFallback).not.toMatch(/operator has been notified/i);
+
+    // Redaction: neither branch leaks a phone/JID or raw provider text.
+    for (const msg of [noFallback, withFallback]) {
+      expect(msg).not.toMatch(/@s\.whatsapp\.net|@lid|\+?\d{7,}/);
+    }
   });
 
   it('model-unavailable result with fallback notifies and shuts down when replay is blocked (single path)', async () => {
@@ -6190,7 +6394,8 @@ describe('AgentRuntime', () => {
     await vi.waitFor(() => expect(state.rejectedTerminalTeardowns.has(mockSession)).toBe(true));
 
     mockSession.handleNew.mockClear();
-    await sendAndDrain(runtime, makeMsg({ messageId: 'blocked-new', content: '/new' }));
+    // single mode: /new requires admin (W1-T3 RULING — SHARED session state).
+    await sendAndDrain(runtime, makeMsg({ messageId: 'blocked-new', content: '/new', senderJid: '15550100001@s.whatsapp.net' }));
 
     expect(mockSession.handleNew).not.toHaveBeenCalled();
     expect(state.rejectedTerminalTeardowns.has(mockSession)).toBe(true);
@@ -7998,7 +8203,13 @@ describe('AgentRuntime', () => {
     expect(MockOutboundQueueCtor).toHaveBeenCalledWith(
       messenger,
       'recreated@s.whatsapp.net',
-      { conversationKey: 'recreated' },
+      // T8-F1+F2: createOutboundQueue also injects the admin-peer + fallback
+      // callbacks (peerIsAdmin/fallbackActive) — asserted by identity below.
+      {
+        conversationKey: 'recreated',
+        peerIsAdmin: expect.any(Function),
+        fallbackActive: expect.any(Function),
+      },
     );
   });
 
@@ -8024,7 +8235,11 @@ describe('AgentRuntime', () => {
     expect(MockOutboundQueueCtor).toHaveBeenLastCalledWith(
       messenger,
       lidJid,
-      { conversationKey: 'mapped-phone' },
+      {
+        conversationKey: 'mapped-phone',
+        peerIsAdmin: expect.any(Function),
+        fallbackActive: expect.any(Function),
+      },
     );
   });
 
@@ -8052,7 +8267,12 @@ describe('AgentRuntime', () => {
     expect(MockOutboundQueueCtor).toHaveBeenCalledWith(
       messenger,
       'inherit@s.whatsapp.net',
-      { conversationKey: 'inherit', senderToken: priorToken },
+      {
+        conversationKey: 'inherit',
+        senderToken: priorToken,
+        peerIsAdmin: expect.any(Function),
+        fallbackActive: expect.any(Function),
+      },
     );
   });
 
@@ -8570,7 +8790,8 @@ describe('AgentRuntime', () => {
     const constructorCallsBefore = (MockOutboundQueueCtor as unknown as ReturnType<typeof vi.fn>).mock.calls.length;
 
     mockSession.getStatus.mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
-    await sendAndDrain(runtime, makeMsg({ content: '/new' }));
+    // single mode: /new requires admin (W1-T3 RULING — SHARED session state).
+    await sendAndDrain(runtime, makeMsg({ content: '/new', senderJid: '15550100001@s.whatsapp.net' }));
 
     const constructorCallsAfter = (MockOutboundQueueCtor as unknown as ReturnType<typeof vi.fn>).mock.calls.length;
     expect(constructorCallsAfter).toBeGreaterThan(constructorCallsBefore);
@@ -8845,7 +9066,7 @@ describe('AgentRuntime', () => {
 
   // @check CHK-067
 // @traces REQ-012.AC-06
-  it('shared: /new is silently ignored for non-admin senders', async () => {
+  it('shared: /new is refused for non-admin senders with a visible denial (B21-A F4a: never silent)', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
 
@@ -8858,8 +9079,9 @@ describe('AgentRuntime', () => {
 
     // handleNew should NOT have been called
     expect(mockSession.handleNew).not.toHaveBeenCalled();
-    // No response sent
-    expect(mockQueue.enqueueText).not.toHaveBeenCalled();
+    // The ONLY reply is the denial notice — no reset ack, no silent drop.
+    const enqueuedTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
+    expect(enqueuedTexts).toEqual(['_Not authorized._']);
   });
 
   // @check CHK-067
@@ -8887,21 +9109,132 @@ describe('AgentRuntime', () => {
     expect(texts.some((t) => t.includes('new session'))).toBe(true);
   });
 
-  it('non-shared: /new is allowed for any sender (backward compat)', async () => {
+  it('single mode: /new is DENIED for a non-admin sender (WG-5 corrected scope, INVERTS former "backward compat" invariant)', async () => {
+    // W1-T3 RULING (W1-PACKET.md :499-501): the old "any sender" invariant this
+    // test used to assert WAS the WG-5 bug. In default single/non-shared scope
+    // `this.session` is ONE session shared across ALL chats (runtime.ts:760), so
+    // a non-admin /new there wipes state others share — affectsShared is true
+    // whenever sessionScope !== 'per_chat', regardless of isGroup.
     const db = makeDb();
     const { messenger } = makeMessenger();
 
-    const runtime = new AgentRuntime(db, messenger); // default: shared=false
+    const runtime = new AgentRuntime(db, messenger); // default: single scope, non-shared
     await runtime.start();
-    await sendAndDrain(runtime, makeMsg({ content: 'hello', senderJid: '99999999@s.whatsapp.net' }));
+    await sendAndDrain(runtime, makeMsg({ content: 'hello', senderJid: '15559998888@s.whatsapp.net' }));
     await emitAgentResultWithoutTokens('done');
 
     await sendAndDrain(runtime, makeMsg({
       content: '/new',
-      senderJid: '99999999@s.whatsapp.net', // not admin, but non-shared allows it
+      senderJid: '15559998888@s.whatsapp.net', // not admin — single-mode reset now denied
+    }));
+
+    expect(mockSession.handleNew).not.toHaveBeenCalled();
+    // B21-A F4a: denial is refused-but-visible — the only reply is the notice.
+    const denialTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
+    expect(denialTexts.some((t) => t.includes('Not authorized'))).toBe(true);
+    expect(denialTexts.some((t) => /new session/i.test(t))).toBe(false);
+  });
+
+  it('single mode: /new with EMPTY adminPhones is allowed for any sender (no-admin instance keeps its only reset path, B21-A F2)', async () => {
+    // The admin-shared-scope denied-predicate would otherwise deny EVERY sender
+    // when config.adminPhones is empty — but on the pre-registry base,
+    // single-mode /new was ungated ("non-shared: /new is allowed for any
+    // sender"), and an instance with no admin configured has NO other reset
+    // path: denying everyone is a total /new lockout, not a security posture.
+    // Empty adminPhones therefore leaves 'admin-shared-scope' ungated (base
+    // parity); plain 'admin'-gated commands stay denied (see sibling test).
+    mockConfig.adminPhones = new Set<string>();
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const runtime = new AgentRuntime(db, messenger); // default: single scope, non-shared
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ content: 'hello', senderJid: '15559998888@s.whatsapp.net' }));
+    await emitAgentResultWithoutTokens('done');
+    mockQueue.enqueueText.mockClear();
+    mockSession.handleNew.mockClear();
+
+    await sendAndDrain(runtime, makeMsg({
+      content: '/new',
+      senderJid: '15559998888@s.whatsapp.net', // any sender — no admin exists to authorize
     }));
 
     expect(mockSession.handleNew).toHaveBeenCalled();
+    const enqueuedTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
+    expect(enqueuedTexts.some((t) => /new session/i.test(t))).toBe(true);
+  });
+
+  it('single mode: /sessions with EMPTY adminPhones stays DENIED (empty-set relaxation is admin-shared-scope ONLY, B21-A F2)', async () => {
+    // The lockout exemption must NOT leak into the plain 'admin' gate: with no
+    // admin configured there is legitimately nobody who may run cross-session
+    // admin surfaces (/sessions, /kill-session) — they were admin-gated on the
+    // pre-registry base too.
+    mockConfig.adminPhones = new Set<string>();
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({
+      content: '/sessions',
+      senderJid: '15559998888@s.whatsapp.net',
+    }));
+
+    expect(sentMessages.map((m) => m.text).some((t) => t.includes('Active Sessions'))).toBe(false);
+    expect(sentMessages.map((m) => m.text).some((t) => t.includes('No active sessions'))).toBe(false);
+  });
+
+  describe('B21-A F4: denial visibility + registry-append fall-through', () => {
+    it("replies '_Not authorized._' on a denied 'admin'-gated command (denial is user-visible, never silent)", async () => {
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({
+        content: '/sessions',
+        senderJid: '15550001111@s.whatsapp.net', // not admin
+      }));
+      // The ONLY reply is the denial notice, on the same queue-routed send
+      // path other local-command replies use.
+      const texts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
+      expect(texts).toEqual(['_Not authorized._']);
+      // The gated surface itself stayed refused — no session list on either path.
+      expect(sentMessages.map((m) => m.text)).toEqual([]);
+    });
+
+    it('a registry command with NO switch case falls through loudly as a forwarded turn (never silently swallowed)', async () => {
+      // Simulate a FUTURE COMMAND_REGISTRY entry (Phase-2 '/stats') whose
+      // handler was never added to the local-command switch. Pre-registry, an
+      // unrecognized command was forwarded to the agent CLI; the switch must
+      // preserve that via an explicit default (warn + forward) instead of
+      // swallowing the input with a bogus 'local_command_handled' completion.
+      classifyInputOverrideRef.current = () => ({ type: 'local', command: 'stats', args: undefined });
+      commandSpecOverrideRef.current = () => ({
+        name: 'stats',
+        summary: 'future command without a handler',
+        syntax: '/stats',
+        tier: 'transport-local',
+        gate: 'none',
+        visibility: 'end-user',
+        errorClasses: ['internal'],
+      });
+      try {
+        const db = makeDb();
+        const { messenger } = makeMessenger();
+        const runtime = new AgentRuntime(db, messenger);
+        await runtime.start();
+        await sendAndDrain(runtime, makeMsg({ content: '/stats' }));
+        await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith('/stats'));
+        expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+          expect.objectContaining({ command: 'stats' }),
+          expect.stringContaining('no handler'),
+        );
+      } finally {
+        classifyInputOverrideRef.current = null;
+        commandSpecOverrideRef.current = null;
+      }
+    });
   });
 
   it('non-sandboxed per_chat serializes same-chat messages while spawnSession is pending', async () => {
@@ -10258,7 +10591,7 @@ describe('AgentRuntime', () => {
     const forwardedRaw = (queue.enqueueResultText as ReturnType<typeof vi.fn>).mock.calls.map((a: unknown[]) => a[0] as string);
     expect(forwardedRaw).not.toContain(socketText);
     // Generic user notice is sent
-    expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('operator has been notified'));
+    expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('resend'));
   });
 
   // QR-211: mirrors the transient-network test above (same handleEventWithContext
@@ -10464,7 +10797,7 @@ describe('AgentRuntime', () => {
         'warning',
       );
       // Generic notice reaches the user.
-      expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('operator has been notified'));
+      expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('resend'));
       // Raw provider text is not forwarded.
       const forwardedRaw = (queue.enqueueResultText as ReturnType<typeof vi.fn>).mock.calls.map((a: unknown[]) => a[0] as string);
       expect(forwardedRaw).not.toContain(SOCKET_TEXT);
@@ -14017,6 +14350,51 @@ describe('AgentRuntime', () => {
       expect(listText).toContain('1. unknown');
     });
 
+    it('/sessions (single scope) renders the resolved chat name via the choke point, not the raw JID (B27)', async () => {
+      // Parity lock with the per_chat listing (B23/B25 F2/F3): the
+      // single-scope branch must route its chat ref through
+      // formatChatRefForOwner too — the live identifier sweep flagged this
+      // surface, and the per_chat assertions above never covered it.
+      // SQL-dispatching prepare mock (established pattern): the DM has a
+      // contacts.display_name row.
+      const db = makeDb();
+      (db.raw.prepare as ReturnType<typeof vi.fn>).mockImplementation((sql: string) => {
+        if (sql.includes('FROM contacts')) {
+          return { run: vi.fn(), get: vi.fn(() => ({ display_name: 'Lucas', notify_name: null })), all: vi.fn(() => []) };
+        }
+        if (sql.includes('FROM agent_sessions')) {
+          return { run: vi.fn(), get: vi.fn(() => ({ total_input_tokens: 1500, total_output_tokens: 700 })), all: vi.fn(() => []) };
+        }
+        return { run: vi.fn(), get: vi.fn(), all: vi.fn(() => []) };
+      });
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+
+      const state = runtime as unknown as {
+        session: typeof mockSession;
+        activeChatJid: string | null;
+      };
+      mockSession.getStatus.mockReturnValue({
+        active: true,
+        pid: 323,
+        sessionId: 'sess-single-3',
+        startedAt: new Date(Date.now() - 60_000).toISOString(),
+        messageCount: 5,
+        lastMessageAt: null,
+      });
+      mockSession.getDbRowId.mockReturnValue(42);
+      state.session = mockSession;
+      state.activeChatJid = '15550001111@s.whatsapp.net';
+
+      await sendAndDrain(runtime, makeMsg({ content: '/sessions', senderJid: adminSender }));
+
+      const listText = sentMessages.map((m) => m.text).find((t) => t.includes('Active Sessions'));
+      // Resolved name + the B25 F3 stable ref suffix, never the raw JID.
+      expect(listText).toContain('1. Lucas (…1111)');
+      expect(listText).not.toContain('15550001111');
+    });
+
     it('/sessions (single scope) reports no active sessions when session inactive', async () => {
       const db = makeDb();
       const { messenger, sentMessages } = makeMessenger();
@@ -14107,6 +14485,67 @@ describe('AgentRuntime', () => {
 
       const listText = sentMessages.map((m) => m.text).find((t) => t.includes('Active Sessions'));
       expect(listText).toContain('— ?,');
+    });
+
+    // ── b28 r2c: the requesting chat's own session renders "Current session" ──
+    // The row whose conversation key matches the chat that sent /sessions has
+    // its number/name identifier replaced by "Current session"; every OTHER row
+    // still routes through the sanitize choke point (formatChatRefForOwner).
+    // Kill-index semantics are unchanged (positional, not parsed from the name).
+    it('b28 r2c: /sessions (per_chat) labels the requesting chat\'s own session "Current session", others by resolved name', async () => {
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await runtime.start();
+
+      const state = runtime as unknown as {
+        chatSessions: Map<string, ReturnType<typeof makePerChatSession>>;
+        resolvePerChatMapKey(jid: string): string;
+      };
+      const startedAt = new Date(Date.now() - 5_000).toISOString();
+      // makeMsg defaults chatJid to 'test@s.whatsapp.net' — derive its canonical
+      // per-chat key the same way the runtime does, so the session keyed by it
+      // IS the requesting chat's own session.
+      const requestingKey = state.resolvePerChatMapKey('test@s.whatsapp.net');
+      state.chatSessions.set(requestingKey, makePerChatSession(true, 11, startedAt));
+      state.chatSessions.set('15551112222', makePerChatSession(true, 12, startedAt)); // a DIFFERENT chat
+
+      await sendAndDrain(runtime, makeMsg({ content: '/sessions', senderJid: adminSender }));
+
+      const listText = sentMessages.map((m) => m.text).find((t) => t.includes('Active Sessions'));
+      expect(listText).toBeDefined();
+      // Exactly the requesting chat's own row is relabelled — never every row.
+      expect(listText).toContain('Current session');
+      expect((listText!.match(/Current session/g) ?? []).length).toBe(1);
+      // Negative control: the OTHER chat still renders via the choke point — its
+      // stable ref suffix proves the sanitizer stayed in the path.
+      expect(listText).toContain('(…2222)');
+    });
+
+    it('b28 r2c: /sessions (single scope) labels the session "Current session" when the request comes from the active chat', async () => {
+      const db = makeDbWithTokenRow({ total_input_tokens: 100, total_output_tokens: 50 });
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+
+      const state = runtime as unknown as { session: typeof mockSession; activeChatJid: string | null };
+      mockSession.getStatus.mockReturnValue({
+        active: true,
+        pid: 900,
+        sessionId: 'sess-cur',
+        startedAt: new Date(Date.now() - 5_000).toISOString(),
+        messageCount: 1,
+        lastMessageAt: null,
+      });
+      mockSession.getDbRowId.mockReturnValue(9);
+      state.session = mockSession;
+      // The active chat IS the requesting chat (makeMsg default).
+      state.activeChatJid = 'test@s.whatsapp.net';
+
+      await sendAndDrain(runtime, makeMsg({ content: '/sessions', senderJid: adminSender }));
+
+      const listText = sentMessages.map((m) => m.text).find((t) => t.includes('Active Sessions'));
+      expect(listText).toContain('1. Current session');
     });
 
     it('/kill-session is ignored for a non-admin sender', async () => {
@@ -14200,7 +14639,8 @@ describe('AgentRuntime', () => {
       expect(state.chatSessions.has(groupKey)).toBe(false);
       expect(state.chatQueues.has(groupKey)).toBe(false);
       const text = sentMessages.map((m) => m.text).find((t) => t.includes('Session killed:'));
-      expect(text).toBe(`_Session killed: ${groupKey} (Group)_`);
+      // B25 F3: the ack carries the stable ref suffix — the kill evidence.
+      expect(text).toBe(`_Session killed: ${groupKey} (…0100) (Group)_`);
     });
 
     // Regression: /kill-session dropped the SessionManager and the outbound queue
@@ -14253,7 +14693,453 @@ describe('AgentRuntime', () => {
 
       expect(targetSession.shutdown).toHaveBeenCalledWith(false);
       const text = sentMessages.map((m) => m.text).find((t) => t.includes('Session killed:'));
-      expect(text).toBe(`_Session killed: ${dmKey} (DM)_`);
+      // B23: with no name metadata in the DB, a numeric DM key renders as a
+      // formatted phone (ladder step) — not the bare conversation key.
+      // B25 F3: plus the stable ref suffix as kill evidence.
+      expect(text).toBe(`_Session killed: +${dmKey} (…2222) (DM)_`);
+    });
+
+    it('/sessions (per_chat scope) renders chat names from the DB, not raw JIDs (B23)', async () => {
+      // Owner ruling: sessions must show contact/group names — raw JID/LID
+      // keys only as last resort. SQL-dispatching prepare mock (established
+      // pattern, see the @lid admin test below): the group has a groups.subject
+      // row, the DM has a contacts.display_name row.
+      const db = makeDb();
+      (db.raw.prepare as ReturnType<typeof vi.fn>).mockImplementation((sql: string) => {
+        if (sql.includes('FROM groups')) {
+          return { run: vi.fn(), get: vi.fn(() => ({ subject: 'Ops Crew Test' })), all: vi.fn(() => []) };
+        }
+        if (sql.includes('FROM contacts')) {
+          return { run: vi.fn(), get: vi.fn(() => ({ display_name: 'Lucas', notify_name: null })), all: vi.fn(() => []) };
+        }
+        if (sql.includes('FROM agent_sessions')) {
+          return { run: vi.fn(), get: vi.fn(() => ({ total_input_tokens: 1500, total_output_tokens: 700 })), all: vi.fn(() => []) };
+        }
+        return { run: vi.fn(), get: vi.fn(), all: vi.fn(() => []) };
+      });
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await runtime.start();
+
+      const state = runtime as unknown as {
+        chatSessions: Map<string, ReturnType<typeof makePerChatSession>>;
+      };
+      const startedAt = new Date(Date.now() - 90_000).toISOString();
+      state.chatSessions.set('15550001111', makePerChatSession(true, 11, startedAt)); // DM
+      state.chatSessions.set('111222333444555666@g.us', makePerChatSession(true, 12, startedAt)); // Group
+
+      await sendAndDrain(runtime, makeMsg({ content: '/sessions', senderJid: adminSender }));
+
+      const listText = sentMessages.map((m) => m.text).find((t) => t.includes('Active Sessions'));
+      // B25 F3: names carry a short stable ref suffix — deterministic, so
+      // identical resolved names stay distinguishable and the later
+      // /kill-session ack proves WHICH chat died (TOCTOU evidence). The B23
+      // ruling was names-not-RAW-JIDs; a 4-char disambiguator tail is
+      // compatible with it and required for safe kills.
+      expect(listText).toContain('1. Lucas (…1111) (DM)');
+      expect(listText).toContain('2. Ops Crew Test (…5666) (Group)');
+      expect(listText).not.toContain('15550001111');
+      expect(listText).not.toContain('111222333444555666');
+    });
+
+    it('/kill-session ack renders the resolved chat name, not the raw key (B23)', async () => {
+      const db = makeDb();
+      (db.raw.prepare as ReturnType<typeof vi.fn>).mockImplementation((sql: string) => {
+        if (sql.includes('FROM contacts')) {
+          return { run: vi.fn(), get: vi.fn(() => ({ display_name: 'Lucas', notify_name: null })), all: vi.fn(() => []) };
+        }
+        return { run: vi.fn(), get: vi.fn(), all: vi.fn(() => []) };
+      });
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await runtime.start();
+
+      const state = runtime as unknown as {
+        chatSessions: Map<string, ReturnType<typeof makePerChatSession>>;
+        chatQueues: Map<string, IOutboundQueue>;
+      };
+      const dmKey = '15550001111';
+      state.chatSessions.set(dmKey, makePerChatSession(true, 11, new Date().toISOString()));
+      state.chatQueues.set(dmKey, makeQueueMock('dm@s.whatsapp.net'));
+
+      await sendAndDrain(runtime, makeMsg({ content: '/kill-session 1', senderJid: adminSender }));
+
+      const text = sentMessages.map((m) => m.text).find((t) => t.includes('Session killed:'));
+      // B25 F3: same suffix form as the /sessions list — the ack must prove
+      // which chat died, not just repeat a (possibly colliding) name.
+      expect(text).toBe('_Session killed: Lucas (…1111) (DM)_');
+    });
+
+    it('/sessions sanitizes remote-controlled names: newline cannot forge a row, markdown is stripped (B25 F2)', async () => {
+      // Push names / group subjects are attacker-controlled. A '\n' in a name
+      // previously forged additional /sessions rows (kill-wrong-session
+      // vector); '*_`~' broke the WhatsApp markdown the list renders in.
+      const db = makeDb();
+      (db.raw.prepare as ReturnType<typeof vi.fn>).mockImplementation((sql: string) => {
+        if (sql.includes('FROM contacts')) {
+          return {
+            run: vi.fn(),
+            get: vi.fn(() => ({
+              display_name: 'Evil\n2. Ghost (DM) — 9m, 9 msgs, 9 tokens *p* `q` ~r~',
+              notify_name: null,
+            })),
+            all: vi.fn(() => []),
+          };
+        }
+        return { run: vi.fn(), get: vi.fn(), all: vi.fn(() => []) };
+      });
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await runtime.start();
+
+      const state = runtime as unknown as {
+        chatSessions: Map<string, ReturnType<typeof makePerChatSession>>;
+      };
+      state.chatSessions.set('15550001111', makePerChatSession(true, 11, new Date().toISOString()));
+
+      await sendAndDrain(runtime, makeMsg({ content: '/sessions', senderJid: adminSender }));
+
+      const listText = sentMessages.map((m) => m.text).find((t) => t.includes('Active Sessions'));
+      expect(listText).toContain('Active Sessions (1)');
+      // No newline-forged second row, no markdown metachars, capped length.
+      expect(listText).not.toContain('\n2. Ghost');
+      expect(listText).not.toContain('*p*');
+      expect(listText).not.toContain('`');
+      expect(listText).not.toContain('~');
+      // The stable ref suffix survives as the identity evidence.
+      expect(listText).toContain('(…1111)');
+    });
+
+    it('/kill-session ack strips markdown metachars so the italic wrapper stays balanced (B25 F2)', async () => {
+      const db = makeDb();
+      (db.raw.prepare as ReturnType<typeof vi.fn>).mockImplementation((sql: string) => {
+        if (sql.includes('FROM contacts')) {
+          return { run: vi.fn(), get: vi.fn(() => ({ display_name: 'x_y_z', notify_name: null })), all: vi.fn(() => []) };
+        }
+        return { run: vi.fn(), get: vi.fn(), all: vi.fn(() => []) };
+      });
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await runtime.start();
+
+      const state = runtime as unknown as {
+        chatSessions: Map<string, ReturnType<typeof makePerChatSession>>;
+        chatQueues: Map<string, IOutboundQueue>;
+      };
+      state.chatSessions.set('15550001111', makePerChatSession(true, 11, new Date().toISOString()));
+      state.chatQueues.set('15550001111', makeQueueMock('dm@s.whatsapp.net'));
+
+      await sendAndDrain(runtime, makeMsg({ content: '/kill-session 1', senderJid: adminSender }));
+
+      const text = sentMessages.map((m) => m.text).find((t) => t.includes('Session killed:'));
+      expect(text).toBe('_Session killed: xyz (…1111) (DM)_');
+    });
+
+    it('/sessions disambiguates identical resolved names with the stable ref suffix (B25 F3)', async () => {
+      const db = makeDb();
+      (db.raw.prepare as ReturnType<typeof vi.fn>).mockImplementation((sql: string) => {
+        if (sql.includes('FROM contacts')) {
+          return { run: vi.fn(), get: vi.fn(() => ({ display_name: 'Lucas', notify_name: null })), all: vi.fn(() => []) };
+        }
+        return { run: vi.fn(), get: vi.fn(), all: vi.fn(() => []) };
+      });
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await runtime.start();
+
+      const state = runtime as unknown as {
+        chatSessions: Map<string, ReturnType<typeof makePerChatSession>>;
+      };
+      const startedAt = new Date().toISOString();
+      state.chatSessions.set('15550001111', makePerChatSession(true, 11, startedAt));
+      state.chatSessions.set('15550002222', makePerChatSession(true, 12, startedAt));
+
+      await sendAndDrain(runtime, makeMsg({ content: '/sessions', senderJid: adminSender }));
+
+      const listText = sentMessages.map((m) => m.text).find((t) => t.includes('Active Sessions'));
+      // Same name, distinguishable rows — the suffix is the discriminator.
+      expect(listText).toContain('1. Lucas (…1111) (DM)');
+      expect(listText).toContain('2. Lucas (…2222) (DM)');
+    });
+
+    it('/kill-session (single scope) with a wrong index does NOT kill the lone session (B25 F4)', async () => {
+      // The parsed index was IGNORED in the shared branch: any N>=1 killed
+      // the only session. Bounds-check must mirror per_chat's reply.
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+
+      mockSession.getStatus.mockReturnValue({
+        active: true,
+        pid: 321,
+        sessionId: 'sess-single',
+        startedAt: new Date().toISOString(),
+        messageCount: 1,
+        lastMessageAt: null,
+      });
+      (runtime as unknown as { session: typeof mockSession }).session = mockSession;
+
+      await sendAndDrain(runtime, makeMsg({ content: '/kill-session 3', senderJid: adminSender }));
+
+      expect(mockSession.shutdown).not.toHaveBeenCalled();
+      const text = sentMessages.map((m) => m.text).find((t) => t.includes('Invalid session number'));
+      expect(text).toBe('_Invalid session number. 1 active._');
+    });
+
+    it('/kill-session rejects trailing-garbage indices like "2x" everywhere (B25 F4)', async () => {
+      // parseInt('2x') === 2 silently accepted garbage and killed session 2.
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await runtime.start();
+
+      const state = runtime as unknown as {
+        chatSessions: Map<string, ReturnType<typeof makePerChatSession>>;
+        chatQueues: Map<string, IOutboundQueue>;
+      };
+      const s1 = makePerChatSession(true, 11, new Date().toISOString());
+      const s2 = makePerChatSession(true, 12, new Date().toISOString());
+      state.chatSessions.set('15550001111', s1);
+      state.chatSessions.set('15550002222', s2);
+      state.chatQueues.set('15550002222', makeQueueMock('dm@s.whatsapp.net'));
+
+      await sendAndDrain(runtime, makeMsg({ content: '/kill-session 2x', senderJid: adminSender }));
+
+      expect(s1.shutdown).not.toHaveBeenCalled();
+      expect(s2.shutdown).not.toHaveBeenCalled();
+      const text = sentMessages.map((m) => m.text).find((t) => t.includes('Usage: /kill-session'));
+      expect(text).toContain('Run /sessions first');
+    });
+
+    it('/kill-session (single scope) ack names the killed chat via the choke point (B25 F4)', async () => {
+      // '_Session killed._' was identity-less — worthless as kill evidence.
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+
+      mockSession.getStatus.mockReturnValue({
+        active: true,
+        pid: 321,
+        sessionId: 'sess-single',
+        startedAt: new Date().toISOString(),
+        messageCount: 1,
+        lastMessageAt: null,
+      });
+      const state = runtime as unknown as {
+        session: typeof mockSession | null;
+        activeChatJid: string | null;
+      };
+      state.session = mockSession;
+      state.activeChatJid = '15550001111@s.whatsapp.net';
+
+      await sendAndDrain(runtime, makeMsg({ content: '/kill-session 1', senderJid: adminSender }));
+
+      expect(mockSession.shutdown).toHaveBeenCalledWith(false);
+      const text = sentMessages.map((m) => m.text).find((t) => t.includes('Session killed'));
+      expect(text).toBe('_Session killed: +15550001111 (…1111)_');
+    });
+
+    // W1-T3: gate convergence security proof matrix (isAdminMessage hoisted
+    // ahead of the switch, replacing the three duplicated in-switch phone-only
+    // gates). QR-143 closes the @sms spoof hole; WG-5 makes /new's gate
+    // unconditional (removes the `this.shared &&` prefix that skipped it in
+    // per_chat scope).
+    it('denies /kill-session to an @sms sender bearing the admin phone digits', async () => {
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+      // Spoof: admin PHONE digits on a non-WhatsApp-authenticated transport JID.
+      await sendAndDrain(runtime, makeMsg({ content: '/kill-session 1', senderJid: '15550100001@sms' }));
+      // The gated action is refused: nothing rides the admin bypass path
+      // (messenger.sendMessage) — no 'Session killed' receipt, no session list.
+      // (B21-A F4a: the denial itself IS user-visible, via the queue path.)
+      expect(sentMessages.map((m) => m.text)).toEqual([]);
+    });
+
+    it('allows /kill-session for an authenticated admin in a GROUP (base parity — DM-only clause removed, B21-A F3)', async () => {
+      // The deleted pre-registry gates were phone-only, so admins could
+      // /sessions and /kill-session from groups; isAdminMessage's DM-only
+      // clause silently removed that capability. The 'admin' gate must use the
+      // authenticated-admin core WITHOUT the DM restriction — the QR-143
+      // authenticated-JID check stays FIRST (see the @sms sibling below), but
+      // an authenticated admin in a group is authorized.
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+      mockSession.getStatus.mockReturnValue({
+        active: true, pid: 321, sessionId: 'sess-single',
+        startedAt: new Date(Date.now() - 60_000).toISOString(), messageCount: 5, lastMessageAt: null,
+      });
+      (runtime as unknown as { session: typeof mockSession; activeChatJid: string | null }).session = mockSession;
+      (runtime as unknown as { activeChatJid: string | null }).activeChatJid = 'owner@s.whatsapp.net';
+      await sendAndDrain(runtime, makeMsg({
+        content: '/kill-session 1',
+        senderJid: adminSender,
+        chatJid: 'group-1@g.us',
+        isGroup: true,
+      }));
+      expect(mockSession.shutdown).toHaveBeenCalledWith(false);
+      expect(sentMessages.map((m) => m.text).some((t) => t.includes('Session killed'))).toBe(true);
+    });
+
+    it('denies /kill-session to an @sms spoof of the admin digits in a GROUP (QR-143 stays closed after the DM-clause removal, B21-A F3)', async () => {
+      // Same spoof shape as the DM @sms test above, aimed at the group venue
+      // the F3 fix opens: admin PHONE digits on a non-WhatsApp-authenticated
+      // transport. The authenticated-JID check runs FIRST, so restoring group
+      // capability must NOT re-open the QR-143 hole.
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+      mockSession.getStatus.mockReturnValue({
+        active: true, pid: 321, sessionId: 'sess-single',
+        startedAt: new Date(Date.now() - 60_000).toISOString(), messageCount: 5, lastMessageAt: null,
+      });
+      (runtime as unknown as { session: typeof mockSession; activeChatJid: string | null }).session = mockSession;
+      (runtime as unknown as { activeChatJid: string | null }).activeChatJid = 'owner@s.whatsapp.net';
+      await sendAndDrain(runtime, makeMsg({
+        content: '/kill-session 1',
+        senderJid: '15550100001@sms',
+        chatJid: 'group-1@g.us',
+        isGroup: true,
+      }));
+      expect(mockSession.shutdown).not.toHaveBeenCalled();
+      expect(sentMessages.map((m) => m.text).some((t) => t.includes('Session killed'))).toBe(false);
+    });
+
+    it('still allows /sessions for the real admin over an authenticated DM JID (positive regression)', async () => {
+      const db = makeDbWithTokenRow({ total_input_tokens: 1500, total_output_tokens: 700 });
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+      mockSession.getStatus.mockReturnValue({
+        active: true, pid: 321, sessionId: 'sess-single',
+        startedAt: new Date(Date.now() - 60_000).toISOString(), messageCount: 5, lastMessageAt: null,
+      });
+      mockSession.getDbRowId.mockReturnValue(42);
+      (runtime as unknown as { session: typeof mockSession; activeChatJid: string | null }).session = mockSession;
+      (runtime as unknown as { activeChatJid: string | null }).activeChatJid = 'owner@s.whatsapp.net';
+      await sendAndDrain(runtime, makeMsg({ content: '/sessions', senderJid: adminSender }));
+      expect(sentMessages.map((m) => m.text).some((t) => t.includes('Active Sessions'))).toBe(true);
+    });
+
+    it('allows /sessions for the admin over an authenticated @lid JID', async () => {
+      // @lid IS a WhatsApp-authenticated transport (isWhatsAppAuthenticatedJid =
+      // isPnJid || isLidJid), so convergence must NOT lock out lid-resolved admins.
+      // Fixture: SQL-dispatching prepare mock resolves the lid to the admin phone,
+      // matching the established pattern at :8067/:9057 (lid_mappings lookup).
+      const db = makeDb();
+      const lidLocal = '77778888';
+      (db.raw.prepare as ReturnType<typeof vi.fn>).mockImplementation((sql: string) => {
+        if (sql.includes('SELECT phone_jid FROM lid_mappings')) {
+          return { get: vi.fn(() => ({ phone_jid: '15550100001@s.whatsapp.net' })) };
+        }
+        return { run: vi.fn(), get: vi.fn(), all: vi.fn(() => []) };
+      });
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+      mockSession.getStatus.mockReturnValue({
+        active: true, pid: 321, sessionId: 'sess-lid',
+        startedAt: new Date(Date.now() - 60_000).toISOString(), messageCount: 3, lastMessageAt: null,
+      });
+      (runtime as unknown as { session: typeof mockSession; activeChatJid: string | null }).session = mockSession;
+      (runtime as unknown as { activeChatJid: string | null }).activeChatJid = 'owner@s.whatsapp.net';
+      await sendAndDrain(runtime, makeMsg({ content: '/sessions', senderJid: `${lidLocal}@lid` }));
+      // Real assertion — the lid admin is allowed, the session list renders:
+      expect(sentMessages.map((m) => m.text).some((t) => t.includes('Active Sessions'))).toBe(true);
+    });
+
+    it('denies /new to a non-admin participant in a per_chat group (WG-5)', async () => {
+      // Construct the runtime in per_chat scope; today `this.shared` is false there so
+      // the gate is SKIPPED (any participant can wipe the session). RED today, GREEN
+      // after the gate becomes unconditional via isAdminMessage.
+      // per_chat /new's non-bypass sendDirect routes through the per-chat
+      // OutboundQueue.enqueueText mock (not messenger.sendMessage/sentMessages) —
+      // observe the shared mockQueue fixture, matching the established idiom used
+      // throughout this file for per-chat queue-routed replies.
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await runtime.start();
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({
+        content: '/new',
+        senderJid: nonAdminSender,
+        chatJid: 'group-1@g.us',
+        isGroup: true,
+      }));
+      // Assert no "Starting new session" acknowledgement was enqueued (the wipe was refused).
+      const enqueuedTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
+      expect(enqueuedTexts.some((t) => /new session/i.test(t))).toBe(false);
+    });
+
+    it('per_chat 1:1 DM: /new is ALLOWED for a non-admin sender (own conversation, not shared — positive regression)', async () => {
+      // Full scope-matrix coverage (W1-PACKET.md :507): affectsShared =
+      // sessionScope !== 'per_chat' || isGroup. A per_chat 1:1 DM reset only
+      // touches the sender's own conversation, so it stays ungated — this was
+      // true both before and after T3 (Bucket B self-resolves); asserted here
+      // explicitly as the positive half of the WG-5 scope matrix.
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await runtime.start();
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({
+        content: '/new',
+        senderJid: nonAdminSender,
+        chatJid: 'dm-1@s.whatsapp.net',
+        isGroup: false,
+      }));
+      const enqueuedTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
+      expect(enqueuedTexts.some((t) => /new session/i.test(t))).toBe(true);
+    });
+
+    it('denies /new to a non-admin sender in single mode even in a group-tagged venue (WG-5 full scope matrix)', async () => {
+      // NET-NEW proof point (distinct from the per_chat-group WG-5 test above):
+      // affectsShared = (sessionScope !== 'per_chat') || isGroup — in default
+      // SINGLE scope the left disjunct is already true regardless of isGroup, so
+      // this must deny identically whether the inbound venue is a DM or a group.
+      // Captured RED against the pre-T3 gate (`this.shared && !isAdminPhone`):
+      // single-mode `this.shared` is false, so the old gate was skipped entirely
+      // for ANY venue, including a group-tagged one — old code let this through.
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger); // default: single scope
+      await runtime.start();
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({
+        content: '/new',
+        senderJid: nonAdminSender,
+        chatJid: 'group-2@g.us',
+        isGroup: true,
+      }));
+      expect(mockSession.handleNew).not.toHaveBeenCalled();
+      const enqueuedTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
+      expect(enqueuedTexts.some((t) => /new session/i.test(t))).toBe(false);
+    });
+
+    it('denies /new to an @sms sender bearing the admin phone digits (single mode — own @sms-closing clause)', async () => {
+      // /new's admin-shared-scope branch has its OWN independently-specified
+      // @sms-closing check (isWhatsAppAuthenticatedJid(msg.senderJid) &&
+      // isAdminPhone(...)) — distinct from isAdminMessage, which only closes
+      // the hole for /sessions and /kill-session (see the sibling @sms test
+      // above). Same spoof shape, aimed at /new: admin PHONE digits on a
+      // non-WhatsApp-authenticated transport JID, in an affectsShared venue
+      // (default single scope — affectsShared regardless of isGroup there).
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger); // default: single scope
+      await runtime.start();
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({ content: '/new', senderJid: '15550100001@sms' }));
+      expect(mockSession.handleNew).not.toHaveBeenCalled();
+      const enqueuedTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
+      expect(enqueuedTexts.some((t) => /new session/i.test(t))).toBe(false);
     });
   });
 
@@ -14453,9 +15339,9 @@ describe('NL routing handlers (nlRouting flag)', () => {
     fs.rmSync(eventsDir, { recursive: true, force: true });
   });
 
-  function makeRoutingRuntime(): { runtime: AgentRuntime; sentMessages: Array<{ jid: string; text: string }> } {
+  function makeRoutingRuntime(runtimeOptions: Record<string, unknown> = {}): { runtime: AgentRuntime; sentMessages: Array<{ jid: string; text: string }> } {
     const { messenger, sentMessages } = makeMessenger();
-    const runtime = new AgentRuntime(routingDb, messenger, 'test', {});
+    const runtime = new AgentRuntime(routingDb, messenger, 'test', runtimeOptions);
     // Mirror the flag-gated schema init that runtime.start() performs in
     // production (tests do not call start(); its other side effects are
     // out of scope here).
@@ -14522,7 +15408,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(events.some((e) => e.event === 'model_preference_set' && e.reasonCode === 'intent_strongest_set')).toBe(true);
   });
 
-  it('/model status renders the recorded preference and the honest authority line', async () => {
+  it('/model status renders the recorded preference and (b28 r2b) omits the Delegation/Authority lines', async () => {
     const { runtime, sentMessages } = makeRoutingRuntime();
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model strongest' }));
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
@@ -14530,7 +15416,10 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(status).toBeDefined();
     expect(status).toContain('Preference: strongest for you in this chat');
     expect(status).toContain('steers new sessions');
-    expect(status).toContain('Authority: routing never changes what I am allowed to do');
+    // b28 r2b: the Delegation/Authority display lines were removed from this
+    // surface (the invariant lives in the system prompt + /why, not here).
+    expect(status).not.toContain('Authority:');
+    expect(status).not.toContain('Delegation:');
     expect(status).not.toContain('no live actions authorized');
   });
 
@@ -15015,6 +15904,98 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(block).not.toContain('current provider: claude-cli');
   });
 
+  it('/model status disambiguates configured fallback entries that share a provider (B23)', async () => {
+    // Live exhibit: two DISTINCT configured fallback entries rendered
+    // "opencode-cli → opencode-cli" — indistinguishable. When an entry
+    // carries a model, the chain must render "provider (model)"; model-less
+    // entries keep the bare provider label.
+    cfgAny().agentFallbacks = [
+      { provider: 'opencode-cli', model: 'glm-4.7' },
+      { provider: 'opencode-cli', model: 'kimi-k3' },
+    ];
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toBeDefined();
+    // b28 r2a: the chain is now one `• ` bullet per entry, but the B23
+    // discriminator holds — two DISTINCT same-provider entries stay
+    // distinguishable because each carries its model.
+    expect(status).toContain('Fallback chain (configured):');
+    expect(status).toContain('• opencode-cli (glm-4.7)');
+    expect(status).toContain('• opencode-cli (kimi-k3)');
+    expect(status).not.toContain('opencode-cli (glm-4.7) → opencode-cli (kimi-k3)');
+  });
+
+  it('/model status shows the model on the active-window and Next lines when the fallback differs only by model (B25 F8)', async () => {
+    // A same-provider fallback entry that pins a DIFFERENT model previously
+    // suppressed the 'Next session' line entirely (provider-only guard) and
+    // rendered the active-window line model-blind — the owner could not see
+    // that new sessions route to a different model.
+    cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'haiku-fast' }];
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    mockSession.getStatus.mockReturnValue({
+      active: true,
+      pid: 555,
+      sessionId: 'sess-live',
+      startedAt: new Date().toISOString(),
+      messageCount: 1,
+      lastMessageAt: null,
+    });
+    mockSession.getProviderId.mockReturnValue('claude-cli');
+    (mockSession as unknown as Record<string, unknown>).getModelRef = vi.fn(() => 'opus-main');
+    const state = runtime as unknown as {
+      session: typeof mockSession;
+      fallbackWindow: { activeUntil: number | null; activeEntry: unknown };
+    };
+    state.session = mockSession;
+    state.fallbackWindow.activeUntil = Date.now() + 60_000;
+    state.fallbackWindow.activeEntry = { provider: 'claude-cli', model: 'haiku-fast' };
+
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toBeDefined();
+    expect(status).toContain('Fallback: active — new sessions route via claude-cli (haiku-fast)');
+    expect(status).toContain('Next session: claude-cli (haiku-fast)');
+  });
+
+  it('/model status suppresses the Next line when the live route matches provider AND model (B25 F8)', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    mockSession.getStatus.mockReturnValue({
+      active: true,
+      pid: 556,
+      sessionId: 'sess-live-2',
+      startedAt: new Date().toISOString(),
+      messageCount: 1,
+      lastMessageAt: null,
+    });
+    mockSession.getProviderId.mockReturnValue('claude-cli');
+    (mockSession as unknown as Record<string, unknown>).getModelRef = vi.fn(() => undefined);
+    (runtime as unknown as { session: typeof mockSession }).session = mockSession;
+
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toBeDefined();
+    expect(status).not.toContain('Next session:');
+  });
+
+  it('/model status keeps the bare provider label for model-less fallback entries (B23)', async () => {
+    cfgAny().agentFallbacks = [
+      { provider: 'codex-cli' },
+      { provider: 'opencode-cli', model: 'kimi-k3' },
+    ];
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    // b28 r2a: bulleted chain — a model-less entry keeps the bare provider
+    // label, a model-bearing entry renders "provider (model)".
+    expect(status).toContain('Fallback chain (configured):');
+    expect(status).toContain('• codex-cli');
+    expect(status).toContain('• opencode-cli (kimi-k3)');
+    expect(status).not.toContain('codex-cli → opencode-cli (kimi-k3)');
+  });
+
   it('/model status reports the PINNED provider as the next-session route, not the default (R7)', async () => {
     cfgAny().agentFallbacks = [{ provider: 'codex-cli' }];
     const { runtime, sentMessages } = makeRoutingRuntime();
@@ -15047,4 +16028,263 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(events.some((e) => e.reasonCode === 'intent_strongest_unreachable')).toBe(true);
   });
 
+  // ── B26 item 1: /model status must render the CONFIGURED primary model ────
+  // Live canary exhibit: agentOptions.model='claude-opus-4-8' yet /model
+  // status rendered 'Model: provider default' — runtime.ts:8361 read only the
+  // live/next route model and never this.model. HONESTY RULE: the served
+  // weight is unobservable, so the configured primary renders with an
+  // explicit '(configured)' label; a genuinely absent config renders
+  // 'provider default (not configured)'; a fallback-entry model stays bare
+  // (it comes from a config entry).
+
+  it('B26: /model status renders the configured primary model with the (configured) label when no fallback window is live', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toBeDefined();
+    expect(status).toContain('Model: claude-opus-4-8 (configured)');
+    expect(status).not.toContain('Model: provider default');
+  });
+
+  it('B26: /model status renders the configured primary even when the LIVE session carries no model ref (canary repro shape)', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+    mockSession.getStatus.mockReturnValue({
+      active: true,
+      pid: 771,
+      sessionId: 'sess-b26',
+      startedAt: new Date().toISOString(),
+      messageCount: 1,
+      lastMessageAt: null,
+    });
+    mockSession.getProviderId.mockReturnValue('claude-cli');
+    (mockSession as unknown as Record<string, unknown>).getModelRef = vi.fn(() => undefined);
+    (runtime as unknown as { session: typeof mockSession }).session = mockSession;
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toBeDefined();
+    expect(status).toContain('Model: claude-opus-4-8 (configured)');
+    expect(status).not.toContain('Model: provider default');
+  });
+
+  it('B26: /model status renders an honest not-configured label when config.model is genuinely absent', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime(); // no model option
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toBeDefined();
+    expect(status).toContain('Model: provider default (not configured)');
+  });
+
+  // ── B26 item 2: /model list — the config-derived model catalogue ──────────
+  // Rendered ENTIRELY from config (the primary, the fallback chain, the tier
+  // vocabulary) — the served weight is unobservable, so nothing here claims
+  // to be it. When nlRoutingTiers is absent the catalogue says so honestly
+  // instead of implying strongest/fastest resolve somewhere specific.
+
+  it('B26: /model list renders the configured primary, every fallback entry, and the pin syntax', async () => {
+    cfgAny().agentFallbacks = [
+      { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
+      { provider: 'opencode-cli', model: 'glm/glm-5.2' },
+    ];
+    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
+    expect(catalogue).toBeDefined();
+    // b28 r2d: one bullet per MODEL (primary + each fallback), never a joined chain.
+    expect(catalogue).toContain('• Primary: claude-cli (claude-opus-4-8 — configured)');
+    expect(catalogue).toContain('• Fallback: opencode-cli (kimi/kimi-k3)');
+    expect(catalogue).toContain('• Fallback: opencode-cli (glm/glm-5.2)');
+    expect(catalogue).not.toContain('opencode-cli (kimi/kimi-k3) → opencode-cli (glm/glm-5.2)');
+    expect(catalogue).toContain('/model provider-id');
+    expect(catalogue).toContain('/reset');
+  });
+
+  // ── b28 r2d: /model list is a true bulleted MODEL list ────────────────────
+  // One `• ` bullet per MODEL (primary + each fallback), each provider carrying
+  // its config-derived modifiers; the D7 caveat moves to a single trailing
+  // _italic_ line. Owner exhibit-3 shape (canary config: no primary model,
+  // kimi/glm fallbacks, no tiers) — the two third-party fallback IDs are
+  // unrecognized by the catalog and MUST carry no invented lifecycle modifier.
+  it('b28 r2d: /model list renders one bullet per model (primary + each fallback), caveat as trailing italic', async () => {
+    cfgAny().agentFallbacks = [
+      { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
+      { provider: 'opencode-cli', model: 'glm/glm-5.2' },
+    ];
+    const { runtime, sentMessages } = makeRoutingRuntime(); // canary: no primary model
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
+    expect(catalogue).toBeDefined();
+    expect(catalogue).toContain('• Primary: claude-cli (provider default — no model configured)');
+    expect(catalogue).toContain('• Fallback: opencode-cli (kimi/kimi-k3)');
+    expect(catalogue).toContain('• Fallback: opencode-cli (glm/glm-5.2)');
+    expect(catalogue).not.toContain('opencode-cli (kimi/kimi-k3) → opencode-cli (glm/glm-5.2)');
+    // D7 caveat as a single trailing _italic_ line, not baked into the header.
+    expect(catalogue).toContain('_Which weight actually serves is not observable here._');
+    // Unrecognized third-party IDs → NO invented lifecycle modifier (D7 honesty).
+    expect(catalogue).not.toContain('[newer:');
+    expect(catalogue).not.toContain('[deprecated');
+  });
+
+  it('b28 r2d: /model list tags config-derived modifiers — a legacy primary model and a configured tier target', async () => {
+    cfgAny().agentFallbacks = [{ provider: 'anthropic-api' }];
+    cfgAny().nlRoutingTiers = { strongest: 'anthropic-api' };
+    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-5' });
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
+    expect(catalogue).toBeDefined();
+    // Legacy primary → catalog advisory modifier, derived from the configured ID.
+    expect(catalogue).toContain(
+      '• Primary: claude-cli (claude-opus-4-5 — configured) [newer: claude-opus-4-8]',
+    );
+    // Fallback provider IS the configured strongest tier → tier tag (from config).
+    expect(catalogue).toContain('• Fallback: anthropic-api [strongest]');
+  });
+
+  it('B26: /model list says tiers are not configured on this line rather than implying they resolve (honesty)', async () => {
+    // Canary shape: nlRoutingTiers ABSENT — strongest/fastest fall to the
+    // default route, and the catalogue must say so.
+    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
+    expect(catalogue).toBeDefined();
+    expect(catalogue).toContain('tiers not configured on this line — default routing only');
+    expect(catalogue).not.toContain('strongest →');
+  });
+
+  it('B26: /model list renders the nlRoutingTiers mappings when configured', async () => {
+    cfgAny().nlRoutingTiers = { strongest: 'anthropic-api' };
+    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
+    expect(catalogue).toBeDefined();
+    expect(catalogue).toContain('strongest → anthropic-api');
+    expect(catalogue).toContain('fastest → not configured (default route)');
+    expect(catalogue).not.toContain('tiers not configured on this line');
+  });
+
+  it('B26: /model list stays honest when no primary model and no fallbacks are configured', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
+    expect(catalogue).toBeDefined();
+    expect(catalogue).toContain('Primary: claude-cli (provider default — no model configured)');
+    expect(catalogue).toContain('Fallbacks: none configured');
+  });
+
+  it('B26: bare /model appends the catalogue affordance line; explicit /model status does not', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
+    const bare = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(bare).toBeDefined();
+    expect(bare).toContain('/model list — see what you can pick');
+    mockQueue.enqueueText.mockClear();
+    sentMessages.length = 0;
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status', messageId: 'msg-2' }));
+    const explicit = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(explicit).toBeDefined();
+    expect(explicit).not.toContain('/model list — see what you can pick');
+  });
+
+  it('B26: /model status keeps the fallback-entry model bare while a fallback window is live (existing behavior)', async () => {
+    cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'haiku-fast' }];
+    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+    const state = runtime as unknown as {
+      fallbackWindow: { activeUntil: number | null; activeEntry: unknown };
+    };
+    state.fallbackWindow.activeUntil = Date.now() + 60_000;
+    state.fallbackWindow.activeEntry = { provider: 'claude-cli', model: 'haiku-fast' };
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toBeDefined();
+    expect(status).toContain('Model: haiku-fast');
+    expect(status).not.toContain('Model: haiku-fast (configured)');
+    expect(status).not.toContain('claude-opus-4-8 (configured)');
+  });
+
+  // ── b28 r2b: /model status drops the Delegation + Authority DISPLAY lines ──
+  // Owner round-2 ruling: those two lines are not about model/route status.
+  // RENDER-ONLY removal — the routing-never-changes-authority invariant stays
+  // in the agent system prompt + security layer and on the /why receipt; only
+  // the two redundant status lines go.
+  it('b28 r2b: /model status no longer renders the Delegation or Authority lines', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toBeDefined();
+    expect(status).not.toContain('Delegation:');
+    expect(status).not.toContain('Authority:');
+  });
+
+  // ── b28 r2a: WhatsApp formatting — the configured fallback chain renders as
+  // one `• ` bullet per entry (WhatsApp narrow column), never a long
+  // ` → `-joined single line. Same-provider entries stay distinguishable
+  // (B23 discriminator preserved through the reformat).
+  it('b28 r2a: /model status renders the configured fallback chain as bullets, one per entry', async () => {
+    cfgAny().agentFallbacks = [
+      { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
+      { provider: 'opencode-cli', model: 'glm/glm-5.2' },
+    ];
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toBeDefined();
+    expect(status).toContain('Fallback chain (configured):');
+    expect(status).toContain('• opencode-cli (kimi/kimi-k3)');
+    expect(status).toContain('• opencode-cli (glm/glm-5.2)');
+    // The pre-b28 defect: the whole chain crammed onto one ` → `-joined line.
+    expect(status).not.toContain('opencode-cli (kimi/kimi-k3) → opencode-cli (glm/glm-5.2)');
+    const bulletLines = status!.split('\n').filter((l) => l.startsWith('• '));
+    expect(bulletLines).toHaveLength(2);
+  });
+
+});
+
+// ── B3 / QR-143: inline imperative extractor admin-grant transport gate ───────
+// The extractor auto-creates a status:'proposed' task bead for admin-authored
+// imperatives. The admin GRANT must gate on authenticated transport BEFORE the
+// phone match — resolvePhoneFromJid collapses <admin-digits>@sms to the admin
+// phone, but @sms is spoofable, so it must not induce an admin-attributed
+// proposal. Both directions proven against a REAL in-memory beads table.
+describe('B3 inline imperative extractor — QR-143 transport gate', () => {
+  const ADMIN_PN = '15550100001@s.whatsapp.net'; // config mock admin phone
+  const ADMIN_SMS = '+15550100001@sms'; // spoofable: same bare digits as admin
+  const IMPERATIVE = 'remind me to call Alex Friday';
+
+  function makeRealDb(): RealDatabase {
+    const db = new RealDatabase(':memory:');
+    db.open();
+    return db;
+  }
+  function proposedCount(db: RealDatabase): number {
+    return (db.raw.prepare("SELECT COUNT(*) AS c FROM beads WHERE status = 'proposed'").get() as { c: number }).c;
+  }
+
+  it('ALLOWS an authenticated WhatsApp admin: imperative → proposed bead created (preserved)', async () => {
+    const restoreMemory = setMockMemoryConfig();
+    const db = makeRealDb();
+    try {
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await sendAndDrain(runtime, makeMsg({ senderJid: ADMIN_PN, chatJid: ADMIN_PN, content: IMPERATIVE, messageId: 'b3-admin' }));
+      expect(proposedCount(db)).toBe(1);
+      await runtime.shutdown();
+    } finally {
+      db.close();
+      restoreMemory();
+    }
+  });
+
+  it('DENIES a spoofed <admin-digits>@sms: imperative → NO proposed bead (new)', async () => {
+    const restoreMemory = setMockMemoryConfig();
+    const db = makeRealDb();
+    try {
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await sendAndDrain(runtime, makeMsg({ senderJid: ADMIN_SMS, chatJid: ADMIN_SMS, content: IMPERATIVE, messageId: 'b3-sms' }));
+      expect(proposedCount(db)).toBe(0);
+      await runtime.shutdown();
+    } finally {
+      db.close();
+      restoreMemory();
+    }
+  });
 });

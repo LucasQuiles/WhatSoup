@@ -104,7 +104,9 @@ function makeRegistry(
   registerAdvancedTools(getSock, (tool) => registry.register(tool));
   registerChatManagementTools(db, getSock, (tool) => registry.register(tool));
 
-  const messagingDeps: MessagingDeps = { connection: conn, db: db.raw };
+  const messagingDeps: MessagingDeps = {
+    connection: conn, db: db.raw, dbWrapper: db, adminPhones: new Set<string>(),
+  };
   registerMessagingTools(registry, messagingDeps);
 
   return registry;
@@ -394,7 +396,10 @@ describe('D. cross-conversation guard', () => {
     } as unknown as ConnectionManager;
 
     const reg = new ToolRegistry();
-    registerMessagingTools(reg, { connection: conn, db: makeDb().raw });
+    const injectionDb = makeDb();
+    registerMessagingTools(reg, {
+      connection: conn, db: injectionDb.raw, dbWrapper: injectionDb, adminPhones: new Set<string>(),
+    });
 
     const aliceSession = chatSession(ALICE_KEY, ALICE_JID);
     await reg.call(

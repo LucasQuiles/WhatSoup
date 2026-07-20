@@ -96,6 +96,7 @@ BOT_ERRORS_TRANSIENT_BACKOFF_SECONDS = positive_env_int("BOT_ERRORS_TRANSIENT_BA
 DEAD_LETTER_META_ALERT_THROTTLE_SECONDS = 3600  # at most one meta-alert per hour
 CLOCK_SKEW_TOLERANCE_SECONDS = 60  # tolerate up to 60s clock skew on clear events
 INCIDENT_RENOTIFY_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_RENOTIFY_SECONDS", 6 * 60 * 60)
+INCIDENT_RENOTIFY_CAP_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_RENOTIFY_CAP_SECONDS", 6 * 60 * 60)
 INCIDENT_ESCALATE_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_ESCALATE_SECONDS", 24 * 60 * 60)
 INCIDENT_ESCALATE_SUPPRESSED = positive_env_int("BOT_ERRORS_INCIDENT_ESCALATE_SUPPRESSED", 72)
 INCIDENT_STALE_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_STALE_SECONDS", INCIDENT_ESCALATE_SECONDS)
@@ -1321,6 +1322,28 @@ def int_field(record: dict[str, Any], key: str, fallback: int = 0) -> int:
         return fallback
 
 
+def incident_renotify_interval_seconds(open_record: dict[str, Any]) -> int:
+    """Current still-open reminder interval for an open incident.
+
+    Reminders back off exponentially per incident_key: the first reminder is due
+    INCIDENT_RENOTIFY_SECONDS after the initial (immediate) escalation, then the
+    interval doubles per sent reminder (advance_incident_renotify_interval),
+    capped at INCIDENT_RENOTIFY_CAP_SECONDS. The interval is persisted on the
+    open incident record so dispatcher restarts do not reset the backoff.
+    """
+    stored = int_field(open_record, "renotifyIntervalSeconds", INCIDENT_RENOTIFY_SECONDS)
+    if stored <= 0:
+        stored = INCIDENT_RENOTIFY_SECONDS
+    return min(stored, INCIDENT_RENOTIFY_CAP_SECONDS)
+
+
+def advance_incident_renotify_interval(open_record: dict[str, Any]) -> None:
+    open_record["renotifyIntervalSeconds"] = min(
+        incident_renotify_interval_seconds(open_record) * 2,
+        INCIDENT_RENOTIFY_CAP_SECONDS,
+    )
+
+
 def source_from_incident_key(key: str) -> str:
     parts = str(key).split("|")
     return parts[2] if len(parts) >= 3 else ""
@@ -2188,7 +2211,11 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
             age_seconds = max(0, current - opened)
             since_notified = max(0, current - last_notified)
             awaiting_physical = str(open_record.get("status") or "") == "awaiting_physical"
-            renotify_seconds = AWAITING_PHYSICAL_RENOTIFY_SECONDS if awaiting_physical else INCIDENT_RENOTIFY_SECONDS
+            renotify_seconds = (
+                AWAITING_PHYSICAL_RENOTIFY_SECONDS
+                if awaiting_physical
+                else incident_renotify_interval_seconds(open_record)
+            )
             escalated = (
                 False
                 if awaiting_physical
@@ -2219,6 +2246,8 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
                 open_record["lastNotifiedAt"] = current
                 open_record["lastNotifiedIso"] = now_iso()
                 open_record["renotifyCount"] = int_field(open_record, "renotifyCount") + 1
+                if not awaiting_physical:
+                    advance_incident_renotify_interval(open_record)
                 append_still_open_context(event, open_record, key, current, suppressed, escalated)
                 return None
             return f"incident already open for {key}; duplicate suppressed"
