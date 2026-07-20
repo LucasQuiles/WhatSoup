@@ -1280,8 +1280,25 @@ export class AgentRuntime implements Runtime {
         return false;
       },
     ).then((provedClosed) => {
-      if (provedClosed && this.systemTurnQuarantines.get(scopeKey) === quarantine) {
-        this.systemTurnQuarantines.delete(scopeKey);
+      if (provedClosed) {
+        if (this.systemTurnQuarantines.get(scopeKey) === quarantine) {
+          this.systemTurnQuarantines.delete(scopeKey);
+        }
+      } else {
+        // The lane stays closed (never reopened onto a possibly-live tree), but
+        // register the one shared proof-of-death retry so a later census that
+        // proves the tree empty reopens it — instead of the entry being retained
+        // forever and throwing SYSTEM_TURN_QUARANTINE_FAILED on every turn.
+        this.proofOfDeath.register(
+          session,
+          `system-turn quarantine "${scopeKey}"`,
+          () => {
+            if (this.systemTurnQuarantines.get(scopeKey) === quarantine) {
+              this.systemTurnQuarantines.delete(scopeKey);
+            }
+          },
+          Date.now(),
+        );
       }
       return provedClosed;
     });

@@ -234,6 +234,10 @@ type RuntimeInternals = {
   chatSessions: Map<string, unknown>;
   chatQueues: Map<string, unknown>;
   chatQuarantine: Map<string, QuarantineRecord>;
+  systemTurnQuarantines: Map<string, Promise<boolean>>;
+  proofOfDeath: { size: number };
+  quarantineTimedOutSystemTurn: (session: unknown, scopeKey: string, lease: unknown) => Promise<boolean>;
+  waitForSystemTurnQuarantine: (scopeKey: string) => Promise<void>;
   sweepQuarantinedChats?: () => Promise<void>;
   stalledChats?: (now: number) => { mapKey: string; reason: string; ageMs: number; attempts: number }[];
 };
@@ -397,5 +401,67 @@ describe('per-chat quarantine — wedge containment and recovery', () => {
       rows.find((r) => r.mapKey === MAP_KEY)?.attempts,
       'release attempts must be counted so escalation can be bounded',
     ).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe('system-turn quarantine — C-F1 recovery and convergence', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSession.shutdown.mockReset();
+    mockSession.shutdown.mockResolvedValue(undefined);
+    mockSession.getStatus.mockReturnValue({
+      active: false, pid: null, sessionId: null, startedAt: null,
+      messageCount: 0, lastMessageAt: null, turnInFlight: false,
+    });
+    mockGetActiveSession.mockReturnValue(null);
+    mockGetResumableSessionForChat.mockReturnValue(null);
+  });
+
+  const SCOPE = 'test@s.whatsapp.net';
+  const lease = { id: 1 } as unknown;
+
+  it('reopens the system-turn lane once a retained-closed quarantine is proven empty', async () => {
+    const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
+    await runtime.start();
+    const state = internals(runtime);
+
+    // The teardown is refused, so quarantineTimedOutSystemTurn resolves false and
+    // retains the entry — under the old code, permanently.
+    mockSession.shutdown.mockRejectedValue(new Error('pre-signal recensus unavailable'));
+    const verdict = await state.quarantineTimedOutSystemTurn(mockSession, SCOPE, lease);
+    expect(verdict).toBe(false);
+
+    // Every subsequent turn for this scope is fail-closed while unprovable.
+    await expect(state.waitForSystemTurnQuarantine(SCOPE)).rejects.toThrow(/SYSTEM_TURN_QUARANTINE_FAILED/);
+    expect(state.proofOfDeath.size, 'a refused system-turn teardown must register for retry').toBeGreaterThan(0);
+
+    // The tree becomes provable; the shared sweep must reopen the lane.
+    mockSession.shutdown.mockResolvedValue(undefined);
+    await state.sweepQuarantinedChats!.call(runtime);
+
+    expect(
+      state.systemTurnQuarantines.has(SCOPE),
+      'a proven-empty tree must reopen the system-turn lane — not stay closed forever',
+    ).toBe(false);
+    await expect(state.waitForSystemTurnQuarantine(SCOPE)).resolves.toBeUndefined();
+  });
+
+  it('releases BOTH a per-chat quarantine and a system-turn quarantine on one proof', async () => {
+    // Structural convergence at the runtime level: one wedged session blocking
+    // two subsystems releases both together, not on two racing schedules.
+    const { runtime, state } = await wedgedRuntime({ everProvable: true });
+    await vi.waitFor(() => expect(state.chatQuarantine.has(MAP_KEY)).toBe(true));
+
+    // Same session also trips a system-turn quarantine (refused teardown).
+    mockSession.shutdown.mockRejectedValueOnce(new Error('pre-signal recensus unavailable'));
+    await state.quarantineTimedOutSystemTurn(mockSession, MAP_KEY, lease);
+    expect(state.systemTurnQuarantines.has(MAP_KEY)).toBe(true);
+
+    // One proof of death.
+    mockSession.shutdown.mockResolvedValue(undefined);
+    await state.sweepQuarantinedChats!.call(runtime);
+
+    expect(state.chatQuarantine.has(MAP_KEY), 'per-chat quarantine released').toBe(false);
+    expect(state.systemTurnQuarantines.has(MAP_KEY), 'system-turn quarantine released').toBe(false);
   });
 });
