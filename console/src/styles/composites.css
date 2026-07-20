@@ -727,15 +727,12 @@ body::before {
 
 
 
-/* Canonical panel container border: use --b1 for c-card and c-section so all primary panels share the same boundary token. */
-.c-card {
-  background: var(--surface-raised);
-  border: var(--bw) solid var(--border-hairline);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-raised);
-}
-/* The card detail modifier was deleted (DD-43): its sole consumer, MessageBubble's
-   hand-rolled detail card, migrated onto the HoverCard primitive that owns this chrome. */
+/* The card panel recipe was absorbed into the Card primitive (DD-38 closeout):
+   `.soup-card` in primitives.css carries the declarations verbatim and is the
+   single sanctioned home; the legacy `.c-card` recipe is deleted. The card
+   detail modifier was deleted earlier (DD-43): its sole consumer,
+   MessageBubble's hand-rolled detail card, migrated onto the HoverCard
+   primitive that owns this chrome. */
 
 /* ═══ Tab button — c-tab from design system ═══ */
 .c-tab {
@@ -936,13 +933,13 @@ body::before {
 button:focus-visible,
 a:focus-visible,
 /* role=radio CardSelector options (div, roving tabindex) — ISM-03 WCAG 2.4.7 */
-[role="radio"]:focus-visible,
-/* keyboard-focusable cards (e.g. Ops fleet rows) — ISM-06 */
-.c-card[tabindex]:focus-visible {
+[role="radio"]:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: var(--bw-accent);
   transition: none;
 }
+/* keyboard-focusable cards (ISM-06) moved with the DD-38 absorb — see
+   `.soup-card[tabindex]:focus-visible` in primitives.css. */
 
 input:focus-visible,
 select:focus-visible,

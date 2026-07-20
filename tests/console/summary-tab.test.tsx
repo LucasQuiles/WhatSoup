@@ -141,7 +141,7 @@ describe('SummaryTab — agent-mode PROVIDER card', () => {
     // Locate the PROVIDER card by its label, then assert the value sibling
     // shows the resolved display name from the providers registry.
     const providerLabel = screen.getByText('PROVIDER')
-    const card = providerLabel.closest('div.c-card') as HTMLElement
+    const card = providerLabel.closest('div.soup-card') as HTMLElement
     expect(card).toBeTruthy()
     expect(within(card).getByText(OPENAI_DISPLAY)).toBeDefined()
   })
@@ -169,7 +169,7 @@ describe('SummaryTab — agent-mode PROVIDER card', () => {
 
     render(withToast(<SummaryTab line={line} onEditConfig={vi.fn()} onChangeMode={vi.fn()} />))
 
-    const card = screen.getByText('PROVIDER').closest('div.c-card') as HTMLElement
+    const card = screen.getByText('PROVIDER').closest('div.soup-card') as HTMLElement
     expect(within(card).getByText(CODEX_DISPLAY)).toBeDefined()
   })
 
@@ -182,7 +182,7 @@ describe('SummaryTab — agent-mode PROVIDER card', () => {
 
     render(withToast(<SummaryTab line={line} onEditConfig={vi.fn()} onChangeMode={vi.fn()} />))
 
-    const card = screen.getByText('PROVIDER').closest('div.c-card') as HTMLElement
+    const card = screen.getByText('PROVIDER').closest('div.soup-card') as HTMLElement
     expect(within(card).getByText(OPENAI_DISPLAY)).toBeDefined()
   })
 
@@ -191,7 +191,7 @@ describe('SummaryTab — agent-mode PROVIDER card', () => {
 
     render(withToast(<SummaryTab line={line} onEditConfig={vi.fn()} onChangeMode={vi.fn()} />))
 
-    const card = screen.getByText('PROVIDER').closest('div.c-card') as HTMLElement
+    const card = screen.getByText('PROVIDER').closest('div.soup-card') as HTMLElement
     expect(within(card).getByText(DEFAULT_PROVIDER_DISPLAY)).toBeDefined()
   })
 
@@ -200,7 +200,7 @@ describe('SummaryTab — agent-mode PROVIDER card', () => {
 
     render(withToast(<SummaryTab line={line} onEditConfig={vi.fn()} onChangeMode={vi.fn()} />))
 
-    const sessionsCard = screen.getByText('SESSIONS').closest('div.c-card') as HTMLElement
+    const sessionsCard = screen.getByText('SESSIONS').closest('div.soup-card') as HTMLElement
     const sessionsValue = within(sessionsCard).getByText('3')
     expect(sessionsValue).toBeDefined()
     expect(sessionsValue.className).not.toMatch(/text-(m-|s-)/)
@@ -248,10 +248,10 @@ describe('SummaryTab — KPI row structural contract', () => {
 
       render(withToast(<SummaryTab line={line} onEditConfig={vi.fn()} onChangeMode={vi.fn()} />))
 
-      const statusCard = screen.getByText('STATUS').closest('div.c-card') as HTMLElement
+      const statusCard = screen.getByText('STATUS').closest('div.soup-card') as HTMLElement
       expect(within(statusCard).getByText('online')).toBeDefined()
 
-      const connectionCard = screen.getByText('CONNECTION').closest('div.c-card') as HTMLElement
+      const connectionCard = screen.getByText('CONNECTION').closest('div.soup-card') as HTMLElement
       expect(within(connectionCard).getByText('connected')).toBeDefined()
     }
   })
@@ -265,7 +265,7 @@ describe('SummaryTab — KPI row structural contract', () => {
 
     render(withToast(<SummaryTab line={line} onEditConfig={vi.fn()} onChangeMode={vi.fn()} />))
 
-    const modelCard = screen.getByText('MODEL').closest('div.c-card') as HTMLElement
+    const modelCard = screen.getByText('MODEL').closest('div.soup-card') as HTMLElement
     expect(within(modelCard).getByText('gpt-4o')).toBeDefined()
   })
 
@@ -274,7 +274,7 @@ describe('SummaryTab — KPI row structural contract', () => {
 
     render(withToast(<SummaryTab line={line} onEditConfig={vi.fn()} onChangeMode={vi.fn()} />))
 
-    const linkCard = screen.getByText('LINK').closest('div.c-card') as HTMLElement
+    const linkCard = screen.getByText('LINK').closest('div.soup-card') as HTMLElement
     const value = within(linkCard).getByText('unknown')
     expect(value).toBeDefined()
     expect(value.className).toContain('text-text-2')

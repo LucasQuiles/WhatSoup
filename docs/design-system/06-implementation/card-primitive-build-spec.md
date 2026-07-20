@@ -56,7 +56,12 @@ mirrors the icon-size-ramp / typography-floor ratchets. (Build it when migration
 mid-migration is premature; the value is preventing NEW spread, so land it alongside the first migration commit.)
 
 ## Status
-**IN PROGRESS (owner-approved 1→2→3, item 2).** `Card.tsx` built (5-variant API: base/interactive/kpi/
+**CLOSED 2026-07-19 (DD-38 closeout).** All consumers migrated (W2-S4 wave); the recipe
+was absorbed — Card.tsx renders `.soup-card` (primitives.css, declarations verbatim + the
+`[tabindex]:focus-visible` rule); the legacy `.c-card` composite recipe is deleted; the guard's
+allowlist is empty (promoted state). Historical record below.
+
+**Was: IN PROGRESS (owner-approved 1→2→3, item 2).** `Card.tsx` built (5-variant API: base/interactive/kpi/
 selectable/status-edge) + barrel export + `tests/console/primitives-card.test.tsx` (6 contract tests). The
 `base` variant renders the `.c-card` recipe verbatim → zero visual change for migrated consumers. Token-only;
 typecheck:all + `verify:console-design` PASS; shadow baseline fell 348→346 as raw usages left.
