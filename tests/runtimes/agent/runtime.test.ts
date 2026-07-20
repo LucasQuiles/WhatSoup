@@ -15702,6 +15702,69 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(events.some((e) => e.event === 'runtime_selected' && e.source === 'user' && e.reasonCode === 'user_pin')).toBe(true);
   });
 
+  // ── EXECPROFILE-CI-FIX Finding 2 (PLAN.md §5b): resolveRoute's pin/tier
+  // branches unconditionally discard the target provider's config model
+  // (`model: undefined`), even though routablePinTargets/isEntryCredentialed
+  // just proved that SAME target eligible using its REAL configured model
+  // (fallback-config.ts: resolveProviderCredentialState reads entry.model).
+  // For opencode-cli (FALLBACK_MODEL_REQUIRED_PROVIDER_IDS), buildChildEnv
+  // hard-throws on a null model (session.ts:261) — so a null-model route to
+  // an eligible opencode-cli fallback/tier target is a live production crash,
+  // not a hypothetical. These two tests drive the REAL, unmocked
+  // resolveRouteForTurn / routablePinTargets / isEntryCredentialed path (only
+  // SessionManager itself is file-mocked) and assert the config's own
+  // validated model is threaded through instead of discarded.
+  it('an eligible pin to a configured opencode-cli fallback threads its validated model into the spawn (Finding 2 — pin branch, production reachability)', async () => {
+    // ZAI_API_KEY makes the 'glm' credential PRESENT for real (unmocked)
+    // lookupCredential — env-first lookup, no keychain dependency — so the
+    // REAL eligibility probe (not a stub) reports opencode-cli routable.
+    const savedZaiKey = process.env.ZAI_API_KEY;
+    process.env.ZAI_API_KEY = 'test-zai-key';
+    try {
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'glm/test-model' }];
+      const first = makeRoutingRuntime();
+      await sendAndDrain(first.runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model opencode-cli' }));
+      // The pin must be ACCEPTED (eligible) — a rejected pin would prove
+      // nothing about the model-discard bug.
+      expect(prefRows()).toHaveLength(1);
+      const { runtime } = makeRoutingRuntime();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'hello there', messageId: 'msg-2' }));
+      const opts = capturedSessionManagerOptsRef.current as unknown as { provider?: string; model?: string } | null;
+      expect(opts).not.toBeNull();
+      expect(opts?.provider).toBe('opencode-cli');
+      // THE BUG: pre-fix this is `undefined` — the exact null buildChildEnv
+      // (session.ts:261) hard-throws on for a real, unmocked SessionManager.
+      // THE FIX: the fallback entry's own validated model must be threaded
+      // through instead of discarded.
+      expect(opts?.model).toBe('glm/test-model');
+    } finally {
+      if (savedZaiKey === undefined) delete process.env.ZAI_API_KEY;
+      else process.env.ZAI_API_KEY = savedZaiKey;
+    }
+  });
+
+  it('an eligible tier route to a configured opencode-cli target threads its validated model into the spawn (Finding 2 — tier branch)', async () => {
+    const savedZaiKey = process.env.ZAI_API_KEY;
+    process.env.ZAI_API_KEY = 'test-zai-key';
+    try {
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'glm/test-model' }];
+      cfgAny().nlRoutingTiers = { strongest: 'opencode-cli' };
+      const first = makeRoutingRuntime();
+      await sendAndDrain(first.runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model strongest' }));
+      const { runtime } = makeRoutingRuntime();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'hello there', messageId: 'msg-2' }));
+      const opts = capturedSessionManagerOptsRef.current as unknown as { provider?: string; model?: string } | null;
+      expect(opts).not.toBeNull();
+      expect(opts?.provider).toBe('opencode-cli');
+      expect(opts?.model).toBe('glm/test-model');
+      const events = await readEvents();
+      expect(events.some((e) => e.reasonCode === 'intent_strongest')).toBe(true);
+    } finally {
+      if (savedZaiKey === undefined) delete process.env.ZAI_API_KEY;
+      else process.env.ZAI_API_KEY = savedZaiKey;
+    }
+  });
+
   it('group preferences are per-sender: A sets, B is unaffected', async () => {
     const { runtime, sentMessages } = makeRoutingRuntime();
     await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_A, isGroup: true, content: '/model strongest' }));

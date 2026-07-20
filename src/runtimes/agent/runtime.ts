@@ -8247,6 +8247,14 @@ export class AgentRuntime implements Runtime {
         pinnedProviderEligible: pinned !== null && routable.includes(pinned),
         tierMap: config.nlRoutingTiers,
         tierProviderEligible: tierProvider !== undefined && routable.includes(tierProvider),
+        // Finding 2 fix: the same agentFallbacks entries that
+        // routablePinTargets/isEntryCredentialed just read to prove a pin/tier
+        // target eligible carry that target's validated config model — thread
+        // it through so resolveRoute can supply it for credential-required
+        // providers (opencode-cli et al.) instead of discarding it to
+        // `undefined`. First entry wins per provider, matching
+        // routablePinTargets' own dedup.
+        configuredModelByProvider: this.configuredModelByProvider(),
       });
       return { ...decision, pinnedProvider: pinned };
     } catch (err) {
@@ -8379,6 +8387,24 @@ export class AgentRuntime implements Runtime {
       targets.push(entry.provider);
     }
     return targets;
+  }
+
+  /**
+   * Provider id → validated config model, derived from `agentFallbacks`
+   * (first entry wins per provider — same dedup `routablePinTargets` applies
+   * when it walks this same array). Feeds `resolveRoute`'s
+   * `configuredModelByProvider` input (EXECPROFILE-CI-FIX Finding 2): the
+   * pin/tier eligibility probe already reads each entry's own model to prove
+   * that provider routable, so this is the same data, just keyed for lookup
+   * instead of iterated for a credential check.
+   */
+  private configuredModelByProvider(): Record<string, string | undefined> {
+    const models: Record<string, string | undefined> = {};
+    for (const entry of this.agentFallbacks) {
+      if (entry.provider in models) continue;
+      models[entry.provider] = entry.model;
+    }
+    return models;
   }
 
   /**

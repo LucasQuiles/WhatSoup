@@ -42,6 +42,10 @@ function inputs(overrides: Partial<RouteInputs> = {}): RouteInputs {
     pinnedProviderEligible: false,
     tierMap: null,
     tierProviderEligible: false,
+    // Empty by default: no test relies on a threaded model unless it opts in
+    // via override — keeps every existing exact-`toEqual` assertion (e.g.
+    // codex-cli pin → model: undefined) unaffected.
+    configuredModelByProvider: {},
     ...overrides,
   };
 }
@@ -162,6 +166,68 @@ describe('resolveRoute precedence', () => {
     expect(d.model).toBeUndefined();
     expect(d.source).toBe('preference');
     expect(d.reasonCode).toBe('user_pin');
+  });
+
+  // ── EXECPROFILE-CI-FIX Finding 2 (PLAN.md §5b) ────────────────────────────
+  // opencode-cli (and the managed API providers) cannot resolve their own
+  // default model — buildChildEnv hard-throws on a null model for them. The
+  // config validator already guarantees a static fallback/tier entry naming
+  // one of these providers carries a model; these branches must THREAD that
+  // validated model through instead of discarding it to `undefined` the way
+  // a genuine claude-cli/codex-cli/gemini-cli provider change correctly does
+  // (contrast with the codex-cli case directly above, which stays undefined).
+
+  it('an eligible pin to a credential-required provider (opencode-cli) threads its configured model (Finding 2 — pin)', () => {
+    const d = resolveRoute(inputs({
+      pref: pref({ intent: 'provider_specific', requestedProvider: 'opencode-cli' }),
+      pinnedProviderEligible: true,
+      configuredModelByProvider: { 'opencode-cli': 'glm/test-model' },
+    }));
+    expect(d.provider).toBe('opencode-cli');
+    expect(d.model).toBe('glm/test-model');
+    expect(d.source).toBe('preference');
+    expect(d.reasonCode).toBe('user_pin');
+  });
+
+  it('an eligible pin to a credential-required provider with NO configured model fails closed to undefined (defensive — should not happen post-validation)', () => {
+    const d = resolveRoute(inputs({
+      pref: pref({ intent: 'provider_specific', requestedProvider: 'opencode-cli' }),
+      pinnedProviderEligible: true,
+      configuredModelByProvider: {},
+    }));
+    expect(d.provider).toBe('opencode-cli');
+    expect(d.model).toBeUndefined();
+  });
+
+  it('an eligible tier route to a credential-required provider (opencode-cli) threads its configured model (Finding 2 — tier)', () => {
+    const d = resolveRoute(inputs({
+      pref: pref({ intent: 'fastest' }),
+      tierMap: { fastest: 'opencode-cli' },
+      tierProviderEligible: true,
+      configuredModelByProvider: { 'opencode-cli': 'glm/test-model' },
+    }));
+    expect(d.provider).toBe('opencode-cli');
+    expect(d.model).toBe('glm/test-model');
+    expect(d.source).toBe('preference');
+    expect(d.reasonCode).toBe('intent_fastest');
+  });
+
+  it('a tier that maps back to the instance primary keeps the operator-configured model even when the primary is credential-required', () => {
+    // Guards the symmetry between the pin and tier branches: an opencode-cli
+    // PRIMARY pinned/tier-routed to ITSELF must take the same
+    // primary-keeps-its-own-model path as claude-cli/codex-cli/gemini-cli —
+    // not fall through to the (empty, since it's the primary, not a fallback
+    // entry) configuredModelByProvider lookup and go null.
+    const d = resolveRoute(inputs({
+      agentProvider: 'opencode-cli',
+      effectiveModel: 'glm/primary-model',
+      pref: pref({ intent: 'strongest' }),
+      tierMap: { strongest: 'opencode-cli' },
+      tierProviderEligible: true,
+      configuredModelByProvider: {},
+    }));
+    expect(d.provider).toBe('opencode-cli');
+    expect(d.model).toBe('glm/primary-model');
   });
 
   it('an unconfigured tier resolves to the default route with an HONEST distinct source', () => {

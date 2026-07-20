@@ -27,7 +27,12 @@ import { PROVIDER_API_KEY_SERVICES } from '../lib/provider-key-service.ts';
 import { isRecord } from '../lib/type-guards.ts';
 import { isSamePhysicalDirectory } from '../lib/home-path.ts';
 import { resolveAgentModel } from './agent-model.ts';
-import { fallbackEntryKey, isSameAsPrimaryFallbackEntry, type AgentFallbackEntry } from './fallback-chain.ts';
+import {
+  fallbackEntryKey,
+  isSameAsPrimaryFallbackEntry,
+  FALLBACK_MODEL_REQUIRED_PROVIDER_IDS,
+  type AgentFallbackEntry,
+} from './fallback-chain.ts';
 import { DEFAULT_TRANSPORT_ID, isTransportId, TRANSPORT_IDS } from '../transport/registry.ts';
 import { ACCOUNT_RE } from './transport-refs.ts';
 import { E164_RE } from '../transport/twilio/types.ts';
@@ -58,14 +63,9 @@ export const VALID_SESSION_SCOPES: ReadonlySet<string> = new Set([
   'per_chat',
 ]);
 
-// Providers whose fallback credential/model route cannot be resolved from a
-// provider-owned default. Managed API providers need a request model, while
-// OpenCode needs the configured model prefix to select exactly one credential.
-const API_PROVIDER_IDS: ReadonlySet<string> = new Set(['openai-api', 'anthropic-api']);
-const FALLBACK_MODEL_REQUIRED_PROVIDER_IDS: ReadonlySet<string> = new Set([
-  ...API_PROVIDER_IDS,
-  'opencode-cli',
-]);
+// FALLBACK_MODEL_REQUIRED_PROVIDER_IDS moved to fallback-chain.ts (SSOT,
+// imported above) so route-resolution.ts can consume the same set without
+// pulling this file's heavier module graph into its pure core.
 export interface ValidationError {
   /** Dotted path of the offending field (e.g. "agentOptions.sessionScope"). */
   field: string;
