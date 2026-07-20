@@ -10,6 +10,7 @@ import type { IdentityStore, GuardMode } from '../core/outbound-identity/types.t
 import type { ContactsDirectory } from '../core/mentions.ts';
 import type { PresenceCache } from './presence-cache.ts';
 import type { WhatsAppSocket, ConnectionStateSnapshot } from './connection.ts';
+import type { OutboundBannerClassifier } from './outbound-content-egress.ts';
 
 /**
  * Minimal runtime connection surface consumed by main.ts and its dependents.
@@ -32,6 +33,11 @@ export interface RuntimeConnection extends EventEmitter, Messenger {
   getConnectionState?(): ConnectionStateSnapshot;
   /** Inject the outbound identity store + guard mode. Wired post-construction in main.ts. */
   setIdentityStore(store: IdentityStore, mode: GuardMode): void;
+  /**
+   * Wire the send-seam provider-error banner classifier (#1783). Optional: only
+   * the Baileys `ConnectionManager` runs an outbound governor; Twilio omits it.
+   */
+  setOutboundContentClassifier?(classify: OutboundBannerClassifier): void;
   connect(): Promise<void>;
   shutdown(): void;
   sendRaw(chatJid: string, content: Record<string, unknown>): Promise<SubmissionReceipt>;

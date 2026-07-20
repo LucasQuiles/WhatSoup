@@ -260,6 +260,8 @@ const { mockConfig, mockSynthesizeSpeech, mockWriteTempFile } = vi.hoisted(() =>
     textAggregateDelayMs: 2_000,
     startupNotifications: true,
     proactiveResumeOnStartup: true,
+    stateRoot: '/tmp/whatsoup-test-state-runtime',
+    restartLoopGuard: { enabled: true, maxRestarts: 3, windowMs: 300_000 },
     mediaDir: '/tmp/whatsoup-test-media/tmp',
     pineconeAllowedIndexes: [] as string[],
     voiceReply: 'never' as 'always' | 'when_received' | 'never',
