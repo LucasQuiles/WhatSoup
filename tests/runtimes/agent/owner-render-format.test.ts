@@ -96,133 +96,169 @@ describe('owner-render-format', () => {
   });
 });
 
-// The dynamic per-harness available-models section for `/config model` (Q ruling
-// 2026-07-19, CONFIG-MODEL-RENDER-SPEC.md). Pure formatter over a listModelCatalog
-// result: (1) the pin renders in the caller's config block ABOVE, so this section
-// degrades independently; (2) ranked head pin→fallbacks→rest, not alphabetical;
-// (3) `showing N of M` ONLY when M > cap; (4) filter-miss ≠ catalogue-unavailable.
+// The dynamic per-harness available-models section for `/config model`
+// (CONFIG-MODEL-RENDER-SPEC.md, Q rulings 2026-07-19/20). Pure formatter over a
+// resolver-produced discriminated listing. Encodes: pin renders in the caller's
+// block ABOVE (degrades independently); ranked head pin→fallbacks→rest (say so
+// when unranked); `showing N of M` only when M>cap; filter-miss ≠ unavailable;
+// a `source:` provenance line = the tag on the LIST; the resolved `harness:` is
+// named on every state (misresolution visible); distinct unavailable reasons
+// (no-key ≠ key-rejected ≠ timeout ≠ empty ≠ no-adapter); as-of = capture time.
 describe('formatAvailableModels', () => {
-  const asOf = 'just now';
+  const base = { harnessLabel: 'opencode-cli', currentModelId: null, fallbackModelIds: [], filter: null, cap: 12 } as const;
 
-  it('ranks current → fallbacks → rest, marks current, and omits the truncation line when M ≤ cap', () => {
+  it('ok: names harness + source provenance line, ranks current→fallbacks→rest, marks current, no truncation when M ≤ cap', () => {
     const out = formatAvailableModels({
-      currentModelId: 'claude-opus-4-8',
-      fallbackModelIds: ['minimax/MiniMax-M2'],
+      ...base,
+      currentModelId: 'minimax/MiniMax-M2',
+      fallbackModelIds: ['deepseek/deepseek-chat'],
       listing: {
         status: 'ok',
-        ids: ['deepseek/deepseek-chat', 'minimax/MiniMax-M2', 'claude-opus-4-8', 'openai/gpt-5.4'],
+        ids: ['openai/gpt-5.4', 'deepseek/deepseek-chat', 'minimax/MiniMax-M2'],
+        sourceLabel: 'opencode CLI',
+        asOfLabel: 'just now',
       },
-      filter: null,
-      cap: 12,
-      asOfLabel: asOf,
     });
     expect(out).toBe(
-      `*Available models* (as of just now)\n` +
-        `${OWNER_BULLET}claude-opus-4-8 [current]\n` +
-        `${OWNER_BULLET}minimax/MiniMax-M2\n` +
+      `*Available models* — harness: opencode-cli\n` +
+        `_source: opencode CLI, as of just now_\n` +
+        `${OWNER_BULLET}minimax/MiniMax-M2 [current]\n` +
         `${OWNER_BULLET}deepseek/deepseek-chat\n` +
         `${OWNER_BULLET}openai/gpt-5.4`,
     );
   });
 
-  it('caps the head and appends "showing N of M" when a preference rank exists and M > cap', () => {
+  it('ok: caps the head and appends "showing N of M" when a preference ranks it and M > cap', () => {
     const ids = Array.from({ length: 20 }, (_, i) => `m/model-${i}`);
     const out = formatAvailableModels({
+      ...base,
       currentModelId: 'm/model-5',
-      fallbackModelIds: [],
-      listing: { status: 'ok', ids },
-      filter: null,
       cap: 3,
-      asOfLabel: asOf,
+      listing: { status: 'ok', ids, sourceLabel: 'opencode CLI', asOfLabel: 'just now' },
     });
     const lines = out.split('\n');
-    expect(lines[0]).toBe('*Available models* (as of just now)');
-    expect(lines[1]).toBe(`${OWNER_BULLET}m/model-5 [current]`);
-    expect(lines).toHaveLength(1 + 3 + 1); // header + cap bullets + truncation
+    expect(lines[0]).toBe('*Available models* — harness: opencode-cli');
+    expect(lines[1]).toBe('_source: opencode CLI, as of just now_');
+    expect(lines[2]).toBe(`${OWNER_BULLET}m/model-5 [current]`);
+    expect(lines).toHaveLength(2 + 3 + 1); // header + source + cap bullets + truncation
     expect(lines[lines.length - 1]).toBe('showing 3 of 20');
   });
 
-  it('says the head is catalogue-order (not the top) when nothing ranks it and M > cap', () => {
+  it('ok: says the head is catalogue order (not "the top") when nothing ranks it and M > cap', () => {
     const ids = Array.from({ length: 20 }, (_, i) => `m/model-${i}`);
     const out = formatAvailableModels({
-      currentModelId: null,
-      fallbackModelIds: [],
-      listing: { status: 'ok', ids },
-      filter: null,
+      ...base,
       cap: 3,
-      asOfLabel: asOf,
+      listing: { status: 'ok', ids, sourceLabel: 'opencode CLI', asOfLabel: 'just now' },
     });
     expect(out.split('\n').pop()).toBe(
       'showing first 3 of 20 (catalogue order — no configured preference to rank by)',
     );
   });
 
-  it('filters case-insensitively and ranks within the matched set', () => {
+  it('ok: filter matches a subset — header notes the filter, ranks within the matched set', () => {
     const out = formatAvailableModels({
-      currentModelId: null,
-      fallbackModelIds: [],
+      ...base,
+      filter: 'minimax',
       listing: {
         status: 'ok',
         ids: ['minimax/MiniMax-M2', 'deepseek/deepseek-chat', 'minimax/MiniMax-Text-01'],
+        sourceLabel: 'opencode CLI',
+        asOfLabel: 'just now',
       },
-      filter: 'minimax',
-      cap: 12,
-      asOfLabel: asOf,
     });
     expect(out).toBe(
-      `*Available models* matching 'minimax' (as of just now)\n` +
+      `*Available models* matching 'minimax' — harness: opencode-cli\n` +
+        `_source: opencode CLI, as of just now_\n` +
         `${OWNER_BULLET}minimax/MiniMax-M2\n` +
         `${OWNER_BULLET}minimax/MiniMax-Text-01`,
     );
   });
 
-  it('renders filter-miss distinctly from catalogue-unavailable (dead-knob defense), counting the full catalogue', () => {
+  it('ok: filter-miss is distinct from unavailable, counts the full catalogue, and carries harness+source+as-of', () => {
     const out = formatAvailableModels({
-      currentModelId: null,
-      fallbackModelIds: [],
-      listing: { status: 'ok', ids: ['a', 'b', 'c'] },
+      ...base,
       filter: 'zzz',
-      cap: 12,
-      asOfLabel: asOf,
-    });
-    expect(out).toBe(`*Available models:* no match for 'zzz' in 3 models (as of just now)`);
-  });
-
-  it('renders catalogue-unavailable honestly (the pin is shown by the caller above)', () => {
-    const out = formatAvailableModels({
-      currentModelId: 'claude-opus-4-8',
-      fallbackModelIds: [],
-      listing: { status: 'unavailable', ids: [] },
-      filter: null,
-      cap: 12,
-      asOfLabel: asOf,
-    });
-    expect(out).toBe(`*Available models:* catalogue unavailable (as of just now)`);
-  });
-
-  it('emits no truncation line when M equals the cap exactly (boundary)', () => {
-    const out = formatAvailableModels({
-      currentModelId: null,
-      fallbackModelIds: [],
-      listing: { status: 'ok', ids: ['a', 'b', 'c'] },
-      filter: null,
-      cap: 3,
-      asOfLabel: asOf,
-    });
-    expect(out.split('\n')).toHaveLength(1 + 3); // header + 3 bullets, NO truncation
-  });
-
-  it('dedups a current model that also appears in the catalogue body (listed once, first)', () => {
-    const out = formatAvailableModels({
-      currentModelId: 'x',
-      fallbackModelIds: [],
-      listing: { status: 'ok', ids: ['a', 'x', 'b'] },
-      filter: null,
-      cap: 12,
-      asOfLabel: asOf,
+      listing: { status: 'ok', ids: ['a', 'b', 'c'], sourceLabel: 'opencode CLI', asOfLabel: 'just now' },
     });
     expect(out).toBe(
-      `*Available models* (as of just now)\n` +
+      `*Available models:* no match for 'zzz' in 3 models (harness: opencode-cli, source: opencode CLI, as of just now)`,
+    );
+  });
+
+  it('unavailable no-key: actionable, named harness, distinct from a rejected key', () => {
+    const out = formatAvailableModels({
+      ...base,
+      harnessLabel: 'claude-cli',
+      currentModelId: 'claude-opus-4-8',
+      listing: { status: 'unavailable', reason: { kind: 'no-key' }, asOfLabel: 'just now' },
+    });
+    expect(out).toBe(
+      `*Available models:* unavailable — no anthropic API key reachable on this host (harness: claude-cli, as of just now)`,
+    );
+  });
+
+  it('unavailable key-rejected: distinct message (key present but not accepted)', () => {
+    const out = formatAvailableModels({
+      ...base,
+      harnessLabel: 'claude-cli',
+      listing: { status: 'unavailable', reason: { kind: 'key-rejected' }, asOfLabel: 'just now' },
+    });
+    expect(out).toBe(
+      `*Available models:* unavailable — anthropic API key present but rejected (401/403) (harness: claude-cli, as of just now)`,
+    );
+  });
+
+  it('unavailable timeout: labeled as a timeout, not absence (Q#3)', () => {
+    const out = formatAvailableModels({
+      ...base,
+      harnessLabel: 'claude-cli',
+      listing: { status: 'unavailable', reason: { kind: 'timeout' }, asOfLabel: 'just now' },
+    });
+    expect(out).toBe(
+      `*Available models:* unavailable — catalogue lookup timed out (harness: claude-cli, as of just now)`,
+    );
+  });
+
+  it('unavailable empty: harness ran but returned nothing', () => {
+    const out = formatAvailableModels({
+      ...base,
+      listing: { status: 'unavailable', reason: { kind: 'empty' }, asOfLabel: 'just now' },
+    });
+    expect(out).toBe(
+      `*Available models:* unavailable — harness returned an empty catalogue (harness: opencode-cli, as of just now)`,
+    );
+  });
+
+  it('unavailable no-adapter: names the unadapted harness rather than "unsupported"', () => {
+    const out = formatAvailableModels({
+      ...base,
+      harnessLabel: 'codex-cli',
+      listing: { status: 'unavailable', reason: { kind: 'no-adapter', harness: 'codex-cli' }, asOfLabel: 'just now' },
+    });
+    expect(out).toBe(
+      `*Available models:* unavailable — no catalogue adapter for harness 'codex-cli' (harness: codex-cli, as of just now)`,
+    );
+  });
+
+  it('ok: no truncation line when M equals the cap exactly (boundary)', () => {
+    const out = formatAvailableModels({
+      ...base,
+      cap: 3,
+      listing: { status: 'ok', ids: ['a', 'b', 'c'], sourceLabel: 'opencode CLI', asOfLabel: 'just now' },
+    });
+    expect(out.split('\n')).toHaveLength(2 + 3); // header + source + 3 bullets, no truncation
+  });
+
+  it('ok: dedups a current model that also appears in the catalogue body (listed once, first)', () => {
+    const out = formatAvailableModels({
+      ...base,
+      currentModelId: 'x',
+      listing: { status: 'ok', ids: ['a', 'x', 'b'], sourceLabel: 'opencode CLI', asOfLabel: 'just now' },
+    });
+    expect(out).toBe(
+      `*Available models* — harness: opencode-cli\n` +
+        `_source: opencode CLI, as of just now_\n` +
         `${OWNER_BULLET}x [current]\n` +
         `${OWNER_BULLET}a\n` +
         `${OWNER_BULLET}b`,

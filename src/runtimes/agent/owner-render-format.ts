@@ -71,65 +71,101 @@ export function modelModifierTags(
  *  narrow column; larger sets truncate with an honest `showing N of M` line. */
 export const MODEL_CATALOGUE_CAP = 12;
 
-/** Input for {@link formatAvailableModels}. All values are already config- or
+/** Why a per-harness catalogue could not be listed. Distinct reasons carry
+ *  distinct fixes (Q 2b#2/#4) — collapsing them into a single "unavailable" is
+ *  the dead-knob defect (the actionable line lies when the real cause differs). */
+export type UnavailableReason =
+  | { kind: 'no-adapter'; harness: string }
+  | { kind: 'no-key' }
+  | { kind: 'key-rejected' }
+  | { kind: 'timeout' }
+  | { kind: 'empty' };
+
+/** The resolver-produced catalogue listing the formatter renders. `asOfLabel`
+ *  is the CAPTURE stamp (Q 2b#1) — when the source was probed, NOT render time. */
+export type AvailableModelsListing =
+  | { status: 'ok'; ids: readonly string[]; sourceLabel: string; asOfLabel: string }
+  | { status: 'unavailable'; reason: UnavailableReason; asOfLabel: string };
+
+/** Input for {@link formatAvailableModels}. All values are config- or
  *  catalogue-derived and sanitize-safe; this layer only shapes strings. */
 export interface AvailableModelsInput {
-  /** Configured/pinned model id — ranked first and marked `[current]`, if in the set. */
+  /** The resolved active harness, named on EVERY render so a misresolution is
+   *  visible in output rather than inferred from a surprising list (Q 2b#4). */
+  harnessLabel: string;
+  /** Configured/pinned model id — ranked first and marked `[current]`, if present. */
   currentModelId: string | null;
   /** Configured fallback model ids — ranked after the current model, in order. */
   fallbackModelIds: readonly string[];
-  /** The harness's self-reported catalogue (from listModelCatalog). */
-  listing: { status: 'ok' | 'unavailable'; ids: readonly string[] };
+  /** The resolver-produced listing (dynamic per harness). */
+  listing: AvailableModelsListing;
   /** Optional case-insensitive substring filter from `/config model <filter>`. */
   filter: string | null;
   /** Max ids to render before truncating (pass {@link MODEL_CATALOGUE_CAP}). */
   cap: number;
-  /** Human as-of label for degrade/truncation lines, e.g. 'just now'. */
-  asOfLabel: string;
+}
+
+/** The actionable, reason-specific line for an unavailable catalogue (Q 2b#2). */
+function unavailableMessage(reason: UnavailableReason): string {
+  switch (reason.kind) {
+    case 'no-key':
+      return 'no anthropic API key reachable on this host';
+    case 'key-rejected':
+      return 'anthropic API key present but rejected (401/403)';
+    case 'timeout':
+      return 'catalogue lookup timed out';
+    case 'empty':
+      return 'harness returned an empty catalogue';
+    case 'no-adapter':
+      return `no catalogue adapter for harness '${reason.harness}'`;
+  }
 }
 
 /**
  * Render the dynamic PER-HARNESS available-models section for `/config model`
- * (Q ruling 2026-07-19, CONFIG-MODEL-RENDER-SPEC.md). The caller renders the
- * config-derived pin/primary block ABOVE this — so this section degrades
- * INDEPENDENTLY and its failure never takes the "what am I on" answer down.
+ * (CONFIG-MODEL-RENDER-SPEC.md; Q rulings 2026-07-19/20). The caller renders the
+ * config-derived pin/primary block ABOVE this, so this section degrades
+ * INDEPENDENTLY — its failure never takes the "what am I on" answer down.
  *
- * Four load-bearing constraints:
- *  1. (caller's job) pin renders first/unconditionally above this section.
- *  2. Ranked head: current → configured fallbacks → rest (catalogue order),
- *     deduped. When nothing config-derived ranks the head, the truncation line
- *     SAYS it is catalogue order rather than implying it is "the top".
- *  3. `showing N of M` ONLY when M > cap (a "showing 12 of 12" line trains
- *     people to ignore exactly the line they must read).
- *  4. Filter-miss (`no match for 'x' in M models`) is rendered distinctly from
- *     catalogue-unavailable — same slot, opposite meaning (dead-knob defense).
+ * Load-bearing constraints:
+ *  - the resolved `harness:` is named on EVERY state (misresolution visible);
+ *  - `ok` carries a `source:` provenance line (the tag on the LIST) with the
+ *    CAPTURE-time as-of — never labeled "what this harness can run";
+ *  - ranked head current→fallbacks→rest (deduped); when nothing config-derived
+ *    ranks it, the truncation line SAYS it is catalogue order, not "the top";
+ *  - `showing N of M` only when M > cap;
+ *  - filter-miss is rendered distinctly from catalogue-unavailable;
+ *  - `unavailable` is actionable and reason-specific (no-key ≠ key-rejected ≠
+ *    timeout ≠ empty ≠ no-adapter) — the fix differs per reason.
  *
- * Pure and stateless. Never throws.
+ * Pure and stateless. Never throws. Caching + time-budget live in the resolver.
  */
 export function formatAvailableModels(input: AvailableModelsInput): string {
-  const { currentModelId, fallbackModelIds, listing, filter, cap, asOfLabel } = input;
+  const { harnessLabel, currentModelId, fallbackModelIds, listing, filter, cap } = input;
 
-  // Constraint 4 (half): catalogue unreachable → honest degrade. The pin is the
-  // caller's config-derived block above, so it survives this (constraint 1).
+  // Unavailable → actionable, reason-specific line. The pin is the caller's
+  // config-derived block above, so this degrades independently.
   if (listing.status === 'unavailable') {
-    return `*Available models:* catalogue unavailable (as of ${asOfLabel})`;
+    return `*Available models:* unavailable — ${unavailableMessage(listing.reason)} (harness: ${harnessLabel}, as of ${listing.asOfLabel})`;
   }
 
+  const { ids, sourceLabel, asOfLabel } = listing;
+
   // Optional case-insensitive substring filter over the full catalogue.
-  let pool: readonly string[] = listing.ids;
+  let pool: readonly string[] = ids;
   if (filter !== null) {
     const needle = filter.toLowerCase();
-    const matched = listing.ids.filter((id) => id.toLowerCase().includes(needle));
+    const matched = ids.filter((id) => id.toLowerCase().includes(needle));
     if (matched.length === 0) {
-      // Constraint 4 (other half): filter-miss is NOT catalogue-unavailable —
-      // count the full catalogue that was searched.
-      return `*Available models:* no match for '${filter}' in ${listing.ids.length} models (as of ${asOfLabel})`;
+      // Filter-miss is NOT catalogue-unavailable — count the full catalogue that
+      // was searched, and keep the provenance so the two states never collapse.
+      return `*Available models:* no match for '${filter}' in ${ids.length} models (harness: ${harnessLabel}, source: ${sourceLabel}, as of ${asOfLabel})`;
     }
     pool = matched;
   }
 
-  // Constraint 2: rank current → fallbacks → rest (catalogue order), deduped.
-  // A pin/fallback present in the pool is the "meaningful rank" signal.
+  // Rank current → fallbacks → rest (catalogue order), deduped. A pin/fallback
+  // in the pool is the "meaningful rank" signal.
   const seen = new Set<string>();
   const ranked: string[] = [];
   const push = (id: string): void => {
@@ -153,16 +189,15 @@ export function formatAvailableModels(input: AvailableModelsInput): string {
   const shown = ranked.slice(0, cap);
   const header =
     filter !== null
-      ? `*Available models* matching '${filter}' (as of ${asOfLabel})`
-      : `*Available models* (as of ${asOfLabel})`;
+      ? `*Available models* matching '${filter}' — harness: ${harnessLabel}`
+      : `*Available models* — harness: ${harnessLabel}`;
+  const sourceLine = `_source: ${sourceLabel}, as of ${asOfLabel}_`;
   const bullets = shown.map(
     (id) => `${OWNER_BULLET}${id}${id === currentModelId ? modifierSuffix(['current']) : ''}`,
   );
 
-  const lines = [header, ...bullets];
+  const lines = [header, sourceLine, ...bullets];
   if (total > cap) {
-    // Constraint 3: truncation line ONLY when it truncates. Constraint 2: if no
-    // preference ranked the head, say it is catalogue order, not "the top".
     lines.push(
       currentInPool || fallbackInPool
         ? `showing ${cap} of ${total}`
