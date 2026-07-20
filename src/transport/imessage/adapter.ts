@@ -174,7 +174,7 @@ export class ImessageAdapter
     delete: new Set(),
   };
 
-  private readonly channelId: ChannelId;
+  public readonly channelId: ChannelId;
   private readonly self: ParticipantRef;
   private readonly port: ImessagePort;
   private readonly sender: string;
