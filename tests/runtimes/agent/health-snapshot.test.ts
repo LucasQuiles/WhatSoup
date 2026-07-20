@@ -399,6 +399,30 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
     const snapshot = runtime.getHealthSnapshot();
     expect(['healthy', 'degraded', 'unhealthy']).toContain(snapshot.status);
   });
+
+  it('recordTurnCapabilitySuccess refreshes primaryModelUsability, clearing staleness (#1884 follow-up)', () => {
+    const staleCheckedAt = Date.now() - 31 * 60_000;
+    (runtime as unknown as { primaryModelUsability: unknown }).primaryModelUsability =
+      { status: 'usable', provider: 'claude-cli', model: null, checkedAt: staleCheckedAt, probeInFlight: false };
+    (runtime as unknown as { recordTurnCapabilitySuccess: (b: boolean) => void }).recordTurnCapabilitySuccess(true);
+    const refreshed = runtime.getFallbackState();
+    expect(refreshed.primaryModelUsability?.checkedAt).toBeGreaterThan(staleCheckedAt);
+    expect(refreshed.turnCapability.modelUsableStale).toBe(false);
+  });
+
+  it('recordTurnCapabilitySuccess does NOT refresh primary usability while a fallback window is active', () => {
+    const staleCheckedAt = Date.now() - 31 * 60_000;
+    const state = runtime as unknown as {
+      primaryModelUsability: unknown;
+      fallbackWindow: { activeUntil: number | null; activeEntry: { provider: string; model?: string } | null };
+      recordTurnCapabilitySuccess: (b: boolean) => void;
+    };
+    state.primaryModelUsability = { status: 'usable', provider: 'claude-cli', model: null, checkedAt: staleCheckedAt, probeInFlight: false };
+    state.fallbackWindow.activeUntil = Date.now() + 60_000;
+    state.fallbackWindow.activeEntry = { provider: 'opencode-cli', model: 'vendor/model' };
+    state.recordTurnCapabilitySuccess(true);
+    expect(runtime.getFallbackState().primaryModelUsability?.checkedAt).toBe(staleCheckedAt);
+  });
 });
 
 describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
