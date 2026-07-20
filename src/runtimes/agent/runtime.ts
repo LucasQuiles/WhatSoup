@@ -8622,11 +8622,7 @@ export class AgentRuntime implements Runtime {
     };
   }
 
-  /**
-   * #1753 rem-2: delegates to the ToolRegistry every socket server (global and
-   * per-chat) shares — the single choke point every MCP tool call flows
-   * through, so this reflects in-flight calls across the whole instance.
-   */
+  // #1753 rem-2: delegates to the ToolRegistry every socket server (global and per-chat) shares — the single choke point every MCP tool call flows through, so this reflects in-flight calls across the whole instance.
   getMcpLivenessSnapshot(): {
     pendingCount: number;
     oldestCallAgeMs: number | null;
@@ -8653,6 +8649,10 @@ export class AgentRuntime implements Runtime {
     if (!isUserTurnResult) return;
     this.turnCapabilityTracker.recordSuccess();
     this.consecutivePrimaryEmptyTurns = 0;
+    if (this.isFallbackWindowActive) return; // #1884 follow-up: a fallback turn proves nothing about the primary
+    const wasStale = deriveModelUsable(this.primaryModelUsability, Date.now()).modelUsableStale;
+    this.recordPrimaryModelUsability({ status: 'usable', provider: this.agentProvider, model: this.model ?? null, reason: 'turn-success' }, 'manual');
+    if (wasStale) log.info({ provider: this.agentProvider, model: this.model ?? null }, 'primary model usability refreshed by turn success after going stale');
   }
 
   private recordTurnCapabilityFailure(
@@ -9499,7 +9499,6 @@ export class AgentRuntime implements Runtime {
       'warning',
     );
   }
-
 
   private primaryModelUsabilityEvidence(
     result: PrimaryModelUsabilityResult,
