@@ -29,9 +29,8 @@ import { isSamePhysicalDirectory } from '../lib/home-path.ts';
 import { resolveAgentModel } from './agent-model.ts';
 import { fallbackEntryKey, isSameAsPrimaryFallbackEntry, type AgentFallbackEntry } from './fallback-chain.ts';
 import { DEFAULT_TRANSPORT_ID, isTransportId, TRANSPORT_IDS } from '../transport/registry.ts';
-import { ACCOUNT_RE } from './transport-refs.ts';
+import { ACCOUNT_RE, APPLEID_EMAIL_RE } from './transport-refs.ts';
 import { E164_RE } from '../transport/twilio/types.ts';
-import { APPLEID_EMAIL_RE } from '../transport/imessage/types.ts';
 import RE2 from 're2';
 
 export const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);

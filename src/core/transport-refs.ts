@@ -22,6 +22,17 @@ export type ChannelId = string & { readonly [__channelIdBrand]: true };
 /** Channel account segment pattern — shared with config validation. */
 export const ACCOUNT_RE = /^[a-z][a-z0-9-]{0,63}$/;
 
+/**
+ * AppleID email shape — iMessage accepts iCloud / me.com / mac.com
+ * addresses plus any email registered against an AppleID. We accept any
+ * RFC-5322-ish shape here; the daemon/Server is the final arbiter.
+ *
+ * Defined in core (the transport-refs seam) so core config validation can
+ * use it without a core→transport edge; re-exported by
+ * src/transport/imessage/types.ts for transport-internal consumers.
+ */
+export const APPLEID_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 export function makeChannelId(kind: ChannelKind, account: string): ChannelId {
   if (!ACCOUNT_RE.test(account)) {
     throw new Error(`invalid account segment: ${JSON.stringify(account)} (must match ${ACCOUNT_RE.source})`);
