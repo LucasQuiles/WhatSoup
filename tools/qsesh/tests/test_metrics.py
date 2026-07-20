@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 import pytest
 from qsesh.errors import QseshError
-from qsesh.jsonio import dumps_json
 from qsesh.metrics import (
     METRICS_VERSION,
     count_text,
@@ -102,20 +101,31 @@ def test_render_reasoning_uses_text_verbatim() -> None:
     assert render_event(event) == "thinking it through"
 
 
-def test_render_tool_call_joins_name_and_dumps_json_input() -> None:
+def test_render_tool_call_joins_name_and_plain_text_input() -> None:
+    """v2: input is rendered as plain text, keys in sorted order.
+
+    v1 rendered `dumps_json(input)`, whose escaping collapsed multi-line payloads
+    to a single line. Sorted-key order is preserved from v1's sort_keys=True.
+    """
     event = make_event(
         EventKind.TOOL_CALL,
         data={"name": "edit", "input": {"path": "a.py", "line": 3}},
     )
-    expected = "edit\n" + dumps_json({"path": "a.py", "line": 3})
-    assert render_event(event) == expected
-    assert render_event(event) == 'edit\n{"line":3,"path":"a.py"}'
+    assert render_event(event) == "edit\nline: 3\npath: a.py"
 
 
-def test_render_tool_result_dumps_json_result() -> None:
+def test_render_tool_result_renders_plain_text_result() -> None:
     event = make_event(EventKind.TOOL_RESULT, data={"result": {"ok": True, "code": 0}})
-    assert render_event(event) == dumps_json({"ok": True, "code": 0})
-    assert render_event(event) == '{"code":0,"ok":true}'
+    assert render_event(event) == "code: 0\nok: true"
+
+
+def test_render_tool_result_preserves_newlines_inside_string_leaves() -> None:
+    """The v1 defect, pinned directly: escaping made this one line."""
+    event = make_event(EventKind.TOOL_RESULT, data={"result": {"out": "a\nb"}})
+    rendered = render_event(event)
+    assert rendered == "out: a\nb"
+    assert len(rendered.splitlines()) == 2
+    assert "\\n" not in rendered
 
 
 def test_render_skill_invocation_prefixes_invoked_slash() -> None:
@@ -432,3 +442,41 @@ def test_inventory_counts_compactions_zero_or_one_record() -> None:
         (), (), (), (), ({"count": 1, "event_indices": [0], "reasons": []},)
     )
     assert result_one["compactions"] == {"unique": 1, "total": 1}
+
+
+# --- v2: multi-line tool payloads must contribute real line counts ---
+
+
+def test_tool_result_multiline_payload_counts_real_lines() -> None:
+    """A tool result carrying N lines of text must contribute N lines, not 1.
+
+    Regression: rendering via dumps_json escaped embedded newlines into the
+    two-character sequence backslash-n, which str.splitlines() never splits, so
+    every tool payload collapsed to a single line and the `line` reduction ratio
+    was computed against a near-zero original.
+    """
+    body = "\n".join(f"line{i}" for i in range(1, 501))  # 500 real lines
+    event = make_event(EventKind.TOOL_RESULT, data={"result": body})
+    result = size_metrics((event,), (), b"", 0)
+    assert result["content_original"]["line"] == 500
+
+
+def test_tool_call_input_multiline_payload_counts_real_lines() -> None:
+    body = "alpha\nbeta\ngamma"
+    event = make_event(
+        EventKind.TOOL_CALL, data={"name": "Read", "input": {"text": body}}
+    )
+    # "Read" line + "text: alpha" + "beta" + "gamma"
+    result = size_metrics((event,), (), b"", 0)
+    assert result["content_original"]["line"] == 4
+
+
+def test_size_metrics_records_the_unicode_version_it_counted_under() -> None:
+    """word/token counts resolve against the interpreter's Unicode database.
+
+    Recording the version makes cross-host mixing detectable instead of silent.
+    """
+    import unicodedata
+
+    result = size_metrics((), (), b"", 0)
+    assert result["unicode_version"] == unicodedata.unidata_version

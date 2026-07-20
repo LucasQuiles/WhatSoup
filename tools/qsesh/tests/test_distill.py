@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import random
+import unicodedata
 from dataclasses import replace
 from pathlib import Path
 
@@ -150,9 +152,24 @@ def test_each_harness_matches_its_independently_authored_distilled_golden(
     actual = _document(_distilled(_cases()[harness]))
     golden_path = FIXTURES / harness / "distilled.json"
     expected = json.loads(golden_path.read_text())
-    assert actual == expected
+
+    # `unicode_version` reports the interpreter's Unicode database and is
+    # runtime-dependent BY DESIGN (py3.12 -> 15.0.0, py3.14 -> 16.0.0), so it
+    # cannot be pinned by a golden that must match on both. Drop it from BOTH
+    # sides — never from one — and assert it separately below.
+    actual_cmp = copy.deepcopy(actual)
+    expected_cmp = copy.deepcopy(expected)
+    actual_cmp["record"]["size_metrics"].pop("unicode_version")
+    expected_cmp["record"]["size_metrics"].pop("unicode_version")
+
+    assert actual_cmp == expected_cmp
     assert golden_path.read_text().endswith("\n")
-    assert dumps_json(expected) == dumps_json(actual)
+    assert dumps_json(expected_cmp) == dumps_json(actual_cmp)
+
+    # The excluded field still has to be right, just not golden-pinned.
+    assert actual["record"]["size_metrics"]["unicode_version"] == (
+        unicodedata.unidata_version
+    )
 
 
 @pytest.mark.parametrize("harness", ["claude", "codex", "opencode"])
@@ -165,8 +182,8 @@ def test_size_and_inventory_metrics_are_wired_into_the_record(harness: str) -> N
     inventory = record["inventory_counts"]
     assert isinstance(size, dict)
     assert isinstance(inventory, dict)
-    assert size["metrics_version"] == "qsesh-metrics-v1"
-    assert inventory["metrics_version"] == "qsesh-metrics-v1"
+    assert size["metrics_version"] == "qsesh-metrics-v2"
+    assert inventory["metrics_version"] == "qsesh-metrics-v2"
     assert size["metrics_version"] == inventory["metrics_version"]
 
     assert (

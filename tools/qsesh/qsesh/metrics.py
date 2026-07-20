@@ -3,13 +3,31 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Callable
 
 from .errors import QseshError
 from .jsonio import dumps_json
 from .model import CanonicalEvent, CleanTurn, EventKind, JsonValue
 
-METRICS_VERSION = "qsesh-metrics-v1"
+# v2 (2026-07-19, T0-approved locked-semantic change): tool payloads are measured
+# as plain text rather than through JSON escaping, so the `line` dimension counts
+# the lines a payload actually carries. Values differ from v1 for any session
+# containing tool calls or tool results.
+METRICS_VERSION = "qsesh-metrics-v2"
+
+# `\w` resolves against the RUNNING interpreter's Unicode database, which this
+# constant does not pin: a codepoint assigned in Unicode 16.0 counts as a word
+# character on a 16.0 interpreter and as punctuation on a 15.0 one. Measured:
+# "\U00010D4A\U00010D4B\U00010D4C" -> py3.14/unidata-16 word=1,token=1 versus
+# py3.12/unidata-15 word=0,token=3.
+#
+# Stdlib offers no way to freeze that table, so counts cannot be made
+# version-independent without vendoring one. Instead the version each record was
+# counted under travels WITH the record, making a mixed-version corpus detectable
+# rather than silently summable. Callers aggregating across hosts must group on
+# it. This mitigates the divergence; it does not eliminate it.
+UNICODE_VERSION = unicodedata.unidata_version
 
 _WORD_PATTERN = re.compile(r"\w+")
 _TOKEN_PATTERN = re.compile(r"\w+|[^\w\s]", re.UNICODE)
@@ -54,6 +72,30 @@ def _render_reasoning(event: CanonicalEvent) -> str:
     return event.text
 
 
+def _json_text(value: JsonValue) -> str:
+    """Render a JSON value as plain text, preserving real newlines.
+
+    `dumps_json` escapes embedded newlines into the two-character sequence
+    ``\\n``, which `str.splitlines()` never splits — so measuring a tool payload
+    through it collapsed every payload to one line and made the `line` reduction
+    ratio meaningless. This renders the same content as text so that all four
+    content dimensions are measured on the characters the payload actually
+    carries.
+
+    Deterministic by construction: mappings emit their keys in sorted order,
+    matching `dumps_json(sort_keys=True)`.
+    """
+    if isinstance(value, str):
+        return value
+    if value is None or isinstance(value, (bool, int, float)):
+        return dumps_json(value)
+    if isinstance(value, list):
+        return "\n".join(_json_text(item) for item in value)
+    if isinstance(value, dict):
+        return "\n".join(f"{key}: {_json_text(value[key])}" for key in sorted(value))
+    raise _fail("metrics-render-json-text")
+
+
 def _render_tool_call(event: CanonicalEvent) -> str:
     name = event.data.get("name")
     if not isinstance(name, str):
@@ -61,13 +103,13 @@ def _render_tool_call(event: CanonicalEvent) -> str:
     tool_input = event.data.get("input")
     if not isinstance(tool_input, dict):
         raise _fail("metrics-render-tool-call")
-    return name + "\n" + dumps_json(tool_input)
+    return name + "\n" + _json_text(tool_input)
 
 
 def _render_tool_result(event: CanonicalEvent) -> str:
     if "result" not in event.data:
         raise _fail("metrics-render-tool-result")
-    return dumps_json(event.data["result"])
+    return _json_text(event.data["result"])
 
 
 def _render_skill_invocation(event: CanonicalEvent) -> str:
@@ -145,6 +187,7 @@ def size_metrics(
 
     return {
         "metrics_version": METRICS_VERSION,
+        "unicode_version": UNICODE_VERSION,
         "content_original": content_original,
         "content_clean": content_clean,
         "content_by_kind": content_by_kind,
