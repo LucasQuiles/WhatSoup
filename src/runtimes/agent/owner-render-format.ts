@@ -91,7 +91,11 @@ export type UnavailableReason =
   // (spawn error / binary not runnable). Distinct from 'no-adapter' (an adapter
   // exists; the binary just wouldn't run) and 'empty' (which asserts it ran) —
   // the fix is the binary/PATH, not the parser or the harness support (Q 2b).
-  | { kind: 'probe-failed' };
+  | { kind: 'probe-failed' }
+  // 'lookup-failed' = a vendor catalogue call failed transiently (HTTP 500 /
+  // network) — the server "can't answer", NOT "you can't ask" (key present, not
+  // rejected, not timed out). Distinct fix from no-key/key-rejected/timeout (Q 2b).
+  | { kind: 'lookup-failed' };
 
 /** The resolver-produced catalogue listing the formatter renders. `asOfLabel`
  *  is the CAPTURE stamp (Q 2b#1) — when the source was probed, NOT render time. */
@@ -132,6 +136,8 @@ function unavailableMessage(reason: UnavailableReason): string {
       return 'harness output not recognizable as a model list (parser may need updating)';
     case 'probe-failed':
       return 'harness catalogue command could not be run (binary missing?)';
+    case 'lookup-failed':
+      return 'catalogue lookup failed (try again shortly)';
     case 'no-adapter':
       return `no catalogue adapter for harness '${reason.harness}'`;
   }

@@ -250,6 +250,17 @@ describe('formatAvailableModels', () => {
     );
   });
 
+  it('unavailable lookup-failed: transient vendor failure, distinct from key/timeout reasons', () => {
+    const out = formatAvailableModels({
+      ...base,
+      harnessLabel: 'claude-cli',
+      listing: { status: 'unavailable', reason: { kind: 'lookup-failed' }, asOfLabel: 'just now' },
+    });
+    expect(out).toBe(
+      `*Available models:* unavailable — catalogue lookup failed (try again shortly) (harness: claude-cli, as of just now)`,
+    );
+  });
+
   it('unavailable no-adapter: names the unadapted harness rather than "unsupported"', () => {
     const out = formatAvailableModels({
       ...base,
