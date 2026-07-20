@@ -86,7 +86,12 @@ export type UnavailableReason =
   // 'unparseable' = the resolver's shape check judged the output present but not
   // a model list (a format regression). Its fix points at the PARSER, not the
   // harness — the silent failure mode a bare "empty" would mask (Q 2b).
-  | { kind: 'unparseable' };
+  | { kind: 'unparseable' }
+  // 'probe-failed' = the harness catalogue command could not be RUN at all
+  // (spawn error / binary not runnable). Distinct from 'no-adapter' (an adapter
+  // exists; the binary just wouldn't run) and 'empty' (which asserts it ran) —
+  // the fix is the binary/PATH, not the parser or the harness support (Q 2b).
+  | { kind: 'probe-failed' };
 
 /** The resolver-produced catalogue listing the formatter renders. `asOfLabel`
  *  is the CAPTURE stamp (Q 2b#1) — when the source was probed, NOT render time. */
@@ -125,6 +130,8 @@ function unavailableMessage(reason: UnavailableReason): string {
       return 'harness ran but returned no model lines';
     case 'unparseable':
       return 'harness output not recognizable as a model list (parser may need updating)';
+    case 'probe-failed':
+      return 'harness catalogue command could not be run (binary missing?)';
     case 'no-adapter':
       return `no catalogue adapter for harness '${reason.harness}'`;
   }

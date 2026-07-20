@@ -240,6 +240,16 @@ describe('formatAvailableModels', () => {
     );
   });
 
+  it('unavailable probe-failed: points at the binary/PATH, distinct from empty and no-adapter', () => {
+    const out = formatAvailableModels({
+      ...base,
+      listing: { status: 'unavailable', reason: { kind: 'probe-failed' }, asOfLabel: 'just now' },
+    });
+    expect(out).toBe(
+      `*Available models:* unavailable — harness catalogue command could not be run (binary missing?) (harness: opencode-cli, as of just now)`,
+    );
+  });
+
   it('unavailable no-adapter: names the unadapted harness rather than "unsupported"', () => {
     const out = formatAvailableModels({
       ...base,
