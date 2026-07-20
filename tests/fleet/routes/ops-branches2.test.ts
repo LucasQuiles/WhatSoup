@@ -403,3 +403,98 @@ describe('handleConfigUpdate: agent path validation branch arms', () => {
     expect(written.permissions.allow).toEqual(['Bash']);
   });
 });
+
+// ---------------------------------------------------------------------------
+// handleConfigUpdate: transport immutability + per-transport admin IDs (S9)
+// ---------------------------------------------------------------------------
+describe('handleConfigUpdate: transport immutability + per-transport admin IDs', () => {
+  function transportInstance(transport: string): { instance: DiscoveredInstance; deps: OpsDeps; configFile: string } {
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ops-s9-cfg-'));
+    const configFile = path.join(configDir, 'config.json');
+    const base: Record<string, unknown> = {
+      name: 'line-x',
+      type: 'passive',
+      adminPhones: ['15551230006'],
+      accessMode: 'self_only',
+    };
+    if (transport !== 'baileys') {
+      base.transport = transport;
+      if (transport === 'signal') {
+        base.signalConfig = {
+          account: 'line-x', phoneNumber: '+15551110000',
+          inboundMode: 'poll', pollIntervalMs: 15000, rateLimit: { messagesPerMinute: 30 },
+        };
+      }
+      if (transport === 'imessage') {
+        base.imessageConfig = {
+          account: 'line-x', backend: 'bluebubbles',
+          bluebubblesUrl: 'https://bb.example.test', bluebubblesPasswordService: 'bb-pw',
+          sender: 'me@icloud.com',
+          inboundMode: 'poll', pollIntervalMs: 15000, rateLimit: { messagesPerMinute: 30 },
+        };
+      }
+    }
+    fs.writeFileSync(configFile, JSON.stringify(base));
+    const instance = {
+      name: 'line-x', type: 'passive', accessMode: 'self_only',
+      healthPort: 9099, dbPath: '/tmp/bot.db', stateRoot: '/tmp/state',
+      logDir: '/tmp/logs', healthToken: 'tok', configPath: configFile, socketPath: null,
+    } as DiscoveredInstance;
+    const deps = {
+      discovery: { getInstance: vi.fn(() => instance), getInstances: vi.fn(() => new Map()), scan: vi.fn() },
+      realtime: { publish: vi.fn() },
+      serviceManager: { restart: vi.fn(), stop: vi.fn(), disable: vi.fn(), enable: vi.fn() },
+    } as unknown as OpsDeps;
+    return { instance, deps, configFile };
+  }
+
+  it('rejects a transport change with 409 (immutable)', async () => {
+    const { deps } = transportInstance('baileys');
+    const req = mockReq(JSON.stringify({ transport: 'twilio' }), 'PATCH');
+    const res = mockJsonRes();
+    await handleConfigUpdate(req, res, deps, { name: 'line-x' });
+    expect(res._status).toBe(409);
+    expect(JSON.parse(res._body).error).toMatch(/transport is immutable/);
+  });
+
+  it('accepts a patch that restates the same transport (no change)', async () => {
+    const { deps, configFile } = transportInstance('signal');
+    const req = mockReq(JSON.stringify({ transport: 'signal', rateLimitPerHour: 50 }), 'PATCH');
+    const res = mockJsonRes();
+    await handleConfigUpdate(req, res, deps, { name: 'line-x' });
+    expect(res._status).toBe(200);
+    const merged = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    expect(merged.transport).toBe('signal');
+  });
+
+  it('normalizes a Signal UUID admin ID verbatim on a signal line', async () => {
+    const { deps, configFile } = transportInstance('signal');
+    const uuid = 'a1b2c3d4-1234-1234-1234-a1b2c3d4e5f6';
+    const req = mockReq(JSON.stringify({ adminPhones: [uuid] }), 'PATCH');
+    const res = mockJsonRes();
+    await handleConfigUpdate(req, res, deps, { name: 'line-x' });
+    expect(res._status).toBe(200);
+    const merged = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    expect(merged.adminPhones).toEqual([uuid]);
+  });
+
+  it('normalizes an AppleID email admin ID verbatim on an imessage line', async () => {
+    const { deps, configFile } = transportInstance('imessage');
+    const req = mockReq(JSON.stringify({ adminPhones: ['boss@icloud.com'] }), 'PATCH');
+    const res = mockJsonRes();
+    await handleConfigUpdate(req, res, deps, { name: 'line-x' });
+    expect(res._status).toBe(200);
+    const merged = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    expect(merged.adminPhones).toEqual(['boss@icloud.com']);
+  });
+
+  it('still digit-normalizes E.164 admin phones on a baileys line', async () => {
+    const { deps, configFile } = transportInstance('baileys');
+    const req = mockReq(JSON.stringify({ adminPhones: ['+1 (555) 123-0006'] }), 'PATCH');
+    const res = mockJsonRes();
+    await handleConfigUpdate(req, res, deps, { name: 'line-x' });
+    expect(res._status).toBe(200);
+    const merged = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    expect(merged.adminPhones).toEqual(['15551230006']);
+  });
+});
