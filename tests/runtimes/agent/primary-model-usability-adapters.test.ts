@@ -248,12 +248,15 @@ describe('createPrimaryModelProbeAdapters', () => {
       status: 'failed' as const,
       output: 'The model configured-primary does not exist or you do not have access to it.',
     }));
-    const adapters = createPrimaryModelProbeAdapters(undefined, {
-      cwd: '/agent-cwd',
-      buildChildEnv: vi.fn(() => ({ PATH: '/usr/bin' })),
-      getProviderBinary: vi.fn(() => 'opencode'),
-      probeBinaryCommand,
-    });
+    const adapters = createPrimaryModelProbeAdapters(
+      { executionProfile: 'whatsoup-headless' },
+      {
+        cwd: '/agent-cwd',
+        buildChildEnv: vi.fn(() => ({ PATH: '/usr/bin' })),
+        getProviderBinary: vi.fn(() => 'opencode'),
+        probeBinaryCommand,
+      },
+    );
 
     await expect(
       adapters.probeBinaryModel?.({ provider: 'opencode-cli', model: 'configured-primary' }),
@@ -261,10 +264,33 @@ describe('createPrimaryModelProbeAdapters', () => {
 
     expect(probeBinaryCommand).toHaveBeenCalledWith(
       'opencode',
-      ['run', '--format', 'json', '--pure', '-m', 'configured-primary', 'Reply with OK only.'],
+      [
+        'run', '--format', 'json', '--pure',
+        '--agent', 'whatsoup-headless',
+        '-m', 'configured-primary',
+        'Reply with OK only.',
+      ],
       expect.any(Object),
       { cwd: '/agent-cwd', timeoutMs: 15_000 },
     );
+  });
+
+  it('rejects a non-reserved OpenCode profile before the model probe spawns', async () => {
+    const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+    const adapters = createPrimaryModelProbeAdapters(
+      { executionProfile: 'fullstack-lead' },
+      {
+        cwd: '/agent-cwd',
+        buildChildEnv: vi.fn(() => ({ PATH: '/usr/bin' })),
+        getProviderBinary: vi.fn(() => 'opencode'),
+        probeBinaryCommand,
+      },
+    );
+
+    await expect(
+      adapters.probeBinaryModel?.({ provider: 'opencode-cli', model: 'configured-primary' }),
+    ).rejects.toThrow(/exactly "whatsoup-headless"/);
+    expect(probeBinaryCommand).not.toHaveBeenCalled();
   });
 
   it('probes OpenCode default model (null) with -m omitted, mirroring turn argv', async () => {

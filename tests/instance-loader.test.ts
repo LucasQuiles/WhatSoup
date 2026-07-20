@@ -551,6 +551,40 @@ describe('loadInstance — agentOptions: providerConfig validation', () => {
   });
 });
 
+describe('loadInstance — OpenCode model admission', () => {
+  it('rejects a model-less OpenCode route before publishing INSTANCE_CONFIG', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'model-less-opencode-agent', {
+      ...minimalAgent,
+      name: 'model-less-opencode-agent',
+      agentOptions: {
+        sessionScope: 'single',
+        provider: 'opencode-cli',
+      },
+    });
+
+    expect(() => loadInstance('model-less-opencode-agent')).toThrow(/opencode-cli.*model/i);
+    expect(process.env).not.toHaveProperty('INSTANCE_CONFIG');
+  });
+
+  it('admits a mapped OpenCode route resolved through models.conversation', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'modeled-opencode-agent', {
+      ...minimalAgent,
+      name: 'modeled-opencode-agent',
+      models: { conversation: 'glm/glm-5.2' },
+      agentOptions: {
+        sessionScope: 'single',
+        provider: 'opencode-cli',
+      },
+    });
+
+    loadInstance('modeled-opencode-agent');
+
+    const config = JSON.parse(process.env.INSTANCE_CONFIG!);
+    expect(config.models.conversation).toBe('glm/glm-5.2');
+    expect(config.agentOptions.provider).toBe('opencode-cli');
+  });
+});
+
 describe('loadInstance — chatOptions: openaiProviderConfig validation (QR-218 PR-2)', () => {
   it('accepts a chat instance with no chatOptions at all (backward-compat)', () => {
     writeInstance(path.join(tmpDir, 'config'), 'test-chat', minimalChat);

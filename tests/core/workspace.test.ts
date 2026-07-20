@@ -354,7 +354,7 @@ describe('provisionWorkspace', () => {
     expect(policy.bash.pathRestricted).toBe(false);
   });
 
-  it('skips the opencode merge write when opencode.json is a symlink (mirrors the provider MCP writer preflight)', () => {
+  it('fails workspace provisioning closed when opencode.json is a symlink', () => {
     const workspacePath = makeTmp();
     const instanceCwd = makeTmp();
     const victimDir = makeTmp();
@@ -362,20 +362,20 @@ describe('provisionWorkspace', () => {
     writeFileSync(victim, '{"untouched":true}');
     symlinkSync(victim, join(workspacePath, 'opencode.json'));
 
-    // Provisioning must not read existing config through the symlink, must
-    // not write through it, and must not fail the whole workspace.
+    // Provisioning must not read or write existing config through the symlink,
+    // and it must not continue into an implicit/default OpenCode profile.
     expect(() =>
       provisionWorkspace({
         ...makeOpts(workspacePath, instanceCwd),
         provider: 'opencode-cli',
       }),
-    ).not.toThrow();
+    ).toThrow(/OpenCode configuration.*non-symlink/i);
 
     expect(readFileSync(victim, 'utf8')).toBe('{"untouched":true}');
     expect(lstatSync(join(workspacePath, 'opencode.json')).isSymbolicLink()).toBe(true);
   });
 
-  it('overwrites corrupt pre-existing opencode.json and the result contains mcp.whatsoup', () => {
+  it('fails workspace provisioning closed without overwriting corrupt opencode.json', () => {
     const workspacePath = makeTmp();
     const instanceCwd = makeTmp();
     writeFileSync(join(workspacePath, 'opencode.json'), 'not json{');
@@ -386,10 +386,9 @@ describe('provisionWorkspace', () => {
         provider: 'opencode-cli',
         sendMediaServerPath: '/abs/path/to/send-media-server.ts',
       }),
-    ).not.toThrow();
+    ).toThrow('Existing OpenCode configuration must be a valid JSON object');
 
-    const opencode = JSON.parse(readFileSync(join(workspacePath, 'opencode.json'), 'utf8'));
-    expect(opencode).toHaveProperty('mcp.whatsoup');
+    expect(readFileSync(join(workspacePath, 'opencode.json'), 'utf8')).toBe('not json{');
   });
 
   it('prunes stale whatsoup-cloud provider/model but preserves sibling mcp entries and unrelated top-level keys', () => {

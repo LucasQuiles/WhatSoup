@@ -4,6 +4,7 @@ import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
 import { createRuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
+import { createOpenCodeParser } from '../../../src/runtimes/agent/providers/opencode-parser.ts';
 import type {
   MarkSystemTurnInput,
   PendingSystemTurnSnapshot,
@@ -830,6 +831,30 @@ function makeRuntimeTurnContext(
     contentType: 'text',
     toolScopeKey: scope === 'per_chat' ? conversationKey : '__global__',
   });
+}
+
+type ToolResultEvent = Extract<AgentEvent, { type: 'tool_result' }>;
+
+function parseOpenCodeToolResult(
+  toolName: string | undefined,
+  isError: boolean,
+  toolId: string,
+): ToolResultEvent {
+  const event = createOpenCodeParser().parse(JSON.stringify({
+    type: 'tool_use',
+    part: {
+      type: 'tool',
+      ...(toolName === undefined ? {} : { tool: toolName }),
+      callID: toolId,
+      state: isError
+        ? { status: 'rejected', error: 'permission requested; auto-rejecting' }
+        : { status: 'completed', output: 'completed' },
+    },
+  }));
+  if (event?.type !== 'tool_result') {
+    throw new Error(`Expected OpenCode tool_result, received ${event?.type ?? 'null'}`);
+  }
+  return event;
 }
 
 type PerChatCleanupRuntimeState = {
@@ -7180,6 +7205,206 @@ describe('AgentRuntime', () => {
     // classifyToolError uses content to determine error vs blocked.
     // toolName is 'unknown' here (no prior tool_use event), so detail is just the reason.
     expect(mockQueue.enqueueToolUpdate).toHaveBeenCalledWith({ category: 'error', detail: 'error msg' });
+  });
+
+  it('scoped result-only tool events preserve identity and make replay unsafe without a tracker start', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const queue = makeQueueMock('scoped@s.whatsapp.net');
+    const tracker = {
+      onToolStart: vi.fn(),
+      onToolEnd: vi.fn(),
+    };
+    const mapKey = 'scoped@s.whatsapp.net';
+    const toolScopeKey = `${mapKey}#1`;
+    const context = makeRuntimeTurnContext('per_chat', 'scoped', queue.targetChatJid, 41, 'turn-scoped');
+    const state = runtime as unknown as {
+      operationTrackers: Map<string, typeof tracker>;
+      perChatRuntimeTurnContexts: Map<string, Array<typeof context>>;
+      turnHadToolActivity: Set<string>;
+      activeToolNames: Map<string, Map<string, string>>;
+      handleEventWithContext(
+        event: AgentEvent,
+        queue: IOutboundQueue,
+        session: null,
+        conversationKey: string,
+        inboundSeq: number,
+        mapKey: string,
+        toolScopeKey: string,
+      ): void;
+    };
+    state.operationTrackers.set(mapKey, tracker);
+    state.perChatRuntimeTurnContexts.set(mapKey, [context]);
+
+    state.handleEventWithContext(
+      {
+        type: 'tool_result',
+        toolId: 'call_edit_rejected',
+        toolName: 'edit',
+        isError: true,
+        content: 'permission requested: edit; auto-rejecting',
+      },
+      queue,
+      null,
+      'scoped',
+      41,
+      mapKey,
+      toolScopeKey,
+    );
+
+    expect(queue.enqueueToolUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      category: 'error',
+      detail: expect.stringContaining('edit'),
+    }));
+    expect(state.turnHadToolActivity.has(toolScopeKey)).toBe(true);
+    expect(state.perChatRuntimeTurnContexts.get(mapKey)?.[0]?.replay.replaySafe).toBe(false);
+    expect(tracker.onToolEnd).toHaveBeenCalledWith('call_edit_rejected');
+    expect(tracker.onToolStart).not.toHaveBeenCalled();
+    expect(state.activeToolNames.has(toolScopeKey)).toBe(false);
+  });
+
+  it('global result-only tool events preserve identity and make replay unsafe without a tracker start', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { shared: true });
+    const queue = makeQueueMock('global@s.whatsapp.net');
+    const tracker = {
+      onAnyActivity: vi.fn(),
+      onToolStart: vi.fn(),
+      onToolEnd: vi.fn(),
+      onTurnComplete: vi.fn(),
+    };
+    const context = makeRuntimeTurnContext('shared', 'global', queue.targetChatJid, 42, 'turn-global');
+    const state = runtime as unknown as {
+      session: typeof mockSession;
+      activeChatJid: string | null;
+      currentTurnChatJid: string | null;
+      outboundQueues: Map<string, IOutboundQueue>;
+      operationTracker: typeof tracker;
+      currentRuntimeTurnContext: typeof context;
+      singleTurnHadToolActivity: boolean;
+      activeToolNames: Map<string, Map<string, string>>;
+      handleEvent(sourceSession: object, event: AgentEvent): void;
+    };
+    state.activeChatJid = queue.targetChatJid;
+    state.currentTurnChatJid = queue.targetChatJid;
+    state.outboundQueues.set(queue.targetChatJid, queue);
+    state.operationTracker = tracker;
+    state.currentRuntimeTurnContext = context;
+    publishSingletonTestOwner(runtime, mockSession, queue.targetChatJid);
+
+    state.handleEvent(mockSession, {
+      type: 'tool_result',
+      toolId: 'call_bash_rejected',
+      toolName: 'bash',
+      isError: true,
+      content: 'permission requested: bash; auto-rejecting',
+    });
+
+    expect(queue.enqueueToolUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      category: 'error',
+      detail: expect.stringContaining('bash'),
+    }));
+    expect(state.singleTurnHadToolActivity).toBe(true);
+    expect(state.currentRuntimeTurnContext.replay.replaySafe).toBe(false);
+    expect(tracker.onToolEnd).toHaveBeenCalledWith('call_bash_rejected');
+    expect(tracker.onToolStart).not.toHaveBeenCalled();
+    expect(state.activeToolNames.has('__global__')).toBe(false);
+  });
+
+  it.each([
+    ['completed with missing name', undefined, false],
+    ['error with missing name', undefined, true],
+    ['completed with default-ignorable name', '\u034F', false],
+    ['error with default-ignorable name', '\u034F', true],
+  ] as const)('scoped unmatched OpenCode result %s records activity and makes replay unsafe', (_label, toolName, isError) => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const queue = makeQueueMock('scoped-unnamed@s.whatsapp.net');
+    const tracker = {
+      onToolStart: vi.fn(),
+      onToolEnd: vi.fn(),
+    };
+    const mapKey = 'scoped-unnamed@s.whatsapp.net';
+    const toolScopeKey = `${mapKey}#1`;
+    const context = makeRuntimeTurnContext('per_chat', 'scoped-unnamed', queue.targetChatJid, 43, 'turn-scoped-unnamed');
+    const state = runtime as unknown as {
+      operationTrackers: Map<string, typeof tracker>;
+      perChatRuntimeTurnContexts: Map<string, Array<typeof context>>;
+      turnHadToolActivity: Set<string>;
+      activeToolNames: Map<string, Map<string, string>>;
+      handleEventWithContext(
+        event: AgentEvent,
+        queue: IOutboundQueue,
+        session: null,
+        conversationKey: string,
+        inboundSeq: number,
+        mapKey: string,
+        toolScopeKey: string,
+      ): void;
+    };
+    const toolId = `scoped-${isError ? 'error' : 'completed'}-${toolName === undefined ? 'missing' : 'ignorable'}`;
+    const event = parseOpenCodeToolResult(toolName, isError, toolId);
+    expect(event).not.toHaveProperty('toolName');
+    state.operationTrackers.set(mapKey, tracker);
+    state.perChatRuntimeTurnContexts.set(mapKey, [context]);
+
+    state.handleEventWithContext(event, queue, null, 'scoped-unnamed', 43, mapKey, toolScopeKey);
+
+    expect(state.turnHadToolActivity.has(toolScopeKey)).toBe(true);
+    expect(state.perChatRuntimeTurnContexts.get(mapKey)?.[0]?.replay.replaySafe).toBe(false);
+    expect(tracker.onToolEnd).toHaveBeenCalledWith(toolId);
+    expect(tracker.onToolStart).not.toHaveBeenCalled();
+    expect(state.activeToolNames.has(toolScopeKey)).toBe(false);
+  });
+
+  it.each([
+    ['completed with missing name', undefined, false],
+    ['error with missing name', undefined, true],
+    ['completed with default-ignorable name', '\u034F', false],
+    ['error with default-ignorable name', '\u034F', true],
+  ] as const)('global unmatched OpenCode result %s records activity and makes replay unsafe', (_label, toolName, isError) => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { shared: true });
+    const queue = makeQueueMock('global-unnamed@s.whatsapp.net');
+    const tracker = {
+      onAnyActivity: vi.fn(),
+      onToolStart: vi.fn(),
+      onToolEnd: vi.fn(),
+      onTurnComplete: vi.fn(),
+    };
+    const context = makeRuntimeTurnContext('shared', 'global-unnamed', queue.targetChatJid, 44, 'turn-global-unnamed');
+    const state = runtime as unknown as {
+      session: typeof mockSession;
+      activeChatJid: string | null;
+      currentTurnChatJid: string | null;
+      outboundQueues: Map<string, IOutboundQueue>;
+      operationTracker: typeof tracker;
+      currentRuntimeTurnContext: typeof context;
+      singleTurnHadToolActivity: boolean;
+      activeToolNames: Map<string, Map<string, string>>;
+      handleEvent(sourceSession: object, event: AgentEvent): void;
+    };
+    const toolId = `global-${isError ? 'error' : 'completed'}-${toolName === undefined ? 'missing' : 'ignorable'}`;
+    const event = parseOpenCodeToolResult(toolName, isError, toolId);
+    expect(event).not.toHaveProperty('toolName');
+    state.activeChatJid = queue.targetChatJid;
+    state.currentTurnChatJid = queue.targetChatJid;
+    state.outboundQueues.set(queue.targetChatJid, queue);
+    state.operationTracker = tracker;
+    state.currentRuntimeTurnContext = context;
+    publishSingletonTestOwner(runtime, mockSession, queue.targetChatJid);
+
+    state.handleEvent(mockSession, event);
+
+    expect(state.singleTurnHadToolActivity).toBe(true);
+    expect(state.currentRuntimeTurnContext.replay.replaySafe).toBe(false);
+    expect(tracker.onToolEnd).toHaveBeenCalledWith(toolId);
+    expect(tracker.onToolStart).not.toHaveBeenCalled();
+    expect(state.activeToolNames.has('__global__')).toBe(false);
   });
 
   it('tool_result with isError emits a provider-wide BOT ERRORS alert', async () => {
