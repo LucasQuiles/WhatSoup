@@ -227,10 +227,11 @@ describe('resolveModelCatalogue — openai', () => {
 describe('resolveModelCatalogue — codex-cli', () => {
   // VERIFIED 2026-07-20 (live `codex --help` on this host): no `models`
   // subcommand exists — `codex models` is parsed as a chat PROMPT, not a
-  // listing command. Production therefore never injects codexFn, so the real
-  // default MUST be a design-time no-adapter, not a spawn attempt at a command
-  // that isn't real (which would misreport as empty/probe-failed).
-  it('names codex-cli in a no-adapter reason when no codexFn is injected (the real production default)', async () => {
+  // listing command. No call site injects a codex fn (there is no dep slot
+  // for one — see the seam comment on resolveCodex), so this no-adapter
+  // reason is the ONLY reachable production behavior, not one branch of a
+  // probe/cache path.
+  it('names codex-cli in a no-adapter reason (the only reachable production behavior)', async () => {
     const out = await resolveModelCatalogue('codex-cli', 'codex', { nowMs: T0 });
     expect(out).toStrictEqual({
       status: 'unavailable',
@@ -238,98 +239,20 @@ describe('resolveModelCatalogue — codex-cli', () => {
       asOfLabel: 'just now',
     });
   });
-
-  it('returns ok with the codex source label on a fresh probe and caches it', async () => {
-    const codexFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['gpt-5-codex'] });
-    const out = await resolveModelCatalogue('codex-cli', 'codex', { nowMs: T0, codexFn });
-    expect(out).toStrictEqual({
-      status: 'ok',
-      ids: ['gpt-5-codex'],
-      sourceLabel: 'codex CLI',
-      asOfLabel: 'just now',
-    });
-    expect(codexFn).toHaveBeenCalledTimes(1);
-  });
-
-  it('serves the cache within TTL without re-spawning', async () => {
-    const codexFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['gpt-5-codex'] });
-    await resolveModelCatalogue('codex-cli', 'codex', { nowMs: T0, codexFn });
-    const out = await resolveModelCatalogue('codex-cli', 'codex', { nowMs: T0 + 30_000, codexFn });
-    expect(out.status).toBe('ok');
-    expect(codexFn).toHaveBeenCalledTimes(1);
-  });
-
-  it('once a codexFn IS injected, maps a spawn-error (no cache) to probe-failed — not no-adapter', async () => {
-    const codexFn = vi.fn().mockResolvedValue({ status: 'unavailable', reason: 'spawn-error' });
-    const out = await resolveModelCatalogue('codex-cli', 'codex', { nowMs: T0, codexFn });
-    expect(out).toStrictEqual({ status: 'unavailable', reason: { kind: 'probe-failed' }, asOfLabel: 'just now' });
-  });
-
-  it('serves a stale cache (with disclosed age) when a later re-probe fails', async () => {
-    const codexFn = vi.fn()
-      .mockResolvedValueOnce({ status: 'ok', ids: ['gpt-5-codex'] })
-      .mockResolvedValueOnce({ status: 'unavailable', reason: 'timeout' });
-    await resolveModelCatalogue('codex-cli', 'codex', { nowMs: T0, codexFn });
-    const out = await resolveModelCatalogue('codex-cli', 'codex', { nowMs: T0 + 5 * 60_000, codexFn });
-    expect(out).toStrictEqual({
-      status: 'ok',
-      ids: ['gpt-5-codex'],
-      sourceLabel: 'codex CLI',
-      asOfLabel: '5m ago',
-    });
-  });
 });
 
 describe('resolveModelCatalogue — gemini-cli', () => {
   // Per the reason-evidence comment on resolveGemini: official docs show model
   // selection as an in-session `/model manage|set` command, not a standalone
-  // `gemini models` listing surface — production never injects geminiFn, so
-  // the real default MUST be a design-time no-adapter (same reasoning as
-  // codex-cli above), never a spawn attempt at an unconfirmed command.
-  it('names gemini-cli in a no-adapter reason when no geminiFn is injected (the real production default)', async () => {
+  // `gemini models` listing surface. No call site injects a gemini fn (there
+  // is no dep slot for one), so this no-adapter reason is the ONLY reachable
+  // production behavior, not one branch of a probe/cache path.
+  it('names gemini-cli in a no-adapter reason (the only reachable production behavior)', async () => {
     const out = await resolveModelCatalogue('gemini-cli', 'gemini', { nowMs: T0 });
     expect(out).toStrictEqual({
       status: 'unavailable',
       reason: { kind: 'no-adapter', harness: 'gemini-cli' },
       asOfLabel: 'just now',
     });
-  });
-
-  it('returns ok with the gemini source label on a fresh probe and caches it', async () => {
-    const geminiFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['gemini-3-pro'] });
-    const out = await resolveModelCatalogue('gemini-cli', 'gemini', { nowMs: T0, geminiFn });
-    expect(out).toStrictEqual({
-      status: 'ok',
-      ids: ['gemini-3-pro'],
-      sourceLabel: 'gemini CLI',
-      asOfLabel: 'just now',
-    });
-    expect(geminiFn).toHaveBeenCalledTimes(1);
-  });
-
-  it('maps an empty probe (no cache) to empty', async () => {
-    const geminiFn = vi.fn().mockResolvedValue({ status: 'unavailable', reason: 'empty' });
-    const out = await resolveModelCatalogue('gemini-cli', 'gemini', { nowMs: T0, geminiFn });
-    expect(out).toStrictEqual({ status: 'unavailable', reason: { kind: 'empty' }, asOfLabel: 'just now' });
-  });
-
-  it('serves a stale cache (with disclosed age) when a later re-probe fails', async () => {
-    const geminiFn = vi.fn()
-      .mockResolvedValueOnce({ status: 'ok', ids: ['gemini-3-pro'] })
-      .mockResolvedValueOnce({ status: 'unavailable', reason: 'spawn-error' });
-    await resolveModelCatalogue('gemini-cli', 'gemini', { nowMs: T0, geminiFn });
-    const out = await resolveModelCatalogue('gemini-cli', 'gemini', { nowMs: T0 + 5 * 60_000, geminiFn });
-    expect(out).toStrictEqual({
-      status: 'ok',
-      ids: ['gemini-3-pro'],
-      sourceLabel: 'gemini CLI',
-      asOfLabel: '5m ago',
-    });
-  });
-
-  it('flags output with a space as unparseable (no cache)', async () => {
-    const geminiFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['not a model id'] });
-    const out = await resolveModelCatalogue('gemini-cli', 'gemini', { nowMs: T0, geminiFn });
-    expect(out).toStrictEqual({ status: 'unavailable', reason: { kind: 'unparseable' }, asOfLabel: 'just now' });
   });
 });
