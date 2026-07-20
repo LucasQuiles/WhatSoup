@@ -105,6 +105,14 @@ export type {
 
 const log = createChildLogger('durability');
 
+/**
+ * PR-C: max age a `status_ping` op may sit in `pending` before the drain ages it
+ * out (quarantine + alert) instead of re-sending. A "back online" notice older
+ * than this is stale misinformation, so dropping it is correct. Strictly scoped
+ * to `op_type='status_ping'` — `text` ops have no age gate.
+ */
+const STATUS_OP_TTL_MS = 30 * 60 * 1000;
+
 // ── Status string unions ──
 
 export type OutboundStatus = 'pending' | 'sending' | 'submitted' | 'echoed' | 'maybe_sent' | 'failed_permanent' | 'quarantined';
@@ -130,6 +138,7 @@ export interface OutboundOpRow {
   payload: string;
   wa_message_id: string | null;
   replay_policy: string;
+  created_at: string;
   submitted_at: string | null;
   source_inbound_seq: number | null;
   is_terminal: number;
@@ -226,6 +235,7 @@ type DurabilityStatements = {
   recordTurnTerminal: PreparedStatement;
   getTurnTerminal: PreparedStatement;
   createOutboundOp: PreparedStatement;
+  supersedeOutstandingStatus: PreparedStatement;
   markSending: PreparedStatement;
   markSubmitted: PreparedStatement;
   markEchoed: PreparedStatement;
@@ -348,6 +358,17 @@ export class DurabilityEngine {
       createOutboundOp: prepare(
         `INSERT INTO outbound_ops (conversation_key, chat_jid, op_type, payload, payload_hash, status, source_inbound_seq, is_terminal, replay_policy)
          VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+      ),
+      // PR-C: one outstanding status ping per chat. Enqueuing a new status_ping
+      // marks any prior non-terminal status_ping for the same chat
+      // failed_permanent/superseded (a terminal state retention already reclaims),
+      // so a re-pair / crash-loop cannot flush a backlog of stale "back online"
+      // notices in one burst. Scoped strictly to op_type='status_ping' — never
+      // touches 'text' ops (user replies, admin responses, isResume continuity).
+      supersedeOutstandingStatus: prepare(
+        `UPDATE outbound_ops SET status = 'failed_permanent', error = 'superseded'
+           WHERE chat_jid = ? AND op_type = 'status_ping'
+             AND status IN ('pending', 'sending', 'submitted', 'maybe_sent')`,
       ),
       markSending: prepare(
         `UPDATE outbound_ops SET status = 'sending' WHERE id = ? AND status = 'pending'`,
@@ -510,7 +531,7 @@ export class DurabilityEngine {
         `SELECT seq, message_id, processing_status, routed_to FROM inbound_events WHERE processing_status IN ('pending', 'processing', 'turn_done')`,
       ),
       getOutboundByStatus: prepare(
-        `SELECT id, chat_jid, op_type, payload, wa_message_id, replay_policy, submitted_at, source_inbound_seq, is_terminal FROM outbound_ops WHERE status = ?`,
+        `SELECT id, chat_jid, op_type, payload, wa_message_id, replay_policy, created_at, submitted_at, source_inbound_seq, is_terminal FROM outbound_ops WHERE status = ?`,
       ),
       getRecoverableToolCalls: prepare(
         `SELECT id, conversation_key, tool_name, replay_policy, outbound_op_id
@@ -1196,6 +1217,10 @@ export class DurabilityEngine {
   // ── Outbound ops ──
   createOutboundOp(params: OutboundOpParams): number {
     const hash = createHash('sha256').update(params.payload).digest('hex');
+    // PR-C supersede-on-enqueue: collapse to one outstanding status ping per chat.
+    if (params.opType === 'status_ping') {
+      this.statements.supersedeOutstandingStatus.run(params.chatJid);
+    }
     const result = this.statements.createOutboundOp.run(
       params.conversationKey, params.chatJid, params.opType, params.payload, hash,
       params.sourceInboundSeq ?? null, params.isTerminal ? 1 : 0, params.replayPolicy,
@@ -1958,7 +1983,7 @@ export async function sendTracked(
   chatJid: string,
   text: string,
   durability: DurabilityEngine | undefined,
-  opts: { replayPolicy: 'safe' | 'unsafe' | 'read_only'; isTerminal?: boolean; sourceInboundSeq?: number; caller?: GuardCaller },
+  opts: { replayPolicy: 'safe' | 'unsafe' | 'read_only'; isTerminal?: boolean; sourceInboundSeq?: number; caller?: GuardCaller; opType?: 'text' | 'status_ping' },
 ): Promise<void> {
   let opId: number | undefined;
   if (durability) {
@@ -1966,7 +1991,7 @@ export async function sendTracked(
     opId = durability.createOutboundOp({
       conversationKey,
       chatJid,
-      opType: 'text',
+      opType: opts.opType ?? 'text',
       payload: JSON.stringify({ text }),
       replayPolicy: opts.replayPolicy,
       sourceInboundSeq: opts.sourceInboundSeq,
@@ -1992,18 +2017,24 @@ export async function sendTracked(
   }
 }
 
-/** Drain replay-safe pending text ops; quarantine malformed ops and isolate failures. */
+/**
+ * Drain replay-safe pending text/status_ping ops; quarantine malformed ops and
+ * isolate failures. Returns `{ resent, expired }`: `resent` = ops re-sent via
+ * `markSubmitted`; `expired` = `status_ping` ops aged out past
+ * `STATUS_OP_TTL_MS` (quarantined, never sent).
+ */
 export async function drainPendingOutbound(
   messenger: Messenger,
   durability: DurabilityEngine,
-): Promise<number> {
+): Promise<{ resent: number; expired: number }> {
   const pending = durability.getOutboundByStatus('pending');
   let resent = 0;
+  let expired = 0;
 
   for (const op of pending) {
     try {
       let text: string | undefined;
-      if (op.op_type === 'text') {
+      if (op.op_type === 'text' || op.op_type === 'status_ping') {
         try {
           const parsed = JSON.parse(op.payload) as unknown;
           if (
@@ -2032,6 +2063,30 @@ export async function drainPendingOutbound(
           `whatsoup@${config.botName} outbound op ${op.id} quarantined`,
           `replay_policy=${op.replay_policy} op_type=${op.op_type} reason=pending_replay_unreconstructable`,
         );
+        continue;
+      }
+
+      if (
+        op.op_type === 'status_ping' &&
+        Date.parse(op.created_at + 'Z') < Date.now() - STATUS_OP_TTL_MS
+      ) {
+        // PR-C TTL age-out (status class only): a "back online" ping stranded in
+        // `pending` past the TTL is stale misinformation. Mirror the
+        // non-reconstructable branch — quarantine (a terminal state retention
+        // reclaims) + alert — but never re-send it. `text` ops are exempt: this
+        // branch is gated on op_type='status_ping'.
+        durability.markQuarantined(op.id);
+        log.warn(
+          { opId: op.id, opType: op.op_type, createdAt: op.created_at },
+          'drainPendingOutbound: stale status_ping past TTL → quarantined',
+        );
+        emitAlertChecked(
+          config.botName,
+          'outbound_quarantined',
+          `whatsoup@${config.botName} outbound op ${op.id} quarantined`,
+          `replay_policy=${op.replay_policy} op_type=${op.op_type} reason=status_op_ttl_expired`,
+        );
+        expired += 1;
         continue;
       }
 
@@ -2065,9 +2120,9 @@ export async function drainPendingOutbound(
   }
 
   if (pending.length > 0) {
-    log.info({ pending: pending.length, resent }, 'drainPendingOutbound: complete');
+    log.info({ pending: pending.length, resent, expired }, 'drainPendingOutbound: complete');
   }
-  return resent;
+  return { resent, expired };
 }
 
 /**

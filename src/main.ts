@@ -1053,8 +1053,15 @@ async function start(): Promise<void> {
       const notifyTarget = pending
         ? { chatJid: pending.chatJid, text: pending.text, isResume: true }
         : { chatJid: toPersonalJid(adminPhone), text: '*Agent back online* ✓', isResume: false };
+      // PR-C: the bare '*Agent back online* ✓' fallback is a status op
+      // (unsafe + status_ping) so it supersedes/ages-out and cannot storm. The
+      // isResume branch carries real continuity content — it stays a safe text op.
+      const startupOpts: { replayPolicy: 'safe' | 'unsafe'; opType?: 'status_ping' } =
+        notifyTarget.isResume
+          ? { replayPolicy: 'safe' }
+          : { replayPolicy: 'unsafe', opType: 'status_ping' };
       setTimeout(() => {
-        sendTracked(connectionManager, notifyTarget.chatJid, notifyTarget.text, durability, { replayPolicy: 'safe' })
+        sendTracked(connectionManager, notifyTarget.chatJid, notifyTarget.text, durability, startupOpts)
           .then(() => log.info({ chatJid: notifyTarget.chatJid, isResume: notifyTarget.isResume }, 'sent startup notification'))
           .catch((err) => log.warn({ err, chatJid: notifyTarget.chatJid }, 'failed to send startup notification'));
       }, 3_000);
@@ -1070,7 +1077,8 @@ async function start(): Promise<void> {
   if (selfRestartBackOnline) {
     const resume = selfRestartBackOnline;
     setTimeout(() => {
-      sendTracked(connectionManager, resume.chatJid, resume.text, durability, { replayPolicy: 'safe' })
+      // PR-C: self-restart back-online is a status op (unsafe + status_ping).
+      sendTracked(connectionManager, resume.chatJid, resume.text, durability, { replayPolicy: 'unsafe', opType: 'status_ping' })
         .then(() => log.info({ chatJid: resume.chatJid }, 'sent self-restart back-online ping'))
         .catch((err) => log.warn({ err, chatJid: resume.chatJid }, 'failed to send self-restart back-online ping'));
     }, 3_000);
