@@ -556,6 +556,7 @@ def save_central_heartbeat(config: SentinelConfig, result: dict) -> str:
         "observedInstanceCount": observed_instance_count,
         "problemInstanceCount": problem_instance_count,
         "unknownInstanceCount": unknown_instance_count,
+        "metrics": result.get("metrics") if isinstance(result.get("metrics"), dict) else None,
     }
     atomic_write_json(heartbeat_path(config), payload)
     return str(heartbeat_path(config))
@@ -1542,6 +1543,42 @@ def default_deps(config: Optional[SentinelConfig] = None) -> SentinelDeps:
     )
 
 
+def compute_cycle_metrics(results: list, action_events: list) -> dict:
+    """Per-cycle countable operational metrics (#1876 P1).
+
+    The sentinel is evaluation-only: it emits heal *candidates* and escalation /
+    freeze / defer *decisions*, it does not execute heals (the selfcheck /
+    deployer does). So these counts report what the sentinel DECIDED this cycle,
+    derived from the evaluated host `results` and the emitted `action_events` —
+    not heal execution success/failure, which the selfcheck heartbeat owns.
+    Emitted into the central heartbeat so the counts are observable off-host.
+    """
+    by_action: dict[str, int] = {}
+    for record in results:
+        if isinstance(record, dict):
+            action = str(record.get("action") or "none")
+            by_action[action] = by_action.get(action, 0) + 1
+
+    def count(action: str) -> int:
+        return by_action.get(action, 0)
+
+    events = [event for event in action_events if isinstance(event, dict)]
+    return {
+        "hostsEvaluated": sum(1 for record in results if isinstance(record, dict)),
+        "healCandidates": count("tier1_heal_candidate"),
+        "escalations": count("escalate") + count("escalate_flapping"),
+        "flapEscalations": count("escalate_flapping"),
+        "correlatedDriftFreezes": count("freeze_correlated_drift"),
+        "concurrencyDeferrals": count("defer_tier1_concurrency_cap"),
+        "massUnreachableDeferrals": count("defer_mass_unreachable"),
+        "connectivitySuppressions": count("suppress_central_connectivity_suspect"),
+        "qUnavailable": count("q_unavailable"),
+        "actionEventsEmitted": len(events),
+        "attentionEventsEmitted": sum(1 for event in events if event.get("action") in ATTENTION_ACTIONS),
+        "byAction": by_action,
+    }
+
+
 def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dict:
     deps = deps or default_deps(config)
     now = deps.now_epoch()
@@ -1643,6 +1680,7 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
             "hosts": results,
             "actionEvents": action_events,
             "actionOutboxDepth": action_outbox_depth,
+            "metrics": compute_cycle_metrics(results, action_events),
             "statePath": str(state_path(config)),
             "cycleSeq": state["cycleSeq"],
             "rosterInventory": roster_inventory_data,
