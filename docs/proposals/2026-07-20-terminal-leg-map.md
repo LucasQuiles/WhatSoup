@@ -1,7 +1,7 @@
 # MAP — In-browser terminal / live exec surface (D-5, PDR-1) — 2026-07-20
 
 **Stage:** MAP (research/design; no build authorization claimed).
-**Sources:** review §3/§D-5 (`~/LAB/status/whatsoup-ui-ux-review-20260719.md`),
+**Sources:** review §3/§D-5 (operator-local status note `whatsoup-ui-ux-review-20260719.md`),
 PDR-1 (`oc-re/audits/2026-07-16-whatsoup-parity-debt-register.md`).
 
 ## 1. The gap, precisely

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -832,5 +832,127 @@ m.reconcile({"credential_probe": evidence}, ["credential_probe"])
     expect(events[0]!.alertSource).toBe('queue:writefail');
     expect(events[0]!.evidence).toContain('writefail backlog critical: count=1');
     expect(events[0]!.evidence).toContain(`${tmpRoot}/writefail`);
+  });
+});
+
+describe('bot-errors-heartbeat-watchdog transition latch', () => {
+  // Production defect (2026-07-17, fleet coordinator host): the q-loop's own outbound nudges
+  // reset awaiting_q_since (classify_activity treats any Codex/outbound message
+  // containing "reply"/"approve"/"blocked" as a fresh ask), so the
+  // q_loop:awaiting_q age sawtooths around BOT_ERRORS_MAX_AWAITING_Q_AGE. Each
+  // sawtooth cycle fully recovered the incident (2 clean observations) and then
+  // reopened it as a brand-new incident, emitting an alternating stale/recovered
+  // pair roughly every NUDGE_COOLDOWN_SECONDS — ~30 messages/day. The watchdog
+  // must latch through such oscillation: one stale alert on entry, silence while
+  // the flap continues, one recovery once the state durably settles.
+  const AWAITING_KEY = 'q_loop:awaiting_q';
+
+  function latchEnv(qLoopState: string): Record<string, string> {
+    return {
+      BOT_ERRORS_STATE_DIR: tmpRoot,
+      BOT_ERRORS_Q_LOOP_STATE: qLoopState,
+      BOT_ERRORS_WATCHDOG_CHECKS: 'q_loop',
+      BOT_ERRORS_MAX_Q_LOOP_AGE: '600',
+      BOT_ERRORS_MAX_AWAITING_Q_AGE: '1200',
+    };
+  }
+
+  function runAwaiting(qLoopState: string, env: Record<string, string>, now: number, awaitingSince: number): void {
+    writePrivateJson(qLoopState, { updated_at: now - 10, awaiting_q_since: awaitingSince, phase: 'monitoring' });
+    runWatchdog({ ...env, BOT_ERRORS_DRY_NOW: String(now) });
+  }
+
+  function watchdogState(): { open: Record<string, { flapCount?: number }>; recentlyRecovered?: Record<string, unknown> } {
+    return JSON.parse(readFileSync(join(tmpRoot, 'heartbeat-watchdog-state.json'), 'utf8'));
+  }
+
+  it('pins the oscillating awaiting_q sequence to two stale alerts and one recovery', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+    const qLoopState = join(tmpRoot, 'q-loop-state.json');
+    const env = latchEnv(qLoopState);
+
+    // Cycle 1: stale (age 2000 > 1200), stale, nudge-reset, clean x2 -> recovery.
+    runAwaiting(qLoopState, env, 10000, 8000);
+    runAwaiting(qLoopState, env, 10300, 8000);
+    runAwaiting(qLoopState, env, 10600, 10500);
+    runAwaiting(qLoopState, env, 10900, 10500);
+    let events = readOutboxEvents();
+    expect(events).toHaveLength(2);
+    expect(events[0]!.summary).toBe(`BOT ERRORS heartbeat watchdog stale: ${AWAITING_KEY}`);
+    expect(events[1]!.eventType).toBe('clear');
+
+    // Cycle 2: the condition re-enters stale inside the flap re-arm window. The
+    // FIRST reopen still alerts — a genuinely new outage of a recovered key must
+    // page immediately — carrying the flap context of the prior incident.
+    runAwaiting(qLoopState, env, 11900, 10500);
+    events = readOutboxEvents();
+    expect(events).toHaveLength(3);
+    expect(events[2]!.eventType).toBe('alert');
+    expect(events[2]!.summary).toBe(`BOT ERRORS heartbeat watchdog stale: ${AWAITING_KEY}`);
+    expect(events[2]!.evidence).toContain('incident_reopened=true');
+    expect(events[2]!.evidence).toContain('flap_count=1');
+    expect(events[2]!.evidence).toContain('first_seen=');
+
+    // Nudge resets the clock again; recovery of a flapped incident is HELD.
+    runAwaiting(qLoopState, env, 12200, 12100);
+    runAwaiting(qLoopState, env, 12500, 12100);
+    // Cycle 3: crosses the threshold again -> now a SILENT reopen (flapping).
+    runAwaiting(qLoopState, env, 13800, 12400);
+
+    events = readOutboxEvents();
+    expect(events).toHaveLength(3);
+    const state = watchdogState();
+    expect(state.open[AWAITING_KEY]!.flapCount).toBe(2);
+  });
+
+  it('flushes the held recovery notice once the flapping key stays clean past the re-arm window', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+    const qLoopState = join(tmpRoot, 'q-loop-state.json');
+    const env = latchEnv(qLoopState);
+
+    runAwaiting(qLoopState, env, 10000, 8000); // stale alert
+    runAwaiting(qLoopState, env, 10600, 10500); // clean 1
+    runAwaiting(qLoopState, env, 10900, 10500); // clean 2 -> immediate recovery (first cycle)
+    runAwaiting(qLoopState, env, 11900, 10500); // first reopen -> alerts with flap context
+    runAwaiting(qLoopState, env, 12200, 12100); // clean 1
+    runAwaiting(qLoopState, env, 12500, 12100); // clean 2 -> recovery HELD (flapped incident)
+    expect(readOutboxEvents()).toHaveLength(3);
+
+    // Q durably returns: clean past the 6h re-arm window -> deferred recovery flush.
+    runAwaiting(qLoopState, env, 12500 + 6 * 60 * 60 + 300, 0);
+    const events = readOutboxEvents();
+    expect(events).toHaveLength(4);
+    expect(events[3]!.eventType).toBe('clear');
+    expect(events[3]!.summary).toBe(`BOT ERRORS heartbeat watchdog recovered: ${AWAITING_KEY}`);
+    expect(events[3]!.evidence).toContain('flap_count=1');
+    const state = watchdogState();
+    expect(Object.keys(state.open)).toHaveLength(0);
+    expect(Object.keys(state.recentlyRecovered ?? {})).toHaveLength(0);
+  });
+
+  it('requires N consecutive stale observations before opening when stale confirmations are configured', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+    const qLoopState = join(tmpRoot, 'q-loop-state.json');
+    const env = {
+      BOT_ERRORS_STATE_DIR: tmpRoot,
+      BOT_ERRORS_Q_LOOP_STATE: qLoopState,
+      BOT_ERRORS_WATCHDOG_CHECKS: 'q_loop',
+      BOT_ERRORS_MAX_Q_LOOP_AGE: '60',
+      BOT_ERRORS_WATCHDOG_STALE_CONFIRMATIONS: '2',
+    };
+
+    writePrivateJson(qLoopState, { updated_at: 100 });
+    runWatchdog({ ...env, BOT_ERRORS_DRY_NOW: '1000' }); // stale observation 1 -> pending, no alert
+    writePrivateJson(qLoopState, { updated_at: 1290 });
+    runWatchdog({ ...env, BOT_ERRORS_DRY_NOW: '1300' }); // clean -> pending counter resets
+    writePrivateJson(qLoopState, { updated_at: 1000 });
+    runWatchdog({ ...env, BOT_ERRORS_DRY_NOW: '1600' }); // stale observation 1 again
+    // No alert may exist yet, so the outbox directory itself must be absent.
+    expect(existsSync(join(tmpRoot, 'outbox'))).toBe(false);
+
+    runWatchdog({ ...env, BOT_ERRORS_DRY_NOW: '1900' }); // stale observation 2 -> opens + alerts once
+    const events = readOutboxEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]!.summary).toBe('BOT ERRORS heartbeat watchdog stale: q_loop');
   });
 });

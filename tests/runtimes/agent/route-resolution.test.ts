@@ -26,6 +26,9 @@ function pref(overrides: Partial<ChatModelPreference> = {}): ChatModelPreference
     fallbackPermitted: false,
     updatedAt: 1_000,
     expiresAt: 2_000,
+    requestedModel: null,
+    validatedProvider: null,
+    modelPinVerified: null,
     ...overrides,
   };
 }

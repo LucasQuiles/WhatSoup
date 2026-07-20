@@ -12,17 +12,152 @@
 //   B. classifyInfraStatusClaim — detect a false self-infra-failure claim so a
 //      caller can divert it to ops instead of the client.
 //
-// This file performs NO logging, NO sending, and NO I/O. Callers (the MCP
-// send_message path) decide what to do with a decision.
+// This file performs NO sending and NO other I/O, and stays pure otherwise.
+// Callers (the MCP send_message path) decide what to do with a decision. The
+// ONE exception (T8-F1, WG-7): `isOperatorDmPeer` logs a single component-
+// tagged, id-only warn when a lid-form peer does not resolve to an admin
+// phone, so an audience-elevation decision is never silent (see the function
+// doc). Nothing else in this file logs.
 //
-// SSOT note: the secret/token/email masking is reused from
-// `sanitizeProviderPreviewText`. The internal-path / identifier / PII shapes
+// SSOT note: the secret/token masking is reused from
+// `sanitizeProviderPreviewText` (email masking stays enabled there for
+// background surfaces but is switched OFF for chat egress — B25 chat-scope
+// owner ruling; see redactInternalArtifacts). The ops-evidence path keeps the
+// sanitizer's full default, emails included — it feeds BOT ERRORS diagnostics,
+// a background surface. The internal-path / identifier / PII shapes
 // here overlap with `scripts/repo-hygiene-guard.ts` and the BOT ERRORS outbox
 // redactor; if a third consumer appears, extract a shared
 // `src/lib/internal-artifact-patterns.ts` (deferred per YAGNI — one consumer now).
 
 import { sanitizeProviderPreviewText } from '../lib/provider-preview-sanitizer.ts';
 import { jidPattern } from '../lib/redaction-patterns.ts';
+import { isAdminPhone } from '../lib/phone.ts';
+import { isLidJid, isWhatsAppAuthenticatedJid } from './jid-constants.ts';
+import { resolvePhoneFromJid } from './access-list.ts';
+import { createChildLogger } from '../logger.ts';
+import type { Database } from './database.ts';
+
+const audienceLog = createChildLogger('outbound-audience');
+
+// ---------------------------------------------------------------------------
+// B21-C: spoof-attempt warn dedupe.
+//
+// isOperatorDmPeer is evaluated on EVERY outbound send (messaging.ts,
+// media.ts, runtime call sites), so a legitimate operator SMS-interop DM
+// (peer = admin digits @sms) would emit one 'spoof attempt denied' warn per
+// bot reply — a sustained log flood mislabeled as an attack. The WARN is
+// deduped per chatJid on a TTL (pattern mirrors emit-alert's throttle map);
+// the deny DECISION is never deduped, and NFR-3 never-silent still holds:
+// every distinct chatJid warns, only repeats within the TTL are suppressed.
+// ---------------------------------------------------------------------------
+const SPOOF_WARN_TTL_MS = 10 * 60 * 1000;
+
+/** Maps chatJid → epoch ms of the last emitted spoof-attempt warn. */
+const spoofWarnLastLoggedAt = new Map<string, number>();
+
+/** Reset the spoof-attempt warn dedupe map (for tests). */
+export function resetSpoofWarnDedupe(): void {
+  spoofWarnLastLoggedAt.clear();
+}
+
+/** True when a spoof-attempt warn for `chatJid` should be emitted now. */
+function shouldWarnSpoofAttempt(chatJid: string, now: number): boolean {
+  const lastLoggedAt = spoofWarnLastLoggedAt.get(chatJid);
+  if (lastLoggedAt !== undefined && now - lastLoggedAt < SPOOF_WARN_TTL_MS) {
+    return false;
+  }
+  // Prune expired entries on insert so the map stays bounded to chatJids
+  // seen within the last TTL window.
+  for (const [jid, loggedAt] of spoofWarnLastLoggedAt) {
+    if (now - loggedAt >= SPOOF_WARN_TTL_MS) spoofWarnLastLoggedAt.delete(jid);
+  }
+  spoofWarnLastLoggedAt.set(chatJid, now);
+  return true;
+}
+
+/**
+ * True iff `chatJid` is a 1:1 DM whose peer is a config admin (T8-F1).
+ *
+ * Keys on the CHATJID (the conversation peer), NOT a sender JID — an OUTBOUND
+ * message has no meaningful sender (the bot is sending), so the operator
+ * identity is the chat itself. Resolves `@lid` → phone via
+ * `resolvePhoneFromJid` (which consults `lid_mappings`): the owner-DM
+ * outbound `chatJid` on the deployed q instance is OBSERVED-LIVE to be the
+ * lid form (V32), so lid resolution is the PRIMARY case here, not
+ * defense-in-depth.
+ *
+ * NEVER silent: when a lid-form peer does not resolve to an admin phone
+ * (unmapped lid → `resolvePhoneFromJid` falls back to the raw LID digits,
+ * which will not match `adminPhones`), a single warn is logged — component-
+ * tagged and id-only (N14: never the chatJid/lid value) — so a lid-thread
+ * audience decision is always observable, never a silent client fall-through.
+ *
+ * Same convention applies to the QR-143 @sms guard's spoof-attempt SUBSET
+ * (fast-follow): an unauthenticated peer that BEARS ADMIN DIGITS — i.e.
+ * would resolve to an admin phone were the transport trusted — is a spoof
+ * attempt, not ordinary traffic, so it warns per NFR-3 ("gate denials log
+ * unsampled, always"). Every OTHER @sms rejection (a benign SMS-bridge chat
+ * with no admin-shaped digits) stays silent — warning on every one would be
+ * noise, not signal. B21-C: because this predicate runs on every outbound
+ * send, the spoof warn itself is deduped per chatJid on a TTL (see
+ * `shouldWarnSpoofAttempt`) — never-silent per chat, not per send; the deny
+ * return value is never deduped.
+ */
+export function isOperatorDmPeer(
+  chatJid: string,
+  isGroup: boolean,
+  db: Database,
+  adminPhones: Set<string>,
+): boolean {
+  if (isGroup) return false;
+  // Shared by BOTH (mutually exclusive) branches below: does the peer resolve
+  // to a configured admin phone? On the unauthenticated branch it selects the
+  // spoof-attempt warn subset; on the authenticated branch it IS the
+  // elevation decision.
+  //
+  // B4 (QR-143): this inline `isAdminPhone(resolvePhoneFromJid(...))` is
+  // DELIBERATELY NOT migrated to `resolvePhoneFromJidForGrant`, and is
+  // allowlisted in `scripts/grant-resolver-inventory-guard.ts`. The GRANT
+  // decision here is already gated on `isWhatsAppAuthenticatedJid(chatJid)`
+  // (line ~119) before the elevation `return peerBearsAdminDigits`. The phone
+  // match is ALSO needed on the UNauthenticated branch to select the
+  // spoof-attempt warn subset (an @sms peer bearing admin digits is a spoof
+  // attempt, not noise) — routing through the grant primitive would null the
+  // phone on @sms and silence that never-silent warn (NFR-3). So the composed
+  // semantics are NOT byte-equivalent to the primitive; migrating here would
+  // regress observability.
+  const peerBearsAdminDigits = isAdminPhone(resolvePhoneFromJid(chatJid, db), adminPhones);
+  // QR-143: only a WhatsApp-authenticated transport (@s.whatsapp.net / @lid) can
+  // carry operator identity here. @sms is spoofable (see the
+  // isWhatsAppAuthenticatedJid doc in jid-constants.ts) and resolvePhoneFromJid
+  // collapses it to the SAME bare phone digits as a real admin JID — without
+  // this guard, a spoofed `<admin-digits>@sms` chatJid would elevate.
+  if (!isWhatsAppAuthenticatedJid(chatJid)) {
+    // Fast-follow: warn ONLY on the spoof-attempt subset (bears admin digits).
+    // Do NOT warn on every @sms rejection — that fires on every benign
+    // SMS-bridge chat and would be noise, not a never-silent signal.
+    if (peerBearsAdminDigits && shouldWarnSpoofAttempt(chatJid, Date.now())) {
+      // This branch catches EVERY non-WhatsApp-authenticated form (@sms,
+      // @c.us, @broadcast, …), so log the ACTUAL form — the '@' suffix —
+      // not a hardcoded 'sms' label. Still id-only (N14): the suffix is the
+      // transport domain, never the peer digits.
+      const atIdx = chatJid.indexOf('@');
+      const chatJidForm = atIdx === -1 ? 'unknown' : chatJid.slice(atIdx + 1) || 'unknown';
+      audienceLog.warn(
+        { chatJidForm, outcome: 'spoof-attempt-denied' },
+        'operator-DM unauthenticated peer bore admin-like digits but is not WhatsApp-authenticated — spoof attempt denied',
+      );
+    }
+    return false;
+  }
+  if (!peerBearsAdminDigits && isLidJid(chatJid)) {
+    audienceLog.warn(
+      { chatJidForm: 'lid', outcome: 'not-elevated' },
+      'operator-DM lid peer did not resolve to an admin phone — not elevated',
+    );
+  }
+  return peerBearsAdminDigits;
+}
 
 export type OutboundAudience = 'client' | 'ops' | 'internal';
 
@@ -174,9 +309,11 @@ export function classifyAssistantTextEgress(text: string): AssistantTextEgressDe
  *   - `ops`      — the configured BOT ERRORS channel (`BOT_ERRORS_JID`);
  *                  verbatim diagnostics preserved.
  *   - `internal` — an operator-owned agent-coordination group listed in
- *                  `WHATSOUP_INTERNAL_JIDS`; the fleet's own vocabulary (home/`~`
- *                  paths, `.claude/`, hook-event names, bead `Files:` lists) is
- *                  legitimate content there, so it is NOT scrubbed as a leak.
+ *                  `WHATSOUP_INTERNAL_JIDS`, OR (T8-F1+F2) an admin's 1:1 DM
+ *                  on the trusted primary (see `ctx` below); the fleet's own
+ *                  vocabulary (home/`~` paths, `.claude/`, hook-event names,
+ *                  bead `Files:` lists) is legitimate content there, so it is
+ *                  NOT scrubbed as a leak.
  *   - `client`   — everything else; the conservative default, since a false
  *                  redaction on an operator message is low-harm while a leak to
  *                  a real client is high-harm.
@@ -184,8 +321,24 @@ export function classifyAssistantTextEgress(text: string): AssistantTextEgressDe
  * is a bypass.
  *
  * Reads `process.env.BOT_ERRORS_JID` and `process.env.WHATSOUP_INTERNAL_JIDS` —
- * the only runtime dependencies in this otherwise pure module; kept here so
+ * the only env dependencies in this otherwise pure module; kept here so
  * audience policy has a single home.
+ *
+ * `ctx` (T8-F1+F2, OPTIONAL — omitting it preserves the exact pre-F1+F2
+ * behavior for every existing caller):
+ *   - `isGroup`       — the target is a group chat (never elevated).
+ *   - `peerIsAdmin`   — `isOperatorDmPeer(chatJid, isGroup, db, adminPhones)`,
+ *                       computed by the caller (this function stays boolean-in,
+ *                       no DB access here — SoC).
+ *   - `fallbackActive`— true while a FALLBACK (non-trusted-primary) provider
+ *                       window is active. FAIL-CLOSED: a caller that cannot
+ *                       determine this MUST pass `true` (full scrub), never
+ *                       default `false` — `false` here elevates an operator DM
+ *                       to `internal`, and an unknown-state elevation during a
+ *                       degraded/fallback model is the exact leak this guards.
+ * Elevation requires ALL THREE: `!isGroup && peerIsAdmin && !fallbackActive`.
+ * `ops`/env-`internal` are checked first and still win (ctx never downgrades
+ * an already-internal/ops chat).
  */
 const EMPTY_JID_SET: ReadonlySet<string> = new Set();
 
@@ -199,10 +352,18 @@ function internalGroupJids(): ReadonlySet<string> {
   return new Set(raw.split(',').map((j) => j.trim()).filter(Boolean));
 }
 
-export function resolveOutboundAudience(chatJid: string): OutboundAudience {
+export function resolveOutboundAudience(
+  chatJid: string,
+  ctx?: { isGroup: boolean; peerIsAdmin: boolean; fallbackActive: boolean },
+): OutboundAudience {
   const opsJid = process.env['BOT_ERRORS_JID']?.trim();
   if (opsJid && chatJid === opsJid) return 'ops';
   if (internalGroupJids().has(chatJid)) return 'internal';
+  // T8-F1+F2: an admin's 1:1 DM on the trusted primary (no fallback window) is
+  // an operator channel. This SUPERSEDES the WHATSOUP_INTERNAL_JIDS owner-DM
+  // stopgap entry (which stays group-oriented going forward) — an env-absent
+  // owner DM still resolves `internal` via this branch.
+  if (ctx && !ctx.isGroup && ctx.peerIsAdmin && !ctx.fallbackActive) return 'internal';
   return 'client';
 }
 
@@ -327,13 +488,16 @@ function redactSensitivePaths(text: string, redactions: Redaction[]): string {
 
 /**
  * Mask internal artifacts in outbound text, scaled to `audience`:
- *   - `client`   — full scrub: secrets/emails, then operator paths, runtime
+ *   - `client`   — full scrub: secrets/tokens, then operator paths, runtime
  *                  identifiers, and tailnet IPs.
- *   - `internal` — secrets/emails/sensitive credential paths only; operator
+ *   - `internal` — secrets/tokens/sensitive credential paths only; operator
  *                  vocabulary is legitimate content in operator-owned agent
  *                  groups, so masking it there is over-redaction.
  *   - `ops`      — verbatim (BOT ERRORS needs raw diagnostics; its outbox
  *                  redactor scrubs secrets downstream).
+ * Email addresses are NEVER masked here (any audience): B25 chat-scope owner
+ * ruling — email redaction is background-only (provider previews, logs,
+ * handoff summarizers) and must not mutate chat-visible text.
  * Defaults to `client`, so existing single-arg callers are unchanged.
  * Returns the cleaned text plus a categorised (non-sensitive) redaction list.
  */
@@ -348,16 +512,23 @@ export function redactInternalArtifacts(
   const redactions: Redaction[] = [];
   let out = text;
 
-  // Secret/token/email masking applies to client AND internal: WhatsApp is a
+  // Secret/token masking applies to client AND internal: WhatsApp is a
   // third-party transport, so a leaked credential is exposure even in an
-  // operator-owned group. Internal WhatsApp JIDs are protected before this pass
-  // because the generic email sanitizer otherwise treats `120...@g.us` as email.
+  // operator-owned group. EMAIL masking does NOT apply here — B25 chat-scope
+  // owner ruling (2026-07-19): email redaction is a BACKGROUND-ONLY function
+  // (provider previews, logs, handoff summarizers) and must never mutate
+  // chat-visible message text (live defect: 121 outbound chat messages carried
+  // the literal '[REDACTED_EMAIL]' marker). `redactEmailLike: false` skips the
+  // whole email-class pass; the preserve* flags are kept so flipping the email
+  // flag back for any single audience restores the exact prior behavior with
+  // one edit (e.g. a future client-tier exception).
   const sanitized = sanitizeProviderPreviewText(out, {
     preserveWhatsAppJids: audience === 'internal',
     preserveWhatsAppMentions: true,
+    redactEmailLike: false,
   });
   if (sanitized !== out) {
-    redactions.push({ category: 'provider_secret', label: 'token-or-email' });
+    redactions.push({ category: 'provider_secret', label: 'token-or-credential' });
     out = sanitized;
   }
 
@@ -438,10 +609,11 @@ function sanitizeOpsEvidence(text: string): string {
 
 /**
  * Decide how a single outbound message should be handled for its audience.
- * Ops sends are never rewritten. Internal sends have secrets/emails masked but
+ * Ops sends are never rewritten. Internal sends have secrets/tokens masked but
  * keep operator vocabulary. Client sends are diverted when they make a false
  * infra-failure claim, redacted when they leak an internal artifact, and
- * otherwise allowed unchanged.
+ * otherwise allowed unchanged. Emails are never masked on chat egress (B25
+ * chat-scope owner ruling — see redactInternalArtifacts).
  */
 export function evaluateOutboundMessageSafety(
   input: OutboundMessageSafetyInput,
@@ -469,7 +641,7 @@ export function evaluateOutboundMessageSafety(
     };
   }
 
-  // Client → full scrub; internal → secrets/emails only.
+  // Client → full scrub; internal → secrets/tokens only.
   const { text: redacted, redactions } = redactInternalArtifacts(text, audience);
   if (redactions.length > 0) {
     return {

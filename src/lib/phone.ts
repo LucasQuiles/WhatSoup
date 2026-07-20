@@ -39,6 +39,16 @@ export function normalizePhoneE164(input: string | number | null | undefined): s
 }
 
 /**
+ * A phone-shaped local part (7-15 digits, E.164 ballpark). Shape check only —
+ * a bare 12-15-digit local can also be an unmapped LID (see
+ * src/core/chat-display-name.ts LID_SUSPECT_MIN_DIGITS for how render paths
+ * disambiguate).
+ */
+export function isPhoneLocal(local: string): boolean {
+  return /^\d{7,15}$/.test(local);
+}
+
+/**
  * Check if a phone number (from a JID) matches any admin phone.
  *
  * Uses suffix matching: if the extracted phone is "15551230006" and

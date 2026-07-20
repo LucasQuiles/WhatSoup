@@ -49,8 +49,8 @@ describe('tool registration', () => {
     const register = (tool: ToolDeclaration) => registry.register(tool);
 
     // Messaging & media
-    registerMessagingTools(registry, { connection, db: db.raw });
-    registerMediaTools(registry, { connection, db });
+    registerMessagingTools(registry, { connection, db: db.raw, dbWrapper: db, adminPhones: new Set<string>() });
+    registerMediaTools(registry, { connection, db, adminPhones: new Set<string>() });
 
     // DB-dependent tools
     registerChatManagementTools(db, getSock, register);

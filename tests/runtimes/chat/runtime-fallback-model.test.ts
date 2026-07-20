@@ -10,6 +10,10 @@ vi.mock('../../../src/config.ts', () => ({
   config: {
     botName: 'TestBot',
     systemPrompt: 'You are a test bot.',
+    // T8-F1: chat/runtime.ts's redactInternalArtifacts ctx now reads
+    // config.adminPhones (isOperatorDmPeer) — empty so this test's fixture
+    // JIDs never resolve as operator DMs (unchanged pre-F1 behavior).
+    adminPhones: new Set<string>(),
     models: {
       conversation: 'claude-opus-4-8',
       extraction: 'claude-sonnet-4-6',
