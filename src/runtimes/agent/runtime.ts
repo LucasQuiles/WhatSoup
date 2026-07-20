@@ -4143,11 +4143,6 @@ export class AgentRuntime implements Runtime {
             break;
           }
 
-          case 'why': {
-            this.sendDirect(chatJid, this.renderRouteWhy(chatJid, msg.senderJid));
-            break;
-          }
-
           case 'reset': {
             // Idempotent by construction: clearing an absent row is a no-op and
             // the reply is identical, so a doubled /reset cannot spam or error.
@@ -8738,7 +8733,9 @@ export class AgentRuntime implements Runtime {
    * only — never tool names, socket paths, pids, account JIDs, or
    * cross-conversation metadata. (b28 r2b removed the Delegation/Authority
    * DISPLAY lines; the invariant they described lives in the agent system
-   * prompt + security layer and the /why receipt, not this status surface.)
+   * prompt + security layer. D11/D12: /why is removed — its "no delegation"
+   * reassurance is folded into the trailing line of this render below rather
+   * than lost.)
    */
   private renderRouteStatus(chatJid: string, senderJid: string): string {
     const { live, pref, next } = this.loadRouteView(chatJid, senderJid);
@@ -8792,39 +8789,18 @@ export class AgentRuntime implements Runtime {
       live && (live.provider !== nextProvider || (live.model ?? null) !== (next.model ?? null))
         ? `\nNext session: ${nextRouteLabel}`
         : '';
-    // b28 r2b: the Delegation + Authority lines are removed from this render
-    // (owner ruling: not about model/route status). DISPLAY-only removal — the
-    // routing-never-changes-authority invariant remains in the agent system
-    // prompt + security layer and on the /why receipt (renderRouteWhy).
+    // b28 r2b: the Delegation + Authority DISPLAY lines are removed from this
+    // render (owner ruling: not about model/route status). D11/D12: the
+    // underlying invariant is not lost — the former /why receipt's
+    // reassurance is folded into the trailing italic line below now that
+    // /why itself is gone.
     return (
       `*Current route:* ${provider}${live ? '' : ' (no live session — next session route)'}\n` +
       `Model: ${model}\n` +
       `${prefLine}\n` +
-      `${fallbackLine}${nextLine}`
+      `${fallbackLine}${nextLine}\n` +
+      '_No delegation; routing never changes what I am allowed to do._'
     );
-  }
-
-  /** Compact route receipt (/why): what answered and why, one line. */
-  private renderRouteWhy(chatJid: string, senderJid: string): string {
-    const { live, pref, next } = this.loadRouteView(chatJid, senderJid);
-    // With no live session, report the provider the NEXT spawn will use (R7)
-    // — the pinned/tier provider, not the fallback-only effectiveProvider.
-    const provider = live?.provider ?? (next.provider || 'unknown-provider');
-    const reason = live
-      ? this.isFallbackWindowActive && live.provider !== next.provider
-        ? "serving this chat's current session (new sessions use the fallback route)"
-        : "serving this chat's current session"
-      : next.source === 'fallback'
-        ? 'a fallback window is active'
-        : next.source === 'preference'
-          ? 'your preferred route for the next session'
-          : next.source === 'pin_blocked_default'
-            ? 'your pinned provider is unavailable — using the default route'
-            : 'instance default route';
-    const prefNote = pref
-      ? '; your preference steers new sessions'
-      : '';
-    return `_Route: ${provider} (${reason})${prefNote}. No delegation; routing never changes what I am allowed to do._`;
   }
 
   /**

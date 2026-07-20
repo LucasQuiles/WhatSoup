@@ -57,11 +57,12 @@ function isStructuredModelArg(parts: readonly string[]): boolean {
  * Classify a user input string.
  *
  * - `/new`, `/status`, `/help` (case-insensitive) → local
- * - `/model`, `/why`, `/reset` → local only when `opts.routingAliases` is true,
+ * - `/model`, `/reset` → local only when `opts.routingAliases` is true,
  *   and only for recognized grammar: `/model`'s STRUCTURED set (bare, a known
  *   verb/provider-id, `N`/`N<letter>` catalogue index, `N default`, or
- *   `list [filter]`), bare `/why`, bare `/reset` — genuine free text (e.g.
- *   "/model the best kimi") still forwards to the agent (F04)
+ *   `list [filter]`), bare `/reset` — genuine free text (e.g.
+ *   "/model the best kimi") still forwards to the agent (F04). D11: `/why` is
+ *   removed from the registry, so it always forwards now.
  * - Any other `/…` slash command → forwarded (passed through to Claude Code)
  * - No leading `/` → message
  */

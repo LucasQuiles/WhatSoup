@@ -15276,8 +15276,8 @@ describe('AgentRuntime', () => {
 });
 
 // ─── NL routing handler matrix (slices 1.5 + 2; review gap F14/B4) ───────────
-// Integration coverage for the /model //why //reset handlers and the spawn
-// steering wiring, on a REAL sqlite store (in-memory) behind the runtime,
+// Integration coverage for the /model //reset handlers (D11: /why removed)
+// and the spawn steering wiring, on a REAL sqlite store (in-memory) behind the runtime,
 // with the file's SessionManager/queue/config mocks. Appended last in this
 // file; mockConfig routing keys are restored in afterEach.
 describe('NL routing handlers (nlRouting flag)', () => {
@@ -15417,10 +15417,12 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(status).toContain('Preference: strongest for you in this chat');
     expect(status).toContain('steers new sessions');
     // b28 r2b: the Delegation/Authority display lines were removed from this
-    // surface (the invariant lives in the system prompt + /why, not here).
+    // surface (the invariant lives in the system prompt). D11: /why is gone —
+    // its "no delegation" reassurance is folded into this render instead.
     expect(status).not.toContain('Authority:');
     expect(status).not.toContain('Delegation:');
     expect(status).not.toContain('no live actions authorized');
+    expect(status).toContain('routing never changes what I am allowed to do');
   });
 
   it('an identical repeat EXTENDS the TTL instead of a misleading no-op', async () => {
@@ -15535,14 +15537,15 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(durability.completeInbound).toHaveBeenCalledWith(77, 'local_command_handled');
   });
 
-  it('/why reports the live session provider once a session is active', async () => {
+  it('/why is removed: forwards to the session rather than rendering a route receipt locally (D11)', async () => {
     const { runtime, sentMessages } = makeRoutingRuntime();
-    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'hello' }));
-    mockSession.getStatus.mockReturnValue({ active: true, pid: 1, sessionId: 's', startedAt: new Date().toISOString(), messageCount: 1, lastMessageAt: null });
-    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/why', messageId: 'msg-2' }));
-    const why = allReplies(sentMessages).find((t) => t.includes('Route:'));
-    expect(why).toContain("serving this chat's current session");
-    expect(why).toContain('routing never changes what I am allowed to do');
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/why' }));
+    // No local "Route:" receipt is rendered — /why is no longer a registry
+    // entry, so classifyInput forwards it raw (the reassurance it used to
+    // carry now lives on /model status instead — see the D11 fold test above).
+    expect(allReplies(sentMessages).some((t) => t.includes('Route:'))).toBe(false);
+    const forwarded = (mockSession.sendTurn.mock.calls as unknown as [string][]).map((c) => c[0]);
+    expect(forwarded.some((t) => t.includes('/why'))).toBe(true);
   });
   it('injects the NL routing prompt contract at spawn (flag on) and omits it when off', async () => {
     const { runtime } = makeRoutingRuntime();
@@ -15811,28 +15814,19 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(opts.providerConfig).toEqual({ extraOpt: 'kept' });
   });
 
-  it('/model default clears the preference via the same path as /reset', async () => {
-    const { runtime, sentMessages } = makeRoutingRuntime();
-    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model strongest' }));
-    expect(prefRows()).toHaveLength(1);
-    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model default', messageId: 'msg-2' }));
-    expect(prefRows()).toHaveLength(0);
-    expect(allReplies(sentMessages).some((t) => t.includes('Back to the default route'))).toBe(true);
-    const events = await readEvents();
-    expect(events.some((e) => e.event === 'model_preference_cleared')).toBe(true);
-  });
-
-  it('/model default clears the route pref AND forwards to the CLI so its own model reset still runs (R8)', async () => {
+  it('D12: /model default is no longer a local verb — it forwards raw and does NOT clear the preference locally (/reset is the undo)', async () => {
     const { runtime, sentMessages } = makeRoutingRuntime();
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model strongest' }));
     expect(prefRows()).toHaveLength(1);
     mockSession.sendTurn.mockClear();
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model default', messageId: 'msg-2' }));
-    // Route override cleared locally...
-    expect(prefRows()).toHaveLength(0);
-    expect(allReplies(sentMessages).some((t) => t.includes('Back to the default route'))).toBe(true);
-    // ...AND the raw command is forwarded so the agent CLI's own /model default
-    // reset is not shadowed by the local interception (R8).
+    // The standalone verb is gone from the registry's subVerbs, so
+    // classifyInput no longer recognizes "/model default" as structured
+    // local grammar (F04 fallthrough) — the preference row survives...
+    expect(prefRows()).toHaveLength(1);
+    expect(allReplies(sentMessages).some((t) => t.includes('Back to the default route'))).toBe(false);
+    // ...and the raw command is forwarded untouched so the agent CLI's own
+    // /model default still runs.
     const forwarded = (mockSession.sendTurn.mock.calls as unknown as [string][]).map((c) => c[0]);
     expect(forwarded.some((t) => t.includes('/model default'))).toBe(true);
   });
@@ -15848,14 +15842,9 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(replies.some((t) => t.includes('Something went wrong'))).toBe(false);
   });
 
-  it('/why renders on the default route when the preference store read throws (R11)', async () => {
-    const { runtime, sentMessages } = makeRoutingRuntime();
-    routingDb.raw.exec('DROP TABLE chat_model_preference');
-    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/why' }));
-    const replies = allReplies(sentMessages);
-    expect(replies.some((t) => t.includes('Route:'))).toBe(true);
-    expect(replies.some((t) => t.includes('Something went wrong'))).toBe(false);
-  });
+  // D11: /why is removed — its R11 degrade-on-store-throw coverage is now
+  // subsumed by the '/model status renders on the default route ...' test
+  // above, since the folded reassurance lives on that same render.
 
   it('spawn fails OPEN to the default route when the pin-eligibility probe throws (R13)', async () => {
     const { runtime } = makeRoutingRuntime();
@@ -15898,7 +15887,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     const opts = capturedSessionManagerOptsRef.current as unknown as { provider?: string; routingSystemBlock?: () => string | null };
     expect(opts.provider).toBe('codex-cli');
     // The in-prompt route fact must match the provider the session runs on —
-    // telling a codex-cli agent it is claude-cli contradicts /why.
+    // telling a codex-cli agent it is claude-cli contradicts /model status.
     const block = String(opts.routingSystemBlock?.());
     expect(block).toContain('current provider: codex-cli');
     expect(block).not.toContain('current provider: claude-cli');
@@ -16203,8 +16192,9 @@ describe('NL routing handlers (nlRouting flag)', () => {
   // ── b28 r2b: /model status drops the Delegation + Authority DISPLAY lines ──
   // Owner round-2 ruling: those two lines are not about model/route status.
   // RENDER-ONLY removal — the routing-never-changes-authority invariant stays
-  // in the agent system prompt + security layer and on the /why receipt; only
-  // the two redundant status lines go.
+  // in the agent system prompt + security layer. D11: the former /why
+  // receipt is gone; its reassurance is now folded into this same render
+  // (see the trailing "routing never changes" line asserted elsewhere).
   it('b28 r2b: /model status no longer renders the Delegation or Authority lines', async () => {
     const { runtime, sentMessages } = makeRoutingRuntime();
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));

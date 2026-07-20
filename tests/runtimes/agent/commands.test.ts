@@ -154,7 +154,6 @@ describe('routing aliases (NL-first design, owner-approved PR-plan v2)', () => {
 
   it('flag OFF (default): /model stays forwarded — byte-identical to today', () => {
     expect(classifyInput('/model strongest')).toEqual({ type: 'forwarded', text: '/model strongest' });
-    expect(classifyInput('/why')).toEqual({ type: 'forwarded', text: '/why' });
     expect(classifyInput('/reset')).toEqual({ type: 'forwarded', text: '/reset' });
   });
 
@@ -170,8 +169,8 @@ describe('routing aliases (NL-first design, owner-approved PR-plan v2)', () => {
     expect(classifyInput('/model', NL)).toEqual({ type: 'local', command: 'model' });
   });
 
-  it('/why returns local command "why"', () => {
-    expect(classifyInput('/why', NL)).toEqual({ type: 'local', command: 'why' });
+  it('/why is removed: always forwards, even with routing aliases ON (D11)', () => {
+    expect(classifyInput('/why', NL)).toEqual({ type: 'forwarded', text: '/why' });
   });
 
   it('/reset returns local command "reset"', () => {
@@ -182,7 +181,7 @@ describe('routing aliases (NL-first design, owner-approved PR-plan v2)', () => {
     expect(classifyInput('/Model fastest', NL)).toEqual({ type: 'local', command: 'model', args: 'fastest' });
   });
 
-  it('/route stays forwarded even with routing aliases ON (not part of the 3-alias set)', () => {
+  it('/route stays forwarded even with routing aliases ON (not part of the alias set)', () => {
     expect(classifyInput('/route', NL)).toEqual({ type: 'forwarded', text: '/route' });
   });
 
@@ -215,9 +214,9 @@ describe('routing aliases — forwarded-capability fallthrough (F04)', () => {
     expect(classifyInput('/model strongest please', NL)).toEqual({ type: 'forwarded', text: '/model strongest please' });
   });
 
-  it('arged /why forwards; bare /why stays local', () => {
+  it('/why is removed: forwards whether bare or arged (D11)', () => {
     expect(classifyInput('/why because', NL)).toEqual({ type: 'forwarded', text: '/why because' });
-    expect(classifyInput('/why', NL)).toEqual({ type: 'local', command: 'why' });
+    expect(classifyInput('/why', NL)).toEqual({ type: 'forwarded', text: '/why' });
   });
 
   it('arged /reset forwards; bare /reset stays local', () => {
@@ -231,7 +230,6 @@ describe('routing aliases — trailing whitespace grammar (R10)', () => {
 
   it('a trailing space on a bare alias still classifies local (matches base /status )', () => {
     expect(classifyInput('/reset ', NL)).toEqual({ type: 'local', command: 'reset' });
-    expect(classifyInput('/why ', NL)).toEqual({ type: 'local', command: 'why' });
     expect(classifyInput('/model ', NL)).toEqual({ type: 'local', command: 'model' });
   });
 
@@ -256,13 +254,13 @@ describe('classifier sets derive from COMMAND_REGISTRY (W1-T2)', () => {
     const derived = REGISTRY.filter((c) => !c.routingAlias).map((c) => c.name).sort();
     expect(derived).toEqual(['help', 'kill-session', 'new', 'sessions', 'status']);
   });
-  it('ROUTING_ALIAS_COMMANDS membership is unchanged', () => {
+  it('ROUTING_ALIAS_COMMANDS membership no longer includes why (D11)', () => {
     const derived = REGISTRY.filter((c) => c.routingAlias).map((c) => c.name).sort();
-    expect(derived).toEqual(['model', 'reset', 'why']);
+    expect(derived).toEqual(['model', 'reset']);
   });
-  it('ROUTING_MODEL_VERBS membership carries the B26 catalogue verb', () => {
+  it('ROUTING_MODEL_VERBS membership carries the B26 catalogue verb, no longer default (D12)', () => {
     const model = REGISTRY.find((c) => c.name === 'model');
-    expect(model?.subVerbs).toEqual(['status', 'list', 'default', 'strongest', 'fastest']);
+    expect(model?.subVerbs).toEqual(['status', 'list', 'strongest', 'fastest']);
   });
 });
 
@@ -274,11 +272,11 @@ describe('nlRouting flag matrix stays byte-identical (G7/D7)', () => {
     }
   });
   // FLAG ON: recognized grammar is claimed local; unrecognized still forwards (F04).
-  it('flag ON — bare aliases and recognized /model grammar are local', () => {
+  it('flag ON — bare aliases and recognized /model grammar are local; /why always forwards (D11)', () => {
     expect(classifyInput('/model', { routingAliases: true })).toEqual({ type: 'local', command: 'model' });
     expect(classifyInput('/model strongest', { routingAliases: true }))
       .toEqual({ type: 'local', command: 'model', args: 'strongest' });
-    expect(classifyInput('/why', { routingAliases: true })).toEqual({ type: 'local', command: 'why' });
+    expect(classifyInput('/why', { routingAliases: true })).toEqual({ type: 'forwarded', text: '/why' });
     expect(classifyInput('/reset', { routingAliases: true })).toEqual({ type: 'local', command: 'reset' });
   });
   it('flag ON — unrecognized /model 2nd token still forwards (F04 capability preservation)', () => {

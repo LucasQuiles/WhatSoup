@@ -57,7 +57,7 @@ function toListLine(c: CommandSpec): string {
  * one bold-name line per command, tagged with its gate value's list tag
  * (GATE_PRESENTATION — scope-accurate per value, G34; a separate axis from
  * the section, composed independently, D4).
- * Routing-alias commands (/model /why /reset) only appear when `nlRouting`
+ * Routing-alias commands (/model /reset — D11 dropped /why) only appear when `nlRouting`
  * is on (byte-identical-off contract, D7). No placeholder/syntax in the list
  * — see module header.
  */
@@ -102,7 +102,7 @@ export function renderHelp({ nlRouting }: { nlRouting: boolean }): string {
  * first whitespace token, backticks removed, leading '/' stripped, lowercased
  * — so '/help Status', '/help /new', '/help kill-session 1' all resolve.
  * Takes the same `nlRouting` input renderHelp does: routing-alias commands
- * (/model /why /reset) are LOCAL only when the flag is on (byte-identical-off
+ * (/model /reset — D11 dropped /why) are LOCAL only when the flag is on (byte-identical-off
  * contract, D7) — flag off they forward, so their local semantics must not
  * render; they get an honest pass-through note instead (B23 — the command
  * DOES forward, so calling it "Unknown" was a lie). Genuinely-unknown
