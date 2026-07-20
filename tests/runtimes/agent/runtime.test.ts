@@ -15478,15 +15478,40 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(events.some((e) => e.event === 'runtime_selected' && e.source === 'user' && e.reasonCode === 'user_pin')).toBe(true);
   });
 
-  it('group preferences are per-sender: A sets, B is unaffected', async () => {
+  it('group preferences are chat-scoped on READ (D13 read-collapse): A sets, B sees the same active preference', async () => {
+    // D13/D13a: the store still WRITES per-sender (the row below is still
+    // keyed to SENDER_A — that part of the contract is unchanged), but the
+    // runtime READ is now chat-scoped last-writer-wins, so sender B's own
+    // /model status reflects A's pin as the chat's active preference rather
+    // than "none". (Pre-D13 this test asserted 'Preference: none' for B —
+    // that was the old per-sender READ contract; the owner chose
+    // last-writer-wins for the read side. The render copy still says "for
+    // you", which is now imprecise for a non-authoring viewer — a rendering
+    // nuance out of scope for this read-collapse change.)
     const { runtime, sentMessages } = makeRoutingRuntime();
     await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_A, isGroup: true, content: '/model strongest' }));
     await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_B, isGroup: true, content: '/model status', messageId: 'msg-2' }));
     const bStatus = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
-    expect(bStatus).toContain('Preference: none');
+    expect(bStatus).toContain('Preference: strongest for you in this chat');
+    // WRITE stays per-sender — unchanged (only the read collapsed).
     const rows = prefRows();
     expect(rows).toHaveLength(1);
     expect(rows[0].sender_jid).toBe(SENDER_A);
+  });
+
+  it('D13: a chat-scoped pin steers a DIFFERENT sender turn to the same route (read-collapse at spawn)', async () => {
+    // Mirrors 'a routable pin steers the NEXT session spawn' above, but the
+    // pin is set by SENDER_A and the spawning turn is SENDER_B's — proving
+    // resolveRouteForTurn (via loadSenderPreference) is now chat-scoped, not
+    // just the /model status render.
+    cfgAny().agentFallbacks = [{ provider: 'codex-cli' }];
+    const first = makeRoutingRuntime();
+    await sendAndDrain(first.runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_A, isGroup: true, content: '/model codex-cli' }));
+    const { runtime } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_B, isGroup: true, content: 'hello there', messageId: 'msg-2' }));
+    const opts = capturedSessionManagerOptsRef.current as unknown as { provider?: string; model?: string };
+    expect(opts).not.toBeNull();
+    expect(opts?.provider).toBe('codex-cli');
   });
 
   it('a blocked pin gets ONE visible notice per transition, default route, pin survives', async () => {

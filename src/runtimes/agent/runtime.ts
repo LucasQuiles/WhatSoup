@@ -92,8 +92,9 @@ import {
   ensureChatPreferenceSchema,
   getPreference,
   setPreference,
-  clearPreference,
   pruneExpired,
+  getLatestChatPreference,
+  clearChatPreference,
   type ChatModelPreference,
   type PreferenceIntent,
 } from './chat-preference-db.ts';
@@ -8244,15 +8245,22 @@ export class AgentRuntime implements Runtime {
   /**
    * Canonical-keyed preference read with fail-open (C3): owns key derivation
    * (preferenceKeys) AND the fail-open contract, so every reader — the spawn
-   * path, /model status, and /why — degrades identically on a store error
-   * (warn + treat as no preference) instead of one path throwing out of a
-   * read-only command. A preference read failure must never surface as an
-   * error or drop a turn.
+   * path and /model status — degrades identically on a store error (warn +
+   * treat as no preference) instead of one path throwing out of a read-only
+   * command. A preference read failure must never surface as an error or
+   * drop a turn.
+   *
+   * D13/D13a (2026-07-20): chat-scoped, last-writer-wins — reads the LATEST
+   * non-expired pin across every sender in the chat via
+   * getLatestChatPreference, not just this senderJid's own row. WRITES stay
+   * per-sender (setPreference/recordRoutePreference), so senderJid is still
+   * needed here for canonicalization (preferenceKeys) even though the read
+   * itself no longer filters by sender.
    */
   private loadSenderPreference(chatJid: string, senderJid: string): ChatModelPreference | null {
     try {
-      const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, senderJid);
-      return getPreference(this.db, chatKey, senderKey);
+      const { chatKey } = preferenceKeys(this.db, chatJid, senderJid);
+      return getLatestChatPreference(this.db, chatKey);
     } catch (err) {
       log.warn({ err, instance: this.instanceName }, 'preference read failed - routing on default');
       return null;
@@ -8407,9 +8415,15 @@ export class AgentRuntime implements Runtime {
 
   /** Store clear + route event without the reply echo. The NL typed-intent
    *  path acknowledges through the agent's own reply (prompt contract), so
-   *  a runtime echo on top would double-message. */
+   *  a runtime echo on top would double-message.
+   *
+   *  D13: chat-scoped clear — pairs with the chat-scoped read, so /reset
+   *  removes every sender's row for the chat, not just the caller's own.
+   *  senderKey is unused here now (kept in the signature — callers still
+   *  derive it via preferenceKeys for the write paths they share it with). */
   private clearRoutePreferenceSilent(chatJid: string, chatKey: string, senderKey: string): void {
-    clearPreference(this.db, chatKey, senderKey);
+    void senderKey;
+    clearChatPreference(this.db, chatKey);
     this.emitRouteEventChecked({
       event: 'model_preference_cleared',
       conversationKey: toConversationKey(chatJid),
