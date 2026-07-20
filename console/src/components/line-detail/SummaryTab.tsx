@@ -13,6 +13,7 @@ import { Button } from '../primitives/Button'
 import { Card, InlineEdit } from '../primitives'
 import { PipelineNode, PipelineArrow } from './PipelineTab'
 import { ProvidersKeysCard } from './ProvidersKeysCard'
+import { RateLimitsCard } from './RateLimitsCard'
 import {
   buildConfigEntries,
   TYPE_COLOR,
@@ -197,6 +198,19 @@ export function SummaryTab({
         </div>
         </Card>
       </motion.div>
+
+      {/* Row 2.5: Rate Limits — chat-mode only (the chat runtime is the
+          sole writer of the rate_limits/llm_attempts tables; agent and
+          passive modes have no throttle dimension to show). D-5. */}
+      {line.mode === 'chat' && (
+        <motion.div
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4, delay: 0.2, ease: [0.22, 1, 0.36, 1] }}
+        >
+          <RateLimitsCard lineName={line.name} />
+        </motion.div>
+      )}
 
       {/* Row 3: Config + Actions side-by-side */}
       <div className="flex gap-[var(--sp-3)]">
