@@ -141,6 +141,7 @@ import { deriveFleetMessageSparklines } from '../../console/src/lib/metrics-spar
 import { displayInstanceName, formatPhone, formatCompact } from '../../console/src/lib/text-utils';
 import type { FeedEvent, FleetMetrics, LineInstance, Mode } from '../../console/src/types';
 import type { LogEntry } from '../../console/src/types';
+import type { Freshness } from '../../console/src/lib/freshness';
 
 // ---------------------------------------------------------------------------
 // Test data factories + render helper
@@ -181,6 +182,7 @@ interface RenderOptions {
   feedError?: Error | null;
   linesRefetch?: ReturnType<typeof vi.fn>;
   feedRefetch?: ReturnType<typeof vi.fn>;
+  linesFreshness?: Freshness;
   fleetMetrics?: Partial<FleetMetrics> | null;
   logs?: LogEntry[];
   logsError?: Error | null;
@@ -208,6 +210,7 @@ function renderPage(opts: RenderOptions = {}) {
     isError: Boolean(opts.linesError),
     error: opts.linesError ?? null,
     refetch: opts.linesRefetch ?? vi.fn(),
+    freshness: opts.linesFreshness,
   });
   useFeedMock.mockReturnValue({
     data: feed,
@@ -550,6 +553,58 @@ describe('SoupKitchen instance table rendering', () => {
     expect(tag).not.toBeNull();
     // Non-stale rows must not borrow the stale warning styling.
     expect(tag.className).not.toMatch(/text-s-warn/);
+  });
+
+  // ---------------------------------------------------------------------
+  // D-3 universal freshness contract (F-UX-4 residual): the strip must
+  // show HOW MUCH of it is carried data, a stale line must never render a
+  // fresh-green shape, and the strip itself carries the #1925 observedAt
+  // marker.
+  // ---------------------------------------------------------------------
+
+  it('renders the "Carried Health" coverage card counting stale lines (compute-kpis staleExcluded)', () => {
+    const staleA = makeLine({ name: 'carried-a', status: 'online', stale: true });
+    const staleB = makeLine({ name: 'carried-b', status: 'unreachable', stale: true });
+    renderPage({ lines: [...lines, staleA, staleB] });
+    const card = getKpiCard('Carried Health');
+    expect(within(card).getByText('2')).toBeDefined();
+    expect(within(card).getByText(`of ${lines.length + 2}`)).toBeDefined();
+  });
+
+  it('a stale online line never renders the fresh-green disc — warn diamond + carried aria (#1762 label stays)', () => {
+    const staleOnline = makeLine({
+      name: 'carried-online',
+      status: 'online',
+      stale: true,
+      healthObservedAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+    });
+    renderPage({ lines: [staleOnline] });
+    const row = within(tableBody()).getByText(displayInstanceName('carried-online')).closest('tr') as HTMLElement;
+    const cell = tableCell(row, 1);
+    expect(cell.querySelector('.soup-shape--ok')).toBeNull();
+    expect(cell.querySelector('.soup-shape--warn')).not.toBeNull();
+    const shape = cell.querySelector('[role="img"]');
+    expect(shape!.getAttribute('aria-label')).toBe('online, carried forward');
+  });
+
+  it('the KPI strip carries the #1925 observedAt marker — fresh when current, stale-flagged when carried', () => {
+    const fiveMinutesAgo = Date.now() - 5 * 60_000;
+    const { unmount } = renderPage({
+      lines,
+      linesFreshness: { observedAt: fiveMinutesAgo, stale: false } satisfies Freshness,
+    });
+    const freshMarker = screen.getByTitle(/Last successful fleet lines fetch/);
+    expect(freshMarker.textContent).toMatch(/observed.*5m ago/);
+    expect(freshMarker.className).not.toMatch(/text-s-warn/);
+    unmount();
+
+    renderPage({
+      lines,
+      linesFreshness: { observedAt: fiveMinutesAgo, stale: true } satisfies Freshness,
+    });
+    const staleMarker = screen.getByTitle(/Fleet lines carried forward/);
+    expect(staleMarker.textContent).toMatch(/stale.*5m ago/);
+    expect(staleMarker.className).toMatch(/text-s-warn/);
   });
 
   it('renders no age tag when a line has never had a live health observation', () => {
