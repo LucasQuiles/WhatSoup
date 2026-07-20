@@ -943,7 +943,7 @@ landed `ba4ed643`):
   design-lint fixture coverage.
 - **Design-regression suite promotion state**: the section-5 suite has grown 15→16→20 checks
   (checks 1+8 made meaningful `db165001`; CSS tier-boundary checks 17–20 added `64332ce8`).
-  Blocking set live in `design-regression.sh`: `EXIT_ON_FAIL=(1 2 6 8 10 12 13 14 15 16 17 19)` —
+  Blocking set live in `design-regression.sh`: `EXIT_ON_FAIL=(1 2 6 8 10 11 12 13 14 15 16 17 19)` —
   twelve checks fail the run; check 12 promoted after the final focus-suppression carve-out was
   removed, check 15 promoted after the dead `useExitPresence` suppression was removed, and check 17
   promoted after `.c-kpi-hover` moved to `--shadow-hover` and `raw-color-css` ratcheted to zero.
