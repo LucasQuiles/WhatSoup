@@ -63,6 +63,70 @@ describe('PendingSystemResultTracker', () => {
     expect(tracker.blockingCount('chat-a')).toBe(1);
   });
 
+  // A false verdict used to be terminal: the fired timer had already nulled
+  // deadlineTimer, and `if (verdict) this.cancel(...)` has no else-branch, so the
+  // lease stayed blocking forever with nothing left to fire. That is an
+  // instance-wide outage, not a per-chat one — handleResumeFailed awaits
+  // waitUntilEmpty on the global turnChain, behind which every chat's inbound is
+  // serialized. Staying blocked is correct (the teardown was not proven); never
+  // retrying the proof is not.
+  it('re-arms the deadline after an unproven verdict so proof-of-death is retried', async () => {
+    vi.useFakeTimers();
+    const tracker = new PendingSystemResultTracker();
+    const owner = { managerId: 'manager-a', generation: 1, toolScopeKey: 'chat-a#1' };
+    const onTimeout = vi.fn(async (): Promise<boolean> => false);
+    const lease = tracker.mark({
+      scopeKey: 'chat-a',
+      purpose: 'respawn_context',
+      owner,
+      timeoutMs: 25,
+      onTimeout,
+    });
+
+    await vi.advanceTimersByTimeAsync(25);
+    expect(onTimeout).toHaveBeenCalledTimes(1);
+    expect(tracker.blockingCount('chat-a')).toBe(1);
+
+    // The retry the old code never scheduled.
+    await vi.advanceTimersByTimeAsync(100);
+    expect(
+      onTimeout.mock.calls.length,
+      'an unproven teardown must be retried, not abandoned with no timer',
+    ).toBeGreaterThan(1);
+    expect(
+      tracker.blockingCount('chat-a'),
+      'the lease must stay blocking while the teardown remains unproven',
+    ).toBe(1);
+    expect(tracker.peek('chat-a')?.lease.id).toBe(lease.id);
+  });
+
+  it('releases the lease when a retried teardown finally proves closed', async () => {
+    vi.useFakeTimers();
+    const tracker = new PendingSystemResultTracker();
+    const owner = { managerId: 'manager-a', generation: 1, toolScopeKey: 'chat-a#1' };
+    let proven = false;
+    const onTimeout = vi.fn(async (): Promise<boolean> => proven);
+    tracker.mark({
+      scopeKey: 'chat-a',
+      purpose: 'respawn_context',
+      owner,
+      timeoutMs: 25,
+      onTimeout,
+    });
+
+    await vi.advanceTimersByTimeAsync(25);
+    expect(tracker.blockingCount('chat-a')).toBe(1);
+
+    // The tree becomes provably empty — a later census clears the ambiguity.
+    proven = true;
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(
+      tracker.count('chat-a'),
+      'once teardown is proven the lease must be released and the scope unblocked',
+    ).toBe(0);
+  });
+
   it('keeps an expired lease classified and blocking when teardown rejects', async () => {
     vi.useFakeTimers();
     const tracker = new PendingSystemResultTracker();

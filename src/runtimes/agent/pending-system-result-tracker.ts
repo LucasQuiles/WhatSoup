@@ -45,6 +45,11 @@ export interface MarkSystemTurnInput {
   readonly onTimeout?: (lease: SystemTurnLeaseToken) => Promise<boolean | 'retry'>;
 }
 
+/** Ceiling on the proof-of-death retry interval for an unproven teardown. */
+const MAX_UNPROVEN_RETRY_MS = 5 * 60 * 1000;
+/** Cap on the exponent so the backoff computation cannot overflow. */
+const MAX_UNPROVEN_BACKOFF_DOUBLINGS = 10;
+
 interface MutableSystemTurnLease {
   readonly lease: SystemTurnLeaseToken;
   readonly purpose: SystemTurnPurpose;
@@ -52,6 +57,8 @@ interface MutableSystemTurnLease {
   readonly routeChatJid?: string;
   blocking: boolean;
   deadlineTimer: ReturnType<typeof setTimeout> | null;
+  /** Consecutive unproven teardown verdicts; drives the retry backoff. */
+  unprovenAttempts?: number;
 }
 
 interface Waiter {
@@ -343,10 +350,46 @@ export class PendingSystemResultTracker {
         }
         return;
       }
-      if (verdict) this.cancel(entry.lease);
+      if (verdict) {
+        this.cancel(entry.lease);
+        return;
+      }
+      // Unproven teardown. The lease MUST stay classified and blocking — we
+      // cannot assume a process we failed to prove dead is gone. But the fired
+      // timer already nulled deadlineTimer, so without re-arming here nothing
+      // would ever retry the proof and the lease would block its scope forever.
+      // Since handleResumeFailed awaits waitUntilEmpty on the global turnChain,
+      // that orphan can mute an entire instance while it reports healthy.
+      this.rearmUnprovenDeadline(entry, timeoutMs, onTimeout);
     } catch {
-      // Fail closed: an unproven teardown retains both classification and blocking.
+      // Fail closed: an unproven teardown retains both classification and
+      // blocking. Retry the proof anyway — a throwing teardown is no more
+      // permanent than one that returns false.
+      this.rearmUnprovenDeadline(entry, timeoutMs, onTimeout);
     }
+  }
+
+  /**
+   * Re-arm proof-of-death for a lease whose teardown could not be proven,
+   * backing off so a permanently-unprovable tree cannot spin.
+   *
+   * Retry is unbounded by design: the alternative is a lease that blocks its
+   * scope forever, and most census ambiguity is a transient `ps` race or a
+   * mid-exit process that clears on a later read. The backoff cap keeps the
+   * steady-state cost to one probe per scope per interval.
+   */
+  private rearmUnprovenDeadline(
+    entry: MutableSystemTurnLease,
+    timeoutMs: number,
+    onTimeout: (lease: SystemTurnLeaseToken) => Promise<boolean | 'retry'>,
+  ): void {
+    if (!this.isLive(entry) || entry.deadlineTimer !== null) return;
+    entry.unprovenAttempts = (entry.unprovenAttempts ?? 0) + 1;
+    const backoff = Math.min(
+      timeoutMs * 2 ** Math.min(entry.unprovenAttempts, MAX_UNPROVEN_BACKOFF_DOUBLINGS),
+      MAX_UNPROVEN_RETRY_MS,
+    );
+    this.armDeadline(entry, backoff, onTimeout);
   }
 
   private isLive(entry: MutableSystemTurnLease): boolean {
