@@ -29,9 +29,11 @@ export function fallbackRequiresIndependentProbe(
 }
 
 /**
- * Resolve the providerConfig an inbound fallback entry should inherit. A
- * fallback into the agent's own provider (or a managed API sibling) inherits the
- * agent's providerConfig; everything else resolves from its own entry config.
+ * Resolve the providerConfig a fallback execution should receive. OpenCode
+ * fallbacks inherit all shared settings except the primary route's custom
+ * endpoint fields; those fields would select the primary credential lane and
+ * suppress the fallback entry's model argument. Same-provider native routes
+ * and managed API siblings keep full inheritance.
  */
 export function fallbackProviderConfigFor(
   provider: string | undefined,
@@ -39,6 +41,11 @@ export function fallbackProviderConfigFor(
   agentProviderConfig: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
   if (provider === undefined) return undefined;
+  if (provider === 'opencode-cli') {
+    if (!agentProviderConfig) return undefined;
+    const { baseUrl: _baseUrl, apiKeyService: _apiKeyService, ...rest } = agentProviderConfig;
+    return rest;
+  }
   if (provider === agentProvider) return agentProviderConfig;
   if (provider === 'openai-api' || provider === 'anthropic-api') return agentProviderConfig;
   return undefined;

@@ -144,6 +144,7 @@ describe('SessionManager spawn-per-turn child handlers (opencode-cli)', () => {
       chatJid: CHAT_JID,
       onEvent: vi.fn(),
       provider: 'opencode-cli',
+      model: 'glm/test-model',
       notifyUser,
       onCrash,
       ...extra,

@@ -304,6 +304,20 @@ describe('AgentRuntime startup MCP config dual-write', () => {
     );
   });
 
+  it('fails runtime startup closed when the OpenCode config target is a symlink', async () => {
+    const cwd = tmp();
+    const decoyDir = tmp();
+    symlinkSync(join(decoyDir, 'decoy-opencode.json'), join(cwd, 'opencode.json'));
+    mockConfig.agentProvider = 'opencode-cli';
+
+    await expect(startRuntime(cwd, 'glm/glm-5.2'))
+      .rejects.toThrow(/OpenCode configuration.*non-symlink/i);
+    expect(mockRuntimeLogger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error) }),
+      'failed to initialize global MCP socket resources',
+    );
+  });
+
   it('writes .mcp.json for a claude fallback when the primary is openai-api', async () => {
     const cwd = tmp();
     mockConfig.agentProvider = 'openai-api';
@@ -517,41 +531,26 @@ describe('opencode MCP config write hardening', () => {
     return dir;
   }
 
-  it('warns on corrupt user opencode.json, overwrites from a fresh base, and proceeds', () => {
+  it('fails closed on corrupt user opencode.json without logging or overwriting it', () => {
     const dir = tmp();
     const target = join(dir, 'opencode.json');
     writeFileSync(target, '{ not json');
-    let fileAtWarn = '';
-    mockRuntimeLogger.warn.mockImplementationOnce(() => {
-      fileAtWarn = readFileSync(target, 'utf8');
-    });
 
-    const written = writeProviderMcpConfig('opencode-cli', dir, socketPath, proxyScript);
-
-    expect(written).toBe(target);
-    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
-      expect.objectContaining({ target }),
-      expect.stringContaining('failed to parse existing opencode.json'),
-    );
-    expect(fileAtWarn).toBe('{ not json');
-    const parsed = readJson(target);
-    expect((parsed.mcp as Record<string, unknown>).whatsoup).toBeDefined();
+    expect(() => writeProviderMcpConfig('opencode-cli', dir, socketPath, proxyScript))
+      .toThrow('Existing OpenCode configuration must be a valid JSON object');
+    expect(mockRuntimeLogger.warn).not.toHaveBeenCalled();
+    expect(readFileSync(target, 'utf8')).toBe('{ not json');
   });
 
-  it('skips symlinked opencode.json with a warning and does not throw', () => {
+  it('fails closed on symlinked opencode.json without touching the target', () => {
     const dir = tmp();
     const decoyDir = tmp();
     const decoyTarget = join(decoyDir, 'attacker-opencode.json');
     symlinkSync(decoyTarget, join(dir, 'opencode.json'));
 
-    const written = writeProviderMcpConfig('opencode-cli', dir, socketPath, proxyScript);
-
-    expect(written).toBeNull();
+    expect(() => writeProviderMcpConfig('opencode-cli', dir, socketPath, proxyScript))
+      .toThrow(/OpenCode configuration.*non-symlink/i);
     expect(existsSync(decoyTarget)).toBe(false);
-    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
-      expect.objectContaining({ target: join(dir, 'opencode.json') }),
-      expect.stringContaining('skipping opencode MCP config write'),
-    );
   });
 
   it('removes the managed whatsoup-cloud provider (including its apiKey) and model when baseUrl is no longer configured', () => {

@@ -47,7 +47,7 @@ export type AgentEvent =
   | { type: 'compact_boundary' }
   | { type: 'assistant_text'; text: string; itemId?: string; complete?: boolean }
   | { type: 'tool_use'; toolName: string; toolId: string; toolInput: Record<string, unknown> }
-  | { type: 'tool_result'; isError: boolean; toolId: string; content: string }
+  | { type: 'tool_result'; isError: boolean; toolId: string; toolName?: string; content: string }
   | {
       type: 'result';
       text: string | null;
