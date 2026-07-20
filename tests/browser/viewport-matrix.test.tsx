@@ -81,7 +81,10 @@ import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ToastContext } from '../../console/src/hooks/toast-context';
 import type { ToastContextValue } from '../../console/src/hooks/toast-context';
-import type { LineInstance } from '../../console/src/types';
+import type { LineInstance, ChatItem, Message } from '../../console/src/types';
+import Nav from '../../console/src/components/Nav';
+import { SummaryTab } from '../../console/src/components/line-detail/SummaryTab';
+import { HistoryTab } from '../../console/src/components/line-detail/HistoryTab';
 import '../../console/src/index.css';
 
 // ---------------------------------------------------------------------------
@@ -772,5 +775,184 @@ describe('Drawer squeeze flip — container query at 900px (DD-18r)', () => {
     }
     const display = window.getComputedStyle(scrim).display;
     expect(display).toBe('none');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RAIL collapse suite (DD-18r leg 1 — nav width pressure beyond label hiding)
+//
+// The rail collapse is a VIEWPORT media query (@media (max-width: 760px),
+// primitives.css) — proven via page.viewport, mirroring the Fleet lg-flip
+// rows. Nav needs no hook mocks: useRealtime has a default context value and
+// useTheme is provider-free (localStorage + document).
+// ---------------------------------------------------------------------------
+
+describe('Viewport matrix — rail collapse (DD-18r leg 1)', () => {
+  it('rail is full width (220px) with visible labels at 761px viewport', async () => {
+    await page.viewport(761, 800);
+    const { container } = await render(
+      <MemoryRouter><Nav /></MemoryRouter>,
+    );
+    const rail = container.querySelector('.soup-rail') as HTMLElement;
+    expect(rail).not.toBeNull();
+    expect(window.getComputedStyle(rail).width).toBe('220px');
+    const label = container.querySelector('.soup-rail__label') as HTMLElement;
+    expect(label).not.toBeNull();
+    // sr-only clip recipe is NOT applied above the breakpoint
+    expect(window.getComputedStyle(label).clipPath ?? '').not.toContain('rect(0px, 0px, 0px, 0px)');
+    expect(window.getComputedStyle(label).position).not.toBe('absolute');
+  });
+
+  it('rail collapses to 64px with sr-only labels at 760px viewport', async () => {
+    await page.viewport(760, 800);
+    const { container } = await render(
+      <MemoryRouter><Nav /></MemoryRouter>,
+    );
+    const rail = container.querySelector('.soup-rail') as HTMLElement;
+    expect(rail).not.toBeNull();
+    expect(window.getComputedStyle(rail).width).toBe('64px');
+    const label = container.querySelector('.soup-rail__label') as HTMLElement;
+    expect(label).not.toBeNull();
+    // The visually-hidden recipe: absolute + clipped box (meaning carried by icon + aria)
+    expect(window.getComputedStyle(label).position).toBe('absolute');
+    expect(window.getComputedStyle(label).overflow).toBe('hidden');
+  });
+
+  it('at short height (1440×500) the nav region owns the scroll and the dock stays mounted', async () => {
+    await page.viewport(1440, 500);
+    const { container } = await render(
+      <MemoryRouter><Nav /></MemoryRouter>,
+    );
+    const scroll = container.querySelector('.soup-rail__scroll') as HTMLElement;
+    expect(scroll).not.toBeNull();
+    expect(window.getComputedStyle(scroll).overflowY).toBe('auto');
+    expect(window.getComputedStyle(scroll).minHeight).toBe('0px');
+    expect(container.querySelector('.soup-rail__dock')).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SIDE-PANEL FOLD suite (DD-18r leg 2 — non-Fleet side-panel law)
+//
+// Both folds are CONTAINER queries (primitives.css side-panel fold band) —
+// proven via the wrapper-width technique (d7-investigation §6.9), mirroring
+// the drawer-squeeze rows above.
+//   SummaryTab Row 3:  @container (max-width: 599px) → stack + full-width panel
+//   HistoryTab split:  @container (max-width: 639px) → stack + full-width
+//                      capped chat list
+// ---------------------------------------------------------------------------
+
+const foldLine: LineInstance = {
+  name: 'fold-line',
+  phone: '+15551234567',
+  mode: 'agent',
+  status: 'online',
+  accessMode: 'allowlist',
+  healthPort: 9000,
+  uptime: '1h',
+  messagesTotal: 0,
+  health: {
+    status: 'ok',
+    uptime_seconds: 3600,
+    messages_total: 0,
+    whatsapp: { connection: { state: 'connected' } },
+    sqlite: { messages_total: 0, schema_version: 1 },
+  } as LineInstance['health'],
+  heartbeat: ['up'],
+  lastActive: 'just now',
+  error: null,
+};
+
+const foldChats: ChatItem[] = [
+  { conversationKey: '15550000001@s.whatsapp.net', displayName: 'One', lastMessageAt: null, lastMessagePreview: null, unreadCount: 0, isGroup: false } as unknown as ChatItem,
+  { conversationKey: '15550000002@s.whatsapp.net', displayName: 'Two', lastMessageAt: null, lastMessagePreview: null, unreadCount: 0, isGroup: false } as unknown as ChatItem,
+];
+
+function wrapSummaryTab(containerWidthPx: number) {
+  return (
+    <QueryClientProvider client={makeQC()}>
+      <ToastContext.Provider value={{ toast: vi.fn(), success: vi.fn(), error: vi.fn(), info: vi.fn(), dismiss: vi.fn(), clear: vi.fn() }}>
+        <div style={{ width: `${containerWidthPx}px`, overflow: 'hidden' }}>
+          <SummaryTab line={foldLine} onEditConfig={() => {}} onChangeMode={() => {}} />
+        </div>
+      </ToastContext.Provider>
+    </QueryClientProvider>
+  );
+}
+
+function wrapHistoryTab(containerWidthPx: number) {
+  return (
+    <QueryClientProvider client={makeQC()}>
+      <ToastContext.Provider value={{ toast: vi.fn(), success: vi.fn(), error: vi.fn(), info: vi.fn(), dismiss: vi.fn(), clear: vi.fn() }}>
+        <div style={{ width: `${containerWidthPx}px`, height: '600px', overflow: 'hidden' }}>
+          <HistoryTab
+            chats={foldChats}
+            messages={[] as Message[]}
+            selectedChat={null}
+            onSelectChat={() => {}}
+            mode="chat"
+            lineName="fold-line"
+            typingJids={new Set()}
+          />
+        </div>
+      </ToastContext.Provider>
+    </QueryClientProvider>
+  );
+}
+
+describe('Viewport matrix — side-panel fold (DD-18r leg 2)', () => {
+  it('SummaryTab Row 3 stacks (flex-direction: column) with a full-width actions panel at 599px container', async () => {
+    await page.viewport(1440, 900);
+    const { container } = await render(wrapSummaryTab(599));
+    const row = container.querySelector('.soup-summary-split__row') as HTMLElement;
+    expect(row).not.toBeNull();
+    expect(window.getComputedStyle(row).flexDirection).toBe('column');
+    const panel = container.querySelector('.soup-summary-split__panel') as HTMLElement;
+    expect(panel).not.toBeNull();
+    expect(window.getComputedStyle(panel).width).toBe(window.getComputedStyle(row).width);
+  });
+
+  it('SummaryTab Row 3 is side-by-side (row) with the 260px actions panel at 600px container', async () => {
+    await page.viewport(1440, 900);
+    const { container } = await render(wrapSummaryTab(600));
+    const row = container.querySelector('.soup-summary-split__row') as HTMLElement;
+    expect(row).not.toBeNull();
+    expect(window.getComputedStyle(row).flexDirection).toBe('row');
+    const panel = container.querySelector('.soup-summary-split__panel') as HTMLElement;
+    expect(panel).not.toBeNull();
+    expect(window.getComputedStyle(panel).width).toBe('260px');
+  });
+
+  it('HistoryTab chat list folds full-width and capped at 639px container', async () => {
+    await page.viewport(1440, 900);
+    const { container } = await render(wrapHistoryTab(639));
+    const row = container.querySelector('.soup-history-split__row') as HTMLElement;
+    expect(row).not.toBeNull();
+    expect(window.getComputedStyle(row).flexDirection).toBe('column');
+    const list = container.querySelector('.soup-history-split__list') as HTMLElement;
+    expect(list).not.toBeNull();
+    // The list fills the row's CONTENT box — the row carries c-border (1px
+    // hairlines), so outer row width minus the border widths is the honest
+    // full-width expectation (637px at the 639px container, not 639px).
+    const rowStyle = window.getComputedStyle(row);
+    const expectedWidth = 639
+      - Number.parseFloat(rowStyle.borderLeftWidth)
+      - Number.parseFloat(rowStyle.borderRightWidth);
+    expect(Number.parseFloat(window.getComputedStyle(list).width)).toBeCloseTo(expectedWidth, 0);
+    // Browsers resolve dvh to px in computed style — assert the resolved
+    // cap is 40% of the viewport height (900px here), never the raw token.
+    const maxH = Number.parseFloat(window.getComputedStyle(list).maxHeight);
+    expect(maxH).toBeCloseTo(0.4 * 900, 0);
+  });
+
+  it('HistoryTab split is side-by-side with the 288px chat list at 640px container', async () => {
+    await page.viewport(1440, 900);
+    const { container } = await render(wrapHistoryTab(640));
+    const row = container.querySelector('.soup-history-split__row') as HTMLElement;
+    expect(row).not.toBeNull();
+    expect(window.getComputedStyle(row).flexDirection).toBe('row');
+    const list = container.querySelector('.soup-history-split__list') as HTMLElement;
+    expect(list).not.toBeNull();
+    expect(window.getComputedStyle(list).width).toBe('288px');
   });
 });
