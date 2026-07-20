@@ -129,13 +129,15 @@ export function writePrivateFileSync(
  * Atomically replace a private file with a mode-0600 payload.
  *
  * The sibling temp is collision-resistant and opened exclusively with
- * O_NOFOLLOW, then fsynced before rename. After rename, a best-effort parent
- * directory fsync asks supported filesystems to persist the new entry.
+ * O_NOFOLLOW, then fsynced before rename. After rename the parent directory is
+ * fsynced; by default that fsync is best-effort, and callers that must prove
+ * the rename is crash-durable can require it to succeed.
  */
 export function writeAtomicPrivateFileSync(
   filePath: string,
   data: string | Buffer,
   label = 'private file',
+  directoryFsync: 'best-effort' | 'required' = 'best-effort',
 ): void {
   const dir = dirname(filePath);
   forceEnsurePrivateDirectorySync(dir, `${label} directory`);
@@ -170,7 +172,8 @@ export function writeAtomicPrivateFileSync(
     assertWritablePrivateFileSync(filePath, label);
     renameSync(tmpPath, filePath);
     tempCreated = false;
-    fsyncDirectory(dir);
+    if (directoryFsync === 'required') fsyncDirectoryRequired(dir);
+    else fsyncDirectory(dir);
   } catch (err) {
     if (fd !== null) {
       try { closeSync(fd); } catch { /* preserve the original failure */ }
@@ -341,22 +344,38 @@ export function assertWritablePrivateFileSync(filePath: string, label = 'private
   }
 }
 
+export interface PrivateJsonMarkerWriteOptions {
+  /** Label used in target-path refusal errors. Defaults to "marker". */
+  label?: string;
+  /** Require the containing-directory fsync to succeed. Defaults to best-effort. */
+  directoryFsync?: 'best-effort' | 'required';
+}
+
 /**
  * Atomically write a private JSON marker file (mode 0600) with TOCTOU-resistant
  * symlink refusal. The marker directory is created (recursive, 0o700) and
  * force-chmodded, then the payload is written to a temp file in the same
- * directory, fsynced, and renamed over the target. The directory is fsynced
- * (best-effort) so the rename survives a crash. The target is re-asserted both
- * before the temp write and immediately before the rename to close the TOCTOU
- * window. On any failure the temp file is cleaned up.
+ * directory, forced to mode 0600, fsynced, and renamed over the target. The
+ * directory is fsynced after publication; callers that must prove rollback
+ * intent is crash-durable can require that fsync to succeed. The target is
+ * re-asserted both before the temp write and immediately before the rename to
+ * close the TOCTOU window. On any failure the temp file is cleaned up.
  *
- * Behavior matches the original `writePrivateJsonMarker` lane in
- * connection.ts (atomic tmp-write → fsync → rename → chmod 0600 → dir fsync;
- * O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW). The serialized payload is
- * `JSON.stringify(value, null, 2) + '\n'`.
+ * No fallible target operation runs after rename in best-effort mode, so a
+ * reported failure means the new payload was not published. The serialized
+ * payload is `JSON.stringify(value, null, 2) + '\n'`.
  */
-export function writePrivateJsonMarkerSync(filePath: string, value: unknown): void {
-  writeAtomicPrivateFileSync(filePath, JSON.stringify(value, null, 2) + '\n', 'marker');
+export function writePrivateJsonMarkerSync(
+  filePath: string,
+  value: unknown,
+  options: PrivateJsonMarkerWriteOptions = {},
+): void {
+  writeAtomicPrivateFileSync(
+    filePath,
+    JSON.stringify(value, null, 2) + '\n',
+    options.label ?? 'marker',
+    options.directoryFsync,
+  );
 }
 
 /**
@@ -439,13 +458,33 @@ export function forceEnsurePrivateDirectorySync(dirPath: string, label: string):
  * crash-survival guarantee where the platform supports it. Errors are swallowed.
  */
 export function fsyncDirectory(path: string): void {
+  try {
+    fsyncDirectoryRequired(path);
+  } catch {
+    // Directory fsync is best-effort on some filesystems.
+  }
+}
+
+function fsyncDirectoryRequired(path: string): void {
   let fd: number | null = null;
+  let failure: unknown;
+  let failed = false;
   try {
     fd = openSync(path, 'r');
     fsyncSync(fd);
-  } catch {
-    // Directory fsync is best-effort on some filesystems.
-  } finally {
-    if (fd !== null) closeSync(fd);
+  } catch (error) {
+    failure = error;
+    failed = true;
   }
+  if (fd !== null) {
+    try {
+      closeSync(fd);
+    } catch (error) {
+      if (!failed) {
+        failure = error;
+        failed = true;
+      }
+    }
+  }
+  if (failed) throw failure;
 }
