@@ -188,7 +188,9 @@ describe('probeModelCatalog', () => {
 // Same `<binary> models` spawn + 5 s kill-timer discipline as probeModelCatalog,
 // but returns the FULL id list (not a found/not_found verdict) for the /config
 // model catalogue render. Honest-degrade contract (CONFIG-SURFACE-MAP.md #4):
-// anything that isn't a clean close with ≥1 id → { status: 'unavailable', ids: [] }
+// anything that isn't a clean close with ≥1 id → { status: 'unavailable', reason }
+// where reason ∈ spawn-error | timeout | empty (Q 2b#3: a timeout must not read
+// as an empty catalogue).
 // so the render says "catalogue unavailable (as of …)", never a fake/stale list.
 
 describe('listModelCatalog', () => {
@@ -223,22 +225,22 @@ describe('listModelCatalog', () => {
 
   it('returns unavailable when the catalog command produces no output', async () => {
     const result = await listModelCatalog('opencode', makeSpawnImpl({ stdoutChunks: [] }));
-    expect(result).toStrictEqual({ status: 'unavailable', ids: [] });
+    expect(result).toStrictEqual({ status: 'unavailable', reason: 'empty' });
   });
 
   it('returns unavailable when stdout is only whitespace', async () => {
     const result = await listModelCatalog('opencode', makeSpawnImpl({ stdoutChunks: ['\n   \n\n'] }));
-    expect(result).toStrictEqual({ status: 'unavailable', ids: [] });
+    expect(result).toStrictEqual({ status: 'unavailable', reason: 'empty' });
   });
 
   it('returns unavailable on an ENOENT spawn error', async () => {
     const result = await listModelCatalog('opencode', makeSpawnImpl({ errorCode: 'ENOENT' }));
-    expect(result).toStrictEqual({ status: 'unavailable', ids: [] });
+    expect(result).toStrictEqual({ status: 'unavailable', reason: 'spawn-error' });
   });
 
   it('returns unavailable on a non-ENOENT spawn error', async () => {
     const result = await listModelCatalog('opencode', makeSpawnImpl({ errorCode: 'EACCES' }));
-    expect(result).toStrictEqual({ status: 'unavailable', ids: [] });
+    expect(result).toStrictEqual({ status: 'unavailable', reason: 'spawn-error' });
   });
 
   it('returns unavailable and kills the child when the listing times out', async () => {
@@ -249,7 +251,7 @@ describe('listModelCatalog', () => {
     const listPromise = listModelCatalog('opencode', spawnImpl);
     await vi.advanceTimersByTimeAsync(5_001);
 
-    expect(await listPromise).toStrictEqual({ status: 'unavailable', ids: [] });
+    expect(await listPromise).toStrictEqual({ status: 'unavailable', reason: 'timeout' });
     expect(fakeChild.kill).toHaveBeenCalled();
     vi.useRealTimers();
   });
@@ -263,7 +265,7 @@ describe('listModelCatalog', () => {
 
     await expect(listModelCatalog('opencode', throwingSpawnImpl)).resolves.toStrictEqual({
       status: 'unavailable',
-      ids: [],
+      reason: 'spawn-error',
     });
   });
 });
