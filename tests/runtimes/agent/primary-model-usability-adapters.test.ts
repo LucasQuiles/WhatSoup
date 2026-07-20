@@ -79,6 +79,81 @@ describe('createPrimaryModelProbeAdapters', () => {
     );
   });
 
+  it('threads the egress proxy port (UPPER + lower case) into the Claude CLI probe env (F6)', async () => {
+    // An opted-in instance's model/recovery probe must egress through the same
+    // allowlist proxy as a real turn, not unproxied. deps.egressProxyPort is
+    // threaded from the runtime's `this.egressProxy?.port`.
+    const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      getProviderBinary: vi.fn(() => 'claude'),
+      probeBinaryCommand,
+      egressProxyPort: 4321,
+    });
+
+    await adapters.probeBinaryModel?.({ provider: 'claude-cli', model: 'claude-opus-4-8' });
+
+    expect(probeBinaryCommand).toHaveBeenCalledWith(
+      'claude',
+      expect.any(Array),
+      expect.objectContaining({
+        HTTP_PROXY: 'http://127.0.0.1:4321',
+        HTTPS_PROXY: 'http://127.0.0.1:4321',
+        NO_PROXY: 'localhost,127.0.0.1',
+        http_proxy: 'http://127.0.0.1:4321',
+        https_proxy: 'http://127.0.0.1:4321',
+        no_proxy: 'localhost,127.0.0.1',
+      }),
+      expect.objectContaining({ timeoutMs: 15_000 }),
+    );
+  });
+
+  it('omits proxy vars from the Claude CLI probe env when no egress proxy port is set (F6)', async () => {
+    // Typed params (matching probeBinaryCommand's signature) so `.mock.calls[0][2]`
+    // — the env arg — is index-checkable under typecheck:all (strict tuple).
+    const probeBinaryCommand = vi.fn(
+      async (_binary: string, _args: string[], _env: NodeJS.ProcessEnv) => ({ status: 'ok' as const, output: 'OK' }),
+    );
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      getProviderBinary: vi.fn(() => 'claude'),
+      probeBinaryCommand,
+    });
+
+    await adapters.probeBinaryModel?.({ provider: 'claude-cli', model: 'claude-opus-4-8' });
+
+    const env = probeBinaryCommand.mock.calls[0]?.[2] ?? {};
+    expect(env).not.toHaveProperty('HTTP_PROXY');
+    expect(env).not.toHaveProperty('http_proxy');
+    expect(env).not.toHaveProperty('HTTPS_PROXY');
+    expect(env).not.toHaveProperty('https_proxy');
+  });
+
+  it('threads the egress proxy port into the OpenCode probe env via buildChildEnv baseOpts (F6)', async () => {
+    // OpenCode builds its env through the real buildChildEnv; passing
+    // egressProxyPort in baseOpts must surface the proxy vars (cross-checks F4
+    // lowercase wiring through the shared builder).
+    const probeBinaryCommand = vi.fn(async () => ({
+      status: 'ok' as const,
+      output: '{"type":"message","role":"assistant","content":"OK"}',
+    }));
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      getProviderBinary: vi.fn(() => 'opencode'),
+      probeBinaryCommand,
+      egressProxyPort: 4321,
+    });
+
+    await adapters.probeBinaryModel?.({ provider: 'opencode-cli', model: 'openai/some-model' });
+
+    expect(probeBinaryCommand).toHaveBeenCalledWith(
+      'opencode',
+      expect.any(Array),
+      expect.objectContaining({
+        HTTP_PROXY: 'http://127.0.0.1:4321',
+        http_proxy: 'http://127.0.0.1:4321',
+      }),
+      expect.objectContaining({ timeoutMs: 15_000 }),
+    );
+  });
+
   it('runs the file-store credential heal before a claude-cli probe, but not for opencode-cli', async () => {
     const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
     const ensureClaudeFileStoreCredential = vi.fn(() => ({ outcome: 'skipped-file-store-current' as const }));

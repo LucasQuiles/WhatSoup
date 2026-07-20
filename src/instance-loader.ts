@@ -36,6 +36,8 @@ interface AgentOptionsSandbox {
   allowedTools?: unknown;
   allowedMcpTools?: unknown;
   bash?: unknown;
+  /** Opt-in egress allowlist (#1607); passthrough only — see runtime.ts SandboxPolicy. */
+  allowedEgress?: unknown;
 }
 
 interface AgentOptions {
