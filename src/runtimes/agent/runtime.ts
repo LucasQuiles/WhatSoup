@@ -236,6 +236,37 @@ interface LegacyProviderTurnOwner {
   readonly routeChatJid: string;
 }
 
+/**
+ * A per-chat mapKey held closed because the previous session's process tree
+ * could not be proven empty. Spawning onto a quarantined mapKey would risk two
+ * live agents on one chat (double sends, cross-delivery), so the gate is
+ * fail-closed; it releases only on proof of death, never on a timer.
+ */
+interface ChatQuarantineRecord {
+  readonly mapKey: string;
+  /** Refusal text from the failed teardown — carried for operator triage. */
+  readonly reason: string;
+  /** Epoch ms the quarantine opened; drives stall age. */
+  readonly since: number;
+  /** The SessionManager whose tree is unproven; retried for proof of death. */
+  readonly session: SessionManager;
+  /** Release attempts so far — lets escalation be bounded and observable. */
+  attempts: number;
+  /** Epoch ms of the last release attempt, or null before the first. */
+  lastAttemptAt: number | null;
+}
+
+/** A quarantined chat is reported stalled once it has been closed this long. */
+const CHAT_STALL_ALERT_MS = envPositiveIntPreDecl('WHATSOUP_CHAT_STALL_MS', 5 * 60 * 1000); // 5m
+/** How often to retry proof-of-death on quarantined chats. */
+const QUARANTINE_SWEEP_INTERVAL_MS = envPositiveIntPreDecl('WHATSOUP_QUARANTINE_SWEEP_MS', 60_000); // 1m
+
+/** Local duplicate of envPositiveInt — declared before its const-hoisted sibling below. */
+function envPositiveIntPreDecl(key: string, fallback: number): number {
+  const raw = Number(process.env[key]);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback;
+}
+
 /** Maximum duration (ms) a control session is allowed to run before force-shutdown. */
 const CONTROL_SESSION_TIMEOUT_MS = 15 * 60 * 1000;
 
@@ -841,10 +872,23 @@ export class AgentRuntime implements Runtime {
    * queue or mutable current-chat field.
    */
   private readonly legacyProviderTurnOwners = new Map<string, LegacyProviderTurnOwner>();
+  /**
+   * Per-mapKey quarantine. The invariant it enforces: no new session may bind to
+   * a mapKey until the previous process tree is proven empty.
+   *
+   * Before this existed the invariant was enforced implicitly — by leaving the
+   * dead SessionManager bound in `chatSessions` and keying the gate on that
+   * object. That silently wedged the chat: inbound messages routed to a corpse,
+   * nothing recovered it short of a process restart, and no metric showed it.
+   * The gate is explicit here so the corpse can be unbound (see
+   * `quarantinePerChatMapKey`) and the stall is reportable (`stalledChats`).
+   */
+  private readonly chatQuarantine = new Map<string, ChatQuarantineRecord>();
   private workspaceSweeper: WorkspaceSweeper;
   private queueSweepTimer: ReturnType<typeof setInterval> | null = null;
   private sessionSweepTimer: ReturnType<typeof setInterval> | null = null;
   private zombieSessionSweepTimer: ReturnType<typeof setInterval> | null = null;
+  private quarantineSweepTimer: ReturnType<typeof setInterval> | null = null;
   // Background handoff distiller (flag-gated). The coordinator owns the timer +
   // runner lifecycle; it stays inert when the flag is off OR the model/key fails
   // to resolve. Initialized in the constructor (needs db + instanceName + the
@@ -1562,6 +1606,22 @@ export class AgentRuntime implements Runtime {
     if (this.sessionSweepTimer) return;
     this.sessionSweepTimer = setInterval(() => this.sweepIdleSessions(), SESSION_SWEEP_INTERVAL_MS);
     this.sessionSweepTimer.unref?.();
+  }
+
+  /**
+   * Retry proof-of-death on quarantined chats. Runs far more often than the
+   * other sweeps: every tick a wedged chat stays closed is a tick the user is
+   * getting silence, and the retry is cheap (one re-census per closed chat).
+   */
+  private startQuarantineSweepTimer(): void {
+    if (this.quarantineSweepTimer) return;
+    this.quarantineSweepTimer = setInterval(() => {
+      if (this.chatQuarantine.size === 0) return;
+      this.sweepQuarantinedChats().catch((err) => {
+        log.warn({ err, instanceName: this.instanceName }, 'quarantine sweep failed');
+      });
+    }, QUARANTINE_SWEEP_INTERVAL_MS);
+    this.quarantineSweepTimer.unref?.();
   }
 
   /**
@@ -3571,6 +3631,7 @@ export class AgentRuntime implements Runtime {
     this.startQueueSweepTimer();
     this.startSessionSweepTimer();
     this.startZombieSessionSweepTimer();
+    this.startQuarantineSweepTimer();
     this.handoffDistill.start();
 
     // Restore any pending polls from the previous process so votes-in-flight
@@ -5232,6 +5293,19 @@ export class AgentRuntime implements Runtime {
           { err, runtimeScope, reason },
           'rejected terminal source teardown failed — provider lane remains closed',
         );
+        // Move the closure from "corpse left bound in chatSessions" (invisible,
+        // unrecoverable) to an explicit mapKey quarantine that is retried for
+        // proof of death and reported as a stalled chat.
+        if (runtimeScope === 'per_chat') {
+          const mapKey = logicalOwner?.mapKey ?? this.findMapKeyForSession(sourceSession);
+          if (mapKey) {
+            this.quarantinePerChatMapKey(
+              mapKey,
+              sourceSession,
+              err instanceof Error ? err.message : String(err),
+            );
+          }
+        }
         if (logicalOwner) {
           // shutdown() clears the provider watchdog before process-tree or
           // lifecycle persistence can reject. Settle the exact processor
@@ -5343,6 +5417,89 @@ export class AgentRuntime implements Runtime {
     if (!teardown) return;
     if (await teardown) return;
     throw new Error('REJECTED_TERMINAL_QUARANTINE_FAILED: exact provider source was not proven closed');
+  }
+
+  /**
+   * Close a mapKey after its session's teardown was refused, and unbind the dead
+   * SessionManager from every per-chat map.
+   *
+   * Unbinding is only safe because `chatQuarantine` now carries the gate that
+   * used to be implied by the corpse's presence in `chatSessions` — see
+   * `setOwnedPerChatSession`. Leaving the corpse bound was the 2026-07-19 wedge:
+   * inbound messages routed to a dead session for 14h with no signal.
+   */
+  private quarantinePerChatMapKey(
+    mapKey: string,
+    session: SessionManager,
+    reason: string,
+  ): void {
+    if (this.chatQuarantine.has(mapKey)) return;
+    this.chatQuarantine.set(mapKey, {
+      mapKey,
+      reason,
+      since: Date.now(),
+      session,
+      attempts: 0,
+      lastAttemptAt: null,
+    });
+    this.chatQueues.get(mapKey)?.abortTurn({ preserveEvidence: true });
+    this.chatQueues.delete(mapKey);
+    this.deleteOwnedPerChatSession(mapKey, session);
+    this.cleanupPerChatState(mapKey, { preserveCrashHistory: true });
+    log.error(
+      { mapKey, reason },
+      'chat quarantined — process tree unproven; no session may bind until it is proven empty',
+    );
+  }
+
+  /**
+   * Retry proof-of-death on every quarantined chat; release the ones that can now
+   * be proven empty.
+   *
+   * This is the difference between a 14-hour outage and a one-minute one. The
+   * fail-closed guard is right to refuse an ambiguous kill, but a one-shot
+   * refusal should not be permanent: most ambiguity is a `ps` race or a mid-exit
+   * process that clears on a later census. Chats that stay unprovable keep the
+   * quarantine and surface via `stalledChats`.
+   */
+  private async sweepQuarantinedChats(): Promise<void> {
+    for (const record of [...this.chatQuarantine.values()]) {
+      record.attempts += 1;
+      record.lastAttemptAt = Date.now();
+      try {
+        await record.session.shutdown(false);
+      } catch (err) {
+        log.warn(
+          { err, mapKey: record.mapKey, attempts: record.attempts },
+          'quarantined chat still unprovable — holding closed',
+        );
+        continue;
+      }
+      // Proven empty: retire the teardown poison and reopen the mapKey.
+      this.rejectedTerminalTeardowns.delete(record.session);
+      this.chatQuarantine.delete(record.mapKey);
+      log.info(
+        { mapKey: record.mapKey, attempts: record.attempts, closedForMs: Date.now() - record.since },
+        'chat quarantine released — process tree proven empty',
+      );
+    }
+  }
+
+  /**
+   * Chats that have been silently unable to serve for longer than the alert
+   * threshold. Consumed by the health surface so a wedged chat pages an operator
+   * instead of being discovered by the user days later.
+   */
+  private stalledChats(
+    now: number = Date.now(),
+  ): { mapKey: string; reason: string; ageMs: number; attempts: number }[] {
+    const rows: { mapKey: string; reason: string; ageMs: number; attempts: number }[] = [];
+    for (const record of this.chatQuarantine.values()) {
+      const ageMs = now - record.since;
+      if (ageMs < CHAT_STALL_ALERT_MS) continue;
+      rows.push({ mapKey: record.mapKey, reason: record.reason, ageMs, attempts: record.attempts });
+    }
+    return rows;
   }
 
   private handleRestrictedSystemResult(
@@ -7249,6 +7406,10 @@ export class AgentRuntime implements Runtime {
       clearInterval(this.zombieSessionSweepTimer);
       this.zombieSessionSweepTimer = null;
     }
+    if (this.quarantineSweepTimer) {
+      clearInterval(this.quarantineSweepTimer);
+      this.quarantineSweepTimer = null;
+    }
     this.handoffDistill.shutdown();
     if (this.revertTimer) {
       clearTimeout(this.revertTimer);
@@ -7689,6 +7850,15 @@ export class AgentRuntime implements Runtime {
   }
 
   private setOwnedPerChatSession(mapKey: string, session: SessionManager): void {
+    // Fail-closed gate: the previous tree on this mapKey is not proven empty, so
+    // a second session here could mean two live agents on one chat.
+    const quarantine = this.chatQuarantine.get(mapKey);
+    if (quarantine) {
+      throw new Error(
+        `CHAT_QUARANTINED: "${mapKey}" is closed until its previous process tree is proven empty ` +
+          `(${quarantine.reason})`,
+      );
+    }
     const managerId = this.managerIdFor(session);
     const current = this.sessionOwnership.get(mapKey);
     if (current && current.managerId !== managerId) {
