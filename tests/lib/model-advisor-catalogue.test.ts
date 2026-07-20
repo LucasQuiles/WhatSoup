@@ -57,19 +57,24 @@ describe('classifyModelFetchFailure', () => {
 
 describe('resolveClaudeOAuthCred', () => {
   const T = 1_000_000; // fixed clock
-  const creds = (accessToken: unknown, expiresAt: unknown) =>
-    JSON.stringify({ claudeAiOauth: { accessToken, expiresAt } });
+  const creds = (accessToken: unknown, expiresAt: unknown, refreshToken?: unknown) =>
+    JSON.stringify({ claudeAiOauth: { accessToken, expiresAt, ...(refreshToken !== undefined ? { refreshToken } : {}) } });
 
   it('returns present with the token when the file has an unexpired accessToken', () => {
     const out = resolveClaudeOAuthCred({ readFileText: () => creds('oauth-tok-live', T + 60_000), nowMs: T });
     expect(out).toStrictEqual({ status: 'present', token: 'oauth-tok-live' });
   });
 
-  it('returns expired when expiresAt is at/before now (self-heals on the next agent turn)', () => {
-    expect(resolveClaudeOAuthCred({ readFileText: () => creds('oauth-tok-stale', T - 1), nowMs: T }))
-      .toStrictEqual({ status: 'expired' });
+  it('returns expired with refresh-token presence when expiresAt is at/before now', () => {
+    // hasRefreshToken lets the credential-state accessor split expired-refreshable
+    // (routable — the CLI refreshes at spawn) from expired-no-refresh (not routable).
+    expect(resolveClaudeOAuthCred({ readFileText: () => creds('oauth-tok-stale', T - 1, 'refresh-x'), nowMs: T }))
+      .toStrictEqual({ status: 'expired', hasRefreshToken: true });
     expect(resolveClaudeOAuthCred({ readFileText: () => creds('oauth-tok-stale', T), nowMs: T }))
-      .toStrictEqual({ status: 'expired' });
+      .toStrictEqual({ status: 'expired', hasRefreshToken: false });
+    // a present-but-empty refresh token is not a usable refresh token
+    expect(resolveClaudeOAuthCred({ readFileText: () => creds('oauth-tok-stale', T - 1, ''), nowMs: T }))
+      .toStrictEqual({ status: 'expired', hasRefreshToken: false });
   });
 
   it('returns absent when the file is missing, unparseable, or has no token', () => {
@@ -82,6 +87,19 @@ describe('resolveClaudeOAuthCred', () => {
   it('treats a token with no expiresAt as present (server response is the authority)', () => {
     const out = resolveClaudeOAuthCred({ readFileText: () => JSON.stringify({ claudeAiOauth: { accessToken: 'oauth-tok-x' } }), nowMs: T });
     expect(out).toStrictEqual({ status: 'present', token: 'oauth-tok-x' });
+  });
+
+  it('applies NO refresh margin — a token still valid for 1ms is present, not expired (Q round 23)', () => {
+    // The credential-state.ts primitive resolveTokenExpiryState has a 5-min refresh
+    // MARGIN (valid-but-soon → 'expiring'). resolveClaudeOAuthCred deliberately does
+    // NOT use it: expiry here is STRICT (expiresAt <= now). This pins that the margin
+    // never flows into the per-provider accessor's states, so a credential valid for
+    // another N minutes stays routable rather than being de-routed early. A future
+    // refactor swapping in the margin-aware primitive breaks this on purpose.
+    expect(resolveClaudeOAuthCred({ readFileText: () => creds('oauth-tok-soon', T + 1), nowMs: T }))
+      .toStrictEqual({ status: 'present', token: 'oauth-tok-soon' });
+    expect(resolveClaudeOAuthCred({ readFileText: () => creds('oauth-tok-inmargin', T + 60_000), nowMs: T }))
+      .toStrictEqual({ status: 'present', token: 'oauth-tok-inmargin' });
   });
 });
 
@@ -102,7 +120,7 @@ describe('fetchAnthropicModelIdsWithStatus — OAuth credential path', () => {
     const fetchSpy = vi.fn();
     vi.stubGlobal('fetch', fetchSpy);
 
-    expect(await fetchAnthropicModelIdsWithStatus({ readOAuthCred: () => ({ status: 'expired' }) }))
+    expect(await fetchAnthropicModelIdsWithStatus({ readOAuthCred: () => ({ status: 'expired', hasRefreshToken: false }) }))
       .toStrictEqual({ status: 'credential-expired' });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
