@@ -83,7 +83,7 @@ describe('SummaryTab provider card contract', () => {
     })))
 
     const providerLabel = screen.getByText('PROVIDER')
-    const card = providerLabel.closest('div.c-card') as HTMLElement
+    const card = providerLabel.closest('div.soup-card') as HTMLElement
     expect(card).toBeTruthy()
     expect(within(card).getByText(getProvider('codex-cli')!.displayName)).toBeDefined()
   })

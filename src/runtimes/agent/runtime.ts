@@ -163,15 +163,22 @@ import { PendingPollPersistence } from './pending-poll-persistence.ts';
 import { HandoffDistillCoordinator } from './handoff-distill-coordinator.ts';
 import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } from './handoff-distill-config.ts';
 import { config } from '../../config.ts';
+import {
+  checkAndRecordInterruptedBoot,
+  markBootInProgress,
+  readRestartLoopGuardHealth,
+  restartLoopGuardPath,
+} from './restart-loop-guard.ts';
 import { canonicalConversationKey, resolvePhoneFromJid, resolvePhoneFromJidForGrant } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
 import { getCommandSpec } from './command-registry.ts';
 import { matchImperative, extractImperativeTarget } from '../../core/substrate/inline-extractor.ts';
 import { createBead } from '../../core/substrate/beads.ts';
-import { mkdirSync, copyFileSync, readdirSync, unlinkSync } from 'node:fs';
+import { mkdirSync, copyFileSync, readdirSync, unlinkSync, readFileSync } from 'node:fs';
 import { join, resolve, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
+import { EgressProxy } from './egress-proxy.ts';
 import { ToolRegistry } from '../../mcp/registry.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
 import { perChatActorSession } from './per-chat-actor-session.ts';
@@ -430,6 +437,14 @@ export interface SandboxPolicy {
   allowedTools: string[];
   allowedMcpTools?: string[];
   bash: { enabled: boolean };
+  /**
+   * Opt-in egress allowlist (#1607 / QR-008). A non-empty list makes
+   * `start()` boot a loopback `EgressProxy` bound to this policy and inject
+   * its port into the child process env (see `egressProxyPort` on
+   * `SessionManager`/`buildBaseChildEnv`). Absent or empty: no proxy, no env
+   * injection — unchanged pre-#1607 behavior.
+   */
+  allowedEgress?: string[];
 }
 
 export type SessionScope = 'single' | 'shared' | 'per_chat';
@@ -752,6 +767,12 @@ export class AgentRuntime implements Runtime {
   private readonly configSystemPrompt: string | undefined;
   private readonly instructionsPath: string | undefined;
   private readonly sandbox: SandboxPolicy | undefined;
+  /** Opt-in egress-allowlist proxy (#1607); undefined when allowedEgress is absent/empty. */
+  private egressProxy: EgressProxy | undefined;
+  /** Test observability only — the egress proxy's bound port has no other externally visible signal. */
+  get egressProxyPortForTest(): number | undefined {
+    return this.egressProxy?.port;
+  }
   private readonly model: string | undefined;
   private readonly sandboxPerChat: boolean;
   private readonly perChatConversationBound: boolean;
@@ -807,6 +828,9 @@ export class AgentRuntime implements Runtime {
   private turnChain: Promise<void> = Promise.resolve();
   private healthStatsTimer: ReturnType<typeof setInterval> | null = null;
   private proactiveResumeIdentityRejects = 0;
+  // C5 restart-loop guard: true when this boot follows an unclean exit
+  // (captured at the top of start()); consumed by the startup resume gate.
+  private restartLoopInterruptedBoot = false;
   private unownedProviderEventRejects = 0;
   private readonly providerEventRejectReasonCounts = new Map<string, number>();
   /**
@@ -1479,6 +1503,13 @@ export class AgentRuntime implements Runtime {
       recentCrashCount: this.getRecentCrashCount(),
       lastCrashAt: this.crashes.lastCrashAt,
       proactiveResumeIdentityRejects: this.proactiveResumeIdentityRejects,
+      restartLoopGuard: {
+        enabled: config.restartLoopGuard.enabled,
+        ...readRestartLoopGuardHealth(
+          restartLoopGuardPath(config.stateRoot),
+          config.restartLoopGuard.windowMs,
+        ),
+      },
       unownedProviderEventRejects: this.unownedProviderEventRejects,
       turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
       turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
@@ -1562,6 +1593,44 @@ export class AgentRuntime implements Runtime {
    * proactively resumed this pass (a live or ambiguous session was already
    * left running for that key) — only meaningful to the startup caller.
    */
+  /**
+   * C5 restart-loop guard consult for the startup resume gate. Returns true
+   * when proactive resume must be suppressed for this boot: the guard is
+   * enabled, resumable work exists, this boot follows an unclean exit, and
+   * the crashy-boot journal has reached the trip threshold. On trip, queues
+   * ONE operator notice through the startup-message channel (popped and sent
+   * by main.ts after connect). Fail-open throughout — any guard error
+   * degrades to "do not suppress".
+   */
+  private shouldSuppressProactiveResume(resumableCount: number): boolean {
+    if (!config.restartLoopGuard.enabled) return false;
+    if (resumableCount < 1) return false;
+    if (!this.restartLoopInterruptedBoot) return false;
+    const trip = checkAndRecordInterruptedBoot({
+      statePath: restartLoopGuardPath(config.stateRoot),
+      maxRestarts: config.restartLoopGuard.maxRestarts,
+      windowMs: config.restartLoopGuard.windowMs,
+    });
+    if (!trip.tripped) return false;
+    log.warn(
+      { bootsInWindow: trip.bootsInWindow, resumableCount, windowMs: config.restartLoopGuard.windowMs },
+      'restart-loop guard tripped — suppressing proactive resume for this boot',
+    );
+    const adminPhone = [...config.adminPhones][0];
+    if (adminPhone) {
+      const windowSec = Math.round(config.restartLoopGuard.windowMs / 1000);
+      this.pendingStartupMessage = {
+        chatJid: toPersonalJid(adminPhone),
+        text:
+          `*Restart-loop guard tripped* ⚠️ — ${trip.bootsInWindow} crash-interrupted boots ` +
+          `inside ${windowSec}s with resumable sessions pending. Proactive resume is ` +
+          `suppressed for this boot to break a possible resume-replay loop; sessions ` +
+          `resume on their next message. Check the journal for the implicated chat.`,
+      };
+    }
+    return true;
+  }
+
   private async sweepStaleAgentSessions(): Promise<Set<string>> {
     const proactiveResumeBlockedConversationKeys = new Set<string>();
     if (!(this.sessionScope === 'per_chat' || this.sandboxPerChat)) {
@@ -2835,6 +2904,13 @@ export class AgentRuntime implements Runtime {
   }
 
   async start(): Promise<void> {
+    // C5 restart-loop guard: mark this boot BEFORE any fallible work so a
+    // later crash leaves the marker standing. Consumed at the resume gate
+    // below; fail-open inside the guard (a broken breaker never wedges a
+    // healthy instance).
+    this.restartLoopInterruptedBoot = config.restartLoopGuard.enabled
+      ? markBootInProgress(restartLoopGuardPath(config.stateRoot))
+      : false;
     this.db.assertWritableCompatibility();
     if (this.cwd && isSamePhysicalDirectory(this.cwd, homedir())) throw new Error('configured agent cwd must not resolve to the user home directory');
     ensureAgentSchema(this.db);
@@ -2882,6 +2958,37 @@ export class AgentRuntime implements Runtime {
         );
         writeSandboxArtifacts(claudeDir, resolvedPolicy, sandboxHookPath, pollLintHookPath, postToolUseLogHookPath);
         log.info({ cwd, hookPath: sandboxHookPath, pollLintHookPath, postToolUseLogHookPath }, 'wrote sandbox-policy.json and settings.json');
+
+        // Opt-in egress-allowlist proxy (#1607 / QR-008): whenever the sandbox
+        // policy carries a PRESENT allowedEgress array (even []=deny-all, F1).
+        // Reads the policy BACK off disk (not the in-memory resolvedPolicy) on
+        // every request, so a live edit to sandbox-policy.json takes effect
+        // without a restart; a corrupt/unreadable file fails closed (egress-proxy.ts).
+        if (Array.isArray(this.sandbox.allowedEgress)) {
+          // Own try so a proxy bind failure is labelled as such (not as a
+          // sandbox-artifact write failure) — then re-throw to abort start():
+          // an opted-in instance must NOT run with egress unconfined (fail-closed).
+          try {
+            const policyPath = join(claudeDir, 'sandbox-policy.json');
+            this.egressProxy = await EgressProxy.start({
+              policy: {
+                read: () => {
+                  const raw = JSON.parse(readFileSync(policyPath, 'utf8'));
+                  return { allowedEgress: Array.isArray(raw.allowedEgress) ? raw.allowedEgress.filter((e: unknown) => typeof e === 'string') : [] };
+                },
+              },
+              failOpen: process.env['WHATSOUP_SANDBOX_FAIL_OPEN'] === '1',
+              log: (event) => log.info(event, 'egress adjudication'),
+            });
+            log.info(
+              { port: this.egressProxy.port, allowlistSize: this.sandbox.allowedEgress.length },
+              'started egress-allowlist proxy',
+            );
+          } catch (proxyErr) {
+            log.error({ err: proxyErr, cwd }, 'failed to start egress-allowlist proxy — aborting start (fail-closed)');
+            throw proxyErr;
+          }
+        }
       } catch (err) {
         log.error({ err, cwd }, 'failed to initialize sandbox artifacts');
         throw err;
@@ -3025,7 +3132,15 @@ export class AgentRuntime implements Runtime {
     // of waiting for the user to send a message after a service restart.
     // sandboxPerChat is excluded — its resume path requires workspace provisioning which happens lazily.
     if (this.sessionScope === 'per_chat' && !this.sandboxPerChat && this.durability && config.proactiveResumeOnStartup) {
-      const resumableCheckpoints = this.durability.getResumableCheckpoints();
+      const resumableCheckpointsRaw = this.durability.getResumableCheckpoints();
+      // C5 restart-loop guard: on trip, suppress proactive resume for this
+      // boot — sessions still lazy-resume on their next inbound message
+      // (the existing fail-safe for every other skip), the instance stays up
+      // serving inbound, and the operator gets one notice. An empty list
+      // makes the loop below a no-op.
+      const resumableCheckpoints = this.shouldSuppressProactiveResume(resumableCheckpointsRaw.length)
+        ? []
+        : resumableCheckpointsRaw;
       for (const cp of resumableCheckpoints) {
         const full = this.durability.getSessionCheckpoint(cp.conversation_key);
         if (!full?.session_id) continue;
@@ -6732,6 +6847,13 @@ export class AgentRuntime implements Runtime {
           autoCompactConsecutiveRapidRearmsMax: this.autoCompact.consecutiveRapidRearmsMax,
           autoCompactNextTurnOverThreshold: this.autoCompact.nextTurnOverThreshold,
           proactiveResumeIdentityRejects: this.proactiveResumeIdentityRejects,
+          restartLoopGuard: {
+            enabled: config.restartLoopGuard.enabled,
+            ...readRestartLoopGuardHealth(
+              restartLoopGuardPath(config.stateRoot),
+              config.restartLoopGuard.windowMs,
+            ),
+          },
           unownedProviderEventRejects: this.unownedProviderEventRejects,
           turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
           turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
@@ -6765,6 +6887,13 @@ export class AgentRuntime implements Runtime {
         autoCompactConsecutiveRapidRearmsMax: this.autoCompact.consecutiveRapidRearmsMax,
         autoCompactNextTurnOverThreshold: this.autoCompact.nextTurnOverThreshold,
         proactiveResumeIdentityRejects: this.proactiveResumeIdentityRejects,
+        restartLoopGuard: {
+          enabled: config.restartLoopGuard.enabled,
+          ...readRestartLoopGuardHealth(
+            restartLoopGuardPath(config.stateRoot),
+            config.restartLoopGuard.windowMs,
+          ),
+        },
         unownedProviderEventRejects: this.unownedProviderEventRejects,
         turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
         turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
@@ -7290,6 +7419,17 @@ export class AgentRuntime implements Runtime {
       }
       this.globalSocketServer = null;
       this.globalMcpSocketPath = null;
+    }
+
+    // Stop the opt-in egress-allowlist proxy (#1607), if one was started.
+    if (this.egressProxy) {
+      try {
+        await this.egressProxy.close();
+        log.debug({ instanceName: this.instanceName }, 'egress-allowlist proxy stopped');
+      } catch (err) {
+        log.warn({ err, instanceName: this.instanceName }, 'egress-allowlist proxy stop failed');
+      }
+      this.egressProxy = undefined;
     }
 
     // Stop workspace-scoped socket servers and media bridges (sandboxPerChat)
@@ -9943,7 +10083,7 @@ export class AgentRuntime implements Runtime {
     };
 
     const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, {
-      cwd: this.cwd ?? homedir(),
+      cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port,
     });
     void Promise.resolve()
       .then(() => probePrimaryModelUsability(target, adapters))
@@ -10018,7 +10158,7 @@ export class AgentRuntime implements Runtime {
   private async probePrimaryProviderRecovered(): Promise<boolean> {
     const result = await probePrimaryModelUsability(
       { provider: this.agentProvider, model: this.model ?? null },
-      createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir() }),
+      createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port }),
     );
     return result.status === 'usable';
   }
@@ -10060,7 +10200,7 @@ export class AgentRuntime implements Runtime {
         },
         runPrimaryModelUsability: () => probePrimaryModelUsability(
           { provider: this.agentProvider, model: this.model ?? null },
-          createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir() }),
+          createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port }),
         ),
         runPrimaryRecoveryProbe: () => this.probePrimaryProviderRecovered(),
         accountAuthDeps: {
@@ -10661,6 +10801,7 @@ export class AgentRuntime implements Runtime {
       whatsoupMcpSocket: mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,
       handoffSystemBlock: this.buildHandoffSystemBlock(conversationKey, route ? route.provider : this.effectiveProvider),
       routingSystemBlock: config.nlRouting ? () => this.buildRoutingContractBlock(route ? route.provider : this.effectiveProvider) : undefined,
+      egressProxyPort: this.egressProxy?.port,
     });
     this.sessionManagerIds.set(session, randomUUID());
     this.sessionEventToolScopes.set(

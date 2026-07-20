@@ -534,13 +534,13 @@ describe('Ops page log stream', () => {
 })
 
 // Locate a line card (the <Card variant="status-edge"> container) by its line
-// name. The card hosts the named selection <button>; its closest `.c-card`
+// name. The card hosts the named selection <button>; its closest `.soup-card`
 // ancestor is the line card itself (the outer panels are <Card variant="base">
-// which also render `.c-card`, so we must anchor on the per-line selection
-// button rather than blindly indexing all `.c-card` nodes).
+// which also render `.soup-card`, so we must anchor on the per-line selection
+// button rather than blindly indexing all `.soup-card` nodes).
 function lineCard(name: string): HTMLElement {
   const selectBtn = screen.getByRole('button', { name: `Select ${name}` })
-  const card = selectBtn.closest('.c-card') as HTMLElement | null
+  const card = selectBtn.closest('.soup-card') as HTMLElement | null
   if (!card) throw new Error(`line card for ${name} not found`)
   return card
 }

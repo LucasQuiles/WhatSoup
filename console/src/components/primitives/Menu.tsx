@@ -265,7 +265,7 @@ function getMenuItems(panel: HTMLElement): HTMLElement[] {
 // ---------------------------------------------------------------------------
 
 export interface MenuSectionProps {
-  /** Section heading (mono uppercase, --text-3). */
+  /** Section heading (mono uppercase, --text-2 — DD-8: sole-carrier label). */
   label: string;
   children: ReactNode;
 }

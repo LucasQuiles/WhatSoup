@@ -165,6 +165,8 @@ export interface SessionManagerOptions {
   whatsoupMcpSocket?: string;
   handoffSystemBlock?: () => string | null;
   routingSystemBlock?: () => string | null;
+  /** Egress proxy port (#1607) — forwarded into buildChildEnv's baseOpts so spawned children pick up HTTP_PROXY/HTTPS_PROXY. Undefined when the instance has no allowedEgress. */
+  egressProxyPort?: number;
 }
 
 /**
@@ -550,6 +552,7 @@ export class SessionManager {
   private readonly whatsoupMcpSocket: string | undefined;
   private readonly handoffSystemBlock: (() => string | null) | undefined;
   private readonly routingSystemBlock: (() => string | null) | undefined;
+  private readonly egressProxyPort: number | undefined;
 
   private systemPrompt: string = '';
 
@@ -672,6 +675,7 @@ export class SessionManager {
     this.whatsoupMcpSocket = opts.whatsoupMcpSocket;
     this.handoffSystemBlock = opts.handoffSystemBlock;
     this.routingSystemBlock = opts.routingSystemBlock;
+    this.egressProxyPort = opts.egressProxyPort;
 
     // Initialize budget enforcement if configured
     const budgetConfig = opts.providerConfig?.budget as BudgetConfig | undefined;
@@ -1536,6 +1540,7 @@ export class SessionManager {
           whatsoupInstance: this.whatsoupInstance,
           whatsoupMcpSocket: this.whatsoupMcpSocket,
           configRoot: this.configRoot,
+          egressProxyPort: this.egressProxyPort,
         },
         this.model,
         this.providerConfig,
@@ -2256,6 +2261,7 @@ export class SessionManager {
                 whatsoupInstance: this.whatsoupInstance,
                 whatsoupMcpSocket: this.whatsoupMcpSocket,
                 configRoot: this.configRoot,
+                egressProxyPort: this.egressProxyPort,
               },
               this.model,
               this.providerConfig,

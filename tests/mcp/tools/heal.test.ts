@@ -248,6 +248,8 @@ vi.mock('../../../src/config.ts', () => ({
     toolUpdateMode: 'full',
     toolUpdateRedirectJid: null,
     textAggregateDelayMs: 2_000,
+    stateRoot: '/tmp/whatsoup-test-state-heal',
+    restartLoopGuard: { enabled: true, maxRestarts: 3, windowMs: 300_000 },
     pineconeAllowedIndexes: [],
   },
 }));

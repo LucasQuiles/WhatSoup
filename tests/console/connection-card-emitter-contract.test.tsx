@@ -205,7 +205,7 @@ describe('CONNECTION card — real emitter → enrichInstance → SummaryTab con
 
     render(withToast(<SummaryTab line={enriched} onEditConfig={vi.fn()} onChangeMode={vi.fn()} />))
 
-    const connectionCard = screen.getByText('CONNECTION').closest('div.c-card') as HTMLElement
+    const connectionCard = screen.getByText('CONNECTION').closest('div.soup-card') as HTMLElement
     expect(within(connectionCard).getByText('connected')).toBeDefined()
     expect(within(connectionCard).queryByText('unknown')).toBeNull()
   })

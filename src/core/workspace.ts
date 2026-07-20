@@ -70,6 +70,7 @@ export interface SandboxConfig {
   allowedPaths: string[];
   allowedTools: string[];
   allowedMcpTools?: string[];
+  allowedEgress?: string[];
   bash: { enabled: boolean; pathRestricted?: boolean };
 }
 
@@ -332,6 +333,7 @@ export function provisionWorkspace(opts: ProvisionOptions): string {
       allowedTools: sandbox.allowedTools,
       ...(sandbox.allowedMcpTools !== undefined ? { allowedMcpTools: sandbox.allowedMcpTools }
         : mcpAllowlist ? { allowedMcpTools: mcpAllowlist } : {}),
+      ...(sandbox.allowedEgress !== undefined ? { allowedEgress: sandbox.allowedEgress } : {}),
       bash: sandbox.bash,
     };
     writeSandboxArtifacts(claudeDir, sandboxPolicy, hookPath, pollLintHookPath, postToolUseLogHookPath);
