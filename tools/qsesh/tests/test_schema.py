@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import stat
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
+import qsesh.schema as schema_module
 from qsesh.errors import QseshError
 from qsesh.schema import (
     APPLICATION_ID,
@@ -16,7 +20,6 @@ from qsesh.schema import (
     SCHEMA_SHA256,
     V1_SCHEMA_SHA256,
     _MIGRATION_2_NAME,
-    _V1_DDL,
     normalized_schema,
     open_database,
     schema_checksum,
@@ -57,6 +60,13 @@ EXPECTED_VIEWS = {
     "corpus_reduction_by_harness",
     "corpus_reduction_by_project",
 }
+V1_SCHEMA_FIXTURE = Path(__file__).parent / "fixtures/schema-v1.sql"
+V1_SCHEMA_FIXTURE_SHA256 = (
+    "506487723c802be97f037af0d10974e0fd6210fe89eff01e4113d4012abd346f"
+)
+V1_SCHEMA_ORACLE_SHA256 = (
+    "0bdb585c87f3020325985ac99a89101fc68aeb048a7af8607692346e5d6ee48c"
+)
 
 
 def _objects(connection: sqlite3.Connection, kind: str) -> set[str]:
@@ -84,12 +94,14 @@ def _seed_session(
     qid: str = "qs-abcdefghij",
     digest: bytes = b"d" * 32,
     native_id: str = "native-1",
+    harness: str = "claude",
+    project: str = "project",
 ) -> None:
     source_digest = "a" * 64
-    relpath = f"archive/claude/{qid}/{source_digest}.jsonl.gz"
+    relpath = f"archive/{harness}/{qid}/{source_digest}.jsonl.gz"
     connection.execute(
         "INSERT INTO archives(relpath,harness,qid,source_digest,sha256,byte_count,accepted_at_us) VALUES(?,?,?,?,?,?,?)",
-        (relpath, "claude", qid, source_digest, "b" * 64, 10, 1),
+        (relpath, harness, qid, source_digest, "b" * 64, 10, 1),
     )
     connection.execute(
         "INSERT INTO sessions(qid,identity_digest,host_id,harness,native_id,project,started_at_us,ended_at_us,duration_us,source_pointer,source_digest,archive_relpath,archive_sha256,archive_byte_count,record_json,updated_at_us) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -97,9 +109,9 @@ def _seed_session(
             qid,
             digest,
             "host-1",
-            "claude",
+            harness,
             native_id,
-            "project",
+            project,
             1,
             2,
             1,
@@ -133,8 +145,10 @@ def _seed_size_metrics(
 
 
 def _build_raw_v1_database(path: Path) -> None:
-    """Build a genuine v1 DB by hand (bypassing open_database, which now speaks v2)."""
+    """Build v1 from the frozen, populated fixture, not production schema constants."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    fixture_bytes = V1_SCHEMA_FIXTURE.read_bytes()
+    assert hashlib.sha256(fixture_bytes).hexdigest() == V1_SCHEMA_FIXTURE_SHA256
     connection = sqlite3.connect(path)
     try:
         connection.execute("PRAGMA foreign_keys=ON")
@@ -142,13 +156,42 @@ def _build_raw_v1_database(path: Path) -> None:
         connection.execute("PRAGMA synchronous=FULL")
         connection.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
         connection.execute("PRAGMA trusted_schema=OFF")
-        for statement in _V1_DDL:
-            connection.execute(statement)
-        connection.execute(f"PRAGMA application_id={APPLICATION_ID}")
-        connection.execute("PRAGMA user_version=1")
-        connection.commit()
+        connection.executescript(fixture_bytes.decode("utf-8"))
     finally:
         connection.close()
+
+
+def _open_two_after_matching_initial_inspection(
+    path: Path, monkeypatch: pytest.MonkeyPatch
+) -> list[int]:
+    first_inspections = threading.Barrier(2)
+    inspected_connections: set[int] = set()
+    inspection_lock = threading.Lock()
+    original_inspect = schema_module._inspect_existing
+
+    def synchronized_inspect(
+        connection: sqlite3.Connection,
+    ) -> tuple[int, int, bool]:
+        observed = original_inspect(connection)
+        connection_id = id(connection)
+        with inspection_lock:
+            is_first = connection_id not in inspected_connections
+            inspected_connections.add(connection_id)
+        if is_first:
+            first_inspections.wait(timeout=5)
+        return observed
+
+    monkeypatch.setattr(schema_module, "_inspect_existing", synchronized_inspect)
+
+    def open_and_report_version() -> int:
+        connection = open_database(path)
+        try:
+            return connection.execute("PRAGMA user_version").fetchone()[0]
+        finally:
+            connection.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        return list(pool.map(lambda _: open_and_report_version(), range(2)))
 
 
 def test_fresh_schema_has_exact_objects_columns_versions_and_checksum(
@@ -160,7 +203,7 @@ def test_fresh_schema_has_exact_objects_columns_versions_and_checksum(
         assert APPLICATION_ID == 0x51534553
         assert (
             SCHEMA_SHA256
-            == "54750f703858ca3d7088c1e5c9e1024920142f043716df9ea62bba01b4c4eb30"
+            == "93d55a85b5c8620d5a8ee3e480746624984b98008abcc1940b5b344a1bf88bcf"
         )
         assert (
             connection.execute("PRAGMA application_id").fetchone()[0] == APPLICATION_ID
@@ -194,7 +237,9 @@ def test_fresh_schema_has_exact_objects_columns_versions_and_checksum(
         assert _columns(connection, "archives")["relpath"] == ("TEXT", 1, 1)
         assert schema_checksum(connection) == SCHEMA_SHA256
         assert normalized_schema(connection)
-        assert connection.execute("SELECT count(*) FROM migrations").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT version,name,checksum FROM migrations"
+        ).fetchall() == [(2, _MIGRATION_2_NAME, SCHEMA_SHA256)]
     finally:
         connection.close()
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
@@ -329,7 +374,17 @@ def test_migrate_v1_to_v2(tmp_path: Path) -> None:
     _build_raw_v1_database(path)
     verify = sqlite3.connect(path)
     try:
-        assert schema_checksum(verify) == V1_SCHEMA_SHA256
+        assert V1_SCHEMA_SHA256 == V1_SCHEMA_ORACLE_SHA256
+        assert schema_checksum(verify) == V1_SCHEMA_ORACLE_SHA256
+        assert verify.execute(
+            "SELECT qid,harness,project FROM sessions"
+        ).fetchall() == [("qs-abcdefghij", "claude", "fixture-project")]
+        assert verify.execute(
+            "SELECT qid,turn_index,role,text FROM transcript_turns"
+        ).fetchall() == [("qs-abcdefghij", 0, "user", "fixture turn")]
+        assert verify.execute(
+            "SELECT qid,name,is_mcp,count,call_ids_json FROM session_tools"
+        ).fetchall() == [("qs-abcdefghij", "fixture_tool", 0, 2, '["call-1","call-2"]')]
     finally:
         verify.close()
 
@@ -348,16 +403,270 @@ def test_migrate_v1_to_v2(tmp_path: Path) -> None:
         assert checksum == SCHEMA_SHA256
         assert applied_at_us >= 0
         assert schema_checksum(connection) == SCHEMA_SHA256
+        assert connection.execute(
+            "SELECT qid,harness,project FROM sessions"
+        ).fetchall() == [("qs-abcdefghij", "claude", "fixture-project")]
+        assert connection.execute(
+            "SELECT qid,turn_index,role,text FROM transcript_turns"
+        ).fetchall() == [("qs-abcdefghij", 0, "user", "fixture turn")]
+        assert connection.execute(
+            "SELECT qid,name,is_mcp,count,call_ids_json FROM session_tools"
+        ).fetchall() == [("qs-abcdefghij", "fixture_tool", 0, 2, '["call-1","call-2"]')]
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
         assert connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"
     finally:
         connection.close()
 
 
+def test_two_concurrent_v1_openers_converge_on_one_migration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "data/qsesh.db"
+    _build_raw_v1_database(path)
+    versions = _open_two_after_matching_initial_inspection(path, monkeypatch)
+
+    assert versions == [2, 2]
+    verify = sqlite3.connect(path)
+    try:
+        assert schema_checksum(verify) == SCHEMA_SHA256
+        assert verify.execute(
+            "SELECT version,name,checksum FROM migrations"
+        ).fetchall() == [(2, _MIGRATION_2_NAME, SCHEMA_SHA256)]
+    finally:
+        verify.close()
+
+
+def test_v1_opener_rechecks_after_peer_migrates_between_inspect_and_checksum(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "data/qsesh.db"
+    _build_raw_v1_database(path)
+    slow_observed_v1 = threading.Event()
+    release_slow = threading.Event()
+    original_inspect = schema_module._inspect_existing
+
+    def pause_slow_after_v1_inspection(
+        connection: sqlite3.Connection,
+    ) -> tuple[int, int, bool]:
+        observed = original_inspect(connection)
+        if (
+            threading.current_thread().name.startswith("slow-v1")
+            and observed[0] == APPLICATION_ID
+            and observed[1] == 1
+            and not slow_observed_v1.is_set()
+        ):
+            slow_observed_v1.set()
+            assert release_slow.wait(timeout=5)
+        return observed
+
+    monkeypatch.setattr(
+        schema_module, "_inspect_existing", pause_slow_after_v1_inspection
+    )
+
+    def open_and_report_version() -> int:
+        connection = open_database(path)
+        try:
+            return connection.execute("PRAGMA user_version").fetchone()[0]
+        finally:
+            connection.close()
+
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="slow-v1") as pool:
+        slow = pool.submit(open_and_report_version)
+        assert slow_observed_v1.wait(timeout=5)
+        try:
+            fast = open_database(path)
+            fast.close()
+        finally:
+            release_slow.set()
+        assert slow.result(timeout=5) == 2
+
+
+def test_two_concurrent_fresh_openers_converge_on_one_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "data/qsesh.db"
+    versions = _open_two_after_matching_initial_inspection(path, monkeypatch)
+
+    assert versions == [2, 2]
+    verify = sqlite3.connect(path)
+    try:
+        assert schema_checksum(verify) == SCHEMA_SHA256
+        assert verify.execute(
+            "SELECT version,name,checksum FROM migrations"
+        ).fetchall() == [(2, _MIGRATION_2_NAME, SCHEMA_SHA256)]
+    finally:
+        verify.close()
+
+
+def test_failed_fresh_opener_does_not_delete_database_installed_by_peer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "data/qsesh.db"
+    slow_reached_configure = threading.Event()
+    release_slow = threading.Event()
+    original_configure = schema_module._configure
+
+    def fail_slow_configure(connection: sqlite3.Connection) -> None:
+        if threading.current_thread().name.startswith("slow-fresh"):
+            slow_reached_configure.set()
+            assert release_slow.wait(timeout=5)
+            raise schema_module._fail("schema-injected-failure")
+        original_configure(connection)
+
+    monkeypatch.setattr(schema_module, "_configure", fail_slow_configure)
+
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="slow-fresh") as pool:
+        slow = pool.submit(open_database, path)
+        assert slow_reached_configure.wait(timeout=5)
+        fast: sqlite3.Connection | None = None
+        try:
+            fast = open_database(path)
+            release_slow.set()
+            with pytest.raises(QseshError) as caught:
+                slow.result(timeout=5)
+            assert caught.value.phase == "schema-injected-failure"
+            assert path.exists()
+            assert fast.execute("PRAGMA user_version").fetchone()[0] == 2
+            assert schema_checksum(fast) == SCHEMA_SHA256
+        finally:
+            release_slow.set()
+            if fast is not None:
+                fast.close()
+
+
+def test_failed_new_install_leaves_a_recoverable_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "data/qsesh.db"
+    original_record = schema_module._record_v2_migration
+    attempts = 0
+
+    def fail_first_record(connection: sqlite3.Connection) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("injected fresh-install failure")
+        original_record(connection)
+
+    monkeypatch.setattr(schema_module, "_record_v2_migration", fail_first_record)
+
+    with pytest.raises(RuntimeError, match="fresh-install failure"):
+        open_database(path)
+    assert path.exists()
+    for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
+        if candidate.exists():
+            assert stat.S_IMODE(candidate.stat().st_mode) == 0o600
+
+    recovered = open_database(path)
+    try:
+        assert recovered.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert schema_checksum(recovered) == SCHEMA_SHA256
+    finally:
+        recovered.close()
+
+
+def test_read_only_v1_database_fails_with_typed_migration_error_without_mutation(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "data/qsesh.db"
+    _build_raw_v1_database(path)
+    candidates = (path, Path(f"{path}-wal"), Path(f"{path}-shm"))
+    before = {
+        candidate.name: candidate.read_bytes()
+        for candidate in candidates
+        if candidate.exists()
+    }
+    path.chmod(0o400)
+    try:
+        with pytest.raises(QseshError) as caught:
+            open_database(path)
+        assert caught.value.code == "QS-E-MIGRATION"
+        assert caught.value.phase == "migration-read-only"
+        assert caught.value.__cause__ is None
+        after = {
+            candidate.name: candidate.read_bytes()
+            for candidate in candidates
+            if candidate.exists()
+        }
+        assert after == before
+        assert stat.S_IMODE(path.stat().st_mode) == 0o400
+    finally:
+        path.chmod(0o600)
+
+    verify = sqlite3.connect(path)
+    try:
+        assert verify.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert schema_checksum(verify) == V1_SCHEMA_SHA256
+        assert verify.execute("SELECT count(*) FROM migrations").fetchone()[0] == 0
+    finally:
+        verify.close()
+
+
+def test_read_only_v1_with_uncheckpointed_wal_fails_without_ignoring_wal_state(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "data/qsesh.db"
+    _build_raw_v1_database(path)
+    writer = sqlite3.connect(path)
+    writer.execute("PRAGMA wal_autocheckpoint=0")
+    writer.execute(
+        "INSERT INTO cursors(host_id,harness,native_id,source_key,updated_at_us,source_digest,extractor_contract) "
+        "VALUES(?,?,?,?,?,?,?)",
+        ("host", "claude", "native", "source", 1, "a" * 64, "fixture-v1"),
+    )
+    writer.commit()
+    wal_path = Path(f"{path}-wal")
+    assert wal_path.stat().st_size > 0
+    candidates = (path, wal_path, Path(f"{path}-shm"))
+    before = {candidate.name: candidate.read_bytes() for candidate in candidates}
+    path.chmod(0o400)
+    try:
+        with pytest.raises(QseshError) as caught:
+            open_database(path)
+        assert caught.value.code == "QS-E-MIGRATION"
+        assert caught.value.phase == "schema-read-only-wal"
+        after = {candidate.name: candidate.read_bytes() for candidate in candidates}
+        assert after == before
+    finally:
+        path.chmod(0o600)
+        writer.close()
+
+
+def test_read_only_inspection_rejects_wal_appearing_during_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "data/qsesh.db"
+    _build_raw_v1_database(path)
+    before = path.read_bytes()
+    original_validate = schema_module._validate_observed_schema
+
+    def create_wal_after_inspection(
+        connection: sqlite3.Connection, *, allow_state_retry: bool = True
+    ) -> tuple[int, int, bool]:
+        observed = original_validate(connection, allow_state_retry=allow_state_retry)
+        Path(f"{path}-wal").write_bytes(b"appeared-during-read-only-inspection")
+        return observed
+
+    monkeypatch.setattr(
+        schema_module, "_validate_observed_schema", create_wal_after_inspection
+    )
+    path.chmod(0o400)
+    try:
+        with pytest.raises(QseshError) as caught:
+            open_database(path)
+        assert caught.value.phase == "schema-read-only-wal"
+        assert path.read_bytes() == before
+    finally:
+        path.chmod(0o600)
+
+
 def test_fresh_and_migrated_fingerprints_match(tmp_path: Path) -> None:
     fresh = open_database(tmp_path / "fresh/qsesh.db")
     try:
         fresh_checksum = schema_checksum(fresh)
+        fresh_ledger = fresh.execute(
+            "SELECT version,name,checksum FROM migrations"
+        ).fetchall()
     finally:
         fresh.close()
 
@@ -366,10 +675,14 @@ def test_fresh_and_migrated_fingerprints_match(tmp_path: Path) -> None:
     migrated = open_database(migrated_path)
     try:
         migrated_checksum = schema_checksum(migrated)
+        migrated_ledger = migrated.execute(
+            "SELECT version,name,checksum FROM migrations"
+        ).fetchall()
     finally:
         migrated.close()
 
     assert fresh_checksum == migrated_checksum == SCHEMA_SHA256
+    assert fresh_ledger == migrated_ledger == [(2, _MIGRATION_2_NAME, SCHEMA_SHA256)]
 
 
 def test_reopen_is_idempotent(tmp_path: Path) -> None:
@@ -380,7 +693,9 @@ def test_reopen_is_idempotent(tmp_path: Path) -> None:
     try:
         assert second.execute("PRAGMA user_version").fetchone()[0] == 2
         assert schema_checksum(second) == SCHEMA_SHA256
-        assert second.execute("SELECT count(*) FROM migrations").fetchone()[0] == 0
+        assert second.execute(
+            "SELECT version,name,checksum FROM migrations"
+        ).fetchall() == [(2, _MIGRATION_2_NAME, SCHEMA_SHA256)]
     finally:
         second.close()
 
@@ -436,6 +751,109 @@ def test_session_content_reduction_view_allows_unclamped_negative_delta(
         connection.close()
 
 
+def test_reduction_views_preserve_incomplete_metric_pairs_as_null_reductions(
+    tmp_path: Path,
+) -> None:
+    connection = open_database(tmp_path / "qsesh.db")
+    try:
+        _seed_session(connection, qid="qs-abcdefghij", digest=b"d" * 32, native_id="n1")
+        _seed_session(connection, qid="qs-bbbbbbbbbb", digest=b"e" * 32, native_id="n2")
+        connection.execute(
+            "INSERT INTO session_size_metrics(qid,side,dimension,value,metrics_version) VALUES(?,?,?,?,?)",
+            ("qs-abcdefghij", "content_original", "char", 100, "m1"),
+        )
+        connection.execute(
+            "INSERT INTO session_size_metrics(qid,side,dimension,value,metrics_version) VALUES(?,?,?,?,?)",
+            ("qs-bbbbbbbbbb", "content_clean", "char", 25, "m1"),
+        )
+
+        session_rows = connection.execute(
+            "SELECT qid,original,clean,delta,reduction_ratio "
+            "FROM session_content_reduction ORDER BY qid"
+        ).fetchall()
+        assert session_rows == [
+            ("qs-abcdefghij", 100, None, None, None),
+            ("qs-bbbbbbbbbb", None, 25, None, None),
+        ]
+        assert connection.execute(
+            "SELECT side,total FROM corpus_size_totals "
+            "WHERE metrics_version='m1' AND dimension='char' ORDER BY side"
+        ).fetchall() == [("content_clean", 25), ("content_original", 100)]
+        assert connection.execute(
+            "SELECT original,clean,delta,reduction_ratio "
+            "FROM corpus_reduction_by_harness "
+            "WHERE metrics_version='m1' AND harness='claude' AND dimension='char'"
+        ).fetchone() == (100, 25, None, None)
+        assert connection.execute(
+            "SELECT original,clean,delta,reduction_ratio "
+            "FROM corpus_reduction_by_project "
+            "WHERE metrics_version='m1' AND project='project' AND dimension='char'"
+        ).fetchone() == (100, 25, None, None)
+    finally:
+        connection.close()
+
+
+def test_reduction_views_keep_mismatched_metrics_versions_separate(
+    tmp_path: Path,
+) -> None:
+    connection = open_database(tmp_path / "qsesh.db")
+    try:
+        _seed_session(connection)
+        connection.execute(
+            "INSERT INTO session_size_metrics(qid,side,dimension,value,metrics_version) VALUES(?,?,?,?,?)",
+            ("qs-abcdefghij", "content_original", "char", 100, "m1"),
+        )
+        connection.execute(
+            "INSERT INTO session_size_metrics(qid,side,dimension,value,metrics_version) VALUES(?,?,?,?,?)",
+            ("qs-abcdefghij", "content_clean", "char", 25, "m2"),
+        )
+
+        assert connection.execute(
+            "SELECT metrics_version,original,clean,delta,reduction_ratio "
+            "FROM session_content_reduction ORDER BY metrics_version"
+        ).fetchall() == [
+            ("m1", 100, None, None, None),
+            ("m2", None, 25, None, None),
+        ]
+        assert connection.execute(
+            "SELECT metrics_version,original,clean,delta,reduction_ratio "
+            "FROM corpus_reduction_by_harness ORDER BY metrics_version"
+        ).fetchall() == [
+            ("m1", 100, None, None, None),
+            ("m2", None, 25, None, None),
+        ]
+    finally:
+        connection.close()
+
+
+def test_content_reduction_views_exclude_raw_dimensions(tmp_path: Path) -> None:
+    connection = open_database(tmp_path / "qsesh.db")
+    try:
+        _seed_session(connection)
+        _seed_size_metrics(connection, "qs-abcdefghij", "m1", "bytes", 100, 25)
+
+        assert (
+            connection.execute(
+                "SELECT * FROM session_content_reduction WHERE dimension='bytes'"
+            ).fetchall()
+            == []
+        )
+        assert (
+            connection.execute(
+                "SELECT * FROM corpus_reduction_by_harness WHERE dimension='bytes'"
+            ).fetchall()
+            == []
+        )
+        assert (
+            connection.execute(
+                "SELECT * FROM corpus_reduction_by_project WHERE dimension='bytes'"
+            ).fetchall()
+            == []
+        )
+    finally:
+        connection.close()
+
+
 def test_corpus_size_totals_sums_value_by_group(tmp_path: Path) -> None:
     connection = open_database(tmp_path / "qsesh.db")
     try:
@@ -462,18 +880,45 @@ def test_corpus_reduction_by_harness_aggregates_before_dividing(
 ) -> None:
     connection = open_database(tmp_path / "qsesh.db")
     try:
-        _seed_session(connection, qid="qs-abcdefghij", digest=b"d" * 32, native_id="n1")
-        _seed_session(connection, qid="qs-bbbbbbbbbb", digest=b"e" * 32, native_id="n2")
+        _seed_session(
+            connection,
+            qid="qs-abcdefghij",
+            digest=b"d" * 32,
+            native_id="n1",
+            harness="claude",
+            project="project-a",
+        )
+        _seed_session(
+            connection,
+            qid="qs-bbbbbbbbbb",
+            digest=b"e" * 32,
+            native_id="n2",
+            harness="claude",
+            project="project-b",
+        )
+        _seed_session(
+            connection,
+            qid="qs-cccccccccc",
+            digest=b"f" * 32,
+            native_id="n3",
+            harness="codex",
+            project="project-a",
+        )
         _seed_size_metrics(connection, "qs-abcdefghij", "m1", "char", 100, 50)
         _seed_size_metrics(connection, "qs-bbbbbbbbbb", "m1", "char", 300, 100)
-        row = connection.execute(
-            "SELECT original,clean,delta,reduction_ratio FROM corpus_reduction_by_harness "
-            "WHERE metrics_version='m1' AND harness='claude' AND dimension='char'"
-        ).fetchone()
+        _seed_size_metrics(connection, "qs-cccccccccc", "m1", "char", 40, 10)
+        rows = connection.execute(
+            "SELECT harness,original,clean,delta,reduction_ratio "
+            "FROM corpus_reduction_by_harness "
+            "WHERE metrics_version='m1' AND dimension='char' ORDER BY harness"
+        ).fetchall()
         # aggregate-first: (100+300)-(50+100) over (100+300), NOT the average of
         # the two per-session ratios (0.5 and 0.667).
-        assert row == (400, 150, 250, 0.625)
-        assert isinstance(row[3], float)
+        assert rows == [
+            ("claude", 400, 150, 250, 0.625),
+            ("codex", 40, 10, 30, 0.75),
+        ]
+        assert all(isinstance(row[4], float) for row in rows)
     finally:
         connection.close()
 
@@ -483,16 +928,43 @@ def test_corpus_reduction_by_project_aggregates_before_dividing(
 ) -> None:
     connection = open_database(tmp_path / "qsesh.db")
     try:
-        _seed_session(connection, qid="qs-abcdefghij", digest=b"d" * 32, native_id="n1")
-        _seed_session(connection, qid="qs-bbbbbbbbbb", digest=b"e" * 32, native_id="n2")
+        _seed_session(
+            connection,
+            qid="qs-abcdefghij",
+            digest=b"d" * 32,
+            native_id="n1",
+            harness="claude",
+            project="project-a",
+        )
+        _seed_session(
+            connection,
+            qid="qs-bbbbbbbbbb",
+            digest=b"e" * 32,
+            native_id="n2",
+            harness="claude",
+            project="project-b",
+        )
+        _seed_session(
+            connection,
+            qid="qs-cccccccccc",
+            digest=b"f" * 32,
+            native_id="n3",
+            harness="codex",
+            project="project-a",
+        )
         _seed_size_metrics(connection, "qs-abcdefghij", "m1", "char", 100, 50)
         _seed_size_metrics(connection, "qs-bbbbbbbbbb", "m1", "char", 300, 100)
-        row = connection.execute(
-            "SELECT original,clean,delta,reduction_ratio FROM corpus_reduction_by_project "
-            "WHERE metrics_version='m1' AND project='project' AND dimension='char'"
-        ).fetchone()
-        assert row == (400, 150, 250, 0.625)
-        assert isinstance(row[3], float)
+        _seed_size_metrics(connection, "qs-cccccccccc", "m1", "char", 40, 10)
+        rows = connection.execute(
+            "SELECT project,original,clean,delta,reduction_ratio "
+            "FROM corpus_reduction_by_project "
+            "WHERE metrics_version='m1' AND dimension='char' ORDER BY project"
+        ).fetchall()
+        assert rows == [
+            ("project-a", 140, 60, 80, pytest.approx(80 / 140)),
+            ("project-b", 300, 100, 200, pytest.approx(2 / 3)),
+        ]
+        assert all(isinstance(row[4], float) for row in rows)
     finally:
         connection.close()
 
@@ -541,19 +1013,28 @@ def test_migration_rolls_back_completely_on_failure_after_ddl(
 ) -> None:
     path = tmp_path / "data/qsesh.db"
     _build_raw_v1_database(path)
+    original_checksum = schema_module.schema_checksum
+    observed_versions: list[int] = []
 
-    def _boom() -> int:
-        raise RuntimeError("injected failure after DDL, before commit")
+    def fail_after_version_bump(connection: sqlite3.Connection) -> str:
+        user_version = connection.execute("PRAGMA user_version").fetchone()[0]
+        observed_versions.append(user_version)
+        if user_version == 2:
+            raise RuntimeError("injected failure after version bump, before commit")
+        return original_checksum(connection)
 
-    monkeypatch.setattr("qsesh.schema.time.time_ns", _boom)
+    monkeypatch.setattr(schema_module, "schema_checksum", fail_after_version_bump)
 
-    with pytest.raises(RuntimeError, match="injected failure"):
+    with pytest.raises(RuntimeError, match="after version bump"):
         open_database(path)
+    assert 2 in observed_versions
 
     verify = sqlite3.connect(path)
     try:
         assert verify.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert original_checksum(verify) == V1_SCHEMA_ORACLE_SHA256
         assert "session_size_metrics" not in _objects(verify, "table")
+        assert not EXPECTED_VIEWS & _objects(verify, "view")
         assert (
             verify.execute(
                 "SELECT count(*) FROM migrations WHERE version=2"
