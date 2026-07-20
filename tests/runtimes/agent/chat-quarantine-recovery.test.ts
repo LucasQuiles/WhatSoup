@@ -228,7 +228,6 @@ interface QuarantineRecord {
   mapKey: string;
   reason: string;
   since: number;
-  attempts: number;
 }
 
 type RuntimeInternals = {
@@ -236,7 +235,7 @@ type RuntimeInternals = {
   chatQueues: Map<string, unknown>;
   chatQuarantine: Map<string, QuarantineRecord>;
   sweepQuarantinedChats?: () => Promise<void>;
-  stalledChats?: (now: number) => { mapKey: string; reason: string; ageMs: number }[];
+  stalledChats?: (now: number) => { mapKey: string; reason: string; ageMs: number; attempts: number }[];
 };
 
 function internals(runtime: AgentRuntime): RuntimeInternals {
@@ -386,10 +385,6 @@ describe('per-chat quarantine — wedge containment and recovery', () => {
       state.chatQuarantine.has(MAP_KEY),
       'an unprovable tree must stay quarantined — releasing it risks two live agents on one chat',
     ).toBe(true);
-    expect(
-      state.chatQuarantine.get(MAP_KEY)!.attempts,
-      'release attempts must be counted so escalation can be bounded',
-    ).toBeGreaterThanOrEqual(2);
 
     const stalled = state.stalledChats;
     expect(stalled, 'stalledChats() must be implemented for chat-level telemetry').toBeTypeOf('function');
@@ -398,5 +393,9 @@ describe('per-chat quarantine — wedge containment and recovery', () => {
       rows.map((r) => r.mapKey),
       'a quarantined chat must surface as stalled — silence is what made this a 14h outage',
     ).toContain(MAP_KEY);
+    expect(
+      rows.find((r) => r.mapKey === MAP_KEY)?.attempts,
+      'release attempts must be counted so escalation can be bounded',
+    ).toBeGreaterThanOrEqual(2);
   });
 });

@@ -79,6 +79,7 @@ import { inspectUserClaudeSettings } from '../../core/user-claude-settings.ts';
 import { isSamePhysicalDirectory } from '../../lib/home-path.ts';
 import { classifyActiveSessions, resolveAmbiguousAgeFallback } from './session-classifier.ts';
 import { SessionManager, formatAge, getProviderBinary, type SessionCrashInfo } from './session.ts';
+import { ProofOfDeathRegistry } from './proof-of-death.ts';
 import {
   OutboundQueue,
   type IOutboundQueue,
@@ -248,12 +249,6 @@ interface ChatQuarantineRecord {
   readonly reason: string;
   /** Epoch ms the quarantine opened; drives stall age. */
   readonly since: number;
-  /** The SessionManager whose tree is unproven; retried for proof of death. */
-  readonly session: SessionManager;
-  /** Release attempts so far — lets escalation be bounded and observable. */
-  attempts: number;
-  /** Epoch ms of the last release attempt, or null before the first. */
-  lastAttemptAt: number | null;
 }
 
 /** A quarantined chat is reported stalled once it has been closed this long. */
@@ -884,6 +879,14 @@ export class AgentRuntime implements Runtime {
    * `quarantinePerChatMapKey`) and the stall is reportable (`stalledChats`).
    */
   private readonly chatQuarantine = new Map<string, ChatQuarantineRecord>();
+  /**
+   * The single owner of "is this session's process tree provably empty?" retry.
+   * The per-chat bind quarantine above and (subsequently) the system-turn
+   * dispatch quarantine register their release callbacks here so one sweep
+   * proves one tree once and fans the result out — instead of each running its
+   * own timer racing to prove the same fact.
+   */
+  private readonly proofOfDeath = new ProofOfDeathRegistry();
   private workspaceSweeper: WorkspaceSweeper;
   private queueSweepTimer: ReturnType<typeof setInterval> | null = null;
   private sessionSweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -1616,7 +1619,7 @@ export class AgentRuntime implements Runtime {
   private startQuarantineSweepTimer(): void {
     if (this.quarantineSweepTimer) return;
     this.quarantineSweepTimer = setInterval(() => {
-      if (this.chatQuarantine.size === 0) return;
+      if (this.proofOfDeath.size === 0) return;
       this.sweepQuarantinedChats().catch((err) => {
         log.warn({ err, instanceName: this.instanceName }, 'quarantine sweep failed');
       });
@@ -5434,18 +5437,25 @@ export class AgentRuntime implements Runtime {
     reason: string,
   ): void {
     if (this.chatQuarantine.has(mapKey)) return;
-    this.chatQuarantine.set(mapKey, {
-      mapKey,
-      reason,
-      since: Date.now(),
-      session,
-      attempts: 0,
-      lastAttemptAt: null,
-    });
+    this.chatQuarantine.set(mapKey, { mapKey, reason, since: Date.now() });
     this.chatQueues.get(mapKey)?.abortTurn({ preserveEvidence: true });
     this.chatQueues.delete(mapKey);
     this.deleteOwnedPerChatSession(mapKey, session);
     this.cleanupPerChatState(mapKey, { preserveCrashHistory: true });
+    // Register the one proof-of-death retry loop that reopens the mapKey. The
+    // callback fires only when the tree is proven empty (see ProofOfDeathRegistry),
+    // never on a timer — releasing the bind gate onto a possibly-live tree would
+    // reintroduce the double-agent risk this quarantine exists to prevent.
+    this.proofOfDeath.register(
+      session,
+      reason,
+      () => {
+        this.rejectedTerminalTeardowns.delete(session);
+        this.chatQuarantine.delete(mapKey);
+      },
+      Date.now(),
+      mapKey,
+    );
     log.error(
       { mapKey, reason },
       'chat quarantined — process tree unproven; no session may bind until it is proven empty',
@@ -5453,51 +5463,35 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
-   * Retry proof-of-death on every quarantined chat; release the ones that can now
-   * be proven empty.
+   * Retry proof-of-death on every registered wedged session; the registry
+   * reopens the ones that can now be proven empty and fires their release
+   * callbacks. Thin wrapper over the shared registry so the retry is one loop,
+   * not one-per-subsystem.
    *
    * This is the difference between a 14-hour outage and a one-minute one. The
    * fail-closed guard is right to refuse an ambiguous kill, but a one-shot
    * refusal should not be permanent: most ambiguity is a `ps` race or a mid-exit
-   * process that clears on a later census. Chats that stay unprovable keep the
+   * process that clears on a later census. Sessions that stay unprovable keep the
    * quarantine and surface via `stalledChats`.
    */
   private async sweepQuarantinedChats(): Promise<void> {
-    for (const record of [...this.chatQuarantine.values()]) {
-      record.attempts += 1;
-      record.lastAttemptAt = Date.now();
-      try {
-        await record.session.shutdown(false);
-      } catch (err) {
-        log.warn(
-          { err, mapKey: record.mapKey, attempts: record.attempts },
-          'quarantined chat still unprovable — holding closed',
-        );
-        continue;
-      }
-      // Proven empty: retire the teardown poison and reopen the mapKey.
-      this.rejectedTerminalTeardowns.delete(record.session);
-      this.chatQuarantine.delete(record.mapKey);
-      log.info(
-        { mapKey: record.mapKey, attempts: record.attempts, closedForMs: Date.now() - record.since },
-        'chat quarantine released — process tree proven empty',
-      );
-    }
+    await this.proofOfDeath.sweep(Date.now());
   }
 
   /**
    * Chats that have been silently unable to serve for longer than the alert
    * threshold. Consumed by the health surface so a wedged chat pages an operator
-   * instead of being discovered by the user days later.
+   * instead of being discovered by the user days later. Reads the retry/attempt
+   * state from the shared registry, keyed back to the per-chat mapKey via the
+   * registration label.
    */
   private stalledChats(
     now: number = Date.now(),
   ): { mapKey: string; reason: string; ageMs: number; attempts: number }[] {
     const rows: { mapKey: string; reason: string; ageMs: number; attempts: number }[] = [];
-    for (const record of this.chatQuarantine.values()) {
-      const ageMs = now - record.since;
-      if (ageMs < CHAT_STALL_ALERT_MS) continue;
-      rows.push({ mapKey: record.mapKey, reason: record.reason, ageMs, attempts: record.attempts });
+    for (const row of this.proofOfDeath.stalled(now, CHAT_STALL_ALERT_MS)) {
+      if (row.label === undefined || !this.chatQuarantine.has(row.label)) continue;
+      rows.push({ mapKey: row.label, reason: row.reason, ageMs: row.ageMs, attempts: row.attempts });
     }
     return rows;
   }
