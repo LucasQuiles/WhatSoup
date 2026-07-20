@@ -200,6 +200,25 @@ describe('restart-loop guard', () => {
       expect(h.lastCheckAt).toBe(t);
     });
 
+    it('bootsTotal is INDEPENDENT storage from boots[] — a prune to empty never resets it (Q round 17)', () => {
+      // Regression guard: if bootsTotal were ever derived from / shared storage
+      // with the pruned boots[] window, it would reset to 0 on the next prune —
+      // which is indistinguishable from "no boots", the exact ambiguity the field
+      // exists to kill. This pins the separation explicitly.
+      let t = 5_000_000;
+      markBootInProgress(statePath, t);
+      markBootInProgress(statePath, t += 1_000);
+      markBootInProgress(statePath, t += 1_000);
+      // Force boots[] to prune to empty on the next write (far past the window)…
+      const far = t + DEFAULT_WINDOW * 100;
+      markBootInProgress(statePath, far);
+      // …and re-read from a FRESH health call (reloads state from the file, so
+      // this also covers "survives a restart", not just an in-memory read).
+      const h = readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, far + 1);
+      expect(h.bootsInWindow).toBe(0); // window pruned to empty
+      expect(h.bootsTotal).toBe(4); // lifetime counter untouched by the prune or the reload
+    });
+
     it('a clean exit resets the window journal but NOT the monotonic counters', () => {
       let t = 3_000_000;
       markBootInProgress(statePath, t);
