@@ -142,9 +142,17 @@ describe('restart-loop guard', () => {
   });
 
   describe('health introspection (read-only, fail-open)', () => {
-    it('reports zeros on missing state', () => {
+    it('reports zeros on missing state, with the window echoed', () => {
       expect(readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, 1_000))
-        .toEqual({ bootsInWindow: 0, tripped: false, lastTripAt: null });
+        .toEqual({
+          bootsInWindow: 0,
+          tripped: false,
+          lastTripAt: null,
+          windowMs: DEFAULT_WINDOW,
+          bootsTotal: 0,
+          checksPerformed: 0,
+          lastCheckAt: null,
+        });
     });
 
     it('reports the live journal after a trip', () => {
@@ -154,6 +162,83 @@ describe('restart-loop guard', () => {
       expect(h.bootsInWindow).toBe(3);
       expect(h.tripped).toBe(true);
       expect(h.lastTripAt).toBe(t);
+    });
+  });
+
+  describe('observability counters (silence != health)', () => {
+    it('echoes windowMs so a flat bootsInWindow:0 is disambiguated from a rolled-past window', () => {
+      const h = readRestartLoopGuardHealth(statePath, 12_345, 1_000);
+      expect(h.windowMs).toBe(12_345);
+    });
+
+    it('bootsTotal counts EVERY boot monotonically and survives window roll-off', () => {
+      let t = 1_000_000;
+      // Two crash-interrupted boots close together, then one far in the future
+      // so the earlier two age out of the window entirely.
+      markBootInProgress(statePath, t);
+      markBootInProgress(statePath, t += 1_000);
+      const far = t + DEFAULT_WINDOW * 10;
+      markBootInProgress(statePath, far);
+      const h = readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, far + 500);
+      expect(h.bootsInWindow).toBe(0); // all aged out — ambiguous alone
+      expect(h.bootsTotal).toBe(3); // ...but the lifetime counter proves 3 boots landed
+    });
+
+    it('checksPerformed + lastCheckAt count the breakers DECISION, not clean boots', () => {
+      let t = 2_000_000;
+      // A clean first boot does not consult the breaker (no prior crash marker).
+      markBootInProgress(statePath, t);
+      let h = readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, t + 100);
+      expect(h.checksPerformed).toBe(0); // the guard was never asked
+      expect(h.lastCheckAt).toBeNull();
+      // A crash-interrupted boot (prior marker still set) reaches the decision.
+      const interrupted = markBootInProgress(statePath, t += 1_000);
+      expect(interrupted).toBe(true);
+      checkAndRecordInterruptedBoot({ statePath, maxRestarts: 3, windowMs: DEFAULT_WINDOW, now: t });
+      h = readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, t + 100);
+      expect(h.checksPerformed).toBe(1); // asked once, allowed (not tripped)
+      expect(h.lastCheckAt).toBe(t);
+    });
+
+    it('bootsTotal is INDEPENDENT storage from boots[] — a prune to empty never resets it (Q round 17)', () => {
+      // Regression guard: if bootsTotal were ever derived from / shared storage
+      // with the pruned boots[] window, it would reset to 0 on the next prune —
+      // which is indistinguishable from "no boots", the exact ambiguity the field
+      // exists to kill. This pins the separation explicitly.
+      let t = 5_000_000;
+      markBootInProgress(statePath, t);
+      markBootInProgress(statePath, t += 1_000);
+      markBootInProgress(statePath, t += 1_000);
+      // Force boots[] to prune to empty on the next write (far past the window)…
+      const far = t + DEFAULT_WINDOW * 100;
+      markBootInProgress(statePath, far);
+      // …and re-read from a FRESH health call (reloads state from the file, so
+      // this also covers "survives a restart", not just an in-memory read).
+      const h = readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, far + 1);
+      expect(h.bootsInWindow).toBe(0); // window pruned to empty
+      expect(h.bootsTotal).toBe(4); // lifetime counter untouched by the prune or the reload
+    });
+
+    it('a clean exit resets the window journal but NOT the monotonic counters', () => {
+      let t = 3_000_000;
+      markBootInProgress(statePath, t);
+      markBootInProgress(statePath, t += 1_000);
+      markCleanExit(statePath);
+      const h = readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, t + 100);
+      expect(h.bootsInWindow).toBe(0); // journal restarted
+      expect(h.bootsTotal).toBe(2); // lifetime count preserved across the clean exit
+    });
+
+    it('back-compat: a legacy state file without the counters loads with defaults, not a reject', () => {
+      // A v:1 file written before observability counters existed.
+      writeFileSync(statePath, JSON.stringify({ v: 1, bootInProgress: false, boots: [], lastTripAt: null }));
+      const h = readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, 1_000);
+      expect(h.bootsTotal).toBe(0);
+      expect(h.checksPerformed).toBe(0);
+      expect(h.lastCheckAt).toBeNull();
+      // ...and a subsequent boot increments from the default rather than NaN.
+      markBootInProgress(statePath, 2_000);
+      expect(readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, 2_100).bootsTotal).toBe(1);
     });
   });
 });

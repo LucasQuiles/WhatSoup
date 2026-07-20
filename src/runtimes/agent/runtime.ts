@@ -53,6 +53,7 @@ import {
 } from '../../core/reply-guarantee.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../../lib/emit-alert.ts';
 import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
+import { resolveProviderCredentialState, isProviderRoutable, spawnFailureCredentialNote } from '../../lib/provider-credential-eligibility.ts';
 import { createChildLogger } from '../../logger.ts';
 import {
   ensureAgentSchema,
@@ -5018,7 +5019,20 @@ export class AgentRuntime implements Runtime {
           this.replyGuarantee?.disarm(failedSeq);
           this.durability.markInboundFailed(failedSeq, 'session_spawn_failed');
         }
-        this.sendDirect(chatJid, 'Something went wrong starting a session. Try sending your message again.');
+        // Eligible-side disclosure (Slice 1): the common config is a primary
+        // routed on a `present-expired-refreshable` credential (routable because
+        // a refresh was expected) that then fails. F07 does not gate the primary,
+        // so this is where that turn gets its explanation. The note HEDGES — the
+        // failure here is not distinguishable as a refresh failure, so it names
+        // the observed classification and the likely cause without asserting it.
+        const credNote = spawnFailureCredentialNote(
+          resolveProviderCredentialState({
+            provider: this.agentProvider,
+            model: this.model,
+            providerConfig: this.agentProviderConfig,
+          }),
+        );
+        this.sendDirect(chatJid, credNote ?? 'Something went wrong starting a session. Try sending your message again.');
         return;
       }
       const completion: { value: RuntimeTurnCompletion | null } = { value: null };
@@ -8376,12 +8390,28 @@ export class AgentRuntime implements Runtime {
    * bookkeeping, but the eligibility DECISION lives here alone.
    */
   private isEntryCredentialed(entry: AgentFallbackEntry): boolean {
-    const service = resolveProviderKeyService(
-      entry.provider,
-      entry.model,
-      fallbackProviderConfigFor(entry.provider, this.agentProvider, this.agentProviderConfig),
+    // INVARIANT this return depends on: `AgentFallbackEntry` carries no auth of
+    // its own (it is `{provider, model}`; `fallbackProviderConfigFor` returns the
+    // PRIMARY's config by identity for a same-provider entry). So a same-provider
+    // tier shares the primary's credential and inherits its unconditional
+    // routability rather than being re-checked — re-checking would de-route a
+    // tier whose own primary is still routing on the same credential. If an
+    // auth-bearing field is ever added to the entry, this inherit becomes a
+    // silent under-exclude and must be conditioned on "no entry-level auth
+    // override", not provider equality alone. F07: cross-provider entries (which
+    // DO carry a distinct credential) read the unified accessor
+    // (eligibility projection) — replacing the old presence-only `service ?
+    // lookup : true` that treated null-service providers as always credentialed;
+    // now a cross-provider claude-cli fallback's expired-no-refresh OAuth is
+    // de-routed, while codex/gemini stay `native` → routable.
+    if (entry.provider === this.agentProvider) return true;
+    return isProviderRoutable(
+      resolveProviderCredentialState({
+        provider: entry.provider,
+        model: entry.model,
+        providerConfig: fallbackProviderConfigFor(entry.provider, this.agentProvider, this.agentProviderConfig),
+      }),
     );
-    return service ? lookupCredential(service) !== null : true;
   }
 
   /** Clear a sender's route preference — shared by `/model default` and `/reset`. */
