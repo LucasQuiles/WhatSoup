@@ -305,7 +305,8 @@ connectionManager.setOutboundContentClassifier?.(classifyStreamedProviderFailure
 // 5. Runtime — selected by instance type
 let runtime: Runtime;
 // Capability-grant manager (#1835) — agent instances only; groups are
-// config-driven (empty by default). reconcile() runs at startup (see start()).
+// config-driven (empty by default). Reconciliation is awaited before any
+// health, poller, runtime, or transport surface starts.
 let grantManager: CapabilityGrantManager | undefined;
 if (instanceType === 'agent') {
   const agentOpts = instanceConfig?.agentOptions as {
@@ -366,6 +367,12 @@ if (instanceType === 'agent') {
         groups: config.capabilityGrantGroups,
         policy: createSettingsPolicyAdapter(claudeDir),
         store: createFileGrantStore(join(claudeDir, 'capability-grant.json')),
+        onError: (err, operation) => {
+          log.error(
+            { err, operation },
+            'capability-grant lifecycle error',
+          );
+        },
       });
     } catch (err) {
       log.error({ err }, 'capability-grant disabled: group config intersects the REQUIRED_DENY floor');
@@ -432,6 +439,11 @@ if (instanceType === 'agent') {
     }, 'memory consolidation enabled but not started');
   }
 }
+
+// Fail closed before exposing any runtime surface. In particular, AgentRuntime
+// startup may resume provider children, and health/pollers accept work before
+// the WhatsApp transport connects.
+if (grantManager) await grantManager.reconcile();
 
 // 6. Wire durability to runtime and message handler
 runtime.setDurability(durability);
@@ -991,10 +1003,6 @@ triggerPoller.start();
 async function start(): Promise<void> {
   // runtime.start() starts enrichment poller internally
   await runtime.start();
-  // Reconcile persisted capability grants BEFORE the connection delivers any
-  // messages (and thus any /grant command): revert an expired grant left by a
-  // crash so a privileged window never outlives its TTL across a restart.
-  if (grantManager) await grantManager.reconcile();
   await connectionManager.connect();
 
   // Wait for history sync or timeout, then allow echo grace before recovery so

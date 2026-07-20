@@ -25,6 +25,7 @@ import {
   assertPrivateDirectorySync,
   ensurePrivateDirectorySync,
   writePrivateFileSync,
+  writePrivateJsonMarkerSync,
 } from '../lib/private-fs.ts';
 
 export { writePrivateFileSync } from '../lib/private-fs.ts';
@@ -195,7 +196,7 @@ export function writePermissionsSettings(
       // null or {} = reset to global inheritance; non-empty object = override
       merged.enabledPlugins = settings.enabledPlugins ?? {};
     }
-    writePrivateFileSync(settingsPath, JSON.stringify(merged, null, 2));
+    writePrivateJsonMarkerSync(settingsPath, merged, { label: 'settings.json' });
   } catch (err) {
     log.error({ err, claudeDir }, 'failed to write permissions settings');
     throw err;
