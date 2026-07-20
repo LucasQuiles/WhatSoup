@@ -164,6 +164,12 @@ export function buildBaseChildEnv(opts?: BuildBaseChildEnvOptions): NodeJS.Proce
  */
 export function buildOpenCodeBaseChildEnv(opts?: BuildBaseChildEnvOptions): NodeJS.ProcessEnv {
   const configRoots = childConfigRoots(opts);
+  const egressProxyPort =
+    typeof opts?.egressProxyPort === 'number' && opts.egressProxyPort > 0
+      ? opts.egressProxyPort
+      : undefined;
+  const egressProxyUrl =
+    egressProxyPort !== undefined ? `http://127.0.0.1:${egressProxyPort}` : undefined;
 
   return Object.fromEntries(
     Object.entries({
@@ -180,6 +186,19 @@ export function buildOpenCodeBaseChildEnv(opts?: BuildBaseChildEnvOptions): Node
       TMPDIR: process.env.TMPDIR,
       WHATSOUP_INSTANCE: opts?.whatsoupInstance,
       WHATSOUP_MCP_SOCKET: opts?.whatsoupMcpSocket,
+      // Egress proxy (#1607): threaded exactly as buildBaseChildEnv does so an
+      // opted-in instance's OpenCode children route outbound HTTP(S) through the
+      // allowlist proxy rather than escaping it. Both UPPER and lower case
+      // variants are set (F4): curl reads lowercase `http_proxy` for plain HTTP
+      // and ignores the uppercase form, so a `curl http://host` would otherwise
+      // bypass the proxy entirely. Only present when a positive port is supplied
+      // — undefined values are filtered out, preserving the unproxied default.
+      HTTP_PROXY: egressProxyUrl,
+      HTTPS_PROXY: egressProxyUrl,
+      NO_PROXY: egressProxyPort !== undefined ? 'localhost,127.0.0.1' : undefined,
+      http_proxy: egressProxyUrl,
+      https_proxy: egressProxyUrl,
+      no_proxy: egressProxyPort !== undefined ? 'localhost,127.0.0.1' : undefined,
     }).filter(([, value]) => value !== undefined),
   ) as NodeJS.ProcessEnv;
 }

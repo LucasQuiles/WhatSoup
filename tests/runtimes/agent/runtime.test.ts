@@ -416,7 +416,8 @@ vi.mock('node:fs', async (importOriginal) => {
   return {
     ...actual,
     mkdirSync: vi.fn(),
-    writeFileSync: vi.fn(),
+    // Delegate to real writeFileSync so private-fs writes persist; a no-op stub left a 0-byte opencode.json the fail-closed reader rejects on the next start().
+    writeFileSync: vi.fn((...args: Parameters<typeof actual.writeFileSync>) => actual.writeFileSync(...args)),
     readFileSync: vi.fn().mockReturnValue(Buffer.from('fake-audio-data')),
     readdirSync: mockReaddirSync,
   };
