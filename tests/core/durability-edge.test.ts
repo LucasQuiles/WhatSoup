@@ -483,7 +483,7 @@ describe('DurabilityEngine edge coverage', () => {
     });
     const messenger = makeMessenger(async () => ({ waMessageId: 'WA_UNUSED' }));
 
-    expect(await drainPendingOutbound(messenger, engine)).toBe(0);
+    expect((await drainPendingOutbound(messenger, engine)).resent).toBe(0);
     expect(messenger.sendMessage).not.toHaveBeenCalled();
     expect(getOutbound(db, id)['status']).toBe('quarantined');
   });
@@ -498,7 +498,7 @@ describe('DurabilityEngine edge coverage', () => {
     });
     const messenger = makeMessenger(async () => Promise.reject(null));
 
-    expect(await drainPendingOutbound(messenger, engine)).toBe(0);
+    expect((await drainPendingOutbound(messenger, engine)).resent).toBe(0);
     expect(getOutbound(db, id)).toMatchObject({ status: 'maybe_sent', error: 'replay_failed' });
   });
 
@@ -523,7 +523,7 @@ describe('DurabilityEngine edge coverage', () => {
       .mockImplementation((id: number) => realMarkSending(id));
     const messenger = makeMessenger(async () => ({ waMessageId: 'WA_AFTER_CATCH' }));
 
-    expect(await drainPendingOutbound(messenger, engine)).toBe(1);
+    expect((await drainPendingOutbound(messenger, engine)).resent).toBe(1);
     expect(getOutbound(db, badId)['status']).toBe('pending');
     expect(getOutbound(db, goodId)['status']).toBe('submitted');
   });

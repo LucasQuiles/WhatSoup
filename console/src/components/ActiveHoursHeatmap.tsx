@@ -24,7 +24,7 @@ function formatHour(h: number): string {
 
 function HeatmapLegend({ max }: { max: number }) {
   return (
-    <div className="flex items-center text-text-3 font-mono justify-end mt-[var(--sp-3)] gap-[var(--sp-2)] text-xs">
+    <div className="flex items-center text-text-2 font-mono justify-end mt-[var(--sp-3)] gap-[var(--sp-2)] text-xs">
       <span>Less</span>
       {[0, 0.25, 0.5, 0.75, 1].map((ratio) => (
         <div key={ratio} className="w-[var(--sp-3)] h-[var(--sp-3)] rounded-sm" style={{ background: intensityColor(ratio * max, max) }} />
@@ -89,7 +89,7 @@ export function ActiveHoursHeatmap({ data, byDate, range }: {
           {HOURS.map((h) => (
             <div
               key={h}
-              className="flex-1 text-text-3 font-mono leading-tight text-center text-xs"
+              className="flex-1 text-text-2 font-mono leading-tight text-center text-xs"
             >
               {h % 3 === 0 ? formatHour(h) : ''}
             </div>
@@ -121,7 +121,7 @@ export function ActiveHoursHeatmap({ data, byDate, range }: {
             <div
               key={`d-${date}`}
               title={i % labelEvery === 0 ? dateLabels[i] : undefined}
-              className="text-text-3 font-mono leading-tight text-center text-xs truncate"
+              className="text-text-2 font-mono leading-tight text-center text-xs truncate"
             >
               {i % labelEvery === 0 ? dateLabels[i] : ''}
             </div>
@@ -177,7 +177,7 @@ export function ActiveHoursHeatmap({ data, byDate, range }: {
           {HOURS.map((h) => (
             <div
               key={`h-${h}`}
-              className="text-text-3 font-mono leading-tight text-center text-xs"
+              className="text-text-2 font-mono leading-tight text-center text-xs"
             >
               {h % 3 === 0 ? formatHour(h) : ''}
             </div>
@@ -220,7 +220,7 @@ export function ActiveHoursHeatmap({ data, byDate, range }: {
           {DAYS.map((day, di) => (
             <div
               key={`d-${di}`}
-              className="text-text-3 font-mono leading-tight text-center text-xs"
+              className="text-text-2 font-mono leading-tight text-center text-xs"
             >
               {day}
             </div>

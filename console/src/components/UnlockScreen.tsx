@@ -36,7 +36,7 @@ export default function UnlockScreen({ onUnlocked }: { onUnlocked: () => void })
         className="flex w-full max-w-[var(--panel-shortcuts)] flex-col gap-[var(--sp-3)] rounded-[var(--radius-md)] border border-border-subtle bg-surface-raised p-[var(--sp-8)]"
       >
         <h1 className="c-heading">Console locked</h1>
-        <p className="c-body text-text-3">
+        <p className="c-body text-text-2">
           Enter the fleet token to start a console session. The token is sent
           once to this server and is not stored in the browser.
         </p>

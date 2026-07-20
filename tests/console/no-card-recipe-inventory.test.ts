@@ -2,50 +2,26 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
 
-// Anti-sprawl guard (DD-38). card.md:60 mandates `card-via-primitive`. Card.tsx IS
-// built (f315b1a5) and a further wave of consumers has migrated onto it (ErrorBoundary,
-// LogsTab, then AccessTab, ScheduledMessageRow, Inbox, Ops; MessageBubble's panel is on
-// <Card> but the surface still carries the `c-card--detail` modifier so it stays a recipe
-// consumer). The remaining files still render the raw `.c-card` CSS recipe.
-// This pins those remaining consumers to an allowlist (tracked migration debt →
-// the Card primitive, scoped in 06-implementation/card-primitive-build-spec.md)
-// and FAILS on any NEW file that reaches for the raw recipe, so new cards cannot
-// bypass the primitive while the existing ones migrate. Migrating a file off
-// `c-card` (good!) makes its entry stale and the honesty test prompts deletion.
-// Report-only-passing; promote to a resilience/eslint error once the allowlist
-// empties and `.c-card` is deleted from composites.css.
+// Anti-sprawl guard (DD-38 — CLOSEOUT STATE). card.md:60 mandates
+// `card-via-primitive`. The migration is COMPLETE: every consumer renders via
+// the Card primitive, and the legacy `.c-card` recipe was ABSORBED — Card.tsx
+// renders `.soup-card` (primitives.css, declarations verbatim) and the
+// composites recipe is deleted. With the allowlist empty this guard is the
+// PROMOTED state the build spec sequenced: it hard-FAILS on ANY raw `.c-card`
+// usage anywhere in console/src, so no surface can bypass the primitive.
 
 const repoRoot = resolve(import.meta.dirname, '..', '..')
 const srcRoot = 'console/src'
 
 const CARD_RECIPE = /\bc-card\b/
 
-// Card.tsx IS the primitive — the single sanctioned home of the `.c-card` recipe. It is not
-// migration debt; it stays allowlisted until `.c-card` is renamed/absorbed at the end of the
-// migration. Every OTHER entry is a raw-recipe consumer still owed a migration onto <Card>.
+// The allowlist is EMPTY by design (DD-38 closeout): the Card primitive absorbed the
+// recipe as `.soup-card` (primitives.css), so NOTHING may use raw `.c-card` — including
+// Card.tsx itself.
 const ALLOWLIST = new Set<string>([
-  'console/src/components/primitives/Card.tsx',
-  // ActiveHoursHeatmap MIGRATED (W2-S4): its 3 c-card sections now render via
-  // <Card variant="base" as="section">; dropped redundant bg-surface-raised.
-  // MessageBubble MIGRATED off the recipe (DD-43): its detail panel now renders via the
-  // HoverCard primitive and the `.c-card--detail` modifier was deleted, so it is no
-  // longer a raw `c-card` consumer (removed from this allowlist per the honesty test).
-  // GroupCard MIGRATED (W2-S4): now renders via <Card variant="interactive"> (a real
-  // <button>), so it no longer uses the raw recipe.
-  // MetricsTab MIGRATED (W2-S4): its 4 c-card sections now render via <Card variant="base"
-  // as="section">, so it no longer uses the raw recipe.
-  // ProvidersKeysCard MIGRATED (W2-S4): its sole c-card surface now renders via the Card
-  // primitive (the motion wrapper is kept outside), so it no longer uses the raw recipe.
-  // SummaryTab MIGRATED (W2-S4): its 4 c-card cards now render via <Card variant="base">
-  // (the motion.div stays as the outer animated wrapper owning position/size; flex-row
-  // cards keep h-full so the inner Card fills the stretched slot), so it no longer uses
-  // the raw recipe.
-  // SoupKitchen MIGRATED (W2-S4): its 4 c-card surfaces now render via <Card variant="base">
-  // (1 motion-nested — the motion.div keeps the external flex-shrink-0 class and wraps the
-  // Card; 3 plain-div 1:1 swaps), so it is no longer a raw `c-card` consumer. This was the
-  // LAST raw-recipe page — only Card.tsx (the primitive home) stays allowlisted now.
-  // MIGRATED onto <Card> (DD-38): ErrorBoundary.tsx, line-detail/LogsTab.tsx, pages/Operator.tsx,
-  // line-detail/AccessTab.tsx, line-detail/ScheduledMessageRow.tsx, Inbox.tsx
+  // EMPTY — migration complete (DD-38 closeout). Card.tsx renders `.soup-card`
+  // (the absorbed recipe in primitives.css) and no longer matches CARD_RECIPE.
+  // Any entry added here is new debt: use <Card> instead.
 ])
 
 function tsxFiles(dir: string): string[] {

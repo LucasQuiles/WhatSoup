@@ -39,6 +39,14 @@ export interface PrimaryModelProbeAdapterDeps {
    * claude-cli probe (see claude-filestore-heal.ts). Injectable for tests.
    */
   ensureClaudeFileStoreCredential?: () => ClaudeFileStoreHealResult;
+  /**
+   * Egress proxy port (#1607, F6). When the runtime has an active egress
+   * allowlist proxy, its port is threaded here so the model/recovery probe's
+   * child env carries `HTTP_PROXY`/`HTTPS_PROXY` (+ lowercase) and the probe's
+   * own egress is adjudicated instead of leaking unproxied. Undefined when the
+   * instance has not opted into the allowlist.
+   */
+  egressProxyPort?: number;
 }
 
 const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
@@ -131,10 +139,18 @@ function modelProbeEnv(
   providerConfig: Record<string, unknown> | undefined,
   deps: PrimaryModelProbeAdapterDeps,
 ): NodeJS.ProcessEnv {
+  // Egress proxy (#1607, F6): thread the runtime's proxy port through so the
+  // probe child egresses through the same allowlist as a real turn. Undefined
+  // when the instance has no allowedEgress → no proxy vars, behaviour unchanged.
+  const baseOpts =
+    typeof deps.egressProxyPort === 'number' && deps.egressProxyPort > 0
+      ? { egressProxyPort: deps.egressProxyPort }
+      : undefined;
   if (provider === 'opencode-cli') {
     const buildEnv = deps.buildChildEnv ?? buildChildEnv;
-    return buildEnv('opencode-cli', undefined, model ?? undefined, providerConfig);
+    return buildEnv('opencode-cli', baseOpts, model ?? undefined, providerConfig);
   }
+  const proxyUrl = baseOpts ? `http://127.0.0.1:${baseOpts.egressProxyPort}` : undefined;
   return {
     HOME: process.env.HOME,
     PATH: process.env.PATH,
@@ -148,6 +164,18 @@ function modelProbeEnv(
     // auth-required fallback even after a successful reauth. undefined is dropped
     // by the spawn layer when the var is unset → no change on hosts that omit it.
     ...(process.env.CLAUDE_CONFIG_DIR ? { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR } : {}),
+    // Egress proxy (#1607, F6): UPPER + lower case (curl reads lowercase for
+    // plain HTTP; see child-env.ts / F4). Only present when opted in.
+    ...(proxyUrl
+      ? {
+          HTTP_PROXY: proxyUrl,
+          HTTPS_PROXY: proxyUrl,
+          NO_PROXY: 'localhost,127.0.0.1',
+          http_proxy: proxyUrl,
+          https_proxy: proxyUrl,
+          no_proxy: 'localhost,127.0.0.1',
+        }
+      : {}),
   };
 }
 

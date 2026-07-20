@@ -284,7 +284,7 @@ describe('SummaryTab — health=null connectionState fallback (b[0])', () => {
     }
     render(withProviders(<SummaryTab line={line} onEditConfig={vi.fn()} onChangeMode={vi.fn()} />))
 
-    const connCard = screen.getByText('CONNECTION').closest('div.c-card') as HTMLElement
+    const connCard = screen.getByText('CONNECTION').closest('div.soup-card') as HTMLElement
     // resolveConnection('unknown') → label is 'unknown'
     expect(connCard).toBeTruthy()
     // The card should render without crashing; connection label present
