@@ -279,6 +279,16 @@ export class ImessageAdapter
     return this.self;
   }
 
+  /**
+   * True iff a conversation ref addresses an iMessage GROUP chat (chat GUID
+   * with the `iMessage;+;` form; DMs use `iMessage;-;`). Used by the
+   * connection bridge to set IncomingMessage.isGroup — the contract
+   * envelope carries no group flag.
+   */
+  isGroupConversation(ref: ConversationRef): boolean {
+    return ref.channel === this.channelId && ref.id.startsWith('iMessage;+;');
+  }
+
   // ── Send ─────────────────────────────────────────────────────────────────
 
   async sendText(
@@ -501,7 +511,10 @@ export class ImessageAdapter
 
   private buildInboundMessage(record: InboundImessage): InboundMessage {
     const channelId = this.channelId;
-    const peer = record.fromMe ? record.to : record.from;
+    // Group envelopes thread under the chat GUID (all members' traffic shares
+    // one conversation). 1:1 envelopes key on the PEER: sender for inbound,
+    // recipient for our own outbound echoes.
+    const peer = record.chatGuid ?? (record.fromMe ? record.to : record.from);
     const senderId = record.fromMe ? this.selfRef().id : record.from;
     const ts = new Date(record.timestamp);
     return {

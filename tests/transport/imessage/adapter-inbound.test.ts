@@ -199,3 +199,36 @@ describe('ImessageAdapter — listener isolation', () => {
     await adapter.disconnect();
   });
 });
+
+describe('ImessageAdapter — group inbound', () => {
+  it('keys a group envelope conversation on the chatGuid, sender stays the member address', async () => {
+    const { adapter } = makeAdapter();
+    await adapter.connect();
+    const received: InboundMessage[] = [];
+    adapter.on('message', (m) => received.push(m));
+
+    adapter.handleInboundRecord({
+      guid: 'g-group-1',
+      from: 'member@icloud.com',
+      to: 'iMessage;+;chatABC',
+      chatGuid: 'iMessage;+;chatABC',
+      body: 'group msg',
+      fromMe: false,
+      kind: 'text',
+      timestamp: 5000,
+    });
+
+    expect(received).toHaveLength(1);
+    expect(received[0].conversation.id).toBe('iMessage;+;chatABC');
+    expect(received[0].sender.id).toBe('member@icloud.com');
+    await adapter.disconnect();
+  });
+
+  it('isGroupConversation: true for iMessage;+; refs, false for DM guids and plain addresses', async () => {
+    const { adapter } = makeAdapter();
+    const channelId = adapter.channelId;
+    expect(adapter.isGroupConversation({ channel: channelId, id: 'iMessage;+;chatABC' })).toBe(true);
+    expect(adapter.isGroupConversation({ channel: channelId, id: 'iMessage;-;friend@icloud.com' })).toBe(false);
+    expect(adapter.isGroupConversation({ channel: channelId, id: 'friend@icloud.com' })).toBe(false);
+  });
+});
