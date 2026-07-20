@@ -286,3 +286,20 @@ describe('nlRouting flag matrix stays byte-identical (G7/D7)', () => {
       .toEqual({ type: 'forwarded', text: '/model sonnet --verbose' });
   });
 });
+
+describe('structured /model grammar (C1 — agent-assisted design)', () => {
+  it('routes structured numbered forms local', () => {
+    expect(classifyInput('/model 2', { routingAliases: true })).toMatchObject({ type: 'local', command: 'model', args: '2' });
+    expect(classifyInput('/model 2b', { routingAliases: true }).type).toBe('local');
+    expect(classifyInput('/model 2 default', { routingAliases: true }).type).toBe('local');
+    expect(classifyInput('/model list openai', { routingAliases: true }).type).toBe('local');
+  });
+  it('FORWARDS free text to the agent (agent-assisted NL)', () => {
+    expect(classifyInput('/model the best kimi', { routingAliases: true }).type).toBe('forwarded');
+  });
+  it('keeps bare + verb + provider-id local; all forward when flag OFF', () => {
+    expect(classifyInput('/model', { routingAliases: true }).command).toBe('model');
+    expect(classifyInput('/model strongest', { routingAliases: true }).command).toBe('model');
+    expect(classifyInput('/model the best kimi').type).toBe('forwarded'); // flag off
+  });
+});
