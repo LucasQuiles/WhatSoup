@@ -104,7 +104,8 @@ import { isProviderId } from './providers/index.ts';
 import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
 import { formatChatRefForOwner } from '../../core/chat-display-name.ts';
-import { OWNER_BULLET, bulletedSection, modelModifierTags, modifierSuffix } from './owner-render-format.ts';
+import { OWNER_BULLET, bulletedSection, modelModifierTags, modifierSuffix, formatAvailableModels, MODEL_CATALOGUE_CAP } from './owner-render-format.ts';
+import { resolveModelCatalogue } from './model-catalogue-resolver.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
 import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
@@ -3951,10 +3952,24 @@ export class AgentRuntime implements Runtime {
               );
               break;
             }
-            if (sub === 'list') {
-              // B26: the model catalogue — config-derived only (see
-              // renderModelCatalogue for the honesty contract).
+            if (sub === 'list' || sub.startsWith('list ')) {
+              // The config-derived pin/primary block renders synchronously and
+              // unconditionally (Q 2b#1). The DYNAMIC per-harness available-models
+              // section is appended by an async, fire-and-forget path so a slow or
+              // failed harness probe never holds the turn (Q 2b#3); it degrades
+              // independently to a reason-specific "unavailable" line.
+              const rawArgs = (classified.args ?? '').trim();
+              const filter = sub === 'list'
+                ? null
+                : rawArgs.slice(rawArgs.toLowerCase().indexOf('list ') + 'list '.length).trim() || null;
+              // The config-derived pin/primary block sends IMMEDIATELY so "what
+              // am I on" never waits on — or is lost to — the catalogue probe
+              // (Q 2b#1).
               this.sendDirect(chatJid, this.renderModelCatalogue());
+              // The dynamic per-harness available-models section follows as a
+              // separate message once the bounded + cached probe resolves —
+              // fire-and-forget so a slow harness never holds the turn (Q 2b#3).
+              void this.sendDynamicModelCatalogueSection(chatJid, filter);
               break;
             }
             if (sub === 'default') {
@@ -8503,6 +8518,34 @@ export class AgentRuntime implements Runtime {
       'Pin: `/model provider-id` — prefers it for you here (24h). Back: `/model default` or `/reset`.',
       '_Which weight actually serves is not observable here._',
     ].join('\n');
+  }
+
+  /**
+   * Send the DYNAMIC per-harness available-models section as the follow-up to
+   * the config-derived `/model list` block (which the caller already delivered).
+   * Fire-and-forget: the catalogue source (an opencode spawn or an anthropic
+   * HTTP call) is bounded + cached, but a slow harness must never hold the turn
+   * (Q 2b#3). Never throws — the resolver is total; the catch is a belt so a bug
+   * here just omits the section (the config block already went out).
+   */
+  private async sendDynamicModelCatalogueSection(chatJid: string, filter: string | null): Promise<void> {
+    try {
+      const provider = this.agentProvider;
+      const binary = getProviderBinary(provider) ?? provider;
+      const listing = await resolveModelCatalogue(provider, binary, { nowMs: Date.now() });
+      this.sendDirect(chatJid, formatAvailableModels({
+        harnessLabel: provider,
+        currentModelId: this.model ?? null,
+        fallbackModelIds: this.agentFallbacks
+          .map((e) => e.model)
+          .filter((m): m is string => m !== undefined),
+        listing,
+        filter,
+        cap: MODEL_CATALOGUE_CAP,
+      }));
+    } catch (err) {
+      log.warn({ err, instance: this.instanceName }, '/model list dynamic catalogue section failed');
+    }
   }
 
   /**
