@@ -329,3 +329,104 @@ def test_stale_roster_for_collector_comparison_fails_closed(tmp_path: Path, monk
     _write_collector_state(mod, state, configuredRemoteHosts=["host-a"])
     problems = mod.collect_problems(_args(), {"collector_roster"})
     assert "collector_roster" in problems
+
+
+# --------------------------------------------------------------------------
+# #1866 Task 3 -- membership follows repaired declaration (monitor code is
+# UNCHANGED). expected_local_services() reads ONLY the deployed per-host
+# profile (BOT_ERRORS_HEALTH_PROFILE / health_profile_path()) -- it never
+# consults the inventory. restore_service_to_always_on() (bot_errors_cutover.py,
+# Task 1) is the ONE authoritative writer that repairs BOTH the inventory and
+# the deployed profile in one call; this proves the watchdog's target-set
+# picks svc1 up purely because that profile-side declaration flipped from
+# "blocked" to "always_on" -- no watchdog code changed.
+# --------------------------------------------------------------------------
+
+
+def _load_cutover_module():
+    spec = importlib.util.spec_from_file_location(
+        "bot_errors_cutover_for_watchdog_roster", _SCRIPT_ROOT / "bot_errors_cutover.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _write_task3_inventory(tmp_path: Path, host: str, profile_filename: str, instance: dict) -> Path:
+    path = tmp_path / "bot-errors-expected-fleet.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "hosts": [
+                    {
+                        "host": host,
+                        "role": "bot-host",
+                        "guiSessionExpected": "always_aqua",
+                        "profile": profile_filename,
+                        "collectorRemote": True,
+                        "instances": [instance],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_task3_profile(profiles_dir: Path, filename: str, instance: dict) -> Path:
+    profiles_dir.mkdir(parents=True, exist_ok=True)
+    path = profiles_dir / filename
+    path.write_text(
+        json.dumps({"role": "bot-host", "instances": [instance]}),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_expected_local_services_follows_repaired_declaration(tmp_path: Path, monkeypatch):
+    mod = _load_module()
+    cutover_mod = _load_cutover_module()
+
+    host = "h1"
+    profile_filename = "h1.json"
+    inventory_path = _write_task3_inventory(
+        tmp_path,
+        host,
+        profile_filename,
+        {
+            "name": "svc1",
+            "expected": "blocked",
+            "service": "com.whatsoup.svc1",
+            "healthPort": 9099,
+            "reason": "Service is unloaded/down pending Lucas approval to bootstrap",
+        },
+    )
+    profiles_dir = tmp_path / "health-profiles"
+    profile_path = _write_task3_profile(
+        profiles_dir,
+        profile_filename,
+        {
+            "name": "svc1",
+            "expected": "blocked",
+            "service": "com.whatsoup.svc1",
+            "reason": "Service is unloaded/down pending Lucas approval to bootstrap",
+        },
+    )
+    monkeypatch.setenv("BOT_ERRORS_HEALTH_PROFILE", str(profile_path))
+
+    # Pre-repair: svc1 is declared blocked in the deployed profile -- NOT a
+    # monitor target.
+    pre_names = {item["name"] for item in mod.expected_local_services()}
+    assert "svc1" not in pre_names
+
+    # Repair the declaration via the ONE authoritative writer (#1866 Task 1) --
+    # no watchdog code changes; membership must follow the repaired declaration.
+    cutover_mod.restore_service_to_always_on(
+        host, "svc1", inventory_path=inventory_path, profiles_dir=profiles_dir
+    )
+
+    post_names = {item["name"] for item in mod.expected_local_services()}
+    assert "svc1" in post_names

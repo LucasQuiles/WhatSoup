@@ -169,10 +169,11 @@ import { canonicalConversationKey, resolvePhoneFromJid } from '../../core/access
 import { isAdminPhone } from '../../lib/phone.ts';
 import { matchImperative, extractImperativeTarget } from '../../core/substrate/inline-extractor.ts';
 import { createBead } from '../../core/substrate/beads.ts';
-import { mkdirSync, copyFileSync, readdirSync, unlinkSync } from 'node:fs';
+import { mkdirSync, copyFileSync, readdirSync, unlinkSync, readFileSync } from 'node:fs';
 import { join, resolve, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
+import { EgressProxy } from './egress-proxy.ts';
 import { ToolRegistry } from '../../mcp/registry.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
 import { perChatActorSession } from './per-chat-actor-session.ts';
@@ -417,6 +418,14 @@ export interface SandboxPolicy {
   allowedTools: string[];
   allowedMcpTools?: string[];
   bash: { enabled: boolean };
+  /**
+   * Opt-in egress allowlist (#1607 / QR-008). A non-empty list makes
+   * `start()` boot a loopback `EgressProxy` bound to this policy and inject
+   * its port into the child process env (see `egressProxyPort` on
+   * `SessionManager`/`buildBaseChildEnv`). Absent or empty: no proxy, no env
+   * injection — unchanged pre-#1607 behavior.
+   */
+  allowedEgress?: string[];
 }
 
 export type SessionScope = 'single' | 'shared' | 'per_chat';
@@ -715,6 +724,12 @@ export class AgentRuntime implements Runtime {
   private readonly configSystemPrompt: string | undefined;
   private readonly instructionsPath: string | undefined;
   private readonly sandbox: SandboxPolicy | undefined;
+  /** Opt-in egress-allowlist proxy (#1607); undefined when allowedEgress is absent/empty. */
+  private egressProxy: EgressProxy | undefined;
+  /** Test observability only — the egress proxy's bound port has no other externally visible signal. */
+  get egressProxyPortForTest(): number | undefined {
+    return this.egressProxy?.port;
+  }
   private readonly model: string | undefined;
   private readonly sandboxPerChat: boolean;
   private readonly perChatConversationBound: boolean;
@@ -2887,6 +2902,37 @@ export class AgentRuntime implements Runtime {
         );
         writeSandboxArtifacts(claudeDir, resolvedPolicy, sandboxHookPath, pollLintHookPath, postToolUseLogHookPath);
         log.info({ cwd, hookPath: sandboxHookPath, pollLintHookPath, postToolUseLogHookPath }, 'wrote sandbox-policy.json and settings.json');
+
+        // Opt-in egress-allowlist proxy (#1607 / QR-008): whenever the sandbox
+        // policy carries a PRESENT allowedEgress array (even []=deny-all, F1).
+        // Reads the policy BACK off disk (not the in-memory resolvedPolicy) on
+        // every request, so a live edit to sandbox-policy.json takes effect
+        // without a restart; a corrupt/unreadable file fails closed (egress-proxy.ts).
+        if (Array.isArray(this.sandbox.allowedEgress)) {
+          // Own try so a proxy bind failure is labelled as such (not as a
+          // sandbox-artifact write failure) — then re-throw to abort start():
+          // an opted-in instance must NOT run with egress unconfined (fail-closed).
+          try {
+            const policyPath = join(claudeDir, 'sandbox-policy.json');
+            this.egressProxy = await EgressProxy.start({
+              policy: {
+                read: () => {
+                  const raw = JSON.parse(readFileSync(policyPath, 'utf8'));
+                  return { allowedEgress: Array.isArray(raw.allowedEgress) ? raw.allowedEgress.filter((e: unknown) => typeof e === 'string') : [] };
+                },
+              },
+              failOpen: process.env['WHATSOUP_SANDBOX_FAIL_OPEN'] === '1',
+              log: (event) => log.info(event, 'egress adjudication'),
+            });
+            log.info(
+              { port: this.egressProxy.port, allowlistSize: this.sandbox.allowedEgress.length },
+              'started egress-allowlist proxy',
+            );
+          } catch (proxyErr) {
+            log.error({ err: proxyErr, cwd }, 'failed to start egress-allowlist proxy — aborting start (fail-closed)');
+            throw proxyErr;
+          }
+        }
       } catch (err) {
         log.error({ err, cwd }, 'failed to initialize sandbox artifacts');
         throw err;
@@ -7137,6 +7183,17 @@ export class AgentRuntime implements Runtime {
       this.globalMcpSocketPath = null;
     }
 
+    // Stop the opt-in egress-allowlist proxy (#1607), if one was started.
+    if (this.egressProxy) {
+      try {
+        await this.egressProxy.close();
+        log.debug({ instanceName: this.instanceName }, 'egress-allowlist proxy stopped');
+      } catch (err) {
+        log.warn({ err, instanceName: this.instanceName }, 'egress-allowlist proxy stop failed');
+      }
+      this.egressProxy = undefined;
+    }
+
     // Stop workspace-scoped socket servers and media bridges (sandboxPerChat)
     let workspaceSocketServersStopped = 0;
     let workspaceMediaBridgesStopped = 0;
@@ -9533,7 +9590,7 @@ export class AgentRuntime implements Runtime {
     };
 
     const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, {
-      cwd: this.cwd ?? homedir(),
+      cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port,
     });
     void Promise.resolve()
       .then(() => probePrimaryModelUsability(target, adapters))
@@ -9609,7 +9666,7 @@ export class AgentRuntime implements Runtime {
   private async probePrimaryProviderRecovered(): Promise<boolean> {
     const result = await probePrimaryModelUsability(
       { provider: this.agentProvider, model: this.model ?? null },
-      createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir() }),
+      createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port }),
     );
     return result.status === 'usable';
   }
@@ -9651,7 +9708,7 @@ export class AgentRuntime implements Runtime {
         },
         runPrimaryModelUsability: () => probePrimaryModelUsability(
           { provider: this.agentProvider, model: this.model ?? null },
-          createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir() }),
+          createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port }),
         ),
         runPrimaryRecoveryProbe: () => this.probePrimaryProviderRecovered(),
         accountAuthDeps: {
@@ -10252,6 +10309,7 @@ export class AgentRuntime implements Runtime {
       whatsoupMcpSocket: mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,
       handoffSystemBlock: this.buildHandoffSystemBlock(conversationKey, route ? route.provider : this.effectiveProvider),
       routingSystemBlock: config.nlRouting ? () => this.buildRoutingContractBlock(route ? route.provider : this.effectiveProvider) : undefined,
+      egressProxyPort: this.egressProxy?.port,
     });
     this.sessionManagerIds.set(session, randomUUID());
     this.sessionEventToolScopes.set(
