@@ -5,7 +5,9 @@ import {
   modifierSuffix,
   modelModifierTags,
   formatAvailableModels,
+  isStructuralCatalogueAbsence,
   MODEL_CATALOGUE_CAP,
+  type AvailableModelsListing,
 } from '../../../src/runtimes/agent/owner-render-format.ts';
 
 // b28 r2a/r2d: the pure WhatsApp owner-render formatting seam. Enumerations
@@ -299,5 +301,43 @@ describe('formatAvailableModels', () => {
   it('exposes one cap constant (number ≥ 1) for uniform use across harnesses', () => {
     expect(typeof MODEL_CATALOGUE_CAP).toBe('number');
     expect(MODEL_CATALOGUE_CAP).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// Render-policy split (advisor 2026-07-20): a STRUCTURAL absence (no catalogue
+// SOURCE exists for this harness) has no retry and no reader-actionable fix, so
+// the caller SUPPRESSES the whole dynamic section instead of appending a
+// permanent dead-end line to every /model list. A TRANSIENT failure (a source
+// that exists but hiccupped) stays rendered because "try again" is actionable.
+describe('isStructuralCatalogueAbsence', () => {
+  const asOf = 'just now';
+  const ok: AvailableModelsListing = { status: 'ok', ids: ['x'], sourceLabel: 'opencode CLI', asOfLabel: asOf };
+
+  it('is false for an available (ok) listing — there is a section to render', () => {
+    expect(isStructuralCatalogueAbsence(ok)).toBe(false);
+  });
+
+  it('is TRUE only for no-key and no-adapter (no source exists on this host)', () => {
+    const structural: AvailableModelsListing[] = [
+      { status: 'unavailable', reason: { kind: 'no-key' }, asOfLabel: asOf },
+      { status: 'unavailable', reason: { kind: 'no-adapter', harness: 'codex-cli' }, asOfLabel: asOf },
+    ];
+    for (const listing of structural) {
+      expect(isStructuralCatalogueAbsence(listing)).toBe(true);
+    }
+  });
+
+  it('is FALSE for every transient reason — a source exists, "try again" is actionable', () => {
+    const transient: AvailableModelsListing[] = [
+      { status: 'unavailable', reason: { kind: 'key-rejected' }, asOfLabel: asOf },
+      { status: 'unavailable', reason: { kind: 'timeout' }, asOfLabel: asOf },
+      { status: 'unavailable', reason: { kind: 'empty' }, asOfLabel: asOf },
+      { status: 'unavailable', reason: { kind: 'unparseable' }, asOfLabel: asOf },
+      { status: 'unavailable', reason: { kind: 'probe-failed' }, asOfLabel: asOf },
+      { status: 'unavailable', reason: { kind: 'lookup-failed' }, asOfLabel: asOf },
+    ];
+    for (const listing of transient) {
+      expect(isStructuralCatalogueAbsence(listing)).toBe(false);
+    }
   });
 });

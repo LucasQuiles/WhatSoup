@@ -98,7 +98,7 @@ Current baseline measurements:
 
 | rule | path | lines | ceiling |
 |------|------|-------|---------|
-| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 11945 | 11945 |
+| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 11951 | 11951 |
 | `arch.file-size` | `tests/runtimes/agent/runtime.test.ts` | 16288 | 16288 |
 
 The `ceiling` column (the `maxLines` field on each measurement in `baseline.json`) is a **blocking

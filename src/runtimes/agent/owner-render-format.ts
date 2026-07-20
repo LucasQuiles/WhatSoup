@@ -103,6 +103,32 @@ export type AvailableModelsListing =
   | { status: 'ok'; ids: readonly string[]; sourceLabel: string; asOfLabel: string }
   | { status: 'unavailable'; reason: UnavailableReason; asOfLabel: string };
 
+/**
+ * STRUCTURAL vs TRANSIENT catalogue absence — a render-policy split (advisor
+ * 2026-07-20). A *structural* absence means no catalogue SOURCE exists for this
+ * harness on this host, so there is nothing to retry and no fix the WhatsApp
+ * reader can take:
+ *   - `no-key`     → the subscription claude-cli authenticates via OAuth and has
+ *                    no anthropic API key here; `/v1/models` is permanently
+ *                    unreachable on this host (provisioning a key is an owner/ops
+ *                    act, not a reader action). This is the NORMAL q state.
+ *   - `no-adapter` → the harness has no catalogue source wired at all.
+ * In those cases the dynamic section would be a permanent dead-end line on every
+ * `/model list`, failing its own "actionable, not a dead end" bar — so the caller
+ * SUPPRESSES it and renders the config-derived block only.
+ *
+ * Every OTHER unavailable reason (`key-rejected`/`timeout`/`empty`/`unparseable`/
+ * `probe-failed`/`lookup-failed`) is a TRANSIENT failure of a source that DOES
+ * exist: "try again shortly" is genuinely actionable (and a rejected key is a
+ * real, fixable misconfiguration worth surfacing), so those still render.
+ */
+export function isStructuralCatalogueAbsence(listing: AvailableModelsListing): boolean {
+  return (
+    listing.status === 'unavailable' &&
+    (listing.reason.kind === 'no-key' || listing.reason.kind === 'no-adapter')
+  );
+}
+
 /** Input for {@link formatAvailableModels}. All values are config- or
  *  catalogue-derived and sanitize-safe; this layer only shapes strings. */
 export interface AvailableModelsInput {
