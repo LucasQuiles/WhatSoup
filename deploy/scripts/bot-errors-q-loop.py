@@ -67,6 +67,39 @@ IDLE_WAIT_SECONDS = 5 * 60
 # stale alert. 480s leaves a 120s margin under the 600s watchdog deadline.
 # Enforced by tests/scripts/bot-errors-q-loop.test.ts.
 MAX_IDLE_WAIT_SECONDS = 8 * 60
+# Frame headers are single-sourced: the composers below and the self-reminder
+# exclusion both derive from these constants so they cannot drift apart.
+BOOTSTRAP_HEADER = "Codex -> Q / durable coordination loop online"
+NUDGE_HEADER = "Codex -> Q / gate nudge"
+CHECKPOINT_HEADER = "Codex -> Q / hourly SDLC checkpoint"
+
+# The loop's own REPEATING reminder frames must never re-arm the awaiting-Q
+# clock: each nudge re-arming the clock turns one unanswered ask into a
+# permanent 15/30-minute stale/recovered sawtooth at the heartbeat watchdog.
+# Own frames always continue "<header>\n\n"; matching the bare header would
+# also swallow legitimate asks that extend it ("... gate nudge escalation").
+# The one-shot bootstrap frame is deliberately NOT excluded: it carries the
+# original ask, and history replay after a state reset must be able to
+# reconstruct the awaiting clock from it.
+SELF_REMINDER_PREFIXES = (
+    NUDGE_HEADER + "\n\n",
+    CHECKPOINT_HEADER + "\n\n",
+)
+
+# Dispatcher/bridge alert banners are machine frames, not asks: they routinely
+# contain "reply"/"approve"/"blocked" in remediation text (observed live
+# 2026-07-18 19:16:49Z — an ESCALATED bead-backlog alert armed the clock and
+# restarted the nudge cycle on a non-ask). They must never arm awaiting-Q.
+ALERT_BANNER_PREFIXES = (
+    "BOT ERROR",
+    "BOT WARNING",
+    "BOT INFO",
+    "BOT RECOVERY",
+    "\U0001f534",  # red-circle bridge lines
+    "\u2705",      # check-mark bridge resolves
+    "\u26a0",      # warning-sign bridge lines
+)
+
 NUDGE_AFTER_SECONDS = 20 * 60
 NUDGE_COOLDOWN_SECONDS = 45 * 60
 CHECKPOINT_AFTER_SECONDS = 60 * 60
@@ -687,7 +720,11 @@ def classify_activity(state: dict[str, Any], messages: list[dict[str, Any]], per
                 persist_activity_state(state, "q_monitoring", persist_state)
         if role in {"codex", "lucas", "outbound"}:
             state["last_outbound_at"] = max(int(state.get("last_outbound_at", 0)), ts)
-            if "reply" in body.lower() or "approve" in body.lower() or "blocked" in body.lower():
+            if (
+                ("reply" in body.lower() or "approve" in body.lower() or "blocked" in body.lower())
+                and not body.startswith(SELF_REMINDER_PREFIXES)
+                and not body.startswith(ALERT_BANNER_PREFIXES)
+            ):
                 state["awaiting_q_since"] = ts
                 persist_activity_state(state, "outbound_awaiting_q", persist_state)
 
@@ -696,7 +733,7 @@ def maybe_send_bootstrap(state: dict[str, Any], socket_path: str) -> bool:
     if state["sent"].get("daemon_online"):
         return False
     text = (
-        "Codex -> Q / durable coordination loop online\n\n"
+        BOOTSTRAP_HEADER + "\n\n"
         "I installed a supervised dynamic polling loop for BOT ERRORS coordination. "
         "It records chat activity, SDLC phase state, outbound asks, Q approvals/blocks, "
         "and adjusts wait time based on activity: 15s while active, 30s while waiting on Q, "
@@ -725,7 +762,7 @@ def maybe_send_nudge(state: dict[str, Any], socket_path: str) -> bool:
     if current - int(state.get("last_nudge_at", 0)) < NUDGE_COOLDOWN_SECONDS:
         return False
     text = (
-        "Codex -> Q / gate nudge\n\n"
+        NUDGE_HEADER + "\n\n"
         "The BOT ERRORS reliability work is still inside the approved SDLC gate. "
         "Please reply with APPROVED, BLOCKED, or the next concrete critique for the current gate. "
         "The loop will keep polling and will not mark this complete without evidence and Q validation."
@@ -747,7 +784,7 @@ def maybe_send_checkpoint(state: dict[str, Any], socket_path: str) -> bool:
         return False
     phase = state.get("phase", "unknown")
     text = (
-        "Codex -> Q / hourly SDLC checkpoint\n\n"
+        CHECKPOINT_HEADER + "\n\n"
         f"Current phase: {phase}. "
         "Completion remains blocked until the approved design, pre-slice checks, Slice 1 evidence, "
         "adversarial review, and per-machine rollout gates are all green. "

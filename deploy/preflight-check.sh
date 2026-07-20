@@ -117,6 +117,20 @@ if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   fi
 else
   echo "PREFLIGHT-WARN: $REPO_ROOT is not a git work tree (cannot compute dirty/unpushed)" >&2
+  # A non-git deploy dir is a release export, and a release export must carry
+  # the manifest the fleet release-drift checker verifies. A manifest-less
+  # export (2026-07-16: WhatSoup-release-ee35101f shipped to four hosts without
+  # one) makes every host flag release-drift forever and leaves the deployed
+  # bytes unverifiable against any recorded plan. Fail closed before restart.
+  if [ ! -f "$REPO_ROOT/.whatsoup-release-manifest.json" ]; then
+    {
+      echo "PREFLIGHT-FAIL: REFUSING TO START — release export lacks .whatsoup-release-manifest.json."
+      echo "  The manifest is written by the snapshot pipeline (scripts/release-snapshot-plan.ts)."
+      echo "  Fix: re-export the release through the snapshot pipeline, or backfill the"
+      echo "  manifest for this export, then re-run preflight."
+    } >&2
+    exit 3
+  fi
 fi
 
 if [ -f "$REPO_ROOT/package-lock.json" ] && [ ! -d "$REPO_ROOT/node_modules" ]; then

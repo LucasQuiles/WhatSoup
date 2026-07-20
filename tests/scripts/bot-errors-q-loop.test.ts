@@ -272,4 +272,139 @@ print(json.dumps(m.q_response_wait_diagnostic(state, current=1000 + (25 * 60)), 
       status: 'stale_awaiting_q',
     });
   });
+
+  it('does not re-arm the awaiting-Q clock from the loop’s own reminder frames', () => {
+    const root = tmpRoot();
+    const result = python(`${importModulePrelude()}
+root = Path(${JSON.stringify(root)})
+root.mkdir(parents=True, exist_ok=True)
+m.STATE_DIR = root
+m.STATE_FILE = root / "state.json"
+m.EVENT_LOG = root / "events.jsonl"
+m.ACTIVITY_LOG = root / "activity.jsonl"
+m.LOCK_FILE = root / "loop.lock"
+state = m.default_state()
+state["phase"] = "monitoring"
+state["awaiting_q_since"] = 1000
+for body in (
+    "Codex -> Q / gate nudge\\n\\nStill inside the approved SDLC gate. Please reply with APPROVED or BLOCKED.",
+    "Codex -> Q / hourly SDLC checkpoint\\n\\nNo reply yet; the gate remains blocked until Q approves.",
+):
+    m.classify_activity(state, [{
+      "pk": 2,
+      "body": body,
+      "timestamp": 5000,
+      "is_from_me": 1,
+      "sender_name": "personal",
+    }])
+print(state["awaiting_q_since"])
+`);
+    expect(result).toBe('1000');
+  });
+
+  it('does not arm the awaiting-Q clock from dispatcher alert banners containing trigger words', () => {
+    const root = tmpRoot();
+    const result = python(`${importModulePrelude()}
+root = Path(${JSON.stringify(root)})
+root.mkdir(parents=True, exist_ok=True)
+m.STATE_DIR = root
+m.STATE_FILE = root / "state.json"
+m.EVENT_LOG = root / "events.jsonl"
+m.ACTIVITY_LOG = root / "activity.jsonl"
+m.LOCK_FILE = root / "loop.lock"
+state = m.default_state()
+state["phase"] = "monitoring"
+state["awaiting_q_since"] = 0
+for body in (
+    "BOT ERROR - ESCALATED still open: whatsoup at loops has 17 bead proposals past review_by_at (threshold 10)\\n  > remediation: approve or retire the backlog",
+    "BOT WARNING - heartbeat watchdog stale: please reply on the incident channel",
+    "BOT INFO - Auto-closed 3 non-actionable stale incident(s); no approval needed",
+    "BOT RECOVERY - alert source cleared: reply latency back under threshold",
+):
+    m.classify_activity(state, [{
+      "pk": 6,
+      "body": body,
+      "timestamp": 9000,
+      "is_from_me": 1,
+      "sender_name": "personal",
+    }])
+print(state["awaiting_q_since"])
+`);
+    expect(result).toBe('0');
+  });
+
+  it('arms the awaiting-Q clock for a legitimate ask that extends a reminder header', () => {
+    const root = tmpRoot();
+    const result = python(`${importModulePrelude()}
+root = Path(${JSON.stringify(root)})
+root.mkdir(parents=True, exist_ok=True)
+m.STATE_DIR = root
+m.STATE_FILE = root / "state.json"
+m.EVENT_LOG = root / "events.jsonl"
+m.ACTIVITY_LOG = root / "activity.jsonl"
+m.LOCK_FILE = root / "loop.lock"
+state = m.default_state()
+state["phase"] = "monitoring"
+state["awaiting_q_since"] = 0
+m.classify_activity(state, [{
+  "pk": 4,
+  "body": "Codex -> Q / gate nudge escalation: this is a new ask, please reply APPROVED or BLOCKED.",
+  "timestamp": 7000,
+  "is_from_me": 1,
+  "sender_name": "personal",
+}])
+print(state["awaiting_q_since"])
+`);
+    expect(result).toBe('7000');
+  });
+
+  it('re-arms the awaiting-Q clock from the one-shot bootstrap frame on history replay', () => {
+    const root = tmpRoot();
+    const result = python(`${importModulePrelude()}
+root = Path(${JSON.stringify(root)})
+root.mkdir(parents=True, exist_ok=True)
+m.STATE_DIR = root
+m.STATE_FILE = root / "state.json"
+m.EVENT_LOG = root / "events.jsonl"
+m.ACTIVITY_LOG = root / "activity.jsonl"
+m.LOCK_FILE = root / "loop.lock"
+state = m.default_state()
+state["phase"] = "monitoring"
+state["awaiting_q_since"] = 0
+m.classify_activity(state, [{
+  "pk": 5,
+  "body": m.BOOTSTRAP_HEADER + "\\n\\nCompletion remains blocked until Q verifies each gate.",
+  "timestamp": 8000,
+  "is_from_me": 1,
+  "sender_name": "personal",
+}])
+print(state["awaiting_q_since"])
+`);
+    expect(result).toBe('8000');
+  });
+
+  it('still arms the awaiting-Q clock for a fresh non-reminder Codex ask', () => {
+    const root = tmpRoot();
+    const result = python(`${importModulePrelude()}
+root = Path(${JSON.stringify(root)})
+root.mkdir(parents=True, exist_ok=True)
+m.STATE_DIR = root
+m.STATE_FILE = root / "state.json"
+m.EVENT_LOG = root / "events.jsonl"
+m.ACTIVITY_LOG = root / "activity.jsonl"
+m.LOCK_FILE = root / "loop.lock"
+state = m.default_state()
+state["phase"] = "monitoring"
+state["awaiting_q_since"] = 0
+m.classify_activity(state, [{
+  "pk": 3,
+  "body": "Codex -> Q / slice 2 review request\\n\\nSpec attached. Please reply with APPROVED or BLOCKED.",
+  "timestamp": 6000,
+  "is_from_me": 1,
+  "sender_name": "personal",
+}])
+print(state["awaiting_q_since"])
+`);
+    expect(result).toBe('6000');
+  });
 });

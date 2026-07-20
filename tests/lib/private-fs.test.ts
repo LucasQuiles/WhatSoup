@@ -489,6 +489,58 @@ describe('writePrivateJsonMarkerSync', () => {
     const { readdirSync } = await import('node:fs');
     expect(readdirSync(dir).filter((f) => f.includes('.tmp'))).toEqual([]);
   });
+
+  it('does not report failure after the atomic rename has published the new file', async () => {
+    const root = makeTmp();
+    const markerPath = join(root, 'priv', 'state.marker');
+
+    vi.resetModules();
+    vi.doMock('node:fs', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs')>();
+      return {
+        ...actual,
+        chmodSync: vi.fn((path: string, mode: number) => {
+          if (path === markerPath) throw new Error('late target chmod failure');
+          return actual.chmodSync(path, mode);
+        }),
+      };
+    });
+    const { writePrivateJsonMarkerSync: writeAtomic } = await import('../../src/lib/private-fs.ts');
+
+    expect(() => writeAtomic(markerPath, { generation: 2 })).not.toThrow();
+    expect(JSON.parse(readFileSync(markerPath, 'utf8'))).toEqual({ generation: 2 });
+    expect(statSync(markerPath).mode & 0o777).toBe(0o600);
+  });
+
+  it('reports a required directory fsync failure so callers do not elevate policy', async () => {
+    const root = makeTmp();
+    const markerPath = join(root, 'priv', 'state.marker');
+    const directorySyncError = new Error('directory fsync unavailable');
+
+    vi.resetModules();
+    let fsyncCalls = 0;
+    vi.doMock('node:fs', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs')>();
+      return {
+        ...actual,
+        fsyncSync: vi.fn((fd: number) => {
+          fsyncCalls += 1;
+          if (fsyncCalls === 2) throw directorySyncError;
+          return actual.fsyncSync(fd);
+        }),
+      };
+    });
+    const { writePrivateJsonMarkerSync: writeAtomic } = await import('../../src/lib/private-fs.ts');
+    const writeRequired = writeAtomic as unknown as (
+      path: string,
+      value: unknown,
+      options: { directoryFsync: 'required' },
+    ) => void;
+
+    expect(() => writeRequired(markerPath, { generation: 3 }, { directoryFsync: 'required' }))
+      .toThrow(directorySyncError);
+    expect(JSON.parse(readFileSync(markerPath, 'utf8'))).toEqual({ generation: 3 });
+  });
 });
 
 describe('atomic private-file primitives', () => {

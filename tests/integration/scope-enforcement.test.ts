@@ -95,6 +95,8 @@ function makeRegistry(db: Database, mockSock: WhatsAppSocket, mockConn: Connecti
   const messagingDeps: MessagingDeps = {
     connection: mockConn,
     db: db.raw,
+    dbWrapper: db,
+    adminPhones: new Set<string>(),
   };
   registerMessagingTools(registry, messagingDeps);
   registerSchedulingTools(registry, { db });
@@ -261,7 +263,7 @@ describe('chat-scoped session', () => {
     } as unknown as ConnectionManager;
 
     const reg = new ToolRegistry();
-    registerMessagingTools(reg, { connection: conn, db: db.raw });
+    registerMessagingTools(reg, { connection: conn, db: db.raw, dbWrapper: db, adminPhones: new Set<string>() });
 
     // Caller supplies BOB_JID but session has ALICE_JID as deliveryJid
     const result = await reg.call(

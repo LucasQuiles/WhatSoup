@@ -199,7 +199,7 @@ export interface FinalizeTurnTerminalParams {
   recoveryJob?: TurnRecoveryJobPersistenceParams;
 }
 
-const TERMINAL_PROVIDER_FAILURE_CLASSES: ReadonlySet<string> = new Set([
+export const TERMINAL_PROVIDER_FAILURE_CLASSES: ReadonlySet<string> = new Set([
   'usage-limit',
   'rate-limit',
   'auth-required',

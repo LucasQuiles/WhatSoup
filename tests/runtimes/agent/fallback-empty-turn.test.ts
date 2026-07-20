@@ -205,11 +205,13 @@ type RuntimeView = {
     isSystemResult?: boolean,
   ): void;
   handleEvent(sourceSession: object, event: unknown): void;
+  perChatTurnText: Map<string, string>;
   recordFallbackTurnOutcome(
     queue: unknown,
     hadVisibleOutput: boolean,
     hadToolWork: boolean,
     session: unknown,
+    wasUnclassifiedError?: boolean,
   ): void;
   managerIdFor(session: object): string;
   captureSystemTurnOwner(session: object, scopeKey: string): MarkSystemTurnInput['owner'];
@@ -596,6 +598,79 @@ describe('fallback chain advance on structurally-empty entry', () => {
     v(runtime).recordFallbackTurnOutcome(queue, false, false, ocSession);
     expect(runtime.getFallbackState().activeFallbackEntry?.model).toBe('deepseek/deepseek-chat');
     expect(runtime.getFallbackState().failedEntryCount).toBe(1);
+  });
+
+  it('advances past an entry that returns consecutive UNCLASSIFIED ERROR turns (raw error text present but suppressed)', () => {
+    const runtime = makeChainRuntime();
+    v(runtime).activateProviderFallback(null);
+    expect(runtime.getFallbackState().activeFallbackEntry?.model).toBe('minimax/MiniMax-M2.7');
+
+    const queue = makeFakeQueue();
+    // An unclassified is_error turn carries NON-empty raw error text, so the
+    // handler passes hadVisibleOutput=true — which historically reset the
+    // advance run and pinned the bot on the dead entry forever. wasUnclassifiedError
+    // (5th arg) routes it through the same advance the empty-output path uses.
+    // 1st error turn: counted, below threshold — still on minimax.
+    v(runtime).recordFallbackTurnOutcome(queue, true, false, ocSession, true);
+    expect(runtime.getFallbackState().activeFallbackEntry?.model).toBe('minimax/MiniMax-M2.7');
+
+    // 2nd consecutive error turn: threshold reached — advance to deepseek.
+    v(runtime).recordFallbackTurnOutcome(queue, true, false, ocSession, true);
+    expect(runtime.getFallbackState().activeFallbackEntry?.model).toBe('deepseek/deepseek-chat');
+    expect(runtime.getFallbackState().failedEntryCount).toBe(1);
+  });
+
+  it('a genuine reply (not an error) still resets the run — wasUnclassifiedError=false is the healthy path', () => {
+    const runtime = makeChainRuntime();
+    v(runtime).activateProviderFallback(null);
+    const queue = makeFakeQueue();
+
+    v(runtime).recordFallbackTurnOutcome(queue, true, false, ocSession, true);  // error 1
+    v(runtime).recordFallbackTurnOutcome(queue, true, false, ocSession, false); // real reply → reset
+    v(runtime).recordFallbackTurnOutcome(queue, true, false, ocSession, true);  // error 1 again
+
+    // The real reply reset the run, so we are back below threshold — still minimax.
+    expect(runtime.getFallbackState().activeFallbackEntry?.model).toBe('minimax/MiniMax-M2.7');
+    expect(runtime.getFallbackState().failedEntryCount).toBe(0);
+  });
+
+  it('does NOT advance when the entry STREAMED a genuine reply before erroring (stream-then-error is productive)', () => {
+    // Blind spot the unit tests miss: an is_error whose turn ALSO streamed real
+    // assistant text delivered output to the user. The advance gate keys on
+    // responseText being empty, so a stream-then-error must reset, not advance —
+    // otherwise a working-but-flaky entry gets skipped. ocSession is passed so
+    // that if the gate regressed the advance WOULD fire (and this test would fail).
+    const runtime = makeChainRuntime();
+    v(runtime).activateProviderFallback(null);
+    const queue = makeFakeQueue();
+
+    // handleEventWithContext calls several session lifecycle methods; return real
+    // values for the ones the advance path reads and no-op the rest.
+    const streamSession = new Proxy(
+      {
+        getProviderId: () => 'opencode-cli',
+        getStatus: () => ({ sessionId: 'opencode-cli-1' }),
+        getDbRowId: () => null,
+      } as Record<string, unknown>,
+      { get: (t, p) => (p in t ? t[p as string] : () => undefined) },
+    );
+
+    for (let i = 0; i < 3; i++) {
+      // Simulate assistant text streamed earlier this turn, then an unclassified error.
+      v(runtime).perChatTurnText.set('mapkey', 'a genuine partial reply');
+      v(runtime).handleEventWithContext(
+        { type: 'result', text: 'the agent glorp fizzled unexpectedly', isError: true },
+        queue,
+        streamSession,
+        'conv',
+        i + 1,
+        'mapkey',
+      );
+    }
+
+    // Three error turns, but each delivered streamed text → never advanced.
+    expect(runtime.getFallbackState().activeFallbackEntry?.model).toBe('minimax/MiniMax-M2.7');
+    expect(runtime.getFallbackState().failedEntryCount).toBe(0);
   });
 
   it('does not advance when a real reply interrupts the empty run', () => {
