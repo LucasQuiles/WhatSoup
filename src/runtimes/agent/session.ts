@@ -1266,6 +1266,13 @@ export class SessionManager {
     exactRowId: number | null,
     rowStatus: 'crashed' | 'resume_failed' = 'crashed',
   ): void {
+    // Idempotent: once this lifecycle is closed, the failure rows already
+    // reflect the terminal state. A wedged tree is now retried on a cadence
+    // (ProofOfDeath sweep, system-turn deadline re-arm), so without this guard
+    // every retry would re-write the same 'crashed'/'orphaned' rows on every
+    // wedged bot. The flag is reset to false on a fresh spawn, so a genuinely
+    // new failure lifecycle still records.
+    if (this.durableFailureClosed) return;
     if (
       exactRowId !== null
       && this.durability

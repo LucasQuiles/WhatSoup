@@ -421,6 +421,51 @@ describe('SessionManager durable error lifecycle', () => {
     expect(sm.getDbRowId()).toBe(rowId);
   });
 
+  it('does not re-write the durable failure lifecycle on a repeated failed shutdown', async () => {
+    // A wedged tree is now retried by the ProofOfDeath sweep and the system-turn
+    // deadline re-arm — both re-invoke shutdown(false) on a cadence. Without an
+    // idempotency guard, every retry re-runs closeDurableFailureLifecycle,
+    // re-writing the same 'crashed'/'orphaned' rows forever on every wedged bot.
+    const child = makeChild(17108);
+    vi.mocked(spawn).mockReturnValue(child as never);
+    const sm = new SessionManager({
+      db,
+      messenger: makeMessenger(),
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+    });
+    sm.setDurability(durability);
+    await sm.spawnSession();
+    const rowId = sm.getDbRowId();
+    if (rowId === null) throw new Error('persistent session row was not created');
+    (sm as unknown as { handleProviderEvent(event: { type: 'init'; sessionId: string }): void })
+      .handleProviderEvent({ type: 'init', sessionId: 'idempotent-close-session' });
+
+    const closeSpy = vi.spyOn(
+      durability as unknown as { closeSessionLifecycleFailure: (...a: unknown[]) => unknown },
+      'closeSessionLifecycleFailure',
+    );
+
+    vi.mocked(killSessionTree).mockRejectedValue(new Error('tree termination failed'));
+    await expect(sm.shutdown(false)).rejects.toThrow(/tree termination failed/i);
+    expect(sm.getStatus().durableFailureClosed).toBe(true);
+    const callsAfterFirst = closeSpy.mock.calls.length;
+    expect(callsAfterFirst).toBe(1);
+
+    // The retry cadence calls shutdown(false) again on the same wedged tree.
+    await expect(sm.shutdown(false)).rejects.toThrow(/tree termination failed/i);
+
+    expect(
+      closeSpy.mock.calls.length,
+      'a second failed shutdown must not re-write the durable failure lifecycle',
+    ).toBe(callsAfterFirst);
+
+    // Restore the module mock's default so this test's persistent rejection does
+    // not bleed into later tests that rely on killSessionTree resolving.
+    vi.mocked(killSessionTree).mockReset();
+    vi.mocked(killSessionTree).mockResolvedValue(undefined);
+  });
+
   it('does not persist graceful state until child termination succeeds', async () => {
     const child = makeChild(17109);
     vi.mocked(spawn).mockReturnValue(child as never);
