@@ -131,7 +131,7 @@ describe('design-regression.sh guard contracts', () => {
   it('keeps the promoted blocking check list explicit', () => {
     const source = readFileSync(SCRIPT, 'utf8');
 
-    expect(source).toContain('EXIT_ON_FAIL=(1 2 6 8 10 12 13 14 15 16 17 19)');
+    expect(source).toContain('EXIT_ON_FAIL=(1 2 6 8 10 11 12 13 14 15 16 17 19)');
   });
 
   it('reports zero focus-suppression hits as a clean blocking PASS', () => {
@@ -140,7 +140,7 @@ describe('design-regression.sh guard contracts', () => {
 
     expect(result.status).toBe(0);
     expect(output).not.toContain('integer expected');
-    expect(output).toContain('Blocking checks: 1 2 6 8 10 12 13 14 15 16 17 19 (all PASS)');
+    expect(output).toContain('Blocking checks: 1 2 6 8 10 11 12 13 14 15 16 17 19 (all PASS)');
 
     const check12 = checkBlock(output, 12);
     expect(check12).toContain('outline-none without focus-visible: count: 0');
