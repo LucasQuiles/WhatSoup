@@ -159,7 +159,7 @@ describe('SignalAdapter — group sends', () => {
 
     expect(port.sent).toHaveLength(1);
     expect(port.sent[0]).toMatchObject({ groupId, body: 'group hello' });
-    expect(port.sent[0].recipient).toBeUndefined();
+    expect(port.sent[0]).not.toHaveProperty('recipient');
   });
 
   it('rejects a malformed group id (not base64 / too short)', async () => {
