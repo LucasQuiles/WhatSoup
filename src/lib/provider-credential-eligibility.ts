@@ -78,3 +78,26 @@ export function providerCredentialDisplayReason(state: ProviderCredentialState):
       return null;
   }
 }
+
+/**
+ * The ELIGIBLE-side disclosure note for a turn/spawn FAILURE (the common config:
+ * a primary routed on an `present-expired-refreshable` credential — routable
+ * because a refresh was expected — that then failed at turn). Returns a HEDGED
+ * note, or null to keep the caller's generic failure message.
+ *
+ * HEDGE, do NOT assert (Q round 27): at the failure site the caller knows the
+ * route-time classification and that the turn failed — NOT that the failure was
+ * the refresh. A 500, a network drop, or model-not-found on an aging-but-fine
+ * credential would all be mislabeled if this said "refresh failed", sending the
+ * user to re-auth for a problem re-auth won't fix. So state the observed and
+ * hedge the cause. Only `present-expired-refreshable` warrants the note; every
+ * other state (including `expired-no-refresh`, which is not routable and so is
+ * not the primary's story here) returns null → generic message.
+ */
+export function spawnFailureCredentialNote(state: ProviderCredentialState): string | null {
+  if (state !== 'present-expired-refreshable') return null;
+  return (
+    "I couldn't start a session. Your sign-in looks expired (a refresh was expected), " +
+    'so that is the likely cause — try re-authenticating if this keeps happening.'
+  );
+}

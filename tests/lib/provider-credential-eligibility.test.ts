@@ -3,6 +3,7 @@ import {
   resolveProviderCredentialState,
   isProviderRoutable,
   providerCredentialDisplayReason,
+  spawnFailureCredentialNote,
 } from '../../src/lib/provider-credential-eligibility.ts';
 import type { ClaudeOAuthCredResult } from '../../src/lib/model-advisor.ts';
 
@@ -69,6 +70,25 @@ describe('projections (invariant 4: one state, two projections)', () => {
     expect(providerCredentialDisplayReason('present-valid')).toBeNull();
     expect(providerCredentialDisplayReason('present-expired-refreshable')).toBeNull();
     expect(providerCredentialDisplayReason('native')).toBeNull();
+  });
+});
+
+describe('spawnFailureCredentialNote (eligible-side disclosure — HEDGE, Q round 27)', () => {
+  it('present-expired-refreshable → a HEDGED note that states the observed and does NOT assert the cause', () => {
+    const note = spawnFailureCredentialNote('present-expired-refreshable');
+    expect(note).not.toBeNull();
+    // OBSERVED: sign-in expired + a refresh was expected. Pin the hedge, not a
+    // confident cause — the failure site can't prove the refresh was the cause.
+    expect(note).toMatch(/expired/i);
+    expect(note).toMatch(/likely|try re-authenticating/i);
+    // must NOT assert the unproven cause
+    expect(note).not.toMatch(/refresh failed/i);
+  });
+
+  it('every other state → null (caller keeps its generic failure message)', () => {
+    for (const s of ['present-valid', 'expired-no-refresh', 'absent', 'rejected', 'native'] as const) {
+      expect(spawnFailureCredentialNote(s)).toBeNull();
+    }
   });
 });
 

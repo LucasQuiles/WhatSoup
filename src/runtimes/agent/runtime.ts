@@ -53,7 +53,7 @@ import {
 } from '../../core/reply-guarantee.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../../lib/emit-alert.ts';
 import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
-import { resolveProviderCredentialState, isProviderRoutable } from '../../lib/provider-credential-eligibility.ts';
+import { resolveProviderCredentialState, isProviderRoutable, spawnFailureCredentialNote } from '../../lib/provider-credential-eligibility.ts';
 import { createChildLogger } from '../../logger.ts';
 import {
   ensureAgentSchema,
@@ -5013,7 +5013,20 @@ export class AgentRuntime implements Runtime {
           this.replyGuarantee?.disarm(failedSeq);
           this.durability.markInboundFailed(failedSeq, 'session_spawn_failed');
         }
-        this.sendDirect(chatJid, 'Something went wrong starting a session. Try sending your message again.');
+        // Eligible-side disclosure (Slice 1): the common config is a primary
+        // routed on a `present-expired-refreshable` credential (routable because
+        // a refresh was expected) that then fails. F07 does not gate the primary,
+        // so this is where that turn gets its explanation. The note HEDGES — the
+        // failure here is not distinguishable as a refresh failure, so it names
+        // the observed classification and the likely cause without asserting it.
+        const credNote = spawnFailureCredentialNote(
+          resolveProviderCredentialState({
+            provider: this.agentProvider,
+            model: this.model,
+            providerConfig: this.agentProviderConfig,
+          }),
+        );
+        this.sendDirect(chatJid, credNote ?? 'Something went wrong starting a session. Try sending your message again.');
         return;
       }
       const completion: { value: RuntimeTurnCompletion | null } = { value: null };
