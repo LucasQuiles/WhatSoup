@@ -1400,6 +1400,24 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
               }
             : {}),
         },
+        // Generic transport-health block (S17 Phase 1): emitted alongside the
+        // legacy `whatsapp` block so non-Baileys lines (signal/imessage/twilio)
+        // report through the same shape. Console consumers read this block
+        // first with a `whatsapp` fallback; the legacy block is deprecated and
+        // removed in Phase 2 once the console fully migrates.
+        transport: {
+          kind: config.transport,
+          connected: isConnected,
+          selfId: deps.connectionManager.botJid ?? 'not connected',
+          connection: {
+            state: connectionState.state,
+            changed_at: connectionState.stateChangedAt,
+            reconnect_attempts: connectionState.reconnectAttempts,
+            reconnect_phase: connectionState.reconnectPhase,
+            last_disconnect_reason: exposeDisconnectMetadata ? connectionState.lastDisconnectReason ?? null : null,
+            last_status_code: exposeDisconnectMetadata ? connectionState.lastStatusCode ?? null : null,
+          },
+        },
         whatsapp: {
           connected: isConnected,
           account_jid: deps.connectionManager.botJid ?? 'not connected',

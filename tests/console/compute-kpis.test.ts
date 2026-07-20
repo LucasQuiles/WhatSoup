@@ -9,7 +9,7 @@
  * optional-field safety paths (`health?`, `messageStats?`, `runtime?`).
  */
 import { describe, expect, it } from 'vitest';
-import { computeKpis } from '../../console/src/lib/compute-kpis';
+import { computeKpis, isLineConnected, isLineConnectivityUnknown } from '../../console/src/lib/compute-kpis';
 import type { LineInstance } from '../../console/src/types';
 
 /**
@@ -504,5 +504,73 @@ describe('computeKpis', () => {
     expect(result.totalSent).toBe(3);
     expect(result.totalReceived).toBe(2);
     expect(result.metricsUnavailable).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S17 — generic transport health block (generic-first, whatsapp fallback)
+// ---------------------------------------------------------------------------
+
+describe('S17 — generic transport health block', () => {
+  const healthWith = (block: Record<string, unknown>) => ({
+    status: 'ok',
+    uptime_seconds: 100,
+    messages_total: 0,
+    whatsapp: { connection: { state: 'open' } },
+    sqlite: { messages_total: 0, schema_version: 1 },
+    ...block,
+  }) as LineInstance['health'];
+
+  it('isLineConnected reads transport.connected + connection.state generic-first', () => {
+    const line = makeLine({
+      status: 'unknown',
+      health: healthWith({ transport: { kind: 'signal', connected: true, connection: { state: 'connected' } } }),
+    });
+    expect(isLineConnected(line)).toBe(true);
+  });
+
+  it('isLineConnected returns false when transport block says disconnected', () => {
+    const line = makeLine({
+      status: 'unknown',
+      health: healthWith({ transport: { kind: 'imessage', connected: false, connection: { state: 'close' } } }),
+    });
+    expect(isLineConnected(line)).toBe(false);
+  });
+
+  it('isLineConnected falls back to the whatsapp block when transport is absent', () => {
+    const line = makeLine({
+      status: 'unknown',
+      health: {
+        status: 'ok', uptime_seconds: 100, messages_total: 0,
+        whatsapp: { connected: true, connection: { state: 'connected' } },
+        sqlite: { messages_total: 0, schema_version: 1 },
+      } as LineInstance['health'],
+    });
+    expect(isLineConnected(line)).toBe(true);
+  });
+
+  it('isLineConnected falls back to whatsapp when transport.connected is undefined', () => {
+    const line = makeLine({
+      status: 'unknown',
+      health: healthWith({ transport: { kind: 'signal' } }),
+    });
+    // transport has no connected verdict → whatsapp block decides (no connected field → false)
+    expect(isLineConnected(line)).toBe(false);
+  });
+
+  it('isLineConnectivityUnknown is false when the transport block has a verdict', () => {
+    const line = makeLine({
+      status: 'unknown',
+      health: healthWith({ transport: { kind: 'imessage', connected: false, connection: { state: 'close' } } }),
+    });
+    expect(isLineConnectivityUnknown(line)).toBe(false);
+  });
+
+  it('isLineConnectivityUnknown is true only when neither block has a verdict', () => {
+    const line = makeLine({
+      status: 'unknown',
+      health: healthWith({ transport: { kind: 'signal' } }),
+    });
+    expect(isLineConnectivityUnknown(line)).toBe(true);
   });
 });
