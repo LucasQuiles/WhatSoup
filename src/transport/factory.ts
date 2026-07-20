@@ -7,10 +7,16 @@ import { ConnectionManager } from './connection.ts';
 import { TwilioConnection } from './twilio/connection-bridge.ts';
 import { TwilioSmsAdapter } from './twilio/adapter.ts';
 import { SdkTwilioSmsPort } from './twilio/twilio-port.ts';
+import { ImessageConnection } from './imessage/connection-bridge.ts';
+import { ImessageAdapter } from './imessage/adapter.ts';
+import { BlueBubblesPort } from './imessage/bluebubbles-port.ts';
+import { ImsgPort } from './imessage/imsg-port.ts';
 import { assertNeverTransport } from './registry.ts';
 import type { RuntimeConnection } from './runtime-connection.ts';
 import type { TransportId } from './registry.ts';
 import type { TwilioSmsConfig } from './twilio/types.ts';
+import type { ImessageConfig } from './imessage/types.ts';
+import type { ImessagePort } from './imessage/port.ts';
 import { TwilioWebhookServer } from './twilio/webhook-server.ts';
 import { lookupCredential } from '../lib/keyring.ts';
 
@@ -19,6 +25,7 @@ export type { RuntimeConnection };
 interface FactoryConfig {
   transport: TransportId;
   twilioConfig?: TwilioSmsConfig;
+  imessageConfig?: ImessageConfig;
 }
 
 /**
@@ -90,14 +97,48 @@ export function createConnection(config: FactoryConfig): RuntimeConnection {
         'Adapter/port/bridge wiring is pending; see the transport-signal-and-imessage plan.',
       );
 
-    case 'imessage':
-      // Foundation stub — adapter + port + bridge wiring lands in a follow-on
-      // phase. The case exists so the TransportId union stays exhaustive
-      // (otherwise assertNeverTransport's `never` argument fails typecheck).
-      throw new Error(
-        '[createConnection] imessage transport is registered but not yet implemented. ' +
-        'Adapter/port/bridge wiring is pending; see the transport-signal-and-imessage plan.',
-      );
+    case 'imessage': {
+      if (config.imessageConfig === undefined) {
+        throw new Error(
+          '[createConnection] transport is "imessage" but imessageConfig is undefined. ' +
+          'Instance config must include a valid imessageConfig block.',
+        );
+      }
+      // Validation rejects these upstream, but an unvalidated path (e.g. a
+      // hand-injected INSTANCE_CONFIG) must still fail loud.
+      if (config.imessageConfig.sender === '') {
+        throw new Error(
+          '[createConnection] imessageConfig is missing sender.',
+        );
+      }
+
+      let port: ImessagePort;
+      if (config.imessageConfig.backend === 'bluebubbles') {
+        const pwService = config.imessageConfig.bluebubblesPasswordService;
+        if (pwService === undefined || pwService === '') {
+          throw new Error(
+            '[createConnection] imessageConfig.backend is "bluebubbles" but bluebubblesPasswordService is missing.',
+          );
+        }
+        // Resolve the credential here (composition root side), never in the
+        // port — mirrors the Twilio arm's keyring-at-factory pattern. A
+        // missing credential fails loud rather than constructing a port
+        // that 401s on every call.
+        const bluebubblesPassword = lookupCredential(pwService);
+        if (bluebubblesPassword === null) {
+          throw new Error(
+            `[createConnection] keyring has no credential for service "${pwService}" ` +
+            '(imessageConfig.bluebubblesPasswordService).',
+          );
+        }
+        port = new BlueBubblesPort({ ...config.imessageConfig, bluebubblesPassword });
+      } else {
+        port = new ImsgPort(config.imessageConfig);
+      }
+
+      const adapter = new ImessageAdapter(config.imessageConfig, port);
+      return new ImessageConnection(adapter);
+    }
 
     default:
       return assertNeverTransport(config.transport, 'createConnection');

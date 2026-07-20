@@ -9,6 +9,7 @@ import { VALID_ACCESS_MODES, VALID_GROUP_SENDER_POLICIES, type AccessMode, type 
 import { DEFAULT_TRANSPORT_ID, isTransportId, type TransportId } from './transport/registry.ts';
 import { DEFAULT_FLEET_PORT, DEFAULT_INSTANCE_HEALTH_PORT } from './fleet/constants.ts';
 import { DEFAULT_TWILIO_SMS, DEFAULT_TWILIO_VOICE, type TwilioSmsConfig, type TwilioInboundMode, type TwilioWebhookConfig, type TwilioVoiceConfig } from './transport/twilio/types.ts';
+import { DEFAULT_IMESSAGE, type ImessageConfig, type ImessageInboundMode } from './transport/imessage/types.ts';
 import { normalizeFallbackEntriesFromAgentOptions } from './core/fallback-chain.ts';
 import { errorMessage } from './lib/error-message.ts';
 import { validateModelRoleValue } from './lib/model-resolver.ts';
@@ -616,6 +617,53 @@ function mergeKnowledgeProfiles(
 // field. Mirrors the resolveMemoryConfig pattern: record/stringProp/numberProp
 // helpers + default merging. Does NOT resolve keyring secrets or instantiate
 // any SDK; config data only.
+export function resolveImessageConfig(
+  rawSource: Record<string, unknown> | null | undefined,
+): ImessageConfig | undefined {
+  const src = asRecord(rawSource ?? undefined);
+  if (!src) return undefined;
+
+  // Required discriminator: abort if 'account' is absent (not an imessageConfig block)
+  const account = stringProp(src, 'account');
+  if (!account) return undefined;
+
+  const rawBackend = src['backend'];
+  const backend = rawBackend === 'imsg' || rawBackend === 'bluebubbles'
+    ? rawBackend
+    : DEFAULT_IMESSAGE.backend;
+
+  const sender = stringProp(src, 'sender') ?? '';
+  const rawMode = src['inboundMode'];
+  const inboundMode: ImessageInboundMode =
+    rawMode === 'poll' || rawMode === 'webhook'
+      ? rawMode
+      : DEFAULT_IMESSAGE.inboundMode;
+  const pollIntervalMs = numberProp(src, 'pollIntervalMs', DEFAULT_IMESSAGE.pollIntervalMs);
+
+  const rateLimitSrc = asRecord(src['rateLimit']);
+  const messagesPerMinute = numberProp(
+    rateLimitSrc,
+    'messagesPerMinute',
+    DEFAULT_IMESSAGE.rateLimit.messagesPerMinute,
+  );
+
+  const imsgSocketPath = stringProp(src, 'imsgSocketPath') ?? DEFAULT_IMESSAGE.imsgSocketPath;
+  const bluebubblesUrl = stringProp(src, 'bluebubblesUrl');
+  const bluebubblesPasswordService = stringProp(src, 'bluebubblesPasswordService');
+
+  return {
+    account,
+    backend,
+    sender,
+    inboundMode,
+    pollIntervalMs,
+    rateLimit: { messagesPerMinute },
+    imsgSocketPath,
+    ...(bluebubblesUrl !== undefined ? { bluebubblesUrl } : {}),
+    ...(bluebubblesPasswordService !== undefined ? { bluebubblesPasswordService } : {}),
+  };
+}
+
 // ---------------------------------------------------------------------------
 export function resolveTwilioSmsConfig(
   rawSource: Record<string, unknown> | null | undefined,
@@ -836,6 +884,13 @@ const resolvedTransport: TransportId = (() => {
 const resolvedTwilioConfig: TwilioSmsConfig | undefined =
   resolvedTransport === 'twilio' && asRecord(instance?.twilioConfig) != null
     ? resolveTwilioSmsConfig(instance?.twilioConfig as Record<string, unknown>)
+    : undefined;
+
+// Same gating for the imessage transport: validation rejects imessageConfig
+// on other transports; the resolver only runs when transport === 'imessage'.
+const resolvedImessageConfig: ImessageConfig | undefined =
+  resolvedTransport === 'imessage' && asRecord(instance?.imessageConfig) != null
+    ? resolveImessageConfig(instance?.imessageConfig as Record<string, unknown>)
     : undefined;
 
 const resolvedAgentOptions = (instance?.agentOptions as Record<string, unknown> | undefined) ?? {};
@@ -1212,6 +1267,11 @@ export const config = {
   // Twilio SMS config — present only when instance.twilioConfig is set.
   // Defaults for inboundMode/pollIntervalMs/rateLimit are applied by resolveTwilioSmsConfig.
   twilioConfig: resolvedTwilioConfig,
+
+  // iMessage config — present only when instance.imessageConfig is set.
+  // Defaults for backend/socket/inboundMode/pollIntervalMs/rateLimit are
+  // applied by resolveImessageConfig.
+  imessageConfig: resolvedImessageConfig,
 } as const;
 
 // Make intEnv available for external use (e.g. tests, future env-driven fields)
