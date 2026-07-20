@@ -1594,6 +1594,49 @@ describe('SessionManager', () => {
     vi.useRealTimers();
   });
 
+  it('retries a refused hard-watchdog SIGKILL until it lands, then self-heals turnInFlight (C-F4)', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const notifyUser = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), instanceName: 'personal', notifyUser });
+    await sm.spawnSession();
+    await sm.sendTurn('long running work');
+    expect(sm.getStatus().turnInFlight).toBe(true);
+
+    // The process-tree kill is REFUSED at a pre-signal guard: no signal is
+    // delivered, so the child never exits. Persistent rejection (not …Once) so a
+    // single retry cannot silently satisfy the assertion.
+    vi.mocked(killSessionTree).mockRejectedValue(new Error('pre-signal recensus unavailable'));
+
+    await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+    expect(notifyUser).toHaveBeenCalledWith(expect.stringContaining('restarting'));
+
+    // Old behavior: one fire-and-forget kill, no retry → turnInFlight stuck forever.
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(
+      sm.getStatus().turnInFlight,
+      'a refused kill must keep being retried, not abandon the session turnInFlight',
+    ).toBe(true); // still hung because the mock still refuses — but retries must be firing
+
+    // The census recovers: the next SIGKILL lands and the child exits.
+    exitOnSigkill(mockChild);
+    vi.mocked(killSessionTree).mockImplementation(async (target: { kill(signal: NodeJS.Signals): boolean }, signal: NodeJS.Signals) => {
+      target.kill(signal);
+    });
+
+    await vi.advanceTimersByTimeAsync(120_000); // past the capped retry backoff
+
+    expect(
+      sm.getStatus().turnInFlight,
+      'once the retried kill lands and the child exits, turnInFlight must clear',
+    ).toBe(false);
+
+    vi.useRealTimers();
+  });
+
   it('an inbound user message does NOT cancel a pending stalled-operation kill (the ~90-min limbo bug)', async () => {
     vi.useFakeTimers();
 

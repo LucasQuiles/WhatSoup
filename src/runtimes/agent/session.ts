@@ -70,6 +70,15 @@ export const WATCHDOG_HARD_MS  = 1_800_000; // 30 min — SIGKILL
 // WATCHDOG_HARD_MS this is NOT reset by inbound messages (see recoverStalledOperation).
 export const STALLED_OP_KILL_GRACE_MS = 180_000; // 3 min after a tool stalls
 
+// A watchdog/stalled-op SIGKILL can be refused at the process-tree fail-closed
+// guard (a `ps` race or an unreadable census) — no signal is delivered and the
+// hung child never exits, so turnInFlight/active stay stuck with no timer left
+// to retry. Re-attempt the reap on a backoff until the kill lands (the child
+// then exits and self-heals via the exit handler) or the session is torn down.
+const HARD_KILL_RETRY_BASE_MS = 2_000;
+const HARD_KILL_RETRY_MAX_MS = 60_000;
+const MAX_HARD_KILL_BACKOFF_DOUBLINGS = 5;
+
 /** Human-readable display name for each supported provider. */
 export const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   'claude-cli': 'Claude Code',
@@ -582,6 +591,9 @@ export class SessionManager {
   private providerTurnTerminalResolve: (() => void) | null = null;
   /** Bounded kill timer for a stalled tool; armed by recoverStalledOperation. */
   private stalledOpKill: ReturnType<typeof setTimeout> | null = null;
+  /** Retry timer + attempt count for a watchdog/stalled-op SIGKILL that was refused. */
+  private hardKillRetry: ReturnType<typeof setTimeout> | null = null;
+  private hardKillAttempts = 0;
   private pendingToolIds: Set<string> = new Set();
   /** Codex app-server thread ID for persistent sessions. */
   private codexThreadId: string | null = null;
@@ -1833,6 +1845,7 @@ export class SessionManager {
       const crashedDbRowId = this.dbRowId;
 
       this.completeProviderTurn();
+      this.clearHardKillRetry(); // the child exited — the reap retry (if any) is done
       this.active = false;
       this.child = null;
       this.sessionId = null;
@@ -1963,6 +1976,59 @@ export class SessionManager {
     }
   }
 
+  private clearHardKillRetry(): void {
+    if (this.hardKillRetry !== null) {
+      clearTimeout(this.hardKillRetry);
+      this.hardKillRetry = null;
+    }
+    this.hardKillAttempts = 0;
+  }
+
+  /**
+   * Reap a hung child, retrying if the process-tree kill is refused.
+   *
+   * A fire-and-forget SIGKILL that rejects at a pre-signal guard delivers no
+   * signal: the child stays alive, its `exit` handler never fires, and
+   * `active`/`providerTurnInFlight` stay stuck with both watchdog timers already
+   * nulled. Retrying re-runs the census; the moment `ps` recovers the SIGKILL
+   * lands, the child exits, and the exit handler clears the stuck state. Release
+   * is therefore on the real exit event — proof of death — never on a timer.
+   */
+  private reapHungChild(child: ReturnType<typeof spawn>, reason: string): void {
+    void this.killChildTree(child, 'SIGKILL').then(
+      () => {
+        // Reaped (or the tree was already gone). The exit handler self-heals;
+        // stop retrying.
+        this.clearHardKillRetry();
+      },
+      (err) => {
+        log.error(
+          { err, pid: child.pid ?? null, chatJid: this.chatJid, reason, attempts: this.hardKillAttempts },
+          'failed to reap hung provider process tree — will retry until it exits',
+        );
+        this.scheduleHardKillRetry(child, reason);
+      },
+    );
+  }
+
+  private scheduleHardKillRetry(child: ReturnType<typeof spawn>, reason: string): void {
+    if (this.hardKillRetry !== null) return;
+    // Stop if the session was torn down or the child was superseded/exited —
+    // the retry only applies while this exact hung child is still ours.
+    if (!this.active || this.child !== child) return;
+    this.hardKillAttempts += 1;
+    const delay = Math.min(
+      HARD_KILL_RETRY_BASE_MS * 2 ** Math.min(this.hardKillAttempts, MAX_HARD_KILL_BACKOFF_DOUBLINGS),
+      HARD_KILL_RETRY_MAX_MS,
+    );
+    this.hardKillRetry = setTimeout(() => {
+      this.hardKillRetry = null;
+      if (!this.active || this.child !== child) return; // self-healed or superseded
+      this.reapHungChild(child, reason);
+    }, delay);
+    this.hardKillRetry.unref?.();
+  }
+
   /**
    * SIGKILL a provider whose tool stalled past STALLED_OP_KILL_GRACE_MS. The exit handler
    * then emits the crash notice and the runtime auto-respawns on the next message.
@@ -1975,10 +2041,7 @@ export class SessionManager {
       'stalled-operation kill fired — SIGKILL hung provider',
     );
     this.notifyUser?.('_A tool call stalled and was terminated. Send your message again to retry._');
-    const child = this.child;
-    void this.killChildTree(child, 'SIGKILL').catch((err) => {
-      log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap stalled provider process tree');
-    });
+    this.reapHungChild(this.child, 'stalled_operation');
   }
 
   /**
@@ -2045,10 +2108,7 @@ export class SessionManager {
     // notice ("Agent session crashed") follows via the exit handler, but this
     // message explains WHY it was terminated.
     this.notifyUser?.(terminationNotice);
-    const child = this.child;
-    void this.killChildTree(child, 'SIGKILL').catch((err) => {
-      log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap watchdog provider process tree');
-    });
+    this.reapHungChild(this.child, 'turn_watchdog');
   }
 
   private crashManagedProviderSession(
@@ -2693,6 +2753,7 @@ export class SessionManager {
   async shutdown(suspend = true): Promise<void> {
     this.clearTurnWatchdog();
     this.clearStalledOpKill();
+    this.clearHardKillRetry();
     this.active = false; // Suppress crash notification for clean shutdown
 
     const currentPid = this.child?.pid ?? null;
