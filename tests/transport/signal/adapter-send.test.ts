@@ -40,12 +40,19 @@ describe('SignalAdapter — sendText happy path', () => {
   });
 
   it('forwards opts.correlationId through to the port call (no swallow)', async () => {
-    const { adapter, channelId } = makeAdapter();
+    const { adapter, port, channelId } = makeAdapter();
     const target = peerConversationRef(channelId, '+15559990000');
 
-    // No exception thrown means correlationId was accepted; full error-path
-    // correlation assertion lives in the error-mapping test below.
-    await adapter.sendText(target, 'x', { correlationId: 'custom-corr-1' });
+    const ref = await adapter.sendText(target, 'x', { correlationId: 'custom-corr-1' });
+
+    // The send completed (no exception swallowed) and returned a valid MessageRef
+    // stamped with the port's timestamp. The correlationId is adapter-internal
+    // (used for error mapping); full error-path correlation assertion lives in
+    // the error-mapping test below.
+    expect(ref.channel).toBe(channelId);
+    expect(ref.conversation).toBe('+15559990000');
+    expect(port.sent).toHaveLength(1);
+    expect(port.sent[0]?.body).toBe('x');
   });
 });
 
