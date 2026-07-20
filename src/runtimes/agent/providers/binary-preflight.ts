@@ -242,14 +242,83 @@ export async function probeModelCatalog(
   env: NodeJS.ProcessEnv,
   spawnImpl: typeof spawn = spawn,
 ): Promise<ModelCatalogResult> {
-  return new Promise<ModelCatalogResult>((resolve) => {
+  const outcome = await collectModelCatalogIds(binary, spawnImpl, env);
+  // Any non-ok outcome (could-not-run or blank output) is indistinguishable
+  // from a misbehaving binary for a MATCH verdict → fail open (unknown).
+  if (!outcome.ok) {
+    return { status: 'unknown', suggestion: null };
+  }
+  if (outcome.ids.includes(model)) {
+    return { status: 'found', suggestion: null };
+  }
+  const lowerModel = model.toLowerCase();
+  const caseInsensitive = outcome.ids.find((id) => id.toLowerCase() === lowerModel) ?? null;
+  return { status: 'not_found', suggestion: caseInsensitive };
+}
+
+/** Why `<binary> models` produced no usable catalogue. The catalogue resolver
+ *  maps each to a distinct render reason (Q 2b#3): a timeout must not read as an
+ *  empty catalogue, and a spawn failure (binary not runnable) is its own fix. */
+export type ModelCatalogUnavailableReason = 'spawn-error' | 'timeout' | 'empty';
+
+/** Result of {@link listModelCatalog}: the harness's dynamic model catalogue.
+ *  Discriminated so the resolver can label a timeout distinctly from an empty
+ *  catalogue rather than collapse both to a bare "unavailable". */
+export type ModelCatalogListing =
+  | { status: 'ok'; ids: string[] }
+  | { status: 'unavailable'; reason: ModelCatalogUnavailableReason };
+
+/**
+ * List the model catalogue a provider binary self-reports via `<binary> models`
+ * — the dynamic, PER-HARNESS source for the `/config model` catalogue render
+ * (owner ask 2026-07-19). Same spawn + 5 s kill-timer discipline as
+ * probeModelCatalog, but returns the full id list instead of a match verdict.
+ *
+ * Honest-degrade contract: anything that is not a clean close with ≥1 id →
+ * `{ status: 'unavailable', reason }` (reason distinguishes spawn-error /
+ * timeout / empty) so the resolver renders a reason-specific, actionable line
+ * rather than an empty or fake list. Never throws.
+ */
+export async function listModelCatalog(
+  binary: string,
+  spawnImpl: typeof spawn = spawn,
+): Promise<ModelCatalogListing> {
+  const outcome = await collectModelCatalogIds(binary, spawnImpl);
+  if (!outcome.ok) {
+    return { status: 'unavailable', reason: outcome.reason };
+  }
+  return { status: 'ok', ids: outcome.ids };
+}
+
+/** Discriminated outcome of the shared `<binary> models` probe. */
+type CatalogProbeOutcome =
+  | { ok: true; ids: string[] }
+  | { ok: false; reason: ModelCatalogUnavailableReason };
+
+/**
+ * Shared spawn+parse core for `<binary> models`, consumed by both
+ * probeModelCatalog (match verdict) and listModelCatalog (full list). Spawns
+ * the command with a 5 s kill-timer, collects stdout, and resolves to:
+ *  - `{ ok: true, ids }` — trimmed, non-empty catalog id lines (in order) on a
+ *    clean close with ≥1 line, or
+ *  - `{ ok: false, reason }` — `'timeout'` (kill-timer fired), `'spawn-error'`
+ *    (synchronous throw or 'error' event), or `'empty'` (clean close, no
+ *    non-blank lines). The distinct reason lets the resolver label a timeout
+ *    apart from an empty catalogue (Q 2b#3).
+ * Never throws. `killTimer` is declared before `settle` captures it so a
+ * synchronous spawn throw cannot hit a TDZ (same hazard as probeFallbackBinary).
+ */
+function collectModelCatalogIds(
+  binary: string,
+  spawnImpl: typeof spawn,
+  env?: NodeJS.ProcessEnv,
+): Promise<CatalogProbeOutcome> {
+  return new Promise<CatalogProbeOutcome>((resolve) => {
     let settled = false;
     let stdoutBuffer = '';
-    // Declared before settle() captures it so a synchronous spawn throw cannot
-    // hit a TDZ (same hazard as probeFallbackBinary above).
     let killTimer: ReturnType<typeof setTimeout> | undefined;
 
-    const settle = (result: ModelCatalogResult): void => {
+    const settle = (result: CatalogProbeOutcome): void => {
       if (settled) return;
       settled = true;
       clearTimeout(killTimer);
@@ -260,18 +329,20 @@ export async function probeModelCatalog(
     try {
       child = spawnImpl(binary, ['models'], {
         stdio: ['ignore', 'pipe', 'ignore'],
+        // probeModelCatalog threads its explicit (egress-scrubbed) env so the
+        // catalog probe routes like a real turn (exec-profile egress coverage);
+        // listModelCatalog passes none, leaving env undefined → the child
+        // inherits process.env, i.e. main's prior no-env behavior on that path.
         env,
       } as SpawnOptionsWithoutStdio);
     } catch {
-      // Synchronous throw from spawn itself — binary presence is the binary
-      // probe's question, not ours; fail open.
-      settle({ status: 'unknown', suggestion: null });
+      settle({ ok: false, reason: 'spawn-error' });
       return;
     }
 
     killTimer = setTimeout(() => {
       try { child.kill(); } catch { /* ignore kill errors */ }
-      settle({ status: 'unknown', suggestion: null });
+      settle({ ok: false, reason: 'timeout' });
     }, PROBE_TIMEOUT_MS);
 
     child.stdout?.on('data', (chunk: Buffer) => {
@@ -279,28 +350,15 @@ export async function probeModelCatalog(
     });
 
     child.on('error', () => {
-      settle({ status: 'unknown', suggestion: null });
+      settle({ ok: false, reason: 'spawn-error' });
     });
 
     child.on('close', () => {
-      if (settled) return;
-      const catalogIds = stdoutBuffer
+      const ids = stdoutBuffer
         .split('\n')
         .map((line) => line.trim())
         .filter((line) => line.length > 0);
-      if (catalogIds.length === 0) {
-        // Empty catalog output is indistinguishable from a misbehaving
-        // binary — fail open rather than cry wolf.
-        settle({ status: 'unknown', suggestion: null });
-        return;
-      }
-      if (catalogIds.includes(model)) {
-        settle({ status: 'found', suggestion: null });
-        return;
-      }
-      const lowerModel = model.toLowerCase();
-      const caseInsensitive = catalogIds.find((id) => id.toLowerCase() === lowerModel) ?? null;
-      settle({ status: 'not_found', suggestion: caseInsensitive });
+      settle(ids.length > 0 ? { ok: true, ids } : { ok: false, reason: 'empty' });
     });
   });
 }

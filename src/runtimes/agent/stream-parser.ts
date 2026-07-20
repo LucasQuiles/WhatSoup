@@ -1,6 +1,36 @@
 // src/runtimes/agent/stream-parser.ts
 // Parses provider stream-json (JSONL) lines into ordered AgentEvent envelopes.
 
+import { createChildLogger } from '../../logger.ts';
+
+const parserLog = createChildLogger('stream-parser');
+
+// ── Unclassified-event observability (id-only) ───────────────────────────────
+// A live canary shows 256+ events/hour classified as unknown / unknown_block /
+// parse_error, and the offending TYPE is currently invisible — impossible to
+// tell whether the provider added a benign new block kind or is emitting real
+// errors. Surface the TYPE STRING ONLY (never the raw payload, never any other
+// field — id-only discipline), at warn, deduped per (classification+type) per
+// process so a steady stream of the same type warns once, not 256×/hour. The
+// key space is bounded (a small set of type strings), so the dedupe set is too.
+const observedUnclassified = new Set<string>();
+
+/** Reset the per-process unclassified-type dedupe (tests only). */
+export function _resetStreamParserObservability(): void {
+  observedUnclassified.clear();
+}
+
+function observeUnclassified(
+  classification: 'unknown' | 'unknown_block' | 'parse_error',
+  blockType: string,
+): void {
+  const key = `${classification}:${blockType}`;
+  if (observedUnclassified.has(key)) return;
+  observedUnclassified.add(key);
+  // id-only: `blockType` is a type discriminant, never payload content or fields.
+  parserLog.warn({ classification, blockType }, 'stream-parser: unclassified provider event (id-only)');
+}
+
 export const IGNORED_BLOCK_REASONS = {
   thinking: 'model-internal, no side effects',
   redacted_thinking: 'model-internal redacted reasoning, no side effects',
@@ -81,7 +111,21 @@ function describeBlockType(block: unknown): string {
 }
 
 function unknownBlock(block: unknown): AgentEvent {
-  return { type: 'unknown_block', blockType: describeBlockType(block), raw: block };
+  const blockType = describeBlockType(block);
+  observeUnclassified('unknown_block', blockType);
+  return { type: 'unknown_block', blockType, raw: block };
+}
+
+/** Top-level unclassified event envelope — logs the event TYPE STRING (id-only). */
+function unknownEvent(parsed: unknown): AgentEvent {
+  observeUnclassified('unknown', describeBlockType(parsed));
+  return { type: 'unknown', raw: parsed };
+}
+
+/** Malformed-JSON envelope — logs the classification only, NEVER the raw line. */
+function parseErrorEvent(line: string): AgentEvent {
+  observeUnclassified('parse_error', 'parse_error');
+  return { type: 'parse_error', line };
 }
 
 function ignoredBlock(
@@ -277,11 +321,11 @@ export function parseEvents(line: string): AgentEvent[] {
   try {
     parsed = JSON.parse(line);
   } catch {
-    return [{ type: 'parse_error', line }];
+    return [parseErrorEvent(line)];
   }
 
   const event = asRecord(parsed);
-  if (event === null) return [{ type: 'unknown', raw: parsed }];
+  if (event === null) return [unknownEvent(parsed)];
 
   const topType = event['type'];
   if (topType === 'system') {
@@ -293,14 +337,14 @@ export function parseEvents(line: string): AgentEvent[] {
     if (typeof subtype === 'string' && subtype.startsWith('hook')) {
       return [{ type: 'ignored' }];
     }
-    return [{ type: 'unknown', raw: parsed }];
+    return [unknownEvent(parsed)];
   }
 
   if (topType === 'assistant') {
     const message = asRecord(event['message']);
     const content = message?.['content'];
     if (!Array.isArray(content) || content.length === 0) {
-      return [{ type: 'unknown', raw: parsed }];
+      return [unknownEvent(parsed)];
     }
     return content.flatMap(parseAssistantBlock);
   }
@@ -313,17 +357,17 @@ export function parseEvents(line: string): AgentEvent[] {
       if (/^Unknown skill:\s+/i.test(trimmed)) {
         return [{ type: 'result', text: trimmed, isError: true }];
       }
-      return [{ type: 'unknown', raw: parsed }];
+      return [unknownEvent(parsed)];
     }
     if (!Array.isArray(content) || content.length === 0) {
-      return [{ type: 'unknown', raw: parsed }];
+      return [unknownEvent(parsed)];
     }
     return content.flatMap(parseUserBlock);
   }
 
   if (topType === 'result') return [resultEvent(event)];
 
-  return [{ type: 'unknown', raw: parsed }];
+  return [unknownEvent(parsed)];
 }
 
 /**

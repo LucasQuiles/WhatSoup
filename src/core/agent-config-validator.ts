@@ -9,7 +9,9 @@
  * CONSTRAINT: Only Node built-ins. No HTTP, no logger. Validation is pure apart
  * from one filesystem identity read for the agentOptions.cwd home-root invariant
  * (#1862) — the same device/inode check AgentRuntime.start() performs, shared here
- * so config load / API writes / preflight all fail closed on it before a restart.
+ * so config load / API writes / preflight all fail closed on it before a restart —
+ * and one one-time-per-instance process.emitWarning knob-honesty warning for
+ * accepted-but-not-yet-enforced agentOptions.commandSurface (T9c deferred).
  */
 
 // Canonical enum sets — kept HERE (no import from instance-loader.ts) so the
@@ -594,6 +596,106 @@ function validateTranscriptionOptions(raw: Record<string, unknown>): ValidationE
   );
 }
 
+const COMMAND_SURFACE_VERBOSITIES: ReadonlySet<string> = new Set(['terse', 'normal']);
+
+/**
+ * agentOptions.commandSurface (W1-T9b): per-instance command-surface policy
+ * overlay — config.json's half of resolveCommandSurface's three input
+ * layers (src/runtimes/agent/command-surface-config.ts). May DISABLE
+ * commands and set cosmetic defaults ONLY; the shape this validates
+ * (InstanceCommandSurfaceConfig) has no gate/venue/visibility fields by
+ * design — those flow exclusively from the T1 command-registry catalog, so
+ * this validator does not (and structurally cannot) police them. Unknown
+ * top-level keys inside the block are ignored, matching this file's
+ * existing permissive convention for extraneous keys (e.g. nlRoutingTiers).
+ *
+ * KNOB HONESTY: resolveCommandSurface/getSurfacePrefs currently have NO src
+ * callers — the runtime wiring is deliberately deferred to W1-T9c — so an
+ * accepted commandSurface block changes nothing at runtime yet. Until T9c
+ * lands, a shape-valid block emits a one-time-per-instance
+ * process.emitWarning (Node's built-in warning channel — this file's
+ * CONSTRAINT bans logger.ts, and repo hygiene bans ad-hoc console calls in
+ * src/) so the config cannot silently lie about behavior. Remove the
+ * warning when T9c wires the resolver in.
+ */
+const commandSurfaceUnenforcedWarned = new Set<string>();
+
+function warnCommandSurfaceNotEnforced(instanceName: string): void {
+  if (commandSurfaceUnenforcedWarned.has(instanceName)) return;
+  commandSurfaceUnenforcedWarned.add(instanceName);
+  process.emitWarning(
+    `agentOptions.commandSurface (instance "${instanceName}") is accepted but not yet enforced (enforcement lands with T9c) — the block validates and persists, but no runtime path consumes it yet.`,
+    { code: 'WHATSOUP_COMMAND_SURFACE_UNENFORCED' },
+  );
+}
+
+function validateCommandSurfaceConfig(
+  opts: Record<string, unknown>,
+  instanceName: string,
+): ValidationError | null {
+  const cs = opts['commandSurface'];
+  if (cs === undefined || cs === null) return null;
+  if (typeof cs !== 'object' || Array.isArray(cs)) {
+    return err('agentOptions.commandSurface', 'agentOptions.commandSurface must be an object when provided');
+  }
+  const surface = cs as Record<string, unknown>;
+
+  if (surface['disabled'] !== undefined) {
+    if (
+      !Array.isArray(surface['disabled']) ||
+      !(surface['disabled'] as unknown[]).every((d) => typeof d === 'string' && d.trim() !== '')
+    ) {
+      return err(
+        'agentOptions.commandSurface.disabled',
+        'agentOptions.commandSurface.disabled must be an array of non-empty command-name strings',
+      );
+    }
+  }
+
+  if (surface['defaultVerbosity'] !== undefined) {
+    if (
+      typeof surface['defaultVerbosity'] !== 'string' ||
+      !COMMAND_SURFACE_VERBOSITIES.has(surface['defaultVerbosity'])
+    ) {
+      return err(
+        'agentOptions.commandSurface.defaultVerbosity',
+        'agentOptions.commandSurface.defaultVerbosity must be "terse" or "normal"',
+      );
+    }
+  }
+
+  if (surface['optionDefaults'] !== undefined) {
+    const od = surface['optionDefaults'];
+    if (typeof od !== 'object' || od === null || Array.isArray(od)) {
+      return err(
+        'agentOptions.commandSurface.optionDefaults',
+        'agentOptions.commandSurface.optionDefaults must be an object of command name -> {option: default} when provided',
+      );
+    }
+    for (const cmdOpts of Object.values(od as Record<string, unknown>)) {
+      if (typeof cmdOpts !== 'object' || cmdOpts === null || Array.isArray(cmdOpts)) {
+        return err(
+          'agentOptions.commandSurface.optionDefaults',
+          'agentOptions.commandSurface.optionDefaults entries must be objects of option -> default string',
+        );
+      }
+      for (const optValue of Object.values(cmdOpts as Record<string, unknown>)) {
+        if (typeof optValue !== 'string') {
+          return err(
+            'agentOptions.commandSurface.optionDefaults',
+            'agentOptions.commandSurface.optionDefaults option values must be strings',
+          );
+        }
+      }
+    }
+  }
+
+  // Shape-valid block: accepted, but nothing consumes it until T9c — warn
+  // so the operator knows the knob is not live yet (see KNOB HONESTY above).
+  warnCommandSurfaceNotEnforced(instanceName);
+  return null;
+}
+
 function validateAgentOptions(
   raw: Record<string, unknown>,
   ctx: ValidatorContext,
@@ -744,6 +846,9 @@ function validateAgentOptions(
       'agentOptions.nlRoutingEventsDir must be a string when provided',
     );
   }
+
+  const commandSurfaceErr = validateCommandSurfaceConfig(opts, ctx.name);
+  if (commandSurfaceErr) return commandSurfaceErr;
 
   if (opts['autoCompactInputTokens'] !== undefined) {
     const threshold = opts['autoCompactInputTokens'];
@@ -932,7 +1037,7 @@ function validateAgentOptions(
     ) {
       return err(
         'agentOptions.providerConfig.baseUrl',
-        'agentOptions.providerConfig.baseUrl is set but no model is configured — without a top-level "model" or "models.conversation" the custom endpoint would never be used; set one that routes to it',
+        'agentOptions.providerConfig.baseUrl is set but no model is configured — without an "agentOptions.model", top-level "model", or "models.conversation" the custom endpoint would never be used; set one that routes to it',
       );
     }
   }

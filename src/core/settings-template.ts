@@ -44,8 +44,8 @@ export const AGENT_DEFAULT_ALLOW: readonly string[] = Object.freeze([
  * `isValidPermissionsSettings` asserts that every entry survives.
  *
  * Populated from the connector mutation inventory approved for #411.
- * Existing on-disk settings with permissions are preserved, but any
- * generated, merged, or repaired agent settings receive this deny floor.
+ * Existing on-disk custom settings are preserved, while the always-run
+ * workspace reconciler restores this floor whenever it has drifted.
  */
 export const REQUIRED_DENY: readonly string[] = Object.freeze([
   // Google auth-backed mutation tools.

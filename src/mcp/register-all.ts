@@ -48,6 +48,15 @@ const log = createChildLogger('register-all');
 export interface RegisterAllToolsOptions {
   enableKnowledgeSearch?: boolean;
   pollRegistrar?: import('./tools/messaging.ts').PollRegistrar;
+  /**
+   * T8-F2: query whether the runtime is currently in a fallback-provider
+   * window, threaded to every MCP send tool that can reach the operator DM
+   * (messaging, media) so their T8-F1 elevation stays provider-conditioned.
+   * OPTIONAL: PassiveRuntime has no agent/fallback-provider concept at all,
+   * so it omits this — messaging/media then fail closed (treat as active,
+   * full scrub) rather than silently elevating on an unknown state.
+   */
+  fallbackActive?: () => boolean;
 }
 
 /**
@@ -139,8 +148,15 @@ export function registerAllTools(
   runModule('messaging', true, () => messagingTools.registerMessagingTools(registry, {
     connection, db: db.raw, profiles: profileRegistry, auditWriter: outboundSendsWriter,
     pollRegistrar: options.pollRegistrar, instanceName: config.botName,
+    // T8-F1+F2: dbWrapper + adminPhones (REQUIRED, mirroring substrate.ts's
+    // established dbWrapper/adminPhones pattern for LID-aware admin gating)
+    // let send/reply/edit/poll resolve isOperatorDmPeer; fallbackActive is
+    // OPTIONAL (see RegisterAllToolsOptions) and threaded straight through.
+    dbWrapper: db, adminPhones: config.adminPhones, fallbackActive: options.fallbackActive,
   }));
-  runModule('media', true, () => mediaTools.registerMediaTools(registry, { connection, db }));
+  runModule('media', true, () => mediaTools.registerMediaTools(registry, {
+    connection, db, adminPhones: config.adminPhones, fallbackActive: options.fallbackActive,
+  }));
   runModule('voice', true, () => voiceTools.registerVoiceTools(registry, { connection, db }));
   runModule('retention', true, () => retentionTools.registerRetentionTools(registry, { db }));
   runModule('status', true, () => statusTools.registerStatusTools(registry, { db, getSock }));

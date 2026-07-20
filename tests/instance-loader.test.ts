@@ -1037,6 +1037,52 @@ describe('loadInstance — XDG fallback', () => {
 });
 
 describe('resolveAgentModel', () => {
+  // B27 fix 1: agentOptions.model is the agent-scoped model knob the instance
+  // schema accepts and the live canary sets — the resolver must read it FIRST.
+  // Before the fix it was never read: this.model stayed undefined at runtime
+  // and --model was never passed at spawn despite a configured instance.
+  it('reads agentOptions.model (the exact live canary shape)', async () => {
+    const { resolveAgentModel } = await import('../src/instance-loader.ts');
+    expect(resolveAgentModel({ agentOptions: { model: 'claude-opus-4-8' } })).toBe(
+      'claude-opus-4-8',
+    );
+  });
+
+  it('agentOptions.model wins over top-level model and models.conversation', async () => {
+    const { resolveAgentModel } = await import('../src/instance-loader.ts');
+    expect(
+      resolveAgentModel({
+        agentOptions: { model: 'claude-opus-4-8' },
+        model: 'claude-opus-4-7',
+        models: { conversation: 'claude-haiku-4-5' },
+      }),
+    ).toBe('claude-opus-4-8');
+  });
+
+  it('blank/non-string agentOptions.model falls through to top-level model', async () => {
+    const { resolveAgentModel } = await import('../src/instance-loader.ts');
+    expect(
+      resolveAgentModel({ agentOptions: { model: '   ' }, model: 'claude-opus-4-7' }),
+    ).toBe('claude-opus-4-7');
+    expect(
+      resolveAgentModel({
+        agentOptions: { model: 42 as unknown as string },
+        model: 'claude-opus-4-7',
+      }),
+    ).toBe('claude-opus-4-7');
+  });
+
+  it('non-object agentOptions is tolerated and falls through', async () => {
+    const { resolveAgentModel } = await import('../src/instance-loader.ts');
+    expect(
+      resolveAgentModel({
+        agentOptions: 'bogus' as unknown as Record<string, unknown>,
+        model: 'claude-opus-4-7',
+      }),
+    ).toBe('claude-opus-4-7');
+    expect(resolveAgentModel({ agentOptions: {} })).toBeUndefined();
+  });
+
   it('returns the top-level model when set', async () => {
     const { resolveAgentModel } = await import('../src/instance-loader.ts');
     expect(resolveAgentModel({ model: 'claude-opus-4-7' })).toBe('claude-opus-4-7');

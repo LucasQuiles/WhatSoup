@@ -38,7 +38,7 @@ import { ensureHandoffArtifactSchema, getHandoffArtifact, deleteHandoffArtifact 
 import { buildHandoffPrelude } from './handoff-prelude.ts';
 import type { AgentProvider } from './providers/types.ts';
 import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
-import { buildRestartSelfTool, triggerSelfRestart, type ServiceRestarter } from './self-restart.ts';
+import { buildRestartSelfTool, triggerSelfRestart, assertRestartSelfAdmin, type ServiceRestarter } from './self-restart.ts';
 import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
 import { sendTracked } from '../../core/durability.ts';
 import { classifyErrorForInbound } from '../../core/inbound-failure-class.ts';
@@ -92,6 +92,7 @@ import {
 } from './outbound-queue.ts';
 import { ControlQueue } from './control-queue.ts';
 import { classifyInput } from './commands.ts';
+import { renderHelp, renderHelpDetail } from './help-render.ts';
 import {
   ensureChatPreferenceSchema,
   getPreference,
@@ -108,6 +109,9 @@ import { buildRoutingPromptContract, extractRouteIntents } from './route-intent.
 import { isProviderId } from './providers/index.ts';
 import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
+import { formatChatRefForOwner } from '../../core/chat-display-name.ts';
+import { OWNER_BULLET, bulletedSection, modelModifierTags, modifierSuffix, formatAvailableModels, MODEL_CATALOGUE_CAP } from './owner-render-format.ts';
+import { resolveModelCatalogue } from './model-catalogue-resolver.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
 import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
@@ -171,8 +175,9 @@ import {
   readRestartLoopGuardHealth,
   restartLoopGuardPath,
 } from './restart-loop-guard.ts';
-import { canonicalConversationKey, resolvePhoneFromJid } from '../../core/access-list.ts';
+import { canonicalConversationKey, resolvePhoneFromJid, resolvePhoneFromJidForGrant } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
+import { getCommandSpec } from './command-registry.ts';
 import { matchImperative, extractImperativeTarget } from '../../core/substrate/inline-extractor.ts';
 import { createBead } from '../../core/substrate/beads.ts';
 import { mkdirSync, copyFileSync, readdirSync, unlinkSync, readFileSync } from 'node:fs';
@@ -340,7 +345,7 @@ function isProviderFallbackReason(value: unknown): value is ProviderFallbackReas
   return value === 'usage-limit' || value === 'rate-limit'
     || value === 'auth-required' || value === 'model-unavailable'
     || value === 'server-error' || value === 'empty-output'
-    || value === 'probe-unusable';
+    || value === 'probe-unusable' || value === 'unknown-terminal-repeated';
 }
 
 /**
@@ -353,6 +358,20 @@ function isProviderFallbackReason(value: unknown): value is ProviderFallbackReas
  * {@link AgentRuntime.maybeArmFallbackAfterEmptyPrimaryTurn}.
  */
 const EMPTY_OUTPUT_FALLBACK_THRESHOLD = 2;
+
+/**
+ * Consecutive unclassified-terminal PRIMARY user turns that force a provider
+ * fallback. An UNKNOWN terminal provider error (is_error result whose text
+ * classifyProviderFailure() cannot place in any known class) has historically
+ * only surfaced a generic notice + ops alert and armed NO fallback, so a broken
+ * primary throwing them turn after turn stalled on the primary while an eligible
+ * fallback sat idle. A single one is treated as transient (keep the session); a
+ * bounded run fails over. Dedicated constant — it intentionally tracks the value
+ * of {@link EMPTY_OUTPUT_FALLBACK_THRESHOLD} today, but is kept separate so tuning
+ * the empty-output threshold cannot silently move the unknown-terminal one. See
+ * {@link AgentRuntime.maybeArmFallbackAfterUnknownTerminal}.
+ */
+const UNKNOWN_TERMINAL_FALLBACK_THRESHOLD = 2;
 
 /**
  * Startup grace for empty-output fallback arming. The boot/recovery sequence
@@ -559,7 +578,7 @@ import {
   type AskUserQuestion,
   type AskUserOption,
 } from './poll-resolution.ts';
-import { resolveOutboundAudience } from '../../core/outbound-message-safety.ts';
+import { resolveOutboundAudience, isOperatorDmPeer, type OutboundAudience } from '../../core/outbound-message-safety.ts';
 
 // Tool_use → ToolUpdate formatting, tool-error classification, and operator-alert
 // gating extracted to ./tool-update.ts (module-level FILE-reduction slice). Re-exported
@@ -618,6 +637,17 @@ function formatClockForUser(epochMs: number): string {
   return new Date(epochMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
+/**
+ * B26 human-scaled token count: 96_200 → '96.2k', 150_000 → '150k', 500 → '500'.
+ * Same >1000 → one-decimal 'k' formula the /sessions handler inlines, plus a
+ * trailing-'.0' strip so round budgets render '150k', not '150.0k'. The
+ * /sessions inline sites keep their exact pre-B26 output ('2.0k') — do not
+ * swap them onto this helper without updating their pinned renders.
+ */
+function formatTokenCount(count: number): string {
+  return count > 1000 ? `${(count / 1000).toFixed(1).replace(/\.0$/, '')}k` : String(count);
+}
+
 function fallbackRequiresPrimaryProbe(reason: ProviderFallbackReason): boolean {
   // Recovery-probe gating is intentionally BROADER than independent-provider
   // routing (`fallbackRequiresIndependentProbe`, used at the routing call-site).
@@ -625,10 +655,17 @@ function fallbackRequiresPrimaryProbe(reason: ProviderFallbackReason): boolean {
   // "resets 9am" is parsed as a daily clock time — so we must re-probe the
   // primary and revert the moment it recovers rather than blind-waiting for the
   // window to elapse. Routing semantics are unchanged; only the recovery path widens.
+  //
+  // unknown-terminal-repeated joins the recovery-probe set (NOT the
+  // independent-probe set): an unclassified terminal error has NO parseable
+  // reset estimate, so without a recovery probe the window blind-waits. It is
+  // deliberately kept OUT of fallbackRequiresIndependentProbe so an operator's
+  // same-provider downgrade rung (e.g. claude-cli/opus) stays selectable.
   return (
     fallbackRequiresIndependentProbe(reason) ||
     reason === 'usage-limit' ||
-    reason === 'rate-limit'
+    reason === 'rate-limit' ||
+    reason === 'unknown-terminal-repeated'
   );
 }
 
@@ -710,10 +747,16 @@ export function extractUsageLimitResetTime(text: string, now: Date = new Date())
 // `isPromptTooLongMessage` lives in `./failure-taxonomy.ts` (imported + re-exported above).
 
 function templateForFallbackReason(reason: ProviderFallbackReason): UserTemplateId {
-  // empty-output / probe-unusable are transient primary failovers from the
-  // user's perspective (no hard auth/usage fault) — they reuse the existing
-  // 'transient' user copy rather than minting new user-facing templates (#1421).
-  if (reason === 'server-error' || reason === 'empty-output' || reason === 'probe-unusable') {
+  // empty-output / probe-unusable / unknown-terminal-repeated are transient
+  // primary failovers from the user's perspective (no hard auth/usage fault) —
+  // they reuse the existing 'transient' user copy rather than minting new
+  // user-facing templates (#1421).
+  if (
+    reason === 'server-error'
+    || reason === 'empty-output'
+    || reason === 'probe-unusable'
+    || reason === 'unknown-terminal-repeated'
+  ) {
     return 'transient';
   }
   return reason;
@@ -857,6 +900,13 @@ export class AgentRuntime implements Runtime {
    *  or when an empty-output fallback is armed. Drives the empty-output fallback
    *  trigger — see maybeArmFallbackAfterEmptyPrimaryTurn. */
   private consecutivePrimaryEmptyTurns = 0;
+  /** Consecutive unclassified-terminal (is_error, classifyProviderFailure→null)
+   *  PRIMARY user turns; reset on any successful turn or when the unknown-terminal
+   *  fallback is armed. Drives the unknown-terminal fallback trigger — see
+   *  maybeArmFallbackAfterUnknownTerminal. Kept SEPARATE from
+   *  consecutivePrimaryEmptyTurns (short-circuited on this path) and from the
+   *  cumulative errorCounts['unknown-terminal'] (which is not consecutive). */
+  private consecutiveUnknownTerminalTurns = 0;
   /** Monotonic construction timestamp (performance.now()), used for the
    *  empty-output arming startup grace — see EMPTY_OUTPUT_ARM_STARTUP_GRACE_MS.
    *  Using performance.now() rather than Date.now() so NTP steps and
@@ -2464,10 +2514,12 @@ export class AgentRuntime implements Runtime {
       recordTurnCapabilitySuccess: (isUserTurnResult) => runtime.recordTurnCapabilitySuccess(isUserTurnResult),
       recordTurnCapabilityFailure: (isUserTurnResult, errorClass) =>
         runtime.recordTurnCapabilityFailure(isUserTurnResult, errorClass),
-      recordFallbackTurnOutcome: (queue, hadVisibleOutput, hadToolWork, session) =>
-        runtime.recordFallbackTurnOutcome(queue, hadVisibleOutput, hadToolWork, session),
+      recordFallbackTurnOutcome: (queue, hadVisibleOutput, hadToolWork, session, wasUnclassifiedError) =>
+        runtime.recordFallbackTurnOutcome(queue, hadVisibleOutput, hadToolWork, session, wasUnclassifiedError),
       maybeArmFallbackAfterEmptyPrimaryTurn: (queue, session, turnHadToolWork, mapKey) =>
         runtime.maybeArmFallbackAfterEmptyPrimaryTurn(queue, session, turnHadToolWork, mapKey),
+      maybeArmFallbackAfterUnknownTerminal: (queue, session, turnHadToolWork, mapKey, isUserTurnResult, evidenceText) =>
+        runtime.maybeArmFallbackAfterUnknownTerminal(queue, session, turnHadToolWork, mapKey, isUserTurnResult, evidenceText),
       enqueueAutoSwitchNotice: (queue, text, logChatJid, mode) =>
         runtime.enqueueAutoSwitchNotice(queue, text, logChatJid, mode),
       withHandoffPrefix: (chatJid, text) => runtime.withHandoffPrefix(chatJid, text),
@@ -2494,6 +2546,7 @@ export class AgentRuntime implements Runtime {
         register: (pollId, chatJid, options, resolution, timeoutMs, abortSignal) =>
           this.registerSendPollAwaiter(pollId, chatJid, options, resolution, timeoutMs, abortSignal),
       },
+      fallbackActive: () => this.isFallbackWindowActive, // T8-F2: mirrors the outbound queue's fallback signal
     });
   }
 
@@ -2522,8 +2575,11 @@ export class AgentRuntime implements Runtime {
     const conversationKey = canonicalConversationKey(chatJid, this.db);
     // QR-069: inherit a prior queue's echo-guard token when one exists.
     const priorToken = this.priorSenderTokenForChat(chatJid);
-    const q = new OutboundQueue(this.messenger, chatJid,
-      { conversationKey, ...(priorToken === undefined ? {} : { senderToken: priorToken }) });
+    const q = new OutboundQueue(this.messenger, chatJid, { // T8-F1+F2: inject admin-peer + fallback-window queries
+      conversationKey, ...(priorToken === undefined ? {} : { senderToken: priorToken }),
+      peerIsAdmin: (jid) => isOperatorDmPeer(jid, isGroupJid(jid), this.db, config.adminPhones),
+      fallbackActive: () => this.isFallbackWindowActive,
+    });
     if (this.durability) q.setDurability(this.durability);
     q.setToolUpdateMode(config.toolUpdateMode);
     q.setToolUpdateRedirectJid(config.toolUpdateRedirectJid);
@@ -3499,15 +3555,10 @@ export class AgentRuntime implements Runtime {
         },
         serviceManager: serviceRestarter,
         trigger: triggerSelfRestart,
-        // QR-047: admin gate, same resolve+isAdminPhone check the other admin paths use.
-        assertAdmin: (session) => {
-          const phone = session.actorJid ? resolvePhoneFromJid(session.actorJid, this.db) : null;
-          if (!phone || !isAdminPhone(phone, config.adminPhones)) {
-            throw new Error(
-              `restart_self is admin-only: caller "${phone ?? 'unresolved'}" is not on the instance admin list`,
-            );
-          }
-        },
+        // QR-047 + QR-143: admin gate hoisted to assertRestartSelfAdmin — gates on
+        // authenticated transport BEFORE the phone match, so a spoofed @sms actor
+        // that collapses to admin digits cannot induce a restart.
+        assertAdmin: (session) => assertRestartSelfAdmin(session, { db: this.db, adminPhones: config.adminPhones }),
       }));
     }
 
@@ -3641,12 +3692,16 @@ export class AgentRuntime implements Runtime {
     // agent turn fails downstream. The bead lands as status='proposed' so a
     // drowsy or misfired match doesn't silently commit real work to the task list.
     try {
+      // senderPhone stays on the PLAIN resolver — it feeds the bead's ownerJid
+      // attribution (display-side, below), which is transport-agnostic.
       const senderPhone = resolvePhoneFromJid(msg.senderJid, this.db);
-      // Skip the inline imperative extractor for synthetic agent-job turns —
-      // otherwise a scheduled prompt would spawn a proposed task bead on every
-      // fire. The job is already a durable agent_job bead; it is not an ad-hoc
-      // imperative to capture.
-      if (isAdminPhone(senderPhone, config.adminPhones) && !msg.isSyntheticJob) {
+      // QR-143 (B4): the admin GRANT (auto-creating a proposed bead) routes
+      // through the grant primitive, which returns null for a spoofable
+      // <admin-digits>@sms transport — so it cannot induce an admin-attributed
+      // proposal. Skip synthetic agent-job turns (already durable agent_job
+      // beads, not ad-hoc imperatives to capture).
+      const grantPhone = resolvePhoneFromJidForGrant(msg.senderJid, this.db);
+      if (grantPhone !== null && isAdminPhone(grantPhone, config.adminPhones) && !msg.isSyntheticJob) {
         const hit = matchImperative(content);
         if (hit) {
           const target = extractImperativeTarget(content);
@@ -3796,14 +3851,70 @@ export class AgentRuntime implements Runtime {
     let forwardAfterLocalCommand: string | null = null;
 
     if (classified.type === 'local') {
+      const spec = getCommandSpec(classified.command);
+      // Gate enforcement by gate class. Both gated classes share the same
+      // authenticated-admin core: isWhatsAppAuthenticatedJid FIRST (QR-143 —
+      // a non-authenticated transport like @sms resolves to the SAME bare
+      // phone as the WhatsApp admin but its sender-ID is spoofable, so the
+      // transport check must precede the phone match), THEN admin-phone.
+      //  - 'admin'              → authenticated admin, any venue (B21-A F3, base
+      //                           parity: the deleted pre-registry gates were
+      //                           phone-only, so admins could run these from
+      //                           groups; isAdminMessage's DM-only clause is
+      //                           deliberately NOT used here): /sessions,
+      //                           /kill-session.
+      //  - 'admin-shared-scope' → /new: admin required ONLY where the reset hits SHARED
+      //                           session state (single/shared mode, or a per_chat GROUP —
+      //                           WG-5; this.session is one session across ALL chats there,
+      //                           :760); a per_chat 1:1 DM reset touches only the sender's
+      //                           own conversation → ungated. Group-permitting (an admin may
+      //                           /new in a group) AND @sms-closing (authenticated-JID check).
+      //                           With EMPTY adminPhones /new stays ungated too (B21-A F2,
+      //                           base parity): a no-admin instance has no other reset path,
+      //                           so deny-everyone would be a total /new lockout, not a
+      //                           security posture. The empty-set exemption is THIS gate
+      //                           only — plain 'admin' commands were admin-gated on base
+      //                           and stay denied when no admin is configured.
+      // Lazy so gate:'none' commands never pay the resolvePhoneFromJid DB read.
+      // B4: the grant primitive gates authenticated-transport-FIRST then resolves;
+      // a non-authenticated (@sms) sender yields null and is denied. Behaviour is
+      // identical to the prior isWhatsAppAuthenticatedJid && isAdminPhone(...) form
+      // (isAdminPhone(null) === false).
+      const isAuthenticatedAdmin = (): boolean => {
+        const phone = resolvePhoneFromJidForGrant(msg.senderJid, this.db);
+        return phone !== null && isAdminPhone(phone, config.adminPhones);
+      };
+      const denied =
+        spec.gate === 'admin'
+          ? !isAuthenticatedAdmin()
+          : spec.gate === 'admin-shared-scope'
+            ? (this.sessionScope !== 'per_chat' || msg.isGroup) &&
+              config.adminPhones.size > 0 &&
+              !isAuthenticatedAdmin()
+            : false;
+      if (denied) {
+        // NFR-3: unsampled — never silent (V19). ids only, no content (U6).
+        // @check CHK-067 // @traces REQ-012.AC-06
+        log.warn(
+          { command: spec.name, senderJid: msg.senderJid, outcome: 'denied', errorClass: 'not-authorized' },
+          'command denied: sender not authorized',
+        );
+        // B21-A F4a: denial must be user-visible, never a silent drop — same
+        // queue-routed send path the other local-command replies use.
+        this.sendDirect(chatJid, '_Not authorized._');
+        // B21-A F1: this return bypasses the R14 post-switch completion below,
+        // so the denied inbound must be finalized HERE — same shape as the
+        // 'empty_content' skip in handleMessageInner — or the row strands in
+        // 'processing' until the stuck-inbound sweep falsely reclaims an authz
+        // denial as a processing FAILURE (stale_reclaim).
+        if (this.durability && msg.inboundSeq !== undefined) {
+          this.durability.markInboundSkipped(msg.inboundSeq, 'not_authorized');
+        }
+        return;
+      }
       try {
         switch (classified.command) {
           case 'new':
-            // Shared mode: /new is admin-only
-            if (this.shared && !isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones)) {
-              // @check CHK-067 // @traces REQ-012.AC-06
-              return;
-            }
             // A local reset cannot erase the immutable evidence owner of an
             // admitted user turn. Ask the caller to retry once that turn has
             // reached its terminal transaction.
@@ -3875,13 +3986,58 @@ export class AgentRuntime implements Runtime {
               const lastActivity = status.lastMessageAt
                 ? formatAge(status.lastMessageAt)
                 : 'none';
+              // B26 owner ruling: /status must show the model explicitly, the
+              // session's token counts, and the session limit. Model follows
+              // the SAME honesty rule as /model status (describeRouteModel:
+              // config-derived only, '(configured)' label — the served weight
+              // is unobservable). Defensive typeof mirrors the getProviderId
+              // call site at maybeStartAutoCompact.
+              const statusModelRef =
+                typeof sessionForStatus?.getModelRef === 'function'
+                  ? sessionForStatus.getModelRef()
+                  : undefined;
+              const statusProvider =
+                typeof sessionForStatus?.getProviderId === 'function'
+                  ? sessionForStatus.getProviderId()
+                  : this.agentProvider;
               text =
                 '*Session active*\n' +
                 `PID: \`${status.pid ?? 'unknown'}\`\n` +
                 `Session: \`${sessionShort}\`\n` +
+                `Model: ${this.describeRouteModel(statusModelRef, statusProvider)}\n` +
                 `Started: ${started}\n` +
                 `Messages: ${status.messageCount}\n` +
                 `Last activity: ${lastActivity}`;
+              // B26: session token counts from the agent_sessions denorm
+              // columns (same source as /sessions); omitted honestly when no
+              // row exists yet. The context line pairs the since-last-compact
+              // quantity maybeStartAutoCompact actually compares (input +
+              // cache_read minus the last-compact baseline, :1273-76) with
+              // the threshold the runtime actually applies (configured value,
+              // else DEFAULT_AUTO_COMPACT_INPUT_TOKENS) — and renders ONLY
+              // where auto-compact can genuinely run (claude-cli session,
+              // non-shared scope): a budget meter for a limit that never
+              // fires would be a lie. NO provider quota meters here — that is
+              // the /account lane.
+              const statusRowId = sessionForStatus?.getDbRowId() ?? null;
+              const statusSnap = statusRowId !== null ? getSessionTokenSnapshot(this.db, statusRowId) : null;
+              if (statusSnap) {
+                text +=
+                  `\nTokens: ${formatTokenCount(statusSnap.totalInputTokens)} in / ${formatTokenCount(statusSnap.totalOutputTokens)} out`;
+                if (
+                  statusProvider === 'claude-cli' &&
+                  this.sessionScope !== 'shared' &&
+                  this.autoCompactInputTokens !== undefined
+                ) {
+                  const contextUsed = Math.max(
+                    0,
+                    statusSnap.totalInputTokens + statusSnap.totalCacheReadTokens -
+                      (statusSnap.lastCompactInputTokens + statusSnap.lastCompactCacheReadTokens),
+                  );
+                  text +=
+                    `\nContext: ${formatTokenCount(contextUsed)} / ${formatTokenCount(this.autoCompactInputTokens)} before auto-compact`;
+                }
+              }
             } else {
               text = '_No active session._ Send a message to start one.';
             }
@@ -3906,7 +4062,35 @@ export class AgentRuntime implements Runtime {
               } catch (err) {
                 log.warn({ err, instance: this.instanceName }, 'pruneExpired failed during /model status - continuing');
               }
-              this.sendDirect(chatJid, this.renderRouteStatus(chatJid, msg.senderJid));
+              // B26: bare /model gets ONE discoverability affordance line for
+              // the catalogue; an explicit /model status stays as-is.
+              const routeStatus = this.renderRouteStatus(chatJid, msg.senderJid);
+              this.sendDirect(
+                chatJid,
+                classified.args === undefined
+                  ? `${routeStatus}\n_/model list — see what you can pick_`
+                  : routeStatus,
+              );
+              break;
+            }
+            if (sub === 'list' || sub.startsWith('list ')) {
+              // The config-derived pin/primary block renders synchronously and
+              // unconditionally (Q 2b#1). The DYNAMIC per-harness available-models
+              // section is appended by an async, fire-and-forget path so a slow or
+              // failed harness probe never holds the turn (Q 2b#3); it degrades
+              // independently to a reason-specific "unavailable" line.
+              const rawArgs = (classified.args ?? '').trim();
+              const filter = sub === 'list'
+                ? null
+                : rawArgs.slice(rawArgs.toLowerCase().indexOf('list ') + 'list '.length).trim() || null;
+              // The config-derived pin/primary block sends IMMEDIATELY so "what
+              // am I on" never waits on — or is lost to — the catalogue probe
+              // (Q 2b#1).
+              this.sendDirect(chatJid, this.renderModelCatalogue());
+              // The dynamic per-harness available-models section follows as a
+              // separate message once the bounded + cached probe resolves —
+              // fire-and-forget so a slow harness never holds the turn (Q 2b#3).
+              void this.sendDynamicModelCatalogueSection(chatJid, filter);
               break;
             }
             if (sub === 'default') {
@@ -3978,28 +4162,17 @@ export class AgentRuntime implements Runtime {
           }
 
           case 'help': {
-            const helpText =
-              '*/new* — start a fresh session\n' +
-              '*/status* — show current session status\n' +
-              '*/sessions* — list all active sessions _(admin)_\n' +
-              '*/kill-session <N>* — terminate a session by number _(admin)_\n' +
-              '*/help* — show this help\n' +
-              (config.nlRouting
-                ? '*/model* — route status; `/model strongest|fastest|default|<provider>`\n' +
-                  '*/why* — why this model answered\n' +
-                  '*/reset* — back to the default route\n'
-                : '') +
-            '_Any other message is forwarded to Claude Code._\n' +
-            'Other slash commands (e.g. `/compact`) are passed directly to Claude Code.';
+            // W1-T5: registry-derived render (help-render.ts), pure functions
+            // of (registry, {nlRouting}) — no runtime reads (R3c-1.3). Detail
+            // shares the flag: alias commands hide local semantics when off (D7).
+            const helpText = classified.args
+              ? renderHelpDetail(classified.args, { nlRouting: config.nlRouting === true })
+              : renderHelp({ nlRouting: config.nlRouting === true });
             this.sendDirect(chatJid, helpText);
             break;
           }
 
           case 'sessions': {
-            // Admin-only
-            if (!isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones)) {
-              return;
-            }
             // #1774: the per-session token figures below read total_input_tokens
             // uncompensated — they now show genuinely-new input, not the old
             // inflated (cache-read-inclusive) total. This display has no
@@ -4007,6 +4180,13 @@ export class AgentRuntime implements Runtime {
             // straight improvement.
             const entries: string[] = [];
             let idx = 1;
+            // b28 r2c: the row whose conversation key matches the chat that sent
+            // /sessions is labelled "Current session" instead of its resolved
+            // name — derived through the same canonical key the runtime dispatches
+            // on, so lid vs pn presentation cannot cause a miss.
+            const requestingKey = this.sessionScope === 'per_chat'
+              ? this.resolvePerChatMapKey(chatJid)
+              : null;
             if (this.sessionScope === 'per_chat') {
               for (const [mapKey, sess] of this.chatSessions) {
                 const st = sess.getStatus();
@@ -4025,7 +4205,14 @@ export class AgentRuntime implements Runtime {
                     tkStr = tkTotal > 1000 ? `${(tkTotal / 1000).toFixed(1)}k` : String(tkTotal);
                   }
                 }
-                entries.push(`${idx}. ${mapKey} (${label}) — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
+                // B23 owner ruling: render the resolved chat name (alias →
+                // group subject/chat name → contact name → formatted phone),
+                // raw key only as last resort. Local DB reads only — cheap.
+                // b28 r2c: the requesting chat's own row reads "Current session".
+                const identifier = mapKey === requestingKey
+                  ? 'Current session'
+                  : formatChatRefForOwner(this.db, mapKey);
+                entries.push(`${idx}. ${identifier} (${label}) — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
                 idx++;
               }
             } else {
@@ -4043,7 +4230,16 @@ export class AgentRuntime implements Runtime {
                     tkStr = tkTotal > 1000 ? `${(tkTotal / 1000).toFixed(1)}k` : String(tkTotal);
                   }
                 }
-                entries.push(`1. ${this.activeChatJid ?? 'unknown'} — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
+                // b28 r2c: when /sessions is sent from the active chat itself,
+                // the single row reads "Current session". Canonicalize BOTH
+                // sides — the request may present as @lid while activeChatJid is
+                // stored as the pn (or vice versa).
+                const requestIsActiveChat = this.activeChatJid !== null
+                  && canonicalizeChatJid(chatJid, this.db) === canonicalizeChatJid(this.activeChatJid, this.db);
+                const identifier = requestIsActiveChat
+                  ? 'Current session'
+                  : (this.activeChatJid ? formatChatRefForOwner(this.db, this.activeChatJid) : 'unknown');
+                entries.push(`1. ${identifier} — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
               }
             }
             const sessionsText = entries.length > 0
@@ -4054,12 +4250,12 @@ export class AgentRuntime implements Runtime {
           }
 
           case 'kill-session': {
-            // Admin-only
-            if (!isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones)) {
-              return;
-            }
-            const targetIdx = parseInt(classified.args ?? '', 10);
-            if (isNaN(targetIdx) || targetIdx < 1) {
+            // B25 F4: strict integer parse — parseInt('2x') === 2 silently
+            // accepted trailing garbage and killed a session the admin never
+            // named. Digits only, everywhere.
+            const rawIdxArg = (classified.args ?? '').trim();
+            const targetIdx = /^\d+$/.test(rawIdxArg) ? Number(rawIdxArg) : NaN;
+            if (!Number.isInteger(targetIdx) || targetIdx < 1) {
               this.sendDirect(chatJid, '_Usage: /kill-session <number>_\nRun /sessions first to see the list.', true);
               break;
             }
@@ -4090,12 +4286,23 @@ export class AgentRuntime implements Runtime {
               const killSuffix = killFinalizationError === null
                 ? ''
                 : '\n_⚠️ some in-flight turns could not be finalized — see logs_';
-              this.sendDirect(chatJid, `_Session killed: ${mapKey} (${killLabel})_${killSuffix}`, true);
+              // B23: same name resolution as the /sessions list above.
+              this.sendDirect(chatJid, `_Session killed: ${formatChatRefForOwner(this.db, mapKey)} (${killLabel})_${killSuffix}`, true);
             } else {
               if (!this.session?.getStatus().active) {
                 this.sendDirect(chatJid, '_No active session to kill._', true);
                 break;
               }
+              // B25 F4: the parsed index was IGNORED here — any N>=1 killed
+              // the lone session. Exactly one session exists in this scope,
+              // so only index 1 is valid; mirror per_chat's invalid reply.
+              if (targetIdx !== 1) {
+                this.sendDirect(chatJid, '_Invalid session number. 1 active._', true);
+                break;
+              }
+              // Capture the chat identity BEFORE teardown nulls it — the ack
+              // must prove which chat died (same choke point as /sessions).
+              const killedRef = this.activeChatJid;
               this.getActiveQueue()?.abortTurn();
               this.operationTracker?.shutdown();
               this.operationTracker = null;
@@ -4104,8 +4311,32 @@ export class AgentRuntime implements Runtime {
               this.session = null;
               this.queue = null;
               this.activeChatJid = null;
-              this.sendDirect(chatJid, '_Session killed._', true);
+              this.sendDirect(
+                chatJid,
+                killedRef
+                  ? `_Session killed: ${formatChatRefForOwner(this.db, killedRef)}_`
+                  : '_Session killed._',
+                true,
+              );
             }
+            break;
+          }
+
+          default: {
+            // B21-A F4b: a COMMAND_REGISTRY entry the classifier admits but
+            // this switch has no case for must fall through LOUDLY as a
+            // forwarded turn — the pre-registry behavior for unrecognized
+            // commands — never be silently swallowed with a bogus
+            // 'local_command_handled' completion. The forwarded turn owns
+            // terminal inbound durability (same contract as the /model
+            // default fall-through above). Unreachable today (the switch
+            // covers every registry entry — `classified.command` is `never`
+            // here); this guards future registry appends without handlers.
+            log.warn(
+              { command: classified.command, chatJid },
+              'local command has no handler — forwarding to agent',
+            );
+            forwardAfterLocalCommand = content as string;
             break;
           }
         }
@@ -5660,10 +5891,17 @@ export class AgentRuntime implements Runtime {
     }
   }
 
+  /** T8-F1+F2: shared operator-DM elevation ctx for direct sends/polls. */
+  private resolveSendAudience(chatJid: string, isGroup: boolean): OutboundAudience {
+    const peerIsAdmin = isOperatorDmPeer(chatJid, isGroup, this.db, config.adminPhones);
+    return resolveOutboundAudience(chatJid, { isGroup, peerIsAdmin, fallbackActive: this.isFallbackWindowActive });
+  }
+
   private sendUnansweredPollTextFallback(
     pending: PendingPollQuestion,
     intro: string,
   ): void {
+    const audience = this.resolveSendAudience(pending.chatJid, isGroupJid(pending.chatJid));
     const unanswered = unansweredPollQuestions(pending);
     unanswered.forEach(({ question }, fallbackIndex) => {
       this.sendDirect(
@@ -5672,7 +5910,7 @@ export class AgentRuntime implements Runtime {
           question,
           fallbackIndex === 0 ? intro : 'Remaining decision question:',
           undefined,
-          resolveOutboundAudience(pending.chatJid),
+          audience,
         ),
       );
     });
@@ -6053,7 +6291,7 @@ export class AgentRuntime implements Runtime {
 
     const pollMessageIds: string[] = [];
     let allHaveSecret = true;
-    const pollAudience = resolveOutboundAudience(chatJid);
+    const pollAudience = this.resolveSendAudience(chatJid, isGroup); // T8-F1+F2
     const formattedQuestions = normalizedQuestions.map((q, index) => ({
       index,
       question: q,
@@ -8205,6 +8443,11 @@ export class AgentRuntime implements Runtime {
       // this_thread preferences are ephemeral by design (24h TTL);
       // sticky pins require explicit confirmation and are a later slice.
       expiresAt: now + PREFERENCE_TTL_MS,
+      // Provider-pin path — carries no MODEL pin (that arrives via the /config
+      // model // /model <N> write path in a later slice).
+      requestedModel: null,
+      validatedProvider: null,
+      modelPinVerified: null,
     });
     this.emitRouteEventChecked({
       event: 'model_preference_set',
@@ -8364,10 +8607,118 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
+   * B26 honest model label, shared by /model status and /status. The served
+   * model weight is UNOBSERVABLE (the stream is never parsed for a model
+   * field; a prior incident had an agent fabricate one) — so this renders
+   * only config-derived values, explicitly labeled:
+   *  - a route model equal to the configured primary → 'model (configured)'
+   *  - any other route model (a config fallback-entry value) → bare
+   *  - no route model but a configured primary on the primary provider →
+   *    'model (configured)'
+   *  - genuinely nothing configured (or a non-primary provider with no
+   *    entry model) → 'provider default (not configured)'
+   */
+  private describeRouteModel(routeModel: string | undefined, routeProvider: string): string {
+    if (routeModel !== undefined) {
+      return routeModel === this.model ? `${routeModel} (configured)` : routeModel;
+    }
+    if (this.model !== undefined && routeProvider === this.agentProvider) {
+      return `${this.model} (configured)`;
+    }
+    return 'provider default (not configured)';
+  }
+
+  /**
+   * B26 /model list — the model catalogue. Rendered ENTIRELY from config
+   * (honesty contract: the served weight is unobservable, so nothing here is
+   * presented as what actually serves — the primary and every fallback entry
+   * are configuration, and the tier vocabulary maps to nlRoutingTiers or is
+   * honestly declared unconfigured). Names follow the shipped F8 convention:
+   * provider (model).
+   */
+  private renderModelCatalogue(): string {
+    const primary = this.model !== undefined
+      ? `${this.agentProvider} (${this.model} — configured)`
+      : `${this.agentProvider} (provider default — no model configured)`;
+    // Tier vocabulary: default always exists (the primary route). strongest/
+    // fastest resolve ONLY through nlRoutingTiers — absent map means they
+    // degrade to the default route, and the catalogue must say so rather than
+    // imply they resolve somewhere specific (canary shape: tiers unset).
+    const tiers = config.nlRoutingTiers;
+    const tiersConfigured = tiers !== null && tiers !== undefined && (tiers.strongest !== undefined || tiers.fastest !== undefined);
+    const tierLine = tiersConfigured
+      ? `Tiers: default → primary route; strongest → ${tiers.strongest ?? 'not configured (default route)'}; fastest → ${tiers.fastest ?? 'not configured (default route)'}`
+      : 'Tiers: default → primary route; strongest/fastest: tiers not configured on this line — default routing only';
+    // b28 r2d: one `• ` bullet per MODEL (primary + each fallback). Each bullet
+    // carries its provider + config-derived modifiers ONLY (D7): a catalog
+    // lifecycle advisory keyed off the configured model ID (silent for IDs the
+    // catalog does not recognize, e.g. third-party kimi/glm) and a tier tag
+    // when the provider is a configured nlRoutingTiers target. The served
+    // weight stays unobservable — the caveat is the trailing _italic_ line.
+    const modelBullets: string[] = [
+      `Primary: ${primary}${modifierSuffix(modelModifierTags(this.model, this.agentProvider, tiers))}`,
+    ];
+    if (this.agentFallbacks.length > 0) {
+      for (const e of this.agentFallbacks) {
+        const label = e.model ? `${e.provider} (${e.model})` : e.provider;
+        modelBullets.push(`Fallback: ${label}${modifierSuffix(modelModifierTags(e.model, e.provider, tiers))}`);
+      }
+    } else {
+      modelBullets.push('Fallbacks: none configured');
+    }
+    return [
+      '*Models on this line* (from config)',
+      ...modelBullets.map((b) => `${OWNER_BULLET}${b}`),
+      tierLine,
+      'Pin: `/model provider-id` — prefers it for you here (24h). Back: `/model default` or `/reset`.',
+      '_Which weight actually serves is not observable here._',
+    ].join('\n');
+  }
+
+  /**
+   * Send the DYNAMIC per-harness available-models section as the follow-up to
+   * the config-derived `/model list` block (which the caller already delivered).
+   * Fire-and-forget: the catalogue source (an opencode spawn or an anthropic
+   * HTTP call) is bounded + cached, but a slow harness must never hold the turn
+   * (Q 2b#3). Never throws — the resolver is total; the catch is a belt so a bug
+   * here just omits the section (the config block already went out).
+   */
+  private async sendDynamicModelCatalogueSection(chatJid: string, filter: string | null): Promise<void> {
+    try {
+      const provider = this.agentProvider;
+      const binary = getProviderBinary(provider) ?? provider;
+      const listing = await resolveModelCatalogue(provider, binary, { nowMs: Date.now() });
+      // `/model list` is a DIRECT, solicited request, so it ALWAYS renders — even
+      // on structural absence (no-adapter / no-credential), where the NAMED reason
+      // ("no catalogue adapter for codex-cli") is the true answer and silence would
+      // leave the user unable to tell "unsupported here" from "broken" (Q 2026-07-20:
+      // silence is a bad answer to a direct question). OAuth sourcing makes a healthy
+      // claude-cli harness `ok`, so a structural reason here is now rare + informative,
+      // not the permanent dead-end the earlier suppression guarded against. Suppression
+      // of structural absence belongs to a future UNSOLICITED/aggregate render (the
+      // /config overview), which gates on isStructuralCatalogueAbsence.
+      this.sendDirect(chatJid, formatAvailableModels({
+        harnessLabel: provider,
+        currentModelId: this.model ?? null,
+        fallbackModelIds: this.agentFallbacks
+          .map((e) => e.model)
+          .filter((m): m is string => m !== undefined),
+        listing,
+        filter,
+        cap: MODEL_CATALOGUE_CAP,
+      }));
+    } catch (err) {
+      log.warn({ err, instance: this.instanceName }, '/model list dynamic catalogue section failed');
+    }
+  }
+
+  /**
    * End-user route status (/model status). Visibility policy (capability-
-   * preserved routing): provider, model route, preference, fallback state,
-   * delegation state, and authority class only — never tool names, socket
-   * paths, pids, account JIDs, or cross-conversation metadata.
+   * preserved routing): provider, model route, preference, and fallback state
+   * only — never tool names, socket paths, pids, account JIDs, or
+   * cross-conversation metadata. (b28 r2b removed the Delegation/Authority
+   * DISPLAY lines; the invariant they described lives in the agent system
+   * prompt + security layer and the /why receipt, not this status surface.)
    */
   private renderRouteStatus(chatJid: string, senderJid: string): string {
     const { live, pref, next } = this.loadRouteView(chatJid, senderJid);
@@ -8376,7 +8727,22 @@ export class AgentRuntime implements Runtime {
     // effectiveProvider, which contradicted the "steers new sessions" line.
     const nextProvider = next.provider || 'unknown-provider';
     const provider = live?.provider ?? nextProvider;
-    const model = (live ? live.model : next.model) ?? 'provider default';
+    // B26 HONESTY RULE (load-bearing): the SERVED model weight is
+    // unobservable — the provider stream is never parsed for a model field —
+    // so every value on this line is config-derived and says so. The route
+    // model (live session's spawn ref, or the resolved next-session model)
+    // comes from config/fallback entries; when it IS the configured primary
+    // it carries the '(configured)' label, a fallback-entry model stays bare
+    // (existing behavior). When the route carries NO model, fall back to the
+    // configured primary explicitly — the pre-B26 render read ONLY the
+    // live/next route model and showed 'provider default' even when
+    // agentOptions.model was set (live canary exhibit). Only a genuinely
+    // absent config renders 'provider default (not configured)'. Never
+    // present a value as the served weight; never invent one.
+    const model = this.describeRouteModel(
+      live ? live.model : next.model,
+      live ? live.provider : nextProvider,
+    );
     const prefLine = pref
       ? `Preference: ${pref.requestedProvider ?? pref.intent} for you in this chat` +
         (pref.expiresAt !== null
@@ -8384,24 +8750,37 @@ export class AgentRuntime implements Runtime {
           : '') +
         ' — steers new sessions'
       : 'Preference: none';
+    // B25 F8: the active-window and Next lines were model-blind — a
+    // same-provider window pinning a DIFFERENT model rendered without the
+    // model and suppressed the Next line entirely. Render "provider (model)"
+    // and compare provider AND model in the suppress guard.
+    const nextRouteLabel = next.model ? `${nextProvider} (${next.model})` : nextProvider;
     const fallbackLine = this.isFallbackWindowActive
-      ? `Fallback: active — new sessions route via ${nextProvider}`
+      ? `Fallback: active — new sessions route via ${nextRouteLabel}`
       : this.agentFallbacks.length > 0
-        ? `Fallback chain (configured): ${this.agentFallbacks.map((e) => e.provider).join(' → ')}`
+        // B23: entries may share a provider and differ only by model — render
+        // "provider (model)" when a model is pinned so distinct configured
+        // entries never collapse to indistinguishable labels. b28 r2a: the
+        // chain renders one `• ` bullet per entry (WhatsApp narrow column),
+        // never a long ` → `-joined single line.
+        ? bulletedSection(
+            'Fallback chain (configured):',
+            this.agentFallbacks.map((e) => (e.model ? `${e.provider} (${e.model})` : e.provider)),
+          )
         : 'Fallback: none configured';
-    const nextLine = live && live.provider !== nextProvider
-      ? `\nNext session: ${nextProvider}`
-      : '';
+    const nextLine =
+      live && (live.provider !== nextProvider || (live.model ?? null) !== (next.model ?? null))
+        ? `\nNext session: ${nextRouteLabel}`
+        : '';
+    // b28 r2b: the Delegation + Authority lines are removed from this render
+    // (owner ruling: not about model/route status). DISPLAY-only removal — the
+    // routing-never-changes-authority invariant remains in the agent system
+    // prompt + security layer and on the /why receipt (renderRouteWhy).
     return (
       `*Current route:* ${provider}${live ? '' : ' (no live session — next session route)'}\n` +
       `Model: ${model}\n` +
       `${prefLine}\n` +
-      `${fallbackLine}${nextLine}\n` +
-      'Delegation: none\n' +
-      // Capability-preserved phrasing, true on EVERY instance (F10): this
-      // surface must not claim the bot can or cannot act — only that
-      // routing choices never change what it may do.
-      'Authority: routing never changes what I am allowed to do'
+      `${fallbackLine}${nextLine}`
     );
   }
 
@@ -8676,6 +9055,94 @@ export class AgentRuntime implements Runtime {
     return true;
   }
 
+  /**
+   * Arm provider fallback when the PRIMARY provider returns REPEATED unclassified
+   * terminal errors — the default-deny "unknown-terminal" case (an is_error result
+   * whose text {@link classifyProviderFailure} cannot place in any known class).
+   * Such a turn produces no arming provider-failure MESSAGE, so the text-driven
+   * ladders never fire and (unlike empty output) the failure is masked behind a
+   * generic notice; a broken primary throwing them stalled turn after turn while
+   * an eligible fallback sat idle.
+   *
+   * A single unknown-terminal is transient (the caller keeps the session and
+   * surfaces the generic notice). After {@link UNKNOWN_TERMINAL_FALLBACK_THRESHOLD}
+   * consecutive occurrences on REAL user turns this fails over exactly like the
+   * sibling terminal classes: activate + replay + notify, with reason
+   * 'unknown-terminal-repeated'. Selection does NOT force an independent provider
+   * (unknown-terminal-repeated is absent from fallbackRequiresIndependentProbe),
+   * so an operator-configured same-provider downgrade rung stays eligible; the
+   * revert is still gated on a fresh primary probe (fallbackRequiresPrimaryProbe)
+   * because there is no parseable reset estimate.
+   *
+   * Gated exactly like {@link maybeArmFallbackAfterEmptyPrimaryTurn}: only real
+   * user turns count (isUserTurnResult), never while a window is already active,
+   * never without a configured fallback, and never for the synthetic
+   * control/repair session (control@heal.internal) — whose emptiness/errors must
+   * not cross-contaminate the real-chat counter. Returns true only when it armed
+   * a window this call; the counter resets on activation and on any successful turn.
+   */
+  private maybeArmFallbackAfterUnknownTerminal(
+    queue: IOutboundQueue,
+    session: SessionManager | null,
+    turnHadToolWork: boolean,
+    mapKey: string | undefined,
+    isUserTurnResult: boolean,
+    evidenceText: string,
+  ): boolean {
+    // System/heal/synthetic turns must never advance or trip the consecutive
+    // threshold. Unlike the empty-output arming call-site (already inside the
+    // is-user-turn guard), this branch runs in the result.text path regardless of
+    // isSystemResult, so the guard is explicit here.
+    if (!isUserTurnResult) return false;
+    if (this.isFallbackWindowActive) return false;
+    if (this.agentFallbacks.length === 0) return false;
+    // control@heal.internal repair-probe exclusion — mirrors
+    // maybeArmFallbackAfterEmptyPrimaryTurn (ml-bot false-failover class): the
+    // controlSession !== null guard avoids the null===null trap (per-chat turns
+    // pass session=null, and controlSession also defaults to null).
+    if ((this.controlSession !== null && session === this.controlSession) || mapKey === 'control@heal.internal') {
+      return false;
+    }
+
+    this.consecutiveUnknownTerminalTurns += 1;
+    if (this.consecutiveUnknownTerminalTurns < UNKNOWN_TERMINAL_FALLBACK_THRESHOLD) return false;
+
+    log.warn(
+      {
+        instanceName: this.instanceName,
+        primaryProvider: this.agentProvider,
+        consecutiveUnknownTerminalTurns: this.consecutiveUnknownTerminalTurns,
+      },
+      'primary provider returned repeated unclassified terminal errors — arming provider fallback',
+    );
+
+    const activation = this.activateProviderFallbackAfterTerminalResult(
+      null,
+      'unknown-terminal-repeated',
+      session,
+      evidenceText,
+    );
+    if (!activation) return false;
+
+    const replayScheduled = this.scheduleFallbackReplay({
+      activation,
+      chatJid: queue.targetChatJid,
+      mapKey,
+      oldSession: session,
+      hadToolActivity: turnHadToolWork,
+    });
+    this.notifyProviderFallbackActivated(queue, activation, {
+      replayScheduled,
+      blockedByToolActivity: turnHadToolWork,
+    });
+    // No replay took over (tool activity already started, or nothing to replay):
+    // the primary session actually errored, so tear it down like the sibling
+    // terminal branches — the active window routes the next turn to the fallback.
+    if (!replayScheduled) session?.shutdown();
+    this.consecutiveUnknownTerminalTurns = 0;
+    return true;
+  }
+
   private activateProviderFallbackAfterTerminalResult(
     resetAt: Date | null,
     reason: ProviderFallbackReason,
@@ -8772,11 +9239,7 @@ export class AgentRuntime implements Runtime {
     };
   }
 
-  /**
-   * #1753 rem-2: delegates to the ToolRegistry every socket server (global and
-   * per-chat) shares — the single choke point every MCP tool call flows
-   * through, so this reflects in-flight calls across the whole instance.
-   */
+  // #1753 rem-2: delegates to the ToolRegistry every socket server (global and per-chat) shares — the single choke point every MCP tool call flows through, so this reflects in-flight calls across the whole instance.
   getMcpLivenessSnapshot(): {
     pendingCount: number;
     oldestCallAgeMs: number | null;
@@ -8803,6 +9266,11 @@ export class AgentRuntime implements Runtime {
     if (!isUserTurnResult) return;
     this.turnCapabilityTracker.recordSuccess();
     this.consecutivePrimaryEmptyTurns = 0;
+    this.consecutiveUnknownTerminalTurns = 0;
+    if (this.isFallbackWindowActive) return; // #1884 follow-up: a fallback turn proves nothing about the primary
+    const wasStale = deriveModelUsable(this.primaryModelUsability, Date.now()).modelUsableStale;
+    this.recordPrimaryModelUsability({ status: 'usable', provider: this.agentProvider, model: this.model ?? null, reason: 'turn-success' }, 'manual');
+    if (wasStale) log.info({ provider: this.agentProvider, model: this.model ?? null }, 'primary model usability refreshed by turn success after going stale');
   }
 
   private recordTurnCapabilityFailure(
@@ -8923,11 +9391,19 @@ export class AgentRuntime implements Runtime {
     return fallbackKeyPresentFor(provider, model, this.agentProvider, this.agentProviderConfig);
   }
 
-  /** User-facing notice for a usage-limit teardown when no fallback replay can run. */
+  /**
+   * User-facing notice for a usage-limit teardown when no fallback replay can
+   * run. A per-model-tier usage cap is NOT cleared by waiting — the remedy is
+   * operator action (add credits or switch the model), so the copy names that
+   * call to action rather than telling the user to "try again after the limit
+   * resets". No ops alert fires on either branch, so the copy does not claim an
+   * operator was already notified. Pure factory (single source of copy);
+   * redaction-safe (no provider text, no PII).
+   */
   private usageLimitNotice(): string {
     return this.agentFallbacks.length > 0
-      ? '_Primary model hit a token/quota limit, but the backup could not continue this turn. An operator has been notified._'
-      : '_Primary model hit a token/quota limit. Please try again after the limit resets._';
+      ? "_I've reached a model usage limit and the backup couldn't continue this turn. An operator needs to add credits or switch my model._"
+      : "_I've reached a model usage limit and couldn't switch automatically. An operator needs to add credits or switch my model._";
   }
 
   /**
@@ -8955,6 +9431,16 @@ export class AgentRuntime implements Runtime {
     this.recentNoFallbackReauthNotices.set(noticeKey, now);
     this.capDedupeMap(this.recentNoFallbackReauthNotices);
     queue.enqueueText('_The agent needs re-authentication before it can reply here. An operator has been notified._');
+    // Back the "operator has been notified" claim: no result-path alert fires on
+    // the no-fallback auth-required teardown (fallback alerts fire only when a
+    // fallback activates), so without this the notice claim would be unbacked.
+    // Fires at notice cadence — the dedup early-return above gates both.
+    emitAlertChecked(
+      this.instanceName,
+      'provider_auth_required_no_fallback',
+      'Agent needs re-authentication and no fallback is available',
+      `chat=${queue.targetChatJid}`,
+    );
   }
 
   /**
@@ -8971,10 +9457,17 @@ export class AgentRuntime implements Runtime {
     hadVisibleOutput: boolean,
     hadToolWork: boolean = false,
     session: SessionManager | null = null,
+    wasUnclassifiedError: boolean = false,
   ): void {
     if (!this.isFallbackWindowActive) return;
     this.fallbackMetrics.recordServedTurn();
-    if (hadVisibleOutput || hadToolWork) {
+    // An UNCLASSIFIED terminal error from the active fallback ENTRY carries
+    // non-empty raw error text (suppressed from the user, replaced by a notice),
+    // so hadVisibleOutput is true even though the turn produced no usable reply.
+    // Treat it as unproductive like a structurally-empty turn — otherwise the
+    // reset below wipes the advance run every turn and the bot pins forever on a
+    // dead entry while a working entry waits behind it in the chain.
+    if ((hadVisibleOutput || hadToolWork) && !wasUnclassifiedError) {
       // The active entry produced a real reply — it is healthy. Clear the
       // empty-advance accounting so a later isolated empty turn starts fresh.
       this.fallbackEmptyAdvance.reset();
@@ -9685,7 +10178,6 @@ export class AgentRuntime implements Runtime {
       'warning',
     );
   }
-
 
   private primaryModelUsabilityEvidence(
     result: PrimaryModelUsabilityResult,
