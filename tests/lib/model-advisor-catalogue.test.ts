@@ -88,6 +88,19 @@ describe('resolveClaudeOAuthCred', () => {
     const out = resolveClaudeOAuthCred({ readFileText: () => JSON.stringify({ claudeAiOauth: { accessToken: 'oauth-tok-x' } }), nowMs: T });
     expect(out).toStrictEqual({ status: 'present', token: 'oauth-tok-x' });
   });
+
+  it('applies NO refresh margin — a token still valid for 1ms is present, not expired (Q round 23)', () => {
+    // The credential-state.ts primitive resolveTokenExpiryState has a 5-min refresh
+    // MARGIN (valid-but-soon → 'expiring'). resolveClaudeOAuthCred deliberately does
+    // NOT use it: expiry here is STRICT (expiresAt <= now). This pins that the margin
+    // never flows into the per-provider accessor's states, so a credential valid for
+    // another N minutes stays routable rather than being de-routed early. A future
+    // refactor swapping in the margin-aware primitive breaks this on purpose.
+    expect(resolveClaudeOAuthCred({ readFileText: () => creds('oauth-tok-soon', T + 1), nowMs: T }))
+      .toStrictEqual({ status: 'present', token: 'oauth-tok-soon' });
+    expect(resolveClaudeOAuthCred({ readFileText: () => creds('oauth-tok-inmargin', T + 60_000), nowMs: T }))
+      .toStrictEqual({ status: 'present', token: 'oauth-tok-inmargin' });
+  });
 });
 
 describe('fetchAnthropicModelIdsWithStatus — OAuth credential path', () => {
