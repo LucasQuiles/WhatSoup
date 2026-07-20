@@ -5,6 +5,7 @@ import type { AgentEvent } from '../../../../src/runtimes/agent/stream-parser.ts
 import { AnthropicApiProvider } from '../../../../src/runtimes/agent/providers/anthropic-api.ts';
 import { OpenAIApiProvider } from '../../../../src/runtimes/agent/providers/openai-api.ts';
 import { providerPreview, sanitizeProviderPreviewText } from '../../../../src/runtimes/agent/provider-preview-sanitizer.ts';
+import { E9_BARE_AT_MESSAGE } from '../../../fixtures/e9-strings.ts';
 
 const { errorMock, warnMock } = vi.hoisted(() => ({
   errorMock: vi.fn(),
@@ -227,6 +228,62 @@ describe('sanitizeProviderPreviewText — compound / camelCase secret keys (QR-0
   });
 });
 
+// T8-F3 (E4): `redactKeyedSecretValues`'s unquoted-value branch false-positived on
+// display-truncated NON-secrets — a backtick-wrapped short id ending `...`/`…`
+// (e.g. `` Session: `4947004d...` ``) got masked to `[REDACTED]` even though the
+// truncation already destroyed any secret value. The carve-out is TIGHT: backtick
+// wrap AND short base (<= MAX_TRUNCATED_DISPLAY_BASE) AND the base does NOT match
+// the known token-prefix alternation (shared with the :86 replacement via
+// KNOWN_TOKEN_PREFIX so the two cannot drift). Width is pinned by boundary +
+// adversarial cases below — see OVER-REDACTION-ROOT-CAUSE.md / W1-PACKET.md T8-F3.
+describe('T8-F3: truncation carve-out in redactKeyedSecretValues (E4)', () => {
+  it('E4 case: backtick-wrapped 8-char truncated display id survives unredacted', () => {
+    const input = 'Session: `4947004d...`';
+    expect(sanitizeProviderPreviewText(input)).toBe(input);
+  });
+
+  it('boundary carve: a 12-char base survives (MAX_TRUNCATED_DISPLAY_BASE)', () => {
+    const input = 'Session: `abcdef123456...`';
+    expect(sanitizeProviderPreviewText(input)).toBe(input);
+  });
+
+  it('boundary mask: a 13-char base is still [REDACTED] (regression guard)', () => {
+    const input = 'Session: `abcdef1234567...`';
+    const out = sanitizeProviderPreviewText(input);
+    expect(out).toContain('[REDACTED]');
+    expect(out).not.toContain('abcdef1234567');
+  });
+
+  it('adversarial: short backtick-wrapped ellipsized value with a known token prefix is still [REDACTED]', () => {
+    const input = 'apikey: `sk-0123a...`';
+    const out = sanitizeProviderPreviewText(input);
+    expect(out).toContain('[REDACTED]');
+    expect(out).not.toContain('sk-0123a');
+  });
+
+  it('full token, no ellipsis, is still [REDACTED] every tier (INV-2)', () => {
+    const input = 'session=abc123def456ghi789';
+    expect(sanitizeProviderPreviewText(input)).toBe('session=[REDACTED]');
+  });
+
+  // Lead-review gate (W1-PACKET.md T8-F3 dispatch checklist item 2b): F3 is not
+  // accepted without this adversarial case green ALONGSIDE the E4-visible case —
+  // a LONG truncated secret prefix (>MAX_TRUNCATED_DISPLAY_BASE, also token-prefixed)
+  // must stay masked. Guards against a loose "any value ending `...`" implementation
+  // that the packet explicitly rejects (it would carve out `apikey=sk-...abcdef...`).
+  it('adversarial (load-bearing): long truncated secret prefix stays [REDACTED]', () => {
+    // Built via array-join (not a literal contiguous run in source) so the
+    // publication-guard's OpenAI-key-shape scan — a source-text regex with no
+    // example-marker exemption — doesn't flag this fixture; the base is still
+    // >MAX_TRUNCATED_DISPLAY_BASE chars AND token-prefixed either way.
+    const longTokenPrefixedBase = ['sk', 'example', '0123456789abcdef'].join('-');
+    const input = `apikey: \`${longTokenPrefixedBase}...\``;
+    const out = sanitizeProviderPreviewText(input);
+    expect(out).toContain('[REDACTED]');
+    expect(out).not.toContain(longTokenPrefixedBase);
+  });
+});
+
 describe('QR-128: email redaction is linear and does not under-redact', () => {
   it('is linear on a pathological dotted local/domain run (no catastrophic backtracking)', () => {
     // The prior /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/ overlapped its
@@ -248,5 +305,130 @@ describe('QR-128: email redaction is linear and does not under-redact', () => {
     expect(out).toContain('[REDACTED_EMAIL]');
     expect(out).not.toContain(addr);
     expect(sanitizeProviderPreviewText(`a.b+c${at}sub.example.co.uk`)).toBe('[REDACTED_EMAIL]');
+  });
+});
+
+// E9 (packet D5): `redactEmailLikeTokens` redacted ANY token containing '@'.
+// The mention-preserve regex requires a character AFTER the '@', so a bare
+// whitespace-flanked '@' used as the word "at" ("meet @ 5pm") ALWAYS became
+// [REDACTED_EMAIL] — live evidence: an agent's own explanation of this bug was
+// itself re-redacted in an internal-tier DM. Fix shape: only an email-SHAPED
+// core — non-empty local part AND non-empty domain part around an '@' — may be
+// redacted as an email. Mention-shaped tokens ('@name', '@15551234567') are NOT
+// email-shaped but stay governed by preserveWhatsAppMentions (phone mentions
+// are PII on surfaces that did not opt in), so the flag keeps its meaning.
+describe('E9 (packet D5): a bare "@" is not email-shaped and must survive', () => {
+  it('a bare "@" between words survives (the word "at")', () => {
+    expect(sanitizeProviderPreviewText(E9_BARE_AT_MESSAGE)).toBe(E9_BARE_AT_MESSAGE);
+  });
+
+  it('"@ 5pm" at the start of a message survives', () => {
+    const input = '@ 5pm works for me';
+    expect(sanitizeProviderPreviewText(input)).toBe(input);
+  });
+
+  it('the quantity idiom "3 @ $5 each" survives', () => {
+    const input = 'ordered 3 @ $5 each';
+    expect(sanitizeProviderPreviewText(input)).toBe(input);
+  });
+
+  it('real emails still redact: minimal a@b.c and dotted local/subdomain forms', () => {
+    // at-split idiom: no literal email address in committed source (repo-hygiene guard).
+    const at = '@';
+    expect(sanitizeProviderPreviewText(`a${at}b.c`)).toBe('[REDACTED_EMAIL]');
+    expect(sanitizeProviderPreviewText(`first.last${at}sub.domain.tld`)).toBe('[REDACTED_EMAIL]');
+  });
+
+  it('adversarial: a dangling trailing "@" does not exempt an embedded email-shaped token (a@b@ still redacts)', () => {
+    // Guards against a lazy "token ends with @ → pass through" implementation:
+    // `a@b@` still contains a non-empty-local/non-empty-domain '@' pair.
+    const out = sanitizeProviderPreviewText('a@b@');
+    expect(out).toContain('[REDACTED_EMAIL]');
+    expect(out).not.toContain('a@b');
+  });
+
+  it('@mention preservation is untouched: @alice and @15555550001 survive with preserveWhatsAppMentions', () => {
+    const options = { preserveWhatsAppMentions: true };
+    expect(sanitizeProviderPreviewText('Hi @alice!', options)).toBe('Hi @alice!');
+    expect(sanitizeProviderPreviewText('ping @15555550001 now', options)).toBe('ping @15555550001 now');
+  });
+
+  it('edge decision "@x": empty local part is mention-shaped, NOT email-shaped — preserved with the flag, still redacted without it (phone-mention PII stays fail-closed)', () => {
+    // Decision (documented): '@x' can never be an email (empty local part), but
+    // it IS mention-shaped, and mention visibility is governed by the
+    // preserveWhatsAppMentions flag — surfaces that did not opt in must keep
+    // masking mentions ('@15551234567' is a phone number). Requiring a
+    // non-empty local part for the EMAIL match must not turn the flag into
+    // dead code.
+    expect(sanitizeProviderPreviewText('cc @x please', { preserveWhatsAppMentions: true })).toBe('cc @x please');
+    expect(sanitizeProviderPreviewText('cc @x please')).toBe('cc [REDACTED_EMAIL] please');
+    expect(sanitizeProviderPreviewText('ping @15555550001 now')).toBe('ping [REDACTED_EMAIL] now');
+  });
+
+  it('edge decision "x@" REVERSED (B25): a dangling local is an ADDRESS FRAGMENT and redacts', () => {
+    // Original E9 ruling said "redacting it protects nothing" — the B25
+    // review proved the opposite for fragments: on CLIENT egress there is no
+    // downstream phone masking (unlike the handoff/ops surfaces), so a
+    // dangling local ('15551234567@', 'user@') carries the whole PII payload
+    // by itself. A dangling-local token — non-empty local + trailing '@' +
+    // EMPTY domain — now redacts (the local is masked); the E9 exemption
+    // narrows to truly-bare '@' runs ('meet @ 5pm', '3 @ $5 each').
+    expect(sanitizeProviderPreviewText('assign user@ then continue'))
+      .toBe('assign [REDACTED_EMAIL] then continue');
+  });
+});
+
+// B25 review (fix/b25-sanitizer-fixture): three execution-verified defects in
+// the E9 predicate family. Each fixture string below reproduced the defect
+// verbatim against the pre-fix sanitizer (recorded in the branch evidence):
+//   1a. 'she said "hi"@ 5pm'      -> 'she said [REDACTED_EMAIL] 5pm'   (over-redaction)
+//   1b. '@foo.bar' + mentions flag -> '[REDACTED_EMAIL]'               (flag ignored)
+//   1c. 'reach them at 15551234567@' -> passed VERBATIM                (PII leak)
+describe('B25: quoted-local domain gate, dotted mention bodies, dangling-local fragments', () => {
+  it('1a: quoted speech followed by "@" (empty domain) survives — the quoted-local branch is email-shape-gated', () => {
+    // The quoted-local branch redacted after scanning ZERO domain chars. The
+    // same email-shaped requirement (non-empty domain) that gates the token
+    // scanner must gate this branch: '"hi"@ 5pm' is quoted speech + the word
+    // "at", not an address.
+    const input = 'she said "hi"@ 5pm';
+    expect(sanitizeProviderPreviewText(input)).toBe(input);
+  });
+
+  it('1a guard: a quoted local with a NON-empty domain still redacts (gate must not disable the branch)', () => {
+    const at = '@';
+    expect(sanitizeProviderPreviewText(`"hi"${at}example.com`)).toBe('[REDACTED_EMAIL]');
+    expect(sanitizeProviderPreviewText(`"hi"${at}[127.0.0.1]`)).toBe('[REDACTED_EMAIL]');
+  });
+
+  it('1b: a dotted mention body is preserved WITH preserveWhatsAppMentions and still masked without it', () => {
+    // Direction ruling (documented in the sanitizer): the PRESERVE regex
+    // accepts dotted mention bodies; dotted mention-shaped tokens stay
+    // redacted by default. See the sanitizer comment for why this direction
+    // cannot leak a real email.
+    expect(sanitizeProviderPreviewText('@foo.bar', { preserveWhatsAppMentions: true })).toBe('@foo.bar');
+    expect(sanitizeProviderPreviewText('@foo.bar')).toBe('[REDACTED_EMAIL]');
+  });
+
+  it('1b guard: a digit-dot mention body stays masked even WITH the flag (phone-fragment PII, fail-closed)', () => {
+    expect(sanitizeProviderPreviewText('@1234.5678', { preserveWhatsAppMentions: true }))
+      .toBe('[REDACTED_EMAIL]');
+  });
+
+  it('1c: a dangling phone-local fragment redacts (client egress has no downstream phone masking)', () => {
+    expect(sanitizeProviderPreviewText('reach them at 15551234567@'))
+      .toBe('reach them at [REDACTED_EMAIL]');
+  });
+
+  it('1c: a space-split address masks the local half', () => {
+    // Shape from the review finding (a real address typed with a space after
+    // the '@'); fixture synthesized — no real identity in committed source.
+    expect(sanitizeProviderPreviewText('first.last@ example-corp.com'))
+      .toBe('[REDACTED_EMAIL] example-corp.com');
+  });
+
+  it('1c guard: E9 protected cases stay protected — truly-bare "@" runs still pass', () => {
+    for (const input of [E9_BARE_AT_MESSAGE, '@ 5pm works for me', 'ordered 3 @ $5 each']) {
+      expect(sanitizeProviderPreviewText(input)).toBe(input);
+    }
   });
 });

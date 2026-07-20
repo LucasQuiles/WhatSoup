@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import type { Database } from '../../core/database.ts';
-import { redactInternalArtifacts, resolveOutboundAudience } from '../../core/outbound-message-safety.ts';
+import { redactInternalArtifacts, resolveOutboundAudience, isOperatorDmPeer } from '../../core/outbound-message-safety.ts';
+import { isGroupJid } from '../../core/jid-constants.ts';
 import type {
   IncomingMessage,
   Messenger,
@@ -348,6 +349,14 @@ export class ChatRuntime implements Runtime {
     let responseText: string | null = null;
     let failureCause: ChatFailureCause | null = null;
     let modelUsed: string = conversationModel;
+    // T8-F2: chat/runtime.ts has no persisted FallbackWindowState (unlike the
+    // agent runtime) — it tries the primary provider then falls back to
+    // this.fallbackProvider PER TURN. This flag is the chat-bot's own
+    // "fallback provider state": true iff THIS response's text actually came
+    // from this.fallbackProvider (set at both success sites below), fully
+    // resolved by the time redactInternalArtifacts runs (never a default —
+    // both outcomes are known before the send path is reached).
+    let usedFallbackProvider = false;
     let inputTokens = 0;
     let outputTokens = 0;
     let llmDurationMs = 0;
@@ -409,6 +418,7 @@ export class ChatRuntime implements Runtime {
           const result = await this.fallbackProvider.generate(fallbackRequest);
           responseText = result.content;
           modelUsed = fallbackModel;
+          usedFallbackProvider = true;
           inputTokens = result.inputTokens;
           outputTokens = result.outputTokens;
           llmDurationMs = Date.now() - llmStart;
@@ -456,6 +466,7 @@ export class ChatRuntime implements Runtime {
           const result = await this.fallbackProvider.generate(fallbackRequest);
           responseText = result.content;
           modelUsed = fallbackModel;
+          usedFallbackProvider = true;
           inputTokens = result.inputTokens;
           outputTokens = result.outputTokens;
           llmDurationMs = Date.now() - llmStart;
@@ -523,7 +534,18 @@ export class ChatRuntime implements Runtime {
     // a no-op on benign text. Reuses the shared core redactor, audience-scoped so
     // operator-owned internal groups keep coordination vocabulary (paths, hook
     // names) and only have secrets/emails masked.
-    responseText = redactInternalArtifacts(responseText, resolveOutboundAudience(msg.chatJid)).text;
+    // T8-F1+F2: chat/runtime.ts has no persisted fallback WINDOW (agent
+    // runtime's FallbackWindowState) — it has a per-turn primary/fallback
+    // provider choice instead. `usedFallbackProvider` (set above) IS its own
+    // fallback-provider state for this turn, so it is passed as `fallbackActive`
+    // directly rather than defaulting closed: by this point in the turn the
+    // provider outcome is fully known, never unknown.
+    const chatIsGroup = isGroupJid(msg.chatJid);
+    responseText = redactInternalArtifacts(responseText, resolveOutboundAudience(msg.chatJid, {
+      isGroup: chatIsGroup,
+      peerIsAdmin: isOperatorDmPeer(msg.chatJid, chatIsGroup, this.db, config.adminPhones),
+      fallbackActive: usedFallbackProvider,
+    })).text;
 
     // 9. Send the response (with exponential-backoff retries on failure)
     const sendStart = Date.now();

@@ -32,6 +32,7 @@ import {
 import { UnknownProfileError, type ProfileRegistry } from './profiles.ts';
 import type { OutboundSendsWriter } from './outbound-sends.ts';
 import { normalizeErrorClass } from './heal-protocol.ts';
+import { getControlPeerWiring } from './heal.ts';
 import { markConversationRead } from './mark-read.ts';
 import type { Runtime } from '../runtimes/types.ts';
 import type { ConnectionRecentDisconnects, ConnectionStateSnapshot } from '../transport/connection.ts';
@@ -190,13 +191,14 @@ const HEALTH_MODEL_USABILITY_STATUSES = new Set([
   'unknown',
 ]);
 
-const HEALTH_TURN_ERROR_CLASSES = new Set([
+export const HEALTH_TURN_ERROR_CLASSES = new Set([
   'usage-limit',
   'rate-limit',
   'auth-required',
   'model-unavailable',
   'policy-block',
   'context-overflow',
+  'server-error', 'transient-network',   // W1-T6: were missing → last_turn_error_class nulled on /health
   'unknown-terminal',
   'empty-output',
 ]);
@@ -274,16 +276,21 @@ function agentRuntimeDetailsForHealth(
 
 export const ENRICHMENT_STALE_MS = 10 * 60 * 1000; // 10 minutes
 const RECENT_DISCONNECT_DEGRADED_THRESHOLD = 3;
-// #1433 — a post-first-turn `empty-output` is benign-by-default (the model
-// returned one empty turn and typically recovers on the next). It only degrades
-// when it is a CURRENT (came after the last successful turn), SUSTAINED stall:
+// #1433 / B21-D — a post-first-turn error in one of these TRANSIENT, self-clearing
+// classes is benign-by-default: `empty-output` (the model returned one empty turn
+// and typically recovers on the next) plus the W1-T6-backfilled `transient-network`
+// and `server-error` (single provider/network blips; failure-taxonomy arms no
+// provider-level action for them). Such an error only degrades /health when it is
+// a CURRENT (came after the last successful turn), SUSTAINED stall:
 //  - DEBOUNCE: must persist this long un-superseded before degrading, so a single
-//    transient empty turn followed by a success never flaps the health body.
-//  - STALE: a trailing empty-output older than this with no recovery is treated as
-//    a benign idle artifact and self-clears (an idle bot has no turn to clear it);
-//    a genuinely-broken model is still caught independently by model_usable===false.
-const EMPTY_OUTPUT_DEGRADE_DEBOUNCE_MS = 60 * 1000; // 1 minute
-const EMPTY_OUTPUT_STALE_MS = 15 * 60 * 1000; // 15 minutes
+//    transient blip followed by a success never flaps the health body.
+//  - STALE: a trailing transient error older than this with no recovery is treated
+//    as a benign idle artifact and self-clears (an idle bot has no turn to clear
+//    it); a genuinely-broken model is still caught independently by
+//    model_usable===false. Classes OUTSIDE this set still degrade immediately.
+const TRANSIENT_SELF_CLEARING_TURN_ERROR_CLASSES = new Set(['empty-output', 'transient-network', 'server-error']);
+const TRANSIENT_TURN_ERROR_DEGRADE_DEBOUNCE_MS = 60 * 1000; // 1 minute
+const TRANSIENT_TURN_ERROR_STALE_MS = 15 * 60 * 1000; // 15 minutes
 // An ambiguous outbound delivery (maybe_sent) should resolve within the echo
 // timeout + a recovery cycle. One left unresolved past this window is a
 // long-lived continuity risk that must degrade /health rather than read green
@@ -1165,43 +1172,46 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       const mcpLiveness = deps.instanceType === 'agent'
         ? deps.runtime?.getMcpLivenessSnapshot?.() ?? null
         : null;
-      // `empty-output` is a known-transient/benign turn-error class and must not
-      // pin or flap the health body (#1433). It degrades only as a CURRENT,
-      // SUSTAINED stall; every other shape is benign:
+      // A turn error in one of the transient self-clearing classes (empty-output,
+      // transient-network, server-error) must not pin or flap the health body
+      // (#1433 / B21-D). It degrades only as a CURRENT, SUSTAINED stall; every
+      // other shape is benign:
       //   1. Boot/pre-first-turn (last_successful_turn_at === null): the boot
       //      sequence stamps empty-output ~1s after restart while the bot is idle
       //      and it never self-clears — always benign (no real turn has failed).
       //   2. Superseded by a success (last_successful_turn_at >= last_turn_error_at):
       //      the model already recovered — benign. This kills the active flap where
-      //      empty/success turns alternate.
-      //   3. Within the debounce window: a fresh trailing empty-output that has not
-      //      yet persisted — benign, so a single empty turn followed by a success
+      //      transient-error/success turns alternate.
+      //   3. Within the debounce window: a fresh trailing transient error that has
+      //      not yet persisted — benign, so a single blip followed by a success
       //      never trips.
       //   4. Older than the staleness bound with no recovery: a benign idle
       //      artifact (an idle bot has no turn to clear it) — self-clears.
       // Safety: a genuinely-broken model is still caught independently via
-      // model_usable===false (the usability probe), and any non-empty-output error
-      // class degrades immediately. Only a current, sustained, non-stale
-      // empty-output stall (window [debounce, stale] after a proven turn) degrades.
-      const emptyOutputError =
-        turnCapability !== null && turnCapability.last_turn_error_class === 'empty-output';
-      const postTurnEmptyOutputIsCurrent =
-        emptyOutputError &&
+      // model_usable===false (the usability probe), and any NON-transient error
+      // class degrades immediately. Only a current, sustained, non-stale transient
+      // stall (window [debounce, stale] after a proven turn) degrades.
+      const transientSelfClearingError =
+        turnCapability !== null &&
+        turnCapability.last_turn_error_class !== null &&
+        TRANSIENT_SELF_CLEARING_TURN_ERROR_CLASSES.has(turnCapability.last_turn_error_class);
+      const postTurnTransientErrorIsCurrent =
+        transientSelfClearingError &&
         turnCapability.last_successful_turn_at !== null &&
         turnCapability.last_turn_error_at !== null &&
         turnCapability.last_turn_error_at > turnCapability.last_successful_turn_at;
-      const postTurnEmptyOutputAgeMs =
-        postTurnEmptyOutputIsCurrent && turnCapability.last_turn_error_at !== null
+      const postTurnTransientErrorAgeMs =
+        postTurnTransientErrorIsCurrent && turnCapability.last_turn_error_at !== null
           ? Date.now() - turnCapability.last_turn_error_at
           : null;
-      const emptyOutputIsDegrading =
-        postTurnEmptyOutputAgeMs !== null &&
-        postTurnEmptyOutputAgeMs >= EMPTY_OUTPUT_DEGRADE_DEBOUNCE_MS &&
-        postTurnEmptyOutputAgeMs <= EMPTY_OUTPUT_STALE_MS;
+      const transientErrorIsDegrading =
+        postTurnTransientErrorAgeMs !== null &&
+        postTurnTransientErrorAgeMs >= TRANSIENT_TURN_ERROR_DEGRADE_DEBOUNCE_MS &&
+        postTurnTransientErrorAgeMs <= TRANSIENT_TURN_ERROR_STALE_MS;
       const turnCapabilityErrorIsDegraded =
         turnCapability !== null &&
         turnCapability.last_turn_error_class !== null &&
-        (emptyOutputError ? emptyOutputIsDegrading : true);
+        (transientSelfClearingError ? transientErrorIsDegrading : true);
       const turnCapabilityIsDegraded =
         turnCapability !== null &&
         (turnCapability.model_usable === false
@@ -1320,6 +1330,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // instance block so operators can see when a bot is running on its
       // fallback provider and when that window expires.
       const fallbackState = deps.runtime?.getFallbackState?.() ?? null;
+
+      const controlPeerWiring = getControlPeerWiring();
 
       // Mode-specific runtime block for control-plane
       let runtimeBlock: Record<string, unknown> = {};
@@ -1454,6 +1466,13 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         },
         model_advisories: getModelAdvisories(),
         durability: durabilityStats,
+        // Q control-peer wiring. The heal_delivery_unavailable critical latches
+        // to one emission per process; this counter is where the suppressed
+        // occurrences are visible afterward (see emitHealReport in heal.ts).
+        control_peer: {
+          configured: controlPeerWiring.configured,
+          suppressed_unavailable_alerts: controlPeerWiring.suppressedUnavailableAlerts,
+        },
         turn_capability: turnCapability,
         runtime: runtimeBlock,
         event_loop: {

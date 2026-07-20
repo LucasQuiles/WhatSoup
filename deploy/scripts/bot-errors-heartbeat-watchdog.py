@@ -77,6 +77,14 @@ def watchdog_recovery_confirmations() -> int:
     return positive_env_int("BOT_ERRORS_WATCHDOG_RECOVERY_CONFIRMATIONS", 2)
 
 
+def watchdog_stale_confirmations() -> int:
+    return positive_env_int("BOT_ERRORS_WATCHDOG_STALE_CONFIRMATIONS", 1)
+
+
+def watchdog_flap_rearm_seconds() -> int:
+    return positive_env_int("BOT_ERRORS_WATCHDOG_FLAP_REARM_SECONDS", 6 * 60 * 60)
+
+
 def max_awaiting_q_age_seconds() -> int:
     return positive_env_int_or_default("BOT_ERRORS_MAX_AWAITING_Q_AGE", 20 * 60)
 
@@ -134,6 +142,8 @@ def validate_thresholds() -> None:
     watchdog_escalate_seconds()
     watchdog_escalate_suppressed()
     watchdog_recovery_confirmations()
+    watchdog_stale_confirmations()
+    watchdog_flap_rearm_seconds()
 
 
 def now_epoch() -> int:
@@ -336,9 +346,10 @@ def load_state() -> dict[str, Any]:
     path = watchdog_state_path()
     data = load_json(path, require_private=True)
     if data is None:
-        return {"version": 1, "open": {}}
-    if not isinstance(data.get("open"), dict):
-        data["open"] = {}
+        data = {"version": 1, "open": {}}
+    for section in ("open", "pendingStale", "recentlyRecovered"):
+        if not isinstance(data.get(section), dict):
+            data[section] = {}
     return data
 
 
@@ -1585,6 +1596,31 @@ def replacement_incident(current: int) -> dict[str, Any]:
     }
 
 
+def deferred_recovery_event(key: str, record: dict[str, Any]) -> Path:
+    """Emit the recovery notice that was held while the incident flapped.
+
+    A flapping incident's stale->ok observations are provisional: within the
+    re-arm window the same condition reopens silently, so its recovery notice is
+    deferred until the key stays clean past the window and then sent exactly once.
+    """
+    return outbox_event(
+        f"BOT ERRORS heartbeat watchdog recovered: {key}",
+        "\n".join([
+            f"source={key}",
+            f"first_seen={record.get('firstSeenAt')}",
+            f"flap_count={int_or_zero(record.get('flapCount'))}",
+            "recovery_notice_deferred=true",
+            f"held_since={record.get('recoveredAt')}",
+            f"suppressed_duplicates={int_or_zero(record.get('suppressed'))}",
+            f"last_evidence={record.get('lastEvidence')}",
+            f"watchdog_state={watchdog_state_path()}",
+        ]),
+        "info",
+        key,
+        event_type="clear",
+    )
+
+
 def reconcile(problems: dict[str, str], active_prefixes: list[str]) -> list[Path]:
     state = load_state()
     open_incidents: dict[str, Any] = state["open"]
@@ -1656,6 +1692,90 @@ def reconcile(problems: dict[str, str], active_prefixes: list[str]) -> list[Path
                 continue
             append_log("suppressed_open", {"source": key, "suppressed": suppressed, "evidence": evidence})
             continue
+        flap_record = state["recentlyRecovered"].get(key)
+        if isinstance(flap_record, dict):
+            recovered_at = parse_iso_epoch(flap_record.get("recoveredAt"))
+            state["recentlyRecovered"].pop(key, None)
+            if recovered_at is not None and max(0, current - recovered_at) < watchdog_flap_rearm_seconds():
+                # The condition re-entered stale inside the re-arm window. The
+                # FIRST reopen still alerts — a genuinely new outage of a
+                # recovered key must page immediately, and one extra message per
+                # storm is the accepted price — but SUBSEQUENT reopens within the
+                # window are silent: re-paging each oscillation is the
+                # alternating stale/recovered storm this latch exists to prevent.
+                # History (firstSeenAt, ageSeconds, suppressed count, renotify
+                # clock) carries over so age-based escalation and the renotify
+                # cadence behave as if the incident never closed.
+                state["pendingStale"].pop(key, None)
+                prior_flap_count = int_or_zero(flap_record.get("flapCount"))
+                flap_count = prior_flap_count + 1
+                first_reopen = prior_flap_count == 0
+                open_incidents[key] = {
+                    "firstSeenAt": flap_record.get("firstSeenAt") or now_iso(current),
+                    "lastSeenAt": now_iso(current),
+                    "lastNotifiedAt": (
+                        now_iso(current)
+                        if first_reopen
+                        else flap_record.get("lastNotifiedAt") or now_iso(current)
+                    ),
+                    "lastEvidence": redacted_evidence,
+                    "suppressed": int_or_zero(flap_record.get("suppressed")) + 1,
+                    "ageSeconds": int_or_zero(flap_record.get("ageSeconds")),
+                    "flapCount": flap_count,
+                }
+                if first_reopen:
+                    append_log(
+                        "flap_reopen_alert",
+                        {"source": key, "flapCount": flap_count, "evidence": evidence},
+                    )
+                    written.append(outbox_event(
+                        f"BOT ERRORS heartbeat watchdog stale: {key}",
+                        "\n".join([
+                            f"source={key}",
+                            "incident_reopened=true",
+                            f"flap_count={flap_count}",
+                            f"first_seen={flap_record.get('firstSeenAt')}",
+                            f"recovered_at={flap_record.get('recoveredAt')}",
+                            evidence,
+                            f"watchdog_state={watchdog_state_path()}",
+                            f"watchdog_log={state_root() / 'logs/heartbeat-watchdog.jsonl'}",
+                            "requested_action=Q investigate recurring monitor failure; this condition re-entered stale within the flap re-arm window.",
+                        ]),
+                        incident_severity(key, escalated=True),
+                        key,
+                    ))
+                else:
+                    append_log("flap_reopen", {"source": key, "flapCount": flap_count, "evidence": evidence})
+                continue
+            # Past the window with the problem back: flush any held recovery
+            # notice for the settled prior incident, then open a fresh one below.
+            if flap_record.get("holdNotice"):
+                written.append(deferred_recovery_event(key, flap_record))
+                append_log(
+                    "recovery_notice_flushed",
+                    {"source": key, "flapCount": int_or_zero(flap_record.get("flapCount"))},
+                )
+        required_stale = watchdog_stale_confirmations()
+        if required_stale > 1:
+            pending_record = state["pendingStale"].get(key)
+            if not isinstance(pending_record, dict):
+                pending_record = {"firstObservedAt": now_iso(current)}
+            observations = int_or_zero(pending_record.get("observations")) + 1
+            pending_record["observations"] = observations
+            pending_record["lastEvidence"] = redacted_evidence
+            if observations < required_stale:
+                state["pendingStale"][key] = pending_record
+                append_log(
+                    "stale_pending",
+                    {
+                        "source": key,
+                        "observations": observations,
+                        "requiredObservations": required_stale,
+                        "evidence": evidence,
+                    },
+                )
+                continue
+        state["pendingStale"].pop(key, None)
         open_incidents[key] = {
             "firstSeenAt": now_iso(current),
             "lastSeenAt": now_iso(current),
@@ -1709,6 +1829,32 @@ def reconcile(problems: dict[str, str], active_prefixes: list[str]) -> list[Path
             )
             continue
         incident = open_incidents.pop(key)
+        flap_count = int_or_zero(incident.get("flapCount"))
+        state["recentlyRecovered"][key] = {
+            "recoveredAt": now_iso(current),
+            "firstSeenAt": incident.get("firstSeenAt"),
+            "lastNotifiedAt": incident.get("lastNotifiedAt"),
+            "lastEvidence": incident.get("lastEvidence"),
+            "suppressed": int_or_zero(incident.get("suppressed")),
+            "ageSeconds": int_or_zero(incident.get("ageSeconds")),
+            "flapCount": flap_count,
+            "recoveryObservations": recovery_observations,
+            "holdNotice": flap_count > 0,
+        }
+        if flap_count > 0:
+            # A flapping incident's recovery is provisional: inside the re-arm
+            # window the same condition reopens silently, so announcing each
+            # oscillation as "recovered" is the other half of the alert storm.
+            # The notice is deferred until the key stays clean past the window.
+            append_log(
+                "recovery_held",
+                {
+                    "source": key,
+                    "flapCount": flap_count,
+                    "recoveryObservations": recovery_observations,
+                },
+            )
+            continue
         written.append(outbox_event(
             f"BOT ERRORS heartbeat watchdog recovered: {key}",
             "\n".join([
@@ -1723,6 +1869,26 @@ def reconcile(problems: dict[str, str], active_prefixes: list[str]) -> list[Path
             key,
             event_type="clear",
         ))
+    for key in sorted(set(state["pendingStale"]) - set(problems)):
+        if key_in_active_scope(key, active_prefixes):
+            state["pendingStale"].pop(key, None)
+    rearm_seconds = watchdog_flap_rearm_seconds()
+    for key in sorted(set(state["recentlyRecovered"]) - set(problems)):
+        if not key_in_active_scope(key, active_prefixes):
+            continue
+        record = state["recentlyRecovered"][key]
+        if not isinstance(record, dict):
+            state["recentlyRecovered"].pop(key, None)
+            continue
+        recovered_at = parse_iso_epoch(record.get("recoveredAt"))
+        if recovered_at is None or max(0, current - recovered_at) >= rearm_seconds:
+            state["recentlyRecovered"].pop(key, None)
+            if record.get("holdNotice"):
+                written.append(deferred_recovery_event(key, record))
+                append_log(
+                    "recovery_notice_flushed",
+                    {"source": key, "flapCount": int_or_zero(record.get("flapCount"))},
+                )
     save_state(state)
     return written
 

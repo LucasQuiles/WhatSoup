@@ -28,7 +28,7 @@ import { join } from 'node:path';
 
 import { writePermissionsSettings } from './workspace.ts';
 import { REQUIRED_DENY } from './settings-template.ts';
-import { writePrivateFileSync } from '../lib/private-fs.ts';
+import { writePrivateJsonMarkerSync } from '../lib/private-fs.ts';
 import type {
   PolicyAdapter,
   PolicySnapshot,
@@ -90,33 +90,51 @@ export function createSettingsPolicyAdapter(claudeDir: string): PolicyAdapter {
   return { read, apply };
 }
 
-/** Minimal shape-check so a hand-edited/old store file can't crash reconcile(). */
+/** Shape-check persisted rollback state before it can drive reconciliation. */
 function isGrantRecord(v: unknown): v is GrantRecord {
   if (v === null || typeof v !== 'object') return false;
   const r = v as Record<string, unknown>;
+  const isStringArray = (value: unknown): value is string[] =>
+    Array.isArray(value) && value.every((entry) => typeof entry === 'string');
+  const capabilities = r.capabilities;
+  const addedToAllow = r.addedToAllow;
+  const removedFromDeny = r.removedFromDeny;
+  if (
+    !isStringArray(capabilities) ||
+    !isStringArray(addedToAllow) ||
+    !isStringArray(removedFromDeny)
+  ) {
+    return false;
+  }
   return (
     r.version === 2 &&
-    typeof r.group === 'string' &&
-    typeof r.armedAtMs === 'number' &&
-    Array.isArray(r.addedToAllow) &&
-    Array.isArray(r.removedFromDeny)
+    typeof r.group === 'string' && r.group.length > 0 &&
+    Number.isSafeInteger(r.armedAtMs) && (r.armedAtMs as number) >= 0 &&
+    (r.expiresAtMs === null ||
+      (Number.isSafeInteger(r.expiresAtMs) && (r.expiresAtMs as number) > (r.armedAtMs as number))) &&
+    addedToAllow.every((entry) => capabilities.includes(entry)) &&
+    removedFromDeny.every((entry) => capabilities.includes(entry))
   );
 }
 
 /**
  * GrantStore backed by a single 0600 JSON file. write(null) clears the active
- * grant by removing the file; a malformed file reads as null (no active grant)
- * rather than throwing, so a corrupt store fails closed to "not armed".
+ * grant by removing the file. A malformed file rejects startup reconciliation:
+ * treating unknown rollback state as "not armed" could leave policy elevated.
  */
 export function createFileGrantStore(storePath: string): GrantStore {
   const read = async (): Promise<GrantRecord | null> => {
     if (!existsSync(storePath)) return null;
+    let parsed: unknown;
     try {
-      const parsed = JSON.parse(readFileSync(storePath, 'utf8'));
-      return isGrantRecord(parsed) ? parsed : null;
-    } catch {
-      return null;
+      parsed = JSON.parse(readFileSync(storePath, 'utf8'));
+    } catch (error) {
+      throw new Error(`invalid capability grant store: ${storePath}`, { cause: error });
     }
+    if (!isGrantRecord(parsed)) {
+      throw new Error(`invalid capability grant store: ${storePath}`);
+    }
+    return parsed;
   };
 
   const write = async (record: GrantRecord | null): Promise<void> => {
@@ -124,7 +142,10 @@ export function createFileGrantStore(storePath: string): GrantStore {
       if (existsSync(storePath)) rmSync(storePath);
       return;
     }
-    writePrivateFileSync(storePath, JSON.stringify(record, null, 2));
+    writePrivateJsonMarkerSync(storePath, record, {
+      label: 'capability grant store',
+      directoryFsync: 'required',
+    });
   };
 
   return { read, write };

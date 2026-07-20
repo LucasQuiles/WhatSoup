@@ -82,6 +82,22 @@ export type ProviderFailureKind =
   // session. Does NOT arm fallback (no provider-level action needed).
   | 'transient-network';
 
+/** Runtime-enumerable SSOT of ProviderFailureKind. The Record presence table
+ *  makes every union member mandatory — adding a kind without listing it here
+ *  is a compile error, so the runtime list can never silently omit a member. */
+const PROVIDER_FAILURE_KIND_PRESENCE: Record<ProviderFailureKind, true> = {
+  'usage-limit': true,
+  'rate-limit': true,
+  'auth-required': true,
+  'model-unavailable': true,
+  'policy-block': true,
+  'context-overflow': true,
+  'server-error': true,
+  'transient-network': true,
+};
+export const PROVIDER_FAILURE_KINDS: readonly ProviderFailureKind[] =
+  Object.keys(PROVIDER_FAILURE_KIND_PRESENCE) as ProviderFailureKind[];
+
 /**
  * SSOT registry of the terminal limit-name tokens the agent provider CLI emits.
  * Its limit-name map covers the 5-hour session cap, the 7-day weekly cap, the
@@ -104,8 +120,54 @@ export const LIMIT_NAME_TOKENS: readonly string[] = [
 ];
 
 /**
+ * Generic anchored matcher for a versioned / family-qualified model-tier TERMINAL
+ * limit ("You've reached your Fable 5 limit", "hit your Opus 4.8 limit"). The bare
+ * LIMIT_NAME_TOKENS list can only match UN-versioned family names (and carries no
+ * fable/haiku token at all), so every versioned tier string slipped past
+ * isUsageLimitMessage and the provider-fallback rollover never armed. Deliberately
+ * GENERIC — any `<verb> your <tier>[ <version>] limit` — NOT an enumerated family
+ * list: enumerating families is the exact hardcoded-staleness root cause of this
+ * incident, so a new model line needs no edit here (the MODEL_CATALOG drift-guard
+ * test proves every catalog family stays covered).
+ *
+ * ReDoS-safe (QR-130/133 lesson): one bounded optional group `(?: [\d.]+)?`, no
+ * nested quantifiers; `\S+` cannot cross a space so it backtracks linearly within a
+ * single token. Same complexity class as LIMIT_RESET_TIME_PATTERN; the rare literal
+ * anchors (`(?:hit|reached|exceeded) your`, ` limit`) keep start positions sparse.
+ *
+ * ACCEPTED FALSE POSITIVE: because the tier token is a bare `\S+`, a conversational
+ * "reached your patience limit" also matches → usage-limit on the infra channel.
+ * That is the QR-209 deliver-over-destroy trade — version coverage is NOT contorted
+ * away to exclude it. On the STREAMING channel the version-required banner mirror
+ * (TIER_LIMIT_BANNER_PATTERN) keeps such un-versioned prose ambient (delivered), so
+ * nothing is silently suppressed.
+ *
+ * SHAPE SCOPE: matches only the possessive "<verb> your <tier>[ <ver>] limit" form.
+ * Name-first ("<Tier> <ver> limit reached") and set-to-$0 ("<Tier> <ver> is set to
+ * $0") VERSIONED shapes are intentionally not matched here (the bare-name forms are
+ * still covered by the ${name} constructions over LIMIT_NAME_TOKENS below). No live
+ * evidence the CLI emits versioned tiers in those shapes; if one slips through, the
+ * consecutive-unknown-terminal fail-safe (maybeArmFallbackAfterUnknownTerminal) is
+ * the backstop rather than a widened regex.
+ */
+const TIER_LIMIT_TERMINAL_PATTERN = /\b(?:hit|reached|exceeded) your \S+(?: [\d.]+)? limit\b/i;
+
+/**
+ * Banner-shape mirror of TIER_LIMIT_TERMINAL_PATTERN with the version group
+ * REQUIRED (`\S+ [\d.]+ limit`, digit mandatory). Fed to bareUsageLimitEvidence so a
+ * streamed VERSIONED tier banner ("You've reached your Fable 5 limit") anchors as a
+ * suppressible banner, while the generic un-versioned false positive
+ * ("reached your patience limit") carries no version digit, matches nothing here,
+ * and therefore stays ambient (delivered). Real tier banners always name a version
+ * (Fable 5, Opus 4.8, Haiku 4.5, Sonnet 5), so requiring the digit costs no
+ * real-banner coverage. Same ReDoS-safe class as the matcher above.
+ */
+const TIER_LIMIT_BANNER_PATTERN = /\b(?:hit|reached|exceeded) your \S+ [\d.]+ limit\b/i;
+
+/**
  * Detect the agent provider CLI's assembled TERMINAL limit phrasings
- * (`You've hit your ${name}` / `${name} reached` / org `$0` allocation). Anchored
+ * (`You've hit your ${name}` / `${name} reached` / org `$0` allocation), plus
+ * versioned/family model-tier limits via TIER_LIMIT_TERMINAL_PATTERN. Anchored
  * on a possessive/terminal verb so a conversational mention of a limit name
  * ("add a weekly limit to the config") never matches. The non-terminal
  * `Approaching ${name}` warning is intentionally NOT matched here — arming
@@ -122,6 +184,9 @@ function hasTerminalLimitAssembler(lower: string): boolean {
       return true;
     }
   }
+  // Versioned / family-qualified model-tier terminal limits ("reached your Fable 5
+  // limit") that the bare LIMIT_NAME_TOKENS list above cannot name. Generic by design.
+  if (TIER_LIMIT_TERMINAL_PATTERN.test(lower)) return true;
   return false;
 }
 
@@ -596,11 +661,14 @@ function startsWithErrorOpener(lowerText: string): boolean {
 /**
  * Longest bare, system-emitted usage-limit evidence phrase matched in `lower`, or
  * '' if none matched. This MIRRORS — but does not replace or change the return
- * type of — two booleans already proven out elsewhere in this file:
- * hasTerminalLimitAssembler's four constructions per LIMIT_NAME_TOKENS name, and
- * isProviderCreditBalanceLimitMessage's literal and compound substrings (plus the
- * model-policy credit-gate compound from isUsageLimitMessage's own top-level
- * branch). Kept as a separate function — rather than changing either of those
+ * type of — booleans already proven out elsewhere in this file:
+ * hasTerminalLimitAssembler's four constructions per LIMIT_NAME_TOKENS name, its
+ * versioned model-tier matcher (mirrored here by the version-REQUIRED
+ * TIER_LIMIT_BANNER_PATTERN — see the note at the versionedTierMatch line for why
+ * the digit is mandatory on this channel), and isProviderCreditBalanceLimitMessage's
+ * literal and compound substrings (plus the model-policy credit-gate compound from
+ * isUsageLimitMessage's own top-level branch). Kept as a separate function — rather
+ * than changing either of those
  * two detectors' return type to expose a match — so their existing,
  * already-verified infra-channel behavior (isUsageLimitMessage) is untouched
  * (QR-209b round-2: do not touch pre-existing classification branches beyond
@@ -632,6 +700,14 @@ function bareUsageLimitEvidence(lower: string): string {
     if (lower.includes(`${name} reached`)) consider(`${name} reached`);
     if (lower.includes(`${name} is set to $0`)) consider(`${name} is set to $0`);
   }
+
+  // Versioned model-tier banner mirror. Uses the version-REQUIRED pattern (digit
+  // mandatory) deliberately: a real streamed tier banner names a version
+  // ("reached your fable 5 limit") and must anchor as suppressible, while the generic
+  // un-versioned matcher FP ("reached your patience limit") carries no digit, matches
+  // nothing here, and stays ambient/delivered (deliver-over-destroy).
+  const versionedTierMatch = TIER_LIMIT_BANNER_PATTERN.exec(lower);
+  if (versionedTierMatch) consider(versionedTierMatch[0]);
 
   if (lower.includes('insufficient_quota')) consider('insufficient_quota');
   if (lower.includes('billing_error')) consider('billing_error');
