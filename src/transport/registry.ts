@@ -13,8 +13,11 @@
 /**
  * Canonical, ordered list of supported transport IDs. Frozen at module load
  * so accidental mutation throws in strict mode. Treat as a closed set.
+ *
+ * Ordering is stable-insertion: baileys (default), then transports in the
+ * order they were added. New transports append to the end.
  */
-export const TRANSPORT_IDS = Object.freeze(['baileys', 'twilio'] as const);
+export const TRANSPORT_IDS = Object.freeze(['baileys', 'twilio', 'signal', 'imessage'] as const);
 
 /** Discriminated-union of supported transport IDs derived from {@link TRANSPORT_IDS}. */
 export type TransportId = (typeof TRANSPORT_IDS)[number];
