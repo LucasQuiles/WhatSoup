@@ -191,10 +191,10 @@ describe('resolveCommandSurface — verbosity + optionDefaults resolution', () =
   });
 
   it('locale passes through from user prefs; undefined when user is null', () => {
-    const withLocale = resolveCommandSurface(FIXTURE_CATALOG, {}, { locale: 'pt-BR' });
-    expect(withLocale.locale).toBe('pt-BR');
     const withoutUser = resolveCommandSurface(FIXTURE_CATALOG, {}, null);
     expect(withoutUser.locale).toBeUndefined();
+    const withLocale = resolveCommandSurface(FIXTURE_CATALOG, {}, { locale: 'pt-BR' });
+    expect(withLocale.locale).toBe('pt-BR');
   });
 });
 

@@ -243,9 +243,8 @@ describe('model pin storage', () => {
       .run(CHAT_A, SENDER_A);
     const got = getPreference(db, CHAT_A, SENDER_A, NOW);
     expect(got).not.toBeNull();
-    expect(got?.requestedModel).toBeNull();
-    expect(got?.validatedProvider).toBeNull();
-    expect(got?.modelPinVerified).toBeNull();
+    // The three model-pin fields read back together as "no model pin".
+    expect(got).toMatchObject({ requestedModel: null, validatedProvider: null, modelPinVerified: null });
   });
 
   it('rejects a corrupt row: provider/verified context with NO model to attach it to', () => {
