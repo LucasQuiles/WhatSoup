@@ -93,7 +93,6 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   { path: 'src/core/retry-runner.ts', issue: '#1817', reason: 'test-only-wired primitive; no runtime importer' },
   { path: 'src/lib/bounded-timeout.ts', issue: '#1816', reason: 'test-only-wired primitive; no runtime importer' },
   { path: 'src/lib/credential-diagnostics.ts', issue: '#1813', reason: 'test-only-wired primitive; no runtime importer' },
-  { path: 'src/lib/credential-state.ts', issue: '#1803', reason: 'test-only-wired; imported only by credential-diagnostics (island)' },
   { path: 'src/lib/fallback-transition.ts', issue: '#1820', reason: 'test-only-wired primitive; no runtime importer' },
   { path: 'src/lib/inbound-debouncer.ts', issue: '#1822', reason: 'test-only-wired primitive; no runtime importer' },
   { path: 'src/lib/keyed-async-queue.ts', issue: '#1815', reason: 'test-only-wired primitive; no runtime importer' },
@@ -116,6 +115,12 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   { path: 'src/core/recovery-catchup-closure.ts', issue: '#1871', reason: 'recovery-catchup closure is test-only-wired; not imported by any runtime recovery root — needs wiring or removal (surfaced by this guard)' },
   { path: 'src/runtimes/chat/enrichment/contradiction.ts', issue: '#1871', reason: 'enrichment pipeline ported but never wired into a runtime chat root; unreachable island with upserter.ts' },
   { path: 'src/runtimes/chat/enrichment/upserter.ts', issue: '#1871', reason: 'enrichment pipeline ported but never wired into a runtime chat root; island head (imports contradiction.ts)' },
+  // command-surface (/config) feature cluster in runtimes/agent: built but never
+  // wired into any runtime agent root; no production importer of any member
+  // (surfaced by this guard). Dead-until-wired island.
+  { path: 'src/runtimes/agent/command-surface-config.ts', issue: '#1871', reason: 'command-surface config module; no production importer (imports command-registry + command-surface-prefs-db); unwired island — surfaced by this guard' },
+  { path: 'src/runtimes/agent/command-surface-prefs-db.ts', issue: '#1871', reason: 'command-surface prefs store; imported only (type-only) by the also-unreachable command-surface-config; no runtime path — surfaced by this guard' },
+  { path: 'src/runtimes/agent/config-surface.ts', issue: '#1871', reason: 'command /config surface module; imports nothing and has no production importer; isolated unreachable island — surfaced by this guard' },
 ];
 
 // ---------------------------------------------------------------------------
