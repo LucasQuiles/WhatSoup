@@ -241,6 +241,18 @@ describe('SignalCliPort — listInboundSince', () => {
     expect(out).toHaveLength(2);
   });
 
+  it('pageSize keeps the OLDEST envelopes when the daemon sends unordered', async () => {
+    const { port, mock } = makePort();
+    mock.on('receive', () => [
+      dataEnvelope({ timestamp: 3000 }),
+      dataEnvelope({ timestamp: 1000 }),
+      dataEnvelope({ timestamp: 2000 }),
+    ]);
+    const out = await port.listInboundSince(new Date(0), 2);
+    // Sort-then-cap: the cap must not keep the first-arriving envelope.
+    expect(out.map((e) => e.timestamp)).toEqual([1000, 2000]);
+  });
+
   it('rejects non-positive / non-integer pageSize with RangeError', async () => {
     const { port, mock } = makePort();
     mock.on('receive', () => []);

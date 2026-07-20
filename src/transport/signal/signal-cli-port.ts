@@ -285,10 +285,11 @@ export class SignalCliPort implements SignalPort {
       // re-delivers; callers dedupe by timestamp.
       if (normalized.timestamp < sinceMs) continue;
       out.push(normalized);
-      if (pageSize !== undefined && out.length >= pageSize) break;
     }
+    // Sort BEFORE capping: the contract is ascending-by-timestamp, so the
+    // pageSize cap must keep the OLDEST envelopes, not the first-arriving.
     out.sort((a, b) => a.timestamp - b.timestamp);
-    return out;
+    return pageSize !== undefined ? out.slice(0, pageSize) : out;
   }
 
   async sendReaction(args: ReactSignalArgs): Promise<void> {
