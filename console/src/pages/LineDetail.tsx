@@ -2,7 +2,7 @@ import React, { useState, useCallback, lazy, Suspense } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { useLine, useChats, useMessages, useAccess, useLogs, useTyping } from '../hooks/use-fleet'
+import { useLine, useChats, useMessages, useAccess, useLogs, useTyping, useCheckpoints } from '../hooks/use-fleet'
 import { useMetrics } from '../hooks/use-metrics'
 import type { MetricsRange } from '../types'
 import { getPreference, setPreference } from '../lib/preferences'
@@ -20,7 +20,7 @@ import ErrorBoundary from '../components/ErrorBoundary'
 const RelinkModal = lazy(() => import('../components/RelinkModal'))
 import {
   ArrowLeft, Info, SlidersHorizontal, GitBranch, Shield,
-  MessageSquare, ScrollText, BarChart3, Clock, Users,
+  MessageSquare, ScrollText, BarChart3, Clock, Users, BookMarked,
   RotateCw, Loader2, Trash2, Link2,
 } from 'lucide-react'
 
@@ -32,6 +32,7 @@ import {
   HistoryTab,
   LogsTab,
   MetricsTab,
+  CheckpointsTab,
   ScheduledTab,
   GroupsTab,
   ConfigEditDialog,
@@ -46,6 +47,7 @@ const BASE_TABS = [
   { id: 'history', label: 'History', icon: MessageSquare },
   { id: 'logs', label: 'Logs', icon: ScrollText },
   { id: 'metrics', label: 'Metrics', icon: BarChart3 },
+  { id: 'checkpoints', label: 'Checkpoints', icon: BookMarked },
 ] as const
 
 /** MCP-dependent tabs — only shown when instance has a global MCP socket (not sandbox-per-chat). */
@@ -85,6 +87,7 @@ export default function LineDetail() {
     refetch: refetchLogs,
   } = useLogs(name || '')
   const { data: metrics, isLoading: metricsLoading, error: metricsError, refetch: refetchMetrics, freshness: metricsFreshness } = useMetrics(name || '', metricsRange)
+  const { data: checkpointsPayload, isLoading: checkpointsLoading, freshness: checkpointsFreshness } = useCheckpoints(name || '')
   const { data: typingData } = useTyping()
   const typingJids = React.useMemo(() =>
     new Set((typingData ?? []).filter(t => t.instance === name).map(t => t.jid)),
@@ -335,6 +338,13 @@ export default function LineDetail() {
               )}
               {activeTab === 'scheduled' && (
                 <ScheduledTab lineName={name || ''} />
+              )}
+              {activeTab === 'checkpoints' && (
+                <CheckpointsTab
+                  payload={checkpointsPayload}
+                  isLoading={checkpointsLoading}
+                  freshness={checkpointsFreshness}
+                />
               )}
               {activeTab === 'groups' && <GroupsTab lineName={name || ''} myJid={line.phone ? `${line.phone}@s.whatsapp.net` : undefined} />}
             </ErrorBoundary>

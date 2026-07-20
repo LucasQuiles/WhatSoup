@@ -68,6 +68,12 @@ Favicon, badge, PWA, and maskable assets are governed by `brand.md` §1.3–§1.
 `design:brand-assets`; changing those files requires both the brand and iconography SSOTs to move
 with the asset packet.
 
+Document-shell chrome state (2026-07-19): the C4 straggler packet landed the document
+`<title>` as `SOUP Console` (spec: `brand.md` document-shell section; pinned by the
+peripheral-brand-regression suite + `design-regression.sh` check 8). The favicon itself
+remains the canonical `/favicon.svg`; the approved identity asset set for PWA icons is
+tracked as register DD-46 (report-only until it lands).
+
 Document-shell iconography/chrome includes the favicon link and browser `theme-color`. The
 `theme-color` value is not a Lucide icon or a separate icon color token; it follows `brand.md` §5 and
 the semantic `--surface-base` surface so browser chrome tracks the active theme. With the warm
