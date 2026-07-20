@@ -193,6 +193,23 @@ export function useProviderStatus(name: string) {
   });
 }
 
+/** Checkpoint browser rows for a line (LineDetail › Checkpoints tab). */
+export function useCheckpoints(name: string) {
+  const query = useQuery({
+    queryKey: ['checkpoints', name],
+    queryFn: () => api.getCheckpoints(name),
+    refetchInterval: POLL_LINES,
+    enabled: !!name,
+  });
+  return {
+    ...query,
+    freshness: queryFreshness({
+      dataUpdatedAt: query.dataUpdatedAt,
+      refetchFailed: query.isRefetchError,
+    }),
+  };
+}
+
 /** Windowed throttle aggregate for a line (D-5 RateLimitsCard). Carries
  *  the #1925 freshness contract (use-metrics idiom). */
 export function useRateLimits(name: string) {

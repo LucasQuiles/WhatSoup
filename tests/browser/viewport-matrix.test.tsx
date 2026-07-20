@@ -105,6 +105,7 @@ const useChatsMock = vi.hoisted(() => vi.fn(() => ({ data: [] })));
 const useMessagesMock = vi.hoisted(() => vi.fn(() => ({ data: [] })));
 const useAccessMock = vi.hoisted(() => vi.fn(() => ({ data: [] })));
 const useTypingMock = vi.hoisted(() => vi.fn(() => ({ data: [] })));
+const useCheckpointsMock = vi.hoisted(() => vi.fn(() => ({ data: undefined, isLoading: false, freshness: undefined })));
 const useProvidersMock = vi.hoisted(() => vi.fn(() => ({ data: [] })));
 const useProviderStatusMock = vi.hoisted(() => vi.fn(() => ({ data: null })));
 // RateLimitsCard (SummaryTab, chat-mode) calls useRateLimits internally —
@@ -120,6 +121,7 @@ vi.mock('../../console/src/hooks/use-fleet', () => ({
   useMessages: useMessagesMock,
   useAccess: useAccessMock,
   useTyping: useTypingMock,
+  useCheckpoints: useCheckpointsMock,
   useProviders: useProvidersMock,
   useProviderStatus: useProviderStatusMock,
   useRateLimits: useRateLimitsMock,
