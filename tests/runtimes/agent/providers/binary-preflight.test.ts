@@ -70,6 +70,7 @@ function makeFakeChild(opts: FakeChildOptions = {}): {
 }
 
 type SpawnImpl = typeof import('node:child_process').spawn;
+const PROBE_ENV: NodeJS.ProcessEnv = { PATH: '/test/bin' };
 
 function makeSpawnImpl(opts: FakeChildOptions): SpawnImpl {
   return ((_binary: string, _args: string[]) => {
@@ -85,11 +86,25 @@ afterEach(() => {
 });
 
 describe('probeFallbackBinary', () => {
+  it('passes the caller-supplied environment explicitly to spawn', async () => {
+    const env = { PATH: '/test/bin', HOME: '/test/home' };
+    const spawnSpy = vi.fn((_binary: string, _args: string[]) =>
+      makeFakeChild({ stdoutLines: ['opencode 0.3.14\n'] }).child);
+
+    await probeFallbackBinary('opencode', env, spawnSpy as unknown as SpawnImpl);
+
+    expect(spawnSpy).toHaveBeenCalledWith(
+      'opencode',
+      ['--version'],
+      expect.objectContaining({ env }),
+    );
+  });
+
   // ── ENOENT → missing ────────────────────────────────────────────────────────
 
   it('returns missing when spawn error code is ENOENT', async () => {
     const spawnImpl = makeSpawnImpl({ errorCode: 'ENOENT' });
-    const result = await probeFallbackBinary('no-such-binary', spawnImpl);
+    const result = await probeFallbackBinary('no-such-binary', PROBE_ENV, spawnImpl);
     expect(result).toStrictEqual({ status: 'missing', version: null });
   });
 
@@ -97,20 +112,20 @@ describe('probeFallbackBinary', () => {
 
   it('returns present with version when binary exits cleanly with stdout', async () => {
     const spawnImpl = makeSpawnImpl({ stdoutLines: ['opencode 0.3.14\n'] });
-    const result = await probeFallbackBinary('opencode', spawnImpl);
+    const result = await probeFallbackBinary('opencode', PROBE_ENV, spawnImpl);
     expect(result.status).toBe('present');
     expect(result.version).toBe('opencode 0.3.14');
   });
 
   it('returns present with null version when binary produces no stdout', async () => {
     const spawnImpl = makeSpawnImpl({ stdoutLines: [] });
-    const result = await probeFallbackBinary('opencode', spawnImpl);
+    const result = await probeFallbackBinary('opencode', PROBE_ENV, spawnImpl);
     expect(result).toEqual({ status: 'present', version: null });
   });
 
   it('returns the first line only when stdout has multiple lines', async () => {
     const spawnImpl = makeSpawnImpl({ stdoutLines: ['v1.2.3\nignored line\n'] });
-    const result = await probeFallbackBinary('opencode', spawnImpl);
+    const result = await probeFallbackBinary('opencode', PROBE_ENV, spawnImpl);
     expect(result.status).toBe('present');
     expect(result.version).toBe('v1.2.3');
   });
@@ -119,7 +134,7 @@ describe('probeFallbackBinary', () => {
 
   it('returns unknown for a non-ENOENT spawn error (fail-open)', async () => {
     const spawnImpl = makeSpawnImpl({ errorCode: 'EACCES' });
-    const result = await probeFallbackBinary('opencode', spawnImpl);
+    const result = await probeFallbackBinary('opencode', PROBE_ENV, spawnImpl);
     expect(result).toStrictEqual({ status: 'unknown', version: null });
   });
 
@@ -139,7 +154,7 @@ describe('probeFallbackBinary', () => {
 
     const spawnImpl = ((_binary: string, _args: string[]) => fakeChild) as unknown as SpawnImpl;
 
-    const probePromise = probeFallbackBinary('hung-binary', spawnImpl);
+    const probePromise = probeFallbackBinary('hung-binary', PROBE_ENV, spawnImpl);
 
     // Advance past the 5 000 ms timeout.
     await vi.advanceTimersByTimeAsync(5_001);
@@ -160,7 +175,7 @@ describe('probeFallbackBinary', () => {
       throw err;
     }) as unknown as SpawnImpl;
 
-    await expect(probeFallbackBinary('bad', throwingSpawnImpl)).resolves.toMatchObject({
+    await expect(probeFallbackBinary('bad', PROBE_ENV, throwingSpawnImpl)).resolves.toMatchObject({
       status: 'missing',
       version: null,
     });
@@ -173,7 +188,7 @@ describe('probeFallbackBinary', () => {
       throw err;
     }) as unknown as SpawnImpl;
 
-    await expect(probeFallbackBinary('bad', throwingSpawnImpl)).resolves.toMatchObject({
+    await expect(probeFallbackBinary('bad', PROBE_ENV, throwingSpawnImpl)).resolves.toMatchObject({
       status: 'unknown',
       version: null,
     });

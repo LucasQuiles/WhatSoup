@@ -78,7 +78,13 @@ import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts, ensurePe
 import { inspectUserClaudeSettings } from '../../core/user-claude-settings.ts';
 import { isSamePhysicalDirectory } from '../../lib/home-path.ts';
 import { classifyActiveSessions, resolveAmbiguousAgeFallback } from './session-classifier.ts';
-import { SessionManager, formatAge, getProviderBinary, type SessionCrashInfo } from './session.ts';
+import {
+  SessionManager,
+  buildChildEnv,
+  formatAge,
+  getProviderBinary,
+  type SessionCrashInfo,
+} from './session.ts';
 import {
   OutboundQueue,
   type IOutboundQueue,
@@ -6731,8 +6737,17 @@ export class AgentRuntime implements Runtime {
         // legitimate session-replacement scenarios where two sessions share a mapKey.
         if (this.isSilentCompact(mapKey)) break;
         const toolNames = this.activeToolNames.get(toolScopeKey);
+        const trackedToolName = toolNames?.get(event.toolId);
+        const resultToolName = event.toolName?.trim() || undefined;
+        if (trackedToolName === undefined) {
+          this.turnHadToolActivity.add(toolScopeKey);
+          if (mapKey !== undefined && this.pendingSystemResults.count(mapKey) === 0) {
+            const contexts = this.perChatRuntimeTurnContexts.get(mapKey);
+            if (contexts?.[0]) contexts[0] = markRuntimeTurnReplayUnsafe(contexts[0]);
+          }
+        }
         if (event.isError) {
-          const toolName = toolNames?.get(event.toolId) ?? 'unknown';
+          const toolName = trackedToolName ?? resultToolName ?? 'unknown';
           const errorPreview = event.content.length > 200 ? event.content.slice(0, 200) + '...' : event.content;
           log.warn({ toolId: event.toolId, toolName, error: errorPreview }, 'tool error reported by agent');
           const classification = classifyToolError(toolName, event.content);
@@ -8232,6 +8247,14 @@ export class AgentRuntime implements Runtime {
         pinnedProviderEligible: pinned !== null && routable.includes(pinned),
         tierMap: config.nlRoutingTiers,
         tierProviderEligible: tierProvider !== undefined && routable.includes(tierProvider),
+        // Finding 2 fix: the same agentFallbacks entries that
+        // routablePinTargets/isEntryCredentialed just read to prove a pin/tier
+        // target eligible carry that target's validated config model — thread
+        // it through so resolveRoute can supply it for credential-required
+        // providers (opencode-cli et al.) instead of discarding it to
+        // `undefined`. First entry wins per provider, matching
+        // routablePinTargets' own dedup.
+        configuredModelByProvider: this.configuredModelByProvider(),
       });
       return { ...decision, pinnedProvider: pinned };
     } catch (err) {
@@ -8273,11 +8296,6 @@ export class AgentRuntime implements Runtime {
   private routeSessionProviderConfig(route: RouteDecision): Record<string, unknown> | undefined {
     if (route.source !== 'preference' || route.provider === this.agentProvider) {
       return this.sessionProviderConfig();
-    }
-    if (route.provider === 'opencode-cli') {
-      if (!this.agentProviderConfig) return undefined;
-      const { baseUrl: _baseUrl, apiKeyService: _apiKeyService, ...rest } = this.agentProviderConfig;
-      return rest;
     }
     // Match the fallback path (effectiveProviderConfig): a provider with no
     // config of its own inherits the agent's providerConfig — including the
@@ -8369,6 +8387,24 @@ export class AgentRuntime implements Runtime {
       targets.push(entry.provider);
     }
     return targets;
+  }
+
+  /**
+   * Provider id → validated config model, derived from `agentFallbacks`
+   * (first entry wins per provider — same dedup `routablePinTargets` applies
+   * when it walks this same array). Feeds `resolveRoute`'s
+   * `configuredModelByProvider` input (EXECPROFILE-CI-FIX Finding 2): the
+   * pin/tier eligibility probe already reads each entry's own model to prove
+   * that provider routable, so this is the same data, just keyed for lookup
+   * instead of iterated for a credential check.
+   */
+  private configuredModelByProvider(): Record<string, string | undefined> {
+    const models: Record<string, string | undefined> = {};
+    for (const entry of this.agentFallbacks) {
+      if (entry.provider in models) continue;
+      models[entry.provider] = entry.model;
+    }
+    return models;
   }
 
   /**
@@ -9371,7 +9407,6 @@ export class AgentRuntime implements Runtime {
   private get effectiveProviderConfig(): Record<string, unknown> | undefined {
     const fallbackEntry = this.effectiveFallbackEntry;
     if (!fallbackEntry) return this.agentProviderConfig;
-    if (fallbackEntry.provider === 'opencode-cli') return this.agentProviderConfig;
     return fallbackProviderConfigFor(fallbackEntry.provider, this.agentProvider, this.agentProviderConfig) ?? this.agentProviderConfig;
   }
 
@@ -9680,10 +9715,48 @@ export class AgentRuntime implements Runtime {
     if (!firstArm) return true;
     // Pre-flight: check key presence and probe validity; never blocks or reverts
     // the window — fail-open on anything except a definitive 401/403.
+    const fallbackProviderConfig = fallbackProviderConfigFor(
+      fallbackEntry.provider,
+      this.agentProvider,
+      this.agentProviderConfig,
+    );
+    const fallbackBinary = getProviderBinary(fallbackEntry.provider);
+    let fallbackProbeEnv: NodeJS.ProcessEnv | null = null;
+    if (fallbackBinary) {
+      try {
+        fallbackProbeEnv = buildChildEnv(
+          fallbackEntry.provider,
+          {
+            allowM365Mutations: this.allowM365Mutations,
+            whatsoupInstance: this.instanceName,
+            whatsoupMcpSocket: this.globalMcpSocketPath ?? undefined,
+          },
+          fallbackEntry.model,
+          fallbackProviderConfig,
+        );
+      } catch (err) {
+        const detail = errorMessage(err);
+        log.error({
+          err: detail,
+          fallbackProvider: fallbackEntry.provider,
+          fallbackModel: fallbackEntry.model,
+        }, 'fallback preflight child environment configuration failed');
+        emitAlertChecked(
+          this.instanceName,
+          'fallback_preflight_config_error',
+          'Fallback provider preflight configuration error',
+          `provider=${alertEvidenceValue(fallbackEntry.provider)}`
+            + ` model=${alertEvidenceValue(fallbackEntry.model)}`
+            + ` detail=${alertEvidenceValue(detail)}`,
+        );
+        return true;
+      }
+    }
+
     const service = resolveProviderKeyService(
       fallbackEntry.provider,
       fallbackEntry.model,
-      fallbackProviderConfigFor(fallbackEntry.provider, this.agentProvider, this.agentProviderConfig),
+      fallbackProviderConfig,
     );
     if (service) {
       const key = lookupCredential(service);
@@ -9717,9 +9790,8 @@ export class AgentRuntime implements Runtime {
     // Pre-flight: check binary presence for CLI-backed fallback providers.
     // Managed-loop providers (openai-api, anthropic-api) have no binary to probe.
     // Never blocks or reverts the window — fail-open on anything except ENOENT.
-    const fallbackBinary = getProviderBinary(fallbackEntry.provider);
-    if (fallbackBinary) {
-      void probeFallbackBinary(fallbackBinary).then((r) => {
+    if (fallbackBinary && fallbackProbeEnv) {
+      void probeFallbackBinary(fallbackBinary, fallbackProbeEnv).then((r) => {
         if (r.status === 'missing') {
           log.error(
             { fallbackProvider: fallbackEntry.provider, binary: fallbackBinary },
@@ -9746,7 +9818,7 @@ export class AgentRuntime implements Runtime {
           // Fire-and-forget, fail-open: never blocks or reverts the window.
           if (fallbackEntry.model && fallbackEntry.provider === 'opencode-cli') {
             const fallbackModel = fallbackEntry.model;
-            void probeModelCatalog(fallbackBinary, fallbackModel).then((catalog) => {
+            void probeModelCatalog(fallbackBinary, fallbackModel, fallbackProbeEnv).then((catalog) => {
               if (catalog.status !== 'not_found') return;
               log.error(
                 {
@@ -10668,24 +10740,13 @@ export class AgentRuntime implements Runtime {
   /**
    * providerConfig handed to a new SessionManager.
    *
-   * The custom-endpoint fields (`baseUrl`/`apiKeyService`) belong to the
-   * PRIMARY provider+model: an opencode session serving a fallback entry must
-   * not inherit them, or the custom-endpoint argv contract (omit `-m` when a
-   * baseUrl is configured) would drop the entry's model and re-route the turn
-   * to the primary's endpoint block — or to opencode's default model when no
-   * block was written for the entry. Every other providerConfig key (budget,
-   * model, …) keeps applying to all sessions, and managed-loop API fallback
-   * sessions keep full inheritance (same-provider API fallback deliberately
-   * honors the primary's endpoint and apiKeyService).
+   * Fallback execution config is selected centrally by
+   * `fallbackProviderConfigFor`: OpenCode drops the primary route's custom
+   * endpoint fields, while managed-loop API fallbacks retain them. Primary
+   * sessions receive the configured providerConfig unchanged.
    */
   private sessionProviderConfig(): Record<string, unknown> | undefined {
-    const selected = this.effectiveProviderConfig;
-    if (!selected) return undefined;
-    if (this.effectiveFallbackEntry === null || this.effectiveProvider !== 'opencode-cli') {
-      return selected;
-    }
-    const { baseUrl: _baseUrl, apiKeyService: _apiKeyService, ...rest } = selected;
-    return rest;
+    return this.effectiveProviderConfig;
   }
 
 
@@ -12067,8 +12128,16 @@ export class AgentRuntime implements Runtime {
 
         if (this.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY)) break;
         const toolNames = this.activeToolNames.get(GLOBAL_TOOL_SCOPE_KEY);
+        const trackedToolName = toolNames?.get(event.toolId);
+        const resultToolName = event.toolName?.trim() || undefined;
+        if (trackedToolName === undefined) {
+          this.singleTurnHadToolActivity = true;
+          if (this.pendingSystemResults.count(GLOBAL_TOOL_SCOPE_KEY) === 0 && this.currentRuntimeTurnContext) {
+            this.currentRuntimeTurnContext = markRuntimeTurnReplayUnsafe(this.currentRuntimeTurnContext);
+          }
+        }
         if (event.isError) {
-          const toolName = toolNames?.get(event.toolId) ?? 'unknown';
+          const toolName = trackedToolName ?? resultToolName ?? 'unknown';
           const errorPreview = event.content.length > 200 ? event.content.slice(0, 200) + '...' : event.content;
           log.warn({
             chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid,

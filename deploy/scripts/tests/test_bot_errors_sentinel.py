@@ -298,6 +298,20 @@ def test_healthy_host_writes_ack_and_resets_open_state(tmp_path: Path):
         "observedInstanceCount": 0,
         "problemInstanceCount": 0,
         "unknownInstanceCount": 0,
+        "metrics": {
+            "hostsEvaluated": 1,
+            "healCandidates": 0,
+            "escalations": 0,
+            "flapEscalations": 0,
+            "correlatedDriftFreezes": 0,
+            "concurrencyDeferrals": 0,
+            "massUnreachableDeferrals": 0,
+            "connectivitySuppressions": 0,
+            "qUnavailable": 0,
+            "actionEventsEmitted": 1,
+            "attentionEventsEmitted": 0,
+            "byAction": {"clear": 1},
+        },
     }
     assert host["ackPath"] == str(ack)
     assert result["heartbeatPath"] == str(_mod.heartbeat_path(config))
@@ -2290,3 +2304,56 @@ def test_unreadable_roster_is_not_bound_and_blocks_green(tmp_path: Path, monkeyp
     assert heartbeat["rosterDigest"] is None
     assert heartbeat["rosterEpoch"] is None
     assert heartbeat["healthy"] is False
+
+
+# ---------------------------------------------------------------------------
+# #1876 P1 — per-cycle operational counters (countable metrics)
+# ---------------------------------------------------------------------------
+def test_p1_compute_cycle_metrics_counts_actions():
+    """The sentinel is evaluation-only, so per-cycle metrics count what it
+    DECIDED (candidates/escalations/freezes/defers/q_unavailable), derived from
+    the evaluated host results + emitted action events — not heal execution
+    outcomes (which the selfcheck/deployer owns)."""
+    results = [
+        {"action": "tier1_heal_candidate", "class": "drift"},
+        {"action": "escalate", "class": "unit_down"},
+        {"action": "escalate_flapping", "class": "flapping"},
+        {"action": "freeze_correlated_drift", "class": "drift"},
+        {"action": "defer_mass_unreachable", "class": "out_of_rotation"},
+        {"action": "defer_tier1_concurrency_cap", "class": "drift"},
+        {"action": "none", "class": "healthy"},
+    ]
+    events = [
+        {"scope": "host", "action": "tier1_heal_candidate"},
+        {"scope": "host", "action": "escalate"},
+        {"scope": "fleet", "action": "none"},
+    ]
+    m = _mod.compute_cycle_metrics(results, events)
+    assert m["hostsEvaluated"] == 7
+    assert m["healCandidates"] == 1
+    assert m["escalations"] == 2  # escalate + escalate_flapping
+    assert m["flapEscalations"] == 1
+    assert m["correlatedDriftFreezes"] == 1
+    assert m["massUnreachableDeferrals"] == 1
+    assert m["concurrencyDeferrals"] == 1
+    assert m["qUnavailable"] == 0
+    assert m["actionEventsEmitted"] == 3
+    # tier1_heal_candidate + escalate are in ATTENTION_ACTIONS; "none" is not.
+    assert m["attentionEventsEmitted"] == 2
+    assert m["byAction"]["none"] == 1
+    assert m["byAction"]["tier1_heal_candidate"] == 1
+
+
+def test_p1_run_once_result_and_heartbeat_carry_metrics(tmp_path: Path):
+    hosts = _hosts_file(tmp_path, [{"host": "host-a"}])
+    config = _config(tmp_path, hosts)
+    result = _mod.run_once(config, _deps(1010.0, {}))
+    assert "metrics" in result
+    m = result["metrics"]
+    assert m["hostsEvaluated"] == 1
+    assert set(m).issuperset(
+        {"healCandidates", "escalations", "qUnavailable", "byAction", "actionEventsEmitted"}
+    )
+    # Persisted to the central heartbeat so it is observable off-host.
+    heartbeat = json.loads(_mod.heartbeat_path(config).read_text(encoding="utf-8"))
+    assert heartbeat["metrics"]["hostsEvaluated"] == 1
