@@ -115,23 +115,27 @@ export type AvailableModelsListing =
   | { status: 'unavailable'; reason: UnavailableReason; asOfLabel: string };
 
 /**
- * STRUCTURAL vs TRANSIENT catalogue absence — a render-policy split (advisor
- * 2026-07-20). A *structural* absence means no catalogue SOURCE exists for this
- * harness on this host, so there is nothing to retry and no fix the WhatsApp
- * reader can take:
- *   - `no-key`     → the subscription claude-cli authenticates via OAuth and has
- *                    no anthropic API key here; `/v1/models` is permanently
- *                    unreachable on this host (provisioning a key is an owner/ops
- *                    act, not a reader action). This is the NORMAL q state.
- *   - `no-adapter` → the harness has no catalogue source wired at all.
- * In those cases the dynamic section would be a permanent dead-end line on every
- * `/model list`, failing its own "actionable, not a dead end" bar — so the caller
- * SUPPRESSES it and renders the config-derived block only.
+ * STRUCTURAL vs TRANSIENT catalogue absence — a render-policy classifier. A
+ * *structural* absence means no catalogue SOURCE exists for this harness at all,
+ * so there is nothing to retry:
+ *   - `no-key`     → NO anthropic credential whatsoever (neither the claude-cli's
+ *                    OAuth token nor an ANTHROPIC_API_KEY). With OAuth sourcing a
+ *                    healthy claude-cli harness is `ok`, so this now means the
+ *                    credential is genuinely missing/broken — rare, not routine.
+ *   - `no-adapter` → the harness has no catalogue source wired at all (e.g. codex).
  *
- * Every OTHER unavailable reason (`key-rejected`/`timeout`/`empty`/`unparseable`/
- * `probe-failed`/`lookup-failed`) is a TRANSIENT failure of a source that DOES
- * exist: "try again shortly" is genuinely actionable (and a rejected key is a
- * real, fixable misconfiguration worth surfacing), so those still render.
+ * SOLICITATION split (Q 2026-07-20): this predicate gates ONLY the UNSOLICITED /
+ * aggregate render (e.g. the `/config` overview or a `/status` model line), where
+ * a "couldn't list models here" line is noise the user didn't ask for → suppress.
+ * A DIRECT request (`/model list`, `/config model`) must ALWAYS render the named
+ * reason instead — silence is a bad answer to a direct question, and leaves the
+ * user unable to tell "unsupported here" from "broken". The direct `/model list`
+ * caller therefore does NOT consult this predicate; the aggregate render does.
+ *
+ * Every OTHER unavailable reason (`key-rejected`/`credential-expired`/`timeout`/
+ * `empty`/`unparseable`/`probe-failed`/`lookup-failed`) is a TRANSIENT failure of a
+ * source that DOES exist — "try again shortly" is actionable — so it renders even
+ * in the aggregate case.
  */
 export function isStructuralCatalogueAbsence(listing: AvailableModelsListing): boolean {
   return (

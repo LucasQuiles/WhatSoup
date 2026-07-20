@@ -104,7 +104,7 @@ import { isProviderId } from './providers/index.ts';
 import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
 import { formatChatRefForOwner } from '../../core/chat-display-name.ts';
-import { OWNER_BULLET, bulletedSection, modelModifierTags, modifierSuffix, formatAvailableModels, isStructuralCatalogueAbsence, MODEL_CATALOGUE_CAP } from './owner-render-format.ts';
+import { OWNER_BULLET, bulletedSection, modelModifierTags, modifierSuffix, formatAvailableModels, MODEL_CATALOGUE_CAP } from './owner-render-format.ts';
 import { resolveModelCatalogue } from './model-catalogue-resolver.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
 import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
@@ -8533,12 +8533,15 @@ export class AgentRuntime implements Runtime {
       const provider = this.agentProvider;
       const binary = getProviderBinary(provider) ?? provider;
       const listing = await resolveModelCatalogue(provider, binary, { nowMs: Date.now() });
-      // Structural absence (no catalogue SOURCE for this harness — the normal
-      // claude-cli-no-key path) has no retry and no reader-actionable fix, so
-      // adding a permanent "unavailable" line to every /model list is a dead end.
-      // Suppress it: the config block already sent above is the whole answer.
-      // Transient failures (a source that exists but hiccupped) still render.
-      if (isStructuralCatalogueAbsence(listing)) return;
+      // `/model list` is a DIRECT, solicited request, so it ALWAYS renders — even
+      // on structural absence (no-adapter / no-credential), where the NAMED reason
+      // ("no catalogue adapter for codex-cli") is the true answer and silence would
+      // leave the user unable to tell "unsupported here" from "broken" (Q 2026-07-20:
+      // silence is a bad answer to a direct question). OAuth sourcing makes a healthy
+      // claude-cli harness `ok`, so a structural reason here is now rare + informative,
+      // not the permanent dead-end the earlier suppression guarded against. Suppression
+      // of structural absence belongs to a future UNSOLICITED/aggregate render (the
+      // /config overview), which gates on isStructuralCatalogueAbsence.
       this.sendDirect(chatJid, formatAvailableModels({
         harnessLabel: provider,
         currentModelId: this.model ?? null,
