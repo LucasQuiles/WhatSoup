@@ -1,0 +1,244 @@
+{
+  "schemaVersion": 1,
+  "policyVersion": "2026-07-20",
+  "controls": [
+    {
+      "id": "repo.hygiene",
+      "policyCategory": "repository-hygiene",
+      "domain": "repository-hygiene",
+      "owner": "repository-policy-owner",
+      "decisionOwner": "repository-hygiene-decision-owner",
+      "implementation": {
+        "commandId": "guard:repo",
+        "detectorId": "repo-hygiene-guard",
+        "nativeSchemaVersion": null
+      },
+      "stages": ["pre-commit", "pre-push", "pull-request", "default-branch", "release"],
+      "trustClass": "untrusted-candidate",
+      "mode": "block",
+      "severity": "high",
+      "riskTiers": ["low", "standard", "elevated", "system-wide"],
+      "surfaces": ["repository-source"],
+      "dependencies": [],
+      "evidence": {
+        "schemaVersion": null,
+        "paths": ["."],
+        "digestBinding": "none",
+        "freshness": "same-process"
+      },
+      "failurePolicy": {
+        "finding": "block",
+        "crash": "inconclusive",
+        "timeout": "inconclusive",
+        "missing": "inconclusive",
+        "skipped": "inconclusive",
+        "cancelled": "inconclusive",
+        "stale": "inconclusive"
+      },
+      "remediation": {
+        "summary": "Run the canonical repository hygiene guard.",
+        "steps": ["Run the reproduction command.", "Repair only the named repository hygiene finding."],
+        "reproduction": "npm run guard:repo"
+      },
+      "exceptionPolicy": {
+        "allowed": false,
+        "scope": "none",
+        "approverRole": null,
+        "maxLifetimeSeconds": null
+      }
+    },
+    {
+      "id": "privacy.publication",
+      "policyCategory": "privacy-publication",
+      "domain": "privacy-publication",
+      "owner": "publication-policy-owner",
+      "decisionOwner": "publication-decision-owner",
+      "implementation": {
+        "commandId": "guard:publication",
+        "detectorId": "publication-guard",
+        "nativeSchemaVersion": null
+      },
+      "stages": ["pre-commit", "pre-push", "pull-request", "default-branch", "release"],
+      "trustClass": "untrusted-candidate",
+      "mode": "block",
+      "severity": "critical",
+      "riskTiers": ["low", "standard", "elevated", "system-wide"],
+      "surfaces": ["public-output"],
+      "dependencies": [],
+      "evidence": {
+        "schemaVersion": null,
+        "paths": ["docs/public-surface.md", "docs/publication-audit.md"],
+        "digestBinding": "none",
+        "freshness": "same-process"
+      },
+      "failurePolicy": {
+        "finding": "block",
+        "crash": "inconclusive",
+        "timeout": "inconclusive",
+        "missing": "inconclusive",
+        "skipped": "inconclusive",
+        "cancelled": "inconclusive",
+        "stale": "inconclusive"
+      },
+      "remediation": {
+        "summary": "Run the canonical publication guard.",
+        "steps": ["Run the reproduction command.", "Remove or reclassify only the named public-surface finding."],
+        "reproduction": "npm run guard:publication"
+      },
+      "exceptionPolicy": {
+        "allowed": false,
+        "scope": "none",
+        "approverRole": null,
+        "maxLifetimeSeconds": null
+      }
+    },
+    {
+      "id": "test.integrity",
+      "policyCategory": "test-integrity",
+      "domain": "test-integrity",
+      "owner": "test-integrity-owner",
+      "decisionOwner": "test-integrity-decision-owner",
+      "implementation": {
+        "commandId": "guard:test-integrity:required",
+        "detectorId": "test-integrity-ci",
+        "nativeSchemaVersion": null
+      },
+      "stages": ["pre-push", "pull-request", "default-branch", "release"],
+      "trustClass": "untrusted-candidate",
+      "mode": "block",
+      "severity": "high",
+      "riskTiers": ["standard", "elevated", "system-wide"],
+      "surfaces": ["test-integrity"],
+      "dependencies": ["repo.hygiene"],
+      "evidence": {
+        "schemaVersion": null,
+        "paths": ["scripts/test-integrity-ci.sh"],
+        "digestBinding": "none",
+        "freshness": "same-process"
+      },
+      "failurePolicy": {
+        "finding": "block",
+        "crash": "inconclusive",
+        "timeout": "inconclusive",
+        "missing": "inconclusive",
+        "skipped": "inconclusive",
+        "cancelled": "inconclusive",
+        "stale": "inconclusive"
+      },
+      "remediation": {
+        "summary": "Run the required native test-integrity adapter.",
+        "steps": ["Run the reproduction command.", "Repair only the named test-integrity finding."],
+        "reproduction": "npm run guard:test-integrity:required"
+      },
+      "exceptionPolicy": {
+        "allowed": false,
+        "scope": "none",
+        "approverRole": null,
+        "maxLifetimeSeconds": null
+      }
+    },
+    {
+      "id": "architecture.fitness-lint",
+      "policyCategory": "functional-correctness",
+      "domain": "functional-correctness",
+      "owner": "fitness-registry-owner",
+      "decisionOwner": "fitness-rule-decision-owner",
+      "implementation": {
+        "commandId": "guard:lint:src",
+        "detectorId": "eslint-fitness-check",
+        "nativeSchemaVersion": null
+      },
+      "stages": ["pre-push", "pull-request", "default-branch", "release"],
+      "trustClass": "untrusted-candidate",
+      "mode": "block",
+      "severity": "high",
+      "riskTiers": ["standard", "elevated", "system-wide"],
+      "surfaces": ["architecture-fitness"],
+      "dependencies": ["repo.hygiene"],
+      "evidence": {
+        "schemaVersion": null,
+        "paths": ["scripts/lib/fitness/registry.ts"],
+        "digestBinding": "none",
+        "freshness": "same-process"
+      },
+      "failurePolicy": {
+        "finding": "block",
+        "crash": "inconclusive",
+        "timeout": "inconclusive",
+        "missing": "inconclusive",
+        "skipped": "inconclusive",
+        "cancelled": "inconclusive",
+        "stale": "inconclusive"
+      },
+      "remediation": {
+        "summary": "Run the native fitness-rule adapter.",
+        "steps": ["Run the reproduction command.", "Repair only the named native fitness finding."],
+        "reproduction": "npm run guard:lint:src"
+      },
+      "exceptionPolicy": {
+        "allowed": false,
+        "scope": "none",
+        "approverRole": null,
+        "maxLifetimeSeconds": null
+      }
+    },
+    {
+      "id": "workflow.safeguard-diagnostics",
+      "policyCategory": "workflow-security",
+      "domain": "workflow-security",
+      "owner": "safeguard-diagnostics-owner",
+      "decisionOwner": "workflow-safeguard-decision-owner",
+      "implementation": {
+        "commandId": "guard:safeguard-diagnostics",
+        "detectorId": "safeguard-diagnostics",
+        "nativeSchemaVersion": null
+      },
+      "stages": ["pre-commit", "pre-push", "pull-request", "default-branch", "release"],
+      "trustClass": "untrusted-candidate",
+      "mode": "block",
+      "severity": "high",
+      "riskTiers": ["standard", "elevated", "system-wide"],
+      "surfaces": ["workflow-safeguards"],
+      "dependencies": ["repo.hygiene"],
+      "evidence": {
+        "schemaVersion": null,
+        "paths": ["scripts/safeguard-diagnostics.ts"],
+        "digestBinding": "none",
+        "freshness": "same-process"
+      },
+      "failurePolicy": {
+        "finding": "block",
+        "crash": "inconclusive",
+        "timeout": "inconclusive",
+        "missing": "inconclusive",
+        "skipped": "inconclusive",
+        "cancelled": "inconclusive",
+        "stale": "inconclusive"
+      },
+      "remediation": {
+        "summary": "Run the canonical safeguard diagnostics.",
+        "steps": ["Run the reproduction command.", "Repair only the named safeguard-chain finding."],
+        "reproduction": "npm run guard:safeguard-diagnostics"
+      },
+      "exceptionPolicy": {
+        "allowed": false,
+        "scope": "none",
+        "approverRole": null,
+        "maxLifetimeSeconds": null
+      }
+    }
+  ],
+  "requiredSurfaces": ["repository-source", "public-output", "test-integrity", "architecture-fitness", "workflow-safeguards"],
+  "riskRules": [],
+  "stages": ["pre-commit", "pre-push", "pull-request", "default-branch", "release"],
+  "trustClasses": ["untrusted-candidate"],
+  "canonicalCommands": {
+    "guard:repo": ["bash", "scripts/run-with-pinned-node.sh", "scripts/repo-hygiene-guard.ts"],
+    "guard:publication": ["bash", "scripts/run-with-pinned-node.sh", "scripts/publication-guard.ts"],
+    "guard:test-integrity:required": ["env", "WHATSOUP_REQUIRE_TEST_INTEGRITY=1", "bash", "scripts/test-integrity-ci.sh"],
+    "guard:lint:src": ["bash", "scripts/run-with-pinned-node.sh", "scripts/eslint-fitness-check.ts"],
+    "guard:safeguard-diagnostics": ["bash", "scripts/run-with-pinned-node.sh", "scripts/safeguard-diagnostics.ts"]
+  },
+  "resultSchema": "ci-control-result-v1",
+  "exceptionSchema": "ci-control-exception-v1"
+}

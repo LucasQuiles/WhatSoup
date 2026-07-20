@@ -326,6 +326,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.verify-push-branch` | `npm run verify:push:branch` | `package.json` | stable | active | Composite verifier run before pushing a branch |
 | `cli:npm.verify-release` | `npm run verify:release` | `package.json` | beta | active | Release-readiness verifier; surface still settling |
 | `cli:npm.verify-publish` | `npm run verify:publish` | `package.json` | beta | active | Strict public-publication prep gate; expected to fail until `PRIVATE-ARCHIVE` rows are removed, sanitized, or reclassified |
+| `cli:npm.ci-manifest` | `npm run ci:manifest -- validate --json` | `package.json` | beta | active | Strict canonical control-manifest validation and observed-control inventory from `controls/ci-control-manifest.json` (`inventory --json`) |
 
 Test, typecheck, build, lint, format, and dev scripts are internal.
 
