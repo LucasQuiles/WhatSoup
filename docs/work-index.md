@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 74
+**Total entries:** 75
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=7, plan=37, review=3, spec=26, state=1 |
-| Status | active=13, closed=4, completed=32, deferred=7, pending=14, unknown=4 |
-| Status source | body-marker=70, fallback=3, state-md-status=1 |
+| Kind | handoff=7, plan=37, review=3, spec=27, state=1 |
+| Status | active=13, closed=4, completed=32, deferred=7, pending=15, unknown=4 |
+| Status source | body-marker=71, fallback=3, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -163,7 +163,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | review | completed | body-marker | bot-errors-tool-call-audit | 2026-06-20 |  |
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | review | completed | body-marker | wall-to-wall-audit-pr-briefs | 2026-07-10 |  |
 
-### docs/superpowers/specs  _(20 entries)_
+### docs/superpowers/specs  _(21 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -187,6 +187,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-07-17-boundary-exit-parser-codeql-hardening-design.md` | spec | active | body-marker | boundary-exit-parser-codeql-hardening-design | 2026-07-17 |  |
 | `docs/superpowers/specs/2026-07-17-boundary-validator-ci-refactor-design.md` | spec | active | body-marker | boundary-validator-ci-refactor-design | 2026-07-17 |  |
 | `docs/superpowers/specs/2026-07-17-macos-credential-durability-design.md` | spec | unknown | fallback | macos-credential-durability-design | 2026-07-17 |  |
+| `docs/superpowers/specs/2026-07-20-cicd-enforcement-control-plane-design.md` | spec | pending | body-marker | cicd-enforcement-control-plane-design | 2026-07-20 |  |
 
 ### docs/superpowers/specs/kill-session-transactional-cancellation  _(3 entries)_
 
@@ -207,4 +208,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-18T01:52:16Z from commit `83d5c7f25f634d875b13440c0aa889933ae88cbc`
+- Generated at 2026-07-20T18:27:29Z from commit `24bb5e5528c7909a8df5f4d490d83e21604f3646`
