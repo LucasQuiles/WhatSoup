@@ -31,7 +31,7 @@
     },
     {
       "path": "src/transport/factory.ts",
-      "sha256": "8782eb6d758f05a50d842d6567883a9c050f1eabbad3adb823c514f0f758f8e7",
+      "sha256": "33f97e76578d99b7f4c60c7f36e78fac48f17fc884987d18d40c9a3fe7398dea",
       "mustContain": [
         "createConnection",
         "ConnectionManager",
