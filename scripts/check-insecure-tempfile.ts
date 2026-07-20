@@ -27,10 +27,15 @@ export interface Finding {
   snippet: string;
 }
 
-// .worktrees holds sibling git-worktree checkouts of OTHER branches; their
-// content is gated by their own pushes. Scanning them makes this checkout's
-// push gate depend on unrelated branch state (observed 2026-07-04: a red-team
-// fixture corpus in a parked worktree blocked an unrelated push with 56 hits).
+// `.worktrees` (and `.claude/worktrees`, the harness isolation-worktree tree) hold
+// sibling git-worktree checkouts of OTHER branches; their content is gated by
+// their own pushes. Scanning them makes this checkout's push gate depend on
+// unrelated branch state (observed 2026-07-04: a red-team fixture corpus in a
+// parked `.worktrees` checkout blocked an unrelated push with 56 hits; recurred
+// 2026-07-19 via `.claude/worktrees/<parked>/tests/fixtures/insecure-tempfile/red`
+// — 14 hits). `.worktrees` is a basename skip (caught at any depth). `.claude/`
+// nests real scannable content beside its `worktrees/`, so `.claude/worktrees`
+// is excluded by relative path in the walk below, not by basename.
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'coverage', '.worktrees']);
 // Flag both tempfile.mktemp( calls and direct-import form (kind py-mktemp)
 const PY_MKTEMP = /\b(?:tempfile\.mktemp\s*\(|from\s+tempfile\s+import\s+(?:\w+\s*,\s*)*mktemp\b)/;
@@ -87,20 +92,22 @@ function scanFile(abs: string, rel: string): Finding[] {
 
 export function scanForInsecureTempfile(root: string): Finding[] {
   const findings: Finding[] = [];
-  // Self-corpus exclusion: when walking from a repo root, skip the guard's own
-  // intentional-violation fixtures so they don't pollute gate results and make
-  // the blocking gate permanently un-greenable. The check is relative-path-
-  // based, so it does NOT fire when the scan root IS the fixture directory
-  // (unit tests call scanForInsecureTempfile(redDir) directly — those must
-  // still find violations).
-  const FIXTURE_CORPUS = 'tests/fixtures/insecure-tempfile';
+  // Relative-path directory exclusions (vs the SKIP_DIRS basename set). Both are
+  // computed against the scan ROOT, so they do NOT fire when the scan root IS the
+  // excluded directory — unit tests call scanForInsecureTempfile(redDir) directly
+  // and must still find violations:
+  //   - tests/fixtures/insecure-tempfile — the guard's own intentional-violation
+  //     corpus; scanning it would make this blocking gate permanently un-greenable.
+  //   - .claude/worktrees — harness isolation worktrees of OTHER branches
+  //     (see SKIP_DIRS note); their fixtures must not gate THIS checkout's push.
+  const SKIP_RELPATHS = new Set(['tests/fixtures/insecure-tempfile', '.claude/worktrees']);
   const walk = (dir: string) => {
     for (const name of readdirSync(dir)) {
       if (SKIP_DIRS.has(name)) continue;
       const abs = path.join(dir, name);
       const st = statSync(abs);
       if (st.isDirectory()) {
-        if (path.relative(root, abs) === FIXTURE_CORPUS) continue;
+        if (SKIP_RELPATHS.has(path.relative(root, abs))) continue;
         walk(abs);
       } else {
         findings.push(...scanFile(abs, path.relative(root, abs)));

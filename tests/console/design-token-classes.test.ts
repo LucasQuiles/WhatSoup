@@ -13,6 +13,11 @@ const readTokenCss = () => [
   'console/src/styles/tokens.component.css',
   'console/src/styles/composites.css',
 ].map(read).join('\n')
+// DD-38 closeout: the card recipe was absorbed into the Card primitive as
+// `.soup-card` in primitives.css — card-class pins read it separately (the
+// token set above keeps its original scope; primitives legitimately owns
+// modal sizing declarations the c-dialog test forbids in composites).
+const readPrimitivesCss = () => read('console/src/styles/primitives.css')
 
 const blockFor = (css: string, selectorFragment: string) => {
   const selectorStart = css.indexOf(selectorFragment)
@@ -29,14 +34,19 @@ const blockFor = (css: string, selectorFragment: string) => {
 describe('design token component classes', () => {
   it('defines reusable input and card classes in index.css', () => {
     const css = readTokenCss()
+    const primitivesCss = readPrimitivesCss()
 
     for (const selector of [
       '.c-input',
       '.c-input-search',
-      '.c-card',
     ]) {
       expect(css).toContain(selector)
     }
+    // DD-38 closeout: the card class is `.soup-card` (Card primitive,
+    // primitives.css); the legacy `.c-card` recipe is deleted everywhere.
+    expect(primitivesCss).toContain('.soup-card')
+    expect(css).not.toMatch(/\.c-card\s*\{/)
+    expect(primitivesCss).not.toMatch(/\.c-card\s*\{/)
     // DD-43: MessageBubble's detail card migrated onto the HoverCard primitive; the
     // `.c-card--detail` modifier had no other consumer and was deleted (composites.css).
     expect(css).not.toContain('.c-card--detail')
@@ -74,8 +84,9 @@ describe('design token component classes', () => {
 
     expect(css).not.toContain('width: min(100%, var(--panel-confirm));')
     expect(css).not.toContain('max-height: var(--modal-max-h);')
-    expect(css).toContain('/* Canonical panel container border: use --b1 for c-card and c-section so all primary panels share the same boundary token. */')
-    expect(css).toContain('.c-card {\n  background: var(--surface-raised);\n  border: var(--bw) solid var(--border-hairline);')
+    // DD-38 closeout: the card recipe moved to `.soup-card` in primitives.css
+    // (declarations verbatim); c-section keeps the canonical border in composites.
+    expect(readPrimitivesCss()).toContain('.soup-card {\n  background: var(--surface-raised);\n  border: var(--bw) solid var(--border-hairline);')
     expect(css).toContain('.c-section {\n  background: var(--surface-raised);\n  border: var(--bw) solid var(--border-hairline);')
   })
 
