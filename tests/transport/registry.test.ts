@@ -11,7 +11,7 @@ import {
 
 describe('transport registry', () => {
   it('is a frozen closed set pinned to the canonical IDs', () => {
-    expect([...TRANSPORT_IDS]).toEqual(['baileys', 'twilio']);
+    expect([...TRANSPORT_IDS]).toEqual(['baileys', 'twilio', 'signal', 'imessage']);
     expect(Object.isFrozen(TRANSPORT_IDS)).toBe(true);
   });
 
@@ -48,7 +48,12 @@ describe('transport registry', () => {
 
   it('assertNeverTransport throws with context and the valid set', () => {
     expect(() => assertNeverTransport('bogus' as never, 'test-site')).toThrow(
-      /\[test-site\] unknown transport id: "bogus"\. Valid: baileys, twilio\./,
+      /\[test-site\] unknown transport id: "bogus"\. Valid: baileys, twilio, signal, imessage\./,
     );
+  });
+
+  it('accepts the signal and imessage transport IDs', () => {
+    expect(isTransportId('signal')).toBe(true);
+    expect(isTransportId('imessage')).toBe(true);
   });
 });

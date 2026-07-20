@@ -42,6 +42,24 @@ describe('sms channel kind', () => {
   });
 });
 
+describe('signal channel kind', () => {
+  it('constructs and parses a signal channel id', () => {
+    const id = makeChannelId('signal', 'ops-line');
+    expect(id).toBe('signal:ops-line');
+    expect(kindOf(id)).toBe('signal');
+    expect(accountOf(id)).toBe('ops-line');
+  });
+});
+
+describe('imessage channel kind', () => {
+  it('constructs and parses an imessage channel id', () => {
+    const id = makeChannelId('imessage', 'mac-mini');
+    expect(id).toBe('imessage:mac-mini');
+    expect(kindOf(id)).toBe('imessage');
+    expect(accountOf(id)).toBe('mac-mini');
+  });
+});
+
 describe('refToKey / msgToKey', () => {
   it('refToKey serializes a ConversationRef stably', () => {
     const c: ConversationRef = { channel: makeChannelId('whatsapp', 'mw-bot'), id: '1234@s.whatsapp.net' };
