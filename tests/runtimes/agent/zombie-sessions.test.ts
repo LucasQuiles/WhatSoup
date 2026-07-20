@@ -130,6 +130,8 @@ vi.mock('../../../src/config.ts', () => ({
     toolUpdateMode: 'full',
     toolUpdateRedirectJid: null,
     textAggregateDelayMs: 2_000,
+    stateRoot: '/tmp/whatsoup-test-state-zombie',
+    restartLoopGuard: { enabled: true, maxRestarts: 3, windowMs: 300_000 },
     mediaDir: '/tmp/whatsoup-test-media/tmp',
     pineconeAllowedIndexes: [],
   },

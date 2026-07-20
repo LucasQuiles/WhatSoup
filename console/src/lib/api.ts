@@ -31,6 +31,7 @@ function mockFallbackEnabled(): boolean {
 import type {
   AccessEntry,
   ChatItem,
+  CheckpointsPayload,
   ContactResult,
   FeedEvent,
   FleetMetrics,
@@ -38,6 +39,7 @@ import type {
   GroupInfo,
   LineInstance,
   LineMetrics,
+  RateLimitsPayload,
   LogEntry,
   Message,
   MetricsRange,
@@ -351,6 +353,9 @@ export const api = {
     () => apiFetch<LogEntry[]>(`/api/lines/${encodeURIComponent(name)}/logs`),
     async () => (await loadMockData()).getLogs(name),
   ),
+  // Checkpoint browser — plain apiFetch (getProviderStatus precedent: no mock lane).
+  getCheckpoints: (name: string) =>
+    apiFetch<CheckpointsPayload>(`/api/lines/${encodeURIComponent(name)}/checkpoints`),
   getFeed: () => withFallback(
     () => apiFetch<FeedEvent[]>('/api/feed'),
     async () => (await loadMockData()).getFeed(),
@@ -436,6 +441,9 @@ export const api = {
 
   getProviderStatus: (name: string) =>
     apiFetch<ProviderStatus>(`/api/lines/${encodeURIComponent(name)}/provider-status`),
+
+  getRateLimits: (name: string) =>
+    apiFetch<RateLimitsPayload>(`/api/lines/${encodeURIComponent(name)}/rate-limits`),
 
   // ── MCP proxy operations ──
 
