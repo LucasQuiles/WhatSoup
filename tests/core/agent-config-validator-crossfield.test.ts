@@ -231,7 +231,7 @@ describe('validateInstanceConfig — opencode-cli baseUrl requires a resolvable 
   it('accepts opencode-cli + baseUrl when a top-level model is set', () => {
     expect(
       validateInstanceConfig(
-        agentRaw(opencodeWithBaseUrl, { model: 'whatsoup-cloud/some-model' }),
+        agentRaw(opencodeWithBaseUrl, { model: 'minimax/some-model' }),
         createCtx,
       ),
       'top-level model must satisfy the custom-endpoint model requirement',
@@ -244,7 +244,7 @@ describe('validateInstanceConfig — opencode-cli baseUrl requires a resolvable 
   it('accepts opencode-cli + baseUrl when models.conversation is set', () => {
     expect(
       validateInstanceConfig(
-        agentRaw(opencodeWithBaseUrl, { models: { conversation: 'whatsoup-cloud/some-model' } }),
+        agentRaw(opencodeWithBaseUrl, { models: { conversation: 'minimax/some-model' } }),
         createCtx,
       ),
       'models.conversation must satisfy the custom-endpoint model requirement',

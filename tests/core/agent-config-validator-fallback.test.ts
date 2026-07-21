@@ -29,13 +29,15 @@ function agentRawFallback(
 describe('validateInstanceConfig — agentOptions.fallbackProvider / fallbackModel', () => {
   it('accepts every canonical provider ID as a fallbackProvider', () => {
     for (const id of PROVIDER_IDS) {
-      // Managed APIs and OpenCode require an explicit fallbackModel; pair one
-      // so this test isolates the provider-ID enum rule.
+      // Managed APIs and OpenCode require an explicit fallbackModel; pair one so
+      // this test isolates the provider-ID enum rule. Use a mapped `<provider>/…`
+      // prefix so it also satisfies opencode-cli's credential-route rule (the API
+      // providers accept the same string verbatim — they do not prefix-check).
       const requiresModel = id === 'openai-api' || id === 'anthropic-api' || id === 'opencode-cli';
       const err = validateInstanceConfig(
         agentRawFallback(
           requiresModel
-            ? { fallbackProvider: id, fallbackModel: 'some-model-id' }
+            ? { fallbackProvider: id, fallbackModel: 'minimax/some-model-id' }
             : { fallbackProvider: id },
         ),
         {
