@@ -4,12 +4,10 @@
 // adapter knows contract; port knows signal-cli JSON-RPC shapes.
 //
 // Recipient identifiers:
-// - Outbound send args accept E.164 phone numbers; the port resolves them to
-//   UUIDs internally via signal-cli's `resolveRecipient` RPC. This keeps the
-//   adapter and config ergonomic for operators while preserving UUID-canonical
-//   identity internally.
-// - Inbound envelopes carry sender UUIDs; the adapter surfaces them to the
-//   contract as JID local-parts (e.g. `<uuid>@signal`).
+// - Outbound send args accept E.164 phone numbers or UUIDs and pass them to
+//   signal-cli's recipient resolver.
+// - Inbound envelopes prefer exposed sender/destination numbers and fall back to UUIDs;
+//   this boundary does not invent a durable UUID↔E.164 alias map.
 //
 // Group identifiers: signal-cli V2 groups use base64 group IDs. The port
 // accepts and returns these as opaque strings; group membership decryption
@@ -75,7 +73,7 @@ export interface SignalPortError {
 export interface ReactSignalArgs {
   /** The message's timestamp (epoch ms) — Signal's unique message id. */
   readonly targetTimestamp: number;
-  /** The peer UUID or group id the reacted-to message lives in. */
+  /** The author UUID of the reacted-to message. */
   readonly targetAuthor: string;
   /** Whether the reacted-to message is in a group. */
   readonly targetInGroup: boolean;
@@ -83,6 +81,13 @@ export interface ReactSignalArgs {
   readonly emoji: string;
   /** True iff removing a prior reaction (emoji should be '' when true). */
   readonly remove: boolean;
+}
+
+/** Arguments for Signal's real remoteDelete JSON-RPC method. */
+export interface RemoteDeleteSignalArgs {
+  readonly recipient?: string;
+  readonly groupId?: string;
+  readonly targetTimestamp: number;
 }
 
 /** Arguments for sending a read receipt for a Signal message. */
@@ -93,13 +98,19 @@ export interface SendReadReceiptArgs {
   readonly timestamps: readonly number[];
 }
 
-/** Arguments for sending a typing indicator. */
-export interface SendTypingArgs {
-  /** Peer UUID. */
+/** Arguments for sending a typing indicator to exactly one peer or group. */
+export type SendTypingArgs = ({
+  /** Peer UUID or E.164 identity. */
   readonly target: string;
+  readonly groupId?: never;
+} | {
+  readonly target?: never;
+  /** Base64 V2 group id. */
+  readonly groupId: string;
+}) & {
   /** True iff the user is composing (typing started); false for stopped. */
   readonly composing: boolean;
-}
+};
 
 /**
  * Narrow provider seam for signal-cli operations.
@@ -108,9 +119,11 @@ export interface SendTypingArgs {
  */
 export interface SignalPort {
   /**
-   * Verify that the daemon is reachable and our linked-device session is
-   * still valid. Pings signal-cli's `getUsername` RPC; throws on connection
-   * failure, daemon-not-running, or unlinked session.
+   * Verify that the account-bound daemon is reachable and can execute a local
+   * account command. Calls signal-cli's `listDevices` RPC. The single-account
+   * daemon does not expose its self E.164 through this command, so matching the
+   * configured phoneNumber to the daemon `-a` identity remains an operator
+   * attestation rather than a mechanical check.
    */
   verifyCredentials(): Promise<void>;
 
@@ -121,22 +134,28 @@ export interface SignalPort {
   send(args: SendSignalArgs): Promise<{ timestamp: number }>;
 
   /**
-   * List envelopes received at or after `since` in BOTH directions (inbound
-   * and our own outbound echoes). `fromMe` on each record distinguishes
-   * direction, mirroring the Twilio port's InboundSms.fromMe contract.
+   * Drain one bounded receive batch in BOTH directions (inbound and our own
+   * outbound echoes). `fromMe` on each record distinguishes direction,
+   * mirroring the Twilio port's InboundSms.fromMe contract. The historical
+   * `since` parameter is validated but MUST NOT filter acceptance: signal-cli
+   * receive is destructive, not a timestamp-queryable feed, and clocks can be
+   * skewed or out of order across batches.
    *
    * Contract:
    * - Returns both inbound messages (fromMe: false) and our own outbound
    *   echoes (fromMe: true). The adapter uses fromMe records as echo
    *   confirmation so the durability engine can transition submitted ops
    *   to echoed.
-   * - The boundary is INCLUSIVE (timestamp >= since): delivery is
-   *   at-least-once so a cursor equal to a message timestamp re-delivers
-   *   rather than drops. Callers MUST deduplicate by `timestamp`.
-   * - Results are ordered ascending by `timestamp` (oldest first) so callers
-   *   can advance their cursor safely.
-   * - `pageSize`, when provided, must be a positive integer and caps the
-   *   result count; implementations throw `RangeError` otherwise.
+   * - Every valid row in the current destructive receive batch is returned,
+   *   regardless of timestamp. signal-cli does not redeliver a previously
+   *   drained batch, so this is not an at-least-once durability boundary across
+   *   a process crash. Callers still deduplicate composite envelope identities
+   *   within delivered/replayed input.
+   * - Results are ordered ascending by `timestamp` (oldest first) for stable
+   *   listener behavior; the order is not a durable cursor.
+   * - `pageSize`, when provided, must be a positive integer and is passed to
+   *   signal-cli as `maxMessages` before the queue is drained; implementations
+   *   throw `RangeError` otherwise and fail if the provider exceeds the bound.
    */
   listInboundSince(since: Date, pageSize?: number): Promise<readonly InboundSignal[]>;
 
@@ -157,4 +176,7 @@ export interface SignalPort {
    * (no "recording audio"); the composing boolean carries both.
    */
   sendTypingIndicator(args: SendTypingArgs): Promise<void>;
+
+  /** Remotely delete one of our previously sent messages. */
+  remoteDelete(args: RemoteDeleteSignalArgs): Promise<void>;
 }

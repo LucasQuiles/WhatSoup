@@ -113,6 +113,24 @@ describe('isAdminMessage -- QR-143 cross-transport admin spoof guard', () => {
     const msg = makeIncomingMsg({ senderJid: '15550100001@s.whatsapp.net', isGroup: false });
     expect(isAdminMessage(msg, mockDb)).toBe(true);
   });
+
+  it('accepts an exact configured Signal UUID and rejects a prefixed lookalike', async () => {
+    const { config } = await import('../../src/config.ts');
+    const uuid = '01234567-8901-2345-6789-012345678901';
+    config.adminPhones.add(uuid);
+    try {
+      expect(isAdminMessage(makeIncomingMsg({
+        senderJid: `${uuid}@signal`,
+        isGroup: false,
+      }), mockDb)).toBe(true);
+      expect(isAdminMessage(makeIncomingMsg({
+        senderJid: `x${uuid}@signal`,
+        isGroup: false,
+      }), mockDb)).toBe(false);
+    } finally {
+      config.adminPhones.delete(uuid);
+    }
+  });
 });
 
 describe('isAdminMessage -- negative', () => {
@@ -152,6 +170,15 @@ describe('parseAdminCommand -- phone positive', () => {
 
   it('handles trailing whitespace', () => {
     expect(parseAdminCommand('ALLOW 15551230008   ')).toEqual({ action: 'allow', subjectType: 'phone', subjectId: '15551230008' });
+  });
+
+  it('parses Signal E.164 and UUID subjects without changing their identity', () => {
+    expect(parseAdminCommand('ALLOW +15551230008')).toEqual({
+      action: 'allow', subjectType: 'phone', subjectId: '+15551230008',
+    });
+    expect(parseAdminCommand('BLOCK a1b2c3d4-1234-4abc-8def-a1b2c3d4e5f6')).toEqual({
+      action: 'block', subjectType: 'phone', subjectId: 'a1b2c3d4-1234-4abc-8def-a1b2c3d4e5f6',
+    });
   });
 });
 
