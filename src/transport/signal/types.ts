@@ -90,7 +90,7 @@ export interface SignalConfig {
   readonly rateLimit: SignalRateLimit;
 
   /**
-   * Phase 5 — absolute path to the signal-cli data directory
+   * absolute path to the signal-cli data directory
    * (default `$XDG_DATA_HOME/signal-cli` ≈ `~/.local/share/signal-cli`).
    * The adapter uses this to confine attachment reads from disk
    * (fetchAttachment resolves each AttachmentRef.id — an absolute path

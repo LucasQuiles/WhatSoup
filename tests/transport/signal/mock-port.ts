@@ -31,9 +31,9 @@ export class MockSignalPort implements SignalPort {
   readonly receipts: SendReadReceiptArgs[] = [];
   readonly typings: SendTypingArgs[] = [];
   readonly groupQueries: string[] = [];
-  /** Phase 6 — next getGroupMetadata result (mutated by tests). */
+  /** next getGroupMetadata result (mutated by tests). */
   nextGroup: SignalGroupMetadata | null = null;
-  /** Phase 6 — error to throw from getGroupMetadata; supersedes nextGroup. */
+  /** error to throw from getGroupMetadata; supersedes nextGroup. */
   nextGroupError: Error | null = null;
   verifyCalls = 0;
 

@@ -1,5 +1,5 @@
 // tests/transport/signal/adapter-edit.test.ts
-// Phase 9 — message edit (SupportsEdit).
+// message edit (SupportsEdit).
 //
 // The spec (signal-and-imessage-transports-spec.md §3a) marks edit as
 // "deferred" with the rationale "edit is beta in upstream". signal-cli
@@ -21,7 +21,7 @@ import { MockSignalPort, makeSignalConfig } from './mock-port.ts';
 import { isEditable } from '../../../src/transport/contract/extensions.ts';
 import type { EditEvent } from '../../../src/transport/contract/events.ts';
 
-describe('SignalAdapter — edit capabilities (Phase 9)', () => {
+describe('SignalAdapter — edit capabilities', () => {
   it('declares the edit extension (isEditable → true)', () => {
     const adapter = new SignalAdapter(makeSignalConfig(), new MockSignalPort());
     expect(isEditable(adapter)).toBe(true);
@@ -29,7 +29,7 @@ describe('SignalAdapter — edit capabilities (Phase 9)', () => {
   });
 });
 
-describe('SignalAdapter — editText (Phase 9)', () => {
+describe('SignalAdapter — editText', () => {
   it('issues a signal-cli send with editTimestamp = target timestamp', async () => {
     const port = new MockSignalPort();
     const adapter = new SignalAdapter(makeSignalConfig(), port);
@@ -76,7 +76,7 @@ describe('SignalAdapter — editText (Phase 9)', () => {
   });
 });
 
-describe('SignalAdapter — inbound edit events (Phase 9)', () => {
+describe('SignalAdapter — inbound edit events', () => {
   it('emits an EditEvent when an inbound dataMessage carries an edit', async () => {
     const adapter = new SignalAdapter(makeSignalConfig(), new MockSignalPort());
     await adapter.connect();

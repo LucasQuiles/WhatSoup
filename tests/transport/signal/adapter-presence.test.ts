@@ -1,5 +1,5 @@
 // tests/transport/signal/adapter-presence.test.ts
-// Phase 7 — presence extension (SupportsPresence).
+// presence extension (SupportsPresence).
 //
 // Before this slice, capabilities.extensions did NOT include 'presence'. The
 // spec (signal-and-imessage-transports-spec.md §3a line 83) lists 'presence'
@@ -23,7 +23,7 @@ import { MockSignalPort, makeSignalConfig } from './mock-port.ts';
 import { isPresenceCapable } from '../../../src/transport/contract/extensions.ts';
 import type { PresenceEvent } from '../../../src/transport/contract/events.ts';
 
-describe('SignalAdapter — presence capabilities (Phase 7)', () => {
+describe('SignalAdapter — presence capabilities', () => {
   it('declares the presence extension (isPresenceCapable → true)', () => {
     const adapter = new SignalAdapter(makeSignalConfig(), new MockSignalPort());
     expect(isPresenceCapable(adapter)).toBe(true);
@@ -31,7 +31,7 @@ describe('SignalAdapter — presence capabilities (Phase 7)', () => {
   });
 });
 
-describe('SignalAdapter — presence events (Phase 7)', () => {
+describe('SignalAdapter — presence events', () => {
   it('emits a PresenceEvent with state=online when an inbound typingMessage arrives', async () => {
     const adapter = new SignalAdapter(makeSignalConfig(), new MockSignalPort());
     await adapter.connect();

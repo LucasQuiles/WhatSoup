@@ -174,7 +174,7 @@ interface RpcEnvelope {
       targetSentTimestamp?: number;
     };
     /**
-     * Phase 9 — edited message payload. signal-cli surfaces an edited
+     * edited message payload. signal-cli surfaces an edited
      * inbound message via `dataMessage.edit` with the original message's
      * timestamp and the replacement body in `message`.
      */
@@ -182,7 +182,7 @@ interface RpcEnvelope {
       targetSentTimestamp?: number;
     };
     /**
-     * Phase 5 — signal-cli downloads inbound attachments to its data dir and
+     * signal-cli downloads inbound attachments to its data dir and
      * reports each one with: storedFilename (absolute path on the signal-cli
      * host), contentType (sniffed MIME), size (decoded bytes), and optionally
      * a caller-facing filename. See `man signal-cli` §receive.
@@ -208,7 +208,7 @@ interface RpcEnvelope {
 }
 
 /**
- * Phase 5 — signal-cli's `attachments` array shape (per the man page §receive
+ * signal-cli's `attachments` array shape (per the man page §receive
  * and the JSON-RPC `receive` response). The port carries these through
  * unchanged; the adapter decides what to surface upstream.
  */
@@ -315,7 +315,7 @@ export function normalizeEnvelope(env: RpcEnvelope, ownNumber: string): InboundS
       };
     }
 
-    // Phase 9 — edited message. signal-cli emits these as a dataMessage with
+    // edited message. signal-cli emits these as a dataMessage with
     // both `edit.targetSentTimestamp` (the original message) and `message`
     // (the new body). Detect BEFORE the plain-text fallback so edits don't
     // surface as fresh messages.
@@ -335,7 +335,7 @@ export function normalizeEnvelope(env: RpcEnvelope, ownNumber: string): InboundS
       };
     }
 
-    // Plain text (or text + attachments). Phase 5: signal-cli emits attachments
+    // Plain text (or text + attachments). signal-cli emits attachments
     // under dataMessage.attachments when a media message arrives.
     const attachments = (dm.attachments ?? [])
       .map(toInboundAttachment)
@@ -351,10 +351,10 @@ export function normalizeEnvelope(env: RpcEnvelope, ownNumber: string): InboundS
       attachments: attachments.length > 0 ? attachments : undefined,
     };
   }
-  // Phase 7 — typingMessage envelopes. signal-cli's typingMessage carries
+  // typingMessage envelopes. signal-cli's typingMessage carries
   // an optional `action` field ('STARTED' for composing, 'STOPPED' for idle).
   // We surface these as type='typing' with a composing boolean; the adapter
-  // emits a PresenceEvent. (Pre-Phase 7 these were dropped.)
+  // emits a PresenceEvent. (Pre- these were dropped.)
   if (env.typingMessage && typeof env.typingMessage === 'object') {
     const tm = env.typingMessage as { action?: string };
     const composing = tm.action !== 'STOPPED';
@@ -429,13 +429,13 @@ export class SignalCliPort implements SignalPort {
     } else {
       params.recipient = [args.recipient];
     }
-    // Phase 5: forward attachments as the signal-cli `attachments` array.
+    // forward attachments as the signal-cli `attachments` array.
     // Each entry is a data URI per the signal-cli man page §send:
     //   data:<MIME>;filename=<FILENAME>;base64,<BASE64 ENCODED DATA>
     if (args.attachments && args.attachments.length > 0) {
       params.attachments = args.attachments.slice();
     }
-    // Phase 9: edit-timestamp forwards to signal-cli's `editTimestamp` param.
+    // edit-timestamp forwards to signal-cli's `editTimestamp` param.
     // When present, signal-cli treats this send as an edit of the prior
     // outbound message identified by the timestamp.
     if (args.editTimestamp !== undefined) {
@@ -505,7 +505,7 @@ export class SignalCliPort implements SignalPort {
   }
 
   /**
-   * Phase 6 — fetch metadata for a single Signal V2 group via signal-cli's
+   * fetch metadata for a single Signal V2 group via signal-cli's
    * `listGroups` RPC. signal-cli returns an array of objects with shape:
    *   { id: string, name: string, members: string[], ... }
    * We filter to the requested groupId. When the group is unknown (or this

@@ -1,5 +1,5 @@
 // tests/transport/signal/adapter-inbound-media.test.ts
-// Phase 5 — inbound attachment surface + fetchAttachment.
+// inbound attachment surface + fetchAttachment.
 //
 // Proves:
 //   1. An inbound `data` envelope carrying signal-cli attachments produces an
@@ -51,7 +51,7 @@ function att(overrides: Partial<InboundAttachment> = {}): InboundAttachment {
   };
 }
 
-describe('SignalAdapter — inbound attachments (Phase 5)', () => {
+describe('SignalAdapter — inbound attachments', () => {
   it('is media-capable (isMediaCapable → true)', () => {
     const adapter = new SignalAdapter(makeSignalConfig(), new MockSignalPort());
     expect(isMediaCapable(adapter)).toBe(true);
@@ -157,7 +157,7 @@ describe('SignalAdapter — inbound attachments (Phase 5)', () => {
   });
 });
 
-describe('signal-cli-port normalizeEnvelope — attachments passthrough (Phase 5)', () => {
+describe('signal-cli-port normalizeEnvelope — attachments passthrough', () => {
   it('surfaces dataMessage.attachments on the data envelope', () => {
     const env = {
       sourceUuid: 'aaa',
@@ -229,7 +229,7 @@ describe('signal-cli-port normalizeEnvelope — attachments passthrough (Phase 5
   });
 });
 
-describe('SignalAdapter — fetchAttachment (Phase 5)', () => {
+describe('SignalAdapter — fetchAttachment', () => {
   let tmpRoot: string;
 
   beforeEach(async () => {

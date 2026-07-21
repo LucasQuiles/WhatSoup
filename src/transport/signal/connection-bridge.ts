@@ -231,7 +231,7 @@ export class SignalConnection extends EventEmitter implements RuntimeConnection 
 
   /**
    * Consumer: src/core/scheduler.ts:203 (media send path)
-   * Phase 5 — media attachments are now wired through the adapter. The bridge
+   * media attachments are now wired through the adapter. The bridge
    * converts the runtime OutboundMedia to the contract MediaPayload (materialize
    * buffer; carry mimetype + filename + caption) and delegates to
    * adapter.sendMedia(), which validates against the spec's MIME allowlist and

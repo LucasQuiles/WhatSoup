@@ -1,5 +1,5 @@
 // tests/transport/signal/adapter-media.test.ts
-// Phase 5 — media attachment support.
+// media attachment support.
 //
 // Before this slice, the Signal adapter declared media.maxBytes: 0, the
 // `media` extension was NOT in capabilities.extensions, and the bridge

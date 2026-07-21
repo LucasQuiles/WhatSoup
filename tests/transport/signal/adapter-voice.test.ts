@@ -1,5 +1,5 @@
 // tests/transport/signal/adapter-voice.test.ts
-// Phase 8 — voice notes (SupportsVoiceNotes).
+// voice notes (SupportsVoiceNotes).
 //
 // The spec (signal-and-imessage-transports-spec.md §3a) marks voice-notes
 // as "deferred" with the rationale "Signal voice is opus-only". This is true
@@ -21,7 +21,7 @@ import { MockSignalPort, makeSignalConfig } from './mock-port.ts';
 import { isVoiceCapable } from '../../../src/transport/contract/extensions.ts';
 import type { VoicePayload } from '../../../src/transport/contract/commands.ts';
 
-describe('SignalAdapter — voice-notes capabilities (Phase 8)', () => {
+describe('SignalAdapter — voice-notes capabilities', () => {
   it('declares the voice-notes extension (isVoiceCapable → true)', () => {
     const adapter = new SignalAdapter(makeSignalConfig(), new MockSignalPort());
     expect(isVoiceCapable(adapter)).toBe(true);
@@ -29,7 +29,7 @@ describe('SignalAdapter — voice-notes capabilities (Phase 8)', () => {
   });
 });
 
-describe('SignalAdapter — sendVoiceNote (Phase 8)', () => {
+describe('SignalAdapter — sendVoiceNote', () => {
   it('encodes an opus VoicePayload as an audio attachment', async () => {
     const port = new MockSignalPort();
     const adapter = new SignalAdapter(makeSignalConfig(), port);

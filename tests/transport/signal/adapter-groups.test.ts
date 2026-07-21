@@ -1,5 +1,5 @@
 // tests/transport/signal/adapter-groups.test.ts
-// Phase 6 — group metadata extension (SupportsGroups).
+// group metadata extension (SupportsGroups).
 //
 // Before this slice, capabilities.extensions did NOT include 'groups' and the
 // adapter had no getGroupMetadata method. The spec (signal-and-imessage-
@@ -22,7 +22,7 @@ import type { GroupUpdateEvent } from '../../../src/transport/contract/events.ts
 
 const GROUP_ID = 'aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789aBcDeFgHiJkLmNoPqRsTuVwXyZ012345';
 
-describe('SignalAdapter — groups capabilities (Phase 6)', () => {
+describe('SignalAdapter — groups capabilities', () => {
   it('declares the groups extension (isGroupsCapable → true)', () => {
     const adapter = new SignalAdapter(makeSignalConfig(), new MockSignalPort());
     expect(isGroupsCapable(adapter)).toBe(true);
@@ -30,7 +30,7 @@ describe('SignalAdapter — groups capabilities (Phase 6)', () => {
   });
 });
 
-describe('SignalAdapter — getGroupMetadata (Phase 6)', () => {
+describe('SignalAdapter — getGroupMetadata', () => {
   it('delegates to the port and returns GroupMetadata { conversation, title, memberCount }', async () => {
     const port = new MockSignalPort();
     port.nextGroup = {
@@ -80,7 +80,7 @@ describe('SignalAdapter — getGroupMetadata (Phase 6)', () => {
   });
 });
 
-describe('SignalAdapter — group-update events (Phase 6)', () => {
+describe('SignalAdapter — group-update events', () => {
   it('emits a group-update event when an inbound sync envelope carries a groupV2 update', async () => {
     const port = new MockSignalPort();
     const adapter = new SignalAdapter(makeSignalConfig(), port);

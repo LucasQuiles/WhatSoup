@@ -30,11 +30,10 @@ export interface SendSignalArgs {
   /**
    * Attachments as signal-cli data URIs
    * (`data:<MIME>;filename=<NAME>;base64,<DATA>` per the signal-cli man page).
-   * Phase 5.
-   */
+   * */
   readonly attachments?: readonly string[];
   /**
-   * Phase 9 — when set, this send is an EDIT of a prior outbound message.
+   * when set, this send is an EDIT of a prior outbound message.
    * signal-cli's `--edit-timestamp` flag; the value is the target message's
    * epoch-ms timestamp. Mutually exclusive with a fresh send (no
    * editTimestamp = normal send).
@@ -94,12 +93,11 @@ export interface InboundSignal {
    * Attachments carried by type='data'/'sync' envelopes (signal-cli
    * `dataMessage.attachments`). Each entry mirrors the fields signal-cli
    * emits: a locally-stored filename (under `<dataDir>/attachments/`),
-   * the MIME type signal-cli sniffed, and the byte size. Phase 5.
-   */
+   * the MIME type signal-cli sniffed, and the byte size. */
   readonly attachments?: readonly InboundAttachment[];
 
   /**
-   * Phase 6 — payload for envelopes that carry a Signal V2 group update
+   * payload for envelopes that carry a Signal V2 group update
    * (signal-cli `syncMessage.groupV2UpdateDetails` or a `dataMessage` with
    * group-v2 metadata). The adapter routes these to the 'group-update'
    * listener as a GroupUpdateEvent. Undefined for non-group-update envelopes.
@@ -107,7 +105,7 @@ export interface InboundSignal {
   readonly groupUpdate?: InboundGroupUpdate;
 
   /**
-   * Phase 7 — payload for typingMessage envelopes (signal-cli emits these via
+   * payload for typingMessage envelopes (signal-cli emits these via
    * the daemon subscription stream when a peer starts/stops typing). The
    * adapter routes these to the 'presence' listener as a PresenceEvent.
    * Undefined for non-typing envelopes.
@@ -115,7 +113,7 @@ export interface InboundSignal {
   readonly typing?: InboundTyping;
 
   /**
-   * Phase 9 — payload for inbound edit envelopes (signal-cli `dataMessage.edit`
+   * payload for inbound edit envelopes (signal-cli `dataMessage.edit`
    * with `targetSentTimestamp` and the new body). The adapter routes these to
    * the 'edit' listener as an EditEvent. Undefined for non-edit envelopes.
    */
@@ -123,7 +121,7 @@ export interface InboundSignal {
 }
 
 /**
- * Phase 7 — typing indicator payload. signal-cli's typingMessage carries
+ * typing indicator payload. signal-cli's typingMessage carries
  * nothing more than a start/stop flag; the adapter maps composing→'online'
  * and stopped→'offline' for the PresenceEvent taxonomy (Signal does not
  * expose last-seen timestamps; this is the closest signal the protocol
@@ -135,7 +133,7 @@ export interface InboundTyping {
 }
 
 /**
- * Phase 9 — inbound edit payload. signal-cli surfaces an edited message via
+ * inbound edit payload. signal-cli surfaces an edited message via
  * `dataMessage.edit` carrying the original message's timestamp and the new
  * body text. The adapter maps this to an EditEvent upstream.
  */
@@ -147,7 +145,7 @@ export interface InboundEdit {
 }
 
 /**
- * Phase 6 — payload describing a Signal V2 group update. signal-cli surfaces
+ * payload describing a Signal V2 group update. signal-cli surfaces
  * these via sync envelopes when our linked device's group state changes.
  * `kind` maps to the GroupUpdateEvent.kind taxonomy.
  */
@@ -160,7 +158,7 @@ export interface InboundGroupUpdate {
 
 /**
  * One inbound attachment as signal-cli reports it on a `data`/`sync` envelope.
- * Phase 5. The `storedFilename` is relative to signal-cli's data directory
+ * The `storedFilename` is relative to signal-cli's data directory
  * (the adapter resolves it via `config.attachmentsDataDir`); `id` is the
  * AttachmentRef id the adapter exposes upstream (the stored filename).
  */
@@ -301,7 +299,7 @@ export interface SignalPort {
   sendTypingIndicator(args: SendTypingArgs): Promise<void>;
 
   /**
-   * Phase 6 — fetch metadata for a single Signal V2 group. Maps to
+   * fetch metadata for a single Signal V2 group. Maps to
    * signal-cli's `listGroups -d -g <groupId>` JSON-RPC. Returns the group's
    * base64 id, human-readable name, and member UUID/E.164 list. Throws if
    * the group is unknown to this linked-device session.
@@ -317,7 +315,7 @@ export interface SignalPort {
 }
 
 /**
- * Phase 6 — signal-cli's group metadata shape, narrowed to the fields the
+ * signal-cli's group metadata shape, narrowed to the fields the
  * adapter consumes. Returned by `getGroupMetadata`.
  */
 export interface SignalGroupMetadata {

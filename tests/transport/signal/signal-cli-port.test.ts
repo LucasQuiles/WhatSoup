@@ -261,7 +261,7 @@ describe('SignalCliPort — listInboundSince', () => {
     await expect(port.listInboundSince(new Date(0), 1.5)).rejects.toThrow(RangeError);
   });
 
-  it('surfaces typing envelopes as type=typing (Phase 7 presence)', async () => {
+  it('surfaces typing envelopes as type=typing (presence)', async () => {
     const { port, mock } = makePort();
     mock.on('receive', () => [
       { envelope: { sourceUuid: 'u', timestamp: 1001, typingMessage: { action: 'STARTED' } } },

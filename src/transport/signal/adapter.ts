@@ -80,17 +80,17 @@ interface Listeners {
   reaction: Set<(e: ReactionEvent) => void>;
   read: Set<(e: ReadEvent) => void>;
   delete: Set<(e: DeleteEvent) => void>;
-  /** Phase 6 — group V2 metadata/membership/admin updates. */
+  /** group V2 metadata/membership/admin updates. */
   groupUpdate: Set<(e: GroupUpdateEvent) => void>;
   /**
-   * Phase 6 — alias for the public kebab-case event name. The SupportsGroups
+   * alias for the public kebab-case event name. The SupportsGroups
    * contract emits 'group-update'; this key lets the on() body's bracket
    * access resolve. Both keys reference the SAME Set instance.
    */
   'group-update': Set<(e: GroupUpdateEvent) => void>;
-  /** Phase 7 — peer presence (typing → online, stopped → offline). */
+  /** peer presence (typing → online, stopped → offline). */
   presence: Set<(e: PresenceEvent) => void>;
-  /** Phase 9 — edited inbound messages (signal-cli dataMessage.edit). */
+  /** edited inbound messages (signal-cli dataMessage.edit). */
   edit: Set<(e: EditEvent) => void>;
 }
 
@@ -223,14 +223,14 @@ export class SignalAdapter
       reaction: new Set<(e: ReactionEvent) => void>(),
       read: new Set<(e: ReadEvent) => void>(),
       delete: new Set<(e: DeleteEvent) => void>(),
-      // Phase 6 — public event name is 'group-update' (kebab) per the
+      // public event name is 'group-update' (kebab) per the
       // SupportsGroups contract, but field name is camelCase. Both keys
       // reference the SAME Set so register and emit share a store.
       groupUpdate: groupUpdateSet,
       'group-update': groupUpdateSet as unknown as Set<(e: GroupUpdateEvent) => void>,
-      // Phase 7 — peer presence (typing → online, stopped → offline).
+      // peer presence (typing → online, stopped → offline).
       presence: new Set<(e: PresenceEvent) => void>(),
-      // Phase 9 — edited inbound messages.
+      // edited inbound messages.
       edit: new Set<(e: EditEvent) => void>(),
     };
   })();
@@ -324,7 +324,7 @@ export class SignalAdapter
       auth: 'qr',                     // signal-cli link emits a QR the operator scans
       readReceipts: 'message',        // per-message read receipts
       reactions: 'single',            // one reaction per user per message
-      // Phase 5: spec §3a — Signal documented attachment caps. MIME allowlist
+      // spec §3a — Signal documented attachment caps. MIME allowlist
       // is the union of formats the Signal Android/iOS clients render natively.
       media: {
         maxBytes: 100 * 1024 * 1024,
@@ -477,7 +477,7 @@ export class SignalAdapter
   }
 
   /**
-   * Phase 5 — send a media attachment. Mirrors TransportAdapter.sendMedia's
+   * send a media attachment. Mirrors TransportAdapter.sendMedia's
    * contract but takes a ConversationRef + OutboundMedia, validates against
    * the spec's MIME allowlist + size cap BEFORE the RPC, then encodes the
    * payload as a signal-cli data-URI attachment
@@ -564,7 +564,7 @@ export class SignalAdapter
   }
 
   /**
-   * Phase 5 — fetch an inbound attachment's bytes by AttachmentRef. signal-cli
+   * fetch an inbound attachment's bytes by AttachmentRef. signal-cli
    * downloads inbound attachments to its data dir during `receive` and reports
    * each one's absolute path as `AttachmentRef.id`. We read the file from disk
    * and return it as MediaBytes (the bytes + sniffed MIME).
@@ -616,10 +616,10 @@ export class SignalAdapter
     }
   }
 
-  // ── SupportsVoiceNotes (Phase 8) ─────────────────────────────────────────
+  // ── SupportsVoiceNotes ─────────────────────────────────────────
 
   /**
-   * Phase 8 — send a voice note. Signal voice notes are opus-encoded audio
+   * send a voice note. Signal voice notes are opus-encoded audio
    * attachments played in-app as push-to-talk (ptt). signal-cli's `send` RPC
    * accepts any allowlisted MIME as an attachment, so we encode the audio
    * payload as a data URI and let signal-cli handle the opus wrap.
@@ -692,10 +692,10 @@ export class SignalAdapter
     return { channel: this.channelId, conversation: target.id, id: String(timestamp) };
   }
 
-  // ── SupportsEdit (Phase 9) ───────────────────────────────────────────────
+  // ── SupportsEdit ───────────────────────────────────────────────
 
   /**
-   * Phase 9 — edit a previously-sent outbound message. signal-cli's `send` RPC
+   * edit a previously-sent outbound message. signal-cli's `send` RPC
    * accepts an `editTimestamp` param that, when set, treats the call as an
    * edit of the prior message identified by that epoch-ms timestamp. The new
    * body fully replaces the original.
@@ -749,10 +749,10 @@ export class SignalAdapter
     }
   }
 
-  // ── SupportsGroups (Phase 6) ─────────────────────────────────────────────
+  // ── SupportsGroups ─────────────────────────────────────────────
 
   /**
-   * Phase 6 — fetch metadata for a Signal V2 group. Delegates to
+   * fetch metadata for a Signal V2 group. Delegates to
    * SignalPort.getGroupMetadata (signal-cli `listGroups -g <groupId>` RPC).
    * Validates channel + group-id format BEFORE the RPC. Maps the port-level
    * shape (SignalGroupMetadata) to the contract GroupMetadata.
@@ -1099,7 +1099,7 @@ export class SignalAdapter
     switch (record.type) {
       case 'data':
       case 'sync':
-        // Phase 6: a sync envelope carrying a groupV2 update is a group-update
+        // a sync envelope carrying a groupV2 update is a group-update
         // event, not a chat message — route it before the message-emit check.
         if (record.groupUpdate) {
           this.emitGroupUpdateEvent(record, record.groupUpdate);
@@ -1108,8 +1108,8 @@ export class SignalAdapter
           // Pure group-update envelopes (body===null && no attachments) are
           // already filtered out by the next guard.
         }
-        // Phase 5: a media-only message has body===null but attachments!==empty.
-        // Emit when there is text OR at least one attachment. (Pre-Phase 5 this
+        // a media-only message has body===null but attachments!==empty.
+        // Emit when there is text OR at least one attachment. (Pre- this
         // was a body-only check; that dropped silent media messages.)
         if (record.body !== null || (record.attachments !== undefined && record.attachments.length > 0)) {
           this.safeEmit(this.listeners.message, this.buildInboundMessage(record));
@@ -1133,7 +1133,7 @@ export class SignalAdapter
         }
         break;
       case 'typing':
-        // Phase 7 — typingMessage envelopes surface as PresenceEvents.
+        // typingMessage envelopes surface as PresenceEvents.
         // signal-cli emits these via the daemon subscription stream when a
         // peer starts/stops composing. composing → 'online', stopped → 'offline'.
         if (record.typing) {
@@ -1141,7 +1141,7 @@ export class SignalAdapter
         }
         break;
       case 'edit':
-        // Phase 9 — edited inbound message (signal-cli dataMessage.edit).
+        // edited inbound message (signal-cli dataMessage.edit).
         if (record.edit) {
           this.emitEditEvent(record, record.edit);
         }
@@ -1219,7 +1219,7 @@ export class SignalAdapter
   }
 
   /**
-   * Phase 6 — emit a GroupUpdateEvent for an inbound sync envelope carrying a
+   * emit a GroupUpdateEvent for an inbound sync envelope carrying a
    * Signal V2 group update (name/description/avatar change, membership change,
    * or admin role change). The conversation is the group id (always present on
    * a group envelope); `kind` and `detail` come from the port-level payload.
@@ -1241,7 +1241,7 @@ export class SignalAdapter
   }
 
   /**
-   * Phase 7 — emit a PresenceEvent for an inbound typingMessage envelope.
+   * emit a PresenceEvent for an inbound typingMessage envelope.
    * Signal does not expose last-seen timestamps (privacy by design); the
    * closest presence signal the protocol offers is typing start/stop, which
    * we map to state='online'/'offline'. Conversation is the peer (1:1) or
@@ -1262,7 +1262,7 @@ export class SignalAdapter
   }
 
   /**
-   * Phase 9 — emit an EditEvent for an inbound edit envelope. The target is
+   * emit an EditEvent for an inbound edit envelope. The target is
    * the edited message (id = targetTimestamp as string); the conversation is
    * the peer (1:1) or the group id. signal-cli surfaces edits via
    * `dataMessage.edit` with the original message's timestamp and the new body.
@@ -1308,7 +1308,7 @@ export class SignalAdapter
       },
       fromMe: record.fromMe,
       text: record.body,
-      // Phase 5 — surface inbound attachments as AttachmentRef[]. The id is
+      // surface inbound attachments as AttachmentRef[]. The id is
       // the absolute path signal-cli wrote the file to (consumed by
       // fetchAttachment below). kind is mapped from the sniffed MIME.
       attachments: (record.attachments ?? []).map((a) => ({
@@ -1482,7 +1482,7 @@ function mimetypeToExtension(mime: string): string {
 }
 
 /**
- * Phase 5 — map a sniffed MIME type to the AttachmentRef `kind` taxonomy.
+ * map a sniffed MIME type to the AttachmentRef `kind` taxonomy.
  * Used by the inbound path when surfacing signal-cli's downloaded attachments
  * as AttachmentRef[] on InboundMessage.
  */

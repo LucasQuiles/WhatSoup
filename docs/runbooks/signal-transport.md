@@ -94,18 +94,18 @@ the only external process. Inbound envelopes arrive via the daemon's
 | Reactions — outbound (react/unreact) | ✅ |
 | Reactions — inbound (peer reacted to a message) | ✅ routed to `on('reaction')` |
 | Typing indicators — outbound (composing/stopped) | ✅ |
-| Typing indicators — inbound | ✅ Phase 7 — typingMessage envelopes routed to `on('presence')`; composing → state='online', STOPPED → state='offline'. (Signal does not expose last-seen timestamps by design; typing is the closest presence signal.) |
+| Typing indicators — inbound | ✅ typingMessage envelopes routed to `on('presence')`; composing → state='online', STOPPED → state='offline'. (Signal does not expose last-seen timestamps by design; typing is the closest presence signal.) |
 | Read receipts — outbound (markRead) | ✅ |
 | Read receipts — inbound (peer marked our message read) | ✅ routed to `on('read')`; one `ReadEvent` per timestamp |
 | Remote delete — outbound (`deleteMessage(scope:'everyone')`) | ✅ |
 | Remote delete — inbound (peer deleted their message) | ✅ routed to `on('delete')`; always `scope:'everyone'` |
 | Delivery receipts — inbound | ❌ dropped (durability tracks delivery via sync echoes) |
 | Sync echoes — inbound (our own outbound confirmed) | ✅ routed to `on('message')` with `fromMe:true` |
-| Media attachments | ✅ Phase 5 — `sendMedia` + `fetchAttachment` wired; 100 MB cap, MIME allowlist (image/jpeg, image/png, image/gif, image/webp, video/mp4, video/webm, audio/aac, audio/mp4, audio/mpeg, application/pdf, text/plain); signal-cli `attachments` data-URI array |
-| Group metadata (`getGroupMetadata`) | ✅ Phase 6 — signal-cli `listGroups -g <groupId>` RPC; mapped to contract `GroupMetadata { conversation, title, memberCount }` |
-| Group V2 updates (`on('group-update')`) | ✅ Phase 6 — sync envelopes carrying `groupV2UpdateDetails` routed to `GroupUpdateEvent { conversation, kind, at }`; kind taxonomy: metadata/membership/admin |
-| Voice notes (`sendVoiceNote`) | ✅ Phase 8 — audio/* payloads encoded as signal-cli attachment data URIs; voice-notes extension declared; rejects non-audio MIME + payloads over media size cap |
-| Message edit (`editText` + `on('edit')`) | ✅ Phase 9 — outbound edits via signal-cli `editTimestamp` param; inbound edits (signal-cli `dataMessage.edit`) routed to `EditEvent { target, newText, at }` |
+| Media attachments | ✅ `sendMedia` + `fetchAttachment` wired; 100 MB cap, MIME allowlist (image/jpeg, image/png, image/gif, image/webp, video/mp4, video/webm, audio/aac, audio/mp4, audio/mpeg, application/pdf, text/plain); signal-cli `attachments` data-URI array |
+| Group metadata (`getGroupMetadata`) | ✅ signal-cli `listGroups -g <groupId>` RPC; mapped to contract `GroupMetadata { conversation, title, memberCount }` |
+| Group V2 updates (`on('group-update')`) | ✅ sync envelopes carrying `groupV2UpdateDetails` routed to `GroupUpdateEvent { conversation, kind, at }`; kind taxonomy: metadata/membership/admin |
+| Voice notes (`sendVoiceNote`) | ✅ audio/* payloads encoded as signal-cli attachment data URIs; voice-notes extension declared; rejects non-audio MIME + payloads over media size cap |
+| Message edit (`editText` + `on('edit')`) | ✅ outbound edits via signal-cli `editTimestamp` param; inbound edits (signal-cli `dataMessage.edit`) routed to `EditEvent { target, newText, at }` |
 | Polls | ❌ rejected (WhatsApp-only feature) |
 
 ### Capability degradation (unsupported-operation handling)
@@ -131,13 +131,13 @@ Tools currently wrapped:
 |---|---|---|
 | `send_message`, `reply_message`, `react_message`, `edit_message`, `delete_message`, `send_location`, `send_contact`, `pin_message` | `sendRaw` | all use the WhatsApp-protocol `sendRaw` envelope shape |
 | `send_poll` | `sendPollMessage` | WhatsApp-only poll contract |
-| `send_voice_reply` | (none) | Phase 8: routes through `sendVoiceNote`; audio/opus payloads encoded as ptt-style attachments |
+| `send_voice_reply` | (none) | routes through `sendVoiceNote`; audio/opus payloads encoded as ptt-style attachments |
 
 Operations that self-degrade without surfacing a tool error:
 
 | Tool | Behaviour on Signal |
 |---|---|
-| `download_media`, `transcribe_audio` | Phase 5: `download_media` now resolves attachments via `adapter.fetchAttachment(ref)` (reads from `attachmentsDataDir`); `transcribe_audio` still depends on application-layer transcription (no Signal-native transcription) |
+| `download_media`, `transcribe_audio` | `download_media` now resolves attachments via `adapter.fetchAttachment(ref)` (reads from `attachmentsDataDir`); `transcribe_audio` still depends on application-layer transcription (no Signal-native transcription) |
 | `mark_conversation_read` | the `markRead` adapter method IS supported on Signal; the `getSocket()` null-check path does not fire |
 
 ### Inbound envelope routing
@@ -245,9 +245,65 @@ dashboards (counters + exhausted state + lifecycle events) is closed.
 
 ## References
 
-- Spec: `~/LAB/oc-re/specs/2026-07-20-signal-and-imessage-transports-spec.md`
+### Local source
+
+- Spec: `~/LAB/oc-re/specs/2026-07-20-signal-and-imessage-transports-spec.md` (§3a
+  is the authoritative Signal capability mandate; §3b is the iMessage counterpart)
 - Port interface: `src/transport/signal/port.ts`
 - Port impl: `src/transport/signal/signal-cli-port.ts`
 - Adapter: `src/transport/signal/adapter.ts`
 - Bridge: `src/transport/signal/connection-bridge.ts`
 - Validator: `src/core/agent-config-validator.ts` (`validateSignalConfig`)
+
+### Parallel example (non-Baileys adapter pattern)
+
+- `src/transport/twilio/adapter.ts:136` — `TwilioSmsAdapter implements
+  TransportAdapter, VoiceCapableTransport` with `capabilities.extensions: new Set()`
+  (SMS carries no extensions); referenced as the reference shape for capabilities
+  declaration + `mapPortError` pattern used here.
+
+### Official documentation consulted (live-fetched, applied mappings)
+
+Sources fetched verbatim from the upstream maintainer (AsamK) and mapped
+directly to adapter source lines:
+
+1. **signal-cli(1) man page** — `https://github.com/AsamK/signal-cli/blob/master/man/signal-cli.1.adoc`
+   (raw: `https://raw.githubusercontent.com/AsamK/signal-cli/master/man/signal-cli.1.adoc`,
+   content-sha256 `6cc7496bca0243765ec262ad6c12122a28fdbe9e0725e903ee32b6f2f5ee37b1`, 36825 bytes)
+2. **signal-cli-jsonrpc(5) man page** — `https://github.com/AsamK/signal-cli/blob/master/man/signal-cli-jsonrpc.5.adoc`
+   (raw: `https://raw.githubusercontent.com/AsamK/signal-cli/master/man/signal-cli-jsonrpc.5.adoc`,
+   content-sha256 `4f019164b87d6a4d742dda10ceb5348970581460eba36b31a88f958386e13191`)
+
+| Phase | Doc field (verbatim from upstream) | Applied at |
+|---|---|---|
+| 1 (reactions) | man §sendReaction: `-e emoji -a target-author -t target-timestamp -r remove` | `port.ts:217` `ReactSignalArgs`; `adapter.ts:797` `react()` |
+| 1 (read receipts) | man §sendReceipt: `-t target-timestamp --type read\|viewed` | `port.ts:231` `SendReadReceiptArgs`; `adapter.ts:865` `markRead()` |
+| 1 (delete) | man §remoteDelete: `-t target-timestamp` | `adapter.ts:897` `deleteMessage(scope:'everyone')` |
+| 5 (media) | man §send `--attachment`: "Data URI encoded attachments must follow RFC 2397 ... `data:<MIME-TYPE>;filename=<FILENAME>;base64,<BASE64 ENCODED DATA>`" | `port.ts:31-35` `SendSignalArgs.attachments`; `adapter.ts:545` `data:${mime};filename=${filename};base64,...` |
+| 6 (groups) | man §listGroups: `-d detailed -g group-id`; jsonrpc(5) `listGroups` returns `{id,name,members,admins,groupInviteLink}` | `signal-cli-port.ts:515` `getGroupMetadata()`; member normalization at `signal-cli-port.ts:534-537` accepts both bare string and `{number,uuid}` shapes |
+| 6 (group updates) | jsonrpc(5) envelope shape `syncMessage` with `groupV2UpdateDetails` | `port.ts:103` doc; `adapter.ts` `on('group-update')` overload + `emitGroupUpdateEvent` |
+| 7 (presence) | man §sendTyping: "Indicator will be shown for 15 seconds unless a typing STOP message is sent first"; man §updateConfiguration: `--typing-indicators {true,false}` | `port.ts:110-126` `InboundTyping` + `typingMessage` doc; `signal-cli-port.ts:354-359` `normalizeEnvelope` typing branch; `adapter.ts` `emitPresenceEvent` (composing→online, STOPPED→offline) |
+| 8 (voice-notes) | man §send `--attachment` (data URI accepts any MIME) — supersedes the spec §3a deferral that claimed "Signal voice is opus-only" | `adapter.ts:630` `sendVoiceNote()`; data-URI encoding at `adapter.ts:680-681` |
+| 9 (edit) | man §send `--edit-timestamp`: "Specify the timestamp of a previous message with the recipient or group to send an edited message" — supersedes the spec §3a deferral that claimed "edit is beta in upstream" | `port.ts:38-42` `SendSignalArgs.editTimestamp`; `signal-cli-port.ts:438-442` param forwarding; `adapter.ts:703` `editText()`; inbound via `dataMessage.edit` at `signal-cli-port.ts:178` |
+
+### Parallel-adapter pattern (other examples)
+
+- `src/transport/twilio/adapter.ts` — Twilio SMS adapter, no extensions
+  (`capabilities.extensions: new Set()` at line 206). Used as the non-Baileys
+  reference for the capabilities + `mapPortError` pattern this adapter follows.
+- `src/transport/baileys/adapter.ts` — Baileys (WhatsApp) adapter, the richest
+  extension surface in the repo. Used as the reference for `SupportsMedia`,
+  `SupportsVoiceNotes`, `SupportsReactions`, `SupportsReadReceipts`,
+  `SupportsTyping`, `SupportsDelete` implementations against a multi-feature
+  transport.
+
+### Spec → implementation delta
+
+The spec §3a line 83 defers `edit` and `voice-notes` ("Signal voice is opus-only;
+edit is beta in upstream — both marked future"). This adapter supersedes both
+deferrals because the consulted signal-cli man page shows both are first-class
+in the JSON-RPC interface (`--edit-timestamp` is documented as a normal `send`
+param; `--attachment` accepts any MIME including `audio/*`). If the operator
+prefers to honor the spec's deferral literally, the two methods can be no-op'd
+to throw `UnsupportedTransportOperationError` without affecting the other 7
+phases; their tests would need GREEN→RED expectations flipped.
