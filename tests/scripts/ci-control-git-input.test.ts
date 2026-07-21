@@ -32,11 +32,19 @@ import {
   MAX_EXACT_AGGREGATE_COMMIT_METADATA_BYTES,
   MAX_EXACT_SINGLE_COMMIT_METADATA_BYTES,
   MAX_EXACT_SINGLE_BLOB_BYTES,
+  MAX_EXACT_AGGREGATE_TREE_BYTES,
+  MAX_EXACT_SINGLE_TREE_BYTES,
+  MAX_EXACT_TREE_ENTRY_COUNT,
+  MAX_EXACT_TREE_ENTRY_PATH_BYTES,
+  MAX_EXACT_TREE_ENTRY_PATH_COUNT,
+  MAX_EXACT_TREE_ENTRY_PATH_SEGMENT_COUNT,
+  type ExactTreeEntrySetV1,
   readExactChangeFacts,
   readExactAddedLines,
   readExactBlobs,
   readExactCommitRange,
   readExactCommitMetadata,
+  readExactTreeEntries,
 } from '../../scripts/lib/ci-control/git-input.ts';
 
 const temporaryRoots: string[] = [];
@@ -133,6 +141,28 @@ function commitOid(bytes: Uint8Array): string {
     .update(`commit ${bytes.byteLength}\0`)
     .update(bytes)
     .digest('hex');
+}
+
+function treeOid(bytes: Uint8Array): string {
+  return createHash('sha1')
+    .update(`tree ${bytes.byteLength}\0`)
+    .update(bytes)
+    .digest('hex');
+}
+
+function rawTreeBody(entries: readonly {
+  mode: '40000' | '100644' | '100755' | '120000' | '160000' | string;
+  name: string;
+  oid: string;
+}[]): Buffer {
+  return Buffer.concat(entries.flatMap(({ mode, name, oid }) => [
+    Buffer.from(`${mode} ${name}\0`, 'utf8'),
+    Buffer.from(oid, 'hex'),
+  ]));
+}
+
+function sortUtf8(values: readonly string[]): string[] {
+  return [...values].sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right)));
 }
 
 function rawCommitBody(options: {
@@ -348,6 +378,705 @@ function emptyRangeResponses(oid: string): Record<string, GitShimResponse> {
     [responseKey(['rev-list', '--parents', `${oid}..${oid}`, '--'])]: { stdout: '' },
   };
 }
+
+function treeLookupResponses(options: {
+  candidateOid: string;
+  commitBody: Buffer;
+  trees: ReadonlyMap<string, Buffer>;
+  objectTypes?: ReadonlyMap<string, string>;
+  objectFormat?: string;
+}): Record<string, GitShimResponse> {
+  const responses = commitMetadataResponses([
+    { oid: options.candidateOid, body: options.commitBody },
+  ], options.objectFormat ?? 'sha1\n');
+  for (const [oid, body] of options.trees) {
+    responses[responseKey(['cat-file', '-t', '--', oid])] = { stdout: 'tree\n' };
+    responses[responseKey(['cat-file', '-s', '--', oid])] = { stdout: `${body.byteLength}\n` };
+    responses[responseKey(['cat-file', 'tree', '--', oid])] = {
+      stdoutBase64: body.toString('base64'),
+    };
+  }
+  for (const [oid, type] of options.objectTypes ?? []) {
+    responses[responseKey(['cat-file', '-t', '--', oid])] = { stdout: `${type}\n` };
+  }
+  return responses;
+}
+
+type GitInputModule = typeof import('../../scripts/lib/ci-control/git-input.ts');
+
+async function withMockedGitInput<T>(
+  execute: (file: string, args: string[]) => Buffer,
+  run: (module: GitInputModule) => T | Promise<T>,
+): Promise<T> {
+  vi.resetModules();
+  vi.doMock('node:child_process', () => ({ execFileSync: execute }));
+  try {
+    return await run(await import('../../scripts/lib/ci-control/git-input.ts'));
+  } finally {
+    vi.doUnmock('node:child_process');
+    vi.resetModules();
+  }
+}
+
+function paddedTreeBody(byteLength: number, childOid: string | null): Buffer {
+  const child = childOid === null
+    ? Buffer.alloc(0)
+    : Buffer.concat([Buffer.from('40000 a\0', 'utf8'), Buffer.from(childOid, 'hex')]);
+  const prefix = Buffer.from('100644 ', 'utf8');
+  const suffix = Buffer.concat([Buffer.from([0]), Buffer.from('1'.repeat(40), 'hex')]);
+  const nameBytes = byteLength - child.byteLength - prefix.byteLength - suffix.byteLength;
+  if (nameBytes < 1) throw new Error('synthetic tree byte length is too small');
+  return Buffer.concat([child, prefix, Buffer.alloc(nameBytes, 0x7a), suffix], byteLength);
+}
+
+function treeChain(byteLengths: readonly number[]): {
+  rootOid: string;
+  path: string;
+  trees: ReadonlyMap<string, Buffer>;
+} {
+  const reverse: [string, Buffer][] = [];
+  let childOid: string | null = null;
+  for (const byteLength of [...byteLengths].reverse()) {
+    const body = paddedTreeBody(byteLength, childOid);
+    childOid = treeOid(body);
+    reverse.push([childOid, body]);
+  }
+  return {
+    rootOid: childOid!,
+    path: Array.from({ length: byteLengths.length - 1 }, () => 'a').join('/'),
+    trees: new Map(reverse),
+  };
+}
+
+function repeatedRawTreeEntries(count: number, trailingMalformed = false): Buffer {
+  const entryBytes = 33;
+  const body = Buffer.alloc(count * entryBytes + (trailingMalformed ? 1 : 0));
+  const oid = Buffer.from('2'.repeat(40), 'hex');
+  for (let index = 0; index < count; index += 1) {
+    const offset = index * entryBytes;
+    body.write('100644 ', offset, 'ascii');
+    body.write(index.toString(16).padStart(5, '0'), offset + 7, 'ascii');
+    body[offset + 12] = 0;
+    oid.copy(body, offset + 13);
+  }
+  if (trailingMalformed) body[body.byteLength - 1] = 0x78;
+  return body;
+}
+
+describe('exact candidate tree entries', () => {
+  it('reads the explicit candidate with all supported modes, absence, Unicode, and literal glob paths', () => {
+    const { root, baseOid } = fixture();
+    write(root, 'regular.txt', 'candidate regular\n');
+    write(root, 'executable.sh', '#!/bin/sh\nexit 0\n');
+    chmodSync(join(root, 'executable.sh'), 0o755);
+    write(root, 'nested/leaf.txt', 'nested leaf\n');
+    write(root, 'docs/café.txt', 'unicode path\n');
+    write(root, 'literal[*?].txt', 'literal glob path\n');
+    symlinkSync('regular.txt', join(root, 'regular-link'));
+    git(root, ['add', '-A']);
+    git(root, ['update-index', '--add', '--cacheinfo', `160000,${baseOid},vendor/component`]);
+    git(root, ['commit', '--quiet', '-m', 'tree candidate']);
+    const candidateOid = git(root, ['rev-parse', 'HEAD']);
+    const candidateTreeOid = git(root, ['rev-parse', `${candidateOid}^{tree}`]);
+
+    write(root, 'regular.txt', 'later ambient head\n');
+    write(root, 'ambient-only.txt', 'not in candidate\n');
+    commit(root, 'later ambient head');
+    write(root, 'index-only.txt', 'index only\n');
+    git(root, ['add', 'index-only.txt']);
+    write(root, 'worktree-only.txt', 'worktree only\n');
+
+    const paths = sortUtf8([
+      'README.md',
+      'docs/café.txt',
+      'executable.sh',
+      'literal[*?].txt',
+      'missing.txt',
+      'nested',
+      'nested/leaf.txt',
+      'regular-link',
+      'regular-link/child',
+      'regular.txt',
+      'regular.txt/child',
+      'vendor/component',
+      'vendor/component/child',
+    ]);
+    const result = readExactTreeEntries(root, { candidateOid, paths });
+
+    expect(result.candidateOid).toBe(candidateOid);
+    expect(result.treeOid).toBe(candidateTreeOid);
+    expect(result.entries.map(({ path }) => path)).toEqual(paths);
+    expect(result.entries).toEqual([
+      {
+        path: 'README.md', presence: 'present', mode: '100644', objectType: 'blob',
+        objectOid: git(root, ['rev-parse', `${candidateOid}:README.md`]),
+      },
+      {
+        path: 'docs/café.txt', presence: 'present', mode: '100644', objectType: 'blob',
+        objectOid: git(root, ['rev-parse', `${candidateOid}:docs/café.txt`]),
+      },
+      {
+        path: 'executable.sh', presence: 'present', mode: '100755', objectType: 'executable',
+        objectOid: git(root, ['rev-parse', `${candidateOid}:executable.sh`]),
+      },
+      {
+        path: 'literal[*?].txt', presence: 'present', mode: '100644', objectType: 'blob',
+        objectOid: git(root, ['rev-parse', `${candidateOid}:literal[*?].txt`]),
+      },
+      { path: 'missing.txt', presence: 'absent', mode: null, objectType: null, objectOid: null },
+      {
+        path: 'nested', presence: 'present', mode: '040000', objectType: 'tree',
+        objectOid: git(root, ['rev-parse', `${candidateOid}:nested`]),
+      },
+      {
+        path: 'nested/leaf.txt', presence: 'present', mode: '100644', objectType: 'blob',
+        objectOid: git(root, ['rev-parse', `${candidateOid}:nested/leaf.txt`]),
+      },
+      {
+        path: 'regular-link', presence: 'present', mode: '120000', objectType: 'symlink',
+        objectOid: git(root, ['rev-parse', `${candidateOid}:regular-link`]),
+      },
+      { path: 'regular-link/child', presence: 'absent', mode: null, objectType: null, objectOid: null },
+      {
+        path: 'regular.txt', presence: 'present', mode: '100644', objectType: 'blob',
+        objectOid: git(root, ['rev-parse', `${candidateOid}:regular.txt`]),
+      },
+      { path: 'regular.txt/child', presence: 'absent', mode: null, objectType: null, objectOid: null },
+      {
+        path: 'vendor/component', presence: 'present', mode: '160000', objectType: 'gitlink',
+        objectOid: baseOid,
+      },
+      { path: 'vendor/component/child', presence: 'absent', mode: null, objectType: null, objectOid: null },
+    ]);
+    expect(result.entries.map(({ path }) => path)).not.toContain('ambient-only.txt');
+  });
+
+  it('allows an empty path set while still proving the exact commit and root tree', () => {
+    const { root, baseOid } = fixture();
+    const result = readExactTreeEntries(root, { candidateOid: baseOid, paths: [] });
+    expect(result).toEqual({
+      candidateOid: baseOid,
+      treeOid: git(root, ['rev-parse', `${baseOid}^{tree}`]),
+      entries: [],
+    });
+  });
+
+  it('rejects hostile input and path arrays before accessors or Git', () => {
+    const oid = 'a'.repeat(40);
+    let getterCalls = 0;
+    const accessorPaths: string[] = [];
+    Object.defineProperty(accessorPaths, '0', {
+      enumerable: true,
+      get: () => {
+        getterCalls += 1;
+        return 'safe.txt';
+      },
+    });
+    Object.defineProperty(accessorPaths, 'length', { value: 1 });
+    const nonEnumerable = ['safe.txt'];
+    Object.defineProperty(nonEnumerable, '0', { value: 'safe.txt', enumerable: false });
+    const extraString = ['safe.txt'];
+    Object.defineProperty(extraString, 'extra', { value: true, enumerable: true });
+    const extraSymbol = ['safe.txt'];
+    Object.defineProperty(extraSymbol, Symbol('extra'), { value: true, enumerable: true });
+    const customPrototype = ['safe.txt'];
+    Object.setPrototypeOf(customPrototype, Object.create(Array.prototype));
+    const sparse = new Array<string>(1);
+    const revoked = Proxy.revocable(['safe.txt'], {});
+    revoked.revoke();
+    const hostilePaths: unknown[] = [
+      null, {}, sparse, accessorPaths, nonEnumerable, extraString, extraSymbol,
+      customPrototype, new Proxy(['safe.txt'], {}), revoked.proxy,
+    ];
+    for (const paths of hostilePaths) {
+      expectCode(() => readExactTreeEntries('/not-a-repository', {
+        candidateOid: oid,
+        paths: paths as readonly string[],
+      }), 'ci.input.tree-entry-malformed');
+    }
+
+    const accessorInput: Record<string, unknown> = { paths: ['safe.txt'] };
+    Object.defineProperty(accessorInput, 'candidateOid', {
+      enumerable: true,
+      get: () => {
+        getterCalls += 1;
+        return oid;
+      },
+    });
+    const hostileInputs: unknown[] = [
+      null, [], {}, { candidateOid: oid, paths: [], extra: true },
+      Object.create({ candidateOid: oid, paths: [] }),
+      new Proxy({ candidateOid: oid, paths: [] }, {}), accessorInput,
+    ];
+    for (const input of hostileInputs) {
+      expectCode(() => readExactTreeEntries('/not-a-repository', input as never),
+        'ci.input.tree-entry-malformed');
+    }
+    expect(getterCalls).toBe(0);
+  });
+
+  it('validates canonical sorted UTF-8 paths and every static path budget before Git', () => {
+    const oid = 'a'.repeat(40);
+    const malformedPaths: readonly string[][] = [
+      [''], ['/absolute'], ['back\\slash'], ['control\npath'], ['double//segment'],
+      ['./dot'], ['parent/../escape'], ['trailing/'], ['\ud800'], ['z.txt', 'a.txt'],
+      ['same.txt', 'same.txt'],
+    ];
+    for (const paths of malformedPaths) {
+      expectCode(() => readExactTreeEntries('/not-a-repository', { candidateOid: oid, paths }),
+        'ci.input.tree-entry-malformed');
+    }
+
+    expect(MAX_EXACT_TREE_ENTRY_PATH_COUNT).toBe(64);
+    expect(MAX_EXACT_TREE_ENTRY_PATH_BYTES).toBe(1_024);
+    expect(MAX_EXACT_TREE_ENTRY_PATH_SEGMENT_COUNT).toBe(1_023);
+    expect(MAX_EXACT_SINGLE_TREE_BYTES).toBe(4 * 1_024 * 1_024);
+    expect(MAX_EXACT_AGGREGATE_TREE_BYTES).toBe(16 * 1_024 * 1_024);
+    expect(MAX_EXACT_TREE_ENTRY_COUNT).toBe(50_000);
+
+    const exactCountAndBytes = Array.from({ length: MAX_EXACT_TREE_ENTRY_PATH_COUNT },
+      (_, index) => `${index.toString(16).padStart(2, '0')}${'a'.repeat(MAX_EXACT_TREE_ENTRY_PATH_BYTES - 2)}`);
+    expect(exactCountAndBytes.reduce((total, path) => total + Buffer.byteLength(path), 0))
+      .toBe(MAX_EXACT_TREE_ENTRY_PATH_COUNT * MAX_EXACT_TREE_ENTRY_PATH_BYTES);
+    expectCode(() => readExactTreeEntries('/not-a-repository', {
+      candidateOid: oid,
+      paths: exactCountAndBytes,
+    }), 'ci.input.tree-entry-unavailable');
+    expectCode(() => readExactTreeEntries('/not-a-repository', {
+      candidateOid: oid,
+      paths: [...exactCountAndBytes, `${'z'.repeat(MAX_EXACT_TREE_ENTRY_PATH_BYTES)}`],
+    }), 'ci.input.tree-entry-budget');
+    expectCode(() => readExactTreeEntries('/not-a-repository', {
+      candidateOid: oid,
+      paths: ['a'.repeat(MAX_EXACT_TREE_ENTRY_PATH_BYTES + 1)],
+    }), 'ci.input.tree-entry-budget');
+
+    const exactSegments = [
+      Array.from({ length: 512 }, () => 'a').join('/'),
+      Array.from({ length: 511 }, () => 'b').join('/'),
+    ];
+    expectCode(() => readExactTreeEntries('/not-a-repository', {
+      candidateOid: oid,
+      paths: exactSegments,
+    }), 'ci.input.tree-entry-unavailable');
+    expectCode(() => readExactTreeEntries('/not-a-repository', {
+      candidateOid: oid,
+      paths: [exactSegments[0]!, `${exactSegments[1]!}/b`],
+    }), 'ci.input.tree-entry-budget');
+  });
+
+  it('fails closed for malformed, duplicate, unavailable, and type-mismatched tree evidence', () => {
+    const leafOid = blobOid(Buffer.from('leaf\n'));
+    const malformedBodies = [
+      Buffer.from('100644 missing-nul', 'utf8'),
+      rawTreeBody([{ mode: '100600', name: 'leaf.txt', oid: leafOid }]),
+      rawTreeBody([
+        { mode: '100644', name: 'leaf.txt', oid: leafOid },
+        { mode: '100644', name: 'leaf.txt', oid: leafOid },
+      ]),
+      Buffer.concat([Buffer.from('100644 leaf.txt\0'), Buffer.alloc(19)]),
+      rawTreeBody([{ mode: '100644', name: 'leaf.txt', oid: '0'.repeat(40) }]),
+    ];
+    for (const rootBody of malformedBodies) {
+      const rootOid = treeOid(rootBody);
+      const commitBody = rawCommitBody({ treeOid: rootOid });
+      const candidateOid = commitOid(commitBody);
+      expectCode(() => withGitShim(treeLookupResponses({
+        candidateOid,
+        commitBody,
+        trees: new Map([[rootOid, rootBody]]),
+      }), (cwd) => readExactTreeEntries(cwd, { candidateOid, paths: ['leaf.txt'] })),
+      'ci.input.tree-entry-malformed');
+    }
+
+    const childTreeBody = rawTreeBody([]);
+    const childTreeOid = treeOid(childTreeBody);
+    const rootBody = rawTreeBody([{ mode: '100644', name: 'leaf.txt', oid: childTreeOid }]);
+    const rootOid = treeOid(rootBody);
+    const commitBody = rawCommitBody({ treeOid: rootOid });
+    const candidateOid = commitOid(commitBody);
+    expectCode(() => withGitShim(treeLookupResponses({
+      candidateOid,
+      commitBody,
+      trees: new Map([[rootOid, rootBody], [childTreeOid, childTreeBody]]),
+    }), (cwd) => readExactTreeEntries(cwd, { candidateOid, paths: ['leaf.txt'] })),
+    'ci.input.tree-entry-identity-mismatch');
+
+    const unavailableResponses = treeLookupResponses({
+      candidateOid,
+      commitBody,
+      trees: new Map([[rootOid, rootBody]]),
+    });
+    unavailableResponses[responseKey(['cat-file', '-t', '--', childTreeOid])] = {
+      stderr: 'private missing object detail', exit: 1,
+    };
+    let thrown: unknown;
+    try {
+      withGitShim(unavailableResponses,
+        (cwd) => readExactTreeEntries(cwd, { candidateOid, paths: ['leaf.txt'] }));
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toMatchObject({ code: 'ci.input.tree-entry-unavailable' });
+    expect(String(thrown)).not.toContain('private missing object detail');
+    expectNoVisibleCause(thrown);
+  });
+
+  it('enforces raw tree single, aggregate, and entry budgets at exact and one-over boundaries', async () => {
+    const runSynthetic = async (
+      rootOid: string,
+      trees: ReadonlyMap<string, Buffer>,
+      path: string | null,
+      declaredSizes: ReadonlyMap<string, number> = new Map(),
+    ): Promise<{ result?: ExactTreeEntrySetV1; error?: unknown; bodyReads: ReadonlyMap<string, number> }> => {
+      const commitBody = rawCommitBody({ treeOid: rootOid });
+      const candidateOid = commitOid(commitBody);
+      const bodyReads = new Map<string, number>();
+      const responses = commitMetadataResponses([{ oid: candidateOid, body: commitBody }]);
+      for (const [oid, body] of trees) {
+        responses[responseKey(['cat-file', '-t', '--', oid])] = { stdout: 'tree\n' };
+        responses[responseKey(['cat-file', '-s', '--', oid])] = {
+          stdout: `${declaredSizes.get(oid) ?? body.byteLength}\n`,
+        };
+        responses[responseKey(['cat-file', 'tree', '--', oid])] = {
+          stdoutBase64: body.toString('base64'),
+        };
+      }
+      return withMockedGitInput((_file, args) => {
+        const key = responseKey(args.slice(1));
+        const response = responses[key];
+        if (response === undefined) throw new Error(`unexpected synthetic command: ${key}`);
+        const treeMatch = key.match(/^\["cat-file","tree","--","([0-9a-f]{40})"\]$/u);
+        if (treeMatch !== null) {
+          const oid = treeMatch[1]!;
+          bodyReads.set(oid, (bodyReads.get(oid) ?? 0) + 1);
+        }
+        return response.stdoutBase64 === undefined
+          ? Buffer.from(response.stdout ?? '', 'utf8')
+          : Buffer.from(response.stdoutBase64, 'base64');
+      }, (isolated) => {
+        try {
+          return {
+            result: isolated.readExactTreeEntries('/isolated-fixture', {
+              candidateOid,
+              paths: path === null ? [] : [path],
+            }),
+            bodyReads,
+          };
+        } catch (error) {
+          return { error, bodyReads };
+        }
+      });
+    };
+
+    const shortBody = rawTreeBody([]);
+    const shortOid = treeOid(shortBody);
+    const exactSingle = await runSynthetic(shortOid, new Map([[shortOid, shortBody]]), null,
+      new Map([[shortOid, MAX_EXACT_SINGLE_TREE_BYTES]]));
+    expect(exactSingle.error).toMatchObject({ code: 'ci.input.tree-entry-identity-mismatch' });
+    expect(exactSingle.bodyReads.get(shortOid)).toBe(1);
+    const overSingle = await runSynthetic(shortOid, new Map([[shortOid, shortBody]]), null,
+      new Map([[shortOid, MAX_EXACT_SINGLE_TREE_BYTES + 1]]));
+    expect(overSingle.error).toMatchObject({ code: 'ci.input.tree-entry-budget' });
+    expect(overSingle.bodyReads.get(shortOid)).toBeUndefined();
+
+    const exactChain = treeChain([
+      4 * 1_024 * 1_024,
+      4 * 1_024 * 1_024,
+      4 * 1_024 * 1_024,
+      2 * 1_024 * 1_024,
+      2 * 1_024 * 1_024,
+    ]);
+    const exactAggregate = await runSynthetic(
+      exactChain.rootOid, exactChain.trees, exactChain.path,
+    );
+    expect(exactAggregate.error).toBeUndefined();
+    expect(exactAggregate.result?.entries).toMatchObject([
+      { path: exactChain.path, presence: 'present', mode: '040000', objectType: 'tree' },
+    ]);
+
+    const overChain = treeChain([
+      4 * 1_024 * 1_024,
+      4 * 1_024 * 1_024,
+      4 * 1_024 * 1_024,
+      2 * 1_024 * 1_024,
+      2 * 1_024 * 1_024 + 1,
+    ]);
+    const overAggregate = await runSynthetic(overChain.rootOid, overChain.trees, overChain.path);
+    expect(overAggregate.error).toMatchObject({ code: 'ci.input.tree-entry-budget' });
+    const overLeafOid = [...overChain.trees.keys()][0]!;
+    expect(overAggregate.bodyReads.get(overLeafOid)).toBeUndefined();
+
+    const exactEntriesBody = repeatedRawTreeEntries(MAX_EXACT_TREE_ENTRY_COUNT);
+    const exactEntriesOid = treeOid(exactEntriesBody);
+    const exactEntries = await runSynthetic(
+      exactEntriesOid, new Map([[exactEntriesOid, exactEntriesBody]]), null,
+    );
+    expect(exactEntries.error).toBeUndefined();
+    const overEntriesBody = repeatedRawTreeEntries(MAX_EXACT_TREE_ENTRY_COUNT + 1, true);
+    const overEntriesOid = treeOid(overEntriesBody);
+    const overEntries = await runSynthetic(
+      overEntriesOid, new Map([[overEntriesOid, overEntriesBody]]), null,
+    );
+    expect(overEntries.error).toMatchObject({ code: 'ci.input.tree-entry-budget' });
+  }, 120_000);
+
+  it('carries the aggregate entry allowance across separately loaded trees', async () => {
+    const rootNonChildCount = 24_999;
+    const childExactCount = MAX_EXACT_TREE_ENTRY_COUNT - rootNonChildCount - 1;
+    const runCase = async (childCount: number, trailingMalformed: boolean) => {
+      const childBody = repeatedRawTreeEntries(childCount, trailingMalformed);
+      const childOid = treeOid(childBody);
+      const rootBody = Buffer.concat([
+        rawTreeBody([{ mode: '40000', name: 'child', oid: childOid }]),
+        repeatedRawTreeEntries(rootNonChildCount),
+      ]);
+      expect(rootNonChildCount + 1 + childExactCount).toBe(MAX_EXACT_TREE_ENTRY_COUNT);
+      expect(rootBody.byteLength).toBeLessThan(MAX_EXACT_SINGLE_TREE_BYTES);
+      expect(childBody.byteLength).toBeLessThan(MAX_EXACT_SINGLE_TREE_BYTES);
+      expect(rootBody.byteLength + childBody.byteLength)
+        .toBeLessThan(MAX_EXACT_AGGREGATE_TREE_BYTES);
+
+      const rootOid = treeOid(rootBody);
+      const commitBody = rawCommitBody({ treeOid: rootOid });
+      const candidateOid = commitOid(commitBody);
+      const responses = treeLookupResponses({
+        candidateOid,
+        commitBody,
+        trees: new Map([[rootOid, rootBody], [childOid, childBody]]),
+        objectTypes: new Map([['2'.repeat(40), 'blob']]),
+      });
+      return withMockedGitInput((_file, args) => {
+        const key = responseKey(args.slice(1));
+        const response = responses[key];
+        if (response === undefined) throw new Error(`unexpected synthetic command: ${key}`);
+        return response.stdoutBase64 === undefined
+          ? Buffer.from(response.stdout ?? '', 'utf8')
+          : Buffer.from(response.stdoutBase64, 'base64');
+      }, (isolated) => {
+        try {
+          return {
+            result: isolated.readExactTreeEntries('/isolated-fixture', {
+              candidateOid,
+              paths: ['child/00000'],
+            }),
+          };
+        } catch (error) {
+          return { error };
+        }
+      });
+    };
+
+    const exact = await runCase(childExactCount, false);
+    expect(exact.error).toBeUndefined();
+    expect(exact.result?.entries).toEqual([{
+      path: 'child/00000',
+      presence: 'present',
+      mode: '100644',
+      objectType: 'blob',
+      objectOid: '2'.repeat(40),
+    }]);
+
+    const over = await runCase(childExactCount + 1, true);
+    expect(over.error).toMatchObject({ code: 'ci.input.tree-entry-budget' });
+  }, 120_000);
+
+  it('rejects every tree-mode/object-type table mismatch without looking up gitlinks', () => {
+    const candidateModes = [
+      { mode: '40000', observed: 'blob' },
+      { mode: '100644', observed: 'tree' },
+      { mode: '100755', observed: 'commit' },
+      { mode: '120000', observed: 'tag' },
+    ] as const;
+    for (const { mode, observed } of candidateModes) {
+      const targetOid = '3'.repeat(40);
+      const rootBody = rawTreeBody([{ mode, name: 'target', oid: targetOid }]);
+      const rootOid = treeOid(rootBody);
+      const commitBody = rawCommitBody({ treeOid: rootOid });
+      const candidateOid = commitOid(commitBody);
+      expectCode(() => withGitShim(treeLookupResponses({
+        candidateOid,
+        commitBody,
+        trees: new Map([[rootOid, rootBody]]),
+        objectTypes: new Map([[targetOid, observed]]),
+      }), (cwd) => readExactTreeEntries(cwd, { candidateOid, paths: ['target'] })),
+      'ci.input.tree-entry-identity-mismatch');
+    }
+
+    const gitlinkOid = '4'.repeat(40);
+    const rootBody = rawTreeBody([{ mode: '160000', name: 'target', oid: gitlinkOid }]);
+    const rootOid = treeOid(rootBody);
+    const commitBody = rawCommitBody({ treeOid: rootOid });
+    const candidateOid = commitOid(commitBody);
+    const result = withGitShim(treeLookupResponses({
+      candidateOid,
+      commitBody,
+      trees: new Map([[rootOid, rootBody]]),
+    }), (cwd) => readExactTreeEntries(cwd, { candidateOid, paths: ['target'] }));
+    expect(result.entries).toEqual([{
+      path: 'target', presence: 'present', mode: '160000', objectType: 'gitlink',
+      objectOid: gitlinkOid,
+    }]);
+  });
+
+  it('rejects terminal substitution of a nested child tree after stable root reread', async () => {
+    const leafOid = blobOid(Buffer.from('leaf\n'));
+    const childFirst = rawTreeBody([{ mode: '100644', name: 'leaf.txt', oid: leafOid }]);
+    const childSecond = rawTreeBody([{ mode: '100644', name: 'evil.txt', oid: leafOid }]);
+    expect(childSecond.byteLength).toBe(childFirst.byteLength);
+    const childOid = treeOid(childFirst);
+    const rootBody = rawTreeBody([{ mode: '40000', name: 'nested', oid: childOid }]);
+    const rootOid = treeOid(rootBody);
+    const commitBody = rawCommitBody({ treeOid: rootOid });
+    const candidateOid = commitOid(commitBody);
+    const responses = treeLookupResponses({
+      candidateOid,
+      commitBody,
+      trees: new Map([[rootOid, rootBody], [childOid, childFirst]]),
+      objectTypes: new Map([[leafOid, 'blob']]),
+    });
+    const reads = new Map<string, number>();
+    await withMockedGitInput((_file, args) => {
+      const key = responseKey(args.slice(1));
+      if (key === responseKey(['cat-file', 'tree', '--', childOid])) {
+        const count = (reads.get(childOid) ?? 0) + 1;
+        reads.set(childOid, count);
+        return count === 1 ? childFirst : childSecond;
+      }
+      if (key === responseKey(['cat-file', 'tree', '--', rootOid])) {
+        reads.set(rootOid, (reads.get(rootOid) ?? 0) + 1);
+      }
+      const response = responses[key];
+      if (response === undefined) throw new Error(`unexpected synthetic command: ${key}`);
+      return response.stdoutBase64 === undefined
+        ? Buffer.from(response.stdout ?? '', 'utf8')
+        : Buffer.from(response.stdoutBase64, 'base64');
+    }, (isolated) => {
+      let thrown: unknown;
+      try {
+        isolated.readExactTreeEntries('/isolated-fixture', {
+          candidateOid,
+          paths: ['nested/leaf.txt'],
+        });
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toMatchObject({ code: 'ci.input.tree-entry-identity-mismatch' });
+      expect(String(thrown)).toContain('ci.input.tree-entry-identity-mismatch');
+    });
+    expect(reads).toEqual(new Map([[rootOid, 2], [childOid, 2]]));
+  });
+
+  it('rejects wrong raw tree identity, partial nonzero output, terminal substitution, and SHA-256', async () => {
+    const leafOid = blobOid(Buffer.from('leaf\n'));
+    const firstBody = rawTreeBody([{ mode: '100644', name: 'one.txt', oid: leafOid }]);
+    const secondBody = rawTreeBody([{ mode: '100644', name: 'two.txt', oid: leafOid }]);
+    expect(secondBody.byteLength).toBe(firstBody.byteLength);
+    const rootOid = treeOid(firstBody);
+    const commitBody = rawCommitBody({ treeOid: rootOid });
+    const candidateOid = commitOid(commitBody);
+
+    const wrongIdentity = treeLookupResponses({
+      candidateOid, commitBody, trees: new Map([[rootOid, secondBody]]),
+    });
+    expectCode(() => withGitShim(wrongIdentity,
+      (cwd) => readExactTreeEntries(cwd, { candidateOid, paths: ['one.txt'] })),
+    'ci.input.tree-entry-identity-mismatch');
+
+    const partial = treeLookupResponses({
+      candidateOid, commitBody, trees: new Map([[rootOid, firstBody]]),
+      objectTypes: new Map([[leafOid, 'blob']]),
+    });
+    partial[responseKey(['cat-file', 'tree', '--', rootOid])] = {
+      stdoutBase64: firstBody.toString('base64'), stderr: 'private partial tree', exit: 23,
+    };
+    let partialError: unknown;
+    try {
+      withGitShim(partial,
+        (cwd) => readExactTreeEntries(cwd, { candidateOid, paths: ['one.txt'] }));
+    } catch (error) {
+      partialError = error;
+    }
+    expect(partialError).toMatchObject({ code: 'ci.input.tree-entry-unavailable' });
+    expect(String(partialError)).not.toContain('private partial tree');
+    expectNoVisibleCause(partialError);
+
+    const responses = treeLookupResponses({
+      candidateOid, commitBody, trees: new Map([[rootOid, firstBody]]),
+      objectTypes: new Map([[leafOid, 'blob']]),
+    });
+    let treeReads = 0;
+    vi.resetModules();
+    vi.doMock('node:child_process', () => ({
+      execFileSync: (_file: string, args: string[]) => {
+        const key = responseKey(args.slice(1));
+        if (key === responseKey(['cat-file', 'tree', '--', rootOid])) {
+          treeReads += 1;
+          return treeReads === 1 ? firstBody : secondBody;
+        }
+        const response = responses[key];
+        if (response === undefined) throw new Error('unexpected synthetic command');
+        if (response.stdoutBase64 !== undefined) return Buffer.from(response.stdoutBase64, 'base64');
+        return Buffer.from(response.stdout ?? '', 'utf8');
+      },
+    }));
+    try {
+      const isolated = await import('../../scripts/lib/ci-control/git-input.ts');
+      let terminalError: unknown;
+      try {
+        isolated.readExactTreeEntries('/isolated-fixture', { candidateOid, paths: ['one.txt'] });
+      } catch (error) {
+        terminalError = error;
+      }
+      expect(terminalError).toMatchObject({ code: 'ci.input.tree-entry-identity-mismatch' });
+      expect(treeReads).toBe(2);
+    } finally {
+      vi.doUnmock('node:child_process');
+      vi.resetModules();
+    }
+
+    expectCode(() => withGitShim(treeLookupResponses({
+      candidateOid,
+      commitBody,
+      trees: new Map([[rootOid, firstBody]]),
+      objectFormat: 'sha256\n',
+    }), (cwd) => readExactTreeEntries(cwd, { candidateOid, paths: [] })),
+    'ci.input.tree-entry-malformed');
+  });
+
+  it('maps only proven timeout and output-budget child failures to their specific codes', async () => {
+    const verify = async (
+      failure: NodeJS.ErrnoException & { signal?: string },
+      code: string,
+    ): Promise<void> => {
+      vi.resetModules();
+      vi.doMock('node:child_process', () => ({ execFileSync: () => { throw failure; } }));
+      try {
+        const isolated = await import('../../scripts/lib/ci-control/git-input.ts');
+        let thrown: unknown;
+        try {
+          isolated.readExactTreeEntries('/isolated-fixture', {
+            candidateOid: 'a'.repeat(40), paths: [],
+          });
+        } catch (error) {
+          thrown = error;
+        }
+        expect(thrown).toMatchObject({ code });
+        expect(String(thrown)).not.toContain(failure.message);
+        expectNoVisibleCause(thrown);
+      } finally {
+        vi.doUnmock('node:child_process');
+        vi.resetModules();
+      }
+    };
+    await verify(Object.assign(new Error('private timeout'), { code: 'ETIMEDOUT' }),
+      'ci.input.tree-entry-timeout');
+    await verify(Object.assign(new Error('private budget'), { code: 'ENOBUFS' }),
+      'ci.input.tree-entry-budget');
+    await verify(Object.assign(new Error('private signal'), { signal: 'SIGKILL' }),
+      'ci.input.tree-entry-unavailable');
+  });
+});
 
 function rangeResponses(
   baseOid: string,
