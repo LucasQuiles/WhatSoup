@@ -23,7 +23,7 @@
 // see src/runtimes/agent/providers/index.ts and issue #447.
 import { homedir } from 'node:os';
 import { PROVIDER_IDS } from '../runtimes/agent/providers/index.ts';
-import { PROVIDER_API_KEY_SERVICES } from '../lib/provider-key-service.ts';
+import { PROVIDER_API_KEY_SERVICES, SERVICE_ENV_MAP, resolveProviderKeyService } from '../lib/provider-key-service.ts';
 import { isRecord } from '../lib/type-guards.ts';
 import { isSamePhysicalDirectory } from '../lib/home-path.ts';
 import { resolveAgentModel } from './agent-model.ts';
@@ -696,6 +696,25 @@ function validateCommandSurfaceConfig(
   return null;
 }
 
+/**
+ * Whether an opencode-cli model's provider prefix resolves to a mapped credential
+ * service. OpenCode has no provider-owned default: buildChildEnv (session.ts)
+ * selects the child's key from the model prefix (e.g. `xai/grok-4` → xai) and
+ * HARD-THROWS at spawn when the prefix maps to no known service. Admission mirrors
+ * that resolution so an unspawnable route is rejected as a clear config error
+ * instead of a runtime turn crash. SECURITY: admission-side predicate only —
+ * buildChildEnv's spawn-time enforcement is unchanged and remains the backstop.
+ *
+ * The `providerConfig.apiKeyService` escape is applied at the PRIMARY call site
+ * only: fallback entries carry no such field, and a fallback opencode-cli inherits
+ * none at spawn (fallbackProviderConfigFor strips baseUrl/apiKeyService), so a
+ * fallback's credential route is ALWAYS the model prefix.
+ */
+function opencodeModelPrefixResolvesToService(model: unknown): boolean {
+  const service = resolveProviderKeyService('opencode-cli', model);
+  return service !== null && PROVIDER_API_KEY_SERVICES.has(service) && Boolean(SERVICE_ENV_MAP[service]);
+}
+
 function validateAgentOptions(
   raw: Record<string, unknown>,
   ctx: ValidatorContext,
@@ -922,6 +941,17 @@ function validateAgentOptions(
           `${field}.provider "${provider}" requires model to be set`,
         );
       }
+      // A fallback opencode-cli's credential route is ALWAYS the model prefix
+      // (fallbackProviderConfigFor strips the instance apiKeyService/baseUrl, and
+      // fallback entries carry no apiKeyService of their own), so an unmapped
+      // prefix would throw in buildChildEnv when the fallback spawns. Reject at
+      // admission, mirroring the primary rule. No apiKeyService escape applies here.
+      if (provider === 'opencode-cli' && !opencodeModelPrefixResolvesToService(model)) {
+        return err(
+          `${field}.model`,
+          `${field}.provider "opencode-cli" model ${JSON.stringify(model)} does not resolve to a mapped provider credential service — use a "<provider>/<model>" id whose provider prefix is a known service (e.g. "minimax/...", "xai/...", "anthropic/...")`,
+        );
+      }
       const entry: AgentFallbackEntry = typeof model === 'string'
         ? { provider, model: model.trim() }
         : { provider };
@@ -975,6 +1005,21 @@ function validateAgentOptions(
     return err(
       'agentOptions.fallbackModel',
       `agentOptions.fallbackProvider "${opts['fallbackProvider']}" requires agentOptions.fallbackModel to be set`,
+    );
+  }
+
+  // Legacy pair: same rule as a fallbacks[] opencode-cli entry — the fallback
+  // credential route is the model prefix (apiKeyService/baseUrl are stripped for
+  // opencode-cli fallbacks), so fallbackModel's prefix must resolve to a mapped
+  // service or buildChildEnv throws when the fallback spawns.
+  if (
+    opts['fallbackProvider'] === 'opencode-cli' &&
+    opts['fallbackModel'] !== undefined &&
+    !opencodeModelPrefixResolvesToService(opts['fallbackModel'])
+  ) {
+    return err(
+      'agentOptions.fallbackModel',
+      `agentOptions.fallbackProvider "opencode-cli" model ${JSON.stringify(opts['fallbackModel'])} does not resolve to a mapped provider credential service — use a "<provider>/<model>" id whose provider prefix is a known service (e.g. "minimax/...", "xai/...", "anthropic/...")`,
     );
   }
 
@@ -1051,6 +1096,35 @@ function validateAgentOptions(
       'model',
       'agentOptions.provider "opencode-cli" requires a non-empty top-level model or models.conversation so its credential route can be selected',
     );
+  }
+
+  // ...and that model's provider prefix must actually resolve to a mapped
+  // credential service. OpenCode has no provider-owned default: buildChildEnv
+  // (session.ts) selects the child's key from the model prefix (e.g.
+  // `xai/grok-4` → xai) and HARD-THROWS at spawn when the prefix maps to no
+  // known service — so a resolvable-but-unmapped model is admitted today yet
+  // fails every turn (boots, then crashes on spawn). Mirror that credential-route
+  // resolution here so the failure surfaces as a clear config error at admission
+  // instead of a runtime turn crash. An explicit providerConfig.apiKeyService
+  // (already validated above to a mapped service + baseUrl) names the route
+  // directly, so the model prefix is not consulted in that case — exactly as
+  // buildChildEnv skips it. SECURITY: this only ADDS an admission-time reject;
+  // buildChildEnv's spawn-time enforcement is unchanged and remains the backstop.
+  if (opts['provider'] === 'opencode-cli') {
+    const pc = opts['providerConfig'];
+    const apiKeyService = isRecord(pc) ? pc['apiKeyService'] : undefined;
+    const namesServiceExplicitly = typeof apiKeyService === 'string' && apiKeyService.trim() !== '';
+    // An explicit providerConfig.apiKeyService (validated above to a mapped
+    // service + baseUrl) names the route directly, so the model prefix is not
+    // consulted — exactly as buildChildEnv skips it. Otherwise the prefix must
+    // resolve. resolveAgentModel is guaranteed defined by the model-less check above.
+    const model = resolveAgentModel(raw);
+    if (!namesServiceExplicitly && !opencodeModelPrefixResolvesToService(model)) {
+      return err(
+        'model',
+        `agentOptions.provider "opencode-cli" model ${JSON.stringify(model ?? null)} does not resolve to a mapped provider credential service — use a "<provider>/<model>" id whose provider prefix is a known service (e.g. "minimax/...", "xai/...", "anthropic/..."), or set agentOptions.providerConfig.apiKeyService (with baseUrl) to name the credential route explicitly`,
+      );
+    }
   }
 
   return null;
