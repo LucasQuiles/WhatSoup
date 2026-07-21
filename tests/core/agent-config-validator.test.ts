@@ -674,6 +674,45 @@ describe('agent type rules', () => {
     expect(validateInstanceConfig(raw, ctx('load'))).toBeNull();
   });
 
+  // A model that IS resolvable (satisfies the model-less check above) but whose
+  // provider prefix maps to NO known credential service is admitted today yet
+  // hard-throws in buildChildEnv at every real turn spawn (session.ts) — an
+  // instance that boots then fails every turn. Admission must reject it, mirroring
+  // buildChildEnv's credential-route resolution, so the failure surfaces as a
+  // clear config error instead of a runtime crash.
+  it.each([
+    { model: 'MiniMax-M2' },                          // no provider prefix at all
+    { model: 'whatsoup-cloud/some-model' },           // prefix present but unmapped
+    { models: { conversation: 'foo/bar' } },          // unmapped via models.conversation
+  ])('rejects a primary opencode-cli route whose model prefix maps to no credential service: %j', (modelConfig) => {
+    const raw = baseAgent({
+      ...modelConfig,
+      agentOptions: { sessionScope: 'single', provider: 'opencode-cli' },
+    });
+
+    const result = validateInstanceConfig(raw, ctx('load'));
+
+    expect(result?.field).toBe('model');
+    expect(result?.message).toContain('opencode-cli');
+    expect(result?.message).toContain('credential service');
+  });
+
+  it('accepts an unmapped opencode-cli model prefix when providerConfig.apiKeyService names the credential route', () => {
+    // buildChildEnv selects the service from apiKeyService (validated to be a
+    // mapped service + baseUrl), so the model prefix is not consulted — the
+    // spawn succeeds, so admission must too.
+    const raw = baseAgent({
+      model: 'whatsoup-cloud/some-model',
+      agentOptions: {
+        sessionScope: 'single',
+        provider: 'opencode-cli',
+        providerConfig: { baseUrl: 'https://api.example.com/v1', apiKeyService: 'minimax' },
+      },
+    });
+
+    expect(validateInstanceConfig(raw, ctx('load'))).toBeNull();
+  });
+
   it.each(['claude-cli', 'codex-cli', 'gemini-cli'])(
     'continues to accept a model-less %s route',
     (provider) => {
@@ -963,6 +1002,24 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
     expect(validateInstanceConfig(raw, ctx('load'))).toBeNull();
   });
 
+  it('rejects opencode-cli fallbackProvider with a fallbackModel prefix that maps to no credential service', () => {
+    // A fallback opencode-cli's credential route is ALWAYS the model prefix:
+    // fallbackProviderConfigFor strips the instance baseUrl/apiKeyService, so the
+    // apiKeyService escape does not apply to fallbacks. A resolvable-but-unmapped
+    // fallbackModel would throw in buildChildEnv when the fallback spawns.
+    const raw = baseAgent({
+      agentOptions: {
+        sessionScope: 'single',
+        fallbackProvider: 'opencode-cli',
+        fallbackModel: 'MiniMax-M2', // no provider prefix -> maps to nothing
+      },
+    });
+    const result = validateInstanceConfig(raw, ctx('load'));
+    expect(result?.field).toBe('agentOptions.fallbackModel');
+    expect(result?.message).toContain('opencode-cli');
+    expect(result?.message).toContain('credential service');
+  });
+
   it('rejects a model-less opencode-cli fallback-chain entry', () => {
     const raw = baseAgent({
       agentOptions: {
@@ -974,6 +1031,19 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
     expect(result?.field).toBe('agentOptions.fallbacks[0].model');
     expect(result?.message).toContain('opencode-cli');
     expect(result?.message).toContain('requires model');
+  });
+
+  it('rejects an opencode-cli fallback-chain entry whose model prefix maps to no credential service', () => {
+    const raw = baseAgent({
+      agentOptions: {
+        sessionScope: 'single',
+        fallbacks: [{ provider: 'opencode-cli', model: 'whatsoup-cloud/some-model' }],
+      },
+    });
+    const result = validateInstanceConfig(raw, ctx('load'));
+    expect(result?.field).toBe('agentOptions.fallbacks[0].model');
+    expect(result?.message).toContain('opencode-cli');
+    expect(result?.message).toContain('credential service');
   });
 
   it('accepts a mapped modeled opencode-cli fallback-chain entry', () => {

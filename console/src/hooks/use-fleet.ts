@@ -244,3 +244,21 @@ export function useLiveSessions(name: string) {
     }),
   };
 }
+
+/** Pending decision queue for a line (D-4 ApprovalsTab). Carries the
+ *  #1925 freshness contract (use-metrics idiom). */
+export function useApprovals(name: string) {
+  const query = useQuery({
+    queryKey: ['approvals', name],
+    queryFn: () => api.getApprovals(name),
+    refetchInterval: POLL_LINES,
+    enabled: !!name,
+  });
+  return {
+    ...query,
+    freshness: queryFreshness({
+      dataUpdatedAt: query.dataUpdatedAt,
+      refetchFailed: query.isRefetchError,
+    }),
+  };
+}

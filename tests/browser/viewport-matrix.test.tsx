@@ -117,6 +117,7 @@ const useRateLimitsMock = vi.hoisted(() => vi.fn(() => ({ data: undefined, isLoa
 // LineDetail (checkpoints tab, terminal stage A) calls useLiveSessions —
 // the explicit-shape factory must provide it or the import errors at load.
 const useLiveSessionsMock = vi.hoisted(() => vi.fn(() => ({ data: undefined, isLoading: false, freshness: { observedAt: null, stale: false } })));
+const useApprovalsMock = vi.hoisted(() => vi.fn(() => ({ data: undefined, isLoading: false, freshness: { observedAt: null, stale: false } })));
 
 vi.mock('../../console/src/hooks/use-fleet', () => ({
   useLines: useLinesMock,
@@ -132,6 +133,7 @@ vi.mock('../../console/src/hooks/use-fleet', () => ({
   useProviderStatus: useProviderStatusMock,
   useRateLimits: useRateLimitsMock,
   useLiveSessions: useLiveSessionsMock,
+  useApprovals: useApprovalsMock,
   // Query option factories — not directly consumed by any component under test;
   // included to prevent "not a function" errors if the module is transitively loaded.
   getLinesQueryOptions: vi.fn(),

@@ -60,12 +60,16 @@ export async function probePrimaryModelUsability(
 ): Promise<PrimaryModelUsabilityResult> {
   const provider = target.provider;
   const model = normalizedModel(target.model);
-  // claude-cli and opencode-cli resolve their own default model, so a null model is
-  // probeable for both (their probe adapters omit the model flag, mirroring turn
-  // argv) — short-circuiting here stranded model-less instances in permanent
-  // fallback (recovery probe could never return usable — observed in production as
-  // a permanently extending fallback window).
-  if (model === null && provider !== 'claude-cli' && provider !== 'opencode-cli') {
+  // claude-cli resolves its own default model, so a null model is probeable for it
+  // (its probe adapter omits the model flag, mirroring turn argv) — short-circuiting
+  // claude-cli here stranded model-less instances in permanent fallback (recovery
+  // probe could never return usable — observed in production as a permanently
+  // extending fallback window). opencode-cli is NOT default-probeable: it derives
+  // the child's credential from the model prefix (buildChildEnv) and has no usable
+  // default, and config admission requires a model for it (agent-config-validator).
+  // A null-model opencode-cli is therefore not-configured, same as codex/gemini/api
+  // providers — probing it would only hit buildChildEnv's credential-route throw.
+  if (model === null && provider !== 'claude-cli') {
     return result(target, null, 'unknown', 'model-not-configured');
   }
 

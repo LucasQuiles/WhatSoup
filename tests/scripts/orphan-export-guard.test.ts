@@ -66,11 +66,10 @@ const EXPORT_DECL_RE =
  */
 const PUBLIC_API_ALLOWLIST = new Set<string>([
   // e.g. "src/index.ts:createBot", // published package entrypoint
-  // JID-family predicate consumed by the stacked transport-surfaces branch
-  // (src/core/jid-constants.ts isPnJid/isLidJid/isSignalJid/isImessageJid chain
-  // + tests/core/jid-constants.test.ts there). Zero references on THIS branch
-  // by design — it lands one layer before its consumer.
-  'src/core/jid-constants.ts:isSignalJid',
+  // JID-family predicates (isPnJid/isLidJid/isSignalJid/isImessageJid) are all
+  // referenced once the transport surfaces + ports are merged:
+  // isAuthenticatedSenderJid composes them in src/core/jid-constants.ts and
+  // tests/core/jid-constants.test.ts exercises each. Empty by design.
 ]);
 
 function repoRelative(absPath: string): string {

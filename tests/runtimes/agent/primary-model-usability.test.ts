@@ -343,34 +343,40 @@ describe('primary-model-usability.ts uncovered-branch coverage', () => {
     });
   });
 
-  it('treats an undefined model as not-configured for codex (default-model CLIs probe it)', async () => {
+  it('treats an undefined model as not-configured for codex AND opencode-cli, but claude-cli probes its default', async () => {
     const adapters: PrimaryModelProbeAdapters = {
       probeBinaryModel: vi.fn(async (): Promise<BinaryModelProbeResult> => ({ status: 'ok' })),
     };
 
-    const result = await probePrimaryModelUsability(
-      { provider: 'codex-cli', model: undefined },
-      adapters,
-    );
-    expect(result).toEqual({
-      status: 'unknown',
-      provider: 'codex-cli',
-      model: null,
-      reason: 'model-not-configured',
-    });
-    expect(adapters.probeBinaryModel).not.toHaveBeenCalled();
-
-    // claude-cli and opencode-cli with the same undefined model DO probe (default-
-    // model fix); with no binary adapter available they degrade to adapter-missing.
-    for (const provider of ['claude-cli', 'opencode-cli'] as const) {
-      const probed = await probePrimaryModelUsability({ provider, model: undefined }, {});
-      expect(probed).toEqual({
+    // codex-cli and opencode-cli have no default-model probe. codex takes its
+    // model from config; opencode-cli derives the child's credential from the
+    // model PREFIX (buildChildEnv) and has no usable default — config admission
+    // requires a model (agent-config-validator). A null model is therefore
+    // not-configured for both, and the binary adapter is never invoked.
+    for (const provider of ['codex-cli', 'opencode-cli'] as const) {
+      const result = await probePrimaryModelUsability(
+        { provider, model: undefined },
+        adapters,
+      );
+      expect(result).toEqual({
         status: 'unknown',
         provider,
         model: null,
-        reason: 'binary-model-probe-unavailable',
+        reason: 'model-not-configured',
       });
     }
+    expect(adapters.probeBinaryModel).not.toHaveBeenCalled();
+
+    // claude-cli alone DOES probe its own default with an undefined model
+    // (subscription auth, no per-model credential); with no binary adapter it
+    // degrades to adapter-missing rather than short-circuiting to not-configured.
+    const probed = await probePrimaryModelUsability({ provider: 'claude-cli', model: undefined }, {});
+    expect(probed).toEqual({
+      status: 'unknown',
+      provider: 'claude-cli',
+      model: null,
+      reason: 'binary-model-probe-unavailable',
+    });
   });
 
   it('treats an explicit null model as not-configured for api providers', async () => {
@@ -633,23 +639,30 @@ describe('claude-cli default-model probing (fleet recovery-stall fix)', () => {
     expect(result).toMatchObject({ status: 'credential-unavailable', model: null });
   });
 
-  it('probes opencode-cli with a null model instead of short-circuiting', async () => {
-    // Same stall class as claude-cli: model-less opencode is valid config
-    // (docs/configuration.md — CLI fallback providers may omit model) and its
-    // probe adapter already omits -m for a null model, but the short-circuit
-    // made that path unreachable, so recovery could never be verified.
+  it('short-circuits opencode-cli with a null model — no default-model probe', async () => {
+    // opencode-cli is NOT in claude-cli's default-probe class: it derives the
+    // child credential from the model prefix (buildChildEnv) with no usable
+    // default, and config admission requires a model for it (both primary and
+    // fallback — agent-config-validator). A null model is not-configured, and the
+    // binary adapter is never invoked (probing it would only hit buildChildEnv's
+    // credential-route throw).
     const probeBinaryModel = vi.fn(async (): Promise<BinaryModelProbeResult> => ({ status: 'ok' }));
     const result = await probePrimaryModelUsability(
       { provider: 'opencode-cli', model: null },
       { probeBinaryModel },
     );
-    expect(probeBinaryModel).toHaveBeenCalledWith({ provider: 'opencode-cli', model: null });
-    expect(result).toEqual({ status: 'usable', provider: 'opencode-cli', model: null });
+    expect(result).toEqual({
+      status: 'unknown',
+      provider: 'opencode-cli',
+      model: null,
+      reason: 'model-not-configured',
+    });
+    expect(probeBinaryModel).not.toHaveBeenCalled();
   });
 
   it('still short-circuits providers with no default-model probe path', async () => {
     const probeBinaryModel = vi.fn(async (): Promise<BinaryModelProbeResult> => ({ status: 'ok' }));
-    for (const provider of ['codex-cli', 'gemini-cli'] as const) {
+    for (const provider of ['codex-cli', 'gemini-cli', 'opencode-cli'] as const) {
       await expect(
         probePrimaryModelUsability({ provider, model: null }, { probeBinaryModel }),
       ).resolves.toMatchObject({ status: 'unknown', reason: 'model-not-configured' });

@@ -747,7 +747,7 @@ function validImessageConfig(overrides: Record<string, unknown> = {}): Record<st
     backend: 'bluebubbles',
     bluebubblesUrl: 'https://bb.example.test',
     bluebubblesPasswordService: 'imessage-bb-pw',
-    sender: 'appleid@users.noreply.github.com',
+    sender: 'me@heal.internal',
     inboundMode: 'poll',
     pollIntervalMs: 15000,
     rateLimit: { messagesPerMinute: 30 },

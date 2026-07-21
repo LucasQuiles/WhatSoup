@@ -120,14 +120,21 @@ function modelProbeCommand(
   providerConfig: Record<string, unknown> | undefined,
 ): string[] {
   if (provider === 'opencode-cli') {
+    // opencode-cli is guaranteed a non-null model here: config admission requires
+    // one (agent-config-validator) and probePrimaryModelUsability short-circuits a
+    // null-model opencode-cli to 'model-not-configured' before invoking this
+    // adapter (see primary-model-usability.ts). Unlike claude-cli below, opencode
+    // has no default-model probe — omitting -m for a null model would produce a
+    // credential-routeless spawn that buildChildEnv rejects.
     return buildOpenCodeRunArgs({
       providerConfig,
       model: model ?? undefined,
       prompt: OPENCODE_MODEL_PROBE_PROMPT,
     });
   }
-  // No configured model => probe the CLI's own default (omit --model) instead of
-  // never probing at all — a model-less instance must be able to recover.
+  // claude-cli only: no configured model => probe the CLI's own default (omit
+  // --model) instead of never probing at all — a model-less instance must be able
+  // to recover (subscription auth needs no per-model credential).
   return ['-p', CLAUDE_MODEL_PROBE_PROMPT, ...(model === null ? [] : ['--model', model])];
 }
 

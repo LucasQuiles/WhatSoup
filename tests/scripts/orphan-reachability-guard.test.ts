@@ -126,8 +126,8 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   // replace the stubs with real adapter construction. Unreachable until then
   // because no production code constructs the adapters.
   // signal adapter/port/types graduated out of TRACKED_UNREACHABLE: the
-  // factory now constructs the signal-cli port (this branch), so all three
-  // are reachable from a production root.
+  // factory now constructs the signal-cli port (this branch, #1980), so all
+  // three are reachable from a production root.
   // imessage adapter/port/types graduated out of TRACKED_UNREACHABLE via the
   // main merge (#1991): the factory constructs the imsg/bluebubbles ports.
 ];

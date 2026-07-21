@@ -26,6 +26,13 @@ import { statusNeedsAttention } from './status-severity';
 export function isLineConnected(line: LineInstance): boolean {
   if (line.status === 'online') return true;
   if (line.stale) return false;
+  // Generic-first (S17): signal/imessage/twilio lines report through the
+  // transport block; the whatsapp block remains the fallback for emitters
+  // that predate it.
+  const t = line.health?.transport;
+  if (t?.connected !== undefined) {
+    return t.connected === true && t.connection?.state === 'connected';
+  }
   const wa = line.health?.whatsapp;
   return wa?.connected === true && wa.connection?.state === 'connected';
 }
@@ -65,7 +72,9 @@ export function isLineConnected(line: LineInstance): boolean {
 export function isLineConnectivityUnknown(line: LineInstance): boolean {
   if (line.status === 'online') return false;
   if (line.stale) return true;
-  return line.health?.whatsapp?.connected === undefined;
+  // Unknown iff NEITHER health block carries a connected verdict.
+  return line.health?.transport?.connected === undefined &&
+    line.health?.whatsapp?.connected === undefined;
 }
 
 export function computeKpis(lines: LineInstance[]): {

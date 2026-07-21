@@ -32,7 +32,7 @@
 import { sanitizeProviderPreviewText } from '../lib/provider-preview-sanitizer.ts';
 import { jidPattern } from '../lib/redaction-patterns.ts';
 import { isAdminPhone } from '../lib/phone.ts';
-import { isLidJid, isWhatsAppAuthenticatedJid } from './jid-constants.ts';
+import { isLidJid, isAuthenticatedSenderJid } from './jid-constants.ts';
 import { resolvePhoneFromJid } from './access-list.ts';
 import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
@@ -118,7 +118,7 @@ export function isOperatorDmPeer(
   // B4 (QR-143): this inline `isAdminPhone(resolvePhoneFromJid(...))` is
   // DELIBERATELY NOT migrated to `resolvePhoneFromJidForGrant`, and is
   // allowlisted in `scripts/grant-resolver-inventory-guard.ts`. The GRANT
-  // decision here is already gated on `isWhatsAppAuthenticatedJid(chatJid)`
+  // decision here is already gated on `isAuthenticatedSenderJid(chatJid)`
   // (line ~119) before the elevation `return peerBearsAdminDigits`. The phone
   // match is ALSO needed on the UNauthenticated branch to select the
   // spoof-attempt warn subset (an @sms peer bearing admin digits is a spoof
@@ -129,10 +129,10 @@ export function isOperatorDmPeer(
   const peerBearsAdminDigits = isAdminPhone(resolvePhoneFromJid(chatJid, db), adminPhones);
   // QR-143: only a WhatsApp-authenticated transport (@s.whatsapp.net / @lid) can
   // carry operator identity here. @sms is spoofable (see the
-  // isWhatsAppAuthenticatedJid doc in jid-constants.ts) and resolvePhoneFromJid
+  // isAuthenticatedSenderJid doc in jid-constants.ts) and resolvePhoneFromJid
   // collapses it to the SAME bare phone digits as a real admin JID — without
   // this guard, a spoofed `<admin-digits>@sms` chatJid would elevate.
-  if (!isWhatsAppAuthenticatedJid(chatJid)) {
+  if (!isAuthenticatedSenderJid(chatJid)) {
     // Fast-follow: warn ONLY on the spoof-attempt subset (bears admin digits).
     // Do NOT warn on every @sms rejection — that fires on every benign
     // SMS-bridge chat and would be noise, not a never-silent signal.

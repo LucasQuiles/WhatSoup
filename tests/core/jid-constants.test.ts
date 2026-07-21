@@ -36,6 +36,10 @@ import {
   fromImessageJid,
   isImessageJid,
   isWhatsAppAuthenticatedJid,
+  isAuthenticatedSenderJid,
+  isSignalJid,
+  toSignalJid,
+  fromSignalJid,
   parseWhatsAppDeliveryNamespace,
 } from '../../src/core/jid-constants.ts';
 
@@ -235,36 +239,58 @@ describe('SMS JID helpers', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// iMessage JID helpers (DOMAIN_IMESSAGE / JID_IMESSAGE / toImessageJid /
-// fromImessageJid / isImessageJid)
-// ---------------------------------------------------------------------------
-
-describe('iMessage JID helpers', () => {
-  it('toImessageJid appends the @imessage suffix and is idempotent', () => {
-    expect(toImessageJid('appleid@example.com')).toBe('appleid@example.com@imessage');
-    expect(toImessageJid('appleid@example.com@imessage')).toBe('appleid@example.com@imessage');
-    expect(toImessageJid('+15551230000')).toBe('+15551230000@imessage');
+describe('isAuthenticatedSenderJid (S6 — signal/imessage parity)', () => {
+  it('returns true for WhatsApp PN/LID (unchanged)', () => {
+    expect(isAuthenticatedSenderJid('15551234567@s.whatsapp.net')).toBe(true);
+    expect(isAuthenticatedSenderJid('1111111234567@lid')).toBe(true);
   });
 
-  it('fromImessageJid strips the suffix and tolerates bare addresses', () => {
-    expect(fromImessageJid('appleid@example.com@imessage')).toBe('appleid@example.com');
-    expect(fromImessageJid('appleid@example.com')).toBe('appleid@example.com');
-    expect(fromImessageJid('+15551230000@imessage')).toBe('+15551230000');
+  it('returns true for Signal Protocol-verified senders', () => {
+    expect(isAuthenticatedSenderJid('a1b2c3d4-1234-1234-1234-a1b2c3d4e5f6@signal')).toBe(true);
+    expect(isAuthenticatedSenderJid('+15559990000@signal')).toBe(true);
+  });
+
+  it('returns true for AppleID-verified iMessage senders', () => {
+    expect(isAuthenticatedSenderJid('user@heal.internal@imessage')).toBe(true);
+    expect(isAuthenticatedSenderJid('iMessage;+;chatABC@imessage')).toBe(true);
+  });
+
+  it('returns false for spoofable/unauthenticated forms', () => {
+    expect(isAuthenticatedSenderJid('15551234567@sms')).toBe(false);
+    expect(isAuthenticatedSenderJid('group@g.us')).toBe(false);
+    expect(isAuthenticatedSenderJid(null)).toBe(false);
+    expect(isAuthenticatedSenderJid('')).toBe(false);
+  });
+
+  it('the old name is an alias (back-compat for in-flight callers)', () => {
+    expect(isWhatsAppAuthenticatedJid).toBe(isAuthenticatedSenderJid);
+  });
+});
+
+describe('Signal/iMessage JID helpers', () => {
+  it('toSignalJid / fromSignalJid round-trip and idempotence', () => {
+    expect(toSignalJid('a1b2c3d4-1234-1234-1234-a1b2c3d4e5f6')).toBe('a1b2c3d4-1234-1234-1234-a1b2c3d4e5f6@signal');
+    expect(toSignalJid('a@signal')).toBe('a@signal');
+    expect(fromSignalJid('a1b2c3d4@signal')).toBe('a1b2c3d4');
+    expect(fromSignalJid('bare')).toBe('bare');
+  });
+
+  it('isSignalJid detects only @signal-suffixed ids', () => {
+    expect(isSignalJid('a@signal')).toBe(true);
+    expect(isSignalJid('a@sms')).toBe(false);
+    expect(isSignalJid(null)).toBe(false);
+  });
+
+  it('toImessageJid / fromImessageJid round-trip and idempotence', () => {
+    expect(toImessageJid('user@heal.internal')).toBe('user@heal.internal@imessage');
+    expect(toImessageJid('a@imessage')).toBe('a@imessage');
+    expect(fromImessageJid('user@heal.internal@imessage')).toBe('user@heal.internal');
+    expect(fromImessageJid('bare')).toBe('bare');
   });
 
   it('isImessageJid detects only @imessage-suffixed ids', () => {
-    expect(isImessageJid('appleid@example.com@imessage')).toBe(true);
-    expect(isImessageJid('+15551230000@imessage')).toBe(true);
-    expect(isImessageJid('appleid@example.com')).toBe(false);
-    expect(isImessageJid('15551230000@s.whatsapp.net')).toBe(false);
+    expect(isImessageJid('a@imessage')).toBe(true);
+    expect(isImessageJid('a@signal')).toBe(false);
     expect(isImessageJid(null)).toBe(false);
-    expect(isImessageJid(undefined)).toBe(false);
-  });
-
-  it('round-trip composes with the JID constants', () => {
-    expect(JID_IMESSAGE).toBe('@imessage');
-    expect(DOMAIN_IMESSAGE).toBe('imessage');
-    expect(fromImessageJid(toImessageJid('appleid@example.com'))).toBe('appleid@example.com');
   });
 });

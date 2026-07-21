@@ -62,6 +62,9 @@ const apiMocks = vi.hoisted(() => ({
   getTyping: vi.fn(),
   getFeed: vi.fn(),
   getProviderStatus: vi.fn(),
+  getApprovals: vi.fn(),
+  getCheckpoints: vi.fn(),
+  getLiveSessions: vi.fn(),
 }));
 
 vi.mock('../../console/src/lib/api', () => ({
@@ -86,6 +89,9 @@ import {
   useTyping,
   useFeed,
   useProviderStatus,
+  useApprovals,
+  useCheckpoints,
+  useLiveSessions,
   computeKpis,
 } from '../../console/src/hooks/use-fleet';
 
@@ -97,6 +103,9 @@ import type {
   LogEntry,
   FeedEvent,
   ProviderStatus,
+  ApprovalsPayload,
+  CheckpointsPayload,
+  LiveSessionsPayload,
 } from '../../console/src/types';
 
 // ---------------------------------------------------------------------------
@@ -212,6 +221,24 @@ const PROVIDER_STATUS_1: ProviderStatus = {
     chain: [],
   },
   lineReachable: true,
+};
+
+const APPROVALS_1: ApprovalsPayload = {
+  observedAt: '2026-05-12T00:00:00Z',
+  supported: true,
+  approvals: [],
+  parseErrors: 0,
+};
+
+const CHECKPOINTS_1: CheckpointsPayload = {
+  observedAt: '2026-05-12T00:00:00Z',
+  checkpoints: [],
+};
+
+const LIVE_SESSIONS_1: LiveSessionsPayload = {
+  observedAt: '2026-05-12T00:00:00Z',
+  sessions: [],
+  anomalyCount: 0,
 };
 
 beforeEach(() => {
@@ -890,6 +917,115 @@ describe('useProviderStatus', () => {
     expect(apiMocks.getProviderStatus).toHaveBeenCalledTimes(1);
     await advanceQueryTimers(5_000);
     expect(apiMocks.getProviderStatus).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hook: useApprovals (D-4 ApprovalsTab — pending decision queue)
+// ---------------------------------------------------------------------------
+
+describe('useApprovals', () => {
+  it('does not fetch when name is empty', async () => {
+    const client = makeClient();
+    const { result } = renderHook(() => useApprovals(''), { wrapper: wrapper(client) });
+    expect(result.current.fetchStatus).toBe('idle');
+    expect(apiMocks.getApprovals).not.toHaveBeenCalled();
+  });
+
+  it('returns the payload and a freshness contract on success', async () => {
+    apiMocks.getApprovals.mockResolvedValue(APPROVALS_1);
+    const client = makeClient();
+    const { result } = renderHook(() => useApprovals('alpha'), { wrapper: wrapper(client) });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual(APPROVALS_1);
+    expect(apiMocks.getApprovals).toHaveBeenCalledWith('alpha');
+    // #1925 freshness contract (use-metrics idiom) is attached to every read.
+    expect(result.current.freshness).toBeDefined();
+    expect(result.current.freshness.stale).toBe(false);
+  });
+
+  it('surfaces API errors', async () => {
+    apiMocks.getApprovals.mockRejectedValue(new Error('read failed'));
+    const client = makeClient();
+    const { result } = renderHook(() => useApprovals('alpha'), { wrapper: wrapper(client) });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(result.current.error?.message).toBe('read failed');
+  });
+
+  it('polls every 5000ms regardless of WS connection (unconditional refetchInterval)', async () => {
+    vi.useFakeTimers();
+    wsConnected = true;
+    apiMocks.getApprovals.mockResolvedValue(APPROVALS_1);
+    const client = makeClient();
+    const { result } = renderHook(() => useApprovals('alpha'), { wrapper: wrapper(client) });
+    await vi.waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(apiMocks.getApprovals).toHaveBeenCalledTimes(1);
+    await advanceQueryTimers(5_000);
+    expect(apiMocks.getApprovals).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hook: useCheckpoints (LineDetail › Checkpoints tab)
+// ---------------------------------------------------------------------------
+
+describe('useCheckpoints', () => {
+  it('does not fetch when name is empty', async () => {
+    const client = makeClient();
+    const { result } = renderHook(() => useCheckpoints(''), { wrapper: wrapper(client) });
+    expect(result.current.fetchStatus).toBe('idle');
+    expect(apiMocks.getCheckpoints).not.toHaveBeenCalled();
+  });
+
+  it('returns the payload and a freshness contract on success', async () => {
+    apiMocks.getCheckpoints.mockResolvedValue(CHECKPOINTS_1);
+    const client = makeClient();
+    const { result } = renderHook(() => useCheckpoints('alpha'), { wrapper: wrapper(client) });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual(CHECKPOINTS_1);
+    expect(apiMocks.getCheckpoints).toHaveBeenCalledWith('alpha');
+    expect(result.current.freshness).toBeDefined();
+    expect(result.current.freshness.stale).toBe(false);
+  });
+
+  it('surfaces API errors', async () => {
+    apiMocks.getCheckpoints.mockRejectedValue(new Error('read failed'));
+    const client = makeClient();
+    const { result } = renderHook(() => useCheckpoints('alpha'), { wrapper: wrapper(client) });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(result.current.error?.message).toBe('read failed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hook: useLiveSessions (terminal stage A inspector)
+// ---------------------------------------------------------------------------
+
+describe('useLiveSessions', () => {
+  it('does not fetch when name is empty', async () => {
+    const client = makeClient();
+    const { result } = renderHook(() => useLiveSessions(''), { wrapper: wrapper(client) });
+    expect(result.current.fetchStatus).toBe('idle');
+    expect(apiMocks.getLiveSessions).not.toHaveBeenCalled();
+  });
+
+  it('returns the payload and a freshness contract on success', async () => {
+    apiMocks.getLiveSessions.mockResolvedValue(LIVE_SESSIONS_1);
+    const client = makeClient();
+    const { result } = renderHook(() => useLiveSessions('alpha'), { wrapper: wrapper(client) });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual(LIVE_SESSIONS_1);
+    expect(apiMocks.getLiveSessions).toHaveBeenCalledWith('alpha');
+    expect(result.current.freshness).toBeDefined();
+    expect(result.current.freshness.stale).toBe(false);
+  });
+
+  it('surfaces API errors', async () => {
+    apiMocks.getLiveSessions.mockRejectedValue(new Error('probe failed'));
+    const client = makeClient();
+    const { result } = renderHook(() => useLiveSessions('alpha'), { wrapper: wrapper(client) });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(result.current.error?.message).toBe('probe failed');
   });
 });
 
