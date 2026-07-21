@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -112,6 +113,36 @@ function makeContainedSymlinkRepo(): {
     JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8')),
   );
   return { root, manifest, targetPath, targetRelPath };
+}
+
+function convertRepoToRelease(root: string): void {
+  rmSync(path.join(root, '.git'), { recursive: true, force: true });
+  const files: Array<{ path: string; sha256: string; sizeBytes: number }> = [];
+  const visit = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const absolute = path.join(dir, entry.name);
+      const relative = path.relative(root, absolute).split(path.sep).join('/');
+      if (relative === '.whatsoup-release-manifest.json') continue;
+      if (entry.isDirectory()) visit(absolute);
+      else if (entry.isFile()) {
+        const body = readFileSync(absolute);
+        files.push({
+          path: relative,
+          sha256: createHash('sha256').update(body).digest('hex'),
+          sizeBytes: body.byteLength,
+        });
+      }
+    }
+  };
+  visit(root);
+  writeFileSync(path.join(root, '.whatsoup-release-manifest.json'), JSON.stringify({
+    schemaVersion: 2,
+    source: { ref: 'HEAD', commit: '0'.repeat(40) },
+    release: { path: root, createdAt: '2026-07-21T00:00:00Z', mutablePathExcludes: [] },
+    rollback: { path: path.join(root, '.rollback') },
+    files,
+    requiredOutputs: [],
+  }), 'utf8');
 }
 
 describe('source runtime drift check', () => {
@@ -344,6 +375,40 @@ describe('source runtime drift check', () => {
     });
 
     expect(issues).toEqual([]);
+  });
+
+  it('uses the release manifest as file authority in a non-git snapshot', () => {
+    const root = makeRepo();
+    convertRepoToRelease(root);
+
+    expect(run(['--manifest', 'manifest.json'], root)).toEqual([]);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it('rejects runtime drift in a non-git snapshot', () => {
+    const root = makeRepo();
+    convertRepoToRelease(root);
+    writeFileSync(path.join(root, 'src/transport/helper.ts'), "export function helper() { return 'drift'; }\n", 'utf8');
+
+    expect(run(['--manifest', 'manifest.json'], root)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'file-sha256-drift', path: 'src/transport/helper.ts' }),
+    ]));
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('rejects a drifted source-runtime control manifest in a non-git snapshot', () => {
+    const root = makeRepo();
+    convertRepoToRelease(root);
+    writeFileSync(path.join(root, 'manifest.json'), JSON.stringify({
+      schemaVersion: 1,
+      scope: 'retargeted',
+      entrypoints: [],
+    }), 'utf8');
+
+    expect(run(['--manifest', 'manifest.json'], root)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'file-sha256-drift', path: 'manifest.json' }),
+    ]));
+    expect(process.exitCode).toBe(1);
   });
 
   it('ignores inherited hook Git environment when creating synthetic repos', () => {
