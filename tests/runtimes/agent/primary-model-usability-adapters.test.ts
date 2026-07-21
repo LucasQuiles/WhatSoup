@@ -293,25 +293,27 @@ describe('createPrimaryModelProbeAdapters', () => {
     expect(probeBinaryCommand).not.toHaveBeenCalled();
   });
 
-  it('probes OpenCode default model (null) with -m omitted, mirroring turn argv', async () => {
+  it('a null-model opencode-cli probe fails at the REAL buildChildEnv — no default credential route', async () => {
+    // opencode-cli derives the child credential from the model prefix; with a
+    // null model buildChildEnv has no service to select and hard-throws. A mock
+    // buildChildEnv here would HIDE that throw and falsely imply a model-less
+    // opencode-cli is probeable (it is not — config admission requires a model,
+    // and probePrimaryModelUsability short-circuits a null-model opencode-cli to
+    // 'model-not-configured'; see primary-model-usability.test.ts). Use the REAL
+    // buildChildEnv so the test documents the actual contract.
     const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
     const adapters = createPrimaryModelProbeAdapters(undefined, {
       cwd: '/agent-cwd',
-      buildChildEnv: vi.fn(() => ({ PATH: '/usr/bin' })),
       getProviderBinary: vi.fn(() => 'opencode'),
       probeBinaryCommand,
     });
 
     await expect(
       adapters.probeBinaryModel?.({ provider: 'opencode-cli', model: null }),
-    ).resolves.toEqual({ status: 'ok' });
+    ).rejects.toThrow(/does not resolve to a mapped provider credential service/);
 
-    expect(probeBinaryCommand).toHaveBeenCalledWith(
-      'opencode',
-      ['run', '--format', 'json', '--pure', 'Reply with OK only.'],
-      expect.any(Object),
-      { cwd: '/agent-cwd', timeoutMs: 15_000 },
-    );
+    // The child env is built before the command is spawned, so the probe never runs.
+    expect(probeBinaryCommand).not.toHaveBeenCalled();
   });
 
   it.each([
