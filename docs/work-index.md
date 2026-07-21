@@ -160,8 +160,8 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-07-17-boundary-exit-parser-codeql-hardening.md` | plan | active | body-marker | boundary-exit-parser-codeql-hardening | 2026-07-17 |  |
 | `docs/superpowers/plans/2026-07-17-boundary-validator-ci-refactor.md` | plan | unknown | fallback | boundary-validator-ci-refactor | 2026-07-17 |  |
 | `docs/superpowers/plans/2026-07-17-macos-credential-durability.md` | plan | unknown | fallback | macos-credential-durability | 2026-07-17 |  |
-| `docs/superpowers/plans/2026-07-20-cicd-control-foundation.md` | plan | active | body-marker | cicd-control-foundation | 2026-07-20 |  |
-| `docs/superpowers/plans/2026-07-20-cicd-enforcement-control-plane-program.md` | plan | active | body-marker | cicd-enforcement-control-plane-program | 2026-07-20 |  |
+| `docs/superpowers/plans/2026-07-20-cicd-control-foundation.md` | plan | active | body-marker | cicd-control-foundation | 2026-07-21 |  |
+| `docs/superpowers/plans/2026-07-20-cicd-enforcement-control-plane-program.md` | plan | active | body-marker | cicd-enforcement-control-plane-program | 2026-07-21 |  |
 
 ### docs/superpowers/reviews  _(3 entries)_
 
@@ -217,4 +217,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-21T05:05:31Z from commit `85a6689837faddc87adbf11cb3205d802ed416a7`
+- Generated at 2026-07-21T05:10:24Z from commit `e013fcd8bb1fc1933a1a7f103d9848e1d7f6c0ba`
