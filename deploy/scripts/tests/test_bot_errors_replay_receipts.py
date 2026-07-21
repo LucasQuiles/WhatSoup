@@ -161,6 +161,15 @@ class ReplayReceiptTestCase(unittest.TestCase):
             result = self.mod.process_one(path, paths)
         return path, result, mocked_send
 
+    def authorize_clear(self, state: dict[str, Any], event: dict[str, Any], opened: int) -> str:
+        observation = self.mod.normalize_dispatch_observation(event)
+        self.assertEqual(type(observation).__name__, "NormalizedObservation")
+        decision = self.mod.evaluate_clear(_open_record(self.mod, event, opened), observation, [])
+        self.mod.record_accepted_clear_notification(
+            state, event, observation, [(observation.incident_key, decision)]
+        )
+        return self.mod.clear_event_identity_digest(event)
+
     def test_pure_classification_distinguishes_exact_replay_and_content_collision(self) -> None:
         identity = "1" * 64
         existing = {identity: _receipt(identity, 100, content="2" * 64)}
@@ -905,6 +914,262 @@ class ReplayReceiptTestCase(unittest.TestCase):
         with self.assertRaises(self.mod.ProcessedReceiptCapacityError) as caught:
             self.mod.load_incident_state(paths)
         self.assertEqual(caught.exception.protected_count, 2)
+
+    def test_corrupt_state_json_fails_closed_without_send_and_retains_queue_ownership(self) -> None:
+        paths = self.mod.setup_dirs()
+        corrupt = b'{"version":1,"processedEvents":'
+        paths["incident_state"].write_bytes(corrupt)
+        event = _event(int(time.time()), event_id="corrupt-state-must-not-send")
+        path = self.write_event(paths, "corrupt-state.json", event)
+
+        with patch.object(self.mod, "send_whatsapp") as send:
+            result = self.mod.process_one(path, paths)
+
+        self.assertFalse(result[0])
+        self.assertIn("incident_state_corrupt", result[1])
+        send.assert_not_called()
+        self.assertEqual(paths["incident_state"].read_bytes(), corrupt)
+        self.assertTrue(path.exists())
+        self.assertFalse(list(paths["sent"].iterdir()))
+
+    def test_pending_clear_retry_rejects_changed_message_bearing_diagnostics(self) -> None:
+        paths = self.mod.setup_dirs()
+        now = int(time.time())
+        alert = _event(now - 300, event_id="diagnostic-binding-open")
+        key = self.mod.incident_key(alert)
+        self.mod.save_incident_state(paths, {
+            "version": 1,
+            "openIncidents": {key: _open_record(self.mod, alert, now - 300)},
+            "lastSentAt": {key: now - 300},
+        })
+        clear = _event(now, event_id="diagnostic-binding-clear", event_type="clear")
+        clear["diagnostics"].update({
+            "queue": "/producer/original-queue",
+            "writefailRecovery": {
+                "recordedAt": "2026-07-21T00:00:00Z",
+                "failedTarget": "/producer/original-target",
+                "breadcrumb": "/producer/original-breadcrumb",
+                "harvest": {"fromHost": "host-a"},
+            },
+        })
+        path = self.write_event(paths, "diagnostic-binding.json", clear)
+        with patch.object(
+            self.mod, "send_whatsapp", side_effect=RuntimeError("injected transport failure")
+        ):
+            first = self.mod.process_one(path, paths)
+        self.assertFalse(first[0])
+
+        retry = json.loads(path.read_text(encoding="utf-8"))
+        retry["diagnostics"]["queue"] = "/producer/changed-queue"
+        retry["diagnostics"]["writefailRecovery"]["failedTarget"] = "/producer/changed-target"
+        path.write_text(json.dumps(retry), encoding="utf-8")
+        with patch.object(self.mod, "send_whatsapp") as send:
+            result = self.mod.process_one(path, paths)
+
+        self.assertEqual(result, (False, "protocol_quarantine:identity_collision"))
+        send.assert_not_called()
+
+    def test_pending_clear_retry_rejects_changed_omitted_dispatch_log_value(self) -> None:
+        paths = self.mod.setup_dirs()
+        now = int(time.time())
+        alert = _event(now - 300, event_id="dispatch-log-binding-open")
+        key = self.mod.incident_key(alert)
+        self.mod.save_incident_state(paths, {
+            "version": 1,
+            "openIncidents": {key: _open_record(self.mod, alert, now - 300)},
+            "lastSentAt": {key: now - 300},
+        })
+        clear = _event(now, event_id="dispatch-log-binding-clear", event_type="clear")
+        clear["diagnostics"]["dispatchLog"] = "/producer/original-dispatch.log"
+        path = self.write_event(paths, "dispatch-log-binding.json", clear)
+        with patch.object(
+            self.mod, "send_whatsapp", side_effect=RuntimeError("injected transport failure")
+        ):
+            first = self.mod.process_one(path, paths)
+        self.assertFalse(first[0])
+
+        retry = json.loads(path.read_text(encoding="utf-8"))
+        retry["diagnostics"]["dispatchLog"] = "/producer/changed-dispatch.log"
+        path.write_text(json.dumps(retry), encoding="utf-8")
+        with patch.object(self.mod, "send_whatsapp") as send:
+            result = self.mod.process_one(path, paths)
+
+        self.assertEqual(result, (False, "protocol_quarantine:identity_collision"))
+        send.assert_not_called()
+
+    def test_pending_authorization_is_never_evicted(self) -> None:
+        now = int(time.time())
+        state: dict[str, Any] = {"version": 1, "openIncidents": {}, "lastSentAt": {}}
+        first = _event(now, event_id="protected-pending", event_type="clear")
+        protected_key = self.authorize_clear(state, first, now - 300)
+        for index in range(1, 50):
+            event = _event(now + index, event_id=f"delivered-{index}", event_type="clear")
+            key = self.authorize_clear(state, event, now - 300)
+            state["acceptedClearNotifications"][key]["notificationState"] = "delivered"
+        newest = _event(now + 60, event_id="newest-pending", event_type="clear")
+        newest_key = self.authorize_clear(state, newest, now - 300)
+
+        self.assertEqual(len(state["acceptedClearNotifications"]), 50)
+        self.assertIn(protected_key, state["acceptedClearNotifications"])
+        self.assertIn(newest_key, state["acceptedClearNotifications"])
+        self.assertEqual(
+            state["acceptedClearNotifications"][protected_key]["notificationState"], "pending"
+        )
+
+    def test_pending_authorization_capacity_fails_closed_with_queue_ownership(self) -> None:
+        paths = self.mod.setup_dirs()
+        now = int(time.time())
+        target_alert = _event(now - 300, event_id="authorization-capacity-open")
+        target_key = self.mod.incident_key(target_alert)
+        state: dict[str, Any] = {
+            "version": 1,
+            "openIncidents": {target_key: _open_record(self.mod, target_alert, now - 300)},
+            "lastSentAt": {target_key: now - 300},
+        }
+        for index in range(50):
+            event = _event(
+                now + index,
+                event_id=f"authorization-pending-{index}",
+                event_type="clear",
+                instance=f"bot-{index}",
+            )
+            self.authorize_clear(state, event, now - 300)
+        self.mod.save_incident_state(paths, state)
+        clear = _event(now + 50, event_id="authorization-overflow", event_type="clear")
+        path = self.write_event(paths, "authorization-overflow.json", clear)
+
+        with patch.object(self.mod, "send_whatsapp") as send:
+            result = self.mod.process_one(path, paths)
+
+        self.assertFalse(result[0], result)
+        self.assertIn("accepted_clear_notification_capacity", result[1])
+        send.assert_not_called()
+        self.assertTrue(path.exists())
+        persisted = self.mod.load_incident_state(paths)
+        self.assertIn(target_key, persisted["openIncidents"])
+        self.assertEqual(len(persisted["acceptedClearNotifications"]), 50)
+
+    def test_recent_close_boundary_survives_history_capacity_and_blocks_stale_fault(self) -> None:
+        paths = self.mod.setup_dirs()
+        now = int(time.time())
+        recent = {
+            "incidentKey": "host-a|ana-bot|socket_down",
+            "receiptTime": now,
+            "closedAt": now,
+            "closingObservationTime": now,
+            "closingEventIdentityDigest": "f" * 64,
+        }
+        other_recent = [
+            {
+                "incidentKey": f"host-a|ana-bot|recent-{index}",
+                "receiptTime": now - index - 1,
+                "closedAt": now - index - 1,
+                "closingObservationTime": now - index - 1,
+            }
+            for index in range(50)
+        ]
+        self.mod.save_incident_state(paths, {
+            "version": 1,
+            "openIncidents": {},
+            "lastSentAt": {},
+            "closedHistory": [recent, *other_recent],
+        })
+        loaded = self.mod.load_incident_state(paths)
+        self.assertEqual(len(loaded["closedHistory"]), 51)
+        self.assertIn(recent, loaded["closedHistory"])
+
+        stale = _event(now, event_id="stale-after-retained-boundary")
+        path = self.write_event(paths, "stale-after-boundary.json", stale)
+        with patch.object(self.mod, "send_whatsapp") as send:
+            result = self.mod.process_one(path, paths)
+        self.assertEqual(result, (True, "stale_out_of_order"))
+        send.assert_not_called()
+
+    def test_recent_close_history_capacity_exhaustion_fails_closed(self) -> None:
+        paths = self.mod.setup_dirs()
+        self.mod.CLOSED_HISTORY_LIMIT = 50
+        now = int(time.time())
+        recent = [
+            {
+                "incidentKey": f"host-a|ana-bot|recent-{index}",
+                "receiptTime": now - index,
+                "closedAt": now - index,
+                "closingObservationTime": now - index,
+            }
+            for index in range(51)
+        ]
+        self.mod.save_incident_state(paths, {
+            "version": 1,
+            "openIncidents": {},
+            "lastSentAt": {},
+            "closedHistory": recent,
+        })
+        event = _event(now, event_id="history-capacity-must-not-send")
+        path = self.write_event(paths, "history-capacity.json", event)
+        with patch.object(self.mod, "send_whatsapp") as send:
+            result = self.mod.process_one(path, paths)
+        self.assertFalse(result[0])
+        self.assertIn("closed_history_capacity", result[1])
+        send.assert_not_called()
+        self.assertTrue(path.exists())
+
+    def test_flap_reference_capacity_does_not_recount_unreceipted_raw_event(self) -> None:
+        self.mod.FLAP_EVENT_REFERENCE_LIMIT = 2
+        flap_state: dict[str, Any] = {}
+        key = "host-a|ana-bot|socket_down"
+        first, second, third = "1" * 64, "2" * 64, "3" * 64
+        self.mod.record_flap_trip(flap_state, key, 100, first, processed_identities=set())
+        self.mod.record_flap_trip(flap_state, key, 101, second, processed_identities=set())
+        with self.assertRaises(self.mod.FlapReferenceCapacityError):
+            self.mod.record_flap_trip(flap_state, key, 102, third, processed_identities=set())
+        self.mod.record_flap_trip(flap_state, key, 103, first, processed_identities=set())
+        self.assertEqual(flap_state[key]["cumulativeCount"], 2)
+        self.assertEqual(flap_state[key]["eventIdentityDigests"], [first, second])
+
+        self.mod.record_flap_trip(
+            flap_state, key, 104, third, processed_identities={first}
+        )
+        self.assertEqual(flap_state[key]["cumulativeCount"], 3)
+        self.assertEqual(flap_state[key]["eventIdentityDigests"], [second, third])
+
+        globally_full: dict[str, Any] = {}
+        self.mod.record_flap_trip(
+            globally_full, "host-a|bot-a|socket_down", 200, first, processed_identities=set()
+        )
+        self.mod.record_flap_trip(
+            globally_full, "host-a|bot-b|socket_down", 201, second, processed_identities=set()
+        )
+        with self.assertRaises(self.mod.FlapReferenceCapacityError):
+            self.mod.record_flap_trip(
+                globally_full, "host-a|bot-c|socket_down", 202, third, processed_identities=set()
+            )
+
+    def test_v2_missing_id_is_protocol_quarantined(self) -> None:
+        paths = self.mod.setup_dirs()
+        event = _event(int(time.time()), event_id="temporary-v2-id")
+        event.pop("id")
+        path = self.write_event(paths, "missing-v2-id.json", event)
+        with patch.object(self.mod, "send_whatsapp") as send:
+            result = self.mod.process_one(path, paths)
+        self.assertEqual(result, (False, "protocol_quarantine:invalid_event_id"))
+        send.assert_not_called()
+        self.assertFalse(path.exists())
+        self.assertEqual(len(list(paths["quarantine"].iterdir())), 1)
+
+        oversized = _event(int(time.time()), event_id="x" * 4097)
+        rejected = self.mod.normalize_dispatch_observation(oversized)
+        self.assertEqual(rejected.code.value, "invalid_event_id")
+
+        first = _event(int(time.time()), event_id="x" * 4095 + "a")
+        second = _event(int(time.time()), event_id="x" * 4095 + "b")
+        first_normalized = self.mod.normalize_dispatch_observation(first)
+        second_normalized = self.mod.normalize_dispatch_observation(second)
+        self.assertEqual(type(first_normalized).__name__, "NormalizedObservation")
+        self.assertEqual(type(second_normalized).__name__, "NormalizedObservation")
+        self.assertNotEqual(
+            self.mod.event_replay_identity_digest(first, first_normalized),
+            self.mod.event_replay_identity_digest(second, second_normalized),
+        )
 
 
 if __name__ == "__main__":

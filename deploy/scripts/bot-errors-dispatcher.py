@@ -117,6 +117,8 @@ PROCESSED_EVENT_CAPACITY = 2048
 PROCESSED_EVENT_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 PROCESSED_EVENT_COLLISION_LIMIT = 50
 FLAP_EVENT_REFERENCE_LIMIT = 2048
+ACCEPTED_CLEAR_NOTIFICATION_LIMIT = 50
+CLOSED_HISTORY_LIMIT = PROCESSED_EVENT_CAPACITY
 INCIDENT_RENOTIFY_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_RENOTIFY_SECONDS", 6 * 60 * 60)
 INCIDENT_RENOTIFY_CAP_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_RENOTIFY_CAP_SECONDS", 6 * 60 * 60)
 INCIDENT_ESCALATE_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_ESCALATE_SECONDS", 24 * 60 * 60)
@@ -667,6 +669,72 @@ def append_dispatch_log(paths: dict[str, Path], payload: dict[str, Any]) -> None
     append_private_jsonl(log_path, record)
 
 
+class IncidentStateCorruptError(RuntimeError):
+    pass
+
+
+class AcceptedClearNotificationCapacityError(RuntimeError):
+    pass
+
+
+class ClosedHistoryCapacityError(RuntimeError):
+    pass
+
+
+class FlapReferenceCapacityError(RuntimeError):
+    pass
+
+
+def accepted_notification_order(item: tuple[str, dict[str, Any]]) -> tuple[int, str]:
+    digest, record = item
+    sequence = record.get("sequence")
+    return (sequence if type(sequence) is int and sequence >= 0 else 0, digest)
+
+
+def prune_accepted_clear_notifications(
+    accepted: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    pending = [item for item in accepted.items() if item[1].get("notificationState") == "pending"]
+    if len(pending) > ACCEPTED_CLEAR_NOTIFICATION_LIMIT:
+        raise AcceptedClearNotificationCapacityError(
+            "pending accepted-clear notification authority exhausts capacity"
+        )
+    delivered = [item for item in accepted.items() if item[1].get("notificationState") == "delivered"]
+    delivered_slots = ACCEPTED_CLEAR_NOTIFICATION_LIMIT - len(pending)
+    retained_delivered = (
+        sorted(delivered, key=accepted_notification_order)[-delivered_slots:]
+        if delivered_slots else []
+    )
+    retained = pending + retained_delivered
+    return dict(sorted(retained, key=accepted_notification_order))
+
+
+def closed_history_order(record: dict[str, Any]) -> tuple[int, str]:
+    receipt_time = record.get("receiptTime", record.get("closedAt"))
+    canonical = json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return (receipt_time if type(receipt_time) is int else 0, canonical)
+
+
+def prune_closed_history(history: list[dict[str, Any]], now: int) -> list[dict[str, Any]]:
+    recent: list[dict[str, Any]] = []
+    older: list[dict[str, Any]] = []
+    for record in history:
+        receipt_time = record.get("receiptTime", record.get("closedAt"))
+        target = (
+            recent
+            if type(receipt_time) is int
+            and now - receipt_time <= PROCESSED_EVENT_MAX_AGE_SECONDS
+            else older
+        )
+        target.append(record)
+    if len(recent) > CLOSED_HISTORY_LIMIT:
+        raise ClosedHistoryCapacityError("recent close-history authority exhausts capacity")
+    older_slots = CLOSED_HISTORY_LIMIT - len(recent)
+    retained_older = sorted(older, key=closed_history_order)[-older_slots:] if older_slots else []
+    retained = recent + retained_older
+    return sorted(retained, key=closed_history_order)
+
+
 def read_json_value(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
@@ -685,14 +753,10 @@ def load_incident_state(paths: dict[str, Path]) -> dict[str, Any]:
         return {"version": 1, "openIncidents": {}, "lastSentAt": {}}
     try:
         loaded = read_json(path)
-    except Exception as exc:  # noqa: BLE001 - dispatcher must recover from corrupt state.
-        backup = path.with_suffix(f".corrupt.{int(time.time())}.{os.getpid()}.json")
-        try:
-            path.replace(backup)
-        except Exception:
-            pass
+    except Exception as exc:  # noqa: BLE001 - corrupt authority must fail closed.
         append_dispatch_log(paths, {"type": "incident_state_corrupt", "path": str(path), "error": str(exc)})
-        return {"version": 1, "openIncidents": {}, "lastSentAt": {}}
+        raise IncidentStateCorruptError("incident state is unreadable") from exc
+    current = int(time.time())
     state = {"version": 1, "openIncidents": {}, "lastSentAt": {}}
     if isinstance(loaded.get("openIncidents"), dict):
         state["openIncidents"] = loaded["openIncidents"]
@@ -724,9 +788,10 @@ def load_incident_state(paths: dict[str, Path]) -> dict[str, Any]:
     if isinstance(loaded.get("promotionSafety"), dict):
         state["promotionSafety"] = loaded["promotionSafety"]
     if isinstance(loaded.get("closedHistory"), list):
-        state["closedHistory"] = [
+        history = [
             record for record in loaded["closedHistory"] if isinstance(record, dict)
-        ][-50:]
+        ]
+        state["closedHistory"] = prune_closed_history(history, current)
     if isinstance(loaded.get("acceptedClearNotifications"), dict):
         accepted: list[tuple[str, dict[str, Any]]] = []
         for digest, record in loaded["acceptedClearNotifications"].items():
@@ -746,13 +811,11 @@ def load_incident_state(paths: dict[str, Path]) -> dict[str, Any]:
                     ),
                 },
             ))
-        accepted.sort(key=lambda item: (item[1]["sequence"], item[0]))
-        accepted = accepted[-50:]
-        state["acceptedClearNotifications"] = dict(accepted)
+        state["acceptedClearNotifications"] = prune_accepted_clear_notifications(dict(accepted))
         loaded_sequence = loaded.get("acceptedClearNotificationSequence")
         state["acceptedClearNotificationSequence"] = max(
             loaded_sequence if type(loaded_sequence) is int and loaded_sequence >= 0 else 0,
-            max((record["sequence"] for _, record in accepted), default=0),
+            max((record["sequence"] for record in state["acceptedClearNotifications"].values()), default=0),
         )
     if isinstance(loaded.get("processedEventCollisions"), list):
         state["processedEventCollisions"] = [
@@ -761,8 +824,8 @@ def load_incident_state(paths: dict[str, Path]) -> dict[str, Any]:
     normalized_receipts = normalize_processed_events(loaded.get("processedEvents"))
     state["processedEvents"] = prune_processed_events(
         normalized_receipts,
-        protected_identities=protected_processed_event_identities(state, int(time.time())),
-        now=int(time.time()),
+        protected_identities=protected_processed_event_identities(state, current),
+        now=current,
         max_age_seconds=PROCESSED_EVENT_MAX_AGE_SECONDS,
         capacity=PROCESSED_EVENT_CAPACITY,
     )
@@ -1786,11 +1849,12 @@ def finalize_accepted_clear(
     closing_identity = (
         event_replay_identity_digest(event, normalized) if normalized is not None else ""
     )
-    history.append({
+    current = int(time.time())
+    closing_record = {
         "incidentKey": key,
         "eventId": redacted_state_text(event.get("id"), 128),
-        "closedAt": int(time.time()),
-        "receiptTime": int(time.time()),
+        "closedAt": current,
+        "receiptTime": current,
         "openingEventIdentityDigest": str(record.get("eventIdentityDigest") or ""),
         "closingEventIdentityDigest": closing_identity,
         "openingEvidenceFingerprint": str(record.get("evidenceFingerprint") or ""),
@@ -1806,8 +1870,10 @@ def finalize_accepted_clear(
             normalized.observed_at_epoch if normalized is not None else event_created_epoch(event) or 0
         ),
         "receipt": decision.proof_receipt,
-    })
-    incident_state["closedHistory"] = history[-50:]
+    }
+    incident_state["closedHistory"] = prune_closed_history(
+        [*history, closing_record], current
+    )
     incident_state["openIncidents"].pop(key, None)
     incident_state.setdefault("lastSentAt", {}).pop(key, None)
     transient_state = incident_state.get("transientState")
@@ -1839,13 +1905,9 @@ def event_content_digest(event: dict[str, Any]) -> str:
     content.pop("delivery", None)
     diagnostics = content.get("diagnostics")
     if isinstance(diagnostics, dict):
-        for key in (
-            "dispatchLog",
-            "queue",
-            "writefailRecovery",
-            "sourceSpecificRecoveredIncidents",
-        ):
-            diagnostics.pop(key, None)
+        if not omit_dispatch_log_in_message(event):
+            diagnostics.pop("dispatchLog", None)
+        diagnostics.pop("sourceSpecificRecoveredIncidents", None)
         if not diagnostics:
             content.pop("diagnostics", None)
     canonical = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -2102,9 +2164,10 @@ def record_accepted_clear_notification(
     accepted = incident_state.get("acceptedClearNotifications")
     if not isinstance(accepted, dict):
         accepted = {}
+    else:
+        accepted = dict(accepted)
     prior_sequence = incident_state.get("acceptedClearNotificationSequence")
     sequence = (prior_sequence if type(prior_sequence) is int and prior_sequence >= 0 else 0) + 1
-    incident_state["acceptedClearNotificationSequence"] = sequence
     digest = accepted_clear_notification_key(event, normalized)
     event_identity_digest = event_replay_identity_digest(event, normalized)
     accepted[digest] = {
@@ -2123,14 +2186,8 @@ def record_accepted_clear_notification(
             for key, decision in closures[:16]
         ],
     }
-    ordered = sorted(
-        accepted.items(),
-        key=lambda item: (
-            item[1].get("sequence") if isinstance(item[1], dict) and type(item[1].get("sequence")) is int else 0,
-            item[0],
-        ),
-    )
-    incident_state["acceptedClearNotifications"] = dict(ordered[-50:])
+    incident_state["acceptedClearNotifications"] = prune_accepted_clear_notifications(accepted)
+    incident_state["acceptedClearNotificationSequence"] = sequence
 
 
 def pending_clear_notification_decision(
@@ -3631,18 +3688,42 @@ def record_flap_trip(
     key: str,
     now: int,
     event_identity_digest: str | None = None,
+    *,
+    processed_identities: set[str] | None = None,
 ) -> dict[str, Any]:
     """Record one raw trip for incident_key at wall-clock `now`, pruning the
     sliding window. Counts input per raw trip (C1)."""
-    entry = flap_entry(flap_state, key)
-    references = entry.get("eventIdentityDigests")
+    settled = processed_identities or set()
+    unresolved_count = 0
+    for candidate in flap_state.values():
+        if not isinstance(candidate, dict):
+            continue
+        candidate_references = candidate.get("eventIdentityDigests")
+        if not isinstance(candidate_references, list):
+            continue
+        unresolved = [
+            digest for digest in candidate_references
+            if isinstance(digest, str) and digest not in settled
+        ]
+        candidate["eventIdentityDigests"] = unresolved
+        unresolved_count += len(unresolved)
+    existing_entry = flap_state.get(key)
+    references = existing_entry.get("eventIdentityDigests") if isinstance(existing_entry, dict) else None
     if not isinstance(references, list):
         references = []
-    if event_identity_digest is not None and event_identity_digest in references:
-        return entry
+    if (
+        event_identity_digest is not None
+        and event_identity_digest in references
+        and isinstance(existing_entry, dict)
+    ):
+        return existing_entry
+    if event_identity_digest is not None:
+        if unresolved_count >= FLAP_EVENT_REFERENCE_LIMIT:
+            raise FlapReferenceCapacityError("unreceipted flap references exhaust capacity")
+    entry = flap_entry(flap_state, key)
     if event_identity_digest is not None:
         references.append(event_identity_digest)
-        entry["eventIdentityDigests"] = references[-FLAP_EVENT_REFERENCE_LIMIT:]
+        entry["eventIdentityDigests"] = references
     pruned = [t for t in entry["tripTimestamps"] if isinstance(t, (int, float)) and 0 <= now - t <= FLAP_WINDOW_SECONDS]
     pruned.append(now)
     entry["tripTimestamps"] = pruned
@@ -3884,7 +3965,13 @@ def flap_scan_outbox(paths: dict[str, Path]) -> int:
                 evidence_fingerprint=event_evidence_fingerprint(event, normalized),
                 now=now,
             )
-            entry = record_flap_trip(flap_state, key, now, identity_digest)
+            entry = record_flap_trip(
+                flap_state,
+                key,
+                now,
+                identity_digest,
+                processed_identities=set(processed) if isinstance(processed, dict) else set(),
+            )
             decision = flap_evaluate(entry, now)
             if decision.get("emit"):
                 entry["pendingStormNotification"] = {
@@ -5343,6 +5430,23 @@ def record_state(paths: dict[str, Path], **updates: Any) -> None:
     atomic_write_json(paths["state"], state)
 
 
+def requeue_claimed_event(claimed: Path, paths: dict[str, Path]) -> Path:
+    retry_path = safe_child_path(paths["outbox"], original_name_from_processing(claimed))
+    os.replace(claimed, retry_path)
+    fsync_parent(retry_path)
+    return retry_path
+
+
+def state_authority_failure_label(exc: Exception) -> str:
+    if isinstance(exc, IncidentStateCorruptError):
+        return "incident_state_corrupt"
+    if isinstance(exc, AcceptedClearNotificationCapacityError):
+        return "accepted_clear_notification_capacity"
+    if isinstance(exc, ClosedHistoryCapacityError):
+        return "closed_history_capacity"
+    return "processed_receipt_state_invalid"
+
+
 def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
     claimed = claim(path, paths["processing"])
     try:
@@ -5383,17 +5487,22 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
 
     try:
         incident_state = load_incident_state(paths)
-    except (ProcessedReceiptCapacityError, ProcessedReceiptValidationError) as exc:
-        retry_path = safe_child_path(paths["outbox"], original_name_from_processing(claimed))
-        os.replace(claimed, retry_path)
-        fsync_parent(retry_path)
+    except (
+        AcceptedClearNotificationCapacityError,
+        ClosedHistoryCapacityError,
+        IncidentStateCorruptError,
+        ProcessedReceiptCapacityError,
+        ProcessedReceiptValidationError,
+    ) as exc:
+        retry_path = requeue_claimed_event(claimed, paths)
+        failure_label = state_authority_failure_label(exc)
         append_dispatch_log(paths, {
-            "type": "processed_receipt_state_invalid",
+            "type": failure_label,
             "eventId": redacted_state_text(event.get("id"), 128),
             "path": str(retry_path),
             "errorKind": type(exc).__name__,
         })
-        return False, f"processed_receipt_state_invalid: {exc}"
+        return False, f"{failure_label}: {exc}"
 
     replay_identity = event_replay_identity_digest(event, normalized)
     replay_content = event_content_digest(event)
@@ -5587,16 +5696,16 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
             event_diagnostics = event.setdefault("diagnostics", {})
             if isinstance(event_diagnostics, dict):
                 event_diagnostics["sourceSpecificRecoveredIncidents"] = recovered_keys
-            for accepted_key, accepted_decision in suppressed_accepted_closures:
-                finalize_accepted_clear(
-                    incident_state, accepted_key, event, accepted_decision, normalized
-                )
             receipt_decision = "accepted_clear_suppressed"
         elif clear_decision is not None and clear_decision.status is ClearStatus.REJECTED:
             receipt_decision = "clear_rejected"
         elif clear_decision is not None and clear_decision.status is ClearStatus.CANDIDATE:
             receipt_decision = "clear_candidate"
         try:
+            for accepted_key, accepted_decision in suppressed_accepted_closures:
+                finalize_accepted_clear(
+                    incident_state, accepted_key, event, accepted_decision, normalized
+                )
             record_processed_event(
                 incident_state,
                 event,
@@ -5654,18 +5763,17 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
         incident_state,
         [key for key, _ in accepted_closures if key != normalized.incident_key],
     )
-    if accepted_closures:
-        for accepted_key, accepted_decision in accepted_closures:
-            finalize_accepted_clear(
-                incident_state, accepted_key, event, accepted_decision, normalized
-            )
-        record_accepted_clear_notification(
-            incident_state, event, normalized, accepted_closures
-        )
     if accepted_closures or proof_state_changes:
         failure_type = "clear_state_persist_failed" if accepted_closures else "proof_state_persist_failed"
         try:
             if accepted_closures:
+                for accepted_key, accepted_decision in accepted_closures:
+                    finalize_accepted_clear(
+                        incident_state, accepted_key, event, accepted_decision, normalized
+                    )
+                record_accepted_clear_notification(
+                    incident_state, event, normalized, accepted_closures
+                )
                 record_processed_event(
                     incident_state,
                     event,
@@ -5678,16 +5786,22 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
                 )
             save_incident_state(paths, incident_state)
         except Exception as exc:
-            retry_path = safe_child_path(paths["outbox"], original_name_from_processing(claimed))
-            os.replace(claimed, retry_path)
-            fsync_parent(retry_path)
+            retry_path = requeue_claimed_event(claimed, paths)
+            result_type = (
+                state_authority_failure_label(exc)
+                if isinstance(
+                    exc,
+                    (AcceptedClearNotificationCapacityError, ClosedHistoryCapacityError),
+                )
+                else failure_type
+            )
             append_dispatch_log(paths, {
-                "type": failure_type,
+                "type": result_type,
                 "eventId": event.get("id"),
                 "path": str(retry_path),
                 "error": str(exc),
             })
-            return False, f"{failure_type}: {exc}"
+            return False, f"{result_type}: {exc}"
 
     stamp_delivery_freshness(event, int(time.time()))
     text = format_event(event)

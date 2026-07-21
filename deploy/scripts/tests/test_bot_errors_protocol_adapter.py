@@ -213,7 +213,11 @@ class ProtocolAdapterTests(unittest.TestCase):
     def test_malformed_and_unsupported_events_return_bounded_typed_reasons(self) -> None:
         cases = [
             ({"schemaVersion": 99}, "unsupported_schema_version"),
-            ({"schemaVersion": 2, "eventType": "alert"}, "missing_incident_identity"),
+            ({
+                "schemaVersion": 2,
+                "id": "missing-incident-identity",
+                "eventType": "alert",
+            }, "missing_incident_identity"),
             ({
                 **self.fixture["version2"]["alert"],
                 "machine": "fixture-host",

@@ -38,6 +38,7 @@ class QuarantineReasonCode(str, Enum):
     INVALID_V2_OBSERVATION = "invalid_v2_observation"
     INVALID_V2_CLEAR_POLICY = "invalid_v2_clear_policy"
     INVALID_V2_REMEDIATION = "invalid_v2_remediation"
+    INVALID_EVENT_ID = "invalid_event_id"
     IDENTITY_COLLISION = "identity_collision"
 
 
@@ -157,6 +158,7 @@ _RECEIPT_DISPLAY_IDENTITY_MAX_LENGTH = 128
 _RECEIPT_NOTIFICATION_STATES = {"not_applicable", "pending", "delivered"}
 _PROOF_REF_MAX_LENGTH = 512
 _IDENTITY_FIELD_MAX_LENGTH = 256
+_EVENT_ID_MAX_LENGTH = 4096
 _INCIDENT_KEY_MAX_LENGTH = 512
 _MAX_SAFE_INTEGER = 9_007_199_254_740_991
 _CLEAR_REASON_MAX_LENGTH = 256
@@ -693,6 +695,8 @@ def normalize_observation(
     if type(raw_version) is not int or raw_version not in {1, 2}:
         return _reason(QuarantineReasonCode.UNSUPPORTED_SCHEMA_VERSION)
     schema_version = int(raw_version)
+    if schema_version == 2 and not _bounded_identity(event.get("id"), _EVENT_ID_MAX_LENGTH):
+        return _reason(QuarantineReasonCode.INVALID_EVENT_ID)
 
     event_type = event.get("eventType", "alert" if schema_version == 1 else None)
     if not isinstance(event_type, str) or event_type not in {"alert", "clear"}:

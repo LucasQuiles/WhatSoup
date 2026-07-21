@@ -1104,6 +1104,14 @@ class DispatcherClearEnforcementTests(IsolatedDispatcherTestCase):
             self.mod.finalize_accepted_clear(state, key, event, decision)
             self.assert_isolated()
             self.mod.record_accepted_clear_notification(state, event, observation, [(key, decision)])
+            digest = self.mod.clear_event_identity_digest(event)
+            if index < 54:
+                state["acceptedClearNotifications"][digest]["notificationState"] = "delivered"
+                for closed in state["closedHistory"]:
+                    if closed.get("incidentKey") == key:
+                        old = now - self.mod.PROCESSED_EVENT_MAX_AGE_SECONDS - index - 1
+                        closed["receiptTime"] = old
+                        closed["closedAt"] = old
             last_event = event
         self.assertEqual(len(state["acceptedClearNotifications"]), 50)
         assert last_event is not None
@@ -1308,6 +1316,9 @@ class DispatcherClearEnforcementTests(IsolatedDispatcherTestCase):
             self.mod.record_accepted_clear_notification(
                 state, event, observation, [(observation.incident_key, decision)]
             )
+            if index < 5:
+                digest = self.mod.clear_event_identity_digest(event)
+                state["acceptedClearNotifications"][digest]["notificationState"] = "delivered"
             events.append((event, observation))
         self.assert_isolated(paths)
         self.mod.save_incident_state(paths, state)
@@ -1347,8 +1358,8 @@ class DispatcherClearEnforcementTests(IsolatedDispatcherTestCase):
         }
         self.assert_isolated(paths)
         self.mod.save_incident_state(paths, malformed)
-        bounded = self.mod.load_incident_state(paths)
-        self.assertEqual(len(bounded["acceptedClearNotifications"]), 50)
+        with self.assertRaises(self.mod.AcceptedClearNotificationCapacityError):
+            self.mod.load_incident_state(paths)
 
     def test_long_prefix_event_ids_do_not_alias_retry_authorization(self) -> None:
         now = int(time.time())
