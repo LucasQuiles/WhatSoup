@@ -127,6 +127,14 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   // imessage adapter/port/types graduated out of TRACKED_UNREACHABLE: the
   // factory now constructs the imsg/bluebubbles ports (this branch), so all
   // three are reachable from a production root.
+  // Agent365 capability client (PR #2019): identity-bridge capability module
+  // extracted from the #1974 dev omnibus and preserved for review. Owner-gated
+  // (ratified Agent365 arch; fleet mutation held pending P1-P5) — intentionally
+  // unwired: no production root imports it yet. Wire in or graduate out when the
+  // gate opens.
+  { path: 'src/core/capabilities/agent365-v1-contract.ts', issue: '#2019', reason: 'Agent365 v1 contract parse/validate; owner-gated identity-bridge module, intentionally unwired pending P1-P5 (extracted from #1974)' },
+  { path: 'src/core/capabilities/agent365-client.ts', issue: '#2019', reason: 'Agent365 capability client (send-once); owner-gated, intentionally unwired pending P1-P5 (extracted from #1974)' },
+  { path: 'src/core/capabilities/loopback-endpoint.ts', issue: '#2019', reason: 'loopback capability-origin parser used by agent365-client; unwired with its consumer pending P1-P5 (extracted from #1974)' },
 ];
 
 // ---------------------------------------------------------------------------
