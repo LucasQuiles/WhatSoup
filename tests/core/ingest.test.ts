@@ -224,6 +224,52 @@ describe('REQ-002.AC-01: message storage', () => {
 
     // Runtime was called
     expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledOnce();
+    const stored = rows[0];
+    expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceMessagePk: stored.pk }),
+    );
+  });
+
+  it('threads an upgraded history placeholder primary key into runtime dispatch', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const handler = makeIngest(db, messenger, runtime);
+    const msg = makeIncomingMessage({ messageId: 'history-upgrade' });
+    db.raw.prepare(`
+      INSERT INTO messages
+        (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp)
+      VALUES (?, ?, ?, ?, 'history', 0, ?)
+    `).run(msg.chatJid, msg.chatJid.replaceAll('@', '_at_'), msg.senderJid, msg.messageId, msg.timestamp - 1);
+    const placeholder = db.raw.prepare(
+      'SELECT pk FROM messages WHERE message_id = ?',
+    ).get(msg.messageId) as { pk: number };
+
+    await runIngest(handler, msg);
+
+    expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledOnce();
+    expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceMessagePk: placeholder.pk }),
+    );
+  });
+
+  it('skips duplicate delivery without assigning source identity to the retry', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const handler = makeIngest(db, messenger, runtime);
+    const first = makeIncomingMessage({ messageId: 'duplicate-source' });
+    const retry = makeIncomingMessage({ messageId: first.messageId });
+
+    await runIngest(handler, first);
+    await runIngest(handler, retry);
+
+    expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledTimes(1);
+    expect(retry.sourceMessagePk).toBeUndefined();
+    const stored = db.raw.prepare(
+      'SELECT pk FROM messages WHERE message_id = ?',
+    ).get(first.messageId) as { pk: number };
+    expect(first.sourceMessagePk).toBe(stored.pk);
   });
 
   it('strips the bot\'s own @mention from inbound group text before dispatch, keeping the stored copy raw (#1854)', async () => {

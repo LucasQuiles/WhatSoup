@@ -159,6 +159,14 @@ export function storeMessageIfNew(db: Database, msg: StoreMessageInput): boolean
 
 // --- Read path ---
 
+/** Return the messages-table primary key for a transport message id. */
+export function getMessagePkById(db: Database, messageId: string): number | null {
+  const row = db.raw.prepare(
+    'SELECT pk FROM messages WHERE message_id = ?',
+  ).get(messageId) as { pk: number } | undefined;
+  return row?.pk ?? null;
+}
+
 /**
  * Return the last `limit` messages in a conversation, ordered chronologically (ASC).
  * Fetches DESC for efficiency, reverses in JS.

@@ -10,7 +10,7 @@ import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
 import type { CapabilityGrantManager } from '../lib/capability-grant.ts';
 import { classifyErrorForInbound } from './inbound-failure-class.ts';
-import { storeMessageIfNew } from './messages.ts';
+import { getMessagePkById, storeMessageIfNew } from './messages.ts';
 import { stripLoneSurrogates } from './sanitize-surrogates.ts';
 import RE2 from 're2';
 import { isAdminMessage, parseAdminCommand } from './command-router.ts';
@@ -73,6 +73,7 @@ interface DisplacementIncidentResult {
 interface StoredIncomingMessage {
   conversationKey: string;
   isNew: boolean;
+  messagePk: number;
 }
 
 function persistIncomingMessage(db: Database, msg: IncomingMessage): StoredIncomingMessage | null {
@@ -94,7 +95,11 @@ function persistIncomingMessage(db: Database, msg: IncomingMessage): StoredIncom
       quotedMessageId: msg.quotedMessageId,
       rawMessage: msg.rawMessage != null ? JSON.stringify(msg.rawMessage) : null,
     });
-    return { conversationKey, isNew };
+    const messagePk = getMessagePkById(db, msg.messageId);
+    if (messagePk === null) {
+      throw new Error('message row missing after persistence');
+    }
+    return { conversationKey, isNew, messagePk };
   } catch (err) {
     log.error({ err, messageId: msg.messageId }, 'failed to store message');
     return null;
@@ -389,6 +394,7 @@ export function createIngestHandler(
           log.debug({ messageId: msg.messageId, reason: 'duplicate' }, 'skipping duplicate message delivery');
           return;
         }
+        msg.sourceMessagePk = storedMessage.messagePk;
 
         // 1b+. Feed-visible inbound log -- carries messageId + chatJid for preview enrichment.
         // Guard: !isFromMe is guaranteed here (isFromMe returns above).

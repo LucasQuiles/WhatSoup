@@ -74,6 +74,8 @@ export interface IncomingMessage {
   rawMessage?: unknown;
   /** durability: seq from inbound_events journal — threads the inbound event through the runtime lifecycle */
   inboundSeq?: number;
+  /** Primary key of the newly stored inbound message used by runtime side effects. */
+  sourceMessagePk?: number;
   /**
    * Set when this is a synthetic turn injected by the agent-job dispatcher
    * (a scheduled `agent_job` bead firing), not a real inbound WhatsApp message.

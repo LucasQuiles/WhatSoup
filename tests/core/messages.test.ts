@@ -21,6 +21,7 @@ import {
   incrementEnrichmentRetries,
   resetEnrichmentErrors,
   hasFromMeReplyAfter,
+  getMessagePkById,
   type StoreMessageInput,
   type MessageRow,
 } from '../../src/core/messages.ts';
@@ -140,6 +141,17 @@ describe('messages', () => {
     expect(results[0].content).toBe('original'); // Content remains unchanged
   });
 
+  it('resolves a newly stored message primary key by transport message id', () => {
+    const msg = makeMsg();
+
+    expect(getMessagePkById(db, msg.messageId)).toBeNull();
+    expect(storeMessageIfNew(db, msg)).toBe(true);
+
+    const messagePk = getMessagePkById(db, msg.messageId);
+    expect(messagePk).toEqual(expect.any(Number));
+    expect(messagePk).toBeGreaterThan(0);
+  });
+
   it('storeMessageIfNew upgrades a history placeholder when the live body arrives', () => {
     const id = `msg-${randomBytes(4).toString('hex')}`;
     db.raw.prepare(`
@@ -155,6 +167,9 @@ describe('messages', () => {
       timestamp: BASE_TS - 10,
     });
 
+    const placeholderPk = (db.raw.prepare(
+      'SELECT pk FROM messages WHERE message_id = ?',
+    ).get(id) as { pk: number }).pk;
     const upgraded = storeMessageIfNew(db, makeMsg({
       chatJid: 'group1@g.us',
       conversationKey: 'group1_at_g.us',
@@ -169,6 +184,10 @@ describe('messages', () => {
     }));
 
     expect(upgraded).toBe(true);
+    const upgradedPk = (db.raw.prepare(
+      'SELECT pk FROM messages WHERE message_id = ?',
+    ).get(id) as { pk: number }).pk;
+    expect(upgradedPk).toBe(placeholderPk);
     const row = db.raw.prepare(`
       SELECT chat_jid, conversation_key, sender_jid, sender_name, content, content_text,
              content_type, timestamp, raw_message
