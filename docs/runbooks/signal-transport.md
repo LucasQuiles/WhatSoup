@@ -182,7 +182,7 @@ know:
 | `credentialLifecycle.environment.authDir` | `out_of_band_via_signal_cli` (or `signalCliDataDir` when supplied) |
 | `credentialLifecycle.currentAuthBond.status` | `"missing"` — credentials live with signal-cli, not in WhatSoup |
 | `credentialLifecycle.currentAuthBond.issues` | `["signal_credentials_managed_out_of_band_by_signal_cli"]` |
-| `credentialLifecycle.recentEvents` | synthesized `connect_start` + `connection_open` (when connected) or `connection_close` (when disconnected, with `reason`) |
+| `credentialLifecycle.recentEvents` | real accumulated events from the adapter's bounded ring buffer (cap 50). Includes `connect_start`, `connection_open`, `connection_close` (with `reason`), and `device_bond_lost` when the adapter parks at `auth_required` (signal-cli's unlinked-account signal — operator action required) |
 
 The raw phone number is NEVER emitted into the snapshot. Credential
 introspection requires an RPC round-trip to signal-cli; the snapshot does

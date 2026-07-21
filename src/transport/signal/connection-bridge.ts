@@ -271,6 +271,9 @@ export class SignalConnection extends EventEmitter implements RuntimeConnection 
         connected,
         stateChangedAt: health.since.toISOString(),
         lastDisconnectReason: health.reasonCode ?? null,
+        // Phase 3 slice 2: surface real adapter lifecycle events instead of
+        // the synthesized 2-event timeline.
+        recentLifecycleEvents: this.adapter.recentLifecycleEvents(),
       });
     }
     return emptyConnectionStateSnapshot({

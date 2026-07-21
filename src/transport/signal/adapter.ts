@@ -49,6 +49,7 @@ import type {
 import type { SupportsReactions, SupportsTyping, SupportsReadReceipts, SupportsDelete } from '../contract/extensions.ts';
 import { E164_RE, SIGNAL_UUID_RE, SIGNAL_GROUP_ID_RE, type SignalConfig } from './types.ts';
 import type { InboundSignal, SignalPort, SignalPortError } from './port.ts';
+import type { CredentialLifecycleEvent, CredentialLifecycleEventName } from '../connection.ts';
 
 // ---------------------------------------------------------------------------
 // Listener registry — message/state/error share one map, extension events
@@ -177,6 +178,18 @@ export class SignalAdapter
     read: new Set(),
     delete: new Set(),
   };
+
+  /**
+   * Bounded ring buffer of recent CredentialLifecycleEvent entries. Phase 3
+   * slice 2: replaces the synthesized 2-event timeline that
+   * signalConnectionStateSnapshot() used to emit. The buffer is drained by
+   * SignalConnection.getConnectionState() via recentLifecycleEvents().
+   *
+   * Cap mirrors the WhatsApp side's recentEvents bound (50 entries). A
+   * flapping daemon cannot grow it unboundedly.
+   */
+  private static readonly LIFECYCLE_EVENT_CAP = 50;
+  private readonly lifecycleEvents: CredentialLifecycleEvent[] = [];
 
   public readonly channelId: ChannelId;
   private readonly self: ParticipantRef;
@@ -745,8 +758,77 @@ export class SignalAdapter
   }
 
   private transitionTo(next: AdapterHealth): void {
+    const prev = this.health;
     this.health = next;
+    this.recordLifecycleEventForTransition(prev, next);
     this.safeEmit(this.listeners.state, next);
+  }
+
+  /**
+   * Record a CredentialLifecycleEvent for a state transition. Mirrors the
+   * WhatsApp side's recordCredentialLifecycle() pattern: each transition
+   * produces at least one event. The auth_required transition is special-cased
+   * to emit `device_bond_lost` because signal-cli surfaces an unlinked
+   * account as a 401 on the next RPC — distinguishing "daemon unreachable"
+   * (transient) from "this device was unlinked" (operator action required).
+   */
+  private recordLifecycleEventForTransition(prev: AdapterHealth, next: AdapterHealth): void {
+    const at = next.since.toISOString();
+    const reconnectAttempts = 0;
+    const reconnectPhase = 'backoff' as const;
+    const base = { at, reconnectAttempts, reconnectPhase };
+
+    // Map adapter state → connection state for the CredentialLifecycleEvent.state field.
+    // The adapter uses 'auth_required' as a distinct state; the lifecycle event schema
+    // uses 'disconnected' for anything not actively connected.
+    const eventState: CredentialLifecycleEvent['state'] = next.state === 'connected' ? 'connected' : 'disconnected';
+
+    if (prev.state !== 'starting' && next.state === 'starting') {
+      // A fresh connect attempt.
+      this.pushLifecycleEvent({ ...base, event: 'connect_start', state: eventState });
+    }
+
+    if (next.state === 'connected' && prev.state !== 'connected') {
+      this.pushLifecycleEvent({ ...base, event: 'connection_open', state: eventState });
+    }
+
+    if (next.state === 'disconnected' && prev.state !== 'disconnected') {
+      this.pushLifecycleEvent({
+        ...base,
+        event: 'connection_close',
+        state: eventState,
+        reason: next.reasonCode ?? undefined,
+      });
+    }
+
+    if (next.state === 'auth_required' && prev.state !== 'auth_required') {
+      // The unlinked-account signal: signal-cli returned 401 on a poll.
+      // Emit device_bond_lost so dashboards distinguish this from a transient
+      // daemon blip — the operator must re-link the device out-of-band.
+      this.pushLifecycleEvent({
+        ...base,
+        event: 'device_bond_lost',
+        state: eventState,
+        reason: next.reasonCode ?? 'signal_device_unlinked',
+      });
+    }
+  }
+
+  private pushLifecycleEvent(event: CredentialLifecycleEvent): void {
+    this.lifecycleEvents.push(event);
+    // Ring-buffer eviction: drop oldest while over cap.
+    while (this.lifecycleEvents.length > SignalAdapter.LIFECYCLE_EVENT_CAP) {
+      this.lifecycleEvents.shift();
+    }
+  }
+
+  /**
+   * Public accessor: returns the recent lifecycle event history (bounded ring
+   * buffer, oldest first). Consumer: SignalConnection.getConnectionState()
+   * surfaces these as `credentialLifecycle.recentEvents` in health.json.
+   */
+  recentLifecycleEvents(): CredentialLifecycleEvent[] {
+    return this.lifecycleEvents.slice();
   }
 }
 

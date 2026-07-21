@@ -20,6 +20,8 @@ export interface MockPortOptions {
   sendError?: Error;
   /** Error to throw from verifyCredentials(). */
   verifyError?: Error;
+  /** Error to throw from listInboundSince(); if set, supersedes nextInbound. */
+  listError?: Error;
 }
 
 export class MockSignalPort implements SignalPort {
@@ -43,6 +45,7 @@ export class MockSignalPort implements SignalPort {
   }
 
   async listInboundSince(_since: Date, _pageSize?: number): Promise<readonly InboundSignal[]> {
+    if (this.opts.listError) throw this.opts.listError;
     const records = this.opts.nextInbound ?? [];
     // One-shot: clear after delivery so subsequent calls return empty.
     this.opts = { ...this.opts, nextInbound: undefined };
