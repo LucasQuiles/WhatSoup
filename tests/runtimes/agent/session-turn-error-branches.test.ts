@@ -5,10 +5,7 @@
 // (session.test.ts, session-provider-switches.test.ts, session-budget.test.ts,
 // session-checkpoints.test.ts, zombie-sessions.test.ts, …) leave behind:
 //
-//   * buildChildEnv per-provider credential FORWARDING branches
-//     (codex/gemini/opencode env-var present-vs-absent) — src lines ~145-203.
-//     Existing tests only exercise the throw/unknown-provider paths, never the
-//     "key is present → forward it" conditionals.
+//   * buildChildEnv per-provider protected-credential exclusion branches.
 //   * getProviderBinary (exported) managed-loop → null branch — src line 266.
 //   * opencodeUsesConfigModel true / false / whitespace — src lines 280-281.
 //   * resolveProviderArgs (via __provider_switch_for_test) value branches:
@@ -170,15 +167,14 @@ async function withEnv(
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// buildChildEnv — per-provider credential FORWARDING branches
+// buildChildEnv — protected credential boundary branches
 // ════════════════════════════════════════════════════════════════════════════
 
-describe('buildChildEnv — credential forwarding branches', () => {
-  it('claude-cli forwards OPENAI_API_KEY when present, never ANTHROPIC_API_KEY', async () => {
+describe('buildChildEnv — protected credential boundary branches', () => {
+  it('claude-cli excludes protected API keys even when present', async () => {
     await withEnv({ OPENAI_API_KEY: 'env-openai-aux', ANTHROPIC_API_KEY: 'env-anthropic' }, () => {
       const env = buildChildEnv('claude-cli');
-      expect(env.OPENAI_API_KEY).toBe('env-openai-aux');
-      // Claude uses subscription auth — the Anthropic key is deliberately excluded.
+      expect(env.OPENAI_API_KEY).toBeUndefined();
       expect(env.ANTHROPIC_API_KEY).toBeUndefined();
     });
   });
@@ -190,10 +186,10 @@ describe('buildChildEnv — credential forwarding branches', () => {
     });
   });
 
-  it('codex-cli forwards OPENAI_API_KEY when present', async () => {
+  it('codex-cli excludes OPENAI_API_KEY even when present', async () => {
     await withEnv({ OPENAI_API_KEY: 'env-openai-codex' }, () => {
       const env = buildChildEnv('codex-cli');
-      expect(env.OPENAI_API_KEY).toBe('env-openai-codex');
+      expect(env.OPENAI_API_KEY).toBeUndefined();
     });
   });
 
@@ -204,11 +200,11 @@ describe('buildChildEnv — credential forwarding branches', () => {
     });
   });
 
-  it('gemini-cli forwards both GEMINI_API_KEY and GOOGLE_API_KEY when present', async () => {
+  it('gemini-cli excludes both protected keys even when present', async () => {
     await withEnv({ GEMINI_API_KEY: 'env-gemini', GOOGLE_API_KEY: 'env-google' }, () => {
       const env = buildChildEnv('gemini-cli');
-      expect(env.GEMINI_API_KEY).toBe('env-gemini');
-      expect(env.GOOGLE_API_KEY).toBe('env-google');
+      expect(env.GEMINI_API_KEY).toBeUndefined();
+      expect(env.GOOGLE_API_KEY).toBeUndefined();
     });
   });
 
@@ -220,7 +216,7 @@ describe('buildChildEnv — credential forwarding branches', () => {
     });
   });
 
-  it('opencode-cli forwards only the credential selected by the model prefix', async () => {
+  it('opencode-cli excludes every protected credential regardless of model prefix', async () => {
     await withEnv(
       {
         OPENAI_API_KEY: 'env-openai-oc',
@@ -230,7 +226,7 @@ describe('buildChildEnv — credential forwarding branches', () => {
       },
       () => {
         const env = buildChildEnv('opencode-cli', undefined, 'deepseek/test-model');
-        expect(env.DEEPSEEK_API_KEY).toBe('env-deepseek');
+        expect(env.DEEPSEEK_API_KEY).toBeUndefined();
         expect(env.OPENAI_API_KEY).toBeUndefined();
         expect(env.ANTHROPIC_API_KEY).toBeUndefined();
         expect(env.MINIMAX_API_KEY).toBeUndefined();
@@ -238,20 +234,20 @@ describe('buildChildEnv — credential forwarding branches', () => {
     );
   });
 
-  it('opencode-cli adds the model-prefix key service (e.g. xai/grok → XAI_API_KEY)', async () => {
+  it('opencode-cli validates a model-prefix service without exporting its key', async () => {
     await withEnv({ XAI_API_KEY: 'env-xai' }, () => {
       const env = buildChildEnv('opencode-cli', undefined, 'xai/grok-4');
-      expect(env.XAI_API_KEY).toBe('env-xai');
+      expect(env.XAI_API_KEY).toBeUndefined();
     });
   });
 
-  it('opencode-cli adds a mapped custom-endpoint apiKeyService key', async () => {
+  it('opencode-cli validates a mapped custom endpoint without exporting its key', async () => {
     await withEnv({ GROQ_API_KEY: 'env-groq' }, () => {
       const env = buildChildEnv('opencode-cli', undefined, undefined, {
         baseUrl: 'https://endpoint.example/v1',
         apiKeyService: 'groq',
       });
-      expect(env.GROQ_API_KEY).toBe('env-groq');
+      expect(env.GROQ_API_KEY).toBeUndefined();
     });
   });
 
