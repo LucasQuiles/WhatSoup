@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Card, Pill, Button } from '../primitives'
 import ConfirmDialog from '../ConfirmDialog'
@@ -18,8 +18,9 @@ import type { ApprovalEntry, ApprovalsPayload } from '../../types'
  * the SAME path an in-chat vote takes (UX-20 parity). Console button,
  * poll vote, and reaction are three renderings of one decision; first
  * resolution wins, and a stale decision surfaces the race honestly (409
- * → error toast, no fake success). textFallback entries are read-only
- * with the chat-lane note (v1). Fail-closed: a fleet read error
+ * → error toast, no fake success). textFallback entries are answerable
+ * from the console (v1.1): the decision delivers as the typed answer
+ * through the same poll-resolution path. Fail-closed: a fleet read error
  * renders an error panel — never a fake-empty queue (PDR-3 invariant).
  */
 
@@ -114,6 +115,7 @@ export function ApprovalsTab({ payload, isLoading, freshness, lineName }: {
           <ApprovalCard
             key={entry.mapKey}
             entry={entry}
+            observedAt={payload ? new Date(payload.observedAt).getTime() : 0}
             onDecide={(questionIndex, selectedOptions) => setPendingDecision({ entry, questionIndex, selectedOptions })}
           />
         ))
@@ -143,20 +145,14 @@ export function ApprovalsTab({ payload, isLoading, freshness, lineName }: {
   )
 }
 
-function ApprovalCard({ entry, onDecide }: {
+function ApprovalCard({ entry, observedAt, onDecide }: {
   entry: ApprovalEntry;
+  /** Fleet-stamped observation time (payload.observedAt) — the amber
+   *  threshold derives from props, never wall-clock (react-hooks/purity). */
+  observedAt: number;
   onDecide: (questionIndex: number, selectedOptions: string[]) => void;
 }) {
   const answeredCount = Object.keys(entry.answersCollected).length
-  const readOnly = entry.mode === 'textFallback'
-  // `now` in state (not Date.now() in render) keeps render pure per
-  // react-hooks/purity; ticked so the "closes soon" amber updates live
-  // (same idiom as ProvidersKeysCard).
-  const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 30_000)
-    return () => clearInterval(timer)
-  }, [])
 
   return (
     <Card variant="base" className="overflow-hidden">
@@ -170,7 +166,7 @@ function ApprovalCard({ entry, onDecide }: {
           )}
           {entry.hardClosesAt !== null && (
             <span
-              className={`c-label${entry.hardClosesAt - now < 60_000 ? ' text-s-warn' : ''}`}
+              className={`c-label${entry.hardClosesAt - observedAt < 60_000 ? ' text-s-warn' : ''}`}
               title={new Date(entry.hardClosesAt).toISOString()}
             >
               {`closes ${formatRelative(new Date(entry.hardClosesAt).toISOString())}`}
@@ -186,16 +182,16 @@ function ApprovalCard({ entry, onDecide }: {
             question={q}
             answered={entry.answersCollected[qi] !== undefined}
             isCurrent={qi === entry.currentQuestionIndex}
-            readOnly={readOnly}
+            readOnly={false}
             onDecide={onDecide}
           />
         ))}
         {answeredCount > 0 && (
           <span className="c-label text-text-2">{`${answeredCount} of ${entry.questions.length} answered`}</span>
         )}
-        {readOnly && (
-          <span className="c-label text-s-warn">
-            This question fell back to chat text — answer it in the conversation (console decisions for text-fallback land in a follow-up).
+        {entry.mode === 'textFallback' && (
+          <span className="c-label text-text-2">
+            Chat-text fallback mode — your decision is delivered as the typed answer through the same poll-resolution path.
           </span>
         )}
       </div>
@@ -236,8 +232,8 @@ function QuestionBlock({ questionIndex, question, answered, isCurrent, readOnly,
             {question.options.map((o) => (
               <Button
                 key={o.label}
-                size="sm"
-                variant={selected.has(o.label) ? 'success' : 'neutral'}
+                size="xs"
+                variant={selected.has(o.label) ? 'primary' : 'neutral'}
                 title={o.description}
                 onClick={() => toggle(o.label)}
                 aria-pressed={selected.has(o.label)}

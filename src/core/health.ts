@@ -71,7 +71,7 @@ export interface HealthDeps {
     mapKey: string;
     questionIndex: number;
     selectedOptions: string[];
-  }) => { ok: true } | { ok: false; error: string; code: 'not_found' | 'stale' | 'invalid' };
+  }) => Promise<{ ok: true } | { ok: false; error: string; code: 'not_found' | 'stale' | 'invalid' }>;
   // Instance identity for control-plane fleet discovery
   instanceName: string;
   instanceType: string;  // 'chat' | 'agent' | 'passive'
@@ -657,6 +657,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       });
       req.on('end', () => {
         if (destroyed) return;
+        void (async () => {
         let parsed: unknown;
         try {
           parsed = JSON.parse(body);
@@ -675,7 +676,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           return;
         }
         try {
-          const result = deps.resolvePollDecision!({
+          const result = await deps.resolvePollDecision!({
             mapKey: d.mapKey,
             questionIndex: d.questionIndex,
             selectedOptions: d.selectedOptions as string[],
@@ -693,6 +694,13 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: 'internal error' }));
         }
+        })().catch((err) => {
+          log.error({ err }, 'POST /poll-decision: async wrapper failure');
+          if (!res.headersSent) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'internal error' }));
+          }
+        });
       });
       return;
     }
