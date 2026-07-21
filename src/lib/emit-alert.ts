@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { appendFileSync, existsSync } from 'node:fs';
 import { createChildLogger } from '../logger.ts';
 import {
+  BotErrorsProtocolValidationError,
   buildBotErrorsEvent,
   writeBotErrorsEvent,
   type BotErrorsCriticalAssetDiagnostic,
@@ -210,6 +211,9 @@ function withProtocol(
   protocol: BotErrorsProtocolInput | undefined,
 ): BotErrorsOutboxInput {
   if (protocol === undefined) return input;
+  if (protocol === null || typeof protocol !== 'object') {
+    throw new BotErrorsProtocolValidationError('Invalid BOT ERRORS protocol input');
+  }
   return {
     ...input,
     observation: protocol.observation,
