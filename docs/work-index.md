@@ -62,7 +62,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/plans/2026-07-17-macos-credential-durability.md` | plan | macos-credential-durability | 2026-07-17 |
 | `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | spec | turn-lifecycle-fitness-extraction-design | 2026-07-11 |
 | `docs/superpowers/specs/2026-07-17-macos-credential-durability-design.md` | spec | macos-credential-durability-design | 2026-07-17 |
-| `docs/superpowers/specs/2026-07-20-durable-incident-remediation-protocol-design.md` | spec | durable-incident-remediation-protocol-design | 2026-07-20 |
+| `docs/superpowers/specs/2026-07-20-durable-incident-remediation-protocol-design.md` | spec | durable-incident-remediation-protocol-design | 2026-07-21 |
 
 ### Cross-tree topic clusters (4)
 
@@ -158,9 +158,9 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-07-17-boundary-exit-parser-codeql-hardening.md` | plan | active | body-marker | boundary-exit-parser-codeql-hardening | 2026-07-17 |  |
 | `docs/superpowers/plans/2026-07-17-boundary-validator-ci-refactor.md` | plan | unknown | fallback | boundary-validator-ci-refactor | 2026-07-17 |  |
 | `docs/superpowers/plans/2026-07-17-macos-credential-durability.md` | plan | unknown | fallback | macos-credential-durability | 2026-07-17 |  |
-| `docs/superpowers/plans/2026-07-20-bot-errors-proof-lifecycle.md` | plan | pending | body-marker | bot-errors-proof-lifecycle | 2026-07-20 |  |
-| `docs/superpowers/plans/2026-07-20-bot-errors-supervision-and-stress.md` | plan | pending | body-marker | bot-errors-supervision-and-stress | 2026-07-20 |  |
-| `docs/superpowers/plans/2026-07-20-inline-proposal-admission-and-cleanup.md` | plan | pending | body-marker | inline-proposal-admission-and-cleanup | 2026-07-20 |  |
+| `docs/superpowers/plans/2026-07-20-bot-errors-proof-lifecycle.md` | plan | pending | body-marker | bot-errors-proof-lifecycle | 2026-07-21 |  |
+| `docs/superpowers/plans/2026-07-20-bot-errors-supervision-and-stress.md` | plan | pending | body-marker | bot-errors-supervision-and-stress | 2026-07-21 |  |
+| `docs/superpowers/plans/2026-07-20-inline-proposal-admission-and-cleanup.md` | plan | pending | body-marker | inline-proposal-admission-and-cleanup | 2026-07-21 |  |
 
 ### docs/superpowers/reviews  _(3 entries)_
 
@@ -195,7 +195,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-07-17-boundary-exit-parser-codeql-hardening-design.md` | spec | active | body-marker | boundary-exit-parser-codeql-hardening-design | 2026-07-17 |  |
 | `docs/superpowers/specs/2026-07-17-boundary-validator-ci-refactor-design.md` | spec | active | body-marker | boundary-validator-ci-refactor-design | 2026-07-17 |  |
 | `docs/superpowers/specs/2026-07-17-macos-credential-durability-design.md` | spec | unknown | fallback | macos-credential-durability-design | 2026-07-17 |  |
-| `docs/superpowers/specs/2026-07-20-durable-incident-remediation-protocol-design.md` | spec | unknown | body-marker | durable-incident-remediation-protocol-design | 2026-07-20 |  |
+| `docs/superpowers/specs/2026-07-20-durable-incident-remediation-protocol-design.md` | spec | unknown | body-marker | durable-incident-remediation-protocol-design | 2026-07-21 |  |
 
 ### docs/superpowers/specs/kill-session-transactional-cancellation  _(3 entries)_
 
@@ -216,4 +216,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-21T02:11:44Z from commit `69f12142ad5d54cd28bae09fcba8b7a8fa20deb4`
+- Generated at 2026-07-21T06:06:59Z from commit `f82159311bc5a4b737eb7e7854ab9373318618e8`
