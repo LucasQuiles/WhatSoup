@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-06-23T01:40:11Z",
+  "generatedAt": "2026-07-21T16:19:52Z",
   "scope": "bot-errors-runtime-scripts",
   "expectedHeadShaPolicy": "populated at deploy time by deploy step; absent here so committed state is observability-only",
   "files": [
@@ -27,7 +27,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "eb6ff9823b217c4cefb329c3a2ff71d0a54fa8bec97854d82718e530a30b79d8",
+      "sha256": "47e940f2f97b639b69358d80195fdd379ecde6866a35d2d1e09289f94f6d4bb6",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -35,6 +35,16 @@
         "sourceSpecificRecoveredIncidents",
         "event_line(\"incident_key\", incident_key(event))",
         "redacted_state_text"
+      ]
+    },
+    {
+      "path": "deploy/scripts/bot_errors_protocol.py",
+      "sha256": "11fe326117ad39df78946bbdfaf8004322c4510799610adec9542602d6d5e111",
+      "mustContain": [
+        "def normalize_observation",
+        "def evaluate_clear",
+        "class NormalizedObservation",
+        "class ClearDecision"
       ]
     },
     {
@@ -300,7 +310,7 @@
     },
     {
       "path": "src/lib/bot-errors-outbox.ts",
-      "sha256": "f8ade0f2b2b6531488d7acb4f23cead45f3c471dd5e82faedad5549eeb0f07fc",
+      "sha256": "39fba7d8b5410d4d8628ccf499ea3028b212d560c944a5aa63ad789207ac503d",
       "mustContain": [
         "AUTHORIZATION_BEARER",
         "WHATSAPP_SERVICE_UNIT",

@@ -766,12 +766,13 @@ def load_incident_state(paths: dict[str, Path]) -> dict[str, Any]:
     # whitelist would drop it and the once-per-day summary would re-fire every run.
     if isinstance(loaded.get("testLeakDaily"), dict):
         state["testLeakDaily"] = loaded["testLeakDaily"]
-    # Pattern F (§10 C0): flap-storm trip state must survive across dispatcher
+    # Pattern F: verified close→reopen state must survive across dispatcher
     # invocations (each run loads → processes → saves → exits), else an in-memory
     # sliding-window counter resets every run and a sustained burst never
     # accumulates. Keyed by incident_key.
     if isinstance(loaded.get("flapState"), dict):
         state["flapState"] = loaded["flapState"]
+        migrate_legacy_flap_state(state["flapState"], current)
     # Pattern D — transient tiering bookkeeping must survive across invocations
     # for the same reason as flapState: the promote window (transientSince anchor)
     # spans multiple one-shot runs. Without this load, every run resets the anchor
@@ -1877,6 +1878,13 @@ def finalize_accepted_clear(
     incident_state["closedHistory"] = prune_closed_history(
         [*history, closing_record], current
     )
+    flap_state = incident_state.get("flapState")
+    flap_record = flap_state.get(key) if isinstance(flap_state, dict) else None
+    if isinstance(flap_record, dict):
+        flap_record["lastAcceptedCloseAt"] = current
+        flap_record["lastAcceptedCloseObservationTime"] = closing_record["closingObservationTime"]
+        flap_record["livenessVerifiedAt"] = current
+        flap_record["underlyingClosed"] = True
     incident_state["openIncidents"].pop(key, None)
     incident_state.setdefault("lastSentAt", {}).pop(key, None)
     transient_state = incident_state.get("transientState")
@@ -2977,7 +2985,8 @@ def should_suppress_send(
         flap_state = incident_state.get("flapState")
         if isinstance(flap_state, dict):
             flap_rec = flap_state.get(key)
-            if isinstance(flap_rec, dict) and flap_rec.get("stormAt"):
+            underlying_open = isinstance(open_incidents.get(key), dict)
+            if isinstance(flap_rec, dict) and flap_rec.get("stormAt") and underlying_open:
                 return f"flap_storm_member: {key} consolidated into open flap storm"
     stronger = stronger_open_incident_for(event, incident_state)
     if stronger is not None:
@@ -3185,6 +3194,8 @@ def mark_incident_sent(
         incident_state.setdefault("lastSentAt", {})[key] = current
         existing = incident_state.setdefault("openIncidents", {}).get(key)
         existing_record = existing if isinstance(existing, dict) else {}
+        if not existing_record and FLAP_DETECTION:
+            record_verified_reopen_if_applicable(event, incident_state, current)
         reopen_record = None if existing_record else record_autoclose_reopen_if_recent(
             event, incident_state, key, current
         )
@@ -3657,31 +3668,71 @@ def mark_stale_incident_failed(record: dict[str, Any], event: dict[str, Any], cu
 
 
 # ---------------------------------------------------------------------------
-# Pattern F — flap-storm detection (design §9 + §10 C0/C1/C2/C4)
+# Pattern F — flap-storm detection (durable incident protocol §8)
 #
-# A flapping source (self-heal-then-fail) is a fault signature, not just noise:
-# we CONSOLIDATE its member events into one alert AND ESCALATE on intensity.
-# Trip state is disk-persisted under incident_state["flapState"], keyed by
-# incident_key, because the dispatcher loads→processes→saves→exits and an
-# in-memory window counter would reset every run (C0). Timestamps are
-# dispatcher wall-clock (never author createdAt — collector clock skew, C0).
-# Trips are counted on raw INPUT before storm-collapse consumes members (C1).
+# A flap is an accepted close followed by a fresh accepted fault reopening the
+# same incident. Repeated observations while an incident is open, rejected
+# clears, stale replays, and collector retries are not state transitions and
+# never increment the verified-reopen counter.
 # ---------------------------------------------------------------------------
+
+def migrate_legacy_flap_state(flap_state: dict[str, Any], now: int) -> None:
+    """Retain old raw counts as diagnostics but revoke their storm authority."""
+    for entry in flap_state.values():
+        if not isinstance(entry, dict):
+            continue
+        typed = (
+            type(entry.get("verifiedReopenCount")) is int
+            or isinstance(entry.get("verifiedReopenTimestamps"), list)
+        )
+        legacy = (
+            type(entry.get("cumulativeCount")) is int
+            or isinstance(entry.get("tripTimestamps"), list)
+        )
+        if typed or not legacy:
+            continue
+        entry["legacyRawTripCount"] = int(entry.get("cumulativeCount") or 0)
+        raw_timestamps = entry.get("tripTimestamps")
+        entry["legacyRawTripTimestamps"] = (
+            list(raw_timestamps) if isinstance(raw_timestamps, list) else []
+        )
+        if entry.get("stormAt"):
+            entry["legacyStormAt"] = entry.get("stormAt")
+            entry["legacyStormSeverity"] = entry.get("stormSeverity")
+            entry["legacyStormRetiredAt"] = now
+        for field in (
+            "cumulativeCount",
+            "tripTimestamps",
+            "firstTripAt",
+            "lastTripAt",
+            "stormAt",
+            "stormSeverity",
+            "lastStormEmitAt",
+            "pendingStormNotification",
+        ):
+            entry.pop(field, None)
+        entry["verifiedReopenCount"] = 0
+        entry["verifiedReopenTimestamps"] = []
+
 
 def flap_entry(flap_state: dict[str, Any], key: str) -> dict[str, Any]:
     entry = flap_state.get(key)
     if not isinstance(entry, dict):
-        entry = {"tripTimestamps": [], "cumulativeCount": 0}
+        entry = {"verifiedReopenTimestamps": [], "verifiedReopenCount": 0}
         flap_state[key] = entry
-    if not isinstance(entry.get("tripTimestamps"), list):
-        entry["tripTimestamps"] = []
+    if not isinstance(entry.get("verifiedReopenTimestamps"), list):
+        entry["verifiedReopenTimestamps"] = []
+    if type(entry.get("verifiedReopenCount")) is not int:
+        entry["verifiedReopenCount"] = 0
+    if type(entry.get("cumulativeCount")) is int and "legacyRawTripCount" not in entry:
+        entry["legacyRawTripCount"] = entry["cumulativeCount"]
     return entry
 
 
-def flap_trips_in_window(entry: dict[str, Any], now: int) -> int:
+def verified_reopens_in_window(entry: dict[str, Any], now: int) -> int:
     return sum(
         1
-        for t in entry.get("tripTimestamps", [])
+        for t in entry.get("verifiedReopenTimestamps", [])
         if isinstance(t, (int, float)) and 0 <= now - t <= FLAP_WINDOW_SECONDS
     )
 
@@ -3708,60 +3759,101 @@ def prune_settled_flap_references(
     return unresolved_count, removed_count
 
 
-def record_flap_trip(
+def record_verified_reopen(
     flap_state: dict[str, Any],
     key: str,
     now: int,
     event_identity_digest: str | None = None,
-    *,
-    processed_identities: set[str] | None = None,
 ) -> dict[str, Any]:
-    """Record one raw trip for incident_key at wall-clock `now`, pruning the
-    sliding window. Counts input per raw trip (C1)."""
-    settled = processed_identities or set()
-    unresolved_count, _ = prune_settled_flap_references(flap_state, settled)
-    existing_entry = flap_state.get(key)
-    references = existing_entry.get("eventIdentityDigests") if isinstance(existing_entry, dict) else None
+    """Append one accepted close→reopen transition to the bounded window."""
+    entry = flap_entry(flap_state, key)
+    references = entry.get("eventIdentityDigests")
     if not isinstance(references, list):
         references = []
-    if (
-        event_identity_digest is not None
-        and event_identity_digest in references
-        and isinstance(existing_entry, dict)
-    ):
-        return existing_entry
-    if event_identity_digest is not None:
-        if unresolved_count >= FLAP_EVENT_REFERENCE_LIMIT:
-            raise FlapReferenceCapacityError("unreceipted flap references exhaust capacity")
-    entry = flap_entry(flap_state, key)
+    if event_identity_digest is not None and event_identity_digest in references:
+        return entry
+    if event_identity_digest is not None and len(references) >= FLAP_EVENT_REFERENCE_LIMIT:
+        raise FlapReferenceCapacityError("unreceipted flap references exhaust capacity")
     if event_identity_digest is not None:
         references.append(event_identity_digest)
         entry["eventIdentityDigests"] = references
-    pruned = [t for t in entry["tripTimestamps"] if isinstance(t, (int, float)) and 0 <= now - t <= FLAP_WINDOW_SECONDS]
-    pruned.append(now)
-    entry["tripTimestamps"] = pruned
-    entry["cumulativeCount"] = int(entry.get("cumulativeCount") or 0) + 1
-    entry["lastTripAt"] = now
-    if not entry.get("firstTripAt"):
-        entry["firstTripAt"] = now
+    timestamps = [
+        timestamp for timestamp in entry["verifiedReopenTimestamps"]
+        if isinstance(timestamp, (int, float))
+        and 0 <= now - timestamp <= FLAP_WINDOW_SECONDS
+    ]
+    timestamps.append(now)
+    entry["verifiedReopenTimestamps"] = timestamps
+    entry["verifiedReopenCount"] = int(entry.get("verifiedReopenCount") or 0) + 1
+    entry["lastVerifiedReopenAt"] = now
+    entry["underlyingClosed"] = False
+    if not entry.get("firstVerifiedReopenAt"):
+        entry["firstVerifiedReopenAt"] = now
     return entry
+
+
+def record_verified_reopen_if_applicable(
+    event: dict[str, Any],
+    incident_state: dict[str, Any],
+    now: int,
+) -> bool:
+    """Record exactly one fresh fault that follows an accepted close."""
+    normalized = normalize_dispatch_observation(event)
+    if not isinstance(normalized, NormalizedObservation):
+        return False
+    if normalized.state is not ObservationState.FAULT:
+        return False
+    key = normalized.incident_key
+    open_incidents = incident_state.get("openIncidents")
+    if isinstance(open_incidents, dict) and isinstance(open_incidents.get(key), dict):
+        return False
+    history = incident_state.get("closedHistory")
+    if not isinstance(history, list):
+        return False
+    closes = [
+        record for record in history
+        if isinstance(record, dict)
+        and record.get("incidentKey") == key
+        and type(record.get("closingObservationTime")) is int
+    ]
+    if not closes:
+        return False
+    latest_close = max(closes, key=lambda record: int(record["closingObservationTime"]))
+    if normalized.observed_at_epoch <= int(latest_close["closingObservationTime"]):
+        return False
+    identity_digest = event_replay_identity_digest(event, normalized)
+    flap_state = incident_state.setdefault("flapState", {})
+    existing = flap_entry(flap_state, key)
+    references = existing.get("eventIdentityDigests")
+    if isinstance(references, list) and identity_digest in references:
+        return False
+    entry = record_verified_reopen(flap_state, key, now, identity_digest)
+    entry["lastVerifiedReopenObservationTime"] = normalized.observed_at_epoch
+    decision = flap_evaluate(entry, now)
+    if decision.get("emit"):
+        entry["pendingStormNotification"] = {
+            "decisionAt": now,
+            "severity": str(decision["severity"]),
+            "reason": str(decision.get("reason") or "")[:128],
+        }
+    return True
 
 
 def flap_evaluate(entry: dict[str, Any], now: int) -> dict[str, Any]:
     """Decide whether to emit a flap_storm alert for this entry now (after its
-    trip was recorded). Mutates storm lifecycle fields. Returns
+    verified reopen was recorded). Mutates storm lifecycle fields. Returns
     {emit: bool, severity: str|None, reason: str}.
 
-    - First crossing of FLAP_TRIP_THRESHOLD in the window opens the storm at
+    - First crossing of FLAP_TRIP_THRESHOLD verified reopens opens the storm at
       `warning` and emits once; member events are then suppressed.
     - Promote to `critical` when the storm persists FLAP_PROMOTE_SECONDS or the
       cumulative count crosses FLAP_CRITICAL_COUNT (the 263-case). Re-emits once
       on escalation, and on the FLAP_PROMOTE_SECONDS cadence while active.
     """
-    trips = flap_trips_in_window(entry, now)
-    cumulative = int(entry.get("cumulativeCount") or 0)
+    reopens = verified_reopens_in_window(entry, now)
+    cumulative = int(entry.get("verifiedReopenCount") or 0)
     if not entry.get("stormAt"):
-        if trips >= FLAP_TRIP_THRESHOLD:
+        if reopens >= FLAP_TRIP_THRESHOLD:
             entry["stormAt"] = now
             entry["stormSeverity"] = "warning"
             entry["lastStormEmitAt"] = now
@@ -3784,14 +3876,24 @@ def flap_evaluate(entry: dict[str, Any], now: int) -> dict[str, Any]:
     return {"emit": False, "severity": new_severity, "reason": "flap_storm_member_suppressed"}
 
 
-def flap_should_resolve(entry: dict[str, Any], now: int) -> bool:
-    """An open storm resolves only after FLAP_STABLE_SECONDS of zero trips in the
-    window. (C2 notes liveness should also gate this; collector silence alone is
-    a weaker signal — tracked as a follow-up; time-stable is the Wave-1 gate.)"""
+def flap_should_resolve(
+    entry: dict[str, Any],
+    now: int,
+    *,
+    underlying_open: bool,
+) -> bool:
+    """Resolve only after accepted close proof and a stable no-reopen interval."""
     if not entry.get("stormAt"):
         return False
-    last_trip = int(entry.get("lastTripAt") or 0)
-    return flap_trips_in_window(entry, now) == 0 and (now - last_trip) >= FLAP_STABLE_SECONDS
+    if underlying_open:
+        return False
+    accepted_close = int(entry.get("lastAcceptedCloseAt") or 0)
+    liveness_verified = int(entry.get("livenessVerifiedAt") or 0)
+    last_reopen = int(entry.get("lastVerifiedReopenAt") or 0)
+    if accepted_close <= 0 or liveness_verified < accepted_close:
+        return False
+    stable_since = max(accepted_close, last_reopen)
+    return now - stable_since >= FLAP_STABLE_SECONDS
 
 
 def flap_storm_event(key: str, entry: dict[str, Any], severity: str, now: int) -> dict[str, Any]:
@@ -3799,24 +3901,24 @@ def flap_storm_event(key: str, entry: dict[str, Any], severity: str, now: int) -
     real requested_action (never 'none'); exempt from Pattern A suppression."""
     fields = incident_event_fields_from_key(key)
     underlying = str(fields.get("alertSource") or fields.get("source") or "unknown")
-    trips = flap_trips_in_window(entry, now)
-    cumulative = int(entry.get("cumulativeCount") or 0)
-    first = int(entry.get("firstTripAt") or now)
-    last = int(entry.get("lastTripAt") or now)
+    reopens = verified_reopens_in_window(entry, now)
+    cumulative = int(entry.get("verifiedReopenCount") or 0)
+    first = int(entry.get("firstVerifiedReopenAt") or now)
+    last = int(entry.get("lastVerifiedReopenAt") or now)
     additions = [
         "flap_storm=true",
         f"incident_key={key}",
         f"underlying_source={underlying}",
-        f"flap_trips_in_window={trips}",
+        f"verified_reopens_in_window={reopens}",
         f"flap_window_seconds={FLAP_WINDOW_SECONDS}",
-        f"flap_cumulative_count={cumulative}",
+        f"verified_reopen_count={cumulative}",
         f"flap_first_seen={iso_from_epoch(first)}",
         f"flap_last_seen={iso_from_epoch(last)}",
-        f"flap_rate_per_window={trips}",
+        f"verified_reopen_rate_per_window={reopens}",
         "severity_rationale=" + (
             f"critical: sustained ≥{FLAP_PROMOTE_SECONDS}s or count ≥{FLAP_CRITICAL_COUNT}"
             if severity == "critical"
-            else f"warning: ≥{FLAP_TRIP_THRESHOLD} trips in {FLAP_WINDOW_SECONDS}s"
+            else f"warning: ≥{FLAP_TRIP_THRESHOLD} verified reopens in {FLAP_WINDOW_SECONDS}s"
         ),
     ]
     return {
@@ -3828,7 +3930,7 @@ def flap_storm_event(key: str, entry: dict[str, Any], severity: str, now: int) -
         **fields,
         "source": "flap_storm",
         "alertSource": underlying,
-        "summary": f"Flap storm: {underlying} unstable — {cumulative} trips, {trips} in last {FLAP_WINDOW_SECONDS}s",
+        "summary": f"Flap storm: {underlying} unstable — {cumulative} verified reopens, {reopens} in last {FLAP_WINDOW_SECONDS}s",
         "evidence": "\n".join(additions),
         "criticalAsset": {
             "asset": {"kind": "monitored_source", "instance": fields.get("instance", "unknown"), "owner": "whatsoup"},
@@ -3838,7 +3940,7 @@ def flap_storm_event(key: str, entry: dict[str, Any], severity: str, now: int) -
                 "recoverability": "operator_recoverable",
                 "confidence": "confirmed",
                 "operatorAction": FLAP_STORM_ACTION,
-                "clearRequirement": f"source quiet ≥ {FLAP_STABLE_SECONDS}s",
+                "clearRequirement": f"accepted close plus no verified reopen for ≥ {FLAP_STABLE_SECONDS}s",
             },
         },
         "diagnostics": {
@@ -3853,15 +3955,15 @@ def flap_resolve_event(key: str, entry: dict[str, Any], now: int) -> dict[str, A
     """One terminal 'resolved after N flaps over Tm' summary (info)."""
     fields = incident_event_fields_from_key(key)
     underlying = str(fields.get("alertSource") or fields.get("source") or "unknown")
-    cumulative = int(entry.get("cumulativeCount") or 0)
-    first = int(entry.get("firstTripAt") or now)
+    cumulative = int(entry.get("verifiedReopenCount") or 0)
+    first = int(entry.get("firstVerifiedReopenAt") or now)
     storm_at = int(entry.get("stormAt") or first)
     minutes = max(1, (now - storm_at) // 60)
     additions = [
         "flap_storm_resolved=true",
         f"incident_key={key}",
         f"underlying_source={underlying}",
-        f"flap_total_count={cumulative}",
+        f"verified_reopen_count={cumulative}",
         f"flap_duration_minutes={minutes}",
         f"flap_first_seen={iso_from_epoch(first)}",
     ]
@@ -3874,7 +3976,7 @@ def flap_resolve_event(key: str, entry: dict[str, Any], now: int) -> dict[str, A
         **fields,
         "source": "flap_storm_resolved",
         "alertSource": underlying,
-        "summary": f"Flap storm resolved: {underlying} stable after {cumulative} flaps over {minutes}m",
+        "summary": f"Flap storm resolved: {underlying} stable after {cumulative} verified reopens over {minutes}m",
         "evidence": "\n".join(additions),
         "diagnostics": {
             "dispatchLog": str(state_paths()["logs"] / "dispatch.jsonl"),
@@ -3920,14 +4022,7 @@ def flush_pending_flap_notifications(
 
 
 def flap_scan_outbox(paths: dict[str, Path]) -> int:
-    """Pre-collapse pass (§10 C1): record ONE flap trip per raw incident-alert
-    event currently in the outbox, keyed by incident_key, and enqueue consolidated
-    flap_storm events when a key crosses threshold / promotes. Runs BEFORE
-    collapse_ready_storms so trips count raw input, not post-collapse survivors.
-    Member events are suppressed later in should_suppress_send via flapState.
-    Returns the number of storm events queued. A pending notification makes the
-    scan fail closed until the durable event is in the outbox.
-    """
+    """Advance typed storms and flush notifications; raw arrivals have no authority."""
     if not FLAP_DETECTION:
         return 0
     try:
@@ -3939,85 +4034,39 @@ def flap_scan_outbox(paths: dict[str, Path]) -> int:
     except Exception as exc:  # noqa: BLE001 - durable pending state retains retry authority.
         append_dispatch_log(paths, {"type": "flap_pending_enqueue_failed", "error": str(exc)})
         return 0
-    flap_state = incident_state.setdefault("flapState", {})
+    flap_state = incident_state.get("flapState")
+    if not isinstance(flap_state, dict):
+        return emitted
     now = int(time.time())
-    for path in sorted(paths["outbox"].glob("*.json")):
+    changed = False
+    for key, entry in sorted(flap_state.items()):
+        if not isinstance(entry, dict) or not entry.get("stormAt"):
+            continue
+        if isinstance(entry.get("pendingStormNotification"), dict):
+            continue
+        decision = flap_evaluate(entry, now)
+        if not decision.get("emit"):
+            continue
+        entry["pendingStormNotification"] = {
+            "decisionAt": now,
+            "severity": str(decision["severity"]),
+            "reason": str(decision.get("reason") or "")[:128],
+        }
+        changed = True
+        append_dispatch_log(paths, {
+            "type": "flap_storm",
+            "incidentKey": key,
+            "severity": decision.get("severity"),
+            "reason": decision.get("reason"),
+            "verifiedReopenCount": entry.get("verifiedReopenCount"),
+            "verifiedReopensInWindow": verified_reopens_in_window(entry, now),
+        })
+    if changed:
         try:
-            if not ready(path, paths):
-                continue
-            event = read_json(path)
-        except Exception:  # noqa: BLE001 - skip unreadable, process_one will quarantine
-            continue
-        if not is_incident_alert(event) or is_incident_clear(event):
-            continue
-        if str(event.get("source") or "") == "flap_storm":
-            continue
-        key = incident_key(event)
-        try:
-            normalized = normalize_dispatch_observation(event)
-            if not isinstance(normalized, NormalizedObservation):
-                continue
-            identity_digest = event_replay_identity_digest(event, normalized)
-            processed = incident_state.get("processedEvents")
-            processed_identities = set(processed) if isinstance(processed, dict) else set()
-            if isinstance(processed, dict) and identity_digest in processed:
-                continue
-            if stale_after_retained_close(incident_state, normalized):
-                continue
-            existing_entry = flap_entry(flap_state, key)
-            if isinstance(existing_entry.get("pendingStormNotification"), dict):
-                continue
-            existing_references = existing_entry.get("eventIdentityDigests")
-            if isinstance(existing_references, list) and identity_digest in existing_references:
-                continue
-            preflight_processed_event_capacity(
-                incident_state,
-                event,
-                normalized,
-                identity_digest=identity_digest,
-                content_digest=event_content_digest(event),
-                evidence_fingerprint=event_evidence_fingerprint(event, normalized),
-                now=now,
-            )
-            entry = record_flap_trip(
-                flap_state,
-                key,
-                now,
-                identity_digest,
-                processed_identities=processed_identities,
-            )
-            decision = flap_evaluate(entry, now)
-            if decision.get("emit"):
-                entry["pendingStormNotification"] = {
-                    "decisionAt": now,
-                    "severity": str(decision["severity"]),
-                    "reason": str(decision.get("reason") or "")[:128],
-                }
             save_incident_state(paths, incident_state)
-            if decision.get("emit"):
-                emitted += flush_pending_flap_notifications(paths, incident_state)
-                append_dispatch_log(paths, {
-                    "type": "flap_storm",
-                    "incidentKey": key,
-                    "severity": decision.get("severity"),
-                    "reason": decision.get("reason"),
-                    "cumulativeCount": entry.get("cumulativeCount"),
-                    "tripsInWindow": flap_trips_in_window(entry, now),
-                })
-        except Exception as exc:  # noqa: BLE001 - one bad event must not block the scan
-            append_dispatch_log(paths, {"type": "flap_scan_error", "incidentKey": key, "error": str(exc)})
-            try:
-                incident_state = load_incident_state(paths)
-                flap_state = incident_state.setdefault("flapState", {})
-                if any(
-                    isinstance(entry, dict)
-                    and isinstance(entry.get("pendingStormNotification"), dict)
-                    for entry in flap_state.values()
-                ):
-                    return emitted
-            except Exception:
-                return emitted
-            continue
+            emitted += flush_pending_flap_notifications(paths, incident_state)
+        except Exception as exc:  # noqa: BLE001 - state/outbox remains retry-owned.
+            append_dispatch_log(paths, {"type": "flap_pending_enqueue_failed", "error": str(exc)})
     return emitted
 
 
@@ -4039,12 +4088,17 @@ def sweep_flap_storms(paths: dict[str, Path]) -> tuple[int, int]:
         if not isinstance(entry, dict):
             continue
         try:
-            if flap_should_resolve(entry, now):
+            open_incidents = incident_state.get("openIncidents")
+            underlying_open = (
+                isinstance(open_incidents, dict)
+                and isinstance(open_incidents.get(str(key)), dict)
+            )
+            if flap_should_resolve(entry, now, underlying_open=underlying_open):
                 send_whatsapp(format_event(flap_resolve_event(str(key), entry, now)))
                 append_dispatch_log(paths, {
                     "type": "flap_storm_resolved",
                     "incidentKey": key,
-                    "cumulativeCount": entry.get("cumulativeCount"),
+                    "verifiedReopenCount": entry.get("verifiedReopenCount"),
                 })
                 flap_state.pop(key, None)
                 resolved += 1
@@ -5956,9 +6010,8 @@ def run_once(max_events: int) -> dict[str, Any]:
         quarantine_invalid_protocol_events(paths)
         test_provenance_suppressed, test_provenance_meta_alerted = suppress_test_provenance_events(paths)
         recovery_deduped = suppress_ready_recovery_duplicates(paths)
-        # Pattern F (§10 C1): count flap trips on raw input BEFORE storm-collapse
-        # consumes members. Queues consolidated flap_storm events; members are
-        # suppressed downstream in should_suppress_send via persisted flapState.
+        # Pattern F: flush notifications decided by previously committed verified
+        # close→reopen transitions. Raw queue arrival never counts as a flap.
         flap_storms = flap_scan_outbox(paths)
         storm_collapsed = collapse_ready_storms(paths)
         processed = 0
@@ -5991,12 +6044,16 @@ def run_once(max_events: int) -> dict[str, Any]:
             else:
                 failed += 1
                 last_error = detail
+        # A processed alert may have committed a verified reopen and its pending
+        # notification atomically with incident/receipt state. Materialize that
+        # notification after processing; delivery remains queue-owned.
+        flap_storms += flap_scan_outbox(paths)
         stale_renotified, stale_failed, stale_error = sweep_stale_incidents(paths, touched_incident_keys)
         if stale_failed:
             failed += stale_failed
             last_error = stale_error
-        # Pattern F: resolve flap storms quiet beyond the stable window (one
-        # terminal "resolved after N flaps" summary each, then terminal removal).
+        # Pattern F: resolve only after authoritative close proof plus a stable
+        # no-reopen interval. Silence alone cannot clear a storm.
         flap_resolved, flap_resolve_errors = sweep_flap_storms(paths)
 
         # --- F5: dead-letter meta-alert (at most once per hour when dir non-empty) ---

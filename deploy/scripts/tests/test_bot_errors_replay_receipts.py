@@ -708,7 +708,7 @@ class ReplayReceiptTestCase(unittest.TestCase):
         persisted = self.mod.load_incident_state(paths)
         self.assertEqual(set(persisted["processedEvents"]), {protected})
 
-    def test_flap_preprocess_is_idempotent_before_receipt_persistence(self) -> None:
+    def test_flap_scan_never_mutates_raw_fault_arrivals(self) -> None:
         os.environ["BOT_ERRORS_FLAP_DETECTION"] = "1"
         os.environ["BOT_ERRORS_FLAP_TRIP_THRESHOLD"] = "99"
         self.mod = _load_module()
@@ -720,25 +720,22 @@ class ReplayReceiptTestCase(unittest.TestCase):
             self.assertEqual(self.mod.flap_scan_outbox(paths), 0)
         send.assert_not_called()
         state = self.mod.load_incident_state(paths)
-        entry = state["flapState"][self.mod.incident_key(event)]
-        self.assertEqual(entry["cumulativeCount"], 1)
-        self.assertEqual(len(entry["eventIdentityDigests"]), 1)
+        self.assertNotIn("flapState", state)
 
-    def test_flap_state_save_failure_has_no_effect_and_fault_fires(self) -> None:
+    def test_flap_scan_does_not_write_state_for_raw_fault(self) -> None:
         os.environ["BOT_ERRORS_FLAP_DETECTION"] = "1"
         os.environ["BOT_ERRORS_FLAP_TRIP_THRESHOLD"] = "1"
         self.mod = _load_module()
         paths = self.mod.setup_dirs()
         event = _event(int(time.time()), event_id="flap-save-fault", schema_version=1)
         path = self.write_event(paths, "flap.json", event)
-        fault = OSError("injected flap state-save fault")
         with (
-            patch.object(self.mod, "save_incident_state", side_effect=fault) as save,
+            patch.object(self.mod, "save_incident_state") as save,
             patch.object(self.mod, "send_whatsapp") as send,
         ):
             queued = self.mod.flap_scan_outbox(paths)
         self.assertEqual(queued, 0)
-        self.assertEqual(save.call_count, 1, "injected flap state fault must fire")
+        save.assert_not_called()
         send.assert_not_called()
         self.assertTrue(path.exists())
         self.assertNotIn("flapState", self.mod.load_incident_state(paths))
@@ -749,7 +746,27 @@ class ReplayReceiptTestCase(unittest.TestCase):
         self.mod = _load_module()
         paths = self.mod.setup_dirs()
         event = _event(int(time.time()), event_id="flap-enqueue-fault", schema_version=1)
-        self.write_event(paths, "flap.json", event)
+        key = self.mod.incident_key(event)
+        now = int(time.time())
+        self.mod.save_incident_state(paths, {
+            "version": 1,
+            "openIncidents": {key: {"status": "open"}},
+            "lastSentAt": {},
+            "flapState": {
+                key: {
+                    "stormAt": now,
+                    "verifiedReopenTimestamps": [now],
+                    "verifiedReopenCount": 1,
+                    "firstVerifiedReopenAt": now,
+                    "lastVerifiedReopenAt": now,
+                    "pendingStormNotification": {
+                        "decisionAt": now,
+                        "severity": "warning",
+                        "reason": "flap_storm_opened",
+                    },
+                }
+            },
+        })
         original_write = self.mod.atomic_write_json
         fault_count = 0
 
@@ -768,30 +785,24 @@ class ReplayReceiptTestCase(unittest.TestCase):
         self.assertEqual(fault_count, 1, "injected flap enqueue fault must fire once")
         send.assert_not_called()
         pending = self.mod.load_incident_state(paths)
-        entry = pending["flapState"][self.mod.incident_key(event)]
-        self.assertEqual(entry["cumulativeCount"], 1)
+        entry = pending["flapState"][key]
+        self.assertEqual(entry["verifiedReopenCount"], 1)
         self.assertIn("pendingStormNotification", entry)
         original_pending = json.loads(json.dumps(entry["pendingStormNotification"]))
-        second = _event(
-            int(time.time()) + 1,
-            event_id="flap-enqueue-interleaved",
-            schema_version=1,
-        )
-        self.write_event(paths, "flap-second.json", second)
         with patch.object(self.mod, "atomic_write_json", side_effect=fail_storm_write):
             self.assertEqual(self.mod.flap_scan_outbox(paths), 0)
         self.assertEqual(fault_count, 2, "pending enqueue fault must fire on retry")
         still_pending = self.mod.load_incident_state(paths)
-        entry = still_pending["flapState"][self.mod.incident_key(event)]
-        self.assertEqual(entry["cumulativeCount"], 1)
+        entry = still_pending["flapState"][key]
+        self.assertEqual(entry["verifiedReopenCount"], 1)
         self.assertEqual(entry["pendingStormNotification"], original_pending)
 
         with patch.object(self.mod, "send_whatsapp") as retry_send:
             self.assertEqual(self.mod.flap_scan_outbox(paths), 1)
         retry_send.assert_not_called()
         settled = self.mod.load_incident_state(paths)
-        entry = settled["flapState"][self.mod.incident_key(event)]
-        self.assertEqual(entry["cumulativeCount"], 2)
+        entry = settled["flapState"][key]
+        self.assertEqual(entry["verifiedReopenCount"], 1)
         self.assertNotIn("pendingStormNotification", entry)
         queued = [
             json.loads(path.read_text(encoding="utf-8"))
@@ -1113,36 +1124,18 @@ class ReplayReceiptTestCase(unittest.TestCase):
         send.assert_not_called()
         self.assertTrue(path.exists())
 
-    def test_flap_reference_capacity_does_not_recount_unreceipted_raw_event(self) -> None:
+    def test_flap_reference_capacity_does_not_recount_verified_reopen(self) -> None:
         self.mod.FLAP_EVENT_REFERENCE_LIMIT = 2
         flap_state: dict[str, Any] = {}
         key = "host-a|ana-bot|socket_down"
         first, second, third = "1" * 64, "2" * 64, "3" * 64
-        self.mod.record_flap_trip(flap_state, key, 100, first, processed_identities=set())
-        self.mod.record_flap_trip(flap_state, key, 101, second, processed_identities=set())
+        self.mod.record_verified_reopen(flap_state, key, 100, first)
+        self.mod.record_verified_reopen(flap_state, key, 101, second)
         with self.assertRaises(self.mod.FlapReferenceCapacityError):
-            self.mod.record_flap_trip(flap_state, key, 102, third, processed_identities=set())
-        self.mod.record_flap_trip(flap_state, key, 103, first, processed_identities=set())
-        self.assertEqual(flap_state[key]["cumulativeCount"], 2)
+            self.mod.record_verified_reopen(flap_state, key, 102, third)
+        self.mod.record_verified_reopen(flap_state, key, 103, first)
+        self.assertEqual(flap_state[key]["verifiedReopenCount"], 2)
         self.assertEqual(flap_state[key]["eventIdentityDigests"], [first, second])
-
-        self.mod.record_flap_trip(
-            flap_state, key, 104, third, processed_identities={first}
-        )
-        self.assertEqual(flap_state[key]["cumulativeCount"], 3)
-        self.assertEqual(flap_state[key]["eventIdentityDigests"], [second, third])
-
-        globally_full: dict[str, Any] = {}
-        self.mod.record_flap_trip(
-            globally_full, "host-a|bot-a|socket_down", 200, first, processed_identities=set()
-        )
-        self.mod.record_flap_trip(
-            globally_full, "host-a|bot-b|socket_down", 201, second, processed_identities=set()
-        )
-        with self.assertRaises(self.mod.FlapReferenceCapacityError):
-            self.mod.record_flap_trip(
-                globally_full, "host-a|bot-c|socket_down", 202, third, processed_identities=set()
-            )
 
     def test_settled_flap_refs_are_pruned_before_processed_capacity_preflight(self) -> None:
         os.environ["BOT_ERRORS_FLAP_DETECTION"] = "1"
@@ -1190,10 +1183,8 @@ class ReplayReceiptTestCase(unittest.TestCase):
         self.assertEqual(scan_result, 0)
         self.assertEqual(process_result, (True, "sent"), process_result)
         send.assert_called_once()
-        self.assertEqual(
-            after_scan["flapState"][key]["eventIdentityDigests"], [incoming_identity]
-        )
-        self.assertEqual(after_scan["flapState"][key]["cumulativeCount"], 3)
+        self.assertEqual(after_scan["flapState"][key]["eventIdentityDigests"], [])
+        self.assertEqual(after_scan["flapState"][key]["verifiedReopenCount"], 0)
         final = self.mod.load_incident_state(paths)
         self.assertIn(incoming_identity, final["processedEvents"])
         self.assertLessEqual(len(final["processedEvents"]), 2)

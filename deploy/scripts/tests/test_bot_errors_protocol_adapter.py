@@ -398,7 +398,7 @@ class DispatcherIntegrationTests(unittest.TestCase):
 
                 with (
                     patch.object(dispatcher, "load_incident_state") as load_state,
-                    patch.object(dispatcher, "record_flap_trip") as record_flap,
+                    patch.object(dispatcher, "record_verified_reopen_if_applicable") as record_flap,
                     patch.object(dispatcher, "send_whatsapp") as send_whatsapp,
                 ):
                     self.assertEqual(dispatcher.state_root().resolve(), state_dir.resolve())
@@ -437,7 +437,7 @@ class DispatcherIntegrationTests(unittest.TestCase):
 
                 with (
                     patch.object(dispatcher, "load_incident_state") as load_state,
-                    patch.object(dispatcher, "record_flap_trip") as record_flap,
+                    patch.object(dispatcher, "record_verified_reopen_if_applicable") as record_flap,
                     patch.object(dispatcher, "send_whatsapp") as send_whatsapp,
                 ):
                     self.assertEqual(dispatcher.state_root().resolve(), state_dir.resolve())
@@ -568,7 +568,7 @@ class DispatcherIntegrationTests(unittest.TestCase):
                         "quarantine_invalid_protocol_events",
                         side_effect=prepass_then_inject,
                     ),
-                    patch.object(dispatcher, "record_flap_trip") as record_flap,
+                    patch.object(dispatcher, "record_verified_reopen_if_applicable") as record_flap,
                     patch.object(dispatcher, "send_whatsapp") as send_whatsapp,
                 ):
                     self.assertEqual(dispatcher.state_root().resolve(), state_dir.resolve())
