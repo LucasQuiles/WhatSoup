@@ -94,8 +94,9 @@ describe('source runtime drift check', () => {
     const root = makeRepo();
     convertRepoToRelease(root);
 
-    expect(run(['--manifest', 'manifest.json'], root)).toEqual([]);
+    const issues = run(['--manifest', 'manifest.json'], root);
     expect(process.exitCode).toBeUndefined();
+    expect(issues).toEqual([]);
   });
 
   it('rejects runtime drift in a non-git snapshot', () => {
