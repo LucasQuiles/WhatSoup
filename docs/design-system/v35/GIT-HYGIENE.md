@@ -11,25 +11,30 @@
 | Worktree `.worktrees/soup-v35-design` | `~/LAB/WhatSoup` | Design-docs working tree (docs-only) | registered; working files reconcile on first write-capable session (branch tip advanced via object-store commits from a sandboxed session) |
 | Mirror `~/agents/q/docs/design-v35/` | local repo, **no remote** | session-writable working mirror | NOT durable — do not rely on it; every file must land on `design/soup-v35` same-session |
 
-## Rules (binding for the program)
+## Rules (binding for the program — tightened 2026-07-21 per owner re-issue)
 
-1. **Same-session landing.** Any doc/artifact produced for this program is committed to
-   `design/soup-v35` and pushed in the same session it is created. Machine-only work is a
-   defect.
-2. **One branch.** All v3.5 docs live on `design/soup-v35` under `docs/design-system/v35/`.
-   No additional branches for docs phases. Implementation work (post-G3) gets its own
-   branch/worktree registered here before creation.
-3. **PR per phase.** Each program phase closes with a PR to `main`:
-   - PR-1: T0 seed + T1 product model (this package)
-   - PR-2: T2 research digest
-   - PR-3: T3 direction mockups (+ G1 record)
-   - PR-4: T4 spec (+ G2 record)
-   - PR-5: T5 enforcement/cutover (+ G3 record)
-4. **PRs stay docs-only until G3.** No console/src changes on the design branch.
-5. **Mirror sync.** The `~/agents/q` mirror is edited (sandbox-writable), then committed to
-   `design/soup-v35` via git object-store plumbing (no worktree file writes required), and
-   pushed immediately.
-6. **No other worktrees.** The program creates none without registering them in this file first.
+1. **Same-session landing.** Any artifact produced for this program is committed and pushed
+   the same session. Machine-only work is a defect.
+2. **PR per phase/track, each independently reviewable.** The cumulative single-PR model is
+   retired. Current map:
+   - **#2008** `fix/guard-tmup-artifacts-skip` — guard fix (independent, mergeable first)
+   - **#2009** `design/soup-v35` — program seed: T0 package + T1 product model + design
+     language (rounds 1–4) + Direction A mockups. Retitled to match. After merge, the branch
+     STAYS as the program's long-lived base.
+   - **Next PRs** — one branch per track off `design/soup-v35`, stacked PRs targeting it:
+     `design/soup-v35-t3-agents` (Agents roster/detail), `-t3-skills-hub`, `-t3-dream-lab`,
+     `-t3-inbox-line`, `-t3-deployments`, `-t3-settings-splash`, `-t4-spec`, `-t5-cutover`.
+     Each PR diff shows only its track. Branches are created when work lands, never empty.
+3. **PRs stay docs-only until G3.** No console/src changes on design branches.
+4. **Mirror discipline.** `~/agents/q` (no remote) is a scratch mirror only — every file must
+   reach a pushed branch same-session. Its local commits are not SSOT.
+5. **Worktree accountability.** Program-owned: `.worktrees/soup-v35-design` (registered,
+   provisioned, push-capable). The ~10 worktrees under `~/agents/q/` (restart-reliability,
+   pr1666/7, pr1671, flake-fix, qr247-harden, r1-sensitive, sticky-actor, wa-routing,
+   mcp-servers-verify) belong to other programs/PRs — not v3.5-owned, not touched.
+   New worktrees require registration here first.
+6. **Append, don't rebuild.** Branch commits append to the remote tip (fast-forward);
+   history rewrites only with explicit owner approval.
 
 ## Current mirror→branch file map
 
