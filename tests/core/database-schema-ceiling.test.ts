@@ -78,6 +78,10 @@ describe('database schema ceiling', () => {
     }
   });
 
+  it('pins the binary schema ceiling to inline-proposal migration 45', () => {
+    expect(CURRENT_SCHEMA_MIGRATION).toBe(45);
+  });
+
   it.each([
     { errcode: 264, reason: 'engine_recovery_required' },
     { errcode: 776, reason: 'engine_recovery_required' },

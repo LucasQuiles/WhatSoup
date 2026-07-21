@@ -1,4 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { Worker } from 'node:worker_threads';
+import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -7,16 +9,228 @@ import { Database } from '../../../src/core/database.ts';
 import {
   createBead, getBead, listBeads, updateBead,
   completeBead, cancelBead, approveProposal, rejectProposal,
-  activityFeed, countOverdueProposals,
+  activityFeed, countOverdueProposals, createInlineProposal,
+  InlineProposalCollisionError,
 } from '../../../src/core/substrate/beads.ts';
 import { upsertEntity, captureObservation, forgetObservation } from '../../../src/core/substrate/entities.ts';
 
 function tmpFile() { return join(tmpdir(), `sub-${randomBytes(8).toString('hex')}.db`); }
 
+function inlineProposalArgs(sourceMessagePk: number) {
+  return {
+    kind: 'task' as const,
+    title: 'review release ledger',
+    body: 'Schedule review release ledger',
+    normalizedTarget: 'review release ledger',
+    ownerJid: 'owner-1',
+    chatJid: 'chat-1',
+    sourceMessagePk,
+    status: 'proposed' as const,
+    confidence: 0.7,
+    proposalReason: 'inline imperative: schedule' as const,
+    actor: 'inline' as const,
+  };
+}
+
 describe('beads core', () => {
   let path: string; let db: Database;
   beforeEach(() => { path = tmpFile(); db = new Database(path); db.open(); });
-  afterEach(() => { db.close(); if (existsSync(path)) unlinkSync(path); });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    db.close();
+    for (const suffix of ['', '-wal', '-shm']) {
+      const candidate = `${path}${suffix}`;
+      if (existsSync(candidate)) unlinkSync(candidate);
+    }
+  });
+
+  it('createInlineProposal returns the original row for an exact retry', () => {
+    const first = createInlineProposal(db.raw, inlineProposalArgs(1001));
+    const retry = createInlineProposal(db.raw, inlineProposalArgs(1001));
+
+    expect(first.created).toBe(true);
+    expect(retry).toEqual({ bead: first.bead, created: false });
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM beads').get()).toEqual({ count: 1 });
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get()).toEqual({ count: 1 });
+  });
+
+  it.each([
+    ['owner', { ownerJid: 'owner-2' }],
+    ['chat', { chatJid: 'chat-2' }],
+    ['verb', { proposalReason: 'inline imperative: watch for' as const }],
+    ['normalized target', { normalizedTarget: 'review a different ledger' }],
+  ])('rejects a stable-field collision in %s with a bounded typed error', (_field, change) => {
+    createInlineProposal(db.raw, inlineProposalArgs(1002));
+
+    let failure: unknown;
+    try {
+      createInlineProposal(db.raw, { ...inlineProposalArgs(1002), ...change });
+    } catch (err) {
+      failure = err;
+    }
+
+    expect(failure).toBeInstanceOf(InlineProposalCollisionError);
+    expect(failure).toMatchObject({ code: 'INLINE_PROPOSAL_COLLISION' });
+    expect(String(failure)).not.toContain('1002');
+    expect(String(failure).length).toBeLessThan(160);
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM beads').get()).toEqual({ count: 1 });
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get()).toEqual({ count: 1 });
+  });
+
+  it('allows identical proposal content from distinct source messages', () => {
+    const first = createInlineProposal(db.raw, inlineProposalArgs(1003));
+    const second = createInlineProposal(db.raw, inlineProposalArgs(1004));
+
+    expect(first.created).toBe(true);
+    expect(second.created).toBe(true);
+    expect(second.bead.id).not.toBe(first.bead.id);
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM beads').get()).toEqual({ count: 2 });
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get()).toEqual({ count: 2 });
+  });
+
+  it('exhausts a bounded SQLite busy retry budget without writing half-state', () => {
+    db.close();
+    const blocker = new DatabaseSync(path, { timeout: 1 });
+    const contender = new DatabaseSync(path, { timeout: 1 });
+    blocker.exec('PRAGMA busy_timeout = 1');
+    contender.exec('PRAGMA busy_timeout = 1');
+    blocker.exec('BEGIN IMMEDIATE');
+
+    const exec = contender.exec.bind(contender);
+    let beginAttempts = 0;
+    vi.spyOn(contender, 'exec').mockImplementation((sql: string) => {
+      if (sql.trim().toUpperCase() === 'BEGIN') beginAttempts += 1;
+      exec(sql);
+    });
+
+    let failure: unknown;
+    const startedAt = performance.now();
+    try {
+      createInlineProposal(contender, inlineProposalArgs(1005));
+    } catch (err) {
+      failure = err;
+    } finally {
+      blocker.exec('ROLLBACK');
+      contender.close();
+      blocker.close();
+    }
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(failure).toMatchObject({ errcode: expect.any(Number) });
+    expect(String(failure)).toMatch(/busy|locked/i);
+    expect(beginAttempts).toBe(5);
+    expect(elapsedMs).toBeLessThan(1_000);
+
+    db = new Database(path);
+    db.open();
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM beads').get()).toEqual({ count: 0 });
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get()).toEqual({ count: 0 });
+  });
+
+  it('admits one bead and one initial event across 100 attempts on independent connections', async () => {
+    db.close();
+    const workerCount = 8;
+    const attemptCounts = Array.from(
+      { length: workerCount },
+      (_, index) => Math.floor(100 / workerCount) + (index < 100 % workerCount ? 1 : 0),
+    );
+    const moduleUrl = new URL('../../../src/core/substrate/beads.ts', import.meta.url).href;
+    const source = `
+      import { parentPort, workerData } from 'node:worker_threads';
+      import { DatabaseSync } from 'node:sqlite';
+      import { createInlineProposal } from ${JSON.stringify(moduleUrl)};
+      parentPort.postMessage({ ready: true });
+      parentPort.once('message', () => {
+        const results = [];
+        try {
+          for (let attempt = 0; attempt < workerData.attempts; attempt += 1) {
+            const connection = new DatabaseSync(workerData.path, { timeout: 5000 });
+            connection.exec('PRAGMA busy_timeout = 5000');
+            try {
+              results.push(createInlineProposal(connection, workerData.args).created);
+            } finally {
+              connection.close();
+            }
+          }
+          parentPort.postMessage({ results });
+        } catch (error) {
+          parentPort.postMessage({ error: String(error) });
+        }
+      });
+    `;
+
+    const workerUrl = new URL(`data:text/javascript,${encodeURIComponent(source)}`);
+    const workers = attemptCounts.map((attempts) => new Worker(workerUrl, {
+      workerData: { attempts, path, args: inlineProposalArgs(1005) },
+    }));
+    const completions = workers.map((worker) => new Promise<boolean[]>((resolve, reject) => {
+      worker.on('message', (message: { ready?: boolean; results?: boolean[]; error?: string }) => {
+        if (message.error) reject(new Error(message.error));
+        if (message.results) resolve(message.results);
+      });
+      worker.on('error', reject);
+      worker.on('exit', (code) => {
+        if (code !== 0) reject(new Error(`inline proposal worker exited ${code}`));
+      });
+    }));
+    await Promise.all(workers.map((worker) => new Promise<void>((resolve, reject) => {
+      worker.once('message', (message: { ready?: boolean }) => {
+        if (!message.ready) return reject(new Error('worker did not report ready'));
+        resolve();
+      });
+      worker.once('error', reject);
+    })));
+    for (const worker of workers) worker.postMessage({ start: true });
+    const results = (await Promise.all(completions)).flat();
+
+    const inspect = new Database(path);
+    inspect.open();
+    try {
+      expect(results).toHaveLength(100);
+      expect(results.filter(Boolean)).toHaveLength(1);
+      expect(inspect.raw.prepare('SELECT COUNT(*) AS count FROM beads').get()).toEqual({ count: 1 });
+      expect(inspect.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get()).toEqual({ count: 1 });
+    } finally {
+      inspect.close();
+    }
+    db = new Database(path);
+    db.open();
+  }, 30_000);
+
+  it.each([
+    'before bead insert',
+    'after bead insert',
+    'after event insert',
+    'before commit',
+  ] as const)('never leaves half-state when a fault occurs %s', (faultPoint) => {
+    if (faultPoint === 'before bead insert') {
+      db.raw.exec(`
+        CREATE TRIGGER inject_before_bead_insert
+        BEFORE INSERT ON beads BEGIN SELECT RAISE(ABORT, 'injected before bead insert'); END
+      `);
+    } else if (faultPoint === 'after bead insert') {
+      db.raw.exec(`
+        CREATE TRIGGER inject_after_bead_insert
+        AFTER INSERT ON beads BEGIN SELECT RAISE(ABORT, 'injected after bead insert'); END
+      `);
+    } else if (faultPoint === 'after event insert') {
+      db.raw.exec(`
+        CREATE TRIGGER inject_after_event_insert
+        AFTER INSERT ON bead_events BEGIN SELECT RAISE(ABORT, 'injected after event insert'); END
+      `);
+    } else {
+      const exec = db.raw.exec.bind(db.raw);
+      vi.spyOn(db.raw, 'exec').mockImplementation((sql: string) => {
+        if (sql.trim().toUpperCase() === 'COMMIT') throw new Error('injected before commit');
+        exec(sql);
+      });
+    }
+
+    expect(() => createInlineProposal(db.raw, inlineProposalArgs(1006))).toThrow(/injected/i);
+    const beadCount = db.raw.prepare('SELECT COUNT(*) AS count FROM beads').get() as { count: number };
+    const eventCount = db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get() as { count: number };
+    expect([beadCount.count, eventCount.count]).toEqual([0, 0]);
+  });
 
   it('createBead persists defaults and writes status_change event', () => {
     const bead = createBead(db.raw, {

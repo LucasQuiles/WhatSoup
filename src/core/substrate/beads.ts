@@ -15,6 +15,28 @@ export interface CreateBeadArgs {
   actor: string;
 }
 
+export interface CreateInlineProposalArgs extends CreateBeadArgs {
+  sourceMessagePk: number;
+  normalizedTarget: string;
+  status: 'proposed';
+  proposalReason: `inline imperative: ${string}`;
+  actor: 'inline';
+}
+
+export interface CreateInlineProposalResult {
+  bead: BeadRow;
+  created: boolean;
+}
+
+export class InlineProposalCollisionError extends Error {
+  readonly code = 'INLINE_PROPOSAL_COLLISION';
+
+  constructor() {
+    super('inline proposal source collides with a different stable identity');
+    this.name = 'InlineProposalCollisionError';
+  }
+}
+
 export const TERMINAL: readonly BeadStatus[] = ['completed', 'cancelled', 'failed'];
 const PROTECTED = new Set(['id', 'kind', 'owner_jid', 'status', 'created_at']);
 
@@ -81,6 +103,91 @@ export function createBead(db: DatabaseSync, args: CreateBeadArgs): BeadRow {
   } catch (err) {
     try { db.exec('ROLLBACK'); } catch { /* best effort */ }
     throw err;
+  }
+}
+
+const SQLITE_BUSY_PRIMARY_CODE = 5;
+const SQLITE_UNIQUE_CONSTRAINT_CODE = 2067;
+const INLINE_PROPOSAL_BUSY_RETRIES = 4;
+const busyRetrySignal = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+const INLINE_PROPOSAL_TARGET_METADATA_KEY = 'inline_proposal_normalized_target';
+
+function sqliteErrcode(err: unknown): number | null {
+  if (typeof err !== 'object' || err === null || !('errcode' in err)) return null;
+  const errcode = (err as { errcode?: unknown }).errcode;
+  return typeof errcode === 'number' ? errcode : null;
+}
+
+function isSqliteBusy(err: unknown): boolean {
+  const errcode = sqliteErrcode(err);
+  return errcode !== null && (errcode & 0xff) === SQLITE_BUSY_PRIMARY_CODE;
+}
+
+function isInlineProposalSourceConflict(err: unknown): boolean {
+  if (sqliteErrcode(err) !== SQLITE_UNIQUE_CONSTRAINT_CODE) return false;
+  return err instanceof Error
+    && err.message === 'UNIQUE constraint failed: beads.source_message_pk';
+}
+
+function sameInlineProposalIdentity(bead: BeadRow, args: CreateInlineProposalArgs): boolean {
+  let metadata: unknown;
+  try {
+    metadata = JSON.parse(bead.metadata_json);
+  } catch {
+    return false;
+  }
+  const storedTarget = typeof metadata === 'object' && metadata !== null
+    ? (metadata as Record<string, unknown>)[INLINE_PROPOSAL_TARGET_METADATA_KEY]
+    : undefined;
+  return bead.owner_jid === args.ownerJid
+    && bead.chat_jid === (args.chatJid ?? null)
+    && bead.source_message_pk === args.sourceMessagePk
+    && bead.proposal_reason === args.proposalReason
+    && storedTarget === args.normalizedTarget;
+}
+
+function getInlineProposalBySource(
+  db: DatabaseSync,
+  sourceMessagePk: number,
+): BeadRow | undefined {
+  return db.prepare(`
+    SELECT * FROM beads
+    WHERE source_message_pk = ?
+      AND proposal_reason LIKE 'inline imperative: %'
+  `).get(sourceMessagePk) as unknown as BeadRow | undefined;
+}
+
+export function createInlineProposal(
+  db: DatabaseSync,
+  args: CreateInlineProposalArgs,
+): CreateInlineProposalResult {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const { normalizedTarget, ...beadArgs } = args;
+      return {
+        bead: createBead(db, {
+          ...beadArgs,
+          metadata: {
+            ...args.metadata,
+            [INLINE_PROPOSAL_TARGET_METADATA_KEY]: normalizedTarget,
+          },
+        }),
+        created: true,
+      };
+    } catch (err) {
+      if (isInlineProposalSourceConflict(err)) {
+        const existing = getInlineProposalBySource(db, args.sourceMessagePk);
+        if (existing && sameInlineProposalIdentity(existing, args)) {
+          return { bead: existing, created: false };
+        }
+        if (existing) throw new InlineProposalCollisionError();
+      }
+      if (isSqliteBusy(err) && attempt < INLINE_PROPOSAL_BUSY_RETRIES) {
+        Atomics.wait(busyRetrySignal, 0, 0, 2 ** attempt);
+        continue;
+      }
+      throw err;
+    }
   }
 }
 

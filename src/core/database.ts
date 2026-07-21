@@ -776,6 +776,7 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [42, runMigration42],
   [43, runMigration43],
   [44, runMigration44],
+  [45, runMigration45],
 ]);
 
 if (Math.max(...MIGRATIONS.keys()) !== CURRENT_SCHEMA_MIGRATION) {
@@ -1163,6 +1164,34 @@ function runMigration44(db: DatabaseSync): void {
   if (!cols.some((c) => c.name === 'last_compact_cache_read_tokens')) {
     db.exec('ALTER TABLE agent_sessions ADD COLUMN last_compact_cache_read_tokens INTEGER DEFAULT 0');
   }
+}
+
+const INLINE_PROPOSAL_SOURCE_PREDICATE =
+  "source_message_pk IS NOT NULL AND proposal_reason LIKE 'inline imperative: %'";
+
+function runMigration45(db: DatabaseSync): void {
+  const table = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'beads'")
+    .get() as { name: string } | undefined;
+  if (!table) return;
+
+  const collision = db.prepare(`
+    SELECT 1
+    FROM beads
+    WHERE ${INLINE_PROPOSAL_SOURCE_PREDICATE}
+    GROUP BY source_message_pk
+    HAVING COUNT(*) > 1
+    LIMIT 1
+  `).get();
+  if (collision) {
+    throw new Error('migration 45 blocked by duplicate inline proposal source linkage');
+  }
+
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_beads_inline_source_unique
+    ON beads(source_message_pk)
+    WHERE ${INLINE_PROPOSAL_SOURCE_PREDICATE}
+  `);
 }
 
 
