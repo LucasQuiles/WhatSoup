@@ -500,8 +500,14 @@ export class ImessageAdapter
     if (record.kind === 'text' && record.body !== null) {
       const msg = this.buildInboundMessage(record);
       this.safeEmit(this.listeners.message, msg);
+    } else if (record.kind === 'reaction' && record.reactionTargetGuid !== undefined) {
+      this.emitReactionEvent(record);
     }
-    // TODO(future): route reaction/read/typing envelopes to extension events.
+    // Read receipts (iMessage `dateRead` on the original outbound message) and
+    // typing indicators (BlueBubbles socket/SSE events) require polling-model
+    // changes — dateRead is state on an existing record (needs cross-poll
+    // diffing), typing is push-only (not surfaced by `/message/query`). Both
+    // are deferred until the inbound pipeline moves to streaming/webhook mode.
 
     trimSeenSet(this.seen);
     return true;
@@ -543,6 +549,36 @@ export class ImessageAdapter
 
   private nextCorrelationId(): string {
     return 'imessage-' + String(++this.seq).padStart(6, '0');
+  }
+
+  /**
+   * Project an inbound tapback reaction record onto the contract
+   * {@link ReactionEvent}. The reaction's `target` references the reacted-to
+   * message; `actor` is the reactor (envelope source for inbound, self for
+   * echoes of our own outbound reaction). Mirrors Signal's emitReactionEvent.
+   */
+  private emitReactionEvent(record: InboundImessage): void {
+    if (record.reactionTargetGuid === undefined) return;
+    const channelId = this.channelId;
+    const peer = record.chatGuid ?? (record.fromMe ? record.to : record.from);
+    const event: ReactionEvent = {
+      target: {
+        channel: channelId,
+        conversation: peer,
+        id: record.reactionTargetGuid,
+      },
+      actor: {
+        channel: channelId,
+        // The reactor: the envelope source for inbound tapbacks; our own id
+        // for echoes (BlueBubbles does echo our outbound reactions back as
+        // inbound associated-message records with isFromMe=true).
+        id: record.fromMe ? this.selfRef().id : record.from,
+      },
+      emoji: record.reactionEmoji ?? '',
+      removed: record.reactionRemove === true,
+      at: new Date(record.timestamp),
+    };
+    this.safeEmit(this.listeners.reaction, event);
   }
 
   private safeEmit<T>(set: Set<(e: T) => void>, payload: T): void {

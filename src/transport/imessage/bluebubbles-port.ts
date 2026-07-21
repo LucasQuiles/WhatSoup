@@ -107,6 +107,23 @@ interface BbMessage {
   chats?: Array<{ guid?: string }>;
   dateCreated?: number;
   itemType?: number;
+  /**
+   * BlueBubbles field set on tapback reaction envelopes. References the
+   * original message's GUID. Absent on plain-text messages.
+   */
+  associatedMessageGuid?: string;
+  /**
+   * BlueBubbles reaction kind. Per the authoritative MessageResponse type
+   * (github.com/BlueBubblesApp/bluebubbles-server README), this field is
+   * surfaced as `number | null` from `/message/query` — the iMessage chat.db
+   * `associated_message_type` code (2000-2005 add, 3000-3005 remove, where
+   * 2000/3000=love, 2001/3001=like, 2002/3002=dislike, 2003/3003=laugh,
+   * 2004/3004=emphasize, 2005/3005=question). The string form ('love',
+   * '-like', …) appears only in OUTBOUND `/message/react` request bodies;
+   * the parser accepts both forms defensively but the inbound surface is
+   * always numeric or null.
+   */
+  associatedMessageType?: number | string;
 }
 
 /** iMessage tapback emoji → BlueBubbles reactionType. Removal prefixes '-'. */
@@ -119,6 +136,77 @@ const EMOJI_TO_REACTION_TYPE: Readonly<Record<string, string>> = Object.freeze({
   '❓': 'question',
 });
 
+/**
+ * Inverse map for inbound parsing: BlueBubbles reactionType name → emoji.
+ * Built once at module load. The outbound map is the source of truth; this
+ * derivation guarantees the inbound round-trips the outbound.
+ */
+const REACTION_TYPE_TO_EMOJI: Readonly<Record<string, string>> = Object.freeze(
+  Object.fromEntries(
+    Object.entries(EMOJI_TO_REACTION_TYPE).map(([emoji, name]) => [name, emoji]),
+  ),
+);
+
+/**
+ * Numeric iMessage chat.db `associated_message_type` codes (from
+ * SUBMESSAGES_TYPE_TABLE in chat.db schema). 2000-2005 are reactions;
+ * 3000-3005 are the removal counterparts. Anything else is not a reaction.
+ */
+const REACTION_NUMERIC_ADD_BASE = 2000;
+const REACTION_NUMERIC_REMOVE_BASE = 3000;
+const REACTION_NUMERIC_NAMES: readonly string[] = [
+  'love',
+  'like',
+  'dislike',
+  'laugh',
+  'emphasize',
+  'question',
+];
+
+/**
+ * Map a BlueBubbles `associatedMessageType` value to a tapback emoji +
+ * removal flag. Returns `null` for non-reaction values (including 0,
+ * 'custom', undefined, or any unrecognized form).
+ *
+ * Production surface (per authoritative BlueBubbles MessageResponse):
+ * always `number | null`. Numeric codes 2000-2005 are tapback adds
+ * (love/like/dislike/laugh/emphasize/question in that order);
+ * 3000-3005 are the removal counterparts. Anything else is not a reaction.
+ *
+ * The string form ('love', '-like', …) is the OUTBOUND `/message/react`
+ * request body shape; the parser accepts it defensively to round-trip the
+ * outbound map, but real `/message/query` responses always use the numeric
+ * form. The defensive string path never executes against production data.
+ */
+function reactionTypeToEmoji(raw: number | string | undefined): { emoji: string; remove: boolean } | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw === 'number') {
+    // iMessage chat.db associated_message_type codes (SUBMESSAGES_TYPE_TABLE).
+    // Defensive guard: reject non-integers (e.g. NaN, 2000.5) — the schema
+    // is integer-only and a fractional value is corrupt data.
+    if (!Number.isInteger(raw)) return null;
+    if (raw >= REACTION_NUMERIC_ADD_BASE && raw < REACTION_NUMERIC_ADD_BASE + REACTION_NUMERIC_NAMES.length) {
+      const name = REACTION_NUMERIC_NAMES[raw - REACTION_NUMERIC_ADD_BASE];
+      return { emoji: REACTION_TYPE_TO_EMOJI[name] ?? '', remove: false };
+    }
+    if (raw >= REACTION_NUMERIC_REMOVE_BASE && raw < REACTION_NUMERIC_REMOVE_BASE + REACTION_NUMERIC_NAMES.length) {
+      const name = REACTION_NUMERIC_NAMES[raw - REACTION_NUMERIC_REMOVE_BASE];
+      return { emoji: REACTION_TYPE_TO_EMOJI[name] ?? '', remove: true };
+    }
+    return null;
+  }
+  // Defensive string path — see docstring above. Never executes against
+  // production data but keeps the parser symmetric with the outbound shape.
+  const s = raw.trim();
+  if (s === '') return null;
+  const remove = s.startsWith('-');
+  const name = remove ? s.slice(1) : s;
+  if (Object.prototype.hasOwnProperty.call(REACTION_TYPE_TO_EMOJI, name)) {
+    return { emoji: REACTION_TYPE_TO_EMOJI[name] ?? '', remove };
+  }
+  return null;
+}
+
 /** Chat GUID for a 1:1 conversation with an address (BlueBubbles format). */
 function dmChatGuid(address: string): string {
   return `iMessage;-;${address}`;
@@ -129,6 +217,31 @@ function normalizeMessage(msg: BbMessage): InboundImessage | null {
   const groupGuid = msg.chats?.[0]?.guid;
   const isGroup = typeof groupGuid === 'string' && groupGuid.startsWith('iMessage;+;');
   const from = msg.isFromMe === true ? '' : (msg.handle?.address ?? 'unknown');
+  const timestamp = typeof msg.dateCreated === 'number' ? msg.dateCreated : 0;
+
+  // Reaction detection: BlueBubbles sets associatedMessageGuid on tapback
+  // envelopes. If associatedMessageType resolves to a known reaction, this
+  // is a reaction envelope (separate from the reacted-to message); otherwise
+  // it's a non-reaction association we don't model (e.g. thread identifier).
+  if (typeof msg.associatedMessageGuid === 'string' && msg.associatedMessageGuid !== '') {
+    const parsed = reactionTypeToEmoji(msg.associatedMessageType);
+    if (parsed !== null) {
+      return {
+        guid: msg.guid,
+        from,
+        to: isGroup ? groupGuid! : (msg.handle?.address ?? ''),
+        chatGuid: isGroup ? groupGuid : undefined,
+        body: null,
+        fromMe: msg.isFromMe === true,
+        kind: 'reaction',
+        timestamp,
+        reactionEmoji: parsed.emoji,
+        reactionRemove: parsed.remove,
+        reactionTargetGuid: msg.associatedMessageGuid,
+      };
+    }
+  }
+
   return {
     guid: msg.guid,
     from,
@@ -137,7 +250,7 @@ function normalizeMessage(msg: BbMessage): InboundImessage | null {
     body: typeof msg.text === 'string' ? msg.text : null,
     fromMe: msg.isFromMe === true,
     kind: msg.text !== null && msg.text !== undefined ? 'text' : 'other',
-    timestamp: typeof msg.dateCreated === 'number' ? msg.dateCreated : 0,
+    timestamp,
   };
 }
 
