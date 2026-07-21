@@ -1094,6 +1094,9 @@ function validateTransportConfig(
       'imessageConfig',
       'imessageConfig is inconsistent with transport ' + JSON.stringify(effectiveTransport) +
         ' — imessageConfig is only valid when transport is "imessage"',
+    );
+  }
+
   // signalConfig present with non-signal transport → reject as inconsistent.
   if (signalConfig !== undefined && effectiveTransport !== 'signal') {
     return err(
@@ -1125,6 +1128,8 @@ function validateTransportConfig(
       return err('imessageConfig', 'imessageConfig must be an object');
     }
     return validateImessageConfig(imessageConfig as Record<string, unknown>);
+  }
+
   // signalConfig is REQUIRED when transport === 'signal'.
   if (effectiveTransport === 'signal') {
     if (signalConfig === undefined || signalConfig === null) {
