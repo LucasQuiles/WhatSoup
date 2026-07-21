@@ -44,7 +44,7 @@ describe('imessage transport — port interface contract', () => {
 
   it('send() returns a guid envelope id', async () => {
     const port = makeStubPort();
-    const r = await port.send({ recipient: 'user@icloud.com', body: 'hi' });
+    const r = await port.send({ recipient: 'user@example.com', body: 'hi' });
     expect(typeof r.guid).toBe('string');
   });
 
@@ -57,8 +57,8 @@ describe('imessage transport — port interface contract', () => {
   it('InboundImessage carries the documented fields', () => {
     const env: InboundImessage = {
       guid: 'guid-1',
-      from: 'user@icloud.com',
-      to: 'us@icloud.com',
+      from: 'user@example.com',
+      to: 'us@example.com',
       body: 'hello',
       fromMe: false,
       kind: 'text',
@@ -71,7 +71,7 @@ describe('imessage transport — port interface contract', () => {
   it('ReactImessageArgs carries target guid + conversation + emoji', () => {
     const args: ReactImessageArgs = {
       targetGuid: 'guid-1',
-      conversation: 'user@icloud.com',
+      conversation: 'user@example.com',
       emoji: '❤️',
       remove: false,
     };
@@ -80,7 +80,7 @@ describe('imessage transport — port interface contract', () => {
 
   it('SendReadReceiptArgs carries multiple guids', () => {
     const args: SendReadReceiptArgs = {
-      conversation: 'user@icloud.com',
+      conversation: 'user@example.com',
       guids: ['guid-1', 'guid-2', 'guid-3'],
     };
     expect(args.guids).toHaveLength(3);

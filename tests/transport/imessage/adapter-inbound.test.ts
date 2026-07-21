@@ -13,8 +13,8 @@ function makeAdapter(port: MockImessagePort = new MockImessagePort()) {
 function envelope(overrides: Partial<InboundImessage> = {}): InboundImessage {
   return {
     guid: 'guid-default',
-    from: 'user@icloud.com',
-    to: 'bot@icloud.com',
+    from: 'user@example.com',
+    to: 'bot@example.com',
     body: 'hello',
     fromMe: false,
     kind: 'text',
@@ -45,10 +45,10 @@ describe('ImessageAdapter — handleInboundRecord', () => {
     const received: InboundMessage[] = [];
     adapter.on('message', (m) => received.push(m));
 
-    adapter.handleInboundRecord(envelope({ from: 'peer@icloud.com', to: 'us@icloud.com', fromMe: false }));
+    adapter.handleInboundRecord(envelope({ from: 'peer@example.com', to: 'us@example.com', fromMe: false }));
 
-    expect(received[0].conversation.id).toBe('peer@icloud.com');
-    expect(received[0].sender.id).toBe('peer@icloud.com');
+    expect(received[0].conversation.id).toBe('peer@example.com');
+    expect(received[0].sender.id).toBe('peer@example.com');
     await adapter.disconnect();
   });
 
@@ -58,9 +58,9 @@ describe('ImessageAdapter — handleInboundRecord', () => {
     const received: InboundMessage[] = [];
     adapter.on('message', (m) => received.push(m));
 
-    adapter.handleInboundRecord(envelope({ from: 'us@icloud.com', to: 'peer@icloud.com', fromMe: true }));
+    adapter.handleInboundRecord(envelope({ from: 'us@example.com', to: 'peer@example.com', fromMe: true }));
 
-    expect(received[0].conversation.id).toBe('peer@icloud.com');
+    expect(received[0].conversation.id).toBe('peer@example.com');
     expect(received[0].sender.id).toBe(adapter.selfRef().id);
     expect(received[0].fromMe).toBe(true);
     await adapter.disconnect();

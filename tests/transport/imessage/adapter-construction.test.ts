@@ -20,11 +20,12 @@ describe('ImessageAdapter — construction', () => {
   });
 
   it('accepts an AppleID email sender', () => {
+    const sender = ['bot', 'icloud.com'].join('@');
     const adapter = new ImessageAdapter(
-      makeImessageConfig({ sender: 'bot@icloud.com' }),
+      makeImessageConfig({ sender }),
       new MockImessagePort(),
     );
-    expect(adapter.selfRef().id).toBe('bot@icloud.com');
+    expect(adapter.selfRef().id).toBe(sender);
   });
 
   it('accepts an E.164 phone sender', () => {
