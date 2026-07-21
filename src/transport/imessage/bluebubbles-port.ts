@@ -146,10 +146,19 @@ function normalizeMessage(msg: BbMessage): InboundImessage | null {
 // ---------------------------------------------------------------------------
 
 export class BlueBubblesPort implements ImessagePort {
+  // Explicit fields instead of constructor parameter properties: node
+  // strip-types (strip-only mode) rejects parameter properties
+  // (tests/strip-types-compat.test.ts).
+  private readonly config: ImessageConfig;
+  private readonly http: BlueBubblesHttpClient;
+
   constructor(
-    private readonly config: ImessageConfig,
-    private readonly http: BlueBubblesHttpClient = createHttpClient(config),
-  ) {}
+    config: ImessageConfig,
+    http: BlueBubblesHttpClient = createHttpClient(config),
+  ) {
+    this.config = config;
+    this.http = http;
+  }
 
   async verifyCredentials(): Promise<void> {
     await this.http({ method: 'GET', path: '/ping' });

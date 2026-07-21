@@ -128,9 +128,9 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   { path: 'src/transport/signal/adapter.ts', issue: '#1975', reason: 'Signal adapter contract; factory stub throws until signal-cli port-impl PR wires it' },
   { path: 'src/transport/signal/port.ts', issue: '#1975', reason: 'Signal Port interface; consumed only by the adapter, which the factory stub does not yet construct' },
   { path: 'src/transport/signal/types.ts', issue: '#1975', reason: 'Signal config/types; consumed only by the adapter + port, neither wired into the factory yet' },
-  { path: 'src/transport/imessage/adapter.ts', issue: '#1975', reason: 'iMessage adapter contract; factory stub throws until imsg/bluebubbles port-impl PR wires it' },
-  { path: 'src/transport/imessage/port.ts', issue: '#1975', reason: 'iMessage Port interface; consumed only by the adapter, which the factory stub does not yet construct' },
-  { path: 'src/transport/imessage/types.ts', issue: '#1975', reason: 'iMessage config/types; consumed only by the adapter + port, neither wired into the factory yet' },
+  // imessage adapter/port/types graduated out of TRACKED_UNREACHABLE: the
+  // factory now constructs the imsg/bluebubbles ports (this branch), so all
+  // three are reachable from a production root.
 ];
 
 // ---------------------------------------------------------------------------

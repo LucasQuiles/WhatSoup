@@ -181,12 +181,21 @@ function normalizeRecord(rec: ImsgHistoryRecord): InboundImessage | null {
 // ---------------------------------------------------------------------------
 
 export class ImsgPort implements ImessagePort {
+  // Explicit fields instead of constructor parameter properties: node
+  // strip-types (strip-only mode) rejects parameter properties
+  // (tests/strip-types-compat.test.ts).
+  private readonly config: ImessageConfig;
+  private readonly connectionFactory: ImsgRpcConnectionFactory;
+
   private connection: ImsgRpcConnection | null = null;
 
   constructor(
-    private readonly config: ImessageConfig,
-    private readonly connectionFactory: ImsgRpcConnectionFactory = createSocketConnection,
-  ) {}
+    config: ImessageConfig,
+    connectionFactory: ImsgRpcConnectionFactory = createSocketConnection,
+  ) {
+    this.config = config;
+    this.connectionFactory = connectionFactory;
+  }
 
   private conn(): ImsgRpcConnection {
     if (!this.connection) {
