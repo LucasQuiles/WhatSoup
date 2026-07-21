@@ -324,10 +324,17 @@ def evaluate_clear(
             scope = receipt.get("scope")
             if scope not in {"application_health", "unit_execution", "reachability", "transition_batch"}:
                 continue
-            if scope == "reachability" and receipt.get("state") == "degraded":
+            if scope == "reachability" and receipt.get("state") != "healthy":
                 continue
-            if scope == "transition_batch" and receipt.get("transitionCount") == 0:
-                continue
+            if scope == "transition_batch":
+                transition_count = receipt.get("transitionCount")
+                if (
+                    type(transition_count) is not int
+                    or transition_count <= 0
+                    or receipt.get("state") != "healthy"
+                    or receipt.get("ok") is not True
+                ):
+                    continue
             if scope in {"unit_execution", "application_health"} and not _semantic_health_receipt(receipt):
                 continue
             return _clear_decision(ClearStatus.ACCEPTED, "authoritative health snapshot verified", observation, policy, [receipt])

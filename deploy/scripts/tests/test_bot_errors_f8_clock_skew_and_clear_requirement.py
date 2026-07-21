@@ -233,6 +233,68 @@ class ClearEvaluatorTests(IsolatedDispatcherTestCase):
         receipt = {"kind": "health_snapshot", "ref": "health:missing-scope", "verified": True, "schemaVersion": 2, "observedAtEpoch": now, "incidentKey": key}
         self.assertEqual(_decision(self.mod, record, event, [receipt]).status.value, "candidate")
 
+    def test_reachability_requires_explicit_healthy_state(self) -> None:
+        now = int(time.time())
+        key = "host-a|ana-bot|instance_unreachable"
+        event = _clear_event(now, source="instance_unreachable", schema_version=2, policy="health_snapshot", proof_ref="reachability:1")
+        record = _open_record(key, now - 300, source="instance_unreachable", policy="health_snapshot", minimum_schema=2)
+        base = {
+            "kind": "health_snapshot",
+            "ref": "reachability:1",
+            "verified": True,
+            "schemaVersion": 2,
+            "observedAtEpoch": now,
+            "incidentKey": key,
+            "scope": "reachability",
+        }
+        self.assertEqual(
+            _decision(self.mod, record, event, [{**base, "state": "healthy"}]).status.value,
+            "accepted",
+        )
+        for state in (None, "unknown", "unreachable", "degraded"):
+            with self.subTest(state=state):
+                receipt = dict(base)
+                if state is not None:
+                    receipt["state"] = state
+                self.assertEqual(
+                    _decision(self.mod, record, event, [receipt]).status.value,
+                    "candidate",
+                )
+
+    def test_transition_batch_requires_directional_healthy_semantics(self) -> None:
+        now = int(time.time())
+        key = "host-a|ana-bot|health_body_degraded"
+        event = _clear_event(now, source="health_body_degraded", schema_version=2, policy="health_snapshot", proof_ref="batch:semantic")
+        record = _open_record(key, now - 300, source="health_body_degraded", policy="health_snapshot", minimum_schema=2)
+        base = {
+            "kind": "health_snapshot",
+            "ref": "batch:semantic",
+            "verified": True,
+            "schemaVersion": 2,
+            "observedAtEpoch": now,
+            "incidentKey": key,
+            "scope": "transition_batch",
+        }
+        positive = {**base, "transitionCount": 1, "state": "healthy", "ok": True}
+        self.assertEqual(_decision(self.mod, record, event, [positive]).status.value, "accepted")
+        negatives = [
+            {**base, "state": "healthy", "ok": True},
+            {**base, "transitionCount": "1", "state": "healthy", "ok": True},
+            {**base, "transitionCount": True, "state": "healthy", "ok": True},
+            {**base, "transitionCount": 0, "state": "healthy", "ok": True},
+            {**base, "transitionCount": -1, "state": "healthy", "ok": True},
+            {**base, "transitionCount": 1, "ok": True},
+            {**base, "transitionCount": 1, "state": "unknown", "ok": True},
+            {**base, "transitionCount": 1, "state": "healthy"},
+            {**base, "transitionCount": 1, "state": "healthy", "ok": False},
+        ]
+        for index, receipt in enumerate(negatives):
+            with self.subTest(index=index, receipt=receipt):
+                self.assertEqual(
+                    _decision(self.mod, record, event, [receipt]).status.value,
+                    "candidate",
+                )
+
     def test_wrong_v2_observation_identity_rejects_even_with_matching_receipt(self) -> None:
         now = int(time.time())
         key = "host-a|ana-bot|health_body_degraded"
