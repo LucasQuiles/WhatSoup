@@ -344,6 +344,7 @@ export default function LineDetail() {
                   payload={checkpointsPayload}
                   isLoading={checkpointsLoading}
                   freshness={checkpointsFreshness}
+                  lineName={name || ''}
                 />
               )}
               {activeTab === 'groups' && <GroupsTab lineName={name || ''} myJid={line.phone ? `${line.phone}@s.whatsapp.net` : undefined} />}
