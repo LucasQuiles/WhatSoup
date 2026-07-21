@@ -21,6 +21,15 @@ export const MAX_EXACT_ADDED_LINE_PATCH_BYTES = 4 * 1_024 * 1_024;
 export const MAX_EXACT_ADDED_LINE_PATCH_ROW_COUNT = 400_000;
 export const MAX_EXACT_ADDED_LINE_PATCH_TOTAL_BYTES = 16 * 1_024 * 1_024;
 export const MAX_EXACT_ADDED_LINE_BYTES = 16 * 1_024 * 1_024;
+export const MAX_EXACT_ADDED_LINE_BUDGET_V1: Readonly<ExactAddedLineBudgetV1> =
+  Object.freeze({
+    changeCount: MAX_EXACT_ADDED_LINE_CHANGE_COUNT,
+    sourceBlobBytes: MAX_EXACT_AGGREGATE_BLOB_BYTES,
+    sourceLineCount: MAX_EXACT_ADDED_LINE_SOURCE_LINE_COUNT,
+    patchBytes: MAX_EXACT_ADDED_LINE_PATCH_TOTAL_BYTES,
+    addedLineCount: MAX_EXACT_ADDED_LINE_COUNT,
+    addedTextBytes: MAX_EXACT_ADDED_LINE_BYTES,
+  });
 export const MAX_EXACT_TREE_ENTRY_PATH_COUNT = 64;
 export const MAX_EXACT_TREE_ENTRY_PATH_BYTES = 1_024;
 export const MAX_EXACT_TREE_ENTRY_PATH_SEGMENT_COUNT = 1_023;
@@ -112,6 +121,25 @@ export interface ExactAddedLineInputV1 {
   candidateOid: string;
 }
 
+export interface ExactAddedLineBudgetV1 {
+  changeCount: number;
+  sourceBlobBytes: number;
+  sourceLineCount: number;
+  patchBytes: number;
+  addedLineCount: number;
+  addedTextBytes: number;
+}
+
+export interface ExactAddedLineBudgetAccountingV1 {
+  limit: ExactAddedLineBudgetV1;
+  consumed: ExactAddedLineBudgetV1;
+  remaining: ExactAddedLineBudgetV1;
+}
+
+export interface ExactBudgetedAddedLineInputV1 extends ExactAddedLineInputV1 {
+  budget: ExactAddedLineBudgetV1;
+}
+
 export interface ExactAddedLineV1 {
   path: string;
   newBlobOid: string;
@@ -127,6 +155,10 @@ export interface ExactAddedLineSetV1 {
   baseOid: string;
   candidateOid: string;
   changes: ExactChangeWithAddedLinesV1[];
+}
+
+export interface ExactBudgetedAddedLineSetV1 extends ExactAddedLineSetV1 {
+  accounting: ExactAddedLineBudgetAccountingV1;
 }
 
 export type ExactGitInputErrorCode =
@@ -1314,6 +1346,18 @@ export function readExactBlobs(
   cwd: string,
   objectOids: readonly string[],
 ): ExactBlobV1[] {
+  return readExactBlobsWithinAggregateBudget(
+    cwd,
+    objectOids,
+    MAX_EXACT_AGGREGATE_BLOB_BYTES,
+  );
+}
+
+function readExactBlobsWithinAggregateBudget(
+  cwd: string,
+  objectOids: readonly string[],
+  aggregateByteLimit: number,
+): ExactBlobV1[] {
   if (!Array.isArray(objectOids)) {
     throw new ExactGitInputError(
       "ci.input.blob-set-malformed",
@@ -1353,7 +1397,7 @@ export function readExactBlobs(
   for (const oid of oids) {
     const blob = preflightBlob(cwd, oid);
     aggregateBytes += blob.byteLength;
-    if (aggregateBytes > MAX_EXACT_AGGREGATE_BLOB_BYTES) {
+    if (aggregateBytes > aggregateByteLimit) {
       throw new ExactGitInputError(
         "ci.input.blob-set-budget",
         "ci.input.blob-set-budget",
@@ -1526,7 +1570,10 @@ function compareFacts(left: ChangeFactV1, right: ChangeFactV1): number {
   return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
 }
 
-function parseChangeFacts(bytes: Buffer): ChangeFactV1[] {
+function parseChangeFacts(
+  bytes: Buffer,
+  maxFactCount = MAX_CHANGE_FACT_COUNT,
+): ChangeFactV1[] {
   if (bytes.byteLength > MAX_CHANGE_SET_BYTES) {
     throw new ExactGitInputError(
       "ci.classification.change-set-budget",
@@ -1537,7 +1584,7 @@ function parseChangeFacts(bytes: Buffer): ChangeFactV1[] {
   const facts: ChangeFactV1[] = [];
 
   for (let index = 0; index < fields.length;) {
-    if (facts.length >= MAX_CHANGE_FACT_COUNT) {
+    if (facts.length >= maxFactCount) {
       throw new ExactGitInputError(
         "ci.classification.change-set-budget",
         "ci.classification.change-set-budget: raw diff exceeds the fact-count budget",
@@ -1626,6 +1673,20 @@ export function readExactChangeFacts(
   baseOid: string,
   candidateOid: string,
 ): ChangeFactV1[] {
+  return readExactChangeFactsWithinLimit(
+    cwd,
+    baseOid,
+    candidateOid,
+    MAX_CHANGE_FACT_COUNT,
+  );
+}
+
+function readExactChangeFactsWithinLimit(
+  cwd: string,
+  baseOid: string,
+  candidateOid: string,
+  maxFactCount: number,
+): ChangeFactV1[] {
   const exactBase = requireCommit(cwd, baseOid, "base");
   const exactCandidate = requireCommit(cwd, candidateOid, "candidate");
   readMergeBase(cwd, exactBase, exactCandidate);
@@ -1651,7 +1712,10 @@ export function readExactChangeFacts(
   );
   let nulCount = 0;
   for (const byte of preflight) if (byte === 0) nulCount += 1;
-  if (nulCount % 2 !== 0 || nulCount / 2 > MAX_CHANGE_FACT_COUNT) {
+  const preflightFactLimit = maxFactCount > Math.floor(MAX_CHANGE_FACT_COUNT / 2)
+    ? MAX_CHANGE_FACT_COUNT
+    : Math.min(MAX_CHANGE_FACT_COUNT, maxFactCount * 2);
+  if (nulCount % 2 !== 0 || nulCount / 2 > preflightFactLimit) {
     throw new ExactGitInputError(
       "ci.classification.change-set-budget",
       "ci.classification.change-set-budget: preflight change count is invalid or over budget",
@@ -1681,7 +1745,7 @@ export function readExactChangeFacts(
     "ci.classification.change-set-malformed",
     MAX_CHANGE_SET_BYTES + 1,
   );
-  return parseChangeFacts(bytes);
+  return parseChangeFacts(bytes, maxFactCount);
 }
 
 interface ExactTextLine {
@@ -1732,6 +1796,135 @@ function validateExactAddedLineInput(value: unknown): ExactAddedLineInputV1 {
   }
 }
 
+const EXACT_ADDED_LINE_BUDGET_KEYS = [
+  "changeCount",
+  "sourceBlobBytes",
+  "sourceLineCount",
+  "patchBytes",
+  "addedLineCount",
+  "addedTextBytes",
+] as const satisfies readonly (keyof ExactAddedLineBudgetV1)[];
+
+function validateExactAddedLineBudget(value: unknown): ExactAddedLineBudgetV1 {
+  if (
+    typeof value !== "object"
+    || value === null
+    || Array.isArray(value)
+    || utilTypes.isProxy(value)
+    || Object.getPrototypeOf(value) !== Object.prototype
+  ) {
+    throw addedLinesError("ci.input.added-lines.input-malformed");
+  }
+  const keys = Reflect.ownKeys(value);
+  if (
+    keys.length !== EXACT_ADDED_LINE_BUDGET_KEYS.length
+    || keys.some((key) => typeof key !== "string")
+    || EXACT_ADDED_LINE_BUDGET_KEYS.some((key) => !keys.includes(key))
+  ) {
+    throw addedLinesError("ci.input.added-lines.input-malformed");
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const budget = {} as ExactAddedLineBudgetV1;
+  for (const key of EXACT_ADDED_LINE_BUDGET_KEYS) {
+    const descriptor = descriptors[key];
+    const maximum = MAX_EXACT_ADDED_LINE_BUDGET_V1[key];
+    if (
+      descriptor === undefined
+      || !("value" in descriptor)
+      || !descriptor.enumerable
+      || typeof descriptor.value !== "number"
+      || !Number.isSafeInteger(descriptor.value)
+      || Object.is(descriptor.value, -0)
+      || descriptor.value < 0
+      || descriptor.value > maximum
+    ) {
+      throw addedLinesError("ci.input.added-lines.input-malformed");
+    }
+    budget[key] = descriptor.value;
+  }
+  return budget;
+}
+
+function validateExactBudgetedAddedLineInput(
+  value: unknown,
+): ExactBudgetedAddedLineInputV1 {
+  try {
+    if (
+      typeof value !== "object"
+      || value === null
+      || Array.isArray(value)
+      || utilTypes.isProxy(value)
+      || Object.getPrototypeOf(value) !== Object.prototype
+    ) {
+      throw addedLinesError("ci.input.added-lines.input-malformed");
+    }
+    const keys = Reflect.ownKeys(value);
+    if (
+      keys.length !== 3
+      || keys.some((key) => typeof key !== "string")
+      || !keys.includes("baseOid")
+      || !keys.includes("candidateOid")
+      || !keys.includes("budget")
+    ) {
+      throw addedLinesError("ci.input.added-lines.input-malformed");
+    }
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const base = descriptors.baseOid;
+    const candidate = descriptors.candidateOid;
+    const budget = descriptors.budget;
+    if (
+      base === undefined || !("value" in base) || !base.enumerable
+      || candidate === undefined || !("value" in candidate) || !candidate.enumerable
+      || budget === undefined || !("value" in budget) || !budget.enumerable
+      || typeof base.value !== "string" || !FULL_OID.test(base.value)
+      || typeof candidate.value !== "string" || !FULL_OID.test(candidate.value)
+    ) {
+      throw addedLinesError("ci.input.added-lines.input-malformed");
+    }
+    return {
+      baseOid: base.value,
+      candidateOid: candidate.value,
+      budget: validateExactAddedLineBudget(budget.value),
+    };
+  } catch {
+    throw addedLinesError("ci.input.added-lines.input-malformed");
+  }
+}
+
+function copyExactAddedLineBudget(
+  value: ExactAddedLineBudgetV1,
+): ExactAddedLineBudgetV1 {
+  return {
+    changeCount: value.changeCount,
+    sourceBlobBytes: value.sourceBlobBytes,
+    sourceLineCount: value.sourceLineCount,
+    patchBytes: value.patchBytes,
+    addedLineCount: value.addedLineCount,
+    addedTextBytes: value.addedTextBytes,
+  };
+}
+
+function freezeExactAddedLineBudget(
+  value: ExactAddedLineBudgetV1,
+): ExactAddedLineBudgetV1 {
+  return Object.freeze(copyExactAddedLineBudget(value));
+}
+
+function exactAddedLineBudgetAccounting(
+  limit: ExactAddedLineBudgetV1,
+  consumed: ExactAddedLineBudgetV1,
+): ExactAddedLineBudgetAccountingV1 {
+  const remaining = {} as ExactAddedLineBudgetV1;
+  for (const key of EXACT_ADDED_LINE_BUDGET_KEYS) {
+    remaining[key] = limit[key] - consumed[key];
+  }
+  return Object.freeze({
+    limit: freezeExactAddedLineBudget(limit),
+    consumed: freezeExactAddedLineBudget(consumed),
+    remaining: freezeExactAddedLineBudget(remaining),
+  });
+}
+
 function mapAddedLineInputError(error: unknown): never {
   if (error instanceof ExactGitInputError) {
     if (
@@ -1746,6 +1939,26 @@ function mapAddedLineInputError(error: unknown): never {
       throw addedLinesError("ci.input.added-lines.budget");
     }
     if (error.code === "ci.input.blob-identity-mismatch") {
+      throw addedLinesError("ci.input.added-lines.identity-mismatch");
+    }
+  }
+  throw addedLinesError("ci.input.added-lines.unavailable");
+}
+
+function mapAddedLineTerminalError(error: unknown): never {
+  if (error instanceof ExactGitInputError) {
+    if (error.code === "ci.input.git-execution-timeout") {
+      throw addedLinesError("ci.input.added-lines.timeout");
+    }
+    if (error.code === "ci.input.blob-unavailable") {
+      throw addedLinesError("ci.input.added-lines.unavailable");
+    }
+    if (
+      error.code === "ci.input.blob-set-malformed"
+      || error.code === "ci.input.blob-set-budget"
+      || error.code === "ci.input.blob-type-unsupported"
+      || error.code === "ci.input.blob-identity-mismatch"
+    ) {
       throw addedLinesError("ci.input.added-lines.identity-mismatch");
     }
   }
@@ -2028,19 +2241,22 @@ function requireBlobSetUnchanged(
   }
 }
 
-export function readExactAddedLines(
+function readExactAddedLinesCore(
   cwd: string,
-  input: ExactAddedLineInputV1,
-): ExactAddedLineSetV1 {
-  const { baseOid, candidateOid } = validateExactAddedLineInput(input);
+  baseOid: string,
+  candidateOid: string,
+  budget: ExactAddedLineBudgetV1,
+): ExactBudgetedAddedLineSetV1 {
   let facts: ChangeFactV1[];
   try {
-    facts = readExactChangeFacts(cwd, baseOid, candidateOid);
+    facts = readExactChangeFactsWithinLimit(
+      cwd,
+      baseOid,
+      candidateOid,
+      budget.changeCount,
+    );
   } catch (error) {
     mapAddedLineInputError(error);
-  }
-  if (facts.length > MAX_EXACT_ADDED_LINE_CHANGE_COUNT) {
-    throw addedLinesError("ci.input.added-lines.budget");
   }
   if (facts.some((fact) => fact.oldType === "gitlink" || fact.newType === "gitlink")) {
     throw addedLinesError("ci.input.added-lines.gitlink");
@@ -2053,7 +2269,11 @@ export function readExactAddedLines(
   }))].sort();
   let exactBlobs: ExactBlobV1[];
   try {
-    exactBlobs = readExactBlobs(cwd, objectOids);
+    exactBlobs = readExactBlobsWithinAggregateBudget(
+      cwd,
+      objectOids,
+      budget.sourceBlobBytes,
+    );
   } catch (error) {
     mapAddedLineInputError(error);
   }
@@ -2063,7 +2283,7 @@ export function readExactAddedLines(
   for (const blob of exactBlobs) {
     const preflight = preflightExactTextBlob(blob);
     physicalLineCount += preflight.lineCount;
-    if (physicalLineCount > MAX_EXACT_ADDED_LINE_SOURCE_LINE_COUNT) {
+    if (physicalLineCount > budget.sourceLineCount) {
       throw addedLinesError("ci.input.added-lines.budget");
     }
     preflightByOid.set(blob.oid, preflight);
@@ -2085,8 +2305,8 @@ export function readExactAddedLines(
     } else if (fact.oldOid === ZERO_OID) {
       const newPreflight = preflightByOid.get(fact.newOid)!;
       if (
-        newPreflight.lineCount > MAX_EXACT_ADDED_LINE_COUNT - addedLineCount
-        || newPreflight.textBytes > MAX_EXACT_ADDED_LINE_BYTES - addedLineBytes
+        newPreflight.lineCount > budget.addedLineCount - addedLineCount
+        || newPreflight.textBytes > budget.addedTextBytes - addedLineBytes
       ) {
         throw addedLinesError("ci.input.added-lines.budget");
       }
@@ -2100,7 +2320,7 @@ export function readExactAddedLines(
       const cacheKey = `${fact.oldOid}:${fact.newOid}`;
       const cached = patchCache.get(cacheKey);
       if (cached === undefined) {
-        const remainingPatchBytes = MAX_EXACT_ADDED_LINE_PATCH_TOTAL_BYTES
+        const remainingPatchBytes = budget.patchBytes
           - patchBytesTotal;
         const patch = addedLineGitBytes(cwd, [
           "-c",
@@ -2129,8 +2349,8 @@ export function readExactAddedLines(
           fact.path,
           linesByOid.get(fact.oldOid) ?? [],
           linesByOid.get(fact.newOid) ?? [],
-          MAX_EXACT_ADDED_LINE_COUNT - addedLineCount,
-          MAX_EXACT_ADDED_LINE_BYTES - addedLineBytes,
+          budget.addedLineCount - addedLineCount,
+          budget.addedTextBytes - addedLineBytes,
           remainingPatchBytes,
         );
         patchBytesTotal += patch.byteLength;
@@ -2142,8 +2362,8 @@ export function readExactAddedLines(
           cachedTextBytes += Buffer.byteLength(line.text, "utf8");
         }
         if (
-          cached.length > MAX_EXACT_ADDED_LINE_COUNT - addedLineCount
-          || cachedTextBytes > MAX_EXACT_ADDED_LINE_BYTES - addedLineBytes
+          cached.length > budget.addedLineCount - addedLineCount
+          || cachedTextBytes > budget.addedTextBytes - addedLineBytes
         ) {
           throw addedLinesError("ci.input.added-lines.budget");
         }
@@ -2154,8 +2374,8 @@ export function readExactAddedLines(
       addedLineCount += 1;
       addedLineBytes += Buffer.byteLength(line.text, "utf8");
       if (
-        addedLineCount > MAX_EXACT_ADDED_LINE_COUNT
-        || addedLineBytes > MAX_EXACT_ADDED_LINE_BYTES
+        addedLineCount > budget.addedLineCount
+        || addedLineBytes > budget.addedTextBytes
       ) {
         throw addedLinesError("ci.input.added-lines.budget");
       }
@@ -2165,10 +2385,49 @@ export function readExactAddedLines(
 
   let reread: ExactBlobV1[];
   try {
-    reread = readExactBlobs(cwd, objectOids);
+    reread = readExactBlobsWithinAggregateBudget(
+      cwd,
+      objectOids,
+      budget.sourceBlobBytes,
+    );
   } catch (error) {
-    mapAddedLineInputError(error);
+    mapAddedLineTerminalError(error);
   }
   requireBlobSetUnchanged(blobs, reread);
-  return { baseOid, candidateOid, changes: result };
+  const consumed: ExactAddedLineBudgetV1 = {
+    changeCount: facts.length,
+    sourceBlobBytes: exactBlobs.reduce((total, blob) => total + blob.byteLength, 0),
+    sourceLineCount: physicalLineCount,
+    patchBytes: patchBytesTotal,
+    addedLineCount,
+    addedTextBytes: addedLineBytes,
+  };
+  return {
+    baseOid,
+    candidateOid,
+    changes: result,
+    accounting: exactAddedLineBudgetAccounting(budget, consumed),
+  };
+}
+
+export function readExactAddedLinesWithinBudget(
+  cwd: string,
+  input: ExactBudgetedAddedLineInputV1,
+): ExactBudgetedAddedLineSetV1 {
+  const { baseOid, candidateOid, budget } = validateExactBudgetedAddedLineInput(input);
+  return readExactAddedLinesCore(cwd, baseOid, candidateOid, budget);
+}
+
+export function readExactAddedLines(
+  cwd: string,
+  input: ExactAddedLineInputV1,
+): ExactAddedLineSetV1 {
+  const { baseOid, candidateOid } = validateExactAddedLineInput(input);
+  const result = readExactAddedLinesCore(
+    cwd,
+    baseOid,
+    candidateOid,
+    MAX_EXACT_ADDED_LINE_BUDGET_V1,
+  );
+  return { baseOid, candidateOid, changes: result.changes };
 }

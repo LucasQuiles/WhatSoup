@@ -24,6 +24,7 @@ import {
   MAX_EXACT_ADDED_LINE_PATCH_TOTAL_BYTES,
   MAX_EXACT_ADDED_LINE_CHANGE_COUNT,
   MAX_EXACT_ADDED_LINE_SOURCE_LINE_COUNT,
+  MAX_EXACT_ADDED_LINE_BUDGET_V1,
   MAX_EXACT_AGGREGATE_BLOB_BYTES,
   MAX_EXACT_BLOB_COUNT,
   MAX_EXACT_COMMIT_COUNT,
@@ -38,9 +39,11 @@ import {
   MAX_EXACT_TREE_ENTRY_PATH_BYTES,
   MAX_EXACT_TREE_ENTRY_PATH_COUNT,
   MAX_EXACT_TREE_ENTRY_PATH_SEGMENT_COUNT,
+  type ExactAddedLineBudgetV1,
   type ExactTreeEntrySetV1,
   readExactChangeFacts,
   readExactAddedLines,
+  readExactAddedLinesWithinBudget,
   readExactBlobs,
   readExactCommitRange,
   readExactCommitMetadata,
@@ -367,6 +370,12 @@ function addedFactsShimResponses(
     };
   }
   return responses;
+}
+
+function addedLineBudget(
+  overrides: Partial<ExactAddedLineBudgetV1> = {},
+): ExactAddedLineBudgetV1 {
+  return { ...MAX_EXACT_ADDED_LINE_BUDGET_V1, ...overrides };
 }
 
 function emptyRangeResponses(oid: string): Record<string, GitShimResponse> {
@@ -1956,6 +1965,650 @@ describe('exact added lines', () => {
       exactAggregate.map((size, index) => size + (index === 4 ? 1 : 0)),
       'ci.input.added-lines.budget',
     );
+  });
+
+  it('publishes the six immutable exact-added-line budget ceilings and preserves the legacy shape', () => {
+    expect(Object.keys(MAX_EXACT_ADDED_LINE_BUDGET_V1).sort()).toEqual([
+      'addedLineCount',
+      'addedTextBytes',
+      'changeCount',
+      'patchBytes',
+      'sourceBlobBytes',
+      'sourceLineCount',
+    ]);
+    expect(MAX_EXACT_ADDED_LINE_BUDGET_V1).toEqual({
+      changeCount: MAX_EXACT_ADDED_LINE_CHANGE_COUNT,
+      sourceBlobBytes: MAX_EXACT_AGGREGATE_BLOB_BYTES,
+      sourceLineCount: MAX_EXACT_ADDED_LINE_SOURCE_LINE_COUNT,
+      patchBytes: MAX_EXACT_ADDED_LINE_PATCH_TOTAL_BYTES,
+      addedLineCount: MAX_EXACT_ADDED_LINE_COUNT,
+      addedTextBytes: MAX_EXACT_ADDED_LINE_BYTES,
+    });
+    expect(Object.isFrozen(MAX_EXACT_ADDED_LINE_BUDGET_V1)).toBe(true);
+
+    const { root, baseOid } = fixture();
+    const candidateOid = baseOid;
+    expect(readExactAddedLines(root, { baseOid, candidateOid })).toEqual({
+      baseOid,
+      candidateOid,
+      changes: [],
+    });
+    const budgeted = readExactAddedLinesWithinBudget(root, {
+      baseOid,
+      candidateOid,
+      budget: {
+        changeCount: 0,
+        sourceBlobBytes: 0,
+        sourceLineCount: 0,
+        patchBytes: 0,
+        addedLineCount: 0,
+        addedTextBytes: 0,
+      },
+    });
+    expect(budgeted).toEqual({
+      baseOid,
+      candidateOid,
+      changes: [],
+      accounting: {
+        limit: {
+          changeCount: 0,
+          sourceBlobBytes: 0,
+          sourceLineCount: 0,
+          patchBytes: 0,
+          addedLineCount: 0,
+          addedTextBytes: 0,
+        },
+        consumed: {
+          changeCount: 0,
+          sourceBlobBytes: 0,
+          sourceLineCount: 0,
+          patchBytes: 0,
+          addedLineCount: 0,
+          addedTextBytes: 0,
+        },
+        remaining: {
+          changeCount: 0,
+          sourceBlobBytes: 0,
+          sourceLineCount: 0,
+          patchBytes: 0,
+          addedLineCount: 0,
+          addedTextBytes: 0,
+        },
+      },
+    });
+  });
+
+  it('rejects widening and hostile budget records before Git without mutating frozen input', () => {
+    const oid = 'a'.repeat(40);
+    const valid = addedLineBudget();
+    expectCode(() => readExactAddedLinesWithinBudget('/not-a-repository', {
+      baseOid: oid,
+      candidateOid: oid,
+      budget: valid,
+    }), 'ci.input.added-lines.unavailable');
+
+    for (const key of Object.keys(valid) as (keyof ExactAddedLineBudgetV1)[]) {
+      expectCode(() => readExactAddedLinesWithinBudget('/not-a-repository', {
+        baseOid: oid,
+        candidateOid: oid,
+        budget: { ...valid, [key]: valid[key] + 1 },
+      }), 'ci.input.added-lines.input-malformed');
+    }
+    for (const invalid of [-0, -1, 0.5, NaN, Infinity, '1', 1n]) {
+      expectCode(() => readExactAddedLinesWithinBudget('/not-a-repository', {
+        baseOid: oid,
+        candidateOid: oid,
+        budget: { ...valid, changeCount: invalid } as never,
+      }), 'ci.input.added-lines.input-malformed');
+    }
+
+    let getterCalls = 0;
+    const accessorBudget = { ...valid } as Record<string, unknown>;
+    Object.defineProperty(accessorBudget, 'changeCount', {
+      enumerable: true,
+      get: () => {
+        getterCalls += 1;
+        return 0;
+      },
+    });
+    const revoked = Proxy.revocable({ ...valid }, {});
+    revoked.revoke();
+    const hostileBudgets: unknown[] = [
+      null,
+      [],
+      { ...valid, extra: 0 },
+      Object.assign(Object.create({}), valid),
+      new Proxy({ ...valid }, {}),
+      revoked.proxy,
+      accessorBudget,
+    ];
+    const symbolBudget = { ...valid } as Record<PropertyKey, unknown>;
+    symbolBudget[Symbol('extra')] = 0;
+    hostileBudgets.push(symbolBudget);
+    const nonEnumerableBudget = { ...valid };
+    Object.defineProperty(nonEnumerableBudget, 'changeCount', {
+      value: valid.changeCount,
+      enumerable: false,
+    });
+    hostileBudgets.push(nonEnumerableBudget);
+    for (const budget of hostileBudgets) {
+      expectCode(() => readExactAddedLinesWithinBudget('/not-a-repository', {
+        baseOid: oid,
+        candidateOid: oid,
+        budget: budget as ExactAddedLineBudgetV1,
+      }), 'ci.input.added-lines.input-malformed');
+    }
+    expect(getterCalls).toBe(0);
+
+    const revokedInput = Proxy.revocable({ baseOid: oid, candidateOid: oid, budget: valid }, {});
+    revokedInput.revoke();
+    const inputAccessor = { baseOid: oid, candidateOid: oid } as Record<string, unknown>;
+    Object.defineProperty(inputAccessor, 'budget', {
+      enumerable: true,
+      get: () => {
+        getterCalls += 1;
+        return valid;
+      },
+    });
+    for (const input of [
+      new Proxy({ baseOid: oid, candidateOid: oid, budget: valid }, {}),
+      revokedInput.proxy,
+      inputAccessor,
+      { baseOid: oid, candidateOid: oid, budget: valid, extra: 0 },
+    ]) {
+      expectCode(() => readExactAddedLinesWithinBudget('/not-a-repository', input as never),
+        'ci.input.added-lines.input-malformed');
+    }
+    expect(getterCalls).toBe(0);
+
+    const frozenBudget = Object.freeze(addedLineBudget({
+      changeCount: 0,
+      sourceBlobBytes: 0,
+      sourceLineCount: 0,
+      patchBytes: 0,
+      addedLineCount: 0,
+      addedTextBytes: 0,
+    }));
+    const frozenInput = Object.freeze({ baseOid: oid, candidateOid: oid, budget: frozenBudget });
+    const before = JSON.stringify(frozenInput);
+    expectCode(() => readExactAddedLinesWithinBudget('/not-a-repository', frozenInput),
+      'ci.input.added-lines.unavailable');
+    expect(JSON.stringify(frozenInput)).toBe(before);
+  });
+
+  it('charges exact logical evidence and returns deeply frozen copy-isolated accounting', () => {
+    const { root, baseOid } = fixture();
+    write(root, 'first.txt', 'é\n');
+    write(root, 'second.txt', 'é\n');
+    const candidateOid = commit(root, 'shared addition');
+    const sourceBytes = Buffer.byteLength('é\n');
+    const callerBudget = addedLineBudget({
+      changeCount: 2,
+      sourceBlobBytes: sourceBytes,
+      sourceLineCount: 1,
+      patchBytes: 0,
+      addedLineCount: 2,
+      addedTextBytes: 4,
+    });
+    const result = readExactAddedLinesWithinBudget(root, {
+      baseOid,
+      candidateOid,
+      budget: callerBudget,
+    });
+    expect(result.accounting).toEqual({
+      limit: {
+        changeCount: 2,
+        sourceBlobBytes: sourceBytes,
+        sourceLineCount: 1,
+        patchBytes: 0,
+        addedLineCount: 2,
+        addedTextBytes: 4,
+      },
+      consumed: {
+        changeCount: 2,
+        sourceBlobBytes: sourceBytes,
+        sourceLineCount: 1,
+        patchBytes: 0,
+        addedLineCount: 2,
+        addedTextBytes: 4,
+      },
+      remaining: {
+        changeCount: 0,
+        sourceBlobBytes: 0,
+        sourceLineCount: 0,
+        patchBytes: 0,
+        addedLineCount: 0,
+        addedTextBytes: 0,
+      },
+    });
+    expect(result.changes.flatMap(({ addedLines }) => addedLines)).toHaveLength(2);
+    expect(Object.isFrozen(result.accounting)).toBe(true);
+    expect(Object.isFrozen(result.accounting.limit)).toBe(true);
+    expect(Object.isFrozen(result.accounting.consumed)).toBe(true);
+    expect(Object.isFrozen(result.accounting.remaining)).toBe(true);
+    callerBudget.changeCount = 1;
+    expect(result.accounting.limit.changeCount).toBe(2);
+  });
+
+  it('enforces each narrowed materialization pool at its real boundary', () => {
+    const addedCase = (content: string, overrides: Partial<ExactAddedLineBudgetV1>) => {
+      const { root, baseOid } = fixture();
+      write(root, 'added.txt', content);
+      const candidateOid = commit(root, 'added budget fixture');
+      return () => readExactAddedLinesWithinBudget(root, {
+        baseOid,
+        candidateOid,
+        budget: addedLineBudget(overrides),
+      });
+    };
+
+    expectCode(addedCase('x', { changeCount: 0 }), 'ci.input.added-lines.budget');
+    expectCode(addedCase('long-line', { sourceBlobBytes: Buffer.byteLength('long-line') - 1 }),
+      'ci.input.added-lines.budget');
+    expectCode(addedCase('\n\n', { sourceLineCount: 1 }), 'ci.input.added-lines.budget');
+    expectCode(addedCase('\n', { addedLineCount: 0 }), 'ci.input.added-lines.budget');
+    expectCode(addedCase('é', { addedTextBytes: 1 }), 'ci.input.added-lines.budget');
+
+    const baseOid = 'a'.repeat(40);
+    const candidateOid = 'b'.repeat(40);
+    const oldBytes = Buffer.from('old\n');
+    const newBytes = Buffer.from('new\n');
+    const oldOid = blobOid(oldBytes);
+    const newOid = blobOid(newBytes);
+    const patch = Buffer.from(
+      `diff --git ${oldOid} ${newOid}\nindex ${oldOid}..${newOid} 100644\n`
+      + `--- ${oldOid}\n+++ ${newOid}\n@@ -1 +1 @@\n-old\n+new\n`,
+    );
+    expectCode(() => withGitShim(
+      addedLineShimResponses(baseOid, candidateOid, 'safe.txt', oldBytes, newBytes, patch),
+      (cwd) => readExactAddedLinesWithinBudget(cwd, {
+        baseOid,
+        candidateOid,
+        budget: addedLineBudget({ patchBytes: patch.byteLength - 1 }),
+      }),
+    ), 'ci.input.added-lines.budget');
+  });
+
+  it('applies narrowed change and fixed per-item blob bounds before blob materialization', () => {
+    const baseOid = 'a'.repeat(40);
+    const candidateOid = 'b'.repeat(40);
+    const bytes = Buffer.from('candidate');
+    const responses = addedFactsShimResponses(baseOid, candidateOid, [
+      { path: 'candidate.txt', bytes },
+    ]);
+    delete responses[responseKey(['rev-parse', '--show-object-format'])];
+    delete responses[responseKey(['cat-file', '-t', '--', blobOid(bytes)])];
+    delete responses[responseKey(['cat-file', '-s', '--', blobOid(bytes)])];
+    delete responses[responseKey(['cat-file', 'blob', '--', blobOid(bytes)])];
+    expectCode(() => withGitShim(responses,
+      (cwd) => readExactAddedLinesWithinBudget(cwd, {
+        baseOid,
+        candidateOid,
+        budget: addedLineBudget({ changeCount: 0 }),
+      })), 'ci.input.added-lines.budget');
+
+    const oversized = addedFactsShimResponses(baseOid, candidateOid, [
+      { path: 'candidate.txt', bytes },
+    ]);
+    oversized[responseKey(['cat-file', '-s', '--', blobOid(bytes)])] = {
+      stdout: `${MAX_EXACT_SINGLE_BLOB_BYTES + 1}\n`,
+    };
+    delete oversized[responseKey(['cat-file', 'blob', '--', blobOid(bytes)])];
+    expectCode(() => withGitShim(oversized,
+      (cwd) => readExactAddedLinesWithinBudget(cwd, {
+        baseOid,
+        candidateOid,
+        budget: addedLineBudget(),
+      })), 'ci.input.added-lines.budget');
+  });
+
+  it('stops a zero change budget after the conservative preflight and admits one real rename', () => {
+    const baseOid = 'a'.repeat(40);
+    const candidateOid = 'b'.repeat(40);
+    const blob = 'c'.repeat(40);
+    const oneAdded = Buffer.from(
+      `:000000 100644 ${'0'.repeat(40)} ${blob} A\0one.txt\0`,
+      'ascii',
+    );
+    const zeroBudgetResponses: Record<string, GitShimResponse> = {
+      [responseKey(['cat-file', '-t', '--', baseOid])]: { stdout: 'commit\n' },
+      [responseKey(['cat-file', '-t', '--', candidateOid])]: { stdout: 'commit\n' },
+      [responseKey(['merge-base', '--all', baseOid, candidateOid])]: { stdout: `${baseOid}\n` },
+      [responseKey([
+        'diff-tree', '--raw', '-z', '--no-commit-id', '-r', '--abbrev=40',
+        '--no-renames', '--no-ext-diff', '--no-textconv', '--ignore-submodules=none',
+        baseOid, candidateOid, '--',
+      ])]: { stdoutBase64: oneAdded.toString('base64') },
+    };
+    expectCode(() => withGitShim(zeroBudgetResponses,
+      (cwd) => readExactAddedLinesWithinBudget(cwd, {
+        baseOid,
+        candidateOid,
+        budget: addedLineBudget({ changeCount: 0 }),
+      })), 'ci.input.added-lines.budget');
+
+    const noRenames = Buffer.concat([
+      Buffer.from(`:100644 000000 ${blob} ${'0'.repeat(40)} D\0old.txt\0`, 'ascii'),
+      Buffer.from(`:000000 100644 ${'0'.repeat(40)} ${blob} A\0new.txt\0`, 'ascii'),
+    ]);
+    const withRename = Buffer.from(
+      `:100644 100644 ${blob} ${blob} R100\0old.txt\0new.txt\0`,
+      'ascii',
+    );
+    const renameResponses: Record<string, GitShimResponse> = {
+      [responseKey(['cat-file', '-t', '--', baseOid])]: { stdout: 'commit\n' },
+      [responseKey(['cat-file', '-t', '--', candidateOid])]: { stdout: 'commit\n' },
+      [responseKey(['merge-base', '--all', baseOid, candidateOid])]: { stdout: `${baseOid}\n` },
+      [responseKey([
+        'diff-tree', '--raw', '-z', '--no-commit-id', '-r', '--abbrev=40',
+        '--no-renames', '--no-ext-diff', '--no-textconv', '--ignore-submodules=none',
+        baseOid, candidateOid, '--',
+      ])]: { stdoutBase64: noRenames.toString('base64') },
+      [responseKey([
+        '-c', `diff.renameLimit=${MAX_CHANGE_FACT_COUNT}`, 'diff-tree', '--raw', '-z',
+        '--no-commit-id', '-r', '--abbrev=40', '--no-ext-diff', '--no-textconv',
+        '--ignore-submodules=none', '--find-renames', '--find-copies',
+        '--find-copies-harder', baseOid, candidateOid, '--',
+      ])]: { stdoutBase64: withRename.toString('base64') },
+      [responseKey(['rev-parse', '--show-object-format'])]: { stdout: 'sha1\n' },
+    };
+    const renamed = withGitShim(renameResponses,
+      (cwd) => readExactAddedLinesWithinBudget(cwd, {
+        baseOid,
+        candidateOid,
+        budget: {
+          changeCount: 1,
+          sourceBlobBytes: 0,
+          sourceLineCount: 0,
+          patchBytes: 0,
+          addedLineCount: 0,
+          addedTextBytes: 0,
+        },
+      }));
+    expect(renamed.changes).toMatchObject([
+      { status: 'renamed', oldPath: 'old.txt', path: 'new.txt', addedLines: [] },
+    ]);
+    expect(renamed.accounting.consumed.changeCount).toBe(1);
+  });
+
+  it('rejects narrowed aggregate blob bytes from size preflight before any body read', () => {
+    const baseOid = 'a'.repeat(40);
+    const candidateOid = 'b'.repeat(40);
+    const oldBytes = Buffer.from('old source\n');
+    const newBytes = Buffer.from('new source\n');
+    const oldOid = blobOid(oldBytes);
+    const newOid = blobOid(newBytes);
+    const patch = Buffer.from(
+      `diff --git ${oldOid} ${newOid}\nindex ${oldOid}..${newOid} 100644\n`
+      + `--- ${oldOid}\n+++ ${newOid}\n@@ -1 +1 @@\n-old source\n+new source\n`,
+    );
+    const responses = addedLineShimResponses(
+      baseOid, candidateOid, 'source.txt', oldBytes, newBytes, patch,
+    );
+    delete responses[responseKey(['cat-file', 'blob', '--', oldOid])];
+    delete responses[responseKey(['cat-file', 'blob', '--', newOid])];
+    expectCode(() => withGitShim(responses,
+      (cwd) => readExactAddedLinesWithinBudget(cwd, {
+        baseOid,
+        candidateOid,
+        budget: addedLineBudget({
+          sourceBlobBytes: oldBytes.byteLength + newBytes.byteLength - 1,
+        }),
+      })), 'ci.input.added-lines.budget');
+  });
+
+  it('allows deletion and an empty added blob with zero non-change pools', () => {
+    const { root, baseOid } = fixture();
+    rmSync(join(root, 'README.md'));
+    write(root, 'empty.txt', '');
+    const candidateOid = commit(root, 'empty and deleted');
+    const result = readExactAddedLinesWithinBudget(root, {
+      baseOid,
+      candidateOid,
+      budget: {
+        changeCount: 2,
+        sourceBlobBytes: 0,
+        sourceLineCount: 0,
+        patchBytes: 0,
+        addedLineCount: 0,
+        addedTextBytes: 0,
+      },
+    });
+    expect(result.changes.map(({ path, status, addedLines }) => ({ path, status, addedLines })))
+      .toEqual([
+        { path: 'README.md', status: 'deleted', addedLines: [] },
+        { path: 'empty.txt', status: 'added', addedLines: [] },
+      ]);
+    expect(result.accounting.consumed).toEqual({
+      changeCount: 2,
+      sourceBlobBytes: 0,
+      sourceLineCount: 0,
+      patchBytes: 0,
+      addedLineCount: 0,
+      addedTextBytes: 0,
+    });
+  });
+
+  it('charges a shared patch once while charging cached output once per path', () => {
+    const baseOid = 'a'.repeat(40);
+    const candidateOid = 'b'.repeat(40);
+    const oldBytes = Buffer.from('old\n');
+    const newBytes = Buffer.from('new\n');
+    const oldOid = blobOid(oldBytes);
+    const newOid = blobOid(newBytes);
+    const patch = Buffer.from(
+      `diff --git ${oldOid} ${newOid}\nindex ${oldOid}..${newOid} 100644\n`
+      + `--- ${oldOid}\n+++ ${newOid}\n@@ -1 +1 @@\n-old\n+new\n`,
+    );
+    const responses = addedLineShimResponses(
+      baseOid, candidateOid, 'first.txt', oldBytes, newBytes, patch,
+    );
+    const raw = Buffer.concat(['first.txt', 'second.txt'].map((path) => Buffer.from(
+      `:100644 100644 ${oldOid} ${newOid} M\0${path}\0`,
+      'ascii',
+    )));
+    for (const args of [[
+      'diff-tree', '--raw', '-z', '--no-commit-id', '-r', '--abbrev=40',
+      '--no-renames', '--no-ext-diff', '--no-textconv', '--ignore-submodules=none',
+      baseOid, candidateOid, '--',
+    ], [
+      '-c', `diff.renameLimit=${MAX_CHANGE_FACT_COUNT}`, 'diff-tree', '--raw', '-z',
+      '--no-commit-id', '-r', '--abbrev=40', '--no-ext-diff', '--no-textconv',
+      '--ignore-submodules=none', '--find-renames', '--find-copies',
+      '--find-copies-harder', baseOid, candidateOid, '--',
+    ]]) {
+      responses[responseKey(args)] = { stdoutBase64: raw.toString('base64') };
+    }
+    const result = withGitShim(responses, (cwd) => readExactAddedLinesWithinBudget(cwd, {
+      baseOid,
+      candidateOid,
+      budget: addedLineBudget({
+        changeCount: 2,
+        sourceBlobBytes: oldBytes.byteLength + newBytes.byteLength,
+        sourceLineCount: 2,
+        patchBytes: patch.byteLength,
+        addedLineCount: 2,
+        addedTextBytes: 6,
+      }),
+    }));
+    expect(result.accounting.consumed).toEqual({
+      changeCount: 2,
+      sourceBlobBytes: oldBytes.byteLength + newBytes.byteLength,
+      sourceLineCount: 2,
+      patchBytes: patch.byteLength,
+      addedLineCount: 2,
+      addedTextBytes: 6,
+    });
+    expect(result.changes.map(({ addedLines }) => addedLines[0]?.path))
+      .toEqual(['first.txt', 'second.txt']);
+  });
+
+  it('publishes accounting only after terminal reread and does not double-charge physical reads', async () => {
+    const baseOid = 'a'.repeat(40);
+    const candidateOid = 'b'.repeat(40);
+    const oldBytes = Buffer.from('old\n');
+    const newBytes = Buffer.from('new\n');
+    const oldOid = blobOid(oldBytes);
+    const newOid = blobOid(newBytes);
+    const patch = Buffer.from(
+      `diff --git ${oldOid} ${newOid}\nindex ${oldOid}..${newOid} 100644\n`
+      + `--- ${oldOid}\n+++ ${newOid}\n@@ -1 +1 @@\n-old\n+new\n`,
+    );
+    const responses = addedLineShimResponses(
+      baseOid, candidateOid, 'safe.txt', oldBytes, newBytes, patch,
+    );
+    const bodyReads = new Map<string, number>();
+    const run = (substituteTerminal: boolean) => withMockedGitInput((_file, args) => {
+      const key = responseKey(args.slice(1));
+      const bodyOid = key === responseKey(['cat-file', 'blob', '--', oldOid])
+        ? oldOid
+        : key === responseKey(['cat-file', 'blob', '--', newOid]) ? newOid : null;
+      if (bodyOid !== null) {
+        const count = (bodyReads.get(bodyOid) ?? 0) + 1;
+        bodyReads.set(bodyOid, count);
+        if (substituteTerminal && bodyOid === newOid && count === 2) return Buffer.from('bad\n');
+      }
+      const response = responses[key];
+      if (response === undefined) throw new Error(`unexpected synthetic command: ${key}`);
+      return response.stdoutBase64 === undefined
+        ? Buffer.from(response.stdout ?? '', 'utf8')
+        : Buffer.from(response.stdoutBase64, 'base64');
+    }, (isolated) => isolated.readExactAddedLinesWithinBudget('/isolated-fixture', {
+      baseOid,
+      candidateOid,
+      budget: addedLineBudget(),
+    }));
+
+    const success = await run(false);
+    expect(bodyReads).toEqual(new Map([[oldOid, 2], [newOid, 2]]));
+    expect(success.accounting.consumed.sourceBlobBytes)
+      .toBe(oldBytes.byteLength + newBytes.byteLength);
+
+    bodyReads.clear();
+    let thrown: unknown;
+    try {
+      await run(true);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toMatchObject({ code: 'ci.input.added-lines.identity-mismatch' });
+    expect(Object.prototype.hasOwnProperty.call(thrown, 'accounting')).toBe(false);
+    expectNoVisibleCause(thrown);
+  });
+
+  it('supports manual exact remainder carry between calls and fails one unit over', () => {
+    const { root, baseOid } = fixture();
+    write(root, 'first.txt', 'a');
+    const firstOid = commit(root, 'first edge');
+    write(root, 'second.txt', 'b');
+    const secondOid = commit(root, 'second edge');
+    const initial = addedLineBudget({
+      changeCount: 2,
+      sourceBlobBytes: 2,
+      sourceLineCount: 2,
+      patchBytes: 0,
+      addedLineCount: 2,
+      addedTextBytes: 2,
+    });
+    const first = readExactAddedLinesWithinBudget(root, {
+      baseOid,
+      candidateOid: firstOid,
+      budget: initial,
+    });
+    for (const key of Object.keys(initial) as (keyof ExactAddedLineBudgetV1)[]) {
+      expect(first.accounting.consumed[key] + first.accounting.remaining[key])
+        .toBe(first.accounting.limit[key]);
+    }
+    const second = readExactAddedLinesWithinBudget(root, {
+      baseOid: firstOid,
+      candidateOid: secondOid,
+      budget: first.accounting.remaining,
+    });
+    expect(second.accounting.remaining).toEqual({
+      changeCount: 0,
+      sourceBlobBytes: 0,
+      sourceLineCount: 0,
+      patchBytes: 0,
+      addedLineCount: 0,
+      addedTextBytes: 0,
+    });
+    expectCode(() => readExactAddedLinesWithinBudget(root, {
+      baseOid: firstOid,
+      candidateOid: secondOid,
+      budget: { ...first.accounting.remaining, addedTextBytes: 0 },
+    }), 'ci.input.added-lines.budget');
+  });
+
+  it('carries positive patch-byte remainder exactly across two modified-file edges', () => {
+    const { root } = fixture();
+    write(root, 'target.txt', 'zero\n');
+    const baseOid = commit(root, 'patch carry base');
+    write(root, 'target.txt', 'one\n');
+    const firstOid = commit(root, 'patch carry first');
+    write(root, 'target.txt', 'two\n');
+    const secondOid = commit(root, 'patch carry second');
+
+    const observedFirst = readExactAddedLinesWithinBudget(root, {
+      baseOid,
+      candidateOid: firstOid,
+      budget: addedLineBudget(),
+    });
+    const observedSecond = readExactAddedLinesWithinBudget(root, {
+      baseOid: firstOid,
+      candidateOid: secondOid,
+      budget: addedLineBudget(),
+    });
+    expect(observedFirst.accounting.consumed.patchBytes).toBeGreaterThan(0);
+    expect(observedSecond.accounting.consumed.patchBytes).toBeGreaterThan(0);
+
+    const total = {} as ExactAddedLineBudgetV1;
+    for (const key of Object.keys(MAX_EXACT_ADDED_LINE_BUDGET_V1) as
+      (keyof ExactAddedLineBudgetV1)[]) {
+      total[key] = observedFirst.accounting.consumed[key]
+        + observedSecond.accounting.consumed[key];
+      expect(total[key]).toBeLessThanOrEqual(MAX_EXACT_ADDED_LINE_BUDGET_V1[key]);
+    }
+    const first = readExactAddedLinesWithinBudget(root, {
+      baseOid,
+      candidateOid: firstOid,
+      budget: total,
+    });
+    expect(first.accounting.remaining.patchBytes).toBeGreaterThan(0);
+    for (const key of Object.keys(total) as (keyof ExactAddedLineBudgetV1)[]) {
+      expect(first.accounting.consumed[key] + first.accounting.remaining[key])
+        .toBe(first.accounting.limit[key]);
+    }
+    const second = readExactAddedLinesWithinBudget(root, {
+      baseOid: firstOid,
+      candidateOid: secondOid,
+      budget: first.accounting.remaining,
+    });
+    expect(second.accounting.remaining).toEqual({
+      changeCount: 0,
+      sourceBlobBytes: 0,
+      sourceLineCount: 0,
+      patchBytes: 0,
+      addedLineCount: 0,
+      addedTextBytes: 0,
+    });
+    expectCode(() => readExactAddedLinesWithinBudget(root, {
+      baseOid: firstOid,
+      candidateOid: secondOid,
+      budget: {
+        ...first.accounting.remaining,
+        patchBytes: first.accounting.remaining.patchBytes - 1,
+      },
+    }), 'ci.input.added-lines.budget');
+  });
+
+  it('keeps the non-empty legacy runtime result to exactly three keys without accounting', () => {
+    const { root, baseOid } = fixture();
+    write(root, 'non-empty.txt', 'content\n');
+    const candidateOid = commit(root, 'non-empty legacy shape');
+    const result = readExactAddedLines(root, { baseOid, candidateOid });
+    expect(Object.keys(result).sort()).toEqual(['baseOid', 'candidateOid', 'changes']);
+    expect(result.changes).toHaveLength(1);
+    expect(Object.prototype.hasOwnProperty.call(result, 'accounting')).toBe(false);
   });
 });
 
