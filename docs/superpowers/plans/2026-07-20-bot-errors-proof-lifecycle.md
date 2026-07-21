@@ -84,7 +84,7 @@ Commit: `feat(alerts): add typed recovery proof envelope`
 
 - [ ] **Step 1: Write failing adapter tests**
 
-Assert version-1 alerts normalize to `fault` with `same_source_newer`; version-1 clears can target only the identical incident key and must be newer; recognized critical-asset requirements map to stronger policies; free-form text never weakens the minimum; malformed/unsupported events produce bounded quarantine reasons.
+Assert version-1 alerts normalize to `fault` with `same_source_newer`; version-1 clears can target only the identical incident key and must be newer; recognized critical-asset requirements map to stronger policies; free-form text never weakens the minimum; malformed/unsupported events produce bounded quarantine reasons. Add the observed weak-auth case: `connected=false`, `disconnect_class=none`, `reconnect_phase=backoff`, zero reconnect attempts, and three weak polls must remain an inferred transient diagnostic and must not normalize to server-revoked/manual-relink semantics.
 
 - [ ] **Step 2: Prove the red state**
 
@@ -123,7 +123,7 @@ Commit: `refactor(alerts): centralize observation normalization`
 
 - [ ] **Step 1: Reverse the current advisory test**
 
-Change the existing mismatch test to assert the clear is suppressed and the open incident remains. Add wrong source, stale proof, missing referenced receipt, weak schema, future timestamp, unknown observation, accepted same-source clear, accepted health snapshot, accepted outbound-after-incident, and accepted auth-bond-plus-outbound cases.
+Change the existing mismatch test to assert the clear is suppressed and the open incident remains. Add wrong source, stale proof, missing referenced receipt, weak schema, future timestamp, unknown observation, accepted same-source clear, accepted health snapshot, accepted outbound-after-incident, and accepted auth-bond-plus-outbound cases. Reproduce the observed weak-auth sequence: a weak `connecting/backoff` observation must never enter `awaiting_physical`; later connected/present-bond evidence closes or supersedes the transient incident without requiring relink proof, while a genuinely terminal-auth incident still requires the stronger policy. Reproduce the observed oneshot sequence separately: a successful service invocation closes only the unit-execution incident and must not clear application-health findings from an `attention-required`, `ok=false` heartbeat.
 
 - [ ] **Step 2: Prove the red state**
 
