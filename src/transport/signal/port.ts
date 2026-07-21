@@ -307,6 +307,13 @@ export interface SignalPort {
    * the group is unknown to this linked-device session.
    */
   getGroupMetadata(groupId: string): Promise<SignalGroupMetadata>;
+
+  /**
+   * Release port resources (sockets, timers, in-flight requests). Called by
+   * the bridge on shutdown(). Implementations MUST be idempotent. The mock
+   * implementation is a no-op; production closes the jsonrpc unix socket.
+   */
+  dispose(): void;
 }
 
 /**

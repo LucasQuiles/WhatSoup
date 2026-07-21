@@ -34,6 +34,10 @@ function makeStubPort(): SignalPort {
     async sendReaction(args) { reactions.push(args); },
     async sendReadReceipts(args) { receipts.push(args); },
     async sendTypingIndicator(args) { typings.push(args); },
+    async getGroupMetadata(_groupId: string) {
+      return { id: _groupId, name: 'stub-group', members: [] };
+    },
+    dispose() { /* no-op */ },
   };
 }
 

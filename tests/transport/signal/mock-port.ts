@@ -37,6 +37,9 @@ export class MockSignalPort implements SignalPort {
   nextGroupError: Error | null = null;
   verifyCalls = 0;
 
+  // Public so tests can mutate (e.g. adapter-reconnect.test.ts flips listError
+  // off between ticks to simulate recovery). Production never instantiates
+  // MockSignalPort.
   constructor(public opts: MockPortOptions = {}) {}
 
   async verifyCredentials(): Promise<void> {
@@ -75,6 +78,10 @@ export class MockSignalPort implements SignalPort {
     if (this.nextGroupError) throw this.nextGroupError;
     if (!this.nextGroup) throw new Error('GROUP_NOT_FOUND');
     return this.nextGroup;
+  }
+
+  dispose(): void {
+    // No-op: MockSignalPort owns no sockets, timers, or in-flight requests.
   }
 }
 

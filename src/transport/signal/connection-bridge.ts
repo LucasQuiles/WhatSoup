@@ -29,7 +29,7 @@ import type { SignalConfig } from './types.ts';
 import type { Subscription } from '../contract/subscription.ts';
 import { toSignalJid, fromSignalJid } from '../../core/jid-constants.ts';
 import type { SignalAdapter } from './adapter.ts';
-import type { SignalCliPort } from './signal-cli-port.ts';
+import type { SignalPort } from './port.ts';
 
 /** Error thrown when an operation is not supported by the Signal transport. */
 export class UnsupportedTransportOperationError extends Error {
@@ -84,7 +84,7 @@ function contractToIncoming(msg: ContractInboundMessage, isGroup: boolean): Inco
  */
 export class SignalConnection extends EventEmitter implements RuntimeConnection {
   private readonly adapter: SignalAdapter;
-  private readonly port: SignalCliPort | null;
+  private readonly port: SignalPort | null;
   private readonly log = createChildLogger('signal-bridge');
   private messageSubscription: Subscription | null = null;
   private errorSubscription: Subscription | null = null;
@@ -123,7 +123,7 @@ export class SignalConnection extends EventEmitter implements RuntimeConnection 
   /** Signal config block (for health snapshots). */
   private readonly signalConfig: SignalConfig | null;
 
-  constructor(adapter: SignalAdapter, port?: SignalCliPort, signalConfig?: SignalConfig, instanceName?: string) {
+  constructor(adapter: SignalAdapter, port?: SignalPort, signalConfig?: SignalConfig, instanceName?: string) {
     super();
     this.adapter = adapter;
     this.port = port ?? null;
