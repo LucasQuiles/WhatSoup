@@ -27,12 +27,16 @@ import {
   MAX_EXACT_AGGREGATE_BLOB_BYTES,
   MAX_EXACT_BLOB_COUNT,
   MAX_EXACT_COMMIT_COUNT,
+  MAX_EXACT_COMMIT_PARENT_EDGE_COUNT,
   MAX_EXACT_COMMIT_RANGE_BYTES,
+  MAX_EXACT_AGGREGATE_COMMIT_METADATA_BYTES,
+  MAX_EXACT_SINGLE_COMMIT_METADATA_BYTES,
   MAX_EXACT_SINGLE_BLOB_BYTES,
   readExactChangeFacts,
   readExactAddedLines,
   readExactBlobs,
   readExactCommitRange,
+  readExactCommitMetadata,
 } from '../../scripts/lib/ci-control/git-input.ts';
 
 const temporaryRoots: string[] = [];
@@ -108,6 +112,11 @@ function expectCode(run: () => unknown, code: string): void {
   expect(String(thrown)).toContain(code);
 }
 
+function expectNoVisibleCause(value: unknown): void {
+  expect(Object.prototype.hasOwnProperty.call(value, 'cause')).toBe(false);
+  expect('cause' in Object(value)).toBe(false);
+}
+
 function hashBlob(root: string, bytes: Uint8Array): string {
   return gitWithInput(root, ['hash-object', '-w', '--stdin'], bytes);
 }
@@ -117,6 +126,56 @@ function blobOid(bytes: Uint8Array): string {
     .update(`blob ${bytes.byteLength}\0`)
     .update(bytes)
     .digest('hex');
+}
+
+function commitOid(bytes: Uint8Array): string {
+  return createHash('sha1')
+    .update(`commit ${bytes.byteLength}\0`)
+    .update(bytes)
+    .digest('hex');
+}
+
+function rawCommitBody(options: {
+  treeOid?: string;
+  parentOids?: readonly string[];
+  author?: string;
+  committer?: string;
+  optionalHeaders?: readonly string[];
+  message?: string;
+} = {}): Buffer {
+  const treeOid = options.treeOid ?? '1'.repeat(40);
+  const author = options.author ?? 'Fixture Author <fixture@example.invalid> 1700000000 +0000';
+  const committer = options.committer ?? author;
+  return Buffer.from([
+    `tree ${treeOid}`,
+    ...(options.parentOids ?? []).map((oid) => `parent ${oid}`),
+    `author ${author}`,
+    `committer ${committer}`,
+    ...(options.optionalHeaders ?? []),
+    '',
+    options.message ?? '',
+  ].join('\n'), 'utf8');
+}
+
+function commitMetadataResponses(
+  entries: readonly { oid: string; body: Buffer; type?: string; size?: string }[],
+  objectFormat = 'sha1\n',
+): Record<string, GitShimResponse> {
+  const responses: Record<string, GitShimResponse> = {
+    [responseKey(['rev-parse', '--show-object-format'])]: { stdout: objectFormat },
+  };
+  for (const entry of entries) {
+    responses[responseKey(['cat-file', '-t', '--', entry.oid])] = {
+      stdout: entry.type ?? 'commit\n',
+    };
+    responses[responseKey(['cat-file', '-s', '--', entry.oid])] = {
+      stdout: entry.size ?? `${entry.body.byteLength}\n`,
+    };
+    responses[responseKey(['cat-file', 'commit', '--', entry.oid])] = {
+      stdoutBase64: entry.body.toString('base64'),
+    };
+  }
+  return responses;
 }
 
 function extractModuleSpecifiers(source: string): string[] {
@@ -764,7 +823,7 @@ describe('exact added lines', () => {
     }
     expect(thrown).toMatchObject({ code: 'ci.input.added-lines.unavailable' });
     expect(String(thrown)).not.toContain('private partial child detail');
-    expect((thrown as Error & { cause?: unknown }).cause).toBeUndefined();
+    expectNoVisibleCause(thrown);
   });
 
   it('distinguishes direct timeout, signal, and output-budget failures without trusting legacy timeout', async () => {
@@ -810,7 +869,8 @@ describe('exact added lines', () => {
           thrown = error;
         }
         expect(thrown).toMatchObject({ code: expectedCode });
-        expect((thrown as Error & { cause?: unknown }).cause).toBeUndefined();
+        expect(String(thrown)).not.toContain(failure.message);
+        expectNoVisibleCause(thrown);
       } finally {
         vi.doUnmock('node:child_process');
         vi.resetModules();
@@ -1404,7 +1464,50 @@ describe('exact commit range', () => {
 
   it('publishes fixed inclusive range budgets', () => {
     expect(MAX_EXACT_COMMIT_COUNT).toBe(4_096);
+    expect(MAX_EXACT_COMMIT_PARENT_EDGE_COUNT).toBe(8_192);
     expect(MAX_EXACT_COMMIT_RANGE_BYTES).toBe(1 * 1_024 * 1_024);
+  });
+
+  it('accepts the exact parent-edge bound and rejects one over before row parsing', () => {
+    const baseOid = 'a'.repeat(40);
+    const localOid = 'b'.repeat(40);
+    const exactParents = Array.from(
+      { length: MAX_EXACT_COMMIT_PARENT_EDGE_COUNT },
+      (_, index) => (index + 1).toString(16).padStart(40, '0'),
+    );
+    const exactRows = Buffer.from(
+      `${localOid} ${exactParents.join(' ')}\n`,
+      'ascii',
+    );
+    const exact = withGitShim(
+      rangeResponses(baseOid, localOid, '1\n', exactRows),
+      (cwd) => readExactCommitRange(cwd, { baseOid, remoteOid: null, localOid }),
+    );
+    expect(exact.commits[0]?.parentOids).toHaveLength(MAX_EXACT_COMMIT_PARENT_EDGE_COUNT);
+
+    const oneOverRows = Buffer.concat([
+      Buffer.from(
+        `${localOid} ${[...exactParents, 'c'.repeat(40)].join(' ')}`,
+        'ascii',
+      ),
+      // If row decoding/materialization runs, this byte is malformed. The edge budget
+      // must win before that later work.
+      Buffer.from([0xff, 0x0a]),
+    ]);
+    expectCode(() => withGitShim(
+      rangeResponses(baseOid, localOid, '1\n', oneOverRows),
+      (cwd) => readExactCommitRange(cwd, { baseOid, remoteOid: null, localOid }),
+    ), 'ci.input.commit-range-budget');
+  });
+
+  it('rejects duplicate parent identities within one commit row', () => {
+    const baseOid = 'a'.repeat(40);
+    const localOid = 'b'.repeat(40);
+    const rows = Buffer.from(`${localOid} ${baseOid} ${baseOid}\n`, 'ascii');
+    expectCode(() => withGitShim(
+      rangeResponses(baseOid, localOid, '1\n', rows),
+      (cwd) => readExactCommitRange(cwd, { baseOid, remoteOid: null, localOid }),
+    ), 'ci.input.commit-range-malformed');
   });
 
   it('rejects nonempty output for an empty range and blank normalized rows', () => {
@@ -1492,25 +1595,6 @@ describe('exact commit range', () => {
     })), 'ci.input.commit-range-budget');
   });
 
-  it('accepts a near-limit valid range payload and rejects one byte over the output budget', () => {
-    const baseOid = 'a'.repeat(40);
-    const localOid = 'b'.repeat(40);
-    const wholeParentCount = Math.floor((MAX_EXACT_COMMIT_RANGE_BYTES / 41) - 1);
-    const nearLimit = Buffer.from(`${localOid}${` ${baseOid}`.repeat(wholeParentCount)}\n`);
-    expect(nearLimit.byteLength).toBe(MAX_EXACT_COMMIT_RANGE_BYTES - 1);
-    const exact = withGitShim(
-      rangeResponses(baseOid, localOid, '1\n', nearLimit),
-      (cwd) => readExactCommitRange(cwd, { baseOid, remoteOid: null, localOid }),
-    );
-    expect(exact.commits).toHaveLength(1);
-
-    const over = Buffer.alloc(MAX_EXACT_COMMIT_RANGE_BYTES + 1, 0x61);
-    expectCode(() => withGitShim(
-      rangeResponses(baseOid, localOid, '1\n', over),
-      (cwd) => readExactCommitRange(cwd, { baseOid, remoteOid: null, localOid }),
-    ), 'ci.input.commit-range-budget');
-  });
-
   it('admits exactly the raw range-output byte limit before malformed parsing', () => {
     const baseOid = 'a'.repeat(40);
     const localOid = 'b'.repeat(40);
@@ -1540,6 +1624,411 @@ describe('exact commit range', () => {
       localOid: oid,
       commits: [],
     });
+  });
+});
+
+describe('exact commit metadata', () => {
+  it('uses only the closed policy-neutral static import surface', () => {
+    const source = readFileSync(
+      join(process.cwd(), 'scripts/lib/ci-control/git-input.ts'),
+      'utf8',
+    );
+    const specifiers = extractModuleSpecifiers(source);
+    expect([...new Set(specifiers)].sort()).toEqual([
+      '../../../src/lib/git-env.ts',
+      'node:child_process',
+      'node:crypto',
+      'node:util',
+    ]);
+    expect(source).not.toMatch(/\bimport\s*\(/u);
+    expect(source).not.toMatch(/\b(?:require|createRequire)\s*\(/u);
+  });
+
+  it('reads the requested exact commit rather than a later safe ambient HEAD', () => {
+    const { root } = fixture();
+    write(root, 'unsafe.txt', 'unsafe commit fixture\n');
+    git(root, ['add', '-A']);
+    execFileSync('git', [
+      'commit', '--quiet', '-m', 'unsafe subject',
+      '-m', 'Co-Authored-By: Fixture <fixture@example.invalid>',
+    ], {
+      cwd: root,
+      env: {
+        ...gitEnvironment(root),
+        GIT_AUTHOR_NAME: 'Retired Worker',
+        GIT_AUTHOR_EMAIL: 'worker@invalid.example',
+        GIT_COMMITTER_NAME: 'Retired Worker',
+        GIT_COMMITTER_EMAIL: 'worker@invalid.example',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const unsafeOid = git(root, ['rev-parse', 'HEAD']);
+    write(root, 'safe.txt', 'safe ambient head\n');
+    commit(root, 'safe ambient head');
+
+    const [metadata] = readExactCommitMetadata(root, [unsafeOid]);
+    expect(metadata).toMatchObject({
+      oid: unsafeOid,
+      authorName: 'Retired Worker',
+      authorEmail: 'worker@invalid.example',
+      subject: 'unsafe subject',
+      byteLength: expect.any(Number),
+      contentSha256: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+    });
+    expect(metadata?.message).toContain('Co-Authored-By: Fixture');
+    expect(metadata?.parentOids).toHaveLength(1);
+    expect(metadata?.treeOid).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it('preserves sorted input order, tree, parents, multiline messages, and signed headers', () => {
+    const parentA = '2'.repeat(40);
+    const parentB = '3'.repeat(40);
+    const firstBody = rawCommitBody({
+      parentOids: [parentA, parentB],
+      optionalHeaders: [
+        'gpgsig -----BEGIN PGP SIGNATURE-----',
+        ' continuation-line',
+        ' ',
+        ' -----END PGP SIGNATURE-----',
+        'mergetag object deadbeef',
+        ' continuation-two',
+      ],
+      message: 'first subject\n\nfirst body\nsecond body\n',
+    });
+    const secondBody = rawCommitBody({ message: '' });
+    const entries = [firstBody, secondBody]
+      .map((body) => ({ oid: commitOid(body), body }))
+      .sort((left, right) => left.oid.localeCompare(right.oid));
+
+    const metadata = withGitShim(commitMetadataResponses(entries), (cwd) =>
+      readExactCommitMetadata(cwd, entries.map(({ oid }) => oid)));
+    expect(metadata.map(({ oid }) => oid)).toEqual(entries.map(({ oid }) => oid));
+    const signed = metadata.find(({ parentOids }) => parentOids.length === 2)!;
+    expect(signed).toMatchObject({
+      treeOid: '1'.repeat(40),
+      parentOids: [parentA, parentB],
+      subject: 'first subject',
+      message: 'first subject\n\nfirst body\nsecond body\n',
+      byteLength: firstBody.byteLength,
+      contentSha256: `sha256:${createHash('sha256').update(firstBody).digest('hex')}`,
+    });
+    expect(metadata.find(({ parentOids }) => parentOids.length === 0)?.message).toBe('');
+  });
+
+  it('rejects non-arrays, sparse/accessor/proxy inputs, malformed OIDs, duplicates, and unsorted OIDs before Git', () => {
+    const a = 'a'.repeat(40);
+    const b = 'b'.repeat(40);
+    const sparse = new Array<string>(1);
+    const accessor: string[] = [];
+    let getterCalls = 0;
+    Object.defineProperty(accessor, '0', {
+      enumerable: true,
+      get: () => {
+        getterCalls += 1;
+        return a;
+      },
+    });
+    Object.defineProperty(accessor, 'length', { value: 1 });
+    const trapped = new Proxy([a], {
+      getOwnPropertyDescriptor: () => {
+        throw new Error('private trap text');
+      },
+    });
+    const transparentProxy = new Proxy([a], {});
+    const nonEnumerableIndex = [a];
+    Object.defineProperty(nonEnumerableIndex, '0', {
+      configurable: true,
+      enumerable: false,
+      value: a,
+      writable: true,
+    });
+    const extraStringKey = [a];
+    Object.defineProperty(extraStringKey, 'extra', { enumerable: true, value: a });
+    const symbolKey = [a];
+    Object.defineProperty(symbolKey, Symbol('extra'), { enumerable: true, value: a });
+    const customPrototype = [a];
+    Object.setPrototypeOf(customPrototype, Object.create(Array.prototype));
+    const malformed: unknown[] = [
+      null, {}, new Set([a]), sparse, accessor, trapped, transparentProxy, nonEnumerableIndex,
+      extraStringKey,
+      symbolKey, customPrototype, [a.toUpperCase()], ['g'.repeat(40)],
+      [a, a], [b, a],
+    ];
+    for (const value of malformed) {
+      expectCode(() => readExactCommitMetadata(
+        '/not-a-repository', value as readonly string[],
+      ), 'ci.input.commit-metadata-malformed');
+    }
+    expect(getterCalls).toBe(0);
+  });
+
+  it('rejects malformed commit bodies, NUL, invalid UTF-8, and unsupported encoding', () => {
+    const valid = rawCommitBody({ message: 'subject\n' });
+    const malformedBodies = [
+      Buffer.from(valid.toString('utf8').replace(/^tree /, 'parent ')),
+      Buffer.from(valid.toString('utf8').replace('\nauthor ', '\ntree ')),
+      Buffer.from(valid.toString('utf8').replace('\ncommitter ', '\nauthor ')),
+      Buffer.from(valid.toString('utf8').replace('\n\nsubject', '\n continuation\n\nsubject')),
+      rawCommitBody({ optionalHeaders: ['encoding ISO-8859-1'], message: 'subject\n' }),
+      Buffer.from(valid.toString('utf8').replace('\nauthor ', '\r\nauthor ')),
+      Buffer.concat([valid, Buffer.from([0])]),
+    ];
+    for (const body of malformedBodies) {
+      const oid = commitOid(body);
+      expectCode(() => withGitShim(
+        commitMetadataResponses([{ oid, body }]),
+        (cwd) => readExactCommitMetadata(cwd, [oid]),
+      ), 'ci.input.commit-metadata-malformed');
+    }
+
+    const invalidUtf8 = Buffer.concat([
+      rawCommitBody({ message: '' }),
+      Buffer.from([0xff]),
+    ]);
+    const invalidOid = commitOid(invalidUtf8);
+    expectCode(() => withGitShim(
+      commitMetadataResponses([{ oid: invalidOid, body: invalidUtf8 }]),
+      (cwd) => readExactCommitMetadata(cwd, [invalidOid]),
+    ), 'ci.input.commit-metadata-invalid-utf8');
+  });
+
+  it('rejects author and committer name angle brackets and controls while preserving ordinary Unicode names', () => {
+    for (const authorName of ['Bad<Name', 'Bad>Name', 'Bad\tName', `Bad${String.fromCharCode(1)}Name`]) {
+      const body = rawCommitBody({
+        author: `${authorName} <fixture@example.invalid> 1700000000 +0000`,
+      });
+      const oid = commitOid(body);
+      expectCode(() => withGitShim(
+        commitMetadataResponses([{ oid, body }]),
+        (cwd) => readExactCommitMetadata(cwd, [oid]),
+      ), 'ci.input.commit-metadata-malformed');
+    }
+
+    for (const committerName of ['Bad<Committer', 'Bad>Committer', 'Bad\tCommitter', `Bad${String.fromCharCode(1)}Committer`]) {
+      const body = rawCommitBody({
+        author: 'Safe Author <fixture@example.invalid> 1700000000 +0000',
+        committer: `${committerName} <fixture@example.invalid> 1700000000 +0000`,
+      });
+      const oid = commitOid(body);
+      expectCode(() => withGitShim(
+        commitMetadataResponses([{ oid, body }]),
+        (cwd) => readExactCommitMetadata(cwd, [oid]),
+      ), 'ci.input.commit-metadata-malformed');
+    }
+
+    const safeBody = rawCommitBody({
+      author: 'Zoë 李 <fixture@example.invalid> 1700000000 +0000',
+      message: 'Unicode author\n',
+    });
+    const safeOid = commitOid(safeBody);
+    expect(withGitShim(
+      commitMetadataResponses([{ oid: safeOid, body: safeBody }]),
+      (cwd) => readExactCommitMetadata(cwd, [safeOid]),
+    )[0]?.authorName).toBe('Zoë 李');
+  });
+
+  it('rejects missing, non-commit, SHA-256, partial, and identity-mismatched evidence with sanitized errors', () => {
+    const privateFixture = 'private-author-value@example.invalid';
+    const body = rawCommitBody({
+      author: `Private Fixture <${privateFixture}> 1700000000 +0000`,
+    });
+    const oid = commitOid(body);
+    const wrongOid = 'f'.repeat(40);
+    const cases: Array<{ responses: Record<string, GitShimResponse>; code: string }> = [
+      {
+        responses: {
+          [responseKey(['rev-parse', '--show-object-format'])]: { stdout: 'sha1\n' },
+          [responseKey(['cat-file', '-t', '--', oid])]: { stderr: privateFixture, exit: 1 },
+        },
+        code: 'ci.input.commit-metadata-unavailable',
+      },
+      {
+        responses: {
+          [responseKey(['rev-parse', '--show-object-format'])]: { stdout: 'sha1\n' },
+          [responseKey(['cat-file', '-t', '--', oid])]: {
+            stdout: 'commit\n', stderr: privateFixture, exit: 1,
+          },
+        },
+        code: 'ci.input.commit-metadata-unavailable',
+      },
+      {
+        responses: commitMetadataResponses([{ oid, body, type: 'blob\n' }]),
+        code: 'ci.input.commit-metadata-malformed',
+      },
+      {
+        responses: commitMetadataResponses([{ oid, body }], 'sha256\n'),
+        code: 'ci.input.commit-metadata-malformed',
+      },
+      {
+        responses: commitMetadataResponses([{ oid, body, size: `${body.byteLength + 1}\n` }]),
+        code: 'ci.input.commit-metadata-identity-mismatch',
+      },
+      {
+        responses: commitMetadataResponses([{ oid: wrongOid, body }]),
+        code: 'ci.input.commit-metadata-identity-mismatch',
+      },
+    ];
+    for (const entry of cases) {
+      let thrown: unknown;
+      try {
+        withGitShim(entry.responses, (cwd) => readExactCommitMetadata(cwd, [
+          entry.responses === cases.at(-1)?.responses ? wrongOid : oid,
+        ]));
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toMatchObject({ code: entry.code });
+      expect(String(thrown)).not.toContain(privateFixture);
+      expectNoVisibleCause(thrown);
+    }
+  });
+
+  it('rejects terminal commit-body substitution without exposing either body', async () => {
+    const firstBody = rawCommitBody({ message: 'private first body\n' });
+    const secondBody = rawCommitBody({ message: 'private other body\n' });
+    expect(secondBody.byteLength).toBe(firstBody.byteLength);
+    const oid = commitOid(firstBody);
+    let bodyReads = 0;
+    vi.resetModules();
+    vi.doMock('node:child_process', () => ({
+      execFileSync: (_file: string, rawArgs: string[]) => {
+        const args = rawArgs.slice(1);
+        if (responseKey(args) === responseKey(['rev-parse', '--show-object-format'])) {
+          return Buffer.from('sha1\n');
+        }
+        if (responseKey(args) === responseKey(['cat-file', '-t', '--', oid])) {
+          return Buffer.from('commit\n');
+        }
+        if (responseKey(args) === responseKey(['cat-file', '-s', '--', oid])) {
+          return Buffer.from(`${firstBody.byteLength}\n`);
+        }
+        if (responseKey(args) === responseKey(['cat-file', 'commit', '--', oid])) {
+          bodyReads += 1;
+          return bodyReads === 1 ? firstBody : secondBody;
+        }
+        throw new Error('unexpected synthetic command');
+      },
+    }));
+    try {
+      const isolated = await import('../../scripts/lib/ci-control/git-input.ts');
+      let thrown: unknown;
+      try {
+        isolated.readExactCommitMetadata('/isolated-fixture', [oid]);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toMatchObject({ code: 'ci.input.commit-metadata-identity-mismatch' });
+      expect(String(thrown)).not.toContain('private first body');
+      expect(String(thrown)).not.toContain('private other body');
+      expect(bodyReads).toBe(2);
+    } finally {
+      vi.doUnmock('node:child_process');
+      vi.resetModules();
+    }
+  });
+
+  it('maps only ETIMEDOUT to timeout, ENOBUFS to budget, and bare SIGKILL to unavailable', async () => {
+    const verify = async (
+      failure: NodeJS.ErrnoException & { signal?: string },
+      code: string,
+    ): Promise<void> => {
+      vi.resetModules();
+      vi.doMock('node:child_process', () => ({ execFileSync: () => { throw failure; } }));
+      try {
+        const isolated = await import('../../scripts/lib/ci-control/git-input.ts');
+        let thrown: unknown;
+        try {
+          isolated.readExactCommitMetadata('/isolated-fixture', []);
+        } catch (error) {
+          thrown = error;
+        }
+        expect(thrown).toMatchObject({ code });
+        expect(String(thrown)).not.toContain(failure.message);
+        expectNoVisibleCause(thrown);
+      } finally {
+        vi.doUnmock('node:child_process');
+        vi.resetModules();
+      }
+    };
+    await verify(Object.assign(new Error('private timeout'), { code: 'ETIMEDOUT' }), 'ci.input.commit-metadata-timeout');
+    await verify(Object.assign(new Error('private budget'), { code: 'ENOBUFS' }), 'ci.input.commit-metadata-budget');
+    await verify(Object.assign(new Error('private signal'), { signal: 'SIGKILL' }), 'ci.input.commit-metadata-unavailable');
+  });
+
+  it('publishes fixed inclusive metadata budgets and rejects one-over count before Git', () => {
+    expect(MAX_EXACT_SINGLE_COMMIT_METADATA_BYTES).toBe(1 * 1_024 * 1_024);
+    expect(MAX_EXACT_AGGREGATE_COMMIT_METADATA_BYTES).toBe(16 * 1_024 * 1_024);
+    const exactCount = Array.from({ length: MAX_EXACT_COMMIT_COUNT }, (_, index) =>
+      index.toString(16).padStart(40, '0'));
+    expectCode(() => readExactCommitMetadata(
+      '/not-a-repository', exactCount,
+    ), 'ci.input.commit-metadata-unavailable');
+    expectCode(() => readExactCommitMetadata(
+      '/not-a-repository',
+      Array.from({ length: MAX_EXACT_COMMIT_COUNT + 1 }, (_, index) =>
+        index.toString(16).padStart(40, '0')),
+    ), 'ci.input.commit-metadata-budget');
+  });
+
+  it('admits exact single and aggregate preflight bounds and rejects one over before loading bodies', () => {
+    const oid = 'a'.repeat(40);
+    const exactSingle = commitMetadataResponses([{
+      oid,
+      body: Buffer.alloc(0),
+      size: `${MAX_EXACT_SINGLE_COMMIT_METADATA_BYTES}\n`,
+    }]);
+    delete exactSingle[responseKey(['cat-file', 'commit', '--', oid])];
+    expectCode(() => withGitShim(exactSingle, (cwd) => readExactCommitMetadata(cwd, [oid])),
+      'ci.input.commit-metadata-unavailable');
+
+    const oversized = commitMetadataResponses([{
+      oid,
+      body: Buffer.alloc(0),
+      size: `${MAX_EXACT_SINGLE_COMMIT_METADATA_BYTES + 1}\n`,
+    }]);
+    delete oversized[responseKey(['cat-file', 'commit', '--', oid])];
+    expectCode(() => withGitShim(oversized, (cwd) => readExactCommitMetadata(cwd, [oid])),
+      'ci.input.commit-metadata-budget');
+
+    const exactAggregateOids = Array.from({ length: 16 }, (_, index) =>
+      (index + 1).toString(16).padStart(40, '0'));
+    const exactAggregate = commitMetadataResponses(exactAggregateOids.map((entryOid) => ({
+      oid: entryOid,
+      body: Buffer.alloc(0),
+      size: `${MAX_EXACT_SINGLE_COMMIT_METADATA_BYTES}\n`,
+    })));
+    for (const entryOid of exactAggregateOids) {
+      delete exactAggregate[responseKey(['cat-file', 'commit', '--', entryOid])];
+    }
+    expectCode(() => withGitShim(
+      exactAggregate,
+      (cwd) => readExactCommitMetadata(cwd, exactAggregateOids),
+    ), 'ci.input.commit-metadata-unavailable');
+
+    const oids = [...exactAggregateOids, 'f'.repeat(40)];
+    const responses = commitMetadataResponses(oids.map((entryOid, index) => ({
+      oid: entryOid,
+      body: Buffer.alloc(0),
+      size: `${index === 16 ? 1 : MAX_EXACT_SINGLE_COMMIT_METADATA_BYTES}\n`,
+    })));
+    for (const entryOid of oids) delete responses[responseKey(['cat-file', 'commit', '--', entryOid])];
+    expectCode(() => withGitShim(responses, (cwd) => readExactCommitMetadata(cwd, oids)),
+      'ci.input.commit-metadata-budget');
+  });
+
+  it('preflights every object before loading any body', () => {
+    const firstBody = rawCommitBody({ message: 'first\n' });
+    const firstOid = commitOid(firstBody);
+    const secondOid = 'f'.repeat(40);
+    const oids = [firstOid, secondOid].sort();
+    const responses = commitMetadataResponses([{ oid: firstOid, body: firstBody }]);
+    responses[responseKey(['cat-file', '-t', '--', secondOid])] = { stdout: 'commit\n' };
+    responses[responseKey(['cat-file', '-s', '--', secondOid])] = {
+      stdout: `${MAX_EXACT_SINGLE_COMMIT_METADATA_BYTES + 1}\n`,
+    };
+    delete responses[responseKey(['cat-file', 'commit', '--', firstOid])];
+    expectCode(() => withGitShim(responses, (cwd) => readExactCommitMetadata(cwd, oids)),
+      'ci.input.commit-metadata-budget');
   });
 });
 

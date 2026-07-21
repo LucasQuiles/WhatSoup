@@ -1,13 +1,16 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { TextDecoder } from "node:util";
+import { TextDecoder, types as utilTypes } from "node:util";
 
 import { cleanGitEnv } from "../../../src/lib/git-env.ts";
 
 export const MAX_CHANGE_SET_BYTES = 16 * 1024 * 1024;
 export const MAX_CHANGE_FACT_COUNT = 50_000;
 export const MAX_EXACT_COMMIT_COUNT = 4_096;
+export const MAX_EXACT_COMMIT_PARENT_EDGE_COUNT = 8_192;
 export const MAX_EXACT_COMMIT_RANGE_BYTES = 1 * 1_024 * 1_024;
+export const MAX_EXACT_SINGLE_COMMIT_METADATA_BYTES = 1 * 1_024 * 1_024;
+export const MAX_EXACT_AGGREGATE_COMMIT_METADATA_BYTES = 16 * 1_024 * 1_024;
 export const MAX_EXACT_BLOB_COUNT = 50_000;
 export const MAX_EXACT_SINGLE_BLOB_BYTES = 4 * 1_024 * 1_024;
 export const MAX_EXACT_AGGREGATE_BLOB_BYTES = 16 * 1_024 * 1_024;
@@ -58,6 +61,18 @@ export interface ExactCommitRangeV1 {
   commits: ExactCommitV1[];
 }
 
+export interface ExactCommitMetadataV1 {
+  oid: string;
+  treeOid: string;
+  parentOids: string[];
+  authorName: string;
+  authorEmail: string;
+  subject: string;
+  message: string;
+  byteLength: number;
+  contentSha256: `sha256:${string}`;
+}
+
 export interface ExactBlobV1 {
   oid: string;
   byteLength: number;
@@ -92,6 +107,12 @@ export type ExactGitInputErrorCode =
   | "ci.input.commit-range-unavailable"
   | "ci.input.commit-range-malformed"
   | "ci.input.commit-range-budget"
+  | "ci.input.commit-metadata-malformed"
+  | "ci.input.commit-metadata-unavailable"
+  | "ci.input.commit-metadata-timeout"
+  | "ci.input.commit-metadata-budget"
+  | "ci.input.commit-metadata-invalid-utf8"
+  | "ci.input.commit-metadata-identity-mismatch"
   | "ci.input.blob-set-malformed"
   | "ci.input.blob-set-budget"
   | "ci.input.blob-unavailable"
@@ -367,6 +388,17 @@ function parseCommitRows(bytes: Buffer, expectedCount: number): Map<string, Exac
       "ci.input.commit-range-budget",
     );
   }
+  let parentEdgeCount = 0;
+  for (const byte of bytes) {
+    if (byte !== 0x20) continue;
+    parentEdgeCount += 1;
+    if (parentEdgeCount > MAX_EXACT_COMMIT_PARENT_EDGE_COUNT) {
+      throw new ExactGitInputError(
+        "ci.input.commit-range-budget",
+        "ci.input.commit-range-budget",
+      );
+    }
+  }
   if (bytes.some((byte) => byte > 0x7f)) {
     throw new ExactGitInputError(
       "ci.input.commit-range-malformed",
@@ -406,7 +438,12 @@ function parseCommitRows(bytes: Buffer, expectedCount: number): Map<string, Exac
       );
     }
     const [oid, ...parentOids] = fields;
-    if (!oid || parentOids.length === 0 || commits.has(oid)) {
+    if (
+      !oid
+      || parentOids.length === 0
+      || new Set(parentOids).size !== parentOids.length
+      || commits.has(oid)
+    ) {
       throw new ExactGitInputError(
         "ci.input.commit-range-malformed",
         "ci.input.commit-range-malformed",
@@ -512,6 +549,293 @@ export function readExactCommitRange(
     );
   }
   return { baseOid, remoteOid, rangeStartOid, localOid, commits };
+}
+
+interface CommitMetadataPreflight {
+  oid: string;
+  byteLength: number;
+}
+
+type CommitMetadataErrorCode = Extract<
+  ExactGitInputErrorCode,
+  `ci.input.commit-metadata-${string}`
+>;
+
+function commitMetadataError(code: CommitMetadataErrorCode): ExactGitInputError {
+  return new ExactGitInputError(code, code);
+}
+
+function commitMetadataGitBytes(
+  cwd: string,
+  args: readonly string[],
+  maxBuffer: number,
+): Buffer {
+  try {
+    return execFileSync("git", ["--no-replace-objects", ...args], {
+      cwd,
+      env: gitEnvironment(),
+      maxBuffer,
+      timeout: GIT_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (error) {
+    const candidate = error as NodeJS.ErrnoException;
+    if (candidate.code === "ETIMEDOUT") {
+      throw commitMetadataError("ci.input.commit-metadata-timeout");
+    }
+    if (candidate.code === "ENOBUFS") {
+      throw commitMetadataError("ci.input.commit-metadata-budget");
+    }
+    throw commitMetadataError("ci.input.commit-metadata-unavailable");
+  }
+}
+
+function metadataAsciiLine(bytes: Buffer): string {
+  try {
+    return canonicalAsciiLine(bytes, "ci.input.commit-metadata-malformed");
+  } catch {
+    throw commitMetadataError("ci.input.commit-metadata-malformed");
+  }
+}
+
+function validateCommitMetadataOids(value: unknown): string[] {
+  try {
+    if (
+      !Array.isArray(value)
+      || utilTypes.isProxy(value)
+      || Object.getPrototypeOf(value) !== Array.prototype
+    ) {
+      throw commitMetadataError("ci.input.commit-metadata-malformed");
+    }
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+    if (
+      lengthDescriptor === undefined
+      || !("value" in lengthDescriptor)
+      || !Number.isSafeInteger(lengthDescriptor.value)
+      || lengthDescriptor.value < 0
+    ) {
+      throw commitMetadataError("ci.input.commit-metadata-malformed");
+    }
+    const length = lengthDescriptor.value as number;
+    if (length > MAX_EXACT_COMMIT_COUNT) {
+      throw commitMetadataError("ci.input.commit-metadata-budget");
+    }
+    const ownKeys = Reflect.ownKeys(value);
+    if (
+      ownKeys.length !== length + 1
+      || !ownKeys.includes("length")
+      || ownKeys.some((key) => typeof key !== "string")
+    ) {
+      throw commitMetadataError("ci.input.commit-metadata-malformed");
+    }
+    const oids: string[] = [];
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (
+        descriptor === undefined
+        || !("value" in descriptor)
+        || descriptor.enumerable !== true
+        || typeof descriptor.value !== "string"
+        || !FULL_OID.test(descriptor.value)
+      ) {
+        throw commitMetadataError("ci.input.commit-metadata-malformed");
+      }
+      if (index > 0 && oids[index - 1]! >= descriptor.value) {
+        throw commitMetadataError("ci.input.commit-metadata-malformed");
+      }
+      oids.push(descriptor.value);
+    }
+    return oids;
+  } catch (error) {
+    if (error instanceof ExactGitInputError) throw error;
+    throw commitMetadataError("ci.input.commit-metadata-malformed");
+  }
+}
+
+function requireCommitMetadataSha1(cwd: string): void {
+  const format = metadataAsciiLine(commitMetadataGitBytes(
+    cwd,
+    ["rev-parse", "--show-object-format"],
+    64,
+  ));
+  if (format !== "sha1") {
+    throw commitMetadataError("ci.input.commit-metadata-malformed");
+  }
+}
+
+function preflightCommitMetadata(
+  cwd: string,
+  oids: readonly string[],
+): CommitMetadataPreflight[] {
+  for (const oid of oids) {
+    const type = metadataAsciiLine(commitMetadataGitBytes(
+      cwd,
+      ["cat-file", "-t", "--", oid],
+      64,
+    ));
+    if (type !== "commit") {
+      throw commitMetadataError("ci.input.commit-metadata-malformed");
+    }
+  }
+
+  const preflight: CommitMetadataPreflight[] = [];
+  let aggregateBytes = 0;
+  for (const oid of oids) {
+    let byteLength: number;
+    try {
+      byteLength = parseBoundedInteger(
+        commitMetadataGitBytes(cwd, ["cat-file", "-s", "--", oid], 64),
+        "ci.input.commit-metadata-malformed",
+      );
+    } catch (error) {
+      if (error instanceof ExactGitInputError && error.code === "ci.input.commit-metadata-malformed") {
+        throw error;
+      }
+      if (error instanceof ExactGitInputError) throw error;
+      throw commitMetadataError("ci.input.commit-metadata-malformed");
+    }
+    if (byteLength > MAX_EXACT_SINGLE_COMMIT_METADATA_BYTES) {
+      throw commitMetadataError("ci.input.commit-metadata-budget");
+    }
+    aggregateBytes += byteLength;
+    if (aggregateBytes > MAX_EXACT_AGGREGATE_COMMIT_METADATA_BYTES) {
+      throw commitMetadataError("ci.input.commit-metadata-budget");
+    }
+    preflight.push({ oid, byteLength });
+  }
+  return preflight;
+}
+
+function parseCommitIdentity(value: string): { name: string; email: string } {
+  const match = /^([^<>\u0000-\u001f\u007f]{1,1024}) <([^<>\s]{1,320})> [0-9]+ [+-][0-9]{4}$/u.exec(value);
+  if (
+    match === null
+    || Buffer.byteLength(match[1]!, "utf8") > 1_024
+    || Buffer.byteLength(match[2]!, "utf8") > 320
+  ) {
+    throw commitMetadataError("ci.input.commit-metadata-malformed");
+  }
+  return { name: match[1]!, email: match[2]! };
+}
+
+function parseCommitMetadataBody(
+  oid: string,
+  bytes: Buffer,
+): ExactCommitMetadataV1 {
+  if (bytes.includes(0)) {
+    throw commitMetadataError("ci.input.commit-metadata-malformed");
+  }
+  let decoded: string;
+  try {
+    decoded = UTF8.decode(bytes);
+  } catch {
+    throw commitMetadataError("ci.input.commit-metadata-invalid-utf8");
+  }
+  const separator = decoded.indexOf("\n\n");
+  if (separator < 0) {
+    throw commitMetadataError("ci.input.commit-metadata-malformed");
+  }
+  const headerText = decoded.slice(0, separator);
+  if (headerText.includes("\r")) {
+    throw commitMetadataError("ci.input.commit-metadata-malformed");
+  }
+  const headers = headerText.split("\n");
+  const tree = /^tree ([0-9a-f]{40})$/.exec(headers[0] ?? "");
+  if (tree === null) {
+    throw commitMetadataError("ci.input.commit-metadata-malformed");
+  }
+  let index = 1;
+  const parentOids: string[] = [];
+  while (index < headers.length) {
+    const parent = /^parent ([0-9a-f]{40})$/.exec(headers[index]!);
+    if (parent === null) break;
+    if (parentOids.includes(parent[1]!)) {
+      throw commitMetadataError("ci.input.commit-metadata-malformed");
+    }
+    parentOids.push(parent[1]!);
+    index += 1;
+  }
+  const authorHeader = headers[index++];
+  const committerHeader = headers[index++];
+  if (!authorHeader?.startsWith("author ") || !committerHeader?.startsWith("committer ")) {
+    throw commitMetadataError("ci.input.commit-metadata-malformed");
+  }
+  const author = parseCommitIdentity(authorHeader.slice("author ".length));
+  parseCommitIdentity(committerHeader.slice("committer ".length));
+
+  let optionalHeaderSeen = false;
+  for (; index < headers.length; index += 1) {
+    const header = headers[index]!;
+    if (header.startsWith(" ")) {
+      if (!optionalHeaderSeen) {
+        throw commitMetadataError("ci.input.commit-metadata-malformed");
+      }
+      continue;
+    }
+    const optional = /^([a-z][a-z0-9-]*) (.+)$/u.exec(header);
+    if (
+      optional === null
+      || new Set(["tree", "parent", "author", "committer", "encoding"]).has(optional[1]!)
+    ) {
+      throw commitMetadataError("ci.input.commit-metadata-malformed");
+    }
+    optionalHeaderSeen = true;
+  }
+
+  const message = decoded.slice(separator + 2);
+  const firstLineEnd = message.indexOf("\n");
+  const rawSubject = firstLineEnd < 0 ? message : message.slice(0, firstLineEnd);
+  const subject = rawSubject.endsWith("\r") ? rawSubject.slice(0, -1) : rawSubject;
+  return {
+    oid,
+    treeOid: tree[1]!,
+    parentOids,
+    authorName: author.name,
+    authorEmail: author.email,
+    subject,
+    message,
+    byteLength: bytes.byteLength,
+    contentSha256: `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
+  };
+}
+
+export function readExactCommitMetadata(
+  cwd: string,
+  commitOids: readonly string[],
+): ExactCommitMetadataV1[] {
+  const oids = validateCommitMetadataOids(commitOids);
+  requireCommitMetadataSha1(cwd);
+  const preflight = preflightCommitMetadata(cwd, oids);
+  const bodies = new Map<string, Buffer>();
+  const metadata: ExactCommitMetadataV1[] = [];
+  for (const item of preflight) {
+    const bytes = commitMetadataGitBytes(
+      cwd,
+      ["cat-file", "commit", "--", item.oid],
+      item.byteLength + 1,
+    );
+    const identity = createHash("sha1")
+      .update(`commit ${item.byteLength}\0`)
+      .update(bytes)
+      .digest("hex");
+    if (bytes.byteLength !== item.byteLength || identity !== item.oid) {
+      throw commitMetadataError("ci.input.commit-metadata-identity-mismatch");
+    }
+    bodies.set(item.oid, bytes);
+    metadata.push(parseCommitMetadataBody(item.oid, bytes));
+  }
+  for (const item of preflight) {
+    const reread = commitMetadataGitBytes(
+      cwd,
+      ["cat-file", "commit", "--", item.oid],
+      item.byteLength + 1,
+    );
+    if (!reread.equals(bodies.get(item.oid)!)) {
+      throw commitMetadataError("ci.input.commit-metadata-identity-mismatch");
+    }
+  }
+  return metadata;
 }
 
 interface BlobPreflight {
