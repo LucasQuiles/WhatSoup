@@ -1587,6 +1587,16 @@ bot persona.
 
 ---
 
+## Inline proposal cleanup artifacts
+
+The offline `scripts/inline-proposal-cleanup.ts` command has no environment-variable
+or instance-config enablement. Operators must provide an exact `--db` path and either
+`--artifact-dir` for `plan` or the resulting `--manifest` for
+`apply`/`verify`/`rollback`. The artifact directory must be mode 0700; manifests,
+snapshots, backups, and receipts are written mode 0600. The command never discovers an
+instance implicitly, never restarts a service, and never sends a message. See
+`docs/runbooks/substrate-slice-1.md` for the gated lifecycle and rollback contract.
+
 ## Database Migration History
 
 Migrations are applied automatically at startup by `src/core/database.ts`. Each migration is recorded in the `schema_migrations` table and is never re-applied.
@@ -1639,6 +1649,7 @@ All migration sources are in `src/core/database.ts` unless noted otherwise.
 | 42 | Adds the historical operator catch-up delivery-proof views, closure validation, unique closure index, and proof-anchor retention contract. This source is byte-for-byte locked to the migration already applied on deployed Q databases and must never be rewritten in place (`src/core/database-migration-42.ts`). |
 | 43 | Forward-repairs historical schema 42 by normalizing closure uniqueness, materializing immutable proof witnesses, hardening proof-anchor retention, and preserving exact idempotent closure receipts. It accepts the exact original deployed schema-42 shape and the attested hardened artifact while rejecting partial, drifted, ambiguous, unwitnessed, or orphaned state. A historical `selected_corroborated` closure is grandfathered only as an immutable witness and replay blocker; later corroboration cannot authorize a new irreversible closure. Operational tooling uses the exported read-only canonical-schema attestation before closure (`src/core/database-migration-43.ts`). |
 | 44 | Adds `total_cache_read_tokens`/`last_compact_cache_read_tokens` to `agent_sessions` (idempotent ALTERs, no-op if `agent_sessions` is absent). Splits the token-accounting semantics: `total_input_tokens` now accumulates only genuinely-new input (base + cache_creation) per turn; `total_cache_read_tokens` accumulates the cache-read portion separately (a repeated re-read of prior context, not new consumption — previously conflated into `total_input_tokens`, inflating it ~O(turns²) on long conversations). No backfill: historical rows keep their old (inflated) `total_input_tokens` value with `total_cache_read_tokens = 0` for that history. |
+| 45 | Adds the canonical partial unique index on `beads.source_message_pk` for inline-imperative proposals, refusing incompatible index definitions or pre-existing source collisions before enforcing one proposal per stored source message (`runMigration45`). |
 
 Recovery plans, runs, disposition links, delivery corroboration, and closure witnesses are retained
 as an indefinite audit ledger. There is currently no TTL or destructive pruning contract for these

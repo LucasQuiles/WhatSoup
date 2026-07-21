@@ -51,14 +51,46 @@ node --experimental-strip-types --input-type=module -e "
 
 ## Common operations
 
-**Reject all open proposals (bulk):**
-```sql
-UPDATE beads
-   SET status='cancelled',
-       cancelled_at=strftime('%s','now'),
-       updated_at=strftime('%s','now')
- WHERE status='proposed';
+**Repair false inline-proposal backlog:** do not bulk-update `beads`. Use the
+reversible operator command below against the exact instance database. It preserves
+valid proposals, uses the runtime classifier, appends audited status events, and
+requires a private operator-selected artifact directory.
+
+```sh
+mkdir -m 700 /private/operator/inline-cleanup
+bash scripts/run-with-pinned-node.sh scripts/inline-proposal-cleanup.ts plan \
+  --db /exact/instance/bot.db --artifact-dir /private/operator/inline-cleanup
+bash scripts/run-with-pinned-node.sh scripts/inline-proposal-cleanup.ts apply \
+  --db /exact/instance/bot.db --manifest /private/operator/inline-cleanup/manifest.json
+bash scripts/run-with-pinned-node.sh scripts/inline-proposal-cleanup.ts verify \
+  --db /exact/instance/bot.db --manifest /private/operator/inline-cleanup/manifest.json
 ```
+
+`plan` is source-database read-only and writes a mode-0600 standalone online backup,
+content hashes, and aggregate counts; message bodies are never placed in JSON
+artifacts. When the source has an active WAL/SHM pair, byte copies are retained under
+the non-SQLite `.provenance` names. They are evidence only and are never attached to
+the standalone snapshot. The normalized online-backup hash is the canonical logical
+database fingerprint used by `apply`; the manifest separately binds the provenance
+copy sizes and hashes.
+
+`apply` refuses schema, fingerprint, classifier, source-event, candidate, busy,
+read-only, or disk-full drift. It creates and verifies `pre-apply-backup.db` before
+acquiring the A5 batch write lock. It also compares an independent SQLite
+`data_version` observation under that lock so a commit racing the backup cannot pass.
+Successful and recovered retries emit `apply-receipt.json`.
+
+After a successful apply, rollback remains available while no later edit exists:
+
+```sh
+bash scripts/run-with-pinned-node.sh scripts/inline-proposal-cleanup.ts rollback \
+  --db /exact/instance/bot.db --manifest /private/operator/inline-cleanup/manifest.json
+```
+
+Rollback restores only the exact manifested rows and removes only their exact cleanup
+events. Any later row or event change fails closed for review. Preserve the manifest,
+backup, and receipts together. Planning, applying, deploying, restarting, or running
+this command on a live instance remains a separately authorized operator action.
 
 **Extend an active watch to the policy cap:** use the MCP tool `extend_trigger` with `until = now + 72*3600`. Handler clamps.
 
