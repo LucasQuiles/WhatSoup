@@ -952,7 +952,7 @@ describe('deploy/whatsoup — source wiring', () => {
     expect(compatibility).toBeGreaterThan(-1);
     expect(compatibility).toBeLessThan(wrapper.indexOf('git -C "$REPO_ROOT"'));
     expect(compatibility).toBeLessThan(wrapper.indexOf('mkdir -p "$TMPDIR"'));
-    expect(compatibility).toBeLessThan(wrapper.indexOf('INSTANCE_TYPE='));
+    expect(compatibility).toBeLessThan(wrapper.indexOf('preflight-check.sh'));
   });
 
   it('propagates the terminal database bootstrap exit status instead of collapsing it to restartable failure', () => {
@@ -1021,13 +1021,16 @@ describe('deploy/whatsoup — source wiring', () => {
     expect(scrub).toBeLessThan(bootstrapIndex);
   });
 
-  it('runs database compatibility before provider credential resolution', () => {
+  it('runs database compatibility without resolving provider credentials in the launcher', () => {
     const wrapper = readFileSync(WRAPPER, 'utf8');
     const databaseGate = wrapper.indexOf('database-compatibility-bootstrap.ts');
-    const providerCredentials = wrapper.indexOf('ANTHROPIC_API_KEY="$(keyring_lookup');
+    const providerCredentialScrub = wrapper.indexOf(
+      'unset ANTHROPIC_API_KEY OPENAI_API_KEY PINECONE_API_KEY WHATSOUP_HEALTH_TOKEN',
+    );
     expect(databaseGate).toBeGreaterThan(-1);
-    expect(providerCredentials).toBeGreaterThan(databaseGate);
-    const between = wrapper.slice(databaseGate, providerCredentials);
+    expect(providerCredentialScrub).toBeGreaterThan(databaseGate);
+    expect(wrapper).not.toContain('keyring_lookup');
+    const between = wrapper.slice(databaseGate, providerCredentialScrub);
     expect(between).toContain('future_schema|engine_recovery_required');
     expect(between).toContain('--hold');
   });
