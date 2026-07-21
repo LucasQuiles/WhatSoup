@@ -79,6 +79,20 @@ describe('inline proposal cleanup protocol', () => {
     expect(statSync(result.snapshotPath).mode & 0o777).toBe(0o600);
   });
 
+  it('rejects a version 1 manifest before database actions', async () => {
+    const f = fixture();
+    const plan = await planInlineProposalCleanup({ dbPath: f.dbPath, artifactDir: f.artifactDir });
+    const manifest = readManifest(plan.manifestPath) as unknown as Record<string, unknown>;
+    manifest.formatVersion = 1;
+    writeFileSync(plan.manifestPath, `${JSON.stringify(manifest)}\n`, { mode: 0o600 });
+
+    await expect(applyInlineProposalCleanup({
+      dbPath: join(f.root, 'missing.db'),
+      manifestPath: plan.manifestPath,
+    })).rejects.toThrow(/manifest format/i);
+    expect(existsSync(join(f.artifactDir, 'pre-apply-backup.db'))).toBe(false);
+  });
+
   it('captures an active WAL/SHM pair consistently without changing source bytes', async () => {
     const f = fixture();
     const raw = new DatabaseSync(f.dbPath);
@@ -160,6 +174,174 @@ describe('inline proposal cleanup protocol', () => {
     const rolledBack = await rollbackInlineProposalCleanup({ dbPath: f.dbPath, manifestPath: plan.manifestPath });
     expect(rolledBack.restoredCount).toBe(1);
     const check = new DatabaseSync(f.dbPath);
+    expect(getBead(check, f.invalid.id)!.bead.status).toBe('proposed');
+    check.close();
+  });
+
+  it('rolls back the whole transaction when cleanup-event deletion removes its canonical source event', async () => {
+    const f = fixture();
+    const plan = await planInlineProposalCleanup({ dbPath: f.dbPath, artifactDir: f.artifactDir });
+    const candidate = plan.manifest.candidates[0]!;
+    await applyInlineProposalCleanup({ dbPath: f.dbPath, manifestPath: plan.manifestPath });
+    const raw = new DatabaseSync(f.dbPath);
+    raw.exec(`CREATE TRIGGER delete_cleanup_source_before_cleanup_event
+      BEFORE DELETE ON bead_events
+      WHEN OLD.actor = 'inline-proposal-cleanup'
+      BEGIN
+        DELETE FROM bead_events WHERE id = ${candidate.sourceEventId};
+      END`);
+    raw.close();
+
+    await expect(rollbackInlineProposalCleanup({ dbPath: f.dbPath, manifestPath: plan.manifestPath }))
+      .rejects.toThrow(/source event|parity|drift/i);
+
+    expect(existsSync(join(f.artifactDir, 'rollback-receipt.json'))).toBe(false);
+    const check = new DatabaseSync(f.dbPath, { readOnly: true });
+    expect(getBead(check, f.invalid.id)!.bead.status).toBe('cancelled');
+    expect(check.prepare('SELECT COUNT(*) AS count FROM bead_events WHERE id = ?')
+      .get(candidate.sourceEventId)).toEqual({ count: 1 });
+    expect(check.prepare(`SELECT COUNT(*) AS count FROM bead_events
+      WHERE bead_id = ? AND actor = 'inline-proposal-cleanup'`).get(candidate.id)).toEqual({ count: 1 });
+    check.close();
+  });
+
+  it('rolls back the whole transaction when cleanup-event deletion removes an unrelated audit event', async () => {
+    const f = fixture();
+    const setup = new DatabaseSync(f.dbPath);
+    const auditEventId = Number(setup.prepare(`INSERT INTO bead_events
+      (bead_id, event_type, payload_json, actor, source_message_pk, created_at)
+      VALUES (?, 'audit_note', '{"note":"retain"}', 'auditor', NULL, 1)`)
+      .run(f.invalid.id).lastInsertRowid);
+    setup.close();
+    const plan = await planInlineProposalCleanup({ dbPath: f.dbPath, artifactDir: f.artifactDir });
+    const candidate = plan.manifest.candidates[0]!;
+    await applyInlineProposalCleanup({ dbPath: f.dbPath, manifestPath: plan.manifestPath });
+    const raw = new DatabaseSync(f.dbPath);
+    const eventCountBefore = raw.prepare('SELECT COUNT(*) AS count FROM bead_events WHERE bead_id = ?')
+      .get(candidate.id);
+    raw.exec(`CREATE TRIGGER delete_cleanup_audit_before_cleanup_event
+      BEFORE DELETE ON bead_events
+      WHEN OLD.actor = 'inline-proposal-cleanup'
+      BEGIN
+        DELETE FROM bead_events WHERE id = ${auditEventId};
+      END`);
+    raw.close();
+
+    await expect(rollbackInlineProposalCleanup({ dbPath: f.dbPath, manifestPath: plan.manifestPath }))
+      .rejects.toThrow(/event parity|drift/i);
+
+    expect(existsSync(join(f.artifactDir, 'rollback-receipt.json'))).toBe(false);
+    const check = new DatabaseSync(f.dbPath, { readOnly: true });
+    expect(getBead(check, f.invalid.id)!.bead.status).toBe('cancelled');
+    expect(check.prepare('SELECT COUNT(*) AS count FROM bead_events WHERE bead_id = ?')
+      .get(candidate.id)).toEqual(eventCountBefore);
+    expect(check.prepare('SELECT COUNT(*) AS count FROM bead_events WHERE id = ?')
+      .get(auditEventId)).toEqual({ count: 1 });
+    check.close();
+  });
+
+  it('rolls back apply when cleanup-event insertion mutates an unrelated baseline audit event', async () => {
+    const f = fixture();
+    const raw = new DatabaseSync(f.dbPath);
+    const auditEventId = Number(raw.prepare(`INSERT INTO bead_events
+      (bead_id, event_type, payload_json, actor, source_message_pk, created_at)
+      VALUES (?, 'audit_note', '{"note":"retain"}', 'auditor', NULL, 1)`)
+      .run(f.invalid.id).lastInsertRowid);
+    raw.exec(`CREATE TRIGGER mutate_audit_after_cleanup_event
+      AFTER INSERT ON bead_events
+      WHEN NEW.actor = 'inline-proposal-cleanup'
+      BEGIN
+        UPDATE bead_events SET payload_json = '{"note":"damaged"}' WHERE id = ${auditEventId};
+      END`);
+    raw.close();
+    const plan = await planInlineProposalCleanup({ dbPath: f.dbPath, artifactDir: f.artifactDir });
+
+    await expect(applyInlineProposalCleanup({ dbPath: f.dbPath, manifestPath: plan.manifestPath }))
+      .rejects.toThrow(/baseline event|parity|drift/i);
+
+    expect(existsSync(join(f.artifactDir, 'apply-receipt.json'))).toBe(false);
+    const check = new DatabaseSync(f.dbPath, { readOnly: true });
+    expect(getBead(check, f.invalid.id)!.bead.status).toBe('proposed');
+    expect(check.prepare('SELECT payload_json FROM bead_events WHERE id = ?').get(auditEventId))
+      .toEqual({ payload_json: '{"note":"retain"}' });
+    expect(check.prepare(`SELECT COUNT(*) AS count FROM bead_events
+      WHERE bead_id = ? AND actor = 'inline-proposal-cleanup'`).get(f.invalid.id)).toEqual({ count: 0 });
+    check.close();
+  });
+
+  it('rolls back apply when a later cleanup insert replaces an earlier cleanup event', async () => {
+    const f = fixture();
+    const raw = new DatabaseSync(f.dbPath);
+    const second = createBead(raw, {
+      kind: 'task', status: 'proposed', title: 'second invalid', body: 'We should schedule this too',
+      ownerJid: 'owner', actor: 'inline', sourceMessagePk: 104,
+      proposalReason: 'inline imperative: schedule', reviewByAt: 1,
+    });
+    raw.exec(`CREATE TRIGGER replace_first_cleanup_after_second
+      AFTER INSERT ON bead_events
+      WHEN NEW.actor = 'inline-proposal-cleanup' AND NEW.bead_id = ${second.id}
+      BEGIN
+        DELETE FROM bead_events
+        WHERE actor = 'inline-proposal-cleanup' AND bead_id = ${f.invalid.id};
+        INSERT INTO bead_events
+          (bead_id, event_type, payload_json, actor, source_message_pk, created_at)
+          VALUES (${f.invalid.id}, 'audit_note', '{"note":"replacement"}', 'auditor', NULL, 1);
+      END`);
+    raw.close();
+    const plan = await planInlineProposalCleanup({ dbPath: f.dbPath, artifactDir: f.artifactDir });
+    expect(plan.manifest.candidates.map((candidate) => candidate.id)).toEqual([f.invalid.id, second.id]);
+
+    await expect(applyInlineProposalCleanup({ dbPath: f.dbPath, manifestPath: plan.manifestPath }))
+      .rejects.toThrow(/cleanup event|baseline event|parity|drift/i);
+
+    expect(existsSync(join(f.artifactDir, 'apply-receipt.json'))).toBe(false);
+    const check = new DatabaseSync(f.dbPath, { readOnly: true });
+    expect(getBead(check, f.invalid.id)!.bead.status).toBe('proposed');
+    expect(getBead(check, second.id)!.bead.status).toBe('proposed');
+    expect(check.prepare(`SELECT COUNT(*) AS count FROM bead_events
+      WHERE actor = 'inline-proposal-cleanup'`).get()).toEqual({ count: 0 });
+    expect(check.prepare(`SELECT COUNT(*) AS count FROM bead_events
+      WHERE event_type = 'audit_note' AND actor = 'auditor'`).get()).toEqual({ count: 0 });
+    check.close();
+  });
+
+  it.each([
+    ['payload_json', '{ "from": null, "to": "proposed" }'],
+    ['actor', 'repair-tool'],
+    ['source_message_pk', 999],
+  ] as const)('rejects rollback when canonical source event %s drifts', async (column, value) => {
+    const f = fixture();
+    const plan = await planInlineProposalCleanup({ dbPath: f.dbPath, artifactDir: f.artifactDir });
+    const candidate = plan.manifest.candidates[0]!;
+    await applyInlineProposalCleanup({ dbPath: f.dbPath, manifestPath: plan.manifestPath });
+    const raw = new DatabaseSync(f.dbPath);
+    raw.prepare(`UPDATE bead_events SET ${column} = ? WHERE id = ?`).run(value, candidate.sourceEventId);
+    raw.close();
+
+    await expect(rollbackInlineProposalCleanup({ dbPath: f.dbPath, manifestPath: plan.manifestPath }))
+      .rejects.toThrow(/source event|parity|drift/i);
+    expect(existsSync(join(f.artifactDir, 'rollback-receipt.json'))).toBe(false);
+    const check = new DatabaseSync(f.dbPath, { readOnly: true });
+    expect(getBead(check, f.invalid.id)!.bead.status).toBe('cancelled');
+    expect(check.prepare(`SELECT ${column} AS value FROM bead_events WHERE id = ?`)
+      .get(candidate.sourceEventId)).toEqual({ value });
+    check.close();
+  });
+
+  it.each(['source-event', 'prior'] as const)('rejects malformed %s manifest fields before database actions', async (field) => {
+    const f = fixture();
+    const plan = await planInlineProposalCleanup({ dbPath: f.dbPath, artifactDir: f.artifactDir });
+    const manifest = readManifest(plan.manifestPath) as unknown as Record<string, unknown>;
+    const candidates = manifest.candidates as Array<Record<string, unknown>>;
+    if (field === 'source-event') candidates[0]!.sourceEventCreatedAt = 'not-an-integer';
+    else (candidates[0]!.prior as Record<string, unknown>).updatedAt = 'not-an-integer';
+    writeFileSync(plan.manifestPath, `${JSON.stringify(manifest)}\n`, { mode: 0o600 });
+
+    const commandDbPath = field === 'source-event' ? join(f.root, 'missing.db') : f.dbPath;
+    await expect(applyInlineProposalCleanup({ dbPath: commandDbPath, manifestPath: plan.manifestPath }))
+      .rejects.toThrow(/manifest candidate shape/i);
+    expect(existsSync(join(f.artifactDir, 'pre-apply-backup.db'))).toBe(false);
+    const check = new DatabaseSync(f.dbPath, { readOnly: true });
     expect(getBead(check, f.invalid.id)!.bead.status).toBe('proposed');
     check.close();
   });

@@ -26,7 +26,7 @@ import {
 } from '../src/core/substrate/inline-extractor.ts';
 
 export const CLASSIFIER_VERSION = 'anchored-v1';
-const FORMAT_VERSION = 1;
+const FORMAT_VERSION = 2;
 const CLEANUP_ACTOR = 'inline-proposal-cleanup';
 const REASON_CODE = 'classifier_rejected';
 const PRIVATE_FILE_MODE = 0o600;
@@ -58,9 +58,14 @@ interface CleanupCandidate {
   id: number;
   bodySha256: string;
   identitySha256: string;
+  baselineEventSetSha256: string;
   rejectionReason: string;
   sourceEventId: number;
+  sourceEventType: string;
+  sourceEventPayloadSha256: string;
+  sourceEventActor: string;
   sourceEventMessagePk: number | null;
+  sourceEventCreatedAt: number;
   prior: CandidateState;
 }
 
@@ -72,7 +77,7 @@ interface CompanionRecord {
 }
 
 export interface CleanupManifest {
-  formatVersion: 1;
+  formatVersion: 2;
   manifestId: string;
   classifierVersion: string;
   createdAt: number;
@@ -114,7 +119,7 @@ export interface CleanupCommandOptions {
 }
 
 interface ApplyReceipt {
-  formatVersion: 1;
+  formatVersion: 2;
   manifestId: string;
   appliedAt: number;
   affectedCount: number;
@@ -127,7 +132,7 @@ interface ApplyReceipt {
 }
 
 interface RollbackReceipt {
-  formatVersion: 1;
+  formatVersion: 2;
   manifestId: string;
   rolledBackAt: number;
   restoredCount: number;
@@ -153,9 +158,20 @@ interface BeadInspectionRow {
 interface OriginEventRow {
   id: number;
   bead_id: number;
+  event_type: string;
   payload_json: string;
   actor: string;
   source_message_pk: number | null;
+  created_at: number;
+}
+
+interface CleanupEventRow {
+  id: number;
+  bead_id: number;
+  payload_json: string;
+  actor: string;
+  source_message_pk: number | null;
+  created_at: number;
 }
 
 interface DatabaseFileIdentity { device: number; inode: number }
@@ -190,6 +206,14 @@ function stableJson(value: unknown): string {
       .map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`).join(',')}}`;
   }
   return JSON.stringify(value);
+}
+
+function isCanonicalSourcePayload(payloadJson: string): boolean {
+  try {
+    return stableJson(JSON.parse(payloadJson)) === stableJson({ from: null, to: 'proposed' });
+  } catch {
+    return false;
+  }
 }
 
 function manifestIdFor(manifest: Omit<CleanupManifest, 'manifestId'>): string {
@@ -347,16 +371,14 @@ function schemaVersion(raw: DatabaseSync): number {
 
 function originEvents(raw: DatabaseSync): Map<number, OriginEventRow[]> {
   const rows = raw.prepare(`
-    SELECT id, bead_id, payload_json, actor, source_message_pk
+    SELECT id, bead_id, event_type, payload_json, actor, source_message_pk, created_at
     FROM bead_events
     WHERE event_type = 'status_change'
     ORDER BY bead_id, id
   `).all() as unknown as OriginEventRow[];
   const result = new Map<number, OriginEventRow[]>();
   for (const row of rows) {
-    let payload: unknown;
-    try { payload = JSON.parse(row.payload_json); } catch { continue; }
-    if (stableJson(payload) !== stableJson({ from: null, to: 'proposed' })) continue;
+    if (!isCanonicalSourcePayload(row.payload_json)) continue;
     const list = result.get(row.bead_id) ?? [];
     list.push(row);
     result.set(row.bead_id, list);
@@ -420,9 +442,14 @@ function inspectSnapshot(raw: DatabaseSync, classifier: Classifier, cutoffAt = M
       id: row.id,
       bodySha256: sha256Bytes(row.body ?? ''),
       identitySha256: candidateIdentityHash(row),
+      baselineEventSetSha256: beadEventSetFingerprint(raw, row.id),
       rejectionReason: result.reason,
       sourceEventId: source.id,
+      sourceEventType: source.event_type,
+      sourceEventPayloadSha256: sha256Bytes(source.payload_json),
+      sourceEventActor: source.actor,
       sourceEventMessagePk: source.source_message_pk,
+      sourceEventCreatedAt: source.created_at,
       prior: {
         status: 'proposed', createdAt: row.created_at, updatedAt: row.updated_at,
         reviewByAt: row.review_by_at, sourceMessagePk: row.source_message_pk,
@@ -443,15 +470,57 @@ function candidateIdentityHash(row: BeadInspectionRow): string {
   return sha256Bytes(stableJson({ ...identity, bodySha256: sha256Bytes(body ?? '') }));
 }
 
+function isNullableSafeInteger(value: unknown): value is number | null {
+  return value === null || isNonNegativeSafeInteger(value);
+}
+
+function isCleanupCandidate(value: unknown): value is CleanupCandidate {
+  if (!isRecord(value) || !hasExactKeys(value, [
+    'id', 'bodySha256', 'identitySha256', 'baselineEventSetSha256', 'rejectionReason',
+    'sourceEventId', 'sourceEventType', 'sourceEventPayloadSha256',
+    'sourceEventActor', 'sourceEventMessagePk', 'sourceEventCreatedAt', 'prior',
+  ])) return false;
+  if (!isRecord(value.prior) || !hasExactKeys(value.prior, [
+    'status', 'createdAt', 'updatedAt', 'reviewByAt', 'sourceMessagePk',
+    'proposalReason', 'completedAt', 'cancelledAt',
+  ])) return false;
+  const prior = value.prior;
+  return isNonNegativeSafeInteger(value.id) && value.id > 0
+    && isSha256(value.bodySha256)
+    && isSha256(value.identitySha256)
+    && isSha256(value.baselineEventSetSha256)
+    && typeof value.rejectionReason === 'string' && value.rejectionReason.length > 0
+    && isNonNegativeSafeInteger(value.sourceEventId) && value.sourceEventId > 0
+    && value.sourceEventType === 'status_change'
+    && isSha256(value.sourceEventPayloadSha256)
+    && value.sourceEventActor === 'inline'
+    && isNullableSafeInteger(value.sourceEventMessagePk)
+    && isNonNegativeSafeInteger(value.sourceEventCreatedAt)
+    && prior.status === 'proposed'
+    && isNonNegativeSafeInteger(prior.createdAt)
+    && isNonNegativeSafeInteger(prior.updatedAt)
+    && isNullableSafeInteger(prior.reviewByAt)
+    && isNullableSafeInteger(prior.sourceMessagePk)
+    && (typeof prior.proposalReason === 'string' || prior.proposalReason === null)
+    && prior.completedAt === null
+    && prior.cancelledAt === null
+    && value.sourceEventMessagePk === prior.sourceMessagePk;
+}
+
 function assertManifest(value: unknown): CleanupManifest {
-  if (value === null || typeof value !== 'object') throw new Error('Invalid cleanup manifest');
-  const manifest = value as CleanupManifest;
-  assertKnownClassifier(manifest.classifierVersion);
-  if (manifest.formatVersion !== FORMAT_VERSION || !Array.isArray(manifest.candidates)) {
+  if (!isRecord(value)) throw new Error('Invalid cleanup manifest');
+  const manifest = value as unknown as CleanupManifest;
+  if (manifest.formatVersion !== FORMAT_VERSION
+    || typeof manifest.classifierVersion !== 'string'
+    || !Array.isArray(manifest.candidates)) {
     throw new Error('Invalid cleanup manifest format');
   }
+  assertKnownClassifier(manifest.classifierVersion);
+  if (manifest.candidates.some((candidate) => !isCleanupCandidate(candidate))) {
+    throw new Error('Invalid cleanup manifest candidate shape');
+  }
   const { manifestId, ...unsigned } = manifest;
-  if (!/^[a-f0-9]{64}$/.test(manifestId) || manifestIdFor(unsigned) !== manifestId) {
+  if (!isSha256(manifestId) || manifestIdFor(unsigned) !== manifestId) {
     throw new Error('Cleanup manifest fingerprint is invalid');
   }
   if (new Set(manifest.candidates.map((candidate) => candidate.id)).size !== manifest.candidates.length) {
@@ -573,9 +642,7 @@ function openWritable(path: string, expectedIdentity?: DatabaseFileIdentity): Da
   }
 }
 
-function cleanupEvents(raw: DatabaseSync, manifest: CleanupManifest): Array<{
-  id: number; bead_id: number; payload_json: string; actor: string; source_message_pk: number | null; created_at: number;
-}> {
+function cleanupEvents(raw: DatabaseSync, manifest: CleanupManifest): CleanupEventRow[] {
   return raw.prepare(`
     SELECT id, bead_id, payload_json, actor, source_message_pk, created_at
     FROM bead_events WHERE actor = ? ORDER BY bead_id, id
@@ -584,7 +651,95 @@ function cleanupEvents(raw: DatabaseSync, manifest: CleanupManifest): Array<{
       return (JSON.parse((row as { payload_json: string }).payload_json) as Record<string, unknown>).manifest_id
         === manifest.manifestId;
     } catch { return false; }
-  }) as unknown as ReturnType<typeof cleanupEvents>;
+  }) as unknown as CleanupEventRow[];
+}
+
+function assertCandidateEventParity(
+  raw: DatabaseSync,
+  candidate: CleanupCandidate,
+  cleanup: readonly CleanupEventRow[],
+  expectedCleanupCount: 0 | 1,
+): CleanupEventRow | undefined {
+  const sources = (raw.prepare(`
+    SELECT id, bead_id, event_type, payload_json, actor, source_message_pk, created_at
+    FROM bead_events
+    WHERE bead_id = ? AND event_type = 'status_change'
+    ORDER BY id
+  `).all(candidate.id) as unknown as OriginEventRow[])
+    .filter((event) => isCanonicalSourcePayload(event.payload_json));
+  const candidateCleanup = cleanup.filter((event) => event.bead_id === candidate.id);
+  const source = sources[0];
+  if (sources.length !== 1 || candidateCleanup.length !== expectedCleanupCount
+    || !source
+    || source.id !== candidate.sourceEventId
+    || source.bead_id !== candidate.id
+    || source.event_type !== candidate.sourceEventType
+    || sha256Bytes(source.payload_json) !== candidate.sourceEventPayloadSha256
+    || source.actor !== candidate.sourceEventActor
+    || source.source_message_pk !== candidate.sourceEventMessagePk
+    || source.created_at !== candidate.sourceEventCreatedAt
+    || beadEventSetFingerprint(
+      raw,
+      candidate.id,
+      new Set(candidateCleanup.map((event) => event.id)),
+    ) !== candidate.baselineEventSetSha256) {
+    throw new Error(`Source event parity for bead ${candidate.id} drifted; review required`);
+  }
+  return candidateCleanup[0];
+}
+
+function beadEventSetFingerprint(
+  raw: DatabaseSync,
+  beadId: number,
+  excludedEventIds: ReadonlySet<number> = new Set(),
+): string {
+  const rows = (raw.prepare('SELECT * FROM bead_events WHERE bead_id = ? ORDER BY id')
+    .all(beadId) as Array<Record<string, unknown>>)
+    .filter((row) => !excludedEventIds.has(row.id as number));
+  return sha256Bytes(stableJson(rows));
+}
+
+function withBaselineEventGuards<T>(
+  raw: DatabaseSync,
+  manifest: CleanupManifest,
+  action: () => T,
+): T {
+  raw.exec(`
+    CREATE TEMP TABLE inline_cleanup_baseline_event_guard (
+      event_id INTEGER PRIMARY KEY
+    ) WITHOUT ROWID;
+    CREATE TEMP TRIGGER inline_cleanup_block_baseline_event_update
+    BEFORE UPDATE ON bead_events
+    WHEN EXISTS (
+      SELECT 1 FROM inline_cleanup_baseline_event_guard WHERE event_id = OLD.id
+    ) OR OLD.actor = '${CLEANUP_ACTOR}'
+    BEGIN
+      SELECT RAISE(ABORT, 'baseline event or cleanup event update blocked');
+    END;
+    CREATE TEMP TRIGGER inline_cleanup_block_baseline_event_delete
+    BEFORE DELETE ON bead_events
+    WHEN EXISTS (
+      SELECT 1 FROM inline_cleanup_baseline_event_guard WHERE event_id = OLD.id
+    ) OR OLD.actor = '${CLEANUP_ACTOR}'
+    BEGIN
+      SELECT RAISE(ABORT, 'baseline event or cleanup event delete blocked');
+    END;
+  `);
+  try {
+    const addGuard = raw.prepare('INSERT INTO inline_cleanup_baseline_event_guard (event_id) VALUES (?)');
+    for (const candidate of manifest.candidates) {
+      const rows = raw.prepare('SELECT id FROM bead_events WHERE bead_id = ? ORDER BY id')
+        .all(candidate.id) as Array<{ id: number }>;
+      for (const row of rows) addGuard.run(row.id);
+    }
+    return action();
+  } finally {
+    raw.exec(`
+      DROP TRIGGER IF EXISTS inline_cleanup_block_baseline_event_update;
+      DROP TRIGGER IF EXISTS inline_cleanup_block_baseline_event_delete;
+      DROP TABLE IF EXISTS inline_cleanup_baseline_event_guard;
+    `);
+  }
 }
 
 function assertAppliedState(raw: DatabaseSync, manifest: CleanupManifest, receipt: ApplyReceipt): void {
@@ -592,7 +747,7 @@ function assertAppliedState(raw: DatabaseSync, manifest: CleanupManifest, receip
   if (events.length !== manifest.candidates.length) throw new Error('Cleanup event count drift requires review');
   for (const candidate of manifest.candidates) {
     const row = raw.prepare('SELECT * FROM beads WHERE id = ?').get(candidate.id) as unknown as BeadInspectionRow | undefined;
-    const event = events.find((entry) => entry.bead_id === candidate.id);
+    const event = assertCandidateEventParity(raw, candidate, events, 1);
     if (!row || row.status !== 'cancelled' || row.cancelled_at !== receipt.appliedAt
       || row.updated_at !== receipt.appliedAt || sha256Bytes(row.body ?? '') !== candidate.bodySha256
       || candidateIdentityHash(row) !== candidate.identitySha256
@@ -612,8 +767,10 @@ function assertAppliedState(raw: DatabaseSync, manifest: CleanupManifest, receip
 }
 
 function assertRolledBackState(raw: DatabaseSync, manifest: CleanupManifest): void {
-  if (cleanupEvents(raw, manifest).length !== 0) throw new Error('Rollback event state drift requires review');
+  const events = cleanupEvents(raw, manifest);
+  if (events.length !== 0) throw new Error('Rollback event state drift requires review');
   for (const candidate of manifest.candidates) {
+    assertCandidateEventParity(raw, candidate, events, 0);
     const row = raw.prepare('SELECT * FROM beads WHERE id = ?').get(candidate.id) as unknown as BeadInspectionRow | undefined;
     if (!row || row.status !== candidate.prior.status || row.updated_at !== candidate.prior.updatedAt
       || row.cancelled_at !== null || sha256Bytes(row.body ?? '') !== candidate.bodySha256
@@ -768,9 +925,9 @@ function writeReceiptBound(
 export async function applyInlineProposalCleanup(options: CleanupCommandOptions): Promise<ApplyReceipt & {
   receiptPath: string; replayed: boolean;
 }> {
-  const dbPath = assertRegularDatabase(options.dbPath);
   const manifestPath = resolve(options.manifestPath);
   const manifest = assertManifest(readJson(manifestPath));
+  const dbPath = assertRegularDatabase(options.dbPath);
   const paths = receiptPaths(manifestPath);
   assertTestOnlySeam(Boolean(options.testOnlyAfterFingerprint || options.testOnlyDuringFingerprint
     || options.testOnlyUnderLockFault || options.testOnlyAfterMutation || options.testOnlyFault));
@@ -866,6 +1023,11 @@ export async function applyInlineProposalCleanup(options: CleanupCommandOptions)
       if (dataVersion(observer) !== observedDataVersion) {
         throw new Error('Database changed under the cleanup write lock');
       }
+      const existingCleanup = cleanupEvents(raw, manifest);
+      if (existingCleanup.length !== 0) throw new Error('Cleanup event parity drifted under lock');
+      for (const candidate of manifest.candidates) {
+        assertCandidateEventParity(raw, candidate, existingCleanup, 0);
+      }
       rows.forEach((row, index) => {
         const candidate = manifest.candidates[index]!;
         const body = row.body ?? '';
@@ -882,13 +1044,13 @@ export async function applyInlineProposalCleanup(options: CleanupCommandOptions)
         attest([]);
         return { affectedCount: 0, eventCount: 0 };
       })
-      : rejectProposalsBatch(raw, {
+      : withBaselineEventGuards(raw, manifest, () => rejectProposalsBatch(raw, {
         candidates: manifest.candidates.map((candidate) => ({ id: candidate.id, expected: candidate.prior })),
         actor: CLEANUP_ACTOR,
         at: appliedAt,
         audit: { reasonCode: REASON_CODE, classifierVersion: manifest.classifierVersion, manifestId: manifest.manifestId },
         assertExpectedRows: attest,
-      });
+      }));
     if (result.affectedCount !== manifest.candidates.length || result.eventCount !== manifest.candidates.length) {
       throw new Error('Cleanup affected/event counts did not match manifest');
     }
@@ -920,9 +1082,9 @@ export async function verifyInlineProposalCleanup(options: CleanupCommandOptions
   integrity: 'ok'; cleanupEventCount: number; candidateCount: number; retainedValid: RetainedValidCounts;
   openOverdueCount: number; receiptPath: string;
 }> {
-  const dbPath = assertRegularDatabase(options.dbPath);
   const manifestPath = resolve(options.manifestPath);
   const manifest = assertManifest(readJson(manifestPath));
+  const dbPath = assertRegularDatabase(options.dbPath);
   const paths = receiptPaths(manifestPath);
   if (!existsSync(paths.apply)) throw new Error('Apply receipt is required before verification');
   const applyReceipt = assertApplyReceipt(readJson(paths.apply), manifest, paths.backup);
@@ -953,9 +1115,9 @@ export async function verifyInlineProposalCleanup(options: CleanupCommandOptions
 export async function rollbackInlineProposalCleanup(options: CleanupCommandOptions): Promise<RollbackReceipt & {
   receiptPath: string; replayed: boolean;
 }> {
-  const dbPath = assertRegularDatabase(options.dbPath);
   const manifestPath = resolve(options.manifestPath);
   const manifest = assertManifest(readJson(manifestPath));
+  const dbPath = assertRegularDatabase(options.dbPath);
   const paths = receiptPaths(manifestPath);
   assertTestOnlySeam(Boolean(options.testOnlyAfterFingerprint || options.testOnlyDuringFingerprint
     || options.testOnlyUnderLockFault || options.testOnlyAfterMutation || options.testOnlyFault));
@@ -1013,13 +1175,14 @@ export async function rollbackInlineProposalCleanup(options: CleanupCommandOptio
         throw new Error('Database changed under the rollback write lock');
       }
       assertAppliedState(raw, manifest, applyReceipt);
+      const cleanup = cleanupEvents(raw, manifest);
       const update = raw.prepare(`
         UPDATE beads SET status='proposed', updated_at=?, completed_at=NULL, cancelled_at=NULL
         WHERE id=? AND status='cancelled' AND updated_at=? AND cancelled_at=?
       `);
       const removeEvent = raw.prepare('DELETE FROM bead_events WHERE id=? AND bead_id=?');
       for (const candidate of manifest.candidates) {
-        const event = cleanupEvents(raw, manifest).find((entry) => entry.bead_id === candidate.id)!;
+        const event = cleanup.find((entry) => entry.bead_id === candidate.id)!;
         if (update.run(candidate.prior.updatedAt, candidate.id, applyReceipt.appliedAt, applyReceipt.appliedAt).changes !== 1) {
           throw new Error(`Rollback row ${candidate.id} changed; review required`);
         }
