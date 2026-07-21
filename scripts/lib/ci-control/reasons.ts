@@ -369,6 +369,18 @@ const REASONS = deepFreeze([
   defineReason({ code: 'ci.refs.local-source-unbound', outcome: 'inconclusive', guidanceKind: 'precondition-correction' }),
   defineReason({ code: 'ci.refs.object-format-unsupported', outcome: 'inconclusive', guidanceKind: 'precondition-correction' }),
   defineReason({ code: 'ci.refs.private-binding-unavailable', outcome: 'inconclusive', guidanceKind: 'evidence-recovery' }),
+  defineReason({
+    code: 'ci.refs.exact-set-mismatch', outcome: 'inconclusive', guidanceKind: 'evidence-recovery',
+    implementationState: 'implemented', retryClass: 'after-evidence-regeneration', remediationClass: 'exact-revision-rerun',
+  }),
+  defineReason({
+    code: 'ci.refs.local-ref-moved', outcome: 'inconclusive', guidanceKind: 'escalation',
+    implementationState: 'implemented', retryClass: 'after-lineage-reconciliation', remediationClass: 'lineage-reconciliation',
+  }),
+  defineReason({
+    code: 'ci.refs.transport-authority-unavailable', outcome: 'inconclusive', guidanceKind: 'evidence-recovery',
+    implementationState: 'implemented', retryClass: 'after-evidence-regeneration', remediationClass: 'exact-revision-rerun',
+  }),
   defineReason({ code: 'evidence.receipt.attempt.stale', outcome: 'inconclusive', guidanceKind: 'evidence-recovery', implementationState: 'planned' }),
   defineReason({ code: 'workflow.result.requirement.missing', outcome: 'inconclusive', guidanceKind: 'evidence-recovery', implementationState: 'planned' }),
   defineReason({ code: 'migration.parity.result.mismatch', outcome: 'inconclusive', guidanceKind: 'escalation', implementationState: 'planned' }),
@@ -493,6 +505,8 @@ const LIMITATION_CODES = deepFreeze([
   'ci.native.cause-code-unavailable',
   'ci.native.evidence-unavailable',
   'ci.native.progress-only',
+  'ci.refs.private-binding-unavailable',
+  'ci.refs.report-only',
 ] as string[]) as readonly string[];
 
 export function allReasonDefinitions(): readonly ReasonDefinitionV2[] {

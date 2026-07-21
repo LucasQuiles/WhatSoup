@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import {
   allReasonDefinitions,
   isEmittableReason,
+  isLegacyCompatibleReason,
+  isRegisteredLimitationCode,
   reasonDefinition,
   type ReasonDefinitionV2,
 } from '../../scripts/lib/ci-control/reasons.ts';
@@ -142,6 +144,35 @@ describe('CP-F2e immutable taxonomy registry', () => {
     });
     expect(isEmittableReason('ci.native.repository-hygiene.finding')).toBe(true);
     expect(isEmittableReason('ci.native.privacy-publication.finding')).toBe(true);
+  });
+
+  it('registers implemented report-only exact-ref canary reasons', () => {
+    expect(reasonDefinition('ci.refs.exact-set-mismatch')).toMatchObject({
+      lifecycle: 'active', metadataState: 'legacy-partial', implementationState: 'implemented',
+      defaultOutcome: 'inconclusive', guidanceKind: 'evidence-recovery',
+      retryClass: 'after-evidence-regeneration', remediationClass: 'exact-revision-rerun',
+      canonicalOwner: 'legacy-metadata-unmigrated', applicableStages: [], requiredIdentityBindings: [],
+    });
+    expect(reasonDefinition('ci.refs.local-ref-moved')).toMatchObject({
+      lifecycle: 'active', metadataState: 'legacy-partial', implementationState: 'implemented',
+      defaultOutcome: 'inconclusive', guidanceKind: 'escalation',
+      retryClass: 'after-lineage-reconciliation', remediationClass: 'lineage-reconciliation',
+      canonicalOwner: 'legacy-metadata-unmigrated', applicableStages: [], requiredIdentityBindings: [],
+    });
+    expect(reasonDefinition('ci.refs.transport-authority-unavailable')).toMatchObject({
+      lifecycle: 'active', metadataState: 'legacy-partial', implementationState: 'implemented',
+      defaultOutcome: 'inconclusive', guidanceKind: 'evidence-recovery',
+      retryClass: 'after-evidence-regeneration', remediationClass: 'exact-revision-rerun',
+      canonicalOwner: 'legacy-metadata-unmigrated', applicableStages: [], requiredIdentityBindings: [],
+    });
+    expect(isEmittableReason('ci.refs.exact-set-mismatch')).toBe(false);
+    expect(isEmittableReason('ci.refs.local-ref-moved')).toBe(false);
+    expect(isEmittableReason('ci.refs.transport-authority-unavailable')).toBe(false);
+    expect(isLegacyCompatibleReason('ci.refs.exact-set-mismatch')).toBe(true);
+    expect(isLegacyCompatibleReason('ci.refs.local-ref-moved')).toBe(true);
+    expect(isLegacyCompatibleReason('ci.refs.transport-authority-unavailable')).toBe(true);
+    expect(isRegisteredLimitationCode('ci.refs.report-only')).toBe(true);
+    expect(isRegisteredLimitationCode('ci.refs.private-binding-unavailable')).toBe(true);
   });
 
   it('separates complete authoritative emission from bounded legacy compatibility', () => {

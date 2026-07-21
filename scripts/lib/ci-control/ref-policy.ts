@@ -45,6 +45,10 @@ const OBSERVATION_KEYS = [
 ] as const;
 const REMOTE_KEYS = ['name', 'repositoryId'] as const;
 const GRAPH_KEYS = ['localObjectType', 'localRefOid', 'objectFormat', 'peeledCommitOid', 'relation', 'remoteObjectAvailable', 'toolDigest', 'trustedBaseAncestor'] as const;
+const SAME_PROCESS_EXACT_REF_SET_BINDINGS = new WeakMap<object, Readonly<{
+  exactRefSetBinding: string;
+  receiptEvidenceDigest: string;
+}>>();
 export type RefOperationV1 = 'create' | 'update' | 'delete';
 export type RefPolicyOutcome = 'pass' | 'block' | 'inconclusive';
 
@@ -237,6 +241,29 @@ function publicUpdateBinding(update: RefUpdateV1, refClass: RefPolicyObservation
   });
 }
 
+function privateExactRefSetBinding(updates: readonly RefUpdateV1[]): string {
+  return digest(updates.map((update, updateIndex) => ({ updateIndex, ...update })));
+}
+
+export function matchesSameProcessExactRefSetBinding(
+  receipt: unknown,
+  updates: readonly RefUpdateV1[],
+  expectedReceiptEvidenceDigest: string,
+): boolean {
+  if (!isRecord(receipt)
+    || !Array.isArray(updates)
+    || updates.length === 0
+    || updates.length > MAX_REF_UPDATES
+    || !DIGEST.test(expectedReceiptEvidenceDigest)) return false;
+  try {
+    const binding = SAME_PROCESS_EXACT_REF_SET_BINDINGS.get(receipt);
+    return binding?.exactRefSetBinding === privateExactRefSetBinding(updates)
+      && binding.receiptEvidenceDigest === expectedReceiptEvidenceDigest;
+  } catch {
+    return false;
+  }
+}
+
 function classifyRef(policy: OutgoingRefPolicyV1, remoteRef: string): RefPolicyObservationV1['refClass'] {
   if (policy.releaseBranches.includes(remoteRef)) return 'release-branch';
   if (policy.releaseTagPrefixes.some((prefix) => remoteRef.startsWith(prefix))) return 'release-tag';
@@ -348,7 +375,12 @@ export function evaluateOutgoingRefPolicy(
     observations,
     createdAt: now.toISOString(),
   };
-  return { ...withoutDigest, evidenceDigest: receiptDigest(withoutDigest) };
+  const receipt = { ...withoutDigest, evidenceDigest: receiptDigest(withoutDigest) };
+  SAME_PROCESS_EXACT_REF_SET_BINDINGS.set(receipt, Object.freeze({
+    exactRefSetBinding: privateExactRefSetBinding(updates),
+    receiptEvidenceDigest: receipt.evidenceDigest,
+  }));
+  return receipt;
 }
 
 function observationSemanticsValid(entry: RefPolicyObservationV1): boolean {

@@ -15,6 +15,7 @@ import {
   ZERO_OID,
   buildInconclusiveRefPolicyReceipt,
   evaluateOutgoingRefPolicy,
+  matchesSameProcessExactRefSetBinding,
   normalizeRemoteIdentity,
   parsePrePushInput,
   parseRefPolicyReceiptBytes,
@@ -151,6 +152,30 @@ describe('bounded pre-push ref parser', () => {
   it('classifies an unbound source expression separately from malformed destination data', () => {
     expect(() => parsePrePushInput(Buffer.from(`HEAD~1 ${A} refs/heads/topic ${ZERO_OID}\n`)))
       .toThrowError(/ci\.refs\.local-source-unbound/);
+  });
+});
+
+describe('private same-process exact-ref binding', () => {
+  it('binds the native receipt object to exact refs without serializing ref names', () => {
+    const updates = parsePrePushInput(Buffer.from(`refs/heads/private-topic ${B} refs/heads/private-topic ${A}\n`));
+    const receipt = evaluateOutgoingRefPolicy(policy(), remote, updates, [graph()], MANIFEST_DIGEST, new Date('2026-07-21T12:00:00.000Z'));
+    const substituted = [{ ...updates[0]!, localRef: 'refs/heads/other', remoteRef: 'refs/heads/other' }];
+
+    expect(matchesSameProcessExactRefSetBinding(receipt, updates, receipt.evidenceDigest)).toBe(true);
+    expect(matchesSameProcessExactRefSetBinding(receipt, substituted, receipt.evidenceDigest)).toBe(false);
+    expect(matchesSameProcessExactRefSetBinding(structuredClone(receipt), updates, receipt.evidenceDigest)).toBe(false);
+    expect(JSON.stringify(receipt)).not.toContain('private-topic');
+  });
+
+  it('invalidates the same object when its owner-produced receipt bytes are replaced', () => {
+    const updates = parsePrePushInput(Buffer.from(`refs/heads/topic ${B} refs/heads/topic ${A}\n`));
+    const passReceipt = evaluateOutgoingRefPolicy(policy(), remote, updates, [graph()], MANIFEST_DIGEST, new Date('2026-07-21T12:00:00.000Z'));
+    const blockReceipt = evaluateOutgoingRefPolicy(
+      policy(), remote, updates, [graph({ relation: 'non-fast-forward' })], MANIFEST_DIGEST, new Date('2026-07-21T12:00:00.000Z'),
+    );
+    Object.assign(passReceipt, structuredClone(blockReceipt));
+
+    expect(matchesSameProcessExactRefSetBinding(passReceipt, updates, passReceipt.evidenceDigest)).toBe(false);
   });
 });
 
