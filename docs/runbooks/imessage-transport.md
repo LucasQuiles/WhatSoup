@@ -113,13 +113,63 @@ Both backends use **config-only auth** (matches the Twilio precedent — no
 | Feature | State |
 |---|---|
 | Text send/receive (1:1 + group) | ✅ |
-| Reactions (tapback: 👍👎❤️‼️❓😂 + remove) | ✅ |
-| Typing indicators (composing/stopped) | ✅ |
-| Read receipts (per conversation, coalesced GUIDs) | ✅ |
+| Reactions — outbound (tapback: 👍👎❤️‼️❓😂 + remove) | ✅ |
+| Reactions — inbound (tapback surfacing) | ✅ BlueBubbles (associatedMessageGuid + associatedMessageType, string or numeric code); ❌ imsg daemon (needs daemon-side reaction surfacing) |
+| Typing indicators — outbound (composing/stopped) | ✅ |
+| Typing indicators — inbound | ❌ deferred (BlueBubbles surfaces typing only via socket/SSE push events, not in `/message/query`; needs webhook/socket mode) |
+| Read receipts — outbound (per conversation, coalesced GUIDs) | ✅ |
+| Read receipts — inbound | ❌ deferred (iMessage read receipts ride on the original outbound message's `dateRead` field, updated in place; needs cross-poll state diffing, not a separate envelope) |
 | Remote delete | ❌ iMessage has no remote-delete protocol (documented parity gap) |
 | Media attachments | ❌ deferred (adapter declares `media.maxBytes: 0`) |
 | Polls | ❌ rejected (WhatsApp-only feature) |
 | `webhook` inbound mode | BlueBubbles only |
+
+## Inbound envelope routing
+
+`ImessageAdapter.handleInboundRecord` (src/transport/imessage/adapter.ts) routes
+by the `kind` discriminator on `InboundImessage`:
+
+| `kind` | Listener | Notes |
+|---|---|---|
+| `text` | `message` (InboundMessage) | body !== null |
+| `reaction` | `reaction` (ReactionEvent) | requires `reactionTargetGuid`; the BlueBubbles port populates `reactionEmoji`/`reactionRemove`/`reactionTargetGuid` from `associatedMessageGuid`+`associatedMessageType` |
+| other | dropped | typing/call events have no v1 contract event; read receipts handled separately (deferred) |
+
+All envelope classes share the `seen` dedupe set (keyed by `guid`); redelivery
+never double-emits. Disposed or non-connected adapters drop silently.
+
+### Reaction envelope shapes
+
+Per the authoritative BlueBubbles `MessageResponse` type (github.com/
+BlueBubblesApp/bluebubbles-server README), `/message/query` surfaces inbound
+tapback reactions as separate message records with two fields:
+
+- **`associatedMessageGuid: string | null`** — set to the reacted-to
+  message's GUID on tapback envelopes; null on plain messages.
+- **`associatedMessageType: number | null`** — the iMessage chat.db
+  `associated_message_type` code. Always numeric or null from the server.
+
+The iMessage chat.db `SUBMESSAGES_TYPE_TABLE` codes the parser accepts:
+
+| Code range | Meaning |
+|---|---|
+| `2000`-`2005` | tapback add: love, like, dislike, laugh, emphasize, question (in that order) |
+| `3000`-`3005` | tapback removal counterparts (same emoji ordering) |
+| `0`, null, anything else | not a reaction — falls through to text surfacing |
+
+The port (`reactionTypeToEmoji` in `bluebubbles-port.ts`) emits a
+`ReactionEvent` with the canonical tapback emoji + `removed` flag for codes
+in the valid ranges. Non-integer numeric values (NaN, 2000.5, etc.) are
+rejected as corrupt data — the schema is integer-only. Out-of-range codes
+(1999, 2006, 4000, negative numbers) fall through to text surfacing.
+
+**Outbound symmetry note:** the OUTBOUND `/message/react` endpoint uses
+string reaction kinds (`'love'`, `'-like'`, etc.) — see `EMOJI_TO_REACTION_TYPE`.
+The parser accepts the same string form defensively to round-trip the
+outbound map, but real inbound `/message/query` responses always use the
+numeric form. The defensive string path never executes against production
+data; it exists to keep the parser symmetric and to fail safe if a future
+BlueBubbles build changes the inbound shape.
 
 ## Health + recovery
 
