@@ -1,5 +1,5 @@
 // tests/mcp/tools/messaging-unsupported-transport.test.ts
-// Phase 2 — graceful capability degradation.
+// Graceful capability degradation.
 //
 // When the active transport (e.g. Signal) does not support an operation the
 // user is invoking via MCP tool, the tool must return a clean, agent-actionable
