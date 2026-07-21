@@ -113,6 +113,32 @@ describe('inline extractor — typed anchored classifier', () => {
     expect(body).toBe(original);
   });
 
+  it.each([
+    'scheduleé synthetic maintenance',
+    'follow upß synthetic release',
+    'track this猫 synthetic event',
+    'schedule\u0301 synthetic maintenance',
+    'schedule١ synthetic maintenance',
+    'schedule2 synthetic maintenance',
+    'schedule_next synthetic maintenance',
+  ])('rejects phrase continuations across Unicode word classes: %s', (body) => {
+    expect(classifyInlineImperative(body)).toEqual({
+      admitted: false,
+      reason: 'not_anchored',
+    });
+  });
+
+  it.each([
+    ['schedule: synthetic maintenance', 'synthetic maintenance'],
+    ['schedule! synthetic maintenance', '! synthetic maintenance'],
+    ['schedule — synthetic maintenance', '— synthetic maintenance'],
+  ])('retains legitimate phrase punctuation and separators: %s', (body, target) => {
+    expect(classifyInlineImperative(body)).toMatchObject({
+      admitted: true,
+      normalizedTarget: target,
+    });
+  });
+
   it('rejects unsupported message types without throwing', () => {
     expect(classifyInlineImperative(null as unknown as string)).toEqual({
       admitted: false,

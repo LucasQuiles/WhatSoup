@@ -26,7 +26,7 @@ export interface ImperativeMatch {
 }
 
 const MAX_CLASSIFICATION_BYTES = 8 * 1024;
-const IMPERATIVE_GRAMMAR = /^(?:please(?:\s+|,\s+))?(?<imperative>remind\s+me|schedule|watch\s+for|follow\s+up|make\s+a\s+task|track\s+this|add\s+a\s+bead)(?=$|\b)/iu;
+const IMPERATIVE_GRAMMAR = /^(?:please(?:\s+|,\s+))?(?<imperative>remind\s+me|schedule|watch\s+for|follow\s+up|make\s+a\s+task|track\s+this|add\s+a\s+bead)(?=$|[^\p{L}\p{M}\p{N}_])/iu;
 const QUOTED_OR_FENCED = /^(?:>|`{3}|~{3}|\[?forwarded(?:\s+many\s+times)?\]?(?=$|[\s:]))/iu;
 const TARGET_SEPARATOR = /^(?:(?:(?:to|for|that|about)\b|:)\s*)+/iu;
 
