@@ -1,0 +1,58 @@
+{
+  "rejectedTotal": 733,
+  "admittedTotal": 4,
+  "rejected": [
+    {
+      "category": "schedule_status_prose",
+      "count": 410,
+      "template": "Synthetic status {index}: the schedule monitor remains stable",
+      "reason": "not_anchored"
+    },
+    {
+      "category": "follow_up_status_prose",
+      "count": 201,
+      "template": "Synthetic report {index}: follow up remains pending",
+      "reason": "not_anchored"
+    },
+    {
+      "category": "watch_status_prose",
+      "count": 110,
+      "template": "Synthetic observation {index}: watch for a later test signal",
+      "reason": "not_anchored"
+    },
+    {
+      "category": "quoted_command",
+      "count": 8,
+      "template": "> schedule synthetic maintenance window {index}",
+      "reason": "quoted_or_fenced"
+    },
+    {
+      "category": "fenced_command",
+      "count": 4,
+      "template": "```text\nschedule synthetic maintenance window {index}\n```",
+      "reason": "quoted_or_fenced"
+    }
+  ],
+  "admitted": [
+    {
+      "body": "Schedule synthetic maintenance alpha",
+      "verb": "schedule",
+      "normalizedTarget": "synthetic maintenance alpha"
+    },
+    {
+      "body": "please, follow up with synthetic owner beta",
+      "verb": "follow-up",
+      "normalizedTarget": "with synthetic owner beta"
+    },
+    {
+      "body": "  Remind me to inspect synthetic ledger gamma",
+      "verb": "remind",
+      "normalizedTarget": "inspect synthetic ledger gamma"
+    },
+    {
+      "body": "watch for synthetic signal delta",
+      "verb": "watch",
+      "normalizedTarget": "synthetic signal delta"
+    }
+  ]
+}
