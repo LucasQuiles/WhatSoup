@@ -470,6 +470,8 @@ function logHints(instance: string): string[] {
 }
 
 const OBSERVATION_STATES = new Set<BotErrorsObservationState>(['fault', 'healthy', 'unknown']);
+const EVENT_TYPES = new Set<BotErrorsEventType>(['alert', 'clear']);
+const SEVERITIES = new Set<BotErrorsSeverity>(['critical', 'error', 'warning', 'info']);
 const FAILURE_CONFIDENCE = new Set<BotErrorsFailureConfidence>(['suspected', 'probable', 'confirmed']);
 const CLEAR_POLICY_KINDS = new Set<BotErrorsClearPolicyKind>([
   'same_source_newer',
@@ -525,10 +527,16 @@ function validateProtocol(
   createdAt: string,
   redactedEvidence: string,
 ): BotErrorsV2Fields | null {
-  const protocolSupplied = input.observation !== undefined
-    || input.clearPolicy !== undefined
-    || input.remediation !== undefined;
+  const protocolSupplied = Object.hasOwn(input, 'observation')
+    || Object.hasOwn(input, 'clearPolicy')
+    || Object.hasOwn(input, 'remediation');
   if (!protocolSupplied) return null;
+  if (!EVENT_TYPES.has(input.eventType)) {
+    throw new BotErrorsProtocolValidationError('Invalid BOT ERRORS protocol event type');
+  }
+  if (input.severity !== undefined && !SEVERITIES.has(input.severity)) {
+    throw new BotErrorsProtocolValidationError('Invalid BOT ERRORS protocol severity');
+  }
   if (!input.observation || typeof input.observation !== 'object') {
     throw new BotErrorsProtocolValidationError('Invalid BOT ERRORS protocol observation');
   }

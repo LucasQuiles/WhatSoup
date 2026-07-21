@@ -139,6 +139,32 @@ describe('buildBotErrorsEvent', () => {
     expect(clear).toMatchObject(observationFixture.version2.clear);
   });
 
+  it('rejects explicitly supplied all-undefined protocol fields instead of downgrading to schema v1', () => {
+    const input = {
+      eventType: 'alert',
+      instance: 'fixture-agent',
+      source: 'fixture-health',
+      summary: 'invalid explicit protocol',
+      observation: undefined,
+      clearPolicy: undefined,
+      remediation: undefined,
+    } as unknown as BotErrorsOutboxInput;
+
+    expect(() => buildBotErrorsEvent(input)).toThrow(/protocol observation/i);
+
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-outbox-explicit-protocol-'));
+    process.env['BOT_ERRORS_OUTBOX_DIR'] = join(tmpRoot, 'outbox');
+    expect(() => writeBotErrorsEvent(input)).toThrow(/protocol observation/i);
+    expect(readdirSync(tmpRoot)).toHaveLength(0);
+  });
+
+  it.each([
+    ['eventType', { eventType: 'resolve' }],
+    ['severity', { severity: 'fatal' }],
+  ] as const)('rejects a runtime-cast invalid schema-v2 %s before output', (_field, override) => {
+    expect(() => buildBotErrorsEvent(v2Input(override))).toThrow(/event type|severity/i);
+  });
+
   it('models the protocol as an all-or-nothing compile-time union', () => {
     const legacy: BotErrorsOutboxInput = {
       eventType: 'alert', instance: 'fixture', source: 'fixture', summary: 'legacy',

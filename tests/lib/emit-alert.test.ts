@@ -635,6 +635,25 @@ describe('emitAlert', () => {
     expect(readdirSync(outboxDir)).toHaveLength(0);
   });
 
+  it.each([
+    ['empty', {}],
+    ['all-undefined', { observation: undefined, clearPolicy: undefined, remediation: undefined }],
+  ] as const)('fails closed instead of durably emitting schema v1 for an explicit %s protocol', (_label, protocol) => {
+    const result = emitAlert(
+      'whatsoup-prod',
+      'agent_respawn_failed',
+      'respawn exhausted',
+      'crashed 3 times',
+      'critical',
+      undefined,
+      protocol as unknown as BotErrorsProtocolInput,
+    );
+
+    expect(result).toMatchObject({ ok: false, channel: 'none', status: 'failed' });
+    expect(spawn).not.toHaveBeenCalled();
+    expect(readdirSync(outboxDir)).toHaveLength(0);
+  });
+
   it('fsyncs both event contents and the outbox directory before returning', () => {
     emitAlert('whatsoup-prod', 'agent_respawn_failed', 'respawn exhausted', 'crashed 3 times');
 
@@ -1514,6 +1533,23 @@ describe('clearAlertSource', () => {
     expect(spawn).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['empty', {}],
+    ['all-undefined', { observation: undefined, clearPolicy: undefined, remediation: undefined }],
+  ] as const)('fails closed instead of durably clearing with schema v1 for an explicit %s protocol', (_label, protocol) => {
+    const result = clearAlertSource(
+      'whatsoup-prod',
+      'agent_respawn_failed',
+      'health recovered',
+      undefined,
+      protocol as unknown as BotErrorsProtocolInput,
+    );
+
+    expect(result).toMatchObject({ ok: false, channel: 'none', status: 'failed' });
+    expect(spawn).not.toHaveBeenCalled();
+    expect(readdirSync(outboxDir)).toHaveLength(0);
+  });
+
   it('falls back to the legacy helper when clear outbox write fails', () => {
     process.env['BOT_ERRORS_OUTBOX_DIR'] = '/dev/null/outbox';
 
@@ -1768,6 +1804,44 @@ describe('WHATSOUP_ALERT_SINK dry-run capture', () => {
     expect(readdirSync(outboxDir)).toHaveLength(0);
     expect(spawn).not.toHaveBeenCalled();
     expect(ok).toBe(true);
+  });
+
+  it.each([
+    ['empty', {}],
+    ['all-undefined', { observation: undefined, clearPolicy: undefined, remediation: undefined }],
+  ] as const)('fails closed without writing the sink for an explicit %s protocol', (_label, protocol) => {
+    const result = emitAlert(
+      'fixture-agent',
+      'fixture-health',
+      'synthetic health probe failed',
+      'synthetic health probe failed',
+      'critical',
+      undefined,
+      protocol as unknown as BotErrorsProtocolInput,
+    );
+
+    expect(result).toMatchObject({ ok: false, channel: 'none', status: 'failed' });
+    expect(() => readFileSync(sinkPath, 'utf8')).toThrow();
+    expect(readdirSync(outboxDir)).toHaveLength(0);
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['empty', {}],
+    ['all-undefined', { observation: undefined, clearPolicy: undefined, remediation: undefined }],
+  ] as const)('fails closed without writing the sink for an explicit %s clear protocol', (_label, protocol) => {
+    const result = clearAlertSource(
+      'fixture-agent',
+      'fixture-health',
+      'synthetic health probe recovered',
+      undefined,
+      protocol as unknown as BotErrorsProtocolInput,
+    );
+
+    expect(result).toMatchObject({ ok: false, channel: 'none', status: 'failed' });
+    expect(() => readFileSync(sinkPath, 'utf8')).toThrow();
+    expect(readdirSync(outboxDir)).toHaveLength(0);
+    expect(spawn).not.toHaveBeenCalled();
   });
 
   it('appends multiple records and routes clears through the sink too', () => {

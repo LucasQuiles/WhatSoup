@@ -5,6 +5,8 @@ import {
   buildBotErrorsEvent,
   writeBotErrorsEvent,
   type BotErrorsCriticalAssetDiagnostic,
+  type BotErrorsLegacyOutboxInput,
+  type BotErrorsOutboxInput,
   type BotErrorsOutboxWrite,
   type BotErrorsProtocolInput,
   type BotErrorsSeverity,
@@ -203,6 +205,19 @@ function alertSinkPath(): string | null {
   return raw && raw.length > 0 ? raw : null;
 }
 
+function withProtocol(
+  input: BotErrorsLegacyOutboxInput,
+  protocol: BotErrorsProtocolInput | undefined,
+): BotErrorsOutboxInput {
+  if (protocol === undefined) return input;
+  return {
+    ...input,
+    observation: protocol.observation,
+    clearPolicy: protocol.clearPolicy,
+    remediation: protocol.remediation,
+  } as BotErrorsOutboxInput;
+}
+
 function captureToAlertSink(
   sink: string,
   input: {
@@ -220,8 +235,7 @@ function captureToAlertSink(
   // redacted exactly like a real outbox event — a secret in evidence must never
   // leak to the sink file.
   const { protocol, ...legacyInput } = input;
-  const eventInput = protocol ? { ...legacyInput, ...protocol } : legacyInput;
-  const event = buildBotErrorsEvent(eventInput);
+  const event = buildBotErrorsEvent(withProtocol(legacyInput, protocol));
   appendFileSync(sink, `${JSON.stringify(event)}\n`);
   return { ok: true, channel: 'sink', status: 'durably_queued' };
 }
@@ -253,7 +267,7 @@ export function emitAlert(
   }
   try {
     const legacyInput = { eventType: 'alert' as const, instance, source, summary, evidence, severity, criticalAsset };
-    const outbox = writeBotErrorsEvent(protocol ? { ...legacyInput, ...protocol } : legacyInput);
+    const outbox = writeBotErrorsEvent(withProtocol(legacyInput, protocol));
     return { ok: true, channel: 'outbox', status: 'durably_queued', outbox };
   } catch (err) {
     const invalid = protocolValidationFailure(err, instance, source, 'alert');
@@ -317,7 +331,7 @@ export function clearAlertSource(
       severity: 'info',
       criticalAsset,
     } as const;
-    const outbox = writeBotErrorsEvent(protocol ? { ...legacyInput, ...protocol } : legacyInput);
+    const outbox = writeBotErrorsEvent(withProtocol(legacyInput, protocol));
     return { ok: true, channel: 'outbox', status: 'durably_queued', outbox };
   } catch (err) {
     const invalid = protocolValidationFailure(err, instance, source, 'clear');
