@@ -78,22 +78,60 @@ _database_bootstrap_trust_git() (
   done < <(env)
   exec git -C "$REPO_ROOT" "$@"
 )
-if ! _database_bootstrap_trust_git rev-parse --is-inside-work-tree 2>/dev/null \
+if _database_bootstrap_trust_git rev-parse --is-inside-work-tree 2>/dev/null \
   | grep -qx 'true'; then
-  echo "FATAL: database bootstrap trust check requires a committed git work tree: $REPO_ROOT" >&2
-  exit 1
-fi
-for trust_path in "${DATABASE_BOOTSTRAP_TRUST_PATHS[@]}"; do
-  trust_absolute="$REPO_ROOT/$trust_path"
-  if [ -L "$trust_absolute" ] || [ ! -f "$trust_absolute" ] \
-    || ! _database_bootstrap_trust_git ls-files --error-unmatch -- "$trust_path" >/dev/null 2>&1 \
-    || ! _database_bootstrap_trust_git cat-file -e "HEAD:$trust_path" >/dev/null 2>&1 \
-    || ! _database_bootstrap_trust_git diff --quiet HEAD -- "$trust_path"; then
-    echo "FATAL: unsafe database bootstrap trust checker path: $trust_absolute" >&2
-    echo "       checker closure must be regular non-symlink, tracked, committed, and clean" >&2
+  for trust_path in "${DATABASE_BOOTSTRAP_TRUST_PATHS[@]}"; do
+    trust_absolute="$REPO_ROOT/$trust_path"
+    if [ -L "$trust_absolute" ] || [ ! -f "$trust_absolute" ] \
+      || ! _database_bootstrap_trust_git ls-files --error-unmatch -- "$trust_path" >/dev/null 2>&1 \
+      || ! _database_bootstrap_trust_git cat-file -e "HEAD:$trust_path" >/dev/null 2>&1 \
+      || ! _database_bootstrap_trust_git diff --quiet HEAD -- "$trust_path"; then
+      echo "FATAL: unsafe database bootstrap trust checker path: $trust_absolute" >&2
+      echo "       checker closure must be regular non-symlink, tracked, committed, and clean" >&2
+      exit 1
+    fi
+  done
+else
+  DATABASE_BOOTSTRAP_RELEASE_MANIFEST="$REPO_ROOT/.whatsoup-release-manifest.json"
+  if [ -L "$DATABASE_BOOTSTRAP_RELEASE_MANIFEST" ] || [ ! -f "$DATABASE_BOOTSTRAP_RELEASE_MANIFEST" ]; then
+    echo "FATAL: database bootstrap trust check requires a regular release manifest: $DATABASE_BOOTSTRAP_RELEASE_MANIFEST" >&2
     exit 1
   fi
-done
+  for trust_path in "${DATABASE_BOOTSTRAP_TRUST_PATHS[@]}"; do
+    trust_absolute="$REPO_ROOT/$trust_path"
+    if [ -L "$trust_absolute" ] || [ ! -f "$trust_absolute" ]; then
+      echo "FATAL: unsafe database bootstrap trust checker path: $trust_absolute" >&2
+      echo "       release checker closure must be regular and manifest-attested" >&2
+      exit 1
+    fi
+  done
+  if ! "$NODE" -e '
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+const [manifestPath, root, ...requiredPaths] = process.argv.slice(1);
+const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+if (![1, 2].includes(manifest.schemaVersion) || !manifest.release || !Array.isArray(manifest.files)) process.exit(2);
+if (path.resolve(String(manifest.release.path || "")) !== path.resolve(root)) process.exit(3);
+const files = new Map();
+for (const item of manifest.files) {
+  if (!item || typeof item.path !== "string" || path.isAbsolute(item.path) || item.path.split(/[\\/]/).includes("..")) process.exit(4);
+  if (typeof item.sha256 !== "string" || !/^[0-9a-fA-F]{64}$/.test(item.sha256) || files.has(item.path)) process.exit(5);
+  files.set(item.path, item.sha256.toLowerCase());
+}
+for (const rel of requiredPaths) {
+  const expected = files.get(rel);
+  const absolute = path.join(root, rel);
+  const stat = fs.lstatSync(absolute);
+  if (!expected || !stat.isFile() || stat.isSymbolicLink()) process.exit(6);
+  const actual = crypto.createHash("sha256").update(fs.readFileSync(absolute)).digest("hex");
+  if (actual !== expected) process.exit(7);
+}
+' "$DATABASE_BOOTSTRAP_RELEASE_MANIFEST" "$REPO_ROOT" "${DATABASE_BOOTSTRAP_TRUST_PATHS[@]}"; then
+    echo "FATAL: unsafe database bootstrap trust checker closure in release manifest" >&2
+    exit 1
+  fi
+fi
 
 if ! (
   cd "$REPO_ROOT"
@@ -117,7 +155,7 @@ JSON
   echo "FATAL: database compatibility bootstrap trust check failed" >&2
   exit 1
 fi
-unset DATABASE_BOOTSTRAP_TRUST_CHECKER DATABASE_BOOTSTRAP_TRUST_PATHS \
+unset DATABASE_BOOTSTRAP_TRUST_CHECKER DATABASE_BOOTSTRAP_TRUST_PATHS DATABASE_BOOTSTRAP_RELEASE_MANIFEST \
   trust_path trust_absolute
 unset -f _database_bootstrap_trust_git
 

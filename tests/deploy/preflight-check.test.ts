@@ -16,6 +16,7 @@
 // and operator message. No sleeps — synchronous spawn + result inspection.
 
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   accessSync,
   chmodSync,
@@ -26,6 +27,7 @@ import {
   writeFileSync,
   existsSync,
   readFileSync,
+  readdirSync,
   rmSync,
   symlinkSync,
 } from 'node:fs';
@@ -209,7 +211,9 @@ exit "\${WHATSOUP_TEST_PREFLIGHT_RC:-0}"
     `#!/usr/bin/env bash
 set -euo pipefail
 if [ "\${1:-}" = "-e" ]; then
-  if [ "$#" -ge 3 ] && [[ "\${3:-}" == */package.json ]]; then
+  if [[ "\${3:-}" == */.whatsoup-release-manifest.json ]]; then
+    exec ${JSON.stringify(PINNED_NODE)} "$@"
+  elif [ "$#" -ge 3 ] && [[ "\${3:-}" == */package.json ]]; then
     printf '${PINNED_NODE_MAJOR + 1}'
   else
     printf 'passive'
@@ -265,6 +269,36 @@ exit 9
 function commitWrapperFixture(fixture: WrapperFixture, message: string): void {
   gitFixture(fixture.root, ['add', '.']);
   gitFixture(fixture.root, ['commit', '-m', message]);
+}
+
+function convertWrapperFixtureToRelease(fixture: WrapperFixture): void {
+  rmSync(join(fixture.root, '.git'), { recursive: true, force: true });
+  const files: Array<{ path: string; sha256: string; sizeBytes: number }> = [];
+  const visit = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const absolute = join(dir, entry.name);
+      const relative = absolute.slice(fixture.root.length + 1).split('\\').join('/');
+      if (relative === '.whatsoup-release-manifest.json') continue;
+      if (entry.isDirectory()) visit(absolute);
+      else if (entry.isFile()) {
+        const body = readFileSync(absolute);
+        files.push({
+          path: relative,
+          sha256: createHash('sha256').update(body).digest('hex'),
+          sizeBytes: body.byteLength,
+        });
+      }
+    }
+  };
+  visit(fixture.root);
+  writeFileSync(join(fixture.root, '.whatsoup-release-manifest.json'), JSON.stringify({
+    schemaVersion: 2,
+    source: { ref: 'HEAD', commit: '0'.repeat(40) },
+    release: { path: fixture.root, createdAt: '2026-07-21T00:00:00Z', mutablePathExcludes: [] },
+    rollback: { path: join(fixture.root, '.rollback') },
+    files,
+    requiredOutputs: [],
+  }), 'utf8');
 }
 
 function runWrapper(
@@ -635,6 +669,41 @@ describe.skipIf(!NODE_IN_PIN)('deploy/whatsoup — black-box startup ordering', 
 
     expect(result.status, result.stderr).toBe(0);
     expect(result.trace).toEqual(['db-check', 'preflight', 'runtime']);
+  });
+
+  it('runs from a non-git release whose manifest attests the bootstrap trust graph', () => {
+    const fixture = makeWrapperFixture();
+    convertWrapperFixtureToRelease(fixture);
+
+    const result = runWrapper(fixture);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.trace).toEqual(['db-check', 'preflight', 'runtime']);
+  });
+
+  it('rejects a manifest-drifted trust checker in a non-git release', () => {
+    const fixture = makeWrapperFixture();
+    convertWrapperFixtureToRelease(fixture);
+    writeFileSync(fixture.trustChecker, 'process.exit(0);\n', 'utf8');
+
+    const result = runWrapper(fixture);
+
+    expect(result.status).toBe(1);
+    expect(result.trace).toEqual([]);
+    expect(result.stderr).toContain('unsafe database bootstrap trust checker closure in release manifest');
+  });
+
+  it('rejects a manifest-drifted bootstrap graph before executing it in a non-git release', () => {
+    const fixture = makeWrapperFixture();
+    convertWrapperFixtureToRelease(fixture);
+    writeFileSync(fixture.bootstrap, "process.stdout.write('tampered\\n');\n", 'utf8');
+
+    const result = runWrapper(fixture);
+
+    expect(result.status).toBe(1);
+    expect(result.trace).toEqual([]);
+    expect(result.stderr).toContain('database compatibility bootstrap trust check failed');
+    expect(result.stderr).toContain('file-sha256-drift');
   });
 
   it('still runs database check when restart preflight is skipped', () => {

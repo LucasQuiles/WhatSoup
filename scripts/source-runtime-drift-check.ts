@@ -61,6 +61,10 @@ interface CheckOptions {
   suggest: boolean;
 }
 
+export interface ReleaseFileAuthority {
+  files: Map<string, string>;
+}
+
 const DEFAULT_MANIFEST = 'deploy/source-runtime-manifest.json';
 const EXTENSION_CANDIDATES = ['', '.ts', '.tsx', '.mts', '.cts', '.js', '.mjs', '.cjs', '.json'];
 const INDEX_CANDIDATES = ['index.ts', 'index.tsx', 'index.mts', 'index.cts', 'index.js', 'index.mjs', 'index.cjs', 'index.json'];
@@ -184,6 +188,38 @@ function gitFileState(cwd: string, relPath: string): GitFileState {
   };
 }
 
+function loadReleaseFileAuthority(cwd: string): ReleaseFileAuthority {
+  const manifestPath = path.join(cwd, '.whatsoup-release-manifest.json');
+  const payload: unknown = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  if (!isRecord(payload) || (payload['schemaVersion'] !== 1 && payload['schemaVersion'] !== 2)) {
+    throw new Error('release snapshot manifest must use schemaVersion 1 or 2');
+  }
+  if (!isRecord(payload['release']) || path.resolve(String(payload['release']['path'] ?? '')) !== path.resolve(cwd)) {
+    throw new Error('release snapshot manifest release.path does not match the runtime root');
+  }
+  if (!Array.isArray(payload['files'])) throw new Error('release snapshot manifest files must be a list');
+  const files = new Map<string, string>();
+  for (const [index, value] of payload['files'].entries()) {
+    if (!isRecord(value)) throw new Error(`release snapshot manifest files[${index}] must be an object`);
+    const filePath = value['path'];
+    const fileSha = value['sha256'];
+    const sizeBytes = value['sizeBytes'];
+    if (typeof filePath !== 'string' || filePath.length === 0 || path.isAbsolute(filePath)
+      || filePath.includes('\0') || filePath.split(/[\\/]/).includes('..')) {
+      throw new Error(`release snapshot manifest files[${index}] has an unsafe path`);
+    }
+    if (typeof fileSha !== 'string' || !/^[0-9a-fA-F]{64}$/.test(fileSha)) {
+      throw new Error(`release snapshot manifest files[${index}] has an invalid sha256`);
+    }
+    if (typeof sizeBytes !== 'number' || !Number.isSafeInteger(sizeBytes) || sizeBytes < 0) {
+      throw new Error(`release snapshot manifest files[${index}] has an invalid sizeBytes`);
+    }
+    if (files.has(filePath)) throw new Error(`release snapshot manifest duplicates ${filePath}`);
+    files.set(filePath, fileSha.toLowerCase());
+  }
+  return { files };
+}
+
 function resolveRelativeImport(cwd: string, importerRel: string, specifier: string): string | null {
   if (!specifier.startsWith('.')) return null;
   const importerDir = path.dirname(path.resolve(cwd, importerRel));
@@ -212,7 +248,13 @@ function readImports(cwd: string, relPath: string): Array<{ specifier: string; r
 function inspectSourceFile(
   cwd: string,
   relPath: string,
-  options: { expectedSha256?: string; mustContain?: string[]; importedBy?: string; specifier?: string },
+  options: {
+    expectedSha256?: string;
+    mustContain?: string[];
+    importedBy?: string;
+    specifier?: string;
+    releaseAuthority?: ReleaseFileAuthority;
+  },
 ): SourceRuntimeIssue[] {
   const absolute = path.resolve(cwd, relPath);
   if (!withinRepo(cwd, absolute)) {
@@ -240,32 +282,50 @@ function inspectSourceFile(
   }
 
   const issues: SourceRuntimeIssue[] = [];
-  const state = gitFileState(cwd, relPath);
-  if (state.error) {
-    issues.push(issue('git-error', 'critical', `git state check failed for ${relPath}: ${state.error}`, { path: relPath }));
-  }
-  if (!state.tracked) {
-    issues.push(issue('file-untracked', 'critical', `source runtime file is untracked: ${relPath}`, {
-      path: relPath,
-      importedBy: options.importedBy,
-      specifier: options.specifier,
-    }));
-  } else if (!state.committed) {
-    issues.push(issue('file-uncommitted', 'critical', `source runtime file is not committed at HEAD: ${relPath}`, {
-      path: relPath,
-      importedBy: options.importedBy,
-      specifier: options.specifier,
-    }));
-  }
-  if (state.dirty) {
-    issues.push(issue('file-dirty', 'high', `source runtime file has unstaged worktree drift: ${relPath}`, { path: relPath }));
-  }
-  if (state.staged) {
-    issues.push(issue('file-staged', 'high', `source runtime file has staged-but-uncommitted drift: ${relPath}`, { path: relPath }));
+  const releaseExpectedSha = options.releaseAuthority?.files.get(relPath);
+  if (options.releaseAuthority) {
+    if (!releaseExpectedSha) {
+      issues.push(issue('file-untracked', 'critical', `source runtime file is absent from the release manifest: ${relPath}`, {
+        path: relPath,
+        importedBy: options.importedBy,
+        specifier: options.specifier,
+      }));
+    }
+  } else {
+    const state = gitFileState(cwd, relPath);
+    if (state.error) {
+      issues.push(issue('git-error', 'critical', `git state check failed for ${relPath}: ${state.error}`, { path: relPath }));
+    }
+    if (!state.tracked) {
+      issues.push(issue('file-untracked', 'critical', `source runtime file is untracked: ${relPath}`, {
+        path: relPath,
+        importedBy: options.importedBy,
+        specifier: options.specifier,
+      }));
+    } else if (!state.committed) {
+      issues.push(issue('file-uncommitted', 'critical', `source runtime file is not committed at HEAD: ${relPath}`, {
+        path: relPath,
+        importedBy: options.importedBy,
+        specifier: options.specifier,
+      }));
+    }
+    if (state.dirty) {
+      issues.push(issue('file-dirty', 'high', `source runtime file has unstaged worktree drift: ${relPath}`, { path: relPath }));
+    }
+    if (state.staged) {
+      issues.push(issue('file-staged', 'high', `source runtime file has staged-but-uncommitted drift: ${relPath}`, { path: relPath }));
+    }
   }
 
   const body = readFileSync(absolute);
   const actualSha256 = sha256(body);
+  if (releaseExpectedSha && actualSha256 !== releaseExpectedSha) {
+    issues.push(issue('file-sha256-drift', 'critical', `release source runtime file hash drift: ${relPath}`, {
+      path: relPath,
+      expected: releaseExpectedSha,
+      actual: actualSha256,
+    }));
+  }
   if (options.expectedSha256 && actualSha256 !== options.expectedSha256) {
     issues.push(issue('file-sha256-drift', 'critical', `source runtime file hash drift: ${relPath}`, {
       path: relPath,
@@ -288,6 +348,7 @@ function inspectSourceFile(
 export function collectSourceRuntimeIssues(
   cwd: string,
   manifest: SourceRuntimeManifest,
+  releaseAuthority?: ReleaseFileAuthority,
 ): SourceRuntimeIssue[] {
   const issues: SourceRuntimeIssue[] = [];
   const visited = new Set<string>();
@@ -307,6 +368,7 @@ export function collectSourceRuntimeIssues(
       mustContain: current.entry?.mustContain,
       importedBy: current.importedBy,
       specifier: current.specifier,
+      releaseAuthority,
     });
     issues.push(...fileIssues);
     if (fileIssues.some((item) => item.kind === 'file-missing' || item.kind === 'file-kind' || item.kind === 'import-missing')) {
@@ -402,7 +464,18 @@ export function run(argv: string[] = process.argv.slice(2), cwd = process.cwd())
   } catch (error) {
     issues.push(issue('invalid-manifest', 'critical', error instanceof Error ? error.message : String(error)));
   }
-  if (manifest) issues.push(...collectSourceRuntimeIssues(cwd, manifest));
+  let releaseAuthority: ReleaseFileAuthority | undefined;
+  const isGitWorkTree = git(cwd, ['rev-parse', '--is-inside-work-tree']).status === 0;
+  if (!isGitWorkTree) {
+    try {
+      releaseAuthority = loadReleaseFileAuthority(cwd);
+    } catch (error) {
+      issues.push(issue('invalid-manifest', 'critical', error instanceof Error ? error.message : String(error)));
+    }
+  }
+  if (manifest && (releaseAuthority || isGitWorkTree)) {
+    issues.push(...collectSourceRuntimeIssues(cwd, manifest, releaseAuthority));
+  }
 
   if (options.json) {
     console.log(JSON.stringify({ ok: issues.length === 0, issues }, null, 2));
