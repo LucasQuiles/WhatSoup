@@ -1,6 +1,21 @@
 import { describe, expect, it } from 'vitest';
 
-import { isAdminPhone, normalizePhone, normalizePhoneE164 } from '../../src/lib/phone.ts';
+import {
+  isAdminPhone,
+  isE164Wire,
+  normalizePhone,
+  normalizePhoneE164,
+} from '../../src/lib/phone.ts';
+
+describe('isE164Wire', () => {
+  it('accepts only canonical plus-prefixed E.164 wire identities', () => {
+    expect(isE164Wire('+15550100101')).toBe(true);
+    expect(isE164Wire('+155500000000001')).toBe(true);
+    expect(isE164Wire('15550100101')).toBe(false);
+    expect(isE164Wire('+01234567')).toBe(false);
+    expect(isE164Wire('+1 (555) 010-0101')).toBe(false);
+  });
+});
 
 describe('normalizePhone', () => {
   it('removes formatting and preserves all digits', () => {
@@ -33,6 +48,15 @@ describe('normalizePhoneE164', () => {
 });
 
 describe('isAdminPhone', () => {
+  it('matches a non-phone transport identity only by exact value', () => {
+    const uuid = '01234567-89ab-cdef-0123-456789abcdef';
+    expect(isAdminPhone(uuid, new Set([uuid]))).toBe(true);
+    expect(isAdminPhone(`x${uuid}`, new Set([uuid]))).toBe(false);
+    const numericUuid = '01234567-8901-2345-6789-012345678901';
+    expect(isAdminPhone(numericUuid, new Set([numericUuid]))).toBe(true);
+    expect(isAdminPhone(`9${numericUuid}`, new Set([numericUuid]))).toBe(false);
+  });
+
   it('matches exact and normalized admin phones', () => {
     const admins = new Set(['15550100101', '5550100102']);
 

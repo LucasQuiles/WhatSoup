@@ -14,6 +14,33 @@ describe('SignalAdapter — construction', () => {
     )).toThrow(/valid E\.164 phoneNumber/);
   });
 
+  it.each([0, 1.5, 601])(
+    'rejects an invalid direct-construction rate limit (%s)',
+    (messagesPerMinute) => {
+      expect(() => new SignalAdapter(
+        makeSignalConfig({ rateLimit: { messagesPerMinute } }),
+        new MockSignalPort(),
+      )).toThrow(/messagesPerMinute must be an integer between 1 and 600/);
+    },
+  );
+
+  it('rejects a forged stream mode at direct construction', () => {
+    expect(() => new SignalAdapter(
+      makeSignalConfig({ inboundMode: 'stream' as 'poll' }),
+      new MockSignalPort(),
+    )).toThrow(/inboundMode must be poll/);
+  });
+
+  it.each([0, -1, 1.5, 2_147_483_648, Number.NaN])(
+    'rejects an invalid direct-construction poll interval (%s)',
+    (pollIntervalMs) => {
+      expect(() => new SignalAdapter(
+        makeSignalConfig({ pollIntervalMs }),
+        new MockSignalPort(),
+      )).toThrow(/pollIntervalMs must be a positive 32-bit timer integer/);
+    },
+  );
+
   it('builds a signal ChannelId from config.account', () => {
     const adapter = new SignalAdapter(makeSignalConfig({ account: 'ops-line' }), new MockSignalPort());
     expect(adapter.selfRef().channel).toBe(makeChannelId('signal', 'ops-line'));
@@ -25,16 +52,17 @@ describe('SignalAdapter — construction', () => {
     expect(adapter.capabilities.kind).toBe('signal');
   });
 
-  it('declares the v1 extension set (reactions/typing/read-receipts/delete)', () => {
+  it('declares only the v1 extensions with complete message targeting', () => {
     const adapter = new SignalAdapter(makeSignalConfig(), new MockSignalPort());
     // Compare as a sorted array so the assertion is order-independent.
     expect([...adapter.capabilities.extensions].sort()).toEqual(
-      ['delete', 'reactions', 'read-receipts', 'typing'].sort(),
+      ['delete', 'read-receipts', 'typing'].sort(),
     );
     // Also assert membership explicitly so an accidental add/remove surfaces.
-    for (const ext of ['reactions', 'typing', 'read-receipts', 'delete'] as const) {
+    for (const ext of ['typing', 'read-receipts', 'delete'] as const) {
       expect(adapter.capabilities.extensions.has(ext)).toBe(true);
     }
+    expect(adapter.capabilities.extensions.has('reactions')).toBe(false);
   });
 
   it('does NOT declare media/voice-notes/edit/presence/groups in v1', () => {
@@ -57,10 +85,10 @@ describe('SignalAdapter — construction', () => {
     expect(adapter.capabilities.auth).toBe('qr');
   });
 
-  it('declares readReceipts: message and reactions: single', () => {
+  it('declares direct-message read receipts and no reaction capability', () => {
     const adapter = new SignalAdapter(makeSignalConfig(), new MockSignalPort());
     expect(adapter.capabilities.readReceipts).toBe('message');
-    expect(adapter.capabilities.reactions).toBe('single');
+    expect(adapter.capabilities.reactions).toBe('none');
   });
 
   it('declares no media capability in v1 (maxBytes: 0, empty allowlist)', () => {

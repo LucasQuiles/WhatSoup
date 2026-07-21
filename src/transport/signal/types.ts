@@ -3,33 +3,28 @@
 //
 // Signal transport backend: signal-cli (https://github.com/AsamK/signal-cli)
 // running in JSON-RPC daemon mode (`signal-cli -u +1555... daemon`), reached
-// over a local UNIX socket. The adapter talks to it via the Port interface
-// in port.ts; this file carries only types and defaults — no SDK imports.
+// over a local UNIX socket or loopback TCP endpoint. The adapter talks to it
+// via the Port interface in port.ts; this file carries only types and defaults.
 //
-// Recipient identity: Signal identifies accounts by UUID (post-2022 migration
-// away from phone-number routing). The adapter accepts E.164 phone numbers
-// for outbound convenience; the Port resolves them to UUIDs internally via
-// signal-cli's `resolveRecipient` JSON-RPC. Inbound envelopes carry the
-// sender's UUID, which is the canonical addressable identity.
+// Recipient identity: Signal identifies accounts by UUID. signal-cli accepts
+// UUID or E.164 recipients for outbound operations. Inbound envelopes prefer
+// the provider E.164 when exposed and fall back to UUID when the number is private;
+// WhatSoup does not claim a durable UUID↔E.164 alias map.
 
 /** E.164 phone shape — shared with the Twilio transport's validator. */
 export const E164_RE = /^\+[1-9]\d{6,14}$/;
 
-/**
- * UUID v4 shape used by Signal for account identity. signal-cli emits and
- * accepts canonical 8-4-4-4-12 lowercase hex. Re-exported here so config
- * validation and the Port can share one source of truth.
- */
-export const SIGNAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export {
+  SIGNAL_GROUP_ID_RE,
+  SIGNAL_UUID_RE,
+  isSignalGroupAddress,
+} from '../../core/transport-refs.ts';
 
 /**
- * Signal connection mode. Mirrors the Twilio inboundMode split:
- * - 'poll'    — adapter polls `receive` at pollIntervalMs
- * - 'stream'  — adapter opens a long-lived receive subscription (signal-cli
- *               `receive` without `timeout` blocks indefinitely and streams
- *               envelopes; one receive call per adapter lifetime)
+ * Signal connection mode. Streaming is deliberately not exposed until a
+ * exercised receive-subscription implementation exists.
  */
-export type SignalInboundMode = 'poll' | 'stream';
+export type SignalInboundMode = 'poll';
 
 /**
  * Per-destination outbound rate cap. Signal does not surface HTTP 429s —
@@ -50,15 +45,12 @@ export interface SignalConfig {
   /** Channel account segment (a-z0-9-), e.g. 'ops-line'. */
   readonly account: string;
 
-  /**
-   * UNIX socket path to the signal-cli daemon. Default '/tmp/signalc.sock'.
-   * Operator starts the daemon once: `signal-cli -u +1555... daemon --socket /tmp/signalc.sock`.
-   */
+  /** UNIX socket path to the signal-cli daemon. Mutually exclusive with tcpPort. */
   readonly socketPath?: string;
 
   /**
    * TCP port for the signal-cli daemon (alternative to socketPath).
-   * If both socketPath and tcpPort are set, socketPath wins.
+   * Mutually exclusive with socketPath.
    */
   readonly tcpPort?: number;
 
@@ -67,28 +59,27 @@ export interface SignalConfig {
 
   /**
    * Our own phone number in E.164 (e.g. '+15551234567'). Used for selfRef.
-   * The linked device's number is recorded by signal-cli at link time and
-   * surfaced via `getUsername`, but we pin it in config so selfRef is
-   * available before the first daemon round-trip.
+   * The operator must attest that this matches the single-account daemon's
+   * `-a` identity. The daemon does not expose that self identity through the
+   * account-bound readiness RPC, so WhatSoup cannot compare it mechanically.
    */
   readonly phoneNumber: string;
 
   /** Inbound delivery mode. */
   readonly inboundMode: SignalInboundMode;
 
-  /** Poll interval for 'poll' mode; ignored in 'stream' mode. */
+  /** Poll interval for inbound receive calls. */
   readonly pollIntervalMs: number;
 
   /** Per-destination outbound rate cap. */
   readonly rateLimit: SignalRateLimit;
 }
 
-/** Defaults applied when an instance config omits the optional fields. */
+/** Polling defaults applied after an endpoint is explicitly selected. */
 export const DEFAULT_SIGNAL: Pick<
   SignalConfig,
-  'socketPath' | 'inboundMode' | 'pollIntervalMs' | 'rateLimit'
+  'inboundMode' | 'pollIntervalMs' | 'rateLimit'
 > = Object.freeze({
-  socketPath: '/tmp/signalc.sock',
   inboundMode: 'poll',
   pollIntervalMs: 15000,
   rateLimit: Object.freeze({ messagesPerMinute: 30 }),

@@ -3,14 +3,14 @@ import type { IncomingMessage } from './types.ts';
 import type { Database } from './database.ts';
 import { resolvePhoneFromJid } from './access-list.ts';
 import type { SubjectType } from './access-list.ts';
-import { isAdminPhone } from '../lib/phone.ts';
+import { isAdminPhone, isE164Wire } from '../lib/phone.ts';
 import { isAuthenticatedSenderJid } from './jid-constants.ts';
+import { SIGNAL_UUID_RE } from './transport-refs.ts';
 
 export function isAdminMessage(msg: IncomingMessage, db: Database): boolean {
-  // QR-143: only a WhatsApp-authenticated sender (@s.whatsapp.net/@lid) may be an
-  // admin. A non-authenticated transport (e.g. @sms) resolves to the SAME bare
-  // phone as the WhatsApp admin, but its sender-ID is spoofable — so gate on the
-  // transport before the phone match, or a spoofed SMS could issue admin commands.
+  // Only an authenticated sender namespace may carry an admin identity. SMS
+  // resolves to the same bare phone as a configured admin but remains spoofable;
+  // Signal and iMessage identities are protocol-authenticated and exact-matched.
   if (!isAuthenticatedSenderJid(msg.senderJid)) return false;
   const phone = resolvePhoneFromJid(msg.senderJid, db);
   return isAdminPhone(phone, config.adminPhones) && msg.isGroup === false;
@@ -34,13 +34,23 @@ export function parseAdminCommand(content: string): AdminCommand | null {
     };
   }
 
-  // ALLOW <phone> / BLOCK <phone>
-  const phoneMatch = content.match(/^(allow|block)\s+(\d+)\s*$/i);
-  if (phoneMatch) {
+  // ALLOW <identity> / BLOCK <identity>. WhatsApp/Twilio use digit-only
+  // subjects; Signal preserves canonical +E.164 or UUID subjects because its
+  // access-list keys are protocol identities rather than normalized digits.
+  const phoneMatch = content.match(/^(allow|block)\s+(\S+)\s*$/i);
+  const rawSubject = phoneMatch?.[2];
+  const canonicalSubject = rawSubject !== undefined && SIGNAL_UUID_RE.test(rawSubject.toLowerCase())
+    ? rawSubject.toLowerCase()
+    : rawSubject;
+  if (
+    phoneMatch
+    && canonicalSubject !== undefined
+    && (/^\d+$/.test(canonicalSubject) || isE164Wire(canonicalSubject) || SIGNAL_UUID_RE.test(canonicalSubject))
+  ) {
     return {
       action: phoneMatch[1].toLowerCase() as 'allow' | 'block',
       subjectType: 'phone',
-      subjectId: phoneMatch[2],
+      subjectId: canonicalSubject,
     };
   }
 

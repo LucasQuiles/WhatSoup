@@ -35,7 +35,7 @@ import { createIngestHandler } from './core/ingest.ts';
 import { createCapabilityGrantManager, type CapabilityGrantManager } from './lib/capability-grant.ts';
 import { createSettingsPolicyAdapter, createFileGrantStore, assertGroupsRespectDenyFloor } from './core/capability-grant-adapter.ts';
 import { toConversationKey } from './core/conversation-key.ts';
-import { toPersonalJid, toLidJid } from './core/jid-constants.ts';
+import { toPersonalJid, toLidJid, toSignalJid } from './core/jid-constants.ts';
 import { selectReplayableDms, rememberReplayedId } from './core/admin.ts';
 import { DurabilityEngine, sendTracked, drainPendingOutbound } from './core/durability.ts';
 import { waitForHistorySyncThenRecover } from './core/post-connect-recovery.ts';
@@ -88,6 +88,12 @@ if (!preflightImportOnlyAuthorized) {
 function resolveTilde(p: string): string {
   if (p === '~') return homedir();
   return p.startsWith('~/') ? join(homedir(), p.slice(2)) : p;
+}
+
+function toConfiguredDirectJid(identity: string): string {
+  return config.transport === 'signal'
+    ? toSignalJid(identity)
+    : toPersonalJid(identity);
 }
 
 const log = createChildLogger('main');
@@ -783,7 +789,9 @@ const healthServer = startHealthServer({
       // Replay queued DM messages — uses shared selectReplayableDms helper from admin.ts
       // so group exclusion, dedup (replayedIds), and adminReplayMax cap are all applied consistently.
       log.info({ subjectType, subjectId }, 'access: allowed via POST /access — replaying queued messages');
-      const jidFormats = [toPersonalJid(subjectId), toLidJid(subjectId)];
+      const jidFormats = config.transport === 'signal'
+        ? [toSignalJid(subjectId)]
+        : [toPersonalJid(subjectId), toLidJid(subjectId)];
       for (const senderJid of jidFormats) {
         const stored = getMessagesBySender(db, senderJid);
         const { toReplay, groupSkipped } = selectReplayableDms(stored, config.adminReplayMax);
@@ -1035,6 +1043,7 @@ async function start(): Promise<void> {
   // Restarts (agent only): send terse "back online" status ping.
   const adminPhone = [...config.adminPhones][0];
   if (adminPhone && instanceType !== 'passive') {
+    const adminChatJid = toConfiguredDirectJid(adminPhone);
     const needsIntro = instanceConfig?.introSent === false;
 
     if (needsIntro) {
@@ -1052,8 +1061,8 @@ async function start(): Promise<void> {
         ? `Hey! *${titleName}* is online and ready. I'm an AI agent with tool access — I can research, write code, manage files, and help with tasks. Send me a message to get started.`
         : `Hey! *${titleName}* is online and ready. I'm an AI assistant — send me a message and I'll respond.`;
       setTimeout(() => {
-        sendTracked(connectionManager, toPersonalJid(adminPhone), introText, durability, { replayPolicy: 'safe' })
-          .then(() => log.info({ chatJid: toPersonalJid(adminPhone) }, 'sent introduction'))
+        sendTracked(connectionManager, adminChatJid, introText, durability, { replayPolicy: 'safe' })
+          .then(() => log.info({ chatJid: adminChatJid }, 'sent introduction'))
           .catch((err) => log.warn({ err }, 'failed to send introduction'));
       }, 3_000);
     } else if (
@@ -1066,7 +1075,7 @@ async function start(): Promise<void> {
       const pending = runtime.popStartupMessage();
       const notifyTarget = pending
         ? { chatJid: pending.chatJid, text: pending.text, isResume: true }
-        : { chatJid: toPersonalJid(adminPhone), text: '*Agent back online* ✓', isResume: false };
+        : { chatJid: adminChatJid, text: '*Agent back online* ✓', isResume: false };
       // PR-C: the bare '*Agent back online* ✓' fallback is a status op
       // (unsafe + status_ping) so it supersedes/ages-out and cannot storm. The
       // isResume branch carries real continuity content — it stays a safe text op.

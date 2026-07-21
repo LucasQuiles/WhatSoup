@@ -103,10 +103,28 @@ describe('createConnection factory', () => {
     ).toThrow(/unknown transport id/);
   });
 
-  it('signal transport throws a not-yet-wired error (foundation stub)', () => {
+  it('signal transport requires signalConfig', () => {
     expect(() =>
       createConnection({ transport: 'signal' }),
-    ).toThrow(/signal.*not yet implemented|not yet wired/i);
+    ).toThrow(/signal.*signalConfig is undefined/i);
+  });
+
+  it('signal transport constructs a live RuntimeConnection', () => {
+    const conn = createConnection({
+      transport: 'signal',
+      signalConfig: {
+        account: 'test',
+        socketPath: '/tmp/signalc-test.sock',
+        phoneNumber: '+15551110000',
+        inboundMode: 'poll',
+        pollIntervalMs: 60000,
+        rateLimit: { messagesPerMinute: 30 },
+      },
+    });
+
+    expect(typeof conn.connect).toBe('function');
+    expect(typeof conn.shutdown).toBe('function');
+    expect(conn.getSocket()).toBeNull();
   });
 
   it('imessage transport throws when imessageConfig is missing (defence-in-depth)', () => {

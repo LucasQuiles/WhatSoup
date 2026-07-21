@@ -101,4 +101,20 @@ describe('assertOutboundIdentity — group classification', () => {
     const d = assertOutboundIdentity('1111111000000002@g.us', { caller: 'report-channel', mode: 'enforce' }, store);
     expect(d).toEqual({ verdict: 'allow' });
   });
+
+  it('applies the approved-group policy to Signal group conversations', () => {
+    const approvedJid = 'Z3JvdXAtY29udmVyc2F0aW9u@signal';
+    const store = fakeStore({ isApprovedGroup: (jid) => jid === approvedJid });
+
+    expect(assertOutboundIdentity(
+      approvedJid,
+      { caller: 'agent', mode: 'enforce' },
+      store,
+    )).toEqual({ verdict: 'allow' });
+    expect(assertOutboundIdentity(
+      'YW5vdGhlci1jb252ZXJzYXRpb24=@signal',
+      { caller: 'agent', mode: 'enforce' },
+      store,
+    )).toMatchObject({ verdict: 'block', code: 'UNKNOWN_GROUP' });
+  });
 });
