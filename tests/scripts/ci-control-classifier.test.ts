@@ -133,6 +133,8 @@ function runtimeSourceClosure(entryPath: string, sourceRoot = projectRoot): stri
 
 const LOW_CONTROLS = [
   'ci.exact-revision-classifier',
+  'ci.hooks.installed',
+  'ci.outgoing-ref-policy',
   'privacy.publication',
   'repo.hygiene',
   'workflow.safeguard-diagnostics',
@@ -140,6 +142,8 @@ const LOW_CONTROLS = [
 const ALL_CONTROLS = [
   'architecture.fitness-lint',
   'ci.exact-revision-classifier',
+  'ci.hooks.installed',
+  'ci.outgoing-ref-policy',
   'privacy.publication',
   'repo.hygiene',
   'test.integrity',

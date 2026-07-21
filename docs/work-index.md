@@ -196,7 +196,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-07-17-boundary-exit-parser-codeql-hardening-design.md` | spec | active | body-marker | boundary-exit-parser-codeql-hardening-design | 2026-07-17 |  |
 | `docs/superpowers/specs/2026-07-17-boundary-validator-ci-refactor-design.md` | spec | active | body-marker | boundary-validator-ci-refactor-design | 2026-07-17 |  |
 | `docs/superpowers/specs/2026-07-17-macos-credential-durability-design.md` | spec | unknown | fallback | macos-credential-durability-design | 2026-07-17 |  |
-| `docs/superpowers/specs/2026-07-20-cicd-enforcement-control-plane-design.md` | spec | active | body-marker | cicd-enforcement-control-plane-design | 2026-07-20 |  |
+| `docs/superpowers/specs/2026-07-20-cicd-enforcement-control-plane-design.md` | spec | active | body-marker | cicd-enforcement-control-plane-design | 2026-07-21 |  |
 
 ### docs/superpowers/specs/kill-session-transactional-cancellation  _(3 entries)_
 
@@ -217,4 +217,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-21T06:37:12Z from commit `dd474cc7aed4b807a58c0cf1c22dead411709bb2`
+- Generated at 2026-07-21T06:52:13Z from commit `828e650171683729fe35d40c6befdc303cf0dff0`
