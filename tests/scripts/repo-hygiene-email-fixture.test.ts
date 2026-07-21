@@ -84,4 +84,14 @@ describe('repo hygiene guard — documentation email fixtures', () => {
 
     expect(issues.map((issue) => issue.code)).toContain('github-token');
   });
+
+  it('keeps phone-shape policy active in the iMessage test subtree', () => {
+    const filePath = 'tests/transport/imessage/types.test.ts';
+    const routablePhone = ['+44', '7911123456'].join('');
+    const unsafe = scanContentLines([{ filePath, line: 1, text: `const sender = "${routablePhone}";` }]);
+    const safe = scanContentLines([{ filePath, line: 2, text: 'const sender = "+447700912345";' }]);
+
+    expect(unsafe.map((issue) => issue.code)).toContain('operator-phone');
+    expect(safe.map((issue) => issue.code)).not.toContain('operator-phone');
+  });
 });

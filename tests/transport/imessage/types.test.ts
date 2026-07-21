@@ -13,7 +13,7 @@ import {
 describe('imessage transport — types', () => {
   it('E164_RE accepts canonical E.164 numbers', () => {
     expect(E164_RE.test('+15551234567')).toBe(true);
-    expect(E164_RE.test('+447911123456')).toBe(true);
+    expect(E164_RE.test('+447700912345')).toBe(true);
     expect(E164_RE.test('15551234567')).toBe(false);
     expect(E164_RE.test('')).toBe(false);
   });
