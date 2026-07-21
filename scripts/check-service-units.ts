@@ -44,6 +44,7 @@ export type ViolationCode =
   | 'bare-homebrew-node'
   | 'env-node-where-pinned-required'
   | 'unexpanded-var-in-plist'
+  | 'secret-environment-file'
   | 'node-pin-mismatch'
   | 'non-absolute-path'
   | 'malformed-program-arguments'
@@ -478,6 +479,16 @@ function validateSystemd(
 ): Violation[] {
   const out: Violation[] = [];
   const push = makePusher(out, file, 'systemd');
+
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.trim();
+    if (/^EnvironmentFile=.*(?:\/secrets\.env|\/instances\/%i\/tokens\.env)$/.test(line)) {
+      push(
+        'secret-environment-file',
+        `${file} projects a managed secret file into the parent process; resolve credentials at the use boundary instead`,
+      );
+    }
+  }
 
   for (const rawLine of text.split('\n')) {
     const line = rawLine.trim();

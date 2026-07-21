@@ -111,6 +111,14 @@ describe('check-service-units guard', () => {
     expect(codes(dir)).toEqual([]);
   });
 
+  it('fails when a systemd unit projects managed secret files into the parent', () => {
+    const dir = makeRepo({
+      'whatsoup@.service': `[Service]\nEnvironmentFile=-%h/.config/whatsoup/instances/%i/tokens.env\nExecStart=%h/.local/bin/whatsoup %i\n`,
+    });
+
+    expect(codes(dir)).toContain('secret-environment-file');
+  });
+
   it('fails on a Label / filename-stem mismatch (label split)', () => {
     const p = plist({
       filename: 'com.whatsoup.fleet.plist',

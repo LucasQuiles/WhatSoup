@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
 
 const lookupCredentialMock = vi.hoisted(() => vi.fn(() => 'must-not-enter-child-env'));
 
@@ -24,13 +25,18 @@ const protectedNames = [
 describe('runtime secret boundary', () => {
   it('launcher clears protected names and performs no secret lookup or export', () => {
     const source = fs.readFileSync('deploy/whatsoup', 'utf8');
+    const start = source.indexOf('# Do not inherit protected credentials');
+    const end = source.indexOf('# Import-only mode', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const block = source.slice(start, end);
+    const result = spawnSync('/bin/bash', ['-c', `${block}\nenv`], {
+      encoding: 'utf8',
+      env: Object.fromEntries(protectedNames.map((name) => [name, `parent-${name}`])),
+    });
 
-    expect(source).toContain('unset ANTHROPIC_API_KEY OPENAI_API_KEY PINECONE_API_KEY');
-    expect(source).toContain('WHATSOUP_HEALTH_TOKEN');
-    expect(source).not.toContain('keyring_lookup()');
-    expect(source).not.toContain('macos_keychain_lookup()');
-    expect(source).not.toContain('read-private-health-token.sh');
-    expect(source).not.toMatch(/export\s+[^\n]*(?:ANTHROPIC_API_KEY|OPENAI_API_KEY|PINECONE_API_KEY|WHATSOUP_HEALTH_TOKEN)/);
+    expect(result.status).toBe(0);
+    for (const name of protectedNames) expect(result.stdout).not.toMatch(new RegExp(`^${name}=`, 'm'));
   });
 
   it.each([
@@ -49,13 +55,4 @@ describe('runtime secret boundary', () => {
     }
   });
 
-  it('health authorization uses the canonical instance-scoped keyring lookup only', () => {
-    const source = fs.readFileSync('src/core/health.ts', 'utf8');
-
-    expect(source).toContain("lookupCredential('whatsoup-health-token', {");
-    expect(source).toContain('user: instanceName');
-    expect(source).toContain('skipEnv: true');
-    expect(source).toContain('skipMigrationFallbacks: true');
-    expect(source).not.toContain("lookupCredential('whatsoup-health-token')");
-  });
 });

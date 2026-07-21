@@ -42,19 +42,6 @@ describe('credential resolution ordering parity (env -> file -> keyring)', () =>
   // NOTE: the scoped-never-reads-unscoped-.key invariant is covered behaviourally in
   // tests/lib/keyring.test.ts; here we only pin cross-runtime resolution ORDER.
 
-  it('deploy/whatsoup removes protected credentials instead of resolving them', () => {
-    const src = read('deploy/whatsoup');
-    expect(src).toContain('unset ANTHROPIC_API_KEY OPENAI_API_KEY PINECONE_API_KEY WHATSOUP_HEALTH_TOKEN');
-    expect(src).not.toContain('HEALTH_TOKEN_FILE=');
-    expect(src).not.toContain('keyring_lookup');
-  });
-
-  it('systemd does not project provider or health-token files into the parent', () => {
-    const src = read('deploy/whatsoup@.service');
-    expect(src).not.toContain('EnvironmentFile=-%h/.config/whatsoup/secrets.env');
-    expect(src).not.toContain('EnvironmentFile=-%h/.config/whatsoup/instances/%i/tokens.env');
-  });
-
   it('deploy/scripts/bot-errors-health-check.py: env, then .key file, then keyring (mirrors keyring.ts)', () => {
     const src = read('deploy/scripts/bot-errors-health-check.py');
     assertOrder(src, 'bot-errors-health-check.py', [
