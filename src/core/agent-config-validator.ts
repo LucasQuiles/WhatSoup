@@ -34,7 +34,7 @@ import {
   type AgentFallbackEntry,
 } from './fallback-chain.ts';
 import { DEFAULT_TRANSPORT_ID, isTransportId, TRANSPORT_IDS } from '../transport/registry.ts';
-import { ACCOUNT_RE } from './transport-refs.ts';
+import { ACCOUNT_RE, APPLEID_EMAIL_RE } from './transport-refs.ts';
 import { E164_RE } from '../transport/twilio/types.ts';
 import RE2 from 're2';
 import {
@@ -1160,6 +1160,16 @@ function validateTransportConfig(
     );
   }
 
+  // imessageConfig present with non-imessage transport → reject as inconsistent.
+  const imessageConfig = raw['imessageConfig'];
+  if (imessageConfig !== undefined && effectiveTransport !== 'imessage') {
+    return err(
+      'imessageConfig',
+      'imessageConfig is inconsistent with transport ' + JSON.stringify(effectiveTransport) +
+        ' — imessageConfig is only valid when transport is "imessage"',
+    );
+  }
+
   // twilioConfig is REQUIRED when transport === 'twilio'.
   if (effectiveTransport === 'twilio') {
     if (twilioConfig === undefined || twilioConfig === null) {
@@ -1171,6 +1181,17 @@ function validateTransportConfig(
     const healthPort =
       typeof raw['healthPort'] === 'number' ? (raw['healthPort'] as number) : undefined;
     return validateTwilioConfig(twilioConfig as Record<string, unknown>, healthPort);
+  }
+
+  // imessageConfig is REQUIRED when transport === 'imessage'.
+  if (effectiveTransport === 'imessage') {
+    if (imessageConfig === undefined || imessageConfig === null) {
+      return err('imessageConfig', 'imessageConfig is required when transport is "imessage"');
+    }
+    if (typeof imessageConfig !== 'object' || Array.isArray(imessageConfig)) {
+      return err('imessageConfig', 'imessageConfig must be an object');
+    }
+    return validateImessageConfig(imessageConfig as Record<string, unknown>);
   }
 
   return null;
@@ -1410,6 +1431,126 @@ function validateTwilioConfig(tc: Record<string, unknown>, healthPort?: number):
           'twilioConfig.rateLimit.smsPerMinute must be an integer between 1 and 600',
         );
       }
+    }
+  }
+
+  return null;
+}
+
+function validateImessageConfig(ic: Record<string, unknown>): ValidationError | null {
+  // account: non-empty, matches ACCOUNT_RE
+  const account = ic['account'];
+  if (typeof account !== 'string' || account === '' || !ACCOUNT_RE.test(account)) {
+    return err(
+      'imessageConfig.account',
+      'imessageConfig.account must be a non-empty lowercase alphanumeric-and-dash string starting with a letter',
+    );
+  }
+
+  // backend: required discriminator
+  const backend = ic['backend'];
+  if (backend !== 'imsg' && backend !== 'bluebubbles') {
+    return err(
+      'imessageConfig.backend',
+      "imessageConfig.backend must be 'imsg' or 'bluebubbles'",
+    );
+  }
+
+  // Backend-conditional requirements.
+  if (backend === 'bluebubbles') {
+    const url = ic['bluebubblesUrl'];
+    if (typeof url !== 'string' || url === '') {
+      return err(
+        'imessageConfig.bluebubblesUrl',
+        "imessageConfig.bluebubblesUrl is required when backend is 'bluebubbles'",
+      );
+    } else {
+      let parsed: URL | null = null;
+      try { parsed = new URL(url); } catch { /* fall through */ }
+      if (!parsed || (parsed.protocol !== 'https:' && parsed.protocol !== 'http:')) {
+        return err(
+          'imessageConfig.bluebubblesUrl',
+          'imessageConfig.bluebubblesUrl must be an http(s) URL',
+        );
+      }
+    }
+    const pwService = ic['bluebubblesPasswordService'];
+    if (
+      typeof pwService !== 'string' ||
+      pwService === '' ||
+      /\s/.test(pwService) ||
+      pwService.length > 128
+    ) {
+      return err(
+        'imessageConfig.bluebubblesPasswordService',
+        "imessageConfig.bluebubblesPasswordService must be a non-empty keyring service name (no whitespace, max 128 chars) when backend is 'bluebubbles'",
+      );
+    }
+  }
+
+  if (backend === 'imsg') {
+    const socketPath = ic['imsgSocketPath'];
+    if (socketPath !== undefined) {
+      if (typeof socketPath !== 'string' || socketPath === '' || !socketPath.startsWith('/')) {
+        return err(
+          'imessageConfig.imsgSocketPath',
+          'imessageConfig.imsgSocketPath must be an absolute path when set',
+        );
+      }
+    }
+  }
+
+  // sender: required, AppleID email or E.164 (our own identity; the backend
+  // doesn't surface it before the first send).
+  const sender = ic['sender'];
+  if (
+    typeof sender !== 'string' ||
+    !(APPLEID_EMAIL_RE.test(sender) || E164_RE.test(sender))
+  ) {
+    return err(
+      'imessageConfig.sender',
+      'imessageConfig.sender must be an AppleID email or E.164 phone number',
+    );
+  }
+
+  // inboundMode: 'poll' or 'webhook'; webhook is BlueBubbles-only.
+  const inboundMode = ic['inboundMode'];
+  if (inboundMode !== undefined && inboundMode !== 'poll' && inboundMode !== 'webhook') {
+    return err(
+      'imessageConfig.inboundMode',
+      "imessageConfig.inboundMode must be 'poll' or 'webhook'",
+    );
+  }
+  if (inboundMode === 'webhook' && backend !== 'bluebubbles') {
+    return err(
+      'imessageConfig.inboundMode',
+      "imessageConfig.inboundMode 'webhook' is only supported with backend 'bluebubbles'",
+    );
+  }
+
+  // pollIntervalMs: optional positive number
+  const pollIntervalMs = ic['pollIntervalMs'];
+  if (pollIntervalMs !== undefined) {
+    if (typeof pollIntervalMs !== 'number' || !Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) {
+      return err(
+        'imessageConfig.pollIntervalMs',
+        'imessageConfig.pollIntervalMs must be a positive number',
+      );
+    }
+  }
+
+  // rateLimit: optional object with positive messagesPerMinute
+  const rateLimit = ic['rateLimit'];
+  if (rateLimit !== undefined) {
+    if (typeof rateLimit !== 'object' || rateLimit === null || Array.isArray(rateLimit)) {
+      return err('imessageConfig.rateLimit', 'imessageConfig.rateLimit must be an object');
+    }
+    const mpm = (rateLimit as Record<string, unknown>)['messagesPerMinute'];
+    if (typeof mpm !== 'number' || !Number.isFinite(mpm) || mpm <= 0) {
+      return err(
+        'imessageConfig.rateLimit.messagesPerMinute',
+        'imessageConfig.rateLimit.messagesPerMinute must be a positive number',
+      );
     }
   }
 

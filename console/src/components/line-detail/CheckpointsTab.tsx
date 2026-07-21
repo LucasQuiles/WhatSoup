@@ -12,7 +12,7 @@ import { useToast } from '../../hooks/toast-context'
 import { statusBadgeStyle, type StatusSeverity } from '../../lib/status-severity'
 import { formatRelative } from '../../lib/format-time'
 import type { Freshness } from '../../lib/freshness'
-import type { CheckpointRow, CheckpointsPayload } from '../../types'
+import type { CheckpointRow, CheckpointsPayload, LiveSessionsPayload, LiveSession } from '../../types'
 
 /**
  * CheckpointsTab — browser + restart-mediated restore for a line's
@@ -64,17 +64,21 @@ function deliveryTitle(row: CheckpointRow): string | undefined {
 
 type SortKey = 'conversation' | 'updated' | null
 
-export function CheckpointsTab({ payload, isLoading, freshness, lineName }: {
+export function CheckpointsTab({ payload, isLoading, freshness, lineName, liveSessions }: {
   payload: CheckpointsPayload | undefined;
   isLoading: boolean;
   freshness: Freshness;
   /** Owning line — the restore action's api target + invalidate key. */
   lineName: string;
+  /** Live session inspector feed (terminal stage A) — joined by
+   *  conversationKey; absent rows render '—', never fabricated liveness. */
+  liveSessions?: LiveSessionsPayload;
 }) {
   // Wrapped in useMemo per exhaustive-deps: the `?? []` fallback would
   // otherwise give sortedRows' useMemo a new dep identity every render.
   const rows = useMemo(() => payload?.checkpoints ?? [], [payload])
   const resumableCount = rows.filter((r) => r.resumable).length
+  const liveByKey = new Map((liveSessions?.sessions ?? []).map((s) => [s.conversationKey, s]))
 
   // Restore flow — AccessTab idiom: pending row → ConfirmDialog → api →
   // toast + invalidate; ref-guard against double-submit while in flight.
@@ -167,21 +171,22 @@ export function CheckpointsTab({ payload, isLoading, freshness, lineName }: {
             <TableHeaderCell sortKey="updated" sort={sortState} onSort={handleSort}>Updated</TableHeaderCell>
             <TableHeaderCell>Workspace</TableHeaderCell>
             <TableHeaderCell>Action</TableHeaderCell>
+            <TableHeaderCell>Live</TableHeaderCell>
           </TableRow>
         </TableHeader>
         <TableBody>
-          {isLoading && <TableLoading colSpan={10} />}
+          {isLoading && <TableLoading colSpan={11} />}
           {!isLoading && payload?.readError && (
             <TableError
-              colSpan={10}
+              colSpan={11}
               message="Checkpoint data unavailable — the fleet could not read this instance's database. This is a read failure, not an empty instance."
             />
           )}
           {!isLoading && !payload?.readError && sortedRows.length === 0 && (
-            <TableEmpty colSpan={10} message="No session checkpoints recorded for this line yet." />
+            <TableEmpty colSpan={11} message="No session checkpoints recorded for this line yet." />
           )}
           {!isLoading && !payload?.readError && sortedRows.map((row) => (
-            <CheckpointTableRow key={row.conversationKey} row={row} onRestore={() => setPendingRestore(row)} />
+            <CheckpointTableRow key={row.conversationKey} row={row} live={liveByKey.get(row.conversationKey)} onRestore={() => setPendingRestore(row)} />
           ))}
         </TableBody>
       </Table>
@@ -208,7 +213,7 @@ export function CheckpointsTab({ payload, isLoading, freshness, lineName }: {
   )
 }
 
-function CheckpointTableRow({ row, onRestore }: { row: CheckpointRow; onRestore: () => void }) {
+function CheckpointTableRow({ row, live, onRestore }: { row: CheckpointRow; live?: LiveSession; onRestore: () => void }) {
   const severity = statusSeverity(row.sessionStatus)
   const badge = statusBadgeStyle(severity)
   return (
@@ -242,6 +247,22 @@ function CheckpointTableRow({ row, onRestore }: { row: CheckpointRow; onRestore:
       </TableCell>
       <TableCell>
         <span title={row.workspacePath ?? undefined}>{workspaceTail(row.workspacePath)}</span>
+      </TableCell>
+      <TableCell>
+        {/* Live session state (terminal stage A): a live pid on an ended row
+            is the #1861 stale-retention surface — rendered in warn; '—' when
+            no live data exists (never fabricated). */}
+        {live === undefined || live.claudePid === null
+          ? '—'
+          : live.anomaly
+            ? <span className="text-s-warn" title={`${live.anomaly === 'pid-alive-after-end' ? 'process lives after end' : 'claims resumable but pid is dead'} — pid ${live.claudePid}${live.pidState ? ` (${live.pidState})` : ''}`}>
+                ● {live.pidState ?? 'unknown'}
+              </span>
+            : live.pidAlive
+              ? <span title={`alive — pid ${live.claudePid} (${live.pidState})${live.pidEtimeSeconds !== null ? `, up ${Math.floor(live.pidEtimeSeconds / 3600)}h${Math.floor((live.pidEtimeSeconds % 3600) / 60)}m` : ''}`}>
+                  ● {live.pidState}
+                </span>
+              : <span title={`pid ${live.claudePid} is not running`}>○ dead</span>}
       </TableCell>
       <TableCell>
         {/* Restore is offered only where the resume gate CAN admit the row

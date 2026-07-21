@@ -30,6 +30,11 @@ import {
   fromSmsJid,
   smsJidToPhone,
   isSmsJid,
+  DOMAIN_IMESSAGE,
+  JID_IMESSAGE,
+  toImessageJid,
+  fromImessageJid,
+  isImessageJid,
   isWhatsAppAuthenticatedJid,
   parseWhatsAppDeliveryNamespace,
 } from '../../src/core/jid-constants.ts';
@@ -227,5 +232,39 @@ describe('SMS JID helpers', () => {
     expect(JID_SMS).toBe('@sms');
     expect(DOMAIN_SMS).toBe('sms');
     expect(fromSmsJid(toSmsJid('+15551230000'))).toBe('+15551230000');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// iMessage JID helpers (DOMAIN_IMESSAGE / JID_IMESSAGE / toImessageJid /
+// fromImessageJid / isImessageJid)
+// ---------------------------------------------------------------------------
+
+describe('iMessage JID helpers', () => {
+  it('toImessageJid appends the @imessage suffix and is idempotent', () => {
+    expect(toImessageJid('appleid@example.com')).toBe('appleid@example.com@imessage');
+    expect(toImessageJid('appleid@example.com@imessage')).toBe('appleid@example.com@imessage');
+    expect(toImessageJid('+15551230000')).toBe('+15551230000@imessage');
+  });
+
+  it('fromImessageJid strips the suffix and tolerates bare addresses', () => {
+    expect(fromImessageJid('appleid@example.com@imessage')).toBe('appleid@example.com');
+    expect(fromImessageJid('appleid@example.com')).toBe('appleid@example.com');
+    expect(fromImessageJid('+15551230000@imessage')).toBe('+15551230000');
+  });
+
+  it('isImessageJid detects only @imessage-suffixed ids', () => {
+    expect(isImessageJid('appleid@example.com@imessage')).toBe(true);
+    expect(isImessageJid('+15551230000@imessage')).toBe(true);
+    expect(isImessageJid('appleid@example.com')).toBe(false);
+    expect(isImessageJid('15551230000@s.whatsapp.net')).toBe(false);
+    expect(isImessageJid(null)).toBe(false);
+    expect(isImessageJid(undefined)).toBe(false);
+  });
+
+  it('round-trip composes with the JID constants', () => {
+    expect(JID_IMESSAGE).toBe('@imessage');
+    expect(DOMAIN_IMESSAGE).toBe('imessage');
+    expect(fromImessageJid(toImessageJid('appleid@example.com'))).toBe('appleid@example.com');
   });
 });
