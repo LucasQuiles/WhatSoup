@@ -436,12 +436,12 @@ describe('admin phones field', () => {
 
   it('shows single-phone helper when exactly one phone configured', () => {
     renderStep({ data: { adminPhones: ['15551234567'] } })
-    expect(screen.getByText(/Add another number for shared admin access/)).toBeDefined()
+    expect(screen.getByText(/Add another for shared admin access/)).toBeDefined()
   })
 
   it('shows count helper text when two or more phones configured', () => {
     renderStep({ data: { adminPhones: ['15551234567', '15559876543'] } })
-    expect(screen.getByText('2 admin numbers configured.')).toBeDefined()
+    expect(screen.getByText('2 admin IDs configured.')).toBeDefined()
   })
 
   it('calls onChange with digits-only array when a valid phone is added via Enter', () => {
