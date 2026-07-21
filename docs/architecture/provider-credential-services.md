@@ -73,11 +73,15 @@ A service is not a provider ID: `nvidia` would be reached as
 ## Traps
 
 - **Key resolution order**
-  (`src/lib/api-key-resolver.ts`): inline → service
-  lookup (mapped env var first, then keyring) → provider-family env fallback
-  (`OPENAI_API_KEY` for `openai-api`, `ANTHROPIC_API_KEY` for
-  `anthropic-api`). The last hop is the cross-account bleed risk; it logs the
-  QR-104 isolation warning when it yields a key.
+  (`src/lib/api-key-resolver.ts`): inline → service lookup → provider-family
+  env fallback (`OPENAI_API_KEY` for `openai-api`, `ANTHROPIC_API_KEY` for
+  `anthropic-api`). An explicitly configured service retains the legacy
+  mapped-env/private-store/keyring order. When the resolver infers the
+  canonical `openai`, `anthropic`, or `pinecone` service, it skips the lookup
+  helper's internal env-first path so private storage, Keychain/`secret-tool`,
+  and supported native OpenCode auth are checked before the separately
+  observed env fallback. That last hop is the cross-account bleed risk; it
+  logs the QR-104 isolation warning when it yields a key.
 - **`providerConfig` is instance-scoped** and inherited by API-type fallback
   entries (`src/runtimes/agent/fallback-config.ts`) — one custom `baseUrl`
   per instance; per-entry `providerConfig` is future schema/validator/runtime
@@ -85,17 +89,18 @@ A service is not a provider ID: `nvidia` would be reached as
 - **`Retry-After` cap** is 10 seconds
   (`src/runtimes/agent/providers/rate-limit-retry.ts`); a longer wait fails
   the turn into the fallback chain.
-- **The chat runtime is now per-instance configurable for OpenAI chat
+- **The chat runtime is per-instance configurable for OpenAI chat
   completions** (`src/runtimes/chat/providers/openai.ts`,
   `chatOptions.openaiProviderConfig` — QR-218 PR-2): an instance that sets
   `baseUrl`/`apiKeyService` gets its own endpoint/key regardless of any
-  process-wide env var; one that sets nothing still gets the legacy bare
-  `new OpenAI()`, governed by `OPENAI_BASE_URL` as before (now the
-  legacy/fallback path).
+  process-wide env var. With no provider config, the client resolves the
+  canonical `openai` credential at construction time; `OPENAI_API_KEY` remains
+  the observable compatibility fallback and `OPENAI_BASE_URL` remains the SDK
+  endpoint fallback.
 - **Whisper voice-note transcription is now per-instance configurable**
   (`src/runtimes/chat/providers/transcription/openai-whisper.ts`,
   `transcriptionOptions.openaiProviderConfig` — QR-218 PR-B): chat voice,
   agent media-prep, and MCP `transcribe_audio` share the same instance
-  process and read this dedicated endpoint/key. A process-wide
-  `OPENAI_BASE_URL` only governs the legacy bare `new OpenAI()` path when
-  `transcriptionOptions.openaiProviderConfig` is unset.
+  process and read this dedicated endpoint/key. With no transcription provider
+  config, the canonical `openai` credential is resolved at use time while
+  `OPENAI_API_KEY` and `OPENAI_BASE_URL` remain compatibility fallbacks.

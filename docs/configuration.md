@@ -242,6 +242,12 @@ each regular, non-symlinked `.key` file must be owned by that user with mode
 consult this unscoped file store: they use the account-specific Keychain or
 `secret-tool` entry before any allowed environment or OpenCode fallback.
 
+Default OpenAI, Anthropic, and Pinecone runtime lookups deliberately bypass the
+unscoped helper's environment-first step. They check the canonical secure
+credential sources first, then use the conventional environment variable only
+as an observable compatibility fallback. Explicit `apiKeyService` routes keep
+their existing mapped-environment compatibility order.
+
 The health-token launch path is intentionally separate. Its transitional,
 account-specific file is
 `$XDG_CONFIG_HOME/whatsoup/instances/<instance>/tokens.env`, not a
@@ -253,6 +259,12 @@ falls back. The file is exactly one
 `WHATSOUP_HEALTH_TOKEN=<64-lowercase-hex>` assignment, owned by the current UID
 with mode `0600`, under a real owner-controlled directory that is not group- or
 world-writable.
+
+Protected health routes resolve `service=whatsoup-health-token` with
+`account=<instance name>` for each authorization check and do not consult the
+legacy shared service alias. A process-local `WHATSOUP_HEALTH_TOKEN` remains a
+transition fallback, so existing managed instances retain continuity while the
+launcher and fleet-discovery migrations are completed.
 
 ### Health Server
 
@@ -1264,12 +1276,12 @@ env var (QR-218 PR-2):
 `https://api.openai.com/v1` when omitted); `apiKeyService` names the keyring
 service that authenticates it, resolved via the same `resolveApiKey()`
 precedence the agent HTTP providers use (`src/lib/api-key-resolver.ts`):
-service-env-var-first, then platform keyring, then the conventional
-`OPENAI_API_KEY` env var as a final fallback — logging the QR-104 isolation
-warning when that last hop actually yields a key. An instance that sets
-neither field constructs the OpenAI client exactly as before (bare
-`new OpenAI()`), so `OPENAI_BASE_URL` remains fully backward-compatible for
-chat instances that configure nothing.
+an explicit service keeps its mapped-env/private-store/keyring order, then the
+conventional `OPENAI_API_KEY` fallback. With no explicit service, the canonical
+`openai` secure sources are checked before that separately observed env
+fallback. The final fallback logs the QR-104 isolation warning when it yields a
+key. An instance that sets neither field still honors `OPENAI_BASE_URL` through
+the SDK, while its credential is resolved explicitly at client construction.
 
 **Console:** Chat instances expose these fields in the Add Line wizard's
 Model step and in the line configuration edit dialog as **Custom OpenAI
@@ -1322,7 +1334,7 @@ consumes `baseUrl` as the OpenAI SDK's `baseURL` option and resolves
 `apiKeyService` with `resolveApiKey({ envVar: "OPENAI_API_KEY" })`. A
 keyring-only config is active: `isAvailable()` consults the resolved key, not
 only `process.env.OPENAI_API_KEY`. When `transcriptionOptions` is unset, the
-provider preserves the legacy bare `new OpenAI()` construction, so
+provider resolves the canonical `openai` secure sources first;
 `OPENAI_BASE_URL` and `OPENAI_API_KEY` remain backward-compatible fallbacks.
 
 **Validation:** `transcriptionOptions.openaiProviderConfig` uses the same

@@ -160,6 +160,10 @@ vi.mock('../../../src/logger.ts', () => ({
   }),
 }));
 
+vi.mock('../../../src/lib/keyring.ts', () => ({
+  lookupCredential: vi.fn(() => null),
+}));
+
 import { registerKnowledgeTools, createPineconeWatchSearch } from '../../../src/mcp/tools/knowledge.ts';
 
 beforeEach(() => {

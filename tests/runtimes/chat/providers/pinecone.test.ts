@@ -54,6 +54,10 @@ vi.mock('../../../../src/logger.ts', () => ({
   createChildLogger: () => mockPineconeLogger,
 }));
 
+vi.mock('../../../../src/lib/keyring.ts', () => ({
+  lookupCredential: vi.fn(() => null),
+}));
+
 import { Pinecone } from '@pinecone-database/pinecone';
 import { PineconeMemory, MemoryRecord, decayScore, applyDecay, getPineconeReadiness } from '../../../../src/runtimes/chat/providers/pinecone.ts';
 import * as configModule from '../../../../src/config.ts';

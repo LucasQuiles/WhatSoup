@@ -31,12 +31,10 @@ function resolveTranscriptionApiKey(): string {
 function getClient(): OpenAI {
   const providerConfig = transcriptionProviderConfig();
   if (!client) {
-    client = providerConfig
-      ? new OpenAI({
-          baseURL: providerConfig.baseUrl,
-          apiKey: resolveTranscriptionApiKey() || undefined,
-        })
-      : new OpenAI();
+    client = new OpenAI({
+      ...(providerConfig?.baseUrl ? { baseURL: providerConfig.baseUrl } : {}),
+      apiKey: resolveTranscriptionApiKey() || undefined,
+    });
   }
   return client;
 }

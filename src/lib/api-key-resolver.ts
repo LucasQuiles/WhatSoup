@@ -6,7 +6,9 @@
 //
 // Resolution order at request time:
 //   1. inline apiKey (when non-empty) — caller-supplied
-//   2. apiKeyService via lookupCredential() (when service is non-empty)
+//   2. apiKeyService via lookupCredential() (when service is non-empty). An
+//      inferred canonical service skips lookupCredential's internal env-first
+//      path so the separately observed fallback below remains authoritative.
 //   3. process.env[envVar] — last-resort fallback (when allowEnvFallback !== false)
 //   4. '' — missing-key signaling is the caller's responsibility
 //
@@ -27,6 +29,12 @@ import { lookupCredential } from './keyring.ts';
 import { createChildLogger } from '../logger.ts';
 
 const log = createChildLogger('api-key-resolver');
+
+const CANONICAL_SERVICE_BY_ENV_VAR: Readonly<Record<string, string>> = {
+  ANTHROPIC_API_KEY: 'anthropic',
+  OPENAI_API_KEY: 'openai',
+  PINECONE_API_KEY: 'pinecone',
+};
 
 export interface ResolveApiKeyOptions {
   /** Inline API key from caller (typically not used; reserved for future config). */
@@ -58,9 +66,15 @@ export function resolveApiKey(opts: ResolveApiKeyOptions): string {
   // keyring ONLY. A missing keyring hit returns '' (visible missing-key
   // downstream) rather than silently falling back to the process env.
   const allowEnvFallback = opts.allowEnvFallback !== false;
+  const inferredCanonicalService = opts.service === undefined;
+  const effectiveService = inferredCanonicalService
+    ? CANONICAL_SERVICE_BY_ENV_VAR[opts.envVar]
+    : opts.service;
 
-  if (opts.service && opts.service.length > 0) {
-    const fromKeyring = lookupCredential(opts.service);
+  if (effectiveService && effectiveService.length > 0) {
+    const fromKeyring = inferredCanonicalService
+      ? lookupCredential(effectiveService, { skipEnv: true })
+      : lookupCredential(effectiveService);
     if (fromKeyring && fromKeyring.length > 0) {
       return fromKeyring;
     }
@@ -76,7 +90,7 @@ export function resolveApiKey(opts: ResolveApiKeyOptions): string {
     const envFallback = process.env[opts.envVar] ?? '';
     if (envFallback.length > 0) {
       log.warn(
-        { service: opts.service, envVar: opts.envVar },
+        { service: effectiveService, envVar: opts.envVar },
         'apiKeyService configured but keyring lookup missed — falling back to env var; verify account isolation',
       );
     }

@@ -36,6 +36,10 @@ vi.mock('../../../../src/logger.ts', () => ({
   },
 }));
 
+vi.mock('../../../../src/lib/keyring.ts', () => ({
+  lookupCredential: vi.fn(() => null),
+}));
+
 import { Pinecone } from '@pinecone-database/pinecone';
 import * as configModule from '../../../../src/config.ts';
 import { getPineconeReadiness } from '../../../../src/runtimes/chat/providers/pinecone.ts';
