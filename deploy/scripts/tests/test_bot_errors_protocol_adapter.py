@@ -323,6 +323,36 @@ class ProtocolAdapterTests(unittest.TestCase):
         self.assertNotEqual(result.remediation.authorization, "physical_required")
         self.assertEqual(result.clear_policy.kind, ClearPolicyKind.SAME_SOURCE_NEWER)
 
+    def test_v2_weak_auth_preserves_declared_stronger_clear_policy(self) -> None:
+        event = {
+            **copy.deepcopy(self.fixture["version2"]["alert"]),
+            "machine": "fixture-host",
+            "source": "instance_logged_out",
+            "clearPolicy": {
+                "kind": "auth_bond_and_outbound",
+                "minimumSchemaVersion": 2,
+            },
+            "remediation": {
+                "recoverability": "manual_relink_required",
+                "requestedAction": "preserve_and_relink",
+                "authorization": "physical_required",
+            },
+            "criticalAsset": weak_auth_event()["criticalAsset"],
+        }
+        ctx = context(event)
+        ctx["is_logged_out_physical_signal"] = True
+        ctx["is_verified_device_bond_lost_signal"] = True
+
+        result = normalize_observation(event, **ctx)
+
+        self.assertIsInstance(result, NormalizedObservation)
+        assert isinstance(result, NormalizedObservation)
+        self.assertEqual(result.classification, "inferred_transient")
+        self.assertEqual(result.failure_code, "WEAK_LOGGED_OUT_SIGNAL")
+        self.assertEqual(result.remediation.recoverability, "auto_recoverable")
+        self.assertEqual(result.remediation.authorization, "automatic_read_only")
+        self.assertEqual(result.clear_policy.kind, ClearPolicyKind.AUTH_BOND_AND_OUTBOUND)
+
 
 class DispatcherIntegrationTests(unittest.TestCase):
     def test_dispatcher_uses_live_classifiers_but_weak_refs_win(self) -> None:
@@ -485,6 +515,95 @@ class DispatcherIntegrationTests(unittest.TestCase):
                 self.assertFalse(event_path.exists())
                 self.assertEqual(len(list(paths["quarantine"].glob("*protocol_quarantine"))), 1)
 
+    def test_post_prepass_nonobject_race_preserves_protocol_and_poison_routes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="bot-errors-protocol-") as raw:
+            state_dir = Path(raw)
+            with loaded_dispatcher(state_dir) as dispatcher:
+                paths = dispatcher.setup_dirs()
+                original_prepass = dispatcher.quarantine_invalid_protocol_events
+                injected = 0
+
+                def prepass_then_inject(active_paths) -> int:
+                    nonlocal injected
+                    quarantined = original_prepass(active_paths)
+                    self.assertEqual(dispatcher.state_root().resolve(), state_dir.resolve())
+                    self.assertEqual(active_paths["root"].resolve(), state_dir.resolve())
+                    (active_paths["outbox"] / "late-list.json").write_text("[]", encoding="utf-8")
+                    (active_paths["outbox"] / "late-invalid-alert.json").write_text(
+                        json.dumps({
+                            "schemaVersion": 99,
+                            "id": "late-invalid-alert",
+                            "eventType": "alert",
+                            "severity": "critical",
+                            "createdAt": "2026-07-20T10:00:05.000Z",
+                            "machine": "fixture-host",
+                            "instance": "fixture-agent",
+                            "source": "fixture-health",
+                        }),
+                        encoding="utf-8",
+                    )
+                    (active_paths["outbox"] / "late-unreadable.json").write_text(
+                        "{not-json", encoding="utf-8"
+                    )
+                    self.assertEqual(
+                        json.loads((active_paths["outbox"] / "late-list.json").read_text()),
+                        [],
+                    )
+                    self.assertEqual(
+                        json.loads(
+                            (active_paths["outbox"] / "late-invalid-alert.json").read_text()
+                        )["schemaVersion"],
+                        99,
+                    )
+                    injected += 1
+                    return quarantined
+
+                with (
+                    patch.object(
+                        dispatcher,
+                        "quarantine_invalid_protocol_events",
+                        side_effect=prepass_then_inject,
+                    ),
+                    patch.object(dispatcher, "record_flap_trip") as record_flap,
+                    patch.object(dispatcher, "send_whatsapp") as send_whatsapp,
+                ):
+                    self.assertEqual(dispatcher.state_root().resolve(), state_dir.resolve())
+                    self.assertEqual(paths["root"].resolve(), state_dir.resolve())
+                    dispatcher.run_once(max_events=25)
+
+                self.assertEqual(injected, 1, "post-prepass race injection did not occur exactly once")
+                record_flap.assert_not_called()
+                send_whatsapp.assert_called_once()
+                protocol_files = list(paths["quarantine"].glob("*protocol_quarantine"))
+                poison_files = list(paths["quarantine"].glob("*.poison"))
+                self.assertEqual(len(protocol_files), 2)
+                self.assertEqual(
+                    {"late-list.json", "late-invalid-alert.json"},
+                    {
+                        name
+                        for name in ("late-list.json", "late-invalid-alert.json")
+                        if any(name in path.name for path in protocol_files)
+                    },
+                )
+                self.assertEqual(len(poison_files), 1)
+                self.assertIn("late-unreadable.json", poison_files[0].name)
+                receipts = [
+                    json.loads(line)
+                    for line in (paths["logs"] / "dispatch.jsonl").read_text().splitlines()
+                ]
+                protocol_receipts = [row for row in receipts if row["type"] == "protocol_quarantine"]
+                poison_receipts = [row for row in receipts if row["type"] == "quarantine"]
+                self.assertEqual(
+                    sorted(row["reason"] for row in protocol_receipts),
+                    ["event_not_object", "unsupported_schema_version"],
+                )
+                self.assertEqual(len(poison_receipts), 1)
+                self.assertEqual(poison_receipts[0]["directWhatsapp"], "sent")
+                if paths["incident_state"].exists():
+                    incident_state = json.loads(paths["incident_state"].read_text())
+                    self.assertEqual(incident_state.get("openIncidents", {}), {})
+                    self.assertEqual(incident_state.get("flapState", {}), {})
+
     def test_protocol_prepass_leaves_unreadable_json_for_existing_poison_path(self) -> None:
         with tempfile.TemporaryDirectory(prefix="bot-errors-protocol-") as raw:
             state_dir = Path(raw)
@@ -513,7 +632,7 @@ class DispatcherIntegrationTests(unittest.TestCase):
                 with patch.object(dispatcher, "send_whatsapp") as send_whatsapp:
                     self.assertEqual(dispatcher.state_root().resolve(), state_dir.resolve())
                     self.assertEqual(paths["root"].resolve(), state_dir.resolve())
-                    ready = dispatcher.ready(event_path, paths["quarantine"])
+                    ready = dispatcher.ready(event_path, paths)
 
                 self.assertFalse(ready)
                 send_whatsapp.assert_called_once()

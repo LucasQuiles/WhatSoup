@@ -442,7 +442,6 @@ def normalize_observation(
         failure_code = _WEAK_AUTH_FAILURE_CODE
         recoverability = "auto_recoverable"
         authorization = "automatic_read_only"
-        policy_kind = ClearPolicyKind.SAME_SOURCE_NEWER
         classification = "inferred_transient"
     elif is_logged_out_physical_signal or is_verified_device_bond_lost_signal:
         recoverability = "manual_relink_required"

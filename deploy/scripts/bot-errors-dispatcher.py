@@ -3009,7 +3009,7 @@ def flap_scan_outbox(paths: dict[str, Path]) -> int:
     changed = False
     for path in sorted(paths["outbox"].glob("*.json")):
         try:
-            if not ready(path, paths["quarantine"]):
+            if not ready(path, paths):
                 continue
             event = read_json(path)
         except Exception:  # noqa: BLE001 - skip unreadable, process_one will quarantine
@@ -3835,7 +3835,7 @@ def collapse_ready_storms(paths: dict[str, Path]) -> int:
     window = storm_window_seconds()
     groups: dict[str, list[tuple[Path, dict[str, Any], int]]] = {}
     for path in sorted(paths["outbox"].glob("*.json")):
-        if not ready(path, paths["quarantine"]):
+        if not ready(path, paths):
             continue
         try:
             event = read_json(path)
@@ -3904,7 +3904,7 @@ def suppress_ready_recovery_duplicates(paths: dict[str, Path]) -> int:
     window = recovery_dedupe_window_seconds()
     groups: dict[str, list[tuple[Path, dict[str, Any], int]]] = {}
     for path in sorted(paths["outbox"].glob("*.json")):
-        if not ready(path, paths["quarantine"]):
+        if not ready(path, paths):
             continue
         try:
             event = read_json(path)
@@ -4060,7 +4060,7 @@ def queue_test_provenance_meta_alert(paths: dict[str, Path], refused: int) -> in
 def suppress_test_provenance_events(paths: dict[str, Path]) -> tuple[int, int]:
     suppressed = 0
     for path in sorted(paths["outbox"].glob("*.json")):
-        if not ready(path, paths["quarantine"]):
+        if not ready(path, paths):
             continue
         try:
             event = read_json(path)
@@ -4080,12 +4080,17 @@ def suppress_test_provenance_events(paths: dict[str, Path]) -> tuple[int, int]:
     return suppressed, alerted
 
 
-def ready(path: Path, quarantine_dir: Path) -> bool:
+def ready(path: Path, paths: dict[str, Path]) -> bool:
     try:
-        event = read_json(path)
+        event = read_json_value(path)
     except Exception as exc:
-        quarantine_poison(path, quarantine_dir, f"invalid JSON before claim: {exc}")
+        quarantine_poison(path, paths["quarantine"], f"invalid JSON before claim: {exc}")
         return False
+    normalized = normalize_dispatch_observation(event)
+    if isinstance(normalized, QuarantineReason):
+        quarantine_protocol_event(path, paths, event, normalized, source_name=path.name)
+        return False
+    assert isinstance(event, dict)
     delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
     next_attempt = int(delivery.get("nextAttemptAtEpoch") or 0)
     return next_attempt <= int(time.time())
@@ -4656,7 +4661,7 @@ def run_once(max_events: int) -> dict[str, Any]:
         for path in sorted(paths["outbox"].glob("*.json")):
             if processed >= max_events:
                 break
-            if not ready(path, paths["quarantine"]):
+            if not ready(path, paths):
                 continue
             try:
                 preview = read_json(path)
