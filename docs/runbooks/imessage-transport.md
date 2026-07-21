@@ -74,7 +74,7 @@ Both backends use **config-only auth** (matches the Twilio precedent — no
     "backend": "bluebubbles",
     "bluebubblesUrl": "https://bb.example.test",
     "bluebubblesPasswordService": "imessage-bb-pw",
-    "sender": "me@heal.internal",
+    "sender": "<your-appleid-email>",
     "inboundMode": "poll",
     "pollIntervalMs": 15000,
     "rateLimit": { "messagesPerMinute": 30 }
@@ -149,7 +149,7 @@ Both backends use **config-only auth** (matches the Twilio precedent — no
 
 ## References
 
-- Spec: `~/LAB/oc-re/specs/2026-07-20-signal-and-imessage-transports-spec.md`
+- Spec: `2026-07-20-signal-and-imessage-transports-spec.md` (internal spec, tracked outside this repository)
 - Port interface: `src/transport/imessage/port.ts`
 - Port impls: `src/transport/imessage/bluebubbles-port.ts`, `src/transport/imessage/imsg-port.ts`
 - Adapter: `src/transport/imessage/adapter.ts`

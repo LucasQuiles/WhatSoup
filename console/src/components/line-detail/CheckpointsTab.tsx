@@ -1,18 +1,24 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import {
   Table, TableHeader, TableHeaderCell, TableBody, TableRow, TableCell,
   TableEmpty, TableError, TableLoading,
   type SortState,
 } from '../primitives/Table'
+import { Button } from '../primitives/Button'
+import ConfirmDialog from '../ConfirmDialog'
+import { api } from '../../lib/api'
+import { useToast } from '../../hooks/toast-context'
 import { statusBadgeStyle, type StatusSeverity } from '../../lib/status-severity'
 import { formatRelative } from '../../lib/format-time'
 import type { Freshness } from '../../lib/freshness'
-import type { CheckpointRow, CheckpointsPayload } from '../../types'
+import type { CheckpointRow, CheckpointsPayload, LiveSessionsPayload, LiveSession } from '../../types'
 
 /**
- * CheckpointsTab — read-only browser for a line's session_checkpoints
- * (spec: oc-re/specs/2026-07-19-checkpoint-browser-ui-spec.md; sort +
- * Delivery column: oc-re/specs/2026-07-19-checkpoints-tab-followups-spec.md).
+ * CheckpointsTab — browser + restart-mediated restore for a line's
+ * session_checkpoints (spec: oc-re/specs/2026-07-19-checkpoint-browser-ui-spec.md;
+ * sort + Delivery column: oc-re/specs/2026-07-19-checkpoints-tab-followups-spec.md;
+ * Restore action: oc-re/specs/2026-07-19-checkpoint-restore-spec.md).
  *
  * Shows which sessions would resume on restart (`resumable` is computed
  * server-side with the durability engine's exact filter), the lifecycle
@@ -21,6 +27,9 @@ import type { CheckpointRow, CheckpointsPayload } from '../../types'
  * aliasing-safe answer to "WHICH chat did this turn deliver to").
  * Conversation and Updated are sortable (client-side, tri-state); the
  * default view preserves the server's updated_at DESC order.
+ * The Restore action marks a non-resumable checkpoint resumable and
+ * restarts the instance so the LIVE runtime resumes it through its own
+ * resume gate — the console never resumes a session itself.
  * Fail-closed: a fleet read error renders TableError — never a fake empty
  * state (PDR-3 invariant).
  */
@@ -55,15 +64,48 @@ function deliveryTitle(row: CheckpointRow): string | undefined {
 
 type SortKey = 'conversation' | 'updated' | null
 
-export function CheckpointsTab({ payload, isLoading, freshness }: {
+export function CheckpointsTab({ payload, isLoading, freshness, lineName, liveSessions }: {
   payload: CheckpointsPayload | undefined;
   isLoading: boolean;
   freshness: Freshness;
+  /** Owning line — the restore action's api target + invalidate key. */
+  lineName: string;
+  /** Live session inspector feed (terminal stage A) — joined by
+   *  conversationKey; absent rows render '—', never fabricated liveness. */
+  liveSessions?: LiveSessionsPayload;
 }) {
   // Wrapped in useMemo per exhaustive-deps: the `?? []` fallback would
   // otherwise give sortedRows' useMemo a new dep identity every render.
   const rows = useMemo(() => payload?.checkpoints ?? [], [payload])
   const resumableCount = rows.filter((r) => r.resumable).length
+  const liveByKey = new Map((liveSessions?.sessions ?? []).map((s) => [s.conversationKey, s]))
+
+  // Restore flow — AccessTab idiom: pending row → ConfirmDialog → api →
+  // toast + invalidate; ref-guard against double-submit while in flight.
+  const toast = useToast()
+  const queryClient = useQueryClient()
+  const [pendingRestore, setPendingRestore] = useState<CheckpointRow | null>(null)
+  const [executingRestore, setExecutingRestore] = useState(false)
+  const executingRestoreRef = useRef(false)
+
+  const executeRestore = async () => {
+    if (!pendingRestore) return
+    if (executingRestoreRef.current) return
+    executingRestoreRef.current = true
+    setExecutingRestore(true)
+    const key = pendingRestore.conversationKey
+    try {
+      await api.restoreCheckpoint(lineName, key)
+      toast.success(`Restore requested for ${truncateMiddle(key)} — ${lineName} is restarting`)
+      queryClient.invalidateQueries({ queryKey: ['checkpoints', lineName] })
+    } catch (e) {
+      toast.error(`Restore failed: ${(e as Error).message}`)
+    } finally {
+      executingRestoreRef.current = false
+      setExecutingRestore(false)
+      setPendingRestore(null)
+    }
+  }
 
   // SoupKitchen sort idiom: the primitive's tri-state cycle (none/asc/desc)
   // adapted onto two-way sortDir; 'none' clears back to the server default
@@ -128,29 +170,50 @@ export function CheckpointsTab({ payload, isLoading, freshness }: {
             <TableHeaderCell>Delivery</TableHeaderCell>
             <TableHeaderCell sortKey="updated" sort={sortState} onSort={handleSort}>Updated</TableHeaderCell>
             <TableHeaderCell>Workspace</TableHeaderCell>
+            <TableHeaderCell>Action</TableHeaderCell>
+            <TableHeaderCell>Live</TableHeaderCell>
           </TableRow>
         </TableHeader>
         <TableBody>
-          {isLoading && <TableLoading colSpan={9} />}
+          {isLoading && <TableLoading colSpan={11} />}
           {!isLoading && payload?.readError && (
             <TableError
-              colSpan={9}
+              colSpan={11}
               message="Checkpoint data unavailable — the fleet could not read this instance's database. This is a read failure, not an empty instance."
             />
           )}
           {!isLoading && !payload?.readError && sortedRows.length === 0 && (
-            <TableEmpty colSpan={9} message="No session checkpoints recorded for this line yet." />
+            <TableEmpty colSpan={11} message="No session checkpoints recorded for this line yet." />
           )}
           {!isLoading && !payload?.readError && sortedRows.map((row) => (
-            <CheckpointTableRow key={row.conversationKey} row={row} />
+            <CheckpointTableRow key={row.conversationKey} row={row} live={liveByKey.get(row.conversationKey)} onRestore={() => setPendingRestore(row)} />
           ))}
         </TableBody>
       </Table>
+
+      <ConfirmDialog
+        open={!!pendingRestore}
+        title="Restore checkpoint?"
+        confirmLabel="Restore & Restart"
+        confirmVariant="primary"
+        confirmDisabled={executingRestore}
+        confirmLoading={executingRestore}
+        onConfirm={executeRestore}
+        onCancel={() => setPendingRestore(null)}
+      >
+        {pendingRestore && (
+          <>
+            This marks the checkpoint for <strong>{truncateMiddle(pendingRestore.conversationKey)}</strong> resumable
+            and restarts instance <strong>{lineName}</strong> so the runtime resumes it through its own resume
+            gate. The instance is briefly unavailable.
+          </>
+        )}
+      </ConfirmDialog>
     </div>
   )
 }
 
-function CheckpointTableRow({ row }: { row: CheckpointRow }) {
+function CheckpointTableRow({ row, live, onRestore }: { row: CheckpointRow; live?: LiveSession; onRestore: () => void }) {
   const severity = statusSeverity(row.sessionStatus)
   const badge = statusBadgeStyle(severity)
   return (
@@ -184,6 +247,32 @@ function CheckpointTableRow({ row }: { row: CheckpointRow }) {
       </TableCell>
       <TableCell>
         <span title={row.workspacePath ?? undefined}>{workspaceTail(row.workspacePath)}</span>
+      </TableCell>
+      <TableCell>
+        {/* Live session state (terminal stage A): a live pid on an ended row
+            is the #1861 stale-retention surface — rendered in warn; '—' when
+            no live data exists (never fabricated). */}
+        {live === undefined || live.claudePid === null
+          ? '—'
+          : live.anomaly
+            ? <span className="text-s-warn" title={`${live.anomaly === 'pid-alive-after-end' ? 'process lives after end' : 'claims resumable but pid is dead'} — pid ${live.claudePid}${live.pidState ? ` (${live.pidState})` : ''}`}>
+                ● {live.pidState ?? 'unknown'}
+              </span>
+            : live.pidAlive
+              ? <span title={`alive — pid ${live.claudePid} (${live.pidState})${live.pidEtimeSeconds !== null ? `, up ${Math.floor(live.pidEtimeSeconds / 3600)}h${Math.floor((live.pidEtimeSeconds % 3600) / 60)}m` : ''}`}>
+                  ● {live.pidState}
+                </span>
+              : <span title={`pid ${live.claudePid} is not running`}>○ dead</span>}
+      </TableCell>
+      <TableCell>
+        {/* Restore is offered only where the resume gate CAN admit the row
+            (not already resumable + session id present). A null session id
+            can never be invented — the dash says why (fail-visible). */}
+        {!row.resumable && row.sessionId
+          ? <Button size="xs" variant="ghost" onClick={onRestore}>Restore</Button>
+          : !row.sessionId
+            ? <span title="No session id — cannot be made resumable">—</span>
+            : '—'}
       </TableCell>
     </TableRow>
   )

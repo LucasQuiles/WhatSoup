@@ -75,6 +75,9 @@ vi.mock('../../console/src/hooks/use-fleet', () => ({
   // LineDetail's checkpoint browser calls useCheckpoints() during render; the
   // mock must expose it or the module throws before the metrics-range assertion.
   useCheckpoints: () => ({ data: undefined, isLoading: false, freshness: undefined }),
+  // LineDetail also feeds the live-session inspector (terminal stage A) —
+  // useLiveSessions must exist on the mock or the render throws at load.
+  useLiveSessions: () => ({ data: undefined, isLoading: false, freshness: { observedAt: null, stale: false } }),
   // Agent-mode SummaryTab embeds ProvidersKeysCard, which reads these hooks.
   useProviders: () => ({ data: [] }),
   useProviderStatus: () => ({

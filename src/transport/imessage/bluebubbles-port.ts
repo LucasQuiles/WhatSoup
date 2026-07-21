@@ -146,12 +146,12 @@ function normalizeMessage(msg: BbMessage): InboundImessage | null {
 // ---------------------------------------------------------------------------
 
 export class BlueBubblesPort implements ImessagePort {
-  // Explicit fields instead of constructor parameter properties: node
-  // strip-types (strip-only mode) rejects parameter properties
-  // (tests/strip-types-compat.test.ts).
   private readonly config: ImessageConfig;
   private readonly http: BlueBubblesHttpClient;
 
+  // Explicit fields + assignment rather than constructor parameter properties:
+  // this repo runs Node's --experimental-strip-types (no build step), which
+  // rejects parameter properties (ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX).
   constructor(
     config: ImessageConfig,
     http: BlueBubblesHttpClient = createHttpClient(config),
