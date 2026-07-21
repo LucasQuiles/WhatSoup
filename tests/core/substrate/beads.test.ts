@@ -33,11 +33,15 @@ function inlineProposalArgs(sourceMessagePk: number) {
 }
 
 function callEscapedInlineProposal(db: DatabaseSync, overrides: Record<string, unknown>) {
+  return callEscapedInlineProposalWithArgs(db, { ...inlineProposalArgs(1999), ...overrides });
+}
+
+function callEscapedInlineProposalWithArgs(db: DatabaseSync, args: unknown) {
   const escaped = createInlineProposal as unknown as (
     connection: DatabaseSync,
-    args: Record<string, unknown>,
+    args: unknown,
   ) => unknown;
-  return escaped(db, { ...inlineProposalArgs(1999), ...overrides });
+  return escaped(db, args);
 }
 
 function expectNoBeadState(db: DatabaseSync): void {
@@ -156,7 +160,38 @@ describe('beads core', () => {
     expect(db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get()).toEqual({ count: 1 });
   });
 
-  it.each([null, null, 0, -1, 1.5, Number.NaN])(
+  it.each([null, undefined])(
+    'rejects whole escaped args %s with a bounded invariant error before any write',
+    (args) => {
+      let failure: unknown;
+      try {
+        callEscapedInlineProposalWithArgs(db.raw, args);
+      } catch (err) {
+        failure = err;
+      }
+
+      expect(failure).toBeInstanceOf(InlineProposalInvariantError);
+      expect(failure).toMatchObject({ code: 'INLINE_PROPOSAL_INVARIANT' });
+      expect(String(failure)).toBe(
+        'InlineProposalInvariantError: inline proposal arguments violate the runtime contract',
+      );
+      expect(String(failure).length).toBeLessThan(160);
+      expectNoBeadState(db.raw);
+    },
+  );
+
+  it.each([
+    null,
+    undefined,
+    '1999',
+    1999n,
+    0,
+    -1,
+    1.5,
+    Number.NaN,
+    Number.MAX_SAFE_INTEGER + 1,
+    Number.MIN_SAFE_INTEGER - 1,
+  ])(
     'rejects invalid sourceMessagePk %s before any write through a type-erased call',
     (sourceMessagePk) => {
       let failure: unknown;

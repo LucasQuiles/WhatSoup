@@ -145,24 +145,35 @@ function hasUnpairedSurrogate(value: string): boolean {
   return false;
 }
 
-function assertInlineProposalArgs(args: CreateInlineProposalArgs): void {
-  if (!Number.isInteger(args.sourceMessagePk) || args.sourceMessagePk <= 0) {
+function assertInlineProposalArgs(args: unknown): void {
+  if (typeof args !== 'object' || args === null) {
     throw new InlineProposalInvariantError();
   }
-  if (args.status !== 'proposed') {
+  const candidate = args as Record<string, unknown>;
+  if (
+    typeof candidate.sourceMessagePk !== 'number'
+    || !Number.isSafeInteger(candidate.sourceMessagePk)
+    || candidate.sourceMessagePk <= 0
+  ) {
     throw new InlineProposalInvariantError();
   }
-  if (args.actor !== 'inline') {
+  if (candidate.status !== 'proposed') {
     throw new InlineProposalInvariantError();
   }
-  if (!INLINE_PROPOSAL_REASONS.has(args.proposalReason)) {
+  if (candidate.actor !== 'inline') {
     throw new InlineProposalInvariantError();
   }
   if (
-    typeof args.normalizedTarget !== 'string'
-    || args.normalizedTarget.trim().length === 0
-    || hasUnpairedSurrogate(args.normalizedTarget)
-    || Buffer.byteLength(args.normalizedTarget, 'utf8') > INLINE_PROPOSAL_TARGET_MAX_BYTES
+    typeof candidate.proposalReason !== 'string'
+    || !INLINE_PROPOSAL_REASONS.has(candidate.proposalReason)
+  ) {
+    throw new InlineProposalInvariantError();
+  }
+  if (
+    typeof candidate.normalizedTarget !== 'string'
+    || candidate.normalizedTarget.trim().length === 0
+    || hasUnpairedSurrogate(candidate.normalizedTarget)
+    || Buffer.byteLength(candidate.normalizedTarget, 'utf8') > INLINE_PROPOSAL_TARGET_MAX_BYTES
   ) {
     throw new InlineProposalInvariantError();
   }

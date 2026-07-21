@@ -143,6 +143,30 @@ describe('migration 45 inline proposal source uniqueness', () => {
        ON beads(source_message_pk)
        WHERE source_message_pk IS NOT NULL`,
     ],
+    [
+      'descending NOCASE key',
+      `CREATE UNIQUE INDEX idx_beads_inline_source_unique
+       ON beads(source_message_pk COLLATE NOCASE DESC)
+       WHERE source_message_pk IS NOT NULL AND proposal_reason LIKE 'inline imperative: %'`,
+    ],
+    [
+      'descending key',
+      `CREATE UNIQUE INDEX idx_beads_inline_source_unique
+       ON beads(source_message_pk DESC)
+       WHERE source_message_pk IS NOT NULL AND proposal_reason LIKE 'inline imperative: %'`,
+    ],
+    [
+      'NOCASE key',
+      `CREATE UNIQUE INDEX idx_beads_inline_source_unique
+       ON beads(source_message_pk COLLATE NOCASE)
+       WHERE source_message_pk IS NOT NULL AND proposal_reason LIKE 'inline imperative: %'`,
+    ],
+    [
+      'additional key column',
+      `CREATE UNIQUE INDEX idx_beads_inline_source_unique
+       ON beads(source_message_pk, owner_jid)
+       WHERE source_message_pk IS NOT NULL AND proposal_reason LIKE 'inline imperative: %'`,
+    ],
   ])('fails closed transactionally for a preexisting %s same-named index', (_variant, indexSql) => {
     const path = tmpFile();
     cleanup.push(path);

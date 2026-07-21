@@ -1183,10 +1183,23 @@ function hasExpectedInlineProposalSourceIndex(db: DatabaseSync, sql: string): bo
   const index = listed.find((candidate) => candidate.name === INLINE_PROPOSAL_SOURCE_INDEX);
   if (!index || index.unique !== 1 || index.partial !== 1) return false;
 
-  const columns = db.prepare(`PRAGMA index_info('${INLINE_PROPOSAL_SOURCE_INDEX}')`).all() as Array<{
-    name: string;
+  const columns = db.prepare(`PRAGMA index_xinfo('${INLINE_PROPOSAL_SOURCE_INDEX}')`).all() as Array<{
+    cid: number;
+    name: string | null;
+    desc: number;
+    coll: string;
+    key: number;
   }>;
-  if (columns.length !== 1 || columns[0]?.name !== 'source_message_pk') return false;
+  const keyColumns = columns.filter((column) => column.key === 1);
+  const keyColumn = keyColumns[0];
+  if (
+    keyColumns.length !== 1
+    || !keyColumn
+    || keyColumn.cid < 0
+    || keyColumn.name !== 'source_message_pk'
+    || keyColumn.desc !== 0
+    || keyColumn.coll !== 'BINARY'
+  ) return false;
 
   const normalized = normalizeIndexSql(sql);
   const whereAt = normalized.indexOf(' where ');
