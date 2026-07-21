@@ -21,6 +21,9 @@
 - New machine-readable commands support `--help` and JSON output; unknown or duplicate options exit `2` with a sanitized reason and exact reproduction command.
 - Each control emits exactly one `PASS`, `WARN`, `BLOCK`, `INCONCLUSIVE`, or `NOT_APPLICABLE` outcome. Aggregate gates alone derive `PASS`, `BLOCK`, or `INCONCLUSIVE`; warnings remain visible but cannot satisfy required evidence, and not-applicable requires trusted classifier proof.
 - One validated machine object owns every human, agent, annotation, summary, and log rendering. Non-pass results name severity/confidence, control and decision owner, domain/stage/operation/trust class, safe structural location, exact bindings, causal impact, ordered remediation, canonical implementation owner, allowed and prohibited patch scope, reproduction preconditions, focused verification, retry/exception semantics, related findings, and stable fingerprint. Generic `CI failed`, raw exceptions, absolute paths, and private matched values are forbidden.
+- The reason catalog is immutable-by-construction and versioned. Every active code records lifecycle, default outcome/severity, applicable stages, required confidence and identity bindings, closed retry/remediation classes, canonical owner, disclosure policy, one canonical message template, unsafe/safe/unavailable fixtures, and escalation or expiry. Existing code meanings are never repurposed; replacement uses a new four-part `<plane>.<domain>.<object>.<condition>` code plus an explicit supersession mapping.
+- Every warning has an owner, repair SLA, expiry, escalation condition, and linked blocking or inconclusive successor. A warning stays visible but never satisfies mandatory evidence. Planned catalog rows are non-emitting and never pass-capable.
+- The canonical result distinguishes claimed and observed scope, causal roots and dependent findings, public/private evidence references, omitted sensitive fields, closed retry/remediation classes, prohibited workarounds, next action, verification plan, and closure criteria. Scope overclaim or missing disclosure is a schema failure.
 - Every execution result includes a validated precondition receipt for runtime/package manager, tool and wrapper digests, dependency-install scopes, workspace/index state, exact OIDs, observed host capabilities, hook identity, fixture/substitute readiness, and test-selection digest. An invalid or unproven precondition is `INCONCLUSIVE`, not product `BLOCK` evidence.
 - Only terminal attempt evidence is authoritative. Attempts use unique non-reused IDs, explicit lifecycle states, exact-byte digests, atomic terminal receipt publication, bounded freshness, append-only history, and proof the owned process group ended.
 - Every phase binds a lineage lease containing base, candidate, tested-merge, and remote OIDs plus manifest, policy, toolchain, selected-plan, and prerequisite-receipt digests, then applies a dependency-aware invalidation matrix after any lease input changes. A changed remote, plan, or prerequisite receipt never silently preserves dependent merge, release, or push authorization.
@@ -244,6 +247,86 @@ git diff --check
 ```bash
 git commit -m "feat(ci): standardize control evidence"
 ```
+
+- [ ] **Step 9 (CP-F2e): Enrich the active taxonomy and result contract before H1c integration**
+
+**Frozen CP-F2e admission packet**
+
+- Evidence: **Proven** at `dd474cc7aed4b807a58c0cf1c22dead411709bb2`.
+  `ReasonDefinitionV1` records only schema, code, guidance kind, and default outcome;
+  `ControlResultV1` has useful bindings, preconditions, attempts, patch scope, and
+  fingerprinting but lacks typed lifecycle governance, claimed/observed scope, causal
+  relationships, closed retry/remediation classes, closure criteria, and separated public/
+  private evidence references.
+- Unsafe fixtures: concurrent writer or stale reviewer represented by an untyped generic
+  prerequisite; warning without owner/expiry/escalation; free-form retry; scope overclaim;
+  missing disclosure; silent V1 code rename; deprecated code emitted by a new control;
+  unknown taxonomy code downgraded to warning; machine/human causal divergence.
+- Safe neighbors: an active implemented four-part code with complete metadata and fixtures;
+  a historical V1 code accepted for read-only evidence through an explicit deprecated/
+  superseded mapping; a warning with owner, SLA, expiry, escalation, and a distinct
+  successor code; exact claimed/observed scope with bounded limitations.
+- Unavailable evidence: unknown code, missing writer/reviewer receipt, unproven scope,
+  malformed causal graph, missing warning governance, or missing evidence-reference class
+  is `INCONCLUSIVE/2`, never warning or pass.
+- Smallest repair: extend only `scripts/lib/ci-control/reasons.ts`,
+  `scripts/lib/ci-control/result.ts`, and their tests. Preserve the existing serializer as
+  the sole renderer and preserve native granular cause codes. Do not activate the rider's
+  aspirational catalog wholesale.
+- Migration: freeze all V1 meanings; add explicit lifecycle/supersession records; new
+  emitters use four-part codes. Deprecated codes remain readable for bounded historical
+  evidence but cannot be emitted by a new control after their acceptance deadline.
+- Warning rule: escalation emits a separately registered successor finding bound to the
+  protected clock and policy. It never mutates the warning code's default outcome.
+- Stop conditions: any alternate message catalog, native-cause collapse, unbounded output,
+  scope ambiguity, sensitive reference leak, or changed HEAD/index/plan invalidates the
+  bead.
+- Rollback: ordinary revert of the additive schema/catalog migration and tests; native
+  receipts remain unchanged.
+
+**Files:**
+
+- Modify: `scripts/lib/ci-control/reasons.ts`
+- Modify: `scripts/lib/ci-control/result.ts`
+- Modify: `tests/scripts/ci-control-result.test.ts`
+- Create: `tests/scripts/ci-control-reasons.test.ts`
+- Modify: `package.json` only to wire the new companion test into the existing branch gate
+
+**Required enriched fields:**
+
+```text
+evidenceState rootCauseId causedBy relatedFindingIds supersedes
+claimedScope observedScope scopeLimitations
+retryClass remediationClass allowedPatchScope prohibitedChanges doNot
+nextBestAction verificationPlan closureCriteria
+sensitiveFieldsOmitted publicEvidenceRefs privateEvidenceRefs
+```
+
+Closed retry classes are `never`, `after-source-change`,
+`after-precondition-repair`, `after-transient-condition`,
+`after-lineage-reconciliation`, `after-evidence-regeneration`,
+`after-rebase-or-merge-refresh`, `after-approval`, and `manual-recovery`.
+Closed remediation classes are `source-patch`, `workflow-policy-change`,
+`environment-setup`, `exact-revision-rerun`, `lineage-reconciliation`,
+`artifact-quarantine`, `rollback`, `hosted-settings-change`, `owner-decision`,
+`exception-renewal`, and `control-retirement`.
+
+Focused RED/GREEN and surrounding verification:
+
+```bash
+bash scripts/run-with-pinned-npm.sh test -- \
+  tests/scripts/ci-control-reasons.test.ts \
+  tests/scripts/ci-control-result.test.ts \
+  tests/scripts/ci-control-ref-policy.test.ts \
+  tests/scripts/hooks-installed-guard.test.ts \
+  --pool=forks --fileParallelism=false --retry=0
+npm run typecheck:scripts
+git diff --check
+```
+
+Expected RED: incomplete reason records, free-form retry/remediation values, missing causal/
+scope/closure fields, and deprecated emission are accepted. Expected GREEN: each is rejected
+with a stable cause while complete active and historical-read fixtures remain valid.
 
 ---
 
@@ -557,6 +640,23 @@ and outgoing histories. Reuse their native scanners, codes, serializers, and exc
 ownership. Prove a secret added then removed in the outgoing range still blocks and a safe
 `HEAD` cannot authorize a different unsafe outgoing OID.
 
+H1c discovery and native RED fixtures may proceed after this packet is frozen, but neutral
+receipt integration waits for CP-F2e. The exact-object adapters record native detector/schema,
+tool/policy digests, exact base/remote/local OIDs, ordered commit/range and observed-path
+digests, native causes/outcome/completeness, claimed and observed scope, limitations, safe
+structural references, exact serialized-byte digest, freshness, and an explicit report-only
+limitation. They never create another taxonomy, warning policy, exception path, or renderer.
+
+Required fixtures include: safe ambient `HEAD` with a different unsafe outgoing OID; a
+private value or sensitive artifact added and removed in an intermediate commit; mismatched
+tree/content identity; claimed full range with partial observation; exact safe range;
+reserved safe neighbor; base-only historical finding under changed-content-only mode;
+missing object/graph, unsupported object format, budget overflow, policy/tool mismatch,
+partial traversal, and stale binding. Redaction covers stdout, stderr, JSON, evidence
+references, raw Git errors, absolute paths, matched values, and reversible low-entropy
+fingerprints. Candidate scanner removal, narrowed observation, severity rewrite, or removal
+of the exact-object branch test must be detected.
+
 - [ ] **Step 6 (CP-H1d): Implement exact per-ref verification and atomic cutover**
 
 Pass each `localOid`, `remoteOid`, and ref identity into the classifier and selected lower-level scanners. Revalidate the local ref still resolves to `localOid` immediately before allowing transport. Multi-ref push passes only if every row passes.
@@ -565,6 +665,12 @@ Require exact equality between parsed ref updates and terminal observations. Pas
 remote name/location as bounded data, preserve child exit `1` versus `2`, prove owned
 children terminated, and revalidate each named local ref. Only this bead wires the new
 authoritative path into `.husky/pre-push`; prior beads remain additive canaries.
+
+H1d additionally requires current writer, lineage, reviewer, workspace-accounting,
+precondition, CP-F2e taxonomy/result, CP-F3 claimed-scope, CP-F4 terminal-attempt, and H1c
+observed-scope receipts. Warning-only evidence never authorizes transport. Pre-push produces
+admission evidence only; a separately authorized push later requires exact remote-OID
+readback and cannot inherit transport success as proof.
 
 - [ ] **Step 7: Wire canonical commands and rich errors**
 

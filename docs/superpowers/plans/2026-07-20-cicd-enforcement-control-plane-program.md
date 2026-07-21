@@ -21,6 +21,9 @@
 - Bind every lane to a lineage lease containing base/candidate/tested-merge/remote OIDs plus manifest, policy, toolchain, plan, and prerequisite-receipt digests. Apply the declared dependency invalidation matrix whenever any lease input changes.
 - Require validated preconditions, direct child statuses, strict shell semantics where shell is unavoidable, process-group termination proof, terminal atomic receipts, append-only attempts, exact workspace-set reconciliation, and irreversible candidate/cache/artifact taint before interpreting a result.
 - Produce all human and agent feedback from one validated canonical object with stable versioned domain codes, causal grouping, safe structural locations, canonical owner, allowed/prohibited patch scope, reproduction preconditions, focused verification, retry/exception semantics, related findings, and stable fingerprint.
+- Version the reason catalog as an immutable semantic registry. Active codes use `<plane>.<domain>.<object>.<condition>` and declare lifecycle, default outcome/severity, stages, confidence, retry/remediation classes, required bindings, owner, disclosure, template, fixtures, and escalation/expiry. Historical V1 codes are readable only through explicit deprecated/superseded mappings; meanings are never repurposed.
+- Give every warning an owner, repair SLA, expiry, escalation condition, and distinct successor code. Warning evidence remains advisory and cannot satisfy a mandatory set.
+- Distinguish claimed versus observed scope and public versus private evidence references. Missing scope disclosure, stale reviewer evidence, unproven process identity, or concurrent writer ownership is inconclusive and invalidates dependent evidence.
 - Accept worker or reviewer evidence only after tool self-tests/source digest, task/scope/mode/schema/result digest, sources/commands/changes, observed model/tool identity when available, confidence/risks, terminal status, and lead reproduction are validated.
 - Use synthetic fixtures. Public output never repeats a private match, source excerpt, absolute local path, environment dump, registry value, or reversible low-entropy fingerprint.
 - Keep hooks fast and non-destructive; remote equivalents remain authoritative.
@@ -28,6 +31,15 @@
 - No live service, keyring, deployment, artifact publication, credential, repository-rule, environment, runner-group, or cloud mutation occurs under this source-only program approval.
 - Stop immediately on unexpected `HEAD`, remote, worktree, index, runtime, artifact, receipt, or owned-process-group drift.
 - Use ordinary commits and reversible source changes. Never rewrite public history or automatically remediate public metadata.
+
+Named P0 scenarios include `integrity.writer.concurrent`,
+`integrity.lineage.review-stale`, `integrity.process.identity-unproven`,
+`execution.shell.failure-masked`, `execution.process-group.live`,
+`evidence.receipt.nonterminal`, and `integrity.remote.readback-mismatch`. A separate resumed
+client or worker that can mutate the same worktree/branch invalidates every overlapping
+review and verification receipt even when its resulting commit is clean or uses an approved
+author. Preserve the state, establish one observed writer by PID/start/process-group/CWD and
+ownership evidence, quarantine stale results, and reconcile lineage before resuming.
 
 ## Frozen Evidence and Resumption Lease
 
@@ -80,6 +92,12 @@ receipts. Every consumer after CP-F4 requires current execution-kernel, taint, a
 receipts. CP-F5 parity and atomic ownership proof precede any hook, workflow, aggregate-gate,
 artifact, or deployment promotion.
 
+The post-CP-F2 rider migration `CP-F2e` is a prerequisite for H1c neutral-receipt
+integration and H1d cutover. H1c may develop native exact-object RED fixtures and additive
+readers in parallel, but no new adapter may invent the missing enriched fields or alternate
+taxonomy. H1d also consumes CP-WA1 workspace reconciliation and a typed current-writer/
+reviewer receipt before authority transfer.
+
 CP-W1 keeps producer authentication and protected decision provenance independent:
 
 | Proof | Required binding | Missing or mismatched result |
@@ -128,7 +146,7 @@ narrow the listed paths but may not add a path family without a new reviewed pro
 | Lane | Accountable owner ID | Dedupe key | Allowed source-write scope | Promotion proof / mandatory stop |
 |---|---|---|---|---|
 | CP-F1 | `ci.manifest.owner` | `ci-control/cp-f1` | `controls/ci-control-manifest.json`, `scripts/lib/ci-control/manifest.ts`, `scripts/ci-control-manifest.ts`, its tests, `package.json`, `docs/public-surface.md` | Strict manifest unsafe/safe proof and source commit / stop on lease drift, graph ambiguity, or any other path |
-| CP-F2 | `ci.evidence.owner` | `ci-control/cp-f2` | `scripts/lib/ci-control/{result,reasons,native-adapter}.ts` and their tests | Exact diagnostic/native-adapter truth table / stop on native-decision recomputation, leak, or invalid terminal receipt |
+| CP-F2 | `ci.evidence.owner` | `ci-control/cp-f2` | `scripts/lib/ci-control/{result,reasons,preconditions,attempt,native-adapter}.ts` and their tests | Exact diagnostic/native-adapter/taxonomy truth table / stop on native-decision recomputation, code repurposing, warning without governance, scope overclaim, leak, or invalid terminal receipt |
 | CP-F3 | `ci.classifier.owner` | `ci-control/cp-f3` | `scripts/lib/ci-control/{git-input,classifier}.ts`, `scripts/ci-control-classify.ts`, manifest/package entries, and their tests | Exact-object unsafe/safe classifier proof / stop on ambient bytes, caller-selected risk, or unresolved graph input |
 | CP-H1 | `ci.hooks.owner` | `ci-control/cp-h1` | `.husky/pre-push`, `scripts/{pre-push-guard,hooks-installed-guard,safeguard-diagnostics}.ts`, manifest/package entries, and their tests | Exact multi-ref and hook-byte proof / stop on foreign hook identity, unresolved ref, or automatic hook mutation |
 | CP-WA1 | `ci.workspace-transition.owner` | `ci-control/cp-wa1` | separately admitted workspace snapshot/transition module, precondition schema adapter, and their tests | Exact named workspace-set round trip / stop on omitted ignored path, partial-staging drift, type/mode drift, or unexpected patch member |

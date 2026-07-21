@@ -658,6 +658,16 @@ requires a trusted classifier receipt and closed applicability reason. Every res
 bounded UTC creation/freshness timestamps. A stale result cannot pass even if its
 recorded outcome was pass.
 
+The canonical object also contains `evidenceState`, `rootCauseId`, `causedBy`,
+`relatedFindingIds`, `supersedes`, `claimedScope`, `observedScope`, `scopeLimitations`,
+closed `retryClass` and `remediationClass`, `allowedPatchScope`, `prohibitedChanges`,
+`doNot`, `nextBestAction`, `verificationPlan`, `closureCriteria`,
+`sensitiveFieldsOmitted`, `publicEvidenceRefs`, and `privateEvidenceRefs`. Causal rendering
+orders invalid preconditions first, then the primary finding, dependent symptoms, smallest
+repair, prohibited changes, focused reproduction, safe-neighbor verification, surrounding
+regression, and closure requirements. Claimed scope without equal or explicitly bounded
+observed scope is not passing evidence.
+
 Aggregate envelopes additionally carry `aggregateDecision`; individual results set it to
 JSON `null`. Warnings remain visible but never satisfy a required check. Aggregate exact
 set equality is over `(control ID, expected producer, revision, policy digest)`, so an
@@ -665,7 +675,44 @@ extra similarly named result cannot substitute for a missing requirement.
 
 ### 11.2 Error taxonomy
 
-Codes are stable, categorical, and specific:
+New codes use the stable form `<plane>.<domain>.<object>.<condition>`. Every registered
+record declares schema version; lifecycle (`active`, `deprecated`, or `superseded`);
+default outcome and severity; applicable stages; required confidence and identity bindings;
+closed retry/remediation classes; canonical owner; public disclosure rules; one message
+template; unsafe, safe-neighbor, and unavailable-evidence fixtures; and escalation or
+expiry. Meaning is immutable. A semantic change creates a new code and migration record.
+Deprecated codes remain readable for historical evidence but are not emitted by new
+controls. Planned codes are non-emitting and cannot imply current capability.
+
+Suffix conventions are fail-closed: `unavailable`, `unknown`, `missing`, and `unproven`
+normally map to `INCONCLUSIVE`; `mismatch`, `unauthorized`, `prohibited`, `tampered`, and
+`bypassed` normally map to `BLOCK`; `near-expiry`, `degraded`, and `observed` may map to
+`WARN` only with an owner, repair SLA, expiry, escalation condition, and distinct successor
+code. Unknown codes are `INCONCLUSIVE`, never warning. A defective emitting path is blocked
+by self-tests and its individual results are inconclusive to downstream consumers.
+
+The initial P0 evidence-production register names at least:
+
+| Code | Outcome | Mandatory response |
+|---|---|---|
+| `integrity.writer.concurrent` | Inconclusive | establish one observed writer; invalidate overlapping receipts |
+| `integrity.lineage.review-stale` | Inconclusive | quarantine the review and replay on current bytes |
+| `integrity.process.identity-unproven` | Inconclusive | bind PID, parent, process group, start, CWD, and owned resources |
+| `precondition.runtime.unsupported` | Inconclusive | repair the runtime, replay focused work, then surrounding coverage |
+| `execution.shell.failure-masked` | Block | reject the wrapper until direct status and strict control flow are proven |
+| `execution.process-group.live` | Inconclusive | terminate and prove the owned group ended before terminal publication |
+| `evidence.receipt.nonterminal` | Inconclusive | wait for an atomic terminal receipt bound to exact emitted bytes |
+| `binding.policy.digest-unavailable` | Inconclusive | restore protected-policy provenance; producer identity cannot substitute |
+| `trust.taint.privilege-after-candidate` | Block | end the attempt; taint is irreversible |
+| `integrity.remote.readback-mismatch` | Block | stop promotion and reconcile the published identity |
+
+These identifiers are semantic registry entries, not permission to emit them before their
+owner, fixtures, bindings, renderer, and escalation contract exist. Compatibility names
+with fewer dot-separated segments remain explicit records; a migration may not silently
+reshape or reinterpret them merely to satisfy a segment-count convention.
+
+Codes are stable, categorical, and specific. The following table includes historical V1
+examples whose future migration must use explicit supersession rather than silent rename:
 
 | Family | Example code | Outcome | Required response |
 |---|---|---|---|
