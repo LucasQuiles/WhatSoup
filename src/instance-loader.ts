@@ -15,6 +15,7 @@ import {
 } from './core/agent-config-validator.ts';
 import type { TransportId } from './transport/registry.ts';
 import type { TwilioSmsConfig } from './transport/twilio/types.ts';
+import type { ImessageConfig } from './transport/imessage/types.ts';
 import { errorMessage } from './lib/error-message.ts';
 
 // ---------------------------------------------------------------------------
@@ -102,6 +103,8 @@ interface InstanceConfig {
   transport?: TransportId;
   // Twilio SMS transport config — present only when transport === 'twilio'
   twilioConfig?: TwilioSmsConfig;
+  // iMessage transport config — present only when transport === 'imessage'
+  imessageConfig?: ImessageConfig;
   // Resolved paths (added by loader)
   paths: InstancePaths;
 }

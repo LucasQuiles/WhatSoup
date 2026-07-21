@@ -109,10 +109,62 @@ describe('createConnection factory', () => {
     ).toThrow(/signal.*not yet implemented|not yet wired/i);
   });
 
-  it('imessage transport throws a not-yet-wired error (foundation stub)', () => {
+  it('imessage transport throws when imessageConfig is missing (defence-in-depth)', () => {
     expect(() =>
       createConnection({ transport: 'imessage' }),
-    ).toThrow(/imessage.*not yet implemented|not yet wired/i);
+    ).toThrow(/imessage.*imessageConfig is undefined/i);
+  });
+
+  it('imessage transport constructs an ImessageConnection with a valid imsg config', () => {
+    const conn = createConnection({
+      transport: 'imessage',
+      imessageConfig: {
+        account: 'test',
+        backend: 'imsg',
+        imsgSocketPath: '/tmp/imsg-test.sock',
+        sender: 'appleid@users.noreply.github.com',
+        inboundMode: 'poll',
+        pollIntervalMs: 60000,
+        rateLimit: { messagesPerMinute: 30 },
+      },
+    });
+    expect(conn).toBeDefined();
+    expect(typeof conn.connect).toBe('function');
+    expect(typeof conn.shutdown).toBe('function');
+    expect(conn.getSocket()).toBeNull();
+  });
+
+  it('imessage transport throws when imessageConfig.sender is empty', () => {
+    expect(() =>
+      createConnection({
+        transport: 'imessage',
+        imessageConfig: {
+          account: 'test',
+          backend: 'imsg',
+          sender: '',
+          inboundMode: 'poll',
+          pollIntervalMs: 60000,
+          rateLimit: { messagesPerMinute: 30 },
+        },
+      }),
+    ).toThrow(/missing sender/i);
+  });
+
+  it('imessage transport throws for bluebubbles without a password service', () => {
+    expect(() =>
+      createConnection({
+        transport: 'imessage',
+        imessageConfig: {
+          account: 'test',
+          backend: 'bluebubbles',
+          bluebubblesUrl: 'https://bb.example.test',
+          sender: 'appleid@users.noreply.github.com',
+          inboundMode: 'poll',
+          pollIntervalMs: 60000,
+          rateLimit: { messagesPerMinute: 30 },
+        },
+      }),
+    ).toThrow(/bluebubblesPasswordService is missing/i);
   });
 });
 
