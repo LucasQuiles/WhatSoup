@@ -4319,6 +4319,9 @@ export class AgentRuntime implements Runtime {
     await this.pendingSystemResults.waitUntilDispatchable(systemScopeKey, systemTurnLease);
     if (dispatchCancelled()) return;
 
+    // Assembled on fresh spawn, merged into the user text only at the provider
+    // boundary — never into replay/journal capture.
+    let contextPreamble: string | null = null;
     const wasInactive = !session.getStatus().active;
     if (wasInactive) {
       const spawnOwnership = effectiveMapKey !== undefined
@@ -4360,42 +4363,34 @@ export class AgentRuntime implements Runtime {
       // Successful spawn after a crash — decay the crash counter
       this.decrementCrashCount(effectiveMapKey ?? crashScopeKey);
 
-      // Inject recent chat history so the agent has conversational context.
-      // This runs on every fresh session spawn (not just resume failures),
-      // giving the agent awareness of what's been discussed recently.
-      // Skipped when handleResumeFailed manages its own context recovery to
-      // avoid sending two context blocks to the same fresh session.
+      // Carry recent chat history into the user turn as a preamble so the agent
+      // has conversational context on every fresh session spawn. Skipped when
+      // handleResumeFailed manages its own context recovery to avoid two
+      // context blocks in the same fresh session.
+      //
+      // Deliberately NOT a fresh_session_context system turn: the admission gate
+      // rejects every effect from that owner (purpose_disallows_effect), so an
+      // action-heavy context block makes the injected turn burn its entire 240s
+      // deadline attempting effects it can never apply, and the timeout
+      // quarantine then kills the session under the queued user turn. Observed
+      // on the owner DM upstream (2026-07-17) and reproduced here on ar-bot
+      // 2026-07-21, where it also left the per-chat queue permanently halted.
+      // Merging into the user turn removes the extra round-trip, the deadline
+      // race, and the effect-blocked channel by construction — and there is no
+      // separate context result, so the QR-095 phantom-reply channel no longer
+      // exists on this path. Replay/journal capture keeps the pure user text
+      // because the merge happens only at the provider boundary below.
       const resumeFailedOwnsContext = mapKeyForChat !== undefined && this.resumeFailedHandling.has(mapKeyForChat);
       if (!resumeFailedOwnsContext) {
-        let contextLease: SystemTurnLeaseToken | null = null;
         try {
           const convKey = canonicalConversationKey(chatJid, this.db);
           const recent = excludeCurrentInboundMessage(getRecentMessages(this.db, convKey, 20), effectiveMapKey === undefined ? this.currentTurnSourceMessageId : this.perChatTurnSourceMessageId.get(effectiveMapKey));
           if (recent.length > 0) {
             const lines = this.formatContextLines(recent.reverse());
-            // QR-095: mark under the SAME scope the single/shared result handler
-            // consumes (GLOBAL_TOOL_SCOPE_KEY). mapKey is undefined for single/
-            // shared callers (sendTurnNonShared), so mark(mapKey) would be a no-op
-            // and the injected system turn's result would be mis-classified as a
-            // USER turn (phantom '[Recent chat context]' reply leaks to the user +
-            // wrong post-turn gate). In per_chat mapKey is defined so this is a
-            // no-op there (consumed by the per_chat consumeIfPending(mapKey)).
-            contextLease = this.markSystemTurn(
-              session,
-              effectiveMapKey ?? GLOBAL_TOOL_SCOPE_KEY,
-              'fresh_session_context',
-              chatJid,
-            );
-            await session.sendTurn(`[Recent chat context — read before responding]\n${lines}`);
+            contextPreamble = `[Recent chat context — read before responding]\n${lines}`;
           }
         } catch (err) {
-          log.warn({ err, chatJid }, 'chat context injection failed — proceeding without context');
-          await this.settleFailedSystemTurnDispatch(
-            session,
-            systemScopeKey,
-            contextLease,
-            err,
-          );
+          log.warn({ err, chatJid }, 'chat context assembly failed — proceeding without context');
         }
       }
     }
@@ -4440,7 +4435,11 @@ export class AgentRuntime implements Runtime {
     if (queue) queue.indicateTyping();
 
     try {
-      await this.sendTrustedActorTurn(session, text, actorJid);
+      await this.sendTrustedActorTurn(
+        session,
+        contextPreamble === null ? text : `${contextPreamble}\n\n[Current message]\n${text}`,
+        actorJid,
+      );
     } catch (err) {
       if (actorPushed && effectiveMapKey !== undefined) {
         this.removeFailedExecutingActor(effectiveMapKey, actorJid, systemTurnLease);
