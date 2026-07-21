@@ -1,6 +1,6 @@
 import type { Database } from './database.ts';
 import { toConversationKey } from './conversation-key.ts';
-import { DOMAIN_LID, DOMAIN_SMS, isLidJid, isWhatsAppAuthenticatedJid, normalizeLid, smsJidToPhone } from './jid-constants.ts';
+import { DOMAIN_LID, DOMAIN_SMS, isLidJid, isAuthenticatedSenderJid, normalizeLid, smsJidToPhone } from './jid-constants.ts';
 import { resolveLid } from './lid-resolver.ts';
 
 export type AccessStatus = 'allowed' | 'blocked' | 'pending' | 'seen';
@@ -189,7 +189,7 @@ export function resolvePhoneFromJid(jid: string, db: Database): string {
  * WHY: `resolvePhoneFromJid` collapses a spoofable `<digits>@sms` JID to the SAME
  * bare phone as a WhatsApp-authenticated admin. Every admin/allow GRANT decision
  * MUST gate on authenticated transport BEFORE matching the phone (see the
- * `isWhatsAppAuthenticatedJid` doc in jid-constants.ts). This primitive collapses
+ * `isAuthenticatedSenderJid` doc in jid-constants.ts). This primitive collapses
  * the easy-to-forget two-step discipline (call the predicate, THEN the resolver,
  * in the right order, every time) into a single fail-closed call, so a grant site
  * cannot get it wrong.
@@ -207,7 +207,7 @@ export function resolvePhoneFromJidForGrant(
   db: Database,
 ): string | null {
   // Explicit null check also narrows `jid` to a non-null string for the resolver.
-  if (jid == null || !isWhatsAppAuthenticatedJid(jid)) return null;
+  if (jid == null || !isAuthenticatedSenderJid(jid)) return null;
   return resolvePhoneFromJid(jid, db);
 }
 

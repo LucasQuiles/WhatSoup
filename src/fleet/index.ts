@@ -11,7 +11,8 @@ import { FleetDbReader } from './db-reader.ts';
 import { createStaticHandler } from './static.ts';
 import { createLivenessHandler } from './livez.ts';
 import { handleGetLines, handleGetLine, handleGetLineProviderStatus } from './routes/lines.ts';
-import { handleGetLineCheckpoints } from './routes/checkpoints.ts';
+import { handleGetLineCheckpoints, handleRestoreCheckpoint } from './routes/checkpoints.ts';
+import { handleGetLiveSessions } from './routes/live-sessions.ts';
 import { handleGetProviders } from './routes/providers.ts';
 import { handlePutCredential, handleDeleteCredential, handleVerifyCredential, handleGetCredential, setExtraCredentialServices, type CredentialDeps } from './routes/credentials.ts';
 import { handleGetSilences, handleAddSilence, handleRemoveSilence } from './routes/silence.ts';
@@ -21,6 +22,7 @@ import { handleGetFeed } from './routes/feed.ts';
 import { handleGetMetrics } from './routes/metrics.ts';
 import { handleGetFleetMetrics } from './routes/fleet-metrics.ts';
 import { handleGetRateLimits } from './routes/rate-limits.ts';
+import { handleGetApprovals, handlePostApprovalDecision } from './routes/approvals.ts';
 import { handleGetVersion, handleUpdate } from './routes/update.ts';
 import { createServiceManager, type ServiceManager } from './platform.ts';
 import {
@@ -117,6 +119,10 @@ type RouteParamsByHandler = {
   getLineProviderStatus: NameRouteParams;
   getLineCheckpoints: NameRouteParams;
   getRateLimits: NameRouteParams;
+  restoreCheckpoint: NameRouteParams;
+  getLiveSessions: NameRouteParams;
+  getApprovals: NameRouteParams;
+  postApprovalDecision: NameRouteParams;
   getSilences: EmptyRouteParams;
   addSilence: EmptyRouteParams;
   removeSilence: NameRouteParams;
@@ -187,6 +193,9 @@ const NAME_ROUTE_HANDLERS = new Set<NamedRouteKey>([
   'getLineProviderStatus',
   'getLineCheckpoints',
   'getRateLimits',
+  'getLiveSessions',
+  'getApprovals',
+  'postApprovalDecision',
   'putCredential',
   'deleteCredential',
   'verifyCredential',
@@ -247,6 +256,10 @@ const handlers: { [K in RouteKey]: RouteHandler<K> } = {
   getLineProviderStatus: (req, res, deps, params) => handleGetLineProviderStatus(req, res, deps, params),
   getLineCheckpoints: (req, res, deps, params) => handleGetLineCheckpoints(req, res, deps, params),
   getRateLimits: (req, res, deps, params) => handleGetRateLimits(req, res, deps, params),
+  restoreCheckpoint: (req, res, deps, params) => handleRestoreCheckpoint(req, res, deps, params),
+  getLiveSessions: (req, res, deps, params) => handleGetLiveSessions(req, res, deps, params),
+  getApprovals: (req, res, deps, params) => handleGetApprovals(req, res, deps, params),
+  postApprovalDecision: (req, res, deps, params) => handlePostApprovalDecision(req, res, deps, params),
   getSilences:  (req, res, _deps, _params) => handleGetSilences(req, res),
   addSilence:   (req, res, _deps, _params) => handleAddSilence(req, res),
   removeSilence: (req, res, _deps, params) => handleRemoveSilence(req, res, { instance: params.name }),
@@ -343,6 +356,10 @@ const ROUTES = [
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/provider-status$/, handler: 'getLineProviderStatus' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/checkpoints$/, handler: 'getLineCheckpoints' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/rate-limits$/, handler: 'getRateLimits' },
+  { method: 'POST',  path: /^\/api\/lines\/(?<name>[^/]+)\/checkpoints\/restore$/, handler: 'restoreCheckpoint' },
+  { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/live-sessions$/, handler: 'getLiveSessions' },
+  { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/approvals$/, handler: 'getApprovals' },
+  { method: 'POST',  path: /^\/api\/lines\/(?<name>[^/]+)\/approvals\/decision$/, handler: 'postApprovalDecision' },
   { method: 'DELETE', path: /^\/api\/lines\/(?<name>[^/]+)$/, handler: 'deleteLine' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)$/, handler: 'getLine' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/chats$/, handler: 'getChats' },

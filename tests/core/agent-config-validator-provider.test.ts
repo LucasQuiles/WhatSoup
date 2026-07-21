@@ -116,10 +116,12 @@ function agentWithProviderConfig(providerConfig: unknown): Record<string, unknow
     adminPhones: ['15555550123'],
     healthPort: 9095,
     systemPrompt: 'hi',
-    // opencode-cli + baseUrl requires a resolvable model (the custom endpoint
-    // block is inert without one — see agent-config-validator-crossfield
-    // coverage); set one here so this suite isolates the URL-shape rules.
-    model: 'whatsoup-cloud/some-model',
+    // opencode-cli + baseUrl requires a resolvable model whose prefix maps to a
+    // known credential service (the custom endpoint block is inert without one,
+    // and an unmapped prefix is rejected at admission — see
+    // agent-config-validator-crossfield coverage); set a mapped one here so this
+    // suite isolates the URL-shape rules.
+    model: 'minimax/some-model',
     agentOptions: {
       sessionScope: 'single',
       provider: 'opencode-cli',

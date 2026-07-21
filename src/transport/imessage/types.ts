@@ -26,11 +26,13 @@
 export const E164_RE = /^\+[1-9]\d{6,14}$/;
 
 /**
- * AppleID email shape — iMessage accepts iCloud / me.com / mac.com
- * addresses plus any email registered against an AppleID. We accept any
- * RFC-5322-ish shape here; the daemon/Server is the final arbiter.
+ * AppleID email shape. Defined in core/transport-refs.ts and re-exported here
+ * so adapter code can keep importing it from the transport it belongs to:
+ * config validation in src/core also needs the pattern, and core may only
+ * import [core, lib], so owning it under transport/ would force a
+ * core → transport edge that the import-boundary ratchet rejects.
  */
-export const APPLEID_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+export { APPLEID_EMAIL_RE } from '../../core/transport-refs.ts';
 
 /** Backend implementation selector. */
 export type ImessageBackend = 'imsg' | 'bluebubbles';
