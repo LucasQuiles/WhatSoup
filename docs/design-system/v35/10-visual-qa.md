@@ -115,3 +115,30 @@ fleet PASS · hatch PASS · agents PASS · skills-hub PASS · dream-lab PASS · 
 deployments PASS · settings PASS · splash PASS — 9/9 after three fix cycles. Two findings
 rejected with spec citation: wordmark accent-'U' (brand.md §1.1 locked) and the marketing
 headline accent word (Landing precedent + D4).
+
+---
+
+# Pass C — grok-4.5 via xAI OAuth on maclab (fourth family, adversarial)
+
+Returned 0/9 FAIL — the harshest verdict. Disposition of its findings:
+
+**Rejected with evidence (majority of claims):**
+- "Blue leakage: chat mode cyan / local badge cyan" — mode channels (teal/cyan/violet) are
+  sanctioned law since v3 (6 channels + 1 accent); the audit prompt under-specified the
+  mode-color exception. Mode cyan ≠ action blue.
+- All Rule-4 "below 11px" claims — Chromium-computed font sizes for every flagged class:
+  exactly 11px at the floor everywhere. Pixel-estimation errors.
+- "WA glyphs green / brand tints" — state dots are the sanctioned status channel; glyphs are
+  neutral `currentColor`.
+- "Splash gradient orbs" — flat 4–5% opacity glyph geometry, not gradients.
+- "Hatch avatar halo" — ceremony-scoped one-shot, fades to 0 post-beat.
+
+**Real items found and fixed (3 — the codex pass missed these):**
+1. Skills Hub source badges were chromatically typed (official/community/local tinted) →
+   neutral pills; thirdparty keeps risk tint (status semantics).
+2. Inbox Line card "live" was text-only → shape marker added.
+3. `.btn.ghost` had no visible affordance anywhere → hairline border on all surfaces.
+
+**Verdict after fixes:** grok's FAIL resolves to PASS with the same two spec citations as
+before. The 3 real items would not have been found without a fourth family — reviewer
+diversity is doing its job.

@@ -35,7 +35,7 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
 .btn { display:inline-flex; align-items:center; gap:8px; padding:8px 14px; border-radius:6px; border:1px solid var(--hair-2); background:var(--raised); color:var(--t1); font:600 12.5px/16px inherit; cursor:pointer; transition:transform .16s ease-out, box-shadow .16s ease-out; }
 .btn:hover { transform:translateY(-1px); box-shadow:var(--shadow-lift); }
 .btn.primary { background:var(--accent); color:var(--accent-fg); border-color:transparent; }
-.btn.ghost { background:transparent; color:var(--t2); }
+.btn.ghost { background:transparent; color:var(--t2); border:1px solid var(--hair-2); }
 .btn.sm { padding:5px 10px; font-size:11.5px; }
 /* hub mode toggle */
 .modebar { display:flex; gap:4px; background:var(--inset); border:1px solid var(--hair); border-radius:8px; padding:3px; }
@@ -64,9 +64,9 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
 .scard .nm { font:700 14px/18px "Bricolage Grotesque",sans-serif; }
 .scard .desc { color:var(--t3); font-size:12px; margin-top:1px; }
 .src { font:600 11px/12px "IBM Plex Mono",monospace; letter-spacing:.06em; padding:3px 8px; border-radius:99px; text-transform:uppercase; flex:none; }
-.src.official { background:color-mix(in srgb, var(--ok) 12%, transparent); color:var(--ok); }
-.src.community { background:color-mix(in srgb, var(--warn) 12%, transparent); color:var(--warn); }
-.src.local { background:color-mix(in srgb, var(--m-chat) 12%, transparent); color:var(--m-chat); }
+.src.official { background:var(--inset); border:1px solid var(--hair-2); color:var(--t2); }
+.src.community { background:var(--inset); border:1px solid var(--hair-2); color:var(--t2); }
+.src.local { background:var(--inset); border:1px solid var(--hair-2); color:var(--t2); }
 .src.thirdparty { background:color-mix(in srgb, var(--crit) 10%, transparent); color:var(--crit); }
 .scard .acts { margin-left:auto; display:flex; gap:6px; flex:none; }
 .compat { display:flex; align-items:center; gap:14px; margin-top:12px; padding:8px 10px; border:1px solid var(--hair); border-radius:8px; background:var(--inset); }
