@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 79
+**Total entries:** 80
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=7, plan=40, review=3, spec=28, state=1 |
-| Status | active=17, closed=4, completed=32, deferred=7, pending=14, unknown=5 |
-| Status source | body-marker=75, fallback=3, state-md-status=1 |
+| Kind | handoff=7, plan=41, review=3, spec=28, state=1 |
+| Status | active=17, closed=4, completed=32, deferred=7, pending=15, unknown=5 |
+| Status source | body-marker=76, fallback=3, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -118,7 +118,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-07-16-boundary-contract-feedback-implementation-notes.md` | handoff | active | body-marker | boundary-contract-feedback-implementation-notes | 2026-07-16 |  |
 | `docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md` | handoff | pending | body-marker | boundary-core-history-mining | 2026-07-16 |  |
 
-### docs/superpowers/plans  _(40 entries)_
+### docs/superpowers/plans  _(41 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -162,6 +162,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-07-17-macos-credential-durability.md` | plan | unknown | fallback | macos-credential-durability | 2026-07-17 |  |
 | `docs/superpowers/plans/2026-07-20-cicd-control-foundation.md` | plan | active | body-marker | cicd-control-foundation | 2026-07-21 |  |
 | `docs/superpowers/plans/2026-07-20-cicd-enforcement-control-plane-program.md` | plan | active | body-marker | cicd-enforcement-control-plane-program | 2026-07-21 |  |
+| `docs/superpowers/plans/2026-07-20-cicd-workflow-portability.md` | plan | pending | body-marker | cicd-workflow-portability | 2026-07-21 |  |
 
 ### docs/superpowers/reviews  _(3 entries)_
 
@@ -217,4 +218,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-21T08:23:04Z from commit `138fe5d2032a591d4ae5abd42697670a34ec8112`
+- Generated at 2026-07-21T14:54:57Z from commit `1bdd8ea37c7c9f3fb600fe0f5a68901398c50ca3`

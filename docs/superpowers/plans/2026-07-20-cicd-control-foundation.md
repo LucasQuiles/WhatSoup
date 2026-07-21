@@ -10,6 +10,8 @@
 
 **Tech Stack:** TypeScript, Node.js 24.15.0, Vitest 4, Git plumbing, JSON, SHA-256, Husky, repository pinned-runtime wrappers.
 
+**Current source progress (2026-07-21):** CP-F1 is present at `fe02ec7150b1bc1165e06d4457cd728c543b0e5b`; CP-F2 at `1ef2e93ed4b44b279402610e62655bd5ba330ff8`; CP-F3 at `5abc4438167a5d93fb0205e8b7083a6e77ec7691`; CP-H1a at `e013fcd8bb1fc1933a1a7f103d9848e1d7f6c0ba`; CP-H1b/ref-policy follow-up at `dd474cc7aed4b807a58c0cf1c22dead411709bb2` and `e6e6c10fedb8829693d4f94b6f02cef7e4741c7e`; and CP-F2e at `1bdd8ea37c7c9f3fb600fe0f5a68901398c50ca3`. CP-WA1, CP-H1c/H1d, CP-F4, and CP-F5 remain incomplete. The separately reviewed workflow/portability plan is planning evidence only and cannot begin authoritative mutation until those prerequisites close.
+
 ## Global Constraints
 
 - Follow the program guardrails in `2026-07-20-cicd-enforcement-control-plane-program.md`.
