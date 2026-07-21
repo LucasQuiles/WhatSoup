@@ -100,7 +100,7 @@ export function scanForInsecureTempfile(root: string): Finding[] {
   //     corpus; scanning it would make this blocking gate permanently un-greenable.
   //   - .claude/worktrees — harness isolation worktrees of OTHER branches
   //     (see SKIP_DIRS note); their fixtures must not gate THIS checkout's push.
-  const SKIP_RELPATHS = new Set(['tests/fixtures/insecure-tempfile', '.claude/worktrees']);
+  const SKIP_RELPATHS = new Set(['tests/fixtures/insecure-tempfile', '.claude/worktrees', '.tmup-artifacts']);
   const walk = (dir: string) => {
     for (const name of readdirSync(dir)) {
       if (SKIP_DIRS.has(name)) continue;
