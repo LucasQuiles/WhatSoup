@@ -273,6 +273,51 @@
       }
     },
     {
+      "id": "ci.outgoing-ref-policy",
+      "policyCategory": "source-integrity",
+      "domain": "source-integrity",
+      "owner": "ci-ref-policy-owner",
+      "decisionOwner": "outgoing-ref-policy-decision-owner",
+      "implementation": {
+        "commandId": "ci:ref-policy",
+        "detectorId": "outgoing-ref-policy",
+        "nativeSchemaVersion": 1
+      },
+      "stages": ["pre-push"],
+      "trustClass": "untrusted-candidate",
+      "mode": "assist",
+      "severity": "high",
+      "riskTiers": ["low", "standard", "elevated", "system-wide"],
+      "surfaces": ["outgoing-ref-policy"],
+      "dependencies": ["ci.hooks.installed", "repo.hygiene"],
+      "evidence": {
+        "schemaVersion": 1,
+        "paths": ["scripts/ci-control-ref-policy.ts", "scripts/lib/ci-control/ref-policy.ts"],
+        "digestBinding": "exact",
+        "freshness": "receipt"
+      },
+      "failurePolicy": {
+        "finding": "block",
+        "crash": "inconclusive",
+        "timeout": "inconclusive",
+        "missing": "inconclusive",
+        "skipped": "inconclusive",
+        "cancelled": "inconclusive",
+        "stale": "inconclusive"
+      },
+      "remediation": {
+        "summary": "Evaluate every bounded outgoing ref update against the reviewed manifest policy without changing the active hook.",
+        "steps": ["Restore exact remote, ref, object, and graph evidence.", "Repair only the named ref-policy finding; do not bypass or widen the policy."],
+        "reproduction": "npm run ci:ref-policy -- --help"
+      },
+      "exceptionPolicy": {
+        "allowed": false,
+        "scope": "none",
+        "approverRole": null,
+        "maxLifetimeSeconds": null
+      }
+    },
+    {
       "id": "ci.exact-revision-classifier",
       "policyCategory": "source-integrity",
       "domain": "source-integrity",
@@ -318,7 +363,7 @@
       }
     }
   ],
-  "requiredSurfaces": ["repository-source", "public-output", "test-integrity", "architecture-fitness", "workflow-safeguards", "hook-installation", "risk-classification"],
+  "requiredSurfaces": ["repository-source", "public-output", "test-integrity", "architecture-fitness", "workflow-safeguards", "hook-installation", "outgoing-ref-policy", "risk-classification"],
   "riskRules": [
     {
       "id": "risk.documentation",
@@ -390,7 +435,7 @@
       "id": "risk.control-policy",
       "tier": "system-wide",
       "reasons": ["ci.classification.policy"],
-      "pathPrefixes": ["controls/", "docs/current-program.md", "docs/superpowers/", "scripts/ci-control-classify.ts", "scripts/ci-control-manifest.ts", "scripts/hooks-installed-guard.ts", "scripts/lib/ci-control/", "scripts/lib/verification/boundary-run/schema.ts", "scripts/lib/verification/boundary-run/shared.ts", "src/lib/git-env.ts", "tests/scripts/hooks-installed-guard.test.ts"]
+      "pathPrefixes": ["controls/", "docs/current-program.md", "docs/superpowers/", "scripts/ci-control-classify.ts", "scripts/ci-control-manifest.ts", "scripts/ci-control-ref-policy.ts", "scripts/hooks-installed-guard.ts", "scripts/lib/ci-control/", "scripts/lib/verification/boundary-run/schema.ts", "scripts/lib/verification/boundary-run/shared.ts", "src/lib/git-env.ts", "tests/scripts/ci-control-manifest.test.ts", "tests/scripts/ci-control-ref-policy.test.ts", "tests/scripts/hooks-installed-guard.test.ts"]
     }
   ],
   "stages": ["pre-commit", "pre-push", "pull-request", "merge-group", "default-branch", "release"],
@@ -402,7 +447,26 @@
     "guard:lint:src": ["bash", "scripts/run-with-pinned-node.sh", "scripts/eslint-fitness-check.ts"],
     "guard:safeguard-diagnostics": ["bash", "scripts/run-with-pinned-node.sh", "scripts/safeguard-diagnostics.ts"],
     "guard:hooks-installed": ["bash", "scripts/run-with-pinned-node.sh", "scripts/hooks-installed-guard.ts", "--json"],
+    "ci:ref-policy": ["bash", "scripts/run-with-pinned-node.sh", "scripts/ci-control-ref-policy.ts"],
     "ci:classify": ["bash", "scripts/run-with-pinned-node.sh", "scripts/ci-control-classify.ts"]
+  },
+  "outgoingRefPolicy": {
+    "schemaVersion": 1,
+    "controlId": "ci.outgoing-ref-policy",
+    "remotes": [
+      {
+        "name": "origin",
+        "repositoryId": "github.com/LucasQuiles/WhatSoup"
+      }
+    ],
+    "branchNamespace": "refs/heads/",
+    "releaseBranches": ["refs/heads/main"],
+    "releaseTagPrefixes": ["refs/tags/v"],
+    "allowedDeleteRefs": [],
+    "branchObjectType": "commit",
+    "releaseTagObjectType": "annotated-tag",
+    "nonFastForward": "block",
+    "unknownRef": "inconclusive"
   },
   "resultSchema": "ci-control-result-v1",
   "exceptionSchema": "ci-control-exception-v1"

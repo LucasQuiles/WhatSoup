@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { parseBoundaryJsonBytes } from '../verification/boundary-run/schema.ts';
+import { isValidGitRefName, type OutgoingRefPolicyV1 } from './ref-policy.ts';
 
 export const MAX_CONTROL_COUNT = 10_000;
 export const MAX_MANIFEST_BYTES = 1_000_000;
@@ -144,6 +145,7 @@ export interface ControlManifestV1 {
   stages: ControlStage[];
   trustClasses: TrustClass[];
   canonicalCommands: Record<string, string[]>;
+  outgoingRefPolicy: OutgoingRefPolicyV1 | null;
   resultSchema: 'ci-control-result-v1';
   exceptionSchema: 'ci-control-exception-v1';
 }
@@ -197,6 +199,7 @@ const TOP_KEYS = [
   'stages',
   'trustClasses',
   'canonicalCommands',
+  'outgoingRefPolicy',
   'resultSchema',
   'exceptionSchema',
 ] as const;
@@ -225,6 +228,8 @@ const FAILURE_KEYS = ['finding', 'crash', 'timeout', 'missing', 'skipped', 'canc
 const REMEDIATION_KEYS = ['summary', 'steps', 'reproduction'] as const;
 const EXCEPTION_KEYS = ['allowed', 'scope', 'approverRole', 'maxLifetimeSeconds'] as const;
 const RISK_RULE_KEYS = ['id', 'tier', 'reasons', 'pathPrefixes'] as const;
+const REF_POLICY_KEYS = ['allowedDeleteRefs', 'branchNamespace', 'branchObjectType', 'controlId', 'nonFastForward', 'releaseBranches', 'releaseTagObjectType', 'releaseTagPrefixes', 'remotes', 'schemaVersion', 'unknownRef'] as const;
+const APPROVED_REMOTE_KEYS = ['name', 'repositoryId'] as const;
 
 function issue(code: string, path: string, message: string): ManifestIssue {
   return { code, path, message };
@@ -417,6 +422,57 @@ function validateRiskRule(value: unknown, path: string, problems: ManifestIssue[
   stringArray(record.pathPrefixes, `${path}.pathPrefixes`, problems, { nonEmpty: true });
 }
 
+function validateOutgoingRefPolicy(value: unknown, path: string, problems: ManifestIssue[]): OutgoingRefPolicyV1 | null {
+  if (value === null) return null;
+  const record = inspectExactObject(value, REF_POLICY_KEYS, path, problems);
+  if (record === null) return null;
+  if (record.schemaVersion !== 1 || record.controlId !== 'ci.outgoing-ref-policy') {
+    problems.push(issue('ci.manifest.invalid-enum', path, 'unsupported outgoing-ref policy identity'));
+  }
+  if (record.branchNamespace !== 'refs/heads/' || record.branchObjectType !== 'commit' || record.releaseTagObjectType !== 'annotated-tag' || record.nonFastForward !== 'block' || record.unknownRef !== 'inconclusive') {
+    problems.push(issue('ci.manifest.invalid-enum', path, 'unsupported outgoing-ref policy value'));
+  }
+  const releaseBranches = stringArray(record.releaseBranches, `${path}.releaseBranches`, problems, { nonEmpty: true }) ?? [];
+  const releaseTagPrefixes = stringArray(record.releaseTagPrefixes, `${path}.releaseTagPrefixes`, problems, { nonEmpty: true }) ?? [];
+  const allowedDeleteRefs = stringArray(record.allowedDeleteRefs, `${path}.allowedDeleteRefs`, problems) ?? [];
+  for (const [key, values] of [['releaseBranches', releaseBranches], ['allowedDeleteRefs', allowedDeleteRefs]] as const) {
+    values.forEach((entry, index) => {
+      if (!isValidGitRefName(entry)) problems.push(issue('ci.manifest.invalid-ref', `${path}.${key}[${index}]`, 'invalid reviewed ref identity'));
+    });
+  }
+  releaseTagPrefixes.forEach((entry, index) => {
+    if (!entry.startsWith('refs/tags/') || !isValidGitRefName(`${entry}x`)) {
+      problems.push(issue('ci.manifest.invalid-ref', `${path}.releaseTagPrefixes[${index}]`, 'invalid release-tag prefix'));
+    }
+  });
+  allowedDeleteRefs.forEach((entry, index) => {
+    if (releaseBranches.includes(entry) || releaseTagPrefixes.some((prefix) => entry.startsWith(prefix))) {
+      problems.push(issue('ci.manifest.ref-policy-protected-delete', `${path}.allowedDeleteRefs[${index}]`, 'release branches and release tags cannot be deletion exceptions'));
+    }
+  });
+  if (!Array.isArray(record.remotes) || record.remotes.length === 0 || record.remotes.length > 16) {
+    problems.push(issue('ci.manifest.invalid-array', `${path}.remotes`, 'a bounded non-empty remote array is required'));
+  } else {
+    const identities = new Set<string>();
+    record.remotes.forEach((entry, index) => {
+      const remote = inspectExactObject(entry, APPROVED_REMOTE_KEYS, `${path}.remotes[${index}]`, problems);
+      if (remote === null) return;
+      requiredString(remote.name, `${path}.remotes[${index}].name`, problems);
+      requiredString(remote.repositoryId, `${path}.remotes[${index}].repositoryId`, problems);
+      if (typeof remote.name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(remote.name)
+        || typeof remote.repositoryId !== 'string'
+        || !/^[A-Za-z0-9.-]+\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(remote.repositoryId)) {
+        problems.push(issue('ci.manifest.invalid-remote', `${path}.remotes[${index}]`, 'invalid normalized remote identity'));
+        return;
+      }
+      const identity = `${remote.name}\0${remote.repositoryId}`;
+      if (identities.has(identity)) problems.push(issue('ci.manifest.duplicate-value', `${path}.remotes[${index}]`, 'duplicate remote identity'));
+      identities.add(identity);
+    });
+  }
+  return record as unknown as OutgoingRefPolicyV1;
+}
+
 function validateManifest(value: unknown): ManifestIssue[] {
   if (!isRecord(value)) return [issue('ci.manifest.type', '$', 'manifest must be an object')];
 
@@ -458,6 +514,7 @@ function validateManifest(value: unknown): ManifestIssue[] {
       stringArray(command, `$.canonicalCommands.${commandId}`, problems, { nonEmpty: true, unique: false });
     }
   }
+  const outgoingRefPolicy = validateOutgoingRefPolicy(top.outgoingRefPolicy, '$.outgoingRefPolicy', problems);
 
   const ids = new Set<string>();
   const ownership = new Set<string>();
@@ -535,6 +592,34 @@ function validateManifest(value: unknown): ManifestIssue[] {
     visited.add(id);
   };
   for (const id of byId.keys()) visit(id);
+
+  if (outgoingRefPolicy !== null) {
+    const owner = byId.get(outgoingRefPolicy.controlId);
+    const refCommand = commands?.['ci:ref-policy'];
+    if (owner === undefined
+      || owner.owner !== 'ci-ref-policy-owner'
+      || owner.decisionOwner !== 'outgoing-ref-policy-decision-owner'
+      || owner.implementation.commandId !== 'ci:ref-policy'
+      || owner.implementation.detectorId !== 'outgoing-ref-policy'
+      || owner.implementation.nativeSchemaVersion !== 1
+      || owner.mode !== 'assist'
+      || owner.trustClass !== 'untrusted-candidate'
+      || owner.stages.length !== 1
+      || owner.stages[0] !== 'pre-push'
+      || owner.surfaces.length !== 1
+      || owner.surfaces[0] !== 'outgoing-ref-policy'
+      || !Array.isArray(refCommand)
+      || refCommand.length !== 3
+      || refCommand[0] !== 'bash'
+      || refCommand[1] !== 'scripts/run-with-pinned-node.sh'
+      || refCommand[2] !== 'scripts/ci-control-ref-policy.ts') {
+      problems.push(issue('ci.manifest.ref-policy-control-mismatch', '$.outgoingRefPolicy.controlId', 'outgoing-ref policy must cross-link its report-only canonical control'));
+    }
+  } else if (byId.has('ci.outgoing-ref-policy')
+    || referencedCommands.has('ci:ref-policy')
+    || requiredSurfaces.includes('outgoing-ref-policy')) {
+    problems.push(issue('ci.manifest.ref-policy-control-mismatch', '$.outgoingRefPolicy', 'registered outgoing-ref capability requires its reviewed policy'));
+  }
 
   const requiredIds = new Set<string>();
   for (const surface of requiredSurfaces) {
@@ -626,6 +711,14 @@ export function canonicalizeControlManifest(manifest: ControlManifestV1): string
         .sort()
         .map((commandId) => [commandId, [...manifest.canonicalCommands[commandId]!]]),
     ),
+    outgoingRefPolicy: manifest.outgoingRefPolicy === null ? null : {
+      ...manifest.outgoingRefPolicy,
+      remotes: [...manifest.outgoingRefPolicy.remotes]
+        .sort((left, right) => `${left.name}\0${left.repositoryId}`.localeCompare(`${right.name}\0${right.repositoryId}`)),
+      releaseBranches: sorted(manifest.outgoingRefPolicy.releaseBranches),
+      releaseTagPrefixes: sorted(manifest.outgoingRefPolicy.releaseTagPrefixes),
+      allowedDeleteRefs: sorted(manifest.outgoingRefPolicy.allowedDeleteRefs),
+    },
   };
   return stableJson(normalized);
 }

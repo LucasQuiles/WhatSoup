@@ -46,6 +46,20 @@ const REASONS = [
   { schemaVersion: 1, code: 'ci.hooks.installed-bytes-mismatch', guidanceKind: 'precondition-correction', defaultOutcome: 'inconclusive' },
   { schemaVersion: 1, code: 'ci.hooks.head-moved', guidanceKind: 'evidence-recovery', defaultOutcome: 'inconclusive' },
   { schemaVersion: 1, code: 'ci.hooks.evidence-unavailable', guidanceKind: 'evidence-recovery', defaultOutcome: 'inconclusive' },
+  { schemaVersion: 1, code: 'ci.refs.pass', guidanceKind: 'none', defaultOutcome: 'pass' },
+  { schemaVersion: 1, code: 'ci.refs.input-malformed', guidanceKind: 'precondition-correction', defaultOutcome: 'inconclusive' },
+  { schemaVersion: 1, code: 'ci.refs.input-budget', guidanceKind: 'precondition-correction', defaultOutcome: 'inconclusive' },
+  { schemaVersion: 1, code: 'ci.refs.input-duplicate', guidanceKind: 'precondition-correction', defaultOutcome: 'inconclusive' },
+  { schemaVersion: 1, code: 'ci.refs.remote-identity-unavailable', guidanceKind: 'precondition-correction', defaultOutcome: 'inconclusive' },
+  { schemaVersion: 1, code: 'ci.refs.remote-policy-prohibited', guidanceKind: 'source-correction', defaultOutcome: 'block' },
+  { schemaVersion: 1, code: 'ci.refs.policy-unknown', guidanceKind: 'evidence-recovery', defaultOutcome: 'inconclusive' },
+  { schemaVersion: 1, code: 'ci.refs.graph-unavailable', guidanceKind: 'evidence-recovery', defaultOutcome: 'inconclusive' },
+  { schemaVersion: 1, code: 'ci.refs.delete-prohibited', guidanceKind: 'source-correction', defaultOutcome: 'block' },
+  { schemaVersion: 1, code: 'ci.refs.force-update-prohibited', guidanceKind: 'source-correction', defaultOutcome: 'block' },
+  { schemaVersion: 1, code: 'ci.refs.object-type-prohibited', guidanceKind: 'source-correction', defaultOutcome: 'block' },
+  { schemaVersion: 1, code: 'ci.refs.local-source-unbound', guidanceKind: 'precondition-correction', defaultOutcome: 'inconclusive' },
+  { schemaVersion: 1, code: 'ci.refs.object-format-unsupported', guidanceKind: 'precondition-correction', defaultOutcome: 'inconclusive' },
+  { schemaVersion: 1, code: 'ci.refs.private-binding-unavailable', guidanceKind: 'evidence-recovery', defaultOutcome: 'inconclusive' },
 ] as const satisfies readonly ReasonDefinitionV1[];
 
 export const REGISTERED_REASON_CODES = new Set<string>(REASONS.map(({ code }) => code));

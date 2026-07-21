@@ -88,6 +88,7 @@ function manifest(controls: Record<string, unknown>[] = [control('repo.hygiene')
     stages: ['pre-commit'],
     trustClasses: ['untrusted-candidate'],
     canonicalCommands: commands,
+    outgoingRefPolicy: null,
     resultSchema: 'ci-control-result-v1',
     exceptionSchema: 'ci-control-exception-v1',
   };
@@ -123,8 +124,9 @@ describe('canonical CI control manifest', () => {
     expect(inventory.schemaVersion).toBe(1);
     expect(inventory.manifestDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(inventory.controls.length).toBeGreaterThan(0);
-    expect(inventory.controls.filter(({ id }) => id !== 'ci.hooks.installed').every((entry) => entry.availability === 'blocking')).toBe(true);
+    expect(inventory.controls.filter(({ id }) => !['ci.hooks.installed', 'ci.outgoing-ref-policy'].includes(id)).every((entry) => entry.availability === 'blocking')).toBe(true);
     expect(inventory.controls.find(({ id }) => id === 'ci.hooks.installed')?.availability).toBe('report-only');
+    expect(inventory.controls.find(({ id }) => id === 'ci.outgoing-ref-policy')?.availability).toBe('report-only');
     expect(inventory.controls.map((entry) => entry.id)).toEqual(expect.arrayContaining([
       'architecture.fitness-lint',
       'test.integrity',
@@ -137,7 +139,7 @@ describe('canonical CI control manifest', () => {
       'scheduled',
     ]);
     expect(loaded.controls.every((entry) => entry.trustClass === 'untrusted-candidate')).toBe(true);
-    expect(loaded.controls.filter(({ id }) => !['ci.exact-revision-classifier', 'ci.hooks.installed'].includes(id)).every((entry) => entry.evidence.schemaVersion === null)).toBe(true);
+    expect(loaded.controls.filter(({ id }) => !['ci.exact-revision-classifier', 'ci.hooks.installed', 'ci.outgoing-ref-policy'].includes(id)).every((entry) => entry.evidence.schemaVersion === null)).toBe(true);
     expect(loaded.controls.find(({ id }) => id === 'ci.exact-revision-classifier')?.evidence).toMatchObject({
       schemaVersion: 1,
       paths: CLASSIFIER_TOOL_SOURCE_PATHS,
@@ -145,11 +147,29 @@ describe('canonical CI control manifest', () => {
       freshness: 'receipt',
     });
     expect(loaded.riskRules.length).toBeGreaterThan(0);
+    expect(loaded.riskRules.find(({ id }) => id === 'risk.control-policy')?.pathPrefixes)
+      .toEqual(expect.arrayContaining([
+        'scripts/ci-control-ref-policy.ts',
+        'tests/scripts/ci-control-manifest.test.ts',
+        'tests/scripts/ci-control-ref-policy.test.ts',
+      ]));
     expect(loaded.canonicalCommands['ci:classify']).toEqual([
       'bash',
       'scripts/run-with-pinned-node.sh',
       'scripts/ci-control-classify.ts',
     ]);
+    expect(loaded.canonicalCommands['ci:ref-policy']).toEqual([
+      'bash',
+      'scripts/run-with-pinned-node.sh',
+      'scripts/ci-control-ref-policy.ts',
+    ]);
+    expect(loaded.outgoingRefPolicy).toMatchObject({
+      schemaVersion: 1,
+      controlId: 'ci.outgoing-ref-policy',
+      allowedDeleteRefs: [],
+      nonFastForward: 'block',
+      unknownRef: 'inconclusive',
+    });
     expect(loaded.canonicalCommands['guard:test-integrity:required']).toEqual([
       'env',
       'WHATSOUP_REQUIRE_TEST_INTEGRITY=1',
@@ -210,6 +230,68 @@ describe('canonical CI control manifest', () => {
         stale: 'inconclusive',
       },
     })]))).toContain('ci.manifest.invalid-enum');
+  });
+
+  it('validates one strict outgoing-ref policy and its canonical control cross-link', () => {
+    const refControl = control('ci.outgoing-ref-policy', {
+      policyCategory: 'source-integrity',
+      domain: 'source-integrity',
+      owner: 'ci-ref-policy-owner',
+      decisionOwner: 'outgoing-ref-policy-decision-owner',
+      implementation: {
+        commandId: 'ci:ref-policy',
+        detectorId: 'outgoing-ref-policy',
+        nativeSchemaVersion: 1,
+      },
+      stages: ['pre-push'],
+      mode: 'assist',
+      surfaces: ['outgoing-ref-policy'],
+      evidence: {
+        schemaVersion: 1,
+        paths: ['scripts/ci-control-ref-policy.ts', 'scripts/lib/ci-control/ref-policy.ts'],
+        digestBinding: 'exact',
+        freshness: 'receipt',
+      },
+    });
+    const value = manifest([refControl]);
+    value.requiredSurfaces = ['outgoing-ref-policy'];
+    value.stages = ['pre-push'];
+    value.canonicalCommands = {
+      'ci:ref-policy': ['bash', 'scripts/run-with-pinned-node.sh', 'scripts/ci-control-ref-policy.ts'],
+    };
+    value.outgoingRefPolicy = {
+      schemaVersion: 1,
+      controlId: 'ci.outgoing-ref-policy',
+      remotes: [{ name: 'origin', repositoryId: 'github.com/LucasQuiles/WhatSoup' }],
+      branchNamespace: 'refs/heads/',
+      releaseBranches: ['refs/heads/main'],
+      releaseTagPrefixes: ['refs/tags/v'],
+      allowedDeleteRefs: [],
+      branchObjectType: 'commit',
+      releaseTagObjectType: 'annotated-tag',
+      nonFastForward: 'block',
+      unknownRef: 'inconclusive',
+    };
+
+    expect(issueCodes(value)).toEqual([]);
+    expect(issueCodes({ ...value, outgoingRefPolicy: { ...(value.outgoingRefPolicy as object), extra: true } }))
+      .toContain('ci.manifest.unknown-key');
+    expect(issueCodes({ ...value, outgoingRefPolicy: { ...(value.outgoingRefPolicy as object), allowedDeleteRefs: ['refs/heads/scratch/x', 'refs/heads/scratch/x'] } }))
+      .toContain('ci.manifest.duplicate-value');
+    expect(issueCodes({ ...value, outgoingRefPolicy: { ...(value.outgoingRefPolicy as object), allowedDeleteRefs: ['refs/heads/scratch/x'] } }))
+      .toEqual([]);
+    expect(issueCodes({ ...value, outgoingRefPolicy: { ...(value.outgoingRefPolicy as object), allowedDeleteRefs: ['refs/heads/main'] } }))
+      .toContain('ci.manifest.ref-policy-protected-delete');
+    expect(issueCodes({ ...value, outgoingRefPolicy: { ...(value.outgoingRefPolicy as object), allowedDeleteRefs: ['refs/tags/v1.2.3'] } }))
+      .toContain('ci.manifest.ref-policy-protected-delete');
+    expect(issueCodes({ ...value, outgoingRefPolicy: { ...(value.outgoingRefPolicy as object), controlId: 'missing' } }))
+      .toContain('ci.manifest.ref-policy-control-mismatch');
+    expect(issueCodes({ ...value, outgoingRefPolicy: null }))
+      .toContain('ci.manifest.ref-policy-control-mismatch');
+    expect(issueCodes({
+      ...value,
+      canonicalCommands: { ...(value.canonicalCommands as object), 'ci:ref-policy': ['true'] },
+    })).toContain('ci.manifest.ref-policy-control-mismatch');
   });
 
   it('rejects duplicate identity or decision ownership while allowing independent observers', () => {

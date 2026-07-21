@@ -362,7 +362,9 @@ git commit -m "feat(ci): classify exact revisions"
 - Evidence: **Proven** at `.husky/pre-push`, `scripts/pre-push-guard.ts:52-74`, and the observed absolute foreign `core.hooksPath`.
 - Reachable failure: push `other-local-ref:feature/x` while safe `HEAD` is checked out; the hook verifies `HEAD`, not the outgoing OID. Delete-only public tag updates receive no content/ref decision.
 - Unsafe fixture: safe `HEAD`, different unsafe outgoing OID; release-tag deletion.
-- Safe neighbor: exact outgoing OID/range with current repository-owned hook bytes; deletion of a manifest-approved unpublished scratch ref.
+- Safe neighbor: exact outgoing OID/range with current repository-owned hook bytes; a
+  manifest-approved unpublished scratch ref is structurally accepted but remains
+  inconclusive until protected exact-ref evidence transport exists.
 - Expected: unsafe `BLOCK/1` or `INCONCLUSIVE/2` by closed cause; safe `PASS/0`.
 - Smallest repair: per-ref classification/verification and hook-installation guard. No automatic hook rewrite.
 - Rollback: restore prior adapters as one ordinary revert; remote gates remain authoritative.
@@ -461,13 +463,92 @@ install, copy, `chmod`, or change Git configuration. The canary remains report-o
 does not claim remote enforcement or resistance to a privileged actor that rewrites both a
 ref and its reflog evidence.
 
-- [ ] **Step 4 (CP-H1b): Add the strict parser and manifest-owned ref policy**
+- [x] **Step 4 (CP-H1b): Add the strict parser and manifest-owned ref policy**
 
 Replace invalid deletion fixtures with Git's actual `(delete)` plus zero-OID shape. Add
 exact-four-field, input byte/count, lowercase full-OID, zero/nonzero combination, duplicate,
 remote identity, new-ref base, annotated-tag, deletion, force-update, and private/control-
 character tests. Unknown policy or unavailable graph evidence is inconclusive. No scratch
 deletion is safe until the manifest schema names it.
+
+**Frozen CP-H1b admission packet**
+
+- Evidence: **Proven** at `be8fe98706c7b761db585d7989903238339d3ed7` by three
+  independent read-only Finder lanes. The current parser ignores trailing fields, reads
+  unbounded stdin, accepts malformed OIDs and impossible zero combinations, discards the
+  exact update set, skips every deletion-only push, ignores the remote arguments, and maps
+  raw parser/tool failures to exit `1`.
+- Unsafe fixtures: a fifth field, tab delimiter, missing terminal LF, byte/count overflow,
+  uppercase/short/non-hex OID, duplicate destination, invalid `(delete)`/zero shape,
+  protected-main or release-tag deletion, non-fast-forward branch update, wrong tag object
+  or peeled target, unknown remote/namespace, moved local ref, and unavailable graph object.
+- Safe neighbors: an exact four-field LF-terminated row, a manifest-authorized `origin`
+  remote role and a fast-forward existing-head update. A synthetic policy fixture may
+  explicitly name one unpublished scratch ref as deletable, but its public receipt remains
+  inconclusive until H1d can bind the private exact ref through protected evidence. The policy evaluator also
+  proves synthetic descendant branch and annotated-tag cases, but the native report-only
+  CLI keeps both inconclusive until a protected exact trusted-base input exists. The live
+  manifest begins with an empty deletion allowlist.
+- Expected: deterministic prohibited policy is `BLOCK/1`; malformed, unclassified,
+  unavailable, stale, or unbound evidence is `INCONCLUSIVE/2`; only complete policy and
+  graph proof is `PASS/0`.
+- Smallest repair: create `scripts/lib/ci-control/ref-policy.ts` and the additive
+  `scripts/ci-control-ref-policy.ts` report-only CLI; extend the existing strict control manifest,
+  reason catalog, and their tests. Do not modify `.husky/pre-push` or the default behavior
+  of `scripts/pre-push-guard.ts` in this bead.
+- Canonical ownership: `ci.outgoing-ref-policy` / `outgoing-ref-policy-decision-owner`. The manifest
+  owns one versioned `outgoingRefPolicy` object declaring authorized normalized remote
+  identities, release branches and tag prefixes, exact deletable refs, branch/release-tag
+  object types, unknown-ref behavior, and non-fast-forward policy. Parser byte/count
+  limits remain versioned code constants and are covered at their exact boundaries.
+- Interfaces: the bounded parser preserves `RefUpdateV1[]`; the evaluator consumes only the
+  reviewed manifest policy plus an exact ordered `RefGraphFactV1[]`; the CLI accepts bounded
+  `--remote-name`, `--remote-location`, and `--json` only. Caller-provided policy, allow,
+  force, or check-selection options are invalid.
+- Privacy: public output contains update indexes and structural ref kinds, never raw input,
+  raw refs, remote locations, local paths, Git exceptions, or reversible low-entropy
+  fingerprints. Exact rows remain internal to the same process until H1d defines their
+  protected terminal receipt transport. Consequently, H1b never emits a public deletion
+  `PASS`; even a manifest-named scratch deletion is `INCONCLUSIVE/2` with
+  `ci.refs.private-binding-unavailable` after its deterministic policy checks succeed.
+- Unchanged controls: repository/publication scanners, exact-revision classifier, hook
+  identity guard, active hook command selection, native detector schemas, and hosted
+  settings remain unchanged.
+- Rollback: ordinary revert of the additive module/CLI plus the same manifest/reason/docs
+  registration. No hook or hosted setting requires rollback.
+- Stop conditions: any unexpected HEAD/index/worktree/upstream movement, policy ambiguity,
+  raw-output leak, unsupported object format, missing terminal result, or masked child
+  status stops mutation and yields inconclusive evidence.
+- Promotion limitation: this report-only bead uses each Git command's direct terminal
+  status internally under a bounded timeout and records the exact trusted executable digest,
+  object format, and derived graph evidence. It does not transport per-command status/signal/
+  timeout observations, own a supervised attempt lifecycle, or prove process-group
+  termination. CP-F4/H1d must supply that terminal execution evidence and protected exact
+  trusted-base provenance before the result can authorize transport. A native receipt is
+  not promoted merely because the CLI process exited.
+
+**Files:**
+
+- Create: `scripts/lib/ci-control/ref-policy.ts`
+- Create: `scripts/ci-control-ref-policy.ts`
+- Create: `tests/scripts/ci-control-ref-policy.test.ts`
+- Modify: `scripts/lib/ci-control/manifest.ts`
+- Modify: `tests/scripts/ci-control-manifest.test.ts`
+- Modify: `controls/ci-control-manifest.json`
+- Modify: `scripts/lib/ci-control/reasons.ts`
+- Modify: `package.json`
+- Modify: `docs/public-surface.md`
+
+**Focused RED command:**
+
+```bash
+bash scripts/run-with-pinned-npm.sh test -- \
+  tests/scripts/ci-control-ref-policy.test.ts \
+  tests/scripts/ci-control-manifest.test.ts \
+  --pool=forks --fileParallelism=false --retry=0
+```
+
+Expected: fail because the strict policy schema, parser, evaluator, and CLI do not exist.
 
 - [ ] **Step 5 (CP-H1c): Add native exact-object entrypoints**
 
