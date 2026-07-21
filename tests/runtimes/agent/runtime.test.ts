@@ -15327,7 +15327,19 @@ describe('NL routing handlers (nlRouting flag)', () => {
     mockQueue.enqueueText.mockClear();
     mockSession.sendTurn.mockClear();
     mockSession.getStatus.mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
-    (mockSession as unknown as Record<string, unknown>).getModelRef = vi.fn(() => undefined);
+    // Task G (D14): the shared mock SessionManager is one singleton object
+    // reused across every constructor call, so its accessors must track the
+    // LATEST construction opts to mean anything for the recycle diff-gate —
+    // a real SessionManager's getProviderId/getModelRef report exactly what
+    // it was constructed with (session.ts readonly fields); a frozen return
+    // value would make every respawn look identical regardless of its actual
+    // route, hiding genuine route changes from applyRouteChangeAndRecycle.
+    (mockSession as unknown as Record<string, unknown>).getModelRef = vi.fn(
+      () => (capturedSessionManagerOptsRef.current as unknown as { model?: string } | null)?.model,
+    );
+    (mockSession as unknown as Record<string, unknown>).getProviderId = vi.fn(
+      () => (capturedSessionManagerOptsRef.current as unknown as { provider?: string } | null)?.provider ?? 'claude-cli',
+    );
   });
 
   afterEach(async () => {
@@ -16591,6 +16603,118 @@ describe('NL routing handlers (nlRouting flag)', () => {
       const reply = allReplies(sentMessages).join('\n');
       expect(reply).toContain('Pinned `opencode-cli` for 24h');
       expect(reply).not.toContain('Already set');
+    });
+  });
+
+  // ── G (D14): a successful pin/reset now applies to the LIVE session, not
+  // just the next /new — SessionManager.model/provider are readonly (set
+  // once at construction), so the switch takes effect by tearing the
+  // session down (idle) or deferring the teardown to the next turn-idle
+  // boundary (busy), never mid-turn. Same-provider claude-cli fallback
+  // entries throughout (mirrors the C3/H "HIT round-trip" pattern) — those
+  // are unconditionally routable (no credential probe), isolating the
+  // recycle behavior under test from the separate credential-gating concern
+  // the C3/H suite above already covers.
+  describe('G: apply a route switch immediately via session recycle (D14)', () => {
+    it('an idle route switch tears down the live session — the NEXT spawn uses the new model', async () => {
+      cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'claude-sonnet-5' }];
+      const anthropicFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['claude-opus-4-8', 'claude-sonnet-5'] });
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueAnthropicFn: anthropicFn });
+      // /model list spawns the live session on the default route (claude-cli/claude-opus-4-8).
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      mockSession.shutdown.mockClear();
+      // /model 2 pins claude-sonnet-5 — a DIFFERENT route than the live session.
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'msg-2' }));
+      // Idle (no turn in flight): the live session is torn down NOW, mirroring
+      // /kill-session's teardown (shutdown(false) — not the resumable suspend).
+      expect(mockSession.shutdown).toHaveBeenCalledWith(false);
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('Now answering with claude-sonnet-5.');
+      expect(reply).toContain('reply keep to make it permanent, /reset to undo.');
+      expect(reply).not.toContain('Pinned claude-sonnet-5 for 24h');
+      // No proactive respawn — createSessionManager only runs on the NEXT
+      // inbound, and it reads the now-live pin.
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'hello', messageId: 'msg-3' }));
+      const opts = capturedSessionManagerOptsRef.current as unknown as { provider?: string; model?: string };
+      expect(opts?.provider).toBe('claude-cli');
+      expect(opts?.model).toBe('claude-sonnet-5');
+    });
+
+    it('pinning the SAME route the live session is already on does not recycle (diff-gate no-op)', async () => {
+      // Entry 1 in the numbered snapshot IS the live session's own route
+      // (claude-cli/claude-opus-4-8, the configured primary) — a genuine
+      // re-pin of the status quo, not merely a repeat (which would hit the
+      // 'refreshed'/'sticky_kept' short-circuit before the diff-gate ever runs).
+      const anthropicFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['claude-opus-4-8'] });
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueAnthropicFn: anthropicFn });
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      mockSession.shutdown.mockClear();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'msg-2' }));
+      expect(mockSession.shutdown).not.toHaveBeenCalled();
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('Pinned claude-opus-4-8 for 24h — reply keep to make it permanent, /reset to undo.');
+      expect(reply).not.toContain('Now answering with');
+      expect(reply).not.toContain("it'll answer from your next message");
+    });
+
+    it('a busy pin defers the recycle — never tears down mid-turn, applies at the next turn-idle boundary', async () => {
+      cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'claude-sonnet-5' }];
+      const anthropicFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['claude-opus-4-8', 'claude-sonnet-5'] });
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueAnthropicFn: anthropicFn });
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      mockSession.shutdown.mockClear();
+      // Simulate an in-flight turn for the single/shared scope — the same
+      // idiom the existing turn_in_progress coverage above uses directly on
+      // the runtime's currentInboundSeq field (isTurnInFlight's single-scope
+      // predicate reads exactly this field).
+      (runtime as unknown as { currentInboundSeq: number | undefined }).currentInboundSeq = 999;
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'msg-2' }));
+      // Deferred: the pin is recorded and disclosed, but the live session
+      // must survive completely untouched while busy.
+      expect(mockSession.shutdown).not.toHaveBeenCalled();
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain("claude-sonnet-5 is pinned — it'll answer from your next message.");
+      expect(reply).not.toContain('Now answering with');
+      // Still busy: a message arriving now must NOT recycle mid-turn — the
+      // deferred flag stays set rather than firing early.
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status', messageId: 'msg-3' }));
+      expect(mockSession.shutdown).not.toHaveBeenCalled();
+      // Turn completes — clear the busy signal exactly as the real
+      // finalization path does (applyRuntimeTurnPostEffects), reaching the
+      // turn-idle boundary the deferral promised to apply at.
+      (runtime as unknown as { currentInboundSeq: number | undefined }).currentInboundSeq = undefined;
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'hello', messageId: 'msg-4' }));
+      expect(mockSession.shutdown).toHaveBeenCalledWith(false);
+      const opts = capturedSessionManagerOptsRef.current as unknown as { provider?: string; model?: string };
+      expect(opts?.model).toBe('claude-sonnet-5');
+    });
+
+    it('/reset recycles the live session back to the default route — undo is equally immediate', async () => {
+      cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'claude-sonnet-5' }];
+      const anthropicFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['claude-opus-4-8', 'claude-sonnet-5'] });
+      const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueAnthropicFn: anthropicFn });
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'msg-2' }));
+      // The pin already recycled the session onto claude-sonnet-5 (idle).
+      expect(mockSession.shutdown).toHaveBeenCalledWith(false);
+      mockSession.shutdown.mockClear();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/reset', messageId: 'msg-3' }));
+      // /reset clears the pin AND recycles the (respawned-as-claude-sonnet-5)
+      // session back toward the default — undo is immediate, not "/new"-gated.
+      expect(mockSession.shutdown).toHaveBeenCalledWith(false);
+      const { runtime: second } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueAnthropicFn: anthropicFn });
+      await sendAndDrain(second, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'hello', messageId: 'msg-4' }));
+      const opts = capturedSessionManagerOptsRef.current as unknown as { provider?: string; model?: string };
+      expect(opts?.provider).toBe('claude-cli');
+      expect(opts?.model).toBe('claude-opus-4-8');
+    });
+
+    it('no live session at pin time is a no-op — nothing to recycle, the next spawn reads the pin regardless', () => {
+      const runtime = new AgentRuntime(routingDb, makeMessenger().messenger, 'test');
+      const outcome = (runtime as unknown as {
+        applyRouteChangeAndRecycle: (chatJid: string, senderJid: string, mapKey: string | undefined) => string;
+      }).applyRouteChangeAndRecycle(CHAT, SENDER_A, undefined);
+      expect(outcome).toBe('noop');
     });
   });
 

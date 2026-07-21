@@ -403,6 +403,14 @@ type RuntimeTurnCapability = RuntimeTurnCapabilityHealth & {
   lastTurnErrorClass: TurnCapabilityErrorClass | null;
 };
 
+/**
+ * Task G (D14) — outcome of applyRouteChangeAndRecycle: 'recycled' (idle,
+ * torn down now — the next inbound respawns on the new route), 'deferred'
+ * (a turn was in flight — a pendingRecycle flag was set instead), or 'noop'
+ * (no live session, or the resolved route already matched it).
+ */
+type RouteRecycleOutcome = 'recycled' | 'deferred' | 'noop';
+
 // Time to wait for an auto-triggered /compact to complete before giving up.
 // A /compact must summarize the whole conversation, so on large contexts it can
 // legitimately take a few minutes; 2 min was too short and produced false
@@ -1440,35 +1448,41 @@ export class AgentRuntime implements Runtime {
     });
   }
 
-  private assertNoActiveUserTurn(scopeKey: string): void {
+  /**
+   * True while a turn is dispatching/pending for scopeKey — per-chat
+   * (perChatInboundSeqQueue + that chat's runtime TurnQueue) or the single/
+   * shared scope (currentInboundSeq/currentTurnChatJid + the global
+   * turnQueue). Pure predicate, no throw — shared by assertNoActiveUserTurn
+   * (which throws for command rejection) and Task G's recycle gating (which
+   * must never throw: a busy chat defers the recycle instead of rejecting
+   * the pin that triggered it).
+   */
+  private isTurnInFlight(scopeKey: string): boolean {
     if (this.sessionScope === 'per_chat') {
       const runtimeQueue = this.perChatTurnQueues.get(scopeKey);
-      if (
+      return (
         (this.perChatInboundSeqQueue.get(scopeKey)?.length ?? 0) > 0
         || runtimeQueue?.isProcessing === true
         || (runtimeQueue?.pending ?? 0) > 0
-      ) {
-        throw new AgentCommandRuntimeError(
-          'turn_in_progress',
-          'agent command rejected because the target chat already has a turn in progress',
-          409,
-        );
-      }
-      return;
+      );
     }
-
-    if (
+    return (
       this.currentInboundSeq !== undefined
       || this.currentTurnChatJid !== null
       || this.turnQueue.isProcessing
       || this.turnQueue.pending > 0
-    ) {
-      throw new AgentCommandRuntimeError(
-        'turn_in_progress',
-        'agent command rejected because the agent already has a turn in progress',
-        409,
-      );
-    }
+    );
+  }
+
+  private assertNoActiveUserTurn(scopeKey: string): void {
+    if (!this.isTurnInFlight(scopeKey)) return;
+    throw new AgentCommandRuntimeError(
+      'turn_in_progress',
+      this.sessionScope === 'per_chat'
+        ? 'agent command rejected because the target chat already has a turn in progress'
+        : 'agent command rejected because the agent already has a turn in progress',
+      409,
+    );
   }
 
   private getOpenFileDescriptorCount(): number | null {
@@ -1849,6 +1863,14 @@ export class AgentRuntime implements Runtime {
   private readonly perChatRuntimeTurnScopeRefs = new Map<string, PerChatRuntimeScopeRef>();
   /** One FIFO per chat: provider dispatch N+1 waits for turn N's durable outcome. */
   private perChatTurnQueues = new Map<string, TurnQueue>();
+  /**
+   * Task G (D14): scope keys (per-chat mapKey, or GLOBAL_TOOL_SCOPE_KEY for
+   * single/shared) whose live session recycle was deferred because a turn
+   * was in flight at pin time. Consumed at the next turn-idle boundary — the
+   * top of ensureSessionAndQueueSync, which every inbound message reaches
+   * BEFORE any turn dispatch (see consumePendingRecycleIfIdle).
+   */
+  private pendingRecycle = new Set<string>();
   /** Mutable callback key for a queue that may be re-keyed from LID to phone JID. */
   private readonly perChatTurnQueueKeys = new WeakMap<TurnQueue, PerChatRuntimeScopeRef>();
   /** The sole shared/singleton user turn whose provider result is still unresolved. */
@@ -4135,7 +4157,10 @@ export class AgentRuntime implements Runtime {
                 this.sendDirect(chatJid, '_Already set (sticky). /reset to go back to the default route._');
                 break;
               }
-              this.sendDirect(chatJid, `_Pinned \`${entry.providerId}\` for 24h — reply keep to make it permanent, /reset to undo._`);
+              // Task G: apply the switch immediately (idle) or defer it to the
+              // next message (busy) — the echo below discloses which.
+              const recycleOutcome = this.applyRouteChangeAndRecycle(chatJid, msg.senderJid, perChatMapKey);
+              this.sendDirect(chatJid, this.renderPinOutcomeEcho(`\`${entry.providerId}\``, recycleOutcome));
               break;
             }
             // D6/D10/D16: `/model N` / `/model N<letter>` — a named-model pin
@@ -4170,7 +4195,11 @@ export class AgentRuntime implements Runtime {
                 );
                 break;
               }
-              this.sendDirect(chatJid, `_Pinned ${entry.id} for 24h — reply keep to make it permanent, /reset to undo._`);
+              // Task G: the recycle must run AFTER H's verify — resolveRouteForTurn
+              // needs the now-VERIFIED pin, or a recycle here would respawn the
+              // session on the provider default and defeat the switch.
+              const recycleOutcome = this.applyRouteChangeAndRecycle(chatJid, msg.senderJid, perChatMapKey);
+              this.sendDirect(chatJid, this.renderPinOutcomeEcho(entry.id, recycleOutcome));
               break;
             }
             const isIntent = sub === 'strongest' || sub === 'fastest';
@@ -4215,12 +4244,12 @@ export class AgentRuntime implements Runtime {
               break;
             }
             // D10: same plain, timing-neutral affordance shape as the numbered-
-            // pick paths above — no "for you" (chat-scoped, D13a) and no
-            // "applies from your next session" (the deferral beta-testers read
-            // as broken; Task G makes the switch take effect and will enrich
-            // this echo, not restate the old deferral).
+            // pick paths above — no "for you" (chat-scoped, D13a). Task G now
+            // makes the switch take effect (recycled/deferred), so the old
+            // blanket "applies from your next session" deferral never returns.
             const what = isProvider ? `\`${sub}\`` : `my ${sub} model`;
-            this.sendDirect(chatJid, `_Pinned ${what} for 24h — reply keep to make it permanent, /reset to undo._`);
+            const recycleOutcome = this.applyRouteChangeAndRecycle(chatJid, msg.senderJid, perChatMapKey);
+            this.sendDirect(chatJid, this.renderPinOutcomeEcho(what, recycleOutcome));
             break;
           }
 
@@ -4229,6 +4258,10 @@ export class AgentRuntime implements Runtime {
             // the reply is identical, so a doubled /reset cannot spam or error.
             const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, msg.senderJid);
             this.clearRoutePreference(chatJid, chatKey, senderKey);
+            // Task G: /reset undoes just as immediately as a pin applies —
+            // recycle back toward the default route (idle now, or deferred to
+            // the next message if a turn is in flight).
+            this.applyRouteChangeAndRecycle(chatJid, msg.senderJid, perChatMapKey);
             break;
           }
 
@@ -8736,6 +8769,138 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
+   * Task G (D14): make a successful /model or /reset route change take
+   * effect on the user's NEXT message instead of the next /new — a running
+   * SessionManager's model/provider are readonly (session.ts, set once at
+   * construction; spawnSession() reuses the same manager), so a live
+   * session keeps answering on the OLD route until it is REPLACED, not
+   * reset in place.
+   *
+   * Diff-gated: resolves the just-written route (`resolveRouteForTurn`,
+   * which now reflects the fresh pin) and compares it — BOTH provider and
+   * model — against the live session's actual (provider, model). No live
+   * session, or an unchanged route, is a no-op; recording a pin the route
+   * resolver won't even honor (e.g. a blocked/ineligible provider) must
+   * never tear down a perfectly good session.
+   *
+   * EAGER-when-idle + defer-when-busy: idle recycles NOW (detach + fire-
+   * and-forget shutdown, mirroring /kill-session's teardown so the next
+   * inbound finds no session and respawns via createSessionManager — the
+   * sole route.model chokepoint); busy sets a pendingRecycle flag consumed
+   * at the next turn-idle boundary (consumePendingRecycleIfIdle) and NEVER
+   * tears down mid-turn.
+   */
+  private applyRouteChangeAndRecycle(
+    chatJid: string,
+    senderJid: string,
+    perChatMapKey: string | undefined,
+  ): RouteRecycleOutcome {
+    const scopeKey = this.sessionScope === 'per_chat'
+      ? (perChatMapKey ?? this.resolvePerChatMapKey(chatJid))
+      : GLOBAL_TOOL_SCOPE_KEY;
+    const session = this.sessionScope === 'per_chat'
+      ? this.chatSessions.get(scopeKey)
+      : this.session;
+    // No live session — the next spawn already reads the fresh pin via
+    // resolveRouteForTurn; nothing to recycle.
+    if (!session) return 'noop';
+    const next = this.resolveRouteForTurn(chatJid, senderJid);
+    if (session.getProviderId() === next.provider && session.getModelRef() === next.model) {
+      return 'noop';
+    }
+    if (this.isTurnInFlight(scopeKey)) {
+      this.pendingRecycle.add(scopeKey);
+      return 'deferred';
+    }
+    this.recycleLiveSession(this.sessionScope === 'per_chat' ? scopeKey : undefined, session);
+    this.pendingRecycle.delete(scopeKey);
+    return 'recycled';
+  }
+
+  /**
+   * Consumption hook for a deferred recycle (Task G busy branch). Called at
+   * the top of ensureSessionAndQueueSync — the point every inbound message
+   * reaches BEFORE any turn dispatch or "does a session exist" check — so
+   * this can only ever fire between turns, never mid-turn: it re-checks
+   * isTurnInFlight itself (a turn may still be draining, or a new one may
+   * already be queued behind it) and leaves the flag set to try again on a
+   * later message if so.
+   */
+  private consumePendingRecycleIfIdle(scopeKey: string): void {
+    if (!this.pendingRecycle.has(scopeKey)) return;
+    if (this.isTurnInFlight(scopeKey)) return;
+    this.pendingRecycle.delete(scopeKey);
+    const session = this.sessionScope === 'per_chat'
+      ? this.chatSessions.get(scopeKey)
+      : this.session;
+    if (!session) return;
+    this.recycleLiveSession(this.sessionScope === 'per_chat' ? scopeKey : undefined, session);
+  }
+
+  /**
+   * Detach the live session from every map/queue it is reachable through —
+   * synchronously, so the caller's subsequent "does a session exist" check
+   * (ensureSessionAndQueueSync, reached either immediately after an idle
+   * recycle or on the next inbound after a deferred one) sees none and
+   * respawns fresh. The actual process teardown is fire-and-forget past
+   * that point (mirrors the existing idle-eviction precedent,
+   * evictIdleSession) — detachment, not the kill finishing, is what next
+   * inbound's respawn correctness depends on.
+   *
+   * Per-chat teardown mirrors /kill-session's per-chat branch exactly
+   * (abort queue, terminalize the runtime TurnQueue, drop from
+   * chatSessions/chatQueues, cleanupPerChatState, shutdown(false)) — NOT
+   * resetOwnedPerChatSession, which respawns the SAME manager with its
+   * cached readonly model and would never apply the switch. Single/shared
+   * teardown mirrors /kill-session's else branch.
+   */
+  private recycleLiveSession(mapKey: string | undefined, session: SessionManager): void {
+    if (this.sessionScope === 'per_chat') {
+      const key = mapKey!;
+      this.chatQueues.get(key)?.abortTurn();
+      this.deleteOwnedPerChatSession(key, session);
+      this.chatQueues.delete(key);
+      this.cleanupPerChatState(key);
+      void this.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(key)
+        .catch((err) => {
+          log.error({ err, mapKey: key }, 'route recycle: runtime turn queue teardown failed');
+        })
+        .finally(() => {
+          void session.shutdown(false).catch((err) => {
+            log.warn({ err, mapKey: key }, 'route recycle: session shutdown failed');
+          });
+        });
+      return;
+    }
+    this.getActiveQueue()?.abortTurn();
+    this.operationTracker?.shutdown();
+    this.operationTracker = null;
+    this.cleanupGlobalAutoCompactState();
+    this.session = null;
+    this.queue = null;
+    this.activeChatJid = null;
+    void session.shutdown(false).catch((err) => {
+      log.warn({ err }, 'route recycle: session shutdown failed');
+    });
+  }
+
+  /**
+   * Task G (D14): the /model pin echo now discloses what actually happens
+   * to the live session, not just the store write — the C3/D10 "Pinned …
+   * for 24h" shape is kept ONLY for a no-op (nothing to recycle); a genuine
+   * switch says so, honestly distinguishing "now" from "next message".
+   */
+  private renderPinOutcomeEcho(label: string, outcome: RouteRecycleOutcome): string {
+    if (outcome === 'recycled') {
+      return `_Now answering with ${label}. reply keep to make it permanent, /reset to undo._`;
+    }
+    if (outcome === 'deferred') {
+      return `_${label} is pinned — it'll answer from your next message. reply keep to make it permanent, /reset to undo._`;
+    }
+    return `_Pinned ${label} for 24h — reply keep to make it permanent, /reset to undo._`;
+  }
+
+  /**
    * Slice-3 NL typed-intent consumption (call sites are flag-gated): strip
    * route-intent marker lines from agent output and feed the FIRST strictly-
    * valid intent into the same per-sender preference path as the /model
@@ -11354,6 +11519,15 @@ export class AgentRuntime implements Runtime {
     initialMapKey: string = this.resolvePerChatMapKey(chatJid),
     actorJid?: string,
   ): void {
+    // Task G (D14): consume a deferred route recycle BEFORE the "does a
+    // session already exist" checks below — every inbound message reaches
+    // this point ahead of any turn dispatch, so this is the turn-idle
+    // boundary a busy-time pin deferred to. Detaching here (only when truly
+    // idle) makes the per_chat/single checks below see no session and
+    // respawn fresh via createSessionManager, which re-resolves the route.
+    this.consumePendingRecycleIfIdle(
+      this.sessionScope === 'per_chat' ? initialMapKey : GLOBAL_TOOL_SCOPE_KEY,
+    );
     if (this.sessionScope === 'per_chat') {
       // per_chat: independent session + queue per canonical chat key
       if (!this.chatSessions.has(initialMapKey)) {

@@ -56,6 +56,10 @@ const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
     setDurability: vi.fn((_durability: unknown) => {}),
     bindGenerationOwnership: vi.fn((_resolve: () => unknown) => {}),
     getProviderId: vi.fn((): string => 'claude-cli'),
+    // Task G (D14): applyRouteChangeAndRecycle's diff-gate reads this on
+    // every live session, same as getProviderId — a real SessionManager
+    // always has it (session.ts), so the mock must too.
+    getModelRef: vi.fn((): string | undefined => undefined),
   };
   const mockQueue = {
     enqueueText: vi.fn(),
