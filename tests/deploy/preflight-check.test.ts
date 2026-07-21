@@ -111,15 +111,84 @@ function makeFixtureTree(
     'export const databaseCompatibilityBootstrapFixture = true;\n',
     'utf8',
   );
-  // Fixture roots are non-git, so preflight treats them as release exports —
-  // which must carry the release manifest (manifest gate). Tests probing the
-  // missing-manifest failure remove this file explicitly.
-  writeFileSync(join(root, '.whatsoup-release-manifest.json'), '{"files":[]}\n', 'utf8');
   for (const [rel, contents] of Object.entries(extraFiles)) {
     const abs = join(root, rel);
     mkdirSync(dirname(abs), { recursive: true });
     writeFileSync(abs, contents, 'utf8');
   }
+  const integrityFiles: Record<string, string> = {
+    'scripts/source-runtime-drift-check.ts': readFileSync(SOURCE_RUNTIME_CHECK, 'utf8'),
+    'scripts/lib/guard-core.ts': readFileSync(GUARD_CORE, 'utf8'),
+    'src/lib/git-env.ts': readFileSync(GIT_ENV, 'utf8'),
+    'src/lib/type-guards.ts': readFileSync(TYPE_GUARDS, 'utf8'),
+  };
+  for (const [rel, contents] of Object.entries(integrityFiles)) {
+    const abs = join(root, rel);
+    if (existsSync(abs)) continue;
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, contents, 'utf8');
+  }
+  const sourceRuntimeManifest = join(root, 'deploy/source-runtime-manifest.json');
+  if (!existsSync(sourceRuntimeManifest)) {
+    mkdirSync(dirname(sourceRuntimeManifest), { recursive: true });
+    writeFileSync(sourceRuntimeManifest, JSON.stringify({
+      schemaVersion: 1,
+      scope: 'preflight-fixture',
+      entrypoints: [
+        { path: 'src/main.ts', importGraph: true },
+        { path: 'src/database-compatibility-bootstrap.ts', importGraph: true },
+      ],
+    }), 'utf8');
+  }
+  writeReleaseManifestForTree(root);
+  return root;
+}
+
+function writeReleaseManifestForTree(root: string): void {
+  const files: Array<{ path: string; sha256: string; sizeBytes: number }> = [];
+  const visit = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const absolute = join(dir, entry.name);
+      const relative = absolute.slice(root.length + 1).split('\\').join('/');
+      if (relative === '.whatsoup-release-manifest.json') continue;
+      if (entry.isDirectory()) visit(absolute);
+      else if (entry.isFile()) {
+        const body = readFileSync(absolute);
+        files.push({
+          path: relative,
+          sha256: createHash('sha256').update(body).digest('hex'),
+          sizeBytes: body.byteLength,
+        });
+      }
+    }
+  };
+  visit(root);
+  writeFileSync(join(root, '.whatsoup-release-manifest.json'), JSON.stringify({
+    schemaVersion: 2,
+    source: { ref: 'HEAD', commit: '0'.repeat(40) },
+    release: { path: root, createdAt: '2026-07-21T00:00:00Z', mutablePathExcludes: [] },
+    rollback: { path: join(root, '.rollback') },
+    files,
+    requiredOutputs: [],
+  }), 'utf8');
+}
+
+function makeIntegrityReleaseTree(): string {
+  const root = makeFixtureTree('export const mainOk = true;\n', {
+    'scripts/source-runtime-drift-check.ts': readFileSync(SOURCE_RUNTIME_CHECK, 'utf8'),
+    'scripts/lib/guard-core.ts': readFileSync(GUARD_CORE, 'utf8'),
+    'src/lib/git-env.ts': readFileSync(GIT_ENV, 'utf8'),
+    'src/lib/type-guards.ts': readFileSync(TYPE_GUARDS, 'utf8'),
+    'deploy/source-runtime-manifest.json': JSON.stringify({
+      schemaVersion: 1,
+      scope: 'preflight-release-integrity',
+      entrypoints: [
+        { path: 'src/main.ts', importGraph: true },
+        { path: 'src/database-compatibility-bootstrap.ts', importGraph: true },
+      ],
+    }),
+  });
+  writeReleaseManifestForTree(root);
   return root;
 }
 
@@ -1136,14 +1205,39 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — release-export mani
   });
 
   it('passes the manifest gate when the release manifest is present', () => {
-    const root = makeFixtureTree(
-      "import { ok } from './helper.ts';\nconsole.log(ok);\n",
-      { 'src/helper.ts': 'export const ok = true;\n' },
-    );
-    writeFileSync(join(root, '.whatsoup-release-manifest.json'), '{"files":[]}\n', 'utf8');
+    const root = makeIntegrityReleaseTree();
     const { status, stderr } = runPreflight(root);
 
     expect(status).toBe(0);
     expect(stderr).toContain('PREFLIGHT-OK');
+  });
+
+  it('rejects a link-clean runtime file whose release-manifest hash drifted', () => {
+    const root = makeIntegrityReleaseTree();
+    expect(runPreflight(root).status).toBe(0);
+    writeFileSync(join(root, 'src/main.ts'), 'export const mainOk = false;\n', 'utf8');
+
+    const result = runPreflight(root);
+
+    expect(result.status).toBe(3);
+    expect(result.stderr).toContain('release source-runtime integrity check failed');
+    expect(result.stderr).toContain('file-sha256-drift');
+    expect(result.stderr).toContain('src/main.ts');
+  });
+
+  it('rejects drifted top-level code before importing it', () => {
+    const root = makeIntegrityReleaseTree();
+    const sentinel = join(root, 'drifted-code-executed');
+    writeFileSync(
+      join(root, 'src/main.ts'),
+      `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(sentinel)}, 'executed');\n`,
+      'utf8',
+    );
+
+    const result = runPreflight(root);
+
+    expect(result.status).toBe(3);
+    expect(result.stderr).toContain('release source-runtime integrity check failed');
+    expect(existsSync(sentinel)).toBe(false);
   });
 });

@@ -91,6 +91,7 @@ fi
 # Tree-integrity gate: tracked drift is fatal; untracked files and unpushed
 # commits are advisory. A long-uptime process on a drifted tracked tree is the
 # latent-landmine signature, so we block before restart.
+IS_RELEASE_EXPORT=0
 if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   tracked_drift_count="$(git -C "$REPO_ROOT" diff --name-only HEAD -- | grep -c . || true)"
   : "${tracked_drift_count:=0}"
@@ -116,6 +117,7 @@ if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     fi
   fi
 else
+  IS_RELEASE_EXPORT=1
   echo "PREFLIGHT-WARN: $REPO_ROOT is not a git work tree (cannot compute dirty/unpushed)" >&2
   # A non-git deploy dir is a release export, and a release export must carry
   # the manifest the fleet release-drift checker verifies. A manifest-less
@@ -140,6 +142,38 @@ if [ -f "$REPO_ROOT/package-lock.json" ] && [ ! -d "$REPO_ROOT/node_modules" ]; 
     echo "  Run 'npm ci' in $REPO_ROOT before starting."
   } >&2
   exit 3
+fi
+
+# Verify release runtime bytes before importing any release-owned module. The
+# import probe executes module top-level code, so running this gate afterward
+# would detect drift only after the untrusted bytes had already run.
+if [ "$IS_RELEASE_EXPORT" -eq 1 ]; then
+  SOURCE_RUNTIME_CHECK="$REPO_ROOT/scripts/source-runtime-drift-check.ts"
+  SOURCE_RUNTIME_MANIFEST="$REPO_ROOT/deploy/source-runtime-manifest.json"
+  if [ -L "$SOURCE_RUNTIME_CHECK" ] || [ ! -f "$SOURCE_RUNTIME_CHECK" ] \
+    || [ -L "$SOURCE_RUNTIME_MANIFEST" ] || [ ! -f "$SOURCE_RUNTIME_MANIFEST" ]; then
+    echo "PREFLIGHT-FAIL: REFUSING TO START — release source-runtime integrity controls are missing or unsafe." >&2
+    exit 3
+  fi
+  set +e
+  source_integrity_out="$({
+    cd "$REPO_ROOT"
+    "$NODE" \
+      --disable-warning=ExperimentalWarning \
+      --experimental-strip-types \
+      "$SOURCE_RUNTIME_CHECK" \
+      --manifest deploy/source-runtime-manifest.json
+  } 2>&1)"
+  source_integrity_rc=$?
+  set -e
+  if [ "$source_integrity_rc" -ne 0 ]; then
+    {
+      echo "PREFLIGHT-FAIL: REFUSING TO START — release source-runtime integrity check failed."
+      printf '%s\n' "$source_integrity_out" | sed 's/^/    /'
+    } >&2
+    exit 3
+  fi
+  echo "PREFLIGHT-OK: release source-runtime graph matches the release manifest" >&2
 fi
 
 # Import-closure probe — the authoritative landmine check. Runs an isolated import

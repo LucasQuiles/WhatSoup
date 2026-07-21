@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -362,9 +362,87 @@ describe('release snapshot planning', () => {
     ]));
   });
 
-  it('documented npm JSON planning command emits parseable JSON when run silent', () => {
-    tmpRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup-release-npm-smoke-'));
+  it('refuses to label dirty tracked bytes as the requested source commit', () => {
+    const sourceRoot = makeGitFixtureSource();
     const releaseRoot = path.join(tmpRoot, 'releases');
+    const scriptPath = path.join(process.cwd(), 'scripts/release-snapshot-plan.ts');
+    writeFileSync(path.join(sourceRoot, 'src/main.ts'), 'export const main = false;\n', 'utf8');
+
+    const proc = spawnSync(process.execPath, [
+      '--disable-warning=ExperimentalWarning',
+      '--experimental-strip-types',
+      scriptPath,
+      '--release-root',
+      releaseRoot,
+      '--source-ref',
+      'HEAD',
+      '--json',
+    ], { cwd: sourceRoot, encoding: 'utf8' });
+
+    expect(proc.status).toBe(1);
+    expect(proc.stdout).toBe('');
+    expect(proc.stderr).toContain('source tree differs from requested commit');
+  });
+
+  it('rejects a source change that races with snapshot planning', () => {
+    const sourceRoot = makeGitFixtureSource();
+    const releaseRoot = path.join(tmpRoot, 'releases');
+    const scriptPath = path.join(process.cwd(), 'scripts/release-snapshot-plan.ts');
+    const fakeBin = path.join(tmpRoot, 'fake-bin');
+    const fakeGit = path.join(fakeBin, 'git');
+    const realGit = spawnSync('which', ['git'], { encoding: 'utf8' }).stdout.trim();
+    const raceFile = path.join(sourceRoot, 'src/main.ts');
+    mkdirSync(fakeBin, { recursive: true });
+    writeFileSync(fakeGit, `#!/bin/sh
+REAL_GIT=${JSON.stringify(realGit)}
+RACE_FILE=${JSON.stringify(raceFile)}
+if [ "$3" = "diff" ] && [ "$4" = "--quiet" ]; then
+  "$REAL_GIT" "$@"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    printf '%s\\n' 'export const main = false;' > "$RACE_FILE"
+  fi
+  exit "$rc"
+fi
+exec "$REAL_GIT" "$@"
+`, 'utf8');
+    chmodSync(fakeGit, 0o755);
+
+    const proc = spawnSync(process.execPath, [
+      '--disable-warning=ExperimentalWarning',
+      '--experimental-strip-types',
+      scriptPath,
+      '--release-root',
+      releaseRoot,
+      '--source-ref',
+      'HEAD',
+      '--json',
+    ], {
+      cwd: sourceRoot,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env['PATH'] ?? ''}`,
+      },
+    });
+
+    expect(proc.status).toBe(1);
+    expect(proc.stdout).toBe('');
+    expect(proc.stderr).toContain('release plan bytes differ from requested commit');
+  });
+
+  it('documented npm JSON planning command emits parseable JSON when run silent', () => {
+    const sourceRoot = makeGitFixtureSource();
+    const releaseRoot = path.join(tmpRoot, 'releases');
+    const scriptPath = path.join(process.cwd(), 'scripts/release-snapshot-plan.ts');
+    writeFileSync(path.join(sourceRoot, 'package.json'), JSON.stringify({
+      name: 'whatsoup-release-npm-smoke',
+      scripts: {
+        'release:snapshot': `${JSON.stringify(process.execPath)} --disable-warning=ExperimentalWarning --experimental-strip-types ${JSON.stringify(scriptPath)}`,
+      },
+    }), 'utf8');
+    execGit(sourceRoot, ['add', 'package.json']);
+    execGit(sourceRoot, ['commit', '-m', 'add release planning command']);
 
     const proc = spawnSync('npm', [
       '--silent',
@@ -379,7 +457,7 @@ describe('release snapshot planning', () => {
       '2026-06-13T06:00:00.000Z',
       '--json',
     ], {
-      cwd: process.cwd(),
+      cwd: sourceRoot,
       encoding: 'utf8',
       maxBuffer: 10 * 1024 * 1024,
     });

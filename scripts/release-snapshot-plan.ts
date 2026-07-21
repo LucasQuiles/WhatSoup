@@ -451,6 +451,39 @@ function git(cwd: string, args: string[]): string {
   return proc.stdout.trim();
 }
 
+function requireSourceTreeAtCommit(cwd: string, sourceCommit: string): void {
+  const proc = spawnSync('git', ['-C', cwd, 'diff', '--quiet', sourceCommit, '--'], {
+    encoding: 'utf8',
+    env: cleanGitEnv(),
+  });
+  if (proc.status === 0) return;
+  if (proc.status === 1) {
+    throw new Error(`source tree differs from requested commit ${sourceCommit}; commit or discard tracked drift before planning a release`);
+  }
+  throw new Error((proc.stderr || proc.error?.message || 'git source-tree comparison failed').trim());
+}
+
+function requirePlanMatchesCommit(
+  cwd: string,
+  sourceCommit: string,
+  files: readonly ReleaseSnapshotFile[],
+): void {
+  for (const file of files) {
+    const proc = spawnSync('git', ['-C', cwd, 'show', `${sourceCommit}:${file.path}`], {
+      encoding: null,
+      env: cleanGitEnv(),
+      maxBuffer: Math.max(20 * 1024 * 1024, file.sizeBytes + 1024),
+    });
+    if (proc.status !== 0) {
+      throw new Error((proc.stderr?.toString('utf8') || proc.error?.message || `git blob read failed for ${file.path}`).trim());
+    }
+    const body = proc.stdout ?? Buffer.alloc(0);
+    if (body.byteLength !== file.sizeBytes || sha256(body) !== file.sha256) {
+      throw new Error(`release plan bytes differ from requested commit ${sourceCommit}: ${file.path}`);
+    }
+  }
+}
+
 function parseArgs(argv: string[]): ParsedArgs {
   const options: ParsedArgs = {
     sourceRef: 'HEAD',
@@ -523,8 +556,9 @@ export function run(argv: string[] = process.argv.slice(2), cwd = process.cwd())
 
   const releaseRoot = options.releaseRoot;
   if (!releaseRoot) throw new Error('--release-root is required');
-  const sourceCommit = git(cwd, ['rev-parse', options.sourceRef]);
-  const trackedFiles = git(cwd, ['ls-files']).split(/\r?\n/).filter(Boolean);
+  const sourceCommit = git(cwd, ['rev-parse', '--verify', `${options.sourceRef}^{commit}`]);
+  requireSourceTreeAtCommit(cwd, sourceCommit);
+  const trackedFiles = git(cwd, ['ls-tree', '-r', '--name-only', sourceCommit]).split(/\r?\n/).filter(Boolean);
   const plan = createReleaseSnapshotPlan({
     sourceRoot: cwd,
     sourceRef: options.sourceRef,
@@ -535,6 +569,7 @@ export function run(argv: string[] = process.argv.slice(2), cwd = process.cwd())
     buildTime: options.buildTime,
     trackedFiles,
   });
+  requirePlanMatchesCommit(cwd, sourceCommit, plan.manifest.files);
 
   if (options.json) {
     console.log(JSON.stringify(plan, null, 2));

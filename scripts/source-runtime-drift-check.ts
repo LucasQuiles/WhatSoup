@@ -265,7 +265,10 @@ function inspectSourceFile(
     })];
   }
   if (!existsSync(absolute)) {
-    return [issue(options.importedBy ? 'import-missing' : 'file-missing', 'critical', `source runtime file missing: ${relPath}`, {
+    const message = options.importedBy
+      ? `source runtime import references a missing module: ${relPath}`
+      : `source runtime file missing: ${relPath}`;
+    return [issue(options.importedBy ? 'import-missing' : 'file-missing', 'critical', message, {
       path: relPath,
       importedBy: options.importedBy,
       specifier: options.specifier,
@@ -471,6 +474,17 @@ export function run(argv: string[] = process.argv.slice(2), cwd = process.cwd())
       releaseAuthority = loadReleaseFileAuthority(cwd);
     } catch (error) {
       issues.push(issue('invalid-manifest', 'critical', error instanceof Error ? error.message : String(error)));
+    }
+  }
+  if (manifest && releaseAuthority && options.manifestPath !== '/dev/stdin') {
+    const manifestAbsolute = path.resolve(cwd, options.manifestPath);
+    if (!withinRepo(cwd, manifestAbsolute)) {
+      issues.push(issue('invalid-manifest', 'critical', 'source runtime manifest path escapes the release root'));
+    } else {
+      issues.push(...inspectSourceFile(cwd, repoRelative(cwd, manifestAbsolute), {
+        releaseAuthority,
+        mustContain: [],
+      }));
     }
   }
   if (manifest && (releaseAuthority || isGitWorkTree)) {
