@@ -127,7 +127,13 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   // because no production code constructs the adapters.
   { path: 'src/transport/signal/adapter.ts', issue: '#1975', reason: 'Signal adapter contract; factory stub throws until signal-cli port-impl PR wires it' },
   { path: 'src/transport/signal/port.ts', issue: '#1975', reason: 'Signal Port interface; consumed only by the adapter, which the factory stub does not yet construct' },
-  { path: 'src/transport/signal/types.ts', issue: '#1975', reason: 'Signal config/types; consumed only by the adapter + port, neither wired into the factory yet' },
+  // signal/types.ts graduated out of TRACKED_UNREACHABLE on this branch: the
+  // surfaces JID chain (src/core/jid-constants.ts isSignalJid) references it,
+  // so it is reachable from a production root. signal adapter/port stay
+  // tracked — the factory signal arm is still a stub until #1980 lands.
+  // imessage adapter/port/types graduated out of TRACKED_UNREACHABLE: the
+  // factory now constructs the imsg/bluebubbles ports (this branch), so all
+  // three are reachable from a production root.
 ];
 
 // ---------------------------------------------------------------------------

@@ -41,6 +41,7 @@ import type {
   LineInstance,
   LineMetrics,
   RateLimitsPayload,
+  ApprovalsPayload,
   LogEntry,
   Message,
   MetricsRange,
@@ -456,6 +457,14 @@ export const api = {
   getRateLimits: (name: string) =>
     apiFetch<RateLimitsPayload>(`/api/lines/${encodeURIComponent(name)}/rate-limits`),
 
+  getApprovals: (name: string) =>
+    apiFetch<ApprovalsPayload>(`/api/lines/${encodeURIComponent(name)}/approvals`),
+  postApprovalDecision: (name: string, decision: { mapKey: string; questionIndex: number; selectedOptions: string[] }) =>
+    apiFetch<{ status: string }>(`/api/lines/${encodeURIComponent(name)}/approvals/decision`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(decision),
+    }),
   // ── MCP proxy operations ──
 
   getScheduled: (name: string, status?: string) => withFallback(

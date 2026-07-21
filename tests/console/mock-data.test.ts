@@ -23,7 +23,7 @@ describe('console mock data accessors', () => {
     const { MOCK_LINES, getLine, getLines } = await loadMockData();
 
     const lines = getLines();
-    expect(lines).toHaveLength(8);
+    expect(lines).toHaveLength(10);
     expect(lines.map((line) => line.name)).toEqual([
       'personal',
       'support',
@@ -33,6 +33,8 @@ describe('console mock data accessors', () => {
       'intern',
       'staging',
       'archive',
+      'signal-relay',
+      'imessage-bridge',
     ]);
     expect(new Set(lines.map((line) => line.mode))).toEqual(new Set(['passive', 'chat', 'agent']));
     expect(new Set(lines.map((line) => line.status))).toEqual(new Set(['online', 'degraded', 'unreachable']));

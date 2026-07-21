@@ -47,8 +47,22 @@ export interface LineInstance {
     // CONNECTION card read a top-level `connection` no emitter ever produced.
     // `connected` is the emitter's composed transport-up signal
     // (`connectionState.connected && state === 'connected'`); it distinguishes
-    // a degraded-but-connected line from a disconnected one (#1881).
-    whatsapp: { connected?: boolean; connection: { state: string } };
+    // a degraded-but-connected line from a disconnected one (#1881). Optional
+    // for non-Baileys transports (signal/imessage/twilio) that emit only the
+    // generic `transport` block below; Baileys lines always carry it.
+    whatsapp?: { connected?: boolean; connection: { state: string } };
+    // Generic transport-health block: emitted by health.ts
+    // alongside `whatsapp` so signal/imessage/twilio lines report through
+    // the same shape. Consumers read this first with a `whatsapp` fallback.
+    // `kind` is the line's TransportId; `selfId` replaces account_jid
+    // (Signal UUID / AppleID aren't JIDs). Optional until the console
+    // migration completes.
+    transport?: {
+      kind?: string;
+      connected?: boolean;
+      selfId?: string;
+      connection?: { state?: string };
+    };
     sqlite: { messages_total: number; schema_version: number };
     runtime?: {
       passive?: { unreadCount: number; lastActivityAt: string | null };
@@ -410,3 +424,36 @@ export interface CheckpointsPayload {
    *  render "unavailable", never a fake empty state (fail-closed, PDR-3). */
   readError?: boolean;
 }
+
+/** One question inside a pending decision poll (D-4 approval queue). */
+export interface ApprovalQuestion {
+  question: string;
+  options: Array<{ label: string; description: string }>;
+  multiSelect: boolean;
+}
+
+/** A pending agent decision awaiting a human answer (D-4). */
+export interface ApprovalEntry {
+  mapKey: string;
+  chatJid: string;
+  mode: 'poll' | 'textFallback';
+  source: 'askuser' | 'send_poll';
+  questions: ApprovalQuestion[];
+  currentQuestionIndex: number;
+  answersCollected: Record<number, string>;
+  createdAt: number;
+  timeoutMs: number;
+  hardClosesAt: number | null;
+}
+
+export interface ApprovalsPayload {
+  observedAt: string;
+  supported: boolean;
+  approvals: ApprovalEntry[];
+  /** Rows whose stored payload failed to parse — fail-visible. */
+  parseErrors: number;
+  /** Present and true only on a fleet read failure — render "unavailable",
+   *  never a fake-empty queue (fail-closed, PDR-3). */
+  readError?: boolean;
+}
+
