@@ -9,6 +9,12 @@ set -euo pipefail
 
 INSTANCE="${1:?Usage: whatsoup <instance-name>}"
 
+# The runtime resolves protected credentials from the OS keyring at each use.
+# Scrub inherited wrapper/launchd values before this launcher starts any child
+# process so neither startup probes nor the long-lived WhatSoup parent inherit
+# provider or health-token material.
+unset ANTHROPIC_API_KEY OPENAI_API_KEY PINECONE_API_KEY ELEVENLABS_API_KEY WHATSOUP_HEALTH_TOKEN
+
 # POSIX-portable symlink resolution (readlink -f is GNU-only, unavailable on macOS)
 _resolve_symlinks() {
   local p="$1"
@@ -18,57 +24,6 @@ _resolve_symlinks() {
     [[ "$p" != /* ]] && p="$dir/$p"
   done
   echo "$(cd "$(dirname "$p")" && pwd)/$(basename "$p")"
-}
-
-# Cross-platform keyring lookup.
-# Normal lookups prefer env vars. Scoped lookups prefer the keyring first so a
-# shared env var cannot shadow an instance-specific token.
-macos_keychain_lookup() {
-  local service="$1"
-  local account="$2"
-  [ -n "${NODE:-}" ] || return 1
-  "$NODE" "$SCRIPT_DIR/lib/read-keychain-secret.mjs" "$service" "$account"
-}
-
-keyring_lookup() {
-  local service="$1"
-  local envvar="${2:-}"
-  shift 2 || true
-  local account="$USER"
-  local env_first=true
-  if [ "$service" = "whatsoup-health-token" ] || [ "$service" = "whatsoup_health" ]; then
-    env_first=false
-  fi
-  if [ "${1:-}" = "user" ] && [ -n "${2:-}" ]; then
-    account="$2"
-    env_first=false
-  fi
-  # Prefer already-set environment variable for service-wide lookups.
-  if [ "$env_first" = "true" ] && [ -n "$envvar" ] && [ -n "${!envvar:-}" ]; then
-    echo "${!envvar}"
-    return
-  fi
-  local keyring_value=""
-  case "$(uname -s)" in
-    Darwin)
-      if ! keyring_value="$(macos_keychain_lookup "$service" "$account")"; then
-        keyring_value=""
-      fi
-      ;;
-    *)
-      if ! keyring_value="$(timeout 3s secret-tool lookup service "$service" "$@" 2>/dev/null)"; then
-        keyring_value=""
-      fi
-      ;;
-  esac
-  if [ -n "$keyring_value" ]; then
-    echo "$keyring_value"
-    return
-  fi
-  if [ "$env_first" != "true" ] && [ -n "$envvar" ] && [ -n "${!envvar:-}" ]; then
-    echo "${!envvar}"
-    return
-  fi
 }
 
 # Pinned Node path (DES-007: don't rely on PATH in user units).
@@ -89,9 +44,6 @@ if ! NODE="$(whatsoup_resolve_node "$REPO_ROOT")"; then
   # whatsoup_resolve_node already printed a FATAL line describing the failure.
   exit 1
 fi
-# shellcheck source=deploy/lib/read-private-health-token.sh
-. "$SCRIPT_DIR/lib/read-private-health-token.sh"
-
 DATABASE_BOOTSTRAP_TS="$REPO_ROOT/src/database-compatibility-bootstrap.ts"
 if [ -L "$DATABASE_BOOTSTRAP_TS" ]; then
   echo "FATAL: unsafe database compatibility entrypoint (must be a regular non-symlink file): $DATABASE_BOOTSTRAP_TS" >&2
@@ -170,7 +122,7 @@ unset DATABASE_BOOTSTRAP_TRUST_CHECKER DATABASE_BOOTSTRAP_TRUST_PATHS \
 unset -f _database_bootstrap_trust_git
 
 # Database compatibility precedes restart preflight, checkout version reporting,
-# tmp creation, full config parsing, and every provider credential/keyring lookup.
+# tmp creation, full config parsing, and runtime credential lookup.
 # A future schema or hot rollback journal enters the dependency-free health
 # drain directly, so unrelated startup damage cannot mask the storage verdict.
 DATABASE_COMPATIBILITY_PERMANENT_EXIT_STATUS=78
@@ -266,78 +218,6 @@ TMPDIR="$XDG_DATA/whatsoup/tmp/$INSTANCE"
 mkdir -p "$TMPDIR"
 chmod 700 "$TMPDIR"
 export TMPDIR
-
-# Detect instance type from instance.json (whatsoup-instances namespace)
-XDG_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
-INSTANCE_JSON="$XDG_CONFIG/whatsoup/instances/$INSTANCE/config.json"
-INSTANCE_TYPE="chat"
-if [ -f "$INSTANCE_JSON" ]; then
-  INSTANCE_TYPE="$($NODE -e "process.stdout.write(JSON.parse(require('fs').readFileSync('$INSTANCE_JSON','utf8')).type ?? 'chat')")"
-fi
-
-if [ "$INSTANCE_TYPE" = "chat" ]; then
-  # Chat instances need API keys for direct LLM calls
-  ANTHROPIC_API_KEY="$(keyring_lookup anthropic ANTHROPIC_API_KEY)"
-  OPENAI_API_KEY="$(keyring_lookup openai OPENAI_API_KEY)"
-  PINECONE_API_KEY="$(keyring_lookup pinecone PINECONE_API_KEY)"
-
-  fail_if_empty() {
-    local name="$1" val="$2"
-    if [ -z "$val" ]; then
-      echo "FATAL: $name key is empty or missing from keyring" >&2
-      echo "  Linux:  secret-tool store --label='$name' service $name <<<'YOUR_KEY'" >&2
-      echo "  macOS:  security add-generic-password -s $name -a \$USER -w 'YOUR_KEY'" >&2
-      echo "  Either: export $(echo "$name" | tr '[:lower:]' '[:upper:]')_API_KEY=YOUR_KEY" >&2
-      exit 1
-    fi
-  }
-
-  fail_if_empty "anthropic" "$ANTHROPIC_API_KEY"
-  fail_if_empty "openai" "$OPENAI_API_KEY"
-  fail_if_empty "pinecone" "$PINECONE_API_KEY"
-
-  export ANTHROPIC_API_KEY OPENAI_API_KEY PINECONE_API_KEY
-else
-  # Agent and passive instances: no ANTHROPIC_API_KEY (would override subscription billing).
-  # OPENAI_API_KEY is needed by agent instances for Whisper audio transcription when users
-  # send voice notes. Passive instances don't call any LLM APIs and the key is harmless.
-  unset ANTHROPIC_API_KEY 2>/dev/null || true
-  OPENAI_API_KEY="$(keyring_lookup openai OPENAI_API_KEY)"
-  if [ -n "$OPENAI_API_KEY" ]; then
-    export OPENAI_API_KEY
-  fi
-
-  # PINECONE_API_KEY is needed by agent instances with pineconeAllowedIndexes for
-  # the knowledge_search MCP tool. The tool runs in the WhatSoup process (not the
-  # Claude Code subprocess), so the key must be in this parent process.
-  PINECONE_API_KEY="$(keyring_lookup pinecone PINECONE_API_KEY)"
-  if [ -n "$PINECONE_API_KEY" ]; then
-    export PINECONE_API_KEY
-  fi
-fi
-
-# Health server auth token — used by POST /heal and POST /send on all instances.
-# Preserve an already-loaded value first. Otherwise read the canonical private
-# per-instance tokens.env through a verified descriptor, then use the scoped
-# Keychain/secret-tool entry and finally the legacy shared Keychain entry.
-# An unsafe existing file is a startup error; only an absent file falls back.
-# Use deploy/check-health-token-keyring.sh <instance> to inspect migration state.
-# Migration tracking: docs/security-handoffs/2026-05-09-env-secret-exposure.md
-# Phase E (W-5).
-if [ -z "${WHATSOUP_HEALTH_TOKEN:-}" ]; then
-  HEALTH_TOKEN_FILE="$XDG_CONFIG/whatsoup/instances/$INSTANCE/tokens.env"
-  if [ -e "$HEALTH_TOKEN_FILE" ] || [ -L "$HEALTH_TOKEN_FILE" ]; then
-    WHATSOUP_HEALTH_TOKEN="$(whatsoup_read_private_health_token \
-      "$NODE" "$SCRIPT_DIR/lib/read-private-health-token.mjs" "$HEALTH_TOKEN_FILE")"
-  fi
-fi
-if [ -z "${WHATSOUP_HEALTH_TOKEN:-}" ]; then
-  WHATSOUP_HEALTH_TOKEN="$(keyring_lookup whatsoup-health-token "" user "$INSTANCE")"
-fi
-if [ -z "${WHATSOUP_HEALTH_TOKEN:-}" ]; then
-  WHATSOUP_HEALTH_TOKEN="$(keyring_lookup whatsoup_health WHATSOUP_HEALTH_TOKEN)"
-fi
-[ -z "${WHATSOUP_HEALTH_TOKEN:-}" ] || export WHATSOUP_HEALTH_TOKEN
 
 # Import-only mode is reserved for deploy/preflight-probe.ts. Never inherit it
 # into the real service process: an ambient/systemd value must not turn a valid

@@ -4,8 +4,8 @@
 #
 # Pre-flight check for the W-6 secrets.env migration. Returns 0 (ready) when
 # all three provider keys (anthropic, openai, pinecone) are findable in the
-# OS keyring, meaning the EnvironmentFile=secrets.env line can be safely
-# removed from deploy/whatsoup@.service. Returns 1 (not ready) if any key is
+# OS keyring, meaning secret-injecting wrappers/EnvironmentFiles can be removed
+# during a controlled direct-launcher cutover. Returns 1 (not ready) if any key is
 # missing from the keyring, printing guidance for each missing entry.
 #
 # Usage: deploy/check-keyring-presence.sh
@@ -18,8 +18,8 @@
 set -euo pipefail
 
 # Services that must be in the keyring before secrets.env can be removed.
-# These match the SERVICE_ENV_MAP keys in src/lib/provider-key-service.ts
-# and the keyring_lookup calls in deploy/whatsoup.
+# These match the SERVICE_ENV_MAP keys in src/lib/provider-key-service.ts and
+# the canonical in-process resolver services.
 SERVICES=(
   "anthropic"
   "openai"
@@ -31,7 +31,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # On macOS, security(1) has no timeout and can hang inside a launchd process when
 # the login keychain cannot present UI. Route the read through the pinned-Node
 # helper, which bounds it with a 3s SIGKILL (same seam as check-health-token-keyring.sh
-# and deploy/whatsoup). Linux keeps the native `timeout 3s secret-tool`.
+# and the health-token checker). Linux keeps the native `timeout 3s secret-tool`.
 NODE=""
 if [ "$(uname -s)" = "Darwin" ]; then
   # shellcheck source=deploy/lib/resolve-node.sh
@@ -77,10 +77,10 @@ done
 echo
 if [ "$missing" -eq 0 ]; then
   echo "✅ All provider keys are in the keyring."
-  echo "   secrets.env can be removed from deploy/whatsoup@.service (W-6)."
+  echo "   Provider secret injection can be removed during the managed cutover (W-6)."
   exit 0
 else
   echo "❌ $missing key(s) missing from keyring."
-  echo "   Store them before removing secrets.env, or the wrapper will fail to start chat instances."
+  echo "   Store them before removing legacy secret injection; affected providers will otherwise fail at use time."
   exit 1
 fi

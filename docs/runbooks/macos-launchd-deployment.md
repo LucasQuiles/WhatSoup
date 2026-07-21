@@ -87,7 +87,7 @@ The bridge row is a deployment pattern, not evidence that a bridge is installed.
 Verify the concrete plist, wrapper, logs, and target Pinecone project before
 claiming queued facts are exported.
 
-Example wrapper chain:
+Superseded wrapper-chain shape (remove during a controlled migration):
 
 ```bash
 ~/.local/bin/with-pinecone-env \
@@ -95,12 +95,12 @@ Example wrapper chain:
     /opt/homebrew/bin/node /path/to/WhatSoup/src/bootstrap.ts <instance>
 ```
 
-Keep wrapper names deployment-owned and keep wrapper output silent. The WhatSoup
-config should only reference the environment variable names those wrappers
-export, for example `memory.pinecone.apiKeyEnv = "PINECONE_API_KEY"` or a
-tenant-specific key name. Do not use wrapper-based broad env inheritance for
-agent child processes unless the provider environment allowlist has been
-reviewed for that deployment.
+Current managed plists invoke `deploy/whatsoup <instance>` directly. That
+launcher scrubs inherited provider and health-token variables before the first
+subprocess; provider and health boundaries resolve secure-store credentials in
+process. The config may retain credential selector names such as
+`memory.pinecone.apiKeyEnv = "PINECONE_API_KEY"`, but the launcher does not
+inject their values.
 
 ## Instance Configs
 
@@ -108,32 +108,29 @@ Per-instance configs live in `~/.config/whatsoup/instances/<instance>/`.
 
 - `config.json` - instance schema, access mode, health port, agent options,
   memory config, and `enabled`.
-- `tokens.env` - transitional per-instance health-token file used by fleet
-  discovery and the launch wrapper. It contains exactly one canonical
+- `tokens.env` - per-instance health-token mirror retained for fleet
+  discovery. It contains exactly one canonical
   `WHATSOUP_HEALTH_TOKEN=<64-lowercase-hex>` assignment. Keep it a regular
   non-symlink file, mode `0600`, owned by the instance operator, and outside
   tracked paths. The instance directory must also be real, operator-owned, and
-  not group- or world-writable. The wrapper fails startup on an unsafe existing
-  file and falls back only when the file is absent.
+  not group- or world-writable.
 - `auth/` - Baileys session credentials.
 - `stdout.log`, `stderr.log` - service output when the plist redirects logs.
 
 Do not confuse per-instance `tokens.env` with the unscoped credential mirror at
 `$XDG_CONFIG_HOME/whatsoup/credentials/<service>.key`. An unscoped lookup may
 use its strict `.key` file before the OS Keychain; an account-scoped lookup never
-uses that file. Health-token startup instead uses this order: an already-loaded
-environment value, per-instance `tokens.env`, the scoped Keychain item with
-service `whatsoup-health-token` and account `<instance>`, then the legacy shared
-Keychain item.
+uses that file. Managed health authorization resolves the scoped Keychain item
+with service `whatsoup-health-token` and account `<instance>`; direct non-managed
+launches may still use the documented environment compatibility fallback.
 
-After the descriptor-safe wrapper is deployed, remove any plaintext
-`WHATSOUP_HEALTH_TOKEN` duplication from the plist's `EnvironmentVariables`.
-Retain the canonical per-instance `tokens.env` file during this migration; the
-wrapper reads it directly, so launchd does not need to copy the token into the
-process environment before startup. `deploy/check-health-token-keyring.sh
+Remove plaintext `WHATSOUP_HEALTH_TOKEN` duplication and secret-injecting
+wrappers from the plist in the same controlled cutover that installs the direct
+launcher. Retain the canonical per-instance `tokens.env` file because fleet
+discovery still consumes it. `deploy/check-health-token-keyring.sh
 <instance>` compares the file with its scoped Keychain mirror without printing
 either value. A passing check does not authorize removing `tokens.env` or the
-launcher file load.
+scoped Keychain entry.
 
 Instances with `enabled: false` are skipped by fleet discovery but keep their
 config and auth state on disk.

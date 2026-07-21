@@ -74,6 +74,13 @@ No migration code was changed by this re-grounding. The handoff stays OPEN.
 
 ## Finding
 
+**Implementation update (2026-07-21):** provider and scoped health lookups now
+occur at their in-process use boundaries, and `deploy/whatsoup` scrubs the five
+protected credential variables before its first subprocess. Managed launchd
+cutovers must invoke that launcher directly and remove the legacy wrapper chain.
+The finding below remains the historical live-state description until each host
+has been cut over and independently verified with process-environment evidence.
+
 WhatSoup secrets can be exposed through process environments on a macOS runtime host.
 
 The live launchd plists do not place `OPENAI_API_KEY`, `PINECONE_API_KEY`, or `WHATSOUP_HEALTH_TOKEN` directly in their `EnvironmentVariables` dictionaries. The exposure comes from wrapper chains that read secrets from keychain, export them, and `exec` Node:

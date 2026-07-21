@@ -233,7 +233,7 @@ The registry tracks env-var groups at the section level.
 
 | Identifier | Vars | Source | Stability | Status | Notes |
 |---|---|---|---|---|---|
-| `env:api-keys` | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `PINECONE_API_KEY` | [docs/configuration.md §API Keys](configuration.md#api-keys-required-for-chat-and-audio-transcription) | stable | active | Loaded from GNOME Keyring by wrapper; required for `chat` instances, soft-optional for `agent`, unused for `passive` |
+| `env:api-keys` | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `PINECONE_API_KEY` | [docs/configuration.md §API Keys](configuration.md#api-keys-required-for-chat-and-audio-transcription) | stable | active | Compatibility fallbacks for direct launches; managed launches scrub them and provider boundaries resolve secure-store credentials at use time |
 | `env:models` | `CONVERSATION_MODEL`, `EXTRACTION_MODEL`, `VALIDATION_MODEL`, `FALLBACK_MODEL` | [docs/configuration.md §Models](configuration.md#models) | stable | active | Overridable per instance via `models` |
 | `env:conversation` | `MAX_TOKENS`, `RATE_LIMIT_PER_HOUR` | [docs/configuration.md §Conversation](configuration.md#conversation) | stable | active | Per-instance overrides available |
 | `env:access-control` | `ADMIN_PHONES` | [docs/configuration.md §Access Control](configuration.md#access-control) | stable | deprecated | Deprecation notice: [2026-05-12 public-surface baseline](releases/2026-05-12-public-surface-baseline.md#deprecations). Removal target: v2.0.0. Single-instance only; `config.json:adminPhones` is the canonical form in multi-instance mode |
