@@ -346,7 +346,7 @@ describe('createPrimaryModelProbeAdapters', () => {
     ).resolves.toEqual({ status: 'unknown', reason: 'binary-model-probe-failed' });
   });
 
-  it('uses the default OpenCode child environment builder when no env builder is injected', async () => {
+  it('uses the default OpenCode child environment builder without inheriting protected keys', async () => {
     const previous = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = 'sk-test-secret';
     const probeBinaryCommand = vi.fn(async () => ({
@@ -370,9 +370,10 @@ describe('createPrimaryModelProbeAdapters', () => {
     expect(probeBinaryCommand).toHaveBeenCalledWith(
       'opencode',
       ['run', '--format', 'json', '--pure', '-m', 'openai/configured-primary', 'Reply with OK only.'],
-      expect.objectContaining({ OPENAI_API_KEY: 'sk-test-secret' }),
+      expect.objectContaining({ PATH: expect.any(String) }),
       { timeoutMs: 15_000 },
     );
+    expect(probeBinaryCommand.mock.calls[0]?.[2]).not.toHaveProperty('OPENAI_API_KEY');
   });
 
   it('probes OpenCode custom-endpoint models from cwd config without overriding -m', async () => {
