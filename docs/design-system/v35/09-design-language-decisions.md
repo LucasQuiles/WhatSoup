@@ -20,13 +20,25 @@ kept. Light "bone" keeps its register with a slightly calmer tint.
 | light base | `#FBF6EC` | **`#FAF6EE`** | — |
 | light inset | `#ECE3D2` | **`#EDE5D5`** | — |
 
-## L2 — Accent: KEEP, thematically aligned
+## L2 — Accent: KEEP, thematically aligned (refined 2026-07-21)
 
 Accent hue family stays 217–221° (complementary to the 35–42° neutral family — the working
 relationship). Dark accent unchanged **`#6BA6FF`** (7.02 AAA on the gentle base; brand mark
-unchanged). Light accent unchanged **`#2563EB`** (4.79 AA on gentle light) — per-theme depth
-is accepted law; alignment is through the hue family, not a single literal. The T2 `#3B76F6`
-candidate is REJECTED (3.81 — fails AA).
+unchanged). Light accent **lifts `#2563EB` → `#2E66E4`** (4.71 AA on `#FAF6EE`) to narrow the
+dark/light drift per owner approval — with a correction: the earlier `#3B76F6` candidate
+fails AA (3.81), so the accessible substitute carrying the same intent is `#2E66E4`.
+
+## Accessibility gate (owner directive, all palette changes)
+
+Every chromatic token ships with per-theme measured WCAG values in the spec; AA (4.5:1)
+minimum for information-carrying color, both themes, no exceptions. Values below are
+pre-verified; spec-time re-verification is a blocking check.
+
+## F1 resolution — chat cyan shift (owner-approved, verified)
+
+- Dark: **`#3FB8DC`** — 7.50 AAA on `#1E1A15` (was `#45C9E8`; opens teal/cyan/accent
+  separation and adds a lightness step 66/60/71).
+- Light: **`#1F6E85`** — 5.37 AA on `#FAF6EE` (per-theme darker literal, same hue family).
 
 ## L3 — Agent identity hues: YES, harmonized set
 
