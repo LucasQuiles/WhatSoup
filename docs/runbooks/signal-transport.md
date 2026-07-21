@@ -94,14 +94,18 @@ the only external process. Inbound envelopes arrive via the daemon's
 | Reactions — outbound (react/unreact) | ✅ |
 | Reactions — inbound (peer reacted to a message) | ✅ routed to `on('reaction')` |
 | Typing indicators — outbound (composing/stopped) | ✅ |
-| Typing indicators — inbound | ❌ dropped (no inbound typing event in the v1 contract) |
+| Typing indicators — inbound | ✅ Phase 7 — typingMessage envelopes routed to `on('presence')`; composing → state='online', STOPPED → state='offline'. (Signal does not expose last-seen timestamps by design; typing is the closest presence signal.) |
 | Read receipts — outbound (markRead) | ✅ |
 | Read receipts — inbound (peer marked our message read) | ✅ routed to `on('read')`; one `ReadEvent` per timestamp |
 | Remote delete — outbound (`deleteMessage(scope:'everyone')`) | ✅ |
 | Remote delete — inbound (peer deleted their message) | ✅ routed to `on('delete')`; always `scope:'everyone'` |
 | Delivery receipts — inbound | ❌ dropped (durability tracks delivery via sync echoes) |
 | Sync echoes — inbound (our own outbound confirmed) | ✅ routed to `on('message')` with `fromMe:true` |
-| Media attachments | ❌ deferred (adapter declares `media.maxBytes: 0`) |
+| Media attachments | ✅ Phase 5 — `sendMedia` + `fetchAttachment` wired; 100 MB cap, MIME allowlist (image/jpeg, image/png, image/gif, image/webp, video/mp4, video/webm, audio/aac, audio/mp4, audio/mpeg, application/pdf, text/plain); signal-cli `attachments` data-URI array |
+| Group metadata (`getGroupMetadata`) | ✅ Phase 6 — signal-cli `listGroups -g <groupId>` RPC; mapped to contract `GroupMetadata { conversation, title, memberCount }` |
+| Group V2 updates (`on('group-update')`) | ✅ Phase 6 — sync envelopes carrying `groupV2UpdateDetails` routed to `GroupUpdateEvent { conversation, kind, at }`; kind taxonomy: metadata/membership/admin |
+| Voice notes (`sendVoiceNote`) | ✅ Phase 8 — audio/* payloads encoded as signal-cli attachment data URIs; voice-notes extension declared; rejects non-audio MIME + payloads over media size cap |
+| Message edit (`editText` + `on('edit')`) | ✅ Phase 9 — outbound edits via signal-cli `editTimestamp` param; inbound edits (signal-cli `dataMessage.edit`) routed to `EditEvent { target, newText, at }` |
 | Polls | ❌ rejected (WhatsApp-only feature) |
 
 ### Capability degradation (unsupported-operation handling)
@@ -127,13 +131,13 @@ Tools currently wrapped:
 |---|---|---|
 | `send_message`, `reply_message`, `react_message`, `edit_message`, `delete_message`, `send_location`, `send_contact`, `pin_message` | `sendRaw` | all use the WhatsApp-protocol `sendRaw` envelope shape |
 | `send_poll` | `sendPollMessage` | WhatsApp-only poll contract |
-| `send_voice_reply` | `sendMedia` | media not wired in v1 |
+| `send_voice_reply` | (none) | Phase 8: routes through `sendVoiceNote`; audio/opus payloads encoded as ptt-style attachments |
 
 Operations that self-degrade without surfacing a tool error:
 
 | Tool | Behaviour on Signal |
 |---|---|
-| `download_media`, `transcribe_audio` | fail early with `no_raw_message` — Signal stores no `raw_message` blob to download |
+| `download_media`, `transcribe_audio` | Phase 5: `download_media` now resolves attachments via `adapter.fetchAttachment(ref)` (reads from `attachmentsDataDir`); `transcribe_audio` still depends on application-layer transcription (no Signal-native transcription) |
 | `mark_conversation_read` | the `markRead` adapter method IS supported on Signal; the `getSocket()` null-check path does not fire |
 
 ### Inbound envelope routing

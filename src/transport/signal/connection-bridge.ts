@@ -17,6 +17,7 @@ import { createChildLogger } from '../../logger.ts';
 import type { InboundMessage as ContractInboundMessage } from '../contract/events.ts';
 import type { RuntimeConnection } from '../runtime-connection.ts';
 import type { IncomingMessage, OutboundMedia, SubmissionReceipt, TypingState } from '../../core/types.ts';
+import type { MediaPayload } from '../contract/commands.ts';
 import { ContactsDirectory } from '../../core/mentions.ts';
 import { PresenceCache } from '../presence-cache.ts';
 import type { IdentityStore, GuardMode } from '../../core/outbound-identity/types.ts';
@@ -230,13 +231,38 @@ export class SignalConnection extends EventEmitter implements RuntimeConnection 
 
   /**
    * Consumer: src/core/scheduler.ts:203 (media send path)
-   * Signal capabilities.media.maxBytes === 0 in v1; reject so scheduler
-   * routes to retry/fail. Media lands in a follow-on phase.
+   * Phase 5 — media attachments are now wired through the adapter. The bridge
+   * converts the runtime OutboundMedia to the contract MediaPayload (materialize
+   * buffer; carry mimetype + filename + caption) and delegates to
+   * adapter.sendMedia(), which validates against the spec's MIME allowlist and
+   * size cap before issuing the signal-cli RPC.
+   *
+   * Stream/URL-backed media is rejected here — the runtime materializes those
+   * upstream when sending via the durable scheduler (see scheduler.ts:203).
    */
-  async sendMedia(_chatJid: string, _media: OutboundMedia): Promise<SubmissionReceipt> {
-    return Promise.reject(
-      new UnsupportedTransportOperationError('sendMedia'),
+  async sendMedia(chatJid: string, media: OutboundMedia): Promise<SubmissionReceipt> {
+    // Strip the synthetic @signal suffix the runtime uses to address this
+    // transport; the adapter wants the raw identifier (E.164 / UUID / group id).
+    const rawId = chatJid.endsWith('@signal') ? chatJid.slice(0, -'@signal'.length) : chatJid;
+
+    if (!media.buffer) {
+      // Stream/URL-backed sources must be materialized upstream. Signal the
+      // same way the WhatsApp socket would (null waMessageId + reject).
+      throw new UnsupportedTransportOperationError('sendMedia:stream-or-url');
+    }
+
+    const payload: MediaPayload = {
+      bytes: new Uint8Array(media.buffer.buffer, media.buffer.byteOffset, media.buffer.byteLength),
+      mime: media.mimetype ?? 'application/octet-stream',
+      filename: media.type === 'document' ? media.filename : undefined,
+      caption: ('caption' in media && typeof media.caption === 'string') ? media.caption : undefined,
+    };
+
+    const ref = await this.adapter.sendMedia(
+      { channel: this.adapter.capabilities.channel, id: rawId },
+      payload,
     );
+    return { waMessageId: ref.id };
   }
 
   // ── RuntimeConnection extended surface ───────────────────────────────────

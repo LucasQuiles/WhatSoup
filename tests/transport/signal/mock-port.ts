@@ -11,6 +11,7 @@ import type {
   ReactSignalArgs,
   SendReadReceiptArgs,
   SendTypingArgs,
+  SignalGroupMetadata,
 } from '../../../src/transport/signal/port.ts';
 
 export interface MockPortOptions {
@@ -29,6 +30,11 @@ export class MockSignalPort implements SignalPort {
   readonly reactions: ReactSignalArgs[] = [];
   readonly receipts: SendReadReceiptArgs[] = [];
   readonly typings: SendTypingArgs[] = [];
+  readonly groupQueries: string[] = [];
+  /** Phase 6 — next getGroupMetadata result (mutated by tests). */
+  nextGroup: SignalGroupMetadata | null = null;
+  /** Phase 6 — error to throw from getGroupMetadata; supersedes nextGroup. */
+  nextGroupError: Error | null = null;
   verifyCalls = 0;
 
   constructor(public opts: MockPortOptions = {}) {}
@@ -62,6 +68,13 @@ export class MockSignalPort implements SignalPort {
 
   async sendTypingIndicator(args: SendTypingArgs): Promise<void> {
     this.typings.push(args);
+  }
+
+  async getGroupMetadata(groupId: string): Promise<SignalGroupMetadata> {
+    this.groupQueries.push(groupId);
+    if (this.nextGroupError) throw this.nextGroupError;
+    if (!this.nextGroup) throw new Error('GROUP_NOT_FOUND');
+    return this.nextGroup;
   }
 }
 

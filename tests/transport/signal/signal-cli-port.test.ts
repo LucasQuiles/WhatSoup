@@ -261,15 +261,27 @@ describe('SignalCliPort — listInboundSince', () => {
     await expect(port.listInboundSince(new Date(0), 1.5)).rejects.toThrow(RangeError);
   });
 
-  it('drops typing envelopes (no inbound typing event in v1 contract)', async () => {
+  it('surfaces typing envelopes as type=typing (Phase 7 presence)', async () => {
     const { port, mock } = makePort();
     mock.on('receive', () => [
-      { envelope: { sourceUuid: 'u', timestamp: 1001, typingMessage: {} } },
+      { envelope: { sourceUuid: 'u', timestamp: 1001, typingMessage: { action: 'STARTED' } } },
       dataEnvelope({ timestamp: 1002 }),
     ]);
     const out = await port.listInboundSince(new Date(0));
+    expect(out).toHaveLength(2);
+    expect(out[0]?.type).toBe('typing');
+    expect(out[0]?.typing).toEqual({ composing: true });
+    expect(out[1]?.timestamp).toBe(1002);
+  });
+
+  it('surfaces typing STOPPED as composing:false', async () => {
+    const { port, mock } = makePort();
+    mock.on('receive', () => [
+      { envelope: { sourceUuid: 'u', timestamp: 1001, typingMessage: { action: 'STOPPED' } } },
+    ]);
+    const out = await port.listInboundSince(new Date(0));
     expect(out).toHaveLength(1);
-    expect(out[0]?.timestamp).toBe(1002);
+    expect(out[0]?.typing).toEqual({ composing: false });
   });
 
   it('drops delivery receipts (no extension event for delivery in v1)', async () => {

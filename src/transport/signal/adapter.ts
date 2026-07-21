@@ -42,11 +42,28 @@ import {
   TransientProviderError,
 } from '../contract/errors.ts';
 import type {
+  AttachmentRef,
   DeleteEvent,
+  EditEvent,
+  GroupUpdateEvent,
+  PresenceEvent,
   ReadEvent,
   ReactionEvent,
 } from '../contract/events.ts';
-import type { SupportsReactions, SupportsTyping, SupportsReadReceipts, SupportsDelete } from '../contract/extensions.ts';
+import type {
+  SupportsMedia,
+  SupportsVoiceNotes,
+  SupportsGroups,
+  SupportsPresence,
+  SupportsEdit,
+  SupportsReactions,
+  SupportsTyping,
+  SupportsReadReceipts,
+  SupportsDelete,
+} from '../contract/extensions.ts';
+import type { GroupMetadata, MediaPayload, MediaBytes, SendMediaOptions, VoicePayload, SendVoiceOptions } from '../contract/commands.ts';
+import { readFile } from 'node:fs/promises';
+import { isAbsolute, relative, resolve } from 'node:path';
 import { E164_RE, SIGNAL_UUID_RE, SIGNAL_GROUP_ID_RE, type SignalConfig } from './types.ts';
 import type { InboundSignal, SignalPort, SignalPortError } from './port.ts';
 import type { CredentialLifecycleEvent, CredentialLifecycleEventName } from '../connection.ts';
@@ -63,6 +80,18 @@ interface Listeners {
   reaction: Set<(e: ReactionEvent) => void>;
   read: Set<(e: ReadEvent) => void>;
   delete: Set<(e: DeleteEvent) => void>;
+  /** Phase 6 — group V2 metadata/membership/admin updates. */
+  groupUpdate: Set<(e: GroupUpdateEvent) => void>;
+  /**
+   * Phase 6 — alias for the public kebab-case event name. The SupportsGroups
+   * contract emits 'group-update'; this key lets the on() body's bracket
+   * access resolve. Both keys reference the SAME Set instance.
+   */
+  'group-update': Set<(e: GroupUpdateEvent) => void>;
+  /** Phase 7 — peer presence (typing → online, stopped → offline). */
+  presence: Set<(e: PresenceEvent) => void>;
+  /** Phase 9 — edited inbound messages (signal-cli dataMessage.edit). */
+  edit: Set<(e: EditEvent) => void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -180,19 +209,31 @@ const SIGNAL_MAX_TEXT = 65_535;
  * time. Tests inject a mock port.
  */
 export class SignalAdapter
-  implements TransportAdapter, SupportsReactions, SupportsTyping, SupportsReadReceipts, SupportsDelete
+  implements TransportAdapter, SupportsMedia, SupportsVoiceNotes, SupportsGroups, SupportsPresence, SupportsEdit, SupportsReactions, SupportsTyping, SupportsReadReceipts, SupportsDelete
 {
   readonly capabilities: Capabilities;
 
   private health: AdapterHealth = { state: 'disconnected', since: new Date() };
-  private readonly listeners: Listeners = {
-    message: new Set(),
-    state: new Set(),
-    error: new Set(),
-    reaction: new Set(),
-    read: new Set(),
-    delete: new Set(),
-  };
+  private readonly listeners: Listeners = (() => {
+    const groupUpdateSet = new Set<(e: GroupUpdateEvent) => void>();
+    return {
+      message: new Set<(e: InboundMessage) => void>(),
+      state: new Set<(e: AdapterHealth) => void>(),
+      error: new Set<(e: TransportError) => void>(),
+      reaction: new Set<(e: ReactionEvent) => void>(),
+      read: new Set<(e: ReadEvent) => void>(),
+      delete: new Set<(e: DeleteEvent) => void>(),
+      // Phase 6 — public event name is 'group-update' (kebab) per the
+      // SupportsGroups contract, but field name is camelCase. Both keys
+      // reference the SAME Set so register and emit share a store.
+      groupUpdate: groupUpdateSet,
+      'group-update': groupUpdateSet as unknown as Set<(e: GroupUpdateEvent) => void>,
+      // Phase 7 — peer presence (typing → online, stopped → offline).
+      presence: new Set<(e: PresenceEvent) => void>(),
+      // Phase 9 — edited inbound messages.
+      edit: new Set<(e: EditEvent) => void>(),
+    };
+  })();
 
   /**
    * Bounded ring buffer of recent CredentialLifecycleEvent entries. 
@@ -229,6 +270,7 @@ export class SignalAdapter
   private readonly phoneNumber: string;
   private readonly pollIntervalMs: number;
   private readonly inboundMode: string;
+  private readonly attachmentsDataDir: string | undefined;
 
   // Monotonic per-adapter ingest counter — incremented for each emitted message.
   private ingestSeq = 0;
@@ -268,9 +310,10 @@ export class SignalAdapter
     this.phoneNumber = config.phoneNumber;
     this.pollIntervalMs = config.pollIntervalMs;
     this.inboundMode = config.inboundMode;
+    this.attachmentsDataDir = config.attachmentsDataDir;
 
     const extensions: ReadonlySet<ExtensionName> = new Set<ExtensionName>([
-      'reactions', 'typing', 'read-receipts', 'delete',
+      'media', 'voice-notes', 'groups', 'presence', 'edit', 'reactions', 'typing', 'read-receipts', 'delete',
     ]);
 
     this.capabilities = {
@@ -281,10 +324,27 @@ export class SignalAdapter
       auth: 'qr',                     // signal-cli link emits a QR the operator scans
       readReceipts: 'message',        // per-message read receipts
       reactions: 'single',            // one reaction per user per message
-      media: { maxBytes: 0, mimeAllowlist: [] },  // media deferred to v2
+      // Phase 5: spec §3a — Signal documented attachment caps. MIME allowlist
+      // is the union of formats the Signal Android/iOS clients render natively.
+      media: {
+        maxBytes: 100 * 1024 * 1024,
+        mimeAllowlist: Object.freeze([
+          'image/jpeg',
+          'image/png',
+          'image/gif',
+          'image/webp',
+          'video/mp4',
+          'video/webm',
+          'audio/aac',
+          'audio/mp4',
+          'audio/mpeg',
+          'application/pdf',
+          'text/plain',
+        ]),
+      },
       idempotency: {
         sendText: 'none',
-        sendMedia: 'none',
+        sendMedia: 'native',           // signal-cli returns timestamp → use as idempotency key
         react: 'none',
         editText: 'none',
         delete: 'none',
@@ -413,6 +473,322 @@ export class SignalAdapter
       // Signal's canonical message id is the envelope timestamp (epoch ms).
       // We stringify so MessageRef.id stays a string across transports.
       id: String(timestamp),
+    };
+  }
+
+  /**
+   * Phase 5 — send a media attachment. Mirrors TransportAdapter.sendMedia's
+   * contract but takes a ConversationRef + OutboundMedia, validates against
+   * the spec's MIME allowlist + size cap BEFORE the RPC, then encodes the
+   * payload as a signal-cli data-URI attachment
+   * (`data:<MIME>;filename=<NAME>;base64,<DATA>` per the man page §send).
+   *
+   * The body (when supplied as `caption`) travels as the signal-cli `message`
+   * field — the Signal client renders it as the attachment caption.
+   */
+  async sendMedia(
+    target: ConversationRef,
+    payload: MediaPayload,
+    _opts?: SendMediaOptions,
+  ): Promise<MessageRef> {
+    const correlationId = this.nextCorrelationId();
+
+    // 1. Channel + destination validation (mirrors sendText).
+    if (target.channel !== this.channelId) {
+      throw new ConversationNotFoundError({
+        channelId: this.channelId,
+        operation: 'sendMedia',
+        correlationId,
+        scope: 'conversation',
+        message: `target channel ${target.channel} does not match adapter channel ${this.channelId}`,
+      });
+    }
+    const isGroupTarget = SIGNAL_GROUP_ID_RE.test(target.id);
+    if (!isGroupTarget && !E164_RE.test(target.id) && !SIGNAL_UUID_RE.test(target.id)) {
+      throw new ConversationNotFoundError({
+        channelId: this.channelId,
+        operation: 'sendMedia',
+        correlationId,
+        scope: 'conversation',
+        message: `target id is not a valid E.164 destination, Signal UUID, or group id`,
+      });
+    }
+
+    // 2. MIME allowlist check (spec §3a) — BEFORE the RPC.
+    const mime = payload.mime;
+    if (!this.capabilities.media.mimeAllowlist.includes(mime)) {
+      throw new PayloadTooLargeError({
+        channelId: this.channelId,
+        operation: 'sendMedia',
+        correlationId,
+        scope: 'request',
+        message: `MIME type ${mime} is not on the Signal media allowlist`,
+      });
+    }
+
+    // 3. Size cap check (spec §3a) — BEFORE the RPC.
+    const size = payload.bytes.byteLength;
+    if (size > this.capabilities.media.maxBytes) {
+      throw new PayloadTooLargeError({
+        channelId: this.channelId,
+        operation: 'sendMedia',
+        correlationId,
+        scope: 'request',
+        message: `attachment size ${size} exceeds maxBytes ${this.capabilities.media.maxBytes}`,
+      });
+    }
+
+    // 4. Encode as signal-cli data URI. Filename: caller-supplied when present,
+    // else derived from the mimetype so signal-cli has something to render.
+    const ext = mimetypeToExtension(mime);
+    const filename = payload.filename ?? `signal-attachment-${Date.now()}.${ext}`;
+    const dataUri = `data:${mime};filename=${filename};base64,${Buffer.from(payload.bytes).toString('base64')}`;
+
+    // 5. Issue the RPC. The caption (if any) travels as the message body.
+    const body = payload.caption ?? '';
+    let timestamp: number;
+    try {
+      const result = isGroupTarget
+        ? await this.port.send({ groupId: target.id, body, attachments: [dataUri] })
+        : await this.port.send({ recipient: target.id, body, attachments: [dataUri] });
+      timestamp = result.timestamp;
+    } catch (err) {
+      throw mapPortError(err, this.channelId, 'sendMedia', correlationId, 'request');
+    }
+
+    return {
+      channel: this.channelId,
+      conversation: target.id,
+      id: String(timestamp),
+    };
+  }
+
+  /**
+   * Phase 5 — fetch an inbound attachment's bytes by AttachmentRef. signal-cli
+   * downloads inbound attachments to its data dir during `receive` and reports
+   * each one's absolute path as `AttachmentRef.id`. We read the file from disk
+   * and return it as MediaBytes (the bytes + sniffed MIME).
+   *
+   * Failures (file missing, unreadable, or path outside the data dir) throw a
+   * PermanentProviderError so the durability engine does not retry indefinitely.
+   */
+  async fetchAttachment(ref: AttachmentRef): Promise<MediaBytes> {
+    const correlationId = this.nextCorrelationId();
+    const dataDir = this.attachmentsDataDir;
+    if (!dataDir) {
+      throw new PermanentProviderError({
+        channelId: this.channelId,
+        operation: 'fetchAttachment',
+        correlationId,
+        scope: 'request',
+        message: 'fetchAttachment requires SignalConfig.attachmentsDataDir to be set (signal-cli data dir)',
+      });
+    }
+    // Resolve and confine to the configured data dir. signal-cli writes
+    // attachments under `<dataDir>/attachments/`; we accept any absolute path
+    // that normalizes to inside dataDir.
+    const resolved = resolve(ref.id);
+    const rel = relative(resolve(dataDir), resolved);
+    const isInside = rel === '' || (rel && !rel.startsWith('..') && !isAbsolute(rel));
+    if (!isInside) {
+      throw new PermanentProviderError({
+        channelId: this.channelId,
+        operation: 'fetchAttachment',
+        correlationId,
+        scope: 'request',
+        message: `attachment path ${ref.id} escapes attachmentsDataDir ${dataDir}`,
+      });
+    }
+    try {
+      const bytes = await readFile(resolved);
+      return {
+        bytes: new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength),
+        mime: ref.mime ?? 'application/octet-stream',
+      };
+    } catch (err) {
+      throw new PermanentProviderError({
+        channelId: this.channelId,
+        operation: 'fetchAttachment',
+        correlationId,
+        scope: 'request',
+        message: `failed to read attachment ${resolved}: ${(err as Error).message}`,
+      });
+    }
+  }
+
+  // ── SupportsVoiceNotes (Phase 8) ─────────────────────────────────────────
+
+  /**
+   * Phase 8 — send a voice note. Signal voice notes are opus-encoded audio
+   * attachments played in-app as push-to-talk (ptt). signal-cli's `send` RPC
+   * accepts any allowlisted MIME as an attachment, so we encode the audio
+   * payload as a data URI and let signal-cli handle the opus wrap.
+   *
+   * MIME validation is strict: only `audio/*` is accepted. Payloads over the
+   * media size cap are rejected before the RPC.
+   */
+  async sendVoiceNote(
+    target: ConversationRef,
+    audio: VoicePayload,
+    _opts?: SendVoiceOptions,
+  ): Promise<MessageRef> {
+    const correlationId = this.nextCorrelationId();
+
+    if (target.channel !== this.channelId) {
+      throw new ConversationNotFoundError({
+        channelId: this.channelId,
+        operation: 'sendVoiceNote',
+        correlationId,
+        scope: 'conversation',
+        message: `target channel ${target.channel} does not match adapter channel ${this.channelId}`,
+      });
+    }
+    const isGroupTarget = SIGNAL_GROUP_ID_RE.test(target.id);
+    if (!isGroupTarget && !E164_RE.test(target.id) && !SIGNAL_UUID_RE.test(target.id)) {
+      throw new ConversationNotFoundError({
+        channelId: this.channelId,
+        operation: 'sendVoiceNote',
+        correlationId,
+        scope: 'conversation',
+        message: `target id is not a valid E.164 destination, Signal UUID, or group id`,
+      });
+    }
+
+    // Voice-notes require an audio/* MIME.
+    if (!audio.mime.startsWith('audio/')) {
+      throw new PayloadTooLargeError({
+        channelId: this.channelId,
+        operation: 'sendVoiceNote',
+        correlationId,
+        scope: 'request',
+        message: `sendVoiceNote requires audio/* MIME, got ${audio.mime}`,
+      });
+    }
+    // Enforce the same size cap as media.
+    if (audio.bytes.byteLength > this.capabilities.media.maxBytes) {
+      throw new PayloadTooLargeError({
+        channelId: this.channelId,
+        operation: 'sendVoiceNote',
+        correlationId,
+        scope: 'request',
+        message: `voice payload size ${audio.bytes.byteLength} exceeds maxBytes ${this.capabilities.media.maxBytes}`,
+      });
+    }
+
+    // Derive the file extension from the audio MIME and encode as data URI.
+    const ext = audio.mime.split('/')[1]?.split(';')[0] ?? 'opus';
+    const filename = `signal-voice-${Date.now()}.${ext}`;
+    const dataUri = `data:${audio.mime};filename=${filename};base64,${Buffer.from(audio.bytes).toString('base64')}`;
+
+    let timestamp: number;
+    try {
+      const result = isGroupTarget
+        ? await this.port.send({ groupId: target.id, body: '', attachments: [dataUri] })
+        : await this.port.send({ recipient: target.id, body: '', attachments: [dataUri] });
+      timestamp = result.timestamp;
+    } catch (err) {
+      throw mapPortError(err, this.channelId, 'sendVoiceNote', correlationId, 'request');
+    }
+    return { channel: this.channelId, conversation: target.id, id: String(timestamp) };
+  }
+
+  // ── SupportsEdit (Phase 9) ───────────────────────────────────────────────
+
+  /**
+   * Phase 9 — edit a previously-sent outbound message. signal-cli's `send` RPC
+   * accepts an `editTimestamp` param that, when set, treats the call as an
+   * edit of the prior message identified by that epoch-ms timestamp. The new
+   * body fully replaces the original.
+   */
+  async editText(target: MessageRef, newText: string): Promise<void> {
+    const correlationId = this.nextCorrelationId();
+
+    if (target.channel !== this.channelId) {
+      throw new ConversationNotFoundError({
+        channelId: this.channelId,
+        operation: 'editText',
+        correlationId,
+        scope: 'conversation',
+        message: `target channel ${target.channel} does not match adapter channel ${this.channelId}`,
+      });
+    }
+    const isGroupTarget = SIGNAL_GROUP_ID_RE.test(target.conversation);
+    if (!isGroupTarget && !E164_RE.test(target.conversation) && !SIGNAL_UUID_RE.test(target.conversation)) {
+      throw new ConversationNotFoundError({
+        channelId: this.channelId,
+        operation: 'editText',
+        correlationId,
+        scope: 'conversation',
+        message: `target conversation is not a valid E.164 destination, Signal UUID, or group id`,
+      });
+    }
+
+    // Parse the target message id (epoch-ms string).
+    const editTimestamp = parseSignalTimestamp(target.id, correlationId, this.channelId);
+
+    if (newText.length === 0 || newText.length > this.capabilities.maxTextLength) {
+      throw new PayloadTooLargeError({
+        channelId: this.channelId,
+        operation: 'editText',
+        correlationId,
+        scope: 'request',
+        message: newText.length === 0
+          ? 'editText requires non-empty text'
+          : `edited text length ${newText.length} exceeds maxTextLength ${this.capabilities.maxTextLength}`,
+      });
+    }
+
+    try {
+      if (isGroupTarget) {
+        await this.port.send({ groupId: target.conversation, body: newText, editTimestamp });
+      } else {
+        await this.port.send({ recipient: target.conversation, body: newText, editTimestamp });
+      }
+    } catch (err) {
+      throw mapPortError(err, this.channelId, 'editText', correlationId, 'request');
+    }
+  }
+
+  // ── SupportsGroups (Phase 6) ─────────────────────────────────────────────
+
+  /**
+   * Phase 6 — fetch metadata for a Signal V2 group. Delegates to
+   * SignalPort.getGroupMetadata (signal-cli `listGroups -g <groupId>` RPC).
+   * Validates channel + group-id format BEFORE the RPC. Maps the port-level
+   * shape (SignalGroupMetadata) to the contract GroupMetadata.
+   */
+  async getGroupMetadata(target: ConversationRef): Promise<GroupMetadata> {
+    const correlationId = this.nextCorrelationId();
+
+    if (target.channel !== this.channelId) {
+      throw new ConversationNotFoundError({
+        channelId: this.channelId,
+        operation: 'getGroupMetadata',
+        correlationId,
+        scope: 'conversation',
+        message: `target channel ${target.channel} does not match adapter channel ${this.channelId}`,
+      });
+    }
+    if (!SIGNAL_GROUP_ID_RE.test(target.id)) {
+      throw new ConversationNotFoundError({
+        channelId: this.channelId,
+        operation: 'getGroupMetadata',
+        correlationId,
+        scope: 'conversation',
+        message: `target id is not a valid Signal V2 group id (expected base64): ${JSON.stringify(target.id)}`,
+      });
+    }
+
+    let raw;
+    try {
+      raw = await this.port.getGroupMetadata(target.id);
+    } catch (err) {
+      throw mapPortError(err, this.channelId, 'getGroupMetadata', correlationId, 'request');
+    }
+    return {
+      conversation: { channel: this.channelId, id: raw.id },
+      title: raw.name,
+      memberCount: raw.members.length,
     };
   }
 
@@ -568,7 +944,10 @@ export class SignalAdapter
   on(event: 'reaction', handler: (e: ReactionEvent) => void): Subscription;
   on(event: 'read', handler: (e: ReadEvent) => void): Subscription;
   on(event: 'delete', handler: (e: DeleteEvent) => void): Subscription;
-  on(event: 'message' | 'state' | 'error' | 'reaction' | 'read' | 'delete', handler: (e: never) => void): Subscription {
+  on(event: 'group-update', handler: (e: GroupUpdateEvent) => void): Subscription;
+  on(event: 'presence', handler: (e: PresenceEvent) => void): Subscription;
+  on(event: 'edit', handler: (e: EditEvent) => void): Subscription;
+  on(event: 'message' | 'state' | 'error' | 'reaction' | 'read' | 'delete' | 'group-update' | 'presence' | 'edit', handler: (e: never) => void): Subscription {
     const set = this.listeners[event] as Set<(e: never) => void>;
     set.add(handler);
     return makeSubscription(() => set.delete(handler));
@@ -720,7 +1099,19 @@ export class SignalAdapter
     switch (record.type) {
       case 'data':
       case 'sync':
-        if (record.body !== null) {
+        // Phase 6: a sync envelope carrying a groupV2 update is a group-update
+        // event, not a chat message — route it before the message-emit check.
+        if (record.groupUpdate) {
+          this.emitGroupUpdateEvent(record, record.groupUpdate);
+          // A group-update envelope MAY also carry a body (signal-cli emits
+          // both sometimes); we still fall through and emit the message if so.
+          // Pure group-update envelopes (body===null && no attachments) are
+          // already filtered out by the next guard.
+        }
+        // Phase 5: a media-only message has body===null but attachments!==empty.
+        // Emit when there is text OR at least one attachment. (Pre-Phase 5 this
+        // was a body-only check; that dropped silent media messages.)
+        if (record.body !== null || (record.attachments !== undefined && record.attachments.length > 0)) {
           this.safeEmit(this.listeners.message, this.buildInboundMessage(record));
         }
         break;
@@ -739,6 +1130,20 @@ export class SignalAdapter
       case 'delete':
         if (record.delete) {
           this.emitDeleteEvent(record, record.delete);
+        }
+        break;
+      case 'typing':
+        // Phase 7 — typingMessage envelopes surface as PresenceEvents.
+        // signal-cli emits these via the daemon subscription stream when a
+        // peer starts/stops composing. composing → 'online', stopped → 'offline'.
+        if (record.typing) {
+          this.emitPresenceEvent(record, record.typing);
+        }
+        break;
+      case 'edit':
+        // Phase 9 — edited inbound message (signal-cli dataMessage.edit).
+        if (record.edit) {
+          this.emitEditEvent(record, record.edit);
         }
         break;
       default:
@@ -813,6 +1218,72 @@ export class SignalAdapter
     this.safeEmit(this.listeners.delete, event);
   }
 
+  /**
+   * Phase 6 — emit a GroupUpdateEvent for an inbound sync envelope carrying a
+   * Signal V2 group update (name/description/avatar change, membership change,
+   * or admin role change). The conversation is the group id (always present on
+   * a group envelope); `kind` and `detail` come from the port-level payload.
+   */
+  private emitGroupUpdateEvent(
+    record: InboundSignal,
+    g: NonNullable<InboundSignal['groupUpdate']>,
+  ): void {
+    const event: GroupUpdateEvent = {
+      conversation: {
+        channel: this.channelId,
+        // Group-update envelopes always carry groupId; the port guarantees it.
+        id: record.groupId ?? '',
+      },
+      kind: g.kind,
+      at: new Date(record.timestamp),
+    };
+    this.safeEmit(this.listeners.groupUpdate, event);
+  }
+
+  /**
+   * Phase 7 — emit a PresenceEvent for an inbound typingMessage envelope.
+   * Signal does not expose last-seen timestamps (privacy by design); the
+   * closest presence signal the protocol offers is typing start/stop, which
+   * we map to state='online'/'offline'. Conversation is the peer (1:1) or
+   * the group id; participant is the typing peer.
+   */
+  private emitPresenceEvent(
+    record: InboundSignal,
+    t: NonNullable<InboundSignal['typing']>,
+  ): void {
+    const peer = record.groupId ?? record.source;
+    const event: PresenceEvent = {
+      conversation: { channel: this.channelId, id: peer },
+      participant: { channel: this.channelId, id: record.source },
+      state: t.composing ? 'online' : 'offline',
+      at: new Date(record.timestamp),
+    };
+    this.safeEmit(this.listeners.presence, event);
+  }
+
+  /**
+   * Phase 9 — emit an EditEvent for an inbound edit envelope. The target is
+   * the edited message (id = targetTimestamp as string); the conversation is
+   * the peer (1:1) or the group id. signal-cli surfaces edits via
+   * `dataMessage.edit` with the original message's timestamp and the new body.
+   */
+  private emitEditEvent(
+    record: InboundSignal,
+    e: NonNullable<InboundSignal['edit']>,
+  ): void {
+    const peer = record.groupId ?? (record.fromMe ? record.destination : record.source);
+    const event: EditEvent = {
+      target: {
+        channel: this.channelId,
+        conversation: peer,
+        id: String(e.targetTimestamp),
+      },
+      newText: e.newText,
+      at: new Date(record.timestamp),
+    };
+    this.safeEmit(this.listeners.edit, event);
+  }
+
   private buildInboundMessage(record: InboundSignal): InboundMessage {
     const channelId = this.channelId;
     // Group envelopes thread under the group id (all members' traffic shares
@@ -837,7 +1308,16 @@ export class SignalAdapter
       },
       fromMe: record.fromMe,
       text: record.body,
-      attachments: [],
+      // Phase 5 — surface inbound attachments as AttachmentRef[]. The id is
+      // the absolute path signal-cli wrote the file to (consumed by
+      // fetchAttachment below). kind is mapped from the sniffed MIME.
+      attachments: (record.attachments ?? []).map((a) => ({
+        id: a.storedFilename,
+        kind: mimeToAttachmentKind(a.contentType),
+        mime: a.contentType,
+        sizeBytes: a.size,
+        filename: a.filename,
+      })),
       timestamp: ts,
       inboundEventKey: String(record.timestamp),
       transportTimestamp: ts,
@@ -978,3 +1458,39 @@ function parseSignalTimestamp(id: string, correlationId: string, channelId: Chan
 // Re-export the port-error type so consumers can match against it without
 // importing the port module directly.
 export type { SignalPortError };
+
+/**
+ * Map an allowlisted MIME type to a sensible file extension so signal-cli has
+ * a filename to render when the caller doesn't supply one. Only types on the
+ * capabilities allowlist are reachable here; the default arm fails closed.
+ */
+function mimetypeToExtension(mime: string): string {
+  switch (mime) {
+    case 'image/jpeg': return 'jpg';
+    case 'image/png': return 'png';
+    case 'image/gif': return 'gif';
+    case 'image/webp': return 'webp';
+    case 'video/mp4': return 'mp4';
+    case 'video/webm': return 'webm';
+    case 'audio/aac': return 'aac';
+    case 'audio/mp4': return 'm4a';
+    case 'audio/mpeg': return 'mp3';
+    case 'application/pdf': return 'pdf';
+    case 'text/plain': return 'txt';
+    default: return 'bin';
+  }
+}
+
+/**
+ * Phase 5 — map a sniffed MIME type to the AttachmentRef `kind` taxonomy.
+ * Used by the inbound path when surfacing signal-cli's downloaded attachments
+ * as AttachmentRef[] on InboundMessage.
+ */
+function mimeToAttachmentKind(mime: string): AttachmentRef['kind'] {
+  if (mime.startsWith('image/')) return 'image';
+  if (mime.startsWith('video/')) return 'video';
+  if (mime.startsWith('audio/')) return 'audio';
+  if (mime === 'application/pdf') return 'document';
+  if (mime.startsWith('text/')) return 'document';
+  return 'unknown';
+}

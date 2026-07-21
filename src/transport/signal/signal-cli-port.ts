@@ -21,11 +21,13 @@
 import net from 'node:net';
 import type { SignalConfig } from './types.ts';
 import type {
+  InboundAttachment,
   InboundSignal,
   ReactSignalArgs,
   SendReadReceiptArgs,
   SendSignalArgs,
   SendTypingArgs,
+  SignalGroupMetadata,
   SignalPort,
   SignalPortError,
 } from './port.ts';
@@ -171,6 +173,21 @@ interface RpcEnvelope {
     delete?: {
       targetSentTimestamp?: number;
     };
+    /**
+     * Phase 9 — edited message payload. signal-cli surfaces an edited
+     * inbound message via `dataMessage.edit` with the original message's
+     * timestamp and the replacement body in `message`.
+     */
+    edit?: {
+      targetSentTimestamp?: number;
+    };
+    /**
+     * Phase 5 — signal-cli downloads inbound attachments to its data dir and
+     * reports each one with: storedFilename (absolute path on the signal-cli
+     * host), contentType (sniffed MIME), size (decoded bytes), and optionally
+     * a caller-facing filename. See `man signal-cli` §receive.
+     */
+    attachments?: RpcAttachment[];
   };
   syncMessage?: {
     sentMessage?: {
@@ -180,6 +197,7 @@ interface RpcEnvelope {
       destinationUuid?: string;
       groupInfo?: { groupId?: string };
       timestamp?: number;
+      attachments?: RpcAttachment[];
     };
   };
   receiptMessage?: {
@@ -189,14 +207,40 @@ interface RpcEnvelope {
   typingMessage?: unknown;
 }
 
+/**
+ * Phase 5 — signal-cli's `attachments` array shape (per the man page §receive
+ * and the JSON-RPC `receive` response). The port carries these through
+ * unchanged; the adapter decides what to surface upstream.
+ */
+interface RpcAttachment {
+  storedFilename?: string;
+  filename?: string;
+  contentType?: string;
+  size?: number;
+}
+
+/** Convert a signal-cli RPC attachment to the port-level InboundAttachment. */
+function toInboundAttachment(a: RpcAttachment): InboundAttachment | null {
+  if (!a || typeof a.storedFilename !== 'string') return null;
+  return {
+    storedFilename: a.storedFilename,
+    contentType: typeof a.contentType === 'string' ? a.contentType : 'application/octet-stream',
+    size: typeof a.size === 'number' ? a.size : 0,
+    filename: typeof a.filename === 'string' ? a.filename : undefined,
+  };
+}
+
 function senderUuid(env: RpcEnvelope): string {
   return env.sourceUuid ?? env.source ?? env.sourceNumber ?? 'unknown';
 }
 
-function normalizeEnvelope(env: RpcEnvelope, ownNumber: string): InboundSignal | null {
+export function normalizeEnvelope(env: RpcEnvelope, ownNumber: string): InboundSignal | null {
   // Sync echo of our own outbound message.
   if (env.syncMessage?.sentMessage) {
     const sent = env.syncMessage.sentMessage;
+    const attachments = (sent.attachments ?? [])
+      .map(toInboundAttachment)
+      .filter((a): a is InboundAttachment => a !== null);
     return {
       timestamp: sent.timestamp ?? env.timestamp ?? 0,
       source: ownNumber,
@@ -205,6 +249,7 @@ function normalizeEnvelope(env: RpcEnvelope, ownNumber: string): InboundSignal |
       body: sent.message ?? null,
       fromMe: true,
       type: 'sync',
+      attachments: attachments.length > 0 ? attachments : undefined,
     };
   }
   // Read receipt — ONLY type='READ' (DELIVERY receipts have no extension event
@@ -270,7 +315,31 @@ function normalizeEnvelope(env: RpcEnvelope, ownNumber: string): InboundSignal |
       };
     }
 
-    // Plain text.
+    // Phase 9 — edited message. signal-cli emits these as a dataMessage with
+    // both `edit.targetSentTimestamp` (the original message) and `message`
+    // (the new body). Detect BEFORE the plain-text fallback so edits don't
+    // surface as fresh messages.
+    if (dm.edit && typeof dm.edit.targetSentTimestamp === 'number') {
+      return {
+        timestamp: env.timestamp ?? 0,
+        source: senderUuid(env),
+        destination: groupId ?? ownNumber,
+        groupId,
+        body: dm.message ?? null,
+        fromMe: false,
+        type: 'edit',
+        edit: {
+          targetTimestamp: dm.edit.targetSentTimestamp,
+          newText: dm.message ?? '',
+        },
+      };
+    }
+
+    // Plain text (or text + attachments). Phase 5: signal-cli emits attachments
+    // under dataMessage.attachments when a media message arrives.
+    const attachments = (dm.attachments ?? [])
+      .map(toInboundAttachment)
+      .filter((a): a is InboundAttachment => a !== null);
     return {
       timestamp: env.timestamp ?? 0,
       source: senderUuid(env),
@@ -279,11 +348,28 @@ function normalizeEnvelope(env: RpcEnvelope, ownNumber: string): InboundSignal |
       body: dm.message ?? null,
       fromMe: false,
       type: 'data',
+      attachments: attachments.length > 0 ? attachments : undefined,
     };
   }
-  // Typing, delivery receipts, calls: dropped — no inbound extension event
-  // for these in the v1 contract (typing is outbound-only via SupportsTyping;
-  // delivery is tracked via sync echoes; calls are out of scope).
+  // Phase 7 — typingMessage envelopes. signal-cli's typingMessage carries
+  // an optional `action` field ('STARTED' for composing, 'STOPPED' for idle).
+  // We surface these as type='typing' with a composing boolean; the adapter
+  // emits a PresenceEvent. (Pre-Phase 7 these were dropped.)
+  if (env.typingMessage && typeof env.typingMessage === 'object') {
+    const tm = env.typingMessage as { action?: string };
+    const composing = tm.action !== 'STOPPED';
+    return {
+      timestamp: env.timestamp ?? 0,
+      source: senderUuid(env),
+      destination: ownNumber,
+      body: null,
+      fromMe: false,
+      type: 'typing',
+      typing: { composing },
+    };
+  }
+  // Delivery receipts and calls remain dropped — no inbound extension event
+  // for these (delivery is tracked via sync echoes; calls are out of scope).
   return null;
 }
 
@@ -342,6 +428,18 @@ export class SignalCliPort implements SignalPort {
       params.groupId = args.groupId;
     } else {
       params.recipient = [args.recipient];
+    }
+    // Phase 5: forward attachments as the signal-cli `attachments` array.
+    // Each entry is a data URI per the signal-cli man page §send:
+    //   data:<MIME>;filename=<FILENAME>;base64,<BASE64 ENCODED DATA>
+    if (args.attachments && args.attachments.length > 0) {
+      params.attachments = args.attachments.slice();
+    }
+    // Phase 9: edit-timestamp forwards to signal-cli's `editTimestamp` param.
+    // When present, signal-cli treats this send as an edit of the prior
+    // outbound message identified by the timestamp.
+    if (args.editTimestamp !== undefined) {
+      params.editTimestamp = args.editTimestamp;
     }
     const result = await this.conn().request('send', params) as { timestamp?: number } | undefined;
     const timestamp = result?.timestamp ?? args.timestamp ?? Date.now();
@@ -404,5 +502,50 @@ export class SignalCliPort implements SignalPort {
       recipient: [args.target],
       when: args.composing ? 'TYPING' : 'STOPPED',
     });
+  }
+
+  /**
+   * Phase 6 — fetch metadata for a single Signal V2 group via signal-cli's
+   * `listGroups` RPC. signal-cli returns an array of objects with shape:
+   *   { id: string, name: string, members: string[], ... }
+   * We filter to the requested groupId. When the group is unknown (or this
+   * linked-device session hasn't seen it), the RPC returns an empty array —
+   * we surface that as a typed error the adapter maps upstream.
+   */
+  async getGroupMetadata(groupId: string): Promise<SignalGroupMetadata> {
+    if (!groupId) {
+      throw Object.assign(new Error('getGroupMetadata: groupId is required'), { code: 'BadArgs' }) satisfies SignalPortError;
+    }
+    const result = await this.conn().request('listGroups', {
+      detailed: true,
+    }) as Array<{
+      id?: string;
+      name?: string;
+      members?: Array<string | { number?: string; uuid?: string }>;
+    }> | undefined;
+    const groups = (result ?? []).filter((g) => g.id === groupId);
+    if (groups.length === 0) {
+      throw Object.assign(
+        new Error(`getGroupMetadata: group ${groupId} not found in this session`),
+        { code: 'GroupNotFound' },
+      ) satisfies SignalPortError;
+    }
+    const g = groups[0];
+    // Normalize members: signal-cli emits each member as either a bare string
+    // (UUID or E.164) or an object with { number, uuid }. We accept both.
+    const members: string[] = [];
+    for (const m of g.members ?? []) {
+      if (typeof m === 'string') {
+        members.push(m);
+      } else if (m && typeof m === 'object') {
+        const id = m.uuid ?? m.number;
+        if (typeof id === 'string') members.push(id);
+      }
+    }
+    return {
+      id: g.id ?? groupId,
+      name: g.name ?? '',
+      members,
+    };
   }
 }
