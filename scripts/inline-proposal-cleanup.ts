@@ -538,7 +538,8 @@ function isManifestDatabase(value: unknown): value is CleanupManifest['database'
     && value.schemaVersion === CURRENT_SCHEMA_MIGRATION
     && value.snapshotFile === 'database-snapshot.db'
     && isCompanionRecord(value.wal, 'source-wal.provenance')
-    && isCompanionRecord(value.shm, 'source-shm.provenance');
+    && isCompanionRecord(value.shm, 'source-shm.provenance')
+    && value.wal.present === value.shm.present;
 }
 
 function assertManifest(value: unknown): CleanupManifest {

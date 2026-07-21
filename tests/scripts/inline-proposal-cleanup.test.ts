@@ -549,6 +549,16 @@ describe('inline proposal cleanup protocol', () => {
       const database = manifest.database as Record<string, unknown>;
       (database.wal as Record<string, unknown>).sha256 = '0'.repeat(64);
     }],
+    ['companion presence parity', (manifest: Record<string, unknown>) => {
+      const database = manifest.database as Record<string, unknown>;
+      database.wal = {
+        present: true,
+        sha256: '0'.repeat(64),
+        size: 1,
+        snapshotFile: 'source-wal.provenance',
+      };
+      database.shm = { present: false, sha256: null, size: null, snapshotFile: null };
+    }],
     ['companion extra key', (manifest: Record<string, unknown>) => {
       const database = manifest.database as Record<string, unknown>;
       (database.shm as Record<string, unknown>).unexpected = true;
