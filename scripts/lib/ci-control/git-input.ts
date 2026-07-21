@@ -1,10 +1,16 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { TextDecoder } from "node:util";
 
 import { cleanGitEnv } from "../../../src/lib/git-env.ts";
 
 export const MAX_CHANGE_SET_BYTES = 16 * 1024 * 1024;
 export const MAX_CHANGE_FACT_COUNT = 50_000;
+export const MAX_EXACT_COMMIT_COUNT = 4_096;
+export const MAX_EXACT_COMMIT_RANGE_BYTES = 1 * 1_024 * 1_024;
+export const MAX_EXACT_BLOB_COUNT = 50_000;
+export const MAX_EXACT_SINGLE_BLOB_BYTES = 4 * 1_024 * 1_024;
+export const MAX_EXACT_AGGREGATE_BLOB_BYTES = 16 * 1_024 * 1_024;
 
 export type ChangeStatusV1 =
   "added" | "modified" | "deleted" | "renamed" | "copied";
@@ -25,8 +31,44 @@ export interface ChangeFactV1 {
   similarity: number | null;
 }
 
+export interface ExactCommitRangeInputV1 {
+  baseOid: string;
+  remoteOid: string | null;
+  localOid: string;
+}
+
+export interface ExactCommitV1 {
+  oid: string;
+  parentOids: string[];
+  firstParentOid: string;
+}
+
+export interface ExactCommitRangeV1 {
+  baseOid: string;
+  remoteOid: string | null;
+  rangeStartOid: string;
+  localOid: string;
+  commits: ExactCommitV1[];
+}
+
+export interface ExactBlobV1 {
+  oid: string;
+  byteLength: number;
+  contentSha256: `sha256:${string}`;
+  bytes: Uint8Array;
+}
+
 export type ExactGitInputErrorCode =
   | "ci.input.revision-unavailable"
+  | "ci.input.commit-range-unavailable"
+  | "ci.input.commit-range-malformed"
+  | "ci.input.commit-range-budget"
+  | "ci.input.blob-set-malformed"
+  | "ci.input.blob-set-budget"
+  | "ci.input.blob-unavailable"
+  | "ci.input.blob-type-unsupported"
+  | "ci.input.blob-identity-mismatch"
+  | "ci.input.git-execution-timeout"
   | "ci.classification.merge-base-unavailable"
   | "ci.classification.change-set-malformed"
   | "ci.classification.change-set-budget"
@@ -94,6 +136,463 @@ function gitBytes(
         : code;
     throw new ExactGitInputError(failureCode, failureCode, { cause: error });
   }
+}
+
+function exactInputGitBytes(
+  cwd: string,
+  args: readonly string[],
+  failureCode: ExactGitInputErrorCode,
+  budgetCode: Extract<
+    ExactGitInputErrorCode,
+    "ci.input.commit-range-budget" | "ci.input.blob-set-budget"
+  >,
+  maxBuffer: number,
+): Buffer {
+  try {
+    return execFileSync("git", ["--no-replace-objects", ...args], {
+      cwd,
+      env: gitEnvironment(),
+      maxBuffer,
+      timeout: GIT_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (error) {
+    const candidate = error as NodeJS.ErrnoException & { signal?: string };
+    const code = candidate.code === "ETIMEDOUT"
+      ? "ci.input.git-execution-timeout"
+      : candidate.code === "ENOBUFS"
+      ? budgetCode
+      : failureCode;
+    throw new ExactGitInputError(code, code, { cause: error });
+  }
+}
+
+function requireSha1ObjectFormat(
+  cwd: string,
+  malformedCode: Extract<
+    ExactGitInputErrorCode,
+    "ci.input.commit-range-malformed" | "ci.input.blob-set-malformed"
+  >,
+  unavailableCode: Extract<
+    ExactGitInputErrorCode,
+    "ci.input.commit-range-unavailable" | "ci.input.blob-unavailable"
+  >,
+  budgetCode: Extract<
+    ExactGitInputErrorCode,
+    "ci.input.commit-range-budget" | "ci.input.blob-set-budget"
+  >,
+): void {
+  const format = canonicalAsciiLine(exactInputGitBytes(
+    cwd,
+    ["rev-parse", "--show-object-format"],
+    unavailableCode,
+    budgetCode,
+    64,
+  ), malformedCode);
+  if (format !== "sha1") {
+    throw new ExactGitInputError(malformedCode, malformedCode);
+  }
+}
+
+function canonicalAsciiLine(
+  bytes: Buffer,
+  malformedCode: ExactGitInputErrorCode,
+): string {
+  if (bytes.byteLength < 2 || bytes[bytes.byteLength - 1] !== 0x0a) {
+    throw new ExactGitInputError(malformedCode, malformedCode);
+  }
+  const body = bytes.subarray(0, bytes.byteLength - 1);
+  if (body.some((byte) => byte < 0x21 || byte > 0x7e)) {
+    throw new ExactGitInputError(malformedCode, malformedCode);
+  }
+  return body.toString("ascii");
+}
+
+function requireFullOid(
+  value: unknown,
+  code: Extract<
+    ExactGitInputErrorCode,
+    "ci.input.commit-range-malformed" | "ci.input.blob-set-malformed"
+  >,
+): string {
+  if (typeof value !== "string" || !FULL_OID.test(value)) {
+    throw new ExactGitInputError(code, code);
+  }
+  return value;
+}
+
+function requireExactCommit(cwd: string, oid: string): void {
+  const type = canonicalAsciiLine(exactInputGitBytes(
+    cwd,
+    ["cat-file", "-t", "--", oid],
+    "ci.input.commit-range-unavailable",
+    "ci.input.commit-range-budget",
+    64,
+  ), "ci.input.commit-range-malformed");
+  if (type !== "commit") {
+    throw new ExactGitInputError(
+      "ci.input.commit-range-malformed",
+      "ci.input.commit-range-malformed",
+    );
+  }
+}
+
+function requireAncestor(cwd: string, ancestorOid: string, localOid: string): void {
+  const mergeBase = canonicalAsciiLine(exactInputGitBytes(
+    cwd,
+    ["merge-base", "--all", ancestorOid, localOid],
+    "ci.input.commit-range-unavailable",
+    "ci.input.commit-range-budget",
+    1_024,
+  ), "ci.input.commit-range-malformed");
+  if (!FULL_OID.test(mergeBase)) {
+    throw new ExactGitInputError(
+      "ci.input.commit-range-malformed",
+      "ci.input.commit-range-malformed",
+    );
+  }
+  if (mergeBase !== ancestorOid) {
+    throw new ExactGitInputError(
+      "ci.input.commit-range-unavailable",
+      "ci.input.commit-range-unavailable",
+    );
+  }
+}
+
+function parseBoundedInteger(
+  bytes: Buffer,
+  malformedCode: ExactGitInputErrorCode,
+): number {
+  const value = canonicalAsciiLine(bytes, malformedCode);
+  if (!/^(?:0|[1-9][0-9]*)$/.test(value)) {
+    throw new ExactGitInputError(malformedCode, malformedCode);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new ExactGitInputError(malformedCode, malformedCode);
+  }
+  return parsed;
+}
+
+function validateExactCommitRangeInput(value: unknown): ExactCommitRangeInputV1 {
+  if (
+    typeof value !== "object"
+    || value === null
+    || Array.isArray(value)
+    || Object.getPrototypeOf(value) !== Object.prototype
+  ) {
+    throw new ExactGitInputError(
+      "ci.input.commit-range-malformed",
+      "ci.input.commit-range-malformed",
+    );
+  }
+  const keys = Reflect.ownKeys(value).sort((left, right) =>
+    String(left).localeCompare(String(right)));
+  if (
+    keys.length !== 3
+    || keys[0] !== "baseOid"
+    || keys[1] !== "localOid"
+    || keys[2] !== "remoteOid"
+  ) {
+    throw new ExactGitInputError(
+      "ci.input.commit-range-malformed",
+      "ci.input.commit-range-malformed",
+    );
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const base = descriptors.baseOid;
+  const remote = descriptors.remoteOid;
+  const local = descriptors.localOid;
+  if (
+    base === undefined || !("value" in base) || !base.enumerable
+    || remote === undefined || !("value" in remote) || !remote.enumerable
+    || local === undefined || !("value" in local) || !local.enumerable
+  ) {
+    throw new ExactGitInputError(
+      "ci.input.commit-range-malformed",
+      "ci.input.commit-range-malformed",
+    );
+  }
+  const baseOid = requireFullOid(base.value, "ci.input.commit-range-malformed");
+  const remoteOid = remote.value === null
+    ? null
+    : requireFullOid(remote.value, "ci.input.commit-range-malformed");
+  const localOid = requireFullOid(local.value, "ci.input.commit-range-malformed");
+  return { baseOid, remoteOid, localOid };
+}
+
+function parseCommitRows(bytes: Buffer, expectedCount: number): Map<string, ExactCommitV1> {
+  if (bytes.byteLength > MAX_EXACT_COMMIT_RANGE_BYTES) {
+    throw new ExactGitInputError(
+      "ci.input.commit-range-budget",
+      "ci.input.commit-range-budget",
+    );
+  }
+  if (bytes.some((byte) => byte > 0x7f)) {
+    throw new ExactGitInputError(
+      "ci.input.commit-range-malformed",
+      "ci.input.commit-range-malformed",
+    );
+  }
+  if (expectedCount === 0) {
+    if (bytes.byteLength !== 0) {
+      throw new ExactGitInputError(
+        "ci.input.commit-range-malformed",
+        "ci.input.commit-range-malformed",
+      );
+    }
+    return new Map();
+  }
+  if (bytes.byteLength === 0 || bytes[bytes.byteLength - 1] !== 0x0a) {
+    throw new ExactGitInputError(
+      "ci.input.commit-range-malformed",
+      "ci.input.commit-range-malformed",
+    );
+  }
+  const rows = bytes.subarray(0, bytes.byteLength - 1).toString("ascii").split("\n");
+  if (rows.length !== expectedCount || rows.some((row) => row.length === 0)) {
+    throw new ExactGitInputError(
+      "ci.input.commit-range-malformed",
+      "ci.input.commit-range-malformed",
+    );
+  }
+
+  const commits = new Map<string, ExactCommitV1>();
+  for (const row of rows) {
+    const fields = row.split(" ");
+    if (fields.some((field) => !FULL_OID.test(field))) {
+      throw new ExactGitInputError(
+        "ci.input.commit-range-malformed",
+        "ci.input.commit-range-malformed",
+      );
+    }
+    const [oid, ...parentOids] = fields;
+    if (!oid || parentOids.length === 0 || commits.has(oid)) {
+      throw new ExactGitInputError(
+        "ci.input.commit-range-malformed",
+        "ci.input.commit-range-malformed",
+      );
+    }
+    commits.set(oid, { oid, parentOids, firstParentOid: parentOids[0]! });
+  }
+  return commits;
+}
+
+function canonicalCommitOrder(commits: Map<string, ExactCommitV1>): ExactCommitV1[] {
+  const pendingParents = new Map<string, number>();
+  const children = new Map<string, string[]>();
+  for (const commit of commits.values()) {
+    let count = 0;
+    for (const parentOid of commit.parentOids) {
+      if (!commits.has(parentOid)) continue;
+      count += 1;
+      const childOids = children.get(parentOid) ?? [];
+      childOids.push(commit.oid);
+      children.set(parentOid, childOids);
+    }
+    pendingParents.set(commit.oid, count);
+  }
+
+  const ready = [...commits.keys()]
+    .filter((oid) => pendingParents.get(oid) === 0)
+    .sort();
+  const ordered: ExactCommitV1[] = [];
+  while (ready.length > 0) {
+    const oid = ready.shift()!;
+    ordered.push(commits.get(oid)!);
+    for (const childOid of children.get(oid) ?? []) {
+      const remaining = pendingParents.get(childOid)! - 1;
+      pendingParents.set(childOid, remaining);
+      if (remaining === 0) {
+        ready.push(childOid);
+        ready.sort();
+      }
+    }
+  }
+  if (ordered.length !== commits.size) {
+    throw new ExactGitInputError(
+      "ci.input.commit-range-malformed",
+      "ci.input.commit-range-malformed",
+    );
+  }
+  return ordered;
+}
+
+export function readExactCommitRange(
+  cwd: string,
+  input: ExactCommitRangeInputV1,
+): ExactCommitRangeV1 {
+  const validated = validateExactCommitRangeInput(input);
+  const { baseOid, remoteOid, localOid } = validated;
+  requireSha1ObjectFormat(
+    cwd,
+    "ci.input.commit-range-malformed",
+    "ci.input.commit-range-unavailable",
+    "ci.input.commit-range-budget",
+  );
+  const rangeStartOid = remoteOid ?? baseOid;
+
+  for (const oid of new Set([baseOid, rangeStartOid, localOid])) {
+    requireExactCommit(cwd, oid);
+  }
+  requireAncestor(cwd, baseOid, localOid);
+  requireAncestor(cwd, rangeStartOid, localOid);
+
+  const revisionRange = `${rangeStartOid}..${localOid}`;
+  const count = parseBoundedInteger(
+    exactInputGitBytes(
+      cwd,
+      ["rev-list", "--count", revisionRange, "--"],
+      "ci.input.commit-range-unavailable",
+      "ci.input.commit-range-budget",
+      64,
+    ),
+    "ci.input.commit-range-malformed",
+  );
+  if (count > MAX_EXACT_COMMIT_COUNT) {
+    throw new ExactGitInputError(
+      "ci.input.commit-range-budget",
+      "ci.input.commit-range-budget",
+    );
+  }
+  const rows = exactInputGitBytes(
+    cwd,
+    ["rev-list", "--parents", revisionRange, "--"],
+    "ci.input.commit-range-unavailable",
+    "ci.input.commit-range-budget",
+    MAX_EXACT_COMMIT_RANGE_BYTES + 1,
+  );
+  const commits = canonicalCommitOrder(parseCommitRows(rows, count));
+  if (
+    (count === 0 && localOid !== rangeStartOid)
+    || (count > 0 && commits.at(-1)?.oid !== localOid)
+  ) {
+    throw new ExactGitInputError(
+      "ci.input.commit-range-malformed",
+      "ci.input.commit-range-malformed",
+    );
+  }
+  return { baseOid, remoteOid, rangeStartOid, localOid, commits };
+}
+
+interface BlobPreflight {
+  oid: string;
+  byteLength: number;
+}
+
+function preflightBlob(cwd: string, oid: string): BlobPreflight {
+  const type = canonicalAsciiLine(exactInputGitBytes(
+    cwd,
+    ["cat-file", "-t", "--", oid],
+    "ci.input.blob-unavailable",
+    "ci.input.blob-set-budget",
+    64,
+  ), "ci.input.blob-set-malformed");
+  if (type !== "blob") {
+    throw new ExactGitInputError(
+      "ci.input.blob-type-unsupported",
+      "ci.input.blob-type-unsupported",
+    );
+  }
+  const byteLength = parseBoundedInteger(
+    exactInputGitBytes(
+      cwd,
+      ["cat-file", "-s", "--", oid],
+      "ci.input.blob-unavailable",
+      "ci.input.blob-set-budget",
+      64,
+    ),
+    "ci.input.blob-set-malformed",
+  );
+  if (byteLength > MAX_EXACT_SINGLE_BLOB_BYTES) {
+    throw new ExactGitInputError(
+      "ci.input.blob-set-budget",
+      "ci.input.blob-set-budget",
+    );
+  }
+  return { oid, byteLength };
+}
+
+export function readExactBlobs(
+  cwd: string,
+  objectOids: readonly string[],
+): ExactBlobV1[] {
+  if (!Array.isArray(objectOids)) {
+    throw new ExactGitInputError(
+      "ci.input.blob-set-malformed",
+      "ci.input.blob-set-malformed",
+    );
+  }
+  if (objectOids.length > MAX_EXACT_BLOB_COUNT) {
+    throw new ExactGitInputError(
+      "ci.input.blob-set-budget",
+      "ci.input.blob-set-budget",
+    );
+  }
+  const validatedOids: string[] = [];
+  for (let index = 0; index < objectOids.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(objectOids, String(index));
+    if (descriptor === undefined || !("value" in descriptor)) {
+      throw new ExactGitInputError(
+        "ci.input.blob-set-malformed",
+        "ci.input.blob-set-malformed",
+      );
+    }
+    validatedOids.push(requireFullOid(
+      descriptor.value,
+      "ci.input.blob-set-malformed",
+    ));
+  }
+  requireSha1ObjectFormat(
+    cwd,
+    "ci.input.blob-set-malformed",
+    "ci.input.blob-unavailable",
+    "ci.input.blob-set-budget",
+  );
+  const oids = [...new Set(validatedOids)].sort();
+
+  const preflight: BlobPreflight[] = [];
+  let aggregateBytes = 0;
+  for (const oid of oids) {
+    const blob = preflightBlob(cwd, oid);
+    aggregateBytes += blob.byteLength;
+    if (aggregateBytes > MAX_EXACT_AGGREGATE_BLOB_BYTES) {
+      throw new ExactGitInputError(
+        "ci.input.blob-set-budget",
+        "ci.input.blob-set-budget",
+      );
+    }
+    preflight.push(blob);
+  }
+
+  const blobs: ExactBlobV1[] = [];
+  for (const blob of preflight) {
+    const content = exactInputGitBytes(
+      cwd,
+      ["cat-file", "blob", "--", blob.oid],
+      "ci.input.blob-unavailable",
+      "ci.input.blob-set-budget",
+      Math.max(1_024, blob.byteLength + 1),
+    );
+    const identity = createHash("sha1")
+      .update(`blob ${blob.byteLength}\0`)
+      .update(content)
+      .digest("hex");
+    if (content.byteLength !== blob.byteLength || identity !== blob.oid) {
+      throw new ExactGitInputError(
+        "ci.input.blob-identity-mismatch",
+        "ci.input.blob-identity-mismatch",
+      );
+    }
+    blobs.push({
+      oid: blob.oid,
+      byteLength: blob.byteLength,
+      contentSha256: `sha256:${createHash("sha256").update(content).digest("hex")}`,
+      bytes: Uint8Array.from(content),
+    });
+  }
+  return blobs;
 }
 
 function requireCommit(
