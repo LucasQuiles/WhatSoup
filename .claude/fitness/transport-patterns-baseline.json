@@ -1,0 +1,247 @@
+[
+  {
+    "ruleId": "hygiene.no-health-whatsapp-key-read",
+    "file": "console/src/components/line-detail/SummaryTab.tsx",
+    "line": 44,
+    "pattern": "health?.whatsapp",
+    "lineText": "const connectionState = line.health?.whatsapp?.connection?.state ?? 'unknown'"
+  },
+  {
+    "ruleId": "hygiene.no-health-whatsapp-key-read",
+    "file": "console/src/lib/compute-kpis.ts",
+    "line": 29,
+    "pattern": "health?.whatsapp",
+    "lineText": "const wa = line.health?.whatsapp;"
+  },
+  {
+    "ruleId": "hygiene.no-health-whatsapp-key-read",
+    "file": "console/src/lib/compute-kpis.ts",
+    "line": 68,
+    "pattern": "health?.whatsapp",
+    "lineText": "return line.health?.whatsapp?.connected === undefined;"
+  },
+  {
+    "ruleId": "hygiene.no-wa-jid-literal-in-generic-ui",
+    "file": "console/src/components/line-detail/GroupCard.tsx",
+    "line": 14,
+    "pattern": "@s.whatsapp.net",
+    "lineText": "// Match by full JID or by phone-number prefix (handles @s.whatsapp.net vs @lid variants)"
+  },
+  {
+    "ruleId": "hygiene.no-wa-jid-literal-in-generic-ui",
+    "file": "console/src/lib/inbox-chat-selection.ts",
+    "line": 4,
+    "pattern": "@g.us",
+    "lineText": "return conversationKey.endsWith('@g.us') || conversationKey.endsWith('_at_g.us')"
+  },
+  {
+    "ruleId": "hygiene.no-wa-jid-literal-in-generic-ui",
+    "file": "console/src/lib/text-utils.ts",
+    "line": 68,
+    "pattern": "@g.us",
+    "lineText": "// If it ends with @g.us or @s.whatsapp.net, extract and format"
+  },
+  {
+    "ruleId": "hygiene.no-wa-jid-literal-in-generic-ui",
+    "file": "console/src/lib/text-utils.ts",
+    "line": 68,
+    "pattern": "@s.whatsapp.net",
+    "lineText": "// If it ends with @g.us or @s.whatsapp.net, extract and format"
+  },
+  {
+    "ruleId": "hygiene.no-wa-jid-literal-in-generic-ui",
+    "file": "console/src/pages/Inbox.tsx",
+    "line": 207,
+    "pattern": "@s.whatsapp.net",
+    "lineText": ": saveContactChat + '@s.whatsapp.net'"
+  },
+  {
+    "ruleId": "hygiene.no-wa-jid-literal-in-generic-ui",
+    "file": "console/src/pages/LineDetail.tsx",
+    "line": 349,
+    "pattern": "@s.whatsapp.net",
+    "lineText": "{activeTab === 'groups' && <GroupsTab lineName={name || ''} myJid={line.phone ? `${line.phone}@s.whatsapp.net` : undefined} />}"
+  },
+  {
+    "ruleId": "hygiene.no-whatsapp-copy-in-generic-ui",
+    "file": "console/src/components/FeedCard.tsx",
+    "line": 5,
+    "pattern": "WhatsApp",
+    "lineText": "import { formatWhatsAppText } from \"../lib/format-wa-text\";"
+  },
+  {
+    "ruleId": "hygiene.no-whatsapp-copy-in-generic-ui",
+    "file": "console/src/components/FeedCard.tsx",
+    "line": 199,
+    "pattern": "WhatsApp",
+    "lineText": "detail: preview ? formatWhatsAppText(preview) : isNonText ? `[${d.contentType}]` : undefined,"
+  },
+  {
+    "ruleId": "hygiene.no-whatsapp-copy-in-generic-ui",
+    "file": "console/src/components/FeedCard.tsx",
+    "line": 209,
+    "pattern": "WhatsApp",
+    "lineText": "detail: formatWhatsAppText(displayText(d.error)),"
+  },
+  {
+    "ruleId": "hygiene.no-whatsapp-copy-in-generic-ui",
+    "file": "console/src/components/MessageContent.tsx",
+    "line": 4,
+    "pattern": "WhatsApp",
+    "lineText": "import { formatWhatsAppText } from '../lib/format-wa-text'"
+  },
+  {
+    "ruleId": "hygiene.no-whatsapp-copy-in-generic-ui",
+    "file": "console/src/components/MessageContent.tsx",
+    "line": 11,
+    "pattern": "WhatsApp",
+    "lineText": "* Renders message content with WhatsApp-style formatting."
+  },
+  {
+    "ruleId": "hygiene.no-whatsapp-copy-in-generic-ui",
+    "file": "console/src/components/MessageContent.tsx",
+    "line": 53,
+    "pattern": "WhatsApp",
+    "lineText": "{formatWhatsAppText(caption.length > 60 ? caption.slice(0, 57) + '...' : caption, highlightQuery)}"
+  },
+  {
+    "ruleId": "hygiene.no-whatsapp-copy-in-generic-ui",
+    "file": "console/src/components/MessageContent.tsx",
+    "line": 68,
+    "pattern": "WhatsApp",
+    "lineText": "{formatWhatsAppText(caption.length > 60 ? caption.slice(0, 57) + '...' : caption, highlightQuery)}"
+  },
+  {
+    "ruleId": "hygiene.no-whatsapp-copy-in-generic-ui",
+    "file": "console/src/components/MessageContent.tsx",
+    "line": 93,
+    "pattern": "WhatsApp",
+    "lineText": "{formatWhatsAppText(msg.content, highlightQuery)}"
+  },
+  {
+    "ruleId": "hygiene.no-whatsapp-copy-in-generic-ui",
+    "file": "console/src/components/MessageContent.tsx",
+    "line": 172,
+    "pattern": "WhatsApp",
+    "lineText": "{formatWhatsAppText(msg.content, highlightQuery)}"
+  },
+  {
+    "ruleId": "hygiene.no-whatsapp-copy-in-generic-ui",
+    "file": "console/src/components/MessageContent.tsx",
+    "line": 257,
+    "pattern": "WhatsApp",
+    "lineText": "{msg.content ? formatWhatsAppText(msg.content, highlightQuery) : <em className=\"text-text-3\">—</em>}"
+  },
+  {
+    "ruleId": "hygiene.no-whatsapp-copy-in-generic-ui",
+    "file": "console/src/components/wizard/ConfigStep.tsx",
+    "line": 107,
+    "pattern": "WhatsApp",
+    "lineText": "return `You are ${titleName}, a helpful AI agent on WhatsApp. You have access to tools including file operations, web search, and code execution within your san"
+  },
+  {
+    "ruleId": "hygiene.no-whatsapp-copy-in-generic-ui",
+    "file": "console/src/components/wizard/ConfigStep.tsx",
+    "line": 109,
+    "pattern": "WhatsApp",
+    "lineText": "return `You are ${titleName}, a helpful AI assistant on WhatsApp. You respond to messages in a conversational, friendly tone. Keep responses concise and relevan"
+  },
+  {
+    "ruleId": "hygiene.no-whatsapp-copy-in-generic-ui",
+    "file": "console/src/components/wizard/ConfigStep.tsx",
+    "line": 116,
+    "pattern": "WhatsApp",
+    "lineText": "return `# ${titleName} — WhatsApp Agent"
+  },
+  {
+    "ruleId": "hygiene.no-whatsapp-copy-in-generic-ui",
+    "file": "console/src/components/wizard/ConfigStep.tsx",
+    "line": 118,
+    "pattern": "WhatsApp",
+    "lineText": "You are ${titleName}, an AI agent running on WhatsApp via WhatSoup."
+  },
+  {
+    "ruleId": "hygiene.no-whatsapp-copy-in-generic-ui",
+    "file": "console/src/components/wizard/ConfigStep.tsx",
+    "line": 121,
+    "pattern": "WhatsApp",
+    "lineText": "- You are a helpful, direct assistant reachable over WhatsApp"
+  },
+  {
+    "ruleId": "hygiene.no-whatsapp-copy-in-generic-ui",
+    "file": "console/src/components/wizard/ConfigStep.tsx",
+    "line": 134,
+    "pattern": "WhatsApp",
+    "lineText": "- Do NOT restart, stop, or modify other WhatsApp instances"
+  },
+  {
+    "ruleId": "hygiene.no-whatsapp-copy-in-generic-ui",
+    "file": "console/src/components/wizard/ConfigStep.tsx",
+    "line": 137,
+    "pattern": "WhatsApp",
+    "lineText": "- Keep responses concise — they're delivered via WhatsApp"
+  },
+  {
+    "ruleId": "hygiene.no-whatsapp-copy-in-generic-ui",
+    "file": "console/src/components/wizard/LinkStep.tsx",
+    "line": 202,
+    "pattern": "WhatsApp",
+    "lineText": "<span className=\"c-heading\">Scan with WhatsApp</span>"
+  },
+  {
+    "ruleId": "hygiene.no-whatsapp-copy-in-generic-ui",
+    "file": "console/src/components/wizard/LinkStep.tsx",
+    "line": 204,
+    "pattern": "WhatsApp",
+    "lineText": "Open WhatsApp &rarr; Settings &rarr; Linked Devices &rarr; Link a Device"
+  },
+  {
+    "ruleId": "hygiene.no-whatsapp-copy-in-generic-ui",
+    "file": "console/src/lib/compute-kpis.ts",
+    "line": 5,
+    "pattern": "WhatsApp",
+    "lineText": "* Whether a line's WhatsApp TRANSPORT is up (#1881). This is transport"
+  },
+  {
+    "ruleId": "hygiene.no-whatsapp-copy-in-generic-ui",
+    "file": "console/src/lib/compute-kpis.ts",
+    "line": 116,
+    "pattern": "WhatsApp",
+    "lineText": "// WhatsApp transport is up, which includes a degraded-but-connected line —"
+  },
+  {
+    "ruleId": "hygiene.no-whatsapp-copy-in-generic-ui",
+    "file": "console/src/lib/format-wa-text.tsx",
+    "line": 5,
+    "pattern": "WhatsApp",
+    "lineText": "* WhatsApp-style text formatting to React elements."
+  },
+  {
+    "ruleId": "hygiene.no-whatsapp-copy-in-generic-ui",
+    "file": "console/src/lib/format-wa-text.tsx",
+    "line": 43,
+    "pattern": "WhatsApp",
+    "lineText": "export function formatWhatsAppText(text: string | null | undefined, highlightQuery?: string): ReactNode[] {"
+  },
+  {
+    "ruleId": "hygiene.no-whatsapp-copy-in-generic-ui",
+    "file": "console/src/lib/text-utils.ts",
+    "line": 62,
+    "pattern": "WhatsApp",
+    "lineText": "// LID format (WhatsApp Linked IDs) — very long digit strings that aren't phone numbers"
+  },
+  {
+    "ruleId": "hygiene.no-whatsapp-copy-in-generic-ui",
+    "file": "console/src/pages/Landing.tsx",
+    "line": 73,
+    "pattern": "WhatsApp",
+    "lineText": "// Showcase §view-brand triptych copy — locked vocabulary (Line, not WhatsApp)."
+  },
+  {
+    "ruleId": "hygiene.no-whatsapp-copy-in-generic-ui",
+    "file": "console/src/pages/Metrics.tsx",
+    "line": 97,
+    "pattern": "WhatsApp",
+    "lineText": "// differ when a line is degraded but its WhatsApp transport is still up."
+  }
+]

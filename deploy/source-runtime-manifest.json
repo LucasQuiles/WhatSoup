@@ -31,7 +31,7 @@
     },
     {
       "path": "src/transport/factory.ts",
-      "sha256": "e4f81559c617d07dd9c4c7698bb9c5ca66371207aabe7dbd8a1cc9b7c1be2cc0",
+      "sha256": "8782eb6d758f05a50d842d6567883a9c050f1eabbad3adb823c514f0f758f8e7",
       "mustContain": [
         "createConnection",
         "ConnectionManager",
@@ -70,7 +70,7 @@
     },
     {
       "path": "src/runtimes/agent/session.ts",
-      "sha256": "172514a7389d55fa6731051cd272f9e3b05cf360e7bfd8f711fef86db52acbb9",
+      "sha256": "5aa4af3b298f98cda6f514af14b96b6dfc80b73c2122b09f03c3fd4493911fc6",
       "mustContain": [
         "composeWithExactLineDedup"
       ],

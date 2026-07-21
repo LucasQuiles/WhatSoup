@@ -12,7 +12,36 @@
 // compatible with (line: string) => AgentEvent | null.
 
 import type { AgentEvent } from '../stream-parser.ts';
-import { isRecord, stringifyValue } from './parser-utils.ts';
+import { hasVisibleToolText, normalizeToolNameForDisplay } from '../tool-update.ts';
+import { extractMessage, isRecord, stringifyValue } from './parser-utils.ts';
+
+const OPENCODE_STATUS_EXCERPT_CHARS = 96;
+
+function hasMeaningfulValue(value: unknown, depth = 0): boolean {
+  if (typeof value === 'string') return hasVisibleToolText(value);
+  if (typeof value === 'number' || typeof value === 'boolean') return true;
+  if (value === null || value === undefined || depth >= 64) return false;
+  if (Array.isArray(value)) return value.some((item) => hasMeaningfulValue(item, depth + 1));
+  if (!isRecord(value)) return false;
+  return Object.values(value).some((item) => hasMeaningfulValue(item, depth + 1));
+}
+
+function toolResultDetail(value: unknown): string | null {
+  const extracted = extractMessage(value);
+  if (extracted && hasVisibleToolText(extracted)) return extracted.trim();
+  if (!hasMeaningfulValue(value)) return null;
+  const serialized = stringifyValue(value).trim();
+  return serialized && hasVisibleToolText(serialized) ? serialized : null;
+}
+
+function statusFallback(status: string): string {
+  const normalized = status.trim().replace(/\s+/g, ' ');
+  if (!normalized) return 'OpenCode tool failed without status or error detail.';
+  const bounded = normalized.length > OPENCODE_STATUS_EXCERPT_CHARS
+    ? `${normalized.slice(0, OPENCODE_STATUS_EXCERPT_CHARS - 1)}…`
+    : normalized;
+  return `OpenCode tool failed with status "${bounded}".`;
+}
 
 export interface OpenCodeParser {
   parse: (line: string) => AgentEvent | null;
@@ -77,25 +106,36 @@ export function createOpenCodeParser(): OpenCodeParser {
         }
 
         const callID = String(part['callID'] ?? '');
+        const rawToolName = String(part['tool'] ?? '');
+        const toolName = hasVisibleToolText(rawToolName)
+          ? normalizeToolNameForDisplay(rawToolName)
+          : '';
         const state = part['state'];
 
         if (!isRecord(state)) {
           return {
             type: 'tool_result',
-            isError: false,
+            isError: true,
             toolId: callID,
-            content: '',
+            ...(toolName ? { toolName } : {}),
+            content: 'OpenCode tool result had missing or malformed state.',
           };
         }
 
         const status = String(state['status'] ?? '');
         const isError = status !== 'completed';
-        const content = stringifyValue(state['output']);
+        const content = isError
+          ? toolResultDetail(state['error'])
+            ?? toolResultDetail(state['output'])
+            ?? toolResultDetail(state['metadata'])
+            ?? statusFallback(status)
+          : stringifyValue(state['output']);
 
         return {
           type: 'tool_result',
           isError,
           toolId: callID,
+          ...(toolName ? { toolName } : {}),
           content,
         };
       }
@@ -144,4 +184,3 @@ export function createOpenCodeParser(): OpenCodeParser {
     },
   };
 }
-

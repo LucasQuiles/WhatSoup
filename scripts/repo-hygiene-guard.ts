@@ -4,6 +4,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   git,
+  isDocumentationEmailFixture,
   isOperationalProtocolToken,
   normalizeRepoPath,
   operationalReleaseHygieneFiles,
@@ -75,7 +76,8 @@ const fixtureFiles = new Set([
 // sensitive_pattern_loader covers its corpus. NOTE: no external secret scanner backstops this
 // repo (the repo hooksPath shadows the global git hooks) - keep exemptions minimal.
 const isFixtureFile = (filePath: string): boolean =>
-  fixtureFiles.has(filePath) || filePath.startsWith('tools/agent-runtime-probes/');
+  fixtureFiles.has(filePath)
+  || filePath.startsWith('tools/agent-runtime-probes/');
 
 // Files that necessarily contain the operational allowlist's own private-SHAPED
 // literals: the shared allowlist source in lib, and the publication-guard test
@@ -103,6 +105,9 @@ const releaseHygieneFiles = [
 
 const allowedEnvVarNameToken = /^[A-Z][A-Z0-9_]+_(?:MUTATIONS|TOKEN|KEY|URL|PATH)$/;
 const allowedMessagingAddressRhs = /@(?:s\.whatsapp\.net|c\.us|lid)$/i;
+
+// Reserved documentation-domain fixtures are defined once in guard-core so this
+// guard and publication-guard cannot disagree about the same token.
 
 // SSOT for the fleet private-host labels: the publication detection rule below,
 // and consumers like the bot-errors collector-unit hygiene test, import this.
@@ -172,6 +177,10 @@ const disallowedCommitAuthorPatterns: GuardPattern[] = [
 export function isAllowedPatternMatch(filePath: string, code: string, token: string): boolean {
   if (allowedEnvVarNameToken.test(token)) return true;
   if (code === 'personal-email' && allowedMessagingAddressRhs.test(token)) return true;
+  // File content only. scanCommitMessage scans with an empty filePath, and a commit
+  // message never legitimately carries an email fixture — so the documentation-domain
+  // allowance must not reach it, or history text would silently gain an email escape.
+  if (code === 'personal-email' && filePath !== '' && isDocumentationEmailFixture(token)) return true;
   if (code === 'operator-phone') {
     return allowedPhoneFixture.test(token.replace(/[\s().-]/g, ''));
   }

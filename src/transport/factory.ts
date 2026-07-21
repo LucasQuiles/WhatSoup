@@ -24,13 +24,22 @@ interface FactoryConfig {
 /**
  * Create the runtime connection for the configured transport.
  *
- * - 'baileys' → new ConnectionManager() (Baileys WhatsApp socket)
- * - 'twilio'  → TwilioConnection wrapping TwilioSmsAdapter + SdkTwilioSmsPort
- * - unknown   → assertNeverTransport (compile-time exhaustiveness + runtime guard)
+ * - 'baileys'  → new ConnectionManager() (Baileys WhatsApp socket)
+ * - 'twilio'   → TwilioConnection wrapping TwilioSmsAdapter + SdkTwilioSmsPort
+ * - 'signal'   → foundation stub; wiring lands in a follow-on phase
+ * - 'imessage' → foundation stub; wiring lands in a follow-on phase
+ * - unknown    → assertNeverTransport (compile-time exhaustiveness + runtime guard)
  *
  * The twilio arm fails loud if twilioConfig is missing; validation in
  * src/core/agent-config-validator.ts guarantees it is present when transport='twilio',
  * but defence-in-depth requires an explicit throw here.
+ *
+ * The signal and imessage arms are deliberately stub throws: the registry
+ * recognises the IDs (so config validation, factory exhaustiveness, and
+ * type-narrowing all see them), but constructing the connection requires the
+ * adapter + port + bridge wiring that lands in subsequent phases. The stub
+ * keeps the type system honest in the meantime — `default: assertNeverTransport`
+ * would otherwise fail compilation because the narrowed union is non-empty.
  */
 export function createConnection(config: FactoryConfig): RuntimeConnection {
   switch (config.transport) {
@@ -71,6 +80,24 @@ export function createConnection(config: FactoryConfig): RuntimeConnection {
 
       return new TwilioConnection(adapter, webhookServer);
     }
+
+    case 'signal':
+      // Foundation stub — adapter + port + bridge wiring lands in a follow-on
+      // phase. The case exists so the TransportId union stays exhaustive
+      // (otherwise assertNeverTransport's `never` argument fails typecheck).
+      throw new Error(
+        '[createConnection] signal transport is registered but not yet implemented. ' +
+        'Adapter/port/bridge wiring is pending; see the transport-signal-and-imessage plan.',
+      );
+
+    case 'imessage':
+      // Foundation stub — adapter + port + bridge wiring lands in a follow-on
+      // phase. The case exists so the TransportId union stays exhaustive
+      // (otherwise assertNeverTransport's `never` argument fails typecheck).
+      throw new Error(
+        '[createConnection] imessage transport is registered but not yet implemented. ' +
+        'Adapter/port/bridge wiring is pending; see the transport-signal-and-imessage plan.',
+      );
 
     default:
       return assertNeverTransport(config.transport, 'createConnection');
