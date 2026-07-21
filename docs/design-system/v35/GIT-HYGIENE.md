@@ -35,20 +35,16 @@
 
 `~/agents/q/docs/design-v35/*.md` → `docs/design-system/v35/*.md` (1:1, same filenames).
 
-## Open blocker (2026-07-21) — push gate fails environmentally
+## Resolved blocker (2026-07-21) — push gate environmental failures
 
-Branch `design/soup-v35` tip `083dbb5e` holds the full package; push to origin is blocked by
-`verify:push:branch` infra issues, NOT content (all content-level guards passed after one
-label scrub):
+1. **Tempfile scanner** flagged gitignored `.tmup-artifacts` residue → root-fixed via
+   `SKIP_RELPATHS` addition → **PR #2008** (`fix/guard-tmup-artifacts-skip`, open).
+2. **`typecheck:all` OOM** at default ~2GB V8 heap → gate needs
+   `NODE_OPTIONS=--max-old-space-size=8192` on this machine (pre-existing; heap-bump decision
+   for the gate script is open — flagged in PR #2008).
+3. Worktree provisioning: gate needs root + console `npm ci` in the worktree (done; worktree
+   is now push-capable).
+4. One load-flake (`design-metrics.test.ts` 10s timeout) — green on retry.
 
-1. `check-insecure-tempfile.ts` scans gitignored working-tree residue — flags
-   `.tmup-artifacts/…20260717…/verify_receipt_index.sh` in the main checkout. **Root fix (1
-   line):** add `'.tmup-artifacts'` to `SKIP_RELPATHS` at
-   `scripts/check-insecure-tempfile.ts:103` (mirrors the existing `.claude/worktrees` skip).
-2. Worktree push path: gate requires `node_modules` (installed via `npm ci`), then node
-   core-dumps (`0x1953f71`) mid-gate in the worktree context — needs diagnosis in a
-   write-capable session. Not blocking if pushing from the main checkout after fix #1.
-
-Unblock options: (a) land the SKIP_RELPATHS fix then push; (b) one-time owner-authorized
-`push --no-verify` (docs-only; CI runs the full superset on the PR); (c) archive/delete the
-`.tmup-artifacts` residue in the main checkout, then push normally.
+**Landed:** `design/soup-v35` pushed → **PR #2009** (docs T0+T1, open). Fix branch pushed →
+PR #2008. Worktree `.worktrees/soup-v35-design` provisioned + push-capable.
