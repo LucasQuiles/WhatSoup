@@ -35,6 +35,17 @@ vi.mock('../../src/logger.ts', () => ({
   }),
 }));
 
+const lookupCredentialMock = vi.hoisted(() => vi.fn(
+  (service: string) => service === 'whatsoup-health-token'
+    ? process.env.WHATSOUP_HEALTH_TOKEN ?? null
+    : null,
+));
+
+vi.mock('../../src/lib/keyring.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/lib/keyring.ts')>();
+  return { ...actual, lookupCredential: lookupCredentialMock };
+});
+
 // ---------------------------------------------------------------------------
 // Imports
 // ---------------------------------------------------------------------------
@@ -179,6 +190,7 @@ describe('POST /mark-read', () => {
   let chatModify: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
+    lookupCredentialMock.mockClear();
     process.env.WHATSOUP_HEALTH_TOKEN = AUTH_TOKEN;
     db = makeDb();
     chatModify = vi.fn().mockResolvedValue(undefined);

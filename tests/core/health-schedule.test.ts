@@ -22,6 +22,17 @@ vi.mock('../../src/logger.ts', () => ({
   createChildLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
 }));
 
+const lookupCredentialMock = vi.hoisted(() => vi.fn(
+  (service: string) => service === 'whatsoup-health-token'
+    ? process.env.WHATSOUP_HEALTH_TOKEN ?? null
+    : null,
+));
+
+vi.mock('../../src/lib/keyring.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/lib/keyring.ts')>();
+  return { ...actual, lookupCredential: lookupCredentialMock };
+});
+
 import { Database } from '../../src/core/database.ts';
 import type { HealthDeps } from '../../src/core/health.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';
@@ -100,6 +111,7 @@ describe('POST /schedule', () => {
   }
 
   beforeEach(() => {
+    lookupCredentialMock.mockClear();
     process.env.WHATSOUP_HEALTH_TOKEN = AUTH_TOKEN;
     db = makeDb();
     root = realpathSync(mkdtempSync(join(tmpdir(), 'sched-route-')));
