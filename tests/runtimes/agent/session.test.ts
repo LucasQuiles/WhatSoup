@@ -2719,12 +2719,12 @@ describe('buildChildEnv', () => {
     expect(() => buildChildEnv('anthropic-api')).toThrow(/managed-loop provider/);
   });
 
-  it('claude-cli: forwards OPENAI_API_KEY when set', () => {
+  it('claude-cli: strips OPENAI_API_KEY even when set', () => {
     const saved = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = 'sk-test-openai-key';
     try {
       const env = buildChildEnv('claude-cli');
-      expect(env.OPENAI_API_KEY).toBe('sk-test-openai-key');
+      expect(env).not.toHaveProperty('OPENAI_API_KEY');
     } finally {
       if (saved === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = saved;
@@ -2742,12 +2742,12 @@ describe('buildChildEnv', () => {
     }
   });
 
-  it('codex-cli: forwards OPENAI_API_KEY when set', () => {
+  it('codex-cli: strips OPENAI_API_KEY even when set', () => {
     const saved = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = 'sk-codex-key';
     try {
       const env = buildChildEnv('codex-cli');
-      expect(env.OPENAI_API_KEY).toBe('sk-codex-key');
+      expect(env).not.toHaveProperty('OPENAI_API_KEY');
     } finally {
       if (saved === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = saved;
@@ -2765,14 +2765,14 @@ describe('buildChildEnv', () => {
     }
   });
 
-  it('gemini-cli: forwards GEMINI_API_KEY when set', () => {
+  it('gemini-cli: strips GEMINI_API_KEY when set', () => {
     const savedG = process.env.GEMINI_API_KEY;
     const savedGo = process.env.GOOGLE_API_KEY;
     process.env.GEMINI_API_KEY = 'gemini-key-123';
     delete process.env.GOOGLE_API_KEY;
     try {
       const env = buildChildEnv('gemini-cli');
-      expect(env.GEMINI_API_KEY).toBe('gemini-key-123');
+      expect(env).not.toHaveProperty('GEMINI_API_KEY');
       expect(env).not.toHaveProperty('GOOGLE_API_KEY');
     } finally {
       if (savedG === undefined) delete process.env.GEMINI_API_KEY;
@@ -2781,15 +2781,15 @@ describe('buildChildEnv', () => {
     }
   });
 
-  it('gemini-cli: forwards both GEMINI_API_KEY and GOOGLE_API_KEY when both set', () => {
+  it('gemini-cli: strips both GEMINI_API_KEY and GOOGLE_API_KEY when both are set', () => {
     const savedG = process.env.GEMINI_API_KEY;
     const savedGo = process.env.GOOGLE_API_KEY;
     process.env.GEMINI_API_KEY = 'gemini-key-xyz';
     process.env.GOOGLE_API_KEY = 'google-key-xyz';
     try {
       const env = buildChildEnv('gemini-cli');
-      expect(env.GEMINI_API_KEY).toBe('gemini-key-xyz');
-      expect(env.GOOGLE_API_KEY).toBe('google-key-xyz');
+      expect(env).not.toHaveProperty('GEMINI_API_KEY');
+      expect(env).not.toHaveProperty('GOOGLE_API_KEY');
     } finally {
       if (savedG === undefined) delete process.env.GEMINI_API_KEY;
       else process.env.GEMINI_API_KEY = savedG;
@@ -2798,14 +2798,14 @@ describe('buildChildEnv', () => {
     }
   });
 
-  it('opencode-cli: forwards only the credential selected by the model prefix', () => {
+  it('opencode-cli: strips credentials selected by the model prefix', () => {
     const savedOai = process.env.OPENAI_API_KEY;
     const savedAnt = process.env.ANTHROPIC_API_KEY;
     process.env.OPENAI_API_KEY = 'sk-openai-oc';
     process.env.ANTHROPIC_API_KEY = 'sk-ant-oc';
     try {
       const env = buildChildEnv('opencode-cli', undefined, 'openai/test-model');
-      expect(env.OPENAI_API_KEY).toBe('sk-openai-oc');
+      expect(env.OPENAI_API_KEY).toBeUndefined();
       expect(env.ANTHROPIC_API_KEY).toBeUndefined();
     } finally {
       if (savedOai === undefined) delete process.env.OPENAI_API_KEY;
@@ -2815,7 +2815,7 @@ describe('buildChildEnv', () => {
     }
   });
 
-  it('opencode-cli: providerConfig.apiKeyService for a known service adds it to env forwarding', () => {
+  it('opencode-cli: providerConfig.apiKeyService never adds a credential to the child env', () => {
     // 'deepseek' is a known service in SERVICE_ENV_MAP -> DEEPSEEK_API_KEY
     const savedDeep = process.env.DEEPSEEK_API_KEY;
     process.env.DEEPSEEK_API_KEY = 'ds-api-key-for-test';
@@ -2829,7 +2829,7 @@ describe('buildChildEnv', () => {
         baseUrl: 'https://endpoint.example/v1',
         apiKeyService: 'deepseek',
       });
-      expect(env.DEEPSEEK_API_KEY).toBe('ds-api-key-for-test');
+      expect(env.DEEPSEEK_API_KEY).toBeUndefined();
     } finally {
       if (savedDeep === undefined) delete process.env.DEEPSEEK_API_KEY;
       else process.env.DEEPSEEK_API_KEY = savedDeep;

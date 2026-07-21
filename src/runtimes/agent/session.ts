@@ -47,9 +47,8 @@ import {
   appendProviderCrashPreview,
   buildProviderCrashMetadata,
 } from './provider-crash-diagnostics.ts';
-import { lookupCredential, resolveProviderKeyService, SERVICE_ENV_MAP } from '../../lib/keyring.ts';
+import { resolveProviderKeyService, SERVICE_ENV_MAP } from '../../lib/keyring.ts';
 import { PROVIDER_API_KEY_SERVICES } from '../../lib/provider-key-service.ts';
-import { resolveApiKey } from '../../lib/api-key-resolver.ts';
 import { killSessionTree } from './process-tree.ts';
 import {
   buildOpenCodeRunArgs,
@@ -205,28 +204,13 @@ export function buildChildEnv(
     ? buildOpenCodeBaseChildEnv(baseOpts)
     : buildBaseChildEnv(baseOpts);
 
-  // Provider-specific credentials — each provider only receives the keys it
-  // needs. Claude/Codex use resolveApiKey(); OpenCode resolves one selected
-  // service through lookupCredential(). Both paths are keyring-aware and avoid
-  // copying the parent credential environment. See the Phase D security handoff.
+  // CLI providers authenticate through their own native credential stores.
+  // Protected API-key names stay out of every child environment; HTTP providers
+  // run in-process and resolve scoped keyring credentials at request time.
   switch (provider) {
     case 'claude-cli':
-      // OPENAI_API_KEY is allowed for this provider's auxiliary features (Whisper).
-      // ANTHROPIC_API_KEY is deliberately excluded — Claude uses subscription auth.
-      {
-        const openaiKey = resolveApiKey({ service: 'openai', envVar: 'OPENAI_API_KEY' });
-        if (openaiKey) env.OPENAI_API_KEY = openaiKey;
-      }
-      break;
     case 'codex-cli':
-      {
-        const openaiKey = resolveApiKey({ service: 'openai', envVar: 'OPENAI_API_KEY' });
-        if (openaiKey) env.OPENAI_API_KEY = openaiKey;
-      }
-      break;
     case 'gemini-cli':
-      if (process.env.GEMINI_API_KEY) env.GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-      if (process.env.GOOGLE_API_KEY) env.GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
       break;
     case 'opencode-cli': {
       const hasCustomEndpoint = opencodeUsesConfigModel(providerConfig);
@@ -265,8 +249,6 @@ export function buildChildEnv(
         selectedService = modelService;
       }
 
-      const key = lookupCredential(selectedService);
-      if (key) env[SERVICE_ENV_MAP[selectedService]!] = key;
       break;
     }
     case 'openai-api':

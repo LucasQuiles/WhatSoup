@@ -89,7 +89,7 @@ describe('generate-health-tokens.sh', () => {
       readToken(home, name);
       expect((fs.statSync(tokenFile(home, name)).mode & 0o777).toString(8)).toBe('600');
     }
-    expect(fs.readFileSync('deploy/whatsoup@.service', 'utf8')).toContain(
+    expect(fs.readFileSync('deploy/whatsoup@.service', 'utf8')).not.toContain(
       'EnvironmentFile=-%h/.config/whatsoup/instances/%i/tokens.env',
     );
     expect(fs.existsSync(logPath)).toBe(false);
@@ -118,6 +118,19 @@ describe('generate-health-tokens.sh', () => {
     const log = fs.readFileSync(logPath, 'utf8');
     expect(log).toContain('secret-tool store --label WhatSoup Health Token (alpha) service whatsoup-health-token user alpha');
     expect(log).toContain('secret-tool store --label WhatSoup Health Token (beta) service whatsoup-health-token user beta');
+    expect(log).not.toContain(readToken(home, 'alpha'));
+    expect(log).not.toContain(readToken(home, 'beta'));
+  });
+
+  it('keeps mirrored macOS tokens off the security command argv', () => {
+    const { home } = makeHome();
+    const { bin, logPath } = makeFakeBin('Darwin');
+
+    runGenerator(home, bin, ['--mirror-keyring'], logPath);
+
+    const log = fs.readFileSync(logPath, 'utf8');
+    expect(log).toContain('security add-generic-password -U -s whatsoup-health-token -a alpha -w');
+    expect(log).toContain('security add-generic-password -U -s whatsoup-health-token -a beta -w');
     expect(log).not.toContain(readToken(home, 'alpha'));
     expect(log).not.toContain(readToken(home, 'beta'));
   });

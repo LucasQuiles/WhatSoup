@@ -28,6 +28,16 @@ import { createChildLogger } from '../logger.ts';
 
 const log = createChildLogger('api-key-resolver');
 
+const CANONICAL_SERVICE_BY_ENV_VAR: Readonly<Record<string, string>> = {
+  ANTHROPIC_API_KEY: 'anthropic',
+  OPENAI_API_KEY: 'openai',
+  PINECONE_API_KEY: 'pinecone',
+  DEEPSEEK_API_KEY: 'deepseek',
+  MINIMAX_API_KEY: 'minimax',
+  GEMINI_API_KEY: 'google',
+  GOOGLE_API_KEY: 'google',
+};
+
 export interface ResolveApiKeyOptions {
   /** Inline API key from caller (typically not used; reserved for future config). */
   inline?: string;
@@ -58,9 +68,12 @@ export function resolveApiKey(opts: ResolveApiKeyOptions): string {
   // keyring ONLY. A missing keyring hit returns '' (visible missing-key
   // downstream) rather than silently falling back to the process env.
   const allowEnvFallback = opts.allowEnvFallback !== false;
+  const effectiveService = opts.service === undefined
+    ? CANONICAL_SERVICE_BY_ENV_VAR[opts.envVar]
+    : opts.service;
 
-  if (opts.service && opts.service.length > 0) {
-    const fromKeyring = lookupCredential(opts.service);
+  if (effectiveService && effectiveService.length > 0) {
+    const fromKeyring = lookupCredential(effectiveService);
     if (fromKeyring && fromKeyring.length > 0) {
       return fromKeyring;
     }
@@ -76,7 +89,7 @@ export function resolveApiKey(opts: ResolveApiKeyOptions): string {
     const envFallback = process.env[opts.envVar] ?? '';
     if (envFallback.length > 0) {
       log.warn(
-        { service: opts.service, envVar: opts.envVar },
+        { service: effectiveService, envVar: opts.envVar },
         'apiKeyService configured but keyring lookup missed — falling back to env var; verify account isolation',
       );
     }

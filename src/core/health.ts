@@ -580,13 +580,13 @@ function classifyDisconnect(connectionState: ConnectionStateSnapshot): Disconnec
   return 'unknown_reconnect';
 }
 
-function requireAuth(req: IncomingMessage, res: ServerResponse): boolean {
+function requireAuth(req: IncomingMessage, res: ServerResponse, instanceName: string): boolean {
   const authHeader = (req.headers as Record<string, string | undefined>)['authorization'];
-  // Route through the shared credential resolver (W-2). lookupCredential checks
-  // the keyring first (when configured), falling back to WHATSOUP_HEALTH_TOKEN
-  // env var. This centralizes secret reads for the W-1 closed-registry gate
-  // and the future W-5 keyring migration off tokens.env.
-  const expectedToken = lookupCredential('whatsoup-health-token') ?? undefined;
+  const expectedToken = lookupCredential('whatsoup-health-token', {
+    user: instanceName,
+    skipEnv: true,
+    skipMigrationFallbacks: true,
+  }) ?? undefined;
   if (!verifyBearer(authHeader, expectedToken)) {
     res.writeHead(401, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Unauthorized' }));
@@ -631,7 +631,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
     // ── POST /poll-decision — D-4 console approval queue: deliver a decision
     // to a pending poll through the runtime's own poll-resolution path ──
     if (req.url === '/poll-decision' && req.method === 'POST') {
-      if (!requireAuth(req, res)) return;
+      if (!requireAuth(req, res, deps.instanceName)) return;
 
       if (!deps.resolvePollDecision) {
         res.writeHead(503, { 'Content-Type': 'application/json' });
@@ -699,7 +699,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
 
     // ── POST /send — send a text message to any chat ──
     if (req.url === '/send' && req.method === 'POST') {
-      if (!requireAuth(req, res)) return;
+      if (!requireAuth(req, res, deps.instanceName)) return;
 
       const MAX_BODY_BYTES = 64 * 1024; // 64 KB
       let body = '';
@@ -760,7 +760,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
     // delivers on its next tick (≤ ~60 s). Media is passed by FILE PATH (bounded to
     // deps.scheduleAllowedRoot), never inline bytes — a branded PDF exceeds the body cap.
     if (req.url === '/schedule' && req.method === 'POST') {
-      if (!requireAuth(req, res)) return;
+      if (!requireAuth(req, res, deps.instanceName)) return;
 
       const jsonHeaders = { 'Content-Type': 'application/json' };
       const MAX_BODY_BYTES = 64 * 1024; // 64 KB — JSON body references a file path, not bytes
@@ -848,7 +848,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       (async () => {
         const jsonHeaders = { 'Content-Type': 'application/json' };
 
-        if (!requireAuth(req, res)) return;
+        if (!requireAuth(req, res, deps.instanceName)) return;
 
         if (deps.instanceType !== 'agent' || !deps.runtime?.handleAgentCommand) {
           res.writeHead(409, jsonHeaders);
@@ -937,7 +937,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       (async () => {
         const jsonHeaders = { 'Content-Type': 'application/json' };
 
-        if (!requireAuth(req, res)) return;
+        if (!requireAuth(req, res, deps.instanceName)) return;
 
         let rawBody = '';
         try {
@@ -1022,7 +1022,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       (async () => {
         const jsonHeaders = { 'Content-Type': 'application/json' };
 
-        if (!requireAuth(req, res)) return;
+        if (!requireAuth(req, res, deps.instanceName)) return;
 
         // Parse body (with size limit matching /send)
         const MAX_BODY_BYTES = 64 * 1024;
@@ -1114,7 +1114,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       (async () => {
         const jsonHeaders = { 'Content-Type': 'application/json' };
 
-        if (!requireAuth(req, res)) return;
+        if (!requireAuth(req, res, deps.instanceName)) return;
 
         // Parse body (with size limit matching /access)
         const MAX_BODY_BYTES = 64 * 1024;
@@ -1181,7 +1181,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
 
     // ── GET /typing — return JIDs currently composing from presence cache ──
     if (req.url === '/typing' && req.method === 'GET') {
-      if (!requireAuth(req, res)) return;
+      if (!requireAuth(req, res, deps.instanceName)) return;
       const cache = deps.connectionManager.presenceCache;
       const composing: { jid: string; since: number }[] = [];
       // presenceCache.entries is private — expose via a method

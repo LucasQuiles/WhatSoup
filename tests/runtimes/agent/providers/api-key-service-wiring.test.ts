@@ -105,15 +105,15 @@ describe('HTTP providers honor apiKeyService (issue #363)', () => {
       expect(req.init.headers).toMatchObject({ Authorization: 'Bearer keyring-key' });
     });
 
-    it('falls back to OPENAI_API_KEY env when apiKeyService is unset', async () => {
+    it('uses the canonical openai keyring service when apiKeyService is unset', async () => {
       process.env.OPENAI_API_KEY = 'env-key';
 
       const provider = new OpenAIApiProvider({});
       await driveTurn(provider);
 
       const req = fetchMock.captured[0];
-      expect(req.init.headers).toMatchObject({ Authorization: 'Bearer env-key' });
-      expect(mockedLookup).not.toHaveBeenCalled();
+      expect(req.init.headers).toMatchObject({ Authorization: 'Bearer keyring-key' });
+      expect(mockedLookup).toHaveBeenCalledWith('openai');
     });
 
     it('falls back to env when apiKeyService is set but keyring lookup misses', async () => {
@@ -143,15 +143,15 @@ describe('HTTP providers honor apiKeyService (issue #363)', () => {
       expect(req.init.headers).toMatchObject({ 'x-api-key': 'keyring-key' });
     });
 
-    it('falls back to ANTHROPIC_API_KEY env when apiKeyService is unset', async () => {
+    it('uses the canonical anthropic keyring service when apiKeyService is unset', async () => {
       process.env.ANTHROPIC_API_KEY = 'env-key';
 
       const provider = new AnthropicApiProvider({});
       await driveTurn(provider);
 
       const req = fetchMock.captured[0];
-      expect(req.init.headers).toMatchObject({ 'x-api-key': 'env-key' });
-      expect(mockedLookup).not.toHaveBeenCalled();
+      expect(req.init.headers).toMatchObject({ 'x-api-key': 'keyring-key' });
+      expect(mockedLookup).toHaveBeenCalledWith('anthropic');
     });
 
     it('falls back to env when apiKeyService is set but keyring lookup misses', async () => {

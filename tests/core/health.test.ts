@@ -48,6 +48,17 @@ const mockHealthLogger = vi.hoisted(() => ({
   debug: vi.fn(),
 }));
 
+const lookupCredentialMock = vi.hoisted(() => vi.fn(
+  (service: string) => service === 'whatsoup-health-token'
+    ? process.env.WHATSOUP_HEALTH_TOKEN ?? null
+    : null,
+));
+
+vi.mock('../../src/lib/keyring.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/lib/keyring.ts')>();
+  return { ...actual, lookupCredential: lookupCredentialMock };
+});
+
 vi.mock('../../src/logger.ts', () => ({
   createChildLogger: (component: string) =>
     component === 'health'
@@ -2196,6 +2207,7 @@ describe('POST /send — Authorization header check', () => {
 
   beforeEach(async () => {
     db = makeDb();
+    lookupCredentialMock.mockClear();
     delete process.env.WHATSOUP_HEALTH_TOKEN;
     deps = makeDeps(db, {
       profiles: createProfileRegistry({
@@ -2247,6 +2259,11 @@ describe('POST /send — Authorization header check', () => {
     });
     expect(status).toBe(200);
     expect(JSON.parse(body).ok).toBe(true);
+    expect(lookupCredentialMock).toHaveBeenCalledWith('whatsoup-health-token', {
+      user: 'WhatSoup',
+      skipEnv: true,
+      skipMigrationFallbacks: true,
+    });
   });
 
   it('audits a successful health send exactly once', async () => {

@@ -272,13 +272,17 @@ describe('OpenAI Provider', () => {
   });
 
   // ── openaiProviderConfig (PR-2/QR-218) ──────────────────────────────────────
-  // Per-instance OpenAI endpoint/key override. No config must stay byte-
-  // identical to today (bare `new OpenAI()`, asserted via the beforeEach's own
-  // construction); resolveApiKey precedence and the QR-104 keyring-miss warn
-  // mirror tests/lib/api-key-resolver.test.ts.
+  // Per-instance OpenAI endpoint/key override. The no-config path resolves the
+  // canonical `openai` keyring service instead of depending on parent env.
 
-  it('no config: constructs the client with zero arguments (backward-compat lock)', () => {
-    expect(MockOpenAI).toHaveBeenCalledWith();
+  it('no config: resolves the canonical keyring service into the SDK client', () => {
+    mockedLookupCredential.mockReturnValue('canonical-openai-key');
+    MockOpenAI.mockClear();
+    createOpenAIProvider();
+    expect(mockedLookupCredential).toHaveBeenCalledWith('openai');
+    expect(MockOpenAI).toHaveBeenCalledWith(
+      expect.objectContaining({ apiKey: 'canonical-openai-key' }),
+    );
   });
 
   it('openaiProviderConfig.baseUrl maps to the SDK baseURL option', () => {

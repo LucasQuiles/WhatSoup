@@ -61,15 +61,16 @@ describe('resolveApiKey', () => {
       expect(mockedLookup).toHaveBeenCalledWith('my-service');
     });
 
-    it('falls back to env var when no inline key and no service is set', () => {
+    it('uses the canonical keyring service when no explicit service is set', () => {
       process.env.OPENAI_API_KEY = 'env-key';
+      mockedLookup.mockReturnValue('canonical-keyring-key');
 
       const result = resolveApiKey({
         envVar: 'OPENAI_API_KEY',
       });
 
-      expect(result).toBe('env-key');
-      expect(mockedLookup).not.toHaveBeenCalled();
+      expect(result).toBe('canonical-keyring-key');
+      expect(mockedLookup).toHaveBeenCalledWith('openai');
     });
 
     it('falls back to env var when service resolves to null (misconfigured service)', () => {
@@ -111,6 +112,7 @@ describe('resolveApiKey', () => {
     });
 
     it('returns empty string when nothing is configured', () => {
+      mockedLookup.mockReturnValue(null);
       const result = resolveApiKey({
         envVar: 'OPENAI_API_KEY',
       });
@@ -130,15 +132,16 @@ describe('resolveApiKey', () => {
       expect(mockedLookup).not.toHaveBeenCalled();
     });
 
-    it('does not call lookupCredential when service is undefined', () => {
+    it('falls back to env when the inferred canonical service misses', () => {
       process.env.OPENAI_API_KEY = 'env-key';
+      mockedLookup.mockReturnValue(null);
 
       const result = resolveApiKey({
         envVar: 'OPENAI_API_KEY',
       });
 
       expect(result).toBe('env-key');
-      expect(mockedLookup).not.toHaveBeenCalled();
+      expect(mockedLookup).toHaveBeenCalledWith('openai');
     });
   });
 
@@ -190,27 +193,33 @@ describe('resolveApiKey', () => {
       expect(mockLog.warn).not.toHaveBeenCalled();
     });
 
-    it('does NOT warn when no service is configured (env is the intended source)', () => {
+    it('warns when the inferred canonical service misses and env is used', () => {
       process.env.ANTHROPIC_API_KEY = 'env-key';
+      mockedLookup.mockReturnValue(null);
 
       const result = resolveApiKey({ envVar: 'ANTHROPIC_API_KEY' });
 
       expect(result).toBe('env-key');
-      expect(mockLog.warn).not.toHaveBeenCalled();
+      expect(mockLog.warn).toHaveBeenCalledWith(
+        { service: 'anthropic', envVar: 'ANTHROPIC_API_KEY' },
+        expect.stringContaining('keyring lookup missed'),
+      );
     });
   });
 
   // W-3 (Phase C): allowEnvFallback flag restricts the resolver to keyring-only.
   describe('allowEnvFallback (W-3 precedence reversal)', () => {
-    it('returns empty string when allowEnvFallback is false and no service is configured', () => {
+    it('uses the inferred canonical service when allowEnvFallback is false', () => {
       process.env.OPENAI_API_KEY = 'env-key';
+      mockedLookup.mockReturnValue('keyring-key');
 
       const result = resolveApiKey({
         envVar: 'OPENAI_API_KEY',
         allowEnvFallback: false,
       });
 
-      expect(result).toBe('');
+      expect(result).toBe('keyring-key');
+      expect(mockedLookup).toHaveBeenCalledWith('openai');
     });
 
     it('returns empty string when allowEnvFallback is false, service is set, and keyring misses', () => {

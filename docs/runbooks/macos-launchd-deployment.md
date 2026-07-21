@@ -14,8 +14,8 @@ transcription, or vector embedding, see
 - The live checkout is an operator-owned path such as `~/LAB/WhatSoup`.
 - Each instance has a config directory at
   `~/.config/whatsoup/instances/<instance>/`.
-- Secret stores or service managers are the source of truth. If a wrapper is
-  used, it only projects required values into the runtime process environment;
+- The OS keyring is the source of truth for provider and health credentials.
+  `deploy/whatsoup` removes protected secret names before starting the parent;
   raw values are never stored in `config.json`, plist files, shell history, or
   tracked docs.
 - Memory and search settings are canonical under `memory.pinecone`.
@@ -87,20 +87,15 @@ The bridge row is a deployment pattern, not evidence that a bridge is installed.
 Verify the concrete plist, wrapper, logs, and target Pinecone project before
 claiming queued facts are exported.
 
-Example wrapper chain:
+Canonical instance launch:
 
 ```bash
-~/.local/bin/with-pinecone-env \
-  ~/.local/bin/with-openai-env \
-    /opt/homebrew/bin/node /path/to/WhatSoup/src/bootstrap.ts <instance>
+/path/to/WhatSoup/deploy/whatsoup <instance>
 ```
 
-Keep wrapper names deployment-owned and keep wrapper output silent. The WhatSoup
-config should only reference the environment variable names those wrappers
-export, for example `memory.pinecone.apiKeyEnv = "PINECONE_API_KEY"` or a
-tenant-specific key name. Do not use wrapper-based broad env inheritance for
-agent child processes unless the provider environment allowlist has been
-reviewed for that deployment.
+Do not prefix that command with provider, OAuth, or health-token projection
+wrappers. Provider boundaries resolve credentials when used, and CLI-agent
+children receive no protected provider variables from the parent.
 
 ## Instance Configs
 
@@ -109,31 +104,28 @@ Per-instance configs live in `~/.config/whatsoup/instances/<instance>/`.
 - `config.json` - instance schema, access mode, health port, agent options,
   memory config, and `enabled`.
 - `tokens.env` - transitional per-instance health-token file used by fleet
-  discovery and the launch wrapper. It contains exactly one canonical
+  discovery only. It contains exactly one canonical
   `WHATSOUP_HEALTH_TOKEN=<64-lowercase-hex>` assignment. Keep it a regular
   non-symlink file, mode `0600`, owned by the instance operator, and outside
   tracked paths. The instance directory must also be real, operator-owned, and
-  not group- or world-writable. The wrapper fails startup on an unsafe existing
-  file and falls back only when the file is absent.
+  not group- or world-writable.
 - `auth/` - Baileys session credentials.
 - `stdout.log`, `stderr.log` - service output when the plist redirects logs.
 
 Do not confuse per-instance `tokens.env` with the unscoped credential mirror at
 `$XDG_CONFIG_HOME/whatsoup/credentials/<service>.key`. An unscoped lookup may
 use its strict `.key` file before the OS Keychain; an account-scoped lookup never
-uses that file. Health-token startup instead uses this order: an already-loaded
-environment value, per-instance `tokens.env`, the scoped Keychain item with
-service `whatsoup-health-token` and account `<instance>`, then the legacy shared
-Keychain item.
+uses that file. Health request authentication reads the scoped Keychain item
+with service `whatsoup-health-token` and account `<instance>`; it does not use
+environment, unscoped-file, or legacy migration fallbacks.
 
-After the descriptor-safe wrapper is deployed, remove any plaintext
-`WHATSOUP_HEALTH_TOKEN` duplication from the plist's `EnvironmentVariables`.
-Retain the canonical per-instance `tokens.env` file during this migration; the
-wrapper reads it directly, so launchd does not need to copy the token into the
-process environment before startup. `deploy/check-health-token-keyring.sh
+Remove any plaintext `WHATSOUP_HEALTH_TOKEN` duplication from the plist's
+`EnvironmentVariables`. Retain the canonical per-instance `tokens.env` file
+during this migration because fleet discovery still reads it; neither launchd
+nor the launcher copies it into the process environment.
+`deploy/check-health-token-keyring.sh
 <instance>` compares the file with its scoped Keychain mirror without printing
-either value. A passing check does not authorize removing `tokens.env` or the
-launcher file load.
+either value. A passing check does not authorize removing `tokens.env`.
 
 Instances with `enabled: false` are skipped by fleet discovery but keep their
 config and auth state on disk.
@@ -229,16 +221,15 @@ launchctl bootout   gui/$(id -u)/com.whatsoup.<instance>
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.whatsoup.<instance>.plist
 ```
 
-Hazard: a `bootout`+`bootstrap` performed **over SSH** drops the job out of the
-Aqua (GUI-login) keychain *session*. For an instance whose model uses the
-`with-claude-oauth-keychain` wrapper, the wrapper's `security unlock-keychain` then
-fails even with the correct password, so the bot starts but is **model-degraded**:
+Hazard: a `bootout`+`bootstrap` performed **over SSH** can leave the job outside
+the Aqua (GUI-login) keychain *session*. Keychain-backed model or provider auth
+may then fail even when the credential exists, so the bot starts but is
+**model-degraded**:
 `/health` returns HTTP 200 with `status=degraded` and
 `turn_capability.model_usable=false` (WhatsApp stays connected — Baileys auth is
 file-based, not keychain). Always **finish a plist change with a
 `kickstart -k`**, which restarts the job *within* the now-bootstrapped GUI domain
-and re-joins the keychain session so the wrapper self-unlocks from its password
-file:
+and re-joins the GUI keychain session:
 
 ```bash
 launchctl kickstart -k gui/$(id -u)/com.whatsoup.<instance>
@@ -265,9 +256,8 @@ Last-resort escalation if `whatsoup-keychain-heal.sh` exits 1 (still degraded): 
 login keychain itself needs unlocking from the GUI session context — open a GUI
 Terminal on the host (e.g. via RustDesk) and run
 `security unlock-keychain ~/Library/Keychains/login.keychain-db`, then re-run the
-heal helper. The wrapper sets `security set-keychain-settings` (no idle/sleep
-relock) on each successful start, so once unlocked it should stay accessible while
-the bot user is logged in.
+heal helper. Verify the required item is readable before repeating the bounded
+restart gate.
 
 ## Health Signals
 

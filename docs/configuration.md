@@ -15,16 +15,16 @@ Both take precedence over built-in defaults.
 
 | Variable | Type | Description |
 |----------|------|-------------|
-| `ANTHROPIC_API_KEY` | string | Anthropic API key. Required for `chat` instances — the `whatsoup` launcher hard-fails on startup if missing (`deploy/whatsoup:101`). **Not set** for `agent`/`passive` instances — the wrapper script explicitly unsets it so the agent runtime uses its subscription billing path instead of the API. |
-| `OPENAI_API_KEY` | string | OpenAI API key. **Required for `chat` instances** — the launcher hard-fails on startup if missing (`deploy/whatsoup:102`). Used as the fallback key for OpenAI chat completions and Whisper transcription when the instance does not configure an `apiKeyService`; a configured `chatOptions.openaiProviderConfig.apiKeyService` or `transcriptionOptions.openaiProviderConfig.apiKeyService` resolves through `resolveApiKey()` first. For `agent` instances it is soft-optional (used for Whisper voice-note transcription when present); `passive` instances do not call any LLM APIs directly. |
+| `ANTHROPIC_API_KEY` | string | Legacy/dev fallback for Anthropic HTTP providers. Managed launches remove it from the parent and resolve service `anthropic` from the OS keyring at use time. CLI-agent children do not inherit it. |
+| `OPENAI_API_KEY` | string | Legacy/dev fallback for OpenAI chat and Whisper. Managed launches remove it from the parent; the default provider path resolves service `openai` from the OS keyring at use time. An explicit `apiKeyService` overrides that canonical service. CLI-agent children do not inherit it. |
 | `OPENAI_BASE_URL` | string | **Legacy/fallback** process-wide override for the OpenAI SDK's endpoint — it governs bare `new OpenAI()` clients. Superseded for `chat` instances' chat completions by per-instance [`chatOptions.openaiProviderConfig.baseUrl`](#custom-endpoint-for-chat-instances-chatoptionsopenaiproviderconfig) and for Whisper transcription by per-instance [`transcriptionOptions.openaiProviderConfig.baseUrl`](#custom-endpoint-for-whisper-transcription-transcriptionoptionsopenaiproviderconfig). Instances that configure neither field still get the legacy bare SDK behavior. |
-| `PINECONE_API_KEY` | string | Default Pinecone API key env var. Instances can point at a different BYOK env var with `memory.pinecone.apiKeyEnv`. **Required for `chat` instances** — the launcher hard-fails on startup if missing (`deploy/whatsoup:103`), and `loadContext` is invoked per inbound message (`src/runtimes/chat/runtime.ts:201`) so a missing key burns the 5s timeout on every message. Soft-optional for `agent` instances (needed only when the instance declares `pineconeAllowedIndexes` for the `knowledge_search` MCP tool). |
-| `GEMINI_API_KEY` | string | Google Gemini API key. Forwarded into the agent subprocess environment only when `agentOptions.provider` is `gemini-cli` (`src/runtimes/agent/session.ts:193`); `GOOGLE_API_KEY` is forwarded alongside it when present. Not consulted by `claude-cli`/`codex-cli`/`opencode-cli` agents, or by `chat`/`passive` instances. An operator running a `gemini-cli` agent line must set it — without it the Gemini CLI has no credential. |
+| `PINECONE_API_KEY` | string | Legacy/dev fallback for Pinecone. Managed launches remove it from the parent; Pinecone consumers resolve the configured service from the OS keyring at use time. |
+| `GEMINI_API_KEY` | string | Legacy/dev fallback for Gemini HTTP use. Managed launches and all CLI-agent child environments remove both `GEMINI_API_KEY` and `GOOGLE_API_KEY`; CLI providers must use native authentication. |
 
-These three keys are loaded from GNOME Keyring by the `whatsoup` wrapper script and exported
-before the process starts. They are never written to disk.
-
-> **Instance-type summary:** `chat` instances require **all three** keys (Anthropic, OpenAI, Pinecone) — startup aborts otherwise. `agent` instances require none at the launcher level; OpenAI and Pinecone are loaded best-effort and used only when the corresponding feature is exercised. `passive` instances require none.
+Managed launches do not project protected provider keys into the WhatSoup parent.
+HTTP provider boundaries resolve their keys from the OS keyring when used; CLI
+providers use their native credential stores. Missing required provider credentials
+surface when that capability is exercised rather than through launcher export.
 
 ### Audio Transcription (local providers)
 
@@ -242,14 +242,12 @@ each regular, non-symlinked `.key` file must be owned by that user with mode
 consult this unscoped file store: they use the account-specific Keychain or
 `secret-tool` entry before any allowed environment or OpenCode fallback.
 
-The health-token launch path is intentionally separate. Its transitional,
-account-specific file is
-`$XDG_CONFIG_HOME/whatsoup/instances/<instance>/tokens.env`, not a
-`credentials/<service>.key` file. `deploy/whatsoup` preserves an already-loaded
-`WHATSOUP_HEALTH_TOKEN`, then reads this per-instance file, then checks the
-scoped `whatsoup-health-token` Keychain/`secret-tool` entry, and finally the
-legacy shared entry. A present unsafe file fails startup; only an absent file
-falls back. The file is exactly one
+The health-token path is intentionally separate. Runtime request authentication
+uses only the scoped OS-keyring entry `service=whatsoup-health-token`,
+`account=<instance>`, with environment and migration fallbacks disabled. The
+transitional account-specific file
+`$XDG_CONFIG_HOME/whatsoup/instances/<instance>/tokens.env` remains solely for
+fleet discovery; the launcher does not read or export it. The file is exactly one
 `WHATSOUP_HEALTH_TOKEN=<64-lowercase-hex>` assignment, owned by the current UID
 with mode `0600`, under a real owner-controlled directory that is not group- or
 world-writable.
@@ -260,7 +258,7 @@ world-writable.
 |----------|------|---------|-------------|
 | `HEALTH_PORT` | integer | `9090` | Port for the HTTP health server (`GET /health`, `POST /send`, `POST /agent/compact`). |
 | `HEALTH_BIND_ADDRESS` | string | `127.0.0.1` | Bind address for the health server. Set to `0.0.0.0` in Docker to allow host-exposed health checks. |
-| `WHATSOUP_HEALTH_TOKEN` | string | (empty) | Bearer token for health-server mutation endpoints such as `POST /send`, `POST /access`, `POST /mark-read`, `POST /heal`, and `POST /agent/compact`. Requests without a matching `Authorization: Bearer <token>` header receive `401`. If unset, mutation endpoints fail closed with `401`. On managed instances, use the per-instance `tokens.env` contract described under Credential Storage instead of duplicating this secret in launchd `EnvironmentVariables`. |
+| `WHATSOUP_HEALTH_TOKEN` | string | ignored by managed health auth | Legacy compatibility name. Managed request authentication resolves the instance-scoped `whatsoup-health-token` OS-keyring entry and disables environment fallback. Keep `tokens.env` only for fleet discovery; never duplicate the secret in launchd or systemd environments. |
 | `WHATSOUP_SCHEDULE_ROOT` | string | (unset) | Filesystem root that `POST /schedule` bounds media file paths to. When unset the route fails closed with `409`; when set, a `filePath` must resolve (fd-pinned, symlink-safe per QR-090) inside this directory or the request is rejected. |
 | `WHATSOUP_REPO_ROOT` | path | `process.cwd()` | Repository root scanned for the ARC binding file reported under the `arc` key of `GET /health` (`src/core/health.ts:1064`); a missing/unparseable file degrades to `{loaded:false,reason}` without failing the process. Only needed when the process CWD is not the repo checkout. |
 | `WHATSOUP_GIT_SHA` | string | `null` in `/health` | Full 40-character git commit SHA for the running checkout. Normally exported by `deploy/whatsoup` after restart preflight and consumed by `src/core/health.ts` for `/health.instance.commit`; `src/transport/connection.ts` reuses the same helper for lifecycle audit `codeSha`. Invalid or short values are ignored. |

@@ -86,7 +86,7 @@ describe('buildChildEnv — opencode-cli least-authority environment', () => {
     }
   });
 
-  it('constructs the characterized system/WhatSoup allowlist and one selected credential', () => {
+  it('constructs the characterized system/WhatSoup allowlist without a selected credential', () => {
     lookupCredentialMock.mockImplementation((service) =>
       service === 'glm' ? 'test-glm-key' : null,
     );
@@ -101,13 +101,12 @@ describe('buildChildEnv — opencode-cli least-authority environment', () => {
       ...REQUIRED_PARENT_ENV,
       WHATSOUP_INSTANCE: 'test-line',
       WHATSOUP_MCP_SOCKET: '/tmp/test-whatsoup.sock',
-      ZAI_API_KEY: 'test-glm-key',
     });
-    expect(lookupCredentialMock.mock.calls).toEqual([['glm']]);
+    expect(lookupCredentialMock).not.toHaveBeenCalled();
   });
 
   it.each(MODEL_CREDENTIAL_CASES)(
-    'maps model prefix %s to only %s',
+    'validates model prefix %s while keeping %s out of the child env',
     (service, envVar) => {
       lookupCredentialMock.mockImplementation((requested) =>
         requested === service ? `test-${service}-key` : null,
@@ -115,9 +114,9 @@ describe('buildChildEnv — opencode-cli least-authority environment', () => {
 
       const env = buildChildEnv('opencode-cli', undefined, `${service}/test-model`);
 
-      expect(lookupCredentialMock.mock.calls).toEqual([[service]]);
-      expect(env[envVar]).toBe(`test-${service}-key`);
-      expect(PROVIDER_CREDENTIAL_KEYS.filter((key) => hasKey(env, key))).toEqual([envVar]);
+      expect(lookupCredentialMock).not.toHaveBeenCalled();
+      expect(env).not.toHaveProperty(envVar);
+      expect(PROVIDER_CREDENTIAL_KEYS.filter((key) => hasKey(env, key))).toEqual([]);
     },
   );
 
@@ -131,9 +130,9 @@ describe('buildChildEnv — opencode-cli least-authority environment', () => {
       apiKeyService: 'openai',
     });
 
-    expect(lookupCredentialMock.mock.calls).toEqual([['openai']]);
-    expect(env.OPENAI_API_KEY).toBe('test-custom-endpoint-key');
-    expect(PROVIDER_CREDENTIAL_KEYS.filter((key) => hasKey(env, key))).toEqual(['OPENAI_API_KEY']);
+    expect(lookupCredentialMock).not.toHaveBeenCalled();
+    expect(env).not.toHaveProperty('OPENAI_API_KEY');
+    expect(PROVIDER_CREDENTIAL_KEYS.filter((key) => hasKey(env, key))).toEqual([]);
   });
 
   it('does not copy privilege, mutation, non-selected credential, or unknown secret-shaped keys', () => {
@@ -142,10 +141,9 @@ describe('buildChildEnv — opencode-cli least-authority environment', () => {
     const env = buildChildEnv('opencode-cli', undefined, 'glm/glm-5.2');
 
     for (const key of Object.keys(DENIED_PARENT_ENV)) {
-      if (key === 'ZAI_API_KEY') continue;
       expect(hasKey(env, key), `${key} must be absent`).toBe(false);
     }
-    expect(env.ZAI_API_KEY).toBe('test-glm-key');
+    expect(env).not.toHaveProperty('ZAI_API_KEY');
   });
 
   it('uses isolated HOME/XDG roots without forwarding the controlling flag', () => {
@@ -164,12 +162,12 @@ describe('buildChildEnv — opencode-cli least-authority environment', () => {
     expect(hasKey(env, CONFIG_ROOT_ISOLATION_FLAG)).toBe(false);
   });
 
-  it('consults only the selected service and leaves its env var absent when the credential is unavailable', () => {
+  it('does not consult the selected service or add its env var', () => {
     lookupCredentialMock.mockReturnValue(null);
 
     const env = buildChildEnv('opencode-cli', undefined, 'glm/glm-5.2');
 
-    expect(lookupCredentialMock.mock.calls).toEqual([['glm']]);
+    expect(lookupCredentialMock).not.toHaveBeenCalled();
     expect(PROVIDER_CREDENTIAL_KEYS.filter((key) => hasKey(env, key))).toEqual([]);
   });
 

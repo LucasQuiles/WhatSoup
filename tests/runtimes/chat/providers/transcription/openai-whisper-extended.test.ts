@@ -363,10 +363,10 @@ describe('getClient — transcriptionOptions.openaiProviderConfig', () => {
     delete process.env.OPENAI_API_KEY;
   });
 
-  it('constructs the OpenAI client with zero arguments when transcriptionOptions is unset', async () => {
+  it('passes the canonical resolved key when transcriptionOptions is unset', async () => {
     mockTranscriptionsCreate.mockResolvedValueOnce({ text: 'hi' });
     await transcribeWithOpenAI(makeBuffer(), 'audio/ogg');
-    expect(vi.mocked(OpenAI)).toHaveBeenCalledWith();
+    expect(vi.mocked(OpenAI)).toHaveBeenCalledWith({ apiKey: 'sk-test' });
   });
 
   it('maps transcriptionOptions.openaiProviderConfig.baseUrl to the SDK baseURL option', async () => {

@@ -2,10 +2,27 @@
 
 **Owner:** WhatSoup application/runtime
 **Discovered:** 2026-05-09 during deployment hardening
-**Status:** in-progress
+**Status:** implementation-complete; live rollout pending
 **Severity:** medium-high
 
 This is a WhatSoup application/runtime issue, not a general host-hardening task. Host, network, and unrelated service posture should stay in their own deployment trackers.
+
+## 2026-07-21 implementation receipt
+
+The terminal implementation is complete on a controlled alignment branch, pending
+the controlled live rollout and post-reboot proof. Managed launchers remove all
+protected provider and health-token names from the parent; CLI child environments
+exclude those names; OpenAI chat/Whisper resolve the canonical keyring service at
+use time; health mutation auth resolves only the instance-scoped keyring entry;
+and systemd no longer projects `secrets.env` or `tokens.env` into the parent.
+`tokens.env` remains unchanged because fleet discovery still requires it.
+
+Deployment acceptance remains open until the manifested release is active and a
+GUI-domain verifier proves: connected primary instance, usable model evidence,
+the deployment-owned recovery-record invariant, preserved owner-blocked secondary
+state, and no protected
+secret names in applicable parent/child environments. No recovery replay, closure,
+or WhatsApp pairing is part of this rollout.
 
 ## Phase Status
 
@@ -13,12 +30,12 @@ Phase letters map to the W-1..W-6 wave nomenclature used in the kickoff doc's Co
 
 | Phase | Title | Status | Accepted provider/phase work (PR/SHA/date) | Pending provider/scope |
 |---|---|---|---|---|
-| W-1 / Phase A | Extend `keyring.ts` with a typed lookup API (no behavior change) | in-progress | — | Full phase pending; [#1802](https://github.com/LucasQuiles/WhatSoup/pull/1802) open (typed lookup + closed-id gate) |
-| W-2 / Phase B | Provider boundary migration (one provider per PR) | in-progress | OpenAI API + Anthropic API providers: [#370](https://github.com/LucasQuiles/WhatSoup/pull/370), SHA `a4bcb536`, merged 2026-05-12. ElevenLabs provider: routed through `lookupCredential('elevenlabs')` in `src/runtimes/chat/providers/elevenlabs.ts:20`, SHA `ef20d66d`, merged 2026-04-06 (predates this handoff). Whisper provider: routed through `resolveApiKey()` in `src/runtimes/chat/providers/transcription/openai-whisper.ts:9,24-29`, [#1683](https://github.com/LucasQuiles/WhatSoup/pull/1683), SHA `6ad7606d`, merged 2026-07-07. Pinecone + Knowledge MCP (coupled migration): [#1800](https://github.com/LucasQuiles/WhatSoup/pull/1800), merged 2026-07-14. Health auth: [#1804](https://github.com/LucasQuiles/WhatSoup/pull/1804), merged 2026-07-14. Pattern B reason-code taxonomy: [#1803](https://github.com/LucasQuiles/WhatSoup/pull/1803), merged 2026-07-14 | Model advisor ([#1801](https://github.com/LucasQuiles/WhatSoup/pull/1801) open) |
-| W-3 / Phase C | Reverse the precedence (resolver-first, env-fallback) | in-progress | — | [#1807](https://github.com/LucasQuiles/WhatSoup/pull/1807) open (`allowEnvFallback` flag on `resolveApiKey`) |
-| W-4 / Phase D | Stop child env inheritance | in-progress | — | [#1808](https://github.com/LucasQuiles/WhatSoup/pull/1808) open (`buildChildEnv` key reads routed through `resolveApiKey`) |
-| W-5 / Phase E | Health token migration | in-progress | Health auth routed through `lookupCredential`: [#1804](https://github.com/LucasQuiles/WhatSoup/pull/1804), merged 2026-07-14; descriptor-safe wrapper preload from canonical per-instance `tokens.env` | Remove plaintext `WHATSOUP_HEALTH_TOKEN` duplication from older launchd plists after controlled deployment; retain `tokens.env` until fleet discovery migrates to the same scoped source |
-| W-6 / Phase F | Wrapper-chain removal (deploy cleanup, terminal phase) | in-progress | D-3 scope resolved: `secrets.env` folds into W-6 (not W-5); keyring-presence check tooling: [#1806](https://github.com/LucasQuiles/WhatSoup/pull/1806), open | Wrapper chain removal and `secrets.env` removal; `tokens.env` removal remains blocked on W-5 fleet-source migration |
+| W-1 / Phase A | Extend `keyring.ts` with a typed lookup API (no behavior change) | complete | Typed lookup and closed-id gate are present on current `origin/main` | — |
+| W-2 / Phase B | Provider boundary migration | complete | All protected provider read sites pass the static secret-env guard; OpenAI chat and Whisper now infer the canonical keyring service when no override is configured | — |
+| W-3 / Phase C | Reverse the precedence (resolver-first, env-fallback) | complete | `resolveApiKey` supports explicit fallback policy and canonical service inference | — |
+| W-4 / Phase D | Stop child env inheritance | complete | CLI child environments exclude protected provider keys | Live environment proof pending |
+| W-5 / Phase E | Health token migration | implementation-complete | Runtime auth uses instance-scoped keyring only; `tokens.env` retained for fleet discovery | Live GUI-domain proof pending |
+| W-6 / Phase F | Wrapper-chain removal (deploy cleanup, terminal phase) | implementation-complete | Launcher and systemd parent environments no longer load protected secrets | Controlled live rollout pending |
 
 Phase B notes: PR #370 routed OpenAI and Anthropic API providers through `lookupCredential(apiKeyService)` with env fallback preserved. ElevenLabs is ALSO already migrated: `src/runtimes/chat/providers/elevenlabs.ts:20` resolves its key via `lookupCredential('elevenlabs')` (env-first with keyring fallback), landed in SHA `ef20d66d` on 2026-04-06 — before this handoff was written — so its prior `pending` listing was a documentation staleness error, corrected in the 2026-07-01 re-grounding below. Whisper was migrated to `resolveApiKey()` by PR #1683 (SHA `6ad7606d`, 2026-07-07), corrected in the 2026-07-14 re-grounding below. Pinecone + Knowledge MCP were migrated together by PR #1800 (merged 2026-07-14), preserving the configurable `apiKeyEnv` and Knowledge MCP's fail-open `return null`. Health auth was migrated by PR #1804 (merged 2026-07-14). Pattern B reason-code taxonomy landed in PR #1803 (merged 2026-07-14). **Phase B is now 7 of 7 providers migrated or in-flight** — only model-advisor remains (PR #1801 open).
 

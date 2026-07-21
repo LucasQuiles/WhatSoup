@@ -8,14 +8,9 @@ StartLimitBurst=10
 OnFailure=whatsoup-heal-notify@%i.service
 
 [Service]
-# Root-level provider API keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, PINECONE_API_KEY).
-# The wrapper (deploy/whatsoup) reads these via keyring_lookup with env-first
-# precedence, so this file is the env source the wrapper picks up. Once keys
-# are stored in the OS keyring (service names: anthropic, openai, pinecone),
-# this line can be removed — the wrapper falls through to the keyring.
-# Migration tracking: docs/security-handoffs/2026-05-09-env-secret-exposure.md
-# Phase F (W-6). Use deploy/check-keyring-presence.sh to verify readiness.
-EnvironmentFile=-%h/.config/whatsoup/secrets.env
+# Provider and health credentials are resolved from the OS keyring at their
+# use sites. Do not project secrets.env or per-instance tokens.env into the
+# parent process environment. tokens.env remains a fleet-discovery artifact.
 Type=simple
 # Pre-install the .nvmrc-pinned Node via nvm if available. No-op on hosts
 # without nvm. The wrapper's version gate (deploy/whatsoup, PR #663) is the
@@ -48,17 +43,6 @@ RestartMaxDelaySec=120
 # session.shutdown() can mark them as clean.
 KillMode=mixed
 TimeoutStopSec=15
-# Load instance-specific tokens (health API auth). The - prefix means
-# systemd won't fail if the file is missing (token simply won't be set).
-# W-5 migration: once the instance's health token is stored in the OS keyring
-# (service=whatsoup-health-token, account=<instance-name>), this line AND the
-# WHATSOUP_HEALTH_TOKEN export block in deploy/whatsoup can both be removed — health.ts
-# resolves the token at request time via lookupCredential('whatsoup-health-token').
-# Use deploy/check-health-token-keyring.sh <instance> to verify readiness.
-# Migration tracking: docs/security-handoffs/2026-05-09-env-secret-exposure.md
-# Phase E (W-5). PR #1804 routed the read site through lookupCredential; the
-# deploy-side removal (this line + wrapper export) is the remaining W-5 work.
-EnvironmentFile=-%h/.config/whatsoup/instances/%i/tokens.env
 # Memory limits — each instance runs ~1.5GB normally.
 # MemoryHigh triggers kernel reclaim pressure; MemoryMax is the hard OOM cap.
 MemoryHigh=4G

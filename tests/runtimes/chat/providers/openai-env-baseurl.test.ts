@@ -29,6 +29,10 @@ vi.mock('../../../../src/logger.ts', () => ({
   }),
 }));
 
+vi.mock('../../../../src/lib/keyring.ts', () => ({
+  lookupCredential: vi.fn(() => null),
+}));
+
 import OpenAI from 'openai';
 import { createOpenAIProvider } from '../../../../src/runtimes/chat/providers/openai.ts';
 

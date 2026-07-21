@@ -6,13 +6,9 @@ import { describe, expect, it } from 'vitest';
 // Cross-runtime credential-resolution ORDERING contract.
 //
 // The unscoped resolution order (env -> private file -> OS keyring) and the
-// launchd health-token chain are implemented THREE times, in three languages
-// that cannot share a seam: the in-process resolver (src/lib/keyring.ts), the
-// launchd wrapper (deploy/whatsoup), and the health-probe mirror
-// (deploy/scripts/bot-errors-health-check.py). The #1912 quality sweep found
-// they had already drifted once. This test pins the order in each so any future
-// reorder goes red instead of silently diverging. It is source-inspection by
-// design — a behavioural test cannot span a bash/TS/python boundary.
+// health-probe mirror are implemented in languages that cannot share a seam.
+// This test pins those orders and the launcher's negative secret boundary so
+// future drift goes red instead of silently diverging.
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const read = (rel: string): string => readFileSync(join(REPO_ROOT, rel), 'utf8');
@@ -46,14 +42,17 @@ describe('credential resolution ordering parity (env -> file -> keyring)', () =>
   // NOTE: the scoped-never-reads-unscoped-.key invariant is covered behaviourally in
   // tests/lib/keyring.test.ts; here we only pin cross-runtime resolution ORDER.
 
-  it('deploy/whatsoup health token: already-loaded env, then tokens.env, then scoped keyring, then legacy', () => {
+  it('deploy/whatsoup removes protected credentials instead of resolving them', () => {
     const src = read('deploy/whatsoup');
-    assertOrder(src, 'deploy/whatsoup', [
-      'HEALTH_TOKEN_FILE="$XDG_CONFIG/whatsoup/instances/$INSTANCE/tokens.env"',
-      'whatsoup_read_private_health_token',
-      'keyring_lookup whatsoup-health-token "" user "$INSTANCE"',
-      'keyring_lookup whatsoup_health WHATSOUP_HEALTH_TOKEN',
-    ]);
+    expect(src).toContain('unset ANTHROPIC_API_KEY OPENAI_API_KEY PINECONE_API_KEY WHATSOUP_HEALTH_TOKEN');
+    expect(src).not.toContain('HEALTH_TOKEN_FILE=');
+    expect(src).not.toContain('keyring_lookup');
+  });
+
+  it('systemd does not project provider or health-token files into the parent', () => {
+    const src = read('deploy/whatsoup@.service');
+    expect(src).not.toContain('EnvironmentFile=-%h/.config/whatsoup/secrets.env');
+    expect(src).not.toContain('EnvironmentFile=-%h/.config/whatsoup/instances/%i/tokens.env');
   });
 
   it('deploy/scripts/bot-errors-health-check.py: env, then .key file, then keyring (mirrors keyring.ts)', () => {

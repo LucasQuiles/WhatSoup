@@ -360,7 +360,7 @@ are breaking.
 
 | Identifier | Artifact | Source | Stability | Status | Notes |
 |---|---|---|---|---|---|
-| `deploy:wrapper.whatsoup` | `whatsoup` launcher script | [`deploy/whatsoup`](../deploy/whatsoup) | stable | active | Takes `<instance-name>` argument; loads keychain secrets, exports env, execs `src/bootstrap.ts` for that instance |
+| `deploy:wrapper.whatsoup` | `whatsoup` launcher script | [`deploy/whatsoup`](../deploy/whatsoup) | stable | active | Takes `<instance-name>`; removes protected secret env names, runs preflight, and execs `src/bootstrap.ts`; providers resolve credentials at use time |
 | `deploy:wrapper.whatsoup-fleet` | `whatsoup-fleet` launcher | [`deploy/whatsoup-fleet`](../deploy/whatsoup-fleet) | stable | active | Fleet-only entrypoint |
 | `deploy:wrapper.whatsoup-auth` | `whatsoup-auth` launcher | [`deploy/whatsoup-auth`](../deploy/whatsoup-auth) | stable | active | Auth-flow entrypoint |
 | `deploy:wrapper.whatsoup-reply-guarantee-drain` | `whatsoup-reply-guarantee-drain` launcher | [`deploy/scripts/reply-guarantee-drain.sh`](../deploy/scripts/reply-guarantee-drain.sh) | stable | active | Repo-relative systemd entrypoint for draining queued stuck replies |
@@ -398,7 +398,7 @@ stability for backup, migration, and disaster-recovery procedures.
 | `artifact:fleet.token-legacy` | `<configRoot>/fleet-token` | [README §Fleet API](../README.md#fleet-api) | stable | deprecated | Deprecation notice: [2026-05-12 public-surface baseline](releases/2026-05-12-public-surface-baseline.md#deprecations). Removal target: v2.0.0. Migrated on first read to `fleet-tokens.json`; retained for rollback |
 | `artifact:fleet.silences` | `<configRoot>/fleet-silences.json` | [`src/fleet/silence-manager.ts`](../src/fleet/silence-manager.ts) | beta | active | Operator-managed alert silence rules; mode `0600`. Managed via `http:fleet.silences.*` routes. Safe to delete (re-bootstraps empty) |
 | `artifact:fleet.alert-throttle` | `<configRoot>/fleet-alert-throttle.json` | [`src/fleet/alert-throttle-store.ts`](../src/fleet/alert-throttle-store.ts) | beta | active | Per-instance `lastAlertAt` cache used by `health-poller` to suppress duplicate alerts across restarts; mode `0600`; stale entries (>15min) auto-pruned at load. Safe to delete (re-bootstraps empty, worst case one batch of alerts re-fires) |
-| `artifact:tokens.env` | `<configRoot>/instances/<name>/tokens.env` | [`deploy/whatsoup-tokens.env.example`](../deploy/whatsoup-tokens.env.example) | stable | active | Per-instance health tokens; shape stable |
+| `artifact:tokens.env` | `<configRoot>/instances/<name>/tokens.env` | [`deploy/whatsoup-tokens.env.example`](../deploy/whatsoup-tokens.env.example) | stable | active | Transitional per-instance health token for fleet discovery only; runtime auth uses the scoped OS-keyring mirror |
 | `artifact:lid-mappings.db` | `<dataRoot>/instances/<name>/bot.db` table `lid_mappings*` | [docs/configuration.md §Database Migration History](configuration.md#database-migration-history) | stable | active | Cross-instance LID-to-phone mapping; #251 freshness-gated history retained |
 | `artifact:logs.dir` | `<dataRoot>/logs/` | [docs/configuration.md §Logging](configuration.md#logging) | stable | active | Pino daily-rotated logs |
 | `artifact:process-tmp.dir` | `$XDG_DATA_HOME/whatsoup/tmp/<name>/` | [docs/configuration.md §XDG Directory Layout](configuration.md#xdg-directory-layout) | stable | active | Per-instance runtime `TMPDIR`; swept hourly after 3 hours |

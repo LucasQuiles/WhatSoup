@@ -81,11 +81,11 @@ mirror_to_keyring() {
   case "$(uname -s)" in
     Darwin)
       command -v security >/dev/null 2>&1 || return 1
-      security add-generic-password \
+      printf '%s\n%s\n' "$token" "$token" | security add-generic-password \
         -U \
         -s "whatsoup-health-token" \
         -a "$instance_name" \
-        -w "$token" >/dev/null
+        -w >/dev/null
       ;;
     *)
       command -v secret-tool >/dev/null 2>&1 || return 1
