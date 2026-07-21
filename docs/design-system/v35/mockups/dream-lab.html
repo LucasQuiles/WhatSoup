@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SOUP — Dream Lab (Direction A: Command Deck)</title>
+<style>
+:root, [data-theme="dark"] {
+  --base:#1E1A15; --raised:#27221C; --overlay:#322D24; --inset:#171410;
+  --t1:#F1ECDF; --t2:#CAC1AF; --t3:#9A907E;
+  --hair:#383024; --hair-2:#473B2C; --hair-3:#5A4C39;
+  --accent:#6BA6FF; --accent-fg:#0A0E14;
+  --ok:#5BD97B; --warn:#F5B54A; --crit:#F4736F;
+  --m-passive:#3BD6B0; --m-chat:#3FB8DC; --m-agent:#A78BFA;
+  --dream:#C9A7F5;
+  --shadow-lift:0 1px 2px rgb(0 0 0/.30), 0 8px 24px rgb(0 0 0/.28);
+}
+[data-theme="light"] {
+  --base:#FAF6EE; --raised:#FDFAF3; --overlay:#FFFFFF; --inset:#EDE5D5;
+  --t1:#221C12; --t2:#524833; --t3:#645849;
+  --hair:#DED4BF; --hair-2:#CDC2A9; --hair-3:#B4A78C;
+  --accent:#2E66E4; --accent-fg:#FFFFFF;
+  --ok:#15722F; --warn:#855900; --crit:#B42318;
+  --m-passive:#096853; --m-chat:#1F6E85; --m-agent:#6D4FA3;
+  --dream:#7A5AA3;
+  --shadow-lift:0 1px 2px rgb(60 45 20/.10), 0 10px 28px rgb(60 45 20/.14);
+}
+* { margin:0; box-sizing:border-box; }
+body { background:var(--base); color:var(--t1); font:400 13.5px/1.5 "Hanken Grotesk",Arial,sans-serif; min-height:100vh; display:flex; flex-direction:column; }
+header { display:flex; align-items:center; gap:14px; padding:14px 22px 12px; border-bottom:1px solid var(--hair); }
+.nameplate { display:flex; align-items:center; gap:12px; }
+.nameplate .tick { width:8px; height:8px; border-radius:1px; background:var(--m-passive); }
+.nameplate .wm { font:800 17px/22px "Bricolage Grotesque",sans-serif; letter-spacing:-0.06em; }
+.nameplate .wm b { color:var(--accent); }
+h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
+.qpill { display:flex; align-items:center; gap:7px; padding:5px 12px; border-radius:99px; background:color-mix(in srgb, var(--dream) 12%, transparent); color:var(--dream); font:600 11.5px/16px "IBM Plex Mono",monospace; }
+.spacer { flex:1; }
+.btn { display:inline-flex; align-items:center; gap:8px; padding:8px 14px; border-radius:6px; border:1px solid var(--hair-2); background:var(--raised); color:var(--t1); font:600 12.5px/16px inherit; cursor:pointer; transition:transform .16s ease-out, box-shadow .16s ease-out; }
+.btn:hover { transform:translateY(-1px); box-shadow:var(--shadow-lift); }
+.btn.ghost { background:transparent; color:var(--t2); }
+.btn.sm { padding:5px 10px; font-size:11.5px; }
+.btn.ok { background:var(--ok); color:var(--accent-fg); border-color:transparent; }
+[data-theme="light"] .btn.ok { color:#fff; }
+.btn.no { color:var(--crit); border-color:color-mix(in srgb, var(--crit) 36%, transparent); background:transparent; }
+.wrap { flex:1; display:grid; grid-template-columns:340px 1fr; min-height:0; }
+.queue { border-right:1px solid var(--hair); overflow:auto; padding:14px 12px; display:flex; flex-direction:column; gap:8px; }
+.qhead { font:600 10.5px/14px "IBM Plex Mono",monospace; letter-spacing:.1em; color:var(--t3); text-transform:uppercase; padding:4px 6px 8px; }
+.dcard { background:var(--raised); border:1px solid var(--hair); border-radius:10px; padding:12px; cursor:pointer; transition:transform .16s ease-out, box-shadow .16s ease-out, border-color .16s; }
+.dcard:hover { transform:translateY(-2px); box-shadow:var(--shadow-lift); }
+.dcard.sel { border-color:var(--dream); box-shadow:0 0 0 1px var(--dream); }
+.dcard .top { display:flex; align-items:center; gap:9px; }
+.av { width:26px; height:26px; border-radius:7px; display:flex; align-items:center; justify-content:center; font:700 10px/1 "Hanken Grotesk",sans-serif; color:#fff; flex:none; }
+.dcard .nm { font:700 13px/17px "Bricolage Grotesque",sans-serif; }
+.dcard .what { color:var(--t3); font-size:11.5px; margin-top:1px; }
+.dtag { margin-left:auto; font:600 9.5px/12px "IBM Plex Mono",monospace; letter-spacing:.05em; padding:3px 7px; border-radius:99px; text-transform:uppercase; flex:none; }
+.dtag.persona { background:color-mix(in srgb, var(--m-agent) 14%, transparent); color:var(--m-agent); }
+.dtag.skills { background:color-mix(in srgb, var(--m-chat) 14%, transparent); color:var(--m-chat); }
+.dtag.routine { background:color-mix(in srgb, var(--m-passive) 14%, transparent); color:var(--m-passive); }
+.dcard .why { color:var(--t2); font-size:12px; margin-top:8px; font-style:italic; }
+.dcard .when { font:400 10px/14px "IBM Plex Mono",monospace; color:var(--t3); margin-top:8px; }
+/* review pane */
+.review { overflow:auto; padding:18px 22px; display:flex; flex-direction:column; gap:14px; }
+.rhead { display:flex; align-items:flex-start; gap:14px; }
+.rhead .av { width:44px; height:44px; border-radius:11px; font-size:15px; }
+.rhead h2 { font:800 22px/28px "Bricolage Grotesque",sans-serif; }
+.rhead .meta { font:400 11px/16px "IBM Plex Mono",monospace; color:var(--t3); margin-top:4px; }
+.panel { background:var(--raised); border:1px solid var(--hair); border-radius:10px; }
+.panel-h { display:flex; align-items:center; gap:8px; padding:11px 14px; border-bottom:1px solid var(--hair); }
+.panel-h h3 { font:600 12.5px/18px inherit; }
+.panel-h .tag { font:500 10px/14px "IBM Plex Mono",monospace; color:var(--t3); }
+.panel-b { padding:14px; }
+.diff { font:400 12.5px/1.7 "IBM Plex Mono",monospace; }
+.diff .sec { color:var(--t3); font-size:10.5px; letter-spacing:.08em; text-transform:uppercase; margin:10px 0 4px; display:block; }
+.diff .sec:first-child { margin-top:0; }
+.diff .line { padding:3px 8px; border-radius:5px; display:block; }
+.diff .del { background:color-mix(in srgb, var(--crit) 10%, transparent); color:var(--crit); text-decoration:line-through; text-decoration-color:color-mix(in srgb, var(--crit) 50%, transparent); }
+.diff .add { background:color-mix(in srgb, var(--ok) 10%, transparent); color:var(--ok); }
+.diff .keep { color:var(--t2); }
+.rationale { display:flex; gap:10px; align-items:flex-start; background:var(--inset); border:1px solid var(--hair); border-radius:10px; padding:12px 14px; }
+.rationale .ic { color:var(--dream); flex:none; }
+.rationale p { color:var(--t2); font-size:12.5px; font-style:italic; }
+.impact { display:flex; gap:16px; }
+.impact .col { flex:1; }
+.impact .k { font:600 10px/14px "IBM Plex Mono",monospace; letter-spacing:.08em; color:var(--t3); text-transform:uppercase; margin-bottom:6px; }
+.impact .v { font-size:12.5px; color:var(--t2); }
+.impact .v b { color:var(--t1); }
+.actions { display:flex; gap:10px; align-items:center; }
+.actions .note { color:var(--t3); font-size:11.5px; }
+.hist { padding:4px 0; }
+.hrow { display:flex; align-items:center; gap:10px; padding:7px 0; border-bottom:1px solid var(--hair); font-size:12px; }
+.hrow:last-child { border:none; }
+.hrow .st { font:700 9.5px/12px "IBM Plex Mono",monospace; padding:2px 7px; border-radius:99px; text-transform:uppercase; flex:none; }
+.hrow .st.approved { background:color-mix(in srgb, var(--ok) 12%, transparent); color:var(--ok); }
+.hrow .st.rejected { background:color-mix(in srgb, var(--crit) 10%, transparent); color:var(--crit); }
+.hrow p { color:var(--t2); }
+.hrow .when { margin-left:auto; font:400 10px/14px "IBM Plex Mono",monospace; color:var(--t3); }
+@media (max-width:980px){ .wrap{grid-template-columns:1fr} .queue{border-right:none;border-bottom:1px solid var(--hair)} }
+</style>
+</head>
+<body>
+<header>
+  <div class="nameplate"><span class="tick"></span><span class="wm">SO<b>U</b>P</span></div>
+  <h1>Dream Lab</h1>
+  <span class="qpill">✦ 3 dreams queued</span>
+  <div class="spacer"></div>
+  <button class="btn ghost theme-toggle" onclick="document.documentElement.dataset.theme=document.documentElement.dataset.theme==='dark'?'light':'dark'">◐ theme</button>
+  <button class="btn ghost">history</button>
+</header>
+<div class="wrap">
+  <aside class="queue">
+    <div class="qhead">Queued · review in order</div>
+    <div class="dcard sel">
+      <div class="top"><span class="av" style="background:hsl(250,38%,34%)">Q</span><div><div class="nm">Quinn</div><div class="what">persona — tone</div></div><span class="dtag persona">persona</span></div>
+      <div class="why">"I want to answer in the group's voice — shorter, warmer."</div>
+      <div class="when">suggested 2h ago · instance 120363···639</div>
+    </div>
+    <div class="dcard">
+      <div class="top"><span class="av" style="background:hsl(285,38%,34%)">M</span><div><div class="nm">Mercy</div><div class="what">skills — add calendar-read</div></div><span class="dtag skills">skills</span></div>
+      <div class="why">"Clients keep asking for appointment times. I can answer if I can read the calendar."</div>
+      <div class="when">suggested 5h ago · instance help@shinycartel</div>
+    </div>
+    <div class="dcard">
+      <div class="top"><span class="av" style="background:hsl(285,38%,34%)">M</span><div><div class="nm">Mercy</div><div class="what">routine — daily summary</div></div><span class="dtag routine">routine</span></div>
+      <div class="why">"I'd like to post a 9am order summary to the ops room each morning."</div>
+      <div class="when">suggested 1d ago · instance help@shinycartel</div>
+    </div>
+    <div class="qhead" style="margin-top:8px">Filters</div>
+    <div class="dcard" style="opacity:.6;cursor:default"><div class="top"><div class="what">agent: all · type: all · state: queued</div></div></div>
+  </aside>
+  <section class="review">
+    <div class="rhead">
+      <span class="av" style="background:hsl(250,38%,34%)">Q</span>
+      <div style="flex:1">
+        <h2>Persona edit — tone</h2>
+        <div class="meta">quinn · persona · suggested 2h ago from instance 120363···639@g.us (WHATSOUP)</div>
+      </div>
+      <button class="btn sm ghost">view chat context</button>
+    </div>
+    <div class="rationale"><span class="ic">✦</span><p>"The room writes in short, warm bursts. My replies read formal next to everyone else's. I would keep answers to two lines when the question is casual, and open with the answer, not a greeting."</p></div>
+    <div class="panel">
+      <div class="panel-h"><h3>Proposed diff</h3><span class="tag">SOUL.md — persona section</span></div>
+      <div class="panel-b diff">
+        <span class="sec">Tone</span>
+        <span class="line del">- Replies are complete and professional, with full greetings and sign-offs.</span>
+        <span class="line add">+ Replies are short and warm. Open with the answer. Two lines for casual questions.</span>
+        <span class="line keep">  Never sacrifice accuracy for brevity.</span>
+        <span class="sec">Formatting</span>
+        <span class="line keep">  WhatsApp markup only. No markdown headers.</span>
+        <span class="line add">+ One idea per message. Split instead of stacking paragraphs.</span>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-h"><h3>Impact</h3></div>
+      <div class="panel-b impact">
+        <div class="col"><div class="k">Applies to</div><div class="v"><b>Quinn</b> · all 9 instances<br>profile version <b>v7 → v8</b></div></div>
+        <div class="col"><div class="k">Reversible</div><div class="v">one-click rollback to v7<br>kept 30 days</div></div>
+        <div class="col"><div class="k">Risk</div><div class="v">low — tone only,<br>no permission changes</div></div>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn ok">✓ Approve &amp; apply</button>
+      <button class="btn no">✕ Reject</button>
+      <button class="btn ghost">edit then approve…</button>
+      <span class="note">Approval applies to the profile; instances pick it up next turn.</span>
+    </div>
+    <div class="panel">
+      <div class="panel-h"><h3>Recent decisions</h3></div>
+      <div class="panel-b hist">
+        <div class="hrow"><span class="st approved">approved</span><p><b>Lumen</b> — add "summarize long threads on request"</p><span class="when">2d</span></div>
+        <div class="hrow"><span class="st rejected">rejected</span><p><b>Sable</b> — "respond to every mention within 30s" (too eager)</p><span class="when">4d</span></div>
+        <div class="hrow"><span class="st approved">approved</span><p><b>Quinn</b> — reduce sign-off frequency</p><span class="when">6d</span></div>
+      </div>
+    </div>
+  </section>
+</div>
+</body>
+</html>
