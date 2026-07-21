@@ -9,6 +9,13 @@ set -euo pipefail
 
 INSTANCE="${1:?Usage: whatsoup <instance-name>}"
 
+# Scrub INHERITED credential material before anything else runs, so ambient
+# wrapper/launchd/session values can never shadow the launcher's deliberate
+# keyring/file resolution below or leak into startup probes. The launcher's own
+# post-scrub resolution (chat API keys, instance health token) is intentional
+# and remains the single supplier of these variables to the child process.
+unset ANTHROPIC_API_KEY OPENAI_API_KEY PINECONE_API_KEY ELEVENLABS_API_KEY WHATSOUP_HEALTH_TOKEN
+
 # POSIX-portable symlink resolution (readlink -f is GNU-only, unavailable on macOS)
 _resolve_symlinks() {
   local p="$1"
