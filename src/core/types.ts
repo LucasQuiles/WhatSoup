@@ -74,7 +74,7 @@ export interface IncomingMessage {
   rawMessage?: unknown;
   /** durability: seq from inbound_events journal — threads the inbound event through the runtime lifecycle */
   inboundSeq?: number;
-  /** Primary key of the newly stored inbound message used by runtime side effects. */
+  /** Primary key of a newly inserted or upgraded stored inbound message used by runtime side effects. */
   sourceMessagePk?: number;
   /**
    * Set when this is a synthetic turn injected by the agent-job dispatcher

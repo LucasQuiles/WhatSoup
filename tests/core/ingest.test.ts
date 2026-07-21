@@ -16,11 +16,15 @@ import type { Runtime } from '../../src/runtimes/types.ts';
 // Module mocks — before any imports of the modules they replace
 // ---------------------------------------------------------------------------
 
+const { mockLogError } = vi.hoisted(() => ({
+  mockLogError: vi.fn(),
+}));
+
 vi.mock('../../src/logger.ts', () => ({
   createChildLogger: () => ({
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn(),
+    error: mockLogError,
     debug: vi.fn(),
   }),
 }));
@@ -213,6 +217,10 @@ describe('REQ-002.AC-01: message storage', () => {
     const runtime = makeRuntime();
     const handler = makeIngest(db, messenger, runtime);
     const msg = makeIncomingMessage({ senderJid: '15550000003@s.whatsapp.net' });
+    let sourceMessagePkAtDispatch: number | undefined;
+    vi.mocked(runtime.handleMessage).mockImplementation(async (dispatched) => {
+      sourceMessagePkAtDispatch = dispatched.sourceMessagePk;
+    });
 
     await runIngest(handler, msg);
 
@@ -225,9 +233,7 @@ describe('REQ-002.AC-01: message storage', () => {
     // Runtime was called
     expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledOnce();
     const stored = rows[0];
-    expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledWith(
-      expect.objectContaining({ sourceMessagePk: stored.pk }),
-    );
+    expect(sourceMessagePkAtDispatch).toBe(stored.pk);
   });
 
   it('threads an upgraded history placeholder primary key into runtime dispatch', async () => {
@@ -236,6 +242,10 @@ describe('REQ-002.AC-01: message storage', () => {
     const runtime = makeRuntime();
     const handler = makeIngest(db, messenger, runtime);
     const msg = makeIncomingMessage({ messageId: 'history-upgrade' });
+    let sourceMessagePkAtDispatch: number | undefined;
+    vi.mocked(runtime.handleMessage).mockImplementation(async (dispatched) => {
+      sourceMessagePkAtDispatch = dispatched.sourceMessagePk;
+    });
     db.raw.prepare(`
       INSERT INTO messages
         (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp)
@@ -248,9 +258,38 @@ describe('REQ-002.AC-01: message storage', () => {
     await runIngest(handler, msg);
 
     expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledOnce();
-    expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledWith(
-      expect.objectContaining({ sourceMessagePk: placeholder.pk }),
-    );
+    expect(sourceMessagePkAtDispatch).toBe(placeholder.pk);
+  });
+
+  it('fails closed when an inserted message row is missing before identity resolution', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const handler = makeIngest(db, messenger, runtime);
+    const msg = makeIncomingMessage({
+      messageId: 'missing-after-persistence',
+      content: 'synthetic fault-injection body',
+    });
+    db.raw.exec(`
+      CREATE TEMP TRIGGER delete_fault_injected_message
+      AFTER INSERT ON messages
+      WHEN NEW.message_id = 'missing-after-persistence'
+      BEGIN
+        DELETE FROM messages WHERE pk = NEW.pk;
+      END
+    `);
+
+    await runIngest(handler, msg);
+
+    expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
+    expect(mockLogError).toHaveBeenCalledOnce();
+    const [details, event] = mockLogError.mock.calls[0] as [
+      { err: Error; messageId: string },
+      string,
+    ];
+    expect(event).toBe('failed to store message');
+    expect(details).toEqual({ err: expect.any(Error), messageId: msg.messageId });
+    expect(details.err.message).toBe('message row missing after persistence');
   });
 
   it('skips duplicate delivery without assigning source identity to the retry', async () => {
