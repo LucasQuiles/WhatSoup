@@ -23,7 +23,7 @@
 // see src/runtimes/agent/providers/index.ts and issue #447.
 import { homedir } from 'node:os';
 import { PROVIDER_IDS } from '../runtimes/agent/providers/index.ts';
-import { PROVIDER_API_KEY_SERVICES } from '../lib/provider-key-service.ts';
+import { PROVIDER_API_KEY_SERVICES, SERVICE_ENV_MAP, resolveProviderKeyService } from '../lib/provider-key-service.ts';
 import { isRecord } from '../lib/type-guards.ts';
 import { isSamePhysicalDirectory } from '../lib/home-path.ts';
 import { resolveAgentModel } from './agent-model.ts';
@@ -34,7 +34,7 @@ import {
   type AgentFallbackEntry,
 } from './fallback-chain.ts';
 import { DEFAULT_TRANSPORT_ID, isTransportId, TRANSPORT_IDS } from '../transport/registry.ts';
-import { ACCOUNT_RE } from './transport-refs.ts';
+import { ACCOUNT_RE, APPLEID_EMAIL_RE } from './transport-refs.ts';
 import { E164_RE } from '../transport/twilio/types.ts';
 import RE2 from 're2';
 import {
@@ -696,6 +696,25 @@ function validateCommandSurfaceConfig(
   return null;
 }
 
+/**
+ * Whether an opencode-cli model's provider prefix resolves to a mapped credential
+ * service. OpenCode has no provider-owned default: buildChildEnv (session.ts)
+ * selects the child's key from the model prefix (e.g. `xai/grok-4` → xai) and
+ * HARD-THROWS at spawn when the prefix maps to no known service. Admission mirrors
+ * that resolution so an unspawnable route is rejected as a clear config error
+ * instead of a runtime turn crash. SECURITY: admission-side predicate only —
+ * buildChildEnv's spawn-time enforcement is unchanged and remains the backstop.
+ *
+ * The `providerConfig.apiKeyService` escape is applied at the PRIMARY call site
+ * only: fallback entries carry no such field, and a fallback opencode-cli inherits
+ * none at spawn (fallbackProviderConfigFor strips baseUrl/apiKeyService), so a
+ * fallback's credential route is ALWAYS the model prefix.
+ */
+function opencodeModelPrefixResolvesToService(model: unknown): boolean {
+  const service = resolveProviderKeyService('opencode-cli', model);
+  return service !== null && PROVIDER_API_KEY_SERVICES.has(service) && Boolean(SERVICE_ENV_MAP[service]);
+}
+
 function validateAgentOptions(
   raw: Record<string, unknown>,
   ctx: ValidatorContext,
@@ -922,6 +941,17 @@ function validateAgentOptions(
           `${field}.provider "${provider}" requires model to be set`,
         );
       }
+      // A fallback opencode-cli's credential route is ALWAYS the model prefix
+      // (fallbackProviderConfigFor strips the instance apiKeyService/baseUrl, and
+      // fallback entries carry no apiKeyService of their own), so an unmapped
+      // prefix would throw in buildChildEnv when the fallback spawns. Reject at
+      // admission, mirroring the primary rule. No apiKeyService escape applies here.
+      if (provider === 'opencode-cli' && !opencodeModelPrefixResolvesToService(model)) {
+        return err(
+          `${field}.model`,
+          `${field}.provider "opencode-cli" model ${JSON.stringify(model)} does not resolve to a mapped provider credential service — use a "<provider>/<model>" id whose provider prefix is a known service (e.g. "minimax/...", "xai/...", "anthropic/...")`,
+        );
+      }
       const entry: AgentFallbackEntry = typeof model === 'string'
         ? { provider, model: model.trim() }
         : { provider };
@@ -975,6 +1005,21 @@ function validateAgentOptions(
     return err(
       'agentOptions.fallbackModel',
       `agentOptions.fallbackProvider "${opts['fallbackProvider']}" requires agentOptions.fallbackModel to be set`,
+    );
+  }
+
+  // Legacy pair: same rule as a fallbacks[] opencode-cli entry — the fallback
+  // credential route is the model prefix (apiKeyService/baseUrl are stripped for
+  // opencode-cli fallbacks), so fallbackModel's prefix must resolve to a mapped
+  // service or buildChildEnv throws when the fallback spawns.
+  if (
+    opts['fallbackProvider'] === 'opencode-cli' &&
+    opts['fallbackModel'] !== undefined &&
+    !opencodeModelPrefixResolvesToService(opts['fallbackModel'])
+  ) {
+    return err(
+      'agentOptions.fallbackModel',
+      `agentOptions.fallbackProvider "opencode-cli" model ${JSON.stringify(opts['fallbackModel'])} does not resolve to a mapped provider credential service — use a "<provider>/<model>" id whose provider prefix is a known service (e.g. "minimax/...", "xai/...", "anthropic/...")`,
     );
   }
 
@@ -1053,6 +1098,35 @@ function validateAgentOptions(
     );
   }
 
+  // ...and that model's provider prefix must actually resolve to a mapped
+  // credential service. OpenCode has no provider-owned default: buildChildEnv
+  // (session.ts) selects the child's key from the model prefix (e.g.
+  // `xai/grok-4` → xai) and HARD-THROWS at spawn when the prefix maps to no
+  // known service — so a resolvable-but-unmapped model is admitted today yet
+  // fails every turn (boots, then crashes on spawn). Mirror that credential-route
+  // resolution here so the failure surfaces as a clear config error at admission
+  // instead of a runtime turn crash. An explicit providerConfig.apiKeyService
+  // (already validated above to a mapped service + baseUrl) names the route
+  // directly, so the model prefix is not consulted in that case — exactly as
+  // buildChildEnv skips it. SECURITY: this only ADDS an admission-time reject;
+  // buildChildEnv's spawn-time enforcement is unchanged and remains the backstop.
+  if (opts['provider'] === 'opencode-cli') {
+    const pc = opts['providerConfig'];
+    const apiKeyService = isRecord(pc) ? pc['apiKeyService'] : undefined;
+    const namesServiceExplicitly = typeof apiKeyService === 'string' && apiKeyService.trim() !== '';
+    // An explicit providerConfig.apiKeyService (validated above to a mapped
+    // service + baseUrl) names the route directly, so the model prefix is not
+    // consulted — exactly as buildChildEnv skips it. Otherwise the prefix must
+    // resolve. resolveAgentModel is guaranteed defined by the model-less check above.
+    const model = resolveAgentModel(raw);
+    if (!namesServiceExplicitly && !opencodeModelPrefixResolvesToService(model)) {
+      return err(
+        'model',
+        `agentOptions.provider "opencode-cli" model ${JSON.stringify(model ?? null)} does not resolve to a mapped provider credential service — use a "<provider>/<model>" id whose provider prefix is a known service (e.g. "minimax/...", "xai/...", "anthropic/..."), or set agentOptions.providerConfig.apiKeyService (with baseUrl) to name the credential route explicitly`,
+      );
+    }
+  }
+
   return null;
 }
 
@@ -1086,6 +1160,16 @@ function validateTransportConfig(
     );
   }
 
+  // imessageConfig present with non-imessage transport → reject as inconsistent.
+  const imessageConfig = raw['imessageConfig'];
+  if (imessageConfig !== undefined && effectiveTransport !== 'imessage') {
+    return err(
+      'imessageConfig',
+      'imessageConfig is inconsistent with transport ' + JSON.stringify(effectiveTransport) +
+        ' — imessageConfig is only valid when transport is "imessage"',
+    );
+  }
+
   // twilioConfig is REQUIRED when transport === 'twilio'.
   if (effectiveTransport === 'twilio') {
     if (twilioConfig === undefined || twilioConfig === null) {
@@ -1097,6 +1181,17 @@ function validateTransportConfig(
     const healthPort =
       typeof raw['healthPort'] === 'number' ? (raw['healthPort'] as number) : undefined;
     return validateTwilioConfig(twilioConfig as Record<string, unknown>, healthPort);
+  }
+
+  // imessageConfig is REQUIRED when transport === 'imessage'.
+  if (effectiveTransport === 'imessage') {
+    if (imessageConfig === undefined || imessageConfig === null) {
+      return err('imessageConfig', 'imessageConfig is required when transport is "imessage"');
+    }
+    if (typeof imessageConfig !== 'object' || Array.isArray(imessageConfig)) {
+      return err('imessageConfig', 'imessageConfig must be an object');
+    }
+    return validateImessageConfig(imessageConfig as Record<string, unknown>);
   }
 
   return null;
@@ -1336,6 +1431,126 @@ function validateTwilioConfig(tc: Record<string, unknown>, healthPort?: number):
           'twilioConfig.rateLimit.smsPerMinute must be an integer between 1 and 600',
         );
       }
+    }
+  }
+
+  return null;
+}
+
+function validateImessageConfig(ic: Record<string, unknown>): ValidationError | null {
+  // account: non-empty, matches ACCOUNT_RE
+  const account = ic['account'];
+  if (typeof account !== 'string' || account === '' || !ACCOUNT_RE.test(account)) {
+    return err(
+      'imessageConfig.account',
+      'imessageConfig.account must be a non-empty lowercase alphanumeric-and-dash string starting with a letter',
+    );
+  }
+
+  // backend: required discriminator
+  const backend = ic['backend'];
+  if (backend !== 'imsg' && backend !== 'bluebubbles') {
+    return err(
+      'imessageConfig.backend',
+      "imessageConfig.backend must be 'imsg' or 'bluebubbles'",
+    );
+  }
+
+  // Backend-conditional requirements.
+  if (backend === 'bluebubbles') {
+    const url = ic['bluebubblesUrl'];
+    if (typeof url !== 'string' || url === '') {
+      return err(
+        'imessageConfig.bluebubblesUrl',
+        "imessageConfig.bluebubblesUrl is required when backend is 'bluebubbles'",
+      );
+    } else {
+      let parsed: URL | null = null;
+      try { parsed = new URL(url); } catch { /* fall through */ }
+      if (!parsed || (parsed.protocol !== 'https:' && parsed.protocol !== 'http:')) {
+        return err(
+          'imessageConfig.bluebubblesUrl',
+          'imessageConfig.bluebubblesUrl must be an http(s) URL',
+        );
+      }
+    }
+    const pwService = ic['bluebubblesPasswordService'];
+    if (
+      typeof pwService !== 'string' ||
+      pwService === '' ||
+      /\s/.test(pwService) ||
+      pwService.length > 128
+    ) {
+      return err(
+        'imessageConfig.bluebubblesPasswordService',
+        "imessageConfig.bluebubblesPasswordService must be a non-empty keyring service name (no whitespace, max 128 chars) when backend is 'bluebubbles'",
+      );
+    }
+  }
+
+  if (backend === 'imsg') {
+    const socketPath = ic['imsgSocketPath'];
+    if (socketPath !== undefined) {
+      if (typeof socketPath !== 'string' || socketPath === '' || !socketPath.startsWith('/')) {
+        return err(
+          'imessageConfig.imsgSocketPath',
+          'imessageConfig.imsgSocketPath must be an absolute path when set',
+        );
+      }
+    }
+  }
+
+  // sender: required, AppleID email or E.164 (our own identity; the backend
+  // doesn't surface it before the first send).
+  const sender = ic['sender'];
+  if (
+    typeof sender !== 'string' ||
+    !(APPLEID_EMAIL_RE.test(sender) || E164_RE.test(sender))
+  ) {
+    return err(
+      'imessageConfig.sender',
+      'imessageConfig.sender must be an AppleID email or E.164 phone number',
+    );
+  }
+
+  // inboundMode: 'poll' or 'webhook'; webhook is BlueBubbles-only.
+  const inboundMode = ic['inboundMode'];
+  if (inboundMode !== undefined && inboundMode !== 'poll' && inboundMode !== 'webhook') {
+    return err(
+      'imessageConfig.inboundMode',
+      "imessageConfig.inboundMode must be 'poll' or 'webhook'",
+    );
+  }
+  if (inboundMode === 'webhook' && backend !== 'bluebubbles') {
+    return err(
+      'imessageConfig.inboundMode',
+      "imessageConfig.inboundMode 'webhook' is only supported with backend 'bluebubbles'",
+    );
+  }
+
+  // pollIntervalMs: optional positive number
+  const pollIntervalMs = ic['pollIntervalMs'];
+  if (pollIntervalMs !== undefined) {
+    if (typeof pollIntervalMs !== 'number' || !Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) {
+      return err(
+        'imessageConfig.pollIntervalMs',
+        'imessageConfig.pollIntervalMs must be a positive number',
+      );
+    }
+  }
+
+  // rateLimit: optional object with positive messagesPerMinute
+  const rateLimit = ic['rateLimit'];
+  if (rateLimit !== undefined) {
+    if (typeof rateLimit !== 'object' || rateLimit === null || Array.isArray(rateLimit)) {
+      return err('imessageConfig.rateLimit', 'imessageConfig.rateLimit must be an object');
+    }
+    const mpm = (rateLimit as Record<string, unknown>)['messagesPerMinute'];
+    if (typeof mpm !== 'number' || !Number.isFinite(mpm) || mpm <= 0) {
+      return err(
+        'imessageConfig.rateLimit.messagesPerMinute',
+        'imessageConfig.rateLimit.messagesPerMinute must be a positive number',
+      );
     }
   }
 

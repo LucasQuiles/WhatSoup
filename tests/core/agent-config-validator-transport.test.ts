@@ -736,3 +736,115 @@ describe('validateInstanceConfig — residual twilio branch coverage', () => {
     expect(validateInstanceConfig(raw, ctx())).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// imessageConfig
+// ---------------------------------------------------------------------------
+
+function validImessageConfig(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    account: 'mac-mini',
+    backend: 'bluebubbles',
+    bluebubblesUrl: 'https://bb.example.test',
+    bluebubblesPasswordService: 'imessage-bb-pw',
+    sender: 'me@heal.internal',
+    inboundMode: 'poll',
+    pollIntervalMs: 15000,
+    rateLimit: { messagesPerMinute: 30 },
+    ...overrides,
+  };
+}
+
+describe('validateInstanceConfig — imessageConfig', () => {
+  it('is required when transport is "imessage"', () => {
+    const raw = baseRaw({ transport: 'imessage' });
+    const err = validateInstanceConfig(raw, ctx());
+    expect(err?.field).toBe('imessageConfig');
+    expect(err?.message).toBe('imessageConfig is required when transport is "imessage"');
+  });
+
+  it('is rejected as inconsistent on non-imessage transports', () => {
+    const raw = baseRaw({ transport: 'twilio', twilioConfig: validTwilioConfig(), imessageConfig: validImessageConfig() });
+    const err = validateInstanceConfig(raw, ctx());
+    expect(err?.field).toBe('imessageConfig');
+    expect(err?.message).toMatch(/imessageConfig is inconsistent with transport/);
+  });
+
+  it('accepts a valid bluebubbles config', () => {
+    const raw = baseRaw({ transport: 'imessage', imessageConfig: validImessageConfig() });
+    expect(validateInstanceConfig(raw, ctx())).toBeNull();
+  });
+
+  it('accepts a valid imsg config (socket path optional)', () => {
+    const raw = baseRaw({
+      transport: 'imessage',
+      imessageConfig: validImessageConfig({
+        backend: 'imsg',
+        bluebubblesUrl: undefined,
+        bluebubblesPasswordService: undefined,
+        sender: '+15551110000',
+      }),
+    });
+    expect(validateInstanceConfig(raw, ctx())).toBeNull();
+  });
+
+  it('rejects an unknown backend', () => {
+    const raw = baseRaw({ transport: 'imessage', imessageConfig: validImessageConfig({ backend: 'icloud' }) });
+    const err = validateInstanceConfig(raw, ctx());
+    expect(err?.field).toBe('imessageConfig.backend');
+    expect(err?.message).toBe("imessageConfig.backend must be 'imsg' or 'bluebubbles'");
+  });
+
+  it('requires bluebubblesUrl when backend is bluebubbles', () => {
+    const raw = baseRaw({ transport: 'imessage', imessageConfig: validImessageConfig({ bluebubblesUrl: '' }) });
+    expect(validateInstanceConfig(raw, ctx())?.field).toBe('imessageConfig.bluebubblesUrl');
+  });
+
+  it('rejects a non-URL bluebubblesUrl', () => {
+    const raw = baseRaw({ transport: 'imessage', imessageConfig: validImessageConfig({ bluebubblesUrl: 'not-a-url' }) });
+    expect(validateInstanceConfig(raw, ctx())?.field).toBe('imessageConfig.bluebubblesUrl');
+  });
+
+  it('requires bluebubblesPasswordService when backend is bluebubbles', () => {
+    const raw = baseRaw({ transport: 'imessage', imessageConfig: validImessageConfig({ bluebubblesPasswordService: '' }) });
+    expect(validateInstanceConfig(raw, ctx())?.field).toBe('imessageConfig.bluebubblesPasswordService');
+  });
+
+  it('rejects a relative imsgSocketPath', () => {
+    const raw = baseRaw({
+      transport: 'imessage',
+      imessageConfig: validImessageConfig({ backend: 'imsg', imsgSocketPath: 'tmp/imsg.sock', bluebubblesUrl: undefined, bluebubblesPasswordService: undefined }),
+    });
+    expect(validateInstanceConfig(raw, ctx())?.field).toBe('imessageConfig.imsgSocketPath');
+  });
+
+  it('rejects a bad sender (not AppleID email or E.164)', () => {
+    const raw = baseRaw({ transport: 'imessage', imessageConfig: validImessageConfig({ sender: 'not-a-sender' }) });
+    expect(validateInstanceConfig(raw, ctx())?.field).toBe('imessageConfig.sender');
+  });
+
+  it('rejects webhook inboundMode on the imsg backend', () => {
+    const raw = baseRaw({
+      transport: 'imessage',
+      imessageConfig: validImessageConfig({ backend: 'imsg', inboundMode: 'webhook', bluebubblesUrl: undefined, bluebubblesPasswordService: undefined }),
+    });
+    const err = validateInstanceConfig(raw, ctx());
+    expect(err?.field).toBe('imessageConfig.inboundMode');
+    expect(err?.message).toMatch(/only supported with backend 'bluebubbles'/);
+  });
+
+  it('rejects an unknown inboundMode', () => {
+    const raw = baseRaw({ transport: 'imessage', imessageConfig: validImessageConfig({ inboundMode: 'stream' }) });
+    expect(validateInstanceConfig(raw, ctx())?.field).toBe('imessageConfig.inboundMode');
+  });
+
+  it('rejects a non-positive pollIntervalMs', () => {
+    const raw = baseRaw({ transport: 'imessage', imessageConfig: validImessageConfig({ pollIntervalMs: -5 }) });
+    expect(validateInstanceConfig(raw, ctx())?.field).toBe('imessageConfig.pollIntervalMs');
+  });
+
+  it('rejects a non-positive rateLimit.messagesPerMinute', () => {
+    const raw = baseRaw({ transport: 'imessage', imessageConfig: validImessageConfig({ rateLimit: { messagesPerMinute: 0 } }) });
+    expect(validateInstanceConfig(raw, ctx())?.field).toBe('imessageConfig.rateLimit.messagesPerMinute');
+  });
+});

@@ -33,6 +33,8 @@ const navigateMock = vi.hoisted(() => vi.fn());
 const useLineMock = vi.hoisted(() => vi.fn());
 const useTypingMock = vi.hoisted(() => vi.fn(() => ({ data: [] })));
 const useCheckpointsMock = vi.hoisted(() => vi.fn(() => ({ data: undefined, isLoading: false, freshness: undefined })));
+const useLiveSessionsMock = vi.hoisted(() => vi.fn(() => ({ data: undefined, isLoading: false, freshness: undefined })));
+const useApprovalsMock = vi.hoisted(() => vi.fn(() => ({ data: undefined, isLoading: false, freshness: undefined })));
 const useChatsMock = vi.hoisted(() => vi.fn(() => ({ data: [] })));
 const useMessagesMock = vi.hoisted(() => vi.fn(() => ({ data: [] })));
 const useAccessMock = vi.hoisted(() => vi.fn((): {
@@ -78,7 +80,12 @@ vi.mock('../../console/src/hooks/use-fleet', async (importOriginal) => {
     // spread did not reliably surface this newly-added export, so LineDetail's
     // useCheckpoints() call threw "No useCheckpoints export on the mock" in CI
     // (the single-file run resolved it via ...actual and passed). #1930.
+    // Same reasoning for the later-added consumed exports LineDetail destructures:
+    // useLiveSessions (#1997) and useApprovals (#1952) — list them explicitly so
+    // the full-coverage run never falls back to the unreliable spread.
     useCheckpoints: useCheckpointsMock,
+    useLiveSessions: useLiveSessionsMock,
+    useApprovals: useApprovalsMock,
   };
 });
 
@@ -213,29 +220,30 @@ function renderLineDetailRoute(routeName: string) {
 // ---------------------------------------------------------------------------
 
 describe('LineDetail tablist (Tabs primitive)', () => {
-  // NOTE (#1930): the checkpoint-browser tab is rendered unconditionally, so the
-  // base count is now 8 (was 7). If the co-driver intends it gated (e.g. agent
-  // lines only), the fix belongs in LineDetail.tsx, not here — flagging for review.
-  it('renders 8 base tabs as role=tab inside a labeled tablist', async () => {
+  // NOTE (#1930 + #1952): BASE_TABS grew by two independent additions that each
+  // landed as "7 -> 8" on their own branch — Checkpoints (#1930/#1953) and
+  // Approvals (#1952). Merged, both are present, so the base count is 9 and the
+  // MCP-capable total is 11 (9 base + 2 MCP: Scheduled, Groups).
+  it('renders 9 base tabs as role=tab inside a labeled tablist', async () => {
     await act(async () => {
       renderLineDetail({ line: makeLine({ name: 'test-line', mode: 'chat' }) });
     });
     const list = screen.getByRole('tablist', { name: 'Line detail tabs' });
-    expect(within(list).getAllByRole('tab')).toHaveLength(8);
+    expect(within(list).getAllByRole('tab')).toHaveLength(9);
   });
 
-  it('renders 10 tabs when the line is MCP-capable (passive mode)', async () => {
+  it('renders 11 tabs when the line is MCP-capable (passive mode)', async () => {
     await act(async () => {
       renderLineDetail({ line: makeLine({ name: 'test-line', mode: 'passive' }) });
     });
-    expect(screen.getAllByRole('tab')).toHaveLength(10);
+    expect(screen.getAllByRole('tab')).toHaveLength(11);
   });
 
-  it('renders 10 tabs when the line is agent mode without sandboxPerChat', async () => {
+  it('renders 11 tabs when the line is agent mode without sandboxPerChat', async () => {
     await act(async () => {
       renderLineDetail({ line: makeLine({ name: 'test-line', mode: 'agent', sandboxPerChat: false }) });
     });
-    expect(screen.getAllByRole('tab')).toHaveLength(10);
+    expect(screen.getAllByRole('tab')).toHaveLength(11);
   });
 
   it('ArrowRight + Enter activates the next tab; focus alone does not switch panels', async () => {
