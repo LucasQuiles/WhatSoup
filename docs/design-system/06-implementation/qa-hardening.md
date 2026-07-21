@@ -256,6 +256,7 @@ Each enforcement rule should include a negative fixture or documented negative e
 | deprecated token usage in migrated directory | fails legacy-token rule |
 | utility/spec-smell class | fails or warns per lifecycle |
 | new shadow-lint warning over the ratchet ceiling | fails shadow-baseline check — negative fixtures live in `tests/scripts/shadow-baseline.test.ts` via the `check-shadow-baseline.mjs --results-json`/`--baseline` seam (default no-flag run is byte-for-byte unchanged; fixtures can never write a baseline) |
+| a page renders under `tests/browser/*` while a `vi.mock('.../use-fleet', () => ({…}))` explicit-shape factory omits a hook that page now consumes | fails the browser suite (strict-ESM oxc transform) at module load — `SyntaxError: does not provide an export named '<hook>'`. The main-suite transform tolerates the missing named import (returns undefined), so this trap fires only in the browser lane; when a page gains a `use-fleet` hook, every browser-suite explicit factory that renders that page must enumerate it |
 
 If a negative fixture is impractical at a lifecycle stage, document a negative example in the rule entry
 and add the fixture when the rule reaches scoped-error.
