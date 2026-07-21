@@ -7,7 +7,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { stderr, stdout } from 'node:process';
-import { backup, DatabaseSync } from 'node:sqlite';
+import { backup, constants as sqliteConstants, DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 import { CURRENT_SCHEMA_MIGRATION } from '../src/core/database-schema-version.ts';
 import { withImmediateTransaction } from '../src/core/db-tx.ts';
@@ -507,13 +507,53 @@ function isCleanupCandidate(value: unknown): value is CleanupCandidate {
     && value.sourceEventMessagePk === prior.sourceMessagePk;
 }
 
+function isCompanionRecord(value: unknown, snapshotFile: string): value is CompanionRecord {
+  if (!isRecord(value) || !hasExactKeys(value, ['present', 'sha256', 'size', 'snapshotFile'])
+    || typeof value.present !== 'boolean') return false;
+  if (!value.present) {
+    return value.sha256 === null && value.size === null && value.snapshotFile === null;
+  }
+  return isSha256(value.sha256)
+    && isNonNegativeSafeInteger(value.size)
+    && value.snapshotFile === snapshotFile;
+}
+
+function isRetainedValidCounts(value: unknown): value is RetainedValidCounts {
+  if (!isRecord(value) || !hasExactKeys(value, [
+    'admittedInline', 'admittedInlineOverdue', 'otherProposed', 'otherProposedOverdue',
+  ])) return false;
+  return isNonNegativeSafeInteger(value.admittedInline)
+    && isNonNegativeSafeInteger(value.admittedInlineOverdue)
+    && isNonNegativeSafeInteger(value.otherProposed)
+    && isNonNegativeSafeInteger(value.otherProposedOverdue)
+    && value.admittedInlineOverdue <= value.admittedInline
+    && value.otherProposedOverdue <= value.otherProposed;
+}
+
+function isManifestDatabase(value: unknown): value is CleanupManifest['database'] {
+  if (!isRecord(value) || !hasExactKeys(value, [
+    'fingerprint', 'schemaVersion', 'snapshotFile', 'wal', 'shm',
+  ])) return false;
+  return isSha256(value.fingerprint)
+    && value.schemaVersion === CURRENT_SCHEMA_MIGRATION
+    && value.snapshotFile === 'database-snapshot.db'
+    && isCompanionRecord(value.wal, 'source-wal.provenance')
+    && isCompanionRecord(value.shm, 'source-shm.provenance');
+}
+
 function assertManifest(value: unknown): CleanupManifest {
-  if (!isRecord(value)) throw new Error('Invalid cleanup manifest');
+  if (!isRecord(value) || !hasExactKeys(value, [
+    'formatVersion', 'manifestId', 'classifierVersion', 'createdAt',
+    'database', 'retainedValid', 'candidates',
+  ])) throw new Error('Invalid cleanup manifest shape');
   const manifest = value as unknown as CleanupManifest;
   if (manifest.formatVersion !== FORMAT_VERSION
     || typeof manifest.classifierVersion !== 'string'
+    || !isNonNegativeSafeInteger(manifest.createdAt)
+    || !isManifestDatabase(manifest.database)
+    || !isRetainedValidCounts(manifest.retainedValid)
     || !Array.isArray(manifest.candidates)) {
-    throw new Error('Invalid cleanup manifest format');
+    throw new Error('Invalid cleanup manifest format or shape');
   }
   assertKnownClassifier(manifest.classifierVersion);
   if (manifest.candidates.some((candidate) => !isCleanupCandidate(candidate))) {
@@ -699,60 +739,147 @@ function beadEventSetFingerprint(
   return sha256Bytes(stableJson(rows));
 }
 
-function withBaselineEventGuards<T>(
+function withCleanupMutationGuards<T>(
   raw: DatabaseSync,
   manifest: CleanupManifest,
-  action: () => T,
+  mode: 'apply' | 'rollback',
+  rollbackEventIds: readonly number[],
+  appliedAt: number | null,
+  action: (enable: () => void) => T,
 ): T {
   raw.exec(`
-    CREATE TEMP TABLE inline_cleanup_baseline_event_guard (
+    CREATE TEMP TABLE inline_cleanup_candidate_guard (
+      bead_id INTEGER PRIMARY KEY
+    ) WITHOUT ROWID;
+    CREATE TEMP TABLE inline_cleanup_rollback_event_guard (
       event_id INTEGER PRIMARY KEY
     ) WITHOUT ROWID;
-    CREATE TEMP TRIGGER inline_cleanup_block_baseline_event_update
-    BEFORE UPDATE ON bead_events
-    WHEN EXISTS (
-      SELECT 1 FROM inline_cleanup_baseline_event_guard WHERE event_id = OLD.id
-    ) OR OLD.actor = '${CLEANUP_ACTOR}'
-    BEGIN
-      SELECT RAISE(ABORT, 'baseline event or cleanup event update blocked');
-    END;
-    CREATE TEMP TRIGGER inline_cleanup_block_baseline_event_delete
-    BEFORE DELETE ON bead_events
-    WHEN EXISTS (
-      SELECT 1 FROM inline_cleanup_baseline_event_guard WHERE event_id = OLD.id
-    ) OR OLD.actor = '${CLEANUP_ACTOR}'
-    BEGIN
-      SELECT RAISE(ABORT, 'baseline event or cleanup event delete blocked');
-    END;
+    CREATE TEMP TABLE inline_cleanup_guard_config (
+      mode TEXT NOT NULL,
+      applied_at INTEGER,
+      enabled INTEGER NOT NULL DEFAULT 0
+    );
   `);
   try {
-    const addGuard = raw.prepare('INSERT INTO inline_cleanup_baseline_event_guard (event_id) VALUES (?)');
-    for (const candidate of manifest.candidates) {
-      const rows = raw.prepare('SELECT id FROM bead_events WHERE bead_id = ? ORDER BY id')
-        .all(candidate.id) as Array<{ id: number }>;
-      for (const row of rows) addGuard.run(row.id);
+    const addCandidate = raw.prepare('INSERT INTO inline_cleanup_candidate_guard (bead_id) VALUES (?)');
+    for (const candidate of manifest.candidates) addCandidate.run(candidate.id);
+    const addEvent = raw.prepare('INSERT INTO inline_cleanup_rollback_event_guard (event_id) VALUES (?)');
+    for (const eventId of rollbackEventIds) addEvent.run(eventId);
+    raw.prepare('INSERT INTO inline_cleanup_guard_config (mode, applied_at) VALUES (?, ?)').run(mode, appliedAt);
+    raw.exec(`
+    CREATE TEMP TRIGGER inline_cleanup_block_bead_insert
+    BEFORE INSERT ON beads
+    WHEN (SELECT enabled FROM inline_cleanup_guard_config) = 1
+    BEGIN
+      SELECT RAISE(ABORT, 'cleanup guard blocked bead insert');
+    END;
+    CREATE TEMP TRIGGER inline_cleanup_block_bead_delete
+    BEFORE DELETE ON beads
+    WHEN (SELECT enabled FROM inline_cleanup_guard_config) = 1
+    BEGIN
+      SELECT RAISE(ABORT, 'cleanup guard blocked bead delete');
+    END;
+    CREATE TEMP TRIGGER inline_cleanup_block_unrelated_bead_update
+    BEFORE UPDATE ON beads
+    WHEN (SELECT enabled FROM inline_cleanup_guard_config) = 1
+      AND (NOT EXISTS (
+        SELECT 1 FROM inline_cleanup_candidate_guard WHERE bead_id = OLD.id
+      ) OR NEW.id != OLD.id)
+    BEGIN
+      SELECT RAISE(ABORT, 'cleanup guard blocked unrelated bead update');
+    END;
+    CREATE TEMP TRIGGER inline_cleanup_block_event_update
+    BEFORE UPDATE ON bead_events
+    WHEN (SELECT enabled FROM inline_cleanup_guard_config) = 1
+    BEGIN
+      SELECT RAISE(ABORT, 'cleanup guard blocked event update');
+    END;
+    CREATE TEMP TRIGGER inline_cleanup_block_event_insert
+    BEFORE INSERT ON bead_events
+    WHEN (SELECT enabled FROM inline_cleanup_guard_config) = 1
+      AND ((SELECT mode FROM inline_cleanup_guard_config) != 'apply'
+        OR NOT EXISTS (
+          SELECT 1 FROM inline_cleanup_candidate_guard WHERE bead_id = NEW.bead_id
+        )
+        OR NEW.event_type != 'status_change'
+        OR NEW.actor != '${CLEANUP_ACTOR}'
+        OR NEW.source_message_pk IS NOT NULL
+        OR NEW.created_at != (SELECT applied_at FROM inline_cleanup_guard_config)
+        OR EXISTS (SELECT 1 FROM bead_events WHERE id = NEW.id))
+    BEGIN
+      SELECT RAISE(ABORT, 'cleanup guard blocked event insert or collision');
+    END;
+    CREATE TEMP TRIGGER inline_cleanup_block_event_delete
+    BEFORE DELETE ON bead_events
+    WHEN (SELECT enabled FROM inline_cleanup_guard_config) = 1
+      AND ((SELECT mode FROM inline_cleanup_guard_config) != 'rollback'
+        OR NOT EXISTS (
+          SELECT 1 FROM inline_cleanup_rollback_event_guard WHERE event_id = OLD.id
+        ))
+    BEGIN
+      SELECT RAISE(ABORT, 'cleanup guard blocked event delete');
+    END;
+    `);
+    const allowedBeadColumns = new Set(mode === 'apply'
+      ? ['status', 'updated_at', 'cancelled_at']
+      : ['status', 'updated_at', 'completed_at', 'cancelled_at']);
+    let enabled = false;
+    const enable = (): void => {
+      if (enabled) throw new Error('Cleanup mutation guard enabled more than once');
+      raw.prepare('UPDATE inline_cleanup_guard_config SET enabled = 1').run();
+      raw.setAuthorizer((actionCode, table, column) => {
+        if (actionCode === sqliteConstants.SQLITE_INSERT) {
+          return mode === 'apply' && table === 'bead_events'
+            ? sqliteConstants.SQLITE_OK : sqliteConstants.SQLITE_DENY;
+        }
+        if (actionCode === sqliteConstants.SQLITE_UPDATE) {
+          return table === 'beads' && column !== null && allowedBeadColumns.has(column)
+            ? sqliteConstants.SQLITE_OK : sqliteConstants.SQLITE_DENY;
+        }
+        if (actionCode === sqliteConstants.SQLITE_DELETE) {
+          return mode === 'rollback' && table === 'bead_events'
+            ? sqliteConstants.SQLITE_OK : sqliteConstants.SQLITE_DENY;
+        }
+        return sqliteConstants.SQLITE_OK;
+      });
+      enabled = true;
+    };
+    try {
+      return action(enable);
+    } finally {
+      if (enabled) raw.setAuthorizer(null);
     }
-    return action();
   } finally {
     raw.exec(`
-      DROP TRIGGER IF EXISTS inline_cleanup_block_baseline_event_update;
-      DROP TRIGGER IF EXISTS inline_cleanup_block_baseline_event_delete;
-      DROP TABLE IF EXISTS inline_cleanup_baseline_event_guard;
+      DROP TRIGGER IF EXISTS inline_cleanup_block_bead_insert;
+      DROP TRIGGER IF EXISTS inline_cleanup_block_bead_delete;
+      DROP TRIGGER IF EXISTS inline_cleanup_block_unrelated_bead_update;
+      DROP TRIGGER IF EXISTS inline_cleanup_block_event_update;
+      DROP TRIGGER IF EXISTS inline_cleanup_block_event_insert;
+      DROP TRIGGER IF EXISTS inline_cleanup_block_event_delete;
+      DROP TABLE IF EXISTS inline_cleanup_candidate_guard;
+      DROP TABLE IF EXISTS inline_cleanup_rollback_event_guard;
+      DROP TABLE IF EXISTS inline_cleanup_guard_config;
     `);
   }
 }
 
-function assertAppliedState(raw: DatabaseSync, manifest: CleanupManifest, receipt: ApplyReceipt): void {
+function assertAppliedMutationState(
+  raw: DatabaseSync,
+  manifest: CleanupManifest,
+  appliedAt: number,
+  eventIds: readonly number[],
+): void {
   const events = cleanupEvents(raw, manifest);
   if (events.length !== manifest.candidates.length) throw new Error('Cleanup event count drift requires review');
   for (const candidate of manifest.candidates) {
     const row = raw.prepare('SELECT * FROM beads WHERE id = ?').get(candidate.id) as unknown as BeadInspectionRow | undefined;
     const event = assertCandidateEventParity(raw, candidate, events, 1);
-    if (!row || row.status !== 'cancelled' || row.cancelled_at !== receipt.appliedAt
-      || row.updated_at !== receipt.appliedAt || sha256Bytes(row.body ?? '') !== candidate.bodySha256
+    if (!row || row.status !== 'cancelled' || row.cancelled_at !== appliedAt
+      || row.updated_at !== appliedAt || sha256Bytes(row.body ?? '') !== candidate.bodySha256
       || candidateIdentityHash(row) !== candidate.identitySha256
-      || !event || event.created_at !== receipt.appliedAt || event.source_message_pk !== null
-      || !receipt.eventIds.includes(event.id)) {
+      || !event || event.created_at !== appliedAt || event.source_message_pk !== null
+      || !eventIds.includes(event.id)) {
       throw new Error(`Cleanup state for bead ${candidate.id} drifted; review required`);
     }
     const payload = JSON.parse(event.payload_json) as Record<string, unknown>;
@@ -766,6 +893,10 @@ function assertAppliedState(raw: DatabaseSync, manifest: CleanupManifest, receip
   }
 }
 
+function assertAppliedState(raw: DatabaseSync, manifest: CleanupManifest, receipt: ApplyReceipt): void {
+  assertAppliedMutationState(raw, manifest, receipt.appliedAt, receipt.eventIds);
+}
+
 function assertRolledBackState(raw: DatabaseSync, manifest: CleanupManifest): void {
   const events = cleanupEvents(raw, manifest);
   if (events.length !== 0) throw new Error('Rollback event state drift requires review');
@@ -773,7 +904,8 @@ function assertRolledBackState(raw: DatabaseSync, manifest: CleanupManifest): vo
     assertCandidateEventParity(raw, candidate, events, 0);
     const row = raw.prepare('SELECT * FROM beads WHERE id = ?').get(candidate.id) as unknown as BeadInspectionRow | undefined;
     if (!row || row.status !== candidate.prior.status || row.updated_at !== candidate.prior.updatedAt
-      || row.cancelled_at !== null || sha256Bytes(row.body ?? '') !== candidate.bodySha256
+      || row.completed_at !== null || row.cancelled_at !== null
+      || sha256Bytes(row.body ?? '') !== candidate.bodySha256
       || candidateIdentityHash(row) !== candidate.identitySha256) {
       throw new Error(`Rolled-back bead ${candidate.id} drifted; review required`);
     }
@@ -1044,12 +1176,23 @@ export async function applyInlineProposalCleanup(options: CleanupCommandOptions)
         attest([]);
         return { affectedCount: 0, eventCount: 0 };
       })
-      : withBaselineEventGuards(raw, manifest, () => rejectProposalsBatch(raw, {
+      : withCleanupMutationGuards(raw, manifest, 'apply', [], appliedAt, (enable) => rejectProposalsBatch(raw, {
         candidates: manifest.candidates.map((candidate) => ({ id: candidate.id, expected: candidate.prior })),
         actor: CLEANUP_ACTOR,
         at: appliedAt,
         audit: { reasonCode: REASON_CODE, classifierVersion: manifest.classifierVersion, manifestId: manifest.manifestId },
-        assertExpectedRows: attest,
+        assertExpectedRows: (rows) => {
+          attest(rows);
+          enable();
+        },
+        assertMutatedState: (mutation) => {
+          if (mutation.affectedCount !== manifest.candidates.length
+            || mutation.eventCount !== manifest.candidates.length) {
+            throw new Error('Cleanup affected/event counts did not match manifest');
+          }
+          const events = cleanupEvents(raw, manifest);
+          assertAppliedMutationState(raw, manifest, appliedAt, events.map((event) => event.id));
+        },
       }));
     if (result.affectedCount !== manifest.candidates.length || result.eventCount !== manifest.candidates.length) {
       throw new Error('Cleanup affected/event counts did not match manifest');
@@ -1164,7 +1307,14 @@ export async function rollbackInlineProposalCleanup(options: CleanupCommandOptio
   try { raw = openWritable(dbPath, expectedIdentity); }
   catch (error) { observer.close(); throw error; }
   try {
-    withImmediateTransaction(raw, () => {
+    const guardedCleanup = cleanupEvents(raw, manifest);
+    withCleanupMutationGuards(
+      raw,
+      manifest,
+      'rollback',
+      guardedCleanup.map((event) => event.id),
+      null,
+      (enable) => withImmediateTransaction(raw, () => {
       assertDatabaseFileIdentity(dbPath, expectedIdentity);
       if (dataVersion(observer) !== observedDataVersion) {
         throw new Error('Database changed between rollback inspection and write lock');
@@ -1174,6 +1324,7 @@ export async function rollbackInlineProposalCleanup(options: CleanupCommandOptio
       if (dataVersion(observer) !== observedDataVersion) {
         throw new Error('Database changed under the rollback write lock');
       }
+      enable();
       assertAppliedState(raw, manifest, applyReceipt);
       const cleanup = cleanupEvents(raw, manifest);
       const update = raw.prepare(`
@@ -1191,7 +1342,8 @@ export async function rollbackInlineProposalCleanup(options: CleanupCommandOptio
         }
       }
       assertRolledBackState(raw, manifest);
-    });
+      }),
+    );
     assertDatabaseFileIdentity(dbPath, expectedIdentity);
     options.testOnlyAfterMutation?.();
     assertDatabaseFileIdentity(dbPath, expectedIdentity);

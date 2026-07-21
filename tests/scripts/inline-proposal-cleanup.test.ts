@@ -3,8 +3,9 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
+import { CURRENT_SCHEMA_MIGRATION } from '../../src/core/database-schema-version.ts';
 import { createBead, getBead, updateBead } from '../../src/core/substrate/beads.ts';
 import {
   CLASSIFIER_VERSION,
@@ -53,6 +54,20 @@ function hash(path: string): string {
 
 function readManifest(path: string): CleanupManifest {
   return JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest;
+}
+
+function resignManifest(manifest: Record<string, unknown>): void {
+  const { manifestId: _manifestId, ...unsigned } = manifest;
+  const stable = (value: unknown): string => {
+    if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
+    if (value !== null && typeof value === 'object') {
+      return `{${Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, entry]) => `${JSON.stringify(key)}:${stable(entry)}`).join(',')}}`;
+    }
+    return JSON.stringify(value);
+  };
+  manifest.manifestId = createHash('sha256').update(stable(unsigned)).digest('hex');
 }
 
 afterEach(() => {
@@ -193,7 +208,7 @@ describe('inline proposal cleanup protocol', () => {
     raw.close();
 
     await expect(rollbackInlineProposalCleanup({ dbPath: f.dbPath, manifestPath: plan.manifestPath }))
-      .rejects.toThrow(/source event|parity|drift/i);
+      .rejects.toThrow(/source event|parity|drift|guard|blocked/i);
 
     expect(existsSync(join(f.artifactDir, 'rollback-receipt.json'))).toBe(false);
     const check = new DatabaseSync(f.dbPath, { readOnly: true });
@@ -228,7 +243,7 @@ describe('inline proposal cleanup protocol', () => {
     raw.close();
 
     await expect(rollbackInlineProposalCleanup({ dbPath: f.dbPath, manifestPath: plan.manifestPath }))
-      .rejects.toThrow(/event parity|drift/i);
+      .rejects.toThrow(/event parity|drift|guard|blocked/i);
 
     expect(existsSync(join(f.artifactDir, 'rollback-receipt.json'))).toBe(false);
     const check = new DatabaseSync(f.dbPath, { readOnly: true });
@@ -257,7 +272,7 @@ describe('inline proposal cleanup protocol', () => {
     const plan = await planInlineProposalCleanup({ dbPath: f.dbPath, artifactDir: f.artifactDir });
 
     await expect(applyInlineProposalCleanup({ dbPath: f.dbPath, manifestPath: plan.manifestPath }))
-      .rejects.toThrow(/baseline event|parity|drift/i);
+      .rejects.toThrow(/baseline event|parity|drift|authoriz|guard|blocked/i);
 
     expect(existsSync(join(f.artifactDir, 'apply-receipt.json'))).toBe(false);
     const check = new DatabaseSync(f.dbPath, { readOnly: true });
@@ -266,6 +281,122 @@ describe('inline proposal cleanup protocol', () => {
       .toEqual({ payload_json: '{"note":"retain"}' });
     expect(check.prepare(`SELECT COUNT(*) AS count FROM bead_events
       WHERE bead_id = ? AND actor = 'inline-proposal-cleanup'`).get(f.invalid.id)).toEqual({ count: 0 });
+    check.close();
+  });
+
+  it('rolls back apply when a balanced trigger replaces an unrelated bead event', async () => {
+    const f = fixture();
+    const raw = new DatabaseSync(f.dbPath);
+    const unrelatedEvent = raw.prepare(`SELECT id, payload_json FROM bead_events
+      WHERE bead_id = ? ORDER BY id LIMIT 1`).get(f.valid.id) as { id: number; payload_json: string };
+    raw.exec(`CREATE TRIGGER replace_unrelated_event_after_cleanup
+      AFTER INSERT ON bead_events
+      WHEN NEW.actor = 'inline-proposal-cleanup'
+      BEGIN
+        DELETE FROM bead_events WHERE id = ${unrelatedEvent.id};
+        INSERT INTO bead_events
+          (bead_id, event_type, payload_json, actor, source_message_pk, created_at)
+          VALUES (${f.valid.id}, 'audit_note', '{"note":"balanced replacement"}', 'auditor', NULL, 1);
+      END`);
+    raw.close();
+    const plan = await planInlineProposalCleanup({ dbPath: f.dbPath, artifactDir: f.artifactDir });
+
+    await expect(applyInlineProposalCleanup({ dbPath: f.dbPath, manifestPath: plan.manifestPath }))
+      .rejects.toThrow(/authoriz|guard|parity|drift|blocked/i);
+
+    expect(existsSync(join(f.artifactDir, 'apply-receipt.json'))).toBe(false);
+    const check = new DatabaseSync(f.dbPath, { readOnly: true });
+    expect(getBead(check, f.invalid.id)!.bead.status).toBe('proposed');
+    expect(check.prepare('SELECT payload_json FROM bead_events WHERE id = ?').get(unrelatedEvent.id))
+      .toEqual({ payload_json: unrelatedEvent.payload_json });
+    expect(check.prepare(`SELECT COUNT(*) AS count FROM bead_events
+      WHERE event_type = 'audit_note' AND actor = 'auditor'`).get()).toEqual({ count: 0 });
+    check.close();
+  });
+
+  it('rolls back apply when a cleanup trigger updates an unrelated bead row', async () => {
+    const f = fixture();
+    const raw = new DatabaseSync(f.dbPath);
+    const before = getBead(raw, f.valid.id)!.bead.title;
+    raw.exec(`CREATE TRIGGER mutate_unrelated_bead_after_cleanup
+      AFTER INSERT ON bead_events
+      WHEN NEW.actor = 'inline-proposal-cleanup'
+      BEGIN
+        UPDATE beads SET title = 'damaged' WHERE id = ${f.valid.id};
+      END`);
+    raw.close();
+    const plan = await planInlineProposalCleanup({ dbPath: f.dbPath, artifactDir: f.artifactDir });
+
+    await expect(applyInlineProposalCleanup({ dbPath: f.dbPath, manifestPath: plan.manifestPath }))
+      .rejects.toThrow(/authoriz|guard|parity|drift|blocked/i);
+
+    expect(existsSync(join(f.artifactDir, 'apply-receipt.json'))).toBe(false);
+    const check = new DatabaseSync(f.dbPath, { readOnly: true });
+    expect(getBead(check, f.invalid.id)!.bead.status).toBe('proposed');
+    expect(getBead(check, f.valid.id)!.bead.title).toBe(before);
+    check.close();
+  });
+
+  it('resets the SQLite authorizer after a guarded apply failure', async () => {
+    const f = fixture();
+    const raw = new DatabaseSync(f.dbPath);
+    raw.exec(`CREATE TRIGGER mutate_unrelated_bead_for_authorizer_reset
+      AFTER INSERT ON bead_events
+      WHEN NEW.actor = 'inline-proposal-cleanup'
+      BEGIN
+        UPDATE beads SET title = 'damaged' WHERE id = ${f.valid.id};
+      END`);
+    raw.close();
+    const plan = await planInlineProposalCleanup({ dbPath: f.dbPath, artifactDir: f.artifactDir });
+    const calls: Array<{ db: DatabaseSync; callback: unknown }> = [];
+    const original = DatabaseSync.prototype.setAuthorizer;
+    const spy = vi.spyOn(DatabaseSync.prototype, 'setAuthorizer').mockImplementation(function (
+      this: DatabaseSync,
+      callback,
+    ) {
+      calls.push({ db: this, callback });
+      return original.call(this, callback);
+    });
+    try {
+      await expect(applyInlineProposalCleanup({ dbPath: f.dbPath, manifestPath: plan.manifestPath }))
+        .rejects.toThrow(/authoriz|guard|blocked/i);
+    } finally {
+      spy.mockRestore();
+    }
+
+    const installed = calls.find((entry) => typeof entry.callback === 'function');
+    expect(installed).toBeDefined();
+    expect(calls.some((entry) => entry.db === installed!.db && entry.callback === null)).toBe(true);
+    expect(existsSync(join(f.artifactDir, 'apply-receipt.json'))).toBe(false);
+  });
+
+  it('rolls back apply when a trigger uses insert-or-replace on an unrelated event ID', async () => {
+    const f = fixture();
+    const raw = new DatabaseSync(f.dbPath);
+    const unrelatedEvent = { id: -7, payload_json: '{"note":"retain negative rowid"}' };
+    raw.prepare(`INSERT INTO bead_events
+      (id, bead_id, event_type, payload_json, actor, source_message_pk, created_at)
+      VALUES (?, ?, 'audit_note', ?, 'auditor', NULL, 1)`)
+      .run(unrelatedEvent.id, f.valid.id, unrelatedEvent.payload_json);
+    raw.exec(`CREATE TRIGGER replace_collision_after_cleanup
+      AFTER INSERT ON bead_events
+      WHEN NEW.actor = 'inline-proposal-cleanup'
+      BEGIN
+        INSERT OR REPLACE INTO bead_events
+          (id, bead_id, event_type, payload_json, actor, source_message_pk, created_at)
+          VALUES (${unrelatedEvent.id}, ${f.valid.id}, 'audit_note', '{"note":"collision"}', 'auditor', NULL, 1);
+      END`);
+    raw.close();
+    const plan = await planInlineProposalCleanup({ dbPath: f.dbPath, artifactDir: f.artifactDir });
+
+    await expect(applyInlineProposalCleanup({ dbPath: f.dbPath, manifestPath: plan.manifestPath }))
+      .rejects.toThrow(/authoriz|guard|parity|drift|blocked|collision/i);
+
+    expect(existsSync(join(f.artifactDir, 'apply-receipt.json'))).toBe(false);
+    const check = new DatabaseSync(f.dbPath, { readOnly: true });
+    expect(getBead(check, f.invalid.id)!.bead.status).toBe('proposed');
+    expect(check.prepare('SELECT payload_json FROM bead_events WHERE id = ?').get(unrelatedEvent.id))
+      .toEqual({ payload_json: unrelatedEvent.payload_json });
     check.close();
   });
 
@@ -292,7 +423,7 @@ describe('inline proposal cleanup protocol', () => {
     expect(plan.manifest.candidates.map((candidate) => candidate.id)).toEqual([f.invalid.id, second.id]);
 
     await expect(applyInlineProposalCleanup({ dbPath: f.dbPath, manifestPath: plan.manifestPath }))
-      .rejects.toThrow(/cleanup event|baseline event|parity|drift/i);
+      .rejects.toThrow(/cleanup event|baseline event|parity|drift|authoriz|guard|blocked/i);
 
     expect(existsSync(join(f.artifactDir, 'apply-receipt.json'))).toBe(false);
     const check = new DatabaseSync(f.dbPath, { readOnly: true });
@@ -302,6 +433,64 @@ describe('inline proposal cleanup protocol', () => {
       WHERE actor = 'inline-proposal-cleanup'`).get()).toEqual({ count: 0 });
     expect(check.prepare(`SELECT COUNT(*) AS count FROM bead_events
       WHERE event_type = 'audit_note' AND actor = 'auditor'`).get()).toEqual({ count: 0 });
+    check.close();
+  });
+
+  it('rolls back the whole rollback when a balanced trigger replaces an unrelated bead event', async () => {
+    const f = fixture();
+    const plan = await planInlineProposalCleanup({ dbPath: f.dbPath, artifactDir: f.artifactDir });
+    await applyInlineProposalCleanup({ dbPath: f.dbPath, manifestPath: plan.manifestPath });
+    const raw = new DatabaseSync(f.dbPath);
+    const unrelatedEvent = raw.prepare(`SELECT id, payload_json FROM bead_events
+      WHERE bead_id = ? ORDER BY id LIMIT 1`).get(f.valid.id) as { id: number; payload_json: string };
+    raw.exec(`CREATE TRIGGER replace_unrelated_event_during_rollback
+      BEFORE DELETE ON bead_events
+      WHEN OLD.actor = 'inline-proposal-cleanup'
+      BEGIN
+        DELETE FROM bead_events WHERE id = ${unrelatedEvent.id};
+        INSERT INTO bead_events
+          (bead_id, event_type, payload_json, actor, source_message_pk, created_at)
+          VALUES (${f.valid.id}, 'audit_note', '{"note":"balanced replacement"}', 'auditor', NULL, 1);
+      END`);
+    raw.close();
+
+    await expect(rollbackInlineProposalCleanup({ dbPath: f.dbPath, manifestPath: plan.manifestPath }))
+      .rejects.toThrow(/authoriz|guard|parity|drift|blocked/i);
+
+    expect(existsSync(join(f.artifactDir, 'rollback-receipt.json'))).toBe(false);
+    const check = new DatabaseSync(f.dbPath, { readOnly: true });
+    expect(getBead(check, f.invalid.id)!.bead.status).toBe('cancelled');
+    expect(check.prepare('SELECT payload_json FROM bead_events WHERE id = ?').get(unrelatedEvent.id))
+      .toEqual({ payload_json: unrelatedEvent.payload_json });
+    expect(check.prepare(`SELECT COUNT(*) AS count FROM bead_events
+      WHERE event_type = 'audit_note' AND actor = 'auditor'`).get()).toEqual({ count: 0 });
+    expect(check.prepare(`SELECT COUNT(*) AS count FROM bead_events
+      WHERE bead_id = ? AND actor = 'inline-proposal-cleanup'`).get(f.invalid.id)).toEqual({ count: 1 });
+    check.close();
+  });
+
+  it('rolls back the whole rollback when cleanup deletion changes another candidate field', async () => {
+    const f = fixture();
+    const plan = await planInlineProposalCleanup({ dbPath: f.dbPath, artifactDir: f.artifactDir });
+    await applyInlineProposalCleanup({ dbPath: f.dbPath, manifestPath: plan.manifestPath });
+    const raw = new DatabaseSync(f.dbPath);
+    raw.exec(`CREATE TRIGGER mutate_candidate_after_cleanup_delete
+      AFTER DELETE ON bead_events
+      WHEN OLD.actor = 'inline-proposal-cleanup'
+      BEGIN
+        UPDATE beads SET completed_at = 999 WHERE id = ${f.invalid.id};
+      END`);
+    raw.close();
+
+    await expect(rollbackInlineProposalCleanup({ dbPath: f.dbPath, manifestPath: plan.manifestPath }))
+      .rejects.toThrow(/parity|drift|review|guard|blocked/i);
+
+    expect(existsSync(join(f.artifactDir, 'rollback-receipt.json'))).toBe(false);
+    const check = new DatabaseSync(f.dbPath, { readOnly: true });
+    expect(getBead(check, f.invalid.id)!.bead.status).toBe('cancelled');
+    expect(getBead(check, f.invalid.id)!.bead.completed_at).toBeNull();
+    expect(check.prepare(`SELECT COUNT(*) AS count FROM bead_events
+      WHERE bead_id = ? AND actor = 'inline-proposal-cleanup'`).get(f.invalid.id)).toEqual({ count: 1 });
     check.close();
   });
 
@@ -344,6 +533,49 @@ describe('inline proposal cleanup protocol', () => {
     const check = new DatabaseSync(f.dbPath, { readOnly: true });
     expect(getBead(check, f.invalid.id)!.bead.status).toBe('proposed');
     check.close();
+  });
+
+  it.each([
+    ['top-level extra key', (manifest: Record<string, unknown>) => { manifest.unexpected = true; }],
+    ['createdAt type', (manifest: Record<string, unknown>) => { manifest.createdAt = 'now'; }],
+    ['database type', (manifest: Record<string, unknown>) => { manifest.database = []; }],
+    ['database extra key', (manifest: Record<string, unknown>) => {
+      (manifest.database as Record<string, unknown>).unexpected = true;
+    }],
+    ['schema version attestation', (manifest: Record<string, unknown>) => {
+      (manifest.database as Record<string, unknown>).schemaVersion = CURRENT_SCHEMA_MIGRATION + 1;
+    }],
+    ['companion consistency', (manifest: Record<string, unknown>) => {
+      const database = manifest.database as Record<string, unknown>;
+      (database.wal as Record<string, unknown>).sha256 = '0'.repeat(64);
+    }],
+    ['companion extra key', (manifest: Record<string, unknown>) => {
+      const database = manifest.database as Record<string, unknown>;
+      (database.shm as Record<string, unknown>).unexpected = true;
+    }],
+    ['retainedValid type', (manifest: Record<string, unknown>) => {
+      (manifest.retainedValid as Record<string, unknown>).admittedInline = 'one';
+    }],
+    ['retainedValid extra key', (manifest: Record<string, unknown>) => {
+      (manifest.retainedValid as Record<string, unknown>).unexpected = 0;
+    }],
+    ['retainedValid overdue relationship', (manifest: Record<string, unknown>) => {
+      const retained = manifest.retainedValid as Record<string, unknown>;
+      retained.admittedInlineOverdue = Number(retained.admittedInline) + 1;
+    }],
+  ] as const)('rejects malformed v2 %s before database actions', async (_label, mutate) => {
+    const f = fixture();
+    const plan = await planInlineProposalCleanup({ dbPath: f.dbPath, artifactDir: f.artifactDir });
+    const manifest = readManifest(plan.manifestPath) as unknown as Record<string, unknown>;
+    mutate(manifest);
+    resignManifest(manifest);
+    writeFileSync(plan.manifestPath, `${JSON.stringify(manifest)}\n`, { mode: 0o600 });
+
+    await expect(applyInlineProposalCleanup({
+      dbPath: join(f.root, 'missing.db'),
+      manifestPath: plan.manifestPath,
+    })).rejects.toThrow(/manifest.*(?:shape|format)/i);
+    expect(existsSync(join(f.artifactDir, 'pre-apply-backup.db'))).toBe(false);
   });
 
   it('fails on stale fingerprints and under-lock row/body drift without partial cleanup', async () => {

@@ -654,6 +654,21 @@ describe('beads core', () => {
       }
     });
 
+    it('runs post-mutation attestation before commit and rolls back when it rejects', () => {
+      const bead = proposed('post-mutation-attestation', 5017);
+      const eventCountBefore = db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get();
+
+      expect(() => reject([batchCandidate(bead)], {
+        assertMutatedState: () => {
+          expect(getBead(db.raw, bead.id)!.bead.status).toBe('cancelled');
+          throw new Error('post-mutation attestation rejected');
+        },
+      })).toThrow(/post-mutation attestation rejected/i);
+
+      expect(getBead(db.raw, bead.id)!.bead.status).toBe('proposed');
+      expect(db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get()).toEqual(eventCountBefore);
+    });
+
     it.each([
       ['empty candidates', []],
       ['duplicate IDs', null],

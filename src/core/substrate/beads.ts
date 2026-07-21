@@ -417,6 +417,8 @@ export interface RejectProposalsBatchArgs {
   audit: ProposalBatchAudit;
   /** Called once, in candidate order, after built-in validation and before the first write. */
   assertExpectedRows?: (rows: readonly Readonly<BeadRow>[]) => void;
+  /** Called after all writes and built-in parity checks, before the transaction commits. */
+  assertMutatedState?: (result: Readonly<RejectProposalsBatchResult>) => void;
 }
 
 export interface RejectProposalsBatchResult {
@@ -492,6 +494,7 @@ function assertRejectProposalBatchArgs(args: unknown): asserts args is RejectPro
       typeof input.at !== 'number' || !Number.isSafeInteger(input.at) || input.at < 0
     ))
     || (input.assertExpectedRows !== undefined && typeof input.assertExpectedRows !== 'function')
+    || (input.assertMutatedState !== undefined && typeof input.assertMutatedState !== 'function')
   ) {
     throw new ProposalBatchInvariantError('invalid_request');
   }
@@ -650,6 +653,7 @@ export function rejectProposalsBatch(
   const at = args.at;
   const audit = { ...args.audit };
   const assertExpectedRows = args.assertExpectedRows;
+  const assertMutatedState = args.assertMutatedState;
   return withImmediateTransaction(db, () => {
     const batchAt = at ?? nowUnixSec();
     const selectProposal = db.prepare('SELECT * FROM beads WHERE id = ?');
@@ -709,7 +713,9 @@ export function rejectProposalsBatch(
     if (eventCount !== rows.length) {
       throw new ProposalBatchDriftError('event_count_mismatch');
     }
-    return { affectedCount: rows.length, eventCount };
+    const result = Object.freeze({ affectedCount: rows.length, eventCount });
+    assertMutatedState?.(result);
+    return result;
   });
 }
 
