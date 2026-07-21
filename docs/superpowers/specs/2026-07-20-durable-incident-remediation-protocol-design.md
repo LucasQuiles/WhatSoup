@@ -53,6 +53,8 @@ The dispatcher already has durable incident state, duplicate suppression, transi
 
 The live channel continues to show this pattern: a release-drift source accumulates raw-trip counts while remaining unresolved, and a separate stale heartbeat remains open. A short provider fallback incident did emit a matching clear and recovery notice, demonstrating that real transition data is available when producers supply it.
 
+A later monitored incident exposed a separate causal-evidence defect. A provider was forcibly terminated after a tool operation exceeded the stalled-operation watchdog, which correctly made final-turn token usage unavailable. The resulting heal report carried the structural `SIGKILL` fact but foregrounded an older recurring stderr warning instead of the watchdog termination reason. The same agent lacked its expected control peer, so the report was recorded as `attempt_1` even though direct delivery was never attempted. The provider respawned, but neither respawn nor a fallback alert proves the control-path fault recovered.
+
 **H2:** Repeated unresolved evidence is being interpreted as instability because flap detection counts observations rather than accepted open/close transitions.
 
 **Falsifier:** The raw events contain verified accepted clears between the counted alerts.
@@ -60,6 +62,10 @@ The live channel continues to show this pattern: a release-drift source accumula
 **H3:** Free-form recovery requirements permit false closure and make cross-source recovery ambiguous.
 
 **Falsifier:** Every accepted clear in the captured lifecycle corpus already has a newer authoritative proof that satisfies the stored requirement.
+
+**H3b:** Untyped termination and delivery outcomes can misattribute root cause and overstate remediation progress.
+
+**Falsifier:** Forced-termination events already retain the watchdog reason through the crash callback, and an unavailable control peer is already stored as blocked rather than attempted.
 
 ### 3.3 Cleanup evidence
 
@@ -399,6 +405,7 @@ The loop itself has health evidence: last successful authoritative read, last qu
 - stronger root opening before or after a symptom;
 - transient recovery before promotion and fault persistence after promotion;
 - insufficient clear proof, wrong source, stale proof, missing referenced receipt, and valid stronger proof;
+- forced watchdog termination with unrelated stderr, missing control peer, blocked delivery, later provider respawn, and control-path restoration;
 - waiting for physical action, monitoring silence, and liveness restoration;
 - state write failure, queue rename failure, disk full, corrupt JSON, permission failure, and concurrent dispatcher invocation.
 
@@ -407,6 +414,7 @@ The loop itself has health evidence: last successful authoritative read, last qu
 - stale plans, changed rows, partial backups, missing WAL/SHM, database busy, constraint failure, disk exhaustion, and process crash;
 - repeated apply, repeated rollback, rollback after later human edits, and mixed valid/invalid candidate sets;
 - successful action without recovery, failed action with later spontaneous recovery, and lease expiry during an attempt.
+- delivery never attempted versus attempted-and-failed, cause code versus collateral diagnostics, and respawn without control-path recovery.
 
 ## 13. Test and Stress Strategy
 
@@ -520,6 +528,8 @@ The implementation is ready for a live execution plan only when all are true:
 - one source message cannot create more than one inline proposal under retry or concurrency;
 - the known false-candidate structures produce zero proposals and reviewed valid structures remain admitted;
 - mismatched, stale, weak, malformed, or unauthorized clears cannot close an incident;
+- forced terminations preserve a typed termination cause separately from bounded stderr context;
+- an unavailable control peer is recorded as blocked, never as an attempted delivery, and clears only after verified wiring restoration;
 - repeated open evidence does not increment verified reopen counts or create a flap storm;
 - real accepted close→reopen transitions still trigger flap detection and escalation;
 - legacy events are either safely adapted or quarantined with an explicit reason;

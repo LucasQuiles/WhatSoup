@@ -218,7 +218,52 @@ Expected: PASS; user-facing fields say `verified_reopens`, not `trips`.
 
 Commit: `fix(alerts): detect flaps from verified reopens`
 
-### Task 6: Add the bounded remediation ledger
+### Task 6: Preserve termination cause and control-delivery truth
+
+**Files:**
+- Modify: `src/runtimes/agent/session.ts`
+- Modify: `src/runtimes/agent/runtime.ts`
+- Modify: `src/core/heal.ts`
+- Modify: `tests/runtimes/agent/session.test.ts`
+- Modify: `tests/runtimes/agent/runtime.test.ts`
+- Modify: `tests/core/heal.test.ts`
+- Modify: `tests/core/health.test.ts`
+
+**Interfaces:**
+- Extends crash information with a bounded `terminationCause` and optional operation kind/identifier.
+- Adds a truthful heal delivery state for `blocked_no_control_peer` rather than claiming `attempt_1`.
+
+- [ ] **Step 1: Write failing causal-evidence tests**
+
+Simulate a stalled tool watchdog kill while stderr contains an unrelated warning. Assert the crash/heal evidence identifies `stalled_operation` as the cause, retains stderr only as collateral diagnostics, excludes command text, and classifies missing final-turn usage as an inhibited consequence of the crash rather than a second root page.
+
+- [ ] **Step 2: Write failing delivery-state tests**
+
+Assert a missing `q` peer creates the report in `blocked_no_control_peer`, performs no direct send, records the durable fallback receipt separately, exposes the blocked state through health, and does not increment direct-attempt counters. A configured peer uses the existing attempt state. Later provider respawn alone must not resolve the control-path fault.
+
+- [ ] **Step 3: Prove the red state**
+
+Run: `bash scripts/run-with-pinned-npm.sh test -- tests/runtimes/agent/session.test.ts tests/runtimes/agent/runtime.test.ts tests/core/heal.test.ts tests/core/health.test.ts --pool=forks`
+
+Expected: FAIL because the stalled-operation reason is logged but not threaded through crash information, and missing-peer reports are currently stored as `attempt_1`.
+
+- [ ] **Step 4: Thread typed termination cause**
+
+Set a bounded pending forced-termination record before killing the provider, consume it once in the exit path, and pass it through every runtime crash callback into `HealReportData`. Keep cause codes and collateral stderr in separate fields. Clear stale pending cause state on provider progress, normal exit, and session replacement.
+
+- [ ] **Step 5: Make delivery state truthful and clearable**
+
+Choose report state only after evaluating control-peer availability. Persist `blocked_no_control_peer` with an owner-required remediation code and fallback event receipt. On verified configuration restoration, transition blocked reports through the existing send path or close the delivery-unavailable incident with a same-source wiring proof; failed sends remain attempted failures, not blocked configuration.
+
+- [ ] **Step 6: Verify and commit**
+
+Run focused crash, watchdog, heal, health, fallback, clear-proof, and redaction tests.
+
+Expected: PASS with causal and delivery state distinctions visible in receipts and no raw command content.
+
+Commit: `fix(heal): preserve causal delivery truth`
+
+### Task 7: Add the bounded remediation ledger
 
 **Files:**
 - Modify: `deploy/scripts/bot_errors_protocol.py`
@@ -255,7 +300,7 @@ Expected: PASS or a documented design-blocking falsifier; do not silently switch
 
 Commit: `feat(alerts): record bounded remediation attempts`
 
-### Task 7: Package, document, and verify the protocol
+### Task 8: Package, document, and verify the protocol
 
 **Files:**
 - Modify: `deploy/bot-errors-runtime-manifest.json`

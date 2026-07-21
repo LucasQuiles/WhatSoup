@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-07-21T02:04:49Z",
+  "generated_at": "2026-07-21T02:11:44Z",
   "repo": "WhatSoup",
-  "git_head": "5286d8d5add0c62e52c233aff59039a18238260f",
+  "git_head": "69f12142ad5d54cd28bae09fcba8b7a8fa20deb4",
   "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran — NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
   "total": 80,
   "schema_version": 5,
@@ -567,8 +567,8 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
-      "last_modified": "2026-07-21",
-      "size_bytes": 16253
+      "last_modified": "2026-07-20",
+      "size_bytes": 19192
     },
     {
       "path": "docs/superpowers/plans/2026-07-20-bot-errors-supervision-and-stress.md",
@@ -579,8 +579,8 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
-      "last_modified": "2026-07-21",
-      "size_bytes": 14473
+      "last_modified": "2026-07-20",
+      "size_bytes": 14552
     },
     {
       "path": "docs/superpowers/plans/2026-07-20-inline-proposal-admission-and-cleanup.md",
@@ -591,7 +591,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
-      "last_modified": "2026-07-21",
+      "last_modified": "2026-07-20",
       "size_bytes": 15906
     },
     {
@@ -892,7 +892,7 @@
       "canonical_parent": "docs/superpowers/specs",
       "supersedes_hint": null,
       "last_modified": "2026-07-20",
-      "size_bytes": 31325
+      "size_bytes": 32784
     },
     {
       "path": "docs/superpowers/specs/kill-session-transactional-cancellation/design.md",

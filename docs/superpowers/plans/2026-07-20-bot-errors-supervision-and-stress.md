@@ -116,7 +116,7 @@ Commit: `feat(ops): add authoritative incident thread cursor`
 
 - [ ] **Step 1: Write failing correlation tests**
 
-Use synthetic chat metadata, dispatcher delivery receipts, incident-state fixtures, and isolated queue directories. Cover repeated open alerts, real close/reopen, rejected clear, root inhibition, stale ledger, missing queue directory, corrupt state, physical action, owner-required action, queue backlog, and no-change cycles.
+Use synthetic chat metadata, dispatcher delivery receipts, incident-state fixtures, and isolated queue directories. Cover repeated open alerts, real close/reopen, rejected clear, root inhibition, stale ledger, missing queue directory, corrupt state, physical action, owner-required action, blocked control-peer delivery, provider respawn without control-path recovery, queue backlog, and no-change cycles.
 
 - [ ] **Step 2: Prove the red state**
 

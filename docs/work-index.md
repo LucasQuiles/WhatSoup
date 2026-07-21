@@ -158,9 +158,9 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-07-17-boundary-exit-parser-codeql-hardening.md` | plan | active | body-marker | boundary-exit-parser-codeql-hardening | 2026-07-17 |  |
 | `docs/superpowers/plans/2026-07-17-boundary-validator-ci-refactor.md` | plan | unknown | fallback | boundary-validator-ci-refactor | 2026-07-17 |  |
 | `docs/superpowers/plans/2026-07-17-macos-credential-durability.md` | plan | unknown | fallback | macos-credential-durability | 2026-07-17 |  |
-| `docs/superpowers/plans/2026-07-20-bot-errors-proof-lifecycle.md` | plan | pending | body-marker | bot-errors-proof-lifecycle | 2026-07-21 |  |
-| `docs/superpowers/plans/2026-07-20-bot-errors-supervision-and-stress.md` | plan | pending | body-marker | bot-errors-supervision-and-stress | 2026-07-21 |  |
-| `docs/superpowers/plans/2026-07-20-inline-proposal-admission-and-cleanup.md` | plan | pending | body-marker | inline-proposal-admission-and-cleanup | 2026-07-21 |  |
+| `docs/superpowers/plans/2026-07-20-bot-errors-proof-lifecycle.md` | plan | pending | body-marker | bot-errors-proof-lifecycle | 2026-07-20 |  |
+| `docs/superpowers/plans/2026-07-20-bot-errors-supervision-and-stress.md` | plan | pending | body-marker | bot-errors-supervision-and-stress | 2026-07-20 |  |
+| `docs/superpowers/plans/2026-07-20-inline-proposal-admission-and-cleanup.md` | plan | pending | body-marker | inline-proposal-admission-and-cleanup | 2026-07-20 |  |
 
 ### docs/superpowers/reviews  _(3 entries)_
 
@@ -216,4 +216,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-21T02:04:49Z from commit `5286d8d5add0c62e52c233aff59039a18238260f`
+- Generated at 2026-07-21T02:11:44Z from commit `69f12142ad5d54cd28bae09fcba8b7a8fa20deb4`
