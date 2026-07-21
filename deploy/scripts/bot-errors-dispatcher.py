@@ -30,6 +30,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from lib.bot_errors_daily_health import daily_health_host_from_payload
 from lib.bot_errors_redaction import redact_bot_errors_text
+from bot_errors_protocol import NormalizedObservation, QuarantineReason, normalize_observation
 
 
 BOT_ERRORS_JID = os.environ.get("BOT_ERRORS_JID", "").strip()
@@ -645,9 +646,13 @@ def append_dispatch_log(paths: dict[str, Path], payload: dict[str, Any]) -> None
     append_private_jsonl(log_path, record)
 
 
-def read_json(path: Path) -> dict[str, Any]:
+def read_json_value(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
-        data = json.load(handle)
+        return json.load(handle)
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    data = read_json_value(path)
     if not isinstance(data, dict):
         raise ValueError("event JSON root must be an object")
     return data
@@ -1473,6 +1478,19 @@ def is_verified_device_bond_lost_signal(event: dict[str, Any]) -> bool:
     )
 
 
+def normalize_dispatch_observation(event: Any) -> NormalizedObservation | QuarantineReason:
+    """Call the pure adapter with identity and existing dispatcher oracle results."""
+    if not isinstance(event, dict):
+        return normalize_observation(event, incident_key="", incident_source="")
+    return normalize_observation(
+        event,
+        incident_key=incident_key(event),
+        incident_source=incident_source(event),
+        is_logged_out_physical_signal=is_logged_out_physical_signal(event),
+        is_verified_device_bond_lost_signal=is_verified_device_bond_lost_signal(event),
+    )
+
+
 def is_physical_intervention_signal(event: dict[str, Any]) -> bool:
     return is_logged_out_physical_signal(event) or is_verified_device_bond_lost_signal(event)
 
@@ -2109,7 +2127,14 @@ def archive_path(directory: Path, original_name: str, status: str, event: dict[s
     return safe_child_path(directory, f"{original_name}.{int(time.time())}.{status}")
 
 
-def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) -> str | None:
+def should_suppress_send(
+    event: dict[str, Any],
+    incident_state: dict[str, Any],
+    normalized: NormalizedObservation | None = None,
+) -> str | None:
+    if normalized is None:
+        candidate = normalize_dispatch_observation(event)
+        normalized = candidate if isinstance(candidate, NormalizedObservation) else None
     if os.environ.get("BOT_ERRORS_SEND_DAILY_HEALTH_INFO", "").strip().lower() in {"1", "true", "yes", "on"}:
         return None
     source = str(event.get("source") or "")
@@ -2144,7 +2169,7 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
             event.setdefault("diagnostics", {})["maintenanceSilenced"] = True
             return f"maintenance_silenced: {maintenance_reason}"
     migrate_legacy_unqualified_incident(event, incident_state)
-    key = incident_key(event)
+    key = normalized.incident_key if normalized is not None else incident_key(event)
     current = int(time.time())
     open_incidents = incident_state.setdefault("openIncidents", {})
     # Pattern F — suppress individual members of an OPEN flap storm; the
@@ -2270,8 +2295,11 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
                 return None
             return f"clear has no open incident for {key}; stale recovery suppressed"
         opened = int_field(open_record, "eventCreatedAtEpoch")
-        created = event_created_epoch(event)
-        if opened > 0 and created is not None and created < opened - CLOCK_SKEW_TOLERANCE_SECONDS:
+        if (
+            opened > 0
+            and normalized is not None
+            and not normalized.clear_is_fresh_for(key, opened, CLOCK_SKEW_TOLERANCE_SECONDS)
+        ):
             return f"clear predates open incident for {key}; stale recovery suppressed"
     return None
 
@@ -4063,6 +4091,63 @@ def ready(path: Path, quarantine_dir: Path) -> bool:
     return next_attempt <= int(time.time())
 
 
+def quarantine_protocol_event(
+    path: Path,
+    paths: dict[str, Path],
+    event: Any,
+    reason: QuarantineReason,
+    source_name: str | None = None,
+) -> tuple[Path, bool]:
+    """Archive invalid protocol input with a bounded log receipt and no page."""
+    event_object = event if isinstance(event, dict) else {}
+    dest = archive_path(
+        paths["quarantine"],
+        source_name or original_name_from_processing(path),
+        "protocol_quarantine",
+        event_object,
+    )
+    os.replace(path, dest)
+    try:
+        dest.chmod(0o600)
+        if dest.stat().st_mode & 0o777 != 0o600:
+            raise OSError("protocol quarantine mode verification failed")
+    except OSError:
+        fsync_parent(dest)
+        append_dispatch_log(paths, {
+            "type": "protocol_quarantine_inconclusive",
+            "eventId": redacted_state_text(event_object.get("id"), 128),
+            "path": str(dest),
+            "reason": "permission_hardening_failed",
+            "receipt": "protocol:permission_hardening_failed",
+        })
+        return dest, False
+    fsync_parent(dest)
+    append_dispatch_log(paths, {
+        "type": "protocol_quarantine",
+        "eventId": redacted_state_text(event_object.get("id"), 128),
+        "path": str(dest),
+        "reason": reason.code.value,
+        "receipt": reason.receipt,
+    })
+    return dest, True
+
+
+def quarantine_invalid_protocol_events(paths: dict[str, Path]) -> int:
+    """Normalize raw outbox input before pre-dispatch mutation passes."""
+    quarantined = 0
+    for path in sorted(paths["outbox"].glob("*.json")):
+        try:
+            event = read_json_value(path)
+        except Exception:
+            continue
+        result = normalize_dispatch_observation(event)
+        if not isinstance(result, QuarantineReason):
+            continue
+        quarantine_protocol_event(path, paths, event, result, source_name=path.name)
+        quarantined += 1
+    return quarantined
+
+
 def quarantine_poison(path: Path, quarantine_dir: Path, reason: str) -> Path:
     ensure_private_dir(quarantine_dir)
     dest = quarantine_dir / f"{path.name}.{int(time.time())}.{os.getpid()}.poison"
@@ -4370,10 +4455,21 @@ def record_state(paths: dict[str, Path], **updates: Any) -> None:
 def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
     claimed = claim(path, paths["processing"])
     try:
-        event = read_json(claimed)
+        event = read_json_value(claimed)
     except Exception as exc:
         quarantine_poison(claimed, paths["quarantine"], f"invalid JSON after claim: {exc}")
         return False, "poison"
+
+    normalized = normalize_dispatch_observation(event)
+    if isinstance(normalized, QuarantineReason):
+        _, hardened = quarantine_protocol_event(
+            claimed, paths, event, normalized, source_name=path.name
+        )
+        if not hardened:
+            return False, "protocol_quarantine_inconclusive:permission_hardening_failed"
+        return False, f"protocol_quarantine:{normalized.code.value}"
+
+    assert isinstance(event, dict)
 
     # --- Test-leak defense-in-depth (B2) ---
     # Drop test-fixture events BEFORE any delivery, incident-state load, or
@@ -4414,7 +4510,7 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
             diagnostics = event.setdefault("diagnostics", {})
             if isinstance(diagnostics, dict):
                 diagnostics["sourceSpecificRecoveredIncidents"] = recovered
-    suppress_reason = should_suppress_send(event, incident_state)
+    suppress_reason = should_suppress_send(event, incident_state, normalized)
     if suppress_reason:
         event = mark_suppressed(event, suppress_reason)
         atomic_write_json(claimed, event)
@@ -4542,6 +4638,7 @@ def run_once(max_events: int) -> dict[str, Any]:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         writefail_recovered = recover_writefail_breadcrumbs(paths)
         reclaimed = reclaim_processing(paths)
+        quarantine_invalid_protocol_events(paths)
         test_provenance_suppressed, test_provenance_meta_alerted = suppress_test_provenance_events(paths)
         recovery_deduped = suppress_ready_recovery_duplicates(paths)
         # Pattern F (§10 C1): count flap trips on raw input BEFORE storm-collapse
