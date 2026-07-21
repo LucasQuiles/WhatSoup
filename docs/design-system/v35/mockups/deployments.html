@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SOUP — Deployments (Direction A: Command Deck)</title>
+<style>
+:root, [data-theme="dark"] {
+  --base:#1E1A15; --raised:#27221C; --overlay:#322D24; --inset:#171410;
+  --t1:#F1ECDF; --t2:#CAC1AF; --t3:#9A907E;
+  --hair:#383024; --hair-2:#473B2C; --hair-3:#5A4C39;
+  --accent:#6BA6FF; --accent-fg:#0A0E14;
+  --ok:#5BD97B; --warn:#F5B54A; --crit:#F4736F;
+  --m-passive:#3BD6B0; --m-chat:#3FB8DC; --m-agent:#A78BFA;
+  --shadow-lift:0 1px 2px rgb(0 0 0/.30), 0 8px 24px rgb(0 0 0/.28);
+}
+[data-theme="light"] {
+  --base:#FAF6EE; --raised:#FDFAF3; --overlay:#FFFFFF; --inset:#EDE5D5;
+  --t1:#221C12; --t2:#524833; --t3:#645849;
+  --hair:#DED4BF; --hair-2:#CDC2A9; --hair-3:#B4A78C;
+  --accent:#2E66E4; --accent-fg:#FFFFFF;
+  --ok:#15722F; --warn:#855900; --crit:#B42318;
+  --m-passive:#096853; --m-chat:#1F6E85; --m-agent:#6D4FA3;
+  --shadow-lift:0 1px 2px rgb(60 45 20/.10), 0 10px 28px rgb(60 45 20/.14);
+}
+* { margin:0; box-sizing:border-box; }
+body { background:var(--base); color:var(--t1); font:400 13.5px/1.5 "Hanken Grotesk",Arial,sans-serif; min-height:100vh; display:flex; flex-direction:column; }
+header { display:flex; align-items:center; gap:14px; padding:14px 22px 12px; border-bottom:1px solid var(--hair); }
+.nameplate { display:flex; align-items:center; gap:12px; }
+.nameplate .tick { width:8px; height:8px; border-radius:1px; background:var(--m-passive); }
+.nameplate .wm { font:800 17px/22px "Bricolage Grotesque",sans-serif; letter-spacing:-0.06em; }
+.nameplate .wm b { color:var(--accent); }
+h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
+.admin { display:flex; align-items:center; gap:7px; padding:5px 12px; border-radius:99px; background:color-mix(in srgb, var(--m-agent) 12%, transparent); color:var(--m-agent); font:600 11px/16px "IBM Plex Mono",monospace; }
+.spacer { flex:1; }
+.btn { display:inline-flex; align-items:center; gap:8px; padding:8px 14px; border-radius:6px; border:1px solid var(--hair-2); background:var(--raised); color:var(--t1); font:600 12.5px/16px inherit; cursor:pointer; transition:transform .16s ease-out, box-shadow .16s ease-out; }
+.btn:hover { transform:translateY(-1px); box-shadow:var(--shadow-lift); }
+.btn.primary { background:var(--accent); color:var(--accent-fg); border-color:transparent; }
+.btn.ghost { background:transparent; color:var(--t2); }
+.btn.sm { padding:5px 10px; font-size:11.5px; }
+.main { flex:1; padding:18px 22px; overflow:auto; }
+/* summary strip */
+.sum { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:16px; }
+.kpi { background:var(--raised); border:1px solid var(--hair); border-radius:8px; padding:12px 14px; transition:transform .18s, box-shadow .18s; }
+.kpi:hover { transform:translateY(-2px); box-shadow:var(--shadow-lift); }
+.kpi .k { font:500 10.5px/14px "IBM Plex Mono",monospace; letter-spacing:.1em; color:var(--t3); text-transform:uppercase; }
+.kpi .v { font:700 22px/28px "Bricolage Grotesque",sans-serif; margin-top:4px; }
+.kpi .d { font:500 11px/14px "IBM Plex Mono",monospace; color:var(--t3); margin-top:2px; }
+/* deployment cards */
+.dcard { background:var(--raised); border:1px solid var(--hair); border-radius:12px; margin-bottom:14px; transition:transform .16s ease-out, box-shadow .16s ease-out; }
+.dcard:hover { transform:translateY(-2px); box-shadow:var(--shadow-lift); }
+.dhead { display:flex; align-items:center; gap:14px; padding:14px 18px; }
+.dicon { width:38px; height:38px; border-radius:10px; background:var(--inset); border:1px solid var(--hair); display:flex; align-items:center; justify-content:center; flex:none; }
+.dicon svg { width:18px; height:18px; fill:var(--t2); }
+.dhead .nm { font:700 16px/20px "Bricolage Grotesque",sans-serif; }
+.dhead .sub { font:400 11px/15px "IBM Plex Mono",monospace; color:var(--t3); margin-top:1px; }
+.st { display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:99px; font:600 10.5px/14px "IBM Plex Mono",monospace; }
+.st.ok { background:color-mix(in srgb, var(--ok) 12%, transparent); color:var(--ok); }
+.st.warn { background:color-mix(in srgb, var(--warn) 12%, transparent); color:var(--warn); }
+.st.crit { background:color-mix(in srgb, var(--crit) 12%, transparent); color:var(--crit); }
+.ver { font:500 10.5px/14px "IBM Plex Mono",monospace; color:var(--t3); }
+.ver .up { color:var(--accent); cursor:pointer; font-weight:600; }
+.dhead .acts { margin-left:auto; display:flex; gap:6px; }
+.dbody { display:grid; grid-template-columns:repeat(4,1fr); border-top:1px solid var(--hair); }
+.dcell { padding:12px 18px; border-right:1px solid var(--hair); }
+.dcell:last-child { border-right:none; }
+.dcell .k { font:500 10px/14px "IBM Plex Mono",monospace; letter-spacing:.08em; color:var(--t3); text-transform:uppercase; }
+.dcell .v { font:700 16px/22px "Bricolage Grotesque",sans-serif; margin-top:3px; }
+.dcell .v .sub { font:400 10.5px/14px "IBM Plex Mono",monospace; color:var(--t3); }
+.mini { display:flex; gap:3px; margin-top:6px; }
+.mini span { font:500 10px/14px "IBM Plex Mono",monospace; color:var(--t2); background:var(--inset); border:1px solid var(--hair); border-radius:5px; padding:2px 7px; }
+.mini span.agt { color:var(--m-agent); }
+.mini span.warn { color:var(--warn); border-color:color-mix(in srgb, var(--warn) 30%, transparent); }
+.hub { display:flex; align-items:center; gap:10px; padding:10px 18px; border-top:1px solid var(--hair); font-size:12px; color:var(--t2); }
+.hub .st2 { width:6px; height:6px; border-radius:50%; background:var(--ok); }
+.hub .pull { margin-left:auto; font:600 11px/14px "IBM Plex Mono",monospace; color:var(--accent); cursor:pointer; }
+/* pair card */
+.pair { border:1.5px dashed var(--hair-3); background:transparent; }
+.pair .dhead { justify-content:center; flex-direction:column; text-align:center; padding:28px; gap:10px; }
+.pair .pi { color:var(--t3); font-size:13px; max-width:46ch; }
+.code { font:700 18px/24px "IBM Plex Mono",monospace; letter-spacing:.3em; color:var(--accent); background:var(--inset); border:1px solid var(--hair); border-radius:8px; padding:8px 18px; }
+@media (max-width:1000px){ .dbody{grid-template-columns:repeat(2,1fr)} .sum{grid-template-columns:repeat(2,1fr)} }
+</style>
+</head>
+<body>
+<header>
+  <div class="nameplate"><span class="tick"></span><span class="wm">SO<b>U</b>P</span></div>
+  <h1>Deployments</h1>
+  <span class="admin">admin lane</span>
+  <div class="spacer"></div>
+  <button class="btn ghost theme-toggle" onclick="document.documentElement.dataset.theme=document.documentElement.dataset.theme==='dark'?'light':'dark'"><svg width="14" height="14" viewBox="0 0 16 16" style="vertical-align:-2px"><circle cx="8" cy="8" r="3.2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6 13 13M13 3l-1.4 1.4M4.4 11.6 3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg> theme</button>
+  <button class="btn primary">＋ Pair deployment</button>
+</header>
+<main class="main">
+  <section class="sum">
+    <div class="kpi"><div class="k">Deployments</div><div class="v">3</div><div class="d">2 healthy · 1 degraded</div></div>
+    <div class="kpi"><div class="k">Total lines</div><div class="v">19</div><div class="d">across 6 channels</div></div>
+    <div class="kpi"><div class="k">Total agents</div><div class="v">12</div><div class="d">8 live · 4 paused</div></div>
+    <div class="kpi"><div class="k">Shared skills</div><div class="v">84</div><div class="d">org hub synced 6m ago</div></div>
+  </section>
+
+  <div class="dcard">
+    <div class="dhead">
+      <span class="dicon"><svg viewBox="0 0 16 16"><path d="M2 3h12v4H2zM2 9h12v4H2z"/></svg></span>
+      <div><div class="nm">local <span style="color:var(--t3);font-weight:400">· this host</span></div><div class="sub">linux-systemd · 192.168.1.10 · primary</div></div>
+      <span class="st ok">healthy</span>
+      <span class="ver">v3.2.1</span>
+      <div class="acts"><button class="btn sm ghost">console</button><button class="btn sm ghost">logs</button></div>
+    </div>
+    <div class="dbody">
+      <div class="dcell"><div class="k">Lines</div><div class="v">11 <span class="sub">/ 14</span></div><div class="mini"><span>wa ×8</span><span>signal ×2</span><span>imsg ×1</span></div></div>
+      <div class="dcell"><div class="k">Agents</div><div class="v">7</div><div class="mini"><span class="agt">quinn</span><span class="agt">lumen</span><span class="agt">+5</span></div></div>
+      <div class="dcell"><div class="k">Load</div><div class="v">0.42 <span class="sub">· 6.1GB / 16GB</span></div><div class="mini"><span>cpu ok</span><span>mem ok</span></div></div>
+      <div class="dcell"><div class="k">Uptime</div><div class="v">21d <span class="sub">· last restart 6/30</span></div><div class="mini"><span>systemd</span></div></div>
+    </div>
+    <div class="hub"><span class="st2"></span> org skills hub — synced 6m ago · 84 skills shared<span class="pull">pull updates ⇓</span></div>
+  </div>
+
+  <div class="dcard">
+    <div class="dhead">
+      <span class="dicon"><svg viewBox="0 0 16 16"><path d="M3 2h10v12H3zM6 5h4M6 8h4M6 11h2"/></svg></span>
+      <div><div class="nm">nest-2 <span style="color:var(--t3);font-weight:400">· container</span></div><div class="sub">docker · 192.168.1.14:3100 · paired 2026-07-18</div></div>
+      <span class="st warn">degraded</span>
+      <span class="ver">v3.1.9 → <span class="up">update to 3.2.1</span></span>
+      <div class="acts"><button class="btn sm ghost">console</button><button class="btn sm ghost">logs</button></div>
+    </div>
+    <div class="dbody">
+      <div class="dcell"><div class="k">Lines</div><div class="v">4 <span class="sub">/ 5</span></div><div class="mini"><span>wa ×3</span><span>discord ×1</span></div></div>
+      <div class="dcell"><div class="k">Agents</div><div class="v">3</div><div class="mini"><span class="agt">forge</span><span class="agt">+2</span></div></div>
+      <div class="dcell"><div class="k">Issue</div><div class="v" style="color:var(--warn)">1 line</div><div class="mini"><span class="warn">builds: reconnect loop</span></div></div>
+      <div class="dcell"><div class="k">Uptime</div><div class="v">3d <span class="sub">· crash 2h ago</span></div><div class="mini"><span>docker</span></div></div>
+    </div>
+    <div class="hub"><span class="st2" style="background:var(--warn)"></span> org skills hub — sync stalled 2h · last OK 14:11<span class="pull">retry ⇓</span></div>
+  </div>
+
+  <div class="dcard">
+    <div class="dhead">
+      <span class="dicon"><svg viewBox="0 0 16 16"><path d="M2 5a6 6 0 0 1 12 0v6a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3z"/></svg></span>
+      <div><div class="nm">field-pi <span style="color:var(--t3);font-weight:400">· remote</span></div><div class="sub">linux (arm64) · tailnet · paired 2026-07-02</div></div>
+      <span class="st ok">healthy</span>
+      <span class="ver">v3.2.1</span>
+      <div class="acts"><button class="btn sm ghost">console</button><button class="btn sm ghost">logs</button></div>
+    </div>
+    <div class="dbody">
+      <div class="dcell"><div class="k">Lines</div><div class="v">2</div><div class="mini"><span>telegram ×1</span><span>email ×1</span></div></div>
+      <div class="dcell"><div class="k">Agents</div><div class="v">2</div><div class="mini"><span class="agt">sable</span><span class="agt">+1</span></div></div>
+      <div class="dcell"><div class="k">Latency</div><div class="v">86ms <span class="sub">· tailnet</span></div><div class="mini"><span>ok</span></div></div>
+      <div class="dcell"><div class="k">Uptime</div><div class="v">19d</div><div class="mini"><span>systemd</span></div></div>
+    </div>
+    <div class="hub"><span class="st2"></span> org skills hub — synced 6m ago<span class="pull">pull updates ⇓</span></div>
+  </div>
+
+  <div class="dcard pair">
+    <div class="dhead">
+      <div class="nm">Pair a new deployment</div>
+      <p class="pi">Run <span style="font-family:'IBM Plex Mono',monospace;color:var(--t2)">whatsoup pair</span> on the remote host and enter its code, or scan from the console there. The new deployment inherits the org skills hub and admin identity.</p>
+      <span class="code">K Q 7 4 · 2 9 F D</span>
+      <div class="acts"><button class="btn">Enter code</button><button class="btn ghost">Show QR</button></div>
+    </div>
+  </div>
+</main>
+</body>
+</html>

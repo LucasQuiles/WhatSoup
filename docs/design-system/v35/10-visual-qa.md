@@ -45,7 +45,29 @@ Residual notes rejected after verification: "button text too light" (7.85 AAA me
 "ghost too subtle" (5.49 AA measured, intentional ghost pattern), "U hue wrong" (it is the
 locked accent — model hex perception is approximate).
 
+## Round 2 — codex (gpt-5.6) cross-validation
+
+A second independent reviewer (codex CLI, high reasoning) audited the v2 set and caught 6 real
+defects the first pass missed:
+
+| # | Finding | Fix | Re-review |
+|---|---|---|---|
+| C1 | Theme toggle rendered as tofu (`◐` not in font stack) — hatch + splash | inline SVG sun icon on all 10 files | FIXED |
+| C2 | Instance identifiers over-truncated (agents) | longer prefix+suffix mask + `title` attrs | FIXED |
+| C3 | Dream Lab decision timestamps nearly clipped | pill-inset timestamps | FIXED |
+| C4 | Skills Hub compat strips too small/low-contrast | 18px cdots, 9.5px codes, t2 labels | FIXED |
+| C5 | Settings page too narrow + truncated admin identity | 1080px measure, full identity string | FIXED |
+| C6 | Splash secondary CTA invisible after ghost demotion | hairline-bordered ghost, t2 ink | FIXED |
+| C7 | Agents instances: 4-of-9 shown, no overflow cue | "show all 9 instances ▾" control | FIXED |
+
+Final re-review verdict: **PASS — all prior issues visibly resolved.**
+
+## Final craft scores (codex, v4)
+
+fleet 8 · hatch 8 · agents 9 · skills-hub 8 · dream-lab 9 · inbox 7 (truncation inherent to
+list density, accepted) · deployments 8 · settings 9 · splash 9 — **mean 8.3, floor 7.**
+
 ## Verdict
 
-Direction A passes independent visual QA. No broken elements on any surface in either theme;
-craft scores 7–8 across the board after one fix cycle.
+Direction A passes two independent visual QA loops (qwen2.5vl:72b + codex gpt-5.6) with zero
+remaining broken elements on any surface in either theme.
