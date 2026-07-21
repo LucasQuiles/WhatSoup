@@ -217,12 +217,21 @@ function normalizeEnvelope(env: RpcEnvelope, ownNumber: string): InboundSignal |
 // ---------------------------------------------------------------------------
 
 export class SignalCliPort implements SignalPort {
+  // Explicit fields instead of constructor parameter properties: node
+  // strip-types (strip-only mode) rejects parameter properties
+  // (tests/strip-types-compat.test.ts).
+  private readonly config: SignalConfig;
+  private readonly connectionFactory: SignalRpcConnectionFactory;
+
   private connection: SignalRpcConnection | null = null;
 
   constructor(
-    private readonly config: SignalConfig,
-    private readonly connectionFactory: SignalRpcConnectionFactory = createSocketConnection,
-  ) {}
+    config: SignalConfig,
+    connectionFactory: SignalRpcConnectionFactory = createSocketConnection,
+  ) {
+    this.config = config;
+    this.connectionFactory = connectionFactory;
+  }
 
   /** Lazily open the RPC connection on first use. */
   private conn(): SignalRpcConnection {
