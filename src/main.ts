@@ -296,7 +296,10 @@ startModelCurrencyMonitor(config.botName, {
 const instanceType = (instanceConfig?.type as string | undefined) ?? 'chat';
 
 // 4. Connection
-const connectionManager: RuntimeConnection = createConnection(config);
+const connectionManager: RuntimeConnection = createConnection({
+  ...config,
+  instanceName: config.botName,
+});
 // #1783 — wire the send-seam provider-error banner classifier into the Baileys
 // outbound governor. main.ts is the composition root (may import runtimes);
 // transport receives the classifier via DI so it need not import runtimes.

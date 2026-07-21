@@ -23,6 +23,8 @@ import type { IdentityStore, GuardMode } from '../../core/outbound-identity/type
 import { applyOutboundIdentityGuard } from '../../core/outbound-identity/guard.ts';
 import type { WhatsAppSocket, ConnectionStateSnapshot } from '../connection.ts';
 import { emptyConnectionStateSnapshot } from '../twilio/connection-snapshot.ts';
+import { signalConnectionStateSnapshot } from './connection-snapshot.ts';
+import type { SignalConfig } from './types.ts';
 import type { Subscription } from '../contract/subscription.ts';
 import { toSignalJid, fromSignalJid } from '../../core/jid-constants.ts';
 import type { SignalAdapter } from './adapter.ts';
@@ -114,10 +116,18 @@ export class SignalConnection extends EventEmitter implements RuntimeConnection 
     this.identityMode = mode;
   }
 
-  constructor(adapter: SignalAdapter, port?: SignalCliPort) {
+  /** Resolved channel instance name (for health snapshots). */
+  private readonly instanceName: string;
+
+  /** Signal config block (for health snapshots). */
+  private readonly signalConfig: SignalConfig | null;
+
+  constructor(adapter: SignalAdapter, port?: SignalCliPort, signalConfig?: SignalConfig, instanceName?: string) {
     super();
     this.adapter = adapter;
     this.port = port ?? null;
+    this.signalConfig = signalConfig ?? null;
+    this.instanceName = instanceName ?? 'signal';
   }
 
   // ── Lifecycle ────────────────────────────────────────────────────────────
@@ -247,6 +257,22 @@ export class SignalConnection extends EventEmitter implements RuntimeConnection 
   getConnectionState(): ConnectionStateSnapshot {
     const health = this.adapter.state();
     const connected = health.state === 'connected';
+    // Use the Signal-specific factory when we have config; fall back to the
+    // generic empty snapshot only when constructed without config (legacy
+    // test paths that don't exercise health-snapshot fields).
+    if (this.signalConfig) {
+      return signalConnectionStateSnapshot({
+        instance: this.instanceName,
+        account: this.signalConfig.account,
+        phoneNumber: this.signalConfig.phoneNumber,
+        socketPath: this.signalConfig.socketPath,
+        tcpHost: this.signalConfig.tcpHost,
+        tcpPort: this.signalConfig.tcpPort,
+        connected,
+        stateChangedAt: health.since.toISOString(),
+        lastDisconnectReason: health.reasonCode ?? null,
+      });
+    }
     return emptyConnectionStateSnapshot({
       connected,
       stateChangedAt: health.since.toISOString(),

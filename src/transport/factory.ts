@@ -28,6 +28,8 @@ export type { RuntimeConnection };
 
 interface FactoryConfig {
   transport: TransportId;
+  /** Channel instance name (config.botName) — surfaced in health snapshots. */
+  instanceName?: string;
   twilioConfig?: TwilioSmsConfig;
   imessageConfig?: ImessageConfig;
   signalConfig?: SignalConfig;
@@ -110,7 +112,7 @@ export function createConnection(config: FactoryConfig): RuntimeConnection {
       }
       const port = new SignalCliPort(config.signalConfig);
       const adapter = new SignalAdapter(config.signalConfig, port);
-      return new SignalConnection(adapter, port);
+      return new SignalConnection(adapter, port, config.signalConfig, config.instanceName);
     }
 
     case 'imessage': {

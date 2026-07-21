@@ -167,6 +167,28 @@ timestamp-keyed dedupe set, so a re-delivered envelope never double-emits.
   loop; transient errors keep the loop alive and log via the bridge's
   error subscriber.
 
+### `health.json` snapshot fields
+
+`getConnectionState()` produces a Signal-specific `ConnectionStateSnapshot`
+via `signalConnectionStateSnapshot()` (see
+`src/transport/signal/connection-snapshot.ts`). Fields an operator should
+know:
+
+| Field | Value for Signal |
+|---|---|
+| `credentialLifecycle.environment.provider` | `"signal"` (not `"twilio-sms"`) |
+| `credentialLifecycle.environment.instance` | the channel instance name (`config.botName`) |
+| `credentialLifecycle.environment.lockPath` | daemon target — UNIX socket path or `host:port` |
+| `credentialLifecycle.environment.authDir` | `out_of_band_via_signal_cli` (or `signalCliDataDir` when supplied) |
+| `credentialLifecycle.currentAuthBond.status` | `"missing"` — credentials live with signal-cli, not in WhatSoup |
+| `credentialLifecycle.currentAuthBond.issues` | `["signal_credentials_managed_out_of_band_by_signal_cli"]` |
+| `credentialLifecycle.recentEvents` | synthesized `connect_start` + `connection_open` (when connected) or `connection_close` (when disconnected, with `reason`) |
+
+The raw phone number is NEVER emitted into the snapshot. Credential
+introspection requires an RPC round-trip to signal-cli; the snapshot does
+not perform one, so the auth-bond status is a static declaration, not a
+live probe.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
