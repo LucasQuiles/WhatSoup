@@ -1,7 +1,9 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { TextDecoder, types as utilTypes } from 'node:util';
 import {
   git,
   isDocumentationEmailFixture,
@@ -9,6 +11,23 @@ import {
   normalizeRepoPath,
   operationalReleaseHygieneFiles,
 } from './lib/guard-core.ts';
+import {
+  ExactGitInputError,
+  MAX_EXACT_ADDED_LINE_BUDGET_V1,
+  MAX_EXACT_TREE_ENTRY_PATH_COUNT,
+  readExactAddedLinesWithinBudget,
+  readExactBlobs,
+  readExactCommitMetadata,
+  readExactCommitRange,
+  readExactTreeEntries,
+  type ExactAddedLineBudgetAccountingV1,
+  type ExactAddedLineBudgetV1,
+  type ExactAddedLineV1,
+  type ExactChangeWithAddedLinesV1,
+  type ExactCommitMetadataV1,
+} from './lib/ci-control/git-input.ts';
+import { canonicalizeBoundaryRun } from './lib/verification/boundary-run/shared.ts';
+import { parseBoundaryJsonBytes } from './lib/verification/boundary-run/schema.ts';
 
 export { normalizeRepoPath } from './lib/guard-core.ts';
 
@@ -123,6 +142,15 @@ const privateTailnetIps = [
 ].map((parts) => parts.join('.'));
 
 const trackedSensitiveAllowlist = new Set(['.env.example', '.claude/settings.json']);
+const trackedSensitiveArtifactPatterns = [
+  /^\.env(?:\.|$)/,
+  /(^|\/)auth_info/,
+  /\.(?:db|db-wal|db-shm)$/,
+  /\.(?:pem|key)$/,
+  /^(?:\.codex|\.tmup-artifacts|artifacts)(?:\/|$)/,
+  /^instances\/[^/]+\/instance\.json$/,
+  /^(?:users|groups|\.sweep)\//,
+];
 
 // Reserved/fictional phone ranges that are safe as test fixtures and documentation:
 //   - North American 555-line numbers (NANP reserved-for-fiction, e.g. +1 415 555 0100)
@@ -488,19 +516,37 @@ function isPackageLockResolvedUrlLine(filePath: string, text: string): boolean {
     && /^\s*"resolved":\s*"https:\/\/registry\.npmjs\.org\//.test(text);
 }
 
+function isProductionCodePath(filePath: string): boolean {
+  return /^(?:src|scripts|deploy|console\/src)\//.test(filePath);
+}
+
+function isSourceConsoleCall(filePath: string, text: string): boolean {
+  return /^(?:src|console\/src)\//.test(filePath)
+    && !srcConsoleAllowedFiles.has(filePath)
+    && /\bconsole\.(?:debug|error|info|log|warn)\s*\(/.test(text);
+}
+
+function isProcessEnvInheritance(text: string): boolean {
+  return /(?:\benv\s*:\s*process\.env|\.{3}process\.env\b)/.test(text);
+}
+
+function isChildProcessShellTrue(text: string): boolean {
+  return /\bshell\s*:\s*true\b/.test(text);
+}
+
+function isDynamicCodeExecution(text: string): boolean {
+  return /\b(?:eval\s*\(|(?:new\s+)?Function\s*\()/.test(text);
+}
+
 export function scanAddedLines(lines: AddedLine[]): GuardIssue[] {
   const issues: GuardIssue[] = [];
 
   for (const line of lines) {
     const filePath = normalizeRepoPath(line.filePath);
-    const productionCodePath = /^(?:src|scripts|deploy|console\/src)\//.test(filePath);
+    const productionCodePath = isProductionCodePath(filePath);
 
     if (isFixtureFile(filePath)) continue;
-    if (
-      /^(?:src|console\/src)\//.test(filePath)
-      && !srcConsoleAllowedFiles.has(filePath)
-      && /\bconsole\.(?:debug|error|info|log|warn)\s*\(/.test(line.text)
-    ) {
+    if (isSourceConsoleCall(filePath, line.text)) {
       issues.push({
         code: 'src-console-call',
         message: 'Production source should use the structured logger instead of ad-hoc console calls.',
@@ -508,7 +554,7 @@ export function scanAddedLines(lines: AddedLine[]): GuardIssue[] {
         line: line.line,
       });
     }
-    if (productionCodePath && /(?:\benv\s*:\s*process\.env|\.{3}process\.env\b)/.test(line.text)) {
+    if (productionCodePath && isProcessEnvInheritance(line.text)) {
       issues.push({
         code: 'process-env-inheritance',
         message: 'Child processes must use an explicit allowlisted env instead of inheriting process.env.',
@@ -516,7 +562,7 @@ export function scanAddedLines(lines: AddedLine[]): GuardIssue[] {
         line: line.line,
       });
     }
-    if (productionCodePath && /\bshell\s*:\s*true\b/.test(line.text)) {
+    if (productionCodePath && isChildProcessShellTrue(line.text)) {
       issues.push({
         code: 'child-process-shell-true',
         message: 'Child process shell mode must not be introduced without an explicit reviewed exception.',
@@ -524,7 +570,7 @@ export function scanAddedLines(lines: AddedLine[]): GuardIssue[] {
         line: line.line,
       });
     }
-    if (productionCodePath && /\b(?:eval\s*\(|(?:new\s+)?Function\s*\()/.test(line.text)) {
+    if (productionCodePath && isDynamicCodeExecution(line.text)) {
       issues.push({
         code: 'dynamic-code-execution',
         message: 'Dynamic code execution must not be introduced in source, scripts, or deploy code.',
@@ -607,14 +653,8 @@ function trackedFiles(cwd: string, filePaths: readonly string[]): string[] {
 export function isTrackedSensitiveArtifact(filePath: string): boolean {
   const normalized = normalizeRepoPath(filePath);
   if (trackedSensitiveAllowlist.has(normalized)) return false;
-  if (/^\.env(?:\.|$)/.test(normalized)) return true;
-  if (/(^|\/)auth_info/.test(normalized)) return true;
-  if (/\.(?:db|db-wal|db-shm)$/.test(normalized)) return true;
-  if (/\.(?:pem|key)$/.test(normalized)) return true;
-  if (/^(?:\.codex|\.tmup-artifacts|artifacts)(?:\/|$)/.test(normalized)) return true;
+  if (trackedSensitiveArtifactPatterns.some((pattern) => pattern.test(normalized))) return true;
   if (normalized === '.mcp.json') return true;
-  if (/^instances\/[^/]+\/instance\.json$/.test(normalized)) return true;
-  if (/^(?:users|groups|\.sweep)\//.test(normalized)) return true;
   return false;
 }
 
@@ -1023,6 +1063,1149 @@ export function readCommitAuthors(cwd: string): CommitAuthor[] {
     cwd,
   );
   return parseCommitAuthorLog(log);
+}
+
+const REPO_HYGIENE_EXACT_RANGE_DETECTOR = 'repo-hygiene-guard';
+const REPO_HYGIENE_EXACT_RANGE_OWNER = 'repository-hygiene-decision-owner';
+const REPO_HYGIENE_EXACT_RANGE_VALIDITY_MS = 5 * 60 * 1000;
+const MAX_REPO_HYGIENE_EXACT_RANGE_FINDINGS = 4_096;
+const FULL_OID = /^[0-9a-f]{40}$/;
+const SHA256 = /^sha256:[0-9a-f]{64}$/;
+const UTF8_FATAL = new TextDecoder('utf-8', { fatal: true });
+const MODULE_PATH = fileURLToPath(import.meta.url);
+const GUARD_CORE_MODULE_PATH = fileURLToPath(new URL('./lib/guard-core.ts', import.meta.url));
+const REPO_HYGIENE_POLICY_PROJECTION_COVERAGE = Object.freeze([
+  'base-line-sets',
+  'child-process-shell-true',
+  'dynamic-code-execution',
+  'find-disallowed-match',
+  'fixture-file-routing',
+  'normalize-repo-path',
+  'package-lock-resolved-url-exception',
+  'pattern-allowlist-routing',
+  'process-env-inheritance',
+  'production-code-path-routing',
+  'scan-added-lines',
+  'scan-commit-authors',
+  'scan-commit-message',
+  'secret-history-subset',
+  'source-console-routing',
+  'suppression-comment-routing',
+  'suppression-rationale-expiry',
+  'tracked-sensitive-artifact-routing',
+] as const);
+const REPO_HYGIENE_EXACT_RANGE_LIMITATIONS = Object.freeze([
+  'aggregate-authorization-unavailable',
+  'changed-content-only',
+  'executor-platform-unavailable',
+  'finding-fingerprint-unavailable',
+  'precondition-receipt-unavailable',
+  'producer-authentication-unavailable',
+  'report-only',
+  'terminal-attempt-process-group-unavailable',
+] as const);
+
+export interface RepoHygieneExactRangeInputV1 {
+  baseOid: string;
+  remoteOid: string | null;
+  localOid: string;
+}
+
+export interface RepoHygieneExactRangeFindingV1 {
+  cause: string;
+  observationKind:
+    | 'net-added-line'
+    | 'net-sensitive-artifact'
+    | 'history-added-line'
+    | 'history-sensitive-artifact'
+    | 'commit-metadata';
+  commitOid: string;
+  parentOid: string | null;
+  path: string | null;
+  pathDisclosure: 'redacted' | 'not-applicable';
+  line: number | null;
+  blobOid: string | null;
+}
+
+export interface RepoHygieneExactRangeCommitBindingV1 {
+  oid: string;
+  parentOids: string[];
+  treeOid: string;
+  metadataSha256: `sha256:${string}`;
+}
+
+export interface RepoHygieneExactRangeReceiptV1 {
+  schemaVersion: 1;
+  detectorId: typeof REPO_HYGIENE_EXACT_RANGE_DETECTOR;
+  decisionOwner: typeof REPO_HYGIENE_EXACT_RANGE_OWNER;
+  authorization: 'report-only';
+  outcome: 'pass' | 'block';
+  exitCode: 0 | 1;
+  completeness: 'complete';
+  baseOid: string;
+  remoteOid: string | null;
+  rangeStartOid: string;
+  localOid: string;
+  toolDigest: `sha256:${string}`;
+  policyDigest: `sha256:${string}`;
+  commitBindings: RepoHygieneExactRangeCommitBindingV1[];
+  commitRangeDigest: `sha256:${string}`;
+  metadataDigest: `sha256:${string}`;
+  observedPathDisclosure: 'all-redacted';
+  observedPathDigest: `sha256:${string}`;
+  observedBlobOidDigest: `sha256:${string}`;
+  budget: ExactAddedLineBudgetAccountingV1;
+  claimedScope: {
+    content: 'net-range-all-rules';
+    history: 'per-parent-secret-and-sensitive-artifact';
+    metadata: 'all-ordered-outgoing-commits';
+  };
+  observedScope: {
+    commitCount: number;
+    parentEdgeCount: number;
+    changeCount: number;
+    observedPathCount: number;
+  };
+  nativeCauses: string[];
+  findings: RepoHygieneExactRangeFindingV1[];
+  limitations: string[];
+  createdAt: string;
+  validUntil: string;
+}
+
+export interface RepoHygieneExactRangeArtifactV1 {
+  payloadBytes: Uint8Array;
+  binding: {
+    schemaVersion: 1;
+    detectorId: typeof REPO_HYGIENE_EXACT_RANGE_DETECTOR;
+    payloadByteLength: number;
+    payloadSha256: `sha256:${string}`;
+  };
+}
+
+export interface RepoHygieneExactRangeExpectedV1 extends RepoHygieneExactRangeInputV1 {
+  currentToolDigest: string;
+  currentPolicyDigest: string;
+  expectedPayloadByteLength: number;
+  expectedPayloadSha256: string;
+}
+
+export type RepoHygieneExactRangeErrorCode =
+  | 'repo-hygiene.exact-range.input-malformed'
+  | 'repo-hygiene.exact-range.evidence-unavailable'
+  | 'repo-hygiene.exact-range.budget'
+  | 'repo-hygiene.exact-range.identity-mismatch'
+  | 'repo-hygiene.exact-range.tool-drift'
+  | 'repo-hygiene.exact-range.policy-drift'
+  | 'repo-hygiene.exact-range.receipt-invalid'
+  | 'repo-hygiene.exact-range.receipt-binding-mismatch'
+  | 'repo-hygiene.exact-range.receipt-stale'
+  | 'repo-hygiene.exact-range.tool-mismatch'
+  | 'repo-hygiene.exact-range.policy-mismatch';
+
+export type RepoHygieneExactRangeBuildResultV1 =
+  | { ok: true; artifact: RepoHygieneExactRangeArtifactV1 }
+  | { ok: false; error: { code: RepoHygieneExactRangeErrorCode } };
+
+export type RepoHygieneExactRangeValidationResultV1 =
+  | { ok: true; receipt: RepoHygieneExactRangeReceiptV1 }
+  | { ok: false; error: { code: RepoHygieneExactRangeErrorCode } };
+
+function exactRangeFailure(
+  code: RepoHygieneExactRangeErrorCode,
+): { ok: false; error: { code: RepoHygieneExactRangeErrorCode } } {
+  return { ok: false, error: { code } };
+}
+
+function strictRecord(value: unknown, expectedKeys: readonly string[]): Record<string, unknown> | null {
+  try {
+    if (
+      typeof value !== 'object'
+      || value === null
+      || Array.isArray(value)
+      || utilTypes.isProxy(value)
+      || Object.getPrototypeOf(value) !== Object.prototype
+    ) return null;
+    const keys = Reflect.ownKeys(value);
+    if (keys.some((key) => typeof key !== 'string') || keys.length !== expectedKeys.length) return null;
+    const sorted = [...keys].sort();
+    if (sorted.some((key, index) => key !== [...expectedKeys].sort()[index])) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    for (const key of expectedKeys) {
+      const descriptor = descriptors[key];
+      if (
+        descriptor === undefined
+        || !('value' in descriptor)
+        || descriptor.enumerable !== true
+      ) return null;
+    }
+    return value as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function validateExactRangeInput(value: unknown): RepoHygieneExactRangeInputV1 | null {
+  const record = strictRecord(value, ['baseOid', 'remoteOid', 'localOid']);
+  if (
+    record === null
+    || typeof record.baseOid !== 'string'
+    || !FULL_OID.test(record.baseOid)
+    || (record.remoteOid !== null && (typeof record.remoteOid !== 'string' || !FULL_OID.test(record.remoteOid)))
+    || typeof record.localOid !== 'string'
+    || !FULL_OID.test(record.localOid)
+  ) return null;
+  return {
+    baseOid: record.baseOid,
+    remoteOid: record.remoteOid as string | null,
+    localOid: record.localOid,
+  };
+}
+
+function sha256Bytes(bytes: Uint8Array): `sha256:${string}` {
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+}
+
+function sha256Canonical(value: unknown): `sha256:${string}` {
+  return sha256Bytes(Buffer.from(canonicalizeBoundaryRun(value), 'utf8'));
+}
+
+function readToolBytes(): Buffer {
+  return readFileSync(MODULE_PATH);
+}
+
+function repoHygienePolicyProjection(): unknown {
+  const project = (patterns: readonly GuardPattern[]) => patterns.map((pattern) => ({
+    code: pattern.code,
+    message: pattern.message,
+    source: pattern.regex.source,
+    flags: pattern.regex.flags,
+  }));
+  return {
+    schemaVersion: 1,
+    guardCoreDigest: sha256Bytes(readFileSync(GUARD_CORE_MODULE_PATH)),
+    addedLinePatterns: project(addedLinePatterns),
+    commitMessagePatterns: project(commitMessagePatterns),
+    disallowedCommitAuthorPatterns: project(disallowedCommitAuthorPatterns),
+    secretPatternCodes: [...secretPatternCodes].sort(),
+    fixtureFiles: [...fixtureFiles].sort(),
+    selfReferentialAllowlistFiles: [...selfReferentialAllowlistFiles].sort(),
+    selfReferentialAllowedCodes: [...selfReferentialAllowedCodes].sort(),
+    trackedSensitiveAllowlist: [...trackedSensitiveAllowlist].sort(),
+    trackedSensitiveArtifactPatterns: trackedSensitiveArtifactPatterns.map((pattern) => ({
+      source: pattern.source,
+      flags: pattern.flags,
+    })),
+    trackedSensitiveArtifactExactPaths: ['.mcp.json'],
+    allowedMatchPolicies: {
+      allowedEnvVarNameToken: { source: allowedEnvVarNameToken.source, flags: allowedEnvVarNameToken.flags },
+      allowedMessagingAddressRhs: { source: allowedMessagingAddressRhs.source, flags: allowedMessagingAddressRhs.flags },
+      allowedPhoneFixture: { source: allowedPhoneFixture.source, flags: allowedPhoneFixture.flags },
+      allowedTwilioSidFixture: { source: allowedTwilioSidFixture.source, flags: allowedTwilioSidFixture.flags },
+      allowedProviderKeyFixture: { source: allowedProviderKeyFixture.source, flags: allowedProviderKeyFixture.flags },
+      allowedSecretAssignmentValue: { source: allowedSecretAssignmentValue.source, flags: allowedSecretAssignmentValue.flags },
+      documentationEmailFixtureImplementation: isDocumentationEmailFixture.toString(),
+      operationalProtocolTokenImplementation: isOperationalProtocolToken.toString(),
+      operationalReleaseHygieneFiles: [...operationalReleaseHygieneFiles].sort(),
+    },
+    sourceConsoleAllowedFiles: [...srcConsoleAllowedFiles].sort(),
+    historyPolicy: {
+      patterns: [...secretPatternCodes].sort(),
+      baselineSuppression: 'range-start-same-path-byte-identical-crlf-line',
+      sensitiveArtifacts: true,
+    },
+    liveRouteCoverage: [...REPO_HYGIENE_POLICY_PROJECTION_COVERAGE],
+    liveRouteImplementations: {
+      baseLineSets: baseLineSets.toString(),
+      childProcessShellTrue: isChildProcessShellTrue.toString(),
+      dynamicCodeExecution: isDynamicCodeExecution.toString(),
+      findDisallowedMatch: findDisallowedMatch.toString(),
+      fixtureFileRouting: isFixtureFile.toString(),
+      normalizeRepoPath: normalizeRepoPath.toString(),
+      packageLockResolvedUrlException: isPackageLockResolvedUrlLine.toString(),
+      patternAllowlistRouting: isAllowedPatternMatch.toString(),
+      processEnvInheritance: isProcessEnvInheritance.toString(),
+      productionCodePathRouting: isProductionCodePath.toString(),
+      scanAddedLines: scanAddedLines.toString(),
+      scanCommitAuthors: scanCommitAuthors.toString(),
+      scanCommitMessage: scanCommitMessage.toString(),
+      secretHistorySubset: secretCauses.toString(),
+      sourceConsoleRouting: isSourceConsoleCall.toString(),
+      suppressionCommentRouting: isSuppressionComment.toString(),
+      suppressionRationaleExpiry: hasSuppressionRationaleAndExpiry.toString(),
+      trackedSensitiveArtifactRouting: isTrackedSensitiveArtifact.toString(),
+    },
+  };
+}
+
+export function canonicalRepoHygienePolicyProjection(): string {
+  return canonicalizeBoundaryRun(repoHygienePolicyProjection());
+}
+
+function policyDigest(): `sha256:${string}` {
+  return sha256Bytes(Buffer.from(canonicalRepoHygienePolicyProjection(), 'utf8'));
+}
+
+export function currentRepoHygieneToolDigest(): `sha256:${string}` {
+  return sha256Bytes(readToolBytes());
+}
+
+export function currentRepoHygienePolicyDigest(): `sha256:${string}` {
+  return policyDigest();
+}
+
+export function repoHygienePolicyProjectionCoverage(): string[] {
+  return [...REPO_HYGIENE_POLICY_PROJECTION_COVERAGE];
+}
+
+function mapExactRangeError(error: unknown): RepoHygieneExactRangeErrorCode {
+  if (error instanceof ExactGitInputError) {
+    if (error.code.endsWith('-budget') || error.code.endsWith('.budget')) {
+      return 'repo-hygiene.exact-range.budget';
+    }
+    if (error.code.endsWith('-identity-mismatch') || error.code.endsWith('.identity-mismatch')) {
+      return 'repo-hygiene.exact-range.identity-mismatch';
+    }
+    if (error.code.endsWith('-malformed') || error.code.endsWith('.input-malformed')) {
+      return 'repo-hygiene.exact-range.input-malformed';
+    }
+  }
+  return 'repo-hygiene.exact-range.evidence-unavailable';
+}
+
+function copyBudget(budget: ExactAddedLineBudgetV1): ExactAddedLineBudgetV1 {
+  return {
+    changeCount: budget.changeCount,
+    sourceBlobBytes: budget.sourceBlobBytes,
+    sourceLineCount: budget.sourceLineCount,
+    patchBytes: budget.patchBytes,
+    addedLineCount: budget.addedLineCount,
+    addedTextBytes: budget.addedTextBytes,
+  };
+}
+
+function budgetAccounting(
+  limit: ExactAddedLineBudgetV1,
+  remaining: ExactAddedLineBudgetV1,
+): ExactAddedLineBudgetAccountingV1 {
+  const consumed = {} as ExactAddedLineBudgetV1;
+  for (const key of Object.keys(limit) as Array<keyof ExactAddedLineBudgetV1>) {
+    consumed[key] = limit[key] - remaining[key];
+  }
+  return { limit: copyBudget(limit), consumed, remaining: copyBudget(remaining) };
+}
+
+interface HistoryLineCandidate {
+  cause: string;
+  commitOid: string;
+  parentOid: string;
+  path: string;
+  line: number;
+  blobOid: string;
+  text: string;
+}
+
+function secretCauses(line: ExactAddedLineV1): string[] {
+  if (isFixtureFile(normalizeRepoPath(line.path))) return [];
+  return secretPatterns
+    .filter((pattern) => findDisallowedMatch(normalizeRepoPath(line.path), pattern, line.text) !== null)
+    .map((pattern) => pattern.code);
+}
+
+function baseLineSets(
+  cwd: string,
+  rangeStartOid: string,
+  paths: readonly string[],
+): Map<string, Set<string>> {
+  if (paths.length > MAX_EXACT_TREE_ENTRY_PATH_COUNT) {
+    throw new ExactGitInputError('ci.input.tree-entry-budget', 'ci.input.tree-entry-budget');
+  }
+  const result = new Map<string, Set<string>>();
+  if (paths.length === 0) return result;
+  const entries = readExactTreeEntries(cwd, { candidateOid: rangeStartOid, paths });
+  const objectOids = entries.entries
+    .filter((entry) => entry.presence === 'present')
+    .map((entry) => {
+      if (entry.objectOid === null || entry.objectType === 'tree' || entry.objectType === 'gitlink') {
+        throw new ExactGitInputError('ci.input.tree-entry-malformed', 'ci.input.tree-entry-malformed');
+      }
+      return entry.objectOid;
+    });
+  const blobs = new Map(readExactBlobs(cwd, objectOids).map((blob) => [blob.oid, blob]));
+  for (const entry of entries.entries) {
+    if (entry.presence === 'absent') {
+      result.set(entry.path, new Set());
+      continue;
+    }
+    const blob = blobs.get(entry.objectOid!);
+    if (blob === undefined || blob.bytes.includes(0)) {
+      throw new ExactGitInputError('ci.input.blob-set-malformed', 'ci.input.blob-set-malformed');
+    }
+    let decoded: string;
+    try {
+      decoded = UTF8_FATAL.decode(blob.bytes);
+    } catch {
+      throw new ExactGitInputError('ci.input.added-lines.invalid-utf8', 'ci.input.added-lines.invalid-utf8');
+    }
+    const rows = decoded === '' ? [] : decoded.split('\n');
+    if (decoded.endsWith('\n')) rows.pop();
+    result.set(entry.path, new Set(rows.map((row, index) => (
+      (index < rows.length - 1 || decoded.endsWith('\n')) && row.endsWith('\r') ? row.slice(0, -1) : row
+    ))));
+  }
+  return result;
+}
+
+function compareFindings(
+  left: RepoHygieneExactRangeFindingV1,
+  right: RepoHygieneExactRangeFindingV1,
+): number {
+  return [left.cause, left.observationKind, left.commitOid, left.parentOid ?? '', left.path ?? '', String(left.line ?? 0)]
+    .join('\0')
+    .localeCompare([right.cause, right.observationKind, right.commitOid, right.parentOid ?? '', right.path ?? '', String(right.line ?? 0)].join('\0'));
+}
+
+function nativeCauseCodes(): ReadonlySet<string> {
+  return new Set([
+    ...addedLinePatterns.map((pattern) => pattern.code),
+    ...commitMessagePatterns.map((pattern) => pattern.code),
+    ...disallowedCommitAuthorPatterns.map((pattern) => pattern.code),
+    'src-console-call',
+    'process-env-inheritance',
+    'child-process-shell-true',
+    'dynamic-code-execution',
+    'unbounded-suppression',
+    'branch-sensitive-artifact',
+    'branch-history-sensitive-artifact',
+  ]);
+}
+
+function appendExactRangeFinding(
+  findings: RepoHygieneExactRangeFindingV1[],
+  projectedFindingKeys: Set<string>,
+  finding: RepoHygieneExactRangeFindingV1,
+): void {
+  const projectedKey = canonicalizeBoundaryRun(finding);
+  if (projectedFindingKeys.has(projectedKey)) return;
+  if (findings.length >= MAX_REPO_HYGIENE_EXACT_RANGE_FINDINGS) {
+    throw new ExactGitInputError('ci.input.added-lines.budget', 'ci.input.added-lines.budget');
+  }
+  projectedFindingKeys.add(projectedKey);
+  findings.push(finding);
+}
+
+function appendRawFindingKey(rawFindingKeys: Set<string>, key: string): boolean {
+  if (rawFindingKeys.has(key)) return false;
+  if (rawFindingKeys.size >= MAX_REPO_HYGIENE_EXACT_RANGE_FINDINGS) {
+    throw new ExactGitInputError('ci.input.added-lines.budget', 'ci.input.added-lines.budget');
+  }
+  rawFindingKeys.add(key);
+  return true;
+}
+
+function scanNetAddedLineFindingsIncrementally(
+  changes: readonly ExactChangeWithAddedLinesV1[],
+  commitOid: string,
+  parentOid: string,
+  findings: RepoHygieneExactRangeFindingV1[],
+  projectedFindingKeys: Set<string>,
+  rawFindingKeys: Set<string>,
+): void {
+  for (const change of changes) {
+    for (const exactLine of change.addedLines) {
+      for (const issue of scanAddedLines([{
+        filePath: exactLine.path,
+        line: exactLine.newLineNumber,
+        text: exactLine.text,
+      }])) {
+        const finding: RepoHygieneExactRangeFindingV1 = {
+          cause: issue.code,
+          observationKind: 'net-added-line',
+          commitOid,
+          parentOid,
+          path: null,
+          pathDisclosure: issue.filePath === undefined ? 'not-applicable' : 'redacted',
+          line: issue.line ?? null,
+          blobOid: issue.filePath === exactLine.path && issue.line === exactLine.newLineNumber
+            ? exactLine.newBlobOid
+            : null,
+        };
+        appendExactRangeFinding(findings, projectedFindingKeys, finding);
+        appendRawFindingKey(
+          rawFindingKeys,
+          `${finding.cause}\0${issue.filePath ?? ''}\0${finding.line ?? 0}`,
+        );
+      }
+    }
+  }
+}
+
+function appendHistoryLineCandidate(
+  historyLines: HistoryLineCandidate[],
+  historyArtifactCount: number,
+  candidate: HistoryLineCandidate,
+): void {
+  if (historyLines.length + historyArtifactCount >= MAX_REPO_HYGIENE_EXACT_RANGE_FINDINGS) {
+    throw new ExactGitInputError('ci.input.added-lines.budget', 'ci.input.added-lines.budget');
+  }
+  historyLines.push(candidate);
+}
+
+function appendHistoryArtifactCandidate(
+  historyArtifacts: Array<{
+    rawPath: string;
+    finding: RepoHygieneExactRangeFindingV1;
+  }>,
+  historyLineCount: number,
+  candidate: {
+    rawPath: string;
+    finding: RepoHygieneExactRangeFindingV1;
+  },
+): void {
+  if (historyArtifacts.length + historyLineCount >= MAX_REPO_HYGIENE_EXACT_RANGE_FINDINGS) {
+    throw new ExactGitInputError('ci.input.added-lines.budget', 'ci.input.added-lines.budget');
+  }
+  historyArtifacts.push(candidate);
+}
+
+function deepFreeze<T>(value: T): T {
+  if (typeof value !== 'object' || value === null || ArrayBuffer.isView(value)) return value;
+  for (const nested of Object.values(value as Record<string, unknown>)) deepFreeze(nested);
+  return Object.freeze(value);
+}
+
+export function createRepoHygieneExactRangeArtifact(
+  cwd: string,
+  input: RepoHygieneExactRangeInputV1,
+): RepoHygieneExactRangeBuildResultV1 {
+  const validated = validateExactRangeInput(input);
+  if (validated === null) return exactRangeFailure('repo-hygiene.exact-range.input-malformed');
+
+  try {
+    const initialToolBytes = readToolBytes();
+    const initialPolicyDigest = policyDigest();
+    const range = readExactCommitRange(cwd, validated);
+    const metadataByOid = new Map(
+      readExactCommitMetadata(cwd, range.commits.map((commit) => commit.oid).sort())
+        .map((metadata) => [metadata.oid, metadata]),
+    );
+    const commitBindings: RepoHygieneExactRangeCommitBindingV1[] = [];
+    for (const commit of range.commits) {
+      const metadata = metadataByOid.get(commit.oid);
+      if (
+        metadata === undefined
+        || metadata.parentOids.length !== commit.parentOids.length
+        || metadata.parentOids.some((parentOid, index) => parentOid !== commit.parentOids[index])
+      ) {
+        return exactRangeFailure('repo-hygiene.exact-range.identity-mismatch');
+      }
+      commitBindings.push({
+        oid: commit.oid,
+        parentOids: [...commit.parentOids],
+        treeOid: metadata.treeOid,
+        metadataSha256: metadata.contentSha256,
+      });
+    }
+
+    const limit = copyBudget(MAX_EXACT_ADDED_LINE_BUDGET_V1);
+    let remaining = copyBudget(limit);
+    const observedPaths = new Set<string>();
+    const observedBlobOids = new Set<string>();
+    let totalChangeCount = 0;
+    let parentEdgeCount = 0;
+    const findings: RepoHygieneExactRangeFindingV1[] = [];
+    const projectedFindingKeys = new Set<string>();
+    const finalArtifactPaths = new Set<string>();
+    const rawFindingKeys = new Set<string>();
+
+    const net = readExactAddedLinesWithinBudget(cwd, {
+      baseOid: range.rangeStartOid,
+      candidateOid: range.localOid,
+      budget: remaining,
+    });
+    remaining = copyBudget(net.accounting.remaining);
+    totalChangeCount += net.changes.length;
+    for (const change of net.changes) {
+      observedPaths.add(change.path);
+      if (change.oldPath !== null) observedPaths.add(change.oldPath);
+      if (change.oldOid !== '0'.repeat(40)) observedBlobOids.add(change.oldOid);
+      if (change.newOid !== '0'.repeat(40)) observedBlobOids.add(change.newOid);
+      if (change.status !== 'deleted' && isTrackedSensitiveArtifact(change.path)) {
+        finalArtifactPaths.add(change.path);
+        const finding: RepoHygieneExactRangeFindingV1 = {
+          cause: 'branch-sensitive-artifact',
+          observationKind: 'net-sensitive-artifact',
+          commitOid: range.localOid,
+          parentOid: range.rangeStartOid,
+          path: null,
+          pathDisclosure: 'redacted',
+          line: null,
+          blobOid: change.newOid === '0'.repeat(40) ? null : change.newOid,
+        };
+        appendExactRangeFinding(findings, projectedFindingKeys, finding);
+        appendRawFindingKey(
+          rawFindingKeys,
+          `${finding.cause}\0${change.path}\0${finding.line ?? 0}`,
+        );
+      }
+    }
+    scanNetAddedLineFindingsIncrementally(
+      net.changes,
+      range.localOid,
+      range.rangeStartOid,
+      findings,
+      projectedFindingKeys,
+      rawFindingKeys,
+    );
+
+    const historyLines: HistoryLineCandidate[] = [];
+    const historyArtifacts: Array<{
+      rawPath: string;
+      finding: RepoHygieneExactRangeFindingV1;
+    }> = [];
+    for (const commit of range.commits) {
+      for (const parentOid of commit.parentOids) {
+        parentEdgeCount += 1;
+        const edge = readExactAddedLinesWithinBudget(cwd, {
+          baseOid: parentOid,
+          candidateOid: commit.oid,
+          budget: remaining,
+        });
+        remaining = copyBudget(edge.accounting.remaining);
+        totalChangeCount += edge.changes.length;
+        for (const change of edge.changes) {
+          observedPaths.add(change.path);
+          if (change.oldPath !== null) observedPaths.add(change.oldPath);
+          if (change.oldOid !== '0'.repeat(40)) observedBlobOids.add(change.oldOid);
+          if (change.newOid !== '0'.repeat(40)) observedBlobOids.add(change.newOid);
+          for (const line of change.addedLines) {
+            for (const cause of secretCauses(line)) {
+              appendHistoryLineCandidate(historyLines, historyArtifacts.length, {
+                cause,
+                commitOid: commit.oid,
+                parentOid,
+                path: line.path,
+                line: line.newLineNumber,
+                blobOid: line.newBlobOid,
+                text: line.text,
+              });
+            }
+          }
+          if (
+            change.status !== 'deleted'
+            && isTrackedSensitiveArtifact(change.path)
+            && !finalArtifactPaths.has(change.path)
+          ) {
+            appendHistoryArtifactCandidate(historyArtifacts, historyLines.length, {
+              rawPath: change.path,
+              finding: {
+                cause: 'branch-history-sensitive-artifact',
+                observationKind: 'history-sensitive-artifact',
+                commitOid: commit.oid,
+                parentOid,
+                path: null,
+                pathDisclosure: 'redacted',
+                line: null,
+                blobOid: change.newOid === '0'.repeat(40) ? null : change.newOid,
+              },
+            });
+          }
+        }
+      }
+    }
+
+    const baselinePaths = [...new Set(historyLines.map((candidate) => candidate.path))].sort();
+    const baselines = baseLineSets(cwd, range.rangeStartOid, baselinePaths);
+    for (const candidate of historyLines) {
+      if (baselines.get(candidate.path)?.has(candidate.text)) continue;
+      const key = `${candidate.cause}\0${candidate.path}\0${candidate.line}`;
+      if (!appendRawFindingKey(rawFindingKeys, key)) continue;
+      appendExactRangeFinding(findings, projectedFindingKeys, {
+        cause: candidate.cause,
+        observationKind: 'history-added-line',
+        commitOid: candidate.commitOid,
+        parentOid: candidate.parentOid,
+        path: null,
+        pathDisclosure: 'redacted',
+        line: candidate.line,
+        blobOid: candidate.blobOid,
+      });
+    }
+    for (const { rawPath, finding } of historyArtifacts) {
+      const key = `${finding.cause}\0${rawPath}\0${finding.line ?? 0}`;
+      if (!appendRawFindingKey(rawFindingKeys, key)) continue;
+      appendExactRangeFinding(findings, projectedFindingKeys, finding);
+    }
+
+    for (const commit of range.commits) {
+      const metadata = metadataByOid.get(commit.oid)!;
+      for (const issue of scanCommitAuthors([{
+        sha: commit.oid,
+        name: metadata.authorName,
+        email: metadata.authorEmail,
+        subject: metadata.subject,
+        message: metadata.message,
+      }])) {
+        appendExactRangeFinding(findings, projectedFindingKeys, {
+          cause: issue.code,
+          observationKind: 'commit-metadata',
+          commitOid: commit.oid,
+          parentOid: null,
+          path: null,
+          pathDisclosure: 'not-applicable',
+          line: issue.line ?? null,
+          blobOid: null,
+        });
+      }
+    }
+    if (findings.length > MAX_REPO_HYGIENE_EXACT_RANGE_FINDINGS) {
+      return exactRangeFailure('repo-hygiene.exact-range.budget');
+    }
+    findings.sort(compareFindings);
+
+    const terminalToolBytes = readToolBytes();
+    if (!initialToolBytes.equals(terminalToolBytes)) {
+      return exactRangeFailure('repo-hygiene.exact-range.tool-drift');
+    }
+    const terminalPolicyDigest = policyDigest();
+    if (terminalPolicyDigest !== initialPolicyDigest) {
+      return exactRangeFailure('repo-hygiene.exact-range.policy-drift');
+    }
+    const created = Date.now();
+    const nativeCauses = [...new Set(findings.map((finding) => finding.cause))].sort();
+    const payload: RepoHygieneExactRangeReceiptV1 = {
+      schemaVersion: 1,
+      detectorId: REPO_HYGIENE_EXACT_RANGE_DETECTOR,
+      decisionOwner: REPO_HYGIENE_EXACT_RANGE_OWNER,
+      authorization: 'report-only',
+      outcome: findings.length === 0 ? 'pass' : 'block',
+      exitCode: findings.length === 0 ? 0 : 1,
+      completeness: 'complete',
+      baseOid: range.baseOid,
+      remoteOid: range.remoteOid,
+      rangeStartOid: range.rangeStartOid,
+      localOid: range.localOid,
+      toolDigest: sha256Bytes(initialToolBytes),
+      policyDigest: initialPolicyDigest,
+      commitBindings,
+      commitRangeDigest: sha256Canonical(range),
+      metadataDigest: sha256Canonical(commitBindings),
+      observedPathDisclosure: 'all-redacted',
+      observedPathDigest: sha256Canonical({
+        schemaVersion: 1,
+        disclosure: 'all-redacted',
+        count: observedPaths.size,
+      }),
+      observedBlobOidDigest: sha256Canonical([...observedBlobOids].sort()),
+      budget: budgetAccounting(limit, remaining),
+      claimedScope: {
+        content: 'net-range-all-rules',
+        history: 'per-parent-secret-and-sensitive-artifact',
+        metadata: 'all-ordered-outgoing-commits',
+      },
+      observedScope: {
+        commitCount: range.commits.length,
+        parentEdgeCount,
+        changeCount: totalChangeCount,
+        observedPathCount: observedPaths.size,
+      },
+      nativeCauses,
+      findings,
+      limitations: [...REPO_HYGIENE_EXACT_RANGE_LIMITATIONS],
+      createdAt: new Date(created).toISOString(),
+      validUntil: new Date(created + REPO_HYGIENE_EXACT_RANGE_VALIDITY_MS).toISOString(),
+    };
+    const serialized = canonicalizeBoundaryRun(payload);
+    const payloadBytes = Uint8Array.from(Buffer.from(serialized, 'utf8'));
+    const binding: RepoHygieneExactRangeArtifactV1['binding'] = {
+      schemaVersion: 1 as const,
+      detectorId: REPO_HYGIENE_EXACT_RANGE_DETECTOR,
+      payloadByteLength: payloadBytes.byteLength,
+      payloadSha256: sha256Bytes(payloadBytes),
+    };
+    return {
+      ok: true,
+      artifact: {
+        payloadBytes: Uint8Array.from(payloadBytes),
+        binding: Object.freeze({ ...binding }),
+      },
+    };
+  } catch (error) {
+    return exactRangeFailure(mapExactRangeError(error));
+  }
+}
+
+function strictArray(value: unknown, maxLength: number): unknown[] | null {
+  try {
+    if (
+      !Array.isArray(value)
+      || utilTypes.isProxy(value)
+      || Object.getPrototypeOf(value) !== Array.prototype
+      || value.length > maxLength
+    ) return null;
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== value.length + 1 || !keys.includes('length')) return null;
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (descriptor === undefined || !('value' in descriptor) || descriptor.enumerable !== true) return null;
+    }
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+function safeInteger(value: unknown, max = Number.MAX_SAFE_INTEGER): value is number {
+  return typeof value === 'number'
+    && Number.isSafeInteger(value)
+    && !Object.is(value, -0)
+    && value >= 0
+    && value <= max;
+}
+
+function validateBudgetRecord(value: unknown): ExactAddedLineBudgetV1 | null {
+  const keys: Array<keyof ExactAddedLineBudgetV1> = [
+    'changeCount',
+    'sourceBlobBytes',
+    'sourceLineCount',
+    'patchBytes',
+    'addedLineCount',
+    'addedTextBytes',
+  ];
+  const record = strictRecord(value, keys);
+  if (record === null) return null;
+  const result = {} as ExactAddedLineBudgetV1;
+  for (const key of keys) {
+    if (!safeInteger(record[key], MAX_EXACT_ADDED_LINE_BUDGET_V1[key])) return null;
+    result[key] = record[key];
+  }
+  return result;
+}
+
+function validateBudgetAccounting(value: unknown): ExactAddedLineBudgetAccountingV1 | null {
+  const record = strictRecord(value, ['limit', 'consumed', 'remaining']);
+  if (record === null) return null;
+  const limit = validateBudgetRecord(record.limit);
+  const consumed = validateBudgetRecord(record.consumed);
+  const remaining = validateBudgetRecord(record.remaining);
+  if (limit === null || consumed === null || remaining === null) return null;
+  for (const key of Object.keys(limit) as Array<keyof ExactAddedLineBudgetV1>) {
+    if (
+      limit[key] !== MAX_EXACT_ADDED_LINE_BUDGET_V1[key]
+      || consumed[key] + remaining[key] !== limit[key]
+    ) return null;
+  }
+  return { limit, consumed, remaining };
+}
+
+function validateStringArray(value: unknown, maxLength: number): string[] | null {
+  const array = strictArray(value, maxLength);
+  if (array === null || array.some((item) => typeof item !== 'string')) return null;
+  const strings = array as string[];
+  if (strings.some((item, index) => index > 0 && strings[index - 1]! >= item)) return null;
+  return strings;
+}
+
+function validateCommitBindings(value: unknown): RepoHygieneExactRangeCommitBindingV1[] | null {
+  const array = strictArray(value, 4_096);
+  if (array === null) return null;
+  const result: RepoHygieneExactRangeCommitBindingV1[] = [];
+  const seen = new Set<string>();
+  for (const item of array) {
+    const record = strictRecord(item, ['oid', 'parentOids', 'treeOid', 'metadataSha256']);
+    const parents = record === null ? null : strictArray(record.parentOids, 8_192);
+    if (
+      record === null
+      || typeof record.oid !== 'string'
+      || !FULL_OID.test(record.oid)
+      || seen.has(record.oid)
+      || typeof record.treeOid !== 'string'
+      || !FULL_OID.test(record.treeOid)
+      || typeof record.metadataSha256 !== 'string'
+      || !SHA256.test(record.metadataSha256)
+      || parents === null
+      || parents.some((parent) => typeof parent !== 'string' || !FULL_OID.test(parent))
+      || new Set(parents as string[]).size !== parents.length
+    ) return null;
+    seen.add(record.oid);
+    result.push({
+      oid: record.oid,
+      parentOids: [...parents] as string[],
+      treeOid: record.treeOid,
+      metadataSha256: record.metadataSha256 as `sha256:${string}`,
+    });
+  }
+  return result;
+}
+
+function validateFindings(value: unknown): RepoHygieneExactRangeFindingV1[] | null {
+  const array = strictArray(value, MAX_REPO_HYGIENE_EXACT_RANGE_FINDINGS);
+  if (array === null) return null;
+  const kinds = new Set([
+    'net-added-line',
+    'net-sensitive-artifact',
+    'history-added-line',
+    'history-sensitive-artifact',
+    'commit-metadata',
+  ]);
+  const result: RepoHygieneExactRangeFindingV1[] = [];
+  for (const item of array) {
+    const record = strictRecord(item, [
+      'cause', 'observationKind', 'commitOid', 'parentOid', 'path', 'pathDisclosure', 'line', 'blobOid',
+    ]);
+    if (
+      record === null
+      || typeof record.cause !== 'string'
+      || record.cause.length === 0
+      || record.cause.length > 128
+      || !nativeCauseCodes().has(record.cause)
+      || typeof record.observationKind !== 'string'
+      || !kinds.has(record.observationKind)
+      || typeof record.commitOid !== 'string'
+      || !FULL_OID.test(record.commitOid)
+      || (record.parentOid !== null && (typeof record.parentOid !== 'string' || !FULL_OID.test(record.parentOid)))
+      || record.path !== null
+      || (record.pathDisclosure !== 'redacted' && record.pathDisclosure !== 'not-applicable')
+      || (record.line !== null && (!safeInteger(record.line) || record.line < 1))
+      || (record.blobOid !== null && (typeof record.blobOid !== 'string' || !FULL_OID.test(record.blobOid)))
+    ) return null;
+    result.push(record as unknown as RepoHygieneExactRangeFindingV1);
+  }
+  const sorted = [...result].sort(compareFindings);
+  if (result.some((finding, index) => compareFindings(finding, sorted[index]!) !== 0)) return null;
+  return result;
+}
+
+function validateExactRangeReceipt(value: unknown): RepoHygieneExactRangeReceiptV1 | null {
+  const record = strictRecord(value, [
+    'schemaVersion', 'detectorId', 'decisionOwner', 'authorization', 'outcome', 'exitCode',
+    'completeness', 'baseOid', 'remoteOid', 'rangeStartOid', 'localOid', 'toolDigest',
+    'policyDigest', 'commitBindings', 'commitRangeDigest', 'metadataDigest',
+    'observedPathDisclosure', 'observedPathDigest', 'observedBlobOidDigest', 'budget', 'claimedScope', 'observedScope',
+    'nativeCauses', 'findings', 'limitations', 'createdAt', 'validUntil',
+  ]);
+  if (record === null) return null;
+  const commitBindings = validateCommitBindings(record.commitBindings);
+  const findings = validateFindings(record.findings);
+  const nativeCauses = validateStringArray(record.nativeCauses, MAX_REPO_HYGIENE_EXACT_RANGE_FINDINGS);
+  const budget = validateBudgetAccounting(record.budget);
+  const claimedScope = strictRecord(record.claimedScope, ['content', 'history', 'metadata']);
+  const observedScope = strictRecord(record.observedScope, [
+    'commitCount', 'parentEdgeCount', 'changeCount', 'observedPathCount',
+  ]);
+  const limitations = strictArray(
+    record.limitations,
+    REPO_HYGIENE_EXACT_RANGE_LIMITATIONS.length,
+  );
+  if (
+    record.schemaVersion !== 1
+    || record.detectorId !== REPO_HYGIENE_EXACT_RANGE_DETECTOR
+    || record.decisionOwner !== REPO_HYGIENE_EXACT_RANGE_OWNER
+    || record.authorization !== 'report-only'
+    || (record.outcome !== 'pass' && record.outcome !== 'block')
+    || (record.exitCode !== 0 && record.exitCode !== 1)
+    || (record.outcome === 'pass') !== (record.exitCode === 0)
+    || record.completeness !== 'complete'
+    || typeof record.baseOid !== 'string'
+    || !FULL_OID.test(record.baseOid)
+    || (record.remoteOid !== null && (typeof record.remoteOid !== 'string' || !FULL_OID.test(record.remoteOid)))
+    || typeof record.rangeStartOid !== 'string'
+    || !FULL_OID.test(record.rangeStartOid)
+    || record.rangeStartOid !== (record.remoteOid ?? record.baseOid)
+    || typeof record.localOid !== 'string'
+    || !FULL_OID.test(record.localOid)
+    || typeof record.toolDigest !== 'string'
+    || !SHA256.test(record.toolDigest)
+    || typeof record.policyDigest !== 'string'
+    || !SHA256.test(record.policyDigest)
+    || typeof record.commitRangeDigest !== 'string'
+    || !SHA256.test(record.commitRangeDigest)
+    || typeof record.metadataDigest !== 'string'
+    || !SHA256.test(record.metadataDigest)
+    || record.observedPathDisclosure !== 'all-redacted'
+    || typeof record.observedPathDigest !== 'string'
+    || !SHA256.test(record.observedPathDigest)
+    || typeof record.observedBlobOidDigest !== 'string'
+    || !SHA256.test(record.observedBlobOidDigest)
+    || commitBindings === null
+    || findings === null
+    || nativeCauses === null
+    || budget === null
+    || claimedScope === null
+    || claimedScope.content !== 'net-range-all-rules'
+    || claimedScope.history !== 'per-parent-secret-and-sensitive-artifact'
+    || claimedScope.metadata !== 'all-ordered-outgoing-commits'
+    || observedScope === null
+    || !safeInteger(observedScope.commitCount, 4_096)
+    || !safeInteger(observedScope.parentEdgeCount, 8_192)
+    || !safeInteger(observedScope.changeCount, MAX_EXACT_ADDED_LINE_BUDGET_V1.changeCount)
+    || !safeInteger(observedScope.observedPathCount, MAX_EXACT_ADDED_LINE_BUDGET_V1.changeCount * 2)
+    || observedScope.commitCount !== commitBindings.length
+    || limitations === null
+    || limitations.length !== REPO_HYGIENE_EXACT_RANGE_LIMITATIONS.length
+    || limitations.some((limitation, index) => limitation !== REPO_HYGIENE_EXACT_RANGE_LIMITATIONS[index])
+    || typeof record.createdAt !== 'string'
+    || typeof record.validUntil !== 'string'
+  ) return null;
+  if (record.observedPathDigest !== sha256Canonical({
+    schemaVersion: 1,
+    disclosure: 'all-redacted',
+    count: observedScope.observedPathCount,
+  })) return null;
+  const causes = [...new Set(findings.map((finding) => finding.cause))].sort();
+  if (
+    nativeCauses.length !== causes.length
+    || nativeCauses.some((cause, index) => cause !== causes[index])
+    || (findings.length === 0) !== (record.outcome === 'pass')
+    || observedScope.changeCount !== budget.consumed.changeCount
+    || observedScope.parentEdgeCount !== commitBindings.reduce(
+      (total, binding) => total + binding.parentOids.length,
+      0,
+    )
+  ) return null;
+  if (
+    (commitBindings.length === 0 && record.localOid !== record.rangeStartOid)
+    || (commitBindings.length > 0 && commitBindings.at(-1)?.oid !== record.localOid)
+    || commitBindings.some((binding) => binding.parentOids.length === 0)
+  ) return null;
+  const commitIndexes = new Map(commitBindings.map((binding, index) => [binding.oid, index]));
+  if (commitBindings.some((binding, index) => binding.parentOids.some((parentOid) => {
+    const parentIndex = commitIndexes.get(parentOid);
+    return parentIndex !== undefined && parentIndex >= index;
+  }))) return null;
+  const bindingByOid = new Map(commitBindings.map((binding) => [binding.oid, binding]));
+  const findingKeys = new Set<string>();
+  for (const finding of findings) {
+    const key = canonicalizeBoundaryRun(finding);
+    if (findingKeys.has(key)) return null;
+    findingKeys.add(key);
+    if (finding.observationKind === 'commit-metadata') {
+      if (
+        !bindingByOid.has(finding.commitOid)
+        || finding.parentOid !== null
+        || finding.path !== null
+        || finding.pathDisclosure !== 'not-applicable'
+        || finding.blobOid !== null
+      ) return null;
+      continue;
+    }
+    if (finding.path !== null || finding.pathDisclosure !== 'redacted') return null;
+    if (finding.observationKind.startsWith('net-')) {
+      if (finding.commitOid !== record.localOid || finding.parentOid !== record.rangeStartOid) return null;
+    } else {
+      const binding = bindingByOid.get(finding.commitOid);
+      if (binding === undefined || finding.parentOid === null || !binding.parentOids.includes(finding.parentOid)) {
+        return null;
+      }
+    }
+    const addedLine = finding.observationKind.endsWith('added-line');
+    if (addedLine && (finding.line === null || finding.blobOid === null)) return null;
+    if (!addedLine && finding.line !== null) return null;
+  }
+  const reconstructedRange = {
+    baseOid: record.baseOid,
+    remoteOid: record.remoteOid,
+    rangeStartOid: record.rangeStartOid,
+    localOid: record.localOid,
+    commits: commitBindings.map((binding) => ({
+      oid: binding.oid,
+      parentOids: binding.parentOids,
+      firstParentOid: binding.parentOids[0],
+    })),
+  };
+  if (sha256Canonical(reconstructedRange) !== record.commitRangeDigest) return null;
+  if (sha256Canonical(commitBindings) !== record.metadataDigest) return null;
+  const created = Date.parse(record.createdAt);
+  const validUntil = Date.parse(record.validUntil);
+  if (
+    !Number.isSafeInteger(created)
+    || !Number.isSafeInteger(validUntil)
+    || validUntil - created !== REPO_HYGIENE_EXACT_RANGE_VALIDITY_MS
+    || new Date(created).toISOString() !== record.createdAt
+    || new Date(validUntil).toISOString() !== record.validUntil
+  ) return null;
+  return record as unknown as RepoHygieneExactRangeReceiptV1;
+}
+
+export function validateRepoHygieneExactRangeArtifact(
+  artifact: RepoHygieneExactRangeArtifactV1,
+  expected: RepoHygieneExactRangeExpectedV1,
+): RepoHygieneExactRangeValidationResultV1 {
+  try {
+    const artifactRecord = strictRecord(artifact, ['payloadBytes', 'binding']);
+    const expectedRecord = strictRecord(expected, [
+      'baseOid', 'remoteOid', 'localOid', 'currentToolDigest', 'currentPolicyDigest',
+      'expectedPayloadByteLength', 'expectedPayloadSha256',
+    ]);
+    const expectedLineage = expectedRecord === null ? null : validateExactRangeInput({
+      baseOid: expectedRecord.baseOid,
+      remoteOid: expectedRecord.remoteOid,
+      localOid: expectedRecord.localOid,
+    });
+    const binding = artifactRecord === null
+      ? null
+      : strictRecord(artifactRecord.binding, [
+        'schemaVersion', 'detectorId', 'payloadByteLength', 'payloadSha256',
+      ]);
+    const bytes = artifactRecord?.payloadBytes;
+    if (
+      artifactRecord === null
+      || expectedRecord === null
+      || expectedLineage === null
+      || typeof expectedRecord.currentToolDigest !== 'string'
+      || !SHA256.test(expectedRecord.currentToolDigest)
+      || typeof expectedRecord.currentPolicyDigest !== 'string'
+      || !SHA256.test(expectedRecord.currentPolicyDigest)
+      || !safeInteger(expectedRecord.expectedPayloadByteLength, 4 * 1024 * 1024)
+      || typeof expectedRecord.expectedPayloadSha256 !== 'string'
+      || !SHA256.test(expectedRecord.expectedPayloadSha256)
+      || binding === null
+      || binding.schemaVersion !== 1
+      || binding.detectorId !== REPO_HYGIENE_EXACT_RANGE_DETECTOR
+      || !safeInteger(binding.payloadByteLength, 4 * 1024 * 1024)
+      || typeof binding.payloadSha256 !== 'string'
+      || !SHA256.test(binding.payloadSha256)
+    ) return exactRangeFailure('repo-hygiene.exact-range.receipt-invalid');
+    if (
+      binding.payloadByteLength !== expectedRecord.expectedPayloadByteLength
+      || binding.payloadSha256 !== expectedRecord.expectedPayloadSha256
+    ) return exactRangeFailure('repo-hygiene.exact-range.receipt-binding-mismatch');
+    if (
+      !(bytes instanceof Uint8Array)
+      || utilTypes.isProxy(bytes)
+      || bytes.byteLength !== binding.payloadByteLength
+      || bytes.byteLength === 0
+      || sha256Bytes(bytes) !== binding.payloadSha256
+    ) return exactRangeFailure('repo-hygiene.exact-range.receipt-invalid');
+
+    const parsed = parseBoundaryJsonBytes(bytes);
+    if (!parsed.result.ok || parsed.value === null || parsed.text === null) {
+      return exactRangeFailure('repo-hygiene.exact-range.receipt-invalid');
+    }
+    if (parsed.text !== canonicalizeBoundaryRun(parsed.value)) {
+      return exactRangeFailure('repo-hygiene.exact-range.receipt-invalid');
+    }
+    const receipt = validateExactRangeReceipt(parsed.value);
+    if (receipt === null) return exactRangeFailure('repo-hygiene.exact-range.receipt-invalid');
+    if (
+      receipt.baseOid !== expectedLineage.baseOid
+      || receipt.remoteOid !== expectedLineage.remoteOid
+      || receipt.localOid !== expectedLineage.localOid
+    ) return exactRangeFailure('repo-hygiene.exact-range.identity-mismatch');
+    if (receipt.toolDigest !== expectedRecord.currentToolDigest) {
+      return exactRangeFailure('repo-hygiene.exact-range.tool-mismatch');
+    }
+    if (receipt.policyDigest !== expectedRecord.currentPolicyDigest) {
+      return exactRangeFailure('repo-hygiene.exact-range.policy-mismatch');
+    }
+    const now = Date.now();
+    if (now < Date.parse(receipt.createdAt) || now > Date.parse(receipt.validUntil)) {
+      return exactRangeFailure('repo-hygiene.exact-range.receipt-stale');
+    }
+    return { ok: true, receipt: deepFreeze(receipt) };
+  } catch {
+    return exactRangeFailure('repo-hygiene.exact-range.receipt-invalid');
+  }
 }
 
 function printIssues(issues: GuardIssue[]): void {
