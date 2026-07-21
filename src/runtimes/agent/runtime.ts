@@ -3744,7 +3744,7 @@ export class AgentRuntime implements Runtime {
           const reviewByAt = Math.floor(Date.now() / 1000) + config.memory.sweep.reviewByDays * 86400;
           const result = createInlineProposal(this.db.raw, {
             kind: 'task',
-            title: classification.normalizedTarget.slice(0, 200),
+            title: [...classification.normalizedTarget].slice(0, 200).join(''),
             body: content,
             ownerJid: config.memory.adminJid || grantPhone,
             chatJid: msg.chatJid,

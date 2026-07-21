@@ -16563,6 +16563,7 @@ describe('inline imperative runtime admission', () => {
 
   type InlineBead = {
     id: number;
+    title: string;
     body: string | null;
     source_message_pk: number | null;
     proposal_reason: string | null;
@@ -16586,7 +16587,7 @@ describe('inline imperative runtime admission', () => {
 
   function inlineRows(db: RealDatabase): { beads: InlineBead[]; events: InlineEvent[] } {
     const beads = db.raw.prepare(`
-      SELECT id, body, source_message_pk, proposal_reason, metadata_json
+      SELECT id, title, body, source_message_pk, proposal_reason, metadata_json
       FROM beads
       WHERE proposal_reason LIKE 'inline imperative: %'
       ORDER BY id
@@ -16752,6 +16753,37 @@ describe('inline imperative runtime admission', () => {
       expect(events).toHaveLength(1);
       expect(beads[0]).toMatchObject({ body: strippedBody, source_message_pk: 7201 });
       expect(mockClassifyInlineImperative).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('preserves a complete emoji at the 200-code-point inline imperative title boundary', async () => {
+    await withInlineRuntime(async (runtime, db) => {
+      const normalizedTarget = `${'a'.repeat(199)}😀`;
+      const body = `schedule ${normalizedTarget}`;
+      await sendAndDrain(runtime, makeMsg({
+        senderJid: ADMIN_PN,
+        chatJid: ADMIN_PN,
+        content: body,
+        messageId: 'inline-unicode-title-boundary',
+        sourceMessagePk: 7251,
+      }));
+
+      const { beads, events } = inlineRows(db);
+      expect(beads).toHaveLength(1);
+      expect(events).toHaveLength(1);
+      expect(beads[0]).toMatchObject({
+        title: normalizedTarget,
+        body,
+        source_message_pk: 7251,
+      });
+      expect(events[0]).toEqual({ bead_id: beads[0].id, source_message_pk: 7251 });
+      expect([...beads[0].title]).toHaveLength(200);
+      expect(beads[0].title.endsWith('😀')).toBe(true);
+      expect(beads[0].title).not.toContain('\uFFFD');
+      expect(Buffer.from(beads[0].title, 'utf8').toString('utf8')).toBe(beads[0].title);
+      expect(JSON.parse(beads[0].metadata_json)).toMatchObject({
+        inline_proposal_normalized_target: normalizedTarget,
+      });
     });
   });
 
