@@ -392,6 +392,31 @@ export interface CheckpointRow {
   resumable: boolean;
 }
 
+/** One checkpoint row joined with live process state (terminal stage A). */
+export interface LiveSession {
+  conversationKey: string;
+  sessionStatus: string;
+  resumable: boolean;
+  claudePid: number | null;
+  /** null when the row has no pid; otherwise whether the pid is alive. */
+  pidAlive: boolean | null;
+  pidState: string | null;
+  pidEtimeSeconds: number | null;
+  /** 'resumable-but-pid-dead' (claims live, process gone) or
+   *  'pid-alive-after-end' (ended row, process lives — the #1861 stale-
+   *  retention class). */
+  anomaly: 'resumable-but-pid-dead' | 'pid-alive-after-end' | null;
+}
+
+export interface LiveSessionsPayload {
+  observedAt: string;
+  sessions: LiveSession[];
+  anomalyCount: number;
+  /** Present and true only on a probe failure — never fabricated liveness. */
+  probeError?: boolean;
+  readError?: boolean;
+}
+
 export interface CheckpointsPayload {
   observedAt: string;
   checkpoints: CheckpointRow[];
@@ -399,3 +424,36 @@ export interface CheckpointsPayload {
    *  render "unavailable", never a fake empty state (fail-closed, PDR-3). */
   readError?: boolean;
 }
+
+/** One question inside a pending decision poll (D-4 approval queue). */
+export interface ApprovalQuestion {
+  question: string;
+  options: Array<{ label: string; description: string }>;
+  multiSelect: boolean;
+}
+
+/** A pending agent decision awaiting a human answer (D-4). */
+export interface ApprovalEntry {
+  mapKey: string;
+  chatJid: string;
+  mode: 'poll' | 'textFallback';
+  source: 'askuser' | 'send_poll';
+  questions: ApprovalQuestion[];
+  currentQuestionIndex: number;
+  answersCollected: Record<number, string>;
+  createdAt: number;
+  timeoutMs: number;
+  hardClosesAt: number | null;
+}
+
+export interface ApprovalsPayload {
+  observedAt: string;
+  supported: boolean;
+  approvals: ApprovalEntry[];
+  /** Rows whose stored payload failed to parse — fail-visible. */
+  parseErrors: number;
+  /** Present and true only on a fleet read failure — render "unavailable",
+   *  never a fake-empty queue (fail-closed, PDR-3). */
+  readError?: boolean;
+}
+

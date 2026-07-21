@@ -65,6 +65,13 @@ export interface HealthDeps {
   runtime?: Runtime;
   profiles?: ProfileRegistry;
   auditWriter?: OutboundSendsWriter;
+  /** D-4 console approval queue: resolve a pending poll through the runtime's
+   *  own poll-resolution path (AgentRuntime only; absent on chat/passive). */
+  resolvePollDecision?: (decision: {
+    mapKey: string;
+    questionIndex: number;
+    selectedOptions: string[];
+  }) => { ok: true } | { ok: false; error: string; code: 'not_found' | 'stale' | 'invalid' };
   // Instance identity for control-plane fleet discovery
   instanceName: string;
   instanceType: string;  // 'chat' | 'agent' | 'passive'
@@ -621,6 +628,75 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
   const loopLagSampler = deps.loopLagSampler ?? new LoopLagSampler();
   loopLagSampler.start();
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+    // ── POST /poll-decision — D-4 console approval queue: deliver a decision
+    // to a pending poll through the runtime's own poll-resolution path ──
+    if (req.url === '/poll-decision' && req.method === 'POST') {
+      if (!requireAuth(req, res)) return;
+
+      if (!deps.resolvePollDecision) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: "this line's runtime does not accept poll decisions" }));
+        return;
+      }
+
+      const MAX_BODY_BYTES = 16 * 1024; // 16 KB — a decision is tiny
+      let body = '';
+      let byteCount = 0;
+      let destroyed = false;
+      req.on('data', (chunk) => {
+        if (destroyed) return;
+        byteCount += Buffer.byteLength(chunk);
+        if (byteCount > MAX_BODY_BYTES) {
+          destroyed = true;
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'request body too large' }));
+          req.destroy();
+          return;
+        }
+        body += chunk;
+      });
+      req.on('end', () => {
+        if (destroyed) return;
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(body);
+        } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'invalid JSON' }));
+          return;
+        }
+        const d = parsed as { mapKey?: unknown; questionIndex?: unknown; selectedOptions?: unknown };
+        if (typeof d.mapKey !== 'string' || d.mapKey.length === 0
+            || typeof d.questionIndex !== 'number' || d.questionIndex < 0
+            || !Array.isArray(d.selectedOptions)
+            || !d.selectedOptions.every((o: unknown) => typeof o === 'string' && o.length > 0)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'expected {mapKey, questionIndex, selectedOptions: string[]}' }));
+          return;
+        }
+        try {
+          const result = deps.resolvePollDecision!({
+            mapKey: d.mapKey,
+            questionIndex: d.questionIndex,
+            selectedOptions: d.selectedOptions as string[],
+          });
+          if (result.ok) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true }));
+          } else {
+            const status = result.code === 'not_found' ? 404 : result.code === 'stale' ? 409 : 400;
+            res.writeHead(status, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: result.error }));
+          }
+        } catch (err) {
+          log.error({ err }, 'POST /poll-decision: unhandled error');
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'internal error' }));
+        }
+      });
+      return;
+    }
+
     // ── POST /send — send a text message to any chat ──
     if (req.url === '/send' && req.method === 'POST') {
       if (!requireAuth(req, res)) return;

@@ -2,7 +2,7 @@ import React, { useState, useCallback, lazy, Suspense } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { useLine, useChats, useMessages, useAccess, useLogs, useTyping, useCheckpoints } from '../hooks/use-fleet'
+import { useLine, useChats, useMessages, useAccess, useLogs, useTyping, useCheckpoints, useLiveSessions, useApprovals } from '../hooks/use-fleet'
 import { useMetrics } from '../hooks/use-metrics'
 import type { MetricsRange } from '../types'
 import { getPreference, setPreference } from '../lib/preferences'
@@ -22,7 +22,7 @@ const RelinkModal = lazy(() => import('../components/RelinkModal'))
 import {
   ArrowLeft, Info, SlidersHorizontal, GitBranch, Shield,
   MessageSquare, ScrollText, BarChart3, Clock, Users, BookMarked,
-  RotateCw, Loader2, Trash2, Link2,
+  RotateCw, Loader2, Trash2, Link2, ClipboardCheck,
 } from 'lucide-react'
 
 import {
@@ -30,6 +30,7 @@ import {
   ModeTab,
   PipelineTab,
   AccessTab,
+  ApprovalsTab,
   HistoryTab,
   LogsTab,
   MetricsTab,
@@ -49,6 +50,7 @@ const BASE_TABS = [
   { id: 'logs', label: 'Logs', icon: ScrollText },
   { id: 'metrics', label: 'Metrics', icon: BarChart3 },
   { id: 'checkpoints', label: 'Checkpoints', icon: BookMarked },
+  { id: 'approvals', label: 'Approvals', icon: ClipboardCheck },
 ] as const
 
 /** MCP-dependent tabs — only shown when instance has a global MCP socket (not sandbox-per-chat). */
@@ -82,6 +84,11 @@ export default function LineDetail() {
     refetch: refetchAccess,
   } = useAccess(name || '')
   const {
+    data: approvalsPayload,
+    isLoading: approvalsLoading,
+    freshness: approvalsFreshness,
+  } = useApprovals(name || '')
+  const {
     data: logs,
     isLoading: logsLoading,
     error: logsError,
@@ -89,6 +96,7 @@ export default function LineDetail() {
   } = useLogs(name || '')
   const { data: metrics, isLoading: metricsLoading, error: metricsError, refetch: refetchMetrics, freshness: metricsFreshness } = useMetrics(name || '', metricsRange)
   const { data: checkpointsPayload, isLoading: checkpointsLoading, freshness: checkpointsFreshness } = useCheckpoints(name || '')
+  const { data: liveSessionsPayload } = useLiveSessions(name || '')
   const { data: typingData } = useTyping()
   const typingJids = React.useMemo(() =>
     new Set((typingData ?? []).filter(t => t.instance === name).map(t => t.jid)),
@@ -162,7 +170,10 @@ export default function LineDetail() {
   // - chat: no MCP socket server
   // - agent (sandbox-per-chat): per-chat sockets only, no global socket
   const hasMcpSocket = line.mode === 'passive' || (line.mode === 'agent' && !line.sandboxPerChat)
-  const tabs = hasMcpSocket ? [...BASE_TABS, ...MCP_TABS] : BASE_TABS
+  const pendingApprovals = approvalsPayload?.approvals?.length ?? 0
+  const tabs = (hasMcpSocket ? [...BASE_TABS, ...MCP_TABS] : [...BASE_TABS]).map((t) =>
+    t.id === 'approvals' && pendingApprovals > 0 ? { ...t, label: `Approvals (${pendingApprovals})` } : t,
+  )
 
   const ease = [0.22, 1, 0.36, 1] as const
 
@@ -300,6 +311,14 @@ export default function LineDetail() {
                   <AccessTab access={access ?? []} lineName={name || ''} />
                 )
               )}
+              {activeTab === 'approvals' && (
+                <ApprovalsTab
+                  payload={approvalsPayload}
+                  isLoading={approvalsLoading}
+                  freshness={approvalsFreshness}
+                  lineName={name || ''}
+                />
+              )}
               {activeTab === 'history' && (
                 <HistoryTab
                   chats={chats || []}
@@ -346,6 +365,8 @@ export default function LineDetail() {
                   payload={checkpointsPayload}
                   isLoading={checkpointsLoading}
                   freshness={checkpointsFreshness}
+                  lineName={name || ''}
+                  liveSessions={liveSessionsPayload}
                 />
               )}
               {activeTab === 'groups' && <GroupsTab lineName={name || ''} myJid={line.phone ? `${line.phone}@s.whatsapp.net` : undefined} />}

@@ -181,14 +181,13 @@ function normalizeRecord(rec: ImsgHistoryRecord): InboundImessage | null {
 // ---------------------------------------------------------------------------
 
 export class ImsgPort implements ImessagePort {
-  // Explicit fields instead of constructor parameter properties: node
-  // strip-types (strip-only mode) rejects parameter properties
-  // (tests/strip-types-compat.test.ts).
+  private connection: ImsgRpcConnection | null = null;
   private readonly config: ImessageConfig;
   private readonly connectionFactory: ImsgRpcConnectionFactory;
 
-  private connection: ImsgRpcConnection | null = null;
-
+  // Explicit fields + assignment rather than constructor parameter properties:
+  // this repo runs Node's --experimental-strip-types (no build step), which
+  // rejects parameter properties (ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX).
   constructor(
     config: ImessageConfig,
     connectionFactory: ImsgRpcConnectionFactory = createSocketConnection,

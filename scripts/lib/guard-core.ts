@@ -180,3 +180,21 @@ export function isOperationalProtocolToken(token: string): boolean {
     token.endsWith('.service') && operationalProtocolIdentifiers.has(token.slice(0, -'.service'.length))
   );
 }
+
+// Domains reserved for documentation by RFC 2606 and RFC 6761. They cannot resolve
+// to a real inbox, so an email-shaped token in one is a fixture by construction —
+// the email analogue of the phone and Twilio SID fixture allowances. Without it, a
+// transport that legitimately needs an email fixture (an iMessage AppleID sender)
+// has no legal way to write one and the pressure is to weaken the rule instead.
+//
+// Lives here because the personal-email rule is implemented twice, in
+// repo-hygiene-guard and publication-guard. Keeping the exception in one place is
+// what stops the two from disagreeing about the same token.
+//
+// End-anchored on purpose: a routable domain that merely embeds a reserved name,
+// such as a host under example.com.evil.net, must still be a finding.
+const documentationEmailRhs = /@(?:[A-Za-z0-9-]+\.)*(?:example\.(?:com|net|org)|example|invalid|test)$/i;
+
+export function isDocumentationEmailFixture(token: string): boolean {
+  return documentationEmailRhs.test(token);
+}
