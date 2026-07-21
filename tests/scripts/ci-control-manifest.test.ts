@@ -123,7 +123,8 @@ describe('canonical CI control manifest', () => {
     expect(inventory.schemaVersion).toBe(1);
     expect(inventory.manifestDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(inventory.controls.length).toBeGreaterThan(0);
-    expect(inventory.controls.every((entry) => entry.availability === 'blocking')).toBe(true);
+    expect(inventory.controls.filter(({ id }) => id !== 'ci.hooks.installed').every((entry) => entry.availability === 'blocking')).toBe(true);
+    expect(inventory.controls.find(({ id }) => id === 'ci.hooks.installed')?.availability).toBe('report-only');
     expect(inventory.controls.map((entry) => entry.id)).toEqual(expect.arrayContaining([
       'architecture.fitness-lint',
       'test.integrity',
@@ -136,7 +137,7 @@ describe('canonical CI control manifest', () => {
       'scheduled',
     ]);
     expect(loaded.controls.every((entry) => entry.trustClass === 'untrusted-candidate')).toBe(true);
-    expect(loaded.controls.filter(({ id }) => id !== 'ci.exact-revision-classifier').every((entry) => entry.evidence.schemaVersion === null)).toBe(true);
+    expect(loaded.controls.filter(({ id }) => !['ci.exact-revision-classifier', 'ci.hooks.installed'].includes(id)).every((entry) => entry.evidence.schemaVersion === null)).toBe(true);
     expect(loaded.controls.find(({ id }) => id === 'ci.exact-revision-classifier')?.evidence).toMatchObject({
       schemaVersion: 1,
       paths: CLASSIFIER_TOOL_SOURCE_PATHS,

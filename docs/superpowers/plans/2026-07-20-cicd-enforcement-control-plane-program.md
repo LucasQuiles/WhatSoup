@@ -70,6 +70,9 @@ CP-F2 + CP-F3 + CP-F4 + CP-F5
 
 CP-F1 + CP-F2 + CP-F4
   -> CP-M1 bounded metrics and advisory-promotion feedback
+
+CP-F2 preconditions
+  -> CP-WA1 exact workspace-transition preservation
 ```
 
 Every consumer after CP-F2 requires current diagnostic, precondition, and terminal-attempt
@@ -91,6 +94,7 @@ CP-W1 keeps producer authentication and protected decision provenance independen
 |---|---|---|---|
 | Foundation manifest, result, classifier, facades | Proven gaps | `2026-07-20-cicd-control-foundation.md` | source commit only |
 | Exact-ref hooks and hook identity | Proven bypass | foundation plan Task 4 | source commit only |
+| Workspace-transition preservation | Proven preservation gap, separate from push authorization | admit CP-WA1 before any automated stash/archive transition | exact named-set round trip; source commit only |
 | Manifest self-protection, exceptions, dual-run parity, atomic ownership | Proven partial ownership | foundation plan Task 6 / CP-F5 | exact old/new parity plus unsafe/safe proof before one atomic source-only cutover |
 | Protected workflow evaluation and trust split | Proven bypass | admit `2026-07-20-cicd-workflow-portability.md` before mutation | independently sourced evaluator plus separate producer/policy receipts |
 | Stable aggregate gates and `merge_group` | Proven gap | admit `2026-07-20-cicd-workflow-portability.md` before mutation | exact-set real PR/merge-group canaries |
@@ -127,6 +131,7 @@ narrow the listed paths but may not add a path family without a new reviewed pro
 | CP-F2 | `ci.evidence.owner` | `ci-control/cp-f2` | `scripts/lib/ci-control/{result,reasons,native-adapter}.ts` and their tests | Exact diagnostic/native-adapter truth table / stop on native-decision recomputation, leak, or invalid terminal receipt |
 | CP-F3 | `ci.classifier.owner` | `ci-control/cp-f3` | `scripts/lib/ci-control/{git-input,classifier}.ts`, `scripts/ci-control-classify.ts`, manifest/package entries, and their tests | Exact-object unsafe/safe classifier proof / stop on ambient bytes, caller-selected risk, or unresolved graph input |
 | CP-H1 | `ci.hooks.owner` | `ci-control/cp-h1` | `.husky/pre-push`, `scripts/{pre-push-guard,hooks-installed-guard,safeguard-diagnostics}.ts`, manifest/package entries, and their tests | Exact multi-ref and hook-byte proof / stop on foreign hook identity, unresolved ref, or automatic hook mutation |
+| CP-WA1 | `ci.workspace-transition.owner` | `ci-control/cp-wa1` | separately admitted workspace snapshot/transition module, precondition schema adapter, and their tests | Exact named workspace-set round trip / stop on omitted ignored path, partial-staging drift, type/mode drift, or unexpected patch member |
 | CP-F4 | `ci.runner.owner` | `ci-control/cp-f4` | `scripts/ci-control-run.ts`, `package.json`, manifest command entries, `.husky/{pre-commit,pre-push}`, and their tests | Exact execution set, taint, and process-terminal proof / stop on shell substitution, missing child, or privilege after taint |
 | CP-F5 | `ci.self-protection.owner` | `ci-control/cp-f5` | safeguard/test-integrity owners and tests, `controls/ci-control-exceptions.json`, `scripts/lib/ci-control/exceptions.ts`, and manifest registrations | Old/new exact parity plus one atomic ownership cutover / stop on any parity difference, inline bypass, or ambiguous exception |
 | CP-W1 | `ci.protected-policy.owner` | `ci-control/cp-w1` | paths admitted by `2026-07-20-cicd-workflow-portability.md` under `.github/workflows/**`, protected evaluator code/tests, and manifest registrations | Independent producer and protected-policy receipts / stop on candidate execution, missing provenance, or undeclared path |

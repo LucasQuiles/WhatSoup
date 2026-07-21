@@ -228,6 +228,51 @@
       }
     },
     {
+      "id": "ci.hooks.installed",
+      "policyCategory": "source-integrity",
+      "domain": "source-integrity",
+      "owner": "ci-hooks-owner",
+      "decisionOwner": "hook-installation-decision-owner",
+      "implementation": {
+        "commandId": "guard:hooks-installed",
+        "detectorId": "hooks-installed-guard",
+        "nativeSchemaVersion": 1
+      },
+      "stages": ["pre-push"],
+      "trustClass": "untrusted-candidate",
+      "mode": "assist",
+      "severity": "high",
+      "riskTiers": ["low", "standard", "elevated", "system-wide"],
+      "surfaces": ["hook-installation"],
+      "dependencies": ["repo.hygiene"],
+      "evidence": {
+        "schemaVersion": 1,
+        "paths": [".husky/check-commit-identity.sh", ".husky/commit-msg", ".husky/pre-commit", ".husky/pre-push"],
+        "digestBinding": "exact",
+        "freshness": "receipt"
+      },
+      "failurePolicy": {
+        "finding": "block",
+        "crash": "inconclusive",
+        "timeout": "inconclusive",
+        "missing": "inconclusive",
+        "skipped": "inconclusive",
+        "cancelled": "inconclusive",
+        "stale": "inconclusive"
+      },
+      "remediation": {
+        "summary": "Inspect the manifest-declared repository-relative hook installation closure without changing configuration.",
+        "steps": ["Run the report-only native hook identity guard.", "After operator confirmation, repair only the named hook installation precondition."],
+        "reproduction": "npm run guard:hooks-installed"
+      },
+      "exceptionPolicy": {
+        "allowed": false,
+        "scope": "none",
+        "approverRole": null,
+        "maxLifetimeSeconds": null
+      }
+    },
+    {
       "id": "ci.exact-revision-classifier",
       "policyCategory": "source-integrity",
       "domain": "source-integrity",
@@ -273,7 +318,7 @@
       }
     }
   ],
-  "requiredSurfaces": ["repository-source", "public-output", "test-integrity", "architecture-fitness", "workflow-safeguards", "risk-classification"],
+  "requiredSurfaces": ["repository-source", "public-output", "test-integrity", "architecture-fitness", "workflow-safeguards", "hook-installation", "risk-classification"],
   "riskRules": [
     {
       "id": "risk.documentation",
@@ -345,7 +390,7 @@
       "id": "risk.control-policy",
       "tier": "system-wide",
       "reasons": ["ci.classification.policy"],
-      "pathPrefixes": ["controls/", "docs/current-program.md", "docs/superpowers/", "scripts/ci-control-classify.ts", "scripts/ci-control-manifest.ts", "scripts/lib/ci-control/"]
+      "pathPrefixes": ["controls/", "docs/current-program.md", "docs/superpowers/", "scripts/ci-control-classify.ts", "scripts/ci-control-manifest.ts", "scripts/hooks-installed-guard.ts", "scripts/lib/ci-control/", "scripts/lib/verification/boundary-run/schema.ts", "scripts/lib/verification/boundary-run/shared.ts", "src/lib/git-env.ts", "tests/scripts/hooks-installed-guard.test.ts"]
     }
   ],
   "stages": ["pre-commit", "pre-push", "pull-request", "merge-group", "default-branch", "release"],
@@ -356,6 +401,7 @@
     "guard:test-integrity:required": ["env", "WHATSOUP_REQUIRE_TEST_INTEGRITY=1", "bash", "scripts/test-integrity-ci.sh"],
     "guard:lint:src": ["bash", "scripts/run-with-pinned-node.sh", "scripts/eslint-fitness-check.ts"],
     "guard:safeguard-diagnostics": ["bash", "scripts/run-with-pinned-node.sh", "scripts/safeguard-diagnostics.ts"],
+    "guard:hooks-installed": ["bash", "scripts/run-with-pinned-node.sh", "scripts/hooks-installed-guard.ts", "--json"],
     "ci:classify": ["bash", "scripts/run-with-pinned-node.sh", "scripts/ci-control-classify.ts"]
   },
   "resultSchema": "ci-control-result-v1",

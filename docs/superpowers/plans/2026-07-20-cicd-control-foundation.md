@@ -367,6 +367,20 @@ git commit -m "feat(ci): classify exact revisions"
 - Smallest repair: per-ref classification/verification and hook-installation guard. No automatic hook rewrite.
 - Rollback: restore prior adapters as one ordinary revert; remote gates remain authoritative.
 
+**Adjudicated implementation sequence:** CP-H1 is four canary beads, not one authority
+switch. CP-H1a adds native hook-identity evidence without changing the active hook. CP-H1b
+adds the manifest-owned ref policy and strict bounded parser. CP-H1c adds exact-object
+entrypoints under the existing repository-hygiene and publication owners. CP-H1d performs
+the per-ref exact-set cutover only after the three additive beads pass together. The
+classifier selects and binds work; it does not turn an ambient `HEAD`/index/worktree scan
+into exact-object evidence.
+
+Workspace preservation is not a pre-push responsibility. The tracked, staged, unstaged,
+untracked, ignored, intent-to-add, generated, assume-unchanged/skip-worktree, submodule,
+symlink, type/mode, partial-staging, and named stash/archive cases move to CP-WA1 under the
+workspace-transition/precondition owner. CP-H1 may consume that receipt later but does not
+implement or silently own it.
+
 **Files:**
 
 - Create: `scripts/hooks-installed-guard.ts`
@@ -378,6 +392,10 @@ git commit -m "feat(ci): classify exact revisions"
 - Modify: `controls/ci-control-manifest.json`
 - Modify: `scripts/safeguard-diagnostics.ts`
 - Modify: `tests/scripts/safeguard-diagnostics.test.ts`
+- Modify when the owning bead requires it: `scripts/lib/ci-control/manifest.ts`
+- Modify when the owning bead requires it: `scripts/lib/ci-control/reasons.ts`
+- Modify when the owning bead requires it: native repository-hygiene/publication entrypoints
+  and their existing companion tests
 
 **Interfaces:**
 
@@ -400,39 +418,78 @@ export interface RefVerificationV1 {
 
 export function parsePrePushInput(input: string): RefUpdateV1[];
 export function verifyOutgoingRefs(cwd: string, updates: RefUpdateV1[]): RefVerificationV1[];
-export function inspectHookInstallation(cwd: string): ControlResultV1;
+export function inspectHookInstallation(cwd: string): HookIdentityReceiptV1;
 ```
 
-- [ ] **Step 1: Replace skip-expecting tests with RED exact-ref, deletion-policy, and workspace-accounting tests**
+CP-H1a emits one bounded native receipt. It must not fabricate a `ControlResultV1` before
+the supervised execution kernel can construct its precondition and terminal-attempt
+evidence. CP-F4 later imports the native receipt through the canonical result adapter and
+renderer.
 
-Preserve parsing tests that remain valid. Add multi-ref, missing object, non-fast-forward ambiguity, ref-name privacy, head movement, foreign hooks path, byte mismatch, and repository-relative hook installation fixtures. Add an ignored named plan omitted from a stash/archive, unexpected staged/generated file, partially staged file, intent-to-add, assume-unchanged/skip-worktree, symlink/type/mode change, and exact planned-patch-set neighbor.
+- [x] **Step 1 (CP-H1a): Write RED hook-identity tests**
 
-- [ ] **Step 2: Prove RED**
+Cover a foreign absolute linked-worktree path even when bytes match, canonical relative
+`.husky`, absolute-current-but-nonportable, escaping path, symlinked ancestor/file, missing
+installed file, byte mismatch, executable-mode mismatch, committed source omission/type/
+mode error, unexpected entry, helper drift, hardlinks, host-native execute denial, `HEAD`
+ABA movement, untrusted `PATH`, launcher/implementation identity, receipt tampering,
+duplicate JSON keys, byte limits, public-output redaction, and proof that the guard does not
+write config, copy hooks, or change modes.
+
+- [x] **Step 2 (CP-H1a): Prove RED**
 
 ```bash
 bash scripts/run-with-pinned-npm.sh test -- \
-  tests/scripts/pre-push-guard.test.ts \
   tests/scripts/hooks-installed-guard.test.ts \
   --pool=forks --fileParallelism=false --retry=0
 ```
 
-- [ ] **Step 3: Implement exact per-ref verification**
+- [x] **Step 3 (CP-H1a): Implement native hook-identity inspection in report-only mode**
+
+Use one approved absolute Git launcher and bind both launcher and selected implementation
+digests. Use Git's resolved hook path, exact committed tree entries, descriptor-bound
+regular-file reads, host-native read/execute authorization, single-link ownership, exact
+directory-set equality for the three entrypoints plus one helper, CWD-bound child
+enumeration tied back to the opened root identity, terminal inode/root revalidation, exact
+40-hex object bindings, and a bounded `HEAD`/selected-ref reflog lease that detects ABA movement. A
+foreign/missing/escaping/symlinked/hardlinked/mismatched installation, changed lineage, or
+unavailable proof is `INCONCLUSIVE/2`; a deterministically invalid committed hook contract
+is `BLOCK/1`; exact stable current-worktree identity is `PASS/0`. The embedded evidence
+digest covers canonical receipt content with the digest field omitted; transport bytes are
+serialized once with exactly one newline. Emit no absolute path or raw Git error. Never
+install, copy, `chmod`, or change Git configuration. The canary remains report-only and
+does not claim remote enforcement or resistance to a privileged actor that rewrites both a
+ref and its reflog evidence.
+
+- [ ] **Step 4 (CP-H1b): Add the strict parser and manifest-owned ref policy**
+
+Replace invalid deletion fixtures with Git's actual `(delete)` plus zero-OID shape. Add
+exact-four-field, input byte/count, lowercase full-OID, zero/nonzero combination, duplicate,
+remote identity, new-ref base, annotated-tag, deletion, force-update, and private/control-
+character tests. Unknown policy or unavailable graph evidence is inconclusive. No scratch
+deletion is safe until the manifest schema names it.
+
+- [ ] **Step 5 (CP-H1c): Add native exact-object entrypoints**
+
+Extend the canonical repository-hygiene and publication owners to read explicit Git objects
+and outgoing histories. Reuse their native scanners, codes, serializers, and exception
+ownership. Prove a secret added then removed in the outgoing range still blocks and a safe
+`HEAD` cannot authorize a different unsafe outgoing OID.
+
+- [ ] **Step 6 (CP-H1d): Implement exact per-ref verification and atomic cutover**
 
 Pass each `localOid`, `remoteOid`, and ref identity into the classifier and selected lower-level scanners. Revalidate the local ref still resolves to `localOid` immediately before allowing transport. Multi-ref push passes only if every row passes.
 
-- [ ] **Step 4: Implement hook identity inspection**
+Require exact equality between parsed ref updates and terminal observations. Pass Git's
+remote name/location as bounded data, preserve child exit `1` versus `2`, prove owned
+children terminated, and revalidate each named local ref. Only this bead wires the new
+authoritative path into `.husky/pre-push`; prior beads remain additive canaries.
 
-Resolve `core.hooksPath`, reject missing/foreign/escaping paths or byte mismatch, and provide a non-destructive remediation command. Do not install, overwrite, or mutate hooks automatically.
-
-- [ ] **Step 5: Implement explicit workspace-set reconciliation**
-
-Before any transition, record all workspace sets and exact named patch members. After stash/archive/restore, prove every named member and its staged/unstaged/type/mode state survived and no unrelated ignored or generated path entered the patch. Preserve partial staging. Missing preservation evidence is inconclusive.
-
-- [ ] **Step 6: Wire canonical commands and rich errors**
+- [ ] **Step 7: Wire canonical commands and rich errors**
 
 Add `guard:hooks-installed`; make the pre-push hook consume exact stdin and preserve child exit `1` versus `2`. Replace raw `Error.message` output with registered sanitized cause codes and ordered remediation.
 
-- [ ] **Step 7: Verify GREEN and surrounding guards**
+- [ ] **Step 8: Verify GREEN and surrounding guards**
 
 ```bash
 bash scripts/run-with-pinned-npm.sh test -- \
@@ -446,9 +503,12 @@ npm run typecheck:scripts
 git diff --check
 ```
 
-- [ ] **Step 8: Independent review and commit**
+- [ ] **Step 9: Independent review and commit each canary bead**
 
 ```bash
+git commit -m "feat(ci): inspect repository hook identity"
+git commit -m "feat(ci): define exact ref update policy"
+git commit -m "feat(ci): scan exact outgoing objects"
 git commit -m "fix(ci): bind hooks to outgoing revisions"
 ```
 
