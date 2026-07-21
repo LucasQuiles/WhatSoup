@@ -349,7 +349,11 @@ describe('createPrimaryModelProbeAdapters', () => {
   it('uses the default OpenCode child environment builder without inheriting protected keys', async () => {
     const previous = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = 'sk-test-secret';
-    const probeBinaryCommand = vi.fn(async () => ({
+    const probeBinaryCommand = vi.fn(async (
+      _binary: string,
+      _args: string[],
+      _env: NodeJS.ProcessEnv,
+    ) => ({
       status: 'ok' as const,
       output: '{"type":"message","role":"assistant","content":"OK"}',
     }));
