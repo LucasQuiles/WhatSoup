@@ -889,10 +889,18 @@ def test_selector_setup_read_failure_kills_and_reaps_the_process_group(
     assert spawned[0].poll() is not None
     with pytest.raises(ProcessLookupError):
         os.kill(spawned[0].pid, 0)
+    # The child records its PID with `printf ... > "$HOME/runner.pid"`, so the
+    # shell's redirection creates the file before printf writes into it. Once
+    # the injected selector failure kills the group, that leaves a window where
+    # the file exists but is still empty — the child never got far enough to
+    # record a PID, which is the same not-applicable case the exists() check
+    # already tolerated, not a reaping failure. Reading it unguarded made this
+    # test flaky on loaded runners (`int('')` -> ValueError).
     pid_file = runner.private_workspace / "home/runner.pid"
-    if pid_file.exists():
+    recorded_pid = pid_file.read_text().strip() if pid_file.exists() else ""
+    if recorded_pid:
         with pytest.raises(ProcessLookupError):
-            os.kill(int(pid_file.read_text()), 0)
+            os.kill(int(recorded_pid), 0)
 
 
 def test_exact_cap_is_accepted_and_never_marked_truncated(tmp_path: Path) -> None:

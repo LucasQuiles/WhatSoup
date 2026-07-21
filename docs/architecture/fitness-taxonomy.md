@@ -74,9 +74,6 @@ rules into hooks, and semantic or human rules into the SDLC review flow.
 | `hygiene.commit-author` | mechanical | block | guard, ci | Reject placeholder or tool-generated commit author identities. |
 | `hygiene.internal-labels` | mechanical | block | guard | Extend existing repo hygiene coverage for internal planning labels. |
 | `hygiene.pr-scope-coherence` | semantic | advisory | sdlc | Keep PR title type and diff scope aligned. |
-| `hygiene.no-wa-jid-literal-in-generic-ui` | mechanical | block | guard, ci | Block new WhatsApp JID literals (`@s.whatsapp.net`, `@g.us`) in generic UI/ops surfaces (console + deploy/scripts); existing occurrences ratchet-baselined. |
-| `hygiene.no-whatsapp-copy-in-generic-ui` | mechanical | block | guard, ci | Block new WhatsApp-presuming copy in generic console components; per-transport copy variants instead. |
-| `hygiene.no-health-whatsapp-key-read` | mechanical | block | guard, ci | Block new direct `health.whatsapp` key reads in console; reads go through the generic transport-health accessor with legacy fallback. |
 
 ## Test
 
@@ -151,7 +148,7 @@ disagree (`| rule | count |` rows below are machine-checked):
 | `arch.ssot-lid-reads` | 6 | `scripts/ssot-pattern-guard.ts` |
 | `arch.ssot-jid-construction` | 7 | `scripts/ssot-pattern-guard.ts` |
 | `arch.ssot-name-ladder` | 5 | `scripts/ssot-pattern-guard.ts` |
-| `arch.ssot-phone-shape` | 9 | `scripts/ssot-pattern-guard.ts` |
+| `arch.ssot-phone-shape` | 7 | `scripts/ssot-pattern-guard.ts` |
 | `arch.ssot-presentation-literals` | 0 | `scripts/ssot-pattern-guard.ts` (pure block) |
 | `arch.ring-boundaries` | 57 | `scripts/ring-boundary-guard.ts` (ratchet, not yet a pure block) |
 

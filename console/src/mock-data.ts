@@ -468,6 +468,122 @@ export const MOCK_LINES: LineInstance[] = [
     chatCounts: { chats: 0, groups: 0 },
     tokenUsage: { input: 0, output: 0 },
   },
+
+  // ── signal-relay ── passive / signal transport / online
+  // Demonstrates the generic transport health block (S17). kind='signal',
+  // selfId is the Signal UUID (not a phone JID). The legacy whatsapp block
+  // is omitted — non-Baileys lines don't emit it. compute-kpis reads
+  // transport-first with a whatsapp fallback.
+  {
+    name: 'signal-relay',
+    phone: '+1 555-0200',
+    mode: 'passive',
+    provider: 'claude-cli',
+    status: 'online',
+    accessMode: 'allowlist',
+    healthPort: 3200,
+    uptime: uptimeStr(86400),
+    messagesTotal: 1247,
+    health: {
+      status: 'ok',
+      uptime_seconds: 86400,
+      messages_total: 1247,
+      transport: {
+        kind: 'signal',
+        connected: true,
+        selfId: 'a1b2c3d4-1234-1234-1234-a1b2c3d4e5f6',
+        connection: { state: 'connected' },
+      },
+      sqlite: { messages_total: 1247, schema_version: 5 },
+      runtime: {
+        passive: { unreadCount: 3, lastActivityAt: ago(600) },
+      },
+      instance: {
+        name: 'signal-relay',
+        mode: 'passive',
+        accessMode: 'allowlist',
+        socketPath: '/run/whatsoup/signal-relay.sock',
+        provider: 'claude-cli',
+      },
+    },
+    heartbeat: hb([
+      'up','up','up','up','up','up','up','up','up','up',
+      'up','up','up','up','up','up','up','up','up','up',
+    ]),
+    lastActive: ago(90),
+    error: null,
+    unread: 3,
+    messagesToday: 18,
+    messageStats: { sent: 4, received: 14, images: 0, audio: 0, documents: 0 },
+    group: 'Personal',
+    linkedStatus: 'linked',
+    totalSessions: 0,
+    models: null,
+    sandboxPerChat: false,
+    chatCounts: { chats: 12, groups: 1 },
+    tokenUsage: { input: 42000, output: 9000 },
+  },
+
+  // ── imessage-bridge ── agent / imessage transport / online
+  // selfId is the AppleID (not a phone JID). Generic transport block only.
+  {
+    name: 'imessage-bridge',
+    phone: '+1 555-0201',
+    mode: 'agent',
+    provider: 'claude-cli',
+    status: 'online',
+    accessMode: 'denyAll',
+    healthPort: 3201,
+    uptime: uptimeStr(172800),
+    messagesTotal: 3891,
+    health: {
+      status: 'ok',
+      uptime_seconds: 172800,
+      messages_total: 3891,
+      transport: {
+        kind: 'imessage',
+        connected: true,
+        selfId: 'ops@heal.internal',
+        connection: { state: 'connected' },
+      },
+      sqlite: { messages_total: 3891, schema_version: 5 },
+      runtime: {
+        agent: {
+          activeSessions: 1,
+          lastSessionStatus: 'idle',
+          lastSessionStartedAt: ago(3600),
+        },
+      },
+      instance: {
+        name: 'imessage-bridge',
+        mode: 'agent',
+        accessMode: 'denyAll',
+        socketPath: '/run/whatsoup/imessage-bridge.sock',
+        provider: 'claude-cli',
+      },
+    },
+    heartbeat: hb([
+      'up','up','up','up','up','up','up','up','up','up',
+      'up','up','up','up','up','up','up','up','up','up',
+    ]),
+    lastActive: ago(240),
+    error: null,
+    activeSessions: 1,
+    messagesToday: 42,
+    messageStats: { sent: 12, received: 30, images: 2, audio: 0, documents: 1 },
+    group: 'Work',
+    linkedStatus: 'linked',
+    totalSessions: 47,
+    models: {
+      conversation: 'claude-sonnet-4-5',
+      extraction: 'claude-haiku-4-5',
+      validation: 'claude-haiku-4-5',
+      fallback: 'claude-sonnet-4-5',
+    },
+    sandboxPerChat: false,
+    chatCounts: { chats: 23, groups: 2 },
+    tokenUsage: { input: 880000, output: 310000 },
+  },
 ];
 
 // ---------------------------------------------------------------------------

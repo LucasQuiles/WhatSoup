@@ -15,6 +15,8 @@ export const DOMAIN_LID = 'lid';
 export const DOMAIN_GROUP = 'g.us';
 /** Bare domain for SMS transport JIDs (after the @) */
 export const DOMAIN_SMS = 'sms';
+/** Bare domain for Signal transport JIDs (after the @) */
+export const DOMAIN_SIGNAL = 'signal';
 /** Bare domain for iMessage transport JIDs (after the @) */
 export const DOMAIN_IMESSAGE = 'imessage';
 
@@ -26,6 +28,8 @@ export const JID_LID = `@${DOMAIN_LID}`;
 export const JID_GROUP = `@${DOMAIN_GROUP}`;
 /** SMS transport JID suffix */
 export const JID_SMS = `@${DOMAIN_SMS}`;
+/** Signal transport JID suffix */
+export const JID_SIGNAL = `@${DOMAIN_SIGNAL}`;
 /** iMessage transport JID suffix */
 export const JID_IMESSAGE = `@${DOMAIN_IMESSAGE}`;
 
@@ -79,6 +83,22 @@ export function fromSmsJid(jid: string): string {
 }
 
 /**
+ * Build a Signal JID from a Signal identifier (UUID or E.164 address).
+ * Idempotent: already-suffixed addresses are returned as-is.
+ */
+export function toSignalJid(address: string): string {
+  return address.endsWith(JID_SIGNAL) ? address : `${address}${JID_SIGNAL}`;
+}
+
+/**
+ * Strip the Signal JID suffix from an address (e.g. '<uuid>@signal' → '<uuid>').
+ * Tolerates an already-bare address.
+ */
+export function fromSignalJid(jid: string): string {
+  return jid.endsWith(JID_SIGNAL) ? jid.slice(0, -JID_SIGNAL.length) : jid;
+}
+
+/**
  * Build an iMessage JID from an iMessage identifier (AppleID email, E.164,
  * or chat GUID). Idempotent: already-suffixed addresses are returned as-is.
  */
@@ -111,6 +131,11 @@ export function isGroupJid(jid: string): boolean {
   return jid.endsWith(JID_GROUP);
 }
 
+/** Check if a JID is a Signal transport JID (@signal). */
+export function isSignalJid(jid: string | null | undefined): boolean {
+  return !!jid && jid.endsWith(JID_SIGNAL);
+}
+
 /** Check if a JID is an iMessage transport JID (@imessage). */
 export function isImessageJid(jid: string | null | undefined): boolean {
   return !!jid && jid.endsWith(JID_IMESSAGE);
@@ -135,9 +160,17 @@ export function isSmsJid(jid: string | null | undefined): boolean {
  * identity's privileges (QR-143). Deny-side (block) checks intentionally do NOT
  * use this — a blocked number must stay blocked across every transport.
  */
-export function isWhatsAppAuthenticatedJid(jid: string | null | undefined): boolean {
-  return isPnJid(jid) || isLidJid(jid);
+export function isAuthenticatedSenderJid(jid: string | null | undefined): boolean {
+  return isPnJid(jid) || isLidJid(jid) || isSignalJid(jid) || isImessageJid(jid);
 }
+
+/**
+ * Back-compat alias for the old WhatsApp-only name. New code should call
+ * isAuthenticatedSenderJid — Signal Protocol and AppleID-verified iMessage
+ * senders are authenticated at the protocol level, same trust tier as
+ * WhatsApp PN/LID senders.
+ */
+export const isWhatsAppAuthenticatedJid = isAuthenticatedSenderJid;
 
 // ── JID parsing ─────────────────────────────────────────────────────────────
 
