@@ -34,6 +34,17 @@ vi.mock('../../src/config.ts', () => ({
 
 vi.mock('../../src/logger.ts', async () => (await import('../helpers/logger-mock.ts')).loggerMock());
 
+const lookupCredentialMock = vi.hoisted(() => vi.fn(
+  (service: string) => service === 'whatsoup-health-token'
+    ? process.env.WHATSOUP_HEALTH_TOKEN ?? null
+    : null,
+));
+
+vi.mock('../../src/lib/keyring.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/lib/keyring.ts')>();
+  return { ...actual, lookupCredential: lookupCredentialMock };
+});
+
 // ---------------------------------------------------------------------------
 // Imports
 // ---------------------------------------------------------------------------
@@ -152,6 +163,7 @@ describe('POST /heal', () => {
   const TOKEN = 'test-heal-token';
 
   beforeEach(async () => {
+    lookupCredentialMock.mockClear();
     db = makeDb();
     process.env.WHATSOUP_HEALTH_TOKEN = TOKEN;
     ({ server, port } = await buildTestServer(makeDeps(db, { runtime: makeRuntime() as Runtime })));
