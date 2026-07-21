@@ -1198,17 +1198,14 @@ class ReplayReceiptTestCase(unittest.TestCase):
         self.assertIn(incoming_identity, final["processedEvents"])
         self.assertLessEqual(len(final["processedEvents"]), 2)
 
-    def test_settled_flap_ref_cleanup_persists_before_stale_early_exit(self) -> None:
-        os.environ["BOT_ERRORS_FLAP_DETECTION"] = "1"
-        os.environ["BOT_ERRORS_FLAP_TRIP_THRESHOLD"] = "99"
-        self.mod = _load_module()
+    def test_load_prunes_settled_flap_refs_before_receipt_capacity_protection(self) -> None:
         self.mod.PROCESSED_EVENT_CAPACITY = 2
-        self.mod.FLAP_EVENT_REFERENCE_LIMIT = 2
         paths = self.mod.setup_dirs()
         now = int(time.time())
         settled_events = [
-            _event(now - 2, event_id="stale-settled-a", schema_version=1),
-            _event(now - 1, event_id="stale-settled-b", schema_version=1),
+            _event(now - 3, event_id="load-settled-a", schema_version=1),
+            _event(now - 2, event_id="load-settled-b", schema_version=1),
+            _event(now - 1, event_id="load-settled-c", schema_version=1),
         ]
         settled_identities = [
             self.mod.event_replay_identity_digest(
@@ -1222,45 +1219,45 @@ class ReplayReceiptTestCase(unittest.TestCase):
             "openIncidents": {},
             "lastSentAt": {},
             "processedEvents": {
-                identity: _receipt(identity, now - 2 + index)
+                identity: _receipt(identity, now - 3 + index)
                 for index, identity in enumerate(settled_identities)
             },
             "flapState": {
                 key: {
-                    "tripTimestamps": [now - 2, now - 1],
-                    "cumulativeCount": 2,
+                    "tripTimestamps": [now - 3, now - 2, now - 1],
+                    "cumulativeCount": 3,
                     "eventIdentityDigests": settled_identities,
                 }
             },
-            "closedHistory": [{
-                "incidentKey": key,
-                "receiptTime": now,
-                "closedAt": now,
-                "closingObservationTime": now,
-                "closingEventIdentityDigest": "f" * 64,
-            }],
         })
-        incoming = _event(now, event_id="stale-after-settled-flap", schema_version=1)
-        normalized = self.mod.normalize_dispatch_observation(incoming)
-        incoming_identity = self.mod.event_replay_identity_digest(incoming, normalized)
-        path = self.write_event(paths, "stale-after-settled-flap.json", incoming)
 
-        with patch.object(self.mod, "send_whatsapp") as send:
-            self.assertEqual(self.mod.flap_scan_outbox(paths), 0)
-            process_result = self.mod.process_one(path, paths)
+        loaded = self.mod.load_incident_state(paths)
 
-        self.assertEqual(process_result, (True, "stale_out_of_order"), process_result)
-        send.assert_not_called()
-        final = self.mod.load_incident_state(paths)
-        self.assertEqual(final["flapState"][key]["eventIdentityDigests"], [])
-        self.assertEqual(final["processedEvents"][incoming_identity]["decision"], "stale_out_of_order")
+        self.assertEqual(loaded["flapState"][key]["eventIdentityDigests"], [])
+        self.assertEqual(len(loaded["processedEvents"]), 2)
+        persisted_before_save = json.loads(
+            paths["incident_state"].read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            persisted_before_save["flapState"][key]["eventIdentityDigests"],
+            settled_identities,
+        )
+        self.assertEqual(len(persisted_before_save["processedEvents"]), 3)
 
-    def test_settled_flap_ref_cleanup_save_failure_retains_original_state(self) -> None:
-        os.environ["BOT_ERRORS_FLAP_DETECTION"] = "1"
-        self.mod = _load_module()
+        self.mod.save_incident_state(paths, loaded)
+
+        persisted_after_save = json.loads(
+            paths["incident_state"].read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            persisted_after_save["flapState"][key]["eventIdentityDigests"], []
+        )
+        self.assertEqual(len(persisted_after_save["processedEvents"]), 2)
+
+    def test_stale_transaction_save_failure_retains_raw_authority_and_queue(self) -> None:
         paths = self.mod.setup_dirs()
         now = int(time.time())
-        settled = _event(now - 1, event_id="cleanup-save-settled", schema_version=1)
+        settled = _event(now - 1, event_id="stale-save-settled", schema_version=1)
         settled_normalized = self.mod.normalize_dispatch_observation(settled)
         settled_identity = self.mod.event_replay_identity_digest(settled, settled_normalized)
         key = self.mod.incident_key(settled)
@@ -1276,23 +1273,45 @@ class ReplayReceiptTestCase(unittest.TestCase):
                     "eventIdentityDigests": [settled_identity],
                 }
             },
+            "closedHistory": [{
+                "incidentKey": key,
+                "receiptTime": now,
+                "closedAt": now,
+                "closingObservationTime": now,
+                "closingEventIdentityDigest": "f" * 64,
+            }],
         })
-        incoming = _event(now, event_id="cleanup-save-incoming", schema_version=1)
-        path = self.write_event(paths, "cleanup-save-incoming.json", incoming)
+        incoming = _event(now, event_id="stale-save-incoming", schema_version=1)
+        incoming_normalized = self.mod.normalize_dispatch_observation(incoming)
+        incoming_identity = self.mod.event_replay_identity_digest(
+            incoming, incoming_normalized
+        )
+        path = self.write_event(paths, "stale-save-incoming.json", incoming)
 
-        with patch.object(
-            self.mod,
-            "save_incident_state",
-            side_effect=OSError("injected settled-reference cleanup save failure"),
-        ) as save:
-            self.assertEqual(self.mod.flap_scan_outbox(paths), 0)
+        with (
+            patch.object(self.mod, "send_whatsapp") as send,
+            patch.object(
+                self.mod,
+                "save_incident_state",
+                side_effect=OSError("injected stale transaction save failure"),
+            ) as save,
+        ):
+            result = self.mod.process_one(path, paths)
 
-        self.assertEqual(save.call_count, 1, "cleanup persistence fault must fire exactly once")
+        self.assertEqual(
+            result,
+            (False, "stale_receipt_persist_failed: injected stale transaction save failure"),
+        )
+        self.assertEqual(save.call_count, 1, "stale transaction save fault must fire once")
+        send.assert_not_called()
         self.assertTrue(path.exists())
+        self.assertEqual(list(paths["processing"].iterdir()), [])
         persisted = json.loads(paths["incident_state"].read_text(encoding="utf-8"))
         self.assertEqual(
             persisted["flapState"][key]["eventIdentityDigests"], [settled_identity]
         )
+        self.assertEqual(set(persisted["processedEvents"]), {settled_identity})
+        self.assertNotIn(incoming_identity, persisted["processedEvents"])
 
     def test_direct_process_prunes_settled_flap_refs_when_detection_is_disabled(self) -> None:
         self.mod.PROCESSED_EVENT_CAPACITY = 2

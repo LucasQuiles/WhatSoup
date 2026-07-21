@@ -3960,18 +3960,6 @@ def flap_scan_outbox(paths: dict[str, Path]) -> int:
             identity_digest = event_replay_identity_digest(event, normalized)
             processed = incident_state.get("processedEvents")
             processed_identities = set(processed) if isinstance(processed, dict) else set()
-            _, settled_references_removed = prune_settled_flap_references(
-                flap_state, processed_identities
-            )
-            if settled_references_removed:
-                try:
-                    save_incident_state(paths, incident_state)
-                except Exception as exc:
-                    append_dispatch_log(paths, {
-                        "type": "flap_settled_reference_cleanup_failed",
-                        "error": str(exc),
-                    })
-                    return emitted
             if isinstance(processed, dict) and identity_digest in processed:
                 continue
             if stale_after_retained_close(incident_state, normalized):
