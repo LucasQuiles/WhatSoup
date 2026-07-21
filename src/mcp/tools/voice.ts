@@ -10,6 +10,10 @@ import { synthesizeSpeech } from '../../runtimes/chat/providers/elevenlabs.ts';
 import { writeTempFile } from '../../core/media-download.ts';
 import { createChildLogger } from '../../logger.ts';
 import { errorMessage } from '../../lib/error-message.ts';
+import {
+  isUnsupportedTransportOperation,
+  unsupportedToolError,
+} from '../../transport/unsupported-operation.ts';
 
 const log = createChildLogger('mcp:voice');
 
@@ -84,6 +88,13 @@ export function registerVoiceTools(
           seconds: result.duration,
         });
       } catch (err) {
+        // Voice notes are media; transports with no media support (Signal v1,
+        // SMS, iMessage) throw UnsupportedTransportOperationError here. Surface
+        // it as a distinct error code so the agent doesn't retry an op the
+        // transport will never support.
+        if (isUnsupportedTransportOperation(err)) {
+          return toolError(unsupportedToolError('sendMedia'));
+        }
         const message = errorMessage(err);
         log.error({ err, chatJid }, 'failed to send voice note');
         return errorResult('send_failed', `Failed to send voice note: ${message}`);

@@ -176,5 +176,37 @@ describe('voice tools', () => {
       const data = JSON.parse(result.content[0].text);
       expect(data.error).toBe('invalid_input');
     });
+
+    it('returns unsupported_transport (not send_failed) when transport does not support voice', async () => {
+      // Signal / Twilio / iMessage all throw UnsupportedTransportOperationError
+      // from sendMedia. Without classification this surfaces as a generic
+      // `send_failed` error, which the agent may retry — masking the fact
+      // that the transport will NEVER support voice notes.
+      mockSynthesize.mockResolvedValueOnce({
+        buffer: Buffer.from('audio'),
+        duration: 3,
+        mimeType: 'audio/mpeg',
+      });
+
+      // Swap the connection's sendMedia to throw the typed error.
+      const freshRegistry = new ToolRegistry();
+      const unsupportedConnection = {
+        sendMedia: vi.fn().mockRejectedValue(
+          new (await import('../../../src/transport/signal/connection-bridge.ts'))
+            .UnsupportedTransportOperationError('sendMedia'),
+        ),
+      } as unknown as VoiceDeps['connection'];
+      registerVoiceTools(freshRegistry, { connection: unsupportedConnection, db });
+
+      const result = await freshRegistry.call(
+        'send_voice_reply',
+        { text: 'Hello' },
+        chatSession('111'),
+      );
+
+      const data = JSON.parse(result.content[0].text);
+      expect(data.error).toBe('unsupported_transport');
+      expect(String(data.message)).toMatch(/sendMedia/i);
+    });
   });
 });

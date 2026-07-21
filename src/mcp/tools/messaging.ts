@@ -37,10 +37,33 @@ import { formatMentions } from '../../core/mentions.ts';
 import type { MessageRow } from '../../core/messages.ts';
 import type { ResolutionStrategy } from '../../runtimes/agent/runtime.ts';
 import { errorMessage } from '../../lib/error-message.ts';
+import {
+  isUnsupportedTransportOperation,
+  unsupportedToolError,
+} from '../../transport/unsupported-operation.ts';
 
 // ---------------------------------------------------------------------------
 // Error sanitization — prevent raw API/protocol errors from leaking to agents
 // ---------------------------------------------------------------------------
+
+/**
+ * Classify a thrown send error and return the appropriate tool-error payload.
+ *
+ * `unsupported_transport` is a distinct, stable error code so the agent LLM
+ * can learn that the active transport (e.g. Signal) does not support this
+ * operation and stop retrying it. All other errors fall through to the
+ * generic sanitized message. `operation` is included verbatim in the
+ * unsupported message so the agent learns WHICH method was unsupported.
+ */
+function classifySendError(
+  err: unknown,
+  operation: string,
+): import('../types.ts').ToolErrorPayload {
+  if (isUnsupportedTransportOperation(err)) {
+    return toolError(unsupportedToolError(operation));
+  }
+  return errorResult(sanitizeError(err));
+}
 
 function sanitizeError(err: unknown): string {
   const raw = errorMessage(err);
@@ -319,7 +342,7 @@ export function registerMessagingTools(
         if (err instanceof Error && (err.message.startsWith('chatJid "') || err.message.startsWith('Invalid chatJid "'))) {
           return errorResult(err.message);
         }
-        return errorResult(sanitizeError(err));
+        return classifySendError(err, 'sendRaw');
       }
 
       routeDivertToOps(guardDecision, deps.instanceName);
@@ -372,7 +395,7 @@ export function registerMessagingTools(
         if (linkPreviewMode === 'off') content['linkPreview'] = null;
         await connection.sendRaw(chatJid, content);
       } catch (err) {
-        return errorResult(sanitizeError(err));
+        return classifySendError(err, 'sendRaw');
       }
 
       routeDivertToOps(replyDecision, deps.instanceName);
@@ -430,7 +453,7 @@ export function registerMessagingTools(
             },
           });
         } catch (err) {
-          return errorResult(sanitizeError(err));
+          return classifySendError(err, 'sendRaw');
         }
         return { sent: true, emoji, messageId, resolved: 'last_inbound' };
       }
@@ -450,7 +473,7 @@ export function registerMessagingTools(
           },
         });
       } catch (err) {
-        return errorResult(sanitizeError(err));
+        return classifySendError(err, 'sendRaw');
       }
 
       return { sent: true, emoji, messageId };
@@ -502,7 +525,7 @@ export function registerMessagingTools(
           },
         });
       } catch (err) {
-        return errorResult(sanitizeError(err));
+        return classifySendError(err, 'sendRaw');
       }
 
       routeDivertToOps(editDecision, deps.instanceName);
@@ -538,7 +561,7 @@ export function registerMessagingTools(
           },
         });
       } catch (err) {
-        return errorResult(sanitizeError(err));
+        return classifySendError(err, 'sendRaw');
       }
 
       return { deleted: true, messageId };
@@ -581,7 +604,7 @@ export function registerMessagingTools(
         if (viewOnce) content['viewOnce'] = true;
         await connection.sendRaw(chatJid, content);
       } catch (err) {
-        return errorResult(sanitizeError(err));
+        return classifySendError(err, 'sendRaw');
       }
 
       return { sent: true, latitude, longitude };
@@ -631,7 +654,7 @@ export function registerMessagingTools(
         if (viewOnce) content['viewOnce'] = true;
         await connection.sendRaw(chatJid, content);
       } catch (err) {
-        return errorResult(sanitizeError(err));
+        return classifySendError(err, 'sendRaw');
       }
 
       return { sent: true, count: contactCards.length };
@@ -756,7 +779,7 @@ export function registerMessagingTools(
 
         return { sent: true, pollId: result.waMessageId, question: safeQuestion, options: safeOptions, selectableCount: resolvedSelectableCount };
       } catch (err) {
-        return errorResult(sanitizeError(err));
+        return classifySendError(err, 'sendPollMessage');
       }
     },
   });
@@ -805,7 +828,7 @@ export function registerMessagingTools(
           time: pin ? durationSeconds[duration] : undefined,
         });
       } catch (err) {
-        return errorResult(sanitizeError(err));
+        return classifySendError(err, 'sendRaw');
       }
 
       return { pinned: pin, messageId, duration: pin ? duration : undefined };
