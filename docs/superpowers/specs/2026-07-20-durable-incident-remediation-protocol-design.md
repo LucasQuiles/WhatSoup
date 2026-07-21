@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-20
 
-**Status:** Pending review — local design only; implementation, live cleanup, deployment, service changes, and outbound messaging remain separately gated
+**Status:** Approved for implementation planning — local design only; implementation, live cleanup, deployment, service changes, and outbound messaging remain separately gated
 
 **Audited WhatSoup base:** `6d38d9f0fa3698e8ae1c14bfde69b2ac503eb0e0`
 
@@ -36,7 +36,7 @@ The protocol observes and classifies automatically, but it does not broaden muta
 
 ### 3.1 Inline proposal evidence
 
-A read-only fleet audit found 736 open proposed beads across three agent instances. Reclassification with a start-anchored imperative grammar retained four intended commands and rejected 732 report-like messages. One instance contained 699 proposals, of which 684 were overdue. All audited inline rows lacked `source_message_pk` linkage.
+A read-only fleet audit and later recapture found 737 open proposed beads across three agent instances. Reclassification with a start-anchored imperative grammar retained four intended commands and rejected 733 report-like messages. The largest instance grew from 699 to 700 proposals while monitoring continued; 684 were already overdue at the initial audit. All audited inline rows lacked `source_message_pk` linkage.
 
 The dominant rejected categories contained imperative words in status prose, especially `schedule`, `follow up`, and `watch for`. The current extractor uses unanchored regular expressions and the runtime applies them to the complete admin-authored message body.
 
@@ -63,7 +63,7 @@ The live channel continues to show this pattern: a release-drift source accumula
 
 ### 3.3 Cleanup evidence
 
-The 732 false candidates are deterministically separable by the approved grammar, while four audited candidates remain valid. Existing bead status changes already append events transactionally.
+The 733 false candidates are deterministically separable by the approved grammar, while four audited candidates remain valid. Existing bead status changes already append events transactionally.
 
 **H4:** The false backlog can be retired reversibly without deleting data or changing valid proposals.
 
@@ -422,7 +422,7 @@ Build a privacy-safe fixture corpus from synthetic messages that preserve the st
 
 Acceptance:
 
-- all 732 audited false-candidate structures reject;
+- all 733 audited false-candidate structures reject;
 - all four audited intended-command structures admit;
 - each rejection reports the expected bounded reason;
 - normalization does not change the stored body.
