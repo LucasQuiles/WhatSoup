@@ -43,6 +43,12 @@ export interface SignalConnectionStateSnapshotOverrides {
    * supplied, replaces the synthesized 2-event timeline.  slice 2.
    */
   recentLifecycleEvents?: readonly CredentialLifecycleEvent[];
+  /** Consecutive transient failure count (Phase 4 reconnect engine). */
+  reconnectAttempts?: number;
+  /** Current reconnect phase (Phase 4 reconnect engine). */
+  reconnectPhase?: 'backoff' | 'cooldown' | 'retry';
+  /** Epoch-ms of the first failure in the current run, or null. */
+  firstFailureAt?: number | null;
 }
 
 /**
@@ -105,14 +111,18 @@ export function signalConnectionStateSnapshot(
   const recentEvents = opts.recentLifecycleEvents && opts.recentLifecycleEvents.length > 0
     ? opts.recentLifecycleEvents.slice()
     : buildRecentEvents(connected, stateChangedAt, lastDisconnectReason);
+  // Phase 4: surface reconnect engine state (or zeros/nulls when caller doesn't supply).
+  const reconnectAttempts = opts.reconnectAttempts ?? 0;
+  const reconnectPhase = opts.reconnectPhase ?? null;
+  const firstFailureAt = opts.firstFailureAt ?? null;
 
   return {
     state: connected ? 'connected' : 'disconnected',
     connected,
-    reconnectAttempts: 0,
-    reconnectPhase: null,
+    reconnectAttempts,
+    reconnectPhase,
     stateChangedAt,
-    firstFailureAt: null,
+    firstFailureAt: firstFailureAt !== null ? new Date(firstFailureAt).toISOString() : null,
     lastPingAt: null,
     lastPongAt: null,
     lastDisconnectReason,

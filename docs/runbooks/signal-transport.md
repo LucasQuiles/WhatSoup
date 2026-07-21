@@ -160,6 +160,9 @@ timestamp-keyed dedupe set, so a re-delivered envelope never double-emits.
 - Transient daemon failures (`signal-cli socket error`, `ECONNREFUSED`,
   RPC timeout) classify as **transient** in the bot-errors dispatcher and
   ride the long retry budget; they never burn the permanent dead-letter cap.
+  Phase 4 added a reconnect engine to the adapter itself: consecutive
+  transient poll failures escalate `reconnectAttempts` and surface via the
+  snapshot (see "Reconnect engine" below).
 - `signal_cli_unregistered` (daemon reports the account unlinked) is an
   auto-close-protected source: silence is not proof of repair. Re-link
   (`signal-cli link`) and restart the daemon.
@@ -183,11 +186,48 @@ know:
 | `credentialLifecycle.currentAuthBond.status` | `"missing"` — credentials live with signal-cli, not in WhatSoup |
 | `credentialLifecycle.currentAuthBond.issues` | `["signal_credentials_managed_out_of_band_by_signal_cli"]` |
 | `credentialLifecycle.recentEvents` | real accumulated events from the adapter's bounded ring buffer (cap 50). Includes `connect_start`, `connection_open`, `connection_close` (with `reason`), and `device_bond_lost` when the adapter parks at `auth_required` (signal-cli's unlinked-account signal — operator action required) |
+| `reconnectAttempts` | consecutive transient poll failures since the last successful poll (resets on success). Drives the reconnect-engine state |
+| `reconnectPhase` | `'backoff'` (1–2 failures) or `'cooldown'` (3+). Mirrors WhatsApp's phase taxonomy |
+| `firstFailureAt` | ISO timestamp of the first failure in the current run (null when no failures) |
 
 The raw phone number is NEVER emitted into the snapshot. Credential
 introspection requires an RPC round-trip to signal-cli; the snapshot does
 not perform one, so the auth-bond status is a static declaration, not a
 live probe.
+
+#### `device_bond_lost` event
+
+When the signal-cli daemon returns a 401 on a poll (`Unregistered user`,
+`NotRegisteredException`, or `UntrustedIdentityException`), the adapter
+classifies the error as `AuthRequiredError` and transitions to the
+`auth_required` state, stopping the poll loop. That transition is recorded
+in `recentEvents` as a `device_bond_lost` event — distinguishing
+"daemon unreachable" (transient, will retry) from "this device was
+unlinked" (operator must re-link via `signal-cli link` and restart the
+daemon). Dashboards keying on `device_bond_lost` for the WhatsApp side
+work identically for Signal.
+
+#### Reconnect engine (Phase 4)
+
+Consecutive transient poll failures (`ECONNREFUSED`, `ECONNRESET`,
+`ETIMEDOUT`, `ENOTFOUND`, `EPIPE`, `EHOSTUNREACH`, `EAI_AGAIN`, or any
+HTTP 5xx / `ControllableException`) escalate through the reconnect engine:
+
+| State | Condition | Behavior |
+|---|---|---|
+| `backoff` | 1–2 consecutive failures | Counter increments, next poll tick retries |
+| `cooldown` | 3+ consecutive failures | Counter keeps incrementing |
+| `exhausted` (parked) | 10+ consecutive failures (`MAX_RECONNECT_ATTEMPTS`) | Poll timer cleared, lifecycle emits `connection_close` with reason `reconnect-exhausted-after-N-attempts`, operator alert routed via bot-errors dispatcher |
+
+A single successful poll resets `reconnectAttempts`, `firstFailureAt`, and
+returns the phase to `backoff`. Constants mirror the WhatsApp side
+(`MAX_RECONNECT_ATTEMPTS=10`, `BASE_BACKOFF_MS=1000`, `MAX_BACKOFF_MS=60000`).
+
+**Note on backoff delay:** the current engine tracks state and parks at
+exhausted but does NOT insert a `setTimeout`-based exponential delay —
+the existing `pollIntervalMs` already spaces retries. Adding real delay
+insertion is a future enhancement; the parity gap that matters for ops
+dashboards (counters + exhausted state + lifecycle events) is closed.
 
 ## Troubleshooting
 

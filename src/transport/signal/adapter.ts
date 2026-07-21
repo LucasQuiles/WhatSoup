@@ -94,9 +94,24 @@ function isSignalRateLimit(err: PortErrorLike): boolean {
 // signal-cli transient faults — connection blips to the daemon, JVM hiccups,
 // envelope decryption retries that surface as ControllableException with a
 // retryable message.
+//
+// Phase 4: recognize common Node network error codes that surface when the
+// signal-cli daemon is unreachable. Without this, a daemon restart would
+// escalate to PermanentProviderError (instead of the reconnect engine) and
+// burn the bot-errors budget instead of self-healing.
+const TRANSIENT_NETWORK_CODES = new Set([
+  'ECONNREFUSED',   // daemon not running / socket deleted
+  'ECONNRESET',     // daemon killed mid-RPC
+  'ETIMEDOUT',      // RPC timeout (network or JVM pause)
+  'ENOTFOUND',      // DNS resolution failure (TCP mode)
+  'EPIPE',          // socket closed mid-write
+  'EHOSTUNREACH',   // network-level unreachable
+  'EAI_AGAIN',      // temporary DNS failure
+]);
 function isSignalTransient(err: PortErrorLike): boolean {
   if (typeof err.status === 'number' && err.status >= 500) return true;
   if (err.code === 'ControllableException') return true;
+  if (typeof err.code === 'string' && TRANSIENT_NETWORK_CODES.has(err.code)) return true;
   // Network-level failure: no status AND no code = the request never reached
   // signal-cli or signal-cli never replied.
   return err.status === undefined && err.code === undefined;
@@ -190,6 +205,23 @@ export class SignalAdapter
    */
   private static readonly LIFECYCLE_EVENT_CAP = 50;
   private readonly lifecycleEvents: CredentialLifecycleEvent[] = [];
+
+  /**
+   * Reconnect engine state. Phase 4: mirrors WhatsApp's reconnect engine
+   * (MAX_RECONNECT_ATTEMPTS=10, BASE_BACKOFF_MS=1000, MAX_BACKOFF_MS=60000).
+   *
+   * Consecutive transient poll failures escalate through this state. A
+   * successful poll resets it. Hitting MAX_RECONNECT_ATTEMPTS parks the
+   * adapter at 'exhausted' (an AdapterState), stops the poll timer, and
+   * emits a connection_close lifecycle event so the bot-errors dispatcher
+   * can route the alert.
+   */
+  private static readonly MAX_RECONNECT_ATTEMPTS = 10;
+  private static readonly BASE_BACKOFF_MS = 1_000;
+  private static readonly MAX_BACKOFF_MS = 60_000;
+  private reconnectAttemptCount = 0;
+  private reconnectPhaseValue: 'backoff' | 'cooldown' | 'retry' = 'backoff';
+  private firstFailureAtMs: number | null = null;
 
   public readonly channelId: ChannelId;
   private readonly self: ParticipantRef;
@@ -569,16 +601,34 @@ export class SignalAdapter
       const mapped = mapPortError(err, this.channelId, 'pollInbound', this.nextCorrelationId(), 'channel');
       this.safeEmit(this.listeners.error, mapped);
       if (mapped instanceof AuthRequiredError) {
+        // Auth required is a separate code path: signal-cli reports the
+        // account unlinked. Operator action required — no retry escalation.
         if (this.pollTimer !== null) {
           clearInterval(this.pollTimer);
           this.pollTimer = null;
         }
         this.transitionTo({ state: 'auth_required', since: new Date(), reasonCode: 'poll-auth-failure' });
+      } else if (mapped instanceof TransientProviderError) {
+        // Phase 4: escalate through the reconnect engine. Hitting the ceiling
+        // parks at 'exhausted' so the bot-errors dispatcher can alert; below
+        // the ceiling the next poll interval tick tries again (the engine
+        // could insert a setTimeout-based backoff, but the existing poll
+        // interval already provides spacing; the attempt counter + exhausted
+        // state are the parity gap that matters for ops dashboards).
+        this.recordTransientFailure();
       }
+      // RateLimitedError and PermanentProviderError do NOT escalate the
+      // reconnect engine on the poll path — rate limits self-heal on the
+      // next interval tick (the daemon enforces its own pacing), and
+      // permanent errors on a poll are typically a transient envelope-shape
+      // issue that will not recur. AuthRequiredError already handled above.
       return;
     }
 
     if (this.disposed) return;
+
+    // Successful poll — reset the reconnect engine.
+    this.resetReconnectEngine();
 
     let maxTs: number | null = null;
     for (const record of records) {
@@ -588,6 +638,59 @@ export class SignalAdapter
     if (maxTs !== null) {
       this.lastPolledAt = new Date(maxTs);
     }
+  }
+
+  /**
+   * Record a consecutive transient failure. Escalates reconnectAttemptCount
+   * and firstFailureAt. When the count reaches MAX_RECONNECT_ATTEMPTS, parks
+   * the adapter at 'exhausted' and stops the poll timer.
+   */
+  private recordTransientFailure(): void {
+    if (this.firstFailureAtMs === null) {
+      this.firstFailureAtMs = Date.now();
+    }
+    this.reconnectAttemptCount += 1;
+    this.reconnectPhaseValue = this.reconnectAttemptCount >= 3 ? 'cooldown' : 'backoff';
+
+    if (this.reconnectAttemptCount >= SignalAdapter.MAX_RECONNECT_ATTEMPTS) {
+      // Park at exhausted: stop the poll timer so we stop hammering the
+      // daemon, transition state, and let the lifecycle event + bot-errors
+      // dispatcher surface the alert.
+      if (this.pollTimer !== null) {
+        clearInterval(this.pollTimer);
+        this.pollTimer = null;
+      }
+      this.transitionTo({
+        state: 'exhausted',
+        since: new Date(),
+        reasonCode: `reconnect-exhausted-after-${this.reconnectAttemptCount}-attempts`,
+      });
+    }
+  }
+
+  /**
+   * Reset the reconnect engine on a successful poll. Idempotent.
+   */
+  private resetReconnectEngine(): void {
+    if (this.reconnectAttemptCount === 0 && this.firstFailureAtMs === null) return;
+    this.reconnectAttemptCount = 0;
+    this.reconnectPhaseValue = 'backoff';
+    this.firstFailureAtMs = null;
+  }
+
+  /** Public accessor: consecutive transient failure count (Phase 4 reconnect engine). */
+  reconnectAttempts(): number {
+    return this.reconnectAttemptCount;
+  }
+
+  /** Public accessor: current reconnect phase (Phase 4 reconnect engine). */
+  reconnectPhase(): 'backoff' | 'cooldown' | 'retry' {
+    return this.reconnectPhaseValue;
+  }
+
+  /** Public accessor: epoch-ms of the first failure in the current run, or null. */
+  firstFailureAt(): number | null {
+    return this.firstFailureAtMs;
   }
 
   // ── Shared inbound pipeline ───────────────────────────────────────────────
@@ -798,6 +901,18 @@ export class SignalAdapter
         event: 'connection_close',
         state: eventState,
         reason: next.reasonCode ?? undefined,
+      });
+    }
+
+    // Phase 4: parking at 'exhausted' is also a connection_close from the
+    // lifecycle-event schema's perspective (the connection is no longer
+    // usable). The reasonCode carries the cause for dashboards.
+    if (next.state === 'exhausted' && prev.state !== 'exhausted') {
+      this.pushLifecycleEvent({
+        ...base,
+        event: 'connection_close',
+        state: eventState,
+        reason: next.reasonCode ?? 'reconnect-exhausted',
       });
     }
 

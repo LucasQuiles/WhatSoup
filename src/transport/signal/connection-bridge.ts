@@ -274,6 +274,10 @@ export class SignalConnection extends EventEmitter implements RuntimeConnection 
         //  slice 2: surface real adapter lifecycle events instead of
         // the synthesized 2-event timeline.
         recentLifecycleEvents: this.adapter.recentLifecycleEvents(),
+        // Phase 4: surface reconnect engine state.
+        reconnectAttempts: this.adapter.reconnectAttempts(),
+        reconnectPhase: this.adapter.reconnectPhase(),
+        firstFailureAt: this.adapter.firstFailureAt(),
       });
     }
     return emptyConnectionStateSnapshot({
