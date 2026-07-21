@@ -1,5 +1,6 @@
 // src/core/substrate/beads.ts
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
+import { withImmediateTransaction, withTransaction } from '../db-tx.ts';
 import { nowUnixSec } from './time.ts';
 import { writeBeadEvent } from './events.ts';
 import type { BeadKind, BeadStatus, BeadRow, BeadEventRow, ActivityFeedRow } from './types.ts';
@@ -389,39 +390,224 @@ export function updateBead(db: DatabaseSync, id: number, args: UpdateBeadArgs): 
 
 interface TransitionArgs { actor: string; at?: number; note?: string; reason?: string; }
 
-function transition(
-  db: DatabaseSync, id: number, toStatus: BeadStatus,
-  args: TransitionArgs, extra: Record<string, unknown> = {},
-  allowedFrom?: BeadStatus[],
+export interface RejectProposalBatchCandidate {
+  id: number;
+  expected: {
+    status: 'proposed';
+    createdAt: number;
+    updatedAt: number;
+    reviewByAt: number | null;
+    sourceMessagePk: number | null;
+    proposalReason: string | null;
+    completedAt: null;
+    cancelledAt: null;
+  };
+}
+
+export interface ProposalBatchAudit {
+  reasonCode: string;
+  classifierVersion: string;
+  manifestId: string;
+}
+
+export interface RejectProposalsBatchArgs {
+  candidates: readonly RejectProposalBatchCandidate[];
+  actor: string;
+  at?: number;
+  audit: ProposalBatchAudit;
+  /** Called once, in candidate order, after built-in validation and before the first write. */
+  assertExpectedRows?: (rows: readonly Readonly<BeadRow>[]) => void;
+}
+
+export interface RejectProposalsBatchResult {
+  affectedCount: number;
+  eventCount: number;
+}
+
+export type ProposalBatchInvariantReason =
+  | 'invalid_request'
+  | 'empty_candidates'
+  | 'duplicate_id'
+  | 'invalid_candidate'
+  | 'invalid_audit';
+
+export class ProposalBatchInvariantError extends Error {
+  readonly code = 'PROPOSAL_BATCH_INVARIANT';
+  readonly reason: ProposalBatchInvariantReason;
+
+  constructor(reason: ProposalBatchInvariantReason) {
+    super(`proposal batch request rejected (${reason})`);
+    this.name = 'ProposalBatchInvariantError';
+    this.reason = reason;
+  }
+}
+
+export type ProposalBatchDriftReason =
+  | 'missing'
+  | 'not_proposed'
+  | 'expected_state_mismatch'
+  | 'update_count_mismatch';
+
+export class ProposalBatchDriftError extends Error {
+  readonly code = 'PROPOSAL_BATCH_DRIFT';
+  readonly reason: ProposalBatchDriftReason;
+
+  constructor(reason: ProposalBatchDriftReason) {
+    super(`proposal batch state drift detected (${reason})`);
+    this.name = 'ProposalBatchDriftError';
+    this.reason = reason;
+  }
+}
+
+const BATCH_ACTOR_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const BATCH_REASON_PATTERN = /^[a-z0-9][a-z0-9._:-]{0,127}$/;
+const BATCH_VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const BATCH_MANIFEST_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+
+function isNullableSafeTimestamp(value: unknown): value is number | null {
+  return value === null || (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0);
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === 'string';
+}
+
+function assertRejectProposalBatchArgs(args: unknown): asserts args is RejectProposalsBatchArgs {
+  if (typeof args !== 'object' || args === null) {
+    throw new ProposalBatchInvariantError('invalid_request');
+  }
+  const input = args as Record<string, unknown>;
+  if (!Array.isArray(input.candidates)) {
+    throw new ProposalBatchInvariantError('invalid_request');
+  }
+  if (input.candidates.length === 0) {
+    throw new ProposalBatchInvariantError('empty_candidates');
+  }
+  if (
+    typeof input.actor !== 'string'
+    || !BATCH_ACTOR_PATTERN.test(input.actor)
+    || (input.at !== undefined && (
+      typeof input.at !== 'number' || !Number.isSafeInteger(input.at) || input.at < 0
+    ))
+    || (input.assertExpectedRows !== undefined && typeof input.assertExpectedRows !== 'function')
+  ) {
+    throw new ProposalBatchInvariantError('invalid_request');
+  }
+  const audit = input.audit;
+  if (
+    typeof audit !== 'object'
+    || audit === null
+    || typeof (audit as Record<string, unknown>).reasonCode !== 'string'
+    || !BATCH_REASON_PATTERN.test((audit as Record<string, unknown>).reasonCode as string)
+    || typeof (audit as Record<string, unknown>).classifierVersion !== 'string'
+    || !BATCH_VERSION_PATTERN.test((audit as Record<string, unknown>).classifierVersion as string)
+    || typeof (audit as Record<string, unknown>).manifestId !== 'string'
+    || !BATCH_MANIFEST_PATTERN.test((audit as Record<string, unknown>).manifestId as string)
+  ) {
+    throw new ProposalBatchInvariantError('invalid_audit');
+  }
+
+  const seen = new Set<number>();
+  for (const candidate of input.candidates) {
+    if (typeof candidate !== 'object' || candidate === null) {
+      throw new ProposalBatchInvariantError('invalid_candidate');
+    }
+    const value = candidate as Record<string, unknown>;
+    if (typeof value.id !== 'number' || !Number.isSafeInteger(value.id) || value.id <= 0) {
+      throw new ProposalBatchInvariantError('invalid_candidate');
+    }
+    if (seen.has(value.id)) throw new ProposalBatchInvariantError('duplicate_id');
+    seen.add(value.id);
+    if (typeof value.expected !== 'object' || value.expected === null) {
+      throw new ProposalBatchInvariantError('invalid_candidate');
+    }
+    const expected = value.expected as Record<string, unknown>;
+    if (
+      expected.status !== 'proposed'
+      || !isNullableSafeTimestamp(expected.createdAt)
+      || expected.createdAt === null
+      || !isNullableSafeTimestamp(expected.updatedAt)
+      || expected.updatedAt === null
+      || !isNullableSafeTimestamp(expected.reviewByAt)
+      || !isNullableSafeTimestamp(expected.sourceMessagePk)
+      || (expected.sourceMessagePk !== null && expected.sourceMessagePk <= 0)
+      || !isNullableString(expected.proposalReason)
+      || expected.completedAt !== null
+      || expected.cancelledAt !== null
+    ) {
+      throw new ProposalBatchInvariantError('invalid_candidate');
+    }
+  }
+}
+
+function rowMatchesBatchExpectation(row: BeadRow, candidate: RejectProposalBatchCandidate): boolean {
+  const expected = candidate.expected;
+  return row.id === candidate.id
+    && row.status === expected.status
+    && row.created_at === expected.createdAt
+    && row.updated_at === expected.updatedAt
+    && row.review_by_at === expected.reviewByAt
+    && row.source_message_pk === expected.sourceMessagePk
+    && row.proposal_reason === expected.proposalReason
+    && row.completed_at === expected.completedAt
+    && row.cancelled_at === expected.cancelledAt;
+}
+
+interface TransitionOperationOptions {
+  extra?: Record<string, unknown>;
+  updateCountError?: () => Error;
+}
+
+function transitionWithinTransaction(
+  db: DatabaseSync,
+  current: BeadRow,
+  toStatus: BeadStatus,
+  args: TransitionArgs,
+  options: TransitionOperationOptions = {},
 ): void {
-  const current = db.prepare(`SELECT * FROM beads WHERE id = ?`).get(id) as unknown as BeadRow | undefined;
-  if (!current) throw new Error(`bead ${id} not found`);
-  if (TERMINAL.includes(current.status)) {
-    throw new Error(`bead ${id} is in terminal status ${current.status}`);
-  }
-  if (allowedFrom && !allowedFrom.includes(current.status)) {
-    throw new Error(`cannot transition from ${current.status} to ${toStatus}`);
-  }
   const at = args.at ?? nowUnixSec();
   const sets: string[] = ['status = ?', 'updated_at = ?'];
   const binds: SQLInputValue[] = [toStatus, at];
   if (toStatus === 'completed') { sets.push('completed_at = ?'); binds.push(at); }
   if (toStatus === 'cancelled') { sets.push('cancelled_at = ?'); binds.push(at); }
-  db.exec('BEGIN');
-  try {
-    db.prepare(`UPDATE beads SET ${sets.join(', ')} WHERE id = ?`).run(...binds, id);
-    writeBeadEvent(db, {
-      beadId: id, eventType: 'status_change', actor: args.actor,
-      payload: {
-        from: current.status, to: toStatus,
-        ...extra,
-        ...(args.note ? { note: args.note } : {}),
-        ...(args.reason ? { reason: args.reason } : {}),
-      },
-      at,
-    });
-    db.exec('COMMIT');
-  } catch (err) { try { db.exec('ROLLBACK'); } catch { /* best effort */ } throw err; }
+  const update = db.prepare(
+    `UPDATE beads SET ${sets.join(', ')} WHERE id = ? AND status = ? AND updated_at = ?`,
+  ).run(...binds, current.id, current.status, current.updated_at);
+  if (Number(update.changes) !== 1) {
+    throw options.updateCountError?.() ?? new Error('bead transition state changed before update');
+  }
+  writeBeadEvent(db, {
+    beadId: current.id, eventType: 'status_change', actor: args.actor,
+    payload: {
+      from: current.status, to: toStatus,
+      ...options.extra,
+      ...(args.note ? { note: args.note } : {}),
+      ...(args.reason ? { reason: args.reason } : {}),
+    },
+    at,
+  });
+}
+
+function transition(
+  db: DatabaseSync, id: number, toStatus: BeadStatus,
+  args: TransitionArgs, extra: Record<string, unknown> = {},
+  allowedFrom?: BeadStatus[],
+  proposalOnly = false,
+): void {
+  withTransaction(db, () => {
+    const current = db.prepare(`SELECT * FROM beads WHERE id = ?`).get(id) as unknown as BeadRow | undefined;
+    if (!current) throw new Error(`bead ${id} not found`);
+    if (proposalOnly && current.status !== 'proposed') {
+      throw new Error(`bead ${id} is not proposed (status=${current.status})`);
+    }
+    if (TERMINAL.includes(current.status)) {
+      throw new Error(`bead ${id} is in terminal status ${current.status}`);
+    }
+    if (allowedFrom && !allowedFrom.includes(current.status)) {
+      throw new Error(`cannot transition from ${current.status} to ${toStatus}`);
+    }
+    transitionWithinTransaction(db, current, toStatus, args, { extra });
+  });
 }
 
 export function completeBead(db: DatabaseSync, id: number, args: TransitionArgs): void {
@@ -431,16 +617,62 @@ export function cancelBead(db: DatabaseSync, id: number, args: TransitionArgs): 
   transition(db, id, 'cancelled', args);
 }
 export function approveProposal(db: DatabaseSync, id: number, args: TransitionArgs): void {
-  const s = db.prepare(`SELECT status FROM beads WHERE id = ?`).get(id) as { status: BeadStatus } | undefined;
-  if (!s) throw new Error(`bead ${id} not found`);
-  if (s.status !== 'proposed') throw new Error(`bead ${id} is not proposed (status=${s.status})`);
-  transition(db, id, 'active', args, {}, ['proposed']);
+  transition(db, id, 'active', args, {}, ['proposed'], true);
 }
 export function rejectProposal(db: DatabaseSync, id: number, args: TransitionArgs): void {
-  const s = db.prepare(`SELECT status FROM beads WHERE id = ?`).get(id) as { status: BeadStatus } | undefined;
-  if (!s) throw new Error(`bead ${id} not found`);
-  if (s.status !== 'proposed') throw new Error(`bead ${id} is not proposed (status=${s.status})`);
-  transition(db, id, 'cancelled', args, args.reason ? { rejection_reason: args.reason } : {}, ['proposed']);
+  transition(
+    db, id, 'cancelled', args,
+    args.reason ? { rejection_reason: args.reason } : {},
+    ['proposed'], true,
+  );
+}
+
+export function rejectProposalsBatch(
+  db: DatabaseSync,
+  args: RejectProposalsBatchArgs,
+): RejectProposalsBatchResult {
+  assertRejectProposalBatchArgs(args);
+  const candidates = args.candidates.map((candidate) => ({
+    id: candidate.id,
+    expected: { ...candidate.expected },
+  }));
+  const actor = args.actor;
+  const at = args.at;
+  const audit = { ...args.audit };
+  const assertExpectedRows = args.assertExpectedRows;
+  return withImmediateTransaction(db, () => {
+    const selectProposal = db.prepare('SELECT * FROM beads WHERE id = ?');
+    const rows = candidates.map((candidate) => {
+      const row = selectProposal.get(candidate.id) as unknown as BeadRow | undefined;
+      if (!row) throw new ProposalBatchDriftError('missing');
+      if (row.status !== 'proposed') throw new ProposalBatchDriftError('not_proposed');
+      if (!rowMatchesBatchExpectation(row, candidate)) {
+        throw new ProposalBatchDriftError('expected_state_mismatch');
+      }
+      return row;
+    });
+
+    if (assertExpectedRows) {
+      const attestationRows = Object.freeze(rows.map((row) => Object.freeze({ ...row })));
+      assertExpectedRows(attestationRows);
+    }
+
+    let affectedCount = 0;
+    let eventCount = 0;
+    for (const row of rows) {
+      transitionWithinTransaction(db, row, 'cancelled', { actor, at }, {
+        extra: {
+          rejection_reason: audit.reasonCode,
+          classifier_version: audit.classifierVersion,
+          manifest_id: audit.manifestId,
+        },
+        updateCountError: () => new ProposalBatchDriftError('update_count_mismatch'),
+      });
+      affectedCount += 1;
+      eventCount += 1;
+    }
+    return { affectedCount, eventCount };
+  });
 }
 
 export interface ActivityFeedFilter { ownerJid?: string; since?: number; limit?: number; }

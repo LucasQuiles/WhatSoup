@@ -20,19 +20,30 @@
  * Non-goals: this helper does not supplant existing transaction code in
  * other core modules. It is the canonical form for NEW code.
  */
+import type { DatabaseSync } from 'node:sqlite';
 import type { Database } from './database.ts';
 
 export type TransactionRunner = <T>(fn: () => T) => T;
+export type TransactionTarget = Database | DatabaseSync;
 
-const transactionRunners = new WeakMap<Database, TransactionRunner>();
+const transactionRunners = new WeakMap<object, TransactionRunner>();
+const immediateTransactionRunners = new WeakMap<object, TransactionRunner>();
 
-/** Prepare one reusable transaction runner for a database instance. */
-export function getTransactionRunner(db: Database): TransactionRunner {
-  const cached = transactionRunners.get(db);
+function rawDatabase(target: TransactionTarget): DatabaseSync {
+  return 'raw' in target ? target.raw : target;
+}
+
+function getRunner(
+  target: TransactionTarget,
+  runners: WeakMap<object, TransactionRunner>,
+  beginSql: 'BEGIN' | 'BEGIN IMMEDIATE',
+): TransactionRunner {
+  const raw = rawDatabase(target);
+  const cached = runners.get(raw);
   if (cached) return cached;
-  const begin = db.raw.prepare('BEGIN');
-  const commit = db.raw.prepare('COMMIT');
-  const rollback = db.raw.prepare('ROLLBACK');
+  const begin = raw.prepare(beginSql);
+  const commit = raw.prepare('COMMIT');
+  const rollback = raw.prepare('ROLLBACK');
 
   const runner: TransactionRunner = <T>(fn: () => T): T => {
     begin.run();
@@ -49,10 +60,24 @@ export function getTransactionRunner(db: Database): TransactionRunner {
       throw err;
     }
   };
-  transactionRunners.set(db, runner);
+  runners.set(raw, runner);
   return runner;
 }
 
-export function withTransaction<T>(db: Database, fn: () => T): T {
+/** Prepare one reusable deferred transaction runner for a database instance. */
+export function getTransactionRunner(db: TransactionTarget): TransactionRunner {
+  return getRunner(db, transactionRunners, 'BEGIN');
+}
+
+/** Prepare one reusable writer-reserving transaction runner for a database instance. */
+export function getImmediateTransactionRunner(db: TransactionTarget): TransactionRunner {
+  return getRunner(db, immediateTransactionRunners, 'BEGIN IMMEDIATE');
+}
+
+export function withTransaction<T>(db: TransactionTarget, fn: () => T): T {
   return getTransactionRunner(db)(fn);
+}
+
+export function withImmediateTransaction<T>(db: TransactionTarget, fn: () => T): T {
+  return getImmediateTransactionRunner(db)(fn);
 }

@@ -9,8 +9,10 @@ import { Database } from '../../../src/core/database.ts';
 import {
   createBead, getBead, listBeads, updateBead,
   completeBead, cancelBead, approveProposal, rejectProposal,
-  activityFeed, countOverdueProposals, createInlineProposal,
+  activityFeed, countOverdueProposals, createInlineProposal, rejectProposalsBatch,
   InlineProposalCollisionError, InlineProposalInvariantError,
+  ProposalBatchDriftError, ProposalBatchInvariantError,
+  type RejectProposalBatchCandidate,
 } from '../../../src/core/substrate/beads.ts';
 import { upsertEntity, captureObservation, forgetObservation } from '../../../src/core/substrate/entities.ts';
 
@@ -31,6 +33,28 @@ function inlineProposalArgs(sourceMessagePk: number) {
     actor: 'inline' as const,
   };
 }
+
+function batchCandidate(bead: ReturnType<typeof createBead>): RejectProposalBatchCandidate {
+  return {
+    id: bead.id,
+    expected: {
+      status: 'proposed',
+      createdAt: bead.created_at,
+      updatedAt: bead.updated_at,
+      reviewByAt: bead.review_by_at,
+      sourceMessagePk: bead.source_message_pk,
+      proposalReason: bead.proposal_reason,
+      completedAt: null,
+      cancelledAt: null,
+    },
+  };
+}
+
+const BATCH_AUDIT = {
+  reasonCode: 'classifier_rejected',
+  classifierVersion: 'anchored-v1',
+  manifestId: 'manifest-001',
+};
 
 function callEscapedInlineProposal(db: DatabaseSync, overrides: Record<string, unknown>) {
   return callEscapedInlineProposalWithArgs(db, { ...inlineProposalArgs(1999), ...overrides });
@@ -136,6 +160,29 @@ function injectStatementRunFault(
     return statement;
   });
   return () => delegated;
+}
+
+function injectNthStatementRunFault(
+  connection: DatabaseSync,
+  sqlNeedle: string,
+  nthRun: number,
+  message: string,
+): void {
+  const originalPrepare = connection.prepare.bind(connection);
+  let matchingRuns = 0;
+  vi.spyOn(connection, 'prepare').mockImplementation((sql: string) => {
+    const statement = originalPrepare(sql);
+    if (!sql.includes(sqlNeedle)) return statement;
+
+    const runnable = statement as unknown as { run: (...params: SQLInputValue[]) => unknown };
+    const originalRun = runnable.run.bind(runnable);
+    vi.spyOn(runnable, 'run').mockImplementation((...params: SQLInputValue[]) => {
+      matchingRuns += 1;
+      if (matchingRuns === nthRun) throw new Error(message);
+      return originalRun(...params);
+    });
+    return statement;
+  });
 }
 
 describe('beads core', () => {
@@ -540,6 +587,239 @@ describe('beads core', () => {
 
     const active = createBead(db.raw, { kind: 'task', title: 'c', ownerJid: 'mw', actor: 'user' });
     expect(() => approveProposal(db.raw, active.id, { actor: 'user' })).toThrow(/not.*proposed/i);
+  });
+
+  describe('rejectProposalsBatch', () => {
+    function proposed(title: string, sourceMessagePk: number) {
+      return createBead(db.raw, {
+        kind: 'task', title, body: `${title} body`, ownerJid: 'mw', actor: 'inline',
+        status: 'proposed', confidence: 0.6,
+        proposalReason: 'inline imperative: schedule', sourceMessagePk,
+        reviewByAt: 2_000_000_000,
+      });
+    }
+
+    function reject(candidates: readonly RejectProposalBatchCandidate[], overrides: Record<string, unknown> = {}) {
+      return rejectProposalsBatch(db.raw, {
+        candidates,
+        actor: 'inline-proposal-cleanup',
+        at: 2_000_000_100,
+        audit: BATCH_AUDIT,
+        ...overrides,
+      });
+    }
+
+    it('validates rows in candidate order, rejects them in one immediate transaction, and reports exact counts', () => {
+      const first = proposed('first', 5001);
+      const second = proposed('second', 5002);
+      const observedRows: number[][] = [];
+      const originalPrepare = db.raw.prepare.bind(db.raw);
+      const transactionStatements: string[] = [];
+      vi.spyOn(db.raw, 'prepare').mockImplementation((sql: string) => {
+        const statement = originalPrepare(sql);
+        if (!['BEGIN IMMEDIATE', 'COMMIT', 'ROLLBACK'].includes(sql)) return statement;
+        const runnable = statement as unknown as { run: (...params: SQLInputValue[]) => unknown };
+        const originalRun = runnable.run.bind(runnable);
+        vi.spyOn(runnable, 'run').mockImplementation((...params: SQLInputValue[]) => {
+          transactionStatements.push(sql);
+          return originalRun(...params);
+        });
+        return statement;
+      });
+
+      const result = reject([batchCandidate(second), batchCandidate(first)], {
+        assertExpectedRows: (rows: readonly { id: number }[]) => {
+          expect(Object.isFrozen(rows)).toBe(true);
+          expect(rows.every((row) => Object.isFrozen(row))).toBe(true);
+          observedRows.push(rows.map((row) => row.id));
+        },
+      });
+
+      expect(result).toEqual({ affectedCount: 2, eventCount: 2 });
+      expect(observedRows).toEqual([[second.id, first.id]]);
+      expect(transactionStatements).toEqual(['BEGIN IMMEDIATE', 'COMMIT']);
+      expect([getBead(db.raw, first.id)!.bead.status, getBead(db.raw, second.id)!.bead.status])
+        .toEqual(['cancelled', 'cancelled']);
+      for (const bead of [first, second]) {
+        const statusEvents = getBead(db.raw, bead.id)!.events.filter((event) => event.event_type === 'status_change');
+        expect(statusEvents).toHaveLength(2);
+        expect(JSON.parse(statusEvents[1]!.payload_json)).toEqual({
+          from: 'proposed',
+          to: 'cancelled',
+          rejection_reason: BATCH_AUDIT.reasonCode,
+          classifier_version: BATCH_AUDIT.classifierVersion,
+          manifest_id: BATCH_AUDIT.manifestId,
+        });
+        expect(statusEvents[1]!.actor).toBe('inline-proposal-cleanup');
+      }
+    });
+
+    it.each([
+      ['empty candidates', []],
+      ['duplicate IDs', null],
+      ['zero ID', [{ id: 0, expected: {} }]],
+      ['unsafe ID', [{ id: Number.MAX_SAFE_INTEGER + 1, expected: {} }]],
+    ])('rejects %s before any mutation', (_label, supplied) => {
+      const bead = proposed('unchanged', 5003);
+      const candidate = batchCandidate(bead);
+      const candidates = supplied === null ? [candidate, candidate] : supplied;
+      const eventCountBefore = db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get();
+
+      expect(() => reject(candidates as unknown as readonly RejectProposalBatchCandidate[]))
+        .toThrow(ProposalBatchInvariantError);
+      expect(getBead(db.raw, bead.id)!.bead.status).toBe('proposed');
+      expect(db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get()).toEqual(eventCountBefore);
+    });
+
+    it.each([
+      ['actor', { actor: '' }],
+      ['reason code', { audit: { ...BATCH_AUDIT, reasonCode: 'contains spaces' } }],
+      ['classifier version', { audit: { ...BATCH_AUDIT, classifierVersion: '' } }],
+      ['manifest ID', { audit: { ...BATCH_AUDIT, manifestId: 'x'.repeat(257) } }],
+    ])('rejects an invalid bounded %s before mutation', (_label, overrides) => {
+      const bead = proposed('invalid-audit', 5016);
+      const eventCountBefore = db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get();
+
+      expect(() => reject([batchCandidate(bead)], overrides)).toThrow(ProposalBatchInvariantError);
+      expect(getBead(db.raw, bead.id)!.bead.status).toBe('proposed');
+      expect(db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get()).toEqual(eventCountBefore);
+    });
+
+    it.each([
+      ['active', 'active'],
+      ['completed', 'completed'],
+      ['cancelled', 'cancelled'],
+    ] as const)('rejects a %s row and leaves earlier candidates unchanged', (_label, status) => {
+      const first = proposed('first-unchanged', 5004);
+      const invalid = createBead(db.raw, {
+        kind: 'task', title: 'invalid-state', ownerJid: 'mw', actor: 'user', status,
+      });
+      const invalidCandidate = {
+        ...batchCandidate(first),
+        id: invalid.id,
+        expected: { ...batchCandidate(first).expected, status: 'proposed' as const },
+      };
+      const eventCountBefore = db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get();
+
+      expect(() => reject([batchCandidate(first), invalidCandidate])).toThrow(ProposalBatchDriftError);
+      expect(getBead(db.raw, first.id)!.bead.status).toBe('proposed');
+      expect(getBead(db.raw, invalid.id)!.bead.status).toBe(status);
+      expect(db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get()).toEqual(eventCountBefore);
+    });
+
+    it.each([
+      ['updatedAt', (candidate: RejectProposalBatchCandidate) => ({ ...candidate, expected: { ...candidate.expected, updatedAt: candidate.expected.updatedAt + 1 } })],
+      ['reviewByAt', (candidate: RejectProposalBatchCandidate) => ({ ...candidate, expected: { ...candidate.expected, reviewByAt: null } })],
+      ['sourceMessagePk', (candidate: RejectProposalBatchCandidate) => ({ ...candidate, expected: { ...candidate.expected, sourceMessagePk: 999_999 } })],
+      ['proposalReason', (candidate: RejectProposalBatchCandidate) => ({ ...candidate, expected: { ...candidate.expected, proposalReason: 'different' } })],
+    ])('fails closed when expected %s has drifted', (_field, mutate) => {
+      const bead = proposed('drifted', 5005);
+      const eventCountBefore = db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get();
+
+      expect(() => reject([mutate(batchCandidate(bead))])).toThrow(ProposalBatchDriftError);
+      expect(getBead(db.raw, bead.id)!.bead.status).toBe('proposed');
+      expect(db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get()).toEqual(eventCountBefore);
+    });
+
+    it('runs the caller attestation once after all built-in validation and before any write', () => {
+      const first = proposed('attest-first', 5006);
+      const second = proposed('attest-second', 5007);
+      const eventCountBefore = db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get();
+      const attestation = vi.fn((rows: readonly { status: string }[]) => {
+        expect(rows.map((row) => row.status)).toEqual(['proposed', 'proposed']);
+        throw new Error('manifest-body-hash-mismatch');
+      });
+
+      expect(() => reject([batchCandidate(first), batchCandidate(second)], {
+        assertExpectedRows: attestation,
+      })).toThrow('manifest-body-hash-mismatch');
+      expect(attestation).toHaveBeenCalledTimes(1);
+      expect(getBead(db.raw, first.id)!.bead.status).toBe('proposed');
+      expect(getBead(db.raw, second.id)!.bead.status).toBe('proposed');
+      expect(db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get()).toEqual(eventCountBefore);
+    });
+
+    it('does not call the attestation when a later built-in row check fails', () => {
+      const first = proposed('prevalidation-first', 5017);
+      const active = createBead(db.raw, {
+        kind: 'task', title: 'prevalidation-invalid', ownerJid: 'mw', actor: 'user',
+      });
+      const invalidCandidate = {
+        ...batchCandidate(first),
+        id: active.id,
+      };
+      const attestation = vi.fn();
+
+      expect(() => reject([batchCandidate(first), invalidCandidate], {
+        assertExpectedRows: attestation,
+      })).toThrow(ProposalBatchDriftError);
+      expect(attestation).not.toHaveBeenCalled();
+      expect(getBead(db.raw, first.id)!.bead.status).toBe('proposed');
+    });
+
+    it('rolls the full batch back when a guarded update reports drift', () => {
+      const first = proposed('update-first', 5008);
+      const second = proposed('update-second', 5009);
+      const eventCountBefore = db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get();
+      const originalPrepare = db.raw.prepare.bind(db.raw);
+      let updateCalls = 0;
+      vi.spyOn(db.raw, 'prepare').mockImplementation((sql: string) => {
+        const statement = originalPrepare(sql);
+        if (!sql.includes('UPDATE beads SET status')) return statement;
+        const runnable = statement as unknown as { run: (...params: SQLInputValue[]) => { changes: bigint | number } };
+        const originalRun = runnable.run.bind(runnable);
+        vi.spyOn(runnable, 'run').mockImplementation((...params: SQLInputValue[]) => {
+          updateCalls += 1;
+          if (updateCalls === 2) return { changes: 0 };
+          return originalRun(...params);
+        });
+        return statement;
+      });
+
+      expect(() => reject([batchCandidate(first), batchCandidate(second)]))
+        .toThrow(ProposalBatchDriftError);
+      expect(getBead(db.raw, first.id)!.bead.status).toBe('proposed');
+      expect(getBead(db.raw, second.id)!.bead.status).toBe('proposed');
+      expect(db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get()).toEqual(eventCountBefore);
+    });
+
+    it('rolls the full batch back when an event write fails', () => {
+      const first = proposed('event-first', 5010);
+      const second = proposed('event-second', 5011);
+      const eventCountBefore = db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get();
+      injectNthStatementRunFault(db.raw, 'INSERT INTO bead_events', 2, 'batch event write failed');
+
+      expect(() => reject([batchCandidate(first), batchCandidate(second)])).toThrow('batch event write failed');
+      expect(getBead(db.raw, first.id)!.bead.status).toBe('proposed');
+      expect(getBead(db.raw, second.id)!.bead.status).toBe('proposed');
+      expect(db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get()).toEqual(eventCountBefore);
+    });
+
+    it('rolls the full batch back when COMMIT fails before delegation', () => {
+      const first = proposed('commit-first', 5012);
+      const second = proposed('commit-second', 5013);
+      const eventCountBefore = db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get();
+      injectStatementRunFault(db.raw, 'COMMIT', 'before', 'batch commit failed');
+
+      expect(() => reject([batchCandidate(first), batchCandidate(second)])).toThrow('batch commit failed');
+      expect(getBead(db.raw, first.id)!.bead.status).toBe('proposed');
+      expect(getBead(db.raw, second.id)!.bead.status).toBe('proposed');
+      expect(db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get()).toEqual(eventCountBefore);
+    });
+
+    it('preserves post-delegation COMMIT ambiguity without claiming rollback', () => {
+      const first = proposed('ambiguous-first', 5014);
+      const second = proposed('ambiguous-second', 5015);
+      const eventCountBefore = db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get() as { count: number };
+      injectStatementRunFault(db.raw, 'COMMIT', 'after', 'batch commit outcome ambiguous');
+
+      expect(() => reject([batchCandidate(first), batchCandidate(second)]))
+        .toThrow('batch commit outcome ambiguous');
+      expect(getBead(db.raw, first.id)!.bead.status).toBe('cancelled');
+      expect(getBead(db.raw, second.id)!.bead.status).toBe('cancelled');
+      expect(db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get())
+        .toEqual({ count: eventCountBefore.count + 2 });
+    });
   });
 
   it('activityFeed is owner-scoped', () => {
