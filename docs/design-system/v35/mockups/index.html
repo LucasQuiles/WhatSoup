@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SOUP v3.5 — Direction mockups</title>
+<style>
+:root { --base:#1E1A15; --raised:#27221C; --t1:#F1ECDF; --t2:#CAC1AF; --t3:#9A907E; --hair:#383024; --accent:#6BA6FF; --passive:#3BD6B0; }
+* { margin:0; box-sizing:border-box; }
+body { background:var(--base); color:var(--t1); font:400 14px/1.6 "Hanken Grotesk",Arial,sans-serif; display:flex; align-items:center; justify-content:center; min-height:100vh; padding:24px; }
+.wrap { width:min(680px,100%); }
+.nameplate { display:flex; align-items:center; gap:12px; margin-bottom:24px; }
+.tick { width:8px; height:8px; border-radius:1px; background:var(--passive); }
+.wm { font:800 22px/28px "Bricolage Grotesque",sans-serif; letter-spacing:-0.06em; }
+.wm b { color:var(--accent); }
+h1 { font:700 18px/24px "Bricolage Grotesque",sans-serif; margin-bottom:6px; }
+p { color:var(--t2); margin-bottom:20px; }
+a.card { display:flex; align-items:center; gap:14px; background:var(--raised); border:1px solid var(--hair); border-radius:12px; padding:18px 20px; color:var(--t1); text-decoration:none; margin-bottom:12px; transition:transform .16s ease-out, box-shadow .16s ease-out; }
+a.card:hover { transform:translateY(-2px); box-shadow:0 1px 2px rgb(0 0 0/.30), 0 8px 24px rgb(0 0 0/.28); }
+a.card .n { font:700 15px/20px "Bricolage Grotesque",sans-serif; }
+a.card .d { color:var(--t3); font-size:12.5px; }
+a.card .go { margin-left:auto; color:var(--accent); font:600 12px/16px "IBM Plex Mono",monospace; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nameplate"><span class="tick"></span><span class="wm">SO<b>U</b>P</span></div>
+  <h1>v3.5 direction mockups — Direction A “Command Deck”</h1>
+  <p>Gentle Warm ramp · single accent · dreamy lift · filled glyph states. Both themes (◐ toggle top-right).</p>
+  <a class="card" href="fleet.html"><div><div class="n">Fleet</div><div class="d">Multi-channel lines grid — 14 channels, agent presence, grants, states</div></div><span class="go">open →</span></a>
+  <a class="card" href="hatch.html"><div><div class="n">Hatch</div><div class="d">First-run wizard + 3-beat ceremony — glow, random name, channel grid</div></div><span class="go">open →</span></a>
+</div>
+</body>
+</html>

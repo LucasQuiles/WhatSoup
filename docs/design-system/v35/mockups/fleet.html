@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SOUP — Fleet (Direction A: Command Deck)</title>
+<style>
+/* ===== v3.5 Gentle Warm tokens (locked round 4) ===== */
+:root, [data-theme="dark"] {
+  --base:#1E1A15; --raised:#27221C; --overlay:#322D24; --inset:#171410;
+  --t1:#F1ECDF; --t2:#CAC1AF; --t3:#9A907E;
+  --hair:#383024; --hair-2:#473B2C; --hair-3:#5A4C39;
+  --accent:#6BA6FF; --accent-fg:#0A0E14;
+  --ok:#5BD97B; --warn:#F5B54A; --crit:#F4736F;
+  --m-passive:#3BD6B0; --m-chat:#3FB8DC; --m-agent:#A78BFA;
+  --wash-a:color-mix(in srgb, var(--accent) 12%, transparent);
+  --shadow-lift:0 1px 2px rgb(0 0 0/.30), 0 8px 24px rgb(0 0 0/.28);
+  --shadow-rest:0 1px 2px rgb(0 0 0/.30);
+}
+[data-theme="light"] {
+  --base:#FAF6EE; --raised:#FDFAF3; --overlay:#FFFFFF; --inset:#EDE5D5;
+  --t1:#221C12; --t2:#524833; --t3:#645849;
+  --hair:#DED4BF; --hair-2:#CDC2A9; --hair-3:#B4A78C;
+  --accent:#2E66E4; --accent-fg:#FFFFFF;
+  --ok:#15722F; --warn:#855900; --crit:#B42318;
+  --m-passive:#096853; --m-chat:#1F6E85; --m-agent:#6D4FA3;
+  --wash-a:color-mix(in srgb, var(--accent) 10%, transparent);
+  --shadow-lift:0 1px 2px rgb(60 45 20/.10), 0 10px 28px rgb(60 45 20/.14);
+  --shadow-rest:0 1px 2px rgb(60 45 20/.10);
+}
+* { margin:0; box-sizing:border-box; }
+html,body { height:100%; }
+body {
+  background:var(--base); color:var(--t1);
+  font:400 13.5px/1.5 "Hanken Grotesk","Helvetica Neue",Arial,sans-serif;
+  display:flex; overflow:hidden;
+}
+/* ===== Nav rail ===== */
+nav {
+  width:212px; flex:none; background:var(--inset); border-right:1px solid var(--hair);
+  display:flex; flex-direction:column; padding:14px 10px; gap:2px;
+}
+.nameplate { display:flex; align-items:center; gap:12px; padding:2px 8px 16px; }
+.nameplate .tick { width:8px; height:8px; border-radius:1px; background:var(--m-passive); }
+.nameplate .wm {
+  font:800 18px/24px "Bricolage Grotesque","Hanken Grotesk",sans-serif;
+  letter-spacing:-0.06em; color:var(--t1);
+}
+.nameplate .wm b { color:var(--accent); font-weight:800; }
+.nameplate .ctx { font:400 10px/16px "IBM Plex Mono",monospace; letter-spacing:.18em; color:var(--t3); margin-left:auto; }
+.nav-sec { font:500 10px/16px "IBM Plex Mono",monospace; letter-spacing:.12em; color:var(--t3); padding:14px 10px 6px; text-transform:uppercase; }
+.nav-item {
+  display:flex; align-items:center; gap:10px; padding:7px 10px; border-radius:6px;
+  color:var(--t2); text-decoration:none; font-weight:500;
+  transition:transform .18s ease-out, box-shadow .18s ease-out, background .18s;
+}
+.nav-item:hover { background:var(--raised); color:var(--t1); transform:translateY(-1px); }
+.nav-item.active { background:var(--wash-a); color:var(--t1); box-shadow:inset 2px 0 0 var(--accent); }
+.nav-item svg { width:16px; height:16px; fill:currentColor; opacity:.85; }
+.nav-item .dot { margin-left:auto; width:6px; height:6px; border-radius:3px; background:var(--warn); }
+.deploy { margin-top:auto; border-top:1px solid var(--hair); padding-top:10px; }
+.deploy .chip { display:flex; align-items:center; gap:8px; padding:6px 10px; font:500 11.5px/16px "IBM Plex Mono",monospace; color:var(--t3); }
+.deploy .chip .st { width:6px; height:6px; border-radius:50%; background:var(--ok); }
+.deploy .chip + .chip .st { background:var(--warn); }
+/* ===== Main ===== */
+main { flex:1; display:flex; flex-direction:column; min-width:0; }
+header {
+  display:flex; align-items:center; gap:14px; padding:14px 22px 12px;
+  border-bottom:1px solid var(--hair);
+}
+h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; letter-spacing:-0.02em; }
+.attn {
+  display:flex; align-items:center; gap:8px; padding:5px 12px; border-radius:99px;
+  background:color-mix(in srgb, var(--warn) 12%, transparent);
+  color:var(--warn); font:600 12px/16px "IBM Plex Mono",monospace; cursor:pointer;
+  border:1px solid color-mix(in srgb, var(--warn) 36%, transparent);
+  transition:transform .18s, box-shadow .18s;
+}
+.attn:hover { transform:translateY(-1px); box-shadow:var(--shadow-lift); }
+.spacer { flex:1; }
+.btn {
+  display:inline-flex; align-items:center; gap:8px; padding:8px 14px; border-radius:6px;
+  border:1px solid var(--hair-2); background:var(--raised); color:var(--t1);
+  font:600 12.5px/16px inherit; cursor:pointer;
+  transition:transform .16s ease-out, box-shadow .16s ease-out, background .16s;
+}
+.btn:hover { transform:translateY(-1px); box-shadow:var(--shadow-lift); }
+.btn.primary { background:var(--accent); color:var(--accent-fg); border-color:transparent; }
+.btn.ghost { background:transparent; color:var(--t2); }
+.theme-toggle { font-family:"IBM Plex Mono",monospace; }
+/* ===== KPI strip ===== */
+.kpis { display:grid; grid-template-columns:repeat(5,1fr); gap:12px; padding:16px 22px 4px; }
+.kpi {
+  background:var(--raised); border:1px solid var(--hair); border-radius:8px; padding:12px 14px;
+  transition:transform .18s ease-out, box-shadow .18s ease-out;
+}
+.kpi:hover { transform:translateY(-2px); box-shadow:var(--shadow-lift); }
+.kpi .k { font:500 10.5px/14px "IBM Plex Mono",monospace; letter-spacing:.1em; color:var(--t3); text-transform:uppercase; }
+.kpi .v { font:700 22px/28px "Bricolage Grotesque",sans-serif; margin-top:4px; }
+.kpi .d { font:500 11px/14px "IBM Plex Mono",monospace; color:var(--t3); margin-top:2px; }
+.kpi .d.up { color:var(--ok); } .kpi .d.dn { color:var(--crit); }
+/* ===== Content ===== */
+.content { flex:1; display:grid; grid-template-columns:1fr 320px; gap:16px; padding:16px 22px 22px; min-height:0; }
+.panel { background:var(--raised); border:1px solid var(--hair); border-radius:8px; display:flex; flex-direction:column; min-height:0; }
+.panel-h { display:flex; align-items:center; gap:10px; padding:12px 16px; border-bottom:1px solid var(--hair); }
+.panel-h h2 { font:600 13px/18px inherit; }
+.panel-h .count { font:500 11px/16px "IBM Plex Mono",monospace; color:var(--t3); }
+/* Fleet table */
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th {
+  text-align:left; font:600 10.5px/14px "IBM Plex Mono",monospace; letter-spacing:.08em;
+  color:var(--t3); text-transform:uppercase; padding:10px 12px; border-bottom:1px solid var(--hair);
+  position:sticky; top:0; background:var(--raised); z-index:1;
+}
+td { padding:10px 12px; border-bottom:1px solid var(--hair); vertical-align:middle; }
+tbody tr { cursor:pointer; transition:background .14s, transform .16s ease-out, box-shadow .16s ease-out; }
+tbody tr:hover { background:var(--overlay); }
+.rows { overflow:auto; }
+/* status shapes */
+.shape { width:8px; height:8px; display:inline-block; flex:none; }
+.shape.disc { border-radius:50%; background:var(--ok); }
+.shape.diamond { background:var(--warn); transform:rotate(45deg); border-radius:1px; }
+.shape.square { background:var(--crit); border-radius:1px; }
+.shape.outline { border:1.5px solid var(--t3); border-radius:1px; background:transparent; }
+.shape.breathe { animation:breathe 2.4s ease-in-out infinite; }
+@keyframes breathe { 0%,100%{opacity:1} 50%{opacity:.35} }
+@media (prefers-reduced-motion: reduce) { .shape.breathe { animation:none; } }
+/* channel glyph + state */
+.chan { position:relative; width:22px; height:22px; display:inline-flex; align-items:center; justify-content:center; }
+.chan svg { width:16px; height:16px; fill:var(--t2); }
+.chan.dim svg { fill:var(--t3); opacity:.45; }
+.chan .st { position:absolute; right:-3px; bottom:-3px; width:8px; height:8px; border-radius:50%; border:2px solid var(--raised); }
+.chan .st.ok { background:var(--ok); } .chan .st.warn { background:var(--warn); } .chan .st.crit { background:var(--crit); } .chan .st.off { background:var(--t3); }
+.lname { font-weight:600; color:var(--t1); }
+.lid { font:400 11px/14px "IBM Plex Mono",monospace; color:var(--t3); }
+.agentcell { display:flex; align-items:center; gap:8px; }
+.av { width:22px; height:22px; border-radius:6px; display:flex; align-items:center; justify-content:center; font:700 10px/1 "Hanken Grotesk",sans-serif; color:#fff; flex:none; }
+.noagent { color:var(--t3); font-style:italic; font-size:12px; }
+.badge { display:inline-flex; align-items:center; gap:6px; padding:3px 8px; border-radius:99px; font:600 10.5px/14px "IBM Plex Mono",monospace; letter-spacing:.04em; }
+.badge.live { background:color-mix(in srgb, var(--ok) 12%, transparent); color:var(--ok); }
+.badge.deact { background:transparent; border:1px solid var(--hair-2); color:var(--t3); }
+.badge.deact s { text-decoration:none; opacity:.7; }
+.mode { display:inline-flex; align-items:center; gap:6px; font:500 11px/14px "IBM Plex Mono",monospace; }
+.mode i { width:6px; height:6px; border-radius:1px; background:currentColor; }
+.mode.pas { color:var(--m-passive); } .mode.cht { color:var(--m-chat); } .mode.agt { color:var(--m-agent); }
+.grants { display:flex; gap:3px; }
+.g { width:14px; height:14px; border-radius:4px; display:flex; align-items:center; justify-content:center; font:700 8.5px/1 "IBM Plex Mono",monospace; }
+.g.see { background:color-mix(in srgb, var(--m-chat) 16%, transparent); color:var(--m-chat); }
+.g.part { background:color-mix(in srgb, var(--m-agent) 16%, transparent); color:var(--m-agent); }
+.g.hid { border:1px dashed var(--hair-3); color:var(--t3); }
+.spark { display:flex; gap:2px; align-items:flex-end; height:16px; }
+.spark i { width:3px; background:var(--t3); border-radius:1px; opacity:.6; }
+.spark i.hi { background:var(--accent); opacity:1; }
+/* feed */
+.feed { overflow:auto; padding:8px 0; }
+.ev { display:flex; gap:10px; padding:8px 16px; font-size:12.5px; }
+.ev .time { font:400 10.5px/18px "IBM Plex Mono",monospace; color:var(--t3); flex:none; width:44px; }
+.ev .ic { width:14px; height:14px; flex:none; margin-top:2px; }
+.ev p { color:var(--t2); } .ev p b { color:var(--t1); font-weight:600; }
+.ev.err p { color:var(--crit); }
+.hb { display:flex; gap:3px; padding:10px 16px; border-top:1px solid var(--hair); }
+.hb i { flex:1; height:4px; border-radius:2px; background:var(--ok); opacity:.8; }
+.hb i.slow { background:var(--warn); } .hb i.down { background:var(--crit); opacity:.9; }
+.hb i.idle { background:var(--hair-2); }
+@media (max-width:1100px){ .content{grid-template-columns:1fr} .kpis{grid-template-columns:repeat(2,1fr)} nav{width:64px} .nav-item span,.nav-sec,.nameplate .wm,.nameplate .ctx,.deploy .chip span{display:none} }
+</style>
+</head>
+<body>
+<nav>
+  <div class="nameplate"><span class="tick"></span><span class="wm">SO<b>U</b>P</span><span class="ctx">FLEET</span></div>
+  <div class="nav-sec">Operate</div>
+  <a class="nav-item active" href="#"><svg viewBox="0 0 16 16"><path d="M2 2h5v5H2zM9 2h5v5H9zM2 9h5v5H2zM9 9h5v5H9z"/></svg><span>Fleet</span></a>
+  <a class="nav-item" href="#"><svg viewBox="0 0 16 16"><path d="M8 1.5 14 5v6l-6 3.5L2 11V5z"/></svg><span>Agents</span></a>
+  <a class="nav-item" href="#"><svg viewBox="0 0 16 16"><path d="M2 3h12v9H6l-4 3z"/></svg><span>Inbox</span><span class="dot"></span></a>
+  <a class="nav-item" href="#"><svg viewBox="0 0 16 16"><path d="M3 13V8m5 5V3m5 10v-7"/></svg><span>Ops</span></a>
+  <div class="nav-sec">Create</div>
+  <a class="nav-item" href="#"><svg viewBox="0 0 16 16"><path d="M8 2a6 6 0 1 0 6 6h-2a4 4 0 1 1-4-4z"/><path d="M8 6l5-3-3 5z"/></svg><span>Skills</span></a>
+  <a class="nav-item" href="#"><svg viewBox="0 0 16 16"><path d="M8 2c2 2 2 4 0 6s-2 4 0 6c-3-1-5-3-5-6s2-5 5-6z"/></svg><span>Dream Lab</span></a>
+  <div class="nav-sec">System</div>
+  <a class="nav-item" href="#"><svg viewBox="0 0 16 16"><path d="M8 5a3 3 0 1 0 0 6 3 3 0 0 0 0-6zm6 3h2M1 8h2m5-7v2m0 10v2m5-12 1.5-1.5M2.5 13.5 4 12m9 1.5L11.5 12M2.5 2.5 4 4"/></svg><span>Settings</span></a>
+  <div class="deploy">
+    <div class="nav-sec">Deployments</div>
+    <div class="chip"><span class="st"></span><span>local · this host</span></div>
+    <div class="chip"><span class="st"></span><span>nest-2 · container</span></div>
+  </div>
+</nav>
+<main>
+  <header>
+    <h1>Fleet</h1>
+    <span class="attn">◆ 2 lines need attention</span>
+    <div class="spacer"></div>
+    <button class="btn ghost theme-toggle" onclick="document.documentElement.dataset.theme=document.documentElement.dataset.theme==='dark'?'light':'dark'">◐ theme</button>
+    <button class="btn primary">＋ Hatch a line</button>
+  </header>
+  <section class="kpis">
+    <div class="kpi"><div class="k">Lines online</div><div class="v">11<span style="color:var(--t3);font-size:14px">/14</span></div><div class="d up">▲ 2 this week</div></div>
+    <div class="kpi"><div class="k">Active agents</div><div class="v">7</div><div class="d">23 chat instances</div></div>
+    <div class="kpi"><div class="k">Messages today</div><div class="v">1,842</div><div class="d up">▲ 12%</div></div>
+    <div class="kpi"><div class="k">Tokens (24h)</div><div class="v">4.1M</div><div class="d dn">▼ 8%</div></div>
+    <div class="kpi"><div class="k">Response p50</div><div class="v">3.2s</div><div class="d">p95 11.4s</div></div>
+  </section>
+  <div class="content">
+    <section class="panel">
+      <div class="panel-h"><h2>Lines</h2><span class="count">14 across 6 channels</span><div class="spacer"></div><button class="btn ghost">⇅ sort</button><button class="btn ghost">⛨ filter</button></div>
+      <div class="rows"><table>
+        <thead><tr><th></th><th>Line</th><th>Channel</th><th>Agent</th><th>Mode</th><th>State</th><th>Grants</th><th>7d</th><th></th></tr></thead>
+        <tbody>
+          <tr><td><span class="shape disc breathe"></span></td><td><div class="lname">Personal</div><div class="lid">+1 845 ··· 0919</div></td><td><span class="chan" title="WhatsApp · connected"><svg viewBox="0 0 16 16"><path d="M8 1a7 7 0 0 0-6 10.5L1 15l3.6-1A7 7 0 1 0 8 1zm3.5 9.5c-.7.7-1.6 1-2.5.8-1.5-.3-3-1.3-4-2.7S4.6 5.9 5 5c.3-.6 1-.7 1.3-.2l.8 1.2c.2.3.1.7-.1.9l-.5.5c.4.9 1.3 1.9 2.3 2.4l.5-.5c.2-.2.6-.3.9-.1l1.2.8c.3.2.4.6.1.5z"/></svg><span class="st ok"></span></span></td><td><span class="noagent">unassigned</span></td><td><span class="mode pas"><i></i>passive</span></td><td><span class="badge live">live</span></td><td><span class="grants"><span class="g see">S</span><span class="g part">P</span><span class="g hid">H</span></span></td><td><span class="spark"><i style="height:40%"></i><i style="height:65%"></i><i class="hi" style="height:90%"></i><i style="height:55%"></i><i style="height:70%"></i><i class="hi" style="height:100%"></i><i style="height:60%"></i></span></td><td>⋯</td></tr>
+          <tr><td><span class="shape disc"></span></td><td><div class="lname">Community</div><div class="lid">+1 845 ··· 4651</div></td><td><span class="chan"><svg viewBox="0 0 16 16"><path d="M8 1a7 7 0 0 0-6 10.5L1 15l3.6-1A7 7 0 1 0 8 1zm3.5 9.5c-.7.7-1.6 1-2.5.8-1.5-.3-3-1.3-4-2.7S4.6 5.9 5 5c.3-.6 1-.7 1.3-.2l.8 1.2c.2.3.1.7-.1.9l-.5.5c.4.9 1.3 1.9 2.3 2.4l.5-.5c.2-.2.6-.3.9-.1l1.2.8c.3.2.4.6.1.5z"/></svg><span class="st ok"></span></span></td><td><span class="agentcell"><span class="av" style="background:hsl(250,38%,34%)">Q</span><span>Quinn</span></span></td><td><span class="mode agt"><i></i>agent</span></td><td><span class="badge live">live</span></td><td><span class="grants"><span class="g part">P</span></span></td><td><span class="spark"><i style="height:55%"></i><i style="height:70%"></i><i style="height:50%"></i><i class="hi" style="height:85%"></i><i style="height:60%"></i><i style="height:75%"></i><i class="hi" style="height:95%"></i></span></td><td>⋯</td></tr>
+          <tr><td><span class="shape diamond"></span></td><td><div class="lname">Studio</div><div class="lid">+1 845 ··· 3372</div></td><td><span class="chan"><svg viewBox="0 0 16 16"><path d="M8 1a7 7 0 0 0-6 10.5L1 15l3.6-1A7 7 0 1 0 8 1zm3.5 9.5c-.7.7-1.6 1-2.5.8-1.5-.3-3-1.3-4-2.7S4.6 5.9 5 5c.3-.6 1-.7 1.3-.2l.8 1.2c.2.3.1.7-.1.9l-.5.5c.4.9 1.3 1.9 2.3 2.4l.5-.5c.2-.2.6-.3.9-.1l1.2.8c.3.2.4.6.1.5z"/></svg><span class="st warn"></span></span></td><td><span class="agentcell"><span class="av" style="background:hsl(100,38%,34%)">L</span><span>Lumen</span></span></td><td><span class="mode agt"><i></i>agent</span></td><td><span class="badge live">live</span></td><td><span class="grants"><span class="g part">P</span></span></td><td><span class="spark"><i style="height:60%"></i><i style="height:45%"></i><i class="hi" style="height:80%"></i><i style="height:55%"></i><i class="hi" style="height:90%"></i><i style="height:65%"></i><i style="height:70%"></i></span></td><td>⋯</td></tr>
+          <tr><td><span class="shape disc"></span></td><td><div class="lname">Alerts</div><div class="lid">signal · +1 845 ··· 0077</div></td><td><span class="chan"><svg viewBox="0 0 16 16"><path d="M8 2a5 5 0 0 1 5 5c0 3 1 4 1 4H2s1-1 1-4a5 5 0 0 1 5-5zm-2 10a2 2 0 0 0 4 0z"/></svg><span class="st ok"></span></span></td><td><span class="agentcell"><span class="av" style="background:hsl(0,38%,34%)">B</span><span>Beacon</span></span></td><td><span class="mode cht"><i></i>chat</span></td><td><span class="badge live">live</span></td><td><span class="grants"><span class="g see">S</span></span></td><td><span class="spark"><i style="height:30%"></i><i style="height:45%"></i><i style="height:35%"></i><i style="height:50%"></i><i class="hi" style="height:75%"></i><i style="height:40%"></i><i style="height:55%"></i></span></td><td>⋯</td></tr>
+          <tr><td><span class="shape square"></span></td><td><div class="lname">Support</div><div class="lid">imessage · l.quiles@…</div></td><td><span class="chan"><svg viewBox="0 0 16 16"><path d="M2 2h12a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H7l-4 3v-3H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/></svg><span class="st crit"></span></span></td><td><span class="agentcell"><span class="av" style="background:hsl(325,38%,34%)">S</span><span>Sable</span></span></td><td><span class="mode agt"><i></i>agent</span></td><td><span class="badge live">live</span></td><td><span class="grants"><span class="g part">P</span></span></td><td><span class="spark"><i style="height:70%"></i><i style="height:60%"></i><i style="height:50%"></i><i style="height:35%"></i><i style="height:20%"></i><i style="height:10%"></i><i style="height:5%"></i></span></td><td>⋯</td></tr>
+          <tr><td><span class="shape outline"></span></td><td><div class="lname">Announce</div><div class="lid">x · @Q_Laboratory</div></td><td><span class="chan dim"><svg viewBox="0 0 16 16"><path d="M2 2l4.7 6L2.3 14h2l3.7-4.8L11.4 14H14L9.2 7.6 13.7 2h-2L8.2 6.4 5 2z"/></svg><span class="st off"></span></span></td><td><span class="noagent">unassigned</span></td><td><span class="mode pas"><i></i>passive</span></td><td><span class="badge deact"><s>deactivated</s></span></td><td><span class="grants"><span class="g hid">H</span></span></td><td><span class="spark"><i style="height:10%"></i><i style="height:15%"></i><i style="height:8%"></i><i style="height:12%"></i><i style="height:5%"></i><i style="height:8%"></i><i style="height:4%"></i></span></td><td>⋯</td></tr>
+          <tr><td><span class="shape disc"></span></td><td><div class="lname">Builds</div><div class="lid">discord · #ci-feed</div></td><td><span class="chan"><svg viewBox="0 0 16 16"><path d="M12 3H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h1l1 2 1.2-2H12a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zM6 9.5A1.2 1.2 0 1 1 6 7a1.2 1.2 0 0 1 0 2.5zm4 0A1.2 1.2 0 1 1 10 7a1.2 1.2 0 0 1 0 2.5z"/></svg><span class="st ok"></span></span></td><td><span class="agentcell"><span class="av" style="background:hsl(60,38%,34%)">F</span><span>Forge</span></span></td><td><span class="mode cht"><i></i>chat</span></td><td><span class="badge live">live</span></td><td><span class="grants"><span class="g see">S</span></span></td><td><span class="spark"><i style="height:40%"></i><i class="hi" style="height:70%"></i><i style="height:50%"></i><i style="height:60%"></i><i style="height:45%"></i><i class="hi" style="height:80%"></i><i style="height:55%"></i></span></td><td>⋯</td></tr>
+          <tr><td><span class="shape disc"></span></td><td><div class="lname">News</div><div class="lid">telegram · @soupwire</div></td><td><span class="chan"><svg viewBox="0 0 16 16"><path d="M1.5 7.5 14 2l-3.5 12-3.7-4.5L4 11l1-3.5z"/></svg><span class="st ok"></span></span></td><td><span class="noagent">unassigned</span></td><td><span class="mode pas"><i></i>passive</span></td><td><span class="badge live">live</span></td><td><span class="grants"><span class="g hid">H</span></span></td><td><span class="spark"><i style="height:50%"></i><i style="height:40%"></i><i style="height:60%"></i><i style="height:45%"></i><i style="height:55%"></i><i style="height:50%"></i><i style="height:65%"></i></span></td><td>⋯</td></tr>
+          <tr><td><span class="shape disc"></span></td><td><div class="lname">ClientDesk</div><div class="lid">email · help@shinycartel…</div></td><td><span class="chan"><svg viewBox="0 0 16 16"><path d="M1 3h14v10H1z"/><path d="M1 3l7 6 7-6" fill-rule="evenodd" stroke-width="0"/></svg><span class="st ok"></span></span></td><td><span class="agentcell"><span class="av" style="background:hsl(285,38%,34%)">M</span><span>Mercy</span></span></td><td><span class="mode agt"><i></i>agent</span></td><td><span class="badge live">live</span></td><td><span class="grants"><span class="g part">P</span></span></td><td><span class="spark"><i style="height:60%"></i><i style="height:55%"></i><i class="hi" style="height:85%"></i><i style="height:70%"></i><i style="height:60%"></i><i class="hi" style="height:90%"></i><i style="height:75%"></i></span></td><td>⋯</td></tr>
+          <tr><td><span class="shape outline"></span></td><td><div class="lname">FieldNotes</div><div class="lid">reddit · u/fieldbot</div></td><td><span class="chan dim"><svg viewBox="0 0 16 16"><circle cx="8" cy="9" r="5"/><path d="M8 4V1.5L12 3"/><circle cx="6.2" cy="8.2" r=".9" fill="var(--raised)"/><circle cx="9.8" cy="8.2" r=".9" fill="var(--raised)"/></svg><span class="st off"></span></span></td><td><span class="noagent">unassigned</span></td><td><span class="mode pas"><i></i>passive</span></td><td><span class="badge deact"><s>deactivated</s></span></td><td><span class="grants"><span class="g hid">H</span></span></td><td><span class="spark"><i style="height:5%"></i><i style="height:8%"></i><i style="height:4%"></i><i style="height:6%"></i><i style="height:3%"></i><i style="height:5%"></i><i style="height:2%"></i></span></td><td>⋯</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+    <section class="panel">
+      <div class="panel-h"><h2>Activity</h2><span class="count">live</span></div>
+      <div class="feed">
+        <div class="ev"><span class="time">14:32</span><span class="ic">●</span><p><b>Quinn</b> answered in <b>WHATSOUP</b> — 2.8s</p></div>
+        <div class="ev"><span class="time">14:31</span><span class="ic">▲</span><p><b>Studio</b> reconnected after 41s degraded</p></div>
+        <div class="ev err"><span class="time">14:28</span><span class="ic">■</span><p><b>Support</b> bridge unreachable — retrying (3/5)</p></div>
+        <div class="ev"><span class="time">14:26</span><span class="ic">✚</span><p><b>Mercy</b> drafted a reply in <b>ClientDesk</b> — pending review</p></div>
+        <div class="ev"><span class="time">14:24</span><span class="ic">◐</span><p><b>Dream Lab</b>: Lumen suggested a persona edit — 1 queued</p></div>
+        <div class="ev"><span class="time">14:19</span><span class="ic">⬡</span><p><b>Skills Hub</b>: pinecone-search updated to 2.4.1 — compatible</p></div>
+        <div class="ev"><span class="time">14:12</span><span class="ic">●</span><p><b>Beacon</b> forwarded an alert to 3 rooms</p></div>
+        <div class="ev"><span class="time">14:05</span><span class="ic">✓</span><p><b>ClientDesk</b> linked via OAuth — line is live</p></div>
+      </div>
+      <div class="hb"><i></i><i></i><i class="slow"></i><i></i><i></i><i></i><i class="idle"></i><i></i><i></i><i class="down"></i><i></i><i></i><i></i><i class="idle"></i></div>
+    </section>
+  </div>
+</main>
+</body>
+</html>
