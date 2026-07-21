@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SOUP — Settings (Direction A: Command Deck)</title>
+<style>
+:root, [data-theme="dark"] {
+  --base:#1E1A15; --raised:#27221C; --overlay:#322D24; --inset:#171410;
+  --t1:#F1ECDF; --t2:#CAC1AF; --t3:#9A907E;
+  --hair:#383024; --hair-2:#473B2C; --hair-3:#5A4C39;
+  --accent:#6BA6FF; --accent-fg:#0A0E14;
+  --ok:#5BD97B; --warn:#F5B54A; --crit:#F4736F;
+  --m-passive:#3BD6B0; --m-chat:#3FB8DC; --m-agent:#A78BFA;
+  --shadow-lift:0 1px 2px rgb(0 0 0/.30), 0 8px 24px rgb(0 0 0/.28);
+}
+[data-theme="light"] {
+  --base:#FAF6EE; --raised:#FDFAF3; --overlay:#FFFFFF; --inset:#EDE5D5;
+  --t1:#221C12; --t2:#524833; --t3:#645849;
+  --hair:#DED4BF; --hair-2:#CDC2A9; --hair-3:#B4A78C;
+  --accent:#2E66E4; --accent-fg:#FFFFFF;
+  --ok:#15722F; --warn:#855900; --crit:#B42318;
+  --m-passive:#096853; --m-chat:#1F6E85; --m-agent:#6D4FA3;
+  --shadow-lift:0 1px 2px rgb(60 45 20/.10), 0 10px 28px rgb(60 45 20/.14);
+}
+* { margin:0; box-sizing:border-box; }
+body { background:var(--base); color:var(--t1); font:400 13.5px/1.5 "Hanken Grotesk",Arial,sans-serif; min-height:100vh; display:flex; flex-direction:column; }
+header { display:flex; align-items:center; gap:14px; padding:14px 22px 12px; border-bottom:1px solid var(--hair); }
+.nameplate { display:flex; align-items:center; gap:12px; }
+.nameplate .tick { width:8px; height:8px; border-radius:1px; background:var(--m-passive); }
+.nameplate .wm { font:800 17px/22px "Bricolage Grotesque",sans-serif; letter-spacing:-0.06em; }
+.nameplate .wm b { color:var(--accent); }
+h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
+.spacer { flex:1; }
+.btn { display:inline-flex; align-items:center; gap:8px; padding:8px 14px; border-radius:6px; border:1px solid var(--hair-2); background:var(--raised); color:var(--t1); font:600 12.5px/16px inherit; cursor:pointer; transition:transform .16s ease-out, box-shadow .16s ease-out; }
+.btn:hover { transform:translateY(-1px); box-shadow:var(--shadow-lift); }
+.btn.ghost { background:transparent; color:var(--t2); }
+.btn.sm { padding:5px 10px; font-size:11.5px; }
+.btn.danger { color:var(--crit); border-color:color-mix(in srgb, var(--crit) 36%, transparent); }
+.wrap { flex:1; display:grid; grid-template-columns:220px 1fr; min-height:0; }
+.snav { border-right:1px solid var(--hair); padding:14px 10px; overflow:auto; }
+.snav a { display:flex; align-items:center; gap:9px; padding:8px 10px; border-radius:6px; color:var(--t2); text-decoration:none; font-weight:500; font-size:13px; }
+.snav a:hover { background:var(--raised); }
+.snav a.on { background:color-mix(in srgb, var(--accent) 10%, transparent); color:var(--t1); box-shadow:inset 2px 0 0 var(--accent); }
+.main { padding:18px 24px; overflow:auto; max-width:760px; }
+h2 { font:700 17px/22px "Bricolage Grotesque",sans-serif; margin-bottom:4px; }
+.desc { color:var(--t3); font-size:12.5px; margin-bottom:16px; }
+.panel { background:var(--raised); border:1px solid var(--hair); border-radius:10px; margin-bottom:14px; }
+.panel-b { padding:6px 16px; }
+.row { display:flex; align-items:center; gap:12px; padding:11px 0; border-bottom:1px solid var(--hair); }
+.row:last-child { border-bottom:none; }
+.row .lbl { font-weight:600; font-size:13px; }
+.row .sub { font:400 11px/15px "IBM Plex Mono",monospace; color:var(--t3); margin-top:1px; }
+.row .ctl { margin-left:auto; display:flex; align-items:center; gap:8px; }
+.inp { background:var(--inset); border:1px solid var(--hair); border-radius:7px; padding:7px 10px; color:var(--t1); font:inherit; font-size:12.5px; outline:none; width:200px; }
+.sel { background:var(--inset); border:1px solid var(--hair); border-radius:7px; padding:7px 10px; color:var(--t1); font:inherit; font-size:12.5px; }
+.tgl { width:32px; height:18px; border-radius:99px; background:var(--hair-2); position:relative; cursor:pointer; flex:none; transition:background .16s; }
+.tgl::after { content:""; position:absolute; left:2px; top:2px; width:14px; height:14px; border-radius:50%; background:var(--t2); transition:transform .16s; }
+.tgl.on { background:var(--accent); } .tgl.on::after { transform:translateX(14px); background:var(--accent-fg); }
+/* theme swatch */
+.swatches { display:flex; gap:8px; }
+.sw { width:52px; border-radius:8px; border:1.5px solid var(--hair-2); overflow:hidden; cursor:pointer; }
+.sw.on { border-color:var(--accent); }
+.sw .a { height:22px; }
+.sw .b { height:10px; }
+.sw.dk .a { background:#1E1A15; } .sw.dk .b { background:#F1ECDF; }
+.sw.lt .a { background:#FAF6EE; } .sw.lt .b { background:#221C12; }
+.sw.au .a { background:linear-gradient(90deg,#1E1A15 50%,#FAF6EE 50%); } .sw.au .b { background:#6BA6FF; }
+/* notifications */
+.nchan { display:flex; align-items:center; gap:10px; padding:8px 0; }
+.nchan svg { width:14px; height:14px; fill:var(--t3); }
+.nchan .nm { font-size:12.5px; font-weight:600; }
+.nchan .opts { margin-left:auto; display:flex; gap:10px; align-items:center; font:500 11px/14px "IBM Plex Mono",monospace; color:var(--t3); }
+/* api tokens */
+.tok { display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--hair); }
+.tok:last-child { border:none; }
+.tok .nm { font:600 12px/16px "IBM Plex Mono",monospace; }
+.tok .sc { font:400 10.5px/14px "IBM Plex Mono",monospace; color:var(--t3); }
+.tok .acts { margin-left:auto; display:flex; gap:6px; }
+.danger-zone { border-color:color-mix(in srgb, var(--crit) 30%, transparent); }
+.danger-zone h2 { color:var(--crit); }
+@media (max-width:800px){ .wrap{grid-template-columns:1fr} .snav{display:flex;overflow-x:auto;border-right:none;border-bottom:1px solid var(--hair)} }
+</style>
+</head>
+<body>
+<header>
+  <div class="nameplate"><span class="tick"></span><span class="wm">SO<b>U</b>P</span></div>
+  <h1>Settings</h1>
+  <div class="spacer"></div>
+  <button class="btn ghost theme-toggle" onclick="document.documentElement.dataset.theme=document.documentElement.dataset.theme==='dark'?'light':'dark'">◐ theme</button>
+</header>
+<div class="wrap">
+  <nav class="snav">
+    <a href="#" class="on">Workspace</a>
+    <a href="#">Appearance</a>
+    <a href="#">Channels</a>
+    <a href="#">Agent defaults</a>
+    <a href="#">Notifications</a>
+    <a href="#">API tokens</a>
+    <a href="#">Danger zone</a>
+  </nav>
+  <main class="main">
+    <h2>Workspace</h2>
+    <p class="desc">Identity and defaults for this deployment.</p>
+    <div class="panel"><div class="panel-b">
+      <div class="row"><div><div class="lbl">Workspace name</div><div class="sub">shown in nav + splash</div></div><div class="ctl"><input class="inp" value="Quiles Lab"></div></div>
+      <div class="row"><div><div class="lbl">Admin identity</div><div class="sub">single admin across all surfaces</div></div><div class="ctl"><span style="font:500 12px/16px 'IBM Plex Mono',monospace">lucas@quiles…</span></div></div>
+      <div class="row"><div><div class="lbl">Appearance</div><div class="sub">both themes are first-class</div></div><div class="ctl"><div class="swatches"><div class="sw dk on" title="dark"><div class="a"></div><div class="b"></div></div><div class="sw lt" title="light"><div class="a"></div><div class="b"></div></div><div class="sw au" title="auto"><div class="a"></div><div class="b"></div></div></div></div></div>
+      <div class="row"><div><div class="lbl">Reduced motion</div><div class="sub">follows system; ceremony becomes instant</div></div><div class="ctl"><span class="tgl"></span></div></div>
+    </div></div>
+
+    <h2 style="margin-top:20px">Notifications</h2>
+    <p class="desc">Per-channel rules for attention events (line degraded, unreachable, grant requests, dreams).</p>
+    <div class="panel"><div class="panel-b">
+      <div class="row nchan"><svg viewBox="0 0 16 16"><path d="M8 1a7 7 0 0 0-6 10.5L1 15l3.6-1A7 7 0 1 0 8 1z"/></svg><span class="nm">Browser push</span><div class="opts"><span>attention only</span><span class="tgl on"></span></div></div>
+      <div class="row nchan"><svg viewBox="0 0 16 16"><path d="M1 3h14v10H1z"/></svg><span class="nm">Webhook</span><div class="opts"><span>all events</span><span class="tgl on"></span><button class="btn sm ghost">edit</button></div></div>
+      <div class="row nchan"><svg viewBox="0 0 16 16"><path d="M1 3h14v10H1z"/></svg><span class="nm">Email digest</span><div class="opts"><span>daily 08:00</span><span class="tgl"></span></div></div>
+    </div></div>
+
+    <h2 style="margin-top:20px">API tokens</h2>
+    <p class="desc">Console/API access tokens for scripts and remote tooling.</p>
+    <div class="panel"><div class="panel-b">
+      <div class="tok"><div><div class="nm">ops-cli</div><div class="sc">fleet:read fleet:write · created 2026-06-11</div></div><div class="acts"><button class="btn sm ghost">rotate</button><button class="btn sm danger">revoke</button></div></div>
+      <div class="tok"><div><div class="nm">backup-cron</div><div class="sc">metrics:read · created 2026-07-02</div></div><div class="acts"><button class="btn sm ghost">rotate</button><button class="btn sm danger">revoke</button></div></div>
+      <div class="row" style="border:none"><div class="ctl" style="margin:8px 0 4px"><button class="btn sm">＋ new token</button></div></div>
+    </div></div>
+
+    <div class="panel danger-zone" style="margin-top:24px"><div class="panel-b">
+      <div class="row" style="padding:16px 0"><div><div class="lbl" style="color:var(--crit)">Export all data</div><div class="sub">messages, configs, memory indexes</div></div><div class="ctl"><button class="btn sm">export…</button></div></div>
+      <div class="row" style="padding:16px 0"><div><div class="lbl" style="color:var(--crit)">Reset workspace</div><div class="sub">lines and agents are deactivated first; 2 confirmations required</div></div><div class="ctl"><button class="btn sm danger">reset…</button></div></div>
+    </div></div>
+  </main>
+</div>
+</body>
+</html>
