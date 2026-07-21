@@ -174,6 +174,23 @@ describe('inline extractor — typed anchored classifier', () => {
   });
 
   it('rejects all 733 synthetic false structures and admits four intended structures', () => {
+    expect(Object.fromEntries(corpus.rejected.map(({ category, count }) => [category, count]))).toEqual({
+      'mid_message_schedule': 644,
+      'mid_message_follow-up': 28,
+      'mid_message_watch': 54,
+      'mid_message_bead': 2,
+      'mid_message_task': 1,
+      'mid_message_track': 4,
+    });
+    expect(
+      Object.fromEntries(
+        ['schedule', 'follow-up'].map((verb) => [
+          verb,
+          corpus.admitted.filter((entry) => entry.verb === verb).length,
+        ]),
+      ),
+    ).toEqual({ schedule: 2, 'follow-up': 2 });
+
     const rejected = corpus.rejected.flatMap(({ category, count, template, reason }) =>
       Array.from({ length: count }, (_unused, index) => ({
         category,
