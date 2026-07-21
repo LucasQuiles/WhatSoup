@@ -249,7 +249,7 @@ export function normalizeEnvelope(env: RpcEnvelope, ownNumber: string): InboundS
       body: sent.message ?? null,
       fromMe: true,
       type: 'sync',
-      attachments: attachments.length > 0 ? attachments : undefined,
+      ...(attachments.length > 0 ? { attachments } : {}),
     };
   }
   // Read receipt — ONLY type='READ' (DELIVERY receipts have no extension event
@@ -348,7 +348,7 @@ export function normalizeEnvelope(env: RpcEnvelope, ownNumber: string): InboundS
       body: dm.message ?? null,
       fromMe: false,
       type: 'data',
-      attachments: attachments.length > 0 ? attachments : undefined,
+      ...(attachments.length > 0 ? { attachments } : {}),
     };
   }
   // typingMessage envelopes. signal-cli's typingMessage carries

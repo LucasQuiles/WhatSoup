@@ -183,9 +183,9 @@ describe('SignalCliPort — extension-envelope surfacing', () => {
     const out = await port.listInboundSince(new Date(0));
     expect(out).toHaveLength(1);
     expect(out[0]).toMatchObject({ type: 'data', body: 'plain text' });
-    expect(out[0].reaction).toBeUndefined();
-    expect(out[0].read).toBeUndefined();
-    expect(out[0].delete).toBeUndefined();
+    expect(out[0]).not.toHaveProperty('reaction');
+    expect(out[0]).not.toHaveProperty('read');
+    expect(out[0]).not.toHaveProperty('delete');
   });
 });
 

@@ -225,7 +225,7 @@ describe('signal-cli-port normalizeEnvelope — attachments passthrough', () => 
       dataMessage: { message: 'plain text' },
     };
     const out = normalizeEnvelope(env as any, '+1555');
-    expect(out!.attachments).toBeUndefined();
+    expect(out!).not.toHaveProperty('attachments');
   });
 });
 

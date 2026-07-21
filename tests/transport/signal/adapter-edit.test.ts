@@ -72,7 +72,7 @@ describe('SignalAdapter — editText', () => {
       'edited in group',
     );
     expect(port.sent[0].groupId).toBe(groupId);
-    expect(port.sent[0].recipient).toBeUndefined();
+    expect(port.sent[0]).not.toHaveProperty('recipient');
   });
 });
 

@@ -164,7 +164,7 @@ describe('SignalAdapter — sendMedia', () => {
     };
     await adapter.sendMedia({ channel: adapter.capabilities.channel, id: groupId }, payload);
     expect(port.sent[0].groupId).toBe(groupId);
-    expect(port.sent[0].recipient).toBeUndefined();
+    expect(port.sent[0]).not.toHaveProperty('recipient');
   });
 });
 

@@ -90,6 +90,6 @@ describe('SignalAdapter — sendVoiceNote', () => {
     const audio: VoicePayload = { bytes: new Uint8Array([0x4f, 0x67]), mime: 'audio/opus' };
     await adapter.sendVoiceNote({ channel: adapter.capabilities.channel, id: groupId }, audio);
     expect(port.sent[0].groupId).toBe(groupId);
-    expect(port.sent[0].recipient).toBeUndefined();
+    expect(port.sent[0]).not.toHaveProperty('recipient');
   });
 });
