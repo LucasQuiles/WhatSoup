@@ -408,3 +408,41 @@ print(state["awaiting_q_since"])
     expect(result).toBe('6000');
   });
 });
+
+// ---------------------------------------------------------------------------
+// S14 — target_kind recognizes multi-transport sender shapes
+// ---------------------------------------------------------------------------
+describe('target_kind: multi-transport sender classification (S14)', () => {
+  function kindOf(target: string): string {
+    return python(`${importModulePrelude()}
+print(m.target_kind(${JSON.stringify(target)}))
+`);
+  }
+
+  it('classifies a Signal UUID address as signal', () => {
+    expect(kindOf('a1b2c3d4-1234-1234-1234-a1b2c3d4e5f6@signal')).toBe('signal');
+  });
+
+  it('classifies a Signal E.164 address as signal', () => {
+    expect(kindOf('15551234567@signal')).toBe('signal');
+  });
+
+  it('classifies an iMessage AppleID address as imessage', () => {
+    expect(kindOf('user@heal.internal@imessage')).toBe('imessage');
+  });
+
+  it('classifies an iMessage chat-identifier address as imessage', () => {
+    expect(kindOf('iMessage;+;chatABC@imessage')).toBe('imessage');
+  });
+
+  it('still classifies legacy WhatsApp shapes unchanged', () => {
+    expect(kindOf('15551234567@s.whatsapp.net')).toBe('phone_jid');
+    expect(kindOf('1234567890@g.us')).toBe('group');
+    expect(kindOf('ABCD-1234@lid')).toBe('lid');
+  });
+
+  it('returns unknown for genuinely unrecognized shapes', () => {
+    expect(kindOf('whatever@random')).toBe('unknown');
+    expect(kindOf('')).toBe('missing');
+  });
+});

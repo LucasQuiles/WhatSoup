@@ -10,7 +10,7 @@ import { createChildLogger } from '../../logger.ts';
 import type { ToolRegistry } from '../registry.ts';
 import type { SessionContext } from '../types.ts';
 import { resolvePhoneFromJid } from '../../core/access-list.ts';
-import { isWhatsAppAuthenticatedJid } from '../../core/jid-constants.ts';
+import { isAuthenticatedSenderJid } from '../../core/jid-constants.ts';
 import {
   createBead, updateBead, completeBead, cancelBead,
   approveProposal, rejectProposal, listBeads, getBead,
@@ -84,7 +84,7 @@ function assertAdmin(deps: SubstrateDeps, session: SessionContext): void {
   // A non-authenticated transport (e.g. @sms) resolves to the SAME bare phone as a
   // WhatsApp admin, but its sender-ID is spoofable — gate on the transport BEFORE
   // the adminPhones match so a spoofed SMS cannot reach admin-gated MCP tools.
-  if (!isWhatsAppAuthenticatedJid(session.actorJid)) {
+  if (!isAuthenticatedSenderJid(session.actorJid)) {
     throw new Error(
       `admin-only tool: actor "${session.actorJid}" is on a non-WhatsApp-authenticated transport and cannot be an admin`,
     );

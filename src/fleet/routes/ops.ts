@@ -8,6 +8,8 @@ import { escapeRegExp } from '../../lib/regex-utils.ts';
 import { isRecord } from '../../lib/type-guards.ts';
 import { createSSEWriter } from '../sse-helpers.ts';
 import { normalizePhoneE164 } from '../../lib/phone.ts';
+import { SIGNAL_UUID_RE } from '../../transport/signal/types.ts';
+import { APPLEID_EMAIL_RE } from '../../transport/imessage/types.ts';
 import { createChildLogger } from '../../logger.ts';
 const log = createChildLogger('fleet:ops');
 import { mcpCall } from '../mcp-client.ts';
@@ -433,6 +435,20 @@ export async function handleConfigUpdate(
         haltConfigUpdateAfterResponse();
       }
 
+      // 0. Transport is IMMUTABLE after line creation — a patch that changes
+      //    the transport kind is rejected with 409 (switching transports means
+      //    re-linking; create a new line instead). Checked against the
+      //    pre-merge existing config so the merged view can't smuggle it.
+      if (
+        patch.transport !== undefined &&
+        patch.transport !== existing.transport
+      ) {
+        jsonResponse(res, 409, {
+          error: 'transport is immutable; create a new line to change transports',
+        });
+        haltConfigUpdateAfterResponse();
+      }
+
       // Deep merge nested config so partial memory.pinecone patches do not destroy
       // sibling namespaces, BYOK key-env settings, or project guards.
       const merged = deepMergeRecords(existing, patch);
@@ -453,7 +469,9 @@ export async function handleConfigUpdate(
         }
       }
 
-      // 2. Normalize adminPhones if patched so the validator sees E.164.
+      // 2. Normalize adminPhones if patched, per the (merged) transport —
+      //    signal accepts E.164 or UUID; imessage accepts E.164 or AppleID
+      //    email; other transports E.164-only.
       if (patch.adminPhones !== undefined) {
         if (
           !Array.isArray(patch.adminPhones) ||
@@ -463,7 +481,8 @@ export async function handleConfigUpdate(
           jsonResponse(res, 400, { error: 'adminPhones must be a non-empty array of strings' });
           haltConfigUpdateAfterResponse();
         }
-        merged.adminPhones = normalizeAdminPhones(patch.adminPhones as string[]);
+        const mergedTransport = typeof merged.transport === 'string' ? merged.transport : 'baileys';
+        merged.adminPhones = normalizeAdminIdsForTransport(mergedTransport, patch.adminPhones as string[]);
       }
 
       // --- Shared validator: closes #244 + #249 PATCH validation gaps ---
@@ -786,6 +805,30 @@ function validatePluginDirs(dirs: unknown[], res: ServerResponse): boolean {
  */
 function normalizeAdminPhones(phones: string[]): string[] {
   return [...new Set(phones.map((p) => normalizePhoneE164(p)))];
+}
+
+/**
+ * Per-transport admin-ID normalization. Admin IDs are matched against the
+ * sender's protocol-verified identity, so the acceptable shape depends on
+ * the line's transport:
+ * - signal:   E.164 phone OR Signal UUID (passed through verbatim)
+ * - imessage: E.164 phone OR AppleID email (passed through verbatim)
+ * - others:   E.164 phone (existing behavior)
+ */
+function normalizeAdminIdsForTransport(transport: string, phones: string[]): string[] {
+  if (transport === 'signal') {
+    return [...new Set(phones.map((p) => {
+      const trimmed = p.trim();
+      return SIGNAL_UUID_RE.test(trimmed) ? trimmed : normalizePhoneE164(trimmed);
+    }))];
+  }
+  if (transport === 'imessage') {
+    return [...new Set(phones.map((p) => {
+      const trimmed = p.trim();
+      return APPLEID_EMAIL_RE.test(trimmed) ? trimmed : normalizePhoneE164(trimmed);
+    }))];
+  }
+  return normalizeAdminPhones(phones);
 }
 
 // ---------------------------------------------------------------------------
