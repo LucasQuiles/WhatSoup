@@ -822,6 +822,9 @@ def load_incident_state(paths: dict[str, Path]) -> dict[str, Any]:
             record for record in loaded["processedEventCollisions"] if isinstance(record, dict)
         ][-PROCESSED_EVENT_COLLISION_LIMIT:]
     normalized_receipts = normalize_processed_events(loaded.get("processedEvents"))
+    loaded_flap_state = state.get("flapState")
+    if isinstance(loaded_flap_state, dict):
+        prune_settled_flap_references(loaded_flap_state, set(normalized_receipts))
     state["processedEvents"] = prune_processed_events(
         normalized_receipts,
         protected_identities=protected_processed_event_identities(state, current),
@@ -3683,6 +3686,28 @@ def flap_trips_in_window(entry: dict[str, Any], now: int) -> int:
     )
 
 
+def prune_settled_flap_references(
+    flap_state: dict[str, Any],
+    processed_identities: set[str],
+) -> tuple[int, int]:
+    unresolved_count = 0
+    removed_count = 0
+    for candidate in flap_state.values():
+        if not isinstance(candidate, dict):
+            continue
+        references = candidate.get("eventIdentityDigests")
+        if not isinstance(references, list):
+            continue
+        unresolved = [
+            digest for digest in references
+            if isinstance(digest, str) and digest not in processed_identities
+        ]
+        candidate["eventIdentityDigests"] = unresolved
+        unresolved_count += len(unresolved)
+        removed_count += len(references) - len(unresolved)
+    return unresolved_count, removed_count
+
+
 def record_flap_trip(
     flap_state: dict[str, Any],
     key: str,
@@ -3694,19 +3719,7 @@ def record_flap_trip(
     """Record one raw trip for incident_key at wall-clock `now`, pruning the
     sliding window. Counts input per raw trip (C1)."""
     settled = processed_identities or set()
-    unresolved_count = 0
-    for candidate in flap_state.values():
-        if not isinstance(candidate, dict):
-            continue
-        candidate_references = candidate.get("eventIdentityDigests")
-        if not isinstance(candidate_references, list):
-            continue
-        unresolved = [
-            digest for digest in candidate_references
-            if isinstance(digest, str) and digest not in settled
-        ]
-        candidate["eventIdentityDigests"] = unresolved
-        unresolved_count += len(unresolved)
+    unresolved_count, _ = prune_settled_flap_references(flap_state, settled)
     existing_entry = flap_state.get(key)
     references = existing_entry.get("eventIdentityDigests") if isinstance(existing_entry, dict) else None
     if not isinstance(references, list):
@@ -3946,6 +3959,19 @@ def flap_scan_outbox(paths: dict[str, Path]) -> int:
                 continue
             identity_digest = event_replay_identity_digest(event, normalized)
             processed = incident_state.get("processedEvents")
+            processed_identities = set(processed) if isinstance(processed, dict) else set()
+            _, settled_references_removed = prune_settled_flap_references(
+                flap_state, processed_identities
+            )
+            if settled_references_removed:
+                try:
+                    save_incident_state(paths, incident_state)
+                except Exception as exc:
+                    append_dispatch_log(paths, {
+                        "type": "flap_settled_reference_cleanup_failed",
+                        "error": str(exc),
+                    })
+                    return emitted
             if isinstance(processed, dict) and identity_digest in processed:
                 continue
             if stale_after_retained_close(incident_state, normalized):
@@ -3970,7 +3996,7 @@ def flap_scan_outbox(paths: dict[str, Path]) -> int:
                 key,
                 now,
                 identity_digest,
-                processed_identities=set(processed) if isinstance(processed, dict) else set(),
+                processed_identities=processed_identities,
             )
             decision = flap_evaluate(entry, now)
             if decision.get("emit"):
