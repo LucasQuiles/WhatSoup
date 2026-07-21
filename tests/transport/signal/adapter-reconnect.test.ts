@@ -1,5 +1,5 @@
 // tests/transport/signal/adapter-reconnect.test.ts
-// Phase 4 — reconnect engine with exponential backoff.
+// reconnect engine with exponential backoff.
 //
 // Before this slice, the Signal adapter's poll loop had no reconnect logic:
 // a transient daemon failure (ECONNREFUSED, RPC timeout) would emit an error

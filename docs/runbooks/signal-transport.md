@@ -160,7 +160,7 @@ timestamp-keyed dedupe set, so a re-delivered envelope never double-emits.
 - Transient daemon failures (`signal-cli socket error`, `ECONNREFUSED`,
   RPC timeout) classify as **transient** in the bot-errors dispatcher and
   ride the long retry budget; they never burn the permanent dead-letter cap.
-  Phase 4 added a reconnect engine to the adapter itself: consecutive
+   added a reconnect engine to the adapter itself: consecutive
   transient poll failures escalate `reconnectAttempts` and surface via the
   snapshot (see "Reconnect engine" below).
 - `signal_cli_unregistered` (daemon reports the account unlinked) is an
@@ -207,7 +207,7 @@ unlinked" (operator must re-link via `signal-cli link` and restart the
 daemon). Dashboards keying on `device_bond_lost` for the WhatsApp side
 work identically for Signal.
 
-#### Reconnect engine (Phase 4)
+#### Reconnect engine
 
 Consecutive transient poll failures (`ECONNREFUSED`, `ECONNRESET`,
 `ETIMEDOUT`, `ENOTFOUND`, `EPIPE`, `EHOSTUNREACH`, `EAI_AGAIN`, or any

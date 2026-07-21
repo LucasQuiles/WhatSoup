@@ -95,7 +95,7 @@ function isSignalRateLimit(err: PortErrorLike): boolean {
 // envelope decryption retries that surface as ControllableException with a
 // retryable message.
 //
-// Phase 4: recognize common Node network error codes that surface when the
+// recognize common Node network error codes that surface when the
 // signal-cli daemon is unreachable. Without this, a daemon restart would
 // escalate to PermanentProviderError (instead of the reconnect engine) and
 // burn the bot-errors budget instead of self-healing.
@@ -207,7 +207,7 @@ export class SignalAdapter
   private readonly lifecycleEvents: CredentialLifecycleEvent[] = [];
 
   /**
-   * Reconnect engine state. Phase 4: mirrors WhatsApp's reconnect engine
+   * Reconnect engine state. mirrors WhatsApp's reconnect engine
    * (MAX_RECONNECT_ATTEMPTS=10, BASE_BACKOFF_MS=1000, MAX_BACKOFF_MS=60000).
    *
    * Consecutive transient poll failures escalate through this state. A
@@ -609,7 +609,7 @@ export class SignalAdapter
         }
         this.transitionTo({ state: 'auth_required', since: new Date(), reasonCode: 'poll-auth-failure' });
       } else if (mapped instanceof TransientProviderError) {
-        // Phase 4: escalate through the reconnect engine. Hitting the ceiling
+        // escalate through the reconnect engine. Hitting the ceiling
         // parks at 'exhausted' so the bot-errors dispatcher can alert; below
         // the ceiling the next poll interval tick tries again (the engine
         // could insert a setTimeout-based backoff, but the existing poll
@@ -678,12 +678,12 @@ export class SignalAdapter
     this.firstFailureAtMs = null;
   }
 
-  /** Public accessor: consecutive transient failure count (Phase 4 reconnect engine). */
+  /** Public accessor: consecutive transient failure count (reconnect engine). */
   reconnectAttempts(): number {
     return this.reconnectAttemptCount;
   }
 
-  /** Public accessor: current reconnect phase (Phase 4 reconnect engine). */
+  /** Public accessor: current reconnect phase (reconnect engine). */
   reconnectPhase(): 'backoff' | 'cooldown' | 'retry' {
     return this.reconnectPhaseValue;
   }
@@ -904,7 +904,7 @@ export class SignalAdapter
       });
     }
 
-    // Phase 4: parking at 'exhausted' is also a connection_close from the
+    // parking at 'exhausted' is also a connection_close from the
     // lifecycle-event schema's perspective (the connection is no longer
     // usable). The reasonCode carries the cause for dashboards.
     if (next.state === 'exhausted' && prev.state !== 'exhausted') {

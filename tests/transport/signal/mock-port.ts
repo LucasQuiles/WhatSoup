@@ -31,7 +31,7 @@ export class MockSignalPort implements SignalPort {
   readonly typings: SendTypingArgs[] = [];
   verifyCalls = 0;
 
-  constructor(private opts: MockPortOptions = {}) {}
+  constructor(public opts: MockPortOptions = {}) {}
 
   async verifyCredentials(): Promise<void> {
     this.verifyCalls++;
