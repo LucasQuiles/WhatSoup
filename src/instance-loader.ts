@@ -16,6 +16,7 @@ import {
 import type { TransportId } from './transport/registry.ts';
 import type { TwilioSmsConfig } from './transport/twilio/types.ts';
 import type { ImessageConfig } from './transport/imessage/types.ts';
+import type { SignalConfig } from './transport/signal/types.ts';
 import { errorMessage } from './lib/error-message.ts';
 
 // ---------------------------------------------------------------------------
@@ -105,6 +106,8 @@ interface InstanceConfig {
   twilioConfig?: TwilioSmsConfig;
   // iMessage transport config — present only when transport === 'imessage'
   imessageConfig?: ImessageConfig;
+  // Signal transport config — present only when transport === 'signal'
+  signalConfig?: SignalConfig;
   // Resolved paths (added by loader)
   paths: InstancePaths;
 }

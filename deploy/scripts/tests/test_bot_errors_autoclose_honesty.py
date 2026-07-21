@@ -262,31 +262,36 @@ def test_autoclose_reopen_history_expires_outside_window(tmp_path):
     assert key not in state.get("staleAutocloseHistory", {})
 
 
-@pytest.mark.parametrize("source", ["whatsapp_device_bond_lost", "instance_logged_out"])
 def test_bond_lost_family_is_not_unverified_autoclosed_even_if_suppression_config_matches(
     tmp_path,
-    source: str,
 ):
-    mod = _load(tmp_path, {"BOT_ERRORS_STALE_RENOTIFY_SUPPRESS_SOURCES": source})
-    now = int(time.time())
-    key = f"host-a|instance-x|{source}"
-    _write_state(mod, {
-        key: {
-            "status": "stale",
-            "openedAt": now - 10 * 86400,
-            "lastSeenAt": now - 8 * 86400,
-            "lastSummary": f"{source} still requires confirmation",
-        },
-    })
-    sends = _capture_sends(mod)
+    for source in (
+        "whatsapp_device_bond_lost",
+        "instance_logged_out",
+        "signal_cli_unregistered",
+    ):
+        source_dir = tmp_path / source
+        source_dir.mkdir()
+        mod = _load(source_dir, {"BOT_ERRORS_STALE_RENOTIFY_SUPPRESS_SOURCES": source})
+        now = int(time.time())
+        key = f"host-a|instance-x|{source}"
+        _write_state(mod, {
+            key: {
+                "status": "stale",
+                "openedAt": now - 10 * 86400,
+                "lastSeenAt": now - 8 * 86400,
+                "lastSummary": f"{source} still requires confirmation",
+            },
+        })
+        sends = _capture_sends(mod)
 
-    sent, failed, err = mod.sweep_stale_incidents(mod.state_paths())
+        sent, failed, err = mod.sweep_stale_incidents(mod.state_paths())
 
-    assert sent == 1 and failed == 0 and err is None
-    assert sends, "protected source should renotify instead of silently auto-closing"
-    state = json.loads((mod.state_paths()["incident_state"]).read_text())
-    assert key in state["openIncidents"]
-    assert key not in state.get("staleAutocloseHistory", {})
+        assert sent == 1 and failed == 0 and err is None
+        assert sends, "protected source should renotify instead of silently auto-closing"
+        state = json.loads((mod.state_paths()["incident_state"]).read_text())
+        assert key in state["openIncidents"]
+        assert key not in state.get("staleAutocloseHistory", {})
 
 
 # ---------------------------------------------------------------------------
