@@ -38,11 +38,8 @@ import {
   isWhatsAppAuthenticatedJid,
   isAuthenticatedSenderJid,
   isSignalJid,
-  isImessageJid,
   toSignalJid,
   fromSignalJid,
-  toImessageJid,
-  fromImessageJid,
   parseWhatsAppDeliveryNamespace,
 } from '../../src/core/jid-constants.ts';
 
