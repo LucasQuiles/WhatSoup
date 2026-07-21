@@ -11,7 +11,7 @@
       "implementation": {
         "commandId": "guard:repo",
         "detectorId": "repo-hygiene-guard",
-        "nativeSchemaVersion": null
+        "nativeSchemaVersion": 1
       },
       "stages": ["pre-commit", "pre-push", "pull-request", "default-branch", "release"],
       "trustClass": "untrusted-candidate",
@@ -21,10 +21,10 @@
       "surfaces": ["repository-source"],
       "dependencies": [],
       "evidence": {
-        "schemaVersion": null,
+        "schemaVersion": 1,
         "paths": ["."],
-        "digestBinding": "none",
-        "freshness": "same-process"
+        "digestBinding": "exact",
+        "freshness": "receipt"
       },
       "failurePolicy": {
         "finding": "block",
@@ -56,7 +56,7 @@
       "implementation": {
         "commandId": "guard:publication",
         "detectorId": "publication-guard",
-        "nativeSchemaVersion": null
+        "nativeSchemaVersion": 1
       },
       "stages": ["pre-commit", "pre-push", "pull-request", "default-branch", "release"],
       "trustClass": "untrusted-candidate",
@@ -66,10 +66,10 @@
       "surfaces": ["public-output"],
       "dependencies": [],
       "evidence": {
-        "schemaVersion": null,
+        "schemaVersion": 1,
         "paths": ["docs/public-surface.md", "docs/publication-audit.md"],
-        "digestBinding": "none",
-        "freshness": "same-process"
+        "digestBinding": "exact",
+        "freshness": "receipt"
       },
       "failurePolicy": {
         "finding": "block",

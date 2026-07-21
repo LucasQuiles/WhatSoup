@@ -265,6 +265,36 @@ const REASONS = deepFreeze([
     messageTemplate: { summary: 'The native semantic-quality owner proved a blocking finding.', guidance: ['Repair the canonical native semantic finding without changing its rule, severity, or exception owner.'] },
   }),
   defineReason({
+    code: 'ci.native.repository-hygiene.finding', outcome: 'block', guidanceKind: 'source-correction', metadataState: 'complete',
+    implementationState: 'implemented', canonicalOwner: 'repository-hygiene-decision-owner',
+    applicableStages: ['pre-push', 'pull-request', 'merge-group', 'default-branch', 'release'],
+    requiredIdentityBindings: ['candidateOid', 'policyDigest', 'toolDigest', 'nativeEvidenceDigest'],
+    messageTemplate: {
+      summary: 'The native repository-hygiene owner proved a blocking exact-range finding.',
+      guidance: ['Repair the preserved native repository-hygiene cause without changing its rule, severity, or exception owner.'],
+    },
+    fixtures: {
+      unsafe: 'A validated exact-range repository-hygiene receipt contains a native blocking cause.',
+      safeNeighbor: 'The adjacent exact range validates with no native repository-hygiene cause.',
+      unavailableEvidence: 'The exact native receipt, byte binding, lineage, tool digest, or policy digest is unavailable or mismatched.',
+    },
+  }),
+  defineReason({
+    code: 'ci.native.privacy-publication.finding', outcome: 'block', guidanceKind: 'source-correction', metadataState: 'complete',
+    implementationState: 'implemented', severity: 'critical', canonicalOwner: 'publication-decision-owner',
+    applicableStages: ['pre-push', 'pull-request', 'merge-group', 'default-branch', 'release'],
+    requiredIdentityBindings: ['candidateOid', 'policyDigest', 'toolDigest', 'nativeEvidenceDigest'],
+    messageTemplate: {
+      summary: 'The native publication owner proved a blocking exact-range privacy finding.',
+      guidance: ['Repair the preserved native publication cause without changing its rule, severity, or exception owner.'],
+    },
+    fixtures: {
+      unsafe: 'A validated exact-range publication receipt contains a native blocking privacy cause.',
+      safeNeighbor: 'The adjacent exact range validates with no native publication cause.',
+      unavailableEvidence: 'The exact native receipt, byte binding, lineage, tool digest, or policy digest is unavailable or mismatched.',
+    },
+  }),
+  defineReason({
     code: 'quality.semantic.finding.warning',
     outcome: 'warn',
     guidanceKind: 'source-correction',

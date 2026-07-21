@@ -14,6 +14,20 @@ import {
 } from '../verification/boundary-run/shared.ts';
 import { assertBoundedEvidenceGraph } from './preconditions.ts';
 import type { NativeEvidenceV1 } from './result.ts';
+import {
+  currentRepoHygienePolicyDigest,
+  currentRepoHygieneToolDigest,
+  validateRepoHygieneExactRangeArtifact,
+  type RepoHygieneExactRangeArtifactV1,
+  type RepoHygieneExactRangeExpectedV1,
+  type RepoHygieneExactRangeReceiptV1,
+} from '../../repo-hygiene-guard.ts';
+import {
+  validatePublicationExactRangeArtifact,
+  type PublicationExactRangeArtifactV1,
+  type PublicationExactRangeExpectedV1,
+  type PublicationExactRangeReceiptV1,
+} from '../../publication-guard.ts';
 
 export interface NativeBindingV1 {
   detectorId: 'semantic-quality' | 'boundary-run';
@@ -47,7 +61,33 @@ export interface NativeAdapterResult {
   nativeEvidence?: NativeEvidenceV1;
 }
 
+type NativeExactRangeReceiptV1 =
+  | RepoHygieneExactRangeReceiptV1
+  | PublicationExactRangeReceiptV1;
+
+export interface NativeExactRangeReportOnlyObservationV1<
+  TReceipt extends NativeExactRangeReceiptV1 = NativeExactRangeReceiptV1,
+> {
+  authorization: 'report-only';
+  outcome: 'pass' | 'block' | 'inconclusive';
+  code:
+    | 'ci.check.passed'
+    | 'ci.native.repository-hygiene.finding'
+    | 'ci.native.privacy-publication.finding'
+    | 'ci.native.receipt-unavailable';
+  nativeCauseCodes: readonly string[];
+  nativeCauseCompleteness: 'complete' | 'unavailable';
+  nativeStatusRefs: readonly string[];
+  limitationCodes: readonly string[];
+  nativeReceipt: TReceipt | null;
+  externalPayloadSha256: string | null;
+}
+
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
+const EMPTY_EXACT_RANGE_CODES = Object.freeze([] as string[]) as readonly string[];
+const UNAVAILABLE_EXACT_RANGE_LIMITATIONS = Object.freeze([
+  'ci.native.evidence-unavailable',
+] as string[]) as readonly string[];
 
 function unavailable(): NativeAdapterResult {
   return {
@@ -58,6 +98,88 @@ function unavailable(): NativeAdapterResult {
     nativeStatusRefs: [],
     limitationCodes: ['ci.native.evidence-unavailable'],
   };
+}
+
+function unavailableExactRange<TReceipt extends NativeExactRangeReceiptV1>(
+  nativeStatusRef: string,
+): NativeExactRangeReportOnlyObservationV1<TReceipt> {
+  return Object.freeze({
+    authorization: 'report-only',
+    outcome: 'inconclusive',
+    code: 'ci.native.receipt-unavailable',
+    nativeCauseCodes: EMPTY_EXACT_RANGE_CODES,
+    nativeCauseCompleteness: 'unavailable',
+    nativeStatusRefs: Object.freeze([nativeStatusRef]),
+    limitationCodes: UNAVAILABLE_EXACT_RANGE_LIMITATIONS,
+    nativeReceipt: null,
+    externalPayloadSha256: null,
+  });
+}
+
+function exactRangeObservation<TReceipt extends NativeExactRangeReceiptV1>(
+  receipt: TReceipt,
+  externalPayloadSha256: string,
+  blockCode: 'ci.native.repository-hygiene.finding' | 'ci.native.privacy-publication.finding',
+): NativeExactRangeReportOnlyObservationV1<TReceipt> {
+  return Object.freeze({
+    authorization: receipt.authorization,
+    outcome: receipt.outcome,
+    code: receipt.outcome === 'pass' ? 'ci.check.passed' : blockCode,
+    nativeCauseCodes: receipt.nativeCauses,
+    nativeCauseCompleteness: receipt.completeness,
+    nativeStatusRefs: EMPTY_EXACT_RANGE_CODES,
+    limitationCodes: EMPTY_EXACT_RANGE_CODES,
+    nativeReceipt: receipt,
+    externalPayloadSha256,
+  });
+}
+
+export function adaptRepoHygieneExactRangeReportOnly(
+  artifact: RepoHygieneExactRangeArtifactV1,
+  expected: RepoHygieneExactRangeExpectedV1,
+): NativeExactRangeReportOnlyObservationV1<RepoHygieneExactRangeReceiptV1> {
+  try {
+    let currentToolDigest: string | null = null;
+    let currentPolicyDigest: string | null = null;
+    try {
+      currentToolDigest = currentRepoHygieneToolDigest();
+      currentPolicyDigest = currentRepoHygienePolicyDigest();
+    } catch {
+      // The owner validator still receives the artifact exactly once below.
+    }
+    const validation = validateRepoHygieneExactRangeArtifact(artifact, expected);
+    if (!validation.ok) return unavailableExactRange(validation.error.code);
+    if (expected.currentToolDigest !== currentToolDigest) {
+      return unavailableExactRange('repo-hygiene.exact-range.tool-mismatch');
+    }
+    if (expected.currentPolicyDigest !== currentPolicyDigest) {
+      return unavailableExactRange('repo-hygiene.exact-range.policy-mismatch');
+    }
+    return exactRangeObservation(
+      validation.receipt,
+      expected.expectedPayloadSha256,
+      'ci.native.repository-hygiene.finding',
+    );
+  } catch {
+    return unavailableExactRange('repo-hygiene.exact-range.receipt-invalid');
+  }
+}
+
+export function adaptPublicationExactRangeReportOnly(
+  artifact: PublicationExactRangeArtifactV1,
+  expected: PublicationExactRangeExpectedV1,
+): NativeExactRangeReportOnlyObservationV1<PublicationExactRangeReceiptV1> {
+  try {
+    const validation = validatePublicationExactRangeArtifact(artifact, expected);
+    if (!validation.ok) return unavailableExactRange(validation.error.code);
+    return exactRangeObservation(
+      validation.receipt,
+      expected.expectedPayloadSha256,
+      'ci.native.privacy-publication.finding',
+    );
+  } catch {
+    return unavailableExactRange('publication.exact-range.receipt-invalid');
+  }
 }
 
 function bindingIsValid(binding: NativeBindingV1, detectorId: NativeBindingV1['detectorId']): boolean {

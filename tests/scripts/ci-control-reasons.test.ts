@@ -121,6 +121,29 @@ describe('CP-F2e immutable taxonomy registry', () => {
     expect(isEmittableReason('quality.semantic.finding.warning')).toBe(true);
   });
 
+  it('registers owner-specific native exact-range wrapper reasons without changing native causes', () => {
+    expect(reasonDefinition('ci.native.repository-hygiene.finding')).toMatchObject({
+      lifecycle: 'active',
+      metadataState: 'complete',
+      implementationState: 'implemented',
+      defaultOutcome: 'block',
+      defaultSeverity: 'high',
+      canonicalOwner: 'repository-hygiene-decision-owner',
+      requiredIdentityBindings: ['candidateOid', 'policyDigest', 'toolDigest', 'nativeEvidenceDigest'],
+    });
+    expect(reasonDefinition('ci.native.privacy-publication.finding')).toMatchObject({
+      lifecycle: 'active',
+      metadataState: 'complete',
+      implementationState: 'implemented',
+      defaultOutcome: 'block',
+      defaultSeverity: 'critical',
+      canonicalOwner: 'publication-decision-owner',
+      requiredIdentityBindings: ['candidateOid', 'policyDigest', 'toolDigest', 'nativeEvidenceDigest'],
+    });
+    expect(isEmittableReason('ci.native.repository-hygiene.finding')).toBe(true);
+    expect(isEmittableReason('ci.native.privacy-publication.finding')).toBe(true);
+  });
+
   it('separates complete authoritative emission from bounded legacy compatibility', () => {
     const legacyCompatible = (reasonApi as unknown as Record<string, unknown>).isLegacyCompatibleReason;
     expect(legacyCompatible).toEqual(expect.any(Function));

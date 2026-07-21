@@ -139,7 +139,20 @@ describe('canonical CI control manifest', () => {
       'scheduled',
     ]);
     expect(loaded.controls.every((entry) => entry.trustClass === 'untrusted-candidate')).toBe(true);
-    expect(loaded.controls.filter(({ id }) => !['ci.exact-revision-classifier', 'ci.hooks.installed', 'ci.outgoing-ref-policy'].includes(id)).every((entry) => entry.evidence.schemaVersion === null)).toBe(true);
+    expect(loaded.controls.filter(({ id }) => ![
+      'ci.exact-revision-classifier', 'ci.hooks.installed', 'ci.outgoing-ref-policy',
+      'privacy.publication', 'repo.hygiene',
+    ].includes(id)).every((entry) => entry.evidence.schemaVersion === null)).toBe(true);
+    for (const id of ['repo.hygiene', 'privacy.publication']) {
+      expect(loaded.controls.find((entry) => entry.id === id)).toMatchObject({
+        implementation: { nativeSchemaVersion: 1 },
+        evidence: {
+          schemaVersion: 1,
+          digestBinding: 'exact',
+          freshness: 'receipt',
+        },
+      });
+    }
     expect(loaded.controls.find(({ id }) => id === 'ci.exact-revision-classifier')?.evidence).toMatchObject({
       schemaVersion: 1,
       paths: CLASSIFIER_TOOL_SOURCE_PATHS,

@@ -1,9 +1,10 @@
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   aggregateOutcomes,
@@ -44,8 +45,28 @@ import {
 } from '../../scripts/lib/ci-control/preconditions.ts';
 import {
   adaptBoundaryRun,
+  adaptPublicationExactRangeReportOnly,
+  adaptRepoHygieneExactRangeReportOnly,
   adaptSemanticQuality,
+  type NativeExactRangeReportOnlyObservationV1,
 } from '../../scripts/lib/ci-control/native-adapter.ts';
+import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
+import {
+  createRepoHygieneExactRangeArtifact,
+  currentRepoHygienePolicyDigest,
+  currentRepoHygieneToolDigest,
+  validateRepoHygieneExactRangeArtifact,
+  type RepoHygieneExactRangeArtifactV1,
+  type RepoHygieneExactRangeExpectedV1,
+} from '../../scripts/repo-hygiene-guard.ts';
+import {
+  createPublicationExactRangeArtifact,
+  currentPublicationPolicyDigest,
+  currentPublicationToolDigest,
+  validatePublicationExactRangeArtifact,
+  type PublicationExactRangeArtifactV1,
+  type PublicationExactRangeExpectedV1,
+} from '../../scripts/publication-guard.ts';
 import { buildBoundaryReceipt } from '../../scripts/lib/semantic-quality/receipt.ts';
 import { canonicalizeBoundaryRun } from '../../scripts/lib/verification/boundary-run/shared.ts';
 import { OID as BOUNDARY_OID, validManifest } from './verify-boundary-run/support.ts';
@@ -108,11 +129,102 @@ const SCANNER_POLICY_RECEIPT = {
 
 const temporaryRoots: string[] = [];
 afterEach(async () => {
+  vi.useRealTimers();
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
 function digest(value: string): string {
   return `sha256:${createHash('sha256').update(value).digest('hex')}`;
+}
+
+function gitFixture(cwd: string, args: string[]): string {
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    env: cleanGitEnv(),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+}
+
+async function exactRangeFixture() {
+  const root = await mkdtemp(path.join(tmpdir(), 'ci-native-exact-range-'));
+  temporaryRoots.push(root);
+  gitFixture(root, ['init', '-b', 'main']);
+  gitFixture(root, ['config', 'user.name', 'Native Adapter Fixture']);
+  gitFixture(root, ['config', 'user.email', 'native-adapter@users.noreply.github.com']);
+  gitFixture(root, ['config', 'commit.gpgsign', 'false']);
+  writeFileSync(path.join(root, 'note.txt'), 'safe baseline\n');
+  gitFixture(root, ['add', 'note.txt']);
+  gitFixture(root, ['commit', '-m', 'test: exact range base']);
+  const baseOid = gitFixture(root, ['rev-parse', 'HEAD']);
+
+  const privateLiteral = ['ghp', 'RealLookingToken1234567890'].join('_');
+  writeFileSync(path.join(root, 'note.txt'), `${privateLiteral}\n`);
+  gitFixture(root, ['commit', '-am', 'test: unsafe outgoing object']);
+  const unsafeOid = gitFixture(root, ['rev-parse', 'HEAD']);
+
+  gitFixture(root, ['checkout', '-b', 'safe-ambient', baseOid]);
+  writeFileSync(path.join(root, 'note.txt'), 'safe outgoing content\n');
+  gitFixture(root, ['commit', '-am', 'test: safe ambient head']);
+  const safeOid = gitFixture(root, ['rev-parse', 'HEAD']);
+
+  const repoBlock = createRepoHygieneExactRangeArtifact(root, { baseOid, remoteOid: null, localOid: unsafeOid });
+  const publicationBlock = createPublicationExactRangeArtifact(root, { baseOid, remoteOid: null, localOid: unsafeOid });
+  const repoPass = createRepoHygieneExactRangeArtifact(root, { baseOid, remoteOid: null, localOid: safeOid });
+  const publicationPass = createPublicationExactRangeArtifact(root, { baseOid, remoteOid: null, localOid: safeOid });
+  expect(repoBlock.ok).toBe(true);
+  expect(publicationBlock.ok).toBe(true);
+  expect(repoPass.ok).toBe(true);
+  expect(publicationPass.ok).toBe(true);
+  if (!repoBlock.ok || !publicationBlock.ok || !repoPass.ok || !publicationPass.ok) throw new Error('native exact-range fixture failed');
+
+  const repoExpected = (artifact: RepoHygieneExactRangeArtifactV1, localOid: string): RepoHygieneExactRangeExpectedV1 => ({
+    baseOid,
+    remoteOid: null,
+    localOid,
+    currentToolDigest: currentRepoHygieneToolDigest(),
+    currentPolicyDigest: currentRepoHygienePolicyDigest(),
+    expectedPayloadByteLength: artifact.binding.payloadByteLength,
+    expectedPayloadSha256: artifact.binding.payloadSha256,
+  });
+  const publicationExpected = (artifact: PublicationExactRangeArtifactV1, localOid: string): PublicationExactRangeExpectedV1 => ({
+    baseOid,
+    remoteOid: null,
+    localOid,
+    currentToolDigest: currentPublicationToolDigest(),
+    currentPolicyDigest: currentPublicationPolicyDigest(),
+    expectedPayloadByteLength: artifact.binding.payloadByteLength,
+    expectedPayloadSha256: artifact.binding.payloadSha256,
+  });
+  return {
+    baseOid,
+    unsafeOid,
+    safeOid,
+    repoBlock: repoBlock.artifact,
+    publicationBlock: publicationBlock.artifact,
+    repoPass: repoPass.artifact,
+    publicationPass: publicationPass.artifact,
+    repoExpected,
+    publicationExpected,
+  };
+}
+
+function reboundRepoArtifact(
+  artifact: RepoHygieneExactRangeArtifactV1,
+  mutate: (payload: Record<string, unknown>) => void,
+): RepoHygieneExactRangeArtifactV1 {
+  const payload = JSON.parse(Buffer.from(artifact.payloadBytes).toString('utf8')) as Record<string, unknown>;
+  mutate(payload);
+  const payloadBytes = Uint8Array.from(Buffer.from(canonicalizeBoundaryRun(payload), 'utf8'));
+  return {
+    payloadBytes,
+    binding: {
+      schemaVersion: 1,
+      detectorId: 'repo-hygiene-guard',
+      payloadByteLength: payloadBytes.byteLength,
+      payloadSha256: `sha256:${createHash('sha256').update(payloadBytes).digest('hex')}`,
+    },
+  };
 }
 
 function processStart(startTicks: string) {
@@ -1261,5 +1373,187 @@ describe('CP-F2 exact-set aggregation and thin native adapters', () => {
     const cyclic: Record<string, unknown> = {};
     cyclic.self = cyclic;
     expect(adaptBoundaryRun(cyclic, binding)).toMatchObject({ outcome: 'inconclusive', code: 'ci.native.receipt-unavailable' });
+  });
+
+  it('thin-adapts real owner receipts without fabricating authority fields', async () => {
+    const fixture = await exactRangeFixture();
+    const repoBlockExpected = fixture.repoExpected(fixture.repoBlock, fixture.unsafeOid);
+    const publicationBlockExpected = fixture.publicationExpected(fixture.publicationBlock, fixture.unsafeOid);
+
+    const repoBlock = adaptRepoHygieneExactRangeReportOnly(fixture.repoBlock, repoBlockExpected);
+    const publicationBlock = adaptPublicationExactRangeReportOnly(
+      fixture.publicationBlock,
+      publicationBlockExpected,
+    );
+    const repoPass = adaptRepoHygieneExactRangeReportOnly(
+      fixture.repoPass,
+      fixture.repoExpected(fixture.repoPass, fixture.safeOid),
+    );
+    const publicationPass = adaptPublicationExactRangeReportOnly(
+      fixture.publicationPass,
+      fixture.publicationExpected(fixture.publicationPass, fixture.safeOid),
+    );
+
+    expect(repoBlock).toMatchObject({
+      authorization: 'report-only',
+      outcome: 'block',
+      code: 'ci.native.repository-hygiene.finding',
+      nativeCauseCompleteness: 'complete',
+      externalPayloadSha256: fixture.repoBlock.binding.payloadSha256,
+    });
+    expect(publicationBlock).toMatchObject({
+      authorization: 'report-only',
+      outcome: 'block',
+      code: 'ci.native.privacy-publication.finding',
+      nativeCauseCompleteness: 'complete',
+      externalPayloadSha256: fixture.publicationBlock.binding.payloadSha256,
+    });
+    expect(repoBlock.externalPayloadSha256).toBe(repoBlockExpected.expectedPayloadSha256);
+    expect(publicationBlock.externalPayloadSha256).toBe(publicationBlockExpected.expectedPayloadSha256);
+    expect(repoPass).toMatchObject({ outcome: 'pass', code: 'ci.check.passed', nativeCauseCompleteness: 'complete' });
+    expect(publicationPass).toMatchObject({ outcome: 'pass', code: 'ci.check.passed', nativeCauseCompleteness: 'complete' });
+    for (const observation of [repoBlock, publicationBlock, repoPass, publicationPass]) {
+      expect(Object.keys(observation).sort()).toEqual([
+        'authorization', 'code', 'externalPayloadSha256', 'limitationCodes',
+        'nativeCauseCodes', 'nativeCauseCompleteness', 'nativeReceipt', 'nativeStatusRefs', 'outcome',
+      ].sort());
+      expect(Object.isFrozen(observation)).toBe(true);
+      expect(Object.isFrozen(observation.nativeCauseCodes)).toBe(true);
+      expect(Object.isFrozen(observation.nativeStatusRefs)).toBe(true);
+      expect(Object.isFrozen(observation.limitationCodes)).toBe(true);
+      expect(Object.isFrozen(observation.nativeReceipt)).toBe(true);
+      expect(Object.isFrozen(observation.nativeReceipt?.limitations)).toBe(true);
+      expect(observation.nativeReceipt?.authorization).toBe('report-only');
+      expect(observation.nativeCauseCodes).toBe(observation.nativeReceipt?.nativeCauses);
+      expect(observation.nativeReceipt?.limitations.length).toBeGreaterThan(0);
+      expect(observation.limitationCodes).toEqual([]);
+      expect(observation.nativeStatusRefs).toEqual([]);
+      expect(() => Object.assign(observation, { outcome: 'inconclusive' })).toThrow();
+      expect(() => Object.assign(observation.nativeStatusRefs, { 0: 'mutated' })).toThrow();
+      expect(() => Object.assign(observation.limitationCodes, { 0: 'mutated' })).toThrow();
+      expect(observation).not.toHaveProperty('producer');
+      expect(observation).not.toHaveProperty('platform');
+      expect(observation).not.toHaveProperty('nativeEvidence');
+      expect(observation).not.toHaveProperty('aggregateDecision');
+      expect(observation).not.toHaveProperty('attempt');
+      expect(observation).not.toHaveProperty('preconditionReceipt');
+    }
+    expect(repoBlock.nativeCauseCodes).toEqual(['github-token']);
+    expect(publicationBlock.nativeCauseCodes).toEqual(['github-token']);
+    expect(repoPass.nativeCauseCodes).toEqual([]);
+    expect(publicationPass.nativeCauseCodes).toEqual([]);
+  });
+
+  it('fails closed with the native validator status for invalid exact-range evidence', async () => {
+    const fixture = await exactRangeFixture();
+    const repoExpected = fixture.repoExpected(fixture.repoBlock, fixture.unsafeOid);
+    const publicationExpected = fixture.publicationExpected(fixture.publicationBlock, fixture.unsafeOid);
+    const wrongOid = 'f'.repeat(40);
+
+    const cases: Array<{ observation: NativeExactRangeReportOnlyObservationV1; status: string }> = [
+      {
+        observation: adaptRepoHygieneExactRangeReportOnly(
+          { ...fixture.repoBlock, payloadBytes: Uint8Array.of(0xff) },
+          repoExpected,
+        ),
+        status: 'repo-hygiene.exact-range.receipt-invalid',
+      },
+      {
+        observation: adaptRepoHygieneExactRangeReportOnly(fixture.repoBlock, { ...repoExpected, expectedPayloadSha256: OTHER_DIGEST }),
+        status: 'repo-hygiene.exact-range.receipt-binding-mismatch',
+      },
+      {
+        observation: adaptRepoHygieneExactRangeReportOnly(fixture.repoBlock, { ...repoExpected, localOid: wrongOid }),
+        status: 'repo-hygiene.exact-range.identity-mismatch',
+      },
+      {
+        observation: adaptRepoHygieneExactRangeReportOnly(fixture.repoBlock, { ...repoExpected, currentToolDigest: OTHER_DIGEST }),
+        status: 'repo-hygiene.exact-range.tool-mismatch',
+      },
+      {
+        observation: adaptRepoHygieneExactRangeReportOnly(fixture.repoBlock, { ...repoExpected, currentPolicyDigest: OTHER_DIGEST }),
+        status: 'repo-hygiene.exact-range.policy-mismatch',
+      },
+      {
+        observation: adaptPublicationExactRangeReportOnly(
+          { ...fixture.publicationBlock, binding: { ...fixture.publicationBlock.binding, detectorId: 'wrong-detector' as never } },
+          publicationExpected,
+        ),
+        status: 'publication.exact-range.receipt-invalid',
+      },
+      {
+        observation: adaptPublicationExactRangeReportOnly(
+          fixture.publicationBlock,
+          { ...publicationExpected, expectedPayloadSha256: OTHER_DIGEST },
+        ),
+        status: 'publication.exact-range.receipt-binding-mismatch',
+      },
+      {
+        observation: adaptPublicationExactRangeReportOnly(fixture.publicationBlock, { ...publicationExpected, localOid: wrongOid }),
+        status: 'publication.exact-range.identity-mismatch',
+      },
+      {
+        observation: adaptPublicationExactRangeReportOnly(
+          fixture.publicationBlock,
+          { ...publicationExpected, currentPolicyDigest: OTHER_DIGEST },
+        ),
+        status: 'publication.exact-range.receipt-invalid',
+      },
+    ];
+    for (const { observation, status } of cases) {
+      expect(observation).toEqual({
+        authorization: 'report-only',
+        outcome: 'inconclusive',
+        code: 'ci.native.receipt-unavailable',
+        nativeCauseCodes: [],
+        nativeCauseCompleteness: 'unavailable',
+        nativeStatusRefs: [status],
+        limitationCodes: ['ci.native.evidence-unavailable'],
+        nativeReceipt: null,
+        externalPayloadSha256: null,
+      });
+      expect(Object.isFrozen(observation)).toBe(true);
+      expect(Object.isFrozen(observation.nativeCauseCodes)).toBe(true);
+      expect(Object.isFrozen(observation.nativeStatusRefs)).toBe(true);
+      expect(Object.isFrozen(observation.limitationCodes)).toBe(true);
+      expect(() => Object.assign(observation, { outcome: 'pass' })).toThrow();
+      expect(() => Object.assign(observation.nativeStatusRefs, { 0: 'mutated' })).toThrow();
+    }
+
+    const repoReceipt = JSON.parse(Buffer.from(fixture.repoBlock.payloadBytes).toString('utf8')) as { validUntil: string };
+    const publicationReceipt = JSON.parse(
+      Buffer.from(fixture.publicationBlock.payloadBytes).toString('utf8'),
+    ) as { validUntil: string };
+    vi.useFakeTimers();
+    vi.setSystemTime(Math.max(Date.parse(repoReceipt.validUntil), Date.parse(publicationReceipt.validUntil)) + 1);
+    expect(adaptRepoHygieneExactRangeReportOnly(fixture.repoBlock, repoExpected).nativeStatusRefs)
+      .toEqual(['repo-hygiene.exact-range.receipt-stale']);
+    expect(adaptPublicationExactRangeReportOnly(fixture.publicationBlock, publicationExpected).nativeStatusRefs)
+      .toEqual(['publication.exact-range.receipt-stale']);
+  });
+
+  it('rejects colluding repo-hygiene receipt and expected digests independently', async () => {
+    const fixture = await exactRangeFixture();
+    const rebound = reboundRepoArtifact(fixture.repoBlock, (payload) => {
+      payload.toolDigest = OTHER_DIGEST;
+      payload.policyDigest = OTHER_DIGEST;
+    });
+    const colludingExpected: RepoHygieneExactRangeExpectedV1 = {
+      ...fixture.repoExpected(rebound, fixture.unsafeOid),
+      currentToolDigest: OTHER_DIGEST,
+      currentPolicyDigest: OTHER_DIGEST,
+    };
+    expect(validateRepoHygieneExactRangeArtifact(rebound, colludingExpected).ok).toBe(true);
+    expect(adaptRepoHygieneExactRangeReportOnly(rebound, colludingExpected)).toEqual({
+      authorization: 'report-only',
+      outcome: 'inconclusive',
+      code: 'ci.native.receipt-unavailable',
+      nativeCauseCodes: [],
+      nativeCauseCompleteness: 'unavailable',
+      nativeStatusRefs: ['repo-hygiene.exact-range.tool-mismatch'],
+      limitationCodes: ['ci.native.evidence-unavailable'],
+      nativeReceipt: null,
+      externalPayloadSha256: null,
+    });
   });
 });
