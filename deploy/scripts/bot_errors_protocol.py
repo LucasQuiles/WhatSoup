@@ -23,6 +23,12 @@ class ClearPolicyKind(str, Enum):
     MANUAL_ACK = "manual_ack"
 
 
+class ClearStatus(str, Enum):
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    CANDIDATE = "candidate"
+
+
 class QuarantineReasonCode(str, Enum):
     EVENT_NOT_OBJECT = "event_not_object"
     UNSUPPORTED_SCHEMA_VERSION = "unsupported_schema_version"
@@ -95,6 +101,13 @@ class NormalizedObservation:
         return True
 
 
+@dataclass(frozen=True)
+class ClearDecision:
+    status: ClearStatus
+    reason: str
+    proof_receipt: dict[str, Any]
+
+
 _POLICY_STRENGTH = {
     ClearPolicyKind.SAME_SOURCE_NEWER: 0,
     ClearPolicyKind.HEALTH_SNAPSHOT: 1,
@@ -124,6 +137,8 @@ _PROOF_REF_MAX_LENGTH = 512
 _IDENTITY_FIELD_MAX_LENGTH = 256
 _INCIDENT_KEY_MAX_LENGTH = 512
 _MAX_SAFE_INTEGER = 9_007_199_254_740_991
+_CLEAR_REASON_MAX_LENGTH = 256
+_CLEAR_RECEIPT_REFS_MAX = 4
 _WEAK_AUTH_FAILURE_CODE = "WEAK_LOGGED_OUT_SIGNAL"
 _TERMINAL_AUTH_FAILURE_CODE = "WA_AUTH_BOND_SERVER_REVOKED"
 _AUTH_BOND_FAILURE_CODES = {
@@ -147,6 +162,224 @@ def stronger_clear_policy(
 ) -> ClearPolicyKind:
     """Return the stronger typed minimum without consulting free-form text."""
     return first if _POLICY_STRENGTH[first] >= _POLICY_STRENGTH[second] else second
+
+
+def _clear_decision(
+    status: ClearStatus,
+    reason: str,
+    observation: NormalizedObservation,
+    policy: ClearPolicyKind,
+    receipts: list[dict[str, Any]],
+) -> ClearDecision:
+    bounded_refs: list[dict[str, Any]] = []
+    for raw in receipts[:_CLEAR_RECEIPT_REFS_MAX]:
+        if not isinstance(raw, dict):
+            continue
+        bounded: dict[str, Any] = {}
+        for key in (
+                "kind",
+                "ref",
+                "schemaVersion",
+                "observedAtEpoch",
+                "incidentKey",
+                "scope",
+                "state",
+                "result",
+                "exitStatus",
+                "verified",
+                "transitionCount",
+                "ok",
+                "priorResult",
+                "priorState",
+            ):
+            value = raw.get(key)
+            if isinstance(value, str):
+                bounded[key] = value[:256]
+            elif isinstance(value, bool):
+                bounded[key] = value
+            elif type(value) is int:
+                bounded[key] = value
+        bounded_refs.append(bounded)
+    return ClearDecision(
+        status=status,
+        reason=str(reason)[:_CLEAR_REASON_MAX_LENGTH],
+        proof_receipt={
+            "status": status.value,
+            "incidentKey": observation.target_incident_key or observation.incident_key,
+            "incidentSource": observation.incident_source,
+            "policy": policy.value,
+            "schemaVersion": observation.schema_version,
+            "observedAtEpoch": observation.observed_at_epoch,
+            "evidenceRefs": bounded_refs,
+        },
+    )
+
+
+def _semantic_health_receipt(receipt: dict[str, Any]) -> bool:
+    scope = receipt.get("scope")
+    if scope == "application_health":
+        return receipt.get("state") == "healthy" and receipt.get("ok") is True
+    if scope == "unit_execution":
+        return (
+            receipt.get("state") == "terminal_success"
+            and receipt.get("result") == "success"
+            and receipt.get("exitStatus") == 0
+        )
+    return False
+
+
+def evaluate_clear(
+    open_record: dict[str, Any],
+    observation: NormalizedObservation,
+    oracle_receipts: list[dict[str, Any]],
+) -> ClearDecision:
+    """Pure, fail-closed decision boundary for one proposed incident clear."""
+    receipts = [receipt for receipt in oracle_receipts if isinstance(receipt, dict)]
+    raw_policy = open_record.get("clearPolicy")
+    if not isinstance(raw_policy, dict):
+        raw_policy = {}
+    try:
+        policy = ClearPolicyKind(raw_policy.get("kind", ClearPolicyKind.SAME_SOURCE_NEWER.value))
+    except (TypeError, ValueError):
+        policy = ClearPolicyKind.SAME_SOURCE_NEWER
+        return _clear_decision(ClearStatus.REJECTED, "stored clear policy is invalid", observation, policy, receipts)
+    minimum_schema = raw_policy.get("minimumSchemaVersion", open_record.get("schemaVersion", 1))
+    if type(minimum_schema) is not int or minimum_schema not in {1, 2}:
+        return _clear_decision(ClearStatus.REJECTED, "stored clear policy schema is invalid", observation, policy, receipts)
+    if observation.schema_version < minimum_schema:
+        return _clear_decision(ClearStatus.REJECTED, "clear schema is weaker than stored policy", observation, policy, receipts)
+    if observation.state is ObservationState.UNKNOWN:
+        return _clear_decision(ClearStatus.CANDIDATE, "observation state is unknown", observation, policy, receipts)
+    if observation.state is not ObservationState.HEALTHY:
+        return _clear_decision(ClearStatus.REJECTED, "observation is not healthy", observation, policy, receipts)
+
+    record_key = str(open_record.get("incidentKey") or "")
+    record_source = str(open_record.get("incidentSource") or "")
+    if (
+        not record_key
+        or not record_source
+        or observation.incident_key != record_key
+        or observation.incident_source != record_source
+    ):
+        return _clear_decision(ClearStatus.REJECTED, "clear incident identity does not match open incident", observation, policy, receipts)
+
+    opened = open_record.get("eventCreatedAtEpoch", open_record.get("openedAt", 0))
+    opened_epoch = opened if type(opened) is int and opened > 0 else 0
+    if policy in {
+        ClearPolicyKind.OUTBOUND_AFTER_INCIDENT,
+        ClearPolicyKind.AUTH_BOND_AND_OUTBOUND,
+    } and opened_epoch <= 0:
+        return _clear_decision(
+            ClearStatus.CANDIDATE,
+            "incident opening timestamp is required for continuity proof",
+            observation,
+            policy,
+            receipts,
+        )
+    if opened_epoch and observation.observed_at_epoch < opened_epoch - 60:
+        return _clear_decision(ClearStatus.REJECTED, "clear proof is stale for open incident", observation, policy, receipts)
+    clock_receipts = [receipt for receipt in receipts if receipt.get("kind") == "evaluation_clock"]
+    if clock_receipts:
+        evaluated = clock_receipts[0].get("observedAtEpoch")
+        if type(evaluated) is int and observation.observed_at_epoch > evaluated + 60:
+            return _clear_decision(ClearStatus.REJECTED, "clear proof timestamp is in the future", observation, policy, receipts)
+
+    if policy is ClearPolicyKind.SAME_SOURCE_NEWER:
+        return _clear_decision(ClearStatus.ACCEPTED, "same-source newer healthy observation", observation, policy, receipts)
+
+    proof_ref = observation.clear_policy.proof_ref
+    matching_ref = [receipt for receipt in receipts if proof_ref is None or receipt.get("ref") == proof_ref]
+    if proof_ref is not None and not matching_ref:
+        return _clear_decision(ClearStatus.REJECTED, "referenced proof receipt is missing", observation, policy, receipts)
+    matching_key = [
+        receipt for receipt in matching_ref
+        if not record_key or receipt.get("incidentKey") == record_key
+    ]
+    if not matching_key:
+        return _clear_decision(ClearStatus.REJECTED, "proof receipt incident identity does not match", observation, policy, receipts)
+    if any(type(receipt.get("schemaVersion")) is not int or receipt["schemaVersion"] < minimum_schema for receipt in matching_key):
+        return _clear_decision(ClearStatus.REJECTED, "proof receipt schema is weaker than stored policy", observation, policy, receipts)
+    verified = [receipt for receipt in matching_key if receipt.get("verified") is True]
+    if not verified:
+        return _clear_decision(ClearStatus.CANDIDATE, "authoritative proof is not yet terminal", observation, policy, receipts)
+    if any(
+        type(receipt.get("observedAtEpoch")) is not int
+        or (opened_epoch and receipt["observedAtEpoch"] < opened_epoch - 60)
+        for receipt in verified
+    ):
+        return _clear_decision(ClearStatus.REJECTED, "oracle proof is stale or missing timestamp", observation, policy, receipts)
+    if clock_receipts:
+        evaluated = clock_receipts[0].get("observedAtEpoch")
+        if type(evaluated) is int and any(
+            receipt.get("observedAtEpoch", evaluated + 61) > evaluated + 60
+            for receipt in verified
+        ):
+            return _clear_decision(ClearStatus.REJECTED, "oracle proof timestamp is in the future", observation, policy, receipts)
+
+    if policy is ClearPolicyKind.HEALTH_SNAPSHOT:
+        health = [receipt for receipt in verified if receipt.get("kind") == "health_snapshot"]
+        if not health:
+            return _clear_decision(ClearStatus.CANDIDATE, "matching health snapshot is unavailable", observation, policy, receipts)
+        for receipt in health:
+            scope = receipt.get("scope")
+            if scope not in {"application_health", "unit_execution", "reachability", "transition_batch"}:
+                continue
+            if scope == "reachability" and receipt.get("state") == "degraded":
+                continue
+            if scope == "transition_batch" and receipt.get("transitionCount") == 0:
+                continue
+            if scope in {"unit_execution", "application_health"} and not _semantic_health_receipt(receipt):
+                continue
+            return _clear_decision(ClearStatus.ACCEPTED, "authoritative health snapshot verified", observation, policy, [receipt])
+        return _clear_decision(ClearStatus.CANDIDATE, "health observation is not recovery proof", observation, policy, health)
+
+    if policy is ClearPolicyKind.OUTBOUND_AFTER_INCIDENT:
+        outbound = [
+            receipt for receipt in verified
+            if receipt.get("kind") == "outbound_after_incident"
+            and type(receipt.get("observedAtEpoch")) is int
+            and receipt["observedAtEpoch"] > opened_epoch
+        ]
+        if outbound:
+            return _clear_decision(ClearStatus.ACCEPTED, "post-incident outbound proof verified", observation, policy, outbound)
+        return _clear_decision(ClearStatus.CANDIDATE, "post-incident outbound proof unavailable", observation, policy, verified)
+
+    if policy is ClearPolicyKind.AUTH_BOND_AND_OUTBOUND:
+        auth = [
+            receipt for receipt in verified
+            if receipt.get("kind") == "auth_bond" and receipt.get("state") == "present"
+        ]
+        outbound = [
+            receipt for receipt in verified
+            if receipt.get("kind") == "outbound_after_incident"
+            and type(receipt.get("observedAtEpoch")) is int
+            and receipt["observedAtEpoch"] > opened_epoch
+        ]
+        stability = [
+            receipt for receipt in verified
+            if receipt.get("kind") == "sustained_stability" and receipt.get("state") == "stable"
+        ]
+        if auth and (outbound or stability):
+            return _clear_decision(ClearStatus.ACCEPTED, "auth bond and delivery continuity verified", observation, policy, auth + outbound + stability)
+        return _clear_decision(ClearStatus.CANDIDATE, "auth bond requires outbound or sustained-stability proof", observation, policy, verified)
+
+    if policy is ClearPolicyKind.SOURCE_QUIET_AND_HEALTH:
+        quiet = any(
+            receipt.get("kind") == "source_quiet" and receipt.get("state") == "quiet"
+            for receipt in verified
+        )
+        healthy = any(
+            receipt.get("kind") == "health_snapshot" and _semantic_health_receipt(receipt)
+            for receipt in verified
+        )
+        if quiet and healthy:
+            return _clear_decision(ClearStatus.ACCEPTED, "source quiet and health proof verified", observation, policy, verified)
+        return _clear_decision(ClearStatus.CANDIDATE, "source quiet and health proof incomplete", observation, policy, verified)
+
+    manual = [receipt for receipt in verified if receipt.get("kind") == "manual_ack"]
+    if manual:
+        return _clear_decision(ClearStatus.ACCEPTED, "manual acknowledgement verified", observation, policy, manual)
+    return _clear_decision(ClearStatus.CANDIDATE, "manual acknowledgement required", observation, policy, verified)
 
 
 def _reason(code: QuarantineReasonCode) -> QuarantineReason:

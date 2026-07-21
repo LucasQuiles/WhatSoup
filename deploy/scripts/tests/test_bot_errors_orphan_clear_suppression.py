@@ -8,7 +8,7 @@ Scope:
   - Clear with no open incident for the key → suppressed.
   - Clear with a matching open incident → sent (returns None).
   - Daily-health clear that recovers daily-health-fail incidents → sent even
-    without an exact key match (handled by daily_health_recovered_incident_keys).
+    without an exact key match (prefiltered by daily_health_clear_candidate_keys).
 """
 from __future__ import annotations
 

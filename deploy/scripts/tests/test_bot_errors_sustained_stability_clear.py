@@ -19,11 +19,11 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import tempfile
 import time
+import unittest
 from pathlib import Path
 from typing import Any
-
-import pytest
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-dispatcher.py"
 
@@ -41,17 +41,25 @@ _ENV_KEYS = [
 ]
 
 
-@pytest.fixture(autouse=True)
-def _clean_env():
-    saved = {k: os.environ.get(k) for k in _ENV_KEYS}
-    for k in _ENV_KEYS:
-        os.environ.pop(k, None)
-    yield
-    for k, v in saved.items():
-        if v is None:
-            os.environ.pop(k, None)
-        else:
-            os.environ[k] = v
+class IsolatedDispatcherTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self._saved_env = {key: os.environ.get(key) for key in _ENV_KEYS}
+        for key in _ENV_KEYS:
+            os.environ.pop(key, None)
+        self._temp = tempfile.TemporaryDirectory(prefix="bot-errors-sustained-")
+        self.state_dir = Path(self._temp.name)
+        os.environ["BOT_ERRORS_STATE_DIR"] = str(self.state_dir)
+
+    def tearDown(self) -> None:
+        for key, value in self._saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        self._temp.cleanup()
+
+    def assert_isolated(self, mod: Any) -> None:
+        self.assertEqual(mod.state_root().resolve(), self.state_dir.resolve())
 
 
 def _load(extra_env: dict[str, str] | None = None):
@@ -98,7 +106,7 @@ def _probe_with_outbound(after_epoch: int) -> str:
 # Unit tests: has_sustained_connection_stability
 # ---------------------------------------------------------------------------
 
-class TestSustainedConnectionStability:
+class TestSustainedConnectionStability(IsolatedDispatcherTestCase):
     def test_accepts_high_uptime_zero_reconnects(self):
         mod = _load()
         probe = _probe_with_stability(uptime=7200, reconnect_attempts=0)
@@ -143,7 +151,7 @@ class TestSustainedConnectionStability:
 # Unit tests: has_post_incident_outbound_proof
 # ---------------------------------------------------------------------------
 
-class TestPostIncidentOutboundProof:
+class TestPostIncidentOutboundProof(IsolatedDispatcherTestCase):
     def test_accepts_outbound_after_incident(self):
         mod = _load()
         now = int(time.time())
@@ -170,7 +178,7 @@ class TestPostIncidentOutboundProof:
 
 
 # ---------------------------------------------------------------------------
-# Integration tests: daily_health_recovered_incident_keys accepts sustained
+# Integration tests: daily_health_clear_candidate_keys recognizes sustained
 # stability as alternative to outbound proof for AUTOCLOSE_PROTECTED sources.
 # ---------------------------------------------------------------------------
 
@@ -214,12 +222,12 @@ def _make_incident_state(
     }
 
 
-class TestSustainedStabilityRecoveryPath:
+class TestSustainedStabilityRecoveryPath(IsolatedDispatcherTestCase):
     """A bond-lost incident with NO outbound proof but WITH sustained stability
-    must be recovered by daily_health_recovered_incident_keys."""
+    must be selected by daily_health_clear_candidate_keys."""
 
-    def test_bond_lost_recovered_via_sustained_stability_no_outbound(self):
-        """The core fix: ghost bond-lost incident clears via stability alone."""
+    def test_bond_lost_with_stability_is_selected_without_outbound(self):
+        """Stable base health selects a protected incident for evaluation."""
         mod = _load()
         now = int(time.time())
         incident_open = now - 86400  # opened 24h ago
@@ -232,14 +240,15 @@ class TestSustainedStabilityRecoveryPath:
         probe = _probe_with_stability(uptime=123894, reconnect_attempts=0)
         event = _make_recovery_event(machine, instance, probe, now)
 
-        recovered = mod.daily_health_recovered_incident_keys(event, state)
+        self.assert_isolated(mod)
+        candidate_keys = mod.daily_health_clear_candidate_keys(event, state)
 
-        assert incident_key in recovered, (
-            "Bond-lost incident with sustained stability (no outbound) must recover"
+        assert incident_key in candidate_keys, (
+            "Bond-lost incident with sustained stability must be selected for evaluation"
         )
 
-    def test_bond_lost_not_recovered_without_stability_or_outbound(self):
-        """Bond-lost incident with neither outbound proof NOR stability must NOT recover."""
+    def test_bond_lost_without_continuity_is_retained_as_candidate(self):
+        """Base health selects the key, but missing continuity cannot close it."""
         mod = _load()
         now = int(time.time())
         incident_open = now - 86400
@@ -252,14 +261,19 @@ class TestSustainedStabilityRecoveryPath:
         probe = _probe_with_stability(uptime=120, reconnect_attempts=0)
         event = _make_recovery_event(machine, instance, probe, now)
 
-        recovered = mod.daily_health_recovered_incident_keys(event, state)
+        self.assert_isolated(mod)
+        candidates = mod.daily_health_clear_candidate_keys(event, state)
+        assert incident_key in candidates
+        normalized = mod.normalize_dispatch_observation(event)
+        decisions = dict(mod.source_specific_clear_decisions(event, state, normalized))
+        assert decisions[incident_key].status.value == "candidate"
+        self.assert_isolated(mod)
+        mod.append_clear_proof_evidence(state["openIncidents"][incident_key], decisions[incident_key])
+        assert incident_key in state["openIncidents"]
+        assert state["openIncidents"][incident_key]["candidateClearProofs"]
 
-        assert incident_key not in recovered, (
-            "Bond-lost incident with low uptime and no outbound must NOT recover"
-        )
-
-    def test_bond_lost_not_recovered_with_reconnect_attempts(self):
-        """Stability path must reject if reconnect_attempts > 0 (connection is flapping)."""
+    def test_bond_lost_with_reconnect_attempts_remains_candidate(self):
+        """A flapping connection is selected but lacks continuity proof."""
         mod = _load()
         now = int(time.time())
         incident_open = now - 86400
@@ -272,14 +286,15 @@ class TestSustainedStabilityRecoveryPath:
         probe = _probe_with_stability(uptime=7200, reconnect_attempts=5)
         event = _make_recovery_event(machine, instance, probe, now)
 
-        recovered = mod.daily_health_recovered_incident_keys(event, state)
+        self.assert_isolated(mod)
+        candidates = mod.daily_health_clear_candidate_keys(event, state)
+        assert incident_key in candidates
+        normalized = mod.normalize_dispatch_observation(event)
+        decisions = dict(mod.source_specific_clear_decisions(event, state, normalized))
+        assert decisions[incident_key].status.value == "candidate"
 
-        assert incident_key not in recovered, (
-            "Bond-lost incident with non-zero reconnect attempts must NOT recover via stability"
-        )
-
-    def test_bond_lost_recovered_via_outbound_proof_still_works(self):
-        """Original outbound-proof path must still work alongside the new stability path."""
+    def test_bond_lost_with_outbound_proof_is_selected(self):
+        """Outbound proof keeps the protected incident in evaluator scope."""
         mod = _load()
         now = int(time.time())
         incident_open = now - 3600
@@ -292,14 +307,15 @@ class TestSustainedStabilityRecoveryPath:
         probe = _probe_with_outbound(after_epoch=now - 60)
         event = _make_recovery_event(machine, instance, probe, now)
 
-        recovered = mod.daily_health_recovered_incident_keys(event, state)
+        self.assert_isolated(mod)
+        candidate_keys = mod.daily_health_clear_candidate_keys(event, state)
 
-        assert incident_key in recovered, (
-            "Bond-lost incident with post-incident outbound proof must recover (original path)"
+        assert incident_key in candidate_keys, (
+            "Bond-lost incident with outbound proof must be selected for evaluation"
         )
 
-    def test_logged_out_recovered_via_sustained_stability(self):
-        """instance_logged_out is also AUTOCLOSE_PROTECTED and must accept stability path."""
+    def test_logged_out_with_stability_is_selected(self):
+        """instance_logged_out is selected for the same protected evaluator policy."""
         mod = _load()
         now = int(time.time())
         incident_open = now - 86400
@@ -311,10 +327,11 @@ class TestSustainedStabilityRecoveryPath:
         probe = _probe_with_stability(uptime=50000, reconnect_attempts=0)
         event = _make_recovery_event(machine, instance, probe, now)
 
-        recovered = mod.daily_health_recovered_incident_keys(event, state)
+        self.assert_isolated(mod)
+        candidate_keys = mod.daily_health_clear_candidate_keys(event, state)
 
-        assert incident_key in recovered, (
-            "instance_logged_out with sustained stability must recover"
+        assert incident_key in candidate_keys, (
+            "instance_logged_out with stability must be selected for evaluation"
         )
 
     def test_non_protected_source_does_not_need_stability_or_outbound(self):
@@ -331,15 +348,15 @@ class TestSustainedStabilityRecoveryPath:
         # Base verified health only — no uptime, no outbound
         event = _make_recovery_event(machine, instance, _BASE_VERIFIED, now)
 
-        recovered = mod.daily_health_recovered_incident_keys(event, state)
+        self.assert_isolated(mod)
+        candidate_keys = mod.daily_health_clear_candidate_keys(event, state)
 
-        assert incident_key in recovered, (
-            "Non-protected source must recover on base verified health alone"
+        assert incident_key in candidate_keys, (
+            "Non-protected source must be selected on base verified health"
         )
 
-    def test_close_recovered_closes_stability_recovered_incident(self):
-        """End-to-end: close_recovered_daily_health_incidents actually removes
-        the incident from openIncidents when recovered via stability."""
+    def test_accepted_decision_closes_stability_recovered_incident(self):
+        """End-to-end: only an accepted evaluator decision removes the incident."""
         mod = _load()
         now = int(time.time())
         incident_open = now - 86400
@@ -351,9 +368,14 @@ class TestSustainedStabilityRecoveryPath:
         probe = _probe_with_stability(uptime=123894, reconnect_attempts=0)
         event = _make_recovery_event(machine, instance, probe, now)
 
-        closed = mod.close_recovered_daily_health_incidents(event, state)
-
-        assert incident_key in closed
+        self.assert_isolated(mod)
+        normalized = mod.normalize_dispatch_observation(event)
+        decisions = mod.source_specific_clear_decisions(event, state, normalized)
+        accepted = [(key, decision) for key, decision in decisions if decision.status.value == "accepted"]
+        assert [key for key, _ in accepted] == [incident_key]
+        self.assert_isolated(mod)
+        for key, decision in accepted:
+            mod.finalize_accepted_clear(state, key, event, decision)
         assert incident_key not in state["openIncidents"], (
             "Incident must be removed from openIncidents after stability-based recovery"
         )
