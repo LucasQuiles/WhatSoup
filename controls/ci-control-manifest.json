@@ -197,7 +197,7 @@
       "trustClass": "untrusted-candidate",
       "mode": "block",
       "severity": "high",
-      "riskTiers": ["standard", "elevated", "system-wide"],
+      "riskTiers": ["low", "standard", "elevated", "system-wide"],
       "surfaces": ["workflow-safeguards"],
       "dependencies": ["repo.hygiene"],
       "evidence": {
@@ -226,18 +226,137 @@
         "approverRole": null,
         "maxLifetimeSeconds": null
       }
+    },
+    {
+      "id": "ci.exact-revision-classifier",
+      "policyCategory": "source-integrity",
+      "domain": "source-integrity",
+      "owner": "ci-classifier-owner",
+      "decisionOwner": "ci-classification-decision-owner",
+      "implementation": {
+        "commandId": "ci:classify",
+        "detectorId": "ci-control-classifier",
+        "nativeSchemaVersion": 1
+      },
+      "stages": ["pre-push", "pull-request", "merge-group", "default-branch", "release"],
+      "trustClass": "untrusted-candidate",
+      "mode": "block",
+      "severity": "high",
+      "riskTiers": ["low", "standard", "elevated", "system-wide"],
+      "surfaces": ["risk-classification"],
+      "dependencies": ["repo.hygiene"],
+      "evidence": {
+        "schemaVersion": 1,
+        "paths": ["scripts/ci-control-classify.ts", "scripts/lib/ci-control/classifier.ts", "scripts/lib/ci-control/git-input.ts", "scripts/lib/ci-control/manifest.ts", "scripts/lib/verification/boundary-run/contracts.ts", "scripts/lib/verification/boundary-run/model.ts", "scripts/lib/verification/boundary-run/schema.ts", "scripts/lib/verification/boundary-run/shared.ts", "scripts/lib/verification/boundary-run/worktree.ts", "src/lib/git-env.ts", "src/lib/type-guards.ts"],
+        "digestBinding": "exact",
+        "freshness": "receipt"
+      },
+      "failurePolicy": {
+        "finding": "block",
+        "crash": "inconclusive",
+        "timeout": "inconclusive",
+        "missing": "inconclusive",
+        "skipped": "inconclusive",
+        "cancelled": "inconclusive",
+        "stale": "inconclusive"
+      },
+      "remediation": {
+        "summary": "Classify the exact Git objects with the reviewed manifest digest.",
+        "steps": ["Restore every required Git object and trusted digest.", "Run the exact-revision classifier again without caller-selected risk or checks."],
+        "reproduction": "npm run ci:classify -- --help"
+      },
+      "exceptionPolicy": {
+        "allowed": false,
+        "scope": "none",
+        "approverRole": null,
+        "maxLifetimeSeconds": null
+      }
     }
   ],
-  "requiredSurfaces": ["repository-source", "public-output", "test-integrity", "architecture-fitness", "workflow-safeguards"],
-  "riskRules": [],
-  "stages": ["pre-commit", "pre-push", "pull-request", "default-branch", "release"],
+  "requiredSurfaces": ["repository-source", "public-output", "test-integrity", "architecture-fitness", "workflow-safeguards", "risk-classification"],
+  "riskRules": [
+    {
+      "id": "risk.documentation",
+      "tier": "low",
+      "reasons": ["ci.classification.docs-only"],
+      "pathPrefixes": ["docs/", "README.md"]
+    },
+    {
+      "id": "risk.application",
+      "tier": "standard",
+      "reasons": ["ci.classification.application-code"],
+      "pathPrefixes": ["console/", "eslint-rules/", "phonectl/", "src/", "tests/"]
+    },
+    {
+      "id": "risk.dependencies",
+      "tier": "elevated",
+      "reasons": ["ci.classification.dependency-manifest"],
+      "pathPrefixes": ["package.json"]
+    },
+    {
+      "id": "risk.dependency-lock",
+      "tier": "elevated",
+      "reasons": ["ci.classification.dependency-lock"],
+      "pathPrefixes": ["package-lock.json"]
+    },
+    {
+      "id": "risk.workflow",
+      "tier": "elevated",
+      "reasons": ["ci.classification.workflow"],
+      "pathPrefixes": [".github/"]
+    },
+    {
+      "id": "risk.hook",
+      "tier": "elevated",
+      "reasons": ["ci.classification.hook"],
+      "pathPrefixes": [".husky/"]
+    },
+    {
+      "id": "risk.release",
+      "tier": "elevated",
+      "reasons": ["ci.classification.release"],
+      "pathPrefixes": ["deploy/", "docker/", "docker-compose.yml"]
+    },
+    {
+      "id": "risk.shared-tooling",
+      "tier": "elevated",
+      "reasons": ["ci.classification.shared-tooling"],
+      "pathPrefixes": [".arc/", ".claude/", "config/", "plugins/", "scripts/", "tools/"]
+    },
+    {
+      "id": "risk.generator",
+      "tier": "elevated",
+      "reasons": ["ci.classification.generator"],
+      "pathPrefixes": ["scripts/generators/", "tools/generators/"]
+    },
+    {
+      "id": "risk.generated-output",
+      "tier": "elevated",
+      "reasons": ["ci.classification.generated-output"],
+      "pathPrefixes": ["docs/generated/"]
+    },
+    {
+      "id": "risk.public-metadata",
+      "tier": "elevated",
+      "reasons": ["ci.classification.public-metadata"],
+      "pathPrefixes": ["docs/public-surface.md", "docs/publication-audit.md", "docs/work-index.json", "docs/work-index.md"]
+    },
+    {
+      "id": "risk.control-policy",
+      "tier": "system-wide",
+      "reasons": ["ci.classification.policy"],
+      "pathPrefixes": ["controls/", "docs/current-program.md", "docs/superpowers/", "scripts/ci-control-classify.ts", "scripts/ci-control-manifest.ts", "scripts/lib/ci-control/"]
+    }
+  ],
+  "stages": ["pre-commit", "pre-push", "pull-request", "merge-group", "default-branch", "release"],
   "trustClasses": ["untrusted-candidate"],
   "canonicalCommands": {
     "guard:repo": ["bash", "scripts/run-with-pinned-node.sh", "scripts/repo-hygiene-guard.ts"],
     "guard:publication": ["bash", "scripts/run-with-pinned-node.sh", "scripts/publication-guard.ts"],
     "guard:test-integrity:required": ["env", "WHATSOUP_REQUIRE_TEST_INTEGRITY=1", "bash", "scripts/test-integrity-ci.sh"],
     "guard:lint:src": ["bash", "scripts/run-with-pinned-node.sh", "scripts/eslint-fitness-check.ts"],
-    "guard:safeguard-diagnostics": ["bash", "scripts/run-with-pinned-node.sh", "scripts/safeguard-diagnostics.ts"]
+    "guard:safeguard-diagnostics": ["bash", "scripts/run-with-pinned-node.sh", "scripts/safeguard-diagnostics.ts"],
+    "ci:classify": ["bash", "scripts/run-with-pinned-node.sh", "scripts/ci-control-classify.ts"]
   },
   "resultSchema": "ci-control-result-v1",
   "exceptionSchema": "ci-control-exception-v1"

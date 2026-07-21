@@ -14,6 +14,7 @@ import {
   validateControlManifest,
   type ControlManifestV1,
 } from '../../scripts/lib/ci-control/manifest.ts';
+import { CLASSIFIER_TOOL_SOURCE_PATHS } from '../../scripts/lib/ci-control/classifier.ts';
 
 const root = resolve(import.meta.dirname, '../..');
 const temporaryRoots: string[] = [];
@@ -135,7 +136,19 @@ describe('canonical CI control manifest', () => {
       'scheduled',
     ]);
     expect(loaded.controls.every((entry) => entry.trustClass === 'untrusted-candidate')).toBe(true);
-    expect(loaded.controls.every((entry) => entry.evidence.schemaVersion === null)).toBe(true);
+    expect(loaded.controls.filter(({ id }) => id !== 'ci.exact-revision-classifier').every((entry) => entry.evidence.schemaVersion === null)).toBe(true);
+    expect(loaded.controls.find(({ id }) => id === 'ci.exact-revision-classifier')?.evidence).toMatchObject({
+      schemaVersion: 1,
+      paths: CLASSIFIER_TOOL_SOURCE_PATHS,
+      digestBinding: 'exact',
+      freshness: 'receipt',
+    });
+    expect(loaded.riskRules.length).toBeGreaterThan(0);
+    expect(loaded.canonicalCommands['ci:classify']).toEqual([
+      'bash',
+      'scripts/run-with-pinned-node.sh',
+      'scripts/ci-control-classify.ts',
+    ]);
     expect(loaded.canonicalCommands['guard:test-integrity:required']).toEqual([
       'env',
       'WHATSOUP_REQUIRE_TEST_INTEGRITY=1',

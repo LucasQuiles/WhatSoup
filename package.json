@@ -69,6 +69,7 @@
     "guard:lint:src": "bash scripts/run-with-pinned-node.sh scripts/eslint-fitness-check.ts",
     "guard:coverage-headroom": "bash scripts/run-with-pinned-node.sh scripts/check-coverage-headroom.ts",
     "ci:manifest": "bash scripts/run-with-pinned-node.sh scripts/ci-control-manifest.ts",
+    "ci:classify": "bash scripts/run-with-pinned-node.sh scripts/ci-control-classify.ts",
     "guard:restart-preflight": "bash deploy/preflight-check.sh .",
     "migrate-memory-config": "bash scripts/run-with-pinned-node.sh scripts/migrate-memory-config.ts",
     "fleet:rotate-token": "bash scripts/run-with-pinned-node.sh scripts/fleet-rotate-token.ts",
