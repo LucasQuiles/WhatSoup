@@ -179,8 +179,11 @@ import {
 import { canonicalConversationKey, resolvePhoneFromJid, resolvePhoneFromJidForGrant } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
 import { getCommandSpec } from './command-registry.ts';
-import { matchImperative, extractImperativeTarget } from '../../core/substrate/inline-extractor.ts';
-import { createBead } from '../../core/substrate/beads.ts';
+import {
+  classifyInlineImperative,
+  type InlineImperativeRejectionReason,
+} from '../../core/substrate/inline-extractor.ts';
+import { createInlineProposal } from '../../core/substrate/beads.ts';
 import { mkdirSync, copyFileSync, readdirSync, unlinkSync, readFileSync } from 'node:fs';
 import { join, resolve, basename } from 'node:path';
 import { homedir } from 'node:os';
@@ -3686,88 +3689,100 @@ export class AgentRuntime implements Runtime {
       return;
     }
 
-    // Substrate slice 1: inline imperative extractor.
-    // Gate on sender identity (admin-only), not deliveryJid. For any admin-authored
-    // message containing an explicit imperative (remind/schedule/watch/track/...),
-    // persist a proposed task bead immediately so the intent survives even if the
-    // agent turn fails downstream. The bead lands as status='proposed' so a
-    // drowsy or misfired match doesn't silently commit real work to the task list.
+    // Inline proposal admission runs only for newly persisted inbound admin text.
+    // Media-derived text, echoes, synthetic jobs, and messages without durable
+    // source identity continue to the agent but cannot create substrate records.
     try {
-      // senderPhone stays on the PLAIN resolver — it feeds the bead's ownerJid
-      // attribution (display-side, below), which is transport-agnostic.
-      const senderPhone = resolvePhoneFromJid(msg.senderJid, this.db);
-      // QR-143 (B4): the admin GRANT (auto-creating a proposed bead) routes
-      // through the grant primitive, which returns null for a spoofable
-      // <admin-digits>@sms transport — so it cannot induce an admin-attributed
-      // proposal. Skip synthetic agent-job turns (already durable agent_job
-      // beads, not ad-hoc imperatives to capture).
-      const grantPhone = resolvePhoneFromJidForGrant(msg.senderJid, this.db);
-      if (grantPhone !== null && isAdminPhone(grantPhone, config.adminPhones) && !msg.isSyntheticJob) {
-        const hit = matchImperative(content);
-        if (hit) {
-          const target = extractImperativeTarget(content);
-          const title = target && target.length > 0 ? target.slice(0, 200) : content.slice(0, 120);
-          // review_by_at records a review horizon on the proposal. It is stored on
-          // the bead and surfaced via get_bead/list_beads for manual/operator
-          // review; no automatic sweep cancels unreviewed rows past this horizon.
-          // Default is config.memory.sweep.reviewByDays * 86400 seconds.
+      type InlineProposalDecisionReason =
+        | InlineImperativeRejectionReason
+        | 'outbound_echo'
+        | 'synthetic_job'
+        | 'missing_source_message'
+        | 'unauthenticated_admin'
+        | 'proposal_created'
+        | 'proposal_reused';
+      const logAdmissionDecision = (reason: InlineProposalDecisionReason): void => {
+        log.debug({ reason }, 'inline proposal admission decision');
+      };
+      const sourceMessagePk = msg.sourceMessagePk;
+      let gateRejection: InlineProposalDecisionReason | null = null;
+      if (msg.isFromMe) {
+        gateRejection = 'outbound_echo';
+      } else if (msg.isSyntheticJob) {
+        gateRejection = 'synthetic_job';
+      } else if (msg.contentType !== 'text') {
+        gateRejection = 'unsupported_message_type';
+      } else if (
+        typeof sourceMessagePk !== 'number'
+        || !Number.isSafeInteger(sourceMessagePk)
+        || sourceMessagePk <= 0
+      ) {
+        gateRejection = 'missing_source_message';
+      }
+
+      const grantPhone = gateRejection === null
+        ? resolvePhoneFromJidForGrant(msg.senderJid, this.db)
+        : null;
+      if (
+        gateRejection === null
+        && (grantPhone === null || !isAdminPhone(grantPhone, config.adminPhones))
+      ) {
+        gateRejection = 'unauthenticated_admin';
+      }
+
+      if (
+        gateRejection !== null
+        || grantPhone === null
+        || typeof sourceMessagePk !== 'number'
+      ) {
+        logAdmissionDecision(gateRejection ?? 'missing_source_message');
+      } else {
+        const classification = classifyInlineImperative(content);
+        if (!classification.admitted) {
+          logAdmissionDecision(classification.reason);
+        } else {
           const reviewByAt = Math.floor(Date.now() / 1000) + config.memory.sweep.reviewByDays * 86400;
-          createBead(this.db.raw, {
+          const result = createInlineProposal(this.db.raw, {
             kind: 'task',
-            title,
+            title: classification.normalizedTarget.slice(0, 200),
             body: content,
-            ownerJid: config.memory.adminJid || (senderPhone ?? msg.senderJid),
+            ownerJid: config.memory.adminJid || grantPhone,
             chatJid: msg.chatJid,
-            sourceMessagePk: null,
+            sourceMessagePk,
             status: 'proposed',
             confidence: 0.7,
-            proposalReason: `inline imperative: ${hit.verb}`,
+            proposalReason: `inline imperative: ${classification.verb}`,
             reviewByAt,
             actor: 'inline',
+            normalizedTarget: classification.normalizedTarget,
           });
-          log.info(
-            { verb: hit.verb, messageId: msg.messageId, chatJid: msg.chatJid, reviewByAt },
-            'inline imperative persisted as proposed bead',
-          );
+          logAdmissionDecision(result.created ? 'proposal_created' : 'proposal_reused');
         }
       }
     } catch (err) {
-      // Classify DB errors: unrecoverable ones (disk full, readonly, corrupt)
-      // indicate infrastructure failure — surface them to the operator by
-      // emitting alert and marking the inbound failed. Everything else
-      // (extractor bugs, constraint errors on malformed extraction output)
-      // is swallowed with a warn so a substrate bug doesn't drop the user's
-      // message. Per spec §8.4 / INV-7: observability is a product surface.
+      // Unrecoverable database failures get the existing operator alert before
+      // propagation. Every failure class then rejects handleMessage so ingest's
+      // existing failure owner records one terminal outcome; nothing is swallowed.
       const msgText = errorMessage(err);
       const code = (err as { code?: unknown })?.code;
       const codeStr = typeof code === 'string' ? code : '';
-      const isUnrecoverable =
-        /SQLITE_(FULL|READONLY|CORRUPT|IOERR|CANTOPEN|NOTADB)/i.test(msgText) ||
-        /SQLITE_(FULL|READONLY|CORRUPT|IOERR|CANTOPEN|NOTADB)/i.test(codeStr);
-      if (isUnrecoverable) {
+      const unrecoverableCode = (
+        /SQLITE_(FULL|READONLY|CORRUPT|IOERR|CANTOPEN|NOTADB)/i.exec(codeStr)
+        ?? /SQLITE_(FULL|READONLY|CORRUPT|IOERR|CANTOPEN|NOTADB)/i.exec(msgText)
+      )?.[0].toUpperCase();
+      if (unrecoverableCode !== undefined) {
         log.error(
-          { err, messageId: msg.messageId, code: codeStr || 'unknown' },
-          'inline extractor hook hit unrecoverable DB error — surfacing to operator',
+          { reason: 'unrecoverable_storage', code: unrecoverableCode },
+          'inline proposal admission hit unrecoverable storage error',
         );
         emitAlertChecked(
           this.instanceName,
           'substrate-inline-hook',
-          `Unrecoverable DB error in inline extractor: ${msgText}`,
-          `messageId=${msg.messageId} chatJid=${msg.chatJid} code=${codeStr || 'unknown'}`,
+          'Unrecoverable storage error in inline proposal admission',
+          `reason=unrecoverable_storage code=${unrecoverableCode}`,
         );
-        if (this.runtimeTurnCoordinator.finalizeMessageProcessingFailure(msg.inboundSeq)) {
-          // Immutable admitted turns terminalize through the coordinator.
-        } else if (this.durability && msg.inboundSeq !== undefined) {
-          this.markRuntimeFaultContinuityCandidate(msg.inboundSeq);
-          this.replyGuarantee?.disarm(msg.inboundSeq);
-          this.durability.markInboundFailed(msg.inboundSeq, classifyErrorForInbound(err));
-        }
-        // Propagate so the outer turn-chain handler notifies the user and
-        // the fleet supervisor sees the PID enter recovery rather than
-        // silently continuing past disk-full conditions.
-        throw err;
       }
-      log.warn({ err, messageId: msg.messageId }, 'inline extractor hook failed (continuing)');
+      throw err;
     }
 
     this.turnChain = this.turnChain

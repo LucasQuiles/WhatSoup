@@ -288,6 +288,10 @@ const { mockPrepareContentForAgent, actualPrepareContentForAgentRef } = vi.hoist
   };
 });
 
+const { mockClassifyInlineImperative } = vi.hoisted(() => ({
+  mockClassifyInlineImperative: vi.fn(),
+}));
+
 vi.mock('../../../src/config.ts', () => ({ config: mockConfig }));
 
 // Mock ElevenLabs synthesizeSpeech for voice reply tests
@@ -308,6 +312,15 @@ vi.mock('../../../src/runtimes/agent/media-prep.ts', async (importOriginal) => {
   return {
     ...actual,
     prepareContentForAgent: mockPrepareContentForAgent,
+  };
+});
+
+vi.mock('../../../src/core/substrate/inline-extractor.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/core/substrate/inline-extractor.ts')>();
+  mockClassifyInlineImperative.mockImplementation(actual.classifyInlineImperative);
+  return {
+    ...actual,
+    classifyInlineImperative: mockClassifyInlineImperative,
   };
 });
 
@@ -2490,7 +2503,7 @@ describe('AgentRuntime', () => {
     expect(replyGuarantee.disarm).toHaveBeenCalledWith(31);
   });
 
-  it('continues the agent turn when inline extraction hits a recoverable persistence error', async () => {
+  it('surfaces an inline imperative recoverable persistence error through handleMessage', async () => {
     const restoreMemory = setMockMemoryConfig();
     try {
       const db = makeDb();
@@ -2500,30 +2513,32 @@ describe('AgentRuntime', () => {
       });
       const { messenger } = makeMessenger();
       const runtime = new AgentRuntime(db, messenger, 'line-a');
+      const durability = { markInboundFailed: vi.fn() };
+      (runtime as unknown as { durability: typeof durability }).durability = durability;
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({
+      await expect(runtime.handleMessage(makeMsg({
         content: 'remind me to check backup status',
         senderJid: '15550100001@s.whatsapp.net',
-      }));
+        sourceMessagePk: 41,
+      }))).rejects.toThrow('constraint failed');
 
-      expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
-        { err: expect.any(Error), messageId: 'msg-1' },
-        'inline extractor hook failed (continuing)',
-      );
       expect(mockEmitAlert).not.toHaveBeenCalledWith(
         'line-a',
         'substrate-inline-hook',
         expect.any(String),
         expect.any(String),
       );
-      expect(mockSession.sendTurn).toHaveBeenCalledWith('remind me to check backup status');
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+      // Pre-admission recoverable failures reject to ingest, which owns the
+      // single terminal write. Runtime must not pre-finalize the same inbound.
+      expect(durability.markInboundFailed).not.toHaveBeenCalled();
     } finally {
       restoreMemory();
     }
   });
 
-  it('alerts and marks inbound failed when inline extraction hits an unrecoverable DB error', async () => {
+  it('alerts and surfaces an inline imperative unrecoverable DB error without pre-finalizing inbound', async () => {
     const restoreMemory = setMockMemoryConfig();
     try {
       const db = makeDb();
@@ -2555,21 +2570,31 @@ describe('AgentRuntime', () => {
         content: 'remind me to inspect disk pressure',
         senderJid: '15550100001@s.whatsapp.net',
         inboundSeq: 42,
+        sourceMessagePk: 42,
       }))).rejects.toThrow(/SQLITE_FULL/);
 
       expect(mockRuntimeLogger.error).toHaveBeenCalledWith(
-        { err: diskFull, messageId: 'msg-1', code: 'SQLITE_FULL' },
-        expect.stringContaining('inline extractor hook hit unrecoverable DB error'),
+        { reason: 'unrecoverable_storage', code: 'SQLITE_FULL' },
+        'inline proposal admission hit unrecoverable storage error',
       );
       expect(mockEmitAlert).toHaveBeenCalledWith(
         'line-a',
         'substrate-inline-hook',
-        expect.stringContaining('Unrecoverable DB error in inline extractor: SQLITE_FULL'),
-        expect.stringContaining('messageId=msg-1 chatJid=test@s.whatsapp.net code=SQLITE_FULL'),
+        'Unrecoverable storage error in inline proposal admission',
+        'reason=unrecoverable_storage code=SQLITE_FULL',
       );
-      expect(replyGuarantee.disarm).toHaveBeenCalledWith(42);
-      // The inline-extractor SQLITE_FULL fault classifies to db_error.
-      expect(durability.markInboundFailed).toHaveBeenCalledWith(42, 'db_error');
+      const serializedEvidence = JSON.stringify([
+        mockRuntimeLogger.error.mock.calls,
+        mockEmitAlert.mock.calls,
+      ]);
+      expect(serializedEvidence).not.toContain('remind me to inspect disk pressure');
+      expect(serializedEvidence).not.toContain('msg-1');
+      expect(serializedEvidence).not.toContain('test@s.whatsapp.net');
+      expect(serializedEvidence).not.toContain('42');
+      // handleMessage rejects to ingest, which owns the one terminal write.
+      // Runtime must not also finalize the same pre-admission inbound.
+      expect(replyGuarantee.disarm).not.toHaveBeenCalled();
+      expect(durability.markInboundFailed).not.toHaveBeenCalled();
       expect(mockSession.sendTurn).not.toHaveBeenCalled();
     } finally {
       restoreMemory();
@@ -16527,53 +16552,273 @@ describe('NL routing handlers (nlRouting flag)', () => {
 
 });
 
-// ── B3 / QR-143: inline imperative extractor admin-grant transport gate ───────
-// The extractor auto-creates a status:'proposed' task bead for admin-authored
-// imperatives. The admin GRANT must gate on authenticated transport BEFORE the
-// phone match — resolvePhoneFromJid collapses <admin-digits>@sms to the admin
-// phone, but @sms is spoofable, so it must not induce an admin-attributed
-// proposal. Both directions proven against a REAL in-memory beads table.
-describe('B3 inline imperative extractor — QR-143 transport gate', () => {
-  const ADMIN_PN = '15550100001@s.whatsapp.net'; // config mock admin phone
-  const ADMIN_SMS = '+15550100001@sms'; // spoofable: same bare digits as admin
-  const IMPERATIVE = 'remind me to call Alex Friday';
+// ── Durable inline imperative runtime admission ───────────────────────────────
+describe('inline imperative runtime admission', () => {
+  const ADMIN_PN = '15550100001@s.whatsapp.net';
+  const ADMIN_SMS = '+15550100001@sms';
+  const NON_ADMIN_PN = '15550109999@s.whatsapp.net';
+  const PRIVATE_BODY = 'schedule private durability review tomorrow';
+  const PRIVATE_TARGET = 'private durability review tomorrow';
+  const INLINE_LOG_MESSAGE = 'inline proposal admission decision';
+
+  type InlineBead = {
+    id: number;
+    body: string | null;
+    source_message_pk: number | null;
+    proposal_reason: string | null;
+    metadata_json: string;
+  };
+  type InlineEvent = { bead_id: number; source_message_pk: number | null };
+
+  beforeEach(() => {
+    mockClassifyInlineImperative.mockClear();
+    mockPrepareContentForAgent.mockImplementation((...args: unknown[]) => actualPrepareContentForAgentRef.current!(...args));
+    mockRuntimeLogger.debug.mockClear();
+    mockSession.sendTurn.mockClear();
+    mockConfig.adminPhones = new Set<string>(['15550100001']);
+  });
 
   function makeRealDb(): RealDatabase {
     const db = new RealDatabase(':memory:');
     db.open();
     return db;
   }
-  function proposedCount(db: RealDatabase): number {
-    return (db.raw.prepare("SELECT COUNT(*) AS c FROM beads WHERE status = 'proposed'").get() as { c: number }).c;
+
+  function inlineRows(db: RealDatabase): { beads: InlineBead[]; events: InlineEvent[] } {
+    const beads = db.raw.prepare(`
+      SELECT id, body, source_message_pk, proposal_reason, metadata_json
+      FROM beads
+      WHERE proposal_reason LIKE 'inline imperative: %'
+      ORDER BY id
+    `).all() as unknown as InlineBead[];
+    const events = db.raw.prepare(`
+      SELECT bead_id, source_message_pk
+      FROM bead_events
+      WHERE bead_id IN (
+        SELECT id FROM beads WHERE proposal_reason LIKE 'inline imperative: %'
+      )
+      ORDER BY id
+    `).all() as unknown as InlineEvent[];
+    return { beads, events };
   }
 
-  it('ALLOWS an authenticated WhatsApp admin: imperative → proposed bead created (preserved)', async () => {
+  function inlineDebugCalls(): unknown[][] {
+    return mockRuntimeLogger.debug.mock.calls.filter((call) => call[1] === INLINE_LOG_MESSAGE);
+  }
+
+  async function withInlineRuntime(
+    run: (runtime: AgentRuntime, db: RealDatabase) => Promise<void>,
+  ): Promise<void> {
     const restoreMemory = setMockMemoryConfig();
     const db = makeRealDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
     try {
-      const { messenger } = makeMessenger();
-      const runtime = new AgentRuntime(db, messenger);
-      await sendAndDrain(runtime, makeMsg({ senderJid: ADMIN_PN, chatJid: ADMIN_PN, content: IMPERATIVE, messageId: 'b3-admin' }));
-      expect(proposedCount(db)).toBe(1);
-      await runtime.shutdown();
+      await run(runtime, db);
     } finally {
+      await runtime.shutdown();
       db.close();
       restoreMemory();
     }
+  }
+
+  it('admits authenticated admin text once with the exact source key and private-free debug evidence', async () => {
+    await withInlineRuntime(async (runtime, db) => {
+      const sourceMessagePk = 987_654_321;
+      await sendAndDrain(runtime, makeMsg({
+        senderJid: ADMIN_PN,
+        chatJid: ADMIN_PN,
+        content: PRIVATE_BODY,
+        messageId: 'inline-admitted',
+        sourceMessagePk,
+      }));
+
+      const { beads, events } = inlineRows(db);
+      expect(beads).toHaveLength(1);
+      expect(events).toHaveLength(1);
+      expect(beads[0]).toMatchObject({
+        body: PRIVATE_BODY,
+        source_message_pk: sourceMessagePk,
+        proposal_reason: 'inline imperative: schedule',
+      });
+      expect(JSON.parse(beads[0].metadata_json)).toMatchObject({
+        inline_proposal_normalized_target: PRIVATE_TARGET,
+      });
+      expect(events[0]).toEqual({ bead_id: beads[0].id, source_message_pk: sourceMessagePk });
+      expect(mockClassifyInlineImperative).toHaveBeenCalledTimes(1);
+
+      const admissionLogs = inlineDebugCalls();
+      expect(admissionLogs).toEqual([[{ reason: 'proposal_created' }, INLINE_LOG_MESSAGE]]);
+      const serializedLogs = JSON.stringify(admissionLogs);
+      expect(serializedLogs).not.toContain(PRIVATE_BODY);
+      expect(serializedLogs).not.toContain(PRIVATE_TARGET);
+      expect(serializedLogs).not.toContain(String(sourceMessagePk));
+    });
   });
 
-  it('DENIES a spoofed <admin-digits>@sms: imperative → NO proposed bead (new)', async () => {
-    const restoreMemory = setMockMemoryConfig();
-    const db = makeRealDb();
-    try {
-      const { messenger } = makeMessenger();
-      const runtime = new AgentRuntime(db, messenger);
-      await sendAndDrain(runtime, makeMsg({ senderJid: ADMIN_SMS, chatJid: ADMIN_SMS, content: IMPERATIVE, messageId: 'b3-sms' }));
-      expect(proposedCount(db)).toBe(0);
-      await runtime.shutdown();
-    } finally {
-      db.close();
-      restoreMemory();
-    }
+  it.each([
+    {
+      label: 'spoofable transport',
+      reason: 'unauthenticated_admin',
+      overrides: { senderJid: ADMIN_SMS, chatJid: ADMIN_SMS },
+    },
+    {
+      label: 'non-admin sender',
+      reason: 'unauthenticated_admin',
+      overrides: { senderJid: NON_ADMIN_PN, chatJid: NON_ADMIN_PN },
+    },
+    {
+      label: 'synthetic job',
+      reason: 'synthetic_job',
+      overrides: { isSyntheticJob: true },
+    },
+    {
+      label: 'outbound echo',
+      reason: 'outbound_echo',
+      overrides: { isFromMe: true },
+    },
+    {
+      label: 'missing source key',
+      reason: 'missing_source_message',
+      overrides: { sourceMessagePk: undefined },
+    },
+    {
+      label: 'non-positive source key',
+      reason: 'missing_source_message',
+      overrides: { sourceMessagePk: 0 },
+    },
+    {
+      label: 'quoted body',
+      reason: 'quoted_or_fenced',
+      overrides: { content: `> ${PRIVATE_BODY}` },
+    },
+    {
+      label: 'fenced body',
+      reason: 'quoted_or_fenced',
+      overrides: { content: `\`\`\`text\n${PRIVATE_BODY}\n\`\`\`` },
+    },
+  ])('rejects $label without an inline imperative bead or event', async ({ reason, overrides }) => {
+    await withInlineRuntime(async (runtime, db) => {
+      await sendAndDrain(runtime, makeMsg({
+        senderJid: ADMIN_PN,
+        chatJid: ADMIN_PN,
+        content: PRIVATE_BODY,
+        messageId: 'inline-rejected',
+        sourceMessagePk: 7001,
+        ...overrides,
+      }));
+
+      expect(inlineRows(db)).toEqual({ beads: [], events: [] });
+      expect(inlineDebugCalls()).toEqual([[{ reason }, INLINE_LOG_MESSAGE]]);
+    });
+  });
+
+  it.each([
+    ['image caption', 'image'],
+    ['audio transcript', 'audio'],
+  ] as const)('rejects an inline imperative %s even when media preparation returns imperative text', async (_label, contentType) => {
+    mockPrepareContentForAgent.mockResolvedValueOnce(PRIVATE_BODY);
+    await withInlineRuntime(async (runtime, db) => {
+      await sendAndDrain(runtime, makeMsg({
+        senderJid: ADMIN_PN,
+        chatJid: ADMIN_PN,
+        content: PRIVATE_BODY,
+        contentType,
+        messageId: `inline-${contentType}`,
+        sourceMessagePk: contentType === 'image' ? 7101 : 7102,
+      }));
+
+      expect(inlineRows(db)).toEqual({ beads: [], events: [] });
+      expect(mockClassifyInlineImperative).not.toHaveBeenCalled();
+      expect(inlineDebugCalls()).toEqual([[{ reason: 'unsupported_message_type' }, INLINE_LOG_MESSAGE]]);
+    });
+  });
+
+  it('admits group text after ingest mention stripping and stores the sanitized body', async () => {
+    await withInlineRuntime(async (runtime, db) => {
+      const strippedBody = 'schedule group durability review';
+      await sendAndDrain(runtime, makeMsg({
+        senderJid: ADMIN_PN,
+        chatJid: 'synthetic-inline-group@g.us',
+        isGroup: true,
+        mentionedJids: ['15550001111@s.whatsapp.net'],
+        content: strippedBody,
+        messageId: 'inline-group-mention-stripped',
+        sourceMessagePk: 7201,
+      }));
+
+      const { beads, events } = inlineRows(db);
+      expect(beads).toHaveLength(1);
+      expect(events).toHaveLength(1);
+      expect(beads[0]).toMatchObject({ body: strippedBody, source_message_pk: 7201 });
+      expect(mockClassifyInlineImperative).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('makes repeated inline imperative delivery idempotent by source key', async () => {
+    await withInlineRuntime(async (runtime, db) => {
+      const repeated = makeMsg({
+        senderJid: ADMIN_PN,
+        chatJid: ADMIN_PN,
+        content: PRIVATE_BODY,
+        messageId: 'inline-repeat',
+        sourceMessagePk: 7301,
+      });
+      await sendAndDrain(runtime, repeated);
+      await sendAndDrain(runtime, { ...repeated });
+
+      const { beads, events } = inlineRows(db);
+      expect(beads).toHaveLength(1);
+      expect(events).toHaveLength(1);
+      expect(beads[0].source_message_pk).toBe(7301);
+      expect(events[0].source_message_pk).toBe(7301);
+      expect(mockClassifyInlineImperative).toHaveBeenCalledTimes(2);
+      expect(inlineDebugCalls()).toEqual([
+        [{ reason: 'proposal_created' }, INLINE_LOG_MESSAGE],
+        [{ reason: 'proposal_reused' }, INLINE_LOG_MESSAGE],
+      ]);
+    });
+  });
+
+  it('surfaces inline imperative classifier exceptions through handleMessage', async () => {
+    const extractorFault = new Error('synthetic classifier fault');
+    mockClassifyInlineImperative.mockImplementationOnce(() => { throw extractorFault; });
+    await withInlineRuntime(async (runtime, db) => {
+      await expect(runtime.handleMessage(makeMsg({
+        senderJid: ADMIN_PN,
+        chatJid: ADMIN_PN,
+        content: PRIVATE_BODY,
+        messageId: 'inline-classifier-fault',
+        sourceMessagePk: 7401,
+      }))).rejects.toBe(extractorFault);
+
+      expect(inlineRows(db)).toEqual({ beads: [], events: [] });
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    });
+  });
+
+  it('surfaces an inline imperative source collision without appending a second event', async () => {
+    await withInlineRuntime(async (runtime, db) => {
+      await sendAndDrain(runtime, makeMsg({
+        senderJid: ADMIN_PN,
+        chatJid: ADMIN_PN,
+        content: PRIVATE_BODY,
+        messageId: 'inline-collision-first',
+        sourceMessagePk: 7501,
+      }));
+
+      await expect(runtime.handleMessage(makeMsg({
+        senderJid: ADMIN_PN,
+        chatJid: ADMIN_PN,
+        content: 'schedule different private target',
+        messageId: 'inline-collision-second',
+        sourceMessagePk: 7501,
+      }))).rejects.toMatchObject({ code: 'INLINE_PROPOSAL_COLLISION' });
+
+      const { beads, events } = inlineRows(db);
+      expect(beads).toHaveLength(1);
+      expect(events).toHaveLength(1);
+      expect(beads[0].body).toBe(PRIVATE_BODY);
+    });
   });
 });
