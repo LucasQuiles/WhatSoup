@@ -687,16 +687,54 @@ Expected: fail because the strict policy schema, parser, evaluator, and CLI do n
 - [ ] **Step 5 (CP-H1c): Add native exact-object entrypoints**
 
 Extend the canonical repository-hygiene and publication owners to read explicit Git objects
-and outgoing histories. Reuse their native scanners, codes, serializers, and exception
-ownership. Prove a secret added then removed in the outgoing range still blocks and a safe
+and outgoing histories. Reuse their native scanners, granular codes, and exception
+ownership. Both manifest rows currently declare `nativeSchemaVersion: null` and
+`digestBinding: none`, and neither owner has a strict revision-bound native receipt to
+reuse. This bead therefore adds each owner's first strict versioned report-only receipt
+schema and validator, using the existing canonical JSON primitive for exact-byte
+serialization. It does not add another scanner, taxonomy, public renderer, or exception
+path. Prove a secret added then removed in the outgoing range still blocks and a safe
 `HEAD` cannot authorize a different unsafe outgoing OID.
 
+**Adjudicated H1c sequence:** H1c-G first adds only bounded, policy-neutral exact commit-
+range and blob-reading primitives to `scripts/lib/ci-control/git-input.ts`; it does not
+change classifier selection. H1c-R then adds the repository-hygiene receipt under
+`repository-hygiene-decision-owner`. H1c-P adds the publication receipt under
+`publication-decision-owner` and does not copy the hygiene owner's sensitive-artifact
+policy. H1c-A finally adds thin report-only adapters and changes manifest native schema/
+digest declarations only after both owner validators pass. These beads run serially under
+one writer and receive independent review before the next bead begins.
+
 H1c discovery and native RED fixtures may proceed after this packet is frozen, but neutral
-receipt integration waits for CP-F2e. The exact-object adapters record native detector/schema,
-tool/policy digests, exact base/remote/local OIDs, ordered commit/range and observed-path
-digests, native causes/outcome/completeness, claimed and observed scope, limitations, safe
-structural references, exact serialized-byte digest, freshness, and an explicit report-only
-limitation. They never create another taxonomy, warning policy, exception path, or renderer.
+receipt integration waits for CP-F2e. Each strict native receipt—not `ControlResultV1`—owns
+the native detector/schema, independently derived tool/policy digests, exact base/remote/
+local OIDs, ordered commit/range and observed-path/blob digests, native causes/outcome/
+completeness, claimed and observed scope, limitations, safe structural references,
+freshness, and an explicit `report-only` authorization value. The canonical native receipt
+payload does not contain its own digest. It is serialized exactly once, and a separate
+binding supplies `sha256` over those exact payload bytes; validators recompute that external
+binding and reject reconstructed, reserialized, or mismatched bytes.
+
+H1c-A returns a distinct `NativeExactRangeReportOnlyObservationV1`, not the existing
+`NativeAdapterResult`/`NativeEvidenceV1`. It validates native bytes and bindings, preserves
+native causes, and translates only disposition, but it has no producer or observed-platform
+fields and cannot populate trusted native evidence. It reuses `ci.check.passed` and
+`ci.native.receipt-unavailable`; deterministic native block observations use only the
+owner-specific wrapper codes `ci.native.repository-hygiene.finding` and
+`ci.native.privacy-publication.finding`. Those wrapper rows do not replace or collapse the
+native cause codes. H1c never fabricates a precondition receipt, producer/platform proof,
+terminal attempt or process-group proof, required/observed aggregate set, aggregate
+decision, warning governance, or terminal fingerprint; CP-F4/H1d own those transitions and
+may construct `NativeEvidenceV1` only after independently binding producer and platform.
+
+The exact range starts at `remoteOid ?? baseOid`, requires full lowercase commit OIDs and
+an ancestor relation to `localOid`, enumerates the complete ordered outgoing commit set,
+and reads paths, modes, object types, and eligible blob bytes from Git objects only. It
+must not consult ambient `HEAD`, the index, worktree bytes, environment-selected refs,
+replacement objects, lazy fetch, or `core.hooksPath`. The shared Git input primitive
+enforces commit/path/blob/count and byte budgets before traversal, hashes each observed
+blob back to its claimed object identity, and makes missing, malformed, unsupported,
+timed-out, over-budget, or partial evidence inconclusive rather than an empty pass.
 
 Required fixtures include: safe ambient `HEAD` with a different unsafe outgoing OID; a
 private value or sensitive artifact added and removed in an intermediate commit; mismatched
@@ -707,6 +745,26 @@ partial traversal, and stale binding. Redaction covers stdout, stderr, JSON, evi
 references, raw Git errors, absolute paths, matched values, and reversible low-entropy
 fingerprints. Candidate scanner removal, narrowed observation, severity rewrite, or removal
 of the exact-object branch test must be detected.
+
+**H1c files:**
+
+- H1c-G: modify `scripts/lib/ci-control/git-input.ts` and create the dedicated
+  `tests/scripts/ci-control-git-input.test.ts`. Do not modify the CP-F3-owned classifier
+  test to establish H1c-G behavior.
+- H1c-R: modify `scripts/repo-hygiene-guard.ts` and
+  `tests/scripts/repo-hygiene-guard.test.ts`.
+- H1c-P: modify `scripts/publication-guard.ts` and
+  `tests/scripts/publication-guard.test.ts`.
+- H1c-A: modify `scripts/lib/ci-control/native-adapter.ts`,
+  `scripts/lib/ci-control/reasons.ts`, `controls/ci-control-manifest.json`, and their
+  existing companion tests. Modify `scripts/lib/ci-control/manifest.ts` only if the
+  existing strict manifest schema cannot express the validated native receipt binding.
+
+The current `--staged`, `--branch-diff`, `--all`, and `--release` entrypoints remain
+unchanged. Exact-range receipts are additive and report-only. Publication exact-range
+coverage scans transient private-literal introductions but does not claim that worktree-
+dependent audit/reference validation ran; H1d must exact-set compose the distinct native
+controls rather than relabel either receipt as complete publication assurance.
 
 - [ ] **Step 6 (CP-H1d): Implement exact per-ref verification and atomic cutover**
 
