@@ -40,6 +40,7 @@ from bot_errors_protocol import (
     QuarantineReason,
     evaluate_clear,
     normalize_observation,
+    stronger_clear_policy,
 )
 
 
@@ -715,8 +716,23 @@ def load_incident_state(paths: dict[str, Path]) -> dict[str, Any]:
     if isinstance(loaded.get("closedHistory"), list):
         state["closedHistory"] = loaded["closedHistory"][-50:]
     if isinstance(loaded.get("acceptedClearNotifications"), dict):
-        accepted = list(loaded["acceptedClearNotifications"].items())[-50:]
+        accepted: list[tuple[str, dict[str, Any]]] = []
+        for digest, record in loaded["acceptedClearNotifications"].items():
+            if not isinstance(record, dict):
+                continue
+            sequence = record.get("sequence")
+            accepted.append((
+                str(digest),
+                {**record, "sequence": sequence if type(sequence) is int and sequence > 0 else 0},
+            ))
+        accepted.sort(key=lambda item: (item[1]["sequence"], item[0]))
+        accepted = accepted[-50:]
         state["acceptedClearNotifications"] = dict(accepted)
+        loaded_sequence = loaded.get("acceptedClearNotificationSequence")
+        state["acceptedClearNotificationSequence"] = max(
+            loaded_sequence if type(loaded_sequence) is int and loaded_sequence >= 0 else 0,
+            max((record["sequence"] for _, record in accepted), default=0),
+        )
     # Per-host daily-health freshness ledger — the heartbeat-watchdog's authoritative
     # liveness source. Must survive across one-shot runs; without this preserve the
     # ledger would reset every invocation and the watchdog would fall back to scanning
@@ -1217,7 +1233,6 @@ def daily_health_clear_candidate_keys(
         return []
     machine = safe_segment(str(event.get("machine") or "unknown"))
     open_incidents = incident_state.setdefault("openIncidents", {})
-    created = event_created_epoch(event)
     candidate_keys: list[str] = []
     seen: set[str] = set()
     for raw_line in str(event.get("evidence") or "").splitlines():
@@ -1226,46 +1241,33 @@ def daily_health_clear_candidate_keys(
         if not match:
             continue
         instance = safe_segment(match.group(1))
-        probe = match.group(2).strip()
-        scope = f"{machine}|{instance}"
-        if is_verified_whatsapp_health_recovery(probe):
-            daily_health_fail_prefix = f"{scope}|daily-health-fail:"
-            for key, record in open_incidents.items():
-                if not str(key).startswith(daily_health_fail_prefix):
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                status = str(record.get("status") or "open")
-                if status in {"closed", "resolved"}:
-                    continue
-                opened = int_field(record, "eventCreatedAtEpoch", int_field(record, "openedAt"))
-                if created is None or opened <= 0 or created <= opened:
-                    continue
-                if key not in seen:
-                    seen.add(key)
-                    candidate_keys.append(key)
-        for source in DAILY_HEALTH_WHATSAPP_RECOVERY_SOURCES:
-            for key in [f"{scope}|{source}", f"{scope}|daily-health:{source}"]:
-                record = open_incidents.get(key)
-                if not isinstance(record, dict):
-                    continue
-                status = str(record.get("status") or "open")
-                if status in {"closed", "resolved"}:
-                    continue
-                opened = int_field(record, "eventCreatedAtEpoch")
-                if opened > 0 and created is not None and created < opened - CLOCK_SKEW_TOLERANCE_SECONDS:
-                    continue
-                if not is_verified_whatsapp_health_recovery(probe):
-                    continue
-                if key not in seen:
-                    seen.add(key)
-                    candidate_keys.append(key)
+        for raw_key, record in open_incidents.items():
+            key = str(raw_key)
+            if not isinstance(record, dict) or str(record.get("status") or "open") in {"closed", "resolved"}:
+                continue
+            parts = key.split("|", 2)
+            if len(parts) != 3 or parts[0] != machine:
+                continue
+            source = parts[2]
+            if source.startswith("daily-health-fail:"):
+                in_scope = safe_segment(source.split(":", 1)[1]) == instance
+            else:
+                tail = source.split(":")[-1]
+                in_scope = parts[1] == instance and tail in DAILY_HEALTH_WHATSAPP_RECOVERY_SOURCES
+            if in_scope and key not in seen:
+                seen.add(key)
+                candidate_keys.append(key)
     return candidate_keys
 
 
 def _daily_health_probe_for_key(event: dict[str, Any], key: str) -> str:
     parts = key.split("|", 2)
-    target_instance = parts[1] if len(parts) == 3 else ""
+    source = parts[2] if len(parts) == 3 else ""
+    target_instance = (
+        safe_segment(source.split(":", 1)[1])
+        if source.startswith("daily-health-fail:")
+        else parts[1] if len(parts) == 3 else ""
+    )
     for raw_line in str(event.get("evidence") or "").splitlines():
         match = re.match(r"^health\s+([^:\s]+):\s+(.+)$", raw_line.strip())
         if match and safe_segment(match.group(1)) == target_instance:
@@ -1285,24 +1287,19 @@ def source_specific_clear_decisions(
         if not isinstance(record, dict):
             continue
         view = clear_record_view(key, record)
-        target = replace(
-            normalized,
-            incident_key=key,
-            incident_source=str(view["incidentSource"]),
-            target_incident_key=key,
-        )
         probe = _daily_health_probe_for_key(event, key)
         source = str(view["incidentSource"])
+        verified_health = is_verified_whatsapp_health_recovery(probe)
         receipt: dict[str, Any] = {
             "kind": "health_snapshot",
             "ref": f"daily-health:{created}",
-            "verified": True,
+            "verified": verified_health,
             "schemaVersion": normalized.schema_version,
             "observedAtEpoch": created,
             "incidentKey": key,
             "scope": "application_health",
-            "state": "healthy",
-            "ok": True,
+            "state": "healthy" if verified_health else "unknown",
+            "ok": verified_health,
         }
         receipts = [receipt, {"kind": "evaluation_clock", "observedAtEpoch": int(time.time())}]
         if source.startswith("daily-health-fail:"):
@@ -1346,6 +1343,13 @@ def source_specific_clear_decisions(
                     "incidentKey": key,
                     "state": "stable",
                 })
+        target = replace(
+            normalized,
+            incident_key=key,
+            incident_source=str(view["incidentSource"]),
+            target_incident_key=key,
+            state=ObservationState.HEALTHY if receipt.get("verified") is True else ObservationState.UNKNOWN,
+        )
         decisions.append((key, evaluate_clear(view, target, receipts)))
     return decisions
 
@@ -1566,25 +1570,83 @@ def normalize_dispatch_observation(event: Any) -> NormalizedObservation | Quaran
     )
 
 
-def clear_policy_state(normalized: NormalizedObservation) -> dict[str, Any]:
-    return {
-        "kind": normalized.clear_policy.kind.value,
-        "minimumSchemaVersion": normalized.clear_policy.minimum_schema_version,
-    }
+def source_minimum_clear_policy(
+    source: str,
+    classification: str = "standard",
+) -> ClearPolicyKind:
+    """Return the minimum proof strength inherent to an incident source."""
+    if classification == "inferred_transient":
+        return ClearPolicyKind.SAME_SOURCE_NEWER
+    tail = source.split(":")[-1]
+    if tail in DAILY_HEALTH_REQUIRES_OUTBOUND_PROOF_SOURCES:
+        return ClearPolicyKind.AUTH_BOND_AND_OUTBOUND
+    if source.startswith("daily-health-fail:") or tail in DAILY_HEALTH_WHATSAPP_RECOVERY_SOURCES:
+        return ClearPolicyKind.HEALTH_SNAPSHOT
+    if source == "bot_errors_delivery":
+        return ClearPolicyKind.OUTBOUND_AFTER_INCIDENT
+    return ClearPolicyKind.SAME_SOURCE_NEWER
+
+
+def clear_policy_state(
+    normalized: NormalizedObservation,
+    existing_record: dict[str, Any] | None = None,
+    effective_classification: str | None = None,
+) -> dict[str, Any]:
+    classification = effective_classification or normalized.classification
+    kind = stronger_clear_policy(
+        normalized.clear_policy.kind,
+        source_minimum_clear_policy(normalized.incident_source, classification),
+    )
+    minimum_schema = max(normalized.schema_version, normalized.clear_policy.minimum_schema_version)
+    if isinstance(existing_record, dict):
+        stored = existing_record.get("clearPolicy")
+        if isinstance(stored, dict):
+            try:
+                kind = stronger_clear_policy(kind, ClearPolicyKind(stored.get("kind")))
+            except (TypeError, ValueError):
+                pass
+            stored_minimum = stored.get("minimumSchemaVersion")
+            if type(stored_minimum) is int and stored_minimum in {1, 2}:
+                minimum_schema = max(minimum_schema, stored_minimum)
+        stored_schema = existing_record.get("schemaVersion")
+        if type(stored_schema) is int and stored_schema in {1, 2}:
+            minimum_schema = max(minimum_schema, stored_schema)
+    return {"kind": kind.value, "minimumSchemaVersion": minimum_schema}
+
+
+def incident_authority_state(classification: str) -> str:
+    return "transient" if classification == "inferred_transient" else "authoritative"
+
+
+def stronger_incident_classification(existing: str, incoming: str) -> str:
+    strength = {"inferred_transient": 0, "standard": 1, "physical_intervention": 2}
+    return existing if strength.get(existing, 1) > strength.get(incoming, 1) else incoming
+
+
+def has_destructive_incident_authority(record: dict[str, Any]) -> bool:
+    authority = str(record.get("clearAuthority") or "")
+    if authority:
+        return authority == "authoritative"
+    return str(record.get("classification") or "standard") != "inferred_transient"
 
 
 def clear_record_view(key: str, record: dict[str, Any]) -> dict[str, Any]:
     """Supply bounded identity for legacy records without inventing a new key."""
     source = _source_of_key(key) or "unknown"
     view = {**record, "incidentKey": key, "incidentSource": source}
-    if not isinstance(view.get("clearPolicy"), dict):
-        if source.split(":")[-1] in DAILY_HEALTH_REQUIRES_OUTBOUND_PROOF_SOURCES:
-            kind = ClearPolicyKind.AUTH_BOND_AND_OUTBOUND
-        elif source.startswith("daily-health-fail:") or source == "health_body_degraded":
-            kind = ClearPolicyKind.HEALTH_SNAPSHOT
-        else:
-            kind = ClearPolicyKind.SAME_SOURCE_NEWER
-        view["clearPolicy"] = {"kind": kind.value, "minimumSchemaVersion": 1}
+    minimum = source_minimum_clear_policy(source, str(view.get("classification") or "standard"))
+    stored = view.get("clearPolicy")
+    if not isinstance(stored, dict):
+        view["clearPolicy"] = {"kind": minimum.value, "minimumSchemaVersion": 1}
+    else:
+        try:
+            stored_kind = ClearPolicyKind(stored.get("kind"))
+        except (TypeError, ValueError):
+            return view
+        view["clearPolicy"] = {
+            **stored,
+            "kind": stronger_clear_policy(stored_kind, minimum).value,
+        }
     return view
 
 
@@ -1603,13 +1665,67 @@ def direct_clear_decision(
     return evaluate_clear(clear_record_view(key, record), normalized, receipts)
 
 
-def append_clear_proof_evidence(record: dict[str, Any], decision: ClearDecision) -> None:
+_OMIT_EVALUATION_CLOCK = object()
+
+
+def canonical_clear_proof_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        if value.get("kind") == "evaluation_clock":
+            return _OMIT_EVALUATION_CLOCK
+        cleaned: dict[str, Any] = {}
+        for key, child in value.items():
+            canonical_child = canonical_clear_proof_value(child)
+            if canonical_child is not _OMIT_EVALUATION_CLOCK:
+                cleaned[str(key)] = canonical_child
+        return cleaned
+    if isinstance(value, (list, tuple)):
+        cleaned_list: list[Any] = []
+        for child in value:
+            canonical_child = canonical_clear_proof_value(child)
+            if canonical_child is not _OMIT_EVALUATION_CLOCK:
+                cleaned_list.append(canonical_child)
+        return cleaned_list
+    return value
+
+
+def clear_proof_identity(
+    decision: ClearDecision,
+    event: dict[str, Any] | None = None,
+) -> str:
+    receipt = decision.proof_receipt if isinstance(decision.proof_receipt, dict) else {}
+    canonical_receipt = canonical_clear_proof_value(receipt)
+    material = {
+        "eventIdDigest": clear_event_identity_digest(event) if isinstance(event, dict) else "",
+        "decisionStatus": decision.status.value,
+        "reason": decision.reason,
+        "receipt": canonical_receipt,
+    }
+    canonical = json.dumps(material, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def append_clear_proof_evidence(
+    record: dict[str, Any],
+    decision: ClearDecision,
+    event: dict[str, Any] | None = None,
+) -> bool:
     field = "rejectedClearProofs" if decision.status is ClearStatus.REJECTED else "candidateClearProofs"
     history = record.get(field)
     if not isinstance(history, list):
         history = []
-    history.append({"reason": decision.reason, "receipt": decision.proof_receipt})
+    proof_identity = clear_proof_identity(decision, event)
+    if any(
+        isinstance(entry, dict) and entry.get("proofIdentity") == proof_identity
+        for entry in history
+    ):
+        return False
+    history.append({
+        "proofIdentity": proof_identity,
+        "reason": decision.reason,
+        "receipt": decision.proof_receipt,
+    })
     record[field] = history[-8:]
+    return True
 
 
 def finalize_accepted_clear(
@@ -1642,6 +1758,47 @@ def clear_event_identity_digest(event: dict[str, Any]) -> str:
     return hashlib.sha256(str(event.get("id") or "").encode("utf-8")).hexdigest()
 
 
+def clear_notification_content_digest(event: dict[str, Any]) -> str:
+    """Bind retry authority to immutable notification content, not delivery state."""
+    diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
+    message_diagnostics = {
+        key: diagnostics[key]
+        for key in ("logHints", "writefailRecovery", "queue", "dispatchLog")
+        if key in diagnostics
+    }
+    rendered_event = {**event, "delivery": {}, "diagnostics": message_diagnostics}
+    content = {
+        key: event[key]
+        for key in (
+            "schemaVersion",
+            "id",
+            "eventType",
+            "severity",
+            "source",
+            "alertSource",
+            "machine",
+            "instance",
+            "platform",
+            "createdAt",
+            "observedAt",
+            "summary",
+            "evidence",
+            "criticalAsset",
+            "observation",
+            "clearPolicy",
+            "remediation",
+            "process",
+            "storm",
+        )
+        if key in event
+    }
+    content["diagnostics"] = message_diagnostics
+    content["requestedAction"] = requested_action_text(event)
+    content["rendered"] = format_event(rendered_event)
+    canonical = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def record_accepted_clear_notification(
     incident_state: dict[str, Any],
     event: dict[str, Any],
@@ -1651,9 +1808,14 @@ def record_accepted_clear_notification(
     accepted = incident_state.get("acceptedClearNotifications")
     if not isinstance(accepted, dict):
         accepted = {}
+    prior_sequence = incident_state.get("acceptedClearNotificationSequence")
+    sequence = (prior_sequence if type(prior_sequence) is int and prior_sequence >= 0 else 0) + 1
+    incident_state["acceptedClearNotificationSequence"] = sequence
     digest = clear_event_identity_digest(event)
     accepted[digest] = {
+        "sequence": sequence,
         "eventIdDigest": digest,
+        "notificationContentDigest": clear_notification_content_digest(event),
         "incidentKey": normalized.incident_key,
         "incidentSource": normalized.incident_source,
         "schemaVersion": normalized.schema_version,
@@ -1664,7 +1826,14 @@ def record_accepted_clear_notification(
             for key, decision in closures[:16]
         ],
     }
-    incident_state["acceptedClearNotifications"] = dict(list(accepted.items())[-50:])
+    ordered = sorted(
+        accepted.items(),
+        key=lambda item: (
+            item[1].get("sequence") if isinstance(item[1], dict) and type(item[1].get("sequence")) is int else 0,
+            item[0],
+        ),
+    )
+    incident_state["acceptedClearNotifications"] = dict(ordered[-50:])
 
 
 def pending_clear_notification_decision(
@@ -1675,20 +1844,9 @@ def pending_clear_notification_decision(
     event_id_digest = clear_event_identity_digest(event)
     accepted = incident_state.get("acceptedClearNotifications")
     record = accepted.get(event_id_digest) if isinstance(accepted, dict) else None
-    expected = {
-        "incidentKey": normalized.incident_key,
-        "incidentSource": normalized.incident_source,
-        "schemaVersion": normalized.schema_version,
-        "observedAtEpoch": normalized.observed_at_epoch,
-        "eventType": normalized.event_type,
-    }
-    if (
-        not isinstance(record, dict)
-        or any(record.get(key) != value for key, value in expected.items())
-        or record.get("eventIdDigest") != event_id_digest
-        or not isinstance(record.get("closures"), list)
-        or not record["closures"]
-    ):
+    if not isinstance(record, dict) or accepted_clear_notification_tamper_reason(
+        event, incident_state, normalized
+    ) is not None:
         return None
     receipt = {
         "status": ClearStatus.ACCEPTED.value,
@@ -1700,6 +1858,34 @@ def pending_clear_notification_decision(
         "evidenceRefs": [],
     }
     return ClearDecision(ClearStatus.ACCEPTED, "accepted clear notification retry", receipt)
+
+
+def accepted_clear_notification_tamper_reason(
+    event: dict[str, Any],
+    incident_state: dict[str, Any],
+    normalized: NormalizedObservation,
+) -> str | None:
+    event_id_digest = clear_event_identity_digest(event)
+    accepted = incident_state.get("acceptedClearNotifications")
+    record = accepted.get(event_id_digest) if isinstance(accepted, dict) else None
+    if not isinstance(record, dict):
+        return None
+    expected = {
+        "incidentKey": normalized.incident_key,
+        "incidentSource": normalized.incident_source,
+        "schemaVersion": normalized.schema_version,
+        "observedAtEpoch": normalized.observed_at_epoch,
+        "eventType": normalized.event_type,
+    }
+    if record.get("eventIdDigest") != event_id_digest:
+        return "accepted_clear_notification_tamper: event identity digest mismatch"
+    if any(record.get(key) != value for key, value in expected.items()):
+        return "accepted_clear_notification_tamper: normalized notification identity mismatch"
+    if record.get("notificationContentDigest") != clear_notification_content_digest(event):
+        return "accepted_clear_notification_tamper: notification content digest mismatch"
+    if not isinstance(record.get("closures"), list) or not record["closures"]:
+        return "accepted_clear_notification_tamper: authorization closure receipt is invalid"
+    return None
 
 
 def is_physical_intervention_signal(event: dict[str, Any]) -> bool:
@@ -2344,6 +2530,7 @@ def should_suppress_send(
     normalized: NormalizedObservation | None = None,
     clear_decision: ClearDecision | None = None,
     source_clear_decisions: list[tuple[str, ClearDecision]] | None = None,
+    proof_state_changes: list[str] | None = None,
 ) -> str | None:
     if normalized is None:
         candidate = normalize_dispatch_observation(event)
@@ -2352,6 +2539,24 @@ def should_suppress_send(
         return None
     source = str(event.get("source") or "")
     severity = str(event.get("severity") or "").lower()
+    source_decisions = source_clear_decisions or []
+    open_incidents = incident_state.setdefault("openIncidents", {})
+    for source_key, decision in source_decisions:
+        if decision.status is ClearStatus.ACCEPTED:
+            continue
+        source_record = open_incidents.get(source_key)
+        if isinstance(source_record, dict):
+            appended = append_clear_proof_evidence(source_record, decision, event)
+            if appended and proof_state_changes is not None:
+                proof_state_changes.append(source_key)
+    accepted_source_clear = any(
+        decision.status is ClearStatus.ACCEPTED for _, decision in source_decisions
+    )
+    accepted_notification_retry = (
+        clear_decision is not None
+        and clear_decision.status is ClearStatus.ACCEPTED
+        and clear_decision.reason == "accepted clear notification retry"
+    )
     if (
         is_incident_alert(event)
         and source == "whatsapp_auth_bond_local_failure"
@@ -2360,6 +2565,8 @@ def should_suppress_send(
         return "test fixture auth-bond event suppressed from live BOT ERRORS"
     if source == "daily-health" and severity == "info" and not is_incident_clear(event):
         return "daily-health info events are retained for heartbeat freshness but not posted to BOT ERRORS"
+    if is_incident_alert(event) and (accepted_source_clear or accepted_notification_retry):
+        return None
     # Pattern H — a relay_host_recovered (info alert) whose paired relay_host_down
     # was held-and-unsurfaced is a self-healed flap; suppress it so the blip pages
     # neither leg. Handled here because the info severity means it never reaches the
@@ -2384,7 +2591,6 @@ def should_suppress_send(
     migrate_legacy_unqualified_incident(event, incident_state)
     key = normalized.incident_key if normalized is not None else incident_key(event)
     current = int(time.time())
-    open_incidents = incident_state.setdefault("openIncidents", {})
     # Pattern F — suppress individual members of an OPEN flap storm; the
     # consolidated flap_storm alert (emitted by the pre-collapse scan) already
     # carries the count/rate. The storm itself never routes through here
@@ -2517,35 +2723,26 @@ def should_suppress_send(
             if transient_clear is not None:
                 return transient_clear
         open_record = open_incidents.get(key)
-        if not isinstance(open_record, dict):
-            if normalized is not None and pending_clear_notification_decision(
-                event, incident_state, normalized
-            ) is not None:
-                return None
-            source_decisions = source_clear_decisions or []
-            for source_key, decision in source_decisions:
-                if decision.status is ClearStatus.ACCEPTED:
-                    continue
-                source_record = open_incidents.get(source_key)
-                if isinstance(source_record, dict):
-                    append_clear_proof_evidence(source_record, decision)
-            if any(decision.status is ClearStatus.ACCEPTED for _, decision in source_decisions):
-                return None
-            if source_decisions:
-                return "source-specific clear proof is not authoritative"
-            return f"clear has no open incident for {key}; stale recovery suppressed"
-        opened = int_field(open_record, "eventCreatedAtEpoch")
-        if (
-            opened > 0
-            and normalized is not None
-            and not normalized.clear_is_fresh_for(key, opened, CLOCK_SKEW_TOLERANCE_SECONDS)
-        ):
-            return f"clear predates open incident for {key}; stale recovery suppressed"
-        if normalized is not None:
+        direct_accepted = False
+        direct_reason: str | None = None
+        if isinstance(open_record, dict) and normalized is not None:
             decision = clear_decision or direct_clear_decision(event, incident_state, normalized)
-            if decision is not None and decision.status is not ClearStatus.ACCEPTED:
-                append_clear_proof_evidence(open_record, decision)
-                return f"clear proof {decision.status.value} for {key}: {decision.reason}"
+            if decision is not None and decision.status is ClearStatus.ACCEPTED:
+                direct_accepted = True
+            elif decision is not None:
+                appended = append_clear_proof_evidence(open_record, decision, event)
+                if appended and proof_state_changes is not None:
+                    proof_state_changes.append(key)
+                direct_reason = f"clear proof {decision.status.value} for {key}: {decision.reason}"
+        if direct_accepted or accepted_source_clear or accepted_notification_retry:
+            return None
+        if direct_reason is not None:
+            return direct_reason
+        if source_decisions:
+            return "source-specific clear proof is not authoritative"
+        if not isinstance(open_record, dict):
+            return f"clear has no open incident for {key}; stale recovery suppressed"
+        return f"clear proof is unavailable for {key}"
     return None
 
 
@@ -2565,10 +2762,10 @@ def append_clear_context(
     incident_state: dict[str, Any],
     accepted_source_keys: list[str] | None = None,
 ) -> None:
-    if not is_incident_clear(event):
+    recovered_keys = accepted_source_keys or []
+    if not is_incident_clear(event) and not recovered_keys:
         return
     open_record = incident_state.setdefault("openIncidents", {}).get(incident_key(event))
-    recovered_keys = accepted_source_keys or []
     if not isinstance(open_record, dict) and not recovered_keys:
         return
     additions: list[str] = []
@@ -2598,7 +2795,10 @@ def mark_incident_sent(
         if normalized is None:
             candidate = normalize_dispatch_observation(event)
             normalized = candidate if isinstance(candidate, NormalizedObservation) else None
-        close_superseded_incidents(event, incident_state)
+        if normalized is None or has_destructive_incident_authority({
+            "classification": normalized.classification,
+        }):
+            close_superseded_incidents(event, incident_state)
         incident_state.setdefault("lastSentAt", {})[key] = current
         existing = incident_state.setdefault("openIncidents", {}).get(key)
         existing_record = existing if isinstance(existing, dict) else {}
@@ -2637,12 +2837,28 @@ def mark_incident_sent(
         if normalized is not None:
             updated_record["incidentKey"] = normalized.incident_key
             updated_record["incidentSource"] = normalized.incident_source
-            updated_record["schemaVersion"] = normalized.schema_version
-            updated_record["clearPolicy"] = clear_policy_state(normalized)
-            updated_record["classification"] = normalized.classification
-            updated_record["clearAuthority"] = (
-                "transient" if normalized.classification == "inferred_transient" else "authoritative"
+            stored_schema = existing_record.get("schemaVersion")
+            updated_record["schemaVersion"] = max(
+                normalized.schema_version,
+                stored_schema if type(stored_schema) is int and stored_schema in {1, 2} else 1,
             )
+            existing_classification = (
+                str(existing_record.get("classification") or "standard")
+                if existing_record and has_destructive_incident_authority(existing_record)
+                else str(existing_record.get("classification") or "inferred_transient")
+                if existing_record else "inferred_transient"
+            )
+            classification = stronger_incident_classification(
+                existing_classification,
+                normalized.classification,
+            )
+            updated_record["clearPolicy"] = clear_policy_state(
+                normalized,
+                existing_record,
+                classification,
+            )
+            updated_record["classification"] = classification
+            updated_record["clearAuthority"] = incident_authority_state(classification)
         code = critical_failure_code(event)
         if code:
             updated_record["failureCode"] = code
@@ -2736,7 +2952,7 @@ def stronger_open_incident_for(
         record = open_incidents.get(stronger_key)
         if not isinstance(record, dict):
             continue
-        if str(record.get("clearAuthority") or "") == "transient":
+        if not has_destructive_incident_authority(record):
             continue
         status = str(record.get("status") or "open")
         if status in {"closed", "resolved", "stale"}:
@@ -4745,30 +4961,42 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
     event = mark_attempt(event)
     atomic_write_json(claimed, event)
     incident_state = load_incident_state(paths)
+    tamper_reason = accepted_clear_notification_tamper_reason(
+        event, incident_state, normalized
+    )
 
     # Stamp daily-health liveness into the durable freshness ledger before any
     # suppress/send branch — all three downstream paths that persist incident_state
     # (suppress, send-success) then carry it, and the high-frequency info cadence is
     # always suppressed (and thus always saved). The watchdog reads this ledger
     # instead of the FIFO-pruned suppressed/ archive.
-    record_daily_health_freshness(event, incident_state)
+    if tamper_reason is None:
+        record_daily_health_freshness(event, incident_state)
 
-    if str(event.get("source") or "") == "daily-health" and not is_incident_clear(event):
+    if (
+        tamper_reason is None
+        and str(event.get("source") or "") == "daily-health"
+        and not is_incident_clear(event)
+    ):
         candidates = daily_health_clear_candidate_keys(event, incident_state)
         if candidates:
             diagnostics = event.setdefault("diagnostics", {})
             if isinstance(diagnostics, dict):
                 diagnostics["sourceSpecificClearCandidates"] = candidates
-    clear_decision = direct_clear_decision(event, incident_state, normalized)
-    if clear_decision is None:
+    clear_decision = (
+        direct_clear_decision(event, incident_state, normalized)
+        if tamper_reason is None else None
+    )
+    if clear_decision is None and tamper_reason is None:
         clear_decision = pending_clear_notification_decision(event, incident_state, normalized)
     source_decisions = (
         source_specific_clear_decisions(event, incident_state, normalized)
-        if is_incident_clear(event)
+        if tamper_reason is None and str(event.get("source") or "") == "daily-health"
         else []
     )
-    suppress_reason = should_suppress_send(
-        event, incident_state, normalized, clear_decision, source_decisions
+    proof_state_changes: list[str] = []
+    suppress_reason = tamper_reason or should_suppress_send(
+        event, incident_state, normalized, clear_decision, source_decisions, proof_state_changes
     )
     if suppress_reason:
         event = mark_suppressed(event, suppress_reason)
@@ -4789,7 +5017,8 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
 
     accepted_closures: list[tuple[str, ClearDecision]] = []
     if (
-        clear_decision is not None
+        is_incident_clear(event)
+        and clear_decision is not None
         and clear_decision.status is ClearStatus.ACCEPTED
         and isinstance(
             incident_state.setdefault("openIncidents", {}).get(normalized.incident_key),
@@ -4813,6 +5042,8 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
         record_accepted_clear_notification(
             incident_state, event, normalized, accepted_closures
         )
+    if accepted_closures or proof_state_changes:
+        failure_type = "clear_state_persist_failed" if accepted_closures else "proof_state_persist_failed"
         try:
             save_incident_state(paths, incident_state)
         except Exception as exc:
@@ -4820,12 +5051,12 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
             os.replace(claimed, retry_path)
             fsync_parent(retry_path)
             append_dispatch_log(paths, {
-                "type": "clear_state_persist_failed",
+                "type": failure_type,
                 "eventId": event.get("id"),
                 "path": str(retry_path),
                 "error": str(exc),
             })
-            return False, f"clear_state_persist_failed: {exc}"
+            return False, f"{failure_type}: {exc}"
 
     stamp_delivery_freshness(event, int(time.time()))
     text = format_event(event)

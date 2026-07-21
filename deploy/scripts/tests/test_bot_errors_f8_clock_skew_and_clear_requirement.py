@@ -187,6 +187,43 @@ class ClearEvaluatorTests(IsolatedDispatcherTestCase):
         self.assertEqual(decision.status.value, "rejected")
         self.assertIn("receipt", decision.reason)
 
+    def test_missing_unreferenced_receipt_is_candidate(self) -> None:
+        now = int(time.time())
+        key = "host-a|ana-bot|health_body_degraded"
+        event = _clear_event(now, source="health_body_degraded")
+        record = _open_record(
+            key,
+            now - 300,
+            source="health_body_degraded",
+            policy="health_snapshot",
+        )
+        decision = _decision(self.mod, record, event, [])
+        self.assertEqual(decision.status.value, "candidate")
+
+    def test_unreferenced_wrong_key_receipt_rejects(self) -> None:
+        now = int(time.time())
+        key = "host-a|ana-bot|health_body_degraded"
+        event = _clear_event(now, source="health_body_degraded")
+        record = _open_record(
+            key,
+            now - 300,
+            source="health_body_degraded",
+            policy="health_snapshot",
+        )
+        receipt = {
+            "kind": "health_snapshot",
+            "verified": True,
+            "schemaVersion": 1,
+            "observedAtEpoch": now,
+            "incidentKey": "host-a|other-bot|health_body_degraded",
+            "scope": "application_health",
+            "state": "healthy",
+            "ok": True,
+        }
+        decision = _decision(self.mod, record, event, [receipt])
+        self.assertEqual(decision.status.value, "rejected")
+        self.assertIn("identity", decision.reason)
+
     def test_weak_receipt_schema_rejects(self) -> None:
         now = int(time.time())
         key = "host-a|ana-bot|health_body_degraded"
@@ -447,6 +484,20 @@ class ClearEvaluatorTests(IsolatedDispatcherTestCase):
 
 
 class DispatcherClearEnforcementTests(IsolatedDispatcherTestCase):
+    def _persist_state_and_event(
+        self,
+        paths: dict[str, Path],
+        state: dict[str, Any],
+        event: dict[str, Any],
+        name: str,
+    ) -> Path:
+        self.assert_isolated(paths)
+        self.mod.save_incident_state(paths, state)
+        event.setdefault("diagnostics", {})["omitDispatchLogInMessage"] = True
+        event_path = paths["outbox"] / name
+        event_path.write_text(json.dumps(event), encoding="utf-8")
+        return event_path
+
     def test_requirement_mismatch_is_suppressed_and_open_incident_retained(self) -> None:
         paths = self.mod.setup_dirs()
         now = int(time.time())
@@ -471,6 +522,437 @@ class DispatcherClearEnforcementTests(IsolatedDispatcherTestCase):
         evidence = persisted["openIncidents"][key]["rejectedClearProofs"]
         self.assertTrue(evidence)
         self.assertNotIn("advisory_only_incident_still_closed", json.dumps(persisted))
+
+    def test_stale_clear_persists_one_rejected_proof_without_notification(self) -> None:
+        paths = self.mod.setup_dirs()
+        now = int(time.time())
+        key = "host-a|ana-bot|socket_down"
+        state = {"version": 1, "openIncidents": {key: _open_record(key, now)}, "lastSentAt": {key: now}}
+        event = _clear_event(now - 90)
+        event_path = self._persist_state_and_event(paths, state, event, "stale.json")
+        with patch.object(self.mod, "send_whatsapp") as send:
+            self.assert_isolated(paths)
+            ok, detail = self.mod.process_one(event_path, paths)
+        self.assertTrue(ok, detail)
+        self.assertEqual(detail, "suppressed")
+        send.assert_not_called()
+        persisted = self.mod.load_incident_state(paths)
+        self.assertIn(key, persisted["openIncidents"])
+        proofs = persisted["openIncidents"][key]["rejectedClearProofs"]
+        self.assertEqual(len(proofs), 1)
+        self.assertIn("stale", proofs[0]["reason"])
+
+    def test_direct_accepted_with_source_candidate_records_sibling_evidence(self) -> None:
+        paths = self.mod.setup_dirs()
+        now = int(time.time())
+        direct_key = "host-a|bot-errors-health|daily-health"
+        source_key = "host-a|ana-bot|whatsapp_device_bond_lost"
+        state = {
+            "version": 1,
+            "openIncidents": {
+                direct_key: _open_record(direct_key, now - 300, source="daily-health"),
+                source_key: _open_record(source_key, now - 300, source="whatsapp_device_bond_lost", policy="auth_bond_and_outbound"),
+            },
+            "lastSentAt": {},
+        }
+        probe = "200 status=healthy wa_connected=true state=connected auth_bond_status=present auth_bond_creds_exists=true auth_bond_creds_size=4096 auth_failure_class=none"
+        event = _clear_event(now, source="daily-health", instance="bot-errors-health")
+        event["evidence"] = f"health ana-bot: {probe}"
+        event_path = self._persist_state_and_event(paths, state, event, "mixed-direct-accepted.json")
+        with patch.object(self.mod, "send_whatsapp") as send:
+            self.assert_isolated(paths)
+            ok, detail = self.mod.process_one(event_path, paths)
+        self.assertTrue(ok, detail)
+        self.assertEqual(detail, "sent")
+        send.assert_called_once()
+        persisted = self.mod.load_incident_state(paths)
+        self.assertNotIn(direct_key, persisted["openIncidents"])
+        self.assertIn(source_key, persisted["openIncidents"])
+        self.assertTrue(persisted["openIncidents"][source_key]["candidateClearProofs"])
+        sent_event = json.loads(next(paths["sent"].iterdir()).read_text(encoding="utf-8"))
+        self.assertNotIn(source_key, sent_event["evidence"])
+
+    def test_direct_rejected_with_source_accepted_closes_only_source(self) -> None:
+        paths = self.mod.setup_dirs()
+        now = int(time.time())
+        direct_key = "host-a|bot-errors-health|daily-health"
+        source_key = "host-a|ana-bot|health_body_degraded"
+        state = {
+            "version": 1,
+            "openIncidents": {
+                direct_key: _open_record(direct_key, now - 300, source="daily-health", policy="health_snapshot", minimum_schema=2),
+                source_key: _open_record(source_key, now - 300, source="health_body_degraded", policy="health_snapshot"),
+            },
+            "lastSentAt": {},
+        }
+        probe = "200 status=healthy wa_connected=true state=connected auth_bond_status=present auth_bond_creds_exists=true auth_bond_creds_size=4096 auth_failure_class=none"
+        event = _clear_event(now, source="daily-health", instance="bot-errors-health")
+        event["evidence"] = f"health ana-bot: {probe}"
+        event_path = self._persist_state_and_event(paths, state, event, "mixed-direct-rejected.json")
+        with patch.object(self.mod, "send_whatsapp") as send:
+            self.assert_isolated(paths)
+            ok, detail = self.mod.process_one(event_path, paths)
+        self.assertTrue(ok, detail)
+        self.assertEqual(detail, "sent")
+        send.assert_called_once()
+        persisted = self.mod.load_incident_state(paths)
+        self.assertIn(direct_key, persisted["openIncidents"])
+        self.assertTrue(persisted["openIncidents"][direct_key]["rejectedClearProofs"])
+        self.assertNotIn(source_key, persisted["openIncidents"])
+        sent_event = json.loads(next(paths["sent"].iterdir()).read_text(encoding="utf-8"))
+        self.assertIn(source_key, sent_event["evidence"])
+        self.assertNotIn(f"recovered_incidents={direct_key}", sent_event["evidence"])
+
+    def test_terminal_unit_success_closes_unit_not_attention_application(self) -> None:
+        paths = self.mod.setup_dirs()
+        now = int(time.time())
+        unit_key = "host-a|bot-errors-health|daily-health-fail:ana-bot"
+        app_key = "host-a|ana-bot|daily-health:attention-required"
+        state = {
+            "version": 1,
+            "openIncidents": {
+                unit_key: _open_record(unit_key, now - 300, source="daily-health-fail:ana-bot", policy="health_snapshot"),
+                app_key: _open_record(app_key, now - 300, source="daily-health:attention-required", policy="health_snapshot"),
+            },
+            "lastSentAt": {},
+        }
+        event = _clear_event(now, source="daily-health", instance="ana-bot")
+        event.update({
+            "eventType": "alert",
+            "severity": "warning",
+            "alertSource": "attention-required",
+            "summary": "BOT ERRORS daily health found issues",
+        })
+        event["evidence"] = "health ana-bot: 200 status=attention-required ok=false Result=success ExecMainStatus=0"
+        event_path = self._persist_state_and_event(paths, state, event, "unit-terminal.json")
+        with patch.object(self.mod, "send_whatsapp", side_effect=RuntimeError("transport unavailable")) as send:
+            self.assert_isolated(paths)
+            ok, detail = self.mod.process_one(event_path, paths)
+        self.assertFalse(ok)
+        self.assertIn("transport unavailable", detail)
+        send.assert_called_once()
+        persisted = self.mod.load_incident_state(paths)
+        self.assertNotIn(unit_key, persisted["openIncidents"])
+        self.assertIn(app_key, persisted["openIncidents"])
+        queued_retry = json.loads(event_path.read_text(encoding="utf-8"))
+        self.assertIsNotNone(
+            self.mod.pending_clear_notification_decision(
+                queued_retry,
+                persisted,
+                self.mod.normalize_dispatch_observation(queued_retry),
+            )
+        )
+        self.assertTrue(event_path.exists())
+
+        with patch.object(self.mod, "send_whatsapp") as retry_send:
+            self.assert_isolated(paths)
+            ok, detail = self.mod.process_one(event_path, paths)
+        self.assertTrue(ok, detail)
+        self.assertEqual(detail, "sent")
+        retry_send.assert_called_once()
+        reloaded = self.mod.load_incident_state(paths)
+        self.assertNotIn(unit_key, reloaded["openIncidents"])
+        self.assertIn(app_key, reloaded["openIncidents"])
+        sent_event = json.loads(next(paths["sent"].iterdir()).read_text(encoding="utf-8"))
+        self.assertIn(unit_key, sent_event["evidence"])
+
+    def test_running_unit_and_partial_health_are_candidates_with_evidence(self) -> None:
+        now = int(time.time())
+        unit_key = "host-a|bot-errors-health|daily-health-fail:ana-bot"
+        health_key = "host-a|ana-bot|health_body_degraded"
+        state = {
+            "version": 1,
+            "openIncidents": {
+                unit_key: _open_record(unit_key, now - 300, source="daily-health-fail:ana-bot", policy="health_snapshot"),
+                health_key: _open_record(health_key, now - 300, source="health_body_degraded", policy="health_snapshot"),
+            },
+            "lastSentAt": {},
+        }
+        event = _clear_event(now, source="daily-health", instance="bot-errors-health")
+        event["evidence"] = "health ana-bot: 200 status=unknown ActiveState=running Result=exit-code ExecMainStatus=1"
+        observation = self.mod.normalize_dispatch_observation(event)
+        self.assert_isolated()
+        decisions = self.mod.source_specific_clear_decisions(event, state, observation)
+        by_key = dict(decisions)
+        self.assertEqual(by_key[unit_key].status.value, "candidate")
+        self.assertEqual(by_key[health_key].status.value, "candidate")
+        self.assert_isolated()
+        reason = self.mod.should_suppress_send(event, state, observation, None, decisions)
+        self.assertIsNotNone(reason)
+        self.assertTrue(state["openIncidents"][unit_key]["candidateClearProofs"])
+        self.assertTrue(state["openIncidents"][health_key]["candidateClearProofs"])
+
+    def test_alert_candidate_proofs_are_durable_before_transport_failure(self) -> None:
+        paths = self.mod.setup_dirs()
+        now = int(time.time())
+        unit_key = "host-a|bot-errors-health|daily-health-fail:ana-bot"
+        state = {
+            "version": 1,
+            "openIncidents": {
+                unit_key: _open_record(
+                    unit_key,
+                    now - 300,
+                    source="daily-health-fail:ana-bot",
+                    policy="health_snapshot",
+                ),
+            },
+            "lastSentAt": {},
+        }
+        event = _clear_event(now, source="daily-health", instance="ana-bot")
+        event.update({
+            "eventType": "alert",
+            "severity": "warning",
+            "alertSource": "attention-required",
+        })
+        event["evidence"] = "health ana-bot: 200 status=attention-required ok=false ActiveState=running Result=exit-code ExecMainStatus=1"
+        event_path = self._persist_state_and_event(paths, state, event, "candidate-send-fail.json")
+        with patch.object(self.mod, "send_whatsapp", side_effect=RuntimeError("transport unavailable")) as send:
+            self.assert_isolated(paths)
+            ok, detail = self.mod.process_one(event_path, paths)
+        self.assertFalse(ok)
+        self.assertIn("transport unavailable", detail)
+        send.assert_called_once()
+        persisted = self.mod.load_incident_state(paths)
+        self.assertTrue(persisted["openIncidents"][unit_key]["candidateClearProofs"])
+        self.assertTrue(event_path.exists())
+
+        interleaved = {**event, "id": "candidate-interleaved", "createdAt": _iso(now + 1)}
+        interleaved_path = paths["outbox"] / "candidate-interleaved.json"
+        interleaved_path.write_text(json.dumps(interleaved), encoding="utf-8")
+        with (
+            patch.object(self.mod.time, "time", return_value=now + 10),
+            patch.object(self.mod, "send_whatsapp", side_effect=RuntimeError("transport unavailable")),
+        ):
+            self.assert_isolated(paths)
+            ok, detail = self.mod.process_one(interleaved_path, paths)
+        self.assertFalse(ok)
+        self.assertIn("transport unavailable", detail)
+
+        with (
+            patch.object(self.mod.time, "time", return_value=now + 20),
+            patch.object(self.mod, "send_whatsapp", side_effect=RuntimeError("transport unavailable")),
+        ):
+            self.assert_isolated(paths)
+            ok, detail = self.mod.process_one(event_path, paths)
+        self.assertFalse(ok)
+        self.assertIn("transport unavailable", detail)
+        reloaded = self.mod.load_incident_state(paths)
+        proofs = reloaded["openIncidents"][unit_key]["candidateClearProofs"]
+        self.assertEqual(len(proofs), 2)
+        self.assertEqual(len({proof["proofIdentity"] for proof in proofs}), 2)
+
+    def test_alert_candidate_proof_save_failure_requeues_before_send(self) -> None:
+        paths = self.mod.setup_dirs()
+        now = int(time.time())
+        unit_key = "host-a|bot-errors-health|daily-health-fail:ana-bot"
+        state = {
+            "version": 1,
+            "openIncidents": {
+                unit_key: _open_record(
+                    unit_key,
+                    now - 300,
+                    source="daily-health-fail:ana-bot",
+                    policy="health_snapshot",
+                ),
+            },
+            "lastSentAt": {},
+        }
+        event = _clear_event(now, source="daily-health", instance="ana-bot")
+        event.update({
+            "eventType": "alert",
+            "severity": "warning",
+            "alertSource": "attention-required",
+        })
+        event["evidence"] = "health ana-bot: 200 status=attention-required ok=false ActiveState=running Result=exit-code ExecMainStatus=1"
+        event_path = self._persist_state_and_event(paths, state, event, "candidate-save-fail.json")
+        with (
+            patch.object(self.mod, "save_incident_state", side_effect=OSError("injected proof save fault")) as save,
+            patch.object(self.mod, "send_whatsapp") as send,
+        ):
+            self.assert_isolated(paths)
+            ok, detail = self.mod.process_one(event_path, paths)
+        self.assertFalse(ok)
+        self.assertIn("proof_state_persist_failed", detail)
+        save.assert_called_once()
+        send.assert_not_called()
+        self.assertTrue(event_path.exists())
+        self.assertFalse(list(paths["sent"].iterdir()))
+
+    def test_source_specific_skew_is_selected_then_evaluator_decides(self) -> None:
+        now = int(time.time())
+        key = "host-a|ana-bot|health_body_degraded"
+        probe = "200 status=healthy wa_connected=true state=connected auth_bond_status=present auth_bond_creds_exists=true auth_bond_creds_size=4096 auth_failure_class=none"
+        for offset, expected in ((-30, "accepted"), (-90, "rejected")):
+            with self.subTest(offset=offset):
+                opened = now
+                state = {"version": 1, "openIncidents": {key: _open_record(key, opened, source="health_body_degraded", policy="health_snapshot")}, "lastSentAt": {}}
+                event = _clear_event(opened + offset, source="daily-health", instance="bot-errors-health")
+                event["evidence"] = f"health ana-bot: {probe}"
+                observation = self.mod.normalize_dispatch_observation(event)
+                self.assert_isolated()
+                candidates = self.mod.daily_health_clear_candidate_keys(event, state)
+                self.assertIn(key, candidates)
+                decisions = self.mod.source_specific_clear_decisions(event, state, observation)
+                self.assertEqual(dict(decisions)[key].status.value, expected)
+                if expected == "rejected":
+                    self.assert_isolated()
+                    self.mod.should_suppress_send(event, state, observation, None, decisions)
+                    self.assertTrue(state["openIncidents"][key]["rejectedClearProofs"])
+
+    def test_alert_storage_applies_source_minimum_clear_policy(self) -> None:
+        now = int(time.time())
+        cases = [
+            ("health_body_degraded", "ana-bot", None),
+            ("daily-health-fail", "bot-errors-health", "ana-bot"),
+            ("instance_unreachable", "ana-bot", None),
+        ]
+        for source, instance, alert_source in cases:
+            with self.subTest(source=source):
+                event = _clear_event(now, source=source, instance=instance)
+                event.update({"id": f"alert-{source}", "eventType": "alert", "severity": "warning"})
+                if alert_source:
+                    event["alertSource"] = alert_source
+                normalized = self.mod.normalize_dispatch_observation(event)
+                state = {"version": 1, "openIncidents": {}, "lastSentAt": {}}
+                self.assert_isolated()
+                self.mod.mark_incident_sent(event, state, normalized)
+                key = normalized.incident_key
+                self.assertEqual(state["openIncidents"][key]["clearPolicy"]["kind"], "health_snapshot")
+                clear = {**event, "id": f"clear-{source}", "eventType": "clear", "severity": "info"}
+                clear_normalized = self.mod.normalize_dispatch_observation(clear)
+                decision = self.mod.direct_clear_decision(clear, state, clear_normalized)
+                self.assertIsNotNone(decision)
+                self.assertEqual(decision.status.value, "candidate")
+
+        weak = _clear_event(now, source="instance_logged_out")
+        weak.update({"id": "weak-auth-alert", "eventType": "alert", "severity": "warning"})
+        weak["criticalAsset"] = {
+            "asset": {"kind": "whatsapp_linked_device", "instance": "ana-bot"},
+            "failure": {"code": "WA_AUTH_BOND_SERVER_REVOKED", "recoverability": "manual_relink_required", "confidence": "probable"},
+            "evidenceRefs": ["connected=false", "state=connecting", "disconnect_class=none", "reconnect_phase=backoff", "reconnect_attempts=0", "weak_signal_polls=3"],
+        }
+        weak_normalized = self.mod.normalize_dispatch_observation(weak)
+        weak_state = {"version": 1, "openIncidents": {}, "lastSentAt": {}}
+        self.assert_isolated()
+        self.mod.mark_incident_sent(weak, weak_state, weak_normalized)
+        self.assertEqual(weak_state["openIncidents"][weak_normalized.incident_key]["clearPolicy"]["kind"], "same_source_newer")
+        terminal = {**weak, "id": "terminal-auth-alert", "criticalAsset": {**weak["criticalAsset"], "evidenceRefs": []}}
+        terminal_normalized = self.mod.normalize_dispatch_observation(terminal)
+        terminal_state = {"version": 1, "openIncidents": {}, "lastSentAt": {}}
+        self.assert_isolated()
+        self.mod.mark_incident_sent(terminal, terminal_state, terminal_normalized)
+        self.assertEqual(terminal_state["openIncidents"][terminal_normalized.incident_key]["clearPolicy"]["kind"], "auth_bond_and_outbound")
+
+    def test_weaker_repeated_alert_cannot_downgrade_policy_or_authority(self) -> None:
+        now = int(time.time())
+        key = "host-a|ana-bot|health_body_degraded"
+        existing = _open_record(
+            key,
+            now - 300,
+            source="health_body_degraded",
+            policy="auth_bond_and_outbound",
+            minimum_schema=2,
+        )
+        existing.update({"classification": "physical_intervention", "clearAuthority": "authoritative"})
+        state = {"version": 1, "openIncidents": {key: existing}, "lastSentAt": {}}
+        repeated = _clear_event(now, source="health_body_degraded")
+        repeated.update({"id": "weaker-repeat", "eventType": "alert", "severity": "warning"})
+        normalized = self.mod.normalize_dispatch_observation(repeated)
+        self.assert_isolated()
+        self.mod.mark_incident_sent(repeated, state, normalized)
+        stored = state["openIncidents"][key]
+        self.assertEqual(stored["schemaVersion"], 2)
+        self.assertEqual(stored["clearPolicy"], {
+            "kind": "auth_bond_and_outbound",
+            "minimumSchemaVersion": 2,
+        })
+        self.assertEqual(stored["classification"], "physical_intervention")
+        self.assertEqual(stored["clearAuthority"], "authoritative")
+
+        weak_clear = _clear_event(now + 1, source="health_body_degraded")
+        decision = self.mod.direct_clear_decision(
+            weak_clear,
+            state,
+            self.mod.normalize_dispatch_observation(weak_clear),
+        )
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.status.value, "rejected")
+        self.assertIn("schema", decision.reason)
+
+    def test_weak_repeat_preserves_legacy_authoritative_record(self) -> None:
+        now = int(time.time())
+        key = "host-a|ana-bot|instance_logged_out"
+        legacy = _open_record(key, now - 300, source="instance_logged_out")
+        legacy.pop("classification", None)
+        legacy.pop("clearAuthority", None)
+        state = {"version": 1, "openIncidents": {key: legacy}, "lastSentAt": {}}
+        weak = _clear_event(now, source="instance_logged_out")
+        weak.update({"id": "weak-repeat-legacy", "eventType": "alert", "severity": "warning"})
+        weak["criticalAsset"] = {
+            "asset": {"kind": "whatsapp_linked_device", "instance": "ana-bot"},
+            "failure": {"code": "WA_AUTH_BOND_SERVER_REVOKED", "recoverability": "manual_relink_required", "confidence": "probable"},
+            "evidenceRefs": ["connected=false", "state=connecting", "disconnect_class=none", "reconnect_phase=backoff", "reconnect_attempts=0", "weak_signal_polls=3"],
+        }
+        normalized = self.mod.normalize_dispatch_observation(weak)
+        self.assertEqual(normalized.classification, "inferred_transient")
+        self.assert_isolated()
+        self.mod.mark_incident_sent(weak, state, normalized)
+        stored = state["openIncidents"][key]
+        self.assertEqual(stored["classification"], "standard")
+        self.assertEqual(stored["clearAuthority"], "authoritative")
+        self.assertEqual(stored["clearPolicy"]["kind"], "auth_bond_and_outbound")
+
+    def test_weak_auth_cannot_supersede_symptoms_but_terminal_auth_can(self) -> None:
+        now = int(time.time())
+        symptom_keys = [
+            "host-a|ana-bot|health_body_degraded",
+            "host-a|ana-bot|instance_unreachable",
+            "host-a|ana-bot|outbound_send_failed",
+        ]
+
+        def symptom_state() -> dict[str, Any]:
+            return {
+                "version": 1,
+                "openIncidents": {
+                    key: _open_record(key, now - 300, source=key.rsplit("|", 1)[-1])
+                    for key in symptom_keys
+                },
+                "lastSentAt": {},
+            }
+
+        weak = _clear_event(now, source="instance_logged_out")
+        weak.update({"id": "weak-auth", "eventType": "alert", "severity": "warning"})
+        weak["criticalAsset"] = {
+            "asset": {"kind": "whatsapp_linked_device", "instance": "ana-bot"},
+            "failure": {"code": "WA_AUTH_BOND_SERVER_REVOKED", "recoverability": "manual_relink_required", "confidence": "probable"},
+            "evidenceRefs": ["connected=false", "state=connecting", "disconnect_class=none", "reconnect_phase=backoff", "reconnect_attempts=0", "weak_signal_polls=3"],
+        }
+        weak_state = symptom_state()
+        weak_normalized = self.mod.normalize_dispatch_observation(weak)
+        self.assertEqual(weak_normalized.classification, "inferred_transient")
+        self.assert_isolated()
+        self.mod.mark_incident_sent(weak, weak_state, weak_normalized)
+        for key in symptom_keys:
+            self.assertIn(key, weak_state["openIncidents"])
+        weak_key = weak_normalized.incident_key
+        self.assertEqual(weak_state["openIncidents"][weak_key]["clearAuthority"], "transient")
+        symptom_event = _clear_event(now + 1, source="health_body_degraded")
+        symptom_event.update({"eventType": "alert", "severity": "warning"})
+        self.assertIsNone(self.mod.stronger_open_incident_for(symptom_event, weak_state))
+
+        terminal = {**weak, "id": "terminal-auth"}
+        terminal["evidence"] = "last_disconnect_reason=loggedOut auth_failure_class=pairing_required"
+        terminal["criticalAsset"] = {
+            **weak["criticalAsset"],
+            "evidenceRefs": [],
+        }
+        terminal_state = symptom_state()
+        terminal_normalized = self.mod.normalize_dispatch_observation(terminal)
+        self.assertNotEqual(terminal_normalized.classification, "inferred_transient")
+        self.assert_isolated()
+        self.mod.mark_incident_sent(terminal, terminal_state, terminal_normalized)
+        for key in symptom_keys:
+            self.assertNotIn(key, terminal_state["openIncidents"])
 
     def test_weak_auth_never_gains_physical_authority_or_absorbs_symptom_freshness(self) -> None:
         now = int(time.time())
@@ -613,6 +1095,239 @@ class DispatcherClearEnforcementTests(IsolatedDispatcherTestCase):
         mutated_observation = self.mod.normalize_dispatch_observation(mutated)
         self.assertIsNone(self.mod.pending_clear_notification_decision(mutated, state, mutated_observation))
 
+    def test_retry_authorization_binds_notification_content_not_delivery_metadata(self) -> None:
+        now = int(time.time())
+        event = _clear_event(now)
+        observation = self.mod.normalize_dispatch_observation(event)
+        key = observation.incident_key
+        record = _open_record(key, now - 300)
+        decision = self.mod.evaluate_clear(record, observation, [])
+        state: dict[str, Any] = {"version": 1, "openIncidents": {}, "lastSentAt": {}}
+        self.mod.record_accepted_clear_notification(state, event, observation, [(key, decision)])
+
+        delivery_retry = json.loads(json.dumps(event))
+        delivery_retry["delivery"] = {
+            "attempts": 7,
+            "status": "queued",
+            "lastError": "transport unavailable",
+            "ageAtDeliverySeconds": 900,
+            "revalidated": False,
+        }
+        self.assertIsNotNone(
+            self.mod.pending_clear_notification_decision(
+                delivery_retry,
+                state,
+                self.mod.normalize_dispatch_observation(delivery_retry),
+            )
+        )
+
+        mutations = {
+            "summary": "tampered recovery summary",
+            "evidence": "tampered recovery evidence",
+            "severity": "critical",
+            "criticalAsset": {
+                "asset": {"kind": "whatsapp_linked_device", "instance": "ana-bot"},
+                "failure": {
+                    "code": "WA_AUTH_BOND_SERVER_REVOKED",
+                    "recoverability": "manual_relink_required",
+                    "operatorAction": "perform a different action",
+                },
+            },
+        }
+        for field, value in mutations.items():
+            with self.subTest(field=field):
+                mutated = json.loads(json.dumps(event))
+                mutated[field] = value
+                self.assertIsNone(
+                    self.mod.pending_clear_notification_decision(
+                        mutated,
+                        state,
+                        self.mod.normalize_dispatch_observation(mutated),
+                    )
+                )
+
+    def test_proof_identity_preserves_future_semantic_receipt_fields(self) -> None:
+        now = int(time.time())
+        event = _clear_event(now)
+        base = {
+            "status": "candidate",
+            "incidentKey": "host-a|ana-bot|health_body_degraded",
+            "incidentSource": "health_body_degraded",
+            "policy": "health_snapshot",
+            "schemaVersion": 1,
+            "observedAtEpoch": now,
+            "evidenceRefs": [
+                {"kind": "evaluation_clock", "observedAtEpoch": now},
+                {"kind": "health_snapshot", "incidentKey": "host-a|ana-bot|health_body_degraded"},
+                "future-nondict-ref",
+            ],
+            "futureNested": {
+                "clock": {"kind": "evaluation_clock", "observedAtEpoch": now},
+                "semantic": {"value": "first"},
+            },
+        }
+        first = self.mod.ClearDecision(
+            self.mod.ClearStatus.CANDIDATE,
+            "authoritative proof is not yet terminal",
+            base,
+        )
+        clock_only_change = self.mod.ClearDecision(
+            self.mod.ClearStatus.CANDIDATE,
+            "authoritative proof is not yet terminal",
+            {
+                **base,
+                "evidenceRefs": [
+                    {"kind": "evaluation_clock", "observedAtEpoch": now + 99},
+                    {"kind": "health_snapshot", "incidentKey": "host-a|ana-bot|health_body_degraded"},
+                    "future-nondict-ref",
+                ],
+                "futureNested": {
+                    **base["futureNested"],
+                    "clock": {"kind": "evaluation_clock", "observedAtEpoch": now + 99},
+                },
+            },
+        )
+        semantic_change = self.mod.ClearDecision(
+            self.mod.ClearStatus.CANDIDATE,
+            "authoritative proof is not yet terminal",
+            {
+                **base,
+                "futureNested": {
+                    **base["futureNested"],
+                    "semantic": {"value": "second"},
+                },
+            },
+        )
+        self.assertEqual(
+            self.mod.clear_proof_identity(first, event),
+            self.mod.clear_proof_identity(clock_only_change, event),
+        )
+        self.assertNotEqual(
+            self.mod.clear_proof_identity(first, event),
+            self.mod.clear_proof_identity(semantic_change, event),
+        )
+
+    def test_tampered_authorized_alert_retry_is_durably_suppressed(self) -> None:
+        paths = self.mod.setup_dirs()
+        now = int(time.time())
+        unit_key = "host-a|bot-errors-health|daily-health-fail:ana-bot"
+        state = {
+            "version": 1,
+            "openIncidents": {
+                unit_key: _open_record(
+                    unit_key,
+                    now - 300,
+                    source="daily-health-fail:ana-bot",
+                    policy="health_snapshot",
+                ),
+            },
+            "lastSentAt": {},
+        }
+        event = _clear_event(now, source="daily-health", instance="ana-bot")
+        event.update({
+            "eventType": "alert",
+            "severity": "warning",
+            "alertSource": "attention-required",
+            "summary": "BOT ERRORS daily health found issues",
+            "evidence": "health ana-bot: 200 status=attention-required ok=false Result=success ExecMainStatus=0",
+        })
+        event_path = self._persist_state_and_event(paths, state, event, "tampered-retry.json")
+        with patch.object(self.mod, "send_whatsapp", side_effect=RuntimeError("transport unavailable")):
+            self.assert_isolated(paths)
+            ok, detail = self.mod.process_one(event_path, paths)
+        self.assertFalse(ok)
+        self.assertIn("transport unavailable", detail)
+        authorized = self.mod.load_incident_state(paths)
+        digest = self.mod.clear_event_identity_digest(event)
+        self.assertIn(digest, authorized["acceptedClearNotifications"])
+        authorization_before = json.loads(json.dumps(authorized["acceptedClearNotifications"][digest]))
+        self.assertNotIn(unit_key, authorized["openIncidents"])
+
+        queued = json.loads(event_path.read_text(encoding="utf-8"))
+        queued["summary"] = "tampered same-id alert"
+        event_path.write_text(json.dumps(queued), encoding="utf-8")
+        with patch.object(self.mod, "send_whatsapp") as send:
+            self.assert_isolated(paths)
+            ok, detail = self.mod.process_one(event_path, paths)
+        self.assertTrue(ok, detail)
+        self.assertEqual(detail, "suppressed")
+        send.assert_not_called()
+        persisted = self.mod.load_incident_state(paths)
+        self.assertIn(digest, persisted["acceptedClearNotifications"])
+        self.assertEqual(persisted["acceptedClearNotifications"][digest], authorization_before)
+        self.assertNotIn("dailyHealthFreshness", persisted)
+        self.assertFalse(event_path.exists())
+        suppressed = json.loads(next(paths["suppressed"].iterdir()).read_text(encoding="utf-8"))
+        reason = suppressed["delivery"]["suppressedReason"]
+        self.assertIn("accepted_clear_notification_tamper", reason)
+        dispatch_records = [
+            json.loads(line)
+            for line in (paths["logs"] / "dispatch.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        tamper_audit = [
+            record for record in dispatch_records
+            if record.get("type") == "suppressed"
+            and "accepted_clear_notification_tamper" in str(record.get("reason") or "")
+        ]
+        self.assertEqual(len(tamper_audit), 1)
+        self.assertNotIn("tampered same-id alert", json.dumps(tamper_audit))
+
+    def test_retry_authorization_order_survives_sorted_save_reload_and_overflow(self) -> None:
+        paths = self.mod.setup_dirs()
+        now = int(time.time())
+        state: dict[str, Any] = {"version": 1, "openIncidents": {}, "lastSentAt": {}}
+        events: list[tuple[dict[str, Any], Any]] = []
+        for index in range(49):
+            event = _clear_event(now + index, instance=f"bot-{index}")
+            observation = self.mod.normalize_dispatch_observation(event)
+            decision = self.mod.evaluate_clear(
+                _open_record(observation.incident_key, now - 300), observation, []
+            )
+            self.mod.record_accepted_clear_notification(
+                state, event, observation, [(observation.incident_key, decision)]
+            )
+            events.append((event, observation))
+        self.assert_isolated(paths)
+        self.mod.save_incident_state(paths, state)
+        state = self.mod.load_incident_state(paths)
+        for index in range(49, 55):
+            event = _clear_event(now + index, instance=f"bot-{index}")
+            observation = self.mod.normalize_dispatch_observation(event)
+            decision = self.mod.evaluate_clear(
+                _open_record(observation.incident_key, now - 300), observation, []
+            )
+            self.mod.record_accepted_clear_notification(
+                state, event, observation, [(observation.incident_key, decision)]
+            )
+            events.append((event, observation))
+        self.assert_isolated(paths)
+        self.mod.save_incident_state(paths, state)
+        reloaded = self.mod.load_incident_state(paths)
+        self.assertEqual(len(reloaded["acceptedClearNotifications"]), 50)
+        for event, _ in events[:5]:
+            self.assertNotIn(self.mod.clear_event_identity_digest(event), reloaded["acceptedClearNotifications"])
+        for event, _ in events[5:]:
+            self.assertIn(self.mod.clear_event_identity_digest(event), reloaded["acceptedClearNotifications"])
+        newest_event, newest_observation = events[-1]
+        self.assertIsNotNone(
+            self.mod.pending_clear_notification_decision(newest_event, reloaded, newest_observation)
+        )
+
+        malformed = {
+            "version": 1,
+            "openIncidents": {},
+            "lastSentAt": {},
+            "acceptedClearNotificationSequence": "bad",
+            "acceptedClearNotifications": {
+                f"{index:064x}": {"eventIdDigest": f"{index:064x}", "closures": [{}]}
+                for index in range(60)
+            },
+        }
+        self.assert_isolated(paths)
+        self.mod.save_incident_state(paths, malformed)
+        bounded = self.mod.load_incident_state(paths)
+        self.assertEqual(len(bounded["acceptedClearNotifications"]), 50)
+
     def test_long_prefix_event_ids_do_not_alias_retry_authorization(self) -> None:
         now = int(time.time())
         state: dict[str, Any] = {"version": 1, "openIncidents": {}, "lastSentAt": {}}
@@ -661,12 +1376,12 @@ class DispatcherClearEnforcementTests(IsolatedDispatcherTestCase):
         now = int(time.time())
         machine, instance = "host-a", "ana-bot"
         accepted_key = f"{machine}|{instance}|health_body_degraded"
-        candidate_key = f"{machine}|{instance}|daily-health-fail:unit"
+        candidate_key = f"{machine}|bot-errors-health|daily-health-fail:{instance}"
         state = {
             "version": 1,
             "openIncidents": {
                 accepted_key: _open_record(accepted_key, now - 300, source="health_body_degraded", policy="health_snapshot"),
-                candidate_key: _open_record(candidate_key, now - 300, source="daily-health-fail:unit", policy="health_snapshot"),
+                candidate_key: _open_record(candidate_key, now - 300, source=f"daily-health-fail:{instance}", policy="health_snapshot"),
             },
             "lastSentAt": {},
         }

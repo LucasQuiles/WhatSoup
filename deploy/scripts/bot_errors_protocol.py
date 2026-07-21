@@ -296,6 +296,18 @@ def evaluate_clear(
         if not record_key or receipt.get("incidentKey") == record_key
     ]
     if not matching_key:
+        supplied_proof = [
+            receipt for receipt in matching_ref
+            if receipt.get("kind") != "evaluation_clock"
+        ]
+        if proof_ref is None and not supplied_proof:
+            return _clear_decision(
+                ClearStatus.CANDIDATE,
+                "authoritative proof receipt is not yet available",
+                observation,
+                policy,
+                receipts,
+            )
         return _clear_decision(ClearStatus.REJECTED, "proof receipt incident identity does not match", observation, policy, receipts)
     if any(type(receipt.get("schemaVersion")) is not int or receipt["schemaVersion"] < minimum_schema for receipt in matching_key):
         return _clear_decision(ClearStatus.REJECTED, "proof receipt schema is weaker than stored policy", observation, policy, receipts)
