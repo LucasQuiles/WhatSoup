@@ -4,14 +4,14 @@ import type { Database } from './database.ts';
 import { resolvePhoneFromJid } from './access-list.ts';
 import type { SubjectType } from './access-list.ts';
 import { isAdminPhone } from '../lib/phone.ts';
-import { isWhatsAppAuthenticatedJid } from './jid-constants.ts';
+import { isAuthenticatedSenderJid } from './jid-constants.ts';
 
 export function isAdminMessage(msg: IncomingMessage, db: Database): boolean {
   // QR-143: only a WhatsApp-authenticated sender (@s.whatsapp.net/@lid) may be an
   // admin. A non-authenticated transport (e.g. @sms) resolves to the SAME bare
   // phone as the WhatsApp admin, but its sender-ID is spoofable — so gate on the
   // transport before the phone match, or a spoofed SMS could issue admin commands.
-  if (!isWhatsAppAuthenticatedJid(msg.senderJid)) return false;
+  if (!isAuthenticatedSenderJid(msg.senderJid)) return false;
   const phone = resolvePhoneFromJid(msg.senderJid, db);
   return isAdminPhone(phone, config.adminPhones) && msg.isGroup === false;
 }

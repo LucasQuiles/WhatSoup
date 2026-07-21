@@ -27,7 +27,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
+from lib.bot_errors_redaction import (
+    redact_bot_errors_text,
+    redact_json_value as redact_shared_json_value,
+)
 
 
 BOT_ERRORS_JID = os.environ.get("BOT_ERRORS_JID", "").strip()
@@ -37,7 +40,11 @@ BOT_ERRORS_KEY = os.environ.get("BOT_ERRORS_KEY") or (
 )
 DEFAULT_DB = os.environ.get("BOT_ERRORS_DB", "")
 DEFAULT_SOCKET = os.environ.get("BOT_ERRORS_SOCKET", "")
-STATE_DIR = Path(os.environ.get("BOT_ERRORS_Q_LOOP_STATE_DIR", Path.home() / ".local/state/bot-errors-q-loop"))
+STATE_DIR = Path(
+    os.environ.get(
+        "BOT_ERRORS_Q_LOOP_STATE_DIR", Path.home() / ".local/state/bot-errors-q-loop"
+    )
+)
 STATE_FILE = STATE_DIR / "state.json"
 EVENT_LOG = STATE_DIR / "events.jsonl"
 ACTIVITY_LOG = STATE_DIR / "activity.jsonl"
@@ -96,8 +103,8 @@ ALERT_BANNER_PREFIXES = (
     "BOT INFO",
     "BOT RECOVERY",
     "\U0001f534",  # red-circle bridge lines
-    "\u2705",      # check-mark bridge resolves
-    "\u26a0",      # warning-sign bridge lines
+    "\u2705",  # check-mark bridge resolves
+    "\u26a0",  # warning-sign bridge lines
 )
 
 NUDGE_AFTER_SECONDS = 20 * 60
@@ -107,6 +114,14 @@ CHECKPOINT_AFTER_SECONDS = 60 * 60
 GROUP_JID_RE = re.compile(r"^\d+@g\.us$")
 PHONE_JID_RE = re.compile(r"^\d+@s\.whatsapp\.net$")
 LID_RE = re.compile(r"^[A-Za-z0-9_-]+@lid$")
+# Multi-transport sender shapes (S14). Signal addresses are `<uuid>@signal` or
+# `<e164>@signal`; iMessage addresses are `<appleid>@imessage` (the appleid
+# itself often contains '@', e.g. `user@heal.internal@imessage`). Recognizing
+# these as legitimate authenticated-sender shapes keeps the q-loop's coverage
+# classifier from flagging them as "unknown" — which would surface as a
+# false-positive routing-mismatch alert for non-Baileys lines.
+SIGNAL_JID_RE = re.compile(r"^.+@signal$")
+IMESSAGE_JID_RE = re.compile(r"^.+@imessage$")
 
 
 def target_kind(target: str) -> str:
@@ -119,13 +134,21 @@ def target_kind(target: str) -> str:
         return "phone_jid"
     if LID_RE.match(value):
         return "lid"
+    if SIGNAL_JID_RE.match(value):
+        return "signal"
+    if IMESSAGE_JID_RE.match(value):
+        return "imessage"
     return "unknown"
 
 
-def q_loop_target_coverage(intended_target: str, bridged_targets: list[str] | tuple[str, ...] | None = None) -> dict[str, Any]:
+def q_loop_target_coverage(
+    intended_target: str, bridged_targets: list[str] | tuple[str, ...] | None = None
+) -> dict[str, Any]:
     bot_errors_target = str(BOT_ERRORS_JID or "").strip()
     intended = str(intended_target or "").strip()
-    targets_equal = bool(bot_errors_target and intended and bot_errors_target == intended)
+    targets_equal = bool(
+        bot_errors_target and intended and bot_errors_target == intended
+    )
     bridge_targets = {str(target or "").strip() for target in (bridged_targets or [])}
     route_bridge_present = bool(intended and intended in bridge_targets)
     if not bot_errors_target:
@@ -168,7 +191,9 @@ def q_response_wait_diagnostic(
     return {
         "awaiting_q": awaiting_q,
         "awaiting_q_age_seconds": awaiting_age,
-        "last_q_message_age_seconds": max(0, observed_at - last_q_message_at) if last_q_message_at > 0 else None,
+        "last_q_message_age_seconds": max(0, observed_at - last_q_message_at)
+        if last_q_message_at > 0
+        else None,
         "phase": str(state.get("phase") or "unknown"),
         "status": status,
     }
@@ -196,7 +221,9 @@ def env_int(name: str, default: int) -> int:
 
 
 BOT_ERRORS_REQUIRE_EXPECTED = env_flag("BOT_ERRORS_REQUIRE_EXPECTED", True)
-Q_LOOP_LOG_MAX_BYTES = max(4096, env_int("BOT_ERRORS_Q_LOOP_LOG_MAX_BYTES", 2 * 1024 * 1024))
+Q_LOOP_LOG_MAX_BYTES = max(
+    4096, env_int("BOT_ERRORS_Q_LOOP_LOG_MAX_BYTES", 2 * 1024 * 1024)
+)
 Q_LOOP_LOG_BACKUPS = max(1, min(20, env_int("BOT_ERRORS_Q_LOOP_LOG_BACKUPS", 3)))
 
 
@@ -277,11 +304,15 @@ def log_event(kind: str, data: dict[str, Any]) -> None:
 
 
 def append_activity(record: dict[str, Any]) -> None:
-    append_private_jsonl(ACTIVITY_LOG, {"ts": now(), "time": iso(), **redact_json_value(record)})
+    append_private_jsonl(
+        ACTIVITY_LOG, {"ts": now(), "time": iso(), **redact_json_value(record)}
+    )
 
 
 def redact_text(value: str) -> str:
-    return redact_bot_errors_text(value, credential_path_marker="[REDACTED CREDENTIAL PATH]")
+    return redact_bot_errors_text(
+        value, credential_path_marker="[REDACTED CREDENTIAL PATH]"
+    )
 
 
 def redact_json_value(value: Any) -> Any:
@@ -295,9 +326,13 @@ def ensure_private_dir(path: Path) -> None:
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
     else:
         if path.is_symlink():
-            raise RuntimeError(f"refusing to use q-loop state directory through symlink: {path}")
+            raise RuntimeError(
+                f"refusing to use q-loop state directory through symlink: {path}"
+            )
         if not os.path.isdir(path):
-            raise RuntimeError(f"refusing to use q-loop state directory over non-directory path: {path}")
+            raise RuntimeError(
+                f"refusing to use q-loop state directory over non-directory path: {path}"
+            )
     try:
         path.chmod(0o700)
     except OSError:
@@ -412,7 +447,9 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     assert_regular_or_missing(tmp, "q-loop state temp")
     data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    fd = os.open(
+        tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600
+    )
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
@@ -451,10 +488,14 @@ def validate_db(db_path: str) -> str | None:
             row = conn.execute(
                 "select 1 from sqlite_master where type = 'table' and name = 'messages'"
             ).fetchone()
-            columns = {
-                str(column[1])
-                for column in conn.execute("pragma table_info(messages)").fetchall()
-            } if row is not None else set()
+            columns = (
+                {
+                    str(column[1])
+                    for column in conn.execute("pragma table_info(messages)").fetchall()
+                }
+                if row is not None
+                else set()
+            )
         finally:
             conn.close()
     except sqlite3.Error as exc:
@@ -530,8 +571,12 @@ def bootstrap_cursor_pk(db_path: str) -> tuple[int, int]:
 
 
 def socket_rpc_lock_path() -> Path:
-    default_root = Path(os.environ.get("BOT_ERRORS_STATE_DIR", Path.home() / ".local/state/bot-errors"))
-    return Path(os.environ.get("BOT_ERRORS_SOCKET_RPC_LOCK", default_root / "socket-rpc.lock")).expanduser()
+    default_root = Path(
+        os.environ.get("BOT_ERRORS_STATE_DIR", Path.home() / ".local/state/bot-errors")
+    )
+    return Path(
+        os.environ.get("BOT_ERRORS_SOCKET_RPC_LOCK", default_root / "socket-rpc.lock")
+    ).expanduser()
 
 
 @contextmanager
@@ -562,7 +607,9 @@ def socket_rpc_lock(timeout: float):
         os.close(fd)
 
 
-def rpc_call(socket_path: str, name: str, args: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
+def rpc_call(
+    socket_path: str, name: str, args: dict[str, Any], timeout: float = 15.0
+) -> dict[str, Any]:
     init_id = 1
     call_id = 2
     init = {
@@ -620,7 +667,9 @@ def validate_bot_errors_target() -> str | None:
     if BOT_ERRORS_REQUIRE_EXPECTED and not BOT_ERRORS_EXPECTED_JID:
         return "BOT_ERRORS_EXPECTED_JID is required for live Q-loop send"
     if BOT_ERRORS_EXPECTED_JID and BOT_ERRORS_JID != BOT_ERRORS_EXPECTED_JID:
-        return "BOT_ERRORS_JID does not match BOT_ERRORS_EXPECTED_JID for live Q-loop send"
+        return (
+            "BOT_ERRORS_JID does not match BOT_ERRORS_EXPECTED_JID for live Q-loop send"
+        )
     return None
 
 
@@ -629,7 +678,9 @@ def send_message(socket_path: str, text: str) -> bool:
         target_error = validate_bot_errors_target()
         if target_error:
             raise RuntimeError(target_error)
-        result = rpc_call(socket_path, "send_message", {"chatJid": BOT_ERRORS_JID, "text": text})
+        result = rpc_call(
+            socket_path, "send_message", {"chatJid": BOT_ERRORS_JID, "text": text}
+        )
         if result.get("isError") is True:
             detail = json.dumps(result, sort_keys=True)[:500]
             raise RuntimeError(f"send_message returned error: {detail}")
@@ -664,7 +715,9 @@ def q_unavailable_reason(body: str) -> str | None:
     return None
 
 
-def persist_activity_state(state: dict[str, Any], reason: str, persist_state: Any | None) -> None:
+def persist_activity_state(
+    state: dict[str, Any], reason: str, persist_state: Any | None
+) -> None:
     if persist_state is None:
         return
     persist_state(state)
@@ -679,7 +732,11 @@ def persist_activity_state(state: dict[str, Any], reason: str, persist_state: An
     )
 
 
-def classify_activity(state: dict[str, Any], messages: list[dict[str, Any]], persist_state: Any | None = None) -> None:
+def classify_activity(
+    state: dict[str, Any],
+    messages: list[dict[str, Any]],
+    persist_state: Any | None = None,
+) -> None:
     for message in messages:
         pk = int(message["pk"])
         body = str(message.get("body") or "")
@@ -687,7 +744,14 @@ def classify_activity(state: dict[str, Any], messages: list[dict[str, Any]], per
         role = message_role(message)
         state["last_seen_pk"] = max(int(state.get("last_seen_pk", 0)), pk)
         state["last_activity_at"] = max(int(state.get("last_activity_at", 0)), ts)
-        append_activity({"pk": pk, "role": role, "sender": message.get("sender_name", ""), "body": body[:4000]})
+        append_activity(
+            {
+                "pk": pk,
+                "role": role,
+                "sender": message.get("sender_name", ""),
+                "body": body[:4000],
+            }
+        )
         if role == "q":
             state["last_q_message_at"] = max(int(state.get("last_q_message_at", 0)), ts)
             unavailable_reason = q_unavailable_reason(body)
@@ -697,7 +761,9 @@ def classify_activity(state: dict[str, Any], messages: list[dict[str, Any]], per
                 state["blocked_since"] = ts
                 state["awaiting_q_since"] = 0
                 state["phase"] = f"q_unavailable_{unavailable_reason}"
-                persist_activity_state(state, f"q_unavailable_{unavailable_reason}", persist_state)
+                persist_activity_state(
+                    state, f"q_unavailable_{unavailable_reason}", persist_state
+                )
             elif re.search(r"\bAPPROVED SCOPE\b", body, re.I):
                 state["scope_approved_at"] = ts
                 state["blocked_since"] = 0
@@ -714,14 +780,22 @@ def classify_activity(state: dict[str, Any], messages: list[dict[str, Any]], per
                 state["awaiting_q_since"] = 0
                 state["phase"] = "blocked_by_q"
                 persist_activity_state(state, "q_blocked", persist_state)
-            elif re.search(r"\b(no response needed|standing by|no post warranted|nothing new|no actionable change|monitoring continues|continuing (?:to )?monitor(?:/poll)?)\b", body, re.I):
+            elif re.search(
+                r"\b(no response needed|standing by|no post warranted|nothing new|no actionable change|monitoring continues|continuing (?:to )?monitor(?:/poll)?)\b",
+                body,
+                re.I,
+            ):
                 state["awaiting_q_since"] = 0
                 state["phase"] = "monitoring"
                 persist_activity_state(state, "q_monitoring", persist_state)
         if role in {"codex", "lucas", "outbound"}:
             state["last_outbound_at"] = max(int(state.get("last_outbound_at", 0)), ts)
             if (
-                ("reply" in body.lower() or "approve" in body.lower() or "blocked" in body.lower())
+                (
+                    "reply" in body.lower()
+                    or "approve" in body.lower()
+                    or "blocked" in body.lower()
+                )
                 and not body.startswith(SELF_REMINDER_PREFIXES)
                 and not body.startswith(ALERT_BANNER_PREFIXES)
             ):
@@ -819,7 +893,10 @@ def run_once(args: argparse.Namespace) -> int:
     if first_start and int(state.get("last_seen_pk", 0)) == 0:
         try:
             state["last_seen_pk"], lookback = bootstrap_cursor_pk(args.db)
-            log_event("bootstrap_cursor", {"last_seen_pk": state["last_seen_pk"], "lookback_messages": lookback})
+            log_event(
+                "bootstrap_cursor",
+                {"last_seen_pk": state["last_seen_pk"], "lookback_messages": lookback},
+            )
         except Exception as exc:  # noqa: BLE001
             log_event("bootstrap_cursor_failed", {"error": str(exc), "db": args.db})
     try:
@@ -829,19 +906,27 @@ def run_once(args: argparse.Namespace) -> int:
         log_event("poll_failed", {"error": error, "db": args.db})
         state["last_poll_error_at"] = now()
         state["last_poll_error"] = error[:500]
-        state["consecutive_poll_failures"] = int(state.get("consecutive_poll_failures", 0)) + 1
+        state["consecutive_poll_failures"] = (
+            int(state.get("consecutive_poll_failures", 0)) + 1
+        )
         save_state(state)
         messages = []
     else:
         if int(state.get("consecutive_poll_failures", 0)) > 0:
-            log_event("poll_recovered", {"failures": state.get("consecutive_poll_failures", 0)})
+            log_event(
+                "poll_recovered",
+                {"failures": state.get("consecutive_poll_failures", 0)},
+            )
         state["last_poll_error_at"] = 0
         state["last_poll_error"] = ""
         state["consecutive_poll_failures"] = 0
     had_activity = bool(messages)
     if messages:
         classify_activity(state, messages, save_state)
-        log_event("poll_activity", {"count": len(messages), "last_pk": state.get("last_seen_pk")})
+        log_event(
+            "poll_activity",
+            {"count": len(messages), "last_pk": state.get("last_seen_pk")},
+        )
     sent = False
     if not args.no_send:
         sent = maybe_send_bootstrap(state, args.socket)
@@ -876,7 +961,9 @@ def run_loop(args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="BOT ERRORS Q coordination loop")
     parser.add_argument("--db", default=os.environ.get("BOT_ERRORS_DB", DEFAULT_DB))
-    parser.add_argument("--socket", default=os.environ.get("BOT_ERRORS_SOCKET", DEFAULT_SOCKET))
+    parser.add_argument(
+        "--socket", default=os.environ.get("BOT_ERRORS_SOCKET", DEFAULT_SOCKET)
+    )
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--no-send", action="store_true")
     return parser.parse_args()
