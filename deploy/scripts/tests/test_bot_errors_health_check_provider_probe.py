@@ -652,7 +652,7 @@ def test_canonical_watchdog_template_is_degraded_tolerant():
 
 def test_watchdog_currency_inventory_skips_non_darwin(monkeypatch):
     monkeypatch.setattr(_mod, "HOST_PLATFORM", "linux")
-    assert _mod.watchdog_currency_inventory(["rb-bot"]) == []
+    assert _mod.watchdog_currency_inventory({"rb-bot": 9090}) == []
 
 
 def test_watchdog_currency_inventory_warns_on_stale(monkeypatch, tmp_path):
@@ -660,8 +660,11 @@ def test_watchdog_currency_inventory_warns_on_stale(monkeypatch, tmp_path):
     monkeypatch.setattr(_mod.Path, "home", lambda: tmp_path)
     bindir = tmp_path / ".local" / "bin"
     bindir.mkdir(parents=True)
-    (bindir / "rb-bot-watchdog").write_text('#!/bin/bash\nif status != "healthy":\n  restart\n')
-    out = _mod.watchdog_currency_inventory(["rb-bot"])
+    (bindir / "rb-bot-watchdog").write_text(
+        '#!/bin/bash\nHEALTH_URL="http://127.0.0.1:9090/health"\n'
+        'if status != "healthy":\n  restart\n'
+    )
+    out = _mod.watchdog_currency_inventory({"rb-bot": 9090})
     assert len(out) == 1
     assert out[0].startswith("WARN watchdog_currency rb-bot: stale_pre_952_watchdog")
     assert "remediation=redeploy_degraded_tolerant_watchdog_template" in out[0]
@@ -672,12 +675,62 @@ def test_watchdog_currency_inventory_clean_on_tolerant(monkeypatch, tmp_path):
     monkeypatch.setattr(_mod.Path, "home", lambda: tmp_path)
     bindir = tmp_path / ".local" / "bin"
     bindir.mkdir(parents=True)
-    (bindir / "ad-bot-watchdog").write_text('#!/bin/bash\nif status not in ("healthy", "degraded"):\n  restart\n')
-    assert _mod.watchdog_currency_inventory(["ad-bot"]) == []
+    (bindir / "ad-bot-watchdog").write_text(
+        '#!/bin/bash\nHEALTH_URL="http://127.0.0.1:9096/health"\n'
+        'if status not in ("healthy", "degraded"):\n  restart\n'
+    )
+    assert _mod.watchdog_currency_inventory({"ad-bot": 9096}) == []
 
 
 def test_watchdog_currency_inventory_skips_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(_mod, "HOST_PLATFORM", "darwin")
     monkeypatch.setattr(_mod.Path, "home", lambda: tmp_path)
     (tmp_path / ".local" / "bin").mkdir(parents=True)
-    assert _mod.watchdog_currency_inventory(["yl-bot"]) == []
+    assert _mod.watchdog_currency_inventory({"yl-bot": 9090}) == []
+
+
+def test_watchdog_currency_inventory_warns_on_health_port_mismatch(monkeypatch, tmp_path):
+    monkeypatch.setattr(_mod, "HOST_PLATFORM", "darwin")
+    monkeypatch.setattr(_mod.Path, "home", lambda: tmp_path)
+    bindir = tmp_path / ".local" / "bin"
+    bindir.mkdir(parents=True)
+    (bindir / "loops-watchdog").write_text(
+        '#!/bin/bash\nHEALTH_URL="http://127.0.0.1:9127/health"\n'
+        'if status not in ("healthy", "degraded"):\n  restart\n'
+    )
+    out = _mod.watchdog_currency_inventory({"loops": 9090})
+    assert len(out) == 1
+    assert "target_port_mismatch expected=9090 observed=9127" in out[0]
+    assert "false_restart_risk" in out[0]
+
+
+def test_watchdog_currency_inventory_warns_on_missing_and_ambiguous_targets(monkeypatch, tmp_path):
+    monkeypatch.setattr(_mod, "HOST_PLATFORM", "darwin")
+    monkeypatch.setattr(_mod.Path, "home", lambda: tmp_path)
+    bindir = tmp_path / ".local" / "bin"
+    bindir.mkdir(parents=True)
+    tolerant = 'if status not in ("healthy", "degraded"):\n  restart\n'
+    (bindir / "missing-watchdog").write_text(tolerant)
+    (bindir / "ambiguous-watchdog").write_text(
+        'curl http://127.0.0.1:9090/health\n'
+        'curl http://localhost:9091/health\n' + tolerant
+    )
+
+    out = _mod.watchdog_currency_inventory({"missing": 9090, "ambiguous": 9090})
+    assert any("missing: target_missing expected=9090" in line for line in out)
+    assert any("ambiguous: target_ambiguous expected=9090 observed=9090,9091" in line for line in out)
+
+
+def test_watchdog_currency_inventory_reports_policy_and_target_independently(monkeypatch, tmp_path):
+    monkeypatch.setattr(_mod, "HOST_PLATFORM", "darwin")
+    monkeypatch.setattr(_mod.Path, "home", lambda: tmp_path)
+    bindir = tmp_path / ".local" / "bin"
+    bindir.mkdir(parents=True)
+    (bindir / "rb-bot-watchdog").write_text(
+        'curl http://127.0.0.1:9191/health\nif status != "healthy":\n  restart\n'
+    )
+
+    out = _mod.watchdog_currency_inventory({"rb-bot": 9090})
+    assert len(out) == 2
+    assert any("stale_pre_952_watchdog" in line for line in out)
+    assert any("target_port_mismatch expected=9090 observed=9191" in line for line in out)

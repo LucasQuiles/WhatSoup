@@ -4800,6 +4800,10 @@ _WATCHDOG_DEGRADED_TOLERANT_RE = re.compile(
     r"""status\s+not\s+in\s*\(\s*["']healthy["']\s*,\s*["']degraded["']""", re.IGNORECASE
 )
 _WATCHDOG_DEGRADED_INTOLERANT_RE = re.compile(r"""status\s*!=\s*["']healthy["']""", re.IGNORECASE)
+_WATCHDOG_HEALTH_TARGET_RE = re.compile(
+    r"https?://(?:127[.]0[.]0[.]1|localhost|\[::1\]):([0-9]{1,5})/health(?:[^A-Za-z0-9_/-]|$)",
+    re.IGNORECASE,
+)
 
 
 def classify_watchdog_policy(script_text: str) -> str:
@@ -4817,7 +4821,16 @@ def classify_watchdog_policy(script_text: str) -> str:
     return "unknown"
 
 
-def watchdog_currency_inventory(names: list[str]) -> list[str]:
+def watchdog_health_ports(script_text: str) -> set[int]:
+    ports: set[int] = set()
+    for match in _WATCHDOG_HEALTH_TARGET_RE.finditer(script_text):
+        port = int(match.group(1))
+        if 1 <= port <= 65535:
+            ports.add(port)
+    return ports
+
+
+def watchdog_currency_inventory(expected_ports: dict[str, int | None]) -> list[str]:
     """WARN when an installed per-instance watchdog is the stale pre-#952 (degraded-intolerant)
     template. macOS-only: the rendered `~/.local/bin/<inst>-watchdog` launchd scripts. Linux hosts
     supervise via systemd timers (different mechanism) and are skipped. Instances with no installed
@@ -4828,7 +4841,7 @@ def watchdog_currency_inventory(names: list[str]) -> list[str]:
         return []
     lines: list[str] = []
     bindir = Path.home() / ".local" / "bin"
-    for name in sorted(set(names)):
+    for name in sorted(expected_ports):
         watchdog = bindir / f"{name}-watchdog"
         if not watchdog.is_file():
             continue
@@ -4850,6 +4863,31 @@ def watchdog_currency_inventory(names: list[str]) -> list[str]:
         elif policy == "unknown":
             lines.append(
                 f"WARN watchdog_currency {name}: unrecognized_restart_policy watchdog={watchdog}"
+            )
+        expected = expected_ports[name]
+        observed = sorted(watchdog_health_ports(text))
+        if not isinstance(expected, int) or not 1 <= expected <= 65535:
+            lines.append(
+                f"WARN watchdog_currency {name}: config_health_port_unavailable "
+                f"watchdog={watchdog} remediation=repair_instance_health_port"
+            )
+        elif not observed:
+            lines.append(
+                f"WARN watchdog_currency {name}: target_missing expected={expected} "
+                f"watchdog={watchdog} false_restart_risk=true "
+                f"remediation=redeploy_watchdog_from_instance_config"
+            )
+        elif len(observed) > 1:
+            lines.append(
+                f"WARN watchdog_currency {name}: target_ambiguous expected={expected} "
+                f"observed={','.join(str(port) for port in observed)} watchdog={watchdog} "
+                f"false_restart_risk=true remediation=redeploy_watchdog_from_instance_config"
+            )
+        elif observed[0] != expected:
+            lines.append(
+                f"WARN watchdog_currency {name}: target_port_mismatch expected={expected} "
+                f"observed={observed[0]} watchdog={watchdog} false_restart_risk=true "
+                f"remediation=redeploy_watchdog_from_instance_config"
             )
     return lines
 
@@ -5098,6 +5136,7 @@ def config_inventory(profile: dict[str, Any]) -> list[str]:
     expected_instances = profile_instances(profile)
     if expected_instances:
         auth_names: list[str] = []
+        watchdog_ports: dict[str, int | None] = {}
         expected_names: set[str] = set()
         for item in expected_instances:
             name = str(item.get("name") or "").strip()
@@ -5174,6 +5213,7 @@ def config_inventory(profile: dict[str, Any]) -> list[str]:
             kind = data.get("type", "unknown")
             enabled = data.get("enabled", True)
             port = item.get("healthPort", data.get("healthPort"))
+            watchdog_ports[name] = port if isinstance(port, int) else None
             socket_path = item.get("socketPath", data.get("socketPath"))
             service = item.get("service")
             lines.append(
@@ -5203,11 +5243,12 @@ def config_inventory(profile: dict[str, Any]) -> list[str]:
         if not profile_bool(profile, "allowUnprofiledInstances", False):
             lines.extend(unprofiled_config_inventory(root, expected_names))
             lines.extend(unprofiled_service_inventory(root, expected_names))
-        lines.extend(watchdog_currency_inventory(auth_names))
+        lines.extend(watchdog_currency_inventory(watchdog_ports))
         lines.extend(local_auth_bond_duplicates(root, auth_names))
         return lines
     ports: dict[int, str] = {}
     auth_names = []
+    watchdog_ports: dict[str, int | None] = {}
     strict_max = profile_mode(profile.get("requiredConfigMaxMode"))
     for cfg in sorted(root.glob("*/config.json")):
         mode = stat.S_IMODE(cfg.stat().st_mode)
@@ -5220,6 +5261,7 @@ def config_inventory(profile: dict[str, Any]) -> list[str]:
         enabled = data.get("enabled", True)
         kind = data.get("type", "unknown")
         port = data.get("healthPort")
+        watchdog_ports[name] = port if isinstance(port, int) else None
         socket_path = data.get("socketPath")
         lines.append(f"config {name}: type={kind} enabled={enabled} mode={mode:o} healthPort={port}")
         mode_line = config_mode_line(name, "config.json", cfg, mode, strict_max)
@@ -5237,6 +5279,7 @@ def config_inventory(profile: dict[str, Any]) -> list[str]:
             exists = Path(socket_path).exists()
             lines.append(f"socket {name}: {socket_path} exists={exists}")
     lines.extend(local_auth_bond_duplicates(root, auth_names))
+    lines.extend(watchdog_currency_inventory(watchdog_ports))
     return lines
 
 
