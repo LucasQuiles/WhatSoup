@@ -11,8 +11,10 @@ import { backup, DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 import { CURRENT_SCHEMA_MIGRATION } from '../src/core/database-schema-version.ts';
 import { withImmediateTransaction } from '../src/core/db-tx.ts';
+import { redactBotErrorsText } from '../src/lib/bot-errors-outbox.ts';
 import {
   assertPrivateDirectorySync,
+  deletePrivateFileSync,
   forceEnsurePrivateDirectorySync,
   readPrivateFileSync,
   writePrivateJsonMarkerSync,
@@ -105,6 +107,8 @@ export interface CleanupCommandOptions {
   testOnlyDuringFingerprint?: () => void;
   /** Test-only fault injected under A5's BEGIN IMMEDIATE lock. */
   testOnlyUnderLockFault?: (raw: DatabaseSync) => void;
+  /** Test-only path mutation injected after the cleanup transaction commits. */
+  testOnlyAfterMutation?: () => void;
   /** Test-only deterministic receipt fault. */
   testOnlyFault?: 'apply-receipt' | 'rollback-receipt';
 }
@@ -119,6 +123,7 @@ interface ApplyReceipt {
   backupPath: string;
   backupSha256: string;
   postFingerprint: string;
+  receiptId: string;
 }
 
 interface RollbackReceipt {
@@ -128,6 +133,7 @@ interface RollbackReceipt {
   restoredCount: number;
   removedEventCount: number;
   postFingerprint: string;
+  receiptId: string;
 }
 
 interface BeadInspectionRow {
@@ -148,8 +154,11 @@ interface OriginEventRow {
   id: number;
   bead_id: number;
   payload_json: string;
+  actor: string;
   source_message_pk: number | null;
 }
+
+interface DatabaseFileIdentity { device: number; inode: number }
 
 function sha256Bytes(value: string | Buffer): string {
   return createHash('sha256').update(value).digest('hex');
@@ -211,6 +220,24 @@ function assertRegularDatabase(path: string): string {
   return absolute;
 }
 
+function databaseFileIdentity(path: string): DatabaseFileIdentity {
+  const stat = lstatSync(path);
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error(`Database must remain an existing regular file: ${path}`);
+  }
+  return { device: stat.dev, inode: stat.ino };
+}
+
+function assertDatabaseFileIdentity(
+  path: string,
+  expected: DatabaseFileIdentity,
+): void {
+  const observed = databaseFileIdentity(path);
+  if (observed.device !== expected.device || observed.inode !== expected.inode) {
+    throw new Error('Database file identity changed during cleanup; refusing replacement path');
+  }
+}
+
 function companionState(dbPath: string): { wal: boolean; shm: boolean } {
   const wal = existsSync(`${dbPath}-wal`);
   const shm = existsSync(`${dbPath}-shm`);
@@ -242,7 +269,7 @@ function normalizeBackup(path: string): string {
     if (result.integrity_check !== 'ok') throw new Error(`integrity_check=${result.integrity_check}`);
   } finally { raw.close(); }
   chmodSync(path, PRIVATE_FILE_MODE);
-    return hashCleanupFile(path);
+  return hashCleanupFile(path);
 }
 
 async function backupConnection(
@@ -320,9 +347,9 @@ function schemaVersion(raw: DatabaseSync): number {
 
 function originEvents(raw: DatabaseSync): Map<number, OriginEventRow[]> {
   const rows = raw.prepare(`
-    SELECT id, bead_id, payload_json, source_message_pk
+    SELECT id, bead_id, payload_json, actor, source_message_pk
     FROM bead_events
-    WHERE actor = 'inline' AND event_type = 'status_change'
+    WHERE event_type = 'status_change'
     ORDER BY bead_id, id
   `).all() as unknown as OriginEventRow[];
   const result = new Map<number, OriginEventRow[]>();
@@ -361,11 +388,16 @@ function inspectSnapshot(raw: DatabaseSync, classifier: Classifier, cutoffAt = M
   for (const row of proposed) {
     const exactOrigins = events.get(row.id)?.length ?? 0;
     const allInlineStatusEvents = inlineEventCounts.get(row.id) ?? 0;
-    if (allInlineStatusEvents > 0 && (exactOrigins !== 1 || allInlineStatusEvents !== 1)) {
+    const originActor = events.get(row.id)?.[0]?.actor;
+    if (exactOrigins > 1 || (allInlineStatusEvents > 0
+      && (exactOrigins !== 1 || allInlineStatusEvents !== 1 || originActor !== 'inline'))) {
       throw new Error(`Ambiguous source events for bead ${row.id}`);
     }
   }
-  const inline = proposed.filter((row) => (events.get(row.id)?.length ?? 0) === 1);
+  const inline = proposed.filter((row) => {
+    const origins = events.get(row.id) ?? [];
+    return origins.length === 1 && origins[0]!.actor === 'inline';
+  });
   for (const row of inline) {
     const sources = events.get(row.id) ?? [];
     if (sources.length !== 1 || sources[0]!.source_message_pk !== row.source_message_pk) {
@@ -374,7 +406,7 @@ function inspectSnapshot(raw: DatabaseSync, classifier: Classifier, cutoffAt = M
   }
   const classified = inline.map((row) => ({ row, result: classifier(row.body ?? '') }));
   const admitted = classified.filter((entry) => entry.result.admitted);
-  const other = proposed.filter((row) => !events.has(row.id));
+  const other = proposed.filter((row) => !inline.some((candidate) => candidate.id === row.id));
   const retainedValid: RetainedValidCounts = {
     admittedInline: admitted.length,
     admittedInlineOverdue: admitted.filter(({ row }) => row.review_by_at !== null && row.review_by_at < cutoffAt).length,
@@ -435,6 +467,87 @@ function readJson<T>(path: string): T {
   return JSON.parse(text) as T;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const observed = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return observed.length === expected.length
+    && observed.every((key, index) => key === expected[index]);
+}
+
+function isSha256(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function receiptIdFor(receipt: unknown): string {
+  return sha256Bytes(stableJson(receipt));
+}
+
+function assertApplyReceipt(
+  value: unknown,
+  manifest: CleanupManifest,
+  expectedBackupPath: string,
+): ApplyReceipt {
+  const keys = [
+    'formatVersion', 'manifestId', 'appliedAt', 'affectedCount', 'eventCount',
+    'eventIds', 'backupPath', 'backupSha256', 'postFingerprint', 'receiptId',
+  ] as const;
+  if (!isRecord(value) || !hasExactKeys(value, keys)
+    || value.formatVersion !== FORMAT_VERSION
+    || value.manifestId !== manifest.manifestId
+    || !isNonNegativeSafeInteger(value.appliedAt)
+    || value.affectedCount !== manifest.candidates.length
+    || value.eventCount !== manifest.candidates.length
+    || !Array.isArray(value.eventIds)
+    || value.eventIds.length !== manifest.candidates.length
+    || value.eventIds.some((id) => !Number.isSafeInteger(id) || id <= 0)
+    || new Set(value.eventIds).size !== value.eventIds.length
+    || typeof value.backupPath !== 'string'
+    || resolve(value.backupPath) !== resolve(expectedBackupPath)
+    || !isSha256(value.backupSha256)
+    || value.backupSha256 !== manifest.database.fingerprint
+    || !isSha256(value.postFingerprint)
+    || !isSha256(value.receiptId)) {
+    throw new Error('Apply receipt failed strict manifest/database validation');
+  }
+  const receipt = value as unknown as ApplyReceipt;
+  const { receiptId, ...unsigned } = receipt;
+  if (receiptId !== receiptIdFor(unsigned)) {
+    throw new Error('Apply receipt failed strict manifest/database validation');
+  }
+  return receipt;
+}
+
+function assertRollbackReceipt(value: unknown, manifest: CleanupManifest): RollbackReceipt {
+  const keys = [
+    'formatVersion', 'manifestId', 'rolledBackAt', 'restoredCount',
+    'removedEventCount', 'postFingerprint', 'receiptId',
+  ] as const;
+  if (!isRecord(value) || !hasExactKeys(value, keys)
+    || value.formatVersion !== FORMAT_VERSION
+    || value.manifestId !== manifest.manifestId
+    || !isNonNegativeSafeInteger(value.rolledBackAt)
+    || value.restoredCount !== manifest.candidates.length
+    || value.removedEventCount !== manifest.candidates.length
+    || !isSha256(value.postFingerprint)
+    || !isSha256(value.receiptId)) {
+    throw new Error('Rollback receipt failed strict manifest/database validation');
+  }
+  const receipt = value as unknown as RollbackReceipt;
+  const { receiptId, ...unsigned } = receipt;
+  if (receiptId !== receiptIdFor(unsigned)) {
+    throw new Error('Rollback receipt failed strict manifest/database validation');
+  }
+  return receipt;
+}
+
 function receiptPaths(manifestPath: string): { apply: string; verify: string; rollback: string; backup: string } {
   const dir = dirname(resolve(manifestPath));
   return {
@@ -445,12 +558,19 @@ function receiptPaths(manifestPath: string): { apply: string; verify: string; ro
   };
 }
 
-function openWritable(path: string): DatabaseSync {
+function openWritable(path: string, expectedIdentity?: DatabaseFileIdentity): DatabaseSync {
+  if (expectedIdentity) assertDatabaseFileIdentity(path, expectedIdentity);
   const url = pathToFileURL(assertRegularDatabase(path));
   url.searchParams.set('mode', 'rw');
   const raw = new DatabaseSync(url.href, { timeout: 50 });
-  raw.exec('PRAGMA foreign_keys = ON');
-  return raw;
+  try {
+    if (expectedIdentity) assertDatabaseFileIdentity(path, expectedIdentity);
+    raw.exec('PRAGMA foreign_keys = ON');
+    return raw;
+  } catch (error) {
+    raw.close();
+    throw error;
+  }
 }
 
 function cleanupEvents(raw: DatabaseSync, manifest: CleanupManifest): Array<{
@@ -516,11 +636,12 @@ function reconstructApplyReceipt(
   if (events.some((event) => event.created_at !== appliedAt)) return null;
   const backupSha256 = hashCleanupFile(backupPath);
   if (backupSha256 !== manifest.database.fingerprint) return null;
-  const receipt: ApplyReceipt = {
+  const unsigned: Omit<ApplyReceipt, 'receiptId'> = {
     formatVersion: FORMAT_VERSION, manifestId: manifest.manifestId, appliedAt,
     affectedCount: manifest.candidates.length, eventCount: manifest.candidates.length,
     eventIds: events.map((event) => event.id), backupPath, backupSha256, postFingerprint,
   };
+  const receipt: ApplyReceipt = { ...unsigned, receiptId: receiptIdFor(unsigned) };
   try { assertAppliedState(raw, manifest, receipt); } catch { return null; }
   return receipt;
 }
@@ -601,11 +722,47 @@ export async function planInlineProposalCleanup(options: PlanOptions): Promise<{
   }
 }
 
-async function currentFingerprint(dbPath: string, scratchPath: string): Promise<string> {
+async function currentFingerprint(
+  dbPath: string,
+  scratchPath: string,
+  source?: DatabaseSync,
+): Promise<string> {
   if (existsSync(scratchPath)) unlinkSync(scratchPath);
-  const companions = companionState(dbPath);
-  try { return await consistentBackup(dbPath, scratchPath, !companions.wal); }
+  try {
+    if (source) return await backupConnection(source, scratchPath);
+    const companions = companionState(dbPath);
+    return await consistentBackup(dbPath, scratchPath, !companions.wal);
+  }
   finally { if (existsSync(scratchPath)) unlinkSync(scratchPath); }
+}
+
+function assertApplyBackup(receipt: ApplyReceipt, manifest: CleanupManifest): void {
+  try {
+    assertReadableDatabase(receipt.backupPath);
+    if (hashCleanupFile(receipt.backupPath) !== receipt.backupSha256
+      || receipt.backupSha256 !== manifest.database.fingerprint) {
+      throw new Error('backup fingerprint mismatch');
+    }
+  } catch {
+    throw new Error('Apply receipt failed strict manifest/database validation');
+  }
+}
+
+function writeReceiptBound(
+  receiptPath: string,
+  receipt: unknown,
+  label: 'apply' | 'rollback',
+  dbPath: string,
+  expectedIdentity: DatabaseFileIdentity,
+): void {
+  assertDatabaseFileIdentity(dbPath, expectedIdentity);
+  atomicWriteJson(receiptPath, receipt);
+  try {
+    assertDatabaseFileIdentity(dbPath, expectedIdentity);
+  } catch (error) {
+    deletePrivateFileSync(receiptPath, `inline cleanup ${label} receipt`);
+    throw error;
+  }
 }
 
 export async function applyInlineProposalCleanup(options: CleanupCommandOptions): Promise<ApplyReceipt & {
@@ -616,40 +773,61 @@ export async function applyInlineProposalCleanup(options: CleanupCommandOptions)
   const manifest = assertManifest(readJson(manifestPath));
   const paths = receiptPaths(manifestPath);
   assertTestOnlySeam(Boolean(options.testOnlyAfterFingerprint || options.testOnlyDuringFingerprint
-    || options.testOnlyUnderLockFault || options.testOnlyFault));
+    || options.testOnlyUnderLockFault || options.testOnlyAfterMutation || options.testOnlyFault));
   if (existsSync(paths.apply)) {
-    const receipt = readJson<ApplyReceipt>(paths.apply);
+    const receipt = assertApplyReceipt(readJson(paths.apply), manifest, paths.backup);
     const raw = new DatabaseSync(dbPath, { readOnly: true });
     try { assertAppliedState(raw, manifest, receipt); } finally { raw.close(); }
-    assertReadableDatabase(receipt.backupPath);
+    assertApplyBackup(receipt, manifest);
     return { ...receipt, receiptPath: paths.apply, replayed: true };
   }
+  const expectedIdentity = databaseFileIdentity(dbPath);
   const observer = new DatabaseSync(dbPath, { readOnly: true, timeout: 250 });
+  try { assertDatabaseFileIdentity(dbPath, expectedIdentity); }
+  catch (error) { observer.close(); throw error; }
   const scratch = join(dirname(manifestPath), '.apply-fingerprint.db');
   let observedFingerprint: string;
   const dataVersionBeforeBackup = dataVersion(observer);
-  try { observedFingerprint = await backupConnection(observer, scratch, options.testOnlyDuringFingerprint); }
-  catch (error) { observer.close(); throw error; }
+  const backupPreexisting = existsSync(paths.backup);
+  const fingerprintTarget = backupPreexisting ? scratch : paths.backup;
+  try {
+    observedFingerprint = backupPreexisting
+      ? await backupConnection(observer, scratch, options.testOnlyDuringFingerprint)
+      : await backupConnection(observer, paths.backup, options.testOnlyDuringFingerprint);
+  } catch (error) { observer.close(); throw error; }
+  try { assertDatabaseFileIdentity(dbPath, expectedIdentity); }
+  catch (error) {
+    observer.close();
+    if (existsSync(fingerprintTarget) && !backupPreexisting) unlinkSync(fingerprintTarget);
+    throw error;
+  }
   const dataVersionAfterBackup = dataVersion(observer);
   if (dataVersionAfterBackup !== dataVersionBeforeBackup) {
     observer.close();
-    if (existsSync(scratch)) unlinkSync(scratch);
+    if (existsSync(fingerprintTarget) && !backupPreexisting) unlinkSync(fingerprintTarget);
+    else if (existsSync(scratch)) unlinkSync(scratch);
     throw new Error('Database changed while the cleanup backup was created');
+  }
+  try {
+    options.testOnlyAfterFingerprint?.();
+    assertDatabaseFileIdentity(dbPath, expectedIdentity);
+  } catch (error) {
+    observer.close();
+    if (existsSync(scratch)) unlinkSync(scratch);
+    throw error;
   }
   if (observedFingerprint !== manifest.database.fingerprint) {
     try {
-      const inspection = new DatabaseSync(dbPath, { readOnly: true });
-      try {
-        const recovered = reconstructApplyReceipt(inspection, manifest, paths.backup, observedFingerprint);
-        if (recovered) {
-          if (options.testOnlyFault === 'apply-receipt') throw new Error('Injected apply receipt write failure');
-          atomicWriteJson(paths.apply, recovered);
-          return { ...recovered, receiptPath: paths.apply, replayed: true };
-        }
-      } finally { inspection.close(); }
+      const recovered = reconstructApplyReceipt(observer, manifest, paths.backup, observedFingerprint);
+      if (recovered) {
+        if (options.testOnlyFault === 'apply-receipt') throw new Error('Injected apply receipt write failure');
+        writeReceiptBound(paths.apply, recovered, 'apply', dbPath, expectedIdentity);
+        return { ...recovered, receiptPath: paths.apply, replayed: true };
+      }
     } finally {
       observer.close();
       if (existsSync(scratch)) unlinkSync(scratch);
+      if (!backupPreexisting && existsSync(paths.backup)) unlinkSync(paths.backup);
     }
     throw new Error('Database fingerprint is stale; create a new cleanup plan');
   }
@@ -657,18 +835,19 @@ export async function applyInlineProposalCleanup(options: CleanupCommandOptions)
   let observedDataVersion: number;
   let raw: DatabaseSync;
   try {
-    if (existsSync(paths.backup)) {
+    if (backupPreexisting) {
       assertReadableDatabase(paths.backup);
       backupSha256 = hashCleanupFile(paths.backup);
       if (backupSha256 !== manifest.database.fingerprint) throw new Error('Existing pre-apply backup is stale');
       unlinkSync(scratch);
     } else {
-      renameSync(scratch, paths.backup);
-      chmodSync(paths.backup, PRIVATE_FILE_MODE);
+      assertReadableDatabase(paths.backup);
+      backupSha256 = hashCleanupFile(paths.backup);
+      if (backupSha256 !== manifest.database.fingerprint) throw new Error('Pre-apply backup fingerprint drifted');
     }
     observedDataVersion = dataVersionAfterBackup;
-    options.testOnlyAfterFingerprint?.();
-    raw = openWritable(dbPath);
+    assertDatabaseFileIdentity(dbPath, expectedIdentity);
+    raw = openWritable(dbPath, expectedIdentity);
   } catch (error) {
     observer.close();
     if (existsSync(scratch)) unlinkSync(scratch);
@@ -678,20 +857,25 @@ export async function applyInlineProposalCleanup(options: CleanupCommandOptions)
   try {
     schemaVersion(raw);
     const attest = (rows: readonly BeadInspectionRow[]): void => {
-        if (dataVersion(observer) !== observedDataVersion) {
-          throw new Error('Database changed between backup and cleanup write lock');
+      assertDatabaseFileIdentity(dbPath, expectedIdentity);
+      if (dataVersion(observer) !== observedDataVersion) {
+        throw new Error('Database changed between backup and cleanup write lock');
+      }
+      options.testOnlyUnderLockFault?.(raw);
+      assertDatabaseFileIdentity(dbPath, expectedIdentity);
+      if (dataVersion(observer) !== observedDataVersion) {
+        throw new Error('Database changed under the cleanup write lock');
+      }
+      rows.forEach((row, index) => {
+        const candidate = manifest.candidates[index]!;
+        const body = row.body ?? '';
+        const classified = classifyInlineImperative(body);
+        if (sha256Bytes(body) !== candidate.bodySha256 || classified.admitted
+          || classified.reason !== candidate.rejectionReason
+          || candidateIdentityHash(row as BeadInspectionRow) !== candidate.identitySha256) {
+          throw new Error(`Candidate ${candidate.id} classifier/body drift under lock`);
         }
-        options.testOnlyUnderLockFault?.(raw);
-        rows.forEach((row, index) => {
-          const candidate = manifest.candidates[index]!;
-          const body = row.body ?? '';
-          const classified = classifyInlineImperative(body);
-          if (sha256Bytes(body) !== candidate.bodySha256 || classified.admitted
-            || classified.reason !== candidate.rejectionReason
-            || candidateIdentityHash(row as BeadInspectionRow) !== candidate.identitySha256) {
-            throw new Error(`Candidate ${candidate.id} classifier/body drift under lock`);
-          }
-        });
+      });
     };
     const result = manifest.candidates.length === 0
       ? withImmediateTransaction(raw, () => {
@@ -708,17 +892,26 @@ export async function applyInlineProposalCleanup(options: CleanupCommandOptions)
     if (result.affectedCount !== manifest.candidates.length || result.eventCount !== manifest.candidates.length) {
       throw new Error('Cleanup affected/event counts did not match manifest');
     }
+    assertDatabaseFileIdentity(dbPath, expectedIdentity);
+    options.testOnlyAfterMutation?.();
+    assertDatabaseFileIdentity(dbPath, expectedIdentity);
     const events = cleanupEvents(raw, manifest);
     if (events.length !== manifest.candidates.length) throw new Error('Cleanup event attestation failed');
-    const postFingerprint = await currentFingerprint(dbPath, join(dirname(manifestPath), '.apply-post-fingerprint.db'));
-    const receipt: ApplyReceipt = {
+    const postFingerprint = await currentFingerprint(
+      dbPath,
+      join(dirname(manifestPath), '.apply-post-fingerprint.db'),
+      observer,
+    );
+    assertDatabaseFileIdentity(dbPath, expectedIdentity);
+    const unsigned: Omit<ApplyReceipt, 'receiptId'> = {
       formatVersion: FORMAT_VERSION, manifestId: manifest.manifestId, appliedAt,
       affectedCount: result.affectedCount, eventCount: result.eventCount,
       eventIds: events.map((event) => event.id), backupPath: paths.backup, backupSha256, postFingerprint,
     };
+    const receipt: ApplyReceipt = { ...unsigned, receiptId: receiptIdFor(unsigned) };
     assertAppliedState(raw, manifest, receipt);
     if (options.testOnlyFault === 'apply-receipt') throw new Error('Injected apply receipt write failure');
-    atomicWriteJson(paths.apply, receipt);
+    writeReceiptBound(paths.apply, receipt, 'apply', dbPath, expectedIdentity);
     return { ...receipt, receiptPath: paths.apply, replayed: false };
   } finally { raw.close(); observer.close(); }
 }
@@ -732,12 +925,8 @@ export async function verifyInlineProposalCleanup(options: CleanupCommandOptions
   const manifest = assertManifest(readJson(manifestPath));
   const paths = receiptPaths(manifestPath);
   if (!existsSync(paths.apply)) throw new Error('Apply receipt is required before verification');
-  const applyReceipt = readJson<ApplyReceipt>(paths.apply);
-  assertReadableDatabase(applyReceipt.backupPath);
-  if (hashCleanupFile(applyReceipt.backupPath) !== applyReceipt.backupSha256
-    || applyReceipt.backupSha256 !== manifest.database.fingerprint) {
-    throw new Error('Backup fingerprint/readability check failed');
-  }
+  const applyReceipt = assertApplyReceipt(readJson(paths.apply), manifest, paths.backup);
+  assertApplyBackup(applyReceipt, manifest);
   const raw = new DatabaseSync(dbPath, { readOnly: true });
   let retainedValid: RetainedValidCounts;
   let openOverdueCount: number;
@@ -769,36 +958,60 @@ export async function rollbackInlineProposalCleanup(options: CleanupCommandOptio
   const manifest = assertManifest(readJson(manifestPath));
   const paths = receiptPaths(manifestPath);
   assertTestOnlySeam(Boolean(options.testOnlyAfterFingerprint || options.testOnlyDuringFingerprint
-    || options.testOnlyUnderLockFault || options.testOnlyFault));
+    || options.testOnlyUnderLockFault || options.testOnlyAfterMutation || options.testOnlyFault));
   if (existsSync(paths.rollback)) {
-    const receipt = readJson<RollbackReceipt>(paths.rollback);
+    const receipt = assertRollbackReceipt(readJson(paths.rollback), manifest);
     const raw = new DatabaseSync(dbPath, { readOnly: true });
     try { assertRolledBackState(raw, manifest); } finally { raw.close(); }
     return { ...receipt, receiptPath: paths.rollback, replayed: true };
   }
   if (!existsSync(paths.apply)) throw new Error('Apply receipt is required before rollback');
-  const applyReceipt = readJson<ApplyReceipt>(paths.apply);
-  const inspection = new DatabaseSync(dbPath, { readOnly: true });
+  const applyReceipt = assertApplyReceipt(readJson(paths.apply), manifest, paths.backup);
+  assertApplyBackup(applyReceipt, manifest);
+  const expectedIdentity = databaseFileIdentity(dbPath);
+  const observer = new DatabaseSync(dbPath, { readOnly: true, timeout: 250 });
+  try { assertDatabaseFileIdentity(dbPath, expectedIdentity); }
+  catch (error) { observer.close(); throw error; }
+  const observedDataVersion = dataVersion(observer);
   let alreadyRolledBack = false;
   try {
-    assertRolledBackState(inspection, manifest);
+    assertRolledBackState(observer, manifest);
     alreadyRolledBack = true;
   } catch { /* Expected before the first rollback. */ }
-  finally { inspection.close(); }
   if (alreadyRolledBack) {
-    const postFingerprint = await currentFingerprint(dbPath, join(dirname(manifestPath), '.rollback-recovery-fingerprint.db'));
-    const recovered: RollbackReceipt = {
-      formatVersion: FORMAT_VERSION, manifestId: manifest.manifestId,
-      rolledBackAt: Math.floor(Date.now() / 1000), restoredCount: manifest.candidates.length,
-      removedEventCount: manifest.candidates.length, postFingerprint,
-    };
-    if (options.testOnlyFault === 'rollback-receipt') throw new Error('Injected rollback receipt write failure');
-    atomicWriteJson(paths.rollback, recovered);
-    return { ...recovered, receiptPath: paths.rollback, replayed: true };
+    try {
+      assertDatabaseFileIdentity(dbPath, expectedIdentity);
+      const postFingerprint = await currentFingerprint(
+        dbPath,
+        join(dirname(manifestPath), '.rollback-recovery-fingerprint.db'),
+        observer,
+      );
+      assertDatabaseFileIdentity(dbPath, expectedIdentity);
+      const unsigned: Omit<RollbackReceipt, 'receiptId'> = {
+        formatVersion: FORMAT_VERSION, manifestId: manifest.manifestId,
+        rolledBackAt: Math.floor(Date.now() / 1000), restoredCount: manifest.candidates.length,
+        removedEventCount: manifest.candidates.length, postFingerprint,
+      };
+      const recovered: RollbackReceipt = { ...unsigned, receiptId: receiptIdFor(unsigned) };
+      if (options.testOnlyFault === 'rollback-receipt') throw new Error('Injected rollback receipt write failure');
+      writeReceiptBound(paths.rollback, recovered, 'rollback', dbPath, expectedIdentity);
+      return { ...recovered, receiptPath: paths.rollback, replayed: true };
+    } finally { observer.close(); }
   }
-  const raw = openWritable(dbPath);
+  let raw: DatabaseSync;
+  try { raw = openWritable(dbPath, expectedIdentity); }
+  catch (error) { observer.close(); throw error; }
   try {
     withImmediateTransaction(raw, () => {
+      assertDatabaseFileIdentity(dbPath, expectedIdentity);
+      if (dataVersion(observer) !== observedDataVersion) {
+        throw new Error('Database changed between rollback inspection and write lock');
+      }
+      options.testOnlyUnderLockFault?.(raw);
+      assertDatabaseFileIdentity(dbPath, expectedIdentity);
+      if (dataVersion(observer) !== observedDataVersion) {
+        throw new Error('Database changed under the rollback write lock');
+      }
       assertAppliedState(raw, manifest, applyReceipt);
       const update = raw.prepare(`
         UPDATE beads SET status='proposed', updated_at=?, completed_at=NULL, cancelled_at=NULL
@@ -816,19 +1029,45 @@ export async function rollbackInlineProposalCleanup(options: CleanupCommandOptio
       }
       assertRolledBackState(raw, manifest);
     });
-    const postFingerprint = await currentFingerprint(dbPath, join(dirname(manifestPath), '.rollback-post-fingerprint.db'));
-    const receipt: RollbackReceipt = {
+    assertDatabaseFileIdentity(dbPath, expectedIdentity);
+    options.testOnlyAfterMutation?.();
+    assertDatabaseFileIdentity(dbPath, expectedIdentity);
+    const postFingerprint = await currentFingerprint(
+      dbPath,
+      join(dirname(manifestPath), '.rollback-post-fingerprint.db'),
+      observer,
+    );
+    assertDatabaseFileIdentity(dbPath, expectedIdentity);
+    const unsigned: Omit<RollbackReceipt, 'receiptId'> = {
       formatVersion: FORMAT_VERSION, manifestId: manifest.manifestId,
       rolledBackAt: Math.floor(Date.now() / 1000), restoredCount: manifest.candidates.length,
       removedEventCount: manifest.candidates.length, postFingerprint,
     };
+    const receipt: RollbackReceipt = { ...unsigned, receiptId: receiptIdFor(unsigned) };
     if (options.testOnlyFault === 'rollback-receipt') throw new Error('Injected rollback receipt write failure');
-    atomicWriteJson(paths.rollback, receipt);
+    writeReceiptBound(paths.rollback, receipt, 'rollback', dbPath, expectedIdentity);
     return { ...receipt, receiptPath: paths.rollback, replayed: false };
-  } finally { raw.close(); }
+  } finally { raw.close(); observer.close(); }
 }
 
 interface CliArgs { command: 'plan' | 'apply' | 'verify' | 'rollback'; dbPath: string; artifactDir?: string; manifestPath?: string }
+
+const MAX_CLI_ERROR_BYTES = 256;
+const CLI_BARE_PHONE = /(?<!\d)\+?\d{10,16}(?!\d)/g;
+
+function boundedCliError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  const redacted = redactBotErrorsText(raw)
+    .replace(CLI_BARE_PHONE, '[REDACTED PHONE]')
+    .replace(/\s+/g, ' ')
+    .trim() || 'unknown cleanup failure';
+  let result = '';
+  for (const character of redacted) {
+    if (Buffer.byteLength(result + character, 'utf8') > MAX_CLI_ERROR_BYTES) return `${result}…`;
+    result += character;
+  }
+  return result;
+}
 
 export function parseCleanupArgs(argv: readonly string[]): CliArgs {
   const [command, ...rest] = argv;
@@ -840,7 +1079,7 @@ export function parseCleanupArgs(argv: readonly string[]): CliArgs {
     const flag = rest[index];
     const value = rest[index + 1];
     if (!['--db', '--artifact-dir', '--manifest'].includes(flag ?? '') || !value || value.startsWith('--')) {
-      throw new Error(`Invalid or missing CLI argument near ${flag ?? '<end>'}`);
+      throw new Error('Invalid or missing CLI argument');
     }
     if (values.has(flag!)) throw new Error(`Duplicate argument: ${flag}`);
     values.set(flag!, value);
@@ -870,7 +1109,7 @@ export async function runCleanupCli(argv: readonly string[], io: {
     io.out(`${JSON.stringify(result)}\n`);
     return 0;
   } catch (error) {
-    io.err(`inline-proposal-cleanup: ${(error as Error).message}\n`);
+    io.err(`inline-proposal-cleanup: ${boundedCliError(error)}\n`);
     return 1;
   }
 }

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -128,6 +128,18 @@ describe('inline proposal cleanup protocol', () => {
       .rejects.toThrow(/WAL.*SHM|companion/i);
   });
 
+  it('rejects a second canonical origin event even when its actor is not inline', async () => {
+    const f = fixture();
+    const raw = new DatabaseSync(f.dbPath);
+    raw.prepare(`INSERT INTO bead_events
+      (bead_id, event_type, payload_json, actor, source_message_pk, created_at)
+      VALUES (?, 'status_change', ?, 'repair-tool', ?, ?)`)
+      .run(f.invalid.id, JSON.stringify({ from: null, to: 'proposed' }), 101, 1);
+    raw.close();
+    await expect(planInlineProposalCleanup({ dbPath: f.dbPath, artifactDir: f.artifactDir }))
+      .rejects.toThrow(/ambiguous source/i);
+  });
+
   it('applies atomically, verifies exact counts and backup readability, then rolls back', async () => {
     const f = fixture();
     const plan = await planInlineProposalCleanup({ dbPath: f.dbPath, artifactDir: f.artifactDir });
@@ -185,6 +197,143 @@ describe('inline proposal cleanup protocol', () => {
     expect(check.prepare(`SELECT COUNT(*) AS count FROM bead_events WHERE actor='inline-proposal-cleanup'`).get())
       .toEqual({ count: 0 });
     check.close();
+  });
+
+  it('rejects a DELETE-journal database path swap after fingerprinting', async () => {
+    const f = fixture();
+    const journal = new DatabaseSync(f.dbPath);
+    journal.exec('PRAGMA journal_mode=DELETE');
+    journal.close();
+    const plan = await planInlineProposalCleanup({ dbPath: f.dbPath, artifactDir: f.artifactDir });
+    const replacement = join(f.root, 'replacement.db');
+    const retired = join(f.root, 'retired.db');
+    copyFileSync(f.dbPath, replacement);
+
+    await expect(applyInlineProposalCleanup({
+      dbPath: f.dbPath,
+      manifestPath: plan.manifestPath,
+      testOnlyAfterFingerprint: () => {
+        renameSync(f.dbPath, retired);
+        renameSync(replacement, f.dbPath);
+      },
+    })).rejects.toThrow(/identity|changed|replaced/i);
+
+    const current = new DatabaseSync(f.dbPath, { readOnly: true });
+    expect(getBead(current, f.invalid.id)!.bead.status).toBe('proposed');
+    current.close();
+  });
+
+  it('rejects a DELETE-journal database path swap injected under the write lock', async () => {
+    const f = fixture();
+    const journal = new DatabaseSync(f.dbPath);
+    journal.exec('PRAGMA journal_mode=DELETE');
+    journal.close();
+    const plan = await planInlineProposalCleanup({ dbPath: f.dbPath, artifactDir: f.artifactDir });
+    const replacement = join(f.root, 'under-lock-replacement.db');
+    const retired = join(f.root, 'under-lock-retired.db');
+    copyFileSync(f.dbPath, replacement);
+
+    await expect(applyInlineProposalCleanup({
+      dbPath: f.dbPath,
+      manifestPath: plan.manifestPath,
+      testOnlyUnderLockFault: () => {
+        renameSync(f.dbPath, retired);
+        renameSync(replacement, f.dbPath);
+      },
+    })).rejects.toThrow(/identity|changed|replaced/i);
+
+    expect(existsSync(join(f.artifactDir, 'apply-receipt.json'))).toBe(false);
+    const current = new DatabaseSync(f.dbPath, { readOnly: true });
+    expect(getBead(current, f.invalid.id)!.bead.status).toBe('proposed');
+    current.close();
+    const original = new DatabaseSync(retired, { readOnly: true });
+    expect(getBead(original, f.invalid.id)!.bead.status).toBe('proposed');
+    original.close();
+  });
+
+  it('does not publish an apply receipt after a post-commit database path swap', async () => {
+    const f = fixture();
+    const journal = new DatabaseSync(f.dbPath);
+    journal.exec('PRAGMA journal_mode=DELETE');
+    journal.close();
+    const plan = await planInlineProposalCleanup({ dbPath: f.dbPath, artifactDir: f.artifactDir });
+    const replacement = join(f.root, 'post-commit-replacement.db');
+    const retired = join(f.root, 'post-commit-retired.db');
+    copyFileSync(f.dbPath, replacement);
+
+    await expect(applyInlineProposalCleanup({
+      dbPath: f.dbPath,
+      manifestPath: plan.manifestPath,
+      testOnlyAfterMutation: () => {
+        renameSync(f.dbPath, retired);
+        renameSync(replacement, f.dbPath);
+      },
+    })).rejects.toThrow(/identity|changed|replaced/i);
+
+    expect(existsSync(join(f.artifactDir, 'apply-receipt.json'))).toBe(false);
+    const current = new DatabaseSync(f.dbPath, { readOnly: true });
+    expect(getBead(current, f.invalid.id)!.bead.status).toBe('proposed');
+    current.close();
+    const original = new DatabaseSync(retired, { readOnly: true });
+    expect(getBead(original, f.invalid.id)!.bead.status).toBe('cancelled');
+    original.close();
+  });
+
+  it('rejects a DELETE-journal database path swap injected under the rollback write lock', async () => {
+    const f = fixture();
+    const journal = new DatabaseSync(f.dbPath);
+    journal.exec('PRAGMA journal_mode=DELETE');
+    journal.close();
+    const plan = await planInlineProposalCleanup({ dbPath: f.dbPath, artifactDir: f.artifactDir });
+    await applyInlineProposalCleanup({ dbPath: f.dbPath, manifestPath: plan.manifestPath });
+    const replacement = join(f.root, 'rollback-under-lock-replacement.db');
+    const retired = join(f.root, 'rollback-under-lock-retired.db');
+    copyFileSync(f.dbPath, replacement);
+
+    await expect(rollbackInlineProposalCleanup({
+      dbPath: f.dbPath,
+      manifestPath: plan.manifestPath,
+      testOnlyUnderLockFault: () => {
+        renameSync(f.dbPath, retired);
+        renameSync(replacement, f.dbPath);
+      },
+    })).rejects.toThrow(/identity|changed|replaced/i);
+
+    expect(existsSync(join(f.artifactDir, 'rollback-receipt.json'))).toBe(false);
+    for (const path of [f.dbPath, retired]) {
+      const raw = new DatabaseSync(path, { readOnly: true });
+      expect(getBead(raw, f.invalid.id)!.bead.status).toBe('cancelled');
+      raw.close();
+    }
+  });
+
+  it('does not publish a rollback receipt after a post-commit database path swap', async () => {
+    const f = fixture();
+    const journal = new DatabaseSync(f.dbPath);
+    journal.exec('PRAGMA journal_mode=DELETE');
+    journal.close();
+    const plan = await planInlineProposalCleanup({ dbPath: f.dbPath, artifactDir: f.artifactDir });
+    await applyInlineProposalCleanup({ dbPath: f.dbPath, manifestPath: plan.manifestPath });
+    const replacement = join(f.root, 'rollback-post-commit-replacement.db');
+    const retired = join(f.root, 'rollback-post-commit-retired.db');
+    copyFileSync(f.dbPath, replacement);
+
+    await expect(rollbackInlineProposalCleanup({
+      dbPath: f.dbPath,
+      manifestPath: plan.manifestPath,
+      testOnlyAfterMutation: () => {
+        renameSync(f.dbPath, retired);
+        renameSync(replacement, f.dbPath);
+      },
+    })).rejects.toThrow(/identity|changed|replaced/i);
+
+    expect(existsSync(join(f.artifactDir, 'rollback-receipt.json'))).toBe(false);
+    const current = new DatabaseSync(f.dbPath, { readOnly: true });
+    expect(getBead(current, f.invalid.id)!.bead.status).toBe('cancelled');
+    current.close();
+    const original = new DatabaseSync(retired, { readOnly: true });
+    expect(getBead(original, f.invalid.id)!.bead.status).toBe('proposed');
+    original.close();
   });
 
   it('detects an unrelated commit that occurs during the online backup', async () => {
@@ -305,6 +454,30 @@ describe('inline proposal cleanup protocol', () => {
     raw.close();
   });
 
+  it('publishes the final recoverable backup before the pre-lock hook and mutation', async () => {
+    const f = fixture();
+    const plan = await planInlineProposalCleanup({ dbPath: f.dbPath, artifactDir: f.artifactDir });
+    let inspected = false;
+    await applyInlineProposalCleanup({
+      dbPath: f.dbPath,
+      manifestPath: plan.manifestPath,
+      testOnlyAfterFingerprint: () => {
+        const backupPath = join(f.artifactDir, 'pre-apply-backup.db');
+        expect(existsSync(backupPath)).toBe(true);
+        const backup = new DatabaseSync(backupPath, { readOnly: true });
+        expect(getBead(backup, f.invalid.id)!.bead.status).toBe('proposed');
+        backup.close();
+        const source = new DatabaseSync(f.dbPath, { readOnly: true });
+        expect(getBead(source, f.invalid.id)!.bead.status).toBe('proposed');
+        source.close();
+        inspected = true;
+      },
+    });
+    expect(inspected).toBe(true);
+    const implementation = readFileSync(new URL('../../scripts/inline-proposal-cleanup.ts', import.meta.url), 'utf8');
+    expect(implementation).toContain('backupConnection(observer, paths.backup');
+  });
+
   it('fails the whole batch deterministically on SQLITE_FULL', async () => {
     const f = fixture();
     const plan = await planInlineProposalCleanup({ dbPath: f.dbPath, artifactDir: f.artifactDir });
@@ -397,6 +570,47 @@ describe('inline proposal cleanup protocol', () => {
     expect(errors.join('')).toMatch(/^inline-proposal-cleanup:/);
     expect(errors.join('').length).toBeLessThan(500);
     expect(errors.join('')).not.toContain('schedule release review');
+
+    const oversizedErrors: string[] = [];
+    const oversized = await runCleanupCli([
+      'plan', '--db', join('/does/not/exist', 'x'.repeat(12_000)), '--artifact-dir', 'out',
+    ], {
+      out: () => undefined, err: (text) => oversizedErrors.push(text),
+    });
+    expect(oversized).toBe(1);
+    expect(Buffer.byteLength(oversizedErrors.join(''), 'utf8')).toBeLessThanOrEqual(320);
+    expect(oversizedErrors.join('')).not.toContain('x'.repeat(500));
+
+    const syntheticToken = `g${'hp_'}${'a'.repeat(36)}`;
+    const secretErrors: string[] = [];
+    await runCleanupCli([
+      'plan', '--db', join('/does/not/exist', syntheticToken, '2125550199'), '--artifact-dir', 'out',
+    ], { out: () => undefined, err: (text) => secretErrors.push(text) });
+    expect(secretErrors.join('')).not.toContain(syntheticToken);
+    expect(secretErrors.join('')).not.toContain('2125550199');
+  });
+
+  it('rejects tampered apply and rollback receipts instead of replaying them', async () => {
+    const applyCase = fixture();
+    const applyPlan = await planInlineProposalCleanup({ dbPath: applyCase.dbPath, artifactDir: applyCase.artifactDir });
+    const applied = await applyInlineProposalCleanup({ dbPath: applyCase.dbPath, manifestPath: applyPlan.manifestPath });
+    writeFileSync(applied.receiptPath, `${JSON.stringify({
+      ...JSON.parse(readFileSync(applied.receiptPath, 'utf8')),
+      postFingerprint: '0'.repeat(64),
+    })}\n`, { mode: 0o600 });
+    await expect(applyInlineProposalCleanup({ dbPath: applyCase.dbPath, manifestPath: applyPlan.manifestPath }))
+      .rejects.toThrow(/apply receipt/i);
+
+    const rollbackCase = fixture();
+    const rollbackPlan = await planInlineProposalCleanup({ dbPath: rollbackCase.dbPath, artifactDir: rollbackCase.artifactDir });
+    await applyInlineProposalCleanup({ dbPath: rollbackCase.dbPath, manifestPath: rollbackPlan.manifestPath });
+    const rolledBack = await rollbackInlineProposalCleanup({ dbPath: rollbackCase.dbPath, manifestPath: rollbackPlan.manifestPath });
+    writeFileSync(rolledBack.receiptPath, `${JSON.stringify({
+      ...JSON.parse(readFileSync(rolledBack.receiptPath, 'utf8')),
+      postFingerprint: '0'.repeat(64),
+    })}\n`, { mode: 0o600 });
+    await expect(rollbackInlineProposalCleanup({ dbPath: rollbackCase.dbPath, manifestPath: rollbackPlan.manifestPath }))
+      .rejects.toThrow(/rollback receipt/i);
   });
 
   it('hashes files larger than two chunks without whole-file buffering', () => {
