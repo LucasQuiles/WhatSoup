@@ -36,7 +36,10 @@ import {
   observeAlertEmission,
   resetEmitAlertThrottle,
 } from '../../src/lib/emit-alert.ts';
-import { buildBotErrorsEvent } from '../../src/lib/bot-errors-outbox.ts';
+import {
+  buildBotErrorsEvent,
+  type BotErrorsProtocolInput,
+} from '../../src/lib/bot-errors-outbox.ts';
 
 const ALERT_SCRIPT = join(homedir(), '.claude', 'scripts', 'whatsapp-alert.sh');
 const SPAWN_OPTIONS = { stdio: 'ignore', timeout: 5_000, detached: false, killSignal: 'SIGKILL' as const };
@@ -53,6 +56,23 @@ const CREDENTIAL_PATH_SAMPLE = '/home/testuser/.config/whatsoup/instances/agent-
 const BOT_ERRORS_ENV_PATH_SAMPLE = '/home/testuser/.config/whatsoup/bot-errors.env';
 const AUTH_PATH_SAMPLE = '/home/testuser/.local/share/whatsoup/instances/agent-alpha/auth/creds.json';
 const BACKUP_PATH_SAMPLE = '/home/testuser/.local/state/whatsoup/auth-bond-backups/agent-alpha/latest';
+const TYPED_ALERT_PROTOCOL = {
+  observation: {
+    state: 'fault',
+    observedAt: '2026-07-20T10:00:00.000Z',
+    producerSequence: 41,
+    confidence: 'confirmed',
+  },
+  clearPolicy: {
+    kind: 'health_snapshot',
+    minimumSchemaVersion: 2,
+  },
+  remediation: {
+    recoverability: 'auto_recoverable',
+    requestedAction: 'probe_health',
+    authorization: 'automatic_read_only',
+  },
+} as const;
 let outboxDir = '';
 let writefailDir = '';
 
@@ -565,6 +585,54 @@ describe('emitAlert', () => {
       outbox: { path: expect.stringContaining(outboxDir) },
     });
     expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('passes a typed observation protocol through the durable alert producer', () => {
+    const result = emitAlert(
+      'whatsoup-prod',
+      'agent_respawn_failed',
+      'respawn exhausted',
+      'crashed 3 times',
+      'critical',
+      undefined,
+      TYPED_ALERT_PROTOCOL,
+    );
+
+    expect(readOnlyEvent()).toMatchObject({
+      schemaVersion: 2,
+      observedAt: '2026-07-20T10:00:00.000Z',
+      observation: {
+        state: 'fault',
+        producerSequence: 41,
+        confidence: 'confirmed',
+        fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
+      clearPolicy: TYPED_ALERT_PROTOCOL.clearPolicy,
+      remediation: TYPED_ALERT_PROTOCOL.remediation,
+    });
+    expect(result.status).toBe('durably_queued');
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('fails closed instead of degrading an invalid typed protocol to legacy delivery', () => {
+    const invalidProtocol = {
+      ...TYPED_ALERT_PROTOCOL,
+      observation: { ...TYPED_ALERT_PROTOCOL.observation, producerSequence: -1 },
+    } as unknown as BotErrorsProtocolInput;
+
+    const result = emitAlert(
+      'whatsoup-prod',
+      'agent_respawn_failed',
+      'respawn exhausted',
+      'crashed 3 times',
+      'critical',
+      undefined,
+      invalidProtocol,
+    );
+
+    expect(result).toMatchObject({ ok: false, channel: 'none', status: 'failed' });
+    expect(spawn).not.toHaveBeenCalled();
+    expect(readdirSync(outboxDir)).toHaveLength(0);
   });
 
   it('fsyncs both event contents and the outbox directory before returning', () => {
@@ -1406,6 +1474,46 @@ describe('clearAlertSource', () => {
     expect(spawn).not.toHaveBeenCalled();
   });
 
+  it('passes typed healthy proof through the durable clear producer', () => {
+    const protocol = {
+      observation: {
+        state: 'healthy',
+        observedAt: '2026-07-20T10:05:00.000Z',
+        producerSequence: 42,
+        confidence: 'confirmed',
+      },
+      clearPolicy: {
+        kind: 'health_snapshot',
+        proofRef: 'receipt:health:42',
+        proofObservedAt: '2026-07-20T10:05:00.000Z',
+        minimumSchemaVersion: 2,
+      },
+      remediation: {
+        recoverability: 'auto_recoverable',
+        requestedAction: 'observe_recovery',
+        authorization: 'automatic_read_only',
+      },
+    } as const;
+
+    const result = clearAlertSource(
+      'whatsoup-prod',
+      'agent_respawn_failed',
+      'health recovered',
+      undefined,
+      protocol,
+    );
+
+    expect(readOnlyEvent()).toMatchObject({
+      schemaVersion: 2,
+      eventType: 'clear',
+      observation: { state: 'healthy', producerSequence: 42 },
+      clearPolicy: protocol.clearPolicy,
+      remediation: protocol.remediation,
+    });
+    expect(result.status).toBe('durably_queued');
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
   it('falls back to the legacy helper when clear outbox write fails', () => {
     process.env['BOT_ERRORS_OUTBOX_DIR'] = '/dev/null/outbox';
 
@@ -1629,6 +1737,34 @@ describe('WHATSOUP_ALERT_SINK dry-run capture', () => {
       evidence: 'reason=empty-output provider=opencode-cli',
     });
     // The whole point: NO durable outbox event, NO operator page.
+    expect(readdirSync(outboxDir)).toHaveLength(0);
+    expect(spawn).not.toHaveBeenCalled();
+    expect(ok).toBe(true);
+  });
+
+  it('preserves a typed schema-v2 protocol in the dry-run sink', () => {
+    const ok = emitAlertChecked(
+      'fixture-agent',
+      'fixture-health',
+      'synthetic health probe failed',
+      'synthetic health probe failed',
+      'critical',
+      undefined,
+      TYPED_ALERT_PROTOCOL,
+    );
+
+    const event = JSON.parse(readFileSync(sinkPath, 'utf8')) as Record<string, unknown>;
+    expect(event).toMatchObject({
+      schemaVersion: 2,
+      observedAt: TYPED_ALERT_PROTOCOL.observation.observedAt,
+      observation: {
+        state: 'fault',
+        producerSequence: 41,
+        fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
+      clearPolicy: TYPED_ALERT_PROTOCOL.clearPolicy,
+      remediation: TYPED_ALERT_PROTOCOL.remediation,
+    });
     expect(readdirSync(outboxDir)).toHaveLength(0);
     expect(spawn).not.toHaveBeenCalled();
     expect(ok).toBe(true);

@@ -8,7 +8,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { forceEnsurePrivateDirectorySync, fsyncDirectory } from './private-fs.ts';
 import { jidPattern } from './redaction-patterns.ts';
 import { homedir, hostname, platform, release, tmpdir } from 'node:os';
@@ -24,6 +24,19 @@ export type BotErrorsRecoverability =
   | 'unrecoverable'
   | 'unknown';
 export type BotErrorsFailureConfidence = 'suspected' | 'probable' | 'confirmed';
+export type BotErrorsObservationState = 'fault' | 'healthy' | 'unknown';
+export type BotErrorsClearPolicyKind =
+  | 'same_source_newer'
+  | 'health_snapshot'
+  | 'outbound_after_incident'
+  | 'auth_bond_and_outbound'
+  | 'source_quiet_and_health'
+  | 'manual_ack';
+export type BotErrorsRemediationAuthorization =
+  | 'automatic_read_only'
+  | 'automatic_safe_retry'
+  | 'owner_required'
+  | 'physical_required';
 export type BotErrorsCriticalAssetKind =
   | 'whatsapp_linked_device'
   | 'whatsapp_auth_bond'
@@ -51,7 +64,33 @@ export interface BotErrorsCriticalAssetDiagnostic {
   evidenceRefs?: string[];
 }
 
-export interface BotErrorsOutboxInput {
+export interface BotErrorsObservationInput {
+  state: BotErrorsObservationState;
+  observedAt: string;
+  producerSequence?: number;
+  confidence: BotErrorsFailureConfidence;
+}
+
+export interface BotErrorsClearPolicy {
+  kind: BotErrorsClearPolicyKind;
+  proofRef?: string;
+  proofObservedAt?: string;
+  minimumSchemaVersion: number;
+}
+
+export interface BotErrorsRemediation {
+  recoverability: BotErrorsRecoverability;
+  requestedAction: string;
+  authorization: BotErrorsRemediationAuthorization;
+}
+
+export interface BotErrorsProtocolInput {
+  observation: BotErrorsObservationInput;
+  clearPolicy: BotErrorsClearPolicy;
+  remediation: BotErrorsRemediation;
+}
+
+interface BotErrorsOutboxBaseInput {
   eventType: BotErrorsEventType;
   instance: string;
   source: string;
@@ -59,6 +98,20 @@ export interface BotErrorsOutboxInput {
   evidence?: string;
   severity?: BotErrorsSeverity;
   criticalAsset?: BotErrorsCriticalAssetDiagnostic;
+}
+
+export interface BotErrorsLegacyOutboxInput extends BotErrorsOutboxBaseInput {
+  observation?: never;
+  clearPolicy?: never;
+  remediation?: never;
+}
+
+export interface BotErrorsV2OutboxInput extends BotErrorsOutboxBaseInput, BotErrorsProtocolInput {}
+
+export type BotErrorsOutboxInput = BotErrorsLegacyOutboxInput | BotErrorsV2OutboxInput;
+
+export class BotErrorsProtocolValidationError extends Error {
+  override readonly name = 'BotErrorsProtocolValidationError';
 }
 
 export interface BotErrorsOutboxWrite {
@@ -416,17 +469,186 @@ function logHints(instance: string): string[] {
   return [...hints];
 }
 
-export function buildBotErrorsEvent(input: BotErrorsOutboxInput, eventId = randomUUID(), createdAt = nowIso()) {
+const OBSERVATION_STATES = new Set<BotErrorsObservationState>(['fault', 'healthy', 'unknown']);
+const FAILURE_CONFIDENCE = new Set<BotErrorsFailureConfidence>(['suspected', 'probable', 'confirmed']);
+const CLEAR_POLICY_KINDS = new Set<BotErrorsClearPolicyKind>([
+  'same_source_newer',
+  'health_snapshot',
+  'outbound_after_incident',
+  'auth_bond_and_outbound',
+  'source_quiet_and_health',
+  'manual_ack',
+]);
+const RECOVERABILITY = new Set<BotErrorsRecoverability>([
+  'auto_recoverable',
+  'operator_recoverable',
+  'manual_relink_required',
+  'manual_repair_required',
+  'unrecoverable',
+  'unknown',
+]);
+const REMEDIATION_AUTHORIZATION = new Set<BotErrorsRemediationAuthorization>([
+  'automatic_read_only',
+  'automatic_safe_retry',
+  'owner_required',
+  'physical_required',
+]);
+const PROOF_REF_MAX_LENGTH = 512;
+const REQUESTED_ACTION_MAX_LENGTH = 128;
+const REQUESTED_ACTION_RE = /^[a-z][a-z0-9_.:-]*$/;
+
+interface BotErrorsV2Fields {
+  observedAt: string;
+  observation: {
+    state: BotErrorsObservationState;
+    fingerprint: string;
+    producerSequence?: number;
+    confidence: BotErrorsFailureConfidence;
+  };
+  clearPolicy: BotErrorsClearPolicy;
+  remediation: BotErrorsRemediation;
+}
+
+function protocolTimestamp(value: unknown, field: string): number {
+  if (typeof value !== 'string') {
+    throw new BotErrorsProtocolValidationError(`Invalid BOT ERRORS protocol ${field} timestamp`);
+  }
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== value) {
+    throw new BotErrorsProtocolValidationError(`Invalid BOT ERRORS protocol ${field} timestamp`);
+  }
+  return parsed;
+}
+
+function validateProtocol(
+  input: BotErrorsOutboxInput,
+  createdAt: string,
+  redactedEvidence: string,
+): BotErrorsV2Fields | null {
+  const protocolSupplied = input.observation !== undefined
+    || input.clearPolicy !== undefined
+    || input.remediation !== undefined;
+  if (!protocolSupplied) return null;
+  if (!input.observation || typeof input.observation !== 'object') {
+    throw new BotErrorsProtocolValidationError('Invalid BOT ERRORS protocol observation');
+  }
+  if (!input.clearPolicy || typeof input.clearPolicy !== 'object') {
+    throw new BotErrorsProtocolValidationError('Invalid BOT ERRORS protocol clear policy');
+  }
+  if (!input.remediation || typeof input.remediation !== 'object') {
+    throw new BotErrorsProtocolValidationError('Invalid BOT ERRORS protocol remediation');
+  }
+
+  const observation = input.observation;
+  if (!OBSERVATION_STATES.has(observation.state)) {
+    throw new BotErrorsProtocolValidationError('Invalid BOT ERRORS protocol observation state');
+  }
+  if (!FAILURE_CONFIDENCE.has(observation.confidence)) {
+    throw new BotErrorsProtocolValidationError('Invalid BOT ERRORS protocol observation confidence');
+  }
+  const createdAtEpoch = protocolTimestamp(createdAt, 'createdAt');
+  const observedAtEpoch = protocolTimestamp(observation.observedAt, 'observedAt');
+  if (observedAtEpoch > createdAtEpoch) {
+    throw new BotErrorsProtocolValidationError('Invalid BOT ERRORS protocol observedAt after createdAt');
+  }
+  if (observation.producerSequence !== undefined
+    && (!Number.isSafeInteger(observation.producerSequence) || observation.producerSequence < 0)) {
+    throw new BotErrorsProtocolValidationError('Invalid BOT ERRORS protocol producer sequence');
+  }
+  if (input.eventType === 'alert' && observation.state === 'healthy') {
+    throw new BotErrorsProtocolValidationError('Invalid BOT ERRORS alert observation; expected fault or unknown');
+  }
+  if (input.eventType === 'clear' && observation.state !== 'healthy') {
+    throw new BotErrorsProtocolValidationError('Invalid BOT ERRORS clear observation; expected healthy');
+  }
+
+  const clearPolicy = input.clearPolicy;
+  if (!CLEAR_POLICY_KINDS.has(clearPolicy.kind)) {
+    throw new BotErrorsProtocolValidationError('Invalid BOT ERRORS protocol clear policy kind');
+  }
+  if (clearPolicy.minimumSchemaVersion !== 2) {
+    throw new BotErrorsProtocolValidationError('Invalid BOT ERRORS protocol minimum schema version');
+  }
+  const proofRef = clearPolicy.proofRef?.trim();
+  if (clearPolicy.proofRef !== undefined
+    && (!proofRef || proofRef.length > PROOF_REF_MAX_LENGTH)) {
+    throw new BotErrorsProtocolValidationError(
+      `Invalid BOT ERRORS protocol proof reference; maximum ${PROOF_REF_MAX_LENGTH} characters`,
+    );
+  }
+  if (clearPolicy.proofObservedAt !== undefined && !proofRef) {
+    throw new BotErrorsProtocolValidationError(
+      'Invalid BOT ERRORS protocol proofObservedAt without proof reference',
+    );
+  }
+  if (input.eventType === 'clear' && clearPolicy.kind !== 'same_source_newer' && !proofRef) {
+    throw new BotErrorsProtocolValidationError('Invalid BOT ERRORS proof-bearing clear without proof reference');
+  }
+  if (clearPolicy.proofObservedAt !== undefined) {
+    const proofObservedAtEpoch = protocolTimestamp(clearPolicy.proofObservedAt, 'proofObservedAt');
+    if (proofObservedAtEpoch > observedAtEpoch) {
+      throw new BotErrorsProtocolValidationError('Invalid BOT ERRORS protocol proofObservedAt after observedAt');
+    }
+  }
+  const redactedProofRef = proofRef === undefined ? undefined : redactText(proofRef);
+  if (redactedProofRef !== undefined && redactedProofRef.length > PROOF_REF_MAX_LENGTH) {
+    throw new BotErrorsProtocolValidationError(
+      `Invalid BOT ERRORS redacted proof reference; maximum ${PROOF_REF_MAX_LENGTH} characters`,
+    );
+  }
+
+  const remediation = input.remediation;
+  if (!RECOVERABILITY.has(remediation.recoverability)) {
+    throw new BotErrorsProtocolValidationError('Invalid BOT ERRORS protocol remediation recoverability');
+  }
+  if (!REMEDIATION_AUTHORIZATION.has(remediation.authorization)) {
+    throw new BotErrorsProtocolValidationError('Invalid BOT ERRORS protocol remediation authorization');
+  }
+  if (typeof remediation.requestedAction !== 'string'
+    || remediation.requestedAction.length === 0
+    || remediation.requestedAction.length > REQUESTED_ACTION_MAX_LENGTH
+    || !REQUESTED_ACTION_RE.test(remediation.requestedAction)) {
+    throw new BotErrorsProtocolValidationError(
+      `Invalid BOT ERRORS protocol requested action; maximum ${REQUESTED_ACTION_MAX_LENGTH} characters`,
+    );
+  }
+
+  return {
+    observedAt: observation.observedAt,
+    observation: {
+      state: observation.state,
+      fingerprint: createHash('sha256').update(redactedEvidence).digest('hex'),
+      ...(observation.producerSequence === undefined ? {} : { producerSequence: observation.producerSequence }),
+      confidence: observation.confidence,
+    },
+    clearPolicy: {
+      kind: clearPolicy.kind,
+      ...(redactedProofRef === undefined ? {} : { proofRef: redactedProofRef }),
+      ...(clearPolicy.proofObservedAt === undefined ? {} : { proofObservedAt: clearPolicy.proofObservedAt }),
+      minimumSchemaVersion: clearPolicy.minimumSchemaVersion,
+    },
+    remediation: {
+      recoverability: remediation.recoverability,
+      requestedAction: remediation.requestedAction,
+      authorization: remediation.authorization,
+    },
+  };
+}
+
+export function buildBotErrorsEvent(input: BotErrorsOutboxInput, eventId: string = randomUUID(), createdAt = nowIso()) {
   const instance = input.instance.trim() || 'unknown';
   const source = input.source.trim() || 'unknown';
   const summary = input.summary.trim() || `${input.eventType} event from ${source}`;
   const evidence = input.evidence?.trim() ?? '';
+  const redactedSummary = redactText(summary);
+  const redactedEvidence = redactText(evidence);
   const criticalAsset = input.criticalAsset
     ? redactOutboxValue(input.criticalAsset) as BotErrorsCriticalAssetDiagnostic
     : null;
+  const protocol = validateProtocol(input, createdAt, redactedEvidence);
 
   return {
-    schemaVersion: 1,
+    schemaVersion: protocol ? 2 : 1,
     id: eventId,
     eventType: input.eventType,
     severity: input.severity ?? (input.eventType === 'clear' ? 'info' : 'critical'),
@@ -435,8 +657,8 @@ export function buildBotErrorsEvent(input: BotErrorsOutboxInput, eventId = rando
     platform: `${hostPlatform()} ${hostRelease()}`,
     instance,
     source,
-    summary: redactText(summary),
-    evidence: redactText(evidence),
+    summary: redactedSummary,
+    evidence: redactedEvidence,
     process: {
       pid: process.pid,
       ppid: process.ppid,
@@ -460,6 +682,7 @@ export function buildBotErrorsEvent(input: BotErrorsOutboxInput, eventId = rando
       nextAttemptAtEpoch: 0,
       lastError: null,
     },
+    ...(protocol ?? {}),
     ...(criticalAsset ? { criticalAsset } : {}),
   };
 }

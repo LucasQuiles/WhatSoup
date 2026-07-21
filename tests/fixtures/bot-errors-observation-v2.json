@@ -1,0 +1,84 @@
+{
+  "legacy": {
+    "alert": {
+      "schemaVersion": 1,
+      "id": "10000000-0000-4000-8000-000000000001",
+      "eventType": "alert",
+      "severity": "critical",
+      "createdAt": "2026-07-20T10:00:05.000Z",
+      "instance": "fixture-agent",
+      "source": "fixture-health",
+      "summary": "synthetic health probe failed",
+      "evidence": "synthetic health probe failed"
+    },
+    "clear": {
+      "schemaVersion": 1,
+      "id": "10000000-0000-4000-8000-000000000002",
+      "eventType": "clear",
+      "severity": "info",
+      "createdAt": "2026-07-20T10:05:05.000Z",
+      "instance": "fixture-agent",
+      "source": "fixture-health",
+      "summary": "synthetic health probe recovered",
+      "evidence": "synthetic health probe recovered"
+    }
+  },
+  "version2": {
+    "alert": {
+      "schemaVersion": 2,
+      "id": "20000000-0000-4000-8000-000000000001",
+      "eventType": "alert",
+      "severity": "critical",
+      "createdAt": "2026-07-20T10:00:05.000Z",
+      "observedAt": "2026-07-20T10:00:00.000Z",
+      "instance": "fixture-agent",
+      "source": "fixture-health",
+      "summary": "synthetic health probe failed",
+      "evidence": "synthetic health probe failed",
+      "observation": {
+        "state": "fault",
+        "fingerprint": "1eec1476582e2b73c382020220f9cc573a5b6510a87c438554063b2fe5ba2214",
+        "producerSequence": 7,
+        "confidence": "confirmed"
+      },
+      "clearPolicy": {
+        "kind": "health_snapshot",
+        "minimumSchemaVersion": 2
+      },
+      "remediation": {
+        "recoverability": "auto_recoverable",
+        "requestedAction": "probe_health",
+        "authorization": "automatic_read_only"
+      }
+    },
+    "clear": {
+      "schemaVersion": 2,
+      "id": "20000000-0000-4000-8000-000000000002",
+      "eventType": "clear",
+      "severity": "info",
+      "createdAt": "2026-07-20T10:05:05.000Z",
+      "observedAt": "2026-07-20T10:05:00.000Z",
+      "instance": "fixture-agent",
+      "source": "fixture-health",
+      "summary": "synthetic health probe recovered",
+      "evidence": "synthetic health probe recovered",
+      "observation": {
+        "state": "healthy",
+        "fingerprint": "28a7d1af494fcdeca8cc58de1f8be02a28ef51e142119c45f7bc194f730f573d",
+        "producerSequence": 8,
+        "confidence": "confirmed"
+      },
+      "clearPolicy": {
+        "kind": "health_snapshot",
+        "proofRef": "receipt:health:fixture-agent:8",
+        "proofObservedAt": "2026-07-20T10:05:00.000Z",
+        "minimumSchemaVersion": 2
+      },
+      "remediation": {
+        "recoverability": "auto_recoverable",
+        "requestedAction": "observe_recovery",
+        "authorization": "automatic_read_only"
+      }
+    }
+  }
+}

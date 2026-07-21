@@ -9,6 +9,8 @@ import {
   recordBotErrorsWritefail,
   writeBotErrorsEvent,
   type BotErrorsCriticalAssetDiagnostic,
+  type BotErrorsOutboxInput,
+  type BotErrorsV2OutboxInput,
 } from '../../src/lib/bot-errors-outbox.ts';
 
 const ENV_KEYS = [
@@ -36,6 +38,40 @@ const originalEnv = new Map<string, string | undefined>(
 
 let tmpRoot = '';
 
+const observationFixture = JSON.parse(readFileSync(
+  join(process.cwd(), 'tests', 'fixtures', 'bot-errors-observation-v2.json'),
+  'utf8',
+)) as {
+  legacy: { alert: Record<string, unknown>; clear: Record<string, unknown> };
+  version2: { alert: Record<string, unknown>; clear: Record<string, unknown> };
+};
+
+function v2Input(overrides: Record<string, unknown> = {}): BotErrorsV2OutboxInput {
+  return {
+    eventType: 'alert',
+    instance: 'fixture-agent',
+    source: 'fixture-health',
+    summary: 'synthetic health probe failed',
+    evidence: 'synthetic health probe failed',
+    observation: {
+      state: 'fault',
+      observedAt: '2026-07-20T10:00:00.000Z',
+      producerSequence: 7,
+      confidence: 'confirmed',
+    },
+    clearPolicy: {
+      kind: 'health_snapshot',
+      minimumSchemaVersion: 2,
+    },
+    remediation: {
+      recoverability: 'auto_recoverable',
+      requestedAction: 'probe_health',
+      authorization: 'automatic_read_only',
+    },
+    ...overrides,
+  } as unknown as BotErrorsV2OutboxInput;
+}
+
 function restoreEnv(): void {
   for (const [key, value] of originalEnv) {
     if (value === undefined) delete process.env[key];
@@ -52,6 +88,232 @@ afterEach(() => {
 });
 
 describe('buildBotErrorsEvent', () => {
+  it('keeps explicit legacy events at schema v1 and matches the compatibility fixture', () => {
+    for (const eventType of ['alert', 'clear'] as const) {
+      const expected = observationFixture.legacy[eventType];
+      const event = buildBotErrorsEvent({
+        eventType,
+        instance: String(expected.instance),
+        source: String(expected.source),
+        summary: String(expected.summary),
+        evidence: String(expected.evidence),
+      }, String(expected.id), String(expected.createdAt));
+
+      expect(event).toMatchObject(expected);
+      expect(event).not.toHaveProperty('observation');
+      expect(event).not.toHaveProperty('clearPolicy');
+      expect(event).not.toHaveProperty('remediation');
+    }
+  });
+
+  it('emits schema v2 only for a complete typed protocol and matches the cross-language fixture', () => {
+    const alert = buildBotErrorsEvent(
+      v2Input(),
+      String(observationFixture.version2.alert.id),
+      String(observationFixture.version2.alert.createdAt),
+    );
+    const clear = buildBotErrorsEvent(v2Input({
+      eventType: 'clear',
+      summary: 'synthetic health probe recovered',
+      evidence: 'synthetic health probe recovered',
+      observation: {
+        state: 'healthy',
+        observedAt: '2026-07-20T10:05:00.000Z',
+        producerSequence: 8,
+        confidence: 'confirmed',
+      },
+      clearPolicy: {
+        kind: 'health_snapshot',
+        proofRef: 'receipt:health:fixture-agent:8',
+        proofObservedAt: '2026-07-20T10:05:00.000Z',
+        minimumSchemaVersion: 2,
+      },
+      remediation: {
+        recoverability: 'auto_recoverable',
+        requestedAction: 'observe_recovery',
+        authorization: 'automatic_read_only',
+      },
+    }), String(observationFixture.version2.clear.id), String(observationFixture.version2.clear.createdAt));
+
+    expect(alert).toMatchObject(observationFixture.version2.alert);
+    expect(clear).toMatchObject(observationFixture.version2.clear);
+  });
+
+  it('models the protocol as an all-or-nothing compile-time union', () => {
+    const legacy: BotErrorsOutboxInput = {
+      eventType: 'alert', instance: 'fixture', source: 'fixture', summary: 'legacy',
+    };
+    const typed: BotErrorsOutboxInput = v2Input();
+    // @ts-expect-error -- permanent negative type-contract fixture: typed observation requires clearPolicy and remediation; expires 2027-12-31
+    const incomplete: BotErrorsOutboxInput = {
+      eventType: 'alert',
+      instance: 'fixture',
+      source: 'fixture',
+      summary: 'incomplete',
+      observation: {
+        state: 'fault' as const,
+        observedAt: '2026-07-20T10:00:00.000Z',
+        confidence: 'confirmed' as const,
+      },
+    };
+
+    expect(legacy).toBeDefined();
+    expect(typed).toBeDefined();
+    expect(incomplete).toBeDefined();
+  });
+
+  it('derives a stable sha256 evidence fingerprint after redaction', () => {
+    const first = buildBotErrorsEvent(v2Input({ evidence: 'token=raw-secret' }), 'event-a', '2026-07-20T10:00:05.000Z');
+    const second = buildBotErrorsEvent(v2Input({ evidence: 'token=raw-secret' }), 'event-b', '2026-07-20T10:00:05.000Z');
+
+    expect(first.observation?.fingerprint).toMatch(/^[a-f0-9]{64}$/);
+    expect(second.observation?.fingerprint).toBe(first.observation?.fingerprint);
+    expect(JSON.stringify(first)).not.toContain('raw-secret');
+  });
+
+  it.each([
+    ['observation.state', { state: 'broken', observedAt: '2026-07-20T10:00:00.000Z', confidence: 'confirmed' }],
+    ['observation.confidence', { state: 'fault', observedAt: '2026-07-20T10:00:00.000Z', confidence: 'certain' }],
+    ['clearPolicy.kind', { kind: 'weak_text', minimumSchemaVersion: 2 }],
+    ['remediation.recoverability', { recoverability: 'eventually', requestedAction: 'probe_health', authorization: 'automatic_read_only' }],
+    ['remediation.authorization', { recoverability: 'auto_recoverable', requestedAction: 'probe_health', authorization: 'anyone' }],
+  ] as const)('rejects an invalid schema-v2 %s enum', (path, value) => {
+    const [field] = path.split('.');
+    expect(() => buildBotErrorsEvent(v2Input({ [field!]: value }), 'event', '2026-07-20T10:00:05.000Z'))
+      .toThrow(/protocol|observation|policy|remediation|invalid/i);
+  });
+
+  it('accepts every schema-v2 policy, confidence, recoverability, and authorization enum', () => {
+    const policies = [
+      'same_source_newer', 'health_snapshot', 'outbound_after_incident',
+      'auth_bond_and_outbound', 'source_quiet_and_health', 'manual_ack',
+    ];
+    const confidence = ['suspected', 'probable', 'confirmed'];
+    const recoverability = [
+      'auto_recoverable', 'operator_recoverable', 'manual_relink_required',
+      'manual_repair_required', 'unrecoverable', 'unknown',
+    ];
+    const authorization = [
+      'automatic_read_only', 'automatic_safe_retry', 'owner_required', 'physical_required',
+    ];
+
+    for (const kind of policies) {
+      expect(() => buildBotErrorsEvent(v2Input({ clearPolicy: { kind, minimumSchemaVersion: 2 } })))
+        .not.toThrow();
+    }
+    for (const value of confidence) {
+      expect(() => buildBotErrorsEvent(v2Input({
+        observation: { state: 'fault', observedAt: '2026-07-20T10:00:00.000Z', confidence: value },
+      }))).not.toThrow();
+    }
+    for (const value of recoverability) {
+      expect(() => buildBotErrorsEvent(v2Input({
+        remediation: { recoverability: value, requestedAction: 'probe_health', authorization: 'automatic_read_only' },
+      }))).not.toThrow();
+    }
+    for (const value of authorization) {
+      expect(() => buildBotErrorsEvent(v2Input({
+        remediation: { recoverability: 'auto_recoverable', requestedAction: 'probe_health', authorization: value },
+      }))).not.toThrow();
+    }
+  });
+
+  it('enforces schema-v2 event/state pairings and complete protocol combinations', () => {
+    expect(() => buildBotErrorsEvent(v2Input({
+      observation: { state: 'unknown', observedAt: '2026-07-20T10:00:00.000Z', confidence: 'suspected' },
+    }))).not.toThrow();
+    expect(() => buildBotErrorsEvent(v2Input({
+      observation: { state: 'healthy', observedAt: '2026-07-20T10:00:00.000Z', confidence: 'confirmed' },
+    }))).toThrow(/alert|fault|unknown|observation/i);
+    expect(() => buildBotErrorsEvent(v2Input({
+      eventType: 'clear',
+      observation: { state: 'fault', observedAt: '2026-07-20T10:00:00.000Z', confidence: 'confirmed' },
+    }))).toThrow(/clear|healthy|observation/i);
+    expect(() => buildBotErrorsEvent({
+      ...v2Input(),
+      clearPolicy: undefined,
+    } as unknown as Parameters<typeof buildBotErrorsEvent>[0])).toThrow(/clear policy|protocol/i);
+    expect(() => buildBotErrorsEvent({
+      ...v2Input(),
+      remediation: undefined,
+    } as unknown as Parameters<typeof buildBotErrorsEvent>[0])).toThrow(/remediation|protocol/i);
+  });
+
+  it('enforces timestamp ordering, proof pairing, and optional producer sequence bounds', () => {
+    expect(() => buildBotErrorsEvent(v2Input({
+      observation: { state: 'fault', observedAt: 'not-a-time', confidence: 'confirmed' },
+    }), 'event', '2026-07-20T10:00:05.000Z')).toThrow(/observedAt|timestamp/i);
+    expect(() => buildBotErrorsEvent(v2Input({
+      observation: { state: 'fault', observedAt: '2026-07-20T10:00:06.000Z', confidence: 'confirmed' },
+    }), 'event', '2026-07-20T10:00:05.000Z')).toThrow(/observedAt|createdAt|timestamp/i);
+    expect(() => buildBotErrorsEvent(v2Input({
+      observation: { state: 'fault', observedAt: '2026-07-20T10:00:00.000Z', producerSequence: -1, confidence: 'confirmed' },
+    }))).toThrow(/producer sequence|producerSequence/i);
+    expect(() => buildBotErrorsEvent(v2Input({
+      observation: { state: 'fault', observedAt: '2026-07-20T10:00:00.000Z', producerSequence: 1.5, confidence: 'confirmed' },
+    }))).toThrow(/producer sequence|producerSequence/i);
+    expect(() => buildBotErrorsEvent(v2Input({
+      observation: {
+        state: 'fault', observedAt: '2026-07-20T10:00:00.000Z',
+        producerSequence: Number.MAX_SAFE_INTEGER + 1, confidence: 'confirmed',
+      },
+    }))).toThrow(/producer sequence|producerSequence/i);
+    for (const producerSequence of [0, Number.MAX_SAFE_INTEGER]) {
+      expect(() => buildBotErrorsEvent(v2Input({
+        observation: { state: 'fault', observedAt: '2026-07-20T10:00:00.000Z', producerSequence, confidence: 'confirmed' },
+      }))).not.toThrow();
+    }
+    expect(() => buildBotErrorsEvent(v2Input({
+      clearPolicy: { kind: 'health_snapshot', proofObservedAt: '2026-07-20T10:00:00.000Z', minimumSchemaVersion: 2 },
+    }))).toThrow(/proof.*reference|proofRef/i);
+    expect(() => buildBotErrorsEvent(v2Input({
+      eventType: 'clear',
+      observation: { state: 'healthy', observedAt: '2026-07-20T10:00:00.000Z', confidence: 'confirmed' },
+      clearPolicy: { kind: 'health_snapshot', proofRef: 'receipt:health:1', proofObservedAt: '2026-07-20T10:00:01.000Z', minimumSchemaVersion: 2 },
+    }), 'event', '2026-07-20T10:00:05.000Z')).toThrow(/proofObservedAt|observedAt|timestamp/i);
+  });
+
+  it('requires proof references on proof-bearing clears and bounds protocol strings', () => {
+    const clear = {
+      eventType: 'clear',
+      observation: { state: 'healthy', observedAt: '2026-07-20T10:00:00.000Z', confidence: 'confirmed' },
+    };
+    expect(() => buildBotErrorsEvent(v2Input({
+      ...clear,
+      clearPolicy: { kind: 'health_snapshot', minimumSchemaVersion: 2 },
+    }))).toThrow(/proof.*reference|proofRef/i);
+    expect(() => buildBotErrorsEvent(v2Input({
+      clearPolicy: { kind: 'health_snapshot', proofRef: 'r'.repeat(513), minimumSchemaVersion: 2 },
+    }))).toThrow(/proof.*512|proof.*long|proofRef/i);
+    expect(() => buildBotErrorsEvent(v2Input({
+      remediation: { recoverability: 'auto_recoverable', requestedAction: `a${'b'.repeat(128)}`, authorization: 'automatic_read_only' },
+    }))).toThrow(/requested action|requestedAction|128/i);
+    expect(() => buildBotErrorsEvent(v2Input({
+      clearPolicy: { kind: 'health_snapshot', minimumSchemaVersion: 3 },
+    }))).toThrow(/schema version|minimumSchemaVersion/i);
+  });
+
+  it('redacts proof references before returning or durably writing schema-v2 events', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-outbox-v2-proof-'));
+    process.env['BOT_ERRORS_OUTBOX_DIR'] = join(tmpRoot, 'outbox');
+    const input = v2Input({
+      eventType: 'clear',
+      observation: { state: 'healthy', observedAt: '2026-07-20T10:00:00.000Z', confidence: 'confirmed' },
+      clearPolicy: {
+        kind: 'health_snapshot',
+        proofRef: 'receipt token=unredacted-proof-secret',
+        proofObservedAt: '2026-07-20T10:00:00.000Z',
+        minimumSchemaVersion: 2,
+      },
+    });
+
+    const built = buildBotErrorsEvent(input, 'event', '2026-07-20T10:00:05.000Z');
+    const written = writeBotErrorsEvent(input);
+    expect(built.clearPolicy?.proofRef).toContain('[REDACTED]');
+    expect(JSON.stringify(built)).not.toContain('unredacted-proof-secret');
+    expect(readFileSync(written.path, 'utf8')).not.toContain('unredacted-proof-secret');
+  });
+
   it('defaults blank routing fields and uses Linux journalctl hints', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-outbox-build-'));
     process.env['BOT_ERRORS_STATE_DIR'] = join(tmpRoot, 'state');

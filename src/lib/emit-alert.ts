@@ -6,6 +6,7 @@ import {
   writeBotErrorsEvent,
   type BotErrorsCriticalAssetDiagnostic,
   type BotErrorsOutboxWrite,
+  type BotErrorsProtocolInput,
   type BotErrorsSeverity,
 } from './bot-errors-outbox.ts';
 
@@ -91,6 +92,18 @@ export interface AlertEmissionContext {
   instance: string;
   source: string;
   operation?: 'alert' | 'clear';
+}
+
+function protocolValidationFailure(
+  err: unknown,
+  instance: string,
+  source: string,
+  operation: 'alert' | 'clear',
+): AlertEmissionResult | null {
+  if (!(err instanceof Error) || err.name !== 'BotErrorsProtocolValidationError') return null;
+  const reason = errorMessage(err);
+  log.warn({ instance, source, err: reason }, `bot-errors ${operation} protocol validation failed`);
+  return { ok: false, channel: 'none', status: 'failed', outboxError: reason };
 }
 
 function requireExpectedJid(): boolean {
@@ -200,12 +213,15 @@ function captureToAlertSink(
     evidence: string;
     severity: BotErrorsSeverity;
     criticalAsset?: BotErrorsCriticalAssetDiagnostic;
+    protocol?: BotErrorsProtocolInput;
   },
 ): AlertEmissionResult {
   // Reuse buildBotErrorsEvent so the captured record is identical-shape AND
   // redacted exactly like a real outbox event — a secret in evidence must never
   // leak to the sink file.
-  const event = buildBotErrorsEvent(input);
+  const { protocol, ...legacyInput } = input;
+  const eventInput = protocol ? { ...legacyInput, ...protocol } : legacyInput;
+  const event = buildBotErrorsEvent(eventInput);
   appendFileSync(sink, `${JSON.stringify(event)}\n`);
   return { ok: true, channel: 'sink', status: 'durably_queued' };
 }
@@ -221,15 +237,27 @@ export function emitAlert(
   evidence: string,
   severity: BotErrorsSeverity = 'critical',
   criticalAsset?: BotErrorsCriticalAssetDiagnostic,
+  protocol?: BotErrorsProtocolInput,
 ): AlertEmissionResult {
   const sink = alertSinkPath();
   if (sink) {
-    return captureToAlertSink(sink, { eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset });
+    try {
+      return captureToAlertSink(sink, {
+        eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset, protocol,
+      });
+    } catch (err) {
+      const invalid = protocolValidationFailure(err, instance, source, 'alert');
+      if (invalid) return invalid;
+      throw err;
+    }
   }
   try {
-    const outbox = writeBotErrorsEvent({ eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset });
+    const legacyInput = { eventType: 'alert' as const, instance, source, summary, evidence, severity, criticalAsset };
+    const outbox = writeBotErrorsEvent(protocol ? { ...legacyInput, ...protocol } : legacyInput);
     return { ok: true, channel: 'outbox', status: 'durably_queued', outbox };
   } catch (err) {
+    const invalid = protocolValidationFailure(err, instance, source, 'alert');
+    if (invalid) return invalid;
     const reason = errorMessage(err);
     log.warn({ instance, source, err: reason }, 'bot-errors outbox write failed');
     if (isThrottled(instance, source, summary)) {
@@ -258,21 +286,29 @@ export function clearAlertSource(
   source: string,
   evidence = `repair_lane:${instance}`,
   criticalAsset?: BotErrorsCriticalAssetDiagnostic,
+  protocol?: BotErrorsProtocolInput,
 ): AlertEmissionResult {
   const sink = alertSinkPath();
   if (sink) {
-    return captureToAlertSink(sink, {
-      eventType: 'clear',
-      instance,
-      source,
-      summary: `alert source cleared: ${source}`,
-      evidence,
-      severity: 'info',
-      criticalAsset,
-    });
+    try {
+      return captureToAlertSink(sink, {
+        eventType: 'clear',
+        instance,
+        source,
+        summary: `alert source cleared: ${source}`,
+        evidence,
+        severity: 'info',
+        criticalAsset,
+        protocol,
+      });
+    } catch (err) {
+      const invalid = protocolValidationFailure(err, instance, source, 'clear');
+      if (invalid) return invalid;
+      throw err;
+    }
   }
   try {
-    const outbox = writeBotErrorsEvent({
+    const legacyInput = {
       eventType: 'clear',
       instance,
       source,
@@ -280,9 +316,12 @@ export function clearAlertSource(
       evidence,
       severity: 'info',
       criticalAsset,
-    });
+    } as const;
+    const outbox = writeBotErrorsEvent(protocol ? { ...legacyInput, ...protocol } : legacyInput);
     return { ok: true, channel: 'outbox', status: 'durably_queued', outbox };
   } catch (err) {
+    const invalid = protocolValidationFailure(err, instance, source, 'clear');
+    if (invalid) return invalid;
     const reason = errorMessage(err);
     log.warn({ instance, source, err: reason }, 'bot-errors clear outbox write failed');
     const legacy = spawnLegacyAlert(
@@ -338,9 +377,10 @@ export function emitAlertChecked(
   evidence: string,
   severity: BotErrorsSeverity = 'critical',
   criticalAsset?: BotErrorsCriticalAssetDiagnostic,
+  protocol?: BotErrorsProtocolInput,
 ): boolean {
   return observeAlertEmission(
-    emitAlert(instance, source, summary, evidence, severity, criticalAsset),
+    emitAlert(instance, source, summary, evidence, severity, criticalAsset, protocol),
     { instance, source, operation: 'alert' },
   );
 }
@@ -350,9 +390,10 @@ export function clearAlertSourceChecked(
   source: string,
   evidence = `repair_lane:${instance}`,
   criticalAsset?: BotErrorsCriticalAssetDiagnostic,
+  protocol?: BotErrorsProtocolInput,
 ): boolean {
   return observeAlertEmission(
-    clearAlertSource(instance, source, evidence, criticalAsset),
+    clearAlertSource(instance, source, evidence, criticalAsset, protocol),
     { instance, source, operation: 'clear' },
   );
 }
