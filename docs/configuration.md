@@ -805,6 +805,15 @@ config error):
   top-level `model` or `models.conversation` is required so OpenCode's exact
   route credential can be selected before any session is spawned. Model
   omission remains valid for `claude-cli`, `codex-cli`, and `gemini-cli`.
+- **Primary `provider: opencode-cli` with a model whose provider prefix maps to
+  no known credential service.** OpenCode selects the child's key from the model
+  prefix (e.g. `xai/grok-4` -> `xai`), so a resolvable-but-unmapped model (e.g.
+  `MiniMax-M2` with no prefix, or `whatsoup-cloud/some-model`) would be admitted
+  yet hard-fail every turn when `buildChildEnv` cannot pick a credential. Unless
+  `providerConfig.apiKeyService` (with `baseUrl`) names the route explicitly, the
+  model must be a `<provider>/<model>` id whose prefix is a mapped inference
+  service. `buildChildEnv` enforces the same rule at spawn as a backstop; this
+  admission check surfaces it as a clear config error instead of a runtime crash.
 - **`providerConfig.baseUrl` with a non-`http(s)` scheme.** The value must be
   an absolute `http://` or `https://` URL.
 - **`provider: opencode-cli` with `providerConfig.baseUrl` but no resolvable
