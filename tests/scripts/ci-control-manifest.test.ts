@@ -38,6 +38,7 @@ function control(id: string, overrides: Record<string, unknown> = {}): Record<st
     stages: ['pre-commit'],
     trustClass: 'untrusted-candidate',
     mode: 'block',
+    availability: 'planned',
     severity: 'high',
     riskTiers: ['standard'],
     surfaces: ['repository'],
@@ -70,6 +71,25 @@ function control(id: string, overrides: Record<string, unknown> = {}): Record<st
     },
     ...overrides,
   };
+}
+
+function exactBlockingControl(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return control('one', {
+    mode: 'block',
+    availability: 'blocking',
+    implementation: {
+      commandId: 'guard:one',
+      detectorId: 'detector:one',
+      nativeSchemaVersion: 1,
+    },
+    evidence: {
+      schemaVersion: 1,
+      paths: ['.'],
+      digestBinding: 'exact',
+      freshness: 'receipt',
+    },
+    ...overrides,
+  });
 }
 
 function manifest(controls: Record<string, unknown>[] = [control('repo.hygiene')]): Record<string, unknown> {
@@ -124,9 +144,17 @@ describe('canonical CI control manifest', () => {
     expect(inventory.schemaVersion).toBe(1);
     expect(inventory.manifestDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(inventory.controls.length).toBeGreaterThan(0);
-    expect(inventory.controls.filter(({ id }) => !['ci.hooks.installed', 'ci.outgoing-ref-policy'].includes(id)).every((entry) => entry.availability === 'blocking')).toBe(true);
-    expect(inventory.controls.find(({ id }) => id === 'ci.hooks.installed')?.availability).toBe('report-only');
-    expect(inventory.controls.find(({ id }) => id === 'ci.outgoing-ref-policy')?.availability).toBe('report-only');
+    expect(Object.fromEntries(inventory.controls.map(({ id, availability }) => [id, availability]))).toEqual({
+      'architecture.fitness-lint': 'planned',
+      'ci.exact-revision-classifier': 'canary',
+      'ci.hooks.installed': 'report-only',
+      'ci.outgoing-ref-policy': 'report-only',
+      'privacy.publication': 'report-only',
+      'repo.hygiene': 'report-only',
+      'test.integrity': 'planned',
+      'workflow.safeguard-diagnostics': 'planned',
+    });
+    expect(inventory.controls.some(({ availability }) => availability === 'blocking')).toBe(false);
     expect(inventory.controls.map((entry) => entry.id)).toEqual(expect.arrayContaining([
       'architecture.fitness-lint',
       'test.integrity',
@@ -207,11 +235,16 @@ describe('canonical CI control manifest', () => {
     const nestedUnknown = control('one', { implementation: { commandId: 'guard:one', detectorId: 'detector:one', nativeSchemaVersion: null, extra: true } });
     expect(issueCodes(manifest([nestedUnknown]))).toContain('ci.manifest.unknown-key');
     expect(issueCodes(manifest([control('one', { mode: 'future-mode' })]))).toContain('ci.manifest.invalid-enum');
+    expect(issueCodes(manifest([control('one', { availability: 'future-state' })]))).toContain('ci.manifest.invalid-enum');
+    expect(issueCodes(manifest([control('one', { availability: 'absent' })]))).toContain('ci.manifest.invalid-enum');
     expect(issueCodes(manifest([control('one', { severity: 'urgent' })]))).toContain('ci.manifest.invalid-enum');
     expect(issueCodes(manifest([control('one', { riskTiers: ['tiny'] })]))).toContain('ci.manifest.invalid-enum');
     const missing = control('one');
     delete missing.failurePolicy;
     expect(issueCodes(manifest([missing]))).toContain('ci.manifest.missing-key');
+    const missingAvailability = control('one');
+    delete missingAvailability.availability;
+    expect(issueCodes(manifest([missingAvailability]))).toContain('ci.manifest.missing-key');
 
     const nonEnumerable = manifest();
     Object.defineProperty(nonEnumerable, 'hidden', { enumerable: false, value: true });
@@ -226,6 +259,56 @@ describe('canonical CI control manifest', () => {
     const symbolCommand = manifest();
     Object.defineProperty(symbolCommand.canonicalCommands as object, Symbol('ghost'), { enumerable: true, value: ['false'] });
     expect(issueCodes(symbolCommand)).toContain('ci.manifest.unknown-key');
+  });
+
+  it('keeps desired blocking mode separate from reviewed capability availability', () => {
+    const planned = manifest([control('one', { mode: 'block', availability: 'planned' })]);
+    expect(issueCodes(planned)).toEqual([]);
+    expect(buildControlInventory(planned as unknown as ControlManifestV1).controls[0]?.availability).toBe('planned');
+
+    const exactReceipt = exactBlockingControl();
+    expect(issueCodes(manifest([exactReceipt]))).toEqual([]);
+    expect(buildControlInventory(manifest([exactReceipt]) as unknown as ControlManifestV1).controls[0]?.availability).toBe('blocking');
+
+    const humanAuthorization = { ...exactReceipt, mode: 'human-authorization' };
+    expect(issueCodes(manifest([humanAuthorization]))).toEqual([]);
+  });
+
+  it.each([
+    {
+      prerequisite: 'blocking intent',
+      candidate: (): Record<string, unknown> => exactBlockingControl({ mode: 'assist' }),
+    },
+    {
+      prerequisite: 'native schema',
+      candidate: (): Record<string, unknown> => {
+        const value = exactBlockingControl();
+        return { ...value, implementation: { ...value.implementation as object, nativeSchemaVersion: null } };
+      },
+    },
+    {
+      prerequisite: 'evidence schema',
+      candidate: (): Record<string, unknown> => {
+        const value = exactBlockingControl();
+        return { ...value, evidence: { ...value.evidence as object, schemaVersion: null } };
+      },
+    },
+    {
+      prerequisite: 'exact digest binding',
+      candidate: (): Record<string, unknown> => {
+        const value = exactBlockingControl();
+        return { ...value, evidence: { ...value.evidence as object, digestBinding: 'none' } };
+      },
+    },
+    {
+      prerequisite: 'receipt freshness',
+      candidate: (): Record<string, unknown> => {
+        const value = exactBlockingControl();
+        return { ...value, evidence: { ...value.evidence as object, freshness: 'same-process' } };
+      },
+    },
+  ])('rejects blocking availability without $prerequisite', ({ candidate }) => {
+    expect(issueCodes(manifest([candidate()]))).toContain('ci.manifest.capability-overclaimed');
   });
 
   it('rejects duplicate risk identities and unproven not-applicable failure policies', () => {

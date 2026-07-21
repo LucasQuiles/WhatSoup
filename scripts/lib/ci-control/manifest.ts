@@ -55,6 +55,15 @@ const CONTROL_MODES = [
   'automatic-remediation',
   'detect-respond',
 ] as const;
+const CONTROL_AVAILABILITIES = [
+  'planned',
+  'report-only',
+  'advisory',
+  'canary',
+  'blocking',
+  'quarantined',
+  'deprecated',
+] as const;
 const SEVERITIES = ['info', 'low', 'medium', 'high', 'critical'] as const;
 const RISK_TIERS = ['low', 'standard', 'elevated', 'system-wide'] as const;
 const FAILURE_DECISIONS = ['warn', 'block', 'inconclusive'] as const;
@@ -63,6 +72,7 @@ export type ControlDomain = (typeof CONTROL_DOMAINS)[number];
 export type ControlStage = (typeof CONTROL_STAGES)[number];
 export type TrustClass = (typeof TRUST_CLASSES)[number];
 export type ControlMode = (typeof CONTROL_MODES)[number];
+export type ControlAvailability = (typeof CONTROL_AVAILABILITIES)[number];
 export type ControlSeverity = (typeof SEVERITIES)[number];
 export type RiskTier = (typeof RISK_TIERS)[number];
 export type FailureDecision = (typeof FAILURE_DECISIONS)[number];
@@ -119,6 +129,7 @@ export interface ControlRecordV1 {
   stages: ControlStage[];
   trustClass: TrustClass;
   mode: ControlMode;
+  availability: ControlAvailability;
   severity: ControlSeverity;
   riskTiers: RiskTier[];
   surfaces: string[];
@@ -150,11 +161,7 @@ export interface ControlManifestV1 {
   exceptionSchema: 'ci-control-exception-v1';
 }
 
-export type CapabilityAvailability =
-  | 'report-only'
-  | 'advisory'
-  | 'blocking'
-  | 'quarantined';
+export type CapabilityAvailability = ControlAvailability | 'absent';
 
 export interface ControlInventoryV1 {
   schemaVersion: 1;
@@ -165,7 +172,7 @@ export interface ControlInventoryV1 {
     stages: ControlStage[];
     mode: ControlMode;
     severity: ControlSeverity;
-    availability: CapabilityAvailability;
+    availability: ControlAvailability;
     implementation: ControlImplementationV1;
   }>;
   requiredSurfaces: string[];
@@ -186,6 +193,7 @@ const domainSet = new Set<string>(CONTROL_DOMAINS);
 const stageSet = new Set<string>(CONTROL_STAGES);
 const trustSet = new Set<string>(TRUST_CLASSES);
 const modeSet = new Set<string>(CONTROL_MODES);
+const availabilitySet = new Set<string>(CONTROL_AVAILABILITIES);
 const severitySet = new Set<string>(SEVERITIES);
 const riskSet = new Set<string>(RISK_TIERS);
 const failureDecisionSet = new Set<string>(FAILURE_DECISIONS);
@@ -213,6 +221,7 @@ const CONTROL_KEYS = [
   'stages',
   'trustClass',
   'mode',
+  'availability',
   'severity',
   'riskTiers',
   'surfaces',
@@ -543,15 +552,33 @@ function validateManifest(value: unknown): ManifestIssue[] {
     if (enumValue(record.trustClass, trustSet, `${path}.trustClass`, problems) && !declaredTrustSet.has(record.trustClass as string)) {
       problems.push(issue('ci.manifest.trust-not-declared', `${path}.trustClass`, 'control trust class is absent from the manifest trust catalog'));
     }
-    enumValue(record.mode, modeSet, `${path}.mode`, problems);
+    const modeValid = enumValue(record.mode, modeSet, `${path}.mode`, problems);
+    const availabilityValid = enumValue(record.availability, availabilitySet, `${path}.availability`, problems);
     enumValue(record.severity, severitySet, `${path}.severity`, problems);
     stringArray(record.riskTiers, `${path}.riskTiers`, problems, { nonEmpty: true, enumValues: riskSet });
     const surfaces = stringArray(record.surfaces, `${path}.surfaces`, problems, { nonEmpty: true }) ?? [];
     stringArray(record.dependencies, `${path}.dependencies`, problems);
-    validateEvidence(record.evidence, `${path}.evidence`, problems);
+    const evidence = validateEvidence(record.evidence, `${path}.evidence`, problems);
     validateFailurePolicy(record.failurePolicy, `${path}.failurePolicy`, problems);
     validateRemediation(record.remediation, `${path}.remediation`, problems);
     validateExceptionPolicy(record.exceptionPolicy, `${path}.exceptionPolicy`, problems);
+
+    if (availabilityValid && record.availability === 'blocking' && (
+      !modeValid
+      || (record.mode !== 'block' && record.mode !== 'human-authorization')
+      || implementation === null
+      || !Number.isSafeInteger(implementation.nativeSchemaVersion)
+      || evidence === null
+      || !Number.isSafeInteger(evidence.schemaVersion)
+      || evidence?.digestBinding !== 'exact'
+      || evidence?.freshness !== 'receipt'
+    )) {
+      problems.push(issue(
+        'ci.manifest.capability-overclaimed',
+        `${path}.availability`,
+        'blocking availability requires blocking intent and exact receipt evidence',
+      ));
+    }
 
     if (typeof record.policyCategory === 'string' && typeof record.decisionOwner === 'string') {
       for (const surface of surfaces) {
@@ -732,13 +759,6 @@ export function loadControlManifest(cwd: string): ControlManifestV1 {
   return parseControlManifestBytes(bytes);
 }
 
-function availabilityForMode(mode: ControlMode): CapabilityAvailability {
-  if (mode === 'block' || mode === 'human-authorization') return 'blocking';
-  if (mode === 'warn') return 'advisory';
-  if (mode === 'quarantine') return 'quarantined';
-  return 'report-only';
-}
-
 export function buildControlInventory(manifest: ControlManifestV1): ControlInventoryV1 {
   const problems = validateControlManifest(manifest);
   if (problems.length > 0) throw new ControlManifestError(problems[0]!);
@@ -753,7 +773,7 @@ export function buildControlInventory(manifest: ControlManifestV1): ControlInven
         stages: sorted(record.stages) as ControlStage[],
         mode: record.mode,
         severity: record.severity,
-        availability: availabilityForMode(record.mode),
+        availability: record.availability,
         implementation: record.implementation,
       })),
     requiredSurfaces: sorted(manifest.requiredSurfaces),
