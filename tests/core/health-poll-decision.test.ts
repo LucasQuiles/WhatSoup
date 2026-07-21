@@ -111,7 +111,7 @@ describe('POST /poll-decision (D-4)', () => {
   });
 
   it('200 + {ok:true} when the runtime accepts the decision (dep called verbatim)', async () => {
-    const resolvePollDecision = vi.fn().mockReturnValue({ ok: true });
+    const resolvePollDecision = vi.fn().mockResolvedValue({ ok: true });
     const { server, port } = await startServer(makeDeps(db, { resolvePollDecision }));
     const res = await post(port, '/poll-decision', JSON.stringify(DECISION), AUTH_HEADER);
     server.close();
@@ -140,7 +140,7 @@ describe('POST /poll-decision (D-4)', () => {
 
   it('maps runtime verdicts: 404 not_found / 409 stale / 400 invalid', async () => {
     for (const [code, expected] of [['not_found', 404], ['stale', 409], ['invalid', 400]] as const) {
-      const resolvePollDecision = vi.fn().mockReturnValue({ ok: false, error: `e-${code}`, code });
+      const resolvePollDecision = vi.fn().mockResolvedValue({ ok: false, error: `e-${code}`, code });
       const { server, port } = await startServer(makeDeps(db, { resolvePollDecision }));
       const res = await post(port, '/poll-decision', JSON.stringify(DECISION), AUTH_HEADER);
       server.close();

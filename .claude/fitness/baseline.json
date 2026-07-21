@@ -6,8 +6,8 @@
       "measurements": [
         {
           "filePath": "src/runtimes/agent/runtime.ts",
-          "lines": 12256,
-          "maxLines": 12256
+          "lines": 12361,
+          "maxLines": 12361
         },
         {
           "filePath": "tests/runtimes/agent/runtime.test.ts",
