@@ -296,8 +296,8 @@ describe('structured /model grammar (C1 — agent-assisted design)', () => {
     expect(classifyInput('/model the best kimi', { routingAliases: true }).type).toBe('forwarded');
   });
   it('keeps bare + verb + provider-id local; all forward when flag OFF', () => {
-    expect(classifyInput('/model', { routingAliases: true }).command).toBe('model');
-    expect(classifyInput('/model strongest', { routingAliases: true }).command).toBe('model');
+    expect(classifyInput('/model', { routingAliases: true })).toMatchObject({ type: 'local', command: 'model' });
+    expect(classifyInput('/model strongest', { routingAliases: true })).toMatchObject({ type: 'local', command: 'model' });
     expect(classifyInput('/model the best kimi').type).toBe('forwarded'); // flag off
   });
 });

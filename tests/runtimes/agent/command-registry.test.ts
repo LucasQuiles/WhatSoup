@@ -109,7 +109,7 @@ describe('COMMAND_REGISTRY', () => {
   });
 
   it('why is removed from the registry (D11)', () => {
-    expect(COMMAND_REGISTRY.find((c) => c.name === 'why')).toBeUndefined();
+    expect(COMMAND_REGISTRY.find((c) => (c.name as string) === 'why')).toBeUndefined();
   });
 
   it('getCommandSpec throws on an unknown command (fail-closed lookup)', () => {
