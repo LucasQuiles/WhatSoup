@@ -40,7 +40,7 @@ export interface SignalConnectionStateSnapshotOverrides {
   lastDisconnectReason: string | null;
   /**
    * Real lifecycle events from the adapter's bounded ring buffer. When
-   * supplied, replaces the synthesized 2-event timeline. Phase 3 slice 2.
+   * supplied, replaces the synthesized 2-event timeline.  slice 2.
    */
   recentLifecycleEvents?: readonly CredentialLifecycleEvent[];
 }
@@ -99,7 +99,7 @@ export function signalConnectionStateSnapshot(
   const { connected, stateChangedAt, lastDisconnectReason } = opts;
   const daemonTarget = resolveDaemonTarget(opts);
   const signalCliDataDir = opts.signalCliDataDir ?? 'out_of_band_via_signal_cli';
-  // Phase 3 slice 2: prefer real adapter events; fall back to synthesis only
+  //  slice 2: prefer real adapter events; fall back to synthesis only
   // for callers that don't supply them (e.g. unit tests of the snapshot
   // factory in isolation).
   const recentEvents = opts.recentLifecycleEvents && opts.recentLifecycleEvents.length > 0

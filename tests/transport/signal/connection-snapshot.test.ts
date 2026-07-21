@@ -1,5 +1,5 @@
 // tests/transport/signal/connection-snapshot.test.ts
-// Phase 3 — Signal-specific connection state snapshot.
+// Signal-specific connection state snapshot.
 //
 // Before this slice, Signal's getConnectionState() borrowed Twilio's
 // emptyConnectionStateSnapshot() factory, which hardcodes "twilio-sms" as the

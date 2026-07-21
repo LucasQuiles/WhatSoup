@@ -1,5 +1,5 @@
 // tests/transport/signal/adapter-lifecycle-events.test.ts
-// Phase 3 slice 2 — real lifecycle event accumulation in the Signal adapter.
+//  slice 2 — real lifecycle event accumulation in the Signal adapter.
 //
 // Before this slice, signalConnectionStateSnapshot() synthesized a 2-event
 // timeline (connect_start + connection_open, or connection_close) on every

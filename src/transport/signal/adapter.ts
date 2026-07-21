@@ -180,7 +180,7 @@ export class SignalAdapter
   };
 
   /**
-   * Bounded ring buffer of recent CredentialLifecycleEvent entries. Phase 3
+   * Bounded ring buffer of recent CredentialLifecycleEvent entries. 
    * slice 2: replaces the synthesized 2-event timeline that
    * signalConnectionStateSnapshot() used to emit. The buffer is drained by
    * SignalConnection.getConnectionState() via recentLifecycleEvents().
