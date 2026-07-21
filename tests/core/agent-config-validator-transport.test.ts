@@ -672,6 +672,15 @@ describe('validateInstanceConfig — webhook inbound (stage 2 unlock)', () => {
     }) });
     expect(validateInstanceConfig(raw, ctx())?.field).toBe('twilioConfig.webhook.publicBaseUrl');
   });
+  it('rejects credentials embedded in publicBaseUrl', () => {
+    const raw = baseRaw({ transport: 'twilio', twilioConfig: validTwilioConfig({
+      inboundMode: 'webhook',
+      webhook: { publicBaseUrl: 'https://user:secret@relay.example.test', listenPort: 8443 },
+    }) });
+    const validation = validateInstanceConfig(raw, ctx());
+    expect(validation?.field).toBe('twilioConfig.webhook.publicBaseUrl');
+    expect(validation?.message).toContain('must not contain credentials');
+  });
   it('rejects voice.enabled with poll mode (coherence rule, exact remediation)', () => {
     const raw = baseRaw({ transport: 'twilio', twilioConfig: validTwilioConfig({
       voice: { enabled: true, voicemailMaxLengthSec: 120 },
@@ -803,6 +812,18 @@ describe('validateInstanceConfig — imessageConfig', () => {
   it('rejects a non-URL bluebubblesUrl', () => {
     const raw = baseRaw({ transport: 'imessage', imessageConfig: validImessageConfig({ bluebubblesUrl: 'not-a-url' }) });
     expect(validateInstanceConfig(raw, ctx())?.field).toBe('imessageConfig.bluebubblesUrl');
+  });
+
+  it('rejects credentials embedded in bluebubblesUrl', () => {
+    const raw = baseRaw({
+      transport: 'imessage',
+      imessageConfig: validImessageConfig({
+        bluebubblesUrl: 'https://user:secret@bb.example.test',
+      }),
+    });
+    const validation = validateInstanceConfig(raw, ctx());
+    expect(validation?.field).toBe('imessageConfig.bluebubblesUrl');
+    expect(validation?.message).toContain('must not contain credentials');
   });
 
   it('requires bluebubblesPasswordService when backend is bluebubbles', () => {

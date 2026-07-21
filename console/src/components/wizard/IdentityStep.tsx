@@ -1,12 +1,18 @@
 import { type FC, useEffect, useId, useRef, useState } from 'react'
-import { Bot, Check, Eye, Loader2, MessageSquare, X } from 'lucide-react'
+import { Bot, Check, Eye, Loader2, Mail, MessageSquare, Phone, Shield, Wifi, X } from 'lucide-react'
 import CardSelector from '../CardSelector'
 import TagInput from '../TagInput'
 import { api } from '../../lib/api'
 import { slugAgentWorkspaceName } from '../../lib/agent-cwd.ts'
-import { validatePhone } from '../../lib/validation'
+import {
+  isTransportKind,
+  TRANSPORT_KINDS,
+  TRANSPORT_MAP,
+  type TransportKind,
+} from '../../lib/transport-meta'
 import { Field, TextInput } from '../primitives'
 import WizardStep from './WizardStep'
+import TransportConfigFields from './TransportConfigFields'
 
 interface IdentityStepProps {
   data: Record<string, unknown>
@@ -40,12 +46,27 @@ const TYPE_OPTIONS = [
   },
 ]
 
+const TRANSPORT_OPTIONS = TRANSPORT_KINDS.map((kind) => ({
+  value: kind,
+  label: TRANSPORT_MAP[kind].cardLabel,
+  description: TRANSPORT_MAP[kind].cardDescription,
+  icon: kind === 'baileys'
+    ? <Wifi size={24} />
+    : kind === 'twilio'
+      ? <Phone size={24} />
+      : kind === 'signal'
+        ? <Shield size={24} />
+        : <Mail size={24} />,
+  color: `var(${TRANSPORT_MAP[kind].token})`,
+}))
+
 type NameStatus = 'idle' | 'checking' | 'available' | 'taken' | 'error'
 
 const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocked }) => {
   const [nameStatus, setNameStatus] = useState<NameStatus>('idle')
   const [showConfirmed, setShowConfirmed] = useState(false)
   const typeErrorId = useId()
+  const transportErrorId = useId()
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const abortRef = useRef<AbortController | null>(null)
 
@@ -58,12 +79,14 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
   const name = (data.name as string) ?? ''
   const description = (data.description as string) ?? ''
   const type = (data.type as string) ?? 'chat'
+  const transport: TransportKind = isTransportKind(data.transport) ? data.transport : 'baileys'
+  const transportMeta = TRANSPORT_MAP[transport]
   const adminPhones = (data.adminPhones as string[]) ?? []
   const adminPhonesHelperText = adminPhones.length === 0
-    ? 'Phone numbers with full admin access to this line. Use international format without the +.'
+    ? transportMeta.adminIdHelper
     : adminPhones.length === 1
-      ? 'Add another number for shared admin access, or continue with one.'
-      : `${adminPhones.length} admin numbers configured.`
+      ? 'Add another admin ID for shared access, or continue with one.'
+      : `${adminPhones.length} admin IDs configured.`
   const hasNameTakenError = !nameLocked && nameStatus === 'taken'
   // Name error-priority (owner round-5 dec 3): nameLocked → helper; else nameTaken → error;
   // else errors.name → error. Field renders one helper OR one error, so we resolve here.
@@ -109,6 +132,27 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
 
   return (
     <WizardStep title="Identity" subtitle="Name this line and choose its type.">
+      <div>
+        <div className="c-heading c-field-label" aria-hidden="true">Transport</div>
+        <CardSelector
+          label="Line Transport"
+          options={TRANSPORT_OPTIONS}
+          selected={transport}
+          disabled={nameLocked}
+          onChange={(selected) => onChange({
+            transport: selected,
+            adminPhones: [],
+            ...(selected === 'twilio' ? { twilioConfig: {} } : {}),
+            ...(selected === 'signal' ? { signalConfig: {} } : {}),
+            ...(selected === 'imessage' ? { imessageConfig: { backend: 'bluebubbles' } } : {}),
+          })}
+          aria-invalid={errors.transport ? true : undefined}
+          aria-describedby={errors.transport ? transportErrorId : undefined}
+        />
+        {nameLocked && <div className="c-helper">Transport is locked after the Baileys line is provisioned.</div>}
+        {errors.transport && <div id={transportErrorId} className="c-error">{errors.transport}</div>}
+      </div>
+
       {/* Type — first so it drives the rest of the wizard */}
       <div>
         {/* Visual heading only — CardSelector's radiogroup carries its own
@@ -174,7 +218,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
       {/* Admin Phones — canonical Field; helper moves BELOW the control per input.md
           ([label][control][hint|error]) and the built-in confirmed Check replaces the manual one (W2-S5). */}
       <Field
-        label="Admin Phones"
+        label={transportMeta.adminIdLabel}
         helper={adminPhonesHelperText}
         error={errors.adminPhones || undefined}
         confirmed={showConfirmed && !errors.adminPhones && adminPhones.length > 0}
@@ -183,13 +227,20 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
           <TagInput
             id={id}
             values={adminPhones}
-            onChange={(values) => onChange({ adminPhones: values.map(v => v.replace(/\D/g, '')) })}
-            placeholder="Enter phone number"
-            validate={validatePhone}
+            onChange={(values) => onChange({ adminPhones: values.map(transportMeta.normalizeAdminId) })}
+            placeholder={transportMeta.adminIdPlaceholder}
+            validate={transportMeta.validateAdminId}
             accentColor={showConfirmed && adminPhones.length > 0 ? 'var(--wizard-accent)' : undefined}
           />
         )}
       </Field>
+
+      <TransportConfigFields
+        transport={transport}
+        data={data}
+        errors={errors}
+        onChange={onChange}
+      />
     </WizardStep>
   )
 }

@@ -3,11 +3,11 @@ import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import { insertPending, updateAccess } from './access-list.ts';
 import type { SubjectType } from './access-list.ts';
-import { toPersonalJid, toLidJid, toSmsJid, toSignalJid, isGroupJid } from './jid-constants.ts';
+import { toPersonalJid, toLidJid, toSmsJid, toSignalJid, toImessageJid, isGroupJid } from './jid-constants.ts';
 import { getAllLidMappings } from './lid-resolver.ts';
 import { getMessagesBySender, type StoredMessage } from './messages.ts';
 import { isAdminPhone, isE164Wire, normalizePhoneE164 } from '../lib/phone.ts';
-import { SIGNAL_UUID_RE } from './transport-refs.ts';
+import { APPLEID_EMAIL_RE, SIGNAL_UUID_RE } from './transport-refs.ts';
 import type { IncomingMessage, Messenger } from './types.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
@@ -28,11 +28,18 @@ function normalizeAccessPhoneSubject(subjectId: string): string {
     if (SIGNAL_UUID_RE.test(lower)) return lower;
     if (isE164Wire(subjectId)) return subjectId;
   }
+  if (config.transport === 'imessage') {
+    const lower = subjectId.toLowerCase();
+    if (APPLEID_EMAIL_RE.test(lower)) return lower;
+    if (isE164Wire(subjectId)) return subjectId;
+  }
   return normalizePhoneE164(subjectId);
 }
 
 function formatAccessPhoneSubject(subjectId: string): string {
-  return config.transport === 'signal' ? subjectId : `+${subjectId}`;
+  return config.transport === 'signal' || config.transport === 'imessage'
+    ? subjectId
+    : `+${subjectId}`;
 }
 
 export function rememberReplayedId(messageId: string): void {
@@ -103,30 +110,36 @@ export async function handleAdminCommand(
   durability?: DurabilityEngine,
 ): Promise<void> {
   if (action === 'allow') {
-    // WhatsApp/Twilio phone subjects use normalized digits. Signal subjects
-    // preserve their canonical +E.164 or UUID access-list identity.
+    // WhatsApp/Twilio use normalized digits. Signal and iMessage preserve
+    // their canonical +E.164, UUID, or AppleID access-list identity.
     if (subjectType === 'phone') subjectId = normalizeAccessPhoneSubject(subjectId);
     updateAccess(db, subjectType, subjectId, 'allowed');
     log.info({ subjectType, subjectId, action: 'allowed_by_admin' }, 'access granted by admin');
 
     if (subjectType === 'phone') {
-      // Signal has one canonical @signal sender form. WhatsApp/Twilio replay
-      // retains the personal/SMS/LID forms used by their access-list keys.
+      // Signal and iMessage each have one canonical sender form. Baileys and
+      // Twilio retain personal/SMS/LID access-list keys.
       const jidFormats: string[] = config.transport === 'signal'
         ? [toSignalJid(subjectId)]
-        : [toPersonalJid(subjectId)];
+        : config.transport === 'imessage'
+          ? [toImessageJid(subjectId)]
+          : [toPersonalJid(subjectId)];
       // SMS rows are stored under '+<digits>@sms' — include that form so
       // ALLOW over the Twilio transport replays the queued messages too.
-      if (config.transport !== 'signal') {
+      if (config.transport !== 'signal' && config.transport !== 'imessage') {
         jidFormats.push(toSmsJid(`+${normalizePhoneE164(subjectId)}`));
       }
-      if (config.transport !== 'signal' && normalizePhoneE164(subjectId) !== subjectId) {
+      if (
+        config.transport !== 'signal'
+        && config.transport !== 'imessage'
+        && normalizePhoneE164(subjectId) !== subjectId
+      ) {
         // A 10-digit subject (admin typed without country code) must also flip
         // the access row stored under the full-digit key resolvePhoneFromJid
         // produces — otherwise replay succeeds while the sender stays pending.
         jidFormats.push(toPersonalJid(normalizePhoneE164(subjectId)));
       }
-      if (config.transport !== 'signal') {
+      if (config.transport !== 'signal' && config.transport !== 'imessage') {
         const lidMap = getAllLidMappings(db);
         for (const [lid, mappedPhone] of lidMap) {
           if (isAdminPhone(mappedPhone, new Set([subjectId]))) {
@@ -218,10 +231,13 @@ function resolveAdminChatJid(db: Database): string | null {
   const msgStmt = db.raw.prepare(
     'SELECT chat_jid FROM messages WHERE sender_jid LIKE ? AND is_from_me = 0 ORDER BY timestamp DESC LIMIT 1',
   );
+  const exactMsgStmt = db.raw.prepare(
+    'SELECT chat_jid FROM messages WHERE sender_jid = ? AND is_from_me = 0 ORDER BY timestamp DESC LIMIT 1',
+  );
 
   if (config.transport === 'signal') {
     for (const identity of config.adminPhones) {
-      const row = msgStmt.get(toSignalJid(identity)) as { chat_jid: string } | undefined;
+      const row = exactMsgStmt.get(toSignalJid(identity)) as { chat_jid: string } | undefined;
       if (row) return row.chat_jid;
     }
     const firstSignalAdmin = [...config.adminPhones][0];
@@ -230,6 +246,19 @@ function resolveAdminChatJid(db: Database): string | null {
       return null;
     }
     return toSignalJid(firstSignalAdmin);
+  }
+
+  if (config.transport === 'imessage') {
+    for (const identity of config.adminPhones) {
+      const row = exactMsgStmt.get(toImessageJid(identity)) as { chat_jid: string } | undefined;
+      if (row) return row.chat_jid;
+    }
+    const firstImessageAdmin = [...config.adminPhones][0];
+    if (!firstImessageAdmin) {
+      log.error('resolveAdminJid: no admin identities configured — cannot resolve iMessage admin JID');
+      return null;
+    }
+    return toImessageJid(firstImessageAdmin);
   }
 
   // Search by admin phone numbers — try SMS JID exact match first, then
@@ -296,7 +325,10 @@ export async function sendApprovalRequest(
   messagePreview: string,
   durability?: DurabilityEngine,
 ): Promise<void> {
-  insertPending(db, 'phone', phone, displayName);
+  const subjectId = config.transport === 'signal' || config.transport === 'imessage'
+    ? normalizeAccessPhoneSubject(phone)
+    : phone;
+  insertPending(db, 'phone', subjectId, displayName);
 
   // QR-100: displayName (=sender pushName) and messagePreview (=sender content) are
   // attacker-controlled and were previously interpolated RAW into this admin
@@ -312,16 +344,16 @@ export async function sendApprovalRequest(
     `New contact request — Name and Message below are SENDER-PROVIDED (untrusted):\n` +
     `Name: "${safeName}"\n` +
     `Message: "${safePreview}"\n` +
-    `To respond, reply exactly: ALLOW ${phone} or BLOCK ${phone}`;
+    `To respond, reply exactly: ALLOW ${subjectId} or BLOCK ${subjectId}`;
 
   const adminJid = resolveAdminChatJid(db);
   if (!adminJid) {
-    log.warn({ phone, displayName }, 'cannot send approval request — no admin phones configured');
+    log.warn({ phone: subjectId, displayName }, 'cannot send approval request — no admin phones configured');
     return;
   }
   await sendTracked(messenger, adminJid, text, durability, { replayPolicy: 'safe', isTerminal: true });
 
-  log.info({ phone, displayName, adminJid, action: 'approval_requested' }, 'approval requested');
+  log.info({ phone: subjectId, displayName, adminJid, action: 'approval_requested' }, 'approval requested');
 }
 
 // ---------------------------------------------------------------------------

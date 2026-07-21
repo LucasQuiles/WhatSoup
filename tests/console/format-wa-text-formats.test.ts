@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { createElement } from 'react';
 import MessageContent from '../../console/src/components/MessageContent';
-import { formatWhatsAppText } from '../../console/src/lib/format-wa-text';
+import { formatMessageText } from '../../console/src/lib/format-message-text';
 import type { Message } from '../../console/src/types';
 
 afterEach(() => cleanup());
@@ -30,7 +30,7 @@ function renderMessage(content: string | null) {
 }
 
 function renderFormatted(content: string | null | undefined) {
-  return render(createElement('div', null, formatWhatsAppText(content)));
+  return render(createElement('div', null, formatMessageText(content)));
 }
 
 describe('MessageContent WhatsApp formatting', () => {
@@ -110,3 +110,36 @@ describe('MessageContent WhatsApp formatting', () => {
     expect(screen.getByText('\u2014')).toBeDefined();
   });
 });
+
+describe('MessageContent transport formatting', () => {
+  it('keeps Signal strike syntax literal while rendering its supported subset', () => {
+    const { container } = render(createElement(MessageContent, {
+      msg: message('*bold* ~literal~ `code`'),
+      transport: 'signal',
+    }))
+
+    expect(screen.getByText('bold').tagName).toBe('STRONG')
+    expect(screen.getByText('code').tagName).toBe('CODE')
+    expect(container.querySelector('s')).toBeNull()
+    expect(container.textContent).toContain('~literal~')
+  })
+
+  it('passes iMessage markdown through while preserving safe URL anchors', () => {
+    const { container } = render(createElement(MessageContent, {
+      msg: message('*literal* _also-literal_ https://example.com'),
+      transport: 'imessage',
+    }))
+
+    expect(container.querySelector('strong, em, s, code')).toBeNull()
+    expect(container.textContent).toContain('*literal* _also-literal_')
+    expect(screen.getByRole('link', { name: 'https://example.com' })).toBeDefined()
+  })
+
+  it('renders Twilio with the full formatting set', () => {
+    const { container } = render(createElement(MessageContent, {
+      msg: message('~strike~'),
+      transport: 'twilio',
+    }))
+    expect(container.querySelector('s')?.textContent).toBe('strike')
+  })
+})

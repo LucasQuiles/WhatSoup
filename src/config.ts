@@ -10,6 +10,7 @@ import { DEFAULT_TRANSPORT_ID, isTransportId, type TransportId } from './transpo
 import { DEFAULT_FLEET_PORT, DEFAULT_INSTANCE_HEALTH_PORT } from './fleet/constants.ts';
 import { DEFAULT_TWILIO_SMS, DEFAULT_TWILIO_VOICE, type TwilioSmsConfig, type TwilioInboundMode, type TwilioWebhookConfig, type TwilioVoiceConfig } from './transport/twilio/types.ts';
 import { DEFAULT_IMESSAGE, type ImessageConfig, type ImessageInboundMode } from './transport/imessage/types.ts';
+import { APPLEID_EMAIL_RE } from './core/transport-refs.ts';
 import { DEFAULT_SIGNAL, SIGNAL_UUID_RE, type SignalConfig, type SignalInboundMode } from './transport/signal/types.ts';
 import { normalizeFallbackEntriesFromAgentOptions } from './core/fallback-chain.ts';
 import { errorMessage } from './lib/error-message.ts';
@@ -449,6 +450,15 @@ export function resolveAdminIdentities(
       const wireIdentity = normalizePhoneE164Wire(trimmed);
       if (!wireIdentity) {
         throw new Error('Signal admin identity must be a UUID or E.164 phone number');
+      }
+      return wireIdentity;
+    }
+    if (transport === 'imessage') {
+      const lower = trimmed.toLowerCase();
+      if (APPLEID_EMAIL_RE.test(lower)) return lower;
+      const wireIdentity = normalizePhoneE164Wire(trimmed);
+      if (!wireIdentity) {
+        throw new Error('iMessage admin identity must be an AppleID email or E.164 phone number');
       }
       return wireIdentity;
     }

@@ -260,6 +260,27 @@ describe('platform service managers', () => {
     await expect(start).rejects.toThrow('spawn denied');
   });
 
+  it('clears a failed docker spawn so a retry creates a fresh child', async () => {
+    const children: MockChild[] = [];
+    childProcessMocks.spawn.mockImplementation(() => {
+      const child = new MockChild();
+      children.push(child);
+      return child;
+    });
+    const { DockerSupervisorServiceManager } = await importPlatform();
+    const manager = new DockerSupervisorServiceManager();
+
+    const failedStart = manager.start('bot-a');
+    children[0].emit('error', new Error('spawn denied'));
+    await expect(failedStart).rejects.toThrow('spawn denied');
+
+    const retry = manager.start('bot-a');
+    expect(children).toHaveLength(2);
+    children[1].emit('spawn');
+    await expect(retry).resolves.toBeUndefined();
+    expect(childProcessMocks.spawn).toHaveBeenCalledTimes(2);
+  });
+
   it('routes non-Error docker startFire failures as Error instances', async () => {
     const { DockerSupervisorServiceManager } = await importPlatform();
     const manager = new DockerSupervisorServiceManager();

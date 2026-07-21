@@ -1,11 +1,13 @@
 import { type FC } from 'react'
 import { Pencil, AlertCircle } from 'lucide-react'
 import ModeBadge from '../ModeBadge'
+import TransportBadge from '../TransportBadge'
 import { getProviderConfigFields, DEFAULT_PROVIDER_ID } from '../../lib/providers'
 import { defaultAgentWorkspacePath } from '../../lib/agent-cwd'
 import { ACCESS_MODE_LABELS } from '../../lib/access-modes'
 import { formatCount } from '../../lib/text-utils'
 import { Button } from '../primitives/Button'
+import { isTransportKind, type TransportKind } from '../../lib/transport-meta'
 
 interface ReviewStepProps {
   data: Record<string, unknown>
@@ -64,6 +66,16 @@ const EditBtn: FC<{ onClick: () => void }> = ({ onClick }) => (
   </Button>
 )
 
+function record(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+}
+
+function text(value: unknown): string {
+  return typeof value === 'string' || typeof value === 'number' ? String(value) : '—'
+}
+
 /* ── Key-value row ── */
 
 const KV: FC<{ label: string; value: React.ReactNode; fullValue?: string }> = ({ label, value, fullValue }) => (
@@ -109,6 +121,10 @@ const ReviewStep: FC<ReviewStepProps> = ({
   const name = (data.name as string) ?? ''
   const description = (data.description as string) ?? ''
   const type = (data.type as string) ?? 'chat'
+  const transport: TransportKind = isTransportKind(data.transport) ? data.transport : 'baileys'
+  const twilioConfig = record(data.twilioConfig)
+  const signalConfig = record(data.signalConfig)
+  const imessageConfig = record(data.imessageConfig)
   const adminPhones = (data.adminPhones as string[]) ?? []
   const models = data.models as Record<string, string> | undefined
   const authMethod = (data.authMethod as string) ?? 'api_key'
@@ -134,8 +150,45 @@ const ReviewStep: FC<ReviewStepProps> = ({
           label="Type"
           value={<ModeBadge mode={type as 'passive' | 'chat' | 'agent'} />}
         />
-        <KV label="Admin phones" value={`${adminPhones.length} configured`} />
+        <KV label="Admin IDs" value={`${adminPhones.length} configured`} />
       </div>
+
+      <section style={cardStyle} aria-labelledby="review-transport-heading">
+        <div style={cardHeaderStyle}>
+          <span id="review-transport-heading" className="font-medium text-data" style={headingStyle}>Transport</span>
+          <EditBtn onClick={() => onEditPhase(0)} />
+        </div>
+        <KV
+          label="Kind"
+          value={<TransportBadge kind={transport} backend={imessageConfig.backend as 'imsg' | 'bluebubbles' | undefined} />}
+        />
+        {transport === 'twilio' && (
+          <>
+            <KV label="Account SID" value={text(twilioConfig.accountSid)} />
+            <KV label="Sender" value={text(twilioConfig.phoneNumber ?? twilioConfig.messagingServiceSid)} />
+            <KV label="Auth token service" value={text(twilioConfig.authTokenService)} />
+          </>
+        )}
+        {transport === 'signal' && (
+          <>
+            <KV label="Self number" value={text(signalConfig.phoneNumber)} />
+            <KV label="Endpoint" value={signalConfig.socketPath
+              ? text(signalConfig.socketPath)
+              : `${text(signalConfig.tcpHost)}:${text(signalConfig.tcpPort)}`}
+            />
+          </>
+        )}
+        {transport === 'imessage' && (
+          <>
+            <KV label="Sender" value={text(imessageConfig.sender)} />
+            <KV label="Backend" value={text(imessageConfig.backend)} />
+            <KV label="Endpoint" value={text(imessageConfig.bluebubblesUrl ?? imessageConfig.imsgSocketPath)} />
+            {imessageConfig.backend === 'bluebubbles' && (
+              <KV label="Password service" value={text(imessageConfig.bluebubblesPasswordService)} />
+            )}
+          </>
+        )}
+      </section>
 
       {/* Model card */}
       <div style={cardStyle}>

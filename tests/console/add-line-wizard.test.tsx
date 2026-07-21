@@ -457,6 +457,97 @@ describe('AddLineWizard — step-0→1 creation side-effect', () => {
   })
 })
 
+describe('AddLineWizard — non-Baileys creation lifecycle', () => {
+  async function fillTransportIdentity(transport: 'twilio' | 'signal' | 'imessage') {
+    fireEvent.click(screen.getByRole('radio', {
+      name: transport === 'twilio'
+        ? /WhatsApp \(Twilio\)/i
+        : new RegExp(transport, 'i'),
+    }))
+    fireEvent.click(screen.getByRole('radio', { name: /passive/i }))
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: `${transport}-line` } })
+
+    const adminInput = screen.getByLabelText(
+      transport === 'signal'
+        ? 'Admin Signal IDs'
+        : transport === 'imessage'
+          ? 'Admin iMessage IDs'
+          : 'Admin Phones',
+    )
+    const admin = transport === 'signal'
+      ? 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+      : transport === 'imessage'
+        ? 'Owner@Example.com'
+        : '15551234567'
+    fireEvent.change(adminInput, { target: { value: admin } })
+    fireEvent.keyDown(adminInput, { key: 'Enter' })
+
+    if (transport === 'twilio') {
+      fireEvent.change(screen.getByLabelText('Twilio Account SID'), {
+        target: { value: `AC${'a'.repeat(32)}` },
+      })
+      fireEvent.change(screen.getByLabelText('Twilio auth-token keyring service'), {
+        target: { value: 'whatsoup-twilio-test' },
+      })
+      fireEvent.change(screen.getByLabelText('Twilio phone number'), {
+        target: { value: '+15551234567' },
+      })
+    } else if (transport === 'signal') {
+      fireEvent.change(screen.getByLabelText('Signal account number'), {
+        target: { value: '+15551234567' },
+      })
+      fireEvent.change(screen.getByLabelText('Signal UNIX socket path'), {
+        target: { value: '/tmp/signal-cli.sock' },
+      })
+    } else {
+      fireEvent.change(screen.getByLabelText('iMessage sender'), {
+        target: { value: 'Owner@Example.com' },
+      })
+      fireEvent.change(screen.getByLabelText('BlueBubbles URL'), {
+        target: { value: 'https://messages.example.test' },
+      })
+      fireEvent.change(screen.getByLabelText('BlueBubbles password keyring service'), {
+        target: { value: 'whatsoup-bluebubbles-test' },
+      })
+    }
+  }
+
+  async function reachReview(transport: 'twilio' | 'signal' | 'imessage') {
+    await fillTransportIdentity(transport)
+    fireEvent.click(screen.getByRole('button', { name: /^next$/i }))
+
+    expect(mockCreateLine).not.toHaveBeenCalled()
+    if (transport !== 'twilio') {
+      await waitFor(() => expect(screen.getByRole('checkbox')).toBeDefined())
+      fireEvent.click(screen.getByRole('checkbox'))
+      fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    }
+
+    await waitFor(() => expect(screen.getByText('Model & Auth')).toBeDefined())
+    fireEvent.click(screen.getByRole('button', { name: /^next$/i }))
+    await waitFor(() => expect(screen.getByRole('tab', { name: /behavior/i })).toBeDefined())
+    fireEvent.click(screen.getByRole('button', { name: /^next$/i }))
+    await waitFor(() => expect(screen.getByRole('button', { name: /create line/i })).toBeDefined())
+  }
+
+  it.each(['twilio', 'signal', 'imessage'] as const)(
+    'creates a final %s config once from Review and never PATCHes immutable transport',
+    async (transport) => {
+      render(<WizardWrapper />)
+      await reachReview(transport)
+
+      fireEvent.click(screen.getByRole('button', { name: /create line/i }))
+      await waitFor(() => expect(mockCreateLine).toHaveBeenCalledTimes(1))
+
+      const payload = mockCreateLine.mock.calls[0][0] as Record<string, unknown>
+      expect(payload.transport).toBe(transport)
+      expect(payload).toHaveProperty(`${transport}Config`)
+      expect(JSON.stringify(payload)).not.toMatch(/must-not|authToken"|bluebubblesPassword"/)
+      expect(mockUpdateConfig).not.toHaveBeenCalled()
+    },
+  )
+})
+
 describe('AddLineWizard — Back/Cancel on step 0', () => {
   it('Back on step 0 acts as Cancel — calls onClose (pristine)', async () => {
     const onClose = vi.fn()
@@ -646,7 +737,7 @@ describe('AddLineWizard — config and review workflow', () => {
     await advanceToReviewStep()
     const editButtons = screen.getAllByRole('button', { name: /edit/i })
     await act(async () => {
-      fireEvent.click(editButtons[2])
+      fireEvent.click(editButtons[3])
     })
 
     await waitFor(() => expect(screen.getByRole('tab', { name: /behavior/i })).toBeDefined())

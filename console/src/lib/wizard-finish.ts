@@ -1,4 +1,5 @@
 import { planCredentialWrites, type CredentialWrite } from './credential-routing.ts';
+import { canonicalizeTransportFormData } from './transport-config.ts';
 
 /** Split the wizard's accumulated form state into the config PATCH payload
  *  (raw keys removed — they go to the keyring, never config.json) and the
@@ -7,7 +8,9 @@ export function buildFinishPatch(
   formData: Record<string, unknown>,
 ): { patch: Record<string, unknown>; credentials: CredentialWrite[] } {
   const credentials = planCredentialWrites(formData);
-  const patch = { ...formData };
+  const patch = formData.transport === undefined
+    ? { ...formData }
+    : canonicalizeTransportFormData(formData);
   delete patch.apiKey;
   delete patch.openaiKey;
   return { patch, credentials };

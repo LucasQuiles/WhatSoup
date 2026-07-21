@@ -149,7 +149,6 @@ Both backends use **config-only auth** (matches the Twilio precedent — no
 
 ## References
 
-- Spec: `2026-07-20-signal-and-imessage-transports-spec.md` (internal spec, tracked outside this repository)
 - Port interface: `src/transport/imessage/port.ts`
 - Port impls: `src/transport/imessage/bluebubbles-port.ts`, `src/transport/imessage/imsg-port.ts`
 - Adapter: `src/transport/imessage/adapter.ts`

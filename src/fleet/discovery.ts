@@ -32,6 +32,7 @@ export interface DiscoveredInstance {
   healthToken: string | null;
   configPath: string;
   socketPath: string | null;
+  transport?: string;
   gui?: boolean;
   guiPort?: number;
   models?: InstanceModels;
@@ -173,6 +174,9 @@ export class FleetDiscovery {
           healthToken,
           configPath,
           socketPath,
+          transport: raw.transport === undefined
+            ? 'baileys'
+            : typeof raw.transport === 'string' ? raw.transport : 'invalid',
           gui: typeof raw.gui === 'boolean' ? raw.gui : undefined,
           guiPort: typeof raw.guiPort === 'number' ? raw.guiPort : undefined,
           models: raw.models as InstanceModels | undefined,

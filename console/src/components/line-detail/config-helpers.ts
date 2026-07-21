@@ -1,5 +1,5 @@
 // Config helpers — build entries dynamically from real instance config
-import { validatePhone } from '../../lib/validation'
+import { isTransportKind, TRANSPORT_MAP } from '../../lib/transport-meta'
 import { isRecord } from '../../lib/type-guards'
 import { ACCESS_MODE_VALUES } from '../../lib/access-modes'
 import { CHAT_API_KEY_SERVICE_OPTIONS, PROVIDERS } from '../../lib/providers'
@@ -204,12 +204,24 @@ export const ENUM_OPTIONS: Record<string, string[]> = {
 export const CUSTOM_ENUM_OPTION = '__custom__'
 export const CUSTOMIZABLE_ENUM_KEYS = new Set(['model'])
 
+export function validateAdminPhones(value: unknown, transport?: string | null): string | null {
+  if (!Array.isArray(value)) return null
+  const kind = isTransportKind(transport) ? transport : 'baileys'
+  if (value.length === 0) {
+    return kind === 'baileys' || kind === 'twilio'
+      ? 'At least one admin phone is required'
+      : 'At least one admin identity is required'
+  }
+  if (value.some(item => typeof item !== 'string' || !TRANSPORT_MAP[kind].validateAdminId(item))) {
+    if (kind === 'baileys' || kind === 'twilio') return 'Phone numbers must contain 10-15 digits'
+    if (kind === 'signal') return 'Signal admin IDs must be an E.164 phone number or UUID'
+    return 'iMessage admin IDs must be an E.164 phone number or lowercase AppleID email'
+  }
+  return null
+}
+
 export const FIELD_VALIDATORS: Record<string, (val: unknown) => string | null> = {
-  adminPhones: v => Array.isArray(v) && v.length === 0
-    ? 'At least one admin phone is required'
-    : Array.isArray(v) && v.some((item) => typeof item !== 'string' || !validatePhone(item))
-    ? 'Phone numbers must contain 10-15 digits'
-    : null,
+  adminPhones: v => validateAdminPhones(v, 'baileys'),
   maxTokens: v => typeof v === 'number' && v < 256 ? 'Min 256' : typeof v === 'number' && v > 200000 ? 'Max 200,000' : null,
   tokenBudget: v => typeof v === 'number' && v < 1000 ? 'Min 1,000' : typeof v === 'number' && v > 10000000 ? 'Max 10M' : null,
   rateLimitPerHour: v => typeof v === 'number' && v < 1 ? 'Min 1' : typeof v === 'number' && v > 10000 ? 'Max 10,000' : null,

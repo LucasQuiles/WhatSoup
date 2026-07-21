@@ -99,6 +99,7 @@ export default function Inbox() {
   )
 
   const currentLine = lines?.find(l => l.name === activeLine)
+  const activeTransport = currentLine?.transport ?? currentLine?.health?.transport?.kind
   const currentChat = resolveCurrentChat(chats, selectedChat, messages)
   const isSearchMode = searchInput.trim().length > 0
   const isDebouncingSearch = isSearchMode && searchInput.trim() !== debouncedSearch
@@ -369,7 +370,7 @@ export default function Inbox() {
                         className="absolute left-0 top-0 w-full flex flex-col"
                         style={{ transform: `translateY(${row.start}px)` }}
                       >
-                        <MessageBubble msg={row.message} highlightQuery={debouncedSearch} />
+                        <MessageBubble msg={row.message} highlightQuery={debouncedSearch} transport={activeTransport} />
                       </div>
                     ))}
                   </div>
@@ -421,7 +422,7 @@ export default function Inbox() {
                         className="absolute left-0 top-0 w-full flex flex-col"
                         style={{ transform: `translateY(${row.start}px)` }}
                       >
-                        <MessageBubble msg={row.message} animate={animatedPks.has(row.message.pk)} />
+                        <MessageBubble msg={row.message} animate={animatedPks.has(row.message.pk)} transport={activeTransport} />
                       </div>
                     ))}
                   </div>

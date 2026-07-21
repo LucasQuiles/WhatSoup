@@ -101,16 +101,18 @@ vi.mock('../../console/src/hooks/use-metrics', async (importOriginal) => {
 vi.mock('../../console/src/components/RelinkModal', () => ({
   default: ({
     lineName,
+    transport,
     open,
     onClose,
     onLinked,
   }: {
     lineName: string;
+    transport?: string | null;
     open: boolean;
     onClose: () => void;
     onLinked: () => void;
   }) => open ? (
-    <div role="dialog" aria-label={`Re-link ${lineName}`}>
+    <div role="dialog" aria-label={`Re-link ${lineName}`} data-transport={transport ?? ''}>
       <button type="button" onClick={onClose}>Close re-link</button>
       <button type="button" onClick={onLinked}>Mark linked</button>
     </div>
@@ -494,7 +496,7 @@ describe('LineDetail header workflows', () => {
 
   it('opens the re-link action instead of restart for unlinked lines', async () => {
     await act(async () => {
-      renderLineDetail({ line: makeLine({ name: 'test-line', linkedStatus: 'unlinked' }) });
+      renderLineDetail({ line: makeLine({ name: 'test-line', transport: 'imessage', linkedStatus: 'unlinked' }) });
     });
 
     expect(screen.getByRole('button', { name: 'Re-link' })).toBeDefined();
@@ -502,7 +504,9 @@ describe('LineDetail header workflows', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Re-link' }));
 
-    expect(within(screen.getByRole('dialog', { name: 'Re-link test-line' })).getByRole('button', { name: 'Close re-link' })).toBeDefined();
+    const relinkDialog = screen.getByRole('dialog', { name: 'Re-link test-line' });
+    expect(relinkDialog.getAttribute('data-transport')).toBe('imessage');
+    expect(within(relinkDialog).getByRole('button', { name: 'Close re-link' })).toBeDefined();
     fireEvent.click(within(screen.getByRole('dialog', { name: 'Re-link test-line' })).getByRole('button', { name: 'Close re-link' }));
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Re-link test-line' })).toBeNull());
 

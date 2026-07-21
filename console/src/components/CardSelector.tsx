@@ -16,6 +16,7 @@ interface CardSelectorProps {
   onChange: (value: string) => void
   'aria-describedby'?: string
   'aria-invalid'?: true
+  disabled?: boolean
 }
 
 /** Derives a wash-opacity background from a CSS var color string. */
@@ -38,13 +39,14 @@ const CardSelector: FC<CardSelectorProps> = ({
   onChange,
   'aria-describedby': ariaDescribedBy,
   'aria-invalid': ariaInvalid,
+  disabled = false,
 }) => {
   const groupRef = useRef<HTMLDivElement | null>(null)
 
   // WAI radiogroup: Arrow keys move focus AND select (selection follows focus).
   // Space selects the currently focused option (handles Tab-then-Space entry).
   const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-    if (!['ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp', ' '].includes(e.key)) return
+    if (disabled || !['ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp', ' '].includes(e.key)) return
     const radios = Array.from(
       groupRef.current?.querySelectorAll<HTMLElement>('[role="radio"]') ?? [],
     )
@@ -80,6 +82,7 @@ const CardSelector: FC<CardSelectorProps> = ({
       aria-label={label}
       aria-describedby={ariaDescribedBy}
       aria-invalid={ariaInvalid}
+      aria-disabled={disabled || undefined}
       className="flex flex-wrap gap-[var(--sp-3)]"
       onKeyDown={handleKeyDown}
     >
@@ -87,15 +90,16 @@ const CardSelector: FC<CardSelectorProps> = ({
         const isSelected = opt.value === selected
         // Roving tabindex: selected option is tabbable; when nothing is selected,
         // the first option is tabbable (WAI radio pattern, none-selected fallback).
-        const tabIndex = isSelected ? 0 : (selected === null && index === 0 ? 0 : -1)
+        const tabIndex = disabled ? -1 : isSelected ? 0 : (selected === null && index === 0 ? 0 : -1)
         return (
           <div
             key={opt.value}
             role="radio"
             aria-checked={isSelected}
             tabIndex={tabIndex}
-            onClick={() => onChange(opt.value)}
-            className="cursor-pointer c-hover flex flex-col items-center text-center flex-1 rounded-lg p-[var(--sp-4)] min-w-0 min-h-[var(--sp-12)]"
+            aria-disabled={disabled || undefined}
+            onClick={() => { if (!disabled) onChange(opt.value) }}
+            className={`${disabled ? 'cursor-not-allowed opacity-[var(--opacity-muted)]' : 'cursor-pointer c-hover'} flex flex-col items-center text-center flex-1 rounded-lg p-[var(--sp-4)] min-w-0 min-h-[var(--sp-12)]`}
             style={{
               background: isSelected ? colorToWash(opt.color) : 'var(--surface-raised)',
               border: isSelected

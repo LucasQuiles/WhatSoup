@@ -332,6 +332,17 @@ describe('healthPort validation', () => {
 });
 
 describe('adminPhones validation', () => {
+  it('accepts a plus-prefixed E.164 identity on load for compatibility', () => {
+    const raw = baseAgent({ adminPhones: ['+15551234567'] });
+    expect(validateInstanceConfig(raw, ctx('load'))).toBeNull();
+  });
+
+  it('rejects embedded non-phone text before it can collapse to an admin identity', () => {
+    const raw = baseAgent({ adminPhones: ['privileged-user+15551234567'] });
+    const result = validateInstanceConfig(raw, ctx('load'));
+    expect(result?.field).toBe('adminPhones');
+  });
+
   it('rejects empty adminPhones array on create', () => {
     const raw = baseAgent({ adminPhones: [] });
     const result = validateInstanceConfig(raw, ctx('create'));

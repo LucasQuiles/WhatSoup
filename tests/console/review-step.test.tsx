@@ -59,7 +59,7 @@ describe('ReviewStep — Identity card', () => {
     })
     expect(screen.getByText('Identity')).toBeDefined()
     expect(kvValue('Name')).toBe('review-fixture-1')
-    expect(kvValue('Admin phones')).toBe('3 configured')
+    expect(kvValue('Admin IDs')).toBe('3 configured')
     // ModeBadge renders the mode label inside the KV row.
     expect(screen.getByText('chat')).toBeDefined()
   })
@@ -67,7 +67,7 @@ describe('ReviewStep — Identity card', () => {
   it('falls back to "-" when name is missing and omits the Description row when empty', () => {
     renderReview({ data: { type: 'agent', adminPhones: [] } })
     expect(kvValue('Name')).toBe('-')
-    expect(kvValue('Admin phones')).toBe('0 configured')
+    expect(kvValue('Admin IDs')).toBe('0 configured')
     expect(kvExists('Description')).toBe(false)
   })
 
@@ -81,6 +81,31 @@ describe('ReviewStep — Identity card', () => {
       },
     })
     expect(kvValue('Description')).toBe('synthetic description for tree inspection')
+  })
+})
+
+describe('ReviewStep — canonical transport config', () => {
+  it('renders the nested Twilio config and keyring service without a raw token', () => {
+    const { container } = renderReview({
+      data: {
+        name: 'twilio-review',
+        type: 'passive',
+        transport: 'twilio',
+        adminPhones: ['15551234567'],
+        twilioConfig: {
+          accountSid: `AC${'a'.repeat(32)}`,
+          authTokenService: 'whatsoup-twilio-review',
+          authToken: 'must-not-render',
+          messagingServiceSid: `MG${'b'.repeat(32)}`,
+        },
+      },
+    })
+
+    expect(screen.getByText('Transport')).toBeDefined()
+    expect(kvValue('Account SID')).toBe(`AC${'a'.repeat(32)}`)
+    expect(kvValue('Auth token service')).toBe('whatsoup-twilio-review')
+    expect(kvValue('Sender')).toBe(`MG${'b'.repeat(32)}`)
+    expect(container.textContent).not.toContain('must-not-render')
   })
 })
 
@@ -236,11 +261,12 @@ describe('ReviewStep — Edit buttons', () => {
   it('clicking each card Edit button calls onEditPhase with the matching phase index', () => {
     const { onEditPhase } = renderReview({ data: { name: 'edit-fix', type: 'agent' } })
     const buttons = screen.getAllByRole('button', { name: /edit/i })
-    expect(buttons).toHaveLength(3)
+    expect(buttons).toHaveLength(4)
     fireEvent.click(buttons[0])
     fireEvent.click(buttons[1])
     fireEvent.click(buttons[2])
-    expect(onEditPhase.mock.calls.map(([phase]) => phase)).toEqual([0, 2, 3])
+    fireEvent.click(buttons[3])
+    expect(onEditPhase.mock.calls.map(([phase]) => phase)).toEqual([0, 0, 2, 3])
   })
 })
 

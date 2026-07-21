@@ -1,19 +1,16 @@
 import { config } from '../config.ts';
 import type { IncomingMessage } from './types.ts';
 import type { Database } from './database.ts';
-import { resolvePhoneFromJid } from './access-list.ts';
+import { resolvePhoneFromJidForGrant } from './access-list.ts';
 import type { SubjectType } from './access-list.ts';
 import { isAdminPhone, isE164Wire } from '../lib/phone.ts';
-import { isAuthenticatedSenderJid } from './jid-constants.ts';
-import { SIGNAL_UUID_RE } from './transport-refs.ts';
+import { APPLEID_EMAIL_RE, SIGNAL_UUID_RE } from './transport-refs.ts';
 
 export function isAdminMessage(msg: IncomingMessage, db: Database): boolean {
-  // Only an authenticated sender namespace may carry an admin identity. SMS
-  // resolves to the same bare phone as a configured admin but remains spoofable;
-  // Signal and iMessage identities are protocol-authenticated and exact-matched.
-  if (!isAuthenticatedSenderJid(msg.senderJid)) return false;
-  const phone = resolvePhoneFromJid(msg.senderJid, db);
-  return isAdminPhone(phone, config.adminPhones) && msg.isGroup === false;
+  const identity = resolvePhoneFromJidForGrant(msg.senderJid, db, config.transport);
+  return identity !== null
+    && isAdminPhone(identity, config.adminPhones)
+    && msg.isGroup === false;
 }
 
 export type AdminCommand =
@@ -39,14 +36,20 @@ export function parseAdminCommand(content: string): AdminCommand | null {
   // access-list keys are protocol identities rather than normalized digits.
   const phoneMatch = content.match(/^(allow|block)\s+(\S+)\s*$/i);
   const rawSubject = phoneMatch?.[2];
-  const canonicalSubject = rawSubject !== undefined && SIGNAL_UUID_RE.test(rawSubject.toLowerCase())
-    ? rawSubject.toLowerCase()
+  const lowerSubject = rawSubject?.toLowerCase();
+  const canonicalSubject = lowerSubject !== undefined
+    && (SIGNAL_UUID_RE.test(lowerSubject)
+      || (config.transport === 'imessage' && APPLEID_EMAIL_RE.test(lowerSubject)))
+    ? lowerSubject
     : rawSubject;
-  if (
-    phoneMatch
-    && canonicalSubject !== undefined
-    && (/^\d+$/.test(canonicalSubject) || isE164Wire(canonicalSubject) || SIGNAL_UUID_RE.test(canonicalSubject))
-  ) {
+  const isValidSubject = canonicalSubject !== undefined && (
+    config.transport === 'signal'
+      ? isE164Wire(canonicalSubject) || SIGNAL_UUID_RE.test(canonicalSubject)
+      : config.transport === 'imessage'
+        ? isE164Wire(canonicalSubject) || APPLEID_EMAIL_RE.test(canonicalSubject)
+        : /^\d+$/.test(canonicalSubject) || isE164Wire(canonicalSubject)
+  );
+  if (phoneMatch && canonicalSubject !== undefined && isValidSubject) {
     return {
       action: phoneMatch[1].toLowerCase() as 'allow' | 'block',
       subjectType: 'phone',

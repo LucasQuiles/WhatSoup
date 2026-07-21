@@ -122,6 +122,28 @@ describe('FeedCard malformed payload rendering', () => {
   })
 })
 
+describe('FeedCard transport formatting', () => {
+  it('passes iMessage previews through instead of applying WhatsApp markdown', () => {
+    const { container } = render(
+      <FeedCard
+        transport="imessage"
+        event={event({
+          detail: {
+            type: 'message',
+            direction: 'inbound',
+            senderName: 'Alex',
+            preview: '*literal* _still-literal_ https://example.com',
+          },
+        })}
+      />,
+    )
+
+    expect(container.querySelector('strong, em, s, code')).toBeNull()
+    expect(container.textContent).toContain('*literal* _still-literal_')
+    expect(screen.getByRole('link', { name: 'https://example.com' })).toBeDefined()
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Degraded-state mapper tests (FeedCard.tsx lines 116–263)
 // One case per mapper, one per representative tone, asserting rendered

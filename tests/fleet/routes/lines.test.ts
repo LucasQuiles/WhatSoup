@@ -131,6 +131,7 @@ describe('handleGetLines', () => {
     expect(body[0]).toMatchObject({
       name: 'alpha',
       mode: 'chat',
+      transport: 'baileys',
       status: 'online',
       statusConfidence: 'confirmed',
       statusReason: 'health_body_ok',
@@ -1302,6 +1303,28 @@ describe('handleGetLines config_error instance', () => {
     expect(line.statusEvidence).toEqual(['config file not found']);
     expect(line.configError).toBe('config file not found');
     expect(line.error).toBe('config file not found');
+  });
+
+  it('returns an unknown explicit transport verbatim instead of advertising Baileys QR auth', () => {
+    const inst = fakeInstance({
+      name: 'future-line',
+      transport: 'future-provider',
+      configError: 'transport is invalid',
+    });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['future-line', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: { getStatuses: vi.fn(() => new Map()), getStatus: vi.fn() } as any,
+    });
+    const res = mockRes();
+
+    handleGetLines(mockReq(), res, deps);
+
+    const line = JSON.parse(res._body)[0];
+    expect(line.status).toBe('config_error');
+    expect(line.transport).toBe('future-provider');
   });
 });
 

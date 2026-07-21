@@ -15,8 +15,8 @@ import { ActionButton } from '../primitives/ActionButton'
 import type { Mode, ChatItem, Message } from './types'
 
 /* HistoryMessages — scroll-to-bottom + load older + send input */
-function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
-  messages: Message[]; outgoingBg: string; selectedChat: string; lineName: string;
+function HistoryMessages({ messages, outgoingBg, selectedChat, lineName, transport }: {
+  messages: Message[]; outgoingBg: string; selectedChat: string; lineName: string; transport?: string | null;
 }) {
   const toast = useToast()
   const queryClient = useQueryClient()
@@ -184,6 +184,7 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
                 outgoingBg={outgoingBg}
                 onCreateContact={(name) => toast.info(`Save contact: ${name}`)}
                 animate={animatedPks.has(row.message.pk)}
+                transport={transport}
               />
             </div>
           ))}
@@ -246,8 +247,8 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
   )
 }
 
-export function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode, lineName, typingJids }: {
-  chats: ChatItem[]; messages: Message[]; selectedChat: string | null; onSelectChat: (key: string) => void; mode: Mode; lineName: string; typingJids: Set<string>;
+export function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode, lineName, typingJids, transport }: {
+  chats: ChatItem[]; messages: Message[]; selectedChat: string | null; onSelectChat: (key: string) => void; mode: Mode; lineName: string; typingJids: Set<string>; transport?: string | null;
 }) {
   const outgoingBg = mode === 'agent' ? 'var(--m-agt-soft)' : 'var(--m-cht-soft)'
   return (
@@ -290,6 +291,7 @@ export function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode, 
             outgoingBg={outgoingBg}
             selectedChat={selectedChat}
             lineName={lineName}
+            transport={transport}
           />
         ) : (
           <div className="flex-1 flex items-center justify-center">

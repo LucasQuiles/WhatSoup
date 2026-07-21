@@ -103,4 +103,15 @@ describe('resolveAdminIdentities', () => {
     }
   });
 
+  it('preserves lowercase AppleID emails and canonicalizes iMessage phones as +E.164', async () => {
+    const { resolveAdminIdentities } = await import('../src/config.ts');
+    expect(resolveAdminIdentities([
+      ' Owner@Example.COM ',
+      '+1 (555) 111-0000',
+    ], 'imessage')).toEqual([
+      'owner@example.com',
+      '+15551110000',
+    ]);
+  });
+
 });

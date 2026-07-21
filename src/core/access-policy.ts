@@ -1,7 +1,13 @@
 import type { IncomingMessage } from './types.ts';
 import type { Database } from './database.ts';
 import { lookupAccess, resolvePhoneFromJid } from './access-list.ts';
-import { bareNumber, normalizeLid, isLidJid, isAuthenticatedSenderJid } from './jid-constants.ts';
+import {
+  bareNumber,
+  normalizeLid,
+  isLidJid,
+  isAuthenticatedSenderForTransport,
+  isSenderJidForTransport,
+} from './jid-constants.ts';
 import { createChildLogger } from '../logger.ts';
 import { config, type AccessMode } from '../config.ts';
 import { isAdminPhone } from '../lib/phone.ts';
@@ -71,10 +77,13 @@ export function shouldRespond(
       return { respond: false, reason: 'self_only_lid_unresolvable', accessStatus: 'blocked' };
     }
 
-    // QR-143: only a WhatsApp-authenticated sender may be granted the self_only
-    // admin path. A spoofable @sms sender resolves to the same bare phone as the
-    // WhatsApp admin, so gate on the transport before the adminPhones match.
-    if (isAuthenticatedSenderJid(msg.senderJid) && isAdminPhone(effectivePhone, config.adminPhones)) {
+    // QR-143: only a sender authenticated by the configured transport may be
+    // granted the self_only admin path. A spoofable @sms sender can resolve to
+    // the same bare phone, so gate the namespace before adminPhones matching.
+    if (
+      isAuthenticatedSenderForTransport(msg.senderJid, config.transport)
+      && isAdminPhone(effectivePhone, config.adminPhones)
+    ) {
       log.debug({ messageId: msg.messageId, phone: effectivePhone }, 'trigger: self_only admin DM → respond');
       return { respond: true, reason: 'self_only_admin', accessStatus: 'allowed' };
     }
@@ -93,6 +102,17 @@ export function shouldRespond(
   if (isUnresolvedLidSender && !(accessMode === 'groups_only' && !msg.isGroup)) {
     log.info({ messageId: msg.messageId, senderJid: msg.senderJid }, 'trigger: LID unresolvable, rejecting');
     return { respond: false, reason: 'lid_unresolvable', accessStatus: 'blocked' };
+  }
+
+  // Block/deny lookup above is intentionally transport-agnostic. Every
+  // positive path below must bind the sender to the configured namespace so a
+  // phone/identity allow row cannot cross-authorize another transport.
+  if (!isSenderJidForTransport(msg.senderJid, config.transport)) {
+    log.info(
+      { messageId: msg.messageId, transport: config.transport },
+      'trigger: sender namespace does not match configured transport',
+    );
+    return { respond: false, reason: 'transport_mismatch', accessStatus: 'blocked' };
   }
 
   // ── open_dm mode (REQ-003.AC-03) ──
@@ -140,10 +160,13 @@ export function shouldRespond(
     // auto-responding to a non-allowlisted member) and #20 (an unknown/pending sender
     // @mention-activating the bot in an un-allowlisted group). Default 'any_member' is a no-op.
     if (config.groupSenderPolicy === 'allowlisted_only') {
-      // Admin elevation is transport-gated (QR-143), mirroring the self_only admin path:
-      // a spoofable non-WhatsApp-authenticated sender must not clear the admin branch.
+      // Admin elevation is transport-gated (QR-143), mirroring self_only: a
+      // sender outside the configured namespace must not clear the admin branch.
       const senderAllowed = entry?.status === 'allowed'
-        || (isAuthenticatedSenderJid(msg.senderJid) && isAdminPhone(effectivePhone, config.adminPhones));
+        || (
+          isAuthenticatedSenderForTransport(msg.senderJid, config.transport)
+          && isAdminPhone(effectivePhone, config.adminPhones)
+        );
       if (!senderAllowed) {
         log.info({ messageId: msg.messageId, phone: effectivePhone }, 'trigger: group strict mode rejects non-allowlisted sender');
         return { respond: false, reason: 'strict_group_non_allowlisted', accessStatus: entry?.status ?? 'unknown' };

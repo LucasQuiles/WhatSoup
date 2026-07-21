@@ -2,7 +2,7 @@ import { type FC, type ReactNode } from "react";
 import { RotateCw, Square, Copy, ExternalLink } from "lucide-react";
 import type { FeedEvent, Mode } from "../types";
 import FeedIcon from "./FeedIcon";
-import { formatWhatsAppText } from "../lib/format-wa-text";
+import { formatMessageText } from "../lib/format-message-text";
 import { getProvider } from "../lib/providers";
 import { statusAlertMessage, statusColorToken, statusSeverity } from "../lib/status-severity";
 import { Button } from "./primitives/Button";
@@ -180,7 +180,7 @@ function connectionPresentation(event: FeedEvent, d: ConnectionDetail): CardPres
   );
 }
 
-function messagePresentation(event: FeedEvent, d: MessageDetail): CardPresentation {
+function messagePresentation(event: FeedEvent, d: MessageDetail, transport?: string | null): CardPresentation {
   const isIn = d.direction === "inbound";
   const isNonText = d.contentType && d.contentType !== "text";
   const count = parseCollapsedCount(displayText(event.text));
@@ -196,17 +196,17 @@ function messagePresentation(event: FeedEvent, d: MessageDetail): CardPresentati
       d.senderName ? chatShort : undefined,
       isNonText ? `[${d.contentType}]` : undefined,
     ]),
-    detail: preview ? formatWhatsAppText(preview) : isNonText ? `[${d.contentType}]` : undefined,
+    detail: preview ? formatMessageText(preview, undefined, transport) : isNonText ? `[${d.contentType}]` : undefined,
   };
 }
 
-function toolErrorPresentation(d: ToolErrorDetail): CardPresentation {
+function toolErrorPresentation(d: ToolErrorDetail, transport?: string | null): CardPresentation {
   return {
     badge: d.toolName || "tool",
     badgeTone: "crit",
     headline: "tool failed",
     headlineTone: "crit",
-    detail: formatWhatsAppText(displayText(d.error)),
+    detail: formatMessageText(displayText(d.error), undefined, transport),
     detailClassName: "fc-detail--error fc-detail--wrap",
   };
 }
@@ -249,7 +249,7 @@ function genericPresentation(event: FeedEvent): CardPresentation {
   };
 }
 
-function renderCard(event: FeedEvent): CardPresentation {
+function renderCard(event: FeedEvent, transport?: string | null): CardPresentation {
   const d = event.detail;
   if (!d || d.type === "generic") return genericPresentation(event);
 
@@ -257,9 +257,9 @@ function renderCard(event: FeedEvent): CardPresentation {
     case "connection":
       return connectionPresentation(event, d);
     case "message":
-      return messagePresentation(event, d);
+      return messagePresentation(event, d, transport);
     case "tool_error":
-      return toolErrorPresentation(d);
+      return toolErrorPresentation(d, transport);
     case "tool_use":
       return {
         badge: d.toolName || "tool",
@@ -437,11 +437,12 @@ interface FeedCardProps {
   onStop?: (instance: string) => void;
   onNavigate?: (path: string) => void;
   onCopyResult?: (success: boolean) => void;
+  transport?: string | null;
 }
 
-const FeedCard: FC<FeedCardProps> = ({ event, onRestart, onStop, onNavigate, onCopyResult }) => {
+const FeedCard: FC<FeedCardProps> = ({ event, onRestart, onStop, onNavigate, onCopyResult, transport }) => {
   const isErr = eventIsCritical(event);
-  const card = renderCard(event);
+  const card = renderCard(event, transport);
   const meta = metadataParts(event);
   const hasMeta = meta.length > 0;
 

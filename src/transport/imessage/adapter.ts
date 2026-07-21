@@ -17,6 +17,7 @@
 // the adapter is backend-agnostic. Backend selection happens at factory time.
 
 import {
+  canonicalizeImessageDirectIdentity,
   makeChannelId,
   type ChannelId,
   type ConversationRef,
@@ -499,6 +500,7 @@ export class ImessageAdapter
 
     if (record.kind === 'text' && record.body !== null) {
       const msg = this.buildInboundMessage(record);
+      if (msg === null) return false;
       this.safeEmit(this.listeners.message, msg);
     }
     // TODO(future): route reaction/read/typing envelopes to extension events.
@@ -509,13 +511,19 @@ export class ImessageAdapter
 
   // ── Private helpers ───────────────────────────────────────────────────────
 
-  private buildInboundMessage(record: InboundImessage): InboundMessage {
+  private buildInboundMessage(record: InboundImessage): InboundMessage | null {
     const channelId = this.channelId;
     // Group envelopes thread under the chat GUID (all members' traffic shares
     // one conversation). 1:1 envelopes key on the PEER: sender for inbound,
     // recipient for our own outbound echoes.
-    const peer = record.chatGuid ?? (record.fromMe ? record.to : record.from);
-    const senderId = record.fromMe ? this.selfRef().id : record.from;
+    const rawPeer = record.chatGuid ?? (record.fromMe ? record.to : record.from);
+    const peer = record.chatGuid !== undefined
+      ? (rawPeer.startsWith('iMessage;+;') || rawPeer.startsWith('iMessage;-;') ? rawPeer : null)
+      : canonicalizeImessageDirectIdentity(rawPeer);
+    const senderId = canonicalizeImessageDirectIdentity(
+      record.fromMe ? this.selfRef().id : record.from,
+    );
+    if (peer === null || senderId === null) return null;
     const ts = new Date(record.timestamp);
     return {
       ref: {

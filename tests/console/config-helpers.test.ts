@@ -21,6 +21,7 @@ import {
   isEqualValue,
   isRecord,
   setValueAtPath,
+  validateAdminPhones,
 } from '../../console/src/components/line-detail/config-helpers.ts';
 import { CHAT_API_KEY_SERVICE_OPTIONS } from '../../console/src/lib/providers.ts';
 
@@ -337,6 +338,16 @@ describe('FIELD_VALIDATORS', () => {
     expect(validate('')).toBeNull();
     expect(validate('groq')).toBeNull();
     expect(validate('pinecone')).toBe('Choose a provider keyring service');
+  });
+});
+
+describe('validateAdminPhones', () => {
+  it('validates transport-specific admin identities while preserving the compatibility field', () => {
+    expect(validateAdminPhones(['15551234567'], 'twilio')).toBeNull();
+    expect(validateAdminPhones(['01234567-89ab-cdef-0123-456789abcdef'], 'signal')).toBeNull();
+    expect(validateAdminPhones(['owner@example.com'], 'imessage')).toBeNull();
+    expect(validateAdminPhones(['owner@example.com'], 'signal')).toMatch(/Signal/i);
+    expect(validateAdminPhones([], 'imessage')).toMatch(/At least one admin/i);
   });
 });
 

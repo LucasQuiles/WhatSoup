@@ -139,6 +139,7 @@ export interface MessagingDeps {
    * isOperatorDmPeer the same way every other send path does.
    */
   adminPhones: Set<string>;
+  transport?: string | null;
   profiles?: ProfileRegistry;
   auditWriter?: OutboundSendsWriter;
   pollRegistrar?: PollRegistrar;
@@ -223,7 +224,13 @@ export function registerMessagingTools(
     const isGroup = isGroupJid(chatJid);
     return {
       isGroup,
-      peerIsAdmin: isOperatorDmPeer(chatJid, isGroup, deps.dbWrapper, deps.adminPhones),
+      peerIsAdmin: isOperatorDmPeer(
+        chatJid,
+        isGroup,
+        deps.dbWrapper,
+        deps.adminPhones,
+        deps.transport ?? 'baileys',
+      ),
       fallbackActive: deps.fallbackActive ? deps.fallbackActive() : true,
     };
   };

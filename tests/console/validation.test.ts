@@ -10,7 +10,23 @@
  * console-side contract independently.
  */
 import { describe, expect, it } from 'vitest';
-import { normalizePhoneInput, validatePhone } from '../../console/src/lib/validation';
+import {
+  isE164WireInput,
+  normalizePhoneIdentityInput,
+  normalizePhoneInput,
+  validatePhone,
+  validatePhoneIdentityInput,
+} from '../../console/src/lib/validation';
+
+describe('isE164WireInput', () => {
+  it('accepts only canonical plus-prefixed provider wire identities', () => {
+    expect(isE164WireInput('+15551234567')).toBe(true);
+    expect(isE164WireInput('+447700900123')).toBe(true);
+    expect(isE164WireInput('15551234567')).toBe(false);
+    expect(isE164WireInput('+05551234567')).toBe(false);
+    expect(isE164WireInput('+1 (555) 123-4567')).toBe(false);
+  });
+});
 
 describe('normalizePhoneInput', () => {
   it('prepends 1 to a 10-digit NANP string', () => {
@@ -42,6 +58,20 @@ describe('normalizePhoneInput', () => {
   it('does not prepend 1 to non-10-digit strings (only the 10-digit case prefixes)', () => {
     expect(normalizePhoneInput('5551234')).toBe('5551234');
     expect(normalizePhoneInput('555123456789')).toBe('555123456789');
+  });
+});
+
+describe('admin phone identity input', () => {
+  it('accepts supported phone formatting and normalizes it to canonical digits', () => {
+    expect(validatePhoneIdentityInput('(555) 123-4567')).toBe(true);
+    expect(validatePhoneIdentityInput('+44 7700 900123')).toBe(true);
+    expect(normalizePhoneIdentityInput('(555) 123-4567')).toBe('15551234567');
+  });
+
+  it('fails closed on embedded text and invalid country-code prefixes', () => {
+    expect(validatePhoneIdentityInput('privileged-user+15551234567')).toBe(false);
+    expect(validatePhoneIdentityInput('+05551234567')).toBe(false);
+    expect(normalizePhoneIdentityInput('privileged-user+15551234567')).toBe('');
   });
 });
 

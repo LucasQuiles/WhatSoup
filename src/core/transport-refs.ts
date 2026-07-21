@@ -36,6 +36,13 @@ export const ACCOUNT_RE = /^[a-z][a-z0-9-]{0,63}$/;
  */
 export const APPLEID_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+/** Canonicalize a direct iMessage identity without altering chat GUIDs. */
+export function canonicalizeImessageDirectIdentity(identity: string): string | null {
+  if (isE164Wire(identity)) return identity;
+  const lower = identity.toLowerCase();
+  return APPLEID_EMAIL_RE.test(lower) ? lower : null;
+}
+
 /** Signal service UUID and V2 group-id shapes shared by core JID policy. */
 export const SIGNAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const SIGNAL_GROUP_ID_RE = /^[A-Za-z0-9+/]{16,}={0,2}$/;

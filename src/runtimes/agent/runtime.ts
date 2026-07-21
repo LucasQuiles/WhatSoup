@@ -2578,7 +2578,13 @@ export class AgentRuntime implements Runtime {
     const priorToken = this.priorSenderTokenForChat(chatJid);
     const q = new OutboundQueue(this.messenger, chatJid, { // T8-F1+F2: inject admin-peer + fallback-window queries
       conversationKey, ...(priorToken === undefined ? {} : { senderToken: priorToken }),
-      peerIsAdmin: (jid) => isOperatorDmPeer(jid, isGroupJid(jid), this.db, config.adminPhones),
+      peerIsAdmin: (jid) => isOperatorDmPeer(
+        jid,
+        isGroupJid(jid),
+        this.db,
+        config.adminPhones,
+        config.transport,
+      ),
       fallbackActive: () => this.isFallbackWindowActive,
     });
     if (this.durability) q.setDurability(this.durability);
@@ -3559,7 +3565,11 @@ export class AgentRuntime implements Runtime {
         // QR-047 + QR-143: admin gate hoisted to assertRestartSelfAdmin — gates on
         // authenticated transport BEFORE the phone match, so a spoofed @sms actor
         // that collapses to admin digits cannot induce a restart.
-        assertAdmin: (session) => assertRestartSelfAdmin(session, { db: this.db, adminPhones: config.adminPhones }),
+        assertAdmin: (session) => assertRestartSelfAdmin(session, {
+          db: this.db,
+          adminPhones: config.adminPhones,
+          transport: config.transport,
+        }),
       }));
     }
 
@@ -3702,7 +3712,7 @@ export class AgentRuntime implements Runtime {
       // <admin-digits>@sms transport — so it cannot induce an admin-attributed
       // proposal. Skip synthetic agent-job turns (already durable agent_job
       // beads, not ad-hoc imperatives to capture).
-      const grantPhone = resolvePhoneFromJidForGrant(msg.senderJid, this.db);
+      const grantPhone = resolvePhoneFromJidForGrant(msg.senderJid, this.db, config.transport);
       if (grantPhone !== null && isAdminPhone(grantPhone, config.adminPhones) && !msg.isSyntheticJob) {
         const hit = matchImperative(content);
         if (hit) {
@@ -3855,7 +3865,7 @@ export class AgentRuntime implements Runtime {
     if (classified.type === 'local') {
       const spec = getCommandSpec(classified.command);
       // Gate enforcement by gate class. Both gated classes share the same
-      // authenticated-admin core: isWhatsAppAuthenticatedJid FIRST (QR-143 —
+      // authenticated-admin core: bind the sender to config.transport first (QR-143 —
       // a non-authenticated transport like @sms resolves to the SAME bare
       // phone as the WhatsApp admin but its sender-ID is spoofable, so the
       // transport check must precede the phone match), THEN admin-phone.
@@ -3880,10 +3890,10 @@ export class AgentRuntime implements Runtime {
       // Lazy so gate:'none' commands never pay the resolvePhoneFromJid DB read.
       // B4: the grant primitive gates authenticated-transport-FIRST then resolves;
       // a non-authenticated (@sms) sender yields null and is denied. Behaviour is
-      // identical to the prior isWhatsAppAuthenticatedJid && isAdminPhone(...) form
+      // identical to the prior transport-bound-authentication && isAdminPhone(...) form
       // (isAdminPhone(null) === false).
       const isAuthenticatedAdmin = (): boolean => {
-        const phone = resolvePhoneFromJidForGrant(msg.senderJid, this.db);
+        const phone = resolvePhoneFromJidForGrant(msg.senderJid, this.db, config.transport);
         return phone !== null && isAdminPhone(phone, config.adminPhones);
       };
       const denied =
@@ -5979,7 +5989,13 @@ export class AgentRuntime implements Runtime {
 
   /** T8-F1+F2: shared operator-DM elevation ctx for direct sends/polls. */
   private resolveSendAudience(chatJid: string, isGroup: boolean): OutboundAudience {
-    const peerIsAdmin = isOperatorDmPeer(chatJid, isGroup, this.db, config.adminPhones);
+    const peerIsAdmin = isOperatorDmPeer(
+      chatJid,
+      isGroup,
+      this.db,
+      config.adminPhones,
+      config.transport,
+    );
     return resolveOutboundAudience(chatJid, { isGroup, peerIsAdmin, fallbackActive: this.isFallbackWindowActive });
   }
 

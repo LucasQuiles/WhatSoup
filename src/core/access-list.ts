@@ -1,6 +1,6 @@
 import type { Database } from './database.ts';
 import { toConversationKey } from './conversation-key.ts';
-import { DOMAIN_LID, DOMAIN_SIGNAL, DOMAIN_SMS, isLidJid, isAuthenticatedSenderJid, normalizeLid, smsJidToPhone } from './jid-constants.ts';
+import { DOMAIN_LID, DOMAIN_SIGNAL, DOMAIN_SMS, fromImessageJid, isImessageJid, isLidJid, isAuthenticatedSenderForTransport, normalizeLid, smsJidToPhone } from './jid-constants.ts';
 import { resolveLid } from './lid-resolver.ts';
 
 export type AccessStatus = 'allowed' | 'blocked' | 'pending' | 'seen';
@@ -158,6 +158,10 @@ export function extractLocal(jid: string): string {
  *   resolvePhoneFromJid('+15555550100@sms', db)           → '15555550100' (E.164 → digits)
  */
 export function resolvePhoneFromJid(jid: string, db: Database): string {
+  if (isImessageJid(jid)) {
+    return fromImessageJid(jid);
+  }
+
   const atIdx = jid.indexOf('@');
   if (atIdx === -1) return jid;
 
@@ -189,14 +193,14 @@ export function resolvePhoneFromJid(jid: string, db: Database): string {
 }
 
 /**
- * GRANT-direction phone resolution (QR-143). Returns `null` for any JID that is
- * NOT WhatsApp-authenticated (`@sms` and every other non-`@s.whatsapp.net`/`@lid`
- * transport), else the same value as `resolvePhoneFromJid(jid, db)`.
+ * GRANT-direction identity resolution (QR-143). Returns `null` unless the JID's
+ * authenticated namespace matches the instance's configured transport, then
+ * returns the same canonical identity as `resolvePhoneFromJid(jid, db)`.
  *
  * WHY: `resolvePhoneFromJid` collapses a spoofable `<digits>@sms` JID to the SAME
- * bare phone as a WhatsApp-authenticated admin. Every admin/allow GRANT decision
- * MUST gate on authenticated transport BEFORE matching the phone (see the
- * `isAuthenticatedSenderJid` doc in jid-constants.ts). This primitive collapses
+ * bare identity as a configured phone admin. Every admin/allow GRANT decision
+ * MUST gate on the configured transport BEFORE matching the identity (see
+ * `isAuthenticatedSenderForTransport` in jid-constants.ts). This primitive collapses
  * the easy-to-forget two-step discipline (call the predicate, THEN the resolver,
  * in the right order, every time) into a single fail-closed call, so a grant site
  * cannot get it wrong.
@@ -212,9 +216,10 @@ export function resolvePhoneFromJid(jid: string, db: Database): string {
 export function resolvePhoneFromJidForGrant(
   jid: string | null | undefined,
   db: Database,
+  transport: string | null | undefined = 'baileys',
 ): string | null {
   // Explicit null check also narrows `jid` to a non-null string for the resolver.
-  if (jid == null || !isAuthenticatedSenderJid(jid)) return null;
+  if (jid == null || !isAuthenticatedSenderForTransport(jid, transport)) return null;
   return resolvePhoneFromJid(jid, db);
 }
 

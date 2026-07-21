@@ -19,6 +19,7 @@ vi.mock('../../console/src/components/TagInput', () => ({
     id,
     placeholder,
     displayLabels,
+    normalizeValue,
     'aria-describedby': ariaDescribedBy,
     'aria-invalid': ariaInvalid,
   }: {
@@ -27,6 +28,7 @@ vi.mock('../../console/src/components/TagInput', () => ({
     id?: string
     placeholder?: string
     displayLabels?: Record<string, string>
+    normalizeValue?: (value: string) => string
     'aria-describedby'?: string
     'aria-invalid'?: true
   }) => (
@@ -47,6 +49,20 @@ vi.mock('../../console/src/components/TagInput', () => ({
         onClick={() => onChange([...values, placeholder === 'Add phone number' ? '15557654321' : 'new-item'])}
       >
         add
+      </button>
+      <button
+        type="button"
+        data-testid="tag-add-signal"
+        onClick={() => onChange([...values, normalizeValue?.('AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE') ?? 'AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE'])}
+      >
+        add-signal
+      </button>
+      <button
+        type="button"
+        data-testid="tag-add-imessage"
+        onClick={() => onChange([...values, normalizeValue?.('Owner@Example.com') ?? 'Owner@Example.com'])}
+      >
+        add-imessage
       </button>
       <button
         type="button"
@@ -1176,6 +1192,50 @@ describe('ConfigEditDialog — chat BYOK edit surface', () => {
 // ---------------------------------------------------------------------------
 
 describe('ConfigEditDialog — adminPhones TagInput wiring', () => {
+  it('normalizes and saves Signal UUID admins for Signal lines', async () => {
+    updateConfigMock.mockResolvedValue(undefined)
+    render(withProviders(
+      <ConfigEditDialog
+        open={true}
+        config={BASE_CONFIG}
+        lineName={LINE}
+        transport="signal"
+        onClose={() => {}}
+      />,
+    ))
+
+    fireEvent.click(screen.getByTestId('tag-add-signal'))
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Save \(1\)/ }))
+    })
+
+    expect(updateConfigMock).toHaveBeenCalledWith(LINE, {
+      adminPhones: ['15551234567', 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'],
+    })
+  })
+
+  it('normalizes and saves AppleID admins for iMessage lines', async () => {
+    updateConfigMock.mockResolvedValue(undefined)
+    render(withProviders(
+      <ConfigEditDialog
+        open={true}
+        config={BASE_CONFIG}
+        lineName={LINE}
+        transport="imessage"
+        onClose={() => {}}
+      />,
+    ))
+
+    fireEvent.click(screen.getByTestId('tag-add-imessage'))
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Save \(1\)/ }))
+    })
+
+    expect(updateConfigMock).toHaveBeenCalledWith(LINE, {
+      adminPhones: ['15551234567', 'owner@example.com'],
+    })
+  })
+
   it('associates the adminPhones label with the TagInput control', () => {
     render(withProviders(
       <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,

@@ -292,6 +292,7 @@ export const fitnessRules = [
       patterns: ['WhatsApp'],
       allowlistPaths: [
         'console/src/mock-data.ts',
+        'console/src/lib/transport-meta.ts',
       ],
     },
     source: ['audit:2026-07-20-signal-imessage-surface-sweep#S2,S3,S15'],

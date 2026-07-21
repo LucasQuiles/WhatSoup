@@ -113,7 +113,7 @@
           "path": "src/components/line-detail/HistoryTab.tsx",
           "count": 1,
           "lines": [
-            218
+            219
           ]
         },
         {
@@ -161,14 +161,14 @@
           "path": "src/components/MessageBubble.tsx",
           "count": 1,
           "lines": [
-            133
+            135
           ]
         },
         {
           "path": "src/components/MessageContent.tsx",
           "count": 1,
           "lines": [
-            167
+            169
           ]
         },
         {
@@ -213,7 +213,7 @@
           "path": "src/pages/Inbox.tsx",
           "count": 1,
           "lines": [
-            457
+            458
           ]
         },
         {
@@ -246,10 +246,10 @@
           "count": 5,
           "lines": [
             55,
-            247,
-            294,
-            306,
-            552
+            260,
+            307,
+            319,
+            565
           ]
         }
       ],

@@ -25,6 +25,7 @@ import { homedir } from 'node:os';
 import { PROVIDER_IDS } from '../runtimes/agent/providers/index.ts';
 import { PROVIDER_API_KEY_SERVICES, SERVICE_ENV_MAP, resolveProviderKeyService } from '../lib/provider-key-service.ts';
 import { isRecord } from '../lib/type-guards.ts';
+import { normalizePhoneE164Wire } from '../lib/phone.ts';
 import { isSamePhysicalDirectory } from '../lib/home-path.ts';
 import { resolveAgentModel } from './agent-model.ts';
 import {
@@ -34,7 +35,7 @@ import {
   type AgentFallbackEntry,
 } from './fallback-chain.ts';
 import { DEFAULT_TRANSPORT_ID, isTransportId, TRANSPORT_IDS } from '../transport/registry.ts';
-import { ACCOUNT_RE, APPLEID_EMAIL_RE } from './transport-refs.ts';
+import { ACCOUNT_RE, APPLEID_EMAIL_RE, SIGNAL_UUID_RE } from './transport-refs.ts';
 import { E164_RE } from '../transport/twilio/types.ts';
 import RE2 from 're2';
 import {
@@ -321,6 +322,28 @@ export function validateInstanceConfig(
         );
       }
       return err('adminPhones', 'adminPhones must be a non-empty array of strings');
+    }
+    const effectiveTransport = isTransportId(raw['transport'])
+      ? raw['transport']
+      : DEFAULT_TRANSPORT_ID;
+    const invalidIdentity = (phones as string[]).find((identity) => {
+      const isPhoneIdentity = normalizePhoneE164Wire(identity) !== null;
+      if (effectiveTransport === 'signal') {
+        return !isPhoneIdentity && !SIGNAL_UUID_RE.test(identity);
+      }
+      if (effectiveTransport === 'imessage') {
+        return !isPhoneIdentity
+          && !(APPLEID_EMAIL_RE.test(identity) && identity === identity.toLowerCase());
+      }
+      return !isPhoneIdentity;
+    });
+    if (invalidIdentity !== undefined) {
+      const expected = effectiveTransport === 'signal'
+        ? 'a valid phone identity or a lowercase Signal UUID'
+        : effectiveTransport === 'imessage'
+          ? 'a valid phone identity or a lowercase AppleID email'
+          : 'a valid phone identity';
+      return err('adminPhones', `adminPhones must contain only ${expected} for transport ${effectiveTransport}`);
     }
   }
 
@@ -1439,6 +1462,12 @@ function validateTwilioConfig(tc: Record<string, unknown>, healthPort?: number):
         'twilioConfig.webhook.publicBaseUrl must be an https:// URL',
       );
     }
+    if (parsed.username !== '' || parsed.password !== '') {
+      return err(
+        'twilioConfig.webhook.publicBaseUrl',
+        'twilioConfig.webhook.publicBaseUrl must not contain credentials',
+      );
+    }
     const listenPort = wb['listenPort'];
     if (
       typeof listenPort !== 'number' ||
@@ -1605,6 +1634,12 @@ function validateImessageConfig(ic: Record<string, unknown>): ValidationError | 
         return err(
           'imessageConfig.bluebubblesUrl',
           'imessageConfig.bluebubblesUrl must be an http(s) URL',
+        );
+      }
+      if (parsed.username !== '' || parsed.password !== '') {
+        return err(
+          'imessageConfig.bluebubblesUrl',
+          'imessageConfig.bluebubblesUrl must not contain credentials',
         );
       }
     }

@@ -143,6 +143,7 @@ function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredIn
     healthToken: 'tok123',
     configPath: '/config/test-line/config.json',
     socketPath: null,
+    transport: 'baileys',
     ...overrides,
   };
 }
@@ -227,6 +228,55 @@ describe('handleAuth', () => {
 
     child.emit('exit', 0);
     expect(res._ended).toBe(true);
+  });
+
+  it.each(['twilio', 'signal', 'imessage'] as const)(
+    'rejects %s before stopping a service or spawning bootstrap-auth',
+    async (transport) => {
+      const svc = mockServiceManager();
+      const deps = makeDeps({
+        discovery: {
+          getInstance: vi.fn(() => fakeInstance({ transport })),
+          scan: vi.fn(),
+        } as any,
+        serviceManager: svc,
+      });
+      const res = mockRes();
+
+      await handleAuth(mockReq(), res, deps, { name: 'test-line' });
+
+      expect(res._status).toBe(409);
+      expect(JSON.parse(res._body).error).toMatch(/baileys/i);
+      expect(svc.stop).not.toHaveBeenCalled();
+      expect(spawn).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects a load-invalid instance before stopping a service or spawning bootstrap-auth', async () => {
+    const child = fakeChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as any);
+    const svc = mockServiceManager();
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => fakeInstance({
+          transport: 'baileys',
+          configError: 'Invalid transport: future-provider',
+        })),
+        scan: vi.fn(),
+      } as any,
+      serviceManager: svc,
+    });
+    const res = mockRes();
+
+    await handleAuth(mockReq(), res, deps, { name: 'test-line' });
+    const observedStatus = res._status;
+    const observedBody = res._body;
+    child.emit('exit', 0);
+
+    expect(observedStatus).toBe(409);
+    expect(JSON.parse(observedBody).error).toMatch(/invalid configuration/i);
+    expect(svc.stop).not.toHaveBeenCalled();
+    expect(spawn).not.toHaveBeenCalled();
   });
 
   it('restarts a stopped instance when auth exits nonzero before connecting', async () => {
@@ -888,6 +938,311 @@ describe('handleCreateLine', () => {
       claudeMd: fileMode(claudeMdPath),
     };
     expect(modes).toEqual({ configJson: 0o600, claudeMd: 0o600 });
+    expect(deps.serviceManager.enable).toHaveBeenCalledWith('mode-agent');
+    expect(deps.serviceManager.start).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['null', null],
+    ['number', 42],
+    ['object', { kind: 'signal' }],
+    ['array', ['signal']],
+  ])('rejects an explicit non-string transport (%s) without side effects', async (label, transport) => {
+    const name = `bad-transport-${label}`;
+    const svc = mockServiceManager();
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+      serviceManager: svc,
+    });
+    const res = mockRes();
+
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name,
+        type: 'passive',
+        transport,
+        adminPhones: ['15551234567'],
+      })),
+      res,
+      deps,
+    );
+
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/transport/i);
+    expect(svc.enable).not.toHaveBeenCalled();
+    expect(svc.start).not.toHaveBeenCalled();
+    expect(fs.existsSync(path.join(
+      process.env.XDG_CONFIG_HOME!,
+      'whatsoup',
+      'instances',
+      name,
+    ))).toBe(false);
+  });
+
+  it.each([
+    {
+      name: 'twilio-line',
+      transport: 'twilio',
+      adminPhones: ['(555) 123-4567'],
+      field: 'twilioConfig',
+      config: {
+        account: 'twilio-line',
+        accountSid: `AC${'a'.repeat(32)}`,
+        authTokenService: 'whatsoup-twilio-test',
+        phoneNumber: '+15551234567',
+        inboundMode: 'poll',
+        pollIntervalMs: 15_000,
+      },
+      expectedAdmins: ['15551234567'],
+    },
+    {
+      name: 'signal-line',
+      transport: 'signal',
+      adminPhones: ['AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE'],
+      field: 'signalConfig',
+      config: {
+        account: 'signal-line',
+        phoneNumber: '+15551234567',
+        socketPath: '/tmp/signal-cli.sock',
+        inboundMode: 'poll',
+        pollIntervalMs: 15_000,
+      },
+      expectedAdmins: ['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'],
+    },
+    {
+      name: 'signal-phone-line',
+      transport: 'signal',
+      adminPhones: ['+15551234567'],
+      field: 'signalConfig',
+      config: {
+        account: 'signal-phone-line',
+        phoneNumber: '+15551234567',
+        socketPath: '/tmp/signal-cli.sock',
+        inboundMode: 'poll',
+        pollIntervalMs: 15_000,
+      },
+      expectedAdmins: ['+15551234567'],
+    },
+    {
+      name: 'imessage-line',
+      transport: 'imessage',
+      adminPhones: ['Owner@Example.com'],
+      field: 'imessageConfig',
+      config: {
+        account: 'imessage-line',
+        backend: 'imsg',
+        sender: 'owner@example.com',
+        imsgSocketPath: '/tmp/imsg.sock',
+        inboundMode: 'poll',
+        pollIntervalMs: 15_000,
+      },
+      expectedAdmins: ['owner@example.com'],
+    },
+    {
+      name: 'imessage-phone-line',
+      transport: 'imessage',
+      adminPhones: ['+15551234567'],
+      field: 'imessageConfig',
+      config: {
+        account: 'imessage-phone-line',
+        backend: 'imsg',
+        sender: '+15551234567',
+        imsgSocketPath: '/tmp/imsg.sock',
+        inboundMode: 'poll',
+        pollIntervalMs: 15_000,
+      },
+      expectedAdmins: ['+15551234567'],
+    },
+  ])('persists $transport config and canonical admin identities on create', async ({
+    name,
+    transport,
+    adminPhones,
+    field,
+    config,
+    expectedAdmins,
+  }) => {
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+    });
+    const res = mockRes();
+
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name,
+        type: 'passive',
+        transport,
+        adminPhones,
+        [field]: config,
+      })),
+      res,
+      deps,
+    );
+
+    expect(res._status).toBe(201);
+    const configPath = path.join(
+      process.env.XDG_CONFIG_HOME!,
+      'whatsoup',
+      'instances',
+      name,
+      'config.json',
+    );
+    const persisted = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(persisted.transport).toBe(transport);
+    expect(persisted[field]).toEqual(config);
+    expect(persisted.adminPhones).toEqual(expectedAdmins);
+    expect(deps.serviceManager.enable).toHaveBeenCalledWith(name);
+    expect(deps.serviceManager.start).toHaveBeenCalledWith(name);
+  });
+
+  it('stops, disables, and removes a non-Baileys line when start fails', async () => {
+    const name = 'signal-start-failure';
+    const svc = mockServiceManager();
+    svc.start.mockRejectedValueOnce(new Error('provider unavailable'));
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+      serviceManager: svc,
+    });
+    const res = mockRes();
+
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name,
+        type: 'passive',
+        transport: 'signal',
+        adminPhones: ['+15551234567'],
+        signalConfig: {
+          account: name,
+          phoneNumber: '+15551234567',
+          socketPath: '/tmp/signal-cli.sock',
+          inboundMode: 'poll',
+          pollIntervalMs: 15_000,
+        },
+      })),
+      res,
+      deps,
+    );
+
+    expect(res._status).toBe(500);
+    expect(JSON.parse(res._body).error).toMatch(/provider unavailable/);
+    expect(svc.stop).toHaveBeenCalledWith(name);
+    expect(svc.disable).toHaveBeenCalledWith(name);
+    expect(fs.existsSync(path.join(
+      process.env.XDG_CONFIG_HOME!,
+      'whatsoup',
+      'instances',
+      name,
+    ))).toBe(false);
+  });
+
+  it('preserves non-Baileys state when a post-start rollback cannot stop the service', async () => {
+    const name = 'signal-stop-rollback-failure';
+    const svc = mockServiceManager();
+    svc.stop.mockRejectedValueOnce(new Error('stop failed'));
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(() => {
+          throw new Error('scan failed after start');
+        }),
+      } as any,
+      serviceManager: svc,
+    });
+    const res = mockRes();
+
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name,
+        type: 'passive',
+        transport: 'signal',
+        adminPhones: ['+15551234567'],
+        signalConfig: {
+          account: name,
+          phoneNumber: '+15551234567',
+          socketPath: '/tmp/signal-cli.sock',
+          inboundMode: 'poll',
+          pollIntervalMs: 15_000,
+        },
+      })),
+      res,
+      deps,
+    );
+
+    expect(res._status).toBe(500);
+    expect(JSON.parse(res._body)).toEqual({
+      error: 'instance creation failed: scan failed after start',
+      rollbackError: 'service stop failed: stop failed',
+    });
+    expect(svc.start).toHaveBeenCalledWith(name);
+    expect(svc.stop).toHaveBeenCalledWith(name);
+    expect(svc.disable).toHaveBeenCalledWith(name);
+    expect(fs.existsSync(path.join(
+      process.env.XDG_CONFIG_HOME!,
+      'whatsoup',
+      'instances',
+      name,
+    ))).toBe(true);
+  });
+
+  it('strips raw Twilio auth tokens from a direct create request before persistence', async () => {
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+    });
+    const res = mockRes();
+
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'twilio-no-raw-secret',
+        type: 'passive',
+        transport: 'twilio',
+        adminPhones: ['15551234567'],
+        twilioConfig: {
+          account: 'twilio-no-raw-secret',
+          accountSid: `AC${'b'.repeat(32)}`,
+          authTokenService: 'whatsoup-twilio-test',
+          authToken: 'must-not-reach-disk',
+          phoneNumber: '+15551234567',
+          inboundMode: 'poll',
+          pollIntervalMs: 15_000,
+        },
+      })),
+      res,
+      deps,
+    );
+
+    expect(res._status).toBe(201);
+    const persisted = JSON.parse(fs.readFileSync(path.join(
+      process.env.XDG_CONFIG_HOME!,
+      'whatsoup',
+      'instances',
+      'twilio-no-raw-secret',
+      'config.json',
+    ), 'utf-8'));
+    expect(persisted.twilioConfig.authToken).toBeUndefined();
+    expect(persisted.twilioConfig.authTokenService).toBe('whatsoup-twilio-test');
+    expect(fs.readFileSync(path.join(
+      process.env.XDG_CONFIG_HOME!,
+      'whatsoup',
+      'instances',
+      'twilio-no-raw-secret',
+      'config.json',
+    ), 'utf-8')).not.toContain('must-not-reach-disk');
   });
 
   it('defaults an empty agent cwd to a home-confined workspace during create', async () => {
@@ -2331,6 +2686,37 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     expect(res._status).toBe(400);
   });
 
+  it('handleCreateLine rejects phone identities containing embedded non-phone text', async () => {
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+    });
+    const res = mockRes();
+
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'junk-admin',
+        type: 'chat',
+        adminPhones: ['privileged-user+15551234567'],
+      })),
+      res,
+      deps,
+    );
+
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/adminPhones/);
+    expect(fs.existsSync(path.join(
+      process.env.XDG_CONFIG_HOME!,
+      'whatsoup',
+      'instances',
+      'junk-admin',
+      'config.json',
+    ))).toBe(false);
+  });
+
   // handleCreateLine: passive with systemPrompt (ops.ts:1037-1040)
   it('handleCreateLine rejects a passive instance with systemPrompt', async () => {
     const deps = makeDeps({
@@ -2529,6 +2915,37 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
         res, deps, { name: 'test-line' });
       expect(res._status).toBe(400);
       expect(JSON.parse(res._body).error).toMatch(/adminPhones/);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('handleConfigUpdate rejects phone identities containing embedded non-phone text', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-wave-cfg-'));
+    try {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({
+        name: 'test-line',
+        type: 'chat',
+        transport: 'baileys',
+        adminPhones: ['15550000001'],
+        healthPort: 3010,
+        accessMode: 'self_only',
+      }));
+      const inst = fakeInstance({ configPath });
+      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const res = mockRes();
+
+      await handleConfigUpdate(
+        mockReq(JSON.stringify({ adminPhones: ['privileged-user+15551234567'] })),
+        res,
+        deps,
+        { name: 'test-line' },
+      );
+
+      expect(res._status).toBe(400);
+      expect(JSON.parse(res._body).error).toMatch(/adminPhones/);
+      expect(JSON.parse(fs.readFileSync(configPath, 'utf8')).adminPhones).toEqual(['15550000001']);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }

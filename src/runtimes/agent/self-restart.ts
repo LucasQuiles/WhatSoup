@@ -191,27 +191,30 @@ export function consumeIntentionalRestartMarker(
 
 /**
  * Hard admin gate for `restart_self`. Throws unless the turn's actor is an
- * instance admin over a WhatsApp-authenticated transport.
+ * instance admin over the namespace authenticated by the configured transport.
  *
- * QR-143: gate on `isWhatsAppAuthenticatedJid(actorJid)` BEFORE the phone
- * match. `resolvePhoneFromJid` collapses `<admin-digits>@sms` to the SAME bare
- * phone as a real WhatsApp admin, but @sms sender-ID is spoofable — without the
- * transport gate a spoofed SMS could induce a service restart (availability
- * DoS / instance-wide session reset). Mirrors `substrate.ts` `assertAdmin`.
+ * QR-143: bind `actorJid` to the configured transport BEFORE matching its
+ * canonical admin identity. Without that binding a spoofed SMS or an identity
+ * authenticated by a different provider could induce an instance-wide restart.
+ * Mirrors `substrate.ts` `assertAdmin`.
  *
  * Exported so both directions (authenticated-admin ALLOW, @sms DENY) are
  * unit-testable independently of the inline runtime wiring.
  */
 export function assertRestartSelfAdmin(
   session: SessionContext,
-  deps: { db: Database; adminPhones: Set<string> },
+  deps: { db: Database; adminPhones: Set<string>; transport?: string | null },
 ): void {
-  // QR-143 (B4): the grant primitive gates on authenticated transport FIRST and
-  // returns null for a spoofable @sms actor that collapses to admin digits.
-  const phone = resolvePhoneFromJidForGrant(session.actorJid ?? null, deps.db);
+  // QR-143 (B4): the grant primitive binds the namespace to the configured
+  // transport first and returns null for spoofable or cross-transport actors.
+  const phone = resolvePhoneFromJidForGrant(
+    session.actorJid ?? null,
+    deps.db,
+    deps.transport ?? 'baileys',
+  );
   if (phone === null) {
     throw new Error(
-      `restart_self is admin-only: actor "${session.actorJid ?? 'unresolved'}" is on a non-WhatsApp-authenticated transport and cannot be an admin`,
+      `restart_self is admin-only: actor "${session.actorJid ?? 'unresolved'}" is not authenticated for the configured transport`,
     );
   }
   if (!isAdminPhone(phone, deps.adminPhones)) {
@@ -249,7 +252,8 @@ export interface RestartSelfToolDeps {
   trigger: (opts: TriggerSelfRestartOptions) => Promise<{ ok: boolean; markerPath: string }>;
   /**
    * Admin gate (QR-047 + QR-143): throws if the turn's actor is not an instance
-   * admin over a WhatsApp-authenticated transport. Wired at the composition root
+   * admin over the namespace authenticated by the configured transport. Wired
+   * at the composition root
    * to `assertRestartSelfAdmin`, so a non-admin in an auto-responded chat — or a
    * spoofed `<admin-digits>@sms` sender — cannot induce the agent to restart the
    * service (prompt-injection / SMS-spoof DoS).

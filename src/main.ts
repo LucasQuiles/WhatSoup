@@ -35,7 +35,7 @@ import { createIngestHandler } from './core/ingest.ts';
 import { createCapabilityGrantManager, type CapabilityGrantManager } from './lib/capability-grant.ts';
 import { createSettingsPolicyAdapter, createFileGrantStore, assertGroupsRespectDenyFloor } from './core/capability-grant-adapter.ts';
 import { toConversationKey } from './core/conversation-key.ts';
-import { toPersonalJid, toLidJid, toSignalJid } from './core/jid-constants.ts';
+import { toPersonalJid, toLidJid, toSignalJid, toImessageJid } from './core/jid-constants.ts';
 import { selectReplayableDms, rememberReplayedId } from './core/admin.ts';
 import { DurabilityEngine, sendTracked, drainPendingOutbound } from './core/durability.ts';
 import { waitForHistorySyncThenRecover } from './core/post-connect-recovery.ts';
@@ -53,7 +53,13 @@ import {
 } from './core/chat-sync.ts';
 import { handleLabelsEdit, handleLabelsAssociation, cleanupOrphanedAssociations } from './core/label-sync.ts';
 import { handleBlocklistSet, handleBlocklistUpdate } from './core/blocklist-sync.ts';
-import { lookupAccess, updateAccess, insertAllowed, seedAutoRespondGroups, resolvePhoneFromJid } from './core/access-list.ts';
+import {
+  lookupAccess,
+  updateAccess,
+  insertAllowed,
+  seedAutoRespondGroups,
+  resolvePhoneFromJidForGrant,
+} from './core/access-list.ts';
 import { hydrateLidMappings, upsertLidMapping, mineMessageKey, mineGroupParticipants, reconcileLidMappings, setLidAuthDir, type LidReconcileState } from './core/lid-resolver.ts';
 import { isAdminPhone } from './lib/phone.ts';
 import { handleGroupsUpsert, handleGroupsUpdate } from './core/group-sync.ts';
@@ -91,9 +97,9 @@ function resolveTilde(p: string): string {
 }
 
 function toConfiguredDirectJid(identity: string): string {
-  return config.transport === 'signal'
-    ? toSignalJid(identity)
-    : toPersonalJid(identity);
+  if (config.transport === 'signal') return toSignalJid(identity);
+  if (config.transport === 'imessage') return toImessageJid(identity);
+  return toPersonalJid(identity);
 }
 
 const log = createChildLogger('main');
@@ -681,9 +687,9 @@ connectionManager.on('groupParticipantsUpdate', (data) => {
   if (!botAdded) return;
 
   // Check if the person who added the bot is an admin
-  const authorPhone = resolvePhoneFromJid(author, db);
-  if (!isAdminPhone(authorPhone, config.adminPhones)) {
-    log.info({ groupJid, author, authorPhone }, 'bot added to group by non-admin — not auto-allowing');
+  const authorIdentity = resolvePhoneFromJidForGrant(author, db, config.transport);
+  if (authorIdentity === null || !isAdminPhone(authorIdentity, config.adminPhones)) {
+    log.info({ groupJid, author }, 'bot added to group by non-admin — not auto-allowing');
     return;
   }
 
@@ -791,7 +797,9 @@ const healthServer = startHealthServer({
       log.info({ subjectType, subjectId }, 'access: allowed via POST /access — replaying queued messages');
       const jidFormats = config.transport === 'signal'
         ? [toSignalJid(subjectId)]
-        : [toPersonalJid(subjectId), toLidJid(subjectId)];
+        : config.transport === 'imessage'
+          ? [toImessageJid(subjectId)]
+          : [toPersonalJid(subjectId), toLidJid(subjectId)];
       for (const senderJid of jidFormats) {
         const stored = getMessagesBySender(db, senderJid);
         const { toReplay, groupSkipped } = selectReplayableDms(stored, config.adminReplayMax);

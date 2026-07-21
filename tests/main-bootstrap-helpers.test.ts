@@ -135,7 +135,7 @@ async function importMainWithMocks(options: {
   rawInstanceConfig?: string;
   pineconeState?: 'ready' | 'missing_index';
   accessMode?: 'self_only' | 'allowlist';
-  transport?: 'baileys' | 'signal';
+  transport?: 'baileys' | 'signal' | 'imessage';
   adminPhones?: string[];
   controlPeers?: string[];
   existingPaths?: string[];
@@ -367,6 +367,7 @@ async function importMainWithMocks(options: {
     toPersonalJid: vi.fn((phone: string) => `${phone}@s.whatsapp.net`),
     toLidJid: vi.fn((phone: string) => `${phone}@lid`),
     toSignalJid: vi.fn((identity: string) => `${identity}@signal`),
+    toImessageJid: vi.fn((identity: string) => `${identity.toLowerCase()}@imessage`),
     selectReplayableDms: vi.fn(() => ({
       toReplay: [] as StoredMessage[],
       groupSkipped: 0,
@@ -397,6 +398,7 @@ async function importMainWithMocks(options: {
     insertAllowed: vi.fn(),
     seedAutoRespondGroups: vi.fn(() => options.seedAutoRespondGroupsReturn ?? 0),
     resolvePhoneFromJid: vi.fn(() => '15551230000'),
+    resolvePhoneFromJidForGrant: vi.fn((): string | null => '15551230000'),
     hydrateLidMappings: vi.fn(() => 0),
     upsertLidMapping: vi.fn(),
     mineMessageKey: vi.fn(() => null),
@@ -476,6 +478,7 @@ async function importMainWithMocks(options: {
     toPersonalJid: mocks.toPersonalJid,
     toLidJid: mocks.toLidJid,
     toSignalJid: mocks.toSignalJid,
+    toImessageJid: mocks.toImessageJid,
   }));
   vi.doMock('../src/core/admin.ts', () => ({ selectReplayableDms: mocks.selectReplayableDms, rememberReplayedId: mocks.rememberReplayedId }));
   vi.doMock('../src/core/durability.ts', () => ({
@@ -507,6 +510,7 @@ async function importMainWithMocks(options: {
     lookupAccess: mocks.lookupAccess, updateAccess: mocks.updateAccess,
     insertAllowed: mocks.insertAllowed, seedAutoRespondGroups: mocks.seedAutoRespondGroups,
     resolvePhoneFromJid: mocks.resolvePhoneFromJid,
+    resolvePhoneFromJidForGrant: mocks.resolvePhoneFromJidForGrant,
   }));
   vi.doMock('../src/core/lid-resolver.ts', () => ({
     hydrateLidMappings: mocks.hydrateLidMappings, upsertLidMapping: mocks.upsertLidMapping,
@@ -937,6 +941,24 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       expect(h.insertAllowed).not.toHaveBeenCalledWith(h.db, 'group', expect.any(String));
     });
 
+    it('does not auto-allow when the author is not canonical for the configured transport', async () => {
+      const h = await importMainWithMocks();
+      h.resolvePhoneFromJidForGrant.mockReturnValueOnce(null);
+      h.connection.emit('groupParticipantsUpdate', {
+        groupJid: 'group@s.whatsapp.net',
+        author: '+1-555-123-4567@s.whatsapp.net',
+        participants: ['bot@s.whatsapp.net'],
+        action: 'add',
+      });
+      expect(h.resolvePhoneFromJidForGrant).toHaveBeenCalledWith(
+        '+1-555-123-4567@s.whatsapp.net',
+        h.db,
+        h.config.transport,
+      );
+      expect(h.insertAllowed).not.toHaveBeenCalledWith(h.db, 'group', expect.any(String));
+      expect(h.updateAccess).not.toHaveBeenCalled();
+    });
+
     it('skips auto-allow when group is already allowed', async () => {
       const h = await importMainWithMocks();
       h.lookupAccess.mockReturnValueOnce({ status: 'allowed' });
@@ -1016,6 +1038,24 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       expect(h.sendTracked).toHaveBeenCalledWith(
         h.connection,
         '+15551230000@signal',
+        expect.stringContaining('*Q* is online and ready'),
+        h.durability,
+        { replayPolicy: 'safe' },
+      );
+    });
+
+    it('routes an iMessage first-boot introduction to the canonical AppleID admin JID', async () => {
+      const h = await importMainWithMocks({
+        transport: 'imessage',
+        adminPhones: ['appleid@example.com'],
+        instanceConfig: { name: 'q', introSent: false },
+      });
+
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(h.sendTracked).toHaveBeenCalledWith(
+        h.connection,
+        'appleid@example.com@imessage',
         expect.stringContaining('*Q* is online and ready'),
         h.durability,
         { replayPolicy: 'safe' },
@@ -1274,6 +1314,30 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       );
     });
 
+    it('routes the default back-online notice to the canonical iMessage admin JID', async () => {
+      const h = await importMainWithMocks({
+        transport: 'imessage',
+        adminPhones: ['appleid@example.com'],
+        instanceConfig: {
+          name: 'q',
+          type: 'agent',
+          introSent: true,
+          agentOptions: { sessionScope: 'shared' },
+        },
+        pendingStartupMessage: null,
+      });
+
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(h.sendTracked).toHaveBeenCalledWith(
+        h.connection,
+        'appleid@example.com@imessage',
+        '*Agent back online* ✓',
+        h.durability,
+        { replayPolicy: 'unsafe', opType: 'status_ping' },
+      );
+    });
+
     it('logs warn when default startup notification delivery fails', async () => {
       const h = await importMainWithMocks({
         instanceConfig: {
@@ -1522,6 +1586,42 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       expect(h.chatRuntime.handleMessage).toHaveBeenCalledWith(expect.objectContaining({
         messageId: 'signal-pending-1',
         senderJid: '+15559990000@signal',
+      }));
+    });
+
+    it('replays a newly allowed iMessage peer from its canonical iMessage sender JID', async () => {
+      const h = await importMainWithMocks({ transport: 'imessage' });
+      const queued: StoredMessage = {
+        pk: 1,
+        messageId: 'imessage-pending-1',
+        conversationKey: 'sender@bb.example.test',
+        chatJid: 'sender@bb.example.test@imessage',
+        senderJid: 'sender@bb.example.test@imessage',
+        senderName: null,
+        content: 'pending hello',
+        contentText: null,
+        contentType: 'text',
+        isFromMe: false,
+        timestamp: 1_700_000_000,
+        quotedMessageId: null,
+        enrichmentProcessedAt: null,
+        enrichmentRetries: 0,
+        createdAt: '2026-07-21T00:00:00.000Z',
+        mediaPath: null,
+      };
+      h.getMessagesBySender.mockReturnValue([queued]);
+      h.selectReplayableDms.mockReturnValue({ toReplay: [queued], groupSkipped: 0 });
+
+      await h.getHealthDeps().handleAccessDecision('phone', 'sender@bb.example.test', 'allow');
+
+      expect(h.getMessagesBySender).toHaveBeenCalledTimes(1);
+      expect(h.getMessagesBySender).toHaveBeenCalledWith(
+        h.db,
+        'sender@bb.example.test@imessage',
+      );
+      expect(h.chatRuntime.handleMessage).toHaveBeenCalledWith(expect.objectContaining({
+        messageId: 'imessage-pending-1',
+        senderJid: 'sender@bb.example.test@imessage',
       }));
     });
 

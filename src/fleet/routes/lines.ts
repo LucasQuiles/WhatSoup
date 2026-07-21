@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { jsonResponse, requireInstance } from '../../lib/http.ts';
 import { asRecord } from '../../lib/type-guards.ts';
+import { stripPlaintextProviderKeys } from '../../lib/config-plaintext-keys.ts';
 import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
 import { normalizeFallbackEntriesFromInstanceConfig } from '../../core/fallback-chain.ts';
 import { extractLocal } from '../../core/access-list.ts';
@@ -499,6 +500,7 @@ export function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | 
     accessMode: inst.accessMode,
     healthPort: inst.healthPort,
     socketPath: inst.socketPath,
+    transport: inst.transport ?? 'baileys',
 
     // Poller status
     status: isConfigError ? 'config_error' : (poll?.status ?? 'unknown'),
@@ -598,7 +600,8 @@ export async function handleGetLine(
   let instanceConfig: Record<string, unknown> = {};
   try {
     const raw = await fs.promises.readFile(instance.configPath, 'utf-8');
-    instanceConfig = JSON.parse(raw);
+    const parsed = asRecord(JSON.parse(raw));
+    if (parsed) instanceConfig = stripPlaintextProviderKeys(parsed).clean;
   } catch { /* config unreadable */ }
 
   // Compute real messagesToday for detail view (derived from stats)
