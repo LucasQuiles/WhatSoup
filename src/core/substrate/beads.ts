@@ -446,7 +446,9 @@ export type ProposalBatchDriftReason =
   | 'missing'
   | 'not_proposed'
   | 'expected_state_mismatch'
-  | 'update_count_mismatch';
+  | 'update_count_mismatch'
+  | 'event_identity_mismatch'
+  | 'event_count_mismatch';
 
 export class ProposalBatchDriftError extends Error {
   readonly code = 'PROPOSAL_BATCH_DRIFT';
@@ -558,13 +560,19 @@ interface TransitionOperationOptions {
   updateCountError?: () => Error;
 }
 
+interface TransitionWriteResult {
+  eventId: number;
+  payloadJson: string;
+  at: number;
+}
+
 function transitionWithinTransaction(
   db: DatabaseSync,
   current: BeadRow,
   toStatus: BeadStatus,
   args: TransitionArgs,
   options: TransitionOperationOptions = {},
-): void {
+): TransitionWriteResult {
   const at = args.at ?? nowUnixSec();
   const sets: string[] = ['status = ?', 'updated_at = ?'];
   const binds: SQLInputValue[] = [toStatus, at];
@@ -576,16 +584,18 @@ function transitionWithinTransaction(
   if (Number(update.changes) !== 1) {
     throw options.updateCountError?.() ?? new Error('bead transition state changed before update');
   }
-  writeBeadEvent(db, {
+  const payload = {
+    from: current.status, to: toStatus,
+    ...options.extra,
+    ...(args.note ? { note: args.note } : {}),
+    ...(args.reason ? { reason: args.reason } : {}),
+  };
+  const eventId = writeBeadEvent(db, {
     beadId: current.id, eventType: 'status_change', actor: args.actor,
-    payload: {
-      from: current.status, to: toStatus,
-      ...options.extra,
-      ...(args.note ? { note: args.note } : {}),
-      ...(args.reason ? { reason: args.reason } : {}),
-    },
+    payload,
     at,
   });
+  return { eventId, payloadJson: JSON.stringify(payload), at };
 }
 
 function transition(
@@ -641,7 +651,15 @@ export function rejectProposalsBatch(
   const audit = { ...args.audit };
   const assertExpectedRows = args.assertExpectedRows;
   return withImmediateTransaction(db, () => {
+    const batchAt = at ?? nowUnixSec();
     const selectProposal = db.prepare('SELECT * FROM beads WHERE id = ?');
+    const selectEvent = db.prepare(`
+      SELECT bead_id, event_type, payload_json, actor, source_message_pk, created_at
+      FROM bead_events
+      WHERE id = ?
+    `);
+    const countEvents = db.prepare('SELECT COUNT(*) AS count FROM bead_events');
+    const eventCountBefore = (countEvents.get() as { count: number }).count;
     const rows = candidates.map((candidate) => {
       const row = selectProposal.get(candidate.id) as unknown as BeadRow | undefined;
       if (!row) throw new ProposalBatchDriftError('missing');
@@ -657,10 +675,8 @@ export function rejectProposalsBatch(
       assertExpectedRows(attestationRows);
     }
 
-    let affectedCount = 0;
-    let eventCount = 0;
     for (const row of rows) {
-      transitionWithinTransaction(db, row, 'cancelled', { actor, at }, {
+      const event = transitionWithinTransaction(db, row, 'cancelled', { actor, at: batchAt }, {
         extra: {
           rejection_reason: audit.reasonCode,
           classifier_version: audit.classifierVersion,
@@ -668,10 +684,32 @@ export function rejectProposalsBatch(
         },
         updateCountError: () => new ProposalBatchDriftError('update_count_mismatch'),
       });
-      affectedCount += 1;
-      eventCount += 1;
+      const storedEvent = selectEvent.get(event.eventId) as {
+        bead_id: number;
+        event_type: string;
+        payload_json: string;
+        actor: string;
+        source_message_pk: number | null;
+        created_at: number;
+      } | undefined;
+      if (
+        !storedEvent
+        || storedEvent.bead_id !== row.id
+        || storedEvent.event_type !== 'status_change'
+        || storedEvent.payload_json !== event.payloadJson
+        || storedEvent.actor !== actor
+        || storedEvent.source_message_pk !== null
+        || storedEvent.created_at !== event.at
+      ) {
+        throw new ProposalBatchDriftError('event_identity_mismatch');
+      }
     }
-    return { affectedCount, eventCount };
+    const eventCountAfter = (countEvents.get() as { count: number }).count;
+    const eventCount = eventCountAfter - eventCountBefore;
+    if (eventCount !== rows.length) {
+      throw new ProposalBatchDriftError('event_count_mismatch');
+    }
+    return { affectedCount: rows.length, eventCount };
   });
 }
 

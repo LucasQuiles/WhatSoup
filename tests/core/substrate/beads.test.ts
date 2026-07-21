@@ -795,6 +795,103 @@ describe('beads core', () => {
       expect(db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get()).toEqual(eventCountBefore);
     });
 
+    it('fails closed when SQLite silently suppresses a batch status event', () => {
+      const first = proposed('suppressed-first', 5018);
+      const second = proposed('suppressed-second', 5019);
+      const eventCountBefore = db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get();
+      db.raw.exec(`
+        CREATE TRIGGER suppress_cleanup_status_event
+        BEFORE INSERT ON bead_events
+        WHEN NEW.event_type = 'status_change'
+          AND NEW.actor = 'inline-proposal-cleanup'
+        BEGIN
+          SELECT RAISE(IGNORE);
+        END
+      `);
+
+      let thrown: unknown;
+      try {
+        reject([batchCandidate(first), batchCandidate(second)]);
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(ProposalBatchDriftError);
+      expect((thrown as ProposalBatchDriftError).reason).toBe('event_identity_mismatch');
+      expect(getBead(db.raw, first.id)!.bead.status).toBe('proposed');
+      expect(getBead(db.raw, second.id)!.bead.status).toBe('proposed');
+      expect(db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get()).toEqual(eventCountBefore);
+    });
+
+    it('fails closed when a trigger adds an extra batch audit event', () => {
+      const bead = proposed('extra-event', 5020);
+      const eventCountBefore = db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get();
+      db.raw.exec(`
+        CREATE TRIGGER duplicate_cleanup_status_event
+        AFTER INSERT ON bead_events
+        WHEN NEW.event_type = 'status_change'
+          AND NEW.actor = 'inline-proposal-cleanup'
+        BEGIN
+          INSERT INTO bead_events (
+            bead_id, event_type, payload_json, actor, source_message_pk, created_at
+          ) VALUES (
+            NEW.bead_id, 'cleanup_shadow', '{}', 'trigger', NULL, NEW.created_at
+          );
+        END
+      `);
+
+      let thrown: unknown;
+      try {
+        reject([batchCandidate(bead)]);
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(ProposalBatchDriftError);
+      expect((thrown as ProposalBatchDriftError).reason).toBe('event_count_mismatch');
+      expect(getBead(db.raw, bead.id)!.bead.status).toBe('proposed');
+      expect(db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get()).toEqual(eventCountBefore);
+    });
+
+    it('uses one timestamp for the entire batch when at is omitted', () => {
+      const first = proposed('timestamp-first', 5021);
+      const second = proposed('timestamp-second', 5022);
+      const initialTime = new Date('2033-05-18T03:33:20.000Z');
+      vi.useFakeTimers();
+      vi.setSystemTime(initialTime);
+      try {
+        const originalPrepare = db.raw.prepare.bind(db.raw);
+        let eventWrites = 0;
+        vi.spyOn(db.raw, 'prepare').mockImplementation((sql: string) => {
+          const statement = originalPrepare(sql);
+          if (!sql.includes('INSERT INTO bead_events')) return statement;
+          const runnable = statement as unknown as { run: (...params: SQLInputValue[]) => unknown };
+          const originalRun = runnable.run.bind(runnable);
+          vi.spyOn(runnable, 'run').mockImplementation((...params: SQLInputValue[]) => {
+            const result = originalRun(...params);
+            eventWrites += 1;
+            if (eventWrites === 1) vi.setSystemTime(new Date(initialTime.getTime() + 10_000));
+            return result;
+          });
+          return statement;
+        });
+
+        reject([batchCandidate(first), batchCandidate(second)], { at: undefined });
+
+        const cleanupEvents = db.raw.prepare(`
+          SELECT created_at FROM bead_events
+          WHERE actor = 'inline-proposal-cleanup'
+          ORDER BY id
+        `).all() as Array<{ created_at: number }>;
+        expect(cleanupEvents).toEqual([
+          { created_at: Math.floor(initialTime.getTime() / 1000) },
+          { created_at: Math.floor(initialTime.getTime() / 1000) },
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('rolls the full batch back when COMMIT fails before delegation', () => {
       const first = proposed('commit-first', 5012);
       const second = proposed('commit-second', 5013);
