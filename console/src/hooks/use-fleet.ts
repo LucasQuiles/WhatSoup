@@ -227,3 +227,20 @@ export function useRateLimits(name: string) {
     }),
   };
 }
+
+/** Live session inspector feed (terminal stage A) — same freshness contract. */
+export function useLiveSessions(name: string) {
+  const query = useQuery({
+    queryKey: ['live-sessions', name],
+    queryFn: () => api.getLiveSessions(name),
+    refetchInterval: POLL_LINES,
+    enabled: !!name,
+  });
+  return {
+    ...query,
+    freshness: queryFreshness({
+      dataUpdatedAt: query.dataUpdatedAt,
+      refetchFailed: query.isRefetchError,
+    }),
+  };
+}
