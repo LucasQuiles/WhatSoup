@@ -20,7 +20,8 @@ const PROBE_TIMEOUT_MS = 5_000;
 /**
  * Probe whether `binary` is spawnable on this host.
  *
- * Spawns `binary ['--version']` with piped stdio and a 5 s timeout.
+ * Spawns `binary ['--version']` with piped stdio, a caller-supplied explicit
+ * environment, and a 5 s timeout.
  *
  * - `ENOENT` spawn error → `{ status: 'missing', version: null }`
  * - stdout produced before exit (regardless of exit code) → `{ status: 'present', version: <first line> }`
@@ -31,6 +32,7 @@ const PROBE_TIMEOUT_MS = 5_000;
  */
 export async function probeFallbackBinary(
   binary: string,
+  env: NodeJS.ProcessEnv,
   spawnImpl: typeof spawn = spawn,
 ): Promise<BinaryPreflightResult> {
   return new Promise<BinaryPreflightResult>((resolve) => {
@@ -52,6 +54,7 @@ export async function probeFallbackBinary(
     try {
       child = spawnImpl(binary, ['--version'], {
         stdio: ['ignore', 'pipe', 'ignore'],
+        env,
       } as SpawnOptionsWithoutStdio);
     } catch (err) {
       // Synchronous throw from spawn itself (rare, platform-dependent).
@@ -220,9 +223,10 @@ export type ModelCatalogResult = {
  * an unknown model. This probe lets the runtime warn operators at window-arm
  * time instead of at first-turn failure.
  *
- * Spawns `binary ['models']` with piped stdio and the same 5 s kill-timer
- * discipline as probeFallbackBinary, then parses stdout lines as catalog ids
- * (blank lines and surrounding whitespace ignored).
+ * Spawns `binary ['models']` with piped stdio, a caller-supplied explicit
+ * environment, and the same 5 s kill-timer discipline as
+ * probeFallbackBinary, then parses stdout lines as catalog ids (blank lines
+ * and surrounding whitespace ignored).
  *
  * - a line equals `model` exactly → `{ status: 'found', suggestion: null }`
  * - a line matches case-insensitively only → `{ status: 'not_found', suggestion: <catalog casing> }`
@@ -235,9 +239,10 @@ export type ModelCatalogResult = {
 export async function probeModelCatalog(
   binary: string,
   model: string,
+  env: NodeJS.ProcessEnv,
   spawnImpl: typeof spawn = spawn,
 ): Promise<ModelCatalogResult> {
-  const outcome = await collectModelCatalogIds(binary, spawnImpl);
+  const outcome = await collectModelCatalogIds(binary, spawnImpl, env);
   // Any non-ok outcome (could-not-run or blank output) is indistinguishable
   // from a misbehaving binary for a MATCH verdict → fail open (unknown).
   if (!outcome.ok) {
@@ -306,6 +311,7 @@ type CatalogProbeOutcome =
 function collectModelCatalogIds(
   binary: string,
   spawnImpl: typeof spawn,
+  env?: NodeJS.ProcessEnv,
 ): Promise<CatalogProbeOutcome> {
   return new Promise<CatalogProbeOutcome>((resolve) => {
     let settled = false;
@@ -323,6 +329,11 @@ function collectModelCatalogIds(
     try {
       child = spawnImpl(binary, ['models'], {
         stdio: ['ignore', 'pipe', 'ignore'],
+        // probeModelCatalog threads its explicit (egress-scrubbed) env so the
+        // catalog probe routes like a real turn (exec-profile egress coverage);
+        // listModelCatalog passes none, leaving env undefined → the child
+        // inherits process.env, i.e. main's prior no-env behavior on that path.
+        env,
       } as SpawnOptionsWithoutStdio);
     } catch {
       settle({ ok: false, reason: 'spawn-error' });
