@@ -125,6 +125,9 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   // follow-on port-impl PRs (signal-cli JSON-RPC, imsg daemon, BlueBubbles HTTP)
   // replace the stubs with real adapter construction. Unreachable until then
   // because no production code constructs the adapters.
+  { path: 'src/transport/signal/adapter.ts', issue: '#1975', reason: 'Signal adapter contract; factory stub throws until signal-cli port-impl PR wires it' },
+  { path: 'src/transport/signal/port.ts', issue: '#1975', reason: 'Signal Port interface; consumed only by the adapter, which the factory stub does not yet construct' },
+  { path: 'src/transport/signal/types.ts', issue: '#1975', reason: 'Signal config/types; consumed only by the adapter + port, neither wired into the factory yet' },
   // signal adapter/port/types graduated out of TRACKED_UNREACHABLE: the
   // factory now constructs the signal-cli port (this branch), so all three
   // are reachable from a production root. imessage entries stay tracked until
