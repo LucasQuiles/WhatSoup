@@ -3,7 +3,7 @@
  * @vitest-environment jsdom
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { createElement } from 'react'
 import ReviewStep from '../../console/src/components/wizard/ReviewStep'
 
@@ -59,7 +59,7 @@ describe('ReviewStep — Identity card', () => {
     })
     expect(screen.getByText('Identity')).toBeDefined()
     expect(kvValue('Name')).toBe('review-fixture-1')
-    expect(kvValue('Admin phones')).toBe('3 configured')
+    expect(kvValue('Admin IDs')).toBe('3 configured')
     // ModeBadge renders the mode label inside the KV row.
     expect(screen.getByText('chat')).toBeDefined()
   })
@@ -67,7 +67,7 @@ describe('ReviewStep — Identity card', () => {
   it('falls back to "-" when name is missing and omits the Description row when empty', () => {
     renderReview({ data: { type: 'agent', adminPhones: [] } })
     expect(kvValue('Name')).toBe('-')
-    expect(kvValue('Admin phones')).toBe('0 configured')
+    expect(kvValue('Admin IDs')).toBe('0 configured')
     expect(kvExists('Description')).toBe(false)
   })
 
@@ -235,12 +235,27 @@ describe('ReviewStep — Config card agent-only rows', () => {
 describe('ReviewStep — Edit buttons', () => {
   it('clicking each card Edit button calls onEditPhase with the matching phase index', () => {
     const { onEditPhase } = renderReview({ data: { name: 'edit-fix', type: 'agent' } })
-    const buttons = screen.getAllByRole('button', { name: /edit/i })
-    expect(buttons).toHaveLength(3)
-    fireEvent.click(buttons[0])
-    fireEvent.click(buttons[1])
-    fireEvent.click(buttons[2])
-    expect(onEditPhase.mock.calls.map(([phase]) => phase)).toEqual([0, 2, 3])
+    // Target each card's edit control by its card heading — card order can
+    // change (the PR 4b-ii Transport card shifted the positional indices).
+    const expected: Array<[heading: string, phase: number]> = [
+      ['Identity', 0],
+      ['Transport', 0],
+      ['Model & Auth', 2],
+      ['Config', 3],
+    ]
+    for (const [heading, phase] of expected) {
+      onEditPhase.mockClear()
+      const headingEl = screen
+        .getAllByText(heading)
+        .find((el) => el.className.includes('text-data'))
+      expect(headingEl, `card heading ${heading}`).toBeDefined()
+      const editBtn = within(headingEl!.parentElement as HTMLElement).getByRole('button', {
+        name: /edit/i,
+      })
+      fireEvent.click(editBtn)
+      expect(onEditPhase).toHaveBeenCalledTimes(1)
+      expect(onEditPhase).toHaveBeenCalledWith(phase)
+    }
   })
 })
 
