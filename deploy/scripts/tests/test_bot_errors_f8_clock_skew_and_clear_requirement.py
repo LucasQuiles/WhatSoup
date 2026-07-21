@@ -1259,6 +1259,7 @@ class DispatcherClearEnforcementTests(IsolatedDispatcherTestCase):
         digest = self.mod.clear_event_identity_digest(event)
         self.assertIn(digest, authorized["acceptedClearNotifications"])
         authorization_before = json.loads(json.dumps(authorized["acceptedClearNotifications"][digest]))
+        receipt_before = json.loads(json.dumps(authorized["processedEvents"][digest]))
         self.assertNotIn(unit_key, authorized["openIncidents"])
 
         queued = json.loads(event_path.read_text(encoding="utf-8"))
@@ -1267,28 +1268,31 @@ class DispatcherClearEnforcementTests(IsolatedDispatcherTestCase):
         with patch.object(self.mod, "send_whatsapp") as send:
             self.assert_isolated(paths)
             ok, detail = self.mod.process_one(event_path, paths)
-        self.assertTrue(ok, detail)
-        self.assertEqual(detail, "suppressed")
+        self.assertFalse(ok)
+        self.assertEqual(detail, "protocol_quarantine:identity_collision")
         send.assert_not_called()
         persisted = self.mod.load_incident_state(paths)
         self.assertIn(digest, persisted["acceptedClearNotifications"])
         self.assertEqual(persisted["acceptedClearNotifications"][digest], authorization_before)
+        self.assertEqual(persisted["processedEvents"][digest], receipt_before)
         self.assertNotIn("dailyHealthFreshness", persisted)
         self.assertFalse(event_path.exists())
-        suppressed = json.loads(next(paths["suppressed"].iterdir()).read_text(encoding="utf-8"))
-        reason = suppressed["delivery"]["suppressedReason"]
-        self.assertIn("accepted_clear_notification_tamper", reason)
+        self.assertFalse(list(paths["suppressed"].iterdir()))
+        self.assertEqual(len(list(paths["quarantine"].iterdir())), 1)
+        self.assertEqual(len(persisted["processedEventCollisions"]), 1)
+        self.assertEqual(persisted["processedEventCollisions"][0]["identityDigest"], digest)
+        self.assertNotIn("tampered same-id alert", json.dumps(persisted["processedEventCollisions"]))
         dispatch_records = [
             json.loads(line)
             for line in (paths["logs"] / "dispatch.jsonl").read_text(encoding="utf-8").splitlines()
         ]
-        tamper_audit = [
+        collision_audit = [
             record for record in dispatch_records
-            if record.get("type") == "suppressed"
-            and "accepted_clear_notification_tamper" in str(record.get("reason") or "")
+            if record.get("type") == "protocol_quarantine"
+            and record.get("reason") == "identity_collision"
         ]
-        self.assertEqual(len(tamper_audit), 1)
-        self.assertNotIn("tampered same-id alert", json.dumps(tamper_audit))
+        self.assertEqual(len(collision_audit), 1)
+        self.assertNotIn("tampered same-id alert", json.dumps(collision_audit))
 
     def test_retry_authorization_order_survives_sorted_save_reload_and_overflow(self) -> None:
         paths = self.mod.setup_dirs()

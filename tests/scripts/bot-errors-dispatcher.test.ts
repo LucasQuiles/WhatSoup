@@ -392,7 +392,7 @@ describe('bot-errors-dispatcher', () => {
       createdAt: '2026-05-31T00:05:00Z',
       summary: 'BOT ERRORS daily health passed',
       evidence: [
-        'health line-a: 200 status=healthy wa_connected=true state=connected',
+        'health line-a: 200 status=healthy wa_connected=true state=connected Result=success ExecMainStatus=0',
         'auth_bond_status=present auth_bond_creds_exists=true auth_bond_creds_size=42',
         'auth_failure_class=none',
       ].join(' '),
@@ -413,9 +413,24 @@ describe('bot-errors-dispatcher', () => {
     const incidentState = JSON.parse(readFileSync(join(tmpRoot, 'incident-state.json'), 'utf8')) as {
       openIncidents: Record<string, unknown>;
       lastSentAt: Record<string, unknown>;
+      closedHistory: Array<{ incidentKey: string; receipt: { status: string } }>;
+      processedEvents: Record<string, { decision: string; notificationState: string }>;
+      acceptedClearNotifications?: Record<string, unknown>;
     };
     expect(incidentState.openIncidents).not.toHaveProperty(incidentKey);
     expect(incidentState.lastSentAt).not.toHaveProperty(incidentKey);
+    expect(incidentState.closedHistory).toHaveLength(1);
+    expect(incidentState.closedHistory[0]).toMatchObject({
+      incidentKey,
+      receipt: { status: 'accepted' },
+    });
+    expect(Object.values(incidentState.processedEvents)).toEqual([
+      expect.objectContaining({
+        decision: 'accepted_clear_suppressed',
+        notificationState: 'not_applicable',
+      }),
+    ]);
+    expect(incidentState.acceptedClearNotifications).toBeUndefined();
     const [suppressedFile] = readdirSync(suppressed);
     const suppressedEvent = JSON.parse(readFileSync(join(suppressed, suppressedFile!), 'utf8')) as {
       diagnostics?: { sourceSpecificRecoveredIncidents?: string[] };

@@ -37,9 +37,15 @@ from bot_errors_protocol import (
     ClearStatus,
     NormalizedObservation,
     ObservationState,
+    ProcessedReceiptCapacityError,
+    ProcessedReceiptValidationError,
     QuarantineReason,
+    QuarantineReasonCode,
+    classify_processed_event,
     evaluate_clear,
     normalize_observation,
+    normalize_processed_events,
+    prune_processed_events,
     stronger_clear_policy,
 )
 
@@ -107,6 +113,10 @@ BOT_ERRORS_TRANSIENT_MAX_ATTEMPTS = positive_env_int("BOT_ERRORS_TRANSIENT_MAX_A
 BOT_ERRORS_TRANSIENT_BACKOFF_SECONDS = positive_env_int("BOT_ERRORS_TRANSIENT_BACKOFF_SECONDS", 300)
 DEAD_LETTER_META_ALERT_THROTTLE_SECONDS = 3600  # at most one meta-alert per hour
 CLOCK_SKEW_TOLERANCE_SECONDS = 60  # tolerate up to 60s clock skew on clear events
+PROCESSED_EVENT_CAPACITY = 2048
+PROCESSED_EVENT_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
+PROCESSED_EVENT_COLLISION_LIMIT = 50
+FLAP_EVENT_REFERENCE_LIMIT = 2048
 INCIDENT_RENOTIFY_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_RENOTIFY_SECONDS", 6 * 60 * 60)
 INCIDENT_RENOTIFY_CAP_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_RENOTIFY_CAP_SECONDS", 6 * 60 * 60)
 INCIDENT_ESCALATE_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_ESCALATE_SECONDS", 24 * 60 * 60)
@@ -714,16 +724,27 @@ def load_incident_state(paths: dict[str, Path]) -> dict[str, Any]:
     if isinstance(loaded.get("promotionSafety"), dict):
         state["promotionSafety"] = loaded["promotionSafety"]
     if isinstance(loaded.get("closedHistory"), list):
-        state["closedHistory"] = loaded["closedHistory"][-50:]
+        state["closedHistory"] = [
+            record for record in loaded["closedHistory"] if isinstance(record, dict)
+        ][-50:]
     if isinstance(loaded.get("acceptedClearNotifications"), dict):
         accepted: list[tuple[str, dict[str, Any]]] = []
         for digest, record in loaded["acceptedClearNotifications"].items():
             if not isinstance(record, dict):
                 continue
             sequence = record.get("sequence")
+            notification_state = record.get("notificationState")
             accepted.append((
                 str(digest),
-                {**record, "sequence": sequence if type(sequence) is int and sequence > 0 else 0},
+                {
+                    **record,
+                    "sequence": sequence if type(sequence) is int and sequence > 0 else 0,
+                    "notificationState": (
+                        notification_state
+                        if notification_state in {"pending", "delivered"}
+                        else "pending"
+                    ),
+                },
             ))
         accepted.sort(key=lambda item: (item[1]["sequence"], item[0]))
         accepted = accepted[-50:]
@@ -733,6 +754,18 @@ def load_incident_state(paths: dict[str, Path]) -> dict[str, Any]:
             loaded_sequence if type(loaded_sequence) is int and loaded_sequence >= 0 else 0,
             max((record["sequence"] for _, record in accepted), default=0),
         )
+    if isinstance(loaded.get("processedEventCollisions"), list):
+        state["processedEventCollisions"] = [
+            record for record in loaded["processedEventCollisions"] if isinstance(record, dict)
+        ][-PROCESSED_EVENT_COLLISION_LIMIT:]
+    normalized_receipts = normalize_processed_events(loaded.get("processedEvents"))
+    state["processedEvents"] = prune_processed_events(
+        normalized_receipts,
+        protected_identities=protected_processed_event_identities(state, int(time.time())),
+        now=int(time.time()),
+        max_age_seconds=PROCESSED_EVENT_MAX_AGE_SECONDS,
+        capacity=PROCESSED_EVENT_CAPACITY,
+    )
     # Per-host daily-health freshness ledger — the heartbeat-watchdog's authoritative
     # liveness source. Must survive across one-shot runs; without this preserve the
     # ledger would reset every invocation and the watchdog would fall back to scanning
@@ -1719,8 +1752,14 @@ def append_clear_proof_evidence(
         for entry in history
     ):
         return False
+    normalized_event = normalize_dispatch_observation(event) if isinstance(event, dict) else None
     history.append({
         "proofIdentity": proof_identity,
+        "eventIdentityDigest": (
+            event_replay_identity_digest(event, normalized_event)
+            if isinstance(event, dict) and isinstance(normalized_event, NormalizedObservation)
+            else ""
+        ),
         "reason": decision.reason,
         "receipt": decision.proof_receipt,
     })
@@ -1733,6 +1772,7 @@ def finalize_accepted_clear(
     key: str,
     event: dict[str, Any],
     decision: ClearDecision,
+    normalized: NormalizedObservation | None = None,
 ) -> None:
     record = incident_state.setdefault("openIncidents", {}).get(key)
     if not isinstance(record, dict):
@@ -1740,10 +1780,31 @@ def finalize_accepted_clear(
     history = incident_state.get("closedHistory")
     if not isinstance(history, list):
         history = []
+    if normalized is None:
+        candidate = normalize_dispatch_observation(event)
+        normalized = candidate if isinstance(candidate, NormalizedObservation) else None
+    closing_identity = (
+        event_replay_identity_digest(event, normalized) if normalized is not None else ""
+    )
     history.append({
         "incidentKey": key,
         "eventId": redacted_state_text(event.get("id"), 128),
         "closedAt": int(time.time()),
+        "receiptTime": int(time.time()),
+        "openingEventIdentityDigest": str(record.get("eventIdentityDigest") or ""),
+        "closingEventIdentityDigest": closing_identity,
+        "openingEvidenceFingerprint": str(record.get("evidenceFingerprint") or ""),
+        "closingEvidenceFingerprint": (
+            event_evidence_fingerprint(event, normalized) if normalized is not None else ""
+        ),
+        "openingEventContentDigest": str(record.get("eventContentDigest") or ""),
+        "closingEventContentDigest": event_content_digest(event),
+        "openingObservationTime": int_field(
+            record, "eventCreatedAtEpoch", int_field(record, "openedAt")
+        ),
+        "closingObservationTime": (
+            normalized.observed_at_epoch if normalized is not None else event_created_epoch(event) or 0
+        ),
         "receipt": decision.proof_receipt,
     })
     incident_state["closedHistory"] = history[-50:]
@@ -1755,48 +1816,281 @@ def finalize_accepted_clear(
 
 
 def clear_event_identity_digest(event: dict[str, Any]) -> str:
+    normalized = normalize_dispatch_observation(event)
+    if isinstance(normalized, NormalizedObservation):
+        return event_replay_identity_digest(event, normalized)
+    return raw_event_id_digest(event)
+
+
+def raw_event_id_digest(event: dict[str, Any]) -> str:
     return hashlib.sha256(str(event.get("id") or "").encode("utf-8")).hexdigest()
 
 
-def clear_notification_content_digest(event: dict[str, Any]) -> str:
-    """Bind retry authority to immutable notification content, not delivery state."""
-    diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
-    message_diagnostics = {
-        key: diagnostics[key]
-        for key in ("logHints", "writefailRecovery", "queue", "dispatchLog")
-        if key in diagnostics
-    }
-    rendered_event = {**event, "delivery": {}, "diagnostics": message_diagnostics}
-    content = {
-        key: event[key]
+def accepted_clear_notification_key(
+    event: dict[str, Any],
+    normalized: NormalizedObservation,
+) -> str:
+    return event_replay_identity_digest(event, normalized)
+
+
+def event_content_digest(event: dict[str, Any]) -> str:
+    """Hash every producer semantic field except dispatcher-owned retry metadata."""
+    content = json.loads(json.dumps(event))
+    content.pop("delivery", None)
+    diagnostics = content.get("diagnostics")
+    if isinstance(diagnostics, dict):
         for key in (
-            "schemaVersion",
-            "id",
-            "eventType",
-            "severity",
-            "source",
-            "alertSource",
-            "machine",
-            "instance",
-            "platform",
-            "createdAt",
-            "observedAt",
-            "summary",
-            "evidence",
-            "criticalAsset",
-            "observation",
-            "clearPolicy",
-            "remediation",
-            "process",
-            "storm",
-        )
-        if key in event
-    }
-    content["diagnostics"] = message_diagnostics
-    content["requestedAction"] = requested_action_text(event)
-    content["rendered"] = format_event(rendered_event)
+            "dispatchLog",
+            "queue",
+            "writefailRecovery",
+            "sourceSpecificRecoveredIncidents",
+        ):
+            diagnostics.pop(key, None)
+        if not diagnostics:
+            content.pop("diagnostics", None)
     canonical = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def clear_notification_content_digest(event: dict[str, Any]) -> str:
+    """Preserve B3's content-bound clear authorization on the shared digest."""
+    return event_content_digest(event)
+
+
+def event_replay_identity_digest(
+    event: dict[str, Any],
+    normalized: NormalizedObservation,
+) -> str:
+    if normalized.schema_version == 2:
+        material: Any = str(event.get("id") or "")
+    else:
+        event_id = str(event.get("id") or "")
+        material = {
+            "schemaVersion": 1,
+            "eventId": event_id,
+            "createdAt": str(event.get("createdAt") or ""),
+            "incidentKey": normalized.incident_key,
+            "incidentSource": normalized.incident_source,
+            **({"syntheticContentDigest": event_content_digest(event)} if not event_id else {}),
+        }
+    canonical = (
+        material if isinstance(material, str)
+        else json.dumps(material, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def event_evidence_fingerprint(
+    event: dict[str, Any],
+    normalized: NormalizedObservation,
+) -> str:
+    return normalized.fingerprint or event_content_digest(event)
+
+
+def event_display_identity(event: dict[str, Any], identity_digest: str) -> str:
+    event_id = str(event.get("id") or "")
+    if not event_id:
+        return f"synthetic:{identity_digest[:16]}"
+    return redacted_state_text(event_id, 128)
+
+
+def _collect_identity_references(value: Any, protected: set[str]) -> None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key.endswith("IdentityDigest") and isinstance(child, str) and re.fullmatch(r"[a-f0-9]{64}", child):
+                protected.add(child)
+            elif key.endswith("IdentityDigests") and isinstance(child, list):
+                for digest in child:
+                    if isinstance(digest, str) and re.fullmatch(r"[a-f0-9]{64}", digest):
+                        protected.add(digest)
+            else:
+                _collect_identity_references(child, protected)
+    elif isinstance(value, list):
+        for child in value:
+            _collect_identity_references(child, protected)
+
+
+def protected_processed_event_identities(
+    incident_state: dict[str, Any],
+    now: int,
+) -> set[str]:
+    protected: set[str] = set()
+    open_incidents = incident_state.get("openIncidents")
+    if isinstance(open_incidents, dict):
+        _collect_identity_references(open_incidents, protected)
+    accepted = incident_state.get("acceptedClearNotifications")
+    if isinstance(accepted, dict):
+        for record in accepted.values():
+            if not isinstance(record, dict) or record.get("notificationState") != "pending":
+                continue
+            digest = record.get("eventIdentityDigest") or record.get("eventIdDigest")
+            if isinstance(digest, str) and re.fullmatch(r"[a-f0-9]{64}", digest):
+                protected.add(digest)
+    history = incident_state.get("closedHistory")
+    if isinstance(history, list):
+        for record in history:
+            if not isinstance(record, dict):
+                continue
+            receipt_time = record.get("receiptTime", record.get("closedAt"))
+            if type(receipt_time) is int and now - receipt_time <= PROCESSED_EVENT_MAX_AGE_SECONDS:
+                _collect_identity_references(record, protected)
+    flap_state = incident_state.get("flapState")
+    if isinstance(flap_state, dict):
+        _collect_identity_references(flap_state, protected)
+    return protected
+
+
+def record_processed_event(
+    incident_state: dict[str, Any],
+    event: dict[str, Any],
+    normalized: NormalizedObservation,
+    *,
+    decision: str,
+    notification_state: str,
+    receipt_time: int | None = None,
+    identity_digest: str | None = None,
+    content_digest: str | None = None,
+    evidence_fingerprint: str | None = None,
+) -> str:
+    current = int(time.time()) if receipt_time is None else receipt_time
+    identity_digest = identity_digest or event_replay_identity_digest(event, normalized)
+    processed = normalize_processed_events(incident_state.get("processedEvents"))
+    if identity_digest in processed:
+        raise ValueError("first processed-event receipt is immutable")
+    processed[identity_digest] = processed_event_receipt(
+        event,
+        normalized,
+        decision=decision,
+        notification_state=notification_state,
+        receipt_time=current,
+        identity_digest=identity_digest,
+        content_digest=content_digest,
+        evidence_fingerprint=evidence_fingerprint,
+    )
+    incident_state["processedEvents"] = prune_processed_events(
+        processed,
+        protected_identities=protected_processed_event_identities(incident_state, current),
+        now=current,
+        max_age_seconds=PROCESSED_EVENT_MAX_AGE_SECONDS,
+        capacity=PROCESSED_EVENT_CAPACITY,
+        required_identity=identity_digest,
+    )
+    return identity_digest
+
+
+def processed_event_receipt(
+    event: dict[str, Any],
+    normalized: NormalizedObservation,
+    *,
+    decision: str,
+    notification_state: str,
+    receipt_time: int,
+    identity_digest: str,
+    content_digest: str | None = None,
+    evidence_fingerprint: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "identityDigest": identity_digest,
+        "displayIdentity": event_display_identity(event, identity_digest),
+        "evidenceFingerprint": evidence_fingerprint or event_evidence_fingerprint(event, normalized),
+        "eventContentDigest": content_digest or event_content_digest(event),
+        "incidentKey": normalized.incident_key,
+        "incidentSource": normalized.incident_source,
+        "observationTime": max(0, normalized.observed_at_epoch),
+        "receiptTime": receipt_time,
+        "decision": str(decision)[:128],
+        "notificationState": notification_state,
+    }
+
+
+def preflight_processed_event_capacity(
+    incident_state: dict[str, Any],
+    event: dict[str, Any],
+    normalized: NormalizedObservation,
+    *,
+    identity_digest: str,
+    content_digest: str,
+    evidence_fingerprint: str,
+    now: int,
+) -> None:
+    candidate = dict(normalize_processed_events(incident_state.get("processedEvents")))
+    candidate[identity_digest] = processed_event_receipt(
+        event,
+        normalized,
+        decision="preflight",
+        notification_state="not_applicable",
+        receipt_time=now,
+        identity_digest=identity_digest,
+        content_digest=content_digest,
+        evidence_fingerprint=evidence_fingerprint,
+    )
+    prune_processed_events(
+        candidate,
+        protected_identities=protected_processed_event_identities(incident_state, now),
+        now=now,
+        max_age_seconds=PROCESSED_EVENT_MAX_AGE_SECONDS,
+        capacity=PROCESSED_EVENT_CAPACITY,
+        required_identity=identity_digest,
+    )
+
+
+def append_processed_event_collision(
+    incident_state: dict[str, Any],
+    event: dict[str, Any],
+    normalized: NormalizedObservation,
+    identity_digest: str,
+) -> None:
+    audit = incident_state.get("processedEventCollisions")
+    if not isinstance(audit, list):
+        audit = []
+    audit.append({
+        "identityDigest": identity_digest,
+        "incomingContentDigest": event_content_digest(event),
+        "incomingEvidenceFingerprint": event_evidence_fingerprint(event, normalized),
+        "incidentKey": normalized.incident_key[:512],
+        "incidentSource": normalized.incident_source[:256],
+        "displayIdentity": event_display_identity(event, identity_digest),
+        "receiptTime": int(time.time()),
+    })
+    incident_state["processedEventCollisions"] = audit[-PROCESSED_EVENT_COLLISION_LIMIT:]
+
+
+def settle_processed_notification(
+    incident_state: dict[str, Any],
+    identity_digest: str,
+    event: dict[str, Any],
+    normalized: NormalizedObservation,
+) -> None:
+    processed = incident_state.get("processedEvents")
+    receipt = processed.get(identity_digest) if isinstance(processed, dict) else None
+    if isinstance(receipt, dict):
+        receipt["notificationState"] = "delivered"
+    accepted = incident_state.get("acceptedClearNotifications")
+    authorization = (
+        accepted.get(accepted_clear_notification_key(event, normalized))
+        if isinstance(accepted, dict) else None
+    )
+    if isinstance(authorization, dict):
+        authorization["notificationState"] = "delivered"
+
+
+def stale_after_retained_close(
+    incident_state: dict[str, Any],
+    normalized: NormalizedObservation,
+) -> bool:
+    if normalized.state is not ObservationState.FAULT:
+        return False
+    history = incident_state.get("closedHistory")
+    if not isinstance(history, list):
+        return False
+    closing_times = [
+        record.get("closingObservationTime")
+        for record in history
+        if isinstance(record, dict)
+        and record.get("incidentKey") == normalized.incident_key
+        and type(record.get("closingObservationTime")) is int
+    ]
+    return bool(closing_times) and normalized.observed_at_epoch <= max(closing_times)
 
 
 def record_accepted_clear_notification(
@@ -1811,11 +2105,14 @@ def record_accepted_clear_notification(
     prior_sequence = incident_state.get("acceptedClearNotificationSequence")
     sequence = (prior_sequence if type(prior_sequence) is int and prior_sequence >= 0 else 0) + 1
     incident_state["acceptedClearNotificationSequence"] = sequence
-    digest = clear_event_identity_digest(event)
+    digest = accepted_clear_notification_key(event, normalized)
+    event_identity_digest = event_replay_identity_digest(event, normalized)
     accepted[digest] = {
         "sequence": sequence,
-        "eventIdDigest": digest,
+        "eventIdDigest": raw_event_id_digest(event),
+        "eventIdentityDigest": event_identity_digest,
         "notificationContentDigest": clear_notification_content_digest(event),
+        "notificationState": "pending",
         "incidentKey": normalized.incident_key,
         "incidentSource": normalized.incident_source,
         "schemaVersion": normalized.schema_version,
@@ -1841,12 +2138,16 @@ def pending_clear_notification_decision(
     incident_state: dict[str, Any],
     normalized: NormalizedObservation,
 ) -> ClearDecision | None:
-    event_id_digest = clear_event_identity_digest(event)
+    event_id_digest = accepted_clear_notification_key(event, normalized)
     accepted = incident_state.get("acceptedClearNotifications")
     record = accepted.get(event_id_digest) if isinstance(accepted, dict) else None
-    if not isinstance(record, dict) or accepted_clear_notification_tamper_reason(
-        event, incident_state, normalized
-    ) is not None:
+    if (
+        not isinstance(record, dict)
+        or record.get("notificationState") != "pending"
+        or accepted_clear_notification_tamper_reason(
+            event, incident_state, normalized
+        ) is not None
+    ):
         return None
     receipt = {
         "status": ClearStatus.ACCEPTED.value,
@@ -1865,7 +2166,7 @@ def accepted_clear_notification_tamper_reason(
     incident_state: dict[str, Any],
     normalized: NormalizedObservation,
 ) -> str | None:
-    event_id_digest = clear_event_identity_digest(event)
+    event_id_digest = accepted_clear_notification_key(event, normalized)
     accepted = incident_state.get("acceptedClearNotifications")
     record = accepted.get(event_id_digest) if isinstance(accepted, dict) else None
     if not isinstance(record, dict):
@@ -1877,8 +2178,14 @@ def accepted_clear_notification_tamper_reason(
         "observedAtEpoch": normalized.observed_at_epoch,
         "eventType": normalized.event_type,
     }
-    if record.get("eventIdDigest") != event_id_digest:
+    if record.get("eventIdDigest") != raw_event_id_digest(event):
         return "accepted_clear_notification_tamper: event identity digest mismatch"
+    stored_replay_identity = record.get("eventIdentityDigest")
+    if (
+        stored_replay_identity is not None
+        and stored_replay_identity != event_replay_identity_digest(event, normalized)
+    ):
+        return "accepted_clear_notification_tamper: replay identity digest mismatch"
     if any(record.get(key) != value for key, value in expected.items()):
         return "accepted_clear_notification_tamper: normalized notification identity mismatch"
     if record.get("notificationContentDigest") != clear_notification_content_digest(event):
@@ -2524,6 +2831,17 @@ def archive_path(directory: Path, original_name: str, status: str, event: dict[s
     return safe_child_path(directory, f"{original_name}.{int(time.time())}.{status}")
 
 
+def archive_terminal_event(
+    claimed: Path,
+    destination: Path,
+    terminal_event: dict[str, Any],
+) -> None:
+    """Persist terminal output without rewriting the replay-owned claimed input."""
+    atomic_write_json(destination, terminal_event)
+    claimed.unlink()
+    fsync_parent(claimed)
+
+
 def should_suppress_send(
     event: dict[str, Any],
     incident_state: dict[str, Any],
@@ -2628,6 +2946,7 @@ def should_suppress_send(
                     weak = []
                 weak.append({
                     "eventId": redacted_state_text(event.get("id"), 128),
+                    "eventIdentityDigest": event_replay_identity_digest(event, normalized),
                     "observedAt": normalized.observed_at_epoch,
                     "classification": "inferred_transient",
                 })
@@ -2640,6 +2959,10 @@ def should_suppress_send(
             open_record["lastSeenAt"] = current
             open_record["lastSeenIso"] = now_iso()
             open_record["lastEventId"] = event.get("id")
+            if normalized is not None:
+                open_record["lastEventIdentityDigest"] = event_replay_identity_digest(
+                    event, normalized
+                )
             open_record["lastSummary"] = redacted_state_text(event.get("summary"), 500)
             open_record["lastEvidence"] = redacted_state_text(event.get("evidence"), 1000, tail=True)
             suppressed = int_field(open_record, "suppressedCount") + 1
@@ -2835,6 +3158,11 @@ def mark_incident_sent(
             "forceNotifyLevels": force_levels,
         }
         if normalized is not None:
+            incoming_identity = event_replay_identity_digest(event, normalized)
+            updated_record["eventIdentityDigest"] = incoming_identity
+            updated_record["lastEventIdentityDigest"] = incoming_identity
+            updated_record["evidenceFingerprint"] = event_evidence_fingerprint(event, normalized)
+            updated_record["eventContentDigest"] = event_content_digest(event)
             updated_record["incidentKey"] = normalized.incident_key
             updated_record["incidentSource"] = normalized.incident_source
             stored_schema = existing_record.get("schemaVersion")
@@ -3298,10 +3626,23 @@ def flap_trips_in_window(entry: dict[str, Any], now: int) -> int:
     )
 
 
-def record_flap_trip(flap_state: dict[str, Any], key: str, now: int) -> dict[str, Any]:
+def record_flap_trip(
+    flap_state: dict[str, Any],
+    key: str,
+    now: int,
+    event_identity_digest: str | None = None,
+) -> dict[str, Any]:
     """Record one raw trip for incident_key at wall-clock `now`, pruning the
     sliding window. Counts input per raw trip (C1)."""
     entry = flap_entry(flap_state, key)
+    references = entry.get("eventIdentityDigests")
+    if not isinstance(references, list):
+        references = []
+    if event_identity_digest is not None and event_identity_digest in references:
+        return entry
+    if event_identity_digest is not None:
+        references.append(event_identity_digest)
+        entry["eventIdentityDigests"] = references[-FLAP_EVENT_REFERENCE_LIMIT:]
     pruned = [t for t in entry["tripTimestamps"] if isinstance(t, (int, float)) and 0 <= now - t <= FLAP_WINDOW_SECONDS]
     pruned.append(now)
     entry["tripTimestamps"] = pruned
@@ -3389,7 +3730,7 @@ def flap_storm_event(key: str, entry: dict[str, Any], severity: str, now: int) -
         "id": f"flap-storm-{safe_segment(key)}-{now}",
         "eventType": "alert",
         "severity": severity,
-        "createdAt": now_iso(),
+        "createdAt": iso_from_epoch(now),
         **fields,
         "source": "flap_storm",
         "alertSource": underlying,
@@ -3449,13 +3790,49 @@ def flap_resolve_event(key: str, entry: dict[str, Any], now: int) -> dict[str, A
     }
 
 
+def flush_pending_flap_notifications(
+    paths: dict[str, Path],
+    incident_state: dict[str, Any],
+) -> int:
+    flap_state = incident_state.get("flapState")
+    if not isinstance(flap_state, dict):
+        return 0
+    queued = 0
+    known_index = build_known_event_index(paths)
+    for key in sorted(flap_state):
+        entry = flap_state.get(key)
+        pending = entry.get("pendingStormNotification") if isinstance(entry, dict) else None
+        if not isinstance(entry, dict) or not isinstance(pending, dict):
+            continue
+        decision_at = pending.get("decisionAt")
+        severity = pending.get("severity")
+        if type(decision_at) is not int or severity not in {"warning", "critical"}:
+            continue
+        event = flap_storm_event(str(key), entry, str(severity), decision_at)
+        if not event_already_known(event, paths, known_index):
+            outbox_path = outbox_path_for_event(event, paths)
+            atomic_write_json(outbox_path, event)
+            remember_known_event(known_index, event)
+            queued += 1
+        entry.pop("pendingStormNotification", None)
+        save_incident_state(paths, incident_state)
+        append_dispatch_log(paths, {
+            "type": "flap_storm_queued",
+            "incidentKey": key,
+            "severity": severity,
+            "decisionAt": decision_at,
+        })
+    return queued
+
+
 def flap_scan_outbox(paths: dict[str, Path]) -> int:
     """Pre-collapse pass (§10 C1): record ONE flap trip per raw incident-alert
-    event currently in the outbox, keyed by incident_key, and emit consolidated
-    flap_storm alerts when a key crosses threshold / promotes. Runs BEFORE
+    event currently in the outbox, keyed by incident_key, and enqueue consolidated
+    flap_storm events when a key crosses threshold / promotes. Runs BEFORE
     collapse_ready_storms so trips count raw input, not post-collapse survivors.
     Member events are suppressed later in should_suppress_send via flapState.
-    Returns the number of storm alerts emitted. Fail-open throughout.
+    Returns the number of storm events queued. A pending notification makes the
+    scan fail closed until the durable event is in the outbox.
     """
     if not FLAP_DETECTION:
         return 0
@@ -3463,10 +3840,13 @@ def flap_scan_outbox(paths: dict[str, Path]) -> int:
         incident_state = load_incident_state(paths)
     except Exception:  # noqa: BLE001 - never block dispatch on a flap read
         return 0
+    try:
+        emitted = flush_pending_flap_notifications(paths, incident_state)
+    except Exception as exc:  # noqa: BLE001 - durable pending state retains retry authority.
+        append_dispatch_log(paths, {"type": "flap_pending_enqueue_failed", "error": str(exc)})
+        return 0
     flap_state = incident_state.setdefault("flapState", {})
     now = int(time.time())
-    emitted = 0
-    changed = False
     for path in sorted(paths["outbox"].glob("*.json")):
         try:
             if not ready(path, paths):
@@ -3480,12 +3860,41 @@ def flap_scan_outbox(paths: dict[str, Path]) -> int:
             continue
         key = incident_key(event)
         try:
-            entry = record_flap_trip(flap_state, key, now)
-            changed = True
+            normalized = normalize_dispatch_observation(event)
+            if not isinstance(normalized, NormalizedObservation):
+                continue
+            identity_digest = event_replay_identity_digest(event, normalized)
+            processed = incident_state.get("processedEvents")
+            if isinstance(processed, dict) and identity_digest in processed:
+                continue
+            if stale_after_retained_close(incident_state, normalized):
+                continue
+            existing_entry = flap_entry(flap_state, key)
+            if isinstance(existing_entry.get("pendingStormNotification"), dict):
+                continue
+            existing_references = existing_entry.get("eventIdentityDigests")
+            if isinstance(existing_references, list) and identity_digest in existing_references:
+                continue
+            preflight_processed_event_capacity(
+                incident_state,
+                event,
+                normalized,
+                identity_digest=identity_digest,
+                content_digest=event_content_digest(event),
+                evidence_fingerprint=event_evidence_fingerprint(event, normalized),
+                now=now,
+            )
+            entry = record_flap_trip(flap_state, key, now, identity_digest)
             decision = flap_evaluate(entry, now)
             if decision.get("emit"):
-                send_whatsapp(format_event(flap_storm_event(key, entry, str(decision["severity"]), now)))
-                emitted += 1
+                entry["pendingStormNotification"] = {
+                    "decisionAt": now,
+                    "severity": str(decision["severity"]),
+                    "reason": str(decision.get("reason") or "")[:128],
+                }
+            save_incident_state(paths, incident_state)
+            if decision.get("emit"):
+                emitted += flush_pending_flap_notifications(paths, incident_state)
                 append_dispatch_log(paths, {
                     "type": "flap_storm",
                     "incidentKey": key,
@@ -3496,9 +3905,18 @@ def flap_scan_outbox(paths: dict[str, Path]) -> int:
                 })
         except Exception as exc:  # noqa: BLE001 - one bad event must not block the scan
             append_dispatch_log(paths, {"type": "flap_scan_error", "incidentKey": key, "error": str(exc)})
+            try:
+                incident_state = load_incident_state(paths)
+                flap_state = incident_state.setdefault("flapState", {})
+                if any(
+                    isinstance(entry, dict)
+                    and isinstance(entry.get("pendingStormNotification"), dict)
+                    for entry in flap_state.values()
+                ):
+                    return emitted
+            except Exception:
+                return emitted
             continue
-    if changed:
-        save_incident_state(paths, incident_state)
     return emitted
 
 
@@ -4715,19 +5133,27 @@ def created_matches(known_values: set[str], created_at: str) -> bool:
     return (not created_at) or (not known_values) or ("" in known_values) or (created_at in known_values)
 
 
-def build_known_event_index(paths: dict[str, Path]) -> dict[str, dict[str, Any]]:
+def build_known_event_index(
+    paths: dict[str, Path],
+    directory_keys: tuple[str, ...] | None = None,
+) -> dict[str, dict[str, Any]]:
     index: dict[str, dict[str, Any]] = {}
-    for key in ("outbox", "processing", "sent", "storm_collapsed", "suppressed", "quarantine"):
+    keys = directory_keys or (
+        "outbox", "processing", "sent", "storm_collapsed", "suppressed", "quarantine"
+    )
+    for key in keys:
         directory = paths[key]
         if not directory.exists():
             continue
         for path in directory.glob("*"):
-            if not path.is_file():
+            if path.is_symlink() or not path.is_file():
                 continue
             try:
                 existing = read_json(path)
             except Exception:
                 continue
+            if key == "dead_letter" and isinstance(existing.get("event"), dict):
+                existing = existing["event"]
             remember_known_event(index, existing)
     return index
 
@@ -4955,14 +5381,162 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
         })
         return False, "test_leak"
 
+    try:
+        incident_state = load_incident_state(paths)
+    except (ProcessedReceiptCapacityError, ProcessedReceiptValidationError) as exc:
+        retry_path = safe_child_path(paths["outbox"], original_name_from_processing(claimed))
+        os.replace(claimed, retry_path)
+        fsync_parent(retry_path)
+        append_dispatch_log(paths, {
+            "type": "processed_receipt_state_invalid",
+            "eventId": redacted_state_text(event.get("id"), 128),
+            "path": str(retry_path),
+            "errorKind": type(exc).__name__,
+        })
+        return False, f"processed_receipt_state_invalid: {exc}"
+
+    replay_identity = event_replay_identity_digest(event, normalized)
+    replay_content = event_content_digest(event)
+    replay_fingerprint = event_evidence_fingerprint(event, normalized)
+    raw_processed = incident_state.get("processedEvents")
+    processed = raw_processed if isinstance(raw_processed, dict) else {}
+    existing_receipt = processed.get(replay_identity)
+    authorized_pending_replay = pending_clear_notification_decision(
+        event, incident_state, normalized
+    )
+    if (
+        isinstance(existing_receipt, dict)
+        and authorized_pending_replay is not None
+        and isinstance(existing_receipt.get("eventContentDigest"), str)
+    ):
+        replay_content = str(existing_receipt["eventContentDigest"])
+    replay_classification = classify_processed_event(
+        processed, replay_identity, replay_content
+    )
+    if replay_classification.status == "identity_collision":
+        append_processed_event_collision(incident_state, event, normalized, replay_identity)
+        try:
+            save_incident_state(paths, incident_state)
+        except Exception as exc:
+            retry_path = safe_child_path(paths["outbox"], original_name_from_processing(claimed))
+            os.replace(claimed, retry_path)
+            fsync_parent(retry_path)
+            append_dispatch_log(paths, {
+                "type": "collision_state_persist_failed",
+                "eventId": redacted_state_text(event.get("id"), 128),
+                "path": str(retry_path),
+                "error": str(exc),
+            })
+            return False, f"collision_state_persist_failed: {exc}"
+        _, hardened = quarantine_protocol_event(
+            claimed,
+            paths,
+            event,
+            QuarantineReason(QuarantineReasonCode.IDENTITY_COLLISION),
+            source_name=path.name,
+        )
+        if not hardened:
+            return False, "protocol_quarantine_inconclusive:permission_hardening_failed"
+        return False, "protocol_quarantine:identity_collision"
+
+    pending_replay_decision = None
+    if replay_classification.status == "exact_replay":
+        pending_replay_decision = authorized_pending_replay
+        if pending_replay_decision is None:
+            event = mark_suppressed(event, "exact replay retained by processed-event receipt")
+            replay_path = archive_path(paths["suppressed"], path.name, "exact_replay", event)
+            archive_terminal_event(claimed, replay_path, event)
+            append_dispatch_log(paths, {
+                "type": "exact_replay",
+                "eventId": redacted_state_text(event.get("id"), 128),
+                "identityDigest": replay_identity,
+                "path": str(replay_path),
+            })
+            return True, "exact_replay"
+
+    if replay_classification.status == "new":
+        try:
+            preflight_processed_event_capacity(
+                incident_state,
+                event,
+                normalized,
+                identity_digest=replay_identity,
+                content_digest=replay_content,
+                evidence_fingerprint=replay_fingerprint,
+                now=int(time.time()),
+            )
+        except Exception as exc:
+            retry_path = safe_child_path(paths["outbox"], original_name_from_processing(claimed))
+            os.replace(claimed, retry_path)
+            fsync_parent(retry_path)
+            append_dispatch_log(paths, {
+                "type": "processed_receipt_capacity_exhausted",
+                "eventId": redacted_state_text(event.get("id"), 128),
+                "path": str(retry_path),
+                "errorKind": type(exc).__name__,
+            })
+            return False, f"processed_receipt_capacity_exhausted: {exc}"
+
+    if replay_classification.status == "new" and authorized_pending_replay is not None:
+        try:
+            record_processed_event(
+                incident_state,
+                event,
+                normalized,
+                decision="accepted_clear",
+                notification_state="pending",
+                identity_digest=replay_identity,
+                content_digest=replay_content,
+                evidence_fingerprint=replay_fingerprint,
+            )
+            save_incident_state(paths, incident_state)
+        except Exception as exc:
+            retry_path = safe_child_path(paths["outbox"], original_name_from_processing(claimed))
+            os.replace(claimed, retry_path)
+            fsync_parent(retry_path)
+            return False, f"pending_receipt_persist_failed: {exc}"
+        pending_replay_decision = authorized_pending_replay
+
+    if replay_classification.status == "new" and stale_after_retained_close(
+        incident_state, normalized
+    ):
+        try:
+            record_processed_event(
+                incident_state,
+                event,
+                normalized,
+                decision="stale_out_of_order",
+                notification_state="not_applicable",
+                identity_digest=replay_identity,
+                content_digest=replay_content,
+                evidence_fingerprint=replay_fingerprint,
+            )
+            save_incident_state(paths, incident_state)
+        except Exception as exc:
+            retry_path = safe_child_path(paths["outbox"], original_name_from_processing(claimed))
+            os.replace(claimed, retry_path)
+            fsync_parent(retry_path)
+            append_dispatch_log(paths, {
+                "type": "stale_receipt_persist_failed",
+                "eventId": redacted_state_text(event.get("id"), 128),
+                "path": str(retry_path),
+                "error": str(exc),
+            })
+            return False, f"stale_receipt_persist_failed: {exc}"
+        event = mark_suppressed(event, "stale/out-of-order event retained as replay evidence")
+        stale_path = archive_path(paths["suppressed"], path.name, "stale_out_of_order", event)
+        archive_terminal_event(claimed, stale_path, event)
+        return True, "stale_out_of_order"
+
     diagnostics = event.setdefault("diagnostics", {})
     if isinstance(diagnostics, dict) and not omit_dispatch_log_in_message(event):
         diagnostics["dispatchLog"] = str(paths["logs"] / "dispatch.jsonl")
     event = mark_attempt(event)
     atomic_write_json(claimed, event)
-    incident_state = load_incident_state(paths)
-    tamper_reason = accepted_clear_notification_tamper_reason(
-        event, incident_state, normalized
+    tamper_reason = (
+        None
+        if pending_replay_decision is not None
+        else accepted_clear_notification_tamper_reason(event, incident_state, normalized)
     )
 
     # Stamp daily-health liveness into the durable freshness ledger before any
@@ -4970,11 +5544,12 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
     # (suppress, send-success) then carry it, and the high-frequency info cadence is
     # always suppressed (and thus always saved). The watchdog reads this ledger
     # instead of the FIFO-pruned suppressed/ archive.
-    if tamper_reason is None:
+    if tamper_reason is None and pending_replay_decision is None:
         record_daily_health_freshness(event, incident_state)
 
     if (
         tamper_reason is None
+        and pending_replay_decision is None
         and str(event.get("source") or "") == "daily-health"
         and not is_incident_clear(event)
     ):
@@ -4983,7 +5558,7 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
             diagnostics = event.setdefault("diagnostics", {})
             if isinstance(diagnostics, dict):
                 diagnostics["sourceSpecificClearCandidates"] = candidates
-    clear_decision = (
+    clear_decision = pending_replay_decision or (
         direct_clear_decision(event, incident_state, normalized)
         if tamper_reason is None else None
     )
@@ -4991,7 +5566,9 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
         clear_decision = pending_clear_notification_decision(event, incident_state, normalized)
     source_decisions = (
         source_specific_clear_decisions(event, incident_state, normalized)
-        if tamper_reason is None and str(event.get("source") or "") == "daily-health"
+        if tamper_reason is None
+        and pending_replay_decision is None
+        and str(event.get("source") or "") == "daily-health"
         else []
     )
     proof_state_changes: list[str] = []
@@ -4999,11 +5576,52 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
         event, incident_state, normalized, clear_decision, source_decisions, proof_state_changes
     )
     if suppress_reason:
+        receipt_decision = "suppressed"
+        suppressed_accepted_closures = [
+            (key, decision)
+            for key, decision in source_decisions
+            if decision.status is ClearStatus.ACCEPTED
+        ]
+        if suppressed_accepted_closures:
+            recovered_keys = [key for key, _ in suppressed_accepted_closures]
+            event_diagnostics = event.setdefault("diagnostics", {})
+            if isinstance(event_diagnostics, dict):
+                event_diagnostics["sourceSpecificRecoveredIncidents"] = recovered_keys
+            for accepted_key, accepted_decision in suppressed_accepted_closures:
+                finalize_accepted_clear(
+                    incident_state, accepted_key, event, accepted_decision, normalized
+                )
+            receipt_decision = "accepted_clear_suppressed"
+        elif clear_decision is not None and clear_decision.status is ClearStatus.REJECTED:
+            receipt_decision = "clear_rejected"
+        elif clear_decision is not None and clear_decision.status is ClearStatus.CANDIDATE:
+            receipt_decision = "clear_candidate"
+        try:
+            record_processed_event(
+                incident_state,
+                event,
+                normalized,
+                decision=receipt_decision,
+                notification_state="not_applicable",
+                identity_digest=replay_identity,
+                content_digest=replay_content,
+                evidence_fingerprint=replay_fingerprint,
+            )
+            save_incident_state(paths, incident_state)
+        except Exception as exc:
+            retry_path = safe_child_path(paths["outbox"], original_name_from_processing(claimed))
+            os.replace(claimed, retry_path)
+            fsync_parent(retry_path)
+            append_dispatch_log(paths, {
+                "type": "suppressed_state_persist_failed",
+                "eventId": redacted_state_text(event.get("id"), 128),
+                "path": str(retry_path),
+                "error": str(exc),
+            })
+            return False, f"suppressed_state_persist_failed: {exc}"
         event = mark_suppressed(event, suppress_reason)
-        atomic_write_json(claimed, event)
-        save_incident_state(paths, incident_state)
         suppressed_path = archive_path(paths["suppressed"], path.name, "suppressed", event)
-        os.replace(claimed, suppressed_path)
+        archive_terminal_event(claimed, suppressed_path, event)
         append_dispatch_log(paths, {
             "type": "suppressed",
             "eventId": event.get("id"),
@@ -5038,13 +5656,26 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
     )
     if accepted_closures:
         for accepted_key, accepted_decision in accepted_closures:
-            finalize_accepted_clear(incident_state, accepted_key, event, accepted_decision)
+            finalize_accepted_clear(
+                incident_state, accepted_key, event, accepted_decision, normalized
+            )
         record_accepted_clear_notification(
             incident_state, event, normalized, accepted_closures
         )
     if accepted_closures or proof_state_changes:
         failure_type = "clear_state_persist_failed" if accepted_closures else "proof_state_persist_failed"
         try:
+            if accepted_closures:
+                record_processed_event(
+                    incident_state,
+                    event,
+                    normalized,
+                    decision="accepted_clear",
+                    notification_state="pending",
+                    identity_digest=replay_identity,
+                    content_digest=replay_content,
+                    evidence_fingerprint=replay_fingerprint,
+                )
             save_incident_state(paths, incident_state)
         except Exception as exc:
             retry_path = safe_child_path(paths["outbox"], original_name_from_processing(claimed))
@@ -5145,16 +5776,39 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
         })
         return False, f"{exc}; email_fallback={email_status}"
 
-    if not is_incident_clear(event) or not (
-        clear_decision is not None and clear_decision.status is ClearStatus.ACCEPTED
-        or accepted_closures
-    ):
-        mark_incident_sent(event, incident_state, normalized, clear_decision)
+    try:
+        if accepted_closures or pending_replay_decision is not None:
+            settle_processed_notification(
+                incident_state, replay_identity, event, normalized
+            )
+        else:
+            mark_incident_sent(event, incident_state, normalized, clear_decision)
+            record_processed_event(
+                incident_state,
+                event,
+                normalized,
+                decision="sent_alert",
+                notification_state="delivered",
+                identity_digest=replay_identity,
+                content_digest=replay_content,
+                evidence_fingerprint=replay_fingerprint,
+            )
         save_incident_state(paths, incident_state)
+    except Exception as exc:
+        retry_path = safe_child_path(paths["outbox"], original_name_from_processing(claimed))
+        os.replace(claimed, retry_path)
+        fsync_parent(retry_path)
+        append_dispatch_log(paths, {
+            "type": "post_send_state_persist_failed",
+            "eventId": redacted_state_text(event.get("id"), 128),
+            "path": str(retry_path),
+            "error": str(exc),
+            "deliveryGuarantee": "at_least_once_post_send_crash_window",
+        })
+        return False, f"post_send_state_persist_failed: {exc}"
     event = mark_sent(event)
-    atomic_write_json(claimed, event)
     sent_path = archive_path(paths["sent"], path.name, "sent", event)
-    os.replace(claimed, sent_path)
+    archive_terminal_event(claimed, sent_path, event)
     append_dispatch_log(paths, {
         "type": "sent",
         "eventId": event.get("id"),
@@ -5175,7 +5829,7 @@ def run_once(max_events: int) -> dict[str, Any]:
         test_provenance_suppressed, test_provenance_meta_alerted = suppress_test_provenance_events(paths)
         recovery_deduped = suppress_ready_recovery_duplicates(paths)
         # Pattern F (§10 C1): count flap trips on raw input BEFORE storm-collapse
-        # consumes members. Emits consolidated flap_storm alerts; members are
+        # consumes members. Queues consolidated flap_storm events; members are
         # suppressed downstream in should_suppress_send via persisted flapState.
         flap_storms = flap_scan_outbox(paths)
         storm_collapsed = collapse_ready_storms(paths)

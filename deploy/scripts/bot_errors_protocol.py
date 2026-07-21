@@ -38,6 +38,7 @@ class QuarantineReasonCode(str, Enum):
     INVALID_V2_OBSERVATION = "invalid_v2_observation"
     INVALID_V2_CLEAR_POLICY = "invalid_v2_clear_policy"
     INVALID_V2_REMEDIATION = "invalid_v2_remediation"
+    IDENTITY_COLLISION = "identity_collision"
 
 
 @dataclass(frozen=True)
@@ -108,6 +109,24 @@ class ClearDecision:
     proof_receipt: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class ProcessedEventClassification:
+    status: str
+    receipt: dict[str, Any] | None = None
+
+
+class ProcessedReceiptCapacityError(RuntimeError):
+    def __init__(self, protected_count: int):
+        super().__init__("processed-event receipt capacity exhausted")
+        self.protected_count = protected_count
+
+
+class ProcessedReceiptValidationError(RuntimeError):
+    def __init__(self, invalid_count: int):
+        super().__init__("persisted processed-event receipts are invalid")
+        self.invalid_count = invalid_count
+
+
 _POLICY_STRENGTH = {
     ClearPolicyKind.SAME_SOURCE_NEWER: 0,
     ClearPolicyKind.HEALTH_SNAPSHOT: 1,
@@ -133,6 +152,9 @@ _AUTHORIZATION = {
 }
 _ACTION_RE = re.compile(r"^[a-z][a-z0-9_.:-]{0,127}$")
 _FINGERPRINT_RE = re.compile(r"^[a-f0-9]{64}$")
+_RECEIPT_DECISION_MAX_LENGTH = 128
+_RECEIPT_DISPLAY_IDENTITY_MAX_LENGTH = 128
+_RECEIPT_NOTIFICATION_STATES = {"not_applicable", "pending", "delivered"}
 _PROOF_REF_MAX_LENGTH = 512
 _IDENTITY_FIELD_MAX_LENGTH = 256
 _INCIDENT_KEY_MAX_LENGTH = 512
@@ -154,6 +176,129 @@ _AUTH_BOND_FAILURE_CODES = {
     "WA_AUTH_BOND_SERVER_REVOKED",
     "WA_AUTH_BOND_SNAPSHOT_CAPTURE_FAILED",
 }
+
+
+def normalize_processed_events(value: Any) -> dict[str, dict[str, Any]]:
+    """Validate persisted replay receipts without repairing ambiguous evidence."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ProcessedReceiptValidationError(1)
+    normalized: dict[str, dict[str, Any]] = {}
+    invalid_count = 0
+    for identity_digest, raw in value.items():
+        if (
+            not isinstance(identity_digest, str)
+            or _FINGERPRINT_RE.fullmatch(identity_digest) is None
+            or not isinstance(raw, dict)
+            or raw.get("identityDigest") != identity_digest
+        ):
+            invalid_count += 1
+            continue
+        evidence_fingerprint = raw.get("evidenceFingerprint")
+        content_digest = raw.get("eventContentDigest")
+        incident_key = raw.get("incidentKey")
+        incident_source = raw.get("incidentSource")
+        display_identity = raw.get("displayIdentity")
+        observation_time = raw.get("observationTime")
+        receipt_time = raw.get("receiptTime")
+        decision = raw.get("decision")
+        notification_state = raw.get("notificationState")
+        if (
+            not isinstance(evidence_fingerprint, str)
+            or _FINGERPRINT_RE.fullmatch(evidence_fingerprint) is None
+            or not isinstance(content_digest, str)
+            or _FINGERPRINT_RE.fullmatch(content_digest) is None
+            or not isinstance(incident_key, str)
+            or not incident_key
+            or len(incident_key) > _INCIDENT_KEY_MAX_LENGTH
+            or not isinstance(incident_source, str)
+            or not incident_source
+            or len(incident_source) > _IDENTITY_FIELD_MAX_LENGTH
+            or not isinstance(display_identity, str)
+            or len(display_identity) > _RECEIPT_DISPLAY_IDENTITY_MAX_LENGTH
+            or type(observation_time) is not int
+            or observation_time < 0
+            or type(receipt_time) is not int
+            or receipt_time < 0
+            or not isinstance(decision, str)
+            or not decision
+            or len(decision) > _RECEIPT_DECISION_MAX_LENGTH
+            or notification_state not in _RECEIPT_NOTIFICATION_STATES
+        ):
+            invalid_count += 1
+            continue
+        normalized[identity_digest] = {
+            "identityDigest": identity_digest,
+            "displayIdentity": display_identity,
+            "evidenceFingerprint": evidence_fingerprint,
+            "eventContentDigest": content_digest,
+            "incidentKey": incident_key,
+            "incidentSource": incident_source,
+            "observationTime": observation_time,
+            "receiptTime": receipt_time,
+            "decision": decision,
+            "notificationState": notification_state,
+        }
+    if invalid_count:
+        raise ProcessedReceiptValidationError(invalid_count)
+    return normalized
+
+
+def classify_processed_event(
+    processed_events: dict[str, dict[str, Any]],
+    identity_digest: str,
+    event_content_digest: str,
+) -> ProcessedEventClassification:
+    """Classify an immutable normalized identity without mutating its first receipt."""
+    existing = processed_events.get(identity_digest)
+    if not isinstance(existing, dict):
+        return ProcessedEventClassification("new")
+    if existing.get("eventContentDigest") == event_content_digest:
+        return ProcessedEventClassification("exact_replay", existing)
+    return ProcessedEventClassification("identity_collision", existing)
+
+
+def prune_processed_events(
+    processed_events: dict[str, dict[str, Any]],
+    *,
+    protected_identities: set[str],
+    now: int,
+    max_age_seconds: int,
+    capacity: int,
+    required_identity: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Pure deterministic age/capacity pruning with fail-closed protection."""
+    if capacity <= 0 or max_age_seconds <= 0:
+        raise ValueError("processed-event retention bounds must be positive")
+    protected_existing = set(protected_identities)
+    protected = set(protected_existing)
+    if required_identity is not None:
+        protected.add(required_identity)
+    retained = {
+        identity: receipt
+        for identity, receipt in processed_events.items()
+        if identity in protected
+        or not (
+            type(receipt.get("receiptTime")) is int
+            and now - receipt["receiptTime"] > max_age_seconds
+        )
+    }
+    while len(retained) > capacity:
+        candidates = [identity for identity in retained if identity not in protected]
+        if not candidates:
+            raise ProcessedReceiptCapacityError(
+                len([identity for identity in retained if identity in protected_existing])
+            )
+        oldest = min(
+            candidates,
+            key=lambda identity: (int(retained[identity]["receiptTime"]), identity),
+        )
+        retained.pop(oldest)
+    return dict(sorted(
+        retained.items(),
+        key=lambda item: (int(item[1]["receiptTime"]), item[0]),
+    ))
 
 
 def stronger_clear_policy(
