@@ -141,9 +141,12 @@ describe('buildChildEnv — opencode-cli least-authority environment', () => {
 
     const env = buildChildEnv('gemini-cli');
 
-    expect(env.GOOGLE_API_KEY).toBeUndefined();
-    expect(env.GEMINI_API_KEY).toBeUndefined();
-    expect(env.GOOGLE_GENERATIVE_AI_API_KEY).toBeUndefined();
+    const presentAliases = Object.keys(env).filter((name) => [
+      'GOOGLE_API_KEY',
+      'GEMINI_API_KEY',
+      'GOOGLE_GENERATIVE_AI_API_KEY',
+    ].includes(name));
+    expect(presentAliases).toEqual([]);
   });
 
   it.each(MODEL_CREDENTIAL_CASES)(
