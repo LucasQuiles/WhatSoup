@@ -772,6 +772,12 @@ const healthServer = startHealthServer({
   instanceName: config.botName,
   instanceType: instanceType,
   accessMode: config.accessMode,
+  // D-4 console approval queue: only the agent runtime owns the
+  // pending-poll machinery; chat/passive instances omit the callback and
+  // the health endpoint answers 503 honestly.
+  resolvePollDecision: runtime instanceof AgentRuntime
+    ? (decision) => runtime.resolvePollDecisionFromConsole(decision)
+    : undefined,
   handleAccessDecision: async (subjectType, subjectId, action) => {
     if (action === 'allow' && subjectType === 'phone') {
       // Replay queued DM messages — uses shared selectReplayableDms helper from admin.ts

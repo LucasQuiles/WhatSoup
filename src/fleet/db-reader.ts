@@ -96,6 +96,37 @@ export interface RateLimitsData {
   excessAttempts: number;
 }
 
+/** One question inside a pending poll (AskUserQuestion). */
+export interface PendingQuestion {
+  question: string;
+  options: Array<{ label: string; description: string }>;
+  multiSelect: boolean;
+}
+
+/** A pending decision the runtime is waiting on (D-4 approval queue). */
+export interface PendingPollEntry {
+  mapKey: string;
+  chatJid: string;
+  mode: 'poll' | 'textFallback';
+  source: 'askuser' | 'send_poll';
+  questions: PendingQuestion[];
+  currentQuestionIndex: number;
+  answersCollected: Record<number, string>;
+  createdAt: number;
+  timeoutMs: number;
+  hardClosesAt: number | null;
+}
+
+/** The pending-polls read result (see getPendingPolls). */
+export interface PendingPollsData {
+  /** False when the pending_polls table is absent (legacy DBs). */
+  supported: boolean;
+  pending: PendingPollEntry[];
+  /** Rows whose payload JSON failed to parse — fail-visible, never silently
+   *  treated as valid or as absent. */
+  parseErrors: number;
+}
+
 const READ_ONLY_DATABASE_OPTIONS: ConstructorParameters<typeof DatabaseSync>[1] = {
   readOnly: true,
 };
@@ -307,6 +338,62 @@ export class FleetDbReader {
         requestedAt: r.requested_at,
         decidedAt: r.decided_at,
       }));
+    });
+  }
+
+  /**
+   * Pending decision queue (D-4 approval queue): rows of `pending_polls`
+   * with the serialized PendingPollQuestion payload deserialized
+   * server-side. Read-only — resolution flows through the instance's
+   * health endpoint (never a fleet-side row write behind the runtime's
+   * back). Unparseable payloads are skipped and counted (fail-visible).
+   */
+  getPendingPolls(name: string, dbPath: string): DbResult<PendingPollsData> {
+    return this.query(name, dbPath, (db) => {
+      const tables = new Set(
+        (db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>)
+          .map((r) => r.name),
+      );
+      if (!tables.has('pending_polls')) {
+        return { supported: false, pending: [], parseErrors: 0 };
+      }
+      const rows = db.prepare(`
+        SELECT map_key, chat_jid, payload, hard_closes_at
+        FROM pending_polls
+        ORDER BY rowid ASC
+        LIMIT 200
+      `).all() as Array<{ map_key: string; chat_jid: string; payload: string; hard_closes_at: number | null }>;
+
+      const pending: PendingPollEntry[] = [];
+      let parseErrors = 0;
+      for (const row of rows) {
+        try {
+          const p = JSON.parse(row.payload) as Record<string, unknown>;
+          const questions = (p.questions as Array<Record<string, unknown>>).map((q) => ({
+            question: String(q.question ?? ''),
+            options: ((q.options as Array<Record<string, unknown>>) ?? []).map((o) => ({
+              label: String(o.label ?? ''),
+              description: String(o.description ?? ''),
+            })),
+            multiSelect: Boolean(q.multiSelect),
+          }));
+          pending.push({
+            mapKey: row.map_key,
+            chatJid: String(p.chatJid ?? row.chat_jid),
+            mode: p.mode === 'textFallback' ? 'textFallback' : 'poll',
+            source: p.source === 'send_poll' ? 'send_poll' : 'askuser',
+            questions,
+            currentQuestionIndex: Number(p.currentQuestionIndex ?? 0),
+            answersCollected: (p.answersCollected ?? {}) as Record<number, string>,
+            createdAt: Number(p.createdAt ?? 0),
+            timeoutMs: Number(p.timeoutMs ?? 0),
+            hardClosesAt: row.hard_closes_at,
+          });
+        } catch {
+          parseErrors += 1;
+        }
+      }
+      return { supported: true, pending, parseErrors };
     });
   }
 
