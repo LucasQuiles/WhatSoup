@@ -18,7 +18,9 @@ import {
   validateControlResult,
   type ControlOutcome,
   type ControlValidationOptions,
+  type WarningEscalationTransitionV1,
 } from '../../scripts/lib/ci-control/result.ts';
+import * as resultApi from '../../scripts/lib/ci-control/result.ts';
 import {
   FileAttemptEvidenceStore,
   supervisorCloseDigest,
@@ -53,7 +55,7 @@ const BASE_OID = '89abcdef89abcdef89abcdef89abcdef89abcdef';
 const MERGE_OID = 'fedcba98fedcba98fedcba98fedcba98fedcba98';
 const DIGEST = `sha256:${'a'.repeat(64)}`;
 const OTHER_DIGEST = `sha256:${'b'.repeat(64)}`;
-const NOW = Date.now();
+const NOW = Date.parse('2026-07-21T08:00:00.000Z');
 const PRECONDITION_AT = new Date(NOW - 10 * 60_000).toISOString();
 const ATTEMPT_CREATED_AT = new Date(NOW - 9 * 60_000).toISOString();
 const ATTEMPT_TERMINAL_AT = new Date(NOW - 8 * 60_000).toISOString();
@@ -61,6 +63,37 @@ const ATTEMPT_LEASE_AT = new Date(NOW - 8.75 * 60_000).toISOString();
 const SUPERVISOR_TERMINAL_AT = new Date(NOW - 8.25 * 60_000).toISOString();
 const RESULT_CREATED_AT = new Date(NOW - 7 * 60_000).toISOString();
 const VALID_UNTIL = new Date(NOW + 60 * 60_000).toISOString();
+const WARNING_GOVERNANCE = {
+  owner: 'semantic-quality-decision-owner',
+  remediationSlaHours: 8,
+  expiresAfterHours: 12,
+  escalationCondition: 'The native semantic warning remains unresolved when its protected validity interval expires.',
+  successorCode: 'quality.semantic.warning.expired',
+  firstObservedAt: RESULT_CREATED_AT,
+  remediationDueAt: new Date(Date.parse(RESULT_CREATED_AT) + 8 * 60 * 60_000).toISOString(),
+  expiresAt: new Date(Date.parse(RESULT_CREATED_AT) + 12 * 60 * 60_000).toISOString(),
+};
+const PRODUCER = {
+  appId: 'expected-app',
+  workflowRef: 'owner/repo/.github/workflows/policy.yml@refs/heads/main',
+  workflowSha: OID,
+  runId: 'run-1',
+  attempt: 1,
+};
+const SEMANTIC_NATIVE_EVIDENCE = {
+  detectorId: 'semantic-quality', schemaVersion: 1, evidenceDigest: DIGEST,
+  nativeCauseCodes: ['semantic.synthetic-finding'],
+  policyDigest: DIGEST,
+  producer: PRODUCER,
+  platform: { os: 'linux', architecture: 'x64' },
+};
+const PROTECTED_POLICY_PRODUCER = {
+  appId: 'protected-policy-app',
+  workflowRef: 'owner/protected/.github/workflows/policy.yml@refs/heads/main',
+  workflowSha: BASE_OID,
+  runId: 'protected-run-1',
+  attempt: 1,
+};
 const SCANNER_POLICY_RECEIPT = {
   schemaVersion: 1,
   policyDigest: DIGEST,
@@ -70,7 +103,7 @@ const SCANNER_POLICY_RECEIPT = {
     { path: 'scripts/lib/guard-core.ts', blobOid: BASE_OID },
     { path: 'scripts/publication-guard.ts', blobOid: OID },
   ],
-  producer: { appId: 'protected-policy-app', workflowSha: BASE_OID },
+  producer: PROTECTED_POLICY_PRODUCER,
 };
 
 const temporaryRoots: string[] = [];
@@ -185,12 +218,40 @@ function expectedPreconditions(receipt = makePreconditions()): PreconditionExpec
 }
 
 function validationOptions(overrides: Record<string, unknown> = {}): ControlValidationOptions & { expectedLease: SupervisorLeaseExpectationsV1 } {
-  return { now: NOW, expectedPreconditions: expectedPreconditions(), expectedLease: leaseExpectations(), ...overrides } as ControlValidationOptions & { expectedLease: SupervisorLeaseExpectationsV1 };
+  return {
+    now: NOW,
+    expectedPreconditions: expectedPreconditions(),
+    expectedLease: leaseExpectations(),
+    expectedBindings: {
+      candidateOid: OID, baseOid: BASE_OID, mergeOid: MERGE_OID,
+      manifestDigest: DIGEST, policyDigest: DIGEST, classifierDigest: DIGEST,
+      producer: PRODUCER, toolDigest: DIGEST,
+    },
+    expectedScope: { kind: 'control-surface', digest: DIGEST, itemCount: 1 },
+    expectedFindingGraph: [{ findingId: 'finding-1', rootCauseId: 'finding-1', causedBy: [], candidateOid: OID, policyDigest: DIGEST }],
+    expectedWarningGovernance: WARNING_GOVERNANCE,
+    expectedWarningTransition: null,
+    expectedNativeEvidence: SEMANTIC_NATIVE_EVIDENCE,
+    expectedScannerPolicyReceipt: SCANNER_POLICY_RECEIPT,
+    ...overrides,
+  } as ControlValidationOptions & { expectedLease: SupervisorLeaseExpectationsV1 };
+}
+
+function noNativeValidationOptions(overrides: Record<string, unknown> = {}): ControlValidationOptions & { expectedLease: SupervisorLeaseExpectationsV1 } {
+  return validationOptions({ expectedNativeEvidence: null, ...overrides });
 }
 
 function publicOutputOptions(forbiddenValues: readonly string[] = []) {
   return {
     ...validationOptions(),
+    forbiddenValues,
+    expectedScannerPolicyReceipt: SCANNER_POLICY_RECEIPT,
+  };
+}
+
+function noNativePublicOutputOptions(forbiddenValues: readonly string[] = []) {
+  return {
+    ...noNativeValidationOptions(),
     forbiddenValues,
     expectedScannerPolicyReceipt: SCANNER_POLICY_RECEIPT,
   };
@@ -251,7 +312,7 @@ async function newEvidenceStore(): Promise<FileAttemptEvidenceStore> {
 }
 
 function makeAttempt(overrides: Record<string, unknown> = {}): TerminalAttemptV1 {
-  const producer = { appId: 'expected-app', workflowRef: 'owner/repo/.github/workflows/policy.yml@refs/heads/main', workflowSha: OID, runId: 'run-1', attempt: 1 };
+  const producer = PRODUCER;
   return {
     schemaVersion: 1,
     id: 'attempt-1',
@@ -291,7 +352,7 @@ function makeAttempt(overrides: Record<string, unknown> = {}): TerminalAttemptV1
 function requiredCheck(overrides: Record<string, unknown> = {}) {
   return {
     id: 'semantic-quality',
-    expectedProducer: { appId: 'expected-app', workflowSha: OID },
+    expectedProducer: PRODUCER,
     expectedPlatform: { os: 'linux', architecture: 'x64' },
     candidateOid: OID,
     mergeOid: MERGE_OID,
@@ -307,9 +368,9 @@ function observedCheck(overrides: Record<string, unknown> = {}) {
     applicabilityReason: null,
     outcome: 'pass',
     causeCode: 'ci.check.passed',
-    expectedProducer: { appId: 'expected-app', workflowSha: OID },
+    expectedProducer: PRODUCER,
     expectedPlatform: { os: 'linux', architecture: 'x64' },
-    producer: { appId: 'expected-app', workflowSha: OID },
+    producer: PRODUCER,
     observedPlatform: { os: 'linux', architecture: 'x64' },
     classifierProof: null,
     nativeCauseCodes: [],
@@ -335,7 +396,7 @@ function classifierProof(overrides: Record<string, unknown> = {}) {
     mergeOid: MERGE_OID,
     policyDigest: DIGEST,
     classifierDigest: DIGEST,
-    producer: { appId: 'expected-app', workflowSha: OID },
+    producer: PRODUCER,
     createdAt: RESULT_CREATED_AT,
     validUntil: VALID_UNTIL,
     ...overrides,
@@ -343,6 +404,12 @@ function classifierProof(overrides: Record<string, unknown> = {}) {
 }
 
 function makeResult(overrides: Record<string, unknown> = {}) {
+  const {
+    __attemptId = 'attempt-1',
+    __attemptCreatedAt = ATTEMPT_CREATED_AT,
+    __attemptTerminalAt = ATTEMPT_TERMINAL_AT,
+    ...resultOverrides
+  } = overrides;
   const result = {
     schemaVersion: 1,
     outcome: 'pass',
@@ -357,8 +424,9 @@ function makeResult(overrides: Record<string, unknown> = {}) {
     eventName: 'pull_request',
     operation: 'validate-native-result',
     trustClass: 'reviewed-source',
-    severity: 'low',
+    severity: 'info',
     confidence: 'proven',
+    evidenceState: 'proven',
     surface: 'semantic-quality',
     applicability: 'required',
     applicabilityReason: null,
@@ -369,10 +437,13 @@ function makeResult(overrides: Record<string, unknown> = {}) {
     policyDigest: DIGEST,
     classifierDigest: DIGEST,
     classifierProof: null,
-    producer: { appId: 'expected-app', workflowRef: 'owner/repo/.github/workflows/policy.yml@refs/heads/main', workflowSha: OID, runId: 'run-1', attempt: 1 },
+    producer: PRODUCER,
     tool: { name: 'ci-control-plane', version: '1', digest: DIGEST },
     platform: { runnerLabel: 'ubuntu-24.04', os: 'linux', architecture: 'x64', runtime: 'node@24.15.0', observedCapabilitiesDigest: DIGEST },
     scannerPolicyReceipt: SCANNER_POLICY_RECEIPT,
+    nativeEvidence: SEMANTIC_NATIVE_EVIDENCE,
+    warningGovernance: null,
+    warningTransition: null,
     preconditionReceipt: makePreconditions(),
     attempt: makeAttempt(),
     attemptDigest: terminalAttemptDigest(makeAttempt() as never),
@@ -380,25 +451,51 @@ function makeResult(overrides: Record<string, unknown> = {}) {
     requiredChecks: [],
     observedChecks: [],
     findingId: null,
+    rootCauseId: null,
+    causedBy: [],
+    relatedFindingIds: [],
+    supersedes: [],
     location: null,
     why: null,
     impact: null,
     guidance: [],
     patchScope: { allowed: [], prohibited: [] },
+    allowedPatchScope: [],
+    prohibitedChanges: [],
+    doNot: [],
     reproduce: { command: 'npm run verify:pr', preconditions: [] },
     verify: { commands: [], expected: [] },
     retryable: false,
     retryConditions: [],
+    retryClass: 'never',
+    remediationClass: 'source-patch',
+    nextBestAction: null,
     exception: { eligible: false, approvalRole: null },
     relatedFindings: [],
-    fingerprint: null,
+    claimedScope: { kind: 'control-surface', digest: DIGEST, itemCount: 1 },
+    observedScope: { kind: 'control-surface', digest: DIGEST, itemCount: 1 },
+    scopeLimitations: [],
+    verificationPlan: [],
+    closureCriteria: [],
+    sensitiveFieldsOmitted: [],
+    publicEvidenceRefs: [],
+    privateEvidenceRefs: [],
+    fingerprint: null as string | null,
     limitations: [],
     createdAt: RESULT_CREATED_AT,
     validUntil: VALID_UNTIL,
-    ...overrides,
+    ...resultOverrides,
   };
-  if (overrides.attempt === undefined) {
+  if (resultOverrides.fingerprint === undefined && result.findingId !== null) result.fingerprint = buildFindingFingerprint(result as never);
+  if (resultOverrides.attempt === undefined) {
     result.attempt = makeAttempt({
+      id: String(__attemptId),
+      createdAt: String(__attemptCreatedAt),
+      terminalAt: String(__attemptTerminalAt),
+      terminationProof: {
+        ...makeAttempt().terminationProof,
+        observedAt: String(__attemptTerminalAt),
+      },
       rawExit: result.exitCode,
       evidenceBinding: {
         controlId: result.controlId,
@@ -414,7 +511,7 @@ function makeResult(overrides: Record<string, unknown> = {}) {
       },
     });
   }
-  if (overrides.attemptDigest === undefined) result.attemptDigest = terminalAttemptDigest(result.attempt as never);
+  if (resultOverrides.attemptDigest === undefined) result.attemptDigest = terminalAttemptDigest(result.attempt as never);
   return result;
 }
 
@@ -422,24 +519,52 @@ function makeDiagnostic(outcome: 'warn' | 'block' | 'inconclusive', overrides: R
   const result = makeResult({
     outcome,
     exitCode: exitCodeForOutcome(outcome),
-    code: outcome === 'warn' ? 'ci.required-check.warning-only' : outcome === 'block' ? 'ci.native.semantic-quality' : 'ci.required-check.missing',
-    severity: outcome === 'warn' ? 'medium' : 'high',
+    code: outcome === 'warn' ? 'quality.semantic.finding.warning' : outcome === 'block' ? 'ci.native.semantic-quality' : 'ci.required-check.missing',
+    owner: outcome === 'warn' || outcome === 'block' ? 'semantic-quality-decision-owner' : 'ci-policy-owner',
+    severity: outcome === 'block' ? 'high' : 'medium',
+    confidence: outcome === 'inconclusive' ? 'inconclusive' : 'proven',
+    evidenceState: outcome === 'inconclusive' ? 'inconclusive' : 'proven',
     findingId: 'finding-1',
+    rootCauseId: 'finding-1',
     location: { kind: 'manifest-key', name: 'controls.semantic-quality' },
-    why: 'The required evidence did not prove the declared boundary.',
+    why: outcome === 'warn'
+      ? 'The native semantic-quality owner reported an actionable advisory finding.'
+      : outcome === 'block'
+        ? 'The native semantic-quality owner proved a blocking finding.'
+        : 'The required evidence did not prove the declared boundary.',
     impact: 'The exact candidate cannot be authorized.',
-    guidance: ['Repair the named precondition.', 'Replay the focused check.'],
+    guidance: outcome === 'warn'
+      ? ['Repair the native semantic finding before its governed expiry; do not treat the warning as passing mandatory evidence.']
+      : outcome === 'block'
+        ? ['Repair the canonical native semantic finding without changing its rule, severity, or exception owner.']
+        : ['Repair the named precondition.', 'Replay the focused check.'],
+    nativeEvidence: outcome === 'warn' || outcome === 'block' ? SEMANTIC_NATIVE_EVIDENCE : null,
+    warningGovernance: outcome === 'warn' ? WARNING_GOVERNANCE : null,
+    validUntil: outcome === 'warn' ? WARNING_GOVERNANCE.expiresAt : VALID_UNTIL,
     patchScope: { allowed: ['canonical adapter'], prohibited: ['continue-on-error', 'permission broadening'] },
+    allowedPatchScope: ['canonical adapter'],
+    prohibitedChanges: ['continue-on-error', 'permission broadening'],
+    doNot: ['Do not weaken the required control.'],
     reproduce: { command: 'npm run verify:pr', preconditions: ['exact Git objects exist'] },
     verify: { commands: ['npm run test:focused', 'npm run test:affected'], expected: ['unsafe fixture fails', 'safe neighbor passes'] },
-    retryable: outcome === 'inconclusive',
-    retryConditions: outcome === 'inconclusive' ? ['named precondition is repaired'] : [],
+    retryable: true,
+    retryConditions: outcome === 'inconclusive' ? ['named precondition is repaired'] : ['the canonical source owner has changed'],
+    retryClass: outcome === 'inconclusive' ? 'after-evidence-regeneration' : 'after-source-change',
+    remediationClass: outcome === 'inconclusive' ? 'exact-revision-rerun' : 'source-patch',
+    nextBestAction: outcome === 'inconclusive' ? 'Repair the named precondition.' : 'Patch the canonical owner.',
     exception: { eligible: false, approvalRole: null },
     relatedFindings: ['dependent-fixture'],
+    relatedFindingIds: ['dependent-fixture'],
+    scopeLimitations: ['No protected remote execution is claimed.'],
+    verificationPlan: ['npm run test:focused', 'npm run test:affected'],
+    closureCriteria: ['unsafe fixture fails', 'safe neighbor passes'],
+    sensitiveFieldsOmitted: ['matched-values'],
+    publicEvidenceRefs: ['public:summary'],
+    privateEvidenceRefs: ['private:opaque:0123456789abcdef'],
     limitations: ['no protected producer is claimed'],
     ...overrides,
   });
-  return { ...result, fingerprint: buildFindingFingerprint(result as never) };
+  return result;
 }
 
 describe('CP-F2 strict outcome and diagnostic contract', () => {
@@ -451,20 +576,20 @@ describe('CP-F2 strict outcome and diagnostic contract', () => {
     expect(validateControlResult(makeResult(), validationOptions()).outcome).toBe('pass');
     expect(validateControlResult(makeDiagnostic('warn'), validationOptions()).outcome).toBe('warn');
     expect(validateControlResult(makeDiagnostic('block'), validationOptions()).outcome).toBe('block');
-    expect(validateControlResult(makeDiagnostic('inconclusive'), validationOptions()).outcome).toBe('inconclusive');
-    expect(validateControlResult(makeResult({ outcome: 'not-applicable', code: 'ci.classification.not-applicable', applicability: 'not-applicable', applicabilityReason: 'ci.classification.not-applicable', classifierProof: classifierProof() }), validationOptions()).outcome).toBe('not-applicable');
+    expect(validateControlResult(makeDiagnostic('inconclusive'), noNativeValidationOptions()).outcome).toBe('inconclusive');
+    expect(validateControlResult(makeResult({ outcome: 'not-applicable', code: 'ci.classification.not-applicable', owner: 'ci-classifier-decision-owner', applicability: 'not-applicable', applicabilityReason: 'ci.classification.not-applicable', classifierProof: classifierProof() }), validationOptions()).outcome).toBe('not-applicable');
   });
 
   it('rejects outcome/exit mismatches and incomplete or generic diagnostics', () => {
     expect(() => validateControlResult(makeResult({ outcome: 'block' }), validationOptions())).toThrow(/exit|outcome/i);
     expect(() => validateControlResult(makeDiagnostic('block', { why: 'CI failed' }), validationOptions())).toThrow(/generic|diagnostic/i);
     expect(() => validateControlResult(makeDiagnostic('block', { owner: '' }), validationOptions())).toThrow(/owner|diagnostic/i);
-    expect(() => validateControlResult(makeDiagnostic('block', { guidance: [] }), validationOptions())).toThrow(/guidance|diagnostic/i);
+    expect(() => validateControlResult(makeDiagnostic('block', { guidance: [] }), validationOptions())).toThrow(/guidance|diagnostic|taxonomy|message/i);
   });
 
   it('requires trusted closed classifier proof for not-applicable and rejects skipped substitutes', () => {
-    expect(() => validateControlResult(makeResult({ outcome: 'not-applicable', code: 'ci.classification.not-applicable', applicability: 'not-applicable', applicabilityReason: null }), validationOptions())).toThrow(/applicab/i);
-    expect(() => validateControlResult(makeResult({ outcome: 'not-applicable', code: 'ci.classification.not-applicable', applicability: 'not-applicable', applicabilityReason: 'ci.classification.not-applicable', classifierProof: classifierProof({ candidateOid: BASE_OID }) }), validationOptions())).toThrow(/classifier|binding/i);
+    expect(() => validateControlResult(makeResult({ outcome: 'not-applicable', code: 'ci.classification.not-applicable', owner: 'ci-classifier-decision-owner', applicability: 'not-applicable', applicabilityReason: null }), validationOptions())).toThrow(/applicab/i);
+    expect(() => validateControlResult(makeResult({ outcome: 'not-applicable', code: 'ci.classification.not-applicable', owner: 'ci-classifier-decision-owner', applicability: 'not-applicable', applicabilityReason: 'ci.classification.not-applicable', classifierProof: classifierProof({ candidateOid: BASE_OID }) }), validationOptions())).toThrow(/classifier|binding/i);
     const skipped = observedCheck({ applicability: 'not-applicable', applicabilityReason: null, outcome: 'pass', producer: null, observedPlatform: null, nativeSchemaVersion: null, evidenceDigest: null, createdAt: null, validUntil: null });
     expect(() => validateControlResult(makeResult({ aggregateDecision: 'pass', requiredChecks: [requiredCheck()], observedChecks: [skipped] }), validationOptions({ expectedChecks: [requiredCheck()] }))).toThrow(/applicab|not-applicable|exact/i);
   });
@@ -472,6 +597,202 @@ describe('CP-F2 strict outcome and diagnostic contract', () => {
   it('does not permit registered reason codes to change outcome semantics', () => {
     expect(() => validateControlResult(makeDiagnostic('block', { code: 'ci.check.passed' }), validationOptions())).toThrow(/taxonomy|code.*outcome/i);
     expect(() => validateControlResult(makeResult({ code: 'ci.required-check.missing' }), validationOptions())).toThrow(/taxonomy|code.*outcome/i);
+    expect(() => validateControlResult(makeDiagnostic('block', { severity: 'low' }), validationOptions())).toThrow(/severity|taxonomy/i);
+    expect(() => validateControlResult(makeDiagnostic('inconclusive', { retryClass: 'after-transient-condition' }), validationOptions())).toThrow(/retry.*class|taxonomy/i);
+    expect(() => validateControlResult(makeDiagnostic('warn', { owner: 'substitute-owner' }), validationOptions())).toThrow(/owner|taxonomy/i);
+    expect(() => validateControlResult(makeDiagnostic('warn', { why: 'A parallel warning explanation.' }), validationOptions())).toThrow(/message|taxonomy/i);
+    expect(() => validateControlResult(makeDiagnostic('warn', { stage: 'deployment' }), validationOptions())).toThrow(/stage|taxonomy/i);
+    expect(() => validateControlResult(makeDiagnostic('warn', { validUntil: new Date(NOW + 13 * 60 * 60_000).toISOString() }), validationOptions())).toThrow(/warning|expiry/i);
+    expect(() => validateControlResult(makeDiagnostic('inconclusive', {
+      code: 'ci.hooks.path-foreign',
+      retryClass: 'after-precondition-repair',
+      remediationClass: 'environment-setup',
+    }), validationOptions())).toThrow(/legacy|metadata|authoritative|emittable/i);
+  });
+
+  it('binds the complete producer execution identity to trusted expectations', () => {
+    for (const producer of [
+      { appId: 'expected-app', workflowRef: 'owner/repo/.github/workflows/other.yml@refs/heads/main', workflowSha: OID, runId: 'run-1', attempt: 1 },
+      { appId: 'expected-app', workflowRef: 'owner/repo/.github/workflows/policy.yml@refs/heads/main', workflowSha: OID, runId: 'run-2', attempt: 1 },
+      { appId: 'expected-app', workflowRef: 'owner/repo/.github/workflows/policy.yml@refs/heads/main', workflowSha: OID, runId: 'run-1', attempt: 2 },
+    ]) expect(() => validateControlResult(makeDiagnostic('block', { producer }), validationOptions())).toThrow(/trusted.*producer|expected.*binding/i);
+  });
+
+  it('rejects malformed trusted causal roots even when the current node matches', () => {
+    const dependent = { findingId: 'dependent', rootCauseId: 'finding-1', causedBy: ['finding-1'], candidateOid: OID, policyDigest: DIGEST };
+    for (const expectedFindingGraph of [
+      [{ findingId: 'finding-1', rootCauseId: 'finding-1', causedBy: ['dependent'], candidateOid: OID, policyDigest: DIGEST }, dependent],
+      [{ findingId: 'finding-1', rootCauseId: 'finding-1', causedBy: [], candidateOid: OID, policyDigest: DIGEST }, { ...dependent, causedBy: [] }],
+      [{ findingId: 'finding-1', rootCauseId: 'finding-1', causedBy: [], candidateOid: OID, policyDigest: DIGEST }, { ...dependent, causedBy: ['finding-1', 'finding-1'] }],
+    ]) expect(() => validateControlResult(makeDiagnostic('block'), validationOptions({ expectedFindingGraph }))).toThrow(/causal|root|duplicate|graph/i);
+  });
+
+  it('keeps deprecated receipts readable only through a non-authorizing historical path', () => {
+    const historicalRead = (resultApi as unknown as Record<string, unknown>).validateHistoricalControlResult;
+    const historicalParse = (resultApi as unknown as Record<string, unknown>).parseHistoricalControlResultJson;
+    expect(historicalRead).toEqual(expect.any(Function));
+    expect(historicalParse).toEqual(expect.any(Function));
+    if (typeof historicalRead !== 'function') return;
+    const historical = makeDiagnostic('inconclusive', { code: 'ci.execution.stale-receipt' });
+    expect(() => validateControlResult(historical, validationOptions())).toThrow(/deprecated|historical|emittable/i);
+    const historicalObjectRead = historicalRead(historical, noNativeValidationOptions()) as { evidenceDigest: string; result: Record<string, unknown> };
+    expect(historicalObjectRead).toMatchObject({ authorization: 'historical-only', lifecycle: 'deprecated' });
+    expect(Object.isFrozen(historicalObjectRead.result)).toBe(true);
+    expect(Object.isFrozen(historicalObjectRead.result.attempt)).toBe(true);
+    expect(() => Object.assign(historicalObjectRead.result, { code: 'ci.check.passed' })).toThrow();
+    const { nativeEvidence: _nativeEvidence, warningGovernance: _warningGovernance, warningTransition: _warningTransition, ...legacySeed } = historical;
+    const legacyAttempt = {
+      ...legacySeed.attempt,
+      evidenceBinding: { ...legacySeed.attempt.evidenceBinding, resultEvidenceDigest: controlResultEvidenceDigest(legacySeed) },
+    };
+    const legacy = { ...legacySeed, attempt: legacyAttempt, attemptDigest: terminalAttemptDigest(legacyAttempt as never) };
+    expect(historicalRead(legacy, noNativeValidationOptions())).toMatchObject({ authorization: 'historical-only', lifecycle: 'deprecated', result: legacy });
+    if (typeof historicalParse !== 'function') return;
+    const compact = JSON.stringify(historical);
+    const padded = `${JSON.stringify(historical, null, 2)}\n`;
+    const compactRead = historicalParse(compact, noNativeValidationOptions()) as { evidenceDigest: string; result: Record<string, unknown> };
+    const paddedRead = historicalParse(padded, noNativeValidationOptions()) as { evidenceDigest: string; result: Record<string, unknown> };
+    expect(compactRead.result).toEqual(paddedRead.result);
+    expect(compactRead.evidenceDigest).not.toBe(paddedRead.evidenceDigest);
+    expect(() => historicalParse('{"schemaVersion":1,"schemaVersion":1}', noNativeValidationOptions())).toThrow(/duplicate|json/i);
+    expect(() => historicalParse(Buffer.from([0xff]), noNativeValidationOptions())).toThrow(/utf-8|json/i);
+  });
+
+  it('requires a protected-clock warning transition API and rejects the warning at expiry', () => {
+    const buildTransition = (resultApi as unknown as Record<string, unknown>).buildWarningEscalationTransition;
+    expect(buildTransition).toEqual(expect.any(Function));
+    const transitionExpiry = NOW - 2 * 60_000;
+    const transitionGovernance = {
+      ...WARNING_GOVERNANCE,
+      firstObservedAt: new Date(transitionExpiry - 12 * 60 * 60_000).toISOString(),
+      remediationDueAt: new Date(transitionExpiry - 4 * 60 * 60_000).toISOString(),
+      expiresAt: new Date(transitionExpiry).toISOString(),
+    };
+    const warning = makeDiagnostic('warn', {
+      warningGovernance: transitionGovernance,
+      createdAt: new Date(NOW - 4 * 60_000).toISOString(),
+      validUntil: transitionGovernance.expiresAt,
+    });
+    const expiresAt = Date.parse(String(warning.validUntil));
+    const protectedNow = NOW;
+    const transitionOptions = validationOptions({ expectedWarningGovernance: transitionGovernance });
+    expect(() => validateControlResult(warning, { ...transitionOptions, now: expiresAt })).toThrow(/expired|stale|warning|fresh/i);
+    if (typeof buildTransition !== 'function') return;
+    const transition = buildTransition(warning, { ...transitionOptions, protectedNow }) as WarningEscalationTransitionV1;
+    expect(transition).toMatchObject({
+      predecessorCode: 'quality.semantic.finding.warning',
+      successorCode: 'quality.semantic.warning.expired',
+      predecessorFindingId: 'finding-1',
+      predecessorAttemptId: 'attempt-1',
+      predecessorAttemptDigest: warning.attemptDigest,
+      nativeCauseCodes: SEMANTIC_NATIVE_EVIDENCE.nativeCauseCodes,
+      expiresAt: warning.validUntil,
+    });
+    const successor = makeDiagnostic('block', {
+      __attemptId: 'attempt-2',
+      __attemptCreatedAt: new Date(expiresAt + 30_000).toISOString(),
+      __attemptTerminalAt: new Date(expiresAt + 60_000).toISOString(),
+      code: 'quality.semantic.warning.expired',
+      findingId: 'finding-expired',
+      rootCauseId: 'finding-expired',
+      why: 'The governed semantic-quality warning expired without a verified remediation receipt.',
+      guidance: ['Repair the original native semantic finding and emit a new exact-revision receipt; do not reset or suppress the original warning interval.'],
+      nativeEvidence: SEMANTIC_NATIVE_EVIDENCE,
+      warningTransition: transition,
+      supersedes: ['finding-1'],
+      createdAt: transition.transitionedAt,
+      validUntil: new Date(protectedNow + 60 * 60_000).toISOString(),
+    });
+    const successorOptions = validationOptions({
+      now: protectedNow,
+      expectedWarningGovernance: transitionGovernance,
+      expectedWarningTransition: transition,
+      expectedFindingGraph: [{ findingId: 'finding-expired', rootCauseId: 'finding-expired', causedBy: [], candidateOid: OID, policyDigest: DIGEST }],
+    });
+    expect(validateControlResult(successor, successorOptions).code).toBe('quality.semantic.warning.expired');
+    const earlyAttempt = makeAttempt({
+      id: 'attempt-before-expiry',
+      rawExit: 1,
+      evidenceBinding: successor.attempt.evidenceBinding,
+    });
+    expect(() => validateControlResult({
+      ...successor,
+      attempt: earlyAttempt,
+      attemptDigest: terminalAttemptDigest(earlyAttempt as never),
+    }, successorOptions)).toThrow(/attempt|expiry|chronology|transition/i);
+    expect(() => validateControlResult({ ...successor, warningTransition: { ...transition, policyDigest: OTHER_DIGEST } }, { ...successorOptions, expectedWarningTransition: { ...transition, policyDigest: OTHER_DIGEST } })).toThrow(/policy|transition|binding/i);
+    expect(() => validateControlResult({ ...successor, nativeEvidence: { ...SEMANTIC_NATIVE_EVIDENCE, nativeCauseCodes: ['semantic.other'] } }, successorOptions)).toThrow(/native|transition|attempt.*binding/i);
+    expect(() => validateControlResult({ ...successor, warningTransition: { ...transition, transitionedAt: new Date(protectedNow + 1).toISOString() } }, successorOptions)).toThrow(/transition|attempt.*binding/i);
+    expect(() => validateControlResult({ ...successor, warningTransition: { ...transition, predecessorAttemptDigest: OTHER_DIGEST } }, { ...successorOptions, expectedWarningTransition: { ...transition, predecessorAttemptDigest: OTHER_DIGEST } })).toThrow(/attempt|transition|binding/i);
+  });
+
+  it('requires native evidence to match independently protected adapter evidence', () => {
+    expect(() => validateControlResult(makeDiagnostic('block'), validationOptions({
+      expectedNativeEvidence: { ...SEMANTIC_NATIVE_EVIDENCE, evidenceDigest: OTHER_DIGEST },
+    }))).toThrow(/native.*expected|protected.*native|native.*binding/i);
+    expect(() => validateControlResult(makeResult({ nativeEvidence: null }), validationOptions())).toThrow(/native.*expected|protected.*native|native.*binding/i);
+    for (const producer of [
+      { ...PRODUCER, appId: 'substitute-app' },
+      { ...PRODUCER, workflowRef: 'owner/repo/.github/workflows/other.yml@refs/heads/main' },
+      { ...PRODUCER, workflowSha: BASE_OID },
+      { ...PRODUCER, runId: 'run-substitute' },
+      { ...PRODUCER, attempt: 2 },
+    ]) expect(() => validateControlResult(makeDiagnostic('block'), validationOptions({
+      expectedNativeEvidence: { ...SEMANTIC_NATIVE_EVIDENCE, producer },
+    }))).toThrow(/native.*expected|protected.*native|native.*binding/i);
+  });
+
+  it('enforces protected scanner-policy identity during core result validation', () => {
+    for (const producer of [
+      { ...PROTECTED_POLICY_PRODUCER, workflowRef: 'owner/protected/.github/workflows/other.yml@refs/heads/main' },
+      { ...PROTECTED_POLICY_PRODUCER, runId: 'protected-run-substitute' },
+      { ...PROTECTED_POLICY_PRODUCER, attempt: 2 },
+    ]) {
+      const substitutedReceipt = { ...SCANNER_POLICY_RECEIPT, producer };
+      expect(() => validateControlResult(makeResult({ scannerPolicyReceipt: substitutedReceipt }), validationOptions())).toThrow(/scanner.*protected|scanner.*expected|scanner.*receipt/i);
+    }
+  });
+
+  it('requires closed retry/remediation classes and exact claimed/observed scope', () => {
+    expect(() => validateControlResult(makeDiagnostic('inconclusive', { retryClass: 'yes-please' }), validationOptions())).toThrow(/retry.*class/i);
+    expect(() => validateControlResult(makeDiagnostic('inconclusive', { remediationClass: 'just-rerun' }), validationOptions())).toThrow(/remediation.*class/i);
+    expect(() => validateControlResult(makeDiagnostic('block', { observedScope: { kind: 'control-surface', digest: OTHER_DIGEST, itemCount: 1 }, scopeLimitations: [] }), validationOptions())).toThrow(/scope|observed/i);
+    expect(() => validateControlResult(makeDiagnostic('inconclusive', { observedScope: { kind: 'control-surface', digest: OTHER_DIGEST, itemCount: 0 }, scopeLimitations: [] }), noNativeValidationOptions())).toThrow(/scope.*limitation|limitation.*scope/i);
+    expect(validateControlResult(makeDiagnostic('inconclusive', { observedScope: { kind: 'control-surface', digest: OTHER_DIGEST, itemCount: 0 } }), noNativeValidationOptions()).outcome).toBe('inconclusive');
+    expect(() => validateControlResult(makeDiagnostic('block', {
+      claimedScope: { kind: 'control-surface', digest: OTHER_DIGEST, itemCount: 1 },
+      observedScope: { kind: 'control-surface', digest: OTHER_DIGEST, itemCount: 1 },
+    }), validationOptions())).toThrow(/trusted.*scope|scope.*expected/i);
+  });
+
+  it('requires causal, patch, verification, closure, and disclosure enrichment parity', () => {
+    expect(() => validateControlResult(makeDiagnostic('block', { rootCauseId: null }), validationOptions())).toThrow(/root.*cause|causal/i);
+    expect(() => validateControlResult(makeDiagnostic('block', { allowedPatchScope: ['different owner'] }), validationOptions())).toThrow(/patch.*scope|allowed/i);
+    expect(() => validateControlResult(makeDiagnostic('block', { verificationPlan: ['different command'] }), validationOptions())).toThrow(/verification.*plan|verify/i);
+    expect(() => validateControlResult(makeDiagnostic('block', { closureCriteria: [] }), validationOptions())).toThrow(/closure/i);
+    expect(() => validateControlResult(makeDiagnostic('block', { doNot: [] }), validationOptions())).toThrow(/prohibited|doNot|workaround/i);
+    expect(() => validateControlResult(makeDiagnostic('block', { publicEvidenceRefs: ['private:absolute/path'] }), validationOptions())).toThrow(/evidence.*ref|public/i);
+    expect(() => validateControlResult(makeDiagnostic('block', { causedBy: ['finding-1'] }), validationOptions())).toThrow(/causal|self|finding/i);
+    expect(() => validateControlResult(makeDiagnostic('block', { retryable: false }), validationOptions())).toThrow(/retry/i);
+    expect(() => validateControlResult(makeDiagnostic('block', {
+      findingId: 'finding-2', rootCauseId: 'finding-1', causedBy: ['finding-1'],
+    }), validationOptions())).toThrow(/finding.*graph|causal.*graph/i);
+    const dependent = validateControlResult(makeDiagnostic('block', {
+      findingId: 'finding-2', rootCauseId: 'finding-1', causedBy: ['finding-1'],
+    }), validationOptions({ expectedFindingGraph: [
+      { findingId: 'finding-1', rootCauseId: 'finding-1', causedBy: [], candidateOid: OID, policyDigest: DIGEST },
+      { findingId: 'finding-2', rootCauseId: 'finding-1', causedBy: ['finding-1'], candidateOid: OID, policyDigest: DIGEST },
+    ] }));
+    expect(dependent.rootCauseId).toBe('finding-1');
+    expect(() => validateControlResult(makeDiagnostic('block', { privateEvidenceRefs: ['private:diagnostic-1'] }), validationOptions())).toThrow(/private.*evidence|opaque/i);
+  });
+
+  it('requires independently trusted envelope identities', () => {
+    const rewritten = makeResult({
+      manifestDigest: OTHER_DIGEST, policyDigest: OTHER_DIGEST, classifierDigest: OTHER_DIGEST,
+      producer: { appId: 'substitute-app', workflowRef: 'owner/repo/.github/workflows/policy.yml@refs/heads/main', workflowSha: BASE_OID, runId: 'run-2', attempt: 1 },
+    });
+    expect(() => validateControlResult(rewritten, validationOptions())).toThrow(/trusted.*binding|expected.*binding|producer|manifest|policy|tool/i);
   });
 
   it('enforces exact nested keys and rejects accessors before reading values', () => {
@@ -484,6 +805,12 @@ describe('CP-F2 strict outcome and diagnostic contract', () => {
 });
 
 describe('CP-F2 parsing, bounds, canonical bytes, and safe feedback', () => {
+  it('keeps canonical native receipt byte validation in the branch gate', () => {
+    const packageJson = JSON.parse(readFileSync(path.join(process.cwd(), 'package.json'), 'utf8')) as { scripts: Record<string, string> };
+    expect(packageJson.scripts['verify:push:branch']).toContain('verify:semantic:shadow');
+    expect(packageJson.scripts['verify:semantic:shadow']).toContain('tests/scripts/semantic-quality-receipt-validation.test.ts');
+  });
+
   it('rejects duplicate JSON keys, invalid UTF-8, and oversized bytes before parsing', () => {
     expect(() => parseControlResultJson('{"schemaVersion":1,"schemaVersion":1}')).toThrow(/duplicate/i);
     expect(() => parseControlResultJson(Buffer.from([0xff]))).toThrow(/utf-8|json/i);
@@ -491,10 +818,10 @@ describe('CP-F2 parsing, bounds, canonical bytes, and safe feedback', () => {
   });
 
   it('enforces string and list budgets at the limit and one over, including multibyte text', () => {
-    const atLimit = makeDiagnostic('inconclusive', { why: 'é'.repeat(1_024) });
-    expect(validateControlResult(atLimit, validationOptions()).why).toBe(atLimit.why);
-    expect(() => validateControlResult(makeDiagnostic('inconclusive', { why: `${'é'.repeat(1_024)}x` }), validationOptions())).toThrow(/byte|string|budget/i);
-    expect(() => validateControlResult(makeDiagnostic('inconclusive', { guidance: Array.from({ length: 65 }, () => 'repair') }), validationOptions())).toThrow(/list|budget|guidance/i);
+    const atLimit = makeDiagnostic('inconclusive', { impact: 'é'.repeat(1_024) });
+    expect(validateControlResult(atLimit, noNativeValidationOptions()).impact).toBe(atLimit.impact);
+    expect(() => validateControlResult(makeDiagnostic('inconclusive', { impact: `${'é'.repeat(1_024)}x` }), noNativeValidationOptions())).toThrow(/byte|string|budget/i);
+    expect(() => validateControlResult(makeDiagnostic('inconclusive', { guidance: Array.from({ length: 65 }, () => 'repair') }), noNativeValidationOptions())).toThrow(/list|budget|guidance/i);
   });
 
   it('uses one deterministic byte projection for serialization and hashing', () => {
@@ -503,6 +830,7 @@ describe('CP-F2 parsing, bounds, canonical bytes, and safe feedback', () => {
     const bytes = canonicalizeControlResult(result, outputOptions);
     expect(serializeControlResult(result, outputOptions)).toBe(Buffer.from(bytes).toString('utf8'));
     expect(hashControlResult(result, outputOptions)).toBe(digest(Buffer.from(bytes).toString('utf8')));
+    expect(hashControlResult(result, outputOptions)).toBe('sha256:a4da386f848d59895cb2198ca8300febe3810cac9ac948ca70a69bbba97bdd41');
     expect(Buffer.from(bytes).toString('utf8').endsWith('\n')).toBe(true);
     expect(() => serializeControlResult(result)).toThrow(/redaction|public output/i);
     const firstRequired = requiredCheck({ id: 'first' });
@@ -515,29 +843,61 @@ describe('CP-F2 parsing, bounds, canonical bytes, and safe feedback', () => {
     expect(serializeControlResult(left, aggregateOutputOptions)).toBe(serializeControlResult(right, aggregateOutputOptions));
   });
 
+  it('binds mutable diagnostics into the terminal result evidence digest', () => {
+    const result = makeDiagnostic('block');
+    for (const mutation of [
+      { impact: 'A different safe but unreviewed impact.' },
+      { limitations: ['A different bounded limitation.'] },
+      { retryConditions: ['a different source correction is complete'] },
+      { relatedFindingIds: ['different-dependent-fixture'] },
+      { publicEvidenceRefs: ['public:different-summary'] },
+      { nativeEvidence: { ...SEMANTIC_NATIVE_EVIDENCE, evidenceDigest: OTHER_DIGEST } },
+    ]) expect(() => validateControlResult({ ...result, ...mutation }, validationOptions())).toThrow(/attempt.*binding|evidence.*binding|native.*expected/i);
+  });
+
   it('renders actionable feedback from the validated object and rejects unsafe public text', () => {
     const result = makeDiagnostic('inconclusive');
-    const rendered = renderControlResult(result as never, publicOutputOptions());
+    const rendered = renderControlResult(result as never, noNativePublicOutputOptions());
     for (const text of [
       result.code, result.owner, result.canonicalImplementationOwner, result.domain,
-      result.operation, result.trustClass, result.severity, result.confidence,
+      result.stage, result.eventName, result.operation, result.trustClass, result.surface,
+      result.applicability, result.severity, result.confidence,
       result.candidateOid, result.baseOid, result.mergeOid, result.manifestDigest,
-      result.policyDigest, result.why, result.impact, ...result.guidance,
+      result.policyDigest, result.classifierDigest, result.producer.appId,
+      result.producer.workflowSha, result.producer.workflowRef, result.producer.runId,
+      String(result.producer.attempt), result.tool.digest, result.platform.runnerLabel,
+      result.platform.observedCapabilitiesDigest, result.scannerPolicyReceipt.sourceOid,
+      result.preconditionReceipt.outcome, result.preconditionReceipt.createdAt,
+      result.attempt.id, result.attempt.lifecycle, result.attemptDigest,
+      result.risk.tier, ...result.risk.reasons, result.createdAt, result.validUntil,
+      result.why, result.impact, ...result.guidance,
+      result.evidenceState, result.rootCauseId, result.claimedScope.kind,
+      result.claimedScope.digest, String(result.claimedScope.itemCount),
+      result.observedScope.kind, result.observedScope.digest,
+      String(result.observedScope.itemCount), result.retryClass,
+      result.remediationClass, result.nextBestAction,
       ...result.patchScope.allowed, ...result.patchScope.prohibited,
       result.reproduce.command, ...result.reproduce.preconditions,
       ...result.verify.commands, ...result.verify.expected,
-      ...result.retryConditions, ...result.relatedFindings, ...result.limitations,
+      ...result.retryConditions, ...result.relatedFindings, ...result.relatedFindingIds,
+      ...result.supersedes, ...result.scopeLimitations, ...result.closureCriteria,
+      ...result.sensitiveFieldsOmitted, ...result.publicEvidenceRefs, ...result.limitations,
     ]) expect(rendered).toContain(text);
+    expect(rendered).not.toContain(result.privateEvidenceRefs[0]);
     expect(rendered).toContain('Exception: Not eligible');
     const privateMatch = 'local-secret-label';
     const absolutePath = ['', 'Users', 'person', 'private', 'file'].join('/');
     expect(() => validateControlResult(makeDiagnostic('block', { why: `Matched ${privateMatch}` }), validationOptions({ forbiddenValues: [privateMatch] }))).toThrow(/unsafe|private|public/i);
     expect(() => validateControlResult(makeDiagnostic('block', { why: absolutePath }), validationOptions())).toThrow(/absolute|unsafe|public/i);
+    for (const unsafePath of ['C:\\Users\\person\\file', '\\\\server\\share\\private', '/Volumes/External/private/file', '/opt/local/private/file', '/Library/Application Support/private', '/etc/hosts', '/usr/local/bin/tool', '/srv/private/file', '/mnt/private/file', 'path=/etc/hosts', 'source=file:///etc/hosts', '{"path":"/etc/hosts"}', 'path{/etc/hosts}', 'path;/etc/hosts', '</etc/hosts>']) {
+      expect(() => validateControlResult(makeDiagnostic('block', { impact: unsafePath }), validationOptions())).toThrow(/absolute|unsafe|public/i);
+    }
+    expect(() => validateControlResult(makeDiagnostic('block', { impact: 'See https://example.invalid/docs/path for safe public guidance.' }), validationOptions())).not.toThrow();
     expect(() => validateControlResult(makeDiagnostic('block', { why: createHash('sha256').update(privateMatch).digest('hex') }), validationOptions({ forbiddenValues: [privateMatch] }))).toThrow(/unsafe|fingerprint|public/i);
     expect(() => renderControlResult(makeDiagnostic('block', { why: `Matched ${privateMatch}` }) as never, publicOutputOptions([privateMatch]))).toThrow(/unsafe|private|public|scan/i);
     expect(() => renderControlResult(makeDiagnostic('block', { why: `token=${privateMatch}` }) as never, publicOutputOptions())).toThrow(/unsafe|private|public|scan/i);
     const scannerOnlyMatch = ['ghp', 'A'.repeat(16)].join('_');
-    const scannerOnlyResult = makeDiagnostic('block', { why: `Matched ${scannerOnlyMatch}` });
+    const scannerOnlyResult = makeDiagnostic('block', { impact: `Matched ${scannerOnlyMatch}` });
     expect(() => validateControlResult(scannerOnlyResult, validationOptions())).not.toThrow();
     expect(() => serializeControlResult(scannerOnlyResult as never, publicOutputOptions())).toThrow(/public output scan did not prove safe exact bytes/i);
     const driftedReceipt = {
@@ -550,7 +910,25 @@ describe('CP-F2 parsing, bounds, canonical bytes, and safe feedback', () => {
   it('requires the stable fingerprint derived from safe causal fields', () => {
     const result = makeDiagnostic('block');
     expect(result.fingerprint).toMatch(/^fp:v1:[0-9a-f]{64}$/);
-    expect(() => validateControlResult({ ...result, fingerprint: `fp:v1:${'0'.repeat(64)}` }, validationOptions())).toThrow(/fingerprint/i);
+    const baseline = buildFindingFingerprint(result as never);
+    expect(baseline).toBe('fp:v1:e77112451fd0a2c7ad862986cc29c9720a708638bc7951230fca73ba11aaedc9');
+    expect(buildFindingFingerprint({ ...result, impact: 'A different non-identity impact.' } as never)).toBe(baseline);
+    for (const mutation of [
+      { code: 'quality.semantic.warning.expired' },
+      { candidateOid: BASE_OID },
+      { policyDigest: OTHER_DIGEST },
+      { location: { kind: 'manifest-key', name: 'controls.other' } },
+      { claimedScope: { kind: 'control-surface', digest: OTHER_DIGEST, itemCount: 1 } },
+    ]) expect(buildFindingFingerprint({ ...result, ...mutation } as never)).not.toBe(baseline);
+    expect(() => validateControlResult({ ...result, fingerprint: `fp:v1:${'0'.repeat(64)}` }, validationOptions())).toThrow(/fingerprint|evidence.*binding/i);
+  });
+
+  it('renders the complete governed warning policy from the validated result', () => {
+    const warning = makeDiagnostic('warn');
+    const rendered = renderControlResult(warning as never, publicOutputOptions());
+    for (const value of ['semantic-quality-decision-owner', '8', '12', 'quality.semantic.warning.expired', 'unresolved', 'expires']) {
+      expect(rendered.toLowerCase()).toContain(value.toLowerCase());
+    }
   });
 });
 
@@ -566,8 +944,8 @@ describe('CP-F2 precondition and terminal evidence', () => {
       { fixture: { created: false, digest: DIGEST }, outcome: 'inconclusive' },
     ]) {
       expect(() => validateControlResult(makeDiagnostic('block', { preconditionReceipt: makePreconditions(mutation) }), validationOptions())).toThrow(/precondition|inconclusive/i);
-      expect(() => validateControlResult(makeDiagnostic('inconclusive', { preconditionReceipt: makePreconditions(mutation) }), validationOptions())).toThrow(/precondition|cause|code/i);
-      expect(validateControlResult(makeDiagnostic('inconclusive', { code: 'ci.input.precondition-unproven', preconditionReceipt: makePreconditions(mutation) }), validationOptions()).outcome).toBe('inconclusive');
+      expect(() => validateControlResult(makeDiagnostic('inconclusive', { preconditionReceipt: makePreconditions(mutation) }), noNativeValidationOptions())).toThrow(/precondition|cause|code/i);
+      expect(validateControlResult(makeDiagnostic('inconclusive', { code: 'ci.input.precondition-unproven', retryClass: 'after-precondition-repair', remediationClass: 'environment-setup', preconditionReceipt: makePreconditions(mutation) }), noNativeValidationOptions()).outcome).toBe('inconclusive');
     }
     const historicalNow = Date.parse('2020-01-01T00:10:00.000Z');
     const historicalReceipt = makePreconditions({ createdAt: '2020-01-01T00:00:00.000Z' });
@@ -579,11 +957,20 @@ describe('CP-F2 precondition and terminal evidence', () => {
     expect(() => validateControlResult(makeResult({ preconditionReceipt: makePreconditions({ workspace: { ...(makePreconditions().workspace as object), candidateOid: BASE_OID } }) }), validationOptions())).toThrow(/candidate|binding|precondition|trusted/i);
     expect(() => validateControlResult(makeResult({ aggregateDecision: 'pass', requiredChecks: [requiredCheck()], observedChecks: [observedCheck({ policyDigest: OTHER_DIGEST })] }), validationOptions({ expectedChecks: [requiredCheck()] }))).toThrow(/policy|tuple|exact/i);
     expect(() => validateControlResult(makeResult({ aggregateDecision: 'pass', requiredChecks: [requiredCheck()], observedChecks: [observedCheck({ mergeOid: BASE_OID })] }), validationOptions({ expectedChecks: [requiredCheck()] }))).toThrow(/merge|tuple|exact/i);
-    expect(() => validateControlResult(makeResult({ aggregateDecision: 'pass', requiredChecks: [requiredCheck()], observedChecks: [observedCheck({ producer: { appId: 'other-app', workflowSha: OID } })] }), validationOptions({ expectedChecks: [requiredCheck()] }))).toThrow(/producer|tuple|exact/i);
+    expect(() => validateControlResult(makeResult({ aggregateDecision: 'pass', requiredChecks: [requiredCheck()], observedChecks: [observedCheck({ producer: { ...PRODUCER, appId: 'other-app' } })] }), validationOptions({ expectedChecks: [requiredCheck()] }))).toThrow(/producer|identity|exact/i);
+    for (const producer of [
+      { ...PRODUCER, workflowRef: 'owner/repo/.github/workflows/other.yml@refs/heads/main' },
+      { ...PRODUCER, runId: 'run-substitute' },
+      { ...PRODUCER, attempt: 2 },
+    ]) expect(() => validateControlResult(makeResult({
+      aggregateDecision: 'pass',
+      requiredChecks: [requiredCheck()],
+      observedChecks: [observedCheck({ producer })],
+    }), validationOptions({ expectedChecks: [requiredCheck()] }))).toThrow(/producer|identity|exact/i);
     expect(() => validateControlResult(makeResult({ createdAt: new Date(NOW + 10 * 60_000).toISOString(), validUntil: new Date(NOW + 20 * 60_000).toISOString() }), validationOptions())).toThrow(/future|stale/i);
     expect(() => validateControlResult(makeResult({ createdAt: new Date(NOW + 4 * 60_000).toISOString(), validUntil: new Date(NOW + 60_000).toISOString() }), validationOptions())).toThrow(/interval|timestamp|fresh/i);
     expect(() => validateControlResult(makeResult({ aggregateDecision: 'pass', requiredChecks: [requiredCheck()], observedChecks: [observedCheck({ createdAt: new Date(NOW + 4 * 60_000).toISOString(), validUntil: new Date(NOW + 60_000).toISOString() })] }), validationOptions({ expectedChecks: [requiredCheck()] }))).toThrow(/interval|timestamp|fresh/i);
-    expect(() => validateControlResult(makeResult({ outcome: 'not-applicable', code: 'ci.classification.not-applicable', applicability: 'not-applicable', applicabilityReason: 'ci.classification.not-applicable', classifierProof: classifierProof({ createdAt: new Date(NOW + 4 * 60_000).toISOString(), validUntil: new Date(NOW + 60_000).toISOString() }) }), validationOptions())).toThrow(/interval|timestamp|fresh/i);
+    expect(() => validateControlResult(makeResult({ outcome: 'not-applicable', code: 'ci.classification.not-applicable', owner: 'ci-classifier-decision-owner', applicability: 'not-applicable', applicabilityReason: 'ci.classification.not-applicable', classifierProof: classifierProof({ createdAt: new Date(NOW + 4 * 60_000).toISOString(), validUntil: new Date(NOW + 60_000).toISOString() }) }), validationOptions())).toThrow(/interval|timestamp|fresh/i);
     expect(() => validateControlResult(makeResult({ aggregateDecision: 'pass', requiredChecks: [requiredCheck({ candidateOid: BASE_OID })], observedChecks: [observedCheck({ candidateOid: BASE_OID })] }), validationOptions({ expectedChecks: [requiredCheck({ candidateOid: BASE_OID })] }))).toThrow(/envelope|revision|policy|trusted/i);
     expect(() => validateControlResult(makeResult({ aggregateDecision: 'pass', requiredChecks: [requiredCheck()], observedChecks: [observedCheck({ observedPlatform: { os: 'macos', architecture: 'arm64' } })] }), validationOptions({ expectedChecks: [requiredCheck()] }))).toThrow(/platform|tuple/i);
     expect(() => validateControlResult(makeResult({ preconditionReceipt: makePreconditions({ createdAt: new Date(NOW + 10 * 60_000).toISOString() }) }), validationOptions())).toThrow(/precondition.*future|future.*precondition/i);
@@ -712,8 +1099,9 @@ describe('CP-F2 exact-set aggregation and thin native adapters', () => {
     });
     const admittedNotApplicable = await makeAdmittedResult({ aggregateDecision: 'pass', requiredChecks: required, observedChecks: [notApplicable] });
     expect(aggregateOutcomes([admittedNotApplicable.result as never], { ...publicOutputOptions(), expectedChecks: required, attemptStore: admittedNotApplicable.store })).toBe('pass');
-    const otherRequired = requiredCheck({ expectedProducer: { appId: 'other-app', workflowSha: OID }, expectedPlatform: { os: 'macos', architecture: 'arm64' } });
-    const otherObserved = observedCheck({ expectedProducer: { appId: 'other-app', workflowSha: OID }, producer: { appId: 'other-app', workflowSha: OID }, expectedPlatform: { os: 'macos', architecture: 'arm64' }, observedPlatform: { os: 'macos', architecture: 'arm64' } });
+    const otherProducer = { ...PRODUCER, appId: 'other-app' };
+    const otherRequired = requiredCheck({ expectedProducer: otherProducer, expectedPlatform: { os: 'macos', architecture: 'arm64' } });
+    const otherObserved = observedCheck({ expectedProducer: otherProducer, producer: otherProducer, expectedPlatform: { os: 'macos', architecture: 'arm64' }, observedPlatform: { os: 'macos', architecture: 'arm64' } });
     expect(aggregateOutcomes([makeResult({ aggregateDecision: 'pass', requiredChecks: [otherRequired], observedChecks: [otherObserved] }) as never], { ...validationOptions(), expectedChecks: required, attemptStore: await newEvidenceStore() })).toBe('inconclusive');
     expect(aggregateOutcomes([makeResult({ aggregateDecision: 'pass', requiredChecks: required, observedChecks: [observedCheck({ outcome: 'block', causeCode: 'ci.check.passed' })] }) as never], { ...validationOptions(), expectedChecks: required, attemptStore: await newEvidenceStore() })).toBe('inconclusive');
     expect(aggregateOutcomes([makeResult({ aggregateDecision: 'pass', requiredChecks: required, observedChecks: [observedCheck({ mergeOid: BASE_OID })] }) as never], { ...validationOptions(), expectedChecks: required, attemptStore: await newEvidenceStore() })).toBe('inconclusive');
@@ -721,12 +1109,12 @@ describe('CP-F2 exact-set aggregation and thin native adapters', () => {
       [],
       [observedCheck(), observedCheck()],
       [observedCheck(), observedCheck({ id: 'substitute' })],
-      [observedCheck({ outcome: 'warn', causeCode: 'ci.required-check.warning-only' })],
+      [observedCheck({ outcome: 'warn', causeCode: 'quality.semantic.finding.warning' })],
       [observedCheck({ validUntil: new Date(NOW - 1).toISOString() })],
     ]) {
       const aggregate = makeDiagnostic('inconclusive', { aggregateDecision: 'inconclusive', requiredChecks: required, observedChecks });
-      expect(() => validateControlResult(aggregate as never, validationOptions({ expectedChecks: required }))).toThrow(/observed|exact|duplicate|stale|outcome|aggregate|cause/i);
-      expect(aggregateOutcomes([aggregate as never], { ...validationOptions(), expectedChecks: required, attemptStore: await newEvidenceStore() })).toBe('inconclusive');
+      expect(() => validateControlResult(aggregate as never, noNativeValidationOptions({ expectedChecks: required }))).toThrow(/observed|exact|duplicate|stale|outcome|aggregate|cause/i);
+      expect(aggregateOutcomes([aggregate as never], { ...noNativeValidationOptions(), expectedChecks: required, attemptStore: await newEvidenceStore() })).toBe('inconclusive');
     }
   });
 
@@ -749,7 +1137,7 @@ describe('CP-F2 exact-set aggregation and thin native adapters', () => {
       limitationCodes: ['ci.native.cause-code-unavailable', 'ci.native.progress-only'],
     };
     const aggregate = makeDiagnostic('inconclusive', { code: 'ci.execution.attempt-inconclusive', aggregateDecision: 'inconclusive', requiredChecks: required, observedChecks: [observed] });
-    expect(validateControlResult(aggregate as never, validationOptions({ expectedChecks: required })).outcome).toBe('inconclusive');
+    expect(validateControlResult(aggregate as never, noNativeValidationOptions({ expectedChecks: required })).outcome).toBe('inconclusive');
   });
 
   it('admits truthful active boundary-run evidence as durable aggregate inconclusive', async () => {
@@ -763,7 +1151,7 @@ describe('CP-F2 exact-set aggregation and thin native adapters', () => {
       candidateOid: BOUNDARY_OID,
       baseOid: null,
       mergeBaseOid: null,
-      producer: { appId: 'expected-app', workflowSha: OID },
+      producer: PRODUCER,
       platform: { os: 'linux', architecture: 'x64' },
     };
     const projection = adaptBoundaryRun(native, binding);
@@ -792,10 +1180,24 @@ describe('CP-F2 exact-set aggregation and thin native adapters', () => {
       preconditionReceipt: preconditions,
     });
     const admitted = await makeAdmittedResult({ ...diagnostic, aggregateDecision: 'inconclusive', requiredChecks: required, observedChecks: [observed] });
-    const boundaryOptions = {
-      ...publicOutputOptions(),
+    const boundaryOptions: ControlValidationOptions & {
+      expectedChecks: readonly unknown[];
+      expectedLease: SupervisorLeaseExpectationsV1;
+    } = {
+      ...noNativePublicOutputOptions(),
       expectedPreconditions: expectedPreconditions(preconditions),
       expectedChecks: required,
+      expectedBindings: {
+        candidateOid: BOUNDARY_OID,
+        baseOid: null,
+        mergeOid: null,
+        manifestDigest: DIGEST,
+        policyDigest: DIGEST,
+        classifierDigest: DIGEST,
+        producer: PRODUCER,
+        toolDigest: DIGEST,
+      },
+      expectedFindingGraph: [{ findingId: 'finding-1', rootCauseId: 'finding-1', causedBy: [], candidateOid: BOUNDARY_OID, policyDigest: DIGEST }],
     };
     expect(validateControlResult(admitted.result as never, boundaryOptions).aggregateDecision).toBe('inconclusive');
     expect(admitted.result.attempt.evidenceBinding).toEqual({
@@ -823,22 +1225,29 @@ describe('CP-F2 exact-set aggregation and thin native adapters', () => {
       findings: [],
     });
     const evidenceDigest = digest(canonicalizeBoundaryRun(native));
-    const binding = { detectorId: 'semantic-quality' as const, schemaVersion: 1 as const, evidenceDigest, policyDigest: DIGEST, candidateOid: OID, baseOid: BASE_OID, mergeBaseOid: BASE_OID, producer: { appId: 'expected-app', workflowSha: OID }, platform: { os: 'linux', architecture: 'x64' } };
+    const binding = { detectorId: 'semantic-quality' as const, schemaVersion: 1 as const, evidenceDigest, policyDigest: DIGEST, candidateOid: OID, baseOid: BASE_OID, mergeBaseOid: BASE_OID, producer: PRODUCER, platform: { os: 'linux', architecture: 'x64' } };
     expect(adaptSemanticQuality(native, binding)).toMatchObject({ outcome: 'pass', nativeCauseCodes: [], nativeCauseCompleteness: 'complete', nativeStatusRefs: [], limitationCodes: [], evidenceDigest, policyDigest: DIGEST, producer: binding.producer, platform: binding.platform });
     expect(adaptSemanticQuality(native, { ...binding, evidenceDigest: OTHER_DIGEST })).toMatchObject({ outcome: 'inconclusive', code: 'ci.native.receipt-unavailable' });
     expect(adaptSemanticQuality(native, { ...binding, candidateOid: BASE_OID })).toMatchObject({ outcome: 'inconclusive', code: 'ci.native.receipt-unavailable' });
     expect(adaptSemanticQuality(native, { ...binding, baseOid: OID })).toMatchObject({ outcome: 'inconclusive', code: 'ci.native.receipt-unavailable' });
     expect(adaptSemanticQuality(native, { ...binding, mergeBaseOid: OID })).toMatchObject({ outcome: 'inconclusive', code: 'ci.native.receipt-unavailable' });
-    const finding = (ruleId: string) => ({ ruleId, decision: 'block' as const, action: 'push' as const, summary: 'Synthetic complete native finding for adapter preservation.', why: 'The adapter must preserve every validated native cause without recomputing policy.', observed: [{ label: 'fixture', value: 'synthetic' }], matchedArtifacts: [], correction: ['Repair the canonical native owner.'], rerun: 'npm run verify:semantic', sourceRefs: ['fixture:ci-control-result'] });
+    const finding = (ruleId: string, decision: 'block' | 'warn' = 'block') => ({ ruleId, decision, action: 'push' as const, summary: 'Synthetic complete native finding for adapter preservation.', why: 'The adapter must preserve every validated native cause without recomputing policy.', observed: [{ label: 'fixture', value: 'synthetic' }], matchedArtifacts: [], correction: ['Repair the canonical native owner.'], rerun: 'npm run verify:semantic', sourceRefs: ['fixture:ci-control-result'] });
     const blocked = buildBoundaryReceipt({ invocation: 'semantic-quality', action: 'push', enforcementMode: 'enforce', base: { headOid: OID, baseOid: BASE_OID, mergeBaseOid: BASE_OID, evidenceSource: 'git-object' }, findings: [finding('semantic.second'), finding('semantic.first')] });
     const blockedDigest = digest(canonicalizeBoundaryRun(blocked));
     expect(adaptSemanticQuality(blocked, { ...binding, evidenceDigest: blockedDigest })).toMatchObject({ outcome: 'block', nativeCauseCodes: ['semantic.first', 'semantic.second'] });
+    const warned = buildBoundaryReceipt({ invocation: 'semantic-quality', action: 'push', enforcementMode: 'enforce', base: { headOid: OID, baseOid: BASE_OID, mergeBaseOid: BASE_OID, evidenceSource: 'git-object' }, findings: [finding('semantic.warning', 'warn')] });
+    const warnedDigest = digest(canonicalizeBoundaryRun(warned));
+    expect(adaptSemanticQuality(warned, { ...binding, evidenceDigest: warnedDigest })).toMatchObject({ outcome: 'warn', code: 'quality.semantic.finding.warning', nativeCauseCodes: ['semantic.warning'] });
+    const safe = buildBoundaryReceipt({ invocation: 'semantic-quality', action: 'push', enforcementMode: 'enforce', base: { headOid: OID, baseOid: BASE_OID, mergeBaseOid: BASE_OID, evidenceSource: 'git-object' }, findings: [] });
+    const safeDigest = digest(canonicalizeBoundaryRun(safe));
+    expect(adaptSemanticQuality(safe, { ...binding, evidenceDigest: safeDigest })).toMatchObject({ outcome: 'pass', code: 'ci.check.passed', nativeCauseCodes: [] });
+    expect(adaptSemanticQuality(warned, { ...binding, evidenceDigest: DIGEST })).toMatchObject({ outcome: 'inconclusive', code: 'ci.native.receipt-unavailable' });
   });
 
   it('uses the canonical boundary-run validator and refuses active progress as terminal evidence', () => {
     const native = validManifest();
     const evidenceDigest = digest(canonicalizeBoundaryRun(native));
-    const binding = { detectorId: 'boundary-run' as const, schemaVersion: 1 as const, evidenceDigest, policyDigest: DIGEST, candidateOid: BOUNDARY_OID, baseOid: null, mergeBaseOid: null, producer: { appId: 'expected-app', workflowSha: OID }, platform: { os: 'linux', architecture: 'x64' } };
+    const binding = { detectorId: 'boundary-run' as const, schemaVersion: 1 as const, evidenceDigest, policyDigest: DIGEST, candidateOid: BOUNDARY_OID, baseOid: null, mergeBaseOid: null, producer: PRODUCER, platform: { os: 'linux', architecture: 'x64' } };
     expect(adaptBoundaryRun(native, binding)).toMatchObject({
       outcome: 'inconclusive',
       code: 'ci.execution.attempt-inconclusive',

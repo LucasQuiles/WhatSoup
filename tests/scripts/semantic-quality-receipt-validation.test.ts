@@ -52,7 +52,13 @@ function binding(bytes: Uint8Array) {
     candidateOid: OID,
     baseOid: OID,
     mergeBaseOid: OID,
-    producer: { appId: 'expected-app', workflowSha: OID },
+    producer: {
+      appId: 'expected-app',
+      workflowRef: 'owner/repo/.github/workflows/policy.yml@refs/heads/main',
+      workflowSha: OID,
+      runId: 'run-1',
+      attempt: 1,
+    },
     platform: { architecture: 'x64', os: 'linux' },
   };
 }
@@ -67,6 +73,15 @@ describe('canonical semantic receipt validation', () => {
       outcome: 'block',
       code: 'ci.native.semantic-quality',
       nativeCauseCodes: ['semantic.synthetic'],
+      nativeEvidence: {
+        detectorId: 'semantic-quality',
+        schemaVersion: 1,
+        evidenceDigest: `sha256:${sha256Bytes(bytes)}`,
+        nativeCauseCodes: ['semantic.synthetic'],
+        policyDigest: DIGEST,
+        producer: binding(bytes).producer,
+        platform: binding(bytes).platform,
+      },
     });
   });
 

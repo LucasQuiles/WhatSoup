@@ -13,6 +13,7 @@ import {
   sha256Bytes,
 } from '../verification/boundary-run/shared.ts';
 import { assertBoundedEvidenceGraph } from './preconditions.ts';
+import type { NativeEvidenceV1 } from './result.ts';
 
 export interface NativeBindingV1 {
   detectorId: 'semantic-quality' | 'boundary-run';
@@ -22,7 +23,13 @@ export interface NativeBindingV1 {
   candidateOid: string;
   baseOid: string | null;
   mergeBaseOid: string | null;
-  producer: { appId: string; workflowSha: string };
+  producer: {
+    appId: string;
+    workflowRef: string;
+    workflowSha: string;
+    runId: string;
+    attempt: number;
+  };
   platform: { architecture: string; os: string };
 }
 
@@ -37,6 +44,7 @@ export interface NativeAdapterResult {
   policyDigest?: string;
   producer?: NativeBindingV1['producer'];
   platform?: NativeBindingV1['platform'];
+  nativeEvidence?: NativeEvidenceV1;
 }
 
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
@@ -61,9 +69,13 @@ function bindingIsValid(binding: NativeBindingV1, detectorId: NativeBindingV1['d
     && (binding.baseOid === null || isOid(binding.baseOid))
     && (binding.mergeBaseOid === null || isOid(binding.mergeBaseOid))
     && isRecord(binding.producer)
-    && hasExactKeys(binding.producer, ['appId', 'workflowSha'])
+    && hasExactKeys(binding.producer, ['appId', 'attempt', 'runId', 'workflowRef', 'workflowSha'])
     && typeof binding.producer.appId === 'string'
+    && typeof binding.producer.workflowRef === 'string'
+    && typeof binding.producer.runId === 'string'
     && isOid(binding.producer.workflowSha)
+    && Number.isSafeInteger(binding.producer.attempt)
+    && binding.producer.attempt > 0
     && isRecord(binding.platform)
     && hasExactKeys(binding.platform, ['architecture', 'os'])
     && typeof binding.platform.architecture === 'string'
@@ -72,6 +84,18 @@ function bindingIsValid(binding: NativeBindingV1, detectorId: NativeBindingV1['d
 
 function evidenceDigest(value: unknown): string {
   return `sha256:${sha256Bytes(canonicalizeBoundaryRun(value))}`;
+}
+
+function nativeEvidence(binding: NativeBindingV1, nativeCauseCodes: string[]): NativeEvidenceV1 {
+  return {
+    detectorId: binding.detectorId,
+    schemaVersion: binding.schemaVersion,
+    evidenceDigest: binding.evidenceDigest,
+    nativeCauseCodes,
+    policyDigest: binding.policyDigest,
+    producer: binding.producer,
+    platform: binding.platform,
+  };
 }
 
 function semanticReceipt(
@@ -104,7 +128,7 @@ export function adaptSemanticQuality(value: unknown, binding?: NativeBindingV1):
     const nativeCauseCodes = [...new Set(receipt.findings.map((finding) => finding.ruleId))].sort();
     return {
       outcome: receipt.decision,
-      code: receipt.decision === 'block' ? 'ci.native.semantic-quality' : receipt.decision === 'inconclusive' ? 'ci.execution.attempt-inconclusive' : receipt.decision === 'warn' ? 'ci.required-check.warning-only' : 'ci.check.passed',
+      code: receipt.decision === 'block' ? 'ci.native.semantic-quality' : receipt.decision === 'inconclusive' ? 'ci.execution.attempt-inconclusive' : receipt.decision === 'warn' ? 'quality.semantic.finding.warning' : 'ci.check.passed',
       nativeCauseCodes,
       nativeCauseCompleteness: receipt.decision === 'pass' || nativeCauseCodes.length > 0 ? 'complete' : 'unavailable',
       nativeStatusRefs: [],
@@ -113,6 +137,7 @@ export function adaptSemanticQuality(value: unknown, binding?: NativeBindingV1):
       policyDigest: binding.policyDigest,
       producer: binding.producer,
       platform: binding.platform,
+      nativeEvidence: nativeEvidence(binding, nativeCauseCodes),
     };
   } catch {
     return unavailable();
@@ -143,6 +168,7 @@ export function adaptBoundaryRun(value: unknown, binding?: NativeBindingV1): Nat
       policyDigest: binding.policyDigest,
       producer: binding.producer,
       platform: binding.platform,
+      nativeEvidence: nativeEvidence(binding, []),
     };
     const outcome = manifest.overallVerdict === 'Pass' ? 'pass' : manifest.overallVerdict === 'Fail' || manifest.overallVerdict === 'Blocked' ? 'block' : 'inconclusive';
     const nativeStatusRefs = manifest.attempts
@@ -161,6 +187,7 @@ export function adaptBoundaryRun(value: unknown, binding?: NativeBindingV1): Nat
       policyDigest: binding.policyDigest,
       producer: binding.producer,
       platform: binding.platform,
+      nativeEvidence: nativeEvidence(binding, []),
     };
   } catch {
     return unavailable();

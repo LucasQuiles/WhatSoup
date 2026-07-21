@@ -9,7 +9,7 @@ import {
   sha256Bytes,
 } from '../verification/boundary-run/shared.ts';
 import { parseBoundaryJsonBytes } from '../verification/boundary-run/schema.ts';
-import { reasonDefinition } from './reasons.ts';
+import { isLegacyCompatibleReason, reasonDefinition } from './reasons.ts';
 
 export const MAX_PRE_PUSH_INPUT_BYTES = 32_768;
 export const MAX_REF_UPDATES = 128;
@@ -411,7 +411,7 @@ export function validateRefPolicyReceipt(value: unknown): RefPolicyReceiptV1 {
   if (!isRecord(value) || !hasExactKeys(value, RECEIPT_KEYS)) fail('ci.refs.input-malformed');
   if (value.schemaVersion !== 1 || value.controlId !== 'ci.outgoing-ref-policy') fail('ci.refs.input-malformed');
   const topReason = reasonDefinition(value.code);
-  if (!['pass', 'block', 'inconclusive'].includes(String(value.outcome)) || typeof value.code !== 'string' || !value.code.startsWith('ci.refs.') || topReason === null || topReason.defaultOutcome !== value.outcome) fail('ci.refs.input-malformed');
+  if (!['pass', 'block', 'inconclusive'].includes(String(value.outcome)) || typeof value.code !== 'string' || !value.code.startsWith('ci.refs.') || !isLegacyCompatibleReason(value.code) || topReason === null || topReason.defaultOutcome !== value.outcome) fail('ci.refs.input-malformed');
   const expectedExit = value.outcome === 'pass' ? 0 : value.outcome === 'block' ? 1 : 2;
   if (value.exitCode !== expectedExit || !DIGEST.test(String(value.evidenceDigest)) || !isTimestamp(value.createdAt)) {
     fail('ci.refs.input-malformed');
@@ -429,7 +429,7 @@ export function validateRefPolicyReceipt(value: unknown): RefPolicyReceiptV1 {
     if (!isRecord(entry) || !hasExactKeys(entry, OBSERVATION_KEYS) || entry.updateIndex !== index || !DIGEST.test(String(entry.updateBindingDigest)) || !DIGEST.test(String(entry.graphEvidenceDigest))) fail('ci.refs.input-malformed');
     if (!['create', 'update', 'delete'].includes(String(entry.operation)) || !['branch', 'release-branch', 'release-tag', 'unknown'].includes(String(entry.refClass))) fail('ci.refs.input-malformed');
     const entryReason = reasonDefinition(entry.code);
-    if (!['pass', 'block', 'inconclusive'].includes(String(entry.outcome)) || typeof entry.code !== 'string' || !entry.code.startsWith('ci.refs.') || entryReason === null || entryReason.defaultOutcome !== entry.outcome) fail('ci.refs.input-malformed');
+    if (!['pass', 'block', 'inconclusive'].includes(String(entry.outcome)) || typeof entry.code !== 'string' || !entry.code.startsWith('ci.refs.') || !isLegacyCompatibleReason(entry.code) || entryReason === null || entryReason.defaultOutcome !== entry.outcome) fail('ci.refs.input-malformed');
     if ((entry.localOid !== null && !isOid(entry.localOid)) || (entry.remoteOid !== null && !isOid(entry.remoteOid))) fail('ci.refs.input-malformed');
     if ((entry.operation === 'delete' && (entry.localOid !== null || entry.remoteOid === null))
       || (entry.operation === 'create' && (entry.localOid === null || entry.remoteOid !== null))
@@ -464,7 +464,7 @@ export function validateRefPolicyReceipt(value: unknown): RefPolicyReceiptV1 {
 
 export function buildInconclusiveRefPolicyReceipt(code: string, now = new Date()): RefPolicyReceiptV1 {
   const reason = reasonDefinition(code);
-  if (!code.startsWith('ci.refs.') || reason?.defaultOutcome !== 'inconclusive') fail('ci.refs.input-malformed');
+  if (!code.startsWith('ci.refs.') || !isLegacyCompatibleReason(code) || reason?.defaultOutcome !== 'inconclusive') fail('ci.refs.input-malformed');
   const withoutDigest = {
     schemaVersion: 1 as const,
     controlId: 'ci.outgoing-ref-policy' as const,

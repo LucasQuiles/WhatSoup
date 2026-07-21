@@ -16,6 +16,7 @@ export const MAX_PRECONDITION_ITEMS = 64;
 export interface EvidenceGraphBudget {
   maxDepth: number;
   maxItems: number;
+  maxObjectKeys?: number;
   maxNodes: number;
   maxStringBytes: number;
 }
@@ -44,7 +45,7 @@ export function assertBoundedEvidenceGraph(root: unknown, budget: EvidenceGraphB
     if (nodes > budget.maxNodes) throw new Error('evidence graph exceeds node budget');
     if (!Array.isArray(value) && Object.getPrototypeOf(value) !== Object.prototype) throw new Error('evidence values must be plain data objects');
     const keys = Reflect.ownKeys(value).filter((key) => !(Array.isArray(value) && key === 'length'));
-    if (keys.length > budget.maxItems || keys.some((key) => typeof key !== 'string')) throw new Error('evidence object exceeds key budget');
+    if (keys.length > (budget.maxObjectKeys ?? budget.maxItems) || keys.some((key) => typeof key !== 'string')) throw new Error('evidence object exceeds key budget');
     if (Array.isArray(value) && value.length > budget.maxItems) throw new Error('evidence list exceeds item budget');
     const descriptors = Object.getOwnPropertyDescriptors(value);
     for (const key of keys) {

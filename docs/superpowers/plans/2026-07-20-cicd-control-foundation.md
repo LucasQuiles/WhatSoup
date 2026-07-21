@@ -270,14 +270,18 @@ git commit -m "feat(ci): standardize control evidence"
   malformed causal graph, missing warning governance, or missing evidence-reference class
   is `INCONCLUSIVE/2`, never warning or pass.
 - Smallest repair: extend only `scripts/lib/ci-control/reasons.ts`,
-  `scripts/lib/ci-control/result.ts`, and their tests. Preserve the existing serializer as
-  the sole renderer and preserve native granular cause codes. Do not activate the rider's
-  aspirational catalog wholesale.
+  `scripts/lib/ci-control/result.ts`, the shared evidence-graph budget in
+  `scripts/lib/ci-control/preconditions.ts`, the existing thin native adapter, and their
+  tests. Preserve the existing serializer as the sole renderer and preserve native
+  granular cause codes. Existing ref-policy receipt readers also reject later-deprecated
+  codes. Do not activate the rider's aspirational catalog wholesale.
 - Migration: freeze all V1 meanings; add explicit lifecycle/supersession records; new
   emitters use four-part codes. Deprecated codes remain readable for bounded historical
   evidence but cannot be emitted by a new control after their acceptance deadline.
 - Warning rule: escalation emits a separately registered successor finding bound to the
-  protected clock and policy. It never mutates the warning code's default outcome.
+  protected clock, original native evidence, policy, predecessor result digest, and a new
+  terminal attempt. It never mutates the warning code's default outcome or resets the
+  first-observed interval.
 - Stop conditions: any alternate message catalog, native-cause collapse, unbounded output,
   scope ambiguity, sensitive reference leak, or changed HEAD/index/plan invalidates the
   bead.
@@ -288,9 +292,19 @@ git commit -m "feat(ci): standardize control evidence"
 
 - Modify: `scripts/lib/ci-control/reasons.ts`
 - Modify: `scripts/lib/ci-control/result.ts`
+- Modify: `scripts/lib/ci-control/preconditions.ts` only to give object-key and list-item
+  budgets independent limits for the enriched envelope
+- Modify: `scripts/lib/ci-control/native-adapter.ts` only to replace the ambiguous legacy
+  warning wrapper with one implemented governed warning code
+- Modify: `scripts/lib/ci-control/ref-policy.ts` only to name its bounded legacy-compatible
+  receipt path explicitly while the new authoritative result envelope rejects partial
+  taxonomy metadata
 - Modify: `tests/scripts/ci-control-result.test.ts`
 - Create: `tests/scripts/ci-control-reasons.test.ts`
-- Modify: `package.json` only to wire the new companion test into the existing branch gate
+- Modify: `tests/scripts/semantic-quality-receipt-validation.test.ts` only to carry the
+  complete producer identity at the existing canonical-byte adapter boundary
+- Modify: `package.json` only to wire the taxonomy companion and canonical native-receipt
+  byte tests into the existing branch gate
 
 **Required enriched fields:**
 
@@ -300,7 +314,41 @@ claimedScope observedScope scopeLimitations
 retryClass remediationClass allowedPatchScope prohibitedChanges doNot
 nextBestAction verificationPlan closureCriteria
 sensitiveFieldsOmitted publicEvidenceRefs privateEvidenceRefs
+nativeEvidence warningGovernance warningTransition
 ```
+
+Validation also receives independently supplied expected envelope bindings—including
+workflow ref, workflow SHA, run, and attempt—expected claimed scope, expected native
+adapter evidence, warning-governance/transition receipts, and an expected bounded causal
+graph. Producer identity remains complete on scanner-policy, classifier, required-check,
+observed-check, native-adapter, and neutral native-evidence projections; native evidence
+also preserves its policy and observed platform. An App/workflow-SHA pair cannot substitute
+for the workflow ref, run, and attempt. Actual and protected-expected native evidence are
+null-symmetric: either both are absent or their complete projections match exactly. Core
+validation—not only rendering or aggregation—also requires the complete protected scanner-
+policy receipt. Equal self-attested values are not trusted evidence.
+Attempt evidence binds the entire result projection except the embedded attempt and its
+digest, which are separately exact-byte validated to avoid recursion. Warning escalation
+also binds the predecessor attempt digest and admits only a successor attempt created at
+or after protected expiry and terminal before transition publication. Public projections
+reject POSIX, drive-letter, UNC, assignment-prefixed, and `file:` absolute paths, not a
+selected-root or punctuation-delimiter denylist, while preserving ordinary HTTPS URLs.
+
+Legacy active codes remain visibly `legacy-partial` compatibility records until their
+native owners receive their own admitted migration. New P0 catalog rows without executable
+unsafe/safe/unavailable boundaries are `planned` and non-emittable. Only active,
+implemented, complete rows may be emitted through `ControlResultV1`; legacy receipt reading
+is a separate historical-only or explicitly compatible native path and cannot authorize an
+aggregate. The first migrated warning is `quality.semantic.finding.warning`; it preserves
+native semantic rule IDs, carries a protected first-observed/SLA/expiry projection, and
+transitions atomically to `quality.semantic.warning.expired` through a new attempt-bound
+result. Neither warning nor expired successor can satisfy evidence using a reset interval.
+The earliest-observation/governance receipt is produced by a protected append-only owner in
+the dependent execution-lifecycle bead; callers may not manufacture their own matching
+`expectedWarningGovernance`. This result bead validates that protected input but does not
+invent a second governance store. Deprecated or superseded receipt transport is parsed
+through a bounded historical-only byte boundary, retains the exact transport digest, and
+returns a recursively frozen canonical view that cannot enter aggregate authorization.
 
 Closed retry classes are `never`, `after-source-change`,
 `after-precondition-repair`, `after-transient-condition`,
@@ -317,6 +365,7 @@ Focused RED/GREEN and surrounding verification:
 bash scripts/run-with-pinned-npm.sh test -- \
   tests/scripts/ci-control-reasons.test.ts \
   tests/scripts/ci-control-result.test.ts \
+  tests/scripts/semantic-quality-receipt-validation.test.ts \
   tests/scripts/ci-control-ref-policy.test.ts \
   tests/scripts/hooks-installed-guard.test.ts \
   --pool=forks --fileParallelism=false --retry=0
