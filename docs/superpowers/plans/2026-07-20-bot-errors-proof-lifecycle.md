@@ -123,7 +123,7 @@ Commit: `refactor(alerts): centralize observation normalization`
 
 - [ ] **Step 1: Reverse the current advisory test**
 
-Change the existing mismatch test to assert the clear is suppressed and the open incident remains. Add wrong source, stale proof, missing referenced receipt, weak schema, future timestamp, unknown observation, accepted same-source clear, accepted health snapshot, accepted outbound-after-incident, and accepted auth-bond-plus-outbound cases. Reproduce the observed weak-auth sequence: a weak `connecting/backoff` observation must never enter `awaiting_physical`; later connected/present-bond evidence closes or supersedes the transient incident without requiring relink proof, while a genuinely terminal-auth incident still requires the stronger policy. Reproduce the observed oneshot sequence separately: a successful service invocation closes only the unit-execution incident and must not clear application-health findings from an `attention-required`, `ok=false` heartbeat.
+Change the existing mismatch test to assert the clear is suppressed and the open incident remains. Add wrong source, stale proof, missing referenced receipt, weak schema, future timestamp, unknown observation, accepted same-source clear, accepted health snapshot, accepted outbound-after-incident, and accepted auth-bond-plus-outbound cases. Reproduce the observed weak-auth sequence: a weak `connecting/backoff` observation must never enter `awaiting_physical`; later connected/present-bond evidence closes or supersedes the transient incident without requiring relink proof, while a genuinely terminal-auth incident still requires the stronger policy. Reproduce both observed oneshot sequences: a successful service invocation closes only the unit-execution incident and must not clear application-health findings from an `attention-required`, `ok=false` heartbeat; an activating/running oneshot previously in the failed set remains unknown and cannot close until a newer terminal `Result=success`/exit-0 receipt exists.
 
 - [ ] **Step 2: Prove the red state**
 
@@ -194,7 +194,7 @@ Commit: `feat(alerts): persist replay-safe event receipts`
 
 - [ ] **Step 1: Write failing transition tests**
 
-Assert 1,500 repeated faults while one incident is open create zero verified reopens; rejected clears create zero; a valid close followed by a fresh accepted fault creates one; replay creates none; a held transient creates none; enough real close/reopen cycles open and escalate one storm.
+Assert 1,500 repeated faults while one incident is open create zero verified reopens; rejected clears create zero; a valid close followed by a fresh accepted fault creates one; replay creates none; a held transient creates none; a failed oneshot that temporarily enters activating/running creates neither a close nor reopen; enough real close/reopen cycles open and escalate one storm.
 
 - [ ] **Step 2: Add a seeded pure-model test**
 

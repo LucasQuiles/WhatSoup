@@ -116,7 +116,7 @@ Commit: `feat(ops): add authoritative incident thread cursor`
 
 - [ ] **Step 1: Write failing correlation tests**
 
-Use synthetic chat metadata, dispatcher delivery receipts, incident-state fixtures, and isolated queue directories. Cover repeated open alerts, real close/reopen, rejected clear, root inhibition, stale ledger, missing queue directory, corrupt state, physical action, owner-required action, blocked control-peer delivery, provider respawn without control-path recovery, queue backlog, and no-change cycles.
+Use synthetic chat metadata, dispatcher delivery receipts, incident-state fixtures, and isolated queue directories. Cover repeated open alerts, real close/reopen, rejected clear, root inhibition, stale ledger, missing queue directory, corrupt state, physical action, owner-required action, blocked control-peer delivery, provider respawn without control-path recovery, queue backlog, and no-change cycles. Add contradiction cases from live supervision: a recovery page while the same oneshot is still activating, a later terminal exit-1 receipt after that page, and a unit-level success while its application heartbeat remains `ok=false`; all classify as `inconclusive` or separate identities rather than resolved.
 
 - [ ] **Step 2: Prove the red state**
 
@@ -198,7 +198,7 @@ Expected: FAIL because the stress command does not exist.
 
 - [ ] **Step 3: Implement deterministic workload generation**
 
-Generate mixed version-1/version-2 events with duplicates, collisions, reorderings, valid/invalid proofs, root/symptom relations, transitions, and remediation attempts. Invoke the real pure protocol evaluator and dispatcher filesystem paths against temporary state only.
+Generate mixed version-1/version-2 events with duplicates, collisions, reorderings, valid/invalid proofs, root/symptom relations, transitions, remediation attempts, and oneshot lifecycle sequences (`failed → activating → failed` and `failed → activating → terminal success`). Invoke the real pure protocol evaluator and dispatcher filesystem paths against temporary state only.
 
 - [ ] **Step 4: Add fault injection and restart loops**
 
