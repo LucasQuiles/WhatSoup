@@ -874,6 +874,7 @@ type PerChatCleanupRuntimeState = {
   pendingTurnText: Map<string, string>;
   pendingPolls: { questions: Map<string, PendingPollQuestion> };
   resumeFailedHandling: Set<string>;
+  pendingRecycle: Set<string>;
   lastSpawnRouteProvider: Map<string, string>;
   lastPinBlockNotice: Map<string, string>;
   autoCompact: AutoCompactView;
@@ -3784,6 +3785,11 @@ describe('AgentRuntime', () => {
       state.pendingTurnText.set(lidKey, 'pending');
       state.crashes.record(lidKey); state.crashes.record(lidKey);
       state.resumeFailedHandling.add(lidKey);
+      // MINOR 4 (final-review): a deferred route recycle (Task G, busy-time
+      // /model pin) is keyed by the SAME per-chat mapKey as the rest of this
+      // migrated state — if it isn't carried over, the recycle the pin
+      // promised silently never applies once the chat's canonical key flips.
+      state.pendingRecycle.add(lidKey);
       state.autoCompact.cooldownUntil.set(lidKey, 1_700_000_900_000);
       state.autoCompact.lastSuccessAt.set(lidKey, 1_700_000_000_000);
       state.autoCompact.rapidRearmRecordedForSuccessAt.set(lidKey, 1_700_000_000_000);
@@ -3835,6 +3841,7 @@ describe('AgentRuntime', () => {
       expect(state.pendingTurnText.get(canonicalJid)).toBe('pending');
       expect(state.crashes.count(canonicalJid)).toBe(2);
       expect(state.resumeFailedHandling.has(canonicalJid)).toBe(true);
+      expect(state.pendingRecycle.has(canonicalJid)).toBe(true);
       expect(state.autoCompact.cooldownUntil.get(canonicalJid)).toBe(1_700_000_900_000);
       expect(state.autoCompact.lastSuccessAt.get(canonicalJid)).toBe(1_700_000_000_000);
       expect(state.autoCompact.rapidRearmRecordedForSuccessAt.get(canonicalJid)).toBe(1_700_000_000_000);
@@ -3864,6 +3871,7 @@ describe('AgentRuntime', () => {
       expect(state.pendingTurnText.has(lidKey)).toBe(false);
       expect(state.pendingPolls.questions.has(lidKey)).toBe(false);
       expect(state.resumeFailedHandling.has(lidKey)).toBe(false);
+      expect(state.pendingRecycle.has(lidKey)).toBe(false);
       expect(state.autoCompact.cooldownUntil.has(lidKey)).toBe(false);
       expect(state.autoCompact.lastSuccessAt.has(lidKey)).toBe(false);
       expect(state.autoCompact.rapidRearmRecordedForSuccessAt.has(lidKey)).toBe(false);
@@ -16263,12 +16271,58 @@ describe('NL routing handlers (nlRouting flag)', () => {
       const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
       const snapshot = (runtime as unknown as {
-        catalogueSnapshot: { resolveCataloguePick: (jid: string, n: number) => { providerId: string; id: string } | null };
+        catalogueSnapshot: { resolveCataloguePick: (jid: string, senderJid: string, n: number) => { providerId: string; id: string } | null };
       }).catalogueSnapshot;
-      expect(snapshot.resolveCataloguePick(CHAT, 1)).toEqual({ providerId: 'claude-cli', id: 'claude-opus-4-8' });
-      expect(snapshot.resolveCataloguePick(CHAT, 2)).toEqual({ providerId: 'opencode-cli', id: 'kimi/kimi-k3' });
+      expect(snapshot.resolveCataloguePick(CHAT, SENDER_A, 1)).toEqual({ providerId: 'claude-cli', id: 'claude-opus-4-8' });
+      expect(snapshot.resolveCataloguePick(CHAT, SENDER_A, 2)).toEqual({ providerId: 'opencode-cli', id: 'kimi/kimi-k3' });
       // Out of range → miss, never a wraparound or a stale guess.
-      expect(snapshot.resolveCataloguePick(CHAT, 3)).toBeNull();
+      expect(snapshot.resolveCataloguePick(CHAT, SENDER_A, 3)).toBeNull();
+    });
+
+    // IMPORTANT 2 (final-review): the numbered snapshot must be captured
+    // per-(chat, sender) — a second/filtered render by a DIFFERENT group
+    // member must never repoint an earlier sender's still-pending pick.
+    // Before this fix, the snapshot was keyed `latestByChat` with a
+    // per-chat CONSTANT synthetic msgId, so B's render silently overwrote
+    // A's — A's later `/model N` would then resolve against B's list.
+    it("a filtered render by A then a full render by B does not repoint A's pending /model N pick", async () => {
+      cfgAny().agentFallbacks = [
+        { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
+        { provider: 'opencode-cli', model: 'glm/glm-5.2' },
+      ];
+      const listFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['kimi/kimi-k3', 'glm/glm-5.2'] });
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueListFn: listFn });
+
+      // A renders a FILTERED menu — kimi only.
+      await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_A, isGroup: true, content: '/model list kimi' }));
+      const aMenu = allReplies(sentMessages).find((t) => t.includes('*Pick a model:*'));
+      expect(aMenu).toBeDefined();
+      expect(aMenu).toContain('1. opencode-cli (kimi/kimi-k3)');
+      expect(aMenu).not.toContain('glm');
+
+      mockQueue.enqueueText.mockClear();
+      sentMessages.length = 0;
+
+      // B renders the FULL menu in the SAME chat — same synthetic per-chat
+      // msgId a pre-fix cache would have overwritten A's slot with.
+      await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_B, isGroup: true, content: '/model list', messageId: 'msg-2' }));
+      const bMenu = allReplies(sentMessages).find((t) => t.includes('*Pick a model:*'));
+      expect(bMenu).toBeDefined();
+      expect(bMenu).toContain('1. claude-cli (claude-opus-4-8) (current)');
+      expect(bMenu).toContain('2. opencode-cli (kimi/kimi-k3)');
+      expect(bMenu).toContain('3. opencode-cli (glm/glm-5.2)');
+
+      mockQueue.enqueueText.mockClear();
+      sentMessages.length = 0;
+
+      // A picks N=1 — must still resolve against what A SAW (kimi), never
+      // silently pin whatever landed at B's slot 1 (the current primary).
+      await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_A, isGroup: true, content: '/model 1', messageId: 'msg-3' }));
+      const rows = prefRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].requested_provider).toBe('opencode-cli');
+      expect(rows[0].requested_model).toBe('kimi/kimi-k3');
+      expect(rows[0].requested_model).not.toBe('claude-opus-4-8');
     });
 
     it('a fallback with no configured model does not get a number, but IS still shown as a bullet in the config block', async () => {
@@ -16370,7 +16424,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(reply).not.toContain('Pinned kimi/kimi-k3 for 24h');
     });
 
-    it('DEFER: a catalogue outage at pin time leaves the pin UNVERIFIED (fail-open), still sends the D10 echo (Task H)', async () => {
+    it("DEFER: a catalogue outage at pin time leaves the pin UNVERIFIED (fail-open), and the echo says so honestly instead of claiming the model is pinned/serving (Task H, MINOR 3 final-review)", async () => {
       cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
       const listFn = vi.fn().mockResolvedValue({ status: 'unavailable', reason: 'spawn-error' });
       const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueListFn: listFn });
@@ -16384,8 +16438,16 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(rows[0].model_pin_verified).toBe(0);
       expect(listFn).toHaveBeenCalledTimes(1);
       const reply = allReplies(sentMessages).join('\n');
-      expect(reply).toContain('Pinned kimi/kimi-k3 for 24h');
+      // MINOR 3: the old unconditional "Pinned kimi/kimi-k3 for 24h" claimed
+      // the model was pinned/serving even though decideModelPinResolution's
+      // needs-catalogue fail-open means it demonstrably will NOT serve until
+      // re-verified — the fix distinguishes this branch with honest copy.
+      expect(reply).not.toContain('Pinned kimi/kimi-k3 for 24h');
+      expect(reply).toContain("Pinned opencode-cli — kimi/kimi-k3 pending a catalogue check; using opencode-cli's default until then.");
+      expect(reply).toContain('/reset to undo');
       expect(reply).not.toContain("Couldn't pin");
+      // Plain-language hold: no line/tier/weight in the new copy either.
+      expect(reply).not.toMatch(/\b(line|tier|weight)\b/i);
     });
 
     it('PROVIDER-CHANGED FAIL-OPEN: a verified pin against a DIFFERENT provider than the one resolving now never bleeds its model into the route (Task H)', async () => {
@@ -16689,6 +16751,84 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(opts?.model).toBe('claude-sonnet-5');
     });
 
+    // HIGHEST-VALUE TEST (final-review Observation, not a known bug — proving
+    // the property, not fixing a defect): the test above manually pokes
+    // currentInboundSeq to SIMULATE a busy turn. This one constructs a
+    // GENUINE mid-turn interleaving: a real provider turn is dispatched via
+    // the turnQueue (shared-mode fire-and-forget dispatch, same idiom as the
+    // existing '/new'-while-busy coverage) and deliberately held open between
+    // dispatch and finalization (session.sendTurn blocked on a manually-
+    // released promise) while a /model switch arrives for the SAME chat. The
+    // recycle must defer (pendingRecycle set, live session NOT torn down
+    // mid-turn) and apply exactly once, only at the next turn-idle boundary.
+    it('DYNAMIC INTERLEAVE: a /model switch arriving between provider-turn dispatch and finalization defers the recycle for real, never mid-turn', async () => {
+      cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'claude-sonnet-5' }];
+      const anthropicFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['claude-opus-4-8', 'claude-sonnet-5'] });
+      // shared: true — non-per_chat dispatch still goes through this.session/
+      // this.queue (the SAME singleton mechanics the G-block tests exercise),
+      // but turn dispatch is fire-and-forget via this.turnQueue (unlike plain
+      // 'single' scope, which awaits sendTurnNonShared — and therefore the
+      // WHOLE turn — directly inside _handleMessageInner, serializing every
+      // inbound behind it and making a genuine SECOND, concurrent inbound
+      // impossible to construct at all). Shared mode is what the existing
+      // busy-rejection tests (e.g. "rejects /new while the shared runtime
+      // queue still owns a turn") use for exactly this reason.
+      const { runtime, sentMessages } = makeRoutingRuntime({ shared: true, model: 'claude-opus-4-8', modelCatalogueAnthropicFn: anthropicFn });
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      mockSession.shutdown.mockClear();
+
+      let markSendStarted!: () => void;
+      let releaseSend!: () => void;
+      const sendStarted = new Promise<void>((resolve) => { markSendStarted = resolve; });
+      const sendBlocked = new Promise<void>((resolve) => { releaseSend = resolve; });
+      mockSession.sendTurn.mockImplementationOnce(async () => {
+        markSendStarted();
+        await sendBlocked;
+      });
+
+      // A genuine provider turn for 'hello'. _handleMessageInner's shared-mode
+      // branch enqueues onto turnQueue and returns WITHOUT awaiting the send —
+      // so `await turnChain` below resolves once the turn is QUEUED, not once
+      // it's DONE; session.sendTurn is still hanging on sendBlocked.
+      const state = runtime as unknown as { turnQueue: { isProcessing: boolean; idle: () => Promise<void> } };
+      await runtime.handleMessage(makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'hello', messageId: 'msg-2' }));
+      await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
+      await sendStarted;
+      expect(state.turnQueue.isProcessing).toBe(true); // genuinely in flight, not simulated
+
+      // A /model switch arrives WHILE that turn is dispatched but not yet
+      // finalized — this is a NEW inbound, processed independently of the
+      // stuck turnQueue processor (local commands are handled synchronously
+      // in _handleMessageInner, which is not what's blocked).
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'msg-3' }));
+      expect(mockSession.shutdown).not.toHaveBeenCalled(); // never mid-turn
+      const deferReply = allReplies(sentMessages).join('\n');
+      expect(deferReply).toContain("claude-sonnet-5 is pinned — it'll answer from your next message.");
+      mockQueue.enqueueText.mockClear();
+      sentMessages.length = 0;
+
+      // Let the in-flight turn finish: release the blocked send AND emit the
+      // 'result' event a real provider run ends with — turn completion
+      // clears currentTurnChatJid/currentInboundSeq via handleEvent('result'),
+      // which is what isTurnInFlight's single/shared predicate actually reads
+      // (turnQueue.isProcessing alone going false is not sufficient). This is
+      // itself NOT the turn-idle boundary the deferral promised — nothing
+      // auto-fires the recycle just because the provider call returned.
+      releaseSend();
+      await state.turnQueue.idle();
+      await emitAgentResult(0, null);
+      expect(mockSession.shutdown).not.toHaveBeenCalled();
+
+      // The NEXT inbound reaches ensureSessionAndQueueSync BEFORE any new
+      // dispatch — consumePendingRecycleIfIdle fires there, exactly once.
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'next turn', messageId: 'msg-4' }));
+      expect(mockSession.shutdown).toHaveBeenCalledTimes(1);
+      expect(mockSession.shutdown).toHaveBeenCalledWith(false);
+      const opts = capturedSessionManagerOptsRef.current as unknown as { provider?: string; model?: string };
+      expect(opts?.provider).toBe('claude-cli');
+      expect(opts?.model).toBe('claude-sonnet-5');
+    });
+
     it('/reset recycles the live session back to the default route — undo is equally immediate', async () => {
       cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'claude-sonnet-5' }];
       const anthropicFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['claude-opus-4-8', 'claude-sonnet-5'] });
@@ -16715,6 +16855,104 @@ describe('NL routing handlers (nlRouting flag)', () => {
         applyRouteChangeAndRecycle: (chatJid: string, senderJid: string, mapKey: string | undefined) => string;
       }).applyRouteChangeAndRecycle(CHAT, SENDER_A, undefined);
       expect(outcome).toBe('noop');
+    });
+
+    // IMPORTANT 1 (final-review): a group re-confirm's 'refreshed'/
+    // 'sticky_kept' outcome bumps ONLY the re-confirming sender's row, but
+    // under chat-scoped last-writer-wins that alone can flip which row wins
+    // the chat. Before this fix, the three pin handlers `break`d on that
+    // outcome WITHOUT ever calling applyRouteChangeAndRecycle — so the live
+    // session kept serving whatever the LAST 'set' pin picked, while the
+    // re-confirm's own echo lied and said "Already set" for a route that
+    // wasn't actually live. This proves the exact interleaving from the
+    // review: A pins, B pins (session now on B's model), A re-confirms — the
+    // re-confirm must recycle the session back to A's model and disclose it
+    // honestly, not print a bare "Already set".
+    it('IMPORTANT-1: a group re-confirm that flips the chat-scoped winner recycles the LIVE session too, not just a bare "Already set"', async () => {
+      // Chat-scoped last-writer-wins breaks ties on updated_at — fake+advance
+      // the clock between writes so two back-to-back pins in the same
+      // millisecond (a real risk on a fast machine) can never tie and make
+      // the winner ambiguous/flaky. Real timers are restored by this describe
+      // block's own afterEach (vi.useRealTimers(), unconditional).
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(1_800_000_000_000);
+      cfgAny().agentFallbacks = [
+        { provider: 'claude-cli', model: 'claude-sonnet-5' },
+        { provider: 'claude-cli', model: 'claude-haiku-4-5' },
+      ];
+      const anthropicFn = vi.fn().mockResolvedValue({
+        status: 'ok',
+        ids: ['claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5'],
+      });
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueAnthropicFn: anthropicFn });
+
+      // Both senders render their OWN menu (Important-2 per-sender snapshot)
+      // so this test doesn't depend on render ORDER between them.
+      await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_A, isGroup: true, content: '/model list' }));
+      vi.setSystemTime(1_800_000_001_000);
+      await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_B, isGroup: true, content: '/model list', messageId: 'msg-2' }));
+
+      // A pins claude-sonnet-5 — 'set', idle recycle.
+      vi.setSystemTime(1_800_000_002_000);
+      await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_A, isGroup: true, content: '/model 2', messageId: 'msg-3' }));
+      expect(mockSession.shutdown).toHaveBeenCalledWith(false);
+      expect(allReplies(sentMessages).join('\n')).toContain('Now answering with claude-sonnet-5.');
+      mockSession.shutdown.mockClear();
+      mockQueue.enqueueText.mockClear();
+      sentMessages.length = 0;
+
+      // B pins claude-haiku-4-5 — 'set', idle recycle. Chat is now on haiku.
+      vi.setSystemTime(1_800_000_003_000);
+      await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_B, isGroup: true, content: '/model 3', messageId: 'msg-4' }));
+      expect(mockSession.shutdown).toHaveBeenCalledWith(false);
+      expect(allReplies(sentMessages).join('\n')).toContain('Now answering with claude-haiku-4-5.');
+      mockSession.shutdown.mockClear();
+      mockQueue.enqueueText.mockClear();
+      sentMessages.length = 0;
+
+      // A re-confirms claude-sonnet-5 — A's OWN row matches, so this hits
+      // 'refreshed' (bumps A's updated_at). Chat-scoped last-writer-wins now
+      // resolves the chat back to A's sonnet row — but the LIVE session is
+      // still on B's haiku. The fix must recycle here, idle (no turn in
+      // flight), and disclose the switch honestly rather than "Already set".
+      vi.setSystemTime(1_800_000_004_000);
+      await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_A, isGroup: true, content: '/model 2', messageId: 'msg-5' }));
+      expect(mockSession.shutdown).toHaveBeenCalledWith(false);
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('Now answering with claude-sonnet-5.');
+      expect(reply).not.toContain('Already set');
+
+      // The NEXT spawn must actually land on sonnet — proving the live
+      // session really moved, not just the echo.
+      vi.setSystemTime(1_800_000_005_000);
+      await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_A, isGroup: true, content: 'hello', messageId: 'msg-6' }));
+      const opts = capturedSessionManagerOptsRef.current as unknown as { provider?: string; model?: string };
+      expect(opts?.provider).toBe('claude-cli');
+      expect(opts?.model).toBe('claude-sonnet-5');
+    });
+
+    // Companion DM/single-sender safety check (review's explicit claim): a
+    // genuine re-confirm by the SAME (only) sender against a LIVE session
+    // already on that route is a true no-op — the diff-gate must not recycle
+    // a session that already matches, and the echo stays the plain
+    // "Already set" shape.
+    it("IMPORTANT-1 (DM safety): a same-sender re-confirm against an ALREADY-live matching route is a genuine no-op, not a spurious recycle", async () => {
+      cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'claude-sonnet-5' }];
+      const anthropicFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['claude-opus-4-8', 'claude-sonnet-5'] });
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueAnthropicFn: anthropicFn });
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'msg-2' }));
+      expect(mockSession.shutdown).toHaveBeenCalledWith(false); // idle recycle onto sonnet
+      mockSession.shutdown.mockClear();
+      mockQueue.enqueueText.mockClear();
+      sentMessages.length = 0;
+      // Re-confirm the SAME pin — 'refreshed', and the live session already
+      // matches (diff-gate no-op) — must NOT recycle again.
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'msg-3' }));
+      expect(mockSession.shutdown).not.toHaveBeenCalled();
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('Already set — extended for another 24h');
+      expect(reply).not.toContain('Now answering with');
     });
   });
 

@@ -2890,6 +2890,18 @@ export class AgentRuntime implements Runtime {
             this.resumeFailedHandling.delete(lidKey);
             this.resumeFailedHandling.add(canonical);
           }
+          // MINOR 4 (final-review): carry a deferred route recycle (Task G,
+          // a /model pin that arrived while the chat was busy) onto the
+          // canonical key too — without this, a mapKey migration between the
+          // defer and its consumption (ensureSessionAndQueueSync's next-
+          // inbound check, keyed by the CURRENT canonical key) would strand
+          // the flag under the dead lidKey and silently drop the recycle
+          // (the pin still applies on the next fresh spawn, so this is
+          // non-destructive either way — but cheap to carry correctly).
+          if (this.pendingRecycle.has(lidKey)) {
+            this.pendingRecycle.delete(lidKey);
+            this.pendingRecycle.add(canonical);
+          }
           // Migrate auto-compact cooldown/last-success/rapid-rearm/measure state
           // from the LID key onto the canonical JID (silent timers, boundary set,
           // and in-flight waiters are intentionally left untouched, as before).
@@ -4130,7 +4142,7 @@ export class AgentRuntime implements Runtime {
               // The config-derived pin/primary block sends IMMEDIATELY so "what
               // am I on" never waits on — or is lost to — the catalogue probe
               // (Q 2b#1).
-              this.sendModelCatalogue(chatJid, filter);
+              this.sendModelCatalogue(chatJid, msg.senderJid, filter);
               break;
             }
             // D6/D16: `/model N default` — resolve N against the snapshot the
@@ -4142,19 +4154,25 @@ export class AgentRuntime implements Runtime {
             const nDefaultMatch = /^(\d+)\s+default$/.exec(sub);
             if (nDefaultMatch) {
               const n = parseInt(nDefaultMatch[1]!, 10);
-              const entry = this.catalogueSnapshot.resolveCataloguePick(chatJid, n);
+              const entry = this.catalogueSnapshot.resolveCataloguePick(chatJid, msg.senderJid, n);
               if (!entry) {
                 this.sendDirect(chatJid, "_That list moved — here's the current one._");
-                this.sendModelCatalogue(chatJid, null);
+                this.sendModelCatalogue(chatJid, msg.senderJid, null);
                 break;
               }
               const outcome = this.recordRoutePreference(chatJid, chatKey, senderKey, 'provider_specific', entry.providerId);
               if (outcome === 'refreshed') {
-                this.sendDirect(chatJid, '_Already set — extended for another 24h. /reset to go back to the default route._');
+                this.sendDirect(chatJid, this.echoReconfirmOutcome(
+                  chatJid, msg.senderJid, perChatMapKey, `\`${entry.providerId}\``,
+                  '_Already set — extended for another 24h. /reset to go back to the default route._',
+                ));
                 break;
               }
               if (outcome === 'sticky_kept') {
-                this.sendDirect(chatJid, '_Already set (sticky). /reset to go back to the default route._');
+                this.sendDirect(chatJid, this.echoReconfirmOutcome(
+                  chatJid, msg.senderJid, perChatMapKey, `\`${entry.providerId}\``,
+                  '_Already set (sticky). /reset to go back to the default route._',
+                ));
                 break;
               }
               // Task G: apply the switch immediately (idle) or defer it to the
@@ -4168,19 +4186,25 @@ export class AgentRuntime implements Runtime {
             // grammar) is tolerated and ignored; the snapshot is a flat list.
             if (/^\d+[a-z]?$/i.test(sub)) {
               const n = parseInt(sub, 10);
-              const entry = this.catalogueSnapshot.resolveCataloguePick(chatJid, n);
+              const entry = this.catalogueSnapshot.resolveCataloguePick(chatJid, msg.senderJid, n);
               if (!entry) {
                 this.sendDirect(chatJid, "_That list moved — here's the current one._");
-                this.sendModelCatalogue(chatJid, null);
+                this.sendModelCatalogue(chatJid, msg.senderJid, null);
                 break;
               }
               const outcome = this.recordRouteModelPin(chatJid, chatKey, senderKey, entry.providerId, entry.id);
               if (outcome === 'refreshed') {
-                this.sendDirect(chatJid, '_Already set — extended for another 24h. /reset to go back to the default route._');
+                this.sendDirect(chatJid, this.echoReconfirmOutcome(
+                  chatJid, msg.senderJid, perChatMapKey, entry.id,
+                  '_Already set — extended for another 24h. /reset to go back to the default route._',
+                ));
                 break;
               }
               if (outcome === 'sticky_kept') {
-                this.sendDirect(chatJid, '_Already set (sticky). /reset to go back to the default route._');
+                this.sendDirect(chatJid, this.echoReconfirmOutcome(
+                  chatJid, msg.senderJid, perChatMapKey, entry.id,
+                  '_Already set (sticky). /reset to go back to the default route._',
+                ));
                 break;
               }
               // Task H: verify the fresh pin against the catalogue BEFORE the
@@ -4197,8 +4221,23 @@ export class AgentRuntime implements Runtime {
               }
               // Task G: the recycle must run AFTER H's verify — resolveRouteForTurn
               // needs the now-VERIFIED pin, or a recycle here would respawn the
-              // session on the provider default and defeat the switch.
+              // session on the provider default and defeat the switch. Still
+              // runs on a DEFERRED verify too — a provider switch (if any) is
+              // real even though the model itself stays unverified.
               const recycleOutcome = this.applyRouteChangeAndRecycle(chatJid, msg.senderJid, perChatMapKey);
+              if (verifyResult === 'deferred') {
+                // MINOR 3 (final-review): decideModelPinResolution's
+                // needs-catalogue fail-open means an unverified pin never
+                // sets route.model — only a provider switch (if the pin's
+                // provider is eligible) actually takes effect. The old D10
+                // echo claimed the specific model was pinned/serving
+                // regardless; say what actually happens instead.
+                this.sendDirect(
+                  chatJid,
+                  `_Pinned ${entry.providerId} — ${entry.id} pending a catalogue check; using ${entry.providerId}'s default until then. /reset to undo._`,
+                );
+                break;
+              }
               this.sendDirect(chatJid, this.renderPinOutcomeEcho(entry.id, recycleOutcome));
               break;
             }
@@ -4234,20 +4273,28 @@ export class AgentRuntime implements Runtime {
             }
             const intent = isIntent ? (sub as 'strongest' | 'fastest') : 'provider_specific';
             const requestedProvider = isProvider ? sub : null;
+            // D10: same plain, timing-neutral affordance shape as the numbered-
+            // pick paths below — no "for you" (chat-scoped, D13a). Task G now
+            // makes the switch take effect (recycled/deferred), so the old
+            // blanket "applies from your next session" deferral never returns.
+            // Computed before the outcome branch below so the refreshed/
+            // sticky_kept re-confirm echo can reuse it too (Important-1).
+            const what = isProvider ? `\`${sub}\`` : `my ${sub} model`;
             const outcome = this.recordRoutePreference(chatJid, chatKey, senderKey, intent, requestedProvider);
             if (outcome === 'refreshed') {
-              this.sendDirect(chatJid, '_Already set — extended for another 24h. /reset to go back to the default route._');
+              this.sendDirect(chatJid, this.echoReconfirmOutcome(
+                chatJid, msg.senderJid, perChatMapKey, what,
+                '_Already set — extended for another 24h. /reset to go back to the default route._',
+              ));
               break;
             }
             if (outcome === 'sticky_kept') {
-              this.sendDirect(chatJid, '_Already set (sticky). /reset to go back to the default route._');
+              this.sendDirect(chatJid, this.echoReconfirmOutcome(
+                chatJid, msg.senderJid, perChatMapKey, what,
+                '_Already set (sticky). /reset to go back to the default route._',
+              ));
               break;
             }
-            // D10: same plain, timing-neutral affordance shape as the numbered-
-            // pick paths above — no "for you" (chat-scoped, D13a). Task G now
-            // makes the switch take effect (recycled/deferred), so the old
-            // blanket "applies from your next session" deferral never returns.
-            const what = isProvider ? `\`${sub}\`` : `my ${sub} model`;
             const recycleOutcome = this.applyRouteChangeAndRecycle(chatJid, msg.senderJid, perChatMapKey);
             this.sendDirect(chatJid, this.renderPinOutcomeEcho(what, recycleOutcome));
             break;
@@ -8901,6 +8948,34 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
+   * Important-1 (final-review): a 'refreshed'/'sticky_kept' pin outcome means
+   * THIS sender's own row didn't change shape — but under chat-scoped last-
+   * writer-wins (D13) the write still bumps that row's updated_at, which can
+   * flip the CHAT's winning preference out from under a DIFFERENT sender's
+   * more-recent pin (group re-confirm interleaving: A pins, B pins, A
+   * re-confirms — A's re-confirm now wins the chat again). The three pin
+   * handlers used to `break` on refreshed/sticky_kept WITHOUT ever calling
+   * applyRouteChangeAndRecycle, so the live session could keep serving B's
+   * model while the pin and /model status both claimed A's — silently, until
+   * /new. Routing every re-confirm through the SAME diff-gated recycle here
+   * closes that: a genuine no-op (DM re-confirm, or a group re-confirm that
+   * didn't move the winner) keeps the existing "Already set" echo; an actual
+   * winner flip gets the honest recycle echo instead, matching what the live
+   * session just did.
+   */
+  private echoReconfirmOutcome(
+    chatJid: string,
+    senderJid: string,
+    perChatMapKey: string | undefined,
+    label: string,
+    alreadySetText: string,
+  ): string {
+    const recycleOutcome = this.applyRouteChangeAndRecycle(chatJid, senderJid, perChatMapKey);
+    if (recycleOutcome === 'noop') return alreadySetText;
+    return this.renderPinOutcomeEcho(label, recycleOutcome);
+  }
+
+  /**
    * Slice-3 NL typed-intent consumption (call sites are flag-gated): strip
    * route-intent marker lines from agent output and feed the FIRST strictly-
    * valid intent into the same per-sender preference path as the /model
@@ -9125,10 +9200,13 @@ export class AgentRuntime implements Runtime {
 
   /** Shared by the `/model list` handler and a disclosed re-render on a
    *  snapshot miss (D16): the config-derived block sends first (unconditional,
-   *  synchronous — Q 2b#1), then the pickable menu follows fire-and-forget. */
-  private sendModelCatalogue(chatJid: string, filter: string | null): void {
+   *  synchronous — Q 2b#1), then the pickable menu follows fire-and-forget.
+   *  senderJid threads through to the snapshot seam (Important-2, final-
+   *  review): the numbered menu is captured per-(chat, sender), so a second
+   *  render by a different group member never repoints this sender's pick. */
+  private sendModelCatalogue(chatJid: string, senderJid: string, filter: string | null): void {
     this.sendDirect(chatJid, this.renderModelCatalogue());
-    void this.sendDynamicModelCatalogueSection(chatJid, filter);
+    void this.sendDynamicModelCatalogueSection(chatJid, senderJid, filter);
   }
 
   /**
@@ -9176,10 +9254,17 @@ export class AgentRuntime implements Runtime {
    * SHARED-ENTRIES INVARIANT: `entries` below is the SAME ordered list the
    * numbers are rendered from, built exactly once.
    *
+   * Important-2 (final-review): the synthetic msgId is a per-CHAT constant,
+   * so the "latest" coordinate MUST be keyed per-sender too (senderJid,
+   * threaded through to the cache) — otherwise a second render in the same
+   * chat by a different group member silently overwrites the first
+   * sender's still-pending numbered pick, even though both renders share
+   * the same synthetic key.
+   *
    * Never throws — a rendering bug here just omits the section (the config
    * block already went out).
    */
-  private async sendDynamicModelCatalogueSection(chatJid: string, filter: string | null): Promise<void> {
+  private async sendDynamicModelCatalogueSection(chatJid: string, senderJid: string, filter: string | null): Promise<void> {
     try {
       const candidates: Array<{ provider: string; model: string }> = [];
       if (this.model !== undefined) candidates.push({ provider: this.agentProvider, model: this.model });
@@ -9192,7 +9277,7 @@ export class AgentRuntime implements Runtime {
       const shown = pool.slice(0, MODEL_CATALOGUE_CAP);
 
       const entries: CatalogueEntry[] = shown.map((e) => ({ providerId: e.provider, id: e.model }));
-      this.catalogueSnapshot.putCatalogueSnapshot(chatJid, `model-list:${chatJid}`, entries);
+      this.catalogueSnapshot.putCatalogueSnapshot(chatJid, senderJid, `model-list:${chatJid}`, entries);
 
       const lines: string[] = [];
       if (shown.length > 0) {

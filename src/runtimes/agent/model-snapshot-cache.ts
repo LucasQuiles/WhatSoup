@@ -13,7 +13,11 @@
  * Invariant 7: a pin stores the RESOLVED `(provider, model)` pair, so hiding an
  * unconfigured provider from the catalogue never breaks an existing pin.
  *
- * TTL: ~15 minutes. Latest snapshot supersedes earlier ones per chat.
+ * TTL: ~15 minutes. Latest snapshot supersedes earlier ones per (chat, sender)
+ * — final-review Important-2: a group render is per-SENDER, not per-chat, so
+ * a second/filtered render by a different member never repoints an earlier
+ * member's still-pending `/model N`. Each sender resolves against the last
+ * menu THEY saw.
  * Quoted-reply resolution: store by-msgId map for `/model N` with a quotedMsgId.
  */
 
@@ -30,23 +34,26 @@ interface CatalogueSnapshot {
 
 export interface CatalogueSnapshotCache {
   /**
-   * Store the rendered catalogue snapshot for a chat.
+   * Store the rendered catalogue snapshot for a chat + the sender who saw it.
    * entries = the catalogue in order; index+1 = the N the user sees.
    * Each entry is { providerId, id } (the resolved pair, invariant 7).
    */
   putCatalogueSnapshot(
     chatJid: string,
+    senderJid: string,
     outboundMsgId: string,
     entries: CatalogueEntry[]
   ): void;
 
   /**
    * Resolve N (1-based) against the snapshot for the quoted message id if given,
-   * else the latest snapshot for the chat.
+   * else the latest snapshot THIS sender saw for the chat (Important-2:
+   * per-sender, not last-render-wins across the whole chat).
    * @returns { providerId, id } or null if miss (out of range / expired / no snapshot).
    */
   resolveCataloguePick(
     chatJid: string,
+    senderJid: string,
     n: number,
     opts?: { quotedMsgId?: string }
   ): CatalogueEntry | null;
@@ -60,8 +67,13 @@ export interface CatalogueSnapshotCache {
 
 const TTL_MS = 15 * 60_000; // 15 minutes
 
+/** Composite key for the per-(chat, sender) "latest" slot. */
+function latestSlotKey(chatJid: string, senderJid: string): string {
+  return `${chatJid}:${senderJid}`;
+}
+
 export function createCatalogueSnapshotCache(): CatalogueSnapshotCache {
-  // chatJid → latest snapshot for that chat
+  // "chatJid:senderJid" → latest snapshot THAT sender saw in that chat.
   const latestByChat = new Map<string, CatalogueSnapshot>();
 
   // msgId → snapshot (for quoted-reply resolution)
@@ -72,7 +84,12 @@ export function createCatalogueSnapshotCache(): CatalogueSnapshotCache {
   }
 
   return {
-    putCatalogueSnapshot(chatJid: string, outboundMsgId: string, entries: CatalogueEntry[]): void {
+    putCatalogueSnapshot(
+      chatJid: string,
+      senderJid: string,
+      outboundMsgId: string,
+      entries: CatalogueEntry[]
+    ): void {
       const now = Date.now();
       const snapshot: CatalogueSnapshot = {
         msgId: outboundMsgId,
@@ -91,12 +108,14 @@ export function createCatalogueSnapshotCache(): CatalogueSnapshotCache {
         }
       }
 
-      // Store as latest for this chat (replaces any prior snapshot)
-      latestByChat.set(chatJid, snapshot);
+      // Store as latest for THIS sender in this chat (replaces only their
+      // own prior snapshot — a different sender's slot is untouched).
+      latestByChat.set(latestSlotKey(chatJid, senderJid), snapshot);
     },
 
     resolveCataloguePick(
       chatJid: string,
+      senderJid: string,
       n: number,
       opts?: { quotedMsgId?: string }
     ): CatalogueEntry | null {
@@ -108,8 +127,8 @@ export function createCatalogueSnapshotCache(): CatalogueSnapshotCache {
         // Resolve against the quoted message snapshot
         snapshot = byMsgId.get(opts.quotedMsgId);
       } else {
-        // Resolve against the latest snapshot for this chat
-        snapshot = latestByChat.get(chatJid);
+        // Resolve against the latest snapshot THIS sender saw for this chat
+        snapshot = latestByChat.get(latestSlotKey(chatJid, senderJid));
       }
 
       if (!snapshot) {
