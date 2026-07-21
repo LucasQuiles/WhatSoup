@@ -21,7 +21,7 @@ vi.mock('../../../../console/src/lib/api', () => ({
 import { CheckpointsTab } from '../../../../console/src/components/line-detail/CheckpointsTab'
 import { api } from '../../../../console/src/lib/api'
 import { ToastContext, type ToastContextValue } from '../../../../console/src/hooks/toast-context'
-import type { CheckpointsPayload } from '../../../../console/src/types'
+import type { CheckpointsPayload, LiveSessionsPayload } from '../../../../console/src/types'
 import type { Freshness } from '../../../../console/src/lib/freshness'
 
 const restoreCheckpointMock = api.restoreCheckpoint as unknown as ReturnType<typeof vi.fn>
@@ -225,6 +225,40 @@ describe('CheckpointsTab — Delivery column (F-UX-3)', () => {
     const bodyRow = screen.getAllByRole('row')[1]!
     // Cells: Conversation, Status, Resumable, Version, PID, Scope, DELIVERY(6), Updated, Workspace, Action
     expect(within(bodyRow).getAllByRole('cell')[6]!.textContent).toBe('—')
+  })
+})
+
+
+describe('CheckpointsTab — Live session column (terminal stage A)', () => {
+  const LIVE_PAYLOAD: LiveSessionsPayload = {
+    observedAt: '2026-07-19T04:00:00Z',
+    anomalyCount: 1,
+    sessions: [
+      { conversationKey: '15550000001@s.whatsapp.net', sessionStatus: 'active', resumable: true, claudePid: 4321, pidAlive: true, pidState: 'Ss', pidEtimeSeconds: 7200, anomaly: null },
+      { conversationKey: '15550000002@s.whatsapp.net', sessionStatus: 'ended', resumable: false, claudePid: 9000, pidAlive: true, pidState: 'S+', pidEtimeSeconds: 900, anomaly: 'pid-alive-after-end' },
+    ],
+  }
+
+  it('renders a live dot + state for rows whose pid is alive', () => {
+    renderTab(<CheckpointsTab lineName={LINE} payload={payload()} isLoading={false} freshness={FRESH} liveSessions={LIVE_PAYLOAD} />)
+    const row = screen.getByTitle('15550000001@s.whatsapp.net').closest('tr') as HTMLElement
+    const live = within(row).getByTitle(/alive — pid 4321 \(Ss\), up 2h0m/)
+    expect(live.textContent).toContain('Ss')
+  })
+
+  it('flags anomalies in warn — a live pid on an ended row is the #1861 retention surface', () => {
+    renderTab(<CheckpointsTab lineName={LINE} payload={payload()} isLoading={false} freshness={FRESH} liveSessions={LIVE_PAYLOAD} />)
+    const row = screen.getByTitle('15550000002@s.whatsapp.net').closest('tr') as HTMLElement
+    const flag = within(row).getByTitle(/process lives after end/i)
+    expect(flag.className).toMatch(/text-s-warn|s-warn/)
+  })
+
+  it('renders em-dash when no live data exists for the row (never fabricates liveness)', () => {
+    renderTab(<CheckpointsTab lineName={LINE} payload={payload()} isLoading={false} freshness={FRESH} />)
+    const bodyRow = screen.getAllByRole('row')[1]!
+    const cells = within(bodyRow).getAllByRole('cell')
+    // Live is the last column
+    expect(cells[cells.length - 1]!.textContent).toBe('—')
   })
 })
 
