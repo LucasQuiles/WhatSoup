@@ -34,26 +34,16 @@ function toOpenAIMessage(m: ChatMessage): OpenAI.Chat.ChatCompletionMessageParam
 export function createOpenAIProvider(
   openaiProviderConfig?: { baseUrl?: string; apiKeyService?: string },
 ): LLMProvider {
-  // Bare construction (no config) is deliberate env sensitivity: the SDK
-  // reads OPENAI_API_KEY and OPENAI_BASE_URL from the process environment,
-  // and a process-wide OPENAI_BASE_URL repoints every bare client in this
-  // process. An instance that configures `chatOptions.openaiProviderConfig`
-  // gets its own chat-completions endpoint/key instead; Whisper transcription
-  // has its own `transcriptionOptions.openaiProviderConfig` field.
-  // (docs/architecture/provider-credential-services.md, Traps); one that
-  // configures nothing must construct byte-identically to before — locked by
-  // the zero-arg assertions in tests/runtimes/chat/providers/openai.test.ts
-  // and the env-default lock in openai-env-baseurl.test.ts. `resolveApiKey`
-  // can return '' on a miss, and the SDK's own apiKey/baseURL defaults only
-  // fire on strict `undefined` — passing '' through would silently send an
-  // empty Bearer header instead of falling back to the env var, hence the
-  // `|| undefined` below.
-  const client = openaiProviderConfig
-    ? new OpenAI({
-        baseURL: openaiProviderConfig.baseUrl,
-        apiKey: resolveApiKey({ service: openaiProviderConfig.apiKeyService, envVar: 'OPENAI_API_KEY' }) || undefined,
-      })
-    : new OpenAI();
+  // Resolve at the provider boundary so the parent can migrate away from an
+  // ambient OPENAI_API_KEY without changing endpoint or model selection.
+  // Omitting baseURL still preserves the SDK's OPENAI_BASE_URL behavior.
+  const client = new OpenAI({
+    ...(openaiProviderConfig?.baseUrl ? { baseURL: openaiProviderConfig.baseUrl } : {}),
+    apiKey: resolveApiKey({
+      service: openaiProviderConfig?.apiKeyService,
+      envVar: 'OPENAI_API_KEY',
+    }) || undefined,
+  });
 
   return {
     name: 'openai',
