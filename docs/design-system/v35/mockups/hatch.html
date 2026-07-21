@@ -35,17 +35,17 @@ body {
 .crumb .tick { width:8px; height:8px; border-radius:1px; background:var(--m-passive); }
 .crumb .wm { font:800 16px/20px "Bricolage Grotesque",sans-serif; letter-spacing:-0.06em; }
 .crumb .wm b { color:var(--accent); }
-.crumb .ctx { font:400 10px/16px "IBM Plex Mono",monospace; letter-spacing:.18em; color:var(--t3); }
+.crumb .ctx { font:400 11px/16px "IBM Plex Mono",monospace; letter-spacing:.18em; color:var(--t3); }
 .theme-toggle { margin-left:auto; }
 /* step rail */
 .steps { display:flex; gap:8px; margin-bottom:28px; }
 .step { flex:1; display:flex; flex-direction:column; gap:6px; }
 .step .bar { height:3px; border-radius:2px; background:var(--hair-2); }
-.step.done .bar { background:var(--ok); }
+.step.done .bar { background:var(--hair-3); }
 .step.now .bar { background:var(--accent); }
-.step span { font:500 10.5px/14px "IBM Plex Mono",monospace; letter-spacing:.08em; color:var(--t3); text-transform:uppercase; }
+.step span { font:500 11px/14px "IBM Plex Mono",monospace; letter-spacing:.08em; color:var(--t3); text-transform:uppercase; }
 .step.now span { color:var(--t1); }
-.step.done span { color:var(--t2); }
+.step.done span { color:var(--t2); } .step.done span::before { content:"✓ "; color:var(--t2); }
 /* card */
 .card {
   background:var(--raised); border:1px solid var(--hair); border-radius:16px;
@@ -61,7 +61,7 @@ h1 { font:700 26px/32px "Bricolage Grotesque",sans-serif; letter-spacing:-0.02em
   background:radial-gradient(circle, color-mix(in srgb, var(--accent) 35%, transparent) 0%, transparent 62%);
   animation:glowplay .8s ease-out 1 both;
 }
-@keyframes glowplay { 0%{opacity:0; transform:scale(.6)} 45%{opacity:1} 100%{opacity:.55; transform:scale(1)} }
+@keyframes glowplay { 0%{opacity:0; transform:scale(.6)} 45%{opacity:1} 100%{opacity:0; transform:scale(1.05)} }
 .eggshell {
   position:absolute; inset:0; border-radius:16px; border:1.5px dashed var(--hair-3);
   display:flex; align-items:center; justify-content:center;
@@ -106,7 +106,7 @@ h1 { font:700 26px/32px "Bricolage Grotesque",sans-serif; letter-spacing:-0.02em
 }
 .btn:hover { transform:translateY(-2px); box-shadow:var(--shadow-lift); }
 .btn.primary { background:var(--accent); color:var(--accent-fg); border-color:transparent; }
-.btn.ghost { background:transparent; color:var(--t3); border-color:transparent; }
+.btn.ghost { background:transparent; color:var(--t2); border:1px solid var(--hair-2); }
 /* channel grid (step 2 preview) */
 .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(88px,1fr)); gap:10px; margin-bottom:8px; }
 .ch {
@@ -117,10 +117,10 @@ h1 { font:700 26px/32px "Bricolage Grotesque",sans-serif; letter-spacing:-0.02em
 .ch:hover { transform:translateY(-2px); box-shadow:var(--shadow-lift); }
 .ch.sel { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent); background:color-mix(in srgb, var(--accent) 8%, var(--inset)); }
 .ch svg { width:22px; height:22px; fill:var(--t2); }
-.ch.sel svg { fill:var(--accent); }
-.ch span { font:500 10px/12px "IBM Plex Mono",monospace; color:var(--t3); letter-spacing:.04em; }
+.ch.sel svg { fill:var(--t1); }
+.ch span { font:500 11px/12px "IBM Plex Mono",monospace; color:var(--t3); letter-spacing:.04em; }
 .ch.sel span { color:var(--t1); }
-.sec { font:600 10.5px/14px "IBM Plex Mono",monospace; letter-spacing:.1em; color:var(--t3); text-transform:uppercase; margin:18px 0 10px; }
+.sec { font:600 11px/14px "IBM Plex Mono",monospace; letter-spacing:.1em; color:var(--t3); text-transform:uppercase; margin:18px 0 10px; }
 @media (prefers-reduced-motion: reduce) { .glow,.av { animation:none; } }
 @media (max-width:640px){ .card{padding:20px} .name{font-size:26px} }
 </style>

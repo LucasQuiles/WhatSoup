@@ -43,7 +43,7 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
 .sum { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:16px; }
 .kpi { background:var(--raised); border:1px solid var(--hair); border-radius:8px; padding:12px 14px; transition:transform .18s, box-shadow .18s; }
 .kpi:hover { transform:translateY(-2px); box-shadow:var(--shadow-lift); }
-.kpi .k { font:500 10.5px/14px "IBM Plex Mono",monospace; letter-spacing:.1em; color:var(--t3); text-transform:uppercase; }
+.kpi .k { font:500 11px/14px "IBM Plex Mono",monospace; letter-spacing:.1em; color:var(--t3); text-transform:uppercase; }
 .kpi .v { font:700 22px/28px "Bricolage Grotesque",sans-serif; margin-top:4px; }
 .kpi .d { font:500 11px/14px "IBM Plex Mono",monospace; color:var(--t3); margin-top:2px; }
 /* deployment cards */
@@ -54,31 +54,31 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
 .dicon svg { width:18px; height:18px; fill:var(--t2); }
 .dhead .nm { font:700 16px/20px "Bricolage Grotesque",sans-serif; }
 .dhead .sub { font:400 11px/15px "IBM Plex Mono",monospace; color:var(--t3); margin-top:1px; }
-.st { display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:99px; font:600 10.5px/14px "IBM Plex Mono",monospace; }
-.st.ok { background:color-mix(in srgb, var(--ok) 12%, transparent); color:var(--ok); }
-.st.warn { background:color-mix(in srgb, var(--warn) 12%, transparent); color:var(--warn); }
-.st.crit { background:color-mix(in srgb, var(--crit) 12%, transparent); color:var(--crit); }
-.ver { font:500 10.5px/14px "IBM Plex Mono",monospace; color:var(--t3); }
+.st { display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:99px; font:600 11px/14px "IBM Plex Mono",monospace; }
+.st.ok { background:color-mix(in srgb, var(--ok) 12%, transparent); color:var(--ok); } .st.ok::before { content:"●"; font-size:7px; }
+.st.warn { background:color-mix(in srgb, var(--warn) 12%, transparent); color:var(--warn); } .st.warn::before { content:"◆"; font-size:7px; }
+.st.crit { background:color-mix(in srgb, var(--crit) 12%, transparent); color:var(--crit); } .st.crit::before { content:"■"; font-size:7px; }
+.ver { font:500 11px/14px "IBM Plex Mono",monospace; color:var(--t3); }
 .ver .up { color:var(--accent); cursor:pointer; font-weight:600; }
 .dhead .acts { margin-left:auto; display:flex; gap:6px; }
 .dbody { display:grid; grid-template-columns:repeat(4,1fr); border-top:1px solid var(--hair); }
 .dcell { padding:12px 18px; border-right:1px solid var(--hair); }
 .dcell:last-child { border-right:none; }
-.dcell .k { font:500 10px/14px "IBM Plex Mono",monospace; letter-spacing:.08em; color:var(--t3); text-transform:uppercase; }
+.dcell .k { font:500 11px/14px "IBM Plex Mono",monospace; letter-spacing:.08em; color:var(--t3); text-transform:uppercase; }
 .dcell .v { font:700 16px/22px "Bricolage Grotesque",sans-serif; margin-top:3px; }
-.dcell .v .sub { font:400 10.5px/14px "IBM Plex Mono",monospace; color:var(--t3); }
+.dcell .v .sub { font:400 11px/14px "IBM Plex Mono",monospace; color:var(--t3); }
 .mini { display:flex; gap:3px; margin-top:6px; }
-.mini span { font:500 10px/14px "IBM Plex Mono",monospace; color:var(--t2); background:var(--inset); border:1px solid var(--hair); border-radius:5px; padding:2px 7px; }
+.mini span { font:500 11px/14px "IBM Plex Mono",monospace; color:var(--t2); background:var(--inset); border:1px solid var(--hair); border-radius:5px; padding:2px 7px; }
 .mini span.agt { color:var(--m-agent); }
 .mini span.warn { color:var(--warn); border-color:color-mix(in srgb, var(--warn) 30%, transparent); }
 .hub { display:flex; align-items:center; gap:10px; padding:10px 18px; border-top:1px solid var(--hair); font-size:12px; color:var(--t2); }
-.hub .st2 { width:6px; height:6px; border-radius:50%; background:var(--ok); }
+.hub .st2 { width:8px; height:8px; border-radius:50%; background:var(--ok); flex:none; }
 .hub .pull { margin-left:auto; font:600 11px/14px "IBM Plex Mono",monospace; color:var(--accent); cursor:pointer; }
 /* pair card */
-.pair { border:1.5px dashed var(--hair-3); background:transparent; }
+.pair { border:1px solid var(--hair-2); background:var(--inset); }
 .pair .dhead { justify-content:center; flex-direction:column; text-align:center; padding:28px; gap:10px; }
 .pair .pi { color:var(--t3); font-size:13px; max-width:46ch; }
-.code { font:700 18px/24px "IBM Plex Mono",monospace; letter-spacing:.3em; color:var(--accent); background:var(--inset); border:1px solid var(--hair); border-radius:8px; padding:8px 18px; }
+.code { font:700 18px/24px "IBM Plex Mono",monospace; letter-spacing:.3em; color:var(--t1); background:var(--inset); border:1px solid var(--hair); border-radius:8px; padding:8px 18px; }
 @media (max-width:1000px){ .dbody{grid-template-columns:repeat(2,1fr)} .sum{grid-template-columns:repeat(2,1fr)} }
 </style>
 </head>
@@ -113,7 +113,7 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
       <div class="dcell"><div class="k">Load</div><div class="v">0.42 <span class="sub">· 6.1GB / 16GB</span></div><div class="mini"><span>cpu ok</span><span>mem ok</span></div></div>
       <div class="dcell"><div class="k">Uptime</div><div class="v">21d <span class="sub">· last restart 6/30</span></div><div class="mini"><span>systemd</span></div></div>
     </div>
-    <div class="hub"><span class="st2"></span> org skills hub — synced 6m ago · 84 skills shared<span class="pull">pull updates ⇓</span></div>
+    <div class="hub"><span class="st2" style="background:none;color:var(--ok);font-size:11px">●</span> org skills hub — synced 6m ago · 84 skills shared<button class="btn sm" style="border-color:var(--accent);color:var(--accent)">pull updates ⇓</button></div>
   </div>
 
   <div class="dcard">
@@ -121,7 +121,7 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
       <span class="dicon"><svg viewBox="0 0 16 16"><path d="M3 2h10v12H3zM6 5h4M6 8h4M6 11h2"/></svg></span>
       <div><div class="nm">nest-2 <span style="color:var(--t3);font-weight:400">· container</span></div><div class="sub">docker · 192.168.1.14:3100 · paired 2026-07-18</div></div>
       <span class="st warn">degraded</span>
-      <span class="ver">v3.1.9 → <span class="up">update to 3.2.1</span></span>
+      <span class="ver">v3.1.9 → <button class="btn sm" style="border-color:var(--accent);color:var(--accent)">update to 3.2.1</button></span>
       <div class="acts"><button class="btn sm ghost">console</button><button class="btn sm ghost">logs</button></div>
     </div>
     <div class="dbody">
@@ -130,7 +130,7 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
       <div class="dcell"><div class="k">Issue</div><div class="v" style="color:var(--warn)">1 line</div><div class="mini"><span class="warn">builds: reconnect loop</span></div></div>
       <div class="dcell"><div class="k">Uptime</div><div class="v">3d <span class="sub">· crash 2h ago</span></div><div class="mini"><span>docker</span></div></div>
     </div>
-    <div class="hub"><span class="st2" style="background:var(--warn)"></span> org skills hub — sync stalled 2h · last OK 14:11<span class="pull">retry ⇓</span></div>
+    <div class="hub"><span class="st2" style="background:none;color:var(--warn);font-size:11px">◆</span> org skills hub — sync stalled 2h · last OK 14:11<button class="btn sm" style="border-color:var(--accent);color:var(--accent)">retry ⇓</button></div>
   </div>
 
   <div class="dcard">
@@ -147,7 +147,7 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
       <div class="dcell"><div class="k">Latency</div><div class="v">86ms <span class="sub">· tailnet</span></div><div class="mini"><span>ok</span></div></div>
       <div class="dcell"><div class="k">Uptime</div><div class="v">19d</div><div class="mini"><span>systemd</span></div></div>
     </div>
-    <div class="hub"><span class="st2"></span> org skills hub — synced 6m ago<span class="pull">pull updates ⇓</span></div>
+    <div class="hub"><span class="st2" style="background:none;color:var(--ok);font-size:11px">●</span> org skills hub — synced 6m ago<button class="btn sm" style="border-color:var(--accent);color:var(--accent)">pull updates ⇓</button></div>
   </div>
 
   <div class="dcard pair">

@@ -60,19 +60,19 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
 .citem .mid { flex:1; min-width:0; }
 .citem .row1 { display:flex; align-items:center; gap:6px; }
 .citem .nm { font-weight:600; font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.citem .tm { margin-left:auto; font:400 10px/14px "IBM Plex Mono",monospace; color:var(--t3); flex:none; }
+.citem .tm { margin-left:auto; font:400 11px/14px "IBM Plex Mono",monospace; color:var(--t3); flex:none; }
 .citem .pv { color:var(--t3); font-size:11.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:1px; }
 .citem .pv b { color:var(--m-agent); font-weight:500; }
 .citem .badges { display:flex; gap:4px; margin-top:3px; }
-.ub { font:700 9.5px/12px "IBM Plex Mono",monospace; padding:1px 6px; border-radius:99px; background:var(--accent); color:var(--accent-fg); }
-.take { font:700 9.5px/12px "IBM Plex Mono",monospace; padding:1px 6px; border-radius:99px; background:color-mix(in srgb, var(--warn) 14%, transparent); color:var(--warn); }
-.agtag { font:700 9.5px/12px "IBM Plex Mono",monospace; padding:1px 6px; border-radius:99px; background:color-mix(in srgb, var(--m-agent) 12%, transparent); color:var(--m-agent); }
+.ub { font:700 11px/13px "IBM Plex Mono",monospace; padding:1px 6px; border-radius:99px; background:var(--overlay); border:1px solid var(--hair-3); color:var(--t1); }
+.take { font:700 11px/13px "IBM Plex Mono",monospace; padding:1px 6px; border-radius:99px; background:color-mix(in srgb, var(--warn) 14%, transparent); color:var(--warn); } .take::before { content:"◆ "; }
+.agtag { font:700 11px/12px "IBM Plex Mono",monospace; padding:1px 6px; border-radius:99px; background:color-mix(in srgb, var(--m-agent) 12%, transparent); color:var(--m-agent); }
 /* thread */
 .thread { display:flex; flex-direction:column; min-width:0; }
 .thead { display:flex; align-items:center; gap:10px; padding:10px 16px; border-bottom:1px solid var(--hair); }
 .thead .ava { width:32px; height:32px; border-radius:9px; background:var(--overlay); display:flex; align-items:center; justify-content:center; font:700 12px/1 sans-serif; color:var(--t2); }
 .thead .nm { font:700 14px/18px "Bricolage Grotesque",sans-serif; }
-.thead .sub { font:400 10.5px/14px "IBM Plex Mono",monospace; color:var(--t3); }
+.thead .sub { font:400 11px/14px "IBM Plex Mono",monospace; color:var(--t3); }
 .takeover { margin-left:auto; display:flex; align-items:center; gap:8px; font:600 11px/14px "IBM Plex Mono",monospace; color:var(--t3); }
 .tgl { width:32px; height:18px; border-radius:99px; background:var(--hair-2); position:relative; cursor:pointer; flex:none; transition:background .16s; }
 .tgl::after { content:""; position:absolute; left:2px; top:2px; width:14px; height:14px; border-radius:50%; background:var(--t2); transition:transform .16s; }
@@ -80,13 +80,13 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
 .msgs { flex:1; overflow:auto; padding:16px; display:flex; flex-direction:column; gap:10px; }
 .mrow { display:flex; gap:8px; max-width:78%; }
 .mrow.me { align-self:flex-end; flex-direction:row-reverse; }
-.mrow .ma { width:24px; height:24px; border-radius:7px; display:flex; align-items:center; justify-content:center; font:700 9px/1 sans-serif; color:#fff; flex:none; align-self:flex-end; }
+.mrow .ma { width:24px; height:24px; border-radius:7px; display:flex; align-items:center; justify-content:center; font:700 11px/1 sans-serif; color:#fff; flex:none; align-self:flex-end; }
 .bub { background:var(--raised); border:1px solid var(--hair); border-radius:12px; padding:9px 12px; font-size:13px; }
-.mrow.me .bub { background:color-mix(in srgb, var(--accent) 14%, var(--raised)); border-color:color-mix(in srgb, var(--accent) 30%, transparent); }
+.mrow.me .bub { background:var(--overlay); border-color:var(--hair-2); }
 .mrow.agent .bub { border-left:2px solid var(--m-agent); }
-.bub .who { font:600 10px/14px "IBM Plex Mono",monospace; color:var(--m-agent); margin-bottom:3px; }
-.bub .tm { font:400 9.5px/14px "IBM Plex Mono",monospace; color:var(--t3); margin-top:4px; text-align:right; }
-.sys { align-self:center; font:500 10.5px/14px "IBM Plex Mono",monospace; color:var(--t3); background:var(--inset); border:1px solid var(--hair); border-radius:99px; padding:4px 12px; }
+.bub .who { font:600 11px/14px "IBM Plex Mono",monospace; color:var(--m-agent); margin-bottom:3px; }
+.bub .tm { font:400 11px/14px "IBM Plex Mono",monospace; color:var(--t3); margin-top:4px; text-align:right; }
+.sys { align-self:center; font:500 11px/14px "IBM Plex Mono",monospace; color:var(--t3); background:var(--inset); border:1px solid var(--hair); border-radius:99px; padding:4px 12px; }
 .composer { display:flex; gap:10px; padding:12px 16px; border-top:1px solid var(--hair); align-items:center; }
 .composer .caps { display:flex; gap:4px; }
 .cap { width:26px; height:26px; border-radius:7px; border:1px solid var(--hair-2); background:var(--raised); color:var(--t2); cursor:pointer; display:flex; align-items:center; justify-content:center; font-size:12px; }
@@ -94,23 +94,23 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
 .cap.off { opacity:.35; cursor:not-allowed; }
 .composer input { flex:1; background:var(--inset); border:1px solid var(--hair); border-radius:9px; padding:10px 12px; color:var(--t1); font:inherit; outline:none; }
 .composer input::placeholder { color:var(--t3); }
-.sendnote { font:400 10px/14px "IBM Plex Mono",monospace; color:var(--t3); }
+.sendnote { font:400 11px/14px "IBM Plex Mono",monospace; color:var(--t3); }
 /* context pane */
 .ctx { border-left:1px solid var(--hair); overflow:auto; padding:14px; }
-.ctx h3 { font:600 10.5px/14px "IBM Plex Mono",monospace; letter-spacing:.1em; color:var(--t3); text-transform:uppercase; margin:14px 0 8px; }
+.ctx h3 { font:600 11px/14px "IBM Plex Mono",monospace; letter-spacing:.1em; color:var(--t3); text-transform:uppercase; margin:14px 0 8px; }
 .ctx h3:first-child { margin-top:0; }
 .pcard { background:var(--raised); border:1px solid var(--hair); border-radius:10px; padding:12px; }
 .pcard .top { display:flex; align-items:center; gap:10px; }
 .pcard .ava { width:38px; height:38px; border-radius:10px; background:var(--overlay); display:flex; align-items:center; justify-content:center; font:700 14px/1 sans-serif; color:var(--t2); }
 .pcard .nm { font:700 14px/18px "Bricolage Grotesque",sans-serif; }
-.pcard .sub { font:400 10.5px/14px "IBM Plex Mono",monospace; color:var(--t3); }
+.pcard .sub { font:400 11px/14px "IBM Plex Mono",monospace; color:var(--t3); }
 .idrow { display:flex; align-items:center; gap:8px; padding:6px 0; font-size:12px; }
 .idrow svg { width:12px; height:12px; fill:var(--t3); }
 .idrow .h { font:500 11px/14px "IBM Plex Mono",monospace; color:var(--t2); }
-.idrow .v { margin-left:auto; color:var(--t3); font:400 10.5px/14px "IBM Plex Mono",monospace; }
+.idrow .v { margin-left:auto; color:var(--t3); font:400 11px/14px "IBM Plex Mono",monospace; }
 .agcard { display:flex; align-items:center; gap:10px; background:var(--raised); border:1px solid var(--hair); border-radius:10px; padding:10px 12px; }
 .agcard .nm { font-weight:600; font-size:12.5px; }
-.agcard .sub { font:400 10px/14px "IBM Plex Mono",monospace; color:var(--t3); }
+.agcard .sub { font:400 11px/14px "IBM Plex Mono",monospace; color:var(--t3); }
 @media (max-width:1100px){ .ctx{display:none} .wrap{grid-template-columns:280px 1fr} }
 @media (max-width:760px){ .wrap{grid-template-columns:1fr} .list{display:none} }
 </style>
@@ -190,10 +190,10 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
       <div class="idrow"><svg viewBox="0 0 16 16"><path d="M8 1a7 7 0 0 0-6 10.5L1 15l3.6-1A7 7 0 1 0 8 1z"/></svg><span class="h">whatsapp</span><span class="v">+1 845 ··· 0919</span></div>
       <div class="idrow"><svg viewBox="0 0 16 16"><path d="M8 2a5 5 0 0 1 5 5c0 3 1 4 1 4H2s1-1 1-4a5 5 0 0 1 5-5z"/></svg><span class="h">signal</span><span class="v">+1 845 ··· 0919</span></div>
       <div class="idrow"><svg viewBox="0 0 16 16"><path d="M2 2l4.7 6L2.3 14h2l3.7-4.8L11.4 14H14L9.2 7.6 13.7 2h-2L8.2 6.4 5 2z"/></svg><span class="h">x</span><span class="v">@Q_Laboratory</span></div>
-      <div class="idrow"><svg viewBox="0 0 16 16"><path d="M1 3h14v10H1z"/></svg><span class="h">email</span><span class="v">lhquiles@…</span></div>
+      <div class="idrow"><svg viewBox="0 0 16 16"><path d="M1 3h14v10H1z"/></svg><span class="h">email</span><span class="v">lhq…@gmail.com</span></div>
     </div>
     <h3>Agent in this chat</h3>
-    <div class="agcard"><span class="ava" style="width:26px;height:26px;border-radius:7px;background:hsl(250,38%,34%);color:#fff;display:flex;align-items:center;justify-content:center;font:700 10px/1 sans-serif">Q</span><div><div class="nm">Quinn</div><div class="sub">paused · takeover on</div></div></div>
+    <div class="agcard"><span class="ava" style="width:26px;height:26px;border-radius:7px;background:hsl(250,38%,34%);color:#fff;display:flex;align-items:center;justify-content:center;font:700 11px/1 sans-serif">Q</span><div><div class="nm">Quinn</div><div class="sub">paused · takeover on</div></div></div>
     <h3>Line</h3>
     <div class="pcard"><div class="idrow"><span class="h" style="color:var(--t1);font-weight:600">Personal</span><span class="v">live</span></div><div class="idrow"><span class="h">grant</span><span class="v">participate (Quinn)</span></div><div class="idrow"><span class="h">linked</span><span class="v">2026-07-21</span></div></div>
   </aside>

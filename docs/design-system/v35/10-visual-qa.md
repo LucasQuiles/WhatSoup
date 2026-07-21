@@ -71,3 +71,47 @@ list density, accepted) · deployments 8 · settings 9 · splash 9 — **mean 8.
 
 Direction A passes two independent visual QA loops (qwen2.5vl:72b + codex gpt-5.6) with zero
 remaining broken elements on any surface in either theme.
+
+---
+
+# Double-blind adversarial passes (2026-07-21, owner-mandated)
+
+Purpose: prove the earlier passes weren't pacification. Two fresh reviewers, different model
+families, unprimed and adversarially framed, no access to prior verdicts.
+
+## Pass A — gemma3:27b (blind, zero design context)
+
+High noise: flagged intentional masked IDs as "information loss", hallucinated truncations,
+confused surfaces between batches. Useful signal anyway: **no new structural defects
+confirmed**, and grant-chip size joined a second reviewer flag. Most items rejected as
+mask-by-design or model error (e.g. "SOUP invisible on light" — 15.69 AAA measured).
+
+## Pass B — gpt-5.4 API (adversarial, spec-armed)
+
+Sharp and systemic. Confirmed REAL conformance violations the first two rounds missed:
+
+| Violation | Class | Fix |
+|---|---|---|
+| Status color-only in agents roster, instances, deployments, inbox, skills-hub, dream-lab | shape law | shape-coded markers (disc/diamond/square/outline or explicit glyphs) everywhere |
+| Blue as data color (sparklines, me-bubble tint, unread badges, pairing code, qpill) | single-accent law | neutralized to ink/neutral |
+| Grant pills hue-coded (P violet / S cyan) | channel collision | neutral letter-coded chips |
+| Hatch done-steps green, selected glyph accent-tinted, glow persisted past the beat | ceremony/accent law | neutral steps, neutral glyph, glow fades to 0 |
+| Sub-11px labels systemic | type floor | surgical 11px floor sweep (after one bad regex attempt broke dimensions — restored from git and redone surgically) |
+| Masked IDs without suffix (l.quiles@…, help@…, lhquiles@…, 18459780···@s.w…) | mask law | prefix+suffix masks |
+| Bare-text actions (⋯ menus, pull updates, choose brain, skip ceremony) | affordance law | bordered buttons / bordered ghost |
+| Dream-lab selection in violet, approve in green | accent law | selection → accent, approve → accent |
+| Deployments pair card dashed = disabled-read | state legibility | solid hairline + inset |
+
+## Contamination lesson (process)
+
+A re-audit run recycled stale findings from report files left in the analysis directory — the
+reviewer read its own prior output instead of the images. Mitigation: reports archived outside
+the analysis dir; final passes run with image-only inputs from a clean directory. Recorded so
+future QA loops isolate evidence from commentary.
+
+## Final verdicts (fresh-image adversarial audits)
+
+fleet PASS · hatch PASS · agents PASS · skills-hub PASS · dream-lab PASS · inbox PASS ·
+deployments PASS · settings PASS · splash PASS — 9/9 after three fix cycles. Two findings
+rejected with spec citation: wordmark accent-'U' (brand.md §1.1 locked) and the marketing
+headline accent word (Landing precedent + D4).
