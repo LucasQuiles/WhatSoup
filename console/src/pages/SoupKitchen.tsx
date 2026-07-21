@@ -27,6 +27,7 @@ import {
 import type { FeedEvent, LineInstance, Mode, MetricsRange } from "../types";
 import type { ChartKey } from "../components/ChartPanel";
 import KpiCard from "../components/KpiCard";
+import TransportBadge from "../components/TransportBadge";
 import AlertBanner from "../components/AlertBanner";
 import ActivityFeed from "../components/ActivityFeed";
 import FilterPill from "../components/FilterPill";
@@ -1234,6 +1235,7 @@ const SoupKitchen: FC = () => {
                               name={displayInstanceName(line.name)}
                               carried={line.stale}
                             />
+                            <TransportBadge kind={line.health?.transport?.kind} />
                             <span className="c-label">
                               {formatPhone(line.phone)}
                             </span>
