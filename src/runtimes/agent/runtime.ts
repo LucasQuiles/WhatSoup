@@ -100,6 +100,9 @@ import {
 } from './chat-preference-db.ts';
 import { preferenceKeys } from './preference-keys.ts';
 import { resolveRoute, type RouteDecision } from './route-resolution.ts';
+import { decideModelPinResolution, type CatalogueOutcome } from './config-surface.ts';
+import { resolveModelCatalogue } from './model-catalogue-resolver.ts';
+import type { fetchAnthropicModelIdsWithStatus } from '../../lib/model-advisor.ts';
 import { deriveChatScope, emitRouteEvent, type ModelRouteEvent } from './route-events.ts';
 import { buildRoutingPromptContract, extractRouteIntents } from './route-intent.ts';
 import { isProviderId } from './providers/index.ts';
@@ -206,7 +209,7 @@ import {
   type OpencodeProviderConfig,
 } from './providers/mcp-bridge.ts';
 import { verifyFallbackCredential } from './providers/credential-verify.ts';
-import { probeFallbackBinary, probeModelCatalog, probeBinaryAuthStatus } from './providers/binary-preflight.ts';
+import { probeFallbackBinary, probeModelCatalog, probeBinaryAuthStatus, type listModelCatalog } from './providers/binary-preflight.ts';
 import {
   probePrimaryModelUsability,
   primaryModelUsabilityRequiresAlert,
@@ -489,6 +492,16 @@ export interface AgentRuntimeOptions {
    * registered (the agent cannot restart itself without it).
    */
   serviceRestarter?: ServiceRestarter;
+  /**
+   * Test-injectable catalogue probes for the `/model N` pin-time verify
+   * (Task H — resolveModelCatalogue's own listFn/anthropicFn seam, threaded
+   * one level further out so a test constructing the runtime can supply a
+   * fake catalogue without spawning a real binary or hitting a real
+   * keychain). Undefined in production — resolveModelCatalogue falls back
+   * to the real probes.
+   */
+  modelCatalogueListFn?: typeof listModelCatalog;
+  modelCatalogueAnthropicFn?: typeof fetchAnthropicModelIdsWithStatus;
 }
 
 export type RuntimePrimaryModelUsability = PrimaryModelUsabilityResult & {
@@ -785,6 +798,9 @@ export class AgentRuntime implements Runtime {
    *  independent of the static primary/fallback config. Mutable only in tests. */
   private nlRoutingEnabled: boolean = config.nlRouting === true;
   private readonly serviceRestarter: ServiceRestarter | undefined;
+  /** Task H injectable catalogue seam (AgentRuntimeOptions doc comment) — undefined in production. */
+  private readonly modelCatalogueListFn: typeof listModelCatalog | undefined;
+  private readonly modelCatalogueAnthropicFn: typeof fetchAnthropicModelIdsWithStatus | undefined;
   private readonly pluginDirs: string[];
   private readonly enabledPlugins: Record<string, boolean> | undefined;
   private readonly allowM365Mutations: boolean | undefined;
@@ -2371,6 +2387,8 @@ export class AgentRuntime implements Runtime {
     this.sandboxPerChat = options?.sandboxPerChat ?? false;
     this.perChatConversationBound = options?.perChatConversationBound ?? false;
     this.serviceRestarter = options?.serviceRestarter;
+    this.modelCatalogueListFn = options?.modelCatalogueListFn;
+    this.modelCatalogueAnthropicFn = options?.modelCatalogueAnthropicFn;
     this.workspaceSweeper = new WorkspaceSweeper(
       this.sandboxPerChat,
       this.workspaceResources,
@@ -4138,6 +4156,18 @@ export class AgentRuntime implements Runtime {
               }
               if (outcome === 'sticky_kept') {
                 this.sendDirect(chatJid, '_Already set (sticky). /reset to go back to the default route._');
+                break;
+              }
+              // Task H: verify the fresh pin against the catalogue BEFORE the
+              // echo (awaited — no fire-and-forget) so a subsequent read
+              // (this same reply, /model status, a next-session spawn) never
+              // observes an unverified pin the catalogue would have rejected.
+              const verifyResult = await this.verifyModelPinAgainstCatalogue(chatKey, senderKey, entry.providerId, entry.id);
+              if (typeof verifyResult === 'object') {
+                this.sendDirect(
+                  chatJid,
+                  `_Couldn't pin ${entry.id} — ${verifyResult.dropped}. Still on the default route; try /model list._`,
+                );
                 break;
               }
               this.sendDirect(chatJid, `_Pinned ${entry.id} for 24h — reply keep to make it permanent, /reset to undo._`);
@@ -8282,6 +8312,31 @@ export class AgentRuntime implements Runtime {
         tierMap: config.nlRoutingTiers,
         tierProviderEligible: tierProvider !== undefined && routable.includes(tierProvider),
       });
+      // Task H — sync consumption of a verified model pin (decideModelPinResolution's
+      // hot path: verified + same provider needs no catalogue, so this stays
+      // pure-sync, no I/O beyond the pref already read above). A provider
+      // change since verification (or an unverified/deferred pin) falls to
+      // `needs-catalogue` with no catalogue supplied here — that is a
+      // deliberate fail-open to the provider-level route already decided
+      // above, not a bug: resolveRouteForTurn never fetches a catalogue or
+      // persists (that is verifyModelPinAgainstCatalogue's job, at pin time).
+      // Gated on decision.source === 'preference' (not the looser
+      // `!== 'fallback'`): the model override may only apply when the route
+      // decision is ITSELF honoring the preference. 'fallback' means health
+      // beats preference — the operator's failover model must win, never
+      // the user's pin. 'pin_blocked_default' means the pin's provider was
+      // ineligible and we fell to the default provider — forcing the
+      // pinned model onto that unrelated default route would be wrong too,
+      // even if validatedProvider happens to coincide with it.
+      if (pref?.requestedModel != null && decision.source === 'preference') {
+        const modelPinDecision = decideModelPinResolution(
+          { requestedModel: pref.requestedModel, validatedProvider: pref.validatedProvider, modelPinVerified: pref.modelPinVerified },
+          decision.provider,
+        );
+        if (modelPinDecision.action === 'use') {
+          decision.model = modelPinDecision.modelId;
+        }
+      }
       return { ...decision, pinnedProvider: pinned };
     } catch (err) {
       log.warn({ err, instance: this.instanceName }, 'route resolution failed - routing on default');
@@ -8566,17 +8621,15 @@ export class AgentRuntime implements Runtime {
    * verification is deferred to the route-resolution consumer rather than
    * asserted here.
    *
-   * ⚠️ WRITE→ROUTE SEAM (verified, not yet closed): `resolveRoute`
-   * (route-resolution.ts) does not read `requestedModel`/`validatedProvider`/
-   * `modelPinVerified` at all today — only `requestedProvider`. This write is
-   * therefore CORRECT and durable (the F12 contract, `decideModelPinResolution`
-   * in config-surface.ts, is written against exactly this shape) but NOT YET
-   * CONSUMED: a `/model N` pin steers the provider on the next session spawn
-   * (same as a provider-id pin) but not yet the specific model. Closing that
-   * — fetching the effective provider's catalogue, calling
-   * decideModelPinResolution, and wiring the result into spawn — is Slice
-   * C.3/Task G's job ("makes the switch take effect immediately"), not this
-   * task's. See the task report for the full seam trace.
+   * WRITE→ROUTE SEAM (Task H, CLOSED): this write is deliberately
+   * unverified — the caller (`/model N` handler) awaits
+   * {@link verifyModelPinAgainstCatalogue} immediately after this call and
+   * BEFORE the D10 echo, so the row is durably verified (or dropped/deferred)
+   * by the time the user sees any reply. `resolveRouteForTurn`'s sync hot
+   * path then consumes the verified bit via `decideModelPinResolution` (the
+   * F12 contract, config-surface.ts) to set `route.model`. Task G (separate,
+   * not this task) additionally makes an ALREADY-LIVE session pick it up
+   * immediately rather than on the next spawn.
    */
   private recordRouteModelPin(
     chatJid: string,
@@ -8623,6 +8676,63 @@ export class AgentRuntime implements Runtime {
       reasonCode: 'user_model_pin_set',
     });
     return 'set';
+  }
+
+  /**
+   * Task H — the ONE async catalogue fetch a model pin ever needs, done at
+   * PIN TIME (awaited by the `/model N` handler before its echo) so the row
+   * is already verified by the time `resolveRouteForTurn`'s SYNC hot path
+   * (decideModelPinResolution, config-surface.ts — the SSOT) needs to
+   * consume it. The catalogue probes are injectable
+   * (modelCatalogueListFn/modelCatalogueAnthropicFn on AgentRuntimeOptions,
+   * mirroring resolveModelCatalogue's own listFn/anthropicFn seam) so a test
+   * never spawns the real binary or hits the real keychain.
+   *
+   * Acts on decideModelPinResolution's verdict against the just-written
+   * (unverified) pin:
+   *   - `use` (+ `revalidated`) — the model IS in the catalogue: persist
+   *     `modelPinVerified: true` (re-reading the row rather than assuming
+   *     its shape, in case it moved under us) and report 'verified'.
+   *   - `drop`                  — the model is NOT in the catalogue: clear
+   *     the whole chat pin (never leave an unverified orphan) and hand back
+   *     the reason so the caller can disclose it instead of the normal D10
+   *     echo.
+   *   - `defer` (catalogue down) and the unreachable `none`/`needs-catalogue`
+   *     shapes (a catalogue and a requestedModel are always supplied here) —
+   *     leave the pin UNVERIFIED exactly as recordRouteModelPin wrote it; a
+   *     deliberate fail-open, report 'deferred'.
+   */
+  private async verifyModelPinAgainstCatalogue(
+    chatKey: string,
+    senderKey: string,
+    providerId: string,
+    model: string,
+  ): Promise<'verified' | 'deferred' | { dropped: string }> {
+    const binary = getProviderBinary(providerId) ?? providerId;
+    const listing = await resolveModelCatalogue(providerId, binary, {
+      nowMs: Date.now(),
+      listFn: this.modelCatalogueListFn,
+      anthropicFn: this.modelCatalogueAnthropicFn,
+    });
+    const catalogue: CatalogueOutcome =
+      listing.status === 'ok' ? { available: true, ids: listing.ids } : { available: false };
+    const decision = decideModelPinResolution(
+      { requestedModel: model, validatedProvider: providerId, modelPinVerified: false },
+      providerId,
+      catalogue,
+    );
+    if (decision.action === 'use') {
+      const existing = getPreference(this.db, chatKey, senderKey);
+      if (existing) {
+        setPreference(this.db, { ...existing, modelPinVerified: true, validatedProvider: providerId, updatedAt: Date.now() });
+      }
+      return 'verified';
+    }
+    if (decision.action === 'drop') {
+      clearChatPreference(this.db, chatKey);
+      return { dropped: decision.reason };
+    }
+    return 'deferred';
   }
 
   /**
@@ -8990,10 +9100,12 @@ export class AgentRuntime implements Runtime {
     // you" mis-implies per-user ownership even when a DIFFERENT sender set
     // it. "This chat is on X" is accurate in both a DM and a group, and never
     // names the setter (that would reintroduce the internal-concept leak the
-    // plain-language rule bans). A model pin shows the model; otherwise the
-    // provider/intent, as before.
+    // plain-language rule bans). A model pin shows the model ONLY once
+    // verified (Task H honesty rule) — an unverified/deferred model pin
+    // would otherwise claim to be serving a model that was never confirmed
+    // to exist; it falls back to the provider/intent, same as before.
     const prefLine = pref
-      ? `This chat is on ${pref.requestedModel ?? (pref.requestedProvider ?? pref.intent)}` +
+      ? `This chat is on ${(pref.modelPinVerified === true ? pref.requestedModel : null) ?? (pref.requestedProvider ?? pref.intent)}` +
         (pref.expiresAt !== null
           ? ` (expires in ~${Math.max(1, Math.round((pref.expiresAt - Date.now()) / 3_600_000))}h)`
           : '') +

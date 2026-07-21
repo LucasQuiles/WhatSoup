@@ -464,6 +464,7 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 import * as registerAllModule from '../../../src/mcp/register-all.ts';
 import { AgentRuntime, isUsageLimitMessage, serializePendingPoll, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
 import { parseGeminiAcpEvent } from '../../../src/runtimes/agent/providers/gemini-acp-parser.ts';
+import { __resetModelCatalogueCacheForTest } from '../../../src/runtimes/agent/model-catalogue-resolver.ts';
 import { providerServerErrorNoFallbackNotice, providerUnknownTerminalNotice, renderUserMessage } from '../../../src/runtimes/agent/response-templates.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import { TurnQueue } from '../../../src/runtimes/agent/turn-queue.ts';
@@ -15316,6 +15317,12 @@ describe('NL routing handlers (nlRouting flag)', () => {
     // The runtime reads its provider from config (config.agentProvider), which
     // the file-wide mockConfig does not set — routing needs a real primary.
     cfgAny().agentProvider = 'claude-cli';
+    // Task H: the per-harness catalogue resolver's opencode/openai caches are
+    // MODULE-LEVEL (keyed by binary, 60s TTL) — without a reset here, an
+    // earlier test's injected listFn result can leak into a later test via
+    // the cache (the injected fn would never be called, and the wrong
+    // catalogue would drive the pin-verify outcome).
+    __resetModelCatalogueCacheForTest();
     capturedSessionManagerOptsRef.current = null;
     mockQueue.enqueueText.mockClear();
     mockSession.sendTurn.mockClear();
@@ -16269,22 +16276,27 @@ describe('NL routing handlers (nlRouting flag)', () => {
   // snapshot and writes a MODEL-level pin in one step; /model N default pins
   // the provider only; a miss is a DISCLOSED re-render, never a silent pick.
   describe('C3: /model N apply — hit/miss/N-default', () => {
-    it('HIT: /model N writes a model-level pin in one step (F12 shape) and echoes the D10 affordance', async () => {
+    it('HIT: /model N writes a model-level pin, verifies it at pin time against the catalogue, and echoes the D10 affordance (Task H)', async () => {
       cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
-      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      // Injected — a real (un-injected) listFn would spawn the opencode
+      // binary from a test path; this fake is the ONLY catalogue source a
+      // test in this suite may ever touch (Task H guardrail).
+      const listFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['kimi/kimi-k3'] });
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueListFn: listFn });
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'msg-2' }));
       const rows = prefRows();
       expect(rows).toHaveLength(1);
       expect(rows[0].intent).toBe('provider_specific');
       expect(rows[0].requested_provider).toBe('opencode-cli');
-      // F12 model-pin shape: requestedModel + validatedProvider populated,
-      // modelPinVerified explicitly false (unverified — deferred to the
-      // route-resolution consumer, not asserted here; see the write→route
-      // seam note on recordRouteModelPin).
+      // F12 model-pin shape: requestedModel + validatedProvider populated.
       expect(rows[0].requested_model).toBe('kimi/kimi-k3');
       expect(rows[0].validated_provider).toBe('opencode-cli');
-      expect(rows[0].model_pin_verified).toBe(0);
+      // Task H: the pin-time verify (awaited before the echo) found the
+      // model in the catalogue, so the row now persists VERIFIED — no
+      // longer the pre-H unconditional `false` write.
+      expect(rows[0].model_pin_verified).toBe(1);
+      expect(listFn).toHaveBeenCalledTimes(1);
       const reply = allReplies(sentMessages).join('\n');
       expect(reply).toContain('Pinned kimi/kimi-k3 for 24h');
       expect(reply).toContain('reply keep to make it permanent, /reset to undo');
@@ -16293,25 +16305,204 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(reply).not.toContain('Applies from your next session');
     });
 
-    it('HIT round-trip: a model-level pin survives read-back through rowToPreference and renders on /model status', async () => {
+    it('HIT round-trip: a VERIFIED model-level pin survives read-back and drives both the preference line and the Model: line (Task H sync consumption)', async () => {
       // Proves the write survives chat-preference-db's strict cross-field
-      // validation on READ (not just the raw row asserted above), and that
-      // the D13a copy fix renders the pinned MODEL, not just the provider.
-      // NOTE (documented deferral, see recordRouteModelPin): resolveRoute
-      // does not yet consume requestedModel, so the separate "Model:" line
-      // still reflects the configured PRIMARY, not the pin — both lines are
-      // expected to appear together until a later slice wires spawn
-      // consumption; this test pins that exact, honest shape.
-      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
-      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      // validation on READ (not just the raw row asserted above), AND that
+      // resolveRouteForTurn's sync hot path (Task H) now actually consumes
+      // the verified pin — the "Model:" line used to lag the pin (a
+      // documented deferral pre-H); it now matches what /model N asked for.
+      //
+      // Same-provider (claude-cli) fallback entry, deliberately — a
+      // cross-provider (e.g. opencode-cli) pin is credential-gated at ROUTE
+      // time (routablePinTargets → a real per-model keyring lookup), which
+      // is a separate concern from what this test targets (sync
+      // consumption); claude-cli-on-claude-cli is unconditionally routable
+      // (isEntryCredentialed's same-provider shortcut), isolating the thing
+      // under test. This also exercises the anthropicFn injection seam
+      // (claude-cli routes through resolveClaude, not resolveOpencode).
+      cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'claude-sonnet-5' }];
+      const anthropicFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['claude-opus-4-8', 'claude-sonnet-5'] });
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueAnthropicFn: anthropicFn });
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'msg-2' }));
+      expect(prefRows()[0].model_pin_verified).toBe(1);
+      expect(anthropicFn).toHaveBeenCalledTimes(1);
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status', messageId: 'msg-3' }));
       const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
       expect(status).toBeDefined();
-      expect(status).toContain('This chat is on kimi/kimi-k3');
-      // Documented deferral: the Model: line is not yet pin-aware.
+      expect(status).toContain('This chat is on claude-sonnet-5');
+      // Task H: the Model: line is now pin-aware — the sync hot path in
+      // resolveRouteForTurn set route.model to the verified pin, distinct
+      // from the configured primary (claude-opus-4-8).
+      expect(status).toContain('Model: claude-sonnet-5');
+      expect(status).not.toContain('Model: claude-opus-4-8 (configured)');
+    });
+
+    it('DROP: a HIT model pin verified against a catalogue that no longer has it is cleared and disclosed, never left as a silent unverified orphan (Task H)', async () => {
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
+      // The catalogue IS reachable but no longer lists the picked model —
+      // decideModelPinResolution's `drop` branch.
+      const listFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['some-other-model'] });
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueListFn: listFn });
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'msg-2' }));
+      // Only a real fake-catalogue drop reaches this outcome — a real failed
+      // spawn in CI would `defer` (row survives, unverified), never `drop`.
+      expect(prefRows()).toHaveLength(0);
+      expect(listFn).toHaveBeenCalledTimes(1);
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain("Couldn't pin kimi/kimi-k3");
+      expect(reply).toContain('not in opencode-cli catalogue');
+      expect(reply).toContain('Still on the default route');
+      // The normal D10 echo must NOT also fire on a drop.
+      expect(reply).not.toContain('Pinned kimi/kimi-k3 for 24h');
+    });
+
+    it('DEFER: a catalogue outage at pin time leaves the pin UNVERIFIED (fail-open), still sends the D10 echo (Task H)', async () => {
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
+      const listFn = vi.fn().mockResolvedValue({ status: 'unavailable', reason: 'spawn-error' });
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueListFn: listFn });
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'msg-2' }));
+      const rows = prefRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].requested_model).toBe('kimi/kimi-k3');
+      expect(rows[0].validated_provider).toBe('opencode-cli');
+      // Deferred, not verified — the write-time `false` stands unchanged.
+      expect(rows[0].model_pin_verified).toBe(0);
+      expect(listFn).toHaveBeenCalledTimes(1);
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('Pinned kimi/kimi-k3 for 24h');
+      expect(reply).not.toContain("Couldn't pin");
+    });
+
+    it('PROVIDER-CHANGED FAIL-OPEN: a verified pin against a DIFFERENT provider than the one resolving now never bleeds its model into the route (Task H)', async () => {
+      // Direct DB seed via the runtime's own canonical-key derivation
+      // (preferenceKeys) rather than the /model N flow — this constructs
+      // the "verified against provider A, routing on provider B now" edge
+      // deterministically, with zero catalogue-fn calls required (the sync
+      // hot path returns `needs-catalogue` before ever touching a catalogue).
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      const prefMod = await import('../../../src/runtimes/agent/chat-preference-db.ts');
+      const keysMod = await import('../../../src/runtimes/agent/preference-keys.ts');
+      const { chatKey, senderKey } = keysMod.preferenceKeys(routingDb, CHAT, SENDER_A);
+      const now = Date.now();
+      prefMod.setPreference(routingDb, {
+        chatJid: chatKey,
+        senderJid: senderKey,
+        intent: 'provider_specific',
+        // agentProvider ('claude-cli') is unconditionally routable, so this
+        // pin resolves without any credential probe — decision.provider
+        // will be 'claude-cli'.
+        requestedProvider: 'claude-cli',
+        scope: 'this_thread',
+        pinStrict: true,
+        fallbackPermitted: false,
+        updatedAt: now,
+        expiresAt: now + 24 * 60 * 60 * 1000,
+        requestedModel: 'exotic/model-x',
+        // Verified against a DIFFERENT provider than the one that will
+        // actually resolve — the provider-changed edge.
+        validatedProvider: 'opencode-cli',
+        modelPinVerified: true,
+      });
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+      const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+      expect(status).toBeDefined();
+      // Fail-open: route.model stays the configured primary — the stale
+      // cross-provider pin never bleeds into the resolved route.
       expect(status).toContain('Model: claude-opus-4-8 (configured)');
+      expect(status).not.toContain('Model: exotic/model-x');
+      // The preference DECLARATION line is a separate honesty axis (verified
+      // bit only, same as the existing provider-pin behavior) — it still
+      // names the pin even though it isn't the one actually serving.
+      expect(status).toContain('This chat is on exotic/model-x');
+    });
+
+    it('a verified model pin does NOT override an active health failover (source=fallback), even when validatedProvider matches the fallback provider', async () => {
+      // resolveRoute's fallback branch returns EARLY on an active window
+      // ("health beats preference" — route-resolution.ts) with the
+      // OPERATOR-configured fallback model, before it ever reads pref. Task
+      // H's sync-consumption block only applies when `decision.source ===
+      // 'preference'` — during a fallback window `decision.source` is
+      // 'fallback', so the pin is never consulted, even if the user's
+      // verified pin happens to be validated against the SAME provider the
+      // fallback window selected. Health beats preference, full stop.
+      cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'claude-haiku-4-5' }];
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      const prefMod = await import('../../../src/runtimes/agent/chat-preference-db.ts');
+      const keysMod = await import('../../../src/runtimes/agent/preference-keys.ts');
+      const { chatKey, senderKey } = keysMod.preferenceKeys(routingDb, CHAT, SENDER_A);
+      const now = Date.now();
+      prefMod.setPreference(routingDb, {
+        chatJid: chatKey,
+        senderJid: senderKey,
+        intent: 'provider_specific',
+        requestedProvider: 'claude-cli',
+        scope: 'this_thread',
+        pinStrict: true,
+        fallbackPermitted: false,
+        updatedAt: now,
+        expiresAt: now + 24 * 60 * 60 * 1000,
+        requestedModel: 'claude-sonnet-5',
+        validatedProvider: 'claude-cli', // SAME provider the fallback window below will also select
+        modelPinVerified: true,
+      });
+      const r = runtime as unknown as { armFallbackWindow: (until: number, reason: string) => boolean };
+      // 'usage-limit' does not require an independent provider (fallback-config.ts
+      // fallbackRequiresIndependentProbe) — a same-provider entry is a legal
+      // selection, and same-provider is unconditionally credentialed
+      // (isEntryCredentialed's shortcut), so this needs no keyring/catalogue mocking.
+      expect(r.armFallbackWindow.call(runtime, Date.now() + 60_000, 'usage-limit')).toBe(true);
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+      const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+      expect(status).toBeDefined();
+      expect(status).toContain('Fallback: active');
+      // The fallback's operator-configured model wins — the verified pin
+      // (even same-provider) never bleeds into an active failover window.
+      expect(status).toContain('Model: claude-haiku-4-5');
+      expect(status).not.toContain('Model: claude-sonnet-5');
+    });
+
+    it('a verified model pin does NOT leak onto a pin_blocked_default route, even when validatedProvider coincidentally matches the default provider', async () => {
+      // The pin's REQUESTED provider ('opencode-cli') is not routable, so
+      // resolveRoute falls to pin_blocked_default and decision.provider
+      // becomes the instance default (agentProvider, 'claude-cli') — never
+      // the blocked provider. decision.source is 'pin_blocked_default', not
+      // 'preference'. This is the case the looser `!== 'fallback'` gate
+      // would get wrong: validatedProvider here is deliberately set to
+      // 'claude-cli' (coincidentally equal to decision.provider), which
+      // would make decideModelPinResolution say "use" if only a provider
+      // match were checked — the explicit source==='preference' gate is
+      // what actually stops the leak.
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      const prefMod = await import('../../../src/runtimes/agent/chat-preference-db.ts');
+      const keysMod = await import('../../../src/runtimes/agent/preference-keys.ts');
+      const { chatKey, senderKey } = keysMod.preferenceKeys(routingDb, CHAT, SENDER_A);
+      const now = Date.now();
+      prefMod.setPreference(routingDb, {
+        chatJid: chatKey,
+        senderJid: senderKey,
+        intent: 'provider_specific',
+        // Not the unconditionally-routable agentProvider, and not made
+        // eligible via routablePinTargets — resolves to pin_blocked_default.
+        requestedProvider: 'opencode-cli',
+        scope: 'this_thread',
+        pinStrict: true,
+        fallbackPermitted: false,
+        updatedAt: now,
+        expiresAt: now + 24 * 60 * 60 * 1000,
+        requestedModel: 'kimi/kimi-k3',
+        // Deliberately the DEFAULT provider, not the requested one — the
+        // edge case a provider-equality-only check would miss.
+        validatedProvider: 'claude-cli',
+        modelPinVerified: true,
+      });
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+      const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+      expect(status).toBeDefined();
+      expect(status).toContain('Model: claude-opus-4-8 (configured)');
+      expect(status).not.toContain('Model: kimi/kimi-k3');
     });
 
     it('MISS: /model N against an expired/absent snapshot is a DISCLOSED re-render, never a silent pick', async () => {
@@ -16363,7 +16554,10 @@ describe('NL routing handlers (nlRouting flag)', () => {
 
     it('the trailing letter suffix (C1 grammar) is tolerated and ignored on a HIT', async () => {
       cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
-      const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      // Injected (Task H guardrail) — the HIT path now awaits a pin-time
+      // verify; a real listFn would spawn from a test path.
+      const listFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['kimi/kimi-k3'] });
+      const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueListFn: listFn });
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2b', messageId: 'msg-2' }));
       const rows = prefRows();
@@ -16378,7 +16572,10 @@ describe('NL routing handlers (nlRouting flag)', () => {
       // spread silently PRESERVED requestedModel/validatedProvider/
       // modelPinVerified instead of clearing them to the provider default.
       cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
-      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      // Injected (Task H guardrail) — the first /model 2 HIT below awaits a
+      // pin-time verify; a real listFn would spawn from a test path.
+      const listFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['kimi/kimi-k3'] });
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueListFn: listFn });
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'msg-2' }));
       expect(prefRows()[0].requested_model).toBe('kimi/kimi-k3');
