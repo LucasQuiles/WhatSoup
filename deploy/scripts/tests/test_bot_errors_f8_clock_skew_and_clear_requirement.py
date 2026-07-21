@@ -130,6 +130,24 @@ class ClearEvaluatorTests(IsolatedDispatcherTestCase):
         self.assertLessEqual(len(decision.reason), 256)
         self.assertEqual(decision.proof_receipt["incidentKey"], key)
 
+    def test_clock_skew_tolerance_boundary_is_inclusive(self) -> None:
+        opened = int(time.time())
+        key = "host-a|ana-bot|socket_down"
+        tolerance = self.mod.CLOCK_SKEW_TOLERANCE_SECONDS
+        at_boundary = _decision(
+            self.mod,
+            _open_record(key, opened),
+            _clear_event(opened - tolerance),
+        )
+        beyond_boundary = _decision(
+            self.mod,
+            _open_record(key, opened),
+            _clear_event(opened - tolerance - 1),
+        )
+        self.assertEqual(at_boundary.status.value, "accepted")
+        self.assertEqual(beyond_boundary.status.value, "rejected")
+        self.assertIn("stale", beyond_boundary.reason)
+
     def test_stale_clear_rejects(self) -> None:
         opened = int(time.time())
         key = "host-a|ana-bot|socket_down"
