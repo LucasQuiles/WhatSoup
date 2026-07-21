@@ -11,6 +11,13 @@ export const MAX_EXACT_COMMIT_RANGE_BYTES = 1 * 1_024 * 1_024;
 export const MAX_EXACT_BLOB_COUNT = 50_000;
 export const MAX_EXACT_SINGLE_BLOB_BYTES = 4 * 1_024 * 1_024;
 export const MAX_EXACT_AGGREGATE_BLOB_BYTES = 16 * 1_024 * 1_024;
+export const MAX_EXACT_ADDED_LINE_CHANGE_COUNT = 4_096;
+export const MAX_EXACT_ADDED_LINE_COUNT = 100_000;
+export const MAX_EXACT_ADDED_LINE_SOURCE_LINE_COUNT = 200_000;
+export const MAX_EXACT_ADDED_LINE_PATCH_BYTES = 4 * 1_024 * 1_024;
+export const MAX_EXACT_ADDED_LINE_PATCH_ROW_COUNT = 400_000;
+export const MAX_EXACT_ADDED_LINE_PATCH_TOTAL_BYTES = 16 * 1_024 * 1_024;
+export const MAX_EXACT_ADDED_LINE_BYTES = 16 * 1_024 * 1_024;
 
 export type ChangeStatusV1 =
   "added" | "modified" | "deleted" | "renamed" | "copied";
@@ -58,6 +65,28 @@ export interface ExactBlobV1 {
   bytes: Uint8Array;
 }
 
+export interface ExactAddedLineInputV1 {
+  baseOid: string;
+  candidateOid: string;
+}
+
+export interface ExactAddedLineV1 {
+  path: string;
+  newBlobOid: string;
+  newLineNumber: number;
+  text: string;
+}
+
+export interface ExactChangeWithAddedLinesV1 extends ChangeFactV1 {
+  addedLines: ExactAddedLineV1[];
+}
+
+export interface ExactAddedLineSetV1 {
+  baseOid: string;
+  candidateOid: string;
+  changes: ExactChangeWithAddedLinesV1[];
+}
+
 export type ExactGitInputErrorCode =
   | "ci.input.revision-unavailable"
   | "ci.input.commit-range-unavailable"
@@ -69,6 +98,15 @@ export type ExactGitInputErrorCode =
   | "ci.input.blob-type-unsupported"
   | "ci.input.blob-identity-mismatch"
   | "ci.input.git-execution-timeout"
+  | "ci.input.added-lines.input-malformed"
+  | "ci.input.added-lines.unavailable"
+  | "ci.input.added-lines.timeout"
+  | "ci.input.added-lines.budget"
+  | "ci.input.added-lines.binary"
+  | "ci.input.added-lines.invalid-utf8"
+  | "ci.input.added-lines.gitlink"
+  | "ci.input.added-lines.patch-malformed"
+  | "ci.input.added-lines.identity-mismatch"
   | "ci.classification.merge-base-unavailable"
   | "ci.classification.change-set-malformed"
   | "ci.classification.change-set-budget"
@@ -886,4 +924,493 @@ export function readExactChangeFacts(
     MAX_CHANGE_SET_BYTES + 1,
   );
   return parseChangeFacts(bytes);
+}
+
+interface ExactTextLine {
+  raw: string;
+  text: string;
+  terminated: boolean;
+}
+
+function addedLinesError(
+  code: Extract<ExactGitInputErrorCode, `ci.input.added-lines.${string}`>,
+): ExactGitInputError {
+  return new ExactGitInputError(code, code);
+}
+
+function validateExactAddedLineInput(value: unknown): ExactAddedLineInputV1 {
+  try {
+    if (
+      typeof value !== "object"
+      || value === null
+      || Array.isArray(value)
+      || Object.getPrototypeOf(value) !== Object.prototype
+    ) {
+      throw addedLinesError("ci.input.added-lines.input-malformed");
+    }
+    const keys = Reflect.ownKeys(value).sort((left, right) =>
+      String(left).localeCompare(String(right)));
+    if (
+      keys.length !== 2
+      || keys[0] !== "baseOid"
+      || keys[1] !== "candidateOid"
+    ) {
+      throw addedLinesError("ci.input.added-lines.input-malformed");
+    }
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const base = descriptors.baseOid;
+    const candidate = descriptors.candidateOid;
+    if (
+      base === undefined || !("value" in base) || !base.enumerable
+      || candidate === undefined || !("value" in candidate) || !candidate.enumerable
+      || typeof base.value !== "string" || !FULL_OID.test(base.value)
+      || typeof candidate.value !== "string" || !FULL_OID.test(candidate.value)
+    ) {
+      throw addedLinesError("ci.input.added-lines.input-malformed");
+    }
+    return { baseOid: base.value, candidateOid: candidate.value };
+  } catch {
+    throw addedLinesError("ci.input.added-lines.input-malformed");
+  }
+}
+
+function mapAddedLineInputError(error: unknown): never {
+  if (error instanceof ExactGitInputError) {
+    if (
+      error.code === "ci.input.git-execution-timeout"
+    ) {
+      throw addedLinesError("ci.input.added-lines.timeout");
+    }
+    if (
+      error.code === "ci.input.blob-set-budget"
+      || error.code === "ci.classification.change-set-budget"
+    ) {
+      throw addedLinesError("ci.input.added-lines.budget");
+    }
+    if (error.code === "ci.input.blob-identity-mismatch") {
+      throw addedLinesError("ci.input.added-lines.identity-mismatch");
+    }
+  }
+  throw addedLinesError("ci.input.added-lines.unavailable");
+}
+
+function addedLineGitBytes(
+  cwd: string,
+  args: readonly string[],
+  maxBuffer: number,
+): Buffer {
+  try {
+    return execFileSync("git", ["--no-replace-objects", ...args], {
+      cwd,
+      env: gitEnvironment(),
+      maxBuffer,
+      timeout: GIT_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (error) {
+    const candidate = error as NodeJS.ErrnoException & { signal?: string };
+    if (candidate.code === "ETIMEDOUT") {
+      throw addedLinesError("ci.input.added-lines.timeout");
+    }
+    if (candidate.code === "ENOBUFS") {
+      throw addedLinesError("ci.input.added-lines.budget");
+    }
+    throw addedLinesError("ci.input.added-lines.unavailable");
+  }
+}
+
+interface ExactTextPreflight {
+  decoded: string;
+  lineCount: number;
+  textBytes: number;
+}
+
+function preflightExactTextBlob(blob: ExactBlobV1): ExactTextPreflight {
+  if (blob.bytes.includes(0)) {
+    throw addedLinesError("ci.input.added-lines.binary");
+  }
+  let decoded: string;
+  try {
+    decoded = UTF8.decode(blob.bytes);
+  } catch {
+    throw addedLinesError("ci.input.added-lines.invalid-utf8");
+  }
+  let lineCount = 0;
+  let strippedCrBytes = 0;
+  for (let index = 0; index < blob.bytes.byteLength; index += 1) {
+    if (blob.bytes[index] !== 0x0a) continue;
+    lineCount += 1;
+    if (index > 0 && blob.bytes[index - 1] === 0x0d) strippedCrBytes += 1;
+  }
+  if (blob.bytes.byteLength > 0 && blob.bytes[blob.bytes.byteLength - 1] !== 0x0a) {
+    lineCount += 1;
+  }
+  return {
+    decoded,
+    lineCount,
+    textBytes: blob.bytes.byteLength - (lineCount - (
+      blob.bytes.byteLength > 0 && blob.bytes[blob.bytes.byteLength - 1] !== 0x0a ? 1 : 0
+    )) - strippedCrBytes,
+  };
+}
+
+function exactTextLines(preflight: ExactTextPreflight): ExactTextLine[] {
+  const { decoded } = preflight;
+  if (decoded.length === 0) return [];
+  const rawLines = decoded.split("\n");
+  const hasTerminalLf = decoded.endsWith("\n");
+  if (hasTerminalLf) rawLines.pop();
+  return rawLines.map((raw, index) => {
+    const terminated = index < rawLines.length - 1 || hasTerminalLf;
+    return {
+      raw,
+      text: terminated && raw.endsWith("\r") ? raw.slice(0, -1) : raw,
+      terminated,
+    };
+  });
+}
+
+function sameTextLine(
+  left: ExactTextLine | undefined,
+  right: ExactTextLine | undefined,
+): boolean {
+  return left !== undefined
+    && right !== undefined
+    && left.raw === right.raw
+    && left.terminated === right.terminated;
+}
+
+function requirePatchLine(
+  actual: ExactTextLine | undefined,
+  content: string,
+  terminated: boolean,
+): void {
+  if (
+    actual === undefined
+    || actual.raw !== content
+    || actual.terminated !== terminated
+  ) {
+    throw addedLinesError("ci.input.added-lines.patch-malformed");
+  }
+}
+
+function parseAddedLinesPatch(
+  patchBytes: Buffer,
+  oldOid: string,
+  newOid: string,
+  path: string,
+  oldLines: readonly ExactTextLine[],
+  newLines: readonly ExactTextLine[],
+  remainingLineCount: number,
+  remainingTextBytes: number,
+  remainingPatchBytes: number,
+): ExactAddedLineV1[] {
+  if (
+    patchBytes.byteLength === 0
+    || patchBytes.byteLength > MAX_EXACT_ADDED_LINE_PATCH_BYTES
+    || patchBytes.byteLength > remainingPatchBytes
+    || patchBytes[patchBytes.byteLength - 1] !== 0x0a
+    || patchBytes.includes(0)
+  ) {
+    throw addedLinesError(
+      patchBytes.byteLength > MAX_EXACT_ADDED_LINE_PATCH_BYTES
+        || patchBytes.byteLength > remainingPatchBytes
+        ? "ci.input.added-lines.budget"
+        : "ci.input.added-lines.patch-malformed",
+    );
+  }
+  let patchRowCount = 0;
+  for (const byte of patchBytes) if (byte === 0x0a) patchRowCount += 1;
+  if (patchRowCount > MAX_EXACT_ADDED_LINE_PATCH_ROW_COUNT) {
+    throw addedLinesError("ci.input.added-lines.budget");
+  }
+  let decoded: string;
+  try {
+    decoded = UTF8.decode(patchBytes);
+  } catch {
+    throw addedLinesError("ci.input.added-lines.patch-malformed");
+  }
+  const rows = decoded.split("\n");
+  rows.pop();
+  if (
+    rows.length < 5
+    || rows[0] !== `diff --git ${oldOid} ${newOid}`
+    || rows[1] !== `index ${oldOid}..${newOid} 100644`
+    || rows[2] !== `--- ${oldOid}`
+    || rows[3] !== `+++ ${newOid}`
+  ) {
+    throw addedLinesError("ci.input.added-lines.patch-malformed");
+  }
+
+  const added: ExactAddedLineV1[] = [];
+  let rowIndex = 4;
+  let oldCursor = 0;
+  let newCursor = 0;
+  let sawHunk = false;
+  let addedTextBytes = 0;
+  while (rowIndex < rows.length) {
+    const header = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?$/.exec(
+      rows[rowIndex++]!,
+    );
+    if (!header) {
+      throw addedLinesError("ci.input.added-lines.patch-malformed");
+    }
+    sawHunk = true;
+    const oldStart = Number(header[1]);
+    const oldCount = header[2] === undefined ? 1 : Number(header[2]);
+    const newStart = Number(header[3]);
+    const newCount = header[4] === undefined ? 1 : Number(header[4]);
+    if (
+      !Number.isSafeInteger(oldStart) || !Number.isSafeInteger(oldCount)
+      || !Number.isSafeInteger(newStart) || !Number.isSafeInteger(newCount)
+    ) {
+      throw addedLinesError("ci.input.added-lines.patch-malformed");
+    }
+    const oldTarget = oldCount === 0 ? oldStart : oldStart - 1;
+    const newTarget = newCount === 0 ? newStart : newStart - 1;
+    if (
+      oldTarget < oldCursor || newTarget < newCursor
+      || oldTarget > oldLines.length || newTarget > newLines.length
+      || oldTarget - oldCursor !== newTarget - newCursor
+    ) {
+      throw addedLinesError("ci.input.added-lines.patch-malformed");
+    }
+    while (oldCursor < oldTarget) {
+      if (!sameTextLine(oldLines[oldCursor]!, newLines[newCursor]!)) {
+        throw addedLinesError("ci.input.added-lines.patch-malformed");
+      }
+      oldCursor += 1;
+      newCursor += 1;
+    }
+
+    let consumedOld = 0;
+    let consumedNew = 0;
+    while (consumedOld < oldCount || consumedNew < newCount) {
+      const row = rows[rowIndex++];
+      if (row === undefined || row.length === 0) {
+        throw addedLinesError("ci.input.added-lines.patch-malformed");
+      }
+      const prefix = row[0]!;
+      if (prefix !== "-" && prefix !== "+" && prefix !== " ") {
+        throw addedLinesError("ci.input.added-lines.patch-malformed");
+      }
+      const content = row.slice(1);
+      const noFinalLf = rows[rowIndex] === "\\ No newline at end of file";
+      if (noFinalLf) rowIndex += 1;
+      const terminated = !noFinalLf;
+      if (prefix === "-") {
+        requirePatchLine(oldLines[oldCursor], content, terminated);
+        oldCursor += 1;
+        consumedOld += 1;
+      } else if (prefix === "+") {
+        requirePatchLine(newLines[newCursor], content, terminated);
+        const textBytes = Buffer.byteLength(newLines[newCursor]!.text, "utf8");
+        if (
+          added.length >= remainingLineCount
+          || addedTextBytes + textBytes > remainingTextBytes
+        ) {
+          throw addedLinesError("ci.input.added-lines.budget");
+        }
+        addedTextBytes += textBytes;
+        added.push({
+          path,
+          newBlobOid: newOid,
+          newLineNumber: newCursor + 1,
+          text: newLines[newCursor]!.text,
+        });
+        newCursor += 1;
+        consumedNew += 1;
+      } else {
+        requirePatchLine(oldLines[oldCursor], content, terminated);
+        requirePatchLine(newLines[newCursor], content, terminated);
+        oldCursor += 1;
+        newCursor += 1;
+        consumedOld += 1;
+        consumedNew += 1;
+      }
+      if (consumedOld > oldCount || consumedNew > newCount) {
+        throw addedLinesError("ci.input.added-lines.patch-malformed");
+      }
+    }
+  }
+  if (!sawHunk) {
+    throw addedLinesError("ci.input.added-lines.patch-malformed");
+  }
+  while (oldCursor < oldLines.length) {
+    if (!sameTextLine(oldLines[oldCursor]!, newLines[newCursor]!)) {
+      throw addedLinesError("ci.input.added-lines.patch-malformed");
+    }
+    oldCursor += 1;
+    newCursor += 1;
+  }
+  if (newCursor !== newLines.length) {
+    throw addedLinesError("ci.input.added-lines.patch-malformed");
+  }
+  return added;
+}
+
+function requireBlobSetUnchanged(
+  before: ReadonlyMap<string, ExactBlobV1>,
+  after: readonly ExactBlobV1[],
+): void {
+  if (before.size !== after.length) {
+    throw addedLinesError("ci.input.added-lines.identity-mismatch");
+  }
+  for (const blob of after) {
+    const original = before.get(blob.oid);
+    if (
+      original === undefined
+      || original.byteLength !== blob.byteLength
+      || original.contentSha256 !== blob.contentSha256
+      || !Buffer.from(original.bytes).equals(Buffer.from(blob.bytes))
+    ) {
+      throw addedLinesError("ci.input.added-lines.identity-mismatch");
+    }
+  }
+}
+
+export function readExactAddedLines(
+  cwd: string,
+  input: ExactAddedLineInputV1,
+): ExactAddedLineSetV1 {
+  const { baseOid, candidateOid } = validateExactAddedLineInput(input);
+  let facts: ChangeFactV1[];
+  try {
+    facts = readExactChangeFacts(cwd, baseOid, candidateOid);
+  } catch (error) {
+    mapAddedLineInputError(error);
+  }
+  if (facts.length > MAX_EXACT_ADDED_LINE_CHANGE_COUNT) {
+    throw addedLinesError("ci.input.added-lines.budget");
+  }
+  if (facts.some((fact) => fact.oldType === "gitlink" || fact.newType === "gitlink")) {
+    throw addedLinesError("ci.input.added-lines.gitlink");
+  }
+
+  const objectOids = [...new Set(facts.flatMap((fact) => {
+    if (fact.status === "deleted" || fact.oldOid === fact.newOid) return [];
+    if (fact.status === "added") return [fact.newOid];
+    return [fact.oldOid, fact.newOid];
+  }))].sort();
+  let exactBlobs: ExactBlobV1[];
+  try {
+    exactBlobs = readExactBlobs(cwd, objectOids);
+  } catch (error) {
+    mapAddedLineInputError(error);
+  }
+  const blobs = new Map(exactBlobs.map((blob) => [blob.oid, blob]));
+  const preflightByOid = new Map<string, ExactTextPreflight>();
+  let physicalLineCount = 0;
+  for (const blob of exactBlobs) {
+    const preflight = preflightExactTextBlob(blob);
+    physicalLineCount += preflight.lineCount;
+    if (physicalLineCount > MAX_EXACT_ADDED_LINE_SOURCE_LINE_COUNT) {
+      throw addedLinesError("ci.input.added-lines.budget");
+    }
+    preflightByOid.set(blob.oid, preflight);
+  }
+  const linesByOid = new Map<string, ExactTextLine[]>();
+  for (const blob of exactBlobs) {
+    linesByOid.set(blob.oid, exactTextLines(preflightByOid.get(blob.oid)!));
+  }
+
+  const patchCache = new Map<string, ExactAddedLineV1[]>();
+  const result: ExactChangeWithAddedLinesV1[] = [];
+  let patchBytesTotal = 0;
+  let addedLineCount = 0;
+  let addedLineBytes = 0;
+  for (const fact of facts) {
+    let addedLines: ExactAddedLineV1[];
+    if (fact.newOid === ZERO_OID || fact.oldOid === fact.newOid) {
+      addedLines = [];
+    } else if (fact.oldOid === ZERO_OID) {
+      const newPreflight = preflightByOid.get(fact.newOid)!;
+      if (
+        newPreflight.lineCount > MAX_EXACT_ADDED_LINE_COUNT - addedLineCount
+        || newPreflight.textBytes > MAX_EXACT_ADDED_LINE_BYTES - addedLineBytes
+      ) {
+        throw addedLinesError("ci.input.added-lines.budget");
+      }
+      addedLines = (linesByOid.get(fact.newOid) ?? []).map((line, index) => ({
+        path: fact.path,
+        newBlobOid: fact.newOid,
+        newLineNumber: index + 1,
+        text: line.text,
+      }));
+    } else {
+      const cacheKey = `${fact.oldOid}:${fact.newOid}`;
+      const cached = patchCache.get(cacheKey);
+      if (cached === undefined) {
+        const remainingPatchBytes = MAX_EXACT_ADDED_LINE_PATCH_TOTAL_BYTES
+          - patchBytesTotal;
+        const patch = addedLineGitBytes(cwd, [
+          "-c",
+          "diff.algorithm=myers",
+          "diff",
+          "--patch",
+          "--unified=0",
+          "--no-indent-heuristic",
+          "--text",
+          "--full-index",
+          "--no-prefix",
+          "--no-color",
+          "--no-ext-diff",
+          "--no-textconv",
+          fact.oldOid,
+          fact.newOid,
+          "--",
+        ], Math.min(
+          MAX_EXACT_ADDED_LINE_PATCH_BYTES + 1,
+          remainingPatchBytes + 1,
+        ));
+        const parsed = parseAddedLinesPatch(
+          patch,
+          fact.oldOid,
+          fact.newOid,
+          fact.path,
+          linesByOid.get(fact.oldOid) ?? [],
+          linesByOid.get(fact.newOid) ?? [],
+          MAX_EXACT_ADDED_LINE_COUNT - addedLineCount,
+          MAX_EXACT_ADDED_LINE_BYTES - addedLineBytes,
+          remainingPatchBytes,
+        );
+        patchBytesTotal += patch.byteLength;
+        patchCache.set(cacheKey, parsed.map((line) => ({ ...line, path: "" })));
+        addedLines = parsed;
+      } else {
+        let cachedTextBytes = 0;
+        for (const line of cached) {
+          cachedTextBytes += Buffer.byteLength(line.text, "utf8");
+        }
+        if (
+          cached.length > MAX_EXACT_ADDED_LINE_COUNT - addedLineCount
+          || cachedTextBytes > MAX_EXACT_ADDED_LINE_BYTES - addedLineBytes
+        ) {
+          throw addedLinesError("ci.input.added-lines.budget");
+        }
+        addedLines = cached.map((line) => ({ ...line, path: fact.path }));
+      }
+    }
+    for (const line of addedLines) {
+      addedLineCount += 1;
+      addedLineBytes += Buffer.byteLength(line.text, "utf8");
+      if (
+        addedLineCount > MAX_EXACT_ADDED_LINE_COUNT
+        || addedLineBytes > MAX_EXACT_ADDED_LINE_BYTES
+      ) {
+        throw addedLinesError("ci.input.added-lines.budget");
+      }
+    }
+    result.push({ ...fact, addedLines });
+  }
+
+  let reread: ExactBlobV1[];
+  try {
+    reread = readExactBlobs(cwd, objectOids);
+  } catch (error) {
+    mapAddedLineInputError(error);
+  }
+  requireBlobSetUnchanged(blobs, reread);
+  return { baseOid, candidateOid, changes: result };
 }
