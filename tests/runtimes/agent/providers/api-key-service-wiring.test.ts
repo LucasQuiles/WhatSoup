@@ -81,6 +81,8 @@ describe('HTTP providers honor apiKeyService (issue #363)', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockedLookup.mockReset();
+    mockedLookup.mockReturnValue(null);
     delete process.env.OPENAI_API_KEY;
     delete process.env.ANTHROPIC_API_KEY;
     fetchMock = installFetchMock();
@@ -113,7 +115,7 @@ describe('HTTP providers honor apiKeyService (issue #363)', () => {
 
       const req = fetchMock.captured[0];
       expect(req.init.headers).toMatchObject({ Authorization: 'Bearer env-key' });
-      expect(mockedLookup).not.toHaveBeenCalled();
+      expect(mockedLookup).toHaveBeenCalledWith('openai', { skipEnv: true });
     });
 
     it('falls back to env when apiKeyService is set but keyring lookup misses', async () => {
@@ -151,7 +153,7 @@ describe('HTTP providers honor apiKeyService (issue #363)', () => {
 
       const req = fetchMock.captured[0];
       expect(req.init.headers).toMatchObject({ 'x-api-key': 'env-key' });
-      expect(mockedLookup).not.toHaveBeenCalled();
+      expect(mockedLookup).toHaveBeenCalledWith('anthropic', { skipEnv: true });
     });
 
     it('falls back to env when apiKeyService is set but keyring lookup misses', async () => {
