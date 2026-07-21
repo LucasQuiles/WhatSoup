@@ -1,6 +1,10 @@
 # 04 — Decision Register (owner choices)
 
-Round 1 ✅ · Round 2 ✅ · **Round 3 ✅ FINAL 2026-07-21** (below, R3-1…R3-16). T1 inputs locked.
+Round 1 ✅ · Round 2 ✅ · Round 3 ✅ · **Round 4 (design language) ✅ 2026-07-21** — L1–L11
+answers + computed token candidates: `09-design-language-decisions.md`. Headline: gentle warm
+ramp (26%→17% chroma), accent hue family kept, harmonized 38/34 agent hue set, two shape
+registers w/ broad enforcement, "dreamy lift" motion class, glyph state system, ceremonious
+glow exception (hatch only), type triad kept.
 
 ## Round 3 — final lock (entities, agent behavior, ops)
 
