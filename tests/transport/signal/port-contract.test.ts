@@ -13,6 +13,7 @@ import type {
   ReactSignalArgs,
   SendReadReceiptArgs,
   SendTypingArgs,
+  RemoteDeleteSignalArgs,
   SignalPortError,
 } from '../../../src/transport/signal/port.ts';
 
@@ -22,6 +23,7 @@ function makeStubPort(): SignalPort {
   const reactions: ReactSignalArgs[] = [];
   const receipts: SendReadReceiptArgs[] = [];
   const typings: SendTypingArgs[] = [];
+  const deletes: RemoteDeleteSignalArgs[] = [];
   return {
     async verifyCredentials() { /* no-op */ },
     async send(args) {
@@ -34,6 +36,7 @@ function makeStubPort(): SignalPort {
     async sendReaction(args) { reactions.push(args); },
     async sendReadReceipts(args) { receipts.push(args); },
     async sendTypingIndicator(args) { typings.push(args); },
+    async remoteDelete(args) { deletes.push(args); },
   };
 }
 
@@ -48,6 +51,7 @@ describe('signal transport — port interface contract', () => {
     expect(typeof port.sendReaction).toBe('function');
     expect(typeof port.sendReadReceipts).toBe('function');
     expect(typeof port.sendTypingIndicator).toBe('function');
+    expect(typeof port.remoteDelete).toBe('function');
   });
 
   it('send() returns a timestamp envelope id', async () => {
@@ -101,6 +105,11 @@ describe('signal transport — port interface contract', () => {
     expect(stopped.composing).toBe(false);
   });
 
+  it('RemoteDeleteSignalArgs separates a recipient from the target timestamp', () => {
+    const args: RemoteDeleteSignalArgs = { recipient: 'peer', targetTimestamp: 12345 };
+    expect(args).toEqual({ recipient: 'peer', targetTimestamp: 12345 });
+  });
+
   it('SignalPortError shape allows optional code + status', () => {
     const e: SignalPortError = { message: 'fail' };
     const e2: SignalPortError = { message: 'fail', code: 'ControllableException', status: 500 };
@@ -115,5 +124,6 @@ describe('signal transport — port interface contract', () => {
     })).resolves.toBeUndefined();
     await expect(port.sendReadReceipts({ target: 'p', timestamps: [1] })).resolves.toBeUndefined();
     await expect(port.sendTypingIndicator({ target: 'p', composing: true })).resolves.toBeUndefined();
+    await expect(port.remoteDelete({ recipient: 'p', targetTimestamp: 1 })).resolves.toBeUndefined();
   });
 });

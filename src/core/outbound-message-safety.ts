@@ -126,13 +126,20 @@ export function isOperatorDmPeer(
   // phone on @sms and silence that never-silent warn (NFR-3). So the composed
   // semantics are NOT byte-equivalent to the primitive; migrating here would
   // regress observability.
-  const peerBearsAdminDigits = isAdminPhone(resolvePhoneFromJid(chatJid, db), adminPhones);
+  const peerBearsAdminIdentity = isAdminPhone(resolvePhoneFromJid(chatJid, db), adminPhones);
   // QR-143: only a WhatsApp-authenticated transport (@s.whatsapp.net / @lid) can
   // carry operator identity here. @sms is spoofable (see the
   // isAuthenticatedSenderJid doc in jid-constants.ts) and resolvePhoneFromJid
   // collapses it to the SAME bare phone digits as a real admin JID — without
   // this guard, a spoofed `<admin-digits>@sms` chatJid would elevate.
   if (!isAuthenticatedSenderJid(chatJid)) {
+    // This is a DENY-side observability check only. Inspect the untrusted local
+    // part directly so a numeric `<admin>@c.us` or `<admin>@sms` still raises a
+    // spoof warning, without weakening the exact-identity grant check above for
+    // UUIDs and other non-phone transport identities.
+    const atIdx = chatJid.indexOf('@');
+    const localPart = atIdx === -1 ? chatJid : chatJid.slice(0, atIdx);
+    const peerBearsAdminDigits = isAdminPhone(localPart, adminPhones);
     // Fast-follow: warn ONLY on the spoof-attempt subset (bears admin digits).
     // Do NOT warn on every @sms rejection — that fires on every benign
     // SMS-bridge chat and would be noise, not a never-silent signal.
@@ -141,7 +148,6 @@ export function isOperatorDmPeer(
       // @c.us, @broadcast, …), so log the ACTUAL form — the '@' suffix —
       // not a hardcoded 'sms' label. Still id-only (N14): the suffix is the
       // transport domain, never the peer digits.
-      const atIdx = chatJid.indexOf('@');
       const chatJidForm = atIdx === -1 ? 'unknown' : chatJid.slice(atIdx + 1) || 'unknown';
       audienceLog.warn(
         { chatJidForm, outcome: 'spoof-attempt-denied' },
@@ -150,13 +156,13 @@ export function isOperatorDmPeer(
     }
     return false;
   }
-  if (!peerBearsAdminDigits && isLidJid(chatJid)) {
+  if (!peerBearsAdminIdentity && isLidJid(chatJid)) {
     audienceLog.warn(
       { chatJidForm: 'lid', outcome: 'not-elevated' },
       'operator-DM lid peer did not resolve to an admin phone — not elevated',
     );
   }
-  return peerBearsAdminDigits;
+  return peerBearsAdminIdentity;
 }
 
 export type OutboundAudience = 'client' | 'ops' | 'internal';

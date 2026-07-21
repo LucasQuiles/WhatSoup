@@ -71,6 +71,7 @@
 import { EventEmitter } from 'node:events';
 import { homedir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { StoredMessage } from '../src/core/messages.ts';
 
 type MainHarness = Awaited<ReturnType<typeof importMainWithMocks>>;
 
@@ -134,6 +135,7 @@ async function importMainWithMocks(options: {
   rawInstanceConfig?: string;
   pineconeState?: 'ready' | 'missing_index';
   accessMode?: 'self_only' | 'allowlist';
+  transport?: 'baileys' | 'signal';
   adminPhones?: string[];
   controlPeers?: string[];
   existingPaths?: string[];
@@ -260,6 +262,7 @@ async function importMainWithMocks(options: {
     pineconeRerank: true,
     pineconeTopK: 8,
     accessMode: options.accessMode ?? 'allowlist',
+    transport: options.transport ?? 'baileys',
     models: { conversation: 'claude-sonnet', extraction: 'gpt-4.1-mini', validation: 'gpt-4.1-mini', fallback: 'gpt-4.1' },
     adminPhones: new Set(options.adminPhones ?? ['15551230000']),
     lockPath: '/tmp/ws-helpers.lock',
@@ -335,7 +338,7 @@ async function importMainWithMocks(options: {
     cleanupOldRateLimits: vi.fn(() => 0),
     cleanupOldAttempts: vi.fn(() => 0),
     deleteOldMessages: vi.fn(() => 0),
-    getMessagesBySender: vi.fn(() => []),
+    getMessagesBySender: vi.fn((): StoredMessage[] => []),
     getMessageCount: vi.fn(() => options.messageCount ?? 1),
     getUnprocessedCount: vi.fn(() => 0),
     processHistoryBatch: vi.fn(() => ({ inserted: 0, upgraded: 0, placeholders: 0, skipped: 0 })),
@@ -363,7 +366,11 @@ async function importMainWithMocks(options: {
     toConversationKey: vi.fn((jid: string) => `conversation:${jid}`),
     toPersonalJid: vi.fn((phone: string) => `${phone}@s.whatsapp.net`),
     toLidJid: vi.fn((phone: string) => `${phone}@lid`),
-    selectReplayableDms: vi.fn(() => ({ toReplay: [], groupSkipped: 0 })),
+    toSignalJid: vi.fn((identity: string) => `${identity}@signal`),
+    selectReplayableDms: vi.fn(() => ({
+      toReplay: [] as StoredMessage[],
+      groupSkipped: 0,
+    })),
     rememberReplayedId: vi.fn(),
     sendTracked: vi.fn(async () => ({ waMessageId: 'sent-1' })),
     drainPendingOutbound: options.drainPendingOutboundRejectsOnStartup
@@ -465,7 +472,11 @@ async function importMainWithMocks(options: {
   vi.doMock('../src/core/heal.ts', () => ({ checkDegradationSignals: mocks.checkDegradationSignals }));
   vi.doMock('../src/core/ingest.ts', () => ({ createIngestHandler: mocks.createIngestHandler }));
   vi.doMock('../src/core/conversation-key.ts', () => ({ toConversationKey: mocks.toConversationKey }));
-  vi.doMock('../src/core/jid-constants.ts', () => ({ toPersonalJid: mocks.toPersonalJid, toLidJid: mocks.toLidJid }));
+  vi.doMock('../src/core/jid-constants.ts', () => ({
+    toPersonalJid: mocks.toPersonalJid,
+    toLidJid: mocks.toLidJid,
+    toSignalJid: mocks.toSignalJid,
+  }));
   vi.doMock('../src/core/admin.ts', () => ({ selectReplayableDms: mocks.selectReplayableDms, rememberReplayedId: mocks.rememberReplayedId }));
   vi.doMock('../src/core/durability.ts', () => ({
     DurabilityEngine,
@@ -993,6 +1004,24 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       expect(text).toContain('tool access');
     });
 
+    it('routes a Signal first-boot introduction to the canonical Signal admin JID', async () => {
+      const h = await importMainWithMocks({
+        transport: 'signal',
+        adminPhones: ['+15551230000'],
+        instanceConfig: { name: 'q', introSent: false },
+      });
+
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(h.sendTracked).toHaveBeenCalledWith(
+        h.connection,
+        '+15551230000@signal',
+        expect.stringContaining('*Q* is online and ready'),
+        h.durability,
+        { replayPolicy: 'safe' },
+      );
+    });
+
     it('skips persistIntroSentFlag when cfgPath does not exist', async () => {
       const h = await importMainWithMocks({
         instanceConfig: { name: 'q', introSent: false },
@@ -1221,6 +1250,30 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       );
     });
 
+    it('routes the default back-online notice to the canonical Signal admin JID', async () => {
+      const h = await importMainWithMocks({
+        transport: 'signal',
+        adminPhones: ['01234567-89ab-cdef-0123-456789abcdef'],
+        instanceConfig: {
+          name: 'q',
+          type: 'agent',
+          introSent: true,
+          agentOptions: { sessionScope: 'shared' },
+        },
+        pendingStartupMessage: null,
+      });
+
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(h.sendTracked).toHaveBeenCalledWith(
+        h.connection,
+        '01234567-89ab-cdef-0123-456789abcdef@signal',
+        '*Agent back online* ✓',
+        h.durability,
+        { replayPolicy: 'unsafe', opType: 'status_ping' },
+      );
+    });
+
     it('logs warn when default startup notification delivery fails', async () => {
       const h = await importMainWithMocks({
         instanceConfig: {
@@ -1439,6 +1492,39 @@ describe('main.ts — uncovered helpers and signal paths', () => {
   // ── Health server — group allow via POST /access ───────────────────────────
 
   describe('handleAccessDecision — group allow path', () => {
+    it('replays a newly allowed Signal peer from its canonical Signal sender JID', async () => {
+      const h = await importMainWithMocks({ transport: 'signal' });
+      const queued: StoredMessage = {
+        pk: 1,
+        messageId: 'signal-pending-1',
+        conversationKey: '+15559990000@signal',
+        chatJid: '+15559990000@signal',
+        senderJid: '+15559990000@signal',
+        senderName: null,
+        content: 'pending hello',
+        contentText: null,
+        contentType: 'text',
+        isFromMe: false,
+        timestamp: 1_700_000_000,
+        quotedMessageId: null,
+        enrichmentProcessedAt: null,
+        enrichmentRetries: 0,
+        createdAt: '2026-07-21T00:00:00.000Z',
+        mediaPath: null,
+      };
+      h.getMessagesBySender.mockReturnValue([queued]);
+      h.selectReplayableDms.mockReturnValue({ toReplay: [queued], groupSkipped: 0 });
+
+      await h.getHealthDeps().handleAccessDecision('phone', '+15559990000', 'allow');
+
+      expect(h.getMessagesBySender).toHaveBeenCalledTimes(1);
+      expect(h.getMessagesBySender).toHaveBeenCalledWith(h.db, '+15559990000@signal');
+      expect(h.chatRuntime.handleMessage).toHaveBeenCalledWith(expect.objectContaining({
+        messageId: 'signal-pending-1',
+        senderJid: '+15559990000@signal',
+      }));
+    });
+
     it('logs info for group allow without replaying messages', async () => {
       const h = await importMainWithMocks();
       const healthDeps = h.getHealthDeps();

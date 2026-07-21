@@ -5,6 +5,8 @@
 // Every JID parsing/normalization operation should live here or delegate here.
 // Do NOT reimplement .split('@')[0] or .endsWith('@lid') inline — use these.
 
+import { isSignalGroupAddress } from './transport-refs.ts';
+
 // ── Domain constants ────────────────────────────────────────────────────────
 
 /** Bare domain for personal chats (after the @) */
@@ -128,7 +130,8 @@ export function isPnJid(jid: string | null | undefined): boolean {
 
 /** Check if a raw JID (not a conversation key) is a group JID. */
 export function isGroupJid(jid: string): boolean {
-  return jid.endsWith(JID_GROUP);
+  return jid.endsWith(JID_GROUP)
+    || (jid.endsWith(JID_SIGNAL) && isSignalGroupAddress(fromSignalJid(jid)));
 }
 
 /** Check if a JID is a Signal transport JID (@signal). */

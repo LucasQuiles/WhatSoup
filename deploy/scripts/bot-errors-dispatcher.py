@@ -123,6 +123,7 @@ AUTOCLOSE_REOPEN_SAMPLE_LIMIT = positive_env_int("BOT_ERRORS_AUTOCLOSE_REOPEN_SA
 AUTOCLOSE_PROTECTED_SOURCES = {
     "whatsapp_device_bond_lost",
     "instance_logged_out",
+    "signal_cli_unregistered",
 }
 AUTOCLOSE_PROTECTED_FAILURE_CODES = {
     "WA_AUTH_BOND_SERVER_REVOKED",
@@ -1946,12 +1947,18 @@ _TRANSIENT_TRANSPORT_SIGNATURES = (
     "socket hang up",
     "websocket is not open",
     "stream errored out",
+    "signal-cli socket error",
+    "signal-cli connection closed",
+    "signal-cli connection ended by peer",
+    "signal-cli socket write failed",
 )
 
 
 def is_transient_transport_failure(error: str) -> bool:
     lower = (error or "").lower()
-    return any(sig in lower for sig in _TRANSIENT_TRANSPORT_SIGNATURES)
+    return any(sig in lower for sig in _TRANSIENT_TRANSPORT_SIGNATURES) or (
+        "signal-cli rpc " in lower and " timed out after " in lower
+    )
 
 
 def mark_failure(event: dict[str, Any], error: str) -> dict[str, Any]:

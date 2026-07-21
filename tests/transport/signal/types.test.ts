@@ -33,18 +33,15 @@ describe('signal transport — types', () => {
   it('DEFAULT_SIGNAL is frozen with the documented defaults', () => {
     expect(Object.isFrozen(DEFAULT_SIGNAL)).toBe(true);
     expect(Object.isFrozen(DEFAULT_SIGNAL.rateLimit)).toBe(true);
-    expect(DEFAULT_SIGNAL.socketPath).toBe('/tmp/signalc.sock');
+    expect(DEFAULT_SIGNAL).not.toHaveProperty('socketPath');
     expect(DEFAULT_SIGNAL.inboundMode).toBe('poll');
     expect(DEFAULT_SIGNAL.pollIntervalMs).toBe(15000);
     expect(DEFAULT_SIGNAL.rateLimit.messagesPerMinute).toBe(30);
   });
 
-  it('SignalInboundMode admits exactly the two documented modes', () => {
-    // Compile-time assertion — the assignment will fail to typecheck if the
-    // union narrows or widens.
-    const a: SignalInboundMode = 'poll';
-    const b: SignalInboundMode = 'stream';
-    expect([a, b]).toEqual(['poll', 'stream']);
+  it('SignalInboundMode exposes only the implemented poll mode', () => {
+    const mode: SignalInboundMode = 'poll';
+    expect(mode).toBe('poll');
   });
 
   it('a fully-populated SignalConfig satisfies the type (compile-time)', () => {
