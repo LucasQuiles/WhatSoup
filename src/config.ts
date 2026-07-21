@@ -943,6 +943,8 @@ const resolvedTwilioConfig: TwilioSmsConfig | undefined =
 const resolvedImessageConfig: ImessageConfig | undefined =
   resolvedTransport === 'imessage' && asRecord(instance?.imessageConfig) != null
     ? resolveImessageConfig(instance?.imessageConfig as Record<string, unknown>)
+    : undefined;
+
 // Same gating for the signal transport: validation rejects signalConfig on
 // other transports; the resolver only runs when transport === 'signal'.
 const resolvedSignalConfig: SignalConfig | undefined =

@@ -96,6 +96,9 @@ export function toImessageJid(address: string): string {
  */
 export function fromImessageJid(jid: string): string {
   return jid.endsWith(JID_IMESSAGE) ? jid.slice(0, -JID_IMESSAGE.length) : jid;
+}
+
+/**
  * Build a Signal JID from a Signal identifier (UUID or E.164 address).
  * Idempotent: already-suffixed addresses are returned as-is.
  */
@@ -131,6 +134,8 @@ export function isGroupJid(jid: string): boolean {
 /** Check if a JID is an iMessage transport JID (@imessage). */
 export function isImessageJid(jid: string | null | undefined): boolean {
   return !!jid && jid.endsWith(JID_IMESSAGE);
+}
+
 /** Check if a JID is a Signal transport JID (@signal). */
 export function isSignalJid(jid: string | null | undefined): boolean {
   return !!jid && jid.endsWith(JID_SIGNAL);

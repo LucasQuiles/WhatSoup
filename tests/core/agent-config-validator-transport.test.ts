@@ -748,6 +748,14 @@ function validImessageConfig(overrides: Record<string, unknown> = {}): Record<st
     bluebubblesUrl: 'https://bb.example.test',
     bluebubblesPasswordService: 'imessage-bb-pw',
     sender: 'appleid@users.noreply.github.com',
+    inboundMode: 'poll',
+    pollIntervalMs: 15000,
+    rateLimit: { messagesPerMinute: 30 },
+    ...overrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // signalConfig
 // ---------------------------------------------------------------------------
 
@@ -791,36 +799,6 @@ describe('validateInstanceConfig — imessageConfig', () => {
         bluebubblesPasswordService: undefined,
         sender: '+15551110000',
       }),
-describe('validateInstanceConfig — signalConfig', () => {
-  it('is required when transport is "signal"', () => {
-    const raw = baseRaw({ transport: 'signal' });
-    const err = validateInstanceConfig(raw, ctx());
-    expect(err?.field).toBe('signalConfig');
-    expect(err?.message).toBe('signalConfig is required when transport is "signal"');
-  });
-
-  it('is rejected as inconsistent on non-signal transports', () => {
-    const raw = baseRaw({ transport: 'twilio', twilioConfig: validTwilioConfig(), signalConfig: validSignalConfig() });
-    const err = validateInstanceConfig(raw, ctx());
-    expect(err?.field).toBe('signalConfig');
-    expect(err?.message).toMatch(/signalConfig is inconsistent with transport/);
-  });
-
-  it('rejects a non-object signalConfig', () => {
-    const raw = baseRaw({ transport: 'signal', signalConfig: 'nope' });
-    const err = validateInstanceConfig(raw, ctx());
-    expect(err?.message).toBe('signalConfig must be an object');
-  });
-
-  it('accepts a valid minimal signalConfig (defaults applied downstream)', () => {
-    const raw = baseRaw({ transport: 'signal', signalConfig: validSignalConfig() });
-    expect(validateInstanceConfig(raw, ctx())).toBeNull();
-  });
-
-  it('accepts socketPath + tcp alternatives', () => {
-    const raw = baseRaw({
-      transport: 'signal',
-      signalConfig: validSignalConfig({ socketPath: '/tmp/sc.sock', tcpPort: 7583, tcpHost: '127.0.0.1', inboundMode: 'stream' }),
     });
     expect(validateInstanceConfig(raw, ctx())).toBeNull();
   });
@@ -883,6 +861,43 @@ describe('validateInstanceConfig — signalConfig', () => {
   it('rejects a non-positive rateLimit.messagesPerMinute', () => {
     const raw = baseRaw({ transport: 'imessage', imessageConfig: validImessageConfig({ rateLimit: { messagesPerMinute: 0 } }) });
     expect(validateInstanceConfig(raw, ctx())?.field).toBe('imessageConfig.rateLimit.messagesPerMinute');
+  });
+});
+
+describe('validateInstanceConfig — signalConfig', () => {
+  it('is required when transport is "signal"', () => {
+    const raw = baseRaw({ transport: 'signal' });
+    const err = validateInstanceConfig(raw, ctx());
+    expect(err?.field).toBe('signalConfig');
+    expect(err?.message).toBe('signalConfig is required when transport is "signal"');
+  });
+
+  it('is rejected as inconsistent on non-signal transports', () => {
+    const raw = baseRaw({ transport: 'twilio', twilioConfig: validTwilioConfig(), signalConfig: validSignalConfig() });
+    const err = validateInstanceConfig(raw, ctx());
+    expect(err?.field).toBe('signalConfig');
+    expect(err?.message).toMatch(/signalConfig is inconsistent with transport/);
+  });
+
+  it('rejects a non-object signalConfig', () => {
+    const raw = baseRaw({ transport: 'signal', signalConfig: 'nope' });
+    const err = validateInstanceConfig(raw, ctx());
+    expect(err?.message).toBe('signalConfig must be an object');
+  });
+
+  it('accepts a valid minimal signalConfig (defaults applied downstream)', () => {
+    const raw = baseRaw({ transport: 'signal', signalConfig: validSignalConfig() });
+    expect(validateInstanceConfig(raw, ctx())).toBeNull();
+  });
+
+  it('accepts socketPath + tcp alternatives', () => {
+    const raw = baseRaw({
+      transport: 'signal',
+      signalConfig: validSignalConfig({ socketPath: '/tmp/sc.sock', tcpPort: 7583, tcpHost: '127.0.0.1', inboundMode: 'stream' }),
+    });
+    expect(validateInstanceConfig(raw, ctx())).toBeNull();
+  });
+
   it('rejects a bad account', () => {
     const raw = baseRaw({ transport: 'signal', signalConfig: validSignalConfig({ account: 'Bad Acct' }) });
     expect(validateInstanceConfig(raw, ctx())?.field).toBe('signalConfig.account');
