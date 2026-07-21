@@ -207,7 +207,7 @@ export function buildChildEnv(
 
   // Provider-specific credentials — each provider only receives the keys it
   // needs. Claude/Codex use resolveApiKey(); OpenCode resolves one selected
-  // service through lookupCredential(). Both paths are keyring-aware and avoid
+  // service through lookupCredential(). All paths are keyring-aware and avoid
   // copying the parent credential environment. See the Phase D security handoff.
   switch (provider) {
     case 'claude-cli':
@@ -224,10 +224,14 @@ export function buildChildEnv(
         if (openaiKey) env.OPENAI_API_KEY = openaiKey;
       }
       break;
-    case 'gemini-cli':
-      if (process.env.GEMINI_API_KEY) env.GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-      if (process.env.GOOGLE_API_KEY) env.GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
+    case 'gemini-cli': {
+      const googleKey = resolveApiKey({ service: 'google', envVar: 'GEMINI_API_KEY' });
+      if (googleKey) {
+        env.GOOGLE_API_KEY = googleKey;
+        env.GEMINI_API_KEY = googleKey;
+      }
       break;
+    }
     case 'opencode-cli': {
       const hasCustomEndpoint = opencodeUsesConfigModel(providerConfig);
       const endpointServiceRaw = providerConfig?.['apiKeyService'];

@@ -13,7 +13,7 @@ INSTANCE="${1:?Usage: whatsoup <instance-name>}"
 # Scrub inherited wrapper/launchd values before this launcher starts any child
 # process so neither startup probes nor the long-lived WhatSoup parent inherit
 # provider or health-token material.
-unset ANTHROPIC_API_KEY OPENAI_API_KEY PINECONE_API_KEY ELEVENLABS_API_KEY WHATSOUP_HEALTH_TOKEN
+unset ANTHROPIC_API_KEY OPENAI_API_KEY DEEPSEEK_API_KEY MINIMAX_API_KEY ZAI_API_KEY XAI_API_KEY GROQ_API_KEY MISTRAL_API_KEY OPENROUTER_API_KEY GOOGLE_API_KEY GOOGLE_GENERATIVE_AI_API_KEY GEMINI_API_KEY FIREWORKS_API_KEY TOGETHER_API_KEY PINECONE_API_KEY ELEVENLABS_API_KEY WHATSOUP_HEALTH_TOKEN
 
 # POSIX-portable symlink resolution (readlink -f is GNU-only, unavailable on macOS)
 _resolve_symlinks() {

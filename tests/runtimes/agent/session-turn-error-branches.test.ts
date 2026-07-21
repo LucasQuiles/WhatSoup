@@ -204,10 +204,10 @@ describe('buildChildEnv — credential forwarding branches', () => {
     });
   });
 
-  it('gemini-cli forwards both GEMINI_API_KEY and GOOGLE_API_KEY when present', async () => {
+  it('gemini-cli resolves the canonical Google credential and mirrors both CLI aliases', async () => {
     await withEnv({ GEMINI_API_KEY: 'env-gemini', GOOGLE_API_KEY: 'env-google' }, () => {
       const env = buildChildEnv('gemini-cli');
-      expect(env.GEMINI_API_KEY).toBe('env-gemini');
+      expect(env.GEMINI_API_KEY).toBe('env-google');
       expect(env.GOOGLE_API_KEY).toBe('env-google');
     });
   });

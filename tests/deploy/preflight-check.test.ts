@@ -36,6 +36,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanGitEnv } from '../../src/lib/git-env.ts';
+import { SERVICE_ENV_MAP } from '../../src/lib/provider-key-service.ts';
 import {
   gitFixture,
   gitFixtureEnv,
@@ -55,6 +56,11 @@ const GIT_ENV = join(REPO_ROOT, 'src/lib/git-env.ts');
 const TYPE_GUARDS = join(REPO_ROOT, 'src/lib/type-guards.ts');
 const SOURCE_RUNTIME_MANIFEST = join(REPO_ROOT, 'deploy/source-runtime-manifest.json');
 const SPAWN_TIMEOUT_MS = 15_000;
+const PROTECTED_ENV_NAMES = [...new Set([
+  ...Object.values(SERVICE_ENV_MAP),
+  'GOOGLE_GENERATIVE_AI_API_KEY',
+  'GEMINI_API_KEY',
+])];
 
 // The pinned interpreter under test. The fixture repo is generated to match the
 // same Node that runs this suite, so the preflight behavior stays portable across
@@ -279,6 +285,14 @@ exit "\${WHATSOUP_TEST_PREFLIGHT_RC:-0}"
     fakeNode,
     `#!/usr/bin/env bash
 set -euo pipefail
+if [ "\${WHATSOUP_TEST_ASSERT_PROTECTED_ENV_ABSENT:-0}" = "1" ]; then
+  for protected_name in \${WHATSOUP_TEST_PROTECTED_ENV_NAMES:-}; do
+    if [ -n "\${!protected_name+x}" ]; then
+      printf 'protected-env-present:%s\\n' "$protected_name" >&2
+      exit 91
+    fi
+  done
+fi
 if [ "\${1:-}" = "-e" ]; then
   if [[ "\${3:-}" == */.whatsoup-release-manifest.json ]]; then
     exec ${JSON.stringify(PINNED_NODE)} "$@"
@@ -740,6 +754,23 @@ describe.skipIf(!NODE_IN_PIN)('deploy/whatsoup — black-box startup ordering', 
     expect(result.trace).toEqual(['db-check', 'preflight', 'runtime']);
   });
 
+  it('removes every protected credential name before the first child process', () => {
+    const fixture = makeWrapperFixture();
+    const protectedValues = Object.fromEntries(
+      PROTECTED_ENV_NAMES.map((name) => [name, `sentinel-${name}`]),
+    );
+
+    const result = runWrapper(fixture, {
+      ...protectedValues,
+      WHATSOUP_TEST_ASSERT_PROTECTED_ENV_ABSENT: '1',
+      WHATSOUP_TEST_PROTECTED_ENV_NAMES: PROTECTED_ENV_NAMES.join(' '),
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.trace).toEqual(['db-check', 'preflight', 'runtime']);
+    expect(result.stderr).not.toContain('protected-env-present:');
+  });
+
   it('runs from a non-git release whose manifest attests the bootstrap trust graph', () => {
     const fixture = makeWrapperFixture();
     convertWrapperFixtureToRelease(fixture);
@@ -1162,7 +1193,7 @@ describe('deploy/whatsoup — source wiring', () => {
     const wrapper = readFileSync(WRAPPER, 'utf8');
     const databaseGate = wrapper.indexOf('database-compatibility-bootstrap.ts');
     const scrub = wrapper.indexOf(
-      'unset ANTHROPIC_API_KEY OPENAI_API_KEY PINECONE_API_KEY ELEVENLABS_API_KEY WHATSOUP_HEALTH_TOKEN',
+      'unset ANTHROPIC_API_KEY OPENAI_API_KEY DEEPSEEK_API_KEY MINIMAX_API_KEY ZAI_API_KEY XAI_API_KEY GROQ_API_KEY MISTRAL_API_KEY OPENROUTER_API_KEY GOOGLE_API_KEY GOOGLE_GENERATIVE_AI_API_KEY GEMINI_API_KEY FIREWORKS_API_KEY TOGETHER_API_KEY PINECONE_API_KEY ELEVENLABS_API_KEY WHATSOUP_HEALTH_TOKEN',
     );
     expect(databaseGate).toBeGreaterThan(-1);
     expect(scrub).toBeGreaterThan(-1);

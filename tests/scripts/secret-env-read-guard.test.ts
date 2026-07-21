@@ -2,9 +2,8 @@
  * Static guard: no direct secret-env reads outside the resolver modules.
  *
  * Enforces the env-secret-exposure handoff's Verification criterion:
- *   "Static guard fails on direct reads of process.env.OPENAI_API_KEY,
- *    ANTHROPIC_API_KEY, PINECONE_API_KEY, ELEVENLABS_API_KEY, or
- *    WHATSOUP_HEALTH_TOKEN outside resolver/test/dev allowlists."
+ *   "Static guard fails on direct reads of protected provider or runtime
+ *    credential environment variables outside resolver/test/dev allowlists."
  *
  * (docs/security-handoffs/2026-05-09-env-secret-exposure.md, Verification §)
  *
@@ -31,18 +30,17 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve, relative, join } from 'node:path';
+import { SERVICE_ENV_MAP } from '../../src/lib/provider-key-service.ts';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
 const SCAN_DIR = 'src';
 
 /** The secret env var names protected by this guard. */
-const PROTECTED_SECRET_ENV_VARS = [
-  'OPENAI_API_KEY',
-  'ANTHROPIC_API_KEY',
-  'PINECONE_API_KEY',
-  'ELEVENLABS_API_KEY',
-  'WHATSOUP_HEALTH_TOKEN',
-] as const;
+const PROTECTED_SECRET_ENV_VARS = [...new Set([
+  ...Object.values(SERVICE_ENV_MAP),
+  'GOOGLE_GENERATIVE_AI_API_KEY',
+  'GEMINI_API_KEY',
+])];
 
 /**
  * Files that are ALLOWED to read the protected env vars directly because

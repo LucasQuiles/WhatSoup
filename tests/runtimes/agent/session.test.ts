@@ -2765,15 +2765,15 @@ describe('buildChildEnv', () => {
     }
   });
 
-  it('gemini-cli: forwards GEMINI_API_KEY when set', () => {
+  it('gemini-cli: resolves GOOGLE_API_KEY and mirrors it to the Gemini alias', () => {
     const savedG = process.env.GEMINI_API_KEY;
     const savedGo = process.env.GOOGLE_API_KEY;
-    process.env.GEMINI_API_KEY = 'gemini-key-123';
-    delete process.env.GOOGLE_API_KEY;
+    delete process.env.GEMINI_API_KEY;
+    process.env.GOOGLE_API_KEY = 'google-key-123';
     try {
       const env = buildChildEnv('gemini-cli');
-      expect(env.GEMINI_API_KEY).toBe('gemini-key-123');
-      expect(env).not.toHaveProperty('GOOGLE_API_KEY');
+      expect(env.GEMINI_API_KEY).toBe('google-key-123');
+      expect(env.GOOGLE_API_KEY).toBe('google-key-123');
     } finally {
       if (savedG === undefined) delete process.env.GEMINI_API_KEY;
       else process.env.GEMINI_API_KEY = savedG;
@@ -2781,14 +2781,14 @@ describe('buildChildEnv', () => {
     }
   });
 
-  it('gemini-cli: forwards both GEMINI_API_KEY and GOOGLE_API_KEY when both set', () => {
+  it('gemini-cli: uses the canonical Google credential when both aliases are set', () => {
     const savedG = process.env.GEMINI_API_KEY;
     const savedGo = process.env.GOOGLE_API_KEY;
     process.env.GEMINI_API_KEY = 'gemini-key-xyz';
     process.env.GOOGLE_API_KEY = 'google-key-xyz';
     try {
       const env = buildChildEnv('gemini-cli');
-      expect(env.GEMINI_API_KEY).toBe('gemini-key-xyz');
+      expect(env.GEMINI_API_KEY).toBe('google-key-xyz');
       expect(env.GOOGLE_API_KEY).toBe('google-key-xyz');
     } finally {
       if (savedG === undefined) delete process.env.GEMINI_API_KEY;
