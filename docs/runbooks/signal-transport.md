@@ -104,6 +104,38 @@ the only external process. Inbound envelopes arrive via the daemon's
 | Media attachments | ❌ deferred (adapter declares `media.maxBytes: 0`) |
 | Polls | ❌ rejected (WhatsApp-only feature) |
 
+### Capability degradation (unsupported-operation handling)
+
+Operations the transport does not support are not silently dropped — the
+`RuntimeConnection` bridge throws `UnsupportedTransportOperationError` (with
+`name='UnsupportedTransportOperationError'` and
+`code='UNSUPPORTED_TRANSPORT_OPERATION'`), and MCP tool handlers catch it via
+`isUnsupportedTransportOperation()` (see
+`src/transport/unsupported-operation.ts`) and return a stable tool error:
+
+```json
+{ "error": "unsupported_transport", "message": "<operation> is not supported on this transport." }
+```
+
+Agent LLMs can key on the `unsupported_transport` code to learn the operation
+will never succeed on this transport — they should not retry, and should fall
+back to a supported operation (e.g. plain text instead of a voice note).
+
+Tools currently wrapped:
+
+| Tool | Unsupported op | Reason |
+|---|---|---|
+| `send_message`, `reply_message`, `react_message`, `edit_message`, `delete_message`, `send_location`, `send_contact`, `pin_message` | `sendRaw` | all use the WhatsApp-protocol `sendRaw` envelope shape |
+| `send_poll` | `sendPollMessage` | WhatsApp-only poll contract |
+| `send_voice_reply` | `sendMedia` | media not wired in v1 |
+
+Operations that self-degrade without surfacing a tool error:
+
+| Tool | Behaviour on Signal |
+|---|---|
+| `download_media`, `transcribe_audio` | fail early with `no_raw_message` — Signal stores no `raw_message` blob to download |
+| `mark_conversation_read` | the `markRead` adapter method IS supported on Signal; the `getSocket()` null-check path does not fire |
+
 ### Inbound envelope routing
 
 `SignalPort.listInboundSince` returns envelopes of all classes the v1 contract
