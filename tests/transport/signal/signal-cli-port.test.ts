@@ -261,11 +261,21 @@ describe('SignalCliPort — listInboundSince', () => {
     await expect(port.listInboundSince(new Date(0), 1.5)).rejects.toThrow(RangeError);
   });
 
-  it('drops receipt/typing envelopes (messages-only surface)', async () => {
+  it('drops typing envelopes (no inbound typing event in v1 contract)', async () => {
     const { port, mock } = makePort();
     mock.on('receive', () => [
-      { envelope: { sourceUuid: 'u', timestamp: 1000, receiptMessage: {} } },
       { envelope: { sourceUuid: 'u', timestamp: 1001, typingMessage: {} } },
+      dataEnvelope({ timestamp: 1002 }),
+    ]);
+    const out = await port.listInboundSince(new Date(0));
+    expect(out).toHaveLength(1);
+    expect(out[0]?.timestamp).toBe(1002);
+  });
+
+  it('drops delivery receipts (no extension event for delivery in v1)', async () => {
+    const { port, mock } = makePort();
+    mock.on('receive', () => [
+      { envelope: { sourceUuid: 'u', timestamp: 1001, receiptMessage: { type: 'DELIVERY', timestamps: [500] } } },
       dataEnvelope({ timestamp: 1002 }),
     ]);
     const out = await port.listInboundSince(new Date(0));

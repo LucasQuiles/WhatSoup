@@ -37,6 +37,14 @@ export interface SendSignalArgs {
  * actually consumes. `fromMe` distinguishes direction; the record set covers
  * both inbound messages and our own outbound echoes (so the durability engine
  * can transition submitted ops to echoed, matching the Twilio pattern).
+ *
+ * `type` discriminates the envelope class. Text content (data/sync) carries
+ * `body`; reaction/read/delete envelopes carry their matching typed payload
+ * field. The adapter routes each non-text type to its extension-event
+ * listener (data → message, reaction → reaction, read → read, delete → delete).
+ * Typing/call envelopes are still dropped in v1 — the contract has no
+ * inbound typing event (typing is outbound-only via SupportsTyping) and no
+ * call event at all.
  */
 export interface InboundSignal {
   /** Envelope timestamp (epoch ms) — used as the provider message id. */
@@ -57,8 +65,46 @@ export interface InboundSignal {
   readonly body: string | null;
   /** True iff this is our own outbound message echoed back. */
   readonly fromMe: boolean;
-  /** Envelope type tag (data/sync/receipt/typing/call/etc.). */
+  /**
+   * Envelope type tag. One of: 'data' (text inbound), 'sync' (our outbound
+   * echo), 'reaction', 'read', 'delete'. Other envelope classes (typing,
+   * call, delivery receipts) are dropped by the port and never appear here.
+   */
   readonly type: string;
+  /** Payload for type='reaction' envelopes; undefined otherwise. */
+  readonly reaction?: InboundReaction;
+  /** Payload for type='read' envelopes; undefined otherwise. */
+  readonly read?: InboundRead;
+  /** Payload for type='delete' envelopes; undefined otherwise. */
+  readonly delete?: InboundDelete;
+}
+
+/** Reaction envelope payload (signal-cli `dataMessage.reaction` shape). */
+export interface InboundReaction {
+  /** Emoji codepoint(s) the reactor sent ('' on removal). */
+  readonly emoji: string;
+  /** True iff this is a removal of a prior reaction. */
+  readonly remove: boolean;
+  /** Timestamp (epoch ms) of the reacted-to message. */
+  readonly targetTimestamp: number;
+  /** Author UUID of the reacted-to message. */
+  readonly targetAuthor: string;
+}
+
+/** Read-receipt envelope payload (signal-cli `receiptMessage.type='READ'`). */
+export interface InboundRead {
+  /** Timestamps (epoch ms) of the messages the sender marked read. */
+  readonly timestamps: readonly number[];
+}
+
+/** Remote-delete envelope payload (signal-cli `dataMessage.delete`). */
+export interface InboundDelete {
+  /** Timestamp (epoch ms) of the deleted message. */
+  readonly targetTimestamp: number;
+  /** Author of the deleted message (signal-cli does not echo this field;
+   *  the port fills it with the envelope source — the deleter — for the
+   *  common case where actor==author. The adapter surfaces it as target.conversation. */
+  readonly targetAuthor: string;
 }
 
 /**

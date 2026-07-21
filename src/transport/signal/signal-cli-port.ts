@@ -162,6 +162,15 @@ interface RpcEnvelope {
   dataMessage?: {
     message?: string | null;
     groupInfo?: { groupId?: string };
+    reaction?: {
+      emoji?: string | null;
+      targetAuthorUuid?: string;
+      targetSentTimestamp?: number;
+      isRemove?: boolean;
+    };
+    delete?: {
+      targetSentTimestamp?: number;
+    };
   };
   syncMessage?: {
     sentMessage?: {
@@ -173,7 +182,10 @@ interface RpcEnvelope {
       timestamp?: number;
     };
   };
-  receiptMessage?: unknown;
+  receiptMessage?: {
+    type?: string;            // 'READ' | 'DELIVERY'
+    timestamps?: number[];
+  };
   typingMessage?: unknown;
 }
 
@@ -195,20 +207,83 @@ function normalizeEnvelope(env: RpcEnvelope, ownNumber: string): InboundSignal |
       type: 'sync',
     };
   }
-  // Inbound data message.
-  if (env.dataMessage) {
+  // Read receipt — ONLY type='READ' (DELIVERY receipts have no extension event
+  // in v1; durability tracks delivery via sync echoes). One receipt can carry
+  // multiple timestamps; the adapter fans them out to one ReadEvent each.
+  if (env.receiptMessage?.type === 'READ' && Array.isArray(env.receiptMessage.timestamps)) {
     return {
       timestamp: env.timestamp ?? 0,
       source: senderUuid(env),
-      destination: env.dataMessage.groupInfo?.groupId ?? ownNumber,
-      groupId: env.dataMessage.groupInfo?.groupId,
-      body: env.dataMessage.message ?? null,
+      destination: ownNumber,
+      body: null,
+      fromMe: false,
+      type: 'read',
+      read: { timestamps: env.receiptMessage.timestamps.slice() },
+    };
+  }
+  // Inbound data message — may carry text, a reaction, or a remote-delete.
+  // signal-cli packs all three under dataMessage; the discriminator is which
+  // sub-object is present (reaction / delete / message body).
+  if (env.dataMessage) {
+    const dm = env.dataMessage;
+    const groupId = dm.groupInfo?.groupId;
+
+    // Remote-delete (dataMessage.delete). targetAuthor is not echoed by
+    // signal-cli; the port fills it with the envelope source — the deleter —
+    // which matches the common case where actor==author. The adapter surfaces
+    // targetAuthor as target.conversation; mismatches surface as a different
+    // conversation id but still emit the event.
+    if (dm.delete && typeof dm.delete.targetSentTimestamp === 'number') {
+      return {
+        timestamp: env.timestamp ?? 0,
+        source: senderUuid(env),
+        destination: groupId ?? ownNumber,
+        groupId,
+        body: null,
+        fromMe: false,
+        type: 'delete',
+        delete: {
+          targetTimestamp: dm.delete.targetSentTimestamp,
+          targetAuthor: senderUuid(env),
+        },
+      };
+    }
+
+    // Reaction (dataMessage.reaction). Empty emoji + isRemove is the
+    // canonical "remove" form; signal-cli also emits isRemove:true with the
+    // previously-reacted emoji.
+    if (dm.reaction && typeof dm.reaction.targetSentTimestamp === 'number') {
+      return {
+        timestamp: env.timestamp ?? 0,
+        source: senderUuid(env),
+        destination: groupId ?? ownNumber,
+        groupId,
+        body: null,
+        fromMe: false,
+        type: 'reaction',
+        reaction: {
+          emoji: dm.reaction.emoji ?? '',
+          remove: dm.reaction.isRemove === true,
+          targetTimestamp: dm.reaction.targetSentTimestamp,
+          targetAuthor: dm.reaction.targetAuthorUuid ?? senderUuid(env),
+        },
+      };
+    }
+
+    // Plain text.
+    return {
+      timestamp: env.timestamp ?? 0,
+      source: senderUuid(env),
+      destination: groupId ?? ownNumber,
+      groupId,
+      body: dm.message ?? null,
       fromMe: false,
       type: 'data',
     };
   }
-  // Receipts, typing indicators, calls: not message envelopes — the adapter's
-  // inbound filter drops non-text anyway; keep the port's surface messages-only.
+  // Typing, delivery receipts, calls: dropped — no inbound extension event
+  // for these in the v1 contract (typing is outbound-only via SupportsTyping;
+  // delivery is tracked via sync echoes; calls are out of scope).
   return null;
 }
 

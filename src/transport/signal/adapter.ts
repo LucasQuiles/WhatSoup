@@ -585,27 +585,117 @@ export class SignalAdapter
    * webhook-equivalent push path (added when the live port supports 'stream'
    * mode) can reuse the same seam.
    *
-   * Note: Signal envelopes can carry non-data types (typing, receipt, reaction,
-   * remote-delete). Only 'data' envelopes with a non-null body are emitted as
-   * InboundMessage; the others are surfaced via the matching extension event.
+   * Routing by `type`:
+   *   - 'data'           → InboundMessage to message listeners
+   *   - 'sync'           → InboundMessage to message listeners (echo of own send)
+   *   - 'reaction'       → ReactionEvent to reaction listeners
+   *   - 'read'           → one ReadEvent per timestamp to read listeners
+   *   - 'delete'         → DeleteEvent to delete listeners
+   *   - other            → dropped (typing/call/delivery have no v1 event)
+   *
+   * All envelope classes share the dedupe set (keyed by envelope timestamp)
+   * and the disposed/connected guards.
    */
   handleInboundRecord(record: InboundSignal): boolean {
     if (this.disposed || this.health.state !== 'connected') return false;
     if (this.seen.has(record.timestamp)) return false;
     this.seen.add(record.timestamp);
 
-    if (record.type === 'data' && record.body !== null) {
-      const msg = this.buildInboundMessage(record);
-      this.safeEmit(this.listeners.message, msg);
+    switch (record.type) {
+      case 'data':
+      case 'sync':
+        if (record.body !== null) {
+          this.safeEmit(this.listeners.message, this.buildInboundMessage(record));
+        }
+        break;
+      case 'reaction':
+        if (record.reaction) {
+          this.emitReactionEvent(record, record.reaction);
+        }
+        break;
+      case 'read':
+        if (record.read) {
+          for (const ts of record.read.timestamps) {
+            this.emitReadEvent(record, ts);
+          }
+        }
+        break;
+      case 'delete':
+        if (record.delete) {
+          this.emitDeleteEvent(record, record.delete);
+        }
+        break;
+      default:
+        // Unknown envelope class — leave seen-marked (so a re-delivery does
+        // not re-enter this branch) but emit nothing.
+        break;
     }
-    // TODO(future): route typing/receipt/reaction envelopes to their
-    // extension-event listeners when the live port surfaces them.
 
     trimSeenSet(this.seen);
     return true;
   }
 
   // ── Private helpers ───────────────────────────────────────────────────────
+
+  private emitReactionEvent(record: InboundSignal, r: NonNullable<InboundSignal['reaction']>): void {
+    // The reaction's target is the reacted-to message; the conversation is
+    // the author of that message (1:1 = peer UUID; group = group id).
+    const event: ReactionEvent = {
+      target: {
+        channel: this.channelId,
+        conversation: r.targetAuthor,
+        id: String(r.targetTimestamp),
+      },
+      actor: {
+        channel: this.channelId,
+        // The reactor: the envelope source for inbound reactions; our own id
+        // for echoes (signal-cli does not currently echo our outbound reactions
+        // as sync messages, so fromMe=true here is theoretical).
+        id: record.fromMe ? this.selfRef().id : record.source,
+      },
+      emoji: r.emoji,
+      removed: r.remove,
+      at: new Date(record.timestamp),
+    };
+    this.safeEmit(this.listeners.reaction, event);
+  }
+
+  private emitReadEvent(record: InboundSignal, targetTimestamp: number): void {
+    const event: ReadEvent = {
+      target: {
+        channel: this.channelId,
+        // The reader is the source; the message they marked read lives in
+        // the conversation between them and us.
+        conversation: record.source,
+        id: String(targetTimestamp),
+      },
+      reader: {
+        channel: this.channelId,
+        id: record.source,
+      },
+      at: new Date(record.timestamp),
+    };
+    this.safeEmit(this.listeners.read, event);
+  }
+
+  private emitDeleteEvent(record: InboundSignal, d: NonNullable<InboundSignal['delete']>): void {
+    const event: DeleteEvent = {
+      target: {
+        channel: this.channelId,
+        // signal-cli remote-delete carries only the target timestamp; the
+        // port fills targetAuthor with the envelope source. The conversation
+        // is that author (1:1 = peer; group = group id).
+        conversation: d.targetAuthor,
+        id: String(d.targetTimestamp),
+      },
+      // signal-cli's remote-delete is always delete-for-everyone (the only
+      // scope the protocol supports); 'me' would have thrown on the outbound
+      // path and never reaches here as an inbound event.
+      scope: 'everyone',
+      at: new Date(record.timestamp),
+    };
+    this.safeEmit(this.listeners.delete, event);
+  }
 
   private buildInboundMessage(record: InboundSignal): InboundMessage {
     const channelId = this.channelId;

@@ -91,12 +91,35 @@ the only external process. Inbound envelopes arrive via the daemon's
 | Feature | State |
 |---|---|
 | Text send/receive (1:1 + group) | ✅ |
-| Reactions (tapback-style, single per user) | ✅ |
-| Typing indicators (composing/stopped) | ✅ |
-| Read receipts (per message timestamp) | ✅ |
-| Remote delete (`delete-for-everyone`) | ✅ |
+| Reactions — outbound (react/unreact) | ✅ |
+| Reactions — inbound (peer reacted to a message) | ✅ routed to `on('reaction')` |
+| Typing indicators — outbound (composing/stopped) | ✅ |
+| Typing indicators — inbound | ❌ dropped (no inbound typing event in the v1 contract) |
+| Read receipts — outbound (markRead) | ✅ |
+| Read receipts — inbound (peer marked our message read) | ✅ routed to `on('read')`; one `ReadEvent` per timestamp |
+| Remote delete — outbound (`deleteMessage(scope:'everyone')`) | ✅ |
+| Remote delete — inbound (peer deleted their message) | ✅ routed to `on('delete')`; always `scope:'everyone'` |
+| Delivery receipts — inbound | ❌ dropped (durability tracks delivery via sync echoes) |
+| Sync echoes — inbound (our own outbound confirmed) | ✅ routed to `on('message')` with `fromMe:true` |
 | Media attachments | ❌ deferred (adapter declares `media.maxBytes: 0`) |
 | Polls | ❌ rejected (WhatsApp-only feature) |
+
+### Inbound envelope routing
+
+`SignalPort.listInboundSince` returns envelopes of all classes the v1 contract
+surfaces. The adapter's `handleInboundRecord` routes each by `type`:
+
+| `type` | Routed to | Payload field |
+|---|---|---|
+| `data` | `on('message')` (InboundMessage) | `body` |
+| `sync` | `on('message')` (InboundMessage with `fromMe:true`) | `body` |
+| `reaction` | `on('reaction')` (ReactionEvent) | `reaction` |
+| `read` | `on('read')` (one ReadEvent per timestamp) | `read` |
+| `delete` | `on('delete')` (DeleteEvent with `scope:'everyone'`) | `delete` |
+
+Envelope classes the v1 contract does not surface (typing, call, delivery
+receipts) are dropped at the port boundary. All envelope classes share the
+timestamp-keyed dedupe set, so a re-delivered envelope never double-emits.
 
 ## Health + recovery
 
