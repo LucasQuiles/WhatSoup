@@ -123,4 +123,88 @@ describe('migration 45 inline proposal source uniqueness', () => {
       inspect.close();
     }
   });
+
+  it.each([
+    [
+      'non-unique',
+      `CREATE INDEX idx_beads_inline_source_unique
+       ON beads(source_message_pk)
+       WHERE source_message_pk IS NOT NULL AND proposal_reason LIKE 'inline imperative: %'`,
+    ],
+    [
+      'wrong-column',
+      `CREATE UNIQUE INDEX idx_beads_inline_source_unique
+       ON beads(owner_jid)
+       WHERE source_message_pk IS NOT NULL AND proposal_reason LIKE 'inline imperative: %'`,
+    ],
+    [
+      'wrong-predicate',
+      `CREATE UNIQUE INDEX idx_beads_inline_source_unique
+       ON beads(source_message_pk)
+       WHERE source_message_pk IS NOT NULL`,
+    ],
+  ])('fails closed transactionally for a preexisting %s same-named index', (_variant, indexSql) => {
+    const path = tmpFile();
+    cleanup.push(path);
+
+    const seed = new Database(path);
+    seed.open();
+    seed.raw.exec('DROP INDEX idx_beads_inline_source_unique');
+    seed.raw.prepare('DELETE FROM schema_migrations WHERE version = 45').run();
+    seed.raw.exec(indexSql);
+    seed.close();
+
+    const migrating = new Database(path);
+    let failure: unknown;
+    try {
+      migrating.open();
+    } catch (err) {
+      failure = err;
+    } finally {
+      migrating.close();
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    expect(String(failure)).toMatch(/migration 45 failed/i);
+    expect(String(failure).length).toBeLessThan(200);
+
+    const inspect = new DatabaseSync(path);
+    try {
+      expect(inspect.prepare(
+        'SELECT version FROM schema_migrations WHERE version = 45',
+      ).get()).toBeUndefined();
+      expect(inspect.prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_beads_inline_source_unique'",
+      ).get()).toEqual({ sql: indexSql });
+      expect(inspect.prepare('SELECT COUNT(*) AS count FROM beads').get()).toEqual({ count: 0 });
+    } finally {
+      inspect.close();
+    }
+  });
+
+  it('accepts an exact preexisting index definition and records migration 45 idempotently', () => {
+    const path = tmpFile();
+    cleanup.push(path);
+
+    const seed = new Database(path);
+    seed.open();
+    const original = seed.raw.prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_beads_inline_source_unique'",
+    ).get() as { sql: string };
+    seed.raw.prepare('DELETE FROM schema_migrations WHERE version = 45').run();
+    seed.close();
+
+    const migrating = new Database(path);
+    migrating.open();
+    try {
+      expect(migrating.raw.prepare(
+        'SELECT version FROM schema_migrations WHERE version = 45',
+      ).get()).toEqual({ version: 45 });
+      expect(migrating.raw.prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_beads_inline_source_unique'",
+      ).get()).toEqual(original);
+    } finally {
+      migrating.close();
+    }
+  });
 });

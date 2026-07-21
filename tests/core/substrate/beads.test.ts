@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Worker } from 'node:worker_threads';
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -10,7 +10,7 @@ import {
   createBead, getBead, listBeads, updateBead,
   completeBead, cancelBead, approveProposal, rejectProposal,
   activityFeed, countOverdueProposals, createInlineProposal,
-  InlineProposalCollisionError,
+  InlineProposalCollisionError, InlineProposalInvariantError,
 } from '../../../src/core/substrate/beads.ts';
 import { upsertEntity, captureObservation, forgetObservation } from '../../../src/core/substrate/entities.ts';
 
@@ -30,6 +30,108 @@ function inlineProposalArgs(sourceMessagePk: number) {
     proposalReason: 'inline imperative: schedule' as const,
     actor: 'inline' as const,
   };
+}
+
+function callEscapedInlineProposal(db: DatabaseSync, overrides: Record<string, unknown>) {
+  const escaped = createInlineProposal as unknown as (
+    connection: DatabaseSync,
+    args: Record<string, unknown>,
+  ) => unknown;
+  return escaped(db, { ...inlineProposalArgs(1999), ...overrides });
+}
+
+function expectNoBeadState(db: DatabaseSync): void {
+  expect(db.prepare('SELECT COUNT(*) AS count FROM beads').get()).toEqual({ count: 0 });
+  expect(db.prepare('SELECT COUNT(*) AS count FROM bead_events').get()).toEqual({ count: 0 });
+}
+
+async function runWorkerBatch(workers: Worker[], timeoutMs = 10_000): Promise<boolean[][]> {
+  interface WorkerState {
+    ready: boolean;
+    results?: boolean[];
+    exitCode?: number;
+  }
+
+  try {
+    return await new Promise<boolean[][]>((resolve, reject) => {
+      const states = workers.map<WorkerState>(() => ({ ready: false }));
+      let started = false;
+      let settled = false;
+      const timer = setTimeout(() => fail(new Error('inline proposal worker batch timed out')), timeoutMs);
+
+      function fail(error: Error): void {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      }
+
+      function maybeResolve(): void {
+        if (settled || !states.every((state) => state.results !== undefined && state.exitCode === 0)) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(states.map((state) => state.results as boolean[]));
+      }
+
+      workers.forEach((worker, index) => {
+        worker.on('message', (message: { ready?: boolean; results?: boolean[]; error?: string }) => {
+          if (message.error) {
+            fail(new Error(message.error));
+            return;
+          }
+          if (message.ready) {
+            states[index].ready = true;
+            if (!started && states.every((state) => state.ready)) {
+              started = true;
+              for (const candidate of workers) candidate.postMessage({ start: true });
+            }
+          }
+          if (Array.isArray(message.results)) {
+            states[index].results = message.results;
+            maybeResolve();
+          }
+        });
+        worker.on('error', (error) => fail(error));
+        worker.on('exit', (code) => {
+          states[index].exitCode = code;
+          if (code !== 0) {
+            fail(new Error(`inline proposal worker exited ${code}`));
+          } else if (states[index].results === undefined) {
+            fail(new Error('inline proposal worker exited without results'));
+          } else {
+            maybeResolve();
+          }
+        });
+      });
+    });
+  } finally {
+    await Promise.allSettled(workers.map((worker) => worker.terminate()));
+  }
+}
+
+function injectStatementRunFault(
+  connection: DatabaseSync,
+  sqlNeedle: string,
+  timing: 'before' | 'after',
+  message: string,
+): () => boolean {
+  const originalPrepare = connection.prepare.bind(connection);
+  let delegated = false;
+  vi.spyOn(connection, 'prepare').mockImplementation((sql: string) => {
+    const statement = originalPrepare(sql);
+    if (!sql.includes(sqlNeedle)) return statement;
+
+    const runnable = statement as unknown as { run: (...params: SQLInputValue[]) => unknown };
+    const originalRun = runnable.run.bind(runnable);
+    vi.spyOn(runnable, 'run').mockImplementation((...params: SQLInputValue[]) => {
+      if (timing === 'before') throw new Error(message);
+      originalRun(...params);
+      delegated = true;
+      throw new Error(message);
+    });
+    return statement;
+  });
+  return () => delegated;
 }
 
 describe('beads core', () => {
@@ -54,10 +156,51 @@ describe('beads core', () => {
     expect(db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get()).toEqual({ count: 1 });
   });
 
+  it.each([null, null, 0, -1, 1.5, Number.NaN])(
+    'rejects invalid sourceMessagePk %s before any write through a type-erased call',
+    (sourceMessagePk) => {
+      let failure: unknown;
+      try {
+        callEscapedInlineProposal(db.raw, { sourceMessagePk });
+      } catch (err) {
+        failure = err;
+      }
+
+      expect(failure).toBeInstanceOf(InlineProposalInvariantError);
+      expect(failure).toMatchObject({ code: 'INLINE_PROPOSAL_INVARIANT' });
+      expect(String(failure)).not.toContain(String(sourceMessagePk));
+      expect(String(failure).length).toBeLessThan(160);
+      expectNoBeadState(db.raw);
+    },
+  );
+
+  it.each([
+    ['status', { status: 'active' }],
+    ['actor', { actor: 'user' }],
+  ])('rejects invalid inline lifecycle field %s before any write', (_field, overrides) => {
+    expect(() => callEscapedInlineProposal(db.raw, overrides)).toThrow(InlineProposalInvariantError);
+    expectNoBeadState(db.raw);
+  });
+
+  it.each([
+    null,
+    'inline imperative: watch for',
+    'inline imperative: Schedule',
+    'inline imperative: task ',
+  ])('rejects invalid inline proposal reason %s before any write', (proposalReason) => {
+    expect(() => callEscapedInlineProposal(db.raw, { proposalReason })).toThrow(InlineProposalInvariantError);
+    expectNoBeadState(db.raw);
+  });
+
+  it.each([null, '', '   ', 42, '\ud800'])('rejects invalid normalized target %s before any write', (normalizedTarget) => {
+    expect(() => callEscapedInlineProposal(db.raw, { normalizedTarget })).toThrow(InlineProposalInvariantError);
+    expectNoBeadState(db.raw);
+  });
+
   it.each([
     ['owner', { ownerJid: 'owner-2' }],
     ['chat', { chatJid: 'chat-2' }],
-    ['verb', { proposalReason: 'inline imperative: watch for' as const }],
+    ['verb', { proposalReason: 'inline imperative: remind' as const }],
     ['normalized target', { normalizedTarget: 'review a different ledger' }],
   ])('rejects a stable-field collision in %s with a bounded typed error', (_field, change) => {
     createInlineProposal(db.raw, inlineProposalArgs(1002));
@@ -127,6 +270,35 @@ describe('beads core', () => {
     expect(db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get()).toEqual({ count: 0 });
   });
 
+  it('rethrows the first SQLite busy error after exhausting bounded retries', () => {
+    const busyErrors = Array.from({ length: 5 }, (_, index) => Object.assign(
+      new Error(`synthetic busy ${index}`),
+      { errcode: 5 },
+    ));
+    const originalPrepare = db.raw.prepare.bind(db.raw);
+    let attempt = 0;
+    vi.spyOn(db.raw, 'prepare').mockImplementation((sql: string) => {
+      const statement = originalPrepare(sql);
+      if (sql.includes('INSERT INTO beads')) {
+        vi.spyOn(statement, 'run').mockImplementation(() => {
+          throw busyErrors[attempt++];
+        });
+      }
+      return statement;
+    });
+
+    let failure: unknown;
+    try {
+      createInlineProposal(db.raw, inlineProposalArgs(1008));
+    } catch (err) {
+      failure = err;
+    }
+
+    expect(attempt).toBe(5);
+    expect(failure).toBe(busyErrors[0]);
+    expectNoBeadState(db.raw);
+  });
+
   it('admits one bead and one initial event across 100 attempts on independent connections', async () => {
     db.close();
     const workerCount = 8;
@@ -163,25 +335,7 @@ describe('beads core', () => {
     const workers = attemptCounts.map((attempts) => new Worker(workerUrl, {
       workerData: { attempts, path, args: inlineProposalArgs(1005) },
     }));
-    const completions = workers.map((worker) => new Promise<boolean[]>((resolve, reject) => {
-      worker.on('message', (message: { ready?: boolean; results?: boolean[]; error?: string }) => {
-        if (message.error) reject(new Error(message.error));
-        if (message.results) resolve(message.results);
-      });
-      worker.on('error', reject);
-      worker.on('exit', (code) => {
-        if (code !== 0) reject(new Error(`inline proposal worker exited ${code}`));
-      });
-    }));
-    await Promise.all(workers.map((worker) => new Promise<void>((resolve, reject) => {
-      worker.once('message', (message: { ready?: boolean }) => {
-        if (!message.ready) return reject(new Error('worker did not report ready'));
-        resolve();
-      });
-      worker.once('error', reject);
-    })));
-    for (const worker of workers) worker.postMessage({ start: true });
-    const results = (await Promise.all(completions)).flat();
+    const results = (await runWorkerBatch(workers)).flat();
 
     const inspect = new Database(path);
     inspect.open();
@@ -197,27 +351,52 @@ describe('beads core', () => {
     db.open();
   }, 30_000);
 
+  it('rejects and reaps a worker that posts results before exiting nonzero', async () => {
+    const source = `
+      import { parentPort } from 'node:worker_threads';
+      parentPort.postMessage({ ready: true });
+      parentPort.once('message', () => {
+        parentPort.postMessage({ results: [true] });
+        setImmediate(() => process.exit(7));
+      });
+    `;
+    const worker = new Worker(new URL(`data:text/javascript,${encodeURIComponent(source)}`));
+
+    await expect(runWorkerBatch([worker])).rejects.toThrow('inline proposal worker exited 7');
+    expect(worker.threadId).toBe(-1);
+  });
+
+  it('reaps a worker when the batch times out', async () => {
+    const source = `
+      import { parentPort } from 'node:worker_threads';
+      parentPort.postMessage({ ready: true });
+      parentPort.once('message', () => setInterval(() => {}, 1000));
+    `;
+    const worker = new Worker(new URL(`data:text/javascript,${encodeURIComponent(source)}`));
+
+    await expect(runWorkerBatch([worker], 100)).rejects.toThrow('inline proposal worker batch timed out');
+    expect(worker.threadId).toBe(-1);
+  });
+
   it.each([
     'before bead insert',
     'after bead insert',
     'after event insert',
     'before commit',
   ] as const)('never leaves half-state when a fault occurs %s', (faultPoint) => {
+    let wasDelegated: (() => boolean) | undefined;
     if (faultPoint === 'before bead insert') {
-      db.raw.exec(`
-        CREATE TRIGGER inject_before_bead_insert
-        BEFORE INSERT ON beads BEGIN SELECT RAISE(ABORT, 'injected before bead insert'); END
-      `);
+      wasDelegated = injectStatementRunFault(
+        db.raw, 'INSERT INTO beads', 'before', 'injected before bead insert',
+      );
     } else if (faultPoint === 'after bead insert') {
-      db.raw.exec(`
-        CREATE TRIGGER inject_after_bead_insert
-        AFTER INSERT ON beads BEGIN SELECT RAISE(ABORT, 'injected after bead insert'); END
-      `);
+      wasDelegated = injectStatementRunFault(
+        db.raw, 'INSERT INTO beads', 'after', 'injected after bead insert',
+      );
     } else if (faultPoint === 'after event insert') {
-      db.raw.exec(`
-        CREATE TRIGGER inject_after_event_insert
-        AFTER INSERT ON bead_events BEGIN SELECT RAISE(ABORT, 'injected after event insert'); END
-      `);
+      wasDelegated = injectStatementRunFault(
+        db.raw, 'INSERT INTO bead_events', 'after', 'injected after event insert',
+      );
     } else {
       const exec = db.raw.exec.bind(db.raw);
       vi.spyOn(db.raw, 'exec').mockImplementation((sql: string) => {
@@ -227,9 +406,31 @@ describe('beads core', () => {
     }
 
     expect(() => createInlineProposal(db.raw, inlineProposalArgs(1006))).toThrow(/injected/i);
+    if (faultPoint === 'before bead insert') expect(wasDelegated?.()).toBe(false);
+    if (faultPoint === 'after bead insert' || faultPoint === 'after event insert') {
+      expect(wasDelegated?.()).toBe(true);
+    }
     const beadCount = db.raw.prepare('SELECT COUNT(*) AS count FROM beads').get() as { count: number };
     const eventCount = db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get() as { count: number };
     expect([beadCount.count, eventCount.count]).toEqual([0, 0]);
+  });
+
+  it('treats a successful COMMIT followed by a thrown error as durable retry ambiguity', () => {
+    const exec = db.raw.exec.bind(db.raw);
+    vi.spyOn(db.raw, 'exec').mockImplementation((sql: string) => {
+      exec(sql);
+      if (sql.trim().toUpperCase() === 'COMMIT') throw new Error('injected after commit');
+    });
+
+    expect(() => createInlineProposal(db.raw, inlineProposalArgs(1007))).toThrow('injected after commit');
+    const durable = db.raw.prepare('SELECT * FROM beads WHERE source_message_pk = ?').get(1007) as { id: number };
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM beads').get()).toEqual({ count: 1 });
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get()).toEqual({ count: 1 });
+
+    const retry = createInlineProposal(db.raw, inlineProposalArgs(1007));
+    expect(retry).toEqual({ bead: expect.objectContaining({ id: durable.id }), created: false });
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM beads').get()).toEqual({ count: 1 });
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM bead_events').get()).toEqual({ count: 1 });
   });
 
   it('createBead persists defaults and writes status_change event', () => {

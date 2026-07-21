@@ -37,6 +37,15 @@ export class InlineProposalCollisionError extends Error {
   }
 }
 
+export class InlineProposalInvariantError extends Error {
+  readonly code = 'INLINE_PROPOSAL_INVARIANT';
+
+  constructor() {
+    super('inline proposal arguments violate the runtime contract');
+    this.name = 'InlineProposalInvariantError';
+  }
+}
+
 export const TERMINAL: readonly BeadStatus[] = ['completed', 'cancelled', 'failed'];
 const PROTECTED = new Set(['id', 'kind', 'owner_jid', 'status', 'created_at']);
 
@@ -111,6 +120,53 @@ const SQLITE_UNIQUE_CONSTRAINT_CODE = 2067;
 const INLINE_PROPOSAL_BUSY_RETRIES = 4;
 const busyRetrySignal = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
 const INLINE_PROPOSAL_TARGET_METADATA_KEY = 'inline_proposal_normalized_target';
+const INLINE_PROPOSAL_TARGET_MAX_BYTES = 8 * 1024;
+const INLINE_PROPOSAL_REASONS = new Set([
+  'inline imperative: remind',
+  'inline imperative: schedule',
+  'inline imperative: watch',
+  'inline imperative: follow-up',
+  'inline imperative: task',
+  'inline imperative: track',
+  'inline imperative: bead',
+]);
+
+function hasUnpairedSurrogate(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function assertInlineProposalArgs(args: CreateInlineProposalArgs): void {
+  if (!Number.isInteger(args.sourceMessagePk) || args.sourceMessagePk <= 0) {
+    throw new InlineProposalInvariantError();
+  }
+  if (args.status !== 'proposed') {
+    throw new InlineProposalInvariantError();
+  }
+  if (args.actor !== 'inline') {
+    throw new InlineProposalInvariantError();
+  }
+  if (!INLINE_PROPOSAL_REASONS.has(args.proposalReason)) {
+    throw new InlineProposalInvariantError();
+  }
+  if (
+    typeof args.normalizedTarget !== 'string'
+    || args.normalizedTarget.trim().length === 0
+    || hasUnpairedSurrogate(args.normalizedTarget)
+    || Buffer.byteLength(args.normalizedTarget, 'utf8') > INLINE_PROPOSAL_TARGET_MAX_BYTES
+  ) {
+    throw new InlineProposalInvariantError();
+  }
+}
 
 function sqliteErrcode(err: unknown): number | null {
   if (typeof err !== 'object' || err === null || !('errcode' in err)) return null;
@@ -161,6 +217,8 @@ export function createInlineProposal(
   db: DatabaseSync,
   args: CreateInlineProposalArgs,
 ): CreateInlineProposalResult {
+  assertInlineProposalArgs(args);
+  let firstBusyError: unknown;
   for (let attempt = 0; ; attempt += 1) {
     try {
       const { normalizedTarget, ...beadArgs } = args;
@@ -182,9 +240,13 @@ export function createInlineProposal(
         }
         if (existing) throw new InlineProposalCollisionError();
       }
-      if (isSqliteBusy(err) && attempt < INLINE_PROPOSAL_BUSY_RETRIES) {
-        Atomics.wait(busyRetrySignal, 0, 0, 2 ** attempt);
-        continue;
+      if (isSqliteBusy(err)) {
+        firstBusyError ??= err;
+        if (attempt < INLINE_PROPOSAL_BUSY_RETRIES) {
+          Atomics.wait(busyRetrySignal, 0, 0, 2 ** attempt);
+          continue;
+        }
+        throw firstBusyError;
       }
       throw err;
     }

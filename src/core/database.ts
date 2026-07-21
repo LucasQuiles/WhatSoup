@@ -1168,12 +1168,53 @@ function runMigration44(db: DatabaseSync): void {
 
 const INLINE_PROPOSAL_SOURCE_PREDICATE =
   "source_message_pk IS NOT NULL AND proposal_reason LIKE 'inline imperative: %'";
+const INLINE_PROPOSAL_SOURCE_INDEX = 'idx_beads_inline_source_unique';
+
+function normalizeIndexSql(sql: string): string {
+  return sql.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function hasExpectedInlineProposalSourceIndex(db: DatabaseSync, sql: string): boolean {
+  const listed = db.prepare("PRAGMA index_list('beads')").all() as Array<{
+    name: string;
+    unique: number;
+    partial: number;
+  }>;
+  const index = listed.find((candidate) => candidate.name === INLINE_PROPOSAL_SOURCE_INDEX);
+  if (!index || index.unique !== 1 || index.partial !== 1) return false;
+
+  const columns = db.prepare(`PRAGMA index_info('${INLINE_PROPOSAL_SOURCE_INDEX}')`).all() as Array<{
+    name: string;
+  }>;
+  if (columns.length !== 1 || columns[0]?.name !== 'source_message_pk') return false;
+
+  const normalized = normalizeIndexSql(sql);
+  const whereAt = normalized.indexOf(' where ');
+  return whereAt !== -1
+    && normalized.slice(whereAt + ' where '.length) === normalizeIndexSql(INLINE_PROPOSAL_SOURCE_PREDICATE);
+}
 
 function runMigration45(db: DatabaseSync): void {
   const table = db
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'beads'")
     .get() as { name: string } | undefined;
   if (!table) return;
+
+  const existingIndex = db.prepare(`
+    SELECT tbl_name, sql
+    FROM sqlite_master
+    WHERE type = 'index' AND name = ?
+  `).get(INLINE_PROPOSAL_SOURCE_INDEX) as { tbl_name: string; sql: string | null } | undefined;
+  if (
+    existingIndex
+    && (
+      existingIndex.tbl_name !== 'beads'
+      || existingIndex.sql === null
+      || !hasExpectedInlineProposalSourceIndex(db, existingIndex.sql)
+    )
+  ) {
+    throw new Error('migration 45 blocked by incompatible inline proposal source index');
+  }
 
   const collision = db.prepare(`
     SELECT 1
@@ -1188,7 +1229,7 @@ function runMigration45(db: DatabaseSync): void {
   }
 
   db.exec(`
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_beads_inline_source_unique
+    CREATE UNIQUE INDEX IF NOT EXISTS ${INLINE_PROPOSAL_SOURCE_INDEX}
     ON beads(source_message_pk)
     WHERE ${INLINE_PROPOSAL_SOURCE_PREDICATE}
   `);
