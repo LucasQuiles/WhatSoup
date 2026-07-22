@@ -1297,8 +1297,15 @@ export class HealthPoller {
     const lastFallbackTurnAt = this.readNumber(instance?.['lastFallbackTurnAt']);
     const lastTurnErrorClass = turnCapability?.['last_turn_error_class'];
     const lastSuccessfulTurnAt = this.readNumber(turnCapability?.['last_successful_turn_at']);
+    const providerExecutionActive = providerExecution?.['active'];
+    const providerExecutionPending = this.readNumber(providerExecution?.['pending']);
+    const providerExecutionOldestWaitMs = this.readNumber(providerExecution?.['oldestWaitMs']);
     const providerPressure = providerExecution?.['pressureActive'];
     const recoveryOutstanding = this.readNumber(runtimeAgent?.['turnRecoveryOutstanding']);
+    const recoveryBlockedUnsafe = this.readNumber(runtimeAgent?.['turnRecoveryBlockedUnsafe']);
+    const recoveryQuarantinedDelivery = this.readNumber(
+      runtimeAgent?.['turnRecoveryQuarantinedDelivery'],
+    );
     const degradationCausesRaw = health['degradation_causes'];
     const degradationCauses = Array.isArray(degradationCausesRaw)
       && degradationCausesRaw.length > 0
@@ -1350,8 +1357,13 @@ export class HealthPoller {
       `last_fallback_turn_at=${lastFallbackTurnAt === null ? 'unknown' : String(lastFallbackTurnAt)}`,
       `last_successful_turn_at=${lastSuccessfulTurnAt === null ? 'unknown' : String(lastSuccessfulTurnAt)}`,
       `last_turn_error_class=${lastTurnErrorClass == null ? 'none' : this.formatEvidenceValue(lastTurnErrorClass, 80) ?? 'unknown'}`,
+      `provider_execution_active=${String(providerExecutionActive ?? 'unknown')}`,
+      `provider_execution_pending=${providerExecutionPending === null ? 'unknown' : String(providerExecutionPending)}`,
+      `provider_execution_oldest_wait_ms=${providerExecutionOldestWaitMs === null ? 'unknown' : String(providerExecutionOldestWaitMs)}`,
       `provider_execution_pressure_active=${String(providerPressure ?? 'unknown')}`,
       `turn_recovery_outstanding=${recoveryOutstanding === null ? 'unknown' : String(recoveryOutstanding)}`,
+      `turn_recovery_blocked_unsafe=${recoveryBlockedUnsafe === null ? 'unknown' : String(recoveryBlockedUnsafe)}`,
+      `turn_recovery_quarantined_delivery=${recoveryQuarantinedDelivery === null ? 'unknown' : String(recoveryQuarantinedDelivery)}`,
     ].join('\n');
     const shouldAlert = polls >= HEALTH_BODY_DEGRADED_ALERT_POLLS
       && dwellMs >= HEALTH_BODY_DEGRADED_ALERT_DWELL_MS;

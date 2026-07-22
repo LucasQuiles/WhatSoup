@@ -105,7 +105,12 @@ function makeOnlineHealth(overrides: Record<string, unknown> = {}): Record<strin
 function makeOperationalFallbackHealth(overrides: {
   degradationCauses?: readonly string[];
   pressureActive?: boolean;
+  providerExecutionActive?: boolean;
+  providerExecutionPending?: number;
+  providerExecutionOldestWaitMs?: number;
   recoveryOutstanding?: number;
+  recoveryBlockedUnsafe?: number;
+  recoveryQuarantinedDelivery?: number;
   whatsappConnected?: boolean;
   connectionState?: string;
   fallbackChainExhausted?: boolean;
@@ -135,8 +140,15 @@ function makeOperationalFallbackHealth(overrides: {
     },
     runtime: {
       agent: {
-        providerExecution: { pressureActive: overrides.pressureActive ?? false },
+        providerExecution: {
+          active: overrides.providerExecutionActive ?? false,
+          pending: overrides.providerExecutionPending ?? 0,
+          oldestWaitMs: overrides.providerExecutionOldestWaitMs ?? 0,
+          pressureActive: overrides.pressureActive ?? false,
+        },
         turnRecoveryOutstanding: overrides.recoveryOutstanding ?? 0,
+        turnRecoveryBlockedUnsafe: overrides.recoveryBlockedUnsafe ?? 0,
+        turnRecoveryQuarantinedDelivery: overrides.recoveryQuarantinedDelivery ?? 0,
       },
     },
     whatsapp: {
@@ -588,6 +600,40 @@ describe('HealthPoller', () => {
       'critical',
       undefined,
     );
+
+    poller.stop();
+  });
+
+  it('includes provider execution and recovery forensic counters in degraded alerts', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(makeOperationalFallbackHealth({
+        pressureActive: true,
+        providerExecutionActive: true,
+        providerExecutionPending: 4,
+        providerExecutionOldestWaitMs: 87_000,
+        recoveryBlockedUnsafe: 6,
+        recoveryQuarantinedDelivery: 1,
+      })),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 5_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    const alertEvidence = ((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).find(
+      (call) => call[1] === 'health_body_degraded',
+    )?.[3] ?? '') as string;
+    expect(alertEvidence).toContain('provider_execution_active=true');
+    expect(alertEvidence).toContain('provider_execution_pending=4');
+    expect(alertEvidence).toContain('provider_execution_oldest_wait_ms=87000');
+    expect(alertEvidence).toContain('turn_recovery_blocked_unsafe=6');
+    expect(alertEvidence).toContain('turn_recovery_quarantined_delivery=1');
 
     poller.stop();
   });
