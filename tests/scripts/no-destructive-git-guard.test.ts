@@ -151,6 +151,123 @@ describe('no-destructive-git guard', () => {
     expect(findings.map((f) => f.command)).toEqual(['git clean']);
   });
 
+  // ── F1: string / heredoc literals are DATA, not commands ────────────────────
+  it('F1: does NOT flag a destructive command name inside a double-quoted echo string', () => {
+    writeShell('scripts/msg.sh', '#!/usr/bin/env bash\necho "never run git reset --hard on main"\n');
+    expect(scanForDestructiveGit(scratch)).toEqual([]);
+  });
+
+  it('F1: does NOT flag a destructive command name inside a quoted log argument', () => {
+    writeShell('scripts/msg.sh', '#!/usr/bin/env bash\nlog "recover with git checkout --force"\n');
+    expect(scanForDestructiveGit(scratch)).toEqual([]);
+  });
+
+  it('F1: does NOT flag a destructive command name inside a variable-assignment string', () => {
+    writeShell('scripts/msg.sh', '#!/usr/bin/env bash\nMSG="git push --force is banned in this repo"\n');
+    expect(scanForDestructiveGit(scratch)).toEqual([]);
+  });
+
+  it('F1: does NOT flag destructive command names inside a heredoc body (DATA)', () => {
+    writeShell(
+      'scripts/help.sh',
+      [
+        '#!/usr/bin/env bash',
+        'cat <<EOF',
+        'Do not use git clean -fdx here.',
+        'git reset --hard   # even a bare-looking line inside the heredoc body is DATA',
+        'EOF',
+        '',
+      ].join('\n'),
+    );
+    expect(scanForDestructiveGit(scratch)).toEqual([]);
+  });
+
+  it('F1-GREEN: a real `git reset --hard` at command position is STILL flagged', () => {
+    writeShell('scripts/recover.sh', '#!/usr/bin/env bash\ngit reset --hard origin/main\n');
+    const findings = scanForDestructiveGit(scratch);
+    expect(findings.some((f) => f.command === 'git reset --hard')).toBe(true);
+  });
+
+  it('F1-HARDENING: a destructive git after a shell keyword prefix (`if …; then`) IS flagged', () => {
+    // Reserved-word prefixes must not create a false negative in a safety-critical guard.
+    writeShell('scripts/branch.sh', '#!/usr/bin/env bash\nif git push --force origin main; then :; fi\n');
+    const findings = scanForDestructiveGit(scratch);
+    expect(findings.some((f) => f.command === 'git push --force')).toBe(true);
+  });
+
+  // ── F2: git global-option prefixes must not bypass detection ─────────────────
+  it('F2: flags `git -C <dir> reset --hard` (global -C before the subcommand)', () => {
+    writeShell('scripts/x.sh', '#!/usr/bin/env bash\ngit -C "$REPO" reset --hard origin/main\n');
+    const findings = scanForDestructiveGit(scratch);
+    expect(findings.some((f) => f.command === 'git reset --hard')).toBe(true);
+  });
+
+  it('F2: flags `git -c <cfg> push --force` (global -c with its argument)', () => {
+    writeShell('scripts/x.sh', '#!/usr/bin/env bash\ngit -c user.name=x push --force origin main\n');
+    const findings = scanForDestructiveGit(scratch);
+    expect(findings.some((f) => f.command === 'git push --force')).toBe(true);
+  });
+
+  it('F2: flags `git --git-dir=… --work-tree=… checkout -f` (=-form global options)', () => {
+    writeShell('scripts/x.sh', '#!/usr/bin/env bash\ngit --git-dir=/x --work-tree=/y checkout -f main\n');
+    const findings = scanForDestructiveGit(scratch);
+    expect(findings.some((f) => f.command === 'git checkout --force')).toBe(true);
+  });
+
+  // ── F3: dry-run `git clean` is non-destructive ──────────────────────────────
+  it('F3: does NOT flag `git clean -nd` (dry-run combined short flag)', () => {
+    writeShell('scripts/x.sh', '#!/usr/bin/env bash\ngit clean -nd\n');
+    expect(scanForDestructiveGit(scratch)).toEqual([]);
+  });
+
+  it('F3: does NOT flag `git clean --dry-run -d`', () => {
+    writeShell('scripts/x.sh', '#!/usr/bin/env bash\ngit clean --dry-run -d\n');
+    expect(scanForDestructiveGit(scratch)).toEqual([]);
+  });
+
+  it('F3: does NOT flag `git clean -nx`', () => {
+    writeShell('scripts/x.sh', '#!/usr/bin/env bash\ngit clean -nx\n');
+    expect(scanForDestructiveGit(scratch)).toEqual([]);
+  });
+
+  it('F3-GREEN: still flags real destructive `git clean` forms (-fdx / -fd / --force)', () => {
+    writeShell(
+      'scripts/x.sh',
+      ['#!/usr/bin/env bash', 'git clean -fdx', 'git clean -fd', 'git clean --force', ''].join('\n'),
+    );
+    const findings = scanForDestructiveGit(scratch);
+    expect(findings.filter((f) => f.command === 'git clean')).toHaveLength(3);
+  });
+
+  // ── F4: --force-if-includes / --force-if-equal are not history-rewriting force ─
+  it('F4: does NOT flag `git push --force-if-includes`', () => {
+    writeShell('scripts/x.sh', '#!/usr/bin/env bash\ngit push --force-if-includes origin main\n');
+    expect(scanForDestructiveGit(scratch)).toEqual([]);
+  });
+
+  it('F4-GREEN: still flags `git push --force`, `--force-with-lease`, and `-f`', () => {
+    writeShell(
+      'scripts/x.sh',
+      [
+        '#!/usr/bin/env bash',
+        'git push --force origin main',
+        'git push --force-with-lease origin main',
+        'git push -f origin main',
+        '',
+      ].join('\n'),
+    );
+    const findings = scanForDestructiveGit(scratch);
+    expect(findings.filter((f) => f.command === 'git push --force')).toHaveLength(3);
+  });
+
+  it('F1-ARITH: an arithmetic left-shift `$((1 << 10))` does NOT open a spurious heredoc that blinds later lines', () => {
+    // Regression: without arithmetic-depth tracking, `<< 10` is misread as a heredoc opener,
+    // skipping every following line to EOF — hiding the real `git push --force` below.
+    writeShell('scripts/shift.sh', '#!/usr/bin/env bash\nn=$((1 << 10))\ngit push --force origin main\n');
+    const findings = scanForDestructiveGit(scratch);
+    expect(findings.some((f) => f.command === 'git push --force')).toBe(true);
+  });
+
   it('GREEN: scanning the real repository yields 0 violations', () => {
     const findings: Finding[] = scanForDestructiveGit(repoRoot);
     expect(findings).toEqual([]);
