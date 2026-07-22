@@ -18,6 +18,10 @@ import type { Database } from '../../core/database.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
+import {
+  executionModeForProvider,
+  isProviderId,
+} from './providers/index.ts';
 
 const log = createChildLogger('session-classifier');
 
@@ -50,6 +54,7 @@ interface ActiveSessionRow {
   status: string;
   started_at: string | null;
   message_count: number | null;
+  provider: string | null;
 }
 
 interface CheckpointInfo {
@@ -158,7 +163,7 @@ export function classifyActiveSessions(
 ): ClassifiedSession[] {
   const activeSessions = db.raw
     .prepare(
-      `SELECT id, session_id, claude_pid, chat_jid, status, started_at, message_count FROM agent_sessions WHERE status = 'active'`,
+      `SELECT id, session_id, claude_pid, chat_jid, status, started_at, message_count, provider FROM agent_sessions WHERE status = 'active'`,
     )
     .all() as unknown as ActiveSessionRow[];
 
@@ -211,20 +216,35 @@ export function classifyActiveSessions(
     // The checkpoint was suspended/orphaned — any live sessions are leftovers.
     const checkpointIsActive = checkpoint.sessionStatus === 'active';
 
-    // Find if any session matches the checkpoint (both PID and session_id)
+    // Resident providers are identified by both durable session ID and live PID.
+    // Spawn-per-turn and managed-loop providers have no durable child process, so
+    // the provider session ID is their authoritative runtime identity.
     const matchingSession = checkpointIsActive
-      ? sessions.find(s =>
-          checkpoint.claudePid !== null &&
-          s.claude_pid === checkpoint.claudePid &&
-          checkpoint.sessionId !== null &&
-          s.session_id === checkpoint.sessionId,
-        )
+      ? sessions.find((s) => {
+          const mode = executionMode(s.provider);
+          if (mode === null || checkpoint.sessionId === null || s.session_id !== checkpoint.sessionId) {
+            return false;
+          }
+          return mode !== 'persistent_session' || (
+            checkpoint.claudePid !== null &&
+            s.claude_pid === checkpoint.claudePid
+          );
+        })
       : null; // non-active checkpoint → no authoritative match
 
     for (const session of sessions) {
       const pidCheck = pidChecker(session.claude_pid);
 
       if (session === matchingSession) {
+        const mode = executionMode(session.provider);
+        if (mode !== null && mode !== 'persistent_session') {
+          results.push({
+            ...sessionFields(session, convKey),
+            classification: 'authoritative_live',
+            reason: `logical session matches active checkpoint (executionMode=${mode}, sessionId=${checkpoint.sessionId})`,
+          });
+          continue;
+        }
         // Full match AND checkpoint is active — but only 'authoritative_live' if the
         // PID is actually ALIVE. QR-101: a checkpoint match with a DEAD pid (the
         // process crashed and the checkpoint row was never reconciled) was wrongly
@@ -290,6 +310,12 @@ export function classifyActiveSessions(
   }
 
   return results;
+}
+
+function executionMode(provider: string | null) {
+  return isProviderId(provider)
+    ? executionModeForProvider(provider)
+    : null;
 }
 
 /**

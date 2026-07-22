@@ -200,22 +200,26 @@ export class SessionLifecycleStore {
       suspendExactAgentSession: prepare(`
         UPDATE agent_sessions
         SET status = 'suspended', ended_at = NULL
-        WHERE id = ? AND session_id = ? AND provider = ? AND status = 'active'
+        WHERE id = ? AND session_id = ? AND provider = ?
+          AND status IN ('active', 'orphaned')
       `),
       endExactAgentSession: prepare(`
         UPDATE agent_sessions
         SET status = 'ended', ended_at = COALESCE(ended_at, datetime('now'))
-        WHERE id = ? AND session_id = ? AND provider = ? AND status = 'active'
+        WHERE id = ? AND session_id = ? AND provider = ?
+          AND status IN ('active', 'orphaned')
       `),
       suspendPreInitAgentSession: prepare(`
         UPDATE agent_sessions
         SET status = 'suspended', ended_at = NULL
-        WHERE id = ? AND session_id IS NULL AND provider = ? AND status = 'active'
+        WHERE id = ? AND session_id IS NULL AND provider = ?
+          AND status IN ('active', 'orphaned')
       `),
       endPreInitAgentSession: prepare(`
         UPDATE agent_sessions
         SET status = 'ended', ended_at = COALESCE(ended_at, datetime('now'))
-        WHERE id = ? AND session_id IS NULL AND provider = ? AND status = 'active'
+        WHERE id = ? AND session_id IS NULL AND provider = ?
+          AND status IN ('active', 'orphaned')
       `),
       closeExactSessionCheckpoints: prepare(`
         UPDATE session_checkpoints

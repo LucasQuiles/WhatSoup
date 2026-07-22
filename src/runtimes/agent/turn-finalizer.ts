@@ -305,15 +305,20 @@ export function finalizeRuntimeTurn(
       throw new Error('A transferred runtime turn requires a recovery owner and replay envelope');
     }
 
-    // A failed attempt that never produced delivery evidence finalizes with the
+    // A runtime fault that never produced delivery evidence finalizes with the
     // reply guarantee still armed and no recovery owner: the inbound is dropped.
     // That drop must not be silent (owner-directed messages have died this way),
     // so it gets a durable continuity-candidate mark plus a breach alert below.
-    // Admission-rejected sheds are excluded — #1750 keeps backpressure separable
-    // from faults so breach alerting cannot false-positive on capacity sheds.
+    // Admission-rejected sheds stay excluded; pre_dispatch_error is the typed
+    // exception because it means an admitted queue processor failed before send.
+    const replyGuaranteeBreachClass = attemptOutcome.kind === 'failed'
+      ? attemptOutcome.class ?? 'unknown'
+      : attemptOutcome.kind === 'admission_rejected' && attemptOutcome.class === 'pre_dispatch_error'
+        ? attemptOutcome.class
+        : null;
     const replyGuaranteeBreach =
       terminal.inboundDisposition === 'failed_terminal' &&
-      attemptOutcome.kind === 'failed' &&
+      replyGuaranteeBreachClass !== null &&
       params.identity.inboundSeq !== null;
     let continuityMarked = false;
     if (replyGuaranteeBreach) {
@@ -344,7 +349,7 @@ export function finalizeRuntimeTurn(
     if (!receipt.winnerMatchesRequest) {
       throw new Error('Durable terminal winner conflicts with the requested terminal identity');
     }
-    if (replyGuaranteeBreach && attemptOutcome.kind === 'failed') {
+    if (replyGuaranteeBreach && replyGuaranteeBreachClass !== null) {
       // Best-effort visibility: the terminal state is already durable, so an
       // alert-sink failure must not convert a finalized turn into an incident.
       try {
@@ -352,7 +357,7 @@ export function finalizeRuntimeTurn(
           params.instanceName,
           REPLY_GUARANTEE_BREACH_ALERT_SOURCE,
           REPLY_GUARANTEE_BREACH_ALERT_SUMMARY,
-          boundedBreachEvidence(params, attemptOutcome.class ?? 'unknown', receipt, continuityMarked),
+          boundedBreachEvidence(params, replyGuaranteeBreachClass, receipt, continuityMarked),
         );
       } catch {
         // Swallowed by design — see comment above.
