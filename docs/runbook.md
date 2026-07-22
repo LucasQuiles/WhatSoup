@@ -814,6 +814,11 @@ sqlite3 $DB ".backup '${DB}.pre-recovery'"
 # Turn recovery is narrower: it reconciles only an exact source inbound,
 # terminal owner, and selected unresolved delivery-op chain. It never blindly
 # replays an arbitrary prompt that happened to be open at the crash.
+# While the process remains live, the 10-second echo-maintenance loop also
+# reconciles up to 200 oldest `maybe_sent` rows created after the post-connect
+# pass once each has aged 30 seconds. Safe/read-only sends return to the pending
+# drainer; unsafe sends quarantine and the existing
+# stuck-inbound sweep can then release a terminally non-echoed recovery owner.
 
 # 5. Start the service
 systemctl --user start whatsoup@$INSTANCE

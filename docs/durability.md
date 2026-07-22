@@ -269,10 +269,14 @@ Runs every **10 seconds** while the process is live (wired in `main.ts` via `set
 on the same interval that calls `drainPendingOutbound()` — see §4.4):
 
 ```
-setInterval(() => { durability.sweepStaleSubmitted(); drainPendingOutbound(...); }, 10_000)
+setInterval(() => {
+  durability.sweepStaleSubmitted();
+  durability.reconcileLiveMaybeSent();
+  drainPendingOutbound(...);
+}, 10_000)
 ```
 
-Promotes any `submitted` op with `submitted_at < now() - 30 seconds` to `maybe_sent` with `error = 'echo_timeout'`. This catches ops whose echo was permanently lost during a live session (not just crash recovery). These `maybe_sent` ops are reconciled by the next post-connect recovery pass (which resets `safe`/`read_only` ops to `pending`); the `pending` stage is then re-sent by the drainer (§4.4), which runs both on this same interval and immediately after each recovery pass.
+Promotes any `submitted` op with `submitted_at < now() - 30 seconds` to `maybe_sent` with `error = 'echo_timeout'`. This catches ops whose echo was permanently lost during a live session (not just crash recovery). The same interval reconciles `maybe_sent` debt created after the one-time post-connect pass, after preserving a 30-second late-echo grace period. Each pass selects the oldest 200 eligible rows so a large backlog cannot monopolize the maintenance tick: confirmed echoes settle, `safe`/`read_only` ops reset to `pending`, and non-safe ops quarantine. Corroborated selected-delivery proof is excluded before applying the page limit so intentionally preserved rows neither create repeated recovery evidence nor starve actionable debt. An empty scan creates no recovery plan or run. The `pending` stage is then re-sent by the drainer (§4.4), which runs both on this same interval and immediately after each recovery pass.
 
 **Why 30 seconds?** WhatsApp echo latency is typically under 2 seconds on a healthy connection. 30 seconds provides a large margin for slow connections, QoS throttling, and brief disconnects while still being short enough that stuck ops don't silently accumulate for hours.
 
