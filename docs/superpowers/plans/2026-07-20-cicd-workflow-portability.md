@@ -2,7 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Every production bead also requires superpowers:test-driven-development, superpowers:test-integrity, superpowers:writing-fail-closed-gates, and superpowers:verification-before-completion.
 
-**Status:** Pending — reviewed; source mutation is not admitted until CP-WA1, CP-F3, CP-H1c/H1d, CP-F4, and CP-F5 close their foundation prerequisites with current-head evidence.
+**Status:** Pending — reviewed; source mutation is not admitted until CP-WA1, CP-F3,
+CP-H1c, CP-GL1, CP-H1d, CP-F4, and CP-F5 close their foundation prerequisites with
+current-head evidence.
 
 **Goal:** Make GitHub Actions the authoritative remote execution and evidence layer for repository-owned controls without duplicating their decisions, while adding protected workflow interpretation, exact merge-result aggregation, and observed-host Linux/macOS portability.
 
@@ -15,7 +17,11 @@
 - GitHub Actions executes and transports evidence for controls the repository already owns; workflow YAML, action wrappers, and aggregate jobs must not become second policy engines.
 - Inventory before adding a workflow, scanner, status, cache, artifact, or hosted rule. A new capability requires proof that no canonical implementation already owns the question.
 - Preserve `repo-hygiene-guard.ts`, `publication-guard.ts`, semantic-quality policy/receipt code, `safeguard-diagnostics.ts`, test-integrity policy, and the control-plane manifest/result/classifier modules as their existing decision owners.
-- CP-WA1, CP-F3, CP-H1c/H1d, CP-F4, and CP-F5 are prerequisites. No task in this plan may become authoritative while workspace-transition accounting, classification, exact-ref execution, bounded orchestration, or manifest/self-protection parity is incomplete.
+- CP-WA1, CP-F3, CP-H1c, CP-GL1, CP-H1d, CP-F4, and CP-F5 are prerequisites. CP-GL1
+  supplies coordinator-owned main/topic remote-ref-set observation before H1d transport,
+  remote review, or workflow canaries. No task in this plan may become authoritative while
+  workspace-transition accounting, classification, remote lineage observation, exact-ref
+  execution, bounded orchestration, or manifest/self-protection parity is incomplete.
 - Leaf outcomes are `PASS`, `WARN`, `BLOCK`, `INCONCLUSIVE`, or `NOT_APPLICABLE`. Aggregate authorization is only `PASS`, `BLOCK`, or `INCONCLUSIVE`; a warning never satisfies mandatory evidence.
 - A not-applicable result is valid only when a trusted exact-revision classifier receipt supplies a closed reason. A skipped job or absent matrix row is not evidence.
 - Require `trusted required set == trusted observed set`. Reject missing, duplicate, substituted, stale, cancelled, timed-out, malformed, nonterminal, wrong-producer, wrong-policy, wrong-platform, or wrong-revision observations.
@@ -66,7 +72,7 @@ The following remain **Inconclusive** until fresh read-only hosted receipts exis
 ## Dependency and Promotion Order
 
 ```text
-CP-WA1 + CP-F3 + CP-H1c/H1d + CP-F4 + CP-F5 current-head closure
+CP-WA1 + CP-F3 + CP-H1c + CP-GL1 + CP-H1d + CP-F4 + CP-F5 current-head closure
   -> CP-W0 source wiring inventory
     -> CP-W1a protected data-only workflow evaluator
       -> CP-W0b immutable dependency lock + report-only inventory canary

@@ -160,9 +160,9 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-07-17-boundary-exit-parser-codeql-hardening.md` | plan | active | body-marker | boundary-exit-parser-codeql-hardening | 2026-07-17 |  |
 | `docs/superpowers/plans/2026-07-17-boundary-validator-ci-refactor.md` | plan | unknown | fallback | boundary-validator-ci-refactor | 2026-07-17 |  |
 | `docs/superpowers/plans/2026-07-17-macos-credential-durability.md` | plan | unknown | fallback | macos-credential-durability | 2026-07-17 |  |
-| `docs/superpowers/plans/2026-07-20-cicd-control-foundation.md` | plan | active | body-marker | cicd-control-foundation | 2026-07-21 |  |
-| `docs/superpowers/plans/2026-07-20-cicd-enforcement-control-plane-program.md` | plan | active | body-marker | cicd-enforcement-control-plane-program | 2026-07-21 |  |
-| `docs/superpowers/plans/2026-07-20-cicd-workflow-portability.md` | plan | pending | body-marker | cicd-workflow-portability | 2026-07-21 |  |
+| `docs/superpowers/plans/2026-07-20-cicd-control-foundation.md` | plan | active | body-marker | cicd-control-foundation | 2026-07-22 |  |
+| `docs/superpowers/plans/2026-07-20-cicd-enforcement-control-plane-program.md` | plan | active | body-marker | cicd-enforcement-control-plane-program | 2026-07-22 |  |
+| `docs/superpowers/plans/2026-07-20-cicd-workflow-portability.md` | plan | pending | body-marker | cicd-workflow-portability | 2026-07-22 |  |
 
 ### docs/superpowers/reviews  _(3 entries)_
 
@@ -218,4 +218,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-21T15:10:43Z from commit `b8f485477a71dcc6fc6572bc3dafe0a31d5e8482`
+- Generated at 2026-07-22T07:34:23Z from commit `55a889ac3de4de3c266905b4ec59eec37dc00a3a`

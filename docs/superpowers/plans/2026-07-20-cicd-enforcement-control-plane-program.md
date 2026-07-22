@@ -64,13 +64,17 @@ ownership evidence, quarantine stale results, and reconcile lineage before resum
 CP-F1 manifest/schema/inventory
   -> CP-F2 neutral result/reason/serializer
     -> CP-F3 exact-revision classifier
-      -> CP-H1 exact-ref hooks and hook identity
-        -> CP-F4 canonical fast/PR facades
-          -> CP-F5 manifest self-protection, exceptions, dual-run parity, atomic ownership
-            -> CP-W1 protected workflow-policy evaluator
-              -> CP-W2 stable gates and immutable workflow dependencies
-                -> CP-P1 native Linux/macOS portability
-                -> CP-G1 source ownership + hosted-settings verifier
+      -> CP-H1a/H1b/H1c additive hook/ref/object evidence
+
+CP-F3 + CP-WA1
+  -> CP-GL1 coordinator remote observation and drift receipts
+    -> CP-H1d exact-ref transport cutover
+      -> CP-F4 canonical fast/PR facades
+        -> CP-F5 manifest self-protection, exceptions, dual-run parity, atomic ownership
+          -> CP-W1 protected workflow-policy evaluator
+            -> CP-W2 stable gates and immutable workflow dependencies
+              -> CP-P1 native Linux/macOS portability
+              -> CP-G1 source ownership + hosted-settings verifier
 
 CP-F2 + CP-F3 + CP-F4 + CP-F5
   -> ART-01 exact-source host artifact contract
@@ -95,8 +99,10 @@ artifact, or deployment promotion.
 The post-CP-F2 rider migration `CP-F2e` is a prerequisite for H1c neutral-receipt
 integration and H1d cutover. H1c may develop native exact-object RED fixtures and additive
 readers in parallel, but no new adapter may invent the missing enriched fields or alternate
-taxonomy. H1d also consumes CP-WA1 workspace reconciliation and a typed current-writer/
-reviewer receipt before authority transfer.
+taxonomy. CP-GL1 consumes CP-WA1 and CP-F3, observes the exact protected main plus leased
+topic ref set from a coordinator-owned clone, and precedes H1d transport, remote review,
+and workflow canaries. H1d also consumes CP-GL1, CP-WA1 workspace reconciliation, and a
+typed current-writer/reviewer receipt before authority transfer.
 
 CP-W1 keeps producer authentication and protected decision provenance independent:
 
@@ -113,6 +119,7 @@ CP-W1 keeps producer authentication and protected decision provenance independen
 | Foundation manifest, result, classifier, facades | Proven gaps | `2026-07-20-cicd-control-foundation.md` | source commit only |
 | Exact-ref hooks and hook identity | Proven bypass | foundation plan Task 4 | source commit only |
 | Workspace-transition preservation | Proven preservation gap, separate from push authorization | admit CP-WA1 before any automated stash/archive transition | exact named-set round trip; source commit only |
+| Coordinator Git lineage and drift observation | Proven orchestration gap | admit a separate CP-GL1 plan before source mutation | exact protected main/topic ref-set receipt; no transport or merge authority |
 | Manifest self-protection, exceptions, dual-run parity, atomic ownership | Proven partial ownership | foundation plan Task 6 / CP-F5 | exact old/new parity plus unsafe/safe proof before one atomic source-only cutover |
 | Protected workflow evaluation and trust split | Proven bypass | admit `2026-07-20-cicd-workflow-portability.md` before mutation | independently sourced evaluator plus separate producer/policy receipts |
 | Stable aggregate gates and `merge_group` | Proven gap | admit `2026-07-20-cicd-workflow-portability.md` before mutation | exact-set real PR/merge-group canaries |
@@ -150,6 +157,7 @@ narrow the listed paths but may not add a path family without a new reviewed pro
 | CP-F3 | `ci.classifier.owner` | `ci-control/cp-f3` | `scripts/lib/ci-control/{git-input,classifier}.ts`, `scripts/ci-control-classify.ts`, manifest/package entries, and their tests | Exact-object unsafe/safe classifier proof / stop on ambient bytes, caller-selected risk, or unresolved graph input |
 | CP-H1 | `ci.hooks.owner` plus the existing repository-hygiene and publication decision owners for H1c only | `ci-control/cp-h1` | `.husky/pre-push`, `scripts/{pre-push-guard,hooks-installed-guard,safeguard-diagnostics,repo-hygiene-guard,publication-guard}.ts`, policy-neutral exact-object additions in `scripts/lib/ci-control/git-input.ts`, thin native adapter/reason registrations, manifest/package entries, and their existing companion tests | Exact multi-ref, hook-byte, and owner-native exact-range receipt proof / stop on foreign hook identity, unresolved ref, ambient source reads, partial traversal, native-owner duplication, or automatic hook mutation |
 | CP-WA1 | `ci.workspace-transition.owner` | `ci-control/cp-wa1` | separately admitted workspace snapshot/transition module, precondition schema adapter, and their tests | Exact named workspace-set round trip / stop on omitted ignored path, partial-staging drift, type/mode drift, or unexpected patch member |
+| CP-GL1 | `ci.git-lineage.owner` | `ci-control/cp-gl1` | only paths admitted by the separate CP-GL1 plan for coordinator observation, drift classification, and detached exact-OID review checkout | Exact protected main/topic ref-set and drift receipt / stop on uncoordinated fetch, missing/extra/duplicate/role-swapped ref, shared-ref mutation, or any transport/merge attempt |
 | CP-F4 | `ci.runner.owner` | `ci-control/cp-f4` | `scripts/ci-control-run.ts`, `package.json`, manifest command entries, `.husky/{pre-commit,pre-push}`, and their tests | Exact execution set, taint, and process-terminal proof / stop on shell substitution, missing child, or privilege after taint |
 | CP-F5 | `ci.self-protection.owner` | `ci-control/cp-f5` | safeguard/test-integrity owners and tests, `controls/ci-control-exceptions.json`, `scripts/lib/ci-control/exceptions.ts`, and manifest registrations | Old/new exact parity plus one atomic ownership cutover / stop on any parity difference, inline bypass, or ambiguous exception |
 | CP-W1 | `ci.protected-policy.owner` | `ci-control/cp-w1` | paths admitted by `2026-07-20-cicd-workflow-portability.md` under `.github/workflows/**`, protected evaluator code/tests, and manifest registrations | Independent producer and protected-policy receipts / stop on candidate execution, missing provenance, or undeclared path |
