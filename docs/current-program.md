@@ -6,9 +6,12 @@ source of truth for scoped planning artifacts.
 
 **Last refreshed:** 2026-07-22
 **Index source:** `docs/work-index.json` schema v5, generated at
-`2026-07-22T12:31:42Z` while HEAD was `a05d3fe72411439902f7606327bfab4d16717de5`
-**Index lineage at refresh:** source checkpoint `a05d3fe72411439902f7606327bfab4d16717de5`,
-whose parent is local integration merge `7f8f63c63b2561b7e0bf4a76fafee9c80dadfae8`.
+`2026-07-22T12:46:22Z` while HEAD was `c03b99a0e24a7d01da8f6b1fe05852efb7219e5a`
+**Index lineage at refresh:** source checkpoint `c03b99a0e24a7d01da8f6b1fe05852efb7219e5a`,
+whose parent is manifest checkpoint `2657ea7472840700f59dc5e927ce3b3038875260`;
+that checkpoint's parent is source checkpoint
+`a05d3fe72411439902f7606327bfab4d16717de5`, whose parent is local integration
+merge `7f8f63c63b2561b7e0bf4a76fafee9c80dadfae8`.
 That merge has first parent `626db87d34cb3b1d41bedd82757cb01be7035a6f`
 and second parent `abe6fe592a2f704deeccf8cc5338abd5a3f8997a`. The regenerated
 index reads the admitted worktree planning bytes while recording the checkpoint HEAD;

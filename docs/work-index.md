@@ -152,7 +152,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-07-09-metrics-realtime-and-watch-completeness.md` | plan | pending | body-marker | metrics-realtime-and-watch-completeness | 2026-07-10 |  |
 | `docs/superpowers/plans/2026-07-09-outbound-governor-and-flood-observability.md` | plan | pending | body-marker | outbound-governor-and-flood-observability | 2026-07-10 |  |
 | `docs/superpowers/plans/2026-07-09-privacy-erasure-and-media-confinement.md` | plan | pending | body-marker | privacy-erasure-and-media-confinement | 2026-07-10 |  |
-| `docs/superpowers/plans/2026-07-11-central-hub-release-proof-pilot.md` | plan | active | body-marker | central-hub-release-proof-pilot | 2026-07-12 |  |
+| `docs/superpowers/plans/2026-07-11-central-hub-release-proof-pilot.md` | plan | active | body-marker | central-hub-release-proof-pilot | 2026-07-22 |  |
 | `docs/superpowers/plans/2026-07-15-headless-fallback-runtime-alignment.md` | plan | unknown | body-marker | headless-fallback-runtime-alignment | 2026-07-15 |  |
 | `docs/superpowers/plans/2026-07-15-semantic-boundary-foundation.md` | plan | pending | body-marker | semantic-boundary-foundation | 2026-07-16 |  |
 | `docs/superpowers/plans/2026-07-16-boundary-contract-feedback-hardening.md` | plan | pending | body-marker | boundary-contract-feedback-hardening | 2026-07-17 |  |
@@ -218,4 +218,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-22T12:31:42Z from commit `a05d3fe72411439902f7606327bfab4d16717de5`
+- Generated at 2026-07-22T12:46:22Z from commit `c03b99a0e24a7d01da8f6b1fe05852efb7219e5a`
