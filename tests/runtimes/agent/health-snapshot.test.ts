@@ -291,7 +291,11 @@ function expectedProviderExecutionDetails(): Record<string, unknown> {
   return {
     providerExecution: {
       active: false,
+      activeWorkKind: null,
+      activeScopeHash: null,
       pending: 0,
+      oldestPendingWorkKind: null,
+      oldestPendingScopeHash: null,
       oldestWaitMs: 0,
       totalWaits: 0,
       maxPending: 0,

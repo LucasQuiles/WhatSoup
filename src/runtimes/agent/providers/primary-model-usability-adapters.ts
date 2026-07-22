@@ -21,6 +21,7 @@ import type {
   ProviderExecutionGate,
   ProviderExecutionLease,
 } from '../provider-execution-gate.ts';
+import { shortHash } from '../../../lib/short-hash.ts';
 
 export interface PrimaryModelProbeAdapterDeps {
   cwd?: string;
@@ -115,7 +116,9 @@ async function probeCliModel(
   const env = modelProbeEnv(provider, model, providerConfig, deps);
   let executionLease: ProviderExecutionLease | null = null;
   if (provider === 'opencode-cli' && deps.providerExecutionGate) {
-    executionLease = await deps.providerExecutionGate.acquire();
+    executionLease = await deps.providerExecutionGate.acquire({
+      work: { kind: 'probe', scopeHash: shortHash(`${provider}\0${model ?? ''}`) },
+    });
   }
   const releaseExecutionLease = (): void => {
     executionLease?.release();
