@@ -67,7 +67,14 @@ describe('v3.5 rail collapse + scroll-owner recipes (T5 b-02, mockup ≤1100px)'
     const collapseStart = chrome.indexOf('@media (max-width: 1100px)')
     expect(collapseStart).toBeGreaterThan(-1)
     const collapseBlock = chrome.slice(collapseStart, collapseStart + 2000)
-    expect(collapseBlock).toContain('.chrome-nav-item__label,')
+    // Labels leave visual layout via the sr-only clip recipe — NOT display:none —
+    // so icon-only rows keep their content-computed accessible name (label +
+    // Inbox unread count) for screen readers (b-02 cross-review finding).
+    expect(collapseBlock).toContain('.chrome-nav-item__label {')
+    expect(collapseBlock).toContain('clip: rect(0, 0, 0, 0);')
+    const labelRule = collapseBlock.slice(collapseBlock.indexOf('.chrome-nav-item__label {'))
+    expect(labelRule.slice(0, labelRule.indexOf('}'))).not.toContain('display: none;')
+    // Non-label chrome (sections, wordmark, ctx, host labels) still drops out.
     expect(collapseBlock).toContain('display: none;')
   })
 

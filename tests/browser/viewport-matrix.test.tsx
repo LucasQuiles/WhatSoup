@@ -791,8 +791,10 @@ describe('Drawer squeeze flip — container query at 900px (DD-18r)', () => {
 // page.viewport, mirroring the Fleet lg-flip rows. NavRail needs no hook
 // mocks: useRealtime has a default context value and useTheme is
 // provider-free (localStorage + document).
-// Labels drop out of layout per the mockup SSOT (display:none) — meaning is
-// carried by the glyph + the link's aria-label/title.
+// Labels drop out of layout per the mockup SSOT via the sr-only clip recipe
+// (NOT display:none) so icon-only rows keep their content-computed accessible
+// name — label text + Inbox unread count — for screen readers (b-02
+// cross-review finding); the glyph + link title reinforce meaning.
 // ---------------------------------------------------------------------------
 
 describe('Viewport matrix — rail collapse (v3.5 b-02)', () => {
@@ -819,8 +821,14 @@ describe('Viewport matrix — rail collapse (v3.5 b-02)', () => {
     expect(window.getComputedStyle(rail).width).toBe('64px');
     const label = container.querySelector('.chrome-nav-item__label') as HTMLElement;
     expect(label).not.toBeNull();
-    // Mockup SSOT: display:none (meaning carried by glyph + aria-label/title)
-    expect(window.getComputedStyle(label).display).toBe('none');
+    // Mockup SSOT: out of visual layout via sr-only clip — still displayed
+    // (display != none) so the accessible name survives; 1px box clipped away.
+    const cs = window.getComputedStyle(label);
+    expect(cs.display).not.toBe('none');
+    expect(cs.position).toBe('absolute');
+    expect(cs.width).toBe('1px');
+    expect(cs.height).toBe('1px');
+    expect(cs.clip).toBe('rect(0px, 0px, 0px, 0px)');
   });
 
   it('at short height (1440×500) the nav region owns the scroll and the utility dock stays mounted', async () => {
