@@ -101,6 +101,47 @@ describe('ImessageAdapter — handleInboundRecord', () => {
     await adapter.disconnect();
   });
 
+  it('does not let a rejected identity reserve its guid', async () => {
+    const { adapter } = makeAdapter();
+    await adapter.connect();
+    const received: InboundMessage[] = [];
+    adapter.on('message', (message) => received.push(message));
+
+    expect(adapter.handleInboundRecord(envelope({
+      guid: 'corrected-guid',
+      from: 'malformed@example',
+    }))).toBe(false);
+    expect(adapter.handleInboundRecord(envelope({
+      guid: 'corrected-guid',
+      from: 'user@users.noreply.github.com',
+    }))).toBe(true);
+    expect(adapter.handleInboundRecord(envelope({
+      guid: 'corrected-guid',
+      from: 'user@users.noreply.github.com',
+    }))).toBe(false);
+    expect(received).toHaveLength(1);
+    await adapter.disconnect();
+  });
+
+  it('does not let rejected identities evict an accepted guid', async () => {
+    const { adapter } = makeAdapter();
+    await adapter.connect();
+    const received: InboundMessage[] = [];
+    adapter.on('message', (message) => received.push(message));
+
+    expect(adapter.handleInboundRecord(envelope({ guid: 'accepted-guid' }))).toBe(true);
+    for (let index = 0; index < 1000; index += 1) {
+      expect(adapter.handleInboundRecord(envelope({
+        guid: `rejected-${index}`,
+        from: 'malformed@example',
+      }))).toBe(false);
+    }
+
+    expect(adapter.handleInboundRecord(envelope({ guid: 'accepted-guid' }))).toBe(false);
+    expect(received).toHaveLength(1);
+    await adapter.disconnect();
+  });
+
   it('does not emit when disconnected', async () => {
     const { adapter } = makeAdapter();
     const received: InboundMessage[] = [];
