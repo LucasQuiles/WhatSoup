@@ -8,7 +8,18 @@ import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.t
 import { PROVIDER_API_KEY_SERVICES } from '../../lib/provider-key-service.ts';
 import { normalizeFallbackEntriesFromInstanceConfig } from '../../core/fallback-chain.ts';
 import { extractLocal } from '../../core/access-list.ts';
-import { bareNumber } from '../../core/jid-constants.ts';
+import {
+  bareNumber,
+  fromImessageJid,
+  fromSignalJid,
+  fromSmsJid,
+  isSenderJidForTransport,
+} from '../../core/jid-constants.ts';
+import {
+  canonicalizeImessageDirectIdentity,
+  SIGNAL_UUID_RE,
+} from '../../core/transport-refs.ts';
+import { isE164Wire } from '../../lib/phone.ts';
 import { resolveAgentModel } from '../../instance-loader.ts';
 import type { FleetDiscovery, DiscoveredInstance } from '../discovery.ts';
 import type { HealthPoller, InstanceStatus } from '../health-poller.ts';
@@ -41,6 +52,46 @@ function formatUptime(seconds: number | undefined | null): string | null {
 function phoneFromJid(jid: string | undefined | null): string {
   if (!jid) return 'unknown';
   return extractLocal(jid);
+}
+
+function lineSelfId(
+  transport: string,
+  genericSelfId: unknown,
+  accountJid: unknown,
+): string {
+  for (const candidate of [genericSelfId, accountJid]) {
+    if (typeof candidate !== 'string') continue;
+    const raw = candidate.trim();
+    if (!raw) continue;
+
+    if (transport === 'twilio') {
+      const identity = fromSmsJid(raw);
+      if (isE164Wire(identity)) return identity;
+      continue;
+    }
+    if (transport === 'signal') {
+      const identity = fromSignalJid(raw);
+      const normalized = identity.toLowerCase();
+      if (isE164Wire(identity)) return identity;
+      if (SIGNAL_UUID_RE.test(normalized)) return normalized;
+      continue;
+    }
+    if (transport === 'imessage') {
+      const identity = fromImessageJid(raw);
+      const normalized = canonicalizeImessageDirectIdentity(identity);
+      if (normalized !== null) return normalized;
+      continue;
+    }
+    if (transport === 'baileys') {
+      if (/^\d{7,15}$/.test(raw)) return raw;
+      if (isSenderJidForTransport(raw, transport)) return phoneFromJid(raw);
+      continue;
+    }
+
+    const normalized = raw.toLowerCase();
+    if (normalized !== 'unknown' && normalized !== 'not connected') return raw;
+  }
+  return 'unknown';
 }
 
 
@@ -476,7 +527,17 @@ export function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | 
     : rawLinkedStatus;
 
   const uptimeSec = dig(h, 'uptime_seconds') as number | undefined;
-  const accountJid = dig(h, 'whatsapp', 'account_jid') as string | undefined;
+  const accountJid = dig(h, 'whatsapp', 'account_jid');
+  const healthTransportValue = dig(h, 'transport', 'kind');
+  const healthTransport = typeof healthTransportValue === 'string'
+    ? healthTransportValue
+    : undefined;
+  const transport = inst.transport ?? healthTransport ?? 'baileys';
+  const selfId = lineSelfId(
+    transport,
+    dig(h, 'transport', 'selfId'),
+    accountJid,
+  );
   const messagesTotal = dig(h, 'sqlite', 'messages_total') as number | undefined;
   const unread = dig(h, 'runtime', 'passive', 'unreadCount') as number | undefined;
   const queueDepth = dig(h, 'runtime', 'chat', 'queueDepth') as number | undefined;
@@ -508,7 +569,7 @@ export function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | 
     accessMode: inst.accessMode,
     healthPort: inst.healthPort,
     socketPath: inst.socketPath,
-    transport: inst.transport ?? 'baileys',
+    transport,
 
     // Poller status
     status: isConfigError ? 'config_error' : (poll?.status ?? 'unknown'),
@@ -522,7 +583,10 @@ export function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | 
     sharedCwdWith: inst.sharedCwdWith ?? null,
 
     // Derived from health snapshot
-    phone: phoneFromJid(accountJid),
+    // phone is retained as a compatibility response field. For non-phone
+    // transports it carries the canonical provider self identity.
+    phone: selfId,
+    selfId,
     uptime: formatUptime(uptimeSec),
     messagesTotal: messagesTotal ?? 0,
     messagesToday: opts.messagesToday ?? messagesTotal ?? 0,

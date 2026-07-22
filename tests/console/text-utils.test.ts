@@ -8,6 +8,7 @@ import {
   formatCount,
   formatPhone,
   getInitials,
+  lineIdentity,
   resolveDisplayName,
   stripMarkdown,
 } from '../../console/src/lib/text-utils'
@@ -45,6 +46,61 @@ describe('console text utilities', () => {
     expect(getInitials('Ada Lovelace')).toBe('AL')
     expect(stripMarkdown('**hello** `world`')).toBe('hello world')
     expect(resolveDisplayName('15551234567@s.whatsapp.net')).toBe('+1 555-123-4567')
+  })
+
+  it.each([
+    ['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@signal', 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'],
+    ['+15550001111@signal', '+1 555-000-1111'],
+    ['Z3JvdXAtY29udmVyc2F0aW9u@signal', 'Z3JvdXAtY29udmVyc2F0aW9u'],
+    ['owner@example.com@imessage', 'owner@example.com'],
+    ['iMessage;+;chat123@imessage', 'iMessage;+;chat123'],
+    ['+15550002222@sms', '+1 555-000-2222'],
+    ['+15550002222evil@sms', '+15550002222evil@sms'],
+    ['owner@example.com', 'owner@example.com'],
+  ])('preserves transport-aware conversation identity %s', (identity, expected) => {
+    expect(resolveDisplayName(identity)).toBe(expected)
+  })
+
+  it.each([
+    ['@signal', '—'],
+    ['@imessage', '—'],
+    ['unknown@signal', '—'],
+    ['not connected@imessage', '—'],
+    ['+15550001111evil@signal', '+15550001111evil@signal'],
+    ['safe\u202Eevil@signal', 'safe\\u202Eevil@signal'],
+    ['safe\u0007evil@imessage', 'safe\\u0007evil@imessage'],
+  ])('fails closed for malformed or control-bearing transport identity %s', (identity, expected) => {
+    expect(resolveDisplayName(identity)).toBe(expected)
+  })
+
+  it('prefers the generic line self identity over the legacy phone field', () => {
+    expect(lineIdentity({
+      transport: 'signal',
+      selfId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@signal',
+      phone: '+15550009999',
+    })).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
+    expect(lineIdentity({ phone: '+15550009999' })).toBe('+15550009999')
+    expect(lineIdentity({ selfId: 'UNKNOWN', phone: '+15550009999' })).toBe('+15550009999')
+    expect(lineIdentity({
+      transport: 'future',
+      selfId: 'opaque@signal',
+      phone: '+15550009999',
+    })).toBe('opaque@signal')
+    expect(lineIdentity({
+      transport: 'imessage',
+      selfId: 'opaque@signal',
+      phone: '+15550009999',
+    })).toBe('opaque@signal')
+    expect(lineIdentity({
+      transport: 'signal',
+      selfId: 'unknown@signal',
+      phone: '+15550009999',
+    })).toBe('+15550009999')
+    expect(lineIdentity({
+      transport: 'signal',
+      selfId: 'safe\u202Eevil@signal',
+      phone: '+15550009999',
+    })).toBe('safe\\u202Eevil@signal')
   })
 
   it('formats linked IDs and non-US phone-like identifiers for display', () => {

@@ -6,7 +6,7 @@ import { useLine, useChats, useMessages, useAccess, useLogs, useTyping, useCheck
 import { useMetrics } from '../hooks/use-metrics'
 import type { MetricsRange } from '../types'
 import { getPreference, setPreference } from '../lib/preferences'
-import { buildSelfJid, formatCount } from '../lib/text-utils'
+import { buildSelfJid, formatCount, lineIdentity } from '../lib/text-utils'
 import { useToast } from '../hooks/toast-context'
 import { api } from '../lib/api'
 import ModeBadge from '../components/ModeBadge'
@@ -212,7 +212,7 @@ export default function LineDetail() {
             <LineTags line={line} />
           </div>
           <div className="font-mono text-text-2 text-data">
-            {line.phone}
+            {lineIdentity(line)}
           </div>
         </div>
 
@@ -378,7 +378,7 @@ export default function LineDetail() {
                   lineName={name || ''}
                   myJid={buildSelfJid(
                     line.transport ?? line.health?.transport?.kind,
-                    line.health?.transport?.selfId ?? line.phone,
+                    line.health?.transport?.selfId ?? lineIdentity(line),
                   )}
                 />
               )}

@@ -43,10 +43,11 @@ import { api } from "../lib/api";
 import { useToast } from "../hooks/toast-context";
 import { formatRelative } from "../lib/format-time";
 import {
-  formatPhone,
   displayInstanceName,
   formatCompact,
   formatCount,
+  lineIdentity,
+  resolveDisplayName,
 } from "../lib/text-utils";
 import { getProvider, getProviderColor } from "../lib/providers";
 import {
@@ -220,9 +221,9 @@ const FleetDrawer: FC<FleetDrawerProps> = ({
             {/* KV block — identity + activity fields (C-1: fields the table showed + drop-policy extras) */}
             <dl className="soup-drawer-kv">
               <div className="soup-drawer-kv__row">
-                <dt className="soup-drawer-kv__key">Phone</dt>
+                <dt className="soup-drawer-kv__key">Identity</dt>
                 <dd className="soup-drawer-kv__val">
-                  {formatPhone(line.phone)}
+                  {resolveDisplayName(lineIdentity(line))}
                 </dd>
               </div>
               <div className="soup-drawer-kv__row">
@@ -1244,7 +1245,7 @@ const SoupKitchen: FC = () => {
                             />
                             <TransportBadge kind={line.transport ?? line.health?.transport?.kind} />
                             <span className="c-label">
-                              {formatPhone(line.phone)}
+                              {resolveDisplayName(lineIdentity(line))}
                             </span>
                             {/* #1877 crit 5: surface the AGE of the last live
                                 health observation on the line-list surface

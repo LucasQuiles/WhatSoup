@@ -1644,12 +1644,27 @@ describe('SoupKitchen drawer', () => {
     expect(screen.queryByRole('complementary')).toBeNull();
   });
 
-  it('drawer KV block shows phone and provider fields', () => {
+  it('drawer KV block shows identity and provider fields', () => {
     renderPage({ lines: [lineA] });
     fireEvent.click(screen.getByText(displayInstanceName('line-a')).closest('tr')!);
     const drawer = screen.getByRole('complementary');
-    expect(within(drawer).getByText('Phone')).toBeDefined();
+    expect(within(drawer).getByText('Identity')).toBeDefined();
     expect(within(drawer).getByText('Provider')).toBeDefined();
+  });
+
+  it('renders an iMessage self identity in both the line table and drawer', () => {
+    const imessageLine = makeLine({
+      name: 'imessage-line',
+      transport: 'imessage',
+      selfId: 'owner@example.com',
+      phone: '+15550009999',
+    });
+    renderPage({ lines: [imessageLine] });
+
+    const tableIdentity = screen.getByText('owner@example.com');
+    fireEvent.click(tableIdentity.closest('tr')!);
+    expect(within(screen.getByRole('complementary')).getByText('owner@example.com')).toBeDefined();
+    expect(screen.queryByText('+15550009999')).toBeNull();
   });
 
   it('drawer log error state exposes retry for the selected line log query', () => {

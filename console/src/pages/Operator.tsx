@@ -18,7 +18,7 @@ import {
 
 import { useToast } from '../hooks/toast-context'
 import { useQueryClient } from '@tanstack/react-query'
-import { displayInstanceName } from '../lib/text-utils'
+import { displayInstanceName, lineIdentity } from '../lib/text-utils'
 import { statusWashClass, statusSeverity } from '../lib/status-severity'
 import { computeKpis } from '../lib/compute-kpis'
 const RelinkModal = lazy(() => import('../components/RelinkModal'))
@@ -262,7 +262,7 @@ export default function Operator() {
                         <ModeBadge mode={line.mode} />
                         <LineTags line={line} />
                       </div>
-                      <span className="c-label">{line.phone}</span>
+                      <span className="c-label">{lineIdentity(line)}</span>
                     </div>
 
                     {/* Row 2: Heartbeat + runtime stats */}

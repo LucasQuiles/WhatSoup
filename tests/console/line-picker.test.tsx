@@ -116,6 +116,34 @@ describe('LinePicker (toolbar variant)', () => {
     expect(screen.getByText('+15550002222')).toBeDefined()
   })
 
+  it('renders a non-phone transport self identity instead of a compatibility phone placeholder', () => {
+    const signalLine = line({
+      name: 'signal-line',
+      transport: 'signal',
+      selfId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      phone: '+15550009999',
+    })
+    render(<LinePicker lines={[signalLine]} activeLine="signal-line" onSelect={vi.fn()} />)
+
+    fireEvent.click(screen.getByRole('combobox', { name: /signal-line/ }))
+    expect(screen.getByText('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')).toBeDefined()
+    expect(screen.queryByText('+15550009999')).toBeNull()
+  })
+
+  it('does not strip a provider-like suffix from an unknown transport identity', () => {
+    const futureLine = line({
+      name: 'future-line',
+      transport: 'future',
+      selfId: 'opaque@signal',
+      phone: '+15550009999',
+    })
+    render(<LinePicker lines={[futureLine]} activeLine="future-line" onSelect={vi.fn()} />)
+
+    fireEvent.click(screen.getByRole('combobox', { name: /future-line/ }))
+    expect(screen.getByText('opaque@signal')).toBeDefined()
+    expect(screen.queryByText('opaque')).toBeNull()
+  })
+
   it('calls onSelect with the line name and closes the panel', () => {
     const onSelect = vi.fn()
     render(<LinePicker lines={sampleLines} activeLine="alpha" onSelect={onSelect} />)

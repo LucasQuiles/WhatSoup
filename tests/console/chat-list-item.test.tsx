@@ -30,6 +30,27 @@ describe('ChatListItem', () => {
     expect(screen.getByText('SC')).toBeDefined()
   })
 
+  it.each([
+    ['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@signal', 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'],
+    ['owner@example.com@imessage', 'owner@example.com'],
+    ['iMessage;+;chat123@imessage', 'iMessage;+;chat123'],
+    ['+15550003333evil@sms', '+15550003333evil@sms'],
+  ])('renders a transport conversation fallback without phone coercion', (name, expected) => {
+    render(<ChatListItem chat={chat({ name })} isSelected={false} onClick={() => {}} />)
+
+    expect(screen.getByText(expected)).toBeDefined()
+    expect(screen.getByRole('option').getAttribute('aria-label')).toBe(`Open conversation with ${expected}`)
+  })
+
+  it('renders bidi controls as visible escapes in the label and accessible name', () => {
+    render(<ChatListItem chat={chat({ name: 'safe\u202Eevil@signal' })} isSelected={false} onClick={() => {}} />)
+
+    expect(screen.getByText('safe\\u202Eevil@signal')).toBeDefined()
+    expect(screen.getByRole('option').getAttribute('aria-label')).toBe(
+      'Open conversation with safe\\u202Eevil@signal',
+    )
+  })
+
   it('strips markdown from the preview line', () => {
     render(
       <ChatListItem

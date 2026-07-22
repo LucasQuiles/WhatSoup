@@ -26,7 +26,7 @@ import { Button } from './primitives/Button';
 import { Popover, popoverOptionId, usePopoverKeyboard } from './primitives/Popover';
 import type { PopoverOption } from './primitives/Popover';
 import type { LineInstance } from '../types';
-import { displayInstanceName } from '../lib/text-utils';
+import { displayInstanceName, lineIdentity } from '../lib/text-utils';
 
 // ---------------------------------------------------------------------------
 // Props — public contract preserved
@@ -104,7 +104,7 @@ export default function LinePicker({
           <StatusCell status={line.status} />
           <span title={line.name} className="flex-1 min-w-0 truncate">{line.name}</span>
           <ModeBadge mode={line.mode} />
-          <span className="c-label ml-auto flex-shrink-0">{line.phone}</span>
+          <span className="c-label ml-auto flex-shrink-0">{lineIdentity(line)}</span>
         </span>
       ),
     }),

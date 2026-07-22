@@ -27,7 +27,10 @@ export interface MetricAvailabilityMap {
 
 export interface LineInstance {
   name: string;
+  /** Compatibility field: canonical line identity, including non-phone providers. */
   phone: string;
+  /** Transport-neutral self identity from the generic health block. */
+  selfId?: string;
   transport?: string;
   mode: Mode;
   provider?: string;
