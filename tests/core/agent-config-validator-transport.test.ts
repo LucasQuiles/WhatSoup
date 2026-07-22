@@ -848,3 +848,122 @@ describe('validateInstanceConfig — imessageConfig', () => {
     expect(validateInstanceConfig(raw, ctx())?.field).toBe('imessageConfig.rateLimit.messagesPerMinute');
   });
 });
+
+// ---------------------------------------------------------------------------
+// signalConfig
+// ---------------------------------------------------------------------------
+
+function validSignalConfig(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    account: 'ops-line',
+    phoneNumber: '+15551110000',
+    socketPath: '/run/user/1000/whatsoup/signal.sock',
+    inboundMode: 'poll',
+    pollIntervalMs: 15000,
+    rateLimit: { messagesPerMinute: 30 },
+    ...overrides,
+  };
+}
+
+describe('validateInstanceConfig — signalConfig', () => {
+  it('requires signalConfig for the signal transport', () => {
+    const err = validateInstanceConfig(baseRaw({ transport: 'signal' }), ctx());
+    expect(err).toMatchObject({
+      field: 'signalConfig',
+      message: 'signalConfig is required when transport is "signal"',
+    });
+  });
+
+  it('rejects signalConfig on every other transport', () => {
+    const err = validateInstanceConfig(baseRaw({ signalConfig: validSignalConfig() }), ctx());
+    expect(err?.field).toBe('signalConfig');
+    expect(err?.message).toMatch(/only valid when transport is "signal"/);
+  });
+
+  it('accepts a poll-only UNIX socket configuration', () => {
+    const raw = baseRaw({
+      transport: 'signal',
+      signalConfig: validSignalConfig({ socketPath: '/tmp/signalc.sock' }),
+    });
+    expect(validateInstanceConfig(raw, ctx())).toBeNull();
+  });
+
+  it('accepts a poll-only TCP configuration without a socket path', () => {
+    const raw = baseRaw({
+      transport: 'signal',
+      signalConfig: validSignalConfig({ socketPath: undefined, tcpHost: '127.0.0.1', tcpPort: 7583 }),
+    });
+    expect(validateInstanceConfig(raw, ctx())).toBeNull();
+  });
+
+  it('fails closed on stream mode until streaming has an exercised implementation', () => {
+    const err = validateInstanceConfig(baseRaw({
+      transport: 'signal',
+      signalConfig: validSignalConfig({ inboundMode: 'stream' }),
+    }), ctx());
+    expect(err).toMatchObject({
+      field: 'signalConfig.inboundMode',
+      message: "signalConfig.inboundMode must be 'poll'; streaming is not implemented",
+    });
+  });
+
+  it.each([
+    ['account', { account: 'Bad Account' }],
+    ['phoneNumber', { phoneNumber: '5551110000' }],
+    ['socketPath', { socketPath: 'relative.sock' }],
+    ['tcpPort', { tcpPort: 70000 }],
+    ['tcpHost', { tcpHost: '' }],
+    ['pollIntervalMs', { pollIntervalMs: 0 }],
+    ['pollIntervalMs', { pollIntervalMs: 1.5 }],
+    ['pollIntervalMs', { pollIntervalMs: 2_147_483_648 }],
+    ['rateLimit.messagesPerMinute', { rateLimit: { messagesPerMinute: 0 } }],
+    ['rateLimit.messagesPerMinute', { rateLimit: { messagesPerMinute: 1.5 } }],
+    ['rateLimit.messagesPerMinute', { rateLimit: { messagesPerMinute: 601 } }],
+  ])('rejects an invalid signalConfig.%s', (field, overrides) => {
+    const err = validateInstanceConfig(baseRaw({
+      transport: 'signal',
+      signalConfig: validSignalConfig(overrides),
+    }), ctx());
+    expect(err?.field).toBe(`signalConfig.${field}`);
+  });
+
+  it('rejects simultaneous UNIX socket and TCP endpoints', () => {
+    const err = validateInstanceConfig(baseRaw({
+      transport: 'signal',
+      signalConfig: validSignalConfig({ socketPath: '/tmp/signalc.sock', tcpPort: 7583 }),
+    }), ctx());
+    expect(err?.field).toBe('signalConfig');
+    expect(err?.message).toMatch(/exactly one of socketPath or tcpPort/);
+  });
+
+  it('requires exactly one endpoint', () => {
+    const err = validateInstanceConfig(baseRaw({
+      transport: 'signal',
+      signalConfig: validSignalConfig({ socketPath: undefined }),
+    }), ctx());
+    expect(err?.field).toBe('signalConfig');
+    expect(err?.message).toMatch(/exactly one/);
+  });
+
+  it('rejects non-loopback plaintext TCP endpoints', () => {
+    const err = validateInstanceConfig(baseRaw({
+      transport: 'signal',
+      signalConfig: validSignalConfig({
+        socketPath: undefined,
+        tcpHost: '192.0.2.10',
+        tcpPort: 7583,
+      }),
+    }), ctx());
+    expect(err?.field).toBe('signalConfig.tcpHost');
+    expect(err?.message).toMatch(/loopback/);
+  });
+
+  it('rejects a TCP host without a TCP port', () => {
+    const err = validateInstanceConfig(baseRaw({
+      transport: 'signal',
+      signalConfig: validSignalConfig({ tcpHost: '127.0.0.1' }),
+    }), ctx());
+    expect(err?.field).toBe('signalConfig.tcpHost');
+    expect(err?.message).toMatch(/requires signalConfig.tcpPort/);
+  });
+});

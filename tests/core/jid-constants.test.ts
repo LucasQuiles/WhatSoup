@@ -163,6 +163,12 @@ describe('isGroupJid', () => {
     expect(isGroupJid('test-group-id@g.us')).toBe(true);
   });
 
+  it('recognizes only base64 Signal group addresses as groups', () => {
+    expect(isGroupJid('Z3JvdXAtY29udmVyc2F0aW9u@signal')).toBe(true);
+    expect(isGroupJid('+155500000000001@signal')).toBe(false);
+    expect(isGroupJid('01234567-89ab-cdef-0123-456789abcdef@signal')).toBe(false);
+  });
+
   it('returns false for non-group JIDs', () => {
     expect(isGroupJid('15551234567@s.whatsapp.net')).toBe(false);
     expect(isGroupJid('12345@lid')).toBe(false);

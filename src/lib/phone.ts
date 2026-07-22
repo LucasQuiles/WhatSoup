@@ -38,6 +38,21 @@ export function normalizePhoneE164(input: string | number | null | undefined): s
   return digits;
 }
 
+/** True only for a canonical, plus-prefixed E.164 provider wire identity. */
+export function isE164Wire(input: string): boolean {
+  return /^\+[1-9]\d{6,14}$/.test(input);
+}
+
+/** Normalize phone-formatted input to provider-wire E.164, rejecting embedded junk. */
+export function normalizePhoneE164Wire(
+  input: string | number | null | undefined,
+): string | null {
+  const text = phoneText(input).trim();
+  if (!/^\+?[\d\s().-]+$/.test(text)) return null;
+  const wire = `+${normalizePhoneE164(text)}`;
+  return isE164Wire(wire) ? wire : null;
+}
+
 /**
  * A phone-shaped local part (7-15 digits, E.164 ballpark). Shape check only —
  * a bare 12-15-digit local can also be an unmapped LID (see
@@ -66,6 +81,12 @@ export function isAdminPhone(phone: string | number | null | undefined, adminPho
   // Exact match first (fast path)
   if (adminPhones.has(rawPhone)) return true;
 
+  // Non-phone transport identities (for example Signal UUIDs and AppleID
+  // emails) are authorization identifiers too, but they must never enter the
+  // digit-normalization path. Otherwise a prefixed/suffixed lookalike can
+  // collapse to the same digits as the configured identity.
+  if (/[A-Za-z@]/.test(rawPhone)) return false;
+
   // QR-033: this is an AUTH boundary (admin commands, elevated access), so it must
   // NOT be a fuzzy suffix match. The previous bidirectional `>=7-digit` suffix test
   // granted admin to ANY number ending in the admin's (country-code-less) digits — an
@@ -80,10 +101,10 @@ export function isAdminPhone(phone: string | number | null | undefined, adminPho
   // a real number; an international admin whose national number is <8 digits must be
   // configured with its full country code.
   const digits = normalizePhone(rawPhone);
-  if (digits.length < 8) return false;
+  if (digits.length < 8 || digits.length > 15) return false;
   for (const admin of adminPhones) {
     const adminDigits = normalizePhone(admin);
-    if (adminDigits.length < 8) continue;
+    if (adminDigits.length < 8 || adminDigits.length > 15) continue;
     if (digits === adminDigits) return true;
     const longer = digits.length >= adminDigits.length ? digits : adminDigits;
     const shorter = digits.length >= adminDigits.length ? adminDigits : digits;

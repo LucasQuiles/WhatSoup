@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SOUP — Welcome (first run)</title>
+<style>
+:root, [data-theme="dark"] {
+  --base:#1E1A15; --raised:#27221C; --t1:#F1ECDF; --t2:#CAC1AF; --t3:#9A907E;
+  --hair:#383024; --hair-2:#473B2C; --hair-3:#5A4C39; --accent:#6BA6FF; --accent-fg:#0A0E14; --m-passive:#3BD6B0;
+  --shadow-lift:0 1px 2px rgb(0 0 0/.30), 0 8px 24px rgb(0 0 0/.28);
+}
+[data-theme="light"] {
+  --base:#FAF6EE; --raised:#FDFAF3; --t1:#221C12; --t2:#524833; --t3:#645849;
+  --hair:#DED4BF; --hair-2:#CDC2A9; --hair-3:#B4A78C; --accent:#2E66E4; --accent-fg:#fff; --m-passive:#096853;
+  --shadow-lift:0 1px 2px rgb(60 45 20/.10), 0 10px 28px rgb(60 45 20/.14);
+}
+* { margin:0; box-sizing:border-box; }
+body {
+  background:var(--base); color:var(--t1); min-height:100vh;
+  font:400 15px/1.6 "Hanken Grotesk",Arial,sans-serif;
+  display:flex; flex-direction:column; align-items:center; justify-content:center; padding:32px 20px;
+  position:relative; overflow:hidden;
+}
+/* abstract glyph-geometry watermark (journey-surface imagery, L7) */
+.wm-glyph { position:fixed; z-index:0; opacity:.05; pointer-events:none; fill:var(--t1); }
+.wm-glyph.g1 { width:340px; height:340px; top:-90px; left:-110px; transform:rotate(-14deg); }
+.wm-glyph.g2 { width:260px; height:260px; bottom:-70px; right:-80px; transform:rotate(11deg); opacity:.04; }
+.hero, .props { position:relative; z-index:1; }
+.hero { text-align:center; max-width:640px; }
+.nameplate { display:inline-flex; align-items:center; gap:14px; margin-bottom:34px; }
+.nameplate .tick { width:10px; height:10px; border-radius:1px; background:var(--m-passive); }
+.nameplate .wm { font:800 34px/40px "Bricolage Grotesque",sans-serif; letter-spacing:-0.06em; }
+.nameplate .wm b { color:var(--accent); }
+h1 { font:800 44px/50px "Bricolage Grotesque",sans-serif; letter-spacing:-0.035em; margin-bottom:16px; }
+h1 .accent { color:var(--accent); }
+.sub { color:var(--t2); font-size:16px; max-width:46ch; margin:0 auto 34px; }
+.cta { display:flex; gap:12px; justify-content:center; }
+.btn { display:inline-flex; align-items:center; gap:8px; padding:13px 24px; border-radius:10px; border:1px solid var(--hair); background:var(--raised); color:var(--t1); font:600 14px/18px inherit; cursor:pointer; transition:transform .16s ease-out, box-shadow .16s ease-out; }
+.btn:hover { transform:translateY(-2px); box-shadow:var(--shadow-lift); }
+.btn.primary { background:var(--accent); color:var(--accent-fg); border-color:transparent; padding:14px 28px; font-size:15px; }
+.btn.ghost2 { background:transparent; border:1px solid var(--hair-3); color:var(--t2); padding:12px 22px; }
+.btn.ghost2:hover { color:var(--t1); }
+.props { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-top:56px; max-width:780px; }
+.prop { background:var(--raised); border:1px solid var(--hair); border-radius:12px; padding:18px; text-align:left; transition:transform .18s ease-out, box-shadow .18s ease-out; }
+.prop:hover { transform:translateY(-2px); box-shadow:var(--shadow-lift); }
+.prop .n { font:600 11px/14px "IBM Plex Mono",monospace; letter-spacing:.1em; color:var(--t3); text-transform:uppercase; margin-bottom:8px; }
+.prop h3 { font:700 15px/20px "Bricolage Grotesque",sans-serif; margin-bottom:6px; }
+.prop p { color:var(--t2); font-size:12.5px; }
+.theme-toggle { position:fixed; top:16px; right:16px; display:inline-flex; align-items:center; gap:8px; background:transparent; border:1px solid var(--hair); border-radius:6px; color:var(--t2); padding:8px 14px; cursor:pointer; font:600 12.5px/16px inherit; transition:transform .16s ease-out, box-shadow .16s ease-out; }
+.theme-toggle:hover { transform:translateY(-1px); box-shadow:var(--shadow-lift); }
+/* light presence: card separation + control borders (locked-token consumption) */
+[data-theme="light"] .panel, [data-theme="light"] .scard, [data-theme="light"] .kpi,
+[data-theme="light"] .dcard, [data-theme="light"] .pcard, [data-theme="light"] .acard,
+[data-theme="light"] .prop, [data-theme="light"] .mstat, [data-theme="light"] .fstrip,
+[data-theme="light"] .card, [data-theme="light"] .ch, [data-theme="light"] .swatches .sw,
+[data-theme="light"] .pair, [data-theme="light"] .bub, [data-theme="light"] .qcard { box-shadow:var(--shadow-rest); }
+[data-theme="light"] .btn.ghost, [data-theme="light"] .btn.sm:not(.upd):not(.danger):not(.no),
+[data-theme="light"] .ibtn, [data-theme="light"] .cap, [data-theme="light"] .fstrip,
+[data-theme="light"] .theme-toggle { border-color:var(--hair-3); }
+@media (max-width:700px){ h1{font-size:32px;line-height:38px} .props{grid-template-columns:1fr} }
+</style>
+</head>
+<body>
+<button class="theme-toggle" onclick="document.documentElement.dataset.theme=document.documentElement.dataset.theme==='dark'?'light':'dark'"><svg width="14" height="14" viewBox="0 0 16 16" style="vertical-align:-2px"><circle cx="8" cy="8" r="3.2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6 13 13M13 3l-1.4 1.4M4.4 11.6 3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg> theme</button>
+<svg class="wm-glyph g1" viewBox="0 0 16 16"><path d="M8 1a7 7 0 0 0-6 10.5L1 15l3.6-1A7 7 0 1 0 8 1z"/></svg>
+<svg class="wm-glyph g2" viewBox="0 0 16 16"><path d="M8 1.5 14 5v6l-6 3.5L2 11V5z"/></svg>
+<div class="hero">
+  <div class="nameplate"><span class="tick"></span><span class="wm">SO<b>U</b>P</span></div>
+  <h1>Run your agents<br>like a <span class="accent">fleet.</span></h1>
+  <p class="sub">One calm console for every channel — WhatsApp, Signal, iMessage, socials and more. Hatch an agent, give it a line, and watch it work.</p>
+  <div class="cta">
+    <button class="btn primary">Hatch your first agent →</button>
+    <button class="btn ghost2">Open the Fleet</button>
+  </div>
+</div>
+<div class="props">
+  <div class="prop"><div class="n">01 — Hatch</div><h3>An agent in minutes</h3><p>Pick a kind, link a channel, watch it come alive. Persona, brain and permissions included.</p></div>
+  <div class="prop"><div class="n">02 — Command</div><h3>Every line in view</h3><p>Real-time fleet across all your channels and deployments. Attention finds you, not the reverse.</p></div>
+  <div class="prop"><div class="n">03 — Trust</div><h3>You stay in charge</h3><p>Grants decide what agents can see and do. Every self-suggested change waits for your approval.</p></div>
+</div>
+</body>
+</html>
