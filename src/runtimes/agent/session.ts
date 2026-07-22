@@ -1340,28 +1340,33 @@ export class SessionManager {
     this.durableFailureClosed = true;
   }
 
-  private persistedResumeProvider(
+  private foreignResumeOwnership(
     providerSessionId: string,
     existingRowId: number | undefined,
-  ): string | null {
-    if (existingRowId === undefined) return null;
-    const namespaces = this.db.raw.prepare(
-      `SELECT DISTINCT provider
+  ): { rowId: number; provider: string } | null {
+    const rowPredicates = [
+      'session_id = ?',
+      'workspace_key = ?',
+      `status IN ('active', 'suspended', 'orphaned', 'crashed')`,
+    ];
+    const rowBindings: Array<string | number> = [providerSessionId, this.conversationKey];
+    if (existingRowId !== undefined) {
+      rowPredicates.push('id = ?');
+      rowBindings.push(existingRowId);
+    }
+    const rows = this.db.raw.prepare(
+      `SELECT id, provider
        FROM agent_sessions
-       WHERE session_id = ?`,
-    ).all(providerSessionId) as Array<{ provider: string | null }>;
-    if (namespaces.length !== 1 || namespaces[0]!.provider === null) return null;
-    const row = this.db.raw.prepare(
-      `SELECT provider
-       FROM agent_sessions
-       WHERE id = ?
-         AND session_id = ?
-         AND workspace_key = ?
-         AND status IN ('active', 'suspended', 'orphaned', 'crashed')`,
-    ).get(existingRowId, providerSessionId, this.conversationKey) as {
+       WHERE ${rowPredicates.join('\n         AND ')}
+       ORDER BY id`,
+    ).all(...rowBindings) as Array<{
+      id: number;
       provider: string | null;
-    } | undefined;
-    return row?.provider === namespaces[0]!.provider ? row.provider : null;
+    }>;
+    if (rows.length !== 1 || rows[0]!.provider === null || rows[0]!.provider === this.provider) {
+      return null;
+    }
+    return { rowId: rows[0]!.id, provider: rows[0]!.provider };
   }
 
   private closeDurableFailureLifecycle(
@@ -1468,20 +1473,31 @@ export class SessionManager {
     const checkpointWatchdogState = this.readCheckpointWatchdogState();
     let resolvedRowId = existingRowId;
     if (resumeSessionId !== undefined) {
-      try {
-        resolvedRowId = resolveResumableAgentSession(this.db, {
-          provider,
-          providerSessionId: resumeSessionId,
-          ...(existingRowId === undefined ? {} : { agentSessionRowId: existingRowId }),
-          workspaceKey: this.conversationKey,
-        }).id;
-      } catch (err) {
-        const persistedProvider = this.persistedResumeProvider(resumeSessionId, existingRowId);
-        if (persistedProvider !== null && existingRowId !== undefined) {
-          this.retireUnsupportedResume(resumeSessionId, existingRowId, persistedProvider);
+      const resumeIdentity = {
+        provider,
+        providerSessionId: resumeSessionId,
+        ...(existingRowId === undefined ? {} : { agentSessionRowId: existingRowId }),
+        workspaceKey: this.conversationKey,
+      };
+      const foreignOwnership = this.foreignResumeOwnership(resumeSessionId, existingRowId);
+      if (foreignOwnership !== null) {
+        let ownershipError: unknown = null;
+        try {
+          resolveResumableAgentSession(this.db, resumeIdentity);
+        } catch (err) {
+          ownershipError = err;
         }
-        throw err;
+        if (ownershipError === null) {
+          throw new Error('Foreign resume ownership preflight disagreed with persisted resolution');
+        }
+        this.retireUnsupportedResume(
+          resumeSessionId,
+          foreignOwnership.rowId,
+          foreignOwnership.provider,
+        );
+        throw ownershipError;
       }
+      resolvedRowId = resolveResumableAgentSession(this.db, resumeIdentity).id;
       if (this.routePolicy) {
         try {
           assertCheckpointRoutePolicyCompatible(
