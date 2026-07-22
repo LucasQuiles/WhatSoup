@@ -230,6 +230,96 @@ describe('ImessageAdapter — pollOnce integration', () => {
     await adapter.disconnect();
   });
 
+  it('continues past a full rejected page without starving a later message', async () => {
+    const records = [
+      ...Array.from({ length: 500 }, (_, index) => envelope({
+        guid: `rejected-page-${index}`,
+        from: 'malformed@example',
+        timestamp: 1000,
+      })),
+      envelope({ guid: 'valid-after-rejected-page', timestamp: 2000 }),
+    ];
+    const port = new MockImessagePort();
+    port.listInboundSince = vi.fn(async (
+      since: Date,
+      pageSize = 500,
+      offset = 0,
+    ) => records
+      .filter((record) => record.timestamp >= since.getTime())
+      .slice(offset, offset + pageSize));
+    const { adapter } = makeAdapter(port);
+    await adapter.connect();
+    const received: InboundMessage[] = [];
+    adapter.on('message', (message) => received.push(message));
+
+    await adapter.pollOnce();
+
+    expect(received.map((message) => message.ref.id)).toEqual(['valid-after-rejected-page']);
+    expect(port.listInboundSince).toHaveBeenNthCalledWith(1, new Date(0), 500, 0);
+    expect(port.listInboundSince).toHaveBeenNthCalledWith(2, new Date(0), 500, 500);
+    await adapter.disconnect();
+  });
+
+  it('drains same-timestamp records across the page boundary without loss', async () => {
+    const records = Array.from({ length: 501 }, (_, index) => envelope({
+      guid: `same-timestamp-${index}`,
+      timestamp: 1000,
+    }));
+    const port = new MockImessagePort();
+    port.listInboundSince = vi.fn(async (
+      since: Date,
+      pageSize = 500,
+      offset = 0,
+    ) => records
+      .filter((record) => record.timestamp >= since.getTime())
+      .slice(offset, offset + pageSize));
+    const { adapter } = makeAdapter(port);
+    await adapter.connect();
+    const received: InboundMessage[] = [];
+    adapter.on('message', (message) => received.push(message));
+
+    await adapter.pollOnce();
+
+    expect(received).toHaveLength(501);
+    expect(new Set(received.map((message) => message.ref.id)).size).toBe(501);
+    expect(port.listInboundSince).toHaveBeenNthCalledWith(1, new Date(0), 500, 0);
+    expect(port.listInboundSince).toHaveBeenNthCalledWith(2, new Date(0), 500, 500);
+    await adapter.disconnect();
+  });
+
+  it('bounds pages per poll and resumes the continuation on the next tick', async () => {
+    const records = [
+      ...Array.from({ length: 5000 }, (_, index) => envelope({
+        guid: `unsupported-page-${index}`,
+        kind: 'reaction',
+        body: null,
+        timestamp: 1000,
+      })),
+      envelope({ guid: 'valid-after-bounded-drain', timestamp: 2000 }),
+    ];
+    const port = new MockImessagePort();
+    port.listInboundSince = vi.fn(async (
+      since: Date,
+      pageSize = 500,
+      offset = 0,
+    ) => records
+      .filter((record) => record.timestamp >= since.getTime())
+      .slice(offset, offset + pageSize));
+    const { adapter } = makeAdapter(port);
+    await adapter.connect();
+    const received: InboundMessage[] = [];
+    adapter.on('message', (message) => received.push(message));
+
+    await adapter.pollOnce();
+    expect(received).toHaveLength(0);
+    expect(port.listInboundSince).toHaveBeenCalledTimes(10);
+
+    await adapter.pollOnce();
+    expect(received.map((message) => message.ref.id)).toEqual(['valid-after-bounded-drain']);
+    expect(port.listInboundSince).toHaveBeenNthCalledWith(11, new Date(0), 500, 5000);
+    await adapter.disconnect();
+  });
+
   it('emits an error and stays connected on a transient poll failure', async () => {
     const port = new MockImessagePort();
     port.listInboundSince = vi.fn(async () => { throw new Error('ECONNREFUSED'); });

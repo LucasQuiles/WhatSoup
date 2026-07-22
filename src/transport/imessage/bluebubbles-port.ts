@@ -183,16 +183,19 @@ export class BlueBubblesPort implements ImessagePort {
     return { guid };
   }
 
-  async listInboundSince(since: Date, pageSize?: number): Promise<readonly InboundImessage[]> {
+  async listInboundSince(since: Date, pageSize?: number, offset = 0): Promise<readonly InboundImessage[]> {
     if (pageSize !== undefined && (!Number.isInteger(pageSize) || pageSize <= 0)) {
       throw new RangeError(`pageSize must be a positive integer, got ${pageSize}`);
+    }
+    if (!Number.isInteger(offset) || offset < 0) {
+      throw new RangeError(`offset must be a non-negative integer, got ${offset}`);
     }
     const result = await this.http({
       method: 'POST',
       path: '/message/query',
       body: {
         limit: pageSize ?? 100,
-        offset: 0,
+        offset,
         sort: 'ASC',
         after: since.getTime(),
         with: ['chats', 'handle'],

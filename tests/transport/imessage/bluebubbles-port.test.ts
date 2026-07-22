@@ -120,7 +120,7 @@ describe('BlueBubblesPort — listInboundSince', () => {
       kind: 'text',
       timestamp: 1000,
     });
-    expect(mock.calls[0]?.body).toMatchObject({ sort: 'ASC', limit: 100 });
+    expect(mock.calls[0]?.body).toMatchObject({ sort: 'ASC', limit: 100, offset: 0 });
   });
 
   it('marks echoes fromMe=true and flags group messages via chat guid', async () => {
@@ -162,11 +162,22 @@ describe('BlueBubblesPort — listInboundSince', () => {
     expect(out.map((m) => m.guid)).toEqual(['g1', 'g2']);
   });
 
+  it('forwards a stable continuation offset to the provider query', async () => {
+    const { port, mock } = makePort();
+    mock.on('POST', '/message/query', () => ({ data: [bbMsg({ guid: 'continued' })] }));
+
+    await port.listInboundSince(new Date(1000), 500, 500);
+
+    expect(mock.calls[0]?.body).toMatchObject({ after: 1000, limit: 500, offset: 500 });
+  });
+
   it('rejects invalid pageSize with RangeError', async () => {
     const { port, mock } = makePort();
     mock.on('POST', '/message/query', () => ({ data: [] }));
     await expect(port.listInboundSince(new Date(0), 0)).rejects.toThrow(RangeError);
     await expect(port.listInboundSince(new Date(0), 1.5)).rejects.toThrow(RangeError);
+    await expect(port.listInboundSince(new Date(0), 1, -1)).rejects.toThrow(RangeError);
+    await expect(port.listInboundSince(new Date(0), 1, 1.5)).rejects.toThrow(RangeError);
   });
 
   it('drops records with no guid or non-text body shape', async () => {

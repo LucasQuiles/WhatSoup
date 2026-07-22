@@ -130,6 +130,8 @@ function mapPortError(
 // envelopes dedupe on GUID (string), unique per message across both backends.
 // ---------------------------------------------------------------------------
 const DEDUPE_CAP = 1000;
+const INBOUND_PAGE_SIZE = 500;
+const MAX_INBOUND_PAGES_PER_POLL = 10;
 
 function trimSeenSet(seen: Set<string>): void {
   for (const oldest of seen) {
@@ -187,6 +189,9 @@ export class ImessageAdapter
   private seq = 0;
 
   private lastPolledAt: Date = new Date(0);
+  private inboundOffset = 0;
+  private inboundMaxTimestamp: number | null = null;
+  private inboundMaxTimestampCount = 0;
   private readonly seen: Set<string> = new Set();
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private disposed = false;
@@ -465,32 +470,52 @@ export class ImessageAdapter
   }
 
   private async pollOnceInner(): Promise<void> {
-    let records: readonly InboundImessage[];
-    try {
-      records = await this.port.listInboundSince(this.lastPolledAt, 500);
-    } catch (err) {
-      if (this.disposed) return;
-      const mapped = mapPortError(err, this.channelId, 'pollInbound', this.nextCorrelationId(), 'channel');
-      this.safeEmit(this.listeners.error, mapped);
-      if (mapped instanceof AuthRequiredError) {
-        if (this.pollTimer !== null) {
-          clearInterval(this.pollTimer);
-          this.pollTimer = null;
+    for (let page = 0; page < MAX_INBOUND_PAGES_PER_POLL; page += 1) {
+      let records: readonly InboundImessage[];
+      try {
+        records = await this.port.listInboundSince(
+          this.lastPolledAt,
+          INBOUND_PAGE_SIZE,
+          this.inboundOffset,
+        );
+      } catch (err) {
+        if (this.disposed) return;
+        const mapped = mapPortError(err, this.channelId, 'pollInbound', this.nextCorrelationId(), 'channel');
+        this.safeEmit(this.listeners.error, mapped);
+        if (mapped instanceof AuthRequiredError) {
+          if (this.pollTimer !== null) {
+            clearInterval(this.pollTimer);
+            this.pollTimer = null;
+          }
+          this.transitionTo({ state: 'auth_required', since: new Date(), reasonCode: 'poll-auth-failure' });
         }
-        this.transitionTo({ state: 'auth_required', since: new Date(), reasonCode: 'poll-auth-failure' });
+        return;
       }
+
+      if (this.disposed) return;
+
+      for (const record of records) {
+        if (this.inboundMaxTimestamp === null || record.timestamp > this.inboundMaxTimestamp) {
+          this.inboundMaxTimestamp = record.timestamp;
+          this.inboundMaxTimestampCount = 1;
+        } else if (record.timestamp === this.inboundMaxTimestamp) {
+          this.inboundMaxTimestampCount += 1;
+        }
+        this.handleInboundRecord(record);
+      }
+
+      if (records.length === INBOUND_PAGE_SIZE) {
+        this.inboundOffset += records.length;
+        continue;
+      }
+
+      if (this.inboundMaxTimestamp !== null) {
+        this.lastPolledAt = new Date(this.inboundMaxTimestamp);
+        this.inboundOffset = this.inboundMaxTimestampCount;
+      }
+      this.inboundMaxTimestamp = null;
+      this.inboundMaxTimestampCount = 0;
       return;
-    }
-
-    if (this.disposed) return;
-
-    let maxTs: number | null = null;
-    for (const record of records) {
-      if (maxTs === null || record.timestamp > maxTs) maxTs = record.timestamp;
-      this.handleInboundRecord(record);
-    }
-    if (maxTs !== null) {
-      this.lastPolledAt = new Date(maxTs);
     }
   }
 

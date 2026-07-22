@@ -231,13 +231,17 @@ export class ImsgPort implements ImessagePort {
     return { guid };
   }
 
-  async listInboundSince(since: Date, pageSize?: number): Promise<readonly InboundImessage[]> {
+  async listInboundSince(since: Date, pageSize?: number, offset = 0): Promise<readonly InboundImessage[]> {
     if (pageSize !== undefined && (!Number.isInteger(pageSize) || pageSize <= 0)) {
       throw new RangeError(`pageSize must be a positive integer, got ${pageSize}`);
+    }
+    if (!Number.isInteger(offset) || offset < 0) {
+      throw new RangeError(`offset must be a non-negative integer, got ${offset}`);
     }
     const result = await this.conn().request('messages.history', {
       since: since.getTime(),
       limit: pageSize ?? 100,
+      offset,
     }) as { messages?: ImsgHistoryRecord[] } | ImsgHistoryRecord[] | undefined;
 
     const records = Array.isArray(result) ? result : (result?.messages ?? []);
