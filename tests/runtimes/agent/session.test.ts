@@ -5074,6 +5074,119 @@ describe('session.ts uncovered-branch coverage', () => {
     vi.useRealTimers();
   });
 
+  it('commits only the final OpenCode stop candidate after a clean process close', async () => {
+    const events: AgentEvent[] = [];
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: (event) => events.push(event),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+    });
+    await sm.spawnSession();
+    events.length = 0;
+    await sm.sendTurn('run one tool and report the result');
+
+    const line = (value: unknown): string => `${JSON.stringify(value)}\n`;
+    mockChild.stdout.emit('data', Buffer.from([
+      line({ type: 'step_start', sessionID: 'ses_compaction', part: { type: 'step-start' } }),
+      line({ type: 'text', part: { text: 'intermediate compaction summary' } }),
+      line({
+        type: 'step_finish',
+        part: { type: 'step-finish', reason: 'stop', tokens: { input: 130_000, output: 50 } },
+      }),
+      line({ type: 'step_start', sessionID: 'ses_compaction', part: { type: 'step-start' } }),
+      line({ type: 'text', part: { text: 'verified final answer' } }),
+      line({
+        type: 'step_finish',
+        part: { type: 'step-finish', reason: 'stop', tokens: { input: 800, output: 12 } },
+      }),
+    ].join('')));
+
+    expect(events.filter((event) => event.type === 'assistant_text' || event.type === 'result')).toEqual([]);
+
+    mockChild._closeCb?.(0, null);
+
+    expect(events.filter((event) => event.type === 'assistant_text' || event.type === 'result')).toEqual([
+      { type: 'assistant_text', text: 'verified final answer' },
+      { type: 'result', text: null, inputTokens: 800, outputTokens: 12, costUsd: undefined },
+    ]);
+  });
+
+  it('discards repeated OpenCode stop candidates and bounds delivery to the final candidate', async () => {
+    const events: AgentEvent[] = [];
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: (event) => events.push(event),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+    });
+    await sm.spawnSession();
+    events.length = 0;
+    await sm.sendTurn('stress compaction boundaries');
+
+    const records: string[] = [];
+    for (let index = 0; index < 25; index += 1) {
+      records.push(
+        JSON.stringify({ type: 'text', part: { text: `discard-${index}` } }),
+        JSON.stringify({ type: 'step_finish', part: { type: 'step-finish', reason: 'stop' } }),
+        JSON.stringify({ type: 'step_start', sessionID: 'ses_stress', part: { type: 'step-start' } }),
+      );
+    }
+    records.push(
+      JSON.stringify({ type: 'text', part: { text: 'keep-final' } }),
+      JSON.stringify({
+        type: 'step_finish',
+        part: { type: 'step-finish', reason: 'stop', tokens: { input: 900, output: 9 } },
+      }),
+    );
+    mockChild.stdout.emit('data', Buffer.from(`${records.join('\n')}\n`));
+    mockChild._closeCb?.(0, null);
+
+    expect(events.filter((event) => event.type === 'assistant_text' || event.type === 'result')).toEqual([
+      { type: 'assistant_text', text: 'keep-final' },
+      { type: 'result', text: null, inputTokens: 900, outputTokens: 9, costUsd: undefined },
+    ]);
+  });
+
+  it('fails closed when OpenCode continues after stop but exits without a final candidate', async () => {
+    const events: AgentEvent[] = [];
+    const onCrash = vi.fn();
+    const notifyUser = vi.fn();
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: (event) => events.push(event),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+      onCrash,
+      notifyUser,
+    });
+    await sm.spawnSession();
+    events.length = 0;
+    await sm.sendTurn('incomplete compaction continuation');
+
+    mockChild.stdout.emit('data', Buffer.from([
+      JSON.stringify({ type: 'text', part: { text: 'discarded summary' } }),
+      JSON.stringify({ type: 'step_finish', part: { type: 'step-finish', reason: 'stop' } }),
+      JSON.stringify({ type: 'step_start', sessionID: 'ses_incomplete', part: { type: 'step-start' } }),
+      '',
+    ].join('\n')));
+    mockChild._closeCb?.(0, null);
+
+    expect(events.filter((event) => event.type === 'assistant_text' || event.type === 'result')).toEqual([]);
+    expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({
+      exitCode: 0,
+      signal: null,
+      crashClass: 'provider_stream_corrupt',
+    }));
+    expect(notifyUser).toHaveBeenCalledWith(expect.stringMatching(/ended before completing the turn/i));
+  });
+
   it('serializes OpenCode process lifetimes across session managers sharing one execution gate', async () => {
     const firstChild = makeMockChild(12001);
     const secondChild = makeMockChild(12002);
