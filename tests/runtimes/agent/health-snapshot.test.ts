@@ -302,6 +302,19 @@ function expectedProviderExecutionDetails(): Record<string, unknown> {
   };
 }
 
+function expectedInboundRestartReplayDetails(): Record<string, unknown> {
+  return {
+    inboundRestartReplay: {
+      attempted: 0,
+      accepted: 0,
+      failed: 0,
+      suppressed: 0,
+      firstSeq: null,
+      lastSeq: null,
+    },
+  };
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
@@ -356,6 +369,7 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         autoCompactNextTurnOverThreshold: 0,
         proactiveResumeIdentityRejects: 0,
         restartLoopGuard: { enabled: true, bootsInWindow: 0, tripped: false, lastTripAt: null, windowMs: 300_000, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null },
+        ...expectedInboundRestartReplayDetails(),
         unownedProviderEventRejects: 0,
         turnFinalizationRetainedRetries: 0,
         turnFinalizationDegradedScopes: 0,
@@ -386,6 +400,7 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         autoCompactNextTurnOverThreshold: 0,
         proactiveResumeIdentityRejects: 0,
         restartLoopGuard: { enabled: true, bootsInWindow: 0, tripped: false, lastTripAt: null, windowMs: 300_000, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null },
+        ...expectedInboundRestartReplayDetails(),
         unownedProviderEventRejects: 0,
         turnFinalizationRetainedRetries: 0,
         turnFinalizationDegradedScopes: 0,
@@ -492,6 +507,7 @@ describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
         autoCompactNextTurnOverThreshold: 0,
         proactiveResumeIdentityRejects: 0,
         restartLoopGuard: { enabled: true, bootsInWindow: 0, tripped: false, lastTripAt: null, windowMs: 300_000, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null },
+        ...expectedInboundRestartReplayDetails(),
         unownedProviderEventRejects: 0,
         turnFinalizationRetainedRetries: 0,
         turnFinalizationDegradedScopes: 0,

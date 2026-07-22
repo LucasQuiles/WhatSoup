@@ -2824,8 +2824,8 @@ describe('AgentRuntime', () => {
       'test@s.whatsapp.net',
       'agentruntime',
     );
-    (runtime as unknown as { startupInboundReplaySuppressed: boolean })
-      .startupInboundReplaySuppressed = true;
+    (runtime as unknown as { inboundReplay: { setSuppressed(value: boolean): void } })
+      .inboundReplay.setSuppressed(true);
 
     expect(await runtime.replayDurableInboundBacklog()).toMatchObject({
       attempted: 0,

@@ -126,8 +126,7 @@ import {
   modelModifierTags, modifierSuffix, renderPinPreferenceOutcome, savedPreferenceLine,
 } from './owner-render-format.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
-import { bareNumber, toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
-import { stripSelfMentionsFrom } from '../../lib/self-mention-strip.ts';
+import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
 import { TurnQueue, type QueuedTurn, type TurnRejectReason } from './turn-queue.ts';
@@ -184,7 +183,6 @@ import { HandoffDistillCoordinator } from './handoff-distill-coordinator.ts';
 import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } from './handoff-distill-config.ts';
 import { config } from '../../config.ts';
 import {
-  checkAndRecordInterruptedBoot,
   markBootInProgress,
   readRestartLoopGuardHealth,
   restartLoopGuardPath,
@@ -239,10 +237,7 @@ import type { ProgressEvent } from './operation-tracker.ts';
 // Imported for the inbound pipeline; the public surface (prepareContentForAgent + the
 // __*ForTests helpers) is re-exported below so namespace-importing tests are unchanged.
 import { prepareContentForAgent, relocateMediaToWorkspace } from './media-prep.ts';
-import {
-  reconstructReplayableInbound,
-  type InboundReplayStats,
-} from './inbound-replay.ts';
+import { evaluateRestartRecoverySuppression, InboundReplayCoordinator, type InboundReplayStats } from './inbound-replay.ts';
 export {
   prepareContentForAgent,
   relocateMediaToWorkspace,
@@ -297,8 +292,6 @@ const SESSION_MIN_RESIDENCY_MS = envPositiveInt('WHATSOUP_SESSION_MIN_RESIDENCY_
 // tool_calls telemetry sentinel can never drift apart.
 const GLOBAL_TOOL_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
 const GLOBAL_CRASH_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
-const TOOL_FAILURE_ALERT_DEDUP_MS = 60 * 1000;
-const MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS = 1_000;
 // (TOOL_FAILURE_ALERT_EXCERPT_CHARS moved to ./tool-update.ts with alertExcerpt.)
 // Default provider-fallback window when the usage-limit message names no reset
 // time. Claude usage limits operate on 5-hour rolling windows, so 5h is a safe
@@ -630,11 +623,9 @@ export {
 import {
   buildToolUpdate,
   classifyToolError,
-  shouldEmitToolFailureAlert,
-  safeAlertSegment,
   alertEvidenceValue,
-  alertExcerpt,
 } from './tool-update.ts';
+import { capDedupeMap, emitRuntimeToolFailureAlert } from './tool-failure-alert.ts';
 
 // Provider-failure string matchers are the single source of truth in
 // `./failure-taxonomy.ts`. They are imported above for internal use and re-exported
@@ -882,16 +873,7 @@ export class AgentRuntime implements Runtime {
   // C5 restart-loop guard: true when this boot follows an unclean exit
   // (captured at the top of start()); consumed by the startup resume gate.
   private restartLoopInterruptedBoot = false;
-  private startupInboundReplaySuppressed = false;
-  private startupInboundReplayRun = false;
-  private startupInboundReplayStats: InboundReplayStats = {
-    attempted: 0,
-    accepted: 0,
-    failed: 0,
-    suppressed: 0,
-    firstSeq: null,
-    lastSeq: null,
-  };
+  private readonly inboundReplay: InboundReplayCoordinator;
   private unownedProviderEventRejects = 0;
   private readonly providerEventRejectReasonCounts = new Map<string, number>();
   /**
@@ -1113,19 +1095,6 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
-   * Bound an evict-oldest dedup map. Mirrors the recentToolFailureAlerts cap so
-   * window-pruned maps can't grow without limit between prunes (e.g. one entry per
-   * distinct chat that never recurs within the window).
-   */
-  private capDedupeMap(map: Map<string, unknown>, max = MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS): void {
-    while (map.size > max) {
-      const oldest = map.keys().next().value;
-      if (oldest === undefined) break;
-      map.delete(oldest);
-    }
-  }
-
-  /**
    * Clear all tool-scope state belonging to one mapKey. Tool scope keys are
    * `${mapKey}#${ordinal}` (see createToolScopeKey), so on a per_chat crash we must
    * drop only the crashing chat's scopes — a blanket `.clear()` would stomp other
@@ -1153,79 +1122,15 @@ export class AgentRuntime implements Runtime {
     toolScopeKey: string;
     mapKey?: string;
   }): void {
-    if (process.env['BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS'] === '0') return;
-
-    // Root-cause noise gate: a non-zero Bash exit (glob/grep no-match, failed
-    // conditional, missing path) is reported by claude-cli as `is_error` but is
-    // a normal agent-loop result, not an operator-actionable failure. Only page
-    // when the error carries an infra/provider-health signature.
-    if (!shouldEmitToolFailureAlert(args.classification.category, args.content)) {
-      log.debug(
-        {
-          instance: this.instanceName,
-          toolName: args.toolName,
-          category: args.classification.category,
-        },
-        'suppressing benign tool-error (not operator-actionable) — no BOT ERRORS alert',
-      );
-      return;
-    }
-
-    const now = Date.now();
-    for (const [key, recordedAt] of this.recentToolFailureAlerts) {
-      if (now - recordedAt > TOOL_FAILURE_ALERT_DEDUP_MS) {
-        this.recentToolFailureAlerts.delete(key);
-      }
-    }
-
     const provider = this.effectiveProvider || this.agentProvider || 'unknown-provider';
-    const source = `runtime-tool-error:${safeAlertSegment(provider)}:${safeAlertSegment(args.toolName)}`;
-    const fingerprint = [
-      this.instanceName,
+    emitRuntimeToolFailureAlert({
+      ...args,
+      recentAlerts: this.recentToolFailureAlerts,
+      instanceName: this.instanceName,
       provider,
-      args.toolName,
-      args.classification.category,
-      args.content.replace(/\s+/g, ' ').trim().slice(0, 500),
-    ].join('\n');
-
-    if (this.recentToolFailureAlerts.has(fingerprint)) return;
-    this.recentToolFailureAlerts.set(fingerprint, now);
-    this.capDedupeMap(this.recentToolFailureAlerts);
-
-    const evidence = [
-      'runtime_source=src/runtimes/agent/runtime.ts:tool_result',
-      `instance=${alertEvidenceValue(this.instanceName)}`,
-      `provider=${alertEvidenceValue(provider)}`,
-      `session_scope=${this.sessionScope}`,
-      `chat_jid=${alertEvidenceValue(args.chatJid ?? null)}`,
-      `tool_scope_key=${alertEvidenceValue(args.toolScopeKey)}`,
-      `map_key=${alertEvidenceValue(args.mapKey ?? null)}`,
-      `tool_id=${alertEvidenceValue(args.toolId)}`,
-      `tool_name=${alertEvidenceValue(args.toolName)}`,
-      `classification=${args.classification.category}`,
-      `detail=${alertEvidenceValue(args.classification.detail)}`,
-      `cwd=${alertEvidenceValue(this.cwd ?? process.cwd())}`,
-      'error_excerpt:',
-      alertExcerpt(args.content) || 'unknown',
-    ].join('\n');
-
-    try {
-      emitAlertChecked(
-        this.instanceName,
-        source,
-        `Agent tool failure: ${args.toolName}`,
-        evidence,
-        'warning',
-      );
-    } catch (err) {
-      log.warn({
-        instance: this.instanceName,
-        provider,
-        toolId: args.toolId,
-        toolName: args.toolName,
-        err: errorMessage(err),
-      }, 'failed to emit BOT ERRORS tool failure alert');
-    }
+      sessionScope: this.sessionScope,
+      cwd: this.cwd ?? process.cwd(),
+    });
   }
 
   // The auto-compact bookkeeping state machine lives in AutoCompactController
@@ -1577,7 +1482,7 @@ export class AgentRuntime implements Runtime {
           config.restartLoopGuard.windowMs,
         ),
       },
-      inboundRestartReplay: this.startupInboundReplayStats,
+      inboundRestartReplay: this.inboundReplay.getStats(),
       unownedProviderEventRejects: this.unownedProviderEventRejects,
       turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
       turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
@@ -1671,32 +1576,17 @@ export class AgentRuntime implements Runtime {
    * degrades to "do not suppress".
    */
   private shouldSuppressProactiveResume(recoveryWorkCount: number): boolean {
-    if (!config.restartLoopGuard.enabled) return false;
-    if (recoveryWorkCount < 1) return false;
-    if (!this.restartLoopInterruptedBoot) return false;
-    const trip = checkAndRecordInterruptedBoot({
+    const result = evaluateRestartRecoverySuppression({
+      enabled: config.restartLoopGuard.enabled,
+      recoveryWorkCount,
+      interruptedBoot: this.restartLoopInterruptedBoot,
       statePath: restartLoopGuardPath(config.stateRoot),
       maxRestarts: config.restartLoopGuard.maxRestarts,
       windowMs: config.restartLoopGuard.windowMs,
+      adminPhone: [...config.adminPhones][0],
     });
-    if (!trip.tripped) return false;
-    log.warn(
-      { bootsInWindow: trip.bootsInWindow, recoveryWorkCount, windowMs: config.restartLoopGuard.windowMs },
-      'restart-loop guard tripped — suppressing restart-time recovery for this boot',
-    );
-    const adminPhone = [...config.adminPhones][0];
-    if (adminPhone) {
-      const windowSec = Math.round(config.restartLoopGuard.windowMs / 1000);
-      this.pendingStartupMessage = {
-        chatJid: toPersonalJid(adminPhone),
-        text:
-          `*Restart-loop guard tripped* ⚠️ — ${trip.bootsInWindow} crash-interrupted boots ` +
-          `inside ${windowSec}s with ${recoveryWorkCount} restart-time recovery item(s). ` +
-          `Automatic session and queued-input replay are suppressed for this boot to break ` +
-          `a possible replay loop. Check the journal for the implicated chat.`,
-      };
-    }
-    return true;
+    if (result.notice) this.pendingStartupMessage = result.notice;
+    return result.suppressed;
   }
 
   private async sweepStaleAgentSessions(): Promise<Set<string>> {
@@ -2417,6 +2307,12 @@ export class AgentRuntime implements Runtime {
     this.pollPersistence = new PendingPollPersistence(db);
     this.messenger = messenger;
     this.instanceName = instanceName ?? 'personal';
+    this.inboundReplay = new InboundReplayCoordinator({
+      instanceName: this.instanceName,
+      getDurability: () => this.durability,
+      getBotJids: () => [(this.messenger as ConnectionManager).botJid, (this.messenger as ConnectionManager).botLid],
+      handleMessage: (msg) => this.handleMessage(msg),
+    });
     this.providerExecutionGate = createProviderExecutionGate(this.instanceName);
     this.runtimeTurnSupervisor = new RuntimeTurnSupervisor(
       this.instanceName,
@@ -3243,9 +3139,7 @@ export class AgentRuntime implements Runtime {
       typeof startupDurability?.getReplayableInboundCount === 'function'
         ? startupDurability.getReplayableInboundCount()
         : 0;
-    this.startupInboundReplaySuppressed = this.shouldSuppressProactiveResume(
-      resumableCheckpointsRaw.length + replayableInboundCount,
-    );
+    this.inboundReplay.setSuppressed(this.shouldSuppressProactiveResume(resumableCheckpointsRaw.length + replayableInboundCount));
 
     // per_chat (non-sandboxed): proactively resume sessions that were active or suspended
     // (graceful shutdown) when we last ran. This lets agents pick up mid-conversation instead
@@ -3257,7 +3151,7 @@ export class AgentRuntime implements Runtime {
       // (the existing fail-safe for every other skip), the instance stays up
       // serving inbound, and the operator gets one notice. An empty list
       // makes the loop below a no-op.
-      const resumableCheckpoints = this.startupInboundReplaySuppressed
+      const resumableCheckpoints = this.inboundReplay.isSuppressed()
         ? []
         : resumableCheckpointsRaw;
       for (const cp of resumableCheckpoints) {
@@ -3771,98 +3665,19 @@ export class AgentRuntime implements Runtime {
   }
 
   supportsDurableInboundReplay(msg: IncomingMessage): boolean {
-    return msg.contentType === 'text' && msg.isSyntheticJob !== true;
+    return this.inboundReplay.supports(msg);
   }
 
   async replayDurableInboundBacklog(limit = 100): Promise<InboundReplayStats> {
-    if (this.startupInboundReplayRun) return { ...this.startupInboundReplayStats };
-    this.startupInboundReplayRun = true;
-    if (!this.durability) return { ...this.startupInboundReplayStats };
-
-    const rows = this.durability.getReplayableInbound(limit);
-    if (rows.length === 0) return { ...this.startupInboundReplayStats };
-    const firstSeq = rows[0]!.seq;
-    const lastSeq = rows[rows.length - 1]!.seq;
-    if (this.startupInboundReplaySuppressed) {
-      this.startupInboundReplayStats = {
-        attempted: 0,
-        accepted: 0,
-        failed: 0,
-        suppressed: rows.length,
-        firstSeq,
-        lastSeq,
-      };
-      emitAlertChecked(
-        this.instanceName,
-        'inbound_restart_replay_suppressed',
-        `Queued inbound replay suppressed for ${this.instanceName}`,
-        `count=${rows.length} first_seq=${firstSeq} last_seq=${lastSeq} reason=restart_loop_guard`,
-        'warning',
-      );
-      return { ...this.startupInboundReplayStats };
-    }
-
-    let accepted = 0;
-    let failed = 0;
-    for (const row of rows) {
-      try {
-        const msg = reconstructReplayableInbound(row);
-        if (msg.isGroup && msg.content) {
-          const connection = this.messenger as ConnectionManager;
-          const botIds = [connection.botJid, connection.botLid]
-            .filter((jid): jid is string => typeof jid === 'string' && jid.length > 0)
-            .flatMap((jid) => [jid, bareNumber(jid)]);
-          if (botIds.length > 0) msg.content = stripSelfMentionsFrom(msg.content, botIds);
-        }
-        await this.handleMessage(msg);
-        accepted += 1;
-      } catch (err) {
-        failed += 1;
-        this.durability.markInboundFailed(row.seq, 'crash_recovery');
-        log.error(
-          { err, inboundSeq: row.seq, priorStatus: row.processing_status },
-          'durable inbound restart replay failed closed',
-        );
-      }
-    }
-
-    this.startupInboundReplayStats = {
-      attempted: rows.length,
-      accepted,
-      failed,
-      suppressed: 0,
-      firstSeq,
-      lastSeq,
-    };
-    emitAlertChecked(
-      this.instanceName,
-      'inbound_restart_replay',
-      `Queued inbound restart replay completed for ${this.instanceName}`,
-      `attempted=${rows.length} accepted=${accepted} failed=${failed} first_seq=${firstSeq} last_seq=${lastSeq}`,
-      failed > 0 ? 'warning' : 'info',
-    );
-    return { ...this.startupInboundReplayStats };
+    return this.inboundReplay.replay(limit);
   }
 
   private beginDurableInboundPreparation(msg: IncomingMessage): void {
-    if (msg.durableAdmission !== 'pending') return;
-    if (!this.durability || msg.inboundSeq === undefined) {
-      throw new Error('Durable pending inbound has no durability owner');
-    }
-    if (!this.durability.beginInboundPreparation(msg.inboundSeq)) {
-      throw new Error(`Durable inbound ${msg.inboundSeq} could not claim preparation`);
-    }
+    this.inboundReplay.beginPreparation(msg);
   }
 
   private finishDurableInboundPreparation(msg: IncomingMessage): void {
-    if (msg.durableAdmission !== 'pending') return;
-    if (!this.durability || msg.inboundSeq === undefined) {
-      throw new Error('Durable preparing inbound has no durability owner');
-    }
-    if (!this.durability.markInboundQueued(msg.inboundSeq)) {
-      throw new Error(`Durable inbound ${msg.inboundSeq} could not enter the runtime queue`);
-    }
-    msg.durableAdmission = 'queued';
+    this.inboundReplay.finishPreparation(msg);
   }
 
   private claimDurableInboundExecution(
@@ -3870,13 +3685,7 @@ export class AgentRuntime implements Runtime {
     durableQueued: boolean,
     scope: 'shared' | 'single' | 'per-chat' | 'local-command',
   ): void {
-    if (!durableQueued) return;
-    if (!this.durability || inboundSeq === undefined) {
-      throw new Error(`Durable ${scope} inbound has no durability owner`);
-    }
-    if (!this.durability.markInboundProcessing(inboundSeq)) {
-      throw new Error(`Durable ${scope} inbound ${inboundSeq} could not claim execution`);
-    }
+    this.inboundReplay.claimExecution(inboundSeq, durableQueued, scope);
   }
 
   private async handleMessageInner(msg: IncomingMessage): Promise<void> {
@@ -6538,7 +6347,7 @@ export class AgentRuntime implements Runtime {
         }
       }
       this.groupMetadataCache.set(chatJid, { adminJids, fetchedAt: Date.now() });
-      this.capDedupeMap(this.groupMetadataCache, AgentRuntime.GROUP_METADATA_CACHE_MAX);
+      capDedupeMap(this.groupMetadataCache, AgentRuntime.GROUP_METADATA_CACHE_MAX);
       return adminJids;
     } catch (err) {
       // QR-036: returns null → callers KEEP the admin gate (fail-closed), they no
@@ -7340,9 +7149,8 @@ export class AgentRuntime implements Runtime {
       || recoveryHealth.turnRecoveryOpenRecoveries > 0
       || recoveryHealth.turnRecoveryCorruptLinks > 0
       || recoveryHealth.turnRecoveryEchoConflicts > 0;
-    const inboundReplayDegraded =
-      this.startupInboundReplayStats.failed > 0
-      || this.startupInboundReplayStats.suppressed > 0;
+    const inboundReplayStats = this.inboundReplay.getStats();
+    const inboundReplayDegraded = inboundReplayStats.failed > 0 || inboundReplayStats.suppressed > 0;
     if (this.sessionScope === 'per_chat') {
       const sessions = [...this.chatSessions.values()];
       let activeSessions = 0;
@@ -7399,7 +7207,7 @@ export class AgentRuntime implements Runtime {
               config.restartLoopGuard.windowMs,
             ),
           },
-          inboundRestartReplay: this.startupInboundReplayStats,
+          inboundRestartReplay: inboundReplayStats,
           unownedProviderEventRejects: this.unownedProviderEventRejects,
           providerExecution,
           turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
@@ -7441,7 +7249,7 @@ export class AgentRuntime implements Runtime {
             config.restartLoopGuard.windowMs,
           ),
         },
-        inboundRestartReplay: this.startupInboundReplayStats,
+        inboundRestartReplay: inboundReplayStats,
         unownedProviderEventRejects: this.unownedProviderEventRejects,
         providerExecution,
         turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
@@ -10410,7 +10218,7 @@ export class AgentRuntime implements Runtime {
     const noticeKey = [queue.targetChatJid, 'auth-required'].join(':');
     if (this.recentNoFallbackReauthNotices.has(noticeKey)) return;
     this.recentNoFallbackReauthNotices.set(noticeKey, now);
-    this.capDedupeMap(this.recentNoFallbackReauthNotices);
+    capDedupeMap(this.recentNoFallbackReauthNotices);
     queue.enqueueText('_The agent needs re-authentication before it can reply here. An operator has been notified._');
     // Back the "operator has been notified" claim: no result-path alert fires on
     // the no-fallback auth-required teardown (fallback alerts fire only when a
@@ -10472,7 +10280,7 @@ export class AgentRuntime implements Runtime {
     }
     if (!this.recentFallbackEmptyTurnAlerts.has(queue.targetChatJid)) {
       this.recentFallbackEmptyTurnAlerts.set(queue.targetChatJid, emptyAlertNow);
-      this.capDedupeMap(this.recentFallbackEmptyTurnAlerts);
+      capDedupeMap(this.recentFallbackEmptyTurnAlerts);
       emitAlertChecked(
         this.instanceName,
         'fallback_empty_turn',
@@ -11286,7 +11094,7 @@ export class AgentRuntime implements Runtime {
     ].join(':');
     if (this.recentProviderFallbackNotices.has(noticeKey)) return;
     this.recentProviderFallbackNotices.set(noticeKey, now);
-    this.capDedupeMap(this.recentProviderFallbackNotices);
+    capDedupeMap(this.recentProviderFallbackNotices);
 
     const card = modelCardLabel(activation.fallbackProvider, activation.fallbackModel);
     const credentialsMissing = activation.keyPresent === false;
