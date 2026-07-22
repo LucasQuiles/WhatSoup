@@ -18,6 +18,7 @@ export interface ProviderRoutePolicy {
 
 export interface ProviderCheckpointRoutePolicy {
   provider: unknown;
+  model: unknown;
   dataPolicy: unknown;
   policyVersion: unknown;
 }
@@ -105,6 +106,7 @@ export function assertCheckpointRoutePolicyCompatible(
   if (!checkpoint) mismatch('is missing route policy metadata');
   const admitted = checkpoint as ProviderCheckpointRoutePolicy;
   if (admitted.provider !== route.provider) mismatch('provider mismatch');
+  if (admitted.model !== (route.model ?? null)) mismatch('model mismatch');
   if (admitted.dataPolicy !== route.dataPolicy) mismatch('data policy mismatch');
   if (admitted.policyVersion !== route.policyVersion) mismatch('policy version mismatch');
 }
