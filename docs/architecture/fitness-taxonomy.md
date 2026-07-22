@@ -101,8 +101,8 @@ Current baseline measurements:
 
 | rule | path | lines | ceiling |
 |------|------|-------|---------|
-| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 12940 | 12940 |
-| `arch.file-size` | `tests/runtimes/agent/runtime.test.ts` | 17396 | 17396 |
+| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 12967 | 12967 |
+| `arch.file-size` | `tests/runtimes/agent/runtime.test.ts` | 17460 | 17460 |
 
 Intentional bump (both twins, per protocol): +105 lines in
 `src/runtimes/agent/runtime.ts` (12256 → 12361) for the D-4 v1.1 additions
