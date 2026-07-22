@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SOUP — Skills Hub (Direction A: Command Deck)</title>
+<style>
+:root, [data-theme="dark"] {
+  --base:#1E1A15; --raised:#27221C; --overlay:#322D24; --inset:#171410;
+  --t1:#F1ECDF; --t2:#CAC1AF; --t3:#9A907E;
+  --hair:#383024; --hair-2:#473B2C; --hair-3:#5A4C39;
+  --accent:#6BA6FF; --accent-fg:#0A0E14;
+  --ok:#5BD97B; --warn:#F5B54A; --crit:#F4736F;
+  --m-passive:#3BD6B0; --m-chat:#3FB8DC; --m-agent:#A78BFA;
+  --shadow-lift:0 1px 2px rgb(0 0 0/.30), 0 8px 24px rgb(0 0 0/.28);
+}
+[data-theme="light"] {
+  --base:#FAF6EE; --raised:#FDFAF3; --overlay:#FFFFFF; --inset:#EDE5D5;
+  --t1:#221C12; --t2:#524833; --t3:#645849;
+  --hair:#DED4BF; --hair-2:#CDC2A9; --hair-3:#B4A78C;
+  --accent:#2E66E4; --accent-fg:#FFFFFF;
+  --ok:#15722F; --warn:#855900; --crit:#B42318;
+  --m-passive:#096853; --m-chat:#1F6E85; --m-agent:#6D4FA3;
+  --shadow-lift:0 1px 2px rgb(60 45 20/.10), 0 10px 28px rgb(60 45 20/.14);
+}
+* { margin:0; box-sizing:border-box; }
+body { background:var(--base); color:var(--t1); font:400 13.5px/1.5 "Hanken Grotesk",Arial,sans-serif; height:100vh; display:flex; overflow:hidden; }
+/* ===== Nav rail (global chrome) ===== */
+nav { width:212px; flex:none; background:var(--inset); border-right:1px solid var(--hair); display:flex; flex-direction:column; padding:14px 10px; gap:2px; }
+.nameplate { display:flex; align-items:center; gap:12px; padding:2px 8px 16px; }
+.nameplate .tick { width:8px; height:8px; border-radius:1px; background:var(--m-passive); }
+.nameplate .wm { font:800 18px/24px "Bricolage Grotesque",sans-serif; letter-spacing:-0.06em; color:var(--t1); }
+.nameplate .wm b { color:var(--accent); font-weight:800; }
+.nameplate .ctx { font:400 11px/16px "IBM Plex Mono",monospace; letter-spacing:.18em; color:var(--t3); margin-left:auto; }
+.nav-sec { font:500 11px/16px "IBM Plex Mono",monospace; letter-spacing:.12em; color:var(--t3); padding:14px 10px 6px; text-transform:uppercase; }
+.nav-item { display:flex; align-items:center; gap:10px; padding:7px 10px; border-radius:6px; color:var(--t2); text-decoration:none; font-weight:500; transition:transform .18s ease-out, box-shadow .18s ease-out, background .18s; }
+.nav-item:hover { background:var(--raised); color:var(--t1); transform:translateY(-1px); }
+.nav-item.active { background:color-mix(in srgb, var(--accent) 10%, transparent); color:var(--t1); box-shadow:inset 2px 0 0 var(--accent); }
+.nav-item svg { width:16px; height:16px; fill:currentColor; opacity:.85; }
+.nav-item .dot { margin-left:auto; width:6px; height:6px; border-radius:1px; transform:rotate(45deg); background:var(--warn); }
+.deploy { margin-top:auto; border-top:1px solid var(--hair); padding-top:10px; }
+.deploy .hchip { display:flex; align-items:center; gap:8px; padding:6px 10px; font:500 11.5px/16px "IBM Plex Mono",monospace; color:var(--t3); }
+.deploy .hchip .hst { width:6px; height:6px; border-radius:50%; background:var(--ok); }
+.deploy .hchip .hst.warn { background:var(--warn); border-radius:1px; transform:rotate(45deg); }
+.appcol { flex:1; display:flex; flex-direction:column; min-width:0; min-height:0; }
+/* light presence: card separation + control borders (locked-token consumption) */
+[data-theme="light"] .panel, [data-theme="light"] .scard, [data-theme="light"] .kpi,
+[data-theme="light"] .dcard, [data-theme="light"] .pcard, [data-theme="light"] .acard,
+[data-theme="light"] .prop, [data-theme="light"] .mstat, [data-theme="light"] .fstrip,
+[data-theme="light"] .card, [data-theme="light"] .ch, [data-theme="light"] .swatches .sw,
+[data-theme="light"] .pair, [data-theme="light"] .bub, [data-theme="light"] .qcard { box-shadow:var(--shadow-rest); }
+[data-theme="light"] .btn.ghost, [data-theme="light"] .btn.sm:not(.upd):not(.danger):not(.no),
+[data-theme="light"] .ibtn, [data-theme="light"] .cap, [data-theme="light"] .fstrip,
+[data-theme="light"] .theme-toggle { border-color:var(--hair-3); }
+@media (max-width:1100px){ nav{width:64px} .nav-item span,.nav-sec,.nameplate .wm,.nameplate .ctx,.deploy .hchip span{display:none} }
+header { display:flex; align-items:center; gap:14px; padding:14px 22px 12px; border-bottom:1px solid var(--hair); }
+h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
+.spacer { flex:1; }
+.btn { display:inline-flex; align-items:center; gap:8px; padding:8px 14px; border-radius:6px; border:1px solid var(--hair-2); background:var(--raised); color:var(--t1); font:600 12.5px/16px inherit; cursor:pointer; transition:transform .16s ease-out, box-shadow .16s ease-out; }
+.btn:hover { transform:translateY(-1px); box-shadow:var(--shadow-lift); }
+.btn.primary { background:var(--accent); color:var(--accent-fg); border-color:transparent; }
+.btn.ghost { background:transparent; color:var(--t2); border:1px solid var(--hair-2); }
+.btn.sm { padding:5px 10px; font-size:11.5px; }
+.btn.sm.upd { border-color:var(--accent); color:var(--accent); }
+/* hub mode toggle */
+.modebar { display:flex; gap:4px; background:var(--inset); border:1px solid var(--hair); border-radius:8px; padding:3px; }
+.modebar button { border:none; background:transparent; color:var(--t3); font:600 11.5px/14px "IBM Plex Mono",monospace; padding:6px 12px; border-radius:6px; cursor:pointer; }
+.modebar button.on { background:var(--raised); color:var(--t1); box-shadow:0 1px 2px rgb(0 0 0/.2); }
+.modebar button .st { color:var(--ok); }
+/* body */
+.wrap { flex:1; display:flex; min-height:0; }
+.filters { width:196px; flex:none; border-right:1px solid var(--hair); padding:14px 12px; overflow:auto; }
+.fsec { font:600 11px/14px "IBM Plex Mono",monospace; letter-spacing:.1em; color:var(--t3); text-transform:uppercase; margin:12px 0 6px; }
+.fitem { display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:6px; color:var(--t2); font-size:12.5px; cursor:pointer; }
+.fitem:hover { background:var(--raised); }
+.fitem.on { background:color-mix(in srgb, var(--accent) 10%, transparent); color:var(--t1); }
+.fitem .c { margin-left:auto; font:500 11px/14px "IBM Plex Mono",monospace; color:var(--t3); }
+.main { flex:1; padding:14px 18px 24px; overflow:auto; }
+.toolbar { display:flex; gap:10px; margin-bottom:10px; align-items:stretch; }
+.toolbar .btn { align-self:stretch; display:inline-flex; align-items:center; }
+.search { flex:1; display:flex; align-items:center; gap:8px; background:var(--inset); border:1px solid var(--hair); border-radius:8px; padding:9px 12px; }
+.search input { flex:1; background:none; border:none; outline:none; color:var(--t1); font:inherit; font-size:13px; }
+.search input::placeholder { color:var(--t3); }
+/* skill rows */
+.scard { background:var(--raised); border:1px solid var(--hair); border-radius:10px; padding:10px 14px; margin-bottom:8px; transition:transform .16s ease-out, box-shadow .16s ease-out; }
+.scard:hover { transform:translateY(-2px); box-shadow:var(--shadow-lift); }
+.scard .top { display:flex; align-items:center; gap:12px; }
+.sicon { width:34px; height:34px; border-radius:8px; background:var(--inset); border:1px solid var(--hair); display:flex; align-items:center; justify-content:center; flex:none; }
+.sicon svg { width:16px; height:16px; fill:var(--t2); }
+.scard .nm { font:700 14px/18px "Bricolage Grotesque",sans-serif; }
+.scard .desc { color:var(--t3); font-size:12px; margin-top:1px; }
+.src { font:600 11px/12px "IBM Plex Mono",monospace; letter-spacing:.06em; padding:3px 8px; border-radius:99px; text-transform:uppercase; flex:none; }
+.src.official { background:var(--inset); border:1px solid var(--hair-2); color:var(--t2); }
+.src.community { background:var(--inset); border:1px solid var(--hair-2); color:var(--t2); }
+.src.local { background:var(--inset); border:1px solid var(--hair-2); color:var(--t2); }
+.src.thirdparty { background:color-mix(in srgb, var(--crit) 10%, transparent); color:var(--crit); }
+.scard .acts { display:flex; gap:6px; flex:none; }
+.scard .top .src { margin-left:auto; }
+.compat { display:flex; align-items:center; gap:14px; margin-top:9px; padding:6px 10px; border:1px solid var(--hair); border-radius:8px; background:var(--inset); }
+.compat .gnote { margin-left:auto; color:var(--t2); font-size:11px; font-style:italic; }
+.compat .lbl { font:600 11px/14px "IBM Plex Mono",monospace; color:var(--t2); letter-spacing:.06em; }
+.cset { display:flex; gap:4px; align-items:center; }
+.cdot { min-width:20px; height:20px; padding:0 4px; border-radius:4px; display:flex; align-items:center; justify-content:center; font:700 11px/1 "IBM Plex Mono",monospace; }
+.cdot.ok { background:color-mix(in srgb, var(--ok) 14%, transparent); color:var(--ok); }
+.cdot.warn { background:color-mix(in srgb, var(--warn) 14%, transparent); color:var(--warn); border-radius:3px; transform:rotate(45deg); } .cdot.warn > * { transform:rotate(-45deg); }
+.cdot.na { background:transparent; border:1px solid var(--hair-2); color:var(--t3); }
+.installed-tag { display:inline-flex; align-items:center; gap:5px; font:600 11px/14px "IBM Plex Mono",monospace; color:var(--ok); }
+.warn-note { display:flex; gap:8px; align-items:flex-start; margin-top:8px; padding:7px 10px; border-radius:8px; background:color-mix(in srgb, var(--warn) 8%, transparent); border:1px solid color-mix(in srgb, var(--warn) 24%, transparent); font-size:11.5px; color:var(--t2); }
+.warn-note b { color:var(--warn); }
+@media (max-width:900px){ .filters{display:none} }
+</style>
+</head>
+<body>
+<nav>
+  <div class="nameplate"><span class="tick"></span><span class="wm">SO<b>U</b>P</span><span class="ctx">SKILLS</span></div>
+  <div class="nav-sec">Operate</div>
+  <a class="nav-item" href="fleet.html"><svg viewBox="0 0 16 16"><path d="M2 2h5v5H2zM9 2h5v5H9zM2 9h5v5H2zM9 9h5v5H9z"/></svg><span>Fleet</span></a>
+  <a class="nav-item" href="agents.html"><svg viewBox="0 0 16 16"><path d="M8 1.5 14 5v6l-6 3.5L2 11V5z"/></svg><span>Agents</span></a>
+  <a class="nav-item" href="inbox.html"><svg viewBox="0 0 16 16"><path d="M2 3h12v9H6l-4 3z"/></svg><span>Inbox</span><span class="dot"></span></a>
+  <a class="nav-item" href="#"><svg viewBox="0 0 16 16" style="fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round"><path d="M3 13V8m5 5V3m5 10v-7"/></svg><span>Ops</span></a>
+  <div class="nav-sec">Create</div>
+  <a class="nav-item active" href="skills-hub.html"><svg viewBox="0 0 16 16"><path d="M8 2a6 6 0 1 0 6 6h-2a4 4 0 1 1-4-4z"/><path d="M8 6l5-3-3 5z"/></svg><span>Skills</span></a>
+  <a class="nav-item" href="dream-lab.html"><svg viewBox="0 0 16 16"><path d="M8 2c2 2 2 4 0 6s-2 4 0 6c-3-1-5-3-5-6s2-5 5-6z"/></svg><span>Dream Lab</span></a>
+  <div class="nav-sec">System</div>
+  <a class="nav-item" href="deployments.html"><svg viewBox="0 0 16 16"><path d="M2 3h12v4H2zM2 9h12v4H2z"/></svg><span>Deployments</span></a>
+  <a class="nav-item" href="settings.html"><svg viewBox="0 0 16 16"><path d="M8 5a3 3 0 1 0 0 6 3 3 0 0 0 0-6zm6 3h2M1 8h2m5-7v2m0 10v2m5-12 1.5-1.5M2.5 13.5 4 12m9 1.5L11.5 12M2.5 2.5 4 4"/></svg><span>Settings</span></a>
+  <div class="deploy">
+    <div class="nav-sec">Hosts</div>
+    <div class="hchip"><span class="hst"></span><span>local · this host</span></div>
+    <div class="hchip"><span class="hst warn"></span><span>nest-2 · container</span></div>
+    <div class="hchip"><span class="hst"></span><span>field-pi · remote</span></div>
+  </div>
+</nav>
+<div class="appcol">
+<header>
+  <h1>Skills Hub</h1>
+  <div class="spacer"></div>
+  <div class="modebar"><button class="on"><span class="st">●</span> personal hub</button><button>org hub · shared</button></div>
+  <button class="btn primary"><svg width="13" height="13" viewBox="0 0 16 16" style="fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round"><path d="M8 11V2M4.5 5.5 8 2l3.5 3.5M2.5 11v2.5h11V11"/></svg> Upload</button>
+  <button class="btn ghost theme-toggle" onclick="document.documentElement.dataset.theme=document.documentElement.dataset.theme==='dark'?'light':'dark'"><svg width="14" height="14" viewBox="0 0 16 16" style="vertical-align:-2px"><circle cx="8" cy="8" r="3.2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6 13 13M13 3l-1.4 1.4M4.4 11.6 3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg> theme</button>
+</header>
+<div class="wrap">
+  <aside class="filters">
+    <div class="fsec">Type</div>
+    <div class="fitem on">All <span class="c">214</span></div>
+    <div class="fitem">Skills <span class="c">96</span></div>
+    <div class="fitem">Plugins <span class="c">61</span></div>
+    <div class="fitem">MCP servers <span class="c">38</span></div>
+    <div class="fitem">Tools <span class="c">19</span></div>
+    <div class="fsec">Source</div>
+    <div class="fitem">Official <span class="c">84</span></div>
+    <div class="fitem">Community <span class="c">102</span></div>
+    <div class="fitem">Local / uploaded <span class="c">28</span></div>
+    <div class="fsec">Status</div>
+    <div class="fitem">Installed <span class="c">41</span></div>
+    <div class="fitem">Updates available <span class="c">7</span></div>
+    <div class="fitem">Incompatible <span class="c">3</span></div>
+    <div class="fsec">Legend</div>
+    <div class="fitem" style="cursor:default;font-size:11px;color:var(--t3);display:block;line-height:1.8">compat<br>C claude-cli · O opencode · X codex<br>G gemini · A anthropic<br>harness<br>agt agent · cht chat · pas passive<br>◆ partial · ○ full · outline n/a</div>
+  </aside>
+  <main class="main">
+    <div class="toolbar">
+      <div class="search"><svg width="13" height="13" viewBox="0 0 16 16" style="fill:none;stroke:var(--t3);stroke-width:1.6;stroke-linecap:round"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg><input placeholder="Search skills, plugins, MCP servers, tools…"></div>
+      <button class="btn ghost">sort: relevance ⇅</button>
+    </div>
+
+    <div class="scard">
+      <div class="top">
+        <span class="sicon"><svg viewBox="0 0 16 16"><path d="M8 1.5 14 5v6l-6 3.5L2 11V5z"/></svg></span>
+        <div><div class="nm">pinecone-search</div><div class="desc">Semantic vector search across indexes with rerank</div></div>
+        <span class="src official">official</span>
+        <span class="installed-tag">✓ installed</span>
+        <div class="acts"><button class="btn sm ghost">configure</button><button class="btn sm upd" title="2.3.0 → 2.4.1">update</button></div>
+      </div>
+      <div class="compat"><span class="lbl">COMPAT</span>
+        <span class="cset"><span class="cdot ok" title="claude-cli">C</span><span class="cdot ok" title="opencode-cli">O</span><span class="cdot ok" title="codex-cli">X</span><span class="cdot warn" title="gemini-cli"><span>G</span></span><span class="cdot ok" title="anthropic-api">A</span></span>
+        <span class="lbl">HARNESS</span>
+        <span class="cset"><span class="cdot ok" title="agent">agt</span><span class="cdot ok" title="chat">cht</span><span class="cdot na" title="passive">pas</span></span>
+        <span class="gnote">gemini: provider config required</span>
+      </div>
+    </div>
+
+    <div class="scard">
+      <div class="top">
+        <span class="sicon"><svg viewBox="0 0 16 16"><path d="M2 3h12v9H6l-4 3z"/></svg></span>
+        <div><div class="nm">whatsapp-fleet-tools</div><div class="desc">Full WhatsApp fleet MCP surface — messages, groups, labels</div></div>
+        <span class="src official">official</span>
+        <span class="installed-tag">✓ installed</span>
+        <div class="acts"><button class="btn sm ghost">configure</button></div>
+      </div>
+      <div class="compat"><span class="lbl">COMPAT</span>
+        <span class="cset"><span class="cdot ok">C</span><span class="cdot ok">O</span><span class="cdot ok">X</span><span class="cdot ok">G</span><span class="cdot ok">A</span></span>
+        <span class="lbl">HARNESS</span>
+        <span class="cset"><span class="cdot ok">agt</span><span class="cdot warn"><span>cht</span></span><span class="cdot ok">pas</span></span>
+      </div>
+    </div>
+
+    <div class="scard">
+      <div class="top">
+        <span class="sicon"><svg viewBox="0 0 16 16" style="fill:none;stroke:var(--t2);stroke-width:1.6;stroke-linecap:round"><path d="M3 13V8m5 5V3m5 10v-7"/></svg></span>
+        <div><div class="nm">auto-seo-suite</div><div class="desc">Third-party SEO auditing and content optimization</div></div>
+        <span class="src thirdparty">3rd-party</span>
+        <div class="acts"><button class="btn sm">review &amp; install</button></div>
+      </div>
+      <div class="warn-note"><svg width="13" height="13" viewBox="0 0 16 16" style="fill:none;stroke:var(--warn);stroke-width:1.5;stroke-linejoin:round;flex:none;margin-top:1px"><path d="M8 2.5 14.5 13.5h-13z"/><path d="M8 7v3" stroke-linecap="round"/><circle cx="8" cy="11.6" r=".9" fill="var(--warn)" stroke="none"/></svg><span><b>Third-party publisher code.</b> This skill installs code published by an unverified author. Reviewed by the hub scanner: 2 medium findings. Installed per-agent only, never pre-selected.</span></div>
+      <div class="compat"><span class="lbl">COMPAT</span>
+        <span class="cset"><span class="cdot ok">C</span><span class="cdot warn"><span>O</span></span><span class="cdot na">X</span><span class="cdot na">G</span><span class="cdot ok">A</span></span>
+        <span class="lbl">HARNESS</span>
+        <span class="cset"><span class="cdot ok">agt</span><span class="cdot na">cht</span><span class="cdot na">pas</span></span>
+      </div>
+    </div>
+
+    <div class="scard">
+      <div class="top">
+        <span class="sicon"><svg viewBox="0 0 16 16"><path d="M8 2a6 6 0 1 0 6 6h-2a4 4 0 1 1-4-4z"/></svg></span>
+        <div><div class="nm">dream-lab-persona</div><div class="desc">Agent self-suggestion pipeline for persona edits</div></div>
+        <span class="src local">local</span>
+        <span class="installed-tag">✓ installed</span>
+        <div class="acts"><button class="btn sm ghost">configure</button></div>
+      </div>
+      <div class="compat"><span class="lbl">COMPAT</span>
+        <span class="cset"><span class="cdot ok">C</span><span class="cdot ok">O</span><span class="cdot ok">X</span><span class="cdot ok">G</span><span class="cdot ok">A</span></span>
+        <span class="lbl">HARNESS</span>
+        <span class="cset"><span class="cdot ok">agt</span><span class="cdot ok">cht</span><span class="cdot na">pas</span></span>
+      </div>
+    </div>
+
+    <div class="scard">
+      <div class="top">
+        <span class="sicon"><svg viewBox="0 0 16 16"><path d="M1 3h14v10H1z"/></svg></span>
+        <div><div class="nm">m365-connector</div><div class="desc">Microsoft 365 MCP — mail, calendar, Teams, Dataverse</div></div>
+        <span class="src community">community</span>
+        <div class="acts"><button class="btn sm">install</button></div>
+      </div>
+      <div class="compat"><span class="lbl">COMPAT</span>
+        <span class="cset"><span class="cdot ok">C</span><span class="cdot ok">O</span><span class="cdot warn"><span>X</span></span><span class="cdot ok">G</span><span class="cdot ok">A</span></span>
+        <span class="lbl">HARNESS</span>
+        <span class="cset"><span class="cdot ok">agt</span><span class="cdot ok">cht</span><span class="cdot na">pas</span></span>
+      </div>
+    </div>
+
+    <div class="scard">
+      <div class="top">
+        <span class="sicon"><svg viewBox="0 0 16 16" style="fill:none;stroke:var(--t2);stroke-width:1.5;stroke-linecap:round"><circle cx="8" cy="8.5" r="5.5"/><path d="M8 5.5v3l2 1.5M6 1.5h4"/></svg></span>
+        <div><div class="nm">scheduled-tasks</div><div class="desc">Cron-style recurring agent jobs with delivery targets</div></div>
+        <span class="src official">official</span>
+        <span class="installed-tag">✓ installed</span>
+        <div class="acts"><button class="btn sm upd" title="1.9.0 → 2.0.0">update</button></div>
+      </div>
+      <div class="compat"><span class="lbl">COMPAT</span>
+        <span class="cset"><span class="cdot ok">C</span><span class="cdot ok">O</span><span class="cdot ok">X</span><span class="cdot ok">G</span><span class="cdot ok">A</span></span>
+        <span class="lbl">HARNESS</span>
+        <span class="cset"><span class="cdot ok">agt</span><span class="cdot ok">cht</span><span class="cdot ok">pas</span></span>
+      </div>
+    </div>
+  </main>
+</div>
+</div>
+</body>
+</html>
