@@ -609,7 +609,7 @@ describe('strict exact-classification admission', () => {
     const { root, trustedInput } = fixture();
     const created = createRiskClassificationReceipt(root, trustedInput);
     class HostileReceipt extends Uint8Array {
-      static override get [Symbol.species](): Uint8ArrayConstructor {
+      static get [Symbol.species](): Uint8ArrayConstructor {
         throw new Error('species must not run');
       }
 

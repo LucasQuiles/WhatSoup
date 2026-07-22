@@ -13,6 +13,8 @@ import {
 } from '../../scripts/lib/ci-control/execution-plan.ts';
 import {
   preflightReportOnlyExecutionPlan,
+  type KernelPreflightV1,
+  type ReportOnlyKernelPreflightV1,
 } from '../../scripts/lib/ci-control/execution-kernel-preflight.ts';
 import {
   createRiskClassificationReceipt,
@@ -138,6 +140,20 @@ function assertDeeplyFrozen(value: unknown): void {
   if (value === null || typeof value !== 'object') return;
   expect(Object.isFrozen(value)).toBe(true);
   for (const nested of Object.values(value)) assertDeeplyFrozen(nested);
+}
+
+/**
+ * Narrows the preflight union on its `code` discriminant. Only the admitted
+ * `ReportOnlyKernelPreflightV1` arm carries `exactChildControlIds`/`unavailableInputs`; the
+ * unadmitted arm deliberately carries neither, so reading them requires proving the arm first.
+ */
+function assertReportOnlyPreflight(
+  preflight: KernelPreflightV1,
+): asserts preflight is ReportOnlyKernelPreflightV1 {
+  expect(preflight.code).toBe('ci.execution-kernel.contracts-unavailable');
+  if (preflight.code !== 'ci.execution-kernel.contracts-unavailable') {
+    throw new Error(`expected an admitted report-only preflight, received ${preflight.code}`);
+  }
 }
 
 function assertDependencyFirst(plan: ControlExecutionPlanV1): void {
@@ -400,7 +416,7 @@ describe('report-only control execution plan compiler', () => {
     expect(plan.requiredSuites.length).toBeGreaterThan(0);
     expect(plan.readiness).toBe('inconclusive');
     expect(plan.limitations).toContain('ci.execution-plan.suite-registry-unavailable');
-    expect(plan.steps.flatMap(({ argv }) => argv)).not.toEqual(expect.arrayContaining(plan.requiredSuites));
+    expect(plan.steps.flatMap(({ argv }) => argv)).not.toEqual(expect.arrayContaining([...plan.requiredSuites]));
   });
 
   it('orders a reversed diamond graph dependency-first and hashes the canonical plan, not caller order', () => {
@@ -643,6 +659,7 @@ describe('report-only control execution plan compiler', () => {
     ]) {
       const plan = compileReportOnlyExecutionPlan(current.manifest, current.admission, current.trustedInput);
       const preflight = preflightReportOnlyExecutionPlan(plan);
+      assertReportOnlyPreflight(preflight);
       expect(preflight).toMatchObject({
         schemaVersion: 1,
         authorization: 'report-only',

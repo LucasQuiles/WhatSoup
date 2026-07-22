@@ -41,6 +41,11 @@ function gitOutput(repo: string, args: string[]): string {
   return execFileSync('git', args, { cwd: repo, encoding: 'utf8', env: cleanGitEnv() }).trim();
 }
 
+/** Mirrors the guard's own payload digest shape so fixtures keep the `sha256:` prefix in their type. */
+function payloadDigest(bytes: Uint8Array): `sha256:${string}` {
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+}
+
 function makeExactRangeRepo(): { repo: string; baseOid: string } {
   const repo = mkdtempSync(join(tmpdir(), 'publication-exact-range-'));
   repos.push(repo);
@@ -82,7 +87,7 @@ function reboundArtifact(
   const payload = JSON.parse(Buffer.from(built.artifact.payloadBytes).toString('utf8')) as Record<string, unknown>;
   mutate(payload);
   const payloadBytes = Buffer.from(canonicalizeBoundaryRun(payload), 'utf8');
-  const payloadSha256 = `sha256:${createHash('sha256').update(payloadBytes).digest('hex')}`;
+  const payloadSha256 = payloadDigest(payloadBytes);
   return {
     artifact: {
       payloadBytes: Uint8Array.from(payloadBytes),
@@ -1336,7 +1341,7 @@ describe('publication guard exact-range native receipt', () => {
 
     const payload = JSON.parse(Buffer.from(built.artifact.payloadBytes).toString('utf8')) as Record<string, unknown>;
     const prettyBytes = Buffer.from(JSON.stringify(payload, null, 2), 'utf8');
-    const prettySha = `sha256:${createHash('sha256').update(prettyBytes).digest('hex')}`;
+    const prettySha = payloadDigest(prettyBytes);
     expect(validatePublicationExactRangeArtifact({
       payloadBytes: Uint8Array.from(prettyBytes),
       binding: {
@@ -1357,7 +1362,7 @@ describe('publication guard exact-range native receipt', () => {
 
     const canonicalText = Buffer.from(built.artifact.payloadBytes).toString('utf8');
     const duplicateBytes = Buffer.from(`{"authorization":"report-only",${canonicalText.slice(1)}`, 'utf8');
-    const duplicateSha = `sha256:${createHash('sha256').update(duplicateBytes).digest('hex')}`;
+    const duplicateSha = payloadDigest(duplicateBytes);
     expect(validatePublicationExactRangeArtifact({
       payloadBytes: Uint8Array.from(duplicateBytes),
       binding: {
