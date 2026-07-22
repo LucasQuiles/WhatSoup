@@ -522,7 +522,7 @@ describe('quality workflow composition', () => {
     expect(setupPythonIndex).toBeGreaterThanOrEqual(0);
     expect(pythonDepsIndex).toBeGreaterThan(setupPythonIndex);
     expect(testIntegrityIndex).toBeGreaterThan(pythonDepsIndex);
-    expect(qualityWorkflow).toContain('uses: actions/setup-python@v5');
+    expect(qualityWorkflow).toMatch(/uses: actions\/setup-python@[0-9a-f]{40}/);
     expect(qualityWorkflow).toContain("python-version: '3.12'");
     expect(qualityWorkflow).toContain('python3 -m pip install --user pytest pytest-cov');
   });
