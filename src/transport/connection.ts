@@ -19,7 +19,13 @@ import {
 import { shortHash } from '../lib/short-hash.ts';
 import { isRecord } from '../lib/type-guards.ts';
 import { createTypingStartGuard, type TypingStartGuard } from '../lib/typing-start-guard.ts';
-import { appendPrivateJsonLineSync, readFreshMarkerSync, writePrivateJsonMarkerSync } from '../lib/private-fs.ts';
+import {
+  appendPrivateJsonLineSync,
+  deletePrivateFileSync,
+  readFreshMarkerSync,
+  readPrivateFileSync,
+  writePrivateJsonMarkerSync,
+} from '../lib/private-fs.ts';
 
 import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
@@ -628,6 +634,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private readonly outboundFloodDetector = new OutboundFloodDetector({
     resolveKey: (jid) => this.contactsDir.resolveConversationKey(jid),
   });
+  private outboundFloodIncidentOpen = false;
+  private outboundFloodIncidentRestored = false;
+  private outboundFloodIncidentOpenedAt = 0;
 
   /** In-memory cache of the most recent presence status per JID. */
   readonly presenceCache = new PresenceCache();
@@ -707,6 +716,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
           globalWindowMs: govCfg.globalWindowMs,
         })
       : null;
+    this.restoreOutboundFloodIncident();
     this.on('exhausted', () => {
       void this.handleExhausted();
     });
@@ -1467,22 +1477,24 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       'outbound flood detected',
     );
     const windowMin = Math.round(OUTBOUND_FLOOD_WINDOW_MS / 60_000);
-    // Dest hash in the SUMMARY (not just evidence) so two conversations flooding
-    // at once produce distinct alerts — the bot-errors dispatcher de-dups on
-    // instance|source|summary, so an identical summary would collapse them and
-    // break the spec's per-(bot, conversation, window) granularity.
-    emitAlertChecked(
+    // Keep the destination hash in the summary so concurrent offenders remain
+    // distinguishable in the incident timeline. Dispatcher ownership is
+    // instance|source, so recovery below waits for every tracked destination to
+    // drain rather than clearing the shared source when only one destination does.
+    const emitted = emitAlertChecked(
       config.botName,
       'outbound_flood',
       `outbound flood: ${result.count}+ sends in ${windowMin}m to conversation ${destHash}`,
       JSON.stringify({ dest: destHash, count: result.count, windowMs: OUTBOUND_FLOOD_WINDOW_MS }),
       'critical',
     );
+    if (emitted) this.persistOutboundFloodIncident();
   }
 
   /** Redacted flood snapshot for the health payload (dest as short hash). */
   private getOutboundFloodStats(): ConnectionOutboundFlood {
     const stats: OutboundFloodStats = this.outboundFloodDetector.stats();
+    this.reconcileOutboundFloodIncident(stats);
     return {
       windowMs: stats.windowMs,
       threshold: stats.threshold,
@@ -1491,6 +1503,98 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       worstDestHash: stats.worstKey ? shortHash(stats.worstKey) : null,
       worstCount: stats.worstCount,
     };
+  }
+
+  private outboundFloodIncidentMarkerPath(): string | null {
+    const root = config.stateRoot ?? config.dataRoot;
+    return typeof root === 'string' && root.length > 0
+      ? join(root, 'outbound-flood-incident.json')
+      : null;
+  }
+
+  private persistOutboundFloodIncident(): void {
+    const openedAt = Date.now();
+    this.outboundFloodIncidentOpen = true;
+    this.outboundFloodIncidentRestored = false;
+    this.outboundFloodIncidentOpenedAt = openedAt;
+    const markerPath = this.outboundFloodIncidentMarkerPath();
+    if (!markerPath) {
+      this.log.warn('outbound flood incident marker path unavailable; restart recovery is not durable');
+      return;
+    }
+    try {
+      writePrivateJsonMarkerSync(markerPath, {
+        version: 1,
+        instance: config.botName,
+        source: 'outbound_flood',
+        openedAt: new Date(openedAt).toISOString(),
+      }, { label: 'outbound flood incident marker', directoryFsync: 'required' });
+    } catch (err) {
+      this.log.warn({ err }, 'failed to persist outbound flood incident marker');
+    }
+  }
+
+  private restoreOutboundFloodIncident(): void {
+    const markerPath = this.outboundFloodIncidentMarkerPath();
+    if (!markerPath) return;
+    try {
+      const raw = readPrivateFileSync(markerPath, {
+        maxBytes: 4_096,
+        label: 'outbound flood incident marker',
+      });
+      if (raw === null) return;
+      const marker = JSON.parse(raw) as Record<string, unknown>;
+      const openedAt = typeof marker['openedAt'] === 'string'
+        ? new Date(marker['openedAt']).getTime()
+        : Number.NaN;
+      if (
+        marker['version'] !== 1
+        || marker['instance'] !== config.botName
+        || marker['source'] !== 'outbound_flood'
+        || !Number.isFinite(openedAt)
+      ) {
+        this.log.warn('ignored invalid outbound flood incident marker');
+        return;
+      }
+      this.outboundFloodIncidentOpen = true;
+      this.outboundFloodIncidentRestored = true;
+      this.outboundFloodIncidentOpenedAt = openedAt;
+    } catch (err) {
+      this.log.warn({ err }, 'failed to restore outbound flood incident marker');
+    }
+  }
+
+  private reconcileOutboundFloodIncident(stats: OutboundFloodStats): void {
+    if (!this.outboundFloodIncidentOpen || stats.flooding) return;
+    if (
+      this.outboundFloodIncidentRestored
+      && Date.now() - this.outboundFloodIncidentOpenedAt <= stats.windowMs
+    ) return;
+
+    const evidence = JSON.stringify({
+      reason: 'verified_quiet_window',
+      windowMs: stats.windowMs,
+      threshold: stats.threshold,
+      destCount: stats.destCount,
+      worstCount: stats.worstCount,
+    });
+    if (!clearAlertSourceChecked(config.botName, 'outbound_flood', evidence)) return;
+
+    this.outboundFloodIncidentOpen = false;
+    this.outboundFloodIncidentRestored = false;
+    this.outboundFloodIncidentOpenedAt = 0;
+    const markerPath = this.outboundFloodIncidentMarkerPath();
+    if (markerPath) {
+      try {
+        deletePrivateFileSync(markerPath, 'outbound flood incident marker');
+      } catch (err) {
+        this.log.warn({ err }, 'failed to delete recovered outbound flood incident marker');
+      }
+    }
+    this.log.info(
+      { windowMs: stats.windowMs, threshold: stats.threshold, destCount: stats.destCount, worstCount: stats.worstCount },
+      'outbound flood recovered after verified quiet window',
+    );
   }
 
 

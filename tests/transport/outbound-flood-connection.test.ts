@@ -20,6 +20,8 @@ const { mockConfig } = vi.hoisted(() => ({
     botName: 'WhatSoup',
     accessMode: 'allowlist',
     healthPort: 9090,
+    stateRoot: '/tmp/wa-test-state-flood',
+    dataRoot: '/tmp/wa-test-data-flood',
     autoTyping: 'off' as 'off' | 'composing' | 'recording',
     models: {
       conversation: 'claude-opus-4-5',
@@ -97,6 +99,8 @@ describe('ConnectionManager outbound-flood seam (T2.1 + T3.2)', () => {
     mockConfig.autoTyping = 'off';
     sinkDir = mkdtempSync(join(tmpdir(), 'flood-sink-'));
     sink = join(sinkDir, 'alerts.jsonl');
+    mockConfig.stateRoot = sinkDir;
+    mockConfig.dataRoot = sinkDir;
     process.env['WHATSOUP_ALERT_SINK'] = sink; // capture alerts instead of paging
     process.env['EMIT_ALERT_THROTTLE_MS'] = '0'; // isolate: no real-clock throttle masking dedup
     resetEmitAlertThrottle();
@@ -105,6 +109,7 @@ describe('ConnectionManager outbound-flood seam (T2.1 + T3.2)', () => {
   afterEach(() => {
     delete process.env['WHATSOUP_ALERT_SINK'];
     delete process.env['EMIT_ALERT_THROTTLE_MS'];
+    vi.useRealTimers();
     rmSync(sinkDir, { recursive: true, force: true });
   });
 
@@ -154,6 +159,84 @@ describe('ConnectionManager outbound-flood seam (T2.1 + T3.2)', () => {
     const flood = manager.getConnectionState().outboundFlood;
     expect(flood!.flooding).toBe(false);
     expect(flood!.worstCount).toBe(19);
+    expect(readAlerts(sink, 'outbound_flood')).toHaveLength(0);
+  });
+
+  it('emits one recovery after the active destination drains, then re-arms for a fresh flood', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-22T12:00:00Z'));
+    const mockSock = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+    const manager = new ConnectionManager();
+    await manager.connect();
+
+    for (let i = 0; i < 20; i += 1) await manager.sendMessage(FLOOD_DEST, `first ${i}`);
+    expect(readAlerts(sink, 'outbound_flood').map((event) => event['eventType'])).toEqual(['alert']);
+
+    vi.setSystemTime(new Date('2026-07-22T12:05:00.001Z'));
+    expect(manager.getConnectionState().outboundFlood?.flooding).toBe(false);
+    expect(readAlerts(sink, 'outbound_flood').map((event) => event['eventType'])).toEqual(['alert', 'clear']);
+
+    // Health is polled repeatedly; a stable healthy state must not emit noisy duplicate clears.
+    manager.getConnectionState();
+    manager.getConnectionState();
+    expect(readAlerts(sink, 'outbound_flood').map((event) => event['eventType'])).toEqual(['alert', 'clear']);
+
+    for (let i = 0; i < 20; i += 1) await manager.sendMessage(FLOOD_DEST, `second ${i}`);
+    expect(readAlerts(sink, 'outbound_flood').map((event) => event['eventType'])).toEqual([
+      'alert',
+      'clear',
+      'alert',
+    ]);
+  });
+
+  it('recovers a pre-restart incident from durable state only after its original window elapses', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-22T12:00:00Z'));
+    const mockSock = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+    const firstManager = new ConnectionManager();
+    await firstManager.connect();
+    for (let i = 0; i < 20; i += 1) await firstManager.sendMessage(FLOOD_DEST, `first ${i}`);
+
+    // A fresh manager represents a service restart: its in-memory detector is empty,
+    // but the durable incident marker must retain recovery ownership.
+    vi.setSystemTime(new Date('2026-07-22T12:01:00Z'));
+    const restartedManager = new ConnectionManager();
+    restartedManager.getConnectionState();
+    expect(readAlerts(sink, 'outbound_flood').map((event) => event['eventType'])).toEqual(['alert']);
+
+    vi.setSystemTime(new Date('2026-07-22T12:05:00.001Z'));
+    restartedManager.getConnectionState();
+    restartedManager.getConnectionState();
+    expect(readAlerts(sink, 'outbound_flood').map((event) => event['eventType'])).toEqual(['alert', 'clear']);
+  });
+
+  it('does not clear while a later burst keeps the rolling window at threshold', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-22T12:00:00Z'));
+    const mockSock = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+    const manager = new ConnectionManager();
+    await manager.connect();
+    for (let i = 0; i < 20; i += 1) await manager.sendMessage(FLOOD_DEST, `first ${i}`);
+
+    vi.setSystemTime(new Date('2026-07-22T12:04:59.999Z'));
+    for (let i = 0; i < 20; i += 1) await manager.sendMessage(FLOOD_DEST, `sustained ${i}`);
+    vi.setSystemTime(new Date('2026-07-22T12:05:00.001Z'));
+    expect(manager.getConnectionState().outboundFlood?.worstCount).toBe(20);
+    expect(manager.getConnectionState().outboundFlood?.flooding).toBe(true);
+    expect(readAlerts(sink, 'outbound_flood').map((event) => event['eventType'])).toEqual(['alert']);
+
+    vi.setSystemTime(new Date('2026-07-22T12:10:00.001Z'));
+    expect(manager.getConnectionState().outboundFlood?.flooding).toBe(false);
+    expect(readAlerts(sink, 'outbound_flood').map((event) => event['eventType'])).toEqual(['alert', 'clear']);
+  });
+
+  it('does not emit a recovery on a clean process with no prior incident ownership', () => {
+    const manager = new ConnectionManager();
+    manager.getConnectionState();
+    manager.getConnectionState();
     expect(readAlerts(sink, 'outbound_flood')).toHaveLength(0);
   });
 });
