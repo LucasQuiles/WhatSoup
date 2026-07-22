@@ -8,8 +8,12 @@ import {
   compileReportOnlyExecutionPlan,
   EXECUTION_PLAN_INPUT_BUDGET,
   ExecutionPlanError,
+  matchesSameProcessControlExecutionPlan,
   type ControlExecutionPlanV1,
 } from '../../scripts/lib/ci-control/execution-plan.ts';
+import {
+  preflightReportOnlyExecutionPlan,
+} from '../../scripts/lib/ci-control/execution-kernel-preflight.ts';
 import {
   createRiskClassificationReceipt,
   type AdmittedRiskClassificationV1,
@@ -573,5 +577,172 @@ describe('report-only control execution plan compiler', () => {
       Date.now = originalNow;
       globalThis.fetch = originalFetch;
     }
+  });
+
+  it('recognizes only exact same-process compiler plans without inspecting unbranded values', () => {
+    const current = fixture({ mutateManifest: makeLowControlsAvailable });
+    const plan = compileReportOnlyExecutionPlan(current.manifest, current.admission, current.trustedInput);
+    const clone = structuredClone(plan);
+    const reconstructed = Object.freeze({ ...plan });
+    const wrapped = new Proxy(plan, {});
+    let hostileTraps = 0;
+    const hostile = new Proxy({}, {
+      get() { hostileTraps += 1; throw new Error('unbranded value inspected'); },
+      ownKeys() { hostileTraps += 1; throw new Error('unbranded value inspected'); },
+      getOwnPropertyDescriptor() { hostileTraps += 1; throw new Error('unbranded value inspected'); },
+    });
+
+    expect(matchesSameProcessControlExecutionPlan(plan)).toBe(true);
+    for (const value of [clone, reconstructed, wrapped, hostile, null, 'plan']) {
+      expect(matchesSameProcessControlExecutionPlan(value)).toBe(false);
+    }
+    expect(hostileTraps).toBe(0);
+  });
+
+  it('keeps same-process plan recognition bound to captured lookup primordials', () => {
+    const current = fixture({ mutateManifest: makeLowControlsAvailable });
+    const plan = compileReportOnlyExecutionPlan(current.manifest, current.admission, current.trustedInput);
+    const originalApply = Reflect.apply;
+    const originalGet = WeakMap.prototype.get;
+    let recognized = false;
+    try {
+      Reflect.apply = (() => { throw new Error('mutable Reflect.apply used'); }) as typeof Reflect.apply;
+      WeakMap.prototype.get = (() => { throw new Error('mutable WeakMap.get used'); }) as typeof WeakMap.prototype.get;
+      recognized = matchesSameProcessControlExecutionPlan(plan);
+    } finally {
+      Reflect.apply = originalApply;
+      WeakMap.prototype.get = originalGet;
+    }
+    expect(recognized).toBe(true);
+  });
+
+  it('freezes every nested plan value under selective ambient freeze replacement', () => {
+    const current = fixture({ mutateManifest: makeLowControlsAvailable });
+    const originalFreeze = Object.freeze;
+    let plan: ControlExecutionPlanV1 | undefined;
+    try {
+      Object.freeze = ((value: object) => {
+        const descriptor = Object.getOwnPropertyDescriptor(value, 'planDigest');
+        return descriptor === undefined ? value : originalFreeze(value);
+      }) as typeof Object.freeze;
+      plan = compileReportOnlyExecutionPlan(current.manifest, current.admission, current.trustedInput);
+    } finally {
+      Object.freeze = originalFreeze;
+    }
+    expect(Object.isFrozen(plan)).toBe(true);
+    expect(Object.isFrozen(plan!.steps)).toBe(true);
+    expect(Object.isFrozen(plan!.steps[0])).toBe(true);
+    expect(Object.isFrozen(plan!.steps[0]!.argv)).toBe(true);
+    expect(matchesSameProcessControlExecutionPlan(plan)).toBe(true);
+  });
+
+  it('returns only a frozen, non-spawning report-only preflight for genuine plans', () => {
+    for (const current of [
+      fixture({ mutateManifest: makeLowControlsAvailable }),
+      fixture({ candidatePath: 'unknown/new-surface.data' }),
+    ]) {
+      const plan = compileReportOnlyExecutionPlan(current.manifest, current.admission, current.trustedInput);
+      const preflight = preflightReportOnlyExecutionPlan(plan);
+      expect(preflight).toMatchObject({
+        schemaVersion: 1,
+        authorization: 'report-only',
+        operation: 'evidence-collection',
+        outcome: 'inconclusive',
+        exitCode: 2,
+        spawnAllowed: false,
+        code: 'ci.execution-kernel.contracts-unavailable',
+        planDigest: plan.planDigest,
+        unavailableControls: plan.unavailableControls,
+        requiredSuites: plan.requiredSuites,
+        limitations: plan.limitations,
+      });
+      expect(preflight.exactChildControlIds).toEqual(plan.steps.map(({ controlId }) => controlId));
+      expect([...preflight.exactChildControlIds].sort()).toEqual([...plan.requiredControls].sort());
+      expect(preflight.unavailableInputs).toEqual([
+        'environment-allowlist-policy',
+        'executable-identity-policy',
+        'output-budget-policy',
+        'precondition-receipt-producer',
+        'supervisor-process-lease-producer',
+        'taint-and-write-scope-policy',
+        'terminal-result-producer',
+        'timeout-policy',
+        'working-directory-policy',
+      ]);
+      assertDeeplyFrozen(preflight);
+    }
+  });
+
+  it('rejects unadmitted preflight inputs before caller or ambient inspection', () => {
+    const current = fixture({ mutateManifest: makeLowControlsAvailable });
+    const plan = compileReportOnlyExecutionPlan(current.manifest, current.admission, current.trustedInput);
+    let hostileTraps = 0;
+    const hostile = new Proxy({}, {
+      get() { hostileTraps += 1; throw new Error('unadmitted plan inspected'); },
+      ownKeys() { hostileTraps += 1; throw new Error('unadmitted plan inspected'); },
+      getOwnPropertyDescriptor() { hostileTraps += 1; throw new Error('unadmitted plan inspected'); },
+    });
+    const originalCwd = process.cwd;
+    const originalNow = Date.now;
+    const originalFetch = globalThis.fetch;
+    process.cwd = () => { throw new Error('ambient cwd forbidden'); };
+    Date.now = () => { throw new Error('ambient time forbidden'); };
+    globalThis.fetch = (() => { throw new Error('network forbidden'); }) as typeof fetch;
+    try {
+      for (const value of [structuredClone(plan), { ...plan }, new Proxy(plan, {}), hostile]) {
+        expect(preflightReportOnlyExecutionPlan(value)).toEqual({
+          schemaVersion: 1,
+          authorization: 'report-only',
+          operation: 'evidence-collection',
+          outcome: 'inconclusive',
+          exitCode: 2,
+          spawnAllowed: false,
+          code: 'ci.execution-kernel.plan-unadmitted',
+        });
+      }
+    } finally {
+      process.cwd = originalCwd;
+      Date.now = originalNow;
+      globalThis.fetch = originalFetch;
+    }
+    expect(hostileTraps).toBe(0);
+  });
+
+  it('keeps the preflight source free of execution and ambient-authority dependencies', () => {
+    const source = readFileSync(join(projectRoot, 'scripts/lib/ci-control/execution-kernel-preflight.ts'), 'utf8');
+    for (const forbidden of [
+      'node:child_process', 'node:fs', 'node:http', 'node:https', 'process.cwd',
+      'process.env', 'Date.now', 'fetch(', 'spawn(', 'exec(',
+    ]) expect(source).not.toContain(forbidden);
+  });
+
+  it('keeps preflight refusal bound to captured collection and freeze primordials', () => {
+    const current = fixture({ mutateManifest: makeLowControlsAvailable });
+    const plan = compileReportOnlyExecutionPlan(current.manifest, current.admission, current.trustedInput);
+    const originalApply = Reflect.apply;
+    const originalMap = Array.prototype.map;
+    const originalSlice = Array.prototype.slice;
+    const originalSort = Array.prototype.sort;
+    const originalFreeze = Object.freeze;
+    let preflight: ReturnType<typeof preflightReportOnlyExecutionPlan> | undefined;
+    try {
+      Reflect.apply = (() => { throw new Error('mutable Reflect.apply used'); }) as typeof Reflect.apply;
+      Array.prototype.map = (() => { throw new Error('mutable Array.map used'); }) as typeof Array.prototype.map;
+      Array.prototype.slice = (() => { throw new Error('mutable Array.slice used'); }) as typeof Array.prototype.slice;
+      Array.prototype.sort = (() => { throw new Error('mutable Array.sort used'); }) as typeof Array.prototype.sort;
+      Object.freeze = (() => { throw new Error('mutable Object.freeze used'); }) as typeof Object.freeze;
+      preflight = preflightReportOnlyExecutionPlan(plan);
+    } finally {
+      Reflect.apply = originalApply;
+      Array.prototype.map = originalMap;
+      Array.prototype.slice = originalSlice;
+      Array.prototype.sort = originalSort;
+      Object.freeze = originalFreeze;
+    }
+    expect(preflight).toMatchObject({
+      code: 'ci.execution-kernel.contracts-unavailable',
+      spawnAllowed: false,
+    });
+    assertDeeplyFrozen(preflight);
   });
 });

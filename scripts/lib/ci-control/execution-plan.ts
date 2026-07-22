@@ -92,6 +92,31 @@ const AVAILABLE = new Set<ControlAvailability>(['report-only', 'advisory', 'cana
 const UNAVAILABLE = new Set<ControlAvailability>(['planned', 'quarantined', 'deprecated']);
 const SHELLS = new Set(['bash', 'dash', 'ksh', 'sh', 'zsh']);
 const UNSAFE_ARG = /[\u0000\r\n`$;&|]/;
+const REFLECT_APPLY = Reflect.apply;
+const REFLECT_OWN_KEYS = Reflect.ownKeys;
+const OBJECT_GET_OWN_PROPERTY_DESCRIPTORS = Object.getOwnPropertyDescriptors;
+const OBJECT_FREEZE = Object.freeze;
+const OBJECT_IS_FROZEN = Object.isFrozen;
+const OBJECT_VALUES = Object.values;
+const WEAK_MAP_GET = WeakMap.prototype.get;
+const WEAK_MAP_SET = WeakMap.prototype.set;
+const PLAN_KEYS = [
+  'authorization', 'baseOid', 'candidateOid', 'classificationEvidenceDigest',
+  'classificationOutcome', 'classifierDigest', 'executable', 'limitations',
+  'manifestDigest', 'mergeOid', 'planDigest', 'readiness', 'requiredControls',
+  'requiredSuites', 'riskTier', 'schemaVersion', 'steps', 'unavailableControls',
+] as const;
+
+interface SameProcessPlanBinding {
+  readonly planDigest: string;
+  readonly requiredControls: readonly string[];
+  readonly requiredSuites: readonly string[];
+  readonly steps: readonly ControlExecutionStepV1[];
+  readonly unavailableControls: readonly string[];
+  readonly limitations: readonly string[];
+}
+
+const SAME_PROCESS_PLANS = new WeakMap<object, Readonly<SameProcessPlanBinding>>();
 
 function fail(code: ExecutionPlanErrorCode): never {
   throw new ExecutionPlanError(code);
@@ -433,9 +458,58 @@ function snapshotSuites(value: readonly string[]): string[] {
 }
 
 function deepFreeze<T>(value: T): T {
-  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value;
-  for (const nested of Object.values(value)) deepFreeze(nested);
-  return Object.freeze(value);
+  if (value === null || typeof value !== 'object' || OBJECT_IS_FROZEN(value)) return value;
+  const nestedValues = OBJECT_VALUES(value);
+  for (let index = 0; index < nestedValues.length; index += 1) deepFreeze(nestedValues[index]);
+  return OBJECT_FREEZE(value);
+}
+
+export function matchesSameProcessControlExecutionPlan(
+  value: unknown,
+): value is ControlExecutionPlanV1 {
+  if (value === null || typeof value !== 'object') return false;
+  try {
+    const binding = REFLECT_APPLY(
+      WEAK_MAP_GET,
+      SAME_PROCESS_PLANS,
+      [value],
+    ) as Readonly<SameProcessPlanBinding> | undefined;
+    if (binding === undefined) return false;
+    const keys = REFLECT_OWN_KEYS(value);
+    if (keys.length !== PLAN_KEYS.length) return false;
+    for (let index = 0; index < keys.length; index += 1) {
+      const key = keys[index];
+      if (typeof key !== 'string') return false;
+      let expected = false;
+      for (let expectedIndex = 0; expectedIndex < PLAN_KEYS.length; expectedIndex += 1) {
+        if (key === PLAN_KEYS[expectedIndex]) {
+          expected = true;
+          break;
+        }
+      }
+      if (!expected) return false;
+    }
+    const descriptors = OBJECT_GET_OWN_PROPERTY_DESCRIPTORS(value);
+    for (let index = 0; index < PLAN_KEYS.length; index += 1) {
+      const key = PLAN_KEYS[index]!;
+      const descriptor = descriptors[key];
+      if (descriptor === undefined
+        || !('value' in descriptor)
+        || descriptor.enumerable !== true
+        || descriptor.configurable !== false
+        || descriptor.writable !== false) return false;
+    }
+    return descriptors.authorization?.value === 'report-only'
+      && descriptors.executable?.value === false
+      && descriptors.planDigest?.value === binding.planDigest
+      && descriptors.requiredControls?.value === binding.requiredControls
+      && descriptors.requiredSuites?.value === binding.requiredSuites
+      && descriptors.steps?.value === binding.steps
+      && descriptors.unavailableControls?.value === binding.unavailableControls
+      && descriptors.limitations?.value === binding.limitations;
+  } catch {
+    return false;
+  }
 }
 
 export function compileReportOnlyExecutionPlan(
@@ -497,5 +571,14 @@ export function compileReportOnlyExecutionPlan(
     ...body,
     planDigest: `sha256:${sha256Bytes(canonicalizeBoundaryRun(body))}`,
   };
-  return deepFreeze(plan);
+  const frozenPlan = deepFreeze(plan);
+  REFLECT_APPLY(WEAK_MAP_SET, SAME_PROCESS_PLANS, [frozenPlan, OBJECT_FREEZE({
+    planDigest: frozenPlan.planDigest,
+    requiredControls: frozenPlan.requiredControls,
+    requiredSuites: frozenPlan.requiredSuites,
+    steps: frozenPlan.steps,
+    unavailableControls: frozenPlan.unavailableControls,
+    limitations: frozenPlan.limitations,
+  })]);
+  return frozenPlan;
 }
