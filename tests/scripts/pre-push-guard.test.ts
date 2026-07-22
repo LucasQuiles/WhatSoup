@@ -20,6 +20,11 @@ import {
   commandsForDecision,
   ZERO_SHA,
 } from '../../scripts/pre-push-guard.ts';
+import {
+  CI_EXEMPT_PUSH_GATE_GUARDS,
+  namedInCi as namedInCiWorkflow,
+  pushGateGuards as pushGateGuardsOf,
+} from '../helpers/gate-membership.ts';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const prePushHook = resolve(repoRoot, '.husky/pre-push');
@@ -595,55 +600,16 @@ describe('quality workflow composition', () => {
  * needed, so the map cannot quietly become a list of excuses.
  */
 /**
- * `backedBy` is a PATH, not prose, and is asserted to exist and to be collected by vitest.
- *
- * The first version of this map held free-text reasons. That is a false-green waiting to
- * happen: delete or rename `ssot-pattern-guard.test.ts` and the map would still cheerfully
- * claim the guard was covered, because nothing connected the sentence to a file. An
- * exemption is a protection claim, and a protection claim has to derive from something on
- * disk rather than from a sentence someone wrote once.
- *
- * `backedBy: null` means the exemption does not rest on a test at all — spell out in `why`
- * what does carry it.
+ * The exemption map and the two membership predicates now live in
+ * `tests/helpers/gate-membership.ts`, because a second suite needs the same answer:
+ * `fitness-registry-backing.test.ts` asks whether each `severity: 'block'` registry rule
+ * names a backstop a server-side merge cannot bypass. Two independent definitions of
+ * "gate-reachable" would drift, and a drifting protection claim is precisely the failure
+ * this file was written to catch — so there is one definition and both suites import it.
  */
-const CI_EXEMPT_PUSH_GATE_GUARDS: Readonly<Record<string, { backedBy: string | null; why: string }>> = {
-  'guard:ssot-patterns': {
-    backedBy: 'tests/scripts/ssot-pattern-guard.test.ts',
-    why: 'asserts every rule count equals BOTH baseline twins against REPO_ROOT — an exact-count ratchet, not a smoke test.',
-  },
-  'guard:ring-boundary-ratchet': {
-    backedBy: 'tests/scripts/ring-boundary-guard.test.ts',
-    why: 'asserts verdict.count === baseline against the live REPO_ROOT.',
-  },
-  'guard:doc-tally': {
-    backedBy: 'tests/scripts/guard-doc-tally.test.ts',
-    why: 'runs validateDocTally + runDocTallyGuard against REPO_ROOT.',
-  },
-  'guard:guard-test-coverage': {
-    backedBy: 'tests/scripts/guard-test-coverage-check.test.ts',
-    why: 'runs findGuardsMissingTests against the live repo root.',
-  },
-  'guard:deployer-static': {
-    backedBy: 'tests/scripts/deployer-static-parity.test.ts',
-    why: 'reads the deploy script and package.json from the live repoRoot.',
-  },
-  'guard:publication:staged': {
-    backedBy: null,
-    why: 'quality.yml runs guard:publication:all (--all), which scans every tracked doc and is a strict superset of the --staged subset. No test backs this; the CI step does.',
-  },
-};
-
 describe('pre-push guard — local/CI enforcement parity for guard steps', () => {
-  const pushGateGuards = [
-    ...new Set(
-      [...(packageJson.scripts['verify:push:branch'] ?? '').matchAll(/npm run (guard:[a-z0-9:._-]+)/g)].map(
-        (m) => m[1],
-      ),
-    ),
-  ].sort();
-
-  const namedInCi = (guard: string): boolean =>
-    new RegExp(`npm run ${guard.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![a-z0-9:._-])`).test(qualityWorkflow);
+  const pushGateGuards = pushGateGuardsOf(packageJson.scripts);
+  const namedInCi = (guard: string): boolean => namedInCiWorkflow(guard, qualityWorkflow);
 
   it('the push gate actually contains guards (the scan is not vacuous)', () => {
     expect(pushGateGuards.length).toBeGreaterThan(20);
