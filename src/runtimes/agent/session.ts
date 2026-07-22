@@ -65,6 +65,9 @@ import { shortHash } from '../../lib/short-hash.ts';
 const log = createChildLogger('session-manager');
 
 const STDIN_WRITE_TIMEOUT_MS = 30_000;
+const OPENCODE_COMPACTION_CONTINUITY_GUIDANCE =
+  'After automatic context compaction, continue the original user request from the summary. ' +
+  'Do not answer the provider synthetic continuation prompt or ask whether to continue unless the original request genuinely requires new user input.';
 
 /** Cap on the retained no-newline stdout line (QR-064): a provider streaming a
  * large no-newline blob would grow `stdoutBufferStr` unbounded → parent OOM. The
@@ -742,6 +745,7 @@ export class SessionManager {
       `Working directory: ${cwd}`,
       POLL_DECISION_GUIDANCE,
       BACKGROUND_TASK_DELIVERY_GUIDANCE,
+      ...(this.provider === 'opencode-cli' ? [OPENCODE_COMPACTION_CONTINUITY_GUIDANCE] : []),
     ].join('\n');
     const sources = [transportPrelude];
 

@@ -3132,6 +3132,32 @@ describe('buildSystemPrompt edge cases', () => {
     const prompt = sm.buildSystemPrompt();
     expect(prompt).toContain('a personal Gemini CLI agent');
   });
+
+  it('instructs OpenCode to continue the original request after automatic compaction', () => {
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'opencode-cli',
+    });
+
+    expect(sm.buildSystemPrompt()).toContain(
+      'After automatic context compaction, continue the original user request from the summary',
+    );
+  });
+
+  it('does not add OpenCode compaction guidance to other providers', () => {
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'gemini-cli',
+    });
+
+    expect(sm.buildSystemPrompt()).not.toContain('After automatic context compaction');
+  });
 });
 
 // ─── updateMcpActorJid branch coverage ───────────────────────────────────────
@@ -5098,6 +5124,15 @@ describe('session.ts uncovered-branch coverage', () => {
         part: { type: 'step-finish', reason: 'stop', tokens: { input: 130_000, output: 50 } },
       }),
       line({ type: 'step_start', sessionID: 'ses_compaction', part: { type: 'step-start' } }),
+      line({
+        type: 'text',
+        part: {
+          type: 'text',
+          synthetic: true,
+          metadata: { compaction_continue: true },
+          text: 'Continue if you have next steps.',
+        },
+      }),
       line({ type: 'text', part: { text: 'verified final answer' } }),
       line({
         type: 'step_finish',
