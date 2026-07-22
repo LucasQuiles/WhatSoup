@@ -27,6 +27,8 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
+import { scanAddedLines } from '../../scripts/repo-hygiene-guard.ts';
+
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 /**
@@ -104,6 +106,59 @@ describe('secret-shaped test fixtures stay assembled, never literal', () => {
       expect(shape, `no pattern registered for ${label}`).toBeDefined();
       expect(shape!.regex.test(sample), `${label} pattern failed to match its own sample`).toBe(true);
     }
+  });
+
+  it('exempts markdown prose from unbounded-suppression but still flags code', () => {
+    // Every suppression token below is ASSEMBLED at runtime. Written literally they would make
+    // THIS file trip the very rule under test - the same self-detection problem
+    // `isSuppressionComment` solves the same way in the guard's own source. The values are
+    // byte-identical at runtime, so the assertions below test exactly what they appear to.
+    const tsSuppression = (kind: string) => `// @ts-${kind}`;
+    const bare = (kind: string) => `@ts-${kind}`;
+
+    // Documentation that DOCUMENTS the suppression policy must be able to name the tokens it
+    // forbids. A suppression comment in prose is inert - it suppresses nothing.
+    const docIssues = scanAddedLines([
+      { filePath: 'docs/plans/example.md', line: 1, text: `Do not add \`${bare('ignore')}\` to silence this.` },
+      { filePath: 'docs/plans/example.md', line: 2, text: `Never use ${bare('expect-error')} here.` },
+      // Token assembled at runtime: writing it literally trips the machine-level
+      // suppression hook on THIS file, the same way literal secret fixtures used to.
+      // `isSuppressionComment` in the guard under test uses this exact idiom on itself.
+      { filePath: 'README.md', line: 3, text: `Avoid ${['eslint', 'disable'].join('-')} in new code.` },
+    ]);
+    expect(docIssues.filter((issue) => issue.code === 'unbounded-suppression')).toEqual([]);
+
+    // The exemption is EXTENSION-scoped, not path-scoped: real code anywhere still blocks.
+    // Tests especially - an unbounded suppression in a test is a real suppression. Gating this
+    // rule on isProductionCodePath (src|scripts|deploy|console/src) would have silently
+    // exempted tests/, which is why the check is documentation-scoped instead.
+    // Assembled at runtime for the same reason as everything else in this file: written
+    // literally, these three fixtures make THIS file trip the very suppression rule it is
+    // testing. (They were previously silent only because they lived in
+    // repo-hygiene-guard.test.ts, which sits in the guard's `fixtureFiles` allowlist —
+    // assembling is preferable to widening that allowlist to cover another file.)
+    const codeIssues = scanAddedLines([
+      { filePath: 'src/x.ts', line: 1, text: tsSuppression('ignore') },
+      { filePath: 'tests/x.test.ts', line: 2, text: tsSuppression('expect-error') },
+      { filePath: 'console/src/y.tsx', line: 3, text: tsSuppression('nocheck') },
+    ]);
+    expect(codeIssues.filter((issue) => issue.code === 'unbounded-suppression')).toHaveLength(3);
+    expect(codeIssues.filter((issue) => issue.code === 'unbounded-suppression').map((i) => i.filePath)).toEqual([
+      'src/x.ts',
+      'tests/x.test.ts',
+      'console/src/y.tsx',
+    ]);
+
+    // A bounded suppression in code stays accepted, and a markdown file with a bounded one
+    // is likewise silent - the exemption does not change the rationale+expiry contract.
+    const boundedIssues = scanAddedLines([
+      {
+        filePath: 'src/z.ts',
+        line: 1,
+        text: '// @ts-expect-error -- upstream type is narrower than runtime payload; expires 2026-12-31',
+      },
+    ]);
+    expect(boundedIssues.filter((issue) => issue.code === 'unbounded-suppression')).toEqual([]);
   });
 
   it('every listed fixture file is real (list cannot rot silently)', () => {

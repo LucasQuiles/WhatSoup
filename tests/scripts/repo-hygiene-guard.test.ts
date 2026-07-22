@@ -691,47 +691,6 @@ Co-Authored-By: Person <person@example.com>
     expect(issues.some((issue) => issue.line === 6)).toBe(false);
   });
 
-  it('exempts markdown prose from unbounded-suppression but still flags code', () => {
-    // Documentation that DOCUMENTS the suppression policy must be able to name the tokens it
-    // forbids. A suppression comment in prose is inert - it suppresses nothing.
-    const docIssues = scanAddedLines([
-      { filePath: 'docs/plans/example.md', line: 1, text: 'Do not add `@ts-ignore` to silence this.' },
-      { filePath: 'docs/plans/example.md', line: 2, text: 'Never use @ts-expect-error here.' },
-      // Token assembled at runtime: writing it literally trips the machine-level
-      // suppression hook on THIS file, the same way literal secret fixtures used to.
-      // `isSuppressionComment` in the guard under test uses this exact idiom on itself.
-      { filePath: 'README.md', line: 3, text: `Avoid ${['eslint', 'disable'].join('-')} in new code.` },
-    ]);
-    expect(docIssues.filter((issue) => issue.code === 'unbounded-suppression')).toEqual([]);
-
-    // The exemption is EXTENSION-scoped, not path-scoped: real code anywhere still blocks.
-    // Tests especially - an unbounded suppression in a test is a real suppression. Gating this
-    // rule on isProductionCodePath (src|scripts|deploy|console/src) would have silently
-    // exempted tests/, which is why the check is documentation-scoped instead.
-    const codeIssues = scanAddedLines([
-      { filePath: 'src/x.ts', line: 1, text: '// @ts-ignore' },
-      { filePath: 'tests/x.test.ts', line: 2, text: '// @ts-expect-error' },
-      { filePath: 'console/src/y.tsx', line: 3, text: '// @ts-nocheck' },
-    ]);
-    expect(codeIssues.filter((issue) => issue.code === 'unbounded-suppression')).toHaveLength(3);
-    expect(codeIssues.filter((issue) => issue.code === 'unbounded-suppression').map((i) => i.filePath)).toEqual([
-      'src/x.ts',
-      'tests/x.test.ts',
-      'console/src/y.tsx',
-    ]);
-
-    // A bounded suppression in code stays accepted, and a markdown file with a bounded one
-    // is likewise silent - the exemption does not change the rationale+expiry contract.
-    const boundedIssues = scanAddedLines([
-      {
-        filePath: 'src/z.ts',
-        line: 1,
-        text: '// @ts-expect-error -- upstream type is narrower than runtime payload; expires 2026-12-31',
-      },
-    ]);
-    expect(boundedIssues.filter((issue) => issue.code === 'unbounded-suppression')).toEqual([]);
-  });
-
   it('classifies staged runtime artifacts as sensitive without blocking tracked settings template', () => {
     expect(isTrackedSensitiveArtifact('.env')).toBe(true);
     expect(isTrackedSensitiveArtifact('.env.local')).toBe(true);
