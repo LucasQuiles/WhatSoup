@@ -256,6 +256,119 @@ describe('SessionManager route policy admission', () => {
     expect(durability.getSessionCheckpoint('15550205')?.session_status).toBe('suspended');
   });
 
+  it('leaves every lifecycle unchanged when a session ID is duplicated across workspaces', async () => {
+    const sessionId = 'cross-workspace-provider-resume';
+    const insert = db.raw.prepare(
+      `INSERT INTO agent_sessions (
+         session_id, claude_pid, started_in_directory, chat_jid, workspace_key,
+         started_at, status, provider
+       ) VALUES (?, 0, '/tmp', ?, ?, datetime('now'), 'suspended', 'anthropic-api')`,
+    );
+    const currentRowId = Number(insert.run(
+      sessionId,
+      '15550207@s.whatsapp.net',
+      '15550207',
+    ).lastInsertRowid);
+    const otherRowId = Number(insert.run(
+      sessionId,
+      '15550208@s.whatsapp.net',
+      '15550208',
+    ).lastInsertRowid);
+    durability.upsertSessionCheckpoint('15550207', {
+      sessionId,
+      sessionStatus: 'suspended',
+    });
+    durability.upsertSessionCheckpoint('15550208', {
+      sessionId,
+      sessionStatus: 'suspended',
+    });
+    const sm = new SessionManager({
+      db,
+      messenger: messenger(),
+      chatJid: '15550207@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      model: 'gpt-5',
+      routePolicy: route,
+    });
+    sm.setDurability(durability);
+
+    await expect(sm.spawnSession(sessionId)).rejects.toThrow(
+      'Provider session ownership is foreign, unknown, or ambiguous',
+    );
+    expect(db.raw.prepare('SELECT id, status FROM agent_sessions WHERE session_id = ? ORDER BY id')
+      .all(sessionId)).toEqual([
+      { id: currentRowId, status: 'suspended' },
+      { id: otherRowId, status: 'suspended' },
+    ]);
+    expect(durability.getSessionCheckpoint('15550207')?.session_status).toBe('suspended');
+    expect(durability.getSessionCheckpoint('15550208')?.session_status).toBe('suspended');
+  });
+
+  it('preserves the canonical ownership error when a foreign row has no checkpoint', async () => {
+    const sessionId = 'foreign-provider-without-checkpoint';
+    const inserted = db.raw.prepare(
+      `INSERT INTO agent_sessions (
+         session_id, claude_pid, started_in_directory, chat_jid, workspace_key,
+         started_at, status, provider
+       ) VALUES (?, 0, '/tmp', '15550209@s.whatsapp.net', '15550209',
+         datetime('now'), 'suspended', 'anthropic-api')`,
+    ).run(sessionId);
+    const rowId = Number(inserted.lastInsertRowid);
+    const sm = new SessionManager({
+      db,
+      messenger: messenger(),
+      chatJid: '15550209@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      model: 'gpt-5',
+      routePolicy: route,
+    });
+    sm.setDurability(durability);
+
+    await expect(sm.spawnSession(sessionId)).rejects.toThrow(
+      'Provider session ownership is foreign, unknown, or ambiguous',
+    );
+    expect(db.raw.prepare('SELECT status FROM agent_sessions WHERE id = ?').get(rowId))
+      .toEqual({ status: 'suspended' });
+  });
+
+  it('does not mask the canonical ownership error when eligible retirement fails', async () => {
+    const sessionId = 'foreign-provider-retirement-failure';
+    const inserted = db.raw.prepare(
+      `INSERT INTO agent_sessions (
+         session_id, claude_pid, started_in_directory, chat_jid, workspace_key,
+         started_at, status, provider
+       ) VALUES (?, 0, '/tmp', '15550210@s.whatsapp.net', '15550210',
+         datetime('now'), 'suspended', 'anthropic-api')`,
+    ).run(sessionId);
+    const rowId = Number(inserted.lastInsertRowid);
+    durability.upsertSessionCheckpoint('15550210', {
+      sessionId,
+      sessionStatus: 'suspended',
+    });
+    const retire = vi.spyOn(durability, 'retireSessionLifecycle')
+      .mockImplementation(() => { throw new Error('synthetic retirement failure'); });
+    const sm = new SessionManager({
+      db,
+      messenger: messenger(),
+      chatJid: '15550210@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      model: 'gpt-5',
+      routePolicy: route,
+    });
+    sm.setDurability(durability);
+
+    await expect(sm.spawnSession(sessionId)).rejects.toThrow(
+      'Provider session ownership is foreign, unknown, or ambiguous',
+    );
+    expect(retire).toHaveBeenCalledOnce();
+    expect(db.raw.prepare('SELECT status FROM agent_sessions WHERE id = ?').get(rowId))
+      .toEqual({ status: 'suspended' });
+    expect(durability.getSessionCheckpoint('15550210')?.session_status).toBe('suspended');
+  });
+
   it('preserves the exact missing-checkpoint rejection and row state without retirement', async () => {
     const sessionId = 'missing-checkpoint-current-provider';
     const inserted = db.raw.prepare(
