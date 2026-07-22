@@ -275,3 +275,87 @@ fleet · hatch · agents · skills-hub · dream-lab · inbox · deployments · s
 **all real wave-4 defects fixed and re-verified across three reviewer families.** The rail
 unification alone (6 surfaces) was worth the wave; the invisible-glyph class would have
 shipped broken without it.
+
+---
+
+# Wave 4b — persona passes: sol / tera / luna via gpt-5.6 (2026-07-21, owner-mandated)
+
+Three named adversarial personas (no prior definitions existed; declared here for the
+record): **SOL** — light-theme specialist; **LUNA** — dark-theme specialist; **TERA** —
+cross-surface/system auditor. Each ran the wave-4 battery with persona-specific emphasis
+on the final image set; codex CLI (gpt-5.6), 8 calls.
+
+## Real items found and fixed
+
+1. **Fleet horizontal overflow (the wave-4b flagship).** The single-line Line cells
+   (nowrap) pushed the content grid 30px past the viewport — the Activity panel ran
+   *off-canvas*. This was almost certainly the true source of the "feed clipped at right
+   edge" claim that four families raised and three text-level measurements "disproved"
+   (the text never overflowed — the *panel* was off-screen). Fixed at the root: redundant
+   channel words dropped from masked ids (the CHANNEL icon column already carries them),
+   `min-width:0` guards on grid panels, cell max-width. Measured: panels 1082/1418 with a
+   clean 22px gutter, zero horizontal scroll, all 14 rows still visible.
+2. **Rail host-chip class collision.** The rail's `.st` marker collided with Deployments'
+   own `.st` status-pill class — host markers rendered as elongated pills (TERA caught
+   "green markers become elongated ovals, amber an oversized diagonal bar"). Renamed to a
+   collision-proof `.hst` across all 7 rail files.
+3. **Settings IA.** Swatches gained text labels (two families flagged label-less theme
+   choices); "Export all data" moved *out* of the Danger zone into a neutral Workspace row
+   (LUNA: non-destructive operation carrying destructive framing — severity-semantics
+   conflict); Reset sub-copy de-duplicated from the section desc; notification channel
+   icons made distinct (bell / bolt / envelope — Webhook and Email digest shared one
+   generic rectangle); notification rows given a fixed-width control zone so metadata
+   tracks one column; auto-swatch's accent-blue block replaced with a neutral split (was
+   reading as a second selection cue next to the accent outline).
+4. **Deployments data honesty.** "Total lines 19" matched neither capacity (14+5+2=21)
+   nor online (11+4+2=17) — now 21 with "17 online · 6 channels". field-pi Lines shows
+   the same used/capacity ratio form as siblings (2/2).
+5. **Vocabulary + state presence.** Agents header CTA unified to "＋ Hatch agent" (was
+   "New agent" vs roster "Hatch an agent" — two verbs for one action). "swap profile"
+   demoted from status-pill lookalike to ghost button (action vs status ambiguity).
+   Builds pending row: `.pending` class with per-theme opacity (dark .65, light .8 — was
+   .55 and approaching invisible on cream, flagged by both theme specialists). Forge
+   draft marker outline t3→t2 (hollow semantics kept, presence restored). Deactivated
+   channel glyphs on light: .45→.6 opacity. Composer disabled cap: .45→.55. Skills-hub
+   `gnote` t3→t2 italic (persistent "sinks into the strip" flags). Takeover terminology
+   unified ("takeover" everywhere — was "takeover"/"takeover enabled"/"takeover on").
+6. **Layout/space.** Dream-lab diff measure capped at 72ch (matches the rationale cap).
+   Pair card row now spans the panel with actions right-anchored (kills the
+   squeezed-left/wasted-right flag). Skills-hub legend restructured into clean semantic
+   lines with shape meanings (◆ partial · ○ full · outline n/a). Agents instance age
+   column fixed at 46px (Lucas's "takeover" value broke the identifier column). Fleet
+   theme toggle moved after the primary CTA (last-in-header law). Splash/Hatch journey
+   toggles aligned to the operator toggle spec (6px radius, 8/14 padding).
+7. **Light-theme card separation.** Resting shadows on light cards + hair-3 borders on
+   neutral controls (locked-token consumption, no palette change). Sol's systemic
+   "cream-on-cream wash-out" class is materially improved; a deeper light hairline ramp
+   remains a **proposal for the owner** (would touch the locked L1 ramp).
+
+## Rejected with evidence / accepted with rationale (recurring classes)
+
+- "Activity feed clips text at the right edge" — text-level overflow measured **zero**
+  on four checks; the true defect was the panel-level overflow fixed in #1 above.
+- "Settings content abuts the divider" — measured 28px gutter vs 22px on peer surfaces
+  (claim was geometrically backwards).
+- "Inbox nameplate divided/shifted" — measured identical position/composition to Fleet's
+  rail (14px/10px, single rule set).
+- "Hatch ceremony radius vs splash cards" — journey register is a scale (8/12/16);
+  ceremony takes the top of its own register law.
+- Inbox selection bar vs card ring — codified two-tier selection vocabulary (list rows =
+  accent edge-bar; cards = accent ring).
+- Journey nameplate composition (Hatch crumb vs Splash hero) — two journey sub-registers
+  (in-product ceremony vs marketing landing), accepted.
+- Pending/draft/deactivated recession, feed/instance density, journey margins, masks —
+  locked law, as dispositioned in wave 4.
+- "Danger zone heading stronger than section headers" — intentional severity framing.
+- Persona oscillation note: with real defects exhausted, personas joined the same
+  adversarial-inflation pattern documented in wave 4 (counts grew on improved images).
+
+## Persona verdict (final)
+
+- TERA cross-surface: fleet PASS · skills-hub PASS · dream-lab PASS (dark); skills-hub
+  PASS · dream-lab PASS · settings PASS (light). Remaining G-flags dispositioned above.
+- LUNA dark: hatch PASS · splash PASS. SOL light: settings-clean items resolved; residual
+  findings are the documented classes above.
+- Net: every sol/tera/luna finding is either fixed, rejected with computed evidence, or
+  accepted with recorded rationale. No undispositioned findings remain.

@@ -40,9 +40,18 @@ nav { width:212px; flex:none; background:var(--inset); border-right:1px solid va
 .nav-item .dot { margin-left:auto; width:6px; height:6px; border-radius:1px; transform:rotate(45deg); background:var(--warn); }
 .deploy { margin-top:auto; border-top:1px solid var(--hair); padding-top:10px; }
 .deploy .hchip { display:flex; align-items:center; gap:8px; padding:6px 10px; font:500 11.5px/16px "IBM Plex Mono",monospace; color:var(--t3); }
-.deploy .hchip .st { width:6px; height:6px; border-radius:50%; background:var(--ok); }
-.deploy .hchip .st.warn { background:var(--warn); border-radius:1px; transform:rotate(45deg); }
+.deploy .hchip .hst { width:6px; height:6px; border-radius:50%; background:var(--ok); }
+.deploy .hchip .hst.warn { background:var(--warn); border-radius:1px; transform:rotate(45deg); }
 .appcol { flex:1; display:flex; flex-direction:column; min-width:0; min-height:0; }
+/* light presence: card separation + control borders (locked-token consumption) */
+[data-theme="light"] .panel, [data-theme="light"] .scard, [data-theme="light"] .kpi,
+[data-theme="light"] .dcard, [data-theme="light"] .pcard, [data-theme="light"] .acard,
+[data-theme="light"] .prop, [data-theme="light"] .mstat, [data-theme="light"] .fstrip,
+[data-theme="light"] .card, [data-theme="light"] .ch, [data-theme="light"] .swatches .sw,
+[data-theme="light"] .pair, [data-theme="light"] .bub, [data-theme="light"] .qcard { box-shadow:var(--shadow-rest); }
+[data-theme="light"] .btn.ghost, [data-theme="light"] .btn.sm:not(.upd):not(.danger):not(.no),
+[data-theme="light"] .ibtn, [data-theme="light"] .cap, [data-theme="light"] .fstrip,
+[data-theme="light"] .theme-toggle { border-color:var(--hair-3); }
 @media (max-width:1100px){ nav{width:64px} .nav-item span,.nav-sec,.nameplate .wm,.nameplate .ctx,.deploy .hchip span{display:none} }
 header { display:flex; align-items:center; gap:14px; padding:14px 22px 12px; border-bottom:1px solid var(--hair); }
 h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
@@ -107,7 +116,7 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
 .composer .caps { display:flex; gap:4px; }
 .cap { width:36px; height:36px; border-radius:8px; border:1px solid var(--hair-2); background:var(--raised); color:var(--t2); cursor:pointer; display:flex; align-items:center; justify-content:center; font-size:12px; }
 .cap:hover { color:var(--t1); }
-.cap.off { opacity:.35; cursor:not-allowed; }
+.cap.off { opacity:.55; cursor:not-allowed; }
 .composer input { flex:1; background:var(--inset); border:1px solid var(--hair); border-radius:9px; padding:9px 12px; height:36px; color:var(--t1); font:inherit; outline:none; }
 .composer input::placeholder { color:var(--t3); }
 .sendnote { font:400 11px/14px "IBM Plex Mono",monospace; color:var(--t3); }
@@ -129,7 +138,7 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
 .idrow .v { margin-left:auto; color:var(--t3); font:400 11px/14px "IBM Plex Mono",monospace; }
 .agcard { display:flex; align-items:center; gap:10px; background:var(--raised); border:1px solid var(--hair); border-radius:10px; padding:10px 12px; }
 .agcard .nm { font-weight:600; font-size:12.5px; }
-.agcard .sub { font:400 11px/14px "IBM Plex Mono",monospace; color:var(--t3); }
+.agcard .sub { font:400 11px/14px "IBM Plex Mono",monospace; color:var(--t2); }
 @media (max-width:1100px){ .ctx{display:none} .wrap{grid-template-columns:280px 1fr} }
 @media (max-width:760px){ .wrap{grid-template-columns:1fr} .list{display:none} }
 </style>
@@ -150,9 +159,9 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
   <a class="nav-item" href="settings.html"><svg viewBox="0 0 16 16"><path d="M8 5a3 3 0 1 0 0 6 3 3 0 0 0 0-6zm6 3h2M1 8h2m5-7v2m0 10v2m5-12 1.5-1.5M2.5 13.5 4 12m9 1.5L11.5 12M2.5 2.5 4 4"/></svg><span>Settings</span></a>
   <div class="deploy">
     <div class="nav-sec">Hosts</div>
-    <div class="hchip"><span class="st"></span><span>local · this host</span></div>
-    <div class="hchip"><span class="st warn"></span><span>nest-2 · container</span></div>
-    <div class="hchip"><span class="st"></span><span>field-pi · remote</span></div>
+    <div class="hchip"><span class="hst"></span><span>local · this host</span></div>
+    <div class="hchip"><span class="hst warn"></span><span>nest-2 · container</span></div>
+    <div class="hchip"><span class="hst"></span><span>field-pi · remote</span></div>
   </div>
 </nav>
 <div class="appcol">
@@ -168,7 +177,7 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
   <span class="chip"><svg viewBox="0 0 16 16"><path d="M2 2h12a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H7l-4 3v-3H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/></svg>iMessage <span class="c">3</span></span>
   <span class="chip"><svg viewBox="0 0 16 16"><path d="M12 3H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h1l1 2 1.2-2H12a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z"/></svg>Discord <span class="c">7</span></span>
   <span class="chip"><svg viewBox="0 0 16 16"><path d="M1 3h14v10H1z"/></svg>Email <span class="c">6</span></span>
-  <span class="chip"><svg viewBox="0 0 16 16"><g transform="translate(1 1) scale(.88)"><path d="M2 2l4.7 6L2.3 14h2l3.7-4.8L11.4 14H14L9.2 7.6 13.7 2h-2L8.2 6.4 5 2z"/></g></svg>X <span class="c">3</span></span>
+  <span class="chip"><svg viewBox="0 0 16 16"><g transform="translate(1 1) scale(.88)"><path d="M2 2l4.7 6L2.3 14h2l3.7-4.8L11.4 14H14L9.2 7.6 13.7 2h-2L8.2 6.4 5 2z"/></g></svg><span class="c">3</span></span>
 </div>
 <div class="wrap">
   <aside class="list">
@@ -186,7 +195,7 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
       <div class="mid"><div class="row1"><span class="nm">Dana K.</span><span class="tm">13:55</span></div><div class="pv"><b>Beacon:</b> your 3pm is confirmed</div><div class="badges"><span class="agtag">Beacon</span><span class="ub">1</span></div></div>
     </div>
     <div class="citem">
-      <span class="ava grp"><svg viewBox="0 0 16 16" style="position:static;background:none;padding:0;width:14px;height:14px"><path d="M8 1a7 7 0 0 0-6 10.5L1 15l3.6-1A7 7 0 1 0 8 1z"/></svg>WS</span>
+      <span class="ava grp">WS<svg viewBox="0 0 16 16"><path d="M8 1a7 7 0 0 0-6 10.5L1 15l3.6-1A7 7 0 1 0 8 1z"/></svg></span>
       <div class="mid"><div class="row1"><span class="nm">WHATSOUP</span><span class="tm">13:41</span></div><div class="pv"><b>Quinn:</b> bead-07 assigned to Lumen</div><div class="badges"><span class="agtag">Quinn</span><span class="take">takeover</span><span class="ub">5</span></div></div>
     </div>
     <div class="citem">
@@ -194,18 +203,26 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
       <div class="mid"><div class="row1"><span class="nm">Jon (billing)</span><span class="tm">12:20</span></div><div class="pv"><b>Mercy:</b> invoice #1042 paid, reconciled</div><div class="badges"><span class="agtag">Mercy</span></div></div>
     </div>
     <div class="citem">
-      <span class="ava grp"><svg viewBox="0 0 16 16" style="position:static;background:none;padding:0;width:14px;height:14px"><path d="M12 3H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h1l1 2 1.2-2H12a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z"/></svg>CI</span>
+      <span class="ava grp">CI<svg viewBox="0 0 16 16"><path d="M12 3H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h1l1 2 1.2-2H12a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z"/></svg></span>
       <div class="mid"><div class="row1"><span class="nm">#ci-feed</span><span class="tm">11:58</span></div><div class="pv">build 4721 green — main is clean</div></div>
     </div>
     <div class="citem">
       <span class="ava">TW<svg viewBox="0 0 16 16"><path d="M2 2l4.7 6L2.3 14h2l3.7-4.8L11.4 14H14L9.2 7.6 13.7 2h-2L8.2 6.4 5 2z"/></svg></span>
       <div class="mid"><div class="row1"><span class="nm">@theworkshop_hq</span><span class="tm">10:44</span></div><div class="pv">DM: can you share the deck?</div><div class="badges"><span class="ub">1</span></div></div>
     </div>
+    <div class="citem">
+      <span class="ava">MQ<svg viewBox="0 0 16 16"><path d="M2 2h12a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H7l-4 3v-3H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/></svg></span>
+      <div class="mid"><div class="row1"><span class="nm">Mom</span><span class="tm">09:12</span></div><div class="pv">you: call this weekend?</div></div>
+    </div>
+    <div class="citem">
+      <span class="ava grp">OA<svg viewBox="0 0 16 16"><path d="M8 2a5 5 0 0 1 5 5c0 3 1 4 1 4H2s1-1 1-4a5 5 0 0 1 5-5zm-2 10a2 2 0 0 0 4 0z"/></svg></span>
+      <div class="mid"><div class="row1"><span class="nm">Ops alerts</span><span class="tm">08:30</span></div><div class="pv"><b>Beacon:</b> nightly digest — all lines green</div><div class="badges"><span class="agtag">Beacon</span></div></div>
+    </div>
   </aside>
   <section class="thread">
     <div class="thead">
       <span class="ava">LQ</span>
-      <div><div class="nm">Lucas Quiles</div><div class="sub">whatsapp · personal line · quinn assigned</div></div>
+      <div><div class="nm">Lucas Quiles</div><div class="sub">WhatsApp · personal line · Quinn assigned</div></div>
       <div class="takeover"><span>takeover</span><span class="tgl on" onclick="this.classList.toggle('on')"></span></div>
     </div>
     <div class="msgs">
@@ -220,7 +237,7 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
     </div>
     <div class="composer">
       <div class="caps"><button class="cap" title="image"><svg width="13" height="13" viewBox="0 0 16 16" style="fill:none;stroke:currentColor;stroke-width:1.4"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><circle cx="5.5" cy="6.5" r="1.3"/><path d="M2 12l3.5-3.5 2.5 2.5 3-3L14 11" stroke-linejoin="round"/></svg></button><button class="cap" title="voice"><svg width="13" height="13" viewBox="0 0 16 16" style="fill:none;stroke:currentColor;stroke-width:1.4;stroke-linecap:round"><rect x="5.5" y="1.5" width="5" height="8" rx="2.5"/><path d="M3 8a5 5 0 0 0 10 0M8 13v2"/></svg></button><button class="cap off" title="poll — not on this channel"><svg width="13" height="13" viewBox="0 0 16 16" style="fill:none;stroke:currentColor;stroke-width:1.4;stroke-linecap:round"><path d="M3 13V9m5 4V5m5 8V7"/></svg></button><button class="cap" title="schedule"><svg width="13" height="13" viewBox="0 0 16 16" style="fill:none;stroke:currentColor;stroke-width:1.4;stroke-linecap:round"><circle cx="8" cy="8.5" r="5.5"/><path d="M8 5.5v3l2 1.5M6.5 1.5h3"/></svg></button></div>
-      <input placeholder="Message as yourself (takeover on)…">
+      <input placeholder="Message as yourself (takeover)…">
       <button class="btn primary" style="height:36px">Send</button>
     </div>
   </section>
@@ -228,13 +245,13 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
     <h3>Person</h3>
     <div class="pcard">
       <div class="top"><span class="ava">LQ</span><div><div class="nm">Lucas Quiles</div><div class="sub">owner · admin</div></div></div>
-      <div class="idrow"><svg viewBox="0 0 16 16"><path d="M8 1a7 7 0 0 0-6 10.5L1 15l3.6-1A7 7 0 1 0 8 1z"/></svg><span class="h">whatsapp</span><span class="v">+1 845 ··· 0919</span></div>
-      <div class="idrow"><svg viewBox="0 0 16 16"><path d="M8 2a5 5 0 0 1 5 5c0 3 1 4 1 4H2s1-1 1-4a5 5 0 0 1 5-5z"/></svg><span class="h">signal</span><span class="v">+1 845 ··· 0919</span></div>
-      <div class="idrow"><svg viewBox="0 0 16 16"><path d="M2 2l4.7 6L2.3 14h2l3.7-4.8L11.4 14H14L9.2 7.6 13.7 2h-2L8.2 6.4 5 2z"/></svg><span class="h">x</span><span class="v">@Q_Laboratory</span></div>
-      <div class="idrow"><svg viewBox="0 0 16 16"><path d="M1 3h14v10H1z"/></svg><span class="h">email</span><span class="v">lhq…@gmail.com</span></div>
+      <div class="idrow"><svg viewBox="0 0 16 16"><path d="M8 1a7 7 0 0 0-6 10.5L1 15l3.6-1A7 7 0 1 0 8 1z"/></svg><span class="h">WhatsApp</span><span class="v">+1 845 ··· 0919</span></div>
+      <div class="idrow"><svg viewBox="0 0 16 16"><path d="M8 2a5 5 0 0 1 5 5c0 3 1 4 1 4H2s1-1 1-4a5 5 0 0 1 5-5z"/></svg><span class="h">Signal</span><span class="v">+1 845 ··· 0919</span></div>
+      <div class="idrow"><svg viewBox="0 0 16 16"><path d="M2 2l4.7 6L2.3 14h2l3.7-4.8L11.4 14H14L9.2 7.6 13.7 2h-2L8.2 6.4 5 2z"/></svg><span class="v">@Q_Laboratory</span></div>
+      <div class="idrow"><svg viewBox="0 0 16 16"><path d="M1 3h14v10H1z"/></svg><span class="h">Email</span><span class="v">lhq…@gmail.com</span></div>
     </div>
     <h3>Agent in this chat</h3>
-    <div class="agcard"><span class="ava" style="width:26px;height:26px;border-radius:7px;background:hsl(250,38%,34%);color:#fff;display:flex;align-items:center;justify-content:center;font:700 11px/1 sans-serif">Q</span><div><div class="nm">Quinn</div><div class="sub">paused · takeover on</div></div></div>
+    <div class="agcard"><span class="ava" style="width:26px;height:26px;border-radius:7px;background:hsl(250,38%,34%);color:#fff;display:flex;align-items:center;justify-content:center;font:700 11px/1 sans-serif">Q</span><div><div class="nm">Quinn</div><div class="sub">paused · takeover</div></div></div>
     <h3>Line</h3>
     <div class="pcard"><div class="idrow"><span class="h" style="color:var(--t1);font-weight:600">Personal</span><span class="v"><span class="badge live">live</span></span></div><div class="idrow"><span class="h">grant</span><span class="v">participate (Quinn)</span></div><div class="idrow"><span class="h">linked</span><span class="v">2026-07-21</span></div>    </div>
   </aside>

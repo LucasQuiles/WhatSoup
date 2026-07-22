@@ -42,9 +42,18 @@ nav { width:212px; flex:none; background:var(--inset); border-right:1px solid va
 .nav-item .dot { margin-left:auto; width:6px; height:6px; border-radius:1px; transform:rotate(45deg); background:var(--warn); }
 .deploy { margin-top:auto; border-top:1px solid var(--hair); padding-top:10px; }
 .deploy .hchip { display:flex; align-items:center; gap:8px; padding:6px 10px; font:500 11.5px/16px "IBM Plex Mono",monospace; color:var(--t3); }
-.deploy .hchip .st { width:6px; height:6px; border-radius:50%; background:var(--ok); }
-.deploy .hchip .st.warn { background:var(--warn); border-radius:1px; transform:rotate(45deg); }
+.deploy .hchip .hst { width:6px; height:6px; border-radius:50%; background:var(--ok); }
+.deploy .hchip .hst.warn { background:var(--warn); border-radius:1px; transform:rotate(45deg); }
 .appcol { flex:1; display:flex; flex-direction:column; min-width:0; min-height:0; }
+/* light presence: card separation + control borders (locked-token consumption) */
+[data-theme="light"] .panel, [data-theme="light"] .scard, [data-theme="light"] .kpi,
+[data-theme="light"] .dcard, [data-theme="light"] .pcard, [data-theme="light"] .acard,
+[data-theme="light"] .prop, [data-theme="light"] .mstat, [data-theme="light"] .fstrip,
+[data-theme="light"] .card, [data-theme="light"] .ch, [data-theme="light"] .swatches .sw,
+[data-theme="light"] .pair, [data-theme="light"] .bub, [data-theme="light"] .qcard { box-shadow:var(--shadow-rest); }
+[data-theme="light"] .btn.ghost, [data-theme="light"] .btn.sm:not(.upd):not(.danger):not(.no),
+[data-theme="light"] .ibtn, [data-theme="light"] .cap, [data-theme="light"] .fstrip,
+[data-theme="light"] .theme-toggle { border-color:var(--hair-3); }
 @media (max-width:1100px){ nav{width:64px} .nav-item span,.nav-sec,.nameplate .wm,.nameplate .ctx,.deploy .hchip span{display:none} }
 header { display:flex; align-items:center; gap:14px; padding:14px 22px 12px; border-bottom:1px solid var(--hair); }
 h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
@@ -86,7 +95,7 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
 .panel-h h3 { font:600 12.5px/18px inherit; }
 .panel-h .tag { font:500 11px/14px "IBM Plex Mono",monospace; color:var(--t3); }
 .panel-b { padding:14px; }
-.diff { font:400 12.5px/1.7 "IBM Plex Mono",monospace; }
+.diff { font:400 12.5px/1.7 "IBM Plex Mono",monospace; max-width:72ch; }
 .diff .sec { color:var(--t3); font-size:11px; letter-spacing:.08em; text-transform:uppercase; margin:10px 0 4px; display:block; }
 .diff .sec:first-child { margin-top:0; }
 .diff .line { padding:3px 8px; border-radius:5px; display:block; }
@@ -130,9 +139,9 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
   <a class="nav-item" href="settings.html"><svg viewBox="0 0 16 16"><path d="M8 5a3 3 0 1 0 0 6 3 3 0 0 0 0-6zm6 3h2M1 8h2m5-7v2m0 10v2m5-12 1.5-1.5M2.5 13.5 4 12m9 1.5L11.5 12M2.5 2.5 4 4"/></svg><span>Settings</span></a>
   <div class="deploy">
     <div class="nav-sec">Hosts</div>
-    <div class="hchip"><span class="st"></span><span>local · this host</span></div>
-    <div class="hchip"><span class="st warn"></span><span>nest-2 · container</span></div>
-    <div class="hchip"><span class="st"></span><span>field-pi · remote</span></div>
+    <div class="hchip"><span class="hst"></span><span>local · this host</span></div>
+    <div class="hchip"><span class="hst warn"></span><span>nest-2 · container</span></div>
+    <div class="hchip"><span class="hst"></span><span>field-pi · remote</span></div>
   </div>
 </nav>
 <div class="appcol">

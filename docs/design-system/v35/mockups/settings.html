@@ -40,9 +40,18 @@ nav { width:212px; flex:none; background:var(--inset); border-right:1px solid va
 .nav-item .dot { margin-left:auto; width:6px; height:6px; border-radius:1px; transform:rotate(45deg); background:var(--warn); }
 .deploy { margin-top:auto; border-top:1px solid var(--hair); padding-top:10px; }
 .deploy .hchip { display:flex; align-items:center; gap:8px; padding:6px 10px; font:500 11.5px/16px "IBM Plex Mono",monospace; color:var(--t3); }
-.deploy .hchip .st { width:6px; height:6px; border-radius:50%; background:var(--ok); }
-.deploy .hchip .st.warn { background:var(--warn); border-radius:1px; transform:rotate(45deg); }
+.deploy .hchip .hst { width:6px; height:6px; border-radius:50%; background:var(--ok); }
+.deploy .hchip .hst.warn { background:var(--warn); border-radius:1px; transform:rotate(45deg); }
 .appcol { flex:1; display:flex; flex-direction:column; min-width:0; min-height:0; }
+/* light presence: card separation + control borders (locked-token consumption) */
+[data-theme="light"] .panel, [data-theme="light"] .scard, [data-theme="light"] .kpi,
+[data-theme="light"] .dcard, [data-theme="light"] .pcard, [data-theme="light"] .acard,
+[data-theme="light"] .prop, [data-theme="light"] .mstat, [data-theme="light"] .fstrip,
+[data-theme="light"] .card, [data-theme="light"] .ch, [data-theme="light"] .swatches .sw,
+[data-theme="light"] .pair, [data-theme="light"] .bub, [data-theme="light"] .qcard { box-shadow:var(--shadow-rest); }
+[data-theme="light"] .btn.ghost, [data-theme="light"] .btn.sm:not(.upd):not(.danger):not(.no),
+[data-theme="light"] .ibtn, [data-theme="light"] .cap, [data-theme="light"] .fstrip,
+[data-theme="light"] .theme-toggle { border-color:var(--hair-3); }
 @media (max-width:1100px){ nav{width:64px} .nav-item span,.nav-sec,.nameplate .wm,.nameplate .ctx,.deploy .hchip span{display:none} }
 header { display:flex; align-items:center; gap:14px; padding:14px 22px 12px; border-bottom:1px solid var(--hair); }
 h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
@@ -57,12 +66,12 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
 .snav a { display:flex; align-items:center; gap:9px; padding:8px 10px; border-radius:6px; color:var(--t2); text-decoration:none; font-weight:500; font-size:13px; }
 .snav a:hover { background:var(--raised); }
 .snav a.on { background:color-mix(in srgb, var(--accent) 10%, transparent); color:var(--t1); box-shadow:inset 2px 0 0 var(--accent); }
-.main { padding:14px 24px; overflow:auto; max-width:1080px; }
+.main { padding:14px 28px 14px; overflow:auto; max-width:1080px; }
 h2 { font:700 17px/22px "Bricolage Grotesque",sans-serif; margin-bottom:4px; }
-.desc { color:var(--t3); font-size:12.5px; margin-bottom:8px; }
-.panel { background:var(--raised); border:1px solid var(--hair); border-radius:10px; margin-bottom:8px; }
+.desc { color:var(--t3); font-size:12.5px; margin-bottom:6px; }
+.panel { background:var(--raised); border:1px solid var(--hair); border-radius:10px; margin-bottom:6px; }
 .panel-b { padding:6px 16px; }
-.row { display:flex; align-items:center; gap:12px; padding:7px 0; border-bottom:1px solid var(--hair); }
+.row { display:flex; align-items:center; gap:12px; padding:6px 0; border-bottom:1px solid var(--hair); }
 .row:last-child { border-bottom:none; }
 .row .lbl { font-weight:600; font-size:13px; }
 .row .sub { font:400 11px/15px "IBM Plex Mono",monospace; color:var(--t3); margin-top:1px; }
@@ -78,16 +87,19 @@ h2 { font:700 17px/22px "Bricolage Grotesque",sans-serif; margin-bottom:4px; }
 .sw.on { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent); }
 .sw .a { height:18px; }
 .sw .b { height:10px; }
+.sw { position:relative; }
+.sw::after { content:attr(data-t); position:absolute; left:0; right:0; bottom:-16px; text-align:center; font:500 10px/12px "IBM Plex Mono",monospace; color:var(--t3); text-transform:uppercase; letter-spacing:.08em; }
+.swatches { margin-bottom:10px; }
 .sw.dk .a { background:#1E1A15; } .sw.dk .b { background:#F1ECDF; }
 .sw.lt .a { background:#FAF6EE; } .sw.lt .b { background:#221C12; }
-.sw.au .a { background:linear-gradient(90deg,#1E1A15 50%,#FAF6EE 50%); } .sw.au .b { background:#6BA6FF; }
+.sw.au .a { background:linear-gradient(90deg,#1E1A15 50%,#FAF6EE 50%); } .sw.au .b { background:linear-gradient(90deg,#F1ECDF 50%,#221C12 50%); }
 /* notifications */
-.nchan { display:flex; align-items:center; gap:10px; padding:6px 0; }
+.nchan { display:flex; align-items:center; gap:10px; padding:5px 0; }
 .nchan svg { width:14px; height:14px; fill:var(--t3); }
 .nchan .nm { font-size:12.5px; font-weight:600; }
-.nchan .opts { margin-left:auto; display:flex; gap:10px; align-items:center; font:500 11px/14px "IBM Plex Mono",monospace; color:var(--t3); }
+.nchan .opts { margin-left:auto; display:flex; gap:10px; align-items:center; justify-content:flex-end; min-width:120px; font:500 11px/14px "IBM Plex Mono",monospace; color:var(--t3); }
 /* api tokens */
-.tok { display:flex; align-items:center; gap:10px; padding:6px 0; border-bottom:1px solid var(--hair); }
+.tok { display:flex; align-items:center; gap:10px; padding:5px 0; border-bottom:1px solid var(--hair); }
 .tok:last-child { border:none; }
 .tok .nm { font:600 12px/16px "IBM Plex Mono",monospace; }
 .tok .sc { font:400 11px/14px "IBM Plex Mono",monospace; color:var(--t3); }
@@ -113,9 +125,9 @@ h2 { font:700 17px/22px "Bricolage Grotesque",sans-serif; margin-bottom:4px; }
   <a class="nav-item active" href="settings.html"><svg viewBox="0 0 16 16"><path d="M8 5a3 3 0 1 0 0 6 3 3 0 0 0 0-6zm6 3h2M1 8h2m5-7v2m0 10v2m5-12 1.5-1.5M2.5 13.5 4 12m9 1.5L11.5 12M2.5 2.5 4 4"/></svg><span>Settings</span></a>
   <div class="deploy">
     <div class="nav-sec">Hosts</div>
-    <div class="hchip"><span class="st"></span><span>local · this host</span></div>
-    <div class="hchip"><span class="st warn"></span><span>nest-2 · container</span></div>
-    <div class="hchip"><span class="st"></span><span>field-pi · remote</span></div>
+    <div class="hchip"><span class="hst"></span><span>local · this host</span></div>
+    <div class="hchip"><span class="hst warn"></span><span>nest-2 · container</span></div>
+    <div class="hchip"><span class="hst"></span><span>field-pi · remote</span></div>
   </div>
 </nav>
 <div class="appcol">
@@ -138,30 +150,30 @@ h2 { font:700 17px/22px "Bricolage Grotesque",sans-serif; margin-bottom:4px; }
       <div class="row"><div><div class="lbl">Workspace name</div><div class="sub">shown in nav + splash</div></div><div class="ctl"><input class="inp" value="Quiles Lab"></div></div>
       <div class="row"><div><div class="lbl">Admin identity</div><div class="sub">single admin across all surfaces</div></div><div class="ctl"><span style="font:500 12px/16px 'IBM Plex Mono',monospace">lucas · owner (admin)</span></div></div>
       <div class="row"><div><div class="lbl">Appearance</div><div class="sub">both themes are first-class</div></div><div class="ctl"><div class="swatches"><div class="sw dk on" data-t="dark" title="dark"><div class="a"></div><div class="b"></div></div><div class="sw lt" data-t="light" title="light"><div class="a"></div><div class="b"></div></div><div class="sw au" data-t="auto" title="auto"><div class="a"></div><div class="b"></div></div></div></div></div>
+      <div class="row"><div><div class="lbl">Export all data</div><div class="sub">messages, configs, memory indexes</div></div><div class="ctl"><button class="btn sm">export…</button></div></div>
       <div class="row"><div><div class="lbl">Reduced motion</div><div class="sub">follows system; ceremony becomes instant</div></div><div class="ctl"><span class="tgl"></span></div></div>
     </div></div>
 
-    <h2 style="margin-top:10px">Notifications</h2>
+    <h2 style="margin-top:8px">Notifications</h2>
     <p class="desc">Per-channel rules for attention events (line degraded, unreachable, grant requests, dreams).</p>
     <div class="panel"><div class="panel-b">
-      <div class="row nchan"><svg viewBox="0 0 16 16"><path d="M8 1a7 7 0 0 0-6 10.5L1 15l3.6-1A7 7 0 1 0 8 1z"/></svg><span class="nm">Browser push</span><div class="opts"><span>attention only</span><span class="tgl on"></span></div></div>
-      <div class="row nchan"><svg viewBox="0 0 16 16"><path d="M1 3h14v10H1z"/></svg><span class="nm">Webhook</span><div class="opts"><span>all events</span><button class="btn sm ghost">edit</button><span class="tgl on"></span></div></div>
+      <div class="row nchan"><svg viewBox="0 0 16 16"><path d="M8 2a5 5 0 0 1 5 5c0 3 1 4 1 4H2s1-1 1-4a5 5 0 0 1 5-5zm-2 10a2 2 0 0 0 4 0z"/></svg><span class="nm">Browser push</span><div class="opts"><span>attention only</span><span class="tgl on"></span></div></div>
+      <div class="row nchan"><svg viewBox="0 0 16 16"><path d="M9 1.5 3.5 9H7l-1 5.5L12.5 7H9l1.5-5.5z"/></svg><span class="nm">Webhook</span><div class="opts"><span>all events</span><button class="btn sm ghost">edit</button><span class="tgl on"></span></div></div>
       <div class="row nchan"><svg viewBox="0 0 16 16"><path d="M1 3h14v10H1z"/></svg><span class="nm">Email digest</span><div class="opts"><span>daily 08:00</span><span class="tgl"></span></div></div>
     </div></div>
 
-    <h2 style="margin-top:10px">API tokens</h2>
+    <h2 style="margin-top:8px">API tokens</h2>
     <p class="desc">Console/API access tokens for scripts and remote tooling.</p>
     <div class="panel"><div class="panel-b">
       <div class="tok"><div><div class="nm">ops-cli</div><div class="sc">fleet:read fleet:write · created 2026-06-11</div></div><div class="acts"><button class="btn sm ghost">rotate</button><button class="btn sm danger">revoke</button></div></div>
       <div class="tok"><div><div class="nm">backup-cron</div><div class="sc">metrics:read · created 2026-07-02</div></div><div class="acts"><button class="btn sm ghost">rotate</button><button class="btn sm danger">revoke</button></div></div>
-      <div class="row" style="border:none"><div class="ctl" style="margin:4px 0 2px"><button class="btn sm" style="border-style:dashed;background:transparent;color:var(--t3)">＋ new token</button></div></div>
+      <div class="row" style="border:none"><div class="ctl" style="margin:4px 0 2px"><button class="btn sm" style="border-style:dashed;border-color:var(--hair-3);background:transparent;color:var(--t2)">＋ new token</button></div></div>
     </div></div>
 
-    <h2 style="margin-top:8px;color:var(--crit)">Danger zone</h2>
+    <h2 style="margin-top:6px;color:var(--crit)">Danger zone</h2>
     <p class="desc">Irreversible actions. Lines and agents are deactivated first; 2 confirmations required.</p>
-    <div class="panel danger-zone" style="margin-top:0"><div class="panel-b" style="display:grid;grid-template-columns:1fr 1fr;gap:0 20px">
-      <div class="row" style="padding:10px 0;border:none"><div><div class="lbl" style="color:var(--crit)"><svg width="12" height="12" viewBox="0 0 16 16" style="fill:none;stroke:currentColor;stroke-width:1.5;stroke-linejoin:round;vertical-align:-1px"><path d="M8 2.5 14.5 13.5h-13z"/><path d="M8 7v3" stroke-linecap="round"/><circle cx="8" cy="11.6" r=".9" fill="currentColor" stroke="none"/></svg> Export all data</div><div class="sub">messages, configs, memory indexes</div></div><div class="ctl"><button class="btn sm">export…</button></div></div>
-      <div class="row" style="padding:10px 0;border:none;border-left:1px solid var(--hair);padding-left:20px"><div><div class="lbl" style="color:var(--crit)"><svg width="12" height="12" viewBox="0 0 16 16" style="fill:none;stroke:currentColor;stroke-width:1.5;stroke-linejoin:round;vertical-align:-1px"><path d="M8 2.5 14.5 13.5h-13z"/><path d="M8 7v3" stroke-linecap="round"/><circle cx="8" cy="11.6" r=".9" fill="currentColor" stroke="none"/></svg> Reset workspace</div><div class="sub">lines and agents are deactivated first; 2 confirmations required</div></div><div class="ctl"><button class="btn sm danger">reset…</button></div></div>
+    <div class="panel danger-zone" style="margin-top:0"><div class="panel-b">
+      <div class="row" style="padding:10px 0;border:none"><div><div class="lbl" style="color:var(--crit)"><svg width="12" height="12" viewBox="0 0 16 16" style="fill:none;stroke:currentColor;stroke-width:1.5;stroke-linejoin:round;vertical-align:-1px"><path d="M8 2.5 14.5 13.5h-13z"/><path d="M8 7v3" stroke-linecap="round"/><circle cx="8" cy="11.6" r=".9" fill="currentColor" stroke="none"/></svg> Reset workspace</div><div class="sub">wipes all lines, agents, and configuration</div></div><div class="ctl"><button class="btn sm danger">reset…</button></div></div>
     </div></div>
   </main>
 </div>

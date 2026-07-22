@@ -36,7 +36,7 @@ body {
 .crumb .wm { font:800 16px/20px "Bricolage Grotesque",sans-serif; letter-spacing:-0.06em; }
 .crumb .wm b { color:var(--accent); }
 .crumb .ctx { font:400 11px/16px "IBM Plex Mono",monospace; letter-spacing:.18em; color:var(--t3); }
-.theme-toggle { position:fixed; top:16px; right:16px; }
+.theme-toggle { position:fixed; top:16px; right:16px; padding:8px 14px; border-radius:6px; font:600 12.5px/16px inherit; }
 /* step rail */
 .steps { display:flex; gap:8px; margin-bottom:28px; }
 .step { flex:1; display:flex; flex-direction:column; gap:6px; }
@@ -122,6 +122,15 @@ h1 { font:700 26px/32px "Bricolage Grotesque",sans-serif; letter-spacing:-0.02em
 .ch.sel span { color:var(--t1); }
 .sec { font:600 11px/14px "IBM Plex Mono",monospace; letter-spacing:.1em; color:var(--t3); text-transform:uppercase; margin:18px 0 10px; }
 @media (prefers-reduced-motion: reduce) { .glow,.av { animation:none; } }
+/* light presence: card separation + control borders (locked-token consumption) */
+[data-theme="light"] .panel, [data-theme="light"] .scard, [data-theme="light"] .kpi,
+[data-theme="light"] .dcard, [data-theme="light"] .pcard, [data-theme="light"] .acard,
+[data-theme="light"] .prop, [data-theme="light"] .mstat, [data-theme="light"] .fstrip,
+[data-theme="light"] .ch, [data-theme="light"] .swatches .sw,
+[data-theme="light"] .pair, [data-theme="light"] .bub, [data-theme="light"] .qcard { box-shadow:var(--shadow-rest); }
+[data-theme="light"] .btn.ghost, [data-theme="light"] .btn.sm:not(.upd):not(.danger):not(.no),
+[data-theme="light"] .ibtn, [data-theme="light"] .cap, [data-theme="light"] .fstrip,
+[data-theme="light"] .theme-toggle { border-color:var(--hair-3); }
 @media (max-width:640px){ .card{padding:20px} .name{font-size:26px} }
 </style>
 </head>

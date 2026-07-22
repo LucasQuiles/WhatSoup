@@ -47,8 +47,17 @@ h1 .accent { color:var(--accent); }
 .prop .n { font:600 11px/14px "IBM Plex Mono",monospace; letter-spacing:.1em; color:var(--t3); text-transform:uppercase; margin-bottom:8px; }
 .prop h3 { font:700 15px/20px "Bricolage Grotesque",sans-serif; margin-bottom:6px; }
 .prop p { color:var(--t2); font-size:12.5px; }
-.theme-toggle { position:fixed; top:16px; right:16px; display:inline-flex; align-items:center; gap:8px; background:transparent; border:1px solid var(--hair); border-radius:10px; color:var(--t2); padding:8px 14px; cursor:pointer; font:600 12.5px/16px "Hanken Grotesk",sans-serif; transition:transform .16s ease-out, box-shadow .16s ease-out; }
+.theme-toggle { position:fixed; top:16px; right:16px; display:inline-flex; align-items:center; gap:8px; background:transparent; border:1px solid var(--hair); border-radius:6px; color:var(--t2); padding:8px 14px; cursor:pointer; font:600 12.5px/16px inherit; transition:transform .16s ease-out, box-shadow .16s ease-out; }
 .theme-toggle:hover { transform:translateY(-1px); box-shadow:var(--shadow-lift); }
+/* light presence: card separation + control borders (locked-token consumption) */
+[data-theme="light"] .panel, [data-theme="light"] .scard, [data-theme="light"] .kpi,
+[data-theme="light"] .dcard, [data-theme="light"] .pcard, [data-theme="light"] .acard,
+[data-theme="light"] .prop, [data-theme="light"] .mstat, [data-theme="light"] .fstrip,
+[data-theme="light"] .card, [data-theme="light"] .ch, [data-theme="light"] .swatches .sw,
+[data-theme="light"] .pair, [data-theme="light"] .bub, [data-theme="light"] .qcard { box-shadow:var(--shadow-rest); }
+[data-theme="light"] .btn.ghost, [data-theme="light"] .btn.sm:not(.upd):not(.danger):not(.no),
+[data-theme="light"] .ibtn, [data-theme="light"] .cap, [data-theme="light"] .fstrip,
+[data-theme="light"] .theme-toggle { border-color:var(--hair-3); }
 @media (max-width:700px){ h1{font-size:32px;line-height:38px} .props{grid-template-columns:1fr} }
 </style>
 </head>

@@ -40,9 +40,18 @@ nav { width:212px; flex:none; background:var(--inset); border-right:1px solid va
 .nav-item .dot { margin-left:auto; width:6px; height:6px; border-radius:1px; transform:rotate(45deg); background:var(--warn); }
 .deploy { margin-top:auto; border-top:1px solid var(--hair); padding-top:10px; }
 .deploy .hchip { display:flex; align-items:center; gap:8px; padding:6px 10px; font:500 11.5px/16px "IBM Plex Mono",monospace; color:var(--t3); }
-.deploy .hchip .st { width:6px; height:6px; border-radius:50%; background:var(--ok); }
-.deploy .hchip .st.warn { background:var(--warn); border-radius:1px; transform:rotate(45deg); }
+.deploy .hchip .hst { width:6px; height:6px; border-radius:50%; background:var(--ok); }
+.deploy .hchip .hst.warn { background:var(--warn); border-radius:1px; transform:rotate(45deg); }
 .appcol { flex:1; display:flex; flex-direction:column; min-width:0; min-height:0; }
+/* light presence: card separation + control borders (locked-token consumption) */
+[data-theme="light"] .panel, [data-theme="light"] .scard, [data-theme="light"] .kpi,
+[data-theme="light"] .dcard, [data-theme="light"] .pcard, [data-theme="light"] .acard,
+[data-theme="light"] .prop, [data-theme="light"] .mstat, [data-theme="light"] .fstrip,
+[data-theme="light"] .card, [data-theme="light"] .ch, [data-theme="light"] .swatches .sw,
+[data-theme="light"] .pair, [data-theme="light"] .bub, [data-theme="light"] .qcard { box-shadow:var(--shadow-rest); }
+[data-theme="light"] .btn.ghost, [data-theme="light"] .btn.sm:not(.upd):not(.danger):not(.no),
+[data-theme="light"] .ibtn, [data-theme="light"] .cap, [data-theme="light"] .fstrip,
+[data-theme="light"] .theme-toggle { border-color:var(--hair-3); }
 @media (max-width:1100px){ nav{width:64px} .nav-item span,.nav-sec,.nameplate .wm,.nameplate .ctx,.deploy .hchip span{display:none} }
 header { display:flex; align-items:center; gap:14px; padding:14px 22px 12px; border-bottom:1px solid var(--hair); }
 h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; letter-spacing:-0.02em; }
@@ -69,7 +78,7 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; letter-spacing:-0.02em
 .acard .nm { font:700 14px/18px "Bricolage Grotesque",sans-serif; }
 .acard .kind { font:500 11px/14px "IBM Plex Mono",monospace; color:var(--t3); letter-spacing:.06em; text-transform:uppercase; }
 .acard .stat { margin-left:auto; width:8px; height:8px; flex:none; }
-.acard .stat.live { background:var(--ok); border-radius:50%; } .acard .stat.paused { background:var(--warn); border-radius:1px; transform:rotate(45deg); } .acard .stat.draft { background:transparent; border:1.5px solid var(--t3); border-radius:1px; }
+.acard .stat.live { background:var(--ok); border-radius:50%; } .acard .stat.paused { background:var(--warn); border-radius:1px; transform:rotate(45deg); } .acard .stat.draft { background:transparent; border:1.5px solid var(--t2); border-radius:1px; }
 .acard .meta { display:flex; align-items:center; gap:6px; margin-top:10px; color:var(--t3); font:500 11px/14px "IBM Plex Mono",monospace; }
 .acard.hatch { background:transparent; border-style:dashed; border-color:var(--hair-2); }
 .acard.hatch:hover { border-color:var(--accent); color:var(--accent); }
@@ -108,6 +117,8 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; letter-spacing:-0.02em
 .tgl::after { content:""; position:absolute; left:2px; top:2px; width:14px; height:14px; border-radius:50%; background:var(--t2); transition:transform .16s; }
 .tgl.on { background:var(--accent); } .tgl.on::after { transform:translateX(14px); background:var(--accent-fg); }
 /* lines/instances */
+.lrow.pending { opacity:.65; }
+[data-theme="light"] .lrow.pending { opacity:.8; }
 .lrow { display:flex; align-items:center; gap:10px; padding:7px 0; border-bottom:1px solid var(--hair); }
 .lrow:last-child { border-bottom:none; }
 .lrow svg { width:14px; height:14px; fill:var(--t3); }
@@ -118,7 +129,7 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; letter-spacing:-0.02em
 .g.see { background:var(--inset); border:1px solid var(--hair-2); color:var(--t2); }
 .irow { display:flex; align-items:center; gap:8px; padding:6px 0; font-size:12px; }
 .irow .who { font-weight:600; color:var(--t1); flex:none; min-width:86px; }
-.irow .ago { color:var(--t3); font-size:11px; flex:none; }
+.irow .ago { color:var(--t3); font-size:11px; flex:none; min-width:46px; }
 .irow .cid { font:400 11px/14px "IBM Plex Mono",monospace; color:var(--t3); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .irow .st { width:6px; height:6px; background:var(--ok); border-radius:50%; }
 .irow .st.paused { background:var(--warn); border-radius:1px; transform:rotate(45deg); }
@@ -164,16 +175,16 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; letter-spacing:-0.02em
   <a class="nav-item" href="settings.html"><svg viewBox="0 0 16 16"><path d="M8 5a3 3 0 1 0 0 6 3 3 0 0 0 0-6zm6 3h2M1 8h2m5-7v2m0 10v2m5-12 1.5-1.5M2.5 13.5 4 12m9 1.5L11.5 12M2.5 2.5 4 4"/></svg><span>Settings</span></a>
   <div class="deploy">
     <div class="nav-sec">Hosts</div>
-    <div class="hchip"><span class="st"></span><span>local · this host</span></div>
-    <div class="hchip"><span class="st warn"></span><span>nest-2 · container</span></div>
-    <div class="hchip"><span class="st"></span><span>field-pi · remote</span></div>
+    <div class="hchip"><span class="hst"></span><span>local · this host</span></div>
+    <div class="hchip"><span class="hst warn"></span><span>nest-2 · container</span></div>
+    <div class="hchip"><span class="hst"></span><span>field-pi · remote</span></div>
   </div>
 </nav>
 <div class="appcol">
 <header>
-  <div><h1>Agents</h1><span class="crumb">ROSTER / QUINN</span></div>
+  <h1>Agents</h1><span class="crumb" style="margin-top:6px">ROSTER / QUINN</span>
   <div class="spacer"></div>
-  <button class="btn primary">＋ New agent</button>
+  <button class="btn primary">＋ Hatch agent</button>
   <button class="btn ghost theme-toggle" onclick="document.documentElement.dataset.theme=document.documentElement.dataset.theme==='dark'?'light':'dark'"><svg width="14" height="14" viewBox="0 0 16 16" style="vertical-align:-2px"><circle cx="8" cy="8" r="3.2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6 13 13M13 3l-1.4 1.4M4.4 11.6 3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg> theme</button>
 </header>
 <div class="wrap">
@@ -211,7 +222,7 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; letter-spacing:-0.02em
     <div class="dhead">
       <span class="av" style="background:hsl(250,38%,34%)">Q</span>
       <div style="flex:1">
-        <div style="display:flex;align-items:center;gap:10px"><h2>Quinn</h2><span class="pill live"><span style="font-size:7px">●</span> live</span><button class="pill swap">⇄ swap profile</button></div>
+        <div style="display:flex;align-items:center;gap:10px"><h2>Quinn</h2><span class="pill live"><span style="font-size:7px">●</span> live</span><button class="btn sm ghost">⇄ swap profile</button></div>
         <div class="soul">"Keeps the community room tidy, answers fast, never sleeps."</div>
         <div class="sub">hatched 2026-07-21 · community agent archetype · sandbox per chat</div>
       </div>
@@ -243,7 +254,7 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; letter-spacing:-0.02em
         <div class="panel-b">
           <div class="lrow"><svg viewBox="0 0 16 16"><path d="M8 1a7 7 0 0 0-6 10.5L1 15l3.6-1A7 7 0 1 0 8 1z"/></svg><div><div class="nm">Community</div><div class="sub">+1 845 ··· 4651 · whatsapp</div></div><span class="g part" title="participate">P</span></div>
           <div class="lrow"><svg viewBox="0 0 16 16"><path d="M8 1a7 7 0 0 0-6 10.5L1 15l3.6-1A7 7 0 1 0 8 1z"/></svg><div><div class="nm">Personal</div><div class="sub">+1 845 ··· 0919 · whatsapp</div></div><span class="g see" title="see only">S</span></div>
-          <div class="lrow" style="opacity:.55"><svg viewBox="0 0 16 16"><path d="M12 3H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h1l1 2 1.2-2H12a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z"/></svg><div><div class="nm">Builds</div><div class="sub">discord · grant requested 2d ago</div></div><span class="g see" style="border:1px dashed var(--hair-3);background:transparent;color:var(--t3)" title="grant requested · pending"><svg width="11" height="11" viewBox="0 0 16 16" style="fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round"><circle cx="8" cy="8" r="5.5"/><path d="M8 5v3l2 1.5"/></svg></span></div>
+          <div class="lrow pending"><svg viewBox="0 0 16 16"><path d="M12 3H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h1l1 2 1.2-2H12a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z"/></svg><div><div class="nm">Builds</div><div class="sub">discord · grant requested 2d ago</div></div><span class="g see" style="border:1px dashed var(--hair-3);background:transparent;color:var(--t3)" title="grant requested · pending"><svg width="11" height="11" viewBox="0 0 16 16" style="fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round"><circle cx="8" cy="8" r="5.5"/><path d="M8 5v3l2 1.5"/></svg></span></div>
         </div>
       </div>
       <div class="panel">
@@ -264,6 +275,7 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; letter-spacing:-0.02em
           <span class="chip"><span class="ok">●</span> scheduled-tasks</span>
           <span class="chip"><span class="ok">●</span> document-drafting</span>
           <span class="chip add">＋ add from Hub</span>
+          <div class="integ" style="margin-top:8px"><span class="st" style="background:var(--warn);border-radius:1px;transform:rotate(45deg)"></span> 2 updates in Hub <span style="margin-left:auto;color:var(--t3)">pinecone · scheduled</span></div>
         </div>
       </div>
       <div class="panel">

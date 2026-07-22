@@ -40,9 +40,18 @@ nav { width:212px; flex:none; background:var(--inset); border-right:1px solid va
 .nav-item .dot { margin-left:auto; width:6px; height:6px; border-radius:1px; transform:rotate(45deg); background:var(--warn); }
 .deploy { margin-top:auto; border-top:1px solid var(--hair); padding-top:10px; }
 .deploy .hchip { display:flex; align-items:center; gap:8px; padding:6px 10px; font:500 11.5px/16px "IBM Plex Mono",monospace; color:var(--t3); }
-.deploy .hchip .st { width:6px; height:6px; border-radius:50%; background:var(--ok); }
-.deploy .hchip .st.warn { background:var(--warn); border-radius:1px; transform:rotate(45deg); }
+.deploy .hchip .hst { width:6px; height:6px; border-radius:50%; background:var(--ok); }
+.deploy .hchip .hst.warn { background:var(--warn); border-radius:1px; transform:rotate(45deg); }
 .appcol { flex:1; display:flex; flex-direction:column; min-width:0; min-height:0; }
+/* light presence: card separation + control borders (locked-token consumption) */
+[data-theme="light"] .panel, [data-theme="light"] .scard, [data-theme="light"] .kpi,
+[data-theme="light"] .dcard, [data-theme="light"] .pcard, [data-theme="light"] .acard,
+[data-theme="light"] .prop, [data-theme="light"] .mstat, [data-theme="light"] .fstrip,
+[data-theme="light"] .card, [data-theme="light"] .ch, [data-theme="light"] .swatches .sw,
+[data-theme="light"] .pair, [data-theme="light"] .bub, [data-theme="light"] .qcard { box-shadow:var(--shadow-rest); }
+[data-theme="light"] .btn.ghost, [data-theme="light"] .btn.sm:not(.upd):not(.danger):not(.no),
+[data-theme="light"] .ibtn, [data-theme="light"] .cap, [data-theme="light"] .fstrip,
+[data-theme="light"] .theme-toggle { border-color:var(--hair-3); }
 @media (max-width:1100px){ nav{width:64px} .nav-item span,.nav-sec,.nameplate .wm,.nameplate .ctx,.deploy .hchip span{display:none} }
 header { display:flex; align-items:center; gap:14px; padding:14px 22px 12px; border-bottom:1px solid var(--hair); }
 h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
@@ -85,9 +94,10 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
 .src.community { background:var(--inset); border:1px solid var(--hair-2); color:var(--t2); }
 .src.local { background:var(--inset); border:1px solid var(--hair-2); color:var(--t2); }
 .src.thirdparty { background:color-mix(in srgb, var(--crit) 10%, transparent); color:var(--crit); }
-.scard .acts { margin-left:auto; display:flex; gap:6px; flex:none; }
+.scard .acts { display:flex; gap:6px; flex:none; }
+.scard .top .src { margin-left:auto; }
 .compat { display:flex; align-items:center; gap:14px; margin-top:9px; padding:6px 10px; border:1px solid var(--hair); border-radius:8px; background:var(--inset); }
-.compat .gnote { margin-left:auto; color:var(--t3); font-size:11px; }
+.compat .gnote { margin-left:auto; color:var(--t2); font-size:11px; font-style:italic; }
 .compat .lbl { font:600 11px/14px "IBM Plex Mono",monospace; color:var(--t2); letter-spacing:.06em; }
 .cset { display:flex; gap:4px; align-items:center; }
 .cdot { min-width:20px; height:20px; padding:0 4px; border-radius:4px; display:flex; align-items:center; justify-content:center; font:700 11px/1 "IBM Plex Mono",monospace; }
@@ -116,9 +126,9 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
   <a class="nav-item" href="settings.html"><svg viewBox="0 0 16 16"><path d="M8 5a3 3 0 1 0 0 6 3 3 0 0 0 0-6zm6 3h2M1 8h2m5-7v2m0 10v2m5-12 1.5-1.5M2.5 13.5 4 12m9 1.5L11.5 12M2.5 2.5 4 4"/></svg><span>Settings</span></a>
   <div class="deploy">
     <div class="nav-sec">Hosts</div>
-    <div class="hchip"><span class="st"></span><span>local · this host</span></div>
-    <div class="hchip"><span class="st warn"></span><span>nest-2 · container</span></div>
-    <div class="hchip"><span class="st"></span><span>field-pi · remote</span></div>
+    <div class="hchip"><span class="hst"></span><span>local · this host</span></div>
+    <div class="hchip"><span class="hst warn"></span><span>nest-2 · container</span></div>
+    <div class="hchip"><span class="hst"></span><span>field-pi · remote</span></div>
   </div>
 </nav>
 <div class="appcol">
@@ -145,10 +155,12 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
     <div class="fitem">Installed <span class="c">41</span></div>
     <div class="fitem">Updates available <span class="c">7</span></div>
     <div class="fitem">Incompatible <span class="c">3</span></div>
+    <div class="fsec">Legend</div>
+    <div class="fitem" style="cursor:default;font-size:11px;color:var(--t3);display:block;line-height:1.8">compat<br>C claude-cli · O opencode · X codex<br>G gemini · A anthropic<br>harness<br>agt agent · cht chat · pas passive<br>◆ partial · ○ full · outline n/a</div>
   </aside>
   <main class="main">
     <div class="toolbar">
-      <div class="search"><svg width="13" height="13" viewBox="0 0 16 16" style="fill:none;stroke:var(--t3);stroke-width:1.6;stroke-linecap:round"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg><input placeholder="Search skills, plugins, MCPs, tools…"></div>
+      <div class="search"><svg width="13" height="13" viewBox="0 0 16 16" style="fill:none;stroke:var(--t3);stroke-width:1.6;stroke-linecap:round"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg><input placeholder="Search skills, plugins, MCP servers, tools…"></div>
       <button class="btn ghost">sort: relevance ⇅</button>
     </div>
 
@@ -164,7 +176,7 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
         <span class="cset"><span class="cdot ok" title="claude-cli">C</span><span class="cdot ok" title="opencode-cli">O</span><span class="cdot ok" title="codex-cli">X</span><span class="cdot warn" title="gemini-cli"><span>G</span></span><span class="cdot ok" title="anthropic-api">A</span></span>
         <span class="lbl">HARNESS</span>
         <span class="cset"><span class="cdot ok" title="agent">agt</span><span class="cdot ok" title="chat">cht</span><span class="cdot na" title="passive">pas</span></span>
-        <span class="gnote">gemini: needs providerConfig</span>
+        <span class="gnote">gemini: provider config required</span>
       </div>
     </div>
 
