@@ -422,6 +422,9 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
   it('degrades only while provider execution pressure is active', async () => {
     vi.useFakeTimers();
     try {
+      runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', {
+        sessionScope: 'per_chat',
+      });
       const gate = (runtime as unknown as { providerExecutionGate: ProviderExecutionGate }).providerExecutionGate;
       const first = await gate.acquire();
       const secondPromise = gate.acquire();
