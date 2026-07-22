@@ -646,8 +646,9 @@ stylesheet (`console/src/styles/chrome.css`) consumes `var()` only: colors from 
   `--chrome-item-pad`, `--chrome-item-gap`, `--chrome-icon` 16px (11-channel-glyphography
   §1 floor), `--chrome-dot` 6px (inbox attention dot + host status dot).
 - **Hosts block** — `--chrome-hosts-pad-top`, `--chrome-hostchip-pad`.
-- **Header** — `--chrome-header-pad`, `--chrome-header-gap`,
-  `--tracking-chrome-title` −0.02em (Bricolage h1), `--tracking-ctx` 0.18em (nameplate
-  ctx caps).
+- **Header** — `--chrome-header-pad`, `--chrome-header-gap`, `--chrome-btn-pad`
+  (header button), `--tracking-chrome-title` −0.02em (Bricolage h1),
+  `--tracking-ctx` 0.18em (nameplate ctx caps), `--tracking-sec` 0.12em (rail section
+  caps).
 - **Shape details** — `--chrome-micro-radius` 1px (tick/dot/host-warn corner; badge.md
   shape family), `--chrome-pill-radius` 99px + `--chrome-attn-pad` (header attn pill).
