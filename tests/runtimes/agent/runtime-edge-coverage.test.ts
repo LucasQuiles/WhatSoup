@@ -1318,7 +1318,7 @@ describe('AgentRuntime edge coverage', () => {
     perChatCreated.opts.notifyUser?.('per-chat crash notice');
     await Promise.resolve();
     expect(perChatQueue.abortTurn).not.toHaveBeenCalled();
-    expect(perChatQueue.enqueueText).toHaveBeenCalledWith('per-chat crash notice');
+    expect(perChatQueue.enqueueText).toHaveBeenCalledWith('per-chat crash notice', 'lifecycle');
     expect(perChatQueue.flush).toHaveBeenCalledTimes(1);
     expect(perChatMessenger.sendMessage).not.toHaveBeenCalled();
     expect(
@@ -1355,7 +1355,7 @@ describe('AgentRuntime edge coverage', () => {
       { type: 'result', text: 'singleton result' },
     );
     singleCreated.opts.notifyUser?.('singleton crash notice');
-    expect(singleQueue.enqueueText).toHaveBeenCalledWith('singleton crash notice');
+    expect(singleQueue.enqueueText).toHaveBeenCalledWith('singleton crash notice', 'lifecycle');
     await vi.waitFor(() => {
       expect(singleQueue.flush).toHaveBeenCalled();
     });

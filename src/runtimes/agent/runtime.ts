@@ -12361,7 +12361,7 @@ export class AgentRuntime implements Runtime {
     // In single/shared mode, chatJid is optional (falls back to shared fields).
     const queue = chatJid ? this.getQueueForChat(chatJid) : this.queue;
     if (queue) {
-      queue.enqueueText(msg);
+      queue.enqueueText(msg, 'lifecycle');
       queue.flush().catch((err) => log.error({ err }, 'flush after crash failed'));
     } else {
       const target = chatJid ?? this.activeChatJid;
