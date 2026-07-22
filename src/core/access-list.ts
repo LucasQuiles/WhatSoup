@@ -1,6 +1,6 @@
 import type { Database } from './database.ts';
 import { toConversationKey } from './conversation-key.ts';
-import { DOMAIN_LID, DOMAIN_SMS, isLidJid, isAuthenticatedSenderJid, normalizeLid, smsJidToPhone } from './jid-constants.ts';
+import { DOMAIN_LID, DOMAIN_SIGNAL, DOMAIN_SMS, isLidJid, isAuthenticatedSenderJid, normalizeLid, smsJidToPhone } from './jid-constants.ts';
 import { resolveLid } from './lid-resolver.ts';
 
 export type AccessStatus = 'allowed' | 'blocked' | 'pending' | 'seen';
@@ -175,6 +175,13 @@ export function resolvePhoneFromJid(jid: string, db: Database): string {
     // Delegate to the canonical SMS JID→phone normalization (digits without
     // leading '+', the repo's phone-subject convention).
     return smsJidToPhone(jid);
+  }
+
+  if (domain === DOMAIN_SIGNAL) {
+    // Signal UUIDs/E.164 identities are already canonical local identifiers.
+    // Do not route them through toConversationKey, which intentionally encodes
+    // non-WhatsApp domains as `<local>_at_<domain>` storage keys.
+    return local;
   }
 
   // Personal JID or other — delegate to extractLocal

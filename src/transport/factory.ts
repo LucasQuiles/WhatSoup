@@ -11,12 +11,16 @@ import { ImessageConnection } from './imessage/connection-bridge.ts';
 import { ImessageAdapter } from './imessage/adapter.ts';
 import { BlueBubblesPort } from './imessage/bluebubbles-port.ts';
 import { ImsgPort } from './imessage/imsg-port.ts';
+import { SignalConnection } from './signal/connection-bridge.ts';
+import { SignalAdapter } from './signal/adapter.ts';
+import { SignalCliPort } from './signal/signal-cli-port.ts';
 import { assertNeverTransport } from './registry.ts';
 import type { RuntimeConnection } from './runtime-connection.ts';
 import type { TransportId } from './registry.ts';
 import type { TwilioSmsConfig } from './twilio/types.ts';
 import type { ImessageConfig } from './imessage/types.ts';
 import type { ImessagePort } from './imessage/port.ts';
+import type { SignalConfig } from './signal/types.ts';
 import { TwilioWebhookServer } from './twilio/webhook-server.ts';
 import { lookupCredential } from '../lib/keyring.ts';
 
@@ -24,8 +28,10 @@ export type { RuntimeConnection };
 
 interface FactoryConfig {
   transport: TransportId;
+  botName?: string;
   twilioConfig?: TwilioSmsConfig;
   imessageConfig?: ImessageConfig;
+  signalConfig?: SignalConfig;
 }
 
 /**
@@ -33,20 +39,16 @@ interface FactoryConfig {
  *
  * - 'baileys'  → new ConnectionManager() (Baileys WhatsApp socket)
  * - 'twilio'   → TwilioConnection wrapping TwilioSmsAdapter + SdkTwilioSmsPort
- * - 'signal'   → foundation stub; wiring lands in a follow-on phase
- * - 'imessage' → foundation stub; wiring lands in a follow-on phase
+ * - 'signal'   → SignalConnection wrapping SignalAdapter + SignalCliPort
+ * - 'imessage' → ImessageConnection wrapping its configured backend adapter
  * - unknown    → assertNeverTransport (compile-time exhaustiveness + runtime guard)
  *
  * The twilio arm fails loud if twilioConfig is missing; validation in
  * src/core/agent-config-validator.ts guarantees it is present when transport='twilio',
  * but defence-in-depth requires an explicit throw here.
  *
- * The signal and imessage arms are deliberately stub throws: the registry
- * recognises the IDs (so config validation, factory exhaustiveness, and
- * type-narrowing all see them), but constructing the connection requires the
- * adapter + port + bridge wiring that lands in subsequent phases. The stub
- * keeps the type system honest in the meantime — `default: assertNeverTransport`
- * would otherwise fail compilation because the narrowed union is non-empty.
+ * The imessage arm is fully wired as well; each non-Baileys arm validates its
+ * required transport config before constructing provider-specific objects.
  */
 export function createConnection(config: FactoryConfig): RuntimeConnection {
   switch (config.transport) {
@@ -88,14 +90,20 @@ export function createConnection(config: FactoryConfig): RuntimeConnection {
       return new TwilioConnection(adapter, webhookServer);
     }
 
-    case 'signal':
-      // Foundation stub — adapter + port + bridge wiring lands in a follow-on
-      // phase. The case exists so the TransportId union stays exhaustive
-      // (otherwise assertNeverTransport's `never` argument fails typecheck).
-      throw new Error(
-        '[createConnection] signal transport is registered but not yet implemented. ' +
-        'Adapter/port/bridge wiring is pending; see the transport-signal-and-imessage plan.',
-      );
+    case 'signal': {
+      if (config.signalConfig === undefined) {
+        throw new Error(
+          '[createConnection] transport is "signal" but signalConfig is undefined. ' +
+          'Instance config must include a valid signalConfig block.',
+        );
+      }
+      if (config.signalConfig.phoneNumber === '') {
+        throw new Error('[createConnection] signalConfig is missing phoneNumber.');
+      }
+      const port = new SignalCliPort(config.signalConfig);
+      const adapter = new SignalAdapter(config.signalConfig, port);
+      return new SignalConnection(adapter, port, config.botName ?? config.signalConfig.account);
+    }
 
     case 'imessage': {
       if (config.imessageConfig === undefined) {

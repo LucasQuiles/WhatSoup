@@ -3,10 +3,11 @@ import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import { insertPending, updateAccess } from './access-list.ts';
 import type { SubjectType } from './access-list.ts';
-import { toPersonalJid, toLidJid, toSmsJid, isGroupJid } from './jid-constants.ts';
+import { toPersonalJid, toLidJid, toSmsJid, toSignalJid, isGroupJid } from './jid-constants.ts';
 import { getAllLidMappings } from './lid-resolver.ts';
 import { getMessagesBySender, type StoredMessage } from './messages.ts';
-import { isAdminPhone, normalizePhoneE164 } from '../lib/phone.ts';
+import { isAdminPhone, isE164Wire, normalizePhoneE164 } from '../lib/phone.ts';
+import { SIGNAL_UUID_RE } from './transport-refs.ts';
 import type { IncomingMessage, Messenger } from './types.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
@@ -20,6 +21,19 @@ const log = createChildLogger('admin');
 /** Track replayed message IDs to prevent duplicate replays within this process lifetime. */
 const MAX_REPLAYED_IDS = 10_000;
 const replayedIds = new Set<string>();
+
+function normalizeAccessPhoneSubject(subjectId: string): string {
+  if (config.transport === 'signal') {
+    const lower = subjectId.toLowerCase();
+    if (SIGNAL_UUID_RE.test(lower)) return lower;
+    if (isE164Wire(subjectId)) return subjectId;
+  }
+  return normalizePhoneE164(subjectId);
+}
+
+function formatAccessPhoneSubject(subjectId: string): string {
+  return config.transport === 'signal' ? subjectId : `+${subjectId}`;
+}
 
 export function rememberReplayedId(messageId: string): void {
   replayedIds.add(messageId);
@@ -89,30 +103,35 @@ export async function handleAdminCommand(
   durability?: DurabilityEngine,
 ): Promise<void> {
   if (action === 'allow') {
-    // Phone subjects are keyed by resolvePhoneFromJid output (full digits) —
-    // normalize so a 10-digit admin command flips the stored row, not a miss.
-    if (subjectType === 'phone') subjectId = normalizePhoneE164(subjectId);
+    // WhatsApp/Twilio phone subjects use normalized digits. Signal subjects
+    // preserve their canonical +E.164 or UUID access-list identity.
+    if (subjectType === 'phone') subjectId = normalizeAccessPhoneSubject(subjectId);
     updateAccess(db, subjectType, subjectId, 'allowed');
     log.info({ subjectType, subjectId, action: 'allowed_by_admin' }, 'access granted by admin');
 
     if (subjectType === 'phone') {
-      // Replay queued messages: try the personal JID, plus any LIDs that map
-      // to this phone. toLidJid(phone) is wrong — LIDs are opaque numbers
-      // unrelated to phone numbers. We must reverse-lookup from lid_mappings.
-      const jidFormats: string[] = [toPersonalJid(subjectId)];
+      // Signal has one canonical @signal sender form. WhatsApp/Twilio replay
+      // retains the personal/SMS/LID forms used by their access-list keys.
+      const jidFormats: string[] = config.transport === 'signal'
+        ? [toSignalJid(subjectId)]
+        : [toPersonalJid(subjectId)];
       // SMS rows are stored under '+<digits>@sms' — include that form so
       // ALLOW over the Twilio transport replays the queued messages too.
-      jidFormats.push(toSmsJid(`+${normalizePhoneE164(subjectId)}`));
-      if (normalizePhoneE164(subjectId) !== subjectId) {
+      if (config.transport !== 'signal') {
+        jidFormats.push(toSmsJid(`+${normalizePhoneE164(subjectId)}`));
+      }
+      if (config.transport !== 'signal' && normalizePhoneE164(subjectId) !== subjectId) {
         // A 10-digit subject (admin typed without country code) must also flip
         // the access row stored under the full-digit key resolvePhoneFromJid
         // produces — otherwise replay succeeds while the sender stays pending.
         jidFormats.push(toPersonalJid(normalizePhoneE164(subjectId)));
       }
-      const lidMap = getAllLidMappings(db);
-      for (const [lid, mappedPhone] of lidMap) {
-        if (isAdminPhone(mappedPhone, new Set([subjectId]))) {
-          jidFormats.push(toLidJid(lid));
+      if (config.transport !== 'signal') {
+        const lidMap = getAllLidMappings(db);
+        for (const [lid, mappedPhone] of lidMap) {
+          if (isAdminPhone(mappedPhone, new Set([subjectId]))) {
+            jidFormats.push(toLidJid(lid));
+          }
         }
       }
 
@@ -133,8 +152,8 @@ export async function handleAdminCommand(
       // so the admin sees an accurate N of M without an unexplained gap.
       const totalQueued = allStored.length - groupSkipped;
       const noticeText = groupSkipped > 0
-        ? `Allowed +${subjectId} — replaying ${replayCount} of ${totalQueued} queued DM messages (${groupSkipped} group message${groupSkipped === 1 ? '' : 's'} skipped)`
-        : `Allowed +${subjectId} — replaying ${replayCount} of ${totalQueued} queued messages`;
+        ? `Allowed ${formatAccessPhoneSubject(subjectId)} — replaying ${replayCount} of ${totalQueued} queued DM messages (${groupSkipped} group message${groupSkipped === 1 ? '' : 's'} skipped)`
+        : `Allowed ${formatAccessPhoneSubject(subjectId)} — replaying ${replayCount} of ${totalQueued} queued messages`;
       await sendTracked(messenger, adminChatJid, noticeText, durability, { replayPolicy: 'safe', isTerminal: true });
 
       for (const msg of toReplay) {
@@ -165,12 +184,12 @@ export async function handleAdminCommand(
       await sendTracked(messenger, adminChatJid, `Got it, allowed group ${subjectId}`, durability, { replayPolicy: 'safe', isTerminal: true });
     }
   } else {
-    if (subjectType === 'phone') subjectId = normalizePhoneE164(subjectId);
+    if (subjectType === 'phone') subjectId = normalizeAccessPhoneSubject(subjectId);
     updateAccess(db, subjectType, subjectId, 'blocked');
     log.info({ subjectType, subjectId, action: 'blocked_by_admin' }, 'access blocked by admin');
 
     if (subjectType === 'phone') {
-      await sendTracked(messenger, adminChatJid, `Blocked +${subjectId}`, durability, { replayPolicy: 'safe', isTerminal: true });
+      await sendTracked(messenger, adminChatJid, `Blocked ${formatAccessPhoneSubject(subjectId)}`, durability, { replayPolicy: 'safe', isTerminal: true });
     } else {
       await sendTracked(messenger, adminChatJid, `Blocked group ${subjectId}`, durability, { replayPolicy: 'safe', isTerminal: true });
     }
@@ -199,6 +218,19 @@ function resolveAdminChatJid(db: Database): string | null {
   const msgStmt = db.raw.prepare(
     'SELECT chat_jid FROM messages WHERE sender_jid LIKE ? AND is_from_me = 0 ORDER BY timestamp DESC LIMIT 1',
   );
+
+  if (config.transport === 'signal') {
+    for (const identity of config.adminPhones) {
+      const row = msgStmt.get(toSignalJid(identity)) as { chat_jid: string } | undefined;
+      if (row) return row.chat_jid;
+    }
+    const firstSignalAdmin = [...config.adminPhones][0];
+    if (!firstSignalAdmin) {
+      log.error('resolveAdminJid: no admin identities configured — cannot resolve Signal admin JID');
+      return null;
+    }
+    return toSignalJid(firstSignalAdmin);
+  }
 
   // Search by admin phone numbers — try SMS JID exact match first, then
   // WhatsApp LIKE prefix (fast path for both transports).

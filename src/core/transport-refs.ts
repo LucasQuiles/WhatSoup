@@ -1,5 +1,7 @@
 // src/core/transport-refs.ts
 
+import { isE164Wire } from '../lib/phone.ts';
+
 /** Transport library / protocol family. */
 export type ChannelKind =
   | 'whatsapp'
@@ -33,6 +35,22 @@ export const ACCOUNT_RE = /^[a-z][a-z0-9-]{0,63}$/;
  * `src/transport/imessage/types.ts` re-exports it for the adapter.
  */
 export const APPLEID_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/** Signal service UUID and V2 group-id shapes shared by core JID policy. */
+export const SIGNAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export const SIGNAL_GROUP_ID_RE = /^[A-Za-z0-9+/]{16,}={0,2}$/;
+
+/**
+ * Signal group IDs are standard base64 and share the @signal namespace with
+ * direct recipients. Prefer a valid E.164 interpretation for the one
+ * syntactically ambiguous edge case so a phone number is never routed as a
+ * group.
+ */
+export function isSignalGroupAddress(address: string): boolean {
+  return !isE164Wire(address)
+    && !SIGNAL_UUID_RE.test(address)
+    && SIGNAL_GROUP_ID_RE.test(address);
+}
 
 export function makeChannelId(kind: ChannelKind, account: string): ChannelId {
   if (!ACCOUNT_RE.test(account)) {

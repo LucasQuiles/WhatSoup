@@ -1378,6 +1378,86 @@ describe('bot-errors-dispatcher', () => {
     expect(deadRecord.event.id).toBe('permanent-failure-test');
     expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "dead_lettered"');
   });
+
+  it.each([
+    'signal-cli socket error: broken pipe',
+    'signal-cli connection closed',
+    'signal-cli connection ended by peer',
+    'signal-cli RPC send timed out after 30000ms',
+    'signal-cli socket write failed: broken pipe',
+    'signal-cli socket error: connect ECONNREFUSED /tmp/signalc.sock',
+  ])('keeps a Signal transport failure deliverable: %s', (failure) => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const outbox = join(tmpRoot, 'outbox');
+    const deadLetter = join(tmpRoot, 'dead-letter');
+    writeEvent(tmpRoot, 'critical', {
+      id: `signal-transient-${failure.length}`,
+      summary: 'Signal daemon temporarily unavailable',
+      delivery: { attempts: 9, status: 'queued', nextAttemptAtEpoch: 0, lastError: null },
+    });
+
+    spawnSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_FAIL: failure,
+      },
+      encoding: 'utf8',
+    });
+
+    expect(existsSync(deadLetter) ? readdirSync(deadLetter).filter((f) => f.endsWith('.json')) : [])
+      .toHaveLength(0);
+    expect(readdirSync(outbox).filter((f) => f.endsWith('.json'))).toHaveLength(1);
+  });
+
+  it('does not treat unrelated ECONNREFUSED failures as Signal transport recovery', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const deadLetter = join(tmpRoot, 'dead-letter');
+    writeEvent(tmpRoot, 'critical', {
+      id: 'unrelated-econnrefused',
+      summary: 'unrelated service failed',
+      delivery: { attempts: 9, status: 'queued', nextAttemptAtEpoch: 0, lastError: null },
+    });
+
+    spawnSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_FAIL: 'database connection ECONNREFUSED 127.0.0.1:5432',
+      },
+      encoding: 'utf8',
+    });
+
+    expect(readdirSync(deadLetter).filter((file) => file.endsWith('.json'))).toHaveLength(1);
+  });
+
+  it.each([
+    'database connection ECONNREFUSED 127.0.0.1:5432',
+    'database RPC query timed out after 30000ms',
+    'signal-cli RPC send rejected permanently',
+  ])('does not classify an unrelated or permanent failure as Signal recovery: %s', (failure) => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const deadLetter = join(tmpRoot, 'dead-letter');
+    writeEvent(tmpRoot, 'critical', {
+      id: `non-signal-transient-${failure.length}`,
+      summary: 'permanent or unrelated service failure',
+      delivery: { attempts: 9, status: 'queued', nextAttemptAtEpoch: 0, lastError: null },
+    });
+
+    spawnSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_FAIL: failure,
+      },
+      encoding: 'utf8',
+    });
+
+    expect(readdirSync(deadLetter).filter((file) => file.endsWith('.json'))).toHaveLength(1);
+  });
 });
 
 describe('release-proof drill: two-run alert/clear traversal', () => {

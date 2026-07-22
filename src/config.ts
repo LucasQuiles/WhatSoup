@@ -1,7 +1,7 @@
 import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { homedir } from 'node:os';
-import { normalizePhoneE164 } from './lib/phone.ts';
+import { normalizePhoneE164, normalizePhoneE164Wire } from './lib/phone.ts';
 import { asRecord } from './lib/type-guards.ts';
 import { migrateLegacyMemoryConfig } from './config-memory-migration.ts';
 import type { Profile } from './core/profiles.ts';
@@ -10,6 +10,7 @@ import { DEFAULT_TRANSPORT_ID, isTransportId, type TransportId } from './transpo
 import { DEFAULT_FLEET_PORT, DEFAULT_INSTANCE_HEALTH_PORT } from './fleet/constants.ts';
 import { DEFAULT_TWILIO_SMS, DEFAULT_TWILIO_VOICE, type TwilioSmsConfig, type TwilioInboundMode, type TwilioWebhookConfig, type TwilioVoiceConfig } from './transport/twilio/types.ts';
 import { DEFAULT_IMESSAGE, type ImessageConfig, type ImessageInboundMode } from './transport/imessage/types.ts';
+import { DEFAULT_SIGNAL, SIGNAL_UUID_RE, type SignalConfig, type SignalInboundMode } from './transport/signal/types.ts';
 import { normalizeFallbackEntriesFromAgentOptions } from './core/fallback-chain.ts';
 import { errorMessage } from './lib/error-message.ts';
 import { validateModelRoleValue } from './lib/model-resolver.ts';
@@ -436,8 +437,29 @@ const rawAdminPhones: string[] = instance
       ? (instance.adminPhones as string[])
       : [])
   : (process.env.ADMIN_PHONES ?? '').split(',').map(p => p.trim()).filter(Boolean);
-// Normalize to E.164 digits — "555-123-0006" → "15551230006", "+1 555 123 0006" → "15551230006"
-const resolvedAdminPhones = rawAdminPhones.map(normalizePhoneE164);
+export function resolveAdminIdentities(
+  identities: readonly string[],
+  transport: TransportId,
+): string[] {
+  return identities.map((identity) => {
+    const trimmed = identity.trim();
+    if (transport === 'signal') {
+      const lower = trimmed.toLowerCase();
+      if (SIGNAL_UUID_RE.test(lower)) return lower;
+      const wireIdentity = normalizePhoneE164Wire(trimmed);
+      if (!wireIdentity) {
+        throw new Error('Signal admin identity must be a UUID or E.164 phone number');
+      }
+      return wireIdentity;
+    }
+    return normalizePhoneE164(trimmed);
+  });
+}
+
+const adminIdentityTransport: TransportId = isTransportId(instance?.transport)
+  ? instance.transport
+  : DEFAULT_TRANSPORT_ID;
+const resolvedAdminPhones = resolveAdminIdentities(rawAdminPhones, adminIdentityTransport);
 
 // ---------------------------------------------------------------------------
 // Default system prompt (extracted for readability)
@@ -746,6 +768,70 @@ export function resolveTwilioSmsConfig(
   };
 }
 
+export function resolveSignalConfig(
+  rawSource: Record<string, unknown> | null | undefined,
+): SignalConfig | undefined {
+  const src = asRecord(rawSource ?? undefined);
+  if (!src) return undefined;
+
+  const account = stringProp(src, 'account');
+  if (!account) return undefined;
+
+  const rawMode = src['inboundMode'];
+  if (rawMode !== undefined && rawMode !== 'poll') {
+    throw new Error(
+      `Invalid signalConfig.inboundMode ${JSON.stringify(rawMode)} — streaming is not implemented; use "poll"`,
+    );
+  }
+  const inboundMode: SignalInboundMode = 'poll';
+  const phoneNumber = stringProp(src, 'phoneNumber') ?? '';
+  const socketPath = stringProp(src, 'socketPath');
+  const tcpPort = numberProp(src, 'tcpPort', 0) || undefined;
+  const tcpHost = stringProp(src, 'tcpHost');
+  const rateLimitSrc = asRecord(src['rateLimit']);
+  const pollIntervalMs = numberProp(src, 'pollIntervalMs', DEFAULT_SIGNAL.pollIntervalMs);
+  if (!Number.isInteger(pollIntervalMs) || pollIntervalMs <= 0 || pollIntervalMs > 2_147_483_647) {
+    throw new Error('Invalid signalConfig.pollIntervalMs — expected a positive 32-bit timer integer');
+  }
+  if (socketPath !== undefined && !isAbsolute(socketPath)) {
+    throw new Error('Invalid signalConfig.socketPath — expected an absolute path');
+  }
+  if (socketPath !== undefined && tcpPort !== undefined) {
+    throw new Error('Invalid signalConfig endpoint — select exactly one of socketPath or tcpPort');
+  }
+  if (tcpHost !== undefined && tcpPort === undefined) {
+    throw new Error('Invalid signalConfig endpoint — tcpHost requires tcpPort');
+  }
+  if (socketPath === undefined && tcpPort === undefined) {
+    throw new Error('Invalid signalConfig endpoint — select exactly one of socketPath or tcpPort');
+  }
+  if (
+    tcpHost !== undefined &&
+    tcpHost !== '127.0.0.1' &&
+    tcpHost !== '::1' &&
+    tcpHost !== 'localhost'
+  ) {
+    throw new Error('Invalid signalConfig endpoint — plaintext TCP must use a loopback host');
+  }
+
+  return {
+    account,
+    phoneNumber,
+    inboundMode,
+    pollIntervalMs,
+    rateLimit: {
+      messagesPerMinute: numberProp(
+        rateLimitSrc,
+        'messagesPerMinute',
+        DEFAULT_SIGNAL.rateLimit.messagesPerMinute,
+      ),
+    },
+    ...(socketPath !== undefined ? { socketPath } : {}),
+    ...(tcpPort !== undefined ? { tcpPort } : {}),
+    ...(tcpHost !== undefined ? { tcpHost } : {}),
+  };
+}
+
 export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | undefined): MemoryConfig {
   const migrated = migrateLegacyMemoryConfig(rawSource ?? {}, { removeLegacy: false }).config;
   const memoryRoot = asRecord(migrated.memory);
@@ -891,6 +977,11 @@ const resolvedTwilioConfig: TwilioSmsConfig | undefined =
 const resolvedImessageConfig: ImessageConfig | undefined =
   resolvedTransport === 'imessage' && asRecord(instance?.imessageConfig) != null
     ? resolveImessageConfig(instance?.imessageConfig as Record<string, unknown>)
+    : undefined;
+
+const resolvedSignalConfig: SignalConfig | undefined =
+  resolvedTransport === 'signal' && asRecord(instance?.signalConfig) != null
+    ? resolveSignalConfig(instance?.signalConfig as Record<string, unknown>)
     : undefined;
 
 const resolvedAgentOptions = (instance?.agentOptions as Record<string, unknown> | undefined) ?? {};
@@ -1272,6 +1363,9 @@ export const config = {
   // Defaults for backend/socket/inboundMode/pollIntervalMs/rateLimit are
   // applied by resolveImessageConfig.
   imessageConfig: resolvedImessageConfig,
+
+  // Signal config — poll-only until a streaming receive path is implemented.
+  signalConfig: resolvedSignalConfig,
 } as const;
 
 // Make intEnv available for external use (e.g. tests, future env-driven fields)
