@@ -1,4 +1,4 @@
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { accessSync, chmodSync, constants, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -8,6 +8,39 @@ const SCRIPT = join(process.cwd(), 'scripts/check-launchd-drift.sh');
 const tmpDirs: string[] = [];
 
 const FAKE_SECRET = 'sekrit-value-9f2c41';
+
+function findPlistPython(): string {
+  const candidates = ['/usr/bin/python3', 'python3'];
+  for (const candidate of candidates) {
+    if (candidate.includes('/') && !existsSync(candidate)) continue;
+    const result = spawnSync(candidate, ['-c', [
+      'import plistlib',
+      'p = plistlib.loads(b"<plist><dict><key>Label</key><string>probe</string></dict></plist>")',
+      'raise SystemExit(0 if p.get("Label") == "probe" else 1)',
+    ].join('; ')], { encoding: 'utf8' });
+    if (result.status === 0) return candidate;
+  }
+  throw new Error('launchd-drift tests require a Python executable with working plistlib support');
+}
+
+const TEST_PLIST_PYTHON = findPlistPython();
+
+function mode000RemainsReadable(): boolean {
+  const root = mkdtempSync(join(tmpdir(), 'whatsoup-mode-check-'));
+  const file = join(root, 'mode-000');
+  try {
+    writeFileSync(file, 'probe');
+    chmodSync(file, 0o000);
+    accessSync(file, constants.R_OK);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+const MODE_000_REMAINS_READABLE = mode000RemainsReadable();
 
 function plistXml(label: string, prog0: string, withSecret = false): string {
   return [
@@ -126,13 +159,41 @@ function installAllOk(f: { repo: string; launchd: string; bin: string; home: str
   writeFileSync(join(f.launchd, 'com.whatsoup.release-drift-check.plist'), 'RENDERED release-drift for tbot\n');
 }
 
-function run(f: { repo: string; launchd: string; bin: string; home: string }, extra: string[] = []) {
+function run(
+  f: { repo: string; launchd: string; bin: string; home: string },
+  extra: string[] = [],
+  env: Record<string, string> = {},
+) {
   return spawnSync('bash', [SCRIPT,
     '--repo-root', f.repo,
     '--launchd-dir', f.launchd,
     '--bin-dir', f.bin,
     ...extra,
-  ], { encoding: 'utf8', env: { ...process.env, HOME: f.home } });
+  ], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      HOME: f.home,
+      LAUNCHD_DRIFT_PYTHON: TEST_PLIST_PYTHON,
+      ...env,
+    },
+  });
+}
+
+function runWithoutPythonOverride(
+  f: { repo: string; launchd: string; bin: string; home: string },
+  env: Record<string, string>,
+) {
+  const inherited = { ...process.env };
+  delete inherited['LAUNCHD_DRIFT_PYTHON'];
+  return spawnSync('bash', [SCRIPT,
+    '--repo-root', f.repo,
+    '--launchd-dir', f.launchd,
+    '--bin-dir', f.bin,
+  ], {
+    encoding: 'utf8',
+    env: { ...inherited, HOME: f.home, ...env },
+  });
 }
 
 afterEach(() => {
@@ -170,6 +231,113 @@ describe('check-launchd-drift.sh CLI + dir gate', () => {
     const result = run(f, ['--allow-missing-launchd-dir']);
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('SKIP:');
+  });
+
+  it('does not require the plist parser for an allowed missing LaunchAgents directory', () => {
+    const f = makeFixture();
+    rmSync(f.launchd, { recursive: true, force: true });
+    const result = run(f, ['--allow-missing-launchd-dir'], {
+      LAUNCHD_DRIFT_PYTHON: join(f.home, 'missing-python'),
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('SKIP:');
+    expect(result.stderr).not.toContain('plist parser precondition unavailable');
+  });
+});
+
+describe('plist parser precondition', () => {
+  it('returns inconclusive exit 2 without false drift or raw errors when the parser crashes', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    const brokenPython = join(f.home, 'broken python');
+    writeFileSync(brokenPython, '#!/bin/bash\necho "raw parser failure secret" >&2\nexit 42\n');
+    chmodSync(brokenPython, 0o755);
+
+    const result = run(f, [], { LAUNCHD_DRIFT_PYTHON: brokenPython });
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('plist parser precondition unavailable');
+    expect(result.stderr).not.toContain('raw parser failure secret');
+    expect(result.stderr).not.toContain('Label mismatch');
+    expect(result.stderr).not.toContain('ProgramArguments[0] unreadable');
+    expect(result.stdout).not.toContain('all managed launchd surfaces match');
+  });
+
+  it('does not fall back when the explicit parser path is missing or empty', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    const nonExecutablePython = join(f.home, 'non-executable-python');
+    writeFileSync(nonExecutablePython, '#!/bin/bash\nexit 0\n');
+    chmodSync(nonExecutablePython, 0o644);
+    for (const selected of [join(f.home, 'missing-python'), nonExecutablePython, '']) {
+      const result = run(f, [], { LAUNCHD_DRIFT_PYTHON: selected });
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain('plist parser precondition unavailable');
+      expect(result.stderr).not.toContain('Label mismatch');
+    }
+  });
+
+  it('returns inconclusive exit 2 if the proven parser later fails a field read', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    const wrapper = join(f.home, 'one shot python');
+    const marker = join(f.home, 'python-used');
+    writeFileSync(wrapper, [
+      '#!/bin/bash',
+      'if [ ! -e "$TEST_PYTHON_MARKER" ]; then',
+      '  : > "$TEST_PYTHON_MARKER"',
+      '  exec "$TEST_REAL_PYTHON" "$@"',
+      'fi',
+      'echo "raw later parser failure secret" >&2',
+      'exit 42',
+      '',
+    ].join('\n'));
+    chmodSync(wrapper, 0o755);
+
+    const result = run(f, [], {
+      LAUNCHD_DRIFT_PYTHON: wrapper,
+      TEST_PYTHON_MARKER: marker,
+      TEST_REAL_PYTHON: TEST_PLIST_PYTHON,
+    });
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('plist field evidence unavailable');
+    expect(result.stderr).not.toContain('raw later parser failure secret');
+    expect(result.stderr).not.toContain('Label mismatch');
+    expect(result.stderr).not.toContain('ProgramArguments[0] unreadable');
+  });
+
+  // @skip-env This branch proves Darwin's system-Python policy and is inapplicable elsewhere.
+  it.skipIf(process.platform !== 'darwin')('uses the macOS system parser instead of a hostile PATH parser by default', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    const hostilePython = join(f.bin, 'python3');
+    writeFileSync(hostilePython, '#!/bin/bash\nexit 42\n');
+    chmodSync(hostilePython, 0o755);
+
+    const result = runWithoutPythonOverride(f, {
+      PATH: `${f.bin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('all managed launchd surfaces match');
+  });
+
+  // @skip-env This branch proves the non-Darwin PATH policy and is inapplicable on macOS.
+  it.skipIf(process.platform === 'darwin')('resolves and validates the PATH parser by default on non-macOS hosts', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    const pathPython = join(f.bin, 'python3');
+    writeFileSync(pathPython, '#!/bin/bash\nexec "$TEST_REAL_PYTHON" "$@"\n');
+    chmodSync(pathPython, 0o755);
+
+    const result = runWithoutPythonOverride(f, {
+      PATH: `${f.bin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      TEST_REAL_PYTHON: TEST_PLIST_PYTHON,
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('all managed launchd surfaces match');
   });
 });
 
@@ -304,6 +472,52 @@ describe('verified installed scripts', () => {
     const result = run(f);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('missing installed watchdog script');
+  });
+
+  it('fails deterministically when the canonical watchdog verifier is missing', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    rmSync(join(f.repo, 'deploy/scripts/render-watchdog.py'));
+
+    const result = run(f);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('missing repo verifier: deploy/scripts/render-watchdog.py');
+    expect(result.stderr).not.toContain('watchdog verification evidence unavailable');
+    expect(result.stdout).not.toContain('all managed launchd surfaces match');
+  });
+
+  // @skip-env Elevated hosts that retain R_OK on mode 000 cannot construct this precondition.
+  it.skipIf(MODE_000_REMAINS_READABLE)('returns inconclusive exit 2 when the canonical watchdog verifier is unreadable', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    chmodSync(join(f.repo, 'deploy/scripts/render-watchdog.py'), 0o000);
+
+    const result = run(f);
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('watchdog verification evidence unavailable: canonical verifier is unreadable');
+    expect(result.stderr).not.toContain('drift: tbot-watchdog script');
+    expect(result.stdout).not.toContain('all managed launchd surfaces match');
+  });
+
+  it('returns inconclusive exit 2 without raw output when watchdog verification crashes', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    writeFileSync(join(f.repo, 'deploy/scripts/render-watchdog.py'), [
+      'import sys',
+      'print("raw watchdog verifier secret", file=sys.stderr)',
+      'raise SystemExit(42)',
+      '',
+    ].join('\n'));
+
+    const result = run(f);
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('watchdog verification evidence unavailable: verifier failed (status 42)');
+    expect(result.stderr).not.toContain('raw watchdog verifier secret');
+    expect(result.stderr).not.toContain('drift: tbot-watchdog script');
+    expect(result.stdout).not.toContain('all managed launchd surfaces match');
   });
 
   it('fails when the installed ms365 script has surviving placeholders', () => {
