@@ -13,11 +13,10 @@
  * updates that file in the same PR and an undeclared one becomes a finding.
  *
  * SPLIT DESIGN (deliberate). `diffProtection` is pure and takes both sides as data, so the
- * whole comparator is tested offline with no token and no network. The CLI supplies the
- * observed side from whatever `gh api` returned:
+ * whole comparator is tested offline with no token and no network. The CLI can read a
+ * captured payload, or invoke `gh api` itself for the live check:
  *
- *   gh api repos/<owner>/<repo>/branches/main/protection \
- *     | node --experimental-strip-types scripts/branch-protection-drift-guard.ts --observed -
+ *   node --experimental-strip-types scripts/branch-protection-drift-guard.ts --live
  *
  * Reading protection requires an admin-scoped token, which CI does not have by default, so
  * this is NOT wired into `verify:push:branch` or `quality.yml` yet. Arming it needs a
@@ -29,15 +28,13 @@
  * lacks admin scope — an authorization failure wearing a 200-shaped costume — so a payload
  * without the protection fields is rejected rather than treated as an empty ruleset.
  *
- * That is also what makes the `guard:branch-protection-drift` npm script safe despite being
- * a pipeline without `pipefail` (npm runs scripts under `sh`, where `set -o pipefail` is not
- * portable). A pipeline reports only its last command's status, so a failing `gh api` would
- * normally be masked — but here the last command is this script, and a failed `gh` leaves it
- * with empty or non-protection stdin, which it rejects as INCONCLUSIVE. The safety comes from
- * this script refusing to guess, not from the shell.
+ * The live command does not use a shell pipeline. It owns the `gh api` child process and
+ * checks both its exit status and payload, so matching JSON followed by a producer failure
+ * is still INCONCLUSIVE rather than a false clean result.
  *
  * Node builtins only.
  */
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -47,6 +44,7 @@ export const EXIT_DRIFT = 1;
 export const EXIT_INCONCLUSIVE = 2;
 
 export const EXPECTED_PROTECTION_PATH = 'docs/enforcement/branch-protection-expected.json';
+export const PROTECTION_API_PATH = 'repos/LucasQuiles/WhatSoup/branches/main/protection';
 
 export interface RequiredStatusChecks {
   strict: boolean;
@@ -256,11 +254,29 @@ export function summarize(findings: ProtectionDrift[]): string {
 }
 
 function readObservedArg(argv: string[]): string {
+  const live = argv.includes('--live');
   const idx = argv.indexOf('--observed');
+  if (live && idx !== -1) {
+    throw new Error('use exactly one observed source: --live or --observed <file|-> (inconclusive)');
+  }
+  if (live) {
+    const result = spawnSync('gh', ['api', PROTECTION_API_PATH], {
+      encoding: 'utf8',
+      maxBuffer: 1024 * 1024,
+    });
+    if (result.error) {
+      throw new Error(`GitHub protection query could not start (inconclusive): ${result.error.message}`);
+    }
+    if (result.status !== 0) {
+      const outcome = result.signal ? `signal ${result.signal}` : `exit ${String(result.status)}`;
+      throw new Error(`GitHub protection query failed with ${outcome} (inconclusive)`);
+    }
+    return result.stdout;
+  }
   if (idx === -1 || argv[idx + 1] === undefined) {
     throw new Error(
-      'usage: branch-protection-drift-guard --observed <file|-> ; pipe `gh api ' +
-        'repos/<owner>/<repo>/branches/main/protection` into it (inconclusive without input)',
+      'usage: branch-protection-drift-guard (--live | --observed <file|->) ' +
+        '(inconclusive without input)',
     );
   }
   const source = argv[idx + 1];
