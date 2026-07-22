@@ -17,6 +17,15 @@
  * two-line `0\n0` value. In arithmetic gates that becomes an unexpected syntax
  * error; in string comparisons it can silently skip the intended branch.
  *
+ * 3. `execution.pipeline.status-incomplete`: a pipeline whose exit status is
+ * CONSUMED while `pipefail` is not in effect. A pipeline reports only its LAST
+ * command's status, so `git push origin main | tail -5` exits 0 for a push the
+ * remote rejected — that happened here and reported a branch as landed when it
+ * had not been. `set -e` does not catch it; the shell considers the pipeline
+ * successful. Only fail-OPEN pipelines are flagged: `producer | grep -q` already
+ * fails closed, because a dead head produces no output and the predicate then
+ * returns false. See PREDICATE_TAIL_RE.
+ *
  * This is the complement to test-integrity's `bash-curl-without-fail`: that rule
  * fires when a curl has no `--fail`/status assertion at all; THIS rule fires
  * when the script DOES capture a status into a sentinel but then forgets the
@@ -46,7 +55,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 export interface GateFinding {
-  kind: 'fail-open-probe' | 'duplicate-zero-count';
+  kind: 'fail-open-probe' | 'duplicate-zero-count' | 'masked-pipeline-status';
   file: string;
   line: number;
   variable: string;
@@ -79,6 +88,149 @@ function successGateFor(line: string): { variable: string; expected: string } | 
 const FAIL_CLOSED_SIGNAL_RE =
   /!=\s*["']?[A-Za-z0-9]+["']?|(?<![\w-])-[zn]\b|\binconclusive\b|\bfail_infra\b|\bfail_actionable\b|\bUNKNOWN\b|\bexit\s+[1-9]/i;
 
+// ── execution.pipeline.status-incomplete ────────────────────────────────────
+
+/**
+ * Blank out single- and double-quoted spans so a `|` inside a string literal is not read
+ * as a pipeline. `grep -Eq "alpha|beta"` is an alternation; flagging it would be noise,
+ * and noise is how a guard gets turned off. Length is preserved so column math survives.
+ */
+function blankQuotedSpans(line: string): string {
+  return line.replace(/'[^']*'|"[^"]*"/g, (span) => span[0] + ' '.repeat(span.length - 2) + span[0]);
+}
+
+/** Strip a trailing `#` comment, after quotes are blanked so `"#"` is not mistaken for one. */
+function stripComment(blanked: string): string {
+  const hash = blanked.search(/(?:^|\s)#/);
+  return hash === -1 ? blanked : blanked.slice(0, hash);
+}
+
+/** A real pipeline: a single `|` that is not part of `||` and not the `|&` redirect form. */
+const PIPELINE_RE = /(?<!\|)\|(?!\||&)/;
+
+/** `set -o pipefail`, or a combined short-flag form such as `set -euo pipefail`. */
+const PIPEFAIL_RE = /\bset\s+(?:-[A-Za-z]+\s+)*-o\s+pipefail\b|\bset\s+-[A-Za-z]*o[A-Za-z]*\s+pipefail\b/;
+
+/** Status-consuming positions: `if`/`while`/`until`/`elif` conditions. */
+const CONDITION_RE = /^\s*(?:if|elif|while|until)\s+/;
+
+/** Inline status test on the same line: `pipeline || fail` / `pipeline && next`. */
+const INLINE_STATUS_TEST_RE = /\|\||&&/;
+
+/**
+ * `|| true` and `|| :` DISCARD the status rather than consume it — the author has said, in
+ * the shell's own idiom, that this pipeline is allowed to fail. Treating that as a
+ * consumption would flag `count=$(... | grep -c x || true)`, which is correct code.
+ */
+const STATUS_DISCARD_RE = /\|\|\s*(?:true|:)\s*(?:$|[)&;|])/;
+
+/** A read of the previous command's status. */
+const STATUS_READ_RE = /\$\?/;
+
+/**
+ * Split a line into pipeline segments on single `|` (not `||`, not `|&`).
+ * Quotes must already be blanked, or an alternation inside a string would split the line.
+ */
+function pipelineSegments(code: string): string[] {
+  const segments: string[] = [];
+  let start = 0;
+  for (let i = 0; i < code.length; i++) {
+    if (code[i] !== '|') continue;
+    if (code[i + 1] === '|' || code[i + 1] === '&') {
+      i += 1; // skip `||` / `|&` wholesale
+      continue;
+    }
+    if (i > 0 && code[i - 1] === '|') continue;
+    segments.push(code.slice(start, i));
+    start = i + 1;
+  }
+  segments.push(code.slice(start));
+  return segments;
+}
+
+/**
+ * The pipeline's LAST command is itself the predicate being tested — `grep -q`, `grep -c`,
+ * `test`, `[`.
+ *
+ * These pipelines are already fail-closed, which is why the idiom is everywhere: if the
+ * head command fails it produces no output, the predicate finds nothing, and the condition
+ * is FALSE. `if ! printf '%s' "$v" | grep -qE '^[0-9]'` rejects a broken `printf` exactly as
+ * it rejects a non-numeric version.
+ *
+ * That is the opposite of the hazard. `git push | tail -5` degrades the other way: a failed
+ * push simply prints nothing and `tail` exits 0, so the gate passes. The distinction is not
+ * "does it contain a pipe" but "which way does the pipeline fail when the head dies".
+ */
+const PREDICATE_TAIL_RE = /^\s*!?\s*(?:grep|egrep|rg)\b[^|]*\s-[A-Za-z]*[qc][A-Za-z]*\b|^\s*!?\s*(?:test|\[)\s/;
+
+/**
+ * Flag pipelines whose exit status is CONSUMED while `pipefail` is not yet in effect.
+ *
+ * A pipeline reports the status of its LAST command only. `git push origin main | tail -5`
+ * therefore exits 0 for a push the remote rejected — observed in this repo, where it
+ * reported a branch as landed that had not been. `set -e` does not help: as far as the
+ * shell is concerned the pipeline succeeded.
+ *
+ * Scoped to consumed status deliberately. A pipeline whose output is the point and whose
+ * status nobody reads is not a defect. Consumption means: the pipeline is a condition, its
+ * status is tested inline with `||`/`&&`, or the next effective line reads `$?`.
+ *
+ * `pipefail` is tracked positionally, not file-wide: enabling it on line 40 does nothing
+ * for the pipeline on line 3, and a guard that merely asked "is pipefail mentioned" would
+ * call that file clean.
+ */
+function scanMaskedPipelines(relPath: string, lines: string[]): GateFinding[] {
+  const findings: GateFinding[] = [];
+  let pipefailActive = false;
+
+  // Index of the next line that actually runs, so `$?` on the following line is attributed
+  // to this pipeline rather than to a blank or a comment in between.
+  const nextEffective = (from: number): string | null => {
+    for (let j = from; j < lines.length; j++) {
+      const s = lines[j].trim();
+      if (!s || s.startsWith('#')) continue;
+      return stripComment(blankQuotedSpans(lines[j]));
+    }
+    return null;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const trimmed = raw.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    const code = stripComment(blankQuotedSpans(raw));
+    if (PIPEFAIL_RE.test(code)) {
+      pipefailActive = true;
+      continue;
+    }
+    if (pipefailActive) continue;
+    if (!PIPELINE_RE.test(code)) continue;
+
+    const segments = pipelineSegments(code);
+    const tail = segments[segments.length - 1] ?? '';
+    if (PREDICATE_TAIL_RE.test(tail)) continue; // already fails closed — see PREDICATE_TAIL_RE
+
+    const consumedInline =
+      CONDITION_RE.test(code) || (INLINE_STATUS_TEST_RE.test(code) && !STATUS_DISCARD_RE.test(code));
+    const consumedNext = !consumedInline && STATUS_READ_RE.test(nextEffective(i + 1) ?? '');
+    if (!consumedInline && !consumedNext) continue;
+
+    findings.push({
+      kind: 'masked-pipeline-status',
+      file: relPath,
+      line: i + 1,
+      variable: 'pipeline',
+      detail:
+        'this pipeline\'s exit status is consumed, but `pipefail` is not in effect here, so the ' +
+        'status reported is the LAST command\'s and an earlier failure passes silently ' +
+        '(`git push ... | tail` exits 0 for a rejected push). Add `set -o pipefail` before it, ' +
+        'or read `${PIPESTATUS[0]}` instead of `$?`.',
+    });
+  }
+  return findings;
+}
+
 /**
  * Scan a single bash script's text. Returns findings where a variable is
  * captured with a sentinel-on-failure AND later gated on success only, with no
@@ -86,7 +238,7 @@ const FAIL_CLOSED_SIGNAL_RE =
  */
 export function scanGateScript(relPath: string, content: string): GateFinding[] {
   const lines = content.split(/\r?\n/);
-  const findings: GateFinding[] = [];
+  const findings: GateFinding[] = scanMaskedPipelines(relPath, lines);
 
   // Pass 0: malformed count fallback. This does not need cross-line context.
   for (let i = 0; i < lines.length; i++) {
@@ -201,10 +353,14 @@ function main(): void {
   const cwd = process.cwd();
   const findings = scanRepoGates(cwd);
   if (findings.length === 0) {
-    console.log('fail-closed-gate-guard: no fail-open gate or duplicate-zero counter shapes found (invariant.fail-closed-gate)');
+    console.log(
+      'fail-closed-gate-guard: no fail-open gate, duplicate-zero counter, or masked-pipeline-status shapes found (invariant.fail-closed-gate, execution.pipeline.status-incomplete)',
+    );
     return;
   }
-  console.error('fail-closed-gate-guard: fail-open gate or duplicate-zero counter shape(s) detected (invariant.fail-closed-gate):');
+  console.error(
+    'fail-closed-gate-guard: fail-open gate, duplicate-zero counter, or masked-pipeline-status shape(s) detected (invariant.fail-closed-gate, execution.pipeline.status-incomplete):',
+  );
   for (const f of findings) {
     console.error(`  ${f.file}:${f.line} ${f.detail}`);
   }
