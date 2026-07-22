@@ -28,11 +28,26 @@ export type { AdditionalMcpServerConfig, OpencodeProviderConfig };
 
 function cloneAndFreeze<T>(value: T): T {
   if (Array.isArray(value)) {
+    if (
+      Object.getPrototypeOf(value) !== Array.prototype
+      || Object.keys(value).some((key) => !/^(?:0|[1-9]\d*)$/u.test(key))
+    ) {
+      throw new Error('Provider MCP tool schema must contain only plain arrays');
+    }
     return Object.freeze(value.map((item) => cloneAndFreeze(item))) as T;
   }
   if (typeof value === 'object' && value !== null) {
-    const output: Record<string, unknown> = {};
-    for (const [key, child] of Object.entries(value)) output[key] = cloneAndFreeze(child);
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new Error('Provider MCP tool schema must contain only plain data objects');
+    }
+    const output = Object.create(null) as Record<string, unknown>;
+    for (const [key, child] of Object.entries(value)) {
+      if (key === '__proto__' || key === 'prototype' || key === 'constructor') {
+        throw new Error('Provider MCP tool schema contains a forbidden object key');
+      }
+      output[key] = cloneAndFreeze(child);
+    }
     return Object.freeze(output) as T;
   }
   return value;
@@ -40,11 +55,24 @@ function cloneAndFreeze<T>(value: T): T {
 
 /** Immutable per-provider-session schema snapshot used by both advertisement and authorization. */
 export function snapshotProviderMcpTools(tools: readonly ProviderMcpTool[]): readonly ProviderMcpTool[] {
-  return Object.freeze(tools.map((tool) => cloneAndFreeze({
-    name: tool.name,
-    description: tool.description,
-    inputSchema: tool.inputSchema,
-  })));
+  return Object.freeze(tools.map((tool) => {
+    const prototype = Object.getPrototypeOf(tool);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new Error('Provider MCP tool definition must be a plain data object');
+    }
+    if (
+      !Object.hasOwn(tool, 'name')
+      || !Object.hasOwn(tool, 'description')
+      || !Object.hasOwn(tool, 'inputSchema')
+    ) {
+      throw new Error('Provider MCP tool definition is incomplete');
+    }
+    return cloneAndFreeze({
+      name: tool.name,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+    });
+  }));
 }
 
 // ---------------------------------------------------------------------------

@@ -16,6 +16,16 @@ export interface ProviderAliasCandidate {
 
 const ALIAS_SUSPECT_RE = /(?:[⟦［\[]\s*WSA1|WSA1\s*[:：])/u;
 const ALIAS_FORMAT_CHAR_RE = /[\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/gu;
+const ALIAS_CONFUSABLES: Readonly<Record<string, string>> = Object.freeze({
+  'Ԝ': 'W',
+  'ԝ': 'w',
+  'Ѕ': 'S',
+  'ѕ': 's',
+  'Α': 'A',
+  'А': 'A',
+  'α': 'a',
+  'а': 'a',
+});
 
 const DETECTORS: ReadonlyArray<{
   readonly type: ProviderAliasType;
@@ -85,5 +95,18 @@ export function collectProviderAliasCandidates(
 export function containsProviderAliasSyntax(text: string): boolean {
   if (ALIAS_SUSPECT_RE.test(text)) return true;
   const comparison = text.normalize('NFKC').replace(ALIAS_FORMAT_CHAR_RE, '');
-  return comparison !== text && ALIAS_SUSPECT_RE.test(comparison);
+  if (comparison !== text && ALIAS_SUSPECT_RE.test(comparison)) return true;
+  const skeleton = Array.from(comparison, (character) => ALIAS_CONFUSABLES[character] ?? character).join('');
+  return skeleton !== comparison && ALIAS_SUSPECT_RE.test(skeleton);
+}
+
+/** Detect reserved syntax fragmented across adjacent fields without rewriting trusted bytes. */
+export function containsProviderAliasSyntaxAcross(texts: readonly string[]): boolean {
+  let carry = '';
+  for (const text of texts) {
+    const boundaryWindow = carry + text.slice(0, 512);
+    if (carry.length > 0 && containsProviderAliasSyntax(boundaryWindow)) return true;
+    carry = (carry + text).slice(-512);
+  }
+  return false;
 }

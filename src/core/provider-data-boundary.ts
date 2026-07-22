@@ -13,6 +13,7 @@ import {
 import {
   collectProviderAliasCandidates,
   containsProviderAliasSyntax,
+  containsProviderAliasSyntaxAcross,
   MAX_ALIASES_PER_TRANSFORM,
   MAX_BOUNDARY_TEXT_LENGTH,
   MAX_TRANSFORM_FIELDS,
@@ -56,6 +57,14 @@ export function createProviderDataBoundary(
   const binding = Object.freeze({ ...options.binding });
   const mode = options.mode;
   const routeSource = options.routeSource;
+  if (
+    !(['configured', 'fallback', 'checkpoint', 'default'] as readonly unknown[]).includes(routeSource)
+    || !(['shadow', 'enforce'] as readonly unknown[]).includes(mode)
+    || binding.policyVersion !== 'provider-data-policy-v1'
+    || !(['trusted', 'restricted'] as readonly unknown[]).includes(binding.dataPolicy)
+  ) {
+    throw new Error('Provider boundary metadata is outside the closed telemetry vocabulary');
+  }
   const eventSink = options.eventSink;
   const entropy = options.entropy ?? ((size: number) => randomBytes(size));
   const hmacKey = entropy(32);
@@ -67,7 +76,7 @@ export function createProviderDataBoundary(
 
   const emit = (
     eventType: ProviderBoundaryEvent['eventType'],
-    success: boolean,
+    success: 0 | 1,
     startedAt: number,
     transformCount: number,
     aliasCount: number,
@@ -93,6 +102,36 @@ export function createProviderDataBoundary(
 
   const assertActive = (): void => {
     if (retired) throw new ProviderDataBoundaryError('retired_boundary');
+  };
+
+  const failureEvent = (
+    error: unknown,
+    operation: 'transform' | 'rehydrate',
+  ): { eventType: ProviderBoundaryEvent['eventType']; success: 0 | 1 } => {
+    const code = error instanceof ProviderDataBoundaryError ? error.code : undefined;
+    if (code === 'secret_detected') return { eventType: 'secret_block', success: 1 };
+    if (
+      code === 'invalid_alias'
+      || code === 'residual_alias'
+      || code === 'nested_alias'
+      || code === 'alias_type_mismatch'
+    ) {
+      return { eventType: 'unknown_alias', success: 0 };
+    }
+    return {
+      eventType: operation === 'transform' ? 'transform_failure' : 'rehydration_failure',
+      success: 0,
+    };
+  };
+
+  const containsSecretAcross = (texts: readonly string[]): boolean => {
+    let carry = '';
+    for (const text of texts) {
+      const boundaryWindow = carry + text.slice(0, 512);
+      if (carry.length > 0 && containsProviderSecretValue(boundaryWindow)) return true;
+      carry = (carry + text).slice(-512);
+    }
+    return false;
   };
 
   const macFor = (type: ProviderAliasType, token: string): string => createHmac('sha256', hmacKey)
@@ -176,45 +215,50 @@ export function createProviderDataBoundary(
     assertActive();
     const startedAt = performance.now();
     if (binding.dataPolicy === 'trusted') {
-      emit('transform', true, startedAt, texts.length, 0, 0);
+      emit('success', 1, startedAt, texts.length, 0, 0);
       return [...texts];
     }
     if (texts.length > MAX_TRANSFORM_FIELDS) {
-      emit('transform', false, startedAt, texts.length, 0, 0);
+      emit('transform_failure', 0, startedAt, texts.length, 0, 0);
       if (mode === 'shadow') return [...texts];
       throw new ProviderDataBoundaryError('limit_exceeded');
     }
     const overLimit = texts.some((text) => text.length > MAX_BOUNDARY_TEXT_LENGTH);
-    const secretCount = texts.reduce(
+    let secretCount = texts.reduce(
       (count, text) => count + (containsProviderSecretValue(text) ? 1 : 0),
       0,
     );
-    const hasReservedSyntax = texts.some(containsProviderAliasSyntax);
+    if (secretCount === 0 && containsSecretAcross(texts)) secretCount = 1;
+    const hasReservedSyntax = texts.some(containsProviderAliasSyntax)
+      || containsProviderAliasSyntaxAcross(texts);
     if (overLimit || secretCount > 0 || hasReservedSyntax) {
-      emit('transform', false, startedAt, texts.length, 0, secretCount);
+      const error = new ProviderDataBoundaryError(
+        overLimit ? 'limit_exceeded' : secretCount > 0 ? 'secret_detected' : 'residual_alias',
+      );
+      const failure = failureEvent(error, 'transform');
+      emit(failure.eventType, failure.success, startedAt, texts.length, 0, secretCount);
       if (mode === 'shadow') return [...texts];
-      if (overLimit) throw new ProviderDataBoundaryError('limit_exceeded');
-      if (secretCount > 0) throw new ProviderDataBoundaryError('secret_detected');
-      throw new ProviderDataBoundaryError('residual_alias');
+      throw error;
     }
     const candidatesByText = texts.map((text) => collectProviderAliasCandidates(text, technicalIdentifiers));
     const allCandidates = candidatesByText.flat();
     if (allCandidates.length > MAX_ALIASES_PER_TRANSFORM) {
-      emit('transform', false, startedAt, texts.length, 0, 0);
+      emit('transform_failure', 0, startedAt, texts.length, 0, 0);
       if (mode === 'shadow') return [...texts];
       throw new ProviderDataBoundaryError('limit_exceeded');
     }
     if (mode === 'shadow') {
-      emit('transform', true, startedAt, texts.length, allCandidates.length, 0);
+      emit('success', 1, startedAt, texts.length, allCandidates.length, 0);
       return [...texts];
     }
     try {
       const staged = stageAliases(allCandidates);
       const output = texts.map((text, index) => render(text, candidatesByText[index]!, staged));
-      emit('transform', true, startedAt, texts.length, allCandidates.length, 0);
+      emit('success', 1, startedAt, texts.length, allCandidates.length, 0);
       return output;
     } catch (error) {
-      emit('transform', false, startedAt, texts.length, 0, 0);
+      const failure = failureEvent(error, 'transform');
+      emit(failure.eventType, failure.success, startedAt, texts.length, 0, 0);
       throw error;
     }
   };
@@ -230,54 +274,51 @@ export function createProviderDataBoundary(
     assertActive();
     const startedAt = performance.now();
     if (binding.dataPolicy === 'trusted') {
-      emit('rehydrate', true, startedAt, 1, 0, 0);
-      return text;
-    }
-    const overLimit = text.length > MAX_BOUNDARY_TEXT_LENGTH;
-    const secretCount = containsProviderSecretValue(text) ? 1 : 0;
-    if (overLimit || secretCount > 0) {
-      emit('rehydrate', false, startedAt, 1, 0, secretCount);
-      if (mode === 'shadow') return text;
-      throw new ProviderDataBoundaryError(overLimit ? 'limit_exceeded' : 'secret_detected');
-    }
-    if (mode === 'shadow') {
-      emit('rehydrate', true, startedAt, 1, 0, 0);
+      emit('success', 1, startedAt, 1, 0, 0);
       return text;
     }
     let aliasCount = 0;
-    ALIAS_RE.lastIndex = 0;
-    const result = text.replace(ALIAS_RE, (alias) => {
-      aliasCount += 1;
-      return authenticate(alias).localValue;
-    });
-    if (containsProviderAliasSyntax(result)) {
-      emit('rehydrate', false, startedAt, 1, aliasCount, 0);
-      throw new ProviderDataBoundaryError('invalid_alias');
+    let secretCount = 0;
+    try {
+      if (text.length > MAX_BOUNDARY_TEXT_LENGTH) throw new ProviderDataBoundaryError('limit_exceeded');
+      secretCount = containsProviderSecretValue(text) ? 1 : 0;
+      if (secretCount > 0) throw new ProviderDataBoundaryError('secret_detected');
+      ALIAS_RE.lastIndex = 0;
+      const result = text.replace(ALIAS_RE, (alias) => {
+        aliasCount += 1;
+        return authenticate(alias).localValue;
+      });
+      if (containsProviderAliasSyntax(result)) throw new ProviderDataBoundaryError('invalid_alias');
+      emit('success', 1, startedAt, 1, aliasCount, 0);
+      return mode === 'shadow' ? text : result;
+    } catch (error) {
+      const failure = failureEvent(error, 'rehydrate');
+      emit(failure.eventType, failure.success, startedAt, 1, aliasCount, secretCount);
+      if (mode === 'shadow') return text;
+      throw error;
     }
-    emit('rehydrate', true, startedAt, 1, aliasCount, 0);
-    return result;
   };
 
   const rehydrateToolInput: ProviderDataBoundary['rehydrateToolInput'] = (toolName, input, tools) => {
     assertActive();
     const startedAt = performance.now();
-    if (binding.dataPolicy === 'trusted') return input;
+    if (binding.dataPolicy === 'trusted') {
+      emit('success', 1, startedAt, 1, 0, 0);
+      return input;
+    }
     let secretCount: number;
     try {
       secretCount = preflightProviderToolValue(input);
     } catch (error) {
-      emit('rehydrate', false, startedAt, 1, 0, 0);
+      const failure = failureEvent(error, 'rehydrate');
+      emit(failure.eventType, failure.success, startedAt, 1, 0, 0);
       if (mode === 'shadow') return input;
       throw error;
     }
     if (secretCount > 0) {
-      emit('rehydrate', false, startedAt, 1, 0, secretCount);
+      emit('secret_block', 1, startedAt, 1, 0, secretCount);
       if (mode === 'shadow') return input;
       throw new ProviderDataBoundaryError('secret_detected');
-    }
-    if (mode === 'shadow') {
-      emit('rehydrate', true, startedAt, 1, 0, 0);
-      return input;
     }
     try {
       const result = rehydrateAuthorizedProviderToolInput({
@@ -286,10 +327,12 @@ export function createProviderDataBoundary(
         tools,
         authenticate: (alias, expectedType) => authenticate(alias, expectedType).localValue,
       });
-      emit('rehydrate', true, startedAt, 1, result.aliasCount, 0);
-      return result.output;
+      emit('success', 1, startedAt, 1, result.aliasCount, 0);
+      return mode === 'shadow' ? input : result.output;
     } catch (error) {
-      emit('rehydrate', false, startedAt, 1, 0, 0);
+      const failure = failureEvent(error, 'rehydrate');
+      emit(failure.eventType, failure.success, startedAt, 1, 0, 0);
+      if (mode === 'shadow') return input;
       throw error;
     }
   };
@@ -297,10 +340,31 @@ export function createProviderDataBoundary(
   return Object.freeze({
     binding,
     mode,
+    assertModel(model: string | undefined): void {
+      assertActive();
+      if (model === binding.model) return;
+      const startedAt = performance.now();
+      emit('route_drift', 0, startedAt, 1, 0, 0);
+      throw new ProviderDataBoundaryError('route_drift');
+    },
     exposeText,
     exposeTexts,
     exposeToolResult(_toolName: string, content: string): string {
       return exposeText(content, { surface: 'tool_result' });
+    },
+    inspectToolJson(rawJson: string): boolean {
+      assertActive();
+      if (binding.dataPolicy === 'trusted') return true;
+      const startedAt = performance.now();
+      try {
+        assertProviderToolJsonSafe(rawJson);
+        return true;
+      } catch (error) {
+        const failure = failureEvent(error, 'rehydrate');
+        emit(failure.eventType, failure.success, startedAt, 1, 0, 0);
+        if (mode === 'shadow') return false;
+        throw error;
+      }
     },
     rehydrateProviderText,
     rehydrateToolInput,
@@ -311,7 +375,7 @@ export function createProviderDataBoundary(
       byAlias.clear();
       byValue.clear();
       hmacKey.fill(0);
-      emit('retire', true, startedAt, 1, 0, 0);
+      emit('success', 1, startedAt, 1, 0, 0);
     },
   });
 }

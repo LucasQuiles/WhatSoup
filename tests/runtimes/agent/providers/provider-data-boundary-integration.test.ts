@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createProviderDataBoundary } from '../../../../src/core/provider-data-boundary.ts';
+import type { ProviderBoundaryEvent } from '../../../../src/core/provider-data-boundary.ts';
 import {
   PROVIDER_DATA_POLICY_VERSION,
   type ProviderRoutePolicy,
@@ -30,7 +31,11 @@ function entropy(): (size: number) => Uint8Array {
   };
 }
 
-function broker(provider: 'openai-api' | 'anthropic-api', sessionId: string) {
+function broker(
+  provider: 'openai-api' | 'anthropic-api',
+  sessionId: string,
+  boundaryEvents: ProviderBoundaryEvent[] = [],
+) {
   return createProviderDataBoundary({
     binding: {
       provider,
@@ -42,6 +47,7 @@ function broker(provider: 'openai-api' | 'anthropic-api', sessionId: string) {
     mode: 'enforce',
     routeSource: 'fallback',
     entropy: entropy(),
+    eventSink: (event) => boundaryEvents.push(event),
   });
 }
 
@@ -325,17 +331,15 @@ describe('managed provider data boundary integration', () => {
     });
     const provider = new OpenAIApiProvider();
     await provider.initialize(initOptions('openai-api', events, mcpBridge));
-    await provider.sendTurn({
+    await expect(provider.sendTurn({
       role: 'user',
       conversationKey: 'chat-key',
       parts: [{ kind: 'text', text: 'Read /workspace/LAB/WhatSoup/package.json' }],
-    });
+    })).rejects.toMatchObject({ code: 'invalid_tool_input' });
 
     expect(executeTool).not.toHaveBeenCalled();
-    expect(events).toContainEqual(expect.objectContaining({
-      type: 'tool_result',
-      isError: true,
-    }));
+    expect(events.filter((event) => event.type === 'tool_use' || event.type === 'tool_result'))
+      .toEqual([]);
   });
 
   it.each([
@@ -410,6 +414,129 @@ describe('managed provider data boundary integration', () => {
     expect(executeTool).toHaveBeenCalledWith('boundary_read_file', {
       path: '/workspace/LAB/WhatSoup/package.json',
     });
+  });
+
+  it.each([
+    ['openai-api', () => new OpenAIApiProvider()],
+    ['anthropic-api', () => new AnthropicApiProvider()],
+  ] as const)('preflights the complete %s tool-call batch before events or execution', async (
+    providerName,
+    makeProvider,
+  ) => {
+    const cases = ['late_secret', 'late_forgery', 'late_invalid'] as const;
+    for (const hostileCase of cases) {
+      fetchMock.mockReset();
+      const events: AgentEvent[] = [];
+      const executeTool = vi.fn(async () => ({ content: 'must not run', isError: false }));
+      const mcpBridge: ProviderMcpBridge = {
+        listTools: () => [{
+          name: 'boundary_read_file',
+          description: 'Read one file',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              path: { type: 'string', 'x-whatsoup-alias-type': 'path' },
+            },
+            required: ['path'],
+          },
+        }],
+        executeTool,
+      };
+      let alias = '';
+      fetchMock.mockImplementation(async (_url: string, init: RequestInit) => {
+        alias ||= findAlias(String(init.body), 'path');
+        const lateArguments = hostileCase === 'late_secret'
+          ? JSON.stringify({ path: 'credential="quoted multiword value"' })
+          : hostileCase === 'late_forgery'
+            ? JSON.stringify({ path: alias.replace(/:[0-9a-f]{32}⟧$/u, `:${'0'.repeat(32)}⟧`) })
+            : '{"path":';
+        if (providerName === 'openai-api') {
+          return openAiSse([{ choices: [{ delta: { tool_calls: [
+            {
+              index: 0,
+              id: 'valid-first',
+              function: { name: 'boundary_read_file', arguments: JSON.stringify({ path: alias }) },
+            },
+            {
+              index: 1,
+              id: 'hostile-late',
+              function: { name: 'boundary_read_file', arguments: lateArguments },
+            },
+          ] } }] }]);
+        }
+        return anthropicSse([
+          { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'valid-first', name: 'boundary_read_file' } },
+          { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify({ path: alias }) } },
+          { type: 'content_block_stop', index: 0 },
+          { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'hostile-late', name: 'boundary_read_file' } },
+          { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: lateArguments } },
+          { type: 'content_block_stop', index: 1 },
+          { type: 'message_stop' },
+        ]);
+      });
+
+      const provider = makeProvider();
+      await provider.initialize(initOptions(providerName, events, mcpBridge));
+      await expect(provider.sendTurn({
+        role: 'user',
+        conversationKey: 'chat-key',
+        parts: [{ kind: 'text', text: 'Read /workspace/LAB/WhatSoup/package.json' }],
+      })).rejects.toBeInstanceOf(Error);
+
+      expect(executeTool, hostileCase).not.toHaveBeenCalled();
+      expect(events.filter((event) => event.type === 'tool_use' || event.type === 'tool_result'), hostileCase)
+        .toEqual([]);
+      expect(provider.getCheckpoint().providerState?.['messageCount'], hostileCase)
+        .toBe(providerName === 'openai-api' ? 2 : 1);
+    }
+  });
+
+  it.each([
+    ['openai-api', () => new OpenAIApiProvider()],
+    ['anthropic-api', () => new AnthropicApiProvider()],
+  ] as const)('rejects per-turn %s model drift before restricted exposure', async (
+    providerName,
+    makeProvider,
+  ) => {
+    const events: AgentEvent[] = [];
+    const boundaryEvents: ProviderBoundaryEvent[] = [];
+    const options = initOptions(providerName, events);
+    options.providerDataBoundary = broker(providerName, options.providerSessionId!, boundaryEvents);
+    const provider = makeProvider();
+    await provider.initialize(options);
+
+    await expect(provider.sendTurn({
+      role: 'user',
+      conversationKey: 'chat-key',
+      model: 'drifted-model',
+      parts: [{ kind: 'text', text: 'Read /workspace/LAB/WhatSoup/package.json' }],
+    })).rejects.toMatchObject({ code: 'route_drift' });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(boundaryEvents).toContainEqual(expect.objectContaining({
+      eventType: 'route_drift',
+      success: 0,
+    }));
+  });
+
+  it('rejects prototype-poisoned advertised tool schemas at snapshot time', async () => {
+    const poisonedSchema = Object.create({
+      properties: { path: { type: 'string', 'x-whatsoup-alias-type': 'path' } },
+    }) as Record<string, unknown>;
+    poisonedSchema['type'] = 'object';
+    const mcpBridge: ProviderMcpBridge = {
+      listTools: () => [{
+        name: 'boundary_read_file',
+        description: 'Read one file',
+        inputSchema: poisonedSchema,
+      }],
+      executeTool: vi.fn(),
+    };
+    const events: AgentEvent[] = [];
+
+    await expect(new OpenAIApiProvider().initialize(initOptions('openai-api', events, mcpBridge)))
+      .rejects.toBeInstanceOf(Error);
+    expect(events).toEqual([]);
   });
 
   it.each([

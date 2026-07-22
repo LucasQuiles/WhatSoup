@@ -130,15 +130,56 @@ const TOOL_FIELD_AUTHORIZATIONS: Readonly<Record<string, Readonly<Record<string,
   newsletter_delete: Object.freeze({ '/jid': 'whatsapp_id' }),
 });
 const EXACT_ALIAS_RE = /^⟦WSA1:(?:path|email|whatsapp_id|phone|network_identity|repository_ref|technical_identifier):[0-9a-f]{32}:[0-9a-f]{32}⟧$/u;
+const FORBIDDEN_OBJECT_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+
+function ownValue(schema: Record<string, unknown>, key: string): unknown {
+  return Object.hasOwn(schema, key) ? schema[key] : undefined;
+}
+
+function assertProviderSchemaSafe(schema: Record<string, unknown>): void {
+  const ancestors = new WeakSet<object>();
+  let nodes = 0;
+  const walk = (value: unknown, depth: number): void => {
+    nodes += 1;
+    if (nodes > MAX_TOOL_NODES || depth > MAX_TOOL_DEPTH) {
+      throw new ProviderDataBoundaryError('limit_exceeded');
+    }
+    if (typeof value !== 'object' || value === null) return;
+    if (ancestors.has(value)) throw new ProviderDataBoundaryError('invalid_tool_input');
+    const prototype = Object.getPrototypeOf(value);
+    if (Array.isArray(value) && (
+      prototype !== Array.prototype
+      || Object.keys(value).some((key) => !/^(?:0|[1-9]\d*)$/u.test(key))
+    )) {
+      throw new ProviderDataBoundaryError('invalid_tool_input');
+    }
+    if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) {
+      throw new ProviderDataBoundaryError('invalid_tool_input');
+    }
+    ancestors.add(value);
+    if (Array.isArray(value)) {
+      for (const child of value) walk(child, depth + 1);
+    } else {
+      for (const key of Object.keys(value)) {
+        if (FORBIDDEN_OBJECT_KEYS.has(key)) throw new ProviderDataBoundaryError('invalid_tool_input');
+        walk((value as Record<string, unknown>)[key], depth + 1);
+      }
+    }
+    ancestors.delete(value);
+  };
+  walk(schema, 0);
+}
 
 function schemaProperties(schema: Record<string, unknown>): Record<string, Record<string, unknown>> {
-  const properties = schema['properties'];
-  if (typeof properties !== 'object' || properties === null || Array.isArray(properties)) return {};
+  const properties = ownValue(schema, 'properties');
+  if (typeof properties !== 'object' || properties === null || Array.isArray(properties)) {
+    return Object.create(null) as Record<string, Record<string, unknown>>;
+  }
   return properties as Record<string, Record<string, unknown>>;
 }
 
 function schemaAliasType(schema: Record<string, unknown>): ProviderAliasType | null {
-  const value = schema['x-whatsoup-alias-type'];
+  const value = ownValue(schema, 'x-whatsoup-alias-type');
   return typeof value === 'string' && (PROVIDER_ALIAS_TYPES as readonly string[]).includes(value)
     ? value as ProviderAliasType
     : null;
@@ -150,7 +191,7 @@ function escapePointerSegment(value: string): string {
 
 function matchesScalarSchema(value: unknown, schema: Record<string, unknown> | undefined): boolean {
   if (schema === undefined) return false;
-  const declaredType = schema['type'];
+  const declaredType = ownValue(schema, 'type');
   const types = Array.isArray(declaredType) ? declaredType : [declaredType];
   const typeMatches = types.some((type) => {
     switch (type) {
@@ -163,8 +204,8 @@ function matchesScalarSchema(value: unknown, schema: Record<string, unknown> | u
     }
   });
   if (!typeMatches) return false;
-  if (Object.hasOwn(schema, 'const') && !Object.is(value, schema['const'])) return false;
-  const allowed = schema['enum'];
+  if (Object.hasOwn(schema, 'const') && !Object.is(value, ownValue(schema, 'const'))) return false;
+  const allowed = ownValue(schema, 'enum');
   return !Array.isArray(allowed) || allowed.some((candidate) => Object.is(value, candidate));
 }
 
@@ -173,7 +214,10 @@ function authorizedAliasType(
   pointer: string,
   schema: Record<string, unknown>,
 ): ProviderAliasType | null {
-  return schemaAliasType(schema) ?? TOOL_FIELD_AUTHORIZATIONS[toolName]?.[pointer] ?? null;
+  const toolAuthorizations = Object.hasOwn(TOOL_FIELD_AUTHORIZATIONS, toolName)
+    ? TOOL_FIELD_AUTHORIZATIONS[toolName]
+    : undefined;
+  return schemaAliasType(schema) ?? toolAuthorizations?.[pointer] ?? null;
 }
 
 export function preflightProviderToolValue(value: unknown): number {
@@ -193,7 +237,16 @@ export function preflightProviderToolValue(value: unknown): number {
     if (typeof current !== 'object' || current === null) return;
     if (ancestors.has(current)) throw new ProviderDataBoundaryError('invalid_tool_input');
     ancestors.add(current);
-    for (const child of Array.isArray(current) ? current : Object.values(current)) walk(child, depth + 1);
+    if (Array.isArray(current)) {
+      for (const child of current) walk(child, depth + 1);
+    } else {
+      for (const key of Object.keys(current)) {
+        if (FORBIDDEN_OBJECT_KEYS.has(key)) throw new ProviderDataBoundaryError('invalid_tool_input');
+        if (key.length > MAX_BOUNDARY_TEXT_LENGTH) throw new ProviderDataBoundaryError('limit_exceeded');
+        if (containsProviderSecretValue(key)) secretCount += 1;
+        walk((current as Record<string, unknown>)[key], depth + 1);
+      }
+    }
     ancestors.delete(current);
   };
   walk(value, 0);
@@ -208,6 +261,7 @@ export function rehydrateAuthorizedProviderToolInput(input: {
 }): { output: Record<string, unknown>; aliasCount: number } {
   const advertised = input.tools.find((candidate) => candidate.name === input.toolName);
   if (!advertised) throw new ProviderDataBoundaryError('unknown_tool');
+  assertProviderSchemaSafe(advertised.inputSchema);
   let aliasCount = 0;
   let nodeCount = 0;
   const ancestors = new WeakSet<object>();
@@ -239,11 +293,12 @@ export function rehydrateAuthorizedProviderToolInput(input: {
     if (prototype !== Object.prototype && prototype !== null) {
       throw new ProviderDataBoundaryError('invalid_tool_input');
     }
-    const output: Record<string, unknown> = {};
+    const output = Object.create(null) as Record<string, unknown>;
     for (const [key, child] of Object.entries(value)) {
-      if (key === '__proto__' || key === 'prototype' || key === 'constructor') {
+      if (FORBIDDEN_OBJECT_KEYS.has(key)) {
         throw new ProviderDataBoundaryError('invalid_tool_input');
       }
+      if (containsProviderAliasSyntax(key)) throw new ProviderDataBoundaryError('unauthorized_field');
       output[key] = cloneUnclassified(child, depth + 1);
     }
     ancestors.delete(value);
@@ -265,25 +320,28 @@ export function rehydrateAuthorizedProviderToolInput(input: {
       if (!matchesScalarSchema(value, schema)) throw new ProviderDataBoundaryError('invalid_tool_input');
       if (!containsProviderAliasSyntax(value)) return value;
       if (!EXACT_ALIAS_RE.test(value)) throw new ProviderDataBoundaryError('nested_alias');
-      if (schema?.['type'] !== 'string') throw new ProviderDataBoundaryError('invalid_tool_input');
+      if (schema === undefined || ownValue(schema, 'type') !== 'string') {
+        throw new ProviderDataBoundaryError('invalid_tool_input');
+      }
       const expectedType = authorizedAliasType(input.toolName, pointer, schema);
       if (expectedType === null) throw new ProviderDataBoundaryError('unauthorized_field');
       aliasCount += 1;
       return input.authenticate(value, expectedType);
     }
     if (Array.isArray(value)) {
-      if (schema?.['type'] !== 'array' || typeof schema['items'] !== 'object' || schema['items'] === null) {
+      const items = schema ? ownValue(schema, 'items') : undefined;
+      if (schema === undefined || ownValue(schema, 'type') !== 'array' || typeof items !== 'object' || items === null) {
         throw new ProviderDataBoundaryError('invalid_tool_input');
       }
       if (ancestors.has(value)) throw new ProviderDataBoundaryError('invalid_tool_input');
       ancestors.add(value);
-      const itemSchema = schema['items'] as Record<string, unknown>;
+      const itemSchema = items as Record<string, unknown>;
       const output = value.map((item) => walk(item, itemSchema, `${pointer}/*`, depth + 1));
       ancestors.delete(value);
       return output;
     }
     if (typeof value === 'object' && value !== null) {
-      if (schema?.['type'] !== 'object' || ancestors.has(value)) {
+      if (schema === undefined || ownValue(schema, 'type') !== 'object' || ancestors.has(value)) {
         throw new ProviderDataBoundaryError('invalid_tool_input');
       }
       const prototype = Object.getPrototypeOf(value);
@@ -292,19 +350,20 @@ export function rehydrateAuthorizedProviderToolInput(input: {
       }
       ancestors.add(value);
       const properties = schemaProperties(schema);
-      const isRecordSchema = schema['properties'] === undefined;
-      const required = schema['required'];
+      const isRecordSchema = !Object.hasOwn(schema, 'properties');
+      const required = ownValue(schema, 'required');
       if (Array.isArray(required) && required.some((key) => (
         typeof key !== 'string' || !Object.hasOwn(value, key)
       ))) {
         throw new ProviderDataBoundaryError('invalid_tool_input');
       }
-      const output: Record<string, unknown> = {};
+      const output = Object.create(null) as Record<string, unknown>;
       for (const [key, child] of Object.entries(value)) {
-        if (key === '__proto__' || key === 'prototype' || key === 'constructor') {
+        if (FORBIDDEN_OBJECT_KEYS.has(key)) {
           throw new ProviderDataBoundaryError('invalid_tool_input');
         }
-        const childSchema = properties[key];
+        if (containsProviderAliasSyntax(key)) throw new ProviderDataBoundaryError('unauthorized_field');
+        const childSchema = Object.hasOwn(properties, key) ? properties[key] : undefined;
         if (childSchema === undefined) {
           if (!isRecordSchema) throw new ProviderDataBoundaryError('unauthorized_field');
           output[key] = cloneUnclassified(child, depth + 1);

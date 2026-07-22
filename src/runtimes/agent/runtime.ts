@@ -11101,7 +11101,11 @@ export class AgentRuntime implements Runtime {
       whatsoupMcpSocket: mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,
       routePolicy: route,
       providerBoundaryMode: this.providerBoundaryMode,
-      providerBoundaryRouteSource: route.source,
+      providerBoundaryRouteSource: route.source === 'preference'
+        ? 'configured'
+        : route.source === 'fallback'
+          ? 'fallback'
+          : 'default',
       handoffSystemBlock: this.buildHandoffSystemBlock(conversationKey, route.provider),
       routingSystemBlock: this.nlRoutingEnabled ? () => this.buildRoutingContractBlock(route.provider) : undefined,
       egressProxyPort: this.egressProxy?.port,

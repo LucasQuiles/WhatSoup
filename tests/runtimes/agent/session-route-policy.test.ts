@@ -112,7 +112,7 @@ describe('SessionManager route policy admission', () => {
     await expect(sm.spawnSession()).rejects.toThrow(/synthetic boundary admission failure/);
 
     expect(initialize).not.toHaveBeenCalled();
-    expect(boundaryEvents).toContainEqual(expect.objectContaining({ eventType: 'retire' }));
+    expect(boundaryEvents).toContainEqual(expect.objectContaining({ eventType: 'success', success: 1 }));
   });
 
   it('preserves existing checkpoint watchdog state when adding route policy metadata', async () => {

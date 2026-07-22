@@ -663,7 +663,7 @@ export class SessionManager {
     this.model = opts.model;
     this.routePolicy = opts.routePolicy;
     this.providerBoundaryMode = opts.providerBoundaryMode ?? 'shadow';
-    this.providerBoundaryRouteSource = opts.providerBoundaryRouteSource ?? 'unknown';
+    this.providerBoundaryRouteSource = opts.providerBoundaryRouteSource ?? 'default';
     this.providerBoundaryEventSink = opts.providerBoundaryEventSink;
     this.pluginDirs = opts.pluginDirs ?? [];
     this.allowM365Mutations = opts.allowM365Mutations;

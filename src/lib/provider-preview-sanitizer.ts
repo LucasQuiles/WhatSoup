@@ -109,40 +109,71 @@ function keyedValueStart(text: string, delimiterIndex: number): number | null {
   return valueStart;
 }
 
+interface KeyedSecretValue {
+  readonly valueStart: number;
+  readonly valueEnd: number;
+  readonly quote: '"' | "'" | null;
+  readonly closed: boolean;
+  readonly redact: boolean;
+}
+
+function keyedSecretValues(text: string): KeyedSecretValue[] {
+  const values: KeyedSecretValue[] = [];
+  let consumedThrough = 0;
+  for (const match of text.matchAll(ASSIGNMENT_DELIMITER)) {
+    if (match.index < consumedThrough) continue;
+    const valueStart = keyedValueStart(text, match.index);
+    if (valueStart === null) continue;
+    const opening = text[valueStart];
+    if (opening === '"' || opening === "'") {
+      let valueEnd = valueStart + 1;
+      let escaped = false;
+      while (valueEnd < text.length) {
+        const char = text[valueEnd]!;
+        if (escaped) escaped = false;
+        else if (char === '\\') escaped = true;
+        else if (char === opening) break;
+        valueEnd += 1;
+      }
+      const closed = text[valueEnd] === opening;
+      values.push({
+        valueStart,
+        valueEnd,
+        quote: opening,
+        closed,
+        redact: true,
+      });
+      consumedThrough = closed ? valueEnd + 1 : valueEnd;
+      continue;
+    }
+    let valueEnd = valueStart;
+    while (valueEnd < text.length && !/\s/.test(text[valueEnd]!)) valueEnd += 1;
+    const value = text.slice(valueStart, valueEnd);
+    values.push({
+      valueStart,
+      valueEnd,
+      quote: null,
+      closed: false,
+      redact: value.length > 0 && !isDisplayTruncatedNonSecret(value),
+    });
+    consumedThrough = valueEnd;
+  }
+  return values;
+}
+
 function redactKeyedSecretValues(text: string): string {
   let cursor = 0;
   let out = '';
-  for (const match of text.matchAll(ASSIGNMENT_DELIMITER)) {
-    if (match.index < cursor) continue;
-    const valueStart = keyedValueStart(text, match.index);
-    if (valueStart === null) continue;
-    out += text.slice(cursor, valueStart);
-    const quote = text[valueStart];
-    if (quote === '"' || quote === "'") {
-      let end = valueStart + 1;
-      let escaped = false;
-      while (end < text.length) {
-        const char = text[end]!;
-        if (escaped) {
-          escaped = false;
-        } else if (char === '\\') {
-          escaped = true;
-        } else if (char === quote) {
-          break;
-        }
-        end += 1;
-      }
-      const closed = text[end] === quote;
-      out += `${quote}[REDACTED]${closed ? quote : ''}`;
-      cursor = closed ? end + 1 : end;
+  for (const value of keyedSecretValues(text)) {
+    out += text.slice(cursor, value.valueStart);
+    if (value.quote !== null) {
+      out += `${value.quote}[REDACTED]${value.closed ? value.quote : ''}`;
+      cursor = value.closed ? value.valueEnd + 1 : value.valueEnd;
       continue;
     }
-
-    let end = valueStart;
-    while (end < text.length && !/\s/.test(text[end]!)) end += 1;
-    const value = text.slice(valueStart, end);
-    out += value.length > 0 && !isDisplayTruncatedNonSecret(value) ? '[REDACTED]' : value;
-    cursor = end;
+    const rawValue = text.slice(value.valueStart, value.valueEnd);
+    out += value.redact ? '[REDACTED]' : rawValue;
+    cursor = value.valueEnd;
   }
   return out + text.slice(cursor);
 }
@@ -158,18 +189,7 @@ export function containsProviderSecretValue(text: string): boolean {
   if (/Bearer\s+[A-Za-z0-9._~+/=-]+/i.test(text)) return true;
   KNOWN_TOKEN_RE.lastIndex = 0;
   if (KNOWN_TOKEN_RE.test(text)) return true;
-  const keyedSecret = /\b([A-Za-z][A-Za-z0-9_.-]{0,64})\s*[:=]\s*["']?([^\s"']+)/gu;
-  for (const match of text.matchAll(keyedSecret)) {
-    const key = match[1] ?? '';
-    if (!isSecretKey(key)) continue;
-    const normalized = key.toLowerCase().replace(/[.-]+/g, '_');
-    const value = match[2] ?? '';
-    const strongKey = /(?:password|passphrase)$/u.test(normalized)
-      || /api_?key/u.test(normalized)
-      || /(?:private_?key|signing_?key|secret_?access_?key|client_?secret)$/u.test(normalized);
-    if (strongKey || value.length >= 12) return true;
-  }
-  return false;
+  return keyedSecretValues(text).some((value) => value.redact);
 }
 
 function redactEmailLikeTokens(

@@ -34,12 +34,10 @@ export type ProviderBoundarySurface =
   | 'provider_output';
 
 export type ProviderBoundaryRouteSource =
-  | 'default'
-  | 'preference'
+  | 'configured'
   | 'fallback'
-  | 'pin_blocked_default'
-  | 'tier_unconfigured_default'
-  | 'unknown';
+  | 'checkpoint'
+  | 'default';
 
 export interface ProviderBoundaryBinding {
   readonly provider: string;
@@ -54,8 +52,15 @@ export interface ProviderBoundaryEvent {
   readonly mode: ProviderBoundaryMode;
   readonly providerClass: 'managed_api';
   readonly routeSource: ProviderBoundaryRouteSource;
-  readonly eventType: 'transform' | 'rehydrate' | 'retire';
-  readonly success: boolean;
+  readonly eventType:
+    | 'success'
+    | 'missing_policy'
+    | 'transform_failure'
+    | 'secret_block'
+    | 'unknown_alias'
+    | 'rehydration_failure'
+    | 'route_drift';
+  readonly success: 0 | 1;
   readonly transformCount: number;
   readonly aliasCount: number;
   readonly secretCount: number;
@@ -74,6 +79,7 @@ export type ProviderDataBoundaryErrorCode =
   | 'unauthorized_field'
   | 'invalid_tool_input'
   | 'retired_boundary'
+  | 'route_drift'
   | 'limit_exceeded'
   | 'entropy_collision';
 
@@ -90,9 +96,11 @@ export class ProviderDataBoundaryError extends Error {
 export interface ProviderDataBoundary {
   readonly binding: ProviderBoundaryBinding;
   readonly mode: ProviderBoundaryMode;
+  assertModel(model: string | undefined): void;
   exposeText(text: string, context: { surface: ProviderBoundarySurface }): string;
   exposeTexts(texts: readonly string[], context: { surface: ProviderBoundarySurface }): string[];
   exposeToolResult(toolName: string, content: string): string;
+  inspectToolJson(rawJson: string): boolean;
   rehydrateProviderText(text: string, context: { surface: ProviderBoundarySurface }): string;
   rehydrateToolInput(
     toolName: string,

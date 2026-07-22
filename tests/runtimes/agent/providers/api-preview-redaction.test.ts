@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
 
 import type { AgentEvent } from '../../../../src/runtimes/agent/stream-parser.ts';
+import { createProviderDataBoundary } from '../../../../src/core/provider-data-boundary.ts';
+import { PROVIDER_DATA_POLICY_VERSION } from '../../../../src/core/provider-data-policy.ts';
 import { AnthropicApiProvider } from '../../../../src/runtimes/agent/providers/anthropic-api.ts';
 import { OpenAIApiProvider } from '../../../../src/runtimes/agent/providers/openai-api.ts';
 import { providerPreview, sanitizeProviderPreviewText } from '../../../../src/runtimes/agent/provider-preview-sanitizer.ts';
@@ -74,6 +76,49 @@ async function driveProviderTurn(provider: OpenAIApiProvider | AnthropicApiProvi
     role: 'user',
   });
 
+  return events;
+}
+
+async function driveRestrictedProviderTurn(
+  providerName: 'openai-api' | 'anthropic-api',
+  provider: OpenAIApiProvider | AnthropicApiProvider,
+): Promise<AgentEvent[]> {
+  const events: AgentEvent[] = [];
+  const model = providerName === 'openai-api' ? 'gpt-test' : 'claude-test';
+  const providerSessionId = `${providerName}-restricted-preview`;
+  await provider.initialize({
+    cwd: '/tmp',
+    instanceName: 'test-instance',
+    model,
+    onCrash: vi.fn(),
+    onEvent: (event) => events.push(event),
+    systemPrompt: 'System prompt',
+    routePolicy: Object.freeze({
+      provider: providerName,
+      model,
+      dataPolicy: 'restricted',
+      policyVersion: PROVIDER_DATA_POLICY_VERSION,
+      policyState: 'classified',
+    }),
+    providerBoundaryMode: 'enforce',
+    providerSessionId,
+    providerDataBoundary: createProviderDataBoundary({
+      binding: {
+        provider: providerName,
+        model,
+        dataPolicy: 'restricted',
+        policyVersion: PROVIDER_DATA_POLICY_VERSION,
+        providerSessionId,
+      },
+      mode: 'enforce',
+      routeSource: 'configured',
+    }),
+  });
+  await provider.sendTurn({
+    conversationKey: 'chat-key',
+    parts: [{ kind: 'text', text: 'hello' }],
+    role: 'user',
+  });
   return events;
 }
 
@@ -161,6 +206,69 @@ describe('provider API preview redaction', () => {
       type: 'result',
     }));
     expectPreviewRedacted(previewFrom(errorMock, 'errPreview'), fixtures);
+  });
+
+  it.each([
+    ['openai-api', () => new OpenAIApiProvider()],
+    ['anthropic-api', () => new AnthropicApiProvider()],
+  ] as const)('uses static scalar-only logging for restricted %s error paths', async (
+    providerName,
+    makeProvider,
+  ) => {
+    const hostileContext = 'RAW_PROVIDER_CONTEXT_SENTINEL';
+    fetchMock.mockResolvedValueOnce(new Response(
+      `upstream context ${hostileContext} credential="quoted multiword value"`,
+      { status: 402 },
+    ));
+
+    await driveRestrictedProviderTurn(providerName, makeProvider());
+
+    expect(JSON.stringify([...errorMock.mock.calls, ...warnMock.mock.calls])).not.toContain(hostileContext);
+    expect(warnMock).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'provider_boundary_http_error', status: 402 }),
+      expect.any(String),
+    );
+
+    errorMock.mockReset();
+    warnMock.mockReset();
+    fetchMock.mockReset();
+    fetchMock.mockRejectedValueOnce(new Error(`connection ${hostileContext}`));
+    await driveRestrictedProviderTurn(providerName, makeProvider());
+    expect(JSON.stringify(errorMock.mock.calls)).not.toContain(hostileContext);
+
+    errorMock.mockReset();
+    warnMock.mockReset();
+    fetchMock.mockReset();
+    fetchMock
+      .mockResolvedValueOnce(new Response(
+        `no low surrogate in string ${hostileContext}`,
+        { status: 400 },
+      ))
+      .mockResolvedValueOnce(providerName === 'openai-api'
+        ? makeSseResponse(['{"choices":[{"delta":{"content":"recovered"}}]}', '[DONE]'])
+        : makeSseResponse([
+            '{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+            '{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"recovered"}}',
+            '{"type":"message_stop"}',
+          ]));
+    await driveRestrictedProviderTurn(providerName, makeProvider());
+    expect(JSON.stringify(warnMock.mock.calls)).not.toContain(hostileContext);
+
+    errorMock.mockReset();
+    warnMock.mockReset();
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce(makeSseResponse([
+      `malformed ${hostileContext}`,
+      ...(providerName === 'openai-api'
+        ? ['{"choices":[{"delta":{"content":"done"}}]}', '[DONE]']
+        : [
+            '{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+            '{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}}',
+            '{"type":"message_stop"}',
+          ]),
+    ]));
+    await driveRestrictedProviderTurn(providerName, makeProvider());
+    expect(JSON.stringify(warnMock.mock.calls)).not.toContain(hostileContext);
   });
 
   it('redacts OpenAI-compatible malformed SSE data previews before logging', async () => {

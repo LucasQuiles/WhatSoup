@@ -26,7 +26,7 @@ import { turnPartsToAnthropicContent } from './media-bridge.ts';
 import { readSseDataLines } from './sse.ts';
 import { stripLoneSurrogates, sanitizeMessageHistory, isSurrogateError } from '../../../core/sanitize-surrogates.ts';
 import { createChildLogger } from '../../../logger.ts';
-import { waitForRateLimitRetry } from './rate-limit-retry.ts';
+import { boundedRetryAfterMs, waitForRateLimitRetry } from './rate-limit-retry.ts';
 import { providerPreview } from '../provider-preview-sanitizer.ts';
 import {
   parseProviderToolInput,
@@ -35,8 +35,9 @@ import {
   connectionErrorResult,
   type ParsedToolInput,
 } from './api-provider-shared.ts';
-import { assertProviderToolJsonSafe } from '../../../core/provider-data-boundary.ts';
+import { ProviderDataBoundaryError } from '../../../core/provider-data-boundary.ts';
 import { exposeProviderTurnParts } from '../../../core/provider-data-boundary-turn.ts';
+import { mapRestrictedProviderApiError } from '../../../core/provider-data-boundary-http.ts';
 
 const log = createChildLogger('anthropic-api-provider');
 
@@ -121,6 +122,10 @@ export class AnthropicApiProvider implements ProviderSession {
       && this.dataBoundary !== undefined;
   }
 
+  private get boundaryRestricted(): boolean {
+    return this.opts?.routePolicy?.dataPolicy === 'restricted' && this.dataBoundary !== undefined;
+  }
+
   /**
    * @param config - Optional provider config block from the instance's config.json.
    *   Allows overriding `model` and `maxTokens` at registration time.
@@ -189,6 +194,7 @@ export class AnthropicApiProvider implements ProviderSession {
 
     // Per-turn model override (e.g. model-switch mid-conversation)
     const turnModel = request.model ?? this.model;
+    this.dataBoundary?.assertModel(turnModel);
 
     const providerParts = exposeProviderTurnParts(this.dataBoundary, request.parts);
     const userContent = turnPartsToAnthropicContent(providerParts).map((block) => (
@@ -208,6 +214,7 @@ export class AnthropicApiProvider implements ProviderSession {
     let lastCacheReadTokens: number | undefined;
 
     for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
+      const historyLengthBeforeCall = this.messages.length;
       const result = await this.callApi(turnModel);
 
       // A later tool-loop iteration that errors out (connection drop, rate
@@ -238,19 +245,38 @@ export class AnthropicApiProvider implements ProviderSession {
       // Emit tool_use events and feed executed tool results back into the loop.
       const toolResultBlocks: AnthropicContentBlock[] = [];
       const advertisedTools = this.providerTools;
+      let preparedUses: Array<{
+        toolUse: ToolUseAccum;
+        parsed: ParsedToolInput;
+        toolInput: Record<string, unknown>;
+      }>;
+      try {
+        const parsedUses = result.toolUses.map((toolUse) => ({
+          toolUse,
+          parsed: toolUse.parsed ?? this.parseToolInput(toolUse, turnModel),
+        }));
+        if (this.boundaryEnforced && parsedUses.some(({ parsed }) => !parsed.ok)) {
+          throw new ProviderDataBoundaryError('invalid_tool_input');
+        }
+        preparedUses = parsedUses.map(({ toolUse, parsed }) => ({
+          toolUse,
+          parsed,
+          toolInput: parsed.ok
+            ? this.dataBoundary?.rehydrateToolInput(toolUse.name, parsed.input, advertisedTools)
+              ?? parsed.input
+            : {},
+        }));
+      } catch (error) {
+        this.messages.length = historyLengthBeforeCall;
+        throw error;
+      }
 
-      for (const tu of result.toolUses) {
+      for (const { toolUse: tu, parsed: parsedToolInput, toolInput } of preparedUses) {
         if (!this.active) break;
         // Parity with openai-api parseToolInput: malformed or non-object
         // provider input must NOT execute the tool — it feeds back to the
         // model as an error tool_result instead. Substituting {} executed
         // real side-effecting tools with empty arguments.
-        const parsedToolInput = tu.parsed ?? this.parseToolInput(tu, turnModel);
-        const toolInput = parsedToolInput.ok
-          ? this.dataBoundary?.rehydrateToolInput(tu.name, parsedToolInput.input, advertisedTools)
-            ?? parsedToolInput.input
-          : {};
-
         this.opts.onEvent({
           type: 'tool_use',
           toolName: tu.name,
@@ -384,7 +410,7 @@ export class AnthropicApiProvider implements ProviderSession {
       });
     } catch (err: unknown) {
       if (this.boundaryEnforced) {
-        log.error({ code: 'provider_boundary_connection_error', model }, 'fetch error in restricted callApi');
+        log.error({ code: 'provider_boundary_connection_error' }, 'fetch error in restricted callApi');
         return { text: '', terminalResultText: '_Connection error - please try again._' };
       }
       return connectionErrorResult(err, model, log);
@@ -397,10 +423,14 @@ export class AnthropicApiProvider implements ProviderSession {
       // If the API rejects the payload due to lone surrogates and we haven't
       // tried recovery yet, sanitize the entire history and retry once.
       if (response.status === 400 && isSurrogateError(errText) && !selfHealAttempt) {
-        log.warn(
-          { model, errPreview: providerPreview(errText, 200), messageCount: this.messages.length },
-          'surrogate corruption detected — self-healing conversation history',
-        );
+        if (this.boundaryEnforced) {
+          log.warn({ code: 'provider_boundary_surrogate_retry', status: 400 }, 'restricted provider surrogate retry');
+        } else {
+          log.warn(
+            { model, errPreview: providerPreview(errText, 200), messageCount: this.messages.length },
+            'surrogate corruption detected — self-healing conversation history',
+          );
+        }
         // Deep-sanitize the stored messages (mutates in place for future turns too)
         const repaired = sanitizeMessageHistory(this.messages as Array<{ role: string; content: unknown }>);
         log.info({ repairedFields: repaired }, 'self-heal complete — retrying API call');
@@ -414,14 +444,29 @@ export class AnthropicApiProvider implements ProviderSession {
       // 401 is Anthropic-specific (a dedicated administrator message) and MUST
       // be handled before the shared ladder, which deliberately omits 401.
       if (response.status === 401) {
-        log.error({ status: 401, model }, 'API auth error');
+        log.error(
+          this.boundaryEnforced ? { code: 'provider_boundary_auth_error', status: 401 } : { status: 401, model },
+          'API auth error',
+        );
         return { text: '', terminalResultText: '_Authentication error - please contact the administrator._' };
       }
 
-      const outcome = mapSharedApiError(
-        { status: response.status, headers: response.headers, errText, model, selfHealAttempt, rateLimitRetryAttempt },
-        log,
-      );
+      const outcome = this.boundaryEnforced
+        ? mapRestrictedProviderApiError({
+            status: response.status,
+            retryAfterMs: response.status === 429 ? boundedRetryAfterMs(response.headers) : null,
+            rateLimitRetryAttempt,
+          })
+        : mapSharedApiError(
+            { status: response.status, headers: response.headers, errText, model, selfHealAttempt, rateLimitRetryAttempt },
+            log,
+          );
+      if (this.boundaryEnforced) {
+        log.warn(
+          { code: 'provider_boundary_http_error', status: response.status },
+          'restricted provider HTTP error',
+        );
+      }
       if (outcome.kind === 'rate-limit-retry') {
         await waitForRateLimitRetry(outcome.retryAfterMs, this.abortController.signal);
         return this.callApi(model, selfHealAttempt, true);
@@ -454,7 +499,7 @@ export class AnthropicApiProvider implements ProviderSession {
       } catch (err) {
         // Malformed SSE chunk - skip, but preserve observability.
         if (this.boundaryEnforced) {
-          log.warn({ code: 'provider_boundary_malformed_sse', model }, 'malformed SSE chunk from restricted Anthropic API');
+          log.warn({ code: 'provider_boundary_malformed_sse' }, 'malformed SSE chunk from restricted Anthropic API');
         } else {
           log.warn({ err, dataPreview: providerPreview(data, 200), model }, 'malformed SSE chunk from Anthropic API');
         }
@@ -567,9 +612,11 @@ export class AnthropicApiProvider implements ProviderSession {
       assistantContent.push({ type: 'tool_use', id: tu.id, name: tu.name, input });
     }
 
-    const localText = this.boundaryEnforced && fullText.length > 0
-      ? this.dataBoundary!.rehydrateProviderText(fullText, { surface: 'provider_output' })
-      : null;
+    let localText: string | null = null;
+    if (this.boundaryRestricted && fullText.length > 0) {
+      const evaluatedText = this.dataBoundary!.rehydrateProviderText(fullText, { surface: 'provider_output' });
+      if (this.boundaryEnforced) localText = evaluatedText;
+    }
 
     // Record assistant turn in provider-facing conversation history only after
     // the complete restricted output has passed validation.
@@ -591,9 +638,17 @@ export class AnthropicApiProvider implements ProviderSession {
   }
 
   private parseToolInput(toolUse: ToolUseAccum, model: string): ParsedToolInput {
-    if (this.boundaryEnforced) {
+    if (this.boundaryRestricted) {
       try {
-        assertProviderToolJsonSafe(toolUse.inputJson || '{}');
+        const rawJson = toolUse.inputJson || '{}';
+        this.dataBoundary!.inspectToolJson(rawJson);
+        if (this.boundaryEnforced) {
+          const parsed = JSON.parse(rawJson) as unknown;
+          if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+            throw new ProviderDataBoundaryError('invalid_tool_input');
+          }
+          return { ok: true, input: parsed as Record<string, unknown> };
+        }
       } catch {
         return {
           ok: false,

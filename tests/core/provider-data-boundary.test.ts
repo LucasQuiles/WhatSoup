@@ -9,6 +9,10 @@ import {
 } from '../../src/core/provider-data-boundary.ts';
 import { PROVIDER_DATA_POLICY_VERSION } from '../../src/core/provider-data-policy.ts';
 import type { ProviderMcpTool } from '../../src/runtimes/agent/providers/types.ts';
+import {
+  containsProviderSecretValue,
+  sanitizeProviderSecrets,
+} from '../../src/lib/provider-preview-sanitizer.ts';
 
 function deterministicEntropy(): (size: number) => Uint8Array {
   let sequence = 0;
@@ -82,8 +86,8 @@ describe('ProviderDataBoundary', () => {
 
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
-      eventType: 'transform',
-      success: false,
+      eventType: 'secret_block',
+      success: 1,
       aliasCount: 0,
       secretCount: 1,
     });
@@ -314,7 +318,8 @@ describe('ProviderDataBoundary', () => {
     expect(shadow.exposeText(bytes, { surface: 'prompt' })).toBe(bytes);
     expect(eventSink).toHaveBeenCalledWith(expect.objectContaining({
       mode: 'shadow',
-      success: true,
+      eventType: 'success',
+      success: 1,
       aliasCount: 2,
     }));
   });
@@ -343,7 +348,6 @@ describe('ProviderDataBoundary', () => {
       'refs/heads/secret-fix',
       'token.internal',
       'secret@example.invalid',
-      'session=blue',
     ].join(' ');
 
     expect(() => broker.exposeText(operational, { surface: 'prompt' })).not.toThrow();
@@ -360,7 +364,22 @@ describe('ProviderDataBoundary', () => {
       .toThrowError(expect.objectContaining({ code: 'secret_detected' }));
     expect(() => broker.exposeText('openaiApiKey=blue', { surface: 'prompt' }))
       .toThrowError(expect.objectContaining({ code: 'secret_detected' }));
-    expect(() => broker.exposeText('session=blue', { surface: 'prompt' })).not.toThrow();
+    expect(() => broker.exposeText('session=blue', { surface: 'prompt' }))
+      .toThrowError(expect.objectContaining({ code: 'secret_detected' }));
+    expect(() => broker.exposeText('session="blue green words"', { surface: 'prompt' }))
+      .toThrowError(expect.objectContaining({ code: 'secret_detected' }));
+    expect(() => broker.exposeText('credential="quoted multiword value"', { surface: 'prompt' }))
+      .toThrowError(expect.objectContaining({ code: 'secret_detected' }));
+  });
+
+  it.each([
+    'session="blue green words"',
+    'credential="quoted multiword value"',
+    "token='single quoted complete value'",
+  ])('uses the canonical complete-value parser for %s', (input) => {
+    expect(containsProviderSecretValue(input)).toBe(true);
+    expect(sanitizeProviderSecrets(input)).not.toContain(input.slice(input.indexOf('=') + 1));
+    expect(sanitizeProviderSecrets(input)).toContain('[REDACTED]');
   });
 
   it('rejects NFKC and invisible alias lookalikes without normalizing them into valid aliases', () => {
@@ -368,10 +387,13 @@ describe('ProviderDataBoundary', () => {
     const alias = broker.exposeText('/workspace/LAB/WhatSoup', { surface: 'prompt' });
     const fullWidth = alias.replace(':', '：');
     const zeroWidth = alias.replace('WSA1', 'WS\u200bA1');
+    const cyrillic = alias.replace('WSA1', 'WЅА1');
 
     expect(() => broker.rehydrateProviderText(fullWidth, { surface: 'provider_output' }))
       .toThrowError(expect.objectContaining({ code: 'invalid_alias' }));
     expect(() => broker.rehydrateProviderText(zeroWidth, { surface: 'provider_output' }))
+      .toThrowError(expect.objectContaining({ code: 'invalid_alias' }));
+    expect(() => broker.rehydrateProviderText(cyrillic, { surface: 'provider_output' }))
       .toThrowError(expect.objectContaining({ code: 'invalid_alias' }));
   });
 
@@ -450,7 +472,11 @@ describe('ProviderDataBoundary', () => {
     const secret = `sk-${'s'.repeat(30)}`;
 
     expect(shadow.exposeText(secret, { surface: 'prompt' })).toBe(secret);
-    expect(events).toContainEqual(expect.objectContaining({ success: false, secretCount: 1 }));
+    expect(events).toContainEqual(expect.objectContaining({
+      eventType: 'secret_block',
+      success: 1,
+      secretCount: 1,
+    }));
   });
 
   it('denies unknown object keys and cyclic provider tool inputs', () => {
@@ -482,6 +508,101 @@ describe('ProviderDataBoundary', () => {
     expect(() => broker.rehydrateToolInput('configure', {
       metadata: { localPath: alias },
     }, tools)).toThrowError(expect.objectContaining({ code: 'unauthorized_field' }));
+  });
+
+  it('atomically detects secrets and reserved aliases split across adjacent turn fields', () => {
+    const broker = boundary();
+
+    expect(() => broker.exposeTexts(
+      ['cred', 'ential="quoted multiword value"'],
+      { surface: 'turn' },
+    )).toThrowError(expect.objectContaining({ code: 'secret_detected' }));
+    expect(() => broker.exposeTexts(
+      ['prefix ⟦W', 'ЅА1:path:deadbeef⟧'],
+      { surface: 'turn' },
+    )).toThrowError(expect.objectContaining({ code: 'residual_alias' }));
+  });
+
+  it('emits exactly one constrained failure event for forged and cross-session output aliases', () => {
+    const source = boundary('source-session');
+    const events: ProviderBoundaryEvent[] = [];
+    const target = boundary('target-session', events);
+    const alias = source.exposeText('/workspace/LAB/WhatSoup', { surface: 'prompt' });
+
+    expect(() => target.rehydrateProviderText(alias, { surface: 'provider_output' }))
+      .toThrowError(expect.objectContaining({ code: 'invalid_alias' }));
+    expect(events).toEqual([
+      expect.objectContaining({ eventType: 'unknown_alias', success: 0, aliasCount: 1 }),
+    ]);
+    expect(Object.keys(events[0]!).sort()).toEqual([
+      'aliasCount',
+      'eventType',
+      'latencyMs',
+      'mode',
+      'policyVersion',
+      'providerClass',
+      'routeSource',
+      'secretCount',
+      'success',
+      'transformCount',
+    ]);
+  });
+
+  it('runs enforce-equivalent shadow validation without creating usable aliases', () => {
+    const events: ProviderBoundaryEvent[] = [];
+    const shadow = createProviderDataBoundary({
+      binding: {
+        provider: 'openai-api',
+        model: 'gpt-test',
+        dataPolicy: 'restricted',
+        policyVersion: PROVIDER_DATA_POLICY_VERSION,
+        providerSessionId: 'shadow-equivalence-session',
+      },
+      mode: 'shadow',
+      routeSource: 'configured',
+      entropy: deterministicEntropy(),
+      eventSink: (event) => events.push(event),
+    });
+    const raw = '/workspace/LAB/WhatSoup';
+
+    expect(shadow.exposeText(raw, { surface: 'prompt' })).toBe(raw);
+    expect(shadow.inspectToolJson('{"path":"first","path":"second"}')).toBe(false);
+    expect(shadow.rehydrateToolInput('missing_tool', { path: raw }, [])).toEqual({ path: raw });
+    expect(shadow.rehydrateProviderText('⟦WSA1:path:unknown:deadbeef⟧', { surface: 'provider_output' }))
+      .toBe('⟦WSA1:path:unknown:deadbeef⟧');
+    expect(events.map(({ eventType, success }) => ({ eventType, success }))).toEqual([
+      { eventType: 'success', success: 1 },
+      { eventType: 'rehydration_failure', success: 0 },
+      { eventType: 'rehydration_failure', success: 0 },
+      { eventType: 'unknown_alias', success: 0 },
+    ]);
+  });
+
+  it('validates record keys as well as values for secrets and alias syntax', () => {
+    const broker = boundary();
+    const alias = broker.exposeText('/workspace/LAB/WhatSoup', { surface: 'prompt' });
+    const tools = [tool('configure', { metadata: { type: 'object' } })];
+
+    expect(() => broker.rehydrateToolInput('configure', {
+      metadata: { 'credential="quoted multiword value"': 'ordinary' },
+    }, tools)).toThrowError(expect.objectContaining({ code: 'secret_detected' }));
+    expect(() => broker.rehydrateToolInput('configure', {
+      metadata: { [alias]: 'ordinary' },
+    }, tools)).toThrowError(expect.objectContaining({ code: 'unauthorized_field' }));
+  });
+
+  it('rejects inherited and prototype-keyed schemas during authorization', () => {
+    const broker = boundary();
+    const inherited = Object.create({ properties: { path: { type: 'string' } } }) as Record<string, unknown>;
+    inherited['type'] = 'object';
+    const protoKeyed = JSON.parse('{"type":"object","properties":{"__proto__":{"type":"string"}}}') as Record<string, unknown>;
+
+    expect(() => broker.rehydrateToolInput('poisoned', { path: 'ordinary' }, [{
+      name: 'poisoned', description: 'test', inputSchema: inherited,
+    }])).toThrowError(expect.objectContaining({ code: 'invalid_tool_input' }));
+    expect(() => broker.rehydrateToolInput('poisoned', {}, [{
+      name: 'poisoned', description: 'test', inputSchema: protoKeyed,
+    }])).toThrowError(expect.objectContaining({ code: 'invalid_tool_input' }));
   });
 
   it('does not let an advisory event sink change enforcement behavior', () => {
@@ -527,5 +648,31 @@ describe('ProviderDataBoundary', () => {
     expect(() => broker.exposeText(`sk-${'v'.repeat(30)}`, { surface: 'prompt' }))
       .toThrowError(expect.objectContaining({ code: 'secret_detected' }));
     expect(events.at(-1)).toMatchObject({ mode: 'enforce', routeSource: 'default' });
+  });
+
+  it.each([
+    ['route source', { routeSource: 'conversation-identity-must-not-emit' }],
+    ['mode', { mode: 'session-identity-must-not-emit' }],
+    ['policy version', { binding: { policyVersion: 'identity-must-not-emit' } }],
+  ])('rejects %s outside the SoupOps closed vocabulary', (_label, mutation) => {
+    const base = {
+      binding: {
+        provider: 'openai-api',
+        model: 'gpt-test',
+        dataPolicy: 'restricted',
+        policyVersion: PROVIDER_DATA_POLICY_VERSION,
+        providerSessionId: 'invalid-provenance-session',
+      },
+      mode: 'enforce',
+      routeSource: 'default',
+      entropy: deterministicEntropy(),
+    };
+    const options = {
+      ...base,
+      ...mutation,
+      binding: { ...base.binding, ...('binding' in mutation ? mutation.binding : {}) },
+    } as unknown as CreateProviderDataBoundaryOptions;
+
+    expect(() => createProviderDataBoundary(options)).toThrow(/closed telemetry vocabulary/i);
   });
 });
