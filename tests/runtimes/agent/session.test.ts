@@ -2816,6 +2816,18 @@ describe('buildChildEnv', () => {
     }
   });
 
+  it('opencode-cli: forwards the Kimi credential selected by a Kimi model', () => {
+    const savedKimi = process.env.KIMI_API_KEY;
+    process.env.KIMI_API_KEY = 'kimi-api-key-for-test';
+    try {
+      const env = buildChildEnv('opencode-cli', undefined, 'kimi/kimi-k3');
+      expect(env.KIMI_API_KEY).toBe('kimi-api-key-for-test');
+    } finally {
+      if (savedKimi === undefined) delete process.env.KIMI_API_KEY;
+      else process.env.KIMI_API_KEY = savedKimi;
+    }
+  });
+
   it('opencode-cli: providerConfig.apiKeyService for a known service adds it to env forwarding', () => {
     // 'deepseek' is a known service in SERVICE_ENV_MAP -> DEEPSEEK_API_KEY
     const savedDeep = process.env.DEEPSEEK_API_KEY;

@@ -29,6 +29,7 @@ export const SERVICE_ENV_MAP: Record<string, string> = {
   openai: 'OPENAI_API_KEY',
   deepseek: 'DEEPSEEK_API_KEY',
   minimax: 'MINIMAX_API_KEY',
+  kimi: 'KIMI_API_KEY',
   glm: 'ZAI_API_KEY',
   xai: 'XAI_API_KEY',
   groq: 'GROQ_API_KEY',
@@ -54,7 +55,7 @@ export const SERVICE_ENV_MAP: Record<string, string> = {
  * as a Bearer token.
  */
 export const PROVIDER_API_KEY_SERVICES: ReadonlySet<string> = new Set([
-  'anthropic', 'openai', 'deepseek', 'minimax', 'glm', 'xai', 'groq',
+  'anthropic', 'openai', 'deepseek', 'minimax', 'kimi', 'glm', 'xai', 'groq',
   'mistral', 'openrouter', 'google', 'fireworks-ai', 'togetherai',
 ]);
 
