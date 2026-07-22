@@ -105,7 +105,7 @@ import {
   type PreferenceIntent,
 } from './chat-preference-db.ts';
 import { preferenceKeys } from './preference-keys.ts';
-import { resolveRoute, type RouteDecision } from './route-resolution.ts';
+import { isPinnedModelEligible, resolveRoute, type RouteDecision } from './route-resolution.ts';
 import { decideModelPinResolution, type CatalogueOutcome } from './config-surface.ts';
 import { resolveModelCatalogue } from './model-catalogue-resolver.ts';
 import type { fetchAnthropicModelIdsWithStatus } from '../../lib/model-advisor.ts';
@@ -4189,7 +4189,7 @@ export class AgentRuntime implements Runtime {
               // Task G: apply the switch immediately (idle) or defer it to the
               // next message (busy) — the echo below discloses which.
               const recycleOutcome = this.applyRouteChangeAndRecycle(chatJid, msg.senderJid, perChatMapKey);
-              this.sendDirect(chatJid, this.renderPinOutcomeEcho(`\`${entry.providerId}\``, recycleOutcome));
+              this.sendDirect(chatJid, this.renderPinOutcomeEcho(`\`${entry.providerId}\``, recycleOutcome, chatJid, msg.senderJid));
               break;
             }
             // D6/D10/D16: `/model N` / `/model N<letter>` — a named-model pin
@@ -4249,7 +4249,7 @@ export class AgentRuntime implements Runtime {
                 );
                 break;
               }
-              this.sendDirect(chatJid, this.renderPinOutcomeEcho(entry.id, recycleOutcome));
+              this.sendDirect(chatJid, this.renderPinOutcomeEcho(entry.id, recycleOutcome, chatJid, msg.senderJid));
               break;
             }
             const isIntent = sub === 'strongest' || sub === 'fastest';
@@ -4307,7 +4307,7 @@ export class AgentRuntime implements Runtime {
               break;
             }
             const recycleOutcome = this.applyRouteChangeAndRecycle(chatJid, msg.senderJid, perChatMapKey);
-            this.sendDirect(chatJid, this.renderPinOutcomeEcho(what, recycleOutcome));
+            this.sendDirect(chatJid, this.renderPinOutcomeEcho(what, recycleOutcome, chatJid, msg.senderJid));
             break;
           }
 
@@ -8570,6 +8570,7 @@ export class AgentRuntime implements Runtime {
         fallbackEntry: this.effectiveFallbackEntry,
         pref,
         pinnedProviderEligible: pinned !== null && routable.includes(pinned),
+        pinnedModelEligible: isPinnedModelEligible(pref, this.agentFallbacks, (entry) => this.isEntryCredentialed(entry)),
         tierMap: config.nlRoutingTiers,
         tierProviderEligible: tierProvider !== undefined && routable.includes(tierProvider),
         // Finding 2 fix: the same agentFallbacks entries that
@@ -8590,13 +8591,12 @@ export class AgentRuntime implements Runtime {
       // above, not a bug: resolveRouteForTurn never fetches a catalogue or
       // persists (that is verifyModelPinAgainstCatalogue's job, at pin time).
       // Gated on decision.source === 'preference' (not the looser
-      // `!== 'fallback'`): the model override may only apply when the route
-      // decision is ITSELF honoring the preference. 'fallback' means health
-      // beats preference — the operator's failover model must win, never
-      // the user's pin. 'pin_blocked_default' means the pin's provider was
-      // ineligible and we fell to the default provider — forcing the
-      // pinned model onto that unrelated default route would be wrong too,
-      // even if validatedProvider happens to coincide with it.
+      // `!== 'fallback'`): the generic post-resolution override may only
+      // apply when the route decision is itself honoring the preference.
+      // A same-provider fallback model pin is handled inside resolveRoute,
+      // after exact-entry and credential checks; every other fallback keeps
+      // the selected fallback model. 'pin_blocked_default' likewise must not
+      // force a pinned model onto an unrelated default route.
       if (pref?.requestedModel != null && decision.source === 'preference') {
         const modelPinDecision = decideModelPinResolution(
           { requestedModel: pref.requestedModel, validatedProvider: pref.validatedProvider, modelPinVerified: pref.modelPinVerified },
@@ -9139,8 +9139,9 @@ export class AgentRuntime implements Runtime {
    * for 24h" shape is kept ONLY for a no-op (nothing to recycle); a genuine
    * switch says so, honestly distinguishing "now" from "next message".
    */
-  private renderPinOutcomeEcho(label: string, outcome: RouteRecycleOutcome): string {
-    return renderPinPreferenceOutcome(label, outcome, fallbackRouteLabel(this.effectiveFallbackEntry));
+  private renderPinOutcomeEcho(label: string, outcome: RouteRecycleOutcome, chatJid: string, senderJid: string): string {
+    const pinRidesFallback = this.resolveRouteForTurn(chatJid, senderJid).reasonCode === 'fallback_window_active_model_pin';
+    return renderPinPreferenceOutcome(label, outcome, pinRidesFallback ? null : fallbackRouteLabel(this.effectiveFallbackEntry));
   }
 
   /**
@@ -9166,11 +9167,11 @@ export class AgentRuntime implements Runtime {
     label: string,
     alreadySetText: string,
   ): string {
-    const fallbackOutcome = fallbackReconfirmationOutcome(label, alreadySetText, fallbackRouteLabel(this.effectiveFallbackEntry));
+    const fallbackOutcome = fallbackReconfirmationOutcome(label, alreadySetText, this.resolveRouteForTurn(chatJid, senderJid).reasonCode === 'fallback_window_active_model_pin' ? null : fallbackRouteLabel(this.effectiveFallbackEntry));
     if (fallbackOutcome) return fallbackOutcome;
     const recycleOutcome = this.applyRouteChangeAndRecycle(chatJid, senderJid, perChatMapKey);
     if (recycleOutcome === 'noop') return alreadySetText;
-    return this.renderPinOutcomeEcho(label, recycleOutcome);
+    return this.renderPinOutcomeEcho(label, recycleOutcome, chatJid, senderJid);
   }
 
   /**
@@ -9555,7 +9556,7 @@ export class AgentRuntime implements Runtime {
     // verified (Task H honesty rule) — an unverified/deferred model pin
     // would otherwise claim to be serving a model that was never confirmed
     // to exist; it falls back to the provider/intent, same as before.
-    const prefLine = savedPreferenceLine(pref, this.isFallbackWindowActive);
+    const prefLine = savedPreferenceLine(pref, this.isFallbackWindowActive, next.reasonCode === 'fallback_window_active_model_pin');
     // B25 F8: the active-window and Next lines were model-blind — a
     // same-provider window pinning a DIFFERENT model rendered without the
     // model and suppressed the Next line entirely. Render "provider (model)"
