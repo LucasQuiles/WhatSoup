@@ -35,7 +35,7 @@ export interface MarkSystemTurnInput {
   readonly purpose: SystemTurnPurpose;
   readonly owner: PendingSystemTurnOwner;
   readonly routeChatJid?: string;
-  /** Absolute wall deadline measured from mark(), independent of later activity. */
+  /** Absolute wall duration measured from mark(), or from explicit activation when deferred. */
   readonly timeoutMs?: number;
   /**
    * Deadline verdict: true only after the timed-out provider request has been
@@ -43,6 +43,8 @@ export interface MarkSystemTurnInput {
    * for one more window without teardown; false retains the lease fail-closed.
    */
   readonly onTimeout?: (lease: SystemTurnLeaseToken) => Promise<boolean | 'retry'>;
+  /** Start the wall deadline only when activateDeadline() proves provider admission. */
+  readonly deferDeadlineUntilActivated?: boolean;
 }
 
 interface MutableSystemTurnLease {
@@ -52,6 +54,11 @@ interface MutableSystemTurnLease {
   readonly routeChatJid?: string;
   blocking: boolean;
   deadlineTimer: ReturnType<typeof setTimeout> | null;
+  deadlineStarted: boolean;
+  deadlineConfig: {
+    timeoutMs: number;
+    onTimeout: (lease: SystemTurnLeaseToken) => Promise<boolean | 'retry'>;
+  } | null;
 }
 
 interface Waiter {
@@ -64,7 +71,8 @@ interface Waiter {
 /**
  * Per-scope FIFO of provider results belonging to explicit system requests.
  * Every live lease remains both dispatch-blocking and result-classifying. A
- * deadline cancels its exact lease only after provider teardown is proven.
+ * Once provider admission activates a deadline, expiry cancels its exact lease
+ * only after provider teardown is proven. Legitimate queue time is unbounded.
  */
 export class PendingSystemResultTracker {
   /** Compatibility/read-only count view. Event admission never trusts it. */
@@ -98,15 +106,42 @@ export class PendingSystemResultTracker {
       ...(input?.routeChatJid !== undefined ? { routeChatJid: input.routeChatJid } : {}),
       blocking: true,
       deadlineTimer: null,
+      deadlineStarted: false,
+      deadlineConfig: input?.timeoutMs !== undefined && input.onTimeout !== undefined
+        ? { timeoutMs: input.timeoutMs, onTimeout: input.onTimeout }
+        : null,
     };
     queue.push(entry);
     this.leases.set(scopeKey, queue);
     this.leaseScopes.set(lease.id, scopeKey);
     this.counts.set(scopeKey, queue.length);
-    if (input?.timeoutMs !== undefined && input.onTimeout !== undefined) {
+    if (
+      input?.timeoutMs !== undefined
+      && input.onTimeout !== undefined
+      && input.deferDeadlineUntilActivated !== true
+    ) {
+      entry.deadlineStarted = true;
       this.armDeadline(entry, input.timeoutMs, input.onTimeout);
     }
     return lease;
+  }
+
+  /** Arm a deferred deadline exactly once at the real provider boundary. */
+  activateDeadline(lease: SystemTurnLeaseToken | null | undefined): boolean {
+    if (!lease) return false;
+    const scopeKey = this.leaseScopes.get(lease.id) ?? lease.scopeKey;
+    const entry = this.leases.get(scopeKey)?.find((candidate) => candidate.lease.id === lease.id);
+    if (!entry) return false;
+    if (entry.deadlineStarted) return true;
+    entry.deadlineStarted = true;
+    if (entry.deadlineConfig) {
+      this.armDeadline(
+        entry,
+        entry.deadlineConfig.timeoutMs,
+        entry.deadlineConfig.onTimeout,
+      );
+    }
+    return true;
   }
 
   count(scopeKey: string): number {

@@ -46,6 +46,7 @@ export interface OpenCodeRunArgsOptions {
   sessionId?: string;
   model?: string;
   prompt?: string;
+  progressLogs?: boolean;
 }
 
 /** Pure argv seam shared by operational turns and model-usability probes. */
@@ -54,6 +55,7 @@ export function buildOpenCodeRunArgs(options: OpenCodeRunArgsOptions): string[] 
     'run',
     '--format', 'json',
     '--pure',
+    ...(options.progressLogs ? ['--print-logs', '--log-level', 'INFO'] : []),
     ...openCodeAgentArgs(options.providerConfig),
     ...(options.sessionId ? ['--session', options.sessionId] : []),
     ...(options.model && !opencodeUsesConfigModel(options.providerConfig)
