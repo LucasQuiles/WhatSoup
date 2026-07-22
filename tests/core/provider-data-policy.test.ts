@@ -69,21 +69,31 @@ describe('provider data policy', () => {
 
     expect(() => assertCheckpointRoutePolicyCompatible(route, {
       provider: 'openai-api',
+      model: 'gpt-5',
       dataPolicy: 'restricted',
       policyVersion: PROVIDER_DATA_POLICY_VERSION,
     })).not.toThrow();
     expect(() => assertCheckpointRoutePolicyCompatible(route, {
       provider: 'anthropic-api',
+      model: 'gpt-5',
       dataPolicy: 'restricted',
       policyVersion: PROVIDER_DATA_POLICY_VERSION,
     })).toThrow(/provider mismatch/i);
     expect(() => assertCheckpointRoutePolicyCompatible(route, {
       provider: 'openai-api',
+      model: 'gpt-4.1',
+      dataPolicy: 'restricted',
+      policyVersion: PROVIDER_DATA_POLICY_VERSION,
+    })).toThrow(/model mismatch/i);
+    expect(() => assertCheckpointRoutePolicyCompatible(route, {
+      provider: 'openai-api',
+      model: 'gpt-5',
       dataPolicy: 'trusted',
       policyVersion: PROVIDER_DATA_POLICY_VERSION,
     })).toThrow(/data policy mismatch/i);
     expect(() => assertCheckpointRoutePolicyCompatible(route, {
       provider: 'openai-api',
+      model: 'gpt-5',
       dataPolicy: 'restricted',
       policyVersion: 'provider-data-policy-v0',
     })).toThrow(/policy version mismatch/i);

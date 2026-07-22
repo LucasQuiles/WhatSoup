@@ -8401,7 +8401,7 @@ export class AgentRuntime implements Runtime {
           decision = Object.freeze({ ...decision, model: modelPinDecision.modelId });
         }
       }
-      return { ...decision, pinnedProvider: pinned };
+      return Object.freeze({ ...decision, pinnedProvider: pinned });
     } catch (err) {
       if (err instanceof ProviderDataPolicyError) throw err;
       log.warn({ err, instance: this.instanceName }, 'route resolution failed - routing on default');

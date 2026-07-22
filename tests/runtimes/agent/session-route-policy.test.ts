@@ -60,6 +60,37 @@ describe('SessionManager route policy admission', () => {
     expect(JSON.parse(checkpoint?.watchdog_state ?? '')).toEqual({
       providerRoutePolicy: {
         provider: 'openai-api',
+        model: 'gpt-5',
+        dataPolicy: 'restricted',
+        policyVersion: PROVIDER_DATA_POLICY_VERSION,
+      },
+    });
+  });
+
+  it('preserves existing checkpoint watchdog state when adding route policy metadata', async () => {
+    durability.upsertSessionCheckpoint('15550203', {
+      watchdogState: JSON.stringify({ lastProbeAt: 123, nested: { healthy: true } }),
+    });
+    vi.spyOn(OpenAIApiProvider.prototype, 'initialize').mockResolvedValue(undefined);
+    const sm = new SessionManager({
+      db,
+      messenger: messenger(),
+      chatJid: '15550203@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      model: 'gpt-5',
+      routePolicy: route,
+    });
+    sm.setDurability(durability);
+
+    await sm.spawnSession();
+
+    expect(JSON.parse(durability.getSessionCheckpoint('15550203')?.watchdog_state ?? '')).toEqual({
+      lastProbeAt: 123,
+      nested: { healthy: true },
+      providerRoutePolicy: {
+        provider: 'openai-api',
+        model: 'gpt-5',
         dataPolicy: 'restricted',
         policyVersion: PROVIDER_DATA_POLICY_VERSION,
       },
@@ -76,6 +107,18 @@ describe('SessionManager route policy admission', () => {
       watchdogState: JSON.stringify({
         providerRoutePolicy: {
           provider: 'anthropic-api',
+          model: 'gpt-5',
+          dataPolicy: 'restricted',
+          policyVersion: PROVIDER_DATA_POLICY_VERSION,
+        },
+      }),
+    },
+    {
+      name: 'model mismatch',
+      watchdogState: JSON.stringify({
+        providerRoutePolicy: {
+          provider: 'openai-api',
+          model: 'gpt-4.1',
           dataPolicy: 'restricted',
           policyVersion: PROVIDER_DATA_POLICY_VERSION,
         },
@@ -86,6 +129,7 @@ describe('SessionManager route policy admission', () => {
       watchdogState: JSON.stringify({
         providerRoutePolicy: {
           provider: 'openai-api',
+          model: 'gpt-5',
           dataPolicy: 'trusted',
           policyVersion: PROVIDER_DATA_POLICY_VERSION,
         },
@@ -96,6 +140,7 @@ describe('SessionManager route policy admission', () => {
       watchdogState: JSON.stringify({
         providerRoutePolicy: {
           provider: 'openai-api',
+          model: 'gpt-5',
           dataPolicy: 'restricted',
           policyVersion: 'provider-data-policy-v0',
         },
@@ -133,5 +178,46 @@ describe('SessionManager route policy admission', () => {
     expect(db.raw.prepare('SELECT status FROM agent_sessions WHERE id = ?').get(rowId))
       .toEqual({ status: 'ended' });
     expect(durability.getSessionCheckpoint('15550202')?.session_status).toBe('ended');
+  });
+
+  it('retires the persisted agent row and checkpoint when its provider differs from the resolved route', async () => {
+    const sessionId = 'foreign-provider-resume';
+    const inserted = db.raw.prepare(
+      `INSERT INTO agent_sessions (
+         session_id, claude_pid, started_in_directory, chat_jid, workspace_key,
+         started_at, status, provider
+       ) VALUES (?, 0, '/tmp', '15550204@s.whatsapp.net', '15550204',
+         datetime('now'), 'suspended', 'anthropic-api')`,
+    ).run(sessionId);
+    const rowId = Number(inserted.lastInsertRowid);
+    durability.upsertSessionCheckpoint('15550204', {
+      sessionId,
+      sessionStatus: 'suspended',
+      watchdogState: JSON.stringify({
+        providerRoutePolicy: {
+          provider: 'anthropic-api',
+          model: 'claude-sonnet-4',
+          dataPolicy: 'restricted',
+          policyVersion: PROVIDER_DATA_POLICY_VERSION,
+        },
+      }),
+    });
+    const initialize = vi.spyOn(OpenAIApiProvider.prototype, 'initialize');
+    const sm = new SessionManager({
+      db,
+      messenger: messenger(),
+      chatJid: '15550204@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      model: 'gpt-5',
+      routePolicy: route,
+    });
+    sm.setDurability(durability);
+
+    await expect(sm.spawnSession(sessionId, rowId)).rejects.toThrow(/provider/i);
+    expect(initialize).not.toHaveBeenCalled();
+    expect(db.raw.prepare('SELECT status FROM agent_sessions WHERE id = ?').get(rowId))
+      .toEqual({ status: 'ended' });
+    expect(durability.getSessionCheckpoint('15550204')?.session_status).toBe('ended');
   });
 });

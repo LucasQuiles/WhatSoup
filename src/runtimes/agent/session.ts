@@ -1227,19 +1227,40 @@ export class SessionManager {
     return rowId;
   }
 
-  private routePolicyCheckpointState(): string | null {
+  private routePolicyCheckpointState(
+    existing: Record<string, unknown> = this.readCheckpointWatchdogState(),
+  ): string | null {
     if (!this.routePolicy) return null;
     return JSON.stringify({
+      ...existing,
       providerRoutePolicy: {
         provider: this.routePolicy.provider,
+        model: this.routePolicy.model ?? null,
         dataPolicy: this.routePolicy.dataPolicy,
         policyVersion: this.routePolicy.policyVersion,
       },
     });
   }
 
-  private persistRoutePolicyCheckpoint(): void {
-    const watchdogState = this.routePolicyCheckpointState();
+  private readCheckpointWatchdogState(): Record<string, unknown> {
+    const row = this.db.raw.prepare(
+      `SELECT watchdog_state
+       FROM session_checkpoints
+       WHERE conversation_key = ?`,
+    ).get(this.conversationKey) as { watchdog_state: string | null } | undefined;
+    if (!row?.watchdog_state) return {};
+    try {
+      const parsed = JSON.parse(row.watchdog_state) as unknown;
+      return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : {};
+    } catch {
+      return {};
+    }
+  }
+
+  private persistRoutePolicyCheckpoint(existing?: Record<string, unknown>): void {
+    const watchdogState = this.routePolicyCheckpointState(existing);
     if (watchdogState === null) return;
     if (this.durability) {
       this.durability.upsertSessionCheckpoint(this.conversationKey, { watchdogState });
@@ -1295,6 +1316,7 @@ export class SessionManager {
   private retireUnsupportedResume(
     providerSessionId: string,
     existingRowId: number,
+    persistedProvider: string = this.provider,
   ): void {
     if (
       this.durability
@@ -1303,19 +1325,43 @@ export class SessionManager {
       this.durability.retireSessionLifecycle({
         agentSessionRowId: existingRowId,
         providerSessionId,
-        provider: this.provider,
+        provider: persistedProvider,
       });
     } else {
       updateResumedSessionStatus(
         this.db,
         existingRowId,
         providerSessionId,
-        this.provider,
+        persistedProvider,
         'ended',
       );
       this.updateCheckpointStatus('ended', providerSessionId);
     }
     this.durableFailureClosed = true;
+  }
+
+  private persistedResumeProvider(
+    providerSessionId: string,
+    existingRowId: number | undefined,
+  ): string | null {
+    if (existingRowId === undefined) return null;
+    const namespaces = this.db.raw.prepare(
+      `SELECT DISTINCT provider
+       FROM agent_sessions
+       WHERE session_id = ?`,
+    ).all(providerSessionId) as Array<{ provider: string | null }>;
+    if (namespaces.length !== 1 || namespaces[0]!.provider === null) return null;
+    const row = this.db.raw.prepare(
+      `SELECT provider
+       FROM agent_sessions
+       WHERE id = ?
+         AND session_id = ?
+         AND workspace_key = ?
+         AND status IN ('active', 'suspended', 'orphaned', 'crashed')`,
+    ).get(existingRowId, providerSessionId, this.conversationKey) as {
+      provider: string | null;
+    } | undefined;
+    return row?.provider === namespaces[0]!.provider ? row.provider : null;
   }
 
   private closeDurableFailureLifecycle(
@@ -1419,14 +1465,23 @@ export class SessionManager {
       return;
     }
     const provider = this.assertKnownProvider('spawnSession');
+    const checkpointWatchdogState = this.readCheckpointWatchdogState();
     let resolvedRowId = existingRowId;
     if (resumeSessionId !== undefined) {
-      resolvedRowId = resolveResumableAgentSession(this.db, {
-        provider,
-        providerSessionId: resumeSessionId,
-        ...(existingRowId === undefined ? {} : { agentSessionRowId: existingRowId }),
-        workspaceKey: this.conversationKey,
-      }).id;
+      try {
+        resolvedRowId = resolveResumableAgentSession(this.db, {
+          provider,
+          providerSessionId: resumeSessionId,
+          ...(existingRowId === undefined ? {} : { agentSessionRowId: existingRowId }),
+          workspaceKey: this.conversationKey,
+        }).id;
+      } catch (err) {
+        const persistedProvider = this.persistedResumeProvider(resumeSessionId, existingRowId);
+        if (persistedProvider !== null && existingRowId !== undefined) {
+          this.retireUnsupportedResume(resumeSessionId, existingRowId, persistedProvider);
+        }
+        throw err;
+      }
       if (this.routePolicy) {
         try {
           assertCheckpointRoutePolicyCompatible(
@@ -1472,7 +1527,7 @@ export class SessionManager {
           resumeSessionId,
           resolvedRowId,
         );
-        this.persistRoutePolicyCheckpoint();
+        this.persistRoutePolicyCheckpoint(checkpointWatchdogState);
       } catch (err) {
         log.error({ err, chatJid: this.chatJid, provider: this.provider }, 'session: failed to persist managed provider');
         this.resetFailedSessionStart();
@@ -1571,7 +1626,7 @@ export class SessionManager {
           resumeSessionId,
           resolvedRowId,
         );
-        this.persistRoutePolicyCheckpoint();
+        this.persistRoutePolicyCheckpoint(checkpointWatchdogState);
       } catch (err) {
         log.error({ err, chatJid: this.chatJid, provider: this.provider }, 'session: failed to persist spawn-per-turn provider');
         this.resetFailedSessionStart();
@@ -1645,7 +1700,7 @@ export class SessionManager {
         resumeSessionId,
         resolvedRowId,
       );
-      this.persistRoutePolicyCheckpoint();
+      this.persistRoutePolicyCheckpoint(checkpointWatchdogState);
     } catch (err) {
       log.error({ err, pid, chatJid: this.chatJid, existingRowId: resolvedRowId ?? null }, 'session: failed to persist spawned child lifecycle');
       let cleanupError: unknown = null;
