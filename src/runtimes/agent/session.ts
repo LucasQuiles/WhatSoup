@@ -2270,6 +2270,25 @@ export class SessionManager {
         this.openCodeParser.reset();
       }
 
+      // Spawn-per-turn providers: kill any existing process and spawn a new one
+      // before waiting for the next global execution lease. The prior child
+      // owns that lease until its process tree is proven dead, so acquiring
+      // first would make a same-session successor wait on itself forever.
+      if (this.child) {
+        const child = this.child;
+        try {
+          await this.killChildTree(child, 'SIGTERM');
+        } catch (err) {
+          this.completeProviderTurn(providerTurnToken);
+          log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap replaced provider process tree');
+          throw new Error('Cannot replace provider while prior process-tree cleanup is inconclusive', {
+            cause: err,
+          });
+        }
+        this.releaseProviderExecutionLease(child);
+        if (this.child === child) this.child = null;
+      }
+
       let executionLease: ProviderExecutionLease | null = null;
       if (this.provider === 'opencode-cli' && this.providerExecutionGate) {
         const waitAbort = new AbortController();
@@ -2287,23 +2306,6 @@ export class SessionManager {
           this.completeProviderTurn(providerTurnToken);
           throw new Error('PROVIDER_EXECUTION_WAIT_ABORTED: session ended before dispatch');
         }
-      }
-
-      // Spawn-per-turn providers: kill any existing process and spawn a new one
-      // with the user prompt appended as a CLI argument.
-      if (this.child) {
-        const child = this.child;
-        try {
-          await this.killChildTree(child, 'SIGTERM');
-        } catch (err) {
-          executionLease?.release();
-          this.completeProviderTurn(providerTurnToken);
-          log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap replaced provider process tree');
-          throw new Error('Cannot replace provider while prior process-tree cleanup is inconclusive', {
-            cause: err,
-          });
-        }
-        this.child = null;
       }
 
       const cwd = this.configuredCwd ?? homedir();
