@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   EXPECTED_PROTECTION_PATH,
+  PROTECTION_API_PATH,
   diffProtection,
   loadExpectedProtection,
   parseObservedProtection,
@@ -34,6 +35,71 @@ function observed(overrides: Record<string, unknown> = {}): ObservedProtection {
     required_conversation_resolution: false,
     ...overrides,
   } as ObservedProtection;
+}
+
+function matchingGitHubPayload(): string {
+  return JSON.stringify({
+    required_status_checks: {
+      strict: true,
+      contexts: ['CodeQL', 'quality (24.x)', 'quality (25.x)'],
+    },
+    required_pull_request_reviews: {
+      required_approving_review_count: 1,
+      dismiss_stale_reviews: true,
+    },
+    enforce_admins: { enabled: false },
+    allow_force_pushes: { enabled: false },
+    allow_deletions: { enabled: false },
+    required_linear_history: { enabled: false },
+    required_conversation_resolution: { enabled: false },
+  });
+}
+
+function runLiveGuardWithFakeGh(exitCode: number): {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  invocation: string;
+} {
+  const repoRoot = path.resolve(import.meta.dirname, '..', '..');
+  const packageJson = JSON.parse(readFileSync(path.join(repoRoot, 'package.json'), 'utf8')) as {
+    scripts?: Record<string, string>;
+  };
+  const command = packageJson.scripts?.['guard:branch-protection-drift'];
+  expect(command).toBeDefined();
+
+  const fakeBin = mkdtempSync(path.join(tmpdir(), 'branch-protection-gh-'));
+  const fakeGh = path.join(fakeBin, 'gh');
+  const invocationFile = path.join(fakeBin, 'invocation.txt');
+
+  try {
+    writeFileSync(
+      fakeGh,
+      [
+        '#!/usr/bin/env node',
+        "const { writeFileSync } = require('node:fs');",
+        `writeFileSync(${JSON.stringify(invocationFile)}, process.argv.slice(2).join(' '));`,
+        `process.stdout.write(${JSON.stringify(`${matchingGitHubPayload()}\n`)});`,
+        `process.exit(${String(exitCode)});`,
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    chmodSync(fakeGh, 0o755);
+    const result = spawnSync('/bin/bash', ['-c', command!], {
+      cwd: repoRoot,
+      env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH ?? ''}` },
+      encoding: 'utf8',
+    });
+    return {
+      status: result.status,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      invocation: readFileSync(invocationFile, 'utf8'),
+    };
+  } finally {
+    rmSync(fakeBin, { recursive: true, force: true });
+  }
 }
 
 describe('branch-protection-drift-guard — diffProtection', () => {
@@ -98,45 +164,21 @@ describe('branch-protection-drift-guard — diffProtection', () => {
 
 describe('branch-protection-drift-guard — fail-closed input handling', () => {
   it('returns INCONCLUSIVE when the live query writes matching JSON and then fails', () => {
-    const repoRoot = path.resolve(import.meta.dirname, '..', '..');
-    const packageJson = JSON.parse(readFileSync(path.join(repoRoot, 'package.json'), 'utf8')) as {
-      scripts?: Record<string, string>;
-    };
-    const command = packageJson.scripts?.['guard:branch-protection-drift'];
-    expect(command).toBeDefined();
+    const result = runLiveGuardWithFakeGh(7);
 
-    const fakeBin = mkdtempSync(path.join(tmpdir(), 'branch-protection-gh-'));
-    const fakeGh = path.join(fakeBin, 'gh');
-    const payload = JSON.stringify({
-      required_status_checks: {
-        strict: true,
-        contexts: ['CodeQL', 'quality (24.x)', 'quality (25.x)'],
-      },
-      required_pull_request_reviews: {
-        required_approving_review_count: 1,
-        dismiss_stale_reviews: true,
-      },
-      enforce_admins: { enabled: false },
-      allow_force_pushes: { enabled: false },
-      allow_deletions: { enabled: false },
-      required_linear_history: { enabled: false },
-      required_conversation_resolution: { enabled: false },
-    });
+    expect(result.invocation).toBe(`api ${PROTECTION_API_PATH}`);
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('GitHub protection query failed with exit 7 (inconclusive)');
+    expect(result.stdout).not.toContain('no drift');
+  });
 
-    try {
-      writeFileSync(fakeGh, `#!/bin/sh\nprintf '%s\\n' '${payload}'\nexit 7\n`, 'utf8');
-      chmodSync(fakeGh, 0o755);
-      const result = spawnSync('/bin/bash', ['-c', command!], {
-        cwd: repoRoot,
-        env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH ?? ''}` },
-        encoding: 'utf8',
-      });
+  it('returns success when the live query exits zero with matching protection', () => {
+    const result = runLiveGuardWithFakeGh(0);
 
-      expect(result.status).toBe(2);
-      expect(`${result.stdout}\n${result.stderr}`).toMatch(/INCONCLUSIVE/i);
-    } finally {
-      rmSync(fakeBin, { recursive: true, force: true });
-    }
+    expect(result.invocation).toBe(`api ${PROTECTION_API_PATH}`);
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(result.stdout).toContain('no drift');
   });
 
   it('treats absent observed input as INCONCLUSIVE, never as no drift', () => {
