@@ -145,10 +145,17 @@ describe('FleetDbReader.getCheckpoints', () => {
 
   it('caps the result set at 500 rows', () => {
     const db = new DatabaseSync(dbPath);
+    // One transaction for all 505 inserts. In autocommit each insert is its own durable
+    // transaction, so this loop paid 505 commits and timed out against the 10s default on
+    // a loaded runner — `quality (25.x)` on run 29904664060, while `quality (24.x)` passed
+    // on the same commit. That is a load-dependent failure, not a behaviour difference.
+    // The assertion here is about the 500-row cap; insert throughput is incidental to it.
+    db.exec('BEGIN');
     for (let i = 0; i < 505; i += 1) {
       insertCheckpoint(db, `conv-${String(i).padStart(3, '0')}`, 'ended', null,
         `2026-07-19 00:${String(i % 60).padStart(2, '0')}:00`);
     }
+    db.exec('COMMIT');
     db.close();
     const result = reader.getCheckpoints('agent-line', dbPath);
     expect(result.ok).toBe(true);

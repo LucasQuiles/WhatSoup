@@ -36,7 +36,10 @@ describe('prepared statement caching', () => {
     // staleness probes that drive /health degradation), and the PR-C
     // supersedeOutstandingStatus statement (one outstanding status ping per chat).
     // Lifecycle methods must not prepare SQL per call.
-    expect(prepareSpy).toHaveBeenCalledTimes(112);
+    // (+1 vs the historical 112: the E17/E22 idempotency probe
+    // agentSessionRowAlreadyInStatusForProvider — the true-repeat-only guard
+    // that lets a duplicate lifecycle close no-op instead of throwing.)
+    expect(prepareSpy).toHaveBeenCalledTimes(113);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');
