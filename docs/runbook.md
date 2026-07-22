@@ -1337,6 +1337,33 @@ sqlite3 "$DB" \
 | Service restarts | `systemctl status` / journald | Restarted >3 times in 10 min |
 | Disk space | Log directory size | >500MB (10 rolling files) |
 
+### BOT ERRORS Source Ownership
+
+Treat the source producer, the dispatcher policy, and the probe as separate owners. An alert is
+not confirmed until its source-specific probe agrees with host state. This table indexes the
+sources most often seen in the fleet channel; `src/lib/fault-taxonomy-registry.json` is the
+machine-readable disposition registry for sources that participate in fault classification.
+
+| Source | Producer owner | Policy / proof owner |
+|---|---|---|
+| `health_body_degraded`, `instance_never_reachable` | `src/fleet/health-poller.ts` | `deploy/scripts/bot-errors-dispatcher.py`; verify the complete health body, transport connection, service generation, and recovery gauges |
+| `whatsapp_device_bond_lost` | `src/transport/connection.ts` and fleet health polling | Physical linked-device state; never infer repair from HTTP reachability |
+| `outbound_flood` | `src/transport/connection.ts` | `src/core/health.ts`; correlate distinct sends, source inbound IDs, and echo state |
+| `bead_proposal_backlog` | `src/core/substrate/poller.ts` | Proposal state and `review_by_at`, not message volume |
+| `fallback_recovery_stalled` | `src/runtimes/agent/runtime.ts` | Persisted fallback window plus current primary-provider recovery probe |
+| `agent_reply_guarantee_breach` | `src/runtimes/agent/turn-finalizer.ts` | Exact terminal record, inbound failure class, delivery proof, and continuity-candidate row |
+| `release-drift` | `scripts/live-release-drift-alert.ts` | Release manifest, artifact tree, and running service provenance |
+| `heartbeat-watchdog` | `deploy/scripts/bot-errors-heartbeat-watchdog.py` | Roster entry and current producer heartbeat; retired entries must not page |
+| `remote-claim-failed` | `deploy/scripts/bot-errors-collector.py` | Collector claim/lease state and target reachability |
+| `stale-autoclose` | `deploy/scripts/bot-errors-dispatcher.py` | Incident ledger transition and explicit source clear evidence |
+
+Machine-local probes not present in this repository are an ownership gap, not an implicit
+WhatSoup alert. Record their deployed path, service/timer, version-control root, and test owner
+before relying on them. A process-growth probe must at minimum include observation span and
+sample count, start/current/peak RSS, leaf cgroup service, service restart count, memory PSI,
+current activity evidence, and a transition-based recovery rule. Never recommend killing from
+a short-window extrapolated RSS slope alone.
+
 ### Simple Polling Script
 
 ```bash

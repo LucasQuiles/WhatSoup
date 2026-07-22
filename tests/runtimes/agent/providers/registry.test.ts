@@ -13,6 +13,7 @@ import { readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
   PROVIDER_IDS,
+  executionModeForProvider,
   isProviderId,
   type ProviderId,
 } from '../../../../src/runtimes/agent/providers/index.ts';
@@ -34,6 +35,17 @@ describe('Provider ID registry (#447)', () => {
     for (const id of PROVIDER_IDS) {
       expect(isProviderId(id)).toBe(true);
     }
+  });
+
+  it('maps every canonical provider to one explicit lifecycle mode', () => {
+    expect(Object.fromEntries(PROVIDER_IDS.map((id) => [id, executionModeForProvider(id)]))).toEqual({
+      'claude-cli': 'persistent_session',
+      'codex-cli': 'persistent_session',
+      'gemini-cli': 'persistent_session',
+      'opencode-cli': 'spawn_per_turn',
+      'openai-api': 'managed_loop',
+      'anthropic-api': 'managed_loop',
+    });
   });
 
   it('isProviderId returns false for unknown / mistyped IDs', () => {
