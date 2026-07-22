@@ -124,7 +124,7 @@ describe('ImsgPort — listInboundSince', () => {
     const out = await port.listInboundSince(new Date(0));
     expect(out).toHaveLength(1);
     expect(out[0]).toMatchObject({ guid: 'g-1', body: 'hello', fromMe: false, kind: 'text' });
-    expect(mock.calls[0]).toEqual({ method: 'messages.history', params: { since: 0, limit: 100 } });
+    expect(mock.calls[0]).toEqual({ method: 'messages.history', params: { since: 0, limit: 100, offset: 0 } });
   });
 
   it('accepts the { messages } wrapper form', async () => {
@@ -157,10 +157,24 @@ describe('ImsgPort — listInboundSince', () => {
     expect(out.map((m) => m.guid)).toEqual(['g-a', 'g-b']);
   });
 
+  it('forwards a stable continuation offset to messages.history', async () => {
+    const { port, mock } = makePort();
+    mock.on('messages.history', () => []);
+
+    await port.listInboundSince(new Date(1000), 500, 500);
+
+    expect(mock.calls[0]).toEqual({
+      method: 'messages.history',
+      params: { since: 1000, limit: 500, offset: 500 },
+    });
+  });
+
   it('rejects invalid pageSize with RangeError', async () => {
     const { port, mock } = makePort();
     mock.on('messages.history', () => []);
     await expect(port.listInboundSince(new Date(0), 0)).rejects.toThrow(RangeError);
+    await expect(port.listInboundSince(new Date(0), 1, -1)).rejects.toThrow(RangeError);
+    await expect(port.listInboundSince(new Date(0), 1, 1.5)).rejects.toThrow(RangeError);
   });
 
   it('stringifies numeric rowids when guid is absent', async () => {

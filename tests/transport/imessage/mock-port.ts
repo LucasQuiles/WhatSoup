@@ -36,7 +36,11 @@ export class MockImessagePort implements ImessagePort {
     return { guid: `guid-${this.nextGuid++}` };
   }
 
-  async listInboundSince(_since: Date, _pageSize?: number): Promise<readonly InboundImessage[]> {
+  async listInboundSince(
+    _since: Date,
+    _pageSize?: number,
+    _offset?: number,
+  ): Promise<readonly InboundImessage[]> {
     const records = this.opts.nextInbound ?? [];
     this.opts = { ...this.opts, nextInbound: undefined };
     return records;

@@ -117,9 +117,11 @@ export interface ImessagePort {
    * direction; same contract as Signal/Twilio ports.
    *
    * Boundary is INCLUSIVE (timestamp >= since); callers MUST dedupe by `guid`.
-   * Ordered ascending by timestamp.
+   * Ordered ascending by timestamp. `offset` is a stable continuation within
+   * the inclusive result set and MUST be applied before returning the page;
+   * callers use it to drain timestamp ties without loss.
    */
-  listInboundSince(since: Date, pageSize?: number): Promise<readonly InboundImessage[]>;
+  listInboundSince(since: Date, pageSize?: number, offset?: number): Promise<readonly InboundImessage[]>;
 
   /**
    * Send a reaction to a prior message. iMessage's tapback protocol supports

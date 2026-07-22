@@ -22,7 +22,7 @@ function makeStubPort(): ImessagePort {
       sent.push(args);
       return { guid: `guid-${sent.length}` };
     },
-    async listInboundSince(_since: Date, _pageSize?: number) {
+    async listInboundSince(_since: Date, _pageSize?: number, _offset?: number) {
       return [] as readonly InboundImessage[];
     },
     async sendReaction(args) { reactions.push(args); },

@@ -99,19 +99,25 @@ describe('ImessageAdapter — poll loop', () => {
   it('pollOnce advances the cursor to the max timestamp seen', async () => {
     const now = 1_700_000_000_000;
     vi.setSystemTime(now);
-    const port = new MockImessagePort({
-      nextInbound: [
-        { guid: 'g1', from: 'p1', to: 'me', body: '1', fromMe: false, kind: 'text', timestamp: now - 1000 },
-        { guid: 'g2', from: 'p2', to: 'me', body: '2', fromMe: false, kind: 'text', timestamp: now - 500 },
-      ],
-    });
+    const records = [
+      { guid: 'g1', from: 'p1', to: 'me', body: '1', fromMe: false, kind: 'text', timestamp: now - 1000 },
+      { guid: 'g2', from: 'p2', to: 'me', body: '2', fromMe: false, kind: 'text', timestamp: now - 500 },
+    ];
+    const port = new MockImessagePort();
+    port.listInboundSince = vi.fn(async (
+      since: Date,
+      pageSize = 500,
+      offset = 0,
+    ) => records
+      .filter((record) => record.timestamp >= since.getTime())
+      .slice(offset, offset + pageSize));
     const adapter = new ImessageAdapter(makeImessageConfig({ pollIntervalMs: 0 }), port);
     await adapter.connect();
     await adapter.pollOnce();
+    await adapter.pollOnce();
 
-    // The cursor advanced past both timestamps; second call returns empty.
-    const records = await port.listInboundSince(new Date(0));
-    expect(records).toEqual([]);
+    expect(port.listInboundSince).toHaveBeenNthCalledWith(1, new Date(0), 500, 0);
+    expect(port.listInboundSince).toHaveBeenNthCalledWith(2, new Date(now - 500), 500, 1);
 
     await adapter.disconnect();
   });
