@@ -32,6 +32,14 @@ describe('console transport config', () => {
     'owner\u202E@example.com',
     'owner\u200B@example.com',
     'owner\u2028@example.com',
+    '\nowner@example.com',
+    'owner@example.com\n',
+    '\u00A0owner@example.com',
+    '\u1680owner@example.com',
+    '\u2029owner@example.com',
+    '\u202Fowner@example.com',
+    '\u205Fowner@example.com',
+    '\u3000owner@example.com',
   ])('rejects unsafe iMessage AppleID admin and sender text %#', (identity) => {
     expect(TRANSPORT_MAP.imessage.validateAdminId(identity)).toBe(false)
     expect(TRANSPORT_MAP.imessage.normalizeAdminId(identity)).toBe('')

@@ -3,8 +3,8 @@
 import { isE164Wire } from '../lib/phone.ts';
 import { ACCOUNT_RE } from '../lib/account-segment.ts';
 export { ACCOUNT_RE } from '../lib/account-segment.ts';
-import { isAppleIdEmail } from '../lib/appleid.ts';
-export { APPLEID_EMAIL_RE, isAppleIdEmail } from '../lib/appleid.ts';
+import { canonicalizeAppleIdEmail } from '../lib/appleid.ts';
+export { APPLEID_EMAIL_RE, canonicalizeAppleIdEmail, isAppleIdEmail } from '../lib/appleid.ts';
 
 /** Transport library / protocol family. */
 export type ChannelKind =
@@ -47,8 +47,7 @@ export function isImessageGroupAddress(address: string): boolean {
 /** Canonicalize a direct iMessage identity without altering chat GUIDs. */
 export function canonicalizeImessageDirectIdentity(identity: string): string | null {
   if (isE164Wire(identity)) return identity;
-  const lower = identity.toLowerCase();
-  return isAppleIdEmail(lower) ? lower : null;
+  return canonicalizeAppleIdEmail(identity);
 }
 
 /** Signal service UUID and V2 group-id shapes shared by core JID policy. */

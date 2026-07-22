@@ -19,6 +19,7 @@ import {
 } from 'lucide-react'
 import type { ScheduledMessage } from '../../types.js'
 import { formatFullTime } from '../../lib/format-time'
+import { escapeDisplayControls } from '../../lib/text-utils'
 import { Button } from '../primitives/Button'
 import { Card } from '../primitives'
 import { statusColor, statusLabel, contentTypeLabel, cronToHuman } from './scheduled-utils.js'
@@ -64,6 +65,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
   const isPending = message.status === 'pending'
   const isRecurring = !!message.recurrence
   const preview = messagePreview(message)
+  const chatLabel = escapeDisplayControls(message.chatName ?? message.chatJid)
   const metaDividerStyle = { opacity: 'var(--opacity-faint)' }
 
   return (
@@ -106,7 +108,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
 
           {/* Second line: target + scheduled time */}
           <div className="flex items-center gap-2 flex-wrap c-label mt-[var(--sp-0h)]">
-            <span>{message.chatName ?? message.chatJid}</span>
+            <span title={chatLabel}>{chatLabel}</span>
             <span style={metaDividerStyle}>·</span>
             <span>{formatFullTime(message.scheduledAt)}</span>
 
@@ -157,7 +159,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
                 size="sm"
                 onClick={() => onCancel(message.id)}
                 disabled={cancelling === message.id}
-                aria-label={`Cancel scheduled message to ${message.chatName ?? message.chatJid}`}
+                aria-label={`Cancel scheduled message to ${chatLabel}`}
                 className="font-mono"
                 icon={cancelling === message.id
                   ? <Loader2 size={15} className="animate-spin" />

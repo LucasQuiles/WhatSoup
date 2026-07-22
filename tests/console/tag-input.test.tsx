@@ -79,6 +79,20 @@ describe('TagInput', () => {
     expect(onChange).toHaveBeenLastCalledWith(['beta'])
   })
 
+  it.each(['\t', '\u00A0', '\u1680', '\u2028', '\u2029', '\u202F', '\u205F', '\u3000', '\uFEFF'])(
+    'does not erase an unsafe boundary before validation: %#',
+    (boundary) => {
+      const normalizeValue = (value: string) => value.toLowerCase()
+      const validate = (value: string) => value === 'owner@example.com'
+      const { onChange, input } = setup([], { normalizeValue, validate })
+
+      fireEvent.change(input(), { target: { value: `${boundary}Owner@Example.com` } })
+      fireEvent.keyDown(input(), { key: 'Enter' })
+
+      expect(onChange).not.toHaveBeenCalled()
+    },
+  )
+
   it('rejects duplicate tags without invoking onChange or clearing the input', () => {
     const { onChange, input } = setup(['alpha'])
     fireEvent.change(input(), { target: { value: 'alpha' } })

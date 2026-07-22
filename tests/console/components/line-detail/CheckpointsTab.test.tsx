@@ -105,6 +105,25 @@ describe('CheckpointsTab', () => {
     expect(screen.getByText(/2 checkpoints · 1 resumable on restart/)).toBeTruthy()
   })
 
+  it('renders and confirms an unsafe conversation identity as visible escaped text', async () => {
+    const unsafe = {
+      ...ROW_ENDED,
+      conversationKey: 'owner\u202E@example.com@imessage',
+    }
+    renderTab(<CheckpointsTab lineName={LINE} payload={payload({ checkpoints: [unsafe] })} isLoading={false} freshness={FRESH} />)
+
+    expect(screen.getByTitle('owner\\u202E@example.com@imessage')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /Restore/ }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByTitle('owner\\u202E@example.com@imessage')).toBeTruthy()
+    expect(dialog.textContent).toContain('owner\\u202E@ex')
+    expect(dialog.textContent).not.toContain('\u202E')
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /Restore & Restart/ }))
+    await waitFor(() => expect(restoreCheckpointMock).toHaveBeenCalledWith(LINE, unsafe.conversationKey))
+    expect(toastValue.success).toHaveBeenCalledWith(expect.stringContaining('owner\\u202E'))
+  })
+
   it('fails closed on readError — error row, never the empty state', () => {
     renderTab(<CheckpointsTab lineName={LINE} payload={payload({ checkpoints: [], readError: true })} isLoading={false} freshness={FRESH} />)
     expect(screen.getByText(/Checkpoint data unavailable/)).toBeTruthy()

@@ -13,6 +13,7 @@ import { resolveGroupNames } from '../group-resolver.ts';
 import { isGroupConversationKey, conversationKeyToJid } from '../../core/conversation-key.ts';
 import { normalizeTimestamp, toIsoFromUnix } from '../time-utils.ts';
 import { isTypingHealthEntry } from '../typing-payload.ts';
+import { escapeDisplayControls } from '../../lib/display-controls.ts';
 
 export interface DataDeps {
   discovery: FleetDiscovery;
@@ -176,7 +177,7 @@ export function handleGetChats(
       // Last message preview: prefix with sender name for groups
       let formattedPreview = preview;
       if (isGroup && preview && lastMsg?.sender_name && !lastMsg?.is_from_me) {
-        const short = lastMsg.sender_name.split(' ')[0]; // first name only
+        const short = escapeDisplayControls(lastMsg.sender_name).split(' ')[0]; // first name only
         formattedPreview = `${short}: ${preview}`;
       } else if (isGroup && preview && lastMsg?.is_from_me) {
         formattedPreview = `You: ${preview}`;

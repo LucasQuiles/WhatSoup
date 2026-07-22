@@ -512,6 +512,16 @@ describe('hover detail card', () => {
     expect(screen.getByText('155501230001@s.whatsapp.net')).toBeDefined()
   })
 
+  it('shows an unsafe sender JID as literal escaped detail text', () => {
+    render(<MessageBubble msg={msg({ senderJid: 'owner\u202E@example.com@imessage' })} />)
+    fireEvent.mouseEnter(document.querySelector('.soup-hovercard')!)
+    act(() => { vi.advanceTimersByTime(500) })
+
+    const jid = screen.getByTitle('owner\\u202E@example.com@imessage')
+    expect(jid.textContent).toBe('owner\\u202E@example.com@imessage')
+    expect(jid.textContent).not.toContain('\u202E')
+  })
+
   it('detail card shows Direction as Inbound for incoming', () => {
     render(<MessageBubble msg={msg({ fromMe: false })} />)
     fireEvent.mouseEnter(document.querySelector('.soup-hovercard')!)

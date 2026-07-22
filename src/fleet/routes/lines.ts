@@ -61,7 +61,7 @@ function lineSelfId(
 ): string {
   for (const candidate of [genericSelfId, accountJid]) {
     if (typeof candidate !== 'string') continue;
-    const raw = candidate.trim();
+    const raw = transport === 'imessage' ? candidate : candidate.trim();
     if (!raw) continue;
 
     if (transport === 'twilio') {

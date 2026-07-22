@@ -98,6 +98,14 @@ describe('ApprovalsTab', () => {
     expect(screen.getByTitle('15550000001@s.whatsapp.net')).toBeTruthy()
   })
 
+  it('renders an unsafe originating identity as visible escaped text', () => {
+    const unsafe = { ...PENDING, mapKey: 'agent:chat:unsafe', chatJid: 'owner\u202E@example.com@imessage' }
+    renderTab(<ApprovalsTab payload={payload({ approvals: [unsafe] })} isLoading={false} freshness={FRESH} lineName={LINE} />)
+
+    expect(screen.getByTitle('owner\\u202E@example.com@imessage')).toBeTruthy()
+    expect(document.body.textContent).not.toContain('\u202E')
+  })
+
   it('single-select: choose → ConfirmDialog → api with (line, mapKey, questionIndex, option) → toast + invalidate', async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     const invalidateSpy = vi.spyOn(client, 'invalidateQueries')

@@ -48,6 +48,50 @@ describe('FeedCard malformed payload rendering', () => {
     expect(screen.queryByText('12345')).toBeNull()
   })
 
+  it.each([
+    ['safe\u202Eevil@signal', 'safe\\u202Eevil@signal'],
+    ['safe\\u202Eevil@signal', 'safe\\\\u202Eevil@signal'],
+    ['\nowner@example.com', '\\u000Aowner@example.com'],
+  ])('renders provider-controlled sender names as unambiguous visible and accessible text %#', (senderName, expected) => {
+    const { container } = render(
+      <FeedCard
+        event={event({
+          detail: {
+            type: 'message',
+            direction: 'inbound',
+            senderName,
+            preview: 'hello',
+          },
+        })}
+      />,
+    )
+
+    const headline = container.querySelector('.fc-headline')
+    expect(headline?.textContent).toBe(expected)
+    expect(headline?.getAttribute('title')).toBe(expected)
+    expect(headline?.getAttribute('aria-label')).toBe(expected)
+  })
+
+  it('escapes an iMessage chat identity in the headline and metadata without changing the raw event', () => {
+    const rawChatJid = 'owner\u202E@example.com@imessage'
+    const { container } = render(
+      <FeedCard
+        event={event({
+          detail: {
+            type: 'message',
+            direction: 'inbound',
+            chatJid: rawChatJid,
+            messageId: 'imessage-1',
+          },
+        })}
+      />,
+    )
+
+    expect(container.querySelector('.fc-headline')?.textContent).toBe('owner\\u202E@example.com')
+    expect(container.querySelector('.fc-meta')?.textContent).toContain('owner\\u202E@example.com@imessage')
+    expect(container.textContent).not.toContain('\u202E')
+  })
+
   it('renders logged-out health events as critical actionable incidents', () => {
     render(
       <FeedCard

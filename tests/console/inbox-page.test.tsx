@@ -375,6 +375,22 @@ describe('Inbox — listbox renders chats from the hook', () => {
 // ---------------------------------------------------------------------------
 
 describe('Inbox — conversation selection workflows', () => {
+  it('renders an unsafe exact conversation key safely while retaining the raw selection key', () => {
+    const conversationKey = 'iMessage;+;chat\u202E_at_imessage'
+    mockChats = [makeChat(conversationKey, { name: 'Operations Group', isGroup: true, unreadCount: 1 })]
+    renderInbox()
+
+    const option = screen.getByRole('option', { name: 'Open conversation with Operations Group, 1 unread' })
+    expect(option.getAttribute('data-conv-key')).toBe(conversationKey)
+    fireEvent.click(option)
+
+    const detail = screen.getByTitle('iMessage;+;chat\\u202E_at_imessage')
+    expect(detail.textContent).not.toContain('\u202E')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Mark Read' }))
+    expect(markReadMock).toHaveBeenCalledWith('test-line', conversationKey)
+  })
+
   it('deep link selects the requested line and chat once, then clears the URL params', async () => {
     mockLines = [
       { name: 'fallback-line', mode: 'passive', status: 'ok' },

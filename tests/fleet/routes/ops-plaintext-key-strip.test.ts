@@ -1095,6 +1095,19 @@ describe('handleCreateLine — plaintext provider-key strip guard', () => {
       expectedField: 'imessageConfig.sender',
     },
     {
+      name: 'boundary AppleID sender',
+      existingConfig: {
+        account: 'pk-line',
+        backend: 'imsg',
+        sender: 'owner@example.com',
+        imsgSocketPath: '/tmp/imsg.sock',
+        inboundMode: 'poll',
+        pollIntervalMs: 15_000,
+      },
+      patchConfig: { sender: '\u2028owner@example.com' },
+      expectedField: 'imessageConfig.sender',
+    },
+    {
       name: 'BlueBubbles field on imsg',
       existingConfig: {
         account: 'pk-line',
@@ -1164,6 +1177,56 @@ describe('handleCreateLine — plaintext provider-key strip guard', () => {
 
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).error).toContain(expectedField);
+    expect(fs.readFileSync(configPath, 'utf8')).toBe(before);
+    expect(patchDeps.serviceManager.restart).not.toHaveBeenCalled();
+  });
+
+  it('rejects a boundary-whitespace AppleID admin PATCH without changing disk', async () => {
+    const dir = path.join(process.env.XDG_CONFIG_HOME as string, 'whatsoup', 'instances', 'pk-line');
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const configPath = path.join(dir, 'config.json');
+    const existing = {
+      name: 'pk-line',
+      type: 'chat',
+      transport: 'imessage',
+      adminPhones: ['owner@example.com'],
+      healthPort: 9095,
+      accessMode: 'self_only',
+      introSent: true,
+      imessageConfig: {
+        account: 'pk-line',
+        backend: 'imsg',
+        sender: 'owner@example.com',
+        imsgSocketPath: '/tmp/imsg.sock',
+        inboundMode: 'poll',
+        pollIntervalMs: 15_000,
+      },
+    };
+    fs.writeFileSync(configPath, `${JSON.stringify(existing, null, 2)}\n`, { mode: 0o600 });
+    const patchDeps: OpsDeps = {
+      discovery: {
+        getInstance: vi.fn(() => ({ name: 'pk-line', configPath })),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+      realtime: { publish: vi.fn() },
+      serviceManager: {
+        enable: vi.fn(), disable: vi.fn(), start: vi.fn(), stop: vi.fn(),
+        restart: vi.fn(), startFire: vi.fn(),
+      } as any,
+    } as OpsDeps;
+    const before = fs.readFileSync(configPath, 'utf8');
+    const res = mockRes();
+
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({ adminPhones: ['\u202Fowner@example.com'] })),
+      res,
+      patchDeps,
+      { name: 'pk-line' },
+    );
+
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/adminPhones/);
     expect(fs.readFileSync(configPath, 'utf8')).toBe(before);
     expect(patchDeps.serviceManager.restart).not.toHaveBeenCalled();
   });

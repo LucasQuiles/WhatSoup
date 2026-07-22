@@ -106,7 +106,7 @@
           "path": "src/components/line-detail/CheckpointsTab.tsx",
           "count": 1,
           "lines": [
-            226
+            229
           ]
         },
         {
@@ -137,8 +137,8 @@
           "path": "src/components/line-detail/ScheduledMessageRow.tsx",
           "count": 2,
           "lines": [
-            108,
-            136
+            110,
+            138
           ]
         },
         {
@@ -161,7 +161,7 @@
           "path": "src/components/MessageBubble.tsx",
           "count": 1,
           "lines": [
-            135
+            136
           ]
         },
         {
@@ -213,7 +213,7 @@
           "path": "src/pages/Inbox.tsx",
           "count": 1,
           "lines": [
-            458
+            459
           ]
         },
         {

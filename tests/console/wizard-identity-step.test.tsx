@@ -477,6 +477,14 @@ describe('admin phones field', () => {
     expect(onChange).not.toHaveBeenCalled()
   })
 
+  it('does not add an iMessage AppleID after erasing unsafe boundary whitespace', () => {
+    const { onChange } = renderStep({ data: { transport: 'imessage', adminPhones: [] } })
+    const tagInput = screen.getByLabelText('Admin iMessage IDs')
+    fireEvent.change(tagInput, { target: { value: '\u2028Owner@Example.com' } })
+    fireEvent.keyDown(tagInput, { key: 'Enter' })
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
   it('shows adminPhones error when errors.adminPhones is set', () => {
     renderStep({ errors: { adminPhones: 'At least one admin required' } })
     expect(screen.getByText('At least one admin required')).toBeDefined()

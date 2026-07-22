@@ -11,6 +11,7 @@ import { api } from '../../lib/api'
 import { useToast } from '../../hooks/toast-context'
 import { statusBadgeStyle, type StatusSeverity } from '../../lib/status-severity'
 import { formatRelative } from '../../lib/format-time'
+import { escapeDisplayControls } from '../../lib/text-utils'
 import type { Freshness } from '../../lib/freshness'
 import type { CheckpointRow, CheckpointsPayload, LiveSessionsPayload, LiveSession } from '../../types'
 
@@ -87,6 +88,7 @@ export function CheckpointsTab({ payload, isLoading, freshness, lineName, liveSe
   const [pendingRestore, setPendingRestore] = useState<CheckpointRow | null>(null)
   const [executingRestore, setExecutingRestore] = useState(false)
   const executingRestoreRef = useRef(false)
+  const pendingRestoreLabel = pendingRestore ? escapeDisplayControls(pendingRestore.conversationKey) : ''
 
   const executeRestore = async () => {
     if (!pendingRestore) return
@@ -96,7 +98,7 @@ export function CheckpointsTab({ payload, isLoading, freshness, lineName, liveSe
     const key = pendingRestore.conversationKey
     try {
       await api.restoreCheckpoint(lineName, key)
-      toast.success(`Restore requested for ${truncateMiddle(key)} — ${lineName} is restarting`)
+      toast.success(`Restore requested for ${truncateMiddle(escapeDisplayControls(key))} — ${lineName} is restarting`)
       queryClient.invalidateQueries({ queryKey: ['checkpoints', lineName] })
     } catch (e) {
       toast.error(`Restore failed: ${(e as Error).message}`)
@@ -203,7 +205,7 @@ export function CheckpointsTab({ payload, isLoading, freshness, lineName, liveSe
       >
         {pendingRestore && (
           <>
-            This marks the checkpoint for <strong>{truncateMiddle(pendingRestore.conversationKey)}</strong> resumable
+            This marks the checkpoint for <strong title={pendingRestoreLabel}>{truncateMiddle(pendingRestoreLabel)}</strong> resumable
             and restarts instance <strong>{lineName}</strong> so the runtime resumes it through its own resume
             gate. The instance is briefly unavailable.
           </>
@@ -216,10 +218,11 @@ export function CheckpointsTab({ payload, isLoading, freshness, lineName, liveSe
 function CheckpointTableRow({ row, live, onRestore }: { row: CheckpointRow; live?: LiveSession; onRestore: () => void }) {
   const severity = statusSeverity(row.sessionStatus)
   const badge = statusBadgeStyle(severity)
+  const conversationLabel = escapeDisplayControls(row.conversationKey)
   return (
     <TableRow severity={severity === 'warn' ? 'warn' : undefined}>
       <TableCell>
-        <span title={row.conversationKey}>{truncateMiddle(row.conversationKey)}</span>
+        <span title={conversationLabel}>{truncateMiddle(conversationLabel)}</span>
       </TableCell>
       <TableCell>
         <span

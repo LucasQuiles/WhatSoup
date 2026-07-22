@@ -1245,6 +1245,31 @@ describe('handleCreateLine', () => {
       expectedField: 'adminPhones',
     },
     {
+      name: 'imessage-boundary-sender',
+      config: {
+        account: 'imessage-boundary-sender',
+        backend: 'imsg',
+        sender: '\u00A0owner@example.com',
+        imsgSocketPath: '/tmp/imsg.sock',
+        inboundMode: 'poll',
+        pollIntervalMs: 15_000,
+      },
+      expectedField: 'imessageConfig.sender',
+    },
+    {
+      name: 'imessage-boundary-admin',
+      adminPhones: ['owner@example.com\u3000'],
+      config: {
+        account: 'imessage-boundary-admin',
+        backend: 'imsg',
+        sender: 'owner@example.com',
+        imsgSocketPath: '/tmp/imsg.sock',
+        inboundMode: 'poll',
+        pollIntervalMs: 15_000,
+      },
+      expectedField: 'adminPhones',
+    },
+    {
       name: 'imessage-mixed-imsg',
       config: {
         account: 'imessage-mixed-imsg',

@@ -51,6 +51,20 @@ describe('ChatListItem', () => {
     )
   })
 
+  it('renders a group preview sender prefix with controls made visible', () => {
+    render(
+      <ChatListItem
+        chat={chat({ lastMessagePreview: 'owner\u202E@example.com: hello' })}
+        isSelected={false}
+        onClick={() => {}}
+      />,
+    )
+
+    const preview = screen.getByTitle('owner\\u202E@example.com: hello')
+    expect(preview.textContent).toBe('owner\\u202E@example.com: hello')
+    expect(preview.textContent).not.toContain('\u202E')
+  })
+
   it.each([
     ['safe\\u202Eevil@signal', 'safe\\\\u202Eevil@signal'],
     ['\nevil@signal', '\\u000Aevil@signal'],

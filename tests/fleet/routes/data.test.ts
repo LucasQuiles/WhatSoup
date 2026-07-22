@@ -280,6 +280,39 @@ describe('handleGetChats', () => {
     expect(JSON.stringify(JSON.parse(res._body))).not.toContain('_needsBackfill');
   });
 
+  it('makes a group preview sender prefix display-safe before returning it', () => {
+    const conversationKey = '111_at_g.us';
+    const db = {
+      prepare: vi.fn((sql: string) => {
+        if (sql.includes('SELECT content, sender_name, is_from_me')) {
+          return { get: () => ({ content: 'deploy ready', sender_name: 'owner\u202E@example.com', is_from_me: 0 }) };
+        }
+        if (sql.includes('SELECT unread_count')) return { get: () => ({ unread_count: 0 }) };
+        if (sql.includes('SELECT subject FROM groups')) return { get: () => ({ subject: 'Ops Room' }) };
+        if (sql.includes('SELECT name FROM chats')) return { get: () => undefined };
+        if (sql.includes('SELECT sender_name FROM messages')) return { get: () => undefined };
+        if (sql.includes('SELECT DISTINCT sender_name')) return { all: () => [] };
+        throw new Error(`unexpected SQL: ${sql}`);
+      }),
+    };
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => fakeInstance({ healthToken: 'token' })) } as any,
+      dbReader: {
+        getChats: vi.fn(() => ({
+          ok: true,
+          data: [{ conversationKey, messageCount: 1, senderName: null, lastMessageAt: 1712332800 }],
+        })),
+        query: vi.fn((_name, _dbPath, fn) => ({ ok: true, data: fn(db as any) })),
+      } as any,
+    });
+    const res = mockRes();
+
+    handleGetChats(mockReq('/api/lines/test-line/chats'), res, deps, { name: 'test-line' });
+
+    expect(JSON.parse(res._body)[0].lastMessagePreview).toBe('owner\\u202E@example.com: deploy ready');
+    expect(JSON.parse(res._body)[0].lastMessagePreview).not.toContain('\u202E');
+  });
+
   it.each([
     ['Signal', 'Z3JvdXAtY29udmVyc2F0aW9u_at_signal', 'Z3JvdXAtY29udmVyc2F0aW9u@signal'],
     ['iMessage', 'iMessage;+;chatABC_at_imessage', 'iMessage;+;chatABC@imessage'],

@@ -5,6 +5,7 @@ import FeedIcon from "./FeedIcon";
 import { formatMessageText } from "../lib/format-message-text";
 import { getProvider } from "../lib/providers";
 import { statusAlertMessage, statusColorToken, statusSeverity } from "../lib/status-severity";
+import { escapeDisplayControls, resolveDisplayName } from "../lib/text-utils";
 import { Button } from "./primitives/Button";
 
 // ---------------------------------------------------------------------------
@@ -101,7 +102,10 @@ function cleanText(event: FeedEvent): string {
 }
 
 function shortChatJid(chatJid?: string): string | undefined {
-  return chatJid ? chatJid.replace(/@.*/, "").slice(-8) : undefined;
+  if (!chatJid) return undefined;
+  const safe = escapeDisplayControls(chatJid);
+  if (/@(?:s\.whatsapp\.net|g\.us)$/.test(safe)) return safe.replace(/@.*/, "").slice(-8);
+  return resolveDisplayName(chatJid);
 }
 
 function parseCollapsedCount(text: string): number | undefined {
@@ -186,11 +190,12 @@ function messagePresentation(event: FeedEvent, d: MessageDetail, transport?: str
   const count = parseCollapsedCount(displayText(event.text));
   const chatShort = shortChatJid(d.chatJid);
   const preview = optionalText(d.preview);
+  const senderName = d.senderName ? resolveDisplayName(d.senderName) : undefined;
 
   return {
     badge: `${isIn ? "recv" : "sent"}${count && count > 1 ? ` \u00d7${count}` : ""}`,
     badgeTone: isIn ? "recv" : "sent",
-    headline: d.senderName ?? chatShort ?? (isIn ? "incoming" : "outgoing"),
+    headline: senderName ?? chatShort ?? (isIn ? "incoming" : "outgoing"),
     headlineTone: isIn ? "recv" : "sent",
     context: joinParts([
       d.senderName ? chatShort : undefined,
@@ -295,11 +300,11 @@ function metadataParts(event: FeedEvent): string[] {
   if (event.component) parts.push(`component:${event.component}`);
   if (d?.type === "message") {
     if (d.messageId) parts.push(`id:${d.messageId}`);
-    if (d.chatJid) parts.push(d.chatJid);
+    if (d.chatJid) parts.push(escapeDisplayControls(d.chatJid));
   } else if ((d?.type === "tool_error" || d?.type === "tool_use") && d.toolId) {
     parts.push(d.toolId);
   } else if (d?.type === "session" && d.chatJid) {
-    parts.push(d.chatJid);
+    parts.push(escapeDisplayControls(d.chatJid));
   }
   return parts;
 }
@@ -407,7 +412,7 @@ function copyContent(event: FeedEvent): string {
   const d = event.detail;
   if (!d) return displayText(event.text);
   switch (d.type) {
-    case "message": return optionalText((d as { preview?: unknown }).preview) ?? displayText(event.text);
+    case "message": return optionalText((d as { preview?: unknown }).preview) ?? escapeDisplayControls(displayText(event.text));
     case "tool_error": return displayText(d.error);
     case "session": return `${d.action}${d.reason ? ` — ${d.reason}` : ""}`;
     case "connection": {
@@ -445,6 +450,7 @@ const FeedCard: FC<FeedCardProps> = ({ event, onRestart, onStop, onNavigate, onC
   const card = renderCard(event, transport);
   const meta = metadataParts(event);
   const hasMeta = meta.length > 0;
+  const headlineLabel = typeof card.headline === "string" ? card.headline : undefined;
 
   return (
     <div
@@ -467,7 +473,11 @@ const FeedCard: FC<FeedCardProps> = ({ event, onRestart, onStop, onNavigate, onC
             </span>
           )}
           <div className="fc-summary">
-            <span className={`fc-headline ${card.headlineTone ? `fc-headline--${card.headlineTone}` : ""}`}>
+            <span
+              className={`fc-headline ${card.headlineTone ? `fc-headline--${card.headlineTone}` : ""}`}
+              aria-label={headlineLabel}
+              title={headlineLabel}
+            >
               {card.headline}
             </span>
             {card.context && <span className="fc-context">{card.context}</span>}

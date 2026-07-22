@@ -21,7 +21,7 @@ import { SearchInput } from '../components/shared/SearchInput.js'
 import { Button } from '../components/primitives/Button'
 import { ActionButton } from '../components/primitives/ActionButton'
 import { TextArea, Card } from '../components/primitives'
-import { resolveDisplayName } from '../lib/text-utils'
+import { escapeDisplayControls, resolveDisplayName } from '../lib/text-utils'
 
 export default function Inbox() {
   const { data: lines } = useLines()
@@ -133,6 +133,7 @@ export default function Inbox() {
   const virtualMessageRows = selectVirtualMessageRows(renderedMessages, messageVirtualizer.getVirtualItems())
   const virtualSearchRows = selectVirtualMessageRows(searchResults, searchVirtualizer.getVirtualItems())
   const currentChatDisplayName = currentChat ? resolveDisplayName(currentChat.name) : ''
+  const currentChatKeyLabel = currentChat ? escapeDisplayControls(currentChat.conversationKey) : ''
 
   const handleLoadOlder = async () => {
     if (!selectedChat || loadingOlder) return
@@ -516,7 +517,7 @@ export default function Inbox() {
               </div>
               <div className="flex-1 min-w-0">
                 <div title={currentChatDisplayName} className="text-text-1 font-medium truncate text-body">{currentChatDisplayName}</div>
-                <div title={currentChat.conversationKey} className="c-label truncate">{currentChat.conversationKey.slice(0, 18)}...</div>
+                <div title={currentChatKeyLabel} className="c-label truncate">{currentChatKeyLabel.slice(0, 18)}...</div>
               </div>
             </div>
 

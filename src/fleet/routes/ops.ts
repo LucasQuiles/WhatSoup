@@ -9,7 +9,7 @@ import { isRecord, setOwnRecordProperty } from '../../lib/type-guards.ts';
 import { createSSEWriter } from '../sse-helpers.ts';
 import { normalizePhoneE164Wire } from '../../lib/phone.ts';
 import { SIGNAL_UUID_RE } from '../../transport/signal/types.ts';
-import { APPLEID_EMAIL_RE } from '../../transport/imessage/types.ts';
+import { canonicalizeAppleIdEmail } from '../../lib/appleid.ts';
 import { createChildLogger } from '../../logger.ts';
 const log = createChildLogger('fleet:ops');
 import { mcpCall } from '../mcp-client.ts';
@@ -830,12 +830,15 @@ function validatePluginDirs(dirs: unknown[], res: ServerResponse): boolean {
 function normalizeAdminIdsForTransport(transport: string, phones: string[]): string[] | null {
   const normalized: string[] = [];
   for (const phone of phones) {
+    if (transport === 'imessage') {
+      const appleId = canonicalizeAppleIdEmail(phone);
+      if (appleId !== null) {
+        normalized.push(appleId);
+        continue;
+      }
+    }
     const trimmed = phone.trim().toLowerCase();
     if (transport === 'signal' && SIGNAL_UUID_RE.test(trimmed)) {
-      normalized.push(trimmed);
-      continue;
-    }
-    if (transport === 'imessage' && APPLEID_EMAIL_RE.test(trimmed)) {
       normalized.push(trimmed);
       continue;
     }

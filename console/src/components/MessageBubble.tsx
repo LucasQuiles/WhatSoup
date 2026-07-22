@@ -1,6 +1,6 @@
 import { type FC, type ReactNode } from 'react'
 import { UserPlus, Check, X, RotateCw } from 'lucide-react'
-import { resolveDisplayName } from '../lib/text-utils'
+import { escapeDisplayControls, resolveDisplayName } from '../lib/text-utils'
 import { formatFullTime, formatTime } from '../lib/format-time'
 import MessageContent from './MessageContent'
 import { Button } from './primitives/Button'
@@ -31,6 +31,7 @@ const isRawJid = (name: string) => /^\d{5,}$/.test(name)
 const detailRows = (msg: Message): ReactNode => {
   const fullTime = formatFullTime(msg.timestamp)
   const senderDisplayName = resolveDisplayName(msg.senderName) || (msg.fromMe ? 'You' : '—')
+  const senderJidDisplay = msg.senderJid ? escapeDisplayControls(msg.senderJid) : ''
   const idValue = msg.pk === -1 ? 'failed' : msg.pk < 0 ? 'sending' : `pk:${msg.pk}`
 
   return (
@@ -38,7 +39,7 @@ const detailRows = (msg: Message): ReactNode => {
       {[
         { label: 'Time', value: fullTime },
         { label: 'Sender', value: senderDisplayName },
-        ...(msg.senderJid ? [{ label: 'JID', value: msg.senderJid, muted: true }] : []),
+        ...(senderJidDisplay ? [{ label: 'JID', value: senderJidDisplay, muted: true }] : []),
         { label: 'Type', value: msg.type },
         { label: 'Direction', value: msg.fromMe ? 'Outbound' : 'Inbound' },
       ].map(({ label, value, muted }) => (

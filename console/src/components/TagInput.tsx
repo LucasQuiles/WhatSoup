@@ -39,6 +39,12 @@ function resolveTone(accentColor: string | undefined): PillTone {
   return ACCENT_TO_TONE[accentColor] ?? 'neutral'
 }
 
+function hasUnsafeTrimBoundary(raw: string, trimmed: string): boolean {
+  const start = raw.indexOf(trimmed)
+  const boundary = `${raw.slice(0, start)}${raw.slice(start + trimmed.length)}`
+  return [...boundary].some(character => character !== ' ')
+}
+
 // ---------------------------------------------------------------------------
 // Props — public contract preserved verbatim (DD-13).
 // accentColor is still accepted so existing consumers (ConfigStep,
@@ -77,6 +83,7 @@ const TagInput: FC<TagInputProps> = ({
   const addTag = useCallback((raw: string) => {
     const trimmed = raw.trim()
     if (!trimmed) return
+    if (hasUnsafeTrimBoundary(raw, trimmed)) return
     const tag = normalizeValue ? normalizeValue(trimmed) : trimmed
     if (!tag) return
     if (values.includes(tag)) return

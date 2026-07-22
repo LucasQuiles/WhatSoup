@@ -131,6 +131,44 @@ describe('FeedCard action handling', () => {
     })
   })
 
+  it('copies a message fallback with control characters made visible', async () => {
+    const writeText = installClipboard()
+    render(
+      <FeedCard
+        event={event({
+          text: 'line-a: received from owner\u202E@example.com',
+          detail: { type: 'message', direction: 'inbound' },
+        })}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy to clipboard' }))
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledWith('line-a: received from owner\\u202E@example.com')
+    })
+  })
+
+  it('keeps an unsafe raw conversation key intact when opening the safely rendered event', () => {
+    const onNavigate = vi.fn()
+    const conversationKey = 'iMessage;+;chat\u202E_at_imessage'
+    render(
+      <FeedCard
+        event={event({
+          detail: {
+            type: 'message',
+            direction: 'inbound',
+            chatJid: 'owner\u202E@example.com@imessage',
+            conversationKey,
+          },
+        })}
+        onNavigate={onNavigate}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open conversation' }))
+    expect(onNavigate).toHaveBeenCalledWith(`/inbox?line=line-a&chat=${encodeURIComponent(conversationKey)}`)
+  })
+
   it('falls back to generic presentation for unknown detail payloads', () => {
     render(
       <FeedCard

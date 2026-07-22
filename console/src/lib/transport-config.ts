@@ -3,7 +3,7 @@ import { isTransportKind, TRANSPORT_MAP, type TransportKind } from './transport-
 import { asRecordOrEmpty } from './type-guards'
 import { isE164WireInput, normalizePhoneIdentityInput } from './validation'
 import { isSignalTcpHost, SIGNAL_TCP_HOST_LABEL } from '../../../src/lib/signal-endpoint.ts'
-import { isAppleIdEmail } from '../../../src/lib/appleid.ts'
+import { canonicalizeAppleIdEmail } from '../../../src/lib/appleid.ts'
 
 const TWILIO_ACCOUNT_SID_RE = /^AC[0-9a-f]{32}$/
 const TWILIO_MESSAGING_SERVICE_SID_RE = /^MG[0-9a-f]{32}$/
@@ -114,8 +114,9 @@ export function canonicalizeTransportFormData(
       : source.backend === 'imsg' || source.backend === 'bluebubbles'
         ? source.backend
         : null
-    const rawSender = text(source.sender)
-    const sender = rawSender.includes('@') ? rawSender.toLowerCase() : wirePhone(rawSender)
+    const rawSender = typeof source.sender === 'string' ? source.sender : ''
+    const appleIdSender = canonicalizeAppleIdEmail(rawSender)
+    const sender = appleIdSender ?? (rawSender.includes('@') ? rawSender : wirePhone(rawSender))
     const config: ConfigRecord = {
       account,
       backend,
@@ -196,8 +197,8 @@ export function validateTransportFormData(data: Record<string, unknown>): Record
     }
   } else if (canonical.transport === 'imessage') {
     const config = canonical.imessageConfig ?? {}
-    const sender = text(config.sender)
-    if (!(isE164WireInput(sender) || (isAppleIdEmail(sender) && sender === sender.toLowerCase()))) {
+    const sender = typeof config.sender === 'string' ? config.sender : ''
+    if (!(isE164WireInput(sender) || canonicalizeAppleIdEmail(sender) === sender)) {
       errors['imessageConfig.sender'] = 'Enter a lowercase AppleID email or E.164 sender'
     }
     if (config.backend !== 'imsg' && config.backend !== 'bluebubbles') {

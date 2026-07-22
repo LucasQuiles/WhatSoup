@@ -1,5 +1,5 @@
 import { type FC } from 'react'
-import { stripMarkdown, resolveDisplayName } from '../lib/text-utils'
+import { escapeDisplayControls, stripMarkdown, resolveDisplayName } from '../lib/text-utils'
 import { formatChatTime } from '../lib/format-time'
 import { Avatar } from './primitives'
 import type { ChatItem } from '../types'
@@ -17,7 +17,7 @@ interface ChatListItemProps {
 const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick, tabIndex = 0, isTyping }) => {
   const displayName = resolveDisplayName(chat.name)
   const lastMessageTime = formatChatTime(chat.lastMessageAt)
-  const previewText = stripMarkdown(chat.lastMessagePreview ?? '')
+  const previewText = escapeDisplayControls(stripMarkdown(chat.lastMessagePreview ?? ''))
 
   return (
     <div

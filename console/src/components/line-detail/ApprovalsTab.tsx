@@ -6,6 +6,7 @@ import { api } from '../../lib/api'
 import { useToast } from '../../hooks/toast-context'
 import { statusBadgeStyle } from '../../lib/status-severity'
 import { formatRelative } from '../../lib/format-time'
+import { escapeDisplayControls } from '../../lib/text-utils'
 import type { Freshness } from '../../lib/freshness'
 import type { ApprovalEntry, ApprovalsPayload } from '../../types'
 
@@ -153,12 +154,13 @@ function ApprovalCard({ entry, observedAt, onDecide }: {
   onDecide: (questionIndex: number, selectedOptions: string[]) => void;
 }) {
   const answeredCount = Object.keys(entry.answersCollected).length
+  const chatLabel = escapeDisplayControls(entry.chatJid)
 
   return (
     <Card variant="base" className="overflow-hidden">
       <div className="flex items-center justify-between c-toolbar bg-surface-raised c-border-b">
-        <span className="font-mono text-data" title={entry.chatJid}>
-          {truncateMiddle(entry.chatJid)}
+        <span className="font-mono text-data" title={chatLabel}>
+          {truncateMiddle(chatLabel)}
         </span>
         <span className="flex items-center gap-[var(--sp-2)]">
           {entry.source === 'askuser' && (

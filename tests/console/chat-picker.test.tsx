@@ -198,6 +198,37 @@ describe('ChatPicker selection', () => {
 // ---------------------------------------------------------------------------
 
 describe('ChatPicker keyboard navigation', () => {
+  it('keeps distinct iMessage destinations bound to distinct active option ids', async () => {
+    const onSelect = vi.fn()
+    const first = chat({
+      conversationKey: 'owner+ops_at_example.com@imessage',
+      name: 'Owner Ops Plus',
+      isGroup: false,
+    })
+    const second = chat({
+      conversationKey: 'owner.ops_at_example.com@imessage',
+      name: 'Owner Ops Dot',
+      isGroup: false,
+    })
+    render(<ChatPicker chats={[first, second]} selected={null} onSelect={onSelect} onClear={vi.fn()} />)
+    const input = getInput()
+    fireEvent.focus(input)
+
+    fireEvent.keyDown(input, { key: 'ArrowDown' })
+    await waitFor(() => expect(input.getAttribute('aria-activedescendant')).not.toBeNull())
+    const firstId = input.getAttribute('aria-activedescendant')
+    expect(document.getElementById(firstId!)?.textContent).toContain('Owner Ops Plus')
+
+    fireEvent.keyDown(input, { key: 'ArrowDown' })
+    const secondId = input.getAttribute('aria-activedescendant')
+    expect(secondId).not.toBe(firstId)
+    expect(document.querySelectorAll(`[id="${secondId}"]`)).toHaveLength(1)
+    expect(document.getElementById(secondId!)?.textContent).toContain('Owner Ops Dot')
+
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(onSelect).toHaveBeenCalledWith(second)
+  })
+
   it('Down opens the panel and sets first option active', async () => {
     render(<ChatPicker chats={allChats} selected={null} onSelect={vi.fn()} onClear={vi.fn()} />)
     const input = getInput()

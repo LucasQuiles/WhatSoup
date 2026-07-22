@@ -106,6 +106,9 @@ describe('resolveImessageConfig', () => {
     [{ account: 'ops', backend: 'imsg', sender: 'owner\u202E@example.com' }, /AppleID/i],
     [{ account: 'ops', backend: 'imsg', sender: 'owner\u200B@example.com' }, /AppleID/i],
     [{ account: 'ops', backend: 'imsg', sender: 'owner\u2028@example.com' }, /AppleID/i],
+    [{ account: 'ops', backend: 'imsg', sender: '\nowner@example.com' }, /AppleID/i],
+    [{ account: 'ops', backend: 'imsg', sender: '\u00A0owner@example.com' }, /AppleID/i],
+    [{ account: 'ops', backend: 'imsg', sender: 'owner@example.com\u3000' }, /AppleID/i],
     [{
       account: 'ops',
       backend: 'imsg',
@@ -164,12 +167,28 @@ describe('resolveAdminIdentities', () => {
   it('preserves lowercase AppleID emails and canonicalizes iMessage phones as +E.164', async () => {
     const { resolveAdminIdentities } = await import('../src/config.ts');
     expect(resolveAdminIdentities([
-      ' Owner@Example.COM ',
+      'Owner@Example.COM',
       '+1 (555) 111-0000',
     ], 'imessage')).toEqual([
       'owner@example.com',
       '+15551110000',
     ]);
+  });
+
+  it.each([
+    '\nowner@example.com',
+    'owner@example.com\n',
+    '\u00A0owner@example.com',
+    '\u1680owner@example.com',
+    '\u2028owner@example.com',
+    '\u2029owner@example.com',
+    '\u202Fowner@example.com',
+    '\u205Fowner@example.com',
+    '\u3000owner@example.com',
+  ])('rejects boundary whitespace in an iMessage admin identity: %#', async (identity) => {
+    const { resolveAdminIdentities } = await import('../src/config.ts');
+    expect(() => resolveAdminIdentities([identity], 'imessage'))
+      .toThrow(/iMessage admin identity/);
   });
 
 });

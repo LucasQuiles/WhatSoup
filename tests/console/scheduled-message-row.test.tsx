@@ -91,6 +91,25 @@ describe('ScheduledMessageRow', () => {
     expect(screen.getByText('chat-placeholder-jid')).toBeTruthy();
   });
 
+  it.each([
+    ['owner\u202E@example.com', 'owner\\u202E@example.com'],
+    ['owner\\u202E@example.com', 'owner\\\\u202E@example.com'],
+  ])('renders a persisted destination as distinct safe visible and accessible text %#', (chatName, expected) => {
+    render(
+      <ScheduledMessageRow
+        message={buildMessage({ chatName })}
+        onCancel={vi.fn()}
+        onEdit={vi.fn()}
+        onDuplicate={vi.fn()}
+        cancelling={null}
+      />,
+    );
+
+    const label = screen.getByText(expected);
+    expect(label.getAttribute('title')).toBe(expected);
+    expect(screen.getByLabelText(`Cancel scheduled message to ${expected}`)).toBeTruthy();
+  });
+
   it('falls back to content type label when image has no caption', () => {
     render(
       <ScheduledMessageRow

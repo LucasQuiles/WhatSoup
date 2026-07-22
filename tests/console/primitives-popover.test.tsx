@@ -321,6 +321,11 @@ describe('Popover — role and ARIA', () => {
 // ---------------------------------------------------------------------------
 
 describe('Popover — aria-activedescendant', () => {
+  it('builds collision-free ids for values that differ only by punctuation', () => {
+    expect(popoverOptionId(LISTBOX_ID, 'owner+ops_at_example.com@imessage'))
+      .not.toBe(popoverOptionId(LISTBOX_ID, 'owner.ops_at_example.com@imessage'))
+  })
+
   it('option ids follow popoverOptionId(listboxId, value) formula', () => {
     const ref = { current: null };
     render(
