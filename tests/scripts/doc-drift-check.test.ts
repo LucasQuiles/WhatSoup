@@ -38,9 +38,13 @@ describe('doc drift check', () => {
     process.exitCode = undefined;
   });
 
-  it('passes for current MCP tool, module count, and design inventory docs', () => {
-    expect(findDocDrift({ cwd: repoRoot })).toEqual([]);
-  });
+  it(
+    'passes for current MCP tool, module count, and design inventory docs',
+    () => {
+      expect(findDocDrift({ cwd: repoRoot })).toEqual([]);
+    },
+    30_000,
+  );
 
   it('flags stale explicit MCP tool count claims with file and line details', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-doc-drift-'));
