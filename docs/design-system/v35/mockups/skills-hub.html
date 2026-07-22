@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SOUP — Skills Hub (Direction A: Command Deck)</title>
+<style>
+:root, [data-theme="dark"] {
+  --base:#1E1A15; --raised:#27221C; --overlay:#322D24; --inset:#171410;
+  --t1:#F1ECDF; --t2:#CAC1AF; --t3:#9A907E;
+  --hair:#383024; --hair-2:#473B2C; --hair-3:#5A4C39;
+  --accent:#6BA6FF; --accent-fg:#0A0E14;
+  --ok:#5BD97B; --warn:#F5B54A; --crit:#F4736F;
+  --m-passive:#3BD6B0; --m-chat:#3FB8DC; --m-agent:#A78BFA;
+  --shadow-lift:0 1px 2px rgb(0 0 0/.30), 0 8px 24px rgb(0 0 0/.28);
+}
+[data-theme="light"] {
+  --base:#FAF6EE; --raised:#FDFAF3; --overlay:#FFFFFF; --inset:#EDE5D5;
+  --t1:#221C12; --t2:#524833; --t3:#645849;
+  --hair:#DED4BF; --hair-2:#CDC2A9; --hair-3:#B4A78C;
+  --accent:#2E66E4; --accent-fg:#FFFFFF;
+  --ok:#15722F; --warn:#855900; --crit:#B42318;
+  --m-passive:#096853; --m-chat:#1F6E85; --m-agent:#6D4FA3;
+  --shadow-lift:0 1px 2px rgb(60 45 20/.10), 0 10px 28px rgb(60 45 20/.14);
+}
+* { margin:0; box-sizing:border-box; }
+body { background:var(--base); color:var(--t1); font:400 13.5px/1.5 "Hanken Grotesk",Arial,sans-serif; min-height:100vh; display:flex; flex-direction:column; }
+header { display:flex; align-items:center; gap:14px; padding:14px 22px 12px; border-bottom:1px solid var(--hair); }
+.nameplate { display:flex; align-items:center; gap:12px; }
+.nameplate .tick { width:8px; height:8px; border-radius:1px; background:var(--m-passive); }
+.nameplate .wm { font:800 17px/22px "Bricolage Grotesque",sans-serif; letter-spacing:-0.06em; }
+.nameplate .wm b { color:var(--accent); }
+h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
+.spacer { flex:1; }
+.btn { display:inline-flex; align-items:center; gap:8px; padding:8px 14px; border-radius:6px; border:1px solid var(--hair-2); background:var(--raised); color:var(--t1); font:600 12.5px/16px inherit; cursor:pointer; transition:transform .16s ease-out, box-shadow .16s ease-out; }
+.btn:hover { transform:translateY(-1px); box-shadow:var(--shadow-lift); }
+.btn.primary { background:var(--accent); color:var(--accent-fg); border-color:transparent; }
+.btn.ghost { background:transparent; color:var(--t2); }
+.btn.sm { padding:5px 10px; font-size:11.5px; }
+/* hub mode toggle */
+.modebar { display:flex; gap:4px; background:var(--inset); border:1px solid var(--hair); border-radius:8px; padding:3px; }
+.modebar button { border:none; background:transparent; color:var(--t3); font:600 11.5px/14px "IBM Plex Mono",monospace; padding:6px 12px; border-radius:6px; cursor:pointer; }
+.modebar button.on { background:var(--raised); color:var(--t1); box-shadow:0 1px 2px rgb(0 0 0/.2); }
+.modebar button .st { color:var(--ok); }
+/* body */
+.wrap { flex:1; display:flex; min-height:0; }
+.filters { width:196px; flex:none; border-right:1px solid var(--hair); padding:14px 12px; overflow:auto; }
+.fsec { font:600 10px/14px "IBM Plex Mono",monospace; letter-spacing:.1em; color:var(--t3); text-transform:uppercase; margin:12px 0 6px; }
+.fitem { display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:6px; color:var(--t2); font-size:12.5px; cursor:pointer; }
+.fitem:hover { background:var(--raised); }
+.fitem.on { background:color-mix(in srgb, var(--accent) 10%, transparent); color:var(--t1); }
+.fitem .c { margin-left:auto; font:500 10px/14px "IBM Plex Mono",monospace; color:var(--t3); }
+.main { flex:1; padding:16px 20px; overflow:auto; }
+.toolbar { display:flex; gap:10px; margin-bottom:14px; align-items:center; }
+.search { flex:1; display:flex; align-items:center; gap:8px; background:var(--inset); border:1px solid var(--hair); border-radius:8px; padding:9px 12px; }
+.search input { flex:1; background:none; border:none; outline:none; color:var(--t1); font:inherit; font-size:13px; }
+.search input::placeholder { color:var(--t3); }
+/* skill rows */
+.scard { background:var(--raised); border:1px solid var(--hair); border-radius:10px; padding:14px 16px; margin-bottom:10px; transition:transform .16s ease-out, box-shadow .16s ease-out; }
+.scard:hover { transform:translateY(-2px); box-shadow:var(--shadow-lift); }
+.scard .top { display:flex; align-items:center; gap:12px; }
+.sicon { width:34px; height:34px; border-radius:8px; background:var(--inset); border:1px solid var(--hair); display:flex; align-items:center; justify-content:center; flex:none; }
+.sicon svg { width:16px; height:16px; fill:var(--t2); }
+.scard .nm { font:700 14px/18px "Bricolage Grotesque",sans-serif; }
+.scard .desc { color:var(--t3); font-size:12px; margin-top:1px; }
+.src { font:600 9.5px/12px "IBM Plex Mono",monospace; letter-spacing:.06em; padding:3px 8px; border-radius:99px; text-transform:uppercase; flex:none; }
+.src.official { background:color-mix(in srgb, var(--ok) 12%, transparent); color:var(--ok); }
+.src.community { background:color-mix(in srgb, var(--warn) 12%, transparent); color:var(--warn); }
+.src.local { background:color-mix(in srgb, var(--m-chat) 12%, transparent); color:var(--m-chat); }
+.src.thirdparty { background:color-mix(in srgb, var(--crit) 10%, transparent); color:var(--crit); }
+.scard .acts { margin-left:auto; display:flex; gap:6px; flex:none; }
+.compat { display:flex; align-items:center; gap:14px; margin-top:12px; padding-top:12px; border-top:1px solid var(--hair); }
+.compat .lbl { font:500 10px/14px "IBM Plex Mono",monospace; color:var(--t3); letter-spacing:.06em; }
+.cset { display:flex; gap:4px; align-items:center; }
+.cdot { width:16px; height:16px; border-radius:4px; display:flex; align-items:center; justify-content:center; font:700 8.5px/1 "IBM Plex Mono",monospace; }
+.cdot.ok { background:color-mix(in srgb, var(--ok) 14%, transparent); color:var(--ok); }
+.cdot.warn { background:color-mix(in srgb, var(--warn) 14%, transparent); color:var(--warn); }
+.cdot.na { background:var(--inset); color:var(--t3); }
+.installed-tag { display:inline-flex; align-items:center; gap:5px; font:600 10px/14px "IBM Plex Mono",monospace; color:var(--ok); }
+.warn-note { display:flex; gap:8px; align-items:flex-start; margin-top:10px; padding:8px 10px; border-radius:8px; background:color-mix(in srgb, var(--warn) 8%, transparent); border:1px solid color-mix(in srgb, var(--warn) 24%, transparent); font-size:11.5px; color:var(--t2); }
+.warn-note b { color:var(--warn); }
+@media (max-width:900px){ .filters{display:none} }
+</style>
+</head>
+<body>
+<header>
+  <div class="nameplate"><span class="tick"></span><span class="wm">SO<b>U</b>P</span></div>
+  <h1>Skills Hub</h1>
+  <div class="spacer"></div>
+  <div class="modebar"><button class="on"><span class="st">●</span> personal hub</button><button>org hub · shared</button></div>
+  <button class="btn ghost theme-toggle" onclick="document.documentElement.dataset.theme=document.documentElement.dataset.theme==='dark'?'light':'dark'">◐ theme</button>
+  <button class="btn primary">⇪ Upload</button>
+</header>
+<div class="wrap">
+  <aside class="filters">
+    <div class="fsec">Type</div>
+    <div class="fitem on">All <span class="c">214</span></div>
+    <div class="fitem">Skills <span class="c">96</span></div>
+    <div class="fitem">Plugins <span class="c">61</span></div>
+    <div class="fitem">MCP servers <span class="c">38</span></div>
+    <div class="fitem">Tools <span class="c">19</span></div>
+    <div class="fsec">Source</div>
+    <div class="fitem">Official <span class="c">84</span></div>
+    <div class="fitem">Community <span class="c">102</span></div>
+    <div class="fitem">Local / uploaded <span class="c">28</span></div>
+    <div class="fsec">Status</div>
+    <div class="fitem">Installed <span class="c">41</span></div>
+    <div class="fitem">Updates available <span class="c">7</span></div>
+    <div class="fitem">Incompatible <span class="c">3</span></div>
+  </aside>
+  <main class="main">
+    <div class="toolbar">
+      <div class="search"><span style="color:var(--t3)">⌕</span><input placeholder="Search skills, plugins, MCPs, tools…"></div>
+      <button class="btn ghost">sort: relevance ⇅</button>
+    </div>
+
+    <div class="scard">
+      <div class="top">
+        <span class="sicon"><svg viewBox="0 0 16 16"><path d="M8 1.5 14 5v6l-6 3.5L2 11V5z"/></svg></span>
+        <div><div class="nm">pinecone-search</div><div class="desc">Semantic vector search across indexes with rerank</div></div>
+        <span class="src official">official</span>
+        <span class="installed-tag">✓ installed</span>
+        <div class="acts"><button class="btn sm ghost">configure</button><button class="btn sm">update 2.4.1</button></div>
+      </div>
+      <div class="compat"><span class="lbl">COMPAT</span>
+        <span class="cset"><span class="cdot ok" title="claude-cli">C</span><span class="cdot ok" title="opencode-cli">O</span><span class="cdot ok" title="codex-cli">X</span><span class="cdot warn" title="gemini-cli">G</span><span class="cdot ok" title="anthropic-api">A</span></span>
+        <span class="lbl">HARNESS</span>
+        <span class="cset"><span class="cdot ok" title="agent">agt</span><span class="cdot ok" title="chat">cht</span><span class="cdot na" title="passive">pas</span></span>
+        <span style="color:var(--t3);font-size:11px">gemini: needs providerConfig</span>
+      </div>
+    </div>
+
+    <div class="scard">
+      <div class="top">
+        <span class="sicon"><svg viewBox="0 0 16 16"><path d="M2 3h12v9H6l-4 3z"/></svg></span>
+        <div><div class="nm">whatsapp-fleet-tools</div><div class="desc">Full WhatsApp fleet MCP surface — messages, groups, labels</div></div>
+        <span class="src official">official</span>
+        <span class="installed-tag">✓ installed</span>
+        <div class="acts"><button class="btn sm ghost">configure</button></div>
+      </div>
+      <div class="compat"><span class="lbl">COMPAT</span>
+        <span class="cset"><span class="cdot ok">C</span><span class="cdot ok">O</span><span class="cdot ok">X</span><span class="cdot ok">G</span><span class="cdot ok">A</span></span>
+        <span class="lbl">HARNESS</span>
+        <span class="cset"><span class="cdot ok">agt</span><span class="cdot warn">cht</span><span class="cdot ok">pas</span></span>
+      </div>
+    </div>
+
+    <div class="scard">
+      <div class="top">
+        <span class="sicon"><svg viewBox="0 0 16 16"><path d="M3 13V8m5 5V3m5 10v-7"/></svg></span>
+        <div><div class="nm">auto-seo-suite</div><div class="desc">Third-party SEO auditing and content optimization</div></div>
+        <span class="src thirdparty">3rd-party</span>
+        <div class="acts"><button class="btn sm">review &amp; install…</button></div>
+      </div>
+      <div class="warn-note">⚠ <span><b>Third-party publisher code.</b> This skill installs code published by an unverified author. Reviewed by the hub scanner: 2 medium findings. Installed per-agent only, never pre-selected.</span></div>
+      <div class="compat"><span class="lbl">COMPAT</span>
+        <span class="cset"><span class="cdot ok">C</span><span class="cdot warn">O</span><span class="cdot na">X</span><span class="cdot na">G</span><span class="cdot ok">A</span></span>
+        <span class="lbl">HARNESS</span>
+        <span class="cset"><span class="cdot ok">agt</span><span class="cdot na">cht</span><span class="cdot na">pas</span></span>
+      </div>
+    </div>
+
+    <div class="scard">
+      <div class="top">
+        <span class="sicon"><svg viewBox="0 0 16 16"><path d="M8 2a6 6 0 1 0 6 6h-2a4 4 0 1 1-4-4z"/></svg></span>
+        <div><div class="nm">dream-lab-persona</div><div class="desc">Agent self-suggestion pipeline for persona edits</div></div>
+        <span class="src local">local</span>
+        <span class="installed-tag">✓ installed</span>
+        <div class="acts"><button class="btn sm ghost">configure</button></div>
+      </div>
+      <div class="compat"><span class="lbl">COMPAT</span>
+        <span class="cset"><span class="cdot ok">C</span><span class="cdot ok">O</span><span class="cdot ok">X</span><span class="cdot ok">G</span><span class="cdot ok">A</span></span>
+        <span class="lbl">HARNESS</span>
+        <span class="cset"><span class="cdot ok">agt</span><span class="cdot ok">cht</span><span class="cdot na">pas</span></span>
+      </div>
+    </div>
+
+    <div class="scard">
+      <div class="top">
+        <span class="sicon"><svg viewBox="0 0 16 16"><path d="M1 3h14v10H1z"/></svg></span>
+        <div><div class="nm">m365-connector</div><div class="desc">Microsoft 365 MCP — mail, calendar, Teams, Dataverse</div></div>
+        <span class="src community">community</span>
+        <div class="acts"><button class="btn sm">install</button></div>
+      </div>
+      <div class="compat"><span class="lbl">COMPAT</span>
+        <span class="cset"><span class="cdot ok">C</span><span class="cdot ok">O</span><span class="cdot warn">X</span><span class="cdot ok">G</span><span class="cdot ok">A</span></span>
+        <span class="lbl">HARNESS</span>
+        <span class="cset"><span class="cdot ok">agt</span><span class="cdot ok">cht</span><span class="cdot na">pas</span></span>
+      </div>
+    </div>
+
+    <div class="scard">
+      <div class="top">
+        <span class="sicon"><svg viewBox="0 0 16 16"><path d="M2 2h5v5H2zM9 2h5v5H9zM2 9h5v5H2zM9 9h5v5H9z"/></svg></span>
+        <div><div class="nm">scheduled-tasks</div><div class="desc">Cron-style recurring agent jobs with delivery targets</div></div>
+        <span class="src official">official</span>
+        <span class="installed-tag">✓ installed · 1.9.0 → 2.0.0</span>
+        <div class="acts"><button class="btn sm">update</button></div>
+      </div>
+      <div class="compat"><span class="lbl">COMPAT</span>
+        <span class="cset"><span class="cdot ok">C</span><span class="cdot ok">O</span><span class="cdot ok">X</span><span class="cdot ok">G</span><span class="cdot ok">A</span></span>
+        <span class="lbl">HARNESS</span>
+        <span class="cset"><span class="cdot ok">agt</span><span class="cdot ok">cht</span><span class="cdot ok">pas</span></span>
+      </div>
+    </div>
+  </main>
+</div>
+</body>
+</html>
