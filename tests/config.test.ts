@@ -1379,6 +1379,8 @@ describe('operationTracker config', () => {
     expect(config.operationTracker.thinkingLongMs).toBe(45_000);
     expect(config.operationTracker.thinkingStallMs).toBe(300_000);
     expect(config.operationTracker.progressPlaceholderRateLimitMs).toBe(180_000);
+    expect(config.operationTracker.maxStatusMessagesPerWindow).toBe(10);
+    expect(config.operationTracker.statusMessageWindowMs).toBe(300_000);
     expect(config.operationTracker.toolThresholds).toBeDefined();
     expect(config.operationTracker.toolThresholds.agent).toEqual({
       expectedMs: 120_000, slowMultiplier: 1.5, stallMultiplier: 3,
@@ -1386,6 +1388,18 @@ describe('operationTracker config', () => {
     expect(config.operationTracker.toolThresholds.default).toEqual({
       expectedMs: 10_000, slowMultiplier: 2, stallMultiplier: 5,
     });
+  });
+
+  it('honors valid cross-turn status-window policy and rejects invalid values to defaults', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      operationTracker: {
+        maxStatusMessagesPerWindow: 7,
+        statusMessageWindowMs: -1,
+      },
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.operationTracker.maxStatusMessagesPerWindow).toBe(7);
+    expect(config.operationTracker.statusMessageWindowMs).toBe(300_000);
   });
 });
 

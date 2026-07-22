@@ -145,6 +145,13 @@ export interface OperationTrackerConfig {
    * gating the user's content/answer/media. Default 10 (MAX_STATUS_MESSAGES_PER_TURN).
    */
   maxStatusMessagesPerTurn: number;
+  /**
+   * Status-narration cap shared across logical turns in one chat. This closes
+   * the reset gap where a burst of related messages can evade the per-turn cap.
+   */
+  maxStatusMessagesPerWindow: number;
+  /** Sliding-window duration for maxStatusMessagesPerWindow. Default 300_000. */
+  statusMessageWindowMs: number;
   toolThresholds: Record<string, ToolThreshold>;
 }
 
@@ -1114,6 +1121,10 @@ export const config = {
     // in outbound-queue.ts (kept literal here to avoid a config↔queue import cycle).
     maxStatusMessagesPerTurn:
       (instance?.operationTracker?.maxStatusMessagesPerTurn as number | undefined) ?? 10,
+    maxStatusMessagesPerWindow:
+      positiveIntValue(instance?.operationTracker?.maxStatusMessagesPerWindow, 10),
+    statusMessageWindowMs:
+      positiveIntValue(instance?.operationTracker?.statusMessageWindowMs, 300_000),
     toolThresholds: mergeToolThresholds(instance?.operationTracker?.toolThresholds),
   } satisfies OperationTrackerConfig,
 
