@@ -23,7 +23,7 @@ const TURN_FINALIZATION_ALERT_SUMMARY = 'Agent turn finalization could not reach
 
 const REPLY_GUARANTEE_BREACH_ALERT_SOURCE = 'agent_reply_guarantee_breach';
 const REPLY_GUARANTEE_BREACH_ALERT_SUMMARY =
-  'Agent turn failed terminally with no delivery — the inbound message was dropped without a reply';
+  'Agent turn failed terminally with no completed reply proof — operator catch-up is required';
 
 export type RuntimeTurnFinalizerDurability = Pick<
   DurabilityEngine,
@@ -211,6 +211,7 @@ function boundedBreachEvidence(
     `generation=${identity.generation}`,
     `reply_guarantee_disarmed=${receipt.effectiveReplyGuaranteeDisarmed}`,
     `continuity_marked=${continuityMarked}`,
+    `partial_answer_op_count=${params.answerEvidence.kind === 'ready' ? params.answerEvidence.opIds.length : 0}`,
     `conversation_key_hash=${shortHash(identity.conversationKey)}`,
     `delivery_jid_hash=${shortHash(identity.deliveryJid)}`,
     `logical_turn_hash=${shortHash(identity.logicalTurnId)}`,
@@ -274,11 +275,19 @@ export function finalizeRuntimeTurn(
 
   let deliveryEvidence: DeliveryEvidence;
   try {
-    deliveryEvidence = deriveDeliveryEvidence(
+    const observedDeliveryEvidence = deriveDeliveryEvidence(
       params.durability,
       params.identity,
       params.answerEvidence.opIds,
     );
+    // An echoed fragment proves transport delivery, but a provider failure
+    // proves the requested turn did not reach a completed answer. Keep that
+    // fragment non-terminal so it cannot tombstone the inbound as replied.
+    // Pending and ambiguous sends retain their existing recovery-owner path.
+    deliveryEvidence = params.attemptOutcome.kind === 'failed' &&
+      observedDeliveryEvidence.kind === 'echoed'
+      ? { kind: 'none' }
+      : observedDeliveryEvidence;
   } catch {
     return emitFailureIncident(params, 'delivery_proof');
   }
