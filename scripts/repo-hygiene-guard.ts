@@ -520,6 +520,15 @@ function isProductionCodePath(filePath: string): boolean {
   return /^(?:src|scripts|deploy|console\/src)\//.test(filePath);
 }
 
+/**
+ * Prose files. Deliberately extension-based rather than directory-based: a plan, runbook or
+ * README anywhere in the tree is documentation, and a lint/type suppression token inside it
+ * is inert text that suppresses nothing.
+ */
+function isDocumentationPath(filePath: string): boolean {
+  return /\.(?:md|mdx|markdown)$/i.test(filePath);
+}
+
 function isSourceConsoleCall(filePath: string, text: string): boolean {
   return /^(?:src|console\/src)\//.test(filePath)
     && !srcConsoleAllowedFiles.has(filePath)
@@ -578,7 +587,18 @@ export function scanAddedLines(lines: AddedLine[]): GuardIssue[] {
         line: line.line,
       });
     }
-    if (isSuppressionComment(line.text) && !hasSuppressionRationaleAndExpiry(line.text)) {
+    // Markdown is exempt: a suppression comment in prose suppresses nothing. Documentation
+    // that DOCUMENTS the suppression policy necessarily names the very tokens it forbids
+    // (e.g. a plan saying "do not add `@ts-ignore`"), and flagging that forces authors to
+    // mangle the prose to describe the rule. The adjacent dynamic-code-execution check is
+    // already path-gated for the same reason. Note this is NOT gated on isProductionCodePath,
+    // which would also exempt tests/ — an unbounded suppression in a test is still a real
+    // suppression and must stay flagged.
+    if (
+      !isDocumentationPath(filePath)
+      && isSuppressionComment(line.text)
+      && !hasSuppressionRationaleAndExpiry(line.text)
+    ) {
       issues.push({
         code: 'unbounded-suppression',
         message: 'Lint/type suppressions must include a rationale and an expires YYYY-MM-DD marker.',
