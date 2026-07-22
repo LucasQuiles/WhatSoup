@@ -164,7 +164,7 @@ vi.mock('../../../src/core/messages.ts', () => ({
   getRecentMessages: vi.fn(() => []),
 }));
 
-type ActiveSessionRow = { id: number; session_id: string | null; chat_jid: string | null; claude_pid: number; status: string; started_at: string; last_message_at: string | null; message_count: number } | null;
+type ActiveSessionRow = { id: number; session_id: string | null; chat_jid: string | null; workspace_key?: string | null; claude_pid: number; status: string; started_at: string; last_message_at: string | null; message_count: number } | null;
 const { mockGetActiveSession } = vi.hoisted(() => {
   return { mockGetActiveSession: vi.fn(() => null as ActiveSessionRow) };
 });
@@ -11765,14 +11765,19 @@ describe('AgentRuntime', () => {
       );
     });
 
-    it('stale session skipped — single mode, session older than 60 min', async () => {
+    it('retires only the exact stale lifecycle when another checkpoint shares its session ID', async () => {
       const db = makeDb();
       const { messenger } = makeMessenger();
+      const checkpointStatuses = new Map([
+        ['user', 'active'],
+        ['other-user', 'active'],
+      ]);
 
       mockGetActiveSession.mockReturnValue({
         id: 1,
         session_id: 'sess-stale',
         chat_jid: 'user@s.whatsapp.net',
+        workspace_key: 'user',
         claude_pid: 0,
         status: 'active',
         started_at: new Date(Date.now() - 120 * 60_000).toISOString(),
@@ -11792,7 +11797,13 @@ describe('AgentRuntime', () => {
           sessionId: 'sess-stale',
           updatedAt: new Date(Date.now() - 120 * 60_000).toISOString().replace('Z', ''),
         })),
-        retireSessionLifecycle: vi.fn(),
+        retireExactSessionLifecycle: vi.fn((params: { conversationKey: string }) => {
+          checkpointStatuses.set(params.conversationKey, 'ended');
+        }),
+        retireSessionLifecycle: vi.fn(() => {
+          checkpointStatuses.set('user', 'ended');
+          checkpointStatuses.set('other-user', 'ended');
+        }),
       };
       (runtime as unknown as { durability: unknown }).durability = mockDurability;
 
@@ -11800,11 +11811,59 @@ describe('AgentRuntime', () => {
 
       // Session too stale — should NOT spawn
       expect(mockSession.spawnSession).not.toHaveBeenCalled();
-      expect(mockDurability.retireSessionLifecycle).toHaveBeenCalledWith({
+      expect(mockDurability.retireExactSessionLifecycle).toHaveBeenCalledWith({
         agentSessionRowId: 1,
         provider: undefined,
         providerSessionId: 'sess-stale',
+        workspaceKey: 'user',
+        conversationKey: 'user',
       });
+      expect(mockDurability.retireSessionLifecycle).not.toHaveBeenCalled();
+      expect(checkpointStatuses).toEqual(new Map([
+        ['user', 'ended'],
+        ['other-user', 'active'],
+      ]));
+    });
+
+    it('leaves a stale lifecycle untouched when its workspace identity is unavailable', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+
+      mockGetActiveSession.mockReturnValue({
+        id: 9,
+        session_id: 'sess-stale-unscoped',
+        chat_jid: 'unscoped@s.whatsapp.net',
+        workspace_key: null,
+        claude_pid: 0,
+        status: 'active',
+        started_at: new Date(Date.now() - 120 * 60_000).toISOString(),
+        last_message_at: null,
+        message_count: 0,
+      });
+
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'single' });
+      const mockDurability = {
+        getLatestCompletedCheckpointForSession: vi.fn(() => completedCheckpoint({
+          id: 9,
+          conversationKey: 'unscoped',
+          deliveryJid: 'unscoped@s.whatsapp.net',
+          deliveryNamespace: 's.whatsapp.net',
+          scope: 'singleton',
+          sessionId: 'sess-stale-unscoped',
+          updatedAt: new Date(Date.now() - 120 * 60_000).toISOString().replace('Z', ''),
+        })),
+        retireExactSessionLifecycle: vi.fn(),
+      };
+      (runtime as unknown as { durability: unknown }).durability = mockDurability;
+
+      await runtime.start();
+
+      expect(mockSession.spawnSession).not.toHaveBeenCalled();
+      expect(mockDurability.retireExactSessionLifecycle).not.toHaveBeenCalled();
+      expect(mockRuntimeLogger.warn).toHaveBeenCalledWith({
+        rowId: 9,
+        conversationKey: 'unscoped',
+      }, 'cannot retire stale shared/single resume without exact workspace identity');
     });
 
     it('shared mode group suppression — session spawned but no startup message', async () => {

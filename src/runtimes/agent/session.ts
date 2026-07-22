@@ -589,6 +589,8 @@ export class SessionManager {
   private resumeAttemptId: string | null = null;
   /** Prevents cleanup shutdown from repainting an already-terminal durable lifecycle as resumable. */
   private durableFailureClosed = false;
+  /** Durable cleanup failed and an active lifecycle may still require operator reconciliation. */
+  private durableFailureInconclusive = false;
   /** JSON-RPC request ID of the thread/start call when resuming a Codex thread.
    *  Used to detect error responses and trigger fallback to a fresh thread. */
   private codexResumeThreadStartReqId: string | null = null;
@@ -1118,12 +1120,13 @@ export class SessionManager {
     if (!this.durability) return;
     if (
       exactSessionId !== null
-      && typeof this.durability.updateSessionCheckpointsStatusBySessionId === 'function'
+      && typeof this.durability.updateExactSessionCheckpointStatus === 'function'
     ) {
-      this.durability.updateSessionCheckpointsStatusBySessionId(
-        exactSessionId,
+      this.durability.updateExactSessionCheckpointStatus({
+        providerSessionId: exactSessionId,
+        conversationKey: this.conversationKey,
         sessionStatus,
-      );
+      });
       return;
     }
     this.durability.upsertSessionCheckpoint(this.conversationKey, { sessionStatus });
@@ -1154,11 +1157,16 @@ export class SessionManager {
       && resumeSessionId !== undefined
       && typeof this.durability.reactivateSessionLifecycle === 'function'
     ) {
+      if (existingRowId === undefined) {
+        throw new Error('Exact resumable agent row identity is required for lifecycle activation');
+      }
       return this.durability.reactivateSessionLifecycle({
-        ...(existingRowId === undefined ? {} : { agentSessionRowId: existingRowId }),
+        agentSessionRowId: existingRowId,
         providerSessionId: resumeSessionId,
         provider: this.provider,
         pid,
+        workspaceKey: this.conversationKey,
+        conversationKey: this.conversationKey,
       });
     }
 
@@ -1299,6 +1307,8 @@ export class SessionManager {
       }
       this.db.raw.exec('COMMIT');
       inTransaction = false;
+      this.durableFailureClosed = true;
+      this.durableFailureInconclusive = false;
     } catch (err) {
       if (inTransaction) {
         try {
@@ -1314,8 +1324,6 @@ export class SessionManager {
         }
       }
       throw err;
-    } finally {
-      this.durableFailureClosed = true;
     }
   }
 
@@ -1327,8 +1335,10 @@ export class SessionManager {
     try {
       this.persistRoutePolicyCheckpoint(existing);
     } catch (metadataError) {
+      let compensated = false;
       try {
         this.compensateRoutePolicyPersistenceFailure(providerSessionId, agentSessionRowId);
+        compensated = true;
       } catch (compensationError) {
         log.warn({
           err: compensationError,
@@ -1339,7 +1349,8 @@ export class SessionManager {
           isResume: providerSessionId !== null,
         }, 'route-policy metadata compensation failed; preserving metadata error');
       }
-      this.durableFailureClosed = true;
+      this.durableFailureClosed = compensated;
+      this.durableFailureInconclusive = !compensated;
       throw metadataError;
     }
   }
@@ -1391,12 +1402,14 @@ export class SessionManager {
   ): void {
     if (
       this.durability
-      && typeof this.durability.retireSessionLifecycle === 'function'
+      && typeof this.durability.retireExactSessionLifecycle === 'function'
     ) {
-      this.durability.retireSessionLifecycle({
+      this.durability.retireExactSessionLifecycle({
         agentSessionRowId: existingRowId,
         providerSessionId,
         provider: persistedProvider,
+        workspaceKey: this.conversationKey,
+        conversationKey: this.conversationKey,
       });
     } else {
       updateResumedSessionStatus(
@@ -1409,6 +1422,7 @@ export class SessionManager {
       this.updateCheckpointStatus('ended', providerSessionId);
     }
     this.durableFailureClosed = true;
+    this.durableFailureInconclusive = false;
   }
 
   private resumeRetirementEligibility(
@@ -1515,6 +1529,7 @@ export class SessionManager {
       this.updateCheckpointStatus('orphaned', exactSessionId);
     }
     this.durableFailureClosed = true;
+    this.durableFailureInconclusive = false;
   }
 
   bindGenerationOwnership(resolve: () => SessionGenerationIdentity | null): void {
@@ -1657,6 +1672,7 @@ export class SessionManager {
       throw new Error(`Provider '${provider}' does not support persisted session resume`);
     }
     this.durableFailureClosed = false;
+    this.durableFailureInconclusive = false;
 
     const cwd = this.configuredCwd ?? homedir();
 
@@ -2953,6 +2969,7 @@ export class SessionManager {
     lastMessageAt: string | null;
     turnInFlight: boolean;
     durableFailureClosed: boolean;
+    durableFailureInconclusive: boolean;
   } {
     return {
       active: this.active,
@@ -2962,6 +2979,7 @@ export class SessionManager {
       messageCount: this.messageCount,
       lastMessageAt: this.lastMessageAt,
       durableFailureClosed: this.durableFailureClosed,
+      durableFailureInconclusive: this.durableFailureInconclusive,
       turnInFlight: this.providerTurnInFlight,
     };
   }

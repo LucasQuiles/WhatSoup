@@ -111,7 +111,7 @@ describe('SessionLifecycleStore through DurabilityEngine', () => {
     expect(durability.getSessionCheckpoint('fault-fresh')).toBeUndefined();
   });
 
-  it('reactivates one exact resumable row and every exact-session checkpoint', () => {
+  it('reactivates one exact resumable row and its exact conversation checkpoint', () => {
     const rowId = insertAgentRow(db, 'resume-session', 'crashed', 'resume-a');
     durability.upsertSessionCheckpoint('resume-a', {
       sessionId: 'resume-session',
@@ -129,6 +129,8 @@ describe('SessionLifecycleStore through DurabilityEngine', () => {
       providerSessionId: 'resume-session',
       provider: 'claude-cli',
       pid: 414,
+      workspaceKey: 'resume-a',
+      conversationKey: 'resume-a',
     })).toBe(rowId);
 
     expect(agentRow(db, rowId)).toMatchObject({
@@ -142,8 +144,8 @@ describe('SessionLifecycleStore through DurabilityEngine', () => {
       session_status: 'active',
     });
     expect(durability.getSessionCheckpoint('resume-b')).toMatchObject({
-      claude_pid: 414,
-      session_status: 'active',
+      claude_pid: 101,
+      session_status: 'suspended',
     });
   });
 
@@ -155,9 +157,12 @@ describe('SessionLifecycleStore through DurabilityEngine', () => {
     });
 
     expect(durability.reactivateSessionLifecycle({
+      agentSessionRowId: rowId,
       providerSessionId: 'proactive-session',
       provider: 'claude-cli',
       pid: 515,
+      workspaceKey: 'proactive-a',
+      conversationKey: 'proactive-a',
     })).toBe(rowId);
     expect(agentRow(db, rowId)).toMatchObject({ status: 'active', ended_at: null });
   });
@@ -171,10 +176,13 @@ describe('SessionLifecycleStore through DurabilityEngine', () => {
     });
 
     expect(() => durability.reactivateSessionLifecycle({
+      agentSessionRowId: second,
       providerSessionId: 'ambiguous-session',
       provider: 'claude-cli',
       pid: 616,
-    })).toThrow(/exactly one|ambiguous/i);
+      workspaceKey: 'ambiguous-a',
+      conversationKey: 'ambiguous-a',
+    })).toThrow(/workspace|exact/i);
     expect(agentRow(db, first).status).toBe('suspended');
     expect(agentRow(db, second).status).toBe('orphaned');
 
@@ -184,6 +192,8 @@ describe('SessionLifecycleStore through DurabilityEngine', () => {
       providerSessionId: 'ambiguous-session',
       provider: 'claude-cli',
       pid: 717,
+      workspaceKey: 'ambiguous-a',
+      conversationKey: 'ambiguous-a',
     })).toThrow(/resumable|exact/i);
     expect(agentRow(db, first).status).toBe('ended');
   });
@@ -209,6 +219,8 @@ describe('SessionLifecycleStore through DurabilityEngine', () => {
       providerSessionId: 'fault-resume-session',
       provider: 'claude-cli',
       pid: 818,
+      workspaceKey: 'fault-resume',
+      conversationKey: 'fault-resume',
     })).toThrow(/resume checkpoint fault/i);
 
     expect(agentRow(db, rowId)).toMatchObject({
@@ -246,7 +258,7 @@ describe('SessionLifecycleStore through DurabilityEngine', () => {
       ended_at: expect.any(String),
     });
     expect(durability.getSessionCheckpoint('failed-a')?.session_status).toBe('orphaned');
-    expect(durability.getSessionCheckpoint('failed-b')?.session_status).toBe('orphaned');
+    expect(durability.getSessionCheckpoint('failed-b')?.session_status).toBe('active');
   });
 
   it('atomically closes a pre-init failure by row and conversation identity', () => {
@@ -326,6 +338,8 @@ describe('SessionLifecycleStore through DurabilityEngine', () => {
       providerSessionId: 'foreign-resume-session',
       provider: 'opencode-cli',
       pid: 929,
+      workspaceKey: 'foreign-resume',
+      conversationKey: 'foreign-resume',
     })).toThrow(/provider|resumable|exact/i);
 
     expect(agentRow(db, rowId)).toEqual(beforeRow);

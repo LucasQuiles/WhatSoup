@@ -259,7 +259,7 @@ describe('SessionManager route policy admission', () => {
         },
       }),
     });
-    const retire = vi.spyOn(durability, 'retireSessionLifecycle')
+    const retire = vi.spyOn(durability, 'retireExactSessionLifecycle')
       .mockImplementation(() => { throw new Error('synthetic policy retirement failure'); });
     const initialize = vi.spyOn(OpenAIApiProvider.prototype, 'initialize');
     const sm = new SessionManager({
@@ -309,7 +309,166 @@ describe('SessionManager route policy admission', () => {
     expect(sm.getStatus()).toMatchObject({
       active: false,
       durableFailureClosed: true,
+      durableFailureInconclusive: false,
     });
+  });
+
+  it('reports an inconclusive durable lifecycle when metadata compensation also fails', async () => {
+    const metadataError = new Error('synthetic route policy metadata failure');
+    vi.spyOn(durability, 'upsertSessionCheckpoint').mockImplementation(() => { throw metadataError; });
+    db.raw.exec(`
+      CREATE TRIGGER deny_route_policy_compensation
+      BEFORE UPDATE OF status ON agent_sessions
+      WHEN OLD.workspace_key = '15550219' AND NEW.status = 'crashed'
+      BEGIN
+        SELECT RAISE(ABORT, 'synthetic compensation failure');
+      END;
+    `);
+    const initialize = vi.spyOn(OpenAIApiProvider.prototype, 'initialize');
+    const sm = new SessionManager({
+      db,
+      messenger: messenger(),
+      chatJid: '15550219@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      model: 'gpt-5',
+      routePolicy: route,
+    });
+    sm.setDurability(durability);
+
+    await expect(sm.spawnSession()).rejects.toBe(metadataError);
+    expect(initialize).not.toHaveBeenCalled();
+    expect(db.raw.prepare(
+      `SELECT COUNT(*) AS n FROM agent_sessions
+       WHERE workspace_key = ? AND status = 'active'`,
+    ).get('15550219')).toEqual({ n: 1 });
+    expect(db.raw.prepare(
+      `SELECT COUNT(*) AS n FROM session_checkpoints
+       WHERE conversation_key = ? AND session_status = 'active'`,
+    ).get('15550219')).toEqual({ n: 1 });
+    expect(sm.getStatus()).toMatchObject({
+      active: false,
+      durableFailureClosed: false,
+    });
+    expect(sm.getStatus()).toHaveProperty('durableFailureInconclusive', true);
+  });
+
+  it('reactivates only the intended compatible OpenCode lifecycle for a duplicate session ID', async () => {
+    const sessionId = 'duplicate-compatible-opencode-resume';
+    const insert = db.raw.prepare(
+      `INSERT INTO agent_sessions (
+         session_id, claude_pid, started_in_directory, chat_jid, workspace_key,
+         started_at, status, provider
+       ) VALUES (?, 0, '/tmp', ?, ?, datetime('now'), 'suspended', 'opencode-cli')`,
+    );
+    const firstRowId = Number(insert.run(
+      sessionId,
+      '15550220@s.whatsapp.net',
+      '15550220',
+    ).lastInsertRowid);
+    const secondRowId = Number(insert.run(
+      sessionId,
+      '15550221@s.whatsapp.net',
+      '15550221',
+    ).lastInsertRowid);
+    durability.upsertSessionCheckpoint('15550220', { sessionId, sessionStatus: 'suspended' });
+    durability.upsertSessionCheckpoint('15550221', { sessionId, sessionStatus: 'suspended' });
+    const sm = new SessionManager({
+      db,
+      messenger: messenger(),
+      chatJid: '15550220@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'opencode-cli',
+    });
+    sm.setDurability(durability);
+
+    await sm.spawnSession(sessionId);
+
+    expect(db.raw.prepare('SELECT id, status FROM agent_sessions WHERE session_id = ? ORDER BY id')
+      .all(sessionId)).toEqual([
+      { id: firstRowId, status: 'active' },
+      { id: secondRowId, status: 'suspended' },
+    ]);
+    expect(durability.getSessionCheckpoint('15550220')?.session_status).toBe('active');
+    expect(durability.getSessionCheckpoint('15550221')?.session_status).toBe('suspended');
+  });
+
+  it('retires only the intended unsupported OpenAI lifecycle for a duplicate session ID', async () => {
+    const sessionId = 'duplicate-unsupported-openai-resume';
+    const insert = db.raw.prepare(
+      `INSERT INTO agent_sessions (
+         session_id, claude_pid, started_in_directory, chat_jid, workspace_key,
+         started_at, status, provider
+       ) VALUES (?, 0, '/tmp', ?, ?, datetime('now'), 'suspended', 'openai-api')`,
+    );
+    const firstRowId = Number(insert.run(
+      sessionId,
+      '15550222@s.whatsapp.net',
+      '15550222',
+    ).lastInsertRowid);
+    const secondRowId = Number(insert.run(
+      sessionId,
+      '15550223@s.whatsapp.net',
+      '15550223',
+    ).lastInsertRowid);
+    durability.upsertSessionCheckpoint('15550222', { sessionId, sessionStatus: 'suspended' });
+    durability.upsertSessionCheckpoint('15550223', { sessionId, sessionStatus: 'suspended' });
+    const sm = new SessionManager({
+      db,
+      messenger: messenger(),
+      chatJid: '15550222@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+    });
+    sm.setDurability(durability);
+
+    await expect(sm.spawnSession(sessionId)).rejects.toThrow(/does not support persisted session resume/i);
+
+    expect(db.raw.prepare('SELECT id, status FROM agent_sessions WHERE session_id = ? ORDER BY id')
+      .all(sessionId)).toEqual([
+      { id: firstRowId, status: 'ended' },
+      { id: secondRowId, status: 'suspended' },
+    ]);
+    expect(durability.getSessionCheckpoint('15550222')?.session_status).toBe('ended');
+    expect(durability.getSessionCheckpoint('15550223')?.session_status).toBe('suspended');
+  });
+
+  it('fails closed when the intended checkpoint identity changes before activation proof', async () => {
+    const sessionId = 'checkpoint-toctou-resume';
+    const inserted = db.raw.prepare(
+      `INSERT INTO agent_sessions (
+         session_id, claude_pid, started_in_directory, chat_jid, workspace_key,
+         started_at, status, provider
+       ) VALUES (?, 0, '/tmp', '15550224@s.whatsapp.net', '15550224',
+         datetime('now'), 'suspended', 'opencode-cli')`,
+    ).run(sessionId);
+    const rowId = Number(inserted.lastInsertRowid);
+    durability.upsertSessionCheckpoint('15550224', { sessionId, sessionStatus: 'suspended' });
+    const reactivate = durability.reactivateSessionLifecycle.bind(durability);
+    vi.spyOn(durability, 'reactivateSessionLifecycle').mockImplementation((params) => {
+      db.raw.prepare(
+        `UPDATE session_checkpoints SET conversation_key = ? WHERE conversation_key = ?`,
+      ).run('15550225', '15550224');
+      durability.upsertSessionCheckpoint('15550224', {
+        sessionId: 'replacement-checkpoint-session',
+        sessionStatus: 'suspended',
+      });
+      return reactivate(params);
+    });
+    const sm = new SessionManager({
+      db,
+      messenger: messenger(),
+      chatJid: '15550224@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'opencode-cli',
+    });
+    sm.setDurability(durability);
+
+    await expect(sm.spawnSession(sessionId)).rejects.toThrow(/checkpoint|conversation|exact/i);
+    expect(db.raw.prepare('SELECT status FROM agent_sessions WHERE id = ?').get(rowId))
+      .toEqual({ status: 'suspended' });
+    expect(durability.getSessionCheckpoint('15550225')?.session_status).toBe('suspended');
+    expect(durability.getSessionCheckpoint('15550224')?.session_status).toBe('suspended');
   });
 
   it('retires the persisted agent row and checkpoint when its provider differs from the resolved route', async () => {
@@ -550,7 +709,7 @@ describe('SessionManager route policy admission', () => {
       sessionId,
       sessionStatus: 'suspended',
     });
-    const retire = vi.spyOn(durability, 'retireSessionLifecycle')
+    const retire = vi.spyOn(durability, 'retireExactSessionLifecycle')
       .mockImplementation(() => { throw new Error('synthetic retirement failure'); });
     const sm = new SessionManager({
       db,
