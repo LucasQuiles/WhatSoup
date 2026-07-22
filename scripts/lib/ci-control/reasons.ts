@@ -497,6 +497,54 @@ const REASONS = deepFreeze([
       unavailableEvidence: 'The terminal receipt, exact-byte digest, or attempt identity is unavailable.',
     },
   }),
+  defineReason({
+    code: 'evidence.change-record.missing',
+    outcome: 'block',
+    guidanceKind: 'source-correction',
+    metadataState: 'complete',
+    implementationState: 'implemented',
+    messageTemplate: {
+      summary: 'The commit declares no resolvable change record, or its referenced record file is absent from the tree.',
+      guidance: ['Add exactly one Change-Record trailer whose referenced changes/<id>.yaml record exists in the same revision; do not weaken the requirement with a low declared risk.'],
+    },
+    fixtures: {
+      unsafe: 'A commit carries no Change-Record trailer, or a Change-Record trailer whose changes/<id>.yaml file does not exist.',
+      safeNeighbor: 'The commit declares exactly one Change-Record trailer whose changes/<id>.yaml record is present in the tree.',
+      unavailableEvidence: 'Record presence cannot be determined because the tree or record path is unreadable; that is inconclusive, not a passing absence.',
+    },
+  }),
+  defineReason({
+    code: 'evidence.trailer.invalid',
+    outcome: 'block',
+    guidanceKind: 'source-correction',
+    metadataState: 'complete',
+    implementationState: 'implemented',
+    messageTemplate: {
+      summary: 'A change-record trailer is unrecognized, duplicated, out of bounds, or omits an obligated companion trailer.',
+      guidance: ['Use only the recognized bounded trailers (Change-Record, Regression-For, Change-Intent), exactly one Change-Record, and supply Regression-For whenever Change-Intent is bugfix.'],
+    },
+    fixtures: {
+      unsafe: 'A commit adds an unknown Change-* trailer, two Change-Record trailers, an injection-bearing value, or Change-Intent: bugfix without Regression-For.',
+      safeNeighbor: 'The commit uses one Change-Record, bounded recognized trailer values, and pairs Change-Intent: bugfix with a Regression-For trailer.',
+      unavailableEvidence: 'The commit message cannot be read; that is inconclusive, not a passing valid trailer set.',
+    },
+  }),
+  defineReason({
+    code: 'evidence.trailer.record-mismatch',
+    outcome: 'block',
+    guidanceKind: 'source-correction',
+    metadataState: 'complete',
+    implementationState: 'implemented',
+    messageTemplate: {
+      summary: 'A present change record is provably inconsistent with its trailer pointer, its filename, the schema, or the allowed record set.',
+      guidance: ['Reconcile the record so its declared id matches its filename and the Change-Record trailer, it is schema-valid, and every referenced record is in the allowed set.'],
+    },
+    fixtures: {
+      unsafe: 'A present, readable changes/<id>.yaml declares a different id, fails the schema, is unparseable, or references a record outside the allowed set.',
+      safeNeighbor: 'The present record is schema-valid, its declared id matches its filename and the trailer, and it is within the allowed record set.',
+      unavailableEvidence: 'The record cannot be read to compare against its pointer; that is inconclusive, not a passing match.',
+    },
+  }),
 ] as ReasonDefinitionV2[]) as readonly ReasonDefinitionV2[];
 
 const REASON_BY_CODE: ReadonlyMap<string, ReasonDefinitionV2> = new Map(REASONS.map((reason) => [reason.code, reason]));

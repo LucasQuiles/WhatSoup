@@ -1,0 +1,7 @@
+# Defect fixture: schema-invalid record. `intent: hotfix` is outside the closed intent set,
+# so the present, readable record is provably not schema-valid -> evidence.trailer.record-mismatch (BLOCK).
+id: CR-bad-enum
+intent: hotfix
+declaredRisk: standard
+components:
+  - scripts/ci-change-record
