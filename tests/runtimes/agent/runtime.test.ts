@@ -1933,7 +1933,7 @@ describe('AgentRuntime', () => {
     }
   });
 
-  it('applies an activity-independent wall deadline to fresh-context system turns', async () => {
+  it('applies an activity-independent wall deadline after provider admission', async () => {
     vi.useFakeTimers();
     let proveShutdown!: () => void;
     mockSession.shutdown.mockImplementationOnce(() => new Promise<void>((resolve) => {
@@ -1946,25 +1946,21 @@ describe('AgentRuntime', () => {
         session: typeof mockSession | null;
         managerIdFor(session: typeof mockSession): string;
         sessionEventToolScopes: WeakMap<typeof mockSession, string>;
-        markSystemTurn(
-          session: typeof mockSession,
-          scopeKey: string,
-          purpose: 'fresh_session_context',
-          routeChatJid: string,
-        ): { id: number; scopeKey: string };
+        markSystemTurn: (...args: [typeof mockSession, string, 'fresh_session_context', string]) => SystemTurnLeaseToken;
+        requireSystemTurnProviderBoundary(lease: SystemTurnLeaseToken): void;
       };
       state.session = mockSession;
       state.managerIdFor(mockSession);
       state.sessionEventToolScopes.set(mockSession, '__global__');
-      state.markSystemTurn(
+      const lease = state.markSystemTurn(
         mockSession,
         '__global__',
         'fresh_session_context',
         '15550001111@s.whatsapp.net',
       );
+      state.requireSystemTurnProviderBoundary(lease);
 
-      // First expiry grants exactly one retry window (P3): no teardown yet,
-      // and the lease keeps blocking dispatch while the slow request finishes.
+      // First expiry grants one retry window while the lease keeps blocking dispatch.
       await vi.advanceTimersByTimeAsync(4 * 60 * 1000);
 
       expect(mockSession.shutdown).not.toHaveBeenCalled();
@@ -3315,8 +3311,9 @@ describe('AgentRuntime', () => {
       setOwnedTestSession(runtime, 'chat-auto', session);
       state.chatQueues.set('chat-auto', queue);
       let missedContextMarkedBeforeInjection = false;
-      state.injectMissedMessages = vi.fn(async () => {
+      state.injectMissedMessages = vi.fn(async (_session: typeof session, _chatJid: string, _sinceUnixSec: number, onProviderBoundaryReady: () => void) => {
         missedContextMarkedBeforeInjection = pendingSystemResults(runtime).count('chat-auto') === 1;
+        onProviderBoundaryReady();
         return true;
       });
 
@@ -3333,7 +3330,7 @@ describe('AgentRuntime', () => {
       expect(state.injectMissedMessages).toHaveBeenCalledWith(
         session,
         'chat-auto@s.whatsapp.net',
-        Math.floor(new Date('2026-06-10T10:00:00Z').getTime() / 1000),
+        Math.floor(new Date('2026-06-10T10:00:00Z').getTime() / 1000), expect.any(Function),
       );
       expect(missedContextMarkedBeforeInjection).toBe(true);
       expect(session.sendTurn).not.toHaveBeenCalled();
@@ -11525,8 +11522,9 @@ describe('AgentRuntime', () => {
           injectMissedMessages: ReturnType<typeof vi.fn>;
         };
         let missedContextMarkedBeforeInjection = false;
-        state.injectMissedMessages = vi.fn(async () => {
+        state.injectMissedMessages = vi.fn(async (_session: typeof mockSession, _chatJid: string, _sinceUnixSec: number, onProviderBoundaryReady: () => void) => {
           missedContextMarkedBeforeInjection = pendingSystemResults(runtime).count('15551230008@lid') === 1;
+          onProviderBoundaryReady();
           return true;
         });
 
@@ -11537,7 +11535,7 @@ describe('AgentRuntime', () => {
         expect(state.injectMissedMessages).toHaveBeenCalledWith(
           mockSession,
           '15551230008@lid',
-          Math.floor(new Date('2026-06-10T09:59:00Z').getTime() / 1000),
+          Math.floor(new Date('2026-06-10T09:59:00Z').getTime() / 1000), expect.any(Function),
         );
         expect(missedContextMarkedBeforeInjection).toBe(true);
         expect(mockSession.sendTurn).not.toHaveBeenCalled();
@@ -11706,7 +11704,7 @@ describe('AgentRuntime', () => {
         expect(activeState.injectMissedMessages).toHaveBeenCalledWith(
           mockSession,
           '15551230011@lid',
-          Math.floor(new Date('2026-06-10T09:59:00Z').getTime() / 1000),
+          Math.floor(new Date('2026-06-10T09:59:00Z').getTime() / 1000), expect.any(Function),
         );
         expect(markSpy).toHaveBeenCalledTimes(2);
         expect(markSpy).toHaveBeenNthCalledWith(1, expect.objectContaining({
