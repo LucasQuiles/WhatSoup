@@ -2324,6 +2324,9 @@ export class SessionManager {
       }
       let sawResult = false;
       let boundarySettled = false;
+      let pendingOpenCodeResult: Extract<AgentEvent, { type: 'result' }> | null = null;
+      let pendingOpenCodeText: Extract<AgentEvent, { type: 'assistant_text' }>[] = [];
+      let openCodeStopCandidateCount = 0;
 
       try {
         onProviderBoundaryReady?.();
@@ -2335,7 +2338,34 @@ export class SessionManager {
 
       const dispatchSpawnPerTurnEvent = (event: AgentEvent): void => {
         if (this.activeProviderTurnToken !== providerTurnToken) return;
-        if (event.type === 'result') sawResult = true;
+        if (this.provider === 'opencode-cli') {
+          if (pendingOpenCodeResult !== null && event.type !== 'result') {
+            if (openCodeStopCandidateCount === 1) {
+              log.warn({
+                provider: this.provider,
+                chatJid: this.chatJid,
+                sessionId: this.sessionId,
+              }, 'OpenCode stop candidate superseded by continued provider output');
+            }
+            pendingOpenCodeResult = null;
+            pendingOpenCodeText = [];
+            sawResult = false;
+          }
+          if (event.type === 'assistant_text') {
+            pendingOpenCodeText.push(event);
+            this.tickWatchdog();
+            return;
+          }
+          if (event.type === 'result') {
+            openCodeStopCandidateCount += 1;
+            pendingOpenCodeResult = event;
+            sawResult = true;
+            this.tickWatchdog();
+            return;
+          }
+        } else if (event.type === 'result') {
+          sawResult = true;
+        }
         this.handleProviderEvent(event);
       };
 
@@ -2525,6 +2555,26 @@ export class SessionManager {
         this.clearTurnWatchdog();
         this.child = null;
 
+        let deliveredTerminalResult = sawResult;
+        if (this.provider === 'opencode-cli') {
+          deliveredTerminalResult = false;
+          if (code === 0 && signal === null && pendingOpenCodeResult !== null) {
+            for (const textEvent of pendingOpenCodeText) this.handleProviderEvent(textEvent);
+            this.handleProviderEvent(pendingOpenCodeResult);
+            deliveredTerminalResult = true;
+            if (openCodeStopCandidateCount > 1) {
+              log.info({
+                provider: this.provider,
+                chatJid: this.chatJid,
+                sessionId: this.sessionId,
+                stopCandidateCount: openCodeStopCandidateCount,
+              }, 'OpenCode turn committed after superseded stop candidates');
+            }
+          }
+          pendingOpenCodeText = [];
+          pendingOpenCodeResult = null;
+        }
+
         // A signal exit AFTER the turn delivered its terminal result is the
         // normal spawn-per-turn teardown (the provider emits its result, then
         // the process tree is torn down with SIGTERM). Only treat a signal exit
@@ -2533,8 +2583,8 @@ export class SessionManager {
         // false onCrash + unexpected-exit notification (#1870). A non-zero exit
         // code still counts as an error even with a result, as it is a stronger
         // failure signal than a teardown SIGTERM.
-        const exitedWithError = (code !== 0 && code !== null) || (signal !== null && !sawResult);
-        const missingTerminalResult = code === 0 && signal === null && !sawResult;
+        const exitedWithError = (code !== 0 && code !== null) || (signal !== null && !deliveredTerminalResult);
+        const missingTerminalResult = code === 0 && signal === null && !deliveredTerminalResult;
         if (exitedWithError || missingTerminalResult) {
           this.completeProviderTurn(providerTurnToken);
           const crashedSessionId = this.sessionId;
