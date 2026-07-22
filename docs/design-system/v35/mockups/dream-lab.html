@@ -26,38 +26,64 @@
   --shadow-lift:0 1px 2px rgb(60 45 20/.10), 0 10px 28px rgb(60 45 20/.14);
 }
 * { margin:0; box-sizing:border-box; }
-body { background:var(--base); color:var(--t1); font:400 13.5px/1.5 "Hanken Grotesk",Arial,sans-serif; min-height:100vh; display:flex; flex-direction:column; }
-header { display:flex; align-items:center; gap:14px; padding:14px 22px 12px; border-bottom:1px solid var(--hair); }
-.nameplate { display:flex; align-items:center; gap:12px; }
+body { background:var(--base); color:var(--t1); font:400 13.5px/1.5 "Hanken Grotesk",Arial,sans-serif; height:100vh; display:flex; overflow:hidden; }
+/* ===== Nav rail (global chrome) ===== */
+nav { width:212px; flex:none; background:var(--inset); border-right:1px solid var(--hair); display:flex; flex-direction:column; padding:14px 10px; gap:2px; }
+.nameplate { display:flex; align-items:center; gap:12px; padding:2px 8px 16px; }
 .nameplate .tick { width:8px; height:8px; border-radius:1px; background:var(--m-passive); }
-.nameplate .wm { font:800 17px/22px "Bricolage Grotesque",sans-serif; letter-spacing:-0.06em; }
-.nameplate .wm b { color:var(--accent); }
+.nameplate .wm { font:800 18px/24px "Bricolage Grotesque",sans-serif; letter-spacing:-0.06em; color:var(--t1); }
+.nameplate .wm b { color:var(--accent); font-weight:800; }
+.nameplate .ctx { font:400 11px/16px "IBM Plex Mono",monospace; letter-spacing:.18em; color:var(--t3); margin-left:auto; }
+.nav-sec { font:500 11px/16px "IBM Plex Mono",monospace; letter-spacing:.12em; color:var(--t3); padding:14px 10px 6px; text-transform:uppercase; }
+.nav-item { display:flex; align-items:center; gap:10px; padding:7px 10px; border-radius:6px; color:var(--t2); text-decoration:none; font-weight:500; transition:transform .18s ease-out, box-shadow .18s ease-out, background .18s; }
+.nav-item:hover { background:var(--raised); color:var(--t1); transform:translateY(-1px); }
+.nav-item.active { background:color-mix(in srgb, var(--accent) 10%, transparent); color:var(--t1); box-shadow:inset 2px 0 0 var(--accent); }
+.nav-item svg { width:16px; height:16px; fill:currentColor; opacity:.85; }
+.nav-item .dot { margin-left:auto; width:6px; height:6px; border-radius:1px; transform:rotate(45deg); background:var(--warn); }
+.deploy { margin-top:auto; border-top:1px solid var(--hair); padding-top:10px; }
+.deploy .hchip { display:flex; align-items:center; gap:8px; padding:6px 10px; font:500 11.5px/16px "IBM Plex Mono",monospace; color:var(--t3); }
+.deploy .hchip .hst { width:6px; height:6px; border-radius:50%; background:var(--ok); }
+.deploy .hchip .hst.warn { background:var(--warn); border-radius:1px; transform:rotate(45deg); }
+.appcol { flex:1; display:flex; flex-direction:column; min-width:0; min-height:0; }
+/* light presence: card separation + control borders (locked-token consumption) */
+[data-theme="light"] .panel, [data-theme="light"] .scard, [data-theme="light"] .kpi,
+[data-theme="light"] .dcard, [data-theme="light"] .pcard, [data-theme="light"] .acard,
+[data-theme="light"] .prop, [data-theme="light"] .mstat, [data-theme="light"] .fstrip,
+[data-theme="light"] .card, [data-theme="light"] .ch, [data-theme="light"] .swatches .sw,
+[data-theme="light"] .pair, [data-theme="light"] .bub, [data-theme="light"] .qcard { box-shadow:var(--shadow-rest); }
+[data-theme="light"] .btn.ghost, [data-theme="light"] .btn.sm:not(.upd):not(.danger):not(.no),
+[data-theme="light"] .ibtn, [data-theme="light"] .cap, [data-theme="light"] .fstrip,
+[data-theme="light"] .theme-toggle { border-color:var(--hair-3); }
+@media (max-width:1100px){ nav{width:64px} .nav-item span,.nav-sec,.nameplate .wm,.nameplate .ctx,.deploy .hchip span{display:none} }
+header { display:flex; align-items:center; gap:14px; padding:14px 22px 12px; border-bottom:1px solid var(--hair); }
 h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
-.qpill { display:flex; align-items:center; gap:7px; padding:5px 12px; border-radius:99px; background:color-mix(in srgb, var(--dream) 12%, transparent); color:var(--dream); font:600 11.5px/16px "IBM Plex Mono",monospace; }
+.qpill { display:flex; align-items:center; gap:7px; padding:5px 12px; border-radius:99px; background:var(--inset); border:1px solid var(--hair-2); color:var(--t2); font:600 11.5px/16px "IBM Plex Mono",monospace; }
 .spacer { flex:1; }
 .btn { display:inline-flex; align-items:center; gap:8px; padding:8px 14px; border-radius:6px; border:1px solid var(--hair-2); background:var(--raised); color:var(--t1); font:600 12.5px/16px inherit; cursor:pointer; transition:transform .16s ease-out, box-shadow .16s ease-out; }
 .btn:hover { transform:translateY(-1px); box-shadow:var(--shadow-lift); }
-.btn.ghost { background:transparent; color:var(--t2); }
+.btn.ghost { background:transparent; color:var(--t2); border:1px solid var(--hair-2); }
 .btn.sm { padding:5px 10px; font-size:11.5px; }
-.btn.ok { background:var(--ok); color:var(--accent-fg); border-color:transparent; }
-[data-theme="light"] .btn.ok { color:#fff; }
+.btn.ok { background:var(--accent); color:var(--accent-fg); border-color:transparent; }
 .btn.no { color:var(--crit); border-color:color-mix(in srgb, var(--crit) 36%, transparent); background:transparent; }
 .wrap { flex:1; display:grid; grid-template-columns:340px 1fr; min-height:0; }
 .queue { border-right:1px solid var(--hair); overflow:auto; padding:14px 12px; display:flex; flex-direction:column; gap:8px; }
-.qhead { font:600 10.5px/14px "IBM Plex Mono",monospace; letter-spacing:.1em; color:var(--t3); text-transform:uppercase; padding:4px 6px 8px; }
+.qhead { font:600 11px/14px "IBM Plex Mono",monospace; letter-spacing:.1em; color:var(--t3); text-transform:uppercase; padding:4px 6px 8px; }
+.fstrip { display:flex; align-items:center; gap:8px; width:100%; padding:8px 10px; border-radius:8px; border:1px solid var(--hair-2); background:transparent; color:var(--t2); font:500 11px/14px "IBM Plex Mono",monospace; cursor:pointer; }
+.fstrip:hover { border-color:var(--hair-3); color:var(--t1); }
 .dcard { background:var(--raised); border:1px solid var(--hair); border-radius:10px; padding:12px; cursor:pointer; transition:transform .16s ease-out, box-shadow .16s ease-out, border-color .16s; }
 .dcard:hover { transform:translateY(-2px); box-shadow:var(--shadow-lift); }
-.dcard.sel { border-color:var(--dream); box-shadow:0 0 0 1px var(--dream); }
+.dcard.sel { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent); }
 .dcard .top { display:flex; align-items:center; gap:9px; }
-.av { width:26px; height:26px; border-radius:7px; display:flex; align-items:center; justify-content:center; font:700 10px/1 "Hanken Grotesk",sans-serif; color:#fff; flex:none; }
+.av { width:26px; height:26px; border-radius:7px; display:flex; align-items:center; justify-content:center; font:700 11px/1 "Hanken Grotesk",sans-serif; color:#fff; flex:none; }
 .dcard .nm { font:700 13px/17px "Bricolage Grotesque",sans-serif; }
 .dcard .what { color:var(--t3); font-size:11.5px; margin-top:1px; }
-.dtag { margin-left:auto; font:600 9.5px/12px "IBM Plex Mono",monospace; letter-spacing:.05em; padding:3px 7px; border-radius:99px; text-transform:uppercase; flex:none; }
-.dtag.persona { background:color-mix(in srgb, var(--m-agent) 14%, transparent); color:var(--m-agent); }
-.dtag.skills { background:color-mix(in srgb, var(--m-chat) 14%, transparent); color:var(--m-chat); }
-.dtag.routine { background:color-mix(in srgb, var(--m-passive) 14%, transparent); color:var(--m-passive); }
+.dtag { margin-left:auto; font:600 11px/12px "IBM Plex Mono",monospace; letter-spacing:.05em; padding:3px 7px; border-radius:99px; text-transform:uppercase; flex:none; }
+.dtag.persona { background:var(--inset); border:1px solid var(--hair-2); color:var(--t2); }
+.dtag.skills { background:var(--inset); border:1px solid var(--hair-2); color:var(--t2); }
+.dtag.routine { background:var(--inset); border:1px solid var(--hair-2); color:var(--t2); }
 .dcard .why { color:var(--t2); font-size:12px; margin-top:8px; font-style:italic; }
-.dcard .when { font:400 10px/14px "IBM Plex Mono",monospace; color:var(--t3); margin-top:8px; }
+.dcard .when { font:400 11px/14px "IBM Plex Mono",monospace; color:var(--t3); margin-top:8px; }
+.dcard .when .inst { white-space:nowrap; }
 /* review pane */
 .review { overflow:auto; padding:18px 22px; display:flex; flex-direction:column; gap:14px; }
 .rhead { display:flex; align-items:flex-start; gap:14px; }
@@ -67,10 +93,10 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
 .panel { background:var(--raised); border:1px solid var(--hair); border-radius:10px; }
 .panel-h { display:flex; align-items:center; gap:8px; padding:11px 14px; border-bottom:1px solid var(--hair); }
 .panel-h h3 { font:600 12.5px/18px inherit; }
-.panel-h .tag { font:500 10px/14px "IBM Plex Mono",monospace; color:var(--t3); }
+.panel-h .tag { font:500 11px/14px "IBM Plex Mono",monospace; color:var(--t3); }
 .panel-b { padding:14px; }
-.diff { font:400 12.5px/1.7 "IBM Plex Mono",monospace; }
-.diff .sec { color:var(--t3); font-size:10.5px; letter-spacing:.08em; text-transform:uppercase; margin:10px 0 4px; display:block; }
+.diff { font:400 12.5px/1.7 "IBM Plex Mono",monospace; max-width:72ch; }
+.diff .sec { color:var(--t3); font-size:11px; letter-spacing:.08em; text-transform:uppercase; margin:10px 0 4px; display:block; }
 .diff .sec:first-child { margin-top:0; }
 .diff .line { padding:3px 8px; border-radius:5px; display:block; }
 .diff .del { background:color-mix(in srgb, var(--crit) 10%, transparent); color:var(--crit); text-decoration:line-through; text-decoration-color:color-mix(in srgb, var(--crit) 50%, transparent); }
@@ -78,33 +104,53 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
 .diff .keep { color:var(--t2); }
 .rationale { display:flex; gap:10px; align-items:flex-start; background:var(--inset); border:1px solid var(--hair); border-radius:10px; padding:12px 14px; }
 .rationale .ic { color:var(--dream); flex:none; }
-.rationale p { color:var(--t2); font-size:12.5px; font-style:italic; }
+.rationale p { color:var(--t2); font-size:12.5px; font-style:italic; max-width:68ch; }
 .impact { display:flex; gap:16px; }
 .impact .col { flex:1; }
-.impact .k { font:600 10px/14px "IBM Plex Mono",monospace; letter-spacing:.08em; color:var(--t3); text-transform:uppercase; margin-bottom:6px; }
+.impact .k { font:600 11px/14px "IBM Plex Mono",monospace; letter-spacing:.08em; color:var(--t3); text-transform:uppercase; margin-bottom:6px; }
 .impact .v { font-size:12.5px; color:var(--t2); }
 .impact .v b { color:var(--t1); }
 .actions { display:flex; gap:10px; align-items:center; }
-.actions .note { color:var(--t3); font-size:11.5px; }
+.actions-note { color:var(--t3); font-size:11.5px; margin-top:-6px; }
 .hist { padding:4px 0; }
 .hrow { display:flex; align-items:center; gap:10px; padding:7px 0; border-bottom:1px solid var(--hair); font-size:12px; }
 .hrow:last-child { border:none; }
-.hrow .st { font:700 9.5px/12px "IBM Plex Mono",monospace; padding:2px 7px; border-radius:99px; text-transform:uppercase; flex:none; }
-.hrow .st.approved { background:color-mix(in srgb, var(--ok) 12%, transparent); color:var(--ok); }
-.hrow .st.rejected { background:color-mix(in srgb, var(--crit) 10%, transparent); color:var(--crit); }
-.hrow p { color:var(--t2); }
-.hrow .when { margin-left:auto; font:400 10px/14px "IBM Plex Mono",monospace; color:var(--t3); }
+.hrow .st { font:700 11px/12px "IBM Plex Mono",monospace; padding:2px 7px; border-radius:99px; text-transform:uppercase; flex:none; }
+.hrow .st.approved { background:color-mix(in srgb, var(--ok) 12%, transparent); color:var(--ok); } .hrow .st.approved::before { content:"✓ "; }
+.hrow .st.rejected { background:color-mix(in srgb, var(--crit) 10%, transparent); color:var(--crit); } .hrow .st.rejected::before { content:"✕ "; }
+.hrow p { color:var(--t2); flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.hrow .when { margin-left:auto; flex:none; padding:2px 8px; font:400 11px/14px "IBM Plex Mono",monospace; color:var(--t3); background:var(--inset); border:1px solid var(--hair); border-radius:99px; }
 @media (max-width:980px){ .wrap{grid-template-columns:1fr} .queue{border-right:none;border-bottom:1px solid var(--hair)} }
 </style>
 </head>
 <body>
+<nav>
+  <div class="nameplate"><span class="tick"></span><span class="wm">SO<b>U</b>P</span><span class="ctx">DREAM</span></div>
+  <div class="nav-sec">Operate</div>
+  <a class="nav-item" href="fleet.html"><svg viewBox="0 0 16 16"><path d="M2 2h5v5H2zM9 2h5v5H9zM2 9h5v5H2zM9 9h5v5H9z"/></svg><span>Fleet</span></a>
+  <a class="nav-item" href="agents.html"><svg viewBox="0 0 16 16"><path d="M8 1.5 14 5v6l-6 3.5L2 11V5z"/></svg><span>Agents</span></a>
+  <a class="nav-item" href="inbox.html"><svg viewBox="0 0 16 16"><path d="M2 3h12v9H6l-4 3z"/></svg><span>Inbox</span><span class="dot"></span></a>
+  <a class="nav-item" href="#"><svg viewBox="0 0 16 16" style="fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round"><path d="M3 13V8m5 5V3m5 10v-7"/></svg><span>Ops</span></a>
+  <div class="nav-sec">Create</div>
+  <a class="nav-item" href="skills-hub.html"><svg viewBox="0 0 16 16"><path d="M8 2a6 6 0 1 0 6 6h-2a4 4 0 1 1-4-4z"/><path d="M8 6l5-3-3 5z"/></svg><span>Skills</span></a>
+  <a class="nav-item active" href="dream-lab.html"><svg viewBox="0 0 16 16"><path d="M8 2c2 2 2 4 0 6s-2 4 0 6c-3-1-5-3-5-6s2-5 5-6z"/></svg><span>Dream Lab</span></a>
+  <div class="nav-sec">System</div>
+  <a class="nav-item" href="deployments.html"><svg viewBox="0 0 16 16"><path d="M2 3h12v4H2zM2 9h12v4H2z"/></svg><span>Deployments</span></a>
+  <a class="nav-item" href="settings.html"><svg viewBox="0 0 16 16"><path d="M8 5a3 3 0 1 0 0 6 3 3 0 0 0 0-6zm6 3h2M1 8h2m5-7v2m0 10v2m5-12 1.5-1.5M2.5 13.5 4 12m9 1.5L11.5 12M2.5 2.5 4 4"/></svg><span>Settings</span></a>
+  <div class="deploy">
+    <div class="nav-sec">Hosts</div>
+    <div class="hchip"><span class="hst"></span><span>local · this host</span></div>
+    <div class="hchip"><span class="hst warn"></span><span>nest-2 · container</span></div>
+    <div class="hchip"><span class="hst"></span><span>field-pi · remote</span></div>
+  </div>
+</nav>
+<div class="appcol">
 <header>
-  <div class="nameplate"><span class="tick"></span><span class="wm">SO<b>U</b>P</span></div>
   <h1>Dream Lab</h1>
   <span class="qpill">✦ 3 dreams queued</span>
   <div class="spacer"></div>
-  <button class="btn ghost theme-toggle" onclick="document.documentElement.dataset.theme=document.documentElement.dataset.theme==='dark'?'light':'dark'">◐ theme</button>
   <button class="btn ghost">history</button>
+  <button class="btn ghost theme-toggle" onclick="document.documentElement.dataset.theme=document.documentElement.dataset.theme==='dark'?'light':'dark'"><svg width="14" height="14" viewBox="0 0 16 16" style="vertical-align:-2px"><circle cx="8" cy="8" r="3.2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6 13 13M13 3l-1.4 1.4M4.4 11.6 3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg> theme</button>
 </header>
 <div class="wrap">
   <aside class="queue">
@@ -117,15 +163,21 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
     <div class="dcard">
       <div class="top"><span class="av" style="background:hsl(285,38%,34%)">M</span><div><div class="nm">Mercy</div><div class="what">skills — add calendar-read</div></div><span class="dtag skills">skills</span></div>
       <div class="why">"Clients keep asking for appointment times. I can answer if I can read the calendar."</div>
-      <div class="when">suggested 5h ago · instance help@shinycartel</div>
+      <div class="when">suggested 5h ago · instance <span class="inst">help@shinycartel…com</span></div>
     </div>
     <div class="dcard">
       <div class="top"><span class="av" style="background:hsl(285,38%,34%)">M</span><div><div class="nm">Mercy</div><div class="what">routine — daily summary</div></div><span class="dtag routine">routine</span></div>
       <div class="why">"I'd like to post a 9am order summary to the ops room each morning."</div>
-      <div class="when">suggested 1d ago · instance help@shinycartel</div>
+      <div class="when">suggested 1d ago · instance <span class="inst">help@shinycartel…com</span></div>
     </div>
     <div class="qhead" style="margin-top:8px">Filters</div>
-    <div class="dcard" style="opacity:.6;cursor:default"><div class="top"><div class="what">agent: all · type: all · state: queued</div></div></div>
+    <button class="fstrip">agent: all · type: all · state: queued <span style="margin-left:auto;color:var(--t3)">▾</span></button>
+    <div class="qhead" style="margin-top:8px">Recently decided</div>
+    <div class="hist">
+      <div class="hrow"><span class="st approved">approved</span><p title="Lumen — add &quot;summarize long threads on request&quot;"><b>Lumen</b> — add "summarize long threads on request"</p><span class="when">2d</span></div>
+      <div class="hrow"><span class="st rejected">rejected</span><p title="Sable — &quot;respond to every mention within 30s&quot; (too eager)"><b>Sable</b> — "respond to every mention within 30s" (too eager)</p><span class="when">4d</span></div>
+      <div class="hrow"><span class="st approved">approved</span><p title="Quinn — reduce sign-off frequency"><b>Quinn</b> — reduce sign-off frequency</p><span class="when">6d</span></div>
+    </div>
   </aside>
   <section class="review">
     <div class="rhead">
@@ -160,18 +212,11 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
     <div class="actions">
       <button class="btn ok">✓ Approve &amp; apply</button>
       <button class="btn no">✕ Reject</button>
-      <button class="btn ghost">edit then approve…</button>
-      <span class="note">Approval applies to the profile; instances pick it up next turn.</span>
+      <button class="btn ghost">Edit then approve</button>
     </div>
-    <div class="panel">
-      <div class="panel-h"><h3>Recent decisions</h3></div>
-      <div class="panel-b hist">
-        <div class="hrow"><span class="st approved">approved</span><p><b>Lumen</b> — add "summarize long threads on request"</p><span class="when">2d</span></div>
-        <div class="hrow"><span class="st rejected">rejected</span><p><b>Sable</b> — "respond to every mention within 30s" (too eager)</p><span class="when">4d</span></div>
-        <div class="hrow"><span class="st approved">approved</span><p><b>Quinn</b> — reduce sign-off frequency</p><span class="when">6d</span></div>
-      </div>
-    </div>
+    <div class="actions-note">Approval applies to the profile; instances pick it up next turn.</div>
   </section>
+</div>
 </div>
 </body>
 </html>
