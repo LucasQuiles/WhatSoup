@@ -3050,7 +3050,10 @@ describe('AgentRuntime', () => {
     expect((runtime as unknown as { perChatTurnText: Map<string, string> }).perChatTurnText.has('test@s.whatsapp.net')).toBe(false);
     expect((runtime as unknown as { perChatAssistantItemText: Map<string, Map<number, string>> }).perChatAssistantItemText.has('test@s.whatsapp.net')).toBe(false);
     expect((runtime as unknown as { activeToolNames: Map<string, string> }).activeToolNames.size).toBe(0);
-    expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('exited with code 1'));
+    expect(mockQueue.enqueueText).toHaveBeenCalledWith(
+      expect.stringContaining('exited with code 1'),
+      'lifecycle',
+    );
     expect(mockQueue.flush).toHaveBeenCalledTimes(1);
   });
 
@@ -11469,7 +11472,10 @@ describe('AgentRuntime', () => {
       capturedNotifyUserRef.current?.('resume callback notice');
 
       expect(resumedQueue?.abortTurn).not.toHaveBeenCalled();
-      expect(resumedQueue?.enqueueText).toHaveBeenCalledWith('resume callback notice');
+      expect(resumedQueue?.enqueueText).toHaveBeenCalledWith(
+        'resume callback notice',
+        'lifecycle',
+      );
       expect(resumedQueue?.flush).toHaveBeenCalled();
       expect(state.chatSessions.has(mapKey)).toBe(true);
       expect(state.chatQueues.has(mapKey)).toBe(true);
