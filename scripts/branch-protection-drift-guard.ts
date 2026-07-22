@@ -1,5 +1,5 @@
 /**
- * branch-protection-drift-check — detects silent changes to `main`'s branch protection.
+ * branch-protection-drift-guard — detects silent changes to `main`'s branch protection.
  *
  * WHY THIS EXISTS. R-02 (required approving review on `main`) was applied by hand through
  * the GitHub API during the 2026-07-21 CI/CD audit. Nothing detected it being turned off
@@ -17,7 +17,7 @@
  * observed side from whatever `gh api` returned:
  *
  *   gh api repos/<owner>/<repo>/branches/main/protection \
- *     | node --experimental-strip-types scripts/branch-protection-drift-check.ts --observed -
+ *     | node --experimental-strip-types scripts/branch-protection-drift-guard.ts --observed -
  *
  * Reading protection requires an admin-scoped token, which CI does not have by default, so
  * this is NOT wired into `verify:push:branch` or `quality.yml` yet. Arming it needs a
@@ -245,9 +245,9 @@ export function diffProtection(expected: ExpectedProtection, observedValue: Obse
 }
 
 export function summarize(findings: ProtectionDrift[]): string {
-  if (findings.length === 0) return 'branch-protection-drift-check: no drift (matches docs/enforcement/branch-protection-expected.json)';
+  if (findings.length === 0) return 'branch-protection-drift-guard: no drift (matches docs/enforcement/branch-protection-expected.json)';
   return [
-    `branch-protection-drift-check: ${findings.length} drift finding(s) against ${EXPECTED_PROTECTION_PATH}:`,
+    `branch-protection-drift-guard: ${findings.length} drift finding(s) against ${EXPECTED_PROTECTION_PATH}:`,
     ...findings.map((f) => `  ${f.detail}`),
     '',
     'If the change was deliberate, update the committed expectation in the same PR so the',
@@ -259,7 +259,7 @@ function readObservedArg(argv: string[]): string {
   const idx = argv.indexOf('--observed');
   if (idx === -1 || argv[idx + 1] === undefined) {
     throw new Error(
-      'usage: branch-protection-drift-check --observed <file|-> ; pipe `gh api ' +
+      'usage: branch-protection-drift-guard --observed <file|-> ; pipe `gh api ' +
         'repos/<owner>/<repo>/branches/main/protection` into it (inconclusive without input)',
     );
   }
@@ -274,7 +274,7 @@ function main(argv: string[]): void {
   } catch (err) {
     // Inconclusive is its own outcome. It is deliberately NOT exit 1: "I could not tell"
     // must never be indistinguishable from "I checked and it drifted".
-    process.stderr.write(`branch-protection-drift-check: INCONCLUSIVE — ${(err as Error).message}\n`);
+    process.stderr.write(`branch-protection-drift-guard: INCONCLUSIVE — ${(err as Error).message}\n`);
     process.exitCode = EXIT_INCONCLUSIVE;
     return;
   }

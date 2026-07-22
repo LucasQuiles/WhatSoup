@@ -7,7 +7,7 @@ import {
   parseObservedProtection,
   summarize,
   type ObservedProtection,
-} from '../../scripts/branch-protection-drift-check.ts';
+} from '../../scripts/branch-protection-drift-guard.ts';
 
 /**
  * R-02 (required approving review on `main`) was applied by hand through the GitHub API.
@@ -31,7 +31,7 @@ function observed(overrides: Record<string, unknown> = {}): ObservedProtection {
   } as ObservedProtection;
 }
 
-describe('branch-protection-drift-check — diffProtection', () => {
+describe('branch-protection-drift-guard — diffProtection', () => {
   it('reports no drift when observed matches the committed expectation', () => {
     const expected = loadExpectedProtection();
     expect(diffProtection(expected, observed())).toEqual([]);
@@ -91,7 +91,7 @@ describe('branch-protection-drift-check — diffProtection', () => {
   });
 });
 
-describe('branch-protection-drift-check — fail-closed input handling', () => {
+describe('branch-protection-drift-guard — fail-closed input handling', () => {
   it('treats absent observed input as INCONCLUSIVE, never as no drift', () => {
     // The whole failure mode this guard exists for is "the setting quietly went away".
     // A guard that reads nothing and prints "no drift" would be the same bug one level up.
@@ -126,7 +126,7 @@ describe('branch-protection-drift-check — fail-closed input handling', () => {
   });
 });
 
-describe('branch-protection-drift-check — committed expectation', () => {
+describe('branch-protection-drift-guard — committed expectation', () => {
   it('the expected snapshot exists and is complete', () => {
     const expected = loadExpectedProtection();
     expect(expected.required_status_checks.contexts.length).toBeGreaterThan(0);

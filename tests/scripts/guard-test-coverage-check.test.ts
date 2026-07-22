@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -480,6 +480,18 @@ describe('guard-test-coverage meta-guard', () => {
 describe('guard-test-coverage meta-guard — real repo', () => {
   afterEach(() => {
     process.exitCode = undefined;
+  });
+
+  it('enumerates the TypeScript target exposed by the branch-protection guard command', () => {
+    const repoRoot = path.resolve(import.meta.dirname, '..', '..');
+    const packageJson = JSON.parse(
+      readFileSync(path.join(repoRoot, 'package.json'), 'utf8'),
+    ) as { scripts?: Record<string, string> };
+    const command = packageJson.scripts?.['guard:branch-protection-drift'] ?? '';
+    const target = command.match(/scripts\/[A-Za-z0-9._/-]+\.ts\b/)?.[0];
+
+    expect(target).toBeDefined();
+    expect(enumerateGuardScripts(repoRoot)).toContain(target);
   });
 
   it('passes against the real repository (all current guards are covered)', () => {

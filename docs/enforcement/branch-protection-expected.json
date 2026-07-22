@@ -1,7 +1,7 @@
 {
   "$comment": [
     "Expected GitHub branch protection for `main`. Compared against the live API by",
-    "scripts/branch-protection-drift-check.ts (npm run guard:branch-protection-drift).",
+    "scripts/branch-protection-drift-guard.ts (npm run guard:branch-protection-drift).",
     "R-02 (required approving review) was applied by hand through the API and nothing",
     "detected it being turned off again -- a setting that gates every merge was itself",
     "unprotected. Changing protection is legitimate; changing it SILENTLY is not, so this",
