@@ -180,6 +180,138 @@ describe('SessionManager route policy admission', () => {
     expect(durability.getSessionCheckpoint('15550202')?.session_status).toBe('ended');
   });
 
+  it('does not retire unrelated workspaces when route-policy rejection shares a session ID', async () => {
+    const sessionId = 'duplicate-route-policy-resume';
+    const insert = db.raw.prepare(
+      `INSERT INTO agent_sessions (
+         session_id, claude_pid, started_in_directory, chat_jid, workspace_key,
+         started_at, status, provider
+       ) VALUES (?, 0, '/tmp', ?, ?, datetime('now'), 'suspended', 'openai-api')`,
+    );
+    const currentRowId = Number(insert.run(
+      sessionId,
+      '15550215@s.whatsapp.net',
+      '15550215',
+    ).lastInsertRowid);
+    const otherRowId = Number(insert.run(
+      sessionId,
+      '15550216@s.whatsapp.net',
+      '15550216',
+    ).lastInsertRowid);
+    const mismatchedWatchdogState = JSON.stringify({
+      providerRoutePolicy: {
+        provider: 'openai-api',
+        model: 'gpt-4.1',
+        dataPolicy: 'restricted',
+        policyVersion: PROVIDER_DATA_POLICY_VERSION,
+      },
+    });
+    durability.upsertSessionCheckpoint('15550215', {
+      sessionId,
+      sessionStatus: 'suspended',
+      watchdogState: mismatchedWatchdogState,
+    });
+    durability.upsertSessionCheckpoint('15550216', {
+      sessionId,
+      sessionStatus: 'suspended',
+      watchdogState: mismatchedWatchdogState,
+    });
+    const sm = new SessionManager({
+      db,
+      messenger: messenger(),
+      chatJid: '15550215@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      model: 'gpt-5',
+      routePolicy: route,
+    });
+    sm.setDurability(durability);
+
+    await expect(sm.spawnSession(sessionId)).rejects.toBeInstanceOf(ProviderDataPolicyError);
+    expect(db.raw.prepare('SELECT id, status FROM agent_sessions WHERE session_id = ? ORDER BY id')
+      .all(sessionId)).toEqual([
+      { id: currentRowId, status: 'suspended' },
+      { id: otherRowId, status: 'suspended' },
+    ]);
+    expect(durability.getSessionCheckpoint('15550215')?.session_status).toBe('suspended');
+    expect(durability.getSessionCheckpoint('15550216')?.session_status).toBe('suspended');
+  });
+
+  it('preserves ProviderDataPolicyError when route-policy retirement fails', async () => {
+    const sessionId = 'route-policy-retirement-failure';
+    const inserted = db.raw.prepare(
+      `INSERT INTO agent_sessions (
+         session_id, claude_pid, started_in_directory, chat_jid, workspace_key,
+         started_at, status, provider
+       ) VALUES (?, 0, '/tmp', '15550217@s.whatsapp.net', '15550217',
+         datetime('now'), 'suspended', 'openai-api')`,
+    ).run(sessionId);
+    const rowId = Number(inserted.lastInsertRowid);
+    durability.upsertSessionCheckpoint('15550217', {
+      sessionId,
+      sessionStatus: 'suspended',
+      watchdogState: JSON.stringify({
+        providerRoutePolicy: {
+          provider: 'openai-api',
+          model: 'gpt-4.1',
+          dataPolicy: 'restricted',
+          policyVersion: PROVIDER_DATA_POLICY_VERSION,
+        },
+      }),
+    });
+    const retire = vi.spyOn(durability, 'retireSessionLifecycle')
+      .mockImplementation(() => { throw new Error('synthetic policy retirement failure'); });
+    const initialize = vi.spyOn(OpenAIApiProvider.prototype, 'initialize');
+    const sm = new SessionManager({
+      db,
+      messenger: messenger(),
+      chatJid: '15550217@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      model: 'gpt-5',
+      routePolicy: route,
+    });
+    sm.setDurability(durability);
+
+    await expect(sm.spawnSession(sessionId)).rejects.toBeInstanceOf(ProviderDataPolicyError);
+    expect(retire).toHaveBeenCalledOnce();
+    expect(initialize).not.toHaveBeenCalled();
+    expect(db.raw.prepare('SELECT status FROM agent_sessions WHERE id = ?').get(rowId))
+      .toEqual({ status: 'suspended' });
+    expect(durability.getSessionCheckpoint('15550217')?.session_status).toBe('suspended');
+  });
+
+  it('compensates a failed route-policy metadata write before provider admission', async () => {
+    const metadataError = new Error('synthetic route policy metadata failure');
+    vi.spyOn(durability, 'upsertSessionCheckpoint').mockImplementation(() => { throw metadataError; });
+    const initialize = vi.spyOn(OpenAIApiProvider.prototype, 'initialize');
+    const sm = new SessionManager({
+      db,
+      messenger: messenger(),
+      chatJid: '15550218@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      model: 'gpt-5',
+      routePolicy: route,
+    });
+    sm.setDurability(durability);
+
+    await expect(sm.spawnSession()).rejects.toBe(metadataError);
+    expect(initialize).not.toHaveBeenCalled();
+    expect(db.raw.prepare(
+      `SELECT COUNT(*) AS n FROM agent_sessions
+       WHERE workspace_key = ? AND status = 'active'`,
+    ).get('15550218')).toEqual({ n: 0 });
+    expect(db.raw.prepare(
+      `SELECT COUNT(*) AS n FROM session_checkpoints
+       WHERE conversation_key = ? AND session_status = 'active'`,
+    ).get('15550218')).toEqual({ n: 0 });
+    expect(sm.getStatus()).toMatchObject({
+      active: false,
+      durableFailureClosed: true,
+    });
+  });
+
   it('retires the persisted agent row and checkpoint when its provider differs from the resolved route', async () => {
     const sessionId = 'foreign-provider-resume';
     const inserted = db.raw.prepare(
