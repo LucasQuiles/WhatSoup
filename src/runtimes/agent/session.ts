@@ -47,6 +47,7 @@ import { composeWithExactLineDedup } from './prompt-compose.ts';
 import {
   appendProviderCrashPreview,
   buildProviderCrashMetadata,
+  classifyProviderCrash,
 } from './provider-crash-diagnostics.ts';
 import { lookupCredential, resolveProviderKeyService, SERVICE_ENV_MAP } from '../../lib/keyring.ts';
 import { PROVIDER_API_KEY_SERVICES } from '../../lib/provider-key-service.ts';
@@ -2268,6 +2269,7 @@ export class SessionManager {
       let pendingOpenCodeResult: Extract<AgentEvent, { type: 'result' }> | null = null;
       let pendingOpenCodeText: Extract<AgentEvent, { type: 'assistant_text' }>[] = [];
       let openCodeStopCandidateCount = 0;
+      let terminalStderrResultDelivered = false;
 
       try {
         onProviderBoundaryReady?.();
@@ -2427,6 +2429,28 @@ export class SessionManager {
         if (nextPreview === this.crashStderrPreview) return;
         this.crashStderrPreview = nextPreview;
         if (!this.crashStderrPreview) return;
+        if (
+          this.provider === 'opencode-cli'
+          && !terminalStderrResultDelivered
+          && classifyProviderCrash(this.crashStderrPreview) === 'provider_usage_limit'
+        ) {
+          terminalStderrResultDelivered = true;
+          sawResult = true;
+          log.warn({
+            provider: this.provider,
+            chatJid: this.chatJid,
+            pid: child.pid ?? null,
+            failureClass: 'provider_usage_limit',
+          }, 'terminal provider stderr observed; ending retrying child');
+          this.handleProviderEvent({
+            type: 'result',
+            text: 'Provider usage limit reached: insufficient balance.',
+          });
+          void this.killChildTree(child, 'SIGTERM').catch((err) => {
+            log.error({ err, provider: this.provider, chatJid: this.chatJid, pid: child.pid ?? null }, 'failed to reap terminal provider stderr child');
+          });
+          return;
+        }
         log.warn({
           provider: this.provider,
           chatJid: this.chatJid,
@@ -2498,8 +2522,8 @@ export class SessionManager {
 
         let deliveredTerminalResult = sawResult;
         if (this.provider === 'opencode-cli') {
-          deliveredTerminalResult = false;
-          if (code === 0 && signal === null && pendingOpenCodeResult !== null) {
+          deliveredTerminalResult = terminalStderrResultDelivered;
+          if (!terminalStderrResultDelivered && code === 0 && signal === null && pendingOpenCodeResult !== null) {
             for (const textEvent of pendingOpenCodeText) this.handleProviderEvent(textEvent);
             this.handleProviderEvent(pendingOpenCodeResult);
             deliveredTerminalResult = true;

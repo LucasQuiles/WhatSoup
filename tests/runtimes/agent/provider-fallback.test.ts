@@ -744,7 +744,7 @@ describe('AgentRuntime — primary recovery probe validity', () => {
     await expect(view(runtime).probePrimaryProviderRecovered()).resolves.toBe(false);
     expect(probeBinaryCommandMock).toHaveBeenCalledWith(
       'opencode',
-      ['run', '--format', 'json', '--pure', '-m', 'openai/gpt-5.2', 'Reply with OK only.'],
+      ['run', '--format', 'json', '--pure', '--print-logs', '--log-level', 'ERROR', '-m', 'openai/gpt-5.2', 'Reply with OK only.'],
       expect.objectContaining({ OPENAI_API_KEY: 'present-but-invalid' }),
       expect.objectContaining({ timeoutMs: 15_000 }),
     );

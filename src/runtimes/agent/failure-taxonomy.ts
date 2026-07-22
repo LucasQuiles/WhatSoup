@@ -297,6 +297,10 @@ function isProviderCreditBalanceLimitMessage(lower: string): boolean {
     // terminal for the turn but carry no billing co-word, so match them directly.
     lower.includes('out of usage credits') ||
     (
+      lower.includes('insufficient balance') &&
+      (lower.includes('account') || lower.includes('billing') || lower.includes('recharge'))
+    ) ||
+    (
       lower.includes('out of usage') &&
       (
         lower.includes('add funds') ||

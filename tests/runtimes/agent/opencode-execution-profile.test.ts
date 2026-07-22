@@ -55,13 +55,13 @@ describe('OpenCode execution profile', () => {
     });
 
     expect(fresh).toEqual([
-      'run', '--format', 'json', '--pure',
+      'run', '--format', 'json', '--pure', '--print-logs', '--log-level', 'ERROR',
       '--agent', 'whatsoup-headless',
       '-m', 'glm/glm-5.2',
       'fresh turn',
     ]);
     expect(resumed).toEqual([
-      'run', '--format', 'json', '--pure',
+      'run', '--format', 'json', '--pure', '--print-logs', '--log-level', 'ERROR',
       '--agent', 'whatsoup-headless',
       '--session', 'session-123',
       '-m', 'glm/glm-5.2',
@@ -84,6 +84,9 @@ describe('OpenCode execution profile', () => {
     });
 
     expect(occurrences(args, '--agent')).toBe(1);
+    expect(occurrences(args, '--print-logs')).toBe(1);
+    expect(occurrences(args, '--log-level')).toBe(1);
+    expect(args).toContain('ERROR');
     expect(args).toContain('whatsoup-headless');
     expect(args).not.toContain('-m');
   });

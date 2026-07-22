@@ -445,6 +445,48 @@ describe('SessionManager spawn-per-turn child handlers (opencode-cli)', () => {
     expect(preview).toContain('boom');
   });
 
+  it('turns fatal OpenCode billing stderr into one terminal usage-limit result and reaps the child', async () => {
+    const events: AgentEvent[] = [];
+    let sm!: SessionManager;
+    const session = await makeOpencodeSession({
+      onEvent: (event: AgentEvent) => {
+        events.push(event);
+        if (event.type === 'result') sm.completeProviderTurn();
+      },
+    });
+    sm = session.sm;
+    await sm.sendTurn('hello');
+    events.length = 0;
+
+    const firstChunk = 'AI_APICallError: account is suspended due to insuffici';
+    const secondChunk = 'ent balance; please recharge or check billing';
+    child.stderr.emit('data', Buffer.from(firstChunk));
+    expect(events).toEqual([]);
+    expect(killSessionTree).not.toHaveBeenCalled();
+    child.stderr.emit('data', Buffer.from(secondChunk));
+    child.stderr.emit('data', Buffer.from(`${firstChunk}${secondChunk}`));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(events).toEqual([{
+      type: 'result',
+      text: 'Provider usage limit reached: insufficient balance.',
+    }]);
+    expect(killSessionTree).toHaveBeenCalledTimes(1);
+    expect(killSessionTree).toHaveBeenCalledWith(
+      child,
+      'SIGTERM',
+      expect.objectContaining({ generationMarker: expect.any(String) }),
+    );
+
+    child._exitCb?.(null, 'SIGTERM');
+    child._closeCb?.(null, 'SIGTERM');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(session.onCrash).not.toHaveBeenCalled();
+    expect(session.notifyUser).not.toHaveBeenCalled();
+    expect(sm.getStatus().turnInFlight).toBe(false);
+  });
+
   it('superseded child close (this.child !== child) is ignored', async () => {
     const { sm, onCrash } = await makeOpencodeSession();
     await sm.sendTurn('first');

@@ -54,6 +54,8 @@ export function buildOpenCodeRunArgs(options: OpenCodeRunArgsOptions): string[] 
     'run',
     '--format', 'json',
     '--pure',
+    '--print-logs',
+    '--log-level', 'ERROR',
     ...openCodeAgentArgs(options.providerConfig),
     ...(options.sessionId ? ['--session', options.sessionId] : []),
     ...(options.model && !opencodeUsesConfigModel(options.providerConfig)

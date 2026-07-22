@@ -2986,7 +2986,8 @@ describe('__provider_switch_for_test', () => {
       { executionProfile: 'whatsoup-headless' },
     );
     expect(args).toEqual([
-      'run', '--format', 'json', '--pure', '--agent', 'whatsoup-headless',
+      'run', '--format', 'json', '--pure', '--print-logs', '--log-level', 'ERROR',
+      '--agent', 'whatsoup-headless',
     ]);
   });
 

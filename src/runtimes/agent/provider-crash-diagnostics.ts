@@ -1,6 +1,7 @@
 // Shared, non-secret provider crash diagnostics for agent runtime alerts.
 
 import {
+  isUsageLimitMessage,
   isProviderStateLockedMessage,
   type AgentFailureClass,
 } from './failure-taxonomy.ts';
@@ -74,9 +75,7 @@ export function classifyProviderCrash(text: string): AgentFailureClass | undefin
     return 'provider_auth_required';
   }
   if (
-    lower.includes('usage limit') ||
-    lower.includes('session limit') ||
-    lower.includes('out of extra usage') ||
+    isUsageLimitMessage(text) ||
     lower.includes('quota exceeded')
   ) {
     return 'provider_usage_limit';

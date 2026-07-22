@@ -101,6 +101,7 @@ describe('provider crash diagnostics', () => {
     ['Failed to authenticate. API Error: 401', 'provider_auth_required'],
     ['Invalid authentication credentials', 'provider_auth_required'],
     ['Session limit reached until 5pm', 'provider_usage_limit'],
+    ['Account suspended due to insufficient balance; please recharge', 'provider_usage_limit'],
     ['429 Too Many Requests', 'provider_rate_limit'],
     ['spawn claude ENOENT', 'provider_binary_missing'],
     ['Permission denied opening credential cache', 'provider_permission_denied'],
@@ -116,6 +117,11 @@ describe('provider crash diagnostics', () => {
     ['provider returned error 500', 'provider_server_error'],
   ])('classifies %s as %s', (text, crashClass) => {
     expect(classifyProviderCrash(text)).toBe(crashClass);
+  });
+
+  it('does not treat ordinary prose about an insufficient balance as a provider limit', () => {
+    expect(classifyProviderCrash('The report discusses an insufficient balance between the two samples.'))
+      .toBeUndefined();
   });
 
   it.each([

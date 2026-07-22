@@ -291,6 +291,7 @@ describe('createPrimaryModelProbeAdapters', () => {
       'opencode',
       [
         'run', '--format', 'json', '--pure',
+        '--print-logs', '--log-level', 'ERROR',
         '--agent', 'whatsoup-headless',
         '-m', 'configured-primary',
         'Reply with OK only.',
@@ -396,7 +397,7 @@ describe('createPrimaryModelProbeAdapters', () => {
 
     expect(probeBinaryCommand).toHaveBeenCalledWith(
       'opencode',
-      ['run', '--format', 'json', '--pure', '-m', 'openai/configured-primary', 'Reply with OK only.'],
+      ['run', '--format', 'json', '--pure', '--print-logs', '--log-level', 'ERROR', '-m', 'openai/configured-primary', 'Reply with OK only.'],
       expect.objectContaining({ OPENAI_API_KEY: 'sk-test-secret' }),
       { timeoutMs: 15_000 },
     );
@@ -423,7 +424,7 @@ describe('createPrimaryModelProbeAdapters', () => {
 
     expect(probeBinaryCommand).toHaveBeenCalledWith(
       'opencode',
-      ['run', '--format', 'json', '--pure', 'Reply with OK only.'],
+      ['run', '--format', 'json', '--pure', '--print-logs', '--log-level', 'ERROR', 'Reply with OK only.'],
       expect.objectContaining({ OPENAI_API_KEY: 'sk-test-secret' }),
       { cwd: '/agent-cwd', timeoutMs: 15_000 },
     );

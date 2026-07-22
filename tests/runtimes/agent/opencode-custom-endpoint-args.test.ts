@@ -133,6 +133,7 @@ const BASE_URL_CONFIG = {
   baseUrl: 'https://api.cloud.example/v1',
 };
 const MANAGED_AGENT_ARGS = ['--agent', 'whatsoup-headless'];
+const ERROR_LOG_ARGS = ['--print-logs', '--log-level', 'ERROR'];
 
 function expectContainedHeadlessArgs(args: string[]): void {
   const agentIndexes = args.flatMap((arg, index) => arg === '--agent' ? [index] : []);
@@ -159,16 +160,16 @@ describe('resolveProviderArgs — opencode-cli custom endpoint omits -m', () => 
     const args = getArgs(BASE_URL_CONFIG);
     expect(args).not.toContain('-m');
     expect(args).not.toContain('minimax/MiniMax-M2');
-    expect(args).toEqual(['run', '--format', 'json', '--pure', ...MANAGED_AGENT_ARGS]);
+    expect(args).toEqual(['run', '--format', 'json', '--pure', ...ERROR_LOG_ARGS, ...MANAGED_AGENT_ARGS]);
     expectContainedHeadlessArgs(args);
   });
 
   it('keeps -m when no baseUrl is configured (regression pin)', () => {
-    expect(getArgs(PROFILE_CONFIG)).toEqual(['run', '--format', 'json', '--pure', ...MANAGED_AGENT_ARGS, '-m', 'minimax/MiniMax-M2']);
+    expect(getArgs(PROFILE_CONFIG)).toEqual(['run', '--format', 'json', '--pure', ...ERROR_LOG_ARGS, ...MANAGED_AGENT_ARGS, '-m', 'minimax/MiniMax-M2']);
   });
 
   it('ignores a blank baseUrl (no silent -m drop on a value the validator rejects)', () => {
-    expect(getArgs({ ...PROFILE_CONFIG, baseUrl: '   ' })).toEqual(['run', '--format', 'json', '--pure', ...MANAGED_AGENT_ARGS, '-m', 'minimax/MiniMax-M2']);
+    expect(getArgs({ ...PROFILE_CONFIG, baseUrl: '   ' })).toEqual(['run', '--format', 'json', '--pure', ...ERROR_LOG_ARGS, ...MANAGED_AGENT_ARGS, '-m', 'minimax/MiniMax-M2']);
   });
 
   it('leaves non-opencode provider argv unchanged when a baseUrl is present', () => {

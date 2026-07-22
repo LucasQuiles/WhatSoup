@@ -60,6 +60,12 @@ describe('terminal provider-limit detection (silent-non-rollover failure class)'
     expect(isUsageLimitMessage('Provider returned insufficient_quota for this API request.')).toBe(true);
   });
 
+  it('classifies a provider-suspended insufficient-balance response as a usage limit', () => {
+    expect(classifyProviderFailure(
+      'AI_APICallError: Your account is suspended due to insufficient balance, please recharge your account or check billing details',
+    )).toBe('usage-limit');
+  });
+
   it('treats "Approaching <name>" as a WARNING, not a terminal limit (no premature rollover)', () => {
     // Approaching means the provider can still serve this turn. Arming fallback here
     // would introduce a premature-rollover failure mode — deliberately excluded.
