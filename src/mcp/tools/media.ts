@@ -43,6 +43,7 @@ export interface MediaDeps {
    * (there is none in this codebase) would pass an empty Set — never elevates.
    */
   adminPhones: Set<string>;
+  transport?: string | null;
   /**
    * T8-F2: query whether the runtime is currently in a fallback-provider
    * window. OPTIONAL — PassiveRuntime has no agent/fallback-provider concept
@@ -139,7 +140,13 @@ export function registerMediaTools(
       const captionIsGroup = isGroupJid(chatJid);
       const captionAudience = resolveOutboundAudience(chatJid, {
         isGroup: captionIsGroup,
-        peerIsAdmin: isOperatorDmPeer(chatJid, captionIsGroup, db, deps.adminPhones),
+        peerIsAdmin: isOperatorDmPeer(
+          chatJid,
+          captionIsGroup,
+          db,
+          deps.adminPhones,
+          deps.transport ?? 'baileys',
+        ),
         fallbackActive: deps.fallbackActive ? deps.fallbackActive() : true,
       });
       const caption = rawCaption !== undefined

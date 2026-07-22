@@ -67,6 +67,16 @@ describe('resolveCurrentChat', () => {
     })
   })
 
+  it.each([
+    ['Signal', 'Z3JvdXAtY29udmVyc2F0aW9u_at_signal'],
+    ['iMessage', 'iMessage;+;chatABC_at_imessage'],
+  ])('builds a group fallback for a deep-linked %s conversation', (_transport, conversationKey) => {
+    expect(resolveCurrentChat([], conversationKey, undefined)).toMatchObject({
+      conversationKey,
+      isGroup: true,
+    })
+  })
+
   it('does not crash when fallback message sender names are nullish', () => {
     const resolved = resolveCurrentChat([], 'direct-1', [
       makeMessage(1, { senderName: null as unknown as string }),

@@ -9,6 +9,10 @@ import { PresenceCache } from '../../src/transport/presence-cache.ts';
 import { registerAllTools } from '../../src/mcp/register-all.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';
 import type { ToolDeclaration } from '../../src/mcp/types.ts';
+import * as messagingTools from '../../src/mcp/tools/messaging.ts';
+import * as mediaTools from '../../src/mcp/tools/media.ts';
+import * as substrateTools from '../../src/mcp/tools/substrate.ts';
+import { config } from '../../src/config.ts';
 
 // Baseline tool count for a non-Pinecone build.
 // Bumped from a loose `>= 100` to an exact baseline so a missing module is detected.
@@ -90,6 +94,38 @@ describe('registerAllTools', () => {
     }
 
     db.raw.close();
+  });
+
+  it('threads the configured transport into every audience-sensitive tool module', () => {
+    const db = new Database(':memory:');
+    db.open();
+    const registry = new ToolRegistry();
+    const runtimeConfig = config as unknown as { transport: string };
+    const originalTransport = runtimeConfig.transport;
+    const messagingSpy = vi.spyOn(messagingTools, 'registerMessagingTools').mockImplementation(() => undefined);
+    const mediaSpy = vi.spyOn(mediaTools, 'registerMediaTools').mockImplementation(() => undefined);
+    const substrateSpy = vi.spyOn(substrateTools, 'registerSubstrateTools').mockImplementation(() => undefined);
+    runtimeConfig.transport = 'signal';
+
+    try {
+      registerAllTools(registry, makeConnection(), db);
+
+      expect(messagingSpy).toHaveBeenCalledWith(
+        registry,
+        expect.objectContaining({ transport: 'signal' }),
+      );
+      expect(mediaSpy).toHaveBeenCalledWith(
+        registry,
+        expect.objectContaining({ transport: 'signal' }),
+      );
+      expect(substrateSpy).toHaveBeenCalledWith(
+        registry,
+        expect.objectContaining({ transport: 'signal' }),
+      );
+    } finally {
+      runtimeConfig.transport = originalTransport;
+      db.raw.close();
+    }
   });
 
   it('re-throws when a core tool module fails to register (fail-closed)', async () => {

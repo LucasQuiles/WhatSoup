@@ -35,6 +35,13 @@ describe('ImessageAdapter — construction', () => {
     expect(adapter.selfRef().id).toBe('+15551234567');
   });
 
+  it('rejects unimplemented webhook mode at the direct-construction seam', () => {
+    expect(() => new ImessageAdapter(
+      makeImessageConfig({ inboundMode: 'webhook' as unknown as 'poll' }),
+      new MockImessagePort(),
+    )).toThrow(/only poll.*not implemented/i);
+  });
+
   it('builds an imessage ChannelId from config.account', () => {
     const adapter = new ImessageAdapter(
       makeImessageConfig({ account: 'mac-mini' }),

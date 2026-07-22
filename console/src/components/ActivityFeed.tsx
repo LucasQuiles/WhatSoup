@@ -14,6 +14,7 @@ interface ActivityFeedProps {
   events: FeedEvent[];
   error?: string;
   onRetry?: () => void;
+  transportsByInstance?: Readonly<Record<string, string | undefined>>;
 }
 
 type FeedFilter = "all" | "msgs" | "conn" | "errors" | "health" | "sessions";
@@ -55,7 +56,7 @@ function eventKey(event: FeedEvent): string {
   return `${event.instance ?? ""}:${event.time}:${d?.type ?? "generic"}:${dir}:${chat}`;
 }
 
-const ActivityFeed: FC<ActivityFeedProps> = ({ events, error, onRetry }) => {
+const ActivityFeed: FC<ActivityFeedProps> = ({ events, error, onRetry, transportsByInstance }) => {
   const navigate = useNavigate();
   const toast = useToast();
 
@@ -218,6 +219,7 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events, error, onRetry }) => {
               onStop={canAct ? handleStop : undefined}
               onNavigate={handleNavigate}
               onCopyResult={handleCopyResult}
+              transport={event.instance ? transportsByInstance?.[event.instance] : undefined}
             />
           );
         })}

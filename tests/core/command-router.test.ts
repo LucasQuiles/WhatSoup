@@ -12,6 +12,7 @@ vi.mock('../../src/config.ts', () => ({
     botName: 'WhatSoup',
     accessMode: 'allowlist',
     healthPort: 9090,
+    transport: 'baileys',
     models: {
       conversation: 'claude-opus-4-5',
       extraction: 'claude-haiku-4-5',
@@ -34,6 +35,7 @@ vi.mock('../../src/logger.ts', () => ({
 // Imports
 // ---------------------------------------------------------------------------
 import { isAdminMessage, parseAdminCommand } from '../../src/core/command-router.ts';
+import { config } from '../../src/config.ts';
 import type { IncomingMessage } from '../../src/core/types.ts';
 import type { Database } from '../../src/core/database.ts';
 
@@ -118,6 +120,9 @@ describe('isAdminMessage -- QR-143 cross-transport admin spoof guard', () => {
     const { config } = await import('../../src/config.ts');
     const uuid = '01234567-8901-2345-6789-012345678901';
     config.adminPhones.add(uuid);
+    const mutableConfig = config as unknown as { transport: string };
+    const originalTransport = mutableConfig.transport;
+    mutableConfig.transport = 'signal';
     try {
       expect(isAdminMessage(makeIncomingMsg({
         senderJid: `${uuid}@signal`,
@@ -128,7 +133,25 @@ describe('isAdminMessage -- QR-143 cross-transport admin spoof guard', () => {
         isGroup: false,
       }), mockDb)).toBe(false);
     } finally {
+      mutableConfig.transport = originalTransport;
       config.adminPhones.delete(uuid);
+    }
+  });
+
+  it.each([
+    ['baileys', '+1-555-010-0001@s.whatsapp.net', new Set(['15550100001'])],
+    ['signal', '+1-555-010-0001@signal', new Set(['+15550100001'])],
+    ['imessage', '+1-555-010-0001@imessage', new Set(['+15550100001'])],
+  ])('rejects malformed admin locals for %s', (transport, senderJid, adminPhones) => {
+    const previousTransport = config.transport;
+    const previousAdmins = config.adminPhones;
+    (config as unknown as { transport: string }).transport = transport;
+    (config as unknown as { adminPhones: Set<string> }).adminPhones = adminPhones;
+    try {
+      expect(isAdminMessage(makeIncomingMsg({ senderJid, isGroup: false }), mockDb)).toBe(false);
+    } finally {
+      (config as unknown as { transport: string }).transport = previousTransport;
+      (config as unknown as { adminPhones: Set<string> }).adminPhones = previousAdmins;
     }
   });
 });
@@ -172,13 +195,21 @@ describe('parseAdminCommand -- phone positive', () => {
     expect(parseAdminCommand('ALLOW 15551230008   ')).toEqual({ action: 'allow', subjectType: 'phone', subjectId: '15551230008' });
   });
 
-  it('parses Signal E.164 and UUID subjects without changing their identity', () => {
+  it('parses Signal E.164 and UUID subjects without changing their identity', async () => {
     expect(parseAdminCommand('ALLOW +15551230008')).toEqual({
       action: 'allow', subjectType: 'phone', subjectId: '+15551230008',
     });
-    expect(parseAdminCommand('BLOCK a1b2c3d4-1234-4abc-8def-a1b2c3d4e5f6')).toEqual({
-      action: 'block', subjectType: 'phone', subjectId: 'a1b2c3d4-1234-4abc-8def-a1b2c3d4e5f6',
-    });
+    const { config } = await import('../../src/config.ts');
+    const mutableConfig = config as unknown as { transport: string };
+    const originalTransport = mutableConfig.transport;
+    mutableConfig.transport = 'signal';
+    try {
+      expect(parseAdminCommand('BLOCK a1b2c3d4-1234-4abc-8def-a1b2c3d4e5f6')).toEqual({
+        action: 'block', subjectType: 'phone', subjectId: 'a1b2c3d4-1234-4abc-8def-a1b2c3d4e5f6',
+      });
+    } finally {
+      mutableConfig.transport = originalTransport;
+    }
   });
 });
 

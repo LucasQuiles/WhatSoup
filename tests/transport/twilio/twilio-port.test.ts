@@ -13,7 +13,7 @@ import type { TwilioSmsConfig } from '../../../src/transport/twilio/types.ts';
 const BASE_CONFIG: TwilioSmsConfig = {
   account: 'ml-bot',
   accountSid: 'AC00000000000000000000000000000000',
-  authTokenService: 'twilio-ml-bot',
+  authTokenService: 'whatsoup-twilio-ml-bot',
   phoneNumber: '+15559990000',
   inboundMode: 'poll',
   pollIntervalMs: 15000,
@@ -54,6 +54,45 @@ function makeMockClient(overrides: Partial<{
 // ---------------------------------------------------------------------------
 
 describe('SdkTwilioSmsPort lazy init', () => {
+  it('rejects a cross-line selector before credential or client access', () => {
+    const lookup = vi.fn().mockReturnValue(TOKEN);
+    const factory = vi.fn().mockReturnValue(makeMockClient({}));
+
+    expect(() => new SdkTwilioSmsPort(
+      { ...BASE_CONFIG, authTokenService: 'whatsoup-twilio-other-line' },
+      { credentialLookup: lookup, clientFactory: factory },
+    )).toThrow(/whatsoup-twilio-ml-bot/);
+    expect(lookup).not.toHaveBeenCalled();
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  it('rejects an invalid account with a forged null selector before credential or client access', () => {
+    const lookup = vi.fn().mockReturnValue(TOKEN);
+    const factory = vi.fn().mockReturnValue(makeMockClient({}));
+
+    expect(() => new SdkTwilioSmsPort(
+      { ...BASE_CONFIG, account: 'INVALID', authTokenService: null } as unknown as TwilioSmsConfig,
+      { credentialLookup: lookup, clientFactory: factory },
+    )).toThrow(/valid account|authTokenService/i);
+    expect(lookup).not.toHaveBeenCalled();
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  it('captures validated config before the caller-owned object can mutate', async () => {
+    const lookup = vi.fn().mockReturnValue(TOKEN);
+    const factory = vi.fn().mockReturnValue(makeMockClient({}));
+    const mutable = { ...BASE_CONFIG };
+    const port = new SdkTwilioSmsPort(mutable, { credentialLookup: lookup, clientFactory: factory });
+
+    mutable.authTokenService = 'openai';
+    mutable.accountSid = `AC${'f'.repeat(32)}`;
+    await port.verifyCredentials();
+
+    expect(lookup).toHaveBeenCalledWith('whatsoup-twilio-ml-bot');
+    expect(lookup).not.toHaveBeenCalledWith('openai');
+    expect(factory).toHaveBeenCalledWith(BASE_CONFIG.accountSid, TOKEN);
+  });
+
   it('does NOT call credentialLookup at construction time', () => {
     const lookup = vi.fn().mockReturnValue(TOKEN);
     const factory = vi.fn().mockReturnValue(makeMockClient({}));

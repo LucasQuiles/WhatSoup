@@ -32,7 +32,7 @@ UnlockScreen, UpdateModal, ConnectionBanner (transport-loss state), Toast system
   ActivityFeed, FeedIcon), chat (ChatList(Item), MessageBubble(Content)), line ops
   (LinePicker, LineTags, TagInput, FleetRowMenu, BulkActionBar, CardSelector, ModeBadge,
   StatusDot, KpiCard, AlertBanner, EmptyState, Skeleton, ErrorBoundary), QR/link (QrDisplay,
-  RelinkModal, SaveContactDialog), AddLineWizard (Identity/Config/ModelAuth/Link/Review steps).
+  RelinkModal, SaveContactDialog), AddLineWizard (Identity/Link/ModelAuth/Config/Review steps).
 - **line-detail/**: 9 tab implementations + group modals + schedule composer (~18 files).
 - **Hooks (15):** use-fleet (WS-push + polling fallback), use-websocket, use-metrics, use-theme,
   use-transport-status, use-toast, use-console-session, use-dismissable, use-exit-presence,
@@ -76,7 +76,7 @@ lint-enforced; multi-channel copy positioning locked 2026-06-13 (generic copy mu
 
 | v3.5 item | Exists today |
 |---|---|
-| Multi-channel Lines | ❌ `Line.type` is a free string; UI is WhatsApp-shaped (QR link, phone/JID identity) |
+| Multi-channel Lines | ◐ Add Line supports WhatsApp, SMS, Signal, and iMessage with transport-specific config, identity, and linkage; the 14-channel product registry remains unimplemented |
 | Managed social channels | ❌ nothing |
 | Agents as objects | ❌ agent config is per-line settings (mode/model/plugins), no Agent entity, no roster, no assignment UX |
 | First-run onboarding | ⚠️ AddLineWizard (5 utilitarian steps, per-line, not first-run) |

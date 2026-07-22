@@ -6,8 +6,8 @@ Each task: deliverable → acceptance. Gates G0–G3 per README skeleton.
 
 | # | Task | Deliverable → acceptance |
 |---|---|---|
-| 0.1 | Pick program home | Decision: repo worktree `design/soup-v35` (mirrors v3 layout) vs this staging dir → recorded in README |
-| 0.2 | Plan SSOT | This package migrated to chosen home, `execution-log.md` started → log entry #1 |
+| 0.1 | Pick program home | ✅ Historical decision complete and superseded: original work used `design/soup-v35`; current SSOT is `main`, with T5 continuing on `design/soup-v35-t5-cutover` |
+| 0.2 | Plan SSOT | ✅ #2009 merged the package to `main`; current repository docs are canonical |
 | 0.3 | Gate rules | Adopt v3 gate discipline (G0/G1/G2/G3, investigation packets, integrator-verifies-claims) → one-page protocol adopted verbatim or amended |
 | 0.4 | v3 bench note | Mark v3 program "benched at 16/24 PASS" in its README with pointer to v3.5 → committed doc |
 
@@ -26,7 +26,7 @@ Each task: deliverable → acceptance. Gates G0–G3 per README skeleton.
 |---|---|---|
 | 2.1 | Entity model | Channel/Line/Agent/Profile/Assignment/Grant/Instance/Workspace/Hatch definitions + cardinality → one-page model spec, owner-approved |
 | 2.2 | ~~Assignment cardinality~~ | ✅ answered R1: Agent 1:N Lines, Line 0:1 Agent, per-chat instances |
-| 2.3 | Channel capability matrix | All **14 channels** (A3): link method, identity form, health states, feature flags → matrix table; **full end-to-end mocked state machines per channel** (R2-7) |
+| 2.3 | Channel capability matrix | All **14 channels** (A3): link method, identity form, health states, feature flags → matrix table; bind the four runtime-backed transports and provide **full end-to-end mocked state machines** for the other ten (R2-7) |
 | 2.4 | Vocabulary amendment | Add Channel, Agent, Profile, Grant, Instance, Assignment, Workspace, Hatch, Deactivated to locked table → spec-ready table (after 2.6) |
 | 2.5 | Linkage state machine | two axes: activation (live/deactivated) × linkage (unlinked→linking→linked→degraded→relink), each state w/ distinct style/representation (R2-11) → state diagram + copy map |
 | 2.6 | **Instance-model investigation** (R2-5, precedes vocabulary lock) | map/compare the current 4-instance runtime model (primary-line, operator-agent, sandbox-agent, chat-bot) → v3.5 archetypes + product model: capabilities, configs, session scopes per archetype → investigation doc w/ mapping table + gaps |
@@ -83,5 +83,6 @@ G0 → WS2 (model) ─┬─► WS1 (research) ─► WS3 (directions) ─► G1
                               WS0 continuous
 ```
 
-First dispatch recommendation: **WS2 tasks 2.1–2.5** (blocks everything visual) + **WS1 1.2–1.4**
-(parallel, independent). WS0.1 needs your call first: repo worktree vs staging dir.
+Historical first-dispatch recommendation (completed/superseded): **WS2 tasks 2.1–2.5** plus
+**WS1 1.2–1.4**. The program-home choice no longer awaits a decision: `main` is the current SSOT,
+#2009 is merged, and the active T5 successor branch is `design/soup-v35-t5-cutover`.

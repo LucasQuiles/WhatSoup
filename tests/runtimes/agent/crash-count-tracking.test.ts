@@ -168,6 +168,7 @@ vi.mock('../../../src/runtimes/agent/media-bridge.ts', () => ({
 
 vi.mock('../../../src/core/durability.ts', () => ({
   sendTracked: vi.fn(),
+  sendTrackedOperatorReport: vi.fn(),
 }));
 
 vi.mock('../../../src/core/conversation-key.ts', () => ({

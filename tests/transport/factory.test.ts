@@ -71,9 +71,34 @@ describe('createConnection factory', () => {
   it('twilio config with twilioConfig returns a TwilioConnection instance', () => {
     const conn = createConnection({
       transport: 'twilio',
+      botName: 'ml-bot',
       twilioConfig: makeTwilioConfig(),
     });
     expect(conn).toBeInstanceOf(TwilioConnection);
+  });
+
+  it('rejects a cross-line Twilio selector before constructing provider or webhook seams', () => {
+    expect(() => createConnection({
+      transport: 'twilio',
+      botName: 'ml-bot',
+      twilioConfig: makeTwilioConfig({ authTokenService: 'whatsoup-twilio-other-line' }),
+    })).toThrow(/whatsoup-twilio-ml-bot/);
+    expect(keyringMock.lookupCredential).not.toHaveBeenCalled();
+    expect(webhookServerMock.constructedOptions).toHaveLength(0);
+  });
+
+  it('rejects an invalid Twilio account even when a forged null selector matches the helper result', () => {
+    expect(() => createConnection({
+      transport: 'twilio',
+      botName: 'INVALID' as string,
+      twilioConfig: {
+        ...makeTwilioConfig(),
+        account: 'INVALID',
+        authTokenService: null,
+      } as unknown as TwilioSmsConfig,
+    })).toThrow(/valid immutable line identity|authTokenService/i);
+    expect(keyringMock.lookupCredential).not.toHaveBeenCalled();
+    expect(webhookServerMock.constructedOptions).toHaveLength(0);
   });
 
   it('twilio transport without twilioConfig throws a loud error', () => {
@@ -91,6 +116,7 @@ describe('createConnection factory', () => {
       expect(() =>
         createConnection({
           transport: 'twilio',
+          botName: 'ml-bot',
           twilioConfig: makeTwilioConfig(twilioConfig),
         }),
       ).toThrow('[createConnection] twilioConfig is missing accountSid or authTokenService.');
@@ -112,6 +138,7 @@ describe('createConnection factory', () => {
   it('signal transport constructs a live RuntimeConnection', () => {
     const conn = createConnection({
       transport: 'signal',
+      botName: 'test',
       signalConfig: {
         account: 'test',
         socketPath: '/tmp/signalc-test.sock',
@@ -136,6 +163,7 @@ describe('createConnection factory', () => {
   it('imessage transport constructs an ImessageConnection with a valid imsg config', () => {
     const conn = createConnection({
       transport: 'imessage',
+      botName: 'test',
       imessageConfig: {
         account: 'test',
         backend: 'imsg',
@@ -156,6 +184,7 @@ describe('createConnection factory', () => {
     expect(() =>
       createConnection({
         transport: 'imessage',
+        botName: 'test',
         imessageConfig: {
           account: 'test',
           backend: 'imsg',
@@ -168,10 +197,45 @@ describe('createConnection factory', () => {
     ).toThrow(/missing sender/i);
   });
 
+  it('imessage transport rejects a noncanonical AppleID sender before constructing a provider', () => {
+    expect(() =>
+      createConnection({
+        transport: 'imessage',
+        botName: 'test',
+        imessageConfig: {
+          account: 'test',
+          backend: 'imsg',
+          sender: 'Owner@Example.com',
+          inboundMode: 'poll',
+          pollIntervalMs: 60000,
+          rateLimit: { messagesPerMinute: 30 },
+        },
+      }),
+    ).toThrow(/lowercase AppleID/i);
+  });
+
+  it('imessage transport rejects an unknown backend instead of falling back to imsg', () => {
+    expect(() =>
+      createConnection({
+        transport: 'imessage',
+        botName: 'test',
+        imessageConfig: {
+          account: 'test',
+          backend: 'not-a-backend' as 'imsg',
+          sender: 'owner@example.com',
+          inboundMode: 'poll',
+          pollIntervalMs: 60000,
+          rateLimit: { messagesPerMinute: 30 },
+        },
+      }),
+    ).toThrow(/imessageConfig\.backend/i);
+  });
+
   it('imessage transport throws for bluebubbles without a password service', () => {
     expect(() =>
       createConnection({
         transport: 'imessage',
+        botName: 'test',
         imessageConfig: {
           account: 'test',
           backend: 'bluebubbles',
@@ -184,12 +248,171 @@ describe('createConnection factory', () => {
       }),
     ).toThrow(/bluebubblesPasswordService is missing/i);
   });
+
+  it.each([
+    ['unrelated credential service', 'https://bb.example.test', 'whatsoup-health-token'],
+    ['another account credential service', 'https://collector.example.test', 'whatsoup-bluebubbles-other-line'],
+    ['cleartext remote endpoint', 'http://collector.example.test', 'whatsoup-bluebubbles-test'],
+  ])('rejects BlueBubbles %s before reading the keyring', (_case, bluebubblesUrl, bluebubblesPasswordService) => {
+    expect(() => createConnection({
+      transport: 'imessage',
+      botName: 'test',
+      imessageConfig: {
+        account: 'test',
+        backend: 'bluebubbles',
+        bluebubblesUrl,
+        bluebubblesPasswordService,
+        sender: 'me@heal.internal',
+        inboundMode: 'poll',
+        pollIntervalMs: 60000,
+        rateLimit: { messagesPerMinute: 30 },
+      },
+    })).toThrow(/BlueBubbles.*(?:service|endpoint)/i);
+    expect(keyringMock.lookupCredential).not.toHaveBeenCalled();
+  });
+
+  it('rejects a nested account and service that impersonate another line before keyring lookup', () => {
+    expect(() => createConnection({
+      transport: 'imessage',
+      botName: 'line-a',
+      imessageConfig: {
+        account: 'line-b',
+        backend: 'bluebubbles',
+        bluebubblesUrl: 'https://collector.example.test',
+        bluebubblesPasswordService: 'whatsoup-bluebubbles-line-b',
+        sender: 'me@heal.internal',
+        inboundMode: 'poll',
+        pollIntervalMs: 60000,
+        rateLimit: { messagesPerMinute: 30 },
+      },
+    })).toThrow(/account.*line identity/i);
+    expect(keyringMock.lookupCredential).not.toHaveBeenCalled();
+  });
+
+  it('requires immutable line identity before selecting a BlueBubbles credential', () => {
+    expect(() => createConnection({
+      transport: 'imessage',
+      imessageConfig: {
+        account: 'line-a',
+        backend: 'bluebubbles',
+        bluebubblesUrl: 'https://bb.example.test',
+        bluebubblesPasswordService: 'whatsoup-bluebubbles-line-a',
+        sender: 'me@heal.internal',
+        inboundMode: 'poll',
+        pollIntervalMs: 60000,
+        rateLimit: { messagesPerMinute: 30 },
+      },
+    })).toThrow(/line identity/i);
+    expect(keyringMock.lookupCredential).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['twilio', { twilioConfig: makeTwilioConfig({ account: 'line-b' }) }],
+    ['signal', {
+      signalConfig: {
+        account: 'line-b',
+        socketPath: '/tmp/signalc-test.sock',
+        phoneNumber: '+15551110000',
+        inboundMode: 'poll' as const,
+        pollIntervalMs: 60000,
+        rateLimit: { messagesPerMinute: 30 },
+      },
+    }],
+    ['imessage', {
+      imessageConfig: {
+        account: 'line-b',
+        backend: 'imsg' as const,
+        imsgSocketPath: '/tmp/imsg-test.sock',
+        sender: 'me@heal.internal',
+        inboundMode: 'poll' as const,
+        pollIntervalMs: 60000,
+        rateLimit: { messagesPerMinute: 30 },
+      },
+    }],
+  ] as const)('rejects a %s nested account that differs from the immutable line identity', (transport, transportConfig) => {
+    expect(() => createConnection({
+      transport,
+      botName: 'line-a',
+      ...transportConfig,
+    })).toThrow(/account.*line identity/i);
+    expect(keyringMock.lookupCredential).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['twilio', { twilioConfig: makeTwilioConfig() }],
+    ['signal', {
+      signalConfig: {
+        account: 'test',
+        socketPath: '/tmp/signalc-test.sock',
+        phoneNumber: '+15551110000',
+        inboundMode: 'poll' as const,
+        pollIntervalMs: 60000,
+        rateLimit: { messagesPerMinute: 30 },
+      },
+    }],
+    ['imessage', {
+      imessageConfig: {
+        account: 'test',
+        backend: 'imsg' as const,
+        imsgSocketPath: '/tmp/imsg-test.sock',
+        sender: 'me@heal.internal',
+        inboundMode: 'poll' as const,
+        pollIntervalMs: 60000,
+        rateLimit: { messagesPerMinute: 30 },
+      },
+    }],
+  ] as const)('requires immutable line identity for %s before constructing a provider', (transport, transportConfig) => {
+    expect(() => createConnection({
+      transport,
+      ...transportConfig,
+    })).toThrow(/line identity/i);
+    expect(keyringMock.lookupCredential).not.toHaveBeenCalled();
+  });
+
+  it('rejects a nested account that differs from the immutable line identity', () => {
+    expect(() => createConnection({
+      transport: 'imessage',
+      botName: 'line-a',
+      imessageConfig: {
+        account: 'line-b',
+        backend: 'bluebubbles',
+        bluebubblesUrl: 'https://bb.example.test',
+        bluebubblesPasswordService: 'whatsoup-bluebubbles-line-a',
+        sender: 'me@heal.internal',
+        inboundMode: 'poll',
+        pollIntervalMs: 60000,
+        rateLimit: { messagesPerMinute: 30 },
+      },
+    })).toThrow(/account.*line identity/i);
+    expect(keyringMock.lookupCredential).not.toHaveBeenCalled();
+  });
+
+  it('selects the credential bound to the immutable line identity', () => {
+    const conn = createConnection({
+      transport: 'imessage',
+      botName: 'line-a',
+      imessageConfig: {
+        account: 'line-a',
+        backend: 'bluebubbles',
+        bluebubblesUrl: 'https://bb.example.test',
+        bluebubblesPasswordService: 'whatsoup-bluebubbles-line-a',
+        sender: 'me@heal.internal',
+        inboundMode: 'poll',
+        pollIntervalMs: 60000,
+        rateLimit: { messagesPerMinute: 30 },
+      },
+    });
+
+    expect(conn).toBeDefined();
+    expect(keyringMock.lookupCredential).toHaveBeenCalledWith('whatsoup-bluebubbles-line-a');
+  });
 });
 
 describe('createConnection factory — webhook mode', () => {
   it('webhook-mode bridge records the port returned by the webhook server', async () => {
     const conn = createConnection({
       transport: 'twilio',
+      botName: 'ml-bot',
       twilioConfig: makeTwilioConfig({
         inboundMode: 'webhook',
         webhook: { publicBaseUrl: 'https://example.test', listenPort: 0, listenAddress: '127.0.0.1' },
@@ -210,6 +433,7 @@ describe('createConnection factory — webhook mode', () => {
 
     createConnection({
       transport: 'twilio',
+      botName: 'ml-bot',
       twilioConfig: makeTwilioConfig({
         inboundMode: 'webhook',
         webhook: {
@@ -229,7 +453,7 @@ describe('createConnection factory — webhook mode', () => {
       voice: { enabled: false, voicemailMaxLengthSec: 120 },
     });
     expect(opts.getAuthToken()).toBe('mock-token');
-    expect(keyringMock.lookupCredential).toHaveBeenCalledWith('twilio-ml-bot');
+    expect(keyringMock.lookupCredential).toHaveBeenCalledWith('whatsoup-twilio-ml-bot');
 
     const sms: InboundSms = {
       sid: 'SM00000000000000000000000000000000',
@@ -253,5 +477,19 @@ describe('createConnection factory — webhook mode', () => {
     };
     opts.onTranscript(transcript);
     expect(transcriptSpy).toHaveBeenCalledWith(transcript);
+  });
+
+  it('captures the validated webhook token service before caller-owned config can mutate', () => {
+    const twilioConfig = makeTwilioConfig({
+      inboundMode: 'webhook',
+      webhook: { publicBaseUrl: 'https://webhook.example.test', listenPort: 8123 },
+    });
+    createConnection({ transport: 'twilio', botName: 'ml-bot', twilioConfig });
+    const opts = webhookServerMock.constructedOptions[0] as TwilioWebhookServerOptions;
+
+    (twilioConfig as unknown as { authTokenService: string }).authTokenService = 'openai';
+    expect(opts.getAuthToken()).toBe('mock-token');
+    expect(keyringMock.lookupCredential).toHaveBeenCalledWith('whatsoup-twilio-ml-bot');
+    expect(keyringMock.lookupCredential).not.toHaveBeenCalledWith('openai');
   });
 });

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { Database } from '../../../src/core/database.ts';
-import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
+import type { IncomingMessage, Messenger, SendOptions } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
 import { createRuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
@@ -254,6 +254,7 @@ vi.mock('../../../src/runtimes/agent/outbound-queue.ts', () => ({
 // mockConfig is mutable so individual tests can override voiceReply for voice reply tests.
 const { mockConfig, mockSynthesizeSpeech, mockWriteTempFile } = vi.hoisted(() => {
   const mockConfig = {
+    transport: 'baileys' as 'baileys' | 'twilio' | 'signal' | 'imessage',
     adminPhones: new Set<string>(['15550100001']),
     controlPeers: new Map<string, string>(),
     toolUpdateMode: 'full' as 'full' | 'minimal' | 'friendly',
@@ -507,18 +508,17 @@ function makeDb(): Database {
   } as unknown as Database;
 }
 
-function makeMessenger(): { messenger: Messenger; sentMessages: Array<{ jid: string; text: string }> } {
-  const sentMessages: Array<{ jid: string; text: string }> = [];
+function makeMessenger(): { messenger: Messenger; sentMessages: Array<{ jid: string; text: string; caller?: SendOptions['caller'] }> } {
+  const sentMessages: Array<{ jid: string; text: string; caller?: SendOptions['caller'] }> = [];
   const messenger: Messenger = {
-    sendMessage: vi.fn(async (jid: string, text: string) => {
-      sentMessages.push({ jid, text });
+    sendMessage: vi.fn(async (jid: string, text: string, opts?: SendOptions) => {
+      sentMessages.push({ jid, text, ...(opts?.caller ? { caller: opts.caller } : {}) });
       return { waMessageId: null };
     }),
     sendMedia: vi.fn(async () => ({ waMessageId: null })),
   };
   return { messenger, sentMessages };
 }
-
 function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
   return {
     messageId: 'msg-1',
@@ -1162,6 +1162,7 @@ describe('AgentRuntime', () => {
     );
     // Reset voice reply config to default (never) between tests
     mockConfig.voiceReply = 'never';
+    mockConfig.transport = 'baileys';
     mockConfig.adminPhones = new Set<string>(['15550100001']);
     mockConfig.controlPeers.clear();
     mockConfig.toolUpdateMode = 'full';
@@ -5262,8 +5263,8 @@ describe('AgentRuntime', () => {
     } as unknown as Database;
     const { messenger, sentMessages } = makeMessenger();
     mockConfig.controlPeers.set('loops', '15550100002');
-    mockConfig.adminPhones = new Set(['15550100003']);
-
+    mockConfig.transport = 'twilio';
+    mockConfig.adminPhones = new Set(['+15550100003']);
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
     const emitHealResult = getRegisteredTool(runtime, 'emit_heal_result');
@@ -5279,14 +5280,12 @@ describe('AgentRuntime', () => {
     runtimeState.activeControlReportId = 'report-escalate';
     runtimeState.chatQueues.set(controlKey, controlQueue);
     runtimeState.handleControlTurn = vi.fn(async () => {});
-
     const result = await emitHealResult.handler({
       reportId: 'report-escalate',
       errorClass: 'crash__boom',
       result: 'escalate',
       diagnosis: 'needs human repair',
     });
-
     expect(result).toEqual({ sent: true, reportId: 'report-escalate', result: 'escalate' });
     expect(controlQueue.sendControlMessage).toHaveBeenCalledWith(
       '15550100002@s.whatsapp.net',
@@ -5300,8 +5299,9 @@ describe('AgentRuntime', () => {
     );
     expect(sentMessages).toEqual([
       {
-        jid: '15550100003@s.whatsapp.net',
+        jid: '+15550100003@sms',
         text: '[HEAL_ESCALATE] Repair for crash__boom escalated.\n\nneeds human repair',
+        caller: 'report-channel',
       },
     ]);
     expect(runtimeState.activeControlReportId).toBe('report-escalate');
@@ -8771,9 +8771,10 @@ describe('AgentRuntime', () => {
     // start() defers the message via pendingStartupMessage (main.ts pops it after WA connects)
     expect(sentMessages).toHaveLength(0);
     const pending = runtime.popStartupMessage();
-    expect(pending).not.toBeNull();
-    expect(pending!.chatJid).toBe('user@s.whatsapp.net');
-    expect(pending!.text).toContain('Resuming');
+    expect(pending).toEqual({
+      chatJid: 'user@s.whatsapp.net',
+      text: expect.stringContaining('Resuming'),
+    });
   });
 
   it('shared resume targets the latest completed turn identity instead of the first session chat', async () => {
@@ -8887,18 +8888,16 @@ describe('AgentRuntime', () => {
       upsertSessionCheckpoint: vi.fn(),
     };
     await runtime.start();
-
-    // Don't pop — simulate failure before WA connects
+    (runtime as unknown as { pendingStartupMessage: { chatJid: string; text: string; caller?: 'report-channel' } }).pendingStartupMessage = { chatJid: '15550100001@s.whatsapp.net', text: 'operator notice', caller: 'report-channel' };
     capturedOnResumeFailedRef.current!();
-
-    // Should NOT have sent directly (WA not connected)
     expect(sentMessages).toHaveLength(0);
 
     // The pending message should now be the expiry message (not the resume message)
     const pending = runtime.popStartupMessage();
-    expect(pending).not.toBeNull();
-    expect(pending!.text).toContain('expired');
-    expect(pending!.text).not.toContain('Resuming');
+    expect(pending).toEqual({
+      chatJid: 'user@s.whatsapp.net',
+      text: '_Previous session expired_ — starting fresh. Send a message to begin.',
+    });
   });
 
   it('start() with no active session — no spawn, no message', async () => {

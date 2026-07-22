@@ -32,7 +32,7 @@
 import { sanitizeProviderPreviewText } from '../lib/provider-preview-sanitizer.ts';
 import { jidPattern } from '../lib/redaction-patterns.ts';
 import { isAdminPhone } from '../lib/phone.ts';
-import { isLidJid, isAuthenticatedSenderJid } from './jid-constants.ts';
+import { isLidJid, isAuthenticatedSenderForTransport } from './jid-constants.ts';
 import { resolvePhoneFromJid } from './access-list.ts';
 import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
@@ -108,6 +108,7 @@ export function isOperatorDmPeer(
   isGroup: boolean,
   db: Database,
   adminPhones: Set<string>,
+  transport: string | null | undefined = 'baileys',
 ): boolean {
   if (isGroup) return false;
   // Shared by BOTH (mutually exclusive) branches below: does the peer resolve
@@ -118,7 +119,8 @@ export function isOperatorDmPeer(
   // B4 (QR-143): this inline `isAdminPhone(resolvePhoneFromJid(...))` is
   // DELIBERATELY NOT migrated to `resolvePhoneFromJidForGrant`, and is
   // allowlisted in `scripts/grant-resolver-inventory-guard.ts`. The GRANT
-  // decision here is already gated on `isAuthenticatedSenderJid(chatJid)`
+  // decision here is already gated on
+  // `isAuthenticatedSenderForTransport(chatJid, transport)`
   // (line ~119) before the elevation `return peerBearsAdminDigits`. The phone
   // match is ALSO needed on the UNauthenticated branch to select the
   // spoof-attempt warn subset (an @sms peer bearing admin digits is a spoof
@@ -127,12 +129,11 @@ export function isOperatorDmPeer(
   // semantics are NOT byte-equivalent to the primitive; migrating here would
   // regress observability.
   const peerBearsAdminIdentity = isAdminPhone(resolvePhoneFromJid(chatJid, db), adminPhones);
-  // QR-143: only a WhatsApp-authenticated transport (@s.whatsapp.net / @lid) can
-  // carry operator identity here. @sms is spoofable (see the
-  // isAuthenticatedSenderJid doc in jid-constants.ts) and resolvePhoneFromJid
-  // collapses it to the SAME bare phone digits as a real admin JID — without
-  // this guard, a spoofed `<admin-digits>@sms` chatJid would elevate.
-  if (!isAuthenticatedSenderJid(chatJid)) {
+  // QR-143: operator identity must come from the namespace bound to the
+  // configured transport. @sms is spoofable, and a WhatsApp/Signal/iMessage
+  // identity from another namespace must not cross-elevate. Without this guard,
+  // a spoofed `<admin-digits>@sms` or mismatched transport JID could elevate.
+  if (!isAuthenticatedSenderForTransport(chatJid, transport)) {
     // This is a DENY-side observability check only. Inspect the untrusted local
     // part directly so a numeric `<admin>@c.us` or `<admin>@sms` still raises a
     // spoof warning, without weakening the exact-identity grant check above for
@@ -144,14 +145,15 @@ export function isOperatorDmPeer(
     // Do NOT warn on every @sms rejection — that fires on every benign
     // SMS-bridge chat and would be noise, not a never-silent signal.
     if (peerBearsAdminDigits && shouldWarnSpoofAttempt(chatJid, Date.now())) {
-      // This branch catches EVERY non-WhatsApp-authenticated form (@sms,
-      // @c.us, @broadcast, …), so log the ACTUAL form — the '@' suffix —
+      // This branch catches every form not authenticated for the configured
+      // transport (@sms, @c.us, a cross-transport namespace, …), so log the
+      // ACTUAL form — the '@' suffix —
       // not a hardcoded 'sms' label. Still id-only (N14): the suffix is the
       // transport domain, never the peer digits.
       const chatJidForm = atIdx === -1 ? 'unknown' : chatJid.slice(atIdx + 1) || 'unknown';
       audienceLog.warn(
         { chatJidForm, outcome: 'spoof-attempt-denied' },
-        'operator-DM unauthenticated peer bore admin-like digits but is not WhatsApp-authenticated — spoof attempt denied',
+        'operator-DM unauthenticated peer bore admin-like digits and does not match the configured transport — spoof attempt denied',
       );
     }
     return false;

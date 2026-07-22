@@ -78,6 +78,60 @@ describe('resolveSignalConfig', () => {
   });
 });
 
+describe('resolveImessageConfig', () => {
+  it('keeps only fields belonging to the selected backend', async () => {
+    const { resolveImessageConfig } = await import('../src/config.ts');
+    expect(resolveImessageConfig({
+      account: 'ops',
+      backend: 'bluebubbles',
+      sender: 'owner@example.com',
+      bluebubblesUrl: 'https://messages.example.test',
+      bluebubblesPasswordService: 'whatsoup-bluebubbles-ops',
+    })).toEqual({
+      account: 'ops',
+      backend: 'bluebubbles',
+      sender: 'owner@example.com',
+      bluebubblesUrl: 'https://messages.example.test',
+      bluebubblesPasswordService: 'whatsoup-bluebubbles-ops',
+      inboundMode: 'poll',
+      pollIntervalMs: 15_000,
+      rateLimit: { messagesPerMinute: 30 },
+    });
+  });
+
+  it.each([
+    [{ account: 'ops', backend: 'not-a-backend', sender: 'owner@example.com' }, /backend/i],
+    [{ account: 'ops', backend: 'imsg', sender: 'Owner@Example.com' }, /lowercase AppleID/i],
+    [{
+      account: 'ops',
+      backend: 'imsg',
+      sender: 'owner@example.com',
+      bluebubblesUrl: 'https://messages.example.test',
+    }, /bluebubblesUrl/i],
+    [{
+      account: 'ops',
+      backend: 'bluebubbles',
+      sender: 'owner@example.com',
+      bluebubblesUrl: 'https://messages.example.test',
+      bluebubblesPasswordService: 'whatsoup-bluebubbles-ops',
+      imsgSocketPath: '/tmp/imsg.sock',
+    }, /imsgSocketPath/i],
+  ])('fails closed on noncanonical direct iMessage resolution: %#', async (raw, expected) => {
+    const { resolveImessageConfig } = await import('../src/config.ts');
+    expect(() => resolveImessageConfig(raw)).toThrow(expected);
+  });
+
+  it('rejects unimplemented webhook mode during direct resolution', async () => {
+    const { resolveImessageConfig } = await import('../src/config.ts');
+    expect(() => resolveImessageConfig({
+      account: 'ops',
+      backend: 'bluebubbles',
+      sender: 'owner@example.com',
+      inboundMode: 'webhook',
+    })).toThrow(/only "poll".*not implemented/i);
+  });
+});
+
 describe('resolveAdminIdentities', () => {
   it('preserves Signal UUIDs and canonicalizes Signal phone identities as +E.164', async () => {
     const { resolveAdminIdentities } = await import('../src/config.ts');
@@ -101,6 +155,17 @@ describe('resolveAdminIdentities', () => {
       expect(() => resolveAdminIdentities([invalid], 'signal'))
         .toThrow(/Signal admin identity/);
     }
+  });
+
+  it('preserves lowercase AppleID emails and canonicalizes iMessage phones as +E.164', async () => {
+    const { resolveAdminIdentities } = await import('../src/config.ts');
+    expect(resolveAdminIdentities([
+      ' Owner@Example.COM ',
+      '+1 (555) 111-0000',
+    ], 'imessage')).toEqual([
+      'owner@example.com',
+      '+15551110000',
+    ]);
   });
 
 });

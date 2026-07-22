@@ -60,6 +60,7 @@ vi.mock('../../../src/core/heal.ts', () => ({
 }));
 vi.mock('../../../src/core/durability.ts', () => ({
   sendTracked: vi.fn(),
+  sendTrackedOperatorReport: vi.fn(),
 }));
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
   emitAlert: vi.fn(),

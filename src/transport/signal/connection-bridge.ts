@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import type { IncomingMessage, OutboundMedia, SubmissionReceipt, TypingState } from '../../core/types.ts';
+import type { IncomingMessage, OutboundMedia, SendOptions, SubmissionReceipt, TypingState } from '../../core/types.ts';
 import { ContactsDirectory } from '../../core/mentions.ts';
 import { applyOutboundIdentityGuard } from '../../core/outbound-identity/guard.ts';
 import type { GuardMode, IdentityStore } from '../../core/outbound-identity/types.ts';
@@ -66,7 +66,7 @@ export class SignalConnection extends EventEmitter implements RuntimeConnection 
   private messageSubscription: Subscription | null = null;
   private errorSubscription: Subscription | null = null;
   private identityStore: IdentityStore | null = null;
-  private identityMode: GuardMode = 'log-only';
+  private identityMode: GuardMode = 'enforce';
   private unregisteredAlertEmitted = false;
 
   constructor(
@@ -158,10 +158,10 @@ export class SignalConnection extends EventEmitter implements RuntimeConnection 
     await this.adapter.disconnect();
   }
 
-  async sendMessage(chatJid: string, text: string): Promise<SubmissionReceipt> {
+  async sendMessage(chatJid: string, text: string, opts?: SendOptions): Promise<SubmissionReceipt> {
     applyOutboundIdentityGuard(
       chatJid,
-      { caller: 'agent', mode: this.identityMode },
+      { caller: opts?.caller ?? 'agent', mode: this.identityMode },
       this.identityStore,
     );
     const ref = await this.adapter.sendText(

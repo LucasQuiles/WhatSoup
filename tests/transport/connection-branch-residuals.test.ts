@@ -73,6 +73,7 @@ vi.mock('../../src/logger.ts', () => {
 
 import { makeWASocket } from '@whiskeysockets/baileys';
 import { ConnectionManager } from '../../src/transport/connection.ts';
+import { withWarmIdentity } from '../helpers/outbound-identity.ts';
 
 const USER_JID = '15550001@s.whatsapp.net';
 const USER_LID = '11111110001@lid';
@@ -116,7 +117,7 @@ function openEvent() {
 async function connectedWith(opts: MockSockOpts = {}) {
   const { mockSock, emit } = makeMockSocket(opts);
   vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
-  const manager = new ConnectionManager();
+  const manager = withWarmIdentity(new ConnectionManager());
   await manager.connect();
   emit(openEvent());
   return { manager, mockSock, emit };
@@ -321,7 +322,7 @@ describe('send paths — null waMessageId arms and no-socket guards', () => {
   });
 
   it('throws CONNECTION_UNAVAILABLE from sendPollMessage when no socket is connected', async () => {
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await expect(manager.sendPollMessage(GROUP_JID, 'Q?', ['A', 'B'], 1)).rejects.toMatchObject({
       code: 'CONNECTION_UNAVAILABLE',
     });
@@ -349,7 +350,7 @@ describe('send paths — null waMessageId arms and no-socket guards', () => {
   });
 
   it('throws CONNECTION_UNAVAILABLE from sendRaw when no socket is connected', async () => {
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await expect(manager.sendRaw(USER_JID, { text: 'hi' })).rejects.toMatchObject({
       code: 'CONNECTION_UNAVAILABLE',
     });
@@ -369,7 +370,7 @@ describe('evictStalePolls — fresh poll retained arm', () => {
       mockSock.sendMessage
         .mockResolvedValueOnce({ key: { id: 'wamid.keep' }, message: { messageContextInfo: { messageSecret: new Uint8Array([1]) } } })
         .mockResolvedValueOnce({ key: { id: 'wamid.second' }, message: { messageContextInfo: { messageSecret: new Uint8Array([2]) } } });
-      const manager = new ConnectionManager();
+      const manager = withWarmIdentity(new ConnectionManager());
       await manager.connect();
       emit(openEvent());
 
@@ -399,7 +400,7 @@ describe('reconnect scheduling — single-flight + shutdown short-circuits', () 
     try {
       const { mockSock, emit } = makeMockSocket();
       vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
-      const manager = new ConnectionManager();
+      const manager = withWarmIdentity(new ConnectionManager());
       await manager.connect();
       emit(openEvent());
       expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(1);

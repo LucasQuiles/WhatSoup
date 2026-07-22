@@ -45,7 +45,7 @@ glow exception (hatch only), type triad kept.
 | R2-4 | Agent creation | **Dynamic entity, created from one of the 4 instance archetypes** (primary-line, operator-agent, sandbox-agent, chat-bot) with per-archetype configs/options. |
 | R2-5 | Instance mapping | **Map/compare/investigate/analyze existing model FIRST** — new task WS2.6 (instance-model investigation) precedes vocabulary lock. |
 | R2-6 | Skills | **Skills = its own area** — skill management surface + **team/org-wide skill sharing across managed instances** (admin-lane flavored). |
-| R2-7 | Channel mocks | **Full end-to-end mocked, ready to plug in** — complete per-channel flow state machines; transports drop in later without UI changes. |
+| R2-7 | Channel mocks | **Full end-to-end mocked, ready to plug in** for the ten channels without runtime backends; WhatsApp, SMS, Signal, and iMessage bind their existing lifecycle/config seams without changing the shared UI state model. |
 | R2-8 | Ceremony medium | **Animated wizard** — low friction, clean clear concise explanations, **demonstrative over explanative**. (Not conversational.) |
 | R2-9 | Mobile | **Full responsiveness and compatibility required** — all v3.5 surfaces. |
 | R2-10 | Grant levels | ✅ hidden / see / participate — **with distinct iconography + indicators per level**. |
@@ -54,7 +54,7 @@ glow exception (hatch only), type triad kept.
 
 ### Round-2 scope deltas
 - **Nav grows**: Fleet · Agents · Inbox · Ops · **Skills** · Settings (R2-6). Admin lane adds a
-  future **Deployments** area (R2-2) — IA reserves, no T3 mockups.
+  future **Deployments** area (R2-2); T3 mockups landed, while runtime implementation remains future work.
 - **Agent archetypes**: the 4 instance models become creation archetypes w/ per-type options (R2-4).
 - **WS2.6 instance-model investigation** (R2-5) — precedes vocabulary lock in T1.
 - **Responsiveness bar raised**: full mobile support, not desktop-first-tolerant (R2-9) —
@@ -67,9 +67,9 @@ glow exception (hatch only), type triad kept.
 
 | # | Decision | Answer |
 |---|---|---|
-| A1 | Program home | ✅ YES — branch `design/soup-v35` on `LucasQuiles/WhatSoup`, docs at `docs/design-system/v35/` (from origin/main `6fb5ee72`). |
+| A1 | Program home | ✅ Historical decision, now superseded — `design/soup-v35` was the original working branch. The current SSOT is `main`; #2009 merged the documentation seed and #2027 continues T5 on `design/soup-v35-t5-cutover`. |
 | A2 | v3 bench mechanics | ✅ YES — banner + frozen records (to execute on first repo-write session) |
-| A3 | Channel registry | ✅ **14 channels, 3 classes.** Messaging: whatsapp (real), signal, imessage, sms, discord, telegram · Socials: x, linkedin, reddit, instagram, facebook · Channels: email, slack, teams |
+| A3 | Channel registry | ✅ **14 designed channels, 3 classes.** Messaging: whatsapp, signal, imessage, sms, discord, telegram · Socials: x, linkedin, reddit, instagram, facebook · Channels: email, slack, teams. Exactly four transport IDs are implemented today: Baileys/WhatsApp, Twilio/SMS, Signal, and iMessage. |
 | A4 | Agent:Line cardinality | ✅ Agent profile 1:N Lines; **runtime per-chat agent instances** (inherits current per-chat session structure) |
 | A5 | "Hatch" vocabulary | ✅ RESEARCH FIRST (A5 deep-dive done → research-hatching.md §1.5); adopt journey-side, ops stays dry |
 

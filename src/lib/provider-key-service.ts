@@ -66,12 +66,13 @@ export function resolveProviderKeyService(
   if (providerConfig && typeof providerConfig === 'object' && !Array.isArray(providerConfig)) {
     const service = (providerConfig as Record<string, unknown>)['apiKeyService'];
     if ((provider === 'openai-api' || provider === 'anthropic-api') && typeof service === 'string') {
-      if (service.length > 0) return service;
+      if (PROVIDER_API_KEY_SERVICES.has(service)) return service;
     }
   }
   if (provider === 'opencode-cli') {
     const prefix = typeof model === 'string' ? model.split('/')[0]?.trim() : '';
-    return prefix ? prefix.toLowerCase() : null;
+    const service = prefix.toLowerCase();
+    return PROVIDER_API_KEY_SERVICES.has(service) ? service : null;
   }
   if (provider === 'openai-api') {
     return 'openai';

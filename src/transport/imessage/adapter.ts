@@ -17,6 +17,8 @@
 // the adapter is backend-agnostic. Backend selection happens at factory time.
 
 import {
+  canonicalizeImessageDirectIdentity,
+  isImessageGroupAddress,
   makeChannelId,
   type ChannelId,
   type ConversationRef,
@@ -204,6 +206,9 @@ export class ImessageAdapter
         `ImessageAdapter sender must be an AppleID email or E.164 phone (got ${JSON.stringify(config.sender)})`,
       );
     }
+    if (config.inboundMode !== 'poll') {
+      throw new Error('ImessageAdapter supports only poll inbound mode; webhook inbound is not implemented');
+    }
 
     this.channelId = makeChannelId('imessage', config.account);
     this.port = port;
@@ -259,7 +264,6 @@ export class ImessageAdapter
         void this.pollOnce();
       }, this.pollIntervalMs);
     }
-    // 'webhook' mode wiring (BlueBubbles only) lands with the live port impl.
   }
 
   async disconnect(): Promise<void> {
@@ -286,7 +290,7 @@ export class ImessageAdapter
    * envelope carries no group flag.
    */
   isGroupConversation(ref: ConversationRef): boolean {
-    return ref.channel === this.channelId && ref.id.startsWith('iMessage;+;');
+    return ref.channel === this.channelId && isImessageGroupAddress(ref.id);
   }
 
   // ── Send ─────────────────────────────────────────────────────────────────
@@ -499,6 +503,7 @@ export class ImessageAdapter
 
     if (record.kind === 'text' && record.body !== null) {
       const msg = this.buildInboundMessage(record);
+      if (msg === null) return false;
       this.safeEmit(this.listeners.message, msg);
     }
     // TODO(future): route reaction/read/typing envelopes to extension events.
@@ -509,13 +514,19 @@ export class ImessageAdapter
 
   // ── Private helpers ───────────────────────────────────────────────────────
 
-  private buildInboundMessage(record: InboundImessage): InboundMessage {
+  private buildInboundMessage(record: InboundImessage): InboundMessage | null {
     const channelId = this.channelId;
     // Group envelopes thread under the chat GUID (all members' traffic shares
     // one conversation). 1:1 envelopes key on the PEER: sender for inbound,
     // recipient for our own outbound echoes.
-    const peer = record.chatGuid ?? (record.fromMe ? record.to : record.from);
-    const senderId = record.fromMe ? this.selfRef().id : record.from;
+    const rawPeer = record.chatGuid ?? (record.fromMe ? record.to : record.from);
+    const peer = record.chatGuid !== undefined
+      ? (isImessageGroupAddress(rawPeer) || rawPeer.startsWith('iMessage;-;') ? rawPeer : null)
+      : canonicalizeImessageDirectIdentity(rawPeer);
+    const senderId = canonicalizeImessageDirectIdentity(
+      record.fromMe ? this.selfRef().id : record.from,
+    );
+    if (peer === null || senderId === null) return null;
     const ts = new Date(record.timestamp);
     return {
       ref: {
@@ -574,7 +585,7 @@ export class ImessageAdapter
 export function isImessageRecipient(id: string): boolean {
   if (typeof id !== 'string' || id.length === 0) return false;
   // Chat GUID for group sends — both backends accept this form.
-  if (id.startsWith('iMessage;-;') || id.startsWith('iMessage;+;')) return true;
+  if (id.startsWith('iMessage;-;') || isImessageGroupAddress(id)) return true;
   return APPLEID_EMAIL_RE.test(id) || E164_RE.test(id);
 }
 

@@ -140,6 +140,24 @@ describe('resolveChatDisplayName — B23 ladder', () => {
     expect(resolveChatDisplayName(db, GROUP_KEY)).toBe('Ops Crew Test');
   });
 
+  it.each([
+    ['Signal', 'Z3JvdXAtY29udmVyc2F0aW9u@signal', 'Z3JvdXAtY29udmVyc2F0aW9u_at_signal'],
+    ['iMessage', 'iMessage;+;chatABC@imessage', 'iMessage;+;chatABC_at_imessage'],
+  ])('%s group names resolve from raw and transport-neutral conversation keys', (_transport, jid, key) => {
+    db.prepare('INSERT INTO chats (jid, conversation_key, name) VALUES (?, ?, ?)')
+      .run(jid, key, `${_transport} Group`);
+    expect(resolveChatDisplayName(db, jid)).toBe(`${_transport} Group`);
+    expect(resolveChatDisplayName(db, key)).toBe(`${_transport} Group`);
+  });
+
+  it('an encoded AppleID iMessage DM resolves the raw-JID chat name', () => {
+    const jid = 'owner@example.test@imessage';
+    const key = 'owner_at_example.test@imessage';
+    db.prepare('INSERT INTO chat_aliases (alias, chat_jid) VALUES (?, ?)')
+      .run('AppleID Peer', jid);
+    expect(resolveChatDisplayName(db, key)).toBe('AppleID Peer');
+  });
+
   it('chats.name when there is no groups row', () => {
     db.prepare('INSERT INTO chats (jid, conversation_key, name) VALUES (?, ?, ?)')
       .run(GROUP_JID, GROUP_KEY, 'Family Group');

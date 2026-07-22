@@ -371,8 +371,9 @@ export default function Operator() {
       {/* Modals */}
       <Suspense fallback={null}>
         <RelinkModal
-          lineName={relinkTarget ?? ''}
-          open={!!relinkTarget}
+          lineName={lines.find(line => line.name === relinkTarget)?.name ?? ''}
+          transport={lines.find(line => line.name === relinkTarget)?.transport}
+          open={lines.some(line => line.name === relinkTarget)}
           onClose={() => setRelinkTarget(null)}
           onLinked={() => { setRelinkTarget(null); queryClient.invalidateQueries({ queryKey: ['lines'] }); toast.success('Instance re-linked!'); }}
         />

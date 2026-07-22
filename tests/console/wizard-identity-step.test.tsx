@@ -13,7 +13,7 @@
  *    not the raw display string. Emoji and punctuation are stripped immediately.
  * 2. There is NO "Next" button inside IdentityStep itself — Next-button gating
  *    lives in the parent Wizard. The component only forwards onChange/errors.
- * 3. adminPhones strips non-digits via `values.map(v => v.replace(/\D/g, ''))`.
+ * 3. adminPhones uses the selected transport's validator and canonicalizer.
  *    The TagInput's own `validate` is `validatePhone` (≥10, ≤15 digits after
  *    normalization). "555-123-4567" → TagInput receives "555-123-4567", calls
  *    validatePhone which normalizes to "15551234567" (11 digits) — valid.
@@ -436,12 +436,12 @@ describe('admin phones field', () => {
 
   it('shows single-phone helper when exactly one phone configured', () => {
     renderStep({ data: { adminPhones: ['15551234567'] } })
-    expect(screen.getByText(/Add another number for shared admin access/)).toBeDefined()
+    expect(screen.getByText(/Add another admin ID for shared access/)).toBeDefined()
   })
 
   it('shows count helper text when two or more phones configured', () => {
     renderStep({ data: { adminPhones: ['15551234567', '15559876543'] } })
-    expect(screen.getByText('2 admin numbers configured.')).toBeDefined()
+    expect(screen.getByText('2 admin IDs configured.')).toBeDefined()
   })
 
   it('calls onChange with digits-only array when a valid phone is added via Enter', () => {
@@ -452,15 +452,12 @@ describe('admin phones field', () => {
     expect(onChange).toHaveBeenCalledWith({ adminPhones: ['15551234567'] })
   })
 
-  it('strips non-digit characters from phone values passed to onChange', () => {
-    // Source surprise §4: IdentityStep strips via .replace(/\D/g, '') after TagInput adds.
-    // "555-123-4567" passes TagInput's validatePhone (normalizePhoneInput yields "15551234567")
-    // then IdentityStep strips dashes → "5551234567"
+  it('canonicalizes a 10-digit NANP admin phone after stripping punctuation', () => {
     const { onChange } = renderStep({ data: { adminPhones: [] } })
     const tagInput = screen.getByPlaceholderText('Enter phone number (press Enter to add)')
     fireEvent.change(tagInput, { target: { value: '555-123-4567' } })
     fireEvent.keyDown(tagInput, { key: 'Enter' })
-    expect(onChange).toHaveBeenCalledWith({ adminPhones: ['5551234567'] })
+    expect(onChange).toHaveBeenCalledWith({ adminPhones: ['15551234567'] })
   })
 
   it('does not add invalid phones (fewer than 10 digits after normalization)', () => {
@@ -469,6 +466,14 @@ describe('admin phones field', () => {
     fireEvent.change(tagInput, { target: { value: '123' } })
     fireEvent.keyDown(tagInput, { key: 'Enter' })
     // TagInput validate blocks short numbers — onChange is not called at all
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it('does not normalize embedded non-phone text into an admin identity', () => {
+    const { onChange } = renderStep({ data: { adminPhones: [] } })
+    const tagInput = screen.getByPlaceholderText('Enter phone number (press Enter to add)')
+    fireEvent.change(tagInput, { target: { value: 'privileged-user+15551234567' } })
+    fireEvent.keyDown(tagInput, { key: 'Enter' })
     expect(onChange).not.toHaveBeenCalled()
   })
 
@@ -503,6 +508,29 @@ describe('admin phones field', () => {
   it('renders existing phone tags in the display', () => {
     renderStep({ data: { adminPhones: ['15551234567'] } })
     expect(screen.getByText('15551234567')).toBeDefined()
+  })
+
+  it('describes Twilio as SMS and never promises authenticated admin access', () => {
+    renderStep({ data: { transport: 'twilio', adminPhones: [] } })
+
+    expect(screen.getByRole('radio', {
+      name: /SMS \(Twilio\) Cloud-hosted SMS through Twilio/i,
+    })).toBeDefined()
+    expect(screen.getByLabelText('SMS Access Phones')).toBeDefined()
+    expect(screen.getByText(/Stored in the compatibility field adminPhones/)).toBeDefined()
+    expect(screen.getByText(/Alerts are not broadcast: startup uses the first configured phone/)).toBeDefined()
+    expect(screen.getByText(/approval alerts may use a recent matching conversation/)).toBeDefined()
+    expect(screen.getByText(/SMS sender IDs are spoofable and cannot issue admin commands/)).toBeDefined()
+    expect(screen.queryByText(/full admin access/i)).toBeNull()
+    expect(document.body.textContent).not.toMatch(/WhatsApp \(Twilio\)|Cloud-hosted WhatsApp/i)
+  })
+
+  it('keeps the Twilio non-admin warning visible after identities are configured', () => {
+    renderStep({ data: { transport: 'twilio', adminPhones: ['15551234567'] } })
+
+    expect(screen.getByText(/1 notification phone stored in adminPhones/)).toBeDefined()
+    expect(screen.getByText(/pre-approved for ordinary SMS but cannot issue admin commands/)).toBeDefined()
+    expect(screen.queryByText(/Add another admin ID/i)).toBeNull()
   })
 })
 

@@ -18,7 +18,7 @@ function baseRaw(overrides: Record<string, unknown> = {}): Record<string, unknow
   return {
     name: 'test-line',
     type: 'agent',
-    accessMode: 'self_only',
+    accessMode: 'allowlist',
     adminPhones: ['15555550123'],
     agentOptions: { sessionScope: 'single' },
     ...overrides,
@@ -27,9 +27,9 @@ function baseRaw(overrides: Record<string, unknown> = {}): Record<string, unknow
 
 function validTwilioConfig(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    account: 'ml-bot',
+    account: 'test-line',
     accountSid: 'AC' + 'a'.repeat(32),
-    authTokenService: 'twilio-ml-bot-token',
+    authTokenService: 'whatsoup-twilio-test-line',
     phoneNumber: '+15559990000',
     inboundMode: 'poll',
     pollIntervalMs: 15000,
@@ -101,6 +101,44 @@ describe('validateInstanceConfig — twilioConfig presence rules', () => {
     expect(err?.message).toContain('required');
   });
 
+  it.each(['self_only', 'groups_only'])(
+    'rejects newly configured interactive Twilio accessMode %s',
+    (accessMode) => {
+      const raw = baseRaw({ transport: 'twilio', accessMode, twilioConfig: validTwilioConfig() });
+      const err = validateInstanceConfig(raw, ctx('create'));
+      expect(err?.field).toBe('accessMode');
+      expect(err?.message).toContain('unavailable for interactive Twilio SMS');
+    },
+  );
+
+  it('rejects an explicitly patched unusable interactive Twilio access mode', () => {
+    const raw = baseRaw({ transport: 'twilio', accessMode: 'self_only', twilioConfig: validTwilioConfig() });
+    const err = validateInstanceConfig(raw, { ...ctx('patch'), patchIncludesAccessMode: true });
+    expect(err?.field).toBe('accessMode');
+    expect(err?.message).toContain('unavailable for interactive Twilio SMS');
+  });
+
+  it('allows an unrelated PATCH to remediate a legacy Twilio self_only config', () => {
+    const raw = baseRaw({ transport: 'twilio', accessMode: 'self_only', twilioConfig: validTwilioConfig() });
+    expect(validateInstanceConfig(raw, ctx('patch'))).toBeNull();
+  });
+
+  it('preserves load compatibility for an existing Twilio self_only config', () => {
+    const raw = baseRaw({ transport: 'twilio', accessMode: 'self_only', twilioConfig: validTwilioConfig() });
+    expect(validateInstanceConfig(raw, ctx('load'))).toBeNull();
+  });
+
+  it('accepts the server-required self_only mode for passive Twilio lines', () => {
+    const raw = baseRaw({
+      transport: 'twilio',
+      type: 'passive',
+      accessMode: 'self_only',
+      agentOptions: undefined,
+      twilioConfig: validTwilioConfig(),
+    });
+    expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
+  });
+
   it('rejects non-object twilioConfig (string)', () => {
     const raw = baseRaw({ transport: 'twilio', twilioConfig: 'not-an-object' });
     const err = validateInstanceConfig(raw, ctx());
@@ -164,10 +202,18 @@ describe('validateInstanceConfig — twilioConfig.account', () => {
     expect(err?.field).toBe('twilioConfig.account');
   });
 
-  it('accepts valid account slug', () => {
-    const cfg = validTwilioConfig({ account: 'ml-bot' });
+  it('accepts a valid account slug matching the immutable line name', () => {
+    const cfg = validTwilioConfig({ account: 'test-line' });
     const raw = baseRaw({ transport: 'twilio', twilioConfig: cfg });
     expect(validateInstanceConfig(raw, ctx())).toBeNull();
+  });
+
+  it('rejects a valid nested account that differs from the immutable line name', () => {
+    const cfg = validTwilioConfig({ account: 'other-line' });
+    const raw = baseRaw({ transport: 'twilio', twilioConfig: cfg });
+    const validation = validateInstanceConfig(raw, ctx());
+    expect(validation?.field).toBe('twilioConfig.account');
+    expect(validation?.message).toMatch(/immutable line/i);
   });
 });
 
@@ -261,14 +307,16 @@ describe('validateInstanceConfig — twilioConfig.authTokenService', () => {
     expect(validateInstanceConfig(raw, ctx())?.field).toBe('twilioConfig.authTokenService');
   });
 
-  it('accepts authTokenService exactly 128 chars (boundary)', () => {
-    const cfg = validTwilioConfig({ authTokenService: 'a'.repeat(128) });
+  it('rejects a valid-looking selector bound to another line', () => {
+    const cfg = validTwilioConfig({ authTokenService: 'whatsoup-twilio-other-line' });
     const raw = baseRaw({ transport: 'twilio', twilioConfig: cfg });
-    expect(validateInstanceConfig(raw, ctx())).toBeNull();
+    const result = validateInstanceConfig(raw, ctx());
+    expect(result?.field).toBe('twilioConfig.authTokenService');
+    expect(result?.message).toContain('whatsoup-twilio-test-line');
   });
 
   it('accepts a normal service name', () => {
-    const cfg = validTwilioConfig({ authTokenService: 'twilio-ml-bot-token' });
+    const cfg = validTwilioConfig({ authTokenService: 'whatsoup-twilio-test-line' });
     const raw = baseRaw({ transport: 'twilio', twilioConfig: cfg });
     expect(validateInstanceConfig(raw, ctx())).toBeNull();
   });
@@ -459,9 +507,9 @@ describe('validateInstanceConfig — full valid twilio configs', () => {
     const raw = baseRaw({
       transport: 'twilio',
       twilioConfig: {
-        account: 'ml-bot',
+        account: 'test-line',
         accountSid: 'AC' + 'a'.repeat(32),
-        authTokenService: 'twilio-ml-bot-token',
+        authTokenService: 'whatsoup-twilio-test-line',
         phoneNumber: '+15559990000',
         inboundMode: 'poll',
         pollIntervalMs: 15000,
@@ -475,9 +523,9 @@ describe('validateInstanceConfig — full valid twilio configs', () => {
     const raw = baseRaw({
       transport: 'twilio',
       twilioConfig: {
-        account: 'ml-bot',
+        account: 'test-line',
         accountSid: 'AC' + 'a'.repeat(32),
-        authTokenService: 'twilio-ml-bot-token',
+        authTokenService: 'whatsoup-twilio-test-line',
         messagingServiceSid: 'MG' + 'c'.repeat(32),
         inboundMode: 'poll',
         pollIntervalMs: 15000,
@@ -672,6 +720,27 @@ describe('validateInstanceConfig — webhook inbound (stage 2 unlock)', () => {
     }) });
     expect(validateInstanceConfig(raw, ctx())?.field).toBe('twilioConfig.webhook.publicBaseUrl');
   });
+  it('rejects credentials embedded in publicBaseUrl', () => {
+    const raw = baseRaw({ transport: 'twilio', twilioConfig: validTwilioConfig({
+      inboundMode: 'webhook',
+      webhook: { publicBaseUrl: 'https://user:secret@relay.example.test', listenPort: 8443 },
+    }) });
+    const validation = validateInstanceConfig(raw, ctx());
+    expect(validation?.field).toBe('twilioConfig.webhook.publicBaseUrl');
+    expect(validation?.message).toContain('must not contain credentials');
+  });
+  it.each([
+    'https://relay.example.test/twilio?token=url-query-marker',
+    'https://relay.example.test/twilio#url-fragment-marker',
+  ])('rejects query or fragment components in publicBaseUrl: %s', (publicBaseUrl) => {
+    const raw = baseRaw({ transport: 'twilio', twilioConfig: validTwilioConfig({
+      inboundMode: 'webhook',
+      webhook: { publicBaseUrl, listenPort: 8443 },
+    }) });
+    const validation = validateInstanceConfig(raw, ctx());
+    expect(validation?.field).toBe('twilioConfig.webhook.publicBaseUrl');
+    expect(validation?.message).toContain('query or fragment');
+  });
   it('rejects voice.enabled with poll mode (coherence rule, exact remediation)', () => {
     const raw = baseRaw({ transport: 'twilio', twilioConfig: validTwilioConfig({
       voice: { enabled: true, voicemailMaxLengthSec: 120 },
@@ -743,10 +812,10 @@ describe('validateInstanceConfig — residual twilio branch coverage', () => {
 
 function validImessageConfig(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    account: 'mac-mini',
+    account: 'test-line',
     backend: 'bluebubbles',
     bluebubblesUrl: 'https://bb.example.test',
-    bluebubblesPasswordService: 'imessage-bb-pw',
+    bluebubblesPasswordService: 'whatsoup-bluebubbles-test-line',
     sender: 'me@heal.internal',
     inboundMode: 'poll',
     pollIntervalMs: 15000,
@@ -805,9 +874,80 @@ describe('validateInstanceConfig — imessageConfig', () => {
     expect(validateInstanceConfig(raw, ctx())?.field).toBe('imessageConfig.bluebubblesUrl');
   });
 
+  it('rejects credentials embedded in bluebubblesUrl', () => {
+    const raw = baseRaw({
+      transport: 'imessage',
+      imessageConfig: validImessageConfig({
+        bluebubblesUrl: 'https://user:secret@bb.example.test',
+      }),
+    });
+    const validation = validateInstanceConfig(raw, ctx());
+    expect(validation?.field).toBe('imessageConfig.bluebubblesUrl');
+    expect(validation?.message).toContain('must not contain credentials');
+  });
+
+  it.each([
+    'https://bb.example.test/api?password=url-query-marker',
+    'https://bb.example.test/api#url-fragment-marker',
+  ])('rejects query or fragment components in bluebubblesUrl: %s', (bluebubblesUrl) => {
+    const raw = baseRaw({
+      transport: 'imessage',
+      imessageConfig: validImessageConfig({ bluebubblesUrl }),
+    });
+    const validation = validateInstanceConfig(raw, ctx());
+    expect(validation?.field).toBe('imessageConfig.bluebubblesUrl');
+    expect(validation?.message).toContain('query or fragment');
+  });
+
   it('requires bluebubblesPasswordService when backend is bluebubbles', () => {
     const raw = baseRaw({ transport: 'imessage', imessageConfig: validImessageConfig({ bluebubblesPasswordService: '' }) });
     expect(validateInstanceConfig(raw, ctx())?.field).toBe('imessageConfig.bluebubblesPasswordService');
+  });
+
+  it('rejects a keyring service outside the BlueBubbles credential namespace', () => {
+    const raw = baseRaw({
+      transport: 'imessage',
+      imessageConfig: validImessageConfig({ bluebubblesPasswordService: 'whatsoup-health-token' }),
+    });
+    expect(validateInstanceConfig(raw, ctx())?.field).toBe('imessageConfig.bluebubblesPasswordService');
+  });
+
+  it('rejects another iMessage account\'s BlueBubbles password service', () => {
+    const raw = baseRaw({
+      transport: 'imessage',
+      imessageConfig: validImessageConfig({ bluebubblesPasswordService: 'whatsoup-bluebubbles-other-line' }),
+    });
+    expect(validateInstanceConfig(raw, ctx())?.field).toBe('imessageConfig.bluebubblesPasswordService');
+  });
+
+  it('rejects a nested account and service that impersonate another line', () => {
+    const raw = baseRaw({
+      transport: 'imessage',
+      imessageConfig: validImessageConfig({
+        account: 'other-line',
+        bluebubblesPasswordService: 'whatsoup-bluebubbles-other-line',
+      }),
+    });
+    expect(validateInstanceConfig(raw, ctx())?.field).toBe('imessageConfig.account');
+  });
+
+  it('rejects a nested account that differs from the immutable line name', () => {
+    const raw = baseRaw({
+      transport: 'imessage',
+      imessageConfig: validImessageConfig({
+        account: 'other-line',
+        bluebubblesPasswordService: 'whatsoup-bluebubbles-test-line',
+      }),
+    });
+    expect(validateInstanceConfig(raw, ctx())?.field).toBe('imessageConfig.account');
+  });
+
+  it('rejects cleartext BlueBubbles endpoints outside loopback', () => {
+    const raw = baseRaw({
+      transport: 'imessage',
+      imessageConfig: validImessageConfig({ bluebubblesUrl: 'http://messages.example.test' }),
+    });
+    expect(validateInstanceConfig(raw, ctx())?.field).toBe('imessageConfig.bluebubblesUrl');
   });
 
   it('rejects a relative imsgSocketPath', () => {
@@ -823,6 +963,42 @@ describe('validateInstanceConfig — imessageConfig', () => {
     expect(validateInstanceConfig(raw, ctx())?.field).toBe('imessageConfig.sender');
   });
 
+  it('rejects a noncanonical uppercase AppleID sender', () => {
+    const raw = baseRaw({ transport: 'imessage', imessageConfig: validImessageConfig({ sender: 'Owner@Example.com' }) });
+    const validation = validateInstanceConfig(raw, ctx());
+    expect(validation?.field).toBe('imessageConfig.sender');
+    expect(validation?.message).toMatch(/lowercase AppleID/i);
+  });
+
+  it.each([
+    {
+      name: 'BlueBubbles URL on imsg',
+      config: validImessageConfig({
+        backend: 'imsg',
+        imsgSocketPath: '/tmp/imsg.sock',
+        bluebubblesPasswordService: undefined,
+      }),
+      field: 'imessageConfig.bluebubblesUrl',
+    },
+    {
+      name: 'BlueBubbles password service on imsg',
+      config: validImessageConfig({
+        backend: 'imsg',
+        imsgSocketPath: '/tmp/imsg.sock',
+        bluebubblesUrl: undefined,
+      }),
+      field: 'imessageConfig.bluebubblesPasswordService',
+    },
+    {
+      name: 'imsg socket path on BlueBubbles',
+      config: validImessageConfig({ imsgSocketPath: '/tmp/imsg.sock' }),
+      field: 'imessageConfig.imsgSocketPath',
+    },
+  ])('rejects backend-exclusive field mixing: $name', ({ config, field }) => {
+    const raw = baseRaw({ transport: 'imessage', imessageConfig: config });
+    expect(validateInstanceConfig(raw, ctx())?.field).toBe(field);
+  });
+
   it('rejects webhook inboundMode on the imsg backend', () => {
     const raw = baseRaw({
       transport: 'imessage',
@@ -830,7 +1006,17 @@ describe('validateInstanceConfig — imessageConfig', () => {
     });
     const err = validateInstanceConfig(raw, ctx());
     expect(err?.field).toBe('imessageConfig.inboundMode');
-    expect(err?.message).toMatch(/only supported with backend 'bluebubbles'/);
+    expect(err?.message).toMatch(/only 'poll'.*not implemented/i);
+  });
+
+  it('rejects unimplemented webhook inboundMode on the BlueBubbles backend', () => {
+    const raw = baseRaw({
+      transport: 'imessage',
+      imessageConfig: validImessageConfig({ inboundMode: 'webhook' }),
+    });
+    const err = validateInstanceConfig(raw, ctx());
+    expect(err?.field).toBe('imessageConfig.inboundMode');
+    expect(err?.message).toMatch(/only 'poll'.*not implemented/i);
   });
 
   it('rejects an unknown inboundMode', () => {
@@ -855,7 +1041,7 @@ describe('validateInstanceConfig — imessageConfig', () => {
 
 function validSignalConfig(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    account: 'ops-line',
+    account: 'test-line',
     phoneNumber: '+15551110000',
     socketPath: '/run/user/1000/whatsoup/signal.sock',
     inboundMode: 'poll',
@@ -894,6 +1080,15 @@ describe('validateInstanceConfig — signalConfig', () => {
       signalConfig: validSignalConfig({ socketPath: undefined, tcpHost: '127.0.0.1', tcpPort: 7583 }),
     });
     expect(validateInstanceConfig(raw, ctx())).toBeNull();
+  });
+
+  it('rejects a valid nested account that differs from the immutable line name', () => {
+    const err = validateInstanceConfig(baseRaw({
+      transport: 'signal',
+      signalConfig: validSignalConfig({ account: 'other-line' }),
+    }), ctx());
+    expect(err?.field).toBe('signalConfig.account');
+    expect(err?.message).toMatch(/immutable line/i);
   });
 
   it('fails closed on stream mode until streaming has an exercised implementation', () => {

@@ -52,6 +52,7 @@ vi.mock('../../src/logger.ts', () => ({
 
 import { makeWASocket } from '@whiskeysockets/baileys';
 import { ConnectionManager } from '../../src/transport/connection.ts';
+import { withWarmIdentity } from '../helpers/outbound-identity.ts';
 
 function makeMockSocket() {
   let evProcessCallback: ((events: Record<string, unknown>) => void) | undefined;
@@ -97,7 +98,7 @@ describe('ConnectionManager — keepalive', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
     emit(openEvent());
     expect(mockSock.query).not.toHaveBeenCalled();
@@ -118,7 +119,7 @@ describe('ConnectionManager — keepalive', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
     emit(openEvent());
 
@@ -134,7 +135,7 @@ describe('ConnectionManager — keepalive', () => {
     mockSock.ws.isOpen = false;
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
     emit(openEvent());
 
@@ -148,7 +149,7 @@ describe('ConnectionManager — keepalive', () => {
     mockSock.query.mockRejectedValue(new Error('ping timeout'));
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     const exhausted = vi.fn();
     manager.on('exhausted', exhausted);
     await manager.connect();
@@ -176,7 +177,7 @@ describe('ConnectionManager — keepalive', () => {
       .mockRejectedValue(new Error('later blip'));
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     const exhausted = vi.fn();
     manager.on('exhausted', exhausted);
     await manager.connect();
@@ -198,7 +199,7 @@ describe('ConnectionManager — self-mention stripping', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
     emit(openEvent());
 
@@ -213,7 +214,7 @@ describe('ConnectionManager — self-mention stripping', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
     emit(openEvent());
 
@@ -228,7 +229,7 @@ describe('ConnectionManager — self-mention stripping', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
     emit(openEvent());
 

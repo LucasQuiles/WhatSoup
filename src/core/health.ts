@@ -8,7 +8,7 @@ import { CURRENT_SCHEMA_MIGRATION, type Database } from './database.ts';
 import { readArcBindingHealth } from './arc-binding-health.ts';
 import { assertSafeHealthBind } from './health-bind-guard.ts';
 import { getMessageCount } from './messages.ts';
-import { getPendingCount, upsertAccess } from './access-list.ts';
+import { getPendingCount, normalizeAccessSubjectRef, upsertAccess } from './access-list.ts';
 import type { RuntimeConnection } from '../transport/runtime-connection.ts';
 import { decideDisconnectAction } from '../transport/auth-disconnect-policy.ts';
 import { DEFAULT_FRESH_INVALID_GRACE_MS } from '../lib/auth-bond-policy.ts';
@@ -1070,12 +1070,12 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         }
 
         const subjectType = data['subjectType'];
-        const subjectId = data['subjectId'];
+        const subjectIdInput = data['subjectId'];
         const action = data['action'];
 
         if (
           typeof subjectType !== 'string' || !subjectType ||
-          typeof subjectId !== 'string' || !subjectId ||
+          typeof subjectIdInput !== 'string' || !subjectIdInput ||
           typeof action !== 'string' || !action
         ) {
           res.writeHead(400, jsonHeaders);
@@ -1090,6 +1090,18 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         if (action !== 'allow' && action !== 'block') {
           res.writeHead(400, jsonHeaders);
           res.end(JSON.stringify({ error: 'action must be "allow" or "block"' }));
+          return;
+        }
+
+        const subjectId = normalizeAccessSubjectRef(
+          deps.db,
+          config.transport,
+          subjectType,
+          subjectIdInput,
+        );
+        if (subjectId === null) {
+          res.writeHead(400, jsonHeaders);
+          res.end(JSON.stringify({ error: 'subjectId does not match subjectType or configured transport' }));
           return;
         }
 

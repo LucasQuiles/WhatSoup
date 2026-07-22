@@ -27,14 +27,17 @@ function throwingStore(throwsTimes: number): IdentityStore {
   };
 }
 
-describe('applyOutboundIdentityGuard — STORE_UNAVAILABLE fail-open', () => {
+describe('applyOutboundIdentityGuard — STORE_UNAVAILABLE policy', () => {
   beforeEach(() => warnSpy.mockClear());
 
-  it('persistent read failure does NOT throw (fail-open), even in enforce mode', () => {
+  it('persistent read failure blocks an ordinary caller in enforce mode', () => {
     const store = throwingStore(Infinity);
     expect(() =>
       applyOutboundIdentityGuard('15550009999@s.whatsapp.net', { caller: 'agent', mode: 'enforce' }, store),
-    ).not.toThrow();
+    ).toThrow(expect.objectContaining({
+      code: 'IDENTITY_BLOCKED',
+      guardCode: 'STORE_UNAVAILABLE',
+    }));
   });
 
   it('a cold target is only blocked on a SUCCESSFUL read (not a busy read)', () => {
@@ -45,12 +48,38 @@ describe('applyOutboundIdentityGuard — STORE_UNAVAILABLE fail-open', () => {
     ).toThrow(OutboundIdentityError);
   });
 
-  it('fail-open audit is queryable by code field (STORE_UNAVAILABLE), not just message', () => {
+  it('null store blocks an ordinary caller in enforce mode', () => {
+    expect(() =>
+      applyOutboundIdentityGuard(
+        '15550009999@s.whatsapp.net',
+        { caller: 'agent', mode: 'enforce' },
+        null,
+      ),
+    ).toThrow(expect.objectContaining({
+      code: 'IDENTITY_BLOCKED',
+      guardCode: 'STORE_UNAVAILABLE',
+    }));
+  });
+
+  it('explicit log-only retains an audited compatibility escape hatch', () => {
     const store = throwingStore(Infinity);
-    applyOutboundIdentityGuard('15550009999@s.whatsapp.net', { caller: 'agent', mode: 'enforce' }, store);
+    applyOutboundIdentityGuard('15550009999@s.whatsapp.net', { caller: 'agent', mode: 'log-only' }, store);
     expect(warnSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ code: 'STORE_UNAVAILABLE', verdict: 'warn', caller: 'agent', mode: 'enforce' }),
-      expect.stringContaining('failing open'),
+      expect.objectContaining({ code: 'STORE_UNAVAILABLE', verdict: 'warn', caller: 'agent', mode: 'log-only' }),
+      expect.stringContaining('log-only'),
     );
   });
+
+  it.each(['health', 'scheduler', 'reply-guarantee', 'report-channel'] as const)(
+    'trusted caller %s does not require the identity store',
+    (caller) => {
+      expect(() =>
+        applyOutboundIdentityGuard(
+          '15550009999@s.whatsapp.net',
+          { caller, mode: 'enforce' },
+          null,
+        ),
+      ).not.toThrow();
+    },
+  );
 });

@@ -4,18 +4,18 @@
 
 | Concept | v3 (today) | v3.5 (target) | Notes |
 |---|---|---|---|
-| **Channel** | implicit (WhatsApp only) | first-class registry entry: id, name, glyph, link method, capabilities, health semantics | **14 in 3 classes** (A3): messaging wa·signal·imessage·sms·discord·telegram, socials x·linkedin·reddit·instagram·facebook, channels email·slack·teams; transports mocked per D2 |
-| **Line** | a WhatsApp connection w/ config | a **channel account** under management: channel + identity (phone/handle/email) + linkage state + assigned agent + access grants | single user-facing noun kept; inactive = "deactivated" (D3) |
+| **Channel** | four transport choices: WhatsApp, SMS, Signal, iMessage | first-class registry entry: id, name, glyph, link method, capabilities, health semantics | **14 in 3 classes** (A3): messaging wa·signal·imessage·sms·discord·telegram, socials x·linkedin·reddit·instagram·facebook, channels email·slack·teams; four runtime-backed, ten mocked per D2 |
+| **Line** | one selected WhatsApp/SMS/Signal/iMessage connection with config | a **channel account** under management: channel + identity (phone/handle/email) + linkage state + assigned agent + access grants | single user-facing noun kept; inactive = "deactivated" (D3) |
 | **Agent** | per-line config blob (mode/model/plugins) | first-class object: name, initials avatar, assignable profile picture, persona/soul, model/brain, skills, status; assignable to Lines | B1/B2; roster + detail + assignment UX |
 | **Agent Profile** | n/a | saved, swappable agent configuration: persona + brain + skills + defaults; create/edit/duplicate/assign/**swap** | B1 — swap flow w/ per-line diff preview |
 | **Agent Instance** | sessionScope per_chat (runtime only) | designed surface: per-chat agent instances visible under Agent detail (active chats, presence) | A4 — inherits current per-chat session structure |
 | **Assignment** | n/a (config lives on line) | relation Line↔Agent with history; unassigned = passive-only | 1 Agent : N Lines; Line 0:1 Agent |
 | **Grant** | n/a | permission relation: agent × line × capability (see/reply/act); controls agent access to passive/personal lines | B3 — Line Access Control |
 | **Fleet** | lines table + charts + feed | multi-channel fleet: channel glyphs, agent presence, restricted-line indicators, attention metric kept | scan-path preserved; 200-line design target (E1) |
-| **Hatch** | n/a | the creation+link+activate journey; ceremony beat at activation (3 beats: name → soul line → setup question) | journey-side vocabulary; ops stays dry (A5) |
+| **Hatch** | n/a | the creation+link+activate journey; ceremony beat at activation (3 beats: name → soul line → channel) | journey-side vocabulary; ops stays dry (A5) |
 | **Workspace** | implicit single tenant | named workspace (settings root) | B5; enables settings IA |
-| **Linkage** | QR link/relink modals | per-channel linkage flows (QR, pairing code, OAuth, bridge) with shared state machine (deactivated→linking→linked→degraded→relink) | one taxonomy, many carriers |
-| **Inbox** | per-line WhatsApp threads | unified cross-channel inbox w/ channel filter | channel chip per thread (B4) |
+| **Linkage** | WhatsApp QR; Twilio configured auto-advance; Signal/iMessage out-of-band attestation | per-channel linkage flows (QR, configured polling, external attestation, OAuth) with shared state machine (deactivated→linking→linked→degraded→relink) | one taxonomy, many carriers; QR remains WhatsApp-only |
+| **Inbox** | per-line threads with transport-aware selection, badges, and message formatting | unified cross-channel inbox w/ channel filter | channel chip per thread (B4) |
 | **Attention** | lines-not-online metric | kept; per-channel degradation semantics | spec already unified |
 
 ## 2. Surface map
@@ -42,7 +42,8 @@ Landing → Get started
   → 1 Identity      workspace name + admin (was: wizard Identity step)
   → 2 Channel       pick channel (glyph grid) → channel-specific link instructions
   → 3 Agent         name + persona (soul.md analog) + brain (model) — templates offered
-  → 4 Link          QR / pairing / OAuth per channel; live status polling
+  → 4 Link          WhatsApp QR, Twilio configured advance, Signal/iMessage attestation,
+                    or a designed future channel flow
   → 5 Hatch         ceremony beat (one-shot): identity → brain → channel checks seal,
                     agent "hatches" → Line live in Fleet
   → Fleet (seeded, alive)
@@ -66,6 +67,6 @@ Short path (N+1 line): Fleet → Add line → 2→4→5 (identity/workspace skip
 
 ## 5. Explicit non-goals (this program)
 
-- Runtime channel transports (Signal/iMessage/X/IG backends) — D2.
+- New runtime channel transports beyond the existing WhatsApp/SMS/Signal/iMessage backends — D2.
 - Platform rename of WhatSoup internals — v3 boundary stands.
 - Multi-tenant/auth-accounts backend — Workspace is a UI concept until platform work lands.

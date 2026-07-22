@@ -2696,11 +2696,13 @@ describe('health command endpoints — malformed bodies and side effects', () =>
   beforeEach(async () => {
     db = makeDb();
     process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    (config as unknown as { transport?: string }).transport = 'baileys';
   });
 
   afterEach(async () => {
     db.close();
     delete process.env.WHATSOUP_HEALTH_TOKEN;
+    delete (config as unknown as { transport?: string }).transport;
     if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
@@ -2887,6 +2889,90 @@ describe('health command endpoints — malformed bodies and side effects', () =>
       .prepare('SELECT subject_type, subject_id, status FROM access_list WHERE subject_id = ?')
       .get('15551234567');
     expect(row).toEqual({ subject_type: 'phone', subject_id: '15551234567', status: 'allowed' });
+  });
+
+  it.each([
+    ['baileys', 'group', 'study-group_at_g.us', 'study-group@g.us'],
+    ['signal', 'group', 'Z3JvdXAtY29udmVyc2F0aW9u_at_signal', 'Z3JvdXAtY29udmVyc2F0aW9u@signal'],
+    ['imessage', 'group', 'iMessage;+;chatABC_at_imessage', 'iMessage;+;chatABC@imessage'],
+    ['signal', 'phone', 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb_at_signal', 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb'],
+    ['imessage', 'phone', 'owner_at_example.test@imessage', 'owner@example.test'],
+  ])('normalizes a %s %s conversation key before access persistence', async (
+    transport,
+    subjectType,
+    subjectId,
+    expectedSubjectId,
+  ) => {
+    (config as unknown as { transport?: string }).transport = transport;
+    const handleAccessDecision = vi.fn().mockResolvedValue(undefined);
+    ({ server, port } = await buildTestServer(makeDeps(db, { handleAccessDecision })));
+
+    const { status, body } = await httpReq(
+      port,
+      '/access',
+      'POST',
+      JSON.stringify({ subjectType, subjectId, action: 'allow' }),
+      { authorization: 'Bearer secret-token' },
+    );
+
+    expect(status).toBe(200);
+    expect(JSON.parse(body)).toMatchObject({ subjectType, subjectId: expectedSubjectId });
+    expect(handleAccessDecision).toHaveBeenCalledWith(subjectType, expectedSubjectId, 'allow');
+    expect(db.raw.prepare(
+      'SELECT subject_type, subject_id, status FROM access_list WHERE subject_type = ? AND subject_id = ?',
+    ).get(subjectType, expectedSubjectId)).toEqual({
+      subject_type: subjectType,
+      subject_id: expectedSubjectId,
+      status: 'allowed',
+    });
+  });
+
+  it.each([
+    ['signal', 'group', 'study-group_at_g.us'],
+    ['imessage', 'phone', 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb_at_signal'],
+  ])('rejects a %s access subject from a mismatched transport namespace', async (
+    transport,
+    subjectType,
+    subjectId,
+  ) => {
+    (config as unknown as { transport?: string }).transport = transport;
+    const handleAccessDecision = vi.fn().mockResolvedValue(undefined);
+    ({ server, port } = await buildTestServer(makeDeps(db, { handleAccessDecision })));
+
+    const { status } = await httpReq(
+      port,
+      '/access',
+      'POST',
+      JSON.stringify({ subjectType, subjectId, action: 'allow' }),
+      { authorization: 'Bearer secret-token' },
+    );
+
+    expect(status).toBe(400);
+    expect(handleAccessDecision).not.toHaveBeenCalled();
+    expect(db.raw.prepare('SELECT COUNT(*) AS cnt FROM access_list').get()).toEqual({ cnt: 0 });
+  });
+
+  it.each([
+    ['baileys', 'not-an-identity'],
+    ['twilio', '   '],
+    ['signal', 'owner@example.test'],
+    ['imessage', 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb'],
+  ])('rejects an invalid bare %s access identity', async (transport, subjectId) => {
+    (config as unknown as { transport?: string }).transport = transport;
+    const handleAccessDecision = vi.fn().mockResolvedValue(undefined);
+    ({ server, port } = await buildTestServer(makeDeps(db, { handleAccessDecision })));
+
+    const { status } = await httpReq(
+      port,
+      '/access',
+      'POST',
+      JSON.stringify({ subjectType: 'phone', subjectId, action: 'allow' }),
+      { authorization: 'Bearer secret-token' },
+    );
+
+    expect(status).toBe(400);
+    expect(handleAccessDecision).not.toHaveBeenCalled();
+    expect(db.raw.prepare('SELECT COUNT(*) AS cnt FROM access_list').get()).toEqual({ cnt: 0 });
   });
 
   it('returns a 500 JSON response when /access persistence unexpectedly fails', async () => {

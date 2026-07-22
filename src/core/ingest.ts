@@ -337,7 +337,7 @@ export function createIngestHandler(
           // corruption in the fleet's automated-repair coordination plane).
           // B4: the grant primitive returns null for a non-authenticated (@sms)
           // transport, so a spoofed control-peer number cannot match.
-          const phone = resolvePhoneFromJidForGrant(msg.senderJid, db);
+          const phone = resolvePhoneFromJidForGrant(msg.senderJid, db, config.transport);
           const isPeer = phone !== null && [...config.controlPeers.values()].includes(phone);
           if (isPeer) {
             const protocol = extractProtocol(msg.content);

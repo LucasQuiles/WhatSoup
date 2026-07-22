@@ -5,7 +5,7 @@
  *   1. resolvePhoneFromJid: SMS JID → digits (subject-format decision).
  *   2. resolveAdminChatJid: SMS sender row → @sms JID; no-row + twilio transport → @sms fallback.
  *   3. Integration round-trip: inbound SMS sender → shouldRespond pending/unknown →
- *      insertPending → parseAdminCommand(ALLOW <digits>) → updateAccess → shouldRespond allowed.
+ *      insertPending → console access decision → updateAccess → shouldRespond allowed.
  */
 
 import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
@@ -136,7 +136,7 @@ describe('resolvePhoneFromJid — SMS JID', () => {
 });
 
 // ---------------------------------------------------------------------------
-// parseAdminCommand — matches ALLOW <digits> produced by resolvePhoneFromJid
+// parseAdminCommand — transport-neutral command parser compatibility
 // ---------------------------------------------------------------------------
 
 describe('parseAdminCommand — ALLOW <digits from SMS>', () => {
@@ -184,8 +184,10 @@ describe('sendApprovalRequest — resolveAdminChatJid with SMS sender row', () =
     expect(messenger.sendMessage).toHaveBeenCalledOnce();
     const [sentJid, sentText] = messenger.sendMessage.mock.calls[0] as [string, string];
     expect(sentJid).toBe('+15550100001@sms');
-    expect(sentText).toContain('ALLOW 14155550100');
-    expect(sentText).toContain('BLOCK 14155550100');
+    expect(sentText).toContain('Review this request in the WhatSoup console');
+    expect(sentText).toContain('SMS replies cannot authorize access decisions');
+    expect(sentText).not.toContain('ALLOW 14155550100');
+    expect(sentText).not.toContain('BLOCK 14155550100');
   });
 
   it('falls back to +<admin>@sms when no message rows exist and transport=twilio', async () => {
@@ -225,14 +227,10 @@ describe('SMS allowlist round-trip', () => {
     expect(result2.respond).toBe(false);
     expect(result2.accessStatus).toBe('pending');
 
-    // Step 4: admin replies "ALLOW 14155550100" — parseAdminCommand parses it
-    const cmd = asAccessCommand(parseAdminCommand(`ALLOW ${phone}`));
-    expect(cmd.subjectId).toBe(PHONE_DIGITS);
+    // Step 4: an authenticated console operator applies the decision.
+    updateAccess(db, 'phone', phone, 'allowed');
 
-    // Step 5: updateAccess applies the command
-    updateAccess(db, cmd.subjectType, cmd.subjectId, 'allowed');
-
-    // Step 6: shouldRespond now allows
+    // Step 5: shouldRespond now allows
     const result3 = shouldRespond(msg, BOT_JID, null, db);
     expect(result3.respond).toBe(true);
     expect(result3.reason).toBe('dm_allowed');
@@ -252,15 +250,17 @@ describe('SMS allowlist round-trip', () => {
     expect(result.accessStatus).toBe('blocked');
   });
 
-  it('sendApprovalRequest produces ALLOW <digits> text for SMS sender', async () => {
+  it('sendApprovalRequest directs SMS notification recipients to the console', async () => {
     const messenger = { sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }), sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }) };
     const phone = resolvePhoneFromJid(SMS_SENDER, db);
 
     await sendApprovalRequest(db, messenger, phone, 'Alice', 'hello from SMS');
 
     const sentText = messenger.sendMessage.mock.calls[0][1] as string;
-    expect(sentText).toContain(`ALLOW ${PHONE_DIGITS}`);
-    expect(sentText).toContain(`BLOCK ${PHONE_DIGITS}`);
+    expect(sentText).toContain('Review this request in the WhatSoup console');
+    expect(sentText).toContain('SMS replies cannot authorize access decisions');
+    expect(sentText).not.toContain(`ALLOW ${PHONE_DIGITS}`);
+    expect(sentText).not.toContain(`BLOCK ${PHONE_DIGITS}`);
     // The pending row must use digits (not +digits or +digits_at_sms)
     const entry = lookupAccess(db, 'phone', PHONE_DIGITS);
     expect(entry).not.toBeNull();
@@ -269,7 +269,7 @@ describe('SMS allowlist round-trip', () => {
 });
 
 // ---------------------------------------------------------------------------
-// handleAdminCommand — ALLOW over SMS replays queued messages stored under @sms
+// handleAdminCommand — an authorized external decision replays queued @sms messages
 // ---------------------------------------------------------------------------
 
 describe('handleAdminCommand — SMS queued-message replay', () => {
@@ -336,7 +336,7 @@ describe('handleAdminCommand — 10-digit subject normalization', () => {
       sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
     };
     const replayed: IncomingMessage[] = [];
-    // Admin typed the 10-digit form (no country code)
+    // The authorized decision used the 10-digit compatibility form (no country code).
     await handleAdminCommand(db, messenger as never, 'allow', 'phone', '5550100004',
       '+15550100005@sms', async (msg: IncomingMessage) => {
         replayed.push(msg);

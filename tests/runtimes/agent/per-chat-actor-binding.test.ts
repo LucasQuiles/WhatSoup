@@ -170,10 +170,12 @@ vi.mock('../../../src/runtimes/agent/media-bridge.ts', () => ({
 
 vi.mock('../../../src/core/durability.ts', () => ({
   sendTracked: vi.fn(),
+  sendTrackedOperatorReport: vi.fn(),
 }));
 
 vi.mock('../../../src/core/conversation-key.ts', () => ({
   toConversationKey: vi.fn((jid: string) => jid),
+  conversationRefToKey: vi.fn((ref: string) => ref),
   // runtime.ts derives its global scope-key constants from this at import time.
   GLOBAL_CONVERSATION_KEY: '__global__',
 }));

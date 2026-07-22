@@ -1,4 +1,4 @@
-import { isRecord } from './lib/type-guards.ts';
+import { isRecord, setOwnRecordProperty } from './lib/type-guards.ts';
 
 export interface MemoryMigrationOptions {
   removeLegacy?: boolean;
@@ -112,12 +112,14 @@ function migrateNamespaceObject(
 ): void {
   const legacyNamespaces = getPath(source, 'pineconeNamespaces');
   if (!isRecord(legacyNamespaces)) return;
+  const sourceNamespaces = getPath(source, 'memory.pinecone.namespaces');
+  let targetNamespaces: Record<string, unknown> | undefined;
 
   let didMove = false;
   for (const [namespaceKey, namespaceValue] of Object.entries(legacyNamespaces)) {
-    const targetPath = `memory.pinecone.namespaces.${namespaceKey}`;
-    if (hasPath(source, targetPath)) continue;
-    setPath(target, targetPath, namespaceValue);
+    if (isRecord(sourceNamespaces) && Object.hasOwn(sourceNamespaces, namespaceKey)) continue;
+    targetNamespaces ??= ensureRecordPath(target, ['memory', 'pinecone', 'namespaces']);
+    setOwnRecordProperty(targetNamespaces, namespaceKey, cloneJson(namespaceValue));
     didMove = true;
   }
   if (didMove) {

@@ -16,12 +16,13 @@ import LinkStep from './wizard/LinkStep'
 
 interface RelinkModalProps {
   lineName: string
+  transport?: string | null
   open: boolean
   onClose: () => void
   onLinked: () => void
 }
 
-const RelinkModal: FC<RelinkModalProps> = ({ lineName, open, onClose, onLinked }) => {
+const RelinkModal: FC<RelinkModalProps> = ({ lineName, transport, open, onClose, onLinked }) => {
   return (
     <Modal
       open={open}
@@ -31,7 +32,7 @@ const RelinkModal: FC<RelinkModalProps> = ({ lineName, open, onClose, onLinked }
     >
       <ModalHeader title={`Re-link ${lineName}`} onClose={onClose} />
       <ModalBody>
-        <LinkStep lineName={lineName} onComplete={onLinked} />
+        <LinkStep lineName={lineName} transport={transport} onComplete={onLinked} />
       </ModalBody>
     </Modal>
   )

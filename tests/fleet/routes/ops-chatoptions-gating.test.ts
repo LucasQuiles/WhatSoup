@@ -369,9 +369,11 @@ describe('handleConfigUpdate PATCH chatOptions validation (QR-218 PR-2)', () => 
       res, makeDeps(fakeInstance(cfg)), { name: 'test-line' },
     );
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(
-      /chatOptions\.openaiProviderConfig\.apiKeyService .* is not a valid provider service/,
+    const error = JSON.parse(res._body).error as string;
+    expect(error).toMatch(
+      /chatOptions\.openaiProviderConfig\.apiKeyService is not a valid provider service/,
     );
+    expect(error).not.toContain('not-a-real-service');
     expect(fs.readFileSync(cfg, 'utf-8')).toBe(before);
   });
 

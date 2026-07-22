@@ -1,11 +1,10 @@
 #!/usr/bin/env node
 // scripts/grant-resolver-inventory-guard.ts
 //
-// CI inventory guard for QR-143 / B4. A phone-keyed admin/allow GRANT decision
-// MUST resolve the sender's phone through `resolvePhoneFromJidForGrant` (which
-// fails closed for non-WhatsApp-authenticated transports), NOT through the
-// general-purpose `resolvePhoneFromJid`, which collapses a spoofable
-// `<digits>@sms` JID to the SAME bare phone as a real WhatsApp admin.
+// CI inventory guard for QR-143 / B4. An admin/allow GRANT decision MUST
+// resolve the sender through `resolvePhoneFromJidForGrant`, which requires a
+// canonical sender identity in the namespace bound to the configured
+// transport. The general resolver is intentionally transport-agnostic.
 //
 // This guard fails the build when a NEW inline `isAdminPhone(resolvePhoneFromJid(...))`
 // composition appears in `src/` outside an explicitly-justified allowlist, so a
@@ -19,8 +18,8 @@
 //     by `(`) distinguishes the primitive from the general resolver.
 //   - It does NOT catch a DECOMPOSED grant
 //     (`const p = resolvePhoneFromJid(jid, db); ... isAdminPhone(p)`), e.g.
-//     `main.ts` (author-of-group auto-allow) or the migrated B1/B3 sites, which
-//     resolve into a variable first. Those are reviewed in the QR-143 call-site
+//     a grant site that resolves into a variable first. Those are reviewed in
+//     the QR-143 call-site
 //     audit; this guard is a cheap tripwire for the most common re-introduction
 //     shape, not a total proof.
 //   - The audit's "(a) inside the primitive itself" clause is vacuous here: the
@@ -47,7 +46,7 @@ export const GRANT_RESOLVER_ALLOWLIST: ReadonlyArray<{ file: string; reason: str
   {
     file: 'src/core/outbound-message-safety.ts',
     reason:
-      'isOperatorDmPeer peerBearsAdminDigits — the GRANT decision is separately gated on isWhatsAppAuthenticatedJid(chatJid) before the elevation return; the phone match is ALSO needed on the UNauthenticated branch to select the never-silent spoof-attempt warn subset (NFR-3). Routing through resolvePhoneFromJidForGrant would null the phone on @sms and silence that warn.',
+      'isOperatorDmPeer peerBearsAdminIdentity — the GRANT decision is separately gated on isAuthenticatedSenderForTransport(chatJid, transport) before the elevation return; the identity match is ALSO needed on the untrusted branch to select the never-silent spoof-attempt warn subset (NFR-3). Routing through resolvePhoneFromJidForGrant would null the identity and silence that warn.',
   },
 ];
 
@@ -89,7 +88,7 @@ export function scanFileForGrantResolvers(relPath: string, content: string): Gra
       file: relPath.split(path.sep).join('/'),
       line,
       detail:
-        'inline isAdminPhone(resolvePhoneFromJid(...)) grant composition — use resolvePhoneFromJidForGrant (fails closed for @sms), or add a justified allowlist row',
+        'inline isAdminPhone(resolvePhoneFromJid(...)) grant composition — use resolvePhoneFromJidForGrant (canonical and transport-bound), or add a justified allowlist row',
     });
   }
   return findings;

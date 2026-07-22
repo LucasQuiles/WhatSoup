@@ -5,9 +5,9 @@ import * as os from 'node:os';
 import { spawn } from 'node:child_process';
 import { readBody, jsonResponse, requireInstance } from '../../lib/http.ts';
 import { escapeRegExp } from '../../lib/regex-utils.ts';
-import { isRecord } from '../../lib/type-guards.ts';
+import { isRecord, setOwnRecordProperty } from '../../lib/type-guards.ts';
 import { createSSEWriter } from '../sse-helpers.ts';
-import { normalizePhoneE164 } from '../../lib/phone.ts';
+import { normalizePhoneE164Wire } from '../../lib/phone.ts';
 import { SIGNAL_UUID_RE } from '../../transport/signal/types.ts';
 import { APPLEID_EMAIL_RE } from '../../transport/imessage/types.ts';
 import { createChildLogger } from '../../logger.ts';
@@ -23,7 +23,7 @@ import type { PermissionsSettings } from '../../core/settings-template.ts';
 import { VALID_TYPES, VALID_ACCESS_MODES, VALID_SESSION_SCOPES } from '../../instance-loader.ts';
 import { validateInstanceConfig } from '../../core/agent-config-validator.ts';
 import type { ValidationError as ConfigValidationError } from '../../core/agent-config-validator.ts';
-import { isGroupConversationKey, conversationKeyToJid } from '../../core/conversation-key.ts';
+import { conversationRefToJid, isRawTransportJidReference } from '../../core/conversation-key.ts';
 import { toPersonalJid } from '../../core/jid-constants.ts';
 import { persistIntroSentFlag } from '../../core/intro-sent-config.ts';
 import {
@@ -45,6 +45,7 @@ import { stripPlaintextProviderKeys } from '../../lib/config-plaintext-keys.ts';
 import { DEFAULT_INSTANCE_HEALTH_PORT } from '../constants.ts';
 import { privateWriteError, writePrivateFileSync } from '../../lib/private-fs.ts';
 import { errorMessage } from '../../lib/error-message.ts';
+import { isTransportId } from '../../transport/registry.ts';
 
 /** Valid instance name pattern: lowercase alphanumeric + hyphens, must start with a letter. */
 const NAME_RE = /^[a-z][a-z0-9-]*$/;
@@ -65,12 +66,15 @@ function deepMergeRecords(
 ): Record<string, unknown> {
   const result: Record<string, unknown> = { ...base };
   for (const [key, value] of Object.entries(patch)) {
-    const current = result[key];
     const childPath = [...path, key];
-    const dottedPath = childPath.join('.');
-    result[key] = isRecord(current) && isRecord(value) && dottedPath !== 'chatOptions.openaiProviderConfig'
+    const current = Object.hasOwn(result, key) ? result[key] : undefined;
+    const isOpenAiProviderConfig = childPath.length === 2
+      && childPath[0] === 'chatOptions'
+      && childPath[1] === 'openaiProviderConfig';
+    const merged = isRecord(current) && isRecord(value) && !isOpenAiProviderConfig
       ? deepMergeRecords(current, value, childPath)
       : value;
+    setOwnRecordProperty(result, key, merged);
   }
   return result;
 }
@@ -158,11 +162,17 @@ export async function handleSend(
       return;
     }
 
-    if (hasChatJid && !parsed.chatJid.includes('@')) {
-      parsed.chatJid = isGroupConversationKey(parsed.chatJid)
-        ? conversationKeyToJid(parsed.chatJid)
-        : toPersonalJid(parsed.chatJid);
-      fixedBody = JSON.stringify(parsed);
+    if (hasChatJid) {
+      if (!isRawTransportJidReference(parsed.chatJid)) {
+        const restoredJid = conversationRefToJid(parsed.chatJid);
+        if (restoredJid !== parsed.chatJid) {
+          parsed.chatJid = restoredJid;
+          fixedBody = JSON.stringify(parsed);
+        } else if (!parsed.chatJid.includes('@')) {
+          parsed.chatJid = toPersonalJid(parsed.chatJid);
+          fixedBody = JSON.stringify(parsed);
+        }
+      }
     }
   } catch { /* invalid JSON: existing fall-through; downstream returns 400 */ }
 
@@ -441,7 +451,7 @@ export async function handleConfigUpdate(
       //    pre-merge existing config so the merged view can't smuggle it.
       if (
         patch.transport !== undefined &&
-        patch.transport !== existing.transport
+        patch.transport !== (existing.transport ?? 'baileys')
       ) {
         jsonResponse(res, 409, {
           error: 'transport is immutable; create a new line to change transports',
@@ -482,7 +492,15 @@ export async function handleConfigUpdate(
           haltConfigUpdateAfterResponse();
         }
         const mergedTransport = typeof merged.transport === 'string' ? merged.transport : 'baileys';
-        merged.adminPhones = normalizeAdminIdsForTransport(mergedTransport, patch.adminPhones as string[]);
+        const normalizedAdminPhones = normalizeAdminIdsForTransport(
+          mergedTransport,
+          patch.adminPhones as string[],
+        );
+        if (!normalizedAdminPhones) {
+          jsonResponse(res, 400, { error: 'adminPhones contains an invalid identity for the selected transport' });
+          haltConfigUpdateAfterResponse();
+        }
+        merged.adminPhones = normalizedAdminPhones;
       }
 
       // --- Shared validator: closes #244 + #249 PATCH validation gaps ---
@@ -499,6 +517,7 @@ export async function handleConfigUpdate(
           mode: 'patch',
           ...(portInventory ? { existingHealthPorts: portInventory.ports } : {}),
           originalType: existing.type,
+          patchIncludesAccessMode: Object.prototype.hasOwnProperty.call(patch, 'accessMode'),
         });
         if (validationError) {
           emitValidationError(validationError, res);
@@ -592,7 +611,7 @@ export async function handleConfigUpdate(
       // and inert plaintext provider keys (wizard-era apiKey/openaiKey — nothing reads them;
       // stripping here also scrubs legacy on-disk victims on their next config write).
       const { settingsJson: _stripped, ...mergedCleanRaw } = merged;
-      const scrubbed = stripPlaintextProviderKeys(mergedCleanRaw).clean;
+      const scrubbed = stripPlaintextProviderKeys(mergedCleanRaw, params.name).clean;
       const clean = migrateLegacyMemoryConfig(scrubbed, { removeLegacy: true }).config;
       try {
         writePrivateConfigFileSync(instance.configPath, JSON.stringify(clean, null, 2) + '\n');
@@ -801,34 +820,34 @@ function validatePluginDirs(dirs: unknown[], res: ServerResponse): boolean {
 }
 
 /**
- * Deduplicate and normalize an array of phone strings using E.164 format.
- */
-function normalizeAdminPhones(phones: string[]): string[] {
-  return [...new Set(phones.map((p) => normalizePhoneE164(p)))];
-}
-
-/**
  * Per-transport admin-ID normalization. Admin IDs are matched against the
  * sender's protocol-verified identity, so the acceptable shape depends on
  * the line's transport:
- * - signal:   E.164 phone OR Signal UUID (passed through verbatim)
- * - imessage: E.164 phone OR AppleID email (passed through verbatim)
- * - others:   E.164 phone (existing behavior)
+ * - signal:   canonical +E.164 phone OR lowercase Signal UUID
+ * - imessage: canonical +E.164 phone OR lowercase AppleID email
+ * - others:   normalized phone digits (existing compatibility behavior)
  */
-function normalizeAdminIdsForTransport(transport: string, phones: string[]): string[] {
-  if (transport === 'signal') {
-    return [...new Set(phones.map((p) => {
-      const trimmed = p.trim();
-      return SIGNAL_UUID_RE.test(trimmed) ? trimmed : normalizePhoneE164(trimmed);
-    }))];
+function normalizeAdminIdsForTransport(transport: string, phones: string[]): string[] | null {
+  const normalized: string[] = [];
+  for (const phone of phones) {
+    const trimmed = phone.trim().toLowerCase();
+    if (transport === 'signal' && SIGNAL_UUID_RE.test(trimmed)) {
+      normalized.push(trimmed);
+      continue;
+    }
+    if (transport === 'imessage' && APPLEID_EMAIL_RE.test(trimmed)) {
+      normalized.push(trimmed);
+      continue;
+    }
+    const wireIdentity = normalizePhoneE164Wire(trimmed);
+    if (!wireIdentity) return null;
+    normalized.push(
+      transport === 'signal' || transport === 'imessage'
+        ? wireIdentity
+        : wireIdentity.slice(1),
+    );
   }
-  if (transport === 'imessage') {
-    return [...new Set(phones.map((p) => {
-      const trimmed = p.trim();
-      return APPLEID_EMAIL_RE.test(trimmed) ? trimmed : normalizePhoneE164(trimmed);
-    }))];
-  }
-  return normalizeAdminPhones(phones);
+  return [...new Set(normalized)];
 }
 
 // ---------------------------------------------------------------------------
@@ -1046,7 +1065,17 @@ export async function handleCreateLine(
     jsonResponse(res, 400, { error: 'adminPhones must be a non-empty array of non-empty strings' });
     return;
   }
-  adminPhones = normalizeAdminPhones(adminPhones as string[]);
+  const transport = body.transport === undefined ? 'baileys' : body.transport;
+  if (!isTransportId(transport)) {
+    jsonResponse(res, 400, { error: 'transport must be one of: baileys, twilio, signal, imessage' });
+    return;
+  }
+  const normalizedAdminPhones = normalizeAdminIdsForTransport(transport, adminPhones as string[]);
+  if (!normalizedAdminPhones) {
+    jsonResponse(res, 400, { error: 'adminPhones contains an invalid identity for the selected transport' });
+    return;
+  }
+  adminPhones = normalizedAdminPhones;
 
   // --- Type-specific validation ---
   // systemPrompt and agentOptions are deferred — validated at instance start by instance-loader.
@@ -1115,6 +1144,7 @@ export async function handleCreateLine(
     adminPhones,
     healthPort,
     accessMode,
+    transport,
     introSent: false, // triggers introduction message on first boot
   };
 
@@ -1130,6 +1160,7 @@ export async function handleCreateLine(
     'pineconeApiKeyEnv', 'pineconeProjectId', 'pineconeExpectedHostSuffix',
     'pineconeNamespaces', 'pineconeFactsNamespace', 'pineconeChunksNamespace',
     'pineconeSummariesNamespace', 'pineconeKnowledgeSearch', 'pineconeKnowledgeProfiles',
+    'twilioConfig', 'signalConfig', 'imessageConfig',
   ];
   for (const field of PASSTHROUGH_FIELDS) {
     if (body[field] != null) config[field] = body[field];
@@ -1143,9 +1174,7 @@ export async function handleCreateLine(
   // Regression guard, not an active hole: PASSTHROUGH_FIELDS excludes the
   // wizard-era plaintext key fields today; this keeps future allowlist
   // growth from reopening the PATCH-path leak fixed alongside it.
-  config = stripPlaintextProviderKeys(
-    migrateLegacyMemoryConfig(config, { removeLegacy: true }).config,
-  ).clean;
+  config = migrateLegacyMemoryConfig(config, { removeLegacy: true }).config;
 
   // --- Shared validator: defense-in-depth before writing to disk ---
   // CREATE has already done inline shape checks above; this catches any field
@@ -1161,10 +1190,12 @@ export async function handleCreateLine(
       return;
     }
   }
+  config = stripPlaintextProviderKeys(config, name).clean;
 
   // --- Create directories ---
   const createdExtras: ExtraRecord[] = [];
-  let serviceEnabled = false;
+  let serviceEnableAttempted = false;
+  let serviceStartAttempted = false;
   try {
     fs.mkdirSync(configRoot(), { recursive: true, mode: 0o700 });
     fs.mkdirSync(configDir, { mode: 0o700 });
@@ -1232,8 +1263,13 @@ export async function handleCreateLine(
     }
 
     // --- Enable service ---
+    serviceEnableAttempted = true;
     await deps.serviceManager.enable(name);
-    serviceEnabled = true;
+
+    if (transport !== 'baileys') {
+      serviceStartAttempted = true;
+      await deps.serviceManager.start(name);
+    }
 
     // --- Re-scan discovery ---
     deps.discovery.scan();
@@ -1242,23 +1278,38 @@ export async function handleCreateLine(
     publishFeedEvent(deps.realtime, name);
     jsonResponse(res, 201, { name, healthPort });
   } catch (err) {
-    if (serviceEnabled) {
+    const rollbackErrors: string[] = [];
+    if (serviceStartAttempted) {
+      try {
+        await deps.serviceManager.stop(name);
+      } catch (rollbackErr) {
+        if (!isBenignServiceTeardownError(rollbackErr, name)) {
+          rollbackErrors.push(`service stop failed: ${serviceErrorMessage(rollbackErr)}`);
+        }
+      }
+    }
+    if (serviceEnableAttempted) {
       try {
         await deps.serviceManager.disable(name);
       } catch (rollbackErr) {
-        log.error(
-          { err: rollbackErr, originalErr: err, instance: name },
-          'failed to disable service after instance creation failure',
-        );
-        jsonResponse(res, 500, {
-          error: `instance creation failed: ${(err as Error).message}`,
-          rollbackError: `service disable failed: ${(rollbackErr as Error).message}`,
-        });
-        return;
+        if (!isBenignServiceTeardownError(rollbackErr, name)) {
+          rollbackErrors.push(`service disable failed: ${serviceErrorMessage(rollbackErr)}`);
+        }
       }
     }
+    if (rollbackErrors.length > 0) {
+      log.error(
+        { err, instance: name, rollbackErrors },
+        'failed to roll back service after instance creation failure',
+      );
+      jsonResponse(res, 500, {
+        error: `instance creation failed: ${errorMessage(err)}`,
+        rollbackError: rollbackErrors.join('; '),
+      });
+      return;
+    }
     cleanupPartial(name, createdExtras);
-    jsonResponse(res, 500, { error: `instance creation failed: ${(err as Error).message}` });
+    jsonResponse(res, 500, { error: `instance creation failed: ${errorMessage(err)}` });
   }
 }
 
@@ -1281,6 +1332,16 @@ export async function handleAuth(
   if (!validateInstanceName(params.name, res)) return;
   const instance = requireInstance(deps.discovery, params.name, res);
   if (!instance) return;
+
+  if (instance.configError) {
+    jsonResponse(res, 409, { error: 'instance has invalid configuration; repair config.json before authentication' });
+    return;
+  }
+
+  if ((instance.transport ?? 'baileys') !== 'baileys') {
+    jsonResponse(res, 409, { error: 'QR authentication is only available for the baileys transport' });
+    return;
+  }
 
   // Prevent concurrent auth requests for the same instance from racing
   if (authInFlight.has(params.name)) {

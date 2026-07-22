@@ -206,6 +206,46 @@ describe('registerMediaTools', () => {
     media.stream.destroy();
   });
 
+  it('keeps operator-only caption details for a configured Signal admin in the Signal namespace', async () => {
+    const filePath = writeFile('signal-admin.jpg');
+    const signalAdmin = '+15550001111';
+    deps.transport = 'signal';
+    deps.adminPhones.add(signalAdmin);
+    deps.fallbackActive = () => false;
+    const session = chatSession(signalAdmin, `${signalAdmin}@signal`, workspace);
+
+    const result = await registry.call(
+      'send_media',
+      { filePath, caption: 'restart via /Users/testuser/LAB/whatsoup/instances/signal-line' },
+      session,
+    );
+
+    expect(result.isError).toBeUndefined();
+    const media = mediaCalls[0].media as { caption: string; stream: { destroy: () => void } };
+    expect(media.caption).toContain('/Users/testuser/LAB/whatsoup/instances/signal-line');
+    media.stream.destroy();
+  });
+
+  it('does not elevate the same Signal media recipient from the iMessage namespace', async () => {
+    const filePath = writeFile('cross-namespace-admin.jpg');
+    const signalAdmin = '+15550001111';
+    deps.transport = 'signal';
+    deps.adminPhones.add(signalAdmin);
+    deps.fallbackActive = () => false;
+    const session = chatSession(signalAdmin, `${signalAdmin}@imessage`, workspace);
+
+    const result = await registry.call(
+      'send_media',
+      { filePath, caption: 'restart via /Users/testuser/LAB/whatsoup/instances/signal-line' },
+      session,
+    );
+
+    expect(result.isError).toBeUndefined();
+    const media = mediaCalls[0].media as { caption: string; stream: { destroy: () => void } };
+    expect(media.caption).not.toContain('/Users/testuser/LAB/whatsoup/instances/signal-line');
+    media.stream.destroy();
+  });
+
   it('retries Baileys encrypted tmp ENOENT with a fresh stream for file sends', async () => {
     const filePath = writeFile('photo.jpg');
     const session = chatSession('15551234567', '15551234567@s.whatsapp.net', workspace);

@@ -34,6 +34,7 @@ import type { TwilioSmsConfig } from '../../../src/transport/twilio/types.ts';
 import { makeTwilioConfig } from './helpers.ts';
 import type { IncomingMessage } from '../../../src/core/types.ts';
 import type { InboundSms } from '../../../src/transport/twilio/port.ts';
+import { withWarmIdentity } from '../../helpers/outbound-identity.ts';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -62,7 +63,7 @@ function makeBridge(configOverrides?: Partial<TwilioSmsConfig>): {
 } {
   const port = new MockTwilioSmsPort();
   const adapter = new TwilioSmsAdapter(makeConfig(configOverrides), port);
-  const bridge = new TwilioConnection(adapter);
+  const bridge = withWarmIdentity(new TwilioConnection(adapter));
   return { bridge, port, adapter };
 }
 

@@ -3,7 +3,18 @@
 // Decision order (spec §4.2): B system caller → A group → LID resolve → C cold floor → E allow.
 // Step D (expect: verified-alias) is a later, separate effort and intentionally absent here.
 
-import { bareNumber, isLidJid, isGroupJid, normalizeLid } from '../jid-constants.ts';
+import {
+  bareNumber,
+  fromImessageJid,
+  fromSignalJid,
+  isGroupJid,
+  isLidJid,
+  JID_IMESSAGE,
+  JID_SIGNAL,
+  JID_SMS,
+  normalizeLid,
+  smsJidToPhone,
+} from '../jid-constants.ts';
 import { createChildLogger } from '../../logger.ts';
 import type { Decision, GuardCode, GuardOpts, IdentityStore } from './types.ts';
 
@@ -11,6 +22,13 @@ const guardLog = createChildLogger('outbound-identity');
 
 /** Infra callers that must never be floored (spec §4.2 step B, §6). */
 const SYSTEM_CALLERS = new Set(['health', 'scheduler', 'reply-guarantee', 'report-channel']);
+
+function accessIdentityForDirectJid(jid: string): string {
+  if (jid.endsWith(JID_SMS)) return smsJidToPhone(jid);
+  if (jid.endsWith(JID_SIGNAL)) return fromSignalJid(jid);
+  if (jid.endsWith(JID_IMESSAGE)) return fromImessageJid(jid);
+  return bareNumber(jid);
+}
 
 /** Downgrade a block to a warn under log-only; pass blocks through under enforce. */
 function applyMode(code: GuardCode, reason: string, mode: GuardOpts['mode']): Decision {
@@ -53,7 +71,7 @@ export function assertOutboundIdentity(
     }
     phoneJid = resolved;
   }
-  const barePhone = bareNumber(phoneJid);
+  const barePhone = accessIdentityForDirectJid(phoneJid);
 
   // C. Cold floor.
   if (!store.isWarm(phoneJid, barePhone)) {
@@ -82,38 +100,71 @@ export class OutboundIdentityError extends Error {
  * Call-site helper: run the guard, audit every non-allow decision, and throw on
  * block. Synchronous (node:sqlite is sync). A store read failure is retried once
  * (node:sqlite's busy_timeout already waited up to 5s, so one more attempt covers
- * a checkpoint-truncate blip); only if the retry also throws does it fail open
- * with a loud STORE_UNAVAILABLE audit. A cold target is blocked only on a
- * SUCCESSFUL read — a transient DB blip never becomes a blocked send.
+ * a checkpoint-truncate blip). If the retry also throws, enforce mode blocks
+ * with a loud STORE_UNAVAILABLE audit; only an explicitly selected log-only
+ * rollout permits the send. A cold target is blocked only after a successful
+ * read, while an unavailable store is classified separately.
  */
 export function applyOutboundIdentityGuard(
   chatJid: string,
   opts: GuardOpts,
   store: IdentityStore | null,
 ): void {
-  if (store === null) return; // not yet wired (e.g. early boot) — do not block.
-  let decision: Decision;
-  try {
-    try {
-      decision = assertOutboundIdentity(chatJid, opts, store);
-    } catch {
-      // node:sqlite busy_timeout already waited up to 5s; one more attempt
-      // covers a checkpoint-truncate blip. Persistent failure → fail open.
-      decision = assertOutboundIdentity(chatJid, opts, store);
-    }
-  } catch (err) {
+  // System callers carry trusted in-process provenance and do not depend on
+  // recipient history. Check them before the store so operator reporting still
+  // works during database recovery.
+  if (SYSTEM_CALLERS.has(opts.caller)) return;
+
+  if (store === null) {
+    const reason = 'outbound identity store is not configured';
+    const verdict = opts.mode === 'enforce' ? 'block' : 'warn';
     guardLog.warn(
       {
         chatJid,
         caller: opts.caller,
         mode: opts.mode,
         code: 'STORE_UNAVAILABLE' satisfies GuardCode,
-        verdict: 'warn',
+        verdict,
+        reason,
+      },
+      opts.mode === 'enforce'
+        ? 'outbound identity store unavailable — blocking send (STORE_UNAVAILABLE)'
+        : 'outbound identity store unavailable — explicit log-only mode allows send (STORE_UNAVAILABLE)',
+    );
+    if (opts.mode === 'enforce') {
+      throw new OutboundIdentityError('STORE_UNAVAILABLE', reason);
+    }
+    return;
+  }
+  let decision: Decision;
+  try {
+    try {
+      decision = assertOutboundIdentity(chatJid, opts, store);
+    } catch {
+      // node:sqlite busy_timeout already waited up to 5s; one more attempt
+      // covers a checkpoint-truncate blip. Persistent failure is handled below.
+      decision = assertOutboundIdentity(chatJid, opts, store);
+    }
+  } catch (err) {
+    const reason = `outbound identity store read failed: ${(err as Error).message}`;
+    const verdict = opts.mode === 'enforce' ? 'block' : 'warn';
+    guardLog.warn(
+      {
+        chatJid,
+        caller: opts.caller,
+        mode: opts.mode,
+        code: 'STORE_UNAVAILABLE' satisfies GuardCode,
+        verdict,
         err: (err as Error).message,
       },
-      'outbound identity store unavailable — failing open (STORE_UNAVAILABLE)',
+      opts.mode === 'enforce'
+        ? 'outbound identity store unavailable — blocking send (STORE_UNAVAILABLE)'
+        : 'outbound identity store unavailable — explicit log-only mode allows send (STORE_UNAVAILABLE)',
     );
-    return; // fail-open: never convert a DB blip into a blocked primary reply path
+    if (opts.mode === 'enforce') {
+      throw new OutboundIdentityError('STORE_UNAVAILABLE', reason);
+    }
+    return;
   }
   if (decision.verdict === 'allow') return;
   guardLog.warn(

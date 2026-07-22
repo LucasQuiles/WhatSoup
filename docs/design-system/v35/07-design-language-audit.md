@@ -40,7 +40,9 @@ The identity is a **"warm paper instrument"**: cream-on-walnut dark, bone light,
 precision, one electric-blue voice, grotesque triad. Distinctive vs generic slate-gray SaaS.
 Already close to the owner's "clean, soothing, subtle" brief — the warmth IS the soothing.
 
-## Interview — v3.5 design language (answers pending)
+## Interview — v3.5 design language (answers locked)
+
+The final rulings are recorded in `09-design-language-decisions.md`.
 
 | # | Question | Rec |
 |---|---|---|
@@ -54,4 +56,4 @@ Already close to the owner's "clean, soothing, subtle" brief — the warmth IS t
 | L8 | Keep Bricolage/Hanken/Plex triad? | keep |
 | L9 | Hero theme for splash: dark-warm hero, light alternate? | dark-warm |
 | L10 | Hatch moment: one-time accent light-sweep, no new hues? | yes |
-| L11 | 2–3 reference products whose feel to approach (or avoid)? | open |
+| L11 | 2–3 reference products whose feel to approach (or avoid)? | none given; see document 09 §L11 |

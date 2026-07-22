@@ -40,7 +40,7 @@ import type { AgentProvider } from './providers/types.ts';
 import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
 import { buildRestartSelfTool, triggerSelfRestart, assertRestartSelfAdmin, type ServiceRestarter } from './self-restart.ts';
 import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
-import { sendTracked } from '../../core/durability.ts';
+import { sendTracked, sendTrackedOperatorReport } from '../../core/durability.ts';
 import { classifyErrorForInbound } from '../../core/inbound-failure-class.ts';
 import {
   normalizeFallbackEntriesFromAgentOptions,
@@ -109,12 +109,12 @@ import { deriveChatScope, emitRouteEvent, type ModelRouteEvent } from './route-e
 import { buildRoutingPromptContract, extractRouteIntents } from './route-intent.ts';
 import { isProviderId } from './providers/index.ts';
 import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../core/messages.ts';
-import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
+import { conversationRefToKey, toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
 import { formatChatRefForOwner } from '../../core/chat-display-name.ts';
 import { OWNER_BULLET, bulletedSection, modelModifierTags, modifierSuffix, formatAvailableModels, MODEL_CATALOGUE_CAP } from './owner-render-format.ts';
 import { resolveModelCatalogue } from './model-catalogue-resolver.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
-import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
+import { toPersonalJid, toTransportDirectJid, isGroupJid } from '../../core/jid-constants.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
 import { TurnQueue, type QueuedTurn, type TurnRejectReason } from './turn-queue.ts';
@@ -1627,7 +1627,7 @@ export class AgentRuntime implements Runtime {
     if (adminPhone) {
       const windowSec = Math.round(config.restartLoopGuard.windowMs / 1000);
       this.pendingStartupMessage = {
-        chatJid: toPersonalJid(adminPhone),
+        chatJid: toTransportDirectJid(adminPhone, config.transport), caller: 'report-channel',
         text:
           `*Restart-loop guard tripped* ⚠️ — ${trip.bootsInWindow} crash-interrupted boots ` +
           `inside ${windowSec}s with resumable sessions pending. Proactive resume is ` +
@@ -1865,7 +1865,7 @@ export class AgentRuntime implements Runtime {
   private shutdownRequested = false;
 
   // Startup notification deferred until after WA connects
-  private pendingStartupMessage: { chatJid: string; text: string } | null = null;
+  private pendingStartupMessage: { chatJid: string; text: string; caller?: 'report-channel' } | null = null;
 
   // Voice reply state (SP4) — tracks inbound contentType and accumulated assistant text per turn.
   // Per-chat mode uses Maps keyed by mapKey; single/shared mode uses scalar fields.
@@ -1969,7 +1969,7 @@ export class AgentRuntime implements Runtime {
     // (workspaceKey = toConversationKey), while in canonical-JID mode it is a
     // JID that must be reduced. Reconcile so teardown reaches these maps and
     // they cannot grow unbounded (LEAK-15).
-    const conversationKey = mapKey.includes('@') ? toConversationKey(mapKey) : mapKey;
+    const conversationKey = conversationRefToKey(mapKey);
     this.lastSpawnRouteProvider.delete(conversationKey);
     this.lastPinBlockNotice.delete(conversationKey);
   }
@@ -2578,7 +2578,7 @@ export class AgentRuntime implements Runtime {
     const priorToken = this.priorSenderTokenForChat(chatJid);
     const q = new OutboundQueue(this.messenger, chatJid, { // T8-F1+F2: inject admin-peer + fallback-window queries
       conversationKey, ...(priorToken === undefined ? {} : { senderToken: priorToken }),
-      peerIsAdmin: (jid) => isOperatorDmPeer(jid, isGroupJid(jid), this.db, config.adminPhones),
+      peerIsAdmin: (jid) => isOperatorDmPeer(jid, isGroupJid(jid), this.db, config.adminPhones, config.transport),
       fallbackActive: () => this.isFallbackWindowActive,
     });
     if (this.durability) q.setDurability(this.durability);
@@ -3513,8 +3513,8 @@ export class AgentRuntime implements Runtime {
             // Also DM admin
             const adminPhone = [...config.adminPhones][0];
             if (adminPhone) {
-              const adminJid = toPersonalJid(adminPhone);
-              await sendTracked(this.messenger, adminJid,
+              const adminJid = toTransportDirectJid(adminPhone, config.transport);
+              await sendTrackedOperatorReport(this.messenger, adminJid,
                 `[HEAL_ESCALATE] Repair for ${parsed.errorClass} escalated.\n\n${parsed.diagnosis}`,
                 this.durability ?? undefined, { replayPolicy: 'safe' });
             }
@@ -3559,7 +3559,7 @@ export class AgentRuntime implements Runtime {
         // QR-047 + QR-143: admin gate hoisted to assertRestartSelfAdmin — gates on
         // authenticated transport BEFORE the phone match, so a spoofed @sms actor
         // that collapses to admin digits cannot induce a restart.
-        assertAdmin: (session) => assertRestartSelfAdmin(session, { db: this.db, adminPhones: config.adminPhones }),
+        assertAdmin: (session) => assertRestartSelfAdmin(session, { db: this.db, adminPhones: config.adminPhones, transport: config.transport }),
       }));
     }
 
@@ -3619,7 +3619,7 @@ export class AgentRuntime implements Runtime {
         contentText: null,
         contentType: 'text',
         isFromMe: false,
-        isGroup: ctx.reportChatJid.endsWith('@g.us'),
+        isGroup: isGroupJid(ctx.reportChatJid),
         mentionedJids: [],
         timestamp: now,
         quotedMessageId: null,
@@ -3702,7 +3702,7 @@ export class AgentRuntime implements Runtime {
       // <admin-digits>@sms transport — so it cannot induce an admin-attributed
       // proposal. Skip synthetic agent-job turns (already durable agent_job
       // beads, not ad-hoc imperatives to capture).
-      const grantPhone = resolvePhoneFromJidForGrant(msg.senderJid, this.db);
+      const grantPhone = resolvePhoneFromJidForGrant(msg.senderJid, this.db, config.transport);
       if (grantPhone !== null && isAdminPhone(grantPhone, config.adminPhones) && !msg.isSyntheticJob) {
         const hit = matchImperative(content);
         if (hit) {
@@ -3855,7 +3855,7 @@ export class AgentRuntime implements Runtime {
     if (classified.type === 'local') {
       const spec = getCommandSpec(classified.command);
       // Gate enforcement by gate class. Both gated classes share the same
-      // authenticated-admin core: isWhatsAppAuthenticatedJid FIRST (QR-143 —
+      // authenticated-admin core: bind the sender to config.transport first (QR-143 —
       // a non-authenticated transport like @sms resolves to the SAME bare
       // phone as the WhatsApp admin but its sender-ID is spoofable, so the
       // transport check must precede the phone match), THEN admin-phone.
@@ -3880,10 +3880,10 @@ export class AgentRuntime implements Runtime {
       // Lazy so gate:'none' commands never pay the resolvePhoneFromJid DB read.
       // B4: the grant primitive gates authenticated-transport-FIRST then resolves;
       // a non-authenticated (@sms) sender yields null and is denied. Behaviour is
-      // identical to the prior isWhatsAppAuthenticatedJid && isAdminPhone(...) form
+      // identical to the prior transport-bound-authentication && isAdminPhone(...) form
       // (isAdminPhone(null) === false).
       const isAuthenticatedAdmin = (): boolean => {
-        const phone = resolvePhoneFromJidForGrant(msg.senderJid, this.db);
+        const phone = resolvePhoneFromJidForGrant(msg.senderJid, this.db, config.transport);
         return phone !== null && isAdminPhone(phone, config.adminPhones);
       };
       const denied =
@@ -5979,7 +5979,7 @@ export class AgentRuntime implements Runtime {
 
   /** T8-F1+F2: shared operator-DM elevation ctx for direct sends/polls. */
   private resolveSendAudience(chatJid: string, isGroup: boolean): OutboundAudience {
-    const peerIsAdmin = isOperatorDmPeer(chatJid, isGroup, this.db, config.adminPhones);
+    const peerIsAdmin = isOperatorDmPeer(chatJid, isGroup, this.db, config.adminPhones, config.transport);
     return resolveOutboundAudience(chatJid, { isGroup, peerIsAdmin, fallbackActive: this.isFallbackWindowActive });
   }
 
@@ -6975,7 +6975,7 @@ export class AgentRuntime implements Runtime {
   }
 
   /** Pop and return the pending startup notification (set during resume), or null. */
-  popStartupMessage(): { chatJid: string; text: string } | null {
+  popStartupMessage(): { chatJid: string; text: string; caller?: 'report-channel' } | null {
     const msg = this.pendingStartupMessage;
     this.pendingStartupMessage = null;
     return msg;
@@ -7190,8 +7190,8 @@ export class AgentRuntime implements Runtime {
         // DM admin
         const adminPhone = [...config.adminPhones][0];
         if (adminPhone) {
-          const adminJid = toPersonalJid(adminPhone);
-          sendTracked(this.messenger, adminJid,
+          const adminJid = toTransportDirectJid(adminPhone, config.transport);
+          sendTrackedOperatorReport(this.messenger, adminJid,
             `[HEAL_ESCALATE] Repair for report ${reportId} timed out after 15 minutes.`,
             this.durability ?? undefined, { replayPolicy: 'safe' })
             .catch(err => log.error({ err }, 'failed to DM admin on timeout'));

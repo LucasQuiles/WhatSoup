@@ -293,12 +293,18 @@ export class DockerSupervisorServiceManager extends BaseServiceManager {
       stdio: 'inherit',
     });
 
+    const clearIfCurrent = () => {
+      if (this.processes.get(name) === child) this.processes.delete(name);
+    };
     this.processes.set(name, child);
-    child.on('exit', () => this.processes.delete(name));
+    child.once('exit', clearIfCurrent);
 
     await new Promise<void>((resolve, reject) => {
-      child.on('spawn', resolve);
-      child.on('error', reject);
+      child.once('spawn', resolve);
+      child.once('error', (err) => {
+        clearIfCurrent();
+        reject(err);
+      });
     });
   }
 
@@ -310,6 +316,7 @@ export class DockerSupervisorServiceManager extends BaseServiceManager {
     await new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
         try { child.kill('SIGKILL'); } catch { /* already exited */ }
+        if (this.processes.get(name) === child) this.processes.delete(name);
         resolve();
       }, 15_000);
       child.once('exit', () => { clearTimeout(timer); resolve(); });

@@ -35,8 +35,8 @@ const useTypingMock = vi.hoisted(() => vi.fn(() => ({ data: [] })));
 const useCheckpointsMock = vi.hoisted(() => vi.fn(() => ({ data: undefined, isLoading: false, freshness: undefined })));
 const useLiveSessionsMock = vi.hoisted(() => vi.fn(() => ({ data: undefined, isLoading: false, freshness: undefined })));
 const useApprovalsMock = vi.hoisted(() => vi.fn(() => ({ data: undefined, isLoading: false, freshness: undefined })));
-const useChatsMock = vi.hoisted(() => vi.fn(() => ({ data: [] })));
-const useMessagesMock = vi.hoisted(() => vi.fn(() => ({ data: [] })));
+const useChatsMock = vi.hoisted(() => vi.fn(() => ({ data: [] as Array<Record<string, unknown>> })));
+const useMessagesMock = vi.hoisted(() => vi.fn(() => ({ data: [] as Array<Record<string, unknown>> })));
 const useAccessMock = vi.hoisted(() => vi.fn((): {
   data?: unknown[];
   isLoading?: boolean;
@@ -97,20 +97,39 @@ vi.mock('../../console/src/hooks/use-metrics', async (importOriginal) => {
   };
 });
 
+vi.mock('../../console/src/hooks/use-virtual-messages', () => ({
+  useVirtualMessages: ({ messages }: { messages: Array<{ pk: number }> }) => ({
+    getVirtualItems: () => messages.map((_, index) => ({ index, key: index, start: index * 80, size: 80 })),
+    getTotalSize: () => messages.length * 80,
+    measureElement: () => {},
+  }),
+}));
+
+vi.mock('../../console/src/hooks/use-sticky-scroll', () => ({
+  useStickyScroll: () => ({
+    scrollRef: { current: null },
+    showJump: false,
+    handleScroll: vi.fn(),
+    jumpToBottom: vi.fn(),
+  }),
+}));
+
 // Stub the lazy RelinkModal so Suspense resolves synchronously in jsdom
 vi.mock('../../console/src/components/RelinkModal', () => ({
   default: ({
     lineName,
+    transport,
     open,
     onClose,
     onLinked,
   }: {
     lineName: string;
+    transport?: string | null;
     open: boolean;
     onClose: () => void;
     onLinked: () => void;
   }) => open ? (
-    <div role="dialog" aria-label={`Re-link ${lineName}`}>
+    <div role="dialog" aria-label={`Re-link ${lineName}`} data-transport={transport ?? ''}>
       <button type="button" onClick={onClose}>Close re-link</button>
       <button type="button" onClick={onLinked}>Mark linked</button>
     </div>
@@ -244,6 +263,40 @@ describe('LineDetail tablist (Tabs primitive)', () => {
       renderLineDetail({ line: makeLine({ name: 'test-line', mode: 'agent', sandboxPerChat: false }) });
     });
     expect(screen.getAllByRole('tab')).toHaveLength(11);
+  });
+
+  it('renders the Twilio badge and propagates Twilio through HistoryTab formatting', async () => {
+    useChatsMock.mockReturnValue({
+      data: [{
+        conversationKey: '15555550001',
+        name: 'SMS Contact',
+        lastMessagePreview: 'preview',
+        lastMessageAt: '2026-04-05T12:00:00.000Z',
+        unreadCount: 0,
+        isGroup: false,
+      }],
+    });
+    useMessagesMock.mockReturnValue({
+      data: [{
+        pk: 1,
+        conversationKey: '15555550001',
+        senderName: 'SMS Contact',
+        senderJid: '15555550001@sms',
+        content: '~strike~',
+        timestamp: '2026-04-05T12:00:00.000Z',
+        fromMe: false,
+        type: 'text',
+      }],
+    });
+
+    await act(async () => {
+      renderLineDetail({ line: makeLine({ name: 'test-line', mode: 'chat', transport: 'twilio' }) });
+    });
+
+    expect(screen.getByTitle('Transport: SMS·Twilio')).toBeDefined();
+    fireEvent.click(screen.getByRole('tab', { name: /History/ }));
+    fireEvent.click(await screen.findByRole('option', { name: 'Open conversation with SMS Contact' }));
+    expect((await screen.findByText('strike')).tagName).toBe('S');
   });
 
   it('ArrowRight + Enter activates the next tab; focus alone does not switch panels', async () => {
@@ -494,7 +547,7 @@ describe('LineDetail header workflows', () => {
 
   it('opens the re-link action instead of restart for unlinked lines', async () => {
     await act(async () => {
-      renderLineDetail({ line: makeLine({ name: 'test-line', linkedStatus: 'unlinked' }) });
+      renderLineDetail({ line: makeLine({ name: 'test-line', transport: 'imessage', linkedStatus: 'unlinked' }) });
     });
 
     expect(screen.getByRole('button', { name: 'Re-link' })).toBeDefined();
@@ -502,7 +555,9 @@ describe('LineDetail header workflows', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Re-link' }));
 
-    expect(within(screen.getByRole('dialog', { name: 'Re-link test-line' })).getByRole('button', { name: 'Close re-link' })).toBeDefined();
+    const relinkDialog = screen.getByRole('dialog', { name: 'Re-link test-line' });
+    expect(relinkDialog.getAttribute('data-transport')).toBe('imessage');
+    expect(within(relinkDialog).getByRole('button', { name: 'Close re-link' })).toBeDefined();
     fireEvent.click(within(screen.getByRole('dialog', { name: 'Re-link test-line' })).getByRole('button', { name: 'Close re-link' }));
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Re-link test-line' })).toBeNull());
 

@@ -7,7 +7,7 @@ lock; owner approval = T1 exit.
 
 | Entity | Definition | Key fields | Notes |
 |---|---|---|---|
-| **Channel** | A messaging platform class | id, name, class (messaging/socials/channels), glyph, linkMethod, capabilities, health semantics | 14 registered: wa·signal·imessage·sms·discord·telegram · x·linkedin·reddit·instagram·facebook · email·slack·teams. wa + sms real; rest mocked (D2) |
+| **Channel** | A messaging platform class | id, name, class (messaging/socials/channels), glyph, linkMethod, capabilities, health semantics | 14 designed product-model entries: wa·signal·imessage·sms·discord·telegram · x·linkedin·reddit·instagram·facebook · email·slack·teams. Exactly four implemented transport IDs—Baileys/WhatsApp, Twilio/SMS, Signal, and iMessage—are runtime-backed; ten remain mocked/future (D2) |
 | **Deployment** | One WhatSoup runtime (host/container) | id, name, address, version, status, lines, agents | Admin lane (R3-16); this deployment = "Local" |
 | **Line** | A channel account under management | id, deploymentId, channelId, identity (phone/handle/email), linkage state, activation state, assignedAgentId, grants[], tags | "deactivated" when activation off (R2-11) |
 | **Agent** | An assignable worker created from an archetype | id, name, avatar (initials/picture), archetype, persona, brain, skills[], toolPermissions, memoryConfig, status | dynamic creation (R2-4); random-name at hatch (R3-11) |
@@ -97,6 +97,6 @@ human-takeover (explicit toggle only, R3-6)
 ## 6. Explicitly NOT in the model (guards against drift)
 
 - No multi-user/roles (single user, two lanes — R2-2). Workspace is single-tenant.
-- No runtime transports beyond wa/sms this program (D2).
+- No new runtime transports beyond the existing wa/sms/signal/imessage set in this program (D2).
 - No mascot/character entity — identity via avatar ladder (pic → initials → channel glyph).
 - No public marketing entity set (R2-3: splash only).

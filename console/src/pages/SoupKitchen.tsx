@@ -27,6 +27,7 @@ import {
 import type { FeedEvent, LineInstance, Mode, MetricsRange } from "../types";
 import type { ChartKey } from "../components/ChartPanel";
 import KpiCard from "../components/KpiCard";
+import TransportBadge from "../components/TransportBadge";
 import AlertBanner from "../components/AlertBanner";
 import ActivityFeed from "../components/ActivityFeed";
 import FilterPill from "../components/FilterPill";
@@ -363,6 +364,13 @@ const SoupKitchen: FC = () => {
 
   const lines = lineData ?? EMPTY_LINES;
   const feed = feedData ?? EMPTY_FEED;
+  const transportsByInstance = useMemo(
+    () => Object.fromEntries(lines.map((line) => [
+      line.name,
+      line.transport ?? line.health?.transport?.kind,
+    ])),
+    [lines],
+  );
 
   // Capability gate for per-row lifecycle actions (Restart / Stop / Delete).
   // The console is already gated behind the session-unlock screen (see
@@ -1234,6 +1242,7 @@ const SoupKitchen: FC = () => {
                               name={displayInstanceName(line.name)}
                               carried={line.stale}
                             />
+                            <TransportBadge kind={line.transport ?? line.health?.transport?.kind} />
                             <span className="c-label">
                               {formatPhone(line.phone)}
                             </span>
@@ -1376,6 +1385,7 @@ const SoupKitchen: FC = () => {
         <Card variant="base" className="flex flex-col overflow-hidden min-h-[var(--fleet-pane-min-h)] lg:basis-0 lg:flex-1 lg:min-w-[var(--feed-min-w)]">
           <ActivityFeed
             events={feed}
+            transportsByInstance={transportsByInstance}
             error={feedError ? feedLoadErrorMessage : undefined}
             onRetry={feedError ? () => { void refetchFeed() } : undefined}
           />

@@ -19,6 +19,7 @@
 //   maps them to typed TransportError subclasses.
 
 import { request } from 'undici';
+import { isImessageGroupAddress } from '../../core/transport-refs.ts';
 import type { ImessageConfig } from './types.ts';
 import type {
   ImessagePort,
@@ -127,7 +128,7 @@ function dmChatGuid(address: string): string {
 function normalizeMessage(msg: BbMessage): InboundImessage | null {
   if (typeof msg.guid !== 'string' || msg.guid === '') return null;
   const groupGuid = msg.chats?.[0]?.guid;
-  const isGroup = typeof groupGuid === 'string' && groupGuid.startsWith('iMessage;+;');
+  const isGroup = typeof groupGuid === 'string' && isImessageGroupAddress(groupGuid);
   const from = msg.isFromMe === true ? '' : (msg.handle?.address ?? 'unknown');
   return {
     guid: msg.guid,

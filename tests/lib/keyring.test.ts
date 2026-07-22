@@ -211,9 +211,9 @@ describe('keyring', () => {
     });
 
     it('honors providerConfig.apiKeyService for HTTP API providers', () => {
-      expect(resolveProviderKeyService('openai-api', undefined, { apiKeyService: 'prod-openai' })).toBe('prod-openai');
-      expect(resolveProviderKeyService('anthropic-api', undefined, { apiKeyService: 'prod-anthropic' })).toBe('prod-anthropic');
-      expect(resolveProviderKeyService('openai-api', undefined, { apiKeyService: ' prod-openai ' })).toBe(' prod-openai ');
+      expect(resolveProviderKeyService('openai-api', undefined, { apiKeyService: 'groq' })).toBe('groq');
+      expect(resolveProviderKeyService('anthropic-api', undefined, { apiKeyService: 'openrouter' })).toBe('openrouter');
+      expect(resolveProviderKeyService('openai-api', undefined, { apiKeyService: ' prod-openai ' })).toBe('openai');
       expect(resolveProviderKeyService('opencode-cli', 'minimax/x', { apiKeyService: 'ignored' })).toBe('minimax');
     });
 

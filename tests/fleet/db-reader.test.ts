@@ -157,6 +157,22 @@ describe('FleetDbReader', () => {
       // 3 non-deleted messages (the deleted one at ts=999 is excluded)
       expect(dm?.messageCount).toBe(3);
     });
+
+    it.each([
+      ['Signal', 'Z3JvdXAtY29udmVyc2F0aW9u@signal', 'Z3JvdXAtY29udmVyc2F0aW9u_at_signal'],
+      ['iMessage', 'iMessage;+;chatABC@imessage', 'iMessage;+;chatABC_at_imessage'],
+    ])('classifies %s group conversation keys as groups', (_transport, chatJid, conversationKey) => {
+      selfDb.prepare(`
+        INSERT INTO messages (chat_jid, conversation_key, sender_jid, sender_name,
+                              content, content_type, is_from_me, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(chatJid, conversationKey, 'sender', 'Alex', 'hello', 'text', 0, 3000);
+
+      const result = reader.getChats('self', '', { limit: 50, offset: 0 });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.data.find((chat) => chat.conversationKey === conversationKey)?.isGroup).toBe(true);
+    });
   });
 
   // ── getMessages ─────────────────────────────────────────────────────────

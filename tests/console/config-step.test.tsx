@@ -93,6 +93,65 @@ describe('ConfigStep — real React handler wiring', () => {
       expect(claudeMdPatches.length).toBe(1)
     })
 
+    it('regenerates recognized defaults when the selected transport changes', () => {
+      const signalRender = renderConfigStep({
+        initialData: {
+          type: 'agent',
+          name: 'sage',
+          transport: 'signal',
+          systemPrompt: '',
+          claudeMd: '',
+        },
+      })
+      const signalDefaults = signalRender.onChange.mock.calls[0][0] as Record<string, unknown>
+      expect(signalDefaults.systemPrompt).toContain('Signal')
+      expect(signalDefaults.claudeMd).toContain('Signal')
+      signalRender.unmount()
+
+      const twilioRender = renderConfigStep({
+        initialData: {
+          type: 'agent',
+          name: 'renamed-sage',
+          transport: 'twilio',
+          ...signalDefaults,
+        },
+      })
+
+      expect(twilioRender.onChange).toHaveBeenCalledWith({
+        systemPrompt: expect.stringContaining('SMS'),
+        claudeMd: expect.stringContaining('SMS'),
+      })
+      const twilioDefaults = twilioRender.onChange.mock.calls[0][0] as Record<string, unknown>
+      expect(twilioDefaults.systemPrompt).toContain('Renamed-sage')
+      expect(twilioDefaults.systemPrompt).not.toContain('Signal')
+      expect(twilioDefaults.claudeMd).not.toContain('Signal')
+    })
+
+    it('preserves user-authored instructions when the selected transport changes', () => {
+      const systemPrompt = 'Follow the operator handbook exactly.'
+      const claudeMd = '# Custom runtime policy\n\nNever replace this text.'
+      const { onChange, rerenderWith } = renderConfigStep({
+        initialData: {
+          type: 'agent',
+          name: 'sage',
+          transport: 'signal',
+          systemPrompt,
+          claudeMd,
+        },
+      })
+
+      onChange.mockClear()
+      rerenderWith({
+        type: 'agent',
+        name: 'sage',
+        transport: 'twilio',
+        systemPrompt,
+        claudeMd,
+      })
+
+      expect(onChange).not.toHaveBeenCalled()
+    })
+
     it('does not prefill systemPrompt for passive type', () => {
       const { onChange } = renderConfigStep({
         initialData: { type: 'passive', name: 'watcher', systemPrompt: '', claudeMd: '' },
@@ -344,27 +403,14 @@ describe('ConfigStep — real React handler wiring', () => {
     })
   })
 
-  describe('TagInput accessibility wiring', () => {
-    it('labels the allowlist contacts input and describes it with helper text', () => {
+  describe('allowlist truthfulness', () => {
+    it('does not render an unwritten pre-approved contacts control', () => {
       renderConfigStep({
         initialData: { type: 'agent', name: 'sage', accessMode: 'allowlist' },
       })
 
-      const input = screen.getByLabelText('Pre-approved contacts') as HTMLInputElement
-      const helper = screen.getByText('These contacts will be automatically approved when they first message.')
-
-      expect(helper.id).toBeTruthy()
-      expect(input.getAttribute('aria-describedby')).toBe(helper.id)
-
-      // Canonical <Field> migration proof: the label is now rendered by the Field
-      // primitive (FormControl.tsx -> `c-heading c-field-label`) rather than the prior
-      // hand-rolled `<label className="c-label c-field-label">`. This assertion FAILS on
-      // the raw markup (which carried `c-label`, never `c-heading`) and PASSES once the
-      // field is migrated onto <Field>, locking the field to the canonical primitive.
-      const label = document.querySelector<HTMLLabelElement>(`label[for="${input.id}"]`)
-      expect(label).not.toBeNull()
-      expect(label!.className).toContain('c-heading')
-      expect(label!.className).toContain('c-field-label')
+      expect(screen.queryByLabelText('Pre-approved contacts')).toBeNull()
+      expect(screen.queryByText(/automatically approved when they first message/i)).toBeNull()
     })
 
     it('labels the RAG allowed indexes input and describes it with its Field helper', () => {

@@ -145,14 +145,14 @@ export function handleGetChats(
       const preview = lastMsg?.content ?? null;
       const unread = (unreadStmt.get(chat.conversationKey) as UnreadRow | undefined)?.unread_count ?? 0;
 
-      // Detect group: conversation_key contains _at_g.us or @g.us
+      // Detect groups across every transport's raw or encoded key shape.
       const isGroup = isGroupConversationKey(chat.conversationKey);
 
       // Resolve display name
       let displayName: string;
       let needsBackfill = false;
       if (isGroup) {
-        // Convert _at_g.us back to @g.us for the groups table lookup
+        // Restore the transport-neutral conversation key for metadata lookup.
         const groupJid = conversationKeyToJid(chat.conversationKey);
         const groupSubject = (groupNameStmt.get(groupJid) as GroupNameRow | undefined)?.subject;
         const chatName = (chatNameStmt.get(chat.conversationKey) as ChatNameRow | undefined)?.name;

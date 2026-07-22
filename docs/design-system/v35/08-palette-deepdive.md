@@ -51,8 +51,8 @@ brick) for AA. Different personality from the dark pastels (accepted per-theme l
   passive teal toward 150°; add a lightness step (66/60/71 already implicit — make it law).
 - **F2 — Per-theme accent personality drift.** Brand mark (favicon `#6BA6FF`) matches the
   DARK accent; light theme runs royal `#2563EB`. On light surfaces the identity accent is
-  effectively a different blue. Options: accept (AA law), or lift light accent to a
-  mid-point (`#3B76F6`-ish, needs ≥4.5 on `#FBF6EC` — `#3B76F6` = 4.53 ✓) to narrow the gap.
+  effectively a different blue. The evaluated mid-point `#3B76F6` narrows the gap but
+  fails AA on `#FBF6EC` at 3.81:1. The locked accessible replacement is `#2E66E4` at 4.71:1.
 - **F3 — Dark t3 at the AA floor (4.50).** Any darkening of the surface ramp or ink drift
   drops it below AA. If F4 darkens/cools the ramp, t3 must lift to `#8E8371` (≈4.8).
 - **F4 — Dark ramp saturation knob.** `#1B1610` is 26% sat — distinctively walnut. A
@@ -67,7 +67,7 @@ brick) for AA. Different personality from the dark pastels (accepted per-theme l
 | # | Knob | Current | Candidate | Rationale |
 |---|---|---|---|---|
 | T1 | chat cyan | `#45C9E8` (190°/65%) | `#3FB8DC` (196°/60%) | F1 cluster separation (opens teal/cyan gap to 46°, adds lightness step) |
-| T2 | light accent | `#2563EB` | `#3B76F6` | F2 narrows dark/light accent gap, holds AA 4.53 |
+| T2 | light accent | `#2563EB` | `#2E66E4` | F2 narrows the dark/light accent gap while preserving AA at 4.71:1; the earlier `#3B76F6` candidate failed at 3.81:1 |
 | T3 | dark t3 | `#897E6B` | `#8E8371` | F3 floor headroom (4.50→4.8) |
 | T4 | dark ramp chroma | `#1B1610` (26%) | `#1B1712` (21%) | F4 calmer walnut — mock A/B |
 | T5 | light raised tint | `#FBF6EC` | `#FDFAF3` | F5 card depth without new shadow law |
@@ -77,9 +77,13 @@ brick) for AA. Different personality from the dark pastels (accepted per-theme l
 Keep untouched: warm neutral family, accent hue relationship, status hues, pastel band,
 shape law, no-gradient/no-glow law.
 
-## 5. Owner questions (sharp)
+## 5. Historical owner questions — resolved
 
-- **Q1** Cool-cluster fix T1 (chat cyan → `#3FB8DC`)? [rec: yes]
-- **Q2** Light accent lift T2 (`#3B76F6`)? [rec: yes]
-- **Q3** Dark ramp chroma: keep distinctive 26% walnut vs calm 21% (T4)? [rec: mock both at T3, decide on screens]
-- **Q4** Elevation: adopt T5+T6 (light raised tint + dark overlay shadows)? [rec: yes]
+The questions below were inputs to the locked decisions in `09-design-language-decisions.md`,
+not current open items:
+
+- **Q1 resolved:** adopt the chat cyan shift (`#3FB8DC` dark; `#1F6E85` light).
+- **Q2 resolved with accessibility correction:** lift the light accent to `#2E66E4`; the earlier
+  `#3B76F6` candidate failed AA.
+- **Q3 resolved:** use the gentler 17% dark walnut ramp specified in document 09.
+- **Q4 resolved:** adopt the interaction-driven lift/shadow system, with reduced-motion removal.

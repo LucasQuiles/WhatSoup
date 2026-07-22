@@ -75,7 +75,7 @@ function makeInstanceConfig(overrides: Record<string, unknown> = {}): Record<str
 const MINIMAL_TWILIO_CONFIG = {
   account: 'ml-bot',
   accountSid: 'AC00000000000000000000000000000000',
-  authTokenService: 'twilio-ml-bot',
+  authTokenService: 'whatsoup-twilio-ml-bot',
   phoneNumber: '+15559990000',
 };
 
@@ -85,7 +85,7 @@ const MINIMAL_TWILIO_CONFIG = {
 const BOTH_SENDERS_TWILIO_CONFIG = {
   account: 'ml-bot',
   accountSid: 'AC00000000000000000000000000000000',
-  authTokenService: 'twilio-ml-bot',
+  authTokenService: 'whatsoup-twilio-ml-bot',
   phoneNumber: '+15559990000',
   messagingServiceSid: 'MGabcdef1234567890abcdef1234567890',
   inboundMode: 'poll',
@@ -104,7 +104,7 @@ describe('TwilioSmsConfig — phoneNumber is optional (XOR invariant)', () => {
     const result = resolveTwilioSmsConfig({
       account: 'ml-bot',
       accountSid: 'AC00000000000000000000000000000000',
-      authTokenService: 'twilio-ml-bot',
+      authTokenService: 'whatsoup-twilio-ml-bot',
       messagingServiceSid: 'MGabcdef1234567890abcdef1234567890',
     });
 
@@ -153,7 +153,7 @@ describe('config — transport twilio, full config', () => {
     const tc = config.twilioConfig!;
     expect(tc.account).toBe('ml-bot');
     expect(tc.accountSid).toBe('AC00000000000000000000000000000000');
-    expect(tc.authTokenService).toBe('twilio-ml-bot');
+    expect(tc.authTokenService).toBe('whatsoup-twilio-ml-bot');
     expect(tc.phoneNumber).toBe('+15559990000');
     expect(tc.messagingServiceSid).toBe('MGabcdef1234567890abcdef1234567890');
     expect(tc.inboundMode).toBe('poll');
@@ -198,7 +198,7 @@ describe('config — messagingServiceSid-only twilioConfig', () => {
       twilioConfig: {
         account: 'ml-bot',
         accountSid: 'AC00000000000000000000000000000000',
-        authTokenService: 'twilio-ml-bot',
+        authTokenService: 'whatsoup-twilio-ml-bot',
         messagingServiceSid: 'MGabcdef1234567890abcdef1234567890',
       },
     }));
@@ -257,7 +257,7 @@ describe('resolveTwilioSmsConfig', () => {
     const result = resolveTwilioSmsConfig({
       account: 'my-bot',
       accountSid: 'AC00000000000000000000000000000000',
-      authTokenService: 'svc',
+      authTokenService: 'whatsoup-twilio-my-bot',
       phoneNumber: '+15550000001',
     });
     expect(result).not.toBeUndefined();
@@ -271,7 +271,7 @@ describe('resolveTwilioSmsConfig', () => {
     const result = resolveTwilioSmsConfig({
       account: 'my-bot',
       accountSid: 'AC00000000000000000000000000000000',
-      authTokenService: 'svc',
+      authTokenService: 'whatsoup-twilio-my-bot',
       phoneNumber: '+15550000001',
       inboundMode: 'poll',
       pollIntervalMs: 8000,
@@ -292,7 +292,7 @@ describe('resolveTwilioSmsConfig — webhook and voice fields', () => {
     const result = resolveTwilioSmsConfig({
       account: 'my-bot',
       accountSid: 'AC00000000000000000000000000000000',
-      authTokenService: 'svc',
+      authTokenService: 'whatsoup-twilio-my-bot',
       phoneNumber: '+15550000001',
       inboundMode: 'webhook',
       webhook: { publicBaseUrl: 'https://relay.example.test/', listenPort: 8443 },
@@ -305,7 +305,7 @@ describe('resolveTwilioSmsConfig — webhook and voice fields', () => {
     const result = resolveTwilioSmsConfig({
       account: 'my-bot',
       accountSid: 'AC00000000000000000000000000000000',
-      authTokenService: 'svc',
+      authTokenService: 'whatsoup-twilio-my-bot',
       phoneNumber: '+15550000001',
       inboundMode: 'webhook',
       webhook: { publicBaseUrl: 'https://relay.example.test', listenPort: 8443 },
@@ -319,7 +319,7 @@ describe('resolveTwilioSmsConfig — webhook and voice fields', () => {
     const result = resolveTwilioSmsConfig({
       account: 'my-bot',
       accountSid: 'AC00000000000000000000000000000000',
-      authTokenService: 'svc',
+      authTokenService: 'whatsoup-twilio-my-bot',
       phoneNumber: '+15550000001',
     });
     expect(result?.voice).toBeUndefined();
@@ -332,7 +332,7 @@ describe('resolveTwilioSmsConfig — webhook and voice fields', () => {
     const result = resolveTwilioSmsConfig({
       account: 'my-bot',
       accountSid: 'AC00000000000000000000000000000000',
-      authTokenService: 'svc',
+      authTokenService: 'whatsoup-twilio-my-bot',
       phoneNumber: '+15550000001',
       inboundMode: 'webhook',
       webhook: { publicBaseUrl: 'https://relay.example.test', listenPort: 8443 },

@@ -19,9 +19,10 @@ Onboarding CLI: `openclaw onboard` → hatch via TUI (`openclaw hatch --tui`) or
 (`http://127.0.0.1:18789`).
 
 **What SOUP takes:**
-- The **order is the ceremony**: identity → brain → channel. It mirrors our wizard
-  (Identity → Config/ModelAuth → Link) almost exactly — the ritual framing is a *presentation
-  layer* over the same state machine, not new logic.
+- The **order is the ceremony**: identity → brain → channel. SOUP's shipped Add Line order is
+  Identity → Link → Model → Config → Review. The target Hatch journey deliberately adds Kind,
+  Agent, ceremony, persistence, and lifecycle concepts; it is not merely presentation over the
+  shipped wizard state machine.
 - Naming the moment matters: the transition "configured → alive" gets a name (Hatch) and a beat.
 - Soul-first ordering is a strong UX idea: persona before plumbing.
 
@@ -58,10 +59,11 @@ dead ends."*
 - Identity persists twice: into `IDENTITY.md`/`SOUL.md` (what the agent reads) and via
   `agents set-identity` (what channels/UI display) — persona is a first-class stored object.
 
-**Design laws worth adopting verbatim:**
+**Design laws evaluated for SOUP:**
 1. Announced defaults with easy undo > blocking questions.
-2. The agent participates in its own birth (self-naming) — ceremony is a *conversation*, not a
-   spinner.
+2. **Rejected as written and re-expressed:** the agent participates through self-naming and an
+   identity transformation, but SOUP uses a non-conversational animated wizard rather than a
+   chat or passive spinner.
 3. Three beats max; every beat skippable; restraint is what makes it feel premium.
 4. The first message is prefilled — end the ceremony inside the relationship, not on a recap.
 5. Identity hierarchy: one reserved mark for the system, distinct marks for agents.
@@ -95,10 +97,10 @@ animated pets. Relevance is the **animation architecture**, not the pets:
 deactivated → linking → hatching → live
 ```
 
-- **Ceremony shape (from OpenClaw):** a short *conversational* rite — the agent self-names
-  (with templates as defaults, C6), states a soul line, and asks one skills/setup question.
-  Three beats max, each skippable. Ends with the first message prefilled ("Say hello…"), landing
-  the user inside the relationship, not on a success screen.
+- **Ceremony shape (adapted from OpenClaw):** a short, non-conversational animated wizard—the
+  adopted SOUP target rejects OpenClaw's conversational carrier. It keeps at most three skippable
+  beats (name, soul line, channel) and a prefilled first message, as specified in
+  `14-onboarding-spec.md`.
 - **Visual carrier:** the identity lockup — channel glyph + agent initials avatar + nameplate.
   The ceremony beat is the avatar/identity transformation in place (one-shot, ≤600ms,
   skippable, reduced-motion → final state; D2-approved feature animation, not an animated
@@ -112,7 +114,7 @@ deactivated → linking → hatching → live
 ## 4. Open questions for G1/T3 (reduced after owner answers)
 
 1. Glyph treatment at the hatch moment: light-sweep vs shape-resolve — mock both in WS3.2.
-2. Does the hatch conversation happen in a dedicated ceremony room (first-run) with the inline
+2. Does the hatch wizard ceremony happen in a dedicated ceremony room (first-run) with the inline
    Fleet beat reserved for N+1 (C5 ✅ both — how the two relate visually)?
 3. Self-naming UX: does the agent propose 3 names from the template persona (option-card) with
    free-text override? (rec: yes, mirrors announced-defaults law)

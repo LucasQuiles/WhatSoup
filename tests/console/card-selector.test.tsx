@@ -159,6 +159,32 @@ describe('click selection', () => {
     const newSelected = screen.getByRole('radio', { name: /Chat Bot/ })
     expect(newSelected.style.background).toBe('var(--btn-neutral-bg)')
   })
+
+  it('keeps a disabled selector inert for click and keyboard activation', () => {
+    const onChange = vi.fn()
+    render(
+      <CardSelector
+        label="Card type"
+        options={makeOptions()}
+        selected="pas"
+        onChange={onChange}
+        disabled
+      />,
+    )
+    const group = screen.getByRole('radiogroup')
+    const radios = screen.getAllByRole('radio')
+
+    expect(group.getAttribute('aria-disabled')).toBe('true')
+    radios.forEach((radio) => {
+      expect(radio.getAttribute('aria-disabled')).toBe('true')
+      expect(radio.tabIndex).toBe(-1)
+    })
+    fireEvent.click(radios[1]!)
+    radios[0]!.focus()
+    fireEvent.keyDown(group, { key: 'ArrowRight' })
+    fireEvent.keyDown(group, { key: ' ' })
+    expect(onChange).not.toHaveBeenCalled()
+  })
 })
 
 // ---------------------------------------------------------------------------

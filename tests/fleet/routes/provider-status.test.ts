@@ -151,21 +151,72 @@ describe('handleGetLineProviderStatus', () => {
       JSON.stringify({
         agentOptions: {
           provider: 'openai-api',
-          providerConfig: { apiKeyService: 'prod-openai' },
+          providerConfig: {
+            baseUrl: 'https://api.groq.com/openai/v1',
+            apiKeyService: 'groq',
+          },
           model: 'gpt-4o',
         },
       }),
     );
-    mockedLookup.mockImplementation((service) => service === 'prod-openai' ? 'prod-openai-key' : null);
+    mockedLookup.mockImplementation((service) => service === 'groq' ? 'groq-key' : null);
 
     const res = mockRes();
     await handleGetLineProviderStatus(mockReq(), res, makeDeps(fakeInstance(), fakeStatus()), { name: 'agent-line' });
 
-    expect(mockedLookup).toHaveBeenCalledWith('prod-openai');
+    expect(mockedLookup).toHaveBeenCalledWith('groq');
     expect(mockedLookup).not.toHaveBeenCalledWith('openai');
     const body = JSON.parse(res._body);
-    expect(body.primary).toEqual({ provider: 'openai-api', model: 'gpt-4o', keyPresent: true, endpointHost: null, apiKeyService: 'prod-openai' });
-    expect(res._body).not.toContain('prod-openai-key');
+    expect(body.primary).toEqual({ provider: 'openai-api', model: 'gpt-4o', keyPresent: true, endpointHost: 'api.groq.com', apiKeyService: 'groq' });
+    expect(res._body).not.toContain('groq-key');
+  });
+
+  it('fails closed on an unchecked on-disk key-service selector without echoing or looking it up', async () => {
+    const hostileSelector = 'plaintext-provider-selector-sentinel';
+    mockedReadFile.mockResolvedValue(
+      JSON.stringify({
+        agentOptions: {
+          provider: 'openai-api',
+          providerConfig: {
+            baseUrl: 'https://gateway.example.com/v1',
+            apiKeyService: hostileSelector,
+          },
+          model: 'gpt-4o',
+        },
+      }),
+    );
+    mockedLookup.mockReturnValue(null);
+
+    const res = mockRes();
+    await handleGetLineProviderStatus(mockReq(), res, makeDeps(fakeInstance()), { name: 'agent-line' });
+
+    expect(mockedLookup).not.toHaveBeenCalledWith(hostileSelector);
+    expect(res._body).not.toContain(hostileSelector);
+    expect(JSON.parse(res._body).primary.apiKeyService).toBeNull();
+  });
+
+  it('fails closed on an unchecked OpenCode model-prefix selector from disk', async () => {
+    const hostileSelector = 'plaintext-provider-selector-sentinel';
+    mockedReadFile.mockResolvedValue(
+      JSON.stringify({
+        agentOptions: {
+          provider: 'opencode-cli',
+          model: `${hostileSelector}/model`,
+        },
+      }),
+    );
+    mockedLookup.mockReturnValue(null);
+
+    const res = mockRes();
+    await handleGetLineProviderStatus(mockReq(), res, makeDeps(fakeInstance()), { name: 'agent-line' });
+
+    expect(mockedLookup).not.toHaveBeenCalledWith(hostileSelector);
+    expect(res._body).not.toContain(hostileSelector);
+    expect(JSON.parse(res._body).primary).toMatchObject({
+      model: null,
+      keyPresent: null,
+      apiKeyService: null,
+    });
   });
 
   it('maps anthropic-api to the anthropic keyring service and reports keyPresent', async () => {
@@ -365,14 +416,17 @@ describe('handleGetLineProviderStatus', () => {
       JSON.stringify({
         agentOptions: {
           provider: 'openai-api',
-          providerConfig: { apiKeyService: 'tenant-openai' },
+          providerConfig: {
+            baseUrl: 'https://api.groq.com/openai/v1',
+            apiKeyService: 'groq',
+          },
           model: 'gpt-4o',
           fallbackProvider: 'openai-api',
           fallbackModel: 'gpt-4o-mini',
         },
       }),
     );
-    mockedLookup.mockImplementation((service) => service === 'tenant-openai' ? 'tenant-openai-key' : null);
+    mockedLookup.mockImplementation((service) => service === 'groq' ? 'groq-key' : null);
 
     const status = fakeStatus({
       health: { instance: { effectiveProvider: 'openai-api', fallbackActiveUntil: activeUntil } },
@@ -381,11 +435,11 @@ describe('handleGetLineProviderStatus', () => {
     const res = mockRes();
     await handleGetLineProviderStatus(mockReq(), res, makeDeps(fakeInstance(), status), { name: 'agent-line' });
 
-    expect(mockedLookup).toHaveBeenCalledWith('tenant-openai');
+    expect(mockedLookup).toHaveBeenCalledWith('groq');
     expect(mockedLookup).not.toHaveBeenCalledWith('openai');
     const body = JSON.parse(res._body);
     expect(body.fallback.keyPresent).toBe(true);
-    expect(res._body).not.toContain('tenant-openai-key');
+    expect(res._body).not.toContain('groq-key');
   });
 
   it('reports an inactive fallback window when fallbackActiveUntil has elapsed', async () => {
@@ -528,11 +582,15 @@ describe('handleGetLineProviderStatus', () => {
       JSON.stringify({
         agentOptions: {
           provider: 'openai-api',
-          providerConfig: { model: 'gpt-4o', apiKeyService: 'prod-openai' },
+          providerConfig: {
+            model: 'gpt-4o',
+            baseUrl: 'https://api.groq.com/openai/v1',
+            apiKeyService: 'groq',
+          },
         },
       }),
     );
-    mockedLookup.mockImplementation((service) => service === 'prod-openai' ? 'prod-openai-key' : null);
+    mockedLookup.mockImplementation((service) => service === 'groq' ? 'groq-key' : null);
 
     const res = mockRes();
     await handleGetLineProviderStatus(mockReq(), res, makeDeps(fakeInstance(), fakeStatus()), { name: 'agent-line' });
@@ -542,8 +600,8 @@ describe('handleGetLineProviderStatus', () => {
       provider: 'openai-api',
       model: 'gpt-4o',
       keyPresent: true,
-      endpointHost: null,
-      apiKeyService: 'prod-openai',
+      endpointHost: 'api.groq.com',
+      apiKeyService: 'groq',
     });
   });
 

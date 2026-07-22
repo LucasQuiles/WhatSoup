@@ -15,13 +15,13 @@ Automated tests are mock-based and do not prove live deliverability.
 
 ## How it works
 
-- `src/transport/registry.ts` — transport ID registry: `baileys` (default) and
-  `twilio`. Unknown IDs are rejected at config validation and again at the
-  factory switch (`assertNeverTransport`).
-- `src/transport/factory.ts` — `createConnection(config)` returns the Baileys
-  `ConnectionManager` for `baileys`, or a `TwilioConnection` (bridge) wrapping
-  `TwilioSmsAdapter` + `SdkTwilioSmsPort` for `twilio`. The twilio arm throws
-  at startup if `twilioConfig` is missing.
+- `src/transport/registry.ts` — transport ID registry: `baileys` (default),
+  `twilio`, `signal`, and `imessage`. Unknown IDs are rejected at config
+  validation and again at the factory switch (`assertNeverTransport`).
+- `src/transport/factory.ts` — `createConnection(config)` returns the
+  transport-specific connection. The Twilio arm wraps `TwilioSmsAdapter` +
+  `SdkTwilioSmsPort` in a `TwilioConnection` bridge and throws at startup if
+  `twilioConfig` is missing.
 - `src/transport/twilio/adapter.ts` — send path, inbound poll loop, health
   state, typed error mapping.
 - `src/transport/twilio/twilio-port.ts` — the only file that touches the
@@ -53,7 +53,7 @@ fake placeholders in the validated shapes):
   "twilioConfig": {
     "account": "sms-agent",
     "accountSid": "AC00000000000000000000000000000000",
-    "authTokenService": "twilio-sms-agent",
+    "authTokenService": "whatsoup-twilio-sms-agent",
     "phoneNumber": "+15550001111",
     "inboundMode": "poll",
     "pollIntervalMs": 15000,
@@ -71,14 +71,16 @@ Per-field notes (validation rules are exact — see
 
 | Field | Required | Default | Validation / behaviour |
 |-------|----------|---------|------------------------|
-| `transport` (top level) | no | `baileys` | Must be `baileys` or `twilio` when present. `twilioConfig` is **required** when `twilio`, and **rejected** when the transport is anything else. |
-| `twilioConfig.account` | yes | — | Channel account segment used to build the channel ID (`sms:<account>`). Must match `^[a-z][a-z0-9-]{0,63}$` (lowercase, starts with a letter). Pick a stable name; changing it changes the channel identity. |
+| `transport` (top level) | no | `baileys` | Must be `baileys`, `twilio`, `signal`, or `imessage` when present. `twilioConfig` is **required** when `twilio`, and **rejected** when the transport is anything else. |
+| `accessMode` (top level) | yes | — | Interactive Twilio SMS lines support `allowlist` and `open_dm`. CREATE/PATCH rejects `self_only` because SMS cannot authenticate an admin sender, and `groups_only` because SMS has no group chats. Passive lines require `self_only`. Existing legacy files with an unusable interactive mode remain loadable so operators can migrate them. |
+| `adminPhones` (top level) | yes | — | Compatibility field containing SMS access phone identities. In non-`self_only` modes every entry seeds ordinary allowlist access. Alerts are not broadcast: startup/intro uses the first configured phone, while approval alerts may prefer a recent matching configured conversation and otherwise fall back to the first. SMS sender IDs are spoofable: these identities are never authenticated admins and cannot issue admin commands. |
+| `twilioConfig.account` | yes | — | Immutable line identity used to build the channel ID (`sms:<account>`). It must equal the top-level line `name` and match `^[a-z][a-z0-9-]{0,63}$` (lowercase, starts with a letter). |
 | `twilioConfig.accountSid` | yes | — | Must match `^AC[0-9a-f]{32}$` — hex must be **lowercase**. |
-| `twilioConfig.authTokenService` | yes | — | Keyring **service name**, not the token itself. Non-empty, no whitespace, max 128 chars. See [Credentials](#credentials-keyring). |
+| `twilioConfig.authTokenService` | yes | — | Derived keyring **service name**, never the token: it must equal `whatsoup-twilio-<immutable-line-name>` (for this example, `whatsoup-twilio-sms-agent`). Arbitrary and cross-line selectors are rejected before credential lookup. See [Credentials](#credentials-keyring). |
 | `twilioConfig.phoneNumber` | XOR | — | E.164 sender (`^\+[1-9]\d{6,14}$`). Exactly **one** of `phoneNumber` or `messagingServiceSid` must be set — both or neither is rejected. |
 | `twilioConfig.messagingServiceSid` | XOR | — | Must match `^MG[0-9a-f]{32}$` (lowercase hex). Used as the sender instead of `phoneNumber`. Caveat: with no `phoneNumber`, inbound polling uses a single unfiltered SDK call — it lists all messages on the Twilio account in both directions (`twilio-port.ts` makes two targeted calls only when `phoneNumber` is configured). |
 | `twilioConfig.inboundMode` | no | `poll` | `'poll'` (REST polling) or `'webhook'` (signature-validated HTTP listener). Unknown values are rejected. |
-| `twilioConfig.webhook.publicBaseUrl` | webhook-mode | — | Public HTTPS base URL Twilio posts to (`https://` required, no trailing slash; the validator strips one if present). Twilio computes signatures over the full public URL; this **must match exactly**. |
+| `twilioConfig.webhook.publicBaseUrl` | webhook-mode | — | Public HTTPS base URL Twilio posts to (`https://` required; userinfo, query strings, and fragments are rejected). An optional trailing slash is normalized away; configure Twilio with the resulting normalized URL because signatures cover the full public URL. |
 | `twilioConfig.webhook.listenPort` | webhook-mode | — | Port the local listener binds (integer `[1, 65535]`; must not equal `healthPort` when both are set). Bind address defaults to `127.0.0.1` — you MUST front it with an HTTPS-terminating proxy or tunnel. |
 | `twilioConfig.webhook.listenAddress` | no | `127.0.0.1` | Override the local bind address. Default keeps the listener off public interfaces; the HTTPS proxy handles public TLS. |
 | `twilioConfig.voice.enabled` | no | `false` | Enable voicemail flow (`true` requires `inboundMode:'webhook'` and a `phoneNumber`). |
@@ -101,7 +103,7 @@ talks to Twilio (lazy — not at startup). Supported backends:
   account is the OS user running the WhatSoup process. Provision with:
 
   ```bash
-  security add-generic-password -s twilio-sms-agent -a "$USER" -w
+  security add-generic-password -s whatsoup-twilio-sms-agent -a "$USER" -w
   # paste the auth token at the prompt
   ```
 
@@ -109,7 +111,7 @@ talks to Twilio (lazy — not at startup). Supported backends:
   `secret-tool lookup service <service>`. Provision with:
 
   ```bash
-  secret-tool store --label="Twilio auth token (sms-agent)" service twilio-sms-agent
+  secret-tool store --label="Twilio auth token (sms-agent)" service whatsoup-twilio-sms-agent
   ```
 
 - **Environment fallback:** does **not** apply to Twilio. `lookupCredential`
@@ -120,6 +122,12 @@ talks to Twilio (lazy — not at startup). Supported backends:
 
 The token is never written to config, never logged, and is scrubbed from SDK
 error messages and stack traces (`twilio-port.ts` `scrubAndRethrow`).
+
+Existing lines that use another service name fail closed. Before updating or
+restarting such a line, provision or copy its token into
+`whatsoup-twilio-<line-name>`, update the config, and verify connectivity. Retire
+the old keyring item manually only after verification; WhatSoup never copies or
+deletes credentials during migration.
 
 ## SMS identity model
 
@@ -138,6 +146,15 @@ same phone number.
 
 Inbound SMS are always direct messages: `isGroup: false`, no sender name, no
 mentions, `contentType: 'text'`.
+
+`adminPhones` does not establish an authenticated SMS administrator. For an
+interactive line, use `allowlist` (the fail-closed default) or `open_dm`.
+Notification phones are seeded as ordinary allowed contacts, but a matching
+SMS sender ID is still spoofable and receives no admin-command privilege. New
+contacts in `allowlist` remain pending until an operator approves or blocks
+them in the WhatSoup console. Approval notification texts intentionally direct
+operators to the console; replying by SMS with `ALLOW` or `BLOCK` cannot
+authorize a decision.
 
 ## Inbound delivery semantics
 
@@ -288,7 +305,7 @@ field error).
 "twilioConfig": {
   "account": "sms-agent",
   "accountSid": "AC00000000000000000000000000000000",
-  "authTokenService": "twilio-sms-agent",
+  "authTokenService": "whatsoup-twilio-sms-agent",
   "phoneNumber": "+15550001111",
   "inboundMode": "webhook",
   "webhook": {

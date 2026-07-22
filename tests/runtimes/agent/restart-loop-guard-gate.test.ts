@@ -70,7 +70,7 @@ describe('T5 — startup resume gate consults the restart-loop guard', () => {
     const { config } = await import('../../../src/config.ts');
     const stub = Object.create(AgentRuntime.prototype) as {
       restartLoopInterruptedBoot: boolean;
-      pendingStartupMessage: { chatJid: string; text: string } | null;
+      pendingStartupMessage: { chatJid: string; text: string; caller?: 'report-channel' } | null;
       shouldSuppressProactiveResume: (resumableCount: number) => boolean;
     };
     stub.restartLoopInterruptedBoot = false;
@@ -117,6 +117,28 @@ describe('T5 — startup resume gate consults the restart-loop guard', () => {
     expect(stub.pendingStartupMessage?.chatJid).toBe('15550000001@s.whatsapp.net');
     expect(stub.pendingStartupMessage?.text).toContain('Restart-loop guard tripped');
     expect(stub.pendingStartupMessage?.text).toContain('resume on their next message');
+    expect(stub.pendingStartupMessage?.caller).toBe('report-channel');
+  });
+
+  it('queues a Twilio restart-loop notice in the SMS namespace', async () => {
+    const { guard, config, stub } = await load({
+      transport: 'twilio',
+      adminPhones: ['+15550000001'],
+      twilioConfig: {
+        account: 'gate-bot',
+        accountSid: `AC${'a'.repeat(32)}`,
+        authTokenService: 'whatsoup-twilio-gate-bot',
+        phoneNumber: '+15550000002',
+        inboundMode: 'poll',
+        pollIntervalMs: 15_000,
+      },
+      accessMode: 'allowlist',
+    });
+    driveCrashyBoots(guard, config.stateRoot, 2);
+    stub.restartLoopInterruptedBoot = true;
+
+    expect(stub.shouldSuppressProactiveResume(2)).toBe(true);
+    expect(stub.pendingStartupMessage?.chatJid).toBe('+15550000001@sms');
   });
 
   it('does not trip below the threshold', async () => {

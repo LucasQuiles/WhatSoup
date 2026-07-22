@@ -4,7 +4,6 @@ import CardSelector from '../CardSelector'
 import TagInput from '../TagInput'
 import { Field, TextInput, NumberInput, SelectInput, FileInput, TextArea, CheckboxField } from '../primitives'
 // form-styles static exports replaced by CSS classes (c-field-label, c-helper)
-import { validatePhone } from '../../lib/validation'
 import { PROVIDERS, getProviderConfigFields, DEFAULT_PROVIDER_ID } from '../../lib/providers'
 import { defaultAgentWorkspacePath } from '../../lib/agent-cwd'
 import { ACCESS_MODE_DETAILS, ACCESS_MODE_VALUES, type AccessModeValue } from '../../lib/access-modes'
@@ -101,24 +100,33 @@ const SESSION_SCOPE_DESCRIPTIONS: Record<string, string> = {
 /* tabStyle removed — using .c-tab CSS class */
 
 /** Generate a sensible default system prompt based on instance type. */
-function defaultSystemPrompt(name: string, type: string): string {
+function transportChannel(transport: unknown): string {
+  if (transport === 'twilio') return 'SMS'
+  if (transport === 'signal') return 'Signal'
+  if (transport === 'imessage') return 'iMessage'
+  return 'WhatsApp'
+}
+
+function defaultSystemPrompt(name: string, type: string, transport: unknown): string {
   const titleName = name.charAt(0).toUpperCase() + name.slice(1)
+  const channel = transportChannel(transport)
   if (type === 'agent') {
-    return `You are ${titleName}, a helpful AI agent on WhatsApp. You have access to tools including file operations, web search, and code execution within your sandbox. Keep responses concise — they're delivered as WhatsApp messages. Ask clarifying questions when a request is ambiguous. Be direct, helpful, and personable.`
+    return `You are ${titleName}, a helpful AI agent on ${channel}. You have access to tools including file operations, web search, and code execution within your sandbox. Keep responses concise — they're delivered as ${channel} messages. Ask clarifying questions when a request is ambiguous. Be direct, helpful, and personable.`
   }
-  return `You are ${titleName}, a helpful AI assistant on WhatsApp. You respond to messages in a conversational, friendly tone. Keep responses concise and relevant — they're delivered as WhatsApp messages. If you don't know something, say so rather than guessing.`
+  return `You are ${titleName}, a helpful AI assistant on ${channel}. You respond to messages in a conversational, friendly tone. Keep responses concise and relevant — they're delivered as ${channel} messages. If you don't know something, say so rather than guessing.`
 }
 
 /** Generate a sensible default CLAUDE.md for a new agent instance. */
-function defaultClaudeMd(name: string, cwd: string): string {
+function defaultClaudeMd(name: string, cwd: string, transport: unknown): string {
   const titleName = name.charAt(0).toUpperCase() + name.slice(1)
   const workspace = cwd.trim() || defaultAgentWorkspacePath(name)
-  return `# ${titleName} — WhatsApp Agent
+  const channel = transportChannel(transport)
+  return `# ${titleName} — ${channel} Agent
 
-You are ${titleName}, an AI agent running on WhatsApp via WhatSoup.
+You are ${titleName}, an AI agent running on ${channel} via WhatSoup.
 
 ## Identity
-- You are a helpful, direct assistant reachable over WhatsApp
+- You are a helpful, direct assistant reachable over ${channel}
 - You run as a Claude Code agent with tool access within your sandbox
 
 ## Workspace
@@ -131,10 +139,10 @@ You are ${titleName}, an AI agent running on WhatsApp via WhatSoup.
 ### Stay in your lane
 - Do NOT modify files outside your workspace
 - Do NOT modify system configs, credentials, or infrastructure
-- Do NOT restart, stop, or modify other WhatsApp instances
+- Do NOT restart, stop, or modify other WhatSoup instances
 
 ### Be conservative with resources
-- Keep responses concise — they're delivered via WhatsApp
+- Keep responses concise — they're delivered via ${channel}
 - Don't spawn unnecessary background processes
 - Don't install system-level packages without explicit permission
 
@@ -146,10 +154,43 @@ You are ${titleName}, an AI agent running on WhatsApp via WhatSoup.
 `
 }
 
+const DEFAULT_PROMPT_TRANSPORTS = ['baileys', 'twilio', 'signal', 'imessage'] as const
+
+function generatedNameFromTitle(title: string): string {
+  return title.charAt(0).toLowerCase() + title.slice(1)
+}
+
+function isGeneratedSystemPrompt(value: string): boolean {
+  const match = /^You are ([^,]+), a helpful AI (agent|assistant) on (?:WhatsApp|SMS|Signal|iMessage)\./.exec(value)
+  if (!match) return false
+  const generatedName = generatedNameFromTitle(match[1])
+  const generatedType = match[2] === 'agent' ? 'agent' : 'chat'
+  return DEFAULT_PROMPT_TRANSPORTS.some((transport) => (
+    value === defaultSystemPrompt(generatedName, generatedType, transport)
+  ))
+}
+
+function isGeneratedClaudeMd(value: string): boolean {
+  const titleMatch = /^# (.+) — (?:WhatsApp|SMS|Signal|iMessage) Agent\n/.exec(value)
+  const workspaceMatch = /\n- Your working directory is `([^`]+)`\n/.exec(value)
+  if (!titleMatch || !workspaceMatch) return false
+  const generatedName = generatedNameFromTitle(titleMatch[1])
+  return DEFAULT_PROMPT_TRANSPORTS.some(
+    (transport) => value === defaultClaudeMd(generatedName, workspaceMatch[1], transport),
+  )
+}
+
 const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => {
   const type = (data.type as string) ?? 'chat'
-  const accessMode = (data.accessMode as string) ?? 'self_only'
-  const allowedContacts = (data.allowedContacts as string[]) ?? []
+  const interactiveTwilio = data.transport === 'twilio' && type !== 'passive'
+  const configuredAccessMode = (data.accessMode as string) ?? 'self_only'
+  const accessMode = interactiveTwilio
+    && (configuredAccessMode === 'self_only' || configuredAccessMode === 'groups_only')
+    ? 'allowlist'
+    : configuredAccessMode
+  const accessOptions = interactiveTwilio
+    ? ACCESS_OPTIONS.filter(({ value }) => value === 'allowlist' || value === 'open_dm')
+    : ACCESS_OPTIONS
   const systemPrompt = (data.systemPrompt as string) ?? ''
   const claudeMd = (data.claudeMd as string) ?? ''
   const agentOptions = useMemo<AgentOptions>(
@@ -162,20 +203,36 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
   const name = (data.name as string) ?? ''
   const defaultWorkspace = defaultAgentWorkspacePath(name)
 
-  // Pre-fill system prompt and claudeMd with sensible defaults (once only on mount)
-  const prefilled = useRef(false)
+  // Fill blanks and replace only recognized generated defaults when identity or
+  // transport changes. User-authored instructions are never rewritten.
+  const initializedDefaults = useRef(false)
   useEffect(() => {
-    if (prefilled.current) return
-    prefilled.current = true
+    const initializeBlankFields = !initializedDefaults.current
+    initializedDefaults.current = true
     const patch: Record<string, unknown> = {}
-    if (type !== 'passive' && !systemPrompt.trim()) {
-      patch.systemPrompt = defaultSystemPrompt(name, type)
+    const nextSystemPrompt = defaultSystemPrompt(name, type, data.transport)
+    if (
+      type !== 'passive'
+      && ((initializeBlankFields && !systemPrompt.trim()) || (
+        systemPrompt !== nextSystemPrompt
+        && isGeneratedSystemPrompt(systemPrompt)
+      ))
+    ) {
+      patch.systemPrompt = nextSystemPrompt
     }
-    if (type === 'agent' && !claudeMd.trim()) {
-      patch.claudeMd = defaultClaudeMd(name, agentOptions.cwd ?? '')
+    const cwd = agentOptions.cwd ?? ''
+    const nextClaudeMd = defaultClaudeMd(name, cwd, data.transport)
+    if (
+      type === 'agent'
+      && ((initializeBlankFields && !claudeMd.trim()) || (
+        claudeMd !== nextClaudeMd
+        && isGeneratedClaudeMd(claudeMd)
+      ))
+    ) {
+      patch.claudeMd = nextClaudeMd
     }
     if (Object.keys(patch).length > 0) onChange(patch)
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps -- waiver:WVR-011 intentional mount-only effect; expires 2026-12-31
+  }, [agentOptions.cwd, claudeMd, data.transport, name, onChange, systemPrompt, type])
 
   const pineconeIndex = (data.pineconeIndex as string) ?? ''
   const pineconeSearchMode = (data.pineconeSearchMode as string) ?? 'Memory'
@@ -346,6 +403,12 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
       {/* 1. Access — conditional-mount panel (Tabs.tsx header §11-13 sanctions this). */}
       {activeTab === 'access' && (
         <div role="tabpanel" id="tabpanel-access" aria-labelledby="tab-access" className="flex flex-col gap-[var(--sp-4)]">
+          {interactiveTwilio && (
+            <div className="bg-surface-raised rounded-md p-[var(--sp-4)]">
+              <span className="c-heading text-s-warn">Twilio SMS identity limits</span>
+              <p className="c-body text-text-2">Twilio SMS cannot authenticate sender identity, and SMS has no group chats. Admin Only and Groups Only are unavailable.</p>
+            </div>
+          )}
           <div>
             <label className="c-label c-field-label">
               <span className="inline-flex items-center gap-[var(--sp-1)]">
@@ -355,7 +418,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
             </label>
             <CardSelector
               label="Access Mode"
-              options={ACCESS_OPTIONS}
+              options={accessOptions}
               selected={accessMode}
               onChange={(value) => onChange({ accessMode: value })}
             />
@@ -371,21 +434,11 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
           {accessMode === 'allowlist' && (
             <div className="bg-surface-raised rounded-md p-[var(--sp-4)] mt-[var(--sp-3)]">
               <span className="c-heading" style={{ color: 'var(--wizard-accent)' }}>Allowlist</span>
-              <p className="c-body text-text-2">Only approved contacts can interact. New contacts will be held in a pending queue until an admin approves or blocks them.</p>
-              <div className="mt-[var(--sp-3)]">
-                <Field label="Pre-approved contacts" helper="These contacts will be automatically approved when they first message.">
-                  {(id) => (
-                    <TagInput
-                      id={id}
-                      values={allowedContacts}
-                      onChange={(values) => onChange({ allowedContacts: values.map(v => v.replace(/\D/g, '')) })}
-                      placeholder="Add phone number"
-                      validate={validatePhone}
-                      accentColor={allowedContacts.length > 0 ? 'var(--wizard-accent)' : undefined}
-                    />
-                  )}
-                </Field>
-              </div>
+              <p className="c-body text-text-2">
+                {interactiveTwilio
+                  ? 'New SMS contacts remain pending until an operator approves or blocks them in the console.'
+                  : 'Only approved contacts can interact. New contacts will be held in a pending queue until an admin approves or blocks them.'}
+              </p>
             </div>
           )}
 

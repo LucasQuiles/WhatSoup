@@ -374,6 +374,70 @@ describe('Happy path', () => {
     expect(sentText).not.toContain('settings.json');
   });
 
+  it('keeps operator-only reply details for a configured Signal admin in the Signal namespace', async () => {
+    const runtimeConfig = configModule.config as unknown as {
+      transport: string;
+      adminPhones: Set<string>;
+    };
+    const originalTransport = runtimeConfig.transport;
+    const originalAdminPhones = runtimeConfig.adminPhones;
+    const signalAdmin = '+15550001111';
+    runtimeConfig.transport = 'signal';
+    runtimeConfig.adminPhones = new Set([signalAdmin]);
+
+    try {
+      const { handler, messenger, primary } = makeHandler();
+      vi.mocked(primary.generate).mockResolvedValue({
+        content: 'restart via /Users/testuser/LAB/whatsoup/instances/signal-line',
+        inputTokens: 50,
+        outputTokens: 5,
+        model: 'claude-opus-4-6',
+        durationMs: 300,
+      });
+      const signalJid = `${signalAdmin}@signal`;
+
+      await handleAndDrain(handler, makeIncomingMessage({ chatJid: signalJid, senderJid: signalJid }));
+
+      const sentText = vi.mocked(messenger.sendMessage).mock.calls[0]?.[1] as string;
+      expect(sentText).toContain('/Users/testuser/LAB/whatsoup/instances/signal-line');
+    } finally {
+      runtimeConfig.transport = originalTransport;
+      runtimeConfig.adminPhones = originalAdminPhones;
+    }
+  });
+
+  it('does not elevate the same Signal admin reply from the iMessage namespace', async () => {
+    const runtimeConfig = configModule.config as unknown as {
+      transport: string;
+      adminPhones: Set<string>;
+    };
+    const originalTransport = runtimeConfig.transport;
+    const originalAdminPhones = runtimeConfig.adminPhones;
+    const signalAdmin = '+15550001111';
+    runtimeConfig.transport = 'signal';
+    runtimeConfig.adminPhones = new Set([signalAdmin]);
+
+    try {
+      const { handler, messenger, primary } = makeHandler();
+      vi.mocked(primary.generate).mockResolvedValue({
+        content: 'restart via /Users/testuser/LAB/whatsoup/instances/signal-line',
+        inputTokens: 50,
+        outputTokens: 5,
+        model: 'claude-opus-4-6',
+        durationMs: 300,
+      });
+      const imessageJid = `${signalAdmin}@imessage`;
+
+      await handleAndDrain(handler, makeIncomingMessage({ chatJid: imessageJid, senderJid: imessageJid }));
+
+      const sentText = vi.mocked(messenger.sendMessage).mock.calls[0]?.[1] as string;
+      expect(sentText).not.toContain('/Users/testuser/LAB/whatsoup/instances/signal-line');
+    } finally {
+      runtimeConfig.transport = originalTransport;
+      runtimeConfig.adminPhones = originalAdminPhones;
+    }
+  });
+
   it('primary provider success — uses primary response, fallback never called', async () => {
     const { handler, messenger, primary, fallback } = makeHandler();
 

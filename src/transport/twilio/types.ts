@@ -22,7 +22,7 @@ export interface TwilioVoiceConfig {
 export interface TwilioSmsConfig {
   readonly account: string;              // channel account segment (a-z0-9-), e.g. 'ml-bot'
   readonly accountSid: string;           // AC… (validated AC[0-9a-f]{32})
-  readonly authTokenService: string;     // keyring service name (never an inline token)
+  readonly authTokenService: string;     // exactly whatsoup-twilio-<account>; never an inline token
   // XOR invariant: exactly one of phoneNumber or messagingServiceSid must be provided.
   // Validation is enforced by src/core/agent-config-validator.ts, not the type.
   readonly phoneNumber?: string;         // E.164 sender — optional; use messagingServiceSid if absent

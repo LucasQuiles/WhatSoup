@@ -1,4 +1,12 @@
-import { DOMAIN_PERSONAL, DOMAIN_LID, DOMAIN_GROUP } from './jid-constants.ts';
+import {
+  DOMAIN_PERSONAL,
+  DOMAIN_LID,
+  DOMAIN_GROUP,
+  JID_IMESSAGE,
+  fromImessageJid,
+  hasKnownTransportJidSuffix,
+  isGroupJid,
+} from './jid-constants.ts';
 
 /**
  * Reserved conversation-key-space sentinel for global-tier (non-chat) scopes:
@@ -9,12 +17,39 @@ import { DOMAIN_PERSONAL, DOMAIN_LID, DOMAIN_GROUP } from './jid-constants.ts';
  */
 export const GLOBAL_CONVERSATION_KEY = '__global__';
 
+/** Distinguish supported raw JIDs from encoded keys that may themselves contain @. */
+export function isRawTransportJidReference(ref: string): boolean {
+  if (!hasKnownTransportJidSuffix(ref)) return false;
+  // The deployed AppleID key encoding replaces the AppleID's @ and therefore
+  // ends in @imessage with only one at-sign.
+  if (
+    ref.endsWith('@imessage')
+    && ref.includes('_at_')
+    && ref.indexOf('@') === ref.lastIndexOf('@')
+  ) return false;
+  return true;
+}
+
+/** Accept a raw supported JID or a transport-neutral conversation key. */
+export function conversationRefToJid(ref: string): string {
+  return isRawTransportJidReference(ref) ? ref : conversationKeyToJid(ref);
+}
+
+/** Normalize raw or alternate references to the deployed conversation key. */
+export function conversationRefToKey(ref: string): string {
+  if (isRawTransportJidReference(ref)) return toConversationKey(ref);
+  const jid = conversationKeyToJid(ref);
+  return jid === ref ? ref : toConversationKey(jid);
+}
+
 export function isGroupConversationKey(key: string): boolean {
-  return key.includes('_at_g.us') || key.includes('@g.us')
+  return isGroupJid(conversationRefToJid(key));
 }
 
 export function conversationKeyToJid(key: string): string {
-  return key.replace('_at_g.us', '@g.us')
+  const separator = key.lastIndexOf('_at_');
+  if (separator <= 0 || separator + 4 >= key.length) return key;
+  return `${key.slice(0, separator)}@${key.slice(separator + 4)}`;
 }
 
 export function toConversationKey(jid: string): string {
@@ -22,10 +57,18 @@ export function toConversationKey(jid: string): string {
     throw new Error(`Invalid JID: "${jid}" -- must contain @`);
   }
 
-  const atIndex = jid.indexOf('@');
-  const local = jid.substring(0, atIndex);
+  const normalizedJid = jid.endsWith(JID_IMESSAGE)
+    ? `${fromImessageJid(jid)}${JID_IMESSAGE}`
+    : jid;
+
+  // Preserve the deployed encoding for identities whose local address contains
+  // an @ (notably AppleID email): owner@example.test@imessage becomes
+  // owner_at_example.test@imessage. Changing this would split existing
+  // conversation-indexed history and session state without a database migration.
+  const atIndex = normalizedJid.indexOf('@');
+  const local = normalizedJid.substring(0, atIndex);
   if (!local) throw new Error(`Invalid JID: "${jid}" — empty local part`);
-  const domain = jid.substring(atIndex + 1);
+  const domain = normalizedJid.substring(atIndex + 1);
 
   switch (domain) {
     case DOMAIN_PERSONAL:

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import { registerGroupTools } from '../../../src/mcp/tools/groups.ts';
 import { config } from '../../../src/config.ts';
@@ -43,11 +43,23 @@ function makeMockSock(): WhatsAppSocket {
 describe('group tools', () => {
   let registry: ToolRegistry;
   let mockSock: WhatsAppSocket;
+  let db: Database;
 
   beforeEach(() => {
     mockSock = makeMockSock();
+    db = new Database(':memory:');
+    db.open();
+    const allowPhone = db.raw.prepare(
+      "INSERT INTO access_list (subject_type, subject_id, status) VALUES ('phone', ?, 'allowed')",
+    );
+    allowPhone.run('111');
+    allowPhone.run('recipient');
     registry = new ToolRegistry();
-    registerGroupTools(() => mockSock, (tool) => registry.register(tool));
+    registerGroupTools(() => mockSock, (tool) => registry.register(tool), db);
+  });
+
+  afterEach(() => {
+    db.close();
   });
 
   const globalTools = [

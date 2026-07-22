@@ -5,18 +5,23 @@ Severity: **S0** blocks all v3.5 design · **S1** blocks a workstream · **S2** 
 
 ## G-01 Channel model (S0)
 
-**Current:** `Line.type: string` (free-form); linking = WhatsApp QR only; identity = phone/JID;
-no channel registry, picker, iconography, or per-channel link flow.
+**Current:** runtime config and the Add Line wizard support four transports: Baileys/WhatsApp,
+Twilio/SMS, Signal, and iMessage. Baileys alone uses in-console QR authentication; Twilio uses
+validated polling configuration and advances automatically; Signal and iMessage use validated
+configuration plus out-of-band operator attestation. Admin identity is transport-specific. The
+four-way transport picker exists, but there is no 14-channel product registry or full glyph set.
 **Gap:** v3.5 needs a channel abstraction the UI can render without knowing the transport:
 channel id, display name, glyph, capabilities (link method, features), status semantics.
 **Design work:** channel registry model + channel glyphography + per-channel link-flow adapter
-pattern (QR / pairing code / OAuth / bridge-login). UI/UX only (D2) — transports mocked.
+pattern (QR / configured polling / external attestation / OAuth). UI/UX only (D2) — reuse the
+four real transport seams and mock only channels without a runtime backend.
 
 ## G-02 Managed social channels (S1, depends G-01)
 
-**Current:** nothing.
-**Gap:** X, LinkedIn, Reddit, IG, Facebook (+ messaging: signal, imessage, sms, discord,
-telegram; channels: email, slack, teams — A3, 14 total) as Lines with channel-specific
+**Current:** WhatsApp, SMS, Signal, and iMessage have runtime/config seams; the social and
+general-channel registry entries do not.
+**Gap:** X, LinkedIn, Reddit, IG, Facebook (+ messaging: Discord and Telegram; channels: email,
+Slack, and Teams — ten designed entries, fourteen total) as Lines with channel-specific
 affordances (handle identity, OAuth-style link copy, rate-limit/health states). No transport in
 scope — but the model must not assume phone-number identity or QR pairing.
 **Design work:** 14-row channel capability matrix, social channel cards in Fleet, link-flow copy
@@ -51,7 +56,7 @@ Line detail, Fleet indicator for restricted lines.
 
 ## G-04 First-run onboarding + hatching ceremony (S1, depends G-01/G-03)
 
-**Current:** AddLineWizard = 5 utilitarian steps (Identity→Config→ModelAuth→Link→Review) for
+**Current:** AddLineWizard = 5 utilitarian steps (Identity→Link→ModelAuth→Config→Review) for
 adding one line inside an already-set-up console. No first-run journey.
 **Gap:** v3.5 needs a designed first-run arc: welcome → workspace/identity → first channel →
 agent persona → link device/account → **hatch ceremony** → land in Fleet with the new Line alive.

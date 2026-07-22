@@ -38,7 +38,7 @@ deployment archetypes over those types:
 | `agentOptions.autoCompactInputTokens` | context auto-compact (150k default) | Brain (advanced) |
 | `agentOptions.nlRouting*` | model-routing aliases + tier map | Brain (routing) |
 | `memory` (BYOK) | Pinecone: index · searchMode · rerank · topK · allowedIndexes | Memory surface (R3-5) |
-| `transport` + `twilioConfig` | **baileys (WhatsApp) · twilio (SMS)** | Channel |
+| `transport` + selected nested config | **baileys (WhatsApp) · twilio (SMS) · signal · imessage**; exactly the selected non-Baileys config is persisted | Channel |
 | rate/budget | rateLimitPerHour · tokenBudget · maxTokens | Profile (limits) |
 | identity | name · adminPhones · siblingPhones · chatAliases | Line |
 | access_list (DB) | phone/group subjects: allowed · blocked · pending · seen | Line access (senders) |
@@ -50,15 +50,21 @@ heartbeat[] · messages · unread · queueDepth · activeSessions · lastSession
 sandboxPerChat · chatCounts {chats, groups} · tokenUsage · linkedStatus (+confidence) · tags ·
 group · config — plus ProviderStatus (primary/fallback slots, chain, telemetry).
 
+The current `linkedStatus` projection is Baileys-specific: it derives WhatsApp health/auth evidence
+and auth-directory artifacts. It is not truthful generic provider health for Twilio, Signal, or
+iMessage; v3.5 must not present it as transport-neutral linkage until those adapters expose a
+separate observed lifecycle contract.
+
 ## 4. Key discoveries
 
-1. **`transport: twilio` already exists** — SMS is a second *real* transport in the schema, not a
-   mock. The channel registry should mark sms as "partial/real transport" and whatsapp as "real";
-   the other 12 are designed mocks (D2).
+1. **Four transports have runtime/config seams** — Baileys/WhatsApp, Twilio/SMS, Signal, and
+   iMessage are real choices in the schema and Add Line flow. The registry should mark those four
+   as runtime-backed; the other ten entries are designed mocks (D2).
 2. **Line ≡ Instance ≡ Agent are fused today.** An agent instance *is* a line: it owns the
-   WhatsApp connection AND the agent runtime. v3.5's core split (Line = channel account, Agent =
+   selected transport connection AND the agent runtime. v3.5's core split (Line = channel account, Agent =
    assignable worker) has no runtime basis yet — it's a **UI/product-model projection** over
-   fused instances (consistent with D2: no runtime work this program).
+   fused instances. D2 adds no fifth transport or Line/Agent split; it projects the four existing
+   runtime seams into the design model.
 3. **access_list is sender access** (who may talk to the bot), NOT agent×line grants. The Grant
    entity (B3/R3-13/14) is net-new with no runtime analog — pure product-model addition.
 4. **Memory is already per-instance BYOK Pinecone** — the Memory surface (R3-5) projects existing
@@ -91,7 +97,7 @@ group · config — plus ProviderStatus (primary/fallback slots, chain, telemetr
 |---|---|---|
 | G-i | Line/Agent/Profile fused in one config | Split into 3 entities in product model; UI projects over per-line configs initially |
 | G-ii | No Grant concept | New entity (agent × line × hidden/see/participate) + audit |
-| G-iii | No Channel registry | New registry (14 entries; sms/whatsapp real, rest mocked) |
+| G-iii | No 14-channel registry | New registry (14 entries; WhatsApp/SMS/Signal/iMessage runtime-backed, ten mocked) |
 | G-iv | No reusable Profile | New entity; materializes into a line config on assign |
 | G-v | No unified Person | New entity linking contacts across channels |
 | G-vi | No skill compatibility metadata | Hub needs a manifest schema (model/harness compat) — design in WS4 |

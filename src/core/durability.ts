@@ -8,6 +8,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { Database } from './database.ts';
 import type { Messenger } from './types.ts';
 import type { GuardCaller } from './outbound-identity/types.ts';
+import { toTransportDirectJid } from './jid-constants.ts';
 import { toConversationKey } from './conversation-key.ts';
 import { withTransaction } from './db-tx.ts';
 import {
@@ -112,6 +113,25 @@ const log = createChildLogger('durability');
  * to `op_type='status_ping'` — `text` ops have no age gate.
  */
 const STATUS_OP_TTL_MS = 30 * 60 * 1000;
+
+const OPERATOR_REPORT_OP_TYPE = 'operator_report_v1';
+const OPERATOR_REPORT_VERSION = 1;
+
+type GenericGuardCaller = Exclude<GuardCaller, 'report-channel'>;
+type OperatorReportType = 'text' | 'status_ping';
+
+function configuredOperatorReportTargets(): ReadonlySet<string> {
+  const targets = new Set<string>();
+  for (const identity of config.adminPhones) {
+    try {
+      targets.add(toTransportDirectJid(identity, config.transport));
+    } catch {
+      // Invalid identities are already rejected by instance validation. Keep
+      // this trust resolver fail-closed if a legacy config bypassed it.
+    }
+  }
+  return targets;
+}
 
 // ── Status string unions ──
 
@@ -221,6 +241,19 @@ export interface OutboundOpParams {
   isTerminal?: boolean;
 }
 
+export interface OperatorReportOpParams {
+  chatJid: string;
+  text: string;
+  reportType: OperatorReportType;
+  replayPolicy: 'safe' | 'unsafe' | 'read_only';
+  sourceInboundSeq?: number;
+  isTerminal?: boolean;
+}
+
+export interface DurabilityEngineOptions {
+  resolveOperatorReportTargets?: () => ReadonlySet<string>;
+}
+
 type PreparedStatement = ReturnType<Database['raw']['prepare']>;
 
 type DurabilityStatements = {
@@ -290,8 +323,11 @@ export class DurabilityEngine {
   private readonly turnRecovery: TurnRecoveryStore;
   private readonly sessionLifecycle: SessionLifecycleStore;
   private readonly confirmedOutboundProbe: (seconds: number) => boolean;
-  constructor(db: Database) {
+  private readonly resolveOperatorReportTargets: () => ReadonlySet<string>;
+  constructor(db: Database, options: DurabilityEngineOptions = {}) {
     this.db = db;
+    this.resolveOperatorReportTargets =
+      options.resolveOperatorReportTargets ?? configuredOperatorReportTargets;
     const prepare = db.raw.prepare.bind(db.raw);
     this.statements = {
       journalInbound: prepare(
@@ -360,14 +396,27 @@ export class DurabilityEngine {
          VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
       ),
       // PR-C: one outstanding status ping per chat. Enqueuing a new status_ping
-      // marks any prior non-terminal status_ping for the same chat
+      // marks any prior non-terminal status_ping (including a reserved operator
+      // report whose bound reportType is status_ping) for the same chat
       // failed_permanent/superseded (a terminal state retention already reclaims),
       // so a re-pair / crash-loop cannot flush a backlog of stale "back online"
       // notices in one burst. Scoped strictly to op_type='status_ping' — never
       // touches 'text' ops (user replies, admin responses, isResume continuity).
       supersedeOutstandingStatus: prepare(
         `UPDATE outbound_ops SET status = 'failed_permanent', error = 'superseded'
-           WHERE chat_jid = ? AND op_type = 'status_ping'
+           WHERE chat_jid = ?
+             AND (
+               op_type = 'status_ping'
+               OR (
+               op_type = 'operator_report_v1'
+                 AND CASE WHEN json_valid(payload)
+                   THEN json_extract(payload, '$.operatorReport.version')
+                 END = 1
+                 AND CASE WHEN json_valid(payload)
+                   THEN json_extract(payload, '$.operatorReport.reportType')
+                 END = 'status_ping'
+               )
+             )
              AND status IN ('pending', 'sending', 'submitted', 'maybe_sent')`,
       ),
       markSending: prepare(
@@ -1216,6 +1265,27 @@ export class DurabilityEngine {
 
   // ── Outbound ops ──
   createOutboundOp(params: OutboundOpParams): number {
+    if (params.opType === OPERATOR_REPORT_OP_TYPE) {
+      throw new Error(`${OPERATOR_REPORT_OP_TYPE} is reserved for sendTrackedOperatorReport`);
+    }
+    try {
+      const parsed = JSON.parse(params.payload) as unknown;
+      if (
+        parsed !== null &&
+        typeof parsed === 'object' &&
+        Object.hasOwn(parsed, 'operatorReport')
+      ) {
+        throw new Error('operatorReport metadata is reserved for sendTrackedOperatorReport');
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('operatorReport metadata is reserved')) {
+        throw err;
+      }
+    }
+    return this.insertOutboundOp(params);
+  }
+
+  private insertOutboundOp(params: OutboundOpParams): number {
     const hash = createHash('sha256').update(params.payload).digest('hex');
     // PR-C supersede-on-enqueue: collapse to one outstanding status ping per chat.
     if (params.opType === 'status_ping') {
@@ -1228,6 +1298,35 @@ export class DurabilityEngine {
     const id = Number(result.lastInsertRowid);
     log.debug({ id, opType: params.opType, replayPolicy: params.replayPolicy }, 'createOutboundOp');
     return id;
+  }
+
+  isOperatorReportTarget(chatJid: string): boolean {
+    return this.resolveOperatorReportTargets().has(chatJid);
+  }
+
+  createOperatorReportOp(params: OperatorReportOpParams): number {
+    if (!this.isOperatorReportTarget(params.chatJid)) {
+      throw new Error('operator report target is not a currently configured admin');
+    }
+    if (params.reportType === 'status_ping') {
+      this.statements.supersedeOutstandingStatus.run(params.chatJid);
+    }
+    return this.insertOutboundOp({
+      conversationKey: toConversationKey(params.chatJid),
+      chatJid: params.chatJid,
+      opType: OPERATOR_REPORT_OP_TYPE,
+      payload: JSON.stringify({
+        text: params.text,
+        operatorReport: {
+          version: OPERATOR_REPORT_VERSION,
+          target: params.chatJid,
+          reportType: params.reportType,
+        },
+      }),
+      replayPolicy: params.replayPolicy,
+      sourceInboundSeq: params.sourceInboundSeq,
+      isTerminal: params.isTerminal,
+    });
   }
 
   /**
@@ -1983,8 +2082,11 @@ export async function sendTracked(
   chatJid: string,
   text: string,
   durability: DurabilityEngine | undefined,
-  opts: { replayPolicy: 'safe' | 'unsafe' | 'read_only'; isTerminal?: boolean; sourceInboundSeq?: number; caller?: GuardCaller; opType?: 'text' | 'status_ping' },
+  opts: { replayPolicy: 'safe' | 'unsafe' | 'read_only'; isTerminal?: boolean; sourceInboundSeq?: number; caller?: GenericGuardCaller; opType?: 'text' | 'status_ping' },
 ): Promise<void> {
+  if ((opts as { caller?: GuardCaller }).caller === 'report-channel') {
+    throw new Error('report-channel requires sendTrackedOperatorReport');
+  }
   let opId: number | undefined;
   if (durability) {
     const conversationKey = toConversationKey(chatJid);
@@ -2018,6 +2120,49 @@ export async function sendTracked(
 }
 
 /**
+ * Send a privileged operator report. Authority comes from the current
+ * transport-aware admin target set, never from a caller string in generic
+ * durable payload data.
+ */
+export async function sendTrackedOperatorReport(
+  messenger: Messenger,
+  chatJid: string,
+  text: string,
+  durability: DurabilityEngine | undefined,
+  opts: {
+    replayPolicy: 'safe' | 'unsafe' | 'read_only';
+    isTerminal?: boolean;
+    sourceInboundSeq?: number;
+    opType?: OperatorReportType;
+  },
+): Promise<void> {
+  if (durability ? !durability.isOperatorReportTarget(chatJid) : !configuredOperatorReportTargets().has(chatJid)) {
+    throw new Error('operator report target is not a currently configured admin');
+  }
+  let opId: number | undefined;
+  if (durability) {
+    opId = durability.createOperatorReportOp({
+      chatJid,
+      text,
+      reportType: opts.opType ?? 'text',
+      replayPolicy: opts.replayPolicy,
+      sourceInboundSeq: opts.sourceInboundSeq,
+      isTerminal: opts.isTerminal,
+    });
+    durability.markSending(opId);
+  }
+  try {
+    const receipt = await messenger.sendMessage(chatJid, text, { caller: 'report-channel' });
+    if (opId !== undefined && durability) durability.markSubmitted(opId, receipt.waMessageId);
+  } catch (err) {
+    if (opId !== undefined && durability) {
+      durability.markMaybeSent(opId, (err as Error)?.message ?? 'send_failed');
+    }
+    throw err;
+  }
+}
+
+/**
  * Drain replay-safe pending text/status_ping ops; quarantine malformed ops and
  * isolate failures. Returns `{ resent, expired }`: `resent` = ops re-sent via
  * `markSubmitted`; `expired` = `status_ping` ops aged out past
@@ -2034,6 +2179,8 @@ export async function drainPendingOutbound(
   for (const op of pending) {
     try {
       let text: string | undefined;
+      let caller: 'report-channel' | undefined;
+      let effectiveOpType: 'text' | 'status_ping' | undefined;
       if (op.op_type === 'text' || op.op_type === 'status_ping') {
         try {
           const parsed = JSON.parse(op.payload) as unknown;
@@ -2042,7 +2189,37 @@ export async function drainPendingOutbound(
             typeof parsed === 'object' &&
             typeof (parsed as { text?: unknown }).text === 'string'
           ) {
-            text = (parsed as { text: string }).text;
+            const candidate = parsed as { text: string; caller?: unknown; operatorReport?: unknown };
+            if (!Object.hasOwn(candidate, 'caller') && !Object.hasOwn(candidate, 'operatorReport')) {
+              text = candidate.text;
+              effectiveOpType = op.op_type;
+            }
+          }
+        } catch {
+          text = undefined;
+        }
+      } else if (op.op_type === OPERATOR_REPORT_OP_TYPE) {
+        try {
+          const parsed = JSON.parse(op.payload) as {
+            text?: unknown;
+            operatorReport?: {
+              version?: unknown;
+              target?: unknown;
+              reportType?: unknown;
+            };
+          };
+          const report = parsed?.operatorReport;
+          if (
+            typeof parsed?.text === 'string' &&
+            report?.version === OPERATOR_REPORT_VERSION &&
+            typeof report.target === 'string' &&
+            report.target === op.chat_jid &&
+            (report.reportType === 'text' || report.reportType === 'status_ping') &&
+            durability.isOperatorReportTarget(op.chat_jid)
+          ) {
+            text = parsed.text;
+            caller = 'report-channel';
+            effectiveOpType = report.reportType;
           }
         } catch {
           text = undefined;
@@ -2067,7 +2244,7 @@ export async function drainPendingOutbound(
       }
 
       if (
-        op.op_type === 'status_ping' &&
+        effectiveOpType === 'status_ping' &&
         Date.parse(op.created_at + 'Z') < Date.now() - STATUS_OP_TTL_MS
       ) {
         // PR-C TTL age-out (status class only): a "back online" ping stranded in
@@ -2098,7 +2275,9 @@ export async function drainPendingOutbound(
         continue;
       }
       try {
-        const receipt = await messenger.sendMessage(op.chat_jid, text);
+        const receipt = caller
+          ? await messenger.sendMessage(op.chat_jid, text, { caller })
+          : await messenger.sendMessage(op.chat_jid, text);
         durability.markSubmitted(op.id, receipt.waMessageId);
         resent += 1;
         log.info(

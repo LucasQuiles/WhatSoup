@@ -11,7 +11,7 @@ import { createChildLogger } from '../../logger.ts';
 import type { TransportAdapter } from '../contract/adapter.ts';
 import type { InboundMessage as ContractInboundMessage } from '../contract/events.ts';
 import type { RuntimeConnection } from '../runtime-connection.ts';
-import type { IncomingMessage, OutboundMedia, SubmissionReceipt, TypingState } from '../../core/types.ts';
+import type { IncomingMessage, OutboundMedia, SendOptions, SubmissionReceipt, TypingState } from '../../core/types.ts';
 import { ContactsDirectory } from '../../core/mentions.ts';
 import { PresenceCache } from '../presence-cache.ts';
 import type { IdentityStore, GuardMode } from '../../core/outbound-identity/types.ts';
@@ -127,7 +127,7 @@ export class TwilioConnection extends EventEmitter implements RuntimeConnection 
   readonly presenceCache = new PresenceCache();
 
   private identityStore: IdentityStore | null = null;
-  private identityMode: GuardMode = 'log-only';
+  private identityMode: GuardMode = 'enforce';
 
   setIdentityStore(store: IdentityStore, mode: GuardMode): void {
     this.identityStore = store;
@@ -232,8 +232,12 @@ export class TwilioConnection extends EventEmitter implements RuntimeConnection 
    * Consumer: src/runtimes/chat/runtime.ts:424,447; src/core/ingest.ts (via Messenger)
    * Maps runtime chatJid + text to adapter ConversationRef + sendText.
    */
-  async sendMessage(chatJid: string, text: string): Promise<SubmissionReceipt> {
-    applyOutboundIdentityGuard(chatJid, { caller: 'agent', mode: this.identityMode }, this.identityStore);
+  async sendMessage(chatJid: string, text: string, opts?: SendOptions): Promise<SubmissionReceipt> {
+    applyOutboundIdentityGuard(
+      chatJid,
+      { caller: opts?.caller ?? 'agent', mode: this.identityMode },
+      this.identityStore,
+    );
     // Strip the synthetic @sms suffix — the adapter addresses raw E.164.
     const target = { channel: this.adapter.capabilities.channel, id: fromSmsJid(chatJid) };
     const ref = await this.adapter.sendText(target, text);

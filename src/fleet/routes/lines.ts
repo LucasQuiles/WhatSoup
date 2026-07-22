@@ -3,7 +3,9 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { jsonResponse, requireInstance } from '../../lib/http.ts';
 import { asRecord } from '../../lib/type-guards.ts';
+import { stripPlaintextProviderKeys } from '../../lib/config-plaintext-keys.ts';
 import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
+import { PROVIDER_API_KEY_SERVICES } from '../../lib/provider-key-service.ts';
 import { normalizeFallbackEntriesFromInstanceConfig } from '../../core/fallback-chain.ts';
 import { extractLocal } from '../../core/access-list.ts';
 import { bareNumber } from '../../core/jid-constants.ts';
@@ -13,6 +15,7 @@ import type { HealthPoller, InstanceStatus } from '../health-poller.ts';
 import type { FleetDbReader } from '../db-reader.ts';
 import { normalizeTimestamp, toIsoFromUnix } from '../time-utils.ts';
 import { hasExplicitAuthLossSignal } from '../auth-loss-signals.ts';
+import { isGroupConversationKey } from '../../core/conversation-key.ts';
 
 export interface LinesDeps {
   discovery: FleetDiscovery;
@@ -321,16 +324,22 @@ interface ChatCounts {
 
 const chatCountsCache = new Map<string, { data: Observation<ChatCounts>; cachedAt: number }>();
 
+export function countConversationKeys(keys: readonly string[]): ChatCounts {
+  let groups = 0;
+  for (const key of keys) {
+    if (isGroupConversationKey(key)) groups += 1;
+  }
+  return { chats: keys.length - groups, groups };
+}
+
 function getChatCounts(dbReader: FleetDbReader, inst: DiscoveredInstance): Observation<ChatCounts> {
   return cachedQuery(chatCountsCache, inst.name, DAILY_CACHE_TTL, () => {
     const result = dbReader.query(inst.name, inst.dbPath, (db) => {
-      const row = db.prepare(`
-        SELECT
-          COUNT(DISTINCT conversation_key) as total,
-          COUNT(DISTINCT CASE WHEN conversation_key LIKE '%@g.us' OR conversation_key LIKE '%_at_g.us' THEN conversation_key END) as groups
+      const rows = db.prepare(`
+        SELECT DISTINCT conversation_key
         FROM messages WHERE deleted_at IS NULL
-      `).get() as { total: number; groups: number } | undefined;
-      return { chats: (row?.total ?? 0) - (row?.groups ?? 0), groups: row?.groups ?? 0 };
+      `).all() as Array<{ conversation_key: string }>;
+      return countConversationKeys(rows.map((row) => row.conversation_key));
     });
     if (!result.ok) return { status: 'unavailable', value: null };
     return { status: 'available', value: result.data };
@@ -499,6 +508,7 @@ export function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | 
     accessMode: inst.accessMode,
     healthPort: inst.healthPort,
     socketPath: inst.socketPath,
+    transport: inst.transport ?? 'baileys',
 
     // Poller status
     status: isConfigError ? 'config_error' : (poll?.status ?? 'unknown'),
@@ -598,7 +608,8 @@ export async function handleGetLine(
   let instanceConfig: Record<string, unknown> = {};
   try {
     const raw = await fs.promises.readFile(instance.configPath, 'utf-8');
-    instanceConfig = JSON.parse(raw);
+    const parsed = asRecord(JSON.parse(raw));
+    if (parsed) instanceConfig = stripPlaintextProviderKeys(parsed, params.name).clean;
   } catch { /* config unreadable */ }
 
   // Compute real messagesToday for detail view (derived from stats)
@@ -668,6 +679,22 @@ function apiProviderConfigModel(
   if (provider !== 'openai-api' && provider !== 'anthropic-api') return undefined;
   const model = providerConfig?.['model'];
   return typeof model === 'string' && model.trim() !== '' ? model : undefined;
+}
+
+function providerStatusModel(
+  provider: string | null | undefined,
+  model: string | null | undefined,
+  providerConfig?: Record<string, unknown>,
+): string | null {
+  if (typeof model !== 'string' || model.trim() === '') return null;
+  if (provider !== 'opencode-cli') return model;
+
+  const configuredService = stringValue(providerConfig?.apiKeyService);
+  const hasMappedOverride =
+    configuredService !== null && PROVIDER_API_KEY_SERVICES.has(configuredService);
+  return hasMappedOverride || resolveProviderKeyService(provider, model, providerConfig) !== null
+    ? model
+    : null;
 }
 
 function lineReachableFromPoll(poll: InstanceStatus | undefined): boolean {
@@ -746,7 +773,10 @@ export async function handleGetLineProviderStatus(
     const raw = await fs.promises.readFile(instance.configPath, 'utf-8');
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      parsedConfig = parsed as Record<string, unknown>;
+      parsedConfig = stripPlaintextProviderKeys(
+        parsed as Record<string, unknown>,
+        params.name,
+      ).clean;
       agentOptions = asRecord(parsedConfig.agentOptions) ?? {};
     }
   } catch { /* config unreadable — treat as empty (provider defaults to runtime default) */ }
@@ -754,14 +784,15 @@ export async function handleGetLineProviderStatus(
   const primaryProvider =
     stringValue(agentOptions.provider) ?? (instance.type === 'agent' ? 'claude-cli' : null);
   const providerConfig = asRecord(agentOptions.providerConfig);
-  const primaryModel =
+  const primaryModelRaw =
     resolveAgentModel(parsedConfig) ??
     apiProviderConfigModel(primaryProvider, providerConfig) ??
     stringValue(agentOptions.model);
+  const primaryModel = providerStatusModel(primaryProvider, primaryModelRaw, providerConfig);
   const fallbackEntries = normalizeFallbackEntriesFromInstanceConfig(parsedConfig);
   const configuredFallback = fallbackEntries[0] ?? null;
   const fallbackProvider = configuredFallback?.provider ?? null;
-  const fallbackModel = configuredFallback?.model ?? null;
+  const fallbackModelRaw = configuredFallback?.model ?? null;
   // Mirror the runtime inheritance rule (fallbackProviderConfigFor,
   // src/runtimes/agent/fallback-config.ts): a fallback entry shares the
   // instance providerConfig when it is the SAME provider OR a managed-API
@@ -772,6 +803,11 @@ export async function handleGetLineProviderStatus(
       fallbackProvider === 'openai-api' ||
       fallbackProvider === 'anthropic-api');
   const fallbackProviderConfig = fallbackInherits ? providerConfig : undefined;
+  const fallbackModel = providerStatusModel(
+    fallbackProvider,
+    fallbackModelRaw,
+    fallbackProviderConfig,
+  );
 
   // Fallback window state from the instance health snapshot (surface C emits
   // instance.fallbackActiveUntil as epoch ms or null).
@@ -813,10 +849,9 @@ export async function handleGetLineProviderStatus(
   // has them STRIPPED as a fallback — runtime.ts sessionProviderConfig()).
   // A CLI primary with an orphaned providerConfig therefore reports null here
   // even though the raw config carries values.
-  // This route reads raw disk JSON with no validator pass (hand-edited,
-  // pre-validator, or authOnly-bootstrapped configs reach here), so a
-  // malformed baseUrl is possible: URL parse failure and no-authority schemes
-  // both normalize to null rather than throwing or emitting ''.
+  // This route reads raw disk JSON with no validator pass, so the shared
+  // sanitizer removes unsafe endpoint and selector values before this seam.
+  // URL parsing still fails closed to null if a malformed value reaches it.
   const endpointFieldsFor = (
     provider: string | null,
     model: string | null,
@@ -842,9 +877,12 @@ export async function handleGetLineProviderStatus(
     // an explicit override set on an opencode instance, the generated
     // opencode.json honors the override while the resolver — and therefore
     // keyPresent and this field — reports the derived service.)
+    const configuredService = config ? stringValue(config.apiKeyService) : null;
     const apiKeyService = provider === 'opencode-cli'
       ? resolveProviderKeyService(provider, model, config)
-      : config ? stringValue(config.apiKeyService) ?? null : null;
+      : configuredService !== null && PROVIDER_API_KEY_SERVICES.has(configuredService)
+        ? configuredService
+        : null;
     return { endpointHost: host, apiKeyService };
   };
   const primaryEndpoint = endpointFieldsFor(

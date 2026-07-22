@@ -18,6 +18,7 @@ import type { TwilioSmsConfig } from './transport/twilio/types.ts';
 import type { ImessageConfig } from './transport/imessage/types.ts';
 import type { SignalConfig } from './transport/signal/types.ts';
 import { errorMessage } from './lib/error-message.ts';
+import { stripPlaintextProviderKeys } from './lib/config-plaintext-keys.ts';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -170,13 +171,21 @@ export function loadInstance(name: string, opts?: { authOnly?: boolean }): void 
   // 4. Validate
   validateInstance(parsed, name, opts?.authOnly);
 
+  // Only the canonicalized object may cross the process-environment boundary.
+  // Validation rejects credential-shaped fields first; this second seam keeps
+  // legacy or manually edited files from bypassing persistence sanitization.
+  const sanitized = stripPlaintextProviderKeys(parsed, name);
+  if (sanitized.removed.length > 0) {
+    throw new Error('Instance config contains unsupported or unsafe credential configuration');
+  }
+
   // 5. Resolve paths
   const paths = instancePaths(name);
   pinProcessTmpDir(paths);
 
   // 6. Build config — cast through unknown since validateInstance already
   // verified the required fields; TS cannot narrow from Record<string,unknown>
-  const config = { ...parsed, paths } as InstanceConfig;
+  const config = { ...sanitized.clean, paths } as unknown as InstanceConfig;
 
   // 7. Set env var
   process.env.INSTANCE_CONFIG = JSON.stringify(config);

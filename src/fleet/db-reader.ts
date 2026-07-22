@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createChildLogger } from '../logger.ts';
+import { isGroupConversationKey } from '../core/conversation-key.ts';
 
 const log = createChildLogger('fleet:db-reader');
 
@@ -233,8 +234,7 @@ export class FleetDbReader {
           m.conversation_key,
           m.sender_name,
           COUNT(*) as message_count,
-          MAX(m.timestamp) as last_message_at,
-          CASE WHEN m.conversation_key LIKE '%_at_g.us' OR m.conversation_key LIKE '%@g.us' THEN 1 ELSE 0 END as is_group
+          MAX(m.timestamp) as last_message_at
         FROM messages m
         WHERE m.deleted_at IS NULL
           AND length(m.conversation_key) >= 5
@@ -248,7 +248,7 @@ export class FleetDbReader {
         senderName: r.sender_name,
         messageCount: r.message_count,
         lastMessageAt: r.last_message_at,
-        isGroup: !!r.is_group,
+        isGroup: isGroupConversationKey(r.conversation_key),
         lastMessagePreview: null,
         lastMessageSender: null,
       }));

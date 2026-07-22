@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
+  conversationRefToJid,
+  conversationRefToKey,
   conversationKeyToJid,
   isGroupConversationKey,
   toConversationKey,
@@ -27,6 +29,14 @@ describe('toConversationKey', () => {
     expect(toConversationKey('unknown@broadcast')).toBe('unknown_at_broadcast');
   });
 
+  it('preserves the deployed AppleID conversation-key encoding', () => {
+    expect(toConversationKey('owner@example.test@imessage')).toBe('owner_at_example.test@imessage');
+  });
+
+  it('canonicalizes a mixed-case AppleID before storing its deployed key', () => {
+    expect(toConversationKey('Owner@Example.Test@imessage')).toBe('owner_at_example.test@imessage');
+  });
+
   it('throws on empty string', () => {
     expect(() => toConversationKey('')).toThrow();
   });
@@ -44,11 +54,18 @@ describe('isGroupConversationKey', () => {
   it('detects normalized and raw group conversation keys', () => {
     expect(isGroupConversationKey('group-alpha_at_g.us')).toBe(true);
     expect(isGroupConversationKey('group-alpha@g.us')).toBe(true);
+    expect(isGroupConversationKey('Z3JvdXAtY29udmVyc2F0aW9u_at_signal')).toBe(true);
+    expect(isGroupConversationKey('Z3JvdXAtY29udmVyc2F0aW9u@signal')).toBe(true);
+    expect(isGroupConversationKey('iMessage;+;chatABC_at_imessage')).toBe(true);
+    expect(isGroupConversationKey('iMessage;+;chatABC@imessage')).toBe(true);
   });
 
   it('does not classify personal or non-group keys as groups', () => {
     expect(isGroupConversationKey('15550100001')).toBe(false);
     expect(isGroupConversationKey('broadcast_at_broadcast')).toBe(false);
+    expect(isGroupConversationKey('+15551230008_at_signal')).toBe(false);
+    expect(isGroupConversationKey('owner@example.test_at_imessage')).toBe(false);
+    expect(isGroupConversationKey('owner_at_ops@example.test@imessage')).toBe(false);
   });
 });
 
@@ -57,9 +74,44 @@ describe('conversationKeyToJid', () => {
     expect(conversationKeyToJid('group-alpha_at_g.us')).toBe('group-alpha@g.us');
   });
 
-  it('leaves non-group keys unchanged', () => {
+  it('leaves bare personal keys unchanged and restores encoded foreign domains', () => {
     expect(conversationKeyToJid('15550100001')).toBe('15550100001');
-    expect(conversationKeyToJid('broadcast_at_broadcast')).toBe('broadcast_at_broadcast');
+    expect(conversationKeyToJid('broadcast_at_broadcast')).toBe('broadcast@broadcast');
+  });
+
+  it.each([
+    ['+15551230008_at_signal', '+15551230008@signal'],
+    ['Z3JvdXAtY29udmVyc2F0aW9u_at_signal', 'Z3JvdXAtY29udmVyc2F0aW9u@signal'],
+    ['iMessage;+;chatABC_at_imessage', 'iMessage;+;chatABC@imessage'],
+    ['owner@example.test_at_imessage', 'owner@example.test@imessage'],
+    ['owner_at_example.test@imessage', 'owner@example.test@imessage'],
+  ])('restores a transport-neutral conversation key %s', (key, jid) => {
+    expect(conversationKeyToJid(key)).toBe(jid);
+  });
+
+  it('round-trips an AppleID iMessage JID containing two at-signs', () => {
+    const jid = 'owner@example.test@imessage';
+    expect(conversationKeyToJid(toConversationKey(jid))).toBe(jid);
+  });
+});
+
+describe('transport-neutral conversation references', () => {
+  it('does not mistake the deployed AppleID key containing @ for a raw JID', () => {
+    const key = 'owner_at_example.test@imessage';
+    expect(conversationRefToJid(key)).toBe('owner@example.test@imessage');
+    expect(conversationRefToKey(key)).toBe(key);
+  });
+
+  it('normalizes raw and alternate AppleID references to the deployed key', () => {
+    expect(conversationRefToKey('owner@example.test@imessage')).toBe('owner_at_example.test@imessage');
+    expect(conversationRefToKey('owner@example.test_at_imessage')).toBe('owner_at_example.test@imessage');
+    expect(conversationRefToJid('owner_at_example.test@imessage')).toBe('owner@example.test@imessage');
+  });
+
+  it('preserves a raw AppleID local containing the literal _at_ sequence', () => {
+    const jid = 'owner_at_ops@example.test@imessage';
+    expect(conversationRefToJid(jid)).toBe(jid);
+    expect(conversationRefToKey(jid)).toBe('owner_at_ops_at_example.test@imessage');
   });
 });
 
@@ -74,16 +126,12 @@ describe('conversationKeyToJid', () => {
 // "harness" is the same direct import the existing tests above already use.
 
 describe('residual-branch coverage', () => {
-  // ── Branch 0 — `isGroupConversationKey` (line 4) `binary-expr` (`||`) ─────
-  describe('isGroupConversationKey — both arms of the `||`', () => {
-    it('returns true via the LEFT arm when the normalized `_at_g.us` form is present', () => {
-      // Branch 0 left:  key.includes('_at_g.us') === true  →  short-circuits, right arm NOT evaluated.
+  describe('isGroupConversationKey — raw and encoded forms', () => {
+    it('returns true for the normalized `_at_g.us` form', () => {
       expect(isGroupConversationKey('120363024555550100_at_g.us')).toBe(true);
     });
 
-    it('returns true via the RIGHT arm when only the raw `@g.us` JID form is present', () => {
-      // Branch 0 right: key.includes('_at_g.us') === false  →  evaluates right side
-      //                key.includes('@g.us') === true  →  return true.
+    it('returns true for the raw `@g.us` JID form', () => {
       expect(isGroupConversationKey('group-bravo@g.us')).toBe(true);
     });
   });
@@ -176,10 +224,8 @@ describe('residual-branch coverage', () => {
       expect(conversationKeyToJid('15550100001')).toBe('15550100001');
     });
 
-    it('conversationKeyToJid replaces only the FIRST occurrence of `_at_g.us`', () => {
-      // String#replace with a string pattern replaces only the first match —
-      // verify the function behaves as a single-shot rewrite, not a global one.
-      expect(conversationKeyToJid('foo_at_g.us_at_g.us')).toBe('foo@g.us_at_g.us');
+    it('conversationKeyToJid treats the final `_at_` as the transport-domain separator', () => {
+      expect(conversationKeyToJid('foo_at_g.us_at_g.us')).toBe('foo_at_g.us@g.us');
     });
   });
 

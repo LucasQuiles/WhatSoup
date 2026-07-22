@@ -103,6 +103,33 @@ describe('migrateLegacyMemoryConfig', () => {
     });
     expect(result.config).not.toHaveProperty('pineconeNamespaces');
   });
+
+  it('preserves dots in dynamic legacy namespace keys', () => {
+    const result = migrateLegacyMemoryConfig({
+      pineconeNamespaces: {
+        'docs.v1': 'docs-v1-namespace',
+      },
+    }, { removeLegacy: true });
+
+    expect((result.config.memory as any).pinecone.namespaces).toEqual({
+      'docs.v1': 'docs-v1-namespace',
+    });
+    expect(result.config).not.toHaveProperty('pineconeNamespaces');
+  });
+
+  it('preserves an own __proto__ legacy namespace without changing the local prototype', () => {
+    const input = JSON.parse(
+      '{"pineconeNamespaces":{"__proto__":{"description":"safe namespace metadata"}}}',
+    );
+    const result = migrateLegacyMemoryConfig(input, { removeLegacy: true });
+    const namespaces = (result.config.memory as any).pinecone.namespaces;
+
+    expect(Object.hasOwn(namespaces, '__proto__')).toBe(true);
+    expect(namespaces['__proto__']).toEqual({ description: 'safe namespace metadata' });
+    expect((namespaces as Record<string, unknown>).description).toBeUndefined();
+    expect(Object.getPrototypeOf(namespaces)).toBe(Object.prototype);
+    expect(JSON.stringify(result.config)).toContain('"__proto__"');
+  });
 });
 
 describe('config-memory-migration.ts uncovered-branch coverage', () => {

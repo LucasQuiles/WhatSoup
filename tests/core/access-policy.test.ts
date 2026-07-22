@@ -7,7 +7,7 @@ import { shouldRespond } from '../../src/core/access-policy.ts';
 import { resolveLid, hydrateLidMappings, upsertLidMapping } from '../../src/core/lid-resolver.ts';
 import { extractLocal } from '../../src/core/access-list.ts';
 import type { IncomingMessage } from '../../src/core/types.ts';
-import { config } from '../../src/config.ts';
+import { config, type AccessMode } from '../../src/config.ts';
 
 // ---------------------------------------------------------------------------
 // Test constants
@@ -22,6 +22,7 @@ const ALLOWED_ADMIN = '15550100001';
 const ALLOWED_USER = '15551230008';
 const BLOCKED_USER = '19999999999';
 const PENDING_USER = '18888888888';
+const TRANSPORT_BOUND_USER = '+15551239999';
 const UNKNOWN_USER = '17777777777';
 const MENTION_TEST_GROUP = '12223334444-group@g.us';  // no access_list entry — mention-gated
 const AUTO_RESPOND_GROUP = '44445556666-group@g.us';  // status=allowed → auto-respond
@@ -61,6 +62,11 @@ beforeAll(() => {
     `INSERT OR IGNORE INTO access_list (subject_type, subject_id, status, display_name, requested_at)
      VALUES ('phone', ?, 'pending', 'PendingUser', datetime('now'))`
   ).run(PENDING_USER);
+
+  db.raw.prepare(
+    `INSERT OR IGNORE INTO access_list (subject_type, subject_id, status, display_name, requested_at)
+     VALUES ('phone', ?, 'allowed', 'TransportBoundUser', datetime('now'))`
+  ).run(TRANSPORT_BOUND_USER);
 
   // Seed an auto-respond group (status=allowed → group_auto_respond fires for all messages)
   db.raw.prepare(
@@ -270,6 +276,91 @@ describe('DM access control', () => {
     expect(result.respond).toBe(true);
     expect(result.reason).toBe('dm_allowed');
     expect(result.accessStatus).toBe('allowed');
+  });
+});
+
+describe('transport-bound positive access grants', () => {
+  const originalTransport = config.transport;
+  const originalAccessMode = config.accessMode;
+  const originalGroupSenderPolicy = config.groupSenderPolicy;
+
+  afterEach(() => {
+    (config as unknown as { transport: string }).transport = originalTransport;
+    (config as unknown as { accessMode: AccessMode }).accessMode = originalAccessMode;
+    (config as unknown as { groupSenderPolicy: string }).groupSenderPolicy = originalGroupSenderPolicy;
+  });
+
+  it('allows an allowlisted direct identity only on the configured namespace', () => {
+    (config as unknown as { transport: string }).transport = 'imessage';
+    const direct = (senderJid: string) => shouldRespond(makeMsg({
+      chatJid: senderJid,
+      senderJid,
+      isGroup: false,
+    }), BOT_JID, BOT_LID, db);
+
+    expect(direct(`${TRANSPORT_BOUND_USER}@imessage`)).toMatchObject({
+      respond: true,
+      reason: 'dm_allowed',
+    });
+    expect(direct(`${TRANSPORT_BOUND_USER}@signal`)).toMatchObject({
+      respond: false,
+      reason: 'transport_mismatch',
+      accessStatus: 'blocked',
+    });
+  });
+
+  it('allows Twilio allowlist grants on canonical SMS JIDs', () => {
+    (config as unknown as { transport: string }).transport = 'twilio';
+    const result = shouldRespond(makeMsg({
+      chatJid: `+${ALLOWED_USER}@sms`,
+      senderJid: `+${ALLOWED_USER}@sms`,
+      isGroup: false,
+    }), BOT_JID, BOT_LID, db);
+
+    expect(result).toMatchObject({ respond: true, reason: 'dm_allowed' });
+  });
+
+  it('rejects a foreign namespace before open_dm can grant access', () => {
+    (config as unknown as { transport: string }).transport = 'signal';
+    (config as unknown as { accessMode: AccessMode }).accessMode = 'open_dm';
+    const result = shouldRespond(makeMsg({
+      chatJid: `${TRANSPORT_BOUND_USER}@imessage`,
+      senderJid: `${TRANSPORT_BOUND_USER}@imessage`,
+      isGroup: false,
+    }), BOT_JID, BOT_LID, db);
+
+    expect(result).toMatchObject({
+      respond: false,
+      reason: 'transport_mismatch',
+      accessStatus: 'blocked',
+    });
+  });
+
+  it('rejects a foreign namespace in strict allowed groups', () => {
+    (config as unknown as { transport: string }).transport = 'imessage';
+    (config as unknown as { groupSenderPolicy: string }).groupSenderPolicy = 'allowlisted_only';
+    const result = shouldRespond(makeMsg({
+      chatJid: AUTO_RESPOND_GROUP,
+      senderJid: `${TRANSPORT_BOUND_USER}@signal`,
+      isGroup: true,
+    }), BOT_JID, BOT_LID, db);
+
+    expect(result).toMatchObject({
+      respond: false,
+      reason: 'transport_mismatch',
+      accessStatus: 'blocked',
+    });
+  });
+
+  it('keeps blocklist denial transport-agnostic', () => {
+    (config as unknown as { transport: string }).transport = 'imessage';
+    const result = shouldRespond(makeMsg({
+      chatJid: `${BLOCKED_USER}@signal`,
+      senderJid: `${BLOCKED_USER}@signal`,
+      isGroup: false,
+    }), BOT_JID, BOT_LID, db);
+
+    expect(result).toMatchObject({ respond: false, reason: 'blocked', accessStatus: 'blocked' });
   });
 });
 

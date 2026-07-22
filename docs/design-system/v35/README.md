@@ -1,11 +1,13 @@
 # SOUP Design System v3.5 — Program Skeleton
 
-**Status:** T0 complete; **G0 approved**; all three interview rounds locked (41 decisions,
-`04-decision-register.md`). **T1 in progress**: WS2.6 instance-model investigation → product
-model + vocabulary lock, WS1 research digest. T3 is wall-to-wall (R3-16): 10 mockup tracks.
+**Status:** merged PR #2009 landed the T0/T1 seed plus T3 mockups and draft T4/WS5/WS6
+artifacts; **G0 approved**; all three interview rounds locked (41 decisions,
+`04-decision-register.md`). Those artifacts do not by themselves prove every later gate complete.
+PR #2027 is the live T5 cutover-plan successor as of 2026-07-22.
 **Mandate date:** 2026-07-21 (owner: Lucas).
-**Home:** branch `design/soup-v35` on `LucasQuiles/WhatSoup`, path
-`docs/design-system/v35/` (A1).
+**Home:** live `main` in `LucasQuiles/WhatSoup`, path `docs/design-system/v35/` (A1).
+The historical `design/soup-v35` branch is no longer present on origin; do not treat its old
+worktree plan as live inventory.
 **Relationship to v3:** v3 implementation program is **benched** (not cancelled). Landed v3 work
 (tokens, primitives, themes, conformance PASS rows) is the v3.5 starting inventory. v3's locked
 direction is reopened by owner decision; v3 spec docs remain reference, not authority.
@@ -15,7 +17,7 @@ direction is reopened by owner decision; v3 spec docs remain reference, not auth
 | # | Decision |
 |---|---|
 | D1 | Bench v3 implementation; design v3.5 fresh now. Reusable v3 assets absorbed per gap-audit disposition. |
-| D2 | UI/UX focus only. No new runtime channel backends (Signal/iMessage/social transports are future platform work). |
+| D2 | UI/UX focus only. The program adds no runtime backends. Baileys/WhatsApp, Twilio/SMS, Signal, and iMessage already have runtime/config seams; the other ten registry channels remain designed futures. |
 | D3 | Scope = operator console **and** public landing/marketing surface. |
 | D4 | "Socials" = managed social channels (X, IG DMs, etc.) as first-class **Lines** with **assigned agents**. |
 | D5 | First-run onboarding is a designed journey incl. a **hatching ceremony** (research: OpenClaw hatch ritual + Hermes Pets animation model — see `research-hatching.md`). |
@@ -24,7 +26,8 @@ direction is reopened by owner decision; v3 spec docs remain reference, not auth
 ## v3.5 scope statement
 
 Elevate SOUP from a WhatsApp console with a strong design system into a **multi-channel fleet
-product**: channel-agnostic Lines (WhatsApp today; Signal, iMessage, X, IG as designed futures),
+product**: channel-agnostic Lines (WhatsApp, SMS, Signal, and iMessage today; X, IG, and the
+other registry channels as designed futures),
 first-class **Agents** assigned to Lines, a guided first-run **Hatch** journey, a marketing-grade
 landing surface, and a measured real-time performance budget — all on the v3 industrial-polish
 creative bar: clean, calm, soothing-subtle, dense-operator when needed.
@@ -34,7 +37,7 @@ creative bar: clean, calm, soothing-subtle, dense-operator when needed.
 | Phase | Name | Content | Exit |
 |---|---|---|---|
 | T0 | Seed | This package: landscape inventory, gap audit, mapping, subtasks | ✅ done |
-| **G0** | Kickoff | Owner approves skeleton, picks first direction batch | pending |
+| **G0** | Kickoff | Owner approves skeleton, picks first direction batch | ✅ approved |
 | T1 | Product model | Channel / Line / Agent / Assignment entities + vocabulary lock | model spec |
 | T2 | Research digest | Hatching (done → fold in), onboarding journey references, multi-channel console references | digest |
 | T3 | Directions | 2–3 visual directions for: Fleet (multi-channel), Hatch flow, Agents surface, Landing | mockups |

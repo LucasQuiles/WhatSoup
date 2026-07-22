@@ -204,6 +204,54 @@ describe('loadInstance — optional fields preserved', () => {
     expect(config.gui).toBe(true);
     expect(config.guiPort).toBe(8080);
   });
+
+  it('preserves legacy Pinecone maps whose operator-defined key contains secret', () => {
+    const legacyChat = {
+      ...minimalChat,
+      pineconeNamespaces: {
+        secretary: 'secretary-namespace',
+      },
+      pineconeKnowledgeProfiles: {
+        secretary: {
+          namespace: 'secretary-namespace',
+          description: 'safe profile',
+        },
+      },
+    };
+    writeInstance(path.join(tmpDir, 'config'), 'test-chat', legacyChat);
+
+    loadInstance('test-chat');
+
+    const config = JSON.parse(process.env.INSTANCE_CONFIG!);
+    expect(config.pineconeNamespaces.secretary).toBe('secretary-namespace');
+    expect(config.pineconeKnowledgeProfiles.secretary).toEqual({
+      namespace: 'secretary-namespace',
+      description: 'safe profile',
+    });
+  });
+
+  it.each([
+    {
+      memory: { pinecone: { apiKeyEnv: 'opaque-api-key-value-secret-sentinel' } },
+    },
+    {
+      memory: {
+        pinecone: {
+          embedUrl: 'https://embed.example.test/v1?api_key=query-secret-sentinel',
+        },
+      },
+    },
+  ])('rejects unsafe Pinecone credential selectors and endpoints on direct load', (unsafeMemory) => {
+    writeInstance(path.join(tmpDir, 'config'), 'test-chat', {
+      ...minimalChat,
+      ...unsafeMemory,
+    });
+
+    expect(() => loadInstance('test-chat')).toThrow(
+      'must not contain plaintext provider credentials',
+    );
+    expect(process.env.INSTANCE_CONFIG).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -548,6 +596,31 @@ describe('loadInstance — agentOptions: providerConfig validation', () => {
     expect(() => loadInstance('bad-provider-budget-agent')).toThrow(
       /agentOptions\.providerConfig\.budget.*object/,
     );
+  });
+
+  it.each([
+    ['top-level provider key', { openaiKeyBackup: 'provider-secret-sentinel' }, false],
+    ['Twilio auth token', { twilioConfig: { authToken: 'transport-secret-sentinel' } }, false],
+    [
+      'auth-only nested authorization header',
+      {
+        agentOptions: {
+          sessionScope: 'single',
+          providerConfig: { headers: { Authorization: 'header-secret-sentinel' } },
+        },
+      },
+      true,
+    ],
+  ])('rejects %s before publishing INSTANCE_CONFIG', (_label, overrides, authOnly) => {
+    const name = 'plaintext-secret-agent';
+    writeInstance(path.join(tmpDir, 'config'), name, {
+      ...minimalAgent,
+      name,
+      ...overrides,
+    });
+
+    expect(() => loadInstance(name, { authOnly })).toThrow(/plaintext provider credentials/i);
+    expect(process.env).not.toHaveProperty('INSTANCE_CONFIG');
   });
 });
 

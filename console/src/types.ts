@@ -28,6 +28,7 @@ export interface MetricAvailabilityMap {
 export interface LineInstance {
   name: string;
   phone: string;
+  transport?: string;
   mode: Mode;
   provider?: string;
   status: Status;
@@ -456,4 +457,3 @@ export interface ApprovalsPayload {
    *  never a fake-empty queue (fail-closed, PDR-3). */
   readError?: boolean;
 }
-

@@ -109,6 +109,7 @@ vi.mock('../../src/lib/emit-alert.ts', () => ({
 
 import { makeWASocket, useMultiFileAuthState } from '@whiskeysockets/baileys';
 import { ConnectionManager } from '../../src/transport/connection.ts';
+import { withWarmIdentity } from '../helpers/outbound-identity.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -245,7 +246,7 @@ describe('ConnectionManager — backoff sequence', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     // Simulate first close (connectionClosed = 428)
@@ -274,7 +275,7 @@ describe('ConnectionManager — backoff sequence', () => {
       return s.mockSock as any;
     });
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect(); // attempt 1
 
     // Fail attempt 1 → schedules reconnect in 1s (attempt index 1)
@@ -310,7 +311,7 @@ describe('ConnectionManager — backoff sequence', () => {
       return s.mockSock as any;
     });
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     // Drive through 7 failures (1s, 2s, 4s, 8s, 16s, 32s, 64s→capped at 60s)
@@ -341,7 +342,7 @@ describe('ConnectionManager — phase transitions', () => {
       return s.mockSock as any;
     });
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect(); // attempt 1
 
     // Burn through 10 attempts.
@@ -374,7 +375,7 @@ describe('ConnectionManager — phase transitions', () => {
       return s.mockSock as any;
     });
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     // Burn through 10 backoff phases to trigger cooldown
@@ -406,7 +407,7 @@ describe('ConnectionManager — phase transitions', () => {
       return s.mockSock as any;
     });
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     // Cause 3 failures to increment the counter
@@ -441,7 +442,7 @@ describe('ConnectionManager — phase transitions', () => {
       return s.mockSock as any;
     });
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
     sockets[0]!.emit(openEvent());
 
@@ -479,7 +480,7 @@ describe('ConnectionManager — phase transitions', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
     expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(1);
 
@@ -513,7 +514,7 @@ describe('ConnectionManager — phase transitions', () => {
       return s.mockSock as any;
     });
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     const backoffs = [1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000, 60_000];
@@ -552,7 +553,7 @@ describe('ConnectionManager — terminal conditions', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
     expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(1);
 
@@ -583,7 +584,7 @@ describe('ConnectionManager — terminal conditions', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     emit(loggedOutStreamErrorEvent('replaced'));
@@ -623,7 +624,7 @@ describe('ConnectionManager — terminal conditions', () => {
       return s.mockSock as any;
     });
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect(); // socket 0
 
     // First ambiguous 401 → exactly one bounded reconnect.
@@ -663,7 +664,7 @@ describe('ConnectionManager — terminal conditions', () => {
       return s.mockSock as any;
     });
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect(); // socket 0
 
     // First ambiguous 401 → one reconnect.
@@ -694,7 +695,7 @@ describe('ConnectionManager — terminal conditions', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     emit(loggedOutStreamErrorEvent('device_removed', {
@@ -752,7 +753,7 @@ describe('ConnectionManager — terminal conditions', () => {
     vi.setSystemTime(new Date('2026-05-10T09:20:00.000Z'));
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     const file = { path: '/x', exists: true, mode: '0600', size: 1, mtime: 't', sha256: 'abcd' };
@@ -799,7 +800,7 @@ describe('ConnectionManager — terminal conditions', () => {
     });
     emitAlertMock.mockImplementationOnce(() => { throw new Error('outbox unavailable'); });
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     sockets[0]!.emit(closeEvent(401));
@@ -820,7 +821,7 @@ describe('ConnectionManager — terminal conditions', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     emit(closeEvent(440));
@@ -843,7 +844,7 @@ describe('ConnectionManager — terminal conditions', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     emit(closeEvent(411));
@@ -867,7 +868,7 @@ describe('ConnectionManager — terminal conditions', () => {
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
     emitAlertMock.mockImplementationOnce(() => { throw new Error('outbox unavailable'); });
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     emit({ 'connection.update': { qr: 'pair-me' } });
@@ -893,7 +894,7 @@ describe('ConnectionManager — terminal conditions', () => {
       return s.mockSock as any;
     });
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     manager.on('exhausted', exhaustedSpy);
     await manager.connect();
 
@@ -930,7 +931,7 @@ describe('ConnectionManager — terminal conditions', () => {
       return s.mockSock as any;
     });
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     manager.on('exhausted', exhaustedSpy);
     await manager.connect();
 
@@ -957,7 +958,7 @@ describe('ConnectionManager — terminal conditions', () => {
       return s.mockSock as any;
     });
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     // Burn through all 10 backoff attempts to enter cooldown
@@ -996,7 +997,7 @@ describe('ConnectionManager — terminal conditions', () => {
       return s.mockSock as any;
     });
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     sockets[0]!.emit(closeEvent(428));
@@ -1025,7 +1026,7 @@ describe('ConnectionManager — botLid cleared on disconnect', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     // Simulate connection open to set botJid and botLid
@@ -1051,7 +1052,7 @@ describe('ConnectionManager — new event handlers', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     const contactsUpsertSpy = vi.fn();
     manager.on('contactsUpsert', contactsUpsertSpy);
     await manager.connect();
@@ -1068,7 +1069,7 @@ describe('ConnectionManager — new event handlers', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     const contactsUpdateSpy = vi.fn();
     manager.on('contactsUpdate', contactsUpdateSpy);
     await manager.connect();
@@ -1085,7 +1086,7 @@ describe('ConnectionManager — new event handlers', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     const messageEditedSpy = vi.fn();
     manager.on('messageEdited', messageEditedSpy);
     await manager.connect();
@@ -1113,7 +1114,7 @@ describe('ConnectionManager — new event handlers', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     const messageDeletedSpy = vi.fn();
     manager.on('messageDeleted', messageDeletedSpy);
     await manager.connect();
@@ -1135,7 +1136,7 @@ describe('ConnectionManager — new event handlers', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     const presenceUpdateSpy = vi.fn();
     manager.on('presenceUpdate', presenceUpdateSpy);
     await manager.connect();
@@ -1172,7 +1173,7 @@ describe('ConnectionManager — new event handlers', () => {
     (mockSock as any).rejectCall = rejectCallSpy;
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     manager.autoRejectCalls = true;
     const callReceivedSpy = vi.fn();
     manager.on('callReceived', callReceivedSpy);
@@ -1195,7 +1196,7 @@ describe('ConnectionManager — new event handlers', () => {
     (mockSock as any).rejectCall = rejectCallSpy;
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     manager.autoRejectCalls = false;
     await manager.connect();
 
@@ -1213,7 +1214,7 @@ describe('ConnectionManager — keepalive', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
     emit(openEvent());
 
@@ -1243,7 +1244,7 @@ describe('ConnectionManager — keepalive', () => {
       return s.mockSock as any;
     });
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
     sockets[0]!.mockSock.query.mockRejectedValueOnce(new Error('ping timeout'));
     sockets[0]!.emit(openEvent());
@@ -1265,7 +1266,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
     emit(openEvent());
     const initialLatest = readLatestAuthBond();
@@ -1302,7 +1303,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
     emit(openEvent());
 
@@ -1344,7 +1345,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
     emit(openEvent());
     const initialLatest = readLatestAuthBond();
@@ -1370,7 +1371,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     expect(manager.getConnectionState()).toMatchObject({
       state: 'disconnected',
       connected: false,
@@ -1456,7 +1457,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
     emit(openEvent());
 
@@ -1509,7 +1510,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
     emit(closeEvent(428));
 
@@ -1524,7 +1525,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     emit({
@@ -1568,7 +1569,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
     emit(openEvent());
 
@@ -1588,7 +1589,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     emit({ 'connection.update': { qr: 'pair-me' } });
@@ -1614,7 +1615,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     mockSock.sendMessage.mockResolvedValue({ key: { id: 'auth-clear-proof' } });
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
     emit(openEvent());
     clearAlertSourceMock.mockClear();
@@ -1677,7 +1678,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     mockSock.sendMessage.mockResolvedValue({ key: { id: 'wa-123' } });
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
     emit(openEvent());
     clearAlertSourceMock.mockClear();
@@ -1704,7 +1705,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     mockSock.sendMessage.mockResolvedValue({ key: { id: optimisticId } });
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
     emit(openEvent());
     clearAlertSourceMock.mockClear();
@@ -1740,7 +1741,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
     await emit({ 'creds.update': {} });
 
@@ -1766,7 +1767,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
     emit(openEvent());
     emitAlertMock.mockClear();
@@ -1819,7 +1820,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
     await emit({ 'creds.update': {} });
 
@@ -1835,7 +1836,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
   });
 
   it('send paths reject clearly when no socket is connected', async () => {
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
 
     await expect(manager.sendMessage('111@s.whatsapp.net', 'hello')).rejects.toMatchObject({
       name: 'WhatSoupError',
@@ -1865,7 +1866,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     mockSock.sendMessage.mockResolvedValue({ key: { id: 'media-1' } });
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
     const stream = Readable.from(['image']);
 
@@ -1899,7 +1900,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
       .mockResolvedValueOnce({ key: { id: 'media-retry' } });
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     await expect(
@@ -1931,7 +1932,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
       .mockRejectedValueOnce(secondErr);
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     await expect(
@@ -1953,7 +1954,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     mockSock.sendMessage.mockRejectedValueOnce(err);
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     await expect(
@@ -1978,7 +1979,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     mockSock.sendMessage.mockRejectedValueOnce(err);
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     await expect(
@@ -2004,7 +2005,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     mockSock.sendMessage.mockRejectedValueOnce(tmpErr);
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     await expect(
@@ -2028,7 +2029,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
       return s.mockSock as any;
     });
 
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     const contactsUpsertSpy = vi.fn();
     manager.on('contactsUpsert', contactsUpsertSpy);
 

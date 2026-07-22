@@ -18,8 +18,8 @@ import type { FC } from 'react'
 
 vi.mock('../../console/src/components/wizard/LinkStep', () => ({
   __esModule: true,
-  default: ({ onComplete }: { onComplete: () => void }) => (
-    <section aria-label="Pairing instructions">
+  default: ({ onComplete, transport }: { onComplete: () => void; transport?: string | null }) => (
+    <section aria-label="Pairing instructions" data-transport={transport ?? ''}>
       <p>Scan the QR code to reconnect this WhatsApp line.</p>
       <button type="button" onClick={onComplete}>Finish pairing</button>
     </section>
@@ -87,6 +87,20 @@ describe('RelinkModal open/close state', () => {
 
     expect(screen.getByRole('region', { name: 'Pairing instructions' })).toBeDefined()
     expect(screen.getByText('Scan the QR code to reconnect this WhatsApp line.')).toBeDefined()
+  })
+
+  it('passes the line transport to LinkStep so non-Baileys relinks cannot open QR auth', () => {
+    render(
+      <RelinkModal
+        lineName="signal-line"
+        transport="signal"
+        open={true}
+        onClose={vi.fn()}
+        onLinked={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByRole('region', { name: 'Pairing instructions' }).getAttribute('data-transport')).toBe('signal')
   })
 })
 
