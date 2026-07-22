@@ -1,3 +1,8 @@
+import { clearAlertSourceChecked, emitAlertChecked } from '../../lib/emit-alert.ts';
+import { createChildLogger } from '../../logger.ts';
+
+const log = createChildLogger('provider-execution-gate');
+
 export interface ProviderExecutionGateSnapshot {
   readonly active: boolean;
   readonly pending: number;
@@ -165,4 +170,41 @@ export class ProviderExecutionGate {
     this.pressureActive = false;
     this.onRecovered?.(this.snapshot());
   }
+}
+
+export function createProviderExecutionGate(instanceName: string): ProviderExecutionGate {
+  return new ProviderExecutionGate({
+    pressureAfterMs: 30_000,
+    onPressure: (snapshot) => {
+      emitAlertChecked(
+        instanceName,
+        'provider_execution_queue_pressure',
+        'OpenCode execution queue has waited at least 30 seconds',
+        [
+          'provider=opencode-cli',
+          'scope=whatsoup_process',
+          `active=${snapshot.active}`,
+          `pending=${snapshot.pending}`,
+          `oldest_wait_ms=${snapshot.oldestWaitMs}`,
+          `total_waits=${snapshot.totalWaits}`,
+          `max_pending=${snapshot.maxPending}`,
+          `aborted_waits=${snapshot.abortedWaits}`,
+          'recovery=automatic_when_execution_lane_idle',
+          'limitation=external_opencode_processes_are_not_serialized',
+        ].join('\n'),
+        'warning',
+      );
+    },
+    onRecovered: (snapshot) => {
+      log.info({
+        instance: instanceName,
+        provider: 'opencode-cli',
+        totalWaits: snapshot.totalWaits,
+        maxPending: snapshot.maxPending,
+        lastWaitMs: snapshot.lastWaitMs,
+        abortedWaits: snapshot.abortedWaits,
+      }, 'OpenCode execution queue pressure recovered');
+      clearAlertSourceChecked(instanceName, 'provider_execution_queue_pressure');
+    },
+  });
 }
