@@ -499,16 +499,14 @@ export class ImessageAdapter
   handleInboundRecord(record: InboundImessage): boolean {
     if (this.disposed || this.health.state !== 'connected') return false;
     if (this.seen.has(record.guid)) return false;
+    if (record.kind !== 'text' || record.body === null) return false;
 
-    let message: InboundMessage | null = null;
-    if (record.kind === 'text' && record.body !== null) {
-      message = this.buildInboundMessage(record);
-      if (message === null) return false;
-    }
+    const message = this.buildInboundMessage(record);
+    if (message === null) return false;
 
     this.seen.add(record.guid);
     trimSeenSet(this.seen);
-    if (message !== null) this.safeEmit(this.listeners.message, message);
+    this.safeEmit(this.listeners.message, message);
     // TODO(future): route reaction/read/typing envelopes to extension events.
 
     return true;

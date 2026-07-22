@@ -157,9 +157,9 @@ describe('ImessageAdapter — handleInboundRecord', () => {
     const received: InboundMessage[] = [];
     adapter.on('message', (m) => received.push(m));
 
-    adapter.handleInboundRecord(envelope({ kind: 'reaction', body: null }));
-    adapter.handleInboundRecord(envelope({ kind: 'typing', body: null }));
-    adapter.handleInboundRecord(envelope({ kind: 'read', body: null }));
+    expect(adapter.handleInboundRecord(envelope({ guid: 'reaction-guid', kind: 'reaction', body: null }))).toBe(false);
+    expect(adapter.handleInboundRecord(envelope({ guid: 'typing-guid', kind: 'typing', body: null }))).toBe(false);
+    expect(adapter.handleInboundRecord(envelope({ guid: 'read-guid', kind: 'read', body: null }))).toBe(false);
 
     expect(received).toHaveLength(0);
     await adapter.disconnect();
@@ -171,8 +171,29 @@ describe('ImessageAdapter — handleInboundRecord', () => {
     const received: InboundMessage[] = [];
     adapter.on('message', (m) => received.push(m));
 
-    adapter.handleInboundRecord(envelope({ kind: 'text', body: null }));
-    expect(received).toHaveLength(0);
+    expect(adapter.handleInboundRecord(envelope({ guid: 'corrected-null-body', kind: 'text', body: null }))).toBe(false);
+    expect(adapter.handleInboundRecord(envelope({ guid: 'corrected-null-body', body: 'arrived later' }))).toBe(true);
+    expect(received).toHaveLength(1);
+    await adapter.disconnect();
+  });
+
+  it('does not let unsupported envelopes evict an accepted guid', async () => {
+    const { adapter } = makeAdapter();
+    await adapter.connect();
+    const received: InboundMessage[] = [];
+    adapter.on('message', (message) => received.push(message));
+
+    expect(adapter.handleInboundRecord(envelope({ guid: 'accepted-before-unsupported' }))).toBe(true);
+    for (let index = 0; index < 1000; index += 1) {
+      expect(adapter.handleInboundRecord(envelope({
+        guid: `unsupported-${index}`,
+        kind: 'reaction',
+        body: null,
+      }))).toBe(false);
+    }
+
+    expect(adapter.handleInboundRecord(envelope({ guid: 'accepted-before-unsupported' }))).toBe(false);
+    expect(received).toHaveLength(1);
     await adapter.disconnect();
   });
 
