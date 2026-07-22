@@ -248,7 +248,7 @@ Note: the `tag-release-gate` workflow does NOT run the full test suite (those ru
 
 ## Maintenance
 
-> **Last audited 2026-07-21** (CI/CD & quality-controls audit, anchored to `origin/main`; dated evidence artifacts retained locally under the gitignored `docs/audits/`). This checklist and `scripts/lib/fitness/registry.ts` remain the sources of truth. Refresh this checklist when the guard/CI surface drifts materially — the Branch Protection and Layer 1 sections above were the primary drift found in that audit.
+> **Last audited 2026-07-21** (CI/CD & quality-controls audit, anchored to `origin/main`; the dated audit report, control registry, and remediation-readiness specs are tracked under `docs/enforcement/2026-07-21-cicd-*.md`). This checklist and `scripts/lib/fitness/registry.ts` remain the sources of truth. Refresh this checklist when the guard/CI surface drifts materially — the Branch Protection and Layer 1 sections above were the primary drift found in that audit.
 
 When adding a new rule to this checklist:
 1. **Pre-test against current code** — run the rule against `main` to identify existing violations
