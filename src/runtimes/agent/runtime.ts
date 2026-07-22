@@ -126,7 +126,8 @@ import {
   modelModifierTags, modifierSuffix, renderPinPreferenceOutcome, savedPreferenceLine,
 } from './owner-render-format.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
-import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
+import { bareNumber, toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
+import { stripSelfMentionsFrom } from '../../lib/self-mention-strip.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
 import { TurnQueue, type QueuedTurn, type TurnRejectReason } from './turn-queue.ts';
@@ -238,6 +239,10 @@ import type { ProgressEvent } from './operation-tracker.ts';
 // Imported for the inbound pipeline; the public surface (prepareContentForAgent + the
 // __*ForTests helpers) is re-exported below so namespace-importing tests are unchanged.
 import { prepareContentForAgent, relocateMediaToWorkspace } from './media-prep.ts';
+import {
+  reconstructReplayableInbound,
+  type InboundReplayStats,
+} from './inbound-replay.ts';
 export {
   prepareContentForAgent,
   relocateMediaToWorkspace,
@@ -877,6 +882,16 @@ export class AgentRuntime implements Runtime {
   // C5 restart-loop guard: true when this boot follows an unclean exit
   // (captured at the top of start()); consumed by the startup resume gate.
   private restartLoopInterruptedBoot = false;
+  private startupInboundReplaySuppressed = false;
+  private startupInboundReplayRun = false;
+  private startupInboundReplayStats: InboundReplayStats = {
+    attempted: 0,
+    accepted: 0,
+    failed: 0,
+    suppressed: 0,
+    firstSeq: null,
+    lastSeq: null,
+  };
   private unownedProviderEventRejects = 0;
   private readonly providerEventRejectReasonCounts = new Map<string, number>();
   /**
@@ -1562,6 +1577,7 @@ export class AgentRuntime implements Runtime {
           config.restartLoopGuard.windowMs,
         ),
       },
+      inboundRestartReplay: this.startupInboundReplayStats,
       unownedProviderEventRejects: this.unownedProviderEventRejects,
       turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
       turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
@@ -1647,16 +1663,16 @@ export class AgentRuntime implements Runtime {
    */
   /**
    * C5 restart-loop guard consult for the startup resume gate. Returns true
-   * when proactive resume must be suppressed for this boot: the guard is
+   * when restart-time recovery must be suppressed for this boot: the guard is
    * enabled, resumable work exists, this boot follows an unclean exit, and
    * the crashy-boot journal has reached the trip threshold. On trip, queues
    * ONE operator notice through the startup-message channel (popped and sent
    * by main.ts after connect). Fail-open throughout — any guard error
    * degrades to "do not suppress".
    */
-  private shouldSuppressProactiveResume(resumableCount: number): boolean {
+  private shouldSuppressProactiveResume(recoveryWorkCount: number): boolean {
     if (!config.restartLoopGuard.enabled) return false;
-    if (resumableCount < 1) return false;
+    if (recoveryWorkCount < 1) return false;
     if (!this.restartLoopInterruptedBoot) return false;
     const trip = checkAndRecordInterruptedBoot({
       statePath: restartLoopGuardPath(config.stateRoot),
@@ -1665,8 +1681,8 @@ export class AgentRuntime implements Runtime {
     });
     if (!trip.tripped) return false;
     log.warn(
-      { bootsInWindow: trip.bootsInWindow, resumableCount, windowMs: config.restartLoopGuard.windowMs },
-      'restart-loop guard tripped — suppressing proactive resume for this boot',
+      { bootsInWindow: trip.bootsInWindow, recoveryWorkCount, windowMs: config.restartLoopGuard.windowMs },
+      'restart-loop guard tripped — suppressing restart-time recovery for this boot',
     );
     const adminPhone = [...config.adminPhones][0];
     if (adminPhone) {
@@ -1675,9 +1691,9 @@ export class AgentRuntime implements Runtime {
         chatJid: toPersonalJid(adminPhone),
         text:
           `*Restart-loop guard tripped* ⚠️ — ${trip.bootsInWindow} crash-interrupted boots ` +
-          `inside ${windowSec}s with resumable sessions pending. Proactive resume is ` +
-          `suppressed for this boot to break a possible resume-replay loop; sessions ` +
-          `resume on their next message. Check the journal for the implicated chat.`,
+          `inside ${windowSec}s with ${recoveryWorkCount} restart-time recovery item(s). ` +
+          `Automatic session and queued-input replay are suppressed for this boot to break ` +
+          `a possible replay loop. Check the journal for the implicated chat.`,
       };
     }
     return true;
@@ -2555,8 +2571,19 @@ export class AgentRuntime implements Runtime {
       isShuttingDown: () => runtime.shutdownRequested,
       getActiveQueue: () => runtime.getActiveQueue(),
       getQueueForChat: (chatJid, mapKey) => runtime.getQueueForChat(chatJid, mapKey),
-      sendTurnPerChat: (chatJid, text, mapKey, actorJid, context, scopeRef) =>
-        runtime.sendTurnPerChat(chatJid, text, mapKey, actorJid, context, scopeRef),
+      claimDurableInboundExecution: (inboundSeq, durableQueued, scope) =>
+        runtime.claimDurableInboundExecution(inboundSeq, durableQueued, scope),
+      sendTurnPerChat: (chatJid, text, mapKey, actorJid, context, scopeRef, beforeUserSend) =>
+        runtime.sendTurnPerChat(
+          chatJid,
+          text,
+          mapKey,
+          actorJid,
+          context,
+          scopeRef,
+          undefined,
+          beforeUserSend,
+        ),
       sendVoiceReply: (chatJid, responseText) => runtime._sendVoiceReply(chatJid, responseText),
       isSilentCompact: (scopeKey) => runtime.isSilentCompact(scopeKey),
       clearSilentCompact: (scopeKey) => runtime.clearSilentCompact(scopeKey),
@@ -3203,22 +3230,38 @@ export class AgentRuntime implements Runtime {
     // instance's own spawns; it cannot see a prior-instance child.
     const proactiveResumeBlockedConversationKeys = await this.sweepStaleAgentSessions();
 
+    const startupDurability = this.durability;
+    const proactiveResumeEnabled =
+      this.sessionScope === 'per_chat'
+      && !this.sandboxPerChat
+      && startupDurability !== null
+      && config.proactiveResumeOnStartup;
+    const resumableCheckpointsRaw = proactiveResumeEnabled
+      ? startupDurability!.getResumableCheckpoints()
+      : [];
+    const replayableInboundCount =
+      typeof startupDurability?.getReplayableInboundCount === 'function'
+        ? startupDurability.getReplayableInboundCount()
+        : 0;
+    this.startupInboundReplaySuppressed = this.shouldSuppressProactiveResume(
+      resumableCheckpointsRaw.length + replayableInboundCount,
+    );
+
     // per_chat (non-sandboxed): proactively resume sessions that were active or suspended
     // (graceful shutdown) when we last ran. This lets agents pick up mid-conversation instead
     // of waiting for the user to send a message after a service restart.
     // sandboxPerChat is excluded — its resume path requires workspace provisioning which happens lazily.
-    if (this.sessionScope === 'per_chat' && !this.sandboxPerChat && this.durability && config.proactiveResumeOnStartup) {
-      const resumableCheckpointsRaw = this.durability.getResumableCheckpoints();
+    if (proactiveResumeEnabled) {
       // C5 restart-loop guard: on trip, suppress proactive resume for this
       // boot — sessions still lazy-resume on their next inbound message
       // (the existing fail-safe for every other skip), the instance stays up
       // serving inbound, and the operator gets one notice. An empty list
       // makes the loop below a no-op.
-      const resumableCheckpoints = this.shouldSuppressProactiveResume(resumableCheckpointsRaw.length)
+      const resumableCheckpoints = this.startupInboundReplaySuppressed
         ? []
         : resumableCheckpointsRaw;
       for (const cp of resumableCheckpoints) {
-        const full = this.durability.getSessionCheckpoint(cp.conversation_key);
+        const full = startupDurability!.getSessionCheckpoint(cp.conversation_key);
         if (!full?.session_id) continue;
 
         // QR-099: a still-live (authoritative_live) or ambiguous session for this
@@ -3247,7 +3290,7 @@ export class AgentRuntime implements Runtime {
         // unsolicited messages. Group sessions start fresh on the next @mention.
         if (isGroupConversationKey(cp.conversation_key) || isGroupJid(chatJid)) {
           log.info({ conversationKey: cp.conversation_key }, 'skipping proactive resume — group chat');
-          this.durability.upsertSessionCheckpoint(cp.conversation_key, { sessionStatus: 'ended' });
+          startupDurability!.upsertSessionCheckpoint(cp.conversation_key, { sessionStatus: 'ended' });
           continue;
         }
 
@@ -3258,7 +3301,7 @@ export class AgentRuntime implements Runtime {
           const age = Date.now() - new Date(full.updated_at + 'Z').getTime();
           if (age > RESUME_MAX_AGE_MS) {
             log.info({ conversationKey: cp.conversation_key, ageMinutes: Math.round(age / 60_000) }, 'skipping proactive resume — session too stale');
-            this.durability.upsertSessionCheckpoint(cp.conversation_key, { sessionStatus: 'ended' });
+            startupDurability!.upsertSessionCheckpoint(cp.conversation_key, { sessionStatus: 'ended' });
             continue;
           }
         }
@@ -3727,11 +3770,121 @@ export class AgentRuntime implements Runtime {
     return processing;
   }
 
+  supportsDurableInboundReplay(msg: IncomingMessage): boolean {
+    return msg.contentType === 'text' && msg.isSyntheticJob !== true;
+  }
+
+  async replayDurableInboundBacklog(limit = 100): Promise<InboundReplayStats> {
+    if (this.startupInboundReplayRun) return { ...this.startupInboundReplayStats };
+    this.startupInboundReplayRun = true;
+    if (!this.durability) return { ...this.startupInboundReplayStats };
+
+    const rows = this.durability.getReplayableInbound(limit);
+    if (rows.length === 0) return { ...this.startupInboundReplayStats };
+    const firstSeq = rows[0]!.seq;
+    const lastSeq = rows[rows.length - 1]!.seq;
+    if (this.startupInboundReplaySuppressed) {
+      this.startupInboundReplayStats = {
+        attempted: 0,
+        accepted: 0,
+        failed: 0,
+        suppressed: rows.length,
+        firstSeq,
+        lastSeq,
+      };
+      emitAlertChecked(
+        this.instanceName,
+        'inbound_restart_replay_suppressed',
+        `Queued inbound replay suppressed for ${this.instanceName}`,
+        `count=${rows.length} first_seq=${firstSeq} last_seq=${lastSeq} reason=restart_loop_guard`,
+        'warning',
+      );
+      return { ...this.startupInboundReplayStats };
+    }
+
+    let accepted = 0;
+    let failed = 0;
+    for (const row of rows) {
+      try {
+        const msg = reconstructReplayableInbound(row);
+        if (msg.isGroup && msg.content) {
+          const connection = this.messenger as ConnectionManager;
+          const botIds = [connection.botJid, connection.botLid]
+            .filter((jid): jid is string => typeof jid === 'string' && jid.length > 0)
+            .flatMap((jid) => [jid, bareNumber(jid)]);
+          if (botIds.length > 0) msg.content = stripSelfMentionsFrom(msg.content, botIds);
+        }
+        await this.handleMessage(msg);
+        accepted += 1;
+      } catch (err) {
+        failed += 1;
+        this.durability.markInboundFailed(row.seq, 'crash_recovery');
+        log.error(
+          { err, inboundSeq: row.seq, priorStatus: row.processing_status },
+          'durable inbound restart replay failed closed',
+        );
+      }
+    }
+
+    this.startupInboundReplayStats = {
+      attempted: rows.length,
+      accepted,
+      failed,
+      suppressed: 0,
+      firstSeq,
+      lastSeq,
+    };
+    emitAlertChecked(
+      this.instanceName,
+      'inbound_restart_replay',
+      `Queued inbound restart replay completed for ${this.instanceName}`,
+      `attempted=${rows.length} accepted=${accepted} failed=${failed} first_seq=${firstSeq} last_seq=${lastSeq}`,
+      failed > 0 ? 'warning' : 'info',
+    );
+    return { ...this.startupInboundReplayStats };
+  }
+
+  private beginDurableInboundPreparation(msg: IncomingMessage): void {
+    if (msg.durableAdmission !== 'pending') return;
+    if (!this.durability || msg.inboundSeq === undefined) {
+      throw new Error('Durable pending inbound has no durability owner');
+    }
+    if (!this.durability.beginInboundPreparation(msg.inboundSeq)) {
+      throw new Error(`Durable inbound ${msg.inboundSeq} could not claim preparation`);
+    }
+  }
+
+  private finishDurableInboundPreparation(msg: IncomingMessage): void {
+    if (msg.durableAdmission !== 'pending') return;
+    if (!this.durability || msg.inboundSeq === undefined) {
+      throw new Error('Durable preparing inbound has no durability owner');
+    }
+    if (!this.durability.markInboundQueued(msg.inboundSeq)) {
+      throw new Error(`Durable inbound ${msg.inboundSeq} could not enter the runtime queue`);
+    }
+    msg.durableAdmission = 'queued';
+  }
+
+  private claimDurableInboundExecution(
+    inboundSeq: number | undefined,
+    durableQueued: boolean,
+    scope: 'shared' | 'single' | 'per-chat' | 'local-command',
+  ): void {
+    if (!durableQueued) return;
+    if (!this.durability || inboundSeq === undefined) {
+      throw new Error(`Durable ${scope} inbound has no durability owner`);
+    }
+    if (!this.durability.markInboundProcessing(inboundSeq)) {
+      throw new Error(`Durable ${scope} inbound ${inboundSeq} could not claim execution`);
+    }
+  }
+
   private async handleMessageInner(msg: IncomingMessage): Promise<void> {
+    const preparedReplay = msg.durableAdmission === 'queued_replay';
     // Process media messages (transcription, text extraction, etc.) before routing.
     // For text messages this is a no-op. For all other types we attempt to convert
     // to a plain-text representation suitable for the stream-json agent protocol.
-    if (msg.contentType !== 'text') {
+    if (!preparedReplay && msg.contentType !== 'text') {
       try {
         msg.content = await prepareContentForAgent(msg, this.db, msg.messageId);
       } catch (err) {
@@ -3756,13 +3909,15 @@ export class AgentRuntime implements Runtime {
       return;
     }
 
+    this.beginDurableInboundPreparation(msg);
+
     // Substrate slice 1: inline imperative extractor.
     // Gate on sender identity (admin-only), not deliveryJid. For any admin-authored
     // message containing an explicit imperative (remind/schedule/watch/track/...),
     // persist a proposed task bead immediately so the intent survives even if the
     // agent turn fails downstream. The bead lands as status='proposed' so a
     // drowsy or misfired match doesn't silently commit real work to the task list.
-    try {
+    if (!preparedReplay) try {
       // senderPhone stays on the PLAIN resolver — it feeds the bead's ownerJid
       // attribution (display-side, below), which is transport-agnostic.
       const senderPhone = resolvePhoneFromJid(msg.senderJid, this.db);
@@ -3839,6 +3994,8 @@ export class AgentRuntime implements Runtime {
       }
       log.warn({ err, messageId: msg.messageId }, 'inline extractor hook failed (continuing)');
     }
+
+    this.finishDurableInboundPreparation(msg);
 
     this.turnChain = this.turnChain
       .then(() => this._handleMessageInner(msg))
@@ -3922,6 +4079,14 @@ export class AgentRuntime implements Runtime {
     let forwardAfterLocalCommand: string | null = null;
 
     if (classified.type === 'local') {
+      const durableLocalCommand =
+        msg.durableAdmission === 'queued' || msg.durableAdmission === 'queued_replay';
+      this.claimDurableInboundExecution(
+        msg.inboundSeq,
+        durableLocalCommand,
+        'local-command',
+      );
+      if (durableLocalCommand) msg.durableAdmission = 'processing';
       const spec = getCommandSpec(classified.command);
       // Gate enforcement by gate class. Both gated classes share the same
       // authenticated-admin core: isWhatsAppAuthenticatedJid FIRST (QR-143 —
@@ -4590,6 +4755,8 @@ export class AgentRuntime implements Runtime {
         contentType: msg.contentType,
         ...(runtimeContext ? { runtimeContext } : {}),
         inboundSeq: msg.inboundSeq,
+        durableQueued:
+          msg.durableAdmission === 'queued' || msg.durableAdmission === 'queued_replay',
       });
     } else if (this.sessionScope === 'per_chat') {
       const mapKey = perChatMapKey!;
@@ -4637,9 +4804,13 @@ export class AgentRuntime implements Runtime {
           contentType: msg.contentType,
           ...(runtimeContext ? { runtimeContext } : {}),
           inboundSeq: msg.inboundSeq,
+          durableQueued:
+            msg.durableAdmission === 'queued' || msg.durableAdmission === 'queued_replay',
         });
       }
     } else {
+      const durableQueued =
+        msg.durableAdmission === 'queued' || msg.durableAdmission === 'queued_replay';
       // single mode: store inbound seq on runtime + queue
       this.currentInboundSeq = msg.inboundSeq;
       this.queue?.setInboundSeq(msg.inboundSeq);
@@ -4660,7 +4831,11 @@ export class AgentRuntime implements Runtime {
         contentType: msg.contentType,
         isGroup: msg.isGroup,
         ...(msg.isGroup ? { groupName: chatJid } : {}),
-      }, msg.inboundSeq);
+      }, msg.inboundSeq, () => this.claimDurableInboundExecution(
+        msg.inboundSeq,
+        durableQueued,
+        'single',
+      ));
     }
   }
 
@@ -4770,7 +4945,13 @@ export class AgentRuntime implements Runtime {
       : null;
     try {
       this.updateSessionActorJid(this.session!, senderJid);
-      await this.session!.sendTurn(prefixedText);
+      await dispatchProviderTurn(this.session!, prefixedText, () => {
+        this.claimDurableInboundExecution(
+          turn.inboundSeq,
+          turn.durableQueued === true,
+          'shared',
+        );
+      });
     } catch (err) {
       if (legacyOwner) {
         this.clearLegacyProviderTurn(GLOBAL_TOOL_SCOPE_KEY, legacyOwner);
@@ -4970,6 +5151,7 @@ export class AgentRuntime implements Runtime {
     actorJid: string,
     source?: RuntimeTurnSourceSnapshot,
     inboundSeq?: number,
+    beforeUserSend?: () => void,
   ): Promise<void> {
     // Clear post-turn gate for shared session scope
     this.postTurnGate.delete(GLOBAL_TOOL_SCOPE_KEY);
@@ -4997,6 +5179,7 @@ export class AgentRuntime implements Runtime {
     let legacyOwner: LegacyProviderTurnOwner | null = null;
     try {
       await this.sendTurnToSession(this.session!, chatJid, text, undefined, actorJid, () => {
+        beforeUserSend?.();
         if (!context) {
           legacyOwner = this.publishLegacyProviderTurn(
             this.session!,
@@ -5045,6 +5228,7 @@ export class AgentRuntime implements Runtime {
     runtimeContext?: RuntimeTurnContext,
     scopeRef?: PerChatRuntimeScopeRef,
     systemTurnLease?: SystemTurnLeaseToken,
+    beforeUserSend?: () => void,
   ): Promise<void> {
     mapKey = scopeRef?.value ?? mapKey;
     const dispatchAllowed = runtimeContext === undefined
@@ -5199,6 +5383,7 @@ export class AgentRuntime implements Runtime {
       const completion: { value: RuntimeTurnCompletion | null } = { value: null };
       try {
         await this.sendTurnToSession(retrySession, chatJid, text, currentMapKey, actorJid, () => {
+          beforeUserSend?.();
           completion.value = beginDispatchedTurn(
             retrySession,
             scopeRef?.value ?? currentMapKey,
@@ -5216,6 +5401,7 @@ export class AgentRuntime implements Runtime {
     const completion: { value: RuntimeTurnCompletion | null } = { value: null };
     try {
       await this.sendTurnToSession(session, chatJid, text, mapKey, actorJid, () => {
+        beforeUserSend?.();
         completion.value = beginDispatchedTurn(
           session,
           scopeRef?.value ?? mapKey,
@@ -7154,6 +7340,9 @@ export class AgentRuntime implements Runtime {
       || recoveryHealth.turnRecoveryOpenRecoveries > 0
       || recoveryHealth.turnRecoveryCorruptLinks > 0
       || recoveryHealth.turnRecoveryEchoConflicts > 0;
+    const inboundReplayDegraded =
+      this.startupInboundReplayStats.failed > 0
+      || this.startupInboundReplayStats.suppressed > 0;
     if (this.sessionScope === 'per_chat') {
       const sessions = [...this.chatSessions.values()];
       let activeSessions = 0;
@@ -7186,6 +7375,9 @@ export class AgentRuntime implements Runtime {
         healthStatus = 'degraded';
       }
       if (providerExecution.pressureActive && healthStatus === 'healthy') healthStatus = 'degraded';
+      if (inboundReplayDegraded && healthStatus === 'healthy') {
+        healthStatus = 'degraded';
+      }
       return {
         status: healthStatus,
         details: {
@@ -7207,6 +7399,7 @@ export class AgentRuntime implements Runtime {
               config.restartLoopGuard.windowMs,
             ),
           },
+          inboundRestartReplay: this.startupInboundReplayStats,
           unownedProviderEventRejects: this.unownedProviderEventRejects,
           providerExecution,
           turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
@@ -7227,7 +7420,7 @@ export class AgentRuntime implements Runtime {
         ? 'degraded'
         : fallbackState.fallbackActiveUntil !== null
           ? 'degraded'
-          : finalizationDegraded || providerExecution.pressureActive
+          : finalizationDegraded || providerExecution.pressureActive || inboundReplayDegraded
             ? 'degraded'
             : 'healthy';
     return {
@@ -7248,6 +7441,7 @@ export class AgentRuntime implements Runtime {
             config.restartLoopGuard.windowMs,
           ),
         },
+        inboundRestartReplay: this.startupInboundReplayStats,
         unownedProviderEventRejects: this.unownedProviderEventRejects,
         providerExecution,
         turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,

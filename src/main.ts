@@ -1032,6 +1032,16 @@ async function start(): Promise<void> {
       } catch (err) {
         log.error({ err }, 'drainPendingOutbound on post-connect recovery failed');
       }
+      // Replay only rows whose runtime state proves provider execution never
+      // began. AgentRuntime owns reconstruction and restart-loop suppression;
+      // any replay fault is contained so transport startup remains available.
+      if (runtime instanceof AgentRuntime) {
+        try {
+          await runtime.replayDurableInboundBacklog();
+        } catch (err) {
+          log.error({ err }, 'durable inbound restart replay failed');
+        }
+      }
     },
   });
 

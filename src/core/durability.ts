@@ -6,7 +6,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Database } from './database.ts';
-import type { Messenger } from './types.ts';
+import type { ContentType, Messenger } from './types.ts';
 import type { GuardCaller } from './outbound-identity/types.ts';
 import { toConversationKey } from './conversation-key.ts';
 import { withTransaction } from './db-tx.ts';
@@ -188,6 +188,29 @@ export interface ActiveSessionCheckpointRow {
   session_status: string;
 }
 
+/**
+ * A runtime-owned inbound that is durably known not to have started provider
+ * execution. The message body is read from the canonical messages row rather
+ * than copied into a second replay ledger.
+ */
+export interface ReplayableInboundRow {
+  seq: number;
+  message_id: string;
+  conversation_key: string;
+  chat_jid: string;
+  processing_status: 'pending' | 'queued';
+  routed_to: string;
+  received_at: string;
+  sender_jid: string;
+  sender_name: string | null;
+  content: string | null;
+  content_text: string | null;
+  content_type: ContentType;
+  timestamp: number;
+  quoted_message_id: string | null;
+  raw_message: string | null;
+}
+
 export type ContinuityCandidateReason =
   | 'crash_reclaim_no_terminal_outbound'
   | 'runtime_fault_no_terminal_outbound';
@@ -225,6 +248,10 @@ type PreparedStatement = ReturnType<Database['raw']['prepare']>;
 
 type DurabilityStatements = {
   journalInbound: PreparedStatement;
+  journalQueuedInbound: PreparedStatement;
+  beginInboundPreparation: PreparedStatement;
+  markInboundQueued: PreparedStatement;
+  markInboundProcessing: PreparedStatement;
   markTurnDone: PreparedStatement;
   markInboundComplete: PreparedStatement;
   markInboundFailed: PreparedStatement;
@@ -258,6 +285,9 @@ type DurabilityStatements = {
   getResumableCheckpoints: PreparedStatement;
   markSessionOrphaned: PreparedStatement;
   getPendingInbound: PreparedStatement;
+  getReplayableInbound: PreparedStatement;
+  getReplayableInboundCount: PreparedStatement;
+  getOldestReplayableInboundAt: PreparedStatement;
   getOutboundByStatus: PreparedStatement;
   getRecoverableToolCalls: PreparedStatement;
   markToolReplayed: PreparedStatement;
@@ -297,6 +327,22 @@ export class DurabilityEngine {
       journalInbound: prepare(
         `INSERT INTO inbound_events (message_id, conversation_key, chat_jid, routed_to, processing_status)
          VALUES (?, ?, ?, ?, 'processing')`,
+      ),
+      journalQueuedInbound: prepare(
+        `INSERT INTO inbound_events (message_id, conversation_key, chat_jid, routed_to, processing_status)
+         VALUES (?, ?, ?, ?, 'pending')`,
+      ),
+      beginInboundPreparation: prepare(
+        `UPDATE inbound_events SET processing_status = 'preparing'
+         WHERE seq = ? AND processing_status = 'pending'`,
+      ),
+      markInboundQueued: prepare(
+        `UPDATE inbound_events SET processing_status = 'queued'
+         WHERE seq = ? AND processing_status = 'preparing'`,
+      ),
+      markInboundProcessing: prepare(
+        `UPDATE inbound_events SET processing_status = 'processing'
+         WHERE seq = ? AND processing_status = 'queued'`,
       ),
       markTurnDone: prepare(`UPDATE inbound_events SET processing_status = 'turn_done' WHERE seq = ?`),
       markInboundComplete: prepare(
@@ -528,7 +574,36 @@ export class DurabilityEngine {
         `UPDATE session_checkpoints SET session_status = 'orphaned', updated_at = datetime('now') WHERE conversation_key = ?`,
       ),
       getPendingInbound: prepare(
-        `SELECT seq, message_id, processing_status, routed_to FROM inbound_events WHERE processing_status IN ('pending', 'processing', 'turn_done')`,
+        `SELECT seq, message_id, processing_status, routed_to FROM inbound_events WHERE processing_status IN ('pending', 'preparing', 'queued', 'processing', 'turn_done')`,
+      ),
+      getReplayableInbound: prepare(
+        `SELECT i.seq, i.message_id, i.conversation_key, i.chat_jid,
+                i.processing_status, i.routed_to, i.received_at,
+                m.sender_jid, m.sender_name, m.content, m.content_text,
+                m.content_type, m.timestamp, m.quoted_message_id, m.raw_message
+         FROM inbound_events i
+         JOIN messages m ON m.message_id = i.message_id
+         WHERE i.processing_status IN ('pending', 'queued')
+           AND i.routed_to = 'agentruntime'
+           AND m.is_from_me = 0
+         ORDER BY i.seq ASC
+         LIMIT ?`,
+      ),
+      getReplayableInboundCount: prepare(
+        `SELECT COUNT(*) AS count
+         FROM inbound_events i
+         JOIN messages m ON m.message_id = i.message_id
+         WHERE i.processing_status IN ('pending', 'queued')
+           AND i.routed_to = 'agentruntime'
+           AND m.is_from_me = 0`,
+      ),
+      getOldestReplayableInboundAt: prepare(
+        `SELECT MIN(i.received_at) AS at
+         FROM inbound_events i
+         JOIN messages m ON m.message_id = i.message_id
+         WHERE i.processing_status IN ('pending', 'queued')
+           AND i.routed_to = 'agentruntime'
+           AND m.is_from_me = 0`,
       ),
       getOutboundByStatus: prepare(
         `SELECT id, chat_jid, op_type, payload, wa_message_id, replay_policy, created_at, submitted_at, source_inbound_seq, is_terminal FROM outbound_ops WHERE status = ?`,
@@ -545,7 +620,7 @@ export class DurabilityEngine {
       ),
       getProcessingInboundEvents: prepare(
         `SELECT i.seq FROM inbound_events i
-         WHERE i.processing_status = 'processing'
+         WHERE i.processing_status IN ('preparing', 'processing')
            AND NOT EXISTS (
              SELECT 1 FROM turn_terminal_records t WHERE t.inbound_seq_key = i.seq
            )`,
@@ -564,11 +639,10 @@ export class DurabilityEngine {
          WHERE source_inbound_seq = ? AND is_terminal = 1
            AND status NOT IN ('quarantined', 'failed_permanent')`,
       ),
-      // W2 stuck-inbound reconciler buckets. Open set is ('pending','processing',
-      // 'turn_done'). 'pending' is the schema DEFAULT but journalInbound (the sole
-      // INSERT site) always writes 'processing' explicitly, so no row is ever
-      // actually 'pending' — matched defensively, not because it occurs. There is
-      // no 'queued' state. An echoed terminal op is the
+      // W2 stuck-inbound reconciler buckets. Open set is ('pending','preparing',
+      // 'queued','processing','turn_done'). Agent-runtime admission uses preparing
+      // while replay-unsafe preprocessing may run and queued while definitely
+      // undispatched; processing means provider execution may have started. An echoed terminal op is the
       // delivery-confirmed success signal (mirrors getTerminalOutboundForInbound's
       // exclusion of quarantined/failed_permanent by matching status='echoed'
       // directly). Each bounded to 200 rows so a large backlog drains over several
@@ -578,7 +652,7 @@ export class DurabilityEngine {
          FROM inbound_events i
          JOIN outbound_ops o
            ON o.source_inbound_seq = i.seq AND o.is_terminal = 1 AND o.status = 'echoed'
-         WHERE i.processing_status IN ('pending', 'processing', 'turn_done')
+         WHERE i.processing_status IN ('pending', 'preparing', 'queued', 'processing', 'turn_done')
            AND i.received_at < datetime('now', '-5 minutes')
            AND NOT EXISTS (
              SELECT 1 FROM turn_terminal_records t WHERE t.inbound_seq_key = i.seq
@@ -604,7 +678,7 @@ export class DurabilityEngine {
       getStaleOpenNoSuccess: prepare(
         `SELECT i.seq AS seq
          FROM inbound_events i
-         WHERE i.processing_status IN ('pending', 'processing')
+         WHERE i.processing_status IN ('pending', 'preparing', 'queued', 'processing')
            AND i.received_at < datetime('now', '-24 hours')
            AND NOT EXISTS (
              SELECT 1 FROM turn_terminal_records t WHERE t.inbound_seq_key = i.seq
@@ -640,7 +714,7 @@ export class DurabilityEngine {
           AND t.inbound_disposition = 'transferred_to_recovery_owner'
          JOIN outbound_ops o ON o.id = t.delivery_op_id
          JOIN turn_recovery_jobs j ON j.terminal_record_id = t.id
-         WHERE i.processing_status IN ('pending', 'processing', 'turn_done')
+         WHERE i.processing_status IN ('pending', 'preparing', 'queued', 'processing', 'turn_done')
            AND i.received_at < datetime('now', '-5 minutes')
            AND j.state <> 'completed'
            AND (
@@ -891,6 +965,43 @@ export class DurabilityEngine {
     const seq = Number(result.lastInsertRowid);
     log.debug({ seq, messageId, routedTo }, 'journalInbound');
     return seq;
+  }
+
+  /**
+   * Journal a runtime input before any replay-unsafe work begins. Pending and
+   * queued are the only restart-replay states; legacy journalInbound callers
+   * retain their historical processing-at-insert behavior.
+   */
+  journalQueuedInbound(
+    messageId: string,
+    conversationKey: string,
+    chatJid: string,
+    routedTo: string,
+  ): number {
+    const result = this.statements.journalQueuedInbound.run(
+      messageId,
+      conversationKey,
+      chatJid,
+      routedTo,
+    );
+    const seq = Number(result.lastInsertRowid);
+    log.debug({ seq, messageId, routedTo }, 'journalQueuedInbound');
+    return seq;
+  }
+
+  /** Claim a pending input before preprocessing can perform durable side effects. */
+  beginInboundPreparation(seq: number): boolean {
+    return this.statements.beginInboundPreparation.run(seq).changes === 1;
+  }
+
+  /** Release a safely prepared input into an in-memory runtime/provider queue. */
+  markInboundQueued(seq: number): boolean {
+    return this.statements.markInboundQueued.run(seq).changes === 1;
+  }
+
+  /** Claim a definitely-undispatched queued input at its execution boundary. */
+  markInboundProcessing(seq: number): boolean {
+    return this.statements.markInboundProcessing.run(seq).changes === 1;
   }
 
   markTurnDone(seq: number): void {
@@ -1440,6 +1551,17 @@ export class DurabilityEngine {
     return this.statements.getPendingInbound.all() as unknown as InboundEventRow[];
   }
 
+  /** Return a bounded FIFO page of agent inputs proven not to have begun execution. */
+  getReplayableInbound(limit = 100): ReplayableInboundRow[] {
+    const boundedLimit = Math.max(1, Math.min(200, Math.trunc(limit)));
+    return this.statements.getReplayableInbound.all(boundedLimit) as unknown as ReplayableInboundRow[];
+  }
+
+  getReplayableInboundCount(): number {
+    const row = this.statements.getReplayableInboundCount.get() as { count: number };
+    return row.count;
+  }
+
   getOutboundByStatus(status: string): OutboundOpRow[] {
     return this.statements.getOutboundByStatus.all(status) as unknown as OutboundOpRow[];
   }
@@ -1931,6 +2053,8 @@ export class DurabilityEngine {
     oldestMaybeSentAt: string | null;
     lastRecoveryAt: string | null;
     openRecoveries: number;
+    replayableInbound: number;
+    oldestReplayableInboundAt: string | null;
   } {
     const pending = this.statements.getPendingOutboundCount.get() as { count: number };
     const quarantined = this.statements.getQuarantinedOutboundCount.get() as { count: number };
@@ -1941,6 +2065,10 @@ export class DurabilityEngine {
     const lastRecovery = this.statements.getLastRecoveryRunCompletedAt.get() as
       | { completed_at: string }
       | undefined;
+    const replayableInbound = this.statements.getReplayableInboundCount.get() as { count: number };
+    const oldestReplayableInbound = this.statements.getOldestReplayableInboundAt.get() as
+      | { at: string | null }
+      | undefined;
     return {
       pendingOutbound: pending.count,
       quarantinedOutbound: quarantined.count,
@@ -1948,6 +2076,8 @@ export class DurabilityEngine {
       oldestMaybeSentAt: oldestMaybeSent?.at ?? null,
       lastRecoveryAt: lastRecovery?.completed_at ?? null,
       openRecoveries: this.recoveryEvidence.countOpen(),
+      replayableInbound: replayableInbound.count,
+      oldestReplayableInboundAt: oldestReplayableInbound?.at ?? null,
     };
   }
 

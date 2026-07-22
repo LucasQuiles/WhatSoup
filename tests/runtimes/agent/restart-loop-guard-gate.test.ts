@@ -116,7 +116,7 @@ describe('T5 — startup resume gate consults the restart-loop guard', () => {
     expect(h.lastTripAt).not.toBeNull();
     expect(stub.pendingStartupMessage?.chatJid).toBe('15550000001@s.whatsapp.net');
     expect(stub.pendingStartupMessage?.text).toContain('Restart-loop guard tripped');
-    expect(stub.pendingStartupMessage?.text).toContain('resume on their next message');
+    expect(stub.pendingStartupMessage?.text).toContain('queued-input replay are suppressed');
   });
 
   it('does not trip below the threshold', async () => {

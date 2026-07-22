@@ -41,6 +41,8 @@ export interface Runtime {
   getHealthSnapshot(): RuntimeHealth;
   shutdown(): Promise<void>;
   setDurability(engine: DurabilityEngine): void;
+  /** True only for inputs whose runtime has an exact queued-turn replay path. */
+  supportsDurableInboundReplay?(msg: IncomingMessage): boolean;
   /** Update delivery JID for active sessions/queues when a LID→phone mapping changes. */
   handleJidAliasChanged?(conversationKey: string, newJid: string): void;
   /** Inject a repair turn into the control session for self-healing. */

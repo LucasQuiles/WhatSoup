@@ -124,6 +124,11 @@ export interface RuntimeTurnCoordinatorPort {
   isShuttingDown?(): boolean;
   getActiveQueue(): IOutboundQueue | null;
   getQueueForChat(chatJid: string, mapKey?: string): IOutboundQueue | null;
+  claimDurableInboundExecution(
+    inboundSeq: number | undefined,
+    durableQueued: boolean,
+    scope: 'per-chat',
+  ): void;
   sendTurnPerChat(
     chatJid: string,
     text: string,
@@ -131,6 +136,7 @@ export interface RuntimeTurnCoordinatorPort {
     actorJid?: string,
     runtimeContext?: RuntimeTurnContext,
     scopeRef?: PerChatRuntimeScopeRef,
+    beforeUserSend?: () => void,
   ): Promise<void>;
   sendVoiceReply(chatJid: string, responseText: string): Promise<void>;
 }
@@ -1372,6 +1378,11 @@ async processPerChatTurn(scopeRef: PerChatRuntimeScopeRef, turn: QueuedTurn): Pr
       turn.senderJid,
       turn.runtimeContext,
       scopeRef,
+      () => this.host.claimDurableInboundExecution(
+        turn.inboundSeq,
+        turn.durableQueued === true,
+        'per-chat',
+      ),
     );
   } catch (err) {
     dispatchFailed = true;

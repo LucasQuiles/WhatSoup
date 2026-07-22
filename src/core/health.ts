@@ -303,6 +303,7 @@ const TRANSIENT_TURN_ERROR_STALE_MS = 15 * 60 * 1000; // 15 minutes
 // long-lived continuity risk that must degrade /health rather than read green
 // (#1865). Generous enough not to flap on transient reconciliation.
 const DURABILITY_STALE_MAYBE_SENT_MS = 30 * 60 * 1000; // 30 minutes
+const DURABILITY_STALE_REPLAYABLE_INBOUND_MS = 15 * 60 * 1000; // 15 minutes
 
 // S-04a — stale model-usability evidence must not read as a healthy green.
 // A bot whose usability probe went stale WHILE it was actively turning has a
@@ -1323,6 +1324,15 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       const durabilityDebtIsDegraded =
         Number.isFinite(oldestMaybeSentMs)
         && Date.now() - oldestMaybeSentMs > DURABILITY_STALE_MAYBE_SENT_MS;
+      const oldestReplayableInboundMs =
+        durabilityStats?.oldestReplayableInboundAt != null
+          && durabilityStats.oldestReplayableInboundAt !== ''
+          ? Date.parse(durabilityStats.oldestReplayableInboundAt.replace(' ', 'T') + 'Z')
+          : Number.NaN;
+      const inboundReplayDebtIsDegraded =
+        (durabilityStats?.replayableInbound ?? 0) > 0
+        && Number.isFinite(oldestReplayableInboundMs)
+        && Date.now() - oldestReplayableInboundMs > DURABILITY_STALE_REPLAYABLE_INBOUND_MS;
 
       let status: 'healthy' | 'degraded' | 'unhealthy';
       if (authFailureIsUnhealthy) {
@@ -1341,7 +1351,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         agentRuntimeStatus === 'degraded' ||
         turnCapabilityIsDegraded ||
         loopLag.locallyStarved ||
-        durabilityDebtIsDegraded
+        durabilityDebtIsDegraded ||
+        inboundReplayDebtIsDegraded
       ) {
         status = 'degraded';
       } else {

@@ -745,6 +745,30 @@ describe('Echo correlation: isFromMe messages', () => {
 // ===========================================================================
 
 describe('Inbound journaling: durabilityEngine.journalInbound', () => {
+  it('replay-capable agent text is durably pending before runtime dispatch', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    runtime.supportsDurableInboundReplay = vi.fn(() => true);
+    const durability = new DurabilityEngine(db);
+    const queuedSpy = vi.spyOn(durability, 'journalQueuedInbound');
+    const legacySpy = vi.spyOn(durability, 'journalInbound');
+    const msg = makeIncomingMessage({ messageId: 'durable-agent-text-1' });
+
+    await runIngest(
+      makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability),
+      msg,
+    );
+
+    expect(queuedSpy).toHaveBeenCalledOnce();
+    expect(legacySpy).not.toHaveBeenCalled();
+    expect(msg.durableAdmission).toBe('pending');
+    expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledWith(msg);
+    expect(db.raw.prepare(
+      'SELECT processing_status FROM inbound_events WHERE message_id = ?',
+    ).get(msg.messageId)).toEqual({ processing_status: 'pending' });
+  });
+
   it('eligible message journals inbound event before dispatch', async () => {
     const db = makeTempDb();
     const messenger = makeMessenger();

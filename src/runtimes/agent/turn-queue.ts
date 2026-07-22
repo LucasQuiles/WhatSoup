@@ -23,6 +23,8 @@ export interface QueuedTurn {
   runtimeContext?: RuntimeTurnContext;
   /** durability: inbound_events.seq for this turn — threaded to outbound ops */
   inboundSeq?: number;
+  /** True when inboundSeq is still in the durable `queued` restart-replay state. */
+  durableQueued?: boolean;
 }
 
 /**

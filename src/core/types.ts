@@ -82,6 +82,13 @@ export interface IncomingMessage {
    * task bead on every fire.
    */
   isSyntheticJob?: boolean;
+  /**
+   * Internal restart-replay ownership marker. `pending` is a freshly journaled
+   * text input; `queued` has completed replay-unsafe preprocessing; and
+   * `queued_replay` is that same durable state reconstructed after restart.
+   * Transport parsers never set this field.
+   */
+  durableAdmission?: 'pending' | 'queued' | 'queued_replay' | 'processing';
 }
 
 export interface RuntimeHealth {

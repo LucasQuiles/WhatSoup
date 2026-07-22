@@ -49,9 +49,14 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
   const capturedOnCrashRef: { current: ((info: CapturedCrashInfo) => void) | null } = { current: null };
   const capturedNotifyUserRef: { current: ((msg: string) => void) | null } = { current: null };
 
+  const sendTurn = vi.fn(async (_text: string) => {});
   const mockSession = {
     spawnSession: vi.fn(async () => {}),
-    sendTurn: vi.fn(async () => {}),
+    sendTurn,
+    sendTurnAtProviderBoundary: vi.fn(async (text: string, onReady?: () => void) => {
+      onReady?.();
+      await sendTurn(text);
+    }),
     handleNew: vi.fn(async () => {}),
     getStatus: vi.fn(() => ({ active: false, pid: null as number | null, sessionId: null as string | null, startedAt: null as string | null, messageCount: 0, lastMessageAt: null as string | null })),
     shutdown: vi.fn(async () => {}),
@@ -537,6 +542,29 @@ function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
     isResponseWorthy: true,
     ...overrides,
   };
+}
+
+function storeReplayMessage(
+  db: RealDatabase,
+  messageId: string,
+  content: string,
+  contentType: IncomingMessage['contentType'] = 'text',
+): void {
+  db.raw.prepare(
+    `INSERT INTO messages (
+       chat_jid, conversation_key, sender_jid, sender_name, message_id,
+       content, content_type, is_from_me, timestamp, quoted_message_id
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, NULL)`,
+  ).run(
+    'test@s.whatsapp.net',
+    'test',
+    'sender@s.whatsapp.net',
+    'Test User',
+    messageId,
+    content,
+    contentType,
+    Date.now(),
+  );
 }
 
 function completedCheckpoint(args: {
@@ -1119,6 +1147,10 @@ describe('AgentRuntime', () => {
     mockSession.waitForProviderTurnToTerminalize.mockReset().mockResolvedValue(undefined);
     mockSession.getStatus.mockReset().mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
     mockSession.sendTurn.mockReset().mockResolvedValue(undefined);
+    mockSession.sendTurnAtProviderBoundary.mockReset().mockImplementation(async (text: string, onReady?: () => void) => {
+      onReady?.();
+      await mockSession.sendTurn(text);
+    });
     mockSession.getDbRowId.mockReset().mockReturnValue(null);
     mockQueue.flushTurnEvidence.mockReset().mockImplementation(async (turnId: string) => ({
       turnId,
@@ -2490,6 +2522,395 @@ describe('AgentRuntime', () => {
       chatJid: 'test@s.whatsapp.net',
     });
     expect(replyGuarantee.disarm).toHaveBeenCalledWith(31);
+  });
+
+  it('keeps a shared follower durably queued until its provider processor actually starts', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'line-a', {
+      cwd: '/tmp/durable-shared-queue',
+      shared: true,
+      sessionScope: 'shared',
+    });
+    const duraDb = new RealDatabase(':memory:');
+    duraDb.open();
+    const durability = new DurabilityEngine(duraDb);
+    runtime.setDurability(durability);
+    await runtime.start();
+
+    await runtime.handleMessage(makeMsg({ content: 'first active turn' }));
+    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith(
+      expect.stringContaining('first active turn'),
+    ));
+
+    const seq = durability.journalQueuedInbound(
+      'durable-follower',
+      'test',
+      'test@s.whatsapp.net',
+      'agentruntime',
+    );
+    await runtime.handleMessage(makeMsg({
+      messageId: 'durable-follower',
+      content: 'second queued turn',
+      inboundSeq: seq,
+      durableAdmission: 'pending',
+    }));
+
+    const readStatus = (): string => (duraDb.raw.prepare(
+      'SELECT processing_status FROM inbound_events WHERE seq = ?',
+    ).get(seq) as { processing_status: string }).processing_status;
+    expect(readStatus()).toBe('queued');
+
+    let admitFollower: (() => void) | undefined;
+    mockSession.sendTurnAtProviderBoundary.mockImplementationOnce(async (turnText: string, onReady?: () => void) => {
+      await new Promise<void>((resolve) => {
+        admitFollower = () => {
+          onReady?.();
+          void mockSession.sendTurn(turnText);
+          resolve();
+        };
+      });
+    });
+    capturedOnEventRef.current?.({ type: 'result', text: 'first complete' });
+    await vi.waitFor(() => expect(admitFollower).toBeTypeOf('function'));
+    expect(readStatus()).toBe('queued');
+
+    admitFollower?.();
+    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith(
+      expect.stringContaining('second queued turn'),
+    ));
+    expect(readStatus()).toBe('processing');
+
+    capturedOnEventRef.current?.({ type: 'result', text: 'second complete' });
+    await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
+    await runtime.shutdown();
+    duraDb.close();
+  });
+
+  it('keeps a singleton turn durably queued until its provider boundary opens', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'line-a', {
+      cwd: '/tmp/durable-single-queue',
+    });
+    const duraDb = new RealDatabase(':memory:');
+    duraDb.open();
+    const durability = new DurabilityEngine(duraDb);
+    runtime.setDurability(durability);
+    await runtime.start();
+
+    const seq = durability.journalQueuedInbound(
+      'durable-single',
+      'test',
+      'test@s.whatsapp.net',
+      'agentruntime',
+    );
+    const readStatus = (): string => (duraDb.raw.prepare(
+      'SELECT processing_status FROM inbound_events WHERE seq = ?',
+    ).get(seq) as { processing_status: string }).processing_status;
+    let admitTurn: (() => void) | undefined;
+    mockSession.sendTurnAtProviderBoundary.mockImplementationOnce(async (turnText: string, onReady?: () => void) => {
+      await new Promise<void>((resolve) => {
+        admitTurn = () => {
+          onReady?.();
+          void mockSession.sendTurn(turnText);
+          resolve();
+        };
+      });
+    });
+
+    await runtime.handleMessage(makeMsg({
+      messageId: 'durable-single',
+      content: 'single queued turn',
+      inboundSeq: seq,
+      durableAdmission: 'pending',
+    }));
+    await vi.waitFor(() => expect(admitTurn).toBeTypeOf('function'));
+    expect(readStatus()).toBe('queued');
+
+    admitTurn?.();
+    await vi.waitFor(() => expect(readStatus()).toBe('processing'));
+    capturedOnEventRef.current?.({ type: 'result', text: 'single complete' });
+    await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
+    await runtime.shutdown();
+    duraDb.close();
+  });
+
+  it('keeps a per-chat turn durably queued until its provider boundary opens', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'line-a', {
+      cwd: '/tmp/durable-per-chat-queue',
+      sessionScope: 'per_chat',
+    });
+    const duraDb = new RealDatabase(':memory:');
+    duraDb.open();
+    const durability = new DurabilityEngine(duraDb);
+    runtime.setDurability(durability);
+    await runtime.start();
+
+    const seq = durability.journalQueuedInbound(
+      'durable-per-chat',
+      'test',
+      'test@s.whatsapp.net',
+      'agentruntime',
+    );
+    const readStatus = (): string => (duraDb.raw.prepare(
+      'SELECT processing_status FROM inbound_events WHERE seq = ?',
+    ).get(seq) as { processing_status: string }).processing_status;
+    let admitTurn: (() => void) | undefined;
+    mockSession.sendTurnAtProviderBoundary.mockImplementationOnce(async (turnText: string, onReady?: () => void) => {
+      await new Promise<void>((resolve) => {
+        admitTurn = () => {
+          onReady?.();
+          void mockSession.sendTurn(turnText);
+          resolve();
+        };
+      });
+    });
+
+    await runtime.handleMessage(makeMsg({
+      messageId: 'durable-per-chat',
+      content: 'per-chat queued turn',
+      inboundSeq: seq,
+      durableAdmission: 'pending',
+    }));
+    await vi.waitFor(() => expect(admitTurn).toBeTypeOf('function'));
+    expect(readStatus()).toBe('queued');
+
+    admitTurn?.();
+    await vi.waitFor(() => expect(readStatus()).toBe('processing'));
+    capturedOnEventRef.current?.({ type: 'result', text: 'per-chat complete' });
+    await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
+    await runtime.shutdown();
+    duraDb.close();
+  });
+
+  it('fails closed before provider dispatch when durable execution ownership is lost', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'line-a', {
+      cwd: '/tmp/durable-claim-lost',
+    });
+    const duraDb = new RealDatabase(':memory:');
+    duraDb.open();
+    const durability = new DurabilityEngine(duraDb);
+    const claimExecution = vi.spyOn(durability, 'markInboundProcessing').mockReturnValue(false);
+    runtime.setDurability(durability);
+    await runtime.start();
+
+    const seq = durability.journalQueuedInbound(
+      'durable-claim-lost',
+      'test',
+      'test@s.whatsapp.net',
+      'agentruntime',
+    );
+
+    await runtime.handleMessage(makeMsg({
+      messageId: 'durable-claim-lost',
+      content: 'must not dispatch',
+      inboundSeq: seq,
+      durableAdmission: 'pending',
+    }));
+    await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
+
+    expect(claimExecution).toHaveBeenCalledWith(seq);
+    expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    expect((duraDb.raw.prepare(
+      'SELECT processing_status FROM inbound_events WHERE seq = ?',
+    ).get(seq) as { processing_status: string }).processing_status).toBe('failed');
+    await runtime.shutdown();
+    duraDb.close();
+  });
+
+  it('replays a queued inbound once and preserves the original durable identity', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'line-a', {
+      cwd: '/tmp/durable-restart-replay',
+    });
+    const duraDb = new RealDatabase(':memory:');
+    duraDb.open();
+    const durability = new DurabilityEngine(duraDb);
+    runtime.setDurability(durability);
+    await runtime.start();
+
+    storeReplayMessage(duraDb, 'restart-queued-once', 'resume this exact turn');
+    const seq = durability.journalQueuedInbound(
+      'restart-queued-once',
+      'test',
+      'test@s.whatsapp.net',
+      'agentruntime',
+    );
+    expect(durability.beginInboundPreparation(seq)).toBe(true);
+    expect(durability.markInboundQueued(seq)).toBe(true);
+
+    expect(await runtime.replayDurableInboundBacklog()).toMatchObject({
+      attempted: 1,
+      accepted: 1,
+      failed: 0,
+      suppressed: 0,
+      firstSeq: seq,
+      lastSeq: seq,
+    });
+    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith('resume this exact turn'));
+    expect((duraDb.raw.prepare(
+      'SELECT processing_status FROM inbound_events WHERE seq = ?',
+    ).get(seq) as { processing_status: string }).processing_status).toBe('processing');
+
+    expect(await runtime.replayDurableInboundBacklog()).toMatchObject({ accepted: 1 });
+    expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+    capturedOnEventRef.current?.({ type: 'result', text: 'replayed complete' });
+    await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
+    await runtime.shutdown();
+    duraDb.close();
+  });
+
+  it('fails a replay row closed when its prepared envelope cannot be reconstructed', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'line-a', {
+      cwd: '/tmp/durable-restart-invalid',
+    });
+    const duraDb = new RealDatabase(':memory:');
+    duraDb.open();
+    const durability = new DurabilityEngine(duraDb);
+    runtime.setDurability(durability);
+    await runtime.start();
+
+    storeReplayMessage(duraDb, 'restart-invalid-media', '[image]', 'image');
+    const seq = durability.journalQueuedInbound(
+      'restart-invalid-media',
+      'test',
+      'test@s.whatsapp.net',
+      'agentruntime',
+    );
+    expect(durability.beginInboundPreparation(seq)).toBe(true);
+    expect(durability.markInboundQueued(seq)).toBe(true);
+
+    expect(await runtime.replayDurableInboundBacklog()).toMatchObject({
+      attempted: 1,
+      accepted: 0,
+      failed: 1,
+      suppressed: 0,
+    });
+    expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    expect((duraDb.raw.prepare(
+      'SELECT processing_status, failure_class FROM inbound_events WHERE seq = ?',
+    ).get(seq) as { processing_status: string; failure_class: string })).toEqual({
+      processing_status: 'failed',
+      failure_class: 'crash_recovery',
+    });
+    await runtime.shutdown();
+    duraDb.close();
+  });
+
+  it('leaves replay rows queued when restart-loop suppression is active', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'line-a', {
+      cwd: '/tmp/durable-restart-suppressed',
+    });
+    const duraDb = new RealDatabase(':memory:');
+    duraDb.open();
+    const durability = new DurabilityEngine(duraDb);
+    runtime.setDurability(durability);
+    await runtime.start();
+
+    storeReplayMessage(duraDb, 'restart-suppressed', 'do not replay in a crash loop');
+    const seq = durability.journalQueuedInbound(
+      'restart-suppressed',
+      'test',
+      'test@s.whatsapp.net',
+      'agentruntime',
+    );
+    (runtime as unknown as { startupInboundReplaySuppressed: boolean })
+      .startupInboundReplaySuppressed = true;
+
+    expect(await runtime.replayDurableInboundBacklog()).toMatchObject({
+      attempted: 0,
+      accepted: 0,
+      failed: 0,
+      suppressed: 1,
+    });
+    expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    expect((duraDb.raw.prepare(
+      'SELECT processing_status FROM inbound_events WHERE seq = ?',
+    ).get(seq) as { processing_status: string }).processing_status).toBe('pending');
+    await runtime.shutdown();
+    duraDb.close();
+  });
+
+  it('claims and completes a durable local command without provider dispatch', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'line-a', {
+      cwd: '/tmp/durable-local-command',
+    });
+    const duraDb = new RealDatabase(':memory:');
+    duraDb.open();
+    const durability = new DurabilityEngine(duraDb);
+    runtime.setDurability(durability);
+    await runtime.start();
+
+    const seq = durability.journalQueuedInbound(
+      'durable-local-status',
+      'test',
+      'test@s.whatsapp.net',
+      'agentruntime',
+    );
+    await runtime.handleMessage(makeMsg({
+      messageId: 'durable-local-status',
+      content: '/status',
+      inboundSeq: seq,
+      durableAdmission: 'pending',
+    }));
+    await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
+
+    expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    expect((duraDb.raw.prepare(
+      'SELECT processing_status, terminal_reason FROM inbound_events WHERE seq = ?',
+    ).get(seq) as { processing_status: string; terminal_reason: string })).toEqual({
+      processing_status: 'complete',
+      terminal_reason: 'local_command_handled',
+    });
+    await runtime.shutdown();
+    duraDb.close();
+  });
+
+  it('claims a durable forwarded command exactly once at provider admission', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'line-a', {
+      cwd: '/tmp/durable-forwarded-command',
+    });
+    const duraDb = new RealDatabase(':memory:');
+    duraDb.open();
+    const durability = new DurabilityEngine(duraDb);
+    const claimExecution = vi.spyOn(durability, 'markInboundProcessing');
+    runtime.setDurability(durability);
+    await runtime.start();
+
+    const seq = durability.journalQueuedInbound(
+      'durable-model-default',
+      'test',
+      'test@s.whatsapp.net',
+      'agentruntime',
+    );
+    await runtime.handleMessage(makeMsg({
+      messageId: 'durable-model-default',
+      content: '/model default',
+      inboundSeq: seq,
+      durableAdmission: 'pending',
+    }));
+    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith('/model default'));
+
+    expect(claimExecution).toHaveBeenCalledTimes(1);
+    expect(claimExecution).toHaveBeenCalledWith(seq);
+    capturedOnEventRef.current?.({ type: 'result', text: 'forwarded complete' });
+    await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
+    await runtime.shutdown();
+    duraDb.close();
   });
 
   it('continues the agent turn when inline extraction hits a recoverable persistence error', async () => {
@@ -9488,6 +9909,7 @@ describe('AgentRuntime', () => {
     });
     let localOnEvent: ((event: AgentEvent) => void) | null = null;
 
+    const localSendTurn = vi.fn(async (_text: string) => {});
     const localSession = {
       ...mockSession,
       getStatus: vi.fn(() => ({
@@ -9503,7 +9925,11 @@ describe('AgentRuntime', () => {
         await spawnBlocked;
         active = true;
       }),
-      sendTurn: vi.fn(async () => {}),
+      sendTurn: localSendTurn,
+      sendTurnAtProviderBoundary: vi.fn(async (text: string, onReady?: () => void) => {
+        onReady?.();
+        await localSendTurn(text);
+      }),
       shutdown: vi.fn(async () => {}),
     };
     (MockSessionManagerCtor as unknown as ReturnType<typeof vi.fn>).mockImplementation(function (

@@ -16,7 +16,7 @@ WhatSoup addresses this with a write-ahead journal approach: every outbound send
 
 2. **Echo never arrives** — the message was delivered but the WebSocket echo was lost (e.g., brief disconnect). The 30-second sweep (`sweepStaleSubmitted`) and post-connect reconciliation against the messages table handle this.
 
-3. **Interrupted inbound processing** — an incoming message started an agent turn but the process crashed before the terminal transaction. Recovery never blindly replays that prompt. A turn with exact immutable identity and unresolved delivery evidence can transfer to a proof-linked recovery job; an arbitrary open inbound with no provable owner is marked `failed` and remains operator-visible instead of risking duplicate provider or tool side effects.
+3. **Interrupted inbound processing** — agent text input that is durably proven not to have reached the provider boundary remains replayable as `pending` or `queued`. Input in replay-unsafe preparation or whose provider/tool side effects may have begun is never blindly replayed: `preparing` and `processing` are failed closed during crash recovery. A later turn with exact immutable identity and unresolved delivery evidence can instead transfer to a proof-linked recovery job.
 
 ---
 
@@ -26,7 +26,14 @@ WhatSoup addresses this with a write-ahead journal approach: every outbound send
 
 Every message that enters the bot's processing pipeline is written to `inbound_events` as the _first_ action, before any routing or LLM call. The journal entry carries a monotonically increasing `seq` number that threads through the entire lifecycle.
 
-The `routed_to` column records which runtime handled the message (`agent`, `chat`, `passive`, etc.). If a process crash occurs while a turn is in progress, pre-connect recovery can inspect `routed_to` to understand what context was lost.
+The `routed_to` column records which runtime handled the message (`agentruntime`, `chatruntime`, `passive`, etc.). AgentRuntime text inputs use four non-terminal admission states:
+
+- `pending`: journaled after ingress policy accepted the message, before runtime preprocessing.
+- `preparing`: runtime preprocessing or durable inline side effects may be running; not automatically replayable.
+- `queued`: preprocessing finished and provider execution is proven not to have started.
+- `processing`: the exact provider-admission callback ran, or a local command began; side effects may have started.
+
+Other runtimes and non-text agent input retain the legacy `processing`-at-insert behavior until they expose an equally precise replay boundary. `pending` and `queued` rows are reconstructed from the canonical `messages` record; message content is not duplicated into another replay ledger.
 
 An inbound event becomes terminal from the outcome selected by the immutable turn finalizer, not from echo alone. An echoed answer produces `finalized_replied`; an explicit suppression policy can produce `finalized_no_reply_policy`; a terminal provider/runtime failure produces `failed_terminal`; and unresolved delivery transfers to an exact recovery owner. Legacy `is_terminal` outbound ops still complete their linked inbound when echoed, but that compatibility path is not the complete terminal model.
 
@@ -75,36 +82,28 @@ The policy is set at creation time by the caller. Autonomous bot responses (via 
 ### 3.1 Inbound Event Lifecycle
 
 ```
-                        ┌─────────────────────────────────────────┐
-                        │                                         │
-  journalInbound()      │  processing_status progression          │
-  ─────────────────     │                                         │
-                        │                                         │
-  INSERT → 'processing' ─┤                                        │
-                         │                                        │
-                         ├─ markTurnDone() ──────► turn_done      │
-                         │                             │          │
-                         │                             │ markInboundComplete()
-                         │                             ▼          │
-                         │                         complete ◄─────┘
-                         │                             ▲
-                         │  (also reachable directly   │
-                         │   from processing via        │
-                         │   markInboundComplete or     │
-                         │   markInboundSkipped)        │
-                         │                             │
-                         ├─ markInboundFailed() ──► failed
-                         │
-                         │ (pre-connect recovery:
-                         │  processing with no terminal
-                         │  outbound op → failed)
+agent text:  INSERT → pending → preparing → queued → processing
+                                                     │       │
+legacy path: INSERT ────────────────────────────────► │       │
+                                                     │       ├─► failed
+                                                     ▼       │
+                                                  turn_done  │
+                                                     │       │
+                                                     └───────┴─► complete
+
+restart: pending/queued replay; preparing/processing fail closed unless
+         existing terminal-delivery evidence owns reconciliation
 ```
 
 **Transitions:**
 
 | From | To | Trigger |
 |---|---|---|
-| `pending` | `processing` | Initial insert (journalInbound writes `processing` directly) |
+| new agent text row | `pending` | `journalQueuedInbound()` after ingress policy and trigger admission |
+| `pending` | `preparing` | `beginInboundPreparation()` before runtime preprocessing or inline durable effects |
+| `preparing` | `queued` | `markInboundQueued()` after preparation, before the runtime/provider queue |
+| `queued` | `processing` | `markInboundProcessing()` at the exact provider boundary or immediately before local-command effects |
+| new legacy row | `processing` | `journalInbound()` for non-replay-capable paths |
 | `processing` | `turn_done` | `markTurnDone()` — agent/chat runtime signals the LLM turn completed |
 | `turn_done` | `complete` | `markInboundComplete()` — terminal outbound op echoed |
 | `processing` | `complete` | `markInboundSkipped()` — message filtered/skipped without a turn (e.g. `local_command`, `empty_content`) |
@@ -191,9 +190,9 @@ Queries `tool_calls` with `status IN ('executing', 'pending')`. For each:
 - If `outbound_op_id IS NULL AND replay_policy IN ('safe', 'read_only')`: mark as `replayed`. The runtime will re-issue the tool call when it replays the conversation turn.
 - If `outbound_op_id IS NULL AND replay_policy = 'unsafe'`: mark as `quarantined`. Manual resolution required.
 
-**Step 4 — Mark abandoned inbound events `failed`**
+**Step 4 — Fail only crash-ambiguous inbound events**
 
-Queries `inbound_events` with `processing_status = 'processing'`. For each:
+Queries `inbound_events` with `processing_status IN ('preparing', 'processing')`. `pending` and `queued` are deliberately preserved for bounded post-connect replay. For each crash-ambiguous row:
 
 - Checks if a non-quarantined, non-permanently-failed **terminal** outbound op exists with `source_inbound_seq` matching this event.
 - If no such op exists: mark the inbound event `failed`. The message was being processed when the crash occurred and never produced a reply.
@@ -206,6 +205,21 @@ receipt finalization fails, the run remains open (`completed_at IS NULL`), its b
 `status: "incomplete"` and the failed phase names, and the primary error is rethrown. Mutations made by
 earlier successful phases remain durable and are owned by that incomplete receipt for the next
 recovery attempt; partial recovery is never reported as complete.
+
+### 4.1.1 Bounded Inbound Restart Replay
+
+After the transport connects and outbound post-connect reconciliation/draining completes, AgentRuntime performs one bounded startup replay pass (100 rows by default, hard-capped at 200 per query). Only rows satisfying every condition below are selected:
+
+- `processing_status IN ('pending', 'queued')`
+- `routed_to = 'agentruntime'`
+- a canonical inbound `messages` row still exists
+- `messages.is_from_me = 0`
+
+`pending` rows re-enter AgentRuntime preprocessing. `queued` rows skip preprocessing that already completed. Both keep the original `inbound_events.seq`; single, shared, and per-chat runtime modes change `queued → processing` only inside the provider-boundary callback supplied by `SessionManager.sendTurnAtProviderBoundary()`. A compare-and-swap failure aborts before provider dispatch. Local commands claim `processing` before command effects and complete through the existing local-command terminal path.
+
+This is admission replay, not provider-result replay and not delivery reconciliation. The row already passed pause, passive-instance, admin-command, access, and trigger gates before it was journaled; startup replay does not manufacture a second ingress event or approval side effect. Group self-mentions are stripped again from the canonical stored text. Malformed envelopes and prepared non-text rows fail closed as `failed/crash_recovery`.
+
+The pass is idempotent within a boot. The restart-loop guard suppresses both proactive session resume and inbound replay after repeated crash-interrupted boots. Suppression or reconstruction failure degrades runtime health and emits a content-free alert with the bounded sequence range. Any replayable row older than 15 minutes degrades global health. Rows beyond the startup batch remain durable and visible to that health check; they are not silently treated as handled.
 
 ### 4.2 Post-Connect Recovery (`postConnectRecovery`)
 
@@ -579,7 +593,7 @@ delivery proof while adding auditable completion and conflict evidence.
 | `chat_jid` | TEXT NOT NULL | Raw WhatsApp JID. Kept for diagnostic queries. |
 | `received_at` | TEXT | Timestamp of journal insertion (datetime, defaults to `now`). |
 | `routed_to` | TEXT | Runtime that handled the message (`agent`, `chat`, `passive`, etc.). |
-| `processing_status` | TEXT NOT NULL | Lifecycle state: `pending`, `processing`, `turn_done`, `complete`, `failed`. Default `pending`. |
+| `processing_status` | TEXT NOT NULL | Lifecycle state: `pending`, `preparing`, `queued`, `processing`, `turn_done`, `complete`, `failed`. Default `pending`; legacy `journalInbound()` explicitly inserts `processing`. Only AgentRuntime text rows in `pending`/`queued` are startup-replay candidates. |
 | `completed_at` | TEXT | Timestamp when status reached a terminal state. |
 | `terminal_reason` | TEXT | Human-readable terminal cause: `response_sent`, `error`, `local_command` / `empty_content` (skipped without a turn), `recovered_turn_done` / `recovered_response_sent` (finalized by recovery or the stuck-inbound reconciler §4.5), etc. Every failed row keeps `terminal_reason = 'error'` exactly (an external matcher contract); the driver split lives in `failure_class`. |
 | `failure_class` | TEXT | Bounded, content-free failure driver stamped alongside `terminal_reason = 'error'` on a failed row. Migration 36; nullable, no CHECK/default/backfill/index (the vocabulary is gated in code at `src/core/inbound-failure-class.ts`). One of: `provider_failure`, `transport_send_failed`, `transport_disconnected`, `timeout`, `db_error`, `session_crash`, `session_spawn_failed`, `crash_recovery`, `stale_reclaim`, the admission-rejection subclasses `queue_full` / `queue_halted` / `queue_closed` / `pre_dispatch_error` / `scope_blocked_recovery` (#1750), `recovery_owner_reclaimed` (#1749), or `unknown`. **NULL** = a pre-taxonomy row (failed before migration 36); **`unknown`** = classified but unattributable. Crash reclaim in `preConnectRecovery` stamps `crash_recovery`; the stuck-inbound reconciler (§4.5) stamps `stale_reclaim` (bucket 3) and `recovery_owner_reclaimed` (bucket 4, the recovery-owner reclaim of §4.7). An admitted-then-rejected turn stamps its distinct rejection driver (queue depth-cap shed, halt, closed admissions, pre-dispatch error, or recovery-scope block) instead of collapsing to `unknown`, so alerting can page on a queue halt without false-positiving on a benign capacity shed. |

@@ -495,12 +495,19 @@ export function createIngestHandler(
           return;
         }
 
-        // 5. Journal inbound event before dispatch so runtime can link outbound ops
+        // 5. Journal inbound event before dispatch so runtime can link outbound ops.
+        // Agent text turns opt into the pending → preparing → queued → processing
+        // protocol; other runtimes/content retain the legacy processing-at-insert
+        // behavior until they expose an exact replay seam.
         const routedTo = runtime.constructor?.name?.toLowerCase() ?? 'runtime';
         let seq: number | undefined;
         if (durability) {
-          seq = durability.journalInbound(msg.messageId, conversationKey, msg.chatJid, routedTo);
+          const replayCapable = runtime.supportsDurableInboundReplay?.(msg) === true;
+          seq = replayCapable
+            ? durability.journalQueuedInbound(msg.messageId, conversationKey, msg.chatJid, routedTo)
+            : durability.journalInbound(msg.messageId, conversationKey, msg.chatJid, routedTo);
           msg.inboundSeq = seq;  // Thread seq into runtime for lifecycle tracking
+          if (replayCapable) msg.durableAdmission = 'pending';
         }
 
         // Strip the bot's own @mention token from inbound GROUP text so the agent
