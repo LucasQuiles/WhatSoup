@@ -1340,33 +1340,59 @@ export class SessionManager {
     this.durableFailureClosed = true;
   }
 
-  private foreignResumeOwnership(
+  private foreignResumeRetirementEligibility(
     providerSessionId: string,
     existingRowId: number | undefined,
   ): { rowId: number; provider: string } | null {
-    const rowPredicates = [
-      'session_id = ?',
-      'workspace_key = ?',
-      `status IN ('active', 'suspended', 'orphaned', 'crashed')`,
-    ];
-    const rowBindings: Array<string | number> = [providerSessionId, this.conversationKey];
-    if (existingRowId !== undefined) {
-      rowPredicates.push('id = ?');
-      rowBindings.push(existingRowId);
-    }
-    const rows = this.db.raw.prepare(
-      `SELECT id, provider
-       FROM agent_sessions
-       WHERE ${rowPredicates.join('\n         AND ')}
-       ORDER BY id`,
-    ).all(...rowBindings) as Array<{
-      id: number;
-      provider: string | null;
-    }>;
-    if (rows.length !== 1 || rows[0]!.provider === null || rows[0]!.provider === this.provider) {
+    try {
+      const rows = this.db.raw.prepare(
+        `SELECT id, provider, workspace_key
+         FROM agent_sessions
+         WHERE session_id = ?
+           AND status IN ('active', 'suspended', 'orphaned', 'crashed')
+         ORDER BY id`,
+      ).all(providerSessionId) as Array<{
+        id: number;
+        provider: string | null;
+        workspace_key: string | null;
+      }>;
+      if (rows.length !== 1) return null;
+      const row = rows[0]!;
+      if (
+        row.provider === null
+        || row.provider === this.provider
+        || row.workspace_key !== this.conversationKey
+        || (existingRowId !== undefined && row.id !== existingRowId)
+      ) {
+        return null;
+      }
+      const checkpoints = this.db.raw.prepare(
+        `SELECT conversation_key, session_status
+         FROM session_checkpoints
+         WHERE session_id = ?
+         ORDER BY id`,
+      ).all(providerSessionId) as Array<{
+        conversation_key: string;
+        session_status: string;
+      }>;
+      if (
+        checkpoints.length !== 1
+        || checkpoints[0]!.conversation_key !== this.conversationKey
+        || !['active', 'suspended', 'orphaned'].includes(checkpoints[0]!.session_status)
+      ) {
+        return null;
+      }
+      return { rowId: row.id, provider: row.provider };
+    } catch (err) {
+      log.warn({
+        err,
+        event: 'foreign-resume-retirement-eligibility-failed',
+        provider: this.provider,
+        conversationKey: this.conversationKey,
+        hasExplicitRowId: existingRowId !== undefined,
+      }, 'foreign resume retirement eligibility check failed closed');
       return null;
     }
-    return { rowId: rows[0]!.id, provider: rows[0]!.provider };
   }
 
   private closeDurableFailureLifecycle(
@@ -1479,25 +1505,30 @@ export class SessionManager {
         ...(existingRowId === undefined ? {} : { agentSessionRowId: existingRowId }),
         workspaceKey: this.conversationKey,
       };
-      const foreignOwnership = this.foreignResumeOwnership(resumeSessionId, existingRowId);
-      if (foreignOwnership !== null) {
-        let ownershipError: unknown = null;
-        try {
-          resolveResumableAgentSession(this.db, resumeIdentity);
-        } catch (err) {
-          ownershipError = err;
+      try {
+        resolvedRowId = resolveResumableAgentSession(this.db, resumeIdentity).id;
+      } catch (resolutionError) {
+        const eligibility = this.foreignResumeRetirementEligibility(resumeSessionId, existingRowId);
+        if (eligibility !== null) {
+          try {
+            this.retireUnsupportedResume(
+              resumeSessionId,
+              eligibility.rowId,
+              eligibility.provider,
+            );
+          } catch (retirementError) {
+            log.warn({
+              err: retirementError,
+              event: 'foreign-resume-retirement-failed',
+              provider,
+              persistedProvider: eligibility.provider,
+              conversationKey: this.conversationKey,
+              rowId: eligibility.rowId,
+            }, 'foreign resume retirement failed; preserving canonical resolution error');
+          }
         }
-        if (ownershipError === null) {
-          throw new Error('Foreign resume ownership preflight disagreed with persisted resolution');
-        }
-        this.retireUnsupportedResume(
-          resumeSessionId,
-          foreignOwnership.rowId,
-          foreignOwnership.provider,
-        );
-        throw ownershipError;
+        throw resolutionError;
       }
-      resolvedRowId = resolveResumableAgentSession(this.db, resumeIdentity).id;
       if (this.routePolicy) {
         try {
           assertCheckpointRoutePolicyCompatible(
