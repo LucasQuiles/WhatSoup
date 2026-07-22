@@ -5,8 +5,29 @@
   /* ═══ Layout constants ═══ */
   --toolbar-h: 50px;         /* toolbar row min-height (nav is 52px) */
   --nav-h: 52px;             /* top nav bar height (legacy top-bar chrome; retained for toolbar parity) */
-  --rail-w: 220px;           /* vertical left-rail chrome width — expanded (label-bearing) state */
   --rail-w-collapsed: 64px;  /* vertical left-rail chrome width — narrow/icon-only collapse */
+  /* ═══ v3.5 global chrome geometry (b-02; SSOT docs/design-system/v35/mockups/*.html).
+     Mockup literals live here (component tier, dimension-allowlisted) so the chrome
+     stylesheet consumes only var() — colors come from the -v35 semantic addendum
+     (tokens.semantic.css §A), radii from the console register (--r-console-md, L4). ═══ */
+  --chrome-rail-w: 212px;          /* rail width, expanded (mockup nav) */
+  --chrome-rail-pad: 14px 10px;    /* rail padding */
+  --chrome-rail-gap: 2px;          /* rail item stack gap */
+  --chrome-nameplate-pad: 2px 8px 16px; /* nameplate block (mockup .nameplate) */
+  --chrome-sec-pad: 14px 10px 6px; /* section label (mockup .nav-sec) */
+  --chrome-item-pad: 7px 10px;     /* nav item (mockup .nav-item) */
+  --chrome-item-gap: 10px;         /* nav item icon↔label gap */
+  --chrome-hosts-pad-top: 10px;    /* hosts block top padding (mockup .deploy) */
+  --chrome-hostchip-pad: 6px 10px; /* host chip row (mockup .hchip) */
+  --chrome-header-pad: 14px 22px 12px; /* chrome header (mockup header) */
+  --chrome-header-gap: 14px;       /* chrome header item gap */
+  --chrome-icon: 16px;             /* rail glyph canvas (11-channel-glyphography §1: 16px floor) */
+  --chrome-dot: 6px;               /* inbox attention dot + host status dot (mockup .dot/.hst) */
+  --chrome-micro-radius: 1px;      /* tick/dot/host-warn corner (sub-grid; badge.md shape family) */
+  --chrome-pill-radius: 99px;      /* attn pill (mockup .attn) */
+  --chrome-attn-pad: 5px 12px;     /* attn pill padding (mockup .attn) */
+  --tracking-ctx: 0.18em;          /* nameplate ctx caps tracking (mockup .ctx) */
+  --tracking-chrome-title: -0.02em; /* chrome header h1 tracking (mockup h1) */
   /* ═══ Element sizes — from design spec §2 ═══ */
   --dot-table: 8px;          /* status dot in tables */
   --dot-feed: 6px;           /* status dot in feeds */

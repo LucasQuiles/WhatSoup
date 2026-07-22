@@ -630,3 +630,24 @@ Additive names; v3 names stay live for current surfaces; v3.5 surface beads cons
   lint error (L4 broad enforcement).
 
 Theme-parity token count moves 123 → 139 (+16 v3.5 names in each scope).
+
+## 11. v3.5 chrome geometry (docs/design-system/v35/mockups/*.html, landed b-02)
+
+Component-tier dimension tokens in `console/src/styles/tokens.component.css`, single
+`:root` scope (theme-independent geometry; parity count unaffected). The mockup
+literals are the visual SSOT — they live here, dimension-allowlisted, so the chrome
+stylesheet (`console/src/styles/chrome.css`) consumes `var()` only: colors from the
+`-v35` semantic addendum (§A), radii from the console register (`--r-console-md`, L4).
+
+- **Rail** — `--chrome-rail-w` 212px (expanded), `--chrome-rail-pad`, `--chrome-rail-gap`;
+  collapse width stays `--rail-w-collapsed` 64px (breakpoint moves 760px → 1100px per
+  mockup `@media (max-width:1100px)`). Legacy `--rail-w` 220px retired.
+- **Nameplate/sections/items** — `--chrome-nameplate-pad`, `--chrome-sec-pad`,
+  `--chrome-item-pad`, `--chrome-item-gap`, `--chrome-icon` 16px (11-channel-glyphography
+  §1 floor), `--chrome-dot` 6px (inbox attention dot + host status dot).
+- **Hosts block** — `--chrome-hosts-pad-top`, `--chrome-hostchip-pad`.
+- **Header** — `--chrome-header-pad`, `--chrome-header-gap`,
+  `--tracking-chrome-title` −0.02em (Bricolage h1), `--tracking-ctx` 0.18em (nameplate
+  ctx caps).
+- **Shape details** — `--chrome-micro-radius` 1px (tick/dot/host-warn corner; badge.md
+  shape family), `--chrome-pill-radius` 99px + `--chrome-attn-pad` (header attn pill).
