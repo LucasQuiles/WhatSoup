@@ -197,6 +197,54 @@
   white-space: nowrap;
 }
 
+.chrome-utility-row svg {
+  width: var(--sp-3);
+  height: var(--sp-3);
+  flex: none;
+}
+
+/* Utility ink tiers — Live = ok channel; Polling = AA text-2 (DD-8 contract:
+   essential degraded-transport text never drops to ghost); version +
+   lock recessed; update CTA = chat channel (carries the v3 semantic). */
+.chrome-utility-row--ok {
+  color: var(--status-ok-solid);
+}
+
+.chrome-utility-row--dim {
+  color: var(--text-2-v35);
+}
+
+.chrome-utility-row--recessed {
+  color: var(--text-3-v35);
+}
+
+/* Clickable utility rows (update available, lock) — rendered through the
+   Button primitive (soup/no-raw-button); these overrides re-register it to
+   the chrome dock: left-aligned, mono, auto height. Scoped selectors beat
+   the primitive's variant specificity without !important. */
+.chrome-utility button.chrome-utility-row {
+  height: auto;
+  width: 100%;
+  justify-content: flex-start;
+  padding: 0;
+  font: var(--type-data-sm);
+  border-radius: var(--r-console-sm);
+}
+
+.chrome-utility button.chrome-utility-row--update,
+.chrome-utility button.chrome-utility-row--update:not([disabled]):not([aria-disabled="true"]):hover {
+  color: var(--mode-chat-solid);
+  background: var(--mode-chat-wash);
+  padding-left: var(--sp-1);
+  padding-right: var(--sp-1);
+}
+
+.chrome-utility button.chrome-utility-row--lock,
+.chrome-utility button.chrome-utility-row--lock:not([disabled]):not([aria-disabled="true"]):hover {
+  color: var(--text-2-v35);
+  background: transparent;
+}
+
 /* --------------------------------------------------------------------------
    HEADER — page title + attention pill + rightmost theme toggle
    (mockup main > header). b-02 owns title/spacer/toggle; page actions
@@ -260,33 +308,32 @@
   flex: 1;
 }
 
-/* Theme toggle — sun SVG + mono label, rightmost (mockup .theme-toggle).
-   Ghost recipe on the v3.5 register: transparent bed, subtle keyline. */
-.chrome-theme-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-2);
+/* Theme toggle — sun SVG + mono label, rightmost (mockup .theme-toggle),
+   rendered through the Button primitive (soup/no-raw-button) and re-registered
+   to the chrome header: transparent bed, subtle keyline, mono label. Scoped
+   selectors beat the primitive's variant specificity without !important. */
+.chrome-header button.chrome-theme-toggle {
   padding: var(--chrome-btn-pad);
+  border-color: var(--border-subtle-v35);
   border-radius: var(--r-console-md);
-  border: var(--bw) solid var(--border-subtle-v35);
   background: transparent;
   color: var(--text-2-v35);
   font: var(--type-data);
-  cursor: pointer;
   transition: transform var(--dur-fast) var(--ease-enter),
     box-shadow var(--dur-fast) var(--ease-enter),
     background var(--dur-fast) var(--ease-enter);
 }
 
-.chrome-theme-toggle:hover {
+.chrome-header button.chrome-theme-toggle:not([disabled]):not([aria-disabled="true"]):hover {
   transform: translateY(calc(-1 * var(--bw)));
   box-shadow: var(--shadow-lift-v35);
   color: var(--text-1-v35);
+  background: transparent;
 }
 
-.chrome-theme-toggle:focus-visible {
-  outline: var(--bw-accent) solid var(--focus-ring);
-  outline-offset: var(--bw-accent);
+.chrome-header button.chrome-theme-toggle svg {
+  width: var(--sp-3);
+  height: var(--sp-3);
 }
 
 /* --------------------------------------------------------------------------

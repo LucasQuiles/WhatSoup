@@ -903,7 +903,7 @@ body::before {
 /* Per-step state label, visually hidden — §12 status law requires state to
    reach assistive tech as TEXT, never by the ✓ glyph or colour alone. The
    sr-only recipe is expressed with --bw (1px) so no raw dimension literal lands
-   outside the token files (mirrors .soup-rail__label). */
+   outside the token files. */
 .soup-wiz-steps__sr {
   position: absolute;
   width: var(--bw);
@@ -990,11 +990,6 @@ textarea:focus-visible {
 /* Chart panel expand/collapse column — opacity only; layout properties snap (DD-18) */
 .c-chart-expand-col {
   transition: opacity var(--dur-slow) var(--ease-enter);
-}
-
-/* Nav link hover */
-.c-nav-link {
-  transition: background 0.15s var(--ease-enter), color 0.15s var(--ease-enter);
 }
 
 /* Dropdown item hover */
