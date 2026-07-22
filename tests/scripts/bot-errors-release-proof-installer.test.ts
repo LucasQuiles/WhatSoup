@@ -6,7 +6,26 @@ import {
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+/**
+ * Every test here drives the real installer through `spawnSync`, so the cost is subprocess
+ * and filesystem work rather than anything this suite could compute faster.
+ *
+ * Measured on an idle machine: 11 of the 34 tests take 2.1-2.9s, against the 10s default
+ * from vitest.config.ts. That is 3.4-4.7x headroom on a quiet box, and CI runners are
+ * several times slower while running the suite in parallel — so the default is decided by
+ * runner load rather than by the code under test. Two tests elsewhere in the repo have
+ * already flaked exactly that way this week (`lines-checkpoints`, `doc-drift-check`), each
+ * costing a full CI cycle to diagnose, and each failing on ONE Node version while passing
+ * on the other with everything else green.
+ *
+ * A file-level budget rather than per-test annotations: all 34 share the same
+ * spawn-the-installer shape, so the reason is a property of the file, not of any one case.
+ * This raises the ceiling; it does not make anything slower, and a genuine hang still fails
+ * — just at 60s instead of 10s.
+ */
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 
 const INSTALLER = join(process.cwd(), 'deploy/scripts/install-bot-errors-release-proof.sh');
 const SYNTH_HOST = 'rp-test-host';
