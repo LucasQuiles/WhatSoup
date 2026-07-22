@@ -118,7 +118,11 @@ import { createCatalogueSnapshotCache, type CatalogueSnapshotCache, type Catalog
 import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
 import { formatChatRefForOwner } from '../../core/chat-display-name.ts';
-import { OWNER_BULLET, bulletedSection, modelModifierTags, modifierSuffix, MODEL_CATALOGUE_CAP } from './owner-render-format.ts';
+import {
+  OWNER_BULLET, MODEL_CATALOGUE_CAP, bulletedSection, displayedRoute,
+  fallbackReconfirmationOutcome, fallbackRouteLabel, isDisplayedRoute,
+  modelModifierTags, modifierSuffix, renderPinPreferenceOutcome, savedPreferenceLine,
+} from './owner-render-format.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
 import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
@@ -9136,17 +9140,7 @@ export class AgentRuntime implements Runtime {
    * switch says so, honestly distinguishing "now" from "next message".
    */
   private renderPinOutcomeEcho(label: string, outcome: RouteRecycleOutcome): string {
-    const fallbackRoute = this.activeFallbackRouteLabel();
-    if (fallbackRoute) {
-      return `_Saved ${label} as this chat's 24h preference. Health fallback is active; new sessions still use ${fallbackRoute} until recovery. reply keep to make it permanent, /reset to undo._`;
-    }
-    if (outcome === 'recycled') {
-      return `_Now answering with ${label}. reply keep to make it permanent, /reset to undo._`;
-    }
-    if (outcome === 'deferred') {
-      return `_${label} is pinned — it'll answer from your next message. reply keep to make it permanent, /reset to undo._`;
-    }
-    return `_Pinned ${label} for 24h — reply keep to make it permanent, /reset to undo._`;
+    return renderPinPreferenceOutcome(label, outcome, fallbackRouteLabel(this.effectiveFallbackEntry));
   }
 
   /**
@@ -9172,11 +9166,8 @@ export class AgentRuntime implements Runtime {
     label: string,
     alreadySetText: string,
   ): string {
-    const fallbackRoute = this.activeFallbackRouteLabel();
-    if (fallbackRoute) {
-      const lifetime = alreadySetText.includes('sticky') ? 'permanent' : 'extended for 24h';
-      return `_Saved preference remains ${label} (${lifetime}). Health fallback is active; new sessions still use ${fallbackRoute} until recovery. /reset to undo._`;
-    }
+    const fallbackOutcome = fallbackReconfirmationOutcome(label, alreadySetText, fallbackRouteLabel(this.effectiveFallbackEntry));
+    if (fallbackOutcome) return fallbackOutcome;
     const recycleOutcome = this.applyRouteChangeAndRecycle(chatJid, senderJid, perChatMapKey);
     if (recycleOutcome === 'noop') return alreadySetText;
     return this.renderPinOutcomeEcho(label, recycleOutcome);
@@ -9474,8 +9465,7 @@ export class AgentRuntime implements Runtime {
   private async sendDynamicModelCatalogueSection(chatJid: string, senderJid: string, filter: string | null): Promise<void> {
     try {
       const { live, next } = this.loadRouteView(chatJid, senderJid);
-      const currentProvider = live?.provider ?? next.provider;
-      const currentModel = live ? live.model : next.model;
+      const current = displayedRoute(live, next);
       const candidates: Array<{ provider: string; model: string }> = [];
       if (this.model !== undefined) candidates.push({ provider: this.agentProvider, model: this.model });
       for (const e of this.agentFallbacks) {
@@ -9493,7 +9483,7 @@ export class AgentRuntime implements Runtime {
       if (shown.length > 0) {
         lines.push('*Pick a model:*');
         shown.forEach((e, i) => {
-          const isCurrent = e.provider === currentProvider && e.model === currentModel;
+          const isCurrent = isDisplayedRoute(e, current);
           lines.push(`${i + 1}. ${e.provider} (${e.model})${isCurrent ? ' (active route)' : ''}`);
         });
         lines.push('Reply `/model N` to switch to that one.');
@@ -9565,15 +9555,7 @@ export class AgentRuntime implements Runtime {
     // verified (Task H honesty rule) — an unverified/deferred model pin
     // would otherwise claim to be serving a model that was never confirmed
     // to exist; it falls back to the provider/intent, same as before.
-    const prefLine = pref
-      ? `Saved preference: ${(pref.modelPinVerified === true ? pref.requestedModel : null) ?? (pref.requestedProvider ?? pref.intent)}` +
-        (pref.expiresAt !== null
-          ? ` (expires in ~${Math.max(1, Math.round((pref.expiresAt - Date.now()) / 3_600_000))}h)`
-          : '') +
-        (this.isFallbackWindowActive
-          ? ' — health fallback currently decides new sessions'
-          : ' — steers new sessions')
-      : 'Saved preference: none';
+    const prefLine = savedPreferenceLine(pref, this.isFallbackWindowActive);
     // B25 F8: the active-window and Next lines were model-blind — a
     // same-provider window pinning a DIFFERENT model rendered without the
     // model and suppressed the Next line entirely. Render "provider (model)"
@@ -9632,12 +9614,6 @@ export class AgentRuntime implements Runtime {
   private get effectiveFallbackEntry(): AgentFallbackEntry | null {
     if (!this.isFallbackWindowActive) return null;
     return this.fallbackWindow.activeEntry ?? this.agentFallbacks[0] ?? null;
-  }
-
-  private activeFallbackRouteLabel(): string | null {
-    const entry = this.effectiveFallbackEntry;
-    if (!entry) return null;
-    return entry.model ? `${entry.provider} (${entry.model})` : entry.provider;
   }
 
   private selectFallbackEntryForWindow(reason?: string): { entry: AgentFallbackEntry; selectedHadMissingCredential: boolean } | null {
