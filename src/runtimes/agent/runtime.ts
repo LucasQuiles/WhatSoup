@@ -641,6 +641,10 @@ import { errorMessage } from '../../lib/error-message.ts';
 /** TTL for this_thread route preferences (echoed in user copy as "24h"). */
 const PREFERENCE_TTL_MS = 24 * 60 * 60 * 1000;
 
+// Only the receipt's promised bare reply mutates routing. Conversational uses
+// such as "please keep it" must continue to the agent unchanged.
+const BARE_KEEP_RE = /^\s*keep[\s!.]*$/i;
+
 function providerDisplayName(provider: string): string {
   switch (provider) {
     case 'claude-cli': return 'Claude';
@@ -3908,6 +3912,15 @@ export class AgentRuntime implements Runtime {
     }
     const classified = classifyInput(content as string, { routingAliases: config.nlRouting });
 
+    if (classified.type === 'message' && BARE_KEEP_RE.test(classified.text)) {
+      const keepReply = this.handleBareKeep(chatJid, msg.senderJid);
+      if (keepReply !== null) {
+        this.sendDirect(chatJid, keepReply);
+        this.completeLocalTextHandling(msg);
+        return;
+      }
+    }
+
     // Set only by /model default (R8): the handler clears the route pref
     // locally and then falls through to forward the raw command so the agent
     // CLI's own /model default reset still runs. Null for every other command.
@@ -4516,16 +4529,7 @@ export class AgentRuntime implements Runtime {
         }
       }
       if (forwardAfterLocalCommand === null) {
-        if (msg.inboundSeq !== undefined) {
-          // Terminal durability completion for ANY locally-handled command (R14).
-          // Local handling never reaches the turn path that completes the inbound
-          // journal, so the row would stay 'processing' and restart recovery would
-          // falsely mark it failed. This covers the routing aliases AND the base
-          // local commands (/new /status /help /sessions /kill-session), closing
-          // the pre-existing stuck-'processing' gap once for all of them instead
-          // of a per-command name-list opt-in.
-          this.durability?.completeInbound(msg.inboundSeq, 'local_command_handled');
-        }
+        this.completeLocalTextHandling(msg);
         return;
       }
       // R8 fall-through: /model default cleared the route pref above; forward
@@ -8433,6 +8437,43 @@ export class AgentRuntime implements Runtime {
       try { unlinkSync(sockRes.cfgPath); } catch { /* best-effort */ }
       this.perChatSocketResources.delete(mapKey);
     }
+  }
+
+  /** Complete inbound durability for text handled without an agent turn. */
+  private completeLocalTextHandling(msg: IncomingMessage): void {
+    if (msg.inboundSeq !== undefined) {
+      this.durability?.completeInbound(msg.inboundSeq, 'local_command_handled');
+    }
+  }
+
+  /** Promote the chat's current live route preference to a permanent pin. */
+  private handleBareKeep(chatJid: string, senderJid: string): string | null {
+    const pref = this.loadSenderPreference(chatJid, senderJid);
+    if (pref === null) return null;
+
+    const label = (pref.modelPinVerified === true ? pref.requestedModel : null)
+      ?? (pref.requestedProvider ?? pref.intent);
+    if (pref.expiresAt === null) {
+      return `_${label} is already kept for this chat. /reset to undo._`;
+    }
+
+    try {
+      setPreference(this.db, { ...pref, expiresAt: null, updatedAt: Date.now() });
+    } catch (err) {
+      log.warn({ err, instance: this.instanceName }, 'keep: preference promotion failed');
+      return null;
+    }
+
+    this.emitRouteEventChecked({
+      event: 'model_preference_set',
+      conversationKey: toConversationKey(chatJid),
+      provider: pref.requestedProvider ?? `intent:${pref.intent}`,
+      modelRef: pref.requestedModel,
+      source: 'user',
+      userVisible: true,
+      reasonCode: 'user_pin_kept',
+    });
+    return `_Keeping ${label} for this chat until you /reset._`;
   }
 
   /** F-STICKY-ACTOR (QR-247): non-claude subprocess CLI providers (PRIMARY and/or configured FALLBACK) that stay on the shared global socket for this instance — the still-uncovered actor-race exposure. */

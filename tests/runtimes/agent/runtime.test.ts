@@ -467,6 +467,8 @@ import * as registerAllModule from '../../../src/mcp/register-all.ts';
 import { AgentRuntime, isUsageLimitMessage, serializePendingPoll, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
 import { parseGeminiAcpEvent } from '../../../src/runtimes/agent/providers/gemini-acp-parser.ts';
 import { __resetModelCatalogueCacheForTest } from '../../../src/runtimes/agent/model-catalogue-resolver.ts';
+import { pruneExpired, setPreference } from '../../../src/runtimes/agent/chat-preference-db.ts';
+import { preferenceKeys } from '../../../src/runtimes/agent/preference-keys.ts';
 import { providerServerErrorNoFallbackNotice, providerUnknownTerminalNotice, renderUserMessage } from '../../../src/runtimes/agent/response-templates.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import { TurnQueue } from '../../../src/runtimes/agent/turn-queue.ts';
@@ -17340,6 +17342,127 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(status).not.toContain('opencode-cli (kimi/kimi-k3) → opencode-cli (glm/glm-5.2)');
     const bulletLines = status!.split('\n').filter((l) => l.startsWith('• '));
     expect(bulletLines).toHaveLength(2);
+  });
+
+  describe('bare keep promotes a temporary route pin to permanent', () => {
+    function seedTemporaryVerifiedPin(chatJid: string, senderJid: string, now = Date.now()): void {
+      const { chatKey, senderKey } = preferenceKeys(routingDb, chatJid, senderJid);
+      setPreference(routingDb, {
+        chatJid: chatKey,
+        senderJid: senderKey,
+        intent: 'provider_specific',
+        requestedProvider: 'opencode-cli',
+        scope: 'this_thread',
+        pinStrict: true,
+        fallbackPermitted: false,
+        updatedAt: now,
+        expiresAt: now + 24 * 60 * 60 * 1000,
+        requestedModel: 'kimi/kimi-k3',
+        validatedProvider: 'opencode-cli',
+        modelPinVerified: true,
+      });
+    }
+
+    it('survives read-back, pruning, and the original TTL horizon', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      const base = 1_800_000_000_000;
+      vi.setSystemTime(base);
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      seedTemporaryVerifiedPin(CHAT, SENDER_A, base);
+      expect(prefRows()[0].expires_at).toBe(base + 24 * 60 * 60 * 1000);
+
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: 'keep',
+        messageId: 'msg-2',
+      }));
+      expect(allReplies(sentMessages).join('\n')).toContain(
+        '_Keeping kimi/kimi-k3 for this chat until you /reset._',
+      );
+      expect(prefRows()[0]).toMatchObject({
+        expires_at: null,
+        requested_model: 'kimi/kimi-k3',
+        requested_provider: 'opencode-cli',
+        model_pin_verified: 1,
+      });
+
+      pruneExpired(routingDb, base + 1_000 * 365 * 24 * 60 * 60 * 1000);
+      expect(prefRows()).toHaveLength(1);
+      expect(prefRows()[0].expires_at).toBeNull();
+      vi.setSystemTime(base + 25 * 60 * 60 * 1000);
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: '/model status',
+        messageId: 'msg-3',
+      }));
+      expect(allReplies(sentMessages).filter((text) => text.includes('*Current route:*')).pop())
+        .toContain('This chat is on kimi/kimi-k3');
+    });
+
+    it('forwards bare keep unchanged when no live pin exists', async () => {
+      const { runtime, sentMessages } = makeRoutingRuntime();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'keep' }));
+      expect(prefRows()).toHaveLength(0);
+      expect(mockSession.sendTurn).toHaveBeenCalled();
+      expect(allReplies(sentMessages).join('\n')).not.toMatch(/Keeping|already kept/i);
+    });
+
+    it('is idempotent for an already-permanent pin', async () => {
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      seedTemporaryVerifiedPin(CHAT, SENDER_A);
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: 'keep',
+        messageId: 'msg-2',
+      }));
+      const updatedAt = prefRows()[0].updated_at;
+      mockSession.sendTurn.mockClear();
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: 'Keep!',
+        messageId: 'msg-3',
+      }));
+      expect(allReplies(sentMessages).join('\n')).toContain(
+        '_kimi/kimi-k3 is already kept for this chat. /reset to undo._',
+      );
+      expect(prefRows()[0].updated_at).toBe(updatedAt);
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    });
+
+    it('does not intercept keep embedded in a sentence', async () => {
+      const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      seedTemporaryVerifiedPin(CHAT, SENDER_A);
+      mockSession.sendTurn.mockClear();
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: 'please keep it',
+        messageId: 'msg-2',
+      }));
+      expect(prefRows()[0].expires_at).not.toBeNull();
+      expect(mockSession.sendTurn).toHaveBeenCalled();
+    });
+
+    it("promotes the chat's winning pin when another group member replies keep", async () => {
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      seedTemporaryVerifiedPin(GROUP, SENDER_A);
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: GROUP,
+        senderJid: SENDER_B,
+        isGroup: true,
+        content: 'keep',
+        messageId: 'msg-2',
+      }));
+      expect(prefRows()).toHaveLength(1);
+      expect(prefRows()[0]).toMatchObject({ sender_jid: SENDER_A, expires_at: null });
+      expect(allReplies(sentMessages).join('\n')).toContain(
+        '_Keeping kimi/kimi-k3 for this chat until you /reset._',
+      );
+    });
   });
 
 });
