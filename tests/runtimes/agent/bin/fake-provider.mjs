@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Shared real child fixture for the B1, B2, and X6 lifecycle probes.
 import { spawn } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { renameSync, writeFileSync } from 'node:fs';
 import { isOrphaned } from './orphan-predicate.ts';
 
 const config = JSON.parse(process.argv[2] ?? '{}');
@@ -49,10 +49,15 @@ if (config.spawnGrandchildren) {
 }
 
 if (config.pidFile) {
+  const tempPidFile = `${config.pidFile}.tmp-${process.pid}`;
   writeFileSync(
-    config.pidFile,
+    tempPidFile,
     JSON.stringify({ provider: process.pid, g1: g1?.pid ?? null, g2: g2?.pid ?? null }),
+    { mode: 0o600 },
   );
+  // Tests use existence as the readiness receipt. Publish only after the JSON
+  // is complete so readers can never observe the truncate/write window.
+  renameSync(tempPidFile, config.pidFile);
 }
 
 if (config.handleSigterm !== false) {
