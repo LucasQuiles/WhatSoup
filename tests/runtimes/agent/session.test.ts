@@ -5126,6 +5126,80 @@ describe('session.ts uncovered-branch coverage', () => {
     expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
   });
 
+  it('reaps a completed same-session OpenCode child before waiting for its next execution lease', async () => {
+    const firstChild = makeMockChild(12005);
+    const secondChild = makeMockChild(12006);
+    vi.mocked(spawn)
+      .mockReturnValueOnce(firstChild as never)
+      .mockReturnValueOnce(secondChild as never);
+    const gate = new ProviderExecutionGate();
+    const session = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: 'same@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+      providerExecutionGate: gate,
+    });
+    await session.spawnSession();
+
+    await session.sendTurn('first');
+    session.completeProviderTurn();
+    const secondTurn = session.sendTurn('second');
+
+    await vi.waitFor(() => {
+      expect(killSessionTree).toHaveBeenCalledWith(
+        firstChild,
+        'SIGTERM',
+        expect.objectContaining({ generationMarker: expect.any(String) }),
+      );
+    });
+    await secondTurn;
+
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(killSessionTree).toHaveBeenCalledTimes(1);
+    expect(gate.snapshot()).toMatchObject({ active: true, pending: 0, totalWaits: 0 });
+
+    secondChild._closeCb?.(0, null);
+    expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+  });
+
+  it('cycles repeated same-session OpenCode turns without self-queuing behind stale leases', async () => {
+    const children = Array.from({ length: 25 }, (_, index) => makeMockChild(12100 + index));
+    for (const child of children) vi.mocked(spawn).mockReturnValueOnce(child as never);
+    const gate = new ProviderExecutionGate();
+    const session = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: 'same-stress@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+      providerExecutionGate: gate,
+    });
+    await session.spawnSession();
+
+    for (let turn = 0; turn < children.length; turn += 1) {
+      await session.sendTurn(`turn-${turn}`);
+      session.completeProviderTurn();
+      expect(gate.snapshot()).toMatchObject({ active: true, pending: 0 });
+    }
+
+    expect(spawn).toHaveBeenCalledTimes(children.length);
+    expect(killSessionTree).toHaveBeenCalledTimes(children.length - 1);
+    expect(gate.snapshot()).toMatchObject({
+      active: true,
+      pending: 0,
+      totalWaits: 0,
+      maxPending: 0,
+      pressureActive: false,
+    });
+
+    children.at(-1)?._closeCb?.(0, null);
+    expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+  });
+
   it('aborts an OpenCode execution waiter when its session shuts down', async () => {
     const firstChild = makeMockChild(12003);
     vi.mocked(spawn).mockReturnValueOnce(firstChild as never);
