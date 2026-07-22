@@ -414,6 +414,135 @@ m.reconcile({"credential_probe": evidence}, ["credential_probe"])
     expect(events[0]!.evidence).toContain('reason=crash');
   });
 
+  it('warns without paging when a detached browser debug tree exceeds age and RSS thresholds', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+    const profilePath = '/private/operator/browser-profile';
+    runWatchdog({
+      BOT_ERRORS_STATE_DIR: tmpRoot,
+      BOT_ERRORS_WATCHDOG_CHECKS: 'browser_debug',
+      BOT_ERRORS_DRY_BROWSER_DEBUG_SNAPSHOT: JSON.stringify([
+        {
+          pid: 4242,
+          ageSeconds: 4200,
+          rssMb: 2519.3,
+          processCount: 16,
+          debugPort: 9334,
+          controllerConnections: 0,
+          profileHash: 'profileabc123',
+          profilePath,
+        },
+      ]),
+    });
+
+    const events = readOutboxEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]!.severity).toBe('warning');
+    expect(events[0]!.alertSource).toBe('browser_debug:profileabc123');
+    expect(events[0]!.summary).toBe('BOT ERRORS browser debug session unattended: browser_debug:profileabc123');
+    expect(events[0]!.diagnostics?.forceNotify).not.toBe(true);
+    expect(events[0]!.evidence).toContain('root_pid=4242');
+    expect(events[0]!.evidence).toContain('rss_mb=2519.3');
+    expect(events[0]!.evidence).toContain('process_count=16');
+    expect(events[0]!.evidence).toContain('controller_connections=0');
+    expect(events[0]!.evidence).not.toContain(profilePath);
+  });
+
+  it('does not alert for a browser debug tree with an active controller or below-threshold resources', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+    runWatchdog({
+      BOT_ERRORS_STATE_DIR: tmpRoot,
+      BOT_ERRORS_WATCHDOG_CHECKS: 'browser_debug',
+      BOT_ERRORS_DRY_BROWSER_DEBUG_SNAPSHOT: JSON.stringify([
+        {
+          pid: 4242,
+          ageSeconds: 4200,
+          rssMb: 2519.3,
+          processCount: 16,
+          debugPort: 9334,
+          controllerConnections: 1,
+          profileHash: 'controlled',
+        },
+        {
+          pid: 4343,
+          ageSeconds: 4200,
+          rssMb: 128,
+          processCount: 4,
+          debugPort: 9335,
+          controllerConnections: 0,
+          profileHash: 'small',
+        },
+        {
+          pid: 4444,
+          ageSeconds: 300,
+          rssMb: 2048,
+          processCount: 12,
+          debugPort: 9336,
+          controllerConnections: 0,
+          profileHash: 'young',
+        },
+      ]),
+    });
+
+    expect(existsSync(join(tmpRoot, 'outbox'))).toBe(false);
+  });
+
+  it('alerts on missing controller visibility without asserting the session is unattended', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+    runWatchdog({
+      BOT_ERRORS_STATE_DIR: tmpRoot,
+      BOT_ERRORS_WATCHDOG_CHECKS: 'browser_debug',
+      BOT_ERRORS_DRY_BROWSER_DEBUG_SNAPSHOT: JSON.stringify([
+        {
+          pid: 4545,
+          ageSeconds: 4200,
+          rssMb: 2048,
+          processCount: 10,
+          debugPort: 9337,
+          controllerConnections: null,
+          profileHash: 'unknowncontroller',
+        },
+      ]),
+    });
+
+    const events = readOutboxEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]!.severity).toBe('warning');
+    expect(events[0]!.alertSource).toBe('browser_debug:probe');
+    expect(events[0]!.summary).toBe('BOT ERRORS browser debug visibility degraded: browser_debug:probe');
+    expect(events[0]!.evidence).toContain('controller_connections=unknown');
+    expect(events[0]!.evidence).not.toContain('session unattended');
+  });
+
+  it('confirms browser debug recovery twice before clearing the incident', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+    const env = {
+      BOT_ERRORS_STATE_DIR: tmpRoot,
+      BOT_ERRORS_WATCHDOG_CHECKS: 'browser_debug',
+      BOT_ERRORS_DRY_BROWSER_DEBUG_SNAPSHOT: JSON.stringify([
+        {
+          pid: 4242,
+          ageSeconds: 4200,
+          rssMb: 2519.3,
+          processCount: 16,
+          debugPort: 9334,
+          controllerConnections: 0,
+          profileHash: 'profileabc123',
+        },
+      ]),
+    };
+
+    runWatchdog(env);
+    runWatchdog({ ...env, BOT_ERRORS_DRY_BROWSER_DEBUG_SNAPSHOT: '[]' });
+    expect(readOutboxEvents()).toHaveLength(1);
+    runWatchdog({ ...env, BOT_ERRORS_DRY_BROWSER_DEBUG_SNAPSHOT: '[]' });
+
+    const events = readOutboxEvents();
+    expect(events).toHaveLength(2);
+    expect(events[1]!.eventType).toBe('clear');
+    expect(events[1]!.alertSource).toBe('browser_debug:profileabc123');
+    expect(events[1]!.summary).toBe('BOT ERRORS heartbeat watchdog recovered: browser_debug:profileabc123');
+  });
+
   it('warns when q-loop heartbeat is fresh but awaiting-Q behavior is stale', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
     const qLoopState = join(tmpRoot, 'q-loop-state.json');
@@ -591,6 +720,43 @@ m.reconcile({"credential_probe": evidence}, ["credential_probe"])
     expect(events).toHaveLength(1);
     expect(events[0]!.alertSource).toBe('daily_health:mini2');
     expect(events[0]!.evidence).toContain('daily-health cadence stale for mini2');
+  });
+
+  it('enriches stale daily-health evidence with the collector reachability diagnosis', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+    writePrivateJson(join(tmpRoot, 'collector-state.json'), {
+      configuredRemoteHosts: ['mini2'],
+      remotes: {
+        mini2: {
+          consecutiveFailures: 33,
+          lastSuccessIso: '2026-07-21T02:29:31Z',
+          lastReachability: {
+            reachabilityDiagnosis: 'tailscale_offline',
+            tailscale: {
+              online: false,
+              lastSeen: '2026-07-21T02:29:48.1Z',
+              tailscaleIPs: ['100.64.0.1'],
+            },
+          },
+        },
+      },
+    });
+
+    runWatchdog({
+      BOT_ERRORS_STATE_DIR: tmpRoot,
+      BOT_ERRORS_WATCHDOG_CHECKS: 'daily_health',
+      BOT_ERRORS_LOCAL_DAILY_HEALTH_HOSTS: '',
+      BOT_ERRORS_MAX_DAILY_HEALTH_AGE: '60',
+    });
+
+    const events = readOutboxEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]!.evidence).toContain('collector_reachability=tailscale_offline');
+    expect(events[0]!.evidence).toContain('collector_consecutive_failures=33');
+    expect(events[0]!.evidence).toContain('collector_last_success=2026-07-21T02:29:31Z');
+    expect(events[0]!.evidence).toContain('tailscale_online=false');
+    expect(events[0]!.evidence).toContain('tailscale_last_seen=2026-07-21T02:29:48.1Z');
+    expect(events[0]!.evidence).not.toContain('100.64.0.1');
   });
 
   it('excludes collector best-effort remotes from required daily-health cadence', () => {
