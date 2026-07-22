@@ -26,6 +26,27 @@ const log = createChildLogger('mcp-bridge');
 export { generateMcpConfigFile, mergeOpencodeConfig, writeMcpConfigToPath, writeProviderMcpConfig, writeProviderMcpConfigTarget };
 export type { AdditionalMcpServerConfig, OpencodeProviderConfig };
 
+function cloneAndFreeze<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return Object.freeze(value.map((item) => cloneAndFreeze(item))) as T;
+  }
+  if (typeof value === 'object' && value !== null) {
+    const output: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value)) output[key] = cloneAndFreeze(child);
+    return Object.freeze(output) as T;
+  }
+  return value;
+}
+
+/** Immutable per-provider-session schema snapshot used by both advertisement and authorization. */
+export function snapshotProviderMcpTools(tools: readonly ProviderMcpTool[]): readonly ProviderMcpTool[] {
+  return Object.freeze(tools.map((tool) => cloneAndFreeze({
+    name: tool.name,
+    description: tool.description,
+    inputSchema: tool.inputSchema,
+  })));
+}
+
 // ---------------------------------------------------------------------------
 // API tool definition types
 // ---------------------------------------------------------------------------
@@ -81,7 +102,7 @@ function normalizeToolResult(result: ToolCallResult): ProviderMcpToolResult {
  * Used by API providers (openai-api) to include WhatSoup's tools in requests.
  */
 export function convertMcpToolsToOpenAI(
-  tools: ProviderMcpTool[],
+  tools: readonly ProviderMcpTool[],
 ): ApiToolDefinition[] {
   return tools.map(tool => ({
     type: 'function' as const,
@@ -98,7 +119,7 @@ export function convertMcpToolsToOpenAI(
  * Used by API providers (anthropic-api) to include WhatSoup's tools in requests.
  */
 export function convertMcpToolsToAnthropic(
-  tools: ProviderMcpTool[],
+  tools: readonly ProviderMcpTool[],
 ): AnthropicToolDefinition[] {
   return tools.map(tool => ({
     name: tool.name,

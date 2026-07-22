@@ -219,7 +219,16 @@ type FallbackView = {
   stashHandoffNotice(chatJid: string, message: string, now: number): boolean;
   withHandoffPrefix(chatJid: string, text: string): string;
   flushPendingHandoffNotice(queue: { targetChatJid: string; enqueueText(text: string): void }): void;
-  formatContextLines(messages: ReadonlyArray<{ timestamp: number; senderName: string | null; senderJid: string; content: string | null }>): string;
+  formatContextLines(
+    messages: ReadonlyArray<{ timestamp: number; senderName: string | null; senderJid: string; content: string | null }>,
+    routePolicy?: {
+      provider: string;
+      model: string | undefined;
+      dataPolicy: 'trusted' | 'restricted' | null;
+      policyVersion: 'provider-data-policy-v1';
+      policyState: 'classified' | 'missing' | 'unsupported';
+    },
+  ): string;
   buildHandoffSystemBlock(conversationKey: string, provider: string): (() => string | null) | undefined;
   // Background handoff distiller seams (extracted into HandoffDistillCoordinator).
   handoffDistill: {
@@ -417,6 +426,27 @@ describe('AgentRuntime — provider fallback state machine', () => {
     expect(redacted).not.toContain(token);
     expect(redacted).toContain('Bearer [REDACTED]');
     expect(redacted).toContain('for the call'); // surgical — conversation text preserved
+    v.deactivateProviderFallback('test cleanup');
+  });
+
+  it('preserves exact recovery emails for the restricted managed broker while trusted fallback stays redacted', () => {
+    const v = view(makeRuntime({ agentFallbackProvider: 'openai-api' }));
+    const email = 'operator@example.com';
+    const msgs = [{ timestamp: 0, senderName: 'Lucas', senderJid: 'l@x', content: `email ${email}` }];
+    v.activateProviderFallback(null);
+    const restrictedRoute = {
+      provider: 'openai-api',
+      model: undefined,
+      dataPolicy: 'restricted' as const,
+      policyVersion: 'provider-data-policy-v1' as const,
+      policyState: 'classified' as const,
+    };
+    const trustedRoute = { ...restrictedRoute, dataPolicy: 'trusted' as const };
+
+    expect(v.formatContextLines(msgs, restrictedRoute)).toContain(email);
+    expect(v.formatContextLines(msgs, restrictedRoute)).not.toContain('[REDACTED_EMAIL]');
+    expect(v.formatContextLines(msgs, trustedRoute)).not.toContain(email);
+    expect(v.formatContextLines(msgs, trustedRoute)).toContain('[REDACTED_EMAIL]');
     v.deactivateProviderFallback('test cleanup');
   });
 

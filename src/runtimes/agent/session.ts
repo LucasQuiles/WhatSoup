@@ -13,7 +13,13 @@ import {
   assertCheckpointRoutePolicyCompatible,
   type ProviderCheckpointRoutePolicy,
   type ProviderRoutePolicy,
+  type ProviderBoundaryMode,
 } from '../../core/provider-data-policy.ts';
+import {
+  createProviderDataBoundary,
+  type ProviderBoundaryRouteSource,
+  type ProviderBoundaryEventSink,
+} from '../../core/provider-data-boundary.ts';
 import type { SessionContext } from '../../mcp/types.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
@@ -169,6 +175,9 @@ export interface SessionManagerOptions {
   instructionsPath?: string;
   model?: string;
   routePolicy?: ProviderRoutePolicy;
+  providerBoundaryMode?: ProviderBoundaryMode;
+  providerBoundaryRouteSource?: ProviderBoundaryRouteSource;
+  providerBoundaryEventSink?: ProviderBoundaryEventSink;
   pluginDirs?: string[];
   allowM365Mutations?: boolean;
   provider?: string;
@@ -529,6 +538,9 @@ export class SessionManager {
   private readonly instructionsPath: string | undefined;
   private readonly model: string | undefined;
   private readonly routePolicy: ProviderRoutePolicy | undefined;
+  private readonly providerBoundaryMode: ProviderBoundaryMode;
+  private readonly providerBoundaryRouteSource: ProviderBoundaryRouteSource;
+  private readonly providerBoundaryEventSink: ProviderBoundaryEventSink | undefined;
   private readonly pluginDirs: string[];
   private readonly allowM365Mutations: boolean | undefined;
   private readonly provider: string;
@@ -650,6 +662,9 @@ export class SessionManager {
     this.instructionsPath = opts.instructionsPath;
     this.model = opts.model;
     this.routePolicy = opts.routePolicy;
+    this.providerBoundaryMode = opts.providerBoundaryMode ?? 'shadow';
+    this.providerBoundaryRouteSource = opts.providerBoundaryRouteSource ?? 'unknown';
+    this.providerBoundaryEventSink = opts.providerBoundaryEventSink;
     this.pluginDirs = opts.pluginDirs ?? [];
     this.allowM365Mutations = opts.allowM365Mutations;
     this.provider = opts.provider ?? 'claude-cli';
@@ -1837,6 +1852,22 @@ export class SessionManager {
 
     if (this.isManagedLoopProvider) {
       const providerSession = this.createManagedProviderSession();
+      const providerSessionId = `${this.provider}-${randomUUID()}`;
+      const providerDataBoundary = this.routePolicy?.dataPolicy === 'restricted'
+        ? createProviderDataBoundary({
+            binding: {
+              provider: this.provider,
+              model: this.model,
+              dataPolicy: 'restricted',
+              policyVersion: this.routePolicy.policyVersion,
+              providerSessionId,
+            },
+            mode: this.providerBoundaryMode,
+            routeSource: this.providerBoundaryRouteSource,
+            eventSink: this.providerBoundaryEventSink,
+            technicalIdentifiers: [this.instanceName],
+          })
+        : undefined;
       const managedGeneration = this.resolveGenerationOwnership?.() ?? null;
 
       this.managedProviderSession = providerSession;
@@ -1867,6 +1898,7 @@ export class SessionManager {
         this.markDurableLifecycleAdmitted();
       } catch (err) {
         log.error({ err, chatJid: this.chatJid, provider: this.provider }, 'session: failed to persist managed provider');
+        providerDataBoundary?.retire();
         this.resetFailedSessionStart();
         throw err;
       }
@@ -1877,6 +1909,9 @@ export class SessionManager {
           systemPrompt,
           model: this.model,
           routePolicy: this.routePolicy,
+          providerBoundaryMode: this.providerBoundaryMode,
+          providerSessionId,
+          providerDataBoundary,
           pluginDirs: this.pluginDirs,
           allowM365Mutations: this.allowM365Mutations,
           instanceName: this.instanceName,
@@ -1917,6 +1952,7 @@ export class SessionManager {
         });
       } catch (err) {
         log.error({ err, chatJid: this.chatJid, provider: this.provider }, 'managed provider failed to initialize');
+        providerSession.kill();
         this.closeDurableFailureLifecycle(
           this.sessionId ?? resumeSessionId ?? null,
           this.dbRowId,

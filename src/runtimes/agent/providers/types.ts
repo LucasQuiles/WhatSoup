@@ -3,6 +3,8 @@
 
 import type { AgentEvent } from '../stream-parser.ts';
 import type { ProviderRoutePolicy } from '../../../core/provider-data-policy.ts';
+import type { ProviderBoundaryMode } from '../../../core/provider-data-policy.ts';
+import type { ProviderDataBoundary } from '../../../core/provider-data-boundary.ts';
 
 // ---------------------------------------------------------------------------
 // Enums / union types
@@ -161,6 +163,12 @@ export interface ProviderSessionOptions {
   model?: string;
   /** Immutable route policy selected atomically with provider/model. */
   routePolicy?: ProviderRoutePolicy;
+  /** Boundary mode admitted with the route. */
+  providerBoundaryMode?: ProviderBoundaryMode;
+  /** Fresh identity shared by the managed provider and its in-memory boundary. */
+  providerSessionId?: string;
+  /** Session-local managed API data boundary. */
+  providerDataBoundary?: ProviderDataBoundary;
   /** Plugin directories to load (CLI providers). */
   pluginDirs?: string[];
   /** Per-instance opt-in for propagating ALLOW_M365_MUTATIONS when fail-closed mode is enabled. */

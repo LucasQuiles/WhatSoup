@@ -20,7 +20,7 @@ import type {
   ProviderSessionOptions,
   ProviderTurnRequest,
 } from './types.ts';
-import { convertMcpToolsToAnthropic, executeBridgeTool } from './mcp-bridge.ts';
+import { convertMcpToolsToAnthropic, executeBridgeTool, snapshotProviderMcpTools } from './mcp-bridge.ts';
 import { resolveApiKey } from '../../../lib/api-key-resolver.ts';
 import { turnPartsToAnthropicContent } from './media-bridge.ts';
 import { readSseDataLines } from './sse.ts';
@@ -35,6 +35,8 @@ import {
   connectionErrorResult,
   type ParsedToolInput,
 } from './api-provider-shared.ts';
+import { assertProviderToolJsonSafe } from '../../../core/provider-data-boundary.ts';
+import { exposeProviderTurnParts } from '../../../core/provider-data-boundary-turn.ts';
 
 const log = createChildLogger('anthropic-api-provider');
 
@@ -107,6 +109,17 @@ export class AnthropicApiProvider implements ProviderSession {
   private baseUrl: string;
   private abortController: AbortController | null = null;
   private config: ProviderConfig['providerConfig'];
+  private providerTools = snapshotProviderMcpTools([]);
+
+  private get dataBoundary() {
+    return this.opts?.providerDataBoundary;
+  }
+
+  private get boundaryEnforced(): boolean {
+    return this.opts?.routePolicy?.dataPolicy === 'restricted'
+      && this.opts.providerBoundaryMode === 'enforce'
+      && this.dataBoundary !== undefined;
+  }
 
   /**
    * @param config - Optional provider config block from the instance's config.json.
@@ -124,24 +137,51 @@ export class AnthropicApiProvider implements ProviderSession {
     opts: ProviderSessionOptions,
     _checkpoint?: ProviderCheckpoint,
   ): Promise<void> {
-    this.opts = opts;
-    this.active = true;
-
-    // API key precedence: apiKeyService keyring → ANTHROPIC_API_KEY env.
-    // Re-resolved per request inside callApi() so late-set keys are picked up.
-    this.apiKey = resolveApiKey({ service: this.config?.apiKeyService, envVar: 'ANTHROPIC_API_KEY' });
-
-    // Per-turn model override takes lowest precedence; opts.model wins over
-    // the constructor default when explicitly set.
-    if (opts.model) {
-      this.model = opts.model;
+    if (
+      opts.routePolicy?.dataPolicy === 'restricted'
+      && opts.providerBoundaryMode === 'enforce'
+      && opts.providerDataBoundary === undefined
+    ) {
+      throw new Error('Restricted managed API route requires a provider data boundary');
     }
+    if (opts.providerDataBoundary && (
+      opts.providerDataBoundary.binding.provider !== 'anthropic-api'
+      || opts.providerDataBoundary.binding.model !== opts.model
+      || opts.providerDataBoundary.binding.dataPolicy !== opts.routePolicy?.dataPolicy
+      || opts.providerDataBoundary.binding.policyVersion !== opts.routePolicy?.policyVersion
+      || opts.providerDataBoundary.binding.providerSessionId !== opts.providerSessionId
+      || opts.providerDataBoundary.mode !== opts.providerBoundaryMode
+    )) {
+      opts.providerDataBoundary.retire();
+      throw new Error('Managed API provider data boundary binding mismatch');
+    }
+    try {
+      this.opts = opts;
+      this.active = true;
+      this.providerTools = snapshotProviderMcpTools(opts.mcpBridge?.listTools() ?? []);
 
-    // System prompt stored separately — Anthropic uses a top-level field
-    this.systemPrompt = opts.systemPrompt;
-    this.messages = [];
+      // API key precedence: apiKeyService keyring → ANTHROPIC_API_KEY env.
+      // Re-resolved per request inside callApi() so late-set keys are picked up.
+      this.apiKey = resolveApiKey({ service: this.config?.apiKeyService, envVar: 'ANTHROPIC_API_KEY' });
 
-    opts.onEvent({ type: 'init', sessionId: `anthropic-api-${randomUUID()}` });
+      // Per-turn model override takes lowest precedence; opts.model wins over
+      // the constructor default when explicitly set.
+      if (opts.model) {
+        this.model = opts.model;
+      }
+
+      // System prompt stored separately — Anthropic uses a top-level field
+      this.systemPrompt = opts.providerDataBoundary?.exposeText(opts.systemPrompt, { surface: 'prompt' })
+        ?? opts.systemPrompt;
+      this.messages = [];
+
+      opts.onEvent({ type: 'init', sessionId: opts.providerSessionId ?? `anthropic-api-${randomUUID()}` });
+    } catch (error) {
+      opts.providerDataBoundary?.retire();
+      this.opts = null;
+      this.active = false;
+      throw error;
+    }
   }
 
   async sendTurn(request: ProviderTurnRequest): Promise<void> {
@@ -150,7 +190,8 @@ export class AnthropicApiProvider implements ProviderSession {
     // Per-turn model override (e.g. model-switch mid-conversation)
     const turnModel = request.model ?? this.model;
 
-    const userContent = turnPartsToAnthropicContent(request.parts).map((block) => (
+    const providerParts = exposeProviderTurnParts(this.dataBoundary, request.parts);
+    const userContent = turnPartsToAnthropicContent(providerParts).map((block) => (
       block.type === 'text'
         ? { ...block, text: stripLoneSurrogates(block.text) }
         : block
@@ -196,6 +237,7 @@ export class AnthropicApiProvider implements ProviderSession {
 
       // Emit tool_use events and feed executed tool results back into the loop.
       const toolResultBlocks: AnthropicContentBlock[] = [];
+      const advertisedTools = this.providerTools;
 
       for (const tu of result.toolUses) {
         if (!this.active) break;
@@ -204,7 +246,10 @@ export class AnthropicApiProvider implements ProviderSession {
         // model as an error tool_result instead. Substituting {} executed
         // real side-effecting tools with empty arguments.
         const parsedToolInput = tu.parsed ?? this.parseToolInput(tu, turnModel);
-        const toolInput = parsedToolInput.ok ? parsedToolInput.input : {};
+        const toolInput = parsedToolInput.ok
+          ? this.dataBoundary?.rehydrateToolInput(tu.name, parsedToolInput.input, advertisedTools)
+            ?? parsedToolInput.input
+          : {};
 
         this.opts.onEvent({
           type: 'tool_use',
@@ -217,10 +262,12 @@ export class AnthropicApiProvider implements ProviderSession {
           ? await executeBridgeTool(this.opts?.mcpBridge, tu.name, toolInput)
           : { content: parsedToolInput.content, isError: true };
 
+        const providerToolContent = this.dataBoundary?.exposeToolResult(tu.name, toolResult.content)
+          ?? toolResult.content;
         toolResultBlocks.push({
           type: 'tool_result',
           tool_use_id: tu.id,
-          content: stripLoneSurrogates(toolResult.content),
+          content: stripLoneSurrogates(providerToolContent),
           ...(toolResult.isError ? { is_error: true } : {}),
         });
 
@@ -284,11 +331,13 @@ export class AnthropicApiProvider implements ProviderSession {
   async shutdown(_reason: 'suspend' | 'end'): Promise<void> {
     this.abortController?.abort();
     this.active = false;
+    this.dataBoundary?.retire();
   }
 
   kill(): void {
     this.abortController?.abort();
     this.active = false;
+    this.dataBoundary?.retire();
   }
 
   buildEnv(): NodeJS.ProcessEnv {
@@ -302,7 +351,7 @@ export class AnthropicApiProvider implements ProviderSession {
     if (!this.opts) throw new Error('Provider not initialized.');
 
     this.abortController = new AbortController();
-    const mcpTools = this.opts.mcpBridge?.listTools() ?? [];
+    const mcpTools = this.providerTools;
 
     // Defense layer: sanitize the system prompt and message history before
     // serialization to prevent lone surrogates from producing invalid JSON.
@@ -334,6 +383,10 @@ export class AnthropicApiProvider implements ProviderSession {
         signal: this.abortController.signal,
       });
     } catch (err: unknown) {
+      if (this.boundaryEnforced) {
+        log.error({ code: 'provider_boundary_connection_error', model }, 'fetch error in restricted callApi');
+        return { text: '', terminalResultText: '_Connection error - please try again._' };
+      }
       return connectionErrorResult(err, model, log);
     }
 
@@ -400,7 +453,11 @@ export class AnthropicApiProvider implements ProviderSession {
         event = JSON.parse(data) as Record<string, unknown>;
       } catch (err) {
         // Malformed SSE chunk - skip, but preserve observability.
-        log.warn({ err, dataPreview: providerPreview(data, 200), model }, 'malformed SSE chunk from Anthropic API');
+        if (this.boundaryEnforced) {
+          log.warn({ code: 'provider_boundary_malformed_sse', model }, 'malformed SSE chunk from restricted Anthropic API');
+        } else {
+          log.warn({ err, dataPreview: providerPreview(data, 200), model }, 'malformed SSE chunk from Anthropic API');
+        }
         continue;
       }
 
@@ -437,7 +494,9 @@ export class AnthropicApiProvider implements ProviderSession {
               const existing = textBlockAccum.get(index) ?? '';
               textBlockAccum.set(index, existing + chunk);
               fullText += chunk;
-              this.opts.onEvent({ type: 'assistant_text', text: chunk });
+              if (!this.boundaryEnforced) {
+                this.opts.onEvent({ type: 'assistant_text', text: chunk });
+              }
             }
           } else if (deltaType === 'input_json_delta') {
             const partialJson = (delta['partial_json'] as string) ?? '';
@@ -508,12 +567,19 @@ export class AnthropicApiProvider implements ProviderSession {
       assistantContent.push({ type: 'tool_use', id: tu.id, name: tu.name, input });
     }
 
-    // Record assistant turn in conversation history
+    const localText = this.boundaryEnforced && fullText.length > 0
+      ? this.dataBoundary!.rehydrateProviderText(fullText, { surface: 'provider_output' })
+      : null;
+
+    // Record assistant turn in provider-facing conversation history only after
+    // the complete restricted output has passed validation.
     if (assistantContent.length > 0) {
       this.messages.push({ role: 'assistant', content: assistantContent });
     } else if (fullText.length > 0) {
       this.messages.push({ role: 'assistant', content: fullText });
     }
+
+    if (localText !== null) this.opts.onEvent({ type: 'assistant_text', text: localText });
 
     return {
       text: fullText,
@@ -525,6 +591,16 @@ export class AnthropicApiProvider implements ProviderSession {
   }
 
   private parseToolInput(toolUse: ToolUseAccum, model: string): ParsedToolInput {
+    if (this.boundaryEnforced) {
+      try {
+        assertProviderToolJsonSafe(toolUse.inputJson || '{}');
+      } catch {
+        return {
+          ok: false,
+          content: 'Tool call failed: restricted provider tool arguments were rejected; the tool was not executed.',
+        };
+      }
+    }
     return parseProviderToolInput(toolUse.inputJson, {
       toolId: toolUse.id,
       toolName: toolUse.name,

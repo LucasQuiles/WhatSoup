@@ -21,7 +21,7 @@ import type {
   ProviderSessionOptions,
   ProviderTurnRequest,
 } from './types.ts';
-import { convertMcpToolsToOpenAI, executeBridgeTool } from './mcp-bridge.ts';
+import { convertMcpToolsToOpenAI, executeBridgeTool, snapshotProviderMcpTools } from './mcp-bridge.ts';
 import { resolveApiKey } from '../../../lib/api-key-resolver.ts';
 import { turnPartsToOpenAIContent } from './media-bridge.ts';
 import { readSseDataLines } from './sse.ts';
@@ -36,6 +36,8 @@ import {
   connectionErrorResult,
   type ParsedToolInput,
 } from './api-provider-shared.ts';
+import { assertProviderToolJsonSafe } from '../../../core/provider-data-boundary.ts';
+import { exposeProviderTurnParts } from '../../../core/provider-data-boundary-turn.ts';
 
 const log = createChildLogger('openai-api-provider');
 
@@ -101,6 +103,17 @@ export class OpenAIApiProvider implements ProviderSession {
   private apiKey: string = '';
   private abortController: AbortController | null = null;
   private apiKeyService: string | undefined;
+  private providerTools = snapshotProviderMcpTools([]);
+
+  private get dataBoundary() {
+    return this.opts?.providerDataBoundary;
+  }
+
+  private get boundaryEnforced(): boolean {
+    return this.opts?.routePolicy?.dataPolicy === 'restricted'
+      && this.opts.providerBoundaryMode === 'enforce'
+      && this.dataBoundary !== undefined;
+  }
 
   /**
    * @param config - Optional provider config block from the instance's config.json.
@@ -118,23 +131,51 @@ export class OpenAIApiProvider implements ProviderSession {
     opts: ProviderSessionOptions,
     _checkpoint?: ProviderCheckpoint,
   ): Promise<void> {
-    this.opts = opts;
-    this.active = true;
-
-    // API key precedence: apiKeyService keyring → OPENAI_API_KEY env.
-    // Re-resolved per request inside callApi() so late-set keys are picked up.
-    this.apiKey = resolveApiKey({ service: this.apiKeyService, envVar: 'OPENAI_API_KEY' });
-
-    // Per-turn model override takes lowest precedence; opts.model wins over
-    // the constructor default when explicitly set.
-    if (opts.model) {
-      this.model = opts.model;
+    if (
+      opts.routePolicy?.dataPolicy === 'restricted'
+      && opts.providerBoundaryMode === 'enforce'
+      && opts.providerDataBoundary === undefined
+    ) {
+      throw new Error('Restricted managed API route requires a provider data boundary');
     }
+    if (opts.providerDataBoundary && (
+      opts.providerDataBoundary.binding.provider !== 'openai-api'
+      || opts.providerDataBoundary.binding.model !== opts.model
+      || opts.providerDataBoundary.binding.dataPolicy !== opts.routePolicy?.dataPolicy
+      || opts.providerDataBoundary.binding.policyVersion !== opts.routePolicy?.policyVersion
+      || opts.providerDataBoundary.binding.providerSessionId !== opts.providerSessionId
+      || opts.providerDataBoundary.mode !== opts.providerBoundaryMode
+    )) {
+      opts.providerDataBoundary.retire();
+      throw new Error('Managed API provider data boundary binding mismatch');
+    }
+    try {
+      this.opts = opts;
+      this.active = true;
+      this.providerTools = snapshotProviderMcpTools(opts.mcpBridge?.listTools() ?? []);
 
-    // System prompt as the first conversation message
-    this.messages = [{ role: 'system', content: opts.systemPrompt }];
+      // API key precedence: apiKeyService keyring → OPENAI_API_KEY env.
+      // Re-resolved per request inside callApi() so late-set keys are picked up.
+      this.apiKey = resolveApiKey({ service: this.apiKeyService, envVar: 'OPENAI_API_KEY' });
 
-    opts.onEvent({ type: 'init', sessionId: `openai-api-${randomUUID()}` });
+      // Per-turn model override takes lowest precedence; opts.model wins over
+      // the constructor default when explicitly set.
+      if (opts.model) {
+        this.model = opts.model;
+      }
+
+      // System prompt as the first conversation message
+      const systemPrompt = opts.providerDataBoundary?.exposeText(opts.systemPrompt, { surface: 'prompt' })
+        ?? opts.systemPrompt;
+      this.messages = [{ role: 'system', content: systemPrompt }];
+
+      opts.onEvent({ type: 'init', sessionId: opts.providerSessionId ?? `openai-api-${randomUUID()}` });
+    } catch (error) {
+      opts.providerDataBoundary?.retire();
+      this.opts = null;
+      this.active = false;
+      throw error;
+    }
   }
 
   async sendTurn(request: ProviderTurnRequest): Promise<void> {
@@ -143,11 +184,12 @@ export class OpenAIApiProvider implements ProviderSession {
     // Per-turn model override (e.g. model-switch mid-conversation)
     const turnModel = request.model ?? this.model;
 
-    const hasRichParts = request.parts.some((part) => part.kind !== 'text');
+    const providerParts = exposeProviderTurnParts(this.dataBoundary, request.parts);
+    const hasRichParts = providerParts.some((part) => part.kind !== 'text');
     const userContent = hasRichParts
-      ? turnPartsToOpenAIContent(request.parts)
+      ? turnPartsToOpenAIContent(providerParts)
       : stripLoneSurrogates(
-          request.parts
+          providerParts
             .filter((p): p is Extract<typeof p, { kind: 'text' }> => p.kind === 'text')
             .map(p => p.text)
             .join('\n'),
@@ -185,10 +227,14 @@ export class OpenAIApiProvider implements ProviderSession {
       }
 
       // Emit tool_use events and feed executed tool results back into the loop.
+      const advertisedTools = this.providerTools;
       for (const tc of result.toolCalls) {
         if (!this.active) break;
         const parsedToolInput = this.parseToolInput(tc, turnModel);
-        const toolInput = parsedToolInput.ok ? parsedToolInput.input : {};
+        const toolInput = parsedToolInput.ok
+          ? this.dataBoundary?.rehydrateToolInput(tc.function.name, parsedToolInput.input, advertisedTools)
+            ?? parsedToolInput.input
+          : {};
 
         this.opts.onEvent({
           type: 'tool_use',
@@ -201,9 +247,11 @@ export class OpenAIApiProvider implements ProviderSession {
           ? await executeBridgeTool(this.opts?.mcpBridge, tc.function.name, toolInput)
           : { content: parsedToolInput.content, isError: true };
 
+        const providerToolContent = this.dataBoundary?.exposeToolResult(tc.function.name, toolResult.content)
+          ?? toolResult.content;
         this.messages.push({
           role: 'tool',
-          content: toolResult.content,
+          content: providerToolContent,
           tool_call_id: tc.id,
         });
 
@@ -262,11 +310,13 @@ export class OpenAIApiProvider implements ProviderSession {
   async shutdown(_reason: 'suspend' | 'end'): Promise<void> {
     this.abortController?.abort();
     this.active = false;
+    this.dataBoundary?.retire();
   }
 
   kill(): void {
     this.abortController?.abort();
     this.active = false;
+    this.dataBoundary?.retire();
   }
 
   buildEnv(): NodeJS.ProcessEnv {
@@ -281,7 +331,7 @@ export class OpenAIApiProvider implements ProviderSession {
     if (!this.opts) throw new Error('Provider not initialized.');
 
     this.abortController = new AbortController();
-    const mcpTools = this.opts.mcpBridge?.listTools() ?? [];
+    const mcpTools = this.providerTools;
 
     // Defense layer: sanitize message history before serialization
     sanitizeMessageHistory(this.messages as Array<{ role: string; content: unknown }>);
@@ -308,6 +358,10 @@ export class OpenAIApiProvider implements ProviderSession {
         signal: this.abortController.signal,
       });
     } catch (err: unknown) {
+      if (this.boundaryEnforced) {
+        log.error({ code: 'provider_boundary_connection_error', model }, 'fetch error in restricted callApi');
+        return { text: '', terminalResultText: '_Connection error - please try again._' };
+      }
       return connectionErrorResult(err, model, log);
     }
 
@@ -357,7 +411,11 @@ export class OpenAIApiProvider implements ProviderSession {
         chunk = JSON.parse(data) as Record<string, unknown>;
       } catch (err) {
         // Malformed SSE chunk - skip, but preserve observability.
-        log.warn({ err, dataPreview: providerPreview(data, 200), model }, 'malformed SSE chunk from OpenAI-compatible API');
+        if (this.boundaryEnforced) {
+          log.warn({ code: 'provider_boundary_malformed_sse', model }, 'malformed SSE chunk from restricted OpenAI-compatible API');
+        } else {
+          log.warn({ err, dataPreview: providerPreview(data, 200), model }, 'malformed SSE chunk from OpenAI-compatible API');
+        }
         continue;
       }
 
@@ -368,7 +426,9 @@ export class OpenAIApiProvider implements ProviderSession {
         // ── Text content ─────────────────────────────────────────────
         if (typeof delta['content'] === 'string' && delta['content'].length > 0) {
           fullText += delta['content'];
-          this.opts.onEvent({ type: 'assistant_text', text: delta['content'] });
+          if (!this.boundaryEnforced) {
+            this.opts.onEvent({ type: 'assistant_text', text: delta['content'] });
+          }
         }
 
         // ── Tool call deltas ──────────────────────────────────────────
@@ -412,7 +472,12 @@ export class OpenAIApiProvider implements ProviderSession {
     if (completedToolCalls.length > 0) {
       assistantMsg.tool_calls = completedToolCalls;
     }
+    let localText: string | null = null;
+    if (this.boundaryEnforced && fullText.length > 0) {
+      localText = this.dataBoundary!.rehydrateProviderText(fullText, { surface: 'provider_output' });
+    }
     this.messages.push(assistantMsg);
+    if (localText !== null) this.opts.onEvent({ type: 'assistant_text', text: localText });
 
     return {
       text: fullText,
@@ -423,6 +488,16 @@ export class OpenAIApiProvider implements ProviderSession {
   }
 
   private parseToolInput(toolCall: ToolCall, model: string): ParsedToolInput {
+    if (this.boundaryEnforced) {
+      try {
+        assertProviderToolJsonSafe(toolCall.function.arguments || '{}');
+      } catch {
+        return {
+          ok: false,
+          content: 'Tool call failed: restricted provider tool arguments were rejected; the tool was not executed.',
+        };
+      }
+    }
     return parseProviderToolInput(toolCall.function.arguments, {
       toolId: toolCall.id,
       toolName: toolCall.function.name,

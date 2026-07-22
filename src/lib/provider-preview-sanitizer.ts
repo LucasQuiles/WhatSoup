@@ -67,6 +67,7 @@ const KNOWN_TOKEN_PREFIX_RE = new RegExp(`^${KNOWN_TOKEN_PREFIX}`);
 // still masks. Anything else keeps today's behavior.
 const MAX_TRUNCATED_DISPLAY_BASE = 12;
 const TRUNCATED_DISPLAY_VALUE_RE = /^`([^`]*?)(?:\.\.\.|…)`$/;
+const PROVIDER_ALIAS_PREVIEW_RE = /(?:⟦WSA1:[^\s⟧]{0,256}⟧?|[［\[]WSA1[^\s\]\uff3d]{0,256}[\]\uff3d]?|WSA1[:：][^\s]{0,256})/gu;
 
 function isDisplayTruncatedNonSecret(value: string): boolean {
   const match = TRUNCATED_DISPLAY_VALUE_RE.exec(value);
@@ -146,10 +147,29 @@ function redactKeyedSecretValues(text: string): string {
   return out + text.slice(cursor);
 }
 
-function sanitizeProviderSecrets(text: string): string {
+export function sanitizeProviderSecrets(text: string): string {
   return redactKeyedSecretValues(text)
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
     .replace(KNOWN_TOKEN_RE, '[REDACTED_TOKEN]');
+}
+
+/** Secret-only predicate for fail-closed provider boundaries. */
+export function containsProviderSecretValue(text: string): boolean {
+  if (/Bearer\s+[A-Za-z0-9._~+/=-]+/i.test(text)) return true;
+  KNOWN_TOKEN_RE.lastIndex = 0;
+  if (KNOWN_TOKEN_RE.test(text)) return true;
+  const keyedSecret = /\b([A-Za-z][A-Za-z0-9_.-]{0,64})\s*[:=]\s*["']?([^\s"']+)/gu;
+  for (const match of text.matchAll(keyedSecret)) {
+    const key = match[1] ?? '';
+    if (!isSecretKey(key)) continue;
+    const normalized = key.toLowerCase().replace(/[.-]+/g, '_');
+    const value = match[2] ?? '';
+    const strongKey = /(?:password|passphrase)$/u.test(normalized)
+      || /api_?key/u.test(normalized)
+      || /(?:private_?key|signing_?key|secret_?access_?key|client_?secret)$/u.test(normalized);
+    if (strongKey || value.length >= 12) return true;
+  }
+  return false;
 }
 
 function redactEmailLikeTokens(
@@ -261,7 +281,10 @@ export function sanitizeProviderPreviewText(
   text: string,
   options: ProviderPreviewSanitizerOptions = {},
 ): string {
-  const sanitized = sanitizeProviderSecrets(text);
+  const sanitized = sanitizeProviderSecrets(text).replace(
+    PROVIDER_ALIAS_PREVIEW_RE,
+    '[REDACTED_PROVIDER_ALIAS]',
+  );
   if (options.redactEmailLike === false) return sanitized;
   return redactEmailLikeTokens(
     sanitized,

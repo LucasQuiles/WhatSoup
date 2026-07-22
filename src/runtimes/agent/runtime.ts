@@ -52,6 +52,7 @@ import {
   resolveProviderRoutePolicy,
   type ProviderBoundaryMode,
   type ProviderDataPolicy,
+  type ProviderRoutePolicy,
 } from '../../core/provider-data-policy.ts';
 import {
   createReplyGuaranteeLivenessSender,
@@ -4748,7 +4749,7 @@ export class AgentRuntime implements Runtime {
           const convKey = canonicalConversationKey(chatJid, this.db);
           const recent = getRecentMessages(this.db, convKey, 20);
           if (recent.length > 0) {
-            const lines = this.formatContextLines(recent.reverse());
+            const lines = this.formatContextLines(recent.reverse(), session.getRoutePolicy?.());
             contextPreamble = `[Recent chat context — read before responding]\n${lines}`;
           }
         } catch (err) {
@@ -11099,6 +11100,8 @@ export class AgentRuntime implements Runtime {
       whatsoupInstance: this.instanceName,
       whatsoupMcpSocket: mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,
       routePolicy: route,
+      providerBoundaryMode: this.providerBoundaryMode,
+      providerBoundaryRouteSource: route.source,
       handoffSystemBlock: this.buildHandoffSystemBlock(conversationKey, route.provider),
       routingSystemBlock: this.nlRoutingEnabled ? () => this.buildRoutingContractBlock(route.provider) : undefined,
       egressProxyPort: this.egressProxy?.port,
@@ -11863,8 +11866,11 @@ export class AgentRuntime implements Runtime {
    */
   private formatContextLines(
     messages: ReadonlyArray<{ timestamp: number; senderName: string | null; senderJid: string; content: string | null }>,
+    routePolicy?: ProviderRoutePolicy,
   ): string {
-    const redactForBackup = this.isFallbackWindowActive;
+    const reversibleRestrictedManagedRoute = routePolicy?.dataPolicy === 'restricted'
+      && (routePolicy.provider === 'openai-api' || routePolicy.provider === 'anthropic-api');
+    const redactForBackup = this.isFallbackWindowActive && !reversibleRestrictedManagedRoute;
     return messages
       .map((m) => {
         const content = m.content ?? '[media]';
@@ -11891,7 +11897,7 @@ export class AgentRuntime implements Runtime {
       const convKey = canonicalConversationKey(chatJid, this.db);
       const missed = getMessagesSince(this.db, convKey, sinceUnixSec, 30);
       if (missed.length === 0) return false;
-      lines = this.formatContextLines(missed);
+      lines = this.formatContextLines(missed, session.getRoutePolicy?.());
       messageCount = missed.length;
     } catch (err) {
       log.warn({ err, chatJid }, 'missed message lookup failed — agent continues without context');
@@ -11977,7 +11983,7 @@ export class AgentRuntime implements Runtime {
           try {
             const recent = getRecentMessages(this.db, canonicalConversationKey(chatJid, this.db), 30);
             if (recent.length > 0) {
-              const lines = this.formatContextLines(recent.reverse());
+              const lines = this.formatContextLines(recent.reverse(), session.getRoutePolicy?.());
               // QR-095: same fix as the sendTurnToSession injection — in single/
               // shared mode mapKey is undefined here, so mark under GLOBAL to match
               // the single/shared consumeIfPending(GLOBAL_TOOL_SCOPE_KEY); otherwise

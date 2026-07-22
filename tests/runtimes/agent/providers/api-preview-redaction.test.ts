@@ -125,6 +125,18 @@ describe('provider API preview redaction', () => {
     expect(bounded).not.toContain(fixtures.keyed);
   });
 
+  it('never writes provider alias tokens or confusable alias fragments into previews', () => {
+    const alias = `⟦WSA1:path:${'a'.repeat(32)}:${'b'.repeat(32)}⟧`;
+    const confusable = `［WSA1：path：${'c'.repeat(32)}：${'d'.repeat(32)}］`;
+
+    expect(providerPreview(`error echoed ${alias}`, 500)).toBe(
+      'error echoed [REDACTED_PROVIDER_ALIAS]',
+    );
+    expect(providerPreview(`error echoed ${confusable}`, 500)).toBe(
+      'error echoed [REDACTED_PROVIDER_ALIAS]',
+    );
+  });
+
   it('redacts OpenAI-compatible HTTP error previews before logging', async () => {
     const fixtures = secretFixtures();
     fetchMock.mockResolvedValueOnce(new Response(providerErrorText(fixtures), { status: 400 }));

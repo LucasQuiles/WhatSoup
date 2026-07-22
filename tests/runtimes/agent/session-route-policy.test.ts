@@ -49,13 +49,32 @@ describe('SessionManager route policy admission', () => {
       provider: 'openai-api',
       model: 'gpt-5',
       routePolicy: route,
+      providerBoundaryMode: 'enforce',
+      providerBoundaryRouteSource: 'fallback',
     });
     sm.setDurability(durability);
 
     await sm.spawnSession();
 
     expect(sm.getRoutePolicy()).toBe(route);
-    expect(initialize).toHaveBeenCalledWith(expect.objectContaining({ routePolicy: route }));
+    expect(initialize).toHaveBeenCalledWith(expect.objectContaining({
+      routePolicy: route,
+      providerBoundaryMode: 'enforce',
+      providerSessionId: expect.stringMatching(/^openai-api-[0-9a-f-]{36}$/),
+      providerDataBoundary: expect.objectContaining({
+        binding: expect.objectContaining({
+          provider: 'openai-api',
+          model: 'gpt-5',
+          dataPolicy: 'restricted',
+          policyVersion: PROVIDER_DATA_POLICY_VERSION,
+          providerSessionId: expect.stringMatching(/^openai-api-[0-9a-f-]{36}$/),
+        }),
+        mode: 'enforce',
+      }),
+    }));
+    const initialized = initialize.mock.calls[0]![0];
+    expect(initialized.providerDataBoundary?.binding.providerSessionId)
+      .toBe(initialized.providerSessionId);
     const checkpoint = durability.getSessionCheckpoint('15550201');
     expect(JSON.parse(checkpoint?.watchdog_state ?? '')).toEqual({
       providerRoutePolicy: {
@@ -65,6 +84,35 @@ describe('SessionManager route policy admission', () => {
         policyVersion: PROVIDER_DATA_POLICY_VERSION,
       },
     });
+  });
+
+  it('retires a newly constructed broker when durable lifecycle admission fails', async () => {
+    db.raw.exec(`
+      CREATE TRIGGER deny_boundary_session_insert
+      BEFORE INSERT ON agent_sessions
+      BEGIN
+        SELECT RAISE(ABORT, 'synthetic boundary admission failure');
+      END;
+    `);
+    const boundaryEvents: Array<{ eventType: string }> = [];
+    const initialize = vi.spyOn(OpenAIApiProvider.prototype, 'initialize').mockResolvedValue(undefined);
+    const sm = new SessionManager({
+      db,
+      messenger: messenger(),
+      chatJid: '15550202@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      model: 'gpt-5',
+      routePolicy: route,
+      providerBoundaryMode: 'enforce',
+      providerBoundaryRouteSource: 'default',
+      providerBoundaryEventSink: (event) => boundaryEvents.push(event),
+    });
+
+    await expect(sm.spawnSession()).rejects.toThrow(/synthetic boundary admission failure/);
+
+    expect(initialize).not.toHaveBeenCalled();
+    expect(boundaryEvents).toContainEqual(expect.objectContaining({ eventType: 'retire' }));
   });
 
   it('preserves existing checkpoint watchdog state when adding route policy metadata', async () => {
