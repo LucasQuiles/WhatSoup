@@ -224,6 +224,12 @@ jobs:
       - name: Insecure tempfile guard
         run: npm run guard:insecure-tempfile
 
+      - name: No destructive git guard
+        run: npm run guard:no-destructive-git
+
+      - name: Grant resolver inventory guard
+        run: npm run guard:grant-resolver
+
       - name: Agent decision polls guard
         run: npm run guard:agent-decision-polls
 
