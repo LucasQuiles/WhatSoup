@@ -32,6 +32,7 @@ import {
   clearStandbyNotice,
 } from './standby-notice.ts';
 import { sanitizeProviderPreviewText } from './provider-preview-sanitizer.ts';
+import { formatContextLines } from './context-lines.ts';
 import { redactHandoffPii } from './handoff-pii-redactor.ts';
 import { seamForProvider } from './handoff-seam-routing.ts';
 import { ensureHandoffArtifactSchema, getHandoffArtifact, deleteHandoffArtifact } from './handoff-artifact.ts';
@@ -87,6 +88,7 @@ import {
 } from './session.ts';
 import { createProviderExecutionGate, ProviderExecutionGate } from './provider-execution-gate.ts';
 import { dispatchProviderTurn } from './provider-boundary-dispatch.ts';
+import { markDeferredSystemTurn, requireSystemTurnProviderBoundary } from './system-turn-deadline.ts';
 import {
   OutboundQueue,
   type IOutboundQueue,
@@ -1694,7 +1696,18 @@ export class AgentRuntime implements Runtime {
     }
 
     const classified = classifyActiveSessions(this.db, this.durability);
+    const residentRowIds = new Set([...this.chatSessions.values()]
+      .map((manager) => manager.getDbRowId())
+      .filter((rowId): rowId is number => rowId !== null));
     for (const session of classified) {
+      if (residentRowIds.has(session.id)) {
+        log.warn(
+          { id: session.id, conversationKey: session.conversationKey, classification: session.classification,
+            reason: session.reason, providerSessionId: session.sessionId },
+          'skipping zombie-session disposition for current-process resident manager');
+        if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
+        continue;
+      }
       switch (session.classification) {
         case 'stale_dead':
           markOrphaned(this.db, session.id);
@@ -3355,10 +3368,8 @@ export class AgentRuntime implements Runtime {
               'proactive_resume_continuation',
               chatJid,
             );
-            await dispatchProviderTurn(
-              session,
-              '[System: session resumed after service restart — continue where you left off]',
-              () => this.requireSystemTurnProviderBoundary(continuationLease!),
+            await this.dispatchSystemTurn(
+              session, '[System: session resumed after service restart — continue where you left off]', continuationLease!,
             );
             log.info({ chatJid }, 'sent continuation turn after proactive resume');
           } catch (err) {
@@ -7480,11 +7491,7 @@ export class AgentRuntime implements Runtime {
       try {
         await this.waitForSystemTurnQuarantine(mapKey);
         await this.pendingSystemResults.waitUntilDispatchable(mapKey, compactLease);
-        await dispatchProviderTurn(
-          session,
-          '/compact',
-          () => this.requireSystemTurnProviderBoundary(compactLease),
-        );
+        await this.dispatchSystemTurn(session, '/compact', compactLease);
       } catch (err) {
         if (silent) this.clearSilentCompact(mapKey);
         await this.settleFailedSystemTurnDispatch(session, mapKey, compactLease, err);
@@ -7535,11 +7542,7 @@ export class AgentRuntime implements Runtime {
         GLOBAL_TOOL_SCOPE_KEY,
         compactLease,
       );
-      await dispatchProviderTurn(
-        session,
-        '/compact',
-        () => this.requireSystemTurnProviderBoundary(compactLease),
-      );
+      await this.dispatchSystemTurn(session, '/compact', compactLease);
     } catch (err) {
       if (silent) this.clearSilentCompact(GLOBAL_TOOL_SCOPE_KEY);
       this.currentTurnChatJid = null;
@@ -8005,51 +8008,29 @@ export class AgentRuntime implements Runtime {
     purpose: SystemTurnPurpose,
     routeChatJid?: string,
   ): SystemTurnLeaseToken {
-    // Deadlines begin only after exact provider-boundary admission. Queue time
-    // can legitimately exceed both 240s windows when a serialized provider is
-    // busy on another chat; counting it as execution previously quarantined a
-    // respawn before its OpenCode process existed. Once admitted, one retry
-    // window remains before quarantine because streams have no request IDs and
-    // a slow result must not be re-sent or allowed to consume a later lease.
-    let retryWindowGranted = false;
-    return this.pendingSystemResults.mark({
+    return markDeferredSystemTurn({
+      tracker: this.pendingSystemResults,
       scopeKey,
       purpose,
       owner: this.captureSystemTurnOwner(session, scopeKey),
       ...(routeChatJid !== undefined ? { routeChatJid } : {}),
-      ...(purpose === 'auto_compact_silent'
-        ? {}
-        : {
-            timeoutMs: SYSTEM_TURN_TIMEOUT_MS,
-            deferDeadlineUntilActivated: true,
-            onTimeout: async (lease: SystemTurnLeaseToken): Promise<boolean | 'retry'> => {
-              if (!retryWindowGranted) {
-                retryWindowGranted = true;
-                log.warn(
-                  { scopeKey, leaseId: lease.id, purpose, timeoutMs: SYSTEM_TURN_TIMEOUT_MS },
-                  'system provider request timed out — retrying once before quarantine',
-                );
-                return 'retry';
-              }
-              log.error(
-                { scopeKey, leaseId: lease.id, purpose, timeoutMs: SYSTEM_TURN_TIMEOUT_MS },
-                'system provider request timed out — quarantining source generation',
-              );
-              const provedClosed = await this.quarantineTimedOutSystemTurn(
-                session,
-                scopeKey,
-                lease,
-              );
-              if (provedClosed) this.releaseSystemTurnExecutingActorByLease(lease);
-              return provedClosed;
-            },
-          }),
+      timeoutMs: SYSTEM_TURN_TIMEOUT_MS,
+      quarantine: async (lease) => {
+        const provedClosed = await this.quarantineTimedOutSystemTurn(session, scopeKey, lease);
+        if (provedClosed) this.releaseSystemTurnExecutingActorByLease(lease);
+        return provedClosed;
+      },
     });
   }
 
   private requireSystemTurnProviderBoundary(lease: SystemTurnLeaseToken): void {
-    if (this.pendingSystemResults.activateDeadline(lease)) return;
-    throw new Error(`SYSTEM_TURN_LEASE_NOT_LIVE_AT_PROVIDER_BOUNDARY:${lease.id}`);
+    requireSystemTurnProviderBoundary(this.pendingSystemResults, lease);
+  }
+
+  private dispatchSystemTurn(session: SessionManager, text: string, lease: SystemTurnLeaseToken, onBoundary?: () => void): Promise<void> {
+    return dispatchProviderTurn(session, text, () => {
+      this.requireSystemTurnProviderBoundary(lease); onBoundary?.();
+    });
   }
 
   private setOwnedPerChatSession(mapKey: string, session: SessionManager): void {
@@ -12237,13 +12218,9 @@ export class AgentRuntime implements Runtime {
           'respawn_continuation',
           args.chatJid,
         );
-        await dispatchProviderTurn(
-          args.session,
-          '[System: session resumed after crash ��� continue where you left off]',
-          () => {
-            this.requireSystemTurnProviderBoundary(continuationLease!);
-            publishRespawnRecovery();
-          },
+        await this.dispatchSystemTurn(
+          args.session, '[System: session resumed after crash ��� continue where you left off]',
+          continuationLease!, publishRespawnRecovery,
         );
         log.info({ mapKey: activeMapKey }, 'sent continuation turn after auto-respawn');
       } catch (err) {
@@ -12415,35 +12392,10 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  private formatRecoveryTimestamp(unixMs: number): string {
-    const d = new Date(unixMs * 1000); // timestamps are unix seconds
-    return d.toTimeString().slice(0, 5); // HH:MM
-  }
-
-  /**
-   * Format chat messages into the `[HH:MM] sender: content` lines injected as
-   * recent-context into a fresh/stand-in session. Single source of truth for
-   * that line shape (previously duplicated across the three injection sites).
-   * Caller controls ordering — getRecentMessages is reverse-chronological (pass
-   * a reversed copy), getMessagesSince is already chronological.
-   *
-   * Cross-provider safety: while a fallback window is active the target session
-   * is a DIFFERENT provider than the conversation originated on, so message
-   * content is scrubbed of secret shapes (tokens, keys, Bearer, emails) before
-   * it crosses the provider boundary. Same-provider respawns inject verbatim —
-   * the content was already seen by that provider, so there is no new exposure.
-   */
   private formatContextLines(
     messages: ReadonlyArray<{ timestamp: number; senderName: string | null; senderJid: string; content: string | null }>,
   ): string {
-    const redactForBackup = this.isFallbackWindowActive;
-    return messages
-      .map((m) => {
-        const content = m.content ?? '[media]';
-        const safe = redactForBackup ? sanitizeProviderPreviewText(content) : content;
-        return `[${this.formatRecoveryTimestamp(m.timestamp)}] ${m.senderName ?? m.senderJid}: ${safe}`;
-      })
-      .join('\n');
+    return formatContextLines(messages, this.isFallbackWindowActive);
   }
 
   /**
@@ -12566,10 +12518,8 @@ export class AgentRuntime implements Runtime {
                 'resume_failure_context',
                 chatJid,
               );
-              await dispatchProviderTurn(
-                session,
-                `[CONTEXT RECOVERY — prior session expired]\n${lines}`,
-                () => this.requireSystemTurnProviderBoundary(contextLease!),
+              await this.dispatchSystemTurn(
+                session, `[CONTEXT RECOVERY — prior session expired]\n${lines}`, contextLease!,
               );
               await this.pendingSystemResults.waitUntilEmpty(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
               await this.waitForSystemTurnQuarantine(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
