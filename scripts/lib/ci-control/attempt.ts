@@ -140,6 +140,12 @@ export interface TerminalAttemptV1 {
 interface ValidationClock { now?: number }
 interface LeaseReadOptions extends ValidationClock { expectedLease?: SupervisorLeaseExpectationsV1 }
 interface FinalizedClose { supervisorCloseDigest: string; historyEntryDigest: string }
+interface TerminalAttemptAdmissionOptions extends ValidationClock {
+  leaseDigest: string;
+  supervisorTerminalDigest: string;
+  supervisorCloseDigest: string;
+  expectedLease: SupervisorLeaseExpectationsV1;
+}
 
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const POSITIVE_DECIMAL = /^[1-9][0-9]*$/;
@@ -309,16 +315,14 @@ export function supervisorCloseDigest(value: SupervisorCloseV1, lease: Superviso
 }
 
 export function terminalAttemptDigest(value: Record<string, unknown>): string {
-  return digestCore(validateTerminalAttempt(value));
+  return digestCore(validateTerminalAttemptShape(value));
 }
 
-export function validateTerminalAttempt(value: unknown, options: ValidationClock = {}): TerminalAttemptV1 {
+function validateTerminalAttemptShape(value: unknown): TerminalAttemptV1 {
   assertBoundedEvidenceGraph(value, { maxDepth: 5, maxItems: 32, maxNodes: 64, maxStringBytes: 2_048 });
   const attempt = requireExactRecord(value, ATTEMPT_KEYS, 'terminal attempt');
   if (attempt.schemaVersion !== 1 || !isOperationalId(attempt.id) || typeof attempt.lifecycle !== 'string' || !TERMINALS.has(attempt.lifecycle as AttemptLifecycle)) throw new Error('invalid terminal attempt identity or lifecycle');
   if (!isTimestamp(attempt.createdAt) || !isTimestamp(attempt.terminalAt) || Date.parse(attempt.terminalAt) < Date.parse(attempt.createdAt)) throw new Error('invalid terminal attempt timestamps');
-  const now = options.now ?? Date.now();
-  if (Date.parse(attempt.createdAt) > now + MAX_FUTURE_SKEW_MS || Date.parse(attempt.terminalAt) > now + MAX_FUTURE_SKEW_MS || now - Date.parse(attempt.createdAt) > MAX_VALIDITY_MS) throw new Error('terminal attempt is stale or future-dated');
   if (!hasDirectStatus(attempt.rawExit, attempt.rawSignal) || typeof attempt.timedOut !== 'boolean' || attempt.timedOut !== (attempt.lifecycle === 'timed-out')) throw new Error('invalid terminal attempt direct status');
   const proof = requireExactRecord(attempt.terminationProof, TERMINATION_KEYS, 'supervisor termination proof');
   if (proof.schemaVersion !== 1 || proof.status !== 'reaped' || !isTimestamp(proof.observedAt) || [proof.leaseDigest, proof.supervisorTerminalDigest, proof.supervisorCloseDigest, proof.supervisorDigest].some((item) => !isDigest(item)) || proof.observedAt !== attempt.terminalAt) throw new Error('supervisor termination proof is invalid');
@@ -327,6 +331,14 @@ export function validateTerminalAttempt(value: unknown, options: ValidationClock
   if (binding.toolDigest !== proof.supervisorDigest) throw new Error('attempt supervisor and tool binding mismatch');
   if (!Number.isSafeInteger(attempt.historySequence) || Number(attempt.historySequence) !== 4 || !isDigest(attempt.historyEntryDigest)) throw new Error('invalid append-only attempt history');
   return { ...attempt, terminationProof: proof, evidenceBinding: binding } as unknown as TerminalAttemptV1;
+}
+
+export function validateTerminalAttempt(value: unknown, options: ValidationClock = {}): TerminalAttemptV1 {
+  const attempt = validateTerminalAttemptShape(value);
+  const now = options.now ?? Date.now();
+  if (!Number.isFinite(now)) throw new Error('terminal attempt validation clock must be finite');
+  if (Date.parse(attempt.createdAt) > now + MAX_FUTURE_SKEW_MS || Date.parse(attempt.terminalAt) > now + MAX_FUTURE_SKEW_MS || now - Date.parse(attempt.createdAt) > MAX_VALIDITY_MS) throw new Error('terminal attempt is stale or future-dated');
+  return attempt;
 }
 
 export function transitionAttempt(from: AttemptLifecycle, to: AttemptLifecycle): AttemptLifecycle {
@@ -483,8 +495,15 @@ export class FileAttemptEvidenceStore {
     this.#assertHistory(attempt, lease, terminal, close);
   }
 
-  writeAdmittedAttempt(attempt: TerminalAttemptV1): void {
+  writeAdmittedAttempt(value: unknown, options?: TerminalAttemptAdmissionOptions): string {
+    if (options === undefined) throw new Error('trusted terminal attempt admission options are required');
+    const attempt = validateTerminalAttempt(value, options);
+    if (attempt.terminationProof.leaseDigest !== options.leaseDigest || attempt.terminationProof.supervisorTerminalDigest !== options.supervisorTerminalDigest || attempt.terminationProof.supervisorCloseDigest !== options.supervisorCloseDigest) throw new Error('terminal receipt supervisor evidence digest mismatch');
+    this.assertAdmissionChain(attempt, { now: options.now, expectedLease: options.expectedLease });
     this.#writeCanonical(path.basename(this.terminalPath(attempt.id)), attempt, 'terminal receipt exists; attempt reuse is forbidden');
+    const digest = terminalAttemptDigest(attempt as unknown as Record<string, unknown>);
+    this.readTerminalAttempt(attempt.id, digest, attempt, { now: options.now, expectedLease: options.expectedLease });
+    return digest;
   }
 
   #assertAttemptEvidence(attempt: TerminalAttemptV1, lease: SupervisorProcessLeaseV1, terminal: SupervisorTerminalV1, close: SupervisorCloseV1): void {
@@ -568,10 +587,5 @@ export function writeTerminalAttempt(filePath: string, value: TerminalAttemptV1,
 }): string {
   const attempt = validateTerminalAttempt(value, options);
   if (path.resolve(filePath) !== options.store.terminalPath(attempt.id)) throw new Error('terminal receipt path does not match its attempt store');
-  if (attempt.terminationProof.leaseDigest !== options.leaseDigest || attempt.terminationProof.supervisorTerminalDigest !== options.supervisorTerminalDigest || attempt.terminationProof.supervisorCloseDigest !== options.supervisorCloseDigest) throw new Error('terminal receipt supervisor evidence digest mismatch');
-  options.store.assertAdmissionChain(attempt, { now: options.now, expectedLease: options.expectedLease });
-  options.store.writeAdmittedAttempt(attempt);
-  const digest = terminalAttemptDigest(attempt as unknown as Record<string, unknown>);
-  options.store.readTerminalAttempt(attempt.id, digest, attempt, { now: options.now, expectedLease: options.expectedLease });
-  return digest;
+  return options.store.writeAdmittedAttempt(attempt, options);
 }

@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rename, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   FileAttemptEvidenceStore,
@@ -191,6 +191,73 @@ describe('CP-F2 supervisor-issued process evidence', () => {
     expect(() => validateSupervisorClose({ ...directClose, rawExit: 2 }, issued, precursor, { now: NOW })).toThrow(/close|exit|supervisor/i);
     expect(() => validateSupervisorClose({ ...directClose, observerDigest: OTHER_DIGEST }, issued, precursor, { now: NOW })).toThrow(/observer|close|binding/i);
     expect(() => validateSupervisorClose({ ...directClose, closedAt: '2026-07-20T21:51:59.000Z' }, issued, precursor, { now: NOW })).toThrow(/chronology|close|terminal/i);
+  });
+
+  it('hashes valid historical attempt content independently of freshness admission', () => {
+    const issued = lease();
+    const precursor = terminal(issued);
+    const historical = attempt(issued, precursor, close(issued), DIGEST);
+    const dateNow = vi.spyOn(Date, 'now');
+
+    try {
+      dateNow.mockReturnValue(NOW);
+      const freshDigest = terminalAttemptDigest(historical as unknown as Record<string, unknown>);
+      expect(validateTerminalAttempt(historical, { now: NOW })).toEqual(historical);
+
+      dateNow.mockReturnValue(NOW + (48 * 60 * 60_000));
+      expect(() => validateTerminalAttempt(historical)).toThrow(/stale|future/i);
+      expect(terminalAttemptDigest(historical as unknown as Record<string, unknown>)).toBe(freshDigest);
+    } finally {
+      dateNow.mockRestore();
+    }
+  });
+
+  it('rejects non-finite trusted clocks instead of bypassing freshness admission', () => {
+    const issued = lease();
+    const historical = attempt(issued, terminal(issued), close(issued), DIGEST);
+
+    for (const invalidNow of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expect(() => validateTerminalAttempt(historical, { now: invalidNow })).toThrow(/clock|finite/i);
+    }
+  });
+
+  it('admits terminal bytes only through a finite-clock validated evidence chain', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'ci-control-attempt-admission-'));
+    roots.push(root);
+    const store = new FileAttemptEvidenceStore(root);
+    const issued = lease();
+    const precursor = terminal(issued);
+    const directClose = close(issued);
+    const admitted = attempt(issued, precursor, directClose, DIGEST);
+    const uncheckedWrite = store.writeAdmittedAttempt.bind(store) as (value: unknown, options?: unknown) => unknown;
+    const claimedOptions = {
+      leaseDigest: supervisorProcessLeaseDigest(issued),
+      supervisorTerminalDigest: supervisorTerminalDigest(precursor, issued),
+      supervisorCloseDigest: supervisorCloseDigest(directClose, issued, precursor),
+      expectedLease: expectations(),
+      now: NOW,
+    };
+
+    expect(() => uncheckedWrite({ ...admitted, rawExit: null, rawSignal: null }, claimedOptions)).toThrow(/admission|direct status|trusted|validation/i);
+    expect(() => uncheckedWrite(admitted, { ...claimedOptions, now: NOW + (48 * 60 * 60_000) })).toThrow(/stale|future/i);
+    expect(() => readFileSync(store.terminalPath(admitted.id), 'utf8')).toThrow();
+
+    store.beginAttempt(issued.attemptId, CREATED_AT);
+    const leaseDigest = store.writeSupervisorLease(issued, expectations(), { now: NOW });
+    const precursorDigest = store.writeSupervisorTerminal(precursor, leaseDigest, { now: NOW, expectedLease: expectations() });
+    const finalized = store.writeSupervisorClose(directClose, leaseDigest, precursorDigest, 'terminal', { now: NOW, expectedLease: expectations() });
+    const chainedAttempt = attempt(issued, precursor, directClose, finalized.historyEntryDigest);
+    const writeOptions = {
+      store,
+      leaseDigest,
+      supervisorTerminalDigest: precursorDigest,
+      supervisorCloseDigest: finalized.supervisorCloseDigest,
+      expectedLease: expectations(),
+    };
+
+    expect(() => writeTerminalAttempt(store.terminalPath(chainedAttempt.id), chainedAttempt, { ...writeOptions, now: Number.NaN })).toThrow(/clock|finite/i);
+    const admittedDigest = writeTerminalAttempt(store.terminalPath(chainedAttempt.id), chainedAttempt, { ...writeOptions, now: NOW });
+    expect(() => store.readTerminalAttempt(chainedAttempt.id, admittedDigest, chainedAttempt, { now: Number.NaN, expectedLease: expectations() })).toThrow(/clock|finite/i);
   });
 
   it('stores one canonical append-only lease, terminal precursor, close, history, and admitted receipt', async () => {
