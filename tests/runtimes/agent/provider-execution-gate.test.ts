@@ -1,6 +1,23 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
+const { emitAlertMock, clearAlertMock } = vi.hoisted(() => ({
+  emitAlertMock: vi.fn(),
+  clearAlertMock: vi.fn(),
+}));
+
+vi.mock('../../../src/lib/emit-alert.ts', () => ({
+  emitAlertChecked: emitAlertMock,
+  clearAlertSourceChecked: clearAlertMock,
+}));
+
+vi.mock('../../../src/logger.ts', () => ({
+  createChildLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
+}));
+
+import {
+  createProviderExecutionGate,
+  ProviderExecutionGate,
+} from '../../../src/runtimes/agent/provider-execution-gate.ts';
 
 describe('ProviderExecutionGate', () => {
   it('admits one owner and preserves FIFO order across waiters', async () => {
@@ -75,6 +92,32 @@ describe('ProviderExecutionGate', () => {
       expect(onRecovered).not.toHaveBeenCalled();
       third.release();
       expect(onRecovered).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('publishes bounded queue pressure and recovery alerts for the runtime gate', async () => {
+    vi.useFakeTimers();
+    try {
+      emitAlertMock.mockClear();
+      clearAlertMock.mockClear();
+      const gate = createProviderExecutionGate('pressure-test');
+      const first = await gate.acquire();
+      const secondPromise = gate.acquire();
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(emitAlertMock).toHaveBeenCalledWith(
+        'pressure-test',
+        'provider_execution_queue_pressure',
+        'OpenCode execution queue has waited at least 30 seconds',
+        expect.stringContaining('limitation=external_opencode_processes_are_not_serialized'),
+        'warning',
+      );
+      first.release();
+      const second = await secondPromise;
+      second.release();
+      expect(clearAlertMock).toHaveBeenCalledWith('pressure-test', 'provider_execution_queue_pressure');
     } finally {
       vi.useRealTimers();
     }
