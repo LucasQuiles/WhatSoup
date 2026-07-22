@@ -594,19 +594,43 @@ describe('quality workflow composition', () => {
  * for. The second test deletes stale entries by failing when an exemption is no longer
  * needed, so the map cannot quietly become a list of excuses.
  */
-const CI_EXEMPT_PUSH_GATE_GUARDS: Readonly<Record<string, string>> = {
-  'guard:ssot-patterns':
-    'tests/scripts/ssot-pattern-guard.test.ts asserts every rule count equals BOTH baseline twins against REPO_ROOT — an exact-count ratchet, not a smoke test.',
-  'guard:ring-boundary-ratchet':
-    'tests/scripts/ring-boundary-guard.test.ts asserts verdict.count === baseline against the live REPO_ROOT.',
-  'guard:doc-tally':
-    'tests/scripts/guard-doc-tally.test.ts runs validateDocTally + runDocTallyGuard against REPO_ROOT.',
-  'guard:guard-test-coverage':
-    'tests/scripts/guard-test-coverage-check.test.ts runs findGuardsMissingTests against the live repo root.',
-  'guard:deployer-static':
-    'tests/scripts/deployer-static-parity.test.ts reads the deploy script and package.json from the live repoRoot.',
-  'guard:publication:staged':
-    'quality.yml runs guard:publication:all (--all), which scans every tracked doc and is a strict superset of the --staged subset.',
+/**
+ * `backedBy` is a PATH, not prose, and is asserted to exist and to be collected by vitest.
+ *
+ * The first version of this map held free-text reasons. That is a false-green waiting to
+ * happen: delete or rename `ssot-pattern-guard.test.ts` and the map would still cheerfully
+ * claim the guard was covered, because nothing connected the sentence to a file. An
+ * exemption is a protection claim, and a protection claim has to derive from something on
+ * disk rather than from a sentence someone wrote once.
+ *
+ * `backedBy: null` means the exemption does not rest on a test at all — spell out in `why`
+ * what does carry it.
+ */
+const CI_EXEMPT_PUSH_GATE_GUARDS: Readonly<Record<string, { backedBy: string | null; why: string }>> = {
+  'guard:ssot-patterns': {
+    backedBy: 'tests/scripts/ssot-pattern-guard.test.ts',
+    why: 'asserts every rule count equals BOTH baseline twins against REPO_ROOT — an exact-count ratchet, not a smoke test.',
+  },
+  'guard:ring-boundary-ratchet': {
+    backedBy: 'tests/scripts/ring-boundary-guard.test.ts',
+    why: 'asserts verdict.count === baseline against the live REPO_ROOT.',
+  },
+  'guard:doc-tally': {
+    backedBy: 'tests/scripts/guard-doc-tally.test.ts',
+    why: 'runs validateDocTally + runDocTallyGuard against REPO_ROOT.',
+  },
+  'guard:guard-test-coverage': {
+    backedBy: 'tests/scripts/guard-test-coverage-check.test.ts',
+    why: 'runs findGuardsMissingTests against the live repo root.',
+  },
+  'guard:deployer-static': {
+    backedBy: 'tests/scripts/deployer-static-parity.test.ts',
+    why: 'reads the deploy script and package.json from the live repoRoot.',
+  },
+  'guard:publication:staged': {
+    backedBy: null,
+    why: 'quality.yml runs guard:publication:all (--all), which scans every tracked doc and is a strict superset of the --staged subset. No test backs this; the CI step does.',
+  },
 };
 
 describe('pre-push guard — local/CI enforcement parity for guard steps', () => {
@@ -654,5 +678,44 @@ describe('pre-push guard — local/CI enforcement parity for guard steps', () =>
   it('guard:transport-patterns has a named CI step (the block rules it backs are not hook-only)', () => {
     // The specific regression. Three severity:'block' rules depended on a client-side hook.
     expect(qualityWorkflow).toMatch(/npm run guard:transport-patterns/);
+  });
+
+  it('every exemption that claims a backing test names a file that EXISTS', () => {
+    // Without this, deleting the backing test silently converts a justified exemption into
+    // an unenforced guard — the map would keep asserting coverage that no longer exists.
+    const missing = Object.entries(CI_EXEMPT_PUSH_GATE_GUARDS)
+      .filter(([, v]) => v.backedBy !== null)
+      .filter(([, v]) => !existsSync(resolve(repoRoot, v.backedBy as string)))
+      .map(([guard, v]) => `${guard} -> ${v.backedBy as string}`);
+    expect(
+      missing,
+      `exemption(s) naming a backing test that no longer exists: ${missing.join(', ')}`,
+    ).toEqual([]);
+  });
+
+  it('every backing test is actually COLLECTED by the suite CI runs', () => {
+    // Existing on disk is not enough — a test under an excluded path never runs, so the
+    // exemption would rest on a file CI silently skips. vitest.config.ts collects
+    // `tests/**/*.test.ts` and excludes tests/browser/** and tests/browser-motion/**.
+    const include = /^tests\/.+\.test\.tsx?$/;
+    const excluded = [/^tests\/browser\//, /^tests\/browser-motion\//];
+    const uncollected = Object.entries(CI_EXEMPT_PUSH_GATE_GUARDS)
+      .filter(([, v]) => v.backedBy !== null)
+      .filter(([, v]) => {
+        const p = v.backedBy as string;
+        return !include.test(p) || excluded.some((re) => re.test(p));
+      })
+      .map(([guard, v]) => `${guard} -> ${v.backedBy as string}`);
+    expect(
+      uncollected,
+      `backing test(s) outside the collected glob, so CI never runs them: ${uncollected.join(', ')}`,
+    ).toEqual([]);
+  });
+
+  it('every exemption states a reason', () => {
+    const blank = Object.entries(CI_EXEMPT_PUSH_GATE_GUARDS)
+      .filter(([, v]) => v.why.trim().length < 20)
+      .map(([guard]) => guard);
+    expect(blank, `exemption(s) without a substantive reason: ${blank.join(', ')}`).toEqual([]);
   });
 });
