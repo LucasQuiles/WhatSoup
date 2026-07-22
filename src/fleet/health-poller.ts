@@ -613,6 +613,7 @@ export class HealthPoller {
   private failureStartedAt: Map<string, number> = new Map();
   private healthBodyDegradedStartedAt: Map<string, number> = new Map();
   private healthBodyDegradedPolls: Map<string, number> = new Map();
+  private operationalFallbackReclassified: Set<string> = new Set();
   private unreachableAlerted: Set<string> = new Set();
   private targetPids: Map<string, number> = new Map();
   private readonly loopLagSampler: LoopLagSampler;
@@ -815,7 +816,7 @@ export class HealthPoller {
           const degradedEvidence = `Health body reports status=${healthStatus}`;
           const degradedAlert = healthStatus === 'degraded'
             ? this.shouldAlertHealthBodyDegraded(name, health, degradedEvidence)
-            : { shouldAlert: true, evidence: degradedEvidence };
+            : { shouldAlert: true, evidence: degradedEvidence, operationalFallback: false };
           this.updateDegraded(
             name,
             health,
@@ -828,8 +829,11 @@ export class HealthPoller {
             false,
             classification.confidence,
             classification.reason,
-            classification.evidence,
+            [...classification.evidence, ...degradedAlert.evidence.split(/\s+/).filter(Boolean)],
           );
+          if (healthStatus === 'degraded' && degradedAlert.operationalFallback) {
+            this.clearReclassifiedHealthBodyAlert(name, degradedAlert.evidence);
+          }
           return;
         }
 
@@ -1214,13 +1218,36 @@ export class HealthPoller {
   private resetHealthBodyDegradedDebounce(name: string): void {
     this.healthBodyDegradedStartedAt.delete(name);
     this.healthBodyDegradedPolls.delete(name);
+    this.operationalFallbackReclassified.delete(name);
+  }
+
+  private clearReclassifiedHealthBodyAlert(name: string, evidence: string): void {
+    if (this.operationalFallbackReclassified.has(name)) return;
+    try {
+      const cleared = clearAlertSourceChecked(
+        name,
+        'health_body_degraded',
+        `reclassified=operational_fallback ${evidence.replace(/\n/g, ' ')}`,
+        undefined,
+      );
+      if (!cleared) return;
+      this.operationalFallbackReclassified.add(name);
+      const status = this.statuses.get(name);
+      if (status) {
+        status.activeAlertSources = status.activeAlertSources.filter(
+          (source) => source !== 'health_body_degraded',
+        );
+      }
+    } catch (err) {
+      log.warn({ err, name }, 'failed to clear reclassified health-body alert');
+    }
   }
 
   private shouldAlertHealthBodyDegraded(
     name: string,
     health: Record<string, unknown>,
     baseEvidence: string,
-  ): { shouldAlert: boolean; evidence: string } {
+  ): { shouldAlert: boolean; evidence: string; operationalFallback: boolean } {
     const now = Date.now();
     const startedAt = this.healthBodyDegradedStartedAt.get(name) ?? now;
     this.healthBodyDegradedStartedAt.set(name, startedAt);
@@ -1229,6 +1256,53 @@ export class HealthPoller {
     const dwellMs = now - startedAt;
     const whatsapp = this.readRecord(health['whatsapp']);
     const connection = this.readRecord(whatsapp?.['connection']);
+    const instance = this.readRecord(health['instance']);
+    const turnCapability = this.readRecord(health['turn_capability']);
+    const runtime = this.readRecord(health['runtime']);
+    const runtimeAgent = this.readRecord(runtime?.['agent']);
+    const providerExecution = this.readRecord(runtimeAgent?.['providerExecution']);
+    const fallbackReason = this.formatEvidenceValue(instance?.['fallbackReason'], 80);
+    const effectiveProvider = this.formatEvidenceValue(instance?.['effectiveProvider'], 80);
+    const fallbackChainExhausted = instance?.['fallbackChainExhausted'];
+    const failedEntryCount = this.readNumber(instance?.['failedEntryCount']);
+    const fallbackTurnsServed = this.readNumber(instance?.['fallbackTurnsServed']);
+    const lastFallbackTurnAt = this.readNumber(instance?.['lastFallbackTurnAt']);
+    const lastTurnErrorClass = turnCapability?.['last_turn_error_class'];
+    const lastSuccessfulTurnAt = this.readNumber(turnCapability?.['last_successful_turn_at']);
+    const providerPressure = providerExecution?.['pressureActive'];
+    const recoveryOutstanding = this.readNumber(runtimeAgent?.['turnRecoveryOutstanding']);
+    const degradationCausesRaw = health['degradation_causes'];
+    const degradationCauses = Array.isArray(degradationCausesRaw)
+      && degradationCausesRaw.length > 0
+      && degradationCausesRaw.every((cause) => typeof cause === 'string' && cause.length > 0)
+      ? degradationCausesRaw as string[]
+      : null;
+    const operationalFallbackCauses = new Set([
+      'provider_fallback_active',
+      'primary_model_unusable',
+      'primary_model_evidence_stale',
+    ]);
+    const exactOperationalFallbackCauses = degradationCauses !== null
+      && degradationCauses.includes('provider_fallback_active')
+      && degradationCauses.every((cause) => operationalFallbackCauses.has(cause));
+    const operationalFallback =
+      exactOperationalFallbackCauses
+      && whatsapp?.['connected'] === true
+      && connection?.['state'] === 'connected'
+      && fallbackReason !== null
+      && effectiveProvider !== null
+      && fallbackChainExhausted === false
+      && failedEntryCount === 0
+      && fallbackTurnsServed !== null
+      && fallbackTurnsServed > 0
+      && lastFallbackTurnAt !== null
+      && lastFallbackTurnAt > 0
+      && lastSuccessfulTurnAt !== null
+      && lastSuccessfulTurnAt > 0
+      && (lastTurnErrorClass === null || lastTurnErrorClass === undefined)
+      && providerPressure === false
+      && recoveryOutstanding === 0;
+    if (!operationalFallback) this.operationalFallbackReclassified.delete(name);
     const evidence = [
       baseEvidence,
       `health_body_degraded_polls=${polls}`,
@@ -1237,6 +1311,19 @@ export class HealthPoller {
       `health_body_degraded_required_dwell_ms=${HEALTH_BODY_DEGRADED_ALERT_DWELL_MS}`,
       `whatsapp_connected=${String(whatsapp?.['connected'] ?? 'unknown')}`,
       `connection_state=${String(connection?.['state'] ?? 'unknown')}`,
+      `degradation_class=${operationalFallback ? 'operational_fallback' : 'undifferentiated'}`,
+      `degradation_causes=${degradationCauses?.join(',') ?? 'unknown'}`,
+      `effective_provider=${effectiveProvider ?? 'unknown'}`,
+      `fallback_reason=${fallbackReason ?? 'unknown'}`,
+      `instance_fallback_model=${this.formatEvidenceValue(instance?.['fallbackModel'], 120) ?? 'unknown'}`,
+      `fallback_chain_exhausted=${String(fallbackChainExhausted ?? 'unknown')}`,
+      `failed_entry_count=${failedEntryCount === null ? 'unknown' : String(failedEntryCount)}`,
+      `fallback_turns_served=${fallbackTurnsServed === null ? 'unknown' : String(fallbackTurnsServed)}`,
+      `last_fallback_turn_at=${lastFallbackTurnAt === null ? 'unknown' : String(lastFallbackTurnAt)}`,
+      `last_successful_turn_at=${lastSuccessfulTurnAt === null ? 'unknown' : String(lastSuccessfulTurnAt)}`,
+      `last_turn_error_class=${lastTurnErrorClass == null ? 'none' : this.formatEvidenceValue(lastTurnErrorClass, 80) ?? 'unknown'}`,
+      `provider_execution_pressure_active=${String(providerPressure ?? 'unknown')}`,
+      `turn_recovery_outstanding=${recoveryOutstanding === null ? 'unknown' : String(recoveryOutstanding)}`,
     ].join('\n');
     const shouldAlert = polls >= HEALTH_BODY_DEGRADED_ALERT_POLLS
       && dwellMs >= HEALTH_BODY_DEGRADED_ALERT_DWELL_MS;
@@ -1249,7 +1336,7 @@ export class HealthPoller {
         requiredDwellMs: HEALTH_BODY_DEGRADED_ALERT_DWELL_MS,
       }, 'health body degraded; waiting for debounce before alert');
     }
-    return { shouldAlert, evidence };
+    return { shouldAlert: operationalFallback ? false : shouldAlert, evidence, operationalFallback };
   }
 
   private trackTargetPid(name: string, health: Record<string, unknown>): void {
