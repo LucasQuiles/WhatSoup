@@ -487,6 +487,29 @@ describe('SessionManager spawn-per-turn child handlers (opencode-cli)', () => {
     expect(sm.getStatus().turnInFlight).toBe(false);
   });
 
+  it('does not start a second child reap when the terminal result handler already shuts down the session', async () => {
+    let shutdownPromise: Promise<void> | null = null;
+    let sm!: SessionManager;
+    const session = await makeOpencodeSession({
+      onEvent: (event: AgentEvent) => {
+        if (event.type !== 'result') return;
+        sm.completeProviderTurn();
+        shutdownPromise = sm.shutdown(false);
+      },
+    });
+    sm = session.sm;
+    await sm.sendTurn('hello');
+
+    child.stderr.emit('data', Buffer.from(
+      'AI_APICallError: account is suspended due to insufficient balance; please recharge or check billing',
+    ));
+    await shutdownPromise;
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(killSessionTree).toHaveBeenCalledTimes(1);
+    expect(sm.getStatus()).toMatchObject({ active: false, turnInFlight: false });
+  });
+
   it('superseded child close (this.child !== child) is ignored', async () => {
     const { sm, onCrash } = await makeOpencodeSession();
     await sm.sendTurn('first');

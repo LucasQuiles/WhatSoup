@@ -2446,9 +2446,15 @@ export class SessionManager {
             type: 'result',
             text: 'Provider usage limit reached: insufficient balance.',
           });
-          void this.killChildTree(child, 'SIGTERM').catch((err) => {
-            log.error({ err, provider: this.provider, chatJid: this.chatJid, pid: child.pid ?? null }, 'failed to reap terminal provider stderr child');
-          });
+          if (
+            this.active
+            && this.child === child
+            && this.isCurrentPersistentChild(child, childGeneration)
+          ) {
+            void this.killChildTree(child, 'SIGTERM').catch((err) => {
+              log.error({ err, provider: this.provider, chatJid: this.chatJid, pid: child.pid ?? null }, 'failed to reap terminal provider stderr child');
+            });
+          }
           return;
         }
         log.warn({
