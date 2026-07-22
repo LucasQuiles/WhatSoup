@@ -1,6 +1,6 @@
 // src/transport/signal/adapter.ts
-// SignalAdapter — implements TransportAdapter + SupportsReactions,
-// SupportsTyping, SupportsReadReceipts, SupportsDelete against a signal-cli
+// SignalAdapter — implements TransportAdapter plus fail-closed reaction seams,
+// SupportsTyping, SupportsReadReceipts, and SupportsDelete against a signal-cli
 // backend reached via the SignalPort interface in port.ts.
 //
 // Shape mirrors TwilioSmsAdapter so the two transports share a common
@@ -8,12 +8,13 @@
 // mapping). Differences are confined to provider-specific seams.
 //
 // Extension mix-ins (per spec §3 — capabilities signal-cli actually supports):
-//   - reactions       (sendReaction RPC)
 //   - typing          (sendTypingIndicator RPC)
 //   - read-receipts   (sendReadReceipts RPC)
-//   - delete          (signal-cli remote-delete via sendReaction with empty emoji + remove flag)
-// Not in v1: media, voice-notes, edit, inline-keyboards, presence, groups (V2 group
-// admin operations beyond send-to-group are intentionally deferred).
+//   - delete          (signal-cli remoteDelete RPC)
+// Not in v1: media, voice-notes, edit, inline-keyboards, presence, and V2 group
+// administration. Plain group sends are supported. Reactions fail closed until
+// MessageRef can carry target author independently from conversation; group read
+// receipts fail closed until the sender can be resolved separately.
 
 import {
   makeChannelId,
@@ -39,6 +40,7 @@ import {
   PayloadTooLargeError,
   PermanentProviderError,
   RateLimitedError,
+  UnsupportedCapabilityError,
   TransientProviderError,
 } from '../contract/errors.ts';
 import type {
@@ -47,7 +49,7 @@ import type {
   ReactionEvent,
 } from '../contract/events.ts';
 import type { SupportsReactions, SupportsTyping, SupportsReadReceipts, SupportsDelete } from '../contract/extensions.ts';
-import { E164_RE, SIGNAL_UUID_RE, type SignalConfig } from './types.ts';
+import { E164_RE, SIGNAL_UUID_RE, isSignalGroupAddress, type SignalConfig } from './types.ts';
 import type { InboundSignal, SignalPort, SignalPortError } from './port.ts';
 
 // ---------------------------------------------------------------------------
@@ -76,10 +78,13 @@ interface PortErrorLike {
 // signal-cli auth/linked-session failures. The JSON-RPC wrapper synthesizes
 // status codes (401 for unlinked, 403 for wrong-account, etc.) and surfaces
 // the signal-cli exception class name in `code`.
-function isSignalAuth(err: PortErrorLike): boolean {
+function isSignalAuth(err: PortErrorLike, operation: string): boolean {
   return err.status === 401
-    || err.code === 'UntrustedIdentityException'
-    || err.code === 'NotRegisteredException';
+    || err.code === 'NotRegisteredException'
+    || err.code === 'NoSuchAccountException'
+    || ((operation === 'connect' || operation === 'pollInbound')
+      && typeof err.message === 'string'
+      && /\b(?:not registered|unregistered)\b/i.test(err.message));
 }
 
 // signal-cli local-queue saturation — surfaced as a synthesized 429. Also
@@ -87,6 +92,7 @@ function isSignalAuth(err: PortErrorLike): boolean {
 // versions emit under burst send.
 function isSignalRateLimit(err: PortErrorLike): boolean {
   return err.status === 429
+    || err.code === '-5'
     || (typeof err.message === 'string' && /rate limit|too many requests/i.test(err.message));
 }
 
@@ -95,6 +101,7 @@ function isSignalRateLimit(err: PortErrorLike): boolean {
 // retryable message.
 function isSignalTransient(err: PortErrorLike): boolean {
   if (typeof err.status === 'number' && err.status >= 500) return true;
+  if (err.code === '-3') return true;
   if (err.code === 'ControllableException') return true;
   // Network-level failure: no status AND no code = the request never reached
   // signal-cli or signal-cli never replied.
@@ -117,7 +124,7 @@ function mapPortError(
   const pe = err as PortErrorLike;
   const msg = (typeof pe?.message === 'string' && pe.message) ? pe.message : String(err);
 
-  if (isSignalAuth(pe)) {
+  if (isSignalAuth(pe, operation)) {
     return new AuthRequiredError({ ...base, message: `Signal auth error: ${msg}`, providerCode: String(pe.code ?? pe.status ?? '') });
   }
   if (isSignalRateLimit(pe)) {
@@ -131,12 +138,12 @@ function mapPortError(
 
 // ---------------------------------------------------------------------------
 // Dedupe-set capacity. Mirrors Twilio's 1000-entry cap with insertion-order
-// eviction. Signal envelopes dedupe on timestamp (epoch ms) which is unique
-// per sender within a session — the cap is per-adapter.
+// eviction. Signal envelopes dedupe on the composite conversation, source,
+// type, and timestamp identity — the cap is per-adapter.
 // ---------------------------------------------------------------------------
 const DEDUPE_CAP = 1000;
 
-function trimSeenSet(seen: Set<number>): void {
+function trimSeenSet(seen: Set<string>): void {
   for (const oldest of seen) {
     if (seen.size <= DEDUPE_CAP) break;
     seen.delete(oldest);
@@ -154,7 +161,7 @@ const SIGNAL_MAX_TEXT = 65_535;
  *
  * Implements:
  * - TransportAdapter (lifecycle + sendText + on(message|state|error))
- * - SupportsReactions (react/unreact/on('reaction'))
+ * - fail-closed SupportsReactions methods (not advertised as a capability)
  * - SupportsTyping (setTyping)
  * - SupportsReadReceipts (markRead/on('read'))
  * - SupportsDelete (deleteMessage/on('delete'))
@@ -183,7 +190,7 @@ export class SignalAdapter
   private readonly port: SignalPort;
   private readonly phoneNumber: string;
   private readonly pollIntervalMs: number;
-  private readonly inboundMode: string;
+  private readonly rateLimitMessagesPerMinute: number;
 
   // Monotonic per-adapter ingest counter — incremented for each emitted message.
   private ingestSeq = 0;
@@ -191,14 +198,12 @@ export class SignalAdapter
   // Correlation counter for error payloads (shared with send path).
   private seq = 0;
 
-  // Inbound poll state. Initialized at connect() to (now - pollIntervalMs)
-  // as a lookback window so messages that arrived just before connect are
-  // not silently lost. Advanced after each poll to the max timestamp seen
-  // (NOT Date.now()) to avoid clock-skew message loss.
-  private lastPolledAt: Date = new Date(0);
+  // Bounded composite-envelope dedupe set.
+  private readonly seen: Set<string> = new Set();
 
-  // Bounded timestamp dedupe set.
-  private readonly seen: Set<number> = new Set();
+  // Sliding one-minute send windows, keyed by conversation.
+  private readonly sendHistory = new Map<string, number[]>();
+  private lastSendHistorySweepAt = 0;
 
   // Timer handle for the poll interval; null when not polling.
   private pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -208,24 +213,45 @@ export class SignalAdapter
 
   // Reentrancy guard: a poll that outlasts the interval must not overlap.
   private polling = false;
+  private activePoll: Promise<void> | null = null;
+
+  // Invalidates asynchronous work started by a previous connect lifecycle.
+  private lifecycleGeneration = 0;
 
   constructor(config: SignalConfig, port: SignalPort) {
     // Validation enforces phoneNumber presence upstream, but direct
     // construction can bypass it — fail loud rather than run with an empty
     // selfRef.
     if (!E164_RE.test(config.phoneNumber)) {
+      throw new Error('SignalAdapter requires a valid E.164 phoneNumber (got invalid value)');
+    }
+    if (config.inboundMode !== 'poll') {
+      throw new Error('SignalAdapter inboundMode must be poll');
+    }
+    if (
+      !Number.isInteger(config.pollIntervalMs)
+      || config.pollIntervalMs <= 0
+      || config.pollIntervalMs > 2_147_483_647
+    ) {
+      throw new Error('SignalAdapter pollIntervalMs must be a positive 32-bit timer integer');
+    }
+    if (
+      !Number.isInteger(config.rateLimit.messagesPerMinute) ||
+      config.rateLimit.messagesPerMinute < 1 ||
+      config.rateLimit.messagesPerMinute > 600
+    ) {
       throw new Error(
-        `SignalAdapter requires a valid E.164 phoneNumber (got ${JSON.stringify(config.phoneNumber)})`,
+        'SignalAdapter rateLimit.messagesPerMinute must be an integer between 1 and 600',
       );
     }
     this.channelId = makeChannelId('signal', config.account);
     this.port = port;
     this.phoneNumber = config.phoneNumber;
     this.pollIntervalMs = config.pollIntervalMs;
-    this.inboundMode = config.inboundMode;
+    this.rateLimitMessagesPerMinute = config.rateLimit.messagesPerMinute;
 
     const extensions: ReadonlySet<ExtensionName> = new Set<ExtensionName>([
-      'reactions', 'typing', 'read-receipts', 'delete',
+      'typing', 'read-receipts', 'delete',
     ]);
 
     this.capabilities = {
@@ -235,7 +261,7 @@ export class SignalAdapter
       maxTextLength: SIGNAL_MAX_TEXT,
       auth: 'qr',                     // signal-cli link emits a QR the operator scans
       readReceipts: 'message',        // per-message read receipts
-      reactions: 'single',            // one reaction per user per message
+      reactions: 'none',              // MessageRef lacks Signal's target author
       media: { maxBytes: 0, mimeAllowlist: [] },  // media deferred to v2
       idempotency: {
         sendText: 'none',
@@ -256,32 +282,40 @@ export class SignalAdapter
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    // receive is destructive at the provider boundary. Let an in-flight batch
+    // finish before changing lifecycle generation so neither a successful
+    // drained batch nor its failure can be misapplied to the new connection.
+    if (this.activePoll !== null) await this.activePoll;
+    const generation = ++this.lifecycleGeneration;
+    this.polling = false;
     this.disposed = false;
     this.transitionTo({ state: 'starting', since: new Date() });
     try {
       await this.port.verifyCredentials();
     } catch (err) {
+      if (generation !== this.lifecycleGeneration) return;
       this.transitionTo({ state: 'disconnected', since: new Date() });
       throw mapPortError(err, this.channelId, 'connect', this.nextCorrelationId(), 'channel');
     }
+    if (generation !== this.lifecycleGeneration) return;
     this.transitionTo({ state: 'connected', since: new Date() });
 
-    if (this.inboundMode === 'poll' && this.pollIntervalMs > 0) {
-      this.lastPolledAt = new Date(Date.now() - this.pollIntervalMs);
-      this.pollTimer = setInterval(() => {
-        void this.pollOnce();
-      }, this.pollIntervalMs);
-    }
-    // 'stream' mode wiring lands with the live port implementation; the
-    // signature-only stub port used in tests doesn't exercise it.
+    // signal-cli receive drains its queued backlog. Provider timestamps never
+    // become a cursor because a later destructive batch may be out of order.
+    this.pollTimer = setInterval(() => {
+      void this.pollOnce();
+    }, this.pollIntervalMs);
   }
 
   async disconnect(): Promise<void> {
-    this.disposed = true;
     if (this.pollTimer !== null) {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    if (this.activePoll !== null) await this.activePoll;
+    this.lifecycleGeneration++;
+    this.polling = false;
+    this.disposed = true;
     this.transitionTo({ state: 'disconnected', since: new Date() });
   }
 
@@ -291,6 +325,10 @@ export class SignalAdapter
 
   selfRef(): ParticipantRef {
     return this.self;
+  }
+
+  isGroupConversation(ref: ConversationRef): boolean {
+    return ref.channel === this.channelId && isSignalGroupAddress(ref.id);
   }
 
   // ── Send ─────────────────────────────────────────────────────────────────
@@ -316,15 +354,15 @@ export class SignalAdapter
     }
 
     // 1b. Destination must be E.164 OR a Signal UUID. Fail before the network
-    // call rather than round-tripping to signal-cli's `resolveRecipient` for
-    // an obvious miss.
-    if (!E164_RE.test(target.id) && !SIGNAL_UUID_RE.test(target.id)) {
+    // call rather than asking signal-cli to reject an obvious miss.
+    const isGroupTarget = isSignalGroupAddress(target.id);
+    if (!isGroupTarget && !E164_RE.test(target.id) && !SIGNAL_UUID_RE.test(target.id)) {
       throw new ConversationNotFoundError({
         channelId: this.channelId,
         operation: 'sendText',
         correlationId,
         scope: 'conversation',
-        message: `target id is not a valid E.164 destination or Signal UUID`,
+        message: `target id is not a valid E.164 destination, Signal UUID, or group id`,
       });
     }
 
@@ -341,9 +379,13 @@ export class SignalAdapter
       });
     }
 
+    this.reserveSendSlot(target.id, correlationId);
+
     let timestamp: number;
     try {
-      const result = await this.port.send({ recipient: target.id, body: text });
+      const result = isGroupTarget
+        ? await this.port.send({ groupId: target.id, body: text })
+        : await this.port.send({ recipient: target.id, body: text });
       timestamp = result.timestamp;
     } catch (err) {
       throw mapPortError(err, this.channelId, 'sendText', correlationId, 'request');
@@ -365,8 +407,6 @@ export class SignalAdapter
   }
 
   async unreact(target: MessageRef, emoji: string): Promise<void> {
-    // Signal's react RPC removes a reaction when `remove: true`; the emoji
-    // argument is informational only (matches what was previously reacted).
     await this.sendReactionInternal(target, emoji, true);
   }
 
@@ -381,20 +421,15 @@ export class SignalAdapter
         message: `target channel ${target.channel} does not match adapter channel ${this.channelId}`,
       });
     }
-    const targetTimestamp = parseSignalTimestamp(target.id, correlationId, this.channelId);
-    const targetAuthor = target.conversation;
-
-    try {
-      await this.port.sendReaction({
-        targetTimestamp,
-        targetAuthor,
-        targetInGroup: false,
-        emoji: remove ? '' : emoji,
-        remove,
-      });
-    } catch (err) {
-      throw mapPortError(err, this.channelId, 'react', correlationId, 'request');
-    }
+    void emoji;
+    void remove;
+    throw new UnsupportedCapabilityError({
+      channelId: this.channelId,
+      operation: 'react',
+      correlationId,
+      scope: 'request',
+      message: 'Signal reactions require a target author that MessageRef does not yet carry',
+    });
   }
 
   // ── SupportsTyping ────────────────────────────────────────────────────────
@@ -410,17 +445,20 @@ export class SignalAdapter
         message: `target channel ${target.channel} does not match adapter channel ${this.channelId}`,
       });
     }
-    if (!E164_RE.test(target.id) && !SIGNAL_UUID_RE.test(target.id)) {
+    const isGroup = isSignalGroupAddress(target.id);
+    if (!isGroup && !E164_RE.test(target.id) && !SIGNAL_UUID_RE.test(target.id)) {
       throw new ConversationNotFoundError({
         channelId: this.channelId,
         operation: 'setTyping',
         correlationId,
         scope: 'conversation',
-        message: `target id is not a valid E.164 destination or Signal UUID`,
+        message: `target id is not a valid E.164 destination, Signal UUID, or group id`,
       });
     }
     try {
-      await this.port.sendTypingIndicator({ target: target.id, composing: on });
+      await this.port.sendTypingIndicator(isGroup
+        ? { groupId: target.id, composing: on }
+        : { target: target.id, composing: on });
     } catch (err) {
       throw mapPortError(err, this.channelId, 'setTyping', correlationId, 'request');
     }
@@ -439,6 +477,15 @@ export class SignalAdapter
         message: `target channel ${target.channel} does not match adapter channel ${this.channelId}`,
       });
     }
+    if (isSignalGroupAddress(target.conversation)) {
+      throw new UnsupportedCapabilityError({
+        channelId: this.channelId,
+        operation: 'markRead',
+        correlationId,
+        scope: 'request',
+        message: 'Signal group read receipts require a sender resolved separately from the group conversation',
+      });
+    }
     const targetTimestamp = parseSignalTimestamp(target.id, correlationId, this.channelId);
     try {
       await this.port.sendReadReceipts({
@@ -452,24 +499,14 @@ export class SignalAdapter
 
   // ── SupportsDelete ────────────────────────────────────────────────────────
   //
-  // Signal implements "delete for everyone" via the remote-delete protocol,
-  // which is itself a reaction envelope with the target message's timestamp
-  // + author and a special "remove" flag. signal-cli surfaces this as a
-  // `delete` RPC over the same port; the adapter models it as a delete()
-  // method on SupportsDelete. 'me' scope (delete-for-me) is not supported
-  // by signal-cli's RPC today — the adapter throws UnsupportedCapabilityError
-  // rather than silently no-op.
+  // Signal implements "delete for everyone" through signal-cli's remoteDelete
+  // RPC. 'me' scope (delete-for-me) is not supported by that RPC, so the
+  // adapter throws UnsupportedCapabilityError rather than silently no-op.
 
   async deleteMessage(target: MessageRef, scope: 'me' | 'everyone'): Promise<void> {
     const correlationId = this.nextCorrelationId();
     if (scope === 'me') {
-      // Throw UnsupportedCapabilityError — but to avoid pulling in another
-      // import for a single use, use the existing PayloadTooLargeError shape
-      // pattern: build a typed PermanentProviderError carrying the semantics.
-      // NOTE: replaced below with the proper UnsupportedCapabilityError once
-      // the contract re-exports it. For now, PermanentProviderError with a
-      // clear message is sufficient (the contract treats it as hard-fail).
-      throw new PermanentProviderError({
+      throw new UnsupportedCapabilityError({
         channelId: this.channelId,
         operation: 'deleteMessage',
         correlationId,
@@ -488,15 +525,9 @@ export class SignalAdapter
     }
     const targetTimestamp = parseSignalTimestamp(target.id, correlationId, this.channelId);
     try {
-      // Remote-delete is implemented as a "remove" reaction with no emoji;
-      // signal-cli translates this to the protocol-level delete envelope.
-      await this.port.sendReaction({
-        targetTimestamp,
-        targetAuthor: target.conversation,
-        targetInGroup: false,
-        emoji: '',
-        remove: true,
-      });
+      await this.port.remoteDelete(isSignalGroupAddress(target.conversation)
+        ? { targetTimestamp, groupId: target.conversation }
+        : { targetTimestamp, recipient: target.conversation });
     } catch (err) {
       throw mapPortError(err, this.channelId, 'deleteMessage', correlationId, 'request');
     }
@@ -526,20 +557,24 @@ export class SignalAdapter
   async pollOnce(): Promise<void> {
     if (this.disposed || this.polling) return;
     if (this.health.state !== 'connected') return;
+    const generation = this.lifecycleGeneration;
     this.polling = true;
+    const operation = this.pollOnceInner(generation);
+    this.activePoll = operation;
     try {
-      await this.pollOnceInner();
+      await operation;
     } finally {
-      this.polling = false;
+      if (this.activePoll === operation) this.activePoll = null;
+      if (generation === this.lifecycleGeneration) this.polling = false;
     }
   }
 
-  private async pollOnceInner(): Promise<void> {
+  private async pollOnceInner(generation: number): Promise<void> {
     let records: readonly InboundSignal[];
     try {
-      records = await this.port.listInboundSince(this.lastPolledAt, 500);
+      records = await this.port.listInboundSince(new Date(0), 500);
     } catch (err) {
-      if (this.disposed) return;
+      if (this.disposed || generation !== this.lifecycleGeneration) return;
       const mapped = mapPortError(err, this.channelId, 'pollInbound', this.nextCorrelationId(), 'channel');
       this.safeEmit(this.listeners.error, mapped);
       if (mapped instanceof AuthRequiredError) {
@@ -552,15 +587,10 @@ export class SignalAdapter
       return;
     }
 
-    if (this.disposed) return;
+    if (this.disposed || generation !== this.lifecycleGeneration) return;
 
-    let maxTs: number | null = null;
     for (const record of records) {
-      if (maxTs === null || record.timestamp > maxTs) maxTs = record.timestamp;
       this.handleInboundRecord(record);
-    }
-    if (maxTs !== null) {
-      this.lastPolledAt = new Date(maxTs);
     }
   }
 
@@ -569,38 +599,49 @@ export class SignalAdapter
   /**
    * Process one provider record through the dedupe + emit pipeline. Returns
    * true if emitted. Mirrors Twilio's handleInboundRecord contract so the
-   * webhook-equivalent push path (added when the live port supports 'stream'
-   * mode) can reuse the same seam.
+   * any future exercised push path can reuse the same seam.
    *
-   * Note: Signal envelopes can carry non-data types (typing, receipt, reaction,
-   * remote-delete). Only 'data' envelopes with a non-null body are emitted as
-   * InboundMessage; the others are surfaced via the matching extension event.
+   * Note: Signal envelopes can carry non-text types (typing, receipt, reaction,
+   * remote-delete). Data messages and sent-message sync echoes with non-null
+   * bodies are emitted as InboundMessage; other types are not emitted here.
    */
   handleInboundRecord(record: InboundSignal): boolean {
     if (this.disposed || this.health.state !== 'connected') return false;
-    if (this.seen.has(record.timestamp)) return false;
-    this.seen.add(record.timestamp);
+    const conversationId = this.conversationId(record);
+    const eventKey = JSON.stringify([
+      conversationId,
+      record.source,
+      record.type,
+      record.timestamp,
+    ]);
+    if (this.seen.has(eventKey)) return false;
+    this.seen.add(eventKey);
 
-    if (record.type === 'data' && record.body !== null) {
-      const msg = this.buildInboundMessage(record);
+    if ((record.type === 'data' || record.type === 'sync') && record.body !== null) {
+      const msg = this.buildInboundMessage(record, conversationId, eventKey);
       this.safeEmit(this.listeners.message, msg);
+      trimSeenSet(this.seen);
+      return true;
     }
     // TODO(future): route typing/receipt/reaction envelopes to their
     // extension-event listeners when the live port surfaces them.
 
     trimSeenSet(this.seen);
-    return true;
+    return false;
   }
 
   // ── Private helpers ───────────────────────────────────────────────────────
 
-  private buildInboundMessage(record: InboundSignal): InboundMessage {
+  private buildInboundMessage(
+    record: InboundSignal,
+    peer: string,
+    eventKey: string,
+  ): InboundMessage {
     const channelId = this.channelId;
     // For inbound messages, the peer is the sender (record.source).
     // For outbound echoes, the peer is the recipient (record.destination).
     // The conversation keys on the PEER so send/receive for the same remote
     // share one thread.
-    const peer = record.fromMe ? record.destination : record.source;
     const senderId = record.fromMe ? this.selfRef().id : record.source;
     const ts = new Date(record.timestamp);
     return {
@@ -621,10 +662,51 @@ export class SignalAdapter
       text: record.body,
       attachments: [],
       timestamp: ts,
-      inboundEventKey: String(record.timestamp),
+      inboundEventKey: eventKey,
       transportTimestamp: ts,
       ingestSeq: ++this.ingestSeq,
     };
+  }
+
+  private conversationId(record: InboundSignal): string {
+    return record.groupId ?? (record.fromMe ? record.destination : record.source);
+  }
+
+  private reserveSendSlot(conversationId: string, correlationId: string): void {
+    const now = Date.now();
+    const cutoff = now - 60_000;
+    if (
+      this.lastSendHistorySweepAt === 0
+      || now < this.lastSendHistorySweepAt
+      || now - this.lastSendHistorySweepAt >= 60_000
+    ) {
+      for (const [key, timestamps] of this.sendHistory) {
+        const active = timestamps.filter((timestamp) => timestamp > cutoff);
+        if (active.length === 0) this.sendHistory.delete(key);
+        else if (active.length !== timestamps.length) this.sendHistory.set(key, active);
+      }
+      this.lastSendHistorySweepAt = now;
+    }
+    const retained = (this.sendHistory.get(conversationId) ?? [])
+      .filter((timestamp) => timestamp > cutoff);
+    const limit = this.configuredMessagesPerMinute();
+    if (retained.length >= limit) {
+      const retryAfterMs = Math.max(1, retained[0]! + 60_000 - now);
+      throw new RateLimitedError({
+        channelId: this.channelId,
+        operation: 'sendText',
+        correlationId,
+        scope: 'conversation',
+        retryAfterMs,
+        message: 'Signal local rate limit reached for this conversation',
+      });
+    }
+    retained.push(now);
+    this.sendHistory.set(conversationId, retained);
+  }
+
+  private configuredMessagesPerMinute(): number {
+    return this.rateLimitMessagesPerMinute;
   }
 
   private nextCorrelationId(): string {

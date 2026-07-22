@@ -422,6 +422,7 @@ describe('handleConfigUpdate: transport immutability + per-transport admin IDs',
       if (transport === 'signal') {
         base.signalConfig = {
           account: 'line-x', phoneNumber: '+15551110000',
+          socketPath: '/tmp/signal-cli-line-x.sock',
           inboundMode: 'poll', pollIntervalMs: 15000, rateLimit: { messagesPerMinute: 30 },
         };
       }

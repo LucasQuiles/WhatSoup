@@ -11,6 +11,7 @@ import type {
   ReactSignalArgs,
   SendReadReceiptArgs,
   SendTypingArgs,
+  RemoteDeleteSignalArgs,
 } from '../../../src/transport/signal/port.ts';
 
 export interface MockPortOptions {
@@ -27,6 +28,7 @@ export class MockSignalPort implements SignalPort {
   readonly reactions: ReactSignalArgs[] = [];
   readonly receipts: SendReadReceiptArgs[] = [];
   readonly typings: SendTypingArgs[] = [];
+  readonly deletes: RemoteDeleteSignalArgs[] = [];
   verifyCalls = 0;
 
   constructor(private opts: MockPortOptions = {}) {}
@@ -59,6 +61,10 @@ export class MockSignalPort implements SignalPort {
 
   async sendTypingIndicator(args: SendTypingArgs): Promise<void> {
     this.typings.push(args);
+  }
+
+  async remoteDelete(args: RemoteDeleteSignalArgs): Promise<void> {
+    this.deletes.push(args);
   }
 }
 

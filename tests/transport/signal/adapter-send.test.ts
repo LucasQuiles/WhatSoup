@@ -1,6 +1,6 @@
 // tests/transport/signal/adapter-send.test.ts
 // sendText happy path + validation rules + port-error mapping.
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { SignalAdapter } from '../../../src/transport/signal/adapter.ts';
 import { MockSignalPort, makeSignalConfig, peerConversationRef } from './mock-port.ts';
 import { makeChannelId, type ChannelId } from '../../../src/core/transport-refs.ts';
@@ -69,7 +69,7 @@ describe('SignalAdapter — sendText validation', () => {
     const { adapter, channelId } = makeAdapter();
     const target = peerConversationRef(channelId, 'not-a-valid-id');
 
-    await expect(adapter.sendText(target, 'hi')).rejects.toThrow(/E\.164 destination or Signal UUID/);
+    await expect(adapter.sendText(target, 'hi')).rejects.toThrow(/E\.164 destination, Signal UUID, or group id/);
   });
 
   it('rejects empty text', async () => {
@@ -138,6 +138,26 @@ describe('SignalAdapter — sendText port-error mapping', () => {
     await expect(adapter.sendText(target, 'hi')).rejects.toThrow(/Signal transient error/);
   });
 
+  it('maps signal-cli numeric I/O and rate-limit codes without treating recipient errors as auth', async () => {
+    const target = peerConversationRef(makeChannelId('signal', 'test'), '+15559990000');
+
+    await expect(new SignalAdapter(makeSignalConfig(), new MockSignalPort({
+      sendError: Object.assign(new Error('I/O failure'), { code: '-3' }),
+    })).sendText(target, 'hi')).rejects.toThrow(/Signal transient error/);
+
+    await expect(new SignalAdapter(makeSignalConfig(), new MockSignalPort({
+      sendError: Object.assign(new Error('rate limited'), { code: '-5' }),
+    })).sendText(target, 'hi')).rejects.toThrow(/Signal rate limit/);
+
+    await expect(new SignalAdapter(makeSignalConfig(), new MockSignalPort({
+      sendError: Object.assign(new Error('Recipient is not registered'), { code: '-1' }),
+    })).sendText(target, 'hi')).rejects.toThrow(/Signal provider error/);
+
+    await expect(new SignalAdapter(makeSignalConfig(), new MockSignalPort({
+      sendError: Object.assign(new Error('safety number changed'), { code: '-4' }),
+    })).sendText(target, 'hi')).rejects.toThrow(/Signal provider error/);
+  });
+
   it('maps an unmatched error to PermanentProviderError', async () => {
     const port = new MockSignalPort({
       sendError: Object.assign(new Error('unknown fault'), { status: 400 }),
@@ -146,5 +166,82 @@ describe('SignalAdapter — sendText port-error mapping', () => {
     const target = peerConversationRef(channelId, '+15559990000');
 
     await expect(adapter.sendText(target, 'hi')).rejects.toThrow(/Signal provider error/);
+  });
+});
+
+describe('SignalAdapter — group sends', () => {
+  it('routes a base64 group id through groupId, never recipient', async () => {
+    const { adapter, port, channelId } = makeAdapter();
+    const groupId = 'Z3JvdXAtY29udmVyc2F0aW9u';
+
+    await adapter.sendText(peerConversationRef(channelId, groupId), 'group hello');
+
+    expect(port.sent[0]).toMatchObject({ groupId, body: 'group hello' });
+    expect(port.sent[0]).not.toHaveProperty('recipient');
+  });
+
+  it('does not misclassify a maximum-length E.164 number as a base64 group id', async () => {
+    const { adapter, port, channelId } = makeAdapter();
+    const e164 = '+155500000000001';
+
+    await adapter.sendText(peerConversationRef(channelId, e164), 'direct hello');
+
+    expect(port.sent[0]).toMatchObject({ recipient: e164 });
+    expect(port.sent[0]).not.toHaveProperty('groupId');
+  });
+});
+
+describe('SignalAdapter — local rate limit', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('enforces the configured per-conversation minute cap before calling the port', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-21T12:00:00Z'));
+    const port = new MockSignalPort();
+    const adapter = new SignalAdapter(makeSignalConfig({
+      rateLimit: { messagesPerMinute: 1 },
+    }), port);
+    const target = peerConversationRef(adapter.capabilities.channel, '+15559990000');
+
+    await adapter.sendText(target, 'one');
+    await expect(adapter.sendText(target, 'two')).rejects.toMatchObject({
+      payload: { code: 'transport.rate_limited', retryAfterMs: 60000 },
+    });
+    expect(port.sent).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(60000);
+    await expect(adapter.sendText(target, 'three')).resolves.toBeDefined();
+    expect(port.sent).toHaveLength(2);
+  });
+
+  it('prunes expired rate-limit windows across high-cardinality conversations', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-21T12:00:00Z'));
+    const adapter = new SignalAdapter(makeSignalConfig({
+      rateLimit: { messagesPerMinute: 1 },
+    }), new MockSignalPort());
+
+    for (let index = 0; index < 1_000; index++) {
+      await adapter.sendText(
+        peerConversationRef(
+          adapter.capabilities.channel,
+          `+1555${String(index).padStart(7, '0')}`,
+        ),
+        'one',
+      );
+    }
+    const history = (adapter as unknown as {
+      sendHistory: Map<string, number[]>;
+    }).sendHistory;
+    expect(history.size).toBe(1_000);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await adapter.sendText(
+      peerConversationRef(adapter.capabilities.channel, '+15559999999'),
+      'fresh',
+    );
+
+    expect(history.size).toBe(1);
+    expect(history.has('+15559999999')).toBe(true);
   });
 });

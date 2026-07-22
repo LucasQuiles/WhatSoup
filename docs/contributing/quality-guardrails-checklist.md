@@ -4,6 +4,8 @@
 
 ## Layer 1 — CI gates (must pass for merge)
 
+> **This table is a curated subset.** As of 2026-07-21 the live `quality.yml` runs ~40+ steps: the full `guard:*` family, coverage (`coverage:check`), browser/Playwright suites, console design checks, mutation via `deploy/scripts/run-sentinel-tests.sh` (pytest `--cov-fail-under=98` + deployer mutation drill — note `stryker.conf.json` is dormant/unwired), and tokenomics/drills. Blocking authority for the 36-rule architectural-fitness registry (`scripts/lib/fitness/registry.ts`) lives in the **guard ring** (`verify:push:branch`), not the ESLint ring, which is warn-only. Semantic-quality (`semantic-quality-check.ts`) runs in **shadow mode** (exit 0) everywhere it is wired; its enforce path is unwired/on-demand.
+
 The `Quality` workflow (`.github/workflows/quality.yml`) runs all of these on every PR and on every push to `main`:
 
 | Step | Command | Purpose |
@@ -215,14 +217,22 @@ Main thread should `grep` to spot-check whenever a reviewer claims a previously-
 
 ## Branch Protection
 
-The default branch is protected by the active GitHub Ruleset "Lock" (id `16319133`), scoped to `~DEFAULT_BRANCH`, with four rules:
+> Verified live 2026-07-21 (audit `WHATSOUP-CICD-AUDIT-2026-07-21`). The default branch is gated by **two overlapping surfaces** — a modern ruleset *and* classic branch protection.
+
+**Ruleset "Lock"** (id `16319133`, enforcement `active`, `bypass_actors=[]` so it binds admins), scoped to `~DEFAULT_BRANCH`, four rules:
 - `deletion` — branch deletion blocked
 - `non_fast_forward` — force-pushes blocked
-- `required_status_checks` — both `quality` matrix legs must pass before merge: `quality (24.x)` and `quality (25.x)`
-- `pull_request` — a pull request is required before merge
+- `required_status_checks` — `quality (24.x)` and `quality (25.x)` must pass (strict=false; branch need not be up to date)
+- `pull_request` — a PR is required, **with 0 required approvals**
 
-To inspect: `gh api repos/LucasQuiles/WhatSoup/rulesets/16319133 | jq '.rules[].type'`
-To modify: `gh api --method PUT repos/LucasQuiles/WhatSoup/rulesets/16319133 --input <json>` (PUT replaces the whole ruleset — include all existing rules or they are dropped)
+**Classic branch protection** (same branch) additionally requires the **`CodeQL`** check, with `strict=true` (branch must be up to date). Its `enforce_admins=false`, so an admin can bypass the classic surface (including CodeQL); the ruleset still binds admins to the quality checks, the PR requirement, and the non-fast-forward/deletion blocks.
+
+**Net effect** — a non-admin contributor must pass `quality (24.x)` + `quality (25.x)` + `CodeQL` and have an up-to-date branch; `CodeQL` is admin-bypassable. **`CodeQL` has no in-repo workflow** — it is GitHub *default code-scanning setup* (state=configured; languages actions/javascript/javascript-typescript/python/typescript; weekly + PR), so it is invisible to an in-repo-only search.
+
+⚠️ **Self-merge is possible.** Because both surfaces require **0 review approvals** (ruleset PR rule = 0; classic `required_pull_request_reviews = null`), a PR whose checks pass can be merged by its own author with no second reviewer. Peer review is a practice, not an enforced gate. There is **no merge queue** (`merge_group`), and all external action `uses:` refs are mutable `@vN` tags (no SHA pinning).
+
+To inspect: `gh api repos/LucasQuiles/WhatSoup/rulesets/16319133 | jq '.rules[].type'` and `gh api repos/LucasQuiles/WhatSoup/branches/main/protection`.
+To modify the ruleset: `gh api --method PUT repos/LucasQuiles/WhatSoup/rulesets/16319133 --input <json>` (PUT replaces the whole ruleset — include all existing rules or they are dropped).
 
 ## Release Runbook
 
@@ -237,6 +247,8 @@ To cut a release:
 Note: the `tag-release-gate` workflow does NOT run the full test suite (those run on every PR via `quality.yml`). It runs the guard-only subset: typechecks, boundary/hygiene/drift/publication guards, ESLint fitness ring, and console lint + build.
 
 ## Maintenance
+
+> **Last audited 2026-07-21** (CI/CD & quality-controls audit, anchored to `origin/main`; the dated audit report, control registry, and remediation-readiness specs are tracked under `docs/enforcement/2026-07-21-cicd-*.md`). This checklist and `scripts/lib/fitness/registry.ts` remain the sources of truth. Refresh this checklist when the guard/CI surface drifts materially — the Branch Protection and Layer 1 sections above were the primary drift found in that audit.
 
 When adding a new rule to this checklist:
 1. **Pre-test against current code** — run the rule against `main` to identify existing violations

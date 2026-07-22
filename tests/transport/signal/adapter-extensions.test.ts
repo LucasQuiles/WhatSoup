@@ -16,29 +16,22 @@ function peerMessageRef(channelId: ChannelId, peerId: string, msgTs: number): Me
 }
 
 describe('SignalAdapter — SupportsReactions', () => {
-  it('react() calls port.sendReaction with the emoji and remove:false', async () => {
+  it('react() fails closed until MessageRef carries the target author', async () => {
     const { adapter, port, channelId } = makeAdapter();
     const target = peerMessageRef(channelId, '+15559990000', 12345);
 
-    await adapter.react(target, '👍');
+    await expect(adapter.react(target, '👍')).rejects.toThrow(/target author/i);
 
-    expect(port.reactions).toHaveLength(1);
-    expect(port.reactions[0]).toMatchObject({
-      targetTimestamp: 12345,
-      targetAuthor: '+15559990000',
-      emoji: '👍',
-      remove: false,
-    });
+    expect(port.reactions).toHaveLength(0);
   });
 
-  it('unreact() calls port.sendReaction with empty emoji and remove:true', async () => {
+  it('unreact() fails closed until MessageRef carries the target author', async () => {
     const { adapter, port, channelId } = makeAdapter();
     const target = peerMessageRef(channelId, '+15559990000', 12345);
 
-    await adapter.unreact(target, '👍');
+    await expect(adapter.unreact(target, '👍')).rejects.toThrow(/target author/i);
 
-    expect(port.reactions).toHaveLength(1);
-    expect(port.reactions[0]).toMatchObject({ emoji: '', remove: true });
+    expect(port.reactions).toHaveLength(0);
   });
 
   it('react() rejects a cross-channel target', async () => {
@@ -52,11 +45,12 @@ describe('SignalAdapter — SupportsReactions', () => {
     await expect(adapter.react(target, '👍')).rejects.toThrow(/does not match adapter channel/);
   });
 
-  it('react() rejects a non-numeric message id', async () => {
-    const { adapter, channelId } = makeAdapter();
-    const target: MessageRef = { channel: channelId, conversation: '+15559990000', id: 'not-a-timestamp' };
+  it('fails closed for group reactions too', async () => {
+    const { adapter, port, channelId } = makeAdapter();
+    const target = peerMessageRef(channelId, 'Z3JvdXAtY29udmVyc2F0aW9u', 12345);
 
-    await expect(adapter.react(target, '👍')).rejects.toThrow(/positive epoch-ms timestamp/);
+    await expect(adapter.react(target, '👍')).rejects.toThrow(/target author/i);
+    expect(port.reactions).toHaveLength(0);
   });
 });
 
@@ -73,10 +67,19 @@ describe('SignalAdapter — SupportsTyping', () => {
     expect(port.typings[0]).toMatchObject({ composing: false });
   });
 
-  it('setTyping rejects a non-E.164 / non-UUID target', async () => {
+  it('setTyping supports a Signal group target without treating it as a peer identity', async () => {
+    const { adapter, port, channelId } = makeAdapter();
+    const groupId = 'Z3JvdXAtY29udmVyc2F0aW9u';
+
+    await adapter.setTyping(peerConversationRef(channelId, groupId), true);
+
+    expect(port.typings[0]).toEqual({ groupId, composing: true });
+  });
+
+  it('setTyping rejects a non-E.164 / non-UUID / non-group target', async () => {
     const { adapter, channelId } = makeAdapter();
     await expect(adapter.setTyping(peerConversationRef(channelId, 'bogus'), true))
-      .rejects.toThrow(/E\.164 destination or Signal UUID/);
+      .rejects.toThrow(/E\.164 destination, Signal UUID, or group id/);
   });
 });
 
@@ -99,6 +102,14 @@ describe('SignalAdapter — SupportsReadReceipts', () => {
     const target: MessageRef = { channel: 'signal:nope' as ChannelId, conversation: '+15559990000', id: '1' };
     await expect(adapter.markRead(target)).rejects.toThrow(/does not match adapter channel/);
   });
+
+  it('markRead() fails closed for a group until the sender can be resolved separately', async () => {
+    const { adapter, port, channelId } = makeAdapter();
+    const target = peerMessageRef(channelId, 'Z3JvdXAtY29udmVyc2F0aW9u', 99999);
+
+    await expect(adapter.markRead(target)).rejects.toThrow(/group read receipts require a sender/i);
+    expect(port.receipts).toHaveLength(0);
+  });
 });
 
 describe('SignalAdapter — SupportsDelete', () => {
@@ -108,18 +119,17 @@ describe('SignalAdapter — SupportsDelete', () => {
     await expect(adapter.deleteMessage(target, 'me')).rejects.toThrow(/scope 'me' is not supported/);
   });
 
-  it("deleteMessage(scope: 'everyone') sends a remove reaction", async () => {
+  it("deleteMessage(scope: 'everyone') calls the remoteDelete operation", async () => {
     const { adapter, port, channelId } = makeAdapter();
     const target = peerMessageRef(channelId, '+15559990000', 12345);
 
     await adapter.deleteMessage(target, 'everyone');
 
-    expect(port.reactions).toHaveLength(1);
-    expect(port.reactions[0]).toMatchObject({
+    expect(port.deletes).toHaveLength(1);
+    expect(port.deletes[0]).toMatchObject({
       targetTimestamp: 12345,
-      targetAuthor: '+15559990000',
-      emoji: '',
-      remove: true,
+      recipient: '+15559990000',
     });
+    expect(port.reactions).toHaveLength(0);
   });
 });

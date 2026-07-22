@@ -7,7 +7,7 @@ import type { InboundMessage } from '../../../src/transport/contract/index.ts';
 import type { InboundSignal } from '../../../src/transport/signal/port.ts';
 
 function makeAdapter(port: MockSignalPort = new MockSignalPort()) {
-  const adapter = new SignalAdapter(makeSignalConfig({ pollIntervalMs: 0 }), port);
+  const adapter = new SignalAdapter(makeSignalConfig({ pollIntervalMs: 60_000 }), port);
   return { adapter, port };
 }
 
@@ -61,7 +61,7 @@ describe('SignalAdapter — handleInboundRecord', () => {
     adapter.on('message', (m) => received.push(m));
 
     adapter.handleInboundRecord(envelope({
-      source: 'me-uuid', destination: 'peer-uuid', fromMe: true,
+      source: 'me-uuid', destination: 'peer-uuid', fromMe: true, type: 'sync',
     }));
 
     expect(received[0].conversation.id).toBe('peer-uuid');
@@ -80,6 +80,52 @@ describe('SignalAdapter — handleInboundRecord', () => {
     adapter.handleInboundRecord(envelope({ timestamp: 5000 }));
 
     expect(received).toHaveLength(1);
+    await adapter.disconnect();
+  });
+
+  it('retains same-timestamp messages from different senders in one group', async () => {
+    const { adapter } = makeAdapter();
+    await adapter.connect();
+    const received: InboundMessage[] = [];
+    adapter.on('message', (m) => received.push(m));
+
+    adapter.handleInboundRecord(envelope({
+      timestamp: 5000,
+      source: 'member-a',
+      destination: 'Z3JvdXAtY29udmVyc2F0aW9u',
+      groupId: 'Z3JvdXAtY29udmVyc2F0aW9u',
+    }));
+    adapter.handleInboundRecord(envelope({
+      timestamp: 5000,
+      source: 'member-b',
+      destination: 'Z3JvdXAtY29udmVyc2F0aW9u',
+      groupId: 'Z3JvdXAtY29udmVyc2F0aW9u',
+    }));
+
+    expect(received.map((message) => message.sender.id)).toEqual(['member-a', 'member-b']);
+    expect(received[0]?.inboundEventKey).not.toBe(received[1]?.inboundEventKey);
+    await adapter.disconnect();
+  });
+
+  it('retains same-timestamp messages from one sender in different conversations', async () => {
+    const { adapter } = makeAdapter();
+    await adapter.connect();
+    const received: InboundMessage[] = [];
+    adapter.on('message', (m) => received.push(m));
+
+    for (const groupId of ['Z3JvdXAtY29udmVyc2F0aW9u', 'YW5vdGhlci1jb252ZXJzYXRpb24=']) {
+      adapter.handleInboundRecord(envelope({
+        timestamp: 5000,
+        source: 'member-a',
+        destination: groupId,
+        groupId,
+      }));
+    }
+
+    expect(received.map((message) => message.conversation.id)).toEqual([
+      'Z3JvdXAtY29udmVyc2F0aW9u',
+      'YW5vdGhlci1jb252ZXJzYXRpb24=',
+    ]);
     await adapter.disconnect();
   });
 
@@ -133,6 +179,17 @@ describe('SignalAdapter — handleInboundRecord', () => {
 });
 
 describe('SignalAdapter — pollOnce integration', () => {
+  it('starts at the epoch so queued messages older than one poll interval are not discarded', async () => {
+    const port = new MockSignalPort();
+    const listInboundSince = vi.spyOn(port, 'listInboundSince').mockResolvedValue([]);
+    const { adapter } = makeAdapter(port);
+    await adapter.connect();
+
+    await adapter.pollOnce();
+
+    expect(listInboundSince).toHaveBeenCalledWith(new Date(0), 500);
+    await adapter.disconnect();
+  });
   it('emits each record returned by listInboundSince', async () => {
     const port = new MockSignalPort({
       nextInbound: [
@@ -184,6 +241,19 @@ describe('SignalAdapter — pollOnce integration', () => {
     expect(adapter.state().state).toBe('auth_required');
     await adapter.disconnect();
   });
+
+  it('treats poll-time signal-cli unregistration as auth-required without misclassifying send recipients', async () => {
+    const authErr = Object.assign(new Error('User is not registered'), { code: '-1' });
+    const port = new MockSignalPort();
+    port.listInboundSince = vi.fn(async () => { throw authErr; });
+    const { adapter } = makeAdapter(port);
+    await adapter.connect();
+
+    await adapter.pollOnce();
+
+    expect(adapter.state().state).toBe('auth_required');
+    await adapter.disconnect();
+  });
 });
 
 describe('SignalAdapter — listener isolation', () => {
@@ -208,5 +278,6 @@ describe('SignalAdapter — listener isolation', () => {
     adapter.on('state', () => { throw new Error('state listener bug'); });
     await adapter.connect();
     expect(adapter.state().state).toBe('connected');  // transition succeeded regardless
+    await adapter.disconnect();
   });
 });
