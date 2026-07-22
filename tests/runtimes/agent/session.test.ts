@@ -5,6 +5,7 @@ import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { ProviderMcpBridge } from '../../../src/runtimes/agent/providers/types.ts';
+import { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
 import {
   CONFIG_ROOT_ISOLATION_FLAG,
   FAILCLOSED_FLAG,
@@ -5059,6 +5060,116 @@ describe('session.ts uncovered-branch coverage', () => {
     await vi.advanceTimersByTimeAsync(0); // flush notifyUnexpectedExit setImmediate
     expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({ exitCode: 1 }));
     vi.useRealTimers();
+  });
+
+  it('serializes OpenCode process lifetimes across session managers sharing one execution gate', async () => {
+    const firstChild = makeMockChild(12001);
+    const secondChild = makeMockChild(12002);
+    vi.mocked(spawn).mockReturnValueOnce(firstChild as never).mockReturnValueOnce(secondChild as never);
+    const gate = new ProviderExecutionGate();
+    const first = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: 'first@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+      providerExecutionGate: gate,
+    });
+    const second = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: 'second@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+      providerExecutionGate: gate,
+    });
+    await first.spawnSession();
+    await second.spawnSession();
+
+    const firstBoundary = vi.fn();
+    const secondBoundary = vi.fn();
+    await first.sendTurnAtProviderBoundary('first', firstBoundary);
+    let secondStarted = false;
+    const secondTurn = second.sendTurnAtProviderBoundary('second', secondBoundary).then(() => {
+      secondStarted = true;
+    });
+    await Promise.resolve();
+
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(secondStarted).toBe(false);
+    expect(firstBoundary).toHaveBeenCalledTimes(1);
+    expect(secondBoundary).not.toHaveBeenCalled();
+    expect(gate.snapshot()).toMatchObject({ active: true, pending: 1 });
+
+    firstChild._closeCb?.(0, null);
+    await secondTurn;
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(secondStarted).toBe(true);
+    expect(secondBoundary).toHaveBeenCalledTimes(1);
+    expect(gate.snapshot()).toMatchObject({ active: true, pending: 0 });
+
+    secondChild._closeCb?.(0, null);
+    expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+  });
+
+  it('aborts an OpenCode execution waiter when its session shuts down', async () => {
+    const firstChild = makeMockChild(12003);
+    vi.mocked(spawn).mockReturnValueOnce(firstChild as never);
+    const gate = new ProviderExecutionGate();
+    const first = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger,
+      chatJid: 'first@s.whatsapp.net', onEvent: vi.fn(),
+      provider: 'opencode-cli', model: 'glm/test-model', providerExecutionGate: gate,
+    });
+    const waiting = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger,
+      chatJid: 'waiting@s.whatsapp.net', onEvent: vi.fn(),
+      provider: 'opencode-cli', model: 'glm/test-model', providerExecutionGate: gate,
+    });
+    await first.spawnSession();
+    await waiting.spawnSession();
+    await first.sendTurn('first');
+    const waitingTurn = waiting.sendTurn('waiting').catch((error: Error) => error);
+    await Promise.resolve();
+
+    await waiting.shutdown();
+    await expect(waitingTurn).resolves.toMatchObject({
+      message: expect.stringContaining('PROVIDER_EXECUTION_WAIT_ABORTED'),
+    });
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(gate.snapshot()).toMatchObject({ active: true, pending: 0, abortedWaits: 1 });
+
+    firstChild._closeCb?.(0, null);
+    expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+  });
+
+  it('releases the OpenCode execution lease when spawn fails before a child exists', async () => {
+    const recoveredChild = makeMockChild(12004);
+    vi.mocked(spawn)
+      .mockImplementationOnce(() => { throw new Error('synthetic spawn failure'); })
+      .mockReturnValueOnce(recoveredChild as never);
+    const gate = new ProviderExecutionGate();
+    const first = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger,
+      chatJid: 'first@s.whatsapp.net', onEvent: vi.fn(),
+      provider: 'opencode-cli', model: 'glm/test-model', providerExecutionGate: gate,
+    });
+    const second = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger,
+      chatJid: 'second@s.whatsapp.net', onEvent: vi.fn(),
+      provider: 'opencode-cli', model: 'glm/test-model', providerExecutionGate: gate,
+    });
+    await first.spawnSession();
+    await second.spawnSession();
+
+    await expect(first.sendTurn('first')).rejects.toThrow('synthetic spawn failure');
+    expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+    await second.sendTurn('second');
+    expect(gate.snapshot()).toMatchObject({ active: true, pending: 0 });
+    recoveredChild._closeCb?.(0, null);
+    expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
   });
 
   // --- Codex stdout: server-initiated request routing + resume-error retry
