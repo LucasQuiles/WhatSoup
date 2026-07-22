@@ -5,6 +5,7 @@ import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
 import { createRuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 import { createOpenCodeParser } from '../../../src/runtimes/agent/providers/opencode-parser.ts';
+import type { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
 import type {
   MarkSystemTurnInput,
   PendingSystemTurnSnapshot,
@@ -42,6 +43,7 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
       };
       whatsoupInstance?: string;
       whatsoupMcpSocket?: string;
+      providerExecutionGate?: ProviderExecutionGate;
     } | null;
   } = { current: null };
   const capturedOnEventRef: { current: ((event: AgentEvent) => void) | null } = { current: null };
@@ -51,7 +53,11 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
 
   const mockSession = {
     spawnSession: vi.fn(async () => {}),
-    sendTurn: vi.fn(async () => {}),
+    sendTurn: vi.fn(async (_text: string) => {}),
+    sendTurnAtProviderBoundary: vi.fn(async (text: string, onReady?: () => void) => {
+      onReady?.();
+      await mockSession.sendTurn(text);
+    }),
     handleNew: vi.fn(async () => {}),
     getStatus: vi.fn(() => ({ active: false, pid: null as number | null, sessionId: null as string | null, startedAt: null as string | null, messageCount: 0, lastMessageAt: null as string | null })),
     shutdown: vi.fn(async () => {}),
@@ -1119,6 +1125,10 @@ describe('AgentRuntime', () => {
     mockSession.waitForProviderTurnToTerminalize.mockReset().mockResolvedValue(undefined);
     mockSession.getStatus.mockReset().mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
     mockSession.sendTurn.mockReset().mockResolvedValue(undefined);
+    mockSession.sendTurnAtProviderBoundary.mockImplementation(async (text: string, onReady?: () => void) => {
+      onReady?.();
+      await mockSession.sendTurn(text);
+    });
     mockSession.getDbRowId.mockReset().mockReturnValue(null);
     mockQueue.flushTurnEvidence.mockReset().mockImplementation(async (turnId: string) => ({
       turnId,
@@ -1356,6 +1366,9 @@ describe('AgentRuntime', () => {
     expect(capturedSessionManagerOptsRef.current).toMatchObject({
       allowM365Mutations: true,
     });
+    const runtimeGate = (runtime as unknown as { providerExecutionGate: ProviderExecutionGate })
+      .providerExecutionGate;
+    expect(capturedSessionManagerOptsRef.current?.providerExecutionGate).toBe(runtimeGate);
   });
 
   it('auto-compacts silently and advances baseline only after compact_boundary', async () => {
@@ -7757,6 +7770,61 @@ describe('AgentRuntime', () => {
     expect(snap.details).toHaveProperty('active');
     expect(snap.details).toHaveProperty('pid');
     expect(snap.details).toHaveProperty('sessionId');
+    expect(snap.details.providerExecution).toMatchObject({
+      active: false,
+      pending: 0,
+      pressureActive: false,
+    });
+  });
+
+  it('alerts and degrades health only for sustained provider execution pressure', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'pressure-test');
+      const gate = (runtime as unknown as { providerExecutionGate: ProviderExecutionGate })
+        .providerExecutionGate;
+      mockEmitAlert.mockClear();
+      mockClearAlertSource.mockClear();
+
+      const first = await gate.acquire();
+      const secondPromise = gate.acquire();
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(runtime.getHealthSnapshot().status).toBe('healthy');
+      expect(mockEmitAlert).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(runtime.getHealthSnapshot()).toMatchObject({
+        status: 'degraded',
+        details: {
+          providerExecution: {
+            active: true,
+            pending: 1,
+            pressureActive: true,
+          },
+        },
+      });
+      expect(mockEmitAlert).toHaveBeenCalledWith(
+        'pressure-test',
+        'provider_execution_queue_pressure',
+        'OpenCode execution queue has waited at least 30 seconds',
+        expect.stringContaining('limitation=external_opencode_processes_are_not_serialized'),
+        'warning',
+      );
+
+      first.release();
+      const second = await secondPromise;
+      expect(mockClearAlertSource).not.toHaveBeenCalled();
+      second.release();
+      expect(runtime.getHealthSnapshot().status).toBe('healthy');
+      expect(mockClearAlertSource).toHaveBeenCalledWith(
+        'pressure-test',
+        'provider_execution_queue_pressure',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // ─── Shutdown ──────────────────────────────────────────────────────────────
@@ -9503,7 +9571,11 @@ describe('AgentRuntime', () => {
         await spawnBlocked;
         active = true;
       }),
-      sendTurn: vi.fn(async () => {}),
+      sendTurn: vi.fn(async (_text: string) => {}),
+      sendTurnAtProviderBoundary: vi.fn(async (text: string, onReady?: () => void) => {
+        onReady?.();
+        await localSession.sendTurn(text);
+      }),
       shutdown: vi.fn(async () => {}),
     };
     (MockSessionManagerCtor as unknown as ReturnType<typeof vi.fn>).mockImplementation(function (

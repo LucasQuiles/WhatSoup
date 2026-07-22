@@ -7,7 +7,7 @@
  * message template. Call-sites read a {@link ResponseWorkflow} instead of
  * hand-rolling activate→diagnostics→replay→notify branches.
  *
- * The table is pure data keyed on the 18-class {@link AgentFailureClass} (the
+ * The table is pure data keyed on the 19-class {@link AgentFailureClass} (the
  * superset that also covers CLI crash / timeout / network / stream-corrupt,
  * which the provider-text path never sees). The provider-text path bridges in
  * via {@link workflowForProviderText}.
@@ -287,6 +287,7 @@ export const RESPONSE_WORKFLOWS: Record<AgentFailureClass, ResponseWorkflow> = {
   // Non-arming class-only failures: no fallback, no diagnostics, no user message.
   provider_binary_missing: inertWorkflow('provider_binary_missing'),
   provider_permission_denied: inertWorkflow('provider_permission_denied'),
+  provider_state_locked: inertWorkflow('provider_state_locked'),
   mcp_transport_failure: inertWorkflow('mcp_transport_failure'),
   tool_handler_exception: inertWorkflow('tool_handler_exception'),
   config_or_capability_missing: inertWorkflow('config_or_capability_missing'),

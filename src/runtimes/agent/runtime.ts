@@ -86,6 +86,10 @@ import {
   type SessionCrashInfo,
 } from './session.ts';
 import {
+  ProviderExecutionGate,
+  type ProviderExecutionGateSnapshot,
+} from './provider-execution-gate.ts';
+import {
   OutboundQueue,
   type IOutboundQueue,
   type ToolUpdate,
@@ -835,6 +839,12 @@ export class AgentRuntime implements Runtime {
    *  against what the user actually saw. Not wired to any consumer besides
    *  the /model list render + apply path added in this task. */
   private readonly catalogueSnapshot: CatalogueSnapshotCache;
+  /**
+   * OpenCode stores process state in one SQLite database. Keep the lease scoped
+   * to the full child lifetime so post-result cleanup cannot overlap another
+   * chat's writer in this WhatSoup process.
+   */
+  private readonly providerExecutionGate: ProviderExecutionGate;
 
   // single mode: one session, one queue
   private session: SessionManager | null = null;
@@ -2398,6 +2408,11 @@ export class AgentRuntime implements Runtime {
     this.pollPersistence = new PendingPollPersistence(db);
     this.messenger = messenger;
     this.instanceName = instanceName ?? 'personal';
+    this.providerExecutionGate = new ProviderExecutionGate({
+      pressureAfterMs: 30_000,
+      onPressure: (snapshot) => this.alertProviderExecutionPressure(snapshot),
+      onRecovered: (snapshot) => this.clearProviderExecutionPressure(snapshot),
+    });
     this.runtimeTurnSupervisor = new RuntimeTurnSupervisor(
       this.instanceName,
       () => this.durability,
@@ -4914,36 +4929,55 @@ export class AgentRuntime implements Runtime {
       await stopCancelledSpawn();
       return;
     }
-    beforeUserSend?.();
-
-    // Publish the execution actor only when this exact request is ready to cross
-    // the provider boundary. Earlier placement leaked actors from cancelled or
-    // context-blocked sends. The one-flight SessionManager invariant makes this
-    // entry the provider request at FIFO HEAD.
     let actorPushed = false;
-    if (this.usesPerChatActorSocket() && effectiveMapKey !== undefined) {
-      if (!session.getStatus().active) this.perChatExecActorQueue.delete(effectiveMapKey);
-      const execQ = this.perChatExecActorQueue.get(effectiveMapKey) ?? [];
-      execQ.push(actorJid);
-      this.perChatExecActorQueue.set(effectiveMapKey, execQ);
-      actorPushed = true;
-      if (systemTurnLease) {
-        this.systemTurnExecActors.set(systemTurnLease.id, {
-          scopeKey: effectiveMapKey,
-          actorJid,
-        });
-      }
-    }
+    const onProviderBoundaryReady = (): void => {
+      beforeUserSend?.();
 
-    // Assert typing immediately so the user sees the indicator while the agent thinks.
-    // Without this, there's a visible gap between message receipt and first tool call.
-    const queue = this.getQueueForChat(chatJid, effectiveMapKey);
-    if (queue) queue.indicateTyping();
+      // Publish the execution actor only when this exact request is ready to cross
+      // the provider boundary. Earlier placement leaked actors from cancelled or
+      // context-blocked sends. The one-flight SessionManager invariant makes this
+      // entry the provider request at FIFO HEAD.
+      if (this.usesPerChatActorSocket() && effectiveMapKey !== undefined) {
+        if (!session.getStatus().active) this.perChatExecActorQueue.delete(effectiveMapKey);
+        const execQ = this.perChatExecActorQueue.get(effectiveMapKey) ?? [];
+        execQ.push(actorJid);
+        this.perChatExecActorQueue.set(effectiveMapKey, execQ);
+        actorPushed = true;
+        if (systemTurnLease) {
+          this.systemTurnExecActors.set(systemTurnLease.id, {
+            scopeKey: effectiveMapKey,
+            actorJid,
+          });
+        }
+      }
+
+      // Assert typing only when provider execution begins. A queued OpenCode turn
+      // must not look dispatched or keep a typing indicator alive while another
+      // chat still owns the shared provider state store.
+      const queue = this.getQueueForChat(chatJid, effectiveMapKey);
+      if (queue) queue.indicateTyping();
+    };
 
     try {
-      await session.sendTurn(
-        contextPreamble === null ? text : `${contextPreamble}\n\n[Current message]\n${text}`,
-      );
+      const turnText = contextPreamble === null
+        ? text
+        : `${contextPreamble}\n\n[Current message]\n${text}`;
+      const boundarySender = (
+        session as SessionManager & {
+          sendTurnAtProviderBoundary?: (
+            body: string,
+            onReady?: () => void,
+          ) => Promise<void>;
+        }
+      ).sendTurnAtProviderBoundary;
+      if (typeof boundarySender === 'function') {
+        await boundarySender.call(session, turnText, onProviderBoundaryReady);
+      } else {
+        // Compatibility for injected or legacy SessionManager implementations.
+        // Production SessionManager exposes the exact-boundary method.
+        onProviderBoundaryReady();
+        await session.sendTurn(turnText);
+      }
     } catch (err) {
       if (actorPushed && effectiveMapKey !== undefined) {
         this.removeFailedExecutingActor(effectiveMapKey, actorJid, systemTurnLease);
@@ -7144,8 +7178,42 @@ export class AgentRuntime implements Runtime {
     return msg;
   }
 
+  private alertProviderExecutionPressure(snapshot: ProviderExecutionGateSnapshot): void {
+    emitAlertChecked(
+      this.instanceName,
+      'provider_execution_queue_pressure',
+      'OpenCode execution queue has waited at least 30 seconds',
+      [
+        'provider=opencode-cli',
+        'scope=whatsoup_process',
+        `active=${snapshot.active}`,
+        `pending=${snapshot.pending}`,
+        `oldest_wait_ms=${snapshot.oldestWaitMs}`,
+        `total_waits=${snapshot.totalWaits}`,
+        `max_pending=${snapshot.maxPending}`,
+        `aborted_waits=${snapshot.abortedWaits}`,
+        'recovery=automatic_when_execution_lane_idle',
+        'limitation=external_opencode_processes_are_not_serialized',
+      ].join('\n'),
+      'warning',
+    );
+  }
+
+  private clearProviderExecutionPressure(snapshot: ProviderExecutionGateSnapshot): void {
+    log.info({
+      instance: this.instanceName,
+      provider: 'opencode-cli',
+      totalWaits: snapshot.totalWaits,
+      maxPending: snapshot.maxPending,
+      lastWaitMs: snapshot.lastWaitMs,
+      abortedWaits: snapshot.abortedWaits,
+    }, 'OpenCode execution queue pressure recovered');
+    clearAlertSourceChecked(this.instanceName, 'provider_execution_queue_pressure');
+  }
+
   getHealthSnapshot(): RuntimeHealth {
     const fallbackState = this.getFallbackState();
+    const providerExecution = this.providerExecutionGate.snapshot();
     const finalizationHealth = this.runtimeTurnSupervisor.health();
     const recoveryHealth = this.getTurnRecoveryHealthDetails();
     const finalizationDegraded =
@@ -7187,6 +7255,9 @@ export class AgentRuntime implements Runtime {
       if (finalizationDegraded && healthStatus === 'healthy') {
         healthStatus = 'degraded';
       }
+      if (providerExecution.pressureActive && healthStatus === 'healthy') {
+        healthStatus = 'degraded';
+      }
       return {
         status: healthStatus,
         details: {
@@ -7209,6 +7280,7 @@ export class AgentRuntime implements Runtime {
             ),
           },
           unownedProviderEventRejects: this.unownedProviderEventRejects,
+          providerExecution,
           turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
           turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
           turnFinalizationRetryAttempts: finalizationHealth.retryAttempts,
@@ -7229,7 +7301,9 @@ export class AgentRuntime implements Runtime {
           ? 'degraded'
           : finalizationDegraded
             ? 'degraded'
-          : 'healthy';
+            : providerExecution.pressureActive
+              ? 'degraded'
+              : 'healthy';
     return {
       status: healthStatus,
       details: {
@@ -7249,6 +7323,7 @@ export class AgentRuntime implements Runtime {
           ),
         },
         unownedProviderEventRejects: this.unownedProviderEventRejects,
+        providerExecution,
         turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
         turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
         turnFinalizationRetryAttempts: finalizationHealth.retryAttempts,
@@ -10915,7 +10990,9 @@ export class AgentRuntime implements Runtime {
     };
 
     const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, {
-      cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port,
+      cwd: this.cwd ?? homedir(),
+      egressProxyPort: this.egressProxy?.port,
+      providerExecutionGate: this.providerExecutionGate,
     });
     void Promise.resolve()
       .then(() => probePrimaryModelUsability(target, adapters))
@@ -10990,7 +11067,11 @@ export class AgentRuntime implements Runtime {
   private async probePrimaryProviderRecovered(): Promise<boolean> {
     const result = await probePrimaryModelUsability(
       { provider: this.agentProvider, model: this.model ?? null },
-      createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port }),
+      createPrimaryModelProbeAdapters(this.agentProviderConfig, {
+        cwd: this.cwd ?? homedir(),
+        egressProxyPort: this.egressProxy?.port,
+        providerExecutionGate: this.providerExecutionGate,
+      }),
     );
     return result.status === 'usable';
   }
@@ -11032,7 +11113,11 @@ export class AgentRuntime implements Runtime {
         },
         runPrimaryModelUsability: () => probePrimaryModelUsability(
           { provider: this.agentProvider, model: this.model ?? null },
-          createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port }),
+          createPrimaryModelProbeAdapters(this.agentProviderConfig, {
+            cwd: this.cwd ?? homedir(),
+            egressProxyPort: this.egressProxy?.port,
+            providerExecutionGate: this.providerExecutionGate,
+          }),
         ),
         runPrimaryRecoveryProbe: () => this.probePrimaryProviderRecovered(),
         accountAuthDeps: {
@@ -11623,6 +11708,7 @@ export class AgentRuntime implements Runtime {
       handoffSystemBlock: this.buildHandoffSystemBlock(conversationKey, route ? route.provider : this.effectiveProvider),
       routingSystemBlock: config.nlRouting ? () => this.buildRoutingContractBlock(route ? route.provider : this.effectiveProvider) : undefined,
       egressProxyPort: this.egressProxy?.port,
+      providerExecutionGate: this.providerExecutionGate,
     });
     this.sessionManagerIds.set(session, randomUUID());
     this.sessionEventToolScopes.set(

@@ -817,6 +817,7 @@ describe('classifyAgentFailure', () => {
       'provider_unknown',
       'provider_binary_missing',
       'provider_permission_denied',
+      'provider_state_locked',
     ] as const) {
       expect(isFallbackEligibleForFailureClass(failureClass, { failureDomain: 'independent' })).toBe(false);
     }
