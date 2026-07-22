@@ -292,6 +292,18 @@ describe('structured /model grammar (C1 — agent-assisted design)', () => {
     expect(classifyInput('/model 2 default', { routingAliases: true }).type).toBe('local');
     expect(classifyInput('/model list openai', { routingAliases: true }).type).toBe('local');
   });
+  it('routes a single model-id token local without swallowing free text', () => {
+    expect(classifyInput('/model glm/glm-5.2', { routingAliases: true })).toEqual({
+      type: 'local',
+      command: 'model',
+      args: 'glm/glm-5.2',
+    });
+    expect(classifyInput('/model openrouter/anthropic/claude-sonnet-5', { routingAliases: true }).type).toBe('local');
+    expect(classifyInput('/model glm/glm-5.2 please', { routingAliases: true })).toEqual({
+      type: 'forwarded',
+      text: '/model glm/glm-5.2 please',
+    });
+  });
   it('FORWARDS free text to the agent (agent-assisted NL)', () => {
     expect(classifyInput('/model the best kimi', { routingAliases: true }).type).toBe('forwarded');
   });

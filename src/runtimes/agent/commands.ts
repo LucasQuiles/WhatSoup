@@ -32,6 +32,15 @@ const ROUTING_MODEL_VERBS = new Set(REGISTRY.find((c) => c.name === 'model')?.su
  *  also counts as structured. */
 const MODEL_INDEX_RE = /^\d+[a-z]?$/i;
 
+/** A single, explicit model id such as `vendor/model` or
+ * `gateway/vendor/model`. Requiring at least one slash keeps natural-language
+ * `/model ...` requests on the agent-assisted path. */
+const MODEL_ID_RE = /^[A-Za-z0-9._:-]+(?:\/[A-Za-z0-9._:-]+)+$/;
+
+export function isExplicitModelId(value: string): boolean {
+  return MODEL_ID_RE.test(value);
+}
+
 /** True when `parts` (the full `/model ...` token list; `parts[0]` is always
  *  "model") matches the STRUCTURED /model grammar the bot owns locally under
  *  the agent-assisted design (owner decision 2026-07-20): bare `/model`, a
@@ -45,7 +54,7 @@ function isStructuredModelArg(parts: readonly string[]): boolean {
   const arg1 = parts[1].toLowerCase();
   if (arg1 === 'list') return true; // bare "list" or with a filter tail of any length
   if (parts.length === 2) {
-    return ROUTING_MODEL_VERBS.has(arg1) || isProviderId(arg1) || MODEL_INDEX_RE.test(parts[1]);
+    return ROUTING_MODEL_VERBS.has(arg1) || isProviderId(arg1) || MODEL_INDEX_RE.test(parts[1]) || isExplicitModelId(parts[1]);
   }
   if (parts.length === 3 && /^\d+$/.test(parts[1]) && parts[2].toLowerCase() === 'default') {
     return true;

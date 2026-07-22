@@ -16627,6 +16627,70 @@ describe('NL routing handlers (nlRouting flag)', () => {
     });
   });
 
+  describe('configured model-id direct selection', () => {
+    it('pins an exact configured model id without requiring a prior menu snapshot', async () => {
+      cfgAny().agentFallbacks = [
+        { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
+        { provider: 'opencode-cli', model: 'glm/glm-5.2' },
+      ];
+      const listFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['kimi/kimi-k3', 'glm/glm-5.2'] });
+      const { runtime, sentMessages } = makeRoutingRuntime({
+        model: 'claude-opus-4-8',
+        modelCatalogueListFn: listFn,
+      });
+
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: '/model glm/glm-5.2',
+      }));
+
+      const rows = prefRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].requested_provider).toBe('opencode-cli');
+      expect(rows[0].requested_model).toBe('glm/glm-5.2');
+      expect(rows[0].validated_provider).toBe('opencode-cli');
+      expect(rows[0].model_pin_verified).toBe(1);
+      expect(listFn).toHaveBeenCalledTimes(1);
+      expect(allReplies(sentMessages).join('\n')).toContain('Now answering with glm/glm-5.2');
+    });
+
+    it('rejects an unconfigured model id locally without dispatching an agent turn', async () => {
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'glm/glm-5.2' }];
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: '/model vendor/not-configured',
+      }));
+
+      expect(prefRows()).toHaveLength(0);
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain("vendor/not-configured isn't configured on this instance");
+      expect(reply).toContain('/model list');
+    });
+
+    it('rejects an ambiguous configured model id instead of choosing a provider by array order', async () => {
+      cfgAny().agentFallbacks = [
+        { provider: 'opencode-cli', model: 'shared/model-x' },
+        { provider: 'codex-cli', model: 'shared/model-x' },
+      ];
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: '/model shared/model-x',
+      }));
+
+      expect(prefRows()).toHaveLength(0);
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('matches more than one configured route');
+      expect(reply).toContain('/model list');
+    });
+  });
+
   // ── C3/D6/D10/D16: the deterministic 1-step apply — /model N resolves the
   // snapshot and writes a MODEL-level pin in one step; /model N default pins
   // the provider only; a miss is a DISCLOSED re-render, never a silent pick.

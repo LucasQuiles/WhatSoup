@@ -92,7 +92,7 @@ import {
   type ToolCategory,
 } from './outbound-queue.ts';
 import { ControlQueue } from './control-queue.ts';
-import { classifyInput } from './commands.ts';
+import { classifyInput, isExplicitModelId } from './commands.ts';
 import { renderHelp, renderHelpDetail } from './help-render.ts';
 import {
   ensureChatPreferenceSchema,
@@ -4199,53 +4199,26 @@ export class AgentRuntime implements Runtime {
                 this.sendModelCatalogue(chatJid, msg.senderJid, null);
                 break;
               }
-              const outcome = this.recordRouteModelPin(chatJid, chatKey, senderKey, entry.providerId, entry.id);
-              if (outcome === 'refreshed') {
-                this.sendDirect(chatJid, this.echoReconfirmOutcome(
-                  chatJid, msg.senderJid, perChatMapKey, entry.id,
-                  '_Already set — extended for another 24h. /reset to go back to the default route._',
-                ));
+              await this.applyConfiguredModelPin(
+                chatJid, msg.senderJid, perChatMapKey, chatKey, senderKey, entry,
+              );
+              break;
+            }
+            const directModelId = (classified.args ?? '').trim();
+            if (isExplicitModelId(directModelId)) {
+              const matches = this.configuredModelEntries().filter((entry) => entry.id === directModelId);
+              const providers = [...new Set(matches.map((entry) => entry.providerId))];
+              if (providers.length === 0) {
+                this.sendDirect(chatJid, `_${directModelId} isn't configured on this instance. Use /model list to see configured models._`);
                 break;
               }
-              if (outcome === 'sticky_kept') {
-                this.sendDirect(chatJid, this.echoReconfirmOutcome(
-                  chatJid, msg.senderJid, perChatMapKey, entry.id,
-                  '_Already set (sticky). /reset to go back to the default route._',
-                ));
+              if (providers.length > 1) {
+                this.sendDirect(chatJid, `_${directModelId} matches more than one configured route. Use /model list and reply with its number._`);
                 break;
               }
-              // Task H: verify the fresh pin against the catalogue BEFORE the
-              // echo (awaited — no fire-and-forget) so a subsequent read
-              // (this same reply, /model status, a next-session spawn) never
-              // observes an unverified pin the catalogue would have rejected.
-              const verifyResult = await this.verifyModelPinAgainstCatalogue(chatKey, senderKey, entry.providerId, entry.id);
-              if (typeof verifyResult === 'object') {
-                this.sendDirect(
-                  chatJid,
-                  `_Couldn't pin ${entry.id} — ${verifyResult.dropped}. Still on the default route; try /model list._`,
-                );
-                break;
-              }
-              // Task G: the recycle must run AFTER H's verify — resolveRouteForTurn
-              // needs the now-VERIFIED pin, or a recycle here would respawn the
-              // session on the provider default and defeat the switch. Still
-              // runs on a DEFERRED verify too — a provider switch (if any) is
-              // real even though the model itself stays unverified.
-              const recycleOutcome = this.applyRouteChangeAndRecycle(chatJid, msg.senderJid, perChatMapKey);
-              if (verifyResult === 'deferred') {
-                // MINOR 3 (final-review): decideModelPinResolution's
-                // needs-catalogue fail-open means an unverified pin never
-                // sets route.model — only a provider switch (if the pin's
-                // provider is eligible) actually takes effect. The old D10
-                // echo claimed the specific model was pinned/serving
-                // regardless; say what actually happens instead.
-                this.sendDirect(
-                  chatJid,
-                  `_Pinned ${entry.providerId} — ${entry.id} pending a catalogue check; using ${entry.providerId}'s default until then. /reset to undo._`,
-                );
-                break;
-              }
-              this.sendDirect(chatJid, this.renderPinOutcomeEcho(entry.id, recycleOutcome));
+              await this.applyConfiguredModelPin(
+                chatJid, msg.senderJid, perChatMapKey, chatKey, senderKey, matches[0]!,
+              );
               break;
             }
             const isIntent = sub === 'strongest' || sub === 'fastest';
@@ -9013,6 +8986,50 @@ export class AgentRuntime implements Runtime {
     return 'deferred';
   }
 
+  /** Apply any config-derived model pick through the same durable write,
+   * catalogue verification, recycle, and user-receipt path. */
+  private async applyConfiguredModelPin(
+    chatJid: string,
+    senderJid: string,
+    perChatMapKey: string | undefined,
+    chatKey: string,
+    senderKey: string,
+    entry: CatalogueEntry,
+  ): Promise<void> {
+    const outcome = this.recordRouteModelPin(chatJid, chatKey, senderKey, entry.providerId, entry.id);
+    if (outcome === 'refreshed') {
+      this.sendDirect(chatJid, this.echoReconfirmOutcome(
+        chatJid, senderJid, perChatMapKey, entry.id,
+        '_Already set — extended for another 24h. /reset to go back to the default route._',
+      ));
+      return;
+    }
+    if (outcome === 'sticky_kept') {
+      this.sendDirect(chatJid, this.echoReconfirmOutcome(
+        chatJid, senderJid, perChatMapKey, entry.id,
+        '_Already set (sticky). /reset to go back to the default route._',
+      ));
+      return;
+    }
+    const verifyResult = await this.verifyModelPinAgainstCatalogue(chatKey, senderKey, entry.providerId, entry.id);
+    if (typeof verifyResult === 'object') {
+      this.sendDirect(
+        chatJid,
+        `_Couldn't pin ${entry.id} — ${verifyResult.dropped}. Still on the default route; try /model list._`,
+      );
+      return;
+    }
+    const recycleOutcome = this.applyRouteChangeAndRecycle(chatJid, senderJid, perChatMapKey);
+    if (verifyResult === 'deferred') {
+      this.sendDirect(
+        chatJid,
+        `_Pinned ${entry.providerId} — ${entry.id} pending a catalogue check; using ${entry.providerId}'s default until then. /reset to undo._`,
+      );
+      return;
+    }
+    this.sendDirect(chatJid, this.renderPinOutcomeEcho(entry.id, recycleOutcome));
+  }
+
   /**
    * Task G (D14): make a successful /model or /reset route change take
    * effect on the user's NEXT message instead of the next /new — a running
@@ -9407,6 +9424,17 @@ export class AgentRuntime implements Runtime {
     void this.sendDynamicModelCatalogueSection(chatJid, senderJid, filter);
   }
 
+  /** Canonical ordered config projection shared by direct lookup and the
+   * numbered catalogue. */
+  private configuredModelEntries(): CatalogueEntry[] {
+    const entries: CatalogueEntry[] = [];
+    if (this.model !== undefined) entries.push({ providerId: this.agentProvider, id: this.model });
+    for (const entry of this.agentFallbacks) {
+      if (entry.model !== undefined) entries.push({ providerId: entry.provider, id: entry.model });
+    }
+    return entries;
+  }
+
   /**
    * A fallback entry's credential state, described the same way Task A's
    * `describeProvider` describes a bare provider id — but MODEL-aware (an
@@ -9464,11 +9492,10 @@ export class AgentRuntime implements Runtime {
    */
   private async sendDynamicModelCatalogueSection(chatJid: string, senderJid: string, filter: string | null): Promise<void> {
     try {
-      const candidates: Array<{ provider: string; model: string }> = [];
-      if (this.model !== undefined) candidates.push({ provider: this.agentProvider, model: this.model });
-      for (const e of this.agentFallbacks) {
-        if (e.model !== undefined) candidates.push({ provider: e.provider, model: e.model });
-      }
+      const candidates = this.configuredModelEntries().map((entry) => ({
+        provider: entry.providerId,
+        model: entry.id,
+      }));
       const pool = filter
         ? candidates.filter((e) => e.model.toLowerCase().includes(filter.toLowerCase()))
         : candidates;
