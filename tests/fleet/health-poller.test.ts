@@ -102,6 +102,50 @@ function makeOnlineHealth(overrides: Record<string, unknown> = {}): Record<strin
   };
 }
 
+function makeOperationalFallbackHealth(overrides: {
+  degradationCauses?: readonly string[];
+  pressureActive?: boolean;
+  recoveryOutstanding?: number;
+  whatsappConnected?: boolean;
+  connectionState?: string;
+  fallbackChainExhausted?: boolean;
+  failedEntryCount?: number;
+  fallbackTurnsServed?: number;
+  lastFallbackTurnAt?: number | null;
+  lastTurnErrorClass?: string | null;
+} = {}): Record<string, unknown> {
+  return {
+    status: 'degraded',
+    degradation_causes: overrides.degradationCauses
+      ?? ['provider_fallback_active', 'primary_model_evidence_stale'],
+    instance: {
+      effectiveProvider: 'opencode-cli',
+      fallbackReason: 'usage-limit',
+      fallbackModel: 'configured/fallback',
+      fallbackChainExhausted: overrides.fallbackChainExhausted ?? false,
+      failedEntryCount: overrides.failedEntryCount ?? 0,
+      fallbackTurnsServed: overrides.fallbackTurnsServed ?? 2,
+      lastFallbackTurnAt: overrides.lastFallbackTurnAt === undefined
+        ? Date.now() - 1_000
+        : overrides.lastFallbackTurnAt,
+    },
+    turn_capability: {
+      last_successful_turn_at: Date.now() - 1_000,
+      last_turn_error_class: overrides.lastTurnErrorClass ?? null,
+    },
+    runtime: {
+      agent: {
+        providerExecution: { pressureActive: overrides.pressureActive ?? false },
+        turnRecoveryOutstanding: overrides.recoveryOutstanding ?? 0,
+      },
+    },
+    whatsapp: {
+      connected: overrides.whatsappConnected ?? true,
+      connection: { state: overrides.connectionState ?? 'connected' },
+    },
+  };
+}
+
 function makeDatabaseInspectionHealth(
   code: 'future_schema' | 'engine_recovery_required' = 'future_schema',
 ): Record<string, unknown> {
@@ -470,6 +514,199 @@ describe('HealthPoller', () => {
       'critical',
       undefined,
     );
+
+    poller.stop();
+  });
+
+  it('suppresses the duplicate health-body alert for an exactly proven operational fallback', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(makeOperationalFallbackHealth()),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 5_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(alertFns.emitAlert).not.toHaveBeenCalledWith(
+      'remote-1',
+      'health_body_degraded',
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+      expect.anything(),
+    );
+    expect(poller.getStatus('remote-1')?.statusEvidence).toEqual(expect.arrayContaining([
+      'degradation_class=operational_fallback',
+      'degradation_causes=provider_fallback_active,primary_model_evidence_stale',
+      'fallback_chain_exhausted=false',
+      'turn_recovery_outstanding=0',
+    ]));
+
+    poller.stop();
+  });
+
+  it('keeps the health-body alert critical when fallback has any additional degradation cause', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(makeOperationalFallbackHealth({
+        degradationCauses: [
+          'provider_fallback_active',
+          'primary_model_unusable',
+          'turn_recovery_degraded',
+        ],
+      })),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 5_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(alertFns.emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'health_body_degraded',
+      'whatsoup@remote-1 health is degraded',
+      expect.stringContaining('degradation_class=undifferentiated'),
+      'critical',
+      undefined,
+    );
+    expect(alertFns.emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'health_body_degraded',
+      expect.any(String),
+      expect.stringContaining('degradation_causes=provider_fallback_active,primary_model_unusable,turn_recovery_degraded'),
+      'critical',
+      undefined,
+    );
+
+    poller.stop();
+  });
+
+  it.each([
+    ['missing cause contract', { degradationCauses: [] }],
+    ['provider execution pressure', { pressureActive: true }],
+    ['outstanding recovery', { recoveryOutstanding: 1 }],
+    ['disconnected transport', { whatsappConnected: false }],
+    ['non-connected transport state', { connectionState: 'reconnecting' }],
+    ['exhausted fallback chain', { fallbackChainExhausted: true }],
+    ['failed fallback entry', { failedEntryCount: 1 }],
+    ['no fallback turn proof', { fallbackTurnsServed: 0 }],
+    ['no fallback turn timestamp', { lastFallbackTurnAt: null }],
+    ['trailing turn error', { lastTurnErrorClass: 'server-error' }],
+  ] as const)('fails closed for exact-cause fallback with %s', async (_label, overrides) => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(makeOperationalFallbackHealth(overrides)),
+    });
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 5_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(alertFns.emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'health_body_degraded',
+      'whatsoup@remote-1 health is degraded',
+      expect.stringContaining('degradation_class=undifferentiated'),
+      'critical',
+      undefined,
+    );
+
+    poller.stop();
+  });
+
+  it('clears an open health-body incident when exact evidence reclassifies it as operational fallback', async () => {
+    const operationalFallbackHealth = makeOperationalFallbackHealth();
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ status: 'degraded', reason: 'runtime_agent_at_risk' }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ status: 'degraded', reason: 'runtime_agent_at_risk' }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ status: 'degraded', reason: 'runtime_agent_at_risk' }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(operationalFallbackHealth),
+      });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 5_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(alertFns.emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'health_body_degraded',
+      expect.any(String),
+      expect.any(String),
+      'critical',
+      undefined,
+    );
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(alertFns.clearAlertSource).toHaveBeenCalledWith(
+      'remote-1',
+      'health_body_degraded',
+      expect.stringContaining('reclassified=operational_fallback'),
+      undefined,
+    );
+    expect(poller.getStatus('remote-1')?.activeAlertSources).not.toContain('health_body_degraded');
+
+    poller.stop();
+  });
+
+  it('retries a failed reclassification clear and stops after durable acceptance', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ status: 'degraded', reason: 'runtime_agent_at_risk' }),
+    });
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 5_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(poller.getStatus('remote-1')?.activeAlertSources).toContain('health_body_degraded');
+
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(makeOperationalFallbackHealth()),
+    });
+    alertFns.clearAlertSource.mockReturnValueOnce(false).mockReturnValueOnce(true);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(poller.getStatus('remote-1')?.activeAlertSources).toContain('health_body_degraded');
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(alertFns.clearAlertSource).toHaveBeenCalledTimes(2);
+    expect(poller.getStatus('remote-1')?.activeAlertSources).not.toContain('health_body_degraded');
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(alertFns.clearAlertSource).toHaveBeenCalledTimes(2);
 
     poller.stop();
   });

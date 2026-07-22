@@ -1458,8 +1458,96 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         }
       }
 
+      const degradationCauses: string[] = [];
+      const addDegradationCause = (cause: string): void => {
+        if (!degradationCauses.includes(cause)) degradationCauses.push(cause);
+      };
+      const fallbackWindowActive =
+        fallbackState !== null
+        && typeof fallbackState.fallbackActiveUntil === 'number'
+        && Number.isFinite(fallbackState.fallbackActiveUntil)
+        && fallbackState.fallbackActiveUntil > Date.now()
+        && typeof fallbackState.fallbackReason === 'string'
+        && fallbackState.fallbackReason.length > 0;
+      if (fallbackWindowActive) addDegradationCause('provider_fallback_active');
+      if (fallbackState?.fallbackChainExhausted === true) {
+        addDegradationCause('fallback_chain_exhausted');
+      }
+      if (
+        typeof fallbackState?.failedEntryCount === 'number'
+        && Number.isFinite(fallbackState.failedEntryCount)
+        && fallbackState.failedEntryCount > 0
+      ) {
+        addDegradationCause('fallback_entry_failures');
+      }
+      if (turnCapability?.model_usable === false) {
+        addDegradationCause(fallbackWindowActive ? 'primary_model_unusable' : 'model_unusable');
+      }
+      if (turnCapabilityErrorIsDegraded) addDegradationCause('turn_capability_error');
+      if (turnCapability !== null && modelEvidenceStaleWhileRelied(turnCapability, Date.now())) {
+        addDegradationCause(fallbackWindowActive
+          ? 'primary_model_evidence_stale'
+          : 'turn_capability_evidence_stale');
+      }
+      if (authFailureIsUnhealthy || authFailureIsDegraded) addDegradationCause('auth_bond_degraded');
+      if (!isConnected) addDegradationCause('transport_disconnected');
+      if (enrichmentIsStale) addDegradationCause('enrichment_stale');
+      if (enrichmentStats.runtimeDegraded) addDegradationCause('enrichment_runtime_degraded');
+      if (connectionChurnIsDegraded) addDegradationCause('connection_churn');
+      if (outboundFloodIsDegraded) addDegradationCause('outbound_flood');
+      if (loopLag.locallyStarved) addDegradationCause('event_loop_starved');
+      if (durabilityDebtIsDegraded) addDegradationCause('durability_debt');
+      if (schemaIsFuture) addDegradationCause('schema_future');
+      else if (!schemaReady) addDegradationCause('schema_not_ready');
+      if (!pendingPollsReadable) addDegradationCause('pending_polls_unreadable');
+
+      const runtimeDetails = runtimeSnapshot?.details as Record<string, unknown> | undefined;
+      const runtimeProviderExecution = runtimeDetails?.['providerExecution'] as Record<string, unknown> | undefined;
+      const positiveRuntimeCounter = (key: string): boolean => {
+        const value = runtimeDetails?.[key];
+        return typeof value === 'number' && Number.isFinite(value) && value > 0;
+      };
+      if (positiveRuntimeCounter('recentCrashes')) addDegradationCause('agent_recent_crashes');
+      if (agentRuntimeStatus === 'degraded' && runtimeDetails?.['active'] === false) {
+        addDegradationCause('agent_session_inactive');
+      }
+      if (
+        positiveRuntimeCounter('turnFinalizationRetainedRetries')
+        || positiveRuntimeCounter('turnFinalizationDegradedScopes')
+      ) {
+        addDegradationCause('turn_finalization_degraded');
+      }
+      if (
+        positiveRuntimeCounter('turnRecoveryOutstanding')
+        || positiveRuntimeCounter('turnRecoveryExhausted')
+        || positiveRuntimeCounter('turnRecoveryOpenRecoveries')
+        || positiveRuntimeCounter('turnRecoveryCorruptLinks')
+        || positiveRuntimeCounter('turnRecoveryEchoConflicts')
+      ) {
+        addDegradationCause('turn_recovery_degraded');
+      }
+      if (runtimeProviderExecution?.['pressureActive'] === true) {
+        addDegradationCause('provider_execution_pressure');
+      }
+      if (
+        agentRuntimeStatus === 'degraded'
+        && !fallbackWindowActive
+        && !degradationCauses.some((cause) => cause.startsWith('agent_')
+          || cause === 'turn_finalization_degraded'
+          || cause === 'turn_recovery_degraded'
+          || cause === 'provider_execution_pressure')
+      ) {
+        addDegradationCause('agent_runtime_degraded_unclassified');
+      } else if (agentRuntimeStatus === 'unhealthy') {
+        addDegradationCause('agent_runtime_unhealthy');
+      }
+      if (status !== 'healthy' && degradationCauses.length === 0) {
+        addDegradationCause('unclassified');
+      }
+
       const body = JSON.stringify({
         status,
+        degradation_causes: degradationCauses,
         generated_at: new Date().toISOString(),
         uptime_seconds: Math.floor((Date.now() - deps.startedAt) / 1000),
         arc: readArcBindingHealth(process.env.WHATSOUP_REPO_ROOT ?? process.cwd()),
