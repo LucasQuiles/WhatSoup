@@ -48,15 +48,17 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   closeSync,
   fsyncSync,
+  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
   readdirSync,
   renameSync,
+  unlinkSync,
   writeFileSync,
   writeSync,
 } from 'node:fs';
-import { open as openFileHandle } from 'node:fs/promises';
+import { link as linkFile, unlink as unlinkFile, writeFile as writeFileAsync } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -751,6 +753,87 @@ function ensureStateDirs(location: LeaseLocation): void {
 }
 
 /**
+ * Where a lease record is staged before it is published.
+ *
+ * Deliberately a sibling of the lease itself: `link()` cannot cross filesystems, and the
+ * git dir is the one directory we already know is writable and on the same device.
+ */
+function stagingPathFor(location: LeaseLocation): string {
+  return `${location.leasePath}.claim-${randomUUID()}`;
+}
+
+/**
+ * Publish a lease record so that EXISTENCE AND CONTENT LAND TOGETHER.
+ *
+ * The obvious claim — `open(leasePath,'wx')` then write — is atomic in the wrong dimension.
+ * `O_CREAT|O_EXCL` guarantees exactly one creator, but it publishes the inode BEFORE the
+ * record is written, so a concurrent loser that handles EEXIST inside that window reads a
+ * zero-byte file. It then cannot name a holder, and a plain writer conflict gets downgraded
+ * to `GIT.WORKTREE.UNACCOUNTED_STATE` — an Inconclusive that tells an operator to reconcile
+ * by hand when all that was required was to back off. Measured at ~2.5% of losers under
+ * four-way contention; invisible at low load, which is how it passed a 43/43 run and only
+ * failed under the loaded push gate.
+ *
+ * Writing the record to a staging file first and then `link()`-ing it into place fixes the
+ * dimension: `link()` is atomic and fails with EEXIST if the target exists, so it keeps the
+ * exactly-one-winner property, but the name only ever appears already-populated. The empty
+ * lease is not merely unlikely, it is unrepresentable.
+ *
+ * A crash is safe in both directions: before the link there is no lease at all, and after it
+ * there is a complete one that `takeover` can reason about. Only the staging file can be
+ * orphaned, and it is not the lease — a stale `agent-writer-lease.json.claim-*` blocks
+ * nothing.
+ *
+ * The async twin is exported so the invariant can be tested against a spinning observer
+ * directly, without paying for the `git` subprocesses that `acquireLease` needs for repo
+ * facts. See `tests/scripts/agent-lease.test.ts`.
+ */
+function publishLeaseSync(location: LeaseLocation, record: LeaseRecord): { ok: true } | { ok: false; err: unknown } {
+  const staging = stagingPathFor(location);
+  try {
+    const fd = openSync(staging, 'wx', 0o600);
+    try {
+      writeSync(fd, serialize(record));
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    linkSync(staging, location.leasePath);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, err };
+  } finally {
+    // The staging name is always transient; the published lease keeps the inode alive.
+    try {
+      unlinkSync(staging);
+    } catch {
+      /* nothing staged, or already gone — neither affects the published lease */
+    }
+  }
+}
+
+/** Async twin of {@link publishLeaseSync}; identical ordering and identical guarantees. */
+export async function publishLeaseAsync(
+  location: LeaseLocation,
+  record: LeaseRecord,
+): Promise<{ ok: true } | { ok: false; err: unknown }> {
+  const staging = stagingPathFor(location);
+  try {
+    await writeFileAsync(staging, serialize(record), { flag: 'wx', mode: 0o600 });
+    await linkFile(staging, location.leasePath);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, err };
+  } finally {
+    try {
+      await unlinkFile(staging);
+    } catch {
+      /* nothing staged, or already gone — neither affects the published lease */
+    }
+  }
+}
+
+/**
  * Acquire the writer lease.
  *
  * The claim is a SINGLE `openSync(path, 'wx')` — an atomic `O_CREAT|O_EXCL` open.
@@ -761,20 +844,8 @@ export function acquireLease(options: AcquireOptions): LeaseResult {
   const plan = planAcquire(options);
   if (!('ready' in plan)) return plan;
 
-  let fd: number;
-  try {
-    fd = openSync(plan.location.leasePath, 'wx', 0o600);
-  } catch (err) {
-    return classifyCreateFailure(err, plan.location, plan.now);
-  }
-  try {
-    writeSync(fd, serialize(plan.record));
-    fsyncSync(fd);
-  } catch (err) {
-    closeSync(fd);
-    return fail('GIT.WORKTREE.UNACCOUNTED_STATE', `lease claimed but not written: ${(err as Error).message}`);
-  }
-  closeSync(fd);
+  const published = publishLeaseSync(plan.location, plan.record);
+  if (!published.ok) return classifyCreateFailure(published.err, plan.location, plan.now);
   return {
     kind: 'ok',
     message: `acquired ${describeHolder(plan.record)}`,
@@ -788,20 +859,8 @@ export async function acquireLeaseAsync(options: AcquireOptions): Promise<LeaseR
   const plan = planAcquire(options);
   if (!('ready' in plan)) return plan;
 
-  let handle;
-  try {
-    handle = await openFileHandle(plan.location.leasePath, 'wx', 0o600);
-  } catch (err) {
-    return classifyCreateFailure(err, plan.location, plan.now);
-  }
-  try {
-    await handle.writeFile(serialize(plan.record));
-    await handle.sync();
-  } catch (err) {
-    await handle.close();
-    return fail('GIT.WORKTREE.UNACCOUNTED_STATE', `lease claimed but not written: ${(err as Error).message}`);
-  }
-  await handle.close();
+  const published = await publishLeaseAsync(plan.location, plan.record);
+  if (!published.ok) return classifyCreateFailure(published.err, plan.location, plan.now);
   return {
     kind: 'ok',
     message: `acquired ${describeHolder(plan.record)}`,
@@ -1230,20 +1289,8 @@ export function takeoverLease(options: TakeoverOptions): LeaseResult {
     freeze,
   };
 
-  let fd: number;
-  try {
-    fd = openSync(location.leasePath, 'wx', 0o600);
-  } catch (err) {
-    return classifyCreateFailure(err, location, now);
-  }
-  try {
-    writeSync(fd, serialize(successor));
-    fsyncSync(fd);
-  } catch (err) {
-    closeSync(fd);
-    return fail('GIT.WORKTREE.UNACCOUNTED_STATE', `successor lease claimed but not written: ${(err as Error).message}`);
-  }
-  closeSync(fd);
+  const published = publishLeaseSync(location, successor);
+  if (!published.ok) return classifyCreateFailure(published.err, location, now);
   return {
     kind: 'ok',
     message: `took over ${describeHolder(successor)}; previous lease retained at ${evidenceLease}`,

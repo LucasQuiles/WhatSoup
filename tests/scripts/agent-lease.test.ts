@@ -9,6 +9,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
+import { open as openFileHandle } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,6 +27,7 @@ import {
   heartbeatLease,
   parseLeaseRecord,
   processIdentityString,
+  publishLeaseAsync,
   readRepoFacts,
   releaseLease,
   resolveLeaseLocation,
@@ -82,6 +84,24 @@ function acquireOk(cwd: string, sessionId: string, extra: Record<string, unknown
     throw new Error(`expected acquire to succeed, got ${result.kind} ${result.reason}: ${result.message}`);
   }
   return result.record;
+}
+
+/**
+ * Read `target` the instant it first exists, yielding to the event loop between polls.
+ *
+ * This models the losing acquirer exactly: it learns the path is taken and immediately tries
+ * to find out who holds it. Returns the bytes it saw — `''` means it caught the publisher
+ * between creating the name and writing the record, which is the defect under test.
+ */
+async function firstSightOfLease(target: string): Promise<string> {
+  for (;;) {
+    try {
+      return readFileSync(target, 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  }
 }
 
 /** Overwrite the on-disk lease with hand-crafted fields (models a foreign/stale writer). */
@@ -218,6 +238,128 @@ describe('agent-lease acquire', () => {
     const winner = winners[0];
     if (winner === undefined || winner.kind !== 'ok') throw new Error('unreachable');
     expect(onDisk.record.leaseId).toBe(winner.record.leaseId);
+  });
+
+  /**
+   * REGRESSION (real failure, 2026-07-22): the loser of a genuine race reported
+   * `GIT.WORKTREE.UNACCOUNTED_STATE` instead of `GIT.LEASE.WRITER_CONFLICT`.
+   *
+   * Cause: the claim was `open(path,'wx')` followed by a separate write. `O_CREAT|O_EXCL`
+   * publishes the INODE before any content exists, so the loser's EEXIST handler could read
+   * a zero-byte file, fail to parse it, and downgrade a plain writer conflict to
+   * "unaccounted state" — an Inconclusive that tells an operator to reconcile by hand when
+   * all that was needed was to back off.
+   *
+   * The window is microseconds wide, so racing through `acquireLease` reproduces it only
+   * intermittently — the defect survived a 43/43 green run and surfaced only under the loaded
+   * push gate. A standalone probe measured 30 of 1200 losers (2.5%) under four-way contention.
+   *
+   * Rather than buy confidence with round count (each `acquireLease` spawns several `git`
+   * subprocesses for repo facts, so a statistically meaningful number of rounds blows the
+   * suite timeout), these two tests observe the publish step directly. `firstSightOfLease`
+   * spins until the path exists and reads it the instant it does, which is precisely the
+   * position the losing acquirer was in. The first test proves that observer can actually
+   * catch a create-then-write publisher — without it, the second test would be a false green.
+   */
+  it('NON-VACUITY: the observer catches a create-then-write publisher mid-claim', async () => {
+    const target = join(scratch, 'old-style-lease.json');
+    const body = `${JSON.stringify({ schemaVersion: 1, leaseId: 'x' }, null, 2)}\n`;
+    let caughtEmpty = false;
+
+    for (let round = 0; round < 200 && !caughtEmpty; round += 1) {
+      rmSync(target, { force: true });
+      // Exactly the old publish path: O_CREAT|O_EXCL publishes the inode, the record lands
+      // in a SECOND syscall, and everything in between sees a zero-byte file.
+      const [firstSight] = await Promise.all([
+        firstSightOfLease(target),
+        (async () => {
+          const handle = await openFileHandle(target, 'wx', 0o600);
+          await handle.writeFile(body);
+          await handle.close();
+        })(),
+      ]);
+      if (firstSight === '') caughtEmpty = true;
+    }
+
+    expect(caughtEmpty, 'observer never caught the empty window — it cannot falsify anything').toBe(true);
+  });
+
+  it('publish is atomic: a concurrent observer NEVER sees an empty lease', async () => {
+    const repo = initRepo();
+    const record = acquireOk(repo, 'session-a');
+    const target = join(scratch, 'published-lease.json');
+    const location = { ...resolveLeaseLocation(repo), leasePath: target };
+
+    for (let round = 0; round < 200; round += 1) {
+      rmSync(target, { force: true });
+      const [firstSight, published] = await Promise.all([
+        firstSightOfLease(target),
+        publishLeaseAsync(location, record),
+      ]);
+
+      expect(published.ok, `round ${round}: publish failed`).toBe(true);
+      // The name and its contents become visible in the same instant, so the worst an
+      // observer can do is arrive early (ENOENT) or late (complete record) — never between.
+      expect(firstSight, `round ${round}: observer saw an empty lease`).not.toBe('');
+      expect(parseLeaseRecord(firstSight).valid, `round ${round}: first sight did not parse`).toBe(true);
+    }
+  });
+
+  it('RACE (repeated): a loser is ALWAYS a writer conflict, never unaccounted state', async () => {
+    const repo = initRepo();
+    const { leasePath } = resolveLeaseLocation(repo);
+    const observed = new Set<string>();
+    let winners = 0;
+
+    for (let round = 0; round < 20; round += 1) {
+      rmSync(leasePath, { force: true });
+
+      const results = await Promise.all(
+        ['a', 'b', 'c', 'd'].map((tag) =>
+          acquireLeaseAsync({ cwd: repo, taskId: `task-${tag}`, sessionId: `session-${tag}`, toolIdentity: 'vitest' }),
+        ),
+      );
+
+      winners += results.filter((r) => r.kind === 'ok').length;
+      for (const loser of results.filter((r) => r.kind !== 'ok')) observed.add(loser.reason);
+
+      // Whoever won, the published lease is complete — never a half-written stub.
+      expect(parseLeaseRecord(readLeaseRaw(repo)).valid, `round ${round}: lease on disk did not parse`).toBe(true);
+    }
+
+    expect(winners, 'exactly one winner per round').toBe(20);
+    expect([...observed]).toEqual(['GIT.LEASE.WRITER_CONFLICT']);
+  }, 60_000);
+
+  it('publishes the lease atomically — it is never observable as an empty file', () => {
+    const repo = initRepo();
+    const location = resolveLeaseLocation(repo);
+
+    acquireOk(repo, 'session-a');
+
+    // Content-and-existence land together, so a concurrent reader that sees the path at
+    // all sees a complete record.
+    expect(readFileSync(location.leasePath, 'utf8').trim()).not.toBe('');
+    expect(parseLeaseRecord(readLeaseRaw(repo)).valid).toBe(true);
+
+    // The staging file used to publish atomically must not survive the claim.
+    const leftovers = readdirSync(location.gitDir).filter((entry) => entry.includes('.claim-'));
+    expect(leftovers, `staging debris left behind: ${leftovers.join(', ')}`).toEqual([]);
+  });
+
+  it('still reports UNACCOUNTED_STATE for a zero-byte lease left by a foreign writer', () => {
+    const repo = initRepo();
+    const location = resolveLeaseLocation(repo);
+
+    // Not a race: nothing is mid-claim, this is genuine debris. Waiting on it or calling it
+    // a writer conflict would name a holder that does not exist, so it stays Inconclusive.
+    writeFileSync(location.leasePath, '');
+
+    const result = acquireLease({ cwd: repo, taskId: 'task-1', sessionId: 'session-a', toolIdentity: 'vitest' });
+    expect(result.kind).toBe('inconclusive');
+    if (result.kind === 'ok') throw new Error('unreachable');
+    expect(result.reason).toBe('GIT.WORKTREE.UNACCOUNTED_STATE');
+    expect(exitCodeFor(result)).toBe(EXIT_INCONCLUSIVE);
   });
 
   it(
