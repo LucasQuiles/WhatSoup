@@ -137,6 +137,11 @@ describe('D1.3 App-shell landmark contract', () => {
     ['Line detail', '/lines/support'],
     ['Inbox', '/inbox'],
     ['Ops', '/ops'],
+    ['Agents', '/agents'],
+    ['Skills Hub', '/skills'],
+    ['Dream Lab', '/dream-lab'],
+    ['Deployments', '/deployments'],
+    ['Settings', '/settings'],
   ] as const;
 
   for (const [heading, path] of routes) {

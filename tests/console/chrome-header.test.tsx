@@ -1,8 +1,9 @@
 /**
  * ChromeHeader — v3.5 chrome header tests (T5 b-02).
- * Pins: per-route h1 (demoted to a span on line-detail, which owns its own
- * h1), the attention pill (copy grammar + link target), and the rightmost
- * theme toggle (sun + mono label, aria-label, toggle behavior).
+ * Pins: the chrome title is always a styled span — never an h1 (every page
+ * surface owns its own h1; D1.3 landmark contract), the attention pill
+ * (copy grammar + link target), and the rightmost theme toggle (sun + mono
+ * label, aria-label, toggle behavior).
  *
  * @vitest-environment jsdom
  */
@@ -39,7 +40,7 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('ChromeHeader — title', () => {
-  it('renders the page h1 per route', () => {
+  it('renders the route title as a styled span, never an h1 (the surface owns the h1)', () => {
     const cases: Array<[string, string]> = [
       ['/', 'Fleet'],
       ['/inbox', 'Inbox'],
@@ -53,15 +54,18 @@ describe('ChromeHeader — title', () => {
     for (const [path, title] of cases) {
       cleanup();
       renderHeader({}, path);
-      const h1 = screen.getByRole('heading', { level: 1 });
-      expect(h1.textContent).toBe(title);
+      expect(screen.queryByRole('heading', { level: 1 })).toBeNull();
+      const titleEl = document.querySelector('.chrome-title');
+      expect(titleEl?.tagName).toBe('SPAN');
+      expect(titleEl?.textContent).toBe(title);
     }
   });
 
-  it('demotes the chrome title to a span on line-detail (the page owns its h1)', () => {
+  it('shows the line name as the span title on line-detail (the page owns its h1)', () => {
     renderHeader({}, '/lines/primary-line', '/lines/:name');
     expect(screen.queryByRole('heading', { level: 1 })).toBeNull();
     const title = document.querySelector('.chrome-title');
+    expect(title?.tagName).toBe('SPAN');
     expect(title?.textContent).toBe('primary-line');
   });
 });

@@ -82,7 +82,7 @@ export const NAV_SECTIONS: NavSectionMeta[] = [
 ];
 
 interface RouteMeta {
-  /** h1 text in the chrome header (line detail shows the line name instead). */
+  /** Title text in the chrome header (line detail shows the line name instead). Surfaces own the h1. */
   title: string;
   /** Nameplate context caps (mockup .ctx). */
   ctx: string;

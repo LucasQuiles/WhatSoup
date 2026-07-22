@@ -6,9 +6,11 @@
  * label). Page-level actions (primary CTA, sort/filter) land with the
  * surface beads b-03+ — b-02 owns only the chrome register.
  *
- * h1 law: exactly one h1 per page. Top-level surfaces get the chrome h1
- * (they render none of their own); the line-detail surface owns its h1 in
- * LineDetail.tsx, so there the chrome title demotes to a styled span.
+ * h1 law: exactly one h1 per page, and the page surface owns it (Fleet,
+ * Inbox, Ops, LineDetail, and the b-02 stubs each render their own). The
+ * chrome title is always a styled span — visible register, aria-hidden so
+ * screen readers hear only the surface's h1. Pinned by the D1.3 app-shell
+ * landmark contract (tests/browser/a11y-contracts.test.tsx).
  */
 import { type FC } from 'react';
 import { Link, useLocation, useParams } from 'react-router-dom';
@@ -31,13 +33,9 @@ const ChromeHeader: FC<ChromeHeaderProps> = ({ alertCount = 0 }) => {
 
   return (
     <header className="chrome-header">
-      {onLineDetail ? (
-        <span className="chrome-title" aria-hidden="true">
-          {titleText}
-        </span>
-      ) : (
-        <h1 className="chrome-title">{titleText}</h1>
-      )}
+      <span className="chrome-title" aria-hidden="true">
+        {titleText}
+      </span>
 
       {alertCount > 0 && (
         <Link to="/" className="chrome-attn">

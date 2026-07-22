@@ -363,7 +363,8 @@ describe('App — chrome counts and update check integration', () => {
   it('chrome header renders with no attention pill (no lines data → 0 alerts)', async () => {
     await act(async () => { renderApp('/'); });
     await waitFor(() => {
-      expect(screen.getByRole('heading', { level: 1, name: 'Fleet' })).toBeDefined();
+      // h1 law: the surface owns the h1 — the chrome title is a styled span.
+      expect(document.querySelector('.chrome-title')?.textContent).toBe('Fleet');
     });
     expect(screen.queryByText(/need.*attention/)).toBeNull();
   });
