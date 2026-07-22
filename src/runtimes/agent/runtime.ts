@@ -1003,8 +1003,6 @@ export class AgentRuntime implements Runtime {
   private recentProviderFallbackNotices = new Map<string, number>();
   private recentFallbackEmptyTurnAlerts = new Map<string, number>();
   private recentToolFailureAlerts = new Map<string, number>();
-  /** Chat-command pairs that have emitted an uncleared BOT ERRORS incident. */
-  private readonly failedLocalCommands = new Set<string>();
   /**
    * Dedup for {@link emitNoFallbackReauthNotice} (QR-211), keyed `${chatJid}:auth-required`.
    * A dedicated map rather than folding into recentProviderFallbackNotices — that
@@ -3985,7 +3983,6 @@ export class AgentRuntime implements Runtime {
         }
         return;
       }
-      let localCommandCompleted = false;
       try {
         switch (classified.command) {
           case 'new':
@@ -4512,7 +4509,6 @@ export class AgentRuntime implements Runtime {
             break;
           }
         }
-        localCommandCompleted = true;
       } catch (err) {
         if (err instanceof AgentCommandRuntimeError && err.code === 'turn_in_progress') {
           log.info({ command: classified.command, chatJid }, 'local command deferred while turn is active');
@@ -4524,41 +4520,7 @@ export class AgentRuntime implements Runtime {
         // The R14 completion below still runs and finalizes the row truthfully
         // (the inbound WAS a locally-handled command).
           log.error({ err, command: classified.command, chatJid }, 'local command handler failed');
-          const command = String(classified.command);
-          this.failedLocalCommands.add(`${chatJid}\u0000${command}`);
-          emitAlertChecked(
-            this.instanceName,
-            'local_command_failed',
-            `Agent local command failed: /${command}`,
-            [
-              'runtime_source=src/runtimes/agent/runtime.ts:local_command',
-              `instance=${alertEvidenceValue(this.instanceName)}`,
-              `command=${alertEvidenceValue(command)}`,
-              `session_scope=${this.sessionScope}`,
-              `chat_jid=${alertEvidenceValue(chatJid)}`,
-              `message_id=${alertEvidenceValue(msg.messageId)}`,
-              `inbound_seq=${msg.inboundSeq ?? 'unavailable'}`,
-              `error_class=${alertEvidenceValue(err instanceof Error ? err.name : typeof err)}`,
-              `error=${alertEvidenceValue(alertExcerpt(errorMessage(err)) || 'unknown')}`,
-            ].join('\n'),
-            'warning',
-          );
           this.sendDirect(chatJid, 'Something went wrong processing that command. Try again?');
-        }
-      }
-      const localCommandFailureKey = `${chatJid}\u0000${String(classified.command)}`;
-      if (localCommandCompleted && this.failedLocalCommands.delete(localCommandFailureKey)) {
-        if (this.failedLocalCommands.size === 0) {
-          clearAlertSourceChecked(
-            this.instanceName,
-            'local_command_failed',
-            [
-              'runtime_source=src/runtimes/agent/runtime.ts:local_command',
-              `command=${alertEvidenceValue(String(classified.command))}`,
-              `session_scope=${this.sessionScope}`,
-              'recovery=successful_retry',
-            ].join('\n'),
-          );
         }
       }
       if (forwardAfterLocalCommand === null) {

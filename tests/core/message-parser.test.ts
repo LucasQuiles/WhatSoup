@@ -159,29 +159,6 @@ describe('parseIncomingMessage — positive cases', () => {
     expect(result!.contentType).toBe('poll');
   });
 
-  it.each(['pollCreationMessageV2', 'pollCreationMessageV3'])(
-    '%s → preserves the poll question and options instead of an unknown blank row',
-    (field) => {
-      const msg = msgWith({
-        [field]: {
-          name: 'Ship the repair?',
-          options: [{ optionName: 'Proceed' }, { optionName: 'Hold' }],
-          selectableOptionCount: 1,
-        },
-      });
-      const result = parseIncomingMessage(msg);
-      expect(result).not.toBeNull();
-      expect(result!.contentType).toBe('poll');
-      expect(result!.contentText).toBe('Poll: Ship the repair? — 2 options');
-      expect(JSON.parse(result!.content!)).toEqual({
-        type: 'poll',
-        name: 'Ship the repair?',
-        options: ['Proceed', 'Hold'],
-        selectableCount: 1,
-      });
-    },
-  );
-
   it('mentionedJid extracted from extendedTextMessage.contextInfo', () => {
     const msg = msgWith({
       extendedTextMessage: {

@@ -2951,8 +2951,6 @@ describe('AgentRuntime', () => {
     });
 
     it('a throwing local-command handler does not overwrite the local_command finalization', async () => {
-      mockEmitAlert.mockClear();
-      mockClearAlertSource.mockClear();
       const db = makeDb();
       const { messenger, sentMessages } = makeMessenger();
       const runtime = new AgentRuntime(db, messenger);
@@ -2967,18 +2965,11 @@ describe('AgentRuntime', () => {
       // escapes to the turnChain catch-all, its unguarded markInboundFailed
       // flips the finalized row to failed/'error' (a silent second terminal
       // write that would count a command-handler fault as an inbound failure).
-      mockSession.handleNew
-        .mockRejectedValueOnce(new Error('session reset failed'))
-        .mockRejectedValueOnce(new Error('other chat reset failed'));
+      mockSession.handleNew.mockRejectedValueOnce(new Error('session reset failed'));
 
       const seq = durability.journalInbound('m-new-throw', 'k-new-throw', 'test@s.whatsapp.net', 'agent');
       // single mode: /new requires admin (W1-T3 RULING — SHARED session state).
-      await sendAndDrain(runtime, makeMsg({
-        chatJid: 'chat-a@g.us',
-        content: '/new',
-        inboundSeq: seq,
-        senderJid: '15550100001@s.whatsapp.net',
-      }));
+      await sendAndDrain(runtime, makeMsg({ content: '/new', inboundSeq: seq, senderJid: '15550100001@s.whatsapp.net' }));
 
       expect(mockSession.handleNew).toHaveBeenCalled();
       const row = duraDb.raw.prepare(
@@ -2991,47 +2982,6 @@ describe('AgentRuntime', () => {
       const enqueuedTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
       expect(enqueuedTexts.some((t) => t.includes('Something went wrong processing that command'))).toBe(true);
       expect(sentMessages.length).toBe(0);
-      expect(mockEmitAlert).toHaveBeenCalledWith(
-        'personal',
-        'local_command_failed',
-        'Agent local command failed: /new',
-        expect.stringContaining('error=session reset failed'),
-        'warning',
-      );
-
-      // A successful retry of the same command in the same chat is the
-      // recovery proof. Neither unrelated commands nor recovery in one chat
-      // may clear the source while the same command remains failed elsewhere.
-      await sendAndDrain(runtime, makeMsg({
-        chatJid: 'chat-b@g.us',
-        content: '/new',
-        messageId: 'm-new-other-chat-failure',
-        senderJid: '15550100001@s.whatsapp.net',
-      }));
-      await sendAndDrain(runtime, makeMsg({
-        chatJid: 'chat-a@g.us',
-        content: '/status',
-        messageId: 'm-status-after-new-failure',
-      }));
-      expect(mockClearAlertSource).not.toHaveBeenCalled();
-      await sendAndDrain(runtime, makeMsg({
-        chatJid: 'chat-a@g.us',
-        content: '/new',
-        messageId: 'm-new-retry',
-        senderJid: '15550100001@s.whatsapp.net',
-      }));
-      expect(mockClearAlertSource).not.toHaveBeenCalled();
-      await sendAndDrain(runtime, makeMsg({
-        chatJid: 'chat-b@g.us',
-        content: '/new',
-        messageId: 'm-new-other-chat-retry',
-        senderJid: '15550100001@s.whatsapp.net',
-      }));
-      expect(mockClearAlertSource).toHaveBeenCalledWith(
-        'personal',
-        'local_command_failed',
-        expect.stringContaining('command=new'),
-      );
 
       duraDb.close();
     });

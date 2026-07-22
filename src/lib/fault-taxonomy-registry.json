@@ -156,11 +156,6 @@
       "owner": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
       "test": "deploy/scripts/tests/test_bot_errors_heartbeat_watchdog_local_health_retry.py"
     },
-    "local_command_failed": {
-      "disposition": "warning_agent_control_surface_failure",
-      "owner": "src/runtimes/agent/runtime.ts",
-      "test": "tests/runtimes/agent/runtime.test.ts"
-    },
     "outbound_quarantined": {
       "disposition": "auth_symptom_clear_gated",
       "owner": "src/lib/fleet-health-gate.ts",

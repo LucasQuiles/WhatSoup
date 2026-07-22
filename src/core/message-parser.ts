@@ -80,13 +80,6 @@ export function parseIncomingMessage(msg: WAMessage): IncomingMessage | null {
   let content: string | null = null;
   let contentText: string | null = null;
   let contentType: import('./types.ts').ContentType = 'unknown';
-  // Baileys may surface an outbound poll echo under any of the three protocol
-  // generations. Their readable fields share the same shape; treating only
-  // v1 as a poll stores v2/v3 questions as unknown rows with null bodies.
-  const pollCreation =
-    innerMessage.pollCreationMessage ??
-    innerMessage.pollCreationMessageV2 ??
-    innerMessage.pollCreationMessageV3;
 
   if (innerMessage.conversation) {
     content = innerMessage.conversation;
@@ -220,8 +213,8 @@ export function parseIncomingMessage(msg: WAMessage): IncomingMessage | null {
     });
     contentText = `Contacts: ${contacts.map((c: any) => c.displayName).join(', ')}`;
     contentType = 'contact';
-  } else if (pollCreation) {
-    const pm = pollCreation;
+  } else if (innerMessage.pollCreationMessage) {
+    const pm = innerMessage.pollCreationMessage;
     const options = (pm.options ?? []).map((o: any) => o.optionName);
     content = JSON.stringify({
       type: 'poll',
