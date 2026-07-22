@@ -121,9 +121,28 @@ function walkTsFiles(root: string, dir: string, acc: string[]): void {
 
 /** Scan every non-test `.ts` file under `src/` for ungated grant compositions. */
 export function scanRepoGrantResolvers(cwd: string): GrantResolverFinding[] {
+  return scanRepoGrantResolversDetailed(cwd).findings;
+}
+
+export interface GrantResolverScanResult {
+  findings: GrantResolverFinding[];
+  /** How many files were actually read. Zero means the verdict is meaningless. */
+  scannedFiles: number;
+}
+
+/**
+ * Same scan, but reports what it examined.
+ *
+ * `walkTsFiles` swallows a `readdirSync` failure and returns, which is right for a
+ * permission-denied subdirectory and wrong for a missing `src/`: both produce zero
+ * candidates, and zero candidates produced a confident "no ungated grant compositions".
+ * The caller cannot tell a clean tree from an unexamined one without this count.
+ */
+export function scanRepoGrantResolversDetailed(cwd: string): GrantResolverScanResult {
   const candidates: string[] = [];
   walkTsFiles(cwd, path.join(cwd, 'src'), candidates);
   const findings: GrantResolverFinding[] = [];
+  let scannedFiles = 0;
   for (const rel of candidates) {
     let content: string;
     try {
@@ -131,25 +150,66 @@ export function scanRepoGrantResolvers(cwd: string): GrantResolverFinding[] {
     } catch {
       continue;
     }
+    scannedFiles += 1;
     findings.push(...scanFileForGrantResolvers(rel, content));
   }
-  return findings;
+  return { findings, scannedFiles };
 }
 
-function main(): void {
+/**
+ * Exit 2 means INCONCLUSIVE — distinct from 1 (examined it, found a violation) and 0
+ * (examined it, it is clean). Collapsing "could not examine" into either one sends an
+ * operator hunting for a violation that does not exist, or ships a false green.
+ *
+ * This guard is a named step in quality.yml, so a "clean" verdict from a tree it never
+ * read is a false green in CI, not merely on a developer's laptop.
+ */
+function main(): number {
   const cwd = process.cwd();
-  const findings = scanRepoGrantResolvers(cwd);
-  if (findings.length === 0) {
-    console.log('grant-resolver-inventory-guard: no ungated isAdminPhone(resolvePhoneFromJid(...)) grant compositions (invariant.qr143-grant-primitive)');
-    return;
+  try {
+    statSync(path.join(cwd, 'src'));
+  } catch {
+    console.error(
+      // Deliberately does NOT quote the clean-verdict phrase. An earlier draft did, and the
+      // empty-scope suite's "must not print a clean verdict" assertion matched the REFUSAL
+      // itself — a text scanner cannot tell using a phrase from naming it.
+      `grant-resolver-inventory-guard: INCONCLUSIVE — no src/ under ${cwd}, so this is not a ` +
+        'repo checkout; refusing to report a clean verdict for a tree that was never examined',
+    );
+    return 2;
+  }
+
+  let result: GrantResolverScanResult;
+  try {
+    result = scanRepoGrantResolversDetailed(cwd);
+  } catch (err) {
+    console.error(`grant-resolver-inventory-guard: FATAL ${(err as Error).message}`); // fail-closed
+    return 2;
+  }
+
+  if (result.scannedFiles === 0) {
+    console.error(
+      `grant-resolver-inventory-guard: INCONCLUSIVE — examined 0 non-test .ts files under ` +
+        `${path.join(cwd, 'src')}; a wrong cwd, a stripped checkout, or an unreadable tree ` +
+        'looks exactly like a clean one, so no verdict is reported',
+    );
+    return 2;
+  }
+
+  if (result.findings.length === 0) {
+    console.log(
+      `grant-resolver-inventory-guard: no ungated isAdminPhone(resolvePhoneFromJid(...)) grant compositions ` +
+        `in ${result.scannedFiles} files (invariant.qr143-grant-primitive)`,
+    );
+    return 0;
   }
   console.error('grant-resolver-inventory-guard: ungated grant composition(s) detected — route through resolvePhoneFromJidForGrant or allowlist with justification (invariant.qr143-grant-primitive):');
-  for (const f of findings) {
+  for (const f of result.findings) {
     console.error(`  ${f.file}:${f.line} ${f.detail}`);
   }
-  process.exitCode = 1;
+  return 1;
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
-  main();
+  process.exitCode = main();
 }

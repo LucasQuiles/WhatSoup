@@ -36,6 +36,11 @@ const GUARDS = [
   { script: 'scripts/no-destructive-git-guard.ts', rule: 'process.no-destructive-git' },
   { script: 'scripts/check-insecure-tempfile.ts', rule: 'test.insecure-tempfile' },
   { script: 'scripts/fail-closed-gate-guard.ts', rule: 'invariant.fail-closed-gate' },
+  // Added 2026-07-22, the fifth instance. Left unchanged in the original sweep because it
+  // backs a non-block rule — but it is a named step in quality.yml, so its "no ungated
+  // grant compositions" verdict on an unexamined tree was a false green in CI, not merely
+  // on a laptop. Severity of the backed rule does not change whether the verdict is a lie.
+  { script: 'scripts/grant-resolver-inventory-guard.ts', rule: 'invariant.qr143-grant-primitive' },
 ] as const;
 
 let emptyTree: string;
@@ -66,7 +71,15 @@ describe('guards refuse to certify a tree they never examined', () => {
   it.each(GUARDS)('$script does NOT print a clean/passed verdict on an empty tree', ({ script }) => {
     const { output } = runGuardIn(emptyTree, script);
     // The exact strings that made this invisible before.
-    expect(output).not.toMatch(/clean \(0 findings\)|passed \(no violations\)|no .*shapes found/i);
+    //
+    // Each alternative matches a VERDICT, not a mention of one. The grant-resolver pattern
+    // is anchored on `in <N> files` for that reason: its first refusal message quoted the
+    // clean-verdict phrase to explain what it was declining to say, and a looser pattern
+    // flagged the refusal as though it were the false green — a scanner cannot distinguish
+    // using a phrase from naming it. The guard no longer quotes the phrase either.
+    expect(output).not.toMatch(
+      /clean \(0 findings\)|passed \(no violations\)|no .*shapes found|no ungated .*compositions in \d+ files/i,
+    );
   });
 
   it.each(GUARDS)('$script still succeeds against the real repo', ({ script }) => {
