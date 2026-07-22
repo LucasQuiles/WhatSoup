@@ -568,17 +568,24 @@ describe('ToolRegistry', () => {
     expect(schema.properties['selectableCount'].description).toBe('Maximum number of choices');
   });
 
-  it('converts ZodRecord to JSON Schema object', () => {
+  it('preserves ZodRecord value schemas as JSON Schema additionalProperties', () => {
     registry.register(
       makeTool({
-        schema: z.object({ metadata: z.record(z.unknown()) }),
+        schema: z.object({
+          metadata: z.record(z.unknown()),
+          labels: z.record(z.array(z.string())),
+        }),
       }),
     );
     const tools = registry.listTools(makeSession());
     const schema = tools[0].inputSchema as {
-      properties: Record<string, { type: string }>;
+      properties: Record<string, { type: string; additionalProperties?: unknown }>;
     };
-    expect(schema.properties['metadata']).toEqual({ type: 'object' });
+    expect(schema.properties['metadata']).toEqual({ type: 'object', additionalProperties: {} });
+    expect(schema.properties['labels']).toEqual({
+      type: 'object',
+      additionalProperties: { type: 'array', items: { type: 'string' } },
+    });
   });
 
   it('converts ZodBoolean to JSON Schema boolean', () => {

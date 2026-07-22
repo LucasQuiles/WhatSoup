@@ -82,6 +82,7 @@ async function driveProviderTurn(provider: OpenAIApiProvider | AnthropicApiProvi
 async function driveRestrictedProviderTurn(
   providerName: 'openai-api' | 'anthropic-api',
   provider: OpenAIApiProvider | AnthropicApiProvider,
+  mode: 'shadow' | 'enforce' = 'enforce',
 ): Promise<AgentEvent[]> {
   const events: AgentEvent[] = [];
   const model = providerName === 'openai-api' ? 'gpt-test' : 'claude-test';
@@ -100,7 +101,7 @@ async function driveRestrictedProviderTurn(
       policyVersion: PROVIDER_DATA_POLICY_VERSION,
       policyState: 'classified',
     }),
-    providerBoundaryMode: 'enforce',
+    providerBoundaryMode: mode,
     providerSessionId,
     providerDataBoundary: createProviderDataBoundary({
       binding: {
@@ -110,7 +111,7 @@ async function driveRestrictedProviderTurn(
         policyVersion: PROVIDER_DATA_POLICY_VERSION,
         providerSessionId,
       },
-      mode: 'enforce',
+      mode,
       routeSource: 'configured',
     }),
   });
@@ -269,6 +270,25 @@ describe('provider API preview redaction', () => {
     ]));
     await driveRestrictedProviderTurn(providerName, makeProvider());
     expect(JSON.stringify(warnMock.mock.calls)).not.toContain(hostileContext);
+  });
+
+  it.each([
+    ['openai-api', () => new OpenAIApiProvider()],
+    ['anthropic-api', () => new AnthropicApiProvider()],
+  ] as const)('uses static content-free logging for restricted shadow %s errors', async (
+    providerName,
+    makeProvider,
+  ) => {
+    const hostileContext = 'RAW_SHADOW_PROVIDER_CONTEXT_SENTINEL';
+    fetchMock.mockResolvedValueOnce(new Response(`upstream ${hostileContext}`, { status: 402 }));
+
+    const events = await driveRestrictedProviderTurn(providerName, makeProvider(), 'shadow');
+
+    expect(JSON.stringify([...errorMock.mock.calls, ...warnMock.mock.calls])).not.toContain(hostileContext);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'result',
+      text: '_Service error (402) - please try again._',
+    }));
   });
 
   it('redacts OpenAI-compatible malformed SSE data previews before logging', async () => {

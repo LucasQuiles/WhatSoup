@@ -379,3 +379,28 @@ export function createProviderDataBoundary(
     },
   });
 }
+
+/** Capture an immutable provider-local facade so caller mutation cannot swap boundary behavior. */
+export function snapshotProviderDataBoundary(boundary: ProviderDataBoundary): ProviderDataBoundary {
+  const binding = Object.freeze({ ...boundary.binding });
+  const assertModel = boundary.assertModel.bind(boundary);
+  const exposeText = boundary.exposeText.bind(boundary);
+  const exposeTexts = boundary.exposeTexts.bind(boundary);
+  const exposeToolResult = boundary.exposeToolResult.bind(boundary);
+  const inspectToolJson = boundary.inspectToolJson.bind(boundary);
+  const rehydrateProviderText = boundary.rehydrateProviderText.bind(boundary);
+  const rehydrateToolInput = boundary.rehydrateToolInput.bind(boundary);
+  const retire = boundary.retire.bind(boundary);
+  return Object.freeze({
+    binding,
+    mode: boundary.mode,
+    assertModel,
+    exposeText,
+    exposeTexts,
+    exposeToolResult,
+    inspectToolJson,
+    rehydrateProviderText,
+    rehydrateToolInput,
+    retire,
+  });
+}

@@ -350,7 +350,8 @@ export function rehydrateAuthorizedProviderToolInput(input: {
       }
       ancestors.add(value);
       const properties = schemaProperties(schema);
-      const isRecordSchema = !Object.hasOwn(schema, 'properties');
+      const hasDeclaredProperties = Object.hasOwn(schema, 'properties');
+      const additionalProperties = ownValue(schema, 'additionalProperties');
       const required = ownValue(schema, 'required');
       if (Array.isArray(required) && required.some((key) => (
         typeof key !== 'string' || !Object.hasOwn(value, key)
@@ -365,8 +366,22 @@ export function rehydrateAuthorizedProviderToolInput(input: {
         if (containsProviderAliasSyntax(key)) throw new ProviderDataBoundaryError('unauthorized_field');
         const childSchema = Object.hasOwn(properties, key) ? properties[key] : undefined;
         if (childSchema === undefined) {
-          if (!isRecordSchema) throw new ProviderDataBoundaryError('unauthorized_field');
-          output[key] = cloneUnclassified(child, depth + 1);
+          if (
+            typeof additionalProperties === 'object'
+            && additionalProperties !== null
+            && !Array.isArray(additionalProperties)
+          ) {
+            output[key] = walk(
+              child,
+              additionalProperties as Record<string, unknown>,
+              `${pointer}/${escapePointerSegment(key)}`,
+              depth + 1,
+            );
+          } else if (additionalProperties === true || (!hasDeclaredProperties && additionalProperties === undefined)) {
+            output[key] = cloneUnclassified(child, depth + 1);
+          } else {
+            throw new ProviderDataBoundaryError('unauthorized_field');
+          }
         } else {
           output[key] = walk(child, childSchema, `${pointer}/${escapePointerSegment(key)}`, depth + 1);
         }

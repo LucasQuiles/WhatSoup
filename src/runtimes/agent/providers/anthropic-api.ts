@@ -35,7 +35,10 @@ import {
   connectionErrorResult,
   type ParsedToolInput,
 } from './api-provider-shared.ts';
-import { ProviderDataBoundaryError } from '../../../core/provider-data-boundary.ts';
+import {
+  ProviderDataBoundaryError,
+  snapshotProviderDataBoundary,
+} from '../../../core/provider-data-boundary.ts';
 import { exposeProviderTurnParts } from '../../../core/provider-data-boundary-turn.ts';
 import { mapRestrictedProviderApiError } from '../../../core/provider-data-boundary-http.ts';
 
@@ -80,10 +83,19 @@ interface ToolUseAccum {
   parsed?: ParsedToolInput;
 }
 
+interface PreparedToolUse {
+  toolUse: ToolUseAccum;
+  parsed: ParsedToolInput;
+  toolInput: Record<string, unknown>;
+}
+
 
 interface CallApiResult {
   text: string;
   toolUses?: ToolUseAccum[];
+  preparedToolUses?: PreparedToolUse[];
+  stagedAssistantMessage?: AnthropicMessage;
+  localText?: string;
   inputTokens?: number;
   outputTokens?: number;
   /** See stream-parser.ts's 'result' event field of the same name (#1774). */
@@ -161,7 +173,11 @@ export class AnthropicApiProvider implements ProviderSession {
       throw new Error('Managed API provider data boundary binding mismatch');
     }
     try {
-      this.opts = opts;
+      const routePolicy = opts.routePolicy ? Object.freeze({ ...opts.routePolicy }) : undefined;
+      const providerDataBoundary = opts.providerDataBoundary
+        ? snapshotProviderDataBoundary(opts.providerDataBoundary)
+        : undefined;
+      this.opts = Object.freeze({ ...opts, routePolicy, providerDataBoundary });
       this.active = true;
       this.providerTools = snapshotProviderMcpTools(opts.mcpBridge?.listTools() ?? []);
 
@@ -176,7 +192,7 @@ export class AnthropicApiProvider implements ProviderSession {
       }
 
       // System prompt stored separately — Anthropic uses a top-level field
-      this.systemPrompt = opts.providerDataBoundary?.exposeText(opts.systemPrompt, { surface: 'prompt' })
+      this.systemPrompt = providerDataBoundary?.exposeText(opts.systemPrompt, { surface: 'prompt' })
         ?? opts.systemPrompt;
       this.messages = [];
 
@@ -237,6 +253,13 @@ export class AnthropicApiProvider implements ProviderSession {
         return;
       }
 
+      if (result.stagedAssistantMessage) {
+        this.messages.push(result.stagedAssistantMessage);
+        if (result.localText !== undefined) {
+          this.opts.onEvent({ type: 'assistant_text', text: result.localText });
+        }
+      }
+
       if (!result.toolUses || result.toolUses.length === 0) {
         // Final text response — loop complete
         break;
@@ -244,31 +267,26 @@ export class AnthropicApiProvider implements ProviderSession {
 
       // Emit tool_use events and feed executed tool results back into the loop.
       const toolResultBlocks: AnthropicContentBlock[] = [];
-      const advertisedTools = this.providerTools;
-      let preparedUses: Array<{
-        toolUse: ToolUseAccum;
-        parsed: ParsedToolInput;
-        toolInput: Record<string, unknown>;
-      }>;
-      try {
-        const parsedUses = result.toolUses.map((toolUse) => ({
-          toolUse,
-          parsed: toolUse.parsed ?? this.parseToolInput(toolUse, turnModel),
-        }));
-        if (this.boundaryEnforced && parsedUses.some(({ parsed }) => !parsed.ok)) {
-          throw new ProviderDataBoundaryError('invalid_tool_input');
+      let preparedUses = result.preparedToolUses;
+      if (!preparedUses) {
+        const advertisedTools = this.providerTools;
+        try {
+          const parsedUses = result.toolUses.map((toolUse) => ({
+            toolUse,
+            parsed: toolUse.parsed ?? this.parseToolInput(toolUse, turnModel),
+          }));
+          preparedUses = parsedUses.map(({ toolUse, parsed }) => ({
+            toolUse,
+            parsed,
+            toolInput: parsed.ok
+              ? this.dataBoundary?.rehydrateToolInput(toolUse.name, parsed.input, advertisedTools)
+                ?? parsed.input
+              : {},
+          }));
+        } catch (error) {
+          this.messages.length = historyLengthBeforeCall;
+          throw error;
         }
-        preparedUses = parsedUses.map(({ toolUse, parsed }) => ({
-          toolUse,
-          parsed,
-          toolInput: parsed.ok
-            ? this.dataBoundary?.rehydrateToolInput(toolUse.name, parsed.input, advertisedTools)
-              ?? parsed.input
-            : {},
-        }));
-      } catch (error) {
-        this.messages.length = historyLengthBeforeCall;
-        throw error;
       }
 
       for (const { toolUse: tu, parsed: parsedToolInput, toolInput } of preparedUses) {
@@ -315,7 +333,12 @@ export class AnthropicApiProvider implements ProviderSession {
       if (!this.active) break;
 
       if (i === MAX_TOOL_ITERATIONS - 1) {
-        log.warn({ model: turnModel, toolUseCount: result.toolUses.length }, 'managed tool loop exhausted');
+        log.warn(
+          this.boundaryRestricted
+            ? { code: 'provider_boundary_tool_loop_exhausted', toolUseCount: result.toolUses.length }
+            : { model: turnModel, toolUseCount: result.toolUses.length },
+          'managed tool loop exhausted',
+        );
         this.opts.onEvent({
           type: 'result',
           text: '_Tool loop limit reached - please try again or send /new._',
@@ -409,7 +432,7 @@ export class AnthropicApiProvider implements ProviderSession {
         signal: this.abortController.signal,
       });
     } catch (err: unknown) {
-      if (this.boundaryEnforced) {
+      if (this.boundaryRestricted) {
         log.error({ code: 'provider_boundary_connection_error' }, 'fetch error in restricted callApi');
         return { text: '', terminalResultText: '_Connection error - please try again._' };
       }
@@ -423,7 +446,7 @@ export class AnthropicApiProvider implements ProviderSession {
       // If the API rejects the payload due to lone surrogates and we haven't
       // tried recovery yet, sanitize the entire history and retry once.
       if (response.status === 400 && isSurrogateError(errText) && !selfHealAttempt) {
-        if (this.boundaryEnforced) {
+        if (this.boundaryRestricted) {
           log.warn({ code: 'provider_boundary_surrogate_retry', status: 400 }, 'restricted provider surrogate retry');
         } else {
           log.warn(
@@ -445,13 +468,13 @@ export class AnthropicApiProvider implements ProviderSession {
       // be handled before the shared ladder, which deliberately omits 401.
       if (response.status === 401) {
         log.error(
-          this.boundaryEnforced ? { code: 'provider_boundary_auth_error', status: 401 } : { status: 401, model },
+          this.boundaryRestricted ? { code: 'provider_boundary_auth_error', status: 401 } : { status: 401, model },
           'API auth error',
         );
         return { text: '', terminalResultText: '_Authentication error - please contact the administrator._' };
       }
 
-      const outcome = this.boundaryEnforced
+      const outcome = this.boundaryRestricted
         ? mapRestrictedProviderApiError({
             status: response.status,
             retryAfterMs: response.status === 429 ? boundedRetryAfterMs(response.headers) : null,
@@ -461,7 +484,7 @@ export class AnthropicApiProvider implements ProviderSession {
             { status: response.status, headers: response.headers, errText, model, selfHealAttempt, rateLimitRetryAttempt },
             log,
           );
-      if (this.boundaryEnforced) {
+      if (this.boundaryRestricted) {
         log.warn(
           { code: 'provider_boundary_http_error', status: response.status },
           'restricted provider HTTP error',
@@ -498,7 +521,7 @@ export class AnthropicApiProvider implements ProviderSession {
         event = JSON.parse(data) as Record<string, unknown>;
       } catch (err) {
         // Malformed SSE chunk - skip, but preserve observability.
-        if (this.boundaryEnforced) {
+        if (this.boundaryRestricted) {
           log.warn({ code: 'provider_boundary_malformed_sse' }, 'malformed SSE chunk from restricted Anthropic API');
         } else {
           log.warn({ err, dataPreview: providerPreview(data, 200), model }, 'malformed SSE chunk from Anthropic API');
@@ -539,7 +562,7 @@ export class AnthropicApiProvider implements ProviderSession {
               const existing = textBlockAccum.get(index) ?? '';
               textBlockAccum.set(index, existing + chunk);
               fullText += chunk;
-              if (!this.boundaryEnforced) {
+              if (!this.boundaryRestricted) {
                 this.opts.onEvent({ type: 'assistant_text', text: chunk });
               }
             }
@@ -612,25 +635,46 @@ export class AnthropicApiProvider implements ProviderSession {
       assistantContent.push({ type: 'tool_use', id: tu.id, name: tu.name, input });
     }
 
-    let localText: string | null = null;
-    if (this.boundaryRestricted && fullText.length > 0) {
-      const evaluatedText = this.dataBoundary!.rehydrateProviderText(fullText, { surface: 'provider_output' });
-      if (this.boundaryEnforced) localText = evaluatedText;
+    const assistantMessage = assistantContent.length > 0
+      ? { role: 'assistant' as const, content: assistantContent }
+      : fullText.length > 0
+        ? { role: 'assistant' as const, content: fullText }
+        : undefined;
+    if (!this.boundaryRestricted) {
+      if (assistantMessage) this.messages.push(assistantMessage);
+      return {
+        text: fullText,
+        toolUses: completedToolUses.length > 0 ? completedToolUses : undefined,
+        inputTokens,
+        outputTokens,
+        cacheReadTokens,
+      };
     }
 
-    // Record assistant turn in provider-facing conversation history only after
-    // the complete restricted output has passed validation.
-    if (assistantContent.length > 0) {
-      this.messages.push({ role: 'assistant', content: assistantContent });
-    } else if (fullText.length > 0) {
-      this.messages.push({ role: 'assistant', content: fullText });
+    const localText = fullText.length > 0
+      ? this.dataBoundary!.rehydrateProviderText(fullText, { surface: 'provider_output' })
+      : undefined;
+    const parsedUses = completedToolUses.map((toolUse) => ({
+      toolUse,
+      parsed: toolUse.parsed ?? this.parseToolInput(toolUse, model),
+    }));
+    if (this.boundaryEnforced && parsedUses.some(({ parsed }) => !parsed.ok)) {
+      throw new ProviderDataBoundaryError('invalid_tool_input');
     }
-
-    if (localText !== null) this.opts.onEvent({ type: 'assistant_text', text: localText });
+    const preparedToolUses = parsedUses.map(({ toolUse, parsed }) => ({
+      toolUse,
+      parsed,
+      toolInput: parsed.ok
+        ? this.dataBoundary!.rehydrateToolInput(toolUse.name, parsed.input, this.providerTools)
+        : {},
+    }));
 
     return {
       text: fullText,
       toolUses: completedToolUses.length > 0 ? completedToolUses : undefined,
+      preparedToolUses: preparedToolUses.length > 0 ? preparedToolUses : undefined,
+      ...(assistantMessage === undefined ? {} : { stagedAssistantMessage: assistantMessage }),
+      ...(localText === undefined ? {} : { localText }),
       inputTokens,
       outputTokens,
       cacheReadTokens,
@@ -639,17 +683,27 @@ export class AnthropicApiProvider implements ProviderSession {
 
   private parseToolInput(toolUse: ToolUseAccum, model: string): ParsedToolInput {
     if (this.boundaryRestricted) {
+      const rawJson = toolUse.inputJson || '{}';
+      let inspected = false;
       try {
-        const rawJson = toolUse.inputJson || '{}';
-        this.dataBoundary!.inspectToolJson(rawJson);
-        if (this.boundaryEnforced) {
-          const parsed = JSON.parse(rawJson) as unknown;
-          if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-            throw new ProviderDataBoundaryError('invalid_tool_input');
-          }
-          return { ok: true, input: parsed as Record<string, unknown> };
-        }
+        inspected = this.dataBoundary!.inspectToolJson(rawJson);
       } catch {
+        return {
+          ok: false,
+          content: 'Tool call failed: restricted provider tool arguments were rejected; the tool was not executed.',
+        };
+      }
+      try {
+        const parsed = JSON.parse(rawJson) as unknown;
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+          throw new Error('non-object');
+        }
+        if (this.boundaryEnforced && !inspected) {
+          throw new Error('restricted inspection rejected input');
+        }
+        return { ok: true, input: parsed as Record<string, unknown> };
+      } catch {
+        log.warn({ code: 'provider_boundary_tool_input_rejected' }, 'restricted provider tool input rejected');
         return {
           ok: false,
           content: 'Tool call failed: restricted provider tool arguments were rejected; the tool was not executed.',

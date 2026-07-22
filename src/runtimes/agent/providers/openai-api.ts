@@ -36,7 +36,10 @@ import {
   connectionErrorResult,
   type ParsedToolInput,
 } from './api-provider-shared.ts';
-import { ProviderDataBoundaryError } from '../../../core/provider-data-boundary.ts';
+import {
+  ProviderDataBoundaryError,
+  snapshotProviderDataBoundary,
+} from '../../../core/provider-data-boundary.ts';
 import { exposeProviderTurnParts } from '../../../core/provider-data-boundary-turn.ts';
 import { mapRestrictedProviderApiError } from '../../../core/provider-data-boundary-http.ts';
 
@@ -78,9 +81,18 @@ interface ToolCall {
   function: { name: string; arguments: string };
 }
 
+interface PreparedToolCall {
+  toolCall: ToolCall;
+  parsed: ParsedToolInput;
+  toolInput: Record<string, unknown>;
+}
+
 interface CallApiResult {
   text: string;
   toolCalls?: ToolCall[];
+  preparedToolCalls?: PreparedToolCall[];
+  stagedAssistantMessage?: ChatMessage;
+  localText?: string;
   inputTokens?: number;
   outputTokens?: number;
   terminalResultText?: string;
@@ -155,7 +167,11 @@ export class OpenAIApiProvider implements ProviderSession {
       throw new Error('Managed API provider data boundary binding mismatch');
     }
     try {
-      this.opts = opts;
+      const routePolicy = opts.routePolicy ? Object.freeze({ ...opts.routePolicy }) : undefined;
+      const providerDataBoundary = opts.providerDataBoundary
+        ? snapshotProviderDataBoundary(opts.providerDataBoundary)
+        : undefined;
+      this.opts = Object.freeze({ ...opts, routePolicy, providerDataBoundary });
       this.active = true;
       this.providerTools = snapshotProviderMcpTools(opts.mcpBridge?.listTools() ?? []);
 
@@ -170,7 +186,7 @@ export class OpenAIApiProvider implements ProviderSession {
       }
 
       // System prompt as the first conversation message
-      const systemPrompt = opts.providerDataBoundary?.exposeText(opts.systemPrompt, { surface: 'prompt' })
+      const systemPrompt = providerDataBoundary?.exposeText(opts.systemPrompt, { surface: 'prompt' })
         ?? opts.systemPrompt;
       this.messages = [{ role: 'system', content: systemPrompt }];
 
@@ -228,37 +244,39 @@ export class OpenAIApiProvider implements ProviderSession {
         return;
       }
 
+      if (result.stagedAssistantMessage) {
+        this.messages.push(result.stagedAssistantMessage);
+        if (result.localText !== undefined) {
+          this.opts.onEvent({ type: 'assistant_text', text: result.localText });
+        }
+      }
+
       if (!result.toolCalls || result.toolCalls.length === 0) {
         // Final text response — loop complete
         break;
       }
 
       // Emit tool_use events and feed executed tool results back into the loop.
-      const advertisedTools = this.providerTools;
-      let preparedCalls: Array<{
-        toolCall: ToolCall;
-        parsed: ParsedToolInput;
-        toolInput: Record<string, unknown>;
-      }>;
-      try {
-        const parsedCalls = result.toolCalls.map((toolCall) => ({
-          toolCall,
-          parsed: this.parseToolInput(toolCall, turnModel),
-        }));
-        if (this.boundaryEnforced && parsedCalls.some(({ parsed }) => !parsed.ok)) {
-          throw new ProviderDataBoundaryError('invalid_tool_input');
+      let preparedCalls = result.preparedToolCalls;
+      if (!preparedCalls) {
+        const advertisedTools = this.providerTools;
+        try {
+          const parsedCalls = result.toolCalls.map((toolCall) => ({
+            toolCall,
+            parsed: this.parseToolInput(toolCall, turnModel),
+          }));
+          preparedCalls = parsedCalls.map(({ toolCall, parsed }) => ({
+            toolCall,
+            parsed,
+            toolInput: parsed.ok
+              ? this.dataBoundary?.rehydrateToolInput(toolCall.function.name, parsed.input, advertisedTools)
+                ?? parsed.input
+              : {},
+          }));
+        } catch (error) {
+          this.messages.length = historyLengthBeforeCall;
+          throw error;
         }
-        preparedCalls = parsedCalls.map(({ toolCall, parsed }) => ({
-          toolCall,
-          parsed,
-          toolInput: parsed.ok
-            ? this.dataBoundary?.rehydrateToolInput(toolCall.function.name, parsed.input, advertisedTools)
-              ?? parsed.input
-            : {},
-        }));
-      } catch (error) {
-        this.messages.length = historyLengthBeforeCall;
-        throw error;
       }
       for (const { toolCall: tc, parsed: parsedToolInput, toolInput } of preparedCalls) {
         if (!this.active) break;
@@ -296,7 +314,12 @@ export class OpenAIApiProvider implements ProviderSession {
       if (!this.active) break;
 
       if (i === MAX_TOOL_ITERATIONS - 1) {
-        log.warn({ model: turnModel, toolCallCount: result.toolCalls.length }, 'managed tool loop exhausted');
+        log.warn(
+          this.boundaryRestricted
+            ? { code: 'provider_boundary_tool_loop_exhausted', toolCallCount: result.toolCalls.length }
+            : { model: turnModel, toolCallCount: result.toolCalls.length },
+          'managed tool loop exhausted',
+        );
         this.opts.onEvent({
           type: 'result',
           text: '_Tool loop limit reached - please try again or send /new._',
@@ -385,7 +408,7 @@ export class OpenAIApiProvider implements ProviderSession {
         signal: this.abortController.signal,
       });
     } catch (err: unknown) {
-      if (this.boundaryEnforced) {
+      if (this.boundaryRestricted) {
         log.error({ code: 'provider_boundary_connection_error' }, 'fetch error in restricted callApi');
         return { text: '', terminalResultText: '_Connection error - please try again._' };
       }
@@ -397,7 +420,7 @@ export class OpenAIApiProvider implements ProviderSession {
 
       // Self-heal: surrogate corruption
       if (response.status === 400 && isSurrogateError(errText) && !selfHealAttempt) {
-        if (this.boundaryEnforced) {
+        if (this.boundaryRestricted) {
           log.warn({ code: 'provider_boundary_surrogate_retry', status: 400 }, 'restricted provider surrogate retry');
         } else {
           log.warn({ model, errPreview: providerPreview(errText, 200) }, 'surrogate corruption detected — sanitizing and retrying');
@@ -409,7 +432,7 @@ export class OpenAIApiProvider implements ProviderSession {
       // User-friendly error — never show raw JSON error bodies.
       // OpenAI has NO dedicated 401 branch: a 401 falls through the shared
       // ladder to the generic `_Service error (401) ..._` message.
-      const outcome = this.boundaryEnforced
+      const outcome = this.boundaryRestricted
         ? mapRestrictedProviderApiError({
             status: response.status,
             retryAfterMs: response.status === 429 ? boundedRetryAfterMs(response.headers) : null,
@@ -419,7 +442,7 @@ export class OpenAIApiProvider implements ProviderSession {
             { status: response.status, headers: response.headers, errText, model, selfHealAttempt, rateLimitRetryAttempt },
             log,
           );
-      if (this.boundaryEnforced) {
+      if (this.boundaryRestricted) {
         log.warn(
           { code: 'provider_boundary_http_error', status: response.status },
           'restricted provider HTTP error',
@@ -454,7 +477,7 @@ export class OpenAIApiProvider implements ProviderSession {
         chunk = JSON.parse(data) as Record<string, unknown>;
       } catch (err) {
         // Malformed SSE chunk - skip, but preserve observability.
-        if (this.boundaryEnforced) {
+        if (this.boundaryRestricted) {
           log.warn({ code: 'provider_boundary_malformed_sse' }, 'malformed SSE chunk from restricted OpenAI-compatible API');
         } else {
           log.warn({ err, dataPreview: providerPreview(data, 200), model }, 'malformed SSE chunk from OpenAI-compatible API');
@@ -469,7 +492,7 @@ export class OpenAIApiProvider implements ProviderSession {
         // ── Text content ─────────────────────────────────────────────
         if (typeof delta['content'] === 'string' && delta['content'].length > 0) {
           fullText += delta['content'];
-          if (!this.boundaryEnforced) {
+          if (!this.boundaryRestricted) {
             this.opts.onEvent({ type: 'assistant_text', text: delta['content'] });
           }
         }
@@ -515,17 +538,40 @@ export class OpenAIApiProvider implements ProviderSession {
     if (completedToolCalls.length > 0) {
       assistantMsg.tool_calls = completedToolCalls;
     }
-    let localText: string | null = null;
-    if (this.boundaryRestricted && fullText.length > 0) {
-      const evaluatedText = this.dataBoundary!.rehydrateProviderText(fullText, { surface: 'provider_output' });
-      if (this.boundaryEnforced) localText = evaluatedText;
+    if (!this.boundaryRestricted) {
+      this.messages.push(assistantMsg);
+      return {
+        text: fullText,
+        toolCalls: completedToolCalls.length > 0 ? completedToolCalls : undefined,
+        inputTokens,
+        outputTokens,
+      };
     }
-    this.messages.push(assistantMsg);
-    if (localText !== null) this.opts.onEvent({ type: 'assistant_text', text: localText });
+
+    const localText = fullText.length > 0
+      ? this.dataBoundary!.rehydrateProviderText(fullText, { surface: 'provider_output' })
+      : undefined;
+    const parsedCalls = completedToolCalls.map((toolCall) => ({
+      toolCall,
+      parsed: this.parseToolInput(toolCall, model),
+    }));
+    if (this.boundaryEnforced && parsedCalls.some(({ parsed }) => !parsed.ok)) {
+      throw new ProviderDataBoundaryError('invalid_tool_input');
+    }
+    const preparedToolCalls = parsedCalls.map(({ toolCall, parsed }) => ({
+      toolCall,
+      parsed,
+      toolInput: parsed.ok
+        ? this.dataBoundary!.rehydrateToolInput(toolCall.function.name, parsed.input, this.providerTools)
+        : {},
+    }));
 
     return {
       text: fullText,
       toolCalls: completedToolCalls.length > 0 ? completedToolCalls : undefined,
+      preparedToolCalls: preparedToolCalls.length > 0 ? preparedToolCalls : undefined,
+      stagedAssistantMessage: assistantMsg,
+      ...(localText === undefined ? {} : { localText }),
       inputTokens,
       outputTokens,
     };
@@ -533,17 +579,27 @@ export class OpenAIApiProvider implements ProviderSession {
 
   private parseToolInput(toolCall: ToolCall, model: string): ParsedToolInput {
     if (this.boundaryRestricted) {
+      const rawJson = toolCall.function.arguments || '{}';
+      let inspected = false;
       try {
-        const rawJson = toolCall.function.arguments || '{}';
-        this.dataBoundary!.inspectToolJson(rawJson);
-        if (this.boundaryEnforced) {
-          const parsed = JSON.parse(rawJson) as unknown;
-          if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-            throw new ProviderDataBoundaryError('invalid_tool_input');
-          }
-          return { ok: true, input: parsed as Record<string, unknown> };
-        }
+        inspected = this.dataBoundary!.inspectToolJson(rawJson);
       } catch {
+        return {
+          ok: false,
+          content: 'Tool call failed: restricted provider tool arguments were rejected; the tool was not executed.',
+        };
+      }
+      try {
+        const parsed = JSON.parse(rawJson) as unknown;
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+          throw new Error('non-object');
+        }
+        if (this.boundaryEnforced && !inspected) {
+          throw new Error('restricted inspection rejected input');
+        }
+        return { ok: true, input: parsed as Record<string, unknown> };
+      } catch {
+        log.warn({ code: 'provider_boundary_tool_input_rejected' }, 'restricted provider tool input rejected');
         return {
           ok: false,
           content: 'Tool call failed: restricted provider tool arguments were rejected; the tool was not executed.',

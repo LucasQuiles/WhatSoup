@@ -423,7 +423,7 @@ describe('managed provider data boundary integration', () => {
     providerName,
     makeProvider,
   ) => {
-    const cases = ['late_secret', 'late_forgery', 'late_invalid'] as const;
+    const cases = ['late_secret', 'late_forgery', 'late_invalid', 'late_record_schema'] as const;
     for (const hostileCase of cases) {
       fetchMock.mockReset();
       const events: AgentEvent[] = [];
@@ -436,8 +436,11 @@ describe('managed provider data boundary integration', () => {
             type: 'object',
             properties: {
               path: { type: 'string', 'x-whatsoup-alias-type': 'path' },
+              metadata: {
+                type: 'object',
+                additionalProperties: { type: 'array', items: { type: 'string' } },
+              },
             },
-            required: ['path'],
           },
         }],
         executeTool,
@@ -449,9 +452,13 @@ describe('managed provider data boundary integration', () => {
           ? JSON.stringify({ path: 'credential="quoted multiword value"' })
           : hostileCase === 'late_forgery'
             ? JSON.stringify({ path: alias.replace(/:[0-9a-f]{32}⟧$/u, `:${'0'.repeat(32)}⟧`) })
-            : '{"path":';
+            : hostileCase === 'late_record_schema'
+              ? JSON.stringify({ metadata: { nested: ['valid', 42] } })
+              : '{"path":';
         if (providerName === 'openai-api') {
-          return openAiSse([{ choices: [{ delta: { tool_calls: [
+          return openAiSse([{ choices: [{ delta: {
+            content: 'safe text that must remain provisional',
+            tool_calls: [
             {
               index: 0,
               id: 'valid-first',
@@ -462,9 +469,13 @@ describe('managed provider data boundary integration', () => {
               id: 'hostile-late',
               function: { name: 'boundary_read_file', arguments: lateArguments },
             },
-          ] } }] }]);
+            ],
+          } }] }]);
         }
         return anthropicSse([
+          { type: 'content_block_start', index: 2, content_block: { type: 'text', text: '' } },
+          { type: 'content_block_delta', index: 2, delta: { type: 'text_delta', text: 'safe text that must remain provisional' } },
+          { type: 'content_block_stop', index: 2 },
           { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'valid-first', name: 'boundary_read_file' } },
           { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify({ path: alias }) } },
           { type: 'content_block_stop', index: 0 },
@@ -486,9 +497,50 @@ describe('managed provider data boundary integration', () => {
       expect(executeTool, hostileCase).not.toHaveBeenCalled();
       expect(events.filter((event) => event.type === 'tool_use' || event.type === 'tool_result'), hostileCase)
         .toEqual([]);
+      expect(events.filter((event) => event.type === 'assistant_text'), hostileCase).toEqual([]);
+      expect(events.filter((event) => event.type !== 'init'), hostileCase).toEqual([]);
       expect(provider.getCheckpoint().providerState?.['messageCount'], hostileCase)
         .toBe(providerName === 'openai-api' ? 2 : 1);
     }
+  });
+
+  it.each([
+    ['openai-api', () => new OpenAIApiProvider()],
+    ['anthropic-api', () => new AnthropicApiProvider()],
+  ] as const)('snapshots the restricted %s boundary admission against caller mutation', async (
+    providerName,
+    makeProvider,
+  ) => {
+    const events: AgentEvent[] = [];
+    const options = initOptions(providerName, events);
+    const provider = makeProvider();
+    await provider.initialize(options);
+
+    options.routePolicy = {
+      ...options.routePolicy!,
+      dataPolicy: 'trusted',
+    };
+    options.providerBoundaryMode = 'shadow';
+    options.providerDataBoundary = undefined;
+    options.model = 'caller-mutated-model';
+    options.providerSessionId = 'caller-mutated-session';
+    const secret = `sk-${'q'.repeat(30)}`;
+    fetchMock.mockResolvedValue(providerName === 'openai-api'
+      ? openAiSse([{ choices: [{ delta: { content: secret } }] }])
+      : anthropicSse([
+          { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+          { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: secret } },
+          { type: 'message_stop' },
+        ]));
+
+    await expect(provider.sendTurn({
+      role: 'user',
+      conversationKey: 'chat-key',
+      parts: [{ kind: 'text', text: 'hello' }],
+    })).rejects.toMatchObject({ code: 'secret_detected' });
+    expect(events.filter((event) => event.type !== 'init')).toEqual([]);
+    expect(provider.getCheckpoint().providerState?.['messageCount'])
+      .toBe(providerName === 'openai-api' ? 2 : 1);
   });
 
   it.each([

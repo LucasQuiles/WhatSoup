@@ -510,6 +510,29 @@ describe('ProviderDataBoundary', () => {
     }, tools)).toThrowError(expect.objectContaining({ code: 'unauthorized_field' }));
   });
 
+  it('enforces additionalProperties value schemas recursively for advertised records', () => {
+    const broker = boundary();
+    const tools = [tool('configure', {
+      metadata: {
+        type: 'object',
+        additionalProperties: {
+          type: 'array',
+          items: { type: 'object', properties: { label: { type: 'string' } }, required: ['label'] },
+        },
+      },
+    })];
+
+    expect(broker.rehydrateToolInput('configure', {
+      metadata: { first: [{ label: 'ordinary' }] },
+    }, tools)).toEqual({ metadata: { first: [{ label: 'ordinary' }] } });
+    expect(() => broker.rehydrateToolInput('configure', {
+      metadata: { first: [{ label: 42 }] },
+    }, tools)).toThrowError(expect.objectContaining({ code: 'invalid_tool_input' }));
+    expect(() => broker.rehydrateToolInput('configure', {
+      metadata: { first: 'not-an-array' },
+    }, tools)).toThrowError(expect.objectContaining({ code: 'invalid_tool_input' }));
+  });
+
   it('atomically detects secrets and reserved aliases split across adjacent turn fields', () => {
     const broker = boundary();
 

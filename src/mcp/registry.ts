@@ -114,7 +114,10 @@ function zodToJsonSchema(schema: ZodType): JsonSchema {
   }
 
   if (schema instanceof ZodRecord) {
-    return withZodDescription(schema, { type: 'object' });
+    return withZodDescription(schema, {
+      type: 'object',
+      additionalProperties: zodToJsonSchema(schema.valueSchema),
+    });
   }
 
   if (schema instanceof ZodObject) {
