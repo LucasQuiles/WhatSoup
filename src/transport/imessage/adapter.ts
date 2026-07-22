@@ -261,6 +261,9 @@ export class ImessageAdapter
       this.transitionTo({ state: 'disconnected', since: new Date() });
       throw mapPortError(err, this.channelId, 'connect', this.nextCorrelationId(), 'channel');
     }
+    this.inboundOffset = 0;
+    this.inboundMaxTimestamp = null;
+    this.inboundMaxTimestampCount = 0;
     this.transitionTo({ state: 'connected', since: new Date() });
 
     if (this.inboundMode === 'poll' && this.pollIntervalMs > 0) {
