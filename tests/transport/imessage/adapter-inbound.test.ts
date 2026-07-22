@@ -79,6 +79,28 @@ describe('ImessageAdapter — handleInboundRecord', () => {
     await adapter.disconnect();
   });
 
+  it('bounds dedupe state when malformed direct identities are rejected', async () => {
+    const { adapter } = makeAdapter();
+    await adapter.connect();
+    const received: InboundMessage[] = [];
+    adapter.on('message', (message) => received.push(message));
+
+    for (let index = 0; index <= 1000; index += 1) {
+      expect(adapter.handleInboundRecord(envelope({
+        guid: `malformed-${index}`,
+        from: 'malformed@example',
+      }))).toBe(false);
+    }
+
+    expect(received).toHaveLength(0);
+    expect(adapter.handleInboundRecord(envelope({
+      guid: 'malformed-0',
+      from: 'user@users.noreply.github.com',
+    }))).toBe(true);
+    expect(received).toHaveLength(1);
+    await adapter.disconnect();
+  });
+
   it('does not emit when disconnected', async () => {
     const { adapter } = makeAdapter();
     const received: InboundMessage[] = [];

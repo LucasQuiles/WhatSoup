@@ -500,6 +500,7 @@ export class ImessageAdapter
     if (this.disposed || this.health.state !== 'connected') return false;
     if (this.seen.has(record.guid)) return false;
     this.seen.add(record.guid);
+    trimSeenSet(this.seen);
 
     if (record.kind === 'text' && record.body !== null) {
       const msg = this.buildInboundMessage(record);
@@ -508,7 +509,6 @@ export class ImessageAdapter
     }
     // TODO(future): route reaction/read/typing envelopes to extension events.
 
-    trimSeenSet(this.seen);
     return true;
   }
 
