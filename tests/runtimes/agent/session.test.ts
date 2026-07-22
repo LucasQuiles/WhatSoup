@@ -6,6 +6,7 @@ import type { Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { ProviderMcpBridge } from '../../../src/runtimes/agent/providers/types.ts';
 import { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
+import { shortHash } from '../../../src/lib/short-hash.ts';
 import {
   CONFIG_ROOT_ISOLATION_FLAG,
   FAILCLOSED_FLAG,
@@ -5226,7 +5227,14 @@ describe('session.ts uncovered-branch coverage', () => {
     expect(secondStarted).toBe(false);
     expect(firstBoundary).toHaveBeenCalledTimes(1);
     expect(secondBoundary).not.toHaveBeenCalled();
-    expect(gate.snapshot()).toMatchObject({ active: true, pending: 1 });
+    expect(gate.snapshot()).toMatchObject({
+      active: true,
+      activeWorkKind: 'turn',
+      activeScopeHash: shortHash('first@s.whatsapp.net'),
+      pending: 1,
+      oldestPendingWorkKind: 'turn',
+      oldestPendingScopeHash: shortHash('second@s.whatsapp.net'),
+    });
 
     firstChild._closeCb?.(0, null);
     await secondTurn;

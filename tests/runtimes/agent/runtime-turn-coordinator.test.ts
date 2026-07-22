@@ -114,17 +114,41 @@ describe('turnFinalizationBookkeeping — token-loss visibility (#1775)', () => 
     expect(emitAlertChecked).toHaveBeenCalledTimes(1);
   });
 
-  it('does NOT alert when the turn was never dispatched (admission_rejected)', () => {
+  it('alerts when a journaled turn is rejected before dispatch and has no automatic replay owner', () => {
     const coordinator = makeCoordinator();
 
     const params = coordinator.turnFinalizationBookkeeping(
       context(),
       sessionWithRowId(13),
       undefined,
-      { kind: 'admission_rejected' },
+      { kind: 'admission_rejected', class: 'queue_closed' },
     );
 
     expect(params.sessionTokens).toBeUndefined();
+    expect(emitAlertChecked).toHaveBeenCalledOnce();
+    expect(emitAlertChecked).toHaveBeenCalledWith(
+      'bookkeeping-test',
+      'agent_turn_admission_rejected',
+      'Journaled agent turn rejected before dispatch',
+      expect.stringContaining('inbound_seq=41 reason=queue_closed automatic_replay=false'),
+      'warning',
+    );
+  });
+
+  it('keeps unjournaled system-turn admission rejection out of BOT ERRORS', () => {
+    const coordinator = makeCoordinator();
+    const unjournaled = createRuntimeTurnContext({
+      ...context(),
+      identity: { ...context().identity, inboundSeq: null },
+    });
+
+    coordinator.turnFinalizationBookkeeping(
+      unjournaled,
+      null,
+      undefined,
+      { kind: 'admission_rejected', class: 'queue_closed' },
+    );
+
     expect(emitAlertChecked).not.toHaveBeenCalled();
   });
 

@@ -402,6 +402,20 @@ turnFinalizationBookkeeping(
   const status = session?.getStatus();
   const hasUsage = event !== undefined
     && (event.inputTokens !== undefined || event.outputTokens !== undefined);
+  if (attemptOutcome?.kind === 'admission_rejected' && context.identity.inboundSeq !== null) {
+    const reason = attemptOutcome.class ?? 'unknown';
+    log.warn(
+      { inboundSeq: context.identity.inboundSeq, scope: context.identity.scope, reason },
+      'journaled agent turn rejected before dispatch — automatic replay unavailable',
+    );
+    emitAlertChecked(
+      this.host.instanceName,
+      'agent_turn_admission_rejected',
+      'Journaled agent turn rejected before dispatch',
+      `inbound_seq=${context.identity.inboundSeq} reason=${reason} automatic_replay=false scope=${context.identity.scope}`,
+      'warning',
+    );
+  }
   // #1775: a turn only reaches here without recorded usage in two cases —
   // it was never dispatched (admission_rejected: message_count never
   // incremented, zero really means zero, stay silent) or it WAS dispatched

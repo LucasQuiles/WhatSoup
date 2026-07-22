@@ -116,6 +116,11 @@
     }
   },
   "sourceDispositions": {
+    "agent_turn_admission_rejected": {
+      "disposition": "undispatched_journaled_turn_requires_owner_resend_no_automatic_replay",
+      "owner": "src/runtimes/agent/runtime-turn-coordinator.ts",
+      "test": "tests/runtimes/agent/runtime-turn-coordinator.test.ts"
+    },
     "agent_reply_guarantee_breach": {
       "disposition": "admitted_turn_failed_without_delivery_requires_operator_catchup",
       "owner": "src/runtimes/agent/turn-finalizer.ts",

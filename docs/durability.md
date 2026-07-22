@@ -416,6 +416,29 @@ chance to land and re-settle the turn before the reclaim would otherwise record 
 a reclaim-failure. `unfinalized_retry_owned` incidents are owned by the finalization
 supervisor's own exhaustion (§4.6), not by this recovery-owner reclaim.
 
+### 4.8 Undispatched Admission Rejection
+
+A journaled user turn can be rejected before provider dispatch when its runtime queue is closed,
+halted, or full. The immutable replay envelope proves what was admitted, and the absence of an
+answer operation proves that no provider response was sent. The current terminal contract still
+records this as `attempt_kind='admission_rejected'`, `inbound_disposition='failed_terminal'`, and
+`delivery_kind='none'`. It does **not** create a `turn_recovery_jobs` row and no runtime worker
+automatically replays it after restart.
+
+This boundary must stay visible. `turn_recovery_jobs` currently owns ambiguous answer-delivery
+reconciliation and late-echo proof; its claim/reassignment APIs are not an active self-replay
+worker. Treating those rows as proof that Q will retry its own prompt is incorrect.
+
+Every journaled admission rejection emits `agent_turn_admission_rejected` with the inbound
+sequence, scope, exact queue reason, and `automatic_replay=false`. Unjournaled system turns stay
+silent. The safe current remediation is an owner-authorized new inbound that restates or continues
+the lost intent after checking the target worktree and external state for already-applied effects.
+The old inbound remains failed as an immutable audit record; do not relabel it delivered merely
+because a later turn succeeds. A future automatic replay worker requires a separate proof contract
+for undispatched input, restart-time owner reassignment, bounded claims/backoff, per-chat ordering,
+and completion tied to the replay turn's echoed terminal output—not the selected-delivery
+assumptions of the current recovery-job schema.
+
 ---
 
 ## 5. Operational Notes

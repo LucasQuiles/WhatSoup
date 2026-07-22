@@ -60,6 +60,7 @@ import type {
   ProviderExecutionGate,
   ProviderExecutionLease,
 } from './provider-execution-gate.ts';
+import { shortHash } from '../../lib/short-hash.ts';
 
 const log = createChildLogger('session-manager');
 
@@ -2235,7 +2236,10 @@ export class SessionManager {
         const waitAbort = new AbortController();
         this.providerExecutionWaitAbort = waitAbort;
         try {
-          executionLease = await this.providerExecutionGate.acquire({ signal: waitAbort.signal });
+          executionLease = await this.providerExecutionGate.acquire({
+            signal: waitAbort.signal,
+            work: { kind: 'turn', scopeHash: shortHash(this.chatJid) },
+          });
         } catch (err) {
           this.completeProviderTurn(providerTurnToken);
           throw err;
