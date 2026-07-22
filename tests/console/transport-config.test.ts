@@ -153,6 +153,24 @@ describe('console transport config', () => {
     expect(errors['signalConfig.tcpHost']).toMatch(/loopback/i)
   })
 
+  it.each(['127.0.0.2', '127.255.255.255', '[::1]', 'LOCALHOST'])(
+    'matches the server allowlist by rejecting unsupported Signal TCP host %s',
+    (tcpHost) => {
+      const errors = validateTransportFormData({
+        name: 'signal-line',
+        transport: 'signal',
+        adminPhones: ['+15551234567'],
+        signalConfig: {
+          phoneNumber: '+15551234567',
+          tcpHost,
+          tcpPort: 7583,
+        },
+      })
+
+      expect(errors['signalConfig.tcpHost']).toMatch(/127\.0\.0\.1.*::1.*localhost/i)
+    },
+  )
+
   it('rejects conflicting Signal UNIX and TCP endpoints before Review submits them', () => {
     const errors = validateTransportFormData({
       name: 'signal-line',

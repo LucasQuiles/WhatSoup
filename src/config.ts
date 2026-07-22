@@ -14,6 +14,7 @@ import { APPLEID_EMAIL_RE } from './core/transport-refs.ts';
 import { DEFAULT_SIGNAL, SIGNAL_UUID_RE, type SignalConfig, type SignalInboundMode } from './transport/signal/types.ts';
 import { normalizeFallbackEntriesFromAgentOptions } from './core/fallback-chain.ts';
 import { errorMessage } from './lib/error-message.ts';
+import { isSignalTcpHost, SIGNAL_TCP_HOST_LABEL } from './lib/signal-endpoint.ts';
 import { validateModelRoleValue } from './lib/model-resolver.ts';
 
 const APP_NAME = 'whatsoup';
@@ -835,11 +836,9 @@ export function resolveSignalConfig(
   }
   if (
     tcpHost !== undefined &&
-    tcpHost !== '127.0.0.1' &&
-    tcpHost !== '::1' &&
-    tcpHost !== 'localhost'
+    !isSignalTcpHost(tcpHost)
   ) {
-    throw new Error('Invalid signalConfig endpoint — plaintext TCP must use a loopback host');
+    throw new Error(`Invalid signalConfig endpoint — plaintext TCP host must be ${SIGNAL_TCP_HOST_LABEL} (the supported loopback hosts)`);
   }
 
   return {

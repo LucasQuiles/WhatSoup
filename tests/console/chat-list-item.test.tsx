@@ -51,6 +51,17 @@ describe('ChatListItem', () => {
     )
   })
 
+  it.each([
+    ['safe\\u202Eevil@signal', 'safe\\\\u202Eevil@signal'],
+    ['\nevil@signal', '\\u000Aevil@signal'],
+    ['safe\u200Bevil@signal', 'safe\\u200Bevil@signal'],
+  ])('keeps literal and boundary control text unambiguous in rendered labels', (name, expected) => {
+    render(<ChatListItem chat={chat({ name })} isSelected={false} onClick={() => {}} />)
+
+    expect(screen.getByText(expected)).toBeDefined()
+    expect(screen.getByRole('option').getAttribute('aria-label')).toBe(`Open conversation with ${expected}`)
+  })
+
   it('strips markdown from the preview line', () => {
     render(
       <ChatListItem

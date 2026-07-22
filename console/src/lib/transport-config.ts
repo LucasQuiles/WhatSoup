@@ -2,6 +2,7 @@ import { slugAgentWorkspaceName } from './agent-cwd'
 import { isTransportKind, TRANSPORT_MAP, type TransportKind } from './transport-meta'
 import { asRecordOrEmpty } from './type-guards'
 import { isE164WireInput, normalizePhoneIdentityInput } from './validation'
+import { isSignalTcpHost, SIGNAL_TCP_HOST_LABEL } from '../../../src/lib/signal-endpoint.ts'
 
 const TWILIO_ACCOUNT_SID_RE = /^AC[0-9a-f]{32}$/
 const TWILIO_MESSAGING_SERVICE_SID_RE = /^MG[0-9a-f]{32}$/
@@ -190,8 +191,8 @@ export function validateTransportFormData(data: Record<string, unknown>): Record
     } else if ((!hasSocketEndpoint || !socketPath.startsWith('/')) && !validTcpPort) {
       errors['signalConfig.endpoint'] = 'Set an absolute UNIX socket path or a loopback TCP port'
     }
-    if (hasTcpEndpoint && !isLoopbackHostname(tcpHost || '127.0.0.1')) {
-      errors['signalConfig.tcpHost'] = 'Signal TCP host must be loopback because signal-cli TCP is plaintext'
+    if (hasTcpEndpoint && !isSignalTcpHost(tcpHost || '127.0.0.1')) {
+      errors['signalConfig.tcpHost'] = `Signal TCP host must be ${SIGNAL_TCP_HOST_LABEL} (the supported loopback hosts) because signal-cli TCP is plaintext`
     }
   } else if (canonical.transport === 'imessage') {
     const config = canonical.imessageConfig ?? {}

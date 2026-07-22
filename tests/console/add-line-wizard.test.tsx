@@ -777,6 +777,36 @@ describe('AddLineWizard — config and review workflow', () => {
     await waitFor(() => expect(screen.getByRole('tab', { name: /behavior/i })).toBeDefined())
     expect(screen.queryByRole('button', { name: /create line/i })).toBeNull()
   })
+
+  it('keeps the Baileys type immutable after early creation and sends the original type in the final PATCH', async () => {
+    render(<WizardWrapper />)
+    await advanceToReviewStep(/passive/i)
+
+    const identityHeading = screen.getAllByText('Identity').find((element) => element.classList.contains('font-medium'))
+    expect(identityHeading).toBeDefined()
+    await act(async () => {
+      fireEvent.click(within(identityHeading!.parentElement as HTMLElement).getByRole('button', { name: /edit/i }))
+    })
+
+    const typeGroup = screen.getByRole('radiogroup', { name: 'Line Type' })
+    const passive = within(typeGroup).getByRole('radio', { name: /passive/i })
+    const chat = within(typeGroup).getByRole('radio', { name: /chat/i })
+    expect(typeGroup.getAttribute('aria-disabled')).toBe('true')
+    expect(passive.getAttribute('aria-checked')).toBe('true')
+    await act(async () => { fireEvent.click(chat) })
+    expect(passive.getAttribute('aria-checked')).toBe('true')
+
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^next$/i })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'View Line' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^next$/i })) })
+    await waitFor(() => expect(screen.getByRole('tab', { name: /behavior/i })).toBeDefined())
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^next$/i })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /create line/i })) })
+
+    await waitFor(() => expect(mockUpdateConfig).toHaveBeenCalledTimes(1))
+    expect(mockCreateLine).toHaveBeenCalledTimes(1)
+    expect((mockUpdateConfig.mock.calls[0][1] as Record<string, unknown>).type).toBe('passive')
+  })
 })
 
 describe('AddLineWizard — credential wiring (finish step)', () => {

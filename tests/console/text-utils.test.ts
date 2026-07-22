@@ -73,6 +73,34 @@ describe('console text utilities', () => {
     expect(resolveDisplayName(identity)).toBe(expected)
   })
 
+  it('keeps escaped controls distinct from literal escape text', () => {
+    const controlled = resolveDisplayName('safe\u202Eevil@signal')
+    const literal = resolveDisplayName('safe\\u202Eevil@signal')
+
+    expect(controlled).toBe('safe\\u202Eevil@signal')
+    expect(literal).toBe('safe\\\\u202Eevil@signal')
+    expect(controlled).not.toBe(literal)
+  })
+
+  it('does not trim boundary controls before making them visible', () => {
+    expect(resolveDisplayName('\nevil@signal')).toBe('\\u000Aevil@signal')
+    expect(lineIdentity({
+      transport: 'signal',
+      selfId: '\nevil@signal',
+      phone: '+15550009999',
+    })).toBe('\\u000Aevil@signal')
+  })
+
+  it.each([
+    ['safe\u200Bevil@signal', 'safe\\u200Bevil@signal'],
+    ['safe\u2060evil@signal', 'safe\\u2060evil@signal'],
+    ['safe\uFEFFevil@signal', 'safe\\uFEFFevil@signal'],
+    ['safe\u070Fevil@signal', 'safe\\u070Fevil@signal'],
+    ['safe\u{E0001}evil@signal', 'safe\\u{E0001}evil@signal'],
+  ])('makes default-ignorable identity code points visible for %s', (identity, expected) => {
+    expect(resolveDisplayName(identity)).toBe(expected)
+  })
+
   it('prefers the generic line self identity over the legacy phone field', () => {
     expect(lineIdentity({
       transport: 'signal',

@@ -40,7 +40,7 @@ import {
   vi,
   type MockedFunction,
 } from 'vitest'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 
 // Mock the api module before importing the component so the debounced
 // useEffect resolves against our stub instead of the real HTTP client.
@@ -575,6 +575,23 @@ describe('nameLocked prop', () => {
     renderStep({ data: { name: 'my-line' }, nameLocked: false })
     const input = screen.getByLabelText('Name') as HTMLInputElement
     expect(input.disabled).toBe(false)
+  })
+
+  it('locks the immutable line type after the Baileys instance is provisioned', () => {
+    const { onChange } = renderStep({
+      data: { type: 'passive', transport: 'baileys', name: 'locked-line' },
+      nameLocked: true,
+    })
+    const group = screen.getByRole('radiogroup', { name: 'Line Type' })
+    const passive = within(group).getByRole('radio', { name: /passive/i })
+    const chat = within(group).getByRole('radio', { name: /chat/i })
+
+    expect(group.getAttribute('aria-disabled')).toBe('true')
+    expect(passive.getAttribute('aria-checked')).toBe('true')
+    expect(chat.getAttribute('aria-disabled')).toBe('true')
+    fireEvent.click(chat)
+    expect(onChange).not.toHaveBeenCalledWith({ type: 'chat' })
+    expect(screen.getByText('Type is locked — instance already provisioned')).toBeDefined()
   })
 })
 

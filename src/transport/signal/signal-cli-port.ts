@@ -1,5 +1,6 @@
 import net from 'node:net';
 import { isAbsolute } from 'node:path';
+import { isSignalTcpHost } from '../../lib/signal-endpoint.ts';
 import type { SignalConfig } from './types.ts';
 import type {
   InboundSignal,
@@ -25,10 +26,6 @@ export type SignalRpcConnectionFactory = (
 const RPC_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_RECEIVE_PAGE_SIZE = 500;
 
-function isLoopbackHost(host: string): boolean {
-  return host === '127.0.0.1' || host === '::1' || host === 'localhost';
-}
-
 function assertEndpoint(config: SignalConfig): void {
   const hasSocket = typeof config.socketPath === 'string' && config.socketPath.length > 0;
   const hasTcp = Number.isInteger(config.tcpPort)
@@ -40,7 +37,7 @@ function assertEndpoint(config: SignalConfig): void {
   if (hasSocket && !isAbsolute(config.socketPath!)) {
     throw new Error('SignalCliPort socketPath must be absolute');
   }
-  if (hasTcp && config.tcpHost !== undefined && !isLoopbackHost(config.tcpHost)) {
+  if (hasTcp && config.tcpHost !== undefined && !isSignalTcpHost(config.tcpHost)) {
     throw new Error('SignalCliPort plaintext TCP requires a loopback host');
   }
 }

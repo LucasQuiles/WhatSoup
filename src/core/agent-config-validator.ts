@@ -26,6 +26,7 @@ import { PROVIDER_IDS } from '../runtimes/agent/providers/index.ts';
 import { PROVIDER_API_KEY_SERVICES, SERVICE_ENV_MAP, resolveProviderKeyService } from '../lib/provider-key-service.ts';
 import { isRecord } from '../lib/type-guards.ts';
 import { normalizePhoneE164Wire } from '../lib/phone.ts';
+import { isSignalTcpHost, SIGNAL_TCP_HOST_LABEL } from '../lib/signal-endpoint.ts';
 import { isSamePhysicalDirectory } from '../lib/home-path.ts';
 import {
   AGENT_PROVIDER_CONFIG_ALLOWED_FIELDS,
@@ -1494,13 +1495,11 @@ function validateSignalConfig(sc: Record<string, unknown>, lineName: string): Va
   }
   if (
     tcpHost !== undefined &&
-    tcpHost !== '127.0.0.1' &&
-    tcpHost !== '::1' &&
-    tcpHost !== 'localhost'
+    !isSignalTcpHost(tcpHost)
   ) {
     return err(
       'signalConfig.tcpHost',
-      'signalConfig.tcpHost must be a loopback host because signal-cli TCP is plaintext',
+      `signalConfig.tcpHost must be ${SIGNAL_TCP_HOST_LABEL} (the supported loopback hosts) because signal-cli TCP is plaintext`,
     );
   }
 

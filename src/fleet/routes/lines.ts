@@ -19,7 +19,7 @@ import {
   canonicalizeImessageDirectIdentity,
   SIGNAL_UUID_RE,
 } from '../../core/transport-refs.ts';
-import { isE164Wire } from '../../lib/phone.ts';
+import { isE164Wire, isPhoneLocal } from '../../lib/phone.ts';
 import { resolveAgentModel } from '../../instance-loader.ts';
 import type { FleetDiscovery, DiscoveredInstance } from '../discovery.ts';
 import type { HealthPoller, InstanceStatus } from '../health-poller.ts';
@@ -83,7 +83,7 @@ function lineSelfId(
       continue;
     }
     if (transport === 'baileys') {
-      if (/^\d{7,15}$/.test(raw)) return raw;
+      if (isPhoneLocal(raw)) return raw;
       if (isSenderJidForTransport(raw, transport)) return phoneFromJid(raw);
       continue;
     }

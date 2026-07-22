@@ -168,10 +168,12 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
           label="Line Type"
           options={TYPE_OPTIONS}
           selected={type}
+          disabled={nameLocked}
           onChange={(value) => onChange({ type: value })}
           aria-invalid={errors.type ? true : undefined}
           aria-describedby={errors.type ? typeErrorId : undefined}
         />
+        {nameLocked && <div className="c-helper">Type is locked — instance already provisioned</div>}
         {errors.type && <div id={typeErrorId} className="c-error">{errors.type}</div>}
       </div>
 

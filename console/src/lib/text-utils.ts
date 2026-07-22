@@ -13,18 +13,21 @@ const IMESSAGE_GROUP_PREFIX = 'iMessage;+;'
 
 type TransportNamespace = 'sms' | 'signal' | 'imessage'
 
+const CONTROL_CODE_POINT_RE = /\p{Cc}/u
+const FORMAT_CODE_POINT_RE = /\p{Cf}/u
+const DEFAULT_IGNORABLE_CODE_POINT_RE = /\p{Default_Ignorable_Code_Point}/u
+
 function escapeIdentityControls(value: string): string {
   return [...value].map(character => {
-    const code = character.charCodeAt(0)
-    const unsafe = code <= 0x1F
-      || (code >= 0x7F && code <= 0x9F)
-      || code === 0x061C
-      || code === 0x200E
-      || code === 0x200F
-      || (code >= 0x202A && code <= 0x202E)
-      || (code >= 0x2066 && code <= 0x2069)
-    if (!unsafe) return character
-    return `\\u${code.toString(16).toUpperCase().padStart(4, '0')}`
+    if (character === '\\') return '\\\\'
+    const code = character.codePointAt(0) ?? 0
+    if (
+      !CONTROL_CODE_POINT_RE.test(character)
+      && !FORMAT_CODE_POINT_RE.test(character)
+      && !DEFAULT_IGNORABLE_CODE_POINT_RE.test(character)
+    ) return character
+    const hex = code.toString(16).toUpperCase()
+    return code <= 0xFFFF ? `\\u${hex.padStart(4, '0')}` : `\\u{${hex}}`
   }).join('')
 }
 
@@ -64,7 +67,7 @@ function declaredTransportNamespace(transport: string): TransportNamespace | nul
 }
 
 function lineIdentityCandidate(value: string, transport: string): string | null {
-  const safeValue = escapeIdentityControls(value.trim())
+  const safeValue = escapeIdentityControls(value).trim()
   if (!safeValue) return null
   const namespace = declaredTransportNamespace(transport)
   if (namespace === null) return isPlaceholderIdentity(safeValue) ? null : safeValue
@@ -130,7 +133,7 @@ export function stripMarkdown(text: string | number | null | undefined): string 
 
 /** Resolve a chat display name — format raw JIDs as phone numbers. */
 export function resolveDisplayName(name: string | number | null | undefined): string {
-  const text = escapeIdentityControls(textValue(name).trim())
+  const text = escapeIdentityControls(textValue(name)).trim()
   if (!text) return '—'
   const transportRef = stripTransportSuffix(text)
   if (transportRef.transport) {
@@ -156,8 +159,8 @@ export function lineIdentity(line: {
   phone?: string | number | null
   transport?: string | null
 }): string {
-  const preferred = textValue(line.selfId).trim()
-  const fallback = textValue(line.phone).trim()
+  const preferred = textValue(line.selfId)
+  const fallback = textValue(line.phone)
   const transport = textValue(line.transport).trim()
   return lineIdentityCandidate(preferred, transport)
     ?? lineIdentityCandidate(fallback, transport)
