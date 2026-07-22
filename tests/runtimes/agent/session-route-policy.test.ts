@@ -214,10 +214,74 @@ describe('SessionManager route policy admission', () => {
     });
     sm.setDurability(durability);
 
-    await expect(sm.spawnSession(sessionId, rowId)).rejects.toThrow(/provider/i);
+    await expect(sm.spawnSession(sessionId)).rejects.toThrow(/provider/i);
     expect(initialize).not.toHaveBeenCalled();
     expect(db.raw.prepare('SELECT status FROM agent_sessions WHERE id = ?').get(rowId))
       .toEqual({ status: 'ended' });
     expect(durability.getSessionCheckpoint('15550204')?.session_status).toBe('ended');
+  });
+
+  it('leaves an omitted-row-ID resume unchanged when provider ownership is ambiguous', async () => {
+    const sessionId = 'ambiguous-provider-resume';
+    const insert = db.raw.prepare(
+      `INSERT INTO agent_sessions (
+         session_id, claude_pid, started_in_directory, chat_jid, workspace_key,
+         started_at, status, provider
+       ) VALUES (?, 0, '/tmp', '15550205@s.whatsapp.net', '15550205',
+         datetime('now'), 'suspended', ?)`,
+    );
+    const firstRowId = Number(insert.run(sessionId, 'anthropic-api').lastInsertRowid);
+    const secondRowId = Number(insert.run(sessionId, 'claude-cli').lastInsertRowid);
+    durability.upsertSessionCheckpoint('15550205', {
+      sessionId,
+      sessionStatus: 'suspended',
+    });
+    const sm = new SessionManager({
+      db,
+      messenger: messenger(),
+      chatJid: '15550205@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      model: 'gpt-5',
+      routePolicy: route,
+    });
+    sm.setDurability(durability);
+
+    await expect(sm.spawnSession(sessionId)).rejects.toThrow(/ambiguous|ownership|provider/i);
+    expect(db.raw.prepare('SELECT id, status FROM agent_sessions WHERE session_id = ? ORDER BY id')
+      .all(sessionId)).toEqual([
+      { id: firstRowId, status: 'suspended' },
+      { id: secondRowId, status: 'suspended' },
+    ]);
+    expect(durability.getSessionCheckpoint('15550205')?.session_status).toBe('suspended');
+  });
+
+  it('preserves the exact missing-checkpoint rejection and row state without retirement', async () => {
+    const sessionId = 'missing-checkpoint-current-provider';
+    const inserted = db.raw.prepare(
+      `INSERT INTO agent_sessions (
+         session_id, claude_pid, started_in_directory, chat_jid, workspace_key,
+         started_at, status, provider
+       ) VALUES (?, 0, '/tmp', '15550206@s.whatsapp.net', '15550206',
+         datetime('now'), 'suspended', 'openai-api')`,
+    ).run(sessionId);
+    const rowId = Number(inserted.lastInsertRowid);
+    const sm = new SessionManager({
+      db,
+      messenger: messenger(),
+      chatJid: '15550206@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      model: 'gpt-5',
+      routePolicy: route,
+    });
+    sm.setDurability(durability);
+
+    await expect(sm.spawnSession(sessionId, rowId)).rejects.toThrow(
+      'No resumable checkpoint matches the provider session and conversation',
+    );
+    expect(db.raw.prepare('SELECT status FROM agent_sessions WHERE id = ?').get(rowId))
+      .toEqual({ status: 'suspended' });
+    expect(durability.getSessionCheckpoint('15550206')).toBeUndefined();
   });
 });
