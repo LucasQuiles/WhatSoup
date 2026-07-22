@@ -870,6 +870,8 @@ describe('GET /health', () => {
                 identityHash: 'b'.repeat(20),
               },
               treeHash: 'c'.repeat(20),
+              fileCount: 14,
+              totalBytes: 1234,
               backup: {
                 root: '/state/auth-bond-backups/test',
                 latest: '/state/auth-bond-backups/test/history/latest',
@@ -914,6 +916,8 @@ describe('GET /health', () => {
             creds: { path: '/auth/creds.json', exists: true, mode: '600', size: 512, mtime: '2026-06-09T12:00:00.000Z', sha256: 'a'.repeat(64) },
             meHash: 'b'.repeat(20),
             treeHash: 'c'.repeat(64),
+            fileCount: 14,
+            totalBytes: 1234,
             backup: {
               root: '/state/auth-bond-backups/test',
               latest: '/state/auth-bond-backups/test/history/latest',
@@ -942,6 +946,8 @@ describe('GET /health', () => {
       creds: { hash: 'a'.repeat(20), mode: '600', empty_hash: false },
       me_hash: 'b'.repeat(20),
       tree_hash: 'c'.repeat(20),
+      file_count: 14,
+      total_bytes: 1234,
       backup: {
         latest: '/state/auth-bond-backups/test/history/latest',
         latest_reason: 'connection-open',
@@ -959,6 +965,8 @@ describe('GET /health', () => {
       currentAuthBond: {
         status: 'present',
         creds: { hash: 'a'.repeat(20), identityHash: 'b'.repeat(20) },
+        fileCount: 14,
+        totalBytes: 1234,
       },
     });
     db2.close();

@@ -425,6 +425,8 @@ function getConnectionState(connectionManager: HealthDeps['connectionManager']):
           identityHash: null,
         },
         treeHash: null,
+        fileCount: null,
+        totalBytes: null,
         backup: {
           root: cfg.stateRoot ?? 'unknown',
           latest: null,
@@ -483,6 +485,8 @@ function formatAuthBond(connectionState: ConnectionStateSnapshot): Record<string
     },
     me_hash: authBond.meHash,
     tree_hash: authBond.treeHash?.slice(0, 20) ?? null,
+    file_count: authBond.fileCount,
+    total_bytes: authBond.totalBytes,
     backup: {
       root: authBond.backup.root,
       latest: authBond.backup.latest,
