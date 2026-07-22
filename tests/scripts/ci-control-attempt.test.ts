@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rename, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -214,10 +214,54 @@ describe('CP-F2 supervisor-issued process evidence', () => {
 
   it('rejects non-finite trusted clocks instead of bypassing freshness admission', () => {
     const issued = lease();
-    const historical = attempt(issued, terminal(issued), close(issued), DIGEST);
+    const precursor = terminal(issued);
+    const directClose = close(issued);
+    const historical = attempt(issued, precursor, directClose, DIGEST);
 
     for (const invalidNow of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expect(() => validateSupervisorProcessLease(issued, expectations(), { now: invalidNow })).toThrow(/clock|finite/i);
+      expect(() => validateSupervisorTerminal(precursor, issued, { now: invalidNow })).toThrow(/clock|finite/i);
+      expect(() => validateSupervisorClose(directClose, issued, precursor, { now: invalidNow })).toThrow(/clock|finite/i);
       expect(() => validateTerminalAttempt(historical, { now: invalidNow })).toThrow(/clock|finite/i);
+    }
+  });
+
+  it('rejects non-finite clocks before precursor stores consume the next append-only state', async () => {
+    for (const [index, invalidNow] of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY].entries()) {
+      const leaseRoot = await mkdtemp(path.join(tmpdir(), `ci-control-attempt-clock-lease-${index}-`));
+      roots.push(leaseRoot);
+      const leaseStore = new FileAttemptEvidenceStore(leaseRoot);
+      const issued = lease();
+      leaseStore.beginAttempt(issued.attemptId, CREATED_AT);
+      expect(() => leaseStore.writeSupervisorLease(issued, expectations(), { now: invalidNow })).toThrow(/clock|finite/i);
+      expect(readdirSync(leaseRoot).sort()).toEqual(['attempt-1.history.0001.json']);
+
+      const terminalRoot = await mkdtemp(path.join(tmpdir(), `ci-control-attempt-clock-terminal-${index}-`));
+      roots.push(terminalRoot);
+      const terminalStore = new FileAttemptEvidenceStore(terminalRoot);
+      terminalStore.beginAttempt(issued.attemptId, CREATED_AT);
+      const leaseDigest = terminalStore.writeSupervisorLease(issued, expectations(), { now: NOW });
+      expect(() => terminalStore.writeSupervisorTerminal(terminal(issued), leaseDigest, { now: invalidNow, expectedLease: expectations() })).toThrow(/clock|finite/i);
+      expect(readdirSync(terminalRoot).sort()).toEqual([
+        'attempt-1.history.0001.json',
+        'attempt-1.history.0002.json',
+        'attempt-1.lease.json',
+      ]);
+
+      const closeRoot = await mkdtemp(path.join(tmpdir(), `ci-control-attempt-clock-close-${index}-`));
+      roots.push(closeRoot);
+      const closeStore = new FileAttemptEvidenceStore(closeRoot);
+      closeStore.beginAttempt(issued.attemptId, CREATED_AT);
+      const closeLeaseDigest = closeStore.writeSupervisorLease(issued, expectations(), { now: NOW });
+      const precursorDigest = closeStore.writeSupervisorTerminal(terminal(issued), closeLeaseDigest, { now: NOW, expectedLease: expectations() });
+      expect(() => closeStore.writeSupervisorClose(close(issued), closeLeaseDigest, precursorDigest, 'terminal', { now: invalidNow, expectedLease: expectations() })).toThrow(/clock|finite/i);
+      expect(readdirSync(closeRoot).sort()).toEqual([
+        'attempt-1.history.0001.json',
+        'attempt-1.history.0002.json',
+        'attempt-1.history.0003.json',
+        'attempt-1.lease.json',
+        'attempt-1.supervisor-terminal.json',
+      ]);
     }
   });
 

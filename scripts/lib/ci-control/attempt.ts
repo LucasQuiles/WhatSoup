@@ -186,6 +186,12 @@ function requireExactRecord(value: unknown, keys: readonly string[], label: stri
   return value;
 }
 
+function validationNow(options: ValidationClock): number {
+  const now = options.now ?? Date.now();
+  if (!Number.isFinite(now)) throw new Error('evidence validation clock must be finite');
+  return now;
+}
+
 function validateTimestampWindow(createdAt: string, validUntil: string, now: number): void {
   const created = Date.parse(createdAt);
   const valid = Date.parse(validUntil);
@@ -238,7 +244,7 @@ function validateExpectations(value: SupervisorLeaseExpectationsV1): void {
 export function validateSupervisorProcessLease(value: unknown, expected: SupervisorLeaseExpectationsV1, options: ValidationClock = {}): SupervisorProcessLeaseV1 {
   validateExpectations(expected);
   const lease = validateLeaseShape(value);
-  validateTimestampWindow(lease.issuedAt, lease.validUntil, options.now ?? Date.now());
+  validateTimestampWindow(lease.issuedAt, lease.validUntil, validationNow(options));
   if (lease.attemptId !== expected.attemptId || lease.supervisor.pid !== expected.supervisorPid || lease.supervisor.ppid !== expected.callerPid) throw new Error('supervisor lease parent or process identity does not match trusted expectations');
   for (const key of ['challengeDigest', 'supervisorToolDigest', 'identityProbeDigest', 'closeObserverDigest', 'commandDigest', 'cwdDigest', 'environmentDigest'] as const) if (lease[key] !== expected[key]) throw new Error(`supervisor lease ${key} does not match trusted binding`);
   return lease;
@@ -284,7 +290,7 @@ function validateTerminalShape(value: unknown, lease: SupervisorProcessLeaseV1):
 export function validateSupervisorTerminal(value: unknown, leaseValue: SupervisorProcessLeaseV1, options: ValidationClock = {}): SupervisorTerminalV1 {
   const lease = validateLeaseShape(leaseValue);
   const terminal = validateTerminalShape(value, lease);
-  const now = options.now ?? Date.now();
+  const now = validationNow(options);
   if (Date.parse(terminal.terminalAt) > now + MAX_FUTURE_SKEW_MS || now - Date.parse(terminal.terminalAt) > MAX_VALIDITY_MS) throw new Error('supervisor terminal receipt is stale or future-dated');
   return terminal;
 }
@@ -306,7 +312,7 @@ export function validateSupervisorClose(value: unknown, leaseValue: SupervisorPr
   const lease = validateLeaseShape(leaseValue);
   const terminal = validateTerminalShape(terminalValue, lease);
   const close = validateCloseShape(value, lease, terminal);
-  if (Date.parse(close.closedAt) > (options.now ?? Date.now()) + MAX_FUTURE_SKEW_MS) throw new Error('supervisor direct close is future-dated');
+  if (Date.parse(close.closedAt) > validationNow(options) + MAX_FUTURE_SKEW_MS) throw new Error('supervisor direct close is future-dated');
   return close;
 }
 
@@ -335,8 +341,7 @@ function validateTerminalAttemptShape(value: unknown): TerminalAttemptV1 {
 
 export function validateTerminalAttempt(value: unknown, options: ValidationClock = {}): TerminalAttemptV1 {
   const attempt = validateTerminalAttemptShape(value);
-  const now = options.now ?? Date.now();
-  if (!Number.isFinite(now)) throw new Error('terminal attempt validation clock must be finite');
+  const now = validationNow(options);
   if (Date.parse(attempt.createdAt) > now + MAX_FUTURE_SKEW_MS || Date.parse(attempt.terminalAt) > now + MAX_FUTURE_SKEW_MS || now - Date.parse(attempt.createdAt) > MAX_VALIDITY_MS) throw new Error('terminal attempt is stale or future-dated');
   return attempt;
 }
