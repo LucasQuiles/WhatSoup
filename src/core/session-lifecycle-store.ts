@@ -13,6 +13,7 @@ export interface BeginFreshSessionLifecycleParams {
   workspaceKey: string;
   provider: string;
   conversationKey: string;
+  checkpointWatchdogState?: string | null;
 }
 
 export interface ReactivateSessionLifecycleParams {
@@ -22,6 +23,7 @@ export interface ReactivateSessionLifecycleParams {
   pid: number;
   workspaceKey: string;
   conversationKey: string;
+  checkpointWatchdogState?: string | null;
 }
 
 export interface RetireSessionLifecycleParams {
@@ -137,14 +139,14 @@ export class SessionLifecycleStore {
           completed_scope, completed_logical_turn_id, completed_manager_id,
           completed_generation
         )
-        VALUES (?, NULL, NULL, NULL, NULL, NULL, NULL, ?, 'active', NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+        VALUES (?, NULL, NULL, NULL, NULL, NULL, ?, ?, 'active', NULL, NULL, NULL, NULL, NULL, NULL, NULL)
         ON CONFLICT(conversation_key) DO UPDATE SET
           session_id = NULL,
           transcript_path = NULL,
           active_turn_id = NULL,
           last_inbound_seq = NULL,
           last_flushed_outbound_id = NULL,
-          watchdog_state = NULL,
+          watchdog_state = excluded.watchdog_state,
           claude_pid = excluded.claude_pid,
           session_status = 'active',
           completed_inbound_seq = NULL,
@@ -193,6 +195,7 @@ export class SessionLifecycleStore {
         UPDATE session_checkpoints
         SET session_status = 'active',
             claude_pid = ?,
+            watchdog_state = CASE WHEN ? = 1 THEN ? ELSE watchdog_state END,
             checkpoint_version = checkpoint_version + 1,
             updated_at = datetime('now')
         WHERE id = ?
@@ -326,7 +329,7 @@ export class SessionLifecycleStore {
   }
 
   beginFreshCheckpoint(conversationKey: string, pid?: number): void {
-    this.statements.beginFreshCheckpoint.run(conversationKey, pid ?? null);
+    this.statements.beginFreshCheckpoint.run(conversationKey, null, pid ?? null);
   }
 
   beginFreshSessionLifecycle(params: BeginFreshSessionLifecycleParams): number {
@@ -341,7 +344,11 @@ export class SessionLifecycleStore {
       );
       const rowId = Number(result.lastInsertRowid);
       validateRowId(rowId);
-      this.statements.beginFreshCheckpoint.run(params.conversationKey, params.pid || null);
+      this.statements.beginFreshCheckpoint.run(
+        params.conversationKey,
+        params.checkpointWatchdogState ?? null,
+        params.pid || null,
+      );
       return rowId;
     });
   }
@@ -403,6 +410,8 @@ export class SessionLifecycleStore {
       requireChanges(
         this.statements.reactivateExactSessionCheckpoint.run(
           params.pid || null,
+          params.checkpointWatchdogState === undefined ? 0 : 1,
+          params.checkpointWatchdogState ?? null,
           checkpoint.id,
           params.conversationKey,
           params.providerSessionId,

@@ -111,6 +111,32 @@ describe('SessionLifecycleStore through DurabilityEngine', () => {
     expect(durability.getSessionCheckpoint('fault-fresh')).toBeUndefined();
   });
 
+  it('retains legacy fresh restart when pre-init state has no pending policy marker', () => {
+    const firstRowId = durability.beginFreshSessionLifecycle({
+      pid: 314,
+      cwd: '/tmp/first',
+      chatJid: 'unresolved-fresh@s.whatsapp.net',
+      workspaceKey: 'unresolved-fresh',
+      provider: 'openai-api',
+      conversationKey: 'unresolved-fresh',
+    });
+
+    const secondRowId = durability.beginFreshSessionLifecycle({
+      pid: 315,
+      cwd: '/tmp/second',
+      chatJid: 'unresolved-fresh@s.whatsapp.net',
+      workspaceKey: 'unresolved-fresh',
+      provider: 'openai-api',
+      conversationKey: 'unresolved-fresh',
+    });
+
+    expect(secondRowId).not.toBe(firstRowId);
+    expect(db.raw.prepare(
+      `SELECT COUNT(*) AS n FROM agent_sessions
+       WHERE workspace_key = 'unresolved-fresh' AND status = 'active'`,
+    ).get()).toEqual({ n: 2 });
+  });
+
   it('reactivates one exact resumable row and its exact conversation checkpoint', () => {
     const rowId = insertAgentRow(db, 'resume-session', 'crashed', 'resume-a');
     durability.upsertSessionCheckpoint('resume-a', {
