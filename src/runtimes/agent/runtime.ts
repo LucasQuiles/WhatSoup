@@ -9136,6 +9136,10 @@ export class AgentRuntime implements Runtime {
    * switch says so, honestly distinguishing "now" from "next message".
    */
   private renderPinOutcomeEcho(label: string, outcome: RouteRecycleOutcome): string {
+    const fallbackRoute = this.activeFallbackRouteLabel();
+    if (fallbackRoute) {
+      return `_Saved ${label} as this chat's 24h preference. Health fallback is active; new sessions still use ${fallbackRoute} until recovery. reply keep to make it permanent, /reset to undo._`;
+    }
     if (outcome === 'recycled') {
       return `_Now answering with ${label}. reply keep to make it permanent, /reset to undo._`;
     }
@@ -9168,6 +9172,11 @@ export class AgentRuntime implements Runtime {
     label: string,
     alreadySetText: string,
   ): string {
+    const fallbackRoute = this.activeFallbackRouteLabel();
+    if (fallbackRoute) {
+      const lifetime = alreadySetText.includes('sticky') ? 'permanent' : 'extended for 24h';
+      return `_Saved preference remains ${label} (${lifetime}). Health fallback is active; new sessions still use ${fallbackRoute} until recovery. /reset to undo._`;
+    }
     const recycleOutcome = this.applyRouteChangeAndRecycle(chatJid, senderJid, perChatMapKey);
     if (recycleOutcome === 'noop') return alreadySetText;
     return this.renderPinOutcomeEcho(label, recycleOutcome);
@@ -9464,6 +9473,9 @@ export class AgentRuntime implements Runtime {
    */
   private async sendDynamicModelCatalogueSection(chatJid: string, senderJid: string, filter: string | null): Promise<void> {
     try {
+      const { live, next } = this.loadRouteView(chatJid, senderJid);
+      const currentProvider = live?.provider ?? next.provider;
+      const currentModel = live ? live.model : next.model;
       const candidates: Array<{ provider: string; model: string }> = [];
       if (this.model !== undefined) candidates.push({ provider: this.agentProvider, model: this.model });
       for (const e of this.agentFallbacks) {
@@ -9481,8 +9493,8 @@ export class AgentRuntime implements Runtime {
       if (shown.length > 0) {
         lines.push('*Pick a model:*');
         shown.forEach((e, i) => {
-          const isCurrent = e.provider === this.agentProvider && e.model === this.model;
-          lines.push(`${i + 1}. ${e.provider} (${e.model})${isCurrent ? ' (current)' : ''}`);
+          const isCurrent = e.provider === currentProvider && e.model === currentModel;
+          lines.push(`${i + 1}. ${e.provider} (${e.model})${isCurrent ? ' (active route)' : ''}`);
         });
         lines.push('Reply `/model N` to switch to that one.');
         if (pool.length > shown.length) {
@@ -9546,19 +9558,22 @@ export class AgentRuntime implements Runtime {
     );
     // Copy fix: the read is chat-scoped, last-writer-wins (D13/D13a) — "for
     // you" mis-implies per-user ownership even when a DIFFERENT sender set
-    // it. "This chat is on X" is accurate in both a DM and a group, and never
+    // it. "Saved preference" is accurate in both a DM and a group without
+    // claiming a fallback or older live session is serving it, and never
     // names the setter (that would reintroduce the internal-concept leak the
     // plain-language rule bans). A model pin shows the model ONLY once
     // verified (Task H honesty rule) — an unverified/deferred model pin
     // would otherwise claim to be serving a model that was never confirmed
     // to exist; it falls back to the provider/intent, same as before.
     const prefLine = pref
-      ? `This chat is on ${(pref.modelPinVerified === true ? pref.requestedModel : null) ?? (pref.requestedProvider ?? pref.intent)}` +
+      ? `Saved preference: ${(pref.modelPinVerified === true ? pref.requestedModel : null) ?? (pref.requestedProvider ?? pref.intent)}` +
         (pref.expiresAt !== null
           ? ` (expires in ~${Math.max(1, Math.round((pref.expiresAt - Date.now()) / 3_600_000))}h)`
           : '') +
-        ' — steers new sessions'
-      : 'Preference: none';
+        (this.isFallbackWindowActive
+          ? ' — health fallback currently decides new sessions'
+          : ' — steers new sessions')
+      : 'Saved preference: none';
     // B25 F8: the active-window and Next lines were model-blind — a
     // same-provider window pinning a DIFFERENT model rendered without the
     // model and suppressed the Next line entirely. Render "provider (model)"
@@ -9617,6 +9632,12 @@ export class AgentRuntime implements Runtime {
   private get effectiveFallbackEntry(): AgentFallbackEntry | null {
     if (!this.isFallbackWindowActive) return null;
     return this.fallbackWindow.activeEntry ?? this.agentFallbacks[0] ?? null;
+  }
+
+  private activeFallbackRouteLabel(): string | null {
+    const entry = this.effectiveFallbackEntry;
+    if (!entry) return null;
+    return entry.model ? `${entry.provider} (${entry.model})` : entry.provider;
   }
 
   private selectFallbackEntryForWindow(reason?: string): { entry: AgentFallbackEntry; selectedHadMissingCredential: boolean } | null {

@@ -15669,7 +15669,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(status).toBeDefined();
     // D13a copy fix: chat-scoped, last-writer-wins — "for you" mis-implies
     // per-user ownership, so the line now names the chat, not the sender.
-    expect(status).toContain('This chat is on strongest');
+    expect(status).toContain('Saved preference: strongest');
     expect(status).toContain('steers new sessions');
     // b28 r2b: the Delegation/Authority display lines were removed from this
     // surface (the invariant lives in the system prompt). D11: /why is gone —
@@ -15804,13 +15804,13 @@ describe('NL routing handlers (nlRouting flag)', () => {
     // than "none". (Pre-D13 this test asserted 'Preference: none' for B —
     // that was the old per-sender READ contract; the owner chose
     // last-writer-wins for the read side. C3's copy fix closes the "for you"
-    // nuance flagged here — the render now says "This chat is on X", which
-    // is accurate for B, a non-authoring viewer, too.)
+    // nuance flagged here — the render now labels the saved chat preference
+    // without claiming that it is necessarily the active route.)
     const { runtime, sentMessages } = makeRoutingRuntime();
     await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_A, isGroup: true, content: '/model strongest' }));
     await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_B, isGroup: true, content: '/model status', messageId: 'msg-2' }));
     const bStatus = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
-    expect(bStatus).toContain('This chat is on strongest');
+    expect(bStatus).toContain('Saved preference: strongest');
     // WRITE stays per-sender — unchanged (only the read collapsed).
     const rows = prefRows();
     expect(rows).toHaveLength(1);
@@ -15847,7 +15847,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(prefRows()).toHaveLength(0);
     await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_A, isGroup: true, content: '/model status', messageId: 'msg-3' }));
     const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
-    expect(status).toContain('Preference: none');
+    expect(status).toContain('Saved preference: none');
     await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_B, isGroup: true, content: 'hello there', messageId: 'msg-4' }));
     const opts = capturedSessionManagerOptsRef.current as unknown as { provider?: string };
     expect(opts?.provider).toBe('claude-cli');
@@ -16202,7 +16202,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
     const replies = allReplies(sentMessages);
     expect(replies.some((t) => t.includes('*Current route:*'))).toBe(true);
-    expect(replies.some((t) => t.includes('Preference: none'))).toBe(true);
+    expect(replies.some((t) => t.includes('Saved preference: none'))).toBe(true);
     expect(replies.some((t) => t.includes('Something went wrong'))).toBe(false);
   });
 
@@ -16549,7 +16549,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
       const menu = allReplies(sentMessages).find((t) => t.includes('*Pick a model:*'));
       expect(menu).toBeDefined();
-      expect(menu).toContain('1. claude-cli (claude-opus-4-8) (current)');
+      expect(menu).toContain('1. claude-cli (claude-opus-4-8) (active route)');
       expect(menu).toContain('2. opencode-cli (kimi/kimi-k3)');
       expect(menu).toContain('3. opencode-cli (glm/glm-5.2)');
       expect(menu).toContain('Reply `/model N` to switch to that one.');
@@ -16597,7 +16597,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
       await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_B, isGroup: true, content: '/model list', messageId: 'msg-2' }));
       const bMenu = allReplies(sentMessages).find((t) => t.includes('*Pick a model:*'));
       expect(bMenu).toBeDefined();
-      expect(bMenu).toContain('1. claude-cli (claude-opus-4-8) (current)');
+      expect(bMenu).toContain('1. claude-cli (claude-opus-4-8) (active route)');
       expect(bMenu).toContain('2. opencode-cli (kimi/kimi-k3)');
       expect(bMenu).toContain('3. opencode-cli (glm/glm-5.2)');
 
@@ -16622,7 +16622,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(config).toContain('• Fallback: codex-cli');
       const menu = allReplies(sentMessages).find((t) => t.includes('*Pick a model:*'));
       expect(menu).toBeDefined();
-      expect(menu).toContain('1. claude-cli (claude-opus-4-8) (current)');
+      expect(menu).toContain('1. claude-cli (claude-opus-4-8) (active route)');
       expect(menu).not.toContain('codex-cli');
     });
   });
@@ -16685,7 +16685,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status', messageId: 'msg-3' }));
       const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
       expect(status).toBeDefined();
-      expect(status).toContain('This chat is on claude-sonnet-5');
+      expect(status).toContain('Saved preference: claude-sonnet-5');
       // Task H: the Model: line is now pin-aware — the sync hot path in
       // resolveRouteForTurn set route.model to the verified pin, distinct
       // from the configured primary (claude-opus-4-8).
@@ -16779,7 +16779,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
       // The preference DECLARATION line is a separate honesty axis (verified
       // bit only, same as the existing provider-pin behavior) — it still
       // names the pin even though it isn't the one actually serving.
-      expect(status).toContain('This chat is on exotic/model-x');
+      expect(status).toContain('Saved preference: exotic/model-x');
     });
 
     it('a verified model pin does NOT override an active health failover (source=fallback), even when validatedProvider matches the fallback provider', async () => {
@@ -17303,6 +17303,94 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(status).toContain('Model: haiku-fast');
     expect(status).not.toContain('Model: haiku-fast (configured)');
     expect(status).not.toContain('claude-opus-4-8 (configured)');
+  });
+
+  it('marks and acknowledges the effective fallback route instead of claiming the saved primary preference is current', async () => {
+    cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'haiku-fast' }];
+    const anthropicFn = vi.fn().mockResolvedValue({
+      status: 'ok',
+      ids: ['claude-opus-4-8', 'haiku-fast'],
+    });
+    const { runtime, sentMessages } = makeRoutingRuntime({
+      model: 'claude-opus-4-8',
+      modelCatalogueAnthropicFn: anthropicFn,
+    });
+    const state = runtime as unknown as {
+      fallbackWindow: { activeUntil: number | null; activeEntry: unknown };
+    };
+    state.fallbackWindow.activeUntil = Date.now() + 60_000;
+    state.fallbackWindow.activeEntry = { provider: 'claude-cli', model: 'haiku-fast' };
+
+    await sendAndDrain(runtime, makeMsg({
+      chatJid: CHAT,
+      senderJid: SENDER_A,
+      content: '/model list',
+    }));
+    const menu = allReplies(sentMessages).find((t) => t.includes('*Pick a model:*'));
+    expect(menu).toBeDefined();
+    expect(menu).toContain('1. claude-cli (claude-opus-4-8)');
+    expect(menu).not.toContain('claude-opus-4-8) (active route)');
+    expect(menu).toContain('2. claude-cli (haiku-fast) (active route)');
+
+    await sendAndDrain(runtime, makeMsg({
+      chatJid: CHAT,
+      senderJid: SENDER_A,
+      content: '/model 1',
+      messageId: 'model-primary-during-fallback',
+    }));
+    expect(allReplies(sentMessages).join('\n')).toContain(
+      'Saved claude-opus-4-8 as this chat\'s 24h preference. Health fallback is active; new sessions still use claude-cli (haiku-fast) until recovery.',
+    );
+
+    await sendAndDrain(runtime, makeMsg({
+      chatJid: CHAT,
+      senderJid: SENDER_A,
+      content: '/model status',
+      messageId: 'model-status-during-fallback',
+    }));
+    const status = allReplies(sentMessages).findLast((t) => t.includes('*Current route:*'));
+    expect(status).toContain('Model: haiku-fast');
+    expect(status).toContain('Saved preference: claude-opus-4-8');
+    expect(status).toContain('health fallback currently decides new sessions');
+    expect(status).not.toContain('This chat is on claude-opus-4-8');
+  });
+
+  it('keeps the live session marked active when fallback only controls the next session', async () => {
+    cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'haiku-fast' }];
+    mockSession.getStatus.mockReturnValue({
+      active: true,
+      pid: 42,
+      sessionId: 'live-primary',
+      startedAt: new Date().toISOString(),
+      messageCount: 1,
+      lastMessageAt: new Date().toISOString(),
+    });
+    (mockSession as unknown as Record<string, unknown>).getModelRef = vi.fn(() => 'claude-opus-4-8');
+    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+    const state = runtime as unknown as {
+      fallbackWindow: { activeUntil: number | null; activeEntry: unknown };
+    };
+    state.fallbackWindow.activeUntil = Date.now() + 60_000;
+    state.fallbackWindow.activeEntry = { provider: 'claude-cli', model: 'haiku-fast' };
+
+    await sendAndDrain(runtime, makeMsg({
+      chatJid: CHAT,
+      senderJid: SENDER_A,
+      content: '/model list',
+    }));
+    const menu = allReplies(sentMessages).find((t) => t.includes('*Pick a model:*'));
+    expect(menu).toContain('1. claude-cli (claude-opus-4-8) (active route)');
+    expect(menu).not.toContain('haiku-fast) (active route)');
+
+    await sendAndDrain(runtime, makeMsg({
+      chatJid: CHAT,
+      senderJid: SENDER_A,
+      content: '/model status',
+      messageId: 'model-live-status',
+    }));
+    const status = allReplies(sentMessages).findLast((t) => t.includes('*Current route:*'));
+    expect(status).toContain('Model: claude-opus-4-8 (configured)');
+    expect(status).toContain('Next session: claude-cli (haiku-fast)');
   });
 
   // ── b28 r2b: /model status drops the Delegation + Authority DISPLAY lines ──
