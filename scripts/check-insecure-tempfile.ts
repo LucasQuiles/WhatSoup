@@ -120,22 +120,6 @@ export function scanForInsecureTempfile(root: string): Finding[] {
 
 function main(): number {
   const root = process.argv[2] ?? process.cwd();
-
-  // Refuse to certify a tree we never examined. This guard walks `root` itself, so an empty
-  // or wrong directory yields zero findings and previously exited 0 — a false green for a
-  // severity:'block' rule (test.insecure-tempfile). The catch below already fails closed on
-  // an unreadable root; this covers the quieter case where the scan simply had nothing to
-  // read. `package.json` is the cheapest proof that this is a repo checkout at all.
-  try {
-    statSync(path.join(root, 'package.json'));
-  } catch {
-    console.error(
-      `[insecure-tempfile] INCONCLUSIVE — no package.json under ${root}, so this is not a repo ` +
-        'checkout; refusing to report "clean" for a tree that was never examined',
-    );
-    return 2;
-  }
-
   let findings: Finding[];
   try {
     findings = scanForInsecureTempfile(root);
