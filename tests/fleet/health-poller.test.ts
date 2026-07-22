@@ -483,6 +483,41 @@ describe('HealthPoller', () => {
     poller.stop();
   });
 
+  it('a live degraded payload resets transport failure consecutiveness', async () => {
+    mockFetch
+      .mockRejectedValueOnce(new Error('This operation was aborted'))
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          status: 'degraded',
+          reason: 'event_loop_starved',
+          whatsapp: { connected: true, connection: { state: 'connected' } },
+        }),
+      })
+      .mockRejectedValueOnce(new Error('This operation was aborted'));
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 1_000);
+    poller.start();
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(poller.getStatus('remote-1')!.consecutiveFailures).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(poller.getStatus('remote-1')).toMatchObject({
+      status: 'degraded',
+      consecutiveFailures: 0,
+      everReachable: true,
+    });
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(poller.getStatus('remote-1')!.consecutiveFailures).toBe(1);
+
+    poller.stop();
+  });
+
   it('alerts when a degraded health body persists beyond the debounce window', async () => {
     mockFetch.mockResolvedValue({
       ok: true,

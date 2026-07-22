@@ -1568,7 +1568,9 @@ export class HealthPoller {
       // `health` here is always a live payload just fetched (even when
       // classified degraded/logged_out) — never the carried-forward branch.
       healthObservedAt: observedAt,
-      consecutiveFailures: existing?.consecutiveFailures ?? 0,
+      // A parsed health payload proves transport reachability even when the
+      // payload reports a separate degraded condition.
+      consecutiveFailures: 0,
       everReachable: true,
       status: newStatus,
       statusConfidence,
