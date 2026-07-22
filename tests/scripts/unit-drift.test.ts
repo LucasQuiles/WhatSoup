@@ -59,7 +59,7 @@ function writeEnsureNodePair(
 }
 
 function run(args: string[]) {
-  return spawnSync('bash', [SCRIPT, ...args], {
+  return spawnSync('/bin/bash', [SCRIPT, ...args], {
     encoding: 'utf8',
   });
 }
@@ -183,6 +183,196 @@ describe('check-unit-drift.sh', () => {
     expect(result.stderr).toContain('whatsoup-ensure-node');
     expect(result.stderr).toContain('local-Node fast path');
   });
+
+  it('rejects an empty --unit selector instead of erasing unit scope', () => {
+    const { repo, systemd, bin } = makeFixture();
+
+    const result = run([
+      '--repo-root', repo,
+      '--systemd-dir', systemd,
+      '--bin-dir', bin,
+      '--unit',
+    ]);
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('missing --unit value');
+    expect(result.stderr).not.toContain('unbound variable');
+    expect(result.stdout).not.toContain('all managed systemd units match');
+  });
+
+  it('rejects an empty --wrapper selector instead of erasing wrapper scope', () => {
+    const { repo, systemd, bin } = makeFixture();
+    const content = '[Unit]\nDescription=Match\n';
+    writeFileSync(join(repo, 'deploy/example.service'), content);
+    writeFileSync(join(systemd, 'example.service'), content);
+
+    const result = run([
+      '--repo-root', repo,
+      '--systemd-dir', systemd,
+      '--bin-dir', bin,
+      '--unit', 'example.service',
+      '--wrapper',
+    ]);
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('missing --wrapper value');
+    expect(result.stderr).not.toContain('unbound variable');
+    expect(result.stdout).not.toContain('all managed systemd units match');
+  });
+
+  it('preserves an explicit non-empty wrapper selector', () => {
+    const { repo, systemd, bin } = makeFixture();
+    const content = '[Unit]\nDescription=Match\n';
+    writeFileSync(join(repo, 'deploy/example.service'), content);
+    writeFileSync(join(systemd, 'example.service'), content);
+
+    const result = run([
+      '--repo-root', repo,
+      '--systemd-dir', systemd,
+      '--bin-dir', bin,
+      '--unit', 'example.service',
+      '--wrapper', 'whatsoup-ensure-node:deploy/scripts/ensure-node-installed.sh',
+    ]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('ok: example.service');
+    expect(result.stdout).toContain('ok: whatsoup-ensure-node local-Node fast path present');
+    expect(result.stdout).toContain('all managed systemd units match');
+  });
+
+  it('rejects combining --no-wrappers with an explicit wrapper selector', () => {
+    const { repo, systemd, bin } = makeFixture();
+
+    const result = run([
+      '--repo-root', repo,
+      '--systemd-dir', systemd,
+      '--bin-dir', bin,
+      '--no-wrappers',
+      '--wrapper', 'whatsoup-ensure-node:deploy/scripts/ensure-node-installed.sh',
+    ]);
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('--no-wrappers cannot be combined with --wrapper');
+    expect(result.stdout).not.toContain('all managed systemd units match');
+  });
+
+  it('rejects combining an explicit wrapper selector with --no-wrappers', () => {
+    const { repo, systemd, bin } = makeFixture();
+
+    const result = run([
+      '--repo-root', repo,
+      '--systemd-dir', systemd,
+      '--bin-dir', bin,
+      '--wrapper', 'whatsoup-ensure-node:deploy/scripts/ensure-node-installed.sh',
+      '--no-wrappers',
+    ]);
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('--no-wrappers cannot be combined with --wrapper');
+    expect(result.stdout).not.toContain('all managed systemd units match');
+  });
+
+  it('rejects repeated --unit selectors instead of replacing earlier scope', () => {
+    const { repo, systemd, bin } = makeFixture();
+
+    const result = run([
+      '--repo-root', repo,
+      '--systemd-dir', systemd,
+      '--bin-dir', bin,
+      '--unit', 'first.service',
+      '--unit', 'second.service',
+      '--no-wrappers',
+    ]);
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('--unit cannot be repeated');
+    expect(result.stdout).not.toContain('all selected systemd units match');
+  });
+
+  it('rejects repeated --wrapper selectors instead of replacing earlier scope', () => {
+    const { repo, systemd, bin } = makeFixture();
+
+    const result = run([
+      '--repo-root', repo,
+      '--systemd-dir', systemd,
+      '--bin-dir', bin,
+      '--wrapper', 'first:deploy/scripts/ensure-node-installed.sh',
+      '--wrapper', 'second:deploy/scripts/ensure-node-installed.sh',
+    ]);
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('--wrapper cannot be repeated');
+    expect(result.stdout).not.toContain('all managed systemd units match');
+  });
+
+  it('rejects repeated --no-wrappers selectors', () => {
+    const { repo, systemd, bin } = makeFixture();
+
+    const result = run([
+      '--repo-root', repo,
+      '--systemd-dir', systemd,
+      '--bin-dir', bin,
+      '--no-wrappers',
+      '--no-wrappers',
+    ]);
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('--no-wrappers cannot be repeated');
+    expect(result.stdout).not.toContain('all selected systemd units match');
+  });
+
+  it('rejects --no-wrappers when a selected unit references a managed wrapper', () => {
+    const { repo, systemd, bin } = makeFixture();
+    const unit = 'whatsoup@.service';
+    const content = [
+      '[Service]',
+      'ExecStartPre=%h/.local/bin/whatsoup-ensure-node --version v24.15.0',
+      '',
+    ].join('\n');
+    writeFileSync(join(repo, 'deploy', unit), content);
+    writeFileSync(join(systemd, unit), content);
+    rmSync(join(bin, 'whatsoup-ensure-node'));
+
+    const result = run([
+      '--repo-root', repo,
+      '--systemd-dir', systemd,
+      '--bin-dir', bin,
+      '--unit', unit,
+      '--no-wrappers',
+    ]);
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('--no-wrappers is not applicable');
+    expect(result.stderr).toContain(unit);
+    expect(result.stderr).toContain('whatsoup-ensure-node');
+    expect(result.stdout).not.toContain('wrapper checks: not applicable');
+    expect(result.stdout).not.toContain('all selected systemd units match');
+  });
+
+  it('rejects --no-wrappers when a selected unit invokes a registered wrapper implementation', () => {
+    const { repo, systemd, bin } = makeFixture();
+    const unit = 'direct-wrapper.service';
+    const implementation = join(repo, 'deploy/scripts/ensure-node-installed.sh');
+    const content = `[Service]\nExecStartPre=${implementation}\n`;
+    writeFileSync(join(repo, 'deploy', unit), content);
+    writeFileSync(join(systemd, unit), content);
+    rmSync(join(bin, 'whatsoup-ensure-node'));
+
+    const result = run([
+      '--repo-root', repo,
+      '--systemd-dir', systemd,
+      '--bin-dir', bin,
+      '--unit', unit,
+      '--no-wrappers',
+    ]);
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('--no-wrappers is not applicable');
+    expect(result.stderr).toContain(unit);
+    expect(result.stderr).toContain('deploy/scripts/ensure-node-installed.sh');
+    expect(result.stdout).not.toContain('wrapper checks: not applicable');
+    expect(result.stdout).not.toContain('all selected systemd units match');
+  });
 });
 
 describe('release-proof explicit unit scope', () => {
@@ -192,10 +382,12 @@ describe('release-proof explicit unit scope', () => {
     const res = run([
       '--repo-root', repo, '--systemd-dir', systemd, '--bin-dir', bin,
       '--unit', ...MONITOR_UNITS,
-      '--wrapper',
+      '--no-wrappers',
     ]);
     expect(res.status).toBe(0);
-    expect(res.stdout).toContain('all managed systemd units match');
+    expect(res.stderr).not.toContain('unbound variable');
+    expect(res.stdout).toContain('wrapper checks: not applicable (--no-wrappers)');
+    expect(res.stdout).toContain('all selected systemd units match; wrapper checks not applicable');
     for (const unit of MONITOR_UNITS) expect(res.stdout).toContain(`ok: ${unit}`);
   });
 
@@ -206,10 +398,11 @@ describe('release-proof explicit unit scope', () => {
     const res = run([
       '--repo-root', repo, '--systemd-dir', systemd, '--bin-dir', bin,
       '--unit', ...MONITOR_UNITS,
-      '--wrapper',
+      '--no-wrappers',
     ]);
     expect(res.status).toBe(1);
     expect(res.stderr).toContain('drift: bot-errors-tree-provenance.timer');
+    expect(res.stdout).not.toContain('all selected systemd units match');
   });
 
   it('missing systemd dir is inconclusive (exit 3), not a pass', () => {
@@ -217,7 +410,7 @@ describe('release-proof explicit unit scope', () => {
     const res = run([
       '--repo-root', repo, '--systemd-dir', join(repo, 'nonexistent-systemd'), '--bin-dir', bin,
       '--unit', ...MONITOR_UNITS,
-      '--wrapper',
+      '--no-wrappers',
     ]);
     expect(res.status).toBe(3);
     expect(res.stdout).toContain('SKIP');

@@ -517,7 +517,14 @@ The pilot always passes all four monitor unit names explicitly:
     bash scripts/check-unit-drift.sh --unit \
       bot-errors-tree-provenance.service bot-errors-tree-provenance.timer \
       bot-errors-runtime-staleness.service bot-errors-runtime-staleness.timer \
-      --wrapper
+      --no-wrappers
+
+The explicit `--no-wrappers` applicability decision is limited to these four
+monitor units, which do not execute a registered managed wrapper; the checker
+validates both registered installed aliases and implementation paths against
+the selected checked-in unit bytes. Empty `--unit` and
+`--wrapper` selectors, repeated selectors, and mixed wrapper-selection modes are
+usage errors and never erase or replace earlier scope.
 
 plus `install-bot-errors-release-proof.sh verify`, which additionally checks
 loaded fragment paths and drop-ins via `systemctl --user show`, and requires

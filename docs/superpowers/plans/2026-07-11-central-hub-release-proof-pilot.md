@@ -1168,10 +1168,11 @@ git commit -m "feat(bot-errors): hardened release-proof monitor units (tree + ru
 ### Task 6: Unit-drift explicit four-unit scope
 
 **Files:**
-- Test: `tests/scripts/unit-drift.test.ts` (no change to `scripts/check-unit-drift.sh` — it already supports `--unit NAME ...` and exits 3 when the systemd dir is missing, which is the Inconclusive path)
+- Implementation: `scripts/check-unit-drift.sh`
+- Test: `tests/scripts/unit-drift.test.ts`
 
 **Interfaces:**
-- Consumes: `scripts/check-unit-drift.sh` CLI (`--repo-root`, `--systemd-dir`, `--bin-dir`, `--unit`, `--wrapper`).
+- Consumes: `scripts/check-unit-drift.sh` CLI (`--repo-root`, `--systemd-dir`, `--bin-dir`, `--unit`, `--wrapper`, `--no-wrappers`). Empty or repeated selectors and mixed wrapper modes are usage errors; `--no-wrappers` is the explicit unit-only applicability decision.
 - Produces: proof that the pilot's explicit invocation `--unit <four monitor units>` passes/fails/skips correctly. The runbook (Task 11) documents this exact invocation.
 
 - [ ] **Step 1: Write the failing tests**
@@ -1201,10 +1202,10 @@ describe('release-proof explicit unit scope', () => {
     const res = run([
       '--repo-root', repo, '--systemd-dir', systemd, '--bin-dir', bin,
       '--unit', ...MONITOR_UNITS,
-      '--wrapper',
+      '--no-wrappers',
     ]);
     expect(res.status).toBe(0);
-    expect(res.stdout).toContain('all managed systemd units match');
+    expect(res.stdout).toContain('all selected systemd units match; wrapper checks not applicable');
     for (const unit of MONITOR_UNITS) expect(res.stdout).toContain(`ok: ${unit}`);
   });
 
@@ -1215,7 +1216,7 @@ describe('release-proof explicit unit scope', () => {
     const res = run([
       '--repo-root', repo, '--systemd-dir', systemd, '--bin-dir', bin,
       '--unit', ...MONITOR_UNITS,
-      '--wrapper',
+      '--no-wrappers',
     ]);
     expect(res.status).toBe(1);
     expect(res.stderr).toContain('drift: bot-errors-tree-provenance.timer');
@@ -1226,7 +1227,7 @@ describe('release-proof explicit unit scope', () => {
     const res = run([
       '--repo-root', repo, '--systemd-dir', join(repo, 'nonexistent-systemd'), '--bin-dir', bin,
       '--unit', ...MONITOR_UNITS,
-      '--wrapper',
+      '--no-wrappers',
     ]);
     expect(res.status).toBe(3);
     expect(res.stdout).toContain('SKIP');
@@ -1234,18 +1235,33 @@ describe('release-proof explicit unit scope', () => {
 });
 ```
 
-(`--wrapper` given with no values clears the default wrapper list, keeping the fixture minimal.)
+The same test file first adds parser-boundary cases proving that empty
+`--unit` and `--wrapper` selectors exit `2`, mixed `--wrapper` /
+`--no-wrappers` modes exit `2`, repeated selection modes exit `2`, a selected
+unit that references a registered managed-wrapper alias or implementation path
+cannot claim wrapper non-applicability, and an explicit non-empty wrapper
+remains a passing safe neighbor. The runner invokes `/bin/bash` so the macOS Bash 3.2
+nounset boundary is exercised deterministically.
 
-- [ ] **Step 2: Run — these should already pass**
+(`--no-wrappers` positively records that wrapper checks are not applicable to
+these four monitor units. The checker proves that no selected checked-in unit
+references a registered managed-wrapper alias, repository-relative
+implementation path, or implementation basename. Empty, repeated, or mixed
+selectors are rejected instead of silently reducing scope.)
+
+- [ ] **Step 2: Run — prove the parser and Bash 3.2 boundary**
 
 Run: `npx vitest run --pool=forks tests/scripts/unit-drift.test.ts`
-Expected: PASS immediately (the script already supports this). These tests exist to pin the pilot's exact invocation shape; if any fail, that is a real finding in `check-unit-drift.sh` — stop and investigate rather than adjusting the test.
+Expected before the implementation patch: FAIL because `--no-wrappers` is not
+yet supported and empty selectors can erase scope. Expected after the smallest
+parser and Bash 3.2-safe iteration patch: PASS. These tests pin the pilot's exact
+invocation shape; do not adjust them to preserve silent under-selection.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add tests/scripts/unit-drift.test.ts
-git commit -m "test(bot-errors): pin explicit release-proof unit-drift scope"
+git add scripts/check-unit-drift.sh tests/scripts/unit-drift.test.ts
+git commit -m "fix(bot-errors): fail closed on unit-drift scope selection"
 ```
 
 ---
@@ -2318,7 +2334,7 @@ The pilot always passes all four monitor unit names explicitly:
     bash scripts/check-unit-drift.sh --unit \
       bot-errors-tree-provenance.service bot-errors-tree-provenance.timer \
       bot-errors-runtime-staleness.service bot-errors-runtime-staleness.timer \
-      --wrapper
+      --no-wrappers
 
 plus `install-bot-errors-release-proof.sh verify`, which additionally checks
 loaded fragment paths and drop-ins via `systemctl --user show`.

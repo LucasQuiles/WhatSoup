@@ -14,14 +14,18 @@ UNITS=(
   "harness-maintenance.service"
   "harness-maintenance.timer"
 )
-WRAPPERS=(
+UNIT_SCOPE="default"
+MANAGED_WRAPPERS=(
   "whatsoup-ensure-node:deploy/scripts/ensure-node-installed.sh"
 )
+WRAPPERS=("${MANAGED_WRAPPERS[@]}")
+WRAPPER_SCOPE="default"
 
 usage() {
   cat <<'USAGE'
 Usage: check-unit-drift.sh [--repo-root PATH] [--systemd-dir PATH] [--unit NAME ...]
                            [--bin-dir PATH] [--wrapper NAME:REL_PATH ...]
+                           [--no-wrappers]
                            [--allow-missing-systemd-dir]
 
 Compare checked-in deploy/*.service|*.timer files with installed systemd user
@@ -29,7 +33,8 @@ units, and verify installed systemd helper wrappers that units execute. Exits 0
 when all managed installed units match and wrappers satisfy their restart-safety
 contracts, 1 when a unit/wrapper is missing or drifted, 3 when the systemd
 directory is absent (unless --allow-missing-systemd-dir is passed, in which
-case exits 0 with a skip message).
+case exits 0 with a skip message). Unit and wrapper selection options may each
+appear at most once.
 USAGE
 }
 
@@ -52,20 +57,62 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     --unit)
-      UNITS=()
+      if [ "$UNIT_SCOPE" = "explicit" ]; then
+        echo "--unit cannot be repeated" >&2
+        usage >&2
+        exit 2
+      fi
       shift
+      if [ "$#" -eq 0 ] || [[ "$1" == --* ]]; then
+        echo "missing --unit value: expected at least one NAME" >&2
+        usage >&2
+        exit 2
+      fi
+      UNIT_SCOPE="explicit"
+      UNITS=()
       while [ "$#" -gt 0 ] && [[ "$1" != --* ]]; do
         UNITS+=("$1")
         shift
       done
       ;;
     --wrapper)
-      WRAPPERS=()
+      if [ "$WRAPPER_SCOPE" = "none" ]; then
+        echo "--no-wrappers cannot be combined with --wrapper" >&2
+        usage >&2
+        exit 2
+      fi
+      if [ "$WRAPPER_SCOPE" = "explicit" ]; then
+        echo "--wrapper cannot be repeated" >&2
+        usage >&2
+        exit 2
+      fi
       shift
+      if [ "$#" -eq 0 ] || [[ "$1" == --* ]]; then
+        echo "missing --wrapper value: expected at least one NAME:REL_PATH" >&2
+        usage >&2
+        exit 2
+      fi
+      WRAPPER_SCOPE="explicit"
+      WRAPPERS=()
       while [ "$#" -gt 0 ] && [[ "$1" != --* ]]; do
         WRAPPERS+=("$1")
         shift
       done
+      ;;
+    --no-wrappers)
+      if [ "$WRAPPER_SCOPE" = "explicit" ]; then
+        echo "--no-wrappers cannot be combined with --wrapper" >&2
+        usage >&2
+        exit 2
+      fi
+      if [ "$WRAPPER_SCOPE" = "none" ]; then
+        echo "--no-wrappers cannot be repeated" >&2
+        usage >&2
+        exit 2
+      fi
+      WRAPPER_SCOPE="none"
+      WRAPPERS=()
+      shift
       ;;
     -h|--help)
       usage
@@ -95,6 +142,26 @@ if [ ! -d "$SYSTEMD_DIR" ]; then
   exit 3
 fi
 
+if [ "$WRAPPER_SCOPE" = "none" ]; then
+  for unit in "${UNITS[@]}"; do
+    repo_unit="$REPO_ROOT/deploy/$unit"
+    if [ ! -f "$repo_unit" ]; then
+      continue
+    fi
+    for entry in "${MANAGED_WRAPPERS[@]}"; do
+      name="${entry%%:*}"
+      rel="${entry#*:}"
+      implementation_name="${rel##*/}"
+      if grep -qF "$name" "$repo_unit" \
+        || grep -qF "$rel" "$repo_unit" \
+        || grep -qF "$implementation_name" "$repo_unit"; then
+        echo "--no-wrappers is not applicable: deploy/$unit references managed wrapper $name ($rel)" >&2
+        exit 2
+      fi
+    done
+  done
+fi
+
 failures=0
 for unit in "${UNITS[@]}"; do
   repo_unit="$REPO_ROOT/deploy/$unit"
@@ -121,6 +188,9 @@ for unit in "${UNITS[@]}"; do
   fi
 done
 
+if [ "$WRAPPER_SCOPE" = "none" ]; then
+  echo "wrapper checks: not applicable (--no-wrappers)"
+else
 for entry in "${WRAPPERS[@]}"; do
   name="${entry%%:*}"
   rel="${entry#*:}"
@@ -170,10 +240,15 @@ for entry in "${WRAPPERS[@]}"; do
       ;;
   esac
 done
+fi
 
 if [ "$failures" -gt 0 ]; then
   echo "unit drift check failed: $failures problem(s)" >&2
   exit 1
 fi
 
-echo "all managed systemd units match"
+if [ "$WRAPPER_SCOPE" = "none" ]; then
+  echo "all selected systemd units match; wrapper checks not applicable"
+else
+  echo "all managed systemd units match"
+fi

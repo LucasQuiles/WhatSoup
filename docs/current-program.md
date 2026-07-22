@@ -6,12 +6,14 @@ source of truth for scoped planning artifacts.
 
 **Last refreshed:** 2026-07-22
 **Index source:** `docs/work-index.json` schema v5, generated at
-`2026-07-22T11:12:26Z` while HEAD was `7f8f63c63b2561b7e0bf4a76fafee9c80dadfae8`
-**Current integration:** local merge `7f8f63c63b2561b7e0bf4a76fafee9c80dadfae8`
-with first parent `626db87d34cb3b1d41bedd82757cb01be7035a6f` and second parent
-`abe6fe592a2f704deeccf8cc5338abd5a3f8997a`. The regenerated index reads the admitted
-worktree planning bytes while recording that precommit HEAD; no committed-byte completion
-is claimed until the declared postcommit terminal checks complete.
+`2026-07-22T12:31:42Z` while HEAD was `a05d3fe72411439902f7606327bfab4d16717de5`
+**Index lineage at refresh:** source checkpoint `a05d3fe72411439902f7606327bfab4d16717de5`,
+whose parent is local integration merge `7f8f63c63b2561b7e0bf4a76fafee9c80dadfae8`.
+That merge has first parent `626db87d34cb3b1d41bedd82757cb01be7035a6f`
+and second parent `abe6fe592a2f704deeccf8cc5338abd5a3f8997a`. The regenerated
+index reads the admitted worktree planning bytes while recording the checkpoint HEAD;
+no committed-byte completion is claimed until the declared postcommit terminal checks
+complete.
 **Policy:** [`docs/canonical-status-policy.md`](canonical-status-policy.md)
 **Review cadence:** [`docs/runbooks/objective-tracking.md`](runbooks/objective-tracking.md)
 **Project map:** [`docs/project-map.md`](project-map.md)
