@@ -574,3 +574,85 @@ describe('quality workflow composition', () => {
     expect(tagReleaseWorkflow).toContain('run: npm run guard:repo:commit-authors');
   });
 });
+
+/**
+ * Local push gate ⊄ CI: a guard that runs ONLY in `verify:push:branch` is enforced by a
+ * client-side hook, and client-side hooks are advisory. `gh pr merge`, the GitHub merge
+ * button, `--no-verify`, or a clone where husky was never installed all bypass it entirely.
+ *
+ * Real instance (2026-07-22): `guard:transport-patterns` backed three `severity: 'block'`
+ * registry rules — `hygiene.no-wa-jid-literal-in-generic-ui`,
+ * `hygiene.no-whatsapp-copy-in-generic-ui`, `hygiene.no-health-whatsapp-key-read` — and
+ * appeared in NO workflow and not in `verify:release`. Its only CI-executed test asserted
+ * `violations.length > 0`, a smoke test that passes just as happily with MORE violations.
+ * So a PR merged through the UI could ship a new violation of a block rule with nothing
+ * catching it. It is now a named step in `quality.yml`.
+ *
+ * A guard may legitimately have no named CI step when something else runs the same
+ * assertion on the live tree inside the full suite (which CI runs via `coverage:check`).
+ * That is fine — but it must be STATED, not assumed, which is what the exemption map is
+ * for. The second test deletes stale entries by failing when an exemption is no longer
+ * needed, so the map cannot quietly become a list of excuses.
+ */
+const CI_EXEMPT_PUSH_GATE_GUARDS: Readonly<Record<string, string>> = {
+  'guard:ssot-patterns':
+    'tests/scripts/ssot-pattern-guard.test.ts asserts every rule count equals BOTH baseline twins against REPO_ROOT — an exact-count ratchet, not a smoke test.',
+  'guard:ring-boundary-ratchet':
+    'tests/scripts/ring-boundary-guard.test.ts asserts verdict.count === baseline against the live REPO_ROOT.',
+  'guard:doc-tally':
+    'tests/scripts/guard-doc-tally.test.ts runs validateDocTally + runDocTallyGuard against REPO_ROOT.',
+  'guard:guard-test-coverage':
+    'tests/scripts/guard-test-coverage-check.test.ts runs findGuardsMissingTests against the live repo root.',
+  'guard:deployer-static':
+    'tests/scripts/deployer-static-parity.test.ts reads the deploy script and package.json from the live repoRoot.',
+  'guard:publication:staged':
+    'quality.yml runs guard:publication:all (--all), which scans every tracked doc and is a strict superset of the --staged subset.',
+};
+
+describe('pre-push guard — local/CI enforcement parity for guard steps', () => {
+  const pushGateGuards = [
+    ...new Set(
+      [...(packageJson.scripts['verify:push:branch'] ?? '').matchAll(/npm run (guard:[a-z0-9:._-]+)/g)].map(
+        (m) => m[1],
+      ),
+    ),
+  ].sort();
+
+  const namedInCi = (guard: string): boolean =>
+    new RegExp(`npm run ${guard.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![a-z0-9:._-])`).test(qualityWorkflow);
+
+  it('the push gate actually contains guards (the scan is not vacuous)', () => {
+    expect(pushGateGuards.length).toBeGreaterThan(20);
+  });
+
+  it('every push-gate guard is either a named CI step or an explicitly justified exemption', () => {
+    const unbacked = pushGateGuards.filter((g) => !namedInCi(g) && !(g in CI_EXEMPT_PUSH_GATE_GUARDS));
+    expect(
+      unbacked,
+      unbacked.length === 0
+        ? ''
+        : `These guards run ONLY in the local push gate, which any server-side merge bypasses:\n` +
+          unbacked.map((g) => `  - ${g}`).join('\n') +
+          `\nAdd a named step to .github/workflows/quality.yml, or add an entry to ` +
+          `CI_EXEMPT_PUSH_GATE_GUARDS naming the live-tree test that enforces it in the full suite.`,
+    ).toEqual([]);
+  });
+
+  it('no stale exemptions — an exempted guard that gained a CI step must leave the map', () => {
+    const nowRedundant = Object.keys(CI_EXEMPT_PUSH_GATE_GUARDS).filter((g) => namedInCi(g));
+    expect(
+      nowRedundant,
+      `These now have a named CI step, so their exemption is obsolete — delete it: ${nowRedundant.join(', ')}`,
+    ).toEqual([]);
+  });
+
+  it('every exemption names a real guard that the push gate actually runs', () => {
+    const orphaned = Object.keys(CI_EXEMPT_PUSH_GATE_GUARDS).filter((g) => !pushGateGuards.includes(g));
+    expect(orphaned, `exemptions for guards not in verify:push:branch: ${orphaned.join(', ')}`).toEqual([]);
+  });
+
+  it('guard:transport-patterns has a named CI step (the block rules it backs are not hook-only)', () => {
+    // The specific regression. Three severity:'block' rules depended on a client-side hook.
+    expect(qualityWorkflow).toMatch(/npm run guard:transport-patterns/);
+  });
+});
