@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+import { isRecord } from '../../../src/lib/type-guards.ts';
 import { parseBoundaryJsonBytes } from '../verification/boundary-run/schema.ts';
 import { isValidGitRefName, type OutgoingRefPolicyV1 } from './ref-policy.ts';
 
@@ -242,10 +243,6 @@ const APPROVED_REMOTE_KEYS = ['name', 'repositoryId'] as const;
 
 function issue(code: string, path: string, message: string): ManifestIssue {
   return { code, path, message };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function inspectExactObject(
