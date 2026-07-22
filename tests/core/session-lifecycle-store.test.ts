@@ -311,6 +311,34 @@ describe('SessionLifecycleStore through DurabilityEngine', () => {
     expect(durability.getSessionCheckpoint('graceful-a')?.session_status).toBe('suspended');
   });
 
+  it('reconciles an exact orphaned logical session during graceful shutdown', () => {
+    const rowId = insertAgentRow(
+      db,
+      'orphaned-logical-session',
+      'orphaned',
+      'orphaned-logical',
+      'opencode-cli',
+    );
+    durability.upsertSessionCheckpoint('orphaned-logical', {
+      sessionId: 'orphaned-logical-session',
+      sessionStatus: 'orphaned',
+    });
+
+    durability.closeSessionLifecycle({
+      agentSessionRowId: rowId,
+      providerSessionId: 'orphaned-logical-session',
+      provider: 'opencode-cli',
+      conversationKey: 'orphaned-logical',
+      status: 'ended',
+    });
+
+    expect(agentRow(db, rowId)).toMatchObject({
+      status: 'ended',
+      ended_at: expect.any(String),
+    });
+    expect(durability.getSessionCheckpoint('orphaned-logical')?.session_status).toBe('ended');
+  });
+
   it('rejects a foreign-provider reactivation without changing row or checkpoint bytes', () => {
     const rowId = insertAgentRow(db, 'foreign-resume-session', 'suspended', 'foreign-resume');
     durability.upsertSessionCheckpoint('foreign-resume', {

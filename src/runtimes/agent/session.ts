@@ -38,6 +38,7 @@ import { OpenAIApiProvider } from './providers/openai-api.ts';
 import { AnthropicApiProvider } from './providers/anthropic-api.ts';
 import {
   PROVIDER_IDS,
+  executionModeForProvider,
   isProviderId,
   assertNeverProvider,
   type ProviderId,
@@ -674,17 +675,11 @@ export class SessionManager {
 
   /** Whether this provider uses a spawn-per-turn model (vs. long-running stdin pipe). */
   private get isSpawnPerTurn(): boolean {
-    // Claude CLI, Codex app-server, and Gemini ACP are persistent subprocesses.
-    // HTTP API providers are managed-loop sessions and never spawn a child.
-    // Others (opencode) still spawn per turn.
-    return !this.isManagedLoopProvider
-      && this.provider !== 'claude-cli'
-      && this.provider !== 'codex-cli'
-      && this.provider !== 'gemini-cli';
+    return executionModeForProvider(this.assertKnownProvider('isSpawnPerTurn')) === 'spawn_per_turn';
   }
 
   private get isManagedLoopProvider(): boolean {
-    return this.provider === 'openai-api' || this.provider === 'anthropic-api';
+    return executionModeForProvider(this.assertKnownProvider('isManagedLoopProvider')) === 'managed_loop';
   }
 
   private createManagedProviderSession(): ProviderSession {
