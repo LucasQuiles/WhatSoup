@@ -10,8 +10,10 @@ import { describe, expect, it } from 'vitest';
 
 import {
   CI_EXEMPT_PUSH_GATE_GUARDS,
+  backstopReachability,
   namedInCi,
   pushGateGuards,
+  runsFullSuite,
   scriptReachability,
   type GateInputs,
 } from './gate-membership.ts';
@@ -22,7 +24,12 @@ const inputs = (overrides: Partial<GateInputs> = {}): GateInputs => ({
     'guard:alpha': 'echo alpha',
     'guard:ssot-patterns': 'echo ssot',
   },
-  qualityWorkflow: '      - name: Alpha\n        run: npm run guard:alpha\n',
+  // Models quality.yml: a named guard step AND the full suite.
+  qualityWorkflow:
+    '      - name: Alpha\n        run: npm run guard:alpha\n' +
+    '      - name: Tests\n        run: npm run coverage:check\n',
+  // Models tag-release-gate.yml: discrete guard steps, NO unit suite.
+  tagReleaseWorkflow: '      - name: Alpha\n        run: npm run guard:alpha\n',
   ...overrides,
 });
 
@@ -83,7 +90,10 @@ describe('scriptReachability', () => {
     const r = scriptReachability('guard:lonely', gate);
     expect(r.reachable).toBe(false);
     expect(r.via).toBe('none');
-    expect(r.detail).toMatch(/bypasses it/);
+    // The message must NAME the path it is talking about — an unreachability report that
+    // does not say which gate is the ambiguity this helper was made path-aware to remove.
+    expect(r.detail).toMatch(/pull-request/);
+    expect(r.detail).toMatch(/does not run it/);
   });
 
   it('does NOT grant an exemption to a guard the push gate does not actually run', () => {
@@ -95,6 +105,55 @@ describe('scriptReachability', () => {
 
   it('reports UNREACHABLE for a script that appears nowhere at all', () => {
     expect(scriptReachability('guard:does-not-exist', inputs()).reachable).toBe(false);
+  });
+});
+
+describe('per-path reachability — the two gates are NOT equivalent', () => {
+  it('runsFullSuite is derived from the workflow text, not hardcoded per path', () => {
+    expect(runsFullSuite('pull-request', inputs())).toBe(true);
+    expect(runsFullSuite('tag-release', inputs())).toBe(false);
+    // If the tag gate ever gains the suite, the answer must follow the bytes.
+    const upgraded = inputs({ tagReleaseWorkflow: 'run: npm run coverage:check\n' });
+    expect(runsFullSuite('tag-release', upgraded)).toBe(true);
+  });
+
+  it('an exempted push-gate guard is reachable on pull-request but NOT on tag-release', () => {
+    // The whole point of making this path-aware. The exemption rests on a live-tree test
+    // inside the full suite; the tag gate never runs that suite, so the guard is genuinely
+    // unreachable there while remaining reachable on the PR path.
+    expect(scriptReachability('guard:ssot-patterns', inputs(), 'pull-request').reachable).toBe(true);
+    const tag = scriptReachability('guard:ssot-patterns', inputs(), 'tag-release');
+    expect(tag.reachable).toBe(false);
+    expect(tag.detail).toMatch(/does not run the full suite/);
+  });
+
+  it('a guard named in BOTH workflows is reachable on both', () => {
+    expect(scriptReachability('guard:alpha', inputs(), 'pull-request').reachable).toBe(true);
+    expect(scriptReachability('guard:alpha', inputs(), 'tag-release').reachable).toBe(true);
+  });
+
+  it('defaults to the pull-request path when none is given', () => {
+    expect(scriptReachability('guard:ssot-patterns', inputs())).toEqual(
+      scriptReachability('guard:ssot-patterns', inputs(), 'pull-request'),
+    );
+  });
+
+  it('a test-file backstop tracks runsFullSuite on each path', () => {
+    // Test-file backstops were handled inline in the calling suite before, which is how the
+    // npm-script half became path-aware while this half silently did not.
+    const entry = 'tests/scripts/anything.test.ts';
+    expect(backstopReachability(entry, inputs(), 'pull-request').reachable).toBe(true);
+    const tag = backstopReachability(entry, inputs(), 'tag-release');
+    expect(tag.reachable).toBe(false);
+    expect(tag.detail).toMatch(/does not run the full suite/);
+  });
+
+  it('backstopReachability routes npm scripts to scriptReachability unchanged', () => {
+    for (const path of ['pull-request', 'tag-release'] as const) {
+      expect(backstopReachability('guard:ssot-patterns', inputs(), path)).toEqual(
+        scriptReachability('guard:ssot-patterns', inputs(), path),
+      );
+    }
   });
 });
 
