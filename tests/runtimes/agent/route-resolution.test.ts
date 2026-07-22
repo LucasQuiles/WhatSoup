@@ -14,6 +14,11 @@
 import { describe, it, expect } from 'vitest';
 import { resolveRoute, type RouteInputs } from '../../../src/runtimes/agent/route-resolution.ts';
 import type { ChatModelPreference } from '../../../src/runtimes/agent/chat-preference-db.ts';
+import {
+  PROVIDER_DATA_POLICY_VERSION,
+  ProviderDataPolicyError,
+  providerRoutePolicyKey,
+} from '../../../src/core/provider-data-policy.ts';
 
 function pref(overrides: Partial<ChatModelPreference> = {}): ChatModelPreference {
   return {
@@ -46,6 +51,9 @@ function inputs(overrides: Partial<RouteInputs> = {}): RouteInputs {
     // via override — keeps every existing exact-`toEqual` assertion (e.g.
     // codex-cli pin → model: undefined) unaffected.
     configuredModelByProvider: {},
+    agentDataPolicy: 'trusted',
+    boundaryMode: 'shadow',
+    configuredDataPolicyByRoute: {},
     ...overrides,
   };
 }
@@ -57,12 +65,15 @@ describe('resolveRoute precedence', () => {
       model: 'opus-4-8',
       source: 'default',
       reasonCode: 'no_preference',
+      dataPolicy: 'trusted',
+      policyVersion: PROVIDER_DATA_POLICY_VERSION,
+      policyState: 'classified',
     });
   });
 
   it('active fallback window beats everything, including an eligible pin', () => {
     const d = resolveRoute(inputs({
-      fallbackEntry: { provider: 'opencode-cli', model: 'glm-4.7' },
+      fallbackEntry: { provider: 'opencode-cli', model: 'glm-4.7', dataPolicy: 'trusted' },
       pref: pref({ intent: 'provider_specific', requestedProvider: 'codex-cli' }),
       pinnedProviderEligible: true,
     }));
@@ -71,6 +82,9 @@ describe('resolveRoute precedence', () => {
       model: 'glm-4.7',
       source: 'fallback',
       reasonCode: 'fallback_window_active',
+      dataPolicy: 'trusted',
+      policyVersion: PROVIDER_DATA_POLICY_VERSION,
+      policyState: 'classified',
     });
   });
 
@@ -90,6 +104,9 @@ describe('resolveRoute precedence', () => {
       model: undefined,
       source: 'preference',
       reasonCode: 'user_pin',
+      dataPolicy: null,
+      policyVersion: PROVIDER_DATA_POLICY_VERSION,
+      policyState: 'missing',
     });
   });
 
@@ -115,6 +132,9 @@ describe('resolveRoute precedence', () => {
       model: undefined,
       source: 'preference',
       reasonCode: 'intent_strongest',
+      dataPolicy: null,
+      policyVersion: PROVIDER_DATA_POLICY_VERSION,
+      policyState: 'missing',
     });
   });
 
@@ -200,6 +220,9 @@ describe('resolveRoute precedence', () => {
       model: undefined,
       source: 'preference',
       reasonCode: 'user_pin',
+      dataPolicy: null,
+      policyVersion: PROVIDER_DATA_POLICY_VERSION,
+      policyState: 'missing',
     });
   });
 
@@ -256,5 +279,51 @@ describe('resolveRoute precedence', () => {
     }));
     expect(d.provider).toBe('claude-cli');
     expect(d.source).toBe('tier_unconfigured_default');
+  });
+
+  it('selects policy by the exact fallback provider/model route', () => {
+    const first = resolveRoute(inputs({
+      fallbackEntry: { provider: 'openai-api', model: 'gpt-5-mini', dataPolicy: 'trusted' },
+    }));
+    const second = resolveRoute(inputs({
+      fallbackEntry: { provider: 'openai-api', model: 'gpt-5', dataPolicy: 'restricted' },
+    }));
+
+    expect(first.dataPolicy).toBe('trusted');
+    expect(second.dataPolicy).toBe('restricted');
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(Object.isFrozen(second)).toBe(true);
+  });
+
+  it('uses the exact configured target policy for pin and tier routes', () => {
+    const configuredModelByProvider = { 'openai-api': 'gpt-5' };
+    const configuredDataPolicyByRoute = {
+      [providerRoutePolicyKey('openai-api', 'gpt-5-mini')]: 'trusted' as const,
+      [providerRoutePolicyKey('openai-api', 'gpt-5')]: 'restricted' as const,
+    };
+    const pin = resolveRoute(inputs({
+      pref: pref({ intent: 'provider_specific', requestedProvider: 'openai-api' }),
+      pinnedProviderEligible: true,
+      configuredModelByProvider,
+      configuredDataPolicyByRoute,
+    }));
+    const tier = resolveRoute(inputs({
+      pref: pref({ intent: 'strongest' }),
+      tierMap: { strongest: 'openai-api' },
+      tierProviderEligible: true,
+      configuredModelByProvider,
+      configuredDataPolicyByRoute,
+    }));
+
+    expect(pin).toMatchObject({ model: 'gpt-5', dataPolicy: 'restricted' });
+    expect(tier).toMatchObject({ model: 'gpt-5', dataPolicy: 'restricted' });
+  });
+
+  it('throws typed enforcement errors before admitting an unclassified selected route', () => {
+    expect(() => resolveRoute(inputs({
+      boundaryMode: 'enforce',
+      pref: pref({ intent: 'provider_specific', requestedProvider: 'codex-cli' }),
+      pinnedProviderEligible: true,
+    }))).toThrow(ProviderDataPolicyError);
   });
 });

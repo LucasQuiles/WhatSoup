@@ -9,6 +9,11 @@ import { join } from 'node:path';
 import type { Database } from '../../core/database.ts';
 import type { Messenger } from '../../core/types.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
+import {
+  assertCheckpointRoutePolicyCompatible,
+  type ProviderCheckpointRoutePolicy,
+  type ProviderRoutePolicy,
+} from '../../core/provider-data-policy.ts';
 import type { SessionContext } from '../../mcp/types.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
@@ -163,6 +168,7 @@ export interface SessionManagerOptions {
   configSystemPrompt?: string;
   instructionsPath?: string;
   model?: string;
+  routePolicy?: ProviderRoutePolicy;
   pluginDirs?: string[];
   allowM365Mutations?: boolean;
   provider?: string;
@@ -522,6 +528,7 @@ export class SessionManager {
   private readonly configSystemPrompt: string | undefined;
   private readonly instructionsPath: string | undefined;
   private readonly model: string | undefined;
+  private readonly routePolicy: ProviderRoutePolicy | undefined;
   private readonly pluginDirs: string[];
   private readonly allowM365Mutations: boolean | undefined;
   private readonly provider: string;
@@ -635,6 +642,7 @@ export class SessionManager {
     this.configSystemPrompt = opts.configSystemPrompt;
     this.instructionsPath = opts.instructionsPath;
     this.model = opts.model;
+    this.routePolicy = opts.routePolicy;
     this.pluginDirs = opts.pluginDirs ?? [];
     this.allowM365Mutations = opts.allowM365Mutations;
     this.provider = opts.provider ?? 'claude-cli';
@@ -647,6 +655,12 @@ export class SessionManager {
         `[session-manager] unknown provider id: ${JSON.stringify(this.provider)}. ` +
           `Valid: ${PROVIDER_IDS.join(', ')}.`,
       );
+    }
+    if (
+      this.routePolicy
+      && (this.routePolicy.provider !== this.provider || this.routePolicy.model !== this.model)
+    ) {
+      throw new Error('Session route policy provider/model must match the admitted provider route');
     }
     this.providerConfig = opts.providerConfig;
     this.mcpBridge = opts.mcpBridge;
@@ -668,6 +682,10 @@ export class SessionManager {
     if (this.mcpSessionContext) {
       this.mcpSessionContext.actorJid = actorJid;
     }
+  }
+
+  getRoutePolicy(): ProviderRoutePolicy | undefined {
+    return this.routePolicy;
   }
 
   // ─── Provider helpers ─────────────────────────────────────────────────────
@@ -1180,7 +1198,50 @@ export class SessionManager {
         this.updateCheckpointStatus('active', resumeSessionId ?? null);
       }
     }
+    this.persistRoutePolicyCheckpoint();
     return rowId;
+  }
+
+  private routePolicyCheckpointState(): string | null {
+    if (!this.routePolicy) return null;
+    return JSON.stringify({
+      providerRoutePolicy: {
+        provider: this.routePolicy.provider,
+        dataPolicy: this.routePolicy.dataPolicy,
+        policyVersion: this.routePolicy.policyVersion,
+      },
+    });
+  }
+
+  private persistRoutePolicyCheckpoint(): void {
+    const watchdogState = this.routePolicyCheckpointState();
+    if (watchdogState === null) return;
+    if (this.durability) {
+      this.durability.upsertSessionCheckpoint(this.conversationKey, { watchdogState });
+      return;
+    }
+    this.db.raw.prepare(
+      `UPDATE session_checkpoints
+       SET watchdog_state = ?, updated_at = datetime('now')
+       WHERE conversation_key = ?`,
+    ).run(watchdogState, this.conversationKey);
+  }
+
+  private readCheckpointRoutePolicy(providerSessionId: string): ProviderCheckpointRoutePolicy | null {
+    const row = this.db.raw.prepare(
+      `SELECT watchdog_state
+       FROM session_checkpoints
+       WHERE conversation_key = ? AND session_id = ?`,
+    ).get(this.conversationKey, providerSessionId) as { watchdog_state: string | null } | undefined;
+    if (!row?.watchdog_state) return null;
+    try {
+      const parsed = JSON.parse(row.watchdog_state) as Record<string, unknown>;
+      const route = parsed['providerRoutePolicy'];
+      if (typeof route !== 'object' || route === null || Array.isArray(route)) return null;
+      return route as ProviderCheckpointRoutePolicy;
+    } catch {
+      return null;
+    }
   }
 
   private resetFailedSessionStart(preservedChild: ReturnType<typeof spawn> | null = null): void {
@@ -1341,6 +1402,17 @@ export class SessionManager {
         ...(existingRowId === undefined ? {} : { agentSessionRowId: existingRowId }),
         workspaceKey: this.conversationKey,
       }).id;
+      if (this.routePolicy) {
+        try {
+          assertCheckpointRoutePolicyCompatible(
+            this.routePolicy,
+            this.readCheckpointRoutePolicy(resumeSessionId),
+          );
+        } catch (err) {
+          this.retireUnsupportedResume(resumeSessionId, resolvedRowId);
+          throw err;
+        }
+      }
     }
     if (resumeSessionId !== undefined && !providerSupportsResume(provider)) {
       this.retireUnsupportedResume(resumeSessionId, resolvedRowId!);
@@ -1375,6 +1447,7 @@ export class SessionManager {
           resumeSessionId,
           resolvedRowId,
         );
+        this.persistRoutePolicyCheckpoint();
       } catch (err) {
         log.error({ err, chatJid: this.chatJid, provider: this.provider }, 'session: failed to persist managed provider');
         this.resetFailedSessionStart();
@@ -1386,6 +1459,7 @@ export class SessionManager {
           cwd,
           systemPrompt,
           model: this.model,
+          routePolicy: this.routePolicy,
           pluginDirs: this.pluginDirs,
           allowM365Mutations: this.allowM365Mutations,
           instanceName: this.instanceName,
@@ -1472,6 +1546,7 @@ export class SessionManager {
           resumeSessionId,
           resolvedRowId,
         );
+        this.persistRoutePolicyCheckpoint();
       } catch (err) {
         log.error({ err, chatJid: this.chatJid, provider: this.provider }, 'session: failed to persist spawn-per-turn provider');
         this.resetFailedSessionStart();
@@ -1545,6 +1620,7 @@ export class SessionManager {
         resumeSessionId,
         resolvedRowId,
       );
+      this.persistRoutePolicyCheckpoint();
     } catch (err) {
       log.error({ err, pid, chatJid: this.chatJid, existingRowId: resolvedRowId ?? null }, 'session: failed to persist spawned child lifecycle');
       let cleanupError: unknown = null;

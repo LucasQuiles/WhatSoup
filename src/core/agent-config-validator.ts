@@ -33,6 +33,11 @@ import {
   FALLBACK_MODEL_REQUIRED_PROVIDER_IDS,
   type AgentFallbackEntry,
 } from './fallback-chain.ts';
+import {
+  isProviderBoundaryMode,
+  isProviderDataPolicy,
+  isRestrictedProviderSupported,
+} from './provider-data-policy.ts';
 import { DEFAULT_TRANSPORT_ID, isTransportId, TRANSPORT_IDS } from '../transport/registry.ts';
 import { ACCOUNT_RE, APPLEID_EMAIL_RE } from './transport-refs.ts';
 import { E164_RE } from '../transport/twilio/types.ts';
@@ -900,11 +905,43 @@ function validateAgentOptions(
     }
   }
 
+  const boundaryMode = opts['providerBoundaryMode'] ?? 'shadow';
+  if (!isProviderBoundaryMode(boundaryMode)) {
+    return err(
+      'agentOptions.providerBoundaryMode',
+      'agentOptions.providerBoundaryMode must be shadow or enforce',
+    );
+  }
+  const primaryDataPolicy = opts['providerDataPolicy'];
+  if (primaryDataPolicy !== undefined && !isProviderDataPolicy(primaryDataPolicy)) {
+    return err(
+      'agentOptions.providerDataPolicy',
+      'agentOptions.providerDataPolicy must be trusted or restricted',
+    );
+  }
+  const primaryProvider = typeof opts['provider'] === 'string' ? opts['provider'] : 'claude-cli';
+  if (primaryDataPolicy === 'restricted' && !isRestrictedProviderSupported(primaryProvider)) {
+    return err(
+      'agentOptions.providerDataPolicy',
+      `agentOptions.providerDataPolicy cannot be restricted for CLI provider "${primaryProvider}" without a proven mechanical isolation boundary`,
+    );
+  }
+  if (boundaryMode === 'enforce' && primaryDataPolicy === undefined) {
+    return err(
+      'agentOptions.providerDataPolicy',
+      'agentOptions.providerDataPolicy is required when agentOptions.providerBoundaryMode is enforce',
+    );
+  }
+
   if (opts['fallbacks'] !== undefined) {
-    if (opts['fallbackProvider'] !== undefined || opts['fallbackModel'] !== undefined) {
+    if (
+      opts['fallbackProvider'] !== undefined
+      || opts['fallbackModel'] !== undefined
+      || opts['fallbackDataPolicy'] !== undefined
+    ) {
       return err(
         'agentOptions.fallbacks',
-        'agentOptions.fallbacks cannot be combined with agentOptions.fallbackProvider or agentOptions.fallbackModel',
+        'agentOptions.fallbacks cannot be combined with agentOptions.fallbackProvider, agentOptions.fallbackModel, or agentOptions.fallbackDataPolicy',
       );
     }
     if (!Array.isArray(opts['fallbacks'])) {
@@ -914,7 +951,7 @@ function validateAgentOptions(
     if (fallbacks.length > 8) {
       return err('agentOptions.fallbacks', 'agentOptions.fallbacks may contain at most 8 entries');
     }
-    const seen = new Set<string>();
+    const seen = new Map<string, unknown>();
     for (let i = 0; i < fallbacks.length; i++) {
       const rawEntry = fallbacks[i];
       const field = `agentOptions.fallbacks[${i}]`;
@@ -952,14 +989,39 @@ function validateAgentOptions(
           `${field}.provider "opencode-cli" model ${JSON.stringify(model)} does not resolve to a mapped provider credential service — use a "<provider>/<model>" id whose provider prefix is a known service (e.g. "minimax/...", "xai/...", "anthropic/...")`,
         );
       }
+      const dataPolicy = rawEntry['dataPolicy'];
+      if (dataPolicy !== undefined && !isProviderDataPolicy(dataPolicy)) {
+        return err(
+          `${field}.dataPolicy`,
+          `${field}.dataPolicy must be trusted or restricted`,
+        );
+      }
+      if (dataPolicy === 'restricted' && !isRestrictedProviderSupported(provider)) {
+        return err(
+          `${field}.dataPolicy`,
+          `${field}.dataPolicy cannot be restricted for CLI provider "${provider}" without a proven mechanical isolation boundary`,
+        );
+      }
+      if (boundaryMode === 'enforce' && dataPolicy === undefined) {
+        return err(
+          `${field}.dataPolicy`,
+          `${field}.dataPolicy is required when agentOptions.providerBoundaryMode is enforce`,
+        );
+      }
       const entry: AgentFallbackEntry = typeof model === 'string'
-        ? { provider, model: model.trim() }
-        : { provider };
+        ? { provider, model: model.trim(), ...(isProviderDataPolicy(dataPolicy) ? { dataPolicy } : {}) }
+        : { provider, ...(isProviderDataPolicy(dataPolicy) ? { dataPolicy } : {}) };
       const key = fallbackEntryKey(entry);
+      if (seen.has(key) && seen.get(key) !== dataPolicy) {
+        return err(
+          `${field}.dataPolicy`,
+          `${field}.dataPolicy conflicts with an earlier policy for the same provider/model route`,
+        );
+      }
       if (seen.has(key)) {
         return err(field, `${field} duplicates an earlier fallback entry`);
       }
-      seen.add(key);
+      seen.set(key, dataPolicy);
       if (isSameAsPrimaryFallbackEntry(entry, raw)) {
         return err(field, `${field} matches the primary provider/model pair`);
       }
@@ -992,6 +1054,41 @@ function validateAgentOptions(
         'agentOptions.fallbackModel must be a non-empty string when provided',
       );
     }
+  }
+
+  if (opts['fallbackDataPolicy'] !== undefined) {
+    if (!isProviderDataPolicy(opts['fallbackDataPolicy'])) {
+      return err(
+        'agentOptions.fallbackDataPolicy',
+        'agentOptions.fallbackDataPolicy must be trusted or restricted',
+      );
+    }
+    if (opts['fallbackProvider'] === undefined) {
+      return err(
+        'agentOptions.fallbackDataPolicy',
+        'agentOptions.fallbackDataPolicy requires agentOptions.fallbackProvider',
+      );
+    }
+    if (
+      opts['fallbackDataPolicy'] === 'restricted'
+      && typeof opts['fallbackProvider'] === 'string'
+      && !isRestrictedProviderSupported(opts['fallbackProvider'])
+    ) {
+      return err(
+        'agentOptions.fallbackDataPolicy',
+        `agentOptions.fallbackDataPolicy cannot be restricted for CLI provider "${opts['fallbackProvider']}" without a proven mechanical isolation boundary`,
+      );
+    }
+  }
+  if (
+    boundaryMode === 'enforce'
+    && opts['fallbackProvider'] !== undefined
+    && opts['fallbackDataPolicy'] === undefined
+  ) {
+    return err(
+      'agentOptions.fallbackDataPolicy',
+      'agentOptions.fallbackDataPolicy is required when agentOptions.providerBoundaryMode is enforce',
+    );
   }
 
   // Cross-field: managed-loop API providers take their request model from
