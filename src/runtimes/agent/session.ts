@@ -70,6 +70,10 @@ const STDIN_WRITE_TIMEOUT_MS = 30_000;
  * large no-newline blob would grow `stdoutBufferStr` unbounded → parent OOM. The
  * MCP socket MAX_BUF analogue; 16 MiB >> any real event line. */
 export const MAX_STDOUT_LINE_BYTES = 16 * 1024 * 1024;
+
+function isOpenCodeDiagnosticLogLine(line: string): boolean {
+  return /^timestamp=\S+\s+level=(?:TRACE|DEBUG|INFO|WARN|ERROR)\b/.test(line);
+}
 /** @deprecated Use WATCHDOG_SOFT_MS / WATCHDOG_HARD_MS instead. Kept for test backward-compat. */
 export const TURN_WATCHDOG_MS = 600_000;
 
@@ -1081,6 +1085,7 @@ export class SessionManager {
             sessionId: resumableSessionId,
             model: this.model,
             prompt,
+            progressLogs: true,
           });
         }
         log.info({ chatJid: this.chatJid, provider: this.provider }, 'opencode: fresh session');
@@ -1088,6 +1093,7 @@ export class SessionManager {
           providerConfig: this.providerConfig,
           model: this.model,
           prompt,
+          progressLogs: true,
         });
       }
 
@@ -2149,6 +2155,22 @@ export class SessionManager {
     });
   }
 
+  private captureProviderStderr(
+    chunk: Buffer,
+    child: ReturnType<typeof spawn>,
+  ): void {
+    const nextPreview = appendProviderCrashPreview(this.crashStderrPreview, chunk);
+    if (nextPreview === this.crashStderrPreview) return;
+    this.crashStderrPreview = nextPreview;
+    if (!this.crashStderrPreview) return;
+    log.warn({
+      provider: this.provider,
+      chatJid: this.chatJid,
+      pid: child.pid ?? null,
+      stderrPreview: this.crashStderrPreview.slice(-500),
+    }, 'provider stderr');
+  }
+
   /** Write a user message turn to the agent — via stdin (Claude) or spawn-per-turn (others). */
   async sendTurn(text: string): Promise<void> {
     return this.sendTurnAtProviderBoundary(text);
@@ -2331,6 +2353,7 @@ export class SessionManager {
       let pendingOpenCodeResult: Extract<AgentEvent, { type: 'result' }> | null = null;
       let pendingOpenCodeText: Extract<AgentEvent, { type: 'assistant_text' }>[] = [];
       let openCodeStopCandidateCount = 0;
+      let openCodeStderrBufferStr = '';
 
       try {
         onProviderBoundaryReady?.();
@@ -2486,22 +2509,50 @@ export class SessionManager {
       child.stderr.on('data', (chunk: Buffer) => {
         if (!this.isCurrentPersistentChild(child, childGeneration)) return;
         if (this.activeProviderTurnToken !== providerTurnToken) return;
-        const nextPreview = appendProviderCrashPreview(this.crashStderrPreview, chunk);
-        if (nextPreview === this.crashStderrPreview) return;
-        this.crashStderrPreview = nextPreview;
-        if (!this.crashStderrPreview) return;
-        log.warn({
-          provider: this.provider,
-          chatJid: this.chatJid,
-          pid: child.pid ?? null,
-          stderrPreview: this.crashStderrPreview.slice(-500),
-        }, 'provider stderr');
+        if (this.provider === 'opencode-cli') {
+          // OpenCode's JSON stdout is buffered until a tool/step completes, so
+          // long productive operations can otherwise look silent for the whole
+          // hard-watchdog window. --print-logs emits internal progress on
+          // stderr; treat those bytes as liveness without retaining structured
+          // diagnostic records in the user-facing crash preview.
+          openCodeStderrBufferStr += chunk.toString('utf8');
+          const lines = openCodeStderrBufferStr.split(/\r?\n/);
+          openCodeStderrBufferStr = lines.pop() ?? '';
+          for (const line of lines) {
+            if (isOpenCodeDiagnosticLogLine(line)) {
+              this.tickWatchdog();
+              continue;
+            }
+            this.captureProviderStderr(Buffer.from(`${line}\n`), child);
+          }
+          if (openCodeStderrBufferStr.length > MAX_STDOUT_LINE_BYTES) {
+            log.warn({
+              provider: this.provider,
+              chatJid: this.chatJid,
+              pid: child.pid ?? null,
+              bytes: openCodeStderrBufferStr.length,
+              cap: MAX_STDOUT_LINE_BYTES,
+            }, 'OpenCode stderr line exceeded cap — dropping runaway diagnostic buffer');
+            openCodeStderrBufferStr = '';
+          }
+          return;
+        }
+        this.captureProviderStderr(chunk, child);
       });
+
+      const flushOpenCodeStderr = (): void => {
+        if (this.provider !== 'opencode-cli' || openCodeStderrBufferStr === '') return;
+        const line = openCodeStderrBufferStr;
+        openCodeStderrBufferStr = '';
+        if (isOpenCodeDiagnosticLogLine(line)) return;
+        this.captureProviderStderr(Buffer.from(line), child);
+      };
 
       // For spawn-per-turn, classify the turn only after the process and all of
       // its stdio streams have closed. This makes the final unterminated record
       // part of the same atomic boundary decision.
       child.on('close', (code, signal) => {
+        flushOpenCodeStderr();
         this.releaseProviderExecutionLease(child);
         const superseded = this.child !== child;
         this.clearShutdownKillTimer(child, childGeneration);

@@ -3431,7 +3431,12 @@ export class AgentRuntime implements Runtime {
                 'proactive_resume_context',
                 chatJid,
               );
-              const injected = await this.injectMissedMessages(session, chatJid, checkpointUpdatedAt);
+              const injected = await this.injectMissedMessages(
+                session,
+                chatJid,
+                checkpointUpdatedAt,
+                () => this.requireSystemTurnProviderBoundary(contextLease!),
+              );
               if (!injected) this.pendingSystemResults.cancel(contextLease);
               else {
                 await this.pendingSystemResults.waitUntilEmpty(effectiveMapKey);
@@ -3445,7 +3450,11 @@ export class AgentRuntime implements Runtime {
               'proactive_resume_continuation',
               chatJid,
             );
-            await session.sendTurn('[System: session resumed after service restart — continue where you left off]');
+            await dispatchProviderTurn(
+              session,
+              '[System: session resumed after service restart — continue where you left off]',
+              () => this.requireSystemTurnProviderBoundary(continuationLease!),
+            );
             log.info({ chatJid }, 'sent continuation turn after proactive resume');
           } catch (err) {
             log.warn({ err, chatJid }, 'failed to send continuation turn after resume');
@@ -4817,6 +4826,7 @@ export class AgentRuntime implements Runtime {
     }
     let actorPushed = false;
     const onProviderBoundaryReady = (): void => {
+      if (systemTurnLease) this.requireSystemTurnProviderBoundary(systemTurnLease);
       beforeUserSend?.();
       // Publish actor and typing evidence only when provider execution begins.
       if (this.usesPerChatActorSocket() && effectiveMapKey !== undefined) {
@@ -7377,7 +7387,11 @@ export class AgentRuntime implements Runtime {
       try {
         await this.waitForSystemTurnQuarantine(mapKey);
         await this.pendingSystemResults.waitUntilDispatchable(mapKey, compactLease);
-        await session.sendTurn('/compact');
+        await dispatchProviderTurn(
+          session,
+          '/compact',
+          () => this.requireSystemTurnProviderBoundary(compactLease),
+        );
       } catch (err) {
         if (silent) this.clearSilentCompact(mapKey);
         await this.settleFailedSystemTurnDispatch(session, mapKey, compactLease, err);
@@ -7428,7 +7442,11 @@ export class AgentRuntime implements Runtime {
         GLOBAL_TOOL_SCOPE_KEY,
         compactLease,
       );
-      await session.sendTurn('/compact');
+      await dispatchProviderTurn(
+        session,
+        '/compact',
+        () => this.requireSystemTurnProviderBoundary(compactLease),
+      );
     } catch (err) {
       if (silent) this.clearSilentCompact(GLOBAL_TOOL_SCOPE_KEY);
       this.currentTurnChatJid = null;
@@ -7905,13 +7923,12 @@ export class AgentRuntime implements Runtime {
     purpose: SystemTurnPurpose,
     routeChatJid?: string,
   ): SystemTurnLeaseToken {
-    // One retry window per lease before quarantine: a production 240s expiry
-    // was a claude-cli subprocess merely slow to start under host I/O pressure
-    // (zero stderr), and immediate teardown killed the session under the
-    // queued user turn ('No active session'). The stream still has no request
-    // IDs, so the request is never re-sent — the lease keeps blocking while
-    // one more full window lets the slow result land; a second consecutive
-    // expiry quarantines exactly as before.
+    // Deadlines begin only after exact provider-boundary admission. Queue time
+    // can legitimately exceed both 240s windows when a serialized provider is
+    // busy on another chat; counting it as execution previously quarantined a
+    // respawn before its OpenCode process existed. Once admitted, one retry
+    // window remains before quarantine because streams have no request IDs and
+    // a slow result must not be re-sent or allowed to consume a later lease.
     let retryWindowGranted = false;
     return this.pendingSystemResults.mark({
       scopeKey,
@@ -7922,6 +7939,7 @@ export class AgentRuntime implements Runtime {
         ? {}
         : {
             timeoutMs: SYSTEM_TURN_TIMEOUT_MS,
+            deferDeadlineUntilActivated: true,
             onTimeout: async (lease: SystemTurnLeaseToken): Promise<boolean | 'retry'> => {
               if (!retryWindowGranted) {
                 retryWindowGranted = true;
@@ -7945,6 +7963,11 @@ export class AgentRuntime implements Runtime {
             },
           }),
     });
+  }
+
+  private requireSystemTurnProviderBoundary(lease: SystemTurnLeaseToken): void {
+    if (this.pendingSystemResults.activateDeadline(lease)) return;
+    throw new Error(`SYSTEM_TURN_LEASE_NOT_LIVE_AT_PROVIDER_BOUNDARY:${lease.id}`);
   }
 
   private setOwnedPerChatSession(mapKey: string, session: SessionManager): void {
@@ -11533,7 +11556,12 @@ export class AgentRuntime implements Runtime {
       ) {
         return;
       }
-      clearAlertSourceChecked(this.instanceName, 'agent_respawn_failed');
+      let respawnRecoveryPublished = false;
+      const publishRespawnRecovery = (): void => {
+        if (respawnRecoveryPublished) return;
+        respawnRecoveryPublished = true;
+        clearAlertSourceChecked(this.instanceName, 'agent_respawn_failed');
+      };
       let contextLease: SystemTurnLeaseToken | null = null;
       let continuationLease: SystemTurnLeaseToken | null = null;
       try {
@@ -11544,7 +11572,14 @@ export class AgentRuntime implements Runtime {
             'respawn_context',
             args.chatJid,
           );
-          const injected = await this.injectMissedMessages(args.session, args.chatJid, args.crashedAtSec);
+          const injected = await this.injectMissedMessages(
+            args.session,
+            args.chatJid,
+            args.crashedAtSec,
+            () => {
+              this.requireSystemTurnProviderBoundary(contextLease!);
+            },
+          );
           if (!injected) this.pendingSystemResults.cancel(contextLease);
           else {
             await this.pendingSystemResults.waitUntilEmpty(activeMapKey);
@@ -11558,7 +11593,14 @@ export class AgentRuntime implements Runtime {
           'respawn_continuation',
           args.chatJid,
         );
-        await args.session.sendTurn('[System: session resumed after crash ��� continue where you left off]');
+        await dispatchProviderTurn(
+          args.session,
+          '[System: session resumed after crash ��� continue where you left off]',
+          () => {
+            this.requireSystemTurnProviderBoundary(continuationLease!);
+            publishRespawnRecovery();
+          },
+        );
         log.info({ mapKey: activeMapKey }, 'sent continuation turn after auto-respawn');
       } catch (err) {
         log.warn({ err, mapKey: activeMapKey }, 'failed to send continuation turn after auto-respawn');
@@ -11770,6 +11812,7 @@ export class AgentRuntime implements Runtime {
     session: SessionManager,
     chatJid: string,
     sinceUnixSec: number,
+    onProviderBoundaryReady: () => void = () => {},
   ): Promise<boolean> {
     let lines: string;
     let messageCount: number;
@@ -11786,7 +11829,11 @@ export class AgentRuntime implements Runtime {
     // Dispatch errors propagate so the caller can distinguish a proven
     // pre-dispatch failure from an ambiguous accepted write and quarantine the
     // provider generation before releasing this system lease.
-    await session.sendTurn(`[Recent chat context — read before responding]\n${lines}`);
+    await dispatchProviderTurn(
+      session,
+      `[Recent chat context — read before responding]\n${lines}`,
+      onProviderBoundaryReady,
+    );
     log.info({ chatJid, messageCount, sinceUnixSec }, 'injected missed messages after resume');
     return true;
   }
@@ -11875,7 +11922,11 @@ export class AgentRuntime implements Runtime {
                 'resume_failure_context',
                 chatJid,
               );
-              await session.sendTurn(`[CONTEXT RECOVERY — prior session expired]\n${lines}`);
+              await dispatchProviderTurn(
+                session,
+                `[CONTEXT RECOVERY — prior session expired]\n${lines}`,
+                () => this.requireSystemTurnProviderBoundary(contextLease!),
+              );
               await this.pendingSystemResults.waitUntilEmpty(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
               await this.waitForSystemTurnQuarantine(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
               if (!session.getStatus().active) return;

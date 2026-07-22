@@ -445,6 +445,35 @@ describe('SessionManager spawn-per-turn child handlers (opencode-cli)', () => {
     expect(preview).toContain('boom');
   });
 
+  it('treats OpenCode diagnostic logs as watchdog progress without retaining them as crash output', async () => {
+    const { sm } = await makeOpencodeSession();
+    await sm.sendTurn('hello');
+    const tick = vi.spyOn(sm, 'tickWatchdog');
+
+    child.stderr.emit('data', Buffer.from(
+      'timestamp=2026-07-22T15:29:58.519Z level=INFO run=runtime-test message=loop session.id=test step=20\n',
+    ));
+
+    expect(tick).toHaveBeenCalledTimes(1);
+    const preview = (sm as unknown as { crashStderrPreview: string }).crashStderrPreview;
+    expect(preview).not.toContain('session.id=test');
+  });
+
+  it('recognizes fragmented progress lines and preserves adjacent raw crash diagnostics', async () => {
+    const { sm } = await makeOpencodeSession();
+    await sm.sendTurn('hello');
+    const tick = vi.spyOn(sm, 'tickWatchdog');
+
+    child.stderr.emit('data', Buffer.from('timestamp=2026-07-22T15:29:58.519Z level=INFO run=runtime-test mes'));
+    expect(tick).not.toHaveBeenCalled();
+    child.stderr.emit('data', Buffer.from('sage=loop session.id=test step=20\nopencode: fatal: boom\n'));
+
+    expect(tick).toHaveBeenCalledTimes(1);
+    const preview = (sm as unknown as { crashStderrPreview: string }).crashStderrPreview;
+    expect(preview).toContain('opencode: fatal: boom');
+    expect(preview).not.toContain('session.id=test');
+  });
+
   it('superseded child close (this.child !== child) is ignored', async () => {
     const { sm, onCrash } = await makeOpencodeSession();
     await sm.sendTurn('first');
