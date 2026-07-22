@@ -7,6 +7,7 @@ import { jsonResponse, parseRoute, parseQueryString, readBody, extractBearer } f
 import { cleanGitEnv } from '../lib/git-env.ts';
 import { FleetDiscovery } from './discovery.ts';
 import { HealthPoller } from './health-poller.ts';
+import { AuthLossSignalStore } from './auth-loss-signal-store.ts';
 import { FleetDbReader } from './db-reader.ts';
 import { createStaticHandler } from './static.ts';
 import { createLivenessHandler } from './livez.ts';
@@ -756,6 +757,11 @@ export function createFleetServer(deps: FleetDeps) {
     () => discovery.getInstances() as any,
     deps.selfName,
     deps.getSelfHealth,
+    undefined,
+    undefined,
+    // #1786: give the durable auth_loss_signal latch a production writer so a de-linked
+    // instance leaves a restart-surviving record instead of only an in-memory boolean.
+    new AuthLossSignalStore(deps.db),
   );
   const dbReader = new FleetDbReader(deps.selfName, deps.db);
 

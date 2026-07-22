@@ -12,6 +12,7 @@ import { sqliteUtcToEpochMs } from '../lib/sqlite-time.ts';
 import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottleDetailed, recordAlertThrottle } from './alert-throttle-store.ts';
 import { isInstanceSilenced } from './silence-manager.ts';
 import { hasExplicitAuthLossSignal } from './auth-loss-signals.ts';
+import { AuthLossSignalStore, type AuthLossSignalInput } from './auth-loss-signal-store.ts';
 import { jidPattern } from '../lib/redaction-patterns.ts';
 import {
   LOOP_LAG_STARVATION_THRESHOLD_MS,
@@ -616,6 +617,13 @@ export class HealthPoller {
   private unreachableAlerted: Set<string> = new Set();
   private targetPids: Map<string, number> = new Map();
   private readonly loopLagSampler: LoopLagSampler;
+  /**
+   * Durable auth-loss latch writer (#1786). Optional: when null the poller behaves
+   * exactly as before. When provided, a confirmed `logged_out` classification records a
+   * durable, restart-surviving row (the in-memory `instance_logged_out` alert state does
+   * not survive a fleet restart; this table does), and a proven recovery resolves it.
+   */
+  private readonly authLossStore: AuthLossSignalStore | null;
 
   constructor(
     getInstances: () => Map<string, InstanceHealth>,
@@ -623,12 +631,14 @@ export class HealthPoller {
     getSelfHealth: () => Record<string, unknown>,
     intervalMs = 5_000,
     loopLagSampler = new LoopLagSampler(),
+    authLossStore: AuthLossSignalStore | null = null,
   ) {
     this.getInstances = getInstances;
     this.selfName = selfName;
     this.getSelfHealth = getSelfHealth;
     this.intervalMs = intervalMs;
     this.loopLagSampler = loopLagSampler;
+    this.authLossStore = authLossStore;
     const throttle = loadAlertThrottleDetailed();
     this.persistedAlertThrottle = throttle.entries;
     this.alertThrottleLoadErrorCode = throttle.loadError?.code ?? (throttle.loadError ? 'UNKNOWN' : null);
@@ -1022,6 +1032,9 @@ export class HealthPoller {
     health: Record<string, unknown>,
     confirmation: LoggedOutConfirmation,
   ): void {
+    // #1786: durably record the de-link BEFORE the alert-throttle logic, so a remote confirmed
+    // logout survives a fleet restart. Independent of whether the in-memory alert is emitted.
+    this.recordDurableAuthLossFromConfirmation(name, confirmation);
     this.updateDegraded(
       name,
       health,
@@ -1499,6 +1512,9 @@ export class HealthPoller {
     classification: HealthSnapshotClassification,
   ): void {
     if (classification.status === 'online') return;
+    if (classification.status === 'logged_out') {
+      this.recordDurableAuthLoss(name, classification);
+    }
     this.updateDegraded(
       name,
       health,
@@ -1513,6 +1529,71 @@ export class HealthPoller {
       classification.reason,
       classification.evidence,
     );
+  }
+
+  /**
+   * #1786: persist a de-link as a durable, restart-surviving `auth_loss_signal` row. The
+   * in-memory `instance_logged_out` alert dies on a fleet restart; this table does not.
+   *
+   * There are TWO poll paths that reach a `logged_out` state, and BOTH record here:
+   *   - self-health / classifier path — `classifyHealthSnapshot` → updateFromHealthSnapshot →
+   *     {@link recordDurableAuthLoss} (reason `whatsapp_auth_loss_with_disconnect_corroboration`);
+   *   - remote confirmation path — `classifyLoggedOutSignal` → updateLoggedOutFromConfirmation →
+   *     {@link recordDurableAuthLossFromConfirmation} (`explicit_auth_loss`/`weak_signal_persisted`).
+   * The remote path is the one a fleet host takes when polling OTHER instances over HTTP, so
+   * missing it (the original #1786 gap) left every cross-instance de-link invisible on restart.
+   *
+   * The store dedups on (instance, classifier, unresolved) → per-poll calls are idempotent.
+   * (`logged_out` and `weak_logged_out_signal` are distinct classifiers and dedup independently,
+   * so a weak→explicit escalation leaves two rows until the resolver — a tracked follow-up —
+   * supersedes the weak one.) No-op without an injected store. Best-effort: a store fault must
+   * never break the poll loop.
+   */
+  private writeDurableAuthLoss(
+    name: string,
+    signal: Pick<AuthLossSignalInput, 'classifier' | 'reason' | 'confidence'>,
+  ): void {
+    if (this.authLossStore === null) return;
+    try {
+      this.authLossStore.record({ instance: name, host: this.selfName, ...signal });
+    } catch (err) {
+      log.warn({ err, name }, 'failed to record durable auth-loss signal (#1786)');
+    }
+  }
+
+  /**
+   * Classifier path (self-health, plus the rare remote case where `classifyLoggedOutSignal`
+   * does not confirm but `classifyHealthSnapshot` still classifies `logged_out`). That site
+   * emits exactly the corroboration reason with `confidence: 'confirmed'`; the guard admits
+   * every such logged_out and only rejects impossible values (a safety net, not a filter).
+   */
+  private recordDurableAuthLoss(name: string, classification: HealthSnapshotClassification): void {
+    if (classification.reason !== 'whatsapp_auth_loss_with_disconnect_corroboration') return;
+    this.writeDurableAuthLoss(name, {
+      classifier: 'logged_out',
+      reason: 'whatsapp_auth_loss_with_disconnect_corroboration',
+      confidence: 'confirmed',
+    });
+  }
+
+  /**
+   * Remote confirmation path. Both callers gate on `confirmation.confirmed`, so `reason` is
+   * always `explicit_auth_loss` or `weak_signal_persisted` (exact store enums) and `confidence`
+   * is `confirmed`/`inferred`; the narrowing below is defensive against a future unconfirmed
+   * reason reaching here rather than a live case. `confirmation.weak` selects the
+   * `weak_logged_out_signal` classifier so weak-persisted signals record distinctly from hard
+   * logouts.
+   */
+  private recordDurableAuthLossFromConfirmation(name: string, confirmation: LoggedOutConfirmation): void {
+    const reason = confirmation.reason === 'explicit_auth_loss' || confirmation.reason === 'weak_signal_persisted'
+      ? confirmation.reason
+      : null;
+    if (reason === null) return;
+    this.writeDurableAuthLoss(name, {
+      classifier: confirmation.weak ? 'weak_logged_out_signal' : 'logged_out',
+      reason,
+      confidence: confirmation.confidence,
+    });
   }
 
   private clearRecoveredAlert(
