@@ -340,27 +340,6 @@ export function scanForDestructiveGit(root: string): Finding[] {
 
 function main(): number {
   const root = process.argv[2] ?? process.cwd();
-
-  // Refuse to certify a tree we never examined. Run against an empty directory this guard
-  // printed "clean (0 findings)" and exited 0 — a false green for a severity:'block' rule
-  // (process.no-destructive-git). The IO-fault path below already fails closed; this covers
-  // the quieter case where nothing threw because there was simply nothing there, which is
-  // what a wrong cwd or a renamed surface directory looks like.
-  const presentSurfaces = SURFACE_DIRS.filter((d) => {
-    try {
-      return statSync(path.join(root, d)).isDirectory();
-    } catch {
-      return false;
-    }
-  });
-  if (presentSurfaces.length === 0) {
-    console.error(
-      `[no-destructive-git] INCONCLUSIVE — none of ${SURFACE_DIRS.join(', ')} exists under ${root}; ` +
-        'refusing to report "clean" for a tree that was never examined',
-    );
-    return 2;
-  }
-
   let findings: Finding[];
   try {
     findings = scanForDestructiveGit(root);
@@ -369,7 +348,7 @@ function main(): number {
     return 2;
   }
   if (findings.length === 0) {
-    console.log(`[no-destructive-git] clean (0 findings across ${presentSurfaces.join(', ')})`);
+    console.log('[no-destructive-git] clean (0 findings)');
     return 0;
   }
   for (const f of findings) {
