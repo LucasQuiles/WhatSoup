@@ -1,0 +1,284 @@
+## skills-hub-dark
+
+A:
+
+- A1 — Skills Hub / dark / top-center / search-and-sort row: the sort control is visibly shorter and vertically inset relative to the sibling search field, creating ragged row edges — severity LOW — confidence HIGH.
+- A2 — PASS
+- A3 — PASS
+- A4 — PASS
+- A5 — PASS
+- A6 — PASS
+
+B:
+
+- B1 — PASS
+- B2 — PASS
+- B3 — PASS
+- B4 — PASS
+- B5 — PASS
+- B6 — PASS
+
+C:
+
+- C1 — PASS
+- C2 — PASS
+- C3 — PASS
+- C4 — PASS
+- C5 — PASS
+- C6 — Skills Hub / dark / center-left / auto-seo-suite card: the leading icon container is empty while every sibling card contains a glyph, making it look like an unloaded placeholder — severity MED — confidence HIGH.
+
+D:
+
+- D1 — PASS
+- D2 — PASS
+- D3 — PASS
+- D4 — PASS
+
+E:
+
+- E1 — PASS
+- E2 — PASS
+- E3 — PASS
+- E4 — PASS
+- E5 — Skills Hub / dark / bottom-center / scheduled-tasks card: the viewport cuts through the card, leaving a dangling partial compatibility section at the fold — severity MED — confidence HIGH.
+
+UNCERTAIN: The single-letter COMPAT and abbreviated HARNESS labels may be difficult to decode, but audience familiarity cannot be established from the screenshot.
+
+## skills-hub-light
+
+A:
+
+- A1 — Skills Hub / light / top-center / search-and-sort row: the sort control is visibly shorter and vertically inset relative to the sibling search field, creating ragged row edges — severity LOW — confidence HIGH.
+- A2 — PASS
+- A3 — PASS
+- A4 — PASS
+- A5 — PASS
+- A6 — PASS
+
+B:
+
+- B1 — PASS
+- B2 — PASS
+- B3 — PASS
+- B4 — PASS
+- B5 — PASS
+- B6 — PASS
+
+C:
+
+- C1 — PASS
+- C2 — PASS
+- C3 — PASS
+- C4 — PASS
+- C5 — PASS
+- C6 — Skills Hub / light / center-left / auto-seo-suite card: the leading icon container is empty while every sibling card contains a glyph, making it look like an unloaded placeholder — severity MED — confidence HIGH.
+
+D:
+
+- D1 — PASS
+- D2 — PASS
+- D3 — PASS
+- D4 — PASS
+
+E:
+
+- E1 — PASS
+- E2 — PASS
+- E3 — PASS
+- E4 — PASS
+- E5 — Skills Hub / light / bottom-center / scheduled-tasks card: the viewport cuts through the card, leaving a dangling partial compatibility section at the fold — severity MED — confidence HIGH.
+
+UNCERTAIN: The single-letter COMPAT and abbreviated HARNESS labels may be difficult to decode, but audience familiarity cannot be established from the screenshot.
+
+## dream-lab-dark
+
+A:
+
+- A1 — PASS
+- A2 — PASS
+- A3 — PASS
+- A4 — PASS
+- A5 — PASS
+- A6 — PASS
+
+B:
+
+- B1 — PASS
+- B2 — PASS
+- B3 — PASS
+- B4 — PASS
+- B5 — PASS
+- B6 — PASS
+
+C:
+
+- C1 — Dream Lab / dark / lower-left / Filters section: the lone muted summary inside a large bordered container has no fields, chips, caret, or button treatment, so the section does not read as operable filtering UI — severity MED — confidence MED.
+- C2 — PASS
+- C3 — PASS
+- C4 — PASS
+- C5 — PASS
+- C6 — PASS
+
+D:
+
+- D1 — PASS
+- D2 — PASS
+- D3 — PASS
+- D4 — PASS
+
+E:
+
+- E1 — PASS
+- E2 — PASS
+- E3 — Dream Lab / dark / top-center and right / suggestion quotation: the first line spans nearly the full main canvas while only “a greeting.” wraps onto the next line, producing an excessively long measure and an orphaned fragment — severity MED — confidence HIGH.
+- E4 — PASS
+- E5 — PASS
+
+UNCERTAIN: The empty lower portion of the queue sidebar may be wasted space, but it could be intentional capacity for a longer dynamic queue.
+
+## dream-lab-light
+
+A:
+
+- A1 — PASS
+- A2 — PASS
+- A3 — PASS
+- A4 — PASS
+- A5 — PASS
+- A6 — PASS
+
+B:
+
+- B1 — PASS
+- B2 — PASS
+- B3 — PASS
+- B4 — PASS
+- B5 — PASS
+- B6 — PASS
+
+C:
+
+- C1 — Dream Lab / light / lower-left / Filters section: the lone muted summary inside a large bordered container has no fields, chips, caret, or button treatment, so the section does not read as operable filtering UI — severity MED — confidence MED.
+- C2 — PASS
+- C3 — PASS
+- C4 — PASS
+- C5 — PASS
+- C6 — PASS
+
+D:
+
+- D1 — PASS
+- D2 — PASS
+- D3 — PASS
+- D4 — PASS
+
+E:
+
+- E1 — PASS
+- E2 — PASS
+- E3 — Dream Lab / light / top-center and right / suggestion quotation: the first line spans nearly the full main canvas while only “a greeting.” wraps onto the next line, producing an excessively long measure and an orphaned fragment — severity MED — confidence HIGH.
+- E4 — PASS
+- E5 — PASS
+
+UNCERTAIN: The empty lower portion of the queue sidebar may be wasted space, but it could be intentional capacity for a longer dynamic queue.
+
+## inbox-dark
+
+A:
+
+- A1 — Inbox / dark / bottom-center / composer row: the text field is visibly taller than the sibling tool and Send controls, leaving those controls vertically inset and producing ragged top and bottom edges — severity LOW — confidence HIGH.
+- A2 — PASS
+- A3 — PASS
+- A4 — PASS
+- A5 — PASS
+- A6 — PASS
+
+B:
+
+- B1 — PASS
+- B2 — PASS
+- B3 — PASS
+- B4 — PASS
+- B5 — PASS
+- B6 — Inbox / dark / top-center and right / channel labels: the same services appear as “WhatsApp” and “X” in the filter bar but as lowercase “whatsapp” and “x” in the chat and person metadata — severity LOW — confidence HIGH.
+
+C:
+
+- C1 — PASS
+- C2 — PASS
+- C3 — Inbox / dark / bottom-center / composer controls: the accessory and Send controls are visibly much shorter than their sibling input, making the interactive targets look cramped — severity MED — confidence HIGH.
+- C4 — Inbox / dark / top-center / takeover toggle: the knob is drawn in the visually off position while the system notice, agent panel, and composer all state that takeover is enabled — severity HIGH — confidence HIGH.
+- C5 — PASS
+- C6 — Inbox / dark / bottom-center / composer footer: “capability-driven composer” reads like an internal implementation or debug label exposed in the finished interface — severity LOW — confidence MED.
+
+D:
+
+- D1 — Inbox / dark / left-center / WHATSOUP conversation row: unread count, agent badge, takeover badge, platform marker, preview, and timestamp compete within one compact row, forming the list’s clear density hotspot — severity LOW — confidence HIGH.
+- D2 — Inbox / dark / center, right, and bottom / takeover state: the same state is repeated in the header toggle, system notice, agent panel, selected-list badge, composer placeholder, and footer — severity MED — confidence HIGH.
+- D3 — PASS
+- D4 — PASS
+
+E:
+
+- E1 — Inbox / dark / center and lower-center / conversation canvas: the gap after the final message is vastly larger than all preceding message gaps, leaving most of the conversation column as an unused blank zone — severity MED — confidence HIGH.
+- E2 — PASS
+- E3 — PASS
+- E4 — PASS
+- E5 — PASS
+
+UNCERTAIN: The composer glyphs appear stylistically and optically uneven, but their different silhouettes prevent a confident icon-size finding.
+
+## inbox-light
+
+A:
+
+- A1 — Inbox / light / bottom-center / composer row: the text field is visibly taller than the sibling tool and Send controls, leaving those controls vertically inset and producing ragged top and bottom edges — severity LOW — confidence HIGH.
+- A2 — PASS
+- A3 — PASS
+- A4 — PASS
+- A5 — PASS
+- A6 — PASS
+
+B:
+
+- B1 — PASS
+- B2 — PASS
+- B3 — PASS
+- B4 — PASS
+- B5 — PASS
+- B6 — Inbox / light / top-center and right / channel labels: the same services appear as “WhatsApp” and “X” in the filter bar but as lowercase “whatsapp” and “x” in the chat and person metadata — severity LOW — confidence HIGH.
+
+C:
+
+- C1 — PASS
+- C2 — PASS
+- C3 — Inbox / light / bottom-center / composer controls: the accessory and Send controls are visibly much shorter than their sibling input, making the interactive targets look cramped — severity MED — confidence HIGH.
+- C4 — Inbox / light / top-center / takeover toggle: the knob is drawn in the visually off position while the system notice, agent panel, and composer all state that takeover is enabled — severity HIGH — confidence HIGH.
+- C5 — PASS
+- C6 — Inbox / light / bottom-center / composer footer: “capability-driven composer” reads like an internal implementation or debug label exposed in the finished interface — severity LOW — confidence MED.
+
+D:
+
+- D1 — Inbox / light / left-center / WHATSOUP conversation row: unread count, agent badge, takeover badge, platform marker, preview, and timestamp compete within one compact row, forming the list’s clear density hotspot — severity LOW — confidence HIGH.
+- D2 — Inbox / light / center, right, and bottom / takeover state: the same state is repeated in the header toggle, system notice, agent panel, selected-list badge, composer placeholder, and footer — severity MED — confidence HIGH.
+- D3 — PASS
+- D4 — PASS
+
+E:
+
+- E1 — Inbox / light / center and lower-center / conversation canvas: the gap after the final message is vastly larger than all preceding message gaps, leaving most of the conversation column as an unused blank zone — severity MED — confidence HIGH.
+- E2 — PASS
+- E3 — PASS
+- E4 — PASS
+- E5 — PASS
+
+UNCERTAIN: The composer glyphs appear stylistically and optically uneven, but their different silhouettes prevent a confident icon-size finding.
+
+| Image | Verdict |
+|---|---|
+| VERDICT skills-hub-dark | FAIL(3) |
+| VERDICT skills-hub-light | FAIL(3) |
+| VERDICT dream-lab-dark | FAIL(2) |
+| VERDICT dream-lab-light | FAIL(2) |
+| VERDICT inbox-dark | FAIL(8) |
+| VERDICT inbox-light | FAIL(8) |

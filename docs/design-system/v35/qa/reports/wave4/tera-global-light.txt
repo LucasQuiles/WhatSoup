@@ -1,0 +1,21 @@
+1. **[G1][HIGH]** **Inbox — light — nameplate — top-left:** A vertical divider separates the SOUP wordmark from “INBOX.” Fleet, Agents, Skills Hub, Dream Lab, Deployments, and Settings use the same operator nameplate without this divider.
+
+2. **[G1][MED]** **Splash — light — theme toggle — top-right:** The “theme” label is visibly heavier than the label in the identical toggle on Hatch and every operator surface.
+
+3. **[G2][HIGH]** **Agents — light — destructive buttons — upper-right/right-center:** “Retire…” uses a tinted fill, while the sibling “kill” controls use the red-outline treatment also used by Dream Lab’s “Reject” and Settings’ “revoke” and “reset…” actions.
+
+4. **[G3][HIGH]** **Fleet — light — KPI cards and primary panels — top/center/right:** Fleet alone gives its operator cards and panels visible drop shadows. Comparable summary cards and primary panels on Deployments, Agents, Skills Hub, Dream Lab, and Settings are border-only.
+
+5. **[G6][HIGH]** **Deployments — light — host-status markers — bottom-left:** The local and field-pi markers become large horizontal ovals, while nest-2 becomes a long diagonal bar. The same Hosts component on Fleet, Agents, Skills Hub, Dream Lab, Inbox, and Settings uses compact dots and diamonds.
+
+| Verdict |
+|---|
+| VERDICT fleet-light: FAIL(1) |
+| VERDICT hatch-light: PASS |
+| VERDICT agents-light: FAIL(1) |
+| VERDICT skills-hub-light: PASS |
+| VERDICT dream-lab-light: PASS |
+| VERDICT inbox-light: FAIL(1) |
+| VERDICT deployments-light: FAIL(1) |
+| VERDICT settings-light: PASS |
+| VERDICT splash-light: FAIL(1) |

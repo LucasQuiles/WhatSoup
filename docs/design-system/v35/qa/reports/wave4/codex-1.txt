@@ -1,0 +1,92 @@
+## fleet-dark
+
+A: A1 PASS; A2 PASS; A3 PASS; A4 PASS; A5 PASS; A6 PASS.
+
+B: B1 PASS; B2 PASS; B3 PASS; B4 PASS; B5 PASS; B6 PASS.
+
+C: C1 PASS; C2 PASS; C3 PASS; C4 PASS; C5 PASS; **C6 — Fleet dark, Lines table, center-left/bottom: the header declares 14 lines, but only 10 rows appear and there is no pagination, scrollbar, expansion control, or filtered-state indicator accounting for the missing entries; severity high; confidence HIGH.**
+
+D: D1 PASS; D2 PASS; D3 PASS; D4 PASS.
+
+E: **E1 — Fleet dark, Activity panel, lower-right: a large empty region remains beneath the activity timeline while the neighboring Lines panel stays fully occupied; severity med; confidence HIGH.** E2 PASS; E3 PASS; E4 PASS; E5 PASS.
+
+UNCERTAIN: None.
+
+## fleet-light
+
+A: A1 PASS; A2 PASS; A3 PASS; A4 PASS; A5 PASS; A6 PASS.
+
+B: B1 PASS; B2 PASS; B3 PASS; B4 PASS; B5 PASS; B6 PASS.
+
+C: C1 PASS; C2 PASS; C3 PASS; C4 PASS; C5 PASS; **C6 — Fleet light, Lines table, center-left/bottom: the header declares 14 lines, but only 10 rows appear and there is no pagination, scrollbar, expansion control, or filtered-state indicator accounting for the missing entries; severity high; confidence HIGH.**
+
+D: D1 PASS; D2 PASS; D3 PASS; D4 PASS.
+
+E: **E1 — Fleet light, Activity panel, lower-right: a large empty region remains beneath the activity timeline while the neighboring Lines panel stays fully occupied; severity med; confidence HIGH.** E2 PASS; E3 PASS; E4 PASS; E5 PASS.
+
+UNCERTAIN: None.
+
+## hatch-dark
+
+A: A1 PASS; A2 PASS; A3 PASS; A4 PASS; A5 PASS; A6 PASS.
+
+B: B1 PASS; B2 PASS; B3 PASS; B4 PASS; B5 PASS; B6 PASS.
+
+C: C1 PASS; C2 PASS; C3 PASS; **C4 — Hatch dark, stepper and “Pick a channel” section, top and bottom-center: CHANNEL is marked completed while the same screen still presents channel selection as unresolved, creating contradictory workflow state; severity high; confidence HIGH.** C5 PASS; C6 PASS.
+
+D: D1 PASS; D2 PASS; D3 PASS; D4 PASS.
+
+E: E1 PASS; E2 PASS; E3 PASS; E4 PASS; **E5 — Hatch dark, channel-option row, bottom: the viewport ends through the option cards, leaving only disconnected card tops visible as a dangling partial element; severity med; confidence HIGH.**
+
+UNCERTAIN: The small icon-only control beside “Quinn” may be undersized relative to the ceremony buttons, but it is not part of a clearly comparable sibling control set.
+
+## hatch-light
+
+A: A1 PASS; A2 PASS; A3 PASS; A4 PASS; A5 PASS; A6 PASS.
+
+B: B1 PASS; B2 PASS; B3 PASS; B4 PASS; B5 PASS; B6 PASS.
+
+C: C1 PASS; C2 PASS; C3 PASS; **C4 — Hatch light, stepper and “Pick a channel” section, top and bottom-center: CHANNEL is marked completed while the same screen still presents channel selection as unresolved, creating contradictory workflow state; severity high; confidence HIGH.** C5 PASS; C6 PASS.
+
+D: D1 PASS; D2 PASS; D3 PASS; D4 PASS.
+
+E: E1 PASS; E2 PASS; E3 PASS; E4 PASS; **E5 — Hatch light, channel-option row, bottom: the viewport ends through the option cards, leaving only disconnected card tops visible as a dangling partial element; severity med; confidence HIGH.**
+
+UNCERTAIN: The small icon-only control beside “Quinn” may be undersized relative to the ceremony buttons, but it is not part of a clearly comparable sibling control set.
+
+## agents-dark
+
+A: A1 PASS; A2 PASS; A3 PASS; A4 PASS; A5 PASS; A6 PASS.
+
+B: B1 PASS; B2 PASS; B3 PASS; B4 PASS; B5 PASS; B6 PASS.
+
+C: C1 PASS; C2 PASS; C3 PASS; **C4 — Agents dark, selected Quinn roster card and Assigned lines panel, left/center-left: the summary says “1 line,” while two equally active-looking rows appear under Assigned lines; no state distinction explains which row counts; severity high; confidence HIGH.** C5 PASS; C6 PASS.
+
+D: D1 PASS; D2 PASS; D3 PASS; D4 PASS.
+
+E: E1 PASS; **E2 — Agents dark, Skills and Memory panels, lower center: Skills leaves most of its panel unused while the equally wide neighboring Memory panel is dense and continues beyond the viewport; severity med; confidence HIGH.** E3 PASS; E4 PASS; **E5 — Agents dark, Memory panel, bottom-right: the viewport cuts through the second memory record and omits the panel’s lower boundary, leaving a dangling partial row; severity med; confidence HIGH.**
+
+UNCERTAIN: None.
+
+## agents-light
+
+A: A1 PASS; A2 PASS; A3 PASS; A4 PASS; A5 PASS; A6 PASS.
+
+B: B1 PASS; B2 PASS; B3 PASS; B4 PASS; B5 PASS; B6 PASS.
+
+C: C1 PASS; C2 PASS; C3 PASS; **C4 — Agents light, selected Quinn roster card and Assigned lines panel, left/center-left: the summary says “1 line,” while two equally active-looking rows appear under Assigned lines; no state distinction explains which row counts; severity high; confidence HIGH.** C5 PASS; C6 PASS.
+
+D: D1 PASS; D2 PASS; D3 PASS; D4 PASS.
+
+E: E1 PASS; **E2 — Agents light, Skills and Memory panels, lower center: Skills leaves most of its panel unused while the equally wide neighboring Memory panel is dense and continues beyond the viewport; severity med; confidence HIGH.** E3 PASS; E4 PASS; **E5 — Agents light, Memory panel, bottom-right: the viewport cuts through the second memory record and omits the panel’s lower boundary, leaving a dangling partial row; severity med; confidence HIGH.**
+
+UNCERTAIN: None.
+
+| Verdict |
+|---|
+| VERDICT fleet-dark: FAIL(2) |
+| VERDICT fleet-light: FAIL(2) |
+| VERDICT hatch-dark: FAIL(2) |
+| VERDICT hatch-light: FAIL(2) |
+| VERDICT agents-dark: FAIL(3) |
+| VERDICT agents-light: FAIL(3) |

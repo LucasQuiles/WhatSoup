@@ -1,0 +1,46 @@
+## Deployments (Dark Theme) - Defect List
+
+*   **Top/Left/Center/Right/Bottom + "local: host" label** - Truncated label text, losing information ("local: host"), med.
+*   **Top/Left/Center/Right/Bottom + "Nest-2: Container" label** - Truncated label text, losing information ("Nest-2: Container"), med.
+*   **Top/Left/Center/Right/Bottom + "field-pi: remote" label** - Truncated label text, losing information ("field-pi: remote"), med.
+*   **Top/Left/Center/Right/Bottom + "signal <2" text** - Low contrast text against dark background, difficult to read, med.
+*   **Top/Left/Center/Right/Bottom + "img <1" text** - Low contrast text against dark background, difficult to read, med.
+*   **Top/Left/Center/Right/Bottom + "discord <1" text** - Low contrast text against dark background, difficult to read, med.
+*   **Top/Left/Center/Right/Bottom + "email <1" text** - Low contrast text against dark background, difficult to read, med.
+*   **Bottom/Center/Right/Bottom + "Enter code" button** - Small button size may impact accessibility, low.
+*   **Bottom/Center/Right/Bottom + "Show QR" button** - Small button size may impact accessibility, low.
+*   **Bottom/Center/Left/Bottom + Input field (K Q 7 4… F D)** - Input field's background color is too similar to the overall dark theme, making the input area difficult to distinguish, med.
+*   **Top/Right/Center/Right + "pair deployment" button** - Inconsistent spacing with other elements on the top bar, low.
+
+**Total Defects:** 11
+
+---
+
+## Settings (Dark Theme) - Defect List
+
+*   **Left/Top/Center/Bottom + Sidebar navigation** - Inconsistent padding/spacing between sidebar items, low.
+*   **Center/Top/Center/Bottom + "Workspace Name" field** - Input field has a very subtle border or none at all, low contrast against background, med.
+*   **Center/Top/Center/Bottom + "Admin Identity" label** - Low contrast text against dark background, difficult to read, med.
+*   **Center/Top/Center/Bottom + "Appearance" label** - Low contrast text against dark background, difficult to read, med.
+*   **Center/Top/Center/Bottom + "Notifications" label** - Low contrast text against dark background, difficult to read, med.
+*   **Center/Top/Center/Bottom + "API tokens" label** - Low contrast text against dark background, difficult to read, med.
+*   **Center/Top/Center/Bottom + "Danger zone" label** - Low contrast text against dark background, difficult to read, med.
+*   **Center/Center/Right/Center + "rotate" button (ops-cli)** - Small button size may impact accessibility, low.
+*   **Center/Center/Right/Center + "revoke" button (ops-cli)** - Small button size may impact accessibility, low.
+*   **Center/Center/Right/Center + "rotate" button (backup-cron)** - Small button size may impact accessibility, low.
+*   **Center/Center/Right/Center + "revoke" button (backup-cron)** - Small button size may impact accessibility, low.
+*   **Center/Bottom/Center/Bottom + "export..." button** - Small button size may impact accessibility, low.
+*   **Center/Bottom/Center/Bottom + "reset..." button** - Small button size may impact accessibility, low.
+
+**Total Defects:** 13
+
+---
+
+## Splash (Dark Theme) - Defect List
+
+*   **Center/Center/Center/Bottom + "Pair a new deployment" text** -  Text is very small and difficult to read, low.
+*   **Bottom/Center/Left/Bottom + Input field (K Q 7 4… F D)** - Input field's background color is too similar to the overall dark theme, making the input area difficult to distinguish, med.
+*   **Bottom/Center/Right/Bottom + "Enter code" button** - Small button size may impact accessibility, low.
+*   **Bottom/Center/Right/Bottom + "Show QR" button** - Small button size may impact accessibility, low.
+
+**Total Defects:** 4

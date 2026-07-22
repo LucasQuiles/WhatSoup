@@ -1,0 +1,124 @@
+## skills-hub-dark
+A: PASS
+
+B: PASS
+
+C: PASS
+
+D: PASS
+
+E: findings
+- E1 — skills-hub-dark + main content area + empty canvas beneath the visible skill list + bottom/center: a large unused area remains under the last visible card while the page presents as a dense scrolling inventory, creating a purposeless dead zone. severity: med. confidence: MED
+
+UNCERTAIN:
+- The right action column on skill cards may vary slightly in vertical placement between rows, but the static view is not clear enough to confirm misalignment.
+
+## skills-hub-light
+A: PASS
+
+B: PASS
+
+C: PASS
+
+D: PASS
+
+E: findings
+- E1 — skills-hub-light + main content area + empty canvas beneath the visible skill list + bottom/center: a large unused area remains under the last visible card while the page presents as a dense scrolling inventory, creating a purposeless dead zone. severity: med. confidence: MED
+
+UNCERTAIN:
+- The right action column on skill cards may vary slightly in vertical placement between rows, but the static view is not clear enough to confirm misalignment.
+
+## dream-lab-dark
+A: findings
+- A4 — dream-lab-dark + header metadata row under “Persona edit — tone” + “quinn · persona · suggested 2h ago…” line + top/center-right: the metadata line sits visibly lower relative to the large title block than comparable title-plus-meta pairings in the left queue cards, producing a floating baseline relationship. severity: low. confidence: MED
+
+B: findings
+- B1 — dream-lab-dark + left queue column + spacing between “Filters” and “Recently decided” versus spacing between queue cards + lower-left: the section gap above “Recently decided” is visibly larger than other repeated vertical gaps in the same column, making the rhythm inconsistent. severity: low. confidence: HIGH
+
+C: findings
+- C2 — dream-lab-dark + left column, recently decided list + decision titles + bottom/left: multiple entries are cut with an ellipsis so early that the deciding action becomes hard to recognize at a glance, reducing identification of the item. severity: low. confidence: MED
+- C5 — dream-lab-dark + footer action row + “Approve & apply”, “Reject”, and “edit then approve” controls + bottom/center-right: the primary path is diluted because three adjacent actions carry similar visual weight while the explanatory sentence competes on the same line, weakening immediate wayfinding. severity: med. confidence: MED
+
+D: findings
+- D1 — dream-lab-dark + footer action row + approval controls plus long helper copy + bottom/center-right: too many competing elements are compressed into one horizontal strip, making the action area the clearest density hotspot on the page. severity: med. confidence: HIGH
+- D4 — dream-lab-dark + main diff panel + file label “SOUL.md — persona section” beside the section title + upper-center-right: secondary metadata is visually close in weight and proximity to the primary “Proposed diff” title, causing metadata to compete with the section heading. severity: low. confidence: MED
+
+E: PASS
+
+UNCERTAIN:
+- The selected left queue card border may sit slightly closer to its top edge than to its bottom edge, but the evidence is not strong enough to confirm padding asymmetry.
+
+## dream-lab-light
+A: findings
+- A4 — dream-lab-light + header metadata row under “Persona edit — tone” + “quinn · persona · suggested 2h ago…” line + top/center-right: the metadata line sits visibly lower relative to the large title block than comparable title-plus-meta pairings in the left queue cards, producing a floating baseline relationship. severity: low. confidence: MED
+
+B: findings
+- B1 — dream-lab-light + left queue column + spacing between “Filters” and “Recently decided” versus spacing between queue cards + lower-left: the section gap above “Recently decided” is visibly larger than other repeated vertical gaps in the same column, making the rhythm inconsistent. severity: low. confidence: HIGH
+
+C: findings
+- C2 — dream-lab-light + left column, recently decided list + decision titles + bottom/left: multiple entries are cut with an ellipsis so early that the deciding action becomes hard to recognize at a glance, reducing identification of the item. severity: low. confidence: MED
+- C5 — dream-lab-light + footer action row + “Approve & apply”, “Reject”, and “edit then approve” controls + bottom/center-right: the primary path is diluted because three adjacent actions carry similar visual weight while the explanatory sentence competes on the same line, weakening immediate wayfinding. severity: med. confidence: MED
+
+D: findings
+- D1 — dream-lab-light + footer action row + approval controls plus long helper copy + bottom/center-right: too many competing elements are compressed into one horizontal strip, making the action area the clearest density hotspot on the page. severity: med. confidence: HIGH
+- D4 — dream-lab-light + main diff panel + file label “SOUL.md — persona section” beside the section title + upper-center-right: secondary metadata is visually close in weight and proximity to the primary “Proposed diff” title, causing metadata to compete with the section heading. severity: low. confidence: MED
+
+E: PASS
+
+UNCERTAIN:
+- The selected left queue card border may sit slightly closer to its top edge than to its bottom edge, but the evidence is not strong enough to confirm padding asymmetry.
+
+## inbox-dark
+A: findings
+- A1 — inbox-dark + message composer row + four utility icon buttons, text field, and Send button + bottom/center: the Send button does not share the same top and bottom edges as the adjacent text field and icon-button row, creating a ragged control row. severity: med. confidence: HIGH
+- A2 — inbox-dark + conversation list + unread count pills at row ends + center-left: the trailing unread-count column drifts because some rows have count pills pushed farther inward while rows without pills leave a different right edge rhythm, breaking the repeated trailing-control column. severity: low. confidence: MED
+
+B: findings
+- B1 — inbox-dark + conversation list + spacing between sender line, preview line, and colored agent chips across rows + center-left: rows with chips (“Quinn”, “Beacon”, “takeover”) become visibly taller than adjacent rows without them, creating an uneven list rhythm within the same component family. severity: med. confidence: HIGH
+- B4 — inbox-dark + top filter pills + leading channel icons inside chips + top/center-left: the icons are not visually uniform in size; the X chip’s glyph reads larger and looser than the neighboring channel icons. severity: low. confidence: MED
+
+C: findings
+- C1 — inbox-dark + conversation transcript + double-check delivery marks beside timestamps + center-right: the checkmarks read as bare glyphs without a clear control or status container, making them visually ambiguous rather than obviously informative state markers. severity: low. confidence: MED
+- C5 — inbox-dark + central transcript pane + page purpose area above messages + center: the main task is not immediately obvious because the chat pane header is sparse and the large empty upper transcript area competes with the actual active conversation lower down, slowing wayfinding. severity: med. confidence: MED
+
+D: findings
+- D1 — inbox-dark + selected conversation row “WHATSOUP” + title, preview, Quinn chip, takeover chip, time, unread badge + center-left: this row carries too many simultaneous badges and metadata elements, making it the strongest density hotspot in the list. severity: med. confidence: HIGH
+- D4 — inbox-dark + selected conversation row “Lucas Quiles” + preview line and purple “Quinn” chip + upper-left-center: the agent chip has enough color and weight to compete with the actual message preview, giving secondary routing metadata similar prominence to primary content. severity: low. confidence: MED
+
+E: findings
+- E1 — inbox-dark + transcript pane + large blank area above first visible message + upper-center: a substantial empty zone sits between the chat header and the first visible bubble with no evident purpose. severity: med. confidence: HIGH
+- E2 — inbox-dark + overall inbox layout + crowded left list/right sidebars versus sparse upper transcript area + center: content is squeezed into the side columns while the main pane leaves a large underused region, creating a cramped-versus-wasted imbalance. severity: med. confidence: HIGH
+
+UNCERTAIN:
+- The takeover toggle label and switch may be fractionally misaligned on their shared baseline, but the screenshot is not definitive enough to confirm.
+
+## inbox-light
+A: findings
+- A1 — inbox-light + message composer row + four utility icon buttons, text field, and Send button + bottom/center: the Send button does not share the same top and bottom edges as the adjacent text field and icon-button row, creating a ragged control row. severity: med. confidence: HIGH
+- A2 — inbox-light + conversation list + unread count pills at row ends + center-left: the trailing unread-count column drifts because some rows have count pills pushed farther inward while rows without pills leave a different right edge rhythm, breaking the repeated trailing-control column. severity: low. confidence: MED
+
+B: findings
+- B1 — inbox-light + conversation list + spacing between sender line, preview line, and colored agent chips across rows + center-left: rows with chips (“Quinn”, “Beacon”, “takeover”) become visibly taller than adjacent rows without them, creating an uneven list rhythm within the same component family. severity: med. confidence: HIGH
+- B4 — inbox-light + top filter pills + leading channel icons inside chips + top/center-left: the icons are not visually uniform in size; the X chip’s glyph reads larger and looser than the neighboring channel icons. severity: low. confidence: MED
+
+C: findings
+- C1 — inbox-light + conversation transcript + double-check delivery marks beside timestamps + center-right: the checkmarks read as bare glyphs without a clear control or status container, making them visually ambiguous rather than obviously informative state markers. severity: low. confidence: MED
+- C5 — inbox-light + central transcript pane + page purpose area above messages + center: the main task is not immediately obvious because the chat pane header is sparse and the large empty upper transcript area competes with the actual active conversation lower down, slowing wayfinding. severity: med. confidence: MED
+
+D: findings
+- D1 — inbox-light + selected conversation row “WHATSOUP” + title, preview, Quinn chip, takeover chip, time, unread badge + center-left: this row carries too many simultaneous badges and metadata elements, making it the strongest density hotspot in the list. severity: med. confidence: HIGH
+- D4 — inbox-light + selected conversation row “Lucas Quiles” + preview line and purple “Quinn” chip + upper-left-center: the agent chip has enough color and weight to compete with the actual message preview, giving secondary routing metadata similar prominence to primary content. severity: low. confidence: MED
+
+E: findings
+- E1 — inbox-light + transcript pane + large blank area above first visible message + upper-center: a substantial empty zone sits between the chat header and the first visible bubble with no evident purpose. severity: med. confidence: HIGH
+- E2 — inbox-light + overall inbox layout + crowded left list/right sidebars versus sparse upper transcript area + center: content is squeezed into the side columns while the main pane leaves a large underused region, creating a cramped-versus-wasted imbalance. severity: med. confidence: HIGH
+
+UNCERTAIN:
+- The takeover toggle label and switch may be fractionally misaligned on their shared baseline, but the screenshot is not definitive enough to confirm.
+
+VERDICT skills-hub-dark: FAIL(1)
+VERDICT skills-hub-light: FAIL(1)
+VERDICT dream-lab-dark: FAIL(6)
+VERDICT dream-lab-light: FAIL(6)
+VERDICT inbox-dark: FAIL(10)
+VERDICT inbox-light: FAIL(10)

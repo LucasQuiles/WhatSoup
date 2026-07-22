@@ -1,0 +1,71 @@
+## deployments-dark
+A: PASS
+
+B: findings
+- B1 — deployments-dark + deployment cards + bottom-right action row in the center: the right-aligned action button sits closer to the card edge in the middle card (“retry”) than in the top and bottom cards (“pull updates”), breaking repeated card spacing rhythm. severity med. confidence HIGH
+- B3 — deployments-dark + host identifiers list + bottom-left hosts panel: the selected host row (“nest-2 · container”) is visibly larger/heavier than the unselected sibling rows beyond the normal state marker change, creating type-role drift within one list. severity low. confidence MED
+
+C: findings
+- C5 — deployments-dark + page header/actions + top-right: the primary action is ambiguous because “Pair deployment” and the large “Pair a new deployment” block both compete as first action entry points for the same task. severity med. confidence MED
+
+D: findings
+- D2 — deployments-dark + pairing controls + bottom-center: “Pair deployment” in the header and the separate “Pair a new deployment” panel below duplicate the same action/purpose on one surface. severity med. confidence HIGH
+
+E: findings
+- E2 — deployments-dark + page content distribution + bottom-center/right: the top and middle of the page are dense with stat cards and deployment cards while the lower-right area of the large pairing panel remains comparatively underused. severity low. confidence MED
+
+UNCERTAIN:
+- The icon glyphs inside the deployment avatar squares may not all be optically centered, but the screenshot resolution is not sufficient to confirm.
+
+## dream-lab-dark
+A: findings
+- A1 — dream-lab-dark + action buttons row + bottom-center: the three sibling buttons (“Approve & apply”, “Reject”, “edit then approve”) do not share the same vertical size, with the primary button visibly taller than the other two, creating a ragged row. severity med. confidence HIGH
+
+B: findings
+- B1 — dream-lab-dark + recently decided rows + lower-left: the spacing between the status pill, title text, and trailing age chip is not consistent across the three rows; the middle row appears tighter than the top and bottom rows. severity low. confidence MED
+- B3 — dream-lab-dark + action buttons + bottom-center: the tertiary action uses sentence case (“edit then approve”) while the neighboring actions are title/capitalized style (“Approve & apply”, “Reject”), creating text-role inconsistency in the same control group. severity low. confidence HIGH
+- B6 — dream-lab-dark + action labels + bottom-center: button casing is inconsistent within one action set, with “edit then approve” lowercased while the others start with capitals. severity low. confidence HIGH
+
+C: findings
+- C2 — dream-lab-dark + recently decided list items + lower-left: decision titles are cut off mid-phrase with ellipsis-like clipping before the meaning is clear (“add "summarize long…” / “respond to every men…” / “reduce sign-off freque…”). severity med. confidence HIGH
+- C5 — dream-lab-dark + review pane actions + bottom-center: the presence of three competing approval paths (“Approve & apply”, “Reject”, “edit then approve”) weakens immediate clarity of the primary next step. severity low. confidence MED
+
+D: findings
+- D4 — dream-lab-dark + queued card metadata + upper-left: each queue card packs agent name, type line, long quote, suggestion age, and instance/source metadata at nearly similar visual weight, making secondary metadata compete with the main proposal content. severity med. confidence MED
+
+E: findings
+- E2 — dream-lab-dark + two-column layout + lower-right: the right review column leaves a large unused dark area beneath the action bar while the left column continues stacking dense content, producing a squeezed-vs-wasted imbalance. severity med. confidence HIGH
+- E5 — dream-lab-dark + recently decided panel + lower-left: the list ends with a dangling partial fourth row at the viewport bottom, reading as an awkward cut element. severity med. confidence HIGH
+
+UNCERTAIN:
+- The vertical columns of avatars/titles/tags in the queued list may drift slightly between cards, but it is not clear enough to confirm.
+- The “view chat context” button may sit slightly high relative to the title block, but baseline mismatch is not certain.
+
+## inbox-dark
+A: findings
+- A2 — inbox-dark + conversation list rows + left-center: the small channel icons preceding preview text do not form a straight vertical column across rows, drifting left/right between items like Sarah Miller, Dana K., WHATSOUP, and @theworkshop_hq. severity med. confidence HIGH
+- A4 — inbox-dark + right sidebar person contact rows + upper-right: the contact-value baselines are uneven, with handles/addresses sitting at slightly different vertical positions relative to their channel labels across whatsapp/signal/x/email rows. severity low. confidence MED
+
+B: findings
+- B1 — inbox-dark + chat bubbles from the same speaker + center/right: outgoing right-aligned bubbles use inconsistent internal padding/width behavior, with some lines hugging the text more tightly while others leave much larger side gutters. severity low. confidence MED
+- B3 — inbox-dark + section headers + right side: “PERSON”, “AGENT IN THIS CHAT”, and “LINE” share the same role but not the same visual density, with the longer middle header appearing more prominent than the other two due to length and spacing treatment. severity low. confidence MED
+
+C: findings
+- C3 — inbox-dark + composer utility buttons + bottom-center: the four square icon buttons to the left of the input read visibly smaller and more cramped than the larger neighboring Send button and the message field, weakening target comfort. severity med. confidence HIGH
+- C5 — inbox-dark + top filter chips vs direct/rooms toggle + upper-left/center: the surface presents multiple competing navigation layers at once (channel chips, Direct/Rooms toggle, thread list) so the primary organizing axis is not immediately obvious. severity med. confidence MED
+
+D: findings
+- D1 — inbox-dark + selected thread row + left-center: the Lucas Quiles row carries avatar, name, timestamp, sender label, preview, agent chip, and unread count simultaneously, making it the densest list item and visually crowded. severity med. confidence HIGH
+- D4 — inbox-dark + thread list rows + left-center: timestamps and assorted badges/chips pull close to the visual weight of the sender names and previews, especially on the selected and WHATSOUP rows. severity med. confidence MED
+
+E: findings
+- E2 — inbox-dark + main conversation area vs sidebar + center/right: the chat pane is relatively sparse while the fixed right sidebar consumes substantial width for short metadata cards, creating cramped conversation measure beside underused side space. severity med. confidence HIGH
+- E3 — inbox-dark + composer/input region + bottom-center: the main message input is compressed into a narrower strip by the adjacent icon cluster and large Send button while broad vertical conversation space above remains underused. severity low. confidence MED
+
+UNCERTAIN:
+- The takeover toggle knob may not be perfectly centered within its track, but the screenshot does not allow confident confirmation.
+- Some message bubble tails/offset avatars may have minor vertical misalignment, but not enough to confirm.
+
+VERDICT deployments-dark: FAIL(5)
+VERDICT dream-lab-dark: FAIL(9)
+VERDICT inbox-dark: FAIL(10)

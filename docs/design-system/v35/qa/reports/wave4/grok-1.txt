@@ -1,0 +1,54 @@
+## fleet-dark
+A: A2 center/table: AGENT column values drift — "unassigned" italic plain text vs avatar+name chips, no shared left edge (med, HIGH). A3 center/table CHANNEL: channel glyphs not uniformly optically centered in their hit areas — WhatsApp/X/mail vary (med, MED). A4 top/stats: secondary lines under stat values sit on inconsistent baselines vs neighbors (e.g. "23 chat instances" vs "▲ 12%") (low, MED).
+B: B1 center/table GRANTS: chip count/spacing varies hard per row (3 chips vs 1 vs dashed empty) breaking grant-column rhythm (med, HIGH). B3 center/table: "unassigned" uses italic weight/color distinct from agent names for the same AGENT role (med, HIGH). B4 center/table CHANNEL: icons differ in optical weight/size (bell vs X vs paper-plane) (low, MED).
+C: C1 left/nav: Inbox attention diamond is the only row affordance cue; Ops/Skills/Dream Lab read as static labels with weak chrome (med, MED). C2 center/table LINE: identifiers truncated mid-token ("+1 845 ··· 0919", "l.quiles@…com", "help@shinycartel…com") with no hover-expand affordance visible (med, HIGH). C4 center/table STATE: "live" pill vs "deactivated" outline pill — deactivated is easy to miss at a glance next to live (med, HIGH). C5 top: dual attention cues (header pill + Inbox diamond + Studio diamond) dilute primary wayfinding (low, MED).
+D: D1 center/table rows: status dot + dual-line identity + channel icon + agent + mode + state + grants + sparkline + menu = 9 competing slots (high, HIGH). D4 center/table: MODE color text, STATE pills, GRANTS chips, 7D sparklines all at similar weight — secondary metrics fight primary LINE identity (med, HIGH).
+E: E2 right/Activity vs center/table: Activity column is sparse while Lines table is densely packed (med, HIGH). E4 left/bottom: DEPLOYMENTS block sits in a large dead sidebar region with only two rows, unbalanced vs main canvas (med, HIGH). E5 bottom: FieldNotes row clipped at panel edge / fold with no full last-row breathing room (med, HIGH).
+UNCERTAIN: whether sort/filter buttons are disabled or just low-contrast (no state change visible in static).
+
+## fleet-light
+A: A2 center/table: same AGENT column left-edge drift as dark (med, HIGH). A3 center/table CHANNEL: same uneven glyph centering (med, MED).
+B: B1 center/table GRANTS: same chip-rhythm break (med, HIGH). B3 AGENT role italic "unassigned" vs named agents (med, HIGH). B5 cross-theme: light structural layout matches dark — PASS on structure.
+C: C2 center/table: same identifier truncation (med, HIGH). C4 STATE deactivated vs live weaker in light (outline gray on cream) (med, HIGH). C1 left/nav: same weak non-selected affordance (med, MED).
+D: D1 center/table rows: same 9-slot density hotspot (high, HIGH). D4 same metadata weight competition (med, HIGH).
+E: E2 right vs center: same sparse Activity vs dense table (med, HIGH). E4 left/bottom DEPLOYMENTS underused (med, HIGH). E5 bottom FieldNotes clipped (med, HIGH).
+UNCERTAIN: ClientDesk channel icon appears darker/filled vs dark-theme counterpart — possible asset inconsistency.
+
+## hatch-dark
+A: A6 center: ceremony card is optically centered; PASS. A1 bottom: "Pick a channel" card top edge cropped mid-panel, not aligned as a full peer card (high, HIGH). A5 page: left/right margins of main card OK; bottom card violates shared vertical rhythm (med, HIGH).
+B: B2 center: avatar dashed rounded-rect radius vs status chips vs CTA radius feel matched — PASS. B3 metadata line under Quinn mixes link-colored "WhatsApp" with muted meta in one role (low, MED).
+C: C1 bottom: channel icons in Pick-a-channel are partially clipped dark squares — unclear targets (high, HIGH). C5 bottom: secondary "Pick a channel" surface peeks under completed HATCH step and competes with primary "Send & go live" (med, HIGH). C6 bottom: orphaned cropped card with cut-off channel row reads unfinished (high, HIGH). C4 stepper: completed checks vs active HATCH OK — PASS.
+D: D2 center: "name / soul / channel" chips restate metadata already in the subtitle line (community agent · WhatsApp · +1 845…) (med, HIGH).
+E: E1 left+right: vast empty side fields around the card on 1440 canvas (med, HIGH). E5 bottom: viewport cuts through Pick-a-channel card, dangling partial element (high, HIGH). E3: content compressed into a narrow center column while sides waste space (med, HIGH).
+UNCERTAIN: dice button beside Quinn — affordance for randomize name? unlabeled icon only.
+
+## hatch-light
+A: A1/A5/A6: same bottom card crop and center placement as dark (high, HIGH).
+B: B5: layout matches dark structurally — PASS. B3: same WhatsApp link-color break in meta line (low, MED).
+C: C1/C5/C6: same clipped channel picker and competing secondary surface (high, HIGH). C2: none in primary card — PASS.
+D: D2: same chip vs subtitle redundancy (med, HIGH).
+E: E1/E3/E5: same dead side zones and folded clipped bottom card (high, HIGH).
+UNCERTAIN: none new.
+
+## agents-dark
+A: A1 center: Brain / Tool permissions top edges align; Assigned lines / Instances align; Skills / Memory align — PASS. A2 left/roster: avatar, name, meta, status marker form clean columns — PASS. A4 header: "live" pill and "swap profile" chip share title baseline — PASS.
+B: B1 left/roster cards: Quinn selected card padding matches siblings — PASS. B3 left/roster status: green dot / amber diamond / empty square used consistently with shape+color law — PASS. B4 Instances row actions: pause/kill sizing consistent — PASS.
+C: C1 Memory "forget…" and Skills "manage" read as buttons — PASS. C2 Instances: IDs masked per design law (prefix+suffix) — PASS not a defect. C4 Tool permissions: MCP mutations off vs others on is clear — PASS. C3 Instances kill/pause: compact but peer-matched — PASS. C6 none — PASS.
+D: D1 header row: live pill + swap profile + Edit profile + Retire competes mildly (low, MED). D3 Brain strip: "choose new brain…" outlined CTA + Swap button + history simultaneous emphasis (med, MED). D4 Instances: full ID + host + age + dual actions per row is heavy (med, HIGH).
+E: E2 left/roster ends mid-height while main column fills — mild underuse below Forge (low, MED). E5: page fills viewport — PASS.
+UNCERTAIN: Builds grant "?" chip meaning (missing grant?) — legible as unknown but sparse.
+
+## agents-light
+A: A1/A2: same clean grid as dark — PASS.
+B: B5 cross-theme: identical structure/spacing to dark — PASS. B1/B3: PASS.
+C: C4 Retire button — light theme red outline on cream is weaker danger affordance than dark but still bordered (low, MED). Otherwise PASS.
+D: D1/D3/D4: same header competition, Brain dual-CTA, Instances density (med, HIGH).
+E: E2: same mild roster bottom gap (low, MED).
+UNCERTAIN: none new.
+
+VERDICT fleet-dark: FAIL(18)
+VERDICT fleet-light: FAIL(14)
+VERDICT hatch-dark: FAIL(12)
+VERDICT hatch-light: FAIL(10)
+VERDICT agents-dark: FAIL(4)
+VERDICT agents-light: FAIL(4)

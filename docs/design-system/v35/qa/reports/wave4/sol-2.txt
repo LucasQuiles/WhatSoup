@@ -1,0 +1,61 @@
+## skills-hub-light
+
+A: A1 PASS; A2 PASS; A3 PASS; A4 PASS; A5 PASS; A6 PASS.
+
+B: B1 PASS; B2 PASS; B3 PASS; B4 PASS; B5 UNCERTAIN; B6 PASS.
+
+C: C1 PASS; C2 PASS; C3 PASS; **C4 FINDING** — skills-hub-light · center/right · outlined COMPAT/HARNESS chips: unavailable states rely on a washed-out cream fill and faint hairline, making them substantially less legible than the green and amber states; severity med; confidence MED. C5 PASS; C6 PASS.
+
+D: **D1 FINDING** — skills-hub-light · center · auto-seo-suite warning strip: publisher trust, scanner findings, installation scope, and selection policy are compressed into one long competing line; severity med; confidence HIGH. D2 PASS; D3 PASS; D4 PASS.
+
+E: E1 PASS; E2 PASS; **E3 FINDING** — skills-hub-light · center/right · repeated compatibility strips: each strip spans almost the entire result card while its content remains clustered at the left, creating conspicuous unused horizontal measure; severity low; confidence HIGH. E4 PASS; E5 PASS.
+
+UNCERTAIN:
+
+- B5 cannot be evaluated because the matching dark-theme screenshot was not supplied.
+
+## dream-lab-light
+
+A: A1 PASS; A2 PASS; A3 PASS; A4 PASS; A5 PASS; A6 PASS.
+
+B: B1 PASS; B2 PASS; B3 PASS; B4 PASS; B5 UNCERTAIN; B6 PASS.
+
+C: C1 PASS; C2 PASS; C3 PASS; C4 PASS; C5 PASS; C6 PASS.
+
+D: D1 PASS; D2 PASS; D3 PASS; **D4 FINDING** — dream-lab-light · top-center · selected-dream provenance line: agent, type, age, instance, and source are presented as one uniformly weighted metadata run, giving secondary provenance excessive visual weight; severity low; confidence MED.
+
+E: E1 PASS; E2 PASS; **E3 FINDING** — dream-lab-light · center · proposed-diff rows: the deleted and added statements run across nearly the full panel width, producing an unnecessarily long reading measure; severity med; confidence HIGH. E4 PASS; E5 PASS.
+
+UNCERTAIN:
+
+- B5 cannot be evaluated because the matching dark-theme screenshot was not supplied.
+- The blank area below the review actions may make the page top-heavy, but the visible task content could simply be shorter than the viewport.
+
+## inbox-light
+
+A: A1 PASS; A2 PASS; A3 PASS; A4 PASS; A5 PASS; A6 PASS.
+
+B: B1 PASS; B2 PASS; B3 PASS; B4 PASS; B5 UNCERTAIN; **B6 FINDING** — inbox-light · top-right/center/right/bottom · takeover state labels: the same state is alternately called “takeover,” “takeover enabled,” and “takeover on”; severity low; confidence HIGH.
+
+C: C1 PASS; C2 PASS; C3 PASS; **C4 FINDING** — inbox-light · bottom-center · third composer icon button: its glyph and border are far more washed out than adjacent composer buttons, causing the disabled/recessed state to approach disappearance on the cream surface; severity med; confidence HIGH. C5 PASS; C6 PASS.
+
+D:
+
+- D1 FINDING — inbox-light · left-center · WHATSOUP conversation row: time, preview, agent chip, takeover badge, and unread count create a visibly denser row than every sibling; severity med; confidence HIGH.
+- D2 FINDING — inbox-light · top-right/center/right/bottom · takeover status: the state is simultaneously repeated in the toggle, transcript banner, agent card, and composer placeholder; severity med; confidence HIGH.
+- D2 FINDING — inbox-light · right · Person contact card: the X glyph is immediately followed by an identical “X” channel label, reading as an accidental “X X” duplicate; severity low; confidence HIGH.
+- D3 PASS; D4 PASS.
+
+E: E1 PASS; E2 PASS; E3 PASS; E4 PASS; E5 PASS.
+
+UNCERTAIN:
+
+- B5 cannot be evaluated because the matching dark-theme screenshot was not supplied.
+- The large blank region above the first chat message may be deliberate bottom anchoring.
+- The lower-right inspector area is underused, but its emptiness may reflect the limited data available for this person.
+
+| Verdict |
+|---|
+| VERDICT skills-hub-light: FAIL(3) |
+| VERDICT dream-lab-light: FAIL(2) |
+| VERDICT inbox-light: FAIL(5) |

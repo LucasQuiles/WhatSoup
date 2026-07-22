@@ -1,0 +1,60 @@
+## deployments-dark
+A: A1 top stat cards row — four summary cards share top edge but SHARDED SKILLS card content block sits optically looser vs DEPLOYMENTS (med, HIGH). A2 deployment cards — trailing console/logs buttons align across cards but nest-2 header meta (degraded + version + update) causes column drift vs local/field-pi status cluster (med, HIGH). A4 nest-2 header — "v3.1.9 → update to 3.2.1" chip baseline sits slightly off the degraded badge baseline (low, MED).
+B: B1 footer skill rows — local and field-pi use "pull updates" while nest-2 uses "retry"; padding of the action chip vs left status text is inconsistent with the fuller local row (med, HIGH). B3 card metric labels — ISSUE value "1 line" is amber/emphasized while sibling metric values (LINES/AGENTS/UPTIME) stay white, role-color drift inside same metric band (med, HIGH). B4 nest-2 header — update chip includes extra control not present on healthy cards, icon/chip sizing denser than peers (low, HIGH).
+C: C1 bottom "Pair a new deployment" — bare text on dark strip, no button/chrome affordance (high, HIGH). C4 field-pi skills row — green dot + "pull updates" looks identical in weight to local despite no pending emphasis difference; nest-2 retry is the only stalled state that reads clearly (low, MED). C5 bottom CTA — page primary "+ Pair deployment" exists top-right but duplicate footer CTA is non-component and weak (med, HIGH). C6 bottom region — partial empty card/strip clipped at viewport with orphan label (high, HIGH).
+D: D1 nest-2 header row — icon + title + meta + degraded badge + version + update chip + console/logs competes as densest header (med, HIGH). D2 skills hub — "org skills hub…84 skills shared" repeats SHARDED SKILLS summary "84" / "org hub synced 6m ago" (med, HIGH). D4 metric chips — wa/signal/imsg and agent name chips same visual weight as values (low, MED).
+E: E1 bottom — large dead zone under field-pi before the orphan CTA strip (med, HIGH). E2 — content tight in cards while bottom third is near-empty (med, HIGH). E5 — "Pair a new deployment" dangling at fold cut by viewport edge (high, HIGH).
+
+UNCERTAIN: whether top stat card internal padding is exactly identical (antialias ambiguity)
+
+## deployments-light
+A: A2 same nest-2 header status/actions drift vs local and field-pi columns (med, HIGH). A4 nest-2 degraded badge vs version/update chip baseline uneven (low, MED).
+B: B1 skills footer actions — retry vs pull updates chip placement/padding inconsistency across three cards (med, HIGH). B3 ISSUE "1 line" amber emphasis vs other metric values (med, HIGH). B5 vs dark — structure matches (PASS on parity).
+C: C1 "Pair a new deployment" bare text, no control affordance (high, HIGH). C6 bottom partial strip/orphan CTA (high, HIGH). C5 weak secondary CTA vs clear top "+ Pair deployment" (med, HIGH).
+D: D1 nest-2 header density worst offender (med, HIGH). D2 org skills hub text duplicates top SHARDED SKILLS stat (med, HIGH).
+E: E1/E2 bottom dead zone under last card (med, HIGH). E5 dangling footer CTA cut at fold (high, HIGH).
+
+UNCERTAIN: none confirmed beyond dark parity
+
+## settings-dark
+A: A5 main content — Workspace / Notifications / API tokens section headers share left edge; sidebar width stable (PASS). A2 API token rows — rotate/revoke buttons form clean column (PASS). A1 Appearance swatches — three theme previews share bottom edge (PASS).
+B: B1 notification rows — Browser push has no trailing edit; Webhook has edit; Email digest has time label — trailing control slot inconsistent (med, HIGH). B3 Admin identity value "lucas · owner (admin)" is plain text while Workspace name is a filled input chrome — same "value" role, different component treatment (med, HIGH). B6 sidebar "Danger zone" vs clipped bottom "Export all data" terminology not mirrored in nav emphasis (low, MED).
+C: C1 Appearance swatches — read as interactive (border on selected) PASS. C2 bottom Danger zone — "Export all data" and adjacent control clipped mid-element by viewport (high, HIGH). C4 Reduced motion toggle off vs notification toggles on — legible PASS. C6 bottom — partial danger card cut off, looks unfinished (high, HIGH). C3 revoke buttons — adequate size PASS.
+D: D2 Workspace block — "Appearance" row duplicates sidebar nav item "Appearance" (med, HIGH). D1 API token rows — id + scopes + date + rotate + revoke acceptable. D3 — revoke red text competes mildly with section headers (low, MED).
+E: E5 bottom danger zone clipped at fold (high, HIGH). E3 content measure OK in center column. E1 right of admin identity value — wide empty run in row (low, MED).
+
+UNCERTAIN: whether Email digest "daily 08:00" is tappable or static label
+
+## settings-light
+A: PASS structural alignment matches dark.
+B: B1 notification trailing slot inconsistency (edit vs empty vs time) same as dark (med, HIGH). B3 Workspace name input chrome vs Admin identity plain text value treatment drift (med, HIGH). B5 — light/dark structure identical PASS.
+C: C2/C6 bottom danger zone clipped ("Export all data" partial, control fragment) (high, HIGH). C1 "+ new token" affordance OK.
+D: D2 Appearance row duplicates sidebar Appearance label (med, HIGH).
+E: E5 danger zone cut at fold (high, HIGH). E1 sparse right side in admin identity row (low, MED).
+
+UNCERTAIN: selected theme swatch (left) outline contrast on light bg slightly soft — still distinguishable
+
+## splash-dark
+A: A6 hero stack (logo, headline, subcopy, CTAs) optically centered horizontally PASS. A1 three feature cards share top/bottom edges PASS. A3 theme glyph in top-right chip — optically centered PASS.
+B: B2 feature cards equal radius PASS. B3 card titles same role/size PASS. B4 no icon set to compare. B1 equal card padding PASS.
+C: C1 both CTAs read as buttons; secondary "Open the Fleet" lower contrast but still chrome'd PASS. C5 page identity + primary CTA clear in 2s PASS. C4 N/A. C6 flat geometric watermarks sanctioned PASS.
+D: PASS — no density/redundancy issues.
+E: E1 large empty vertical space between CTA row and feature cards — intentional marketing breath but approaches dead zone on 1440x900 (low, MED). E4 watermarks balance corners PASS. E5 viewport fills sensibly PASS.
+
+UNCERTAIN: secondary CTA contrast near minimum on dark fill
+
+## splash-light
+A: A6 hero centered PASS. A1 feature cards aligned PASS.
+B: B5 vs dark — identical structure/spacing PASS. B2/B3 PASS.
+C: C1 secondary "Open the Fleet" border/fill subtler on light but still identifiable (low, MED). C5 clear PASS.
+D: PASS.
+E: E1 same large gap between CTAs and feature cards as dark (low, MED). E5 PASS.
+
+UNCERTAIN: none further
+
+VERDICT deployments-dark: FAIL(18)
+VERDICT deployments-light: FAIL(14)
+VERDICT settings-dark: FAIL(10)
+VERDICT settings-light: FAIL(8)
+VERDICT splash-dark: FAIL(1)
+VERDICT splash-light: FAIL(2)

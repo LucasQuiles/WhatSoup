@@ -1,0 +1,154 @@
+## deployments-light
+
+A:
+
+- A1 PASS
+- A2 PASS
+- A3 PASS
+- A4 PASS
+- A5 PASS
+- A6 PASS
+
+B:
+
+- B1 PASS
+- B2 PASS
+- B3 PASS
+- B4 PASS
+- B5 NOT TESTABLE; no dark counterpart supplied.
+- B6 PASS
+
+C:
+
+- C1 PASS
+- C2 PASS
+- C3 PASS
+- C4 — deployments-light · center · Lines values: local and nest-2 show used/capacity ratios, while field-pi shows only “2,” leaving its capacity state ambiguous. Severity med · Confidence HIGH.
+- C5 PASS
+- C6 — deployments-light · top/center · Total Lines summary: “19” conflicts with the visible deployment/channel counts, which total 17. The aggregate and its breakdown cannot both represent the same quantity. Severity high · Confidence MED.
+
+D:
+
+- D1 PASS
+- D2 PASS
+- D3 PASS
+- D4 PASS
+
+E:
+
+- E1 PASS
+- E2 — deployments-light · bottom/center-right · Pair a new deployment panel: all instructions and controls are compressed into the left portion while most of the full-width panel remains unused. Severity med · Confidence HIGH.
+- E3 PASS
+- E4 PASS
+- E5 PASS
+
+UNCERTAIN:
+
+- B5 cross-theme structural parity cannot be evaluated without deployments-dark.
+- The vertically centered status/version clusters may look detached from both header text rows, but the pattern is consistent enough to be intentional.
+- The nest-2 header is substantially denser than its siblings, but it does not visibly collide or clip.
+
+## settings-light
+
+A:
+
+- A1 PASS
+- A2 PASS
+- A3 PASS
+- A4 PASS
+- A5 PASS
+- A6 PASS
+
+B:
+
+- B1 PASS
+- B2 PASS
+- B3 PASS
+- B4 — settings-light · center · notification-channel icons: the Browser push speech bubble is visibly taller and heavier than the Webhook and Email digest rectangles, breaking optical sizing consistency. Severity low · Confidence HIGH.
+- B5 NOT TESTABLE; no dark counterpart supplied.
+- B6 PASS
+
+C:
+
+- C1 PASS
+- C2 PASS
+- C3 PASS
+- C4 — settings-light · upper-right · Workspace name control: its flat beige recessed fill and absence of an adjacent edit/save affordance make enabled versus read-only/disabled state unclear. Severity med · Confidence MED.
+- C5 PASS
+- C6 — settings-light · center · Webhook and Email digest icons: both use the same generic solid rectangle, making distinct notification types visually indistinguishable and placeholder-like. Severity med · Confidence HIGH.
+
+D:
+
+- D1 PASS
+- D2 — settings-light · bottom/center · Danger zone: the deactivation and two-confirmation warning is repeated immediately inside the Reset workspace panel after appearing directly above it. Severity low · Confidence HIGH.
+- D3 PASS
+- D4 PASS
+
+E:
+
+- E1 PASS
+- E2 PASS
+- E3 PASS
+- E4 PASS
+- E5 PASS
+
+UNCERTAIN:
+
+- B5 cross-theme structural parity cannot be evaluated without settings-dark.
+- The unlabeled Appearance swatches do not disclose their exact meanings, but their shapes and selected outline are sufficient to avoid a confirmed affordance defect.
+- The secondary settings rail leaves a large lower area unused, although that may be intentional persistent-navigation structure.
+
+## splash-light
+
+A:
+
+- A1 PASS
+- A2 PASS
+- A3 PASS
+- A4 PASS
+- A5 PASS
+- A6 PASS
+
+B:
+
+- B1 PASS
+- B2 PASS
+- B3 PASS
+- B4 PASS
+- B5 NOT TESTABLE; no dark counterpart supplied.
+- B6 PASS
+
+C:
+
+- C1 PASS
+- C2 PASS
+- C3 PASS
+- C4 PASS
+- C5 PASS
+- C6 — splash-light · lower-center · three feature cards: their fills nearly match the surrounding cream canvas and only faint hairlines define their edges, causing the cards to wash into the background. Severity low · Confidence MED.
+
+D:
+
+- D1 PASS
+- D2 PASS
+- D3 PASS
+- D4 PASS
+
+E:
+
+- E1 PASS
+- E2 PASS
+- E3 PASS
+- E4 PASS
+- E5 PASS
+
+UNCERTAIN:
+
+- B5 cross-theme structural parity cannot be evaluated without splash-dark.
+- The secondary and theme-button outlines are subdued on cream, but remain sufficiently visible to avoid a confirmed affordance failure.
+
+| Verdict |
+|---|
+| VERDICT deployments-light: FAIL(3) |
+| VERDICT settings-light: FAIL(4) |
+| VERDICT splash-light: FAIL(1) |

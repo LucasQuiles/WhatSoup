@@ -1,0 +1,237 @@
+Below is a strict audit by image, assuming violations exist and checking against every rule.
+
+---
+
+## 1) `fleet-dark.png`
+
+### Rule violations
+
+1. **Blue used as semantic data color in 7D sparklines**
+   - **Location:** Lines table, `7D` column across multiple rows; blue bars mixed into miniature charts.
+   - **Rule:** **1** — single blue accent only for actions/focus/selection.
+   - **Severity:** **Medium**
+   - **Why:** Blue is being used to encode chart data/activity, not interaction/focus/selection.
+
+2. **Purple used as semantic grant/status coding outside allowed mode palette usage**
+   - **Location:** `GRANTS` column pills, especially `P` badges.
+   - **Rule:** **1**
+   - **Severity:** **Medium**
+   - **Why:** Purple is conveying permission/grant meaning. Rule limits chromatic meaning to blue for action, green/amber/red for status, teal/cyan/violet for mode colors. Grant levels appear to be meaningfully color-coded outside that system.
+
+3. **Cyan/blue used as semantic grant coding**
+   - **Location:** `GRANTS` column pills, especially `S` badges.
+   - **Rule:** **1**
+   - **Severity:** **Medium**
+   - **Why:** Cyan/blue appears to encode grant class/level rather than mode. This is another chromatic meaning channel.
+
+4. **Status conveyed by color-only left markers**
+   - **Location:** First column of each line row: green dots, amber diamond, red square, hollow square.
+   - **Rule:** **2**
+   - **Severity:** **Low**
+   - **Why:** Although shapes exist, the tiny markers are visually dominated by color and not consistently legible as shape-coded states at this size. The deactivated/alert distinctions rely heavily on color recognition.
+
+5. **Muted low-contrast text for essential identifiers**
+   - **Location:** Secondary line identifiers under line names, e.g. `+1 845 ... 0919`, `signal · +1 845 ... 0077`, `help@shinycartel…`, etc.
+   - **Rule:** **4**
+   - **Severity:** **Medium**
+   - **Why:** These are essential identifiers but are rendered in very muted brown-on-brown contrast.
+
+6. **Muted low-contrast text for essential activity details**
+   - **Location:** Activity panel item bodies and timestamps, e.g. `14:32`, `— 2.8s`, `pending review`, `compatible`.
+   - **Rule:** **4**
+   - **Severity:** **Medium**
+   - **Why:** Operational details in the live activity feed are too subdued for essential monitoring content.
+
+7. **Likely sub-11px text in multiple operational labels**
+   - **Location:** Table headers (`LINE`, `CHANNEL`, `AGENT`, etc.), mini metadata under cards (`23 chat instances`, `p95 11.4s`), sidebar section labels (`OPERATE`, `CREATE`, `SYSTEM`, `DEPLOYMENTS`), activity timestamps.
+   - **Rule:** **4**
+   - **Severity:** **Medium**
+   - **Why:** Several labels appear below the minimum readable size threshold.
+
+8. **Interactive row overflow menus lack clear affordance**
+   - **Location:** Rightmost `...` controls in each line row.
+   - **Rule:** **7**
+   - **Severity:** **Medium**
+   - **Why:** Bare ellipsis text/icon without button container/hover/target clarity does not reliably read as interactive.
+
+9. **Interactive chart cells do not clearly look interactive if clickable**
+   - **Location:** `7D` mini bar chart column and possibly `GRANTS` pills if meant to open details.
+   - **Rule:** **7**
+   - **Severity:** **Low**
+   - **Why:** If these are actionable, they lack button affordance and read as passive data.
+
+### Other visual defects
+
+1. **Status shape system is inconsistent**
+   - **Location:** Left row markers: circles on most rows, diamond for `Studio`, red square for `Support`, outlined square for some deactivated rows.
+   - **Severity:** **Medium**
+   - **Issue:** Shape mappings are not explained anywhere on-screen; two deactivated-ish looking rows use different weak-outline symbols that are hard to distinguish.
+
+2. **Channel icon + tiny status dot creates visual clutter**
+   - **Location:** `CHANNEL` column for each row.
+   - **Severity:** **Low**
+   - **Issue:** The mini green/amber/red dots attached to channel icons are so small they risk looking like rendering artifacts rather than purposeful state indicators.
+
+3. **Table density harms scanability**
+   - **Location:** Entire `Lines` table.
+   - **Severity:** **Low**
+   - **Issue:** Many columns, muted text, and tiny metadata produce poor hierarchy.
+
+4. **Activity event icons are inconsistent in visual weight**
+   - **Location:** Activity list (`•`, triangle, square, plus, sunburst, hexagon, checkmark).
+   - **Severity:** **Low**
+   - **Issue:** Shapes vary in stroke/fill weight and are not normalized, weakening pattern recognition.
+
+5. **Sidebar hierarchy is uneven**
+   - **Location:** Left nav, especially `Inbox` with detached amber dot and indented `Ops`.
+   - **Severity:** **Low**
+   - **Issue:** The amber dot reads as a floating notification unrelated to a durable nav structure.
+
+**Per-image count — `fleet-dark.png`: 9 rule violations, 5 other visual defects**
+
+---
+
+## 2) `hatch-dark.png`
+
+### Rule violations
+
+1. **Multiple chromatic step indicators; blue and green both used as process meaning**
+   - **Location:** Top progress/navigation line: `KIND`, `CHANNEL`, `AGENT`, `LINK`, `HATCH`.
+   - **Rule:** **1**
+   - **Severity:** **Medium**
+   - **Why:** Green and blue are both used to encode step completion/current state. Blue is reserved for actions/focus/selection only; green is status, not generic progress state.
+
+2. **Blue used as channel brand/selection and green used as tags simultaneously**
+   - **Location:** Selected `WhatsApp` tile in channel picker; green pills above avatar (`name`, `soul`, `channel`); blue text `WhatsApp` in profile metadata.
+   - **Rule:** **1**
+   - **Severity:** **Medium**
+   - **Why:** Blue is carrying brand/channel meaning in addition to selection; green is used decoratively/semantically outside status.
+
+3. **Glow effect present outside allowed hatch ceremony radial glow exception is ambiguous and likely excessive**
+   - **Location:** Around central `Q` avatar card.
+   - **Rule:** **5**
+   - **Severity:** **Medium**
+   - **Why:** There is a visible soft glow/haze around the avatar. Rule allows one radial glow at the hatch ceremony moment only. This screen may be that moment, but the implementation looks like a persistent card aura rather than a single ceremonial moment. Borderline, but as rendered it appears as a standing effect.
+
+4. **Channel glyphs are not monochrome silhouettes**
+   - **Location:** `WhatsApp` selected tile icon shown in blue; possibly other vendor marks with internal negative spaces/stroke styling.
+   - **Rule:** **3**
+   - **Severity:** **Medium**
+   - **Why:** Rule requires monochrome filled silhouettes. The selected WhatsApp glyph is chromatically tinted and reads as brand-colored.
+
+5. **Essential text likely below 11px**
+   - **Location:** Top step labels (`KIND`, `CHANNEL`, etc.), section labels (`MESSAGING`, `SOCIALS`, `CHANNELS`), metadata under name (`community agent · WhatsApp · +1 845 ... 4651 · brain: claude-sonnet`).
+   - **Rule:** **4**
+   - **Severity:** **Medium**
+   - **Why:** Several labels appear undersized.
+
+6. **Muted low-contrast essential metadata**
+   - **Location:** Agent metadata line below quote, section descriptors, channel tile labels.
+   - **Rule:** **4**
+   - **Severity:** **Medium**
+   - **Why:** The phone number, channel, and brain assignment are operationally important but too faint.
+
+7. **Masked identifier lacks useful visible prefix+suffix in one case**
+   - **Location:** Message composer text `Hey Quinn — welcome. Say hello to the room?` does not show a target room identifier; also this screen overall exposes only one phone with `+1 845 ... 4651` correctly, but the room/channel destination is omitted where context is needed.
+   - **Rule:** **6**
+   - **Severity:** **Low**
+   - **Why:** The system allows masking, but destination context should preserve useful prefix/suffix or equivalent identifying context. Here the send target is too vague.
+
+8. **Icon-only sparkle/settings control lacks button affordance**
+   - **Location:** Top-right small star/sun icon.
+   - **Rule:** **7**
+   - **Severity:** **Medium**
+   - **Why:** It appears as a loose icon with no visible hit area/border, unlike adjacent buttons elsewhere in the system.
+
+9. **Small square icon button next to “Quinn” has weak affordance**
+   - **Location:** To the right of the `Quinn` heading.
+   - **Rule:** **7**
+   - **Severity:** **Low**
+   - **Why:** Tiny icon-only action is difficult to recognize and target.
+
+### Other visual defects
+
+1. **The “Skip ceremony” action looks disabled even if active**
+   - **Location:** Under composer, left of `Adjust persona`.
+   - **Severity:** **Medium**
+   - **Issue:** Low-contrast plain text reads as inactive/help text rather than a clickable secondary action.
+
+2. **Primary action hierarchy is muddled**
+   - **Location:** Composer area with `Send & go live` and below-row `Adjust persona`.
+   - **Severity:** **Low**
+   - **Issue:** The call to action is visually detached at far right while the secondary button below competes for attention.
+
+3. **Avatar card has excessive empty space**
+   - **Location:** Upper card center around avatar and chips.
+   - **Severity:** **Low**
+   - **Issue:** Vertical spacing makes the content feel sparse and disconnected.
+
+4. **Selected channel tile relies heavily on border color**
+   - **Location:** `WhatsApp` card in picker.
+   - **Severity:** **Low**
+   - **Issue:** The selected state is mostly a blue outline; this is not strong enough compared with dark neighbors.
+
+5. **Inconsistent capitalization taxonomy**
+   - **Location:** `SOCIALS`, `CHANNELS`, `MESSAGING`; then tile labels `iMessage`, `LinkedIn`, `Email`, etc.
+   - **Severity:** **Low**
+   - **Issue:** Not a rules violation, but the mix of all-caps headers and varied casing adds noise.
+
+**Per-image count — `hatch-dark.png`: 9 rule violations, 5 other visual defects**
+
+---
+
+## 3) `agents-dark.png`
+
+### Rule violations
+
+1. **Blue used as semantic data/state outside action/focus/selection**
+   - **Location:** Tool permission toggles are blue when on; `swap profile` pill; selected roster card border; memory source bullets include blue; possible chip accents.
+   - **Rule:** **1**
+   - **Severity:** **Medium**
+   - **Why:** Blue is acceptable for interactive state, but here it also bleeds into persistent semantic labeling and data accents, not just immediate action/focus/selection.
+
+2. **Purple used as semantic grant levels**
+   - **Location:** `Assigned lines` right-side badges `P`; selected agent avatar tile; possibly dream counts in sidebar.
+   - **Rule:** **1**
+   - **Severity:** **Medium**
+   - **Why:** Purple is carrying permission/category meaning in grants, not mode.
+
+3. **Color-only status dots in roster and instances**
+   - **Location:** Left sidebar agent list trailing dots; instance list colored bullets.
+   - **Rule:** **2**
+   - **Severity:** **High**
+   - **Why:** Green/amber dots communicate status with no accompanying distinct shape code. This is a direct violation of the mandatory shape-coded status rule.
+
+4. **Muted low-contrast essential operational text**
+   - **Location:** Sidebar metadata (`1 line · 9 instances`, `paused`, `draft`), top metadata under quote, instance rows, memory list timestamps.
+   - **Rule:** **4**
+   - **Severity:** **Medium**
+   - **Why:** Core operational details are too faint.
+
+5. **Likely sub-11px text in multiple labels**
+   - **Location:** Breadcrumb (`ROSTER / QUINN`), chip subtitles (`per-chat`, `granular`, `via Hub`), tiny action labels (`pause`, `kill`), memory timestamps (`2m`, `1h`, `3h`), sidebar role text.
+   - **Rule:** **4**
+   - **Severity:** **Medium**
+   - **Why:** Multiple controls and labels appear below minimum size.
+
+6. **Search icon and input affordance are weak**
+   - **Location:** Left sidebar search field.
+   - **Rule:** **7**
+   - **Severity:** **Low**
+   - **Why:** The field is bordered, but the icon is tiny and placeholder contrast is weak; interaction affordance is marginal.
+
+7. **Tiny inline text-actions without button affordance**
+   - **Location:** `history`, `manage`, `show all 9 instances`, memory `forget...`, `swap`, possibly `choose new brain…`
+   - **Rule:** **7**
+   - **Severity:** **Medium**
+   - **Why:** Several actions are rendered as low-emphasis text or slim pills inconsistent with clear clickability.
+
+8. **Danger action styling relies heavily on red color**
+   - **Location:** `Retire...` button.
+   - **Rule:** **1**
+   - **Severity:** **Low**
+   - **Why:** Red is status color and acceptable for destructive actions in many systems, but here the button’s meaning is primarily color-driven with weak structural differentiation.
+
+### Other visual defects
+
+1. **Roster card
