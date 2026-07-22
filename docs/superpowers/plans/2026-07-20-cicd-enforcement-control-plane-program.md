@@ -50,17 +50,18 @@ ownership evidence, quarantine stale results, and reconcile lineage before resum
 - **Durability checkpoint:** live SSH readback initially bound local and remote design branch to `9fc8a640845d581025b6e7997c0de70b55478a1e` and remote `main` to `24bb5e5528c7909a8df5f4d490d83e21604f3646`. The `9fc8a640…` commit explicitly bypassed hooks and remains preservation evidence, not verified closure.
 - **Last implementation-source commit:** `1bdd8ea37c7c9f3fb600fe0f5a68901398c50ca3`; the later documentation-only planning admission is `b8f485477a71dcc6fc6572bc3dafe0a31d5e8482`. At that admission the locally observed `origin/main` tracking ref was `6fb5ee72e6f2ae6f4ddc858b7fc0db0fae825c0c`, and the design branch's upstream tracking ref remained `9fc8a640845d581025b6e7997c0de70b55478a1e`. These are local Git observations, not fresh hosted readback. The tracked worktree/index sets were clean immediately after the planning admission, and the workflow/portability plan is now tracked; every later bead must freeze its own current lease rather than inheriting this historical observation.
 - **Current planning state:** the design, program, and foundation plan are tracked. `2026-07-20-cicd-workflow-portability.md` is reviewed as a separate source-only canary plan and remains blocked on CP-F2f, CP-WA1, CP-H1c, CP-GL1, CP-H1d, CP-F4, and CP-F5. Plan digests and prerequisite receipts are refreshed before each mutation, promotion, and closeout; a changed digest invalidates dependent evidence.
-- **Current integration observation:** local merge commit `308b08069da327ce38b16c7e0206593a5eee4529`
-  preserves the evidence-bearing topic history through first parent
-  `c6b7540ad3fb969c544997b132975a0b97159fa2` and incorporates locally observed
-  `origin/main` `2be8a2c9a57642a2f43e39dedac39dbcd4330193` without rebasing. The earlier second-parent
-  workflow has source-level `merge_group` wiring, keeps merge-group runs out of
-  cancel-in-progress, and uses 14/14 direct external full-SHA references. Those source facts
-  invalidate the older workflow-gap reviews; they do not prove reviewed action provenance,
-  protected-policy execution, exact-set merge authorization, or a live merge queue. The
-  latest six-path main delta changes fail-closed and session/fleet transaction code; it is
-  disjoint from the staged planning paths but invalidates prior merge-sensitive and aggregate
-  receipts.
+- **Current integration observation:** local merge commit
+  `7f8f63c63b2561b7e0bf4a76fafee9c80dadfae8` preserves the 22-file Task 7/source-split
+  commit `626db87d34cb3b1d41bedd82757cb01be7035a6f` as first parent and incorporates locally
+  observed `origin/main` `abe6fe592a2f704deeccf8cc5338abd5a3f8997a` as second parent
+  without rebasing. The second parent adds `agent:lease`, its tests, package wiring, and a
+  public-surface row. That lease is quarantined from control-plane authority as a precursor;
+  authoritative CP-WA1 remains incomplete. Earlier integrated workflow source has
+  `merge_group` wiring, keeps merge-group runs out of cancel-in-progress, and uses 14/14
+  direct external full-SHA references. Those source facts do not prove reviewed action
+  provenance, protected-policy execution, exact-set merge authorization, or a live merge
+  queue. The current merge invalidates dependent prior evidence, and no final verification
+  is claimed at `7f8f63c…`.
 - **Review history:** stale pre-resumption manifests, terminal Luna/Terra reviews on the superseded `d7a443cb…` lease, Terra capability/bootstrap failures, a publication-CAS failure, a Luna publication-recovery failure, and runs stopped on upstream drift remain preserved as advisory or inconclusive evidence. No verdict or draft edit transfers without independent validation on the current reconciled bytes.
 - **Proven:** `scripts/required-suites.ts` is informational, falls back when its merge base cannot be resolved, and exits zero on internal failure. It is not an authoritative classifier.
 - **Proven:** CP-F1, CP-F2/CP-F2e, CP-F3, CP-H1a, and CP-H1b now exist through ordinary source commits: the strict control manifest, neutral five-outcome result/taxonomy/precondition/attempt contracts, exact-object classifier/lineage lease, report-only hook-identity guard, and report-only ref policy are present. `verify:fast`, `verify:pr`, `verify:portability`, `verify:deploy`, `portability-gate`, and `policy-gate` remain absent.
@@ -158,7 +159,7 @@ CP-W1 keeps producer authentication and protected decision provenance independen
 |---|---|---|---|
 | Foundation manifest, result, classifier, facades | Proven gaps | `2026-07-20-cicd-control-foundation.md` | source commit only |
 | Exact-ref hooks and hook identity | Proven bypass | foundation plan Task 4 | source commit only |
-| Workspace-transition preservation | Proven preservation gap, separate from push authorization | admit CP-WA1 before any automated stash/archive transition | exact named-set round trip; source commit only |
+| Workspace-transition preservation | Proven preservation gap with a quarantined writer/lineage-lease precursor; authoritative workspace transition remains absent | reuse/adapt the existing `agent:lease` owner and admit CP-WA1 before any automated stash/archive transition | exact named-set round trip plus single-owner parity and atomic migration; source commit only |
 | Coordinator Git lineage and drift observation | Proven orchestration gap | admit a separate CP-GL1 plan before source mutation | exact protected main/topic ref-set receipt; no transport or merge authority |
 | Manifest self-protection, exceptions, dual-run parity, atomic ownership | Proven partial ownership | foundation plan Task 6 / CP-F5 | exact old/new parity plus unsafe/safe proof before one atomic source-only cutover |
 | Protected workflow evaluation and trust split | Proven bypass | admit `2026-07-20-cicd-workflow-portability.md` before mutation | independently sourced evaluator plus separate producer/policy receipts |
@@ -196,7 +197,7 @@ narrow the listed paths but may not add a path family without a new reviewed pro
 | CP-F2 | `ci.evidence.owner` | `ci-control/cp-f2` | `scripts/lib/ci-control/{result,reasons,preconditions,attempt,native-adapter}.ts` and their tests | Exact diagnostic/native-adapter/taxonomy truth table / stop on native-decision recomputation, code repurposing, warning without governance, scope overclaim, leak, or invalid terminal receipt |
 | CP-F3 | `ci.classifier.owner` | `ci-control/cp-f3` | `scripts/lib/ci-control/{git-input,classifier}.ts`, `scripts/ci-control-classify.ts`, manifest/package entries, and their tests | Exact-object unsafe/safe classifier proof / stop on ambient bytes, caller-selected risk, or unresolved graph input |
 | CP-H1 | `ci.hooks.owner` plus the existing repository-hygiene and publication decision owners for H1c only | `ci-control/cp-h1` | `.husky/pre-push`, `scripts/{pre-push-guard,hooks-installed-guard,safeguard-diagnostics,repo-hygiene-guard,publication-guard}.ts`, policy-neutral exact-object additions in `scripts/lib/ci-control/git-input.ts`, thin native adapter/reason registrations, manifest/package entries, and their existing companion tests | Exact multi-ref, hook-byte, and owner-native exact-range receipt proof / stop on foreign hook identity, unresolved ref, ambient source reads, partial traversal, native-owner duplication, or automatic hook mutation |
-| CP-WA1 | `ci.workspace-transition.owner` | `ci-control/cp-wa1` | separately admitted workspace snapshot/transition module, precondition schema adapter, and their tests | Exact named workspace-set round trip / stop on omitted ignored path, partial-staging drift, type/mode drift, or unexpected patch member |
+| CP-WA1 | `ci.workspace-transition.owner` plus the existing quarantined `agent:lease` owner | `ci-control/cp-wa1` | reuse/adapt `scripts/agent-lease.ts` and `tests/scripts/agent-lease.test.ts`; add the separately admitted workspace snapshot/transition adapters, package/public-surface/manifest registration, and tests without creating a second lease owner | Exact named workspace-set round trip and lease parity / stop on omitted ignored path, partial-staging drift, type/mode drift, unexpected patch member, dual lease authority, or unproven atomic migration |
 | CP-GL1 | `ci.git-lineage.owner` | `ci-control/cp-gl1` | only paths admitted by the separate CP-GL1 plan for coordinator observation, drift classification, and detached exact-OID review checkout | Exact protected main/topic ref-set and drift receipt / stop on uncoordinated fetch, missing/extra/duplicate/role-swapped ref, shared-ref mutation, or any transport/merge attempt |
 | CP-F4 | `ci.runner.owner` | `ci-control/cp-f4` | `scripts/ci-control-run.ts`, `package.json`, manifest command entries, `.husky/{pre-commit,pre-push}`, and their tests | Exact execution set, taint, and process-terminal proof / stop on shell substitution, missing child, or privilege after taint |
 | CP-F5 | `ci.self-protection.owner` | `ci-control/cp-f5` | safeguard/test-integrity owners and tests, `controls/ci-control-exceptions.json`, `scripts/lib/ci-control/exceptions.ts`, and manifest registrations | Old/new exact parity plus one atomic ownership cutover / stop on any parity difference, inline bypass, or ambiguous exception |

@@ -6,7 +6,12 @@ source of truth for scoped planning artifacts.
 
 **Last refreshed:** 2026-07-22
 **Index source:** `docs/work-index.json` schema v5, generated at
-`2026-07-22T10:09:01Z` from `308b08069da327ce38b16c7e0206593a5eee4529`
+`2026-07-22T11:12:26Z` while HEAD was `7f8f63c63b2561b7e0bf4a76fafee9c80dadfae8`
+**Current integration:** local merge `7f8f63c63b2561b7e0bf4a76fafee9c80dadfae8`
+with first parent `626db87d34cb3b1d41bedd82757cb01be7035a6f` and second parent
+`abe6fe592a2f704deeccf8cc5338abd5a3f8997a`. The regenerated index reads the admitted
+worktree planning bytes while recording that precommit HEAD; no committed-byte completion
+is claimed until the declared postcommit terminal checks complete.
 **Policy:** [`docs/canonical-status-policy.md`](canonical-status-policy.md)
 **Review cadence:** [`docs/runbooks/objective-tracking.md`](runbooks/objective-tracking.md)
 **Project map:** [`docs/project-map.md`](project-map.md)
@@ -67,7 +72,7 @@ cross-tree topic clusters: `design`, `fleet-charts`, `requirements`, and `tasks`
 |---|---|---|
 | `docs/superpowers/specs/2026-07-20-cicd-enforcement-control-plane-design.md` | approved architecture and evidence contract | active; implementation remains unproven |
 | `docs/superpowers/plans/2026-07-20-cicd-enforcement-control-plane-program.md` | recursive dependency and trust-boundary ledger | active; future lanes require their named admission plans |
-| `docs/superpowers/plans/2026-07-20-cicd-control-foundation.md` | first executable source-only plan | active; the admitted source split is staged for a hook-bound preservation checkpoint, while newly observed `main` lease work requires non-rebase integration and reassessment before exact-set verification; CP-F2f/F4/CP-TR1/F5 remain incomplete and CP-WA1 is not credited before that audit |
+| `docs/superpowers/plans/2026-07-20-cicd-control-foundation.md` | first executable source-only plan | active; the 22-file planning/bootstrap and source-split candidate landed at `626db87d…` and was merged with the agent-lease lineage at `7f8f63c…`. `agent:lease` is quarantined from control-plane authority as a precursor only; authoritative CP-WA1, CP-F2f/F4/CP-TR1/F5, and current-merge verification remain incomplete |
 | `docs/superpowers/plans/2026-07-20-cicd-workflow-portability.md` | protected workflow and native portability follow-on | pending; current source has partial `merge_group` and action-pin coverage, but protected policy, exact-set gates, live queue evidence, and native portability remain incomplete |
 
 The remaining active and pending artifacts are listed mechanically in

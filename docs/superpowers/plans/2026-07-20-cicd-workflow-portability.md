@@ -49,11 +49,14 @@ current-head evidence.
 ## Frozen Source Evidence
 
 The historical admission used implementation head `1bdd8ea37c7c9f3fb600fe0f5a68901398c50ca3`
-and `origin/main` `6fb5ee72e6f2ae6f4ddc858b7fc0db0fae825c0c`. Current integration merge
-`308b08069da327ce38b16c7e0206593a5eee4529` preserves that evidence-bearing history through
-first parent `c6b7540ad3fb969c544997b132975a0b97159fa2` and incorporates locally observed
-`origin/main` `2be8a2c9a57642a2f43e39dedac39dbcd4330193`. The latest main delta does not change
-workflow bytes, but it invalidates prior merge-sensitive and aggregate receipts. The current
+and `origin/main` `6fb5ee72e6f2ae6f4ddc858b7fc0db0fae825c0c`. Current local integration
+`7f8f63c63b2561b7e0bf4a76fafee9c80dadfae8` preserves the 22-file Task 7/source-split
+commit `626db87d34cb3b1d41bedd82757cb01be7035a6f` as first parent and incorporates locally
+observed `origin/main` `abe6fe592a2f704deeccf8cc5338abd5a3f8997a` as second parent without
+rebasing. The agent-lease delta does not change the three workflow blobs below, but it
+changes foundation prerequisites: `agent:lease` is quarantined as a partial precursor and
+authoritative CP-WA1 remains incomplete. Prior merge-sensitive and aggregate receipts are
+invalid; no current workflow authorization or final verification is claimed. The current
 three workflow blobs are:
 
 ```text

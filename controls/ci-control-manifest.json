@@ -325,6 +325,52 @@
       }
     },
     {
+      "id": "ci.agent-writer-lease",
+      "policyCategory": "source-integrity",
+      "domain": "source-integrity",
+      "owner": "agent-orchestration-owner",
+      "decisionOwner": "workspace-writer-lease-decision-owner",
+      "implementation": {
+        "commandId": "agent:lease",
+        "detectorId": "agent-lease",
+        "nativeSchemaVersion": 1
+      },
+      "stages": ["pre-commit", "pre-push"],
+      "trustClass": "untrusted-candidate",
+      "mode": "block",
+      "availability": "quarantined",
+      "severity": "critical",
+      "riskTiers": ["low", "standard", "elevated", "system-wide"],
+      "surfaces": ["workspace-writer-lease"],
+      "dependencies": ["repo.hygiene"],
+      "evidence": {
+        "schemaVersion": 1,
+        "paths": ["scripts/agent-lease.ts", "tests/scripts/agent-lease.test.ts"],
+        "digestBinding": "exact",
+        "freshness": "receipt"
+      },
+      "failurePolicy": {
+        "finding": "block",
+        "crash": "inconclusive",
+        "timeout": "inconclusive",
+        "missing": "inconclusive",
+        "skipped": "inconclusive",
+        "cancelled": "inconclusive",
+        "stale": "inconclusive"
+      },
+      "remediation": {
+        "summary": "Keep the partial writer lease quarantined until CP-WA1 closes its takeover, workspace-accounting, producer-identity, and commit-transition gaps.",
+        "steps": ["Use the existing lease only as non-authoritative canary evidence.", "Complete and verify the admitted CP-WA1 ownership transfer before relying on it for mutation authorization."],
+        "reproduction": "npm run agent:lease -- --help"
+      },
+      "exceptionPolicy": {
+        "allowed": false,
+        "scope": "none",
+        "approverRole": null,
+        "maxLifetimeSeconds": null
+      }
+    },
+    {
       "id": "ci.exact-revision-classifier",
       "policyCategory": "source-integrity",
       "domain": "source-integrity",
@@ -371,7 +417,7 @@
       }
     }
   ],
-  "requiredSurfaces": ["repository-source", "public-output", "test-integrity", "architecture-fitness", "workflow-safeguards", "hook-installation", "outgoing-ref-policy", "risk-classification"],
+  "requiredSurfaces": ["repository-source", "public-output", "test-integrity", "architecture-fitness", "workflow-safeguards", "hook-installation", "outgoing-ref-policy", "workspace-writer-lease", "risk-classification"],
   "riskRules": [
     {
       "id": "risk.documentation",
@@ -443,12 +489,13 @@
       "id": "risk.control-policy",
       "tier": "system-wide",
       "reasons": ["ci.classification.policy"],
-      "pathPrefixes": ["controls/", "docs/current-program.md", "docs/superpowers/", "scripts/ci-control-classify.ts", "scripts/ci-control-manifest.ts", "scripts/ci-control-ref-policy.ts", "scripts/hooks-installed-guard.ts", "scripts/lib/ci-control/", "scripts/lib/verification/boundary-run/schema.ts", "scripts/lib/verification/boundary-run/shared.ts", "src/lib/git-env.ts", "tests/scripts/ci-control-manifest.test.ts", "tests/scripts/ci-control-ref-policy.test.ts", "tests/scripts/hooks-installed-guard.test.ts"]
+      "pathPrefixes": ["controls/", "docs/current-program.md", "docs/superpowers/", "scripts/ci-control-classify.ts", "scripts/ci-control-manifest.ts", "scripts/ci-control-ref-policy.ts", "scripts/hooks-installed-guard.ts", "scripts/lib/ci-control/", "scripts/lib/repo-hygiene-policy.ts", "scripts/repo-hygiene-guard.ts", "scripts/lib/verification/boundary-run/schema.ts", "scripts/lib/verification/boundary-run/shared.ts", "src/lib/git-env.ts", "tests/scripts/ci-control-manifest.test.ts", "tests/scripts/ci-control-ref-policy.test.ts", "tests/scripts/hooks-installed-guard.test.ts", "tests/scripts/repo-hygiene-policy.test.ts"]
     }
   ],
   "stages": ["pre-commit", "pre-push", "pull-request", "merge-group", "default-branch", "release"],
   "trustClasses": ["untrusted-candidate"],
   "canonicalCommands": {
+    "agent:lease": ["bash", "scripts/run-with-pinned-node.sh", "scripts/agent-lease.ts"],
     "guard:repo": ["bash", "scripts/run-with-pinned-node.sh", "scripts/repo-hygiene-guard.ts"],
     "guard:publication": ["bash", "scripts/run-with-pinned-node.sh", "scripts/publication-guard.ts"],
     "guard:test-integrity:required": ["env", "WHATSOUP_REQUIRE_TEST_INTEGRITY=1", "bash", "scripts/test-integrity-ci.sh"],

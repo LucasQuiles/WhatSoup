@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import ts from 'typescript';
 
 import { describe, expect, it } from 'vitest';
 
@@ -34,6 +35,48 @@ function sha256(bytes: Buffer): `sha256:${string}` {
   return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 }
 
+const LOADER_CAPABILITY_REFERENCE = '<loader-capability-reference>';
+
+function staticImportSpecifiers(source: string): string[] {
+  const sourceFile = ts.createSourceFile('repo-hygiene-policy.ts', source, ts.ScriptTarget.Latest, true);
+  const specifiers: string[] = [];
+  const loaderCapabilities = new Set(['require', 'createRequire', 'getBuiltinModule']);
+  const loaderRoots = new Set(['process', 'globalThis']);
+  const addSpecifier = (specifier: ts.Expression | undefined): void => {
+    specifiers.push(
+      specifier !== undefined && ts.isStringLiteralLike(specifier)
+        ? specifier.text
+        : '<dynamic-module-reference>',
+    );
+  };
+  const visit = (node: ts.Node): void => {
+    if (
+      (ts.isIdentifier(node) &&
+        (loaderCapabilities.has(node.text) || loaderRoots.has(node.text))) ||
+      (ts.isStringLiteralLike(node) && loaderCapabilities.has(node.text))
+    ) {
+      specifiers.push(LOADER_CAPABILITY_REFERENCE);
+    }
+    if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
+      if (node.moduleSpecifier !== undefined) addSpecifier(node.moduleSpecifier);
+    } else if (
+      ts.isImportEqualsDeclaration(node) &&
+      ts.isExternalModuleReference(node.moduleReference)
+    ) {
+      addSpecifier(node.moduleReference.expression);
+    } else if (ts.isCallExpression(node)) {
+      const isDynamicImport = node.expression.kind === ts.SyntaxKind.ImportKeyword;
+      const isCommonJsLoader =
+        ts.isIdentifier(node.expression) &&
+        (node.expression.text === 'require' || node.expression.text === 'createRequire');
+      if (isDynamicImport || isCommonJsLoader) addSpecifier(node.arguments[0]);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return specifiers;
+}
+
 describe('repository hygiene policy extraction', () => {
   it('binds the guard and extracted policy bytes through deterministic framing', () => {
     const guardBytes = readFileSync(join(process.cwd(), 'scripts/repo-hygiene-guard.ts'));
@@ -46,18 +89,71 @@ describe('repository hygiene policy extraction', () => {
     expect(sha256(framedToolBytes(guardBytes, mutatedPolicy))).not.toBe(currentRepoHygieneToolDigest());
   });
 
-  it('keeps one-way imports and the established parent facade', () => {
+  it('keeps declared module references one-way, rejects loader roots, and preserves the facade', () => {
     const policySource = readFileSync(
       join(process.cwd(), 'scripts/lib/repo-hygiene-policy.ts'),
       'utf8',
     );
-    const specifiers = [...policySource.matchAll(/\bfrom\s+['"]([^'"]+)['"]/gu)]
-      .map((match) => match[1]);
+    const specifiers = staticImportSpecifiers(policySource);
     expect([...new Set(specifiers)]).toEqual(['./guard-core.ts']);
-    expect(policySource).not.toMatch(/\bimport\s*\(/u);
-    expect(policySource).not.toMatch(/\b(?:require|createRequire)\s*\(/u);
     expect(privateHostLabels).toBe(internalPrivateHostLabels);
     expect(isAllowedPatternMatch).toBe(internalIsAllowedPatternMatch);
+  });
+
+  it('detects a comment-obscured reverse side-effect import', () => {
+    const policySource = readFileSync(
+      join(process.cwd(), 'scripts/lib/repo-hygiene-policy.ts'),
+      'utf8',
+    );
+    const mutated = `${policySource}\nimport/* deliberate comment */ "../repo-hygiene-guard.ts";\n`;
+    expect(staticImportSpecifiers(mutated)).toContain('../repo-hygiene-guard.ts');
+  });
+
+  it('detects reverse re-exports, dynamic imports, and import-equals references', () => {
+    const reversePath = '../repo-hygiene-guard.ts';
+    expect(staticImportSpecifiers(`export * from "${reversePath}";`)).toContain(reversePath);
+    expect(
+      staticImportSpecifiers(`void import/* deliberate comment */("${reversePath}");`),
+    ).toContain(reversePath);
+    expect(staticImportSpecifiers(`import guard = require("${reversePath}");`)).toContain(
+      reversePath,
+    );
+  });
+
+  it('keeps the allowed guard-core module reference as the safe neighbor', () => {
+    expect(staticImportSpecifiers('export { scan } from "./guard-core.ts";')).toEqual([
+      './guard-core.ts',
+    ]);
+  });
+
+  it('detects process.getBuiltinModule loader acquisition, aliasing, and computed access', () => {
+    const mutated = `
+      const moduleApi = process.getBuiltinModule('module');
+      const load = moduleApi.createRequire(import.meta.url);
+      load('../repo-hygiene-guard.ts');
+    `;
+    expect(staticImportSpecifiers(mutated)).toContain(LOADER_CAPABILITY_REFERENCE);
+
+    const aliased = `
+      const acquireLoader = process.getBuiltinModule;
+      const moduleApi = acquireLoader('module');
+    `;
+    expect(staticImportSpecifiers(aliased)).toContain(LOADER_CAPABILITY_REFERENCE);
+
+    const computed = `
+      const acquireLoader = process['get' + 'BuiltinModule'];
+      const moduleApi = acquireLoader('module');
+      const createLoader = moduleApi['create' + 'Require'];
+      const load = createLoader(import.meta.url);
+      load('../repo-hygiene-guard.ts');
+    `;
+    expect(staticImportSpecifiers(computed)).toContain(LOADER_CAPABILITY_REFERENCE);
+
+    const computedBinding = `
+      const { ['getBuiltinModule']: acquireLoader } = process;
+      const moduleApi = acquireLoader('module');
+    `;
+    expect(staticImportSpecifiers(computedBinding)).toContain(LOADER_CAPABILITY_REFERENCE);
   });
 
   it('preserves complete live policy-route coverage and registers its own policy source', () => {

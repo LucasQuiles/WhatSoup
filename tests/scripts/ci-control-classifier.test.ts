@@ -132,6 +132,7 @@ function runtimeSourceClosure(entryPath: string, sourceRoot = projectRoot): stri
 }
 
 const LOW_CONTROLS = [
+  'ci.agent-writer-lease',
   'ci.exact-revision-classifier',
   'ci.hooks.installed',
   'ci.outgoing-ref-policy',
@@ -141,6 +142,7 @@ const LOW_CONTROLS = [
 ];
 const ALL_CONTROLS = [
   'architecture.fitness-lint',
+  'ci.agent-writer-lease',
   'ci.exact-revision-classifier',
   'ci.hooks.installed',
   'ci.outgoing-ref-policy',
@@ -361,6 +363,9 @@ describe('exact revision classification', () => {
     ['hook', '.husky/pre-push', '#!/bin/sh\n', 'elevated', ['ci.classification.executable-mode', 'ci.classification.hook']],
     ['release', 'deploy/release.json', '{}\n', 'elevated', ['ci.classification.release']],
     ['policy', 'controls/policy.json', '{}\n', 'system-wide', ['ci.classification.policy']],
+    ['hygiene guard policy', 'scripts/repo-hygiene-guard.ts', 'export {};\n', 'system-wide', ['ci.classification.policy']],
+    ['extracted hygiene policy', 'scripts/lib/repo-hygiene-policy.ts', 'export {};\n', 'system-wide', ['ci.classification.policy']],
+    ['hygiene policy fixture', 'tests/scripts/repo-hygiene-policy.test.ts', 'export {};\n', 'system-wide', ['ci.classification.policy']],
   ] as const)('classifies %s from manifest-owned path rules', (_label, path, bytes, tier, reasons) => {
     const { root, baseOid, manifestDigest } = fixture();
     write(root, path, bytes);
@@ -379,7 +384,9 @@ describe('exact revision classification', () => {
     expect(result.riskTier).toBe(tier);
     expect(result.reasons).toEqual(reasons);
     expect(result.requiredControls).toEqual(ALL_CONTROLS);
-    expect(result.requiredSuites).toEqual(['tests/example.test.ts']);
+    expect(result.requiredSuites).toEqual(
+      path.endsWith('.test.ts') ? ['tests/example.test.ts', path] : ['tests/example.test.ts'],
+    );
   });
 
   it('fails closed on an uncovered gitlink while preserving its native object-type reason', () => {

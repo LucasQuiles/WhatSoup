@@ -1,10 +1,12 @@
 /**
- * agent-lease.ts — atomic writer/lineage lease for multi-agent git work.
+ * agent-lease.ts — quarantined writer/lineage-lease precursor for multi-agent Git work.
  *
- * Implements the P0 control of the Multi-Agent Git Control Rider
+ * Implements a tested subset of the P0 control in the Multi-Agent Git Control Rider
  * (`~/.claude/plans/multi-agent-git-control-rider.md` §"Writer/lineage lease"):
  * *"The most important control is not a rebase policy. It is exclusive mutation
- * ownership."*
+ * ownership."* It is not CP-WA1 authority: takeover, complete workspace accounting,
+ * producer identity, branch-keyed ownership, supervision, and protected commit transition
+ * still require the admitted atomic ownership cutover.
  *
  * WHY THIS EXISTS. Linked worktrees isolate HEAD and the index but SHARE `refs/*`
  * — including the stash ref — and the repo config. An agent building uncommitted
@@ -27,17 +29,19 @@
  *
  * NOTE: `git worktree lock` is NOT a substitute. It only blocks prune/move/remove —
  * it does not exclude concurrent file edits, and a worktree locked by a dead session
- * stays locked. Hence an external lease with a PROVEN takeover path.
+ * stays locked. Hence an external lease with a tested, quarantined takeover precursor.
  *
- * ATOMICITY. `acquire` publishes the lease by writing the record to a staging sibling and
+ * ACQUIRE ATOMICITY. `acquire` publishes the lease by writing the record to a staging sibling and
  * then `link()`-ing it into place, so the name and its contents become visible together
  * (see {@link publishLeaseSync}). `link()` fails with EEXIST when the target exists, which
  * keeps the exactly-one-winner property that an `O_EXCL` create would give — but an
  * `O_EXCL` create publishes the inode BEFORE the record is written, and a loser reading
  * inside that window cannot name the holder. There is no `existsSync`-then-write anywhere
  * on the acquire path either: that is a check-then-act race two agents can both win.
- * Takeover claims the incumbent lease with a single `renameSync`, which is likewise atomic
- * — the loser of a concurrent takeover gets ENOENT and is refused.
+ * Takeover claims the incumbent lease with one `renameSync`, so a concurrent takeover loser
+ * is refused. That does not continuously exclude an ordinary acquire between incumbent
+ * removal and successor publication; takeover therefore remains quarantined until CP-WA1
+ * supplies one continuously exclusive transition.
  *
  * FAIL-CLOSED. Unreadable, truncated, malformed or ambiguous state is NEVER success.
  * "I could not determine the process identity" resolves to INCONCLUSIVE (exit 2), never
@@ -718,7 +722,7 @@ function planAcquire(options: AcquireOptions): AcquirePlan | LeaseFailure {
       testedMergeOid: null,
     },
     bindings: computeBindings(facts, options.planPath),
-    allowedPaths: options.allowedPaths ?? ['.'],
+    allowedPaths: options.allowedPaths ?? [],
     createdAt: timestamp,
     heartbeatAt: timestamp,
     expiresAt: new Date(now.getTime() + ttlSeconds * 1000).toISOString(),
@@ -1034,8 +1038,9 @@ function step(stepNumber: number, id: string, satisfied: boolean, detail: string
 }
 
 /**
- * Take over an abandoned lease. All SEVEN rider steps must be PROVEN; any step that
- * cannot be proven refuses the takeover and leaves the incumbent lease in place.
+ * Attempt to take over an abandoned lease. All seven reconciliation prerequisites must
+ * complete; any unmet prerequisite refuses the takeover and leaves the incumbent lease
+ * in place. These checks do not establish continuous exclusivity or mutation authority.
  *
  * Step 2 is the one that must not be "optimised": takeover is authorised ONLY by
  * positive proof that the recorded writer process is ABSENT. A live PID refuses —
@@ -1295,7 +1300,7 @@ export function takeoverLease(options: TakeoverOptions): LeaseResult {
       testedMergeOid: null,
     },
     bindings: computeBindings(facts, options.planPath),
-    allowedPaths: options.allowedPaths ?? previous.allowedPaths,
+    allowedPaths: options.allowedPaths ?? [],
     createdAt: now.toISOString(),
     heartbeatAt: now.toISOString(),
     expiresAt: new Date(now.getTime() + ttlSeconds * 1000).toISOString(),
@@ -1321,7 +1326,7 @@ Commands:
   status      Report the current lease (exit 2 if expired/malformed — fail-closed)
   heartbeat   Extend the lease you own
   release     Release the lease you own (archived as evidence)
-  takeover    Take over an abandoned lease — all seven rider steps must be PROVEN
+  takeover    Quarantined takeover precursor — checks seven reconciliation prerequisites
   check-path  Verify paths against the lease allowedPaths[]
 
 Options:
@@ -1330,7 +1335,7 @@ Options:
   --session <id>         Session id of the writer
   --tool <id>            Tool identity of the writer
   --mode <write|read>    Lease mode (default: write)
-  --allow <path>         Allowed path (repeatable; default '.')
+  --allow <path>         Allowed path (repeatable; omitted means deny all paths)
   --expect-branch <b>    Refuse unless the worktree is on this branch
   --expect-head <oid>    Refuse unless HEAD is this OID
   --base-oid <oid>       Immutable task base OID (default: current HEAD)
@@ -1411,6 +1416,10 @@ function report(result: LeaseResult | StatusResult, json: boolean): number {
 function usageError(message: string): number {
   process.stderr.write(`[agent-lease] INCONCLUSIVE ${message}\n\n${USAGE}\n`);
   return EXIT_INCONCLUSIVE;
+}
+
+export function formatUnexpectedFailure(_error: unknown): string {
+  return '[agent-lease] git.worktree.unaccounted-state (INCONCLUSIVE) internal execution failed; reconcile the worktree and start a new attempt';
 }
 
 function runCheckPath(args: ParsedArgs, cwd: string, json: boolean): number {
@@ -1499,14 +1508,20 @@ export function main(argv: string[]): number {
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
-  let code = EXIT_INCONCLUSIVE;
+export function executeCli(
+  argv: string[],
+  execute: (args: string[]) => number = main,
+): number {
   try {
-    code = main(process.argv.slice(2));
+    return execute(argv);
   } catch (err) {
-    // A crash is INCONCLUSIVE, never a clean exit.
-    process.stderr.write(`[agent-lease] git.worktree.unaccounted-state (INCONCLUSIVE) crashed: ${(err as Error).stack ?? String(err)}\n`);
-    code = EXIT_INCONCLUSIVE;
+    // A crash is INCONCLUSIVE, never a clean exit. The boundary emits only the
+    // canonical sanitized projection; the raw exception is not public evidence.
+    process.stderr.write(`${formatUnexpectedFailure(err)}\n`);
+    return EXIT_INCONCLUSIVE;
   }
-  process.exit(code);
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+  process.exit(executeCli(process.argv.slice(2)));
 }

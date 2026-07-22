@@ -120,6 +120,7 @@ function fixture(options: {
 }
 
 function makeLowControlsAvailable(manifest: ControlManifestV1): void {
+  control(manifest, 'ci.agent-writer-lease').availability = 'report-only';
   control(manifest, 'workflow.safeguard-diagnostics').availability = 'report-only';
 }
 
@@ -219,6 +220,19 @@ describe('report-only control execution plan compiler', () => {
     expect(repeated).toEqual(plan);
     expect(repeated.planDigest).toBe(plan.planDigest);
     expect(plan.planDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
+  });
+
+  it('keeps the checked-in quarantined lease unavailable and makes readiness inconclusive', () => {
+    const { manifest, trustedInput, admission } = fixture();
+    const plan = compileReportOnlyExecutionPlan(manifest, admission, trustedInput);
+
+    expect(plan.readiness).toBe('inconclusive');
+    expect(plan.unavailableControls).toContain('ci.agent-writer-lease');
+    expect(plan.limitations).toContain('ci.execution-plan.controls-unavailable');
+    expect(plan.steps.find(({ controlId }) => controlId === 'ci.agent-writer-lease')).toMatchObject({
+      availability: 'quarantined',
+      disposition: 'unavailable',
+    });
   });
 
   it('preserves detached direct argv arrays and rejects shell-source or interpolation payloads', () => {

@@ -40,12 +40,12 @@ its compound commit command masked the direct Git/hook terminal status and CP-WA
 yet exist. It is provisional evidence, not completed admission. A fresh direct
 `typecheck:all` capture at those bytes left four `TS2345` errors in
 `tests/scripts/repo-hygiene-guard.test.ts`; CP-TC1b below owns only that remaining typed
-boundary repair. The current uncommitted planning/bootstrap candidate routes the four failing and
-three equivalent existing payload sites through one runtime SHA-256 binding guard; its
-focused 80-test replay and both typechecks pass. That evidence remains precommit and does
-not complete CP-TC1b until the exact Task 7 reconciliation and postcommit replay pass. No later
-bead may use the quarantined P0.1 commit, CP-TC1a, a green focused suite, or any test-only
-repair as substitute evidence for the full branch gate.
+boundary repair. The planning/bootstrap and source-split candidate is preserved by the
+ordinary hook-bound commit `626db87d34cb3b1d41bedd82757cb01be7035a6f`. That commit
+contains the 22-file admitted split, but its focused evidence became merge-sensitive when
+`main` advanced and does not complete Task 7 without exact post-merge replay. No later bead
+may use the quarantined P0.1 commit, CP-TC1a, a green focused suite, the `626db87d…`
+checkpoint, or any test-only repair as substitute evidence for the full branch gate.
 The separately reviewed workflow/portability plan is planning evidence only and cannot
 begin authoritative mutation until those prerequisites close.
 
@@ -94,24 +94,29 @@ after this merge and later expanded through the admitted file-size prerequisite;
 candidate requires new exact-byte review and complete post-merge verification before a
 reconciliation commit.
 
-**Latest main reconciliation (2026-07-22):** merge commit
+**Prior main reconciliation (2026-07-22):** merge commit
 `308b08069da327ce38b16c7e0206593a5eee4529` preserves `c6b7540ad3fb969c544997b132975a0b97159fa2`
 as its first parent and incorporates `origin/main`
 `2be8a2c9a57642a2f43e39dedac39dbcd4330193` as its second parent without rebasing. The
 incoming six-path delta changes the fail-closed gate plus session/fleet transaction code and
 tests. It does not overlap the staged planning/bootstrap paths, but it invalidates prior
 typecheck, fail-closed, merge-sensitive, and aggregate receipts. The Task 7 candidate was
-reapplied after the hook-bound merge; every result below must bind `308b080…` or a later
-ordinary descendant.
+reapplied after the hook-bound merge. Those receipts are historical after the later
+agent-lease integration.
 
-**Coordinator drift observation (2026-07-22):** after the 22-file candidate was staged,
-the approved SSH remote advanced `main` from `2be8a2c9a57642a2f43e39dedac39dbcd4330193`
-to `abe6fe592a2f704deeccf8cc5338abd5a3f8997a`. The incoming four-path change adds the
-canonical agent writer/lineage lease and package wiring. Although it has no direct path
-overlap with the staged set, it is semantically relevant to CP-WA1 and invalidates all
-policy-, toolchain-, merge-, and aggregate-sensitive evidence. The current candidate must
-be preserved by an ordinary hook-bound checkpoint and merged with that exact main OID
-without rebasing before CP-WA1 status or final verification is reassessed.
+**Current agent-lease integration (2026-07-22):** local merge
+`7f8f63c63b2561b7e0bf4a76fafee9c80dadfae8` preserves the 22-file Task 7/source-split
+commit `626db87d34cb3b1d41bedd82757cb01be7035a6f` as first parent and incorporates the
+coordinator-observed `origin/main` OID
+`abe6fe592a2f704deeccf8cc5338abd5a3f8997a` as second parent without rebasing. Its
+first-parent delta is exactly four paths: `docs/public-surface.md`, `package.json`, new
+`scripts/agent-lease.ts`, and new `tests/scripts/agent-lease.test.ts`. The merged
+`agent:lease` command is a tested but incomplete precursor: it does not prove continuous
+takeover exclusivity, exact workspace-set accounting, authenticated producer/tool identity,
+branch-keyed ownership, bounded supervision/terminal attempts, or the protected commit
+transition. It is therefore registered and documented as `quarantined`, not credited as
+CP-WA1 or used to authorize mutation. This merge invalidates prior policy-, toolchain-,
+merge-, and aggregate-sensitive evidence; no final verification is claimed at `7f8f63c…`.
 
 ## Global Constraints
 
@@ -1455,7 +1460,7 @@ diff. They verify that the runtime narrowing preserves the original binding fals
 test count, assertions, and failure cause. Stage exactly the one named test file and run
 the staged repository, publication, commit-message, and hook-identity guards.
 
-Because CP-WA1 does not yet exist, record the global provisional manual workspace sets
+Because authoritative CP-WA1 remains incomplete, record the global provisional manual workspace sets
 before and immediately after staging with `GIT_OPTIONAL_LOCKS=0`, capture each direct
 status, and commit through the current hooks with:
 
@@ -1478,6 +1483,15 @@ workspace commands in the global protocol remain useful operator observations un
 bead is committed, but they are not authoritative receipts: `git status` can refresh the
 index, line-oriented output is unsafe for hostile paths, and the existing boundary
 snapshot calls `git write-tree`. Do not reuse that mutating snapshot implementation.
+
+Current source already contains `scripts/agent-lease.ts` and
+`tests/scripts/agent-lease.test.ts`. They are quarantined from CP-WA1 authority but are the
+only admitted writer/lineage-lease precursor. CP-WA1 must reuse and adapt that owner; it
+must not create a second lease record, store, CLI, taxonomy, or takeover path. Before RED
+work, compare the current contract with the target `WorkspaceWriterLeaseV1`, admit the
+existing source/test paths, choose one canonical wire format, and define parity, migration,
+rollback, and reference-scan proof. An incompatible replacement requires one atomic
+ownership transfer; no intermediate state may have dual authority or no authority.
 
 **Patch admission packet**
 
@@ -1523,21 +1537,26 @@ snapshot calls `git write-tree`. Do not reuse that mutating snapshot implementat
 - Modify: `package.json`
 - Modify: `docs/public-surface.md`
 - Modify: `.husky/pre-commit`
+- Modify: `scripts/agent-lease.ts`
+- Modify: `tests/scripts/agent-lease.test.ts`
 
 Before RED edits, run a read-only reference scan for command registration and companion
 test requirements. If another production path is required, stop, add its exact path/hash
 to this packet, and obtain fresh admission.
 
-The twenty-path packet spans three independently reviewed internal subreceipts:
+The twenty-two-path packet spans three independently reviewed internal subreceipts:
 `CP-WA1a` for trusted Git plus the shared supervisor/attempt store, `CP-WA1b` for pure
 read-only workspace accounting and registry/transition validation, and `CP-WA1c` for the
 commit launcher plus hook activation. Each subreceipt has its own RED/GREEN diff digest,
 review finding set, and rollback analysis. They land atomically because no intermediate
 state may advertise workspace authority, change the hook, or become a second process/Git
 owner; failure in any subreceipt rejects the entire activation commit. This is a deliberate
-trust-boundary cutover, not permission to broaden the packet beyond the twenty named paths.
+trust-boundary cutover, not permission to broaden the packet beyond the twenty-two named paths.
 
 **Interfaces:**
+
+`WorkspaceWriterLeaseV1` below is the normalized target contract for the adapted existing
+owner. It is not permission to introduce a parallel lease wire format or implementation.
 
 ```ts
 export interface WorkspacePatchAdmissionV1 {
@@ -1852,8 +1871,10 @@ export interface WorkspaceCommitLauncherEvidenceHandleV1 {
 
 The normal command surface is deliberately small and does not expose automatic rebase:
 `repo-agent start`, `status`, `checkpoint`, `sync --classify`, `handoff`, `integrate`, and
-`close`. These are planned CP-GL1 interfaces, not current pass-capable commands. CP-WA1
-supplies the atomic local writer lease plus workspace, process, and terminal-evidence
+`close`. These are planned CP-GL1 interfaces, not current pass-capable commands. The
+quarantined `agent:lease` precursor supplies only partial local writer/lineage leasing.
+Completed CP-WA1, after reuse/adaptation and atomic ownership admission, must additionally
+supply authoritative workspace, process, terminal-evidence, and protected-transition
 primitives; a separate admitted CP-GL1 bead must add coordinator-owned fetch, immutable
 remote observation and drift receipts, integration-branch construction, and detached
 exact-OID reviewer checkouts before any `repo-agent` command is advertised. A shared stash
@@ -2049,9 +2070,12 @@ missing/changed output, unclaimed before, generically claimed after, reused befo
 wrong transition binding, or claim-mode mismatch is inconclusive. A mismatch is never
 repaired by the child or treated as pass.
 
-The same anchored registry owns one atomic `WorkspaceWriterLeaseV1` per
-`(repositoryId, worktreeId)` and per `(repositoryId, branch)`. The strict CLI exposes
-`writer-lease acquire`, `status`, `heartbeat`, `release`, and `takeover`, each using
+The adapted `agent:lease` implementation remains the sole writer-lease owner. CP-WA1
+integrates that owner with the anchored registry and protected descriptors; it does not add
+another acquire/status/heartbeat/release/takeover implementation. The registry owns one
+atomic `WorkspaceWriterLeaseV1` per
+`(repositoryId, worktreeId)` and per `(repositoryId, branch)`. The adapted `agent:lease`
+CLI exposes `acquire`, `status`, `heartbeat`, `release`, and `takeover`, each using
 protected canonical input/output descriptors and terminal attempts. Acquire holds one
 exclusive registry lock and fails on either conflicting key. Every workspace check,
 protected commit launcher, and transition consumes the exact lease through a protected
@@ -2410,7 +2434,7 @@ git diff --check
 - [ ] **Step 5: Independent review, staged admission, and commit**
 
 Require the global review receipt. Capture the provisional manual workspace observations,
-stage exactly the twenty named CP-WA1 files, repeat the manual observations with
+stage exactly the twenty-two named CP-WA1 files, repeat the manual observations with
 `GIT_OPTIONAL_LOCKS=0`, and prove no index/object/ref/config/stash mutation occurred. Run
 the staged implementation's pinned `check` command first with `validate-unclaimed`, then
 run the protected commit launcher, whose internal final action is `claim`, against the
@@ -4548,25 +4572,27 @@ them. Its ownership remains multi-control exact-set selection, execution, and ag
 ### Task 7: Admitted planning/bootstrap reconciliation and next-plan admission
 
 This task records the implemented F1/F2/F2e/F3/H1a/H1b and report-only H1d-C/F4 precursor
-state, closes only the bounded CP-TC1b test-typing repair plus the result-fixture clock and
-Markdown hygiene false-positive repairs below, and reconciles planning/publication metadata.
-It does **not** close CP-F2f, CP-WA1, active H1d, CP-F4c1/c2/c3, CP-TR1, or CP-F5: their
-decisive remediation, workspace, supervised-command, coverage-receipt, exception, and
-execution-stage owners are absent from the current source tree. This task therefore cannot
+state, the committed bounded CP-TC1b test-typing repair, result-fixture clock repair,
+Markdown hygiene false-positive repair, and source-split prerequisite, then reconciles
+planning/publication metadata. It does **not** close CP-F2f, authoritative CP-WA1, active
+H1d, CP-F4c1/c2/c3, CP-TR1, or CP-F5. The merged `agent:lease` is quarantined as a partial
+precursor; decisive workspace accounting, protected transition, supervised-command,
+coverage-receipt, exception, and execution-stage ownership remains incomplete. This task therefore cannot
 authorize a feature-branch push or claim a foundation-wave closeout. Protected workflow
 evaluation, portability, artifacts, and deployment also remain explicitly incomplete.
 Neither this task nor a green regression bundle may advertise or authorize those
 capabilities.
 
-**Files:**
+**Historical source-split checkpoint (22 paths, committed at `626db87d…`; do not
+restage in this follow-up):**
 
+- Modify: `controls/ci-control-manifest.json`
 - Modify: `docs/current-program.md`
 - Modify: `docs/superpowers/plans/2026-07-20-cicd-control-foundation.md`
 - Modify: `docs/superpowers/plans/2026-07-20-cicd-enforcement-control-plane-program.md`
 - Modify: `docs/superpowers/plans/2026-07-20-cicd-workflow-portability.md`
 - Regenerate: `docs/work-index.json`
 - Regenerate: `docs/work-index.md`
-- Modify: `controls/ci-control-manifest.json`
 - Modify: `scripts/lib/ci-control/classifier.ts`
 - Create: `scripts/lib/ci-control/git-input-core.ts`
 - Modify: `scripts/lib/ci-control/git-input.ts`
@@ -4582,6 +4608,23 @@ capabilities.
 - Create: `tests/scripts/repo-hygiene-policy.test.ts`
 - Modify: `tests/scripts/safeguard-diagnostics.test.ts`
 - Create: `tests/scripts/support/ci-control-git-input-fixtures.ts`
+
+**Current quarantine-hardening follow-up (exactly 14 staged paths):**
+
+- Modify: `docs/current-program.md`
+- Modify: `docs/superpowers/plans/2026-07-20-cicd-control-foundation.md`
+- Modify: `docs/superpowers/plans/2026-07-20-cicd-enforcement-control-plane-program.md`
+- Modify: `docs/superpowers/plans/2026-07-20-cicd-workflow-portability.md`
+- Regenerate: `docs/work-index.json`
+- Regenerate: `docs/work-index.md`
+- Modify: `controls/ci-control-manifest.json`
+- Modify: `docs/public-surface.md`
+- Modify: `scripts/agent-lease.ts`
+- Modify: `tests/scripts/agent-lease.test.ts`
+- Modify: `tests/scripts/ci-control-classifier.test.ts`
+- Modify: `tests/scripts/ci-control-execution-plan.test.ts`
+- Modify: `tests/scripts/ci-control-manifest.test.ts`
+- Modify: `tests/scripts/repo-hygiene-policy.test.ts`
 
 The result-test path updates its fixture to calculate precondition and terminal-
 attempt evidence with the same protected clock and expected-precondition inputs required
@@ -4626,8 +4669,9 @@ remote-tracking OID either to equal the coordinator observation or to enter the 
 integrator protocol. The provisional path can stop the commit but cannot authorize push,
 merge, or selective evidence reuse. Bind HEAD, observed main, local `origin/main`, plan, manifest,
 policy, toolchain, and implemented-prerequisite receipt digests into the Task 7 lineage
-lease. Bind CP-F2f, CP-WA1, CP-F4c1, and CP-TR1 only as explicit absent-path inventory;
-nonexistent receipts are not preconditions. Any unexpected remote movement, overlapping incoming path, dirty
+lease. Bind CP-F2f, authoritative CP-WA1, CP-F4c1, and CP-TR1 only as explicit incomplete
+inventory; the quarantined `agent:lease` precursor is not an implemented-prerequisite receipt,
+and nonexistent receipts are not preconditions. Any unexpected remote movement, overlapping incoming path, dirty
 workspace set, or stale prerequisite review stops Step 1 until the delta is reconciled
 through an ordinary reviewed Git operation.
 
@@ -4664,6 +4708,8 @@ PATH=/opt/homebrew/opt/python@3.12/libexec/bin:/usr/bin:/bin:/usr/sbin:/sbin:/op
   tests/scripts/semantic-quality-check.test.ts \
   tests/scripts/semantic-quality-receipt-validation.test.ts \
   tests/scripts/verify-boundary-run.test.ts \
+  tests/scripts/agent-lease.test.ts \
+  tests/scripts/public-surface-drift-check.test.ts \
   --pool=forks --fileParallelism=false --retry=0
 bash scripts/run-with-pinned-npm.sh run typecheck:scripts
 bash scripts/run-with-pinned-npm.sh run typecheck:all
@@ -4680,7 +4726,7 @@ while still admitting the exact GNU timeout executable required by boundary-run 
 Record both observed tool identities in the precondition receipt; do not reinterpret
 either bootstrap failure as a product defect.
 
-Expected: all 29 listed files and 890 tests execute and pass without retries or filters that
+Expected: all 31 listed files and 970 tests execute and pass without retries or filters that
 mask mandatory work; both typechecks pass. Explicitly compare requested and executed file
 sets so a test runner that silently ignores nonexistent filters cannot satisfy this step.
 
@@ -4753,14 +4799,16 @@ Require each worker/reviewer result to bind task and scope, read-only/mutation m
 
 - [ ] **Step 6: Re-freeze upstream, review, and commit; stop at the remote-write boundary**
 
-Task 7 entry first consumes and inspects a coordinator remote observation; Step 6 consumes
-a fresh observation again. Neither step fetches from the linked worker worktree.
+The 22-file source-split checkpoint occurred at
+`626db87d34cb3b1d41bedd82757cb01be7035a6f`; it does not prove this step or current-merge
+closure. Task 7 entry first consumes and inspects a coordinator remote observation; Step 6
+consumes a fresh observation again. Neither step fetches from the linked worker worktree.
 If either reconciliation changes HEAD, upstream, the merge result, plan, manifest, policy,
 or a prerequisite receipt, restart Steps 1–5 and obtain a new exact-byte review before
 staging. Then obtain
 independent code review, stage only the named reconciliation files, reconcile tracked,
 staged, unstaged, untracked, ignored, generated, mode, and submodule sets manually because
-CP-WA1 is absent, and run:
+authoritative CP-WA1 remains incomplete, and run:
 
 ```bash
 git diff --cached --name-status
@@ -4773,11 +4821,12 @@ bash scripts/run-with-pinned-npm.sh run guard:hooks-installed
 git commit -m "fix(ci): reconcile control bootstrap verification"
 ```
 
-Expected: the staged set equals the 22 named files in this task's **Files** list, the
-unstaged diff is empty, the admitted file-size split is included in the same bounded
-candidate and green, and the ordinary commit completes through the verified repository
-hooks. Because CP-WA1 is absent, this commit is not evidence of an authoritative workspace
-transition.
+Expected: the staged set equals the exact 14-path current follow-up set declared by this task and
+the admission packet; the earlier 22-file split remains bound to `626db87d…` rather than
+being restaged. The unstaged diff is empty, the admitted file-size split remains green, and
+the ordinary follow-up commit completes through the verified repository hooks. Because
+authoritative CP-WA1 remains incomplete and `agent:lease` is quarantined, this commit is
+not evidence of an authoritative workspace transition.
 The remote-write boundary stops here; no bounded repair claim is allowed until Step 7
 passes. This task does not push or merge: a later packet requires
 completed H1d, a current owner request that authorizes the exact branch action, SSH
@@ -4787,9 +4836,9 @@ required checks in this task.
 - [ ] **Step 7: Reverify the clean planning/bootstrap reconciliation commit**
 
 The first postcommit observations verify the clean state and exact commit transition. The
-precommit results cannot be reused as committed-byte evidence. CP-WA1 remains absent, so
-these direct observations are explicit bootstrap evidence rather than a canonical workspace
-receipt:
+precommit results cannot be reused as committed-byte evidence. Authoritative CP-WA1 remains
+incomplete, so these direct observations are explicit bootstrap evidence rather than a
+canonical workspace receipt; the quarantined lease precursor cannot fill that gap:
 
 ```bash
 GIT_OPTIONAL_LOCKS=0 git status --short
@@ -4840,6 +4889,8 @@ PATH=/opt/homebrew/opt/python@3.12/libexec/bin:/usr/bin:/bin:/usr/sbin:/sbin:/op
   tests/scripts/semantic-quality-check.test.ts \
   tests/scripts/semantic-quality-receipt-validation.test.ts \
   tests/scripts/verify-boundary-run.test.ts \
+  tests/scripts/agent-lease.test.ts \
+  tests/scripts/public-surface-drift-check.test.ts \
   --pool=forks --fileParallelism=false --retry=0
 bash scripts/run-with-pinned-npm.sh run typecheck:scripts
 bash scripts/run-with-pinned-npm.sh run typecheck:all
@@ -4868,7 +4919,7 @@ Do not reuse the precommit suite or coverage result: the reconciliation commit c
 invalidated it.
 
 Expected: clean worktree/index, the exact admitted reconciliation set, every post-commit
-guard, all 29 focused files/890 tests, the present control-precursor regression bundle, and
+guard, all 31 focused files/970 tests, the present control-precursor regression bundle, and
 unfiltered full coverage pass from committed bytes. Revalidate HEAD and `origin/main`; any
 drift invalidates these bootstrap results. This closes only the three bounded repairs named
 at Task 7 entry and records current planning state. CP-F2f, CP-WA1, active H1d, CP-F4,

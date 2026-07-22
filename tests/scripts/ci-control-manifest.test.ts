@@ -146,6 +146,7 @@ describe('canonical CI control manifest', () => {
     expect(inventory.controls.length).toBeGreaterThan(0);
     expect(Object.fromEntries(inventory.controls.map(({ id, availability }) => [id, availability]))).toEqual({
       'architecture.fitness-lint': 'planned',
+      'ci.agent-writer-lease': 'quarantined',
       'ci.exact-revision-classifier': 'canary',
       'ci.hooks.installed': 'report-only',
       'ci.outgoing-ref-policy': 'report-only',
@@ -168,7 +169,7 @@ describe('canonical CI control manifest', () => {
     ]);
     expect(loaded.controls.every((entry) => entry.trustClass === 'untrusted-candidate')).toBe(true);
     expect(loaded.controls.filter(({ id }) => ![
-      'ci.exact-revision-classifier', 'ci.hooks.installed', 'ci.outgoing-ref-policy',
+      'ci.agent-writer-lease', 'ci.exact-revision-classifier', 'ci.hooks.installed', 'ci.outgoing-ref-policy',
       'privacy.publication', 'repo.hygiene',
     ].includes(id)).every((entry) => entry.evidence.schemaVersion === null)).toBe(true);
     for (const id of ['repo.hygiene', 'privacy.publication']) {
@@ -190,10 +191,27 @@ describe('canonical CI control manifest', () => {
     expect(loaded.riskRules.length).toBeGreaterThan(0);
     expect(loaded.riskRules.find(({ id }) => id === 'risk.control-policy')?.pathPrefixes)
       .toEqual(expect.arrayContaining([
+        'scripts/lib/repo-hygiene-policy.ts',
+        'scripts/repo-hygiene-guard.ts',
         'scripts/ci-control-ref-policy.ts',
         'tests/scripts/ci-control-manifest.test.ts',
         'tests/scripts/ci-control-ref-policy.test.ts',
+        'tests/scripts/repo-hygiene-policy.test.ts',
       ]));
+    expect(loaded.controls.find(({ id }) => id === 'ci.agent-writer-lease')).toMatchObject({
+      availability: 'quarantined',
+      implementation: {
+        commandId: 'agent:lease',
+        detectorId: 'agent-lease',
+        nativeSchemaVersion: 1,
+      },
+      mode: 'block',
+    });
+    expect(loaded.canonicalCommands['agent:lease']).toEqual([
+      'bash',
+      'scripts/run-with-pinned-node.sh',
+      'scripts/agent-lease.ts',
+    ]);
     expect(loaded.canonicalCommands['ci:classify']).toEqual([
       'bash',
       'scripts/run-with-pinned-node.sh',
