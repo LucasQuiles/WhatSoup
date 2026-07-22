@@ -3519,11 +3519,20 @@ export class AgentRuntime implements Runtime {
         if (ageMs > 60 * 60 * 1000) {
           log.info({ chatJid: priorResumeIdentity.deliveryJid, ageMinutes: Math.round(ageMs / 60_000) },
             'skipping shared/single resume — session too stale');
-          this.durability!.retireSessionLifecycle({
-            agentSessionRowId: priorSession.id,
-            providerSessionId: priorSession.session_id!,
-            provider: this.effectiveProvider,
-          });
+          if (priorSession.workspace_key === null) {
+            log.warn({
+              rowId: priorSession.id,
+              conversationKey: checkpoint.conversation_key,
+            }, 'cannot retire stale shared/single resume without exact workspace identity');
+          } else {
+            this.durability!.retireExactSessionLifecycle({
+              agentSessionRowId: priorSession.id,
+              providerSessionId: priorSession.session_id!,
+              provider: this.effectiveProvider,
+              workspaceKey: priorSession.workspace_key,
+              conversationKey: checkpoint.conversation_key,
+            });
+          }
           priorSession = null;
           priorResumeIdentity = null;
         }

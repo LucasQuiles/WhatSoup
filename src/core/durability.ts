@@ -47,7 +47,9 @@ import {
   type CloseSessionLifecycleFailureParams,
   type CloseSessionLifecycleParams,
   type ReactivateSessionLifecycleParams,
+  type RetireExactSessionLifecycleParams,
   type RetireSessionLifecycleParams,
+  type UpdateExactSessionCheckpointStatusParams,
 } from './session-lifecycle-store.ts';
 import type {
   ClaimTurnRecoveryJobOptions,
@@ -1423,6 +1425,10 @@ export class DurabilityEngine {
     return this.sessionLifecycle.retireSessionLifecycle(params);
   }
 
+  retireExactSessionLifecycle(params: RetireExactSessionLifecycleParams): number {
+    return this.sessionLifecycle.retireExactSessionLifecycle(params);
+  }
+
   closeSessionLifecycleFailure(params: CloseSessionLifecycleFailureParams): void {
     this.sessionLifecycle.closeSessionLifecycleFailure(params);
   }
@@ -1436,6 +1442,10 @@ export class DurabilityEngine {
       sessionId,
       sessionStatus,
     );
+  }
+
+  updateExactSessionCheckpointStatus(params: UpdateExactSessionCheckpointStatusParams): number {
+    return this.sessionLifecycle.updateExactSessionCheckpointStatus(params);
   }
 
   getAllActiveCheckpoints(): ActiveSessionCheckpointRow[] {
