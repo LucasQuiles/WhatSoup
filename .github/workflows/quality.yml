@@ -2,6 +2,11 @@ name: Quality
 
 on:
   pull_request:
+  # `quality (24.x)` / `quality (25.x)` are REQUIRED contexts on main. A merge queue
+  # only advances once every required check reports on the merge_group ref, so without
+  # this trigger an enabled queue would stall every PR indefinitely waiting for a run
+  # that never starts. Wire the trigger BEFORE enabling the queue, never after.
+  merge_group:
   push:
     branches:
       - main
@@ -9,9 +14,12 @@ on:
 # Cancel superseded runs for the same ref. A new push/PR-sync supersedes the
 # in-flight run instead of leaving it orphaned at "pending 0s" for hours (the
 # close+reopen-to-retrigger workaround) and frees a runner slot immediately.
+# merge_group is deliberately EXEMPT: cancelling an in-flight merge-queue run
+# reports a failed/cancelled required check and ejects the PR from the queue, so
+# queue runs must always finish (same reasoning as tag-release-gate.yml).
 concurrency:
   group: quality-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 permissions:
   contents: read
