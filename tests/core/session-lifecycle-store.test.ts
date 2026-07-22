@@ -311,6 +311,157 @@ describe('SessionLifecycleStore through DurabilityEngine', () => {
     expect(durability.getSessionCheckpoint('graceful-a')?.session_status).toBe('suspended');
   });
 
+  it('closes an active session to ended and closes its checkpoints (regression)', () => {
+    const rowId = insertAgentRow(db, 'ended-session', 'active', 'ended-a');
+    durability.upsertSessionCheckpoint('ended-a', {
+      sessionId: 'ended-session',
+      sessionStatus: 'active',
+    });
+
+    durability.closeSessionLifecycle({
+      agentSessionRowId: rowId,
+      providerSessionId: 'ended-session',
+      provider: 'claude-cli',
+      conversationKey: 'ended-a',
+      status: 'ended',
+    });
+
+    expect(agentRow(db, rowId)).toMatchObject({ status: 'ended', ended_at: expect.any(String) });
+    expect(durability.getSessionCheckpoint('ended-a')?.session_status).toBe('ended');
+  });
+
+  it('closing an already-terminal session lifecycle is an idempotent no-op (E17)', () => {
+    const rowId = insertAgentRow(db, 'double-close-session', 'active', 'double-close-a');
+    durability.upsertSessionCheckpoint('double-close-a', {
+      sessionId: 'double-close-session',
+      sessionStatus: 'active',
+    });
+
+    // First close: active -> ended. This must succeed.
+    durability.closeSessionLifecycle({
+      agentSessionRowId: rowId,
+      providerSessionId: 'double-close-session',
+      provider: 'claude-cli',
+      conversationKey: 'double-close-a',
+      status: 'ended',
+    });
+    expect(agentRow(db, rowId).status).toBe('ended');
+
+    // Second close with the exact same params: the row is already terminal
+    // ('ended'), so none of the close statements (WHERE status = 'active')
+    // match. This must NOT throw -- it's a clean idempotent no-op, not a
+    // genuine invariant violation.
+    expect(() => durability.closeSessionLifecycle({
+      agentSessionRowId: rowId,
+      providerSessionId: 'double-close-session',
+      provider: 'claude-cli',
+      conversationKey: 'double-close-a',
+      status: 'ended',
+    })).not.toThrow();
+
+    // The no-op must not have disturbed the already-terminal row.
+    expect(agentRow(db, rowId)).toMatchObject({ status: 'ended', ended_at: expect.any(String) });
+    // The no-op early-returns BEFORE the checkpoint-close statements, so it must
+    // leave the checkpoint that the first close already closed terminal — never
+    // reopen or disturb it (the one place a silent no-op could leak open state).
+    expect(durability.getSessionCheckpoint('double-close-a')?.session_status).toBe('ended');
+  });
+
+  it('still throws when closing a genuinely non-existent agent session row', () => {
+    expect(() => durability.closeSessionLifecycle({
+      agentSessionRowId: 999_999,
+      providerSessionId: 'never-existed-session',
+      provider: 'claude-cli',
+      conversationKey: 'never-existed',
+      status: 'ended',
+    })).toThrow(/exact active agent session row could not be closed/i);
+  });
+
+  it('still throws when the row is STILL ACTIVE but session_id mismatches (not an already-terminal no-op)', () => {
+    // A still-active row whose session_id differs from the close params is a
+    // REAL invariant violation the throw must catch — it must NOT be waved
+    // through as "already terminal". Reachable via the codex resume-rejection
+    // path that rewrites an active row's session_id.
+    const rowId = insertAgentRow(db, 'real-session-id', 'active', 'mismatch-a');
+    durability.upsertSessionCheckpoint('mismatch-a', {
+      sessionId: 'real-session-id',
+      sessionStatus: 'active',
+    });
+    // Close with a DIFFERENT providerSessionId: the exact-close matches 0 rows
+    // (session_id mismatch) AND the row is still 'active' — this must throw, not
+    // no-op, because the identity does not match the row being closed.
+    expect(() => durability.closeSessionLifecycle({
+      agentSessionRowId: rowId,
+      providerSessionId: 'a-different-session-id',
+      provider: 'claude-cli',
+      conversationKey: 'mismatch-a',
+      status: 'ended',
+    })).toThrow(/exact active agent session row could not be closed/i);
+    // The active row and its checkpoint must be untouched (no silent leak).
+    expect(agentRow(db, rowId).status).toBe('active');
+  });
+
+  it('still throws when the same-identity row is terminal in a DIFFERENT status than the close requested (mixed-status, not a same-status repeat) [E22]', () => {
+    // Adversarial finding [E22]: closeSessionLifecycle can only transition an
+    // ACTIVE row, so a 0-change close whose same-identity row is terminal in a
+    // status OTHER than the one requested is NOT an idempotent repeat -- it is the
+    // reachable evict-suspend/resume race (a delayed idle-suspend leaves the row
+    // 'suspended', then the user /new-ends it). Silently no-oping would leave a
+    // user-ended session resumable. The idempotency no-op must fire ONLY for a
+    // true same-status repeat; every other non-active status must still throw.
+    const rowId = insertAgentRow(db, 'mixed-session', 'active', 'mixed-a');
+    durability.upsertSessionCheckpoint('mixed-a', {
+      sessionId: 'mixed-session',
+      sessionStatus: 'active',
+    });
+    // First close: suspend the row (active -> suspended).
+    durability.closeSessionLifecycle({
+      agentSessionRowId: rowId,
+      providerSessionId: 'mixed-session',
+      provider: 'claude-cli',
+      conversationKey: 'mixed-a',
+      status: 'suspended',
+    });
+    expect(agentRow(db, rowId).status).toBe('suspended');
+    // Now close-to-ENDED the same identity: the row is 'suspended' (not 'active',
+    // not 'ended'), so this is a mixed-status close, NOT a repeat. Must throw.
+    expect(() => durability.closeSessionLifecycle({
+      agentSessionRowId: rowId,
+      providerSessionId: 'mixed-session',
+      provider: 'claude-cli',
+      conversationKey: 'mixed-a',
+      status: 'ended',
+    })).toThrow(/exact active agent session row could not be closed/i);
+    // The suspended row must be untouched (no silent state divergence).
+    expect(agentRow(db, rowId).status).toBe('suspended');
+  });
+
+  it('is idempotent on a double-close of a pre-init (null providerSessionId) session', () => {
+    // The pre-init branch (providerSessionId === null) must be idempotent too.
+    const rowId = insertAgentRow(db, null, 'active', 'preinit-a');
+    durability.upsertSessionCheckpoint('preinit-a', {
+      sessionId: undefined,
+      sessionStatus: 'active',
+    });
+    durability.closeSessionLifecycle({
+      agentSessionRowId: rowId,
+      providerSessionId: null,
+      provider: 'claude-cli',
+      conversationKey: 'preinit-a',
+      status: 'ended',
+    });
+    expect(agentRow(db, rowId).status).toBe('ended');
+    // Second close of the already-terminal pre-init row: clean no-op.
+    expect(() => durability.closeSessionLifecycle({
+      agentSessionRowId: rowId,
+      providerSessionId: null,
+      provider: 'claude-cli',
+      conversationKey: 'preinit-a',
+      status: 'ended',
+    })).not.toThrow();
+    expect(agentRow(db, rowId).status).toBe('ended');
+  });
+
   it('rejects a foreign-provider reactivation without changing row or checkpoint bytes', () => {
     const rowId = insertAgentRow(db, 'foreign-resume-session', 'suspended', 'foreign-resume');
     durability.upsertSessionCheckpoint('foreign-resume', {
