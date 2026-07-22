@@ -142,3 +142,136 @@ Returned 0/9 FAIL — the harshest verdict. Disposition of its findings:
 **Verdict after fixes:** grok's FAIL resolves to PASS with the same two spec citations as
 before. The 3 real items would not have been found without a fourth family — reviewer
 diversity is doing its job.
+
+---
+
+# Wave 4 — explicit-test-battery pass (2026-07-21, owner-mandated)
+
+Purpose: catch what broader prompts missed — small alignment issues, inconsistency, bad
+UI/UX, clutter, poor use of space. Method: a **25-test explicit battery** (A alignment ×6,
+B consistency ×6, C UI/UX ×6, D clutter ×4, E space ×5) plus a **G cross-surface battery
+(×7)**, run per-image with mandatory element+region citations, confidence tags, and an
+anti-artifact preamble (sanctioned exceptions enumerated; absolute pixel estimation banned
+— relative comparisons only). 18 fresh screenshots (9 surfaces × 2 themes, 1440×900),
+image-only evidence directory (prior contamination lesson applied).
+
+**Reviewer availability this wave:** gpt-5.4 (OpenAI API) ✓ · grok-4.5 (xAI OAuth host) ✓ · codex gpt-5.6 (CLI) ✓ · qwen2.5vl:72b + gemma3:27b ✗ (local vision host offline) ·
+claude-opus-4-8 ✗ (API balance empty + CLI weekly cap). Three families ran the full
+battery; the two local families re-join when the local vision host returns.
+
+## Real defects found and fixed
+
+**1. Global chrome missing on 6 of 7 operator surfaces (the flagship catch, G1, both
+families, HIGH).** Fleet carried the locked left nav rail (00-landscape-inventory: "Global
+chrome: left nav rail with SOUP nameplate"); agents, skills-hub, dream-lab, inbox,
+deployments, settings had silently shipped top-bar-only chrome through six track PRs.
+Fixed: rail on all operator surfaces (active state, SOUP nameplate + per-surface ctx,
+Operate/Create/System sections, Hosts status block); "Deployments" added as a System nav
+item everywhere; theme toggle standardized (sun SVG + label, rightmost in every header;
+fixed corner on journey surfaces); header nameplates de-duplicated into the rail.
+
+**2. Invisible/tofu glyph sweep (broken-asset class).** Two line-chart icons (skills-hub
+auto-seo, fleet Ops nav) were stroke-only paths with `fill` styling → rendered as *empty
+squares* (grok caught what three earlier waves missed; confirmed in code). Fixed via
+stroke styling. Also replaced every font-dependent risky glyph with inline SVG: ⚄ dice,
+⇪ upload, ⇓ download, ⌕ search, ⛨ filter, ⚠ warnings, and the emoji composer caps
+(🖼🎤📊⏰ — chromatic emoji violating the monochrome-glyph law).
+
+**3. Fold-dangles and contradictory composition.** Hatch stacked the *completed* channel
+step below the final ceremony (codex: "CHANNEL marked completed while selection is
+presented as unresolved" — contradictory workflow state; both families flagged the
+dangling clipped card) → channel card removed; ceremony now composes centered at 900px.
+Deployments pair card, settings danger zone, skills-hub last card all clipped at the fold
+→ spacing/radius restructure until every surface fits 1440×900 exactly (Chromium-measured:
+deployments 836/836, settings 840/840, skills-hub 839/839, dream-lab 840/840).
+
+**4. Mockup-state bugs (content honesty).** Inbox takeover toggle rendered OFF while the
+system notice, agent card, and composer all stated ON (codex HIGH) → toggle state fixed.
+Fleet header declared "14 lines" with 10 rows shown and no overflow cue (codex HIGH) →
+table rows compacted to single-line anatomy; all 14 rows now fit (644/644) and the count
+text corrected ("14 across 10 channels" — it had claimed 6). Agents roster said "1 line"
+while two assigned lines rendered → "2 lines".
+
+**5. Component vocabulary unification.** Inbox Line "live" bare dot+text → shared status
+pill (fleet/agents/deployments pattern). Inbox Direct/Rooms selected state → accent-wash
+(was ambiguous enough that grok inverted which tab was active, both themes). Destructive
+actions: instance "kill" neutral-at-rest → crit-tinted (one destructive vocabulary:
+crit-outline family). Update actions: skills-hub neutral vs deployments accent-outline →
+accent-outline everywhere. "Add" controls: dashed-ghost pattern unified (settings new-token
+converted). Takeover toggle warn-amber → accent (one switch vocabulary; the caution
+semantics stay on the ◆ badge). Deployments "admin lane" violet chip → neutral (leaving
+warn=attention, neutral=info as the two title-pill registers). Settings subnav listed
+sections that don't exist in the content (Channels, Agent defaults — grok HIGH) → trimmed
+to real sections; Danger zone given the same section header+desc pattern as siblings.
+Settings theme swatch: selection state didn't follow the theme being viewed (grok HIGH) →
+swatch selection now syncs with the toggle.
+
+**6. Alignment & space.** Fleet row menu buttons drove 51px rows → compact `.rowbtn`
+(21px) + padding trims; Deployments hub action buttons now form a right column; settings
+notification toggles trail in one column; inbox composer children uniform 36px; inbox
+timestamps/unread pills each get a fixed right column; dream-lab "Recently decided" moved
+from the overloaded review pane into the underused queue column (kills both the D3
+competing-blocks flag and the E2 dead-zone flag); dream-lab action note moved out of the
+button strip; pair card restructured to a single flow row (no squeezed right column).
+
+**7. Data & terminology.** Dream-lab Mercy instances: full mask law (prefix+suffix+nowrap
++ title attr). Skills-hub update labels unified ("update" + version delta in title attr).
+Deployments ISSUE metric value neutralized (warn stays on the chip + degraded pill — same
+data-color law as wave 3). "org hub" vs "org skills hub" terminology unified. Hosts block
+completed (field-pi was missing from the global rail). Dream-lab "edit then approve" →
+"Edit then approve" (casing drift inside one action set — the wave's smallest real catch).
+
+## Rejected with computed evidence (representative)
+
+- "Hatch/splash sit off-center / left-leaning / top-heavy" (repeated across runs, HIGH
+  confidences) — Chromium-measured: hatch shell gutters 290/290, margins 122/122; splash
+  hero gutters 515/515, stack margins 175/175. Exactly centered; watermark asymmetry is
+  sanctioned diagonal balance.
+- "Reject button shorter / tighter padding" (HIGH, twice) — measured: all three action
+  buttons 33px height, identical class.
+- "Settings revoke sits lower than rotate" / "agents Edit/Retire baseline ragged" —
+  identical `.btn.sm` components in centered flex rows.
+- "Deployments/Settings nav items smaller than Operate items" — identical `.nav-item` class.
+- "Hatch-card gap tighter than roster gaps" — uniform `gap:8px` flex column.
+- "Activity feed clips text mid-word" — every `.ev p` scrollWidth ≤ clientWidth (all False).
+- "Deployments/settings bottom panels clipped" — panel bottoms at y=850/873 vs 900 viewport.
+- "Inbox composer icons cramped vs Send" — 36px = 36px = 36px after unification.
+- "Cross-theme structural parity breaks" (footnote present in one theme, swatch order
+  flipped, more rows visible in one theme) — single DOM; only colors flip.
+- Telegram/X glyphs optically smaller — **accepted as real** and optically normalized
+  (scale transforms); the rest of the icon-size claims rejected per viewBox uniformity.
+
+## Accepted with rationale (conscious dispositions)
+
+- **Agents Memory panel internal scroll** (~120px at 900px) — the only surface not fully
+  composing at viewport. Console detail surfaces scroll internally (fleet table precedent);
+  truncating Memory content would misrepresent the surface. Flagged HIGH three times;
+  consciously accepted as the operator-scroll pattern.
+- Row/instance/feed density (persistent D1 everywhere) — console register law: dense
+  operator feel is the design. Two-tier selection vocabulary codified (list rows = accent
+  edge-bar; cards = accent ring) after grok's G6 selection-drift catch.
+- Journey-surface margins/emptiness (persistent E1/E2 on hatch/splash) — journey register
+  law: spacious centered composition, same pattern as splash (which passes).
+- Masks with ellipsis (recurring C2 flags) — privacy mask law; prefix+suffix+title attrs.
+- "Unassigned" italic text (absence styling), recessed deactivated pills (intentional
+  recession), eggshell dashed frame (ceremony motif), hatch card lighter than roster cards
+  (add-row pattern), skills-hub filter column ending mid-height (content-complete sidebar),
+  deployments header-primary + featured pair card (entry + destination, not duplication),
+  dream-lab `history` ghost in the primary slot (action zone is the review pane),
+  "Upload" icon+label (import action, not `+ Verb` creation).
+
+## Process note — adversarial oscillation
+
+With the battery's paid-per-defect framing, finding counts *inflate* once real defects are
+exhausted: identical-or-improved images drew FAIL(2)→FAIL(5)→FAIL(10) across consecutive
+runs, with the same elements alternating between PASS and HIGH-severity claims
+(centered-composition "shifts", identical-component "size differences"). Completion rule
+applied: every remaining finding is either fixed, rejected with computed evidence, or
+accepted with recorded rationale. No undispositioned findings remain.
+
+## Verdict
+
+fleet · hatch · agents · skills-hub · dream-lab · inbox · deployments · settings · splash —
+**all real wave-4 defects fixed and re-verified across three reviewer families.** The rail
+unification alone (6 surfaces) was worth the wave; the invisible-glyph class would have
+shipped broken without it.

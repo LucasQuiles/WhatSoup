@@ -24,12 +24,27 @@
   --shadow-lift:0 1px 2px rgb(60 45 20/.10), 0 10px 28px rgb(60 45 20/.14);
 }
 * { margin:0; box-sizing:border-box; }
-body { background:var(--base); color:var(--t1); font:400 13.5px/1.5 "Hanken Grotesk",Arial,sans-serif; height:100vh; display:flex; flex-direction:column; overflow:hidden; }
-header { display:flex; align-items:center; gap:14px; padding:14px 22px 12px; border-bottom:1px solid var(--hair); }
-.nameplate { display:flex; align-items:center; gap:12px; }
+body { background:var(--base); color:var(--t1); font:400 13.5px/1.5 "Hanken Grotesk",Arial,sans-serif; height:100vh; display:flex; overflow:hidden; }
+/* ===== Nav rail (global chrome) ===== */
+nav { width:212px; flex:none; background:var(--inset); border-right:1px solid var(--hair); display:flex; flex-direction:column; padding:14px 10px; gap:2px; }
+.nameplate { display:flex; align-items:center; gap:12px; padding:2px 8px 16px; }
 .nameplate .tick { width:8px; height:8px; border-radius:1px; background:var(--m-passive); }
-.nameplate .wm { font:800 17px/22px "Bricolage Grotesque",sans-serif; letter-spacing:-0.06em; }
-.nameplate .wm b { color:var(--accent); }
+.nameplate .wm { font:800 18px/24px "Bricolage Grotesque",sans-serif; letter-spacing:-0.06em; color:var(--t1); }
+.nameplate .wm b { color:var(--accent); font-weight:800; }
+.nameplate .ctx { font:400 11px/16px "IBM Plex Mono",monospace; letter-spacing:.18em; color:var(--t3); margin-left:auto; }
+.nav-sec { font:500 11px/16px "IBM Plex Mono",monospace; letter-spacing:.12em; color:var(--t3); padding:14px 10px 6px; text-transform:uppercase; }
+.nav-item { display:flex; align-items:center; gap:10px; padding:7px 10px; border-radius:6px; color:var(--t2); text-decoration:none; font-weight:500; transition:transform .18s ease-out, box-shadow .18s ease-out, background .18s; }
+.nav-item:hover { background:var(--raised); color:var(--t1); transform:translateY(-1px); }
+.nav-item.active { background:color-mix(in srgb, var(--accent) 10%, transparent); color:var(--t1); box-shadow:inset 2px 0 0 var(--accent); }
+.nav-item svg { width:16px; height:16px; fill:currentColor; opacity:.85; }
+.nav-item .dot { margin-left:auto; width:6px; height:6px; border-radius:1px; transform:rotate(45deg); background:var(--warn); }
+.deploy { margin-top:auto; border-top:1px solid var(--hair); padding-top:10px; }
+.deploy .hchip { display:flex; align-items:center; gap:8px; padding:6px 10px; font:500 11.5px/16px "IBM Plex Mono",monospace; color:var(--t3); }
+.deploy .hchip .st { width:6px; height:6px; border-radius:50%; background:var(--ok); }
+.deploy .hchip .st.warn { background:var(--warn); border-radius:1px; transform:rotate(45deg); }
+.appcol { flex:1; display:flex; flex-direction:column; min-width:0; min-height:0; }
+@media (max-width:1100px){ nav{width:64px} .nav-item span,.nav-sec,.nameplate .wm,.nameplate .ctx,.deploy .hchip span{display:none} }
+header { display:flex; align-items:center; gap:14px; padding:14px 22px 12px; border-bottom:1px solid var(--hair); }
 h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
 .spacer { flex:1; }
 .btn { display:inline-flex; align-items:center; gap:8px; padding:8px 14px; border-radius:6px; border:1px solid var(--hair-2); background:var(--raised); color:var(--t1); font:600 12.5px/16px inherit; cursor:pointer; transition:transform .16s ease-out, box-shadow .16s ease-out; }
@@ -50,7 +65,7 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
 .list { border-right:1px solid var(--hair); overflow:auto; }
 .seg { display:flex; gap:4px; padding:10px 12px 6px; }
 .seg button { flex:1; border:none; background:var(--inset); color:var(--t3); font:600 11px/14px "IBM Plex Mono",monospace; padding:6px 0; border-radius:6px; cursor:pointer; }
-.seg button.on { background:var(--raised); color:var(--t1); box-shadow:0 0 0 1px var(--hair-2); }
+.seg button.on { background:color-mix(in srgb, var(--accent) 12%, transparent); color:var(--t1); box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent); }
 .citem { display:flex; gap:10px; padding:10px 12px; cursor:pointer; border-left:2px solid transparent; }
 .citem:hover { background:var(--raised); }
 .citem.sel { background:var(--raised); border-left-color:var(--accent); }
@@ -64,6 +79,7 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
 .citem .pv { color:var(--t3); font-size:11.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:1px; }
 .citem .pv b { color:var(--m-agent); font-weight:500; }
 .citem .badges { display:flex; gap:4px; margin-top:3px; }
+.citem .badges .ub { margin-left:auto; }
 .ub { font:700 11px/13px "IBM Plex Mono",monospace; padding:1px 6px; border-radius:99px; background:var(--overlay); border:1px solid var(--hair-3); color:var(--t1); }
 .take { font:700 11px/13px "IBM Plex Mono",monospace; padding:1px 6px; border-radius:99px; background:color-mix(in srgb, var(--warn) 14%, transparent); color:var(--warn); } .take::before { content:"◆ "; }
 .agtag { font:700 11px/12px "IBM Plex Mono",monospace; padding:1px 6px; border-radius:99px; background:color-mix(in srgb, var(--m-agent) 12%, transparent); color:var(--m-agent); }
@@ -74,10 +90,10 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
 .thead .nm { font:700 14px/18px "Bricolage Grotesque",sans-serif; }
 .thead .sub { font:400 11px/14px "IBM Plex Mono",monospace; color:var(--t3); }
 .takeover { margin-left:auto; display:flex; align-items:center; gap:8px; font:600 11px/14px "IBM Plex Mono",monospace; color:var(--t3); }
-.tgl { width:32px; height:18px; border-radius:99px; background:var(--hair-2); position:relative; cursor:pointer; flex:none; transition:background .16s; }
+.tgl { width:32px; height:18px; border-radius:99px; background:var(--hair-2); position:relative; cursor:pointer; flex:none; transition:background .16s; box-shadow:inset 0 0 0 1px var(--hair-3); }
 .tgl::after { content:""; position:absolute; left:2px; top:2px; width:14px; height:14px; border-radius:50%; background:var(--t2); transition:transform .16s; }
-.tgl.on { background:var(--warn); } .tgl.on::after { transform:translateX(14px); background:var(--accent-fg); }
-.msgs { flex:1; overflow:auto; padding:16px; display:flex; flex-direction:column; gap:10px; }
+.tgl.on { background:var(--accent); } .tgl.on::after { transform:translateX(14px); background:var(--accent-fg); }
+.msgs { flex:1; overflow:auto; padding:16px; display:flex; flex-direction:column; justify-content:flex-end; gap:10px; }
 .mrow { display:flex; gap:8px; max-width:78%; }
 .mrow.me { align-self:flex-end; flex-direction:row-reverse; }
 .mrow .ma { width:24px; height:24px; border-radius:7px; display:flex; align-items:center; justify-content:center; font:700 11px/1 sans-serif; color:#fff; flex:none; align-self:flex-end; }
@@ -89,12 +105,15 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
 .sys { align-self:center; font:500 11px/14px "IBM Plex Mono",monospace; color:var(--t3); background:var(--inset); border:1px solid var(--hair); border-radius:99px; padding:4px 12px; }
 .composer { display:flex; gap:10px; padding:12px 16px; border-top:1px solid var(--hair); align-items:center; }
 .composer .caps { display:flex; gap:4px; }
-.cap { width:26px; height:26px; border-radius:7px; border:1px solid var(--hair-2); background:var(--raised); color:var(--t2); cursor:pointer; display:flex; align-items:center; justify-content:center; font-size:12px; }
+.cap { width:36px; height:36px; border-radius:8px; border:1px solid var(--hair-2); background:var(--raised); color:var(--t2); cursor:pointer; display:flex; align-items:center; justify-content:center; font-size:12px; }
 .cap:hover { color:var(--t1); }
 .cap.off { opacity:.35; cursor:not-allowed; }
-.composer input { flex:1; background:var(--inset); border:1px solid var(--hair); border-radius:9px; padding:10px 12px; color:var(--t1); font:inherit; outline:none; }
+.composer input { flex:1; background:var(--inset); border:1px solid var(--hair); border-radius:9px; padding:9px 12px; height:36px; color:var(--t1); font:inherit; outline:none; }
 .composer input::placeholder { color:var(--t3); }
 .sendnote { font:400 11px/14px "IBM Plex Mono",monospace; color:var(--t3); }
+/* status pill (shared status vocabulary) */
+.badge { display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:99px; font:600 11px/14px "IBM Plex Mono",monospace; }
+.badge.live { background:color-mix(in srgb, var(--ok) 12%, transparent); color:var(--ok); } .badge.live::before { content:"● "; font-size:7px; }
 /* context pane */
 .ctx { border-left:1px solid var(--hair); overflow:auto; padding:14px; }
 .ctx h3 { font:600 11px/14px "IBM Plex Mono",monospace; letter-spacing:.1em; color:var(--t3); text-transform:uppercase; margin:14px 0 8px; }
@@ -116,8 +135,28 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
 </style>
 </head>
 <body>
+<nav>
+  <div class="nameplate"><span class="tick"></span><span class="wm">SO<b>U</b>P</span><span class="ctx">INBOX</span></div>
+  <div class="nav-sec">Operate</div>
+  <a class="nav-item" href="fleet.html"><svg viewBox="0 0 16 16"><path d="M2 2h5v5H2zM9 2h5v5H9zM2 9h5v5H2zM9 9h5v5H9z"/></svg><span>Fleet</span></a>
+  <a class="nav-item" href="agents.html"><svg viewBox="0 0 16 16"><path d="M8 1.5 14 5v6l-6 3.5L2 11V5z"/></svg><span>Agents</span></a>
+  <a class="nav-item active" href="inbox.html"><svg viewBox="0 0 16 16"><path d="M2 3h12v9H6l-4 3z"/></svg><span>Inbox</span><span class="dot"></span></a>
+  <a class="nav-item" href="#"><svg viewBox="0 0 16 16" style="fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round"><path d="M3 13V8m5 5V3m5 10v-7"/></svg><span>Ops</span></a>
+  <div class="nav-sec">Create</div>
+  <a class="nav-item" href="skills-hub.html"><svg viewBox="0 0 16 16"><path d="M8 2a6 6 0 1 0 6 6h-2a4 4 0 1 1-4-4z"/><path d="M8 6l5-3-3 5z"/></svg><span>Skills</span></a>
+  <a class="nav-item" href="dream-lab.html"><svg viewBox="0 0 16 16"><path d="M8 2c2 2 2 4 0 6s-2 4 0 6c-3-1-5-3-5-6s2-5 5-6z"/></svg><span>Dream Lab</span></a>
+  <div class="nav-sec">System</div>
+  <a class="nav-item" href="deployments.html"><svg viewBox="0 0 16 16"><path d="M2 3h12v4H2zM2 9h12v4H2z"/></svg><span>Deployments</span></a>
+  <a class="nav-item" href="settings.html"><svg viewBox="0 0 16 16"><path d="M8 5a3 3 0 1 0 0 6 3 3 0 0 0 0-6zm6 3h2M1 8h2m5-7v2m0 10v2m5-12 1.5-1.5M2.5 13.5 4 12m9 1.5L11.5 12M2.5 2.5 4 4"/></svg><span>Settings</span></a>
+  <div class="deploy">
+    <div class="nav-sec">Hosts</div>
+    <div class="hchip"><span class="st"></span><span>local · this host</span></div>
+    <div class="hchip"><span class="st warn"></span><span>nest-2 · container</span></div>
+    <div class="hchip"><span class="st"></span><span>field-pi · remote</span></div>
+  </div>
+</nav>
+<div class="appcol">
 <header>
-  <div class="nameplate"><span class="tick"></span><span class="wm">SO<b>U</b>P</span></div>
   <h1>Inbox</h1>
   <div class="spacer"></div>
   <button class="btn ghost theme-toggle" onclick="document.documentElement.dataset.theme=document.documentElement.dataset.theme==='dark'?'light':'dark'"><svg width="14" height="14" viewBox="0 0 16 16" style="vertical-align:-2px"><circle cx="8" cy="8" r="3.2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6 13 13M13 3l-1.4 1.4M4.4 11.6 3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg> theme</button>
@@ -129,14 +168,14 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
   <span class="chip"><svg viewBox="0 0 16 16"><path d="M2 2h12a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H7l-4 3v-3H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/></svg>iMessage <span class="c">3</span></span>
   <span class="chip"><svg viewBox="0 0 16 16"><path d="M12 3H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h1l1 2 1.2-2H12a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z"/></svg>Discord <span class="c">7</span></span>
   <span class="chip"><svg viewBox="0 0 16 16"><path d="M1 3h14v10H1z"/></svg>Email <span class="c">6</span></span>
-  <span class="chip"><svg viewBox="0 0 16 16"><path d="M2 2l4.7 6L2.3 14h2l3.7-4.8L11.4 14H14L9.2 7.6 13.7 2h-2L8.2 6.4 5 2z"/></svg>X <span class="c">3</span></span>
+  <span class="chip"><svg viewBox="0 0 16 16"><g transform="translate(1 1) scale(.88)"><path d="M2 2l4.7 6L2.3 14h2l3.7-4.8L11.4 14H14L9.2 7.6 13.7 2h-2L8.2 6.4 5 2z"/></g></svg>X <span class="c">3</span></span>
 </div>
 <div class="wrap">
   <aside class="list">
     <div class="seg"><button class="on">Direct</button><button>Rooms</button></div>
     <div class="citem sel">
       <span class="ava">LQ<svg viewBox="0 0 16 16"><path d="M8 1a7 7 0 0 0-6 10.5L1 15l3.6-1A7 7 0 1 0 8 1z"/></svg></span>
-      <div class="mid"><div class="row1"><span class="nm">Lucas Quiles</span><span class="tm">14:32</span></div><div class="pv"><b>Quinn:</b> shipped the agents mockup, PR is up</div><div class="badges"><span class="ub">2</span><span class="agtag">Quinn</span></div></div>
+      <div class="mid"><div class="row1"><span class="nm">Lucas Quiles</span><span class="tm">14:32</span></div><div class="pv"><b>Quinn:</b> shipped the agents mockup, PR is up</div><div class="badges"><span class="agtag">Quinn</span><span class="ub">2</span></div></div>
     </div>
     <div class="citem">
       <span class="ava">SM<svg viewBox="0 0 16 16"><path d="M2 2h12a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H7l-4 3v-3H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/></svg></span>
@@ -144,11 +183,11 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
     </div>
     <div class="citem">
       <span class="ava">DK<svg viewBox="0 0 16 16"><path d="M8 2a5 5 0 0 1 5 5c0 3 1 4 1 4H2s1-1 1-4a5 5 0 0 1 5-5z"/></svg></span>
-      <div class="mid"><div class="row1"><span class="nm">Dana K.</span><span class="tm">13:55</span></div><div class="pv"><b>Beacon:</b> your 3pm is confirmed</div><div class="badges"><span class="ub">1</span><span class="agtag">Beacon</span></div></div>
+      <div class="mid"><div class="row1"><span class="nm">Dana K.</span><span class="tm">13:55</span></div><div class="pv"><b>Beacon:</b> your 3pm is confirmed</div><div class="badges"><span class="agtag">Beacon</span><span class="ub">1</span></div></div>
     </div>
     <div class="citem">
       <span class="ava grp"><svg viewBox="0 0 16 16" style="position:static;background:none;padding:0;width:14px;height:14px"><path d="M8 1a7 7 0 0 0-6 10.5L1 15l3.6-1A7 7 0 1 0 8 1z"/></svg>WS</span>
-      <div class="mid"><div class="row1"><span class="nm">WHATSOUP</span><span class="tm">13:41</span></div><div class="pv"><b>Quinn:</b> bead-07 assigned to Lumen</div><div class="badges"><span class="ub">5</span><span class="agtag">Quinn</span><span class="take">takeover</span></div></div>
+      <div class="mid"><div class="row1"><span class="nm">WHATSOUP</span><span class="tm">13:41</span></div><div class="pv"><b>Quinn:</b> bead-07 assigned to Lumen</div><div class="badges"><span class="agtag">Quinn</span><span class="take">takeover</span><span class="ub">5</span></div></div>
     </div>
     <div class="citem">
       <span class="ava">JB<svg viewBox="0 0 16 16"><path d="M1 3h14v10H1z"/></svg></span>
@@ -167,7 +206,7 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
     <div class="thead">
       <span class="ava">LQ</span>
       <div><div class="nm">Lucas Quiles</div><div class="sub">whatsapp · personal line · quinn assigned</div></div>
-      <div class="takeover"><span>takeover</span><span class="tgl" onclick="this.classList.toggle('on')"></span></div>
+      <div class="takeover"><span>takeover</span><span class="tgl on" onclick="this.classList.toggle('on')"></span></div>
     </div>
     <div class="msgs">
       <div class="mrow"><span class="ma" style="background:var(--overlay);color:var(--t2)">L</span><div class="bub">Did the agents mockup land?<div class="tm">14:30</div></div></div>
@@ -175,13 +214,15 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
       <div class="mrow"><span class="ma" style="background:var(--overlay);color:var(--t2)">L</span><div class="bub">Nice. Skills hub next?<div class="tm">14:31</div></div></div>
       <div class="sys">takeover enabled — Quinn is paused in this chat</div>
       <div class="mrow me"><div class="bub">Actually I'll drive this thread for a bit.<div class="tm">14:32 ✓✓</div></div></div>
+      <div class="mrow"><span class="ma" style="background:var(--overlay);color:var(--t2)">L</span><div class="bub">Fine — but thread the needle on the grants question first.<div class="tm">14:33</div></div></div>
+      <div class="mrow me"><div class="bub">Already done. Beacon keeps see-only on Alerts until Friday.<div class="tm">14:33 ✓✓</div></div></div>
+      <div class="mrow"><span class="ma" style="background:var(--overlay);color:var(--t2)">L</span><div class="bub">Good. Then ship the inbox pass when the models report back.<div class="tm">14:34</div></div></div>
     </div>
     <div class="composer">
-      <div class="caps"><button class="cap" title="image">🖼</button><button class="cap" title="voice">🎤</button><button class="cap off" title="poll — not on this channel">📊</button><button class="cap" title="schedule">⏰</button></div>
+      <div class="caps"><button class="cap" title="image"><svg width="13" height="13" viewBox="0 0 16 16" style="fill:none;stroke:currentColor;stroke-width:1.4"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><circle cx="5.5" cy="6.5" r="1.3"/><path d="M2 12l3.5-3.5 2.5 2.5 3-3L14 11" stroke-linejoin="round"/></svg></button><button class="cap" title="voice"><svg width="13" height="13" viewBox="0 0 16 16" style="fill:none;stroke:currentColor;stroke-width:1.4;stroke-linecap:round"><rect x="5.5" y="1.5" width="5" height="8" rx="2.5"/><path d="M3 8a5 5 0 0 0 10 0M8 13v2"/></svg></button><button class="cap off" title="poll — not on this channel"><svg width="13" height="13" viewBox="0 0 16 16" style="fill:none;stroke:currentColor;stroke-width:1.4;stroke-linecap:round"><path d="M3 13V9m5 4V5m5 8V7"/></svg></button><button class="cap" title="schedule"><svg width="13" height="13" viewBox="0 0 16 16" style="fill:none;stroke:currentColor;stroke-width:1.4;stroke-linecap:round"><circle cx="8" cy="8.5" r="5.5"/><path d="M8 5.5v3l2 1.5M6.5 1.5h3"/></svg></button></div>
       <input placeholder="Message as yourself (takeover on)…">
-      <button class="btn primary sm">Send</button>
+      <button class="btn primary" style="height:36px">Send</button>
     </div>
-    <div style="padding:0 16px 10px"><span class="sendnote">capability-driven composer: polls unavailable on whatsapp DM · agent paused while takeover is on</span></div>
   </section>
   <aside class="ctx">
     <h3>Person</h3>
@@ -195,8 +236,9 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; }
     <h3>Agent in this chat</h3>
     <div class="agcard"><span class="ava" style="width:26px;height:26px;border-radius:7px;background:hsl(250,38%,34%);color:#fff;display:flex;align-items:center;justify-content:center;font:700 11px/1 sans-serif">Q</span><div><div class="nm">Quinn</div><div class="sub">paused · takeover on</div></div></div>
     <h3>Line</h3>
-    <div class="pcard"><div class="idrow"><span class="h" style="color:var(--t1);font-weight:600">Personal</span><span class="v"><span style="color:var(--ok);font-size:8px">●</span> live</span></div><div class="idrow"><span class="h">grant</span><span class="v">participate (Quinn)</span></div><div class="idrow"><span class="h">linked</span><span class="v">2026-07-21</span></div></div>
+    <div class="pcard"><div class="idrow"><span class="h" style="color:var(--t1);font-weight:600">Personal</span><span class="v"><span class="badge live">live</span></span></div><div class="idrow"><span class="h">grant</span><span class="v">participate (Quinn)</span></div><div class="idrow"><span class="h">linked</span><span class="v">2026-07-21</span></div>    </div>
   </aside>
+</div>
 </div>
 </body>
 </html>

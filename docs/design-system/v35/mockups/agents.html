@@ -24,14 +24,30 @@
   --shadow-lift:0 1px 2px rgb(60 45 20/.10), 0 10px 28px rgb(60 45 20/.14);
 }
 * { margin:0; box-sizing:border-box; }
-body { background:var(--base); color:var(--t1); font:400 13.5px/1.5 "Hanken Grotesk",Arial,sans-serif; min-height:100vh; display:flex; flex-direction:column; }
-header { display:flex; align-items:center; gap:14px; padding:14px 22px 12px; border-bottom:1px solid var(--hair); }
-.nameplate { display:flex; align-items:center; gap:12px; margin-right:8px; }
+body { background:var(--base); color:var(--t1); font:400 13.5px/1.5 "Hanken Grotesk",Arial,sans-serif; height:100vh; display:flex; overflow:hidden; }
+/* ===== Nav rail (global chrome) ===== */
+nav { width:212px; flex:none; background:var(--inset); border-right:1px solid var(--hair); display:flex; flex-direction:column; padding:14px 10px; gap:2px; }
+.nameplate { display:flex; align-items:center; gap:12px; padding:2px 8px 16px; }
 .nameplate .tick { width:8px; height:8px; border-radius:1px; background:var(--m-passive); }
-.nameplate .wm { font:800 17px/22px "Bricolage Grotesque",sans-serif; letter-spacing:-0.06em; }
-.nameplate .wm b { color:var(--accent); }
+.nameplate .wm { font:800 18px/24px "Bricolage Grotesque",sans-serif; letter-spacing:-0.06em; color:var(--t1); }
+.nameplate .wm b { color:var(--accent); font-weight:800; }
+.nameplate .ctx { font:400 11px/16px "IBM Plex Mono",monospace; letter-spacing:.18em; color:var(--t3); margin-left:auto; }
+.nav-sec { font:500 11px/16px "IBM Plex Mono",monospace; letter-spacing:.12em; color:var(--t3); padding:14px 10px 6px; text-transform:uppercase; }
+.nav-item { display:flex; align-items:center; gap:10px; padding:7px 10px; border-radius:6px; color:var(--t2); text-decoration:none; font-weight:500; transition:transform .18s ease-out, box-shadow .18s ease-out, background .18s; }
+.nav-item:hover { background:var(--raised); color:var(--t1); transform:translateY(-1px); }
+.nav-item.active { background:color-mix(in srgb, var(--accent) 10%, transparent); color:var(--t1); box-shadow:inset 2px 0 0 var(--accent); }
+.nav-item svg { width:16px; height:16px; fill:currentColor; opacity:.85; }
+.nav-item .dot { margin-left:auto; width:6px; height:6px; border-radius:1px; transform:rotate(45deg); background:var(--warn); }
+.deploy { margin-top:auto; border-top:1px solid var(--hair); padding-top:10px; }
+.deploy .hchip { display:flex; align-items:center; gap:8px; padding:6px 10px; font:500 11.5px/16px "IBM Plex Mono",monospace; color:var(--t3); }
+.deploy .hchip .st { width:6px; height:6px; border-radius:50%; background:var(--ok); }
+.deploy .hchip .st.warn { background:var(--warn); border-radius:1px; transform:rotate(45deg); }
+.appcol { flex:1; display:flex; flex-direction:column; min-width:0; min-height:0; }
+@media (max-width:1100px){ nav{width:64px} .nav-item span,.nav-sec,.nameplate .wm,.nameplate .ctx,.deploy .hchip span{display:none} }
+header { display:flex; align-items:center; gap:14px; padding:14px 22px 12px; border-bottom:1px solid var(--hair); }
 h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; letter-spacing:-0.02em; }
-.crumb { color:var(--t3); font:500 11px/16px "IBM Plex Mono",monospace; letter-spacing:.1em; }
+.crumb { color:var(--t3); font:500 11px/16px "IBM Plex Mono",monospace; letter-spacing:.1em; cursor:pointer; }
+.crumb:hover { color:var(--t2); }
 .spacer { flex:1; }
 .btn { display:inline-flex; align-items:center; gap:8px; padding:8px 14px; border-radius:6px; border:1px solid var(--hair-2); background:var(--raised); color:var(--t1); font:600 12.5px/16px inherit; cursor:pointer; transition:transform .16s ease-out, box-shadow .16s ease-out; }
 .btn:hover { transform:translateY(-1px); box-shadow:var(--shadow-lift); }
@@ -55,6 +71,8 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; letter-spacing:-0.02em
 .acard .stat { margin-left:auto; width:8px; height:8px; flex:none; }
 .acard .stat.live { background:var(--ok); border-radius:50%; } .acard .stat.paused { background:var(--warn); border-radius:1px; transform:rotate(45deg); } .acard .stat.draft { background:transparent; border:1.5px solid var(--t3); border-radius:1px; }
 .acard .meta { display:flex; align-items:center; gap:6px; margin-top:10px; color:var(--t3); font:500 11px/14px "IBM Plex Mono",monospace; }
+.acard.hatch { background:transparent; border-style:dashed; border-color:var(--hair-2); }
+.acard.hatch:hover { border-color:var(--accent); color:var(--accent); }
 .acard .meta svg { width:12px; height:12px; fill:var(--t3); }
 .acard .dream { margin-left:auto; color:var(--m-agent); font-weight:600; }
 /* detail */
@@ -86,7 +104,7 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; letter-spacing:-0.02em
 .trow { display:flex; align-items:center; gap:10px; padding:6px 0; }
 .trow .lbl { font-size:12.5px; color:var(--t1); }
 .trow .scope { margin-left:auto; font:400 11px/14px "IBM Plex Mono",monospace; color:var(--t3); }
-.tgl { width:32px; height:18px; border-radius:99px; background:var(--hair-2); position:relative; cursor:pointer; flex:none; transition:background .16s; }
+.tgl { width:32px; height:18px; border-radius:99px; background:var(--hair-2); position:relative; cursor:pointer; flex:none; transition:background .16s; box-shadow:inset 0 0 0 1px var(--hair-3); }
 .tgl::after { content:""; position:absolute; left:2px; top:2px; width:14px; height:14px; border-radius:50%; background:var(--t2); transition:transform .16s; }
 .tgl.on { background:var(--accent); } .tgl.on::after { transform:translateX(14px); background:var(--accent-fg); }
 /* lines/instances */
@@ -99,12 +117,15 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; letter-spacing:-0.02em
 .g.part { background:var(--overlay); border:1px solid var(--hair-3); color:var(--t1); }
 .g.see { background:var(--inset); border:1px solid var(--hair-2); color:var(--t2); }
 .irow { display:flex; align-items:center; gap:8px; padding:6px 0; font-size:12px; }
-.irow .cid { font:500 11px/14px "IBM Plex Mono",monospace; color:var(--t2); }
+.irow .who { font-weight:600; color:var(--t1); flex:none; min-width:86px; }
+.irow .ago { color:var(--t3); font-size:11px; flex:none; }
+.irow .cid { font:400 11px/14px "IBM Plex Mono",monospace; color:var(--t3); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .irow .st { width:6px; height:6px; background:var(--ok); border-radius:50%; }
 .irow .st.paused { background:var(--warn); border-radius:1px; transform:rotate(45deg); }
 .irow .act { margin-left:auto; display:flex; gap:6px; }
-.ibtn { padding:3px 8px; border-radius:5px; border:1px solid var(--hair-2); background:transparent; color:var(--t3); font:600 11px/12px "IBM Plex Mono",monospace; cursor:pointer; }
+.ibtn { padding:5px 10px; border-radius:5px; border:1px solid var(--hair-2); background:transparent; color:var(--t3); font:600 11px/12px "IBM Plex Mono",monospace; cursor:pointer; }
 .ibtn:hover { color:var(--t1); border-color:var(--hair-3); }
+.ibtn.kill { color:color-mix(in srgb, var(--crit) 75%, var(--t3)); border-color:color-mix(in srgb, var(--crit) 28%, transparent); }
 .ibtn.kill:hover { color:var(--crit); border-color:var(--crit); }
 /* skills chips */
 .chips { display:flex; flex-wrap:wrap; gap:6px; }
@@ -112,12 +133,12 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; letter-spacing:-0.02em
 .chip .ok { color:var(--ok); font-size:11px; }
 .chip.add { border-style:dashed; color:var(--t3); cursor:pointer; }
 /* memory */
-.mem-stats { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-bottom:10px; }
+.mem-stats { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-bottom:8px; }
 .mstat { background:var(--inset); border:1px solid var(--hair); border-radius:8px; padding:8px 10px; }
 .mstat .k { font:500 11px/12px "IBM Plex Mono",monospace; letter-spacing:.08em; color:var(--t3); text-transform:uppercase; }
 .mstat .v { font:700 15px/20px "Bricolage Grotesque",sans-serif; margin-top:2px; }
 .mstat .v .sub { font:400 11px/14px "IBM Plex Mono",monospace; color:var(--t3); }
-.mrow { display:flex; gap:8px; padding:6px 0; border-bottom:1px solid var(--hair); font-size:12px; }
+.mrow { display:flex; gap:8px; padding:5px 0; border-bottom:1px solid var(--hair); font-size:12px; }
 .mrow:last-child { border:none; }
 .mrow .t { font:400 11px/16px "IBM Plex Mono",monospace; color:var(--t3); flex:none; width:38px; }
 .mrow p { color:var(--t2); } .mrow p b { color:var(--t1); font-weight:600; }
@@ -128,19 +149,39 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; letter-spacing:-0.02em
 </style>
 </head>
 <body>
+<nav>
+  <div class="nameplate"><span class="tick"></span><span class="wm">SO<b>U</b>P</span><span class="ctx">AGENTS</span></div>
+  <div class="nav-sec">Operate</div>
+  <a class="nav-item" href="fleet.html"><svg viewBox="0 0 16 16"><path d="M2 2h5v5H2zM9 2h5v5H9zM2 9h5v5H2zM9 9h5v5H9z"/></svg><span>Fleet</span></a>
+  <a class="nav-item active" href="agents.html"><svg viewBox="0 0 16 16"><path d="M8 1.5 14 5v6l-6 3.5L2 11V5z"/></svg><span>Agents</span></a>
+  <a class="nav-item" href="inbox.html"><svg viewBox="0 0 16 16"><path d="M2 3h12v9H6l-4 3z"/></svg><span>Inbox</span><span class="dot"></span></a>
+  <a class="nav-item" href="#"><svg viewBox="0 0 16 16" style="fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round"><path d="M3 13V8m5 5V3m5 10v-7"/></svg><span>Ops</span></a>
+  <div class="nav-sec">Create</div>
+  <a class="nav-item" href="skills-hub.html"><svg viewBox="0 0 16 16"><path d="M8 2a6 6 0 1 0 6 6h-2a4 4 0 1 1-4-4z"/><path d="M8 6l5-3-3 5z"/></svg><span>Skills</span></a>
+  <a class="nav-item" href="dream-lab.html"><svg viewBox="0 0 16 16"><path d="M8 2c2 2 2 4 0 6s-2 4 0 6c-3-1-5-3-5-6s2-5 5-6z"/></svg><span>Dream Lab</span></a>
+  <div class="nav-sec">System</div>
+  <a class="nav-item" href="deployments.html"><svg viewBox="0 0 16 16"><path d="M2 3h12v4H2zM2 9h12v4H2z"/></svg><span>Deployments</span></a>
+  <a class="nav-item" href="settings.html"><svg viewBox="0 0 16 16"><path d="M8 5a3 3 0 1 0 0 6 3 3 0 0 0 0-6zm6 3h2M1 8h2m5-7v2m0 10v2m5-12 1.5-1.5M2.5 13.5 4 12m9 1.5L11.5 12M2.5 2.5 4 4"/></svg><span>Settings</span></a>
+  <div class="deploy">
+    <div class="nav-sec">Hosts</div>
+    <div class="hchip"><span class="st"></span><span>local · this host</span></div>
+    <div class="hchip"><span class="st warn"></span><span>nest-2 · container</span></div>
+    <div class="hchip"><span class="st"></span><span>field-pi · remote</span></div>
+  </div>
+</nav>
+<div class="appcol">
 <header>
-  <div class="nameplate"><span class="tick"></span><span class="wm">SO<b>U</b>P</span></div>
   <div><h1>Agents</h1><span class="crumb">ROSTER / QUINN</span></div>
   <div class="spacer"></div>
-  <button class="btn ghost theme-toggle" onclick="document.documentElement.dataset.theme=document.documentElement.dataset.theme==='dark'?'light':'dark'"><svg width="14" height="14" viewBox="0 0 16 16" style="vertical-align:-2px"><circle cx="8" cy="8" r="3.2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6 13 13M13 3l-1.4 1.4M4.4 11.6 3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg> theme</button>
   <button class="btn primary">＋ New agent</button>
+  <button class="btn ghost theme-toggle" onclick="document.documentElement.dataset.theme=document.documentElement.dataset.theme==='dark'?'light':'dark'"><svg width="14" height="14" viewBox="0 0 16 16" style="vertical-align:-2px"><circle cx="8" cy="8" r="3.2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6 13 13M13 3l-1.4 1.4M4.4 11.6 3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg> theme</button>
 </header>
 <div class="wrap">
   <aside class="roster">
-    <div class="search"><span style="color:var(--t3)">⌕</span><input placeholder="Search agents…"></div>
+    <div class="search"><svg width="13" height="13" viewBox="0 0 16 16" style="fill:none;stroke:var(--t3);stroke-width:1.6;stroke-linecap:round"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg><input placeholder="Search agents…"></div>
     <div class="acard sel">
       <div class="top"><span class="av" style="background:hsl(250,38%,34%)">Q</span><div><div class="nm">Quinn</div><div class="kind">community agent</div></div><span class="stat live"></span></div>
-      <div class="meta"><svg viewBox="0 0 16 16"><path d="M8 1a7 7 0 0 0-6 10.5L1 15l3.6-1A7 7 0 1 0 8 1z"/></svg> 1 line · 9 instances <span class="dream">✦ 1 dream</span></div>
+      <div class="meta"><svg viewBox="0 0 16 16"><path d="M8 1a7 7 0 0 0-6 10.5L1 15l3.6-1A7 7 0 1 0 8 1z"/></svg> 2 lines · 9 instances <span class="dream">✦ 1 dream</span></div>
     </div>
     <div class="acard">
       <div class="top"><span class="av" style="background:hsl(100,38%,34%)">L</span><div><div class="nm">Lumen</div><div class="kind">community agent</div></div><span class="stat live"></span></div>
@@ -161,6 +202,9 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; letter-spacing:-0.02em
     <div class="acard">
       <div class="top"><span class="av" style="background:hsl(60,38%,34%)">F</span><div><div class="nm">Forge</div><div class="kind">chat responder</div></div><span class="stat draft"></span></div>
       <div class="meta"><svg viewBox="0 0 16 16"><path d="M12 3H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h1l1 2 1.2-2H12a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z"/></svg> 1 line · draft</div>
+    </div>
+    <div class="acard hatch">
+      <div class="top"><span class="av" style="background:transparent;border:1.5px dashed var(--hair-2);color:var(--t3)">＋</span><div><div class="nm" style="color:var(--t3)">Hatch an agent</div><div class="kind">kind · channel · persona</div></div></div>
     </div>
   </aside>
   <section class="detail">
@@ -199,16 +243,16 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; letter-spacing:-0.02em
         <div class="panel-b">
           <div class="lrow"><svg viewBox="0 0 16 16"><path d="M8 1a7 7 0 0 0-6 10.5L1 15l3.6-1A7 7 0 1 0 8 1z"/></svg><div><div class="nm">Community</div><div class="sub">+1 845 ··· 4651 · whatsapp</div></div><span class="g part" title="participate">P</span></div>
           <div class="lrow"><svg viewBox="0 0 16 16"><path d="M8 1a7 7 0 0 0-6 10.5L1 15l3.6-1A7 7 0 1 0 8 1z"/></svg><div><div class="nm">Personal</div><div class="sub">+1 845 ··· 0919 · whatsapp</div></div><span class="g see" title="see only">S</span></div>
-          <div class="lrow" style="opacity:.55"><svg viewBox="0 0 16 16"><path d="M12 3H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h1l1 2 1.2-2H12a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z"/></svg><div><div class="nm">Builds</div><div class="sub">discord · grant requested 2d ago</div></div><span class="g see" style="border:1px dashed var(--hair-3);background:transparent;color:var(--t3)">?</span></div>
+          <div class="lrow" style="opacity:.55"><svg viewBox="0 0 16 16"><path d="M12 3H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h1l1 2 1.2-2H12a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z"/></svg><div><div class="nm">Builds</div><div class="sub">discord · grant requested 2d ago</div></div><span class="g see" style="border:1px dashed var(--hair-3);background:transparent;color:var(--t3)" title="grant requested · pending"><svg width="11" height="11" viewBox="0 0 16 16" style="fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round"><circle cx="8" cy="8" r="5.5"/><path d="M8 5v3l2 1.5"/></svg></span></div>
         </div>
       </div>
       <div class="panel">
         <div class="panel-h"><h3>Instances</h3><span class="tag">9 per-chat</span><div class="spacer"></div><button class="btn sm ghost">pause all</button></div>
         <div class="panel-b">
-          <div class="irow"><span class="st"></span><span class="cid" title="120363427253262639@g.us">12036342···639@g.us</span><span style="color:var(--t3)">WHATSOUP · 2m ago</span><span class="act"><button class="ibtn">pause</button><button class="ibtn kill">kill</button></span></div>
-          <div class="irow"><span class="st"></span><span class="cid" title="120363408282664227@g.us">12036340···227@g.us</span><span style="color:var(--t3)">AGENT365 · 14m ago</span><span class="act"><button class="ibtn">pause</button><button class="ibtn kill">kill</button></span></div>
-          <div class="irow"><span class="st paused"></span><span class="cid" title="18459780919@s.whatsapp.net">18459780···919@s.whatsapp.net</span><span style="color:var(--t3)">Lucas · takeover on</span><span class="act"><button class="ibtn">resume</button><button class="ibtn kill">kill</button></span></div>
-          <div class="irow"><span class="st"></span><span class="cid" title="120363427171135923@g.us">12036342···923@g.us</span><span style="color:var(--t3)">OPENAGENT · 1h ago</span><span class="act"><button class="ibtn">pause</button><button class="ibtn kill">kill</button></span></div>
+          <div class="irow"><span class="st"></span><span class="who">WHATSOUP</span><span class="ago">2m</span><span class="cid">12036342···639@g.us</span><span class="act"><button class="ibtn">pause</button><button class="ibtn kill">kill</button></span></div>
+          <div class="irow"><span class="st"></span><span class="who">AGENT365</span><span class="ago">14m</span><span class="cid">12036340···227@g.us</span><span class="act"><button class="ibtn">pause</button><button class="ibtn kill">kill</button></span></div>
+          <div class="irow"><span class="st paused"></span><span class="who">Lucas</span><span class="ago">takeover</span><span class="cid">18459780···919@s.whatsapp.net</span><span class="act"><button class="ibtn">resume</button><button class="ibtn kill">kill</button></span></div>
+          <div class="irow"><span class="st"></span><span class="who">OPENAGENT</span><span class="ago">1h</span><span class="cid">12036342···923@g.us</span><span class="act"><button class="ibtn">pause</button><button class="ibtn kill">kill</button></span></div>
           <div class="irow" style="justify-content:center"><button class="ibtn" style="padding:5px 14px">show all 9 instances ▾</button></div>
         </div>
       </div>
@@ -230,7 +274,7 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; letter-spacing:-0.02em
             <div class="mstat"><div class="k">Episodic</div><div class="v"><span style="color:var(--ok);font-size:8px">●</span> healthy <span class="sub">last 3m</span></div></div>
             <div class="mstat"><div class="k">Vault</div><div class="v"><span style="color:var(--ok);font-size:8px">●</span> synced <span class="sub">obsidian</span></div></div>
           </div>
-          <div class="search" style="margin-bottom:8px"><span style="color:var(--t3)">⌕</span><input placeholder="Search memories…"></div>
+          <div class="search" style="margin-bottom:8px"><svg width="13" height="13" viewBox="0 0 16 16" style="fill:none;stroke:var(--t3);stroke-width:1.6;stroke-linecap:round"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg><input placeholder="Search memories…"></div>
           <div class="mrow"><span class="t">2m</span><p><b>preference:</b> Lucas prefers concise answers, lead with the result</p></div>
           <div class="mrow"><span class="t">1h</span><p><b>fact:</b> WHATSOUP group reviews happen async, no meeting</p></div>
           <div class="mrow"><span class="t">3h</span><p><b>correction:</b> bead IDs are kebab-case, not numeric</p></div>
@@ -240,6 +284,7 @@ h1 { font:700 20px/26px "Bricolage Grotesque",sans-serif; letter-spacing:-0.02em
       </div>
     </div>
   </section>
+</div>
 </div>
 </body>
 </html>
