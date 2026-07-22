@@ -96,6 +96,7 @@ const MAX_CLASSIFIER_SOURCE_FILE_BYTES = 2 * 1024 * 1024;
 export const CLASSIFIER_TOOL_SOURCE_PATHS = [
   'scripts/ci-control-classify.ts',
   'scripts/lib/ci-control/classifier.ts',
+  'scripts/lib/ci-control/git-input-core.ts',
   'scripts/lib/ci-control/git-input.ts',
   'scripts/lib/ci-control/manifest.ts',
   'scripts/lib/ci-control/reasons.ts',

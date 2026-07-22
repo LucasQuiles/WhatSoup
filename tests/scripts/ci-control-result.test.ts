@@ -450,7 +450,10 @@ function makeAttempt(overrides: Record<string, unknown> = {}): TerminalAttemptV1
       policyDigest: DIGEST,
       toolDigest: DIGEST,
       platformDigest: digest(canonicalizeBoundaryRun({ runnerLabel: 'ubuntu-24.04', os: 'linux', architecture: 'x64', runtime: 'node@24.15.0', observedCapabilitiesDigest: DIGEST })),
-      preconditionDigest: preconditionDigest(makePreconditions()),
+      preconditionDigest: preconditionDigest(makePreconditions(), {
+        now: NOW,
+        expected: expectedPreconditions(),
+      }),
       producerDigest: digest(canonicalizeBoundaryRun(producer)),
       scannerPolicyReceiptDigest: digest(canonicalizeBoundaryRun(SCANNER_POLICY_RECEIPT)),
       resultEvidenceDigest: DIGEST,
@@ -616,7 +619,10 @@ function makeResult(overrides: Record<string, unknown> = {}) {
         policyDigest: result.policyDigest,
         toolDigest: (result.tool as { digest: string }).digest,
         platformDigest: digest(canonicalizeBoundaryRun(result.platform)),
-        preconditionDigest: preconditionDigest(result.preconditionReceipt as never),
+        preconditionDigest: preconditionDigest(result.preconditionReceipt as never, {
+          now: NOW,
+          expected: expectedPreconditions(result.preconditionReceipt as PreconditionReceiptV1),
+        }),
         producerDigest: digest(canonicalizeBoundaryRun(result.producer)),
         scannerPolicyReceiptDigest: digest(canonicalizeBoundaryRun(result.scannerPolicyReceipt)),
         resultEvidenceDigest: controlResultEvidenceDigest(result),
@@ -1048,7 +1054,7 @@ describe('CP-F2 precondition and terminal evidence', () => {
   it('validates complete preconditions and makes setup failures inconclusive', () => {
     const receipt = makePreconditions();
     expect(validatePreconditionReceipt(receipt, { now: NOW, expected: expectedPreconditions() })).toEqual(receipt);
-    expect(preconditionDigest(receipt as never)).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(preconditionDigest(receipt as never, { now: NOW, expected: expectedPreconditions(receipt) })).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(() => validatePreconditionReceipt(makePreconditions({ runtime: { name: 'node', version: 'unsupported', digest: DIGEST } }), { now: NOW, expected: expectedPreconditions() })).toThrow(/trusted|runtime|precondition/i);
     for (const mutation of [
       { runtime: { name: 'node', version: 'unsupported', digest: DIGEST }, outcome: 'inconclusive' },
@@ -1113,16 +1119,16 @@ describe('CP-F2 precondition and terminal evidence', () => {
   });
 
   it('accepts only terminal monotonic attempts after the process group ends', () => {
-    expect(validateTerminalAttempt(makeAttempt()).lifecycle).toBe('terminal');
+    expect(validateTerminalAttempt(makeAttempt(), { now: NOW }).lifecycle).toBe('terminal');
     expect(transitionAttempt('created', 'running')).toBe('running');
     expect(transitionAttempt('running', 'finalizing')).toBe('finalizing');
     expect(() => transitionAttempt('created', 'cancelled')).toThrow(/transition/i);
     expect(() => transitionAttempt('running', 'timed-out')).toThrow(/transition/i);
     expect(() => transitionAttempt('terminal', 'running')).toThrow(/transition/i);
-    for (const lifecycle of ['cancelled', 'timed-out', 'corrupt']) expect(validateTerminalAttempt(makeAttempt({ lifecycle, rawExit: null, rawSignal: 'SIGTERM', timedOut: lifecycle === 'timed-out' })).lifecycle).toBe(lifecycle);
-    expect(() => validateTerminalAttempt(makeAttempt({ lifecycle: 'running', terminalAt: null }))).toThrow(/terminal|lifecycle/i);
-    expect(() => validateTerminalAttempt({ ...makeAttempt(), terminationProof: { ...(makeAttempt().terminationProof as object), status: 'running' } })).toThrow(/termination|process group/i);
-    expect(() => validateTerminalAttempt({ ...makeAttempt(), terminationProof: { ...(makeAttempt().terminationProof as object), supervisorDigest: OTHER_DIGEST } })).toThrow(/supervisor|binding/i);
+    for (const lifecycle of ['cancelled', 'timed-out', 'corrupt']) expect(validateTerminalAttempt(makeAttempt({ lifecycle, rawExit: null, rawSignal: 'SIGTERM', timedOut: lifecycle === 'timed-out' }), { now: NOW }).lifecycle).toBe(lifecycle);
+    expect(() => validateTerminalAttempt(makeAttempt({ lifecycle: 'running', terminalAt: null }), { now: NOW })).toThrow(/terminal|lifecycle/i);
+    expect(() => validateTerminalAttempt({ ...makeAttempt(), terminationProof: { ...(makeAttempt().terminationProof as object), status: 'running' } }, { now: NOW })).toThrow(/termination|process group/i);
+    expect(() => validateTerminalAttempt({ ...makeAttempt(), terminationProof: { ...(makeAttempt().terminationProof as object), supervisorDigest: OTHER_DIGEST } }, { now: NOW })).toThrow(/supervisor|binding/i);
     expect(() => validateControlResult(makeResult({ attemptDigest: OTHER_DIGEST }), validationOptions())).toThrow(/attempt.*digest|digest.*attempt/i);
     const validAttempt = makeResult().attempt;
     const wrongBinding = makeAttempt({ ...validAttempt, evidenceBinding: { ...validAttempt.evidenceBinding, candidateOid: BASE_OID } });

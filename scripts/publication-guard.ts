@@ -646,6 +646,7 @@ const UTF8_FATAL = new TextDecoder('utf-8', { fatal: true });
 const PUBLICATION_MODULE_PATH = fileURLToPath(import.meta.url);
 const PUBLICATION_TOOL_PATHS = Object.freeze([
   { id: 'publication-guard.ts', path: PUBLICATION_MODULE_PATH },
+  { id: 'git-input-core.ts', path: fileURLToPath(new URL('./lib/ci-control/git-input-core.ts', import.meta.url)) },
   { id: 'git-input.ts', path: fileURLToPath(new URL('./lib/ci-control/git-input.ts', import.meta.url)) },
   { id: 'guard-core.ts', path: fileURLToPath(new URL('./lib/guard-core.ts', import.meta.url)) },
   { id: 'boundary-run/shared.ts', path: fileURLToPath(new URL('./lib/verification/boundary-run/shared.ts', import.meta.url)) },

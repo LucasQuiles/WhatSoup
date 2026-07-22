@@ -2,11 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Every production bead also requires superpowers:test-driven-development, superpowers:test-integrity, superpowers:writing-fail-closed-gates, and superpowers:verification-before-completion.
 
-**Status:** Pending — reviewed; source mutation is not admitted until CP-WA1, CP-F3, CP-H1c/H1d, CP-F4, and CP-F5 close their foundation prerequisites with current-head evidence.
+**Status:** Pending — reviewed; source mutation is not admitted until CP-F2f, CP-WA1, CP-F3,
+CP-H1c, CP-GL1, CP-H1d, CP-F4, and CP-F5 close their foundation prerequisites with
+current-head evidence.
 
 **Goal:** Make GitHub Actions the authoritative remote execution and evidence layer for repository-owned controls without duplicating their decisions, while adding protected workflow interpretation, exact merge-result aggregation, and observed-host Linux/macOS portability.
 
-**Architecture:** First build a strict source-wiring inventory and a data-only workflow-policy evaluator on the existing manifest, classifier, result, precondition, attempt, and native-adapter contracts. Then remove mutable workflow dependencies and unsafe output transport, establish an independently sourced protected evaluator, and migrate existing quality jobs behind one top-level PR/merge-group orchestrator with exact-set gates. Native portability remains a separate leaf and aggregate domain whose receipts prove observed host properties instead of trusting runner labels.
+**Architecture:** First build a strict source-wiring inventory and a data-only workflow-policy evaluator on the existing manifest, classifier, result, precondition, attempt, and native-adapter contracts. Then audit and provenance-lock the existing full-SHA workflow dependencies, remove unsafe output transport, establish an independently sourced protected evaluator, and migrate existing quality jobs behind one top-level PR/merge-result orchestrator with exact-set gates. Native portability remains a separate leaf and aggregate domain whose receipts prove observed host properties instead of trusting runner labels.
 
 **Tech Stack:** TypeScript, Node.js 24.15.0 and Node.js 25.x validation, Vitest 4, `yaml` 2.9.0 AST parsing, Git object plumbing, GitHub Actions and reusable workflows, Linux x64 and observed native macOS execution, SHA-256 canonical evidence.
 
@@ -15,7 +17,11 @@
 - GitHub Actions executes and transports evidence for controls the repository already owns; workflow YAML, action wrappers, and aggregate jobs must not become second policy engines.
 - Inventory before adding a workflow, scanner, status, cache, artifact, or hosted rule. A new capability requires proof that no canonical implementation already owns the question.
 - Preserve `repo-hygiene-guard.ts`, `publication-guard.ts`, semantic-quality policy/receipt code, `safeguard-diagnostics.ts`, test-integrity policy, and the control-plane manifest/result/classifier modules as their existing decision owners.
-- CP-WA1, CP-F3, CP-H1c/H1d, CP-F4, and CP-F5 are prerequisites. No task in this plan may become authoritative while workspace-transition accounting, classification, exact-ref execution, bounded orchestration, or manifest/self-protection parity is incomplete.
+- CP-F2f, CP-WA1, CP-F3, CP-H1c, CP-GL1, CP-H1d, CP-F4, and CP-F5 are prerequisites. CP-GL1
+  supplies coordinator-owned main/topic remote-ref-set observation before H1d transport,
+  remote review, or workflow canaries. No task in this plan may become authoritative while
+  workspace-transition accounting, classification, remote lineage observation, exact-ref
+  execution, bounded orchestration, or manifest/self-protection parity is incomplete.
 - Leaf outcomes are `PASS`, `WARN`, `BLOCK`, `INCONCLUSIVE`, or `NOT_APPLICABLE`. Aggregate authorization is only `PASS`, `BLOCK`, or `INCONCLUSIVE`; a warning never satisfies mandatory evidence.
 - A not-applicable result is valid only when a trusted exact-revision classifier receipt supplies a closed reason. A skipped job or absent matrix row is not evidence.
 - Require `trusted required set == trusted observed set`. Reject missing, duplicate, substituted, stale, cancelled, timed-out, malformed, nonterminal, wrong-producer, wrong-policy, wrong-platform, or wrong-revision observations.
@@ -24,7 +30,11 @@
 - Untrusted pull-request jobs use `contents: read`, no valuable secrets, bounded direct commands, explicit timeouts, trust-partitioned caches, and terminal attempt receipts.
 - Do not run candidate code through `pull_request_target` or a privileged `workflow_run`. Do not consume a candidate artifact in a privileged job without independent producer, digest, and content verification.
 - Pin each external action and reusable workflow to a reviewed full commit SHA. Record the upstream repository, reviewed release, source diff, required permissions, network behavior, update mechanism, and exact SHA in one lock registry.
-- Keep current Linux Node 24/25 and CodeQL required checks unchanged until replacement gates pass exact PR and merge-group canaries. CodeQL ownership and event coverage require hosted readback before any source duplication.
+- Preserve the documented Linux Node 24/25 and CodeQL status contexts unchanged while their
+  current required/App bindings remain unauthenticated. Replacement gates still require
+  exact PR canaries and, only on a supported and separately authorized queue topology, exact
+  merge-group canaries. CodeQL ownership and event coverage require hosted readback before
+  any source duplication.
 - A required workflow must not use workflow-level path filters. Every stable gate always exists, has a static dependency graph, and consumes explicit not-applicable receipts. Repository-local candidate workflows may emit only distinctly named report-only canary summaries; the eventual stable required status is emitted only by the independently sourced protected producer.
 - Public diagnostics are staged into a confined directory, scanned after production, and uploaded only from the accepted manifest. Scan stdout, stderr, JSON, summaries, annotations, filenames, reports, screenshots, traces, videos, source maps, archive names, metadata, and bytes.
 - Reusable workflow permission chains may maintain or reduce permissions but never elevate them. Privileged release and deployment workflows remain outside the pull-request chain.
@@ -38,18 +48,26 @@
 
 ## Frozen Source Evidence
 
-The plan is authored from implementation head `1bdd8ea37c7c9f3fb600fe0f5a68901398c50ca3` with current `origin/main` `6fb5ee72e6f2ae6f4ddc858b7fc0db0fae825c0c`. The three audited workflow blobs were unchanged by CP-F2e:
+The historical admission used implementation head `1bdd8ea37c7c9f3fb600fe0f5a68901398c50ca3`
+and `origin/main` `6fb5ee72e6f2ae6f4ddc858b7fc0db0fae825c0c`. Current integration merge
+`308b08069da327ce38b16c7e0206593a5eee4529` preserves that evidence-bearing history through
+first parent `c6b7540ad3fb969c544997b132975a0b97159fa2` and incorporates locally observed
+`origin/main` `2be8a2c9a57642a2f43e39dedac39dbcd4330193`. The latest main delta does not change
+workflow bytes, but it invalidates prior merge-sensitive and aggregate receipts. The current
+three workflow blobs are:
 
 ```text
-.github/workflows/quality.yml          sha256:0bb6a32c96530f3450ff7aa8fdb6c43088e079693d5fd66636b28c69feefd919
-.github/workflows/tag-release-gate.yml sha256:0a5c6b6a172ea002a407d5f449f75da7b34af52b5faae00b1cde1db88b8a9726
-.github/workflows/whatsoup-guard.yml   sha256:2ca66062925b9a6dbbe344fced3feb869e3fb4a211712da962fd49a296d01067
+.github/workflows/quality.yml          sha256:f3edade025565d46a10037f5ca107c8081559b13ab599bc1d24625302069ece1
+.github/workflows/tag-release-gate.yml sha256:48da89c6d33f7dc9fd247351567a8da49c3ba770ad5d62bc271854cecb638c45
+.github/workflows/whatsoup-guard.yml   sha256:b3887b0d4c671daec96f7a9374dc94d1c60427a310dc2b3fe27dceef7be47c84
 ```
 
-The following are **Proven** from those exact source bytes:
+The following are **Proven** from those exact current source bytes:
 
-- all three workflows omit `merge_group`;
-- all 14 external `uses:` references are mutable major-version tags;
+- `quality.yml` handles `merge_group` and prevents merge-group cancellation; the other two
+  workflows do not handle `merge_group`;
+- all 14 direct external `uses:` references are full 40-hex SHAs; source syntax alone does
+  not prove upstream provenance, reviewed-release mapping, permissions, or enforcement;
 - no top-level `policy-gate`, `portability-gate`, exact-set aggregate, or observed-host receipt exists;
 - Linux Node 24/25 owns broad quality execution, while macOS runs only the narrow BOT ERRORS clock hermeticity selection;
 - the pull-request quality job executes candidate installation and scripts before receiving `TEST_INTEGRITY_DEPLOY_KEY` in the same runner;
@@ -61,12 +79,12 @@ The following are **Proven** from those exact source bytes:
 - the only `continue-on-error` site is explicitly advisory history scanning;
 - current source declares read-only workflow permissions and contains no OIDC, package publication, deployment environment, `pull_request_target`, `workflow_run`, or artifact-download promotion path.
 
-The following remain **Inconclusive** until fresh read-only hosted receipts exist: required-check names and App bindings, CodeQL default or advanced setup and merge-group coverage, merge-queue enablement, ruleset precedence, organization-required workflows, action policy, cache visibility, fork approval, runner isolation, deploy-key scope, secret scanning, push protection, and protected environments.
+The following remain **Inconclusive** until fresh read-only hosted receipts exist: required-check names and App bindings, CodeQL default or advanced setup and merge-group coverage, merge-queue enablement, ruleset precedence, organization-required workflows, action policy, cache visibility, fork approval, runner isolation, deploy-key scope, secret scanning, push protection, and protected environments. The tracked quality-guardrails checklist documents one classic-protection approval for non-admins, admin bypass, and merge-queue unavailability on the current user-owned repository. Those statements are documented observations, not authenticated hosted evidence consumed by this plan.
 
 ## Dependency and Promotion Order
 
 ```text
-CP-WA1 + CP-F3 + CP-H1c/H1d + CP-F4 + CP-F5 current-head closure
+CP-F2f + CP-WA1 + CP-F3 + CP-H1c + CP-GL1 + CP-H1d + CP-F4 + CP-F5 current-head closure
   -> CP-W0 source wiring inventory
     -> CP-W1a protected data-only workflow evaluator
       -> CP-W0b immutable dependency lock + report-only inventory canary
@@ -74,11 +92,15 @@ CP-WA1 + CP-F3 + CP-H1c/H1d + CP-F4 + CP-F5 current-head closure
           -> CP-W1b independently sourced producer declaration and canary
             -> CP-W2b untrusted PR/merge-group leaves + protected policy-gate canary
               -> CP-P1 protected observed-host Linux/macOS canary
-                -> real PR and merge-group canaries
+                -> real PR canaries + synthetic/source merge-group proof
+                  -> real merge-group canary only after supported topology and separate queue authorization
                   -> separate CP-G1 hosted status/private-assurance cutover request
 ```
 
-Inventory, evaluators, new observers, and gates begin report-only. No new status becomes required in this plan. Existing required checks remain active through canaries and any later atomic cutover.
+Inventory, evaluators, new observers, and gates begin report-only. No new status becomes
+required in this plan. Preserve the documented existing status contexts through canaries
+and any later atomic cutover without asserting their required bindings before authenticated
+hosted readback.
 
 ## Patch Admission Packet
 
@@ -414,8 +436,8 @@ export interface ProtectedWorkflowPolicyInputV1 {
 export interface WorkflowPolicyEvaluationV1 {
   schemaVersion: 1;
   inventoryDigest: string;
-  findings: ControlResultV1[];
-  aggregate: ControlResultV1;
+  findings: ControlResultV2[];
+  aggregate: ControlResultV2;
 }
 
 export function evaluateWorkflowPolicyDataOnly(
@@ -452,7 +474,12 @@ Extract the existing safeguard predicates behind a native safeguard receipt owne
 
 Tests must independently remove or alter producer identity, protected policy/workflow/tool digests, observed executor identity, and authenticated transport binding. Validate the full executor receipt through the Task 1 canonical validator, hash its exact canonical bytes, and require the executor transport payload digest to match; a digest without authenticated bytes is report-only. Missing proof returns `INCONCLUSIVE`; a proven unauthorized producer, altered protected policy, prohibited executor, forged matching fields, or payload-digest mismatch returns `BLOCK`. An expected App with the wrong protected policy must never pass. A caller-supplied self-describing receipt file is report-only and cannot satisfy an authoritative row.
 
-Register and test the first workflow-policy codes in the same bead, including `workflow.action.reference-mutable`, `workflow.trigger.merge-group-missing`, `workflow.permission.elevation-after-taint`, `workflow.artifact.upload-before-scan`, `workflow.exit.ignored`, `binding.policy.digest-unavailable`, `binding.policy.digest-mismatch`, and `binding.producer.unauthorized`. Unknown codes remain `INCONCLUSIVE`; existing code meanings may not be changed.
+Register and test the first workflow-policy codes in the same bead, including
+`workflow.action.reference.mutable`, `workflow.trigger.merge-group.missing`,
+`workflow.permission.post-taint.elevated`, `workflow.artifact.upload.before-scan`,
+`workflow.execution.exit.ignored`, `binding.policy.digest.unavailable`,
+`binding.policy.digest.mismatch`, and `binding.producer.identity.unauthorized`. Unknown codes
+remain `INCONCLUSIVE`; existing code meanings may not be changed.
 
 - [ ] **Step 5: Add the source-only CLI**
 
@@ -521,16 +548,28 @@ export interface WorkflowDependencyLockV1 {
 }
 ```
 
-- Consumes: `npm run ci:workflow-inventory`, the dependency lock, exact classifier and lineage receipts, canonical `ControlResultV1`, and the latest separately authenticated read-only hosted-settings receipt when available.
+Compatibility readers may accept `AnyControlResult`, but V1 remains historical/report-only
+and is rejected from every protected required set, aggregate authorization, native-lane
+satisfaction, and authoritative public projection. Fixtures must prove a schema-valid V1
+receipt remains readable for history while failing both gate inputs and observed-row matching.
+
+- Consumes: `npm run ci:workflow-inventory`, the dependency lock, exact classifier and lineage receipts, canonical `ControlResultV2`, and the latest separately authenticated read-only hosted-settings receipt when available.
 - Produces: one sanitized workflow-inventory result and one non-authoritative check summary bound to the exact event revision.
 
 - [ ] **Step 1: Write RED workflow AST tests**
 
 Require `contents: read`, no secrets/OIDC/write permissions, explicit timeout, bounded concurrency, full-SHA action refs, a typed `EventRevisionV1`, lineage-lease input, scan-before-upload, and a report-only check name that cannot be mistaken for `policy-gate`. Reject candidate-selected controls, workflow-level required-check path filters, shell interpolation, and a success step after an ignored failure. Add lock fixtures for mutable refs, short SHAs, wrong upstream repository, force-moved release tags, workflow/lock mismatch, missing permission/network declarations, and a valid reviewed full-SHA neighbor.
 
-- [ ] **Step 2: Resolve and record immutable action identities**
+- [ ] **Step 2: Audit, import, and maintain immutable action identities**
 
-For each current external action, resolve the reviewed release tag and its peeled commit, verify the upstream repository and source diff, then write the 40-hex identity into `controls/github-actions-lock.json` and all three existing workflows in the same bead. The dependency lock exists before `ci-inventory.yml` becomes its first new consumer. The packet must include the exact command output and reviewed commit; a tag, branch, shortened SHA, unresolved annotated tag, or force-moved reviewed tag stops the task.
+For each current external action, treat the already present 40-hex workflow reference as an
+unverified input. Resolve its intended reviewed release tag and peeled commit, verify the
+upstream repository and source diff, then import that identity into
+`controls/github-actions-lock.json`. Modify an existing workflow reference only when this
+audit proves a mismatch or an admitted update is required. The dependency lock exists before
+`ci-inventory.yml` becomes its first new consumer. The packet must include the exact command
+output and reviewed commit; a tag, branch, shortened SHA, unresolved annotated tag,
+force-moved reviewed tag, or unexplained current pin stops the task.
 
 ```bash
 git ls-remote https://github.com/actions/checkout.git 'refs/tags/v4' 'refs/tags/v4^{}'
@@ -653,7 +692,7 @@ Add thin confined-file and archive adapters to `publication-guard.ts`; reuse its
 
 - [ ] **Step 4: Implement one bounded public-output transport**
 
-Run authoritative child commands with direct executable/argument arrays and captured stdout/stderr. Generate JSON, summaries, annotations, artifact names, and accepted files from the same validated `ControlResultV1` plus explicit redaction inputs. Sanitize exact bytes before any public projection; raw child output cannot stream directly to GitHub logs. Bind the accepted projections to producer/tool/policy, terminal attempt, event revision, lineage lease, freshness, and the digest of the exact emitted bytes. Missing or inconclusive scanning publishes only a bounded safe control-plane error and no diagnostic payload.
+Run authoritative child commands with direct executable/argument arrays and captured stdout/stderr. Generate JSON, summaries, annotations, artifact names, and accepted files from the same validated `ControlResultV2` plus explicit redaction inputs. Sanitize exact bytes before any public projection; raw child output cannot stream directly to GitHub logs. Bind the accepted projections to producer/tool/policy, terminal attempt, event revision, lineage lease, freshness, and the digest of the exact emitted bytes. Missing or inconclusive scanning publishes only a bounded safe control-plane error and no diagnostic payload. Historical V1 may be rendered only through an explicitly non-authorizing history view.
 
 - [ ] **Step 5: Reorder browser diagnostic publication**
 
@@ -663,7 +702,11 @@ In quality and tag release: run tests, collect bounded diagnostics into a new co
 
 Give `whatsoup-guard.yml` a measured explicit timeout. Preserve the existing history scan as advisory and ensure its `continue-on-error` cannot satisfy a mandatory result or mask another step.
 
-Register and test `workflow.artifact.upload-before-scan`, `feedback.output.sensitive-echo`, `feedback.output.over-budget`, `trust.cache.cross-class-restore`, `evidence.receipt.nonterminal`, and `evidence.receipt.digest-mismatch`. A warning-only history scan remains a separate advisory observation; it cannot satisfy any required row or contribute to aggregate `PASS`.
+Register and test `workflow.artifact.upload.before-scan`,
+`feedback.output.data.sensitive-echo`, `feedback.output.bytes.over-budget`,
+`trust.cache.class.cross-restore`, `evidence.receipt.state.nonterminal`, and
+`evidence.receipt.digest.mismatch`. A warning-only history scan remains a separate advisory
+observation; it cannot satisfy any required row or contribute to aggregate `PASS`.
 
 - [ ] **Step 7: Verify and commit in two reviewable beads**
 
@@ -749,7 +792,7 @@ The repository-local reusable workflow is named `reusable-workflow-policy-canary
 
 - [ ] **Step 5: Canary before removing the current private-key path**
 
-Run old and protected evaluations in parallel on synthetic unsafe/safe revisions and real same-repository PRs. Compare native causes, exact bindings, decisions, and result sets. The protected lane must prove it cannot execute candidate code or receive candidate caches/artifacts. Register and test `binding.producer.identity-unavailable`, `binding.producer.unauthorized`, `binding.policy.digest-mismatch`, `binding.executor.identity-unavailable`, `binding.agent.result-schema-invalid`, and `evidence.receipt.replayed` in the same bead.
+Run old and protected evaluations in parallel on synthetic unsafe/safe revisions and real same-repository PRs. Compare native causes, exact bindings, decisions, and result sets. The protected lane must prove it cannot execute candidate code or receive candidate caches/artifacts. Register and test `binding.producer.identity.unavailable`, `binding.producer.identity.unauthorized`, `binding.policy.digest.mismatch`, `binding.executor.identity.unavailable`, `binding.agent.result.invalid-schema`, and `evidence.receipt.attempt.replayed` in the same bead.
 
 - [ ] **Step 6: Preserve the current authority and prepare three distinct cutovers**
 
@@ -860,7 +903,7 @@ export function buildRequiredSetReceipt(
   producerReceipt: ProtectedProducerReceiptV1,
   gateId: RequiredSetReceiptV1['gateId'],
 ): RequiredSetReceiptV1;
-export function evaluatePolicyGateCanary(input: ProtectedGateInputV1): ControlResultV1;
+export function evaluatePolicyGateCanary(input: ProtectedGateInputV1): ControlResultV2;
 ```
 
 `RequiredCheckV1` and `ObservedCheckV1` are exported from the canonical result module in this bead; `gate.ts` must use its exact-set validation rather than implement a second tuple or aggregator. No public API accepts a caller-selected required array. `buildRequiredSetReceipt()` is the sole derivation owner: it joins the protected manifest, exact classifier, protected workflow inventory/source, gate ID, expected producer/platform tuples, policy/tool identity, event/lease, and exact row digest, then authenticates the exact payload through the protected transport. The receipt binds one `producerReceiptDigest`; substitution with another producer object fails.
@@ -869,7 +912,7 @@ Refactor the canonical result/attempt owners atomically so the existing local `F
 
 - [ ] **Step 1: Write RED gate truth tables and workflow mutation tests**
 
-Cover pass, warning-only required observation, advisory warning outside the required set, deterministic block, missing result, duplicate, similarly named substitute, wrong App, wrong workflow SHA, wrong policy, wrong candidate, caller-forged required set, PR-head receipt supplied for merge group, stale receipt, cancelled, timeout, skipped, malformed, nonterminal, live child, replay, mutable-latest-file replacement, wrong terminal-byte digest, broken append-only history, valid not-applicable, and invalid skipped-as-not-applicable. Mutation tests remove each trigger, fixed job dependency, result binding, and `if: always()`. A warning cannot satisfy any required row or contribute to `PASS`; warning-only mandatory evidence makes authorization `INCONCLUSIVE`.
+Cover pass, warning-only required observation, advisory warning outside the required set, deterministic block, missing result, duplicate, similarly named substitute, wrong App, wrong workflow SHA, wrong policy, wrong candidate, caller-forged required set, schema-valid historical V1 supplied as a required observation, PR-head receipt supplied for merge group, stale receipt, cancelled, timeout, skipped, malformed, nonterminal, live child, replay, mutable-latest-file replacement, wrong terminal-byte digest, broken append-only history, valid not-applicable, and invalid skipped-as-not-applicable. Mutation tests remove each trigger, fixed job dependency, result binding, and `if: always()`. A warning cannot satisfy any required row or contribute to `PASS`; warning-only mandatory evidence makes authorization `INCONCLUSIVE`.
 
 - [ ] **Step 2: Implement one aggregate owner**
 
@@ -877,7 +920,7 @@ Build the canary projection from the canonical result module's exact-set aggrega
 
 - [ ] **Step 3: Convert existing quality execution into reusable leaves without changing coverage**
 
-Characterize the existing Linux 24/25 command order, permissions, timeouts, and outputs. Copy that sequence into `reusable-quality.yml` with maintained-or-reduced permissions, then invoke it as two separately named canary jobs: `quality-linux-node24` and `quality-linux-node25`. Leave the existing `Quality / quality` commands and status behavior intact apart from the already admitted action-pin, cache, and output-transport beads. Redirecting or deleting the old job occurs only in the later source-ownership cutover. Do not depend on a matrix job's ambiguous aggregate output. Each fixed canary job emits one tuple/attempt/evidence digest. Dual-run until exact command/result parity is proven. Preserve CodeQL as its existing owner; do not create or alter CodeQL without the Task 3 hosted receipt.
+Characterize the existing Linux 24/25 command order, permissions, timeouts, and outputs. Copy that sequence into `reusable-quality.yml` with maintained-or-reduced permissions, then invoke it as two separately named canary jobs: `quality-linux-node24` and `quality-linux-node25`. Leave the existing `Quality / quality` commands and status behavior intact apart from the already admitted action-pin, cache, and output-transport beads. Redirecting or deleting the old job occurs only in the later source-ownership cutover. Do not depend on a matrix job's ambiguous aggregate output. Each fixed canary job emits one tuple/attempt/evidence digest. Dual-run until exact command/result parity is proven. Preserve the documented CodeQL surface unchanged; do not infer its owner or create, alter, or retire it without the Task 3 hosted receipt.
 
 - [ ] **Step 4: Add the top-level orchestrator**
 
@@ -887,13 +930,28 @@ The top-level workflow handles `pull_request`, `merge_group: checks_requested`, 
 
 Pin GitHub's Dependency Review Action through the existing Task 3 lock registry. Begin report-only and evaluate only the introduced dependency delta. Keep repository lockfile/install/registry policy canonical. Do not block licenses or vulnerability thresholds until owner policy, exceptions, unsafe/safe fixtures, and baseline behavior are admitted.
 
-- [ ] **Step 6: Extend all potentially required providers to merge-group revisions**
+- [ ] **Step 6: Bind inherited merge-group source coverage without expanding legacy authority**
 
-Add `merge_group` to the new canary orchestrator. Only after the Task 3 hosted receipt identifies exact current required contexts may the existing `quality.yml` receive the same event without renaming its workflow/jobs or changing PR coverage. Bind every result to `proposedMergeOid` and the merge-group member digest. Do not change CodeQL when its ownership/event receipt is unavailable.
+Current `quality.yml` already contains `merge_group` source wiring while retaining the
+candidate/private-key sequence. Treat that inherited trigger as a proven source fact and a
+tainted legacy risk, not as CP-W2 completion. Do not remove it merely to recreate it in the
+new unprivileged canary orchestrator, and do not let it confer protected authority. Add
+structural fixtures proving the legacy trigger cannot gain new privilege, producer status,
+or artifact trust. The replacement protected workflow receives authoritative merge-group
+ownership only during the coordinated private-assurance-removal, source-ownership, and
+hosted-binding cutover. Bind every synthetic or real canary result to `proposedMergeOid` and
+the merge-group member digest. If the repository remains user-owned or current required
+contexts cannot produce safe merge-group evidence, queue enablement and real merge-group
+canaries remain unavailable/inconclusive; use exact source inspection and synthetic event
+fixtures without calling them live queue evidence. Do not change CodeQL when its
+ownership/event receipt is unavailable.
 
 Keep `whatsoup-guard.yml` unchanged and separately visible during this bead. Inventory its overlapping Node 24/25 work, path-filtered applicability, advisory history scan, and exact status identity. It remains the old source owner until a later source-ownership packet proves command/result parity and reference scans show it no longer authorizes a boundary; this plan does not silently absorb or retire it. `tag-release-gate.yml` is not part of the PR/merge orchestration bead.
 
-Register and test `workflow.result.required-missing`, `workflow.result.exact-set-mismatch`, `workflow.result.duplicate-substitute`, `workflow.result.skipped-as-success`, `binding.merge.oid-mismatch`, and `test.advisory-used-as-authority` in the same bead.
+Register and test the existing planned `workflow.result.requirement.missing` code plus
+`workflow.result.set.mismatch`, `workflow.result.substitute.duplicate`,
+`workflow.result.skip.presented-success`, `binding.merge.oid.mismatch`, and
+`test.advisory.result.used-authoritatively` in the same bead.
 
 - [ ] **Step 7: Verify local structure and report-only canaries**
 
@@ -914,7 +972,14 @@ git diff --check
 git commit -m "ci: add exact-set merge policy canary"
 ```
 
-Real canary sequence: same-repository PR, synthetic fork-equivalent PR, queued merge-group revision, default-branch backstop. Compare exact old/new result sets and decisions. Keep all existing required checks unchanged. This commit cannot close the protected gate row until the independent producer emits and authenticates the required-set and final gate receipts.
+Canary sequence: same-repository PR, synthetic fork-equivalent PR, synthetic exact
+merge-group event/source fixtures, and default-branch backstop. Add a real queued
+merge-group revision only after authenticated hosted readback proves a supported topology
+and a separate owner authorization enables the queue. Compare exact old/new result sets and
+decisions. Keep all documented status contexts unchanged while their required bindings are
+unverified. This commit cannot close the
+protected gate row until the independent producer emits and authenticates the required-set
+and final gate receipts.
 
 ---
 
@@ -966,7 +1031,7 @@ export interface PortabilityLaneReceiptV1 {
   classificationDigest: string;
   protectedHostObservation: ProtectedHostObservationReceiptV1;
   suiteDigest: string;
-  result: ControlResultV1;
+  result: ControlResultV2;
   observedCheckReceipt: ObservedCheckReceiptV1;
 }
 
@@ -974,7 +1039,7 @@ export interface PortabilityGateInputV1 extends ProtectedGateInputV1 {
   laneReceipts: PortabilityLaneReceiptV1[];
 }
 
-export function evaluatePortabilityGateCanary(input: PortabilityGateInputV1): ControlResultV1;
+export function evaluatePortabilityGateCanary(input: PortabilityGateInputV1): ControlResultV2;
 ```
 
 - [ ] **Step 1: Write RED observed-host and applicability tests**
@@ -987,7 +1052,7 @@ The independently sourced protected workflow observes the host before executing 
 
 - [ ] **Step 3: Build the risk-selected portability suite**
 
-Consume the protected exact classifier and required-set receipts. Documentation-only changes may emit a validated not-applicable row after always-on policy and metadata checks. Dependency, native, platform, workflow, build, release, unknown/system-wide, merge-group executable, and release-candidate changes require both supported native tuples. Register and test `precondition.host.capability-unproven`, `binding.executor.identity-unavailable`, `binding.executor.prohibited-host`, and `portability.required-host-missing` without creating a second native policy owner.
+Consume the protected exact classifier and required-set receipts. Documentation-only changes may emit a validated not-applicable row after always-on policy and metadata checks. Dependency, native, platform, workflow, build, release, unknown/system-wide, merge-group executable, and release-candidate changes require both supported native tuples. Register and test `precondition.host.capability.unproven`, `binding.executor.identity.unavailable`, `binding.executor.host.prohibited`, and `portability.host.requirement.missing` without creating a second native policy owner.
 
 - [ ] **Step 4: Replace the narrow macOS clock job through dual-run parity**
 
@@ -1018,7 +1083,11 @@ git diff --check
 git commit -m "ci: add observed-host portability canary"
 ```
 
-Local non-native simulation cannot close macOS. Completion requires exact-OID receipts from both actual supported host tuples, followed by PR and merge-group canaries.
+Local non-native simulation cannot close macOS. Completion requires exact-OID receipts from
+both actual supported host tuples and PR canaries. A real merge-group canary is additionally
+required only after authenticated hosted readback proves a supported queue topology and the
+queue is separately authorized; until then, exact synthetic merge-group fixtures remain
+visible but cannot close live queue evidence.
 
 Do not add a `verify:portability` facade in this task until the command can validate both authenticated host receipts and produce the declared aggregate evidence. A source-only local simulator uses an explicitly canary/report-only name.
 
@@ -1082,7 +1151,7 @@ bash scripts/run-with-pinned-npm.sh run coverage:check -- --pool=forks --filePar
 
 Expected: complete suite and coverage thresholds pass. Any skipped, unsupported, unavailable, masked, or nonterminal lane is disclosed as inconclusive rather than clean.
 
-- [ ] **Step 4: Prove real canaries and exact remote identity**
+- [ ] **Step 4: Prove topology-applicable canaries and exact remote identity**
 
 For separately authorized pushes, verify remote branch OID equals the locally scanned OID. Preserve terminal receipts for same-repository PR, synthetic fork-equivalent input, merge-group proposed merge, default branch, Linux native, macOS native, protected evaluator, exact-set gates, and diagnostic rejection. No stale PR-head receipt may close a merge-group row.
 
@@ -1092,11 +1161,11 @@ Using a separately approved read-only App, refresh rulesets, required statuses, 
 
 - [ ] **Step 6: Stop before hosted mutation**
 
-Prepare three distinct packets: (1) private-assurance transport removal, (2) source workflow leaf-ownership transfer, and (3) hosted required-status/App binding. Each shows current settings/source ownership, the proposed atomic cutover, prior-state rollback receipt, exact protected producer, real PR/merge-group canaries, no-dual/no-zero-authority proof, and owner identities. Do not change required checks, action policy, environments, secrets, rulesets, merge queue, or the existing private-key path under this plan.
+Prepare three distinct packets: (1) private-assurance transport removal, (2) source workflow leaf-ownership transfer, and (3) hosted required-status/App binding. Each shows current settings/source ownership, the proposed atomic cutover, prior-state rollback receipt, exact protected producer, real PR canaries, synthetic/source merge-group proof, any topology-applicable real merge-group canary, no-dual/no-zero-authority proof, and owner identities. Do not change required checks, action policy, environments, secrets, rulesets, merge queue, or the existing private-key path under this plan.
 
 The packets execute under one coordinated, separately approved transition runbook: verify the protected producer and current hosted state; bind and read back the new required protected status while preserving old checks; transfer source leaf ownership; remove the private transport; retire the old required status only after a current-head readback; roll back in exact reverse order. A failure between steps restores the last verified authority and preserves every failed receipt. Separate approvals and receipts remain mandatory even though the order is coordinated.
 
-- [ ] **Step 7: Publish metadata and commit the source closeout**
+- [ ] **Step 7: Publish metadata and commit the source reconciliation**
 
 ```bash
 bash scripts/run-with-pinned-npm.sh run work-index:regen
@@ -1120,12 +1189,18 @@ This plan is complete only when:
 - no new canary or protected job executes candidate code and later receives private assurance or privilege; source-canary completion retains one explicitly disclosed legacy `quality.yml` taint until the separately authorized private-assurance cutover;
 - all external workflow dependencies are reviewed full-SHA pins with a tested update path;
 - every public diagnostic channel crosses the canonical scan-after-generation boundary;
-- all canary-required repository-owned providers produce exact proposed-merge evidence for `merge_group`; hosted CodeQL and any other existing required provider remain an explicit CP-G1 prerequisite when readback is unavailable;
+- all canary-required repository-owned providers prove exact proposed-merge handling through
+  source and synthetic `merge_group` fixtures; when a supported queue topology is separately
+  authorized, they also produce real merge-group receipts. Hosted CodeQL and any other
+  existing required provider remain an explicit CP-G1 prerequisite when readback is
+  unavailable;
 - repository-local canary gates always exist with static dependencies, while only the independently sourced protected producer may emit the eventual stable required gates; both consume the canonical exact-set owner;
 - Linux and macOS receipts prove observed host/runtime/tool/filesystem identity for the exact revision and policy;
 - unsafe cases block, safe neighbors pass, unavailable evidence is inconclusive, warnings remain advisory, and self-removal mutations fail;
 - old/new workflows demonstrate exact command, native-cause, decision, and binding parity before one atomic authority transfer;
-- current Linux and CodeQL required checks remain preserved until a separately approved hosted cutover is read back;
+- documented Linux and CodeQL status contexts remain preserved until authenticated hosted
+  readback proves their current required bindings and a separately approved cutover is read
+  back;
 - the current candidate/private-key path remains explicitly unresolved until its separate atomic hosted cutover; source canaries never claim that risk is removed;
 - no planned artifact, release, deployment, hosted, scheduled, or runtime capability is advertised as pass-capable before its own admitted implementation and external trust prerequisites exist.
 

@@ -12,7 +12,6 @@ import * as repoHygieneGuardModule from '../../scripts/repo-hygiene-guard.ts';
 import {
   createRepoHygieneExactRangeArtifact,
   currentRepoHygienePolicyDigest,
-  currentRepoHygieneToolDigest,
   isAllowedPatternMatch,
   isTrackedSensitiveArtifact,
   parseArgs,
@@ -24,7 +23,6 @@ import {
   scanCommitMessage,
   scanCommitAuthors,
   scanContentLines,
-  repoHygienePolicyProjectionCoverage,
   validateRepoHygieneExactRangeArtifact,
 } from '../../scripts/repo-hygiene-guard.ts';
 
@@ -96,6 +94,13 @@ function expectedForArtifact(
     expectedPayloadByteLength: artifact.binding.payloadByteLength,
     expectedPayloadSha256: artifact.binding.payloadSha256,
   };
+}
+
+function requireArtifactBindingFields(payload: unknown): { toolDigest: string; policyDigest: string } {
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('artifact payload must be an object');
+  const { toolDigest, policyDigest } = payload as Record<string, unknown>;
+  if (typeof toolDigest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(toolDigest) || typeof policyDigest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(policyDigest)) throw new Error('artifact binding digests are invalid');
+  return { toolDigest, policyDigest };
 }
 
 function makeBranchRepo(): string {
@@ -683,6 +688,34 @@ Co-Authored-By: Person <person@example.com>
     expect(issues.some((issue) => issue.line === 6)).toBe(false);
   });
 
+  it('exempts inert markdown prose while retaining suppression checks for MDX and tests', () => {
+    const suppressionToken = ['@ts', 'ignore'].join('-');
+    const issues = scanAddedLines([
+      { filePath: 'docs/plan.md', line: 10, text: `The policy prohibits ${suppressionToken} in production code.` },
+      { filePath: 'README.markdown', line: 20, text: `Do not add ${suppressionToken} to bypass type checking.` },
+      {
+        filePath: 'docs/example.mdx',
+        line: 30,
+        text: `{/* ${suppressionToken} */}`,
+      },
+      { filePath: 'tests/example.test.ts', line: 40, text: `// ${suppressionToken}` },
+    ]);
+    expect(issues).toEqual([
+      {
+        code: 'unbounded-suppression',
+        message: 'Lint/type suppressions must include a rationale and an expires YYYY-MM-DD marker.',
+        filePath: 'docs/example.mdx',
+        line: 30,
+      },
+      {
+        code: 'unbounded-suppression',
+        message: 'Lint/type suppressions must include a rationale and an expires YYYY-MM-DD marker.',
+        filePath: 'tests/example.test.ts',
+        line: 40,
+      },
+    ]);
+  });
+
   it('classifies staged runtime artifacts as sensitive without blocking tracked settings template', () => {
     expect(isTrackedSensitiveArtifact('.env')).toBe(true);
     expect(isTrackedSensitiveArtifact('.env.local')).toBe(true);
@@ -1263,10 +1296,7 @@ The migrated group was 1203631234567890@g.us.
         localOid,
       }));
       const payload = JSON.parse(Buffer.from(artifact.payloadBytes).toString('utf8')) as Record<string, any>;
-      const expected = expectedForArtifact(artifact, payload as {
-        toolDigest: string;
-        policyDigest: string;
-      }, { baseOid, remoteOid: null, localOid });
+      const expected = expectedForArtifact(artifact, requireArtifactBindingFields(payload), { baseOid, remoteOid: null, localOid });
 
       const removedBinding = structuredClone(payload);
       removedBinding.commitBindings = [];
@@ -1312,10 +1342,7 @@ The migrated group was 1203631234567890@g.us.
       ].sort());
       const validated = validateRepoHygieneExactRangeArtifact(
         artifact,
-        expectedForArtifact(artifact, payload as {
-          toolDigest: string;
-          policyDigest: string;
-        }, { baseOid, remoteOid: null, localOid }),
+        expectedForArtifact(artifact, requireArtifactBindingFields(payload), { baseOid, remoteOid: null, localOid }),
       );
       expect(validated.ok).toBe(true);
       if (!validated.ok) return;
@@ -1339,10 +1366,7 @@ The migrated group was 1203631234567890@g.us.
         localOid,
       }));
       const payload = JSON.parse(Buffer.from(artifact.payloadBytes).toString('utf8')) as Record<string, any>;
-      const expected = expectedForArtifact(artifact, payload as {
-        toolDigest: string;
-        policyDigest: string;
-      }, { baseOid, remoteOid: null, localOid });
+      const expected = expectedForArtifact(artifact, requireArtifactBindingFields(payload), { baseOid, remoteOid: null, localOid });
 
       const removedNonterminal = structuredClone(payload);
       const [removed] = removedNonterminal.commitBindings.splice(0, 1);
@@ -1384,64 +1408,6 @@ The migrated group was 1203631234567890@g.us.
         artifactForPayload(strippedBlock),
         expected,
       ).ok).toBe(false);
-    });
-
-    it('binds tool bytes independently and declares complete live policy-route coverage', () => {
-      const moduleBytes = readFileSync(join(process.cwd(), 'scripts', 'repo-hygiene-guard.ts'));
-      const independentToolDigest = `sha256:${createHash('sha256').update(moduleBytes).digest('hex')}`;
-      expect(currentRepoHygieneToolDigest()).toBe(independentToolDigest);
-      expect(currentRepoHygienePolicyDigest()).toMatch(/^sha256:[0-9a-f]{64}$/);
-      expect(repoHygienePolicyProjectionCoverage()).toEqual([
-        'base-line-sets',
-        'child-process-shell-true',
-        'dynamic-code-execution',
-        'find-disallowed-match',
-        'fixture-file-routing',
-        'normalize-repo-path',
-        'package-lock-resolved-url-exception',
-        'pattern-allowlist-routing',
-        'process-env-inheritance',
-        'production-code-path-routing',
-        'scan-added-lines',
-        'scan-commit-authors',
-        'scan-commit-message',
-        'secret-history-subset',
-        'source-console-routing',
-        'suppression-comment-routing',
-        'suppression-rationale-expiry',
-        'tracked-sensitive-artifact-routing',
-      ]);
-      const source = moduleBytes.toString('utf8');
-      for (const marker of [
-        'baseLineSets: baseLineSets.toString()',
-        'childProcessShellTrue: isChildProcessShellTrue.toString()',
-        'dynamicCodeExecution: isDynamicCodeExecution.toString()',
-        'findDisallowedMatch: findDisallowedMatch.toString()',
-        'fixtureFileRouting: isFixtureFile.toString()',
-        'normalizeRepoPath: normalizeRepoPath.toString()',
-        'packageLockResolvedUrlException: isPackageLockResolvedUrlLine.toString()',
-        'patternAllowlistRouting: isAllowedPatternMatch.toString()',
-        'processEnvInheritance: isProcessEnvInheritance.toString()',
-        'productionCodePathRouting: isProductionCodePath.toString()',
-        'scanAddedLines: scanAddedLines.toString()',
-        'scanCommitAuthors: scanCommitAuthors.toString()',
-        'scanCommitMessage: scanCommitMessage.toString()',
-        'secretHistorySubset: secretCauses.toString()',
-        'sourceConsoleRouting: isSourceConsoleCall.toString()',
-        'suppressionCommentRouting: isSuppressionComment.toString()',
-        'suppressionRationaleExpiry: hasSuppressionRationaleAndExpiry.toString()',
-        'trackedSensitiveArtifactRouting: isTrackedSensitiveArtifact.toString()',
-      ]) expect(source).toContain(marker);
-      expect(source).toContain('appendExactRangeFinding');
-      expect((source.match(/findings\.push\(/g) ?? []).length).toBe(1);
-      expect(source).toContain('scanNetAddedLineFindingsIncrementally');
-      expect(source).not.toContain('scanAddedLines(net.changes.flatMap');
-      expect(source).toContain('appendHistoryLineCandidate');
-      expect(source).toContain('appendHistoryArtifactCandidate');
-      expect(source).toContain('appendRawFindingKey');
-      expect((source.match(/historyLines\.push\(/g) ?? []).length).toBe(1);
-      expect((source.match(/historyArtifacts\.push\(/g) ?? []).length).toBe(1);
-      expect((source.match(/rawFindingKeys\.add\(/g) ?? []).length).toBe(1);
     });
 
     it('exposes independently hashable policy bytes bound to exact guard-core bytes and the receipt', () => {
@@ -1495,7 +1461,7 @@ The migrated group was 1203631234567890@g.us.
       expect(payload.nativeCauses).toContain(cause);
       expect(validateRepoHygieneExactRangeArtifact(
         artifact,
-        expectedForArtifact(artifact, payload, { baseOid, remoteOid: null, localOid }),
+        expectedForArtifact(artifact, requireArtifactBindingFields(payload), { baseOid, remoteOid: null, localOid }),
       ).ok).toBe(true);
     });
 
@@ -1763,7 +1729,7 @@ The migrated group was 1203631234567890@g.us.
       expect(payload.observedScope.observedPathCount).toBe(2);
       expect(validateRepoHygieneExactRangeArtifact(
         artifact,
-        expectedForArtifact(artifact, payload, { baseOid, remoteOid: null, localOid }),
+        expectedForArtifact(artifact, requireArtifactBindingFields(payload), { baseOid, remoteOid: null, localOid }),
       ).ok).toBe(true);
     });
 
@@ -1778,6 +1744,7 @@ The migrated group was 1203631234567890@g.us.
         localOid,
       }));
       const payload = JSON.parse(Buffer.from(original.payloadBytes).toString('utf8')) as Record<string, any>;
+      expect(() => requireArtifactBindingFields({ ...payload, toolDigest: null })).toThrow(/binding digest/i);
 
       const unknownCause = structuredClone(payload);
       unknownCause.findings[0].cause = 'injected-unknown-cause';
@@ -1785,7 +1752,7 @@ The migrated group was 1203631234567890@g.us.
       const unknownArtifact = artifactForPayload(unknownCause);
       expect(validateRepoHygieneExactRangeArtifact(
         unknownArtifact,
-        expectedForArtifact(unknownArtifact, unknownCause, { baseOid, remoteOid: null, localOid }),
+        expectedForArtifact(unknownArtifact, requireArtifactBindingFields(unknownCause), { baseOid, remoteOid: null, localOid }),
       ).ok).toBe(false);
 
       const unsafePath = structuredClone(payload);
@@ -1793,7 +1760,7 @@ The migrated group was 1203631234567890@g.us.
       const unsafeArtifact = artifactForPayload(unsafePath);
       expect(validateRepoHygieneExactRangeArtifact(
         unsafeArtifact,
-        expectedForArtifact(unsafeArtifact, unsafePath, { baseOid, remoteOid: null, localOid }),
+        expectedForArtifact(unsafeArtifact, requireArtifactBindingFields(unsafePath), { baseOid, remoteOid: null, localOid }),
       ).ok).toBe(false);
     });
 

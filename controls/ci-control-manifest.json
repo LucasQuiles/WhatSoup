@@ -345,7 +345,7 @@
       "dependencies": ["repo.hygiene"],
       "evidence": {
         "schemaVersion": 1,
-        "paths": ["scripts/ci-control-classify.ts", "scripts/lib/ci-control/classifier.ts", "scripts/lib/ci-control/git-input.ts", "scripts/lib/ci-control/manifest.ts", "scripts/lib/ci-control/reasons.ts", "scripts/lib/ci-control/ref-policy.ts", "scripts/lib/verification/boundary-run/contracts.ts", "scripts/lib/verification/boundary-run/model.ts", "scripts/lib/verification/boundary-run/schema.ts", "scripts/lib/verification/boundary-run/shared.ts", "scripts/lib/verification/boundary-run/worktree.ts", "src/lib/git-env.ts", "src/lib/type-guards.ts"],
+        "paths": ["scripts/ci-control-classify.ts", "scripts/lib/ci-control/classifier.ts", "scripts/lib/ci-control/git-input-core.ts", "scripts/lib/ci-control/git-input.ts", "scripts/lib/ci-control/manifest.ts", "scripts/lib/ci-control/reasons.ts", "scripts/lib/ci-control/ref-policy.ts", "scripts/lib/verification/boundary-run/contracts.ts", "scripts/lib/verification/boundary-run/model.ts", "scripts/lib/verification/boundary-run/schema.ts", "scripts/lib/verification/boundary-run/shared.ts", "scripts/lib/verification/boundary-run/worktree.ts", "src/lib/git-env.ts", "src/lib/type-guards.ts"],
         "digestBinding": "exact",
         "freshness": "receipt"
       },

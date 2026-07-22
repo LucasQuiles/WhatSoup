@@ -914,6 +914,7 @@ describe('publication guard exact-range native receipt', () => {
     };
     expect(tools.sources.map((source) => source.id)).toEqual([
       'publication-guard.ts',
+      'git-input-core.ts',
       'git-input.ts',
       'guard-core.ts',
       'boundary-run/shared.ts',
@@ -926,6 +927,7 @@ describe('publication guard exact-range native receipt', () => {
     ]);
     const sourcePaths = new Map([
       ['publication-guard.ts', 'scripts/publication-guard.ts'],
+      ['git-input-core.ts', 'scripts/lib/ci-control/git-input-core.ts'],
       ['git-input.ts', 'scripts/lib/ci-control/git-input.ts'],
       ['guard-core.ts', 'scripts/lib/guard-core.ts'],
       ['boundary-run/shared.ts', 'scripts/lib/verification/boundary-run/shared.ts'],

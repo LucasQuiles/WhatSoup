@@ -4,9 +4,9 @@ This document is the human-maintained synthesis over the generated planning
 index. Treat `docs/work-index.json` and `docs/work-index.md` as the mechanical
 source of truth for scoped planning artifacts.
 
-**Last refreshed:** 2026-07-20
+**Last refreshed:** 2026-07-22
 **Index source:** `docs/work-index.json` schema v5, generated at
-`2026-07-20T20:58:18Z` from `f30052f11a86cc3ece3026ff8e8798ec207831ea`
+`2026-07-22T10:09:01Z` from `308b08069da327ce38b16c7e0206593a5eee4529`
 **Policy:** [`docs/canonical-status-policy.md`](canonical-status-policy.md)
 **Review cadence:** [`docs/runbooks/objective-tracking.md`](runbooks/objective-tracking.md)
 **Project map:** [`docs/project-map.md`](project-map.md)
@@ -20,14 +20,14 @@ matters.
 
 | Status | Count | Meaning |
 |---|---:|---|
-| active | 16 | Authored artifacts currently declare active work; the CI/CD control-plane initiative is the current lane normalized in this refresh. |
-| pending | 14 | Authored artifacts declare pending work and require their own owner disposition. |
+| active | 17 | Authored artifacts currently declare active work; the CI/CD control-plane initiative is the current lane normalized in this refresh. |
+| pending | 15 | Authored artifacts declare pending work and require their own owner disposition. |
 | completed | 32 | Historical plans/specs marked complete or landed. |
 | deferred | 7 | Fleet-charts artifacts are explicitly shelved. |
 | closed | 4 | Historical artifacts retained without claiming completion. |
-| unknown | 4 | Four artifacts lack a policy-vocabulary status and remain visible for triage. |
+| unknown | 5 | Five artifacts lack a policy-vocabulary status and remain visible for triage. |
 
-The work index has 77 total rows, zero inconsistencies, four unknown-status rows, and four
+The work index has 80 total rows, zero inconsistencies, five unknown-status rows, and four
 cross-tree topic clusters: `design`, `fleet-charts`, `requirements`, and `tasks`.
 
 ## Canonical Surfaces
@@ -67,11 +67,12 @@ cross-tree topic clusters: `design`, `fleet-charts`, `requirements`, and `tasks`
 |---|---|---|
 | `docs/superpowers/specs/2026-07-20-cicd-enforcement-control-plane-design.md` | approved architecture and evidence contract | active; implementation remains unproven |
 | `docs/superpowers/plans/2026-07-20-cicd-enforcement-control-plane-program.md` | recursive dependency and trust-boundary ledger | active; future lanes require their named admission plans |
-| `docs/superpowers/plans/2026-07-20-cicd-control-foundation.md` | first executable source-only plan | active; CP-F1 is next only after terminal plan review and planning-batch commit |
+| `docs/superpowers/plans/2026-07-20-cicd-control-foundation.md` | first executable source-only plan | active; the admitted source split is staged for a hook-bound preservation checkpoint, while newly observed `main` lease work requires non-rebase integration and reassessment before exact-set verification; CP-F2f/F4/CP-TR1/F5 remain incomplete and CP-WA1 is not credited before that audit |
+| `docs/superpowers/plans/2026-07-20-cicd-workflow-portability.md` | protected workflow and native portability follow-on | pending; current source has partial `merge_group` and action-pin coverage, but protected policy, exact-set gates, live queue evidence, and native portability remain incomplete |
 
 The remaining active and pending artifacts are listed mechanically in
 `docs/work-index.md`; this synthesis does not imply that they share the CI/CD initiative's
-authority or priority. Deferred and closed rows remain historical. The four unknown rows
+authority or priority. Deferred and closed rows remain historical. The five unknown rows
 must receive an authored status or structured supersession marker before they can be
 treated as complete, deferred, or active.
 
