@@ -136,7 +136,11 @@ class ClaudeExtractor:
                     start_ts = None
             if git_branch is None and isinstance(row.get("gitBranch"), str):
                 git_branch = row.get("gitBranch")
-            if version is None and isinstance(row.get("version"), str) and row["version"]:
+            if (
+                version is None
+                and isinstance(row.get("version"), str)
+                and row["version"]
+            ):
                 version = row.get("version")
             if title is None:
                 if row.get("type") == "ai-title" and isinstance(
@@ -260,13 +264,9 @@ class ClaudeExtractor:
                 data = _modern_compaction_data(modern)
             else:
                 # Legacy schema: compact_metadata (snake) with a single reason.
-                legacy = _object(
-                    row.get("compact_metadata"), phase="claude-compaction"
-                )
+                legacy = _object(row.get("compact_metadata"), phase="claude-compaction")
                 data = {
-                    "reason": _string(
-                        legacy.get("reason"), phase="claude-compaction"
-                    )
+                    "reason": _string(legacy.get("reason"), phase="claude-compaction")
                 }
             builder.add(
                 EventKind.COMPACTION,
@@ -505,9 +505,7 @@ class ClaudeExtractor:
             # call; it arrives in a later assistant message. Same pairing
             # discipline as native tool_result (in user messages).
             if part_type == "advisor_tool_result":
-                call_id = _string(
-                    part.get("tool_use_id"), phase="claude-tool-result"
-                )
+                call_id = _string(part.get("tool_use_id"), phase="claude-tool-result")
                 if call_id not in tool_calls or call_id in tool_results:
                     raise _schema("claude-tool-result")
                 tool_results.add(call_id)

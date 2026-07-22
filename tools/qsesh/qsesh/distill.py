@@ -343,9 +343,7 @@ def distill(
                     {"trigger", "pre_tokens", "post_tokens", "duration_ms"},
                     {"cumulative_dropped_tokens"},
                 )
-                compaction_reasons.append(
-                    _string(event.data.get("trigger"))
-                )
+                compaction_reasons.append(_string(event.data.get("trigger")))
             else:
                 _exact_keys(event.data, set(), {"reason"})
                 reason = event.data.get("reason")
