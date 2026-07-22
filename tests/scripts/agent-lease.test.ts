@@ -194,14 +194,14 @@ describe('agent-lease acquire', () => {
     expect(Date.parse(record.expiresAt)).toBeGreaterThan(Date.parse(record.heartbeatAt));
   });
 
-  it('BLOCKS a second acquire while the lease is held → GIT.LEASE.WRITER_CONFLICT, exit 1', () => {
+  it('BLOCKS a second acquire while the lease is held → git.lease.writer-conflict, exit 1', () => {
     const repo = initRepo();
     acquireOk(repo, 'session-a');
 
     const second = acquireLease({ cwd: repo, taskId: 'task-2', sessionId: 'session-b', toolIdentity: 'vitest' });
     expect(second.kind).toBe('block');
     if (second.kind === 'ok') throw new Error('unreachable');
-    expect(second.reason).toBe('GIT.LEASE.WRITER_CONFLICT');
+    expect(second.reason).toBe('git.lease.writer-conflict');
     expect(exitCodeFor(second)).toBe(EXIT_BLOCK);
     expect(exitCodeFor(second)).toBe(1);
 
@@ -227,7 +227,7 @@ describe('agent-lease acquire', () => {
     expect(winners).toHaveLength(1);
     expect(losers).toHaveLength(1);
     for (const loser of losers) {
-      expect(loser.reason).toBe('GIT.LEASE.WRITER_CONFLICT');
+      expect(loser.reason).toBe('git.lease.writer-conflict');
       expect(loser.kind).toBe('block');
       expect(exitCodeFor(loser)).toBe(EXIT_BLOCK);
     }
@@ -242,7 +242,7 @@ describe('agent-lease acquire', () => {
 
   /**
    * REGRESSION (real failure, 2026-07-22): the loser of a genuine race reported
-   * `GIT.WORKTREE.UNACCOUNTED_STATE` instead of `GIT.LEASE.WRITER_CONFLICT`.
+   * `git.worktree.unaccounted-state` instead of `git.lease.writer-conflict`.
    *
    * Cause: the claim was `open(path,'wx')` followed by a separate write. `O_CREAT|O_EXCL`
    * publishes the INODE before any content exists, so the loser's EEXIST handler could read
@@ -328,7 +328,7 @@ describe('agent-lease acquire', () => {
     }
 
     expect(winners, 'exactly one winner per round').toBe(20);
-    expect([...observed]).toEqual(['GIT.LEASE.WRITER_CONFLICT']);
+    expect([...observed]).toEqual(['git.lease.writer-conflict']);
   }, 60_000);
 
   it('publishes the lease atomically — it is never observable as an empty file', () => {
@@ -358,7 +358,7 @@ describe('agent-lease acquire', () => {
     const result = acquireLease({ cwd: repo, taskId: 'task-1', sessionId: 'session-a', toolIdentity: 'vitest' });
     expect(result.kind).toBe('inconclusive');
     if (result.kind === 'ok') throw new Error('unreachable');
-    expect(result.reason).toBe('GIT.WORKTREE.UNACCOUNTED_STATE');
+    expect(result.reason).toBe('git.worktree.unaccounted-state');
     expect(exitCodeFor(result)).toBe(EXIT_INCONCLUSIVE);
   });
 
@@ -399,7 +399,7 @@ describe('agent-lease acquire', () => {
     60_000,
   );
 
-  it('BLOCKS when the worktree is on the wrong branch → GIT.WORKTREE.WRONG_BRANCH', () => {
+  it('BLOCKS when the worktree is on the wrong branch → git.worktree.wrong-branch', () => {
     const repo = initRepo();
     const result = acquireLease({
       cwd: repo,
@@ -410,12 +410,12 @@ describe('agent-lease acquire', () => {
     });
     expect(result.kind).toBe('block');
     if (result.kind === 'ok') throw new Error('unreachable');
-    expect(result.reason).toBe('GIT.WORKTREE.WRONG_BRANCH');
+    expect(result.reason).toBe('git.worktree.wrong-branch');
     expect(exitCodeFor(result)).toBe(EXIT_BLOCK);
     expect(existsSync(resolveLeaseLocation(repo).leasePath)).toBe(false);
   });
 
-  it('is INCONCLUSIVE when HEAD is not the expected OID → GIT.HEAD.UNEXPECTED_CHANGE', () => {
+  it('is INCONCLUSIVE when HEAD is not the expected OID → git.head.unexpected-change', () => {
     const repo = initRepo();
     const result = acquireLease({
       cwd: repo,
@@ -426,7 +426,7 @@ describe('agent-lease acquire', () => {
     });
     expect(result.kind).toBe('inconclusive');
     if (result.kind === 'ok') throw new Error('unreachable');
-    expect(result.reason).toBe('GIT.HEAD.UNEXPECTED_CHANGE');
+    expect(result.reason).toBe('git.head.unexpected-change');
     expect(exitCodeFor(result)).toBe(EXIT_INCONCLUSIVE);
   });
 
@@ -435,7 +435,7 @@ describe('agent-lease acquire', () => {
     acquireOk(repo, 'session-a');
     const cli = runCli(repo, ['acquire', '--task', 't', '--session', 'session-b', '--tool', 'vitest']);
     expect(cli.code).toBe(1);
-    expect(cli.stderr).toContain('GIT.LEASE.WRITER_CONFLICT');
+    expect(cli.stderr).toContain('git.lease.writer-conflict');
   });
 });
 
@@ -469,7 +469,7 @@ describe('agent-lease malformed state is fail-closed', () => {
     const result = statusLease({ cwd: repo });
     expect(result.kind).toBe('inconclusive');
     if (result.kind === 'ok') throw new Error('unreachable');
-    expect(result.reason).toBe('GIT.WORKTREE.UNACCOUNTED_STATE');
+    expect(result.reason).toBe('git.worktree.unaccounted-state');
   });
 
   it('treats a lease with a wrong-typed field as INCONCLUSIVE (no silent coercion)', () => {
@@ -498,7 +498,7 @@ describe('agent-lease malformed state is fail-closed', () => {
     writeFileSync(resolveLeaseLocation(repo).leasePath, '{ "schemaVersion": 1, "leaseId"');
     const cli = runCli(repo, ['status']);
     expect(cli.code).toBe(2);
-    expect(cli.stderr).toContain('GIT.WORKTREE.UNACCOUNTED_STATE');
+    expect(cli.stderr).toContain('git.worktree.unaccounted-state');
   });
 
   it('is INCONCLUSIVE outside a git repository rather than reporting a free worktree', () => {
@@ -523,7 +523,7 @@ describe('agent-lease expiry', () => {
 
     expect(result.kind).toBe('inconclusive');
     if (result.kind === 'ok') throw new Error('unreachable');
-    expect(result.reason).toBe('GIT.LEASE.EXPIRED_UNRECONCILED');
+    expect(result.reason).toBe('git.lease.expired-unreconciled');
     expect(exitCodeFor(result)).toBe(EXIT_INCONCLUSIVE);
     expect(exitCodeFor(result)).toBe(2);
     // Not silently stolen: byte-identical incumbent lease still on disk.
@@ -539,7 +539,7 @@ describe('agent-lease expiry', () => {
     const result = statusLease({ cwd: repo });
     expect(result.kind).toBe('inconclusive');
     if (result.kind === 'ok') throw new Error('unreachable');
-    expect(result.reason).toBe('GIT.LEASE.EXPIRED_UNRECONCILED');
+    expect(result.reason).toBe('git.lease.expired-unreconciled');
   });
 });
 
@@ -558,7 +558,7 @@ describe('agent-lease takeover', () => {
     return abandoned;
   }
 
-  it('REFUSES takeover against a LIVE heartbeat → GIT.LEASE.WRITER_CONFLICT, exit 1', () => {
+  it('REFUSES takeover against a LIVE heartbeat → git.lease.writer-conflict, exit 1', () => {
     const repo = initRepo();
     acquireOk(repo, 'session-a');
     const before = readLeaseRaw(repo);
@@ -566,7 +566,7 @@ describe('agent-lease takeover', () => {
     const result = takeoverLease({ cwd: repo, taskId: 't', sessionId: 'session-b', toolIdentity: 'vitest' });
     expect(result.kind).toBe('block');
     if (result.kind === 'ok') throw new Error('unreachable');
-    expect(result.reason).toBe('GIT.LEASE.WRITER_CONFLICT');
+    expect(result.reason).toBe('git.lease.writer-conflict');
     expect(exitCodeFor(result)).toBe(EXIT_BLOCK);
     expect(readLeaseRaw(repo)).toBe(before);
   });
@@ -588,7 +588,7 @@ describe('agent-lease takeover', () => {
     const result = takeoverLease({ cwd: repo, taskId: 't', sessionId: 'session-b', toolIdentity: 'vitest' });
     expect(result.kind).toBe('inconclusive');
     if (result.kind === 'ok') throw new Error('unreachable');
-    expect(result.reason).toBe('GIT.LEASE.EXPIRED_UNRECONCILED');
+    expect(result.reason).toBe('git.lease.expired-unreconciled');
     expect(result.message).toMatch(/alive/i);
     expect(readLeaseRaw(repo)).toBe(before);
   });
@@ -608,7 +608,7 @@ describe('agent-lease takeover', () => {
     const result = takeoverLease({ cwd: repo, taskId: 't', sessionId: 'session-b', toolIdentity: 'vitest' });
     expect(result.kind).toBe('inconclusive');
     if (result.kind === 'ok') throw new Error('unreachable');
-    expect(result.reason).toBe('GIT.LEASE.EXPIRED_UNRECONCILED');
+    expect(result.reason).toBe('git.lease.expired-unreconciled');
     expect(exitCodeFor(result)).toBe(EXIT_INCONCLUSIVE);
     expect(readLeaseRaw(repo)).toBe(before);
   });
@@ -690,11 +690,11 @@ describe('agent-lease takeover', () => {
     const result = takeoverLease({ cwd: repo, taskId: 't', sessionId: 'session-b', toolIdentity: 'vitest' });
     expect(result.kind).toBe('block');
     if (result.kind === 'ok') throw new Error('unreachable');
-    expect(result.reason).toBe('GIT.WORKTREE.WRONG_BRANCH');
+    expect(result.reason).toBe('git.worktree.wrong-branch');
     expect(existsSync(resolveLeaseLocation(repo).leasePath)).toBe(true);
   });
 
-  it('REFUSES takeover when HEAD is not the expected OID → GIT.HEAD.UNEXPECTED_CHANGE', () => {
+  it('REFUSES takeover when HEAD is not the expected OID → git.head.unexpected-change', () => {
     const repo = initRepo();
     makeAbandonable(repo, acquireOk(repo, 'session-a'));
     const result = takeoverLease({
@@ -706,7 +706,7 @@ describe('agent-lease takeover', () => {
     });
     expect(result.kind).toBe('inconclusive');
     if (result.kind === 'ok') throw new Error('unreachable');
-    expect(result.reason).toBe('GIT.HEAD.UNEXPECTED_CHANGE');
+    expect(result.reason).toBe('git.head.unexpected-change');
   });
 
   it('REFUSES takeover when there is no lease at all (nothing to reconcile)', () => {
@@ -737,7 +737,7 @@ describe('agent-lease heartbeat and release', () => {
     const result = heartbeatLease({ cwd: repo, sessionId: 'session-b', toolIdentity: 'vitest' });
     expect(result.kind).toBe('block');
     if (result.kind === 'ok') throw new Error('unreachable');
-    expect(result.reason).toBe('GIT.LEASE.WRITER_CONFLICT');
+    expect(result.reason).toBe('git.lease.writer-conflict');
     expect(readLeaseRaw(repo)).toBe(before);
   });
 
@@ -749,7 +749,7 @@ describe('agent-lease heartbeat and release', () => {
     const result = releaseLease({ cwd: repo, sessionId: 'session-b', toolIdentity: 'vitest' });
     expect(result.kind).toBe('block');
     if (result.kind === 'ok') throw new Error('unreachable');
-    expect(result.reason).toBe('GIT.LEASE.WRITER_CONFLICT');
+    expect(result.reason).toBe('git.lease.writer-conflict');
     expect(exitCodeFor(result)).toBe(EXIT_BLOCK);
     expect(readLeaseRaw(repo)).toBe(before);
   });
@@ -764,7 +764,7 @@ describe('agent-lease heartbeat and release', () => {
     const result = releaseLease({ cwd: repo, sessionId: 'session-a', toolIdentity: 'vitest' });
     expect(result.kind).toBe('block');
     if (result.kind === 'ok') throw new Error('unreachable');
-    expect(result.reason).toBe('GIT.LEASE.WRITER_CONFLICT');
+    expect(result.reason).toBe('git.lease.writer-conflict');
     expect(existsSync(resolveLeaseLocation(repo).leasePath)).toBe(true);
   });
 
@@ -805,12 +805,12 @@ describe('agent-lease allowedPaths', () => {
     expect(violations).toEqual(['docs/runbook.md', '.github/workflows/quality.yml']);
   });
 
-  it('BLOCKS an allowedPaths violation through the CLI with GIT.LEASE.PATH_NOT_ALLOWED', () => {
+  it('BLOCKS an allowedPaths violation through the CLI with git.lease.path-not-allowed', () => {
     const repo = initRepo();
     acquireOk(repo, 'session-a', { allowedPaths: ['src'] });
     const cli = runCli(repo, ['check-path', 'docs/runbook.md']);
     expect(cli.code).toBe(1);
-    expect(cli.stderr).toContain('GIT.LEASE.PATH_NOT_ALLOWED');
+    expect(cli.stderr).toContain('git.lease.path-not-allowed');
     expect(cli.stderr).toContain('docs/runbook.md');
 
     const allowed = runCli(repo, ['check-path', 'src/core/db.ts']);
@@ -843,11 +843,11 @@ describe('agent-lease allowedPaths', () => {
 // ── Taxonomy and process identity primitives ────────────────────────────────
 describe('agent-lease taxonomy and identity', () => {
   it('maps the rider reason codes to the rider outcomes', () => {
-    expect(REASON_OUTCOMES['GIT.LEASE.WRITER_CONFLICT']).toBe('block');
-    expect(REASON_OUTCOMES['GIT.LEASE.EXPIRED_UNRECONCILED']).toBe('inconclusive');
-    expect(REASON_OUTCOMES['GIT.WORKTREE.WRONG_BRANCH']).toBe('block');
-    expect(REASON_OUTCOMES['GIT.HEAD.UNEXPECTED_CHANGE']).toBe('inconclusive');
-    expect(REASON_OUTCOMES['GIT.WORKTREE.UNACCOUNTED_STATE']).toBe('inconclusive');
+    expect(REASON_OUTCOMES['git.lease.writer-conflict']).toBe('block');
+    expect(REASON_OUTCOMES['git.lease.expired-unreconciled']).toBe('inconclusive');
+    expect(REASON_OUTCOMES['git.worktree.wrong-branch']).toBe('block');
+    expect(REASON_OUTCOMES['git.head.unexpected-change']).toBe('inconclusive');
+    expect(REASON_OUTCOMES['git.worktree.unaccounted-state']).toBe('inconclusive');
   });
 
   it('maps outcomes to exit codes: ok 0, block 1, inconclusive 2', () => {

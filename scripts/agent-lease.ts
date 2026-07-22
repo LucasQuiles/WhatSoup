@@ -29,12 +29,15 @@
  * it does not exclude concurrent file edits, and a worktree locked by a dead session
  * stays locked. Hence an external lease with a PROVEN takeover path.
  *
- * ATOMICITY. `acquire` creates the lease with a single exclusive-create open
- * (`O_EXCL` via `openSync(path, 'wx')` / `fsPromises.open(path, 'wx')`). There is no
- * `existsSync`-then-write anywhere on the acquire path: that is a check-then-act race
- * two agents can both win. Takeover claims the incumbent lease with a single
- * `renameSync`, which is likewise atomic — the loser of a concurrent takeover gets
- * ENOENT and is refused.
+ * ATOMICITY. `acquire` publishes the lease by writing the record to a staging sibling and
+ * then `link()`-ing it into place, so the name and its contents become visible together
+ * (see {@link publishLeaseSync}). `link()` fails with EEXIST when the target exists, which
+ * keeps the exactly-one-winner property that an `O_EXCL` create would give — but an
+ * `O_EXCL` create publishes the inode BEFORE the record is written, and a loser reading
+ * inside that window cannot name the holder. There is no `existsSync`-then-write anywhere
+ * on the acquire path either: that is a check-then-act race two agents can both win.
+ * Takeover claims the incumbent lease with a single `renameSync`, which is likewise atomic
+ * — the loser of a concurrent takeover gets ENOENT and is refused.
  *
  * FAIL-CLOSED. Unreadable, truncated, malformed or ambiguous state is NEVER success.
  * "I could not determine the process identity" resolves to INCONCLUSIVE (exit 2), never
@@ -74,33 +77,43 @@ export type LeaseOutcome = 'block' | 'inconclusive';
 
 /**
  * Rider error taxonomy (the subset this tool can emit) plus ONE clearly-labelled
- * extension. `GIT.LEASE.PATH_NOT_ALLOWED` is not in the rider table; it is added
- * here because the rider's lease record carries `allowedPaths[]` but the table has
- * no code for violating it. Everything else is the rider's own spelling.
+ * extension. `git.lease.path-not-allowed` is not in the rider table; it is added here
+ * because the rider's lease record carries `allowedPaths[]` but the table has no code for
+ * violating it.
  *
- * Malformed / unreadable lease state maps to `GIT.WORKTREE.UNACCOUNTED_STATE`
+ * SPELLING. These are lowercase-dotted, not the rider's `GIT.LEASE.WRITER_CONFLICT`. The
+ * control plane already had 81 emitted codes in `scripts/lib/ci-control/reasons.ts`, all
+ * lowercase, and a result's `code` is part of `RESULT_KEYS` — it feeds
+ * `controlResultEvidenceDigest`. Re-spelling those 81 would therefore change the digest of
+ * every already-emitted receipt and invalidate `controls/ci-control-manifest.json`, which
+ * is precisely the historical-evidence breakage this control plane exists to prevent. So
+ * lowercase-dotted is the WIRE format and the rider's SCREAMING_DOT is documentation
+ * spelling, related by a mechanical transliteration (lowercase; `_` becomes `-`; dots
+ * kept): `GIT.LEASE.WRITER_CONFLICT` <-> `git.lease.writer-conflict`.
+ *
+ * Malformed / unreadable lease state maps to `git.worktree.unaccounted-state`
  * (Inconclusive in the rider table) — state belonging to the worktree that cannot
  * be accounted for. It is deliberately NOT mapped to a Block code: an operator must
  * reconcile it, and a Block would invite "just delete it".
  */
 export const REASON_CODES = [
-  'GIT.LEASE.WRITER_CONFLICT',
-  'GIT.LEASE.EXPIRED_UNRECONCILED',
-  'GIT.LEASE.PATH_NOT_ALLOWED',
-  'GIT.HEAD.UNEXPECTED_CHANGE',
-  'GIT.WORKTREE.WRONG_BRANCH',
-  'GIT.WORKTREE.UNACCOUNTED_STATE',
+  'git.lease.writer-conflict',
+  'git.lease.expired-unreconciled',
+  'git.lease.path-not-allowed',
+  'git.head.unexpected-change',
+  'git.worktree.wrong-branch',
+  'git.worktree.unaccounted-state',
 ] as const;
 
 export type ReasonCode = (typeof REASON_CODES)[number];
 
 export const REASON_OUTCOMES: Readonly<Record<ReasonCode, LeaseOutcome>> = {
-  'GIT.LEASE.WRITER_CONFLICT': 'block',
-  'GIT.LEASE.EXPIRED_UNRECONCILED': 'inconclusive',
-  'GIT.LEASE.PATH_NOT_ALLOWED': 'block',
-  'GIT.HEAD.UNEXPECTED_CHANGE': 'inconclusive',
-  'GIT.WORKTREE.WRONG_BRANCH': 'block',
-  'GIT.WORKTREE.UNACCOUNTED_STATE': 'inconclusive',
+  'git.lease.writer-conflict': 'block',
+  'git.lease.expired-unreconciled': 'inconclusive',
+  'git.lease.path-not-allowed': 'block',
+  'git.head.unexpected-change': 'inconclusive',
+  'git.worktree.wrong-branch': 'block',
+  'git.worktree.unaccounted-state': 'inconclusive',
 };
 
 // ── Lease record (rider §"Writer/lineage lease") ────────────────────────────
@@ -662,18 +675,18 @@ function planAcquire(options: AcquireOptions): AcquirePlan | LeaseFailure {
   const cwd = options.cwd ?? process.cwd();
   const now = options.now ?? new Date();
   const factsResult = readRepoFacts(cwd);
-  if (!factsResult.ok) return fail('GIT.WORKTREE.UNACCOUNTED_STATE', factsResult.message);
+  if (!factsResult.ok) return fail('git.worktree.unaccounted-state', factsResult.message);
   const facts = factsResult.facts;
 
   if (options.expectBranch !== undefined && facts.branch !== options.expectBranch) {
     return fail(
-      'GIT.WORKTREE.WRONG_BRANCH',
+      'git.worktree.wrong-branch',
       `worktree is on ${facts.branch ?? '(detached HEAD)'} but the task expects ${options.expectBranch}`,
     );
   }
   if (options.expectHeadOid !== undefined && facts.headOid !== options.expectHeadOid) {
     return fail(
-      'GIT.HEAD.UNEXPECTED_CHANGE',
+      'git.head.unexpected-change',
       `HEAD is ${facts.headOid ?? '(unborn)'} but ${options.expectHeadOid} was expected`,
     );
   }
@@ -718,33 +731,33 @@ function classifyCreateFailure(err: unknown, location: LeaseLocation, now: Date)
   const code = (err as NodeJS.ErrnoException).code;
   if (code !== 'EEXIST') {
     return fail(
-      'GIT.WORKTREE.UNACCOUNTED_STATE',
+      'git.worktree.unaccounted-state',
       `could not create the lease at ${location.leasePath}: ${code ?? 'error'} ${(err as Error).message}`,
     );
   }
   const read = readLeaseFile(location);
   if (read.state === 'absent') {
     // The file vanished between O_EXCL failing and the read: concurrent mutation.
-    return fail('GIT.WORKTREE.UNACCOUNTED_STATE', 'lease disappeared while it was being inspected');
+    return fail('git.worktree.unaccounted-state', 'lease disappeared while it was being inspected');
   }
   if (read.state === 'unreadable') {
-    return fail('GIT.WORKTREE.UNACCOUNTED_STATE', `lease state is unreadable: ${read.problem}`);
+    return fail('git.worktree.unaccounted-state', `lease state is unreadable: ${read.problem}`);
   }
   const parsed = parseLeaseRecord(read.raw);
   if (!parsed.valid) {
     return fail(
-      'GIT.WORKTREE.UNACCOUNTED_STATE',
+      'git.worktree.unaccounted-state',
       `lease state is malformed (${parsed.problem}) — reconcile it manually; it is NOT safe to overwrite`,
     );
   }
   if (isExpired(parsed.record, now)) {
     return fail(
-      'GIT.LEASE.EXPIRED_UNRECONCILED',
+      'git.lease.expired-unreconciled',
       `lease heartbeat expired at ${parsed.record.expiresAt} but was never reconciled — ` +
         `run 'takeover' (which must PROVE the previous writer is gone); ${describeHolder(parsed.record)}`,
     );
   }
-  return fail('GIT.LEASE.WRITER_CONFLICT', `another writer holds this worktree: ${describeHolder(parsed.record)}`);
+  return fail('git.lease.writer-conflict', `another writer holds this worktree: ${describeHolder(parsed.record)}`);
 }
 
 function ensureStateDirs(location: LeaseLocation): void {
@@ -769,7 +782,7 @@ function stagingPathFor(location: LeaseLocation): string {
  * `O_CREAT|O_EXCL` guarantees exactly one creator, but it publishes the inode BEFORE the
  * record is written, so a concurrent loser that handles EEXIST inside that window reads a
  * zero-byte file. It then cannot name a holder, and a plain writer conflict gets downgraded
- * to `GIT.WORKTREE.UNACCOUNTED_STATE` — an Inconclusive that tells an operator to reconcile
+ * to `git.worktree.unaccounted-state` — an Inconclusive that tells an operator to reconcile
  * by hand when all that was required was to back off. Measured at ~2.5% of losers under
  * four-way contention; invisible at low load, which is how it passed a 43/43 run and only
  * failed under the loaded push gate.
@@ -880,7 +893,7 @@ export function statusLease(options: ContextOptions): StatusResult {
   const cwd = options.cwd ?? process.cwd();
   const now = options.now ?? new Date();
   const factsResult = readRepoFacts(cwd);
-  if (!factsResult.ok) return fail('GIT.WORKTREE.UNACCOUNTED_STATE', factsResult.message);
+  if (!factsResult.ok) return fail('git.worktree.unaccounted-state', factsResult.message);
   const location = locationFromFacts(factsResult.facts);
 
   const read = readLeaseFile(location);
@@ -888,15 +901,15 @@ export function statusLease(options: ContextOptions): StatusResult {
     return { kind: 'ok', state: 'free', message: `no writer lease on ${location.leasePath}`, record: null, steps: [] };
   }
   if (read.state === 'unreadable') {
-    return fail('GIT.WORKTREE.UNACCOUNTED_STATE', `lease state is unreadable: ${read.problem}`);
+    return fail('git.worktree.unaccounted-state', `lease state is unreadable: ${read.problem}`);
   }
   const parsed = parseLeaseRecord(read.raw);
   if (!parsed.valid) {
-    return fail('GIT.WORKTREE.UNACCOUNTED_STATE', `lease state is malformed: ${parsed.problem}`);
+    return fail('git.worktree.unaccounted-state', `lease state is malformed: ${parsed.problem}`);
   }
   if (isExpired(parsed.record, now)) {
     return fail(
-      'GIT.LEASE.EXPIRED_UNRECONCILED',
+      'git.lease.expired-unreconciled',
       `lease heartbeat expired at ${parsed.record.expiresAt} and was never reconciled; ${describeHolder(parsed.record)}`,
     );
   }
@@ -929,31 +942,31 @@ function loadOwnedLease(options: OwnerOptions, verb: string): OwnedLease | Lease
   const cwd = options.cwd ?? process.cwd();
   const now = options.now ?? new Date();
   const factsResult = readRepoFacts(cwd);
-  if (!factsResult.ok) return fail('GIT.WORKTREE.UNACCOUNTED_STATE', factsResult.message);
+  if (!factsResult.ok) return fail('git.worktree.unaccounted-state', factsResult.message);
   const location = locationFromFacts(factsResult.facts);
 
   const read = readLeaseFile(location);
   if (read.state === 'absent') {
-    return fail('GIT.WORKTREE.UNACCOUNTED_STATE', `there is no lease to ${verb} at ${location.leasePath}`);
+    return fail('git.worktree.unaccounted-state', `there is no lease to ${verb} at ${location.leasePath}`);
   }
   if (read.state === 'unreadable') {
-    return fail('GIT.WORKTREE.UNACCOUNTED_STATE', `lease state is unreadable: ${read.problem}`);
+    return fail('git.worktree.unaccounted-state', `lease state is unreadable: ${read.problem}`);
   }
   const parsed = parseLeaseRecord(read.raw);
   if (!parsed.valid) {
-    return fail('GIT.WORKTREE.UNACCOUNTED_STATE', `lease state is malformed: ${parsed.problem}`);
+    return fail('git.worktree.unaccounted-state', `lease state is malformed: ${parsed.problem}`);
   }
 
   const callerIdentity = processIdentityString(options.pid ?? process.pid);
   if (parsed.record.writer.sessionId !== options.sessionId) {
     return fail(
-      'GIT.LEASE.WRITER_CONFLICT',
+      'git.lease.writer-conflict',
       `session ${options.sessionId} cannot ${verb} a lease owned by session ${parsed.record.writer.sessionId}`,
     );
   }
   if (parsed.record.writer.processIdentity !== callerIdentity) {
     return fail(
-      'GIT.LEASE.WRITER_CONFLICT',
+      'git.lease.writer-conflict',
       `process identity mismatch: lease holder is ${parsed.record.writer.processIdentity} but the caller is ` +
         `${callerIdentity} — a matching PID alone is not identity`,
     );
@@ -969,7 +982,7 @@ function replaceLease(location: LeaseLocation, record: LeaseRecord): LeaseFailur
     renameSync(tmp, location.leasePath);
     return null;
   } catch (err) {
-    return fail('GIT.WORKTREE.UNACCOUNTED_STATE', `could not update the lease: ${(err as Error).message}`);
+    return fail('git.worktree.unaccounted-state', `could not update the lease: ${(err as Error).message}`);
   }
 }
 
@@ -1000,7 +1013,7 @@ export function releaseLease(options: OwnerOptions): LeaseResult {
   try {
     renameSync(owned.location.leasePath, archive);
   } catch (err) {
-    return fail('GIT.WORKTREE.UNACCOUNTED_STATE', `could not release the lease: ${(err as Error).message}`);
+    return fail('git.worktree.unaccounted-state', `could not release the lease: ${(err as Error).message}`);
   }
   return {
     kind: 'ok',
@@ -1036,25 +1049,25 @@ export function takeoverLease(options: TakeoverOptions): LeaseResult {
   const steps: TakeoverStep[] = [];
 
   const factsResult = readRepoFacts(cwd);
-  if (!factsResult.ok) return fail('GIT.WORKTREE.UNACCOUNTED_STATE', factsResult.message, steps);
+  if (!factsResult.ok) return fail('git.worktree.unaccounted-state', factsResult.message, steps);
   const facts = factsResult.facts;
   const location = locationFromFacts(facts);
 
   const read = readLeaseFile(location);
   if (read.state === 'absent') {
     return fail(
-      'GIT.WORKTREE.UNACCOUNTED_STATE',
+      'git.worktree.unaccounted-state',
       `there is no lease to take over at ${location.leasePath} — use 'acquire'`,
       steps,
     );
   }
   if (read.state === 'unreadable') {
-    return fail('GIT.WORKTREE.UNACCOUNTED_STATE', `lease state is unreadable: ${read.problem}`, steps);
+    return fail('git.worktree.unaccounted-state', `lease state is unreadable: ${read.problem}`, steps);
   }
   const parsed = parseLeaseRecord(read.raw);
   if (!parsed.valid) {
     return fail(
-      'GIT.WORKTREE.UNACCOUNTED_STATE',
+      'git.worktree.unaccounted-state',
       `lease state is malformed (${parsed.problem}) — reconcile it manually; takeover will not guess`,
       steps,
     );
@@ -1064,14 +1077,14 @@ export function takeoverLease(options: TakeoverOptions): LeaseResult {
   // 1. confirm heartbeat expired
   if (!isExpired(previous, now)) {
     steps.push(step(1, 'heartbeat-expired', false, `lease is live until ${previous.expiresAt}`));
-    return fail('GIT.LEASE.WRITER_CONFLICT', `lease heartbeat is still live: ${describeHolder(previous)}`, steps);
+    return fail('git.lease.writer-conflict', `lease heartbeat is still live: ${describeHolder(previous)}`, steps);
   }
   steps.push(step(1, 'heartbeat-expired', true, `heartbeat expired at ${previous.expiresAt}`));
 
   // Worktree / branch identity must match before anything else is considered.
   if (previous.repository.worktreeIdentity !== facts.worktreeIdentity) {
     return fail(
-      'GIT.WORKTREE.UNACCOUNTED_STATE',
+      'git.worktree.unaccounted-state',
       `lease belongs to worktree ${previous.repository.worktreeIdentity} but this is ${facts.worktreeIdentity}`,
       steps,
     );
@@ -1079,7 +1092,7 @@ export function takeoverLease(options: TakeoverOptions): LeaseResult {
   const expectedBranch = options.expectBranch ?? previous.repository.branch;
   if (facts.branch !== expectedBranch) {
     return fail(
-      'GIT.WORKTREE.WRONG_BRANCH',
+      'git.worktree.wrong-branch',
       `lease was taken on branch ${expectedBranch ?? '(detached)'} but the worktree is on ` +
         `${facts.branch ?? '(detached)'} — reconcile the branch before taking over`,
       steps,
@@ -1087,7 +1100,7 @@ export function takeoverLease(options: TakeoverOptions): LeaseResult {
   }
   if (options.expectHeadOid !== undefined && facts.headOid !== options.expectHeadOid) {
     return fail(
-      'GIT.HEAD.UNEXPECTED_CHANGE',
+      'git.head.unexpected-change',
       `HEAD is ${facts.headOid ?? '(unborn)'} but ${options.expectHeadOid} was expected`,
       steps,
     );
@@ -1100,7 +1113,7 @@ export function takeoverLease(options: TakeoverOptions): LeaseResult {
       step(2, 'writer-identity-proven-absent', false, `unparseable process identity ${previous.writer.processIdentity}`),
     );
     return fail(
-      'GIT.LEASE.EXPIRED_UNRECONCILED',
+      'git.lease.expired-unreconciled',
       `the previous writer's process identity (${previous.writer.processIdentity}) could not be determined, ` +
         `so its death cannot be proven — refusing takeover`,
       steps,
@@ -1113,7 +1126,7 @@ export function takeoverLease(options: TakeoverOptions): LeaseResult {
       step(2, 'writer-identity-proven-absent', false, `pid ${identity.pid} is alive (started ${probe.startedAt})`),
     );
     return fail(
-      'GIT.LEASE.EXPIRED_UNRECONCILED',
+      'git.lease.expired-unreconciled',
       recycled
         ? `pid ${identity.pid} is alive but started ${probe.startedAt}, not ${identity.startedAt} — the PID was ` +
           `recycled, so the previous writer's fate is unknown; refusing takeover (a PID alone is not identity)`
@@ -1125,7 +1138,7 @@ export function takeoverLease(options: TakeoverOptions): LeaseResult {
   if (probe.state === 'unknown') {
     steps.push(step(2, 'writer-identity-proven-absent', false, `probe inconclusive: ${probe.detail}`));
     return fail(
-      'GIT.LEASE.EXPIRED_UNRECONCILED',
+      'git.lease.expired-unreconciled',
       `could not determine whether pid ${identity.pid} is running (${probe.detail}); absence of evidence is not ` +
         `evidence of absence — refusing takeover`,
       steps,
@@ -1170,10 +1183,10 @@ export function takeoverLease(options: TakeoverOptions): LeaseResult {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') {
       steps.push(step(4, 'previous-lease-recorded-abandoned', false, 'another takeover claimed the lease first'));
-      return fail('GIT.LEASE.WRITER_CONFLICT', 'another takeover claimed this lease first', steps);
+      return fail('git.lease.writer-conflict', 'another takeover claimed this lease first', steps);
     }
     steps.push(step(4, 'previous-lease-recorded-abandoned', false, `claim failed: ${(err as Error).message}`));
-    return fail('GIT.WORKTREE.UNACCOUNTED_STATE', `could not claim the lease: ${(err as Error).message}`, steps);
+    return fail('git.worktree.unaccounted-state', `could not claim the lease: ${(err as Error).message}`, steps);
   }
 
   const evidenceBase = path.join(location.abandonedDir, `${previous.leaseId}.gen${previous.generation}`);
@@ -1185,7 +1198,7 @@ export function takeoverLease(options: TakeoverOptions): LeaseResult {
   } catch (err) {
     steps.push(step(4, 'previous-lease-recorded-abandoned', false, `could not file evidence: ${(err as Error).message}`));
     return fail(
-      'GIT.WORKTREE.UNACCOUNTED_STATE',
+      'git.worktree.unaccounted-state',
       `previous lease claimed but not filed as evidence (it is at ${claimPath}): ${(err as Error).message}`,
       steps,
     );
@@ -1201,13 +1214,13 @@ export function takeoverLease(options: TakeoverOptions): LeaseResult {
   let lineageFailure: LeaseFailure | null = null;
   if (!recheck.ok) {
     steps.push(step(6, 'lineage-revalidated', false, recheck.message));
-    lineageFailure = fail('GIT.WORKTREE.UNACCOUNTED_STATE', recheck.message, steps);
+    lineageFailure = fail('git.worktree.unaccounted-state', recheck.message, steps);
   } else if (recheck.facts.headOid !== freeze.headOid || recheck.facts.branch !== freeze.branch) {
     steps.push(
       step(6, 'lineage-revalidated', false, `HEAD moved during takeover: ${freeze.headOid} -> ${recheck.facts.headOid}`),
     );
     lineageFailure = fail(
-      'GIT.HEAD.UNEXPECTED_CHANGE',
+      'git.head.unexpected-change',
       `HEAD or branch moved while the lease was being taken over (${freeze.headOid ?? '(unborn)'} -> ` +
         `${recheck.facts.headOid ?? '(unborn)'}); the previous lease is retained at ${evidenceLease}`,
       steps,
@@ -1215,7 +1228,7 @@ export function takeoverLease(options: TakeoverOptions): LeaseResult {
   } else if (recheck.facts.workspaceDigest !== freeze.workspaceDigest) {
     steps.push(step(6, 'lineage-revalidated', false, 'the workspace changed during takeover'));
     lineageFailure = fail(
-      'GIT.WORKTREE.UNACCOUNTED_STATE',
+      'git.worktree.unaccounted-state',
       `the workspace changed while the lease was being taken over; the previous lease is retained at ${evidenceLease}`,
       steps,
     );
@@ -1249,7 +1262,7 @@ export function takeoverLease(options: TakeoverOptions): LeaseResult {
     writeFileSync(evidenceMeta, `${JSON.stringify(abandonedEvidence, null, 2)}\n`, { mode: 0o600 });
   } catch (err) {
     return fail(
-      'GIT.WORKTREE.UNACCOUNTED_STATE',
+      'git.worktree.unaccounted-state',
       `could not write takeover evidence to ${evidenceMeta}: ${(err as Error).message}`,
       steps,
     );
@@ -1414,7 +1427,7 @@ function runCheckPath(args: ParsedArgs, cwd: string, json: boolean): number {
   }
   return report(
     fail(
-      'GIT.LEASE.PATH_NOT_ALLOWED',
+      'git.lease.path-not-allowed',
       `path(s) outside the lease allowlist [${status.record.allowedPaths.join(', ')}]: ${violations.join(', ')}`,
     ),
     json,
@@ -1492,7 +1505,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
     code = main(process.argv.slice(2));
   } catch (err) {
     // A crash is INCONCLUSIVE, never a clean exit.
-    process.stderr.write(`[agent-lease] GIT.WORKTREE.UNACCOUNTED_STATE (INCONCLUSIVE) crashed: ${(err as Error).stack ?? String(err)}\n`);
+    process.stderr.write(`[agent-lease] git.worktree.unaccounted-state (INCONCLUSIVE) crashed: ${(err as Error).stack ?? String(err)}\n`);
     code = EXIT_INCONCLUSIVE;
   }
   process.exit(code);
