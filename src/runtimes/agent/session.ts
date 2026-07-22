@@ -2444,7 +2444,7 @@ export class SessionManager {
           }, 'terminal provider stderr observed; ending retrying child');
           this.handleProviderEvent({
             type: 'result',
-            text: 'Provider usage limit reached: insufficient balance.',
+            text: 'Provider usage limit reached.',
           });
           if (
             this.active

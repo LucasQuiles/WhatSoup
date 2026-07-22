@@ -469,7 +469,7 @@ describe('SessionManager spawn-per-turn child handlers (opencode-cli)', () => {
 
     expect(events).toEqual([{
       type: 'result',
-      text: 'Provider usage limit reached: insufficient balance.',
+      text: 'Provider usage limit reached.',
     }]);
     expect(killSessionTree).toHaveBeenCalledTimes(1);
     expect(killSessionTree).toHaveBeenCalledWith(
@@ -485,6 +485,29 @@ describe('SessionManager spawn-per-turn child handlers (opencode-cli)', () => {
     expect(session.onCrash).not.toHaveBeenCalled();
     expect(session.notifyUser).not.toHaveBeenCalled();
     expect(sm.getStatus().turnInFlight).toBe(false);
+  });
+
+  it('does not misreport a non-balance OpenCode usage limit as insufficient balance', async () => {
+    const events: AgentEvent[] = [];
+    let sm!: SessionManager;
+    const session = await makeOpencodeSession({
+      onEvent: (event: AgentEvent) => {
+        events.push(event);
+        if (event.type === 'result') sm.completeProviderTurn();
+      },
+    });
+    sm = session.sm;
+    await sm.sendTurn('hello');
+    events.length = 0;
+
+    child.stderr.emit('data', Buffer.from('Session limit reached until 5pm'));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(events).toEqual([{
+      type: 'result',
+      text: 'Provider usage limit reached.',
+    }]);
+    expect(killSessionTree).toHaveBeenCalledTimes(1);
   });
 
   it('does not start a second child reap when the terminal result handler already shuts down the session', async () => {
