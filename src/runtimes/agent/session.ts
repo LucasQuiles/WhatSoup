@@ -462,7 +462,21 @@ function resolveProviderParser(
     case 'claude-cli': return parseEvents;
     case 'codex-cli': return (line: string) => singleEventEnvelope(parseCodexEvent(line));
     case 'gemini-cli': return (line: string) => singleEventEnvelope(parseGeminiAcpEvent(line));
-    case 'opencode-cli': return (line: string) => singleEventEnvelope(openCodeParser.parse(line));
+    case 'opencode-cli': return (line: string) => {
+      const event = openCodeParser.parse(line);
+      if (event?.type === 'tool_result' && !event.isError && event.toolName) {
+        return [
+          {
+            type: 'tool_use',
+            toolName: event.toolName,
+            toolId: event.toolId,
+            toolInput: {},
+          },
+          event,
+        ];
+      }
+      return singleEventEnvelope(event);
+    };
     case 'openai-api':
     case 'anthropic-api':
       throw new Error(
