@@ -259,6 +259,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.setup` | `npm run setup` | `package.json` | stable | active | First-run setup wizard |
 | `cli:npm.auth` | `npm run auth` | `package.json` | stable | active | QR-code authentication flow (supervisor) |
 | `cli:npm.auth-instance` | `npm run auth:instance` | `package.json` | stable | active | QR-code authentication for a specific instance |
+| `cli:npm.agent-lease` | `npm run agent:lease` | `package.json` | stable | active | Atomic writer/lineage lease for multi-agent git work — `acquire`/`status`/`heartbeat`/`release`/`takeover`/`check-path`; exit 0 OK, 1 BLOCK, 2 INCONCLUSIVE |
 | `cli:npm.audit-instance-plugins` | `npm run audit:instance-plugins` | `package.json` | stable | active | Audit plugin allowlists across instances |
 | `cli:npm.backfill-enrichment` | `npm run backfill-enrichment` | `package.json` | stable | active | One-shot enrichment backfill |
 | `cli:npm.token-window` | `npm run token-window` | `package.json` | beta | active | Tokenomics pilot helper; reports rolling agent-token totals from an instance `bot.db` |
