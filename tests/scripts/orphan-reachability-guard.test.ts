@@ -98,6 +98,11 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   { path: 'src/lib/keyed-async-queue.ts', issue: '#1815', reason: 'test-only-wired primitive; no runtime importer' },
   { path: 'src/lib/status-reaction-controller.ts', issue: '#1823', reason: 'test-only-wired primitive; no runtime importer' },
   { path: 'src/lib/text-chunking.ts', issue: '#1821', reason: 'test-only-wired primitive; no runtime importer' },
+  // qpi harvest (owner-gated preserve): config-issue multi-line formatter salvaged
+  // from qpi/config-issue-format. No runtime consumer today (agent-config-validator
+  // is fail-fast/single-error). Owner-gated island — wire into a multi-issue config
+  // surface or remove; tracked by the #1871 dead-code inventory until then.
+  { path: 'src/lib/config-issue-format.ts', issue: '#1871', reason: 'qpi-harvest config-issue formatter; owner-gated preserve, no runtime importer' },
   // auth-loss durability signal modules: exist but the terminal-logout path
   // never writes the durable row, so nothing production imports the controller
   // subtree. Tracked by the durability-writer-invariant work; graduates when wired.
