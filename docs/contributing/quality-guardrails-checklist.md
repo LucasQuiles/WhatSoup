@@ -231,7 +231,20 @@ Main thread should `grep` to spot-check whenever a reviewer claims a previously-
 
 ⚠️ **Admin self-merge remains possible — deliberately.** R-02 closed the self-merge gap for *non-admins* by setting 1 required approval on the classic surface. It does **not** bind admins: classic `enforce_admins=false`, and the ruleset's `pull_request` rule (which does bind admins) still requires **0** approvals. So a repo admin can still merge their own PR. This is an accepted residual — raising the ruleset's approval count would block every solo merge on a single-maintainer repo. To close it fully, set the approval count on ruleset `16319133` instead.
 
-**Merge queue.** `quality.yml` triggers on `merge_group` and exempts queue runs from `cancel-in-progress` (cancelling a queue run ejects the PR). The queue **setting itself is not yet enabled** — enable it only after this trigger is on `main`, or every PR stalls waiting for a check that never runs. `whatsoup-guard.yml` is path-filtered and must therefore **never** be made a required context while a queue is enabled.
+**Merge queue — UNAVAILABLE on this repository (platform constraint).** Do not spend time trying to turn it on. GitHub's merge queue requires an **organization-owned** repository; `LucasQuiles/WhatSoup` is public but `owner.type=User`, so the `merge_queue` ruleset rule is rejected outright:
+
+```
+PUT /repos/LucasQuiles/WhatSoup/rulesets/16319133
+-> HTTP 422 {"errors":["Invalid rule 'merge_queue': "]}
+```
+
+Verified 2026-07-22: rejected **both** with explicit parameters and with none, so it is not a parameter-tuning problem. It would only become available by transferring the repo to an organization.
+
+`quality.yml` nevertheless **does** trigger on `merge_group` and exempts queue runs from `cancel-in-progress` (cancelling a queue run reports a cancelled required check and ejects the PR). That wiring is deliberately retained: it is inert while no queue exists, and it is the correct prerequisite if the repo ever moves to an org — the trigger must be on `main` *before* a queue is enabled, or every PR stalls waiting for a check that never runs.
+
+Two constraints to respect if a queue ever becomes possible:
+- `whatsoup-guard.yml` is path-filtered and must **never** be made a required context while a queue is live — a PR not touching those paths would never report it, stalling the queue.
+- `CodeQL` is GitHub-managed default setup (it runs as event `dynamic`, with no in-repo workflow), so its behaviour on a `merge_group` ref cannot be configured or verified in advance. Treat enabling a queue as a canary exercise on a single low-risk PR, not a fleet-wide switch.
 
 **Action pinning.** All external action `uses:` refs are pinned to 40-hex commit SHAs (R-03, PR #2024) — verified 14/14 pinned, 0 mutable `@vN` tags.
 
