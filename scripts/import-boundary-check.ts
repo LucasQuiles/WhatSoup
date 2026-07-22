@@ -457,6 +457,18 @@ export function run(
 
   const repoRoot = args.root;
 
+  // Refuse to certify a tree we never examined. `collectSourceFiles` returns [] when `src/`
+  // is absent, so running this against an empty or wrong directory printed "import boundary
+  // check passed (no violations)" and exited 0 — a false green for a severity:'block' rule
+  // (arch.import-boundaries). A renamed or missing `src/` is exactly the case where the
+  // boundary rule stops being enforced, so it must be loud rather than silently clean.
+  if (!existsSync(path.join(repoRoot, 'src'))) {
+    throw new Error(
+      `import boundary check INCONCLUSIVE — no src/ under ${repoRoot}; refusing to report ` +
+        '"passed" for a tree that was never examined',
+    );
+  }
+
   if (args.mode === 'report') {
     printReport(repoRoot);
     return { allViolations: [], newViolations: [], baselinedViolations: [] };
@@ -509,7 +521,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   try {
     run();
   } catch (err) {
-    console.error((err as Error).message);
-    process.exitCode = 1;
+    const message = (err as Error).message;
+    console.error(message);
+    // Exit 2 for "I could not examine the tree" so it is distinguishable from exit 1,
+    // "I examined it and found a violation". An operator who cannot tell those apart will
+    // go looking for an import violation that does not exist.
+    process.exitCode = /INCONCLUSIVE/.test(message) ? 2 : 1;
   }
 }
