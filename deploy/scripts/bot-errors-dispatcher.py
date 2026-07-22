@@ -47,6 +47,10 @@ RECOVERY_DUPLICATE_SUPPRESSION_REASON = (
     "duplicate recovery/info event retained as audit-only; "
     "earliest matching event in the dedupe window remains dispatchable"
 )
+RECOVERED_BEFORE_DELIVERY_REASON = (
+    "incident recovered before its pending alert was delivered; "
+    "alert and clear retained as audit-only"
+)
 TEST_PROVENANCE_SUPPRESSION_REASON = "test-provenance event refused by dispatcher"
 TERMINAL_AUTH_FAILURE_CLASSES = {"pairing_required", "serverside_logout_irreversible"}
 LOGGED_OUT_REASON_KEY = "loggedout"
@@ -3879,6 +3883,84 @@ def move_suppressed_event(
     return suppressed_path
 
 
+def suppress_alerts_recovered_before_delivery(paths: dict[str, Path]) -> int:
+    """Retire queued alerts when a later clear proves recovery before delivery.
+
+    This closes the retry-ordering hole where a temporarily undeliverable alert
+    stays in ``outbox/``, its clear is orphan-suppressed, and the old alert pages
+    after service recovery. When an incident is already recorded as open, only
+    the undelivered duplicate alert is retired; its clear remains visible.
+    """
+    incident_state = load_incident_state(paths)
+    open_incidents = incident_state.get("openIncidents")
+    if not isinstance(open_incidents, dict):
+        open_incidents = {}
+
+    alerts_by_key: dict[str, list[tuple[Path, dict[str, Any], int]]] = {}
+    clears: list[tuple[Path, dict[str, Any], int]] = []
+    for path in sorted(paths["outbox"].glob("*.json")):
+        try:
+            event = read_json(path)
+        except Exception:
+            continue
+        epoch = event_created_epoch(event)
+        if epoch is None:
+            continue
+        if is_incident_alert(event):
+            alerts_by_key.setdefault(incident_key(event), []).append((path, event, epoch))
+        elif is_incident_clear(event) and ready(path, paths["quarantine"]):
+            clears.append((path, event, epoch))
+
+    suppressed = 0
+    for clear_path, clear_event, clear_epoch in sorted(clears, key=lambda row: (row[2], str(row[0]))):
+        key = incident_key(clear_event)
+        if not clear_path.exists():
+            continue
+        pending_alerts = [
+            record for record in alerts_by_key.get(key, [])
+            if record[0].exists()
+            and record[2] <= clear_epoch
+            and not ready(record[0], paths["quarantine"])
+        ]
+        if not pending_alerts:
+            continue
+
+        alert_ids: list[str] = []
+        for alert_path, alert_event, _alert_epoch in pending_alerts:
+            move_suppressed_event(
+                alert_path,
+                paths,
+                alert_event,
+                RECOVERED_BEFORE_DELIVERY_REASON,
+                "recovered_before_delivery_alert_suppressed",
+            )
+            alert_ids.append(str(alert_event.get("id") or "unknown"))
+            suppressed += 1
+
+        clear_will_dispatch = key in open_incidents
+        if not clear_will_dispatch:
+            move_suppressed_event(
+                clear_path,
+                paths,
+                clear_event,
+                RECOVERED_BEFORE_DELIVERY_REASON,
+                "recovered_before_delivery_clear_suppressed",
+            )
+            suppressed += 1
+        append_dispatch_log(paths, {
+            "type": "recovered_before_delivery",
+            "incidentKey": key,
+            "alertEventIds": alert_ids,
+            "clearEventId": clear_event.get("id"),
+            "clearCreatedAtEpoch": clear_epoch,
+            "clearWillDispatch": clear_will_dispatch,
+        })
+        alerts_by_key[key] = [
+            record for record in alerts_by_key.get(key, []) if record[0].exists()
+        ]
+    return suppressed
+
+
 def suppress_ready_recovery_duplicates(paths: dict[str, Path]) -> int:
     window = recovery_dedupe_window_seconds()
     groups: dict[str, list[tuple[Path, dict[str, Any], int]]] = {}
@@ -4555,10 +4637,11 @@ def run_once(max_events: int) -> dict[str, Any]:
         # consumes members. Emits consolidated flap_storm alerts; members are
         # suppressed downstream in should_suppress_send via persisted flapState.
         flap_storms = flap_scan_outbox(paths)
+        recovered_before_delivery = suppress_alerts_recovered_before_delivery(paths)
         storm_collapsed = collapse_ready_storms(paths)
         processed = 0
         sent = 0
-        suppressed = test_provenance_suppressed + recovery_deduped
+        suppressed = test_provenance_suppressed + recovery_deduped + recovered_before_delivery
         failed = 0
         test_leak_dropped = 0
         last_error = None
@@ -4629,6 +4712,7 @@ def run_once(max_events: int) -> dict[str, Any]:
             testProvenanceSuppressed=test_provenance_suppressed,
             testProvenanceMetaAlerted=test_provenance_meta_alerted,
             recoveryDeduped=recovery_deduped,
+            recoveredBeforeDelivery=recovered_before_delivery,
             stormCollapsed=storm_collapsed,
             flapStorms=flap_storms,
             flapResolved=flap_resolved,
@@ -4650,6 +4734,7 @@ def run_once(max_events: int) -> dict[str, Any]:
             "testProvenanceSuppressed": test_provenance_suppressed,
             "testProvenanceMetaAlerted": test_provenance_meta_alerted,
             "recoveryDeduped": recovery_deduped,
+            "recoveredBeforeDelivery": recovered_before_delivery,
             "stormCollapsed": storm_collapsed,
             "flapStorms": flap_storms,
             "flapResolved": flap_resolved,
