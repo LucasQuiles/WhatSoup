@@ -15,13 +15,13 @@ describe('fallback chain helpers', () => {
           'opencode-cli',
           {},
           { provider: '   ' },
-          { provider: ' opencode-cli ', model: ' minimax/MiniMax-M2 ' },
-          { provider: ' openai-api ', model: '   ' },
+          { provider: ' opencode-cli ', model: ' minimax/MiniMax-M2 ', dataPolicy: 'trusted' },
+          { provider: ' openai-api ', model: '   ', dataPolicy: 'restricted' },
         ],
       }),
     ).toEqual([
-      { provider: 'opencode-cli', model: 'minimax/MiniMax-M2' },
-      { provider: 'openai-api' },
+      { provider: 'opencode-cli', model: 'minimax/MiniMax-M2', dataPolicy: 'trusted' },
+      { provider: 'openai-api', dataPolicy: 'restricted' },
     ]);
   });
 
@@ -32,8 +32,9 @@ describe('fallback chain helpers', () => {
       normalizeFallbackEntriesFromAgentOptions({
         fallbackProvider: ' opencode-cli ',
         fallbackModel: ' minimax/MiniMax-M2 ',
+        fallbackDataPolicy: ' trusted ',
       }),
-    ).toEqual([{ provider: 'opencode-cli', model: 'minimax/MiniMax-M2' }]);
+    ).toEqual([{ provider: 'opencode-cli', model: 'minimax/MiniMax-M2', dataPolicy: 'trusted' }]);
     expect(
       normalizeFallbackEntriesFromInstanceConfig({
         agentOptions: {

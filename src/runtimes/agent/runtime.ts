@@ -47,6 +47,13 @@ import {
   type AgentFallbackEntry,
 } from '../../core/fallback-chain.ts';
 import {
+  ProviderDataPolicyError,
+  providerRoutePolicyKey,
+  resolveProviderRoutePolicy,
+  type ProviderBoundaryMode,
+  type ProviderDataPolicy,
+} from '../../core/provider-data-policy.ts';
+import {
   createReplyGuaranteeLivenessSender,
   DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS,
   ReplyGuaranteeManager,
@@ -830,6 +837,8 @@ export class AgentRuntime implements Runtime {
   private readonly autoCompactInputTokens: number | undefined;
   private readonly agentProvider: string;
   private readonly agentProviderConfig: Record<string, unknown> | undefined;
+  private readonly agentDataPolicy: ProviderDataPolicy | null;
+  private readonly providerBoundaryMode: ProviderBoundaryMode;
   // Automatic provider fallback (claude-cli → opencode-cli etc.) on usage limit.
   // The legacy scalar pair is normalized as entry zero for compatibility.
   private readonly agentFallbacks: AgentFallbackEntry[];
@@ -2450,15 +2459,16 @@ export class AgentRuntime implements Runtime {
     this.replyGuaranteeTimeoutMs = options?.replyGuaranteeTimeoutMs ?? DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS;
     this.agentProvider = config.agentProvider;
     this.agentProviderConfig = config.agentProviderConfig;
+    this.agentDataPolicy = config.agentProviderDataPolicy ?? null;
+    this.providerBoundaryMode = config.agentProviderBoundaryMode ?? 'shadow';
     const configuredFallbacks = Array.isArray(config.agentFallbacks)
       ? config.agentFallbacks
       : normalizeFallbackEntriesFromAgentOptions({
           fallbackProvider: config.agentFallbackProvider,
           fallbackModel: config.agentFallbackModel,
+          fallbackDataPolicy: config.agentFallbackDataPolicy,
         });
-    this.agentFallbacks = configuredFallbacks.map((entry) =>
-      entry.model ? { provider: entry.provider, model: entry.model } : { provider: entry.provider },
-    );
+    this.agentFallbacks = configuredFallbacks.map((entry) => ({ ...entry }));
     this.registry = new ToolRegistry();
     this.registerAllTools();
     this.catalogueSnapshot = createCatalogueSnapshotCache();
@@ -8326,7 +8336,9 @@ export class AgentRuntime implements Runtime {
     // resolution failure must degrade to the default route and NEVER drop a
     // turn — so the pin probe is inside this guard, not just the pref read.
     try {
-      const pref = actorJid ? this.loadSenderPreference(chatJid, actorJid) : null;
+      const pref = this.nlRoutingEnabled && actorJid
+        ? this.loadSenderPreference(chatJid, actorJid)
+        : null;
       const pinned = pref?.intent === 'provider_specific' ? pref.requestedProvider : null;
       // The tier provider this pref maps to (if any) is probed for routability
       // the same way a pin is — an ineligible tier degrades to the default
@@ -8335,11 +8347,17 @@ export class AgentRuntime implements Runtime {
         pref?.intent === 'strongest' ? config.nlRoutingTiers?.strongest
         : pref?.intent === 'fastest' ? config.nlRoutingTiers?.fastest
         : undefined;
-      const routable = this.routablePinTargets();
-      const decision = resolveRoute({
+      const fallbackEntry = this.effectiveFallbackEntry;
+      // Health-window fallback and unconfigured/NL-disabled routes do not need
+      // a credential probe. Avoid making an unrelated probe a prerequisite for
+      // selecting the already-known exact route.
+      const routable = fallbackEntry === null && pref !== null
+        ? this.routablePinTargets()
+        : [this.agentProvider];
+      let decision = resolveRoute({
         agentProvider: this.agentProvider,
         effectiveModel: this.effectiveModel,
-        fallbackEntry: this.effectiveFallbackEntry,
+        fallbackEntry,
         pref,
         pinnedProviderEligible: pinned !== null && routable.includes(pinned),
         pinnedModelEligible: isPinnedModelEligible(
@@ -8347,7 +8365,7 @@ export class AgentRuntime implements Runtime {
           this.agentFallbacks,
           (entry) => this.isEntryCredentialed(entry),
         ),
-        tierMap: config.nlRoutingTiers,
+        tierMap: this.nlRoutingEnabled ? config.nlRoutingTiers : null,
         tierProviderEligible: tierProvider !== undefined && routable.includes(tierProvider),
         // Finding 2 fix: the same agentFallbacks entries that
         // routablePinTargets/isEntryCredentialed just read to prove a pin/tier
@@ -8357,6 +8375,9 @@ export class AgentRuntime implements Runtime {
         // `undefined`. First entry wins per provider, matching
         // routablePinTargets' own dedup.
         configuredModelByProvider: this.configuredModelByProvider(),
+        agentDataPolicy: this.agentDataPolicy,
+        boundaryMode: this.providerBoundaryMode,
+        configuredDataPolicyByRoute: this.configuredDataPolicyByRoute(),
       });
       // Task H — sync consumption of a verified model pin (decideModelPinResolution's
       // hot path: verified + same provider needs no catalogue, so this stays
@@ -8377,19 +8398,25 @@ export class AgentRuntime implements Runtime {
           decision.provider,
         );
         if (modelPinDecision.action === 'use') {
-          decision.model = modelPinDecision.modelId;
+          decision = Object.freeze({ ...decision, model: modelPinDecision.modelId });
         }
       }
       return { ...decision, pinnedProvider: pinned };
     } catch (err) {
+      if (err instanceof ProviderDataPolicyError) throw err;
       log.warn({ err, instance: this.instanceName }, 'route resolution failed - routing on default');
-      return {
+      const policy = resolveProviderRoutePolicy({
         provider: this.agentProvider,
-        model: this.effectiveModel,
+        model: this.model,
+        dataPolicy: this.agentDataPolicy,
+        boundaryMode: this.providerBoundaryMode,
+      });
+      return Object.freeze({
+        ...policy,
         source: 'default',
         reasonCode: 'route_resolution_failed',
         pinnedProvider: null,
-      };
+      });
     }
   }
 
@@ -8536,6 +8563,16 @@ export class AgentRuntime implements Runtime {
       models[entry.provider] = entry.model;
     }
     return models;
+  }
+
+  private configuredDataPolicyByRoute(): Record<string, ProviderDataPolicy | undefined> {
+    const policies: Record<string, ProviderDataPolicy | undefined> = {};
+    for (const entry of this.agentFallbacks) {
+      const key = providerRoutePolicyKey(entry.provider, entry.model);
+      if (key in policies) continue;
+      policies[key] = entry.dataPolicy;
+    }
+    return policies;
   }
 
   /**
@@ -10892,15 +10929,15 @@ export class AgentRuntime implements Runtime {
     eventToolScopeKey?: string;
   }): SessionManager {
     const conversationKey = toConversationKey(opts.chatJid);
-    // Slice-2 routing wiring (flag-gated): preferences steer the session being
-    // spawned; flag off keeps the exact base expressions below.
-    const route = config.nlRouting ? this.resolveRouteForTurn(opts.chatJid, opts.actorJid) : null;
-    if (route) this.noteRouteAtSpawn(opts.chatJid, conversationKey, route);
+    // Resolve the provider/model/policy tuple for every session. NL preferences
+    // remain flag-gated inside resolveRouteForTurn; policy admission does not.
+    const route = this.resolveRouteForTurn(opts.chatJid, opts.actorJid);
+    if (this.nlRoutingEnabled) this.noteRouteAtSpawn(opts.chatJid, conversationKey, route);
     // F-STICKY-ACTOR (QR-247 hardening): wire the per-chat actor socket HERE — the
     // single choke point every spawn path (ensure / proactive-resume / provider-
     // fallback) flows through — keyed on the session's ACTUAL provider, not the
     // instance-global one. A fallback to a non-claude provider tears the socket down.
-    const sessionProvider = route ? route.provider : this.effectiveProvider;
+    const sessionProvider = route.provider;
     const perChatWire = this.wirePerChatActorSocket(opts.chatJid, sessionProvider);
     const mcpSocketPath = opts.mcpSocketPath ?? perChatWire?.mcpSocketPath;
     const providerConfigOverride = opts.providerConfigOverride ?? perChatWire?.providerConfigOverride;
@@ -10941,19 +10978,20 @@ export class AgentRuntime implements Runtime {
       configRoot: this.sandboxPerChat && opts.cwd ? join(opts.cwd, '.agent-home') : undefined,
       configSystemPrompt: this.configSystemPrompt,
       instructionsPath: this.instructionsPath,
-      model: route ? route.model : this.effectiveModel,
+      model: route.model,
       pluginDirs: this.pluginDirs,
       allowM365Mutations: this.allowM365Mutations,
-      provider: route ? route.provider : this.effectiveProvider,
+      provider: route.provider,
       providerConfig: providerConfigOverride
-        ? { ...(route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig()), ...providerConfigOverride }
-        : (route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig()),
+        ? { ...this.routeSessionProviderConfig(route), ...providerConfigOverride }
+        : this.routeSessionProviderConfig(route),
       mcpBridge: createProviderMcpBridge(this.registry, providerToolSession),
       mcpSessionContext: providerToolSession,
       whatsoupInstance: this.instanceName,
       whatsoupMcpSocket: mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,
-      handoffSystemBlock: this.buildHandoffSystemBlock(conversationKey, route ? route.provider : this.effectiveProvider),
-      routingSystemBlock: config.nlRouting ? () => this.buildRoutingContractBlock(route ? route.provider : this.effectiveProvider) : undefined,
+      routePolicy: route,
+      handoffSystemBlock: this.buildHandoffSystemBlock(conversationKey, route.provider),
+      routingSystemBlock: this.nlRoutingEnabled ? () => this.buildRoutingContractBlock(route.provider) : undefined,
       egressProxyPort: this.egressProxy?.port,
       providerExecutionGate: this.providerExecutionGate,
     });
