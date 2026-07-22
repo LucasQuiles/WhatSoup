@@ -8,6 +8,7 @@ import {
   admitRiskClassificationReceipt,
   createRiskClassificationReceipt,
   MAX_CLASSIFICATION_RECEIPT_BYTES,
+  matchesSameProcessRiskClassificationAdmission,
   RiskClassificationReceiptError,
   riskClassificationEvidenceDigest,
   serializeRiskClassification,
@@ -17,7 +18,10 @@ import type {
   RiskClassificationV1,
 } from '../../scripts/lib/ci-control/classifier.ts';
 import { digestControlManifest, loadControlManifest } from '../../scripts/lib/ci-control/manifest.ts';
-import { canonicalizeBoundaryRun } from '../../scripts/lib/verification/boundary-run/shared.ts';
+import {
+  canonicalizeBoundaryRun,
+  sha256Bytes,
+} from '../../scripts/lib/verification/boundary-run/shared.ts';
 
 const projectRoot = resolve(import.meta.dirname, '../..');
 const temporaryRoots: string[] = [];
@@ -123,7 +127,277 @@ function changedHex(value: string): string {
   return `${value.slice(0, index)}${replacement}${value.slice(index + 1)}`;
 }
 
+function invokeWithReplacedMethod<T>(
+  target: object,
+  key: PropertyKey,
+  replacement: (...args: unknown[]) => unknown,
+  operation: () => T,
+): { ok: true; value: T } | { ok: false; error: unknown } {
+  const descriptor = Object.getOwnPropertyDescriptor(target, key);
+  if (descriptor === undefined) throw new Error('expected method descriptor');
+  Object.defineProperty(target, key, { ...descriptor, value: replacement });
+  try {
+    return { ok: true, value: operation() };
+  } catch (error) {
+    return { ok: false, error };
+  } finally {
+    Object.defineProperty(target, key, descriptor);
+  }
+}
+
 describe('strict exact-classification admission', () => {
+  it('privately recognizes only genuine same-process report-only admission wrappers', () => {
+    const { root, trustedInput } = fixture();
+    const created = createRiskClassificationReceipt(root, trustedInput);
+    const admitted = admitRiskClassificationReceipt(root, trustedInput, created.receiptBytes);
+
+    expect(matchesSameProcessRiskClassificationAdmission(created)).toBe(true);
+    expect(matchesSameProcessRiskClassificationAdmission(admitted)).toBe(true);
+    expect(Object.isFrozen(created)).toBe(true);
+    expect(Object.isFrozen(admitted)).toBe(true);
+    expect(Object.isExtensible(created)).toBe(false);
+    expect(Object.getOwnPropertyDescriptors(created)).toMatchObject({
+      authorization: { enumerable: true, configurable: false, writable: false },
+      classification: { enumerable: true, configurable: false, writable: false },
+      receiptBytes: { enumerable: true, configurable: false, writable: false },
+      evidenceDigest: { enumerable: true, configurable: false, writable: false },
+    });
+    expect(created.authorization).toBe('report-only');
+    expect(admitted.authorization).toBe('report-only');
+    expect(Reflect.ownKeys(created)).toEqual([
+      'authorization',
+      'classification',
+      'receiptBytes',
+      'evidenceDigest',
+    ]);
+    expect('decision' in created).toBe(false);
+    expect('exitCode' in created).toBe(false);
+  });
+
+  it('rejects cloned and coherently reconstructed wrappers despite identical public values', () => {
+    const { root, trustedInput } = fixture();
+    const created = createRiskClassificationReceipt(root, trustedInput);
+    const cloned = structuredClone(created);
+    const reconstructed = {
+      authorization: created.authorization,
+      classification: created.classification,
+      receiptBytes: created.receiptBytes,
+      evidenceDigest: created.evidenceDigest,
+    };
+    const detachedReconstruction = {
+      authorization: created.authorization,
+      classification: structuredClone(created.classification),
+      receiptBytes: Uint8Array.from(created.receiptBytes),
+      evidenceDigest: created.evidenceDigest,
+    };
+
+    expect(cloned).toEqual(created);
+    expect(reconstructed).toEqual(created);
+    expect(detachedReconstruction).toEqual(created);
+    expect(matchesSameProcessRiskClassificationAdmission(cloned)).toBe(false);
+    expect(matchesSameProcessRiskClassificationAdmission(reconstructed)).toBe(false);
+    expect(matchesSameProcessRiskClassificationAdmission(detachedReconstruction)).toBe(false);
+  });
+
+  it('rejects hostile unbranded values without invoking their properties', () => {
+    let getterCalls = 0;
+    let proxyTrapCalls = 0;
+    const hostile = Object.create({ inherited: true }) as Record<PropertyKey, unknown>;
+    for (const key of ['authorization', 'classification', 'receiptBytes', 'evidenceDigest']) {
+      Object.defineProperty(hostile, key, {
+        enumerable: true,
+        get: () => {
+          getterCalls += 1;
+          throw new Error('unbranded admission fields must not be read');
+        },
+      });
+    }
+    Object.defineProperty(hostile, Symbol('foreign'), {
+      enumerable: true,
+      get: () => {
+        getterCalls += 1;
+        throw new Error('unbranded admission symbols must not be read');
+      },
+    });
+    const hostileProxy = new Proxy({}, {
+      get: () => {
+        proxyTrapCalls += 1;
+        throw new Error('unbranded proxy fields must not be read');
+      },
+      getOwnPropertyDescriptor: () => {
+        proxyTrapCalls += 1;
+        throw new Error('unbranded proxy descriptors must not be read');
+      },
+      getPrototypeOf: () => {
+        proxyTrapCalls += 1;
+        throw new Error('unbranded proxy prototype must not be read');
+      },
+      ownKeys: () => {
+        proxyTrapCalls += 1;
+        throw new Error('unbranded proxy keys must not be read');
+      },
+    });
+
+    expect(matchesSameProcessRiskClassificationAdmission(hostile)).toBe(false);
+    expect(matchesSameProcessRiskClassificationAdmission(hostileProxy)).toBe(false);
+    expect(matchesSameProcessRiskClassificationAdmission(null)).toBe(false);
+    expect(matchesSameProcessRiskClassificationAdmission('report-only')).toBe(false);
+    expect(getterCalls).toBe(0);
+    expect(proxyTrapCalls).toBe(0);
+  });
+
+  it('invalidates a genuine admission after receipt-byte mutation and keeps root fields immutable', () => {
+    const { root, trustedInput } = fixture();
+    const created = createRiskClassificationReceipt(root, trustedInput);
+
+    expect(matchesSameProcessRiskClassificationAdmission(created)).toBe(true);
+    expect(() => Object.defineProperty(created, 'authorization', { value: 'pass' })).toThrowError(TypeError);
+    expect(() => Object.defineProperty(created, 'receiptBytes', { value: Uint8Array.from(created.receiptBytes) }))
+      .toThrowError(TypeError);
+    created.receiptBytes[0] = created.receiptBytes[0] === 0x7b ? 0x5b : 0x7b;
+    expect(matchesSameProcessRiskClassificationAdmission(created)).toBe(false);
+    expect(created.authorization).toBe('report-only');
+  });
+
+  it('returns false without throwing after a genuine receipt buffer is detached', () => {
+    const { root, trustedInput } = fixture();
+    const created = createRiskClassificationReceipt(root, trustedInput);
+
+    expect(matchesSameProcessRiskClassificationAdmission(created)).toBe(true);
+    structuredClone(created.receiptBytes, { transfer: [created.receiptBytes.buffer] });
+    expect(created.receiptBytes.byteLength).toBe(0);
+    expect(() => matchesSameProcessRiskClassificationAdmission(created)).not.toThrow();
+    expect(matchesSameProcessRiskClassificationAdmission(created)).toBe(false);
+  });
+
+  it('uses captured WeakMap and Uint8Array primordials for the private binding boundary', () => {
+    const { root, trustedInput } = fixture();
+    const created = createRiskClassificationReceipt(root, trustedInput);
+
+    const getResult = invokeWithReplacedMethod(
+      WeakMap.prototype,
+      'get',
+      () => { throw new Error('dynamic WeakMap#get must not run'); },
+      () => matchesSameProcessRiskClassificationAdmission(created),
+    );
+    expect(getResult).toEqual({ ok: true, value: true });
+
+    const setResult = invokeWithReplacedMethod(
+      WeakMap.prototype,
+      'set',
+      () => { throw new Error('dynamic WeakMap#set must not run'); },
+      () => createRiskClassificationReceipt(root, trustedInput),
+    );
+    expect(setResult.ok).toBe(true);
+    if (setResult.ok) {
+      expect(matchesSameProcessRiskClassificationAdmission(setResult.value)).toBe(true);
+    }
+
+    const typedArraySetResult = invokeWithReplacedMethod(
+      Object.getPrototypeOf(Uint8Array.prototype) as object,
+      'set',
+      () => { throw new Error('dynamic Uint8Array#set must not run'); },
+      () => admitRiskClassificationReceipt(root, trustedInput, created.receiptBytes),
+    );
+    expect(typedArraySetResult.ok).toBe(true);
+    if (typedArraySetResult.ok) {
+      expect(matchesSameProcessRiskClassificationAdmission(typedArraySetResult.value)).toBe(true);
+    }
+  });
+
+  it('uses captured Reflect.apply for every same-process admission intrinsic call', () => {
+    const { root, trustedInput } = fixture();
+    const created = createRiskClassificationReceipt(root, trustedInput);
+    const originalReflectApply = Reflect.apply;
+    const originalWeakMapGet = WeakMap.prototype.get;
+    const reconstructed = Object.freeze({
+      authorization: created.authorization,
+      classification: created.classification,
+      receiptBytes: created.receiptBytes,
+      evidenceDigest: created.evidenceDigest,
+    });
+    const forgedBinding = Object.freeze({
+      classification: reconstructed.classification,
+      receiptBytes: reconstructed.receiptBytes,
+      evidenceDigest: reconstructed.evidenceDigest,
+      receiptBytesDigest: sha256Bytes(reconstructed.receiptBytes),
+    });
+
+    const forgeryResult = invokeWithReplacedMethod(
+      Reflect,
+      'apply',
+      (...call) => {
+        const [target, thisArgument, argumentsList] = call;
+        if (target === originalWeakMapGet) return forgedBinding;
+        return originalReflectApply(
+          target as (...parameters: unknown[]) => unknown,
+          thisArgument,
+          argumentsList as ArrayLike<unknown>,
+        );
+      },
+      () => matchesSameProcessRiskClassificationAdmission(reconstructed),
+    );
+    expect(forgeryResult).toEqual({ ok: true, value: false });
+
+    const genuineResult = invokeWithReplacedMethod(
+      Reflect,
+      'apply',
+      () => { throw new Error('dynamic Reflect.apply must not run'); },
+      () => {
+        const createdUnderPatch = createRiskClassificationReceipt(root, trustedInput);
+        const admittedUnderPatch = admitRiskClassificationReceipt(
+          root,
+          trustedInput,
+          createdUnderPatch.receiptBytes,
+        );
+        return {
+          created: matchesSameProcessRiskClassificationAdmission(createdUnderPatch),
+          admitted: matchesSameProcessRiskClassificationAdmission(admittedUnderPatch),
+        };
+      },
+    );
+    expect(genuineResult).toEqual({
+      ok: true,
+      value: { created: true, admitted: true },
+    });
+  });
+
+  it('uses captured Uint8Array factory and constructor for exact admission bytes', () => {
+    const { root, trustedInput } = fixture();
+    const baseline = createRiskClassificationReceipt(root, trustedInput);
+    const expectedBytes = Buffer.from(baseline.receiptBytes);
+
+    const factoryResult = invokeWithReplacedMethod(
+      Object.getPrototypeOf(Uint8Array) as object,
+      'from',
+      () => { throw new Error('dynamic Uint8Array.from must not run'); },
+      () => {
+        const created = createRiskClassificationReceipt(root, trustedInput);
+        const admitted = admitRiskClassificationReceipt(root, trustedInput, baseline.receiptBytes);
+        return { created, admitted };
+      },
+    );
+    expect(factoryResult.ok).toBe(true);
+    if (factoryResult.ok) {
+      expect(Buffer.from(factoryResult.value.created.receiptBytes)).toEqual(expectedBytes);
+      expect(Buffer.from(factoryResult.value.admitted.receiptBytes)).toEqual(expectedBytes);
+      expect(matchesSameProcessRiskClassificationAdmission(factoryResult.value.created)).toBe(true);
+      expect(matchesSameProcessRiskClassificationAdmission(factoryResult.value.admitted)).toBe(true);
+    }
+
+    const constructorResult = invokeWithReplacedMethod(
+      globalThis,
+      'Uint8Array',
+      () => { throw new Error('dynamic Uint8Array constructor must not run'); },
+      () => admitRiskClassificationReceipt(root, trustedInput, baseline.receiptBytes),
+    );
+    expect(constructorResult.ok).toBe(true);
+    if (constructorResult.ok) {
+      expect(Buffer.from(constructorResult.value.receiptBytes)).toEqual(expectedBytes);
+      expect(matchesSameProcessRiskClassificationAdmission(constructorResult.value)).toBe(true);
+    }
+  });
+
   it('creates and admits stable canonical low-risk evidence as detached report-only snapshots', () => {
     const { root, trustedInput } = fixture();
     const created = createRiskClassificationReceipt(root, trustedInput);

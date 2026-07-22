@@ -35,17 +35,19 @@ export class RiskClassificationReceiptError extends Error {
 }
 
 export interface AdmittedRiskClassificationV1 {
-  authorization: 'report-only';
-  classification: Readonly<RiskClassificationV1>;
-  receiptBytes: Uint8Array;
-  evidenceDigest: string;
+  readonly authorization: 'report-only';
+  readonly classification: Readonly<RiskClassificationV1>;
+  readonly receiptBytes: Uint8Array;
+  readonly evidenceDigest: string;
 }
 
 const EXACT_INPUT_KEYS = ['baseOid', 'candidateOid', 'eventName', 'manifestDigest', 'mergeOid'] as const;
 const EVENTS = new Set(['pull_request', 'merge_group', 'push', 'tag', 'local']);
 const OID = /^[0-9a-f]{40}$/;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
-const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(Uint8Array.prototype) as object;
+const REFLECT_APPLY = Reflect.apply;
+const UINT8_ARRAY_CONSTRUCTOR = Uint8Array;
+const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(UINT8_ARRAY_CONSTRUCTOR.prototype) as object;
 const TYPED_ARRAY_BYTE_LENGTH = Object.getOwnPropertyDescriptor(
   TYPED_ARRAY_PROTOTYPE,
   'byteLength',
@@ -54,6 +56,23 @@ const TYPED_ARRAY_TO_STRING_TAG = Object.getOwnPropertyDescriptor(
   TYPED_ARRAY_PROTOTYPE,
   Symbol.toStringTag,
 )?.get;
+const UINT8_ARRAY_FROM = UINT8_ARRAY_CONSTRUCTOR.from;
+const UINT8_ARRAY_SET = UINT8_ARRAY_CONSTRUCTOR.prototype.set;
+const WEAK_MAP_GET = WeakMap.prototype.get;
+const WEAK_MAP_SET = WeakMap.prototype.set;
+const ADMISSION_KEYS = [
+  'authorization',
+  'classification',
+  'receiptBytes',
+  'evidenceDigest',
+] as const;
+interface SameProcessAdmissionBinding {
+  classification: Readonly<RiskClassificationV1>;
+  receiptBytes: Uint8Array;
+  evidenceDigest: string;
+  receiptBytesDigest: string;
+}
+const SAME_PROCESS_ADMISSIONS = new WeakMap<object, Readonly<SameProcessAdmissionBinding>>();
 
 function fail(code: RiskClassificationReceiptErrorCode): never {
   throw new RiskClassificationReceiptError(code);
@@ -64,10 +83,10 @@ function snapshotReceiptBytes(receiptBytes: Uint8Array): Uint8Array {
   try {
     if (TYPED_ARRAY_BYTE_LENGTH === undefined
       || TYPED_ARRAY_TO_STRING_TAG === undefined
-      || Reflect.apply(TYPED_ARRAY_TO_STRING_TAG, receiptBytes, []) !== 'Uint8Array') {
+      || REFLECT_APPLY(TYPED_ARRAY_TO_STRING_TAG, receiptBytes, []) !== 'Uint8Array') {
       fail('ci.classification.receipt.malformed');
     }
-    byteLength = Reflect.apply(TYPED_ARRAY_BYTE_LENGTH, receiptBytes, []) as number;
+    byteLength = REFLECT_APPLY(TYPED_ARRAY_BYTE_LENGTH, receiptBytes, []) as number;
   } catch (error) {
     if (error instanceof RiskClassificationReceiptError) throw error;
     fail('ci.classification.receipt.malformed');
@@ -75,9 +94,9 @@ function snapshotReceiptBytes(receiptBytes: Uint8Array): Uint8Array {
   if (byteLength > MAX_CLASSIFICATION_RECEIPT_BYTES) {
     fail('ci.classification.receipt.byte-budget');
   }
-  const snapshot = new Uint8Array(byteLength);
+  const snapshot = new UINT8_ARRAY_CONSTRUCTOR(byteLength);
   try {
-    Reflect.apply(Uint8Array.prototype.set, snapshot, [receiptBytes]);
+    REFLECT_APPLY(UINT8_ARRAY_SET, snapshot, [receiptBytes]);
   } catch {
     fail('ci.classification.receipt.malformed');
   }
@@ -148,7 +167,7 @@ export function serializeRiskClassification(
   if (bytes.byteLength > MAX_CLASSIFICATION_RECEIPT_BYTES) {
     fail('ci.classification.receipt.byte-budget');
   }
-  return Uint8Array.from(bytes);
+  return REFLECT_APPLY(UINT8_ARRAY_FROM, UINT8_ARRAY_CONSTRUCTOR, [bytes]) as Uint8Array;
 }
 
 export function riskClassificationEvidenceDigest(
@@ -170,12 +189,64 @@ function admittedResult(
   canonicalBytes: Uint8Array,
 ): AdmittedRiskClassificationV1 {
   const classification = detachedClassification(canonicalBytes);
-  return {
+  const receiptBytes = REFLECT_APPLY(
+    UINT8_ARRAY_FROM,
+    UINT8_ARRAY_CONSTRUCTOR,
+    [canonicalBytes],
+  ) as Uint8Array;
+  const evidenceDigest = riskClassificationEvidenceDigest(
+    trustedInput,
+    classification as RiskClassificationV1,
+  );
+  const result = Object.freeze({
     authorization: 'report-only',
     classification,
-    receiptBytes: Uint8Array.from(canonicalBytes),
-    evidenceDigest: riskClassificationEvidenceDigest(trustedInput, classification as RiskClassificationV1),
-  };
+    receiptBytes,
+    evidenceDigest,
+  } satisfies AdmittedRiskClassificationV1);
+  REFLECT_APPLY(WEAK_MAP_SET, SAME_PROCESS_ADMISSIONS, [result, Object.freeze({
+    classification,
+    receiptBytes,
+    evidenceDigest,
+    receiptBytesDigest: sha256Bytes(receiptBytes),
+  })]);
+  return result;
+}
+
+export function matchesSameProcessRiskClassificationAdmission(
+  value: unknown,
+): value is AdmittedRiskClassificationV1 {
+  if (value === null || typeof value !== 'object') return false;
+  try {
+    const binding = REFLECT_APPLY(
+      WEAK_MAP_GET,
+      SAME_PROCESS_ADMISSIONS,
+      [value],
+    ) as Readonly<SameProcessAdmissionBinding> | undefined;
+    if (binding === undefined) return false;
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== ADMISSION_KEYS.length
+      || keys.some((key) => typeof key !== 'string' || !ADMISSION_KEYS.includes(key as typeof ADMISSION_KEYS[number]))) {
+      return false;
+    }
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    if (Object.keys(descriptors).length !== ADMISSION_KEYS.length) return false;
+    for (const key of ADMISSION_KEYS) {
+      const descriptor = descriptors[key];
+      if (descriptor === undefined
+        || !('value' in descriptor)
+        || descriptor.enumerable !== true
+        || descriptor.configurable !== false
+        || descriptor.writable !== false) return false;
+    }
+    return descriptors.authorization?.value === 'report-only'
+      && descriptors.classification?.value === binding.classification
+      && descriptors.receiptBytes?.value === binding.receiptBytes
+      && descriptors.evidenceDigest?.value === binding.evidenceDigest
+      && sha256Bytes(binding.receiptBytes) === binding.receiptBytesDigest;
+  } catch {
+    return false;
+  }
 }
 
 export function createRiskClassificationReceipt(
