@@ -521,6 +521,44 @@ describe('HealthPoller', () => {
     poller.stop();
   });
 
+  it('retains an open health-body alert when probe failures recover to the same degraded state', async () => {
+    const degraded = {
+      ok: true,
+      json: () => Promise.resolve({
+        status: 'degraded',
+        reason: 'runtime_agent_at_risk',
+        whatsapp: { connected: true, connection: { state: 'connected' } },
+      }),
+    };
+    mockFetch
+      .mockResolvedValueOnce(degraded)
+      .mockResolvedValueOnce(degraded)
+      .mockResolvedValueOnce(degraded)
+      .mockRejectedValueOnce(new Error('This operation was aborted'))
+      .mockRejectedValueOnce(new Error('This operation was aborted'))
+      .mockRejectedValueOnce(new Error('This operation was aborted'))
+      .mockResolvedValueOnce(degraded);
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 5_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(poller.getStatus('remote-1')!.activeAlertSources).toContain('health_body_degraded');
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(poller.getStatus('remote-1')!.status).toBe('unreachable');
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(poller.getStatus('remote-1')!.status).toBe('degraded');
+    expect(poller.getStatus('remote-1')!.activeAlertSources).toContain('health_body_degraded');
+    expectClearAlertSourceNotCalled('remote-1', 'health_body_degraded');
+
+    poller.stop();
+  });
+
   it('classifies health endpoint auth failures separately from reachability loss', async () => {
     mockFetch.mockResolvedValue({
       ok: false,

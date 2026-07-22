@@ -1456,7 +1456,7 @@ export class HealthPoller {
     if (newStatus !== prevStatus) {
       this.emitStatusChange(name, newStatus, prevStatus);
       if (newStatus !== 'logged_out' && prevStatus === 'unreachable') {
-        this.clearRecoveredAlert(name, existing, health);
+        this.clearRecoveredAlert(name, existing, health, alertSource);
       }
     }
 
@@ -1519,6 +1519,7 @@ export class HealthPoller {
     name: string,
     previous: InstanceStatus | undefined,
     currentHealth?: Record<string, unknown>,
+    currentAlertSource?: string,
   ): void {
     const prevStatus = previous?.status;
     const activeSources = new Set(previous?.activeAlertSources ?? []);
@@ -1531,6 +1532,10 @@ export class HealthPoller {
     if (sources.length === 0) return;
     const retainedSources: string[] = [];
     for (const source of sources) {
+      if (source === currentAlertSource) {
+        retainedSources.push(source);
+        continue;
+      }
       if (!this.shouldClearRecoveredSource(source, previous, currentHealth)) {
         retainedSources.push(source);
         log.info({ name, source }, 'recovered alert clear withheld until recovery proof is complete');
