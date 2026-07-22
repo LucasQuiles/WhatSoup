@@ -305,6 +305,77 @@ describe('SessionManager route policy admission', () => {
     expect(durability.getSessionCheckpoint('15550208')?.session_status).toBe('suspended');
   });
 
+  it.each([
+    {
+      name: 'another provider',
+      historicalProvider: 'claude-cli' as string | null,
+      currentJid: '15550211@s.whatsapp.net',
+      currentKey: '15550211',
+      historicalJid: '15550212@s.whatsapp.net',
+      historicalKey: '15550212',
+    },
+    {
+      name: 'a NULL provider namespace',
+      historicalProvider: null,
+      currentJid: '15550213@s.whatsapp.net',
+      currentKey: '15550213',
+      historicalJid: '15550214@s.whatsapp.net',
+      historicalKey: '15550214',
+    },
+  ])('does not retire through a historical session-ID row owned by $name', async ({
+    historicalProvider,
+    currentJid,
+    currentKey,
+    historicalJid,
+    historicalKey,
+  }) => {
+    const sessionId = `historical-namespace-${currentKey}`;
+    const insert = db.raw.prepare(
+      `INSERT INTO agent_sessions (
+         session_id, claude_pid, started_in_directory, chat_jid, workspace_key,
+         started_at, status, provider
+       ) VALUES (?, 0, '/tmp', ?, ?, datetime('now'), ?, ?)`,
+    );
+    const currentRowId = Number(insert.run(
+      sessionId,
+      currentJid,
+      currentKey,
+      'suspended',
+      'anthropic-api',
+    ).lastInsertRowid);
+    const historicalRowId = Number(insert.run(
+      sessionId,
+      historicalJid,
+      historicalKey,
+      'ended',
+      historicalProvider,
+    ).lastInsertRowid);
+    durability.upsertSessionCheckpoint(currentKey, {
+      sessionId,
+      sessionStatus: 'suspended',
+    });
+    const sm = new SessionManager({
+      db,
+      messenger: messenger(),
+      chatJid: currentJid,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      model: 'gpt-5',
+      routePolicy: route,
+    });
+    sm.setDurability(durability);
+
+    await expect(sm.spawnSession(sessionId)).rejects.toThrow(
+      'Provider session ownership is foreign, unknown, or ambiguous',
+    );
+    expect(db.raw.prepare('SELECT id, status FROM agent_sessions WHERE session_id = ? ORDER BY id')
+      .all(sessionId)).toEqual([
+      { id: currentRowId, status: 'suspended' },
+      { id: historicalRowId, status: 'ended' },
+    ]);
+    expect(durability.getSessionCheckpoint(currentKey)?.session_status).toBe('suspended');
+  });
+
   it('preserves the canonical ownership error when a foreign row has no checkpoint', async () => {
     const sessionId = 'foreign-provider-without-checkpoint';
     const inserted = db.raw.prepare(

@@ -1320,6 +1320,19 @@ export class SessionManager {
     existingRowId: number | undefined,
   ): { rowId: number; provider: string } | null {
     try {
+      const namespaces = this.db.raw.prepare(
+        `SELECT DISTINCT provider
+         FROM agent_sessions
+         WHERE session_id = ?`,
+      ).all(providerSessionId) as Array<{ provider: string | null }>;
+      if (
+        namespaces.length !== 1
+        || namespaces[0]!.provider === null
+        || namespaces[0]!.provider === this.provider
+      ) {
+        return null;
+      }
+      const persistedProvider = namespaces[0]!.provider;
       const rows = this.db.raw.prepare(
         `SELECT id, provider, workspace_key
          FROM agent_sessions
@@ -1334,8 +1347,7 @@ export class SessionManager {
       if (rows.length !== 1) return null;
       const row = rows[0]!;
       if (
-        row.provider === null
-        || row.provider === this.provider
+        row.provider !== persistedProvider
         || row.workspace_key !== this.conversationKey
         || (existingRowId !== undefined && row.id !== existingRowId)
       ) {
@@ -1357,7 +1369,7 @@ export class SessionManager {
       ) {
         return null;
       }
-      return { rowId: row.id, provider: row.provider };
+      return { rowId: row.id, provider: persistedProvider };
     } catch (err) {
       log.warn({
         err,
