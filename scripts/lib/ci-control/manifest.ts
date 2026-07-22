@@ -526,7 +526,7 @@ function validateManifest(value: unknown): ManifestIssue[] {
   const outgoingRefPolicy = validateOutgoingRefPolicy(top.outgoingRefPolicy, '$.outgoingRefPolicy', problems);
 
   const ids = new Set<string>();
-  const ownership = new Set<string>();
+  const ownership = new Map<string, string>();
   const byId = new Map<string, ControlRecordV1>();
   const referencedCommands = new Set<string>();
 
@@ -582,9 +582,13 @@ function validateManifest(value: unknown): ManifestIssue[] {
 
     if (typeof record.policyCategory === 'string' && typeof record.decisionOwner === 'string') {
       for (const surface of surfaces) {
-        const key = `${record.policyCategory}\0${surface}\0${record.decisionOwner}`;
-        if (ownership.has(key)) problems.push(issue('ci.manifest.duplicate-owner', path, 'conflicting canonical decision ownership'));
-        ownership.add(key);
+        const key = `${record.policyCategory}\0${surface}`;
+        const decisionOwner = ownership.get(key);
+        if (decisionOwner !== undefined && decisionOwner !== record.decisionOwner) {
+          problems.push(issue('ci.manifest.duplicate-owner', path, 'conflicting canonical decision ownership'));
+        } else {
+          ownership.set(key, record.decisionOwner);
+        }
       }
     }
     if (idValid && !byId.has(record.id as string)) byId.set(record.id as string, record as unknown as ControlRecordV1);

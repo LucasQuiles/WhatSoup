@@ -392,8 +392,19 @@ describe('canonical CI control manifest', () => {
 
   it('rejects duplicate identity or decision ownership while allowing independent observers', () => {
     expect(issueCodes(manifest([control('same'), control('same', { decisionOwner: 'other-owner' })]))).toContain('ci.manifest.duplicate-id');
-    expect(issueCodes(manifest([control('one'), control('two')]))).toContain('ci.manifest.duplicate-owner');
-    const safe = manifest([
+    const sameDecisionOwner = manifest([
+      control('one'),
+      control('two', { dependencies: ['one'] }),
+    ]);
+    expect(issueCodes(sameDecisionOwner)).not.toContain('ci.manifest.duplicate-owner');
+
+    const conflictingDecisionOwner = manifest([
+      control('one'),
+      control('two', { decisionOwner: 'other-owner', dependencies: ['one'] }),
+    ]);
+    expect(issueCodes(conflictingDecisionOwner)).toContain('ci.manifest.duplicate-owner');
+
+    const independentQuestion = manifest([
       control('one'),
       control('two', {
         policyCategory: 'privacy-publication',
@@ -402,7 +413,17 @@ describe('canonical CI control manifest', () => {
         dependencies: ['one'],
       }),
     ]);
-    expect(issueCodes(safe)).not.toContain('ci.manifest.duplicate-owner');
+    expect(issueCodes(independentQuestion)).not.toContain('ci.manifest.duplicate-owner');
+
+    const independentSurface = manifest([
+      control('one'),
+      control('two', {
+        decisionOwner: 'other-owner',
+        surfaces: ['other'],
+      }),
+    ]);
+    independentSurface.requiredSurfaces = ['repository', 'other'];
+    expect(issueCodes(independentSurface)).toEqual([]);
   });
 
   it('rejects missing dependencies, cycles, unowned surfaces, and unreachable controls', () => {
