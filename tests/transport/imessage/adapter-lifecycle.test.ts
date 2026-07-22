@@ -2,7 +2,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ImessageAdapter } from '../../../src/transport/imessage/adapter.ts';
 import { MockImessagePort, makeImessageConfig } from './mock-port.ts';
-import type { AdapterHealth } from '../../../src/transport/contract/index.ts';
+import type { AdapterHealth, InboundMessage } from '../../../src/transport/contract/index.ts';
+import type { InboundImessage } from '../../../src/transport/imessage/port.ts';
 
 describe('ImessageAdapter — lifecycle', () => {
   it('connect() calls verifyCredentials and transitions to connected', async () => {
@@ -119,6 +120,274 @@ describe('ImessageAdapter — poll loop', () => {
     expect(port.listInboundSince).toHaveBeenNthCalledWith(1, new Date(0), 500, 0);
     expect(port.listInboundSince).toHaveBeenNthCalledWith(2, new Date(now - 500), 500, 1);
 
+    await adapter.disconnect();
+  });
+
+  it('resets an incomplete continuation when reconnecting', async () => {
+    const now = 1_700_000_000_000;
+    vi.setSystemTime(now);
+    let records: InboundImessage[] = Array.from({ length: 5000 }, (_, index) => ({
+      guid: `unsupported-${index}`,
+      from: 'user@users.noreply.github.com',
+      to: 'bot@users.noreply.github.com',
+      body: null,
+      fromMe: false,
+      kind: 'reaction',
+      timestamp: now,
+    }));
+    const port = new MockImessagePort();
+    port.listInboundSince = vi.fn(async (
+      since: Date,
+      pageSize = 500,
+      offset = 0,
+    ) => records
+      .filter((record) => record.timestamp >= since.getTime())
+      .slice(offset, offset + pageSize));
+    const adapter = new ImessageAdapter(makeImessageConfig({ pollIntervalMs: 1000 }), port);
+    const received: InboundMessage[] = [];
+    adapter.on('message', (message) => received.push(message));
+    await adapter.connect();
+    await adapter.pollOnce();
+    expect(port.listInboundSince).toHaveBeenCalledTimes(10);
+
+    await adapter.disconnect();
+    vi.setSystemTime(now + 10_000);
+    records = [{
+      guid: 'fresh-after-reconnect',
+      from: 'user@users.noreply.github.com',
+      to: 'bot@users.noreply.github.com',
+      body: 'fresh',
+      fromMe: false,
+      kind: 'text',
+      timestamp: now + 10_000,
+    }];
+    await adapter.connect();
+    await adapter.pollOnce();
+
+    expect(received.map((message) => message.ref.id)).toEqual(['fresh-after-reconnect']);
+    expect(port.listInboundSince).toHaveBeenNthCalledWith(
+      11,
+      new Date(now + 9_000),
+      500,
+      0,
+    );
+    await adapter.disconnect();
+  });
+
+  it('resets an incomplete continuation after auth-required reconnect', async () => {
+    const now = 1_700_000_000_000;
+    vi.setSystemTime(now);
+    const fullPage = Array.from({ length: 500 }, (_, index) => ({
+      guid: `auth-page-${index}`,
+      from: 'user@users.noreply.github.com',
+      to: 'bot@users.noreply.github.com',
+      body: null,
+      fromMe: false,
+      kind: 'reaction',
+      timestamp: now,
+    }));
+    let authenticated = false;
+    const fresh = [{
+      guid: 'fresh-after-auth',
+      from: 'user@users.noreply.github.com',
+      to: 'bot@users.noreply.github.com',
+      body: 'fresh',
+      fromMe: false,
+      kind: 'text',
+      timestamp: now + 10_000,
+    }];
+    const port = new MockImessagePort();
+    port.listInboundSince = vi.fn(async (
+      since: Date,
+      pageSize = 500,
+      offset = 0,
+    ) => {
+      if (authenticated) {
+        return fresh
+          .filter((record) => record.timestamp >= since.getTime())
+          .slice(offset, offset + pageSize);
+      }
+      if (offset === 0) return fullPage;
+      throw Object.assign(new Error('expired credential'), { status: 401 });
+    });
+    const adapter = new ImessageAdapter(makeImessageConfig({ pollIntervalMs: 1000 }), port);
+    const received: InboundMessage[] = [];
+    adapter.on('message', (message) => received.push(message));
+    await adapter.connect();
+    await adapter.pollOnce();
+    expect(adapter.state().state).toBe('auth_required');
+
+    authenticated = true;
+    vi.setSystemTime(now + 10_000);
+    await adapter.connect();
+    await adapter.pollOnce();
+
+    expect(received.map((message) => message.ref.id)).toEqual(['fresh-after-auth']);
+    expect(port.listInboundSince).toHaveBeenNthCalledWith(
+      3,
+      new Date(now + 9_000),
+      500,
+      0,
+    );
+    await adapter.disconnect();
+  });
+
+  it('resets a completed boundary offset when reconnecting beyond its lookback', async () => {
+    const now = 1_700_000_000_000;
+    vi.setSystemTime(now);
+    let records = [{
+      guid: 'completed-boundary',
+      from: 'user@users.noreply.github.com',
+      to: 'bot@users.noreply.github.com',
+      body: 'old',
+      fromMe: false,
+      kind: 'text',
+      timestamp: now,
+    }];
+    const port = new MockImessagePort();
+    port.listInboundSince = vi.fn(async (
+      since: Date,
+      pageSize = 500,
+      offset = 0,
+    ) => records
+      .filter((record) => record.timestamp >= since.getTime())
+      .slice(offset, offset + pageSize));
+    const adapter = new ImessageAdapter(makeImessageConfig({ pollIntervalMs: 1000 }), port);
+    const received: InboundMessage[] = [];
+    adapter.on('message', (message) => received.push(message));
+    await adapter.connect();
+    await adapter.pollOnce();
+    expect(received.map((message) => message.ref.id)).toEqual(['completed-boundary']);
+
+    await adapter.disconnect();
+    vi.setSystemTime(now + 10_000);
+    records = [{
+      guid: 'fresh-after-completed-boundary',
+      from: 'user@users.noreply.github.com',
+      to: 'bot@users.noreply.github.com',
+      body: 'fresh',
+      fromMe: false,
+      kind: 'text',
+      timestamp: now + 10_000,
+    }];
+    await adapter.connect();
+    await adapter.pollOnce();
+
+    expect(received.map((message) => message.ref.id)).toEqual([
+      'completed-boundary',
+      'fresh-after-completed-boundary',
+    ]);
+    expect(port.listInboundSince).toHaveBeenNthCalledWith(
+      2,
+      new Date(now + 9_000),
+      500,
+      0,
+    );
+    await adapter.disconnect();
+  });
+
+  it('resumes a partial continuation after a transient page failure', async () => {
+    const fullPage = Array.from({ length: 500 }, (_, index) => ({
+      guid: `transient-page-${index}`,
+      from: 'user@users.noreply.github.com',
+      to: 'bot@users.noreply.github.com',
+      body: null,
+      fromMe: false,
+      kind: 'reaction',
+      timestamp: 1000,
+    }));
+    const valid = {
+      guid: 'valid-after-transient-page',
+      from: 'user@users.noreply.github.com',
+      to: 'bot@users.noreply.github.com',
+      body: 'fresh',
+      fromMe: false,
+      kind: 'text',
+      timestamp: 2000,
+    };
+    let failContinuation = true;
+    const port = new MockImessagePort();
+    port.listInboundSince = vi.fn(async (
+      _since: Date,
+      _pageSize = 500,
+      offset = 0,
+    ) => {
+      if (offset === 0) return fullPage;
+      if (failContinuation) {
+        failContinuation = false;
+        throw new Error('ECONNRESET');
+      }
+      return [valid];
+    });
+    const adapter = new ImessageAdapter(makeImessageConfig({ pollIntervalMs: 0 }), port);
+    const received: InboundMessage[] = [];
+    adapter.on('message', (message) => received.push(message));
+    await adapter.connect();
+
+    await adapter.pollOnce();
+    expect(adapter.state().state).toBe('connected');
+    expect(received).toHaveLength(0);
+    await adapter.pollOnce();
+
+    expect(received.map((message) => message.ref.id)).toEqual(['valid-after-transient-page']);
+    expect(port.listInboundSince).toHaveBeenNthCalledWith(3, new Date(0), 500, 500);
+    await adapter.disconnect();
+  });
+
+  it('drops an in-flight later page after disconnect and restarts cleanly', async () => {
+    const fullPage = Array.from({ length: 500 }, (_, index) => ({
+      guid: `in-flight-page-${index}`,
+      from: 'user@users.noreply.github.com',
+      to: 'bot@users.noreply.github.com',
+      body: null,
+      fromMe: false,
+      kind: 'reaction',
+      timestamp: 1000,
+    }));
+    const stale = {
+      guid: 'stale-in-flight',
+      from: 'user@users.noreply.github.com',
+      to: 'bot@users.noreply.github.com',
+      body: 'stale',
+      fromMe: false,
+      kind: 'text',
+      timestamp: 2000,
+    };
+    const fresh = { ...stale, guid: 'fresh-after-in-flight-disconnect', body: 'fresh', timestamp: 3000 };
+    let continuationStarted!: () => void;
+    const started = new Promise<void>((resolve) => { continuationStarted = resolve; });
+    let resolveContinuation!: (records: readonly typeof stale[]) => void;
+    let reconnected = false;
+    const port = new MockImessagePort();
+    port.listInboundSince = vi.fn(async (
+      _since: Date,
+      _pageSize = 500,
+      offset = 0,
+    ) => {
+      if (reconnected) return offset === 0 ? [fresh] : [];
+      if (offset === 0) return fullPage;
+      continuationStarted();
+      return new Promise<readonly typeof stale[]>((resolve) => {
+        resolveContinuation = resolve;
+      });
+    });
+    const adapter = new ImessageAdapter(makeImessageConfig({ pollIntervalMs: 0 }), port);
+    const received: InboundMessage[] = [];
+    adapter.on('message', (message) => received.push(message));
+    await adapter.connect();
+
+    const polling = adapter.pollOnce();
+    await started;
+    await adapter.disconnect();
+    resolveContinuation([stale]);
+    await polling;
+    expect(received).toHaveLength(0);
+
+    reconnected = true;
+    await adapter.connect();
+    await adapter.pollOnce();
+    expect(received.map((message) => message.ref.id)).toEqual(['fresh-after-in-flight-disconnect']);
+    expect(port.listInboundSince).toHaveBeenNthCalledWith(3, new Date(0), 500, 0);
     await adapter.disconnect();
   });
 });
