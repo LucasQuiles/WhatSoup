@@ -1,7 +1,7 @@
 # 10 — Visual QA (vision-model review, 2026-07-21)
 
 Method: 18 screenshots (9 surfaces × 2 themes, 1440×900) reviewed by a vision-language model
-(qwen2.5vl:72b, local on mwlab) against the locked design language, followed by a fix pass and
+(qwen2.5vl:72b, local vision host) against the locked design language, followed by a fix pass and
 re-review. (The author model has no native vision; the review loop is independent.)
 
 ## Round 1 (dark) — scores & findings
@@ -118,7 +118,7 @@ headline accent word (Landing precedent + D4).
 
 ---
 
-# Pass C — grok-4.5 via xAI OAuth on maclab (fourth family, adversarial)
+# Pass C — grok-4.5 via xAI OAuth host (fourth family, adversarial)
 
 Returned 0/9 FAIL — the harshest verdict. Disposition of its findings:
 
