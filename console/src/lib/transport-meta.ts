@@ -1,9 +1,9 @@
 import { normalizePhoneIdentityInput, validatePhoneIdentityInput } from './validation'
+import { isAppleIdEmail } from '../../../src/lib/appleid.ts'
 
 export type TransportKind = 'baileys' | 'twilio' | 'signal' | 'imessage'
 
 const SIGNAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
-const APPLEID_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
 function normalizeWirePhoneIdentity(value: string): string {
   const normalized = normalizePhoneIdentityInput(value)
@@ -77,10 +77,10 @@ export const TRANSPORT_MAP: Readonly<Record<TransportKind, TransportEntry>> = {
     adminIdLabel: 'Admin iMessage IDs',
     adminIdPlaceholder: 'name@example.com or +14155551234',
     adminIdHelper: 'Use a lowercase AppleID email or E.164 phone number.',
-    validateAdminId: (value) => validatePhoneIdentityInput(value) || APPLEID_EMAIL_RE.test(value.trim().toLowerCase()),
+    validateAdminId: (value) => validatePhoneIdentityInput(value) || isAppleIdEmail(value.trim().toLowerCase()),
     normalizeAdminId: (value) => {
       const normalized = value.trim().toLowerCase()
-      return APPLEID_EMAIL_RE.test(normalized) ? normalized : normalizeWirePhoneIdentity(normalized)
+      return isAppleIdEmail(normalized) ? normalized : normalizeWirePhoneIdentity(normalized)
     },
   },
 }

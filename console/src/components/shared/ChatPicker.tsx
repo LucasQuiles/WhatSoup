@@ -33,6 +33,7 @@ import { SearchInput } from './SearchInput.js';
 import { Button } from '../primitives/Button.js';
 import { Popover, popoverOptionId, usePopoverKeyboard } from '../primitives/Popover.js';
 import type { PopoverOption } from '../primitives/Popover.js';
+import { resolveDisplayName } from '../../lib/text-utils.js';
 
 interface ChatPickerProps {
   chats: ChatItem[];
@@ -43,7 +44,8 @@ interface ChatPickerProps {
 }
 
 function chatLabel(chat: ChatItem): string {
-  return typeof chat.name === 'string' && chat.name.trim() ? chat.name : chat.conversationKey;
+  const identity = typeof chat.name === 'string' && chat.name.trim() ? chat.name : chat.conversationKey;
+  return resolveDisplayName(identity);
 }
 
 export function ChatPicker({

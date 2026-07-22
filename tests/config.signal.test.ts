@@ -102,6 +102,10 @@ describe('resolveImessageConfig', () => {
   it.each([
     [{ account: 'ops', backend: 'not-a-backend', sender: 'owner@example.com' }, /backend/i],
     [{ account: 'ops', backend: 'imsg', sender: 'Owner@Example.com' }, /lowercase AppleID/i],
+    [{ account: 'ops', backend: 'imsg', sender: 'owner\u0007@example.com' }, /AppleID/i],
+    [{ account: 'ops', backend: 'imsg', sender: 'owner\u202E@example.com' }, /AppleID/i],
+    [{ account: 'ops', backend: 'imsg', sender: 'owner\u200B@example.com' }, /AppleID/i],
+    [{ account: 'ops', backend: 'imsg', sender: 'owner\u2028@example.com' }, /AppleID/i],
     [{
       account: 'ops',
       backend: 'imsg',

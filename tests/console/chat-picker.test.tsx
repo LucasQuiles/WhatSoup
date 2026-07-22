@@ -86,6 +86,39 @@ describe('ChatPicker display-safe rows', () => {
 
     expect(screen.getByText('ops-chat')).toBeDefined()
   })
+
+  it('keeps unsafe, literal-escape, and separator chat labels distinct for selection', async () => {
+    const unsafe = chat({ conversationKey: 'unsafe-chat', name: 'safe\u202Eevil@signal' })
+    const literal = chat({ conversationKey: 'literal-chat', name: 'safe\\u202Eevil@signal' })
+    const separated = chat({ conversationKey: 'separated-chat', name: '\u2028evil@signal' })
+    const onSelect = vi.fn()
+    const { rerender } = render(
+      <ChatPicker
+        chats={[unsafe, literal, separated]}
+        selected={null}
+        onSelect={onSelect}
+        onClear={vi.fn()}
+      />,
+    )
+
+    fireEvent.focus(getInput())
+    expect(await screen.findByRole('option', { name: 'safe\\u202Eevil@signal' })).toBeDefined()
+    expect(screen.getByRole('option', { name: 'safe\\\\u202Eevil@signal' })).toBeDefined()
+    expect(screen.getByRole('option', { name: '\\u2028evil@signal' })).toBeDefined()
+
+    fireEvent.mouseDown(screen.getByRole('option', { name: 'safe\\u202Eevil@signal' }))
+    expect(onSelect).toHaveBeenCalledWith(unsafe)
+
+    rerender(
+      <ChatPicker
+        chats={[unsafe, literal, separated]}
+        selected={unsafe}
+        onSelect={onSelect}
+        onClear={vi.fn()}
+      />,
+    )
+    expect(screen.getByText('safe\\u202Eevil@signal').getAttribute('title')).toBe('safe\\u202Eevil@signal')
+  })
 })
 
 // ---------------------------------------------------------------------------

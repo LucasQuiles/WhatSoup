@@ -119,6 +119,24 @@ describe('ReviewStep — canonical transport config', () => {
     expect(screen.getByText(/At least one notification phone is required/)).toBeDefined()
     expect(screen.queryByText(/admin phone number is required/i)).toBeNull()
   })
+
+  it('makes unsafe iMessage sender code points visible in Review', () => {
+    renderReview({
+      data: {
+        name: 'imessage-review',
+        type: 'passive',
+        transport: 'imessage',
+        adminPhones: ['owner@example.com'],
+        imessageConfig: {
+          backend: 'imsg',
+          sender: 'owner\u202E@example.com',
+          imsgSocketPath: '/tmp/imsg.sock',
+        },
+      },
+    })
+
+    expect(kvValue('Sender')).toBe('owner\\u202E@example.com')
+  })
 })
 
 describe('ReviewStep — Model & Auth card', () => {

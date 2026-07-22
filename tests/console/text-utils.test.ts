@@ -101,6 +101,21 @@ describe('console text utilities', () => {
     expect(resolveDisplayName(identity)).toBe(expected)
   })
 
+  it.each([
+    ['\u00A0evil@signal', '\\u00A0evil@signal'],
+    ['safe\u2028evil@signal', 'safe\\u2028evil@signal'],
+    ['safe\u2029evil@signal', 'safe\\u2029evil@signal'],
+    ['\u1680evil@signal', '\\u1680evil@signal'],
+    ['\u2000evil@signal', '\\u2000evil@signal'],
+    ['\u202Fevil@signal', '\\u202Fevil@signal'],
+    ['\u205Fevil@signal', '\\u205Fevil@signal'],
+    ['\u3000evil@signal', '\\u3000evil@signal'],
+  ])('makes non-ASCII identity separators visible for %s', (identity, expected) => {
+    expect(resolveDisplayName(identity)).toBe(expected)
+    const withoutSeparator = identity.replace(/[\u00A0\u1680\u2000\u2028\u2029\u202F\u205F\u3000]/u, '')
+    expect(resolveDisplayName(identity)).not.toBe(resolveDisplayName(withoutSeparator))
+  })
+
   it('prefers the generic line self identity over the legacy phone field', () => {
     expect(lineIdentity({
       transport: 'signal',

@@ -5,7 +5,7 @@ import TransportBadge from '../TransportBadge'
 import { getProviderConfigFields, DEFAULT_PROVIDER_ID } from '../../lib/providers'
 import { defaultAgentWorkspacePath } from '../../lib/agent-cwd'
 import { ACCESS_MODE_LABELS } from '../../lib/access-modes'
-import { formatCount } from '../../lib/text-utils'
+import { formatCount, resolveDisplayName } from '../../lib/text-utils'
 import { Button } from '../primitives/Button'
 import { isTransportKind, TRANSPORT_MAP, type TransportKind } from '../../lib/transport-meta'
 
@@ -185,7 +185,7 @@ const ReviewStep: FC<ReviewStepProps> = ({
         )}
         {transport === 'imessage' && (
           <>
-            <KV label="Sender" value={text(imessageConfig.sender)} />
+            <KV label="Sender" value={resolveDisplayName(text(imessageConfig.sender))} />
             <KV label="Backend" value={text(imessageConfig.backend)} />
             <KV label="Endpoint" value={text(imessageConfig.bluebubblesUrl ?? imessageConfig.imsgSocketPath)} />
             {imessageConfig.backend === 'bluebubbles' && (

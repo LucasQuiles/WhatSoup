@@ -27,6 +27,26 @@ describe('console transport config', () => {
     expect(TRANSPORT_MAP.imessage.normalizeAdminId('+1 (555) 123-4567')).toBe('+15551234567')
   })
 
+  it.each([
+    'owner\u0007@example.com',
+    'owner\u202E@example.com',
+    'owner\u200B@example.com',
+    'owner\u2028@example.com',
+  ])('rejects unsafe iMessage AppleID admin and sender text %#', (identity) => {
+    expect(TRANSPORT_MAP.imessage.validateAdminId(identity)).toBe(false)
+    expect(TRANSPORT_MAP.imessage.normalizeAdminId(identity)).toBe('')
+    expect(validateTransportFormData({
+      name: 'imessage-line',
+      transport: 'imessage',
+      adminPhones: ['owner@example.com'],
+      imessageConfig: {
+        backend: 'imsg',
+        sender: identity,
+        imsgSocketPath: '/tmp/imsg.sock',
+      },
+    })).toHaveProperty('imessageConfig.sender')
+  })
+
   it('builds a Twilio poll config from the canonical nested block without serializing secrets', () => {
     const result = canonicalizeTransportFormData({
       name: 'support-line',

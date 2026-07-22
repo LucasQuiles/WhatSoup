@@ -55,6 +55,7 @@ describe('ChatListItem', () => {
     ['safe\\u202Eevil@signal', 'safe\\\\u202Eevil@signal'],
     ['\nevil@signal', '\\u000Aevil@signal'],
     ['safe\u200Bevil@signal', 'safe\\u200Bevil@signal'],
+    ['safe\u2028evil@signal', 'safe\\u2028evil@signal'],
   ])('keeps literal and boundary control text unambiguous in rendered labels', (name, expected) => {
     render(<ChatListItem chat={chat({ name })} isSelected={false} onClick={() => {}} />)
 

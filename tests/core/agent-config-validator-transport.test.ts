@@ -971,6 +971,16 @@ describe('validateInstanceConfig — imessageConfig', () => {
   });
 
   it.each([
+    'owner\u0007@example.com',
+    'owner\u202E@example.com',
+    'owner\u200B@example.com',
+    'owner\u2028@example.com',
+  ])('rejects unsafe AppleID sender text %#', (sender) => {
+    const raw = baseRaw({ transport: 'imessage', imessageConfig: validImessageConfig({ sender }) });
+    expect(validateInstanceConfig(raw, ctx())?.field).toBe('imessageConfig.sender');
+  });
+
+  it.each([
     {
       name: 'BlueBubbles URL on imsg',
       config: validImessageConfig({

@@ -27,6 +27,15 @@ describe('imessage transport — types', () => {
     expect(APPLEID_EMAIL_RE.test('')).toBe(false);
   });
 
+  it.each([
+    'owner\u0007@example.com',
+    'owner\u202E@example.com',
+    'owner\u200B@example.com',
+    'owner\u2028@example.com',
+  ])('APPLEID_EMAIL_RE rejects unsafe identity code points in %s', (identity) => {
+    expect(APPLEID_EMAIL_RE.test(identity)).toBe(false);
+  });
+
   it('DEFAULT_IMESSAGE is frozen with documented defaults', () => {
     expect(Object.isFrozen(DEFAULT_IMESSAGE)).toBe(true);
     expect(Object.isFrozen(DEFAULT_IMESSAGE.rateLimit)).toBe(true);

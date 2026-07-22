@@ -3,6 +3,8 @@
 import { isE164Wire } from '../lib/phone.ts';
 import { ACCOUNT_RE } from '../lib/account-segment.ts';
 export { ACCOUNT_RE } from '../lib/account-segment.ts';
+import { isAppleIdEmail } from '../lib/appleid.ts';
+export { APPLEID_EMAIL_RE, isAppleIdEmail } from '../lib/appleid.ts';
 
 /** Transport library / protocol family. */
 export type ChannelKind =
@@ -28,13 +30,12 @@ export type ChannelId = string & { readonly [__channelIdBrand]: true };
  * plus any email registered against an AppleID. We accept any RFC-5322-ish
  * shape here; the daemon/Server is the final arbiter.
  *
- * Lives in core (not src/transport/imessage/) because config validation needs
- * it: core may only import [core, lib], so defining it under transport/ would
- * force a core → transport edge that the import-boundary ratchet rejects.
+ * Re-exported from lib (not src/transport/imessage/) because config validation
+ * and the console share it: core may only import [core, lib], so defining it
+ * under transport/ would force a core → transport edge that the import-boundary
+ * ratchet rejects.
  * `src/transport/imessage/types.ts` re-exports it for the adapter.
  */
-export const APPLEID_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
 const IMESSAGE_GROUP_PREFIX = 'iMessage;+;';
 
 /** BlueBubbles/imsg group chat GUID prefix with a non-empty provider id. */
@@ -47,7 +48,7 @@ export function isImessageGroupAddress(address: string): boolean {
 export function canonicalizeImessageDirectIdentity(identity: string): string | null {
   if (isE164Wire(identity)) return identity;
   const lower = identity.toLowerCase();
-  return APPLEID_EMAIL_RE.test(lower) ? lower : null;
+  return isAppleIdEmail(lower) ? lower : null;
 }
 
 /** Signal service UUID and V2 group-id shapes shared by core JID policy. */

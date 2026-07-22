@@ -1220,6 +1220,31 @@ describe('handleCreateLine', () => {
       expectedField: 'imessageConfig.sender',
     },
     {
+      name: 'imessage-unsafe-sender',
+      config: {
+        account: 'imessage-unsafe-sender',
+        backend: 'imsg',
+        sender: 'owner\u202E@example.com',
+        imsgSocketPath: '/tmp/imsg.sock',
+        inboundMode: 'poll',
+        pollIntervalMs: 15_000,
+      },
+      expectedField: 'imessageConfig.sender',
+    },
+    {
+      name: 'imessage-unsafe-admin',
+      adminPhones: ['owner\u200B@example.com'],
+      config: {
+        account: 'imessage-unsafe-admin',
+        backend: 'imsg',
+        sender: 'owner@example.com',
+        imsgSocketPath: '/tmp/imsg.sock',
+        inboundMode: 'poll',
+        pollIntervalMs: 15_000,
+      },
+      expectedField: 'adminPhones',
+    },
+    {
       name: 'imessage-mixed-imsg',
       config: {
         account: 'imessage-mixed-imsg',
@@ -1248,6 +1273,7 @@ describe('handleCreateLine', () => {
     },
   ])('rejects noncanonical direct iMessage CREATE config: $name', async ({
     name,
+    adminPhones,
     config,
     expectedField,
   }) => {
@@ -1267,7 +1293,7 @@ describe('handleCreateLine', () => {
         name,
         type: 'passive',
         transport: 'imessage',
-        adminPhones: ['owner@example.com'],
+        adminPhones: adminPhones ?? ['owner@example.com'],
         imessageConfig: config,
       })),
       res,

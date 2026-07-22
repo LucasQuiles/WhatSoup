@@ -1082,6 +1082,19 @@ describe('handleCreateLine — plaintext provider-key strip guard', () => {
       expectedField: 'imessageConfig.sender',
     },
     {
+      name: 'unsafe AppleID sender',
+      existingConfig: {
+        account: 'pk-line',
+        backend: 'imsg',
+        sender: 'owner@example.com',
+        imsgSocketPath: '/tmp/imsg.sock',
+        inboundMode: 'poll',
+        pollIntervalMs: 15_000,
+      },
+      patchConfig: { sender: 'owner\u200B@example.com' },
+      expectedField: 'imessageConfig.sender',
+    },
+    {
       name: 'BlueBubbles field on imsg',
       existingConfig: {
         account: 'pk-line',
