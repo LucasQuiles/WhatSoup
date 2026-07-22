@@ -6,6 +6,7 @@ import MessageContent from './MessageContent'
 import { Button } from './primitives/Button'
 import { HoverCard } from './primitives'
 import type { Message } from '../types'
+import type { TransportKind } from '../lib/transport-meta'
 
 interface MessageBubbleProps {
   msg: Message
@@ -16,6 +17,7 @@ interface MessageBubbleProps {
   animate?: boolean
   /** Called when user clicks retry on a failed message. */
   onRetry?: (msg: Message) => void
+  transport?: TransportKind | string | null
 }
 
 const isRawJid = (name: string) => /^\d{5,}$/.test(name)
@@ -90,7 +92,7 @@ const DeliveryStatus: FC<{ msg: Message; onRetry?: (msg: Message) => void }> = (
   return <Check size={12} strokeWidth={1.75} className="text-s-ok" />
 }
 
-const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-soft)', onCreateContact, highlightQuery, animate, onRetry }) => {
+const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-soft)', onCreateContact, highlightQuery, animate, onRetry, transport }) => {
   const isMedia = msg.type !== 'text'
   const senderDisplayName = resolveDisplayName(msg.senderName)
 
@@ -137,7 +139,7 @@ const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-
           }}
         >
           <div className="text-text-1 leading-relaxed" style={{ overflowWrap: 'break-word' }}>
-            <MessageContent msg={msg} highlightQuery={highlightQuery} />
+            <MessageContent msg={msg} highlightQuery={highlightQuery} transport={transport} />
           </div>
         </div>
       </HoverCard>

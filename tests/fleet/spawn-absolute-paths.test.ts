@@ -5,6 +5,7 @@
  * service user's `$HOME` and relative `src/bootstrap*.ts` strings ENOENT (#419).
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -27,14 +28,10 @@ const { DockerSupervisorServiceManager } = await import('../../src/fleet/platfor
 const REL_BOOTSTRAP_AUTH = 'src/bootstrap-auth.ts';
 
 function makeFakeChild() {
-  return {
-    on(event: string, cb: (...args: unknown[]) => void) {
-      if (event === 'spawn') queueMicrotask(() => cb());
-      return this;
-    },
-    once() { return this; },
-    kill() { /* noop */ },
-  };
+  const child = new EventEmitter() as EventEmitter & { kill: ReturnType<typeof vi.fn> };
+  child.kill = vi.fn();
+  queueMicrotask(() => child.emit('spawn'));
+  return child;
 }
 
 describe('fleet spawn argv uses absolute repo-root paths (#419)', () => {

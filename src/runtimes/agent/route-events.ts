@@ -1,5 +1,6 @@
 import { appendFileSync, mkdirSync, renameSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { isGroupConversationKey } from '../../core/conversation-key.ts';
 
 /**
  * Fail-closed route-event sidecar (slice 4 — full taxonomy per the grounding
@@ -61,10 +62,7 @@ export const ROUTE_EVENTS_MAX_BYTES = 5 * 1024 * 1024;
 
 export function deriveChatScope(conversationKey: string | null): RouteChatScope {
   if (conversationKey === null) return 'instance';
-  // The only caller passes a toConversationKey value, and group chats serialize
-  // as "<local>_at_g.us" — NOT "@g.us" — so match that suffix (R9). Checking
-  // "@g.us" mislabeled every group routing decision as a DM in the sidecar.
-  return conversationKey.endsWith('_at_g.us') ? 'group' : 'dm';
+  return isGroupConversationKey(conversationKey) ? 'group' : 'dm';
 }
 
 function routeEventProblem(ev: ModelRouteEvent): string | null {

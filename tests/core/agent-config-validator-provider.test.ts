@@ -131,6 +131,17 @@ function agentWithProviderConfig(providerConfig: unknown): Record<string, unknow
 }
 
 describe('validateInstanceConfig — agentOptions.providerConfig.baseUrl', () => {
+  it('accepts an opaque provider agent whose benign name contains a secret marker substring', () => {
+    const raw = agentWithProviderConfig({
+      agents: {
+        secretary: { description: 'safe' },
+      },
+    });
+
+    expect(validateInstanceConfig(raw, { name: 'test-line', mode: 'create' })).toBeNull();
+    expect(validateInstanceConfig(raw, { name: 'test-line', mode: 'load' })).toBeNull();
+  });
+
   it('accepts a valid https URL but rejects the same config with a bad URL', () => {
     const good = validateInstanceConfig(
       agentWithProviderConfig({ baseUrl: 'https://api.cloud.example.com/v1' }),
@@ -146,12 +157,13 @@ describe('validateInstanceConfig — agentOptions.providerConfig.baseUrl', () =>
     expect(bad?.field).toBe('agentOptions.providerConfig.baseUrl');
   });
 
-  it('accepts providerConfig with no baseUrl, still honoring sibling budget rules', () => {
-    const ok = validateInstanceConfig(
+  it('rejects source-unsupported budget fields and still validates the budget shape without baseUrl', () => {
+    const unsupported = validateInstanceConfig(
       agentWithProviderConfig({ budget: { tokenBudget: 5000 } }),
       { name: 'test-line', mode: 'create' },
     );
-    expect(ok).toBeNull();
+    expect(unsupported?.field).toBe('agentOptions.providerConfig.budget.tokenBudget');
+    expect(unsupported?.message).toContain('not an allowed budget field');
     // A malformed sibling (budget as array) must still be caught — the absent
     // baseUrl path does not short-circuit the rest of providerConfig validation.
     const bad = validateInstanceConfig(

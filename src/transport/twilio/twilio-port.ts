@@ -7,6 +7,7 @@
 import type { TwilioSmsConfig } from './types.ts';
 import type { InboundSms, PlaceCallArgs, SendSmsArgs, TwilioPortError, TwilioSmsPort } from './port.ts';
 import { lookupCredential } from '../../lib/keyring.ts';
+import { twilioAuthTokenServiceForAccount } from '../../lib/twilio-config.ts';
 
 // ---------------------------------------------------------------------------
 // Narrow duck-type interfaces for the SDK client surface.
@@ -138,6 +139,7 @@ function scrubAndRethrow(err: unknown, token: string): never {
 
 export class SdkTwilioSmsPort implements TwilioSmsPort {
   private readonly config: TwilioSmsConfig;
+  private readonly authTokenService: string;
   private readonly getCredential: (service: string) => string | null;
   private readonly makeClient: ClientFactory;
 
@@ -152,7 +154,17 @@ export class SdkTwilioSmsPort implements TwilioSmsPort {
   private _token = '';
 
   constructor(config: TwilioSmsConfig, deps: SdkTwilioSmsPortDeps = {}) {
-    this.config = config;
+    const expectedAuthTokenService = twilioAuthTokenServiceForAccount(config.account);
+    if (expectedAuthTokenService === null) {
+      throw new Error(`Twilio account must be a valid account segment and immutable line identity: ${config.account}`);
+    }
+    if (config.authTokenService !== expectedAuthTokenService) {
+      throw new Error(
+        `Twilio authTokenService must be ${expectedAuthTokenService} for account ${config.account}`,
+      );
+    }
+    this.config = { ...config };
+    this.authTokenService = expectedAuthTokenService;
     this.getCredential = deps.credentialLookup ?? lookupCredential;
     this.makeClient = deps.clientFactory ?? buildRealClient;
   }
@@ -168,11 +180,11 @@ export class SdkTwilioSmsPort implements TwilioSmsPort {
   }
 
   private async initClient(): Promise<TwilioClientLike> {
-    const token = this.getCredential(this.config.authTokenService);
+    const token = this.getCredential(this.authTokenService);
     if (!token) {
       throw Object.assign(
         new Error(
-          `Twilio auth token not found in keyring for service "${this.config.authTokenService}"`,
+          `Twilio auth token not found in keyring for service "${this.authTokenService}"`,
         ),
         { status: 401 } as Partial<TwilioPortError>,
       );

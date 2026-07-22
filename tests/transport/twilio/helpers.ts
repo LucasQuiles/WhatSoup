@@ -7,7 +7,7 @@ export function makeTwilioConfig(overrides?: Partial<TwilioSmsConfig>): TwilioSm
   return {
     account: 'ml-bot',
     accountSid: 'AC00000000000000000000000000000000',
-    authTokenService: 'twilio-ml-bot',
+    authTokenService: 'whatsoup-twilio-ml-bot',
     phoneNumber: '+15559990000',
     inboundMode: 'poll',
     pollIntervalMs: 15000,

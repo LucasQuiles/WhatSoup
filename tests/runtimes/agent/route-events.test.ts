@@ -145,6 +145,8 @@ describe('deriveChatScope', () => {
     expect(toConversationKey('111222333@g.us')).toBe('111222333_at_g.us');
     expect(deriveChatScope(toConversationKey('111222333@g.us'))).toBe('group');
     expect(deriveChatScope('111222333_at_g.us')).toBe('group');
+    expect(deriveChatScope('Z3JvdXAtY29udmVyc2F0aW9u_at_signal')).toBe('group');
+    expect(deriveChatScope('iMessage;+;chatABC_at_imessage')).toBe('group');
     expect(deriveChatScope(toConversationKey('15550000001@s.whatsapp.net'))).toBe('dm');
     expect(deriveChatScope('15550000001')).toBe('dm');
   });

@@ -10,6 +10,8 @@ import {
   updateAccess,
   getPendingCount,
   extractLocal,
+  resolvePhoneFromJid,
+  resolvePhoneFromJidForGrant,
 } from '../../src/core/access-list.ts';
 
 function tempDbPath(): string {
@@ -141,5 +143,19 @@ describe('extractLocal', () => {
 
   it('returns the string unchanged when there is no @ symbol', () => {
     expect(extractLocal('15551230008')).toBe('15551230008');
+  });
+});
+
+describe('iMessage access identity resolution', () => {
+  it('preserves AppleID and E.164 identities through the authenticated grant resolver', () => {
+    expect(resolvePhoneFromJid('owner@example.com@imessage', db)).toBe('owner@example.com');
+    expect(resolvePhoneFromJid('+15551234567@imessage', db)).toBe('+15551234567');
+    expect(resolvePhoneFromJidForGrant('owner@example.com@imessage', db, 'imessage')).toBe('owner@example.com');
+    expect(resolvePhoneFromJidForGrant('+15551234567@imessage', db, 'imessage')).toBe('+15551234567');
+  });
+
+  it('rejects an authenticated identity from a different configured transport', () => {
+    expect(resolvePhoneFromJidForGrant('owner@example.com@imessage', db, 'signal')).toBeNull();
+    expect(resolvePhoneFromJidForGrant('+15551234567@signal', db, 'imessage')).toBeNull();
   });
 });

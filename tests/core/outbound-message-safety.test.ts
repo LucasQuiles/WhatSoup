@@ -752,6 +752,16 @@ describe('isOperatorDmPeer', () => {
     }
   });
 
+  it('binds operator-DM elevation to the configured transport namespace', () => {
+    const db = openDbWithLidMapping();
+    try {
+      expect(isOperatorDmPeer(OWNER_PHONE_JID, false, db, ADMIN_PHONES, 'baileys')).toBe(true);
+      expect(isOperatorDmPeer(OWNER_PHONE_JID, false, db, ADMIN_PHONES, 'signal')).toBe(false);
+    } finally {
+      db.close();
+    }
+  });
+
   it('[gate test 5, lid form — the PRIMARY case, V32] returns true for the owner DM peer in lid-JID form via a resolveLid fixture mapping', () => {
     const db = openDbWithLidMapping();
     try {

@@ -22,16 +22,16 @@
 #   WVR-003 RETIRED — zero hex literals remain in chart-utils.ts (grep-verified).
 #   WVR-004 RETIRED — QrDisplay hex eliminated via getComputedStyle resolution (7a592488).
 #   WVR-002 converted to PERMANENT per spec-section citation (lint-plan §4 third-party numeric API).
-#   WVR-011 scope re-pinned: line 174→176 (verified against current tree).
 # DD-21r changes (2026-06-12):
-#   WVR-011 scope re-pinned: line 176→177 (Tabs import added above useEffect in ConfigStep).
 #   WVR-012 expiration_phase re-pointed: D6→D-series-close (retirement triggers not yet fired).
 # B3W4 changes (2026-06-12):
 #   WVR-014 RETIRED — static data-line-type accent definitions replace runtime injection (grep-verified; B3 wave 4).
 #   WVR-013 RETIRED — .c-kpi-hover shadow migrated to --shadow-hover (raw-color-css 1→0).
 # Suppression hygiene (2026-06-14):
 #   WVR-015 UPDATED — useExitPresence must clear stale close dwell state on reopen.
-# Remaining: 10 entries (WVR-001, WVR-002, WVR-005..WVR-009, WVR-011..WVR-012, WVR-015).
+# Console transport successor (2026-07-21):
+#   WVR-011 RETIRED — generated defaults now update through an exhaustive dependency list while preserving user-authored text.
+# Remaining: 9 entries (WVR-001, WVR-002, WVR-005..WVR-009, WVR-012, WVR-015).
 
 waivers:
   - id: WVR-001
@@ -163,18 +163,6 @@ waivers:
     status: temporary
     expiration_phase: C4
     cleanup_trigger: react-hooks plugin/library compatibility update
-    user_approval_required: no
-  - id: WVR-011
-    rule: react-hooks/exhaustive-deps
-    owner: console-maintainer
-    reason: intentional mount-only effect (wizard default seeding must not re-run on dep changes).
-    scope: console/src/components/wizard/ConfigStep.tsx:177
-    expiry: 2026-12-31
-    replacement_plan: re-express with useRef-guarded init or React 19 idiom during the wizard C2/C3 migration.
-    safer_alternative_considered: adding deps — rejected, would re-seed user-edited wizard state.
-    status: temporary
-    expiration_phase: C3
-    cleanup_trigger: wizard migration slice
     user_approval_required: no
   - id: WVR-012
     rule: react-refresh/only-export-components

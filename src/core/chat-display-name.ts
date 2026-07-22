@@ -48,7 +48,11 @@
 
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import type { Database } from './database.ts';
-import { isGroupConversationKey, conversationKeyToJid } from './conversation-key.ts';
+import {
+  conversationRefToJid,
+  isGroupConversationKey,
+  isRawTransportJidReference,
+} from './conversation-key.ts';
 import {
   toPersonalJid,
   toLidJid,
@@ -256,11 +260,11 @@ function lidShape(db: Database, ref: string, lidLocal: string): RefShape {
 
 function classifyRef(db: Database, ref: string): RefShape {
   if (isGroupConversationKey(ref)) {
-    const jid = ref.includes('@') ? ref : conversationKeyToJid(ref);
+    const jid = conversationRefToJid(ref);
     return { probeKeys: dedupe([ref, jid]), contactJids: [], phoneDigits: null, isGroup: true };
   }
 
-  if (ref.includes('@')) {
+  if (isRawTransportJidReference(ref)) {
     const local = normalizeLid(bareNumber(ref)); // device suffix stripped
     if (isLidJid(ref)) return lidShape(db, ref, local);
     if (isPnJid(ref)) {
@@ -282,11 +286,10 @@ function classifyRef(db: Database, ref: string): RefShape {
   const enc = ref.indexOf('_at_');
   if (enc >= 0) {
     // Non-group conversation-key encoding: reconstruct the raw jid for ANY
-    // '_at_' domain so aliases/chat rows keyed by the jid resolve (B25
-    // below-cap). Local reverse of toConversationKey's default branch —
-    // conversationKeyToJid deliberately stays group-only for its fleet
-    // callers.
-    const jid = `${ref.slice(0, enc)}@${ref.slice(enc + '_at_'.length)}`;
+  // '_at_' domain so aliases/chat rows keyed by the jid resolve (B25
+  // below-cap). Use the shared transport-neutral reverse operation so
+  // AppleID locals containing '@' split at the final encoded separator.
+    const jid = conversationRefToJid(ref);
     return { probeKeys: dedupe([ref, jid]), contactJids: [], phoneDigits: null, isGroup: false };
   }
 

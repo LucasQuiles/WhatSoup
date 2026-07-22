@@ -33,7 +33,8 @@ export type Decision =
  * Read surface the guard depends on. Implemented by SqliteIdentityStore over
  * bot.db; can be faked in unit tests. All methods are synchronous because the
  * underlying node:sqlite DatabaseSync is synchronous. A read failure throws —
- * the guard catches it and maps to STORE_UNAVAILABLE (fail-open, spec §6).
+ * the guard catches it and maps to STORE_UNAVAILABLE. Enforce mode blocks;
+ * explicit log-only mode records an audited allow.
  */
 export interface IdentityStore {
   /** Bare lid (no @lid suffix) → phone JID, or null if unmapped. */

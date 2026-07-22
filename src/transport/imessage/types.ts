@@ -71,7 +71,7 @@ export interface ImessageConfig {
 
   /**
    * BlueBubbles Server base URL (e.g. 'https://bb.example.test'). Required
-   * when backend === 'bluebubbles'.
+   * when backend === 'bluebubbles'; HTTP is accepted only on loopback.
    */
   readonly bluebubblesUrl?: string;
 
@@ -83,9 +83,10 @@ export interface ImessageConfig {
   readonly bluebubblesPassword?: string;
 
   /**
-   * Keyring service name for the BlueBubbles password. Required when
-   * backend === 'bluebubbles'. The factory resolves the credential via
-   * lookupCredential() before constructing the port.
+   * Line-bound keyring service name for the BlueBubbles password.
+   * Required when backend === 'bluebubbles' and exactly
+   * `whatsoup-bluebubbles-<line-name>`. The factory resolves the credential
+   * only after verifying that binding.
    */
   readonly bluebubblesPasswordService?: string;
 
@@ -97,7 +98,7 @@ export interface ImessageConfig {
    */
   readonly sender: string;
 
-  /** Inbound delivery mode. 'poll' (default) or 'webhook' (BlueBubbles only). */
+  /** Inbound delivery mode. Only 'poll' is implemented. */
   readonly inboundMode: ImessageInboundMode;
 
   /** Poll interval for 'poll' mode. */
@@ -107,8 +108,8 @@ export interface ImessageConfig {
   readonly rateLimit: ImessageRateLimit;
 }
 
-/** Inbound delivery mode. Stage 1 supports 'poll'; BlueBubbles adds 'webhook'. */
-export type ImessageInboundMode = 'poll' | 'webhook';
+/** Inbound delivery mode. Webhook admission remains closed until a receiver exists. */
+export type ImessageInboundMode = 'poll';
 
 /** Defaults applied when an instance config omits the optional fields. */
 export const DEFAULT_IMESSAGE: Pick<

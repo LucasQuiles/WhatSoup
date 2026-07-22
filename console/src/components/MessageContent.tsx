@@ -1,7 +1,8 @@
 import { type FC, type ReactElement } from 'react'
 import { Image, Film, FileAudio, FileText, HelpCircle } from 'lucide-react'
 import type { Message } from '../types'
-import { formatWhatsAppText } from '../lib/format-wa-text'
+import { formatMessageText } from '../lib/format-message-text'
+import type { TransportKind } from '../lib/transport-meta'
 
 function formatMediaDuration(seconds: number): string {
   return seconds > 0 ? `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}` : ''
@@ -15,6 +16,7 @@ function formatMediaDuration(seconds: number): string {
 interface MessageContentProps {
   msg: Message
   highlightQuery?: string
+  transport?: TransportKind | string | null
 }
 
 /** Format byte counts into human-readable strings. */
@@ -25,7 +27,7 @@ function formatBytes(bytes: number): string {
 }
 
 /** Media type indicator for non-text messages (fallback). */
-const MediaIndicator: FC<{ type: string; caption?: string | null; highlightQuery?: string }> = ({ type, caption, highlightQuery }) => {
+const MediaIndicator: FC<{ type: string; caption?: string | null; highlightQuery?: string; transport?: TransportKind | string | null }> = ({ type, caption, highlightQuery, transport }) => {
   const icons: Record<string, ReactElement> = {
     image: <Image size={16} strokeWidth={1.75} className="text-m-cht" />,
     audio: <FileAudio size={16} strokeWidth={1.75} className="text-m-agt" />,
@@ -50,7 +52,7 @@ const MediaIndicator: FC<{ type: string; caption?: string | null; highlightQuery
         </div>
         {caption && (
           <div className="text-data text-text-2 mt-[var(--sp-1)]">
-            {formatWhatsAppText(caption.length > 60 ? caption.slice(0, 57) + '...' : caption, highlightQuery)}
+            {formatMessageText(caption.length > 60 ? caption.slice(0, 57) + '...' : caption, highlightQuery, transport)}
           </div>
         )}
       </div>
@@ -65,7 +67,7 @@ const MediaIndicator: FC<{ type: string; caption?: string | null; highlightQuery
       </span>
       {caption && (
         <span className="text-data text-text-2 ml-[var(--sp-1)]">
-          {formatWhatsAppText(caption.length > 60 ? caption.slice(0, 57) + '...' : caption, highlightQuery)}
+          {formatMessageText(caption.length > 60 ? caption.slice(0, 57) + '...' : caption, highlightQuery, transport)}
         </span>
       )}
     </div>
@@ -73,7 +75,7 @@ const MediaIndicator: FC<{ type: string; caption?: string | null; highlightQuery
 }
 
 /** Rich media renderer — extracts metadata from rawMessage, falls back to MediaIndicator. */
-const RichMedia: FC<{ msg: Message; highlightQuery?: string }> = ({ msg, highlightQuery }) => {
+const RichMedia: FC<{ msg: Message; highlightQuery?: string; transport?: TransportKind | string | null }> = ({ msg, highlightQuery, transport }) => {
   // B01: Image thumbnails
   if (msg.type === 'image' && msg.rawMessage) {
     try {
@@ -90,7 +92,7 @@ const RichMedia: FC<{ msg: Message; highlightQuery?: string }> = ({ msg, highlig
             />
             {msg.content && (
               <div className="text-data text-text-2 mt-[var(--sp-1)]">
-                {formatWhatsAppText(msg.content, highlightQuery)}
+                {formatMessageText(msg.content, highlightQuery, transport)}
               </div>
             )}
           </div>
@@ -169,7 +171,7 @@ const RichMedia: FC<{ msg: Message; highlightQuery?: string }> = ({ msg, highlig
             </div>
             {msg.content && (
               <div className="text-data text-text-2 mt-[var(--sp-1)]">
-                {formatWhatsAppText(msg.content, highlightQuery)}
+                {formatMessageText(msg.content, highlightQuery, transport)}
               </div>
             )}
           </div>
@@ -179,7 +181,7 @@ const RichMedia: FC<{ msg: Message; highlightQuery?: string }> = ({ msg, highlig
   }
 
   // Fallback: generic media indicator
-  return <MediaIndicator type={msg.type} caption={msg.content} highlightQuery={highlightQuery} />
+  return <MediaIndicator type={msg.type} caption={msg.content} highlightQuery={highlightQuery} transport={transport} />
 }
 
 /** Extract quoted message context from rawMessage proto. */
@@ -237,14 +239,14 @@ const QuotedReplyBar: FC<{ participant?: string; text?: string }> = ({ participa
   </div>
 )
 
-const MessageContent: FC<MessageContentProps> = ({ msg, highlightQuery }) => {
+const MessageContent: FC<MessageContentProps> = ({ msg, highlightQuery, transport }) => {
   const quoted = extractQuotedContext(msg.rawMessage)
 
   if (msg.type !== 'text') {
     return (
       <>
         {quoted && <QuotedReplyBar participant={quoted.participant} text={quoted.text} />}
-        <RichMedia msg={msg} highlightQuery={highlightQuery} />
+        <RichMedia msg={msg} highlightQuery={highlightQuery} transport={transport} />
       </>
     )
   }
@@ -254,7 +256,7 @@ const MessageContent: FC<MessageContentProps> = ({ msg, highlightQuery }) => {
   return (
     <>
       {quoted && <QuotedReplyBar participant={quoted.participant} text={quoted.text} />}
-      {msg.content ? formatWhatsAppText(msg.content, highlightQuery) : <em className="text-text-3">—</em>}
+      {msg.content ? formatMessageText(msg.content, highlightQuery, transport) : <em className="text-text-3">—</em>}
     </>
   )
 }

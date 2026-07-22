@@ -626,14 +626,14 @@ describe('AgentRuntime — fallback key-presence guard', () => {
   it('uses providerConfig.apiKeyService for same-provider API fallback key presence', () => {
     const runtime = makeRuntime({
       agentProvider: 'openai-api',
-      agentProviderConfig: { apiKeyService: 'tenant-openai' },
+      agentProviderConfig: { apiKeyService: 'groq' },
       agentFallbackProvider: 'openai-api',
       agentFallbackModel: 'gpt-4o-mini',
     });
-    lookupCredentialMock.mockImplementation((svc) => (svc === 'tenant-openai' ? 'tenant-key' : null));
+    lookupCredentialMock.mockImplementation((svc) => (svc === 'groq' ? 'groq-key' : null));
     const present = view(runtime).fallbackKeyPresent('openai-api', 'gpt-4o-mini');
     expect(present).toBe(true);
-    expect(lookupCredentialMock).toHaveBeenCalledWith('tenant-openai');
+    expect(lookupCredentialMock).toHaveBeenCalledWith('groq');
     expect(lookupCredentialMock).not.toHaveBeenCalledWith('openai');
   });
 

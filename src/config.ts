@@ -10,6 +10,7 @@ import { DEFAULT_TRANSPORT_ID, isTransportId, type TransportId } from './transpo
 import { DEFAULT_FLEET_PORT, DEFAULT_INSTANCE_HEALTH_PORT } from './fleet/constants.ts';
 import { DEFAULT_TWILIO_SMS, DEFAULT_TWILIO_VOICE, type TwilioSmsConfig, type TwilioInboundMode, type TwilioWebhookConfig, type TwilioVoiceConfig } from './transport/twilio/types.ts';
 import { DEFAULT_IMESSAGE, type ImessageConfig, type ImessageInboundMode } from './transport/imessage/types.ts';
+import { APPLEID_EMAIL_RE } from './core/transport-refs.ts';
 import { DEFAULT_SIGNAL, SIGNAL_UUID_RE, type SignalConfig, type SignalInboundMode } from './transport/signal/types.ts';
 import { normalizeFallbackEntriesFromAgentOptions } from './core/fallback-chain.ts';
 import { errorMessage } from './lib/error-message.ts';
@@ -452,6 +453,15 @@ export function resolveAdminIdentities(
       }
       return wireIdentity;
     }
+    if (transport === 'imessage') {
+      const lower = trimmed.toLowerCase();
+      if (APPLEID_EMAIL_RE.test(lower)) return lower;
+      const wireIdentity = normalizePhoneE164Wire(trimmed);
+      if (!wireIdentity) {
+        throw new Error('iMessage admin identity must be an AppleID email or E.164 phone number');
+      }
+      return wireIdentity;
+    }
     return normalizePhoneE164(trimmed);
   });
 }
@@ -650,16 +660,24 @@ export function resolveImessageConfig(
   if (!account) return undefined;
 
   const rawBackend = src['backend'];
-  const backend = rawBackend === 'imsg' || rawBackend === 'bluebubbles'
-    ? rawBackend
-    : DEFAULT_IMESSAGE.backend;
+  if (rawBackend !== 'imsg' && rawBackend !== 'bluebubbles') {
+    throw new Error("imessageConfig.backend must be 'imsg' or 'bluebubbles'");
+  }
+  const backend = rawBackend;
 
   const sender = stringProp(src, 'sender') ?? '';
+  const canonicalSender = (APPLEID_EMAIL_RE.test(sender) && sender === sender.toLowerCase())
+    || normalizePhoneE164Wire(sender) === sender;
+  if (!canonicalSender) {
+    throw new Error('imessageConfig.sender must be a lowercase AppleID email or E.164 phone number');
+  }
   const rawMode = src['inboundMode'];
-  const inboundMode: ImessageInboundMode =
-    rawMode === 'poll' || rawMode === 'webhook'
-      ? rawMode
-      : DEFAULT_IMESSAGE.inboundMode;
+  if (rawMode !== undefined && rawMode !== 'poll') {
+    throw new Error(
+      `Invalid imessageConfig.inboundMode ${JSON.stringify(rawMode)} — only "poll" is supported; webhook inbound is not implemented`,
+    );
+  }
+  const inboundMode: ImessageInboundMode = 'poll';
   const pollIntervalMs = numberProp(src, 'pollIntervalMs', DEFAULT_IMESSAGE.pollIntervalMs);
 
   const rateLimitSrc = asRecord(src['rateLimit']);
@@ -673,6 +691,16 @@ export function resolveImessageConfig(
   const bluebubblesUrl = stringProp(src, 'bluebubblesUrl');
   const bluebubblesPasswordService = stringProp(src, 'bluebubblesPasswordService');
 
+  if (backend === 'imsg' && src['bluebubblesUrl'] !== undefined) {
+    throw new Error("imessageConfig.bluebubblesUrl is only valid when backend is 'bluebubbles'");
+  }
+  if (backend === 'imsg' && src['bluebubblesPasswordService'] !== undefined) {
+    throw new Error("imessageConfig.bluebubblesPasswordService is only valid when backend is 'bluebubbles'");
+  }
+  if (backend === 'bluebubbles' && src['imsgSocketPath'] !== undefined) {
+    throw new Error("imessageConfig.imsgSocketPath is only valid when backend is 'imsg'");
+  }
+
   return {
     account,
     backend,
@@ -680,9 +708,9 @@ export function resolveImessageConfig(
     inboundMode,
     pollIntervalMs,
     rateLimit: { messagesPerMinute },
-    imsgSocketPath,
-    ...(bluebubblesUrl !== undefined ? { bluebubblesUrl } : {}),
-    ...(bluebubblesPasswordService !== undefined ? { bluebubblesPasswordService } : {}),
+    ...(backend === 'imsg' ? { imsgSocketPath } : {}),
+    ...(backend === 'bluebubbles' && bluebubblesUrl !== undefined ? { bluebubblesUrl } : {}),
+    ...(backend === 'bluebubbles' && bluebubblesPasswordService !== undefined ? { bluebubblesPasswordService } : {}),
   };
 }
 
@@ -1350,10 +1378,17 @@ export const config = {
   // Mirroring agentProvider: simple inline read with a default.
   transport: resolvedTransport,
 
-  // Outbound identity guard mode. Staged rollout: default log-only (audit-only,
-  // no behavior change). Per-instance flip to 'enforce' via env.
-  outboundIdentityMode:
-    process.env.WHATSOUP_OUTBOUND_IDENTITY_MODE === 'enforce' ? 'enforce' : 'log-only',
+  // Outbound identity guard mode. Enforce by default; log-only is an explicit
+  // operator rollback mode. Unknown values fail startup instead of weakening
+  // the egress boundary.
+  outboundIdentityMode: (() => {
+    const raw = process.env.WHATSOUP_OUTBOUND_IDENTITY_MODE;
+    if (raw === undefined) return 'enforce';
+    if (raw === 'enforce' || raw === 'log-only') return raw;
+    throw new Error(
+      `Invalid configuration: WHATSOUP_OUTBOUND_IDENTITY_MODE must be "enforce" or "log-only"; received "${raw}"`,
+    );
+  })(),
 
   // Twilio SMS config — present only when instance.twilioConfig is set.
   // Defaults for inboundMode/pollIntervalMs/rateLimit are applied by resolveTwilioSmsConfig.

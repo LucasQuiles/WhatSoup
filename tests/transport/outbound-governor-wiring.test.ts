@@ -63,6 +63,7 @@ vi.mock('../../src/logger.ts', () => ({
 import { makeWASocket } from '@whiskeysockets/baileys';
 import { makeMockSocket } from '../helpers/baileys-mock.ts';
 import { ConnectionManager } from '../../src/transport/connection.ts';
+import { withWarmIdentity } from '../helpers/outbound-identity.ts';
 
 const JID = '15551230009@s.whatsapp.net';
 
@@ -74,7 +75,7 @@ async function connected() {
   const { mockSock, emit } = makeMockSocket();
   mockSock.sendMessage.mockResolvedValue({ key: { id: 'wa-ok' } });
   vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
-  const manager = new ConnectionManager();
+  const manager = withWarmIdentity(new ConnectionManager());
   await manager.connect();
   emit(openEvent());
   return { manager, mockSock, emit };

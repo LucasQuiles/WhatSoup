@@ -543,7 +543,13 @@ export class ChatRuntime implements Runtime {
     const chatIsGroup = isGroupJid(msg.chatJid);
     responseText = redactInternalArtifacts(responseText, resolveOutboundAudience(msg.chatJid, {
       isGroup: chatIsGroup,
-      peerIsAdmin: isOperatorDmPeer(msg.chatJid, chatIsGroup, this.db, config.adminPhones),
+      peerIsAdmin: isOperatorDmPeer(
+        msg.chatJid,
+        chatIsGroup,
+        this.db,
+        config.adminPhones,
+        config.transport,
+      ),
       fallbackActive: usedFallbackProvider,
     })).text;
 

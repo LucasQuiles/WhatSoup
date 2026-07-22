@@ -37,8 +37,11 @@ import {
   isImessageJid,
   isWhatsAppAuthenticatedJid,
   isAuthenticatedSenderJid,
+  isAuthenticatedSenderForTransport,
+  isSenderJidForTransport,
   isSignalJid,
   toSignalJid,
+  toTransportDirectJid,
   fromSignalJid,
   parseWhatsAppDeliveryNamespace,
 } from '../../src/core/jid-constants.ts';
@@ -169,6 +172,13 @@ describe('isGroupJid', () => {
     expect(isGroupJid('01234567-89ab-cdef-0123-456789abcdef@signal')).toBe(false);
   });
 
+  it('recognizes iMessage group chat GUIDs without treating DMs as groups', () => {
+    expect(isGroupJid('iMessage;+;chatABC@imessage')).toBe(true);
+    expect(isGroupJid('iMessage;-;chatABC@imessage')).toBe(false);
+    expect(isGroupJid('owner@example.test@imessage')).toBe(false);
+    expect(isGroupJid('+15551230008@imessage')).toBe(false);
+  });
+
   it('returns false for non-group JIDs', () => {
     expect(isGroupJid('15551234567@s.whatsapp.net')).toBe(false);
     expect(isGroupJid('12345@lid')).toBe(false);
@@ -245,6 +255,21 @@ describe('SMS JID helpers', () => {
   });
 });
 
+describe('transport-aware direct JID routing', () => {
+  it.each([
+    ['baileys', '15551230000', '15551230000@s.whatsapp.net'],
+    ['twilio', '15551230000', '+15551230000@sms'],
+    ['signal', '+15551230000', '+15551230000@signal'],
+    ['imessage', 'Owner@Example.com', 'owner@example.com@imessage'],
+  ] as const)('routes %s identities through the provider namespace', (transport, identity, expected) => {
+    expect(toTransportDirectJid(identity, transport)).toBe(expected);
+  });
+
+  it('rejects a malformed Twilio notification identity', () => {
+    expect(() => toTransportDirectJid('not-a-phone', 'twilio')).toThrow(/E\.164/);
+  });
+});
+
 describe('isAuthenticatedSenderJid (S6 — signal/imessage parity)', () => {
   it('returns true for WhatsApp PN/LID (unchanged)', () => {
     expect(isAuthenticatedSenderJid('15551234567@s.whatsapp.net')).toBe(true);
@@ -258,7 +283,10 @@ describe('isAuthenticatedSenderJid (S6 — signal/imessage parity)', () => {
 
   it('returns true for AppleID-verified iMessage senders', () => {
     expect(isAuthenticatedSenderJid('user@heal.internal@imessage')).toBe(true);
-    expect(isAuthenticatedSenderJid('iMessage;+;chatABC@imessage')).toBe(true);
+  });
+
+  it('does not authenticate iMessage conversation GUIDs as direct senders', () => {
+    expect(isAuthenticatedSenderJid('iMessage;+;chatABC@imessage')).toBe(false);
   });
 
   it('returns false for spoofable/unauthenticated forms', () => {
@@ -270,6 +298,50 @@ describe('isAuthenticatedSenderJid (S6 — signal/imessage parity)', () => {
 
   it('the old name is an alias (back-compat for in-flight callers)', () => {
     expect(isWhatsAppAuthenticatedJid).toBe(isAuthenticatedSenderJid);
+  });
+});
+
+describe('isAuthenticatedSenderForTransport', () => {
+  it('binds authenticated namespaces to the configured transport and fails closed', () => {
+    expect(isAuthenticatedSenderForTransport('15551234567@s.whatsapp.net', 'baileys')).toBe(true);
+    expect(isAuthenticatedSenderForTransport('+15551234567@signal', 'signal')).toBe(true);
+    expect(isAuthenticatedSenderForTransport('owner@example.com@imessage', 'imessage')).toBe(true);
+    expect(isAuthenticatedSenderForTransport('15551234567@s.whatsapp.net', 'signal')).toBe(false);
+    expect(isAuthenticatedSenderForTransport('+15551234567@signal', 'imessage')).toBe(false);
+    expect(isAuthenticatedSenderForTransport('15551234567@s.whatsapp.net', 'twilio')).toBe(false);
+    expect(isAuthenticatedSenderForTransport('15551234567@s.whatsapp.net', 'future-provider')).toBe(false);
+  });
+
+  it('rejects malformed locals even when the namespace suffix matches', () => {
+    expect(isAuthenticatedSenderForTransport('+1-555-123-4567@s.whatsapp.net', 'baileys')).toBe(false);
+    expect(isAuthenticatedSenderForTransport('+1-555-123-4567@signal', 'signal')).toBe(false);
+    expect(isAuthenticatedSenderForTransport('+1-555-123-4567@imessage', 'imessage')).toBe(false);
+    expect(isAuthenticatedSenderForTransport('group-address-value@signal', 'signal')).toBe(false);
+  });
+
+  it('accepts canonical direct identities including WhatsApp device qualifiers', () => {
+    expect(isAuthenticatedSenderForTransport('15551234567:2@s.whatsapp.net', 'baileys')).toBe(true);
+    expect(isAuthenticatedSenderForTransport('1111111234567:4@lid', 'baileys')).toBe(true);
+    expect(isAuthenticatedSenderForTransport('aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee@signal', 'signal')).toBe(true);
+    expect(isAuthenticatedSenderForTransport('owner@example.com@imessage', 'imessage')).toBe(true);
+  });
+});
+
+describe('isSenderJidForTransport', () => {
+  it('binds canonical sender namespaces, including Twilio SMS', () => {
+    expect(isSenderJidForTransport('15551234567@s.whatsapp.net', 'baileys')).toBe(true);
+    expect(isSenderJidForTransport('+15551234567@sms', 'twilio')).toBe(true);
+    expect(isSenderJidForTransport('+15551234567@signal', 'signal')).toBe(true);
+    expect(isSenderJidForTransport('owner@example.com@imessage', 'imessage')).toBe(true);
+  });
+
+  it('fails closed for cross-transport and non-canonical senders', () => {
+    expect(isSenderJidForTransport('+15551234567@signal', 'imessage')).toBe(false);
+    expect(isSenderJidForTransport('+15551234567@imessage', 'signal')).toBe(false);
+    expect(isSenderJidForTransport('15551234567@s.whatsapp.net', 'twilio')).toBe(false);
+    expect(isSenderJidForTransport('1555-123-4567@sms', 'twilio')).toBe(false);
+    expect(isSenderJidForTransport('OWNER@example.com@imessage', 'imessage')).toBe(false);
+    expect(isSenderJidForTransport('abc:1:2@lid', 'baileys')).toBe(false);
   });
 });
 
@@ -289,8 +361,10 @@ describe('Signal/iMessage JID helpers', () => {
 
   it('toImessageJid / fromImessageJid round-trip and idempotence', () => {
     expect(toImessageJid('user@heal.internal')).toBe('user@heal.internal@imessage');
+    expect(toImessageJid('User@Heal.Internal')).toBe('user@heal.internal@imessage');
     expect(toImessageJid('a@imessage')).toBe('a@imessage');
     expect(fromImessageJid('user@heal.internal@imessage')).toBe('user@heal.internal');
+    expect(fromImessageJid('User@Heal.Internal@imessage')).toBe('user@heal.internal');
     expect(fromImessageJid('bare')).toBe('bare');
   });
 

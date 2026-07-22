@@ -32,6 +32,11 @@ import { api } from '../lib/api'
 import { withDefaultAgentWorkspace } from '../lib/agent-cwd'
 import { CHAT_API_KEY_SERVICE_OPTIONS, DEFAULT_PROVIDER_ID } from '../lib/providers'
 import { buildFinishPatch } from '../lib/wizard-finish'
+import {
+  canonicalizeTransportFormData,
+  transportAttestationFingerprint,
+  validateTransportFormData,
+} from '../lib/transport-config'
 import { useToast } from '../hooks/toast-context'
 
 interface AddLineWizardProps {
@@ -99,8 +104,7 @@ const validateStep = (step: number, formData: Record<string, unknown>): Record<s
     const raw = (formData.name as string) ?? ''
     const name = raw.toLowerCase().replace(/[^a-z0-9-]/g, '')
     if (!name || name.length < 2) errs.name = 'Enter a name — at least 2 characters (letters, numbers, hyphens)'
-    const phones = formData.adminPhones as string[]
-    if (!phones || phones.length === 0) errs.adminPhones = 'Add at least one admin phone number, then press Enter'
+    Object.assign(errs, validateTransportFormData(formData))
   }
   if (step === 2) {
     Object.assign(errs, validateChatOpenAIProviderConfig(formData))
@@ -119,6 +123,7 @@ const validateStep = (step: number, formData: Record<string, unknown>): Record<s
 const AddLineWizard: FC<AddLineWizardProps> = ({ open, onClose }) => {
   const [currentStep, setCurrentStep] = useState(0)
   const [formData, setFormData] = useState<Record<string, unknown>>({
+    transport: 'baileys',
     type: '',
     accessMode: 'self_only',
     adminPhones: [],
@@ -163,6 +168,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ open, onClose }) => {
     if (open && !prevOpenRef.current) {
       setCurrentStep(0)
       setFormData({
+        transport: 'baileys',
         type: '',
         accessMode: 'self_only',
         adminPhones: [],
@@ -199,7 +205,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ open, onClose }) => {
       setShowConfirmExit(false)
       setInstanceCreated(false)
       setWizardCompleted(false)
-      setLineLinked(false)
+      setLinkedAttestation(null)
       setLockedName(null)
     }
     prevOpenRef.current = open
@@ -215,7 +221,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ open, onClose }) => {
 
   const [instanceCreated, setInstanceCreated] = useState(false)
   const [wizardCompleted, setWizardCompleted] = useState(false)
-  const [lineLinked, setLineLinked] = useState(false)
+  const [linkedAttestation, setLinkedAttestation] = useState<string | null>(null)
   const toastApi = useToast()
 
   // Warn user about tab close when instance is created but wizard incomplete
@@ -233,15 +239,15 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ open, onClose }) => {
   const [lockedName, setLockedName] = useState<string | null>(null)
 
   const handleNext = useCallback(async () => {
-    const nextFormData = withDefaultAgentWorkspace(formData)
-    if (nextFormData !== formData) setFormData(nextFormData)
+    const nextFormData = canonicalizeTransportFormData(withDefaultAgentWorkspace(formData))
+    setFormData(nextFormData)
     const errs = validateStep(currentStep, nextFormData)
     setErrors(errs)
     if (Object.keys(errs).length > 0) return
 
     // Create the instance when advancing from Identity to Link
     // so the auth process has a config dir to write QR keys to
-    if (currentStep === 0 && !instanceCreated) {
+    if (currentStep === 0 && nextFormData.transport === 'baileys' && !instanceCreated) {
       setCreating(true)
       setCreateError(null)
       try {
@@ -286,12 +292,18 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ open, onClose }) => {
     setCreating(true)
     setCreateError(null)
     try {
-      const nextFormData = withDefaultAgentWorkspace(formData)
-      if (nextFormData !== formData) setFormData(nextFormData)
+      const nextFormData = canonicalizeTransportFormData(withDefaultAgentWorkspace(formData))
+      setFormData(nextFormData)
       // Instance already created at step 0→1. Keys never ride the config
       // PATCH — they go to the OS keyring via the credentials API.
       const { patch, credentials } = buildFinishPatch(nextFormData)
-      await api.updateConfig(nextFormData.name as string, patch)
+      if (nextFormData.transport === 'baileys') {
+        await api.updateConfig(nextFormData.name as string, patch)
+      } else {
+        await api.createLine(patch)
+        setInstanceCreated(true)
+        setLockedName(nextFormData.name as string)
+      }
       for (const cred of credentials) {
         try {
           await api.setCredential(cred.service, cred.value)
@@ -366,9 +378,10 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ open, onClose }) => {
             {currentStep === 1 && (
               <LinkStep
                 lineName={formData.name as string}
-                alreadyLinked={lineLinked}
+                transport={formData.transport as string}
+                alreadyLinked={linkedAttestation === transportAttestationFingerprint(formData)}
                 onComplete={() => {
-                  setLineLinked(true)
+                  setLinkedAttestation(transportAttestationFingerprint(formData))
                   setCurrentStep(2)
                 }}
               />

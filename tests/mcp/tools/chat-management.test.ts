@@ -43,6 +43,10 @@ function seedConversations(db: Database) {
       ('111@s.whatsapp.net', '111', '111@s.whatsapp.net', 'Alice', 'msg4', 'Fourth message', 'text', 0, 4000),
       ('111@s.whatsapp.net', '111', '111@s.whatsapp.net', 'Alice', 'msg5', 'Fifth message', 'text', 0, 5000),
       ('222@s.whatsapp.net', '222', '222@s.whatsapp.net', 'Bob',   'msg6', 'Bob chat', 'text', 0, 6000);
+    INSERT INTO contacts (jid, canonical_phone)
+    VALUES ('333@s.whatsapp.net', '333');
+    INSERT INTO access_list (subject_type, subject_id, status)
+    VALUES ('group', '333@g.us', 'allowed');
   `);
 }
 
@@ -718,10 +722,10 @@ describe('chat-management tools', () => {
       const original = config.outboundIdentityMode;
       (config as { outboundIdentityMode: string }).outboundIdentityMode = 'enforce';
       try {
-        // 333@s.whatsapp.net has no contact / no access / no inbound — cold.
+        // 444@s.whatsapp.net has no contact / no access / no inbound — cold.
         const result = await registry.call(
           'forward_message',
-          { message_id: 'msg1', to_jid: '333@s.whatsapp.net' },
+          { message_id: 'msg1', to_jid: '444@s.whatsapp.net' },
           globalSession(),
         );
         expect(result.isError).toBe(true);
@@ -739,7 +743,7 @@ describe('chat-management tools', () => {
       try {
         const result = await registry.call(
           'forward_message',
-          { message_id: 'msg1', to_jid: '333@s.whatsapp.net' },
+          { message_id: 'msg1', to_jid: '444@s.whatsapp.net' },
           globalSession(),
         );
         expect(result.isError).toBeUndefined();
@@ -1051,6 +1055,29 @@ describe('chat-management.ts uncovered-branch coverage', () => {
       expect(data.conversationKey).toBe('grp1_at_g.us');
       expect(data.messageCount).toBe(1);
       expect(data.chatJid).toBe('grp1@g.us');
+    });
+
+    it('accepts canonical and raw AppleID iMessage conversation references', async () => {
+      db.raw.exec(`
+        INSERT INTO messages
+          (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, content_type, is_from_me, timestamp)
+        VALUES
+          ('owner@example.test@imessage', 'owner_at_example.test@imessage', 'owner@example.test@imessage', 'Owner', 'imsg-appleid-1', 'hello', 'text', 0, 12000)
+      `);
+
+      for (const conversation_key of [
+        'owner_at_example.test@imessage',
+        'owner@example.test@imessage',
+        'owner@example.test_at_imessage',
+      ]) {
+        const result = await registry.call('get_chat', { conversation_key }, globalSession());
+        expect(result.isError).toBeUndefined();
+        expect(JSON.parse(result.content[0].text)).toMatchObject({
+          conversationKey: 'owner_at_example.test@imessage',
+          chatJid: 'owner@example.test@imessage',
+          messageCount: 1,
+        });
+      }
     });
   });
 

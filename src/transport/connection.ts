@@ -633,7 +633,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   readonly presenceCache = new PresenceCache();
 
   private identityStore: IdentityStore | null = null;
-  private identityMode: GuardMode = 'log-only';
+  private identityMode: GuardMode = 'enforce';
 
   /**
    * PR-F socket-seam outbound governor. Created ONCE here (SS2) and reused

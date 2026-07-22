@@ -299,6 +299,20 @@ describe('FleetDiscovery.scan — malformed config.json', () => {
     expect(broken?.configError).toMatch(/Invalid type/i);
   });
 
+  it('preserves an explicitly unknown transport so clients cannot mistake it for Baileys', () => {
+    writeInstanceConfig('future-transport', {
+      ...chatInstance,
+      name: 'future-transport',
+      transport: 'future-provider',
+    });
+
+    const discovery = new FleetDiscovery(configRoot);
+    const instance = discovery.scan().get('future-transport');
+
+    expect(instance?.configError).toMatch(/transport/i);
+    expect(instance?.transport).toBe('future-provider');
+  });
+
   it('keeps instances with load-invalid healthPort and marks them config_error', () => {
     writeInstanceConfig('low-port', {
       name: 'low-port',

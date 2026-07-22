@@ -75,6 +75,23 @@ describe('assertOutboundIdentity — plain phone jid', () => {
     const d = assertOutboundIdentity('15550009999@s.whatsapp.net', { caller: 'agent', mode: 'enforce' }, store);
     expect(d).toEqual({ verdict: 'block', code: 'COLD_TARGET', reason: expect.any(String) });
   });
+
+  it('preserves a full AppleID when resolving an iMessage access identity', () => {
+    const seenBareIds: string[] = [];
+    const store = fakeStore({
+      isWarm: (_jid, bareId) => {
+        seenBareIds.push(bareId);
+        return bareId === 'owner@example.com';
+      },
+    });
+
+    expect(assertOutboundIdentity(
+      'owner@example.com@imessage',
+      { caller: 'agent', mode: 'enforce' },
+      store,
+    )).toEqual({ verdict: 'allow' });
+    expect(seenBareIds).toEqual(['owner@example.com']);
+  });
 });
 
 describe('assertOutboundIdentity — group classification', () => {
@@ -113,6 +130,22 @@ describe('assertOutboundIdentity — group classification', () => {
     )).toEqual({ verdict: 'allow' });
     expect(assertOutboundIdentity(
       'YW5vdGhlci1jb252ZXJzYXRpb24=@signal',
+      { caller: 'agent', mode: 'enforce' },
+      store,
+    )).toMatchObject({ verdict: 'block', code: 'UNKNOWN_GROUP' });
+  });
+
+  it('applies the approved-group policy to iMessage group conversations', () => {
+    const approvedJid = 'iMessage;+;approved-chat@imessage';
+    const store = fakeStore({ isApprovedGroup: (jid) => jid === approvedJid });
+
+    expect(assertOutboundIdentity(
+      approvedJid,
+      { caller: 'agent', mode: 'enforce' },
+      store,
+    )).toEqual({ verdict: 'allow' });
+    expect(assertOutboundIdentity(
+      'iMessage;+;unknown-chat@imessage',
       { caller: 'agent', mode: 'enforce' },
       store,
     )).toMatchObject({ verdict: 'block', code: 'UNKNOWN_GROUP' });

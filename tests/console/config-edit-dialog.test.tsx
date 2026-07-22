@@ -19,6 +19,7 @@ vi.mock('../../console/src/components/TagInput', () => ({
     id,
     placeholder,
     displayLabels,
+    normalizeValue,
     'aria-describedby': ariaDescribedBy,
     'aria-invalid': ariaInvalid,
   }: {
@@ -27,6 +28,7 @@ vi.mock('../../console/src/components/TagInput', () => ({
     id?: string
     placeholder?: string
     displayLabels?: Record<string, string>
+    normalizeValue?: (value: string) => string
     'aria-describedby'?: string
     'aria-invalid'?: true
   }) => (
@@ -47,6 +49,20 @@ vi.mock('../../console/src/components/TagInput', () => ({
         onClick={() => onChange([...values, placeholder === 'Add phone number' ? '15557654321' : 'new-item'])}
       >
         add
+      </button>
+      <button
+        type="button"
+        data-testid="tag-add-signal"
+        onClick={() => onChange([...values, normalizeValue?.('AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE') ?? 'AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE'])}
+      >
+        add-signal
+      </button>
+      <button
+        type="button"
+        data-testid="tag-add-imessage"
+        onClick={() => onChange([...values, normalizeValue?.('Owner@Example.com') ?? 'Owner@Example.com'])}
+      >
+        add-imessage
       </button>
       <button
         type="button"
@@ -135,6 +151,68 @@ afterEach(() => cleanup())
 // ---------------------------------------------------------------------------
 
 describe('ConfigEditDialog — structural render', () => {
+  it('fails closed instead of presenting an explicit unknown transport as Baileys', () => {
+    render(withProviders(
+      <ConfigEditDialog
+        open={true}
+        config={BASE_CONFIG}
+        lineName={LINE}
+        transport="unknown-transport"
+        onClose={() => {}}
+      />,
+    ))
+
+    expect(screen.getByText('Unsupported transport configuration')).toBeDefined()
+    expect(screen.queryByText('adminPhones')).toBeNull()
+    expect((screen.getByRole('button', { name: /^Save$/ }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('does not expose or submit server-derived prototype-mutating config paths', async () => {
+    updateConfigMock.mockResolvedValue(undefined)
+    const maliciousConfig = JSON.parse(JSON.stringify({
+      name: LINE,
+      type: 'agent',
+      safe: true,
+      '__proto__.consoleConfigPolluted': 'blocked',
+      'constructor.prototype.consoleConfigPolluted': 'blocked',
+      'agentOptions..cwd': 'blocked',
+    })) as Record<string, unknown>;
+
+    render(withProviders(
+      <ConfigEditDialog open={true} config={maliciousConfig} lineName={LINE} onClose={() => {}} />,
+    ));
+
+    expect(screen.queryByText('__proto__.consoleConfigPolluted')).toBeNull();
+    expect(screen.queryByText('constructor.prototype.consoleConfigPolluted')).toBeNull();
+    expect(screen.queryByText('agentOptions..cwd')).toBeNull();
+    expect(Object.hasOwn(Object.prototype, 'consoleConfigPolluted')).toBe(false);
+
+    fireEvent.click(screen.getByLabelText('safe'))
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Save \(1\)/ }))
+    })
+
+    expect(updateConfigMock).toHaveBeenCalledTimes(1)
+    const submitted = updateConfigMock.mock.calls[0][1] as Record<string, unknown>
+    expect(submitted).toEqual({ safe: false })
+    expect(Object.hasOwn(submitted, '__proto__')).toBe(false)
+    expect(Object.hasOwn(submitted, 'constructor')).toBe(false)
+  });
+
+  it('renders an own config key that collides with Object.prototype without inherited enum metadata', () => {
+    const collidingConfig = JSON.parse(JSON.stringify({
+      name: LINE,
+      type: 'agent',
+      toString: 'own-value',
+    })) as Record<string, unknown>
+
+    render(withProviders(
+      <ConfigEditDialog open={true} config={collidingConfig} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    expect((screen.getByLabelText('toString') as HTMLInputElement).value).toBe('own-value')
+  })
+
   it('renders the dialog with correct role and aria attributes', () => {
     render(withProviders(
       <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
@@ -877,6 +955,25 @@ describe('ConfigEditDialog — enum and custom-enum field', () => {
     expect(options).toContain('groups_only')
   })
 
+  it('prevents newly selecting unusable access modes for an interactive Twilio SMS line', () => {
+    render(withProviders(
+      <ConfigEditDialog
+        open={true}
+        config={BASE_CONFIG}
+        lineName={LINE}
+        transport="twilio"
+        onClose={() => {}}
+      />,
+    ))
+
+    expect(screen.getByText(/Twilio SMS cannot authenticate admins or receive group chats/)).toBeDefined()
+    const accessModeSelect = screen.getByLabelText('accessMode') as HTMLSelectElement
+    const options = Array.from(accessModeSelect.options)
+    expect(options.map(option => option.value)).toEqual(['self_only', 'allowlist', 'open_dm'])
+    expect(options[0].disabled).toBe(true)
+    expect(options[0].textContent).toMatch(/unavailable for Twilio SMS/i)
+  })
+
   it('marks the field modified when the select value changes', () => {
     render(withProviders(
       <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
@@ -1176,6 +1273,50 @@ describe('ConfigEditDialog — chat BYOK edit surface', () => {
 // ---------------------------------------------------------------------------
 
 describe('ConfigEditDialog — adminPhones TagInput wiring', () => {
+  it('normalizes and saves Signal UUID admins for Signal lines', async () => {
+    updateConfigMock.mockResolvedValue(undefined)
+    render(withProviders(
+      <ConfigEditDialog
+        open={true}
+        config={BASE_CONFIG}
+        lineName={LINE}
+        transport="signal"
+        onClose={() => {}}
+      />,
+    ))
+
+    fireEvent.click(screen.getByTestId('tag-add-signal'))
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Save \(1\)/ }))
+    })
+
+    expect(updateConfigMock).toHaveBeenCalledWith(LINE, {
+      adminPhones: ['15551234567', 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'],
+    })
+  })
+
+  it('normalizes and saves AppleID admins for iMessage lines', async () => {
+    updateConfigMock.mockResolvedValue(undefined)
+    render(withProviders(
+      <ConfigEditDialog
+        open={true}
+        config={BASE_CONFIG}
+        lineName={LINE}
+        transport="imessage"
+        onClose={() => {}}
+      />,
+    ))
+
+    fireEvent.click(screen.getByTestId('tag-add-imessage'))
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Save \(1\)/ }))
+    })
+
+    expect(updateConfigMock).toHaveBeenCalledWith(LINE, {
+      adminPhones: ['15551234567', 'owner@example.com'],
+    })
+  })
+
   it('associates the adminPhones label with the TagInput control', () => {
     render(withProviders(
       <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,

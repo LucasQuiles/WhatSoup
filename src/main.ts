@@ -35,9 +35,14 @@ import { createIngestHandler } from './core/ingest.ts';
 import { createCapabilityGrantManager, type CapabilityGrantManager } from './lib/capability-grant.ts';
 import { createSettingsPolicyAdapter, createFileGrantStore, assertGroupsRespectDenyFloor } from './core/capability-grant-adapter.ts';
 import { toConversationKey } from './core/conversation-key.ts';
-import { toPersonalJid, toLidJid, toSignalJid } from './core/jid-constants.ts';
+import { toPersonalJid, toLidJid, toSmsJid, toSignalJid, toImessageJid, toTransportDirectJid } from './core/jid-constants.ts';
 import { selectReplayableDms, rememberReplayedId } from './core/admin.ts';
-import { DurabilityEngine, sendTracked, drainPendingOutbound } from './core/durability.ts';
+import {
+  DurabilityEngine,
+  sendTracked,
+  sendTrackedOperatorReport,
+  drainPendingOutbound,
+} from './core/durability.ts';
 import { waitForHistorySyncThenRecover } from './core/post-connect-recovery.ts';
 import { seedChatAliases } from './core/chats-resolver.ts';
 import { createProfileRegistry } from './core/profiles.ts';
@@ -53,9 +58,15 @@ import {
 } from './core/chat-sync.ts';
 import { handleLabelsEdit, handleLabelsAssociation, cleanupOrphanedAssociations } from './core/label-sync.ts';
 import { handleBlocklistSet, handleBlocklistUpdate } from './core/blocklist-sync.ts';
-import { lookupAccess, updateAccess, insertAllowed, seedAutoRespondGroups, resolvePhoneFromJid } from './core/access-list.ts';
+import {
+  lookupAccess,
+  updateAccess,
+  insertAllowed,
+  seedAutoRespondGroups,
+  resolvePhoneFromJidForGrant,
+} from './core/access-list.ts';
 import { hydrateLidMappings, upsertLidMapping, mineMessageKey, mineGroupParticipants, reconcileLidMappings, setLidAuthDir, type LidReconcileState } from './core/lid-resolver.ts';
-import { isAdminPhone } from './lib/phone.ts';
+import { isAdminPhone, normalizePhoneE164Wire } from './lib/phone.ts';
 import { handleGroupsUpsert, handleGroupsUpdate } from './core/group-sync.ts';
 import type { Runtime } from './runtimes/types.ts';
 import { MediaRetentionTimer } from './core/media-retention.ts';
@@ -91,9 +102,7 @@ function resolveTilde(p: string): string {
 }
 
 function toConfiguredDirectJid(identity: string): string {
-  return config.transport === 'signal'
-    ? toSignalJid(identity)
-    : toPersonalJid(identity);
+  return toTransportDirectJid(identity, config.transport);
 }
 
 const log = createChildLogger('main');
@@ -307,6 +316,10 @@ const connectionManager: RuntimeConnection = createConnection(config);
 // outbound governor. main.ts is the composition root (may import runtimes);
 // transport receives the classifier via DI so it need not import runtimes.
 connectionManager.setOutboundContentClassifier?.(classifyStreamedProviderFailure);
+// Install the outbound identity boundary before constructing any scheduler,
+// runtime timer, or transport connection that can reach a provider.
+connectionManager.contactsDir.setDatabase(db);
+connectionManager.setIdentityStore(new SqliteIdentityStore(db.raw), config.outboundIdentityMode);
 
 // 5. Runtime — selected by instance type
 let runtime: Runtime;
@@ -681,9 +694,9 @@ connectionManager.on('groupParticipantsUpdate', (data) => {
   if (!botAdded) return;
 
   // Check if the person who added the bot is an admin
-  const authorPhone = resolvePhoneFromJid(author, db);
-  if (!isAdminPhone(authorPhone, config.adminPhones)) {
-    log.info({ groupJid, author, authorPhone }, 'bot added to group by non-admin — not auto-allowing');
+  const authorIdentity = resolvePhoneFromJidForGrant(author, db, config.transport);
+  if (authorIdentity === null || !isAdminPhone(authorIdentity, config.adminPhones)) {
+    log.info({ groupJid, author }, 'bot added to group by non-admin — not auto-allowing');
     return;
   }
 
@@ -789,9 +802,16 @@ const healthServer = startHealthServer({
       // Replay queued DM messages — uses shared selectReplayableDms helper from admin.ts
       // so group exclusion, dedup (replayedIds), and adminReplayMax cap are all applied consistently.
       log.info({ subjectType, subjectId }, 'access: allowed via POST /access — replaying queued messages');
+      const twilioIdentity = config.transport === 'twilio'
+        ? normalizePhoneE164Wire(subjectId)
+        : null;
       const jidFormats = config.transport === 'signal'
         ? [toSignalJid(subjectId)]
-        : [toPersonalJid(subjectId), toLidJid(subjectId)];
+        : config.transport === 'imessage'
+          ? [toImessageJid(subjectId)]
+          : config.transport === 'twilio'
+            ? (twilioIdentity === null ? [] : [toSmsJid(twilioIdentity)])
+            : [toPersonalJid(subjectId), toLidJid(subjectId)];
       for (const senderJid of jidFormats) {
         const stored = getMessagesBySender(db, senderJid);
         const { toReplay, groupSkipped } = selectReplayableDms(stored, config.adminReplayMax);
@@ -994,11 +1014,6 @@ triggerPoller.start();
 
 // 17. Seed contacts directory from message history (so @name mentions work after restart)
 {
-  // Inject DB into contacts directory so LID→phone resolution works for @mentions
-  connectionManager.contactsDir.setDatabase(db);
-
-  connectionManager.setIdentityStore(new SqliteIdentityStore(db.raw), config.outboundIdentityMode);
-
   const rows = db.raw.prepare(
     `SELECT DISTINCT sender_jid, sender_name FROM messages
      WHERE sender_jid IS NOT NULL AND sender_name IS NOT NULL AND sender_name != ''
@@ -1061,7 +1076,9 @@ async function start(): Promise<void> {
         ? `Hey! *${titleName}* is online and ready. I'm an AI agent with tool access — I can research, write code, manage files, and help with tasks. Send me a message to get started.`
         : `Hey! *${titleName}* is online and ready. I'm an AI assistant — send me a message and I'll respond.`;
       setTimeout(() => {
-        sendTracked(connectionManager, adminChatJid, introText, durability, { replayPolicy: 'safe' })
+        sendTrackedOperatorReport(connectionManager, adminChatJid, introText, durability, {
+          replayPolicy: 'safe',
+        })
           .then(() => log.info({ chatJid: adminChatJid }, 'sent introduction'))
           .catch((err) => log.warn({ err }, 'failed to send introduction'));
       }, 3_000);
@@ -1073,9 +1090,14 @@ async function start(): Promise<void> {
     ) {
       // Agent restart notification (existing behavior)
       const pending = runtime.popStartupMessage();
-      const notifyTarget = pending
-        ? { chatJid: pending.chatJid, text: pending.text, isResume: true }
-        : { chatJid: adminChatJid, text: '*Agent back online* ✓', isResume: false };
+      const notifyTarget: {
+        chatJid: string;
+        text: string;
+        isResume: boolean;
+        caller?: 'report-channel';
+      } = pending
+        ? { chatJid: pending.chatJid, text: pending.text, isResume: true, caller: pending.caller }
+        : { chatJid: adminChatJid, text: '*Agent back online* ✓', isResume: false, caller: 'report-channel' };
       // PR-C: the bare '*Agent back online* ✓' fallback is a status op
       // (unsafe + status_ping) so it supersedes/ages-out and cannot storm. The
       // isResume branch carries real continuity content — it stays a safe text op.
@@ -1084,7 +1106,16 @@ async function start(): Promise<void> {
           ? { replayPolicy: 'safe' }
           : { replayPolicy: 'unsafe', opType: 'status_ping' };
       setTimeout(() => {
-        sendTracked(connectionManager, notifyTarget.chatJid, notifyTarget.text, durability, startupOpts)
+        const send = notifyTarget.caller === 'report-channel'
+          ? sendTrackedOperatorReport(
+              connectionManager,
+              notifyTarget.chatJid,
+              notifyTarget.text,
+              durability,
+              startupOpts,
+            )
+          : sendTracked(connectionManager, notifyTarget.chatJid, notifyTarget.text, durability, startupOpts);
+        send
           .then(() => log.info({ chatJid: notifyTarget.chatJid, isResume: notifyTarget.isResume }, 'sent startup notification'))
           .catch((err) => log.warn({ err, chatJid: notifyTarget.chatJid }, 'failed to send startup notification'));
       }, 3_000);

@@ -10,7 +10,7 @@ import { createChildLogger } from '../../logger.ts';
 import type { ToolRegistry } from '../registry.ts';
 import type { SessionContext } from '../types.ts';
 import { resolvePhoneFromJid } from '../../core/access-list.ts';
-import { isAuthenticatedSenderJid } from '../../core/jid-constants.ts';
+import { isAuthenticatedSenderForTransport } from '../../core/jid-constants.ts';
 import {
   createBead, updateBead, completeBead, cancelBead,
   approveProposal, rejectProposal, listBeads, getBead,
@@ -41,6 +41,7 @@ export interface SubstrateDeps {
    */
   dbWrapper: Database;
   adminPhones: Set<string>;
+  transport?: string | null;
   /**
    * Gate for `poll.url` watches (F2 Slice B). Defaults OFF — a `create_watch`
    * with `source:'poll.url'` THROWS at creation (never persists) unless an
@@ -80,13 +81,12 @@ function assertAdmin(deps: SubstrateDeps, session: SessionContext): void {
       'admin-only tool: session has no actorJid — the runtime must populate actorJid from the sender before dispatching admin-gated tools',
     );
   }
-  // QR-143: only WhatsApp-authenticated actors (@s.whatsapp.net/@lid) may be admin.
-  // A non-authenticated transport (e.g. @sms) resolves to the SAME bare phone as a
-  // WhatsApp admin, but its sender-ID is spoofable — gate on the transport BEFORE
-  // the adminPhones match so a spoofed SMS cannot reach admin-gated MCP tools.
-  if (!isAuthenticatedSenderJid(session.actorJid)) {
+  // QR-143: the actor namespace must match the configured transport. A spoofable
+  // @sms sender or an identity authenticated by a different provider must not
+  // cross-elevate through a matching admin identity.
+  if (!isAuthenticatedSenderForTransport(session.actorJid, deps.transport ?? 'baileys')) {
     throw new Error(
-      `admin-only tool: actor "${session.actorJid}" is on a non-WhatsApp-authenticated transport and cannot be an admin`,
+      `admin-only tool: actor "${session.actorJid}" is not authenticated for the configured transport`,
     );
   }
   const phone = actorPhone(deps, session);
@@ -100,7 +100,7 @@ function assertAdmin(deps: SubstrateDeps, session: SessionContext): void {
 /**
  * Boolean form of the admin gate for the registry's central sensitive-tool
  * authorizer (R1). Same predicate as assertAdmin — fail-closed on missing
- * actors, non-WhatsApp transports, and unlisted phones.
+ * actors, mismatched transport namespaces, and unlisted identities.
  */
 export function isAdminActor(deps: SubstrateDeps, session: SessionContext): boolean {
   try {
@@ -108,8 +108,8 @@ export function isAdminActor(deps: SubstrateDeps, session: SessionContext): bool
     return true;
   } catch (err) {
     // The central gate replies uniformly (non-disclosing) to the caller, so
-    // the specific reason (missing LID mapping, non-WhatsApp transport,
-    // unlisted phone) would otherwise vanish — an admin lockout must stay
+    // the specific reason (missing LID mapping, mismatched transport,
+    // unlisted identity) would otherwise vanish — an admin lockout must stay
     // diagnosable server-side (F06). Log the actor + cause, deny.
     log.info(
       { actorJid: session.actorJid ?? null, reason: err instanceof Error ? err.message : String(err) },

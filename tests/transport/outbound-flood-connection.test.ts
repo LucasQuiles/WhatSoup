@@ -57,6 +57,7 @@ vi.mock('../../src/logger.ts', () => ({
 
 import { makeWASocket } from '@whiskeysockets/baileys';
 import { ConnectionManager } from '../../src/transport/connection.ts';
+import { withWarmIdentity } from '../helpers/outbound-identity.ts';
 import { resetEmitAlertThrottle } from '../../src/lib/emit-alert.ts';
 
 function makeMockSocket() {
@@ -111,7 +112,7 @@ describe('ConnectionManager outbound-flood seam (T2.1 + T3.2)', () => {
   it('counts text, MCP-raw, poll AND media sends toward one dest and trips once', async () => {
     const mockSock = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     // 20 sends to FLOOD_DEST across three tiers (default threshold = 20). If any
@@ -146,7 +147,7 @@ describe('ConnectionManager outbound-flood seam (T2.1 + T3.2)', () => {
   it('does not trip or alert below the threshold', async () => {
     const mockSock = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     for (let i = 0; i < 19; i += 1) await manager.sendMessage(FLOOD_DEST, `text ${i}`);

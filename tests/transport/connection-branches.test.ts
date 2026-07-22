@@ -74,6 +74,7 @@ vi.mock('../../src/logger.ts', () => ({
 
 import { makeWASocket } from '@whiskeysockets/baileys';
 import { ConnectionManager } from '../../src/transport/connection.ts';
+import { withWarmIdentity } from '../helpers/outbound-identity.ts';
 
 // Repo-hygiene reserved identifiers only.
 const USER_JID = '15550001@s.whatsapp.net';
@@ -113,7 +114,7 @@ function openEvent() {
 async function connected() {
   const { mockSock, emit } = makeMockSocket();
   vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
-  const manager = new ConnectionManager();
+  const manager = withWarmIdentity(new ConnectionManager());
   await manager.connect();
   emit(openEvent());
   return { manager, mockSock, emit };
@@ -142,7 +143,7 @@ describe('ConnectionManager.setTyping — TypingState normalization branches', (
   });
 
   it('returns silently when no socket is connected (sock-null guard)', async () => {
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await expect(manager.setTyping(USER_JID, true)).resolves.toBeUndefined();
   });
 
@@ -280,7 +281,7 @@ describe('ConnectionManager.sendRaw — non-text content branch', () => {
 
 describe('ConnectionManager.getSocket', () => {
   it('returns null before any connect', () => {
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     expect(manager.getSocket()).toBeNull();
   });
 
@@ -338,7 +339,7 @@ describe('ConnectionManager.clearPollTracking', () => {
         key: { id: 'wamid.poll' },
         message: { messageContextInfo: { messageSecret: new Uint8Array([1, 2, 3, 4]) } },
       });
-      const manager = new ConnectionManager();
+      const manager = withWarmIdentity(new ConnectionManager());
       await manager.connect();
       emit(openEvent());
 
@@ -379,7 +380,7 @@ describe('ConnectionManager poll eviction', () => {
           key: { id: 'wamid.fresh' },
           message: { messageContextInfo: { messageSecret: new Uint8Array([8, 8]) } },
         });
-      const manager = new ConnectionManager();
+      const manager = withWarmIdentity(new ConnectionManager());
       await manager.connect();
       emit(openEvent());
 

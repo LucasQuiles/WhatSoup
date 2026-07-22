@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   capitalize,
+  buildSelfJid,
   displayInstanceName,
   formatCompact,
   formatCount,
@@ -65,5 +66,15 @@ describe('console text utilities', () => {
     expect(formatCount(1234567)).toBe('1,234,567')
     expect(formatCount(null)).toBe('0')
     expect(formatCount(Number.NaN)).toBe('0')
+  })
+
+  it('builds transport-native self JIDs idempotently', () => {
+    expect(buildSelfJid('baileys', '15551234567')).toBe('15551234567@s.whatsapp.net')
+    expect(buildSelfJid('twilio', '+15551234567')).toBe('+15551234567@sms')
+    expect(buildSelfJid('signal', 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@signal')
+    expect(buildSelfJid('imessage', 'owner@example.com')).toBe('owner@example.com@imessage')
+    expect(buildSelfJid('signal', '+15551234567@signal')).toBe('+15551234567@signal')
+    expect(buildSelfJid('imessage', 'owner@example.com@imessage')).toBe('owner@example.com@imessage')
+    expect(buildSelfJid('signal', 'not connected')).toBeUndefined()
   })
 })

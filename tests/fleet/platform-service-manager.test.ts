@@ -260,6 +260,85 @@ describe('platform service managers', () => {
     await expect(start).rejects.toThrow('spawn denied');
   });
 
+  it('clears a failed docker spawn so a retry creates a fresh child', async () => {
+    const children: MockChild[] = [];
+    childProcessMocks.spawn.mockImplementation(() => {
+      const child = new MockChild();
+      children.push(child);
+      return child;
+    });
+    const { DockerSupervisorServiceManager } = await importPlatform();
+    const manager = new DockerSupervisorServiceManager();
+
+    const failedStart = manager.start('bot-a');
+    children[0].emit('error', new Error('spawn denied'));
+    await expect(failedStart).rejects.toThrow('spawn denied');
+
+    const retry = manager.start('bot-a');
+    expect(children).toHaveLength(2);
+    children[1].emit('spawn');
+    await expect(retry).resolves.toBeUndefined();
+    expect(childProcessMocks.spawn).toHaveBeenCalledTimes(2);
+  });
+
+  it('evicts a docker child that ignores SIGKILL so restart creates a fresh child', async () => {
+    vi.useFakeTimers();
+    const children: MockChild[] = [];
+    childProcessMocks.spawn.mockImplementation(() => {
+      const child = new MockChild();
+      children.push(child);
+      return child;
+    });
+    const { DockerSupervisorServiceManager } = await importPlatform();
+    const manager = new DockerSupervisorServiceManager();
+
+    const initialStart = manager.start('bot-a');
+    children[0].emit('spawn');
+    await initialStart;
+
+    const restart = manager.restart('bot-a');
+    expect(children[0].kill).toHaveBeenCalledWith('SIGTERM');
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(children[0].kill).toHaveBeenCalledWith('SIGKILL');
+    expect(children).toHaveLength(2);
+    children[1].emit('spawn');
+    await expect(restart).resolves.toBeUndefined();
+    expect(vi.getTimerCount()).toBe(0);
+
+    children[0].emit('exit');
+    await manager.start('bot-a');
+    expect(childProcessMocks.spawn).toHaveBeenCalledTimes(2);
+  });
+
+  it('evicts a timed-out docker child even when sending SIGKILL throws', async () => {
+    vi.useFakeTimers();
+    const children: MockChild[] = [];
+    childProcessMocks.spawn.mockImplementation(() => {
+      const child = new MockChild();
+      children.push(child);
+      return child;
+    });
+    const { DockerSupervisorServiceManager } = await importPlatform();
+    const manager = new DockerSupervisorServiceManager();
+
+    const initialStart = manager.start('bot-a');
+    children[0].emit('spawn');
+    await initialStart;
+    children[0].kill.mockImplementation((signal?: string) => {
+      if (signal === 'SIGKILL') throw new Error('already gone');
+      return true;
+    });
+
+    const restart = manager.restart('bot-a');
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(children).toHaveLength(2);
+    children[1].emit('spawn');
+    await expect(restart).resolves.toBeUndefined();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('routes non-Error docker startFire failures as Error instances', async () => {
     const { DockerSupervisorServiceManager } = await importPlatform();
     const manager = new DockerSupervisorServiceManager();

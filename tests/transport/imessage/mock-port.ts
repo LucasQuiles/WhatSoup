@@ -62,7 +62,7 @@ export function makeImessageConfig(overrides: Partial<ImessageConfig> = {}): Ime
     account: 'test',
     backend: 'bluebubbles',
     bluebubblesUrl: 'https://bb.example.test',
-    bluebubblesPasswordService: 'imsg-bb-test',
+    bluebubblesPasswordService: 'whatsoup-bluebubbles-test',
     sender: 'bot@icloud.com',
     inboundMode: 'poll',
     pollIntervalMs: 60000,

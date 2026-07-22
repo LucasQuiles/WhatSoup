@@ -70,6 +70,19 @@ export function resolveDisplayName(name: string | number | null | undefined): st
   return text
 }
 
+export function buildSelfJid(
+  transport: string | null | undefined,
+  selfId: string | number | null | undefined,
+): string | undefined {
+  const id = textValue(selfId).trim()
+  if (!id || id.toLowerCase() === 'not connected') return undefined
+  if (/@(?:s\.whatsapp\.net|sms|signal|imessage)$/.test(id)) return id
+  if (transport === 'twilio') return `${id}@sms`
+  if (transport === 'signal') return `${id}@signal`
+  if (transport === 'imessage') return `${id}@imessage`
+  return `${id}@s.whatsapp.net`
+}
+
 /** Format large numbers compactly: 1234 → "1.2K", 2450000 → "2.4M" */
 export function formatCompact(n: number): string {
   if (n < 1000) return String(n)

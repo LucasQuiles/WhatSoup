@@ -1,6 +1,6 @@
 // tests/transport/imessage/types.test.ts
 // Type-shape conformance for the iMessage transport config + defaults.
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, expectTypeOf } from 'vitest';
 import {
   E164_RE,
   APPLEID_EMAIL_RE,
@@ -43,10 +43,10 @@ describe('imessage transport — types', () => {
     expect([a, b]).toEqual(['imsg', 'bluebubbles']);
   });
 
-  it('ImessageInboundMode admits exactly the two documented modes', () => {
-    const a: ImessageInboundMode = 'poll';
-    const b: ImessageInboundMode = 'webhook';
-    expect([a, b]).toEqual(['poll', 'webhook']);
+  it('ImessageInboundMode admits only the implemented poll mode', () => {
+    const mode: ImessageInboundMode = 'poll';
+    expect(mode).toBe('poll');
+    expectTypeOf<ImessageInboundMode>().toEqualTypeOf<'poll'>();
   });
 
   it('a fully-populated bluebubbles ImessageConfig satisfies the type', () => {
@@ -54,7 +54,7 @@ describe('imessage transport — types', () => {
       account: 'mac-mini',
       backend: 'bluebubbles',
       bluebubblesUrl: 'https://bb.example.test',
-      bluebubblesPasswordService: 'imsg-bb-prod',
+      bluebubblesPasswordService: 'whatsoup-bluebubbles-mac-mini',
       sender: 'bot@icloud.com',
       inboundMode: 'poll',
       pollIntervalMs: 10000,

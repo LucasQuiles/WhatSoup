@@ -70,16 +70,18 @@ vi.mock('../../console/src/lib/api', () => ({
 vi.mock('../../console/src/components/RelinkModal', () => ({
   default: ({
     lineName,
+    transport,
     open,
     onClose,
     onLinked,
   }: {
     lineName: string
+    transport?: string | null
     open: boolean
     onClose: () => void
     onLinked: () => void
   }) => open ? (
-    <div role="dialog" aria-label={`Relink ${lineName}`}>
+    <div role="dialog" aria-label={`Relink ${lineName}`} data-transport={transport ?? ''}>
       <span>Relink modal for {lineName}</span>
       <button type="button" onClick={onLinked}>finish relink</button>
       <button type="button" onClick={onClose}>close relink</button>
@@ -748,13 +750,13 @@ describe('Ops page instance actions (per-line kebab — FleetRowMenu)', () => {
 
   it('opens the relink modal for unlinked instances and invalidates lines after relink', async () => {
     const { toast } = renderOps({
-      lines: [makeLine({ name: 'beta', status: 'logged_out', linkedStatus: 'unlinked' })],
+      lines: [makeLine({ name: 'beta', transport: 'signal', status: 'logged_out', linkedStatus: 'unlinked' })],
     })
 
     // Re-link stays a dedicated button (FleetRowMenu does not cover re-link).
     fireEvent.click(screen.getByRole('button', { name: /Re-link/ }))
 
-    expect(await screen.findByRole('dialog', { name: 'Relink beta' })).toBeDefined()
+    expect((await screen.findByRole('dialog', { name: 'Relink beta' })).getAttribute('data-transport')).toBe('signal')
 
     fireEvent.click(screen.getByRole('button', { name: 'finish relink' }))
 

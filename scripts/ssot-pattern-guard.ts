@@ -272,7 +272,7 @@ export const SSOT_RULES: readonly SsotRuleSpec[] = [
       {
         file: 'src/runtimes/agent/runtime.ts',
         reason:
-          'two `${conversationKey}@lid` probe keys and one endsWith(\'@g.us\') group predicate predate jid-constants; behaviour-identical migration to toLidJid/isGroupJid pending (runtime.ts edits batched separately to keep the guard wave src-minimal).',
+          'two `${conversationKey}@lid` probe keys predate jid-constants; behaviour-identical migration to toLidJid remains pending.',
       },
       {
         file: 'src/mcp/tools/advanced.ts',

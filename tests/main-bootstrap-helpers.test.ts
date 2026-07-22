@@ -135,7 +135,7 @@ async function importMainWithMocks(options: {
   rawInstanceConfig?: string;
   pineconeState?: 'ready' | 'missing_index';
   accessMode?: 'self_only' | 'allowlist';
-  transport?: 'baileys' | 'signal';
+  transport?: 'baileys' | 'signal' | 'twilio' | 'imessage';
   adminPhones?: string[];
   controlPeers?: string[];
   existingPaths?: string[];
@@ -151,7 +151,7 @@ async function importMainWithMocks(options: {
   dbCloseThrows?: boolean;
   importFromLegacyDbThrows?: boolean;
   seedAutoRespondGroupsReturn?: number;
-  pendingStartupMessage?: { chatJid: string; text: string } | null;
+  pendingStartupMessage?: { chatJid: string; text: string; caller?: 'report-channel' } | null;
   persistIntroSentFlagThrows?: boolean;
   execFileSyncThrows?: boolean;
   drainPendingOutboundRejectsOnStartup?: boolean;
@@ -366,13 +366,22 @@ async function importMainWithMocks(options: {
     toConversationKey: vi.fn((jid: string) => `conversation:${jid}`),
     toPersonalJid: vi.fn((phone: string) => `${phone}@s.whatsapp.net`),
     toLidJid: vi.fn((phone: string) => `${phone}@lid`),
+    toSmsJid: vi.fn((identity: string) => `${identity}@sms`),
     toSignalJid: vi.fn((identity: string) => `${identity}@signal`),
+    toImessageJid: vi.fn((identity: string) => `${identity.toLowerCase()}@imessage`),
+    toTransportDirectJid: vi.fn((identity: string, transport: string) => {
+      if (transport === 'twilio') return `${identity.startsWith('+') ? identity : `+${identity}`}@sms`;
+      if (transport === 'signal') return `${identity}@signal`;
+      if (transport === 'imessage') return `${identity.toLowerCase()}@imessage`;
+      return `${identity}@s.whatsapp.net`;
+    }),
     selectReplayableDms: vi.fn(() => ({
       toReplay: [] as StoredMessage[],
       groupSkipped: 0,
     })),
     rememberReplayedId: vi.fn(),
     sendTracked: vi.fn(async () => ({ waMessageId: 'sent-1' })),
+    sendTrackedOperatorReport: vi.fn(async () => ({ waMessageId: 'sent-1' })),
     drainPendingOutbound: options.drainPendingOutboundRejectsOnStartup
       ? vi.fn(async () => { throw new Error('startup drain failed'); })
       : vi.fn(async () => undefined),
@@ -397,6 +406,7 @@ async function importMainWithMocks(options: {
     insertAllowed: vi.fn(),
     seedAutoRespondGroups: vi.fn(() => options.seedAutoRespondGroupsReturn ?? 0),
     resolvePhoneFromJid: vi.fn(() => '15551230000'),
+    resolvePhoneFromJidForGrant: vi.fn((): string | null => '15551230000'),
     hydrateLidMappings: vi.fn(() => 0),
     upsertLidMapping: vi.fn(),
     mineMessageKey: vi.fn(() => null),
@@ -404,6 +414,7 @@ async function importMainWithMocks(options: {
     reconcileLidMappings: vi.fn((): { hydrated: number; unresolvedLids: string[] } => ({ hydrated: 0, unresolvedLids: [] })),
     setLidAuthDir: vi.fn(),
     isAdminPhone: vi.fn(() => true),
+    normalizePhoneE164Wire: vi.fn((input: string) => `+${input.replace(/\D/g, '')}`),
     handleGroupsUpsert: vi.fn(),
     handleGroupsUpdate: vi.fn(),
     MediaRetentionTimer: vi.fn(function () { return mediaRetentionTimer; }),
@@ -475,12 +486,16 @@ async function importMainWithMocks(options: {
   vi.doMock('../src/core/jid-constants.ts', () => ({
     toPersonalJid: mocks.toPersonalJid,
     toLidJid: mocks.toLidJid,
+    toSmsJid: mocks.toSmsJid,
     toSignalJid: mocks.toSignalJid,
+    toImessageJid: mocks.toImessageJid,
+    toTransportDirectJid: mocks.toTransportDirectJid,
   }));
   vi.doMock('../src/core/admin.ts', () => ({ selectReplayableDms: mocks.selectReplayableDms, rememberReplayedId: mocks.rememberReplayedId }));
   vi.doMock('../src/core/durability.ts', () => ({
     DurabilityEngine,
     sendTracked: mocks.sendTracked,
+    sendTrackedOperatorReport: mocks.sendTrackedOperatorReport,
     drainPendingOutbound: mocks.drainPendingOutbound,
   }));
   vi.doMock('../src/runtimes/agent/self-restart.ts', () => ({
@@ -507,13 +522,17 @@ async function importMainWithMocks(options: {
     lookupAccess: mocks.lookupAccess, updateAccess: mocks.updateAccess,
     insertAllowed: mocks.insertAllowed, seedAutoRespondGroups: mocks.seedAutoRespondGroups,
     resolvePhoneFromJid: mocks.resolvePhoneFromJid,
+    resolvePhoneFromJidForGrant: mocks.resolvePhoneFromJidForGrant,
   }));
   vi.doMock('../src/core/lid-resolver.ts', () => ({
     hydrateLidMappings: mocks.hydrateLidMappings, upsertLidMapping: mocks.upsertLidMapping,
     mineMessageKey: mocks.mineMessageKey, mineGroupParticipants: mocks.mineGroupParticipants,
     reconcileLidMappings: mocks.reconcileLidMappings, setLidAuthDir: mocks.setLidAuthDir,
   }));
-  vi.doMock('../src/lib/phone.ts', () => ({ isAdminPhone: mocks.isAdminPhone }));
+  vi.doMock('../src/lib/phone.ts', () => ({
+    isAdminPhone: mocks.isAdminPhone,
+    normalizePhoneE164Wire: mocks.normalizePhoneE164Wire,
+  }));
   vi.doMock('../src/core/group-sync.ts', () => ({ handleGroupsUpsert: mocks.handleGroupsUpsert, handleGroupsUpdate: mocks.handleGroupsUpdate }));
   vi.doMock('../src/core/media-retention.ts', () => ({ MediaRetentionTimer: mocks.MediaRetentionTimer }));
   vi.doMock('../src/core/process-tmp-retention.ts', () => ({
@@ -937,6 +956,24 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       expect(h.insertAllowed).not.toHaveBeenCalledWith(h.db, 'group', expect.any(String));
     });
 
+    it('does not auto-allow when the author is not canonical for the configured transport', async () => {
+      const h = await importMainWithMocks();
+      h.resolvePhoneFromJidForGrant.mockReturnValueOnce(null);
+      h.connection.emit('groupParticipantsUpdate', {
+        groupJid: 'group@s.whatsapp.net',
+        author: '+1-555-123-4567@s.whatsapp.net',
+        participants: ['bot@s.whatsapp.net'],
+        action: 'add',
+      });
+      expect(h.resolvePhoneFromJidForGrant).toHaveBeenCalledWith(
+        '+1-555-123-4567@s.whatsapp.net',
+        h.db,
+        h.config.transport,
+      );
+      expect(h.insertAllowed).not.toHaveBeenCalledWith(h.db, 'group', expect.any(String));
+      expect(h.updateAccess).not.toHaveBeenCalled();
+    });
+
     it('skips auto-allow when group is already allowed', async () => {
       const h = await importMainWithMocks();
       h.lookupAccess.mockReturnValueOnce({ status: 'allowed' });
@@ -977,7 +1014,7 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       await vi.advanceTimersByTimeAsync(3_000);
 
       expect(h.persistIntroSentFlag).toHaveBeenCalledWith(cfgPath, true);
-      expect(h.sendTracked).toHaveBeenCalledWith(
+      expect(h.sendTrackedOperatorReport).toHaveBeenCalledWith(
         h.connection,
         '15551230000@s.whatsapp.net',
         // botName 'q' is title-cased and wrapped in markdown bold: "*Q* is online and ready"
@@ -986,7 +1023,7 @@ describe('main.ts — uncovered helpers and signal paths', () => {
         { replayPolicy: 'safe' },
       );
       // chat intro text (not agent): the assistant phrasing, no tool-access copy
-      const text = (h.sendTracked as ReturnType<typeof vi.fn>).mock.calls[0][2] as string;
+      const text = (h.sendTrackedOperatorReport as ReturnType<typeof vi.fn>).mock.calls[0][2] as string;
       expect(text).toContain("I'm an AI assistant");
       expect(text).not.toContain('tool access');
     });
@@ -1000,7 +1037,7 @@ describe('main.ts — uncovered helpers and signal paths', () => {
 
       await vi.advanceTimersByTimeAsync(3_000);
 
-      const text = (h.sendTracked as ReturnType<typeof vi.fn>).mock.calls[0][2] as string;
+      const text = (h.sendTrackedOperatorReport as ReturnType<typeof vi.fn>).mock.calls[0][2] as string;
       expect(text).toContain('tool access');
     });
 
@@ -1013,9 +1050,45 @@ describe('main.ts — uncovered helpers and signal paths', () => {
 
       await vi.advanceTimersByTimeAsync(3_000);
 
-      expect(h.sendTracked).toHaveBeenCalledWith(
+      expect(h.sendTrackedOperatorReport).toHaveBeenCalledWith(
         h.connection,
         '+15551230000@signal',
+        expect.stringContaining('*Q* is online and ready'),
+        h.durability,
+        { replayPolicy: 'safe' },
+      );
+    });
+
+    it('routes a Twilio first-boot introduction to the canonical SMS notification JID', async () => {
+      const h = await importMainWithMocks({
+        transport: 'twilio',
+        adminPhones: ['+15551230000'],
+        instanceConfig: { name: 'q', introSent: false },
+      });
+
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(h.sendTrackedOperatorReport).toHaveBeenCalledWith(
+        h.connection,
+        '+15551230000@sms',
+        expect.stringContaining('*Q* is online and ready'),
+        h.durability,
+        { replayPolicy: 'safe' },
+      );
+    });
+
+    it('routes an iMessage first-boot introduction to the canonical AppleID admin JID', async () => {
+      const h = await importMainWithMocks({
+        transport: 'imessage',
+        adminPhones: ['appleid@example.com'],
+        instanceConfig: { name: 'q', introSent: false },
+      });
+
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(h.sendTrackedOperatorReport).toHaveBeenCalledWith(
+        h.connection,
+        'appleid@example.com@imessage',
         expect.stringContaining('*Q* is online and ready'),
         h.durability,
         { replayPolicy: 'safe' },
@@ -1032,7 +1105,7 @@ describe('main.ts — uncovered helpers and signal paths', () => {
 
       expect(h.persistIntroSentFlag).not.toHaveBeenCalled();
       // Still sends intro
-      expect(h.sendTracked).toHaveBeenCalled();
+      expect(h.sendTrackedOperatorReport).toHaveBeenCalled();
     });
 
     it('logs warn and continues when persistIntroSentFlag throws', async () => {
@@ -1052,14 +1125,14 @@ describe('main.ts — uncovered helpers and signal paths', () => {
         'failed to persist introSent flag',
       );
       // Still sent the intro
-      expect(h.sendTracked).toHaveBeenCalled();
+      expect(h.sendTrackedOperatorReport).toHaveBeenCalled();
     });
 
     it('logs warn when introduction delivery fails', async () => {
       const h = await importMainWithMocks({
         instanceConfig: { name: 'q', introSent: false },
       });
-      h.sendTracked.mockRejectedValueOnce(new Error('send failed'));
+      h.sendTrackedOperatorReport.mockRejectedValueOnce(new Error('send failed'));
 
       h.capturedTimeouts.find((timer) => timer.ms === 3_000)!.callback();
       await flushMicrotasks();
@@ -1206,7 +1279,7 @@ describe('main.ts — uncovered helpers and signal paths', () => {
 
       await vi.advanceTimersByTimeAsync(3_000);
 
-      // Pending branch: notifyTarget = { chatJid: pending.chatJid, text: pending.text }
+      // An ordinary resume remains unprivileged even when it is sent after restart.
       expect(h.sendTracked).toHaveBeenCalledWith(
         h.connection,
         '15559001@s.whatsapp.net',
@@ -1215,7 +1288,7 @@ describe('main.ts — uncovered helpers and signal paths', () => {
         { replayPolicy: 'safe' },
       );
       // It must NOT fall back to the default "back online" notice (a status op).
-      expect(h.sendTracked).not.toHaveBeenCalledWith(
+      expect(h.sendTrackedOperatorReport).not.toHaveBeenCalledWith(
         h.connection,
         '15551230000@s.whatsapp.net',
         '*Agent back online* ✓',
@@ -1225,6 +1298,32 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       expect(h.logger.info).toHaveBeenCalledWith(
         { chatJid: '15559001@s.whatsapp.net', isResume: true },
         'sent startup notification',
+      );
+    });
+
+    it('preserves the trusted caller only for an explicitly classified operator notice', async () => {
+      const h = await importMainWithMocks({
+        instanceConfig: {
+          name: 'q',
+          type: 'agent',
+          introSent: true,
+          agentOptions: { sessionScope: 'shared' },
+        },
+        pendingStartupMessage: {
+          chatJid: '15551230000@s.whatsapp.net',
+          text: 'restart loop guard tripped',
+          caller: 'report-channel',
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(h.sendTrackedOperatorReport).toHaveBeenCalledWith(
+        h.connection,
+        '15551230000@s.whatsapp.net',
+        'restart loop guard tripped',
+        h.durability,
+        { replayPolicy: 'safe' },
       );
     });
 
@@ -1241,7 +1340,7 @@ describe('main.ts — uncovered helpers and signal paths', () => {
 
       await vi.advanceTimersByTimeAsync(3_000);
 
-      expect(h.sendTracked).toHaveBeenCalledWith(
+      expect(h.sendTrackedOperatorReport).toHaveBeenCalledWith(
         h.connection,
         '15551230000@s.whatsapp.net',
         '*Agent back online* ✓',
@@ -1265,9 +1364,33 @@ describe('main.ts — uncovered helpers and signal paths', () => {
 
       await vi.advanceTimersByTimeAsync(3_000);
 
-      expect(h.sendTracked).toHaveBeenCalledWith(
+      expect(h.sendTrackedOperatorReport).toHaveBeenCalledWith(
         h.connection,
         '01234567-89ab-cdef-0123-456789abcdef@signal',
+        '*Agent back online* ✓',
+        h.durability,
+        { replayPolicy: 'unsafe', opType: 'status_ping' },
+      );
+    });
+
+    it('routes the default back-online notice to the canonical iMessage admin JID', async () => {
+      const h = await importMainWithMocks({
+        transport: 'imessage',
+        adminPhones: ['appleid@example.com'],
+        instanceConfig: {
+          name: 'q',
+          type: 'agent',
+          introSent: true,
+          agentOptions: { sessionScope: 'shared' },
+        },
+        pendingStartupMessage: null,
+      });
+
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(h.sendTrackedOperatorReport).toHaveBeenCalledWith(
+        h.connection,
+        'appleid@example.com@imessage',
         '*Agent back online* ✓',
         h.durability,
         { replayPolicy: 'unsafe', opType: 'status_ping' },
@@ -1284,7 +1407,7 @@ describe('main.ts — uncovered helpers and signal paths', () => {
         },
         pendingStartupMessage: null,
       });
-      h.sendTracked.mockRejectedValueOnce(new Error('send failed'));
+      h.sendTrackedOperatorReport.mockRejectedValueOnce(new Error('send failed'));
 
       h.capturedTimeouts.find((timer) => timer.ms === 3_000)!.callback();
       await flushMicrotasks();
@@ -1522,6 +1645,75 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       expect(h.chatRuntime.handleMessage).toHaveBeenCalledWith(expect.objectContaining({
         messageId: 'signal-pending-1',
         senderJid: '+15559990000@signal',
+      }));
+    });
+
+    it('replays a newly allowed iMessage peer from its canonical iMessage sender JID', async () => {
+      const h = await importMainWithMocks({ transport: 'imessage' });
+      const queued: StoredMessage = {
+        pk: 1,
+        messageId: 'imessage-pending-1',
+        conversationKey: 'sender@bb.example.test',
+        chatJid: 'sender@bb.example.test@imessage',
+        senderJid: 'sender@bb.example.test@imessage',
+        senderName: null,
+        content: 'pending hello',
+        contentText: null,
+        contentType: 'text',
+        isFromMe: false,
+        timestamp: 1_700_000_000,
+        quotedMessageId: null,
+        enrichmentProcessedAt: null,
+        enrichmentRetries: 0,
+        createdAt: '2026-07-21T00:00:00.000Z',
+        mediaPath: null,
+      };
+      h.getMessagesBySender.mockReturnValue([queued]);
+      h.selectReplayableDms.mockReturnValue({ toReplay: [queued], groupSkipped: 0 });
+
+      await h.getHealthDeps().handleAccessDecision('phone', 'sender@bb.example.test', 'allow');
+
+      expect(h.getMessagesBySender).toHaveBeenCalledTimes(1);
+      expect(h.getMessagesBySender).toHaveBeenCalledWith(
+        h.db,
+        'sender@bb.example.test@imessage',
+      );
+      expect(h.chatRuntime.handleMessage).toHaveBeenCalledWith(expect.objectContaining({
+        messageId: 'imessage-pending-1',
+        senderJid: 'sender@bb.example.test@imessage',
+      }));
+    });
+
+    it('replays a newly allowed Twilio peer from its canonical SMS sender JID', async () => {
+      const h = await importMainWithMocks({ transport: 'twilio' });
+      const queued: StoredMessage = {
+        pk: 1,
+        messageId: 'twilio-pending-1',
+        conversationKey: '+15559990000_at_sms',
+        chatJid: '+15559990000@sms',
+        senderJid: '+15559990000@sms',
+        senderName: null,
+        content: 'pending hello',
+        contentText: null,
+        contentType: 'text',
+        isFromMe: false,
+        timestamp: 1_700_000_000,
+        quotedMessageId: null,
+        enrichmentProcessedAt: null,
+        enrichmentRetries: 0,
+        createdAt: '2026-07-21T00:00:00.000Z',
+        mediaPath: null,
+      };
+      h.getMessagesBySender.mockReturnValue([queued]);
+      h.selectReplayableDms.mockReturnValue({ toReplay: [queued], groupSkipped: 0 });
+
+      await h.getHealthDeps().handleAccessDecision('phone', '15559990000', 'allow');
+
+      expect(h.getMessagesBySender).toHaveBeenCalledTimes(1);
+      expect(h.getMessagesBySender).toHaveBeenCalledWith(h.db, '+15559990000@sms');
+      expect(h.chatRuntime.handleMessage).toHaveBeenCalledWith(expect.objectContaining({
+        messageId: 'twilio-pending-1',
+        senderJid: '+15559990000@sms',
       }));
     });
 

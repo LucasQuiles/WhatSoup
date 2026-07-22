@@ -1839,5 +1839,39 @@ describe('registerMessagingTools', () => {
       const call = JSON.parse(calls[0]);
       expect(call.content.text).not.toContain('/Users/testuser/LAB/whatsoup/instances/q');
     });
+
+    it('elevates a configured Signal admin only in the Signal namespace', async () => {
+      const signalAdmin = '+15550001111';
+      deps.transport = 'signal';
+      deps.adminPhones.add(signalAdmin);
+      deps.fallbackActive = () => false;
+      const session = chatSession(signalAdmin, `${signalAdmin}@signal`);
+
+      const result = await registry.call(
+        'send_message',
+        { text: 'restart via /Users/testuser/LAB/whatsoup/instances/signal-line' },
+        session,
+      );
+
+      expect(result.isError).toBeUndefined();
+      expect(JSON.parse(calls[0]).content.text).toContain('/Users/testuser/LAB/whatsoup/instances/signal-line');
+    });
+
+    it('does not elevate the same Signal admin identity from the iMessage namespace', async () => {
+      const signalAdmin = '+15550001111';
+      deps.transport = 'signal';
+      deps.adminPhones.add(signalAdmin);
+      deps.fallbackActive = () => false;
+      const session = chatSession(signalAdmin, `${signalAdmin}@imessage`);
+
+      const result = await registry.call(
+        'send_message',
+        { text: 'restart via /Users/testuser/LAB/whatsoup/instances/signal-line' },
+        session,
+      );
+
+      expect(result.isError).toBeUndefined();
+      expect(JSON.parse(calls[0]).content.text).not.toContain('/Users/testuser/LAB/whatsoup/instances/signal-line');
+    });
   });
 });

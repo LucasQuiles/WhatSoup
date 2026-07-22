@@ -92,6 +92,7 @@ vi.mock('../../src/logger.ts', () => ({
 
 import { makeWASocket } from '@whiskeysockets/baileys';
 import { ConnectionManager } from '../../src/transport/connection.ts';
+import { withWarmIdentity } from '../helpers/outbound-identity.ts';
 
 const USER_JID = '15550001@s.whatsapp.net';
 const GROUP_JID = '111111100000000001@g.us';
@@ -130,7 +131,7 @@ function openEvent() {
 async function connected() {
   const { mockSock, emit } = makeMockSocket();
   vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
-  const manager = new ConnectionManager();
+  const manager = withWarmIdentity(new ConnectionManager());
   await manager.connect();
   emit(openEvent());
   return { manager, mockSock, emit };
@@ -430,7 +431,7 @@ describe('ConnectionManager poll-vote handler — missing encPayload/encIv', () 
         key: { id: 'wamid.poll.partial' },
         message: { messageContextInfo: { messageSecret: new Uint8Array([7, 8]) } },
       });
-      const manager = new ConnectionManager();
+      const manager = withWarmIdentity(new ConnectionManager());
       await manager.connect();
       emit(openEvent());
 
@@ -570,7 +571,7 @@ describe('ConnectionManager.disconnect — clears pending reconnect timer', () =
           throw new Error('fail');
         })
         .mockReturnValue(mockSock as any);
-      const manager = new ConnectionManager();
+      const manager = withWarmIdentity(new ConnectionManager());
       await manager.connect();
       // A reconnect timer is now scheduled. Shut down before it fires.
       await manager.disconnect();
@@ -592,7 +593,7 @@ describe('ConnectionManager.disconnect — clears pending reconnect timer', () =
 
 describe('ConnectionManager.connect — early-return when shuttingDown', () => {
   it('returns immediately without creating a socket when shutdown has been requested', async () => {
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.shutdown();
     await manager.connect();
     expect(vi.mocked(makeWASocket)).not.toHaveBeenCalled();
@@ -640,7 +641,7 @@ describe('ConnectionManager poll-vote decryption — creator from creationKey (n
         key: { id: 'wamid.poll.notmine' },
         message: { messageContextInfo: { messageSecret: new Uint8Array([3, 3]) } },
       });
-      const manager = new ConnectionManager();
+      const manager = withWarmIdentity(new ConnectionManager());
       await manager.connect();
       emit(openEvent());
 
@@ -710,7 +711,7 @@ describe('ConnectionManager.clearPollTracking — tears down buffered grace time
         key: { id: 'wamid.poll.coverage' },
         message: { messageContextInfo: { messageSecret: new Uint8Array([11, 12]) } },
       });
-      const manager = new ConnectionManager();
+      const manager = withWarmIdentity(new ConnectionManager());
       await manager.connect();
       emit(openEvent());
 
@@ -770,7 +771,7 @@ describe('ConnectionManager.getConnectionState — credentialLifecycle recency',
   it('records a connect_start lifecycle event when connect() is called', async () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     const snap = manager.getConnectionState();
@@ -1058,7 +1059,7 @@ describe('ConnectionManager.shutdown — clears vote grace timers', () => {
         key: { id: 'wamid.poll.shutdown' },
         message: { messageContextInfo: { messageSecret: new Uint8Array([33]) } },
       });
-      const manager = new ConnectionManager();
+      const manager = withWarmIdentity(new ConnectionManager());
       await manager.connect();
       emit(openEvent());
 
@@ -1117,7 +1118,7 @@ describe('ConnectionManager poll-vote decryption — top-level promise rejection
         key: { id: 'wamid.poll.reject' },
         message: { messageContextInfo: { messageSecret: new Uint8Array([21, 22]) } },
       });
-      const manager = new ConnectionManager();
+      const manager = withWarmIdentity(new ConnectionManager());
       await manager.connect();
       emit(openEvent());
 
@@ -1171,7 +1172,7 @@ describe('ConnectionManager.runKeepalive — keepalive query timeout', () => {
       const { mockSock, emit } = makeMockSocket();
       mockSock.query.mockResolvedValueOnce(null); // falsy result → throw 'keepalive timed out'
       vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
-      const manager = new ConnectionManager();
+      const manager = withWarmIdentity(new ConnectionManager());
       await manager.connect();
       emit(openEvent());
 
@@ -1196,7 +1197,7 @@ describe('ConnectionManager.runKeepalive — keepalive query timeout', () => {
         resolveQuery = resolve;
       }));
       vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
-      const manager = new ConnectionManager();
+      const manager = withWarmIdentity(new ConnectionManager());
       await manager.connect();
       emit(openEvent());
 
@@ -1232,7 +1233,7 @@ describe('ConnectionManager.runKeepalive — keepalive query timeout', () => {
         rejectQuery = reject;
       }));
       vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
-      const manager = new ConnectionManager();
+      const manager = withWarmIdentity(new ConnectionManager());
       await manager.connect();
       emit(openEvent());
 
@@ -1267,7 +1268,7 @@ describe('ConnectionManager.gracefulReconnect — in-flight guard', () => {
       // Every query rejects so the keepalive catch arm fires gracefulReconnect.
       mockSock.query.mockRejectedValue(new Error('keepalive fail'));
       vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
-      const manager = new ConnectionManager();
+      const manager = withWarmIdentity(new ConnectionManager());
       await manager.connect();
       emit(openEvent());
 

@@ -51,14 +51,14 @@ describe('assertRestartSelfAdmin — QR-143 transport gate (both directions)', (
     db = makeDb();
     expect(() =>
       assertRestartSelfAdmin({ tier: 'global', actorJid: ADMIN_SMS_JID }, { db, adminPhones }),
-    ).toThrow(/non-WhatsApp-authenticated transport/);
+    ).toThrow(/configured transport/);
   });
 
   it('DENIES a missing actorJid (fail-closed)', () => {
     db = makeDb();
     expect(() =>
       assertRestartSelfAdmin({ tier: 'global' }, { db, adminPhones }),
-    ).toThrow(/non-WhatsApp-authenticated transport/);
+    ).toThrow(/configured transport/);
   });
 
   it('DENIES an authenticated non-admin phone', () => {
@@ -66,6 +66,16 @@ describe('assertRestartSelfAdmin — QR-143 transport gate (both directions)', (
     expect(() =>
       assertRestartSelfAdmin({ tier: 'global', actorJid: '15550100999@s.whatsapp.net' }, { db, adminPhones }),
     ).toThrow(/not on the instance admin list/);
+  });
+
+  it('DENIES an admin identity from a different configured transport namespace', () => {
+    db = makeDb();
+    expect(() =>
+      assertRestartSelfAdmin(
+        { tier: 'global', actorJid: ADMIN_PN_JID },
+        { db, adminPhones, transport: 'signal' },
+      ),
+    ).toThrow(/configured transport/);
   });
 });
 

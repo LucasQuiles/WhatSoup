@@ -1522,6 +1522,7 @@ describe('AgentRuntime edge coverage', () => {
     expect(messenger.sendMessage).toHaveBeenCalledWith(
       '15550000002@s.whatsapp.net',
       expect.stringContaining('report report-edge timed out'),
+      { caller: 'report-channel' },
     );
     expect(controlSession.shutdown).toHaveBeenCalledTimes(1);
   });

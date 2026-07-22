@@ -1,19 +1,25 @@
 import { type FC, useState, useEffect, useCallback, useRef } from 'react'
-import { CheckCircle2, XCircle, Loader2, Clock } from 'lucide-react'
+import { CheckCircle2, XCircle, Loader2, Clock, BookOpen, Server } from 'lucide-react'
 import QrDisplay from '../QrDisplay'
 import { parseAuthErrorMessage, parseQrPayload } from './link-step-events'
 import { getApiTicket, isProductionConsole } from '../../lib/api'
 import { Button } from '../primitives/Button'
+import { Checkbox } from '../primitives/Checkbox'
+import { isTransportKind, type TransportKind } from '../../lib/transport-meta'
 
 interface LinkStepProps {
   lineName: string
   onComplete: () => void
   alreadyLinked?: boolean
+  transport?: TransportKind | string | null
 }
 
 type LinkStatus = 'waiting' | 'connected' | 'error'
 
-const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete, alreadyLinked = false }) => {
+const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete, alreadyLinked = false, transport }) => {
+  const kind: TransportKind | null = transport == null
+    ? 'baileys'
+    : isTransportKind(transport) ? transport : null
   const [status, setStatus] = useState<LinkStatus>(alreadyLinked ? 'connected' : 'waiting')
   const [qrValue, setQrValue] = useState('')
   const [errorMsg, setErrorMsg] = useState('')
@@ -21,6 +27,14 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete, alreadyLinked = fal
   const [qrAge, setQrAge] = useState(0)
   const qrTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const retryCountRef = useRef(0)
+  const twilioAdvancedRef = useRef(false)
+  const [selfAttested, setSelfAttested] = useState(false)
+
+  useEffect(() => {
+    if (kind !== 'twilio' || alreadyLinked || twilioAdvancedRef.current) return
+    twilioAdvancedRef.current = true
+    onComplete()
+  }, [alreadyLinked, kind, onComplete])
 
   useEffect(() => {
     let es: EventSource | null = null
@@ -32,7 +46,7 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete, alreadyLinked = fal
       qrTimerRef.current = null
     }
 
-    if (alreadyLinked) {
+    if (alreadyLinked || kind !== 'baileys') {
       return () => {
         cancelled = true
         clearQrTimer()
@@ -118,7 +132,7 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete, alreadyLinked = fal
       if (es) es.close()
       clearQrTimer()
     }
-  }, [alreadyLinked, lineName, retryKey])
+  }, [alreadyLinked, kind, lineName, retryKey])
 
   const handleRetry = useCallback(() => {
     setStatus('waiting')
@@ -128,7 +142,22 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete, alreadyLinked = fal
     setRetryKey((k) => k + 1)
   }, [])
 
+  if (kind === null) {
+    return (
+      <div className="flex flex-col items-center text-center gap-[var(--sp-4)] py-[var(--sp-6)] px-0">
+        <XCircle size={48} strokeWidth={1.5} className="text-s-crit" />
+        <div className="flex flex-col gap-[var(--sp-1)]">
+          <span className="c-heading text-lg">Unsupported transport</span>
+          <span className="c-body text-text-2">
+            This line cannot use QR authentication until its transport configuration is repaired.
+          </span>
+        </div>
+      </div>
+    )
+  }
+
   if (status === 'connected') {
+    const isBaileys = kind === 'baileys'
     return (
       <div
         className="flex flex-col items-center text-center gap-[var(--sp-4)] py-[var(--sp-6)] px-0"
@@ -140,14 +169,16 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete, alreadyLinked = fal
         />
         <div className="flex flex-col gap-[var(--sp-1)]">
           <span className="c-heading text-lg">
-            Line is live!
+            {isBaileys ? 'Line is live!' : 'Setup acknowledged'}
           </span>
           <span className="c-body text-text-2">
-            <strong>{lineName}</strong> is now connected and running.
+            {isBaileys
+              ? <><strong>{lineName}</strong> is now connected and running.</>
+              : <>The external setup for <strong>{lineName}</strong> was acknowledged.</>}
           </span>
         </div>
         <Button variant="primary" onClick={onComplete}>
-          View Line
+          {isBaileys ? 'View Line' : 'Continue'}
         </Button>
       </div>
     )
@@ -174,6 +205,43 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete, alreadyLinked = fal
         </div>
         <Button variant="primary" onClick={handleRetry}>
           Try Again
+        </Button>
+      </div>
+    )
+  }
+
+  if (kind === 'signal' || kind === 'imessage') {
+    const isSignal = kind === 'signal'
+    const runbookUrl = `https://github.com/LucasQuiles/WhatSoup/blob/main/docs/runbooks/${kind}-transport.md`
+    return (
+      <div className="flex flex-col items-start text-left gap-[var(--sp-4)] py-[var(--sp-4)] px-0 max-w-xl">
+        <div className="flex items-center gap-[var(--sp-3)]">
+          <Server size={32} strokeWidth={1.5} className="text-text-2" />
+          <span className="c-heading text-lg">
+            {isSignal ? 'Attest the signal-cli link' : 'Attest the iMessage backend'}
+          </span>
+        </div>
+        <p className="c-body text-text-2">
+          {isSignal
+            ? 'Confirm that signal-cli is registered for the configured number and its JSON-RPC endpoint is running.'
+            : 'Confirm that the configured imsg or BlueBubbles backend is reachable from this host.'}
+        </p>
+        <a
+          href={runbookUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-[var(--sp-2)] text-brand-accent c-body"
+        >
+          <BookOpen size={16} />
+          Open the full {isSignal ? 'Signal' : 'iMessage'} runbook
+        </a>
+        <Checkbox
+          checked={selfAttested}
+          onChange={setSelfAttested}
+          label={isSignal ? 'signal-cli is linked and registered' : 'Backend is reachable'}
+        />
+        <Button variant="primary" onClick={onComplete} disabled={!selfAttested}>
+          Continue
         </Button>
       </div>
     )

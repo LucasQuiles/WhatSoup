@@ -161,37 +161,35 @@ fails visibly instead of clearing the evidence needed for diagnosis or retry.
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `ADMIN_PHONES` | string | (empty) | Comma-separated list of phone numbers with admin access. Used only in single-instance mode; `config.json` `adminPhones` takes over in multi-instance mode. Example: `15555550100,15555550101`. |
-| `WHATSOUP_OUTBOUND_IDENTITY_MODE` | string | `log-only` | Mode for the outbound identity guard, which floors sends to cold (unknown) recipients at every `Messenger` egress. `log-only` (default) audits but never blocks — zero behavior change. `enforce` throws `OutboundIdentityError` and stops the send for cold targets. Any value other than `enforce` resolves to `log-only`. Resolved per-instance in `src/config.ts` (`outboundIdentityMode`). |
+| `WHATSOUP_OUTBOUND_IDENTITY_MODE` | string | `enforce` | Mode for the outbound identity guard, which floors sends to cold (unknown) recipients at every `Messenger` egress. `enforce` throws `OutboundIdentityError` and stops the send when identity evidence is cold or unavailable. Explicit `log-only` is the audited rollback mode. Any other value fails startup. Resolved per-instance in `src/config.ts` (`outboundIdentityMode`). |
 
-#### Enabling enforce mode
+#### Outbound identity rollout and rollback
 
-Default is `log-only` (audit only). After an instance's logs show the warm-set
-covers legitimate traffic (only genuine cold/unknown would-blocks remain), flip:
+The default is fail-closed `enforce`. Before upgrading an existing deployment,
+confirm that its warm set covers legitimate traffic. A temporary audited rollback
+may be selected explicitly with:
 
-    WHATSOUP_OUTBOUND_IDENTITY_MODE=enforce
+    WHATSOUP_OUTBOUND_IDENTITY_MODE=log-only
 
-in that instance's environment, then restart the instance. Audit events are
+in that instance's environment, then restart the instance. Remove the override
+to return to enforcement. Audit events are
 structured logs from the `outbound-identity` child logger (`code`, `reason`,
 `verdict`, `caller`). Infra callers (`health`, `scheduler`, `reply-guarantee`,
 `report-channel`) are never floored regardless of mode.
 
-#### Guarded egresses and out-of-scope direct callers
+#### Guarded egresses and fixed-destination exceptions
 
-The guard runs at every free-recipient egress. The five `Messenger` methods
-(`ConnectionManager` `sendMessage`/`sendRaw`/`sendPollMessage`/`sendMedia` and
-`TwilioConnection.sendMessage`) are guarded inline. Two MCP tools that reach the
+The guard runs at every free-recipient egress. Baileys `ConnectionManager`
+`sendMessage`/`sendRaw`/`sendPollMessage`/`sendMedia`, plus the Twilio, Signal,
+and iMessage connection bridges, are guarded inline. Two MCP tools that reach the
 raw socket directly — `forward_message` and `relay_message` — are **also** routed
 through the guard. `relay_message` is disabled by default
 (`advanced.enableRelayMessage`) and is guarded before it can be enabled.
 
-The following direct callers are intentionally **out of scope**: they are
-fixed-destination, self-profile, or catalog sends with no free recipient, so the
-identity floor does not apply:
-
-- **status broadcast** — posts to the WhatsApp status JID, not a chosen recipient.
-- **send_product / send_product_message** — catalog content to a fixed target.
-- **share_phone_number / request_phone_number** — self-profile exchange, no message body to a cold target.
-- **group invite (send_group_invite)** — invite link delivery, fixed-destination.
+Caller-supplied targets for product messages, phone-number exchange, and group
+invites are guarded before provider access, just like ordinary text/media sends.
+The only recipient exception is **status broadcast**, whose destination is the
+fixed WhatsApp status JID rather than an operator- or model-selected target.
 
 ### Storage Paths (single-instance / legacy mode only)
 
@@ -420,7 +418,7 @@ into place during deployment.
 | `enabled` | boolean | no | `true` | Fleet opt-out switch. Set to `false` to keep the config on disk while taking the instance out of fleet rotation — discovery skips it, ops routes ignore its `healthPort`, and no polling or proxying occurs. Any other value (including absent) leaves the instance enabled. See note below.[^enabled] |
 | `name` | string | yes | — | Instance name. Must match the directory name. Validated by the loader. |
 | `type` | string | yes | — | Instance type: `chat`, `agent`, or `passive`. |
-| `adminPhones` | string[] | yes | — | Non-empty array of phone numbers with admin access. All elements must be non-empty strings. |
+| `adminPhones` | string[] | yes | — | Compatibility field for configured admin identities. Values are normalized and validated by transport: E.164 phone identity for Baileys/Twilio, Signal UUID or E.164 for Signal, and lowercase AppleID email or E.164 for iMessage. |
 | `accessMode` | string | yes | — | Who can interact with the bot. See [Access Modes](#access-modes). |
 | `systemPrompt` | string | see rules | — | LLM system prompt. **Required** for `chat`. **Forbidden** for `passive`. Optional for `agent` (falls back to `DEFAULT_SYSTEM_PROMPT` in `config.ts`). |
 | `models` | object | no | env/default | Model overrides. Keys: `conversation`, `extraction`, `validation`, `fallback`. Each takes a literal model ID or a symbolic `<vendor>[:<family>]:latest[-stable]` form (see [Dynamic model resolution](#dynamic-model-resolution)). |
@@ -446,8 +444,10 @@ into place during deployment.
 | `agentOptions` | object | agent only | — | Agent-specific settings. Required fields vary by `sessionScope`. See [agentOptions](#agentoptions). |
 | `chatOptions` | object | no | — | Chat-specific settings. Currently just `openaiProviderConfig` (chat OpenAI endpoint/key override). See [chatOptions](#chatoptions). |
 | `transcriptionOptions` | object | no | — | Shared OpenAI Whisper transcription endpoint/key override. Valid for chat, agent, and passive instances. See [transcriptionOptions](#transcriptionoptions). |
-| `transport` | string | no | `baileys` | Message transport: `baileys` (WhatsApp, default) or `twilio` (SMS). See [`twilioConfig`](#twilioconfig). |
+| `transport` | string | no | `baileys` | Message transport: `baileys` (WhatsApp, default), `twilio` (SMS), `signal`, or `imessage`. See the transport config rows below. |
 | `twilioConfig` | object | iff `transport: "twilio"` | — | Twilio SMS transport settings. **Required** when `transport` is `twilio`; **rejected** when present with any other transport. See [`twilioConfig`](#twilioconfig). |
+| `signalConfig` | object | iff `transport: "signal"` | — | Signal transport settings. **Required** for Signal and rejected for every other transport. Configure the line's own E.164 identity and exactly one UNIX-socket or TCP daemon endpoint. See the [Signal runbook](runbooks/signal-transport.md). |
+| `imessageConfig` | object | iff `transport: "imessage"` | — | iMessage transport settings. **Required** for iMessage and rejected for every other transport. Configure sender plus exactly one backend: BlueBubbles URL/keyring service or `imsg` socket path. See the [iMessage runbook](runbooks/imessage-transport.md). |
 | `rateLimitWindowMs` | integer (ms) | `3600000` (1 h) | Measurement window for the per-user response rate limit — `checkRateLimit` counts responses sent within this window and compares against `rateLimitPerHour` (`src/runtimes/chat/rate-limiter.ts:15`). When unset it falls back to `rateLimitNoticeWindowMs` if that is set (with a startup deprecation warning), else the 1-hour default (`src/config.ts:448`). |
 | `rateLimitNoticeWindowMs` | integer (ms) | `3600000` (1 h) | Dedup window for the "chill, I need a minute" rate-limit notice — once a user is told they are rate-limited, the notice is suppressed for this long before it can be sent again (`src/runtimes/chat/runtime.ts:174`). Distinct from `rateLimitWindowMs` (the counting window). |
 | `recencyHalfLifeDays` | integer | `14` | Per-instance override of `RECENCY_HALF_LIFE_DAYS` — positive day-count half-life for memory-search recency decay (`src/config.ts:858`). Smaller values forget faster. Falls back to the `RECENCY_HALF_LIFE_DAYS` env var, then `14`; non-positive/non-integer values are ignored. |
@@ -1406,7 +1406,7 @@ identity model, limitations, and keyring provisioning live in the runbook:
 "twilioConfig": {
   "account": "sms-agent",
   "accountSid": "AC00000000000000000000000000000000",
-  "authTokenService": "twilio-sms-agent",
+  "authTokenService": "whatsoup-twilio-sms-agent",
   "phoneNumber": "+15550001111",
   "inboundMode": "poll",
   "pollIntervalMs": 15000,
@@ -1416,13 +1416,13 @@ identity model, limitations, and keyring provisioning live in the runbook:
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `account` | string | yes | — | Channel account segment for the `sms:<account>` channel ID. Must match `^[a-z][a-z0-9-]{0,63}$`. Changing it changes the channel identity. |
+| `account` | string | yes | — | Immutable line identity used for the `sms:<account>` channel ID. It must equal the top-level line `name` and match `^[a-z][a-z0-9-]{0,63}$`. |
 | `accountSid` | string | yes | — | Twilio Account SID. Must match `^AC[0-9a-f]{32}$` (hex must be lowercase). |
-| `authTokenService` | string | yes | — | OS keyring **service name** for the auth token — never the token itself. Non-empty, no whitespace, max 128 chars. Resolved via `src/lib/keyring.ts` `lookupCredential` at first use; no environment-variable fallback exists for Twilio. |
+| `authTokenService` | string | yes | — | Derived OS keyring service for the auth token — never the token itself. It must equal `whatsoup-twilio-<immutable-line-name>`; arbitrary and cross-line selectors are rejected before `lookupCredential`. There is no environment fallback. Existing lines must provision/copy the token into this canonical service before updating or restarting; WhatSoup does not migrate or delete keyring items. |
 | `phoneNumber` | string | XOR | — | E.164 sender number (`^\+[1-9]\d{6,14}$`). Exactly one of `phoneNumber` or `messagingServiceSid` must be set. |
 | `messagingServiceSid` | string | XOR | — | Messaging Service SID sender. Must match `^MG[0-9a-f]{32}$` (lowercase hex). Without `phoneNumber`, inbound polling uses a single unfiltered call listing all messages on the account in both directions (no targeted per-number filtering). |
 | `inboundMode` | string | no | `poll` | `poll` (REST polling) or `webhook` (signature-validated HTTP listener). |
-| `webhook.publicBaseUrl` | string | webhook-mode | — | Public HTTPS base URL for Twilio to call. Trailing slash is stripped by the loader. Signature validation depends on this matching exactly. |
+| `webhook.publicBaseUrl` | string | webhook-mode | — | Public HTTPS base URL for Twilio to call. Userinfo, query strings, and fragments are rejected; a trailing slash is stripped by the loader. Signature validation depends on this matching exactly. |
 | `webhook.listenPort` | integer | webhook-mode | — | Local listener port (`[1, 65535]`; must not equal `healthPort`). Bind address defaults to `127.0.0.1`; use an HTTPS proxy/tunnel. |
 | `webhook.listenAddress` | string | no | `127.0.0.1` | Override local bind address. |
 | `voice.enabled` | boolean | no | `false` | Enable voicemail + `placeCall`. Requires `inboundMode:'webhook'` and `phoneNumber`. |
@@ -1438,7 +1438,7 @@ The loader enforces these constraints before the process starts:
 - `name` must match the directory name.
 - `type` must be `chat`, `agent`, or `passive`.
 - `accessMode` must be one of the four valid values.
-- `adminPhones` must be a non-empty array of non-empty strings.
+- `adminPhones` must be non-empty and valid for the selected transport: E.164 phone identity for Baileys/Twilio, Signal UUID or E.164 for Signal, and lowercase AppleID email or E.164 for iMessage.
 - `chat` instances must have a non-empty `systemPrompt`.
 - `passive` instances must not have a `systemPrompt` and must use `accessMode: self_only`.
 - Fleet create/update APIs default omitted `agentOptions` to `sessionScope: per_chat` with a per-instance workspace under the user's home directory.
@@ -1449,8 +1449,10 @@ The loader enforces these constraints before the process starts:
 - `agentOptions.allowM365Mutations`, when present, must be a boolean.
 - `chatAliases`, when present, must be an object of non-empty alias to JID strings.
 - `profiles`, when present, must be an object of profile names to profile objects with only `prefix`, `tag`, and `linkPreview` fields.
-- `transport`, when present, must be `baileys` or `twilio`.
-- `twilioConfig` is required when `transport` is `twilio` and rejected otherwise; its field rules (SID shapes, sender XOR, inbound mode, webhook block, voice coherence, numeric ranges) are listed under [`twilioConfig`](#twilioconfig).
+- `transport`, when present, must be `baileys`, `twilio`, `signal`, or `imessage`.
+- Exactly the selected non-Baileys transport config is required: `twilioConfig`, `signalConfig`, or `imessageConfig`; transport configs for other transports are rejected.
+- Twilio field rules (immutable account/name binding, SID shapes, canonical keyring service, sender XOR, inbound mode, webhook block, voice coherence, numeric ranges) are listed under [`twilioConfig`](#twilioconfig).
+- Signal requires its own E.164 number, poll mode, and exactly one UNIX-socket or TCP signal-cli endpoint. iMessage requires a normalized sender, poll mode, and a backend-coherent BlueBubbles or `imsg` endpoint. See the public transport runbooks linked above.
 
 ---
 

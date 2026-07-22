@@ -131,6 +131,7 @@ describe('handleCreateLine — rollback preserves pre-existing user files (#248)
 
     expect(res._status).toBe(500);
     expect(JSON.parse(res._body).error).toMatch(/instance creation failed/);
+    expect(deps.serviceManager.disable).toHaveBeenCalledWith('preserve-agent');
 
     // CLAUDE.md must be byte-for-byte restored.
     expect(fs.existsSync(claudeMdPath)).toBe(true);

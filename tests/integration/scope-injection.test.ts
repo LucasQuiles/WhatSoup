@@ -100,7 +100,7 @@ function makeRegistry(
   const getSock = () => sock;
 
   registerChatOperationTools(db, getSock, (tool) => registry.register(tool));
-  registerGroupTools(getSock, (tool) => registry.register(tool));
+  registerGroupTools(getSock, (tool) => registry.register(tool), db);
   registerAdvancedTools(getSock, (tool) => registry.register(tool));
   registerChatManagementTools(db, getSock, (tool) => registry.register(tool));
 
@@ -608,7 +608,11 @@ describe('F. schema advertised vs underlying schema integrity', () => {
     // send_group_invite has chatJid as optional in Zod schema.
     // From chat-scoped: registry must still inject deliveryJid and the handler must use it.
     const captured: CapturedCall[] = [];
-    const reg = makeRegistry(makeDb(), makeMockSock(captured));
+    const db = makeDb();
+    db.raw.prepare(
+      "INSERT INTO access_list (subject_type, subject_id, status) VALUES ('phone', ?, 'allowed')",
+    ).run(ALICE_KEY);
+    const reg = makeRegistry(db, makeMockSock(captured));
     const aliceSession = chatSession(ALICE_KEY, ALICE_JID);
 
     await reg.call(

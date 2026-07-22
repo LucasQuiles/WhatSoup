@@ -466,6 +466,43 @@ describe('handleConfigUpdate PATCH round-trip invariant (#244 #249)', () => {
     expect(persisted).toEqual(original);
   });
 
+  it('rejects an unusable interactive Twilio access mode and leaves the file untouched', async () => {
+    const agentCwd = makeAgentCwd('rt-twilio-mode');
+    const name = 'roundtrip-twilio';
+    const dir = path.join(tmpDir, 'whatsoup', 'instances', name);
+    fs.mkdirSync(dir, { recursive: true });
+    const cfg = path.join(dir, 'config.json');
+    const original = {
+      name,
+      type: 'agent',
+      accessMode: 'allowlist',
+      adminPhones: ['15551230006'],
+      healthPort: 9095,
+      transport: 'twilio',
+      twilioConfig: {
+        account: name,
+        accountSid: `AC${'b'.repeat(32)}`,
+        authTokenService: 'whatsoup-twilio-roundtrip-twilio',
+        phoneNumber: '+15551230006',
+        inboundMode: 'poll',
+        pollIntervalMs: 15_000,
+      },
+      agentOptions: { sessionScope: 'per_chat', cwd: agentCwd },
+    };
+    fs.writeFileSync(cfg, JSON.stringify(original));
+    const inst = fakeInstance(cfg, { name, type: 'agent', accessMode: 'allowlist' });
+
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({ accessMode: 'groups_only' })),
+      res, makeDeps(inst), { name },
+    );
+
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toContain('unavailable for interactive Twilio SMS');
+    expect(JSON.parse(fs.readFileSync(cfg, 'utf-8'))).toEqual(original);
+  });
+
   it('persists a valid BYOK providerConfig + fallbacks patch (positive round-trip)', async () => {
     const agentCwd = makeAgentCwd('rt-byok');
     const dir = path.join(tmpDir, 'whatsoup', 'instances', 'roundtrip-byok');

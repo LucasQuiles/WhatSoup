@@ -1,11 +1,13 @@
 import { type FC } from 'react'
 import { Pencil, AlertCircle } from 'lucide-react'
 import ModeBadge from '../ModeBadge'
+import TransportBadge from '../TransportBadge'
 import { getProviderConfigFields, DEFAULT_PROVIDER_ID } from '../../lib/providers'
 import { defaultAgentWorkspacePath } from '../../lib/agent-cwd'
 import { ACCESS_MODE_LABELS } from '../../lib/access-modes'
 import { formatCount } from '../../lib/text-utils'
 import { Button } from '../primitives/Button'
+import { isTransportKind, TRANSPORT_MAP, type TransportKind } from '../../lib/transport-meta'
 
 interface ReviewStepProps {
   data: Record<string, unknown>
@@ -64,6 +66,16 @@ const EditBtn: FC<{ onClick: () => void }> = ({ onClick }) => (
   </Button>
 )
 
+function record(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+}
+
+function text(value: unknown): string {
+  return typeof value === 'string' || typeof value === 'number' ? String(value) : '—'
+}
+
 /* ── Key-value row ── */
 
 const KV: FC<{ label: string; value: React.ReactNode; fullValue?: string }> = ({ label, value, fullValue }) => (
@@ -83,11 +95,15 @@ function previewFirstLine(text: string, max: number): string {
 
 /* ── Friendly error messages ── */
 
-function friendlyError(raw: string): string {
+function friendlyError(raw: string, transport: TransportKind): string {
   if (raw.includes('already exists')) return 'An instance with this name already exists. Go back to Identity and choose a different name.'
   if (raw.includes('systemPrompt')) return 'A system prompt is required. Click "Edit" on the Config card above to add one.'
   if (raw.includes('agentOptions')) return 'Agent configuration is incomplete. Click "Edit" on the Config card to set a working directory.'
-  if (raw.includes('adminPhones')) return 'At least one admin phone number is required. Click "Edit" on the Identity card.'
+  if (raw.includes('adminPhones')) {
+    return transport === 'twilio'
+      ? 'At least one notification phone is required. Click "Edit" on the Identity card.'
+      : `At least one ${TRANSPORT_MAP[transport].adminIdLabel.toLowerCase().replace(/^admin /, '')} is required. Click "Edit" on the Identity card.`
+  }
   if (raw.includes('cwd must be within')) return 'The working directory must be inside the home directory. Click "Edit" on the Config card to fix.'
   if (raw.includes('rateLimitPerHour')) return 'Rate limit must be between 1 and 10,000 per hour. Click "Edit" on the Config card.'
   if (raw.includes('maxTokens')) return 'Max tokens must be between 256 and 200,000. Click "Edit" on the Config card.'
@@ -109,6 +125,11 @@ const ReviewStep: FC<ReviewStepProps> = ({
   const name = (data.name as string) ?? ''
   const description = (data.description as string) ?? ''
   const type = (data.type as string) ?? 'chat'
+  const transport: TransportKind = isTransportKind(data.transport) ? data.transport : 'baileys'
+  const transportMeta = TRANSPORT_MAP[transport]
+  const twilioConfig = record(data.twilioConfig)
+  const signalConfig = record(data.signalConfig)
+  const imessageConfig = record(data.imessageConfig)
   const adminPhones = (data.adminPhones as string[]) ?? []
   const models = data.models as Record<string, string> | undefined
   const authMethod = (data.authMethod as string) ?? 'api_key'
@@ -134,8 +155,45 @@ const ReviewStep: FC<ReviewStepProps> = ({
           label="Type"
           value={<ModeBadge mode={type as 'passive' | 'chat' | 'agent'} />}
         />
-        <KV label="Admin phones" value={`${adminPhones.length} configured`} />
+        <KV label={transportMeta.adminIdLabel} value={`${adminPhones.length} configured`} />
       </div>
+
+      <section style={cardStyle} aria-labelledby="review-transport-heading">
+        <div style={cardHeaderStyle}>
+          <span id="review-transport-heading" className="font-medium text-data" style={headingStyle}>Transport</span>
+          <EditBtn onClick={() => onEditPhase(0)} />
+        </div>
+        <KV
+          label="Kind"
+          value={<TransportBadge kind={transport} backend={imessageConfig.backend as 'imsg' | 'bluebubbles' | undefined} />}
+        />
+        {transport === 'twilio' && (
+          <>
+            <KV label="Account SID" value={text(twilioConfig.accountSid)} />
+            <KV label="Sender" value={text(twilioConfig.phoneNumber ?? twilioConfig.messagingServiceSid)} />
+            <KV label="Auth token service" value={text(twilioConfig.authTokenService)} />
+          </>
+        )}
+        {transport === 'signal' && (
+          <>
+            <KV label="Self number" value={text(signalConfig.phoneNumber)} />
+            <KV label="Endpoint" value={signalConfig.socketPath
+              ? text(signalConfig.socketPath)
+              : `${text(signalConfig.tcpHost)}:${text(signalConfig.tcpPort)}`}
+            />
+          </>
+        )}
+        {transport === 'imessage' && (
+          <>
+            <KV label="Sender" value={text(imessageConfig.sender)} />
+            <KV label="Backend" value={text(imessageConfig.backend)} />
+            <KV label="Endpoint" value={text(imessageConfig.bluebubblesUrl ?? imessageConfig.imsgSocketPath)} />
+            {imessageConfig.backend === 'bluebubbles' && (
+              <KV label="Password service" value={text(imessageConfig.bluebubblesPasswordService)} />
+            )}
+          </>
+        )}
+      </section>
 
       {/* Model card */}
       <div style={cardStyle}>
@@ -204,7 +262,7 @@ const ReviewStep: FC<ReviewStepProps> = ({
         >
           <AlertCircle size={16} className="text-s-crit flex-shrink-0" />
           <span className="text-s-crit text-data">
-            {friendlyError(error)}
+            {friendlyError(error, transport)}
           </span>
         </div>
       )}

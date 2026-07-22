@@ -260,6 +260,26 @@ describe('sendApprovalRequest', () => {
     expect(sentText).toContain('BLOCK');
   });
 
+  it('directs Twilio approval decisions to the console because SMS replies cannot authorize', async () => {
+    const { config } = await import('../../src/config.ts');
+    const originalTransport = (config as any).transport;
+    (config as any).transport = 'twilio';
+    try {
+      const db = openDb();
+      const messenger = makeMockMessenger();
+
+      await sendApprovalRequest(db, messenger, '15554440009', 'SMS Contact', 'Please help');
+
+      const sentText = messenger.sendMessage.mock.calls[0][1] as string;
+      expect(sentText).toContain('Review this request in the WhatSoup console');
+      expect(sentText).toContain('SMS replies cannot authorize access decisions');
+      expect(sentText).not.toContain('reply exactly');
+      expect(sentText).not.toMatch(/ALLOW\s+15554440009|BLOCK\s+15554440009/);
+    } finally {
+      (config as any).transport = originalTransport;
+    }
+  });
+
   it('truncates long preview to 100 chars', async () => {
     const db = openDb();
     const messenger = makeMockMessenger();
@@ -590,7 +610,7 @@ describe('selectReplayableDms', () => {
     expect(result.groupSkipped).toBe(0);
   });
 
-  it('reports groupSkipped count for group chatJids', () => {
+  it('reports groupSkipped count for every transport group chatJid', () => {
     const { selectReplayableDms, __resetReplayedIdsForTests } = adminModule as any;
 
     __resetReplayedIdsForTests();
@@ -632,13 +652,51 @@ describe('selectReplayableDms', () => {
         mediaPath: null,
         contentText: null,
       },
+      {
+        pk: 5,
+        chatJid: 'Z3JvdXAtY29udmVyc2F0aW9u@signal',
+        conversationKey: 'signal-group-helper',
+        senderJid: '+15559002001@signal',
+        senderName: 'SignalGroupUser',
+        messageId: 'signal-group-helper-001',
+        content: 'signal group content',
+        contentType: 'text',
+        isFromMe: false,
+        timestamp: 1700020002,
+        quotedMessageId: null,
+        enrichmentProcessedAt: null,
+        enrichmentRetries: 0,
+        createdAt: '2023-01-01T00:00:02.000Z',
+        mediaPath: null,
+        contentText: null,
+      },
+      {
+        pk: 6,
+        chatJid: 'iMessage;+;group-helper@imessage',
+        conversationKey: 'imessage-group-helper',
+        senderJid: 'sender@example.test@imessage',
+        senderName: 'ImessageGroupUser',
+        messageId: 'imessage-group-helper-001',
+        content: 'imessage group content',
+        contentType: 'text',
+        isFromMe: false,
+        timestamp: 1700020003,
+        quotedMessageId: null,
+        enrichmentProcessedAt: null,
+        enrichmentRetries: 0,
+        createdAt: '2023-01-01T00:00:03.000Z',
+        mediaPath: null,
+        contentText: null,
+      },
     ];
 
     const result = selectReplayableDms(stored, 10);
     const ids = result.toReplay.map((m: any) => m.messageId as string);
     expect(ids).toContain('dm-helper-001');
     expect(ids).not.toContain('group-helper-001');
-    expect(result.groupSkipped).toBe(1);
+    expect(ids).not.toContain('signal-group-helper-001');
+    expect(ids).not.toContain('imessage-group-helper-001');
+    expect(result.groupSkipped).toBe(3);
   });
 });
 

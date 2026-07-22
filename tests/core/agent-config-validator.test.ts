@@ -332,6 +332,17 @@ describe('healthPort validation', () => {
 });
 
 describe('adminPhones validation', () => {
+  it('accepts a plus-prefixed E.164 identity on load for compatibility', () => {
+    const raw = baseAgent({ adminPhones: ['+15551234567'] });
+    expect(validateInstanceConfig(raw, ctx('load'))).toBeNull();
+  });
+
+  it('rejects embedded non-phone text before it can collapse to an admin identity', () => {
+    const raw = baseAgent({ adminPhones: ['privileged-user+15551234567'] });
+    const result = validateInstanceConfig(raw, ctx('load'));
+    expect(result?.field).toBe('adminPhones');
+  });
+
   it('rejects empty adminPhones array on create', () => {
     const raw = baseAgent({ adminPhones: [] });
     const result = validateInstanceConfig(raw, ctx('create'));
@@ -506,6 +517,25 @@ describe('authOnly mode short-circuits type rules', () => {
     const result = validateInstanceConfig(raw, ctx('load', { authOnly: true }));
     expect(result).toBeNull();
     expect(validateInstanceConfig(raw, ctx('load'))?.field).toBe('systemPrompt');
+  });
+
+  it.each([
+    ['top-level provider key', { openaiKeyBackup: 'provider-secret-sentinel' }, 'openaiKeyBackup'],
+    ['Twilio auth token', { twilioConfig: { authToken: 'transport-secret-sentinel' } }, 'twilioConfig.authToken'],
+    [
+      'nested authorization header',
+      {
+        agentOptions: {
+          sessionScope: 'single',
+          providerConfig: { headers: { Authorization: 'header-secret-sentinel' } },
+        },
+      },
+      'agentOptions.providerConfig.headers.Authorization',
+    ],
+  ])('still rejects plaintext credentials in %s', (_label, overrides, expectedField) => {
+    const result = validateInstanceConfig(baseAgent(overrides), ctx('load', { authOnly: true }));
+    expect(result?.field).toBe(expectedField);
+    expect(result?.message).not.toContain('secret-sentinel');
   });
 });
 
@@ -1084,6 +1114,168 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
     expect(result?.message).toContain('http or https');
   });
 
+  it.each([
+    ['credentials', 'https://provider-user:provider-password@host.example/v1'],
+    ['query', 'https://host.example/v1?api_key=provider-query-sentinel'],
+    ['fragment', 'https://host.example/v1#provider-fragment-sentinel'],
+  ])('rejects providerConfig.baseUrl containing %s', (_label, baseUrl) => {
+    const raw = baseAgent({
+      agentOptions: { sessionScope: 'single', providerConfig: { baseUrl } },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('agentOptions.providerConfig.baseUrl');
+    expect(result?.message).toContain('must not contain credentials or a query or fragment');
+  });
+
+  it.each([
+    [
+      'agentOptions.providerConfig.headers',
+      baseAgent({
+        agentOptions: {
+          sessionScope: 'single',
+          providerConfig: { headers: { Authorization: 'provider-header-sentinel' } },
+        },
+      }),
+    ],
+    [
+      'chatOptions.openaiProviderConfig.headers',
+      baseChat({
+        chatOptions: {
+          openaiProviderConfig: { headers: { Authorization: 'provider-header-sentinel' } },
+        },
+      }),
+    ],
+    [
+      'transcriptionOptions.openaiProviderConfig.headers',
+      baseChat({
+        transcriptionOptions: {
+          openaiProviderConfig: { headers: { Authorization: 'provider-header-sentinel' } },
+        },
+      }),
+    ],
+  ])('rejects unknown provider configuration field %s', (field, raw) => {
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe(field);
+    expect(result?.message).toContain('not an allowed provider configuration field');
+  });
+
+  it('preserves the known agent provider configuration surface', () => {
+    const result = validateInstanceConfig(baseAgent({
+      agentOptions: {
+        sessionScope: 'single',
+        provider: 'anthropic-api',
+        providerConfig: {
+          model: 'claude-test',
+          baseUrl: 'https://host.example/v1',
+          apiKeyService: 'anthropic',
+          maxTokens: 4096,
+          budget: { requestsPerMinute: 10 },
+          opencodeCommandMode: 'auto',
+        },
+      },
+    }), ctx('create'));
+    expect(result).toEqual(null);
+  });
+
+  it('accepts every source-backed agent provider configuration key', () => {
+    const result = validateInstanceConfig(baseAgent({
+      agentOptions: {
+        sessionScope: 'single',
+        provider: 'anthropic-api',
+        providerConfig: {
+          model: 'claude-test',
+          baseUrl: 'https://host.example/v1',
+          apiKeyService: 'anthropic',
+          maxTokens: 4096,
+          providerId: 'whatsoup-custom',
+          executionProfile: 'whatsoup-headless',
+          budget: {
+            requestsPerMinute: 10,
+            tokensPerMinute: 1000,
+            dailySpendCapUsd: 5,
+            chatBurstLimit: 3,
+            costPerMillionTokens: 2,
+          },
+          permissionMode: 'default',
+          rawSystemPrompt: false,
+          tools: ['Read'],
+          mcpConfig: ['/tmp/mcp.json'],
+          settingSources: 'project',
+          effort: 'low',
+          agents: { reviewer: { description: 'safe' } },
+          fallbackModel: ['fallback-a'],
+          disableSlashCommands: true,
+          strictMcpConfig: true,
+          noSessionPersistence: true,
+          opencodeCommandMode: 'auto',
+        },
+      },
+    }), ctx('create'));
+    expect(result).toEqual(null);
+  });
+
+  it('rejects unknown provider budget fields', () => {
+    const result = validateInstanceConfig(baseAgent({
+      agentOptions: {
+        sessionScope: 'single',
+        providerConfig: { budget: { headers: 'budget-header-sentinel' } },
+      },
+    }), ctx('create'));
+    expect(result?.field).toBe('agentOptions.providerConfig.budget.headers');
+    expect(result?.message).toContain('not an allowed budget field');
+  });
+
+  it.each([NaN, Infinity, -1, '10'])('rejects invalid provider budget value %j', (requestsPerMinute) => {
+    const result = validateInstanceConfig(baseAgent({
+      agentOptions: {
+        sessionScope: 'single',
+        providerConfig: { budget: { requestsPerMinute } },
+      },
+    }), ctx('create'));
+    expect(result?.field).toBe('agentOptions.providerConfig.budget.requestsPerMinute');
+    expect(result?.message).toContain('finite non-negative number');
+  });
+
+  it('rejects plaintext authorization nested in an opaque agents configuration', () => {
+    const result = validateInstanceConfig(baseAgent({
+      agentOptions: {
+        sessionScope: 'single',
+        providerConfig: {
+          agents: { reviewer: { Authorization: 'agent-authorization-sentinel' } },
+        },
+      },
+    }), ctx('create'));
+    expect(result?.field).toBe('agentOptions.providerConfig.agents.reviewer.Authorization');
+    expect(result?.message).toContain('plaintext provider credentials');
+  });
+
+  it.each([
+    ['model', 7],
+    ['maxTokens', Infinity],
+    ['providerId', { nested: true }],
+    ['permissionMode', false],
+    ['rawSystemPrompt', 'true'],
+    ['tools', { Read: true }],
+    ['mcpConfig', 7],
+    ['settingSources', ['project']],
+    ['effort', 1],
+    ['agents', ['reviewer']],
+    ['fallbackModel', { model: 'fallback' }],
+    ['disableSlashCommands', 'true'],
+    ['strictMcpConfig', 'true'],
+    ['noSessionPersistence', 'true'],
+    ['opencodeCommandMode', 'unknown-mode'],
+  ])('rejects malformed agent provider configuration value %s', (field, value) => {
+    const result = validateInstanceConfig(baseAgent({
+      agentOptions: {
+        sessionScope: 'single',
+        providerConfig: { [field]: value },
+      },
+    }), ctx('create'));
+    expect(result?.field).toBe(`agentOptions.providerConfig.${field}`);
+    expect(result?.message).toContain('must');
+  });
+
   it('rejects opencode-cli baseUrl without any configured model', () => {
     const raw = baseAgent({
       agentOptions: {
@@ -1107,12 +1299,14 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
   });
 
   it('rejects unknown providerConfig.apiKeyService', () => {
+    const hostileSelector = 'plaintext-provider-selector-sentinel';
     const raw = baseAgent({
-      agentOptions: { sessionScope: 'single', providerConfig: { apiKeyService: 'nope-svc' } },
+      agentOptions: { sessionScope: 'single', providerConfig: { apiKeyService: hostileSelector } },
     });
     const result = validateInstanceConfig(raw, ctx('create'));
     expect(result?.field).toBe('agentOptions.providerConfig.apiKeyService');
     expect(result?.message).toContain('not a valid provider service');
+    expect(result?.message).not.toContain(hostileSelector);
   });
 
   it('rejects providerConfig.apiKeyService set without baseUrl', () => {
@@ -1311,7 +1505,7 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
   });
 
   it('rejects twilioConfig present alongside default (baileys) transport', () => {
-    const raw = baseChat({ twilioConfig: { account: 'acme' } });
+    const raw = baseChat({ twilioConfig: { account: 'alpha' } });
     const result = validateInstanceConfig(raw, ctx('create'));
     expect(result?.field).toBe('twilioConfig');
     expect(result?.message).toContain('inconsistent with transport "baileys"');
@@ -1333,9 +1527,9 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
 
   // Helper: a fully valid twilioConfig (messagingServiceSid sender).
   const validTwilio = () => ({
-    account: 'acme',
+    account: 'alpha',
     accountSid: 'AC' + '0'.repeat(32),
-    authTokenService: 'twilio-auth-token',
+    authTokenService: 'whatsoup-twilio-alpha',
     messagingServiceSid: 'MG' + '0'.repeat(32),
   });
 
@@ -1389,9 +1583,9 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
     const raw = baseChat({
       transport: 'twilio',
       twilioConfig: {
-        account: 'acme',
+        account: 'alpha',
         accountSid: 'AC' + '0'.repeat(32),
-        authTokenService: 'twilio-auth-token',
+        authTokenService: 'whatsoup-twilio-alpha',
       },
     });
     const result = validateInstanceConfig(raw, ctx('create'));
@@ -1403,9 +1597,9 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
     const raw = baseChat({
       transport: 'twilio',
       twilioConfig: {
-        account: 'acme',
+        account: 'alpha',
         accountSid: 'AC' + '0'.repeat(32),
-        authTokenService: 'twilio-auth-token',
+        authTokenService: 'whatsoup-twilio-alpha',
         phoneNumber: 'not-a-number',
       },
     });
@@ -1418,9 +1612,9 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
     const raw = baseChat({
       transport: 'twilio',
       twilioConfig: {
-        account: 'acme',
+        account: 'alpha',
         accountSid: 'AC' + '0'.repeat(32),
-        authTokenService: 'twilio-auth-token',
+        authTokenService: 'whatsoup-twilio-alpha',
         messagingServiceSid: 'MGshort',
       },
     });
@@ -1560,9 +1754,9 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
     const raw = baseChat({
       transport: 'twilio',
       twilioConfig: {
-        account: 'acme',
+        account: 'alpha',
         accountSid: 'AC' + '0'.repeat(32),
-        authTokenService: 'twilio-auth-token',
+        authTokenService: 'whatsoup-twilio-alpha',
         phoneNumber: '+15550000001',
         voice: { enabled: true },
       },
@@ -1619,9 +1813,9 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
     const raw = baseChat({
       transport: 'twilio',
       twilioConfig: {
-        account: 'acme',
+        account: 'alpha',
         accountSid: 'AC' + '0'.repeat(32),
-        authTokenService: 'twilio-auth-token',
+        authTokenService: 'whatsoup-twilio-alpha',
         phoneNumber: '+15550000001',
         inboundMode: 'webhook',
         webhook: { publicBaseUrl: 'https://host.example', listenPort: 8080 },

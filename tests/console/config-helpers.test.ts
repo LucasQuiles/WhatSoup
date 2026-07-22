@@ -20,7 +20,9 @@ import {
   getValueAtPath,
   isEqualValue,
   isRecord,
+  isSafeConfigPath,
   setValueAtPath,
+  validateAdminPhones,
 } from '../../console/src/components/line-detail/config-helpers.ts';
 import { CHAT_API_KEY_SERVICE_OPTIONS } from '../../console/src/lib/providers.ts';
 
@@ -60,6 +62,17 @@ describe('getValueAtPath', () => {
     expect(getValueAtPath(null, 'a')).toBeUndefined();
     expect(getValueAtPath('hi', 'length')).toBeUndefined();
   });
+
+  it('rejects inherited and prototype-mutating path segments', () => {
+    const inherited = Object.create({ inherited: { value: 'not-own' } }) as Record<string, unknown>;
+    inherited.own = { value: 'own' };
+
+    expect(getValueAtPath(inherited, 'own.value')).toBe('own');
+    expect(getValueAtPath(inherited, 'inherited.value')).toBeUndefined();
+    expect(getValueAtPath({}, '__proto__.polluted')).toBeUndefined();
+    expect(getValueAtPath({}, 'constructor.prototype.polluted')).toBeUndefined();
+    expect(getValueAtPath({}, 'a..b')).toBeUndefined();
+  });
 });
 
 describe('setValueAtPath', () => {
@@ -88,6 +101,17 @@ describe('setValueAtPath', () => {
     setValueAtPath(target, 'a.added', 2);
     expect(target).toEqual({ a: { keep: 1, added: 2 } });
   });
+
+  it('fails closed on dangerous or empty path segments without prototype mutation', () => {
+    const target: Record<string, unknown> = {};
+
+    setValueAtPath(target, '__proto__.consoleConfigPolluted', true);
+    setValueAtPath(target, 'constructor.prototype.consoleConfigPolluted', true);
+    setValueAtPath(target, 'a..consoleConfigPolluted', true);
+
+    expect(Object.hasOwn(Object.prototype, 'consoleConfigPolluted')).toBe(false);
+    expect(target).toEqual({});
+  });
 });
 
 describe('deleteValueAtPath', () => {
@@ -114,6 +138,28 @@ describe('deleteValueAtPath', () => {
     const target: Record<string, unknown> = { a: 'scalar' };
     deleteValueAtPath(target, 'a.b.c');
     expect(target).toEqual({ a: 'scalar' });
+  });
+
+  it('does not traverse inherited or dangerous path segments', () => {
+    const inherited = { keep: true };
+    const target = Object.create({ inherited }) as Record<string, unknown>;
+
+    deleteValueAtPath(target, 'inherited.keep');
+    deleteValueAtPath(target, '__proto__.consoleConfigPolluted');
+
+    expect(inherited.keep).toBe(true);
+    expect(Object.hasOwn(Object.prototype, 'consoleConfigPolluted')).toBe(false);
+  });
+});
+
+describe('isSafeConfigPath', () => {
+  it('accepts ordinary paths and rejects empty or prototype-mutating segments', () => {
+    expect(isSafeConfigPath('agentOptions.cwd')).toBe(true);
+    expect(isSafeConfigPath('')).toBe(false);
+    expect(isSafeConfigPath('.cwd')).toBe(false);
+    expect(isSafeConfigPath('agentOptions..cwd')).toBe(false);
+    expect(isSafeConfigPath('__proto__.polluted')).toBe(false);
+    expect(isSafeConfigPath('constructor.prototype.polluted')).toBe(false);
   });
 });
 
@@ -231,6 +277,7 @@ describe('static config tables', () => {
     expect(CONFIG_EXCLUDE_KEYS.has('type')).toBe(true);
     expect(CONFIG_EXCLUDE_KEYS.has('paths')).toBe(true);
     expect(CONFIG_EXCLUDE_KEYS.has('healthPort')).toBe(true);
+    expect(CONFIG_EXCLUDE_KEYS.has('transport')).toBe(true);
     expect(CONFIG_EXCLUDE_KEYS.has('agentOptions')).toBe(false);
   });
 
@@ -340,7 +387,31 @@ describe('FIELD_VALIDATORS', () => {
   });
 });
 
+describe('validateAdminPhones', () => {
+  it('validates transport-specific admin identities while preserving the compatibility field', () => {
+    expect(validateAdminPhones(['15551234567'], 'twilio')).toBeNull();
+    expect(validateAdminPhones(['01234567-89ab-cdef-0123-456789abcdef'], 'signal')).toBeNull();
+    expect(validateAdminPhones(['owner@example.com'], 'imessage')).toBeNull();
+    expect(validateAdminPhones(['owner@example.com'], 'signal')).toMatch(/Signal/i);
+    expect(validateAdminPhones([], 'imessage')).toMatch(/At least one admin/i);
+  });
+});
+
 describe('buildConfigEntries', () => {
+  it('omits keys whose dotted path contains dangerous or empty segments', () => {
+    const config = JSON.parse(JSON.stringify({
+      safe: true,
+      '__proto__.consoleConfigPolluted': 'blocked',
+      'constructor.prototype.consoleConfigPolluted': 'blocked',
+      'agentOptions..cwd': 'blocked',
+    })) as Record<string, unknown>;
+
+    expect(buildConfigEntries(config)).toEqual([
+      { key: 'safe', value: 'true', type: 'boolean' },
+    ]);
+    expect(Object.hasOwn(Object.prototype, 'consoleConfigPolluted')).toBe(false);
+  });
+
   it('skips CONFIG_EXCLUDE_KEYS and emits a typed entry per remaining key', () => {
     const entries = buildConfigEntries({
       name: 'ignored',

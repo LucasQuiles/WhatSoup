@@ -25,6 +25,8 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 // ─── QrDisplay stub ─────────────────────────────────────────────────────────
 vi.mock('../../console/src/components/QrDisplay', () => ({
@@ -167,6 +169,55 @@ describe('LinkStep — initial render (waiting, no QR)', () => {
   })
 })
 
+describe('LinkStep — transport isolation', () => {
+  it('auto-advances Twilio exactly once and never opens a QR EventSource', async () => {
+    const onComplete = vi.fn()
+    const { rerender } = render(
+      <LinkStep lineName="twilio-line" transport="twilio" onComplete={onComplete} />,
+    )
+
+    await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1))
+    rerender(<LinkStep lineName="twilio-line" transport="twilio" onComplete={onComplete} />)
+    await act(async () => { await Promise.resolve() })
+
+    expect(onComplete).toHaveBeenCalledTimes(1)
+    expect(registry).toHaveLength(0)
+  })
+
+  it.each([
+    ['signal', 'Signal', 'https://github.com/LucasQuiles/WhatSoup/blob/main/docs/runbooks/signal-transport.md'],
+    ['imessage', 'iMessage', 'https://github.com/LucasQuiles/WhatSoup/blob/main/docs/runbooks/imessage-transport.md'],
+  ] as const)('requires out-of-band %s attestation and uses a public runbook', (transport, label, href) => {
+    const onComplete = vi.fn()
+    render(<LinkStep lineName={`${transport}-line`} transport={transport} onComplete={onComplete} />)
+
+    expect(registry).toHaveLength(0)
+    const runbook = screen.getByRole('link', { name: new RegExp(`${label} runbook`, 'i') })
+    expect(runbook.getAttribute('href')).toBe(href)
+    const publicPath = new URL(href).pathname.split('/blob/main/')[1]
+    const publicationAudit = readFileSync(
+      resolve(process.cwd(), 'docs/publication-audit.md'),
+      'utf8',
+    )
+    expect(publicationAudit).toContain(`| \`${publicPath}\` | PUBLIC |`)
+    const continueButton = screen.getByRole('button', { name: 'Continue' })
+    expect(continueButton.hasAttribute('disabled')).toBe(true)
+    fireEvent.click(screen.getByRole('checkbox'))
+    fireEvent.click(continueButton)
+    expect(onComplete).toHaveBeenCalledTimes(1)
+  })
+
+  it('fails closed on an explicit unknown transport without opening QR auth', async () => {
+    render(<LinkStep lineName="unknown-line" transport="future-provider" onComplete={vi.fn()} />)
+
+    await act(async () => { await Promise.resolve() })
+
+    expect(registry).toHaveLength(0)
+    expect(screen.getByText(/unsupported transport/i)).toBeDefined()
+    expect(screen.queryByText('Scan with WhatsApp')).toBeNull()
+  })
+})
+
 // ─── Fleet-token path ────────────────────────────────────────────────────────
 describe('LinkStep — fleet-token path', () => {
   it('mints an sse ticket and threads it into the EventSource URL', async () => {
@@ -292,6 +343,24 @@ describe('LinkStep — connected event', () => {
     expect(registry).toHaveLength(0)
     expect(screen.getByText('Line is live!')).toBeDefined()
     fireEvent.click(screen.getByRole('button', { name: 'View Line' }))
+    expect(onComplete).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not claim an externally attested line is live when revisiting Link', () => {
+    const onComplete = vi.fn()
+    render(
+      <LinkStep
+        lineName="signal-line"
+        transport="signal"
+        onComplete={onComplete}
+        alreadyLinked
+      />,
+    )
+
+    expect(registry).toHaveLength(0)
+    expect(screen.getByText('Setup acknowledged')).toBeDefined()
+    expect(screen.queryByText('Line is live!')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
     expect(onComplete).toHaveBeenCalledTimes(1)
   })
 

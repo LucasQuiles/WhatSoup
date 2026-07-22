@@ -23,6 +23,12 @@ describe('echo-guard', () => {
     expect(canSendToGroup(jid, DEFAULT_CFG)).toBe(false);
   });
 
+  it('applies the group cooldown to iMessage group conversations', () => {
+    const jid = 'iMessage;+;chatABC@imessage';
+    recordGroupOutbound(jid);
+    expect(canSendToGroup(jid, DEFAULT_CFG)).toBe(false);
+  });
+
   it('allows send after cooldown expires', async () => {
     vi.useFakeTimers();
     const jid = '111111100000000001@g.us';

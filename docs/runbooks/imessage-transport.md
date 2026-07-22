@@ -39,11 +39,14 @@ signed-in Mac itself.
 1. A Mac signed into iMessage with [BlueBubbles Server](https://bluebubbles.app)
    installed and running.
 2. The REST API enabled; note the **server URL** and **password**.
-3. Store the password in the keyring under a service name of your choice
-   (e.g. `imessage-bb-pw`) — WhatSoup resolves it at startup via
-   `bluebubblesPasswordService` and never logs it.
-4. URL reachability from the WhatSoup host (`https://` recommended outside
-   localhost).
+3. Store the password under the exact line-bound keyring service
+   `whatsoup-bluebubbles-<line-name>` (for example,
+   `whatsoup-bluebubbles-ops-imessage`). WhatSoup resolves it at startup via
+   `bluebubblesPasswordService` and never logs it. Services for other providers
+   or WhatSoup lines are rejected before lookup.
+4. URL reachability from the WhatSoup host. HTTPS is required outside
+   loopback; plain HTTP is accepted only for `localhost`, `127.0.0.0/8`, or
+   `[::1]`.
 
 ### imsg daemon
 
@@ -62,19 +65,21 @@ Both backends use **config-only auth** (matches the Twilio precedent — no
 
 ## Instance config
 
-`instance.json` (validated by `agent-config-validator.ts`):
+The instance's `config.json` (validated by `agent-config-validator.ts`):
 
 ```json
 {
   "name": "ops-imessage",
-  "type": "agent",
+  "type": "passive",
   "transport": "imessage",
+  "accessMode": "self_only",
+  "adminPhones": ["owner@example.com"],
   "imessageConfig": {
     "account": "ops-imessage",
     "backend": "bluebubbles",
     "bluebubblesUrl": "https://bb.example.test",
-    "bluebubblesPasswordService": "imessage-bb-pw",
-    "sender": "<your-appleid-email>",
+    "bluebubblesPasswordService": "whatsoup-bluebubbles-ops-imessage",
+    "sender": "owner@example.com",
     "inboundMode": "poll",
     "pollIntervalMs": 15000,
     "rateLimit": { "messagesPerMinute": 30 }
@@ -87,10 +92,10 @@ Both backends use **config-only auth** (matches the Twilio precedent — no
 | `account` | yes | Channel account segment (a-z0-9-) |
 | `backend` | yes | `'imsg'` or `'bluebubbles'` |
 | `sender` | yes | Our own identity — AppleID email or E.164 |
-| `bluebubblesUrl` | backend=bluebubbles | http(s) URL of the Server |
-| `bluebubblesPasswordService` | backend=bluebubbles | Keyring service name for the Server password |
+| `bluebubblesUrl` | backend=bluebubbles | HTTPS URL of the Server, or HTTP on loopback only; userinfo, query strings, and fragments are rejected |
+| `bluebubblesPasswordService` | backend=bluebubbles | Exact line-bound keyring service `whatsoup-bluebubbles-<line-name>` |
 | `imsgSocketPath` | no (imsg only) | Default `/tmp/imsg.sock`, must be absolute |
-| `inboundMode` | no | `poll` (default) or `webhook` (**bluebubbles only**) |
+| `inboundMode` | no | `poll` (default and only implemented mode) |
 | `pollIntervalMs` | no | Default 15000 |
 | `rateLimit.messagesPerMinute` | no | Default 30; per-destination safety cap |
 
@@ -119,7 +124,7 @@ Both backends use **config-only auth** (matches the Twilio precedent — no
 | Remote delete | ❌ iMessage has no remote-delete protocol (documented parity gap) |
 | Media attachments | ❌ deferred (adapter declares `media.maxBytes: 0`) |
 | Polls | ❌ rejected (WhatsApp-only feature) |
-| `webhook` inbound mode | BlueBubbles only |
+| `webhook` inbound mode | ❌ rejected until an authenticated receiver is implemented |
 
 ## Health + recovery
 
@@ -140,7 +145,7 @@ Both backends use **config-only auth** (matches the Twilio precedent — no
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `imessageConfig is required when transport is "imessage"` | missing config block | add `imessageConfig` to instance.json |
+| `imessageConfig is required when transport is "imessage"` | missing config block | add `imessageConfig` to the instance's `config.json` |
 | `keyring has no credential for service …` | password not in keyring | store the BlueBubbles password under the configured service name |
 | `bluebubbles HTTP error: connect ECONNREFUSED` | Server down / wrong URL / firewall | verify BlueBubbles Server is running and the URL is reachable from this host |
 | `HTTP 401` on every call | wrong/expired Server password | update the keyring entry |
@@ -149,7 +154,6 @@ Both backends use **config-only auth** (matches the Twilio precedent — no
 
 ## References
 
-- Spec: `2026-07-20-signal-and-imessage-transports-spec.md` (internal spec, tracked outside this repository)
 - Port interface: `src/transport/imessage/port.ts`
 - Port impls: `src/transport/imessage/bluebubbles-port.ts`, `src/transport/imessage/imsg-port.ts`
 - Adapter: `src/transport/imessage/adapter.ts`

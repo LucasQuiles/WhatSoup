@@ -23,6 +23,9 @@ import type { ImessagePort } from './imessage/port.ts';
 import type { SignalConfig } from './signal/types.ts';
 import { TwilioWebhookServer } from './twilio/webhook-server.ts';
 import { lookupCredential } from '../lib/keyring.ts';
+import { isBluebubblesPasswordServiceForAccount, isTrustedBluebubblesUrl } from '../lib/bluebubbles-config.ts';
+import { canonicalizeImessageDirectIdentity } from '../core/transport-refs.ts';
+import { twilioAuthTokenServiceForAccount } from '../lib/twilio-config.ts';
 
 export type { RuntimeConnection };
 
@@ -32,6 +35,19 @@ interface FactoryConfig {
   twilioConfig?: TwilioSmsConfig;
   imessageConfig?: ImessageConfig;
   signalConfig?: SignalConfig;
+}
+
+function assertAccountMatchesLine(
+  transport: Exclude<TransportId, 'baileys'>,
+  account: string,
+  botName: string | undefined,
+): asserts botName is string {
+  if (botName === undefined || botName === '') {
+    throw new Error(`[createConnection] ${transport} requires immutable line identity (botName).`);
+  }
+  if (account !== botName) {
+    throw new Error(`[createConnection] ${transport} account must match the immutable line identity.`);
+  }
 }
 
 /**
@@ -62,6 +78,7 @@ export function createConnection(config: FactoryConfig): RuntimeConnection {
           'Instance config must include a valid twilioConfig block.',
         );
       }
+      assertAccountMatchesLine('twilio', config.twilioConfig.account, config.botName);
       // Validation rejects these upstream, but an unvalidated path (e.g. a
       // hand-injected INSTANCE_CONFIG) must still fail loud, not construct a
       // port with empty credentials.
@@ -70,18 +87,28 @@ export function createConnection(config: FactoryConfig): RuntimeConnection {
           '[createConnection] twilioConfig is missing accountSid or authTokenService.',
         );
       }
-      const port = new SdkTwilioSmsPort(config.twilioConfig);
-      const adapter = new TwilioSmsAdapter(config.twilioConfig, port);
+      const expectedAuthTokenService = twilioAuthTokenServiceForAccount(config.botName);
+      if (expectedAuthTokenService === null) {
+        throw new Error('[createConnection] twilio requires a valid immutable line identity.');
+      }
+      if (config.twilioConfig.authTokenService !== expectedAuthTokenService) {
+        throw new Error(
+          `[createConnection] twilioConfig.authTokenService must be ${expectedAuthTokenService}.`,
+        );
+      }
+      const twilioConfig = { ...config.twilioConfig };
+      const port = new SdkTwilioSmsPort(twilioConfig);
+      const adapter = new TwilioSmsAdapter(twilioConfig, port);
 
       let webhookServer: TwilioWebhookServer | undefined;
-      if (config.twilioConfig.inboundMode === 'webhook' && config.twilioConfig.webhook !== undefined) {
-        const { webhook } = config.twilioConfig;
+      if (twilioConfig.inboundMode === 'webhook' && twilioConfig.webhook !== undefined) {
+        const { webhook } = twilioConfig;
         webhookServer = new TwilioWebhookServer({
-          getAuthToken: () => lookupCredential(config.twilioConfig!.authTokenService),
+          getAuthToken: () => lookupCredential(expectedAuthTokenService),
           publicBaseUrl: webhook.publicBaseUrl,
           listenPort: webhook.listenPort,
           listenAddress: webhook.listenAddress,
-          voice: config.twilioConfig.voice ?? { enabled: false, voicemailMaxLengthSec: 120 },
+          voice: twilioConfig.voice ?? { enabled: false, voicemailMaxLengthSec: 120 },
           onSms: (r) => adapter.handleInboundRecord(r),
           onTranscript: (t) => adapter.handleTranscript(t),
         });
@@ -97,12 +124,13 @@ export function createConnection(config: FactoryConfig): RuntimeConnection {
           'Instance config must include a valid signalConfig block.',
         );
       }
+      assertAccountMatchesLine('signal', config.signalConfig.account, config.botName);
       if (config.signalConfig.phoneNumber === '') {
         throw new Error('[createConnection] signalConfig is missing phoneNumber.');
       }
       const port = new SignalCliPort(config.signalConfig);
       const adapter = new SignalAdapter(config.signalConfig, port);
-      return new SignalConnection(adapter, port, config.botName ?? config.signalConfig.account);
+      return new SignalConnection(adapter, port, config.botName);
     }
 
     case 'imessage': {
@@ -112,6 +140,7 @@ export function createConnection(config: FactoryConfig): RuntimeConnection {
           'Instance config must include a valid imessageConfig block.',
         );
       }
+      assertAccountMatchesLine('imessage', config.imessageConfig.account, config.botName);
       // Validation rejects these upstream, but an unvalidated path (e.g. a
       // hand-injected INSTANCE_CONFIG) must still fail loud.
       if (config.imessageConfig.sender === '') {
@@ -119,14 +148,28 @@ export function createConnection(config: FactoryConfig): RuntimeConnection {
           '[createConnection] imessageConfig is missing sender.',
         );
       }
+      if (canonicalizeImessageDirectIdentity(config.imessageConfig.sender) !== config.imessageConfig.sender) {
+        throw new Error(
+          '[createConnection] imessageConfig.sender must be a lowercase AppleID email or E.164 phone number.',
+        );
+      }
 
       let port: ImessagePort;
       if (config.imessageConfig.backend === 'bluebubbles') {
+        if (config.imessageConfig.imsgSocketPath !== undefined) {
+          throw new Error('[createConnection] imessageConfig.imsgSocketPath is only valid with the imsg backend.');
+        }
         const pwService = config.imessageConfig.bluebubblesPasswordService;
         if (pwService === undefined || pwService === '') {
           throw new Error(
             '[createConnection] imessageConfig.backend is "bluebubbles" but bluebubblesPasswordService is missing.',
           );
+        }
+        if (!isBluebubblesPasswordServiceForAccount(pwService, config.botName)) {
+          throw new Error('[createConnection] BlueBubbles credential service is not bound to this line.');
+        }
+        if (!isTrustedBluebubblesUrl(config.imessageConfig.bluebubblesUrl ?? '')) {
+          throw new Error('[createConnection] BlueBubbles endpoint is untrusted; use HTTPS or a loopback HTTP URL.');
         }
         // Resolve the credential here (composition root side), never in the
         // port — mirrors the Twilio arm's keyring-at-factory pattern. A
@@ -140,8 +183,17 @@ export function createConnection(config: FactoryConfig): RuntimeConnection {
           );
         }
         port = new BlueBubblesPort({ ...config.imessageConfig, bluebubblesPassword });
-      } else {
+      } else if (config.imessageConfig.backend === 'imsg') {
+        if (
+          config.imessageConfig.bluebubblesUrl !== undefined
+          || config.imessageConfig.bluebubblesPasswordService !== undefined
+          || config.imessageConfig.bluebubblesPassword !== undefined
+        ) {
+          throw new Error('[createConnection] BlueBubbles fields are only valid with the bluebubbles backend.');
+        }
         port = new ImsgPort(config.imessageConfig);
+      } else {
+        throw new Error('[createConnection] imessageConfig.backend must be "imsg" or "bluebubbles".');
       }
 
       const adapter = new ImessageAdapter(config.imessageConfig, port);

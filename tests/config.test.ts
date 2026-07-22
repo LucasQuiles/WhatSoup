@@ -30,6 +30,7 @@ beforeEach(() => {
     WHATSOUP_DATA_DIR: process.env.WHATSOUP_DATA_DIR,
     WHATSOUP_STATE_DIR: process.env.WHATSOUP_STATE_DIR,
     WHATSOUP_GUI_PORT: process.env.WHATSOUP_GUI_PORT,
+    WHATSOUP_OUTBOUND_IDENTITY_MODE: process.env.WHATSOUP_OUTBOUND_IDENTITY_MODE,
     TMPDIR: process.env.TMPDIR,
     // P3.6 D-2: new env var that overrides apiTimeoutMs.
     WHATSOUP_API_TIMEOUT_MS: process.env.WHATSOUP_API_TIMEOUT_MS,
@@ -61,6 +62,7 @@ beforeEach(() => {
   delete process.env.MAX_AGE_DAYS;
   delete process.env.LOG_LEVEL;
   delete process.env.WHATSOUP_GUI_PORT;
+  delete process.env.WHATSOUP_OUTBOUND_IDENTITY_MODE;
   delete process.env.TMPDIR;
   // D-2: keep existing "apiTimeoutMs defaults to 30_000" tests deterministic
   // regardless of what the parent env has set for WHATSOUP_API_TIMEOUT_MS.
@@ -100,6 +102,26 @@ function makeInstanceConfig(overrides: Record<string, unknown> = {}): Record<str
     ...overrides,
   };
 }
+
+describe('config — outbound identity mode', () => {
+  it('defaults to enforce when the environment variable is absent', async () => {
+    const { config } = await import('../src/config.ts');
+    expect(config.outboundIdentityMode).toBe('enforce');
+  });
+
+  it('preserves explicit log-only as the compatibility rollback', async () => {
+    process.env.WHATSOUP_OUTBOUND_IDENTITY_MODE = 'log-only';
+    const { config } = await import('../src/config.ts');
+    expect(config.outboundIdentityMode).toBe('log-only');
+  });
+
+  it('rejects an invalid mode instead of silently disabling enforcement', async () => {
+    process.env.WHATSOUP_OUTBOUND_IDENTITY_MODE = 'warn';
+    await expect(import('../src/config.ts')).rejects.toThrow(
+      /WHATSOUP_OUTBOUND_IDENTITY_MODE must be "enforce" or "log-only"/,
+    );
+  });
+});
 
 describe('config — INSTANCE_CONFIG validation', () => {
   it('rejects invalid INSTANCE_CONFIG JSON with parse context', async () => {
@@ -1936,7 +1958,7 @@ describe('config — transport + twilioConfig', () => {
       twilioConfig: {
         account: 'ml-bot',
         accountSid: 'ACabc123',
-        authTokenService: 'twilio-token',
+        authTokenService: 'whatsoup-twilio-ml-bot',
         phoneNumber: '+15551230001',
       },
     }));
@@ -2330,7 +2352,7 @@ describe('config — resolveTwilioSmsConfig webhook publicBaseUrl default', () =
     const result = resolveTwilioSmsConfig({
       account: 'ml-bot',
       accountSid: 'AC00000000000000000000000000000000',
-      authTokenService: 'twilio-ml-bot',
+      authTokenService: 'whatsoup-twilio-ml-bot',
       phoneNumber: '+15550000002',
       inboundMode: 'webhook',
       webhook: { listenPort: 8443 },

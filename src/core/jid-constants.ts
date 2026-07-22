@@ -5,7 +5,13 @@
 // Every JID parsing/normalization operation should live here or delegate here.
 // Do NOT reimplement .split('@')[0] or .endsWith('@lid') inline — use these.
 
-import { isSignalGroupAddress } from './transport-refs.ts';
+import {
+  canonicalizeImessageDirectIdentity,
+  isImessageGroupAddress,
+  isSignalGroupAddress,
+  SIGNAL_UUID_RE,
+} from './transport-refs.ts';
+import { isE164Wire, normalizePhoneE164Wire } from '../lib/phone.ts';
 
 // ── Domain constants ────────────────────────────────────────────────────────
 
@@ -105,7 +111,27 @@ export function fromSignalJid(jid: string): string {
  * or chat GUID). Idempotent: already-suffixed addresses are returned as-is.
  */
 export function toImessageJid(address: string): string {
-  return address.endsWith(JID_IMESSAGE) ? address : `${address}${JID_IMESSAGE}`;
+  const bare = address.endsWith(JID_IMESSAGE)
+    ? address.slice(0, -JID_IMESSAGE.length)
+    : address;
+  const canonical = canonicalizeImessageDirectIdentity(bare) ?? bare;
+  return `${canonical}${JID_IMESSAGE}`;
+}
+
+export type DirectJidTransport = 'baileys' | 'twilio' | 'signal' | 'imessage';
+
+/** Route a configured direct identity through its transport namespace. */
+export function toTransportDirectJid(identity: string, transport: DirectJidTransport): string {
+  if (transport === 'signal') return toSignalJid(identity);
+  if (transport === 'imessage') return toImessageJid(identity);
+  if (transport === 'twilio') {
+    const normalized = normalizePhoneE164Wire(identity);
+    if (!normalized) {
+      throw new Error('Twilio notification identity must be an E.164 phone number');
+    }
+    return toSmsJid(normalized);
+  }
+  return toPersonalJid(identity);
 }
 
 /**
@@ -113,7 +139,8 @@ export function toImessageJid(address: string): string {
  * Tolerates an already-bare address.
  */
 export function fromImessageJid(jid: string): string {
-  return jid.endsWith(JID_IMESSAGE) ? jid.slice(0, -JID_IMESSAGE.length) : jid;
+  const bare = jid.endsWith(JID_IMESSAGE) ? jid.slice(0, -JID_IMESSAGE.length) : jid;
+  return canonicalizeImessageDirectIdentity(bare) ?? bare;
 }
 
 // ── JID type detection ──────────────────────────────────────────────────────
@@ -131,7 +158,8 @@ export function isPnJid(jid: string | null | undefined): boolean {
 /** Check if a raw JID (not a conversation key) is a group JID. */
 export function isGroupJid(jid: string): boolean {
   return jid.endsWith(JID_GROUP)
-    || (jid.endsWith(JID_SIGNAL) && isSignalGroupAddress(fromSignalJid(jid)));
+    || (jid.endsWith(JID_SIGNAL) && isSignalGroupAddress(fromSignalJid(jid)))
+    || (jid.endsWith(JID_IMESSAGE) && isImessageGroupAddress(fromImessageJid(jid)));
 }
 
 /** Check if a JID is a Signal transport JID (@signal). */
@@ -149,29 +177,86 @@ export function isSmsJid(jid: string | null | undefined): boolean {
   return !!jid && jid.endsWith(JID_SMS);
 }
 
+/** True when a raw JID already carries one of the supported transport suffixes. */
+export function hasKnownTransportJidSuffix(jid: string): boolean {
+  return isPnJid(jid)
+    || isLidJid(jid)
+    || jid.endsWith(JID_GROUP)
+    || isSmsJid(jid)
+    || isSignalJid(jid)
+    || isImessageJid(jid);
+}
+
+const WHATSAPP_PHONE_SENDER_RE = /^\d{7,15}(?::\d+)?$/;
+const WHATSAPP_LID_SENDER_RE = /^\d{1,20}(?::\d+)?$/;
+
+function senderLocal(jid: string | null | undefined, suffix: string): string | null {
+  if (!jid || !jid.endsWith(suffix)) return null;
+  const local = jid.slice(0, -suffix.length);
+  return local.length > 0 ? local : null;
+}
+
 /**
- * True only for WhatsApp-authenticated transports — personal (@s.whatsapp.net)
- * and linked-device (@lid) — whose sender identity WhatsApp verifies via E2E
- * device pairing.
+ * Bind a canonical direct-sender JID to an instance transport. Unlike the
+ * authentication predicate below, this includes Twilio's canonical @sms
+ * namespace so ordinary allowlist/open-mode policy remains usable there.
+ */
+export function isSenderJidForTransport(
+  jid: string | null | undefined,
+  transport: string | null | undefined,
+): boolean {
+  if (transport === 'baileys' || transport == null) {
+    const pn = senderLocal(jid, JID_PERSONAL);
+    if (pn !== null) return WHATSAPP_PHONE_SENDER_RE.test(pn);
+    const lid = senderLocal(jid, JID_LID);
+    return lid !== null && WHATSAPP_LID_SENDER_RE.test(lid);
+  }
+  if (transport === 'twilio') {
+    const sms = senderLocal(jid, JID_SMS);
+    return sms !== null && isE164Wire(sms);
+  }
+  if (transport === 'signal') {
+    const signal = senderLocal(jid, JID_SIGNAL);
+    return signal !== null && (isE164Wire(signal) || SIGNAL_UUID_RE.test(signal));
+  }
+  if (transport === 'imessage') {
+    const imessage = senderLocal(jid, JID_IMESSAGE);
+    return imessage !== null && canonicalizeImessageDirectIdentity(imessage) === imessage;
+  }
+  return false;
+}
+
+/**
+ * True for a sender namespace whose provider can authenticate identity:
+ * WhatsApp personal/linked-device JIDs, Signal, and iMessage.
  *
  * NON-authenticated transports (e.g. @sms via Twilio) are deliberately excluded:
  * the Twilio webhook signature only authenticates the request is *from Twilio*,
  * NOT that the SMS `From` is the claimed sender — SMS sender-ID is spoofable.
- * Because `resolvePhoneFromJid` collapses `<num>@sms` to the same bare phone as
- * WhatsApp `<num>`, admin/allow GRANT decisions MUST gate on this predicate
- * before matching the phone, so a spoofed SMS cannot inherit a WhatsApp
- * identity's privileges (QR-143). Deny-side (block) checks intentionally do NOT
- * use this — a blocked number must stay blocked across every transport.
+ * This broad classification does not bind a JID to an instance. Admin/allow
+ * GRANT decisions MUST use `isAuthenticatedSenderForTransport` so an identity
+ * authenticated by one provider cannot inherit another provider's privileges
+ * (QR-143). Deny-side checks intentionally stay transport-agnostic.
  */
 export function isAuthenticatedSenderJid(jid: string | null | undefined): boolean {
-  return isPnJid(jid) || isLidJid(jid) || isSignalJid(jid) || isImessageJid(jid);
+  return isSenderJidForTransport(jid, 'baileys')
+    || isSenderJidForTransport(jid, 'signal')
+    || isSenderJidForTransport(jid, 'imessage');
+}
+
+/** Bind an authenticated sender namespace to the instance's configured transport. */
+export function isAuthenticatedSenderForTransport(
+  jid: string | null | undefined,
+  transport: string | null | undefined,
+): boolean {
+  if (transport === 'twilio') return false;
+  return isSenderJidForTransport(jid, transport);
 }
 
 /**
- * Back-compat alias for the old WhatsApp-only name. New code should call
- * isAuthenticatedSenderJid — Signal Protocol and AppleID-verified iMessage
- * senders are authenticated at the protocol level, same trust tier as
- * WhatsApp PN/LID senders.
+ * Back-compat alias for the old WhatsApp-only name. Do not use this broad alias
+ * for grants; bind the sender to the configured transport with
+ * `isAuthenticatedSenderForTransport`.
  */
 export const isWhatsAppAuthenticatedJid = isAuthenticatedSenderJid;
 

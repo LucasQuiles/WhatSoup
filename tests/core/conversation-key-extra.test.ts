@@ -34,6 +34,11 @@ describe('isGroupConversationKey', () => {
     expect(isGroupConversationKey('120363555555550001@g.us')).toBe(true);
   });
 
+  it('returns true for normalized Signal and iMessage group keys', () => {
+    expect(isGroupConversationKey('Z3JvdXAtY29udmVyc2F0aW9u_at_signal')).toBe(true);
+    expect(isGroupConversationKey('iMessage;+;chatABC_at_imessage')).toBe(true);
+  });
+
   it('returns false for a personal conversation key (bare phone number)', () => {
     expect(isGroupConversationKey('15550100001')).toBe(false);
   });
@@ -63,9 +68,8 @@ describe('conversationKeyToJid', () => {
     expect(conversationKeyToJid('15550100001')).toBe('15550100001');
   });
 
-  it('is a no-op for unknown-domain keys', () => {
-    // Keys like unknown_at_broadcast do NOT contain _at_g.us — returned as-is
-    expect(conversationKeyToJid('unknown_at_broadcast')).toBe('unknown_at_broadcast');
+  it('restores unknown-domain keys through the transport-neutral encoding', () => {
+    expect(conversationKeyToJid('unknown_at_broadcast')).toBe('unknown@broadcast');
   });
 
   it('is idempotent when called on a key that already has @g.us', () => {

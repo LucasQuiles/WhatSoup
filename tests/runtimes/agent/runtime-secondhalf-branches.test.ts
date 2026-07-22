@@ -439,6 +439,47 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       expect(mockSession.sendTurn).not.toHaveBeenCalled();
     });
 
+    it.each([
+      ['Signal', 'Z3JvdXAtY29udmVyc2F0aW9u@signal'],
+      ['iMessage', 'iMessage;+;chatABC@imessage'],
+    ])('marks a synthetic %s group job as a group turn', (_transport, reportChatJid) => {
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, makeMessenger().messenger);
+      const handleMessage = vi.spyOn(runtime, 'handleMessage').mockResolvedValue();
+      const mutableConfig = mockConfig as typeof mockConfig & { memory?: { adminJid: string } };
+      mutableConfig.memory = { adminJid: '15550100001@s.whatsapp.net' };
+
+      try {
+        expect(runtime.dispatchAgentJob({
+          beadId: 1,
+          triggerId: 2,
+          prompt: 'do work',
+          title: 'scheduled work',
+          reportChatJid,
+        })).toMatchObject({ dispatched: true });
+        expect(handleMessage).toHaveBeenCalledWith(expect.objectContaining({ isGroup: true }));
+      } finally {
+        delete mutableConfig.memory;
+      }
+    });
+
+    it('cleans route state for an encoded AppleID key containing @ without double-encoding it', () => {
+      const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger);
+      const state = runtime as unknown as {
+        cleanupPerChatState: (key: string) => void;
+        lastSpawnRouteProvider: Map<string, string>;
+        lastPinBlockNotice: Map<string, string>;
+      };
+      const key = 'owner_at_example.test@imessage';
+      state.lastSpawnRouteProvider.set(key, 'codex-cli');
+      state.lastPinBlockNotice.set(key, 'claude-cli');
+
+      state.cleanupPerChatState(key);
+
+      expect(state.lastSpawnRouteProvider.has(key)).toBe(false);
+      expect(state.lastPinBlockNotice.has(key)).toBe(false);
+    });
+
     it('rejects a control turn before constructing a repair session', async () => {
       const db = makeDb();
       const rejection = new Error('database compatibility drain');

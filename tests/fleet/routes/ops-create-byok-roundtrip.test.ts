@@ -134,4 +134,52 @@ describe('handleCreateLine — BYOK providerConfig/fallbacks round-trip', () => 
     expect(persisted.agentOptions.fallbacks).toEqual(fallbacks);
     expect(persisted.agentOptions.provider).toBe('claude-cli');
   });
+
+  it.each([
+    [
+      'unknown headers',
+      'hostile-headers',
+      { model: 'gpt-test', headers: { Authorization: 'create-provider-header-sentinel' } },
+      'create-provider-header-sentinel',
+      'headers',
+    ],
+    [
+      'URL credentials',
+      'hostile-url',
+      {
+        baseUrl: 'https://create-user:create-password@provider.example.test/v1',
+        apiKeyService: 'openai',
+        model: 'gpt-test',
+      },
+      'create-password',
+      'credentials',
+    ],
+  ])('rejects providerConfig %s before creating disk or service state', async (_label, name, providerConfig, sentinel, errorFragment) => {
+    const deps = successDeps();
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name,
+        type: 'agent',
+        adminPhones: ['15551234567'],
+        agentOptions: {
+          cwd: agentCwd,
+          sessionScope: 'single',
+          provider: 'openai-api',
+          providerConfig,
+        },
+      })),
+      res,
+      deps,
+    );
+
+    expect(res._status).toBe(400);
+    expect(res._body).toContain(errorFragment);
+    expect(res._body).not.toContain(sentinel);
+    expect(fs.existsSync(path.join(
+      process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', name,
+    ))).toBe(false);
+    expect(deps.serviceManager.enable).not.toHaveBeenCalled();
+    expect(deps.serviceManager.start).not.toHaveBeenCalled();
+  });
 });

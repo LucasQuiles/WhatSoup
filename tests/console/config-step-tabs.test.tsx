@@ -90,21 +90,15 @@ describe('ConfigStep — access and behavior tabs', () => {
     expect(screen.getByText('Access Mode')).toBeDefined()
   })
 
-  it('writes access mode changes and normalizes allowlist contacts to digits only', () => {
-    const { onChange } = renderConfigStep({ initialData: { accessMode: 'self_only', allowedContacts: [] } })
+  it('writes access mode changes without presenting an unwritten pre-approval control', () => {
+    const { onChange } = renderConfigStep({ initialData: { accessMode: 'self_only' } })
 
     // Access-mode options are a WAI radiogroup (CardSelector, DD-14) — each option
     // is role="radio" with its accessible name composed from label + description.
     fireEvent.click(screen.getByRole('radio', { name: /Allowlist Approved contacts only/i }))
     expect(onChange).toHaveBeenLastCalledWith({ accessMode: 'allowlist' })
-
-    onChange.mockClear()
-    const phoneInput = screen.getByPlaceholderText('Add phone number (press Enter to add)')
-    fireEvent.change(phoneInput, { target: { value: '555-123-4567' } })
-    fireEvent.keyDown(phoneInput, { key: 'Enter' })
-
-    expect(onChange).toHaveBeenCalledTimes(1)
-    expect(onChange).toHaveBeenLastCalledWith({ allowedContacts: ['5551234567'] })
+    expect(screen.queryByLabelText('Pre-approved contacts')).toBeNull()
+    expect(screen.queryByText(/automatically approved when they first message/i)).toBeNull()
 
     onChange.mockClear()
     fireEvent.click(screen.getByRole('radio', { name: /Open DMs Anyone can send direct messages/i }))
@@ -115,6 +109,55 @@ describe('ConfigStep — access and behavior tabs', () => {
     fireEvent.click(screen.getByRole('radio', { name: /Groups Only Only responds in group chats/i }))
     expect(onChange).toHaveBeenLastCalledWith({ accessMode: 'groups_only' })
     expect(screen.getByText(/Direct messages are ignored/)).toBeDefined()
+  })
+
+  it('offers only functional access modes for an interactive Twilio SMS line', () => {
+    renderConfigStep({
+      initialData: {
+        transport: 'twilio',
+        type: 'chat',
+        accessMode: 'self_only',
+      },
+    })
+
+    expect(screen.getByText(/Twilio SMS cannot authenticate sender identity/)).toBeDefined()
+    expect(screen.getByText(/Admin Only and Groups Only are unavailable/)).toBeDefined()
+    expect(screen.getByRole('radio', { name: /Allowlist Approved contacts only/i })).toBeDefined()
+    expect(screen.getByRole('radio', { name: /Open DMs Anyone can send direct messages/i })).toBeDefined()
+    expect(screen.queryByRole('radio', { name: /Admin Only/i })).toBeNull()
+    expect(screen.queryByRole('radio', { name: /Groups Only/i })).toBeNull()
+    expect(screen.queryByLabelText('Pre-approved contacts')).toBeNull()
+    expect(screen.getByText(/New SMS contacts remain pending until an operator approves or blocks them in the console/)).toBeDefined()
+  })
+
+  it.each([
+    ['baileys', 'WhatsApp'],
+    ['twilio', 'SMS'],
+    ['signal', 'Signal'],
+    ['imessage', 'iMessage'],
+  ] as const)('prefills %s agent instructions for the actual %s transport', (transport, channel) => {
+    const { onChange } = renderConfigStep({
+      initialData: {
+        transport,
+        type: 'agent',
+        name: `${transport}-agent`,
+        systemPrompt: '',
+        claudeMd: '',
+      },
+    })
+
+    const prefill = onChange.mock.calls.find(([patch]) => (
+      Object.prototype.hasOwnProperty.call(patch, 'systemPrompt')
+      && Object.prototype.hasOwnProperty.call(patch, 'claudeMd')
+    ))?.[0] as Record<string, unknown> | undefined
+    expect(prefill?.systemPrompt).toContain(`on ${channel}`)
+    expect(prefill?.systemPrompt).toContain(`${channel} messages`)
+    expect(prefill?.claudeMd).toContain(`${channel} Agent`)
+    expect(prefill?.claudeMd).toContain(`running on ${channel} via WhatSoup`)
+    if (transport !== 'baileys') {
+      expect(prefill?.systemPrompt).not.toContain('WhatsApp')
+      expect(prefill?.claudeMd).not.toContain('WhatsApp')
+    }
   })
 
   it('updates behavior text fields and hides system prompts for passive lines', () => {

@@ -99,6 +99,7 @@ export default function Inbox() {
   )
 
   const currentLine = lines?.find(l => l.name === activeLine)
+  const activeTransport = currentLine?.transport ?? currentLine?.health?.transport?.kind
   const currentChat = resolveCurrentChat(chats, selectedChat, messages)
   const isSearchMode = searchInput.trim().length > 0
   const isDebouncingSearch = isSearchMode && searchInput.trim() !== debouncedSearch
@@ -197,7 +198,7 @@ export default function Inbox() {
   }
 
   const handleSaveContact = async (name: string) => {
-    if (!saveContactChat || !name) return
+    if (!saveContactChat || !name || (activeTransport ?? 'baileys') !== 'baileys') return
     setActionBusy(true)
     const parts = name.split(/\s+/)
     const firstName = parts[0]
@@ -369,7 +370,7 @@ export default function Inbox() {
                         className="absolute left-0 top-0 w-full flex flex-col"
                         style={{ transform: `translateY(${row.start}px)` }}
                       >
-                        <MessageBubble msg={row.message} highlightQuery={debouncedSearch} />
+                        <MessageBubble msg={row.message} highlightQuery={debouncedSearch} transport={activeTransport} />
                       </div>
                     ))}
                   </div>
@@ -421,7 +422,7 @@ export default function Inbox() {
                         className="absolute left-0 top-0 w-full flex flex-col"
                         style={{ transform: `translateY(${row.start}px)` }}
                       >
-                        <MessageBubble msg={row.message} animate={animatedPks.has(row.message.pk)} />
+                        <MessageBubble msg={row.message} animate={animatedPks.has(row.message.pk)} transport={activeTransport} />
                       </div>
                     ))}
                   </div>
@@ -582,7 +583,7 @@ export default function Inbox() {
                     onClick={async () => {
                       setActionBusy(true)
                       try {
-                        const subjectType = currentChat.isGroup ? 'group' : 'number'
+                        const subjectType = currentChat.isGroup ? 'group' : 'phone'
                         await api.accessDecision(activeLine, subjectType, currentChat.conversationKey, 'allow')
                         toast.success(`Allowed ${resolveDisplayName(currentChat.name)}`)
                       } catch (err) {
@@ -602,7 +603,7 @@ export default function Inbox() {
                     onClick={async () => {
                       setActionBusy(true)
                       try {
-                        const subjectType = currentChat.isGroup ? 'group' : 'number'
+                        const subjectType = currentChat.isGroup ? 'group' : 'phone'
                         await api.accessDecision(activeLine, subjectType, currentChat.conversationKey, 'block')
                         toast.info(`Blocked ${resolveDisplayName(currentChat.name)}`)
                       } catch (err) {
@@ -614,7 +615,7 @@ export default function Inbox() {
                   >
                     Block Contact
                   </Button>
-                  {!currentChat.isGroup && (
+                  {!currentChat.isGroup && (activeTransport ?? 'baileys') === 'baileys' && (
                     <Button
                       variant="neutral"
                       className="w-full justify-center border-[var(--border-subtle)] text-text-2"

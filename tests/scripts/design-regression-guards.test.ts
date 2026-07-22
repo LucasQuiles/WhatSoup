@@ -224,7 +224,7 @@ describe('design-regression.sh guard contracts', () => {
     expect(result.status).toBe(0);
 
     const check15 = checkBlock(output, 15);
-    expect(check15).toContain('Registered waivers: 10');
+    expect(check15).toContain('Registered waivers: 9');
     expect(check15).toContain('Untagged disable directives: 0');
     expect(check15).toContain('Unknown source waiver ids: 0');
     expect(check15).toContain('Stale registry TS/TSX scopes: 0');

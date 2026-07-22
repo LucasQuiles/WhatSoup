@@ -171,7 +171,7 @@ disagree (`| rule | count |` rows below are machine-checked):
 | rule | violations (baseline) | enforcement |
 |------|-----------------------|-------------|
 | `arch.ssot-lid-reads` | 6 | `scripts/ssot-pattern-guard.ts` |
-| `arch.ssot-jid-construction` | 7 | `scripts/ssot-pattern-guard.ts` |
+| `arch.ssot-jid-construction` | 6 | `scripts/ssot-pattern-guard.ts` |
 | `arch.ssot-name-ladder` | 5 | `scripts/ssot-pattern-guard.ts` |
 | `arch.ssot-phone-shape` | 9 | `scripts/ssot-pattern-guard.ts` |
 | `arch.ssot-presentation-literals` | 0 | `scripts/ssot-pattern-guard.ts` (pure block) |

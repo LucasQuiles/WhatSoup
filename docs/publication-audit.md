@@ -8,8 +8,8 @@ Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`,
 
 | Classification | Count |
 |---|---:|
-| PUBLIC | 1 |
-| PRIVATE-ARCHIVE | 122 |
+| PUBLIC | 2 |
+| PRIVATE-ARCHIVE | 121 |
 | SANITIZE | 0 |
 | DELETE | 0 |
 | Total | 123 |
@@ -28,7 +28,7 @@ Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`,
 | `docs/runbooks/error-response-workflows.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/fleet-bot-hardening-standard.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/host-maintenance.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
-| `docs/runbooks/imessage-transport.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
+| `docs/runbooks/imessage-transport.md` | PUBLIC | Sanitized operator documentation for the public iMessage transport surface; contains no private topology, credentials, or internal planning references. |
 | `docs/runbooks/knowledge-profiles.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/macos-host-setup.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/macos-launchd-deployment.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |

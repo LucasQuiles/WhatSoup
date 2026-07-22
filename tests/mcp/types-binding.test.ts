@@ -80,6 +80,33 @@ describe('resolveConversationKey — existing behavior preserved', () => {
     expect(resolveConversationKey({ tier: 'global' }, OTHER_KEY)).toBe(OTHER_KEY);
   });
 
+  it('keeps canonical AppleID keys stable while accepting their raw iMessage JID', () => {
+    const key = 'owner_at_example.test@imessage';
+    const jid = 'owner@example.test@imessage';
+
+    expect(resolveConversationKey({ tier: 'global' }, key)).toBe(key);
+    expect(resolveConversationKey({ tier: 'global' }, jid)).toBe(key);
+    expect(resolveConversationKey({ tier: 'global' }, 'owner@example.test_at_imessage')).toBe(key);
+  });
+
+  it('treats deployed, alternate, and raw AppleID references as the same bound conversation', () => {
+    const key = 'owner_at_example.test@imessage';
+    const deliveryJid = 'owner@example.test@imessage';
+    const session = bound({
+      conversationKey: key,
+      deliveryJid,
+      binding: Object.freeze({
+        kind: 'conversation-bound',
+        conversationKey: key,
+        deliveryJid,
+      }),
+    });
+
+    expect(resolveConversationKey(session, key)).toBe(key);
+    expect(resolveConversationKey(session, 'owner@example.test@imessage')).toBe(key);
+    expect(resolveConversationKey(session, 'owner@example.test_at_imessage')).toBe(key);
+  });
+
   it('a turn-pinned global session (conversationKey set, NO binding) still resolves the caller key', () => {
     const operatorMidTurn: SessionContext = { tier: 'global', conversationKey: BOUND_KEY };
     expect(resolveConversationKey(operatorMidTurn, OTHER_JID)).toBe(OTHER_KEY);

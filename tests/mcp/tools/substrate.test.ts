@@ -29,9 +29,9 @@ const SENSITIVE_TOOLS = [
 ];
 const READ_TOOLS = ['list_beads', 'get_activity', 'get_bead', 'list_triggers', 'get_profile', 'list_entities'];
 
-const adminPhone = 'admin-user';
+const adminPhone = '15550100001';
 const adminActor = `${adminPhone}@s.whatsapp.net`;
-const guestActor = 'guest-user@s.whatsapp.net';
+const guestActor = '15550100002@s.whatsapp.net';
 
 const adminSession: SessionContext = { tier: 'global', actorJid: adminActor };
 const guestSession: SessionContext = { tier: 'global', actorJid: guestActor };
@@ -50,12 +50,14 @@ function registerDefaultTools(
     dbWrapper?: Database;
     observationConfidenceMin?: number;
     enableUrlWatch?: boolean;
+    transport?: string;
   } = {},
 ) {
   registerSubstrateTools(registry, {
     db: db.raw,
     dbWrapper: overrides.dbWrapper ?? db,
     adminPhones: new Set<string>([adminPhone]),
+    transport: overrides.transport ?? 'baileys',
     enableUrlWatch: overrides.enableUrlWatch ?? false,
     memory: {
       adminJid: adminPhone,
@@ -109,7 +111,7 @@ describe('substrate MCP tools', () => {
     // (wrapped by registry.call), distinct from the central gate's uniform
     // 'Unknown tool' reply — proves the retained layer, not just any error.
     expect(res.content[0].text).toBe(
-      'Tool "capture_task" failed: admin-only tool: caller phone "guest-user" is not on the instance admin list',
+      'Tool "capture_task" failed: admin-only tool: caller phone "15550100002" is not on the instance admin list',
     );
   });
 
@@ -137,6 +139,16 @@ describe('substrate MCP tools', () => {
     expect(res.content[0].text).toBe('Unknown tool: capture_task');
   });
 
+  it('rejects an admin-shaped actor from a different configured transport namespace', async () => {
+    const strictRegistry = new ToolRegistry();
+    registerDefaultTools(strictRegistry, db, vaultPath, { transport: 'imessage' });
+
+    const res = await strictRegistry.call('capture_task', { title: 'x' }, adminSession);
+
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toBe('Unknown tool: capture_task');
+  });
+
   it('regenerate_vault is admin gated without existence disclosure (R1)', async () => {
     const res = await registry.call('regenerate_vault', {}, guestSession);
     expect(res.isError).toBe(true);
@@ -160,8 +172,8 @@ describe('substrate MCP tools', () => {
     // the full personal JID.  resolveLid strips the @domain before querying.
     db.raw.prepare(
       `INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)`
-    ).run('admin-lid', `${adminPhone}@s.whatsapp.net`);
-    const lidSession: SessionContext = { tier: 'global', actorJid: 'admin-lid@lid' };
+    ).run('1111111234567', `${adminPhone}@s.whatsapp.net`);
+    const lidSession: SessionContext = { tier: 'global', actorJid: '1111111234567@lid' };
     const res = parseResult(await registry.call('capture_task', { title: 'via @lid' }, lidSession));
     expect(res.bead_id).toBeGreaterThan(0);
   });
@@ -171,7 +183,7 @@ describe('substrate MCP tools', () => {
     // the LID number as fallback, which is NOT on the admin list → reject.
     // R1: the central gate denies BEFORE the handler, without existence
     // disclosure — still fail-closed, earlier.
-    const lidSession: SessionContext = { tier: 'global', actorJid: 'missing-lid@lid' };
+    const lidSession: SessionContext = { tier: 'global', actorJid: '1111111234568@lid' };
     const res = await registry.call('capture_task', { title: 'x' }, lidSession);
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toBe('Unknown tool: capture_task');
@@ -191,7 +203,7 @@ describe('substrate MCP tools', () => {
     const res = await gatedRegistry.call(
       'capture_task',
       { title: 'blocked by resolver failure' },
-      { tier: 'global', actorJid: 'admin-lid@lid' },
+      { tier: 'global', actorJid: '1111111234567@lid' },
     );
 
     expect(res.isError).toBe(true);

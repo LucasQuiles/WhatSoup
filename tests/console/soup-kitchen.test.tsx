@@ -1532,6 +1532,29 @@ describe('SoupKitchen structural composition', () => {
     expect(screen.getByText(/feed-event-two/)).toBeDefined();
   });
 
+  it('propagates iMessage from the line through ActivityFeed and renders its fleet badge', () => {
+    const { container } = renderPage({
+      lines: [makeLine({ name: 'imessage-line', transport: 'imessage' })],
+      feed: [{
+        time: '12:00',
+        mode: 'chat',
+        text: 'imessage-line: inbound message',
+        instance: 'imessage-line',
+        detail: {
+          type: 'message',
+          direction: 'inbound',
+          senderName: 'Alex',
+          preview: '*literal* _still-literal_ https://example.com',
+        },
+      }],
+    });
+
+    expect(screen.getByTitle('Transport: iMessage')).toBeDefined();
+    expect(container.querySelector('.fc strong, .fc em, .fc s, .fc code')).toBeNull();
+    expect(container.textContent).toContain('*literal* _still-literal_');
+    expect(screen.getByRole('link', { name: 'https://example.com' })).toBeDefined();
+  });
+
   it('is exported as a default React function component', async () => {
     const mod = await import('../../console/src/pages/SoupKitchen');
     expect(mod.default).toBeDefined();

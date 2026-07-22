@@ -429,7 +429,7 @@ describe('handleConfigUpdate: transport immutability + per-transport admin IDs',
       if (transport === 'imessage') {
         base.imessageConfig = {
           account: 'line-x', backend: 'bluebubbles',
-          bluebubblesUrl: 'https://bb.example.test', bluebubblesPasswordService: 'bb-pw',
+          bluebubblesUrl: 'https://bb.example.test', bluebubblesPasswordService: 'whatsoup-bluebubbles-line-x',
           sender: 'me@heal.internal',
           inboundMode: 'poll', pollIntervalMs: 15000, rateLimit: { messagesPerMinute: 30 },
         };
@@ -468,6 +468,19 @@ describe('handleConfigUpdate: transport immutability + per-transport admin IDs',
     expect(merged.transport).toBe('signal');
   });
 
+  it('accepts an explicit baileys restatement for a legacy config with no transport field', async () => {
+    const { deps, configFile } = transportInstance('baileys');
+    const req = mockReq(JSON.stringify({ transport: 'baileys', rateLimitPerHour: 50 }), 'PATCH');
+    const res = mockJsonRes();
+
+    await handleConfigUpdate(req, res, deps, { name: 'line-x' });
+
+    expect(res._status).toBe(200);
+    const merged = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    expect(merged.transport).toBe('baileys');
+    expect(merged.rateLimitPerHour).toBe(50);
+  });
+
   it('normalizes a Signal UUID admin ID verbatim on a signal line', async () => {
     const { deps, configFile } = transportInstance('signal');
     const uuid = 'a1b2c3d4-1234-1234-1234-a1b2c3d4e5f6';
@@ -488,6 +501,21 @@ describe('handleConfigUpdate: transport immutability + per-transport admin IDs',
     const merged = JSON.parse(fs.readFileSync(configFile, 'utf8'));
     expect(merged.adminPhones).toEqual(['boss@heal.internal']);
   });
+
+  it.each(['signal', 'imessage'] as const)(
+    'preserves canonical +E.164 admin IDs on a %s line',
+    async (transport) => {
+      const { deps, configFile } = transportInstance(transport);
+      const req = mockReq(JSON.stringify({ adminPhones: ['+1 (555) 123-0006'] }), 'PATCH');
+      const res = mockJsonRes();
+
+      await handleConfigUpdate(req, res, deps, { name: 'line-x' });
+
+      expect(res._status).toBe(200);
+      const merged = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+      expect(merged.adminPhones).toEqual(['+15551230006']);
+    },
+  );
 
   it('still digit-normalizes E.164 admin phones on a baileys line', async () => {
     const { deps, configFile } = transportInstance('baileys');

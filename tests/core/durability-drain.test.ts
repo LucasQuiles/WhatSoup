@@ -10,7 +10,11 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
-import { DurabilityEngine, drainPendingOutbound } from '../../src/core/durability.ts';
+import {
+  DurabilityEngine,
+  drainPendingOutbound,
+  sendTrackedOperatorReport,
+} from '../../src/core/durability.ts';
 import type { Messenger, SubmissionReceipt } from '../../src/core/types.ts';
 
 const emitAlert = vi.hoisted(() => vi.fn(() => true));
@@ -72,6 +76,191 @@ describe('drainPendingOutbound()', () => {
     const row = getOutbound(db, opId);
     expect(row['status']).toBe('submitted');
     expect(row['wa_message_id']).toBe('WA_REPLAYED_1');
+  });
+
+  it.each(['health', 'scheduler', 'reply-guarantee', 'report-channel'] as const)(
+    'quarantines a generic payload that self-attests privileged caller %s',
+    async (caller) => {
+    const opId = engine.createOutboundOp({
+      conversationKey: 'k1', chatJid: 'admin@s.whatsapp.net', opType: 'text',
+        payload: JSON.stringify({ text: 'operator notice', caller }), replayPolicy: 'safe',
+    });
+
+      const messenger = makeMessenger(async () => ({ waMessageId: 'MUST_NOT_SEND' }));
+    const { resent } = await drainPendingOutbound(messenger, engine);
+
+      expect(messenger.sendMessage).not.toHaveBeenCalled();
+      expect(resent).toBe(0);
+      expect(getOutbound(db, opId)['status']).toBe('quarantined');
+    },
+  );
+
+  it('rejects the reserved report operation through generic creation', () => {
+    expect(() => engine.createOutboundOp({
+      conversationKey: 'k1',
+      chatJid: 'admin@s.whatsapp.net',
+      opType: 'operator_report_v1',
+      payload: JSON.stringify({ text: 'operator notice' }),
+      replayPolicy: 'safe',
+    })).toThrow(/reserved/);
+    expect(() => engine.createOutboundOp({
+      conversationKey: 'k1',
+      chatJid: 'admin@s.whatsapp.net',
+      opType: 'text',
+      payload: JSON.stringify({ text: 'operator notice', operatorReport: { version: 1 } }),
+      replayPolicy: 'safe',
+    })).toThrow(/reserved/);
+  });
+
+  it('replays a dedicated report once with report-channel authority after provider recovery', async () => {
+    const target = 'admin@s.whatsapp.net';
+    const reportEngine = new DurabilityEngine(db, {
+      resolveOperatorReportTargets: () => new Set([target]),
+    });
+    const messenger = makeMessenger(vi.fn()
+      .mockRejectedValueOnce(new Error('provider unavailable'))
+      .mockResolvedValueOnce({ waMessageId: 'WA_TRUSTED_REPLAY' }));
+
+    await expect(sendTrackedOperatorReport(
+      messenger,
+      target,
+      'operator notice',
+      reportEngine,
+      { replayPolicy: 'safe' },
+    )).rejects.toThrow('provider unavailable');
+    reportEngine.postConnectRecovery();
+
+    await expect(drainPendingOutbound(messenger, reportEngine)).resolves.toEqual({ resent: 1, expired: 0 });
+    expect(messenger.sendMessage).toHaveBeenNthCalledWith(2, target, 'operator notice', {
+      caller: 'report-channel',
+    });
+  });
+
+  it('rejects a dedicated report to a nonconfigured target before journaling or send', async () => {
+    const reportEngine = new DurabilityEngine(db, {
+      resolveOperatorReportTargets: () => new Set(['admin@s.whatsapp.net']),
+    });
+    const messenger = makeMessenger(async () => ({ waMessageId: 'MUST_NOT_SEND' }));
+
+    await expect(sendTrackedOperatorReport(
+      messenger,
+      'cold@s.whatsapp.net',
+      'operator notice',
+      reportEngine,
+      { replayPolicy: 'safe' },
+    )).rejects.toThrow(/currently configured admin/);
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM outbound_ops').get()).toMatchObject({ count: 0 });
+  });
+
+  it('quarantines a dedicated report whose stored target no longer matches its chat', async () => {
+    const target = 'admin@s.whatsapp.net';
+    const reportEngine = new DurabilityEngine(db, {
+      resolveOperatorReportTargets: () => new Set([target, 'other@s.whatsapp.net']),
+    });
+    const opId = reportEngine.createOperatorReportOp({
+      chatJid: target,
+      text: 'operator notice',
+      reportType: 'text',
+      replayPolicy: 'safe',
+    });
+    db.raw.prepare('UPDATE outbound_ops SET chat_jid = ? WHERE id = ?')
+      .run('other@s.whatsapp.net', opId);
+    const messenger = makeMessenger(async () => ({ waMessageId: 'MUST_NOT_SEND' }));
+
+    await drainPendingOutbound(messenger, reportEngine);
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+    expect(getOutbound(db, opId)['status']).toBe('quarantined');
+  });
+
+  it('quarantines a dedicated report after admin rotation', async () => {
+    const targets = new Set(['admin@s.whatsapp.net']);
+    const reportEngine = new DurabilityEngine(db, {
+      resolveOperatorReportTargets: () => targets,
+    });
+    const opId = reportEngine.createOperatorReportOp({
+      chatJid: 'admin@s.whatsapp.net',
+      text: 'operator notice',
+      reportType: 'text',
+      replayPolicy: 'safe',
+    });
+    targets.clear();
+    targets.add('rotated@s.whatsapp.net');
+    const messenger = makeMessenger(async () => ({ waMessageId: 'MUST_NOT_SEND' }));
+
+    await drainPendingOutbound(messenger, reportEngine);
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+    expect(getOutbound(db, opId)['status']).toBe('quarantined');
+  });
+
+  it.each([
+    { operatorReport: { version: 2, target: 'admin@s.whatsapp.net', reportType: 'text' } },
+    { operatorReport: { version: 1, target: 'admin@s.whatsapp.net', reportType: 'unknown' } },
+    { operatorReport: null },
+  ])('quarantines malformed or unknown reserved report metadata %#', async (metadata) => {
+    const target = 'admin@s.whatsapp.net';
+    const reportEngine = new DurabilityEngine(db, {
+      resolveOperatorReportTargets: () => new Set([target]),
+    });
+    const opId = reportEngine.createOperatorReportOp({
+      chatJid: target,
+      text: 'operator notice',
+      reportType: 'text',
+      replayPolicy: 'safe',
+    });
+    db.raw.prepare('UPDATE outbound_ops SET payload = ? WHERE id = ?')
+      .run(JSON.stringify({ text: 'operator notice', ...metadata }), opId);
+    const messenger = makeMessenger(async () => ({ waMessageId: 'MUST_NOT_SEND' }));
+
+    await drainPendingOutbound(messenger, reportEngine);
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+    expect(getOutbound(db, opId)['status']).toBe('quarantined');
+  });
+
+  it('does not let malformed reserved payloads block a later status report', async () => {
+    const target = 'admin@s.whatsapp.net';
+    const reportEngine = new DurabilityEngine(db, {
+      resolveOperatorReportTargets: () => new Set([target]),
+    });
+    const malformedId = reportEngine.createOperatorReportOp({
+      chatJid: target,
+      text: 'old operator notice',
+      reportType: 'text',
+      replayPolicy: 'safe',
+    });
+    db.raw.prepare('UPDATE outbound_ops SET payload = ? WHERE id = ?').run('{', malformedId);
+
+    const statusId = reportEngine.createOperatorReportOp({
+      chatJid: target,
+      text: 'back online',
+      reportType: 'status_ping',
+      replayPolicy: 'safe',
+    });
+    const messenger = makeMessenger(async () => ({ waMessageId: 'WA_STATUS' }));
+
+    await expect(drainPendingOutbound(messenger, reportEngine)).resolves.toEqual({ resent: 1, expired: 0 });
+    expect(messenger.sendMessage).toHaveBeenCalledTimes(1);
+    expect(messenger.sendMessage).toHaveBeenCalledWith(
+      target,
+      'back online',
+      { caller: 'report-channel' },
+    );
+    expect(getOutbound(db, malformedId)['status']).toBe('quarantined');
+    expect(getOutbound(db, statusId)['status']).toBe('submitted');
+  });
+
+  it('quarantines a pending text op with unrecognized caller provenance', async () => {
+    const opId = engine.createOutboundOp({
+      conversationKey: 'k1', chatJid: 'admin@s.whatsapp.net', opType: 'text',
+      payload: JSON.stringify({ text: 'operator notice', caller: 'external' }), replayPolicy: 'safe',
+    });
+
+    const messenger = makeMessenger(async () => ({ waMessageId: 'MUST_NOT_SEND' }));
+    const { resent } = await drainPendingOutbound(messenger, engine);
+
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+    expect(resent).toBe(0);
+    expect(getOutbound(db, opId)['status']).toBe('quarantined');
   });
 
   it('quarantines + alerts a non-text (unreconstructable) pending op instead of leaving it pending', async () => {

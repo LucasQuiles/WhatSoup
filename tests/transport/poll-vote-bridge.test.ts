@@ -53,6 +53,7 @@ vi.mock('../../src/logger.ts', () => ({
 import { createHash } from 'node:crypto';
 import { makeWASocket } from '@whiskeysockets/baileys';
 import { ConnectionManager } from '../../src/transport/connection.ts';
+import { withWarmIdentity } from '../helpers/outbound-identity.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -139,7 +140,7 @@ describe('poll vote bridge', () => {
     emit = result.emit;
     (makeWASocket as ReturnType<typeof vi.fn>).mockReturnValue(mockSock);
 
-    cm = new ConnectionManager();
+    cm = withWarmIdentity(new ConnectionManager());
     await cm.connect();
     emit({ 'connection.update': { connection: 'open' } });
   });

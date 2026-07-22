@@ -16,6 +16,7 @@ import { beforeEach, describe, it, expect, vi } from 'vitest';
 import {
   _getLineCachesForTests,
   _resetLineCaches,
+  countConversationKeys,
   handleGetLines,
   handleGetLine,
   handleGetLineProviderStatus,
@@ -131,6 +132,7 @@ describe('handleGetLines', () => {
     expect(body[0]).toMatchObject({
       name: 'alpha',
       mode: 'chat',
+      transport: 'baileys',
       status: 'online',
       statusConfidence: 'confirmed',
       statusReason: 'health_body_ok',
@@ -1056,6 +1058,16 @@ describe('handleGetLines lastMessageTime from DB', () => {
 // ---------------------------------------------------------------------------
 
 describe('handleGetLines chatCounts', () => {
+  it('counts Signal and iMessage group keys as groups', () => {
+    expect(countConversationKeys([
+      '15550100001',
+      'Z3JvdXAtY29udmVyc2F0aW9u_at_signal',
+      'iMessage;+;chatABC_at_imessage',
+      '+15551230008_at_signal',
+      'owner_at_example.test@imessage',
+    ])).toEqual({ chats: 3, groups: 2 });
+  });
+
   it('returns zero chat counts when db query fails', () => {
     const inst = fakeInstance({ name: 'cc1' });
     const deps = makeDeps({
@@ -1302,6 +1314,28 @@ describe('handleGetLines config_error instance', () => {
     expect(line.statusEvidence).toEqual(['config file not found']);
     expect(line.configError).toBe('config file not found');
     expect(line.error).toBe('config file not found');
+  });
+
+  it('returns an unknown explicit transport verbatim instead of advertising Baileys QR auth', () => {
+    const inst = fakeInstance({
+      name: 'future-line',
+      transport: 'future-provider',
+      configError: 'transport is invalid',
+    });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['future-line', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: { getStatuses: vi.fn(() => new Map()), getStatus: vi.fn() } as any,
+    });
+    const res = mockRes();
+
+    handleGetLines(mockReq(), res, deps);
+
+    const line = JSON.parse(res._body)[0];
+    expect(line.status).toBe('config_error');
+    expect(line.transport).toBe('future-provider');
   });
 });
 

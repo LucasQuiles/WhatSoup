@@ -50,7 +50,7 @@ vi.mock('react-router-dom', () => ({
 }))
 
 // use-fleet hooks: mutable state so individual tests can override.
-let mockLines: Array<{ name: string; mode: string; status: string }> = []
+let mockLines: Array<{ name: string; mode: string; status: string; transport?: string }> = []
 let mockChats: Array<{
   conversationKey: string
   name: string
@@ -409,6 +409,32 @@ describe('Inbox — conversation selection workflows', () => {
   })
 })
 
+describe('Inbox — transport formatter propagation', () => {
+  it('passes Signal to MessageBubble so strike syntax stays literal', () => {
+    mockLines = [{ name: 'test-line', mode: 'passive', status: 'ok', transport: 'signal' }]
+    mockChats = [makeChat('conv-a', { name: 'Signal Contact' })]
+    mockMessages = [makeMessage(1, '*bold* ~literal~')]
+    const { container } = renderInbox()
+
+    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Signal Contact' }))
+
+    expect(screen.getByText('bold').tagName).toBe('STRONG')
+    expect(container.querySelector('s')).toBeNull()
+    expect(container.textContent).toContain('~literal~')
+  })
+
+  it('passes Baileys to MessageBubble so the full formatting set is rendered', () => {
+    mockLines = [{ name: 'test-line', mode: 'passive', status: 'ok', transport: 'baileys' }]
+    mockChats = [makeChat('conv-a', { name: 'WhatsApp Contact' })]
+    mockMessages = [makeMessage(1, '~strike~')]
+    const { container } = renderInbox()
+
+    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with WhatsApp Contact' }))
+
+    expect(container.querySelector('s')?.textContent).toBe('strike')
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Offline-with-cache branch for the chat list (DD-29)
 // ---------------------------------------------------------------------------
@@ -705,14 +731,14 @@ describe('Inbox — contact action workflows', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Allow Contact' }))
 
     await waitFor(() => {
-      expect(accessDecisionMock).toHaveBeenCalledWith('test-line', 'number', 'conv-a', 'allow')
+      expect(accessDecisionMock).toHaveBeenCalledWith('test-line', 'phone', 'conv-a', 'allow')
     })
     expect(toastMock.error).toHaveBeenCalledWith('Failed to allow: allow denied')
 
     fireEvent.click(screen.getByRole('button', { name: 'Block Contact' }))
 
     await waitFor(() => {
-      expect(accessDecisionMock).toHaveBeenCalledWith('test-line', 'number', 'conv-a', 'block')
+      expect(accessDecisionMock).toHaveBeenCalledWith('test-line', 'phone', 'conv-a', 'block')
     })
     expect(toastMock.error).toHaveBeenCalledWith('Failed to block: block denied')
   })
@@ -759,6 +785,16 @@ describe('Inbox — contact action workflows', () => {
       })
     })
     expect(toastMock.error).toHaveBeenCalledWith('Failed to save: address book locked')
+  })
+
+  it.each(['signal', 'imessage'])('hides WhatsApp-only Save Contact on %s lines', (transport) => {
+    mockLines = [{ name: 'test-line', mode: 'passive', status: 'ok', transport }]
+    mockChats = [makeChat('owner_at_example.test@imessage', { name: 'Direct Contact' })]
+
+    renderInbox()
+    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Direct Contact' }))
+
+    expect(screen.queryByRole('button', { name: 'Save Contact' })).toBeNull()
   })
 })
 

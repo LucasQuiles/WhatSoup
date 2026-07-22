@@ -147,6 +147,7 @@ async function importMainWithMocks(options: {
     pineconeSearchMode: 'hybrid',
     pineconeRerank: true,
     pineconeTopK: 8,
+    transport: 'baileys',
     accessMode: options.accessMode ?? 'allowlist',
     models: {
       conversation: 'claude-sonnet',
@@ -289,9 +290,16 @@ async function importMainWithMocks(options: {
     toConversationKey: vi.fn((jid: string) => `conversation:${jid}`),
     toPersonalJid: vi.fn((phone: string) => `${phone}@s.whatsapp.net`),
     toLidJid: vi.fn((phone: string) => `${phone}@lid`),
+    toTransportDirectJid: vi.fn((identity: string, transport: string) => {
+      if (transport === 'twilio') return `${identity}@sms`;
+      if (transport === 'signal') return `${identity}@signal`;
+      if (transport === 'imessage') return `${identity.toLowerCase()}@imessage`;
+      return `${identity}@s.whatsapp.net`;
+    }),
     selectReplayableDms: vi.fn((stored: unknown[]) => ({ toReplay: stored, groupSkipped: 1 })),
     rememberReplayedId: vi.fn(),
     sendTracked: vi.fn(async () => ({ waMessageId: 'sent-1' })),
+    sendTrackedOperatorReport: vi.fn(async () => ({ waMessageId: 'sent-1' })),
     drainPendingOutbound: vi.fn(async () => ({ resent: 0, expired: 0 })),
     waitForHistorySyncThenRecover: vi.fn(async ({ recover }: { recover: () => unknown }) => {
       await recover();
@@ -316,6 +324,7 @@ async function importMainWithMocks(options: {
     insertAllowed: vi.fn(),
     seedAutoRespondGroups: vi.fn(() => 0),
     resolvePhoneFromJid: vi.fn(() => '15551230000'),
+    resolvePhoneFromJidForGrant: vi.fn(() => '15551230000'),
     hydrateLidMappings: vi.fn(() => 1),
     upsertLidMapping: vi.fn(),
     mineMessageKey: vi.fn(() => ({ lid: 'user@lid', phoneJid: '15551230000@s.whatsapp.net' })),
@@ -413,6 +422,7 @@ async function importMainWithMocks(options: {
   vi.doMock('../src/core/jid-constants.ts', () => ({
     toPersonalJid: mocks.toPersonalJid,
     toLidJid: mocks.toLidJid,
+    toTransportDirectJid: mocks.toTransportDirectJid,
   }));
   vi.doMock('../src/core/admin.ts', () => ({
     selectReplayableDms: mocks.selectReplayableDms,
@@ -421,6 +431,7 @@ async function importMainWithMocks(options: {
   vi.doMock('../src/core/durability.ts', () => ({
     DurabilityEngine,
     sendTracked: mocks.sendTracked,
+    sendTrackedOperatorReport: mocks.sendTrackedOperatorReport,
     drainPendingOutbound: mocks.drainPendingOutbound,
   }));
   vi.doMock('../src/core/post-connect-recovery.ts', () => ({
@@ -457,6 +468,7 @@ async function importMainWithMocks(options: {
     insertAllowed: mocks.insertAllowed,
     seedAutoRespondGroups: mocks.seedAutoRespondGroups,
     resolvePhoneFromJid: mocks.resolvePhoneFromJid,
+    resolvePhoneFromJidForGrant: mocks.resolvePhoneFromJidForGrant,
   }));
   vi.doMock('../src/core/lid-resolver.ts', () => ({
     hydrateLidMappings: mocks.hydrateLidMappings,
@@ -736,6 +748,11 @@ describe('main bootstrap', () => {
       participants: ['bot@s.whatsapp.net'],
       action: 'add',
     });
+    expect(h.resolvePhoneFromJidForGrant).toHaveBeenCalledWith(
+      '15551230000@s.whatsapp.net',
+      h.db,
+      'baileys',
+    );
     expect(h.insertAllowed).toHaveBeenCalledWith(h.db, 'group', 'group@s.whatsapp.net');
 
     h.connection.emit('labelsEdit', [{ id: 'label-1' }]);
@@ -909,7 +926,7 @@ describe('main bootstrap', () => {
     );
 
     await vi.advanceTimersByTimeAsync(3_000);
-    expect(h.sendTracked).toHaveBeenCalledWith(
+    expect(h.sendTrackedOperatorReport).toHaveBeenCalledWith(
       h.connection,
       '15551230000@s.whatsapp.net',
       '*Agent back online* \u2713',

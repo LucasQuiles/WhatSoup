@@ -11,7 +11,7 @@ import type { ExtendedBaileysSocket } from '../types.ts';
 import { type MessageRow, rowToMessage } from '../../core/messages.ts';
 import { createChildLogger } from '../../logger.ts';
 import { nowUnixSec } from '../../fleet/time-utils.ts';
-import { toConversationKey } from '../../core/conversation-key.ts';
+import { conversationRefToKey, toConversationKey } from '../../core/conversation-key.ts';
 import { DOMAIN_PERSONAL, DOMAIN_LID, DOMAIN_GROUP } from '../../core/jid-constants.ts';
 import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
 import { config } from '../../config.ts';
@@ -388,9 +388,9 @@ function makeGetChat(db: Database): ToolDeclaration {
     replayPolicy: 'read_only',
     handler: async (params) => {
       const { conversation_key: rawKey } = GetChatSchema.parse(params);
-      // Normalize raw JID (e.g. "…@g.us") to DB key format ("…_at_g.us")
-      let conversation_key: string;
-      try { conversation_key = toConversationKey(rawKey); } catch { conversation_key = rawKey; }
+      // Accept a raw transport JID or an already-canonical DB key without
+      // double-encoding AppleID keys that contain their own @.
+      const conversation_key = conversationRefToKey(rawKey);
 
       const row = db.raw
         .prepare(

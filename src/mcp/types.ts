@@ -1,6 +1,6 @@
 import type { ZodType } from 'zod';
 import type { WhatsAppSocket } from '../transport/connection.ts';
-import { toConversationKey } from '../core/conversation-key.ts';
+import { conversationRefToKey } from '../core/conversation-key.ts';
 export { isPathWithinAllowedRoot } from '../lib/path-boundary.ts';
 
 export type ToolScope = 'chat' | 'global';
@@ -153,9 +153,9 @@ export function conversationBoundKey(session: SessionContext): string | undefine
  */
 export function resolveConversationKey(session: SessionContext, callerKey: string): string {
   if (session.tier === 'chat-scoped') return session.conversationKey!;
-  // Caller may pass a raw JID — normalize it to the DB encoding.
-  let resolved: string;
-  try { resolved = toConversationKey(callerKey); } catch { resolved = callerKey; }
+  // Caller may pass a raw JID or an already-canonical key. Normalize only
+  // proven raw transport JIDs so AppleID keys containing @ stay byte-stable.
+  const resolved = conversationRefToKey(callerKey);
   const boundKey = conversationBoundKey(session);
   if (boundKey !== undefined && resolved !== boundKey) {
     throw new Error(`conversation_key "${callerKey}" is not available to this conversation-bound session`);

@@ -21,7 +21,7 @@ import React, { useState, useCallback, useEffect, useId } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, Save } from 'lucide-react'
 import TagInput from '../TagInput'
-import { normalizePhoneInput, validatePhone } from '../../lib/validation'
+import { isTransportKind, TRANSPORT_MAP } from '../../lib/transport-meta'
 import { useToast } from '../../hooks/toast-context'
 import { api } from '../../lib/api'
 import {
@@ -44,7 +44,9 @@ import {
   CUSTOM_ENUM_OPTION,
   CUSTOMIZABLE_ENUM_KEYS,
   FIELD_VALIDATORS,
+  validateAdminPhones,
   isRecord,
+  isSafeConfigPath,
   getValueAtPath,
   setValueAtPath,
   deleteValueAtPath,
@@ -80,12 +82,14 @@ export function ConfigEditDialog({
   open,
   config,
   lineName,
+  transport,
   adminPhonesDisplay,
   onClose,
 }: {
   open: boolean
   config: Record<string, unknown>
   lineName: string
+  transport?: string | null
   adminPhonesDisplay?: Record<string, string>
   onClose: () => void
 }) {
@@ -95,6 +99,10 @@ export function ConfigEditDialog({
   const [saving, setSaving] = useState(false)
   const [customEnumFields, setCustomEnumFields] = useState<Record<string, true>>({})
   const fieldIdPrefix = useId()
+  const invalidTransport = transport !== undefined && transport !== null && !isTransportKind(transport)
+  const transportKind = isTransportKind(transport) ? transport : 'baileys'
+  const transportMeta = TRANSPORT_MAP[transportKind]
+  const interactiveTwilio = transportKind === 'twilio' && config.type !== 'passive'
 
   // Reset patch and custom-enum state on each open (C-B3W2-1 — mirrors
   // CreateGroupModal precedent; provides fresh-state-per-open semantics that
@@ -107,9 +115,11 @@ export function ConfigEditDialog({
   }, [open])
 
   const editableEntries: [string, unknown][] = React.useMemo(() => {
+    if (invalidTransport) return []
     const entries: [string, unknown][] = []
     for (const [k, v] of Object.entries(config)) {
       if (CONFIG_EXCLUDE_KEYS.has(k)) continue
+      if (!isSafeConfigPath(k)) continue
       if (k === 'agentOptions' && isRecord(v)) {
         const remaining = cloneRecord(v)
         for (const fieldKey of Object.keys(AGENT_OPTION_FIELDS)) {
@@ -146,7 +156,7 @@ export function ConfigEditDialog({
       }
     }
     return entries
-  }, [config])
+  }, [config, invalidTransport])
 
   const editableEntryValues = React.useMemo(
     () => Object.fromEntries(editableEntries) as Record<string, unknown>,
@@ -158,12 +168,16 @@ export function ConfigEditDialog({
   }, [config])
 
   const currentValue = useCallback((key: string): unknown => (
-    key in patch ? patch[key] : key in editableEntryValues ? editableEntryValues[key] : configValue(key)
+    Object.hasOwn(patch, key)
+      ? patch[key]
+      : Object.hasOwn(editableEntryValues, key)
+        ? editableEntryValues[key]
+        : configValue(key)
   ), [patch, editableEntryValues, configValue])
 
   const setField = useCallback((key: string, value: unknown) => {
     setPatch(prev => {
-      const originalValue = key in editableEntryValues ? editableEntryValues[key] : configValue(key)
+      const originalValue = Object.hasOwn(editableEntryValues, key) ? editableEntryValues[key] : configValue(key)
       if (isEqualValue(value, originalValue)) {
         const next = { ...prev }
         delete next[key]
@@ -177,11 +191,13 @@ export function ConfigEditDialog({
     const value = currentValue(key)
     const enumOptions = ENUM_OPTIONS[key]
     const customEnumActive = CUSTOMIZABLE_ENUM_KEYS.has(key)
-      && (key in customEnumFields || (typeof value === 'string' && !!enumOptions && !enumOptions.includes(value)))
+      && (Object.hasOwn(customEnumFields, key) || (typeof value === 'string' && !!enumOptions && !enumOptions.includes(value)))
     if (customEnumActive && typeof value === 'string' && value.trim() === '') {
       return 'Enter a custom model ID or choose a preset'
     }
-    const fieldError = FIELD_VALIDATORS[key]?.(value) ?? null
+    const fieldError = key === 'adminPhones'
+      ? validateAdminPhones(value, transportKind)
+      : FIELD_VALIDATORS[key]?.(value) ?? null
     if (fieldError) return fieldError
     if (key === CHAT_OPENAI_BASE_URL_KEY) {
       const baseUrl = typeof value === 'string' ? value.trim() : ''
@@ -198,7 +214,7 @@ export function ConfigEditDialog({
       }
     }
     return null
-  }, [currentValue, customEnumFields])
+  }, [currentValue, customEnumFields, transportKind])
 
   const handleSave = async () => {
     if (Object.keys(patch).length === 0) {
@@ -286,9 +302,13 @@ export function ConfigEditDialog({
           id={fieldId}
           values={values}
           onChange={(newValues) => setField(key, newValues)}
-          placeholder={key === 'adminPhones' ? 'Add phone number' : 'Add item'}
-          validate={key === 'adminPhones' ? validatePhone : undefined}
-          normalizeValue={key === 'adminPhones' ? normalizePhoneInput : undefined}
+          placeholder={key === 'adminPhones'
+            ? transportKind === 'baileys' || transportKind === 'twilio'
+              ? 'Add phone number'
+              : transportMeta.adminIdPlaceholder
+            : 'Add item'}
+          validate={key === 'adminPhones' ? transportMeta.validateAdminId : undefined}
+          normalizeValue={key === 'adminPhones' ? transportMeta.normalizeAdminId : undefined}
           accentColor={values.length > 0 ? 'var(--mode-agent-solid)' : undefined}
           displayLabels={key === 'adminPhones' ? adminPhonesDisplay : undefined}
           aria-describedby={describedBy}
@@ -316,15 +336,17 @@ export function ConfigEditDialog({
     }
 
     // String with known enum -> select
-    const enumOpts = key in ENUM_OPTIONS ? ENUM_OPTIONS[key]
-      : key in AGENT_OPTION_FIELDS && AGENT_OPTION_FIELDS[key].type === 'enum' ? AGENT_OPTION_FIELDS[key].enum
+    const enumOpts = key === 'accessMode' && config.type === 'passive' ? ['self_only']
+      : key === 'accessMode' && interactiveTwilio ? ['allowlist', 'open_dm']
+      : Object.hasOwn(ENUM_OPTIONS, key) ? ENUM_OPTIONS[key]
+      : Object.hasOwn(AGENT_OPTION_FIELDS, key) && AGENT_OPTION_FIELDS[key].type === 'enum' ? AGENT_OPTION_FIELDS[key].enum
       : null
     if (typeof originalValue === 'string' && enumOpts) {
       const customEnumActive = CUSTOMIZABLE_ENUM_KEYS.has(key)
-        && (key in customEnumFields || !enumOpts.includes(val as string))
+        && (Object.hasOwn(customEnumFields, key) || !enumOpts.includes(val as string))
       const clearCustomEnum = () => {
         setCustomEnumFields(prev => {
-          if (!(key in prev)) return prev
+          if (!Object.hasOwn(prev, key)) return prev
           const next = { ...prev }
           delete next[key]
           return next
@@ -351,6 +373,11 @@ export function ConfigEditDialog({
             aria-invalid={invalid ? true : undefined}
             error={invalid && !customEnumActive}
           >
+            {!CUSTOMIZABLE_ENUM_KEYS.has(key) && typeof val === 'string' && !enumOpts.includes(val) && (
+              <option value={val} disabled>
+                {enumOptionLabel(key, val)} {interactiveTwilio ? '(unavailable for Twilio SMS)' : '(unavailable)'}
+              </option>
+            )}
             {enumOpts.map(opt => (
               <option key={opt} value={opt}>{enumOptionLabel(key, opt)}</option>
             ))}
@@ -409,8 +436,8 @@ export function ConfigEditDialog({
   }
 
   const hasChanges = Object.keys(patch).length > 0
-  const hasErrors = editableEntries.some(([key]) => {
-    const isActive = key in patch || key in customEnumFields
+  const hasErrors = invalidTransport || editableEntries.some(([key]) => {
+    const isActive = Object.hasOwn(patch, key) || Object.hasOwn(customEnumFields, key)
     return isActive && getFieldError(key) !== null
   })
 
@@ -433,8 +460,18 @@ export function ConfigEditDialog({
       </div>
 
       <ModalBody>
+        {invalidTransport && (
+          <div className="rounded-md bg-surface-raised p-[var(--sp-3)] text-s-crit text-sm">
+            Unsupported transport configuration
+          </div>
+        )}
+        {interactiveTwilio && (
+          <div className="rounded-md bg-surface-raised p-[var(--sp-3)] text-s-warn text-sm">
+            Twilio SMS cannot authenticate admins or receive group chats. Interactive lines support allowlist or open_dm access only.
+          </div>
+        )}
         {editableEntries.map(([key, originalValue]) => {
-          const isActive = key in patch || key in customEnumFields
+          const isActive = Object.hasOwn(patch, key) || Object.hasOwn(customEnumFields, key)
           const fieldError = isActive ? getFieldError(key) : null
           const fieldId = `${fieldIdPrefix}-${fieldIdSegment(key)}`
           const errorId = fieldError ? `${fieldId}-error` : undefined

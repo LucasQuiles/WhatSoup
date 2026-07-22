@@ -11,8 +11,8 @@
 
 /** Who may EXECUTE a command (identity axis). Composes with `venue` (N17):
  *  identity is WHO, venue is WHERE — god-priv needs both.
- *  - 'admin'              : authenticated admin (isWhatsAppAuthenticatedJid
- *                           FIRST — QR-143 @sms-closing — then admin-phone),
+ *  - 'admin'              : transport-bound authentication FIRST (QR-143
+ *                           @sms-closing), then canonical admin identity,
  *                           enforced inline in runtime.ts. Group-permitting
  *                           since B21-A F3 (base parity: the pre-registry
  *                           phone-only gates let admins run these from groups;
@@ -25,7 +25,7 @@
  *                           where the effect is scoped to the sender's own
  *                           conversation. The identity check itself is
  *                           group-permitting (an admin may act in a group) and
- *                           @sms-closing (requires isWhatsAppAuthenticatedJid).
+ *                           @sms-closing (requires transport-bound authentication).
  *                           With EMPTY adminPhones the gate stays open (B21-A
  *                           F2: a no-admin instance has no other reset path).
  *                           Used by /new — enforced in runtime.ts. */

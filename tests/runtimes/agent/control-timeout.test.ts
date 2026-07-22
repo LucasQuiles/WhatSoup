@@ -135,6 +135,7 @@ vi.mock('../../../src/runtimes/agent/control-queue.ts', () => ({
 
 vi.mock('../../../src/core/durability.ts', () => ({
   sendTracked: vi.fn(async () => {}),
+  sendTrackedOperatorReport: vi.fn(async () => {}),
 }));
 
 const { mockDequeueNextReport } = vi.hoisted(() => ({
@@ -162,7 +163,8 @@ vi.mock('../../../src/core/heal.ts', () => ({
 
 vi.mock('../../../src/config.ts', () => ({
   config: {
-    adminPhones: new Set<string>(),
+    transport: 'twilio',
+    adminPhones: new Set<string>(['+15559990003']),
     controlPeers: new Map<string, string>([
       ['loops', '15559990001'],
       ['q', '15559990002'],
@@ -226,6 +228,7 @@ void _mockQueueTypeCheck;
 
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
 import { mkdirSync } from 'node:fs';
+import { sendTrackedOperatorReport } from '../../../src/core/durability.ts';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -319,7 +322,8 @@ describe('control session hard timeout', () => {
   });
 
   it('fires after 15 minutes and calls shutdown + clearControlReport', async () => {
-    const runtime = new AgentRuntime(makeDb(), makeMessenger());
+    const messenger = makeMessenger();
+    const runtime = new AgentRuntime(makeDb(), messenger);
     await runtime.start();
 
     await runtime.handleControlTurn('r-003', JSON.stringify({ reportId: 'r-003', errorClass: 'crash__oom' }));
@@ -345,6 +349,13 @@ describe('control session hard timeout', () => {
         diagnosis: 'Repair session timed out after 15 minutes without resolution',
       },
       undefined,
+    );
+    expect(sendTrackedOperatorReport).toHaveBeenCalledWith(
+      messenger,
+      '+15559990003@sms',
+      '[HEAL_ESCALATE] Repair for report r-003 timed out after 15 minutes.',
+      undefined,
+      { replayPolicy: 'safe' },
     );
   });
 

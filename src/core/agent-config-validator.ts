@@ -25,7 +25,15 @@ import { homedir } from 'node:os';
 import { PROVIDER_IDS } from '../runtimes/agent/providers/index.ts';
 import { PROVIDER_API_KEY_SERVICES, SERVICE_ENV_MAP, resolveProviderKeyService } from '../lib/provider-key-service.ts';
 import { isRecord } from '../lib/type-guards.ts';
+import { normalizePhoneE164Wire } from '../lib/phone.ts';
 import { isSamePhysicalDirectory } from '../lib/home-path.ts';
+import {
+  AGENT_PROVIDER_CONFIG_ALLOWED_FIELDS,
+  OPENAI_PROVIDER_CONFIG_ALLOWED_FIELDS,
+  findPlaintextInstanceSecretField,
+  findPlaintextProviderSecretField,
+  hasDisallowedTransportUrlComponents,
+} from '../lib/config-plaintext-keys.ts';
 import { resolveAgentModel } from './agent-model.ts';
 import {
   fallbackEntryKey,
@@ -34,7 +42,17 @@ import {
   type AgentFallbackEntry,
 } from './fallback-chain.ts';
 import { DEFAULT_TRANSPORT_ID, isTransportId, TRANSPORT_IDS } from '../transport/registry.ts';
-import { ACCOUNT_RE, APPLEID_EMAIL_RE } from './transport-refs.ts';
+import {
+  ACCOUNT_RE,
+  APPLEID_EMAIL_RE,
+  SIGNAL_UUID_RE,
+} from './transport-refs.ts';
+import {
+  bluebubblesPasswordServiceForAccount,
+  isBluebubblesPasswordServiceForAccount,
+  isTrustedBluebubblesUrl,
+} from '../lib/bluebubbles-config.ts';
+import { twilioAuthTokenServiceForAccount } from '../lib/twilio-config.ts';
 import { E164_RE } from '../transport/twilio/types.ts';
 import RE2 from 're2';
 import {
@@ -91,6 +109,8 @@ export interface ValidatorContext {
   existingHealthPorts?: ReadonlyMap<string, number>;
   /** On PATCH, the pre-merge type from the persisted config. */
   originalType?: unknown;
+  /** Whether the PATCH payload explicitly supplied accessMode. */
+  patchIncludesAccessMode?: boolean;
   /** When true (loader auth-only flow), skip agentOptions/systemPrompt-shape rules. */
   authOnly?: boolean;
 }
@@ -226,6 +246,20 @@ export function validateInstanceConfig(
   raw: Record<string, unknown>,
   ctx: ValidatorContext,
 ): ValidationError | null {
+  // Fleet CREATE/PATCH intentionally scrub hostile plaintext fields before
+  // persistence so an unrelated PATCH can remediate legacy files. Direct disk
+  // load/discovery has no outer persistence boundary and therefore rejects
+  // credential-shaped fields before auth-only bootstrap can short-circuit.
+  if (ctx.mode === 'load' || ctx.mode === 'discovery') {
+    const plaintextSecretField = findPlaintextInstanceSecretField(raw);
+    if (plaintextSecretField !== null) {
+      return err(
+        plaintextSecretField,
+        `${plaintextSecretField} must not contain plaintext provider credentials`,
+      );
+    }
+  }
+
   if (ctx.mode === 'load') {
     if (raw['name'] === undefined) {
       return err('name', `Missing required field "name" in ${ctx.name}`);
@@ -281,6 +315,17 @@ export function validateInstanceConfig(
       `Invalid accessMode "${String(raw['accessMode'])}": must be one of ${[...VALID_ACCESS_MODES].join(', ')}`,
     );
   }
+  if (
+    (ctx.mode === 'create' || (ctx.mode === 'patch' && ctx.patchIncludesAccessMode === true))
+    && raw['transport'] === 'twilio'
+    && raw['type'] !== 'passive'
+    && (raw['accessMode'] === 'self_only' || raw['accessMode'] === 'groups_only')
+  ) {
+    return err(
+      'accessMode',
+      `accessMode "${String(raw['accessMode'])}" is unavailable for interactive Twilio SMS; use allowlist or open_dm`,
+    );
+  }
 
   // --- healthPort ---
   if (raw['healthPort'] !== undefined && raw['healthPort'] !== null) {
@@ -321,6 +366,28 @@ export function validateInstanceConfig(
         );
       }
       return err('adminPhones', 'adminPhones must be a non-empty array of strings');
+    }
+    const effectiveTransport = isTransportId(raw['transport'])
+      ? raw['transport']
+      : DEFAULT_TRANSPORT_ID;
+    const invalidIdentity = (phones as string[]).find((identity) => {
+      const isPhoneIdentity = normalizePhoneE164Wire(identity) !== null;
+      if (effectiveTransport === 'signal') {
+        return !isPhoneIdentity && !SIGNAL_UUID_RE.test(identity);
+      }
+      if (effectiveTransport === 'imessage') {
+        return !isPhoneIdentity
+          && !(APPLEID_EMAIL_RE.test(identity) && identity === identity.toLowerCase());
+      }
+      return !isPhoneIdentity;
+    });
+    if (invalidIdentity !== undefined) {
+      const expected = effectiveTransport === 'signal'
+        ? 'a valid phone identity or a lowercase Signal UUID'
+        : effectiveTransport === 'imessage'
+          ? 'a valid phone identity or a lowercase AppleID email'
+          : 'a valid phone identity';
+      return err('adminPhones', `adminPhones must contain only ${expected} for transport ${effectiveTransport}`);
     }
   }
 
@@ -389,7 +456,7 @@ export function validateInstanceConfig(
   const pineconeGuardErr = validatePineconeProjectGuard(raw, ctx);
   if (pineconeGuardErr) return pineconeGuardErr;
 
-  const transportErr = validateTransportConfig(raw);
+  const transportErr = validateTransportConfig(raw, ctx.name);
   if (transportErr) return transportErr;
 
   if (raw['type'] === 'agent') {
@@ -470,7 +537,24 @@ export function validateInstanceConfig(
 function validateProviderConfigShape(
   pc: Record<string, unknown>,
   path: string,
+  allowedFields: ReadonlySet<string>,
 ): ValidationError | null {
+  for (const field of Object.keys(pc)) {
+    if (!allowedFields.has(field)) {
+      return err(
+        `${path}.${field}`,
+        `${path}.${field} is not an allowed provider configuration field`,
+      );
+    }
+  }
+  const plaintextSecretField = findPlaintextProviderSecretField(pc, path);
+  if (plaintextSecretField !== null) {
+    return err(
+      plaintextSecretField,
+      `${plaintextSecretField} must not contain plaintext provider credentials`,
+    );
+  }
+
   // baseUrl: custom OpenAI-compatible endpoint. When present it must be a
   // non-empty, parseable absolute http(s) URL — a malformed value would
   // silently break routing at agent/chat startup.
@@ -496,6 +580,12 @@ function validateProviderConfigShape(
         `${path}.baseUrl must use http or https`,
       );
     }
+    if (hasDisallowedTransportUrlComponents(baseUrl)) {
+      return err(
+        `${path}.baseUrl`,
+        `${path}.baseUrl must not contain credentials or a query or fragment`,
+      );
+    }
   }
 
   // apiKeyService: names the keyring service whose key authenticates a
@@ -516,7 +606,7 @@ function validateProviderConfigShape(
     if (!PROVIDER_API_KEY_SERVICES.has(pc['apiKeyService'])) {
       return err(
         `${path}.apiKeyService`,
-        `${path}.apiKeyService ${JSON.stringify(pc['apiKeyService'])} is not a valid provider service — valid provider services: ${Array.from(PROVIDER_API_KEY_SERVICES).join(', ')}`,
+        `${path}.apiKeyService is not a valid provider service — valid provider services: ${Array.from(PROVIDER_API_KEY_SERVICES).join(', ')}`,
       );
     }
     if (pc['baseUrl'] === undefined) {
@@ -561,6 +651,7 @@ function validateChatOptions(raw: Record<string, unknown>): ValidationError | nu
   return validateProviderConfigShape(
     providerConfig as Record<string, unknown>,
     'chatOptions.openaiProviderConfig',
+    OPENAI_PROVIDER_CONFIG_ALLOWED_FIELDS,
   );
 }
 
@@ -593,6 +684,7 @@ function validateTranscriptionOptions(raw: Record<string, unknown>): ValidationE
   return validateProviderConfigShape(
     providerConfig as Record<string, unknown>,
     'transcriptionOptions.openaiProviderConfig',
+    OPENAI_PROVIDER_CONFIG_ALLOWED_FIELDS,
   );
 }
 
@@ -713,6 +805,105 @@ function validateCommandSurfaceConfig(
 function opencodeModelPrefixResolvesToService(model: unknown): boolean {
   const service = resolveProviderKeyService('opencode-cli', model);
   return service !== null && PROVIDER_API_KEY_SERVICES.has(service) && Boolean(SERVICE_ENV_MAP[service]);
+}
+
+const AGENT_PROVIDER_BUDGET_FIELDS: ReadonlySet<string> = new Set([
+  'requestsPerMinute',
+  'tokensPerMinute',
+  'dailySpendCapUsd',
+  'chatBurstLimit',
+  'costPerMillionTokens',
+]);
+
+const AGENT_PROVIDER_STRING_FIELDS: ReadonlySet<string> = new Set([
+  'model',
+  'providerId',
+  'permissionMode',
+  'settingSources',
+  'effort',
+]);
+
+const AGENT_PROVIDER_BOOLEAN_FIELDS: ReadonlySet<string> = new Set([
+  'rawSystemPrompt',
+  'disableSlashCommands',
+  'strictMcpConfig',
+  'noSessionPersistence',
+]);
+
+const OPENCODE_COMMAND_MODES: ReadonlySet<string> = new Set([
+  'auto',
+  'modern-run',
+  'legacy-prompt-json',
+]);
+
+function isStringOrStringArray(value: unknown): boolean {
+  return typeof value === 'string' || (
+    Array.isArray(value) && value.every((entry) => typeof entry === 'string')
+  );
+}
+
+function validateAgentProviderConfigValues(pc: Record<string, unknown>): ValidationError | null {
+  for (const field of AGENT_PROVIDER_STRING_FIELDS) {
+    if (pc[field] !== undefined && (typeof pc[field] !== 'string' || pc[field].trim() === '')) {
+      return err(
+        `agentOptions.providerConfig.${field}`,
+        `agentOptions.providerConfig.${field} must be a non-empty string when provided`,
+      );
+    }
+  }
+  for (const field of AGENT_PROVIDER_BOOLEAN_FIELDS) {
+    if (pc[field] !== undefined && typeof pc[field] !== 'boolean') {
+      return err(
+        `agentOptions.providerConfig.${field}`,
+        `agentOptions.providerConfig.${field} must be a boolean when provided`,
+      );
+    }
+  }
+  if (
+    pc['maxTokens'] !== undefined &&
+    (
+      typeof pc['maxTokens'] !== 'number' ||
+      !Number.isFinite(pc['maxTokens']) ||
+      !Number.isInteger(pc['maxTokens']) ||
+      pc['maxTokens'] < 1
+    )
+  ) {
+    return err(
+      'agentOptions.providerConfig.maxTokens',
+      'agentOptions.providerConfig.maxTokens must be a positive integer when provided',
+    );
+  }
+  for (const field of ['tools', 'mcpConfig', 'fallbackModel'] as const) {
+    if (pc[field] !== undefined && !isStringOrStringArray(pc[field])) {
+      return err(
+        `agentOptions.providerConfig.${field}`,
+        `agentOptions.providerConfig.${field} must be a string or an array of strings when provided`,
+      );
+    }
+  }
+  if (
+    pc['agents'] !== undefined &&
+    typeof pc['agents'] !== 'string' &&
+    !isRecord(pc['agents'])
+  ) {
+    return err(
+      'agentOptions.providerConfig.agents',
+      'agentOptions.providerConfig.agents must be a string or object when provided',
+    );
+  }
+  if (
+    pc['opencodeCommandMode'] !== undefined &&
+    (
+      typeof pc['opencodeCommandMode'] !== 'string' ||
+      !OPENCODE_COMMAND_MODES.has(pc['opencodeCommandMode'])
+    )
+  ) {
+    return err(
+      'agentOptions.providerConfig.opencodeCommandMode',
+      'agentOptions.providerConfig.opencodeCommandMode must be auto, modern-run, or legacy-prompt-json',
+    );
+  }
+  return null;
 }
 
 function validateAgentOptions(
@@ -1060,13 +1251,34 @@ function validateAgentOptions(
           'agentOptions.providerConfig.budget must be an object when provided',
         );
       }
+      const budget = pc['budget'] as Record<string, unknown>;
+      for (const [field, value] of Object.entries(budget)) {
+        if (!AGENT_PROVIDER_BUDGET_FIELDS.has(field)) {
+          return err(
+            `agentOptions.providerConfig.budget.${field}`,
+            `agentOptions.providerConfig.budget.${field} is not an allowed budget field`,
+          );
+        }
+        if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+          return err(
+            `agentOptions.providerConfig.budget.${field}`,
+            `agentOptions.providerConfig.budget.${field} must be a finite non-negative number`,
+          );
+        }
+      }
     }
     // Shared shape rules (baseUrl format+scheme; apiKeyService format,
     // PROVIDER_API_KEY_SERVICES membership, and apiKeyService-requires-baseUrl)
     // — see validateProviderConfigShape for the single source of truth, also
     // used by chatOptions.openaiProviderConfig.
-    const shapeErr = validateProviderConfigShape(pc, 'agentOptions.providerConfig');
+    const shapeErr = validateProviderConfigShape(
+      pc,
+      'agentOptions.providerConfig',
+      AGENT_PROVIDER_CONFIG_ALLOWED_FIELDS,
+    );
     if (shapeErr) return shapeErr;
+    const valueErr = validateAgentProviderConfigValues(pc);
+    if (valueErr) return valueErr;
     // AGENT-ONLY: for opencode-cli, baseUrl is written into opencode.json as a
     // custom provider block that is only exercised when the instance's
     // resolved model (top-level `model`, else `models.conversation`) routes
@@ -1136,6 +1348,7 @@ const _TWILIO_MSG_SVC_SID_RE = /^MG[0-9a-f]{32}$/;
 
 function validateTransportConfig(
   raw: Record<string, unknown>,
+  lineName: string,
 ): ValidationError | null {
   const transport = raw['transport'];
   const twilioConfig = raw['twilioConfig'];
@@ -1189,7 +1402,7 @@ function validateTransportConfig(
     }
     const healthPort =
       typeof raw['healthPort'] === 'number' ? (raw['healthPort'] as number) : undefined;
-    return validateTwilioConfig(twilioConfig as Record<string, unknown>, healthPort);
+    return validateTwilioConfig(twilioConfig as Record<string, unknown>, lineName, healthPort);
   }
 
   // imessageConfig is REQUIRED when transport === 'imessage'.
@@ -1200,7 +1413,7 @@ function validateTransportConfig(
     if (typeof imessageConfig !== 'object' || Array.isArray(imessageConfig)) {
       return err('imessageConfig', 'imessageConfig must be an object');
     }
-    return validateImessageConfig(imessageConfig as Record<string, unknown>);
+    return validateImessageConfig(imessageConfig as Record<string, unknown>, lineName);
   }
 
   if (effectiveTransport === 'signal') {
@@ -1210,18 +1423,24 @@ function validateTransportConfig(
     if (typeof signalConfig !== 'object' || Array.isArray(signalConfig)) {
       return err('signalConfig', 'signalConfig must be an object');
     }
-    return validateSignalConfig(signalConfig as Record<string, unknown>);
+    return validateSignalConfig(signalConfig as Record<string, unknown>, lineName);
   }
 
   return null;
 }
 
-function validateSignalConfig(sc: Record<string, unknown>): ValidationError | null {
+function validateSignalConfig(sc: Record<string, unknown>, lineName: string): ValidationError | null {
   const account = sc['account'];
   if (typeof account !== 'string' || !ACCOUNT_RE.test(account)) {
     return err(
       'signalConfig.account',
       'signalConfig.account must be a non-empty lowercase alphanumeric-and-dash string starting with a letter',
+    );
+  }
+  if (account !== lineName) {
+    return err(
+      'signalConfig.account',
+      'signalConfig.account must match the immutable line name',
     );
   }
 
@@ -1331,7 +1550,11 @@ function validateSignalConfig(sc: Record<string, unknown>): ValidationError | nu
   return null;
 }
 
-function validateTwilioConfig(tc: Record<string, unknown>, healthPort?: number): ValidationError | null {
+function validateTwilioConfig(
+  tc: Record<string, unknown>,
+  lineName: string,
+  healthPort?: number,
+): ValidationError | null {
   // account: non-empty, matches ACCOUNT_RE
   const account = tc['account'];
   if (typeof account !== 'string' || account === '' || !ACCOUNT_RE.test(account)) {
@@ -1340,7 +1563,12 @@ function validateTwilioConfig(tc: Record<string, unknown>, healthPort?: number):
       'twilioConfig.account must be a non-empty lowercase alphanumeric-and-dash string starting with a letter',
     );
   }
-
+  if (account !== lineName) {
+    return err(
+      'twilioConfig.account',
+      'twilioConfig.account must match the immutable line name',
+    );
+  }
   // accountSid: matches ^AC[0-9a-f]{32}$
   const accountSid = tc['accountSid'];
   if (typeof accountSid !== 'string' || !_TWILIO_ACCOUNT_SID_RE.test(accountSid)) {
@@ -1350,17 +1578,13 @@ function validateTwilioConfig(tc: Record<string, unknown>, healthPort?: number):
     );
   }
 
-  // authTokenService: non-empty, no whitespace, max 128 chars
+  // authTokenService: exact provider- and line-bound keyring selector.
   const authTokenService = tc['authTokenService'];
-  if (
-    typeof authTokenService !== 'string' ||
-    authTokenService === '' ||
-    /\s/.test(authTokenService) ||
-    authTokenService.length > 128
-  ) {
+  const expectedAuthTokenService = twilioAuthTokenServiceForAccount(lineName);
+  if (authTokenService !== expectedAuthTokenService) {
     return err(
       'twilioConfig.authTokenService',
-      'twilioConfig.authTokenService must be a non-empty keyring service name (no whitespace, max 128 chars)',
+      `twilioConfig.authTokenService must be ${JSON.stringify(expectedAuthTokenService)} for this line`,
     );
   }
 
@@ -1437,6 +1661,12 @@ function validateTwilioConfig(tc: Record<string, unknown>, healthPort?: number):
       return err(
         'twilioConfig.webhook.publicBaseUrl',
         'twilioConfig.webhook.publicBaseUrl must be an https:// URL',
+      );
+    }
+    if (hasDisallowedTransportUrlComponents(parsed)) {
+      return err(
+        'twilioConfig.webhook.publicBaseUrl',
+        'twilioConfig.webhook.publicBaseUrl must not contain credentials or a query or fragment',
       );
     }
     const listenPort = wb['listenPort'];
@@ -1571,13 +1801,19 @@ function validateTwilioConfig(tc: Record<string, unknown>, healthPort?: number):
   return null;
 }
 
-function validateImessageConfig(ic: Record<string, unknown>): ValidationError | null {
+function validateImessageConfig(ic: Record<string, unknown>, lineName: string): ValidationError | null {
   // account: non-empty, matches ACCOUNT_RE
   const account = ic['account'];
   if (typeof account !== 'string' || account === '' || !ACCOUNT_RE.test(account)) {
     return err(
       'imessageConfig.account',
       'imessageConfig.account must be a non-empty lowercase alphanumeric-and-dash string starting with a letter',
+    );
+  }
+  if (account !== lineName) {
+    return err(
+      'imessageConfig.account',
+      'imessageConfig.account must match the immutable line name',
     );
   }
 
@@ -1592,6 +1828,12 @@ function validateImessageConfig(ic: Record<string, unknown>): ValidationError | 
 
   // Backend-conditional requirements.
   if (backend === 'bluebubbles') {
+    if (ic['imsgSocketPath'] !== undefined) {
+      return err(
+        'imessageConfig.imsgSocketPath',
+        "imessageConfig.imsgSocketPath is only valid when backend is 'imsg'",
+      );
+    }
     const url = ic['bluebubblesUrl'];
     if (typeof url !== 'string' || url === '') {
       return err(
@@ -1607,22 +1849,47 @@ function validateImessageConfig(ic: Record<string, unknown>): ValidationError | 
           'imessageConfig.bluebubblesUrl must be an http(s) URL',
         );
       }
+      if (hasDisallowedTransportUrlComponents(parsed)) {
+        return err(
+          'imessageConfig.bluebubblesUrl',
+          'imessageConfig.bluebubblesUrl must not contain credentials or a query or fragment',
+        );
+      }
+      if (!isTrustedBluebubblesUrl(url)) {
+        return err(
+          'imessageConfig.bluebubblesUrl',
+          'imessageConfig.bluebubblesUrl must use HTTPS unless the server is on loopback',
+        );
+      }
     }
     const pwService = ic['bluebubblesPasswordService'];
     if (
-      typeof pwService !== 'string' ||
-      pwService === '' ||
-      /\s/.test(pwService) ||
-      pwService.length > 128
+      typeof pwService !== 'string'
+      || !isBluebubblesPasswordServiceForAccount(pwService, lineName)
     ) {
+      const expected = bluebubblesPasswordServiceForAccount(lineName);
       return err(
         'imessageConfig.bluebubblesPasswordService',
-        "imessageConfig.bluebubblesPasswordService must be a non-empty keyring service name (no whitespace, max 128 chars) when backend is 'bluebubbles'",
+        expected
+          ? `imessageConfig.bluebubblesPasswordService must be '${expected}' for this line`
+          : 'imessageConfig.bluebubblesPasswordService must be bound to the configured line',
       );
     }
   }
 
   if (backend === 'imsg') {
+    if (ic['bluebubblesUrl'] !== undefined) {
+      return err(
+        'imessageConfig.bluebubblesUrl',
+        "imessageConfig.bluebubblesUrl is only valid when backend is 'bluebubbles'",
+      );
+    }
+    if (ic['bluebubblesPasswordService'] !== undefined) {
+      return err(
+        'imessageConfig.bluebubblesPasswordService',
+        "imessageConfig.bluebubblesPasswordService is only valid when backend is 'bluebubbles'",
+      );
+    }
     const socketPath = ic['imsgSocketPath'];
     if (socketPath !== undefined) {
       if (typeof socketPath !== 'string' || socketPath === '' || !socketPath.startsWith('/')) {
@@ -1639,26 +1906,20 @@ function validateImessageConfig(ic: Record<string, unknown>): ValidationError | 
   const sender = ic['sender'];
   if (
     typeof sender !== 'string' ||
-    !(APPLEID_EMAIL_RE.test(sender) || E164_RE.test(sender))
+    !((APPLEID_EMAIL_RE.test(sender) && sender === sender.toLowerCase()) || E164_RE.test(sender))
   ) {
     return err(
       'imessageConfig.sender',
-      'imessageConfig.sender must be an AppleID email or E.164 phone number',
+      'imessageConfig.sender must be a lowercase AppleID email or E.164 phone number',
     );
   }
 
-  // inboundMode: 'poll' or 'webhook'; webhook is BlueBubbles-only.
+  // inboundMode: poll only until an authenticated webhook receiver exists.
   const inboundMode = ic['inboundMode'];
-  if (inboundMode !== undefined && inboundMode !== 'poll' && inboundMode !== 'webhook') {
+  if (inboundMode !== undefined && inboundMode !== 'poll') {
     return err(
       'imessageConfig.inboundMode',
-      "imessageConfig.inboundMode must be 'poll' or 'webhook'",
-    );
-  }
-  if (inboundMode === 'webhook' && backend !== 'bluebubbles') {
-    return err(
-      'imessageConfig.inboundMode',
-      "imessageConfig.inboundMode 'webhook' is only supported with backend 'bluebubbles'",
+      "imessageConfig.inboundMode supports only 'poll'; webhook inbound is not implemented",
     );
   }
 

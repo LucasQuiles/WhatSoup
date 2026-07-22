@@ -46,21 +46,18 @@ describe('provider key service mapping', () => {
   });
 
   it('honors non-empty HTTP API overrides but ignores empty or non-string values', () => {
-    expect(resolveProviderKeyService('openai-api', undefined, { apiKeyService: 'tenant-openai' })).toBe('tenant-openai');
-    expect(resolveProviderKeyService('anthropic-api', undefined, { apiKeyService: 'tenant-anthropic' })).toBe('tenant-anthropic');
+    expect(resolveProviderKeyService('openai-api', undefined, { apiKeyService: 'groq' })).toBe('groq');
+    expect(resolveProviderKeyService('anthropic-api', undefined, { apiKeyService: 'openrouter' })).toBe('openrouter');
     expect(resolveProviderKeyService('openai-api', undefined, { apiKeyService: '' })).toBe('openai');
     expect(resolveProviderKeyService('anthropic-api', undefined, { apiKeyService: '' })).toBe('anthropic');
     expect(resolveProviderKeyService('openai-api', undefined, { apiKeyService: 42 })).toBe('openai');
+    expect(resolveProviderKeyService('openai-api', undefined, { apiKeyService: 'plaintext-provider-selector-sentinel' })).toBe('openai');
   });
 
   it('derives opencode service names from model prefixes and leaves non-keyring providers unresolved', () => {
     expect(resolveProviderKeyService('opencode-cli', ' DeepSeek/deepseek-chat ')).toBe('deepseek');
     expect(resolveProviderKeyService('opencode-cli', 'minimax/MiniMax-M2.7', { apiKeyService: 'ignored' })).toBe('minimax');
-    // Documented fail-open: an UNREGISTERED vendor prefix still resolves to a
-    // service name (no SERVICE_ENV_MAP membership check here) — downstream
-    // lookupCredential simply misses. Locked so a future membership check is
-    // a conscious behavior change.
-    expect(resolveProviderKeyService('opencode-cli', 'unknown-vendor/some-model')).toBe('unknown-vendor');
+    expect(resolveProviderKeyService('opencode-cli', 'unknown-vendor/some-model')).toBeNull();
     expect(resolveProviderKeyService('opencode-cli', '')).toBeNull();
     expect(resolveProviderKeyService('claude-cli', 'claude-sonnet')).toBeNull();
     expect(resolveProviderKeyService(null, 'minimax/model')).toBeNull();

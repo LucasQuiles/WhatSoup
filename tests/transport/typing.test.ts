@@ -46,6 +46,7 @@ vi.mock('../../src/logger.ts', () => ({
 
 import { makeWASocket } from '@whiskeysockets/baileys';
 import { ConnectionManager } from '../../src/transport/connection.ts';
+import { withWarmIdentity } from '../helpers/outbound-identity.ts';
 
 function makeMockSocket() {
   return {
@@ -74,7 +75,7 @@ describe('ConnectionManager typing', () => {
   it('setTyping accepts recording state', async () => {
     const mockSock = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     await manager.setTyping('111@s.whatsapp.net', 'recording');
@@ -86,7 +87,7 @@ describe('ConnectionManager typing', () => {
     mockConfig.autoTyping = 'recording';
     const mockSock = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     await manager.sendMessage('111@s.whatsapp.net', 'hello');
@@ -100,7 +101,7 @@ describe('ConnectionManager typing', () => {
     mockConfig.autoTyping = 'composing';
     const mockSock = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
-    const manager = new ConnectionManager();
+    const manager = withWarmIdentity(new ConnectionManager());
     await manager.connect();
 
     await manager.sendRaw('111@s.whatsapp.net', { text: 'hello' });

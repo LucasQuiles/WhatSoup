@@ -337,7 +337,7 @@ describe('validateInstanceConfig — providerConfig.apiKeyService', () => {
     const err = validateInstanceConfig(opencodeEndpoint('grokcloud'), createCtx);
     expect(err).not.toBeNull();
     expect(err?.field).toBe('agentOptions.providerConfig.apiKeyService');
-    expect(err?.message).toContain('grokcloud');
+    expect(err?.message).not.toContain('grokcloud');
     expect(err?.message).toContain('minimax');
     expect(err?.message).toContain('deepseek');
   });
@@ -354,7 +354,7 @@ describe('validateInstanceConfig — providerConfig.apiKeyService', () => {
       expect(err?.field, `${service} must stay rejected until mapped`).toBe(
         'agentOptions.providerConfig.apiKeyService',
       );
-      expect(err?.message).toContain(service);
+      expect(err?.message).not.toContain(service);
     }
   });
 
@@ -484,7 +484,7 @@ describe('validateInstanceConfig — chatOptions.openaiProviderConfig.apiKeyServ
     const err = validateInstanceConfig(openaiEndpoint('grokcloud'), createCtx);
     expect(err).not.toBeNull();
     expect(err?.field).toBe('chatOptions.openaiProviderConfig.apiKeyService');
-    expect(err?.message).toContain('grokcloud');
+    expect(err?.message).not.toContain('grokcloud');
     expect(err?.message).toContain('minimax');
   });
 
@@ -561,7 +561,7 @@ describe('validateInstanceConfig — apiKeyService rejects non-provider keyring 
       );
       expect(err).not.toBeNull();
       expect(err?.field).toBe('agentOptions.providerConfig.apiKeyService');
-      expect(err?.message).toContain(service);
+      expect(err?.message).not.toContain(service);
     });
 
     it(`rejects apiKeyService ${service} on chatOptions.openaiProviderConfig even with a valid baseUrl`, () => {
@@ -585,7 +585,7 @@ describe('validateInstanceConfig — apiKeyService rejects non-provider keyring 
       );
       expect(err).not.toBeNull();
       expect(err?.field).toBe('chatOptions.openaiProviderConfig.apiKeyService');
-      expect(err?.message).toContain(service);
+      expect(err?.message).not.toContain(service);
     });
 
     it(`rejects apiKeyService ${service} on transcriptionOptions.openaiProviderConfig even with a valid baseUrl`, () => {
@@ -610,7 +610,7 @@ describe('validateInstanceConfig — apiKeyService rejects non-provider keyring 
       );
       expect(err).not.toBeNull();
       expect(err?.field).toBe('transcriptionOptions.openaiProviderConfig.apiKeyService');
-      expect(err?.message).toContain(service);
+      expect(err?.message).not.toContain(service);
     });
   }
 });

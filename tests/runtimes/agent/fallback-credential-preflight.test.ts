@@ -224,19 +224,19 @@ describe('armFallbackWindow — credential pre-flight', () => {
   });
 
   it('uses providerConfig.apiKeyService for same-provider API fallback pre-flight', () => {
-    lookupCredentialMock.mockImplementation((service) => service === 'tenant-openai' ? 'tenant-openai-key' : null);
+    lookupCredentialMock.mockImplementation((service) => service === 'groq' ? 'groq-key' : null);
     const runtime = makeRuntime({
       agentProvider: 'openai-api',
-      agentProviderConfig: { apiKeyService: 'tenant-openai' },
+      agentProviderConfig: { apiKeyService: 'groq' },
       agentFallbackProvider: 'openai-api',
       agentFallbackModel: 'gpt-4o-mini',
     });
 
     fbView(runtime).activateProviderFallback(null);
 
-    expect(lookupCredentialMock).toHaveBeenCalledWith('tenant-openai');
+    expect(lookupCredentialMock).toHaveBeenCalledWith('groq');
     expect(lookupCredentialMock).not.toHaveBeenCalledWith('openai');
-    expect(verifyFallbackCredentialMock).toHaveBeenCalledWith('tenant-openai', 'tenant-openai-key');
+    expect(verifyFallbackCredentialMock).toHaveBeenCalledWith('groq', 'groq-key');
     expect(vi.mocked(emitAlert)).not.toHaveBeenCalledWith(
       'test',
       'fallback_credential_missing',

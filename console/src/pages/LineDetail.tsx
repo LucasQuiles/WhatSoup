@@ -6,10 +6,11 @@ import { useLine, useChats, useMessages, useAccess, useLogs, useTyping, useCheck
 import { useMetrics } from '../hooks/use-metrics'
 import type { MetricsRange } from '../types'
 import { getPreference, setPreference } from '../lib/preferences'
-import { formatCount } from '../lib/text-utils'
+import { buildSelfJid, formatCount } from '../lib/text-utils'
 import { useToast } from '../hooks/toast-context'
 import { api } from '../lib/api'
 import ModeBadge from '../components/ModeBadge'
+import TransportBadge from '../components/TransportBadge'
 import { StatusCell, Tabs, Tab, Button, ActionButton } from '../components/primitives'
 import LineTags from '../components/LineTags'
 import HeartbeatStrip from '../components/HeartbeatStrip'
@@ -203,6 +204,10 @@ export default function LineDetail() {
             <h1 title={line.name} className="text-text-1 font-extrabold font-[family-name:var(--font-display)] tracking-[var(--tracking-tight)] text-xl truncate min-w-0 flex-1">
               {line.name}
             </h1>
+            <TransportBadge
+              kind={line.transport ?? line.health?.transport?.kind}
+              backend={(line.config?.imessageConfig as { backend?: 'imsg' | 'bluebubbles' } | undefined)?.backend}
+            />
             <ModeBadge mode={line.mode} />
             <LineTags line={line} />
           </div>
@@ -326,6 +331,7 @@ export default function LineDetail() {
                   mode={line.mode}
                   lineName={name || ''}
                   typingJids={typingJids}
+                  transport={line.transport ?? line.health?.transport?.kind}
                 />
               )}
               {activeTab === 'logs' && (
@@ -367,7 +373,15 @@ export default function LineDetail() {
                   liveSessions={liveSessionsPayload}
                 />
               )}
-              {activeTab === 'groups' && <GroupsTab lineName={name || ''} myJid={line.phone ? `${line.phone}@s.whatsapp.net` : undefined} />}
+              {activeTab === 'groups' && (
+                <GroupsTab
+                  lineName={name || ''}
+                  myJid={buildSelfJid(
+                    line.transport ?? line.health?.transport?.kind,
+                    line.health?.transport?.selfId ?? line.phone,
+                  )}
+                />
+              )}
             </ErrorBoundary>
           </motion.div>
         </AnimatePresence>
@@ -392,6 +406,7 @@ export default function LineDetail() {
       <Suspense fallback={null}>
         <RelinkModal
           lineName={line?.name ?? ''}
+          transport={line.transport ?? line.health?.transport?.kind}
           open={showRelink}
           onClose={() => setShowRelink(false)}
           onLinked={() => { setShowRelink(false); queryClient.invalidateQueries({ queryKey: ['lines', name] }); toast.success(`${line?.name} re-linked!`); }}
@@ -402,6 +417,7 @@ export default function LineDetail() {
           open={showConfigEditor}
           config={line.config}
           lineName={line.name}
+          transport={line.transport ?? line.health?.transport?.kind}
           adminPhonesDisplay={(line as unknown as { adminPhonesDisplay?: Record<string, string> }).adminPhonesDisplay}
           onClose={() => setShowConfigEditor(false)}
         />

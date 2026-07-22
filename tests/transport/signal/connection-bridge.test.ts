@@ -7,6 +7,7 @@ import { SignalConnection } from '../../../src/transport/signal/connection-bridg
 import { MockSignalPort, makeSignalConfig } from './mock-port.ts';
 import { Database } from '../../../src/core/database.ts';
 import { storeMessageIfNew } from '../../../src/core/messages.ts';
+import { withWarmIdentity } from '../../helpers/outbound-identity.ts';
 
 describe('SignalConnection', () => {
   it('translates group inbound messages onto the RuntimeConnection surface', async () => {
@@ -120,7 +121,7 @@ describe('SignalConnection', () => {
   it('routes portable text sends through the adapter', async () => {
     const port = new MockSignalPort();
     const adapter = new SignalAdapter(makeSignalConfig({ pollIntervalMs: 60_000 }), port);
-    const connection = new SignalConnection(adapter);
+    const connection = withWarmIdentity(new SignalConnection(adapter));
 
     await expect(connection.sendMessage('+15559990000@signal', 'hello')).resolves.toMatchObject({
       waMessageId: expect.stringMatching(/^\d+$/),

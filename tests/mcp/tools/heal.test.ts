@@ -146,6 +146,7 @@ const { mockSendTracked } = vi.hoisted(() => ({
 }));
 vi.mock('../../../src/core/durability.ts', () => ({
   sendTracked: mockSendTracked,
+  sendTrackedOperatorReport: mockSendTracked,
 }));
 
 // dequeueNextReport mock

@@ -59,6 +59,7 @@ import {
   TYPING_BREAKER_MAX_CONSECUTIVE_FAILURES,
   TYPING_PRESENCE_TIMEOUT_MS,
 } from '../../src/transport/connection.ts';
+import { withWarmIdentity } from '../helpers/outbound-identity.ts';
 
 const USER_JID = '15550001@s.whatsapp.net';
 
@@ -95,7 +96,7 @@ function openEvent() {
 async function connected() {
   const { mockSock, emit } = makeMockSocket();
   vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
-  const manager = new ConnectionManager();
+  const manager = withWarmIdentity(new ConnectionManager());
   await manager.connect();
   emit(openEvent());
   return { manager, mockSock, emit };

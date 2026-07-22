@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Database } from '../../../src/core/database.ts';
 import { SqliteIdentityStore } from '../../../src/core/outbound-identity/store.ts';
+import { assertOutboundIdentity } from '../../../src/core/outbound-identity/guard.ts';
 
 let db: Database;
 let store: SqliteIdentityStore;
@@ -38,6 +39,19 @@ describe('SqliteIdentityStore.isWarm', () => {
     db.raw.prepare("INSERT INTO access_list (subject_type, subject_id, status) VALUES ('phone', ?, 'allowed')")
       .run('15550002222');
     expect(store.isWarm('15550002222@s.whatsapp.net', '15550002222')).toBe(true);
+  });
+
+  it.each([
+    ['Twilio SMS', '15550002223', '+15550002223@sms'],
+    ['Signal E.164', '+15550002224', '+15550002224@signal'],
+    ['Signal UUID', '01234567-89ab-cdef-0123-456789abcdef', '01234567-89ab-cdef-0123-456789abcdef@signal'],
+    ['iMessage AppleID', 'owner@example.com', 'owner@example.com@imessage'],
+  ])('maps an allowed %s identity through its transport JID', (_name, subjectId, jid) => {
+    db.raw.prepare("INSERT INTO access_list (subject_type, subject_id, status) VALUES ('phone', ?, 'allowed')")
+      .run(subjectId);
+
+    expect(assertOutboundIdentity(jid, { caller: 'agent', mode: 'enforce' }, store))
+      .toEqual({ verdict: 'allow' });
   });
 
   it('is NOT warm when access_list status is pending', () => {
