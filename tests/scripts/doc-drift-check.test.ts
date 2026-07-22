@@ -38,9 +38,22 @@ describe('doc drift check', () => {
     process.exitCode = undefined;
   });
 
-  it('passes for current MCP tool, module count, and design inventory docs', () => {
-    expect(findDocDrift({ cwd: repoRoot })).toEqual([]);
-  });
+  it(
+    'passes for current MCP tool, module count, and design inventory docs',
+    () => {
+      expect(findDocDrift({ cwd: repoRoot })).toEqual([]);
+    },
+    // The only test here that scans the REAL repo, and 4.5x the slowest of its siblings
+    // (2227ms locally against ~660ms each). At that margin the 10s default is decided by
+    // runner load rather than by the code: it timed out on `quality (24.x)` while
+    // `quality (25.x)` passed on the same commit, with 21260 other tests green.
+    //
+    // An explicit budget is the right fix here, unlike the 505-row checkpoint seed, where
+    // the cost was accidental (one durable commit per insert) and was removed instead.
+    // Scanning the whole repo is this test's actual job, so the work cannot be made
+    // cheaper without weakening what it checks — only the budget can be made honest.
+    60_000,
+  );
 
   it('flags stale explicit MCP tool count claims with file and line details', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-doc-drift-'));
