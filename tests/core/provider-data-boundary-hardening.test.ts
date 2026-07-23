@@ -307,6 +307,20 @@ describe('provider data boundary hardening', () => {
     expect(broker.rehydrateToolInput('inspect', record, tools)).toEqual(record);
   });
 
+  it.each([100, 500, 1_000])(
+    'bounds internal boundary work for %i delimiter-dense fields',
+    (fieldCount) => {
+      const value = 'ordinarycredential=a='.repeat(24);
+      const texts = Array.from({ length: fieldCount }, () => value);
+      const scan = scanProviderTextSequence(texts);
+      const inspectedCharacters = fieldCount * value.length;
+
+      expect(scan.secretBoundaryWorkUnitCount).toBeGreaterThan(0);
+      expect(scan.secretBoundaryWorkUnitCount).toBeLessThanOrEqual(inspectedCharacters * 24);
+      expect(scan.detectorInvocationCount).toBeLessThanOrEqual(fieldCount * 4);
+    },
+  );
+
   it.each([
     ['early two-field secret', ['cred', 'ential="quoted multiword value"'], 'secret_detected'],
     ['late two-field secret', ['ordinary', 'values', 'cred', 'ential="quoted multiword value"'], 'secret_detected'],

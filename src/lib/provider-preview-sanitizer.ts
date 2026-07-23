@@ -117,22 +117,42 @@ interface KeyedValueStart {
   readonly valueStart: number;
 }
 
+export interface ProviderSecretBoundaryWorkCounter {
+  /** Aggregate deterministic scanner work only; never content, positions, or values. */
+  units: number;
+}
+
+function addBoundaryWork(
+  counter: ProviderSecretBoundaryWorkCounter | undefined,
+  units: number,
+): void {
+  if (counter) counter.units += units;
+}
+
 function keyedValueStart(
   text: string,
   delimiterIndex: number,
   allowSecretKeySuffix: boolean,
+  workCounter?: ProviderSecretBoundaryWorkCounter,
 ): KeyedValueStart | null {
   let keyEnd = delimiterIndex;
-  while (keyEnd > 0 && /\s/.test(text[keyEnd - 1]!)) keyEnd -= 1;
+  while (keyEnd > 0 && /\s/.test(text[keyEnd - 1]!)) {
+    addBoundaryWork(workCounter, 1);
+    keyEnd -= 1;
+  }
   let keyStart = keyEnd;
   let usedSecretKeySuffix = false;
   const closingQuote = text[keyEnd - 1];
   if (closingQuote === '"' || closingQuote === "'") {
     let contentStart = keyEnd - 1;
-    while (contentStart > 0 && /[A-Za-z0-9_.-]/.test(text[contentStart - 1]!)) contentStart -= 1;
+    while (contentStart > 0 && /[A-Za-z0-9_.-]/.test(text[contentStart - 1]!)) {
+      addBoundaryWork(workCounter, 1);
+      contentStart -= 1;
+    }
     if (text[contentStart - 1] !== closingQuote) return null;
     keyStart = contentStart - 1;
     const key = text.slice(contentStart, keyEnd - 1);
+    addBoundaryWork(workCounter, key.length);
     if (!isSecretKey(key)) {
       const suffixStart = allowSecretKeySuffix ? secretKeySuffixStart(key) : null;
       if (suffixStart === null) return null;
@@ -140,9 +160,13 @@ function keyedValueStart(
       usedSecretKeySuffix = true;
     }
   } else {
-    while (keyStart > 0 && /[A-Za-z0-9_.-]/.test(text[keyStart - 1]!)) keyStart -= 1;
+    while (keyStart > 0 && /[A-Za-z0-9_.-]/.test(text[keyStart - 1]!)) {
+      addBoundaryWork(workCounter, 1);
+      keyStart -= 1;
+    }
     if (keyStart === keyEnd) return null;
     const key = text.slice(keyStart, keyEnd);
+    addBoundaryWork(workCounter, key.length);
     if (!isSecretKey(key)) {
       const suffixStart = allowSecretKeySuffix ? secretKeySuffixStart(key) : null;
       if (suffixStart === null) return null;
@@ -152,7 +176,10 @@ function keyedValueStart(
   }
   if (!usedSecretKeySuffix && keyStart > 0 && /[A-Za-z0-9_]/.test(text[keyStart - 1]!)) return null;
   let valueStart = delimiterIndex + 1;
-  while (valueStart < text.length && /\s/.test(text[valueStart]!)) valueStart += 1;
+  while (valueStart < text.length && /\s/.test(text[valueStart]!)) {
+    addBoundaryWork(workCounter, 1);
+    valueStart += 1;
+  }
   return { secretStart: keyStart, valueStart };
 }
 
@@ -172,8 +199,12 @@ interface BoundaryCandidateIndex {
   readonly tokenMatchEnds: Int32Array;
 }
 
-function createBoundaryCandidateIndex(text: string): BoundaryCandidateIndex {
+function createBoundaryCandidateIndex(
+  text: string,
+  workCounter?: ProviderSecretBoundaryWorkCounter,
+): BoundaryCandidateIndex {
   const length = text.length;
+  addBoundaryWork(workCounter, length * 2);
   const unquotedEnds = new Uint32Array(length).fill(length);
   const singleQuoteEnds = new Uint32Array(length).fill(length);
   const doubleQuoteEnds = new Uint32Array(length).fill(length);
@@ -222,16 +253,19 @@ function keyedSecretValues(
   text: string,
   allowSecretKeySuffix = false,
   boundaryIndex?: BoundaryCandidateIndex,
+  workCounter?: ProviderSecretBoundaryWorkCounter,
 ): KeyedSecretValue[] {
   const values: KeyedSecretValue[] = [];
   let candidateIndex = boundaryIndex;
   let consumedThrough = 0;
+  addBoundaryWork(workCounter, text.length);
   for (const match of text.matchAll(ASSIGNMENT_DELIMITER)) {
+    addBoundaryWork(workCounter, 1);
     if (!allowSecretKeySuffix && match.index < consumedThrough) continue;
-    const start = keyedValueStart(text, match.index, allowSecretKeySuffix);
+    const start = keyedValueStart(text, match.index, allowSecretKeySuffix, workCounter);
     if (start === null) continue;
     if (allowSecretKeySuffix && !candidateIndex) {
-      candidateIndex = createBoundaryCandidateIndex(text);
+      candidateIndex = createBoundaryCandidateIndex(text, workCounter);
     }
     const { secretStart, valueStart } = start;
     const opening = text[valueStart];
@@ -241,6 +275,7 @@ function keyedSecretValues(
         : valueStart + 1;
       let escaped = false;
       while (!candidateIndex && valueEnd < text.length) {
+        addBoundaryWork(workCounter, 1);
         const char = text[valueEnd]!;
         if (escaped) escaped = false;
         else if (char === '\\') escaped = true;
@@ -261,6 +296,7 @@ function keyedSecretValues(
     }
     let valueEnd = candidateIndex?.unquotedEnds[valueStart] ?? valueStart;
     while (!candidateIndex && valueEnd < text.length && !/\s/.test(text[valueEnd]!)) {
+      addBoundaryWork(workCounter, 1);
       valueEnd += 1;
     }
     const value = text.slice(valueStart, valueEnd);
@@ -311,6 +347,7 @@ function providerSecretValueSpans(
   text: string,
   allowSecretKeySuffix = false,
   tokenBoundaryStarts: ReadonlySet<number> = new Set(),
+  workCounter?: ProviderSecretBoundaryWorkCounter,
 ): ProviderSecretValueSpan[] {
   const spans: ProviderSecretValueSpan[] = [];
   let boundaryIndex: BoundaryCandidateIndex | undefined;
@@ -321,12 +358,14 @@ function providerSecretValueSpans(
     tokenSpans.add(key);
     spans.push({ start, end });
   };
+  addBoundaryWork(workCounter, text.length);
   BEARER_TOKEN_RE.lastIndex = 0;
   for (const match of text.matchAll(BEARER_TOKEN_RE)) {
     if (match.index !== undefined) {
       spans.push({ start: match.index, end: match.index + match[0].length });
     }
   }
+  addBoundaryWork(workCounter, text.length);
   KNOWN_TOKEN_RE.lastIndex = 0;
   for (const match of text.matchAll(KNOWN_TOKEN_RE)) {
     if (match.index !== undefined) {
@@ -335,10 +374,11 @@ function providerSecretValueSpans(
   }
   if (allowSecretKeySuffix) {
     for (const start of tokenBoundaryStarts) {
+      addBoundaryWork(workCounter, 1);
       KNOWN_TOKEN_PREFIX_AT_START_RE.lastIndex = start;
       const prefixMatch = KNOWN_TOKEN_PREFIX_AT_START_RE.exec(text);
       if (prefixMatch?.index === start && !boundaryIndex) {
-        boundaryIndex = createBoundaryCandidateIndex(text);
+        boundaryIndex = createBoundaryCandidateIndex(text, workCounter);
       }
       const end = boundaryIndex?.tokenMatchEnds[start] ?? -1;
       if (
@@ -349,7 +389,12 @@ function providerSecretValueSpans(
       }
     }
   }
-  for (const value of keyedSecretValues(text, allowSecretKeySuffix, boundaryIndex)) {
+  for (const value of keyedSecretValues(
+    text,
+    allowSecretKeySuffix,
+    boundaryIndex,
+    workCounter,
+  )) {
     if (!value.redact) continue;
     spans.push({
       start: value.secretStart,
@@ -373,13 +418,15 @@ export function containsProviderSecretValueAcrossBoundary(
   left: string,
   right: string,
   leftFieldStarts: readonly number[] = [],
+  workCounter?: ProviderSecretBoundaryWorkCounter,
 ): boolean {
   const boundary = left.length;
   const tokenBoundaryStarts = new Set(leftFieldStarts);
   const directLeftStarts = new Set(
-    providerSecretValueSpans(left, true, tokenBoundaryStarts).map((span) => span.start),
+    providerSecretValueSpans(left, true, tokenBoundaryStarts, workCounter)
+      .map((span) => span.start),
   );
-  return providerSecretValueSpans(left + right, true, tokenBoundaryStarts)
+  return providerSecretValueSpans(left + right, true, tokenBoundaryStarts, workCounter)
     .some((span) => (
       span.start < boundary
       && span.end > boundary

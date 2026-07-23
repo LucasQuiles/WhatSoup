@@ -169,6 +169,8 @@ export interface ProviderTextSequenceScan {
   readonly directAlias: boolean;
   readonly fragmentedAlias: boolean;
   readonly detectorInvocationCount: number;
+  /** Aggregate deterministic secret-boundary work for availability assertions. */
+  readonly secretBoundaryWorkUnitCount: number;
 }
 
 /** Scan one deterministic sequence while distinguishing complete values from cross-field fragments. */
@@ -180,6 +182,7 @@ export function scanProviderTextSequence(texts: readonly string[]): ProviderText
   let directAlias = false;
   let fragmentedAlias = false;
   let detectorInvocationCount = 0;
+  const secretBoundaryWork = { units: 0 };
   const hasSecret = (text: string): boolean => {
     detectorInvocationCount += 1;
     return containsProviderSecretValue(text);
@@ -198,7 +201,12 @@ export function scanProviderTextSequence(texts: readonly string[]): ProviderText
     leftFieldStarts: readonly number[],
   ): boolean => {
     detectorInvocationCount += 1;
-    return containsProviderSecretValueAcrossBoundary(left, right, leftFieldStarts);
+    return containsProviderSecretValueAcrossBoundary(
+      left,
+      right,
+      leftFieldStarts,
+      secretBoundaryWork,
+    );
   };
   for (const text of texts) {
     const prefix = text.slice(0, 512);
@@ -227,5 +235,6 @@ export function scanProviderTextSequence(texts: readonly string[]): ProviderText
     directAlias,
     fragmentedAlias,
     detectorInvocationCount,
+    secretBoundaryWorkUnitCount: secretBoundaryWork.units,
   };
 }
