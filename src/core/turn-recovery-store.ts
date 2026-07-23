@@ -425,6 +425,7 @@ type TurnRecoveryStatements = {
   renewTurnRecoveryClaim: PreparedStatement;
   completeTurnRecoveryJob: PreparedStatement;
   getTurnRecoverySourceInboundStatus: PreparedStatement;
+  getTurnRecoveryOriginalDeliveryStatus: PreparedStatement;
   getEchoedTurnRecoverySettlement: PreparedStatement;
   completeEchoedTurnRecoveryInbound: PreparedStatement;
   completeEchoedTurnRecoveryJob: PreparedStatement;
@@ -561,6 +562,16 @@ export class TurnRecoveryStore {
         ${VALID_RECOVERY_JOB_FROM}
         WHERE j.id = ?
           AND j.claim_expires_at > datetime('now')
+      `),
+      // Same join, no claim-liveness filter: callable BEFORE a claim exists,
+      // so the supervisor can skip claiming a job whose original selected
+      // delivery is still ambiguous (maybe_sent) rather than claim, replay,
+      // and then fail completeTurnRecoveryJob's own terminal-status gate
+      // after a real send already went out (the duplicate-output risk).
+      getTurnRecoveryOriginalDeliveryStatus: prepare(`
+        SELECT o.status AS outbound_status
+        ${VALID_RECOVERY_JOB_FROM}
+        WHERE j.id = ?
       `),
       getEchoedTurnRecoverySettlement: prepare(`
         SELECT j.id AS job_id, j.state, i.seq AS inbound_seq,
@@ -1692,6 +1703,23 @@ export class TurnRecoveryStore {
       echoConflicts: row.echo_conflicts,
       openRecoveries: row.open_recoveries,
     };
+  }
+
+  /**
+   * The ORIGINAL selected-delivery op's outbound status, independent of
+   * claim state — callable on a still-`pending` job (unlike
+   * `getEchoedTurnRecoverySettlement`/the completion-time check, both of
+   * which require a live claim). `undefined` covers both "job does not
+   * exist" and "no valid recovery link" the same way the shared join does
+   * elsewhere; callers that need to distinguish those already hold the row
+   * from enumeration.
+   */
+  getTurnRecoveryOriginalDeliveryStatus(jobId: number): { outboundStatus: string } | undefined {
+    validatePositiveSafeInteger(jobId, 'Recovery job ID');
+    const row = this.statements.getTurnRecoveryOriginalDeliveryStatus.get(jobId) as
+      | { outbound_status: string }
+      | undefined;
+    return row ? { outboundStatus: row.outbound_status } : undefined;
   }
 
   hasOutstandingTurnRecoveryForScope(
