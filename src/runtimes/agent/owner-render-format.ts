@@ -15,6 +15,60 @@ import { adviseModel } from '../../lib/model-catalog.ts';
 /** WhatsApp bullet prefix for owner-facing enumerations. */
 export const OWNER_BULLET = '• ';
 
+export interface DisplayRoute {
+  provider: string;
+  model?: string;
+}
+
+export function displayedRoute(live: DisplayRoute | null, next: DisplayRoute): DisplayRoute {
+  return live ?? next;
+}
+
+export function isDisplayedRoute(candidate: DisplayRoute, active: DisplayRoute): boolean {
+  return candidate.provider === active.provider && candidate.model === active.model;
+}
+
+export function fallbackRouteLabel(entry: DisplayRoute | null): string | null {
+  return entry ? (entry.model ? `${entry.provider} (${entry.model})` : entry.provider) : null;
+}
+
+export function renderPinPreferenceOutcome(
+  label: string,
+  outcome: 'noop' | 'recycled' | 'deferred',
+  fallbackRoute: string | null,
+): string {
+  if (fallbackRoute) {
+    return `_Saved ${label} as this chat's 24h preference. Health fallback is active; new sessions still use ${fallbackRoute} until recovery. reply keep to make it permanent, /reset to undo._`;
+  }
+  if (outcome === 'recycled') return `_Now answering with ${label}. reply keep to make it permanent, /reset to undo._`;
+  if (outcome === 'deferred') return `_${label} is pinned — it'll answer from your next message. reply keep to make it permanent, /reset to undo._`;
+  return `_Pinned ${label} for 24h — reply keep to make it permanent, /reset to undo._`;
+}
+
+export function fallbackReconfirmationOutcome(
+  label: string,
+  alreadySetText: string,
+  fallbackRoute: string | null,
+): string | null {
+  if (!fallbackRoute) return null;
+  const lifetime = alreadySetText.includes('sticky') ? 'permanent' : 'extended for 24h';
+  return `_Saved preference remains ${label} (${lifetime}). Health fallback is active; new sessions still use ${fallbackRoute} until recovery. /reset to undo._`;
+}
+
+export function savedPreferenceLine(
+  pref: { intent: string; requestedProvider: string | null; requestedModel: string | null; modelPinVerified: boolean | null; expiresAt: number | null } | null,
+  fallbackActive: boolean,
+  honoredWithinFallback = false,
+  now = Date.now(),
+): string {
+  if (!pref) return 'Saved preference: none';
+  const target = (pref.modelPinVerified === true ? pref.requestedModel : null) ?? pref.requestedProvider ?? pref.intent;
+  const expiry = pref.expiresAt === null ? '' : ` (expires in ~${Math.max(1, Math.round((pref.expiresAt - now) / 3_600_000))}h)`;
+  const effect = honoredWithinFallback ? ' — active within the health fallback provider' :
+    fallbackActive ? ' — health fallback currently decides new sessions' : ' — steers new sessions';
+  return `Saved preference: ${target}${expiry}${effect}`;
+}
+
 /**
  * Render an enumeration as a header line followed by one `• ` bullet per entry
  * — the WhatsApp-narrow-column shape. Callers only reach here with a non-empty

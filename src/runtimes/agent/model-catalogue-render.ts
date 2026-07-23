@@ -14,7 +14,15 @@ import { createChildLogger } from '../../logger.ts';
 import type { AgentFallbackEntry } from '../../core/fallback-chain.ts';
 import { resolveProviderCredentialState, isProviderRoutable } from '../../lib/provider-credential-eligibility.ts';
 import { fallbackProviderConfigFor } from './fallback-config.ts';
-import { OWNER_BULLET, modelModifierTags, modifierSuffix, MODEL_CATALOGUE_CAP } from './owner-render-format.ts';
+import {
+  OWNER_BULLET,
+  displayedRoute,
+  isDisplayedRoute,
+  modelModifierTags,
+  modifierSuffix,
+  MODEL_CATALOGUE_CAP,
+  type DisplayRoute,
+} from './owner-render-format.ts';
 import { configPointer, scopedCatalogue } from './model-catalogue.ts';
 import type { ProviderDescriptor } from './providers/provider-descriptor.ts';
 import type { CatalogueSnapshotCache, CatalogueEntry } from './model-snapshot-cache.ts';
@@ -40,6 +48,7 @@ export interface ModelCatalogueRenderPort {
   // composition-layer import (ring-boundary discipline).
   readonly nlRoutingTiers: { strongest?: string; fastest?: string } | null | undefined;
   sendDirect(chatJid: string, text: string): void;
+  loadRouteView(chatJid: string, senderJid: string): { live: DisplayRoute | null; next: DisplayRoute };
 }
 
 /**
@@ -178,6 +187,8 @@ export async function sendDynamicModelCatalogueSection(
   filter: string | null,
 ): Promise<void> {
   try {
+    const { live, next } = port.loadRouteView(chatJid, senderJid);
+    const active = displayedRoute(live, next);
     const candidates: Array<{ provider: string; model: string }> = [];
     if (port.model !== undefined) candidates.push({ provider: port.agentProvider, model: port.model });
     for (const e of port.agentFallbacks) {
@@ -195,8 +206,8 @@ export async function sendDynamicModelCatalogueSection(
     if (shown.length > 0) {
       lines.push('*Pick a model:*');
       shown.forEach((e, i) => {
-        const isCurrent = e.provider === port.agentProvider && e.model === port.model;
-        lines.push(`${i + 1}. ${e.provider} (${e.model})${isCurrent ? ' (current)' : ''}`);
+        const isCurrent = isDisplayedRoute(e, active);
+        lines.push(`${i + 1}. ${e.provider} (${e.model})${isCurrent ? ' (active route)' : ''}`);
       });
       lines.push('Reply `/model N` to switch to that one.');
       if (pool.length > shown.length) {

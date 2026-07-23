@@ -285,3 +285,96 @@ export function clearChatPreference(db: Database, chatJid: string): void {
 export function pruneExpired(db: Database, now: number = Date.now()): void {
   db.raw.prepare(`DELETE FROM chat_model_preference WHERE expires_at IS NOT NULL AND expires_at <= ?`).run(now);
 }
+
+/**
+ * `promoteToSticky` typed outcomes (Q-CANARY model-pin `keep` contract,
+ * 2026-07-23). The DB helper owns the atomic predicate and returns one of
+ * these; the runtime layer only maps the result to an event/receipt — it
+ * never re-derives eligibility or re-decides the actor policy itself.
+ */
+export type PromoteOutcome = 'promoted' | 'already_sticky' | 'expired' | 'superseded' | 'actor_mismatch' | 'absent';
+
+export interface PromoteToStickyResult {
+  outcome: PromoteOutcome;
+  /** The relevant row (post-write for `promoted`, as-read otherwise). Null
+   *  for `absent`/`expired`/`superseded` — there is nothing safe to surface. */
+  preference: ChatModelPreference | null;
+}
+
+/** Latest row for a chat across every sender, WITHOUT the expiry filter that
+ *  getLatestChatPreference/rowToPreference apply — internal to
+ *  promoteToSticky, which needs to tell "nothing was ever pinned" (absent)
+ *  apart from "a pin existed but lapsed" (expired) before deciding. Never
+ *  used for route resolution. */
+function latestRowIncludingExpired(db: Database, chatJid: string): PreferenceRow | undefined {
+  return db.raw
+    .prepare(`SELECT ${PREFERENCE_COLUMNS} FROM chat_model_preference WHERE chat_jid = ? ORDER BY updated_at DESC LIMIT 1`)
+    .get(chatJid) as PreferenceRow | undefined;
+}
+
+/**
+ * Compare-and-set promotion of the confirmed receipt (the active preference
+ * row IS the receipt — no parallel pending-confirmation state) to a
+ * permanent, sticky pin.
+ *
+ * `nowMs` is the caller's chosen eligibility instant — pass the inbound's
+ * own receive time (`IncomingMessage.timestamp`), never delayed processing
+ * time, so provider-queue pressure cannot turn an on-time `keep` into an
+ * "expired" refusal it would not have earned at receive time.
+ *
+ * Actor policy: only the sender who set the chat's current winning
+ * preference may confirm it (the safest match to the existing per-sender
+ * write audit — GAP-CHECK's "any group member may promote" finding).
+ * `confirmingSenderJid` MUST already be the canonicalized senderKey
+ * (preferenceKeys) — the same form every writer stores, so this comparison
+ * never false-mismatches on a LID/PN alias of the same person.
+ *
+ * The write is a single atomic UPDATE gated on `updated_at` matching the
+ * exact row just read: if the row moved between read and write (a fresh
+ * /model pin, a /reset, a second `keep`, any concurrent writer), zero rows
+ * are affected and the promotion is rejected as `superseded` rather than
+ * resurrecting whatever is there now. `scope='sticky'` and `expires_at=NULL`
+ * are set together in the same statement — the store's own invariant
+ * (`scope=sticky ⇔ expires_at IS NULL`, see the module doc above) can never
+ * be split across two writes.
+ */
+export function promoteToSticky(
+  db: Database,
+  chatJid: string,
+  confirmingSenderJid: string,
+  nowMs: number,
+): PromoteToStickyResult {
+  const raw = latestRowIncludingExpired(db, chatJid);
+  if (!raw) return { outcome: 'absent', preference: null };
+
+  const isExpired = typeof raw.expires_at === 'number' && raw.expires_at <= nowMs;
+  if (isExpired) return { outcome: 'expired', preference: null };
+
+  const winning = rowToPreference(raw, nowMs);
+  // A row that exists, is not expired-per-the-clause-above, yet still fails
+  // shape validation is corrupt (F12 cross-field contract, wrong-typed
+  // affinity, …) — rowToPreference already maps that to null. Treat it the
+  // same as "nothing valid to confirm" rather than risk building a
+  // ChatModelPreference from an out-of-contract row.
+  if (winning === null) return { outcome: 'absent', preference: null };
+
+  if (winning.senderJid !== confirmingSenderJid) {
+    return { outcome: 'actor_mismatch', preference: winning };
+  }
+  if (winning.expiresAt === null) {
+    return { outcome: 'already_sticky', preference: winning };
+  }
+
+  const updatedAt = Date.now();
+  const result = db.raw
+    .prepare(
+      `UPDATE chat_model_preference
+         SET scope = 'sticky', expires_at = NULL, updated_at = ?
+       WHERE chat_jid = ? AND sender_jid = ? AND updated_at = ?`,
+    )
+    .run(updatedAt, winning.chatJid, winning.senderJid, winning.updatedAt);
+  if (result.changes !== 1) {
+    return { outcome: 'superseded', preference: null };
+  }
+  return { outcome: 'promoted', preference: { ...winning, scope: 'sticky', expiresAt: null, updatedAt } };
+}

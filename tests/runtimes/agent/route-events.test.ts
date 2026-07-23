@@ -53,6 +53,7 @@ describe('emitRouteEvent', () => {
     const warn = vi.fn();
     const types: RouteEventType[] = [
       'runtime_selected', 'runtime_switched', 'model_preference_set',
+      'model_preference_made_sticky',
       'model_preference_cleared', 'auto_fallback_started', 'auto_fallback_cleared',
       'user_pin_unreachable', 'delegation_started', 'delegation_finished',
       'approval_required',
