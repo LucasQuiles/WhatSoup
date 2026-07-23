@@ -10,7 +10,6 @@
  * the previous inline implementation — see the `/model list` characterization
  * suite in tests/runtimes/agent/model-pin.test.ts.
  */
-import { config } from '../../config.ts';
 import { createChildLogger } from '../../logger.ts';
 import type { AgentFallbackEntry } from '../../core/fallback-chain.ts';
 import { resolveProviderCredentialState, isProviderRoutable } from '../../lib/provider-credential-eligibility.ts';
@@ -36,6 +35,10 @@ export interface ModelCatalogueRenderPort {
   readonly model: string | undefined;
   readonly agentFallbacks: AgentFallbackEntry[];
   readonly catalogueSnapshot: CatalogueSnapshotCache;
+  // D15: the strongest/fastest intent→provider map. Supplied by the runtime
+  // host (which owns the config read) so this render module stays free of a
+  // composition-layer import (ring-boundary discipline).
+  readonly nlRoutingTiers: { strongest?: string; fastest?: string } | null | undefined;
   sendDirect(chatJid: string, text: string): void;
 }
 
@@ -45,8 +48,7 @@ export interface ModelCatalogueRenderPort {
  * (help-render.ts's tiersConfigured input) read, so the two surfaces can
  * never disagree about whether the verbs are a no-op on this instance.
  */
-export function tiersConfigured(): boolean {
-  const tiers = config.nlRoutingTiers;
+export function tiersConfigured(tiers: { strongest?: string; fastest?: string } | null | undefined): boolean {
   return tiers !== null && tiers !== undefined && (tiers.strongest !== undefined || tiers.fastest !== undefined);
 }
 
@@ -67,8 +69,8 @@ export function renderModelCatalogue(port: ModelCatalogueRenderPort): string {
   // strongest/fastest resolve ONLY through nlRoutingTiers — an absent map
   // means the verbs are a no-op on this instance, so D15 hides the whole
   // line rather than advertising it (canary shape: tiers unset).
-  const tiers = config.nlRoutingTiers;
-  const tiersAreConfigured = tiersConfigured();
+  const tiers = port.nlRoutingTiers;
+  const tiersAreConfigured = tiersConfigured(tiers);
   // b28 r2d: one `• ` bullet per MODEL (primary + each fallback). Each bullet
   // carries its provider + config-derived modifiers ONLY (D7): a catalog
   // lifecycle advisory keyed off the configured model ID (silent for IDs the

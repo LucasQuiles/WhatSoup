@@ -2487,6 +2487,7 @@ export class AgentRuntime implements Runtime {
       model: runtime.model,
       agentFallbacks: runtime.agentFallbacks,
       catalogueSnapshot: runtime.catalogueSnapshot,
+      nlRoutingTiers: config.nlRoutingTiers,
       pendingRecycle: runtime.pendingRecycle,
       chatSessions: runtime.chatSessions,
       chatQueues: runtime.chatQueues,
@@ -4170,7 +4171,7 @@ export class AgentRuntime implements Runtime {
             // shares the flag: alias commands hide local semantics when off (D7).
             // D15: tiersConfigured is a config read, kept in the runtime layer
             // and passed IN — help-render.ts stays a pure function of its args.
-            const helpOpts = { nlRouting: config.nlRouting === true, tiersConfigured: modelTiersConfigured() };
+            const helpOpts = { nlRouting: config.nlRouting === true, tiersConfigured: modelTiersConfigured(config.nlRoutingTiers) };
             const helpText = classified.args
               ? renderHelpDetail(classified.args, helpOpts)
               : renderHelp(helpOpts);
