@@ -371,12 +371,15 @@ export function rehydrateAuthorizedProviderToolInput(input: {
             && additionalProperties !== null
             && !Array.isArray(additionalProperties)
           ) {
-            output[key] = walk(
-              child,
-              additionalProperties as Record<string, unknown>,
-              `${pointer}/${escapePointerSegment(key)}`,
-              depth + 1,
-            );
+            const additionalSchema = additionalProperties as Record<string, unknown>;
+            output[key] = Reflect.ownKeys(additionalSchema).length === 0
+              ? cloneUnclassified(child, depth + 1)
+              : walk(
+                  child,
+                  additionalSchema,
+                  `${pointer}/${escapePointerSegment(key)}`,
+                  depth + 1,
+                );
           } else if (additionalProperties === true || (!hasDeclaredProperties && additionalProperties === undefined)) {
             output[key] = cloneUnclassified(child, depth + 1);
           } else {

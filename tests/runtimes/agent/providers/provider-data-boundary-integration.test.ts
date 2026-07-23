@@ -65,6 +65,35 @@ function anthropicSse(events: Array<Record<string, unknown>>): Response {
   });
 }
 
+function providerToolCall(
+  provider: 'openai-api' | 'anthropic-api',
+  rawArguments: string,
+): Response {
+  return provider === 'openai-api'
+    ? openAiSse([{ choices: [{ delta: { tool_calls: [{
+        index: 0,
+        id: 'empty-schema-call',
+        function: { name: 'configure', arguments: rawArguments },
+      }] } }] }])
+    : anthropicSse([
+        { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'empty-schema-call', name: 'configure' } },
+        { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: rawArguments } },
+        { type: 'content_block_stop', index: 0 },
+        { type: 'message_stop' },
+      ]);
+}
+
+function providerText(provider: 'openai-api' | 'anthropic-api', text: string): Response {
+  return provider === 'openai-api'
+    ? openAiSse([{ choices: [{ delta: { content: text } }] }])
+    : anthropicSse([
+        { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+        { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } },
+        { type: 'content_block_stop', index: 0 },
+        { type: 'message_stop' },
+      ]);
+}
+
 function initOptions(
   provider: 'openai-api' | 'anthropic-api',
   events: AgentEvent[],
@@ -501,6 +530,93 @@ describe('managed provider data boundary integration', () => {
       expect(events.filter((event) => event.type !== 'init'), hostileCase).toEqual([]);
       expect(provider.getCheckpoint().providerState?.['messageCount'], hostileCase)
         .toBe(providerName === 'openai-api' ? 2 : 1);
+    }
+  });
+
+  it.each([
+    ['openai-api', () => new OpenAIApiProvider()],
+    ['anthropic-api', () => new AnthropicApiProvider()],
+  ] as const)('passes ordinary JSON through empty-schema %s record values', async (
+    providerName,
+    makeProvider,
+  ) => {
+    const ordinary = {
+      text: 'ordinary',
+      number: 42.5,
+      enabled: true,
+      absent: null,
+      nested: { label: 'value', count: 2 },
+      items: ['value', 3, false, null, { nested: ['leaf'] }],
+    };
+    const events: AgentEvent[] = [];
+    const executeTool = vi.fn(async () => ({ content: 'complete', isError: false }));
+    const mcpBridge: ProviderMcpBridge = {
+      listTools: () => [{
+        name: 'configure',
+        description: 'Configure metadata',
+        inputSchema: {
+          type: 'object',
+          properties: { metadata: { type: 'object', additionalProperties: {} } },
+          required: ['metadata'],
+        },
+      }],
+      executeTool,
+    };
+    fetchMock.mockImplementation(async () => fetchMock.mock.calls.length === 1
+      ? providerToolCall(providerName, JSON.stringify({ metadata: ordinary }))
+      : providerText(providerName, 'done'));
+    const provider = makeProvider();
+    await provider.initialize(initOptions(providerName, events, mcpBridge));
+
+    await provider.sendTurn({
+      role: 'user',
+      conversationKey: 'chat-key',
+      parts: [{ kind: 'text', text: 'configure ordinary metadata' }],
+    });
+
+    expect(executeTool).toHaveBeenCalledWith('configure', { metadata: ordinary });
+  });
+
+  it.each([
+    ['openai-api', () => new OpenAIApiProvider()],
+    ['anthropic-api', () => new AnthropicApiProvider()],
+  ] as const)('rejects hostile JSON inside empty-schema %s record values', async (
+    providerName,
+    makeProvider,
+  ) => {
+    for (const hostileCase of ['secret', 'alias'] as const) {
+      fetchMock.mockReset();
+      const events: AgentEvent[] = [];
+      const executeTool = vi.fn(async () => ({ content: 'must not run', isError: false }));
+      const mcpBridge: ProviderMcpBridge = {
+        listTools: () => [{
+          name: 'configure',
+          description: 'Configure metadata',
+          inputSchema: {
+            type: 'object',
+            properties: { metadata: { type: 'object', additionalProperties: {} } },
+          },
+        }],
+        executeTool,
+      };
+      fetchMock.mockImplementation(async (_url: string, init: RequestInit) => {
+        const value = hostileCase === 'secret'
+          ? 'credential="quoted multiword value"'
+          : findAlias(String(init.body), 'path');
+        return providerToolCall(providerName, JSON.stringify({ metadata: { value } }));
+      });
+      const provider = makeProvider();
+      await provider.initialize(initOptions(providerName, events, mcpBridge));
+
+      await expect(provider.sendTurn({
+        role: 'user',
+        conversationKey: 'chat-key',
+        parts: [{ kind: 'text', text: 'use /workspace/LAB/WhatSoup metadata' }],
+      }), hostileCase).rejects.toBeInstanceOf(Error);
+
+      expect(executeTool, hostileCase).not.toHaveBeenCalled();
+      expect(events.filter((event) => event.type === 'tool_use' || event.type === 'tool_result'), hostileCase)
+        .toEqual([]);
     }
   });
 

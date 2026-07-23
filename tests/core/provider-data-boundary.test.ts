@@ -533,6 +533,56 @@ describe('ProviderDataBoundary', () => {
     }, tools)).toThrowError(expect.objectContaining({ code: 'invalid_tool_input' }));
   });
 
+  it('accepts ordinary JSON recursively when additionalProperties uses the empty schema', () => {
+    const broker = boundary();
+    const ordinary = {
+      text: 'ordinary',
+      number: 42.5,
+      enabled: true,
+      absent: null,
+      nested: { label: 'value', count: 2 },
+      items: ['value', 3, false, null, { nested: ['leaf'] }],
+    };
+    const tools = [tool('configure', {
+      metadata: { type: 'object', additionalProperties: {} },
+    })];
+
+    expect(broker.rehydrateToolInput('configure', { metadata: ordinary }, tools))
+      .toEqual({ metadata: ordinary });
+  });
+
+  it('keeps empty-schema record values unclassified and bounded', () => {
+    const broker = boundary();
+    const knownAlias = broker.exposeText('/workspace/LAB/WhatSoup', { surface: 'prompt' });
+    const forgedAlias = knownAlias.replace(/:[0-9a-f]{32}⟧$/u, `:${'0'.repeat(32)}⟧`);
+    const cyclic: Record<string, unknown> = {};
+    cyclic['self'] = cyclic;
+    let tooDeep: unknown = 'leaf';
+    for (let index = 0; index < 34; index += 1) tooDeep = [tooDeep];
+    const prototypeKey = JSON.parse('{"__proto__":"ordinary"}') as Record<string, unknown>;
+    const tools = [tool('configure', {
+      metadata: { type: 'object', additionalProperties: {} },
+    })];
+    const hostileValues: Array<[string, unknown, string]> = [
+      ['secret', 'credential="quoted multiword value"', 'secret_detected'],
+      ['known alias', knownAlias, 'unauthorized_field'],
+      ['forged alias', forgedAlias, 'unauthorized_field'],
+      ['prototype key', prototypeKey, 'invalid_tool_input'],
+      ['cycle', cyclic, 'invalid_tool_input'],
+      ['non-finite number', Number.POSITIVE_INFINITY, 'invalid_tool_input'],
+      ['depth limit', tooDeep, 'limit_exceeded'],
+      ['node limit', Array.from({ length: 10_001 }, () => null), 'limit_exceeded'],
+      ['string limit', 'x'.repeat(1_048_577), 'limit_exceeded'],
+    ];
+
+    for (const [label, value, code] of hostileValues) {
+      expect(
+        () => broker.rehydrateToolInput('configure', { metadata: { value } }, tools),
+        label,
+      ).toThrowError(expect.objectContaining({ code }));
+    }
+  });
+
   it('atomically detects secrets and reserved aliases split across adjacent turn fields', () => {
     const broker = boundary();
 
