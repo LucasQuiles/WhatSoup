@@ -680,7 +680,16 @@ live here, dimension-allowlisted, so the agents stylesheet
   assigned-line rows + grant chip (`--agents-grant-box` 18px), instance rows
   (`--agents-irow-who` 86px / `--agents-irow-ago` 46px / `--agents-ibtn-*`),
   skills chips, memory stats (`--agents-mstat-*`, `--tracking-agents-mstat`),
-  `--agents-mrow-t-w` 38ch-class memory rows.
+  `--agents-mrow-t-w` 38ch-class memory rows. Micro-geometry (burndown-class
+  literals, all mockup-traced): `--agents-crumb-mt`, `--agents-icon-search/-meta/
+  -line`, `--agents-search-icon-stroke`, `--agents-soul-mt`, `--agents-sub-mt`,
+  `--agents-dhead-actions-gap`, `--agents-pill-gap/-pad`, `--agents-kv-gap/-pad-y`,
+  `--agents-trow-pad-y`, `--agents-lrow-pad-y`, `--agents-irow-pad-y/-st`,
+  `--agents-integ-gap/-pad-y/-st`, `--agents-inote-mt`, `--agents-mstats-mb`,
+  `--agents-mstat-v-mt`, `--agents-empty-pad-y`, `--agents-roster-empty-pad`,
+  `--agents-presence-bw` 1.5px (§4 hollow-stroke floor). Font SIZES ride the
+  `--text-*` scale + `--type-display` composite (weight/leading raw, fleet
+  idiom); hairlines are `var(--bw)`; avatar ink is `--agent-avatar-ink`.
 - **Stacking breakpoint is the mockup's own** — agents.html `@media
   (max-width:1000px)` stacks `.agents-wrap` and `.agents-grid`; NOT the
   chrome/fleet 1100px idiom (pinned in viewport-matrix at 999/1000/1001).

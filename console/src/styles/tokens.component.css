@@ -78,6 +78,31 @@
   --agents-mstat-pad: 8px 10px;  /* memory stat padding (mockup .mstat) */
   --agents-mstat-radius: 8px;    /* memory stat radius (mockup .mstat) */
   --agents-mrow-t-w: 38px;       /* memory row time column (mockup .mrow .t) */
+  --agents-crumb-mt: 6px;        /* header crumb margin-top (mockup .crumb) */
+  --agents-icon-search: 13px;    /* search glyph box (mockup .search svg) */
+  --agents-icon-meta: 12px;      /* roster meta glyph box (mockup .acard .meta svg) */
+  --agents-icon-line: 14px;      /* assigned-line glyph box (mockup .lrow svg) */
+  --agents-search-icon-stroke: 1.6; /* search glyph stroke width (mockup) */
+  --agents-soul-mt: 2px;         /* detail soul margin-top (mockup .dhead .soul) */
+  --agents-sub-mt: 6px;          /* detail sub margin-top (mockup .dhead .sub) */
+  --agents-dhead-actions-gap: 8px; /* detail head action cluster gap (mockup) */
+  --agents-pill-gap: 6px;        /* presence pill gap (mockup .pill) */
+  --agents-pill-pad: 3px 10px;   /* presence pill padding (mockup .pill) */
+  --agents-kv-gap: 12px;         /* brain kv column gap (mockup .kv) */
+  --agents-kv-pad-y: 5px;        /* brain kv row vertical padding (mockup .kv) */
+  --agents-trow-pad-y: 6px;      /* tool row vertical padding (mockup .trow) */
+  --agents-lrow-pad-y: 7px;      /* assigned-line row vertical padding (mockup .lrow) */
+  --agents-irow-pad-y: 6px;      /* instance row vertical padding (mockup .irow) */
+  --agents-irow-st: 6px;         /* instance status dot (mockup .irow .st) */
+  --agents-integ-st: 6px;        /* integration status dot (mockup .integ .st) */
+  --agents-integ-gap: 8px;       /* integration row gap (mockup .integ) */
+  --agents-integ-pad-y: 4px;     /* integration row vertical padding (mockup .integ) */
+  --agents-inote-mt: 8px;        /* instances footnote margin-top (documented deviation) */
+  --agents-mstats-mb: 8px;       /* memory stat grid margin-bottom (mockup .mem-stats) */
+  --agents-mstat-v-mt: 2px;      /* memory stat value margin-top (mockup .mstat .v) */
+  --agents-empty-pad-y: 6px;     /* honest-empty vertical padding (documented deviation) */
+  --agents-roster-empty-pad: 12px 4px; /* roster empty padding (documented deviation) */
+  --agents-presence-bw: 1.5px;   /* hollow presence outline width (§4: ≥1.5px stroke) */
   --agents-search-pad: 8px 12px; /* roster/memory search padding (mockup .search) */
   --agents-search-gap: 8px;      /* search box gap (mockup .search) */
   --agents-search-radius: 8px;   /* search box radius (mockup .search) */
