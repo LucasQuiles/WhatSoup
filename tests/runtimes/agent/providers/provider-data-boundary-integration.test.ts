@@ -15,6 +15,12 @@ import type {
   ProviderSessionOptions,
 } from '../../../../src/runtimes/agent/providers/types.ts';
 import type { AgentEvent } from '../../../../src/runtimes/agent/stream-parser.ts';
+import {
+  EMPTY_ASSIGNMENT_PAIRWISE_CASES,
+  everySplit,
+  NESTED_KEYLIKE_SEAM_CASES,
+  SAME_FIELD_ASSIGNMENT_SEPARATORS,
+} from '../../../helpers/provider-boundary-successor-cases.ts';
 
 const restrictedRoute: ProviderRoutePolicy = Object.freeze({
   provider: 'openai-api',
@@ -30,38 +36,7 @@ const OVERLAPPING_SECRET_ASSIGNMENTS = [
   `password="ghp_${'a'.repeat(16)}"`,
   `password=x/ghp_${'b'.repeat(16)}`,
   'password=xBearer alpha',
-  'password=xtoken=Bearer alpha',
-  'password=x/password=Bearer alpha',
-  'password="x token=Bearer alpha"',
-  `password=xtoken=ghp_${'c'.repeat(16)}`,
-  `password=x/token=ghp_${'d'.repeat(16)}`,
-  `password="x token=ghp_${'e'.repeat(16)}"`,
 ] as const;
-
-const SAME_FIELD_ASSIGNMENT_SEPARATORS = [',', ';', '&', '|'] as const;
-
-const EMPTY_FIRST_ASSIGNMENT_CASES = SAME_FIELD_ASSIGNMENT_SEPARATORS.flatMap(
-  (separator) => [
-    {
-      label: `empty before ${separator}`,
-      assignment: `token=${separator}password=beta`,
-    },
-    {
-      label: `whitespace-empty before ${separator}`,
-      assignment: `token= ${separator}password=beta`,
-    },
-  ],
-).flatMap(({ label, assignment }) => Array.from(
-  { length: assignment.length - 1 },
-  (_, index) => {
-    const split = index + 1;
-    return {
-      metadata: [assignment.slice(0, split), assignment.slice(split)],
-      secretCount: 1,
-      caseName: `${label} split ${split}`,
-    };
-  },
-));
 
 const SAME_FIELD_ASSIGNMENT_CASES = [
   ...SAME_FIELD_ASSIGNMENT_SEPARATORS.map((separator) => ({
@@ -74,8 +49,31 @@ const SAME_FIELD_ASSIGNMENT_CASES = [
     secretCount: 1,
     caseName: `${separator} ordinary punctuation`,
   })),
-  ...EMPTY_FIRST_ASSIGNMENT_CASES,
 ] as const;
+
+const PROVIDER_FACTORIES = [
+  ['openai-api', () => new OpenAIApiProvider()],
+  ['anthropic-api', () => new AnthropicApiProvider()],
+] as const;
+
+const SUCCESSOR_SPLIT_CASES = [
+  ...NESTED_KEYLIKE_SEAM_CASES.map(({ assignment, caseName }) => ({
+    caseName,
+    source: assignment,
+  })),
+  ...EMPTY_ASSIGNMENT_PAIRWISE_CASES.map(({ caseName, source }) => ({
+    caseName,
+    source,
+  })),
+] as const;
+
+const SUCCESSOR_PROVIDER_SPLIT_CASES = PROVIDER_FACTORIES.flatMap(
+  ([providerName, makeProvider]) => SUCCESSOR_SPLIT_CASES.map((splitCase) => ({
+    ...splitCase,
+    providerName,
+    makeProvider,
+  })),
+);
 
 function entropy(): (size: number) => Uint8Array {
   let call = 0;
@@ -1003,6 +1001,108 @@ describe('managed provider data boundary integration', () => {
       'one-character keyed value then a distinct token',
     );
   });
+
+  it.each(SUCCESSOR_PROVIDER_SPLIT_CASES)(
+    'executes every $caseName split independently through restricted $providerName',
+    async ({ providerName, makeProvider, source }) => {
+      const observations = [];
+      for (const { left, right, split } of everySplit(source)) {
+        fetchMock.mockReset();
+        const metadata = [left, right];
+        const originalMetadata = [...metadata];
+        const events: AgentEvent[] = [];
+        const boundaryEvents: ProviderBoundaryEvent[] = [];
+        const executeTool = vi.fn(async () => ({ content: 'must not run', isError: false }));
+        const mcpBridge: ProviderMcpBridge = {
+          listTools: () => [{
+            name: 'configure',
+            description: 'Configure metadata',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                metadata: {
+                  type: 'array',
+                  items: { type: 'string' },
+                },
+              },
+              required: ['metadata'],
+            },
+          }],
+          executeTool,
+        };
+        fetchMock.mockImplementation(async () => fetchMock.mock.calls.length === 1
+          ? providerToolCall(providerName, JSON.stringify({ metadata }))
+          : providerText(providerName, 'done'));
+        const provider = makeProvider();
+        await provider.initialize(initOptions(providerName, events, mcpBridge, boundaryEvents));
+        let rejectionCode: string | undefined;
+        try {
+          await provider.sendTurn({
+            role: 'user',
+            conversationKey: 'chat-key',
+            parts: [{ kind: 'text', text: 'configure successor split metadata' }],
+          });
+        } catch (error) {
+          rejectionCode = typeof error === 'object' && error !== null && 'code' in error
+            ? String(error.code)
+            : 'unexpected_error';
+        }
+
+        observations.push({
+          split,
+          rejectionCode,
+          fetchCalls: fetchMock.mock.calls.length,
+          executeCalls: executeTool.mock.calls.length,
+          nonInitEventCount: events.filter((event) => event.type !== 'init').length,
+          messageCount: provider.getCheckpoint().providerState?.['messageCount'],
+          metadataUnchanged: JSON.stringify(metadata) === JSON.stringify(originalMetadata),
+          secretBlockCounts: boundaryEvents
+            .filter((event) => event.eventType === 'secret_block')
+            .map((event) => event.secretCount),
+        });
+      }
+
+      const expectedMessageCount = providerName === 'openai-api' ? 2 : 1;
+      const anomalySplits = {
+        rejection: observations
+          .filter(({ rejectionCode }) => rejectionCode !== 'secret_detected')
+          .map(({ split }) => split),
+        fetch: observations.filter(({ fetchCalls }) => fetchCalls !== 1).map(({ split }) => split),
+        execution: observations
+          .filter(({ executeCalls }) => executeCalls !== 0)
+          .map(({ split }) => split),
+        events: observations
+          .filter(({ nonInitEventCount }) => nonInitEventCount !== 0)
+          .map(({ split }) => split),
+        history: observations
+          .filter(({ messageCount }) => messageCount !== expectedMessageCount)
+          .map(({ split }) => split),
+        mutation: observations
+          .filter(({ metadataUnchanged }) => !metadataUnchanged)
+          .map(({ split }) => split),
+        exactCount: observations
+          .filter(({ secretBlockCounts }) => (
+            secretBlockCounts.length !== 1 || secretBlockCounts[0] !== 1
+          ))
+          .map(({ split }) => split),
+      };
+      expect({
+        executedSplits: observations.length,
+        anomalySplits,
+      }).toEqual({
+        executedSplits: source.length - 1,
+        anomalySplits: {
+          rejection: [],
+          fetch: [],
+          execution: [],
+          events: [],
+          history: [],
+          mutation: [],
+          exactCount: [],
+        },
+      });
+    },
+  );
 
   it.each([
     ['openai-api', () => new OpenAIApiProvider()],

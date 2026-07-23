@@ -14,6 +14,17 @@ import {
   containsProviderSecretValue,
   sanitizeProviderSecrets,
 } from '../../src/lib/provider-preview-sanitizer.ts';
+import {
+  EMPTY_ASSIGNMENT_PAIRWISE_CASES,
+  everySplit,
+  EXPECTED_PAIRWISE_KEYS,
+  MULTIPLE_REAL_ASSIGNMENT_CONTROLS,
+  NESTED_KEYLIKE_FILLER_OFFSETS,
+  NESTED_KEYLIKE_SEAM_CASES,
+  NONEMPTY_PAIRWISE_CONTROLS,
+  OBSERVED_PAIRWISE_KEYS,
+  ORDINARY_PUNCTUATION_CONTROLS,
+} from '../helpers/provider-boundary-successor-cases.ts';
 
 function entropy(): (size: number) => Uint8Array {
   let call = 0;
@@ -60,6 +71,65 @@ function aliasFrom(value: string): string {
   return alias;
 }
 
+function capturedErrorCode(run: () => void): string | undefined {
+  try {
+    run();
+    return undefined;
+  } catch (error) {
+    if (typeof error === 'object' && error !== null && 'code' in error) {
+      return String(error.code);
+    }
+    return 'unexpected_error';
+  }
+}
+
+interface SplitBoundaryObservation {
+  split: number;
+  scan: number;
+  exposeCode: string | undefined;
+  rehydrateCode: string | undefined;
+  expose: number | undefined;
+  rehydrate: number | undefined;
+  exposeEventTypes: string[];
+  rehydrateEventTypes: string[];
+  textsUnchanged: boolean;
+  inputUnchanged: boolean;
+}
+
+function splitAnomalySummary(observations: readonly SplitBoundaryObservation[]) {
+  return {
+    scan: observations.filter(({ scan }) => scan !== 1).map(({ split }) => split),
+    exposeCode: observations
+      .filter(({ exposeCode }) => exposeCode !== 'secret_detected')
+      .map(({ split }) => split),
+    rehydrateCode: observations
+      .filter(({ rehydrateCode }) => rehydrateCode !== 'secret_detected')
+      .map(({ split }) => split),
+    exposeCount: observations.filter(({ expose }) => expose !== 1).map(({ split }) => split),
+    rehydrateCount: observations.filter(({ rehydrate }) => rehydrate !== 1).map(({ split }) => split),
+    exposeEvents: observations
+      .filter(({ exposeEventTypes }) => exposeEventTypes.join(',') !== 'secret_block')
+      .map(({ split }) => split),
+    rehydrateEvents: observations
+      .filter(({ rehydrateEventTypes }) => rehydrateEventTypes.join(',') !== 'secret_block')
+      .map(({ split }) => split),
+    mutation: observations
+      .filter(({ textsUnchanged, inputUnchanged }) => !textsUnchanged || !inputUnchanged)
+      .map(({ split }) => split),
+  };
+}
+
+const NO_SPLIT_ANOMALIES = {
+  scan: [],
+  exposeCode: [],
+  rehydrateCode: [],
+  exposeCount: [],
+  rehydrateCount: [],
+  exposeEvents: [],
+  rehydrateEvents: [],
+  mutation: [],
+};
+
 const QUOTED_ASSIGNMENT_SPLITS = [
   '"password"="beta"',
   '"token"="beta"',
@@ -84,25 +154,6 @@ const OFFSET_OVERLAPPING_SECRET_ASSIGNMENTS = [
   'password=xBearer alpha',
 ] as const;
 
-const NESTED_KEYLIKE_SECRET_ASSIGNMENTS = [
-  'password=xtoken=Bearer alpha',
-  'password=x/password=Bearer alpha',
-  'password="x token=Bearer alpha"',
-  `password=xtoken=ghp_${'b'.repeat(16)}`,
-  `password=x/token=ghp_${'c'.repeat(16)}`,
-  `password="x token=ghp_${'d'.repeat(16)}"`,
-] as const;
-
-const NESTED_KEYLIKE_FILLER_OFFSETS = [
-  511,
-  512,
-  513,
-  65_530,
-  65_535,
-  65_536,
-  65_537,
-] as const;
-
 const SEEDED_OFFSET_OVERLAPS = Array.from({ length: 90 }, (_, index) => {
   const key = ['password', 'token', 'credential'][index % 3]!;
   const leading = 'x'.repeat(index % 5 + 1);
@@ -111,21 +162,6 @@ const SEEDED_OFFSET_OVERLAPS = Array.from({ length: 90 }, (_, index) => {
   const tokenCharacter = String.fromCharCode(97 + (index % 26));
   return `${key}=${leading}${separator}ghp_${tokenCharacter.repeat(16)}`;
 });
-
-const SAME_FIELD_ASSIGNMENT_SEPARATORS = [',', ';', '&', '|'] as const;
-
-const EMPTY_FIRST_ASSIGNMENT_CASES = SAME_FIELD_ASSIGNMENT_SEPARATORS.flatMap(
-  (separator) => [
-    {
-      label: `empty before ${separator}`,
-      assignment: `token=${separator}password=beta`,
-    },
-    {
-      label: `whitespace-empty before ${separator}`,
-      assignment: `token= ${separator}password=beta`,
-    },
-  ],
-);
 
 describe('provider data boundary hardening', () => {
   it.each([
@@ -383,23 +419,20 @@ describe('provider data boundary hardening', () => {
     }
   });
 
-  it.each(NESTED_KEYLIKE_SECRET_ASSIGNMENTS)(
-    'matches canonical outer-key ownership for every split of case %#',
-    (assignment) => {
+  it.each(NESTED_KEYLIKE_SEAM_CASES)(
+    'matches canonical outer-key ownership for every split of $caseName',
+    ({ assignment }) => {
       const canonical = scanProviderTextSequence([assignment]);
-      expect(canonical.directSecretCount + canonical.fragmentedSecretCount).toBe(1);
-
-      for (let split = 1; split < assignment.length; split += 1) {
-        const texts = [assignment.slice(0, split), assignment.slice(split)];
-        const originalTexts = [...texts];
+      const observations = everySplit(assignment).map(({ left, right, split }) => {
+        const texts = [left, right];
         const input = { metadata: texts };
         const exposeEvents: ProviderBoundaryEvent[] = [];
         const rehydrateEvents: ProviderBoundaryEvent[] = [];
         const scan = scanProviderTextSequence(texts);
-
-        expect(() => boundary(exposeEvents).exposeTexts(texts, { surface: 'history' }))
-          .toThrowError(expect.objectContaining({ code: 'secret_detected' }));
-        expect(() => boundary(rehydrateEvents).rehydrateToolInput(
+        const exposeCode = capturedErrorCode(
+          () => boundary(exposeEvents).exposeTexts(texts, { surface: 'history' }),
+        );
+        const rehydrateCode = capturedErrorCode(() => boundary(rehydrateEvents).rehydrateToolInput(
           'inspect',
           input,
           [{
@@ -409,74 +442,80 @@ describe('provider data boundary hardening', () => {
               additionalProperties: true,
             },
           }],
-        )).toThrowError(expect.objectContaining({ code: 'secret_detected' }));
-        expect({
+        ));
+        return {
+          split,
           scan: scan.directSecretCount + scan.fragmentedSecretCount,
+          exposeCode,
+          rehydrateCode,
           expose: exposeEvents
             .find((event) => event.eventType === 'secret_block')?.secretCount,
           rehydrate: rehydrateEvents
             .find((event) => event.eventType === 'secret_block')?.secretCount,
           exposeEventTypes: exposeEvents.map((event) => event.eventType),
           rehydrateEventTypes: rehydrateEvents.map((event) => event.eventType),
-          texts,
-          input,
-        }, `split ${split}`).toEqual({
-          scan: 1,
-          expose: 1,
-          rehydrate: 1,
-          exposeEventTypes: ['secret_block'],
-          rehydrateEventTypes: ['secret_block'],
-          texts: originalTexts,
-          input: { metadata: originalTexts },
-        });
-      }
+          textsUnchanged: JSON.stringify(texts) === JSON.stringify([left, right]),
+          inputUnchanged: JSON.stringify(input) === JSON.stringify({
+            metadata: [left, right],
+          }),
+        };
+      });
+      expect({
+        canonical: canonical.directSecretCount + canonical.fragmentedSecretCount,
+        executedSplits: observations.length,
+        anomalySplits: splitAnomalySummary(observations),
+      }).toEqual({
+        canonical: 1,
+        executedSplits: assignment.length - 1,
+        anomalySplits: NO_SPLIT_ANOMALIES,
+      });
     },
   );
 
   it.each(NESTED_KEYLIKE_FILLER_OFFSETS.flatMap((offset) => (
-    NESTED_KEYLIKE_SECRET_ASSIGNMENTS.map((assignment) => ({
-      assignment,
+    NESTED_KEYLIKE_SEAM_CASES.map((seamCase) => ({
+      ...seamCase,
       offset,
     }))
   )))(
-    'keeps nested ownership canonical with the outer assignment at offset $offset for case %#',
-    ({ assignment, offset }) => {
-      const source = `${'x'.repeat(offset - 1)} ${assignment}`;
+    'keeps the nested grammar seam canonical at exact offset $offset for $caseName',
+    ({ assignment, offset, seamRelativeIndex }) => {
+      const fillerLength = offset - seamRelativeIndex;
+      const source = `${'x'.repeat(fillerLength - 1)} ${assignment}`;
       const canonical = scanProviderTextSequence([source]);
-      expect(source.indexOf(assignment)).toBe(offset);
-      expect(canonical.directSecretCount + canonical.fragmentedSecretCount).toBe(1);
-
-      for (let relativeSplit = 1; relativeSplit < assignment.length; relativeSplit += 1) {
-        const split = offset + relativeSplit;
-        const scan = scanProviderTextSequence([
-          source.slice(0, split),
-          source.slice(split),
-        ]);
-        expect(
-          scan.directSecretCount + scan.fragmentedSecretCount,
-          `offset ${offset} relative split ${relativeSplit}`,
-        ).toBe(1);
-      }
+      const scan = scanProviderTextSequence([source.slice(0, offset), source.slice(offset)]);
+      expect({
+        actualSeamOffset: source.indexOf(assignment) + seamRelativeIndex,
+        assignmentStart: source.indexOf(assignment),
+        canonical: canonical.directSecretCount + canonical.fragmentedSecretCount,
+        split: scan.directSecretCount + scan.fragmentedSecretCount,
+      }).toEqual({
+        actualSeamOffset: offset,
+        assignmentStart: fillerLength,
+        canonical: 1,
+        split: 1,
+      });
     },
   );
 
-  it.each(EMPTY_FIRST_ASSIGNMENT_CASES)(
-    'does not count the $label first assignment across any split',
-    ({ assignment }) => {
-      const canonical = scanProviderTextSequence([assignment]);
-      expect(canonical.directSecretCount + canonical.fragmentedSecretCount).toBe(1);
+  it('proves the deterministic empty-assignment matrix covers every pair of axis values', () => {
+    expect([...OBSERVED_PAIRWISE_KEYS].sort()).toEqual([...EXPECTED_PAIRWISE_KEYS].sort());
+  });
 
-      for (let split = 1; split < assignment.length; split += 1) {
-        const texts = [assignment.slice(0, split), assignment.slice(split)];
-        const originalTexts = [...texts];
+  it.each(EMPTY_ASSIGNMENT_PAIRWISE_CASES)(
+    'does not count the empty outer assignment across every split of $caseName',
+    ({ source }) => {
+      const canonical = scanProviderTextSequence([source]);
+      const observations = everySplit(source).map(({ left, right, split }) => {
+        const texts = [left, right];
         const input = { metadata: texts };
         const exposeEvents: ProviderBoundaryEvent[] = [];
         const rehydrateEvents: ProviderBoundaryEvent[] = [];
         const scan = scanProviderTextSequence(texts);
-
-        expect(() => boundary(exposeEvents).exposeTexts(texts, { surface: 'history' }))
-          .toThrowError(expect.objectContaining({ code: 'secret_detected' }));
-        expect(() => boundary(rehydrateEvents).rehydrateToolInput(
+        const exposeCode = capturedErrorCode(
+          () => boundary(exposeEvents).exposeTexts(texts, { surface: 'history' }),
+        );
+        const rehydrateCode = capturedErrorCode(() => boundary(rehydrateEvents).rehydrateToolInput(
           'inspect',
           input,
           [{
@@ -486,43 +525,50 @@ describe('provider data boundary hardening', () => {
               additionalProperties: true,
             },
           }],
-        )).toThrowError(expect.objectContaining({ code: 'secret_detected' }));
-        expect({
+        ));
+        return {
+          split,
           scan: scan.directSecretCount + scan.fragmentedSecretCount,
+          exposeCode,
+          rehydrateCode,
           expose: exposeEvents
             .find((event) => event.eventType === 'secret_block')?.secretCount,
           rehydrate: rehydrateEvents
             .find((event) => event.eventType === 'secret_block')?.secretCount,
           exposeEventTypes: exposeEvents.map((event) => event.eventType),
           rehydrateEventTypes: rehydrateEvents.map((event) => event.eventType),
-          texts,
-          input,
-        }, `split ${split}`).toEqual({
-          scan: 1,
-          expose: 1,
-          rehydrate: 1,
-          exposeEventTypes: ['secret_block'],
-          rehydrateEventTypes: ['secret_block'],
-          texts: originalTexts,
-          input: { metadata: originalTexts },
-        });
-      }
+          textsUnchanged: JSON.stringify(texts) === JSON.stringify([left, right]),
+          inputUnchanged: JSON.stringify(input) === JSON.stringify({
+            metadata: [left, right],
+          }),
+        };
+      });
+      expect({
+        canonical: canonical.directSecretCount + canonical.fragmentedSecretCount,
+        executedSplits: observations.length,
+        anomalySplits: splitAnomalySummary(observations),
+      }).toEqual({
+        canonical: 1,
+        executedSplits: source.length - 1,
+        anomalySplits: NO_SPLIT_ANOMALIES,
+      });
     },
   );
 
-  it.each(SAME_FIELD_ASSIGNMENT_SEPARATORS)(
-    'counts unquoted assignments separated by %s as distinct values',
-    (separator) => {
-      const text = `token=alpha${separator}password=beta`;
+  it.each([
+    ...NONEMPTY_PAIRWISE_CONTROLS,
+    ...ORDINARY_PUNCTUATION_CONTROLS,
+    ...MULTIPLE_REAL_ASSIGNMENT_CONTROLS,
+  ])('keeps $caseName at its canonical control count', ({ source, secretCount }) => {
       const exposeEvents: ProviderBoundaryEvent[] = [];
       const rehydrateEvents: ProviderBoundaryEvent[] = [];
-      const scan = scanProviderTextSequence([text]);
+      const scan = scanProviderTextSequence([source]);
 
-      expect(() => boundary(exposeEvents).exposeTexts([text], { surface: 'history' }))
+      expect(() => boundary(exposeEvents).exposeTexts([source], { surface: 'history' }))
         .toThrowError(expect.objectContaining({ code: 'secret_detected' }));
       expect(() => boundary(rehydrateEvents).rehydrateToolInput(
         'inspect',
-        { metadata: [text] },
+        { metadata: [source] },
         [{
           name: 'inspect',
           inputSchema: {
@@ -537,24 +583,8 @@ describe('provider data boundary hardening', () => {
           .find((event) => event.eventType === 'secret_block')?.secretCount,
         rehydrate: rehydrateEvents
           .find((event) => event.eventType === 'secret_block')?.secretCount,
-      }).toEqual({ scan: 2, expose: 2, rehydrate: 2 });
-    },
-  );
-
-  it.each(SAME_FIELD_ASSIGNMENT_SEPARATORS)(
-    'keeps ordinary %s punctuation inside one unquoted value',
-    (separator) => {
-      const text = `password=alpha${separator}ordinary`;
-      const events: ProviderBoundaryEvent[] = [];
-      const scan = scanProviderTextSequence([text]);
-
-      expect(scan.directSecretCount + scan.fragmentedSecretCount).toBe(1);
-      expect(() => boundary(events).exposeTexts([text], { surface: 'history' }))
-        .toThrowError(expect.objectContaining({ code: 'secret_detected' }));
-      expect(events.filter((event) => event.eventType === 'secret_block'))
-        .toEqual([expect.objectContaining({ secretCount: 1 })]);
-    },
-  );
+      }).toEqual({ scan: secretCount, expose: secretCount, rehydrate: secretCount });
+  });
 
   it.each([
     ['overlapping direct values', ['token=Bearer alpha', 'password="Bearer beta"']],
