@@ -16638,6 +16638,12 @@ describe('NL routing handlers (nlRouting flag)', () => {
         model: 'claude-opus-4-8',
         modelCatalogueListFn: listFn,
       });
+      (mockSession as unknown as { getProviderId: ReturnType<typeof vi.fn> }).getProviderId
+        .mockReturnValue('claude-cli');
+      (mockSession as unknown as { getModelRef: ReturnType<typeof vi.fn> }).getModelRef
+        .mockReturnValue('claude-opus-4-8');
+      (runtime as unknown as { session: typeof mockSession; activeChatJid: string | null }).session = mockSession;
+      (runtime as unknown as { activeChatJid: string | null }).activeChatJid = CHAT;
 
       await sendAndDrain(runtime, makeMsg({
         chatJid: CHAT,
