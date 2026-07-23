@@ -250,6 +250,43 @@ describe('ImsgPort — listInboundSince', () => {
     expect(mock.closeCalls).toBe(1);
   });
 
+  it.each([
+    ['message', { subscription: '1', message: rec({ id: 2, guid: 'string-subscription' }) }],
+    ['message', { subscription: 0, message: rec({ id: 3, guid: 'zero-subscription' }) }],
+    ['error', null],
+    ['error', { subscription: -1 }],
+  ] as const)('fails closed on malformed %s subscription context', async (method, params) => {
+    const { port, mock } = makePort();
+    bootstrap(mock, []);
+    mock.on('watch.subscribe', () => {
+      mock.emitNotification(method, params);
+      return { subscription: 1 };
+    });
+
+    await expect(port.listInboundSince(new Date(0))).rejects.toMatchObject({
+      code: 'MalformedResponse',
+    });
+    expect(mock.closeCalls).toBe(1);
+  });
+
+  it('ignores malformed unknown notifications and valid notifications for another subscription', async () => {
+    const { port, mock } = makePort();
+    bootstrap(mock, []);
+    mock.on('watch.subscribe', () => {
+      mock.emitNotification('typing', null);
+      mock.emitNotification('message', {
+        subscription: 2,
+        message: rec({ id: 4, guid: 'foreign-subscription' }),
+      });
+      return { subscription: 1 };
+    });
+
+    const page = await port.listInboundSince(new Date(0));
+
+    expect(page.records).toEqual([]);
+    expect(mock.closeCalls).toBe(0);
+  });
+
   it('resubscribes from the exclusive rowid cursor after a connection reset', async () => {
     const { port, mock } = makePort();
     bootstrap(mock, [rec({ id: 7, guid: 'g-7' })]);

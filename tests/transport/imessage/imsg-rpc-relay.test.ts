@@ -247,10 +247,19 @@ describe('imsg rpc relay', () => {
     const relay = await start(fx);
     unlinkSync(fx.socketPath);
     writeFileSync(fx.socketPath, 'replacement');
+    let stoppedOutcome: 'pending' | 'resolved' | 'rejected' = 'pending';
+    void relay.stopped.then(
+      () => { stoppedOutcome = 'resolved'; },
+      () => { stoppedOutcome = 'rejected'; },
+    );
+    await Promise.resolve();
+
+    expect(stoppedOutcome).toBe('pending');
 
     await relay.close();
     await expect(relay.stopped).resolves.toBeUndefined();
 
+    expect(stoppedOutcome).toBe('resolved');
     expect(readFileSync(fx.socketPath, 'utf8')).toBe('replacement');
   });
 
@@ -264,11 +273,19 @@ describe('imsg rpc relay', () => {
     }) as typeof net.createServer);
     try {
       const relay = await start(fx);
+      let stoppedOutcome: 'pending' | 'resolved' | 'rejected' = 'pending';
+      void relay.stopped.then(
+        () => { stoppedOutcome = 'resolved'; },
+        () => { stoppedOutcome = 'rejected'; },
+      );
+      await Promise.resolve();
 
       expect(observedServer).toBeDefined();
+      expect(stoppedOutcome).toBe('pending');
       observedServer!.emit('error', new Error('injected post-listen failure'));
 
       await expect(relay.stopped).rejects.toThrow(/server failed after startup/i);
+      expect(stoppedOutcome).toBe('rejected');
       expect(() => lstatSync(fx.socketPath)).toThrow();
     } finally {
       createServerSpy.mockRestore();
