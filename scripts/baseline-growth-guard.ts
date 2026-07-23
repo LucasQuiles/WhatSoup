@@ -19,7 +19,6 @@
  *      out. Never reported as a pass: "could not look" is not "nothing changed".
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -40,10 +39,11 @@ const EXIT_INCONCLUSIVE = 2;
 
 const defaultRepoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-const KNOWN_FLAGS = ['--base', '--repo', '--json', '--help', '-h'] as const;
+const KNOWN_FLAGS = ['--base', '--candidate', '--repo', '--json', '--help', '-h'] as const;
 
 interface Options {
   base: string | null;
+  candidate: string;
   /**
    * Test seam. Overrides the repo scanned, so the growth path can be proven against a
    * throwaway git repo instead of by mutating this one. Same seam idiom as
@@ -55,7 +55,7 @@ interface Options {
 }
 
 function parseOptions(argv: readonly string[]): Options | 'help' {
-  const options: Options = { base: null, repo: defaultRepoRoot, json: false };
+  const options: Options = { base: null, candidate: 'HEAD', repo: defaultRepoRoot, json: false };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (isHelpFlag(arg)) return 'help';
@@ -63,6 +63,10 @@ function parseOptions(argv: readonly string[]): Options | 'help' {
     if (arg === '--base') {
       const taken = takeValue(argv, i);
       options.base = taken.value;
+      i = taken.index;
+    } else if (arg === '--candidate') {
+      const taken = takeValue(argv, i);
+      options.candidate = taken.value;
       i = taken.index;
     } else if (arg === '--repo') {
       const taken = takeValue(argv, i);
@@ -82,11 +86,30 @@ function parseOptions(argv: readonly string[]): Options | 'help' {
  * that silently compares against the wrong revision is worse than one that says it could
  * not determine the answer.
  */
-function resolveBase(explicit: string | null, repoRoot: string): string | null {
-  if (explicit) return explicit;
-  for (const candidate of ['origin/main', 'main']) {
+function resolveCommit(revision: string, repoRoot: string): string | null {
+  try {
+    const out = execFileSync(
+      'git',
+      ['rev-parse', '--verify', '--end-of-options', `${revision}^{commit}`],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        env: cleanGitEnv(),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    const oid = out.trim();
+    return /^[0-9a-f]{40}$/.test(oid) ? oid : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveBase(explicit: string | null, repoRoot: string, candidateOid: string): string | null {
+  if (explicit) return resolveCommit(explicit, repoRoot);
+  for (const baseRef of ['origin/main', 'main']) {
     try {
-      const out = execFileSync('git', ['merge-base', candidate, 'HEAD'], {
+      const out = execFileSync('git', ['merge-base', baseRef, candidateOid], {
         cwd: repoRoot,
         encoding: 'utf8',
         env: cleanGitEnv(),
@@ -116,16 +139,10 @@ type Weighing =
   | { kind: 'absent' }
   | { kind: 'error'; message: string };
 
-function weighAt(revision: string | null, path: string, repoRoot: string): Weighing {
+function weighAt(revision: string, path: string, repoRoot: string): Weighing {
   let text: string;
   try {
-    if (revision === null) {
-      const abs = resolve(repoRoot, path);
-      if (!existsSync(abs)) return { kind: 'absent' };
-      text = readFileSync(abs, 'utf8');
-    } else {
-      text = readGitTextAtRevision({ cwd: repoRoot, revision, path });
-    }
+    text = readGitTextAtRevision({ cwd: repoRoot, revision, path });
   } catch (error) {
     // A path missing at a revision is genuinely absent there; anything else is a real
     // read failure and must stay distinguishable from it.
@@ -159,7 +176,7 @@ function main(): number {
 
   if (options === 'help') {
     console.log(
-      'Usage: baseline-growth-guard.ts [--base <rev>] [--json]\n\n' +
+      'Usage: baseline-growth-guard.ts [--base <rev>] [--candidate <rev>] [--json]\n\n' +
         'Refuses any increase in the tolerated-debt weight of a committed baseline file.\n' +
         'Exit 0 = all baselines shrank or held, 1 = a baseline grew, 2 = inconclusive.',
     );
@@ -167,7 +184,15 @@ function main(): number {
   }
 
   const repoRoot = options.repo;
-  const base = resolveBase(options.base, repoRoot);
+  const candidate = resolveCommit(options.candidate, repoRoot);
+  if (candidate === null) {
+    console.error(
+      `FAIL(inconclusive): candidate revision ${options.candidate} could not be resolved to ` +
+        'an exact commit, so baseline growth cannot be evaluated.',
+    );
+    return EXIT_INCONCLUSIVE;
+  }
+  const base = resolveBase(options.base, repoRoot, candidate);
   if (base === null) {
     console.error(
       'FAIL(inconclusive): could not resolve a merge base against origin/main or main, so ' +
@@ -182,7 +207,7 @@ function main(): number {
 
   for (const entry of BASELINE_REGISTRY) {
     const atBase = weighAt(base, entry.path, repoRoot);
-    const atHead = weighAt(null, entry.path, repoRoot);
+    const atHead = weighAt(candidate, entry.path, repoRoot);
 
     // A registry row that cannot be weighed is a BROKEN GUARD, not a clean baseline. It is
     // reported by path and message so it gets fixed, never dropped.
@@ -225,7 +250,7 @@ function main(): number {
   const findings: BaselineFinding[] = compareWeights(comparable);
 
   if (options.json) {
-    console.log(JSON.stringify({ base, examined: comparable.length, findings }, null, 2));
+    console.log(JSON.stringify({ base, candidate, examined: comparable.length, findings }, null, 2));
   }
 
   const grew = findings.filter((f) => !f.inconclusive);

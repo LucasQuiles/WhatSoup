@@ -11,7 +11,7 @@
  * revision resolution, weighing, and comparison are all the production code path.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -64,6 +64,11 @@ function writeBoundary(dir: string, count: number): void {
   );
 }
 
+function commitCandidate(dir: string, message: string): void {
+  git(dir, ['add', '-A']);
+  git(dir, ['commit', '-qm', message]);
+}
+
 /**
  * Run the guard and return its raw result.
  *
@@ -85,6 +90,7 @@ describe('baseline growth guard — the red proof', () => {
   it('BLOCKS (exit 1) when a baseline gains entries', () => {
     const dir = makeRepo(2);
     writeBoundary(dir, 5); // institutionalise 3 more violations
+    commitCandidate(dir, 'grow baseline');
 
     // Spelled out inline with the guard path as a literal, rather than via runGuard():
     // `guard-test-coverage-check.ts` proves failure-path coverage from the AST, and it
@@ -99,7 +105,7 @@ describe('baseline growth guard — the red proof', () => {
         '--repo',
         dir,
         '--base',
-        'HEAD',
+        'HEAD^',
       ],
       { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 },
     );
@@ -120,7 +126,29 @@ describe('baseline growth guard — the red proof', () => {
   it('PASSES (exit 0) when a baseline shrinks', () => {
     const dir = makeRepo(5);
     writeBoundary(dir, 1);
-    const { status, out } = runGuard(['--repo', dir, '--base', 'HEAD']);
+    commitCandidate(dir, 'shrink baseline');
+    const { status, out } = runGuard(['--repo', dir, '--base', 'HEAD^']);
+    expect(status, out).toBe(0);
+  });
+
+  it('BLOCKS committed growth even when mutable worktree bytes hide it', () => {
+    const dir = makeRepo(2);
+    writeBoundary(dir, 5);
+    commitCandidate(dir, 'grow baseline');
+    writeBoundary(dir, 2); // a lifecycle script restores apparently safe ambient bytes
+
+    const { status, out } = runGuard(['--repo', dir, '--base', 'HEAD^', '--candidate', 'HEAD']);
+    expect(status, out).toBe(1);
+    expect(out).toMatch(/2 -> 5/);
+  });
+
+  it('PASSES a committed shrink even when mutable worktree bytes look larger', () => {
+    const dir = makeRepo(5);
+    writeBoundary(dir, 1);
+    commitCandidate(dir, 'shrink baseline');
+    writeBoundary(dir, 9); // ambient bytes must not change the exact candidate decision
+
+    const { status, out } = runGuard(['--repo', dir, '--base', 'HEAD^', '--candidate', 'HEAD']);
     expect(status, out).toBe(0);
   });
 
@@ -135,7 +163,8 @@ describe('baseline growth guard — the red proof', () => {
     // an unweighable document as 0 would sail through as an improvement.
     const dir = makeRepo(4);
     writeFileSync(join(dir, '.claude/fitness/boundary-baseline.json'), '{ this is not json');
-    const { status, out } = runGuard(['--repo', dir, '--base', 'HEAD']);
+    commitCandidate(dir, 'corrupt baseline');
+    const { status, out } = runGuard(['--repo', dir, '--base', 'HEAD^']);
     expect(status, `expected INCONCLUSIVE, got ${status}.\n${out}`).toBe(2);
     // Case-insensitive: an unparseable document is reported through the shape-error
     // channel ("FAIL(inconclusive): ... could not be weighed"), not the comparison
@@ -180,6 +209,19 @@ describe('baseline growth guard — the red proof', () => {
   it('refuses a flag-shaped value instead of using it as a revision', () => {
     // `--base --json` must not hand "--json" to git as a ref.
     const { status, out } = runGuard(['--base', '--json']);
+    expect(status).toBe(2);
+    expect(out).toMatch(/another flag/);
+  });
+
+  it('is INCONCLUSIVE when the candidate revision cannot be resolved', () => {
+    const dir = makeRepo(2);
+    const { status, out } = runGuard(['--repo', dir, '--candidate', 'no-such-revision']);
+    expect(status, out).toBe(2);
+    expect(out).toMatch(/candidate revision/i);
+  });
+
+  it('refuses a flag-shaped candidate value instead of using it as a revision', () => {
+    const { status, out } = runGuard(['--candidate', '--json']);
     expect(status).toBe(2);
     expect(out).toMatch(/another flag/);
   });
@@ -234,6 +276,13 @@ describe('registry coverage — the scan cannot silently narrow', () => {
     );
     const dead = BASELINE_REGISTRY.filter((b) => !present.has(b.path)).map((b) => b.path);
     expect(dead, `dead registry rows: ${dead.join(', ')}`).toEqual([]);
+  });
+});
+
+describe('remote exact-revision wiring', () => {
+  it('binds the blocking workflow step to the exact GitHub candidate OID', () => {
+    const workflow = readFileSync(resolve(repoRoot, '.github/workflows/quality.yml'), 'utf8');
+    expect(workflow).toContain('npm run guard:baseline-growth -- --candidate "$GITHUB_SHA"');
   });
 });
 
