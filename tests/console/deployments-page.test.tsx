@@ -151,7 +151,7 @@ describe('v3.5 deployments — the one real deployment card', () => {
   it('degrades the state pill and surfaces real issues when lines are not online', async () => {
     mockLines = [
       makeLine('personal'),
-      makeLine('builds', { status: 'unreachable', statusReason: 'reconnect loop' }),
+      makeLine('builds', { status: 'degraded', statusReason: 'reconnect loop' }),
     ]
     const { container, getByTestId } = renderPage()
     await waitFor(() => expect(getByTestId('deploy-card-local')).toBeDefined())
@@ -160,6 +160,16 @@ describe('v3.5 deployments — the one real deployment card', () => {
     expect(cells[0]!.textContent).toContain('1 / 2')
     expect(cells[2]!.querySelector('.deploy-dcell__k')!.textContent).toBe('Issues')
     expect(cells[2]!.textContent).toContain('builds: reconnect loop')
+  })
+
+  it('labels the crit severity critical (never a raw state code) on pill and summary', async () => {
+    mockLines = [makeLine('personal'), makeLine('builds', { status: 'unreachable' })]
+    const { container, getByTestId } = renderPage()
+    await waitFor(() => expect(getByTestId('deploy-card-local')).toBeDefined())
+    expect(getByTestId('deploy-state').textContent).toBe('critical')
+    const kpis = [...container.querySelectorAll('.deploy-kpi')]
+    expect(kpis[0]!.querySelector('.deploy-kpi__d')!.textContent).toContain('critical')
+    expect(kpis[0]!.querySelector('.deploy-kpi__d')!.textContent).not.toContain('crit ·')
   })
 
   it('shows the update-available note with the retired-update explanation', async () => {

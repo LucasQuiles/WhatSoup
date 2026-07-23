@@ -13,6 +13,16 @@ import { channelOf } from './transport-identity.js'
 
 export type DeploymentState = 'healthy' | 'degraded' | 'crit'
 
+/** Human label per state — the card pill and summary cell consume ONE map
+ *  (never a raw state code in copy). The mockup shows healthy/degraded
+ *  pills; 'critical' labels the crit severity class the mockup's CSS
+ *  defines (.st.crit) but no example card displays. */
+export const DEPLOYMENT_STATE_LABEL: Record<DeploymentState, string> = {
+  healthy: 'healthy',
+  degraded: 'degraded',
+  crit: 'critical',
+}
+
 /** Worst-of line statuses. unreachable/config_error escalate to crit;
  *  degraded/unknown/logged_out read as warn; an empty fleet is healthy by
  *  definition (nothing is wrong yet — honest zero). */
@@ -59,8 +69,8 @@ export function issueLinesOf(lines: readonly LineInstance[]): LineInstance[] {
   return lines.filter((l) => l.status !== 'online')
 }
 
-/** Uptime in the mockup's coarse register: 21d · 6h · 12m (never fabricated
- *  precision the source doesn't carry). */
+/** Uptime in the mockup's coarse register — single most-significant unit
+ *  (the SSOT renders 21d / 3d / 19d; never fabricated compound precision). */
 export function formatUptime(seconds: number | null | undefined): string {
   if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return '—'
   const d = Math.floor(seconds / 86400)

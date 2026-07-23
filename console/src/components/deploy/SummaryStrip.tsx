@@ -4,7 +4,13 @@
  * (the b-05 n/a pattern — never a fabricated count or sync time).
  */
 import type { LineInstance } from '../../types'
-import { agentLinesOf, channelCountsOf, countOnline, deploymentStateOf } from '../../lib/deployments'
+import {
+  DEPLOYMENT_STATE_LABEL,
+  agentLinesOf,
+  channelCountsOf,
+  countOnline,
+  deploymentStateOf,
+} from '../../lib/deployments'
 
 export function SummaryStrip({ lines }: { lines: LineInstance[] }) {
   const state = deploymentStateOf(lines)
@@ -18,7 +24,7 @@ export function SummaryStrip({ lines }: { lines: LineInstance[] }) {
       <div className="deploy-kpi">
         <div className="deploy-kpi__k">Deployments</div>
         <div className="deploy-kpi__v">1</div>
-        <div className="deploy-kpi__d">{state} · this host</div>
+        <div className="deploy-kpi__d">{DEPLOYMENT_STATE_LABEL[state]} · this host</div>
       </div>
       <div className="deploy-kpi">
         <div className="deploy-kpi__k">Total lines</div>

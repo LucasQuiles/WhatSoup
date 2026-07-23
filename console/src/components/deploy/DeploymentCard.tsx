@@ -14,6 +14,7 @@ import type { LineInstance } from '../../types'
 import { api } from '../../lib/api'
 import {
   CHANNEL_SHORT,
+  DEPLOYMENT_STATE_LABEL,
   channelCountsOf,
   countOnline,
   agentLinesOf,
@@ -24,10 +25,10 @@ import {
 } from '../../lib/deployments'
 import { Button } from '../primitives/Button'
 
-const STATE_LABEL: Record<string, { cls: string; text: string }> = {
-  healthy: { cls: 'deploy-st--ok', text: 'healthy' },
-  degraded: { cls: 'deploy-st--warn', text: 'degraded' },
-  crit: { cls: 'deploy-st--crit', text: 'degraded' },
+const STATE_CLASS: Record<string, string> = {
+  healthy: 'deploy-st--ok',
+  degraded: 'deploy-st--warn',
+  crit: 'deploy-st--crit',
 }
 
 export function DeploymentCard({ lines }: { lines: LineInstance[] }) {
@@ -63,8 +64,8 @@ export function DeploymentCard({ lines }: { lines: LineInstance[] }) {
           </div>
           <div className="deploy-dhead__sub">this console&apos;s fleet · primary</div>
         </div>
-        <span className={`deploy-st ${STATE_LABEL[state]!.cls}`} data-testid="deploy-state">
-          {STATE_LABEL[state]!.text}
+        <span className={`deploy-st ${STATE_CLASS[state]}`} data-testid="deploy-state">
+          {DEPLOYMENT_STATE_LABEL[state]}
         </span>
         <span className="deploy-ver">
           {version ? `v${version.sha.slice(0, 7)}` : 'v…'}

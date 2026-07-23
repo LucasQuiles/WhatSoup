@@ -5,6 +5,7 @@
 import { describe, expect, it } from 'vitest'
 import type { LineInstance } from '../../console/src/types'
 import {
+  DEPLOYMENT_STATE_LABEL,
   agentLinesOf,
   channelCountsOf,
   countOnline,
@@ -28,6 +29,12 @@ describe('deploymentStateOf', () => {
     expect(deploymentStateOf([line('a', { status: 'logged_out' })])).toBe('degraded')
     expect(deploymentStateOf([line('a'), line('b', { status: 'unreachable' })])).toBe('crit')
     expect(deploymentStateOf([line('a', { status: 'config_error' })])).toBe('crit')
+  })
+})
+
+describe('DEPLOYMENT_STATE_LABEL (vocabulary pin)', () => {
+  it('every state has a human label — raw codes never reach copy', () => {
+    expect(DEPLOYMENT_STATE_LABEL).toEqual({ healthy: 'healthy', degraded: 'degraded', crit: 'critical' })
   })
 })
 
