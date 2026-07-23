@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { isAllowedPatternMatch, scanCommitMessage, scanContentLines } from '../../scripts/repo-hygiene-guard.ts';
+import { scanTextForPrivateLiterals } from '../../scripts/publication-guard.ts';
 
 // Lives apart from repo-hygiene-guard.test.ts on purpose: that suite carries
 // credential-shaped fixtures for its own detection cases, so editing tools that
@@ -55,5 +56,42 @@ describe('repo hygiene guard — documentation email fixtures', () => {
     ]);
 
     expect(issues.filter((issue) => issue.code === 'personal-email').map((issue) => issue.line)).toEqual([2]);
+  });
+
+  it('keeps routable iMessage identities blocking in both canonical guards', () => {
+    const filePath = 'tests/transport/imessage/adapter-send.test.ts';
+    const token = routableFixture('somebody', 'icloud.com');
+    const line = `const recipient = "${token}";`;
+
+    expect(scanContentLines([{ filePath, line: 1, text: line }]).map((issue) => issue.code)).toContain(
+      'personal-email',
+    );
+    expect(scanTextForPrivateLiterals(filePath, line).map((issue) => issue.code)).toContain('personal-email');
+  });
+
+  it('keeps reserved iMessage identities safe in both canonical guards', () => {
+    const filePath = 'tests/transport/imessage/adapter-send.test.ts';
+    const line = 'const recipient = "somebody@example.com";';
+
+    expect(scanContentLines([{ filePath, line: 1, text: line }])).toEqual([]);
+    expect(scanTextForPrivateLiterals(filePath, line)).toEqual([]);
+  });
+
+  it('does not hide non-email findings in the iMessage test subtree', () => {
+    const filePath = 'tests/transport/imessage/adapter-send.test.ts';
+    const token = ['ghp_', 'abcdefghijklmnop'].join('');
+    const issues = scanContentLines([{ filePath, line: 1, text: `const token = "${token}";` }]);
+
+    expect(issues.map((issue) => issue.code)).toContain('github-token');
+  });
+
+  it('keeps phone-shape policy active in the iMessage test subtree', () => {
+    const filePath = 'tests/transport/imessage/types.test.ts';
+    const routablePhone = ['+44', '7911123456'].join('');
+    const unsafe = scanContentLines([{ filePath, line: 1, text: `const sender = "${routablePhone}";` }]);
+    const safe = scanContentLines([{ filePath, line: 2, text: 'const sender = "+447700912345";' }]);
+
+    expect(unsafe.map((issue) => issue.code)).toContain('operator-phone');
+    expect(safe.map((issue) => issue.code)).not.toContain('operator-phone');
   });
 });

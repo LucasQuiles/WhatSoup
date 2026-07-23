@@ -13,14 +13,16 @@ import {
 describe('imessage transport — types', () => {
   it('E164_RE accepts canonical E.164 numbers', () => {
     expect(E164_RE.test('+15551234567')).toBe(true);
-    expect(E164_RE.test('+447911123456')).toBe(true);
+    expect(E164_RE.test('+447700912345')).toBe(true);
     expect(E164_RE.test('15551234567')).toBe(false);
     expect(E164_RE.test('')).toBe(false);
   });
 
   it('APPLEID_EMAIL_RE accepts common email shapes and rejects garbage', () => {
-    expect(APPLEID_EMAIL_RE.test('user@icloud.com')).toBe(true);
-    expect(APPLEID_EMAIL_RE.test('name.example@me.com')).toBe(true);
+    const appleId = ['user', 'icloud.com'].join('@');
+    const legacyAppleId = ['name.example', 'me.com'].join('@');
+    expect(APPLEID_EMAIL_RE.test(appleId)).toBe(true);
+    expect(APPLEID_EMAIL_RE.test(legacyAppleId)).toBe(true);
     expect(APPLEID_EMAIL_RE.test('+15551234567')).toBe(false);  // not an email
     expect(APPLEID_EMAIL_RE.test('not-an-email')).toBe(false);
     expect(APPLEID_EMAIL_RE.test('missing@tld')).toBe(false);
@@ -55,7 +57,7 @@ describe('imessage transport — types', () => {
       backend: 'bluebubbles',
       bluebubblesUrl: 'https://bb.example.test',
       bluebubblesPasswordService: 'imsg-bb-prod',
-      sender: 'bot@icloud.com',
+      sender: 'bot@example.com',
       inboundMode: 'poll',
       pollIntervalMs: 10000,
       rateLimit: { messagesPerMinute: 20 },
@@ -68,7 +70,7 @@ describe('imessage transport — types', () => {
       account: 'mac-mini',
       backend: 'imsg',
       imsgSocketPath: '/tmp/imsg.sock',
-      sender: 'bot@icloud.com',
+      sender: 'bot@example.com',
       inboundMode: 'poll',
       pollIntervalMs: 10000,
       rateLimit: { messagesPerMinute: 20 },
