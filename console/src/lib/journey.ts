@@ -1,5 +1,8 @@
+import { CHANNEL_LABEL } from './transport-identity.js'
+
 /**
  * journey — local vocabulary for the v3.5 hatch journey (T5 b-10).
+ * Channel display names come from the transport-identity home (hygiene law).
  *
  * What lives here vs the server: kind presets and the name wordlist are
  * journey-local by design (14-onboarding §1/§3); providers and models wire
@@ -109,7 +112,7 @@ export interface ChannelTile {
 }
 
 export const CHANNEL_TILES: ChannelTile[] = [
-  { id: 'baileys', label: 'WhatsApp', enabled: true },
+  { id: 'baileys', label: CHANNEL_LABEL.wa, enabled: true },
   { id: 'signal', label: 'Signal', enabled: false, note: 'CLI provisioning only — the API cannot create signal lines today' },
   { id: 'imessage', label: 'iMessage', enabled: false, note: 'CLI provisioning only — the API cannot create imessage lines today' },
   { id: 'twilio', label: 'SMS', enabled: false, note: 'CLI provisioning only — the API cannot create twilio lines today' },

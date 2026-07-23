@@ -5,7 +5,7 @@
  * at a time (the wave-4 law: completed-step content never competes).
  *
  * Honest backend reality (verified):
- * - Only baileys (WhatsApp) is API-creatable; every other channel tile is
+ * - Only baileys is API-creatable; every other channel tile is
  *   disabled with the reason (createLine has no transport field).
  * - The line is created when entering Link (the auth child needs its config
  *   dir) — name locks there; a mid-journey abandon leaves an unlinked line,
@@ -18,6 +18,7 @@ import { useTheme } from '../hooks/use-theme'
 import { useToast } from '../hooks/toast-context'
 import { api, getApiTicket, isProductionConsole } from '../lib/api'
 import type { ProviderCatalogEntry } from '../types'
+import { CHANNEL_LABEL } from '../lib/transport-identity'
 import {
   CHANNEL_TILES,
   KIND_PRESETS,
@@ -191,7 +192,7 @@ export default function Hatch() {
         {step === 1 && (
           <div className="journey-card">
             <h1>Pick a channel</h1>
-            <p className="journey-sub">One account per line. WhatsApp links by QR in this console today.</p>
+            <p className="journey-sub">{`One account per line. ${CHANNEL_LABEL.wa} links by QR in this console today.`}</p>
             <div className="journey-grid">
               {CHANNEL_TILES.map((c) => (
                 <div
@@ -211,7 +212,7 @@ export default function Hatch() {
                 ← Back
               </Button>
               <Button variant="primary" onClick={() => setStep(2)}>
-                Continue with WhatsApp →
+                {`Continue with ${CHANNEL_LABEL.wa} →`}
               </Button>
             </div>
           </div>
@@ -289,7 +290,7 @@ export default function Hatch() {
               <p className="journey-note">OpenCode resolves its key service from the model prefix at runtime — set it in Settings → API tokens.</p>
             ) : null}
             <div className="journey-field">
-              <label className="journey-label" htmlFor="hatch-admin">Your WhatsApp number (admin)</label>
+              <label className="journey-label" htmlFor="hatch-admin">{`Your ${CHANNEL_LABEL.wa} number (admin)`}</label>
               <TextInput
                 id="hatch-admin"
                 value={adminPhone}
@@ -310,8 +311,8 @@ export default function Hatch() {
 
         {step === 3 && (
           <div className="journey-card">
-            <h1>Link WhatsApp</h1>
-            <p className="journey-sub">Scan the code from WhatsApp → Linked devices → Link a device. The line is created as the flow opens; its name locks here.</p>
+            <h1>{`Link ${CHANNEL_LABEL.wa}`}</h1>
+            <p className="journey-sub">{`Scan the code from ${CHANNEL_LABEL.wa} → Linked devices → Link a device. The line is created as the flow opens; its name locks here.`}</p>
             <div className="journey-linkstage" data-testid="link-stage">
               {link.phase === 'creating' ? <p className="journey-note">Creating the line…</p> : null}
               {link.phase === 'watching' ? <p className="journey-note">Waiting for the first code…</p> : null}
@@ -340,7 +341,7 @@ export default function Hatch() {
             <Ceremony
               name={name}
               soul={soul.trim()}
-              channelLabel="WhatsApp"
+              channelLabel={CHANNEL_LABEL.wa}
               adminPhone={adminPhone.trim()}
               lineName={lineName}
               agentInitial={name.trim().charAt(0).toUpperCase() || '·'}
