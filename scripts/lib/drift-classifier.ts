@@ -169,6 +169,21 @@ const PATH_RULES: ReadonlyArray<{ test: (p: string) => boolean; drift: DriftClas
       /^scripts\/(lib\/fitness\/|.*guard.*\.(ts|sh)$|.*-check\.ts$|check-.*\.(ts|sh)$)/.test(p),
   },
   {
+    // Everything that decides HOW the tree is judged: lint rule implementations, the
+    // fitness eslint config, vitest configs (which choose what the suite even collects),
+    // agent/runtime policy directories, and the guard tooling package.
+    label: 'lint rule, test-runner config, or agent/tool policy',
+    drift: 'POLICY_OR_WORKFLOW',
+    test: (p) =>
+      p.startsWith('eslint-rules/') ||
+      /^eslint\.config\./.test(p) ||
+      /^vitest(\.[a-z.]+)?\.config\.ts$/.test(p) ||
+      p === 'stryker.conf.json' ||
+      p.startsWith('.claude/') ||
+      p.startsWith('.arc/') ||
+      p.startsWith('tools/whatsoup_guard/'),
+  },
+  {
     label: 'dependency or toolchain pin',
     drift: 'DEPENDENCY',
     test: (p) =>
@@ -177,7 +192,18 @@ const PATH_RULES: ReadonlyArray<{ test: (p: string) => boolean; drift: DriftClas
       p.endsWith('/package-lock.json') ||
       p.endsWith('/package.json') ||
       p === 'Dockerfile' ||
+      /^tsconfig(\.[a-z]+)?\.json$/.test(p) ||
+      p === 'docker-compose.yml' ||
+      p.startsWith('docker/') ||
       p.startsWith('deploy/docker/'),
+  },
+  {
+    // Service units, plists, install scripts and proxy assets. These do not change what the
+    // code computes, but they change what a HOST does with it — so platform and artifact
+    // evidence is invalidated while component-local evidence survives.
+    label: 'deployment or platform asset',
+    drift: 'AFFECTED_COMPONENT',
+    test: (p) => p.startsWith('deploy/') || p.startsWith('phonectl/') || p.startsWith('config/'),
   },
   {
     label: 'shared runtime library or cross-cutting core module',
@@ -187,7 +213,38 @@ const PATH_RULES: ReadonlyArray<{ test: (p: string) => boolean; drift: DriftClas
   {
     label: 'generator or authoritative generated input',
     drift: 'GENERATED_INPUT',
-    test: (p) => /\.generated\.|^docs\/tools\.md$|^docs\/public-surface\.md$/.test(p),
+    test: (p) =>
+      /\.generated\.|^docs\/tools\.md$|^docs\/public-surface\.md$/.test(p) ||
+      p.startsWith('artifacts/'),
+  },
+  {
+    label: 'repo-level ignore or environment template',
+    drift: 'DISJOINT_METADATA',
+    test: (p) => /^\.(gitignore|dockerignore|gitattributes|editorconfig)$/.test(p) || p === '.env.example',
+  },
+  {
+    label: 'plugin or auxiliary tool source',
+    drift: 'DISJOINT_CODE',
+    test: (p) => p.startsWith('plugins/') || p.startsWith('tools/'),
+  },
+  {
+    /**
+     * Catch-all for `scripts/`, deliberately conservative and deliberately LAST.
+     *
+     * In this repo `scripts/` IS the enforcement surface: every guard runs through
+     * `scripts/run-with-pinned-node.sh`, and `scripts/lib/verification/` and
+     * `scripts/lib/semantic-quality/` are the libraries those guards are built on. A change
+     * anywhere in here can change what the gate concludes.
+     *
+     * The error is asymmetric, which is why the default leans this way: misclassifying a
+     * runtime-only helper (say `transcribe-faster-whisper.py`) as policy costs one
+     * unnecessary reconcile, while the reverse ships a false green on a change to the rules
+     * themselves. Placed last so the more specific rules above — guards, fitness registry,
+     * lib/fitness — still supply their own precise labels.
+     */
+    label: 'script surface (the tooling the gate itself runs on)',
+    drift: 'POLICY_OR_WORKFLOW',
+    test: (p) => p.startsWith('scripts/'),
   },
   {
     label: 'documentation or metadata',

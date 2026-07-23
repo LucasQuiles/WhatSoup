@@ -14,6 +14,7 @@
  *   3. An unrecognised path must force UNKNOWN. Defaulting it to DISJOINT_CODE is exactly
  *      how a new policy surface gets treated as inert.
  */
+import { execFileSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -266,5 +267,64 @@ describe('drift-classify CLI — the IO boundary', () => {
 
   it('exits INCONCLUSIVE when the diff cannot be computed', () => {
     expect(main(['--base', 'totally-not-a-ref-zzz'], repoRoot)).toBe(EXIT_INCONCLUSIVE);
+  });
+});
+
+describe('live tree — coverage is byte-derived, not imagined', () => {
+  /**
+   * The classifier's path rules are hand-maintained, so their coverage is exactly as good as
+   * whoever last edited them imagined. Two bugs already proved that: `check-*.ts` fell
+   * through because only the `*-check.ts` suffix form was matched, and a first pass left 714
+   * of 2952 tracked files (24%) unclassified — every one of which would have returned
+   * INCONCLUSIVE. Both were found by running against the real tree, not by inspection.
+   *
+   * This test makes that measurement permanent. UNKNOWN is safe but useless: a classifier
+   * that abstains on a quarter of the repo answers nothing. Failing here means a new surface
+   * appeared — add a rule for it, deliberately, rather than letting drift touching it
+   * silently become INCONCLUSIVE.
+   */
+  const trackedFiles = (): string[] =>
+    execFileSync('git', ['ls-tree', '-r', 'HEAD', '--name-only'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+    })
+      .split('\n')
+      .filter(Boolean);
+
+  it('the scan is not vacuous — this repo really does have thousands of tracked files', () => {
+    // Without this, a failed `git ls-tree` returning nothing would make the assertion below
+    // pass trivially: zero files, zero unclassified, green. Same false-green shape the
+    // empty-scope guards were built for.
+    expect(trackedFiles().length).toBeGreaterThan(1000);
+  });
+
+  it('every tracked file on the live tree classifies — no path falls through to UNKNOWN', () => {
+    const files = trackedFiles();
+    const verdict = classifyDrift(files);
+    expect(
+      verdict.unclassified,
+      verdict.unclassified.length === 0
+        ? ''
+        : `${verdict.unclassified.length} tracked path(s) match no rule, so any drift touching ` +
+          `them returns INCONCLUSIVE:\n` +
+          verdict.unclassified.slice(0, 25).map((p) => `  - ${p}`).join('\n') +
+          `\nAdd a PATH_RULES entry. Do not widen an existing rule until you have checked it ` +
+          `does not swallow a more specific one above it.`,
+    ).toEqual([]);
+  });
+
+  it('classification is spread across classes, not everything funnelled into one', () => {
+    // A rule ordered wrongly — say the scripts/ catch-all placed first — would still give
+    // 100% coverage while making every verdict POLICY_OR_WORKFLOW. Coverage alone cannot
+    // detect that; distribution can.
+    const counts = new Map<string, number>();
+    for (const c of classifyDrift(trackedFiles()).classifications) {
+      counts.set(c.drift, (counts.get(c.drift) ?? 0) + 1);
+    }
+    expect(counts.size, `only ${counts.size} distinct class(es) used`).toBeGreaterThanOrEqual(5);
+    // The bulk of a source repo is ordinary component code; if that is not true, an
+    // over-broad rule has swallowed it.
+    expect(counts.get('DISJOINT_CODE') ?? 0).toBeGreaterThan(counts.get('POLICY_OR_WORKFLOW') ?? 0);
   });
 });
