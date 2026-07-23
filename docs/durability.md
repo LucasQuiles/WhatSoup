@@ -219,7 +219,7 @@ After the transport connects and outbound post-connect reconciliation/draining c
 
 This is admission replay, not provider-result replay and not delivery reconciliation. The row already passed pause, passive-instance, admin-command, access, and trigger gates before it was journaled; startup replay does not manufacture a second ingress event or approval side effect. Group self-mentions are stripped again from the canonical stored text. Malformed envelopes and prepared non-text rows fail closed as `failed/crash_recovery`.
 
-The pass is idempotent within a boot. The restart-loop guard suppresses both proactive session resume and inbound replay after repeated crash-interrupted boots. Suppression or reconstruction failure degrades runtime health and emits a content-free alert with the bounded sequence range. Any replayable row older than 15 minutes degrades global health. Rows beyond the startup batch remain durable and visible to that health check; they are not silently treated as handled.
+The pass is idempotent within a boot. The restart-loop guard suppresses both proactive session resume and inbound replay after repeated crash-interrupted boots. Suppression or reconstruction failure degrades runtime health and emits a content-free alert with the bounded sequence range. Any replayable row older than 15 minutes degrades global health. `/health.durability` also exposes `openInbound` and `oldestOpenInboundAt` across every non-terminal inbound state; an open row older than the 30-minute provider watchdog plus a five-minute persistence grace period keeps global health degraded. Rows beyond the startup batch remain durable and visible to that health check; they are not silently treated as handled.
 
 ### 4.2 Post-Connect Recovery (`postConnectRecovery`)
 

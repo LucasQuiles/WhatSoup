@@ -304,6 +304,10 @@ const TRANSIENT_TURN_ERROR_STALE_MS = 15 * 60 * 1000; // 15 minutes
 // (#1865). Generous enough not to flap on transient reconciliation.
 const DURABILITY_STALE_MAYBE_SENT_MS = 30 * 60 * 1000; // 30 minutes
 const DURABILITY_STALE_REPLAYABLE_INBOUND_MS = 15 * 60 * 1000; // 15 minutes
+// A normal provider turn is bounded by a 30-minute hard watchdog. Allow five
+// minutes for terminal persistence/recovery before stale open inbound debt
+// keeps the health body degraded.
+const DURABILITY_STALE_OPEN_INBOUND_MS = 35 * 60 * 1000;
 
 // S-04a — stale model-usability evidence must not read as a healthy green.
 // A bot whose usability probe went stale WHILE it was actively turning has a
@@ -1333,6 +1337,15 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         (durabilityStats?.replayableInbound ?? 0) > 0
         && Number.isFinite(oldestReplayableInboundMs)
         && Date.now() - oldestReplayableInboundMs > DURABILITY_STALE_REPLAYABLE_INBOUND_MS;
+      const oldestOpenInboundMs =
+        durabilityStats?.oldestOpenInboundAt != null
+          && durabilityStats.oldestOpenInboundAt !== ''
+          ? Date.parse(durabilityStats.oldestOpenInboundAt.replace(' ', 'T') + 'Z')
+          : Number.NaN;
+      const openInboundDebtIsDegraded =
+        (durabilityStats?.openInbound ?? 0) > 0
+        && Number.isFinite(oldestOpenInboundMs)
+        && Date.now() - oldestOpenInboundMs > DURABILITY_STALE_OPEN_INBOUND_MS;
 
       let status: 'healthy' | 'degraded' | 'unhealthy';
       if (authFailureIsUnhealthy) {
@@ -1352,7 +1365,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         turnCapabilityIsDegraded ||
         loopLag.locallyStarved ||
         durabilityDebtIsDegraded ||
-        inboundReplayDebtIsDegraded
+        inboundReplayDebtIsDegraded ||
+        openInboundDebtIsDegraded
       ) {
         status = 'degraded';
       } else {

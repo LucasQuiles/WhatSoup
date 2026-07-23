@@ -278,6 +278,46 @@ describe('GET /health', () => {
     }
   });
 
+  it('degrades and surfaces an inbound left non-terminal beyond the provider watchdog window', async () => {
+    const db2 = makeDb();
+    const durability = new DurabilityEngine(db2);
+    const seq = durability.journalInbound('msg-open-health', 'key-open', 'jid-open', 'agent');
+    db2.raw
+      .prepare(`UPDATE inbound_events SET received_at = datetime('now', '-3600 seconds') WHERE seq = ?`)
+      .run(seq);
+
+    const { server: server2, port: port2 } = await buildTestServer(makeDeps(db2, { durability }));
+    try {
+      const { status, body } = await httpReq(port2, '/health', 'GET');
+      const json = JSON.parse(body);
+      expect(status).toBe(200);
+      expect(json.status).toBe('degraded');
+      expect(json.durability.openInbound).toBe(1);
+      expect(json.durability.oldestOpenInboundAt).not.toBeNull();
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+      db2.close();
+    }
+  });
+
+  it('does not degrade for a recent live inbound inside the watchdog grace window', async () => {
+    const db2 = makeDb();
+    const durability = new DurabilityEngine(db2);
+    durability.journalInbound('msg-recent-open-health', 'key-open', 'jid-open', 'agent');
+
+    const { server: server2, port: port2 } = await buildTestServer(makeDeps(db2, { durability }));
+    try {
+      const { status, body } = await httpReq(port2, '/health', 'GET');
+      const json = JSON.parse(body);
+      expect(status).toBe(200);
+      expect(json.status).toBe('healthy');
+      expect(json.durability.openInbound).toBe(1);
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+      db2.close();
+    }
+  });
+
   it('surfaces control-peer wiring under control_peer when the Q peer is configured', async () => {
     const { status, body } = await httpReq(port, '/health', 'GET');
     expect(status).toBe(200);

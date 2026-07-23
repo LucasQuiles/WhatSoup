@@ -178,6 +178,30 @@ describe('DurabilityEngine', () => {
       const ageMs = Date.now() - Date.parse((stats.oldestMaybeSentAt as string).replace(' ', 'T') + 'Z');
       expect(ageMs).toBeGreaterThan(30 * 60 * 1000);
     });
+
+    it('getHealthStats surfaces every non-terminal inbound and its oldest age', () => {
+      expect(engine.getHealthStats()).toMatchObject({
+        openInbound: 0,
+        oldestOpenInboundAt: null,
+      });
+
+      const seq = engine.journalInbound('msg-open-health', 'key-open', 'jid-open', 'agent');
+      db.raw
+        .prepare(`UPDATE inbound_events SET received_at = datetime('now', '-3600 seconds') WHERE seq = ?`)
+        .run(seq);
+
+      const open = engine.getHealthStats();
+      expect(open.openInbound).toBe(1);
+      expect(open.oldestOpenInboundAt).not.toBeNull();
+      const ageMs = Date.now() - Date.parse((open.oldestOpenInboundAt as string).replace(' ', 'T') + 'Z');
+      expect(ageMs).toBeGreaterThan(30 * 60 * 1000);
+
+      engine.markInboundFailed(seq, 'crash_recovery');
+      expect(engine.getHealthStats()).toMatchObject({
+        openInbound: 0,
+        oldestOpenInboundAt: null,
+      });
+    });
   });
 
   describe('sweepStaleSubmitted()', () => {

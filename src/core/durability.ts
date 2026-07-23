@@ -288,6 +288,7 @@ type DurabilityStatements = {
   getReplayableInbound: PreparedStatement;
   getReplayableInboundCount: PreparedStatement;
   getOldestReplayableInboundAt: PreparedStatement;
+  getOpenInboundStats: PreparedStatement;
   getOutboundByStatus: PreparedStatement;
   getRecoverableToolCalls: PreparedStatement;
   markToolReplayed: PreparedStatement;
@@ -604,6 +605,11 @@ export class DurabilityEngine {
          WHERE i.processing_status IN ('pending', 'queued')
            AND i.routed_to = 'agentruntime'
            AND m.is_from_me = 0`,
+      ),
+      getOpenInboundStats: prepare(
+        `SELECT COUNT(*) AS count, MIN(received_at) AS at
+         FROM inbound_events
+         WHERE processing_status IN ('pending', 'preparing', 'queued', 'processing', 'turn_done')`,
       ),
       getOutboundByStatus: prepare(
         `SELECT id, chat_jid, op_type, payload, wa_message_id, replay_policy, created_at, submitted_at, source_inbound_seq, is_terminal FROM outbound_ops WHERE status = ?`,
@@ -2055,6 +2061,8 @@ export class DurabilityEngine {
     openRecoveries: number;
     replayableInbound: number;
     oldestReplayableInboundAt: string | null;
+    openInbound: number;
+    oldestOpenInboundAt: string | null;
   } {
     const pending = this.statements.getPendingOutboundCount.get() as { count: number };
     const quarantined = this.statements.getQuarantinedOutboundCount.get() as { count: number };
@@ -2069,6 +2077,9 @@ export class DurabilityEngine {
     const oldestReplayableInbound = this.statements.getOldestReplayableInboundAt.get() as
       | { at: string | null }
       | undefined;
+    const openInbound = this.statements.getOpenInboundStats.get() as
+      | { count: number; at: string | null }
+      | undefined;
     return {
       pendingOutbound: pending.count,
       quarantinedOutbound: quarantined.count,
@@ -2078,6 +2089,8 @@ export class DurabilityEngine {
       openRecoveries: this.recoveryEvidence.countOpen(),
       replayableInbound: replayableInbound.count,
       oldestReplayableInboundAt: oldestReplayableInbound?.at ?? null,
+      openInbound: openInbound?.count ?? 0,
+      oldestOpenInboundAt: openInbound?.at ?? null,
     };
   }
 
