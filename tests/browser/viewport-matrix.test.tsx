@@ -998,15 +998,19 @@ describe('Viewport matrix — Agents (v3.5 b-04)', () => {
   };
 
   beforeEach(() => {
-    useLinesMock.mockReturnValue({ data: [agentLine] });
-    useLineMock.mockReturnValue({ data: agentLine });
+    // The hoisted factories type the defaults (null/[]); the Agents fixtures
+    // are intentionally richer — widen via the mock's own ReturnType.
+    useLinesMock.mockReturnValue({ data: [agentLine] } as unknown as ReturnType<typeof useLinesMock>);
+    useLineMock.mockReturnValue({ data: agentLine } as unknown as ReturnType<typeof useLineMock>);
     useProviderStatusMock.mockReturnValue({
       data: {
         primary: { provider: 'test-provider', model: 'test-model-1', keyPresent: true },
         fallback: { provider: null, model: null, keyPresent: null, active: false, activeUntil: null },
       },
-    });
-    useLiveSessionsMock.mockReturnValue({ data: { observedAt: null, sessions: [], anomalyCount: 0 } });
+    } as unknown as ReturnType<typeof useProviderStatusMock>);
+    useLiveSessionsMock.mockReturnValue({
+      data: { observedAt: null, sessions: [], anomalyCount: 0 },
+    } as unknown as ReturnType<typeof useLiveSessionsMock>);
   });
 
   it('at 1001px: wrap is roster+detail side-by-side and the panel grid is 2-up', async () => {

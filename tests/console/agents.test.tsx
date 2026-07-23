@@ -97,7 +97,9 @@ function makeProviderStatus(overrides: Partial<ProviderStatus> = {}): ProviderSt
       turnsServed: null,
       turnsEmpty: null,
       probeAttempts: null,
-      lastTurnAt: null,
+      lastFallbackTurnAt: null,
+      activeEntry: null,
+      chain: [],
     } as ProviderStatus['fallback'],
     ...overrides,
   } as ProviderStatus;
@@ -141,7 +143,6 @@ beforeEach(() => {
   useLineMock.mockReturnValue({
     data: makeLine({
       // detail payload extras (config rides the detail endpoint)
-      // @ts-expect-error -- the list type omits the detail-only `config` field; expires 2026-12-31
       config: {
         claudeMd: '# Quinn\n\nKeeps the room tidy, answers fast.',
         agentOptions: {
@@ -389,10 +390,7 @@ describe('tool permissions (mockup .trow/.tgl)', () => {
 
   it('no declared knobs renders the honest empty note', () => {
     useLineMock.mockReturnValue({
-      data: makeLine({
-        // @ts-expect-error -- detail-only `config` field (see beforeEach fixture); expires 2026-12-31
-        config: { agentOptions: {} },
-      }),
+      data: makeLine({ config: { agentOptions: {} } }),
     });
     renderPage();
     expect(screen.getByText(/No tool knobs declared/)).toBeTruthy();
@@ -526,10 +524,7 @@ describe('skills (mockup .chips)', () => {
 
   it('no declared plugins renders the honest default note', () => {
     useLineMock.mockReturnValue({
-      data: makeLine({
-        // @ts-expect-error -- detail-only `config` field (see beforeEach fixture); expires 2026-12-31
-        config: { agentOptions: {} },
-      }),
+      data: makeLine({ config: { agentOptions: {} } }),
     });
     renderPage();
     expect(screen.getByText(/No plugins declared/)).toBeTruthy();
