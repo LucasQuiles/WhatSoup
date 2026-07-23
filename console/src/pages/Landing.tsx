@@ -79,7 +79,7 @@ const Landing: FC = () => {
         {PROPS.map((prop) => (
           <div key={prop.n} className="journey-prop">
             <div className="journey-prop__n">{prop.n}</div>
-            <h3>{prop.h}</h3>
+            <h2>{prop.h}</h2>
             <p>{prop.p}</p>
           </div>
         ))}
