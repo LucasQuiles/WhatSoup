@@ -499,7 +499,15 @@ describe('report-only outgoing ref policy CLI', () => {
       cwd: repository,
       encoding: 'utf8',
       input,
-      env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' },
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: 'CI fixture',
+        GIT_AUTHOR_EMAIL: 'ci-fixture@example.invalid',
+        GIT_COMMITTER_NAME: 'CI fixture',
+        GIT_COMMITTER_EMAIL: 'ci-fixture@example.invalid',
+        GIT_CONFIG_NOSYSTEM: '1',
+        GIT_CONFIG_GLOBAL: '/dev/null',
+      },
     }).trim();
     try {
       git(['init', '--quiet', '--object-format=sha1']);
