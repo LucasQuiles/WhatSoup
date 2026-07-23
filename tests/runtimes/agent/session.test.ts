@@ -370,7 +370,7 @@ describe('SessionManager', () => {
       chatJid: CHAT_JID,
       onEvent: vi.fn(),
       whatsoupMcpSocket: '/private/actor.sock',
-      mcpSocketReady: ready,
+      providerTransitionReady: ready,
     });
 
     const spawning = sm.spawnSession();
@@ -382,6 +382,44 @@ describe('SessionManager', () => {
     expect(spawn).not.toHaveBeenCalled();
   });
 
+  it('does not initialize an API provider until the previous provider transition settles', async () => {
+    let settleTransition!: () => void;
+    const transitionReady = new Promise<void>((resolve) => {
+      settleTransition = resolve;
+    });
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      providerTransitionReady: transitionReady,
+    });
+
+    const spawning = sm.spawnSession();
+    await Promise.resolve();
+    expect(sm.getStatus().active).toBe(false);
+
+    settleTransition();
+    await spawning;
+    expect(sm.getStatus().active).toBe(true);
+  });
+
+  it('keeps API provider initialization fail-closed when transition retirement rejects', async () => {
+    const rejection = new Error('previous provider retirement failed');
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'anthropic-api',
+      providerTransitionReady: Promise.reject(rejection),
+    });
+
+    await expect(sm.spawnSession()).rejects.toBe(rejection);
+    expect(sm.getStatus().active).toBe(false);
+  });
+
   it('rechecks actor-socket readiness at the spawn-per-turn child boundary', async () => {
     const sm = new SessionManager({
       db: makeDb(),
@@ -391,14 +429,14 @@ describe('SessionManager', () => {
       provider: 'opencode-cli',
       model: 'glm/test-model',
       whatsoupMcpSocket: '/private/actor.sock',
-      mcpSocketReady: Promise.resolve(),
+      providerTransitionReady: Promise.resolve(),
     });
     await sm.spawnSession();
     vi.mocked(spawn).mockClear();
     const rejection = new Error('actor socket no longer ready');
     const failedReady = Promise.reject(rejection);
     void failedReady.catch(() => {});
-    (sm as unknown as { mcpSocketReady: Promise<void> }).mcpSocketReady = failedReady;
+    (sm as unknown as { providerTransitionReady: Promise<void> }).providerTransitionReady = failedReady;
 
     await expect(sm.sendTurn('blocked turn')).rejects.toBe(rejection);
     expect(spawn).not.toHaveBeenCalled();

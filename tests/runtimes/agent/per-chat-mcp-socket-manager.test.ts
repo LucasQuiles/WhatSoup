@@ -1,4 +1,6 @@
 import {
+  chmodSync,
+  existsSync,
   lstatSync,
   mkdtempSync,
   rmSync,
@@ -280,6 +282,133 @@ describe('PerChatMcpSocketManager', () => {
     await replacement.ready;
     expect(lstatSync(replacement.socketPath).ino).not.toBe(firstStat.ino);
     manager.release(identity);
+  });
+
+  it('does not make a no-socket provider transition ready until retirement completes', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'whatsoup-actor-manager-'));
+    roots.push(root);
+    const identity = 'cli-to-api@s.whatsapp.net';
+    const manager = makeManager(root);
+    const first = manager.acquire(identity, identity);
+    await first.ready;
+    const firstStat = lstatSync(first.socketPath);
+    let proveRetired!: () => void;
+    const retired = new Promise<void>((resolve) => { proveRetired = resolve; });
+
+    manager.releaseAfter(identity, retired);
+    const transitionReady = manager.providerTransitionReady(identity);
+    let ready = false;
+    void transitionReady.then(() => { ready = true; });
+    await Promise.resolve();
+
+    expect(ready).toBe(false);
+    expect(lstatSync(first.socketPath).ino).toBe(firstStat.ino);
+    proveRetired();
+    await transitionReady;
+    expect(ready).toBe(true);
+    expect(existsSync(first.socketPath)).toBe(false);
+  });
+
+  it('keeps a no-socket provider transition fail-closed after rejected retirement proof', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'whatsoup-actor-manager-'));
+    roots.push(root);
+    const identity = 'cli-to-api-rejected@s.whatsapp.net';
+    const manager = makeManager(root);
+    const first = manager.acquire(identity, identity);
+    await first.ready;
+
+    manager.releaseAfter(identity, Promise.reject(new Error('turn retirement failed')));
+
+    await expect(manager.providerTransitionReady(identity))
+      .rejects.toThrow(/turn retirement failed/i);
+    expect(existsSync(first.socketPath)).toBe(true);
+  });
+
+  it('accepts a later successful child-stop proof after the first proof rejects', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'whatsoup-actor-manager-'));
+    roots.push(root);
+    const identity = 'retry-teardown@s.whatsapp.net';
+    const manager = makeManager(root);
+    const first = manager.acquire(identity, identity);
+    await first.ready;
+    const firstStat = lstatSync(first.socketPath);
+
+    manager.releaseAfter(identity, Promise.reject(new Error('child still running')));
+    const blocked = manager.acquire(identity, identity);
+    await expect(blocked.ready).rejects.toThrow(/child still running/i);
+    expect(lstatSync(first.socketPath).ino).toBe(firstStat.ino);
+
+    manager.releaseAfter(identity, Promise.resolve());
+    const replacement = manager.acquire(identity, identity);
+    await replacement.ready;
+    expect(lstatSync(replacement.socketPath).ino).not.toBe(firstStat.ino);
+    manager.release(identity);
+  });
+
+  it('preflights resource and teardown-barrier collisions before changing either identity', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'whatsoup-actor-manager-'));
+    roots.push(root);
+    const sourceIdentity = 'source@lid';
+    const targetIdentity = 'target@s.whatsapp.net';
+    const manager = makeManager(root);
+    const source = manager.acquire(sourceIdentity, sourceIdentity);
+    const target = manager.acquire(targetIdentity, targetIdentity);
+    await Promise.all([source.ready, target.ready]);
+    let releaseSource!: () => void;
+    let releaseTarget!: () => void;
+    manager.releaseAfter(
+      sourceIdentity,
+      new Promise<void>((resolve) => { releaseSource = resolve; }),
+    );
+    manager.releaseAfter(
+      targetIdentity,
+      new Promise<void>((resolve) => { releaseTarget = resolve; }),
+    );
+    const state = manager as unknown as {
+      resources: Map<string, { identity: { value: string } }>;
+      teardownBarriers: Map<string, { identity: { value: string } }>;
+    };
+
+    expect(() => manager.rekey(sourceIdentity, targetIdentity, targetIdentity))
+      .toThrow(/rekey collision/i);
+    expect(state.resources.get(sourceIdentity)?.identity.value).toBe(sourceIdentity);
+    expect(state.resources.get(targetIdentity)?.identity.value).toBe(targetIdentity);
+    expect(state.teardownBarriers.get(sourceIdentity)?.identity.value).toBe(sourceIdentity);
+    expect(state.teardownBarriers.get(targetIdentity)?.identity.value).toBe(targetIdentity);
+
+    releaseSource();
+    releaseTarget();
+    await Promise.all([
+      state.teardownBarriers.get(sourceIdentity)!.ready,
+      state.teardownBarriers.get(targetIdentity)!.ready,
+    ]);
+  });
+
+  it('retains socket ownership when unlink is denied and releases it on a later retry', async () => {
+    if (typeof process.getuid === 'function' && process.getuid() === 0) return;
+    const root = mkdtempSync(join(tmpdir(), 'whatsoup-actor-manager-'));
+    roots.push(root);
+    const identity = 'unlink-retry@s.whatsapp.net';
+    const manager = makeManager(root);
+    const lease = manager.acquire(identity, identity);
+    await lease.ready;
+    const before = lstatSync(lease.socketPath);
+    const socketDirectory = dirname(lease.socketPath);
+
+    chmodSync(socketDirectory, 0o500);
+    try {
+      expect(() => manager.release(identity)).toThrow(/socket cleanup failed/i);
+      const after = lstatSync(lease.socketPath);
+      expect({ dev: after.dev, ino: after.ino }).toEqual({ dev: before.dev, ino: before.ino });
+      expect((manager as unknown as { resources: Map<string, unknown> }).resources.has(identity))
+        .toBe(true);
+    } finally {
+      chmodSync(socketDirectory, 0o700);
+    }
+
+    manager.release(identity);
+    expect((manager as unknown as { resources: Map<string, unknown> }).resources.has(identity))
+      .toBe(false);
   });
 
   it('moves an active teardown barrier across rekey and refuses an early direct release', async () => {

@@ -2,9 +2,12 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createConnection, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { existsSync, writeFileSync, unlinkSync } from 'node:fs';
+import { existsSync, lstatSync, writeFileSync, unlinkSync } from 'node:fs';
 import { z } from 'zod';
-import { WhatSoupSocketServer } from '../../src/mcp/socket-server.ts';
+import {
+  SocketCleanupError,
+  WhatSoupSocketServer,
+} from '../../src/mcp/socket-server.ts';
 import { ToolRegistry } from '../../src/mcp/registry.ts';
 import type { SessionContext, ToolDeclaration } from '../../src/mcp/types.ts';
 import { waitForSocket } from '../helpers/wait-for.ts';
@@ -992,6 +995,33 @@ describe('socket-server.ts uncovered-branch coverage', () => {
 
     expect(() => server.stop()).not.toThrow();
     expect(server.connectionCount).toBe(0);
+  });
+
+  it.each([
+    ['default cleanup', undefined],
+    ['unlink-disabled cleanup', { unlinkSocket: false }],
+  ] as const)('does not unlink a replacement socket at the same path during %s', async (_label, options) => {
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    await server.startAndWait();
+    const original = lstatSync(socketPath);
+    expect((server as unknown as { ownedSocket: { dev: number; ino: number } }).ownedSocket)
+      .toEqual({ dev: original.dev, ino: original.ino });
+    unlinkSync(socketPath);
+
+    const replacement = new WhatSoupSocketServer(socketPath, registry, session);
+    await replacement.startAndWait();
+    const replacementStat = lstatSync(socketPath);
+    expect({ dev: replacementStat.dev, ino: replacementStat.ino })
+      .not.toEqual({ dev: original.dev, ino: original.ino });
+
+    expect(() => server.stop(options)).toThrow(SocketCleanupError);
+    expect(() => server.stop(options)).toThrow(/^MCP socket cleanup failed$/);
+    const after = lstatSync(socketPath);
+    expect({ dev: after.dev, ino: after.ino })
+      .toEqual({ dev: replacementStat.dev, ino: replacementStat.ino });
+
+    replacement.stop();
+    server = replacement;
   });
 
   // --- blank/whitespace lines inside a frame are skipped (src line 99) ---

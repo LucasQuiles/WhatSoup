@@ -1,6 +1,6 @@
 import { createServer } from 'node:net';
 import type { Server, Socket } from 'node:net';
-import { unlinkSync } from 'node:fs';
+import { lstatSync, unlinkSync } from 'node:fs';
 import { createChildLogger } from '../logger.ts';
 import { toConversationKey } from '../core/conversation-key.ts';
 import type { ToolRegistry } from './registry.ts';
@@ -8,6 +8,14 @@ import { makeConversationBinding, type SessionContext } from './types.ts';
 
 const log = createChildLogger('WhatSoupSocketServer');
 const RESERVED_SESSION_ARGUMENTS = new Set(['actorJid', 'conversationKey']);
+
+export class SocketCleanupError extends Error {
+  override readonly name = 'SocketCleanupError';
+
+  constructor() {
+    super('MCP socket cleanup failed');
+  }
+}
 
 interface JsonRpcRequest {
   jsonrpc: string;
@@ -43,6 +51,8 @@ export class WhatSoupSocketServer {
   private readonly connectionSessions = new Map<number, SessionContext>();
   /** Active client sockets. Destroyed on stop() so FDs do not leak. */
   private readonly activeSockets = new Map<number, Socket>();
+  /** Exact filesystem object created by this server; used to prevent replacement unlink. */
+  private ownedSocket: { dev: number; ino: number } | null = null;
 
   /**
    * F-STICKY-ACTOR: optional per-request actor resolver. When set (per-chat
@@ -83,7 +93,7 @@ export class WhatSoupSocketServer {
 
   start(): void {
     void this.startAndWait().catch((err) => {
-      log.error({ err }, 'server failed to start');
+      log.error({ code: (err as NodeJS.ErrnoException).code }, 'server failed to start');
     });
   }
 
@@ -115,7 +125,7 @@ export class WhatSoupSocketServer {
       this.connectionSessions.set(clientId, connSession);
       this.activeSockets.set(clientId, socket);
 
-      log.info({ clientId, socketPath: this.socketPath, connections: this.connectionSessions.size }, 'client connected');
+      log.info({ clientId, connections: this.connectionSessions.size }, 'client connected');
       // QR-053: decode the stream as UTF-8 so Node's internal StringDecoder buffers
       // an incomplete multibyte sequence across a kernel read boundary. Without this,
       // `chunk.toString()` decoded each ~64KB read independently and a multibyte char
@@ -213,8 +223,17 @@ export class WhatSoupSocketServer {
       };
       const onListening = (): void => {
         this.server?.off('error', onError);
-        log.info({ socketPath: this.socketPath }, 'MCP socket server listening');
-        resolve();
+        try {
+          const socketStat = lstatSync(this.socketPath);
+          if (!socketStat.isSocket()) throw new SocketCleanupError();
+          this.ownedSocket = { dev: socketStat.dev, ino: socketStat.ino };
+          log.info('MCP socket server listening');
+          resolve();
+        } catch {
+          this.server?.close();
+          this.server = null;
+          reject(new SocketCleanupError());
+        }
       };
       this.server!.once('error', onError);
       this.server!.once('listening', onListening);
@@ -222,7 +241,7 @@ export class WhatSoupSocketServer {
     });
 
     this.server.on('error', (err) => {
-      log.error({ err }, 'server error');
+      log.error({ code: (err as NodeJS.ErrnoException).code }, 'server error');
     });
   }
 
@@ -232,16 +251,41 @@ export class WhatSoupSocketServer {
     }
     this.activeSockets.clear();
     this.connectionSessions.clear();
+    if (this.ownedSocket) {
+      try {
+        const current = lstatSync(this.socketPath);
+        if (
+          !current.isSocket() ||
+          current.dev !== this.ownedSocket.dev ||
+          current.ino !== this.ownedSocket.ino
+        ) {
+          throw new SocketCleanupError();
+        }
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          this.ownedSocket = null;
+        } else if (err instanceof SocketCleanupError) {
+          throw err;
+        } else {
+          throw new SocketCleanupError();
+        }
+      }
+    }
     if (this.server) {
       this.server.close();
       this.server = null;
-      if (options.unlinkSocket !== false) {
-        try {
-          unlinkSync(this.socketPath);
-        } catch {
-          // Already gone — that's fine
-        }
+    }
+    if (options.unlinkSocket === false || !this.ownedSocket) return;
+
+    try {
+      unlinkSync(this.socketPath);
+      this.ownedSocket = null;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        this.ownedSocket = null;
+        return;
       }
+      throw new SocketCleanupError();
     }
   }
 
@@ -287,7 +331,7 @@ export class WhatSoupSocketServer {
   updateConversationKey(conversationKey: string | undefined): void {
     if (this.baseSession.binding) {
       log.warn(
-        { socketPath: this.socketPath, requested: conversationKey, bound: this.baseSession.binding.conversationKey },
+        { requested: conversationKey, bound: this.baseSession.binding.conversationKey },
         'updateConversationKey refused — socket is conversation-bound for its lifetime',
       );
       return;
@@ -310,7 +354,7 @@ export class WhatSoupSocketServer {
   updateConversationBinding(deliveryJid: string): void {
     const current = this.baseSession.binding;
     if (!current) {
-      log.warn({ socketPath: this.socketPath }, 'updateConversationBinding refused — socket has no conversation binding');
+      log.warn('updateConversationBinding refused — socket has no conversation binding');
       return;
     }
     const next = makeConversationBinding(toConversationKey(deliveryJid), deliveryJid);

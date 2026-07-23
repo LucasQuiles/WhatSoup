@@ -256,6 +256,4043 @@ import { randomUUID } from 'node:crypto';
 import { EgressProxy } from './egress-proxy.ts';
 import { ToolRegistry } from '../../mcp/registry.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
+<<<<<<< HEAD
+=======
+import { PerChatMcpSocketManager } from './per-chat-mcp-socket-manager.ts';
+import type { SessionContext } from '../../mcp/types.ts';
+import type { ConnectionManager } from '../../transport/connection.ts';
+import { registerAllTools } from '../../mcp/register-all.ts';
+import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-bridge.ts';
+import { WorkspaceSweeper, type WorkspaceResource } from './workspace-sweeper.ts';
+import {
+  fallbackProviderConfigFor,
+  fallbackKeyPresent as fallbackKeyPresentFor,
+  fallbackRequiresIndependentProbe,
+  oneMessageHandoffEnabled,
+} from './fallback-config.ts';
+import { makeIdleEligibilityResolver } from './fallback-eligibility-cache.ts';
+import {
+  createProviderMcpBridge,
+  writeProviderMcpConfig,
+  writeProviderMcpConfigTarget,
+  type OpencodeProviderConfig,
+} from './providers/mcp-bridge.ts';
+import { isProviderId, mcpModeForProvider } from './providers/index.ts';
+import { verifyFallbackCredential } from './providers/credential-verify.ts';
+import { probeFallbackBinary, probeModelCatalog, probeBinaryAuthStatus, type listModelCatalog } from './providers/binary-preflight.ts';
+import {
+  probePrimaryModelUsability,
+  primaryModelUsabilityRequiresAlert,
+  type PrimaryModelUsabilityResult,
+} from './providers/primary-model-usability.ts';
+import { createPrimaryModelProbeAdapters } from './providers/primary-model-usability-adapters.ts';
+import { ensureClaudeFileStoreCredential } from './providers/claude-filestore-heal.ts';
+import { jitteredDelay, sleep } from '../../core/retry.ts';
+import { synthesizeSpeech } from '../chat/providers/elevenlabs.ts';
+import { writeTempFile } from '../../core/media-download.ts';
+import { OperationTracker } from './operation-tracker.ts';
+import type { ProgressEvent } from './operation-tracker.ts';
+// Media prep (message → agent content + workspace relocation) extracted to media-prep.ts.
+// Imported for the inbound pipeline; the public surface (prepareContentForAgent + the
+// __*ForTests helpers) is re-exported below so namespace-importing tests are unchanged.
+import { prepareContentForAgent, relocateMediaToWorkspace } from './media-prep.ts';
+export {
+  prepareContentForAgent,
+  relocateMediaToWorkspace,
+  __resetCreatedMediaDirsForTests,
+  __rememberCreatedMediaDirForTests,
+  __getCreatedMediaDirsSizeForTests,
+  __hasCreatedMediaDirForTests,
+} from './media-prep.ts';
+
+const log = createChildLogger('agent-runtime');
+
+interface LegacyProviderTurnOwner {
+  readonly owner: PendingSystemTurnOwner;
+  readonly routeChatJid: string;
+}
+
+/** Maximum duration (ms) a control session is allowed to run before force-shutdown. */
+const CONTROL_SESSION_TIMEOUT_MS = 15 * 60 * 1000;
+
+/** Max consecutive crashes before auto-respawn gives up and waits for user action. */
+const AUTO_RESPAWN_MAX_CRASHES = 3;
+/** Base delay (ms) before attempting auto-respawn after a crash. Actual delay uses exponential backoff. */
+const AUTO_RESPAWN_BASE_MS = 2_000;
+/** Maximum respawn delay (ms) — caps the exponential backoff. */
+const AUTO_RESPAWN_MAX_DELAY_MS = 15_000;
+/** Periodic runtime health stats emission interval. */
+const HEALTH_STATS_INTERVAL_MS = 60_000;
+const SHARED_QUEUE_IDLE_MS = 60 * 60 * 1000;
+const SHARED_QUEUE_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
+// Idle per-chat agent session lifecycle bounds. A resident session idle (no
+// message) beyond SESSION_IDLE_MS is suspended; sessions support --resume so the
+// next message rehydrates. MAX_RESIDENT_SESSIONS is an LRU ceiling so a burst of
+// distinct chats cannot pin unbounded memory; SESSION_MIN_RESIDENCY_MS is an
+// anti-thrash floor so a freshly-spawned session is never immediately evicted.
+const envPositiveInt = (key: string, fallback: number): number => {
+  const raw = Number(process.env[key]);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback;
+};
+const SESSION_IDLE_MS = envPositiveInt('WHATSOUP_SESSION_IDLE_MS', 60 * 60 * 1000); // 1h
+const SESSION_SWEEP_INTERVAL_MS = envPositiveInt('WHATSOUP_SESSION_SWEEP_MS', 10 * 60 * 1000); // 10m
+// #1756: the agent_sessions DB classifier used to run startup-only, so an
+// init-failure session landing in the 'ambiguous' bucket was skipped forever.
+// ZOMBIE_SESSION_SWEEP_INTERVAL_MS re-runs the classifier periodically;
+// AMBIGUOUS_SESSION_MAX_AGE_MS is the age (with zero processed messages)
+// past which an ambiguous row is independently re-verified and, if still not
+// alive+owned, marked terminal (see resolveAmbiguousAgeFallback).
+const ZOMBIE_SESSION_SWEEP_INTERVAL_MS = envPositiveInt('WHATSOUP_ZOMBIE_SWEEP_MS', 30 * 60 * 1000); // 30m
+const AMBIGUOUS_SESSION_MAX_AGE_MS = envPositiveInt('WHATSOUP_AMBIGUOUS_SESSION_MAX_AGE_MS', 24 * 60 * 60 * 1000); // 24h
+const MAX_RESIDENT_SESSIONS = envPositiveInt('WHATSOUP_MAX_SESSIONS', 12);
+const SESSION_MIN_RESIDENCY_MS = envPositiveInt('WHATSOUP_SESSION_MIN_RESIDENCY_MS', 5 * 60 * 1000); // 5m
+// Single-sourced from conversation-key.ts so the tool/crash scope keys and the
+// tool_calls telemetry sentinel can never drift apart.
+const GLOBAL_TOOL_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
+const GLOBAL_CRASH_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
+const TOOL_FAILURE_ALERT_DEDUP_MS = 60 * 1000;
+const MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS = 1_000;
+// (TOOL_FAILURE_ALERT_EXCERPT_CHARS moved to ./tool-update.ts with alertExcerpt.)
+// Default provider-fallback window when the usage-limit message names no reset
+// time. Claude usage limits operate on 5-hour rolling windows, so 5h is a safe
+// upper-bound estimate for when the primary provider becomes available again.
+const DEFAULT_FALLBACK_WINDOW_MS = 5 * 60 * 60 * 1000; // 18_000_000 ms (5h)
+// Clamp the fallback window so a malformed/adversarial reset time can neither
+// revert almost immediately nor pin the fallback for an unreasonable span.
+const MIN_FALLBACK_WINDOW_MS = 60 * 1000; // 1 minute
+const MAX_FALLBACK_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
+const PROVIDER_FALLBACK_NOTICE_DEDUP_MS = (() => {
+  const raw = Number(process.env['WHATSOUP_PROVIDER_FALLBACK_NOTICE_DEDUP_MS']);
+  return Number.isFinite(raw) && raw > 0 ? raw : 30 * 60 * 1000;
+})();
+const PROVIDER_FALLBACK_PRIMARY_RECHECK_MS = (() => {
+  const raw = Number(process.env['WHATSOUP_PROVIDER_FALLBACK_PRIMARY_RECHECK_MS']);
+  if (!Number.isFinite(raw) || raw <= 0) return 5 * 60 * 1000;
+  return Math.min(Math.max(raw, 30 * 1000), 30 * 60 * 1000);
+})();
+// The primary model usability probe has its own longer CLI deadline in
+// primary-model-usability-adapters.ts; shorter binary presence checks keep
+// their 5 s preflight timeout in providers/binary-preflight.ts.
+// Consecutive failed recovery probes (revert-timer extension path) before a
+// single fallback_recovery_stalled alert is emitted. The cap only surfaces the
+// stall — the window keeps extending so the instance is never stranded on a
+// dead primary. One alert per stall episode; the counter resets on deactivation
+// (which a successful probe triggers).
+const PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD = (() => {
+  const raw = Number(process.env['WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD']);
+  if (!Number.isFinite(raw) || raw <= 0) return 12;
+  return Math.min(Math.max(Math.trunc(raw), 3), 100);
+})();
+// Opt-in: on an arming provider failure (via the registry dispatcher), run the
+// best-effort diagnostic bundle and emit its findings to the alert outbox.
+// Fire-and-forget — never blocks, delays, or alters the turn's fallback path.
+function diagnosticBundleEnabled(): boolean {
+  return process.env['WHATSOUP_DIAGNOSTIC_BUNDLE'] === '1';
+}
+// Guardrail: the diagnostic bundle probes the PRIMARY provider's health, which
+// is instance-global (identical across chats). Throttle it to at most once per
+// window so a fallback storm — many chats failing at once, or rapid repeated
+// failures — cannot spawn a flurry of CLI auth-status probes, and so we do not
+// re-probe the same primary health redundantly.
+const DIAGNOSTIC_BUNDLE_THROTTLE_MS = 60_000;
+// Max age of a handoff artifact before it is considered stale and dropped from
+// the injected system block. A stale summary misleads the stand-in, so the
+// prelude builder rejects artifacts older than this when composing context.
+const HANDOFF_STALE_MS = 120_000;
+/**
+ * `modelUsable` reports `true` only when the primary-model usability probe behind
+ * it is no older than this window. A stale `usable` probe (e.g. after reverting to
+ * primary and then sitting idle, or if an external process strips creds) is
+ * downgraded to `null` (unknown) so /health and monitors cannot read a green that
+ * is hours out of date. See RCA 2026-06-24 (rb-bot stale-`modelUsable` gap).
+ */
+const MODEL_USABILITY_FRESHNESS_MS = 30 * 60_000;
+// ── Background handoff-distiller sweep tuning (all gated behind the flag) ──────
+// One periodic sweep enumerates active conversations and asks the runner to
+// (maybe) distill each. The runner+gate own growth/budget/breaker/concurrency,
+// so the interval only sets how often that machinery is consulted.
+/** Narrow an arbitrary (possibly null) string to a ProviderFallbackReason. */
+function isProviderFallbackReason(value: unknown): value is ProviderFallbackReason {
+  return value === 'usage-limit' || value === 'rate-limit'
+    || value === 'auth-required' || value === 'model-unavailable'
+    || value === 'server-error' || value === 'empty-output'
+    || value === 'probe-unusable' || value === 'unknown-terminal-repeated';
+}
+
+/**
+ * Consecutive empty PRIMARY-provider user turns that force a provider fallback
+ * even when the independent usability probe has not (yet) flagged the primary.
+ * A healthy primary effectively never returns two pure-empty user turns in a
+ * row; a broken primary auth/session (e.g. claude-cli after a silent CLI
+ * auto-update invalidated its keychain login) exits cleanly with NO text on
+ * every turn. Deterministic trigger threshold — see
+ * {@link AgentRuntime.maybeArmFallbackAfterEmptyPrimaryTurn}.
+ */
+const EMPTY_OUTPUT_FALLBACK_THRESHOLD = 2;
+
+/**
+ * Consecutive unclassified-terminal PRIMARY user turns that force a provider
+ * fallback. An UNKNOWN terminal provider error (is_error result whose text
+ * classifyProviderFailure() cannot place in any known class) has historically
+ * only surfaced a generic notice + ops alert and armed NO fallback, so a broken
+ * primary throwing them turn after turn stalled on the primary while an eligible
+ * fallback sat idle. A single one is treated as transient (keep the session); a
+ * bounded run fails over. Dedicated constant — it intentionally tracks the value
+ * of {@link EMPTY_OUTPUT_FALLBACK_THRESHOLD} today, but is kept separate so tuning
+ * the empty-output threshold cannot silently move the unknown-terminal one. See
+ * {@link AgentRuntime.maybeArmFallbackAfterUnknownTerminal}.
+ */
+const UNKNOWN_TERMINAL_FALLBACK_THRESHOLD = 2;
+
+/**
+ * Startup grace for empty-output fallback arming. The boot/recovery sequence
+ * (proactive per-chat resume → resume-fail → context-recovery / replayed turns)
+ * emits empty results while the usability probe is still transiently `unknown`,
+ * which `primaryModelUsabilityRequiresAlert` treats as unusable. Arming on that
+ * noise via the single-empty probe fast-path falsely fails the instance over to
+ * the backup on every restart (and persists the window, so it reloads on the
+ * next restart — a primary/backup flap). Within this window, before the instance
+ * has proven it can serve a turn (`lastSuccessfulTurnAt === null`), ONLY the
+ * probe fast-path is suppressed: empty turns are still counted toward
+ * {@link EMPTY_OUTPUT_FALLBACK_THRESHOLD} so the consecutive-empty threshold can
+ * still arm (a genuinely-dead primary on real early traffic still fails over,
+ * and the per-chat replay that arms via the threshold is preserved). The
+ * fast-path is live again immediately after the window elapses or the first
+ * successful turn.
+ *
+ * The elapsed measurement uses `performance.now()` (monotonic clock) rather
+ * than `Date.now()` so wall-clock steps — NTP corrections, host sleep/wake, VM
+ * migration, all most likely in the first seconds of process life — cannot
+ * prematurely end or over-extend the window (R1 hardening).
+ *
+ * See {@link AgentRuntime.maybeArmFallbackAfterEmptyPrimaryTurn}.
+ */
+const EMPTY_OUTPUT_ARM_STARTUP_GRACE_MS = 60_000;
+type RuntimeTurnCapability = RuntimeTurnCapabilityHealth & {
+  modelUsabilityStatus: PrimaryModelUsabilityResult['status'] | null;
+  lastTurnErrorClass: TurnCapabilityErrorClass | null;
+};
+
+// Time to wait for an auto-triggered /compact to complete before giving up.
+// A /compact must summarize the whole conversation, so on large contexts it can
+// legitimately take a few minutes; 2 min was too short and produced false
+// timeouts that fed an unbounded-growth spiral. Must stay < SILENT_COMPACT_TTL_MS
+// (defined in auto-compact-controller.ts) so the silent-compact flag does not
+// expire mid-compaction.
+const AUTO_COMPACT_TIMEOUT_MS = 4 * 60 * 1000;
+/** Absolute wall bound for every non-auto provider request owned by the runtime. */
+const SYSTEM_TURN_TIMEOUT_MS = AUTO_COMPACT_TIMEOUT_MS;
+// Cooldown after a timed-out /compact before another auto-compact may be tried.
+// Kept short so a session that times out retries soon (bounding how far it grows
+// between attempts) rather than degrading for a long window; still long enough to
+// prevent a per-turn retry storm. A session that genuinely cannot compact is
+// ultimately recovered by the prompt-too-long kill+respawn path.
+const AUTO_COMPACT_TIMEOUT_BACKOFF_MS = 5 * 60 * 1000;
+// The success-cooldown, rapid-rearm window, and backoff tiers now live in
+// auto-compact-controller.ts alongside the state machine that uses them;
+// AUTO_COMPACT_RAPID_REARM_WINDOW_MS is imported above for the trigger gate.
+// Default auto-compact threshold: trigger /compact after 150k input tokens since last compact.
+// Claude's context window is 200k tokens; compacting at 150k prevents "prompt too long" errors
+// while leaving headroom for tool results and system prompts. Override per-instance via
+// agentOptions.autoCompactInputTokens in config.json.
+const DEFAULT_AUTO_COMPACT_INPUT_TOKENS = 150_000;
+
+class AgentCommandRuntimeError extends Error {
+  readonly code: string;
+  readonly statusCode: number;
+
+  constructor(code: string, message: string, statusCode: number) {
+    super(message);
+    this.name = 'AgentCommandRuntimeError';
+    this.code = code;
+    this.statusCode = statusCode;
+  }
+}
+
+export interface SandboxPolicy {
+  allowedPaths: string[];
+  allowedTools: string[];
+  allowedMcpTools?: string[];
+  bash: { enabled: boolean };
+  /**
+   * Opt-in egress allowlist (#1607 / QR-008). A non-empty list makes
+   * `start()` boot a loopback `EgressProxy` bound to this policy and inject
+   * its port into the child process env (see `egressProxyPort` on
+   * `SessionManager`/`buildBaseChildEnv`). Absent or empty: no proxy, no env
+   * injection — unchanged pre-#1607 behavior.
+   */
+  allowedEgress?: string[];
+}
+
+export type SessionScope = 'single' | 'shared' | 'per_chat';
+
+export interface AgentRuntimeOptions {
+  shared?: boolean;
+  /** Session scope: 'single' (one chat), 'shared' (one session, many chats), 'per_chat' (one session per chat). */
+  sessionScope?: SessionScope;
+  cwd?: string;
+  configSystemPrompt?: string;
+  instructionsPath?: string;
+  sandbox?: SandboxPolicy;
+  /** Claude model identifier to pass via --model flag (e.g. 'claude-opus-4-6[1m]'). */
+  model?: string;
+  /** When true, each chat gets an isolated workspace directory with its own Claude config. Requires sessionScope 'per_chat'. */
+  sandboxPerChat?: boolean;
+  /**
+   * When true, the per-chat actor socket carries a conversation-bound
+   * SessionContext (see per-chat-actor-session.ts and docs/configuration.md).
+   * Default false — the #1785 rec-3 behavior (send confinement only) is
+   * unchanged. Requires sessionScope 'per_chat'; incompatible with sandboxPerChat.
+   */
+  perChatConversationBound?: boolean;
+  /** Plugin directories to pass via --plugin-dir to the claude subprocess. */
+  pluginDirs?: string[];
+  /** Per-instance plugin enablement. Written to project settings.json to override global. */
+  enabledPlugins?: Record<string, boolean>;
+  /** Per-instance opt-in for propagating ALLOW_M365_MUTATIONS when fail-closed mode is enabled. */
+  allowM365Mutations?: boolean;
+  /** Automatically run a silent /compact after this many input tokens since the last compact. */
+  autoCompactInputTokens?: number;
+  /** Reply Guarantee timeout override for tests and tightly controlled deployments. */
+  replyGuaranteeTimeoutMs?: number;
+  /**
+   * Systemd restart capability, injected from the composition root. The runtimes
+   * layer cannot import the fleet layer, so main.ts constructs the concrete
+   * ServiceManager and passes it here. When absent, the restart_self tool is not
+   * registered (the agent cannot restart itself without it).
+   */
+  serviceRestarter?: ServiceRestarter;
+  /**
+   * Test-injectable catalogue probes for the `/model N` pin-time verify
+   * (Task H — resolveModelCatalogue's own listFn/anthropicFn seam, threaded
+   * one level further out so a test constructing the runtime can supply a
+   * fake catalogue without spawning a real binary or hitting a real
+   * keychain). Undefined in production — resolveModelCatalogue falls back
+   * to the real probes.
+   */
+  modelCatalogueListFn?: typeof listModelCatalog;
+  modelCatalogueAnthropicFn?: typeof fetchAnthropicModelIdsWithStatus;
+}
+
+export type RuntimePrimaryModelUsability = PrimaryModelUsabilityResult & {
+  checkedAt: number | null;
+  probeInFlight: boolean;
+};
+
+/**
+ * Pure derivation of the `modelUsable` health verdict from the last usability
+ * probe, gated on freshness. Either verdict — a `usable` green OR a
+ * requires-alert red — older than `freshnessMs` is reported as `null` (unknown)
+ * with `modelUsableStale=true` rather than a stale green or a stale red (#1884).
+ * Pure + exported for direct unit testing (the probe state itself is private).
+ */
+export function deriveModelUsable(
+  usability: RuntimePrimaryModelUsability | null,
+  nowMs: number,
+  freshnessMs: number = MODEL_USABILITY_FRESHNESS_MS,
+): { modelUsable: boolean | null; modelUsableStale: boolean; modelUsableCheckedAt: number | null } {
+  const modelUsableCheckedAt = usability?.checkedAt ?? null;
+  if (!usability || usability.probeInFlight) {
+    return { modelUsable: null, modelUsableStale: false, modelUsableCheckedAt };
+  }
+  if (usability.status === 'usable') {
+    const fresh = typeof modelUsableCheckedAt === 'number'
+      && (nowMs - modelUsableCheckedAt) <= freshnessMs;
+    return fresh
+      ? { modelUsable: true, modelUsableStale: false, modelUsableCheckedAt }
+      : { modelUsable: null, modelUsableStale: true, modelUsableCheckedAt };
+  }
+  if (primaryModelUsabilityRequiresAlert(usability)) {
+    // Symmetric with the `usable` branch (#1884): a "not usable" verdict older
+    // than freshnessMs (e.g. a credential-unavailable cached at startup) is
+    // stale evidence, not an authoritative red — report null (unknown) +
+    // modelUsableStale=true so it re-probes rather than caching a stale false.
+    const fresh = typeof modelUsableCheckedAt === 'number'
+      && (nowMs - modelUsableCheckedAt) <= freshnessMs;
+    return fresh
+      ? { modelUsable: false, modelUsableStale: false, modelUsableCheckedAt }
+      : { modelUsable: null, modelUsableStale: true, modelUsableCheckedAt };
+  }
+  return { modelUsable: null, modelUsableStale: false, modelUsableCheckedAt };
+}
+// ---------------------------------------------------------------------------
+// AskUserQuestion → Poll formatting / resolution helpers
+//
+// Extracted to ./poll-resolution.ts (module-level FILE-reduction slice of the
+// god-class decomposition). Imported here for AgentRuntime's use and re-exported
+// to preserve the original public surface for external consumers (unchanged).
+// ---------------------------------------------------------------------------
+export {
+  serializePendingPoll,
+  deserializePendingPoll,
+  evaluateResolution,
+  evaluateResolutionOnTimeout,
+  formatPollQuestion,
+  type ResolutionStrategy,
+  type PollVote,
+  type ResolutionResult,
+  type SerializedPendingPoll,
+  type PendingPollQuestion,
+} from './poll-resolution.ts';
+import {
+  deserializePendingPoll,
+  evaluateResolution,
+  evaluateResolutionOnTimeout,
+  formatPollQuestion,
+  pendingPollMatchesChatJid,
+  normalizePendingPollTimeoutMs,
+  formatTextFallbackQuestion,
+  answerForPollSelection,
+  resolveTypedPollAnswer,
+  normalizeAskUserQuestions,
+  isLowSignalPollStatusReply,
+  hasEscapeHatchOption,
+  configuredDefaultPollTimeoutMs,
+  clearPendingPollTimers,
+  removePollIdsForQuestion,
+  advancePendingPollIndex,
+  unansweredPollQuestions,
+  type PendingPollQuestion,
+  type SerializedPendingPoll,
+  type ResolutionStrategy,
+  type PollVote,
+  type AskUserQuestion,
+  type AskUserOption,
+} from './poll-resolution.ts';
+import { resolveOutboundAudience, isOperatorDmPeer, type OutboundAudience } from '../../core/outbound-message-safety.ts';
+
+// Tool_use → ToolUpdate formatting, tool-error classification, and operator-alert
+// gating extracted to ./tool-update.ts (module-level FILE-reduction slice). Re-exported
+// to preserve the public surface; imported here for AgentRuntime's use.
+export {
+  buildToolUpdate,
+  classifyToolError,
+  isOperatorActionableToolError,
+  shouldEmitToolFailureAlert,
+  stripToolErrorTags,
+  isParallelSiblingCancellation,
+} from './tool-update.ts';
+import {
+  buildToolUpdate,
+  classifyToolError,
+  shouldEmitToolFailureAlert,
+  safeAlertSegment,
+  alertEvidenceValue,
+  alertExcerpt,
+} from './tool-update.ts';
+
+// Provider-failure string matchers are the single source of truth in
+// `./failure-taxonomy.ts`. They are imported above for internal use and re-exported
+// here so existing importers (e.g. tests) keep `runtime.ts` as their entry point.
+export {
+  isUsageLimitMessage,
+  isProviderAuthRequiredMessage,
+  isRateLimitResultMessage,
+  isProviderPolicyBlockMessage,
+  isPromptTooLongMessage,
+  isProviderModelUnavailableMessage,
+} from './failure-taxonomy.ts';
+import { errorMessage } from '../../lib/error-message.ts';
+
+function providerDisplayName(provider: string): string {
+  switch (provider) {
+    case 'claude-cli': return 'Claude';
+    case 'codex-cli': return 'Codex';
+    case 'gemini-cli': return 'Gemini';
+    case 'opencode-cli': return 'OpenCode';
+    case 'openai-api': return 'OpenAI';
+    case 'anthropic-api': return 'Anthropic';
+    default: return provider;
+  }
+}
+
+function modelCardLabel(provider: string, model: string | undefined): string {
+  const providerName = providerDisplayName(provider);
+  return model && model.trim() ? `${providerName} / ${model.trim()}` : providerName;
+}
+
+function formatClockForUser(epochMs: number): string {
+  return new Date(epochMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+/**
+ * B26 human-scaled token count: 96_200 → '96.2k', 150_000 → '150k', 500 → '500'.
+ * Same >1000 → one-decimal 'k' formula the /sessions handler inlines, plus a
+ * trailing-'.0' strip so round budgets render '150k', not '150.0k'. The
+ * /sessions inline sites keep their exact pre-B26 output ('2.0k') — do not
+ * swap them onto this helper without updating their pinned renders.
+ */
+function formatTokenCount(count: number): string {
+  return count > 1000 ? `${(count / 1000).toFixed(1).replace(/\.0$/, '')}k` : String(count);
+}
+
+function fallbackRequiresPrimaryProbe(reason: ProviderFallbackReason): boolean {
+  // Recovery-probe gating is intentionally BROADER than independent-provider
+  // routing (`fallbackRequiresIndependentProbe`, used at the routing call-site).
+  // Usage/rate limits carry an unreliable reset estimate — e.g. a weekly limit's
+  // "resets 9am" is parsed as a daily clock time — so we must re-probe the
+  // primary and revert the moment it recovers rather than blind-waiting for the
+  // window to elapse. Routing semantics are unchanged; only the recovery path widens.
+  //
+  // unknown-terminal-repeated joins the recovery-probe set (NOT the
+  // independent-probe set): an unclassified terminal error has NO parseable
+  // reset estimate, so without a recovery probe the window blind-waits. It is
+  // deliberately kept OUT of fallbackRequiresIndependentProbe so an operator's
+  // same-provider downgrade rung (e.g. claude-cli/opus) stays selectable.
+  return (
+    fallbackRequiresIndependentProbe(reason) ||
+    reason === 'usage-limit' ||
+    reason === 'rate-limit' ||
+    reason === 'unknown-terminal-repeated'
+  );
+}
+
+
+/**
+ * Extract the usage-limit reset time from a provider usage-limit message.
+ *
+ * Claude usage-limit notices often name when the cap resets — e.g.
+ *   "resets at 3pm", "resets at 15:00", "try again at 9:30am",
+ *   "will be available at 11pm", or a raw Unix-epoch seconds value.
+ * The fallback state machine uses this to schedule auto-revert to the primary
+ * provider. Parsing is conservative: anything it cannot confidently interpret
+ * yields `null`, and the caller then applies a default rolling-window estimate.
+ *
+ * Returned times are always in the future relative to `now` — a clock time like
+ * "3pm" that has already passed today is rolled forward to tomorrow.
+ *
+ * @param text the usage-limit message text
+ * @param now  injectable clock for deterministic tests (defaults to Date.now)
+ * @returns the reset Date, or null when unparseable
+ */
+export function extractUsageLimitResetTime(text: string, now: Date = new Date()): Date | null {
+  if (typeof text !== 'string' || text.length === 0) return null;
+  const lower = text.toLowerCase();
+
+  // 1) Clock time after a reset cue: "resets at 3pm", "available at 15:00",
+  //    "come back at 9:30am", "try again at 11 pm".
+  //    Parsed FIRST so an explicit clock cue always wins over an incidental
+  //    long number elsewhere in the message (e.g. an order/quota figure).
+  //    The trailing (?!\d) prevents the clock hour from matching the leading
+  //    digits of a longer number (e.g. "5551234567").
+  const cue = /(?:reset[s]?|available|come\s+back|try\s+again|back)\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?(?!\d)\s*(am|pm)?/i;
+  const m = lower.match(cue);
+  if (m) {
+    let hour = Number.parseInt(m[1]!, 10);
+    const minute = m[2] ? Number.parseInt(m[2], 10) : 0;
+    const meridiem = m[3];
+    if (
+      Number.isFinite(hour) &&
+      Number.isFinite(minute) &&
+      hour >= 0 &&
+      minute >= 0 &&
+      minute < 60 &&
+      (meridiem ? hour >= 1 && hour <= 12 : hour <= 23)
+    ) {
+      if (meridiem === 'pm' && hour < 12) hour += 12;
+      if (meridiem === 'am' && hour === 12) hour = 0;
+      const candidate = new Date(now);
+      candidate.setHours(hour, minute, 0, 0);
+      // A clock time already past today rolls forward to tomorrow.
+      if (candidate.getTime() <= now.getTime()) {
+        candidate.setDate(candidate.getDate() + 1);
+      }
+      return candidate;
+    }
+  }
+
+  // 2) Raw Unix epoch (seconds, 10 digits) — e.g. "resets at 1771000000".
+  //    Milliseconds (13 digits) are also accepted. Cue-anchored: the epoch must
+  //    directly follow a reset cue, so an incidental long number (order/quota
+  //    figure) is never mistaken for a reset time.
+  const epochMatch = lower.match(
+    /(?:reset[s]?|available|try\s+again|come\s+back|back)\D{0,12}(1[5-9]\d{8}|[2-9]\d{9})(\d{3})?\b/,
+  );
+  if (epochMatch) {
+    const seconds = epochMatch[1]!;
+    const millis = epochMatch[2];
+    const epochMs = millis
+      ? Number.parseInt(seconds + millis, 10)
+      : Number.parseInt(seconds, 10) * 1000;
+    if (Number.isFinite(epochMs) && epochMs > now.getTime()) {
+      return new Date(epochMs);
+    }
+  }
+
+  return null;
+}
+
+// `isPromptTooLongMessage` lives in `./failure-taxonomy.ts` (imported + re-exported above).
+
+function templateForFallbackReason(reason: ProviderFallbackReason): UserTemplateId {
+  // empty-output / probe-unusable / unknown-terminal-repeated are transient
+  // primary failovers from the user's perspective (no hard auth/usage fault) —
+  // they reuse the existing 'transient' user copy rather than minting new
+  // user-facing templates (#1421).
+  if (
+    reason === 'server-error'
+    || reason === 'empty-output'
+    || reason === 'probe-unusable'
+    || reason === 'unknown-terminal-repeated'
+  ) {
+    return 'transient';
+  }
+  return reason;
+}
+
+export class AgentRuntime implements Runtime {
+
+  private readonly db: Database;
+  private readonly messenger: Messenger;
+  private readonly instanceName: string;
+  private readonly shared: boolean;
+  private readonly sessionScope: SessionScope;
+  private readonly cwd: string | undefined;
+  private readonly configSystemPrompt: string | undefined;
+  private readonly instructionsPath: string | undefined;
+  private readonly sandbox: SandboxPolicy | undefined;
+  /** Opt-in egress-allowlist proxy (#1607); undefined when allowedEgress is absent/empty. */
+  private egressProxy: EgressProxy | undefined;
+  /** Test observability only — the egress proxy's bound port has no other externally visible signal. */
+  get egressProxyPortForTest(): number | undefined {
+    return this.egressProxy?.port;
+  }
+  private readonly model: string | undefined;
+  private readonly sandboxPerChat: boolean;
+  private readonly perChatConversationBound: boolean;
+  /** F-STICKY-ACTOR (QR-263): nlRouting adds a DYNAMIC actor-race surface — a live
+   *  per-sender `/model` pin can route a turn to a non-claude CLI provider at runtime,
+   *  independent of the static primary/fallback config. Mutable only in tests. */
+  private nlRoutingEnabled: boolean = config.nlRouting === true;
+  private readonly serviceRestarter: ServiceRestarter | undefined;
+  /** Task H injectable catalogue seam (AgentRuntimeOptions doc comment) — undefined in production. */
+  private readonly modelCatalogueListFn: typeof listModelCatalog | undefined;
+  private readonly modelCatalogueAnthropicFn: typeof fetchAnthropicModelIdsWithStatus | undefined;
+  private readonly pluginDirs: string[];
+  private readonly enabledPlugins: Record<string, boolean> | undefined;
+  private readonly allowM365Mutations: boolean | undefined;
+  private readonly autoCompactInputTokens: number | undefined;
+  private readonly agentProvider: string;
+  private readonly agentProviderConfig: Record<string, unknown> | undefined;
+  // Automatic provider fallback (claude-cli → opencode-cli etc.) on usage limit.
+  // The legacy scalar pair is normalized as entry zero for compatibility.
+  private readonly agentFallbacks: AgentFallbackEntry[];
+  private readonly replyGuaranteeTimeoutMs: number;
+  private readonly registry: ToolRegistry;
+  /** Coordinate snapshot for numbered-drill stability (D16/D17) — the exact
+   *  ordered catalogue a `/model list` render showed, so `/model N` resolves
+   *  against what the user actually saw. Not wired to any consumer besides
+   *  the /model list render + apply path added in this task. */
+  private readonly catalogueSnapshot: CatalogueSnapshotCache;
+  private readonly providerExecutionGate: ProviderExecutionGate;
+
+  // single mode: one session, one queue
+  private session: SessionManager | null = null;
+  private queue: IOutboundQueue | null = null;
+  private activeChatJid: string | null = null;
+
+  // shared mode: single session, per-chat outbound queues + global turn queue
+  private outboundQueues: Map<string, IOutboundQueue> = new Map();
+
+  // per_chat mode: independent session + queue per chatJid
+  // When sandboxPerChat=true, maps are keyed by workspaceKey; when false, keyed by raw chatJid.
+  private chatSessions: Map<string, SessionManager> = new Map();
+  private chatQueues: Map<string, IOutboundQueue> = new Map();
+  private readonly sessionOwnership = new SessionOwnershipRegistry();
+  private readonly sessionManagerIds = new WeakMap<SessionManager, string>();
+  private readonly sessionEventToolScopes = new WeakMap<SessionManager, string>();
+  private readonly ownedSessionManagers = new Map<string, SessionManager>();
+
+  // Operation tracker: per-session progress reporting & stall detection
+  // Parallels session storage — single/shared uses operationTracker, per_chat uses operationTrackers map.
+  private operationTracker: OperationTracker | null = null;
+  private operationTrackers: Map<string, OperationTracker> = new Map();
+  private workspaceResources: Map<string, WorkspaceResource> = new Map();
+  private readonly perChatMcpSocketManager: PerChatMcpSocketManager;
+  private globalMcpSocketPath: string | null = null;
+  private replyGuarantee: ReplyGuaranteeManager | null = null;
+  private turnQueue: TurnQueue;
+  private currentTurnChatJid: string | null = null;
+
+  // NOTE: turnHadVisibleOutput is only tracked in the non-per-chat handleEvent path.
+  // Spawn-per-turn providers route through handleEventWithContext which does not
+  // use this flag. The "(no response)" fallback only exists in handleEvent.
+  private turnHadVisibleOutput = false;
+  private turnHadSuppressedReplySatisfaction = false;
+  private turnChain: Promise<void> = Promise.resolve();
+  private healthStatsTimer: ReturnType<typeof setInterval> | null = null;
+  private proactiveResumeIdentityRejects = 0;
+  // C5 restart-loop guard: true when this boot follows an unclean exit
+  // (captured at the top of start()); consumed by the startup resume gate.
+  private restartLoopInterruptedBoot = false;
+  private unownedProviderEventRejects = 0;
+  private readonly providerEventRejectReasonCounts = new Map<string, number>();
+  /**
+   * Explicit source-bound ownership for turns admitted without a durability
+   * journal row. Production normally uses RuntimeTurnContext; this lane keeps
+   * legacy/test deployments fail-closed without inferring ownership from a
+   * queue or mutable current-chat field.
+   */
+  private readonly legacyProviderTurnOwners = new Map<string, LegacyProviderTurnOwner>();
+  private workspaceSweeper: WorkspaceSweeper;
+  private queueSweepTimer: ReturnType<typeof setInterval> | null = null;
+  private sessionSweepTimer: ReturnType<typeof setInterval> | null = null;
+  private zombieSessionSweepTimer: ReturnType<typeof setInterval> | null = null;
+  // Background handoff distiller (flag-gated). The coordinator owns the timer +
+  // runner lifecycle; it stays inert when the flag is off OR the model/key fails
+  // to resolve. Initialized in the constructor (needs db + instanceName + the
+  // config readers, which stay on AgentRuntime for the health/context callers).
+  private readonly handoffDistill: HandoffDistillCoordinator;
+  private pendingRespawnTimers = new Set<ReturnType<typeof setTimeout>>();
+  // Provider-fallback window lifecycle scalars (active-until / activated-at /
+  // arm-reason / reset-at / recovery-probe-required / active-entry). Owned by the
+  // collaborator; the arm / activate / deactivate / revert / probe orchestration
+  // stays in AgentRuntime and pokes these fields directly. isActive() carries the
+  // only read logic. Pure field-relocation — no behavior change.
+  private readonly fallbackWindow = new FallbackWindowState();
+  // Process-local fallback-window telemetry (turns served/empty + arm-time
+  // snapshots, lifetime activation/revert/replay totals, and window USD cost).
+  // Increment/snapshot/delta logic lives in the collaborator; the orchestration
+  // (window-active gate on cost, served-vs-empty decision + alerting, and the
+  // arm/deactivate/replay call sites) stays in AgentRuntime.
+  private readonly fallbackMetrics = new FallbackWindowMetrics();
+  // Per-window fallback-chain state (failed-entry keys + last-selection
+  // eligibility + entry-key/snapshot/exhausted queries). The selection DECISION
+  // (selectFallbackEntryForWindow / markActiveFallbackFailed) stays in AgentRuntime
+  // and drives this; agentFallbacks (config) stays here and is passed in.
+  private readonly fallbackChain = new FallbackChain();
+  // Empty-output advance accounting for the CURRENT active fallback entry: the
+  // consecutive-empty-turn run + the attempted-key guard. A structurally-dead
+  // fallback model (connects but emits no assistant text) returns empty every turn;
+  // once the run reaches EMPTY_OUTPUT_FALLBACK_THRESHOLD the entry is advanced
+  // through the SAME path terminal failures use. The advance ACTION (re-select +
+  // alert) stays in recordFallbackTurnOutcome; the collaborator owns the state +
+  // the should-advance predicate.
+  private readonly fallbackEmptyAdvance = new FallbackEmptyAdvance();
+  private revertTimer: ReturnType<typeof setTimeout> | null = null;
+  private fallbackPrimaryProbeTimer: ReturnType<typeof setTimeout> | null = null;
+  // Consecutive failed recovery probes on the revert-timer EXTENSION path
+  // (process-local, reset on deactivation — which a successful probe triggers).
+  // Early-window standing probes do not count: nothing is extending yet.
+  // At PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD one fallback_recovery_stalled
+  // alert fires per stall episode; the window keeps extending regardless.
+  private fallbackProbeAttempts = 0;
+  // Epoch ms of the most recent recovery probe (either path); null until the
+  // first probe. Process-local observability only — never persisted.
+  private fallbackLastProbeAt: number | null = null;
+  // Epoch ms of the last diagnostic-bundle kick (instance-level throttle).
+  private lastDiagnosticBundleAt = 0;
+  private primaryModelUsability: RuntimePrimaryModelUsability | null = null;
+  private primaryModelUsabilityAlertActive = false;
+  /** Consecutive empty PRIMARY-provider user turns; reset on any successful turn
+   *  or when an empty-output fallback is armed. Drives the empty-output fallback
+   *  trigger — see maybeArmFallbackAfterEmptyPrimaryTurn. */
+  private consecutivePrimaryEmptyTurns = 0;
+  /** Consecutive unclassified-terminal (is_error, classifyProviderFailure→null)
+   *  PRIMARY user turns; reset on any successful turn or when the unknown-terminal
+   *  fallback is armed. Drives the unknown-terminal fallback trigger — see
+   *  maybeArmFallbackAfterUnknownTerminal. Kept SEPARATE from
+   *  consecutivePrimaryEmptyTurns (short-circuited on this path) and from the
+   *  cumulative errorCounts['unknown-terminal'] (which is not consecutive). */
+  private consecutiveUnknownTerminalTurns = 0;
+  /** Monotonic construction timestamp (performance.now()), used for the
+   *  empty-output arming startup grace — see EMPTY_OUTPUT_ARM_STARTUP_GRACE_MS.
+   *  Using performance.now() rather than Date.now() so NTP steps and
+   *  sleep-wake clock jumps cannot prematurely end or over-extend the grace
+   *  window (R1 hardening). */
+  private readonly runtimeBootPerfMs = performance.now();
+  // Turn-outcome telemetry feeding the fallback decision + /health: last successful
+  // user turn, last user-turn error class/time, and cumulative per-class failure
+  // counts. The is-user-turn guard + consecutivePrimaryEmptyTurns reset stay in
+  // recordTurnCapabilitySuccess/Failure; the field mutations live in the tracker.
+  private readonly turnCapabilityTracker = new TurnCapabilityTracker();
+  // Silent-compact + auto-compact rearm state machine (cooldown/last-success/
+  // rapid-rearm/measure/boundary maps, in-flight waiters, and cumulative health
+  // counters). Constructed in the constructor once autoCompactInputTokens is known.
+  // See src/runtimes/agent/auto-compact-controller.ts.
+  private readonly autoCompact: AutoCompactController;
+
+  /**
+   * Post-turn event gate — tracks mapKeys where a 'result' event has been
+   * processed but no new user message has arrived yet. Events arriving while
+   * the gate is active are SDK-injected artifacts (system-reminders that
+   * trigger phantom model output) and must be suppressed.
+   *
+   * Set: on 'result' event in handleEventWithContext
+   * Cleared: in sendTurnPerChat when the next user message initiates a turn
+   */
+  private postTurnGate = new Set<string>();
+
+  // ---------------------------------------------------------------------------
+  // AskUserQuestion → Poll bridge state
+  // ---------------------------------------------------------------------------
+  // The pending-poll map + its two active-guard queries live in the collaborator;
+  // AgentRuntime's settle/expiry/persist/restore/cleanup orchestration drives
+  // this.pendingPolls.questions directly.
+  private readonly pendingPolls = new PendingPollStore();
+  /** Exact source-turn terminal barrier for each live AskUser continuation. */
+  private readonly pendingPollSourceTurnBarriers = new WeakMap<PendingPollQuestion, Promise<void>>();
+  /** Tool IDs for which the auto-resolved is_error tool_result should be suppressed. */
+  private suppressedAskUserToolIds = new Set<string>();
+  private groupMetadataCache = new Map<string, { adminJids: Set<string>; fetchedAt: number }>();
+  private static readonly GROUP_METADATA_CACHE_TTL_MS = 5 * 60 * 1000;
+  private static readonly GROUP_METADATA_CACHE_MAX = 256;
+
+  // Crash tracking — keyed by per-chat mapKey for per_chat runtimes and by a
+  // single global key for single/shared mode. Counts survive session map deletions
+  // so health reporting can surface recent failures until a successful respawn decays them.
+  // The count map + lastCrashAt live in CrashTracker; scope-KEY derivation
+  // (getCrashScopeKey) stays here because it depends on runtime config.
+  private readonly crashes = new CrashTracker();
+
+  /** Maps toolScopeKey → (toolId → toolName) so tool_result errors stay isolated per session scope. */
+  private activeToolNames = new Map<string, Map<string, string>>();
+  private nextToolScopeOrdinal = 0;
+  private recentProviderFallbackNotices = new Map<string, number>();
+  private recentFallbackEmptyTurnAlerts = new Map<string, number>();
+  private recentToolFailureAlerts = new Map<string, number>();
+  /**
+   * Dedup for {@link emitNoFallbackReauthNotice} (QR-211), keyed `${chatJid}:auth-required`.
+   * A dedicated map rather than folding into recentProviderFallbackNotices — that
+   * map's keys are 4-part (chatJid:reason:fallbackProvider:fallbackModel) and mean
+   * "already told this chat which backup took over"; this is the opposite case
+   * (no backup took over at all) and needs its own 2-part key shape.
+   */
+  private recentNoFallbackReauthNotices = new Map<string, number>();
+
+  /**
+   * Tracks toolScopeKeys where at least one non-phantom tool_use event was
+   * processed for the current turn. Used to suppress the empty-turn fallback
+   * notice when the agent's entire reply was tool work (e.g. send_message,
+   * send_media MCP tools) — in that case the user already received a visible
+   * result via the outbound channel and the "no reply" notice would be wrong.
+   *
+   * Lifecycle: set on tool_use (after post-turn-gate check); cleared by
+   * clearToolNames at the start of each result event (same lifecycle as
+   * activeToolNames). Not persisted — process-local only.
+   */
+  private turnHadToolActivity = new Set<string>();
+
+  /** For the single/shared path (handleEvent): mirrors turnHadToolActivity
+   *  as a boolean since that path uses a single global scope key. */
+  private singleTurnHadToolActivity = false;
+
+  // Best-effort SQLite durability for pending polls (save/remove/loadRows + the
+  // swallowed-error counter surfaced in health). Initialized in the constructor —
+  // it needs the db. rehydratePendingPolls orchestrates loadRows() into the store +
+  // timers + downtime notify; settle/delete/expiry call save/remove.
+  private readonly pollPersistence: PendingPollPersistence;
+
+  private recordCrash(mapKey: string): number {
+    return this.crashes.record(mapKey);
+  }
+
+  private getCrashCount(mapKey: string): number {
+    return this.crashes.count(mapKey);
+  }
+
+  /**
+   * Window for the health-degraded crash signal (#1427). A crash older than this
+   * no longer degrades health, so a transient crash that immediately recovers
+   * clears within the window instead of pinning status=degraded forever. Sustained
+   * crash LOOPS are still caught by auto-respawn exhaustion (a separate alert), so
+   * a short window here only governs the soft "crashed recently" health hint.
+   */
+  private static readonly CRASH_HEALTH_DECAY_WINDOW_MS = 10 * 60_000;
+
+  private getRecentCrashCount(): number {
+    return this.crashes.recentWithin(AgentRuntime.CRASH_HEALTH_DECAY_WINDOW_MS);
+  }
+
+  private decrementCrashCount(mapKey: string): void {
+    this.crashes.decrement(mapKey);
+  }
+
+  private getCrashScopeKey(chatJid: string): string {
+    if (this.sessionScope !== 'per_chat') {
+      return GLOBAL_CRASH_SCOPE_KEY;
+    }
+    return this.sandboxPerChat
+      ? chatJidToWorkspace(this.cwd ?? homedir(), chatJid).workspaceKey
+      : chatJid;
+  }
+
+  private createToolScopeKey(scopeBase: string): string {
+    this.nextToolScopeOrdinal += 1;
+    return `${scopeBase}#${this.nextToolScopeOrdinal}`;
+  }
+
+  private requireSessionToolScopeKey(session: SessionManager): string {
+    const toolScopeKey = this.sessionEventToolScopes.get(session);
+    if (!toolScopeKey) {
+      throw new Error('Cannot dispatch a runtime turn for an unregistered session manager');
+    }
+    return toolScopeKey;
+  }
+
+  private getToolNames(toolScopeKey: string): Map<string, string> {
+    let names = this.activeToolNames.get(toolScopeKey);
+    if (!names) {
+      names = new Map<string, string>();
+      this.activeToolNames.set(toolScopeKey, names);
+    }
+    return names;
+  }
+
+  private clearToolNames(toolScopeKey: string): void {
+    this.activeToolNames.delete(toolScopeKey);
+    // Note: turnHadToolActivity is NOT cleared here — the result handler captures
+    // it for the empty-turn check and clears it explicitly after the check.
+  }
+
+  /**
+   * Bound an evict-oldest dedup map. Mirrors the recentToolFailureAlerts cap so
+   * window-pruned maps can't grow without limit between prunes (e.g. one entry per
+   * distinct chat that never recurs within the window).
+   */
+  private capDedupeMap(map: Map<string, unknown>, max = MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS): void {
+    while (map.size > max) {
+      const oldest = map.keys().next().value;
+      if (oldest === undefined) break;
+      map.delete(oldest);
+    }
+  }
+
+  /**
+   * Clear all tool-scope state belonging to one mapKey. Tool scope keys are
+   * `${mapKey}#${ordinal}` (see createToolScopeKey), so on a per_chat crash we must
+   * drop only the crashing chat's scopes — a blanket `.clear()` would stomp other
+   * concurrent chats' in-flight tool state (mislabeled tool errors, mis-fired
+   * empty-turn notices for bystander chats).
+   */
+  private clearToolScopeFor(mapKey: string): void {
+    // Scope keys are always `${mapKey}#${ordinal}` (createToolScopeKey), so a prefix
+    // match on `${mapKey}#` is exact — `chat#…` never matches `chat2#…`.
+    const prefix = `${mapKey}#`;
+    for (const key of this.activeToolNames.keys()) {
+      if (key.startsWith(prefix)) this.activeToolNames.delete(key);
+    }
+    for (const key of this.turnHadToolActivity) {
+      if (key.startsWith(prefix)) this.turnHadToolActivity.delete(key);
+    }
+  }
+
+  private maybeEmitToolFailureAlert(args: {
+    chatJid: string | null | undefined;
+    toolId: string;
+    toolName: string;
+    content: string;
+    classification: ToolUpdate;
+    toolScopeKey: string;
+    mapKey?: string;
+  }): void {
+    if (process.env['BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS'] === '0') return;
+
+    // Root-cause noise gate: a non-zero Bash exit (glob/grep no-match, failed
+    // conditional, missing path) is reported by claude-cli as `is_error` but is
+    // a normal agent-loop result, not an operator-actionable failure. Only page
+    // when the error carries an infra/provider-health signature.
+    if (!shouldEmitToolFailureAlert(args.classification.category, args.content)) {
+      log.debug(
+        {
+          instance: this.instanceName,
+          toolName: args.toolName,
+          category: args.classification.category,
+        },
+        'suppressing benign tool-error (not operator-actionable) — no BOT ERRORS alert',
+      );
+      return;
+    }
+
+    const now = Date.now();
+    for (const [key, recordedAt] of this.recentToolFailureAlerts) {
+      if (now - recordedAt > TOOL_FAILURE_ALERT_DEDUP_MS) {
+        this.recentToolFailureAlerts.delete(key);
+      }
+    }
+
+    const provider = this.effectiveProvider || this.agentProvider || 'unknown-provider';
+    const source = `runtime-tool-error:${safeAlertSegment(provider)}:${safeAlertSegment(args.toolName)}`;
+    const fingerprint = [
+      this.instanceName,
+      provider,
+      args.toolName,
+      args.classification.category,
+      args.content.replace(/\s+/g, ' ').trim().slice(0, 500),
+    ].join('\n');
+
+    if (this.recentToolFailureAlerts.has(fingerprint)) return;
+    this.recentToolFailureAlerts.set(fingerprint, now);
+    this.capDedupeMap(this.recentToolFailureAlerts);
+
+    const evidence = [
+      'runtime_source=src/runtimes/agent/runtime.ts:tool_result',
+      `instance=${alertEvidenceValue(this.instanceName)}`,
+      `provider=${alertEvidenceValue(provider)}`,
+      `session_scope=${this.sessionScope}`,
+      `chat_jid=${alertEvidenceValue(args.chatJid ?? null)}`,
+      `tool_scope_key=${alertEvidenceValue(args.toolScopeKey)}`,
+      `map_key=${alertEvidenceValue(args.mapKey ?? null)}`,
+      `tool_id=${alertEvidenceValue(args.toolId)}`,
+      `tool_name=${alertEvidenceValue(args.toolName)}`,
+      `classification=${args.classification.category}`,
+      `detail=${alertEvidenceValue(args.classification.detail)}`,
+      `cwd=${alertEvidenceValue(this.cwd ?? process.cwd())}`,
+      'error_excerpt:',
+      alertExcerpt(args.content) || 'unknown',
+    ].join('\n');
+
+    try {
+      emitAlertChecked(
+        this.instanceName,
+        source,
+        `Agent tool failure: ${args.toolName}`,
+        evidence,
+        'warning',
+      );
+    } catch (err) {
+      log.warn({
+        instance: this.instanceName,
+        provider,
+        toolId: args.toolId,
+        toolName: args.toolName,
+        err: errorMessage(err),
+      }, 'failed to emit BOT ERRORS tool failure alert');
+    }
+  }
+
+  // The auto-compact bookkeeping state machine lives in AutoCompactController
+  // (src/runtimes/agent/auto-compact-controller.ts). These privates stay as thin
+  // delegators so the turn-pipeline call sites (and their characterization tests)
+  // are unchanged; the TRIGGER decision maybeStartAutoCompact stays below because
+  // it depends on the db/session/pending-system tracking, not on this state.
+  private beginSilentCompact(scopeKey: string): void {
+    this.autoCompact.beginSilentCompact(scopeKey);
+  }
+
+  private isSilentCompact(scopeKey?: string): boolean {
+    return this.autoCompact.isSilentCompact(scopeKey);
+  }
+
+  private clearSilentCompact(scopeKey?: string): void {
+    this.autoCompact.clearSilentCompact(scopeKey);
+  }
+
+  private finishAutoCompact(scopeKey: string): void {
+    this.autoCompact.finishAutoCompact(scopeKey);
+  }
+
+  private consumeCompactBoundary(scopeKey: string): boolean {
+    return this.autoCompact.consumeCompactBoundary(scopeKey);
+  }
+
+  private recordAutoCompactSuccess(scopeKey: string): void {
+    this.autoCompact.recordAutoCompactSuccess(scopeKey);
+  }
+
+  private recordAutoCompactRapidRearm(scopeKey: string, lastSuccessAt: number, now: number): void {
+    this.autoCompact.recordAutoCompactRapidRearm(scopeKey, lastSuccessAt, now);
+  }
+
+  private recordAutoCompactNextTurnIfNeeded(
+    scopeKey: string,
+    inputTokens: number | undefined,
+    consumeWhenNotOverThreshold = true,
+  ): void {
+    this.autoCompact.recordAutoCompactNextTurnIfNeeded(scopeKey, inputTokens, consumeWhenNotOverThreshold);
+  }
+
+  /**
+   * A provider stream without request IDs cannot safely retain a timed-out
+   * classification slot while admitting another request. Prove the old process
+   * tree is gone before cancelling the exact lease and reopening the lane.
+   */
+  private quarantineTimedOutSystemTurn(
+    session: SessionManager,
+    scopeKey: string,
+    lease: SystemTurnLeaseToken,
+  ): Promise<boolean> {
+    const existing = this.systemTurnQuarantines.get(scopeKey);
+    if (existing) return existing;
+
+    let quarantine!: Promise<boolean>;
+    quarantine = session.shutdown(false).then(
+      () => true,
+      (err) => {
+        log.error(
+          { err, scopeKey, leaseId: lease.id },
+          'timed-out system request quarantine failed — provider lane remains closed',
+        );
+        return false;
+      },
+    ).then((provedClosed) => {
+      if (provedClosed && this.systemTurnQuarantines.get(scopeKey) === quarantine) {
+        this.systemTurnQuarantines.delete(scopeKey);
+      }
+      return provedClosed;
+    });
+    this.systemTurnQuarantines.set(scopeKey, quarantine);
+    return quarantine;
+  }
+
+  private async waitForSystemTurnQuarantine(scopeKey: string): Promise<void> {
+    const quarantine = this.systemTurnQuarantines.get(scopeKey);
+    if (!quarantine) return;
+    if (await quarantine) return;
+    throw new Error(`SYSTEM_TURN_QUARANTINE_FAILED: provider lane "${scopeKey}" remains closed`);
+  }
+
+  private async settleFailedSystemTurnDispatch(
+    session: SessionManager,
+    scopeKey: string,
+    lease: SystemTurnLeaseToken | null | undefined,
+    error: unknown,
+  ): Promise<void> {
+    if (!lease) return;
+    const message = error instanceof Error ? error.message : String(error);
+    const status = session.getStatus();
+    // A synchronous one-flight rejection proves this new lease never crossed
+    // the provider boundary. Likewise, a manager reporting no request owner has
+    // already proved pre-dispatch failure or completed teardown.
+    if (message.includes('PROVIDER_TURN_IN_FLIGHT') || status.turnInFlight !== true) {
+      this.pendingSystemResults.cancel(lease);
+      return;
+    }
+    const provedClosed = await this.quarantineTimedOutSystemTurn(session, scopeKey, lease);
+    if (provedClosed) {
+      this.pendingSystemResults.cancel(lease);
+      return;
+    }
+    throw new Error(`SYSTEM_TURN_QUARANTINE_FAILED: provider lane "${scopeKey}" remains closed`, {
+      cause: error,
+    });
+  }
+
+  private maybeStartAutoCompact(session: SessionManager | null, mapKey?: string): void {
+    if (this.autoCompactInputTokens === undefined || session === null) return;
+    // QR-105: '/compact' is a claude-cli-only slash command. For any other provider
+    // (codex-cli/opencode-cli/gemini-cli, anthropic-api/openai-api) sending it is a
+    // plain user message that never emits a compact_boundary — so markSessionCompacted
+    // never advances and EVERY over-threshold turn re-fires it, UNTHROTTLED (the
+    // rapid-rearm + cooldown safeguards below key on the claude-only compact_boundary /
+    // success / timeout events, which never fire). Gate on the SESSION's actual provider
+    // (getProviderId, not the primary this.agentProvider) so a fallback-to-non-claude
+    // session is skipped too. If per-provider compaction is added later, extend here.
+    // Defensive typeof check mirrors the getProviderId call site at ~5366; an
+    // indeterminate provider fails safe (skip the claude-only command).
+    const sessionProvider =
+      typeof session.getProviderId === 'function' ? session.getProviderId() : null;
+    if (sessionProvider !== 'claude-cli') return;
+    if (this.sessionScope === 'shared') return;
+    if (!session.getStatus().active) return;
+
+    const rowId = session.getDbRowId();
+    if (rowId === null) return;
+
+    const snapshot = getSessionTokenSnapshot(this.db, rowId);
+    if (!snapshot) return;
+
+    // #1774: total_input_tokens no longer includes cache_read (it is
+    // genuinely-new input only — see the schema note above ensureAgentSchema
+    // in session-db.ts). This heuristic's job is unchanged: approximate how
+    // much of the model's context window this session has consumed since
+    // its last compact. cache_read IS that consumed context being re-read,
+    // so the combined value below is deliberately the SAME quantity the
+    // pre-split single column used to hold — this preserves today's
+    // trigger point exactly, with zero recalibration of autoCompactInputTokens.
+    const totalCombined = snapshot.totalInputTokens + snapshot.totalCacheReadTokens;
+    const lastCompactCombined = snapshot.lastCompactInputTokens + snapshot.lastCompactCacheReadTokens;
+    const inputSinceCompact = Math.max(0, totalCombined - lastCompactCombined);
+    if (inputSinceCompact < this.autoCompactInputTokens) return;
+
+    const scopeKey = mapKey ?? GLOBAL_TOOL_SCOPE_KEY;
+
+    // Rollout bootstrap: existing sessions that already accumulated past the
+    // threshold before this knob was enabled would otherwise fire /compact
+    // on their very next turn — a fleet-wide enable could trigger a compact
+    // storm. Detect by lastCompactInputTokens=0 + totalInputTokens at or
+    // above threshold (matches the outer gate's >= semantics), advance the
+    // baseline once silently, and let the natural threshold cycle take over.
+    //
+    // Side effect to be aware of: a brand-new session whose first turn
+    // happens to cross the threshold (large file ingestion, very low
+    // threshold) will also take this path and silently skip its first real
+    // compact. Same anti-storm behaviour; documented in docs/runbook.md.
+    if (snapshot.lastCompactInputTokens === 0 && totalCombined >= this.autoCompactInputTokens) {
+      markSessionCompacted(this.db, rowId);
+      log.info({
+        scopeKey,
+        rowId,
+        totalInputTokens: snapshot.totalInputTokens,
+        totalCacheReadTokens: snapshot.totalCacheReadTokens,
+        lastCompactInputTokens: snapshot.lastCompactInputTokens,
+        threshold: this.autoCompactInputTokens,
+      }, 'auto compact baseline initialised for existing session');
+      return;
+    }
+
+    if (this.autoCompact.waiters.has(scopeKey) || this.isSilentCompact(scopeKey)) return;
+
+    const now = Date.now();
+    const lastSuccessAt = this.autoCompact.lastSuccessAt.get(scopeKey);
+    if (lastSuccessAt !== undefined) {
+      const withinRapidRearmWindow = now - lastSuccessAt < AUTO_COMPACT_RAPID_REARM_WINDOW_MS;
+      const alreadyRecordedForSuccess =
+        this.autoCompact.rapidRearmRecordedForSuccessAt.get(scopeKey) === lastSuccessAt;
+      if (withinRapidRearmWindow && !alreadyRecordedForSuccess) {
+        this.recordAutoCompactRapidRearm(scopeKey, lastSuccessAt, now);
+        return;
+      }
+      if (!withinRapidRearmWindow && !alreadyRecordedForSuccess) {
+        this.autoCompact.consecutiveRapidRearms.delete(scopeKey);
+        this.autoCompact.lastSuccessAt.delete(scopeKey);
+      }
+    }
+
+    const cooldownUntil = this.autoCompact.cooldownUntil.get(scopeKey);
+    if (cooldownUntil !== undefined) {
+      if (now < cooldownUntil) return;
+      this.autoCompact.cooldownUntil.delete(scopeKey);
+    }
+
+    let resolveWaiter!: () => void;
+    let compactLease: SystemTurnLeaseToken | null = null;
+    const timer = setTimeout(() => {
+      log.error(
+        { scopeKey, rowId, timeoutMs: AUTO_COMPACT_TIMEOUT_MS, backoffMs: AUTO_COMPACT_TIMEOUT_BACKOFF_MS },
+        'auto compact timed out',
+      );
+      this.clearSilentCompact(scopeKey);
+      this.finishAutoCompact(scopeKey);
+      this.autoCompact.cooldownUntil.set(scopeKey, Date.now() + AUTO_COMPACT_TIMEOUT_BACKOFF_MS);
+      // The stream has no per-request correlation. If /compact produced no
+      // terminal result, retaining its FIFO slot while admitting a user request
+      // lets the user's result consume the compact slot. Tear down the source
+      // process first; only proven teardown cancels the exact lease.
+      if (compactLease) {
+        void this.quarantineTimedOutSystemTurn(session, scopeKey, compactLease)
+          .then((provedClosed) => {
+            if (provedClosed) this.pendingSystemResults.cancel(compactLease);
+          });
+      }
+    }, AUTO_COMPACT_TIMEOUT_MS);
+    timer.unref?.();
+
+    const promise = new Promise<void>((resolve) => {
+      resolveWaiter = resolve;
+    });
+    this.autoCompact.waiters.set(scopeKey, { promise, resolve: resolveWaiter, timer });
+    this.beginSilentCompact(scopeKey);
+
+    log.info({
+      scopeKey,
+      rowId,
+      inputSinceCompact,
+      threshold: this.autoCompactInputTokens,
+    }, 'auto compact triggered');
+
+    compactLease = this.markSystemTurn(
+      session,
+      scopeKey,
+      'auto_compact_silent',
+      mapKey !== undefined
+        ? this.chatQueues.get(mapKey)?.targetChatJid
+        : (this.currentTurnChatJid ?? this.activeChatJid ?? undefined),
+    );
+    void session.sendTurn('/compact').catch(async (err) => {
+      log.warn({ err, scopeKey, rowId }, 'auto compact send failed');
+      this.clearSilentCompact(scopeKey);
+      this.finishAutoCompact(scopeKey);
+      await this.settleFailedSystemTurnDispatch(session, scopeKey, compactLease, err);
+    }).catch((err) => {
+      log.error({ err, scopeKey, rowId }, 'auto compact failed to quarantine ambiguous dispatch');
+    });
+  }
+
+  /**
+   * True while a turn is dispatching/pending for scopeKey — per-chat
+   * (perChatInboundSeqQueue + that chat's runtime TurnQueue) or the single/
+   * shared scope (currentInboundSeq/currentTurnChatJid + the global
+   * turnQueue). Pure predicate, no throw — shared by assertNoActiveUserTurn
+   * (which throws for command rejection) and Task G's recycle gating (which
+   * must never throw: a busy chat defers the recycle instead of rejecting
+   * the pin that triggered it).
+   */
+  private isTurnInFlight(scopeKey: string): boolean {
+    if (this.sessionScope === 'per_chat') {
+      const runtimeQueue = this.perChatTurnQueues.get(scopeKey);
+      return (
+        (this.perChatInboundSeqQueue.get(scopeKey)?.length ?? 0) > 0
+        || runtimeQueue?.isProcessing === true
+        || (runtimeQueue?.pending ?? 0) > 0
+      );
+    }
+    return (
+      this.currentInboundSeq !== undefined
+      || this.currentTurnChatJid !== null
+      || this.turnQueue.isProcessing
+      || this.turnQueue.pending > 0
+    );
+  }
+
+  private assertNoActiveUserTurn(scopeKey: string): void {
+    if (!this.isTurnInFlight(scopeKey)) return;
+    throw new AgentCommandRuntimeError(
+      'turn_in_progress',
+      this.sessionScope === 'per_chat'
+        ? 'agent command rejected because the target chat already has a turn in progress'
+        : 'agent command rejected because the agent already has a turn in progress',
+      409,
+    );
+  }
+
+  private getOpenFileDescriptorCount(): number | null {
+    try {
+      return readdirSync('/proc/self/fd').length;
+    } catch (err) {
+      log.debug({ err }, 'failed to count open file descriptors');
+      return null;
+    }
+  }
+
+  private getTurnRecoveryHealthDetails() {
+    const counts = typeof this.durability?.getTurnRecoverySupervisorCounts === 'function'
+      ? this.durability.getTurnRecoverySupervisorCounts()
+      : {
+      outstanding: 0, pending: 0, liveClaimed: 0, expiredClaimed: 0,
+      blockedUnsafe: 0, exhausted: 0, quarantinedDelivery: 0, corruptLinks: 0,
+      orphanTransfers: 0, echoConflicts: 0, openRecoveries: 0,
+      };
+    return {
+      turnRecoveryOutstanding: counts.outstanding,
+      turnRecoveryPending: counts.pending,
+      turnRecoveryLiveClaimed: counts.liveClaimed,
+      turnRecoveryExpiredClaimed: counts.expiredClaimed,
+      turnRecoveryBlockedUnsafe: counts.blockedUnsafe,
+      turnRecoveryExhausted: counts.exhausted,
+      turnRecoveryOpenRecoveries: counts.openRecoveries,
+      turnRecoveryQuarantinedDelivery: counts.quarantinedDelivery,
+      turnRecoveryCorruptLinks: counts.corruptLinks,
+      turnRecoveryOrphanTransfers: counts.orphanTransfers ?? 0,
+      turnRecoveryEchoConflicts: counts.echoConflicts ?? 0,
+    };
+  }
+
+  private logHealthStats(): void {
+    const memoryUsage = process.memoryUsage();
+    const finalizationHealth = this.runtimeTurnSupervisor.health();
+    const recoveryHealth = this.getTurnRecoveryHealthDetails();
+
+    log.info({
+      instanceName: this.instanceName,
+      sessionScope: this.sessionScope,
+      shared: this.shared,
+      sandboxPerChat: this.sandboxPerChat,
+      chatSessions: this.chatSessions.size,
+      chatQueues: this.chatQueues.size,
+      outboundQueues: this.outboundQueues.size,
+      workspaceResources: this.workspaceResources.size,
+      fdCount: this.getOpenFileDescriptorCount(),
+      memoryUsage: {
+        rss: memoryUsage.rss,
+        heapTotal: memoryUsage.heapTotal,
+        heapUsed: memoryUsage.heapUsed,
+        external: memoryUsage.external,
+        arrayBuffers: memoryUsage.arrayBuffers,
+      },
+      recentCrashCount: this.getRecentCrashCount(),
+      lastCrashAt: this.crashes.lastCrashAt,
+      proactiveResumeIdentityRejects: this.proactiveResumeIdentityRejects,
+      restartLoopGuard: {
+        enabled: config.restartLoopGuard.enabled,
+        ...readRestartLoopGuardHealth(
+          restartLoopGuardPath(config.stateRoot),
+          config.restartLoopGuard.windowMs,
+        ),
+      },
+      unownedProviderEventRejects: this.unownedProviderEventRejects,
+      turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
+      turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
+      turnFinalizationRetryAttempts: finalizationHealth.retryAttempts,
+      turnFinalizationRetryRecoveries: finalizationHealth.retryRecoveries,
+      turnFinalizationRetryExhaustions: finalizationHealth.retryExhaustions,
+      ...recoveryHealth,
+    }, 'agent runtime health stats');
+  }
+
+  private startHealthStatsTimer(): void {
+    if (this.healthStatsTimer) return;
+    this.healthStatsTimer = setInterval(() => {
+      try {
+        this.logHealthStats();
+      } catch (err) {
+        log.warn({ err, instanceName: this.instanceName }, 'agent runtime health stats failed');
+      }
+    }, HEALTH_STATS_INTERVAL_MS);
+    this.healthStatsTimer.unref?.();
+  }
+
+  private startQueueSweepTimer(): void {
+    if (!this.shared || this.queueSweepTimer) return;
+    this.queueSweepTimer = setInterval(() => this.sweepIdleQueues(), SHARED_QUEUE_SWEEP_INTERVAL_MS);
+    this.queueSweepTimer.unref?.();
+  }
+
+  private sweepIdleQueues(): void {
+    if (!this.shared) return;
+
+    const now = Date.now();
+    for (const [chatJid, queue] of this.outboundQueues) {
+      const lastActivity = typeof queue.lastActivity === 'number' ? queue.lastActivity : now;
+      const idleMs = now - lastActivity;
+      if (idleMs <= SHARED_QUEUE_IDLE_MS) continue;
+      if (chatJid === this.currentTurnChatJid) continue;
+      if (queue.hasPendingWork?.() === true) continue;
+
+      log.debug({ chatJid, idleMs }, 'evicting idle outbound queue');
+      void queue.shutdown().catch((err) => {
+        log.warn({ err, chatJid }, 'idle outbound queue shutdown failed');
+      });
+      this.outboundQueues.delete(chatJid);
+    }
+  }
+
+  private startSessionSweepTimer(): void {
+    if (this.sessionSweepTimer) return;
+    this.sessionSweepTimer = setInterval(() => this.sweepIdleSessions(), SESSION_SWEEP_INTERVAL_MS);
+    this.sessionSweepTimer.unref?.();
+  }
+
+  /**
+   * #1756: classifyActiveSessions used to run startup-only, so its 'ambiguous'
+   * bucket was a permanent no-op — an init-failure session that never
+   * checkpointed stayed 'active' forever. This interval re-runs the same
+   * sweep start() does, so any row still 'ambiguous' gets a fresh chance at
+   * the age-based fallback disposition in sweepStaleAgentSessions.
+   */
+  private startZombieSessionSweepTimer(): void {
+    if (!(this.sessionScope === 'per_chat' || this.sandboxPerChat) || this.zombieSessionSweepTimer) return;
+    this.zombieSessionSweepTimer = setInterval(() => {
+      this.sweepStaleAgentSessions().catch((err) => {
+        log.warn({ err, instanceName: this.instanceName }, 'interval zombie-session sweep failed');
+      });
+    }, ZOMBIE_SESSION_SWEEP_INTERVAL_MS);
+    this.zombieSessionSweepTimer.unref?.();
+  }
+
+  /**
+   * Sweep stale sessions for all per_chat modes (including Q's non-sandboxed
+   * per_chat). Cross-references agent_sessions with session_checkpoints to
+   * safely identify which processes to keep and which to reap. Only kills
+   * PIDs verified as owned children. Called once at startup and, per #1756,
+   * again on an interval (startZombieSessionSweepTimer) so a session that
+   * lands in 'ambiguous' — the classifier's do-not-touch bucket — is not
+   * skipped forever; resolveAmbiguousAgeFallback gives every pass a chance to
+   * retire a row that has sat idle with zero activity past the age
+   * threshold. Returns the set of conversation keys that must not be
+   * proactively resumed this pass (a live or ambiguous session was already
+   * left running for that key) — only meaningful to the startup caller.
+   */
+  /**
+   * C5 restart-loop guard consult for the startup resume gate. Returns true
+   * when proactive resume must be suppressed for this boot: the guard is
+   * enabled, resumable work exists, this boot follows an unclean exit, and
+   * the crashy-boot journal has reached the trip threshold. On trip, queues
+   * ONE operator notice through the startup-message channel (popped and sent
+   * by main.ts after connect). Fail-open throughout — any guard error
+   * degrades to "do not suppress".
+   */
+  private shouldSuppressProactiveResume(resumableCount: number): boolean {
+    if (!config.restartLoopGuard.enabled) return false;
+    if (resumableCount < 1) return false;
+    if (!this.restartLoopInterruptedBoot) return false;
+    const trip = checkAndRecordInterruptedBoot({
+      statePath: restartLoopGuardPath(config.stateRoot),
+      maxRestarts: config.restartLoopGuard.maxRestarts,
+      windowMs: config.restartLoopGuard.windowMs,
+    });
+    if (!trip.tripped) return false;
+    log.warn(
+      { bootsInWindow: trip.bootsInWindow, resumableCount, windowMs: config.restartLoopGuard.windowMs },
+      'restart-loop guard tripped — suppressing proactive resume for this boot',
+    );
+    const adminPhone = [...config.adminPhones][0];
+    if (adminPhone) {
+      const windowSec = Math.round(config.restartLoopGuard.windowMs / 1000);
+      this.pendingStartupMessage = {
+        chatJid: toPersonalJid(adminPhone),
+        text:
+          `*Restart-loop guard tripped* ⚠️ — ${trip.bootsInWindow} crash-interrupted boots ` +
+          `inside ${windowSec}s with resumable sessions pending. Proactive resume is ` +
+          `suppressed for this boot to break a possible resume-replay loop; sessions ` +
+          `resume on their next message. Check the journal for the implicated chat.`,
+      };
+    }
+    return true;
+  }
+
+  private async sweepStaleAgentSessions(): Promise<Set<string>> {
+    const proactiveResumeBlockedConversationKeys = new Set<string>();
+    if (!(this.sessionScope === 'per_chat' || this.sandboxPerChat)) {
+      return proactiveResumeBlockedConversationKeys;
+    }
+    if (!this.durability) {
+      log.warn('durability engine not set — skipping active session classification');
+      return proactiveResumeBlockedConversationKeys;
+    }
+
+    const classified = classifyActiveSessions(this.db, this.durability);
+    for (const session of classified) {
+      switch (session.classification) {
+        case 'stale_dead':
+          markOrphaned(this.db, session.id);
+          break;
+        case 'stale_live':
+          log.warn({
+            id: session.id,
+            pid: session.claudePid,
+            conversationKey: session.conversationKey,
+            reason: session.reason,
+          }, 'reaping stale session');
+          try {
+            await killSessionTree(session.claudePid, 'SIGTERM', {
+              generationMarker:
+                `stale:${session.id}:${session.sessionId ?? 'unknown'}:${session.claudePid}`,
+            });
+          } catch (err) {
+            log.error({
+              err,
+              id: session.id,
+              pid: session.claudePid,
+              conversationKey: session.conversationKey,
+            }, 'stale session tree cleanup inconclusive — blocking proactive resume');
+            if (session.conversationKey) {
+              proactiveResumeBlockedConversationKeys.add(session.conversationKey);
+              break;
+            }
+            throw err;
+          }
+          markOrphaned(this.db, session.id);
+          break;
+        case 'ambiguous': {
+          const fallback = resolveAmbiguousAgeFallback(
+            {
+              id: session.id,
+              claudePid: session.claudePid,
+              startedAt: session.startedAt,
+              messageCount: session.messageCount,
+            },
+            Date.now(),
+            AMBIGUOUS_SESSION_MAX_AGE_MS,
+          );
+          if (fallback === 'orphan') {
+            markOrphaned(this.db, session.id);
+            log.warn({
+              id: session.id,
+              pid: session.claudePid,
+              conversationKey: session.conversationKey,
+              reason: session.reason,
+            }, 'ambiguous session past age threshold with no activity — marked orphaned (#1756)');
+            break;
+          }
+          log.warn({
+            id: session.id,
+            pid: session.claudePid,
+            conversationKey: session.conversationKey,
+            reason: session.reason,
+          }, 'ambiguous session — not touching');
+          // Left running — block a duplicate proactive resume for this key.
+          if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
+          break;
+        }
+        case 'authoritative_live':
+          // Verified-live child left in place — block a duplicate proactive resume.
+          if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
+          break;
+      }
+    }
+    return proactiveResumeBlockedConversationKeys;
+  }
+
+  /**
+   * True only if a resident agent session is safe to suspend right now. A session
+   * is evictable when it is live, between turns, past the minimum-residency floor,
+   * idle beyond the TTL, and not blocking on a pending poll vote. Mirrors the
+   * guards proven necessary by the eviction design (turn-in-flight, anti-thrash
+   * residency floor, awaited-poll exemption).
+   */
+  private isSessionSafeToEvict(mapKey: string, session: SessionManager, now: number): boolean {
+    if (session === this.controlSession) return false;    // synthetic self-heal session has its own lifecycle
+    const st = session.getStatus();
+    if (st.active !== true) return false;                 // not a live resident session
+    if (st.turnInFlight === true) return false;           // mid-turn (covers mid-tool-call)
+    // A turn is queued/dispatching for this chat. pendingTurnText is set before the
+    // session ref is captured for dispatch and cleared at turn completion, so it
+    // closes the window where a sweep could evict a session mid-dispatch (before its
+    // watchdog arms) and the captured ref then gets respawned off-map. Fail-safe:
+    // a lingering pending turn only defers eviction, never forces it.
+    if (this.pendingTurnText.has(mapKey)) return false;
+    if (this.pendingPolls.questions.has(mapKey)) return false; // awaiting a poll vote
+    // Images are buffered for IMAGE_COALESCE_MS before dispatch and do NOT set
+    // pendingTurnText or refresh lastMessageAt — so without this guard an idle/LRU
+    // sweep could evict mid-buffer, and cleanupPerChatState would abort the buffer,
+    // silently dropping the user's images and disarming the reply guarantee.
+    if (this.imageCoalesce.buffers.has(mapKey)) return false;
+    const startedMs = st.startedAt ? Date.parse(st.startedAt) : now;
+    if (Number.isFinite(startedMs) && now - startedMs < SESSION_MIN_RESIDENCY_MS) return false; // anti-thrash floor
+    return true;
+  }
+
+  private sessionIdleMs(session: SessionManager, now: number): number {
+    const st = session.getStatus();
+    const startedMs = st.startedAt ? Date.parse(st.startedAt) : now;
+    const lastMs = st.lastMessageAt ? Date.parse(st.lastMessageAt) : startedMs;
+    return Number.isFinite(lastMs) ? now - lastMs : 0;
+  }
+
+  /** TTL-pass eligibility: safe to evict AND idle beyond the TTL. */
+  private isSessionEvictable(mapKey: string, session: SessionManager, now: number): boolean {
+    return this.isSessionSafeToEvict(mapKey, session, now) && this.sessionIdleMs(session, now) > SESSION_IDLE_MS;
+  }
+
+  /**
+   * Suspend resident per-chat agent sessions that have gone idle, so the resident
+   * session set stays bounded instead of accumulating one process (plus its MCP
+   * and browser children) per distinct chat until the host exhausts memory.
+   *
+   * Pass 1 (TTL): suspend anything idle beyond SESSION_IDLE_MS. Pass 2 (LRU
+   * ceiling): if still over MAX_RESIDENT_SESSIONS, suspend the longest-idle
+   * evictable sessions down toward the cap. Eviction goes through the session's
+   * own graceful shutdown(true) — which suspends (resumable) and routes through
+   * the exit-handler's clean-shutdown path — never an external kill.
+   */
+  private sweepIdleSessions(): void {
+    const now = Date.now();
+
+    // Pass 1 — TTL.
+    for (const [mapKey, session] of this.chatSessions) {
+      if (!this.isSessionEvictable(mapKey, session, now)) continue;
+      this.evictIdleSession(mapKey, session, 'idle-ttl');
+    }
+
+    // Pass 2 — LRU ceiling. Unlike pass 1 this evicts even sessions still within
+    // the TTL (longest-idle first), to bound memory under a burst of many active
+    // chats; it still honors the safety guards (live, between-turns, no pending
+    // poll, past the residency floor).
+    if (this.chatSessions.size > MAX_RESIDENT_SESSIONS) {
+      const overBy = this.chatSessions.size - MAX_RESIDENT_SESSIONS;
+      const candidates = [...this.chatSessions.entries()]
+        .filter(([mapKey, session]) => this.isSessionSafeToEvict(mapKey, session, now))
+        .map(([mapKey, session]) => ({ mapKey, session, idleMs: this.sessionIdleMs(session, now) }))
+        .sort((a, b) => b.idleMs - a.idleMs); // longest-idle first
+      for (const { mapKey, session } of candidates.slice(0, overBy)) {
+        this.evictIdleSession(mapKey, session, 'lru-ceiling');
+      }
+    }
+  }
+
+  private evictIdleSession(mapKey: string, session: SessionManager, reason: string): void {
+    log.info({ chatJid: mapKey, reason, residentCount: this.chatSessions.size }, 'suspending idle agent session');
+    const childStopped = session.shutdown(true);
+    this.perChatMcpSocketManager.releaseAfter(mapKey, childStopped);
+    // Remove first so a concurrent inbound message cleanly re-spawns/resumes.
+    this.deleteOwnedPerChatSession(mapKey, session);
+    // Tear down the chat's outbound queue too (mirrors every other session-removal
+    // site). In per_chat mode the queue sweep never runs, so without this the queue
+    // map grows one dead entry per evicted chat under a burst — undercutting the
+    // memory bound this feature exists to enforce.
+    this.chatQueues.get(mapKey)?.abortTurn();
+    this.chatQueues.delete(mapKey);
+    // Canonical teardown of all co-keyed per-chat state (operation tracker,
+    // auto-compact timers, image-coalesce buffers, turn bookkeeping). Required
+    // whenever a session leaves chatSessions — otherwise eviction leaks the very
+    // auxiliary state/timers this feature exists to bound. Next message re-spawns
+    // and repopulates. Safe at this point: the safety guards already exclude a
+    // chat with a pending turn or pending poll.
+    this.cleanupPerChatState(mapKey, { preserveActorSocket: true });
+    void childStopped.catch((err) => {
+      log.warn({ err, chatJid: mapKey }, 'idle session shutdown failed');
+    });
+  }
+
+  // Tracks inbound seq for the current turn (single/shared mode)
+  private currentInboundSeq: number | undefined;
+  // Tracks inbound seq per chat key (per_chat mode — chats are concurrent)
+  // FIFO queue: push on dispatch, shift on result to prevent race when turns overlap.
+  private perChatInboundSeqQueue: Map<string, number[]> = new Map();
+  /** Immutable journal/identity/replay snapshots, aligned with the per-chat seq FIFO. */
+  private perChatRuntimeTurnContexts = new Map<string, RuntimeTurnContext[]>();
+  private perChatRuntimeTurnCompletions = new Map<string, RuntimeTurnCompletion>();
+  private readonly perChatRuntimeTurnScopeRefs = new Map<string, PerChatRuntimeScopeRef>();
+  /** One FIFO per chat: provider dispatch N+1 waits for turn N's durable outcome. */
+  private perChatTurnQueues = new Map<string, TurnQueue>();
+  /**
+   * Task G (D14): scope keys (per-chat mapKey, or GLOBAL_TOOL_SCOPE_KEY for
+   * single/shared) whose live session recycle was deferred because a turn
+   * was in flight at pin time. Consumed at the next turn-idle boundary — the
+   * top of ensureSessionAndQueueSync, which every inbound message reaches
+   * BEFORE any turn dispatch (see consumePendingRecycleIfIdle).
+   */
+  private pendingRecycle = new Set<string>();
+  /** Mutable callback key for a queue that may be re-keyed from LID to phone JID. */
+  private readonly perChatTurnQueueKeys = new WeakMap<TurnQueue, PerChatRuntimeScopeRef>();
+  /** The sole shared/singleton user turn whose provider result is still unresolved. */
+  private currentRuntimeTurnContext: RuntimeTurnContext | null = null;
+  /** Singleton turn admitted but not yet published into an outbound evidence epoch. */
+  private pendingSingletonRuntimeTurnContext: RuntimeTurnContext | null = null;
+  private currentRuntimeTurnCompletion: RuntimeTurnCompletion | null = null;
+  /** Owns bounded terminal retries and sticky affected-scope degradation. */
+  private readonly runtimeTurnSupervisor: RuntimeTurnSupervisor<RuntimeTurnPostEffects>;
+  private readonly runtimeTurnHost: RuntimeTurnCoordinatorPort & RuntimeResultHandlerPort;
+  private readonly runtimeTurnCoordinator: RuntimeTurnCoordinator;
+  /** Host object backing model-pin.ts / model-catalogue-render.ts (the `/model` surface). */
+  private readonly modelPinHost: ModelPinPort;
+  private readonly runtimeTurnAfterTerminal = new Map<string, RuntimeTurnAfterTerminalAction>();
+  private readonly recoveryManagerId = randomUUID();
+  private recoveryGeneration = 0;
+
+  /** Last pin-block notice per conversation (one notice per transition). */
+  private lastPinBlockNotice = new Map<string, string>();
+  /** Last spawn provider per conversation — runtime_switched detection (slice 4). */
+  private lastSpawnRouteProvider = new Map<string, string>();
+  // Counts pending system-turn results (context injection, continuation) that should
+  // not consume from perChatInboundSeqQueue when their result event arrives. The
+  // counter invariants (mark / unmark / consumeIfPending / count) live in the
+  // collaborator; the raw map is reachable via .counts for per-chat cleanup/shutdown.
+  private readonly pendingSystemResults = new PendingSystemResultTracker();
+  /** Latest alias update deferred until an uncorrelated provider lane is empty. */
+  private readonly pendingJidAliasChanges = new Map<string, { newJid: string }>();
+  /** Provider teardown barriers created when a system request misses its terminal result. */
+  private readonly systemTurnQuarantines = new Map<string, Promise<boolean>>();
+  /** Exact-source teardowns for terminal results that could not be safely attributed. */
+  private readonly rejectedTerminalTeardowns = new WeakMap<SessionManager, Promise<boolean>>();
+  private readonly activeMessageHandlers = new Set<Promise<void>>();
+  private shutdownRequested = false;
+
+  // Startup notification deferred until after WA connects
+  private pendingStartupMessage: { chatJid: string; text: string } | null = null;
+
+  // Voice reply state (SP4) — tracks inbound contentType and accumulated assistant text per turn.
+  // Per-chat mode uses Maps keyed by mapKey; single/shared mode uses scalar fields.
+  private currentTurnInboundContentType: string | null = null;
+  private currentTurnAssistantText = '';
+  private currentTurnAssistantItemText: Map<string, string> = new Map();
+  // Inbound message id anchoring the current turn — reply-guarantee evidence
+  // (hasFromMeReplyAfter) is scoped to the origin conversation via this id.
+  private currentTurnSourceMessageId: string | null = null;
+  private perChatTurnSourceMessageId: Map<string, string> = new Map();
+  private perChatTurnContentType: Map<string, string> = new Map();
+  private perChatTurnText: Map<string, string> = new Map();
+  private perChatTurnSuppressedReplySatisfaction: Set<string> = new Set();
+  private perChatAssistantItemText: Map<string, Map<string, string>> = new Map();
+  // R1 streaming marker scan: hold the FIRST line of a turn's assistant text
+  // until it is resolvable (a newline arrived, or it can no longer be a
+  // [[wa-route: …]] marker) so a marker split across token-streamed deltas
+  // never leaks and always registers. null = not scanning (base per-delta
+  // path); '' or a partial line = actively holding. Shared/single mode uses
+  // the scalar, per_chat uses the map; both armed at turn start and flushed at
+  // the terminal 'result', all flag-gated (flag off leaves them untouched).
+  private currentTurnRouteMarkerHold: string | null = null;
+  private perChatRouteMarkerHold: Map<string, string> = new Map();
+
+  // Tracks the most recent turn text per chat (keyed by workspaceKey or chatJid).
+  // Used to replay a message when session resume fails and the turn was lost.
+  private pendingTurnText: Map<string, string> = new Map();
+  private pendingTurnActorJid: Map<string, string | undefined> = new Map();
+  // F-STICKY-ACTOR (QR-245): per-chat executing-turn actor register. HEAD =
+  // oldest-dispatched-unresolved = the turn the subprocess is currently running.
+  // Read fail-closed by resolveExecutingActor (empty/absent -> deny). Cleared on
+  // every abnormal termination (cleanupPerChatState + crash/resume/fallback).
+  private perChatExecActorQueue: Map<string, (string | undefined)[]> = new Map();
+  /** Exact actor FIFO slot owned by an output-producing system lease (poll continuation). */
+  private readonly systemTurnExecActors = new Map<number, {
+    scopeKey: string;
+    actorJid: string | undefined;
+  }>();
+  private currentTurnReplayText: string | null = null;
+  private currentTurnReplayActorJid: string | undefined;
+
+  // ---------------------------------------------------------------------------
+  // Image coalescing — batch rapid image sends into a single turn
+  // ---------------------------------------------------------------------------
+  // When multiple images arrive for the same chat within IMAGE_COALESCE_MS,
+  // they're collected and sent as one combined turn to avoid hitting Claude's
+  // per-image dimension limits in multi-image sessions.
+  private static readonly IMAGE_COALESCE_MS = 3_000;
+  private static readonly MAX_COALESCE_BATCH = 20;
+  // Owns the per-chat image coalesce buffer map + durability marking / abort.
+  // The turn-pipeline methods (coalesceImageTurn / flushImageCoalesce / LID rekey)
+  // stay here and drive this.imageCoalesce.buffers directly. durability and
+  // replyGuarantee are late-bound, so they are read through getter thunks.
+  private readonly imageCoalesce = new ImageCoalescer(
+    () => this.durability,
+    () => this.replyGuarantee,
+  );
+
+  // Set of mapKeys for which handleResumeFailed is currently managing context
+  // injection + pending-turn replay. Used to suppress context injection in any
+  // concurrent sendTurnToSession call for the same chat, preventing double injection.
+  private resumeFailedHandling: Set<string> = new Set();
+
+  // Global socket server (non-sandboxPerChat mode)
+  private globalSocketServer: WhatSoupSocketServer | null = null;
+  private singletonProviderToolSession: SessionContext | null = null;
+
+  private durability: DurabilityEngine | null = null;
+
+  private getPerChatAssistantItemMap(mapKey: string): Map<string, string> {
+    const existing = this.perChatAssistantItemText.get(mapKey);
+    if (existing) return existing;
+    const created = new Map<string, string>();
+    this.perChatAssistantItemText.set(mapKey, created);
+    return created;
+  }
+
+  private abortImageCoalesceBuffer(mapKey: string, reason: string): boolean {
+    return this.imageCoalesce.abort(mapKey, reason);
+  }
+
+  /**
+   * Remove all per-chat auxiliary state for a given map key.
+   * Call this whenever a session is removed from chatSessions.
+   */
+  private cleanupPerChatState(
+    mapKey: string,
+    options: {
+      preserveCrashHistory?: boolean;
+      preserveProviderTurnOwnership?: boolean;
+      preserveActorSocket?: boolean;
+    } = {},
+  ): void {
+    this.cleanupPerChatGenerationState(mapKey, options);
+    // F-STICKY-ACTOR: terminal cleanup also stops the per-chat socket. A /new
+    // generation replacement deliberately calls only cleanupPerChatGenerationState
+    // so socket/config ownership stays with the mapped manager.
+    if (!options.preserveActorSocket) this.teardownPerChatActorSocket(mapKey);
+    // Slice-4 route bookkeeping is keyed by conversationKey, not the raw
+    // mapKey: in sandbox mode mapKey already IS the conversationKey
+    // (workspaceKey = toConversationKey), while in canonical-JID mode it is a
+    // JID that must be reduced. Reconcile so teardown reaches these maps and
+    // they cannot grow unbounded (LEAK-15).
+    const conversationKey = mapKey.includes('@') ? toConversationKey(mapKey) : mapKey;
+    this.lastSpawnRouteProvider.delete(conversationKey);
+    this.lastPinBlockNotice.delete(conversationKey);
+  }
+
+  /** Clear resources owned by one child generation while preserving its logical owner. */
+  private cleanupPerChatGenerationState(
+    mapKey: string,
+    options: {
+      preserveCrashHistory?: boolean;
+      preserveProviderTurnOwnership?: boolean;
+    } = {},
+  ): void {
+    if (options.preserveCrashHistory !== true) this.crashes.forget(mapKey);
+    this.perChatInboundSeqQueue.delete(mapKey);
+    if (options.preserveProviderTurnOwnership !== true) {
+      this.pendingSystemResults.clearScope(mapKey);
+      this.legacyProviderTurnOwners.delete(mapKey);
+      this.systemTurnQuarantines.delete(mapKey);
+    }
+    this.perChatTurnSourceMessageId.delete(mapKey);
+    this.perChatTurnContentType.delete(mapKey);
+    this.perChatTurnText.delete(mapKey);
+    this.perChatTurnSuppressedReplySatisfaction.delete(mapKey);
+    this.perChatAssistantItemText.delete(mapKey);
+    this.perChatRouteMarkerHold.delete(mapKey);
+    this.pendingTurnText.delete(mapKey);
+    this.pendingTurnActorJid.delete(mapKey);
+    this.perChatExecActorQueue.delete(mapKey);
+    this.clearSystemTurnExecutingActors(mapKey);
+    this.resumeFailedHandling.delete(mapKey);
+    this.postTurnGate.delete(mapKey);
+    // Drop all auto-compact bookkeeping for this scope (cooldown/last-success/
+    // rapid-rearm/measure/boundary + resolve any in-flight waiter + silent timer).
+    this.autoCompact.cleanupScope(mapKey);
+    // Clean up pending poll question state
+    this.deletePendingPollQuestions(mapKey);
+    // Cancel any pending image coalesce buffer
+    this.abortImageCoalesceBuffer(mapKey, 'cleanup_aborted');
+    // Clean up operation tracker for this chat
+    const tracker = this.operationTrackers.get(mapKey);
+    if (tracker) {
+      tracker.shutdown();
+      this.operationTrackers.delete(mapKey);
+    }
+  }
+
+  private cleanupGlobalAutoCompactState(): void {
+    this.autoCompact.cleanupScope(GLOBAL_TOOL_SCOPE_KEY);
+    this.pendingSystemResults.clearScope(GLOBAL_TOOL_SCOPE_KEY);
+    this.legacyProviderTurnOwners.delete(GLOBAL_TOOL_SCOPE_KEY);
+    this.systemTurnQuarantines.delete(GLOBAL_TOOL_SCOPE_KEY);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Image coalescing methods
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Buffer an image turn. If more images arrive within IMAGE_COALESCE_MS,
+   * they're appended. When the timer fires (or a non-image message arrives),
+   * all buffered images are sent as a single combined turn.
+   *
+   * Seq/state setup is deferred to flush time — only the representative
+   * turn gets a seq entry, preventing desync with the shift-one-per-turn
+   * logic in handleEventPerChat.
+   */
+  private async coalesceImageTurn(mapKey: string, chatJid: string, text: string, msg: IncomingMessage): Promise<void> {
+    const existing = this.imageCoalesce.buffers.get(mapKey);
+    if (existing) {
+      // More images arriving — append and reset timer
+      existing.texts.push(text);
+      // The representative seq is the last image, so its journaled message id
+      // must travel with that same last message into the immutable turn snapshot.
+      existing.msg = msg;
+      if (msg.inboundSeq !== undefined) existing.inboundSeqs.push(msg.inboundSeq);
+      clearTimeout(existing.timer);
+      existing.timer = setTimeout(() => void this.flushImageCoalesce(mapKey), AgentRuntime.IMAGE_COALESCE_MS);
+      if (existing.texts.length >= AgentRuntime.MAX_COALESCE_BATCH) {
+        log.warn({
+          mapKey,
+          bufferedCount: existing.texts.length,
+          maxBatch: AgentRuntime.MAX_COALESCE_BATCH,
+        }, 'image coalesce batch limit reached — flushing immediately');
+        await this.flushImageCoalesce(mapKey);
+        return;
+      }
+      log.info({ mapKey, bufferedCount: existing.texts.length }, 'image coalesced into batch');
+    } else {
+      // First image — start the coalesce window
+      const timer = setTimeout(() => void this.flushImageCoalesce(mapKey), AgentRuntime.IMAGE_COALESCE_MS);
+      this.imageCoalesce.buffers.set(mapKey, {
+        texts: [text],
+        timer,
+        msg,
+        inboundSeqs: msg.inboundSeq !== undefined ? [msg.inboundSeq] : [],
+      });
+      log.info({ mapKey }, 'image coalesce window opened');
+    }
+  }
+
+  /**
+   * Flush the image coalesce buffer for a chat — send all buffered images
+   * as a single combined turn. Returns a Promise so callers can await it
+   * to prevent concurrent turn injection.
+   *
+   * Durability: only the LAST inboundSeq is pushed onto perChatInboundSeqQueue
+   * (the representative seq for this combined turn). Earlier seqs are marked
+   * skipped with reason 'coalesced_image' via durability engine.
+   */
+  private async flushImageCoalesce(mapKey: string): Promise<void> {
+    if (this.resumeFailedHandling.has(mapKey)) {
+      const aborted = this.abortImageCoalesceBuffer(mapKey, 'resume_failed');
+      if (aborted) {
+        log.warn({ mapKey }, 'image coalesce flush skipped during resume-failed recovery');
+      }
+      return;
+    }
+
+    const entry = this.imageCoalesce.buffers.get(mapKey);
+    if (!entry) return;
+
+    clearTimeout(entry.timer);
+    this.imageCoalesce.buffers.delete(mapKey);
+
+    const { texts, msg, inboundSeqs } = entry;
+    const chatJid = msg.chatJid;
+    const count = texts.length;
+    const representativeSeq = inboundSeqs.length > 0 ? inboundSeqs[inboundSeqs.length - 1] : undefined;
+
+    try {
+      // Mark all-but-last inbound seqs as coalesced (they won't get their own turn)
+      if (inboundSeqs.length > 1) {
+        this.imageCoalesce.markSeqsSkipped(mapKey, inboundSeqs.slice(0, -1), 'coalesced_image');
+      }
+
+      // Combine all image references into one turn
+      let combinedText: string;
+      if (count === 1) {
+        combinedText = texts[0];
+      } else {
+        combinedText = `[${count} images received]\n${texts.join('\n')}`;
+        log.info({ mapKey, imageCount: count, coalescedSeqs: inboundSeqs.length - 1 }, 'flushing coalesced image batch as single turn');
+      }
+
+      const session = this.chatSessions.get(mapKey);
+      if (!session) throw new Error(`Coalesced image turn has no session for "${mapKey}"`);
+      const source: RuntimeTurnSourceSnapshot = {
+        sourceMessageId: msg.messageId,
+        conversationKey: canonicalConversationKey(chatJid, this.db),
+        senderJid: msg.senderJid,
+        senderName: msg.senderName,
+        contentType: 'image',
+        isGroup: msg.isGroup,
+        ...(msg.isGroup ? { groupName: chatJid } : {}),
+      };
+      const runtimeContext = this.runtimeTurnCoordinator.createRuntimeTurnForDispatch({
+        scope: 'per_chat',
+        chatJid,
+        text: combinedText,
+        inboundSeq: representativeSeq,
+        source,
+        session,
+        toolScopeKey: this.requireSessionToolScopeKey(session),
+        mapKey,
+      });
+      this.enqueuePerChatRuntimeTurn(mapKey, {
+        sourceMessageId: source.sourceMessageId,
+        conversationKey: source.conversationKey,
+        chatJid,
+        senderJid: source.senderJid,
+        senderName: source.senderName,
+        text: combinedText,
+        isGroup: source.isGroup,
+        groupName: source.groupName,
+        contentType: 'image',
+        ...(runtimeContext ? { runtimeContext } : {}),
+        inboundSeq: representativeSeq,
+      });
+    } catch (err) {
+      if (representativeSeq !== undefined) {
+        this.imageCoalesce.markSeqFailed(mapKey, representativeSeq, classifyErrorForInbound(err));
+      }
+      this.pendingTurnText.delete(mapKey);
+      this.pendingTurnActorJid.delete(mapKey);
+      this.perChatTurnSourceMessageId.delete(mapKey);
+      this.perChatTurnContentType.delete(mapKey);
+      this.perChatTurnText.delete(mapKey);
+      this.perChatTurnSuppressedReplySatisfaction.delete(mapKey);
+      this.perChatAssistantItemText.delete(mapKey);
+      log.error({ err, mapKey, imageCount: count }, 'failed to send coalesced image turn');
+    }
+  }
+
+  private normalizeAssistantTextForDelivery(
+    event: Extract<AgentEvent, { type: 'assistant_text' }>,
+    mapKey?: string,
+  ): string | null {
+    if (!event.itemId) return event.text;
+
+    const itemMap = mapKey !== undefined
+      ? this.getPerChatAssistantItemMap(mapKey)
+      : this.currentTurnAssistantItemText;
+
+    const prior = itemMap.get(event.itemId) ?? '';
+
+    if (!event.complete) {
+      itemMap.set(event.itemId, prior + event.text);
+      return event.text;
+    }
+
+    itemMap.delete(event.itemId);
+    if (!prior) return event.text;
+    if (event.text === prior) return null;
+    if (event.text.startsWith(prior)) return event.text.slice(prior.length);
+    return event.text;
+  }
+
+  private gateAssistantTextForOutbound(
+    text: string,
+    queue: IOutboundQueue,
+    inboundSeq: number | undefined,
+    mapKey?: string,
+  ): string | null {
+    const decision = classifyAssistantTextEgress(text);
+    if (decision.action === 'allow') return text;
+
+    log.info(
+      {
+        chatJid: queue.targetChatJid,
+        reason: decision.reason,
+        satisfiesReplyGuarantee: decision.satisfiesReplyGuarantee,
+        textPreview: sanitizeProviderPreviewText(text).slice(0, 200),
+      },
+      'assistant_text egress gate suppressed non-user-facing text',
+    );
+
+    if (decision.satisfiesReplyGuarantee) {
+      // Invariant: any suppression whose TEXT asserts the origin chat was
+      // served must prove it with byte-derived evidence — a from-me message
+      // stored in the ORIGIN conversation after this turn's inbound. Only
+      // send_verification carries that assertion ("I already replied via a
+      // send tool"). Without evidence (observed live: agent sent to a
+      // DIFFERENT chat, then its verification text disarmed the origin
+      // chat's guarantee → permanent silence), suppress the text but leave
+      // the reply guarantee armed so the silence fallback still fires.
+      // ack_filler and noop are exempt: both assert NOTHING was sent
+      // anywhere (deliberate silence — "lane parked", "no user ask",
+      // "staying silent", bare punctuation) and are the intentional-silence
+      // contract for turns where the agent correctly chose not to reply
+      // (#1751 investigation: gating all of ack_filler broke exactly this —
+      // a "do not reply" turn that never sends anywhere has no evidence to
+      // produce and would wrongly stay armed forever). The one ack_filler
+      // pattern that DOES assert a delivery happened ("confirmed delivery",
+      // "landed clean") lives under send_verification instead (see
+      // outbound-message-safety.ts SEND_VERIFICATION_PATTERNS), so it is
+      // already evidence-gated here without widening this condition. Turns
+      // with no inbound (proactive/system) have no armed guarantee to
+      // protect.
+      if (
+        decision.reason === 'send_verification' &&
+        inboundSeq !== undefined &&
+        !this.originChatRepliedThisTurn(mapKey)
+      ) {
+        log.warn(
+          {
+            chatJid: queue.targetChatJid,
+            inboundSeq,
+            textPreview: sanitizeProviderPreviewText(text).slice(0, 200),
+          },
+          'send_verification text without origin-chat outbound — reply guarantee stays armed',
+        );
+        return null;
+      }
+      if (mapKey !== undefined) this.perChatTurnSuppressedReplySatisfaction.add(mapKey);
+      else this.turnHadSuppressedReplySatisfaction = true;
+    }
+    return null;
+  }
+
+  /** Evidence check for send_verification suppression: fails closed when the
+   *  turn's inbound message id is untracked or has no stored inbound row. */
+  private originChatRepliedThisTurn(mapKey: string | undefined): boolean {
+    const sourceMessageId = mapKey !== undefined
+      ? this.perChatTurnSourceMessageId.get(mapKey)
+      : this.currentTurnSourceMessageId;
+    if (sourceMessageId === undefined || sourceMessageId === null) return false;
+    try {
+      return hasFromMeReplyAfter(this.db, sourceMessageId);
+    } catch (err) {
+      log.warn({ err, mapKey }, 'origin-chat reply evidence query failed — failing closed');
+      return false;
+    }
+  }
+
+  /**
+   * Two-tier gate for provider-failure text that streamed as assistant_text (QR-209).
+   * The permissive `classifyProviderFailure` suppression used to drop ANY match,
+   * silently discarding genuine replies that merely discussed an auth/limit error
+   * (observed live: replies about an expired OAuth token dropped to silence). Now
+   * only BANNER-confident matches (the text IS the error — short + error-opener /
+   * usage-limit) are suppressed; AMBIENT matches (prose about an error) are let
+   * through to the egress gate. Fallback is still armed only on the terminal
+   * 'result' event, never here. Shared by both assistant_text handlers so their
+   * suppression policy can't drift.
+   *
+   * Returns `{ suppress: true }` when THIS gate drops the chunk (caller must
+   * `break`). Otherwise returns `{ suppress: false, ambient }`, where `ambient`
+   * is non-null when the text matched a provider-failure token but was let
+   * through as prose about an error, not the error itself — the caller must run
+   * this result through the egress gate and log the ambient tripwire with that
+   * gate's REAL outcome (#1758: logging "delivered" here fired one gate before
+   * `gateAssistantTextForOutbound`, which can still suppress the same chunk for
+   * an unrelated reason — a suppressed chunk logged as "delivered" is worse than
+   * useless in incident forensics).
+   */
+  private suppressStreamedProviderFailure(
+    normalizedText: string,
+    chatJid: string | null,
+  ): { suppress: boolean; ambient: { kind: ProviderFailureKind } | null } {
+    const classification = classifyStreamedProviderFailure(normalizedText);
+    if (classification === null) return { suppress: false, ambient: null };
+    if (classification.confidence === 'banner') {
+      log.warn(
+        { chatJid, kind: classification.kind, textPreview: normalizedText.slice(0, MAX_STREAMED_BANNER_LENGTH) },
+        'suppressed provider-failure message from assistant_text',
+      );
+      return { suppress: true, ambient: null };
+    }
+    // Ambient: matched a provider-failure token but is prose about an error, not the
+    // error itself. Dropping it is the QR-209 silent-reply defect, so this gate lets
+    // it through — but the egress gate downstream can still suppress it for an
+    // unrelated reason. The tripwire log therefore fires at the call site, after
+    // that gate has run, tagged with its actual outcome.
+    return { suppress: false, ambient: { kind: classification.kind } };
+  }
+
+  /**
+   * Logs the QR-209 ambient-provider-failure tripwire with the REAL post-egress-gate
+   * outcome (#1758). `delivered` when the fleet should see a novel banner shape that
+   * ought to become a suppressible opener instead; `suppressed` when an unrelated
+   * egress-gate reason (ack_filler, internal_narration, ...) already handled it, so
+   * forensics must not read this line as evidence of delivery.
+   */
+  private logAmbientProviderFailureOutcome(
+    ambient: { kind: ProviderFailureKind } | null,
+    normalizedText: string,
+    chatJid: string | null,
+    delivered: boolean,
+  ): void {
+    if (!ambient) return;
+    log.warn(
+      {
+        chatJid,
+        kind: ambient.kind,
+        textLength: normalizedText.length,
+        textPreview: normalizedText.slice(0, MAX_STREAMED_BANNER_LENGTH),
+        outcome: delivered ? 'delivered' : 'suppressed',
+      },
+      delivered
+        ? 'delivered assistant_text despite provider-failure classification'
+        : 'suppressed assistant_text despite provider-failure classification (egress gate)',
+    );
+  }
+
+  // ─── Control session (self-healing repair) ────────────────────────────────
+  private activeControlReportId: string | null = null;
+  /** Tool protocol completed, but the owning provider request has not terminalized yet. */
+  private controlProtocolCompletedReportId: string | null = null;
+  /** Prevent duplicate terminal-result effects while teardown proof is pending. */
+  private controlTerminalizingReportId: string | null = null;
+  private controlSession: SessionManager | null = null;
+  private controlSessionTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(db: Database, messenger: Messenger, instanceName?: string, options?: AgentRuntimeOptions) {
+    this.db = db;
+    this.pollPersistence = new PendingPollPersistence(db);
+    this.messenger = messenger;
+    this.instanceName = instanceName ?? 'personal';
+    this.providerExecutionGate = createProviderExecutionGate(this.instanceName);
+    this.runtimeTurnSupervisor = new RuntimeTurnSupervisor(
+      this.instanceName,
+      () => this.durability,
+      (result, retained) => this.runtimeTurnCoordinator.applyRecoveredRuntimeTurnFinalization(result, retained),
+    );
+    this.handoffDistill = new HandoffDistillCoordinator({
+      db,
+      instanceName: this.instanceName,
+      isEnabled: () => handoffDistillerEnabled(),
+      getModel: () => handoffDistillModel(),
+    });
+    this.sessionScope = options?.sessionScope ?? (options?.shared ? 'shared' : 'single');
+    this.shared = this.sessionScope === 'shared';
+    this.cwd = options?.cwd;
+    this.configSystemPrompt = options?.configSystemPrompt;
+    this.instructionsPath = options?.instructionsPath;
+    this.sandbox = options?.sandbox;
+    this.model = options?.model;
+    this.sandboxPerChat = options?.sandboxPerChat ?? false;
+    this.perChatConversationBound = options?.perChatConversationBound ?? false;
+    this.serviceRestarter = options?.serviceRestarter;
+    this.modelCatalogueListFn = options?.modelCatalogueListFn;
+    this.modelCatalogueAnthropicFn = options?.modelCatalogueAnthropicFn;
+    this.workspaceSweeper = new WorkspaceSweeper(
+      this.sandboxPerChat,
+      this.workspaceResources,
+      (workspaceKey) => this.chatSessions.get(workspaceKey)?.getStatus().active === true,
+    );
+    this.pluginDirs = options?.pluginDirs ?? [];
+    this.enabledPlugins = options?.enabledPlugins;
+    this.allowM365Mutations = options?.allowM365Mutations;
+    this.autoCompactInputTokens =
+      typeof options?.autoCompactInputTokens === 'number' &&
+      Number.isFinite(options.autoCompactInputTokens) &&
+      options.autoCompactInputTokens > 0
+        ? Math.floor(options.autoCompactInputTokens)
+        : DEFAULT_AUTO_COMPACT_INPUT_TOKENS;
+    this.autoCompact = new AutoCompactController(this.autoCompactInputTokens);
+    this.replyGuaranteeTimeoutMs = options?.replyGuaranteeTimeoutMs ?? DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS;
+    this.agentProvider = config.agentProvider;
+    this.agentProviderConfig = config.agentProviderConfig;
+    const configuredFallbacks = Array.isArray(config.agentFallbacks)
+      ? config.agentFallbacks
+      : normalizeFallbackEntriesFromAgentOptions({
+          fallbackProvider: config.agentFallbackProvider,
+          fallbackModel: config.agentFallbackModel,
+        });
+    this.agentFallbacks = configuredFallbacks.map((entry) =>
+      entry.model ? { provider: entry.provider, model: entry.model } : { provider: entry.provider },
+    );
+    this.registry = new ToolRegistry();
+    this.registerAllTools();
+    this.perChatMcpSocketManager = new PerChatMcpSocketManager({
+      stateRoot: config.stateRoot,
+      registry: this.registry,
+      allowedRoot: this.cwd ?? homedir(),
+      conversationBound: this.perChatConversationBound,
+      resolveActor: (mapKey) => this.resolveExecutingActorByMapKey(mapKey),
+    });
+    this.catalogueSnapshot = createCatalogueSnapshotCache();
+
+    this.turnQueue = new TurnQueue({
+      maxDepth: config.agentMaxQueueDepth,
+      onReject: (turn, reason) => {
+        this.finalizeRejectedRuntimeTurn(turn, reason);
+        log.warn({ chatJid: turn.chatJid, senderJid: turn.senderJid, reason },
+          'turn rejected — agent queue full');
+      },
+      onProcessorError: (turn, error) => this.finalizeSharedProcessorError(turn, error),
+    });
+    this.turnQueue.setProcessor((turn) => this.processTurn(turn));
+    this.runtimeTurnHost = this.createRuntimeTurnHost();
+    this.runtimeTurnCoordinator = new RuntimeTurnCoordinator(this.runtimeTurnHost);
+    this.modelPinHost = this.createModelPinHost();
+
+    // Subscribe to poll vote events for AskUserQuestion → Poll bridge
+    const connection = this.messenger as ConnectionManager;
+    if (typeof connection.on === 'function') {
+      connection.on('pollVoteReceived', (data) => {
+        this.handlePollVoteReceived(data);
+      });
+      connection.on('pollVoteFailed', (data) => {
+        this.handlePollVoteFailed(data);
+      });
+    }
+  }
+
+  /**
+   * Host object for the extracted `/model` surface (model-pin.ts,
+   * model-catalogue-render.ts) — same shape as createRuntimeTurnHost: readonly
+   * state is captured by value, the four fields recycleLiveSession mutates are
+   * get/set pairs, and every collaborator is a bound delegate.
+   */
+  private createModelPinHost(): ModelPinPort {
+    const runtime = this;
+    return {
+      db: runtime.db,
+      instanceName: runtime.instanceName,
+      sessionScope: runtime.sessionScope,
+      agentProvider: runtime.agentProvider,
+      agentProviderConfig: runtime.agentProviderConfig,
+      model: runtime.model,
+      agentFallbacks: runtime.agentFallbacks,
+      catalogueSnapshot: runtime.catalogueSnapshot,
+      nlRoutingTiers: config.nlRoutingTiers,
+      pendingRecycle: runtime.pendingRecycle,
+      chatSessions: runtime.chatSessions,
+      chatQueues: runtime.chatQueues,
+      modelCatalogueListFn: runtime.modelCatalogueListFn,
+      modelCatalogueAnthropicFn: runtime.modelCatalogueAnthropicFn,
+      get effectiveFallbackEntry() { return runtime.effectiveFallbackEntry; },
+      get runtimeTurnCoordinator() { return runtime.runtimeTurnCoordinator; },
+      get session() { return runtime.session; },
+      set session(value) { runtime.session = value; },
+      get queue() { return runtime.queue; },
+      set queue(value) { runtime.queue = value; },
+      get activeChatJid() { return runtime.activeChatJid; },
+      set activeChatJid(value) { runtime.activeChatJid = value; },
+      get operationTracker() { return runtime.operationTracker; },
+      set operationTracker(value) { runtime.operationTracker = value; },
+      sendDirect: (chatJid, text) => runtime.sendDirect(chatJid, text),
+      resolveRouteForTurn: (chatJid, actorJid) => runtime.resolveRouteForTurn(chatJid, actorJid),
+      resolvePerChatMapKey: (chatJid) => runtime.resolvePerChatMapKey(chatJid),
+      isTurnInFlight: (scopeKey) => runtime.isTurnInFlight(scopeKey),
+      getActiveQueue: () => runtime.getActiveQueue(),
+      deleteOwnedPerChatSession: (mapKey, expected) => runtime.deleteOwnedPerChatSession(mapKey, expected),
+      cleanupPerChatState: (mapKey, options) => runtime.cleanupPerChatState(mapKey, options),
+      retirePerChatProviderTransitionAfter: (mapKey, transitionSettled) =>
+        runtime.perChatMcpSocketManager.releaseAfter(mapKey, transitionSettled),
+      cleanupGlobalAutoCompactState: () => runtime.cleanupGlobalAutoCompactState(),
+      emitRouteEventChecked: (ev) => runtime.emitRouteEventChecked(ev),
+      recordRoutePreference: (chatJid, chatKey, senderKey, intent, requestedProvider) =>
+        runtime.recordRoutePreference(chatJid, chatKey, senderKey, intent, requestedProvider),
+      routablePinTargets: () => runtime.routablePinTargets(),
+      renderRouteStatus: (chatJid, senderJid) => runtime.renderRouteStatus(chatJid, senderJid),
+      loadRouteView: (chatJid, senderJid) => runtime.loadRouteView(chatJid, senderJid),
+      completeLocalInbound: (inboundSeq) => { if (inboundSeq !== undefined) runtime.durability?.completeInbound(inboundSeq, 'local_command_handled'); },
+    };
+  }
+
+  private createRuntimeTurnHost(): RuntimeTurnCoordinatorPort & RuntimeResultHandlerPort {
+    const runtime = this;
+    return {
+      db: runtime.db,
+      instanceName: runtime.instanceName,
+      shared: runtime.shared,
+      runtimeTurnSupervisor: runtime.runtimeTurnSupervisor,
+      sessionOwnership: runtime.sessionOwnership,
+      recoveryManagerId: runtime.recoveryManagerId,
+      pendingPolls: runtime.pendingPolls,
+      pendingSystemResults: runtime.pendingSystemResults,
+      workspaceSweeper: runtime.workspaceSweeper,
+      postTurnGate: runtime.postTurnGate,
+      turnHadToolActivity: runtime.turnHadToolActivity,
+      perChatInboundSeqQueue: runtime.perChatInboundSeqQueue,
+      perChatRuntimeTurnContexts: runtime.perChatRuntimeTurnContexts,
+      perChatRuntimeTurnCompletions: runtime.perChatRuntimeTurnCompletions,
+      perChatRuntimeTurnScopeRefs: runtime.perChatRuntimeTurnScopeRefs,
+      turnQueue: runtime.turnQueue,
+      perChatTurnQueues: runtime.perChatTurnQueues,
+      perChatTurnQueueKeys: runtime.perChatTurnQueueKeys,
+      perChatExecActorQueue: runtime.perChatExecActorQueue,
+      pendingTurnText: runtime.pendingTurnText,
+      pendingTurnActorJid: runtime.pendingTurnActorJid,
+      perChatTurnSourceMessageId: runtime.perChatTurnSourceMessageId,
+      perChatTurnContentType: runtime.perChatTurnContentType,
+      perChatTurnText: runtime.perChatTurnText,
+      perChatTurnSuppressedReplySatisfaction: runtime.perChatTurnSuppressedReplySatisfaction,
+      perChatAssistantItemText: runtime.perChatAssistantItemText,
+      perChatRouteMarkerHold: runtime.perChatRouteMarkerHold,
+      currentTurnAssistantItemText: runtime.currentTurnAssistantItemText,
+      chatQueues: runtime.chatQueues,
+      chatSessions: runtime.chatSessions,
+      runtimeTurnAfterTerminal: runtime.runtimeTurnAfterTerminal,
+      get durability() { return runtime.durability; },
+      get runtimeTurnCoordinator() { return runtime.runtimeTurnCoordinator; },
+      get replyGuarantee() { return runtime.replyGuarantee; },
+      get recoveryGeneration() { return runtime.recoveryGeneration; },
+      set recoveryGeneration(value) { runtime.recoveryGeneration = value; },
+      get session() { return runtime.session; },
+      set session(value) { runtime.session = value; },
+      get pendingSingletonRuntimeTurnContext() { return runtime.pendingSingletonRuntimeTurnContext; },
+      set pendingSingletonRuntimeTurnContext(value) { runtime.pendingSingletonRuntimeTurnContext = value; },
+      get activeChatJid() { return runtime.activeChatJid; },
+      set activeChatJid(value) { runtime.activeChatJid = value; },
+      get currentInboundSeq() { return runtime.currentInboundSeq; },
+      set currentInboundSeq(value) { runtime.currentInboundSeq = value; },
+      get currentRuntimeTurnContext() { return runtime.currentRuntimeTurnContext; },
+      set currentRuntimeTurnContext(value) { runtime.currentRuntimeTurnContext = value; },
+      get currentRuntimeTurnCompletion() { return runtime.currentRuntimeTurnCompletion; },
+      set currentRuntimeTurnCompletion(value) { runtime.currentRuntimeTurnCompletion = value; },
+      get currentTurnChatJid() { return runtime.currentTurnChatJid; },
+      set currentTurnChatJid(value) { runtime.currentTurnChatJid = value; },
+      get currentTurnReplayText() { return runtime.currentTurnReplayText; },
+      set currentTurnReplayText(value) { runtime.currentTurnReplayText = value; },
+      get currentTurnReplayActorJid() { return runtime.currentTurnReplayActorJid; },
+      set currentTurnReplayActorJid(value) { runtime.currentTurnReplayActorJid = value; },
+      get currentTurnRouteMarkerHold() { return runtime.currentTurnRouteMarkerHold; },
+      set currentTurnRouteMarkerHold(value) { runtime.currentTurnRouteMarkerHold = value; },
+      get currentTurnInboundContentType() { return runtime.currentTurnInboundContentType; },
+      set currentTurnInboundContentType(value) { runtime.currentTurnInboundContentType = value; },
+      get currentTurnAssistantText() { return runtime.currentTurnAssistantText; },
+      set currentTurnAssistantText(value) { runtime.currentTurnAssistantText = value; },
+      get turnHadVisibleOutput() { return runtime.turnHadVisibleOutput; },
+      set turnHadVisibleOutput(value) { runtime.turnHadVisibleOutput = value; },
+      get turnHadSuppressedReplySatisfaction() { return runtime.turnHadSuppressedReplySatisfaction; },
+      set turnHadSuppressedReplySatisfaction(value) { runtime.turnHadSuppressedReplySatisfaction = value; },
+      get singleTurnHadToolActivity() { return runtime.singleTurnHadToolActivity; },
+      set singleTurnHadToolActivity(value) { runtime.singleTurnHadToolActivity = value; },
+      get isFallbackWindowActive() { return runtime.isFallbackWindowActive; },
+      managerIdFor: (session) => runtime.managerIdFor(session),
+      isShuttingDown: () => runtime.shutdownRequested,
+      getActiveQueue: () => runtime.getActiveQueue(),
+      getQueueForChat: (chatJid, mapKey) => runtime.getQueueForChat(chatJid, mapKey),
+      sendTurnPerChat: (chatJid, text, mapKey, actorJid, context, scopeRef) =>
+        runtime.sendTurnPerChat(chatJid, text, mapKey, actorJid, context, scopeRef),
+      sendVoiceReply: (chatJid, responseText) => runtime._sendVoiceReply(chatJid, responseText),
+      isSilentCompact: (scopeKey) => runtime.isSilentCompact(scopeKey),
+      clearSilentCompact: (scopeKey) => runtime.clearSilentCompact(scopeKey),
+      consumeCompactBoundary: (scopeKey) => runtime.consumeCompactBoundary(scopeKey),
+      finishAutoCompact: (scopeKey) => runtime.finishAutoCompact(scopeKey),
+      recordAutoCompactSuccess: (scopeKey) => runtime.recordAutoCompactSuccess(scopeKey),
+      recordAutoCompactNextTurnIfNeeded: (scopeKey, inputTokens, consumeWhenNotOverThreshold) =>
+        runtime.recordAutoCompactNextTurnIfNeeded(scopeKey, inputTokens, consumeWhenNotOverThreshold),
+      maybeStartAutoCompact: (session, mapKey) => runtime.maybeStartAutoCompact(session, mapKey),
+      flushRouteMarker: (held, chatJid, actorJid) => runtime.flushRouteMarker(held, chatJid, actorJid),
+      clearToolNames: (toolScopeKey) => runtime.clearToolNames(toolScopeKey),
+      recordTurnCostUsd: (event) => runtime.recordTurnCostUsd(event),
+      recordTurnCapabilitySuccess: (isUserTurnResult) => runtime.recordTurnCapabilitySuccess(isUserTurnResult),
+      recordTurnCapabilityFailure: (isUserTurnResult, errorClass) =>
+        runtime.recordTurnCapabilityFailure(isUserTurnResult, errorClass),
+      recordFallbackTurnOutcome: (queue, hadVisibleOutput, hadToolWork, session, wasUnclassifiedError) =>
+        runtime.recordFallbackTurnOutcome(queue, hadVisibleOutput, hadToolWork, session, wasUnclassifiedError),
+      maybeArmFallbackAfterEmptyPrimaryTurn: (queue, session, turnHadToolWork, mapKey) =>
+        runtime.maybeArmFallbackAfterEmptyPrimaryTurn(queue, session, turnHadToolWork, mapKey),
+      maybeArmFallbackAfterUnknownTerminal: (queue, session, turnHadToolWork, mapKey, isUserTurnResult, evidenceText) =>
+        runtime.maybeArmFallbackAfterUnknownTerminal(queue, session, turnHadToolWork, mapKey, isUserTurnResult, evidenceText),
+      enqueueAutoSwitchNotice: (queue, text, logChatJid, mode) =>
+        runtime.enqueueAutoSwitchNotice(queue, text, logChatJid, mode),
+      withHandoffPrefix: (chatJid, text) => runtime.withHandoffPrefix(chatJid, text),
+      flushPendingHandoffNotice: (queue) => runtime.flushPendingHandoffNotice(queue),
+      activateProviderFallback: (resetAt, reason) => runtime.activateProviderFallback(resetAt, reason),
+      activateProviderFallbackAfterTerminalResult: (resetAt, reason, session, evidenceText) =>
+        runtime.activateProviderFallbackAfterTerminalResult(resetAt, reason, session, evidenceText),
+      scheduleFallbackReplay: (args) => runtime.scheduleFallbackReplay(args),
+      notifyProviderFallbackActivated: (queue, activation, replay) =>
+        runtime.notifyProviderFallbackActivated(queue, activation, replay),
+      emitNoFallbackReauthNotice: (queue) => runtime.emitNoFallbackReauthNotice(queue),
+      usageLimitNotice: () => runtime.usageLimitNotice(),
+      kickDiagnosticBundle: (workflow, providerText) => runtime.kickDiagnosticBundle(workflow, providerText),
+    } satisfies RuntimeTurnCoordinatorPort & RuntimeResultHandlerPort;
+  }
+
+  private registerAllTools(): void {
+    const allowGlobalKnowledgeSearch = (config as {
+      memory?: { pinecone?: { knowledgeSearch?: { allowGlobalAgentSessions?: boolean } } };
+    }).memory?.pinecone?.knowledgeSearch?.allowGlobalAgentSessions === true;
+    registerAllTools(this.registry, this.messenger as ConnectionManager, this.db, {
+      enableKnowledgeSearch: this.sandboxPerChat || allowGlobalKnowledgeSearch,
+      pollRegistrar: {
+        register: (pollId, chatJid, options, resolution, timeoutMs, abortSignal) =>
+          this.registerSendPollAwaiter(pollId, chatJid, options, resolution, timeoutMs, abortSignal),
+      },
+      fallbackActive: () => this.isFallbackWindowActive, // T8-F2: mirrors the outbound queue's fallback signal
+    });
+  }
+
+  /**
+   * Find the echo-guard token of any existing queue still targeting this chat,
+   * across all three stores + the canonical key (QR-069). A replacement queue
+   * inherits it so the predecessor's still-active group cooldown does not
+   * silently flood-suppress the replacement's first (often terminal) reply.
+   */
+  private priorSenderTokenForChat(chatJid: string): string | undefined {
+    const canonical = canonicalizeChatJid(chatJid, this.db);
+    const prior =
+      this.outboundQueues.get(chatJid) ??
+      this.outboundQueues.get(canonical) ??
+      this.chatQueues.get(chatJid) ??
+      this.chatQueues.get(canonical) ??
+      this.queue ??
+      undefined;
+    return prior?.getSenderToken();
+  }
+
+  /** Create and configure an OutboundQueue with shared settings (durability, toolUpdateMode). */
+  private createOutboundQueue(chatJid: string, reason: string): OutboundQueue {
+    // Durable attribution is DB-canonical and immutable. Delivery routing may
+    // later move between a phone JID and LID without rewriting conversation_key.
+    const conversationKey = canonicalConversationKey(chatJid, this.db);
+    // QR-069: inherit a prior queue's echo-guard token when one exists.
+    const priorToken = this.priorSenderTokenForChat(chatJid);
+    const q = new OutboundQueue(this.messenger, chatJid, { // T8-F1+F2: inject admin-peer + fallback-window queries
+      conversationKey, ...(priorToken === undefined ? {} : { senderToken: priorToken }),
+      peerIsAdmin: (jid) => isOperatorDmPeer(jid, isGroupJid(jid), this.db, config.adminPhones),
+      fallbackActive: () => this.isFallbackWindowActive,
+    });
+    if (this.durability) q.setDurability(this.durability);
+    q.setToolUpdateMode(config.toolUpdateMode);
+    q.setToolUpdateRedirectJid(config.toolUpdateRedirectJid);
+    q.setTextAggregateDelayMs(config.textAggregateDelayMs);
+    log.debug({
+      chatJid,
+      conversationKey,
+      reason,
+      sessionScope: this.sessionScope,
+      shared: this.shared,
+      sandboxPerChat: this.sandboxPerChat,
+      hasDurability: this.durability !== null,
+    }, 'created outbound queue');
+    return q;
+  }
+
+  setDurability(engine: DurabilityEngine): void {
+    this.durability = engine;
+    this.registry.setDurability(engine);
+    this.replyGuarantee?.shutdown();
+    this.replyGuarantee = new ReplyGuaranteeManager({
+      durability: engine,
+      timeoutMs: this.replyGuaranteeTimeoutMs,
+      sendFallback: createReplyGuaranteeLivenessSender({
+        messenger: this.messenger,
+      }),
+    });
+    // Propagate to any already-created outbound queues
+    if (this.queue) this.queue.setDurability(engine);
+    for (const q of this.outboundQueues.values()) q.setDurability(engine);
+    for (const q of this.chatQueues.values()) q.setDurability(engine);
+  }
+
+  /**
+   * Update delivery JID for active sessions and queues when a LID→phone
+   * mapping changes. Iterates per-chat queues and socket servers keyed
+  * by conversationKey (sandboxPerChat mode) or raw chatJid.
+  */
+  handleJidAliasChanged(
+    conversationKey: string,
+    newJid: string,
+    deferIfActive: boolean = true,
+  ): void {
+    const activeContext = this.currentRuntimeTurnContext?.identity.conversationKey === conversationKey
+      ? this.currentRuntimeTurnContext
+      : [...this.perChatRuntimeTurnContexts.values()]
+          .flat()
+          .find((context) => context.identity.conversationKey === conversationKey)
+        ?? [...this.perChatTurnQueues.values()]
+          .map((queue) => queue.activeTurn?.runtimeContext)
+          .find((context) => context?.identity.conversationKey === conversationKey);
+    if (deferIfActive && activeContext) {
+      const turnId = activeContext.identity.logicalTurnId;
+      const priorAction = this.runtimeTurnAfterTerminal.get(turnId);
+      this.runtimeTurnAfterTerminal.set(turnId, async (result) => {
+        this.handleJidAliasChanged(conversationKey, newJid, false);
+        await priorAction?.(result);
+      });
+      log.info(
+        { conversationKey, newJid, turnId },
+        'deferred delivery JID migration until active turn terminalized',
+      );
+      return;
+    }
+
+    if (deferIfActive && this.sessionScope === 'per_chat' && !this.sandboxPerChat) {
+      const lidKey = `${conversationKey}@lid`;
+      if (this.chatSessions.has(lidKey) && this.pendingSystemResults.count(lidKey) > 0) {
+        const existing = this.pendingJidAliasChanges.get(conversationKey);
+        if (existing) {
+          existing.newJid = newJid;
+        } else {
+          const pending = { newJid };
+          this.pendingJidAliasChanges.set(conversationKey, pending);
+          void this.pendingSystemResults.waitUntilEmpty(lidKey).then(() => {
+            if (this.pendingJidAliasChanges.get(conversationKey) !== pending) return;
+            this.pendingJidAliasChanges.delete(conversationKey);
+            if (this.shutdownRequested) return;
+            this.handleJidAliasChanged(conversationKey, pending.newJid, false);
+          });
+        }
+        log.info(
+          { conversationKey, newJid, systemScopeKey: lidKey },
+          'deferred delivery JID migration until provider system requests terminalized',
+        );
+        return;
+      }
+    }
+
+    // Per-chat queues (sandboxPerChat or per_chat mode)
+    const queue = this.chatQueues.get(conversationKey);
+    if (queue) {
+      queue.updateDeliveryJid(newJid);
+      log.info({ conversationKey, newJid }, 'updated delivery JID on outbound queue');
+    }
+
+    // Per-chat socket servers
+    const res = this.workspaceResources.get(conversationKey);
+    if (res?.socketServer) {
+      res.socketServer.updateDeliveryJid(newJid);
+      log.info({ conversationKey, newJid }, 'updated delivery JID on socket server');
+    }
+
+    // Shared-mode outbound queues (keyed by canonical JID — may need re-key)
+    for (const [key, q] of this.outboundQueues) {
+      try {
+        if (toConversationKey(key) === conversationKey) {
+          q.updateDeliveryJid(newJid);
+          // Re-key from old LID-based key to canonical phone JID
+          const canonical = canonicalizeChatJid(newJid, this.db);
+          if (key !== canonical) {
+            this.outboundQueues.delete(key);
+            this.outboundQueues.set(canonical, q);
+            log.info({ oldKey: key, newKey: canonical }, 'shared-mode: re-keyed outbound queue after LID resolution');
+          }
+        }
+      } catch (err) {
+        log.debug({ err, key }, 'JID parsing failed during session resume — skipping');
+      }
+    }
+
+    // Single-mode queue
+    if (this.queue) {
+      this.queue.updateDeliveryJid(newJid);
+    }
+
+    // Re-key per_chat maps: if a session is stored under a LID-based key,
+    // migrate it to the canonical phone JID now that the mapping is known.
+    // All co-keyed maps must be migrated atomically.
+    if (this.sessionScope === 'per_chat' && !this.sandboxPerChat) {
+      const lidKey = `${conversationKey}@lid`;
+      if (this.chatSessions.has(lidKey)) {
+        const canonical = canonicalizeChatJid(newJid, this.db);
+        if (canonical !== lidKey && !this.chatSessions.has(canonical)) {
+          const legacyProviderTurn = this.legacyProviderTurnOwners.get(lidKey);
+          if (legacyProviderTurn && this.legacyProviderTurnOwners.has(canonical)) {
+            throw new Error(`Cannot rekey provider turn ownership onto occupied scope "${canonical}"`);
+          }
+          this.pendingSystemResults.rekeyScope(lidKey, canonical);
+          if (legacyProviderTurn) {
+            this.legacyProviderTurnOwners.delete(lidKey);
+            this.legacyProviderTurnOwners.set(canonical, legacyProviderTurn);
+          }
+
+          // Migrate session
+          const session = this.chatSessions.get(lidKey)!;
+          this.rekeyOwnedPerChatSession(lidKey, canonical, session);
+
+          // Migrate queue
+          const chatQueue = this.chatQueues.get(lidKey);
+          if (chatQueue) {
+            chatQueue.updateDeliveryJid(newJid);
+            this.chatQueues.delete(lidKey);
+            this.chatQueues.set(canonical, chatQueue);
+          }
+
+          // Migrate all co-keyed per-chat maps
+          const seqQueue = this.perChatInboundSeqQueue.get(lidKey);
+          if (seqQueue) {
+            this.perChatInboundSeqQueue.delete(lidKey);
+            this.perChatInboundSeqQueue.set(canonical, seqQueue);
+          }
+          const runtimeContexts = this.perChatRuntimeTurnContexts.get(lidKey);
+          if (runtimeContexts) {
+            this.perChatRuntimeTurnContexts.delete(lidKey);
+            this.perChatRuntimeTurnContexts.set(canonical, runtimeContexts);
+            for (const runtimeContext of runtimeContexts) {
+              const scopeRef = this.perChatRuntimeTurnScopeRefs.get(
+                runtimeContext.identity.logicalTurnId,
+              );
+              if (scopeRef) scopeRef.value = canonical;
+            }
+          }
+          const runtimeCompletion = this.perChatRuntimeTurnCompletions.get(lidKey);
+          if (runtimeCompletion) {
+            this.perChatRuntimeTurnCompletions.delete(lidKey);
+            this.perChatRuntimeTurnCompletions.set(canonical, runtimeCompletion);
+          }
+          const runtimeTurnQueue = this.perChatTurnQueues.get(lidKey);
+          if (runtimeTurnQueue) {
+            this.perChatTurnQueues.delete(lidKey);
+            this.perChatTurnQueues.set(canonical, runtimeTurnQueue);
+            const queueKey = this.perChatTurnQueueKeys.get(runtimeTurnQueue);
+            if (queueKey) queueKey.value = canonical;
+          }
+          const pending = this.pendingTurnText.get(lidKey);
+          if (pending !== undefined) {
+            this.pendingTurnText.delete(lidKey);
+            this.pendingTurnText.set(canonical, pending);
+          }
+          if (this.pendingTurnActorJid.has(lidKey)) {
+            const pendingActor = this.pendingTurnActorJid.get(lidKey);
+            this.pendingTurnActorJid.delete(lidKey);
+            this.pendingTurnActorJid.set(canonical, pendingActor);
+          }
+          // F-STICKY-ACTOR (QR-247, F4): migrate the executing-actor queue and
+          // actor-socket identity together so the live resolver follows the new key.
+          const execActors = this.perChatExecActorQueue.get(lidKey);
+          if (execActors !== undefined) {
+            this.perChatExecActorQueue.delete(lidKey);
+            this.perChatExecActorQueue.set(canonical, execActors);
+          }
+          for (const binding of this.systemTurnExecActors.values()) {
+            if (binding.scopeKey === lidKey) binding.scopeKey = canonical;
+          }
+          this.perChatMcpSocketManager.rekey(lidKey, canonical, newJid);
+          // QR-049: migrate the per_chat OperationTracker. It holds a setInterval
+          // progress timer + slow/stall setTimeouts that are cleared only by
+          // shutdown() keyed on the canonical mapKey — leaving it under lidKey
+          // leaks the timer and loses the chat's in-flight progress/stall state.
+          const opTracker = this.operationTrackers.get(lidKey);
+          if (opTracker) {
+            this.operationTrackers.delete(lidKey);
+            this.operationTrackers.set(canonical, opTracker);
+          }
+          this.crashes.rekey(lidKey, canonical);
+          const contentType = this.perChatTurnContentType.get(lidKey);
+          if (contentType !== undefined) {
+            this.perChatTurnContentType.delete(lidKey);
+            this.perChatTurnContentType.set(canonical, contentType);
+          }
+          const sourceMessageId = this.perChatTurnSourceMessageId.get(lidKey);
+          if (sourceMessageId !== undefined) {
+            this.perChatTurnSourceMessageId.delete(lidKey);
+            this.perChatTurnSourceMessageId.set(canonical, sourceMessageId);
+          }
+          const turnText = this.perChatTurnText.get(lidKey);
+          if (turnText !== undefined) {
+            this.perChatTurnText.delete(lidKey);
+            this.perChatTurnText.set(canonical, turnText);
+          }
+          if (this.perChatTurnSuppressedReplySatisfaction.has(lidKey)) {
+            this.perChatTurnSuppressedReplySatisfaction.delete(lidKey);
+            this.perChatTurnSuppressedReplySatisfaction.add(canonical);
+          }
+          const itemText = this.perChatAssistantItemText.get(lidKey);
+          if (itemText) {
+            this.perChatAssistantItemText.delete(lidKey);
+            this.perChatAssistantItemText.set(canonical, itemText);
+          }
+          if (this.resumeFailedHandling.has(lidKey)) {
+            this.resumeFailedHandling.delete(lidKey);
+            this.resumeFailedHandling.add(canonical);
+          }
+          // MINOR 4 (final-review): carry a deferred route recycle (Task G,
+          // a /model pin that arrived while the chat was busy) onto the
+          // canonical key too — without this, a mapKey migration between the
+          // defer and its consumption (ensureSessionAndQueueSync's next-
+          // inbound check, keyed by the CURRENT canonical key) would strand
+          // the flag under the dead lidKey and silently drop the recycle
+          // (the pin still applies on the next fresh spawn, so this is
+          // non-destructive either way — but cheap to carry correctly).
+          if (this.pendingRecycle.has(lidKey)) {
+            this.pendingRecycle.delete(lidKey);
+            this.pendingRecycle.add(canonical);
+          }
+          // Migrate auto-compact cooldown/last-success/rapid-rearm/measure state
+          // from the LID key onto the canonical JID (silent timers, boundary set,
+          // and in-flight waiters are intentionally left untouched, as before).
+          this.autoCompact.rekey(lidKey, canonical);
+          const pendingPoll = this.pendingPolls.questions.get(lidKey);
+          if (pendingPoll) {
+            this.pendingPolls.questions.delete(lidKey);
+            this.pollPersistence.remove(lidKey);
+            clearPendingPollTimers(pendingPoll);
+            pendingPoll.chatJidAliases.add(lidKey);
+            pendingPoll.chatJidAliases.add(newJid);
+            pendingPoll.chatJidAliases.add(canonical);
+            pendingPoll.chatJid = canonical;
+            this.pendingPolls.questions.set(canonical, pendingPoll);
+            this.pollPersistence.save(canonical, pendingPoll);
+            this.startPendingPollExpiry(canonical, pendingPoll);
+          }
+          const imageBuffer = this.imageCoalesce.buffers.get(lidKey);
+          if (imageBuffer) {
+            clearTimeout(imageBuffer.timer);
+            imageBuffer.timer = setTimeout(
+              () => void this.flushImageCoalesce(canonical),
+              AgentRuntime.IMAGE_COALESCE_MS,
+            );
+            imageBuffer.msg = { ...imageBuffer.msg, chatJid: newJid };
+            this.imageCoalesce.buffers.delete(lidKey);
+            this.imageCoalesce.buffers.set(canonical, imageBuffer);
+          }
+          this.cleanupPerChatState(lidKey, { preserveProviderTurnOwnership: true });
+          log.info({ lidKey, canonical, newJid }, 'per_chat: re-keyed session and all maps after LID resolution');
+        }
+      }
+    }
+  }
+
+  private checkpointResumeIdentity(
+    checkpoint: SessionCheckpointRow,
+    expectedScope: PersistedResumeIdentity['scope'],
+  ): PersistedResumeIdentity | null {
+    const identity = resolveResumeIdentity({
+      scope: checkpoint.completed_scope,
+      conversationKey: checkpoint.conversation_key,
+      deliveryJid: checkpoint.completed_delivery_jid,
+      deliveryNamespace: checkpoint.completed_delivery_namespace,
+      inboundSeq: checkpoint.completed_inbound_seq,
+      logicalTurnId: checkpoint.completed_logical_turn_id,
+      managerId: checkpoint.completed_manager_id,
+      generation: checkpoint.completed_generation,
+    });
+    return identity?.scope === expectedScope ? identity : null;
+  }
+
+  private recordProactiveResumeIdentityReject(
+    conversationKey: string | null,
+    reason: 'legacy_or_ambiguous_identity' | 'scope_mismatch',
+  ): void {
+    this.proactiveResumeIdentityRejects += 1;
+    log.warn(
+      { conversationKey, reason },
+      'skipping proactive resume — persisted delivery identity is not provable',
+    );
+  }
+
+  async start(): Promise<void> {
+    // C5 restart-loop guard: mark this boot BEFORE any fallible work so a
+    // later crash leaves the marker standing. Consumed at the resume gate
+    // below; fail-open inside the guard (a broken breaker never wedges a
+    // healthy instance).
+    this.restartLoopInterruptedBoot = config.restartLoopGuard.enabled
+      ? markBootInProgress(restartLoopGuardPath(config.stateRoot))
+      : false;
+    this.db.assertWritableCompatibility();
+    if (this.cwd && isSamePhysicalDirectory(this.cwd, homedir())) throw new Error('configured agent cwd must not resolve to the user home directory');
+    ensureAgentSchema(this.db);
+    // Crash-safe latch table for the one-message handoff collapse. Idempotent;
+    // created eagerly so an unconsumed notice from a prior process can flush.
+    ensureStandbyNoticeSchema(this.db);
+    // Handoff-artifact store for the distilled-context injection seam. Idempotent;
+    // created eagerly so a fresh stand-in session can read a prior distill. The
+    // injection itself is flag-gated (WHATSOUP_HANDOFF_CONTEXT); creating the
+    // table unconditionally is inert when the flag is off.
+    ensureHandoffArtifactSchema(this.db);
+    this.restorePersistedFallbackWindow();
+    backfillSessionProvider(this.db, this.agentProvider ?? 'claude-cli');
+    if (config.nlRouting) {
+      // Additive + idempotent; gated so flag-off leaves the DB untouched.
+      ensureChatPreferenceSchema(this.db);
+      // Retention sweep at boot: expired rows are DELETED, not merely
+      // ignored on read (F13) — keeps DB audits honest about live pins.
+      pruneExpired(this.db);
+    }
+
+    const sandboxHookPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/hooks/agent-sandbox.sh');
+
+    // Write sandbox policy and hook settings when sandbox config is present
+    if (this.sandbox) {
+      const cwd = this.cwd ?? homedir();
+      try {
+        const claudeDir = join(cwd, '.claude');
+        mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
+
+        // Resolve allowedPaths to absolute paths before writing
+        const resolvedPolicy = {
+          ...this.sandbox,
+          allowedPaths: this.sandbox.allowedPaths.map(p =>
+            p.startsWith('~/') ? join(homedir(), p.slice(2)) : resolve(p),
+          ),
+        };
+        const pollLintHookPath = resolve(
+          new URL('.', import.meta.url).pathname,
+          '../../../deploy/hooks/poll-interaction-lint.mjs',
+        );
+        const postToolUseLogHookPath = resolve(
+          new URL('.', import.meta.url).pathname,
+          '../../../deploy/hooks/post-tool-use-log.sh',
+        );
+        writeSandboxArtifacts(claudeDir, resolvedPolicy, sandboxHookPath, pollLintHookPath, postToolUseLogHookPath);
+        log.info({ cwd, hookPath: sandboxHookPath, pollLintHookPath, postToolUseLogHookPath }, 'wrote sandbox-policy.json and settings.json');
+
+        // Opt-in egress-allowlist proxy (#1607 / QR-008): whenever the sandbox
+        // policy carries a PRESENT allowedEgress array (even []=deny-all, F1).
+        // Reads the policy BACK off disk (not the in-memory resolvedPolicy) on
+        // every request, so a live edit to sandbox-policy.json takes effect
+        // without a restart; a corrupt/unreadable file fails closed (egress-proxy.ts).
+        if (Array.isArray(this.sandbox.allowedEgress)) {
+          // Own try so a proxy bind failure is labelled as such (not as a
+          // sandbox-artifact write failure) — then re-throw to abort start():
+          // an opted-in instance must NOT run with egress unconfined (fail-closed).
+          try {
+            const policyPath = join(claudeDir, 'sandbox-policy.json');
+            this.egressProxy = await EgressProxy.start({
+              policy: {
+                read: () => {
+                  const raw = JSON.parse(readFileSync(policyPath, 'utf8'));
+                  return { allowedEgress: Array.isArray(raw.allowedEgress) ? raw.allowedEgress.filter((e: unknown) => typeof e === 'string') : [] };
+                },
+              },
+              failOpen: process.env['WHATSOUP_SANDBOX_FAIL_OPEN'] === '1',
+              log: (event) => log.info(event, 'egress adjudication'),
+            });
+            log.info(
+              { port: this.egressProxy.port, allowlistSize: this.sandbox.allowedEgress.length },
+              'started egress-allowlist proxy',
+            );
+          } catch (proxyErr) {
+            log.error({ err: proxyErr, cwd }, 'failed to start egress-allowlist proxy — aborting start (fail-closed)');
+            throw proxyErr;
+          }
+        }
+      } catch (err) {
+        log.error({ err, cwd }, 'failed to initialize sandbox artifacts');
+        throw err;
+      }
+    }
+
+    // Ensure settings.json has a permissions block — safety net for instances
+    // without sandbox config. Prevents Claude Code's "sensitive file" blocks.
+    {
+      const cwd = this.cwd ?? homedir();
+      try {
+        const claudeDir = join(cwd, '.claude');
+        ensurePermissionsSettings(claudeDir, 'agent', this.enabledPlugins, { hasSandbox: !!this.sandbox });
+        // User-level settings are not owned by this instance. Startup only
+        // inspects for its exact hook and warns; it never repairs or normalizes
+        // global hooks, permissions, or plugins.
+        if (!this.sandbox) {
+          const homeClaudeDir = join(homedir(), '.claude');
+          if (homeClaudeDir !== claudeDir) {
+            inspectUserClaudeSettings(homeClaudeDir, sandboxHookPath);
+          }
+        }
+      } catch (err) {
+        log.error({ err, cwd }, 'failed to ensure permissions settings during startup');
+        throw err;
+      }
+    }
+
+    // Start global WhatSoup socket server (non-sandboxPerChat mode only)
+    if (!this.sandboxPerChat) {
+      const agentCwd = this.cwd ?? homedir();
+      try {
+        const claudeDir = join(agentCwd, '.claude');
+        mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
+        const socketPath = join(claudeDir, 'whatsoup.sock');
+
+        // Fail-closed file boundary (audit #1094): the global session must carry
+        // an explicit allowedRoot or file-capable tools (post_status/send_media/
+        // schedule_message) would be denied. agentCwd is the agent's working root
+        // (the parent of every chatJidToWorkspace() workspace), so legit media the
+        // agent stages under its tree stays reachable while paths outside it
+        // (system dirs, credentials, the instance DB) are rejected.
+        if (!this.cwd) {
+          log.warn(
+            { agentCwd },
+            'agent cwd unset; global MCP file boundary falls back to home directory',
+          );
+        }
+        const globalSession: SessionContext = { tier: 'global', allowedRoot: agentCwd };
+        this.globalSocketServer = new WhatSoupSocketServer(socketPath, this.registry, globalSession);
+        this.globalSocketServer.start();
+        this.globalMcpSocketPath = socketPath;
+        log.info({ socketPath }, 'global WhatSoup socket server started');
+        // Write the whatsoup MCP config to every configured CLI provider target:
+        // primary first, then fallback when it uses a distinct config file.
+        const mcpServerScript = resolve(
+          new URL('.', import.meta.url).pathname,
+          '../../../deploy/mcp/whatsoup-proxy.ts',
+        );
+        const writtenTargets = new Set<string>();
+        const writtenPaths: string[] = [];
+        const writeFor = (provider: string, providerConfig?: { baseUrl?: string; model?: string; apiKeyService?: string }): void => {
+          const target = writeProviderMcpConfigTarget(provider, agentCwd);
+          if (target === null) return;
+          if (writtenTargets.has(target)) {
+            log.warn(
+              { primary: this.agentProvider, fallback: provider, target },
+              'primary and fallback providers share an MCP config target — primary shape kept',
+            );
+            return;
+          }
+          const written = writeProviderMcpConfig(
+            provider,
+            agentCwd,
+            socketPath,
+            mcpServerScript,
+            providerConfig,
+          );
+          if (written) {
+            writtenTargets.add(written);
+            writtenPaths.push(written);
+          }
+        };
+
+        const primaryOpencodeProviderConfig = this.primaryOpencodeProviderConfig();
+        writeFor(this.agentProvider, primaryOpencodeProviderConfig);
+        for (const entry of this.agentFallbacks) {
+          if (entry.provider === this.agentProvider) continue;
+          writeFor(
+            entry.provider,
+            entry.provider === 'opencode-cli'
+              ? { model: entry.model }
+              : undefined,
+          );
+        }
+        log.info({ agentCwd, provider: this.agentProvider, fallbackChain: this.agentFallbacks, mcpConfigPaths: writtenPaths }, 'wrote whatsoup MCP config');
+      } catch (err) {
+        if (this.globalSocketServer) {
+          try {
+            this.globalSocketServer.stop();
+          } catch (stopErr) {
+            log.warn({ err: stopErr, agentCwd }, 'failed to clean up global socket server after startup error');
+          }
+          this.globalSocketServer = null;
+        }
+        this.globalMcpSocketPath = null;
+        log.error({ err, agentCwd }, 'failed to initialize global MCP socket resources');
+        throw err;
+      }
+    }
+
+    // sandboxPerChat: backfill workspace keys for legacy rows
+    if (this.sandboxPerChat) {
+      backfillWorkspaceKeys(this.db, this.cwd ?? homedir());
+    }
+
+    // QR-099: conversation keys whose prior-instance child the sweep left running
+    // (authoritative_live) or declined to touch (ambiguous). The proactive-resume
+    // loop below MUST NOT spawn a second session for these — a live child + a
+    // resumable checkpoint for the same key would otherwise yield two agent
+    // sessions for one chat (duplicate turn processing / replies, contended
+    // per-chat state). The in-loop `chatSessions.has()` guard only dedupes THIS
+    // instance's own spawns; it cannot see a prior-instance child.
+    const proactiveResumeBlockedConversationKeys = await this.sweepStaleAgentSessions();
+
+    // per_chat (non-sandboxed): proactively resume sessions that were active or suspended
+    // (graceful shutdown) when we last ran. This lets agents pick up mid-conversation instead
+    // of waiting for the user to send a message after a service restart.
+    // sandboxPerChat is excluded — its resume path requires workspace provisioning which happens lazily.
+    if (this.sessionScope === 'per_chat' && !this.sandboxPerChat && this.durability && config.proactiveResumeOnStartup) {
+      const resumableCheckpointsRaw = this.durability.getResumableCheckpoints();
+      // C5 restart-loop guard: on trip, suppress proactive resume for this
+      // boot — sessions still lazy-resume on their next inbound message
+      // (the existing fail-safe for every other skip), the instance stays up
+      // serving inbound, and the operator gets one notice. An empty list
+      // makes the loop below a no-op.
+      const resumableCheckpoints = this.shouldSuppressProactiveResume(resumableCheckpointsRaw.length)
+        ? []
+        : resumableCheckpointsRaw;
+      for (const cp of resumableCheckpoints) {
+        const full = this.durability.getSessionCheckpoint(cp.conversation_key);
+        if (!full?.session_id) continue;
+
+        // QR-099: a still-live (authoritative_live) or ambiguous session for this
+        // key was left running by the sweep above — resuming would double-spawn.
+        // Skipping degrades to lazy resume on the next message (fail-safe).
+        if (proactiveResumeBlockedConversationKeys.has(cp.conversation_key)) {
+          log.info({ conversationKey: cp.conversation_key }, 'skipping proactive resume — live/ambiguous session already present');
+          continue;
+        }
+
+        const resumeIdentity = this.checkpointResumeIdentity(full, 'per_chat');
+        if (!resumeIdentity) {
+          this.recordProactiveResumeIdentityReject(
+            cp.conversation_key,
+            full.completed_scope === null || full.completed_scope === 'per_chat'
+              ? 'legacy_or_ambiguous_identity'
+              : 'scope_mismatch',
+          );
+          continue;
+        }
+        const chatJid = resumeIdentity.deliveryJid;
+
+        // AE1: Skip group conversations — groups should not be proactively resumed.
+        // Agents in groups are orchestrated via @mentions. Proactive resume bypasses
+        // the ingest pipeline's sibling filter (access-policy.ts:121-124), causing
+        // unsolicited messages. Group sessions start fresh on the next @mention.
+        if (isGroupConversationKey(cp.conversation_key) || isGroupJid(chatJid)) {
+          log.info({ conversationKey: cp.conversation_key }, 'skipping proactive resume — group chat');
+          this.durability.upsertSessionCheckpoint(cp.conversation_key, { sessionStatus: 'ended' });
+          continue;
+        }
+
+        // Skip stale sessions — don't resume conversations that have been inactive for over 60 minutes.
+        // Without this, every restart tries to resurrect days-old sessions and fires unsolicited messages.
+        const RESUME_MAX_AGE_MS = 60 * 60 * 1000;
+        if (full.updated_at) {
+          const age = Date.now() - new Date(full.updated_at + 'Z').getTime();
+          if (age > RESUME_MAX_AGE_MS) {
+            log.info({ conversationKey: cp.conversation_key, ageMinutes: Math.round(age / 60_000) }, 'skipping proactive resume — session too stale');
+            this.durability.upsertSessionCheckpoint(cp.conversation_key, { sessionStatus: 'ended' });
+            continue;
+          }
+        }
+
+        const initialMapKey = this.resolvePerChatMapKey(chatJid);
+        if (this.chatSessions.has(initialMapKey)) continue; // already created by sweep or prior iteration
+
+        log.info({ conversationKey: cp.conversation_key, sessionId: full.session_id, chatJid, mapKey: initialMapKey }, 'proactive per_chat resume on startup');
+
+        // Create session + queue (same as ensureSessionAndQueueSync but with resume)
+        const toolScopeKey = this.createToolScopeKey(initialMapKey);
+        let session!: SessionManager;
+        const resolveSessionMapKey = () => this.findMapKeyForSession(session, initialMapKey);
+        try {
+          session = this.createSessionManager({
+            chatJid,
+            cwd: this.cwd,
+            onEvent: (event) => {
+              this.handleEventPerChat(session, event, toolScopeKey);
+            },
+            onCrash: (info) => {
+              const mapKey = resolveSessionMapKey() ?? initialMapKey;
+              this.handlePerChatCrash(mapKey, chatJid, info, session);
+            },
+            notifyUser: (msg) => {
+              this.handleCrashNotify(msg, chatJid);
+            },
+            eventToolScopeKey: toolScopeKey,
+          });
+        } catch (err) {
+          // F-STICKY-ACTOR (QR-247 hardening): per-chat socket wiring now runs inside
+          // createSessionManager, so a socket/config failure here must not abort the
+          // whole startup proactive-resume loop — skip this chat, which then lazy-resumes
+          // on its next inbound message (fail-safe).
+          log.warn({ err, chatJid, mapKey: initialMapKey }, 'proactive resume: per-chat session creation failed — skipping (will lazy-resume on next message)');
+          continue;
+        }
+        this.setOwnedPerChatSession(initialMapKey, session);
+        const perChatQ = this.createOutboundQueue(chatJid, 'startup proactive per-chat resume');
+        this.chatQueues.set(initialMapKey, perChatQ);
+
+        // Wire operation tracker for this proactively-resumed per-chat session
+        const startupTracker = this.createOperationTracker(session, () => {
+          const currentMapKey = this.findMapKeyForSession(session, initialMapKey);
+          return currentMapKey ? this.chatQueues.get(currentMapKey) : undefined;
+        });
+        if (startupTracker) this.operationTrackers.set(initialMapKey, startupTracker);
+
+        // Attempt resume, then inject any messages the agent missed during
+        // downtime and send a continuation turn so the agent picks up where it
+        // left off without requiring the user to send "proceed".
+        const checkpointUpdatedAt = full.updated_at
+          ? Math.floor(new Date(full.updated_at + 'Z').getTime() / 1000)
+          : undefined;
+        const resumeOwnership = this.captureOwnedPerChatGeneration(initialMapKey, session);
+        session.spawnSession(full.session_id).then(async () => {
+          let contextLease: SystemTurnLeaseToken | null = null;
+          let continuationLease: SystemTurnLeaseToken | null = null;
+          const effectiveMapKey = await this.activateSpawnedOwnedPerChatSession(
+            initialMapKey,
+            session,
+            resumeOwnership,
+          );
+          // Small delay to let the init event propagate (confirms resume succeeded)
+          await sleep(1_000);
+          if (!session.getStatus().active) return; // resume failed, onResumeFailed handles it
+          try {
+            // Inject messages that arrived while the service was down.
+            // Without this, the agent resumes with stale context — it has no
+            // awareness of messages sent during the downtime window.
+            if (checkpointUpdatedAt) {
+              contextLease = this.markSystemTurn(
+                session,
+                effectiveMapKey,
+                'proactive_resume_context',
+                chatJid,
+              );
+              const injected = await this.injectMissedMessages(session, chatJid, checkpointUpdatedAt);
+              if (!injected) this.pendingSystemResults.cancel(contextLease);
+              else {
+                await this.pendingSystemResults.waitUntilEmpty(effectiveMapKey);
+                await this.waitForSystemTurnQuarantine(effectiveMapKey);
+                if (!session.getStatus().active) return;
+              }
+            }
+            continuationLease = this.markSystemTurn(
+              session,
+              effectiveMapKey,
+              'proactive_resume_continuation',
+              chatJid,
+            );
+            await session.sendTurn('[System: session resumed after service restart — continue where you left off]');
+            log.info({ chatJid }, 'sent continuation turn after proactive resume');
+          } catch (err) {
+            log.warn({ err, chatJid }, 'failed to send continuation turn after resume');
+            await this.settleFailedSystemTurnDispatch(
+              session,
+              effectiveMapKey,
+              continuationLease ?? contextLease,
+              err,
+            );
+          }
+        }).catch((err) => {
+          log.warn({ err, chatJid, sessionId: full.session_id }, 'proactive resume failed — will retry on next message');
+        });
+      }
+    }
+
+    // Attempt to resume a prior active session.
+    // Skipped for per_chat mode (all variants) — per_chat resume is handled above (proactive) or lazily.
+    // Without this guard, per_chat + !sandboxPerChat would set this.session to a stale session
+    // that no subsequent handleMessage call routes to (they use chatSessions maps instead).
+    const prior = (this.sandboxPerChat || this.sessionScope === 'per_chat')
+      ? null
+      : getActiveSession(this.db, this.effectiveProvider);
+
+    // AE2: Staleness check for shared/single mode — match per_chat's 60-minute threshold.
+    let priorSession = prior;
+    let priorResumeIdentity: PersistedResumeIdentity | null = null;
+
+    if (priorSession) {
+      const expectedScope = this.shared ? 'shared' : 'singleton';
+      const checkpoint = this.durability && priorSession.session_id
+        ? this.durability.getLatestCompletedCheckpointForSession(priorSession.session_id)
+        : undefined;
+      priorResumeIdentity = checkpoint
+        ? this.checkpointResumeIdentity(checkpoint, expectedScope)
+        : null;
+      if (!priorResumeIdentity) {
+        this.recordProactiveResumeIdentityReject(
+          checkpoint?.conversation_key ?? null,
+          checkpoint !== undefined &&
+            checkpoint.completed_scope !== null &&
+            checkpoint.completed_scope !== expectedScope
+            ? 'scope_mismatch'
+            : 'legacy_or_ambiguous_identity',
+        );
+        priorSession = null;
+      } else if (checkpoint?.updated_at) {
+        const ageMs = Date.now() - new Date(checkpoint.updated_at + 'Z').getTime();
+        if (ageMs > 60 * 60 * 1000) {
+          log.info({ chatJid: priorResumeIdentity.deliveryJid, ageMinutes: Math.round(ageMs / 60_000) },
+            'skipping shared/single resume — session too stale');
+          this.durability!.retireSessionLifecycle({
+            agentSessionRowId: priorSession.id,
+            providerSessionId: priorSession.session_id!,
+            provider: this.effectiveProvider,
+          });
+          priorSession = null;
+          priorResumeIdentity = null;
+        }
+      } else {
+        // No checkpoint or updated_at absent — cannot verify freshness, skip resume
+        log.info(
+          { chatJid: priorResumeIdentity.deliveryJid },
+          'skipping shared/single resume — no checkpoint or no updated_at',
+        );
+        priorSession = null;
+        priorResumeIdentity = null;
+      }
+    }
+
+    if (priorSession?.session_id && priorResumeIdentity) {
+      // Capture narrowed values before closures — TypeScript does not propagate
+      // if-guard narrowing into lambdas, so priorSession.chat_jid inside the closure
+      // would remain typed as string | null even though we've checked it.
+      const resumeChatJid = priorResumeIdentity.deliveryJid;
+      const resumeSessionId: string = priorSession.session_id;
+      const isGroupChat = isGroupJid(resumeChatJid);
+
+      // ── C1/C2/I2: Hoist group check before spawn/queue creation ──────────
+      if (isGroupChat && !this.shared) {
+        // Single mode + group: session can't serve DMs, skip entirely (Bug I2 fix —
+        // previously spawned a full subprocess then immediately killed it).
+        log.info({ chatJid: resumeChatJid, sessionId: resumeSessionId }, 'skipping single-mode resume — group chat');
+      } else {
+        log.info({ sessionId: resumeSessionId, chatJid: resumeChatJid }, 'resuming prior session');
+        this.activeChatJid = resumeChatJid;
+        let resumedSession!: SessionManager;
+        resumedSession = this.createSessionManager({
+          chatJid: resumeChatJid,
+          cwd: this.cwd,
+          trackSingletonMcpSession: true,
+          onEvent: (event) => this.handleEvent(resumedSession, event),
+          onResumeFailed: () => this.handleResumeFailed(resumeChatJid),
+          onCrash: (info) => {
+            this.recordCrash(GLOBAL_CRASH_SCOPE_KEY);
+            const turnWasInFlight = this.currentRuntimeTurnContext !== null;
+            const queue = this.getActiveQueue();
+            this.finalizeRuntimeCrash(this.currentRuntimeTurnContext, queue, this.session);
+            this.cleanupSharedCrashTurnState();
+            this.emitCrashHealReport(resumeChatJid, info, turnWasInFlight);
+          },
+          notifyUser: (msg) => this.handleCrashNotify(msg),
+        });
+        this.session = resumedSession;
+
+        // Bug C2 fix: Do NOT create a group-keyed queue for shared mode — it would
+        // remain as a stale entry in outboundQueues since no startup message is sent.
+        // The queue is created on-demand via ensureOutboundQueue when a real message arrives.
+        if (!isGroupChat) {
+          if (this.shared) {
+            const q = this.createOutboundQueue(resumeChatJid, 'startup resume shared');
+            this.outboundQueues.set(canonicalizeChatJid(resumeChatJid, this.db), q);
+          } else {
+            const q = this.createOutboundQueue(resumeChatJid, 'startup resume single');
+            this.queue = q;
+          }
+        }
+
+        // Wire operation tracker for resumed single/shared session
+        this.operationTracker = this.createOperationTracker(this.session, () => this.getActiveQueue());
+
+        // Bug C1 fix: Wrap spawnSession in try/catch — every other call site does this.
+        // If spawn fails (bad session ID, corrupted state, claude-cli not found), clean up
+        // gracefully instead of crashing the runtime.
+        try {
+          await this.session.spawnSession(resumeSessionId, priorSession.id);
+        } catch (err) {
+          log.warn({ err, sessionId: resumeSessionId, chatJid: resumeChatJid }, 'spawnSession failed during resume — cleaning up');
+          this.operationTracker?.shutdown();
+          this.operationTracker = null;
+          this.session = null;
+          this.activeChatJid = null;
+          if (this.shared) {
+            this.outboundQueues.delete(canonicalizeChatJid(resumeChatJid, this.db));
+          } else {
+            this.queue = null;
+          }
+          // Fall through — runtime continues without a resumed session
+        }
+
+        // Defer notification until after WA connects (sending here causes a fatal crash)
+        if (this.session) {
+          if (isGroupChat) {
+            // Shared mode + group: session stays alive (serves DMs too), just no unsolicited group message.
+            log.info({ chatJid: resumeChatJid }, 'suppressing startup message — shared-mode group chat');
+          } else {
+            const age = formatAge(priorSession.started_at);
+            this.pendingStartupMessage = {
+              chatJid: resumeChatJid,
+              text: `_Resuming session_ from *${age}*. Send a message to continue, or /new to start fresh.`,
+            };
+          }
+        }
+      }
+    }
+
+    // Register emit_heal_result MCP tool (once, for control-plane repair completion).
+    // Only on non-sandboxed instances (Q) — sandboxed instances (Loops) are repair targets, not repairers.
+    // Tagged `core: false` because this registration is conditional on configured control peers;
+    // see `src/mcp/types.ts` for the contract — non-core tools must tolerate absence on instances
+    // that do not meet the gate (no control peers, sandbox mode, or per-chat sandbox).
+    if (config.controlPeers.size > 0 && !this.sandboxPerChat && !this.sandbox) {
+      this.registry.register({
+        name: 'emit_heal_result',
+        description: 'Signal completion of a repair cycle. Only callable during an active repair session.',
+        schema: EmitHealResultSchema,
+        scope: 'global',
+        targetMode: 'caller-supplied',
+        replayPolicy: 'unsafe',
+        core: false,
+        handler: async (params) => {
+          const parsed = EmitHealResultSchema.parse(params);
+
+          // Validate: must match active repair
+          if (!this.activeControlReportId) {
+            throw new Error('No active repair session');
+          }
+          if (parsed.reportId !== this.activeControlReportId) {
+            throw new Error(`No active repair for reportId ${parsed.reportId}. Active: ${this.activeControlReportId}`);
+          }
+          if (this.controlProtocolCompletedReportId === parsed.reportId) {
+            throw new Error(`Repair result already emitted for reportId ${parsed.reportId}`);
+          }
+
+          const controlQueue = this.getControlQueue();
+          if (!controlQueue) {
+            throw new Error('Control queue not found');
+          }
+
+          // Determine target JID (Loops)
+          const loopsPhone = [...config.controlPeers.entries()].find(([name]) => name === 'loops')?.[1];
+          const loopsJid = loopsPhone ? toPersonalJid(loopsPhone) : null;
+
+          if (parsed.result === 'fixed') {
+            if (loopsJid) {
+              await controlQueue.sendControlMessage(loopsJid, 'HEAL_COMPLETE', {
+                reportId: parsed.reportId,
+                errorClass: parsed.errorClass,
+                result: 'fixed',
+                commitSha: parsed.commitSha,
+                diagnosis: parsed.diagnosis,
+              }, this.durability ?? undefined);
+            }
+          } else {
+            // escalate
+            if (loopsJid) {
+              await controlQueue.sendControlMessage(loopsJid, 'HEAL_ESCALATE', {
+                reportId: parsed.reportId,
+                errorClass: parsed.errorClass,
+                diagnosis: parsed.diagnosis,
+              }, this.durability ?? undefined);
+            }
+            // Also DM admin
+            const adminPhone = [...config.adminPhones][0];
+            if (adminPhone) {
+              const adminJid = toPersonalJid(adminPhone);
+              await sendTracked(this.messenger, adminJid,
+                `[HEAL_ESCALATE] Repair for ${parsed.errorClass} escalated.\n\n${parsed.diagnosis}`,
+                this.durability ?? undefined, { replayPolicy: 'safe' });
+            }
+          }
+
+          // Resolve pending_heal_reports row (Type 3 cleanup)
+          try {
+            this.db.raw.prepare(
+              "UPDATE pending_heal_reports SET state = 'resolved' WHERE report_id = ?",
+            ).run(parsed.reportId);
+          } catch (err) {
+            // best-effort, but visible: a stuck-pending row re-fires stale-open re-notify
+            log.warn({ err, reportId: parsed.reportId }, 'failed to mark heal report resolved; row stays pending');
+          }
+
+          // The MCP result still has to travel back through this exact provider
+          // request. Retain the immutable report owner and the timeout until the
+          // provider emits its terminal result; advancing here lets report A's
+          // trailing result terminalize a newly-dispatched report B.
+          this.controlProtocolCompletedReportId = parsed.reportId;
+
+          return { sent: true, reportId: parsed.reportId, result: parsed.result };
+        },
+      });
+    }
+
+    // Register restart_self MCP tool (agent instance only — sandboxed instances
+    // are repair targets, not self-restarters). Routes through the existing
+    // graceful shutdown via ServiceManager.restart; logic lives in self-restart.ts.
+    // Requires the fleet-owned restarter injected from the composition root.
+    if (!this.sandbox && !this.sandboxPerChat && this.serviceRestarter) {
+      const serviceRestarter = this.serviceRestarter;
+      this.registry.register(buildRestartSelfTool({
+        instanceName: this.instanceName,
+        dataRoot: config.dataRoot,
+        resolveChatJid: () => this.currentTurnChatJid ?? this.activeChatJid ?? undefined,
+        sendAck: async (chatJid, text) => {
+          await sendTracked(this.messenger, chatJid, text, this.durability ?? undefined, { replayPolicy: 'unsafe' });
+        },
+        serviceManager: serviceRestarter,
+        trigger: triggerSelfRestart,
+        // QR-047 + QR-143: admin gate hoisted to assertRestartSelfAdmin — gates on
+        // authenticated transport BEFORE the phone match, so a spoofed @sms actor
+        // that collapses to admin digits cannot induce a restart.
+        assertAdmin: (session) => assertRestartSelfAdmin(session, { db: this.db, adminPhones: config.adminPhones }),
+      }));
+    }
+
+    // Heal the claude file-store credential from the keychain BEFORE the first
+    // turn can run, so a keychain-only refresh (native login) can't false-arm
+    // the provider fallback on turn 1 (the recovery probe path heals for the
+    // mid-run case). No-op off-darwin / when CLAUDE_CONFIG_DIR is unset / when
+    // the file store is already current. Fail-open by contract.
+    if (this.agentProvider === 'claude-cli') {
+      ensureClaudeFileStoreCredential();
+    }
+    this.schedulePrimaryModelUsabilityProbe('startup');
+    this.startHealthStatsTimer();
+    this.workspaceSweeper.start();
+    this.startQueueSweepTimer();
+    this.startSessionSweepTimer();
+    this.startZombieSessionSweepTimer();
+    this.handoffDistill.start();
+
+    // Restore any pending polls from the previous process so votes-in-flight
+    // and active AskUserQuestion polls survive a restart. Errors logged inside;
+    // never throws.
+    await this.rehydratePendingPolls();
+    await this.consumeQueuedPollDecisions();
+
+    log.info({
+      instanceName: this.instanceName,
+      sessionScope: this.sessionScope,
+      shared: this.shared,
+      sandboxPerChat: this.sandboxPerChat,
+      sandboxed: this.sandbox !== undefined,
+    }, 'AgentRuntime started');
+  }
+
+  /**
+   * Dispatch a scheduled `agent_job` as a real agent turn. Wired into the
+   * TriggerPoller (main.ts) so a schedule.cron/at_time fire whose linked bead
+   * is an agent_job RUNS the prompt instead of posting a bare "cron tick". The
+   * synthetic turn flows through the normal handleMessage path, so it works in
+   * shared / per_chat / single modes alike. Returns synchronously once the turn
+   * is ACCEPTED onto the turn chain — the turn itself runs async (we never block
+   * the poller tick for the whole turn). Throwing here is reported by the poller
+   * as a fail-CLOSED dispatch (the schedule does not silently no-op).
+   */
+  dispatchAgentJob(ctx: {
+    beadId: number; triggerId: number; prompt: string; title: string; reportChatJid: string;
+  }): { dispatched: boolean; detail?: string } {
+    try {
+      this.db.assertWritableCompatibility();
+      const now = Math.floor(Date.now() / 1000);
+      const synthetic: IncomingMessage = {
+        messageId: `agentjob-${ctx.triggerId}-${now}`,
+        chatJid: ctx.reportChatJid,
+        senderJid: config.memory.adminJid,
+        senderName: ctx.title ? `Scheduled job: ${ctx.title}`.slice(0, 80) : 'Scheduled job',
+        content: ctx.prompt,
+        contentText: null,
+        contentType: 'text',
+        isFromMe: false,
+        isGroup: ctx.reportChatJid.endsWith('@g.us'),
+        mentionedJids: [],
+        timestamp: now,
+        quotedMessageId: null,
+        isResponseWorthy: true,
+        inboundSeq: undefined,
+        isSyntheticJob: true,
+      };
+      // Fire-and-forget onto the turn chain; failures inside the turn are logged
+      // by handleMessage's own turn-chain error handler.
+      void this.handleMessage(synthetic).catch((err: unknown) => {
+        log.error(
+          { err, triggerId: ctx.triggerId, beadId: ctx.beadId },
+          'agent job turn failed after dispatch',
+        );
+      });
+      return { dispatched: true, detail: `enqueued turn for bead ${ctx.beadId}` };
+    } catch (err) {
+      return { dispatched: false, detail: errorMessage(err) };
+    }
+  }
+
+  handleMessage(msg: IncomingMessage): Promise<void> {
+    try {
+      this.db.assertWritableCompatibility();
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    if (this.shutdownRequested) {
+      return Promise.reject(new Error('Agent runtime is shutting down; new turns are not accepted'));
+    }
+    const processing = this.handleMessageInner(msg);
+    this.activeMessageHandlers.add(processing);
+    void processing.finally(() => {
+      this.activeMessageHandlers.delete(processing);
+    }).catch(() => {});
+    return processing;
+  }
+
+  private async handleMessageInner(msg: IncomingMessage): Promise<void> {
+    // Process media messages (transcription, text extraction, etc.) before routing.
+    // For text messages this is a no-op. For all other types we attempt to convert
+    // to a plain-text representation suitable for the stream-json agent protocol.
+    if (msg.contentType !== 'text') {
+      try {
+        msg.content = await prepareContentForAgent(msg, this.db, msg.messageId);
+      } catch (err) {
+        log.warn(
+          { err, contentType: msg.contentType, messageId: msg.messageId },
+          'media processing failed — using fallback label',
+        );
+        msg.content = `[${msg.contentType} message — processing failed]`;
+      }
+    }
+
+    const content = msg.content;
+    if (content === null || content.trim() === '') {
+      log.warn(
+        { messageId: msg.messageId, contentType: msg.contentType },
+        'empty content after media processing — skipping',
+      );
+      // Mark inbound event as skipped so it doesn't stay stuck in 'processing'
+      if (this.durability && msg.inboundSeq !== undefined) {
+        this.durability.markInboundSkipped(msg.inboundSeq, 'empty_content');
+      }
+      return;
+    }
+
+    // Substrate slice 1: inline imperative extractor.
+    // Gate on sender identity (admin-only), not deliveryJid. For any admin-authored
+    // message containing an explicit imperative (remind/schedule/watch/track/...),
+    // persist a proposed task bead immediately so the intent survives even if the
+    // agent turn fails downstream. The bead lands as status='proposed' so a
+    // drowsy or misfired match doesn't silently commit real work to the task list.
+    try {
+      // senderPhone stays on the PLAIN resolver — it feeds the bead's ownerJid
+      // attribution (display-side, below), which is transport-agnostic.
+      const senderPhone = resolvePhoneFromJid(msg.senderJid, this.db);
+      // QR-143 (B4): the admin GRANT (auto-creating a proposed bead) routes
+      // through the grant primitive, which returns null for a spoofable
+      // <admin-digits>@sms transport — so it cannot induce an admin-attributed
+      // proposal. Skip synthetic agent-job turns (already durable agent_job
+      // beads, not ad-hoc imperatives to capture).
+      const grantPhone = resolvePhoneFromJidForGrant(msg.senderJid, this.db);
+      if (grantPhone !== null && isAdminPhone(grantPhone, config.adminPhones) && !msg.isSyntheticJob) {
+        const hit = matchImperative(content);
+        if (hit) {
+          const target = extractImperativeTarget(content);
+          const title = target && target.length > 0 ? target.slice(0, 200) : content.slice(0, 120);
+          // review_by_at records a review horizon on the proposal. It is stored on
+          // the bead and surfaced via get_bead/list_beads for manual/operator
+          // review; no automatic sweep cancels unreviewed rows past this horizon.
+          // Default is config.memory.sweep.reviewByDays * 86400 seconds.
+          const reviewByAt = Math.floor(Date.now() / 1000) + config.memory.sweep.reviewByDays * 86400;
+          createBead(this.db.raw, {
+            kind: 'task',
+            title,
+            body: content,
+            ownerJid: config.memory.adminJid || (senderPhone ?? msg.senderJid),
+            chatJid: msg.chatJid,
+            sourceMessagePk: null,
+            status: 'proposed',
+            confidence: 0.7,
+            proposalReason: `inline imperative: ${hit.verb}`,
+            reviewByAt,
+            actor: 'inline',
+          });
+          log.info(
+            { verb: hit.verb, messageId: msg.messageId, chatJid: msg.chatJid, reviewByAt },
+            'inline imperative persisted as proposed bead',
+          );
+        }
+      }
+    } catch (err) {
+      // Classify DB errors: unrecoverable ones (disk full, readonly, corrupt)
+      // indicate infrastructure failure — surface them to the operator by
+      // emitting alert and marking the inbound failed. Everything else
+      // (extractor bugs, constraint errors on malformed extraction output)
+      // is swallowed with a warn so a substrate bug doesn't drop the user's
+      // message. Per spec §8.4 / INV-7: observability is a product surface.
+      const msgText = errorMessage(err);
+      const code = (err as { code?: unknown })?.code;
+      const codeStr = typeof code === 'string' ? code : '';
+      const isUnrecoverable =
+        /SQLITE_(FULL|READONLY|CORRUPT|IOERR|CANTOPEN|NOTADB)/i.test(msgText) ||
+        /SQLITE_(FULL|READONLY|CORRUPT|IOERR|CANTOPEN|NOTADB)/i.test(codeStr);
+      if (isUnrecoverable) {
+        log.error(
+          { err, messageId: msg.messageId, code: codeStr || 'unknown' },
+          'inline extractor hook hit unrecoverable DB error — surfacing to operator',
+        );
+        emitAlertChecked(
+          this.instanceName,
+          'substrate-inline-hook',
+          `Unrecoverable DB error in inline extractor: ${msgText}`,
+          `messageId=${msg.messageId} chatJid=${msg.chatJid} code=${codeStr || 'unknown'}`,
+        );
+        if (this.runtimeTurnCoordinator.finalizeMessageProcessingFailure(msg.inboundSeq)) {
+          // Immutable admitted turns terminalize through the coordinator.
+        } else if (this.durability && msg.inboundSeq !== undefined) {
+          this.markRuntimeFaultContinuityCandidate(msg.inboundSeq);
+          this.replyGuarantee?.disarm(msg.inboundSeq);
+          this.durability.markInboundFailed(msg.inboundSeq, classifyErrorForInbound(err));
+        }
+        // Propagate so the outer turn-chain handler notifies the user and
+        // the fleet supervisor sees the PID enter recovery rather than
+        // silently continuing past disk-full conditions.
+        throw err;
+      }
+      log.warn({ err, messageId: msg.messageId }, 'inline extractor hook failed (continuing)');
+    }
+
+    this.turnChain = this.turnChain
+      .then(() => this._handleMessageInner(msg))
+      .catch((err) => {
+        log.error(
+          { err, messageId: msg.messageId, chatJid: msg.chatJid },
+          'unhandled error in message processing',
+        );
+        // Admitted turns have one terminal owner; pre-admission failures retain
+        // the legacy inbound owner so they cannot stay stuck in processing.
+        if (this.runtimeTurnCoordinator.finalizeMessageProcessingFailure(msg.inboundSeq)) {
+          // Coordinator owns terminal persistence and reply-guarantee disarm.
+        } else if (this.durability && msg.inboundSeq !== undefined) {
+          this.markRuntimeFaultContinuityCandidate(msg.inboundSeq);
+          this.replyGuarantee?.disarm(msg.inboundSeq);
+          this.durability.markInboundFailed(msg.inboundSeq, classifyErrorForInbound(err));
+        }
+        // Notify user of failure
+        this.sendDirect(msg.chatJid, 'Something went wrong processing that message. Try again?');
+      });
+  }
+
+  private async _handleMessageInner(msg: IncomingMessage): Promise<void> {
+    let content = msg.content;
+    const chatJid = msg.chatJid;
+    // Mirrors ingest's journal key exactly, including mapped-LID DMs whose
+    // durable conversation key is the resolved phone while delivery stays @lid.
+    const journalConversationKey = canonicalConversationKey(chatJid, this.db);
+    const perChatMapKey = this.sessionScope === 'per_chat'
+      ? this.resolvePerChatMapKey(chatJid)
+      : undefined;
+
+    // Substrate slice 1: propagate sender identity to every MCP session so
+    // admin-gated substrate tools can distinguish the caller from the target
+    // chat. In groups, msg.chatJid IS the group JID; without this propagation
+    // admin gating would compare against the group JID and always reject.
+    //
+    // Two cases to cover:
+    //   1. Global socket (single / shared / non-sandbox per_chat modes) —
+    //      always active when !sandboxPerChat; update unconditionally.
+    //   2. Per-chat sockets — only populated in workspaceResources when
+    //      sandboxPerChat=true (async ensureSessionAndQueue path). The
+    //      synchronous per_chat-without-sandbox path uses the global socket
+    //      above and never allocates a per-chat socket, so the `workspaceResources`
+    //      lookup here is only reachable under sandboxPerChat=true.
+    // Every non-sandbox per_chat subprocess uses its own actor-bound socket.
+    // Keep the shared global socket actor-less for the whole mode so any accidental
+    // fallback to it fails closed instead of inheriting another sender.
+    if (this.shouldBroadcastGlobalActor()) {
+      this.globalSocketServer?.updateActorJid(msg.senderJid);
+    }
+    if (this.sandboxPerChat) {
+      await this.ensureSessionAndQueue(chatJid, msg.senderJid);
+      const key = perChatMapKey ?? this.resolvePerChatMapKey(chatJid);
+      const res = this.workspaceResources.get(key);
+      res?.socketServer?.updateActorJid(msg.senderJid);
+      // Relocate media files from global temp dir into user's workspace
+      // so the agent can read them within its sandbox-allowed paths.
+      if (content) {
+        const { workspacePath } = chatJidToWorkspace(this.cwd ?? homedir(), chatJid);
+        content = relocateMediaToWorkspace(content, workspacePath);
+        msg.content = content;
+      }
+    } else if (this.sessionScope === 'per_chat') {
+      this.ensureSessionAndQueueSync(chatJid, perChatMapKey!, msg.senderJid);
+    } else {
+      this.ensureSessionAndQueueSync(chatJid, undefined, msg.senderJid);
+    }
+    const classified = classifyInput(content as string, { routingAliases: config.nlRouting });
+    if (tryHandleBareKeep(this.modelPinHost, classified, chatJid, msg)) return;
+
+    // Set only by /model default (R8): the handler clears the route pref
+    // locally and then falls through to forward the raw command so the agent
+    // CLI's own /model default reset still runs. Null for every other command.
+    let forwardAfterLocalCommand: string | null = null;
+
+    if (classified.type === 'local') {
+      const spec = getCommandSpec(classified.command);
+      // Gate enforcement by gate class. Both gated classes share the same
+      // authenticated-admin core: isWhatsAppAuthenticatedJid FIRST (QR-143 —
+      // a non-authenticated transport like @sms resolves to the SAME bare
+      // phone as the WhatsApp admin but its sender-ID is spoofable, so the
+      // transport check must precede the phone match), THEN admin-phone.
+      //  - 'admin'              → authenticated admin, any venue (B21-A F3, base
+      //                           parity: the deleted pre-registry gates were
+      //                           phone-only, so admins could run these from
+      //                           groups; isAdminMessage's DM-only clause is
+      //                           deliberately NOT used here): /sessions,
+      //                           /kill-session.
+      //  - 'admin-shared-scope' → /new: admin required ONLY where the reset hits SHARED
+      //                           session state (single/shared mode, or a per_chat GROUP —
+      //                           WG-5; this.session is one session across ALL chats there,
+      //                           :760); a per_chat 1:1 DM reset touches only the sender's
+      //                           own conversation → ungated. Group-permitting (an admin may
+      //                           /new in a group) AND @sms-closing (authenticated-JID check).
+      //                           With EMPTY adminPhones /new stays ungated too (B21-A F2,
+      //                           base parity): a no-admin instance has no other reset path,
+      //                           so deny-everyone would be a total /new lockout, not a
+      //                           security posture. The empty-set exemption is THIS gate
+      //                           only — plain 'admin' commands were admin-gated on base
+      //                           and stay denied when no admin is configured.
+      // Lazy so gate:'none' commands never pay the resolvePhoneFromJid DB read.
+      // B4: the grant primitive gates authenticated-transport-FIRST then resolves;
+      // a non-authenticated (@sms) sender yields null and is denied. Behaviour is
+      // identical to the prior isWhatsAppAuthenticatedJid && isAdminPhone(...) form
+      // (isAdminPhone(null) === false).
+      const isAuthenticatedAdmin = (): boolean => {
+        const phone = resolvePhoneFromJidForGrant(msg.senderJid, this.db);
+        return phone !== null && isAdminPhone(phone, config.adminPhones);
+      };
+      const denied =
+        spec.gate === 'admin'
+          ? !isAuthenticatedAdmin()
+          : spec.gate === 'admin-shared-scope'
+            ? (this.sessionScope !== 'per_chat' || msg.isGroup) &&
+              config.adminPhones.size > 0 &&
+              !isAuthenticatedAdmin()
+            : false;
+      if (denied) {
+        // NFR-3: unsampled — never silent (V19). ids only, no content (U6).
+        // @check CHK-067 // @traces REQ-012.AC-06
+        log.warn(
+          { command: spec.name, senderJid: msg.senderJid, outcome: 'denied', errorClass: 'not-authorized' },
+          'command denied: sender not authorized',
+        );
+        // B21-A F4a: denial must be user-visible, never a silent drop — same
+        // queue-routed send path the other local-command replies use.
+        this.sendDirect(chatJid, '_Not authorized._');
+        // B21-A F1: this return bypasses the R14 post-switch completion below,
+        // so the denied inbound must be finalized HERE — same shape as the
+        // 'empty_content' skip in handleMessageInner — or the row strands in
+        // 'processing' until the stuck-inbound sweep falsely reclaims an authz
+        // denial as a processing FAILURE (stale_reclaim).
+        if (this.durability && msg.inboundSeq !== undefined) {
+          this.durability.markInboundSkipped(msg.inboundSeq, 'not_authorized');
+        }
+        return;
+      }
+      try {
+        switch (classified.command) {
+          case 'new':
+            // A local reset cannot erase the immutable evidence owner of an
+            // admitted user turn. Ask the caller to retry once that turn has
+            // reached its terminal transaction.
+            this.assertNoActiveUserTurn(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY);
+            // Capture session ref before branches may delete it from the map.
+            // In per_chat mode, this.session is NOT reliable (shared field race),
+            // so we look up the correct session from the per-chat maps.
+            const sessionForNew = this.sessionScope === 'per_chat'
+              ? this.chatSessions.get(perChatMapKey!)
+              : this.session;
+            log.info({
+              chatJid,
+              sessionScope: this.sessionScope,
+              shared: this.shared,
+              sandboxPerChat: this.sandboxPerChat,
+            }, 'resetting session and queue for /new');
+            if (this.sessionScope === 'per_chat') {
+              if (!sessionForNew) {
+                throw new Error(`No owned per-chat session found for /new at "${perChatMapKey!}"`);
+              }
+              await this.resetOwnedPerChatSession(perChatMapKey!, chatJid, sessionForNew);
+            } else {
+              // Abort the old queue — clears timers and typing heartbeat before discarding.
+              this.getQueueForChat(chatJid)?.abortTurn();
+              this.cleanupGlobalAutoCompactState();
+              // Create a fresh queue before spawning so stale output from the old session
+              // can never leak into the new session's delivery channel.
+              if (this.shared) {
+                const queue = this.createOutboundQueue(chatJid, '/new shared replacement');
+                this.outboundQueues.set(chatJid, queue);
+              } else {
+                this.queue = this.createOutboundQueue(chatJid, '/new single replacement');
+              }
+              if (sessionForNew) {
+                await this.waitForRejectedTerminalTeardown(sessionForNew);
+                await sessionForNew.handleNew();
+                this.rejectedTerminalTeardowns.delete(sessionForNew);
+              }
+            }
+            // QR-108: /new is a clean reset, so drop the one-message-handoff latches
+            // for this conversation too — otherwise a standby notice or handoff
+            // artifact stashed before /new leaks into the NEXT reply/prelude (both
+            // tables are keyed by the stable conversation_key, which /new does not
+            // change). Both fns are idempotent no-ops when nothing is pending, and
+            // their own JSDoc already documents "cleared on /new".
+            {
+              const resetKey = toConversationKey(chatJid);
+              clearStandbyNotice(this.db, resetKey);
+              deleteHandoffArtifact(this.db, resetKey);
+            }
+            // Reset turn flag — stale value from the old session must not suppress the
+            // _(no response)_ fallback if the first new-session turn has no visible text.
+            this.turnHadVisibleOutput = false;
+            this.sendDirect(chatJid, '*Starting new session* ✓');
+            break;
+
+          case 'status': {
+            // Look up session from per-chat maps (not the shared field) to avoid race.
+            const sessionForStatus = this.sessionScope === 'per_chat'
+              ? this.chatSessions.get(perChatMapKey!)
+              : this.session;
+            const status = sessionForStatus?.getStatus();
+            let text: string;
+            if (status?.active) {
+              const sessionShort = status.sessionId
+                ? status.sessionId.slice(0, 8) + '...'
+                : 'pending';
+              const started = status.startedAt ? formatAge(status.startedAt) : 'unknown';
+              const lastActivity = status.lastMessageAt
+                ? formatAge(status.lastMessageAt)
+                : 'none';
+              // B26 owner ruling: /status must show the model explicitly, the
+              // session's token counts, and the session limit. Model follows
+              // the SAME honesty rule as /model status (describeRouteModel:
+              // config-derived only, '(configured)' label — the served weight
+              // is unobservable). Defensive typeof mirrors the getProviderId
+              // call site at maybeStartAutoCompact.
+              const statusModelRef =
+                typeof sessionForStatus?.getModelRef === 'function'
+                  ? sessionForStatus.getModelRef()
+                  : undefined;
+              const statusProvider =
+                typeof sessionForStatus?.getProviderId === 'function'
+                  ? sessionForStatus.getProviderId()
+                  : this.agentProvider;
+              text =
+                '*Session active*\n' +
+                `PID: \`${status.pid ?? 'unknown'}\`\n` +
+                `Session: \`${sessionShort}\`\n` +
+                `Model: ${this.describeRouteModel(statusModelRef, statusProvider)}\n` +
+                `Started: ${started}\n` +
+                `Messages: ${status.messageCount}\n` +
+                `Last activity: ${lastActivity}`;
+              // B26: session token counts from the agent_sessions denorm
+              // columns (same source as /sessions); omitted honestly when no
+              // row exists yet. The context line pairs the since-last-compact
+              // quantity maybeStartAutoCompact actually compares (input +
+              // cache_read minus the last-compact baseline, :1273-76) with
+              // the threshold the runtime actually applies (configured value,
+              // else DEFAULT_AUTO_COMPACT_INPUT_TOKENS) — and renders ONLY
+              // where auto-compact can genuinely run (claude-cli session,
+              // non-shared scope): a budget meter for a limit that never
+              // fires would be a lie. NO provider quota meters here — that is
+              // the /account lane.
+              const statusRowId = sessionForStatus?.getDbRowId() ?? null;
+              const statusSnap = statusRowId !== null ? getSessionTokenSnapshot(this.db, statusRowId) : null;
+              if (statusSnap) {
+                text +=
+                  `\nTokens: ${formatTokenCount(statusSnap.totalInputTokens)} in / ${formatTokenCount(statusSnap.totalOutputTokens)} out`;
+                if (
+                  statusProvider === 'claude-cli' &&
+                  this.sessionScope !== 'shared' &&
+                  this.autoCompactInputTokens !== undefined
+                ) {
+                  const contextUsed = Math.max(
+                    0,
+                    statusSnap.totalInputTokens + statusSnap.totalCacheReadTokens -
+                      (statusSnap.lastCompactInputTokens + statusSnap.lastCompactCacheReadTokens),
+                  );
+                  text +=
+                    `\nContext: ${formatTokenCount(contextUsed)} / ${formatTokenCount(this.autoCompactInputTokens)} before auto-compact`;
+                }
+              }
+            } else {
+              text = '_No active session._ Send a message to start one.';
+            }
+            this.sendDirect(chatJid, text);
+            break;
+          }
+
+          case 'model': {
+            // NL-first routing alias (owner-approved design). Records a
+            // chat-scoped REASONING preference and renders route visibility —
+            // never tool, mutation, or authority changes (capability-preserved
+            // routing). Reachable only when agentOptions.nlRouting is true (the
+            // classifier gates on the same flag). The handler body lives in
+            // model-pin.ts over this runtime's ModelPinPort host.
+            await handleModelCommand(this.modelPinHost, {
+              chatJid,
+              senderJid: msg.senderJid,
+              args: classified.args,
+              perChatMapKey,
+            });
+            break;
+          }
+
+          case 'reset': {
+            // Idempotent by construction: clearing an absent row is a no-op and
+            // the reply is identical, so a doubled /reset cannot spam or error.
+            const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, msg.senderJid);
+            this.clearRoutePreference(chatJid, chatKey, senderKey);
+            // Task G: /reset undoes just as immediately as a pin applies —
+            // recycle back toward the default route (idle now, or deferred to
+            // the next message if a turn is in flight).
+            this.applyRouteChangeAndRecycle(chatJid, msg.senderJid, perChatMapKey);
+            break;
+          }
+
+          case 'help': {
+            // W1-T5: registry-derived render (help-render.ts), pure functions
+            // of (registry, {nlRouting}) — no runtime reads (R3c-1.3). Detail
+            // shares the flag: alias commands hide local semantics when off (D7).
+            // D15: tiersConfigured is a config read, kept in the runtime layer
+            // and passed IN — help-render.ts stays a pure function of its args.
+            const helpOpts = { nlRouting: config.nlRouting === true, tiersConfigured: modelTiersConfigured(config.nlRoutingTiers) };
+            const helpText = classified.args
+              ? renderHelpDetail(classified.args, helpOpts)
+              : renderHelp(helpOpts);
+            this.sendDirect(chatJid, helpText);
+            break;
+          }
+
+          case 'sessions': {
+            // #1774: the per-session token figures below read total_input_tokens
+            // uncompensated — they now show genuinely-new input, not the old
+            // inflated (cache-read-inclusive) total. This display has no
+            // budget/quota semantics, so the smaller, honest number is a
+            // straight improvement.
+            const entries: string[] = [];
+            let idx = 1;
+            // b28 r2c: the row whose conversation key matches the chat that sent
+            // /sessions is labelled "Current session" instead of its resolved
+            // name — derived through the same canonical key the runtime dispatches
+            // on, so lid vs pn presentation cannot cause a miss.
+            const requestingKey = this.sessionScope === 'per_chat'
+              ? this.resolvePerChatMapKey(chatJid)
+              : null;
+            if (this.sessionScope === 'per_chat') {
+              for (const [mapKey, sess] of this.chatSessions) {
+                const st = sess.getStatus();
+                if (!st.active) continue;
+                const isGrp = isGroupConversationKey(mapKey);
+                const label = isGrp ? 'Group' : 'DM';
+                const ageStr = st.startedAt ? formatAge(st.startedAt) : '?';
+                const dbRowId = sess.getDbRowId();
+                let tkStr = '0';
+                if (dbRowId !== null) {
+                  const tokenRow = this.db.raw.prepare(
+                    'SELECT total_input_tokens, total_output_tokens FROM agent_sessions WHERE id = ?'
+                  ).get(dbRowId) as { total_input_tokens: number | null; total_output_tokens: number | null } | undefined;
+                  if (tokenRow) {
+                    const tkTotal = (tokenRow.total_input_tokens ?? 0) + (tokenRow.total_output_tokens ?? 0);
+                    tkStr = tkTotal > 1000 ? `${(tkTotal / 1000).toFixed(1)}k` : String(tkTotal);
+                  }
+                }
+                // B23 owner ruling: render the resolved chat name (alias →
+                // group subject/chat name → contact name → formatted phone),
+                // raw key only as last resort. Local DB reads only — cheap.
+                // b28 r2c: the requesting chat's own row reads "Current session".
+                const identifier = mapKey === requestingKey
+                  ? 'Current session'
+                  : formatChatRefForOwner(this.db, mapKey);
+                entries.push(`${idx}. ${identifier} (${label}) — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
+                idx++;
+              }
+            } else {
+              const st = this.session?.getStatus();
+              if (st?.active) {
+                const ageStr = st.startedAt ? formatAge(st.startedAt) : '?';
+                const dbRowId = this.session?.getDbRowId() ?? null;
+                let tkStr = '0';
+                if (dbRowId !== null) {
+                  const tokenRow = this.db.raw.prepare(
+                    'SELECT total_input_tokens, total_output_tokens FROM agent_sessions WHERE id = ?'
+                  ).get(dbRowId) as { total_input_tokens: number | null; total_output_tokens: number | null } | undefined;
+                  if (tokenRow) {
+                    const tkTotal = (tokenRow.total_input_tokens ?? 0) + (tokenRow.total_output_tokens ?? 0);
+                    tkStr = tkTotal > 1000 ? `${(tkTotal / 1000).toFixed(1)}k` : String(tkTotal);
+                  }
+                }
+                // b28 r2c: when /sessions is sent from the active chat itself,
+                // the single row reads "Current session". Canonicalize BOTH
+                // sides — the request may present as @lid while activeChatJid is
+                // stored as the pn (or vice versa).
+                const requestIsActiveChat = this.activeChatJid !== null
+                  && canonicalizeChatJid(chatJid, this.db) === canonicalizeChatJid(this.activeChatJid, this.db);
+                const identifier = requestIsActiveChat
+                  ? 'Current session'
+                  : (this.activeChatJid ? formatChatRefForOwner(this.db, this.activeChatJid) : 'unknown');
+                entries.push(`1. ${identifier} — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
+              }
+            }
+            const sessionsText = entries.length > 0
+              ? `*Active Sessions (${entries.length})*\n\n${entries.join('\n')}\n\n/kill-session <number> to terminate`
+              : '_No active sessions._';
+            this.sendDirect(chatJid, sessionsText, true);
+            break;
+          }
+
+          case 'kill-session': {
+>>>>>>> 00c6468b (fix(agent): preserve provider transition ownership)
             // B25 F4: strict integer parse — parseInt('2x') === 2 silently
             // accepted trailing garbage and killed a session the admin never
             // named. Digits only, everywhere.
@@ -277,18 +4314,24 @@ import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
               // cleanupPerChatState. Left behind, the next inbound turn for this
               // chat queues behind a processor whose session is gone, never
               // reaches spawnSession, and the chat deadlocks.
-              let killFinalizationError: unknown = null;
-              try {
-                await this.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(mapKey);
-              } catch (err) {
-                killFinalizationError = err;
-                log.error({ err, mapKey }, 'kill-session: runtime turn queue teardown failed');
-              }
+              const turnTerminalized =
+                this.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(mapKey);
               const childStopped = targetSession.shutdown(false);
-              this.perChatMcpSocketManager.releaseAfter(mapKey, childStopped);
+              const transitionSettled = Promise.all([
+                childStopped,
+                turnTerminalized,
+              ]).then(() => undefined);
+              this.perChatMcpSocketManager.releaseAfter(mapKey, transitionSettled);
               this.deleteOwnedPerChatSession(mapKey, targetSession);
               this.chatQueues.delete(mapKey);
               this.cleanupPerChatState(mapKey, { preserveActorSocket: true });
+              let killFinalizationError: unknown = null;
+              try {
+                await turnTerminalized;
+              } catch (err) {
+                killFinalizationError = err;
+                log.error('kill-session: runtime turn queue teardown failed');
+              }
               await childStopped;
               const killLabel = isGroupConversationKey(mapKey) ? 'Group' : 'DM';
               const killSuffix = killFinalizationError === null
@@ -3694,7 +7737,11 @@ import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
         try { await queue.shutdown(); } catch (err) { log.warn({ err, chatJid }, 'per_chat queue shutdown failed'); }
       }
       this.chatQueues.clear();
-      for (const mapKey of perChatKeys) this.cleanupPerChatState(mapKey);
+      for (const mapKey of perChatKeys) {
+        const failedOwner = failedPerChatSessions.get(mapKey);
+        if (failedOwner && this.chatSessions.get(mapKey) === failedOwner) continue;
+        this.cleanupPerChatState(mapKey);
+      }
     }
 
     if (!preserveRuntimeTurnState && this.shared) {
@@ -4331,7 +8378,7 @@ import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
   }
 
   private wirePerChatActorSocket(chatJid: string, provider: string):
-    | { mcpSocketPath: string; mcpSocketReady: Promise<void> }
+    | { mcpSocketPath?: string; providerTransitionReady: Promise<void> }
     | undefined {
     if (this.sessionScope !== 'per_chat' || this.sandboxPerChat) return undefined;
     const mapKey = this.resolvePerChatMapKey(chatJid);
@@ -4339,11 +8386,13 @@ import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
       throw new Error(`unrecognized provider MCP capability: ${provider}`);
     }
     if (mcpModeForProvider(provider) === 'none') {
-      this.perChatMcpSocketManager.release(mapKey);
-      return undefined;
+      return {
+        providerTransitionReady:
+          this.perChatMcpSocketManager.providerTransitionReady(mapKey),
+      };
     }
     const { socketPath, ready } = this.perChatMcpSocketManager.acquire(mapKey, chatJid);
-    return { mcpSocketPath: socketPath, mcpSocketReady: ready };
+    return { mcpSocketPath: socketPath, providerTransitionReady: ready };
   }
 
   private teardownPerChatActorSocket(mapKey: string): void {
@@ -7067,13 +11116,13 @@ import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
     const sessionProvider = route.provider;
     const perChatWire = this.wirePerChatActorSocket(opts.chatJid, sessionProvider);
     const mcpSocketPath = opts.mcpSocketPath ?? perChatWire?.mcpSocketPath;
-    const mcpSocketReady = perChatWire?.mcpSocketReady;
+    const providerTransitionReady = perChatWire?.providerTransitionReady;
     const actorSocketRequired =
       this.sessionScope === 'per_chat' &&
       !this.sandboxPerChat &&
       isProviderId(sessionProvider) &&
       mcpModeForProvider(sessionProvider) === 'stdio_proxy';
-    if (actorSocketRequired && (!mcpSocketPath?.trim() || !mcpSocketReady)) {
+    if (actorSocketRequired && (!mcpSocketPath?.trim() || !providerTransitionReady)) {
       throw new Error(`per_chat ${sessionProvider} session for ${conversationKey} would spawn without an actor-bound socket`);
     }
     const providerToolSession: SessionContext =
@@ -7118,7 +11167,7 @@ import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
       mcpSessionContext: providerToolSession,
       whatsoupInstance: this.instanceName,
       whatsoupMcpSocket: mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,
-      mcpSocketReady,
+      providerTransitionReady,
       handoffSystemBlock: this.buildHandoffSystemBlock(conversationKey, route ? route.provider : this.effectiveProvider),
       routingSystemBlock: config.nlRouting ? () => this.buildRoutingContractBlock(route ? route.provider : this.effectiveProvider) : undefined,
       egressProxyPort: this.egressProxy?.port,

@@ -556,10 +556,10 @@ describe('F-STICKY-ACTOR hardening: wirePerChatActorSocket keys on the ACTUAL pr
     resolvePerChatMapKey(c: string): string;
     perChatMcpSocketManager: {
       acquire: (mapKey: string, chatJid: string) => { socketPath: string; ready: Promise<void> };
-      release: (mapKey: string) => void;
+      providerTransitionReady: (mapKey: string) => Promise<void>;
     };
     wirePerChatActorSocket(chatJid: string, provider: string):
-      | { mcpSocketPath: string; mcpSocketReady: Promise<void> }
+      | { mcpSocketPath?: string; providerTransitionReady: Promise<void> }
       | undefined;
   };
   let runtime: AgentRuntime;
@@ -583,7 +583,7 @@ describe('F-STICKY-ACTOR hardening: wirePerChatActorSocket keys on the ACTUAL pr
       const acquire = spyAcquire();
       expect(priv().wirePerChatActorSocket(CHAT, provider)).toEqual({
         mcpSocketPath: `/tmp/${mapKey}.sock`,
-        mcpSocketReady: ready,
+        providerTransitionReady: ready,
       });
       expect(acquire).toHaveBeenCalledWith(mapKey, CHAT);
     },
@@ -591,10 +591,16 @@ describe('F-STICKY-ACTOR hardening: wirePerChatActorSocket keys on the ACTUAL pr
 
   it.each(['openai-api', 'anthropic-api'])('%s remains outside the child MCP lane', (provider) => {
     const acquire = spyAcquire();
-    const release = vi.spyOn(priv().perChatMcpSocketManager, 'release');
-    expect(priv().wirePerChatActorSocket(CHAT, provider)).toBeUndefined();
+    const transitionReady = Promise.resolve();
+    const providerTransitionReady = vi.spyOn(
+      priv().perChatMcpSocketManager,
+      'providerTransitionReady',
+    ).mockReturnValue(transitionReady);
+    expect(priv().wirePerChatActorSocket(CHAT, provider)).toEqual({
+      providerTransitionReady: transitionReady,
+    });
     expect(acquire).not.toHaveBeenCalled();
-    expect(release).toHaveBeenCalledWith(mapKey);
+    expect(providerTransitionReady).toHaveBeenCalledWith(mapKey);
   });
 
   it('an unrecognized provider fails closed before SessionManager construction', () => {
@@ -615,7 +621,7 @@ describe('F-STICKY-ACTOR hardening: createSessionManager is the single wiring ch
   const CHAT = 'dm-choke@s.whatsapp.net';
   type Priv = {
     wirePerChatActorSocket(chatJid: string, provider: string):
-      | { mcpSocketPath: string; mcpSocketReady: Promise<void> }
+      | { mcpSocketPath?: string; providerTransitionReady: Promise<void> }
       | undefined;
     createSessionManager(opts: Record<string, unknown>): unknown;
   };
@@ -630,14 +636,14 @@ describe('F-STICKY-ACTOR hardening: createSessionManager is the single wiring ch
   it('passes the actual routed provider actor socket and readiness into SessionManager', () => {
     const ready = Promise.resolve();
     const wire = vi.spyOn(runtime as unknown as { wirePerChatActorSocket: Priv['wirePerChatActorSocket'] }, 'wirePerChatActorSocket')
-      .mockReturnValue({ mcpSocketPath: '/tmp/actor.sock', mcpSocketReady: ready });
+      .mockReturnValue({ mcpSocketPath: '/tmp/actor.sock', providerTransitionReady: ready });
     priv().createSessionManager(baseOpts());
     expect(wire).toHaveBeenCalledWith(CHAT, 'claude-cli');
     const options = (SessionManager as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
     expect(options).toMatchObject({
       provider: 'claude-cli',
       whatsoupMcpSocket: '/tmp/actor.sock',
-      mcpSocketReady: ready,
+      providerTransitionReady: ready,
     });
   });
 

@@ -238,7 +238,7 @@ export interface SessionManagerOptions {
   mcpSessionContext?: SessionContext;
   whatsoupInstance?: string;
   whatsoupMcpSocket?: string;
-  mcpSocketReady?: Promise<void>;
+  providerTransitionReady?: Promise<void>;
   handoffSystemBlock?: () => string | null;
   routingSystemBlock?: () => string | null;
   /** Egress proxy port (#1607) — forwarded into buildChildEnv's baseOpts so spawned children pick up HTTP_PROXY/HTTPS_PROXY. Undefined when the instance has no allowedEgress. */
@@ -614,7 +614,7 @@ export class SessionManager {
   private readonly mcpSessionContext: SessionContext | undefined;
   private readonly whatsoupInstance: string | undefined;
   private readonly whatsoupMcpSocket: string | undefined;
-  private readonly mcpSocketReady: Promise<void> | undefined;
+  private readonly providerTransitionReady: Promise<void> | undefined;
   private readonly handoffSystemBlock: (() => string | null) | undefined;
   private readonly routingSystemBlock: (() => string | null) | undefined;
   private readonly egressProxyPort: number | undefined;
@@ -784,7 +784,7 @@ export class SessionManager {
     this.mcpSessionContext = opts.mcpSessionContext;
     this.whatsoupInstance = opts.whatsoupInstance;
     this.whatsoupMcpSocket = opts.whatsoupMcpSocket;
-    this.mcpSocketReady = opts.mcpSocketReady;
+    this.providerTransitionReady = opts.providerTransitionReady;
     this.handoffSystemBlock = opts.handoffSystemBlock;
     this.routingSystemBlock = opts.routingSystemBlock;
     this.egressProxyPort = opts.egressProxyPort;
@@ -2059,6 +2059,10 @@ export class SessionManager {
     if (this.active && (this.child !== null || this.managedProviderSession !== null)) {
       return;
     }
+<<<<<<< HEAD
+=======
+    await this.providerTransitionReady;
+>>>>>>> 00c6468b (fix(agent): preserve provider transition ownership)
     const provider = this.assertKnownProvider('spawnSession');
     const checkpointWatchdogState = this.readCheckpointWatchdogState();
     this.assertNoPendingRoutePolicyAdmission(checkpointWatchdogState);
@@ -3100,7 +3104,7 @@ export class SessionManager {
     if (this.providerTurnInFlight) {
       throw new Error('PROVIDER_TURN_IN_FLIGHT: wait for the current provider request to terminalize');
     }
-    if (this.isSpawnPerTurn) await this.mcpSocketReady;
+    if (this.isSpawnPerTurn) await this.providerTransitionReady;
 
     // Budget enforcement: check rate/spend limits before dispatching the turn
     if (this.budget) {

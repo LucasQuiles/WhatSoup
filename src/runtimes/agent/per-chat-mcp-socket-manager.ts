@@ -32,6 +32,7 @@ interface PerChatSocketResource {
 interface TeardownBarrier {
   identity: { value: string };
   ready: Promise<void>;
+  state: 'pending' | 'rejected';
 }
 
 function processUid(): number | undefined {
@@ -181,7 +182,11 @@ export class PerChatMcpSocketManager {
       }
       unlinkSync(socketPath);
     }
-    await server.startAndWait({ unlinkExisting: false });
+    try {
+      await server.startAndWait({ unlinkExisting: false });
+    } catch {
+      throw new Error('actor MCP socket start failed');
+    }
   }
 
   release(conversationIdentity: string): void {
@@ -189,6 +194,14 @@ export class PerChatMcpSocketManager {
       throw new Error('actor MCP socket release requires terminal child proof');
     }
     this.releaseOwned(conversationIdentity);
+  }
+
+  providerTransitionReady(conversationIdentity: string): Promise<void> {
+    const barrier = this.teardownBarriers.get(conversationIdentity);
+    if (barrier) return barrier.ready;
+    return Promise.resolve().then(() => {
+      this.releaseOwned(conversationIdentity);
+    });
   }
 
   private releaseOwned(conversationIdentity: string): void {
@@ -199,16 +212,22 @@ export class PerChatMcpSocketManager {
   }
 
   releaseAfter(conversationIdentity: string, childStopped: Promise<void>): void {
-    if (this.teardownBarriers.has(conversationIdentity)) return;
+    const existing = this.teardownBarriers.get(conversationIdentity);
+    if (existing?.state === 'pending') return;
     const identity = { value: conversationIdentity };
     let barrier!: TeardownBarrier;
-    const ready = childStopped.then(() => {
-      this.releaseOwned(identity.value);
-      if (this.teardownBarriers.get(identity.value) === barrier) {
-        this.teardownBarriers.delete(identity.value);
-      }
-    });
-    barrier = { identity, ready };
+    const ready = childStopped
+      .then(() => {
+        this.releaseOwned(identity.value);
+        if (this.teardownBarriers.get(identity.value) === barrier) {
+          this.teardownBarriers.delete(identity.value);
+        }
+      })
+      .catch((err: unknown) => {
+        barrier.state = 'rejected';
+        throw err;
+      });
+    barrier = { identity, ready, state: 'pending' };
     this.teardownBarriers.set(conversationIdentity, barrier);
     void ready.catch(() => {});
   }
@@ -220,8 +239,16 @@ export class PerChatMcpSocketManager {
   ): void {
     if (oldIdentity === newIdentity) return;
     const resource = this.resources.get(oldIdentity);
-    const target = this.resources.get(newIdentity);
-    if (resource && target && target !== resource) {
+    const barrier = this.teardownBarriers.get(oldIdentity);
+    const targetResource = this.resources.get(newIdentity);
+    const targetBarrier = this.teardownBarriers.get(newIdentity);
+    if (
+      (resource || barrier) &&
+      (
+        (targetResource && targetResource !== resource) ||
+        (targetBarrier && targetBarrier !== barrier)
+      )
+    ) {
       throw new Error('actor MCP socket rekey collision');
     }
     if (resource) {
@@ -234,7 +261,6 @@ export class PerChatMcpSocketManager {
       }
       this.resources.set(newIdentity, resource);
     }
-    const barrier = this.teardownBarriers.get(oldIdentity);
     if (barrier) {
       this.teardownBarriers.delete(oldIdentity);
       barrier.identity.value = newIdentity;

@@ -125,8 +125,13 @@ export interface ModelPinPort extends ModelCatalogueRenderPort {
   deleteOwnedPerChatSession(mapKey: string, expected?: SessionManager): boolean;
   cleanupPerChatState(
     mapKey: string,
-    options?: { preserveCrashHistory?: boolean; preserveProviderTurnOwnership?: boolean },
+    options?: {
+      preserveCrashHistory?: boolean;
+      preserveProviderTurnOwnership?: boolean;
+      preserveActorSocket?: boolean;
+    },
   ): void;
+  retirePerChatProviderTransitionAfter(mapKey: string, transitionSettled: Promise<void>): void;
   cleanupGlobalAutoCompactState(): void;
   emitRouteEventChecked(ev: Omit<ModelRouteEvent, 'ts' | 'instance' | 'chatScope' | 'authority'>): void;
   recordRoutePreference(
@@ -529,16 +534,23 @@ function routeRecycleLifecycle(port: ModelPinPort): RouteRecycleLifecycle<Sessio
 }
 
 /**
- * Retire an idle live session without losing a journal/processor owner. Exact
- * ownership stays published while process-tree shutdown is awaited; the
- * runtime queue is then re-proven and retired synchronously before session/
- * queue maps detach, so success cannot race a next inbound onto the old route.
+ * Detach the live session from every map/queue it is reachable through —
+ * synchronously, so the caller's subsequent "does a session exist" check
+ * (ensureSessionAndQueueSync, reached either immediately after an idle
+ * recycle or on the next inbound after a deferred one) sees none and
+ * respawns fresh. Per-chat teardown starts first and its promise is registered
+ * with the actor-socket manager before detachment. The next spawn may be
+ * requested immediately, but its provider-transition readiness remains blocked
+ * until the old child proves stopped and the scoped turn queue terminalizes; a
+ * rejected proof keeps the old ownership fail-closed.
  *
- * Per-chat teardown awaits shutdown(false), then atomically retires the
- * already-proven runtime TurnQueue and drops chatSessions/chatQueues — NOT
- * resetOwnedPerChatSession, which respawns the SAME manager with its cached
- * readonly model and would never apply the switch. Single/shared teardown
- * follows the same shutdown-before-detach rule.
+ * Per-chat teardown uses the same provider-transition barrier as idle eviction
+ * and /kill-session, then aborts and terminalizes the runtime TurnQueue, drops
+ * chatSessions/chatQueues, and clears generation state without releasing the
+ * actor socket early. It does NOT use resetOwnedPerChatSession, which respawns
+ * the SAME manager with its
+ * cached readonly model and would never apply the switch. Single/shared
+ * teardown mirrors /kill-session's else branch.
  */
 export async function recycleLiveSession(
   port: ModelPinPort,
@@ -547,29 +559,22 @@ export async function recycleLiveSession(
 ): Promise<void> {
   if (port.sessionScope === 'per_chat') {
     const key = mapKey!;
-    const outboundQueue = port.chatQueues.get(key);
-    if (port.chatSessions.get(key) !== session) {
-      throw new RouteRecycleOwnershipChangedError(
-        `Per-chat session ownership changed before route recycle for ${key}`,
-      );
-    }
-    const runtimeQueue = port.runtimeTurnCoordinator.captureIdlePerChatTurnQueueForRecycle(key);
-    await session.shutdown(false);
-    if (
-      port.chatSessions.get(key) !== session
-      || port.chatQueues.get(key) !== outboundQueue
-    ) {
-      throw new RouteRecycleOwnershipChangedError(
-        `Per-chat session or queue ownership changed during route recycle for ${key}`,
-      );
-    }
-    outboundQueue?.abortTurn({ preserveEvidence: true });
-    port.runtimeTurnCoordinator.retireIdlePerChatTurnQueueForRecycle(key, runtimeQueue);
-    if (!port.deleteOwnedPerChatSession(key, session)) {
-      throw new Error(`Route recycle lost exact per-chat session ownership for ${key}`);
-    }
+    const childStopped = session.shutdown(false);
+    port.chatQueues.get(key)?.abortTurn();
+    const turnTerminalized =
+      port.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(key);
+    const transitionSettled = Promise.all([childStopped, turnTerminalized])
+      .then(() => undefined);
+    port.retirePerChatProviderTransitionAfter(key, transitionSettled);
+    port.deleteOwnedPerChatSession(key, session);
     port.chatQueues.delete(key);
-    port.cleanupPerChatState(key);
+    port.cleanupPerChatState(key, { preserveActorSocket: true });
+    void turnTerminalized.catch(() => {
+      log.error('route recycle: runtime turn queue teardown failed');
+    });
+    void childStopped.catch(() => {
+      log.warn('route recycle: session shutdown failed');
+    });
     return;
   }
   if (port.session !== session) {

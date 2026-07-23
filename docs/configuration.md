@@ -873,7 +873,7 @@ proof unless a WhatSoup-specific proof artifact says so.
 | `cwd` | string | no | `~/.local/share/whatsoup/instances/<name>/workspace` | Working directory for the agent subprocess. Tilde is expanded (`~` → `$HOME`). Empty values are replaced with the default. |
 | `instructionsPath` | string | no | — | Path to a CLAUDE.md-style instructions file, relative to `cwd`. |
 | `sandboxPerChat` | boolean | no | `false` | Provision a separate workspace per chat. Requires `sessionScope: per_chat`. |
-| `perChatConversationBound` | boolean | no | `false` | Harden the per-chat actor socket (non-sandbox `per_chat`, `claude-cli`): the socket's MCP session carries a conversation binding, so global tools are default-denied outside the registry's reviewed conversation-safe allowlist (`transcribe_audio`), caller-supplied conversation keys are confined to the socket's own chat, and injected targets are filled from the binding (caller-supplied targets rejected). Also enables `memory_write` for the bound session. Default `false` = the existing behavior (injected-send confinement only). Requires `sessionScope: per_chat`; incompatible with `sandboxPerChat`. **Capability note:** enabling this removes cross-conversation reads and unreviewed global tools from the per-chat agent by design — opt in per instance only after confirming the instance does not rely on them. |
+| `perChatConversationBound` | boolean | no | `false` | Harden the per-chat actor socket for non-sandbox `per_chat` sessions. The contract applies to every CLI provider that exposes WhatSoup MCP (`claude-cli`, `codex-cli`, `gemini-cli`, and `opencode-cli`), including primary, routed, and fallback children. The socket's MCP session carries a conversation binding, so global tools are default-denied outside the registry's reviewed conversation-safe allowlist (`transcribe_audio`), caller-supplied conversation keys are confined to the socket's own chat, and injected targets are filled from the binding (caller-supplied targets rejected). Also enables `memory_write` for the bound session. Default `false` = injected-send confinement only. Requires `sessionScope: per_chat`; incompatible with `sandboxPerChat`. **Capability note:** enabling this removes cross-conversation reads and unreviewed global tools from the per-chat agent by design — opt in per instance only after confirming the instance does not rely on them. |
 | `sandbox` | object | no | — | Sandbox constraints applied via agent enforcement hooks. See [sandbox](#agentoptionssandbox). |
 | `mcp` | object | no | — | MCP feature flags for the agent subprocess (e.g., `{ "send_media": true }`). |
 | `pluginDirs` | string[] | no | — | Additional plugin directories to pass via `--plugin-dir` to the `claude-cli` agent subprocess. Tilde is expanded (`~` → `$HOME`). **Version resilience:** when an entry pins a version directory (e.g. `~/.claude/plugins/superpowers/5.0.7`) that no longer exists — for example after `claude plugin update` bumps it to `5.1.0` — the highest existing semver sibling under the same parent is substituted automatically at startup. Non-version paths and still-present directories are passed through unchanged. |
@@ -884,6 +884,39 @@ proof unless a WhatSoup-specific proof artifact says so.
 | `nlRoutingTiers` | object | no | — | Intent→provider map for NL routing: `{ "strongest": "<provider-id>", "fastest": "<provider-id>" }`. Unset tiers resolve to the default route honestly (`/model strongest` records the preference and routing reports it as unmapped). |
 | `nlRoutingEventsDir` | string | no | per-instance config dir | Sink directory for the fail-closed `route-events.ndjson` sidecar (route metadata only — no message bodies, no raw sender JIDs; emit failure degrades to a warning and never blocks a turn). |
 | `commandSurface` | object | no | — | Per-instance command-surface policy overlay (disable commands, cosmetic defaults). See [agentOptions.commandSurface](#agentoptionscommandsurface). **Accepted but not yet enforced (enforcement lands with T9c)** — the validator warns at config-validation time. |
+
+#### Per-chat MCP actor socket lifecycle
+
+In a non-sandbox `per_chat` runtime, each logical chat session owns one mode-`0600`
+Unix socket below a mode-`0700` runtime directory. All four MCP-capable CLI
+providers—Claude, Codex, Gemini, and OpenCode—receive that session-specific
+socket through their child environment. Sequential primary, routed, and fallback
+children for the same logical session reuse it; children from different chats do
+not.
+
+Child launch waits for socket readiness. An eligible CLI child is not spawned
+unless the runtime has proved that its actor-bound socket is live. A missing,
+empty, colliding, or unready actor socket fails closed even when the static
+`WHATSOUP_SOCKET` is configured. The static socket remains a compatibility
+transport only for processes outside eligible non-sandbox per-chat CLI sessions
+and for API-only providers that do not launch an MCP client.
+
+Replacement also waits fail-closed across CLI-to-CLI, CLI-to-API, and API-to-CLI
+route changes. Idle eviction, provider transitions, and explicit session
+teardown keep the old socket owned until the old child has proved it stopped
+and the session-scoped turn queue has terminalized. A failed retirement proof
+can be retried, but does not permit a replacement provider to overlap the old
+owner. Socket cleanup verifies the exact device/inode created by the server
+before unlinking; if the path has been replaced or unlink fails, ownership is
+retained and the replacement remains blocked. Logs describe the lifecycle
+error without emitting the socket path.
+
+This binding prevents accidental cross-chat reuse through generated MCP
+configuration and provider routing. It is not an operating-system isolation
+boundary against a hostile process running as the same Unix UID: such a process
+may inspect that account's processes or accessible runtime files. Strong
+same-UID adversary isolation requires a separate OS identity or sandbox and is
+outside this transport contract.
 
 #### Primary model usability probe
 
