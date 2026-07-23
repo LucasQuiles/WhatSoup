@@ -115,6 +115,28 @@ export interface TurnRecoveryScanResult {
    */
   readonly skippedOriginalDeliveryPending: number;
   /**
+   * A job whose `scope` is not in `supportedScopes` (when the dependency is
+   * supplied) — a PERMANENT skip, not requeued. Wiring a real dispatcher for
+   * every scope's session-lifecycle machinery is scoped independently per
+   * scope (shared/singleton differ materially from per_chat); an unsupported
+   * scope's jobs stay exactly as wedged as they are today (no regression),
+   * now visible here instead of silently invisible or churning to exhausted
+   * via repeated dispatch failures.
+   */
+  readonly skippedUnsupportedScope: number;
+  /**
+   * A job that is otherwise claimable but whose target is not currently
+   * dispatchable (when `isDispatchable` is supplied and returns false) — a
+   * TRANSIENT skip, not requeued (no claim was taken, so no attempt is
+   * consumed and no backoff clock starts). Distinguishing this from
+   * `retryable_failure` matters: 5 retryable failures at 30s backoff
+   * exhausts a job in minutes, which would durably discard perfectly
+   * recoverable work if the only reason it can't run yet is "no live
+   * session for this chat" — a condition a cold-restarted instance can take
+   * far longer than minutes to resolve (a user has to re-engage the chat).
+   */
+  readonly skippedNotDispatchable: number;
+  /**
    * Store-call exceptions caught and logged during this scan (reassign,
    * claim, complete, or requeue failing) that did NOT abort the scan for
    * other jobs. A scanner that swallows these and reports plain zero
@@ -146,6 +168,22 @@ export interface TurnRecoverySupervisorDeps {
   readonly dispatchReplay: TurnRecoveryReplayDispatcher;
   /** Fresh supervisor identity for a claim/reassignment; must vary per call (epoch fencing). */
   readonly freshOwnerIdentity: () => TurnRecoveryOwnerIdentity;
+  /**
+   * Scopes this instance's `dispatchReplay` actually knows how to run.
+   * Omitted means every scope is treated as supported (existing default —
+   * matches every current test, which only ever uses 'per_chat'). Wiring a
+   * production dispatcher for only a subset of scopes should supply this so
+   * unsupported-scope jobs are skipped before claiming rather than churning
+   * to exhausted.
+   */
+  readonly supportedScopes?: ReadonlySet<TurnRecoveryJobRow['scope']>;
+  /**
+   * Optional pre-claim dispatchability check (e.g. "does a live session
+   * exist for this job's chat right now"). Omitted means every due job is
+   * treated as dispatchable — existing default. Returning false skips the
+   * job for this cycle without claiming it (see `skippedNotDispatchable`).
+   */
+  readonly isDispatchable?: (job: TurnRecoveryJobRow) => boolean;
   readonly leaseSeconds?: number;
   readonly backoffSeconds?: number;
   readonly scanIntervalMs?: number;
@@ -155,7 +193,8 @@ function emptyScanResult(): TurnRecoveryScanResult {
   return {
     scanned: 0, claimed: 0, completed: 0, requeued: 0,
     exhausted: 0, reassigned: 0, skippedBlockedUnsafe: 0,
-    skippedOriginalDeliveryPending: 0, processingErrors: 0,
+    skippedOriginalDeliveryPending: 0, skippedUnsupportedScope: 0,
+    skippedNotDispatchable: 0, processingErrors: 0,
   };
 }
 
@@ -163,7 +202,8 @@ function mergeScanResult(
   into: {
     scanned: number; claimed: number; completed: number; requeued: number;
     exhausted: number; reassigned: number; skippedBlockedUnsafe: number;
-    skippedOriginalDeliveryPending: number; processingErrors: number;
+    skippedOriginalDeliveryPending: number; skippedUnsupportedScope: number;
+    skippedNotDispatchable: number; processingErrors: number;
   },
   delta: Partial<TurnRecoveryScanResult>,
 ): void {
@@ -175,6 +215,8 @@ function mergeScanResult(
   into.reassigned += delta.reassigned ?? 0;
   into.skippedBlockedUnsafe += delta.skippedBlockedUnsafe ?? 0;
   into.skippedOriginalDeliveryPending += delta.skippedOriginalDeliveryPending ?? 0;
+  into.skippedUnsupportedScope += delta.skippedUnsupportedScope ?? 0;
+  into.skippedNotDispatchable += delta.skippedNotDispatchable ?? 0;
   into.processingErrors += delta.processingErrors ?? 0;
 }
 
@@ -196,6 +238,8 @@ export class TurnRecoverySupervisor {
   private readonly durability: () => TurnRecoverySupervisorDurability | null;
   private readonly dispatchReplay: TurnRecoveryReplayDispatcher;
   private readonly freshOwnerIdentity: () => TurnRecoveryOwnerIdentity;
+  private readonly supportedScopes: ReadonlySet<TurnRecoveryJobRow['scope']> | null;
+  private readonly isDispatchable: ((job: TurnRecoveryJobRow) => boolean) | null;
   private readonly leaseSeconds: number;
   private readonly backoffSeconds: number;
   private readonly scanIntervalMs: number;
@@ -222,6 +266,8 @@ export class TurnRecoverySupervisor {
     this.durability = deps.durability;
     this.dispatchReplay = deps.dispatchReplay;
     this.freshOwnerIdentity = deps.freshOwnerIdentity;
+    this.supportedScopes = deps.supportedScopes ?? null;
+    this.isDispatchable = deps.isDispatchable ?? null;
     this.leaseSeconds = deps.leaseSeconds ?? DEFAULT_LEASE_SECONDS;
     this.backoffSeconds = deps.backoffSeconds ?? DEFAULT_BACKOFF_SECONDS;
     this.scanIntervalMs = deps.scanIntervalMs ?? SCAN_INTERVAL_MS;
@@ -322,7 +368,8 @@ export class TurnRecoverySupervisor {
     const totals = {
       scanned: page.jobs.length, claimed: 0, completed: 0, requeued: 0,
       exhausted: 0, reassigned: 0, skippedBlockedUnsafe: 0,
-      skippedOriginalDeliveryPending: 0, processingErrors: 0,
+      skippedOriginalDeliveryPending: 0, skippedUnsupportedScope: 0,
+      skippedNotDispatchable: 0, processingErrors: 0,
     };
 
     for (const job of page.jobs) {
@@ -343,6 +390,17 @@ export class TurnRecoverySupervisor {
     }
     if (job.state === 'exhausted' || job.state === 'completed') {
       return {};
+    }
+    // Both pre-claim: neither consumes an attempt or starts a backoff clock.
+    // Unsupported scope is permanent (this dispatcher never handles it);
+    // not-dispatchable is transient (e.g. no live session yet) — conflating
+    // either with retryable_failure would churn the job to exhausted in
+    // minutes over a condition dispatchReplay was never going to resolve.
+    if (this.supportedScopes && !this.supportedScopes.has(job.scope)) {
+      return { skippedUnsupportedScope: 1 };
+    }
+    if (this.isDispatchable && !this.isDispatchable(job)) {
+      return { skippedNotDispatchable: 1 };
     }
 
     if (job.state === 'claimed') {

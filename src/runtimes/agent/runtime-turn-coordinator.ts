@@ -28,6 +28,7 @@ import type {
   RuntimeTurnRetryResult,
   RuntimeTurnSupervisor,
 } from './runtime-turn-supervisor.ts';
+import type { SystemTurnLeaseToken } from './pending-system-result-tracker.ts';
 import type { ReplyGuaranteeManager } from '../../core/reply-guarantee.ts';
 import type { SessionOwnershipRegistry } from './session-ownership.ts';
 import { createChildLogger } from '../../logger.ts';
@@ -131,6 +132,8 @@ export interface RuntimeTurnCoordinatorPort {
     actorJid?: string,
     runtimeContext?: RuntimeTurnContext,
     scopeRef?: PerChatRuntimeScopeRef,
+    systemTurnLease?: SystemTurnLeaseToken,
+    excludeJobId?: number,
   ): Promise<void>;
   sendVoiceReply(chatJid: string, responseText: string): Promise<void>;
 }
@@ -1361,7 +1364,14 @@ finalizeRuntimeCrash(
   });
 }
 
-async processPerChatTurn(scopeRef: PerChatRuntimeScopeRef, turn: QueuedTurn): Promise<void> {
+async processPerChatTurn(
+  scopeRef: PerChatRuntimeScopeRef,
+  turn: QueuedTurn,
+  // PRESTAGE-T4: set only when the turn-recovery supervisor is calling this
+  // directly (not via the live-message queue path) to dispatch a claimed
+  // job's replay — see beginRuntimeTurnEvidence's doc comment for why.
+  excludeJobId?: number,
+): Promise<void> {
   const mapKey = scopeRef.value;
   const seqQueue = this.host.perChatInboundSeqQueue.get(mapKey) ?? [];
   if (turn.inboundSeq !== undefined) seqQueue.push(turn.inboundSeq);
@@ -1386,6 +1396,8 @@ async processPerChatTurn(scopeRef: PerChatRuntimeScopeRef, turn: QueuedTurn): Pr
       turn.senderJid,
       turn.runtimeContext,
       scopeRef,
+      undefined,
+      excludeJobId,
     );
   } catch (err) {
     dispatchFailed = true;

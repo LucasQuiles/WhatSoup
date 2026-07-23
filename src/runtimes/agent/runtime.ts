@@ -8,6 +8,8 @@ import type {
   DurabilityEngine,
   SessionCheckpointRow,
 } from '../../core/durability.ts';
+import type { TurnRecoveryClaimFence, TurnRecoveryJobRow } from '../../core/turn-recovery-store.ts';
+import { TurnRecoverySupervisor, type TurnRecoveryReplayDispatchResult } from './turn-recovery-supervisor.ts';
 import { splitInputTokenUsage, type AgentEvent } from './stream-parser.ts';
 import {
   classifyProviderFailure,
@@ -1896,6 +1898,7 @@ export class AgentRuntime implements Runtime {
   private currentRuntimeTurnCompletion: RuntimeTurnCompletion | null = null;
   /** Owns bounded terminal retries and sticky affected-scope degradation. */
   private readonly runtimeTurnSupervisor: RuntimeTurnSupervisor<RuntimeTurnPostEffects>;
+  private readonly turnRecoverySupervisor: TurnRecoverySupervisor;
   private readonly runtimeTurnHost: RuntimeTurnCoordinatorPort & RuntimeResultHandlerPort;
   private readonly runtimeTurnCoordinator: RuntimeTurnCoordinator;
   /** Host object backing model-pin.ts / model-catalogue-render.ts (the `/model` surface). */
@@ -2414,6 +2417,25 @@ export class AgentRuntime implements Runtime {
       () => this.durability,
       (result, retained) => this.runtimeTurnCoordinator.applyRecoveredRuntimeTurnFinalization(result, retained),
     );
+    // PRESTAGE-T4: durable turn-recovery execution consumer. Started once
+    // durability is available (setDurability), stopped at shutdown.
+    // per_chat only for now — shared/singleton recovery jobs are left
+    // exactly as wedged as they are today (skippedUnsupportedScope, not a
+    // regression); their session-lifecycle machinery differs materially and
+    // is separate follow-up wiring.
+    this.turnRecoverySupervisor = new TurnRecoverySupervisor({
+      instanceName: this.instanceName,
+      durability: () => this.durability,
+      dispatchReplay: (job, fence) => this.dispatchTurnRecoveryReplay(job, fence),
+      freshOwnerIdentity: () => ({
+        logicalTurnId: `${randomUUID()}:turn-recovery-supervisor`,
+        managerId: this.recoveryManagerId,
+        generation: ++this.recoveryGeneration,
+      }),
+      supportedScopes: new Set(['per_chat']),
+      isDispatchable: (job) => job.scope === 'per_chat'
+        && this.chatSessions.has(this.resolvePerChatMapKey(job.delivery_jid)),
+    });
     this.handoffDistill = new HandoffDistillCoordinator({
       db,
       instanceName: this.instanceName,
@@ -2776,6 +2798,9 @@ export class AgentRuntime implements Runtime {
     if (this.queue) this.queue.setDurability(engine);
     for (const q of this.outboundQueues.values()) q.setDurability(engine);
     for (const q of this.chatQueues.values()) q.setDurability(engine);
+    // PRESTAGE-T4: durability is required before the supervisor can scan;
+    // start() is idempotent against an already-started loop.
+    this.turnRecoverySupervisor.start();
   }
 
   /**
@@ -4954,6 +4979,11 @@ export class AgentRuntime implements Runtime {
     runtimeContext?: RuntimeTurnContext,
     scopeRef?: PerChatRuntimeScopeRef,
     systemTurnLease?: SystemTurnLeaseToken,
+    // PRESTAGE-T4: set only by the turn-recovery supervisor's own replay
+    // dispatch, so its admission check excludes its own still-`claimed` job
+    // (see beginRuntimeTurnEvidence's doc comment). Every other caller omits
+    // it, so their admission predicate is unchanged.
+    excludeJobId?: number,
   ): Promise<void> {
     mapKey = scopeRef?.value ?? mapKey;
     const dispatchAllowed = runtimeContext === undefined
@@ -5063,6 +5093,7 @@ export class AgentRuntime implements Runtime {
         currentMapKey,
         runtimeContext,
         scopeRef,
+        excludeJobId,
       );
     };
 
@@ -5145,6 +5176,7 @@ export class AgentRuntime implements Runtime {
     mapKey: string,
     context: RuntimeTurnContext | undefined,
     scopeRef?: PerChatRuntimeScopeRef,
+    excludeJobId?: number,
   ): RuntimeTurnCompletion | null {
     if (!context) return null;
     mapKey = scopeRef?.value ?? mapKey;
@@ -5155,7 +5187,7 @@ export class AgentRuntime implements Runtime {
     if (contexts.length > 0) {
       throw new Error(`Per-chat runtime turn context FIFO already has an active owner for "${mapKey}"`);
     }
-    this.runtimeTurnCoordinator.beginRuntimeTurnEvidence(queue, context);
+    this.runtimeTurnCoordinator.beginRuntimeTurnEvidence(queue, context, excludeJobId);
     contexts.push(context);
     this.perChatRuntimeTurnContexts.set(mapKey, contexts);
     this.perChatRuntimeTurnScopeRefs.set(
@@ -5165,6 +5197,100 @@ export class AgentRuntime implements Runtime {
     const completion = this.runtimeTurnCoordinator.createRuntimeTurnCompletion(context);
     this.perChatRuntimeTurnCompletions.set(mapKey, completion);
     return completion;
+  }
+
+  /**
+   * Real implementation of `TurnRecoveryReplayDispatcher` (PRESTAGE-T4).
+   * Reuses the exact per_chat live-turn pipeline — `createRuntimeTurnForDispatch`
+   * -> `processPerChatTurn` (-> `sendTurnPerChat` -> `beginRuntimeTurnEvidence`
+   * with `excludeJobId` -> `createRuntimeTurnCompletion` -> `session.sendTurn`
+   * -> await `completion.promise`) — not a second, parallel dispatch path.
+   *
+   * Only reached for `per_chat` jobs with a live session already present:
+   * the supervisor's `supportedScopes`/`isDispatchable` predicates check both
+   * BEFORE claiming, so this method mostly re-verifies rather than newly
+   * enforces — except the narrow claim-to-dispatch race where the session
+   * tears down in between, handled below as retryable.
+   *
+   * A clean resolution here does NOT itself mark the job complete:
+   * `completeTurnRecoveryJob` (called by the supervisor after this returns
+   * `delivered`) independently re-validates genuine echo/finalization proof
+   * via its own SQL gate — so an imperfect `delivered` classification here
+   * cannot falsely complete a job; it would throw there instead, caught and
+   * counted as a processing error by the supervisor's existing handling.
+   *
+   * `blocked_unsafe_detected` is not produced by this implementation yet —
+   * no reliable signal for "newly discovered unsafe" has been wired from the
+   * dispatch outcome; every failure here classifies as `retryable_failure`
+   * for now (bounded by the existing exhaustion ceiling).
+   */
+  private async dispatchTurnRecoveryReplay(
+    job: TurnRecoveryJobRow,
+    _fence: TurnRecoveryClaimFence,
+  ): Promise<TurnRecoveryReplayDispatchResult> {
+    if (job.scope !== 'per_chat') {
+      // supportedScopes already filters this before claiming; never silently
+      // "deliver" an unsupported scope if it somehow reaches here anyway.
+      return { kind: 'retryable_failure' };
+    }
+    const mapKey = this.resolvePerChatMapKey(job.delivery_jid);
+    const session = this.chatSessions.get(mapKey);
+    if (!session) {
+      // isDispatchable already checked this before claiming; a session torn
+      // down in the narrow window since then is a genuine race, not the
+      // common "no session yet" case that isDispatchable exists to skip.
+      return { kind: 'retryable_failure' };
+    }
+
+    const source: RuntimeTurnSourceSnapshot = {
+      sourceMessageId: job.source_message_id,
+      conversationKey: job.conversation_key,
+      senderJid: job.sender_jid,
+      senderName: job.sender_name,
+      contentType: 'text',
+      isGroup: job.is_group === 1,
+      ...(job.is_group === 1 ? { groupName: job.group_name ?? job.delivery_jid } : {}),
+    };
+
+    let runtimeContext: RuntimeTurnContext | null;
+    try {
+      runtimeContext = this.runtimeTurnCoordinator.createRuntimeTurnForDispatch({
+        scope: 'per_chat',
+        chatJid: job.delivery_jid,
+        text: job.replay_text,
+        inboundSeq: job.source_inbound_seq,
+        source,
+        session,
+        toolScopeKey: this.requireSessionToolScopeKey(session),
+        mapKey,
+      });
+    } catch (err) {
+      log.warn({ err, jobId: job.id }, 'turn recovery replay context construction failed');
+      return { kind: 'retryable_failure' };
+    }
+    if (!runtimeContext) return { kind: 'retryable_failure' };
+
+    const turn: QueuedTurn = {
+      sourceMessageId: source.sourceMessageId,
+      conversationKey: source.conversationKey,
+      chatJid: job.delivery_jid,
+      senderJid: source.senderJid,
+      senderName: source.senderName,
+      text: job.replay_text,
+      isGroup: source.isGroup,
+      groupName: source.groupName,
+      contentType: 'text',
+      runtimeContext,
+      inboundSeq: job.source_inbound_seq,
+    };
+    const scopeRef: PerChatRuntimeScopeRef = { value: mapKey };
+    try {
+      await this.runtimeTurnCoordinator.processPerChatTurn(scopeRef, turn, job.id);
+    } catch (err) {
+      log.warn({ err, jobId: job.id }, 'turn recovery replay dispatch failed');
+      return { kind: 'retryable_failure' };
+    }
+    return { kind: 'delivered' };
   }
 
   private updateSessionActorJid(session: SessionManager, actorJid: string | undefined): void {
@@ -7605,6 +7731,12 @@ export class AgentRuntime implements Runtime {
       shutdownFailures.push(err);
       preserveRuntimeTurnState = true;
       log.error({ err }, 'runtime turn finalizations remained unresolved during shutdown');
+    }
+    try {
+      await this.turnRecoverySupervisor.shutdown();
+    } catch (err) {
+      shutdownFailures.push(err);
+      log.error({ err }, 'turn recovery supervisor scan in flight remained unresolved during shutdown');
     }
     try {
       await this.runtimeTurnCoordinator.awaitUndispatchedCrashFinalizations();
