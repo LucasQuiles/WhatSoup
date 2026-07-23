@@ -899,6 +899,9 @@ const echoTimeoutInterval = setInterval(() => {
   try {
     durability.sweepStaleSubmitted();
   } catch (err) { log.error({ err }, 'echo timeout sweep failed'); }
+  try {
+    durability.reconcileLiveMaybeSent();
+  } catch (err) { log.error({ err }, 'live maybe-sent reconciliation failed'); }
   // Drain any ops that landed in `pending` between reconnects (BEAD-057).
   // Fire-and-forget, matching this interval's existing style.
   drainPendingOutbound(connectionManager, durability)

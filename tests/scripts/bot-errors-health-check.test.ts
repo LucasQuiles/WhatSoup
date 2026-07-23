@@ -1903,6 +1903,10 @@ print(json.dumps({"result": m.json_rpc(${JSON.stringify(socket)}, "tools/list", 
         BOT_ERRORS_REQUIRED_TOOLS: 'send_message,missing_tool',
         BOT_ERRORS_TOOL_LIST_ATTEMPTS: '2',
         BOT_ERRORS_TOOL_LIST_RETRY_DELAY_SECONDS: '0',
+        BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
+        BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
         BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
           role: 'tool-retry-test',
           expectDispatcher: false,
@@ -4591,6 +4595,10 @@ print(m.probe_health(9092))
               autoCompactIneffective: 1,
               autoCompactConsecutiveRapidRearmsMax: 2,
               autoCompactNextTurnOverThreshold: 3,
+              turnFinalizationDegradedScopes: 1,
+              turnFinalizationRetryExhaustions: 1,
+              turnRecoveryBlockedUnsafe: 6,
+              turnRecoveryQuarantinedDelivery: 1,
             },
           },
         }),
@@ -4619,6 +4627,10 @@ print(m.probe_health(9092))
     expect(event.evidence).toContain('runtime_agent_recent_crashes=1');
     expect(event.evidence).toContain('runtime_agent_auto_compact_ineffective=1');
     expect(event.evidence).toContain('runtime_agent_auto_compact_next_turn_over_threshold=3');
+    expect(event.evidence).toContain('runtime_agent_turn_finalization_degraded_scopes=1');
+    expect(event.evidence).toContain('runtime_agent_turn_finalization_retry_exhaustions=1');
+    expect(event.evidence).toContain('runtime_agent_turn_recovery_blocked_unsafe=6');
+    expect(event.evidence).toContain('runtime_agent_turn_recovery_quarantined_delivery=1');
   });
 
   it('warns on recent provider resume failures without classifying them as auth loss', () => {

@@ -1,0 +1,42 @@
+### Image 1: deployments-dark.png
+
+#### [BROKEN]
+- None
+
+#### [POLISH]
+1. The "Pair a new deployment" section feels slightly isolated. Consider adding a subtle border or background to better integrate it with the rest of the content.
+2. The "uptime" and "load" metrics could be more visually distinct. Perhaps a small icon or a different font weight could help differentiate them.
+3. The "pull updates" and "retry" links are too subtle. Increase the font size or add a small icon to make them more noticeable.
+
+#### Craft Score: 8
+- The overall design is clean and follows the locked design language well. However, some minor adjustments could improve the hierarchy and density.
+
+---
+
+### Image 2: settings-dark.png
+
+#### [BROKEN]
+- None
+
+#### [POLISH]
+1. The "Appearance" section could benefit from a more intuitive toggle design. The current toggle might be too subtle for users to notice.
+2. The "API tokens" section feels a bit cramped. Adding some padding between the tokens and the section header would improve readability.
+3. The "Export all data" and "Reset workspace" buttons are too close to each other. Increasing the spacing between them would prevent accidental clicks.
+
+#### Craft Score: 7
+- The settings page is functional but could be more visually appealing with some spacing and toggle adjustments. The hierarchy is clear, but the density could be improved.
+
+---
+
+### Image 3: splash-dark.png
+
+#### [BROKEN]
+- None
+
+#### [POLISH]
+1. The "Hatch your first agent" and "Open the Fleet" buttons are too similar in size and weight. Consider making one more prominent to guide the user's action.
+2. The "An agent in minutes" section could benefit from a small icon or graphic to break up the text and make it more engaging.
+3. The overall layout feels a bit empty. Adding some subtle background elements or textures could enhance the visual appeal without distracting from the content.
+
+#### Craft Score: 6
+- The splash page is clean and minimalistic, but it lacks some visual interest. The hierarchy is clear, but the density and feel could be improved with some additional elements.

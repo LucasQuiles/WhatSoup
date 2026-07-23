@@ -4,6 +4,8 @@
 
 ## Layer 1 — CI gates (must pass for merge)
 
+> **This table is a curated subset.** As of 2026-07-21 the live `quality.yml` runs ~40+ steps: the full `guard:*` family, coverage (`coverage:check`), browser/Playwright suites, console design checks, mutation via `deploy/scripts/run-sentinel-tests.sh` (pytest `--cov-fail-under=98` + deployer mutation drill — note `stryker.conf.json` is dormant/unwired), and tokenomics/drills. Blocking authority for the 36-rule architectural-fitness registry (`scripts/lib/fitness/registry.ts`) lives in the **guard ring** (`verify:push:branch`), not the ESLint ring, which is warn-only. Semantic-quality (`semantic-quality-check.ts`) runs in **shadow mode** (exit 0) everywhere it is wired; its enforce path is unwired/on-demand.
+
 The `Quality` workflow (`.github/workflows/quality.yml`) runs all of these on every PR and on every push to `main`:
 
 | Step | Command | Purpose |
@@ -215,14 +217,39 @@ Main thread should `grep` to spot-check whenever a reviewer claims a previously-
 
 ## Branch Protection
 
-The default branch is protected by the active GitHub Ruleset "Lock" (id `16319133`), scoped to `~DEFAULT_BRANCH`, with four rules:
+> Verified live 2026-07-22 via `gh api .../branches/main/protection` and `.../rulesets` (originally audited 2026-07-21, `WHATSOUP-CICD-AUDIT-2026-07-21`; refreshed after the R-02 approval requirement and the `merge_group` wiring). The default branch is gated by **two overlapping surfaces** — a modern ruleset *and* classic branch protection.
+
+**Ruleset "Lock"** (id `16319133`, enforcement `active`, `bypass_actors=[]` so it binds admins), scoped to `~DEFAULT_BRANCH`, four rules:
 - `deletion` — branch deletion blocked
 - `non_fast_forward` — force-pushes blocked
-- `required_status_checks` — both `quality` matrix legs must pass before merge: `quality (24.x)` and `quality (25.x)`
-- `pull_request` — a pull request is required before merge
+- `required_status_checks` — `quality (24.x)` and `quality (25.x)` must pass (strict=false; branch need not be up to date)
+- `pull_request` — a PR is required, **with 0 required approvals**
 
-To inspect: `gh api repos/LucasQuiles/WhatSoup/rulesets/16319133 | jq '.rules[].type'`
-To modify: `gh api --method PUT repos/LucasQuiles/WhatSoup/rulesets/16319133 --input <json>` (PUT replaces the whole ruleset — include all existing rules or they are dropped)
+**Classic branch protection** (same branch) additionally requires the **`CodeQL`** check, with `strict=true` (branch must be up to date), and — since the R-02 remediation — **`required_pull_request_reviews.required_approving_review_count = 1`** with `dismiss_stale_reviews=true` (an approval does not survive later commits). Its `enforce_admins=false`, so an admin can bypass the classic surface (including CodeQL *and* the approval requirement); the ruleset still binds admins to the quality checks, the PR requirement, and the non-fast-forward/deletion blocks.
+
+**Net effect** — a non-admin contributor must pass `quality (24.x)` + `quality (25.x)` + `CodeQL`, have an up-to-date branch, **and obtain one approving review**; `CodeQL` and the approval are admin-bypassable. **`CodeQL` has no in-repo workflow** — it is GitHub *default code-scanning setup* (state=configured; languages actions/javascript/javascript-typescript/python/typescript; weekly + PR), so it is invisible to an in-repo-only search.
+
+⚠️ **Admin self-merge remains possible — deliberately.** R-02 closed the self-merge gap for *non-admins* by setting 1 required approval on the classic surface. It does **not** bind admins: classic `enforce_admins=false`, and the ruleset's `pull_request` rule (which does bind admins) still requires **0** approvals. So a repo admin can still merge their own PR. This is an accepted residual — raising the ruleset's approval count would block every solo merge on a single-maintainer repo. To close it fully, set the approval count on ruleset `16319133` instead.
+
+**Merge queue — UNAVAILABLE on this repository (platform constraint).** Do not spend time trying to turn it on. GitHub's merge queue requires an **organization-owned** repository; `LucasQuiles/WhatSoup` is public but `owner.type=User`, so the `merge_queue` ruleset rule is rejected outright:
+
+```
+PUT /repos/LucasQuiles/WhatSoup/rulesets/16319133
+-> HTTP 422 {"errors":["Invalid rule 'merge_queue': "]}
+```
+
+Verified 2026-07-22: rejected **both** with explicit parameters and with none, so it is not a parameter-tuning problem. It would only become available by transferring the repo to an organization.
+
+`quality.yml` nevertheless **does** trigger on `merge_group` and exempts queue runs from `cancel-in-progress` (cancelling a queue run reports a cancelled required check and ejects the PR). That wiring is deliberately retained: it is inert while no queue exists, and it is the correct prerequisite if the repo ever moves to an org — the trigger must be on `main` *before* a queue is enabled, or every PR stalls waiting for a check that never runs.
+
+Two constraints to respect if a queue ever becomes possible:
+- `whatsoup-guard.yml` is path-filtered and must **never** be made a required context while a queue is live — a PR not touching those paths would never report it, stalling the queue.
+- `CodeQL` is GitHub-managed default setup (it runs as event `dynamic`, with no in-repo workflow), so its behaviour on a `merge_group` ref cannot be configured or verified in advance. Treat enabling a queue as a canary exercise on a single low-risk PR, not a fleet-wide switch.
+
+**Action pinning.** All external action `uses:` refs are pinned to 40-hex commit SHAs (R-03, PR #2024) — verified 14/14 pinned, 0 mutable `@vN` tags.
+
+To inspect: `gh api repos/LucasQuiles/WhatSoup/rulesets/16319133 | jq '.rules[].type'` and `gh api repos/LucasQuiles/WhatSoup/branches/main/protection`.
+To modify the ruleset: `gh api --method PUT repos/LucasQuiles/WhatSoup/rulesets/16319133 --input <json>` (PUT replaces the whole ruleset — include all existing rules or they are dropped).
 
 ## Release Runbook
 
@@ -237,6 +264,8 @@ To cut a release:
 Note: the `tag-release-gate` workflow does NOT run the full test suite (those run on every PR via `quality.yml`). It runs the guard-only subset: typechecks, boundary/hygiene/drift/publication guards, ESLint fitness ring, and console lint + build.
 
 ## Maintenance
+
+> **Last audited 2026-07-21** (CI/CD & quality-controls audit, anchored to `origin/main`; the dated audit report, control registry, and remediation-readiness specs are tracked under `docs/enforcement/2026-07-21-cicd-*.md`). This checklist and `scripts/lib/fitness/registry.ts` remain the sources of truth. Refresh this checklist when the guard/CI surface drifts materially — the Branch Protection and Layer 1 sections above were the primary drift found in that audit.
 
 When adding a new rule to this checklist:
 1. **Pre-test against current code** — run the rule against `main` to identify existing violations

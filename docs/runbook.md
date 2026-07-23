@@ -391,12 +391,24 @@ mutation requires explicit approval before it is attempted.
 
 Some stable startup rejections do not enter the inspection-only health server.
 An invalid schema, unsafe database identity, non-writable canonical database
-artifact, or permanent inspection-health bind failure exits with status 78.
-The systemd unit's `RestartPreventExitStatus=78` prevents a backoff loop; use
-the logs and service exit evidence to identify the specific reason. Exit 78 is
-not a universal database-error classification: `database_identity_changed` and
-other genuinely transient startup failures remain exit 1 and retryable by the
-service manager.
+artifact, or permanent inspection-health bind failure exits with status 78, as
+does a startup configuration-validation failure — a malformed instance config,
+an invalid config field, or a missing required setting (a `ConfigValidationError`
+mapped by `startupExitCode`). The systemd unit's `RestartPreventExitStatus=78`
+prevents a backoff loop; use the logs and service exit evidence to identify the
+specific reason. Exit 78 is not a universal error classification: only a
+positively-identified permanent fault exits 78. `database_identity_changed`, a
+transient startup I/O failure (a directory-create race, a full disk), and other
+genuinely transient failures remain exit 1 and retryable by the service manager —
+misclassifying a recoverable failure as permanent would halt a service that a
+restart could heal.
+
+Note (scope): this exit-78 classification is node-side. The bash launcher
+(`deploy/whatsoup`) still exits 1 on its own permanent-config faults — a missing
+required API key, a preflight failure — so those can still restart-flap until the
+tracked launcher-side follow-up lands. Missing-key faults are the most common
+real-world flap; treat a flapping unit with a clean node log as a launcher-side
+config fault.
 
 File-backed startup also requires the immediate database parent to be one
 canonical directory owned by the runtime user whose mode bits grant no group or
@@ -814,6 +826,11 @@ sqlite3 $DB ".backup '${DB}.pre-recovery'"
 # Turn recovery is narrower: it reconciles only an exact source inbound,
 # terminal owner, and selected unresolved delivery-op chain. It never blindly
 # replays an arbitrary prompt that happened to be open at the crash.
+# While the process remains live, the 10-second echo-maintenance loop also
+# reconciles up to 200 oldest `maybe_sent` rows created after the post-connect
+# pass once each has aged 30 seconds. Safe/read-only sends return to the pending
+# drainer; unsafe sends quarantine and the existing
+# stuck-inbound sweep can then release a terminally non-echoed recovery owner.
 
 # 5. Start the service
 systemctl --user start whatsoup@$INSTANCE

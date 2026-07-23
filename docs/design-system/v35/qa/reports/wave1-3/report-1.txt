@@ -1,0 +1,27 @@
+### Image 1: splash-dark-v2.png
+
+#### [BROKEN]
+- None
+
+#### [POLISH]
+1. The "SOUP" wordmark's "U" is blue, but the description specifies it should be electric blue. Adjust the hue to match the locked design language.
+2. The "Hatch your first agent" button uses electric blue, but the text is too light, causing slight legibility issues. Increase the text contrast slightly.
+3. The "Open the Fleet" text is too subtle and blends into the background. Increase the text contrast or consider a light outline to make it more noticeable.
+
+#### Craft Score: 8
+- The overall design is clean and adheres to the locked design language, but minor adjustments in color and contrast can improve legibility and hierarchy.
+
+---
+
+### Image 2: skills-hub-dark-v2.png
+
+#### [BROKEN]
+- None
+
+#### [POLISH]
+1. The "review & install" button for the "auto-seo-suite" is too dim and blends into the background. Increase the contrast or add a light outline to make it more noticeable.
+2. The "configure" buttons are inconsistently styled. Some have a light outline, while others do not. Standardize the button styling for consistency.
+3. The "sort: relevance" dropdown is too subtle and blends into the background. Increase the contrast or add a light outline to make it more noticeable.
+
+#### Craft Score: 7
+- The design is functional and adheres to the locked design language, but improving button contrast and standardizing button styles can enhance the user experience and visual hierarchy.

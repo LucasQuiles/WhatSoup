@@ -3438,27 +3438,11 @@ export class AgentRuntime implements Runtime {
           onResumeFailed: () => this.handleResumeFailed(resumeChatJid),
           onCrash: (info) => {
             this.recordCrash(GLOBAL_CRASH_SCOPE_KEY);
+            const turnWasInFlight = this.currentRuntimeTurnContext !== null;
             const queue = this.getActiveQueue();
             this.finalizeRuntimeCrash(this.currentRuntimeTurnContext, queue, this.session);
             this.cleanupSharedCrashTurnState();
-            // #1754: a crash must ALWAYS attempt to report — even with zero control
-            // peers configured, emitHealReport's own BOT ERRORS fallback (heal.ts)
-            // is the guaranteed-or-alerted delivery path. Gating this call on
-            // `config.controlPeers.size > 0` silently dropped every crash report
-            // whenever no control peer (or a partial one missing 'q') was configured.
-            try {
-              emitHealReport(this.db, this.messenger, this.durability, {
-                type: 'crash',
-                chatJid: resumeChatJid,
-                exitCode: info.exitCode ?? undefined,
-                signal: info.signal ?? undefined,
-                provider: info.provider,
-                crashClass: info.crashClass,
-                stderr: info.stderrPreview,
-              }, this.activeControlReportId);
-            } catch (err) {
-              log.warn({ err }, 'failed to emit heal report for session crash');
-            }
+            this.emitCrashHealReport(resumeChatJid, info, turnWasInFlight);
           },
           notifyUser: (msg) => this.handleCrashNotify(msg),
         });
@@ -11890,24 +11874,11 @@ export class AgentRuntime implements Runtime {
         onEvent: (event) => this.handleEvent(singletonSession, event),
         onCrash: (info) => {
           this.recordCrash(GLOBAL_CRASH_SCOPE_KEY);
+          const turnWasInFlight = this.currentRuntimeTurnContext !== null;
           const queue = this.getActiveQueue();
           this.finalizeRuntimeCrash(this.currentRuntimeTurnContext, queue, this.session);
           this.cleanupSharedCrashTurnState();
-          // #1754: see the resume-path onCrash above — never gate the report attempt
-          // on control-peer presence; emitHealReport's own fallback handles absence.
-          try {
-            emitHealReport(this.db, this.messenger, this.durability, {
-              type: 'crash',
-              chatJid,
-              exitCode: info.exitCode ?? undefined,
-              signal: info.signal ?? undefined,
-              provider: info.provider,
-              crashClass: info.crashClass,
-              stderr: info.stderrPreview,
-            }, this.activeControlReportId);
-          } catch (err) {
-            log.warn({ err }, 'failed to emit heal report for session crash');
-          }
+          this.emitCrashHealReport(chatJid, info, turnWasInFlight);
         },
         notifyUser: (msg) => this.handleCrashNotify(msg),
       });
@@ -11935,6 +11906,42 @@ export class AgentRuntime implements Runtime {
     if (!this.outboundQueues.has(chatJid)) {
       const q = this.createOutboundQueue(chatJid, 'shared ensureOutboundQueue');
       this.outboundQueues.set(chatJid, q);
+    }
+  }
+
+  /**
+   * Report a provider crash to the heal pipeline.
+   *
+   * #1754: a crash must ALWAYS attempt to report — even with zero control peers configured,
+   * emitHealReport's own BOT ERRORS fallback (heal.ts) is the guaranteed-or-alerted delivery
+   * path, so this is never gated on `config.controlPeers.size > 0`.
+   *
+   * The one exception is the supervisor's own idle reap with no turn in flight: the 30-min
+   * inactivity kill is routine housekeeping on a healthy session, and paging an operator to
+   * "investigate and remediate" a SIGKILL we issued on purpose is noise, not a fault. A reap
+   * that interrupts an in-flight turn IS a fault (the provider stalled), so it still reports.
+   */
+  private emitCrashHealReport(
+    chatJid: string,
+    info: SessionCrashInfo,
+    turnWasInFlight: boolean,
+  ): void {
+    if (info.terminationReason === 'idle_watchdog' && !turnWasInFlight) {
+      log.info({ chatJid, signal: info.signal ?? null, terminationReason: info.terminationReason }, 'idle-watchdog reap on an idle session — no heal report');
+      return;
+    }
+    try {
+      emitHealReport(this.db, this.messenger, this.durability, {
+        type: 'crash',
+        chatJid,
+        exitCode: info.exitCode ?? undefined,
+        signal: info.signal ?? undefined,
+        provider: info.provider,
+        crashClass: info.crashClass,
+        stderr: info.stderrPreview,
+      }, this.activeControlReportId);
+    } catch (err) {
+      log.warn({ err }, 'failed to emit heal report for session crash');
     }
   }
 
@@ -12041,22 +12048,12 @@ export class AgentRuntime implements Runtime {
     tracker?.shutdown();
     this.operationTrackers.delete(currentMapKey);
     this.cleanupPerChatCrashTurnState(currentMapKey);
-    // #1754: see the singleton onCrash above — control-peer presence is no longer
-    // a precondition for attempting the report; only chatJid (needed for context) is.
-    if (chatJid) {
-      try {
-        emitHealReport(this.db, this.messenger, this.durability, {
-          type: 'crash',
-          chatJid,
-          exitCode: info?.exitCode ?? undefined,
-          signal: info?.signal ?? undefined,
-          provider: info?.provider,
-          crashClass: info?.crashClass,
-          stderr: info?.stderrPreview,
-        }, this.activeControlReportId);
-      } catch (err) {
-        log.warn({ err }, 'failed to emit heal report for session crash');
-      }
+    if (chatJid && info) {
+      this.emitCrashHealReport(
+        chatJid,
+        info,
+        crashContext !== undefined || journaledCrashSeq !== undefined,
+      );
     }
 
     // Auto-respawn: if we haven't hit the crash limit, try to resume the session

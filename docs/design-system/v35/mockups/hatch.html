@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SOUP — Hatch (Direction A: Command Deck)</title>
+<style>
+:root, [data-theme="dark"] {
+  --base:#1E1A15; --raised:#27221C; --overlay:#322D24; --inset:#171410;
+  --t1:#F1ECDF; --t2:#CAC1AF; --t3:#9A907E;
+  --hair:#383024; --hair-2:#473B2C; --hair-3:#5A4C39;
+  --accent:#6BA6FF; --accent-fg:#0A0E14;
+  --ok:#5BD97B; --warn:#F5B54A; --crit:#F4736F;
+  --m-passive:#3BD6B0; --m-chat:#3FB8DC; --m-agent:#A78BFA;
+  --shadow-lift:0 1px 2px rgb(0 0 0/.30), 0 8px 24px rgb(0 0 0/.28);
+}
+[data-theme="light"] {
+  --base:#FAF6EE; --raised:#FDFAF3; --overlay:#FFFFFF; --inset:#EDE5D5;
+  --t1:#221C12; --t2:#524833; --t3:#645849;
+  --hair:#DED4BF; --hair-2:#CDC2A9; --hair-3:#B4A78C;
+  --accent:#2E66E4; --accent-fg:#FFFFFF;
+  --ok:#15722F; --warn:#855900; --crit:#B42318;
+  --m-passive:#096853; --m-chat:#1F6E85; --m-agent:#6D4FA3;
+  --shadow-lift:0 1px 2px rgb(60 45 20/.10), 0 10px 28px rgb(60 45 20/.14);
+}
+* { margin:0; box-sizing:border-box; }
+body {
+  background:var(--base); color:var(--t1); min-height:100vh;
+  font:400 14px/1.6 "Hanken Grotesk","Helvetica Neue",Arial,sans-serif;
+  display:flex; flex-direction:column; align-items:center; justify-content:center; padding:40px 20px;
+}
+/* journey register: spacious, soft radii */
+.shell { width:min(860px,100%); }
+.crumb { display:flex; align-items:center; gap:12px; margin-bottom:28px; }
+.crumb .tick { width:8px; height:8px; border-radius:1px; background:var(--m-passive); }
+.crumb .wm { font:800 16px/20px "Bricolage Grotesque",sans-serif; letter-spacing:-0.06em; }
+.crumb .wm b { color:var(--accent); }
+.crumb .ctx { font:400 11px/16px "IBM Plex Mono",monospace; letter-spacing:.18em; color:var(--t3); }
+.theme-toggle { position:fixed; top:16px; right:16px; padding:8px 14px; border-radius:6px; font:600 12.5px/16px inherit; }
+/* step rail */
+.steps { display:flex; gap:8px; margin-bottom:28px; }
+.step { flex:1; display:flex; flex-direction:column; gap:6px; }
+.step .bar { height:3px; border-radius:2px; background:var(--hair-2); }
+.step.done .bar { background:var(--hair-3); }
+.step.now .bar { background:var(--accent); }
+.step span { font:500 11px/14px "IBM Plex Mono",monospace; letter-spacing:.08em; color:var(--t3); text-transform:uppercase; }
+.step.now span { color:var(--t1); }
+.step.done span { color:var(--t2); } .step.done span::before { content:"✓ "; color:var(--t2); }
+/* card */
+.card {
+  background:var(--raised); border:1px solid var(--hair); border-radius:16px;
+  padding:32px; box-shadow:var(--shadow-lift);
+}
+h1 { font:700 26px/32px "Bricolage Grotesque",sans-serif; letter-spacing:-0.02em; margin-bottom:8px; }
+.sub { color:var(--t2); margin-bottom:24px; max-width:56ch; }
+/* ceremony: glow (sanctioned one-shot) */
+.stage { display:flex; flex-direction:column; align-items:center; text-align:center; padding:24px 0 8px; }
+.lockup { position:relative; width:120px; height:120px; margin-bottom:20px; }
+.glow {
+  position:absolute; inset:-40px; border-radius:50%;
+  background:radial-gradient(circle, color-mix(in srgb, var(--accent) 35%, transparent) 0%, transparent 62%);
+  animation:glowplay .8s ease-out 1 both;
+}
+@keyframes glowplay { 0%{opacity:0; transform:scale(.6)} 45%{opacity:1} 100%{opacity:0; transform:scale(1.05)} }
+.eggshell {
+  position:absolute; inset:0; border-radius:16px; border:1.5px dashed var(--hair-3);
+  display:flex; align-items:center; justify-content:center;
+}
+.av {
+  width:72px; height:72px; border-radius:16px; background:hsl(250,38%,34%);
+  display:flex; align-items:center; justify-content:center;
+  font:700 28px/1 "Hanken Grotesk",sans-serif; color:#fff;
+  animation:pop .5s cubic-bezier(.2,1.4,.4,1) .25s both;
+}
+@keyframes pop { 0%{transform:scale(.4); opacity:0} 100%{transform:scale(1); opacity:1} }
+.beats { display:flex; gap:10px; margin:20px 0; }
+.beat { display:flex; align-items:center; gap:8px; padding:8px 14px; border-radius:99px; border:1px solid var(--hair-2); font:500 12px/16px "IBM Plex Mono",monospace; color:var(--t2); }
+.beat .dot { width:6px; height:6px; border-radius:50%; background:var(--ok); }
+.beat.pending { color:var(--t3); } .beat.pending .dot { background:var(--hair-3); }
+.name-row { display:flex; align-items:center; gap:10px; margin-bottom:6px; }
+.name { font:800 34px/40px "Bricolage Grotesque",sans-serif; letter-spacing:-0.03em; }
+.dice {
+  width:36px; height:36px; border-radius:10px; border:1px solid var(--hair-2); background:var(--overlay);
+  color:var(--t2); font-size:16px; cursor:pointer;
+  transition:transform .16s ease-out, box-shadow .16s ease-out;
+}
+.dice:hover { transform:translateY(-2px) rotate(-8deg); box-shadow:var(--shadow-lift); }
+.soul { color:var(--t2); font-style:italic; margin-bottom:4px; }
+.meta { font:400 11.5px/16px "IBM Plex Mono",monospace; color:var(--t3); margin-bottom:26px; }
+.meta b { color:var(--m-chat); font-weight:500; }
+.first-msg {
+  width:100%; background:var(--inset); border:1px solid var(--hair); border-radius:12px;
+  padding:14px 16px; display:flex; gap:12px; align-items:center; margin-bottom:22px;
+}
+.first-msg input {
+  flex:1; background:none; border:none; outline:none; color:var(--t1);
+  font:400 14px/20px "Hanken Grotesk",sans-serif;
+}
+.first-msg input::placeholder { color:var(--t3); }
+.actions { display:flex; gap:10px; justify-content:center; }
+.btn {
+  display:inline-flex; align-items:center; gap:8px; padding:11px 20px; border-radius:10px;
+  border:1px solid var(--hair-2); background:var(--overlay); color:var(--t1);
+  font:600 13.5px/18px inherit; cursor:pointer;
+  transition:transform .16s ease-out, box-shadow .16s ease-out;
+}
+.btn:hover { transform:translateY(-2px); box-shadow:var(--shadow-lift); }
+.btn.primary { background:var(--accent); color:var(--accent-fg); border-color:transparent; }
+.btn.ghost { background:transparent; color:var(--t2); border:1px solid var(--hair-2); }
+/* channel grid (step 2 preview) */
+.grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(88px,1fr)); gap:10px; margin-bottom:8px; }
+.ch {
+  aspect-ratio:1; border-radius:12px; border:1px solid var(--hair); background:var(--inset);
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px;
+  cursor:pointer; transition:transform .16s ease-out, box-shadow .16s ease-out, border-color .16s;
+}
+.ch:hover { transform:translateY(-2px); box-shadow:var(--shadow-lift); }
+.ch.sel { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent); background:color-mix(in srgb, var(--accent) 8%, var(--inset)); }
+.ch svg { width:22px; height:22px; fill:var(--t2); }
+.ch.sel svg { fill:var(--t1); }
+.ch span { font:500 11px/12px "IBM Plex Mono",monospace; color:var(--t3); letter-spacing:.04em; }
+.ch.sel span { color:var(--t1); }
+.sec { font:600 11px/14px "IBM Plex Mono",monospace; letter-spacing:.1em; color:var(--t3); text-transform:uppercase; margin:18px 0 10px; }
+@media (prefers-reduced-motion: reduce) { .glow,.av { animation:none; } }
+/* light presence: card separation + control borders (locked-token consumption) */
+[data-theme="light"] .panel, [data-theme="light"] .scard, [data-theme="light"] .kpi,
+[data-theme="light"] .dcard, [data-theme="light"] .pcard, [data-theme="light"] .acard,
+[data-theme="light"] .prop, [data-theme="light"] .mstat, [data-theme="light"] .fstrip,
+[data-theme="light"] .ch, [data-theme="light"] .swatches .sw,
+[data-theme="light"] .pair, [data-theme="light"] .bub, [data-theme="light"] .qcard { box-shadow:var(--shadow-rest); }
+[data-theme="light"] .btn.ghost, [data-theme="light"] .btn.sm:not(.upd):not(.danger):not(.no),
+[data-theme="light"] .ibtn, [data-theme="light"] .cap, [data-theme="light"] .fstrip,
+[data-theme="light"] .theme-toggle { border-color:var(--hair-3); }
+@media (max-width:640px){ .card{padding:20px} .name{font-size:26px} }
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="crumb">
+    <span class="tick"></span><span class="wm">SO<b>U</b>P</span><span class="ctx">HATCH</span>
+    <button class="btn ghost theme-toggle" onclick="document.documentElement.dataset.theme=document.documentElement.dataset.theme==='dark'?'light':'dark'"><svg width="14" height="14" viewBox="0 0 16 16" style="vertical-align:-2px"><circle cx="8" cy="8" r="3.2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6 13 13M13 3l-1.4 1.4M4.4 11.6 3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg> theme</button>
+  </div>
+  <div class="steps">
+    <div class="step done"><div class="bar"></div><span>Kind</span></div>
+    <div class="step done"><div class="bar"></div><span>Channel</span></div>
+    <div class="step done"><div class="bar"></div><span>Agent</span></div>
+    <div class="step done"><div class="bar"></div><span>Link</span></div>
+    <div class="step now"><div class="bar"></div><span>Hatch</span></div>
+  </div>
+
+  <div class="card">
+    <div class="stage">
+      <div class="lockup">
+        <span class="glow"></span>
+        <span class="eggshell"></span>
+        <span class="av" style="position:absolute;left:24px;top:24px">Q</span>
+      </div>
+      <div class="beats">
+        <span class="beat"><span class="dot"></span>name</span>
+        <span class="beat"><span class="dot"></span>soul</span>
+        <span class="beat"><span class="dot"></span>channel</span>
+      </div>
+      <div class="name-row"><span class="name">Quinn</span><button class="dice" title="Another name"><svg width="16" height="16" viewBox="0 0 16 16" style="fill:none;stroke:currentColor;stroke-width:1.5"><rect x="2" y="2" width="12" height="12" rx="3"/><circle cx="5.5" cy="5.5" r="1.1" fill="currentColor" stroke="none"/><circle cx="10.5" cy="10.5" r="1.1" fill="currentColor" stroke="none"/><circle cx="10.5" cy="5.5" r="1.1" fill="currentColor" stroke="none"/><circle cx="5.5" cy="10.5" r="1.1" fill="currentColor" stroke="none"/></svg></button></div>
+      <p class="soul">"Keeps the community room tidy, answers fast, never sleeps."</p>
+      <p class="meta">community agent · <b>WhatsApp</b> · +1 845 ··· 4651 · brain: claude-sonnet</p>
+      <div class="first-msg">
+        <input value="Hey Quinn — welcome. Say hello to the room?" placeholder="Say hello to your new agent…">
+        <button class="btn primary">Send &amp; go live</button>
+      </div>
+      <div class="actions">
+        <button class="btn ghost">Skip ceremony</button>
+        <button class="btn">Adjust persona</button>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

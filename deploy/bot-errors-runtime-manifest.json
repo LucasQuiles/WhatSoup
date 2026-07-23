@@ -67,7 +67,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "512463cbb735d56eb80d599cbdcf06a2e3974eec8cda6fef04530afa6ebd9d3a",
+      "sha256": "53c50903327e9d27018dc2c571bdfc87dbc29cc602771e005ae9aa96911625f2",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -135,7 +135,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "a56950aea8b2315994d8cb881dd0e3002627d7cddc8349f4ae60251e1e373fea",
+      "sha256": "fcafec6acde3c9ab1ed5fcc009e7f9020d2c0fd9ffbeee77ab19caaac84d45bc",
       "mustContain": [
         "BOT_ERRORS_Q_LOOP_STATE_DIR",
         "BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT",
@@ -143,7 +143,9 @@
         "fleet_sentinel_age",
         "q_loop:supervisor",
         "refusing to trust critical file",
-        "redact_watchdog_text"
+        "redact_watchdog_text",
+        "browser_debug_problems",
+        "collector_reachability_evidence"
       ]
     },
     {

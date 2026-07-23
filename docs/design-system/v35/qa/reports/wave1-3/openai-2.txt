@@ -1,0 +1,290 @@
+**skills-hub-dark.png**
+
+### Rule violations
+
+1. **Status conveyed by color-only text/badges without required shape coding**
+   - **Location:** Top-right hub selector, green dot next to “personal hub”
+   - **Rule:** 2
+   - **Severity:** Medium
+   - **Issue:** Status/selection is indicated with a green circular mark and color; there is no documented required status shape system (disc/diamond/square/outline mapped consistently). This reads as color-dependent status.
+
+2. **Status conveyed by color-only pill**
+   - **Location:** Card row “pinecone-search”, green “OFFICIAL” pill
+   - **Rule:** 2
+   - **Severity:** Medium
+   - **Issue:** “Official” is expressed with green color treatment only; no distinct required shape-code.
+
+3. **Status conveyed by color-only text**
+   - **Location:** Card row “pinecone-search”, green “✓ installed”
+   - **Rule:** 2
+   - **Severity:** Medium
+   - **Issue:** Installed state relies on green color plus checkmark glyph, not one of the prescribed shape codes.
+
+4. **Status conveyed by color-only pill**
+   - **Location:** Card row “whatsapp-fleet-tools”, green “OFFICIAL” pill
+   - **Rule:** 2
+   - **Severity:** Medium
+
+5. **Status conveyed by color-only text**
+   - **Location:** Card row “whatsapp-fleet-tools”, green “✓ installed”
+   - **Rule:** 2
+   - **Severity:** Medium
+
+6. **Status conveyed by color-only pill**
+   - **Location:** Card row “auto-seo-suite”, red “3RD-PARTY” pill
+   - **Rule:** 2
+   - **Severity:** High
+   - **Issue:** Risk/source classification is carried by red status color only; no required shape code.
+
+7. **Status conveyed by color-only warning banner**
+   - **Location:** Card row “auto-seo-suite”, amber warning strip “Third-party publisher code...”
+   - **Rule:** 2
+   - **Severity:** High
+   - **Issue:** Warning state is primarily color-coded; small warning icon is not one of the mandated shape codes and does not establish a system-consistent shape status.
+
+8. **Status conveyed by non-status chromatic mode/source pill**
+   - **Location:** Card row “dream-lab-persona”, cyan/blue “LOCAL” pill
+   - **Rule:** 1
+   - **Severity:** Medium
+   - **Issue:** Cyan/blue is being used to encode a source/state meaning outside action/focus/selection. Rule allows teal/cyan/violet only for modes; “LOCAL” here appears as provenance/source, not mode.
+
+9. **Status conveyed by color-only text**
+   - **Location:** Card row “dream-lab-persona”, green “✓ installed”
+   - **Rule:** 2
+   - **Severity:** Medium
+
+10. **Status conveyed by color-only pill**
+    - **Location:** Card row “m365-connector”, amber “COMMUNITY” pill
+    - **Rule:** 2
+    - **Severity:** Medium
+    - **Issue:** Community/source classification is encoded by color only, without required shape coding.
+
+11. **Status conveyed by color-only pill**
+    - **Location:** Card row “scheduled-tasks”, green “OFFICIAL” pill
+    - **Rule:** 2
+    - **Severity:** Medium
+
+12. **Status conveyed by color-only text**
+    - **Location:** Card row “scheduled-tasks”, green “✓ installed · 1.9.0 → 2.0.0”
+    - **Rule:** 2
+    - **Severity:** Medium
+
+13. **Essential text likely below 11px**
+    - **Location:** Left filter counts (“214”, “96”, “61”, etc.), section labels “TYPE / SOURCE / STATUS”, metadata in compat/harness strips
+    - **Rule:** 4
+    - **Severity:** Medium
+    - **Issue:** Several counters and micro-labels appear sub-11px.
+
+14. **Low-contrast essential metadata**
+    - **Location:** Search placeholder, left-nav counts, compatibility/harness row text, card subtitles/descriptions
+    - **Rule:** 4
+    - **Severity:** Medium
+    - **Issue:** Important inventory/compliance information is muted against dark brown backgrounds and risks insufficient contrast.
+
+### Other visual defects
+
+1. **Primary action hierarchy conflict**
+   - **Location:** Top-right “Upload” button vs card-level install/update actions
+   - **Severity:** Medium
+   - **Issue:** Global blue “Upload” dominates page while item-level core actions are visually de-emphasized outlines; action hierarchy is inconsistent.
+
+2. **Selected nav item affordance is weak**
+   - **Location:** Left sidebar “All”
+   - **Severity:** Low
+   - **Issue:** Selected state is mostly a subtle fill change and count tint; not strongly distinguishable.
+
+3. **Compat badges use many greens/ambers with unclear semantics**
+   - **Location:** All COMPAT strips
+   - **Severity:** Medium
+   - **Issue:** Repeated colored letter chips create a legend burden and likely semantic ambiguity.
+
+4. **Truncated CTA label**
+   - **Location:** “review & install...”
+   - **Severity:** Low
+   - **Issue:** Ellipsis cuts a primary decision label rather than resizing or wrapping.
+
+5. **Inconsistent icon metaphor style**
+   - **Location:** Skill avatars leading each card
+   - **Severity:** Low
+   - **Issue:** Mix of abstract marks and container silhouettes without obvious category logic.
+
+**Violation count: 14 rule violations, 5 other defects**
+
+
+---
+
+**dream-lab-dark.png**
+
+### Rule violations
+
+1. **Mode/status chip uses violet for queued count, potentially carrying semantic meaning outside allowed scope**
+   - **Location:** Header chip “3 dreams queued”
+   - **Rule:** 1
+   - **Severity:** Medium
+   - **Issue:** Violet chip appears to encode queue/status state rather than a mode.
+
+2. **Selection state uses violet outline/fill rather than single blue accent**
+   - **Location:** Left queue list, selected “Quinn” card
+   - **Rule:** 1
+   - **Severity:** High
+   - **Issue:** Selection/focus is rendered in violet, but selection is restricted to the single blue accent.
+
+3. **Status conveyed by color-only pill**
+   - **Location:** Selected queue item, pill “PERSONA” in violet
+   - **Rule:** 2
+   - **Severity:** Medium
+
+4. **Status conveyed by color-only pill**
+   - **Location:** Other queue items, “SKILLS” cyan pill and “ROUTINE” teal pill
+   - **Rule:** 2
+   - **Severity:** Medium
+   - **Issue:** Category/state meaning depends on color treatment without required shape coding.
+
+5. **Mode/category colors overloaded beyond allowed semantics**
+   - **Location:** Left queue list pills “PERSONA / SKILLS / ROUTINE”
+   - **Rule:** 1
+   - **Severity:** Medium
+   - **Issue:** Multiple chromatic labels are being used to encode item classes. If these are categories rather than modes, this violates the constrained color semantics.
+
+6. **Status diff uses red/green color-only coding**
+   - **Location:** “Proposed diff” red removed line and green added lines
+   - **Rule:** 2
+   - **Severity:** High
+   - **Issue:** Change type relies on color; no required shape coding for status/change semantics.
+
+7. **Status chip uses green color-only**
+   - **Location:** “Recent decisions” rows, green “APPROVED”
+   - **Rule:** 2
+   - **Severity:** Medium
+
+8. **Status chip uses red color-only**
+   - **Location:** “Recent decisions” row, red “REJECTED”
+   - **Rule:** 2
+   - **Severity:** Medium
+
+9. **Approve action uses green instead of single blue action accent**
+   - **Location:** Footer action bar, “✓ Approve & apply”
+   - **Rule:** 1
+   - **Severity:** High
+   - **Issue:** Primary action is green. Green is reserved for status, not action.
+
+10. **Reject button uses red as action accent**
+    - **Location:** Footer action bar, “✕ Reject”
+    - **Rule:** 1
+    - **Severity:** High
+    - **Issue:** Red is being used as button/action styling rather than pure status communication.
+
+11. **Low-contrast muted essential metadata**
+    - **Location:** Header metadata line “quinn · persona · suggested 2h ago...”, side queue timestamps/instance info, filters text
+    - **Rule:** 4
+    - **Severity:** Medium
+
+12. **Essential text likely below 11px**
+    - **Location:** Section labels “QUEUED · REVIEW IN ORDER”, “TONE”, “FORMATTING”, “APPLIES TO”, “REVERSIBLE”, “RISK”, tiny age pills “2d/4d/6d”
+    - **Rule:** 4
+    - **Severity:** Medium
+
+13. **Identifier masking leaves limited useful suffix visibility**
+    - **Location:** Header metadata “120363···639@g.us”
+    - **Rule:** 6
+    - **Severity:** Low
+    - **Issue:** Prefix is preserved, suffix is minimal but arguably useful; however, the masked ID may not retain enough suffix/context for practical disambiguation.
+
+### Other visual defects
+
+1. **Diff readability issue**
+   - **Location:** Removed red text with strikethrough on dark red background
+   - **Severity:** Medium
+   - **Issue:** Double encoding plus low contrast reduces legibility.
+
+2. **Primary action order ambiguity**
+   - **Location:** “Approve & apply”, “Reject”, “edit then approve...”
+   - **Severity:** Medium
+   - **Issue:** Three actions have inconsistent emphasis; the middle destructive action is too prominent.
+
+3. **Weak filter discoverability**
+   - **Location:** Left “FILTERS” box
+   - **Severity:** Low
+   - **Issue:** Looks more like static text than editable/searchable control.
+
+4. **Inconsistent capitalization and label grammar**
+   - **Location:** “edit then approve...”
+   - **Severity:** Low
+   - **Issue:** Lowercase label among title-case peers looks unrefined and less actionable.
+
+**Violation count: 13 rule violations, 4 other defects**
+
+
+---
+
+**inbox-dark.png**
+
+### Rule violations
+
+1. **Channel glyphs are not monochrome filled silhouettes**
+   - **Location:** Top channel tabs: WhatsApp, Signal, iMessage, Discord, Email, X
+   - **Rule:** 3
+   - **Severity:** High
+   - **Issue:** Several icons are outlined, letterforms, or mixed-detail symbols rather than consistent monochrome filled silhouettes.
+
+2. **Selection accent is blue on “All” tab, but additional non-blue chromatic chips also encode categories/status**
+   - **Location:** Top tab row counts/chips and sidebar pills
+   - **Rule:** 1
+   - **Severity:** Medium
+   - **Issue:** Multiple non-blue hues are used to convey message/channel/agent meaning beyond action/focus/selection.
+
+3. **Status conveyed by color-only unread/count badges**
+   - **Location:** Left thread list, blue count badges “2”, “1”, “5”, etc.
+   - **Rule:** 2
+   - **Severity:** Medium
+   - **Issue:** Numeric badges rely on blue fill for state emphasis; no required shape-coded status system.
+
+4. **Status conveyed by color-only presence/assignment pills**
+   - **Location:** Left thread list, violet “Quinn”, teal/blue “Beacon”, violet “Mercy”, amber “takeover”
+   - **Rule:** 2
+   - **Severity:** Medium
+   - **Issue:** Meaning is carried by colored pills rather than required shape coding.
+
+5. **Amber used for “takeover” semantic without shape-code**
+   - **Location:** Left thread list and central banner “takeover enabled...”
+   - **Rule:** 2
+   - **Severity:** High
+   - **Issue:** Operational state is color-signaled only.
+
+6. **Interactive toggle has weak affordance**
+   - **Location:** Header of conversation pane, “takeover” switch
+   - **Rule:** 7
+   - **Severity:** Medium
+   - **Issue:** The switch is visually subtle, low-contrast, and easy to miss as interactive.
+
+7. **Interactive segmented control has weak affordance**
+   - **Location:** Left pane “Direct / Rooms”
+   - **Rule:** 7
+   - **Severity:** Medium
+   - **Issue:** The inactive segment “Rooms” reads like a dark label block more than a clickable control.
+
+8. **Low-contrast essential text**
+   - **Location:** Left thread preview lines, timestamps, right sidebar contact details, bottom composer helper text
+   - **Rule:** 4
+   - **Severity:** Medium
+
+9. **Essential text likely below 11px**
+   - **Location:** Thread metadata under names, helper labels in right rail, tiny badges and timestamps, footer helper sentence
+   - **Rule:** 4
+   - **Severity:** Medium
+
+10. **Identifier masking over-obscures contact data**
+    - **Location:** Right sidebar phone numbers “+1 845 ··· 0919”
+    - **Rule:** 6
+    - **Severity:** Low
+    - **Issue:** Prefix+suffix are retained, but the middle masking may still be too aggressive for distinguishing multiple similar contacts sharing same suffix.
+
+11. **Identifier masking over-obscures email**
+    - **Location:** Right sidebar email “lhquiles@_”
+    - **Rule:** 6
+    - **Severity:** Medium
+    - **Issue:** Useful suffix/domain context is not preserved. Rule requires useful prefix + suffix.
+
+12. **Status/state meaning encoded by blue outgoing message bubble**
+    - **Location:** Main conversation, user-composed message bubble on right
+    - **Rule:** 2

@@ -27,7 +27,7 @@ import {
   closeDatabaseCompatibilityHealthServer,
   DATABASE_COMPATIBILITY_PERMANENT_EXIT_STATUS,
   DatabaseCompatibilityPermanentStartupError,
-  databaseCompatibilityStartupExitCode,
+  startupExitCode,
   runEarlyDatabaseCompatibilityGate,
   waitForDatabaseCompatibilityDrain,
 } from '../../src/core/database-compatibility-early.ts';
@@ -171,10 +171,10 @@ describe('database compatibility health drain', () => {
       'database compatibility health port cannot bind',
       Object.assign(new Error('address in use'), { code: 'EADDRINUSE' }),
     );
-    expect(databaseCompatibilityStartupExitCode(failure)).toBe(
+    expect(startupExitCode(failure)).toBe(
       DATABASE_COMPATIBILITY_PERMANENT_EXIT_STATUS,
     );
-    expect(databaseCompatibilityStartupExitCode(new Error('transient'))).toBe(1);
+    expect(startupExitCode(new Error('transient'))).toBe(1);
     expect(() => configureDatabaseCompatibilityBootstrap('../invalid')).toThrow(
       DatabaseCompatibilityPermanentStartupError,
     );
@@ -205,7 +205,7 @@ describe('database compatibility health drain', () => {
     }).catch((err: unknown) => err);
 
     expect(failure).toBeInstanceOf(DatabaseCompatibilityPermanentStartupError);
-    expect(databaseCompatibilityStartupExitCode(failure)).toBe(
+    expect(startupExitCode(failure)).toBe(
       DATABASE_COMPATIBILITY_PERMANENT_EXIT_STATUS,
     );
   });
@@ -244,7 +244,7 @@ describe('database compatibility health drain', () => {
       } else {
         expect(failure).toBe(compatibilityError);
       }
-      expect(databaseCompatibilityStartupExitCode(failure)).toBe(exitCode);
+      expect(startupExitCode(failure)).toBe(exitCode);
       expect(startDrain).not.toHaveBeenCalled();
     },
   );
@@ -347,7 +347,7 @@ describe('database compatibility health drain', () => {
       expect(failure).toMatchObject({
         cause: { reason: 'database_not_writable' },
       });
-      expect(databaseCompatibilityStartupExitCode(failure)).toBe(78);
+      expect(startupExitCode(failure)).toBe(78);
       expect(startDrain).not.toHaveBeenCalled();
       expect(() => db.assertWritableCompatibility()).toThrow(
         (failure as DatabaseCompatibilityPermanentStartupError).cause as Error,
@@ -510,7 +510,7 @@ describe('database compatibility health drain', () => {
 
       expect(failure).toBeInstanceOf(DatabaseCompatibilityPermanentStartupError);
       expect(failure).toMatchObject({ cause: permanentError });
-      expect(databaseCompatibilityStartupExitCode(failure)).toBe(78);
+      expect(startupExitCode(failure)).toBe(78);
       expect(startServer).not.toHaveBeenCalled();
       expect(releaseLock).toHaveBeenCalledOnce();
     } finally {
@@ -549,7 +549,7 @@ describe('database compatibility health drain', () => {
       }).catch((err: unknown) => err);
 
       expect(failure).toBe(transientError);
-      expect(databaseCompatibilityStartupExitCode(failure)).toBe(1);
+      expect(startupExitCode(failure)).toBe(1);
       expect(startServer).not.toHaveBeenCalled();
       expect(releaseLock).toHaveBeenCalledOnce();
     } finally {

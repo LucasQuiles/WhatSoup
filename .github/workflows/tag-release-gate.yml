@@ -33,11 +33,11 @@ jobs:
     # run rides to the 6h GitHub default.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: '24.x'
           cache: npm
@@ -61,6 +61,36 @@ jobs:
 
       - name: Import boundary guard
         run: npm run guard:boundaries
+
+      # `origin/main` must exist as a ref before the diff-based guard below. The checkout
+      # uses fetch-depth: 0, but this makes the remote-tracking ref explicit rather than
+      # relying on checkout's refspec behaviour — if it were missing, guard:baseline-growth
+      # would exit 2 (INCONCLUSIVE) and block the release for an infrastructure reason
+      # rather than a real finding.
+      - name: Fetch main for diff-based guards
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+
+      # Cycle detection, alongside the direction check above. Whole-tree and
+      # revision-independent, so it is exactly as meaningful here as on a PR.
+      - name: Import cycle guard
+        run: npm run guard:import-cycle
+
+      # Every imported package must be declared. Also whole-tree, and the property it
+      # protects — that a clean install resolves — is most load-bearing at release time.
+      - name: Phantom dependency guard
+        run: npm run guard:phantom-deps
+
+      # Tolerated-debt ceilings may only shrink.
+      #
+      # HONEST SCOPE ON THIS PATH: this guard is diff-based, comparing the candidate against
+      # `merge-base(origin/main, HEAD)`. For a tag cut at main's tip that base IS the tag, so
+      # the comparison is between a commit and itself and the step passes trivially. It does
+      # real work only when the tag diverges from main (e.g. cut from a release branch).
+      # It is wired here because it cannot report growth falsely and costs ~1s — not because
+      # it is strong protection on this path. The authoritative baseline check is the PR
+      # gate. Do not read a green here as "no debt was institutionalised".
+      - name: Baseline growth guard
+        run: npm run guard:baseline-growth
 
       - name: Repo hygiene release
         run: npm run guard:repo:release-hygiene
@@ -112,7 +142,7 @@ jobs:
         run: npm run verify:console-design
 
       - name: Cache Playwright browsers
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ hashFiles('package-lock.json') }}
@@ -127,7 +157,7 @@ jobs:
         run: npm run test:browser:motion
 
       - name: Upload browser test failure screenshots
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: failure()
         with:
           name: browser-test-screenshots-tag-release

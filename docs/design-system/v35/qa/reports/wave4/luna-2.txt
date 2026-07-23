@@ -1,0 +1,59 @@
+## skills-hub-dark
+
+A: PASS (A1–A6)
+
+B: PASS (B1–B4, B6)
+
+C: findings
+
+- C1 — left sidebar, source/status filter entries: unselected filters appear as bare text rather than controls, making clickability ambiguous. Severity: MED. Confidence: HIGH.
+- C4 — center, compatibility/harness matrices: amber diamond states are not defined by the adjacent labels or legend, so their meaning cannot be identified at a glance. Severity: MED. Confidence: HIGH.
+- C4 — upper-center, pinecone-search footer: “gemini: provider config required” is substantially dimmer than nearby compatibility information and sinks into the recessed strip. Severity: MED. Confidence: HIGH.
+
+D: PASS (D1–D4)
+
+E: findings
+
+- E2 — left sidebar versus center card footers: the legend is compressed into awkward short line fragments while most repeated compatibility strips retain extensive unused horizontal space. Severity: LOW. Confidence: HIGH.
+
+UNCERTAIN: B5 cannot be evaluated because the corresponding light-theme screenshot was not supplied.
+
+## dream-lab-dark
+
+A: PASS (A1–A6)
+
+B: PASS (B1–B4, B6)
+
+C: PASS (C1–C6)
+
+D: PASS (D1–D4)
+
+E: findings
+
+- E2 — bottom-left versus bottom-right: recently decided actions are squeezed into a narrow column and heavily truncated while a much larger area beneath the main action controls remains unused. Severity: MED. Confidence: HIGH.
+
+UNCERTAIN: B5 cannot be evaluated because the corresponding light-theme screenshot was not supplied.
+
+## inbox-dark
+
+A: PASS (A1–A6)
+
+B: PASS (B1–B4, B6)
+
+C: findings
+
+- C4 — bottom-center composer, audio-level control: its glyph and boundary are dramatically fainter than the sibling attachment, microphone, and timer controls, making the disabled state verge on disappearance. Severity: MED. Confidence: HIGH.
+
+D: findings
+
+- D2 — center/right, takeover state: the header toggle, in-thread status banner, and “Agent in this chat” card simultaneously repeat that takeover is active and Quinn is paused. Severity: LOW. Confidence: HIGH.
+
+E: PASS (E1–E5)
+
+UNCERTAIN: B5 cannot be evaluated because the corresponding light-theme screenshot was not supplied.
+
+| Verdict |
+|---|
+| VERDICT skills-hub-dark: FAIL(4) |
+| VERDICT dream-lab-dark: FAIL(1) |
+| VERDICT inbox-dark: FAIL(2) |

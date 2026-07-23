@@ -437,6 +437,62 @@ describe('DurabilityEngine — postConnectRecovery()', () => {
     expect(stats.outboundQuarantined).toBe(1);
   });
 
+  it('reconciles maybe_sent debt created after the post-connect recovery pass', () => {
+    engine.postConnectRecovery();
+
+    const opId = engine.createOutboundOp({
+      conversationKey: 'k1', chatJid: 'j1', opType: 'text',
+      payload: '{}', replayPolicy: 'unsafe',
+    });
+    engine.markSending(opId);
+    engine.markMaybeSent(opId, 'send-failed-after-reconnect');
+
+    const freshStats = engine.reconcileLiveMaybeSent();
+
+    expect(getOutbound(db, opId)['status']).toBe('maybe_sent');
+    expect(freshStats.outboundReconciled).toBe(0);
+
+    db.raw.prepare(
+      "UPDATE outbound_ops SET created_at = datetime('now', '-31 seconds') WHERE id = ?",
+    ).run(opId);
+    const agedStats = engine.reconcileLiveMaybeSent();
+
+    expect(getOutbound(db, opId)['status']).toBe('quarantined');
+    expect(agedStats.outboundReconciled).toBe(1);
+    expect(agedStats.outboundQuarantined).toBe(1);
+  });
+
+  it('bounds live maybe_sent reconciliation to FIFO pages of 200 rows', () => {
+    for (let index = 0; index < 201; index += 1) {
+      const opId = engine.createOutboundOp({
+        conversationKey: 'k1', chatJid: 'j1', opType: 'text',
+        payload: '{}', replayPolicy: 'unsafe',
+      });
+      engine.markSending(opId);
+      engine.markMaybeSent(opId, 'load-test');
+    }
+    db.raw.exec("UPDATE outbound_ops SET created_at = datetime('now', '-31 seconds')");
+
+    const first = engine.reconcileLiveMaybeSent();
+    const remainingAfterFirst = engine.getOutboundByStatus('maybe_sent');
+    const second = engine.reconcileLiveMaybeSent();
+
+    expect(first.outboundReconciled).toBe(200);
+    expect(remainingAfterFirst).toHaveLength(1);
+    expect(second.outboundReconciled).toBe(1);
+    expect(engine.getOutboundByStatus('maybe_sent')).toHaveLength(0);
+  });
+
+  it('does not create recovery evidence when no live maybe_sent debt exists', () => {
+    const before = db.raw.prepare('SELECT COUNT(*) AS count FROM recovery_runs').get() as { count: number };
+
+    const stats = engine.reconcileLiveMaybeSent();
+
+    const after = db.raw.prepare('SELECT COUNT(*) AS count FROM recovery_runs').get() as { count: number };
+    expect(stats.outboundReconciled).toBe(0);
+    expect(after.count).toBe(before.count);
+  });
+
   it('clears outbound quarantine alert source after post-connect recovery completes', () => {
     const stats = engine.postConnectRecovery();
 

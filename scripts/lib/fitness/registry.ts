@@ -27,6 +27,29 @@ export interface FitnessRule {
   ratchet?: boolean;
   params?: Record<string, unknown>;
   source: string[];
+  /**
+   * What actually enforces this rule, machine-readably. REQUIRED for `severity: 'block'`
+   * and asserted by `tests/scripts/fitness-registry-backing.test.ts`.
+   *
+   * Each entry is either:
+   *   - an npm script name  (`'guard:transport-patterns'`, `'typecheck:all'`) — must exist
+   *     in package.json and be gate-reachable, or
+   *   - a repo-relative test path (`'tests/scripts/foo.test.ts'`) — must exist on disk and
+   *     be collected by vitest, which CI runs in full via `coverage:check`.
+   *
+   * Why this field exists: before it, the rule→enforcement link lived only in prose inside
+   * `rationale` and in a row of `docs/architecture/fitness-taxonomy.md`. Establishing that
+   * all 17 block rules were genuinely enforced took a dozen greps and a subagent, because
+   * four of them (`arch.file-size`, `hygiene.commit-author`, `hygiene.internal-labels`,
+   * `test.typecheck-all-required`) had NO reference to their rule id anywhere outside the
+   * registry and that doc. Archaeology is not an enforcement mechanism.
+   *
+   * Scope of the claim, stated precisely: this field plus its test prove every block rule
+   * DECLARES a real, gate-reachable backstop. They do NOT prove the backstop actually
+   * detects what the rule describes — that semantic link stays hand-asserted, in `rationale`
+   * and in each guard's own tests.
+   */
+  implementedBy?: string[];
 }
 
 export const fitnessRules = [
@@ -38,6 +61,7 @@ export const fitnessRules = [
     detect: 'mechanical',
     rings: ['hook', 'eslint', 'guard', 'ci'],
     severity: 'block',
+    implementedBy: ['tests/scripts/fitness-file-size-warning-budget.test.ts'],
     ratchet: true,
     params: { maxLines: 2000 },
     source: ['retrospective:runtime.ts-6009-lines', 'retrospective:runtime-test-churn'],
@@ -82,6 +106,7 @@ export const fitnessRules = [
     detect: 'mechanical',
     rings: ['guard', 'ci'],
     severity: 'block',
+    implementedBy: ['guard:boundaries'],
     ratchet: true,
     params: {
       // Importer layer → allowed target layers. Same-layer imports are always
@@ -152,6 +177,7 @@ export const fitnessRules = [
     detect: 'mechanical',
     rings: ['guard', 'hook'],
     severity: 'block',
+    implementedBy: ['guard:fail-closed-gate'],
     source: ['feedback:writing_fail_closed_gates', 'feedback:shell_exit_via_pipe'],
   },
   {
@@ -194,6 +220,7 @@ export const fitnessRules = [
     detect: 'mechanical',
     rings: ['guard', 'hook'],
     severity: 'block',
+    implementedBy: ['guard:no-destructive-git'],
     source: ['feedback:no_git_clean', 'developer-instructions:git-safety'],
   },
   {
@@ -234,6 +261,7 @@ export const fitnessRules = [
     detect: 'mechanical',
     rings: ['guard', 'ci'],
     severity: 'block',
+    implementedBy: ['guard:repo:commit-authors'],
     params: { allowedIdentityRefs: ['canonical-local-author', 'github-noreply-author'] },
     source: ['audit:whatsoup-test-invalid-history'],
   },
@@ -245,6 +273,11 @@ export const fitnessRules = [
     detect: 'mechanical',
     rings: ['guard'],
     severity: 'block',
+    // Three invocation paths reach the same `internal-workstream-label` pattern in
+    // repo-hygiene-guard.ts. `release-hygiene` (scanTrackedFiles) is listed because it is
+    // the ONLY one wired into tag-release-gate.yml — omitting it hid the fact that this
+    // rule is covered on the tag path while its neighbours are not.
+    implementedBy: ['guard:repo:staged', 'guard:repo:branch-diff', 'guard:repo:release-hygiene'],
     source: ['feedback:hygiene_internal_labels', 'existing:repo-hygiene-guard'],
   },
   {
@@ -265,6 +298,7 @@ export const fitnessRules = [
     detect: 'mechanical',
     rings: ['guard', 'ci'],
     severity: 'block',
+    implementedBy: ['guard:transport-patterns'],
     ratchet: true,
     params: {
       globs: ['console/src', 'deploy/scripts'],
@@ -285,6 +319,7 @@ export const fitnessRules = [
     detect: 'mechanical',
     rings: ['guard', 'ci'],
     severity: 'block',
+    implementedBy: ['guard:transport-patterns'],
     ratchet: true,
     params: {
       globs: ['console/src'],
@@ -304,6 +339,7 @@ export const fitnessRules = [
     detect: 'mechanical',
     rings: ['guard', 'ci'],
     severity: 'block',
+    implementedBy: ['guard:transport-patterns'],
     ratchet: true,
     params: {
       globs: ['console/src'],
@@ -323,6 +359,7 @@ export const fitnessRules = [
     detect: 'mechanical',
     rings: ['guard', 'ci'],
     severity: 'block',
+    implementedBy: ['typecheck:all'],
     source: ['feedback:test_author_typecheck_all', 'audit:verify-push-branch-typecheck-gap'],
   },
   {
@@ -373,6 +410,7 @@ export const fitnessRules = [
     detect: 'ast',
     rings: ['eslint', 'guard'],
     severity: 'block',
+    implementedBy: ['guard:ring-boundary-ratchet'],
     ratchet: true,
     source: ['architecture:ring-boundaries', 'spec:2026-07-19-ssot-enforcement-ratchet'],
   },
@@ -395,6 +433,7 @@ export const fitnessRules = [
     detect: 'mechanical',
     rings: ['guard', 'ci'],
     severity: 'block',
+    implementedBy: ['guard:ssot-patterns'],
     ratchet: true,
     source: ['spec:2026-07-19-ssot-enforcement-ratchet', 'retrospective:b25-resolver-hardening'],
   },
@@ -407,6 +446,7 @@ export const fitnessRules = [
     detect: 'mechanical',
     rings: ['guard', 'ci'],
     severity: 'block',
+    implementedBy: ['guard:ssot-patterns'],
     ratchet: true,
     source: ['spec:2026-07-19-ssot-enforcement-ratchet', 'architecture:jid-constants-header'],
   },
@@ -419,6 +459,7 @@ export const fitnessRules = [
     detect: 'mechanical',
     rings: ['guard', 'ci'],
     severity: 'block',
+    implementedBy: ['guard:ssot-patterns'],
     ratchet: true,
     source: ['spec:2026-07-19-ssot-enforcement-ratchet', 'retrospective:b25-chat-display-name'],
   },
@@ -431,6 +472,7 @@ export const fitnessRules = [
     detect: 'mechanical',
     rings: ['guard', 'ci'],
     severity: 'block',
+    implementedBy: ['guard:ssot-patterns'],
     ratchet: true,
     source: ['spec:2026-07-19-ssot-enforcement-ratchet', 'commit:qr-033-phone-auth-boundary'],
   },
@@ -443,6 +485,7 @@ export const fitnessRules = [
     detect: 'mechanical',
     rings: ['guard', 'ci'],
     severity: 'block',
+    implementedBy: ['guard:ssot-patterns'],
     ratchet: true,
     source: ['spec:2026-07-19-ssot-enforcement-ratchet', 'retrospective:help-render-passthrough-fork'],
   },
@@ -455,6 +498,7 @@ export const fitnessRules = [
     detect: 'mechanical',
     rings: ['guard', 'ci'],
     severity: 'block',
+    implementedBy: ['guard:insecure-tempfile'],
     source: ['codeql:py/insecure-temporary-file', 'spec:2026-06-27-insecure-tempfile'],
   },
 ] satisfies FitnessRule[];

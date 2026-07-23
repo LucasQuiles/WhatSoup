@@ -1,0 +1,56 @@
+## fleet-light
+
+**A:** A1 PASS; A2 PASS; A3 PASS; A4 PASS; **A5 finding** — Fleet · light · Activity panel · right region: the lower panel reaches the viewport edge while the header controls and KPI row retain a visible right gutter, breaking the shared page edge. Severity **med**; confidence **HIGH**. A6 PASS.
+
+**B:** B1 PASS; B2 PASS; B3 PASS; B4 PASS; B5 UNCERTAIN; B6 PASS.
+
+**C:** C1 PASS; **C2 finding** — Fleet · light · Activity feed · right region: multiple activity sentences are clipped at the viewport edge, including the ClientDesk entry, instead of wrapping or truncating cleanly. Severity **high**; confidence **HIGH**. C3 PASS; **C4 finding** — Fleet · light · deactivated Announce and FieldNotes channel glyphs · center-left table: the recessed gray icons nearly disappear against the cream row, making their disabled state harder to identify than the accompanying state chips. Severity **med**; confidence **HIGH**. C5 PASS; C6 PASS.
+
+**D:** D1 PASS; D2 PASS; D3 PASS; D4 PASS.
+
+**E:** E1 PASS; E2 PASS; E3 PASS; E4 PASS; E5 PASS.
+
+**UNCERTAIN:**
+
+- B5 cannot be evaluated because the dark-theme counterpart was not supplied.
+- Fleet · light · table hairlines · center: row separators are faint on cream, but they remain distinguishable in this screenshot.
+
+## hatch-light
+
+**A:** A1 PASS; A2 PASS; A3 PASS; A4 PASS; A5 PASS; A6 PASS.
+
+**B:** B1 PASS; B2 PASS; B3 PASS; B4 PASS; B5 UNCERTAIN; B6 PASS.
+
+**C:** C1 PASS; C2 PASS; C3 PASS; C4 PASS; C5 PASS; **C6 finding** — Hatch · light · ceremony card shell · center: the card fill matches the page and its perimeter is visibly fainter than the nested button and chip outlines, leaving the primary surface weakly separated from the surrounding cream canvas. Severity **med**; confidence **HIGH**.
+
+**D:** D1 PASS; D2 PASS; D3 PASS; D4 PASS.
+
+**E:** E1 PASS; E2 PASS; E3 PASS; E4 PASS; E5 PASS.
+
+**UNCERTAIN:**
+
+- B5 cannot be evaluated because the dark-theme counterpart was not supplied.
+- Hatch · light · “name / soul / channel” chips · center: these may be intentional validation labels, but without interaction context they could also read as unresolved placeholders.
+
+## agents-light
+
+**A:** A1 PASS; A2 PASS; A3 PASS; A4 PASS; A5 PASS; A6 PASS.
+
+**B:** B1 PASS; B2 PASS; B3 PASS; B4 PASS; B5 UNCERTAIN; B6 PASS.
+
+**C:** C1 PASS; C2 PASS; C3 PASS; **C4 finding** — Agents · light · Forge draft status marker · left roster: the hollow neutral square is substantially fainter than the adjacent green and amber roster markers and nearly disappears into the cream card. Severity **med**; confidence **HIGH**. **C4 finding** — Agents · light · Builds pending assignment · center: its title, metadata, leading icon, and dashed trailing control are all washed out simultaneously, making the row look unavailable or accidental rather than clearly pending. Severity **med**; confidence **HIGH**. C5 PASS; C6 PASS.
+
+**D:** D1 PASS; D2 PASS; D3 PASS; D4 PASS.
+
+**E:** E1 PASS; E2 PASS; E3 PASS; E4 PASS; **E5 finding** — Agents · light · Memory panel · bottom-right: the viewport cuts through the memory list, leaving the second visible record and its row boundary dangling at the fold. Severity **med**; confidence **HIGH**.
+
+**UNCERTAIN:**
+
+- B5 cannot be evaluated because the dark-theme counterpart was not supplied.
+- Agents · light · inactive MCP toggle · upper-right: its off state has weaker track separation than the enabled toggles, but the dark knob still makes the state identifiable.
+
+| Verdict |
+|---|
+| VERDICT fleet-light: FAIL(3) |
+| VERDICT hatch-light: FAIL(1) |
+| VERDICT agents-light: FAIL(3) |

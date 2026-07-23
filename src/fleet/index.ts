@@ -752,12 +752,18 @@ function buildCredentialDeps(deps: RouteDeps): CredentialDeps {
 
 export function createFleetServer(deps: FleetDeps) {
   const discovery = new FleetDiscovery();
+  const dbReader = new FleetDbReader(deps.selfName, deps.db);
   const healthPoller = new HealthPoller(
     () => discovery.getInstances() as any,
     deps.selfName,
     deps.getSelfHealth,
+    undefined,
+    undefined,
+    // #1786 (P2 fix): give the durable auth_loss_signal latch a production writer that
+    // targets each instance's OWN persistent, migrated DB via dbReader.queryWrite — never
+    // deps.db (the fleet server's own throwaway :memory: handle in production, standalone.ts).
+    dbReader,
   );
-  const dbReader = new FleetDbReader(deps.selfName, deps.db);
 
   // Determine dist directory for static files
   const distDir = path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..', 'dist');

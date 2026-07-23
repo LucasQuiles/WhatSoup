@@ -354,11 +354,19 @@ function parseExpectation(call: ts.CallExpression): Expectation | null {
     chain.unshift(expression.name.text);
     expression = expression.expression;
   }
+  // One or two arguments. Vitest's `expect(actual, 'message')` takes an assertion message
+  // as its second argument, and requiring exactly one made that idiomatic form invisible
+  // here — 54 of the 123 files in tests/scripts/ use it. A guard whose only failure
+  // assertion carried a message was reported as `test-does-not-exercise-failure`, which
+  // pushes the author toward the allowlist or toward deleting the message. The subject is
+  // `arguments[0]` either way, so nothing downstream changes: this widens what gets
+  // PARSED, never what counts as proof.
   if (
     !ts.isCallExpression(expression)
     || !ts.isIdentifier(expression.expression)
     || expression.expression.text !== 'expect'
-    || expression.arguments.length !== 1
+    || expression.arguments.length < 1
+    || expression.arguments.length > 2
   ) {
     return null;
   }

@@ -1,0 +1,114 @@
+## fleet-dark
+A: PASS
+
+B: PASS
+
+C: findings  
+- C2 | fleet-dark | Activity panel right column item text | center-right | The first activity row is clipped at the right edge, cutting the message after “WHATSOUP —” instead of resolving cleanly. | severity high | confidence HIGH
+
+D: findings  
+- D1 | fleet-dark | Lines table rows with grants + 7D sparkbars + overflow menu | center-left | Each row’s trailing area packs multiple competing controls/indicators into a tight strip, making the right side visibly denser than the rest of the row. | severity med | confidence MED
+
+E: findings  
+- E2 | fleet-dark | Overall page body split between Lines table and Activity panel | center-right | The main content is compressed into the left table while the narrower right activity rail still carries long multiline items, creating a squeezed-right / expansive-left imbalance. | severity med | confidence MED
+
+UNCERTAIN:  
+- The line-health dots at the bottom of the Activity panel may be slightly cramped against the panel’s right edge, but the crop makes this hard to confirm.
+
+## fleet-light
+A: PASS
+
+B: PASS
+
+C: findings  
+- C2 | fleet-light | Activity panel right column item text | center-right | The first activity row is clipped at the right edge, cutting the message after “WHATSOUP —” instead of resolving cleanly. | severity high | confidence HIGH
+
+D: findings  
+- D1 | fleet-light | Lines table rows with grants + 7D sparkbars + overflow menu | center-left | Each row’s trailing area packs multiple competing controls/indicators into a tight strip, making the right side visibly denser than the rest of the row. | severity med | confidence MED
+
+E: findings  
+- E2 | fleet-light | Overall page body split between Lines table and Activity panel | center-right | The main content is compressed into the left table while the narrower right activity rail still carries long multiline items, creating a squeezed-right / expansive-left imbalance. | severity med | confidence MED
+
+UNCERTAIN:  
+- The line-health dots at the bottom of the Activity panel may be slightly cramped against the panel’s right edge, but the crop makes this hard to confirm.
+
+## hatch-dark
+A: findings  
+- A6 | hatch-dark | Main ceremony card and stepper group | center | The ceremony content block sits slightly left of the optical center of the canvas, with visibly more open space on the right side than on the left. | severity med | confidence MED
+
+B: PASS
+
+C: PASS
+
+D: PASS
+
+E: findings  
+- E1 | hatch-dark | Empty canvas around the ceremony card | far right / far bottom | Large unused dark areas surround the centered card, especially to the right and below, without carrying additional content. | severity med | confidence HIGH  
+- E2 | hatch-dark | Viewport distribution | right | The experience concentrates all content into a central card while a substantial right-side field remains underused. | severity med | confidence HIGH
+
+UNCERTAIN:  
+- The avatar well above the “Q” tile may be very slightly right-shifted relative to the card center, but it is not clear enough to confirm.
+
+## hatch-light
+A: findings  
+- A6 | hatch-light | Main ceremony card and stepper group | center | The ceremony content block sits slightly left of the optical center of the canvas, with visibly more open space on the right side than on the left. | severity med | confidence MED
+
+B: PASS
+
+C: PASS
+
+D: PASS
+
+E: findings  
+- E1 | hatch-light | Empty canvas around the ceremony card | far right / far bottom | Large unused light areas surround the centered card, especially to the right and below, without carrying additional content. | severity med | confidence HIGH  
+- E2 | hatch-light | Viewport distribution | right | The experience concentrates all content into a central card while a substantial right-side field remains underused. | severity med | confidence HIGH
+
+UNCERTAIN:  
+- The avatar well above the “Q” tile may be very slightly right-shifted relative to the card center, but it is not clear enough to confirm.
+
+## agents-dark
+A: findings  
+- A4 | agents-dark | Header row actions “Edit profile” and “Retire…” | top-right | The two buttons do not share a clean visual baseline; the red secondary action sits slightly lower than the adjacent neutral button. | severity med | confidence MED
+
+B: findings  
+- B1 | agents-dark | Left roster cards compared with “Hatch an agent” card | center-left / lower-left | The placeholder “Hatch an agent” card uses a visibly different internal padding rhythm from the roster cards above it, making the stack cadence break. | severity med | confidence HIGH
+
+C: PASS
+
+D: findings  
+- D1 | agents-dark | Instances panel rows | center-right | Each instance row combines status dot, name, age, identifier, and two action buttons in one line, making these rows the densest hotspot on the page. | severity med | confidence HIGH  
+- D4 | agents-dark | Agent detail header metadata line | top-center | The hatched date, archetype, and sandbox metadata sits close in weight and prominence to the quote and title area, causing secondary info to compete more than it should. | severity low | confidence MED
+
+E: findings  
+- E2 | agents-dark | Main content distribution between left roster and right dashboard cards | center-right / lower-right | The upper-right area is tightly packed with panels while the lower-right viewport cuts into additional content, creating a cramped-right feeling beside a comparatively regular left roster column. | severity med | confidence MED  
+- E5 | agents-dark | Memory panel at bottom-right | bottom-right | The viewport cuts into the Memory content mid-panel, leaving a dangling partial section at the fold. | severity high | confidence HIGH
+
+UNCERTAIN:  
+- The selected Quinn card outline may sit slightly closer to the card edge than comparable inner spacing on other cards, but it is subtle.
+
+## agents-light
+A: findings  
+- A4 | agents-light | Header row actions “Edit profile” and “Retire…” | top-right | The two buttons do not share a clean visual baseline; the red secondary action sits slightly lower than the adjacent neutral button. | severity med | confidence MED
+
+B: findings  
+- B1 | agents-light | Left roster cards compared with “Hatch an agent” card | center-left / lower-left | The placeholder “Hatch an agent” card uses a visibly different internal padding rhythm from the roster cards above it, making the stack cadence break. | severity med | confidence HIGH
+
+C: PASS
+
+D: findings  
+- D1 | agents-light | Instances panel rows | center-right | Each instance row combines status dot, name, age, identifier, and two action buttons in one line, making these rows the densest hotspot on the page. | severity med | confidence HIGH  
+- D4 | agents-light | Agent detail header metadata line | top-center | The hatched date, archetype, and sandbox metadata sits close in weight and prominence to the quote and title area, causing secondary info to compete more than it should. | severity low | confidence MED
+
+E: findings  
+- E2 | agents-light | Main content distribution between left roster and right dashboard cards | center-right / lower-right | The upper-right area is tightly packed with panels while the lower-right viewport cuts into additional content, creating a cramped-right feeling beside a comparatively regular left roster column. | severity med | confidence MED  
+- E5 | agents-light | Memory panel at bottom-right | bottom-right | The viewport cuts into the Memory content mid-panel, leaving a dangling partial section at the fold. | severity high | confidence HIGH
+
+UNCERTAIN:  
+- The selected Quinn card outline may sit slightly closer to the card edge than comparable inner spacing on other cards, but it is subtle.
+
+VERDICT fleet-dark: FAIL(3)
+VERDICT fleet-light: FAIL(3)
+VERDICT hatch-dark: FAIL(3)
+VERDICT hatch-light: FAIL(3)
+VERDICT agents-dark: FAIL(6)
+VERDICT agents-light: FAIL(6)

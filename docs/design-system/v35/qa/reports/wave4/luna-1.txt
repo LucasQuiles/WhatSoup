@@ -1,0 +1,154 @@
+## fleet-dark
+
+A:
+
+- A1 PASS
+- A2 PASS
+- A3 PASS
+- A4 PASS
+- A5 PASS
+- A6 PASS
+
+B:
+
+- B1 PASS
+- B2 PASS
+- B3 PASS
+- B4 PASS
+- B5 UNTESTABLE — no fleet light-theme counterpart supplied.
+- B6 PASS
+
+C:
+
+- C1 PASS
+- C2 — Fleet / dark, Activity feed and line-health strip, right region: several event strings and health markers are clipped at the viewport edge, hiding operational content; severity high; confidence HIGH.
+- C3 PASS
+- C4 — Fleet / dark, deactivated state pills and associated channel/grant markers, center table: recessed warm-gray styling blends into the row surfaces and is difficult to distinguish at a glance; severity med; confidence HIGH.
+- C5 PASS
+- C6 PASS
+
+D:
+
+- D1 PASS
+- D2 PASS
+- D3 PASS
+- D4 PASS
+
+E:
+
+- E1 PASS
+- E2 — Fleet / dark, Lines-versus-Activity split, center/right region: the Activity column is visibly compressed while the table remains broad, forcing repeated wrapping and right-edge loss in the feed; severity med; confidence HIGH.
+- E3 PASS
+- E4 PASS
+- E5 PASS
+
+UNCERTAIN:
+
+- B5 cross-theme parity cannot be evaluated without the corresponding light screenshot.
+- Fleet / dark, Activity feed, right region: event density may remain excessive even after the clipping is corrected, but the current overflow prevents a clean judgment.
+
+## hatch-dark
+
+A:
+
+- A1 PASS
+- A2 PASS
+- A3 PASS
+- A4 PASS
+- A5 PASS
+- A6 PASS
+
+B:
+
+- B1 PASS
+- B2 PASS
+- B3 PASS
+- B4 PASS
+- B5 UNTESTABLE — no hatch light-theme counterpart supplied.
+- B6 PASS
+
+C:
+
+- C1 PASS
+- C2 PASS
+- C3 PASS
+- C4 PASS
+- C5 PASS
+- C6 PASS
+
+D:
+
+- D1 PASS
+- D2 PASS
+- D3 PASS
+- D4 PASS
+
+E:
+
+- E1 PASS
+- E2 PASS
+- E3 PASS
+- E4 PASS
+- E5 PASS
+
+UNCERTAIN:
+
+- B5 cross-theme parity cannot be evaluated without the corresponding light screenshot.
+- Hatch / dark, completed-step rules, upper-center region: the warm hairlines approach the canvas color, but checks and labels preserve enough state information to avoid a confirmed C4 failure.
+- Hatch / dark, secondary buttons, lower-center region: borders are subdued against the card surface, but the controls remain recognizable.
+
+## agents-dark
+
+A:
+
+- A1 PASS
+- A2 PASS
+- A3 PASS
+- A4 PASS
+- A5 PASS
+- A6 PASS
+
+B:
+
+- B1 PASS
+- B2 PASS
+- B3 PASS
+- B4 PASS
+- B5 UNTESTABLE — no agents light-theme counterpart supplied.
+- B6 — Agents / dark, “New agent” header action and “Hatch an agent” roster action, top-right and lower-left regions: two labels describe the same creation action with inconsistent terminology; severity med; confidence HIGH.
+
+C:
+
+- C1 — Agents / dark, “swap profile” control beside the live badge, upper-center region: its badge-like treatment closely matches the adjacent status pill, making action versus status ambiguous; severity med; confidence MED.
+- C2 PASS
+- C3 PASS
+- C4 — Agents / dark, pending “Builds” assigned-line row, center-left region: the title, metadata, and request state are crushed into nearly the same warm-dark ramp as the panel background; severity med; confidence HIGH.
+- C4 — Agents / dark, Forge draft marker, lower-left roster: the hollow neutral square has substantially weaker visibility than the green and amber sibling markers, obscuring the agent’s state; severity med; confidence HIGH.
+- C5 PASS
+- C6 PASS
+
+D:
+
+- D1 PASS
+- D2 PASS
+- D3 PASS
+- D4 PASS
+
+E:
+
+- E1 PASS
+- E2 PASS
+- E3 PASS
+- E4 PASS
+- E5 — Agents / dark, Memory panel, bottom-right region: the viewport cuts through the memory list and leaves a partially visible row dangling at the fold; severity med; confidence HIGH.
+
+UNCERTAIN:
+
+- B5 cross-theme parity cannot be evaluated without the corresponding light screenshot.
+- Agents / dark, Instances panel, center-right region: the longest row appears close to a density failure, but its columns and controls remain separable in the supplied frame.
+
+| Verdict |
+|---|
+| VERDICT fleet-dark: FAIL(3) |
+| VERDICT hatch-dark: PASS |
+| VERDICT agents-dark: FAIL(5) |

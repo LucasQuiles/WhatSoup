@@ -63,6 +63,7 @@ function isStructuredModelArg(parts: readonly string[]): boolean {
  *   `list [filter]`), bare `/reset` — genuine free text (e.g.
  *   "/model the best kimi") still forwards to the agent (F04). D11: `/why` is
  *   removed from the registry, so it always forwards now.
+ * - Bare `/` (with optional trailing whitespace) → local `/help` menu
  * - Any other `/…` slash command → forwarded (passed through to Claude Code)
  * - No leading `/` → message
  */
@@ -79,6 +80,9 @@ export function classifyInput(text: string, opts?: { routingAliases?: boolean })
   // only on the command name and already tolerate a trailing space (R10).
   const rest = text.slice(1);
   const parts = rest.split(/\s+/).filter((p) => p.length > 0);
+  if (parts.length === 0) {
+    return { type: 'local', command: 'help' };
+  }
   const commandName = (parts[0] ?? '').toLowerCase();
 
   const routingAlias =

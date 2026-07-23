@@ -122,6 +122,13 @@ const BACKGROUND_TASK_DELIVERY_GUIDANCE = [
   '- Never say work is dispatched or running unless the dispatching tool call happened in the same turn; if you promise a report, deliver it via send_message when the task returns.',
 ].join('\n');
 
+/**
+ * Why the supervisor itself terminated the provider. Absent on a genuine provider fault.
+ * `idle_watchdog` is routine housekeeping (the 30-min inactivity reap); `stalled_operation`
+ * is a real hang that the supervisor cleaned up.
+ */
+export type SessionTerminationReason = 'idle_watchdog' | 'stalled_operation';
+
 export interface SessionCrashInfo {
   exitCode: number | null;
   signal: NodeJS.Signals | null;
@@ -137,6 +144,11 @@ export interface SessionCrashInfo {
   stderrPreview?: string;
   /** Manager generation captured by the child/provider that emitted this crash. Null for unbound sessions. */
   generationIdentity?: SessionGenerationIdentity | null;
+  /**
+   * Set when this exit was a supervisor-initiated reap rather than a provider fault, so
+   * downstream alerting can avoid paging an operator for a kill the supervisor asked for.
+   */
+  terminationReason?: SessionTerminationReason;
 }
 
 export interface SessionGenerationIdentity {
@@ -562,6 +574,14 @@ export class SessionManager {
   private providerTurnTerminalResolve: (() => void) | null = null;
   /** Bounded kill timer for a stalled tool; armed by recoverStalledOperation. */
   private stalledOpKill: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Records a kill this manager itself issued, so the exit handler can tell a supervisor
+   * reap apart from a provider fault. Bound to the exact child and signal: an exit that
+   * does not match is treated as a real crash.
+   */
+  private intentionalKill:
+    | { child: ReturnType<typeof spawn>; signal: NodeJS.Signals; reason: SessionTerminationReason }
+    | null = null;
   private pendingToolIds: Set<string> = new Set();
   /** Codex app-server thread ID for persistent sessions. */
   private codexThreadId: string | null = null;
@@ -1740,6 +1760,10 @@ export class SessionManager {
       this.clearShutdownKillTimer(child, childGeneration);
       if (superseded) return;
 
+      // Consume the marker for this child even on the clean-shutdown path below, so a
+      // stale reap intent can never be attributed to a later, unrelated exit.
+      const terminationReason = this.takeIntentionalKill(child, signal);
+
       if (!this.active) {
         // Clean shutdown — the caller retains its local child reference while
         // process-tree proof finishes, but this manager must not retain an
@@ -1814,9 +1838,10 @@ export class SessionManager {
           sessionId: crashedSessionId,
           dbRowId: crashedDbRowId,
           generationIdentity: childGeneration,
-          ...this.buildCrashMetadata(),
+          terminationReason,
+          ...this.buildCrashMetadata(terminationReason),
         });
-        this.notifyUnexpectedExit(code, signal, childGeneration);
+        this.notifyUnexpectedExit(code, signal, childGeneration, terminationReason);
       }
     });
   }
@@ -1825,10 +1850,19 @@ export class SessionManager {
     code: number | null,
     signal: NodeJS.Signals | null,
     generationIdentity: SessionGenerationIdentity | null,
+    terminationReason?: SessionTerminationReason,
   ): void {
     // Exit code 0 = normal shutdown (e.g. /new, graceful stop) — skip notification entirely.
     if (code === 0 && !signal) {
       log.info({ rowId: this.dbRowId }, 'session exited cleanly (code 0) — no crash notification');
+      return;
+    }
+
+    // A supervisor reap already sent the user a notice that says why the session ended
+    // (inactivity, stalled tool). The generic crash line would be a second, less accurate
+    // message for the same event.
+    if (terminationReason !== undefined) {
+      log.info({ rowId: this.dbRowId, terminationReason }, 'supervisor reap — generic crash notification suppressed');
       return;
     }
 
@@ -1940,9 +1974,34 @@ export class SessionManager {
     );
     this.notifyUser?.('_A tool call stalled and was terminated. Send your message again to retry._');
     const child = this.child;
+    this.markIntentionalKill(child, 'SIGKILL', 'stalled_operation');
     void this.killChildTree(child, 'SIGKILL').catch((err) => {
       log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap stalled provider process tree');
     });
+  }
+
+  /** Record that this manager is about to kill `child` on purpose. Cleared by the exit handler. */
+  private markIntentionalKill(
+    child: ReturnType<typeof spawn>,
+    signal: NodeJS.Signals,
+    reason: SessionTerminationReason,
+  ): void {
+    this.intentionalKill = { child, signal, reason };
+  }
+
+  /**
+   * Consume the intent marker for an exiting child. Returns the reason only when the exit
+   * matches the kill we issued — a different child, or a different signal than the one we
+   * sent, means the process died of something else and must still be treated as a crash.
+   */
+  private takeIntentionalKill(
+    child: ReturnType<typeof spawn>,
+    signal: NodeJS.Signals | null,
+  ): SessionTerminationReason | undefined {
+    const marker = this.intentionalKill;
+    if (marker === null || marker.child !== child) return undefined;
+    this.intentionalKill = null;
+    return marker.signal === signal ? marker.reason : undefined;
   }
 
   /**
@@ -2005,11 +2064,11 @@ export class SessionManager {
 
     if (this.child === null) return;
     log.warn({ sessionId: this.sessionId, pid: this.child?.pid, reason: 'turn_watchdog' }, 'turn watchdog fired — killing stalled Claude process');
-    // Notify user with a specific message before the kill — the generic crash
-    // notice ("Agent session crashed") follows via the exit handler, but this
-    // message explains WHY it was terminated.
+    // This notice is the ONLY user-facing message for a reap: the intent marker below
+    // suppresses the generic crash notice (and the operator page) in the exit handler.
     this.notifyUser?.(terminationNotice);
     const child = this.child;
+    this.markIntentionalKill(child, 'SIGKILL', 'idle_watchdog');
     void this.killChildTree(child, 'SIGKILL').catch((err) => {
       log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap watchdog provider process tree');
     });

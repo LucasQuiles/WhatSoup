@@ -16,6 +16,38 @@ rules into hooks, and semantic or human rules into the SDLC review flow.
 - `rings`: hook, eslint, guard, ci, or sdlc.
 - `severity`: block, warn, or advisory.
 - `source`: evidence that caused the rule to exist.
+- `implementedBy`: what actually enforces the rule — npm script names
+  (`guard:transport-patterns`, `typecheck:all`) or repo-relative test paths.
+  **Required for every `severity: 'block'` rule** and asserted by
+  `tests/scripts/fitness-registry-backing.test.ts`. It exists because the
+  rule→enforcement link used to live only in prose here and in `rationale`: four block
+  rules had no occurrence of their rule id anywhere outside the registry and this
+  document, so confirming they were enforced meant archaeology rather than running a
+  check.
+
+  Entries are **alternative routes to the same detector, not a conjunction** — a rule
+  is enforced on a gate path when *any* of its entries runs there. `hygiene.internal-labels`
+  lists three `guard:repo` modes for this reason, and only `guard:repo:release-hygiene`
+  runs on the tag gate.
+
+  Reachability is answered **per gate path**, because the two are not equivalent:
+
+  | path | workflow | full suite? | consequence |
+  |---|---|---|---|
+  | `pull-request` | `quality.yml` | yes (`coverage:check`) | a live-tree test can carry a guard with no named step |
+  | `tag-release` | `tag-release-gate.yml` | **no** | a named step is the only way a check runs |
+
+  All 17 block rules are covered on `pull-request`. **12 are not covered on
+  `tag-release`**, recorded as an exact ratchet in `TAG_PATH_UNCOVERED_BLOCK_RULES` so
+  the gap cannot widen — or close — unnoticed. That is second-order rather than a live
+  breach (a tag is cut from a PR-gated `main`), but `enforce_admins` is false here, so
+  the tag gate is the only check downstream of an admin push to `main`. Whether to make
+  the tag gate mirror the PR gate is a release-engineering decision, left to whoever
+  owns that workflow.
+
+  It proves each block rule *declares* a real backstop that exists, runs somewhere, and
+  is unbypassable on the PR path — not that the backstop detects what the rule
+  describes. That link stays hand-asserted, in `rationale` and in each guard's own tests.
 
 ## Architecture
 

@@ -1,0 +1,42 @@
+- [G1][fleet-dark, agents-dark, skills-hub-dark, dream-lab-dark, inbox-dark, deployments-dark, settings-dark] Dark theme, page chrome, top-right theme toggle, top-right region: the theme toggle sits flush to the far right on most operator surfaces, but on agents-dark it is shifted left because a primary action precedes it, breaking the “same place everywhere” rule for the identical control. Confidence: HIGH.
+
+- [G1][fleet-dark, agents-dark, skills-hub-dark, dream-lab-dark, inbox-dark, deployments-dark, settings-dark] Dark theme, page chrome, top header/title block, top-left region: inbox-dark adds a vertical divider between the wordmark and section name in the header area, while the other operator surfaces show only wordmark + section label without that divider. Header composition is not identical across surfaces. Confidence: HIGH.
+
+- [G2][fleet-dark, agents-dark, skills-hub-dark, dream-lab-dark, deployments-dark, splash-dark, hatch-dark] Dark theme, buttons, primary action buttons, top-right/center regions: the blue primary CTA style drifts between surfaces. Fleet/agents/deployments/skills-hub use relatively compact rectangular blue buttons in the top-right; splash-dark uses a much wider centered blue CTA; hatch-dark uses a blue CTA embedded inside a dark input bar with a noticeably different proportion and visual container relationship. Same action tier is not rendered consistently across surfaces. Confidence: HIGH.
+
+- [G2][dream-lab-dark, settings-dark, agents-dark] Dark theme, buttons, destructive actions, bottom/right regions: destructive buttons are not styled consistently. Dream-lab-dark “Reject” is outlined with red text on dark fill; settings-dark “revoke” and “reset...” use smaller red-outline pills; agents-dark “Retire...” is a larger red-outline button with a different padding scale. Same destructive action type shows visible style drift across operator surfaces. Confidence: HIGH.
+
+- [G3][fleet-dark, agents-dark, skills-hub-dark, dream-lab-dark, inbox-dark, deployments-dark, settings-dark] Dark theme, cards/panels, panel corner treatment, center/right regions: inbox-dark’s chat/message bubbles and composer container use noticeably rounder corners than the standard content panels/cards used across fleet, agents, skills hub, dream lab, deployments, and settings. Panel vocabulary is not using a consistent corner radius family. Confidence: HIGH.
+
+- [G3][fleet-dark, skills-hub-dark, dream-lab-dark, deployments-dark, settings-dark] Dark theme, cards/panels, border/hairline treatment, center regions: settings-dark major panels (Workspace, Notifications, API tokens, Danger zone) have heavier, more continuous border emphasis than the subtler hairline treatment on comparable operator panels in fleet, skills hub, dream lab, and deployments. Border treatment drifts cross-surface. Confidence: MED.
+
+- [G4][fleet-dark, agents-dark, skills-hub-dark, dream-lab-dark, inbox-dark, deployments-dark, settings-dark] Dark theme, type ramp, page titles, top-left region: the page title on agents-dark appears visibly larger/heavier than the page titles on inbox-dark, settings-dark, skills-hub-dark, and deployments-dark. The page-title ramp is not uniform across operator surfaces. Confidence: MED.
+
+- [G4][fleet-dark, agents-dark, dream-lab-dark, deployments-dark, settings-dark] Dark theme, type ramp, section headers, center/right regions: section header styling is inconsistent across surfaces. Example: settings-dark uses large bold section headers (“Workspace”, “Notifications”, “API tokens”, “Danger zone”), while fleet-dark table/panel headings and deployments-dark panel labels are markedly smaller and more utility-like; agents-dark right-column card headings are also smaller than settings-dark’s section headers. Shared section-header ramp is not consistent. Confidence: HIGH.
+
+- [G5][fleet-dark, agents-dark, skills-hub-dark, dream-lab-dark, inbox-dark, deployments-dark, settings-dark] Dark theme, spacing rhythm, outer page padding below top bar, top/center regions: the vertical gap from the top divider/header rule to the first row of content is tighter on fleet-dark and inbox-dark than on skills-hub-dark and deployments-dark, where the first content row sits visibly farther below. Outer page spacing rhythm varies across operator surfaces. Confidence: HIGH.
+
+- [G5][agents-dark, inbox-dark, settings-dark] Dark theme, spacing rhythm, sidebar-to-content gutter, left/center regions: the content starts with different gutter widths from the left navigation divider. Inbox-dark and agents-dark begin content closer to the divider, while settings-dark’s main content is pushed farther right because of the internal settings nav, creating a broken outer rhythm for an operator surface. Confidence: MED.
+
+- [G6][fleet-dark, dream-lab-dark, skills-hub-dark] Dark theme, component vocabulary, badges/pills, center/left regions: outline badges are not rendered identically. Fleet-dark state pills (“live”, “deactivated”) are rounded filled pills; dream-lab-dark type badges (“PERSONA”, “SKILLS”, “ROUTINE”) are outlined capsules with different stroke/height proportions; skills-hub-dark source badges (“OFFICIAL”, “LOCAL”, “COMMUNITY”, “3RD-PARTY”) use another distinct pill construction. Badge vocabulary drifts across surfaces beyond simple label differences. Confidence: HIGH.
+
+- [G6][agents-dark, inbox-dark, dream-lab-dark] Dark theme, component vocabulary, avatars, left/center regions: avatar rendering is inconsistent. Agents-dark roster uses larger square rounded-corner initial tiles; inbox-dark uses smaller circular/squircle contact chips in the thread list plus a square-ish agent chip in the side panel; dream-lab-dark uses medium square initial tiles. The same avatar concept is not rendered identically across surfaces. Confidence: HIGH.
+
+- [G6][agents-dark, skills-hub-dark, settings-dark, inbox-dark] Dark theme, component vocabulary, toggles, right/center regions: toggle switches vary in proportion and visual weight. Agents-dark permission toggles are larger and more prominent; settings-dark notification/theme toggles are smaller and slimmer; inbox-dark takeover toggle uses yet another size/profile. Toggle component vocabulary is inconsistent across surfaces. Confidence: HIGH.
+
+- [G7][fleet-dark, agents-dark, skills-hub-dark, dream-lab-dark, inbox-dark, deployments-dark, settings-dark] Dark theme, density register, settings surface, center/right regions: settings-dark is visibly airier than the other operator surfaces, with larger uninterrupted vertical gaps between rows/sections and fewer information units per viewport height. It breaks the denser operator-surface register shared by fleet, agents, skills hub, inbox, dream lab, and deployments. Confidence: HIGH.
+
+UNCERTAIN
+- [G1][hatch-dark, splash-dark vs operator surfaces] Dark theme, page chrome, overall header composition, top regions: journey surfaces intentionally omit the left operator sidebar and use a different shell; this may be by design under G7, so not promoted to a finding.
+- [G4][splash-dark vs other surfaces] Dark theme, title scale, center region: splash headline is much larger than app page titles, but this likely belongs to journey/marketing register rather than a defect.
+- [G3][hatch-dark vs other panels] Dark theme, ceremony card shadow/glow, center region: hatch uses a larger centered vessel with more atmospheric depth; because journey surfaces may have their own register, this is not certain as a cross-surface defect.
+
+VERDICT fleet-dark: FAIL(8)
+VERDICT hatch-dark: FAIL(1)
+VERDICT agents-dark: FAIL(10)
+VERDICT skills-hub-dark: FAIL(8)
+VERDICT dream-lab-dark: FAIL(8)
+VERDICT inbox-dark: FAIL(8)
+VERDICT deployments-dark: FAIL(7)
+VERDICT settings-dark: FAIL(9)
+VERDICT splash-dark: FAIL(1)

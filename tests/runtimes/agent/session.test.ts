@@ -1543,6 +1543,77 @@ describe('SessionManager', () => {
     vi.useRealTimers();
   });
 
+  it('a watchdog reap is tagged idle_watchdog and sends no second, generic crash notice', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+    const notifyUser = vi.fn();
+    const onCrash = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), instanceName: 'personal', notifyUser, onCrash });
+    await sm.spawnSession();
+    await sm.sendTurn('test message');
+
+    await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS);
+    expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(notifyUser).toHaveBeenCalledWith(expect.stringContaining('inactivity'));
+
+    // The process exit follows the signal we sent.
+    mockChild._exitCb?.(null, 'SIGKILL');
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(onCrash).toHaveBeenCalledTimes(1);
+    expect(onCrash.mock.calls[0][0]).toMatchObject({
+      signal: 'SIGKILL',
+      terminationReason: 'idle_watchdog',
+      crashClass: 'idle_watchdog',
+    });
+    // The inactivity notice already explained the termination; the generic line is suppressed.
+    expect(sentMessages.filter((m) => m.text.includes('session ended'))).toHaveLength(0);
+
+    vi.useRealTimers();
+  });
+
+  it('a SIGKILL the manager did not issue is still an untagged crash', async () => {
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+    const onCrash = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), onCrash });
+    await sm.spawnSession();
+
+    // Killed by something else entirely (OOM killer, operator, systemd).
+    mockChild._exitCb?.(null, 'SIGKILL');
+
+    await vi.waitFor(() => expect(onCrash).toHaveBeenCalledTimes(1));
+    expect(onCrash.mock.calls[0][0].terminationReason).toBeUndefined();
+    await vi.waitFor(() => expect(sentMessages.some((m) => m.text.includes('session ended'))).toBe(true));
+  });
+
+  it('a reap intent does not excuse an exit that does not match the signal we sent', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const onCrash = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), instanceName: 'personal', notifyUser: vi.fn(), onCrash });
+    await sm.spawnSession();
+    await sm.sendTurn('test message');
+
+    await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS);
+
+    // The child dies of a different cause before our SIGKILL lands — that is a real crash.
+    mockChild._exitCb?.(null, 'SIGSEGV');
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(onCrash).toHaveBeenCalledTimes(1);
+    expect(onCrash.mock.calls[0][0].terminationReason).toBeUndefined();
+
+    vi.useRealTimers();
+  });
+
   it('clearTurnWatchdog prevents all 3 tiers from firing', async () => {
     vi.useFakeTimers();
 

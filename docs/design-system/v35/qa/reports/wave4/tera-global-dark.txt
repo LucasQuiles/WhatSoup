@@ -1,0 +1,27 @@
+1. **[G1] HIGH — Affected: Inbox.** Dark theme, sidebar nameplate, top-left: a vertical divider splits “SOUP” from “INBOX,” and the context label sits visibly closer to the wordmark. Fleet, Agents, Skills Hub, Dream Lab, Deployments, and Settings use the undivided nameplate composition.
+
+2. **[G1] HIGH — Affected: Splash.** Dark theme, journey nameplate, upper center: Splash enlarges and centers the standalone “SOUP” wordmark. Hatch uses a smaller, left-aligned “SOUP HATCH” nameplate above its journey content, breaking position, size, and composition consistency.
+
+3. **[G1][G2] HIGH — Affected: Splash.** Dark theme, theme-toggle control, top-right: the control is visibly narrower and its label heavier than the same control on Hatch and every operator surface.
+
+4. **[G3] MED — Affected: Hatch.** Dark theme, ceremony panel, center: its corner curvature is visibly stronger than the feature cards on Splash and the recurring panels across operator surfaces.
+
+5. **[G5] HIGH — Affected: Settings.** Dark theme, Workspace content pane, upper center-left: the heading and first panel sit much closer to the internal divider than content does in the corresponding right panes of Agents, Skills Hub, and Dream Lab.
+
+6. **[G6] HIGH — Affected: Deployments.** Dark theme, Hosts list, bottom-left: green host markers become elongated ovals and the amber marker becomes an oversized diagonal bar. Other sidebar-bearing surfaces use compact green circles and amber diamonds.
+
+7. **[G6] MED — Affected: Inbox.** Dark theme, selected conversation, left-center: selection uses a flat full-width row with only a blue leading edge. Agents and Dream Lab render selected master-list items as rounded cards with a complete blue outline.
+
+8. **[G6] MED — Affected: Agents.** Dark theme, Assigned lines panel, center-left: Community, Personal, and Builds use generic speech-bubble glyphs. Fleet represents those same lines with recognizable WhatsApp and Discord channel glyphs.
+
+| Verdict |
+|---|
+| VERDICT fleet-dark: PASS |
+| VERDICT hatch-dark: FAIL(1) |
+| VERDICT agents-dark: FAIL(1) |
+| VERDICT skills-hub-dark: PASS |
+| VERDICT dream-lab-dark: PASS |
+| VERDICT inbox-dark: FAIL(2) |
+| VERDICT deployments-dark: FAIL(1) |
+| VERDICT settings-dark: FAIL(1) |
+| VERDICT splash-dark: FAIL(2) |

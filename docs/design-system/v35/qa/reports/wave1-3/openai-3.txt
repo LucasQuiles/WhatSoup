@@ -1,0 +1,241 @@
+## deployments-dark.png
+
+### Rule violations
+
+1. **Green status communicated by color-only dots/pills**
+   - **Location:** Bottom sync row in first card (“org skills hub — synced 6m ago…”), bottom sync row in third card (“synced 6m ago”); green “healthy” pills on `local` and `field-pi`.
+   - **Rule:** 2
+   - **Severity:** High
+   - **Issue:** Health/sync state is indicated with green color and text, but there is no required shape-coded status marker system (disc/diamond/square/outline) evident. The tiny green dots are not part of a consistent explicit shape-coded legend/system and the pill itself relies on color.
+
+2. **Amber degraded status communicated by color-only pill**
+   - **Location:** `nest-2` card, “degraded” badge.
+   - **Rule:** 2
+   - **Severity:** High
+   - **Issue:** Degraded state is conveyed via amber color and label, without the required shape-coded status indicator.
+
+3. **Amber issue/status dot communicated by color-only**
+   - **Location:** Bottom sync/status row of `nest-2` card (“sync stalled 2h” with amber dot).
+   - **Rule:** 2
+   - **Severity:** High
+   - **Issue:** Warning/degraded sync state appears color-only.
+
+4. **Non-accent violet used semantically for identity/tagging**
+   - **Location:** Header chip “admin lane”.
+   - **Rule:** 1
+   - **Severity:** Medium
+   - **Issue:** Violet is being used as a semantic chip outside clearly defined mode-color usage. It appears to denote a role/context label, which is not actions/focus/selection and not obviously a mode switch.
+
+5. **Non-accent violet used on agent chips**
+   - **Location:** Agent tags such as `quinn`, `lumen`, `+5`, `forge`, `+2`, `sable`, `+1`.
+   - **Rule:** 1
+   - **Severity:** Medium
+   - **Issue:** Violet is used to encode chip/category meaning. This is not action/focus/selection, and mode-color use is not established here.
+
+6. **Blue accent used as content emphasis rather than action/focus/selection**
+   - **Location:** `nest-2` card text link/version notice “update to 3.2.1”.
+   - **Rule:** 1
+   - **Severity:** Medium
+   - **Issue:** Blue is being used inline as informational emphasis inside a status string, not a primary action control. If it is clickable, affordance is weak; if not clickable, accent misuse.
+
+7. **Blue accent used in non-button text action with weak affordance**
+   - **Location:** Bottom-right of first and third cards, “pull updates ↓”; bottom-right of second card, “retry ↑”.
+   - **Rule:** 7
+   - **Severity:** High
+   - **Issue:** These appear interactive but are styled as bare text links with minimal affordance, unlike buttons elsewhere.
+
+8. **Potential sub-11px essential text**
+   - **Location:** Card metadata rows: “linux-systemd · 192.168.1.10 · primary”, “docker · 192.168.1.14:3100 · paired 2026-07-18”, similar subtitles and stat footnotes.
+   - **Rule:** 4
+   - **Severity:** Medium
+   - **Issue:** Several metadata lines appear around 10px monospace or smaller and carry essential deployment details.
+
+9. **Low-contrast essential metadata**
+   - **Location:** IPs, host details, paired dates, mini labels under top summary cards, version strings like `v3.2.1`, resource strings like `6.1GB / 16GB`.
+   - **Rule:** 4
+   - **Severity:** Medium
+   - **Issue:** Important operational information is rendered in muted low-contrast text.
+
+10. **Identifier masking rule not followed for sensitive-looking identifiers**
+    - **Location:** Full IP addresses and host:port values shown in deployment subtitles.
+    - **Rule:** 6
+    - **Severity:** Low
+    - **Issue:** Rule permits masking; this surface exposes full identifiers. Not always mandatory, but given the rule’s privacy expectation, this is a conformance concern for potentially sensitive infrastructure identifiers.
+
+### Other visual defects
+
+1. **Inconsistent action treatment**
+   - **Location:** Header “+ Pair deployment” is a filled button; “console/logs” are outlined pills; “pull updates/retry” are bare text.
+   - **Severity:** Medium
+   - **Issue:** Action hierarchy and affordance are inconsistent across the same surface.
+
+2. **Card iconography lacks clear semantic distinction**
+   - **Location:** Left icons for `local`, `nest-2`, `field-pi`.
+   - **Severity:** Low
+   - **Issue:** Similar dark rounded-square containers with minimal glyph differentiation reduce scanability.
+
+3. **Section density causes weak grouping**
+   - **Location:** Mid-card stat sections (LINES / AGENTS / LOAD / UPTIME etc.).
+   - **Severity:** Low
+   - **Issue:** Vertical separators are subtle; content blocks visually blend together.
+
+4. **Bottom CTA area has weak primary emphasis**
+   - **Location:** “Pair a new deployment” panel.
+   - **Severity:** Medium
+   - **Issue:** The code box dominates while “Enter code” and “Show QR” buttons are small and visually secondary, reducing discoverability of next steps.
+
+5. **Dashed border on pairing panel reads as disabled**
+   - **Location:** Entire “Pair a new deployment” container.
+   - **Severity:** Medium
+   - **Issue:** Dashed perimeter suggests placeholder/disabled/dropzone state rather than active setup flow.
+
+**Violation count for deployments-dark.png: 10 rule violations, 5 other defects**
+
+---
+
+## settings-dark.png
+
+### Rule violations
+
+1. **Blue used for selected navigation state**
+   - **Location:** Left sidebar selected item “Workspace” with blue outline/accent edge.
+   - **Rule:** 1
+   - **Severity:** Low
+   - **Issue:** This is acceptable only if blue is the sole accent for selection; however additional blue appears elsewhere for other meanings, creating conformance drift.
+
+2. **Blue used to communicate enabled toggle state**
+   - **Location:** Notification toggles for “Browser push” and “Webhook”.
+   - **Rule:** 1
+   - **Severity:** Medium
+   - **Issue:** Blue is being used as a binary state color rather than purely action/focus/selection. Enabled/disabled state should not depend on accent semantics.
+
+3. **Color-only toggle state**
+   - **Location:** All toggles in Workspace and Notifications sections.
+   - **Rule:** 2
+   - **Severity:** High
+   - **Issue:** On/off state is primarily conveyed through color fill and knob position; no explicit shape-coded status system is used for statusful controls.
+
+4. **Appearance theme thumbnails use blue as thematic fill/meaning**
+   - **Location:** Three theme preview chips in “Appearance”.
+   - **Rule:** 1
+   - **Severity:** Medium
+   - **Issue:** Blue bars/areas within thumbnails communicate selected theme/content coloration beyond action/focus/selection.
+
+5. **Potential sub-11px essential helper text**
+   - **Location:** Descriptions such as “shown in nav + splash”, “single admin across all surfaces”, “follows system; ceremony becomes instant”, token metadata lines.
+   - **Rule:** 4
+   - **Severity:** Medium
+   - **Issue:** These appear very small and are operationally important.
+
+6. **Low-contrast essential text**
+   - **Location:** Section descriptions, token scopes (`fleet:read fleet:write` etc.), dates, notification timing labels, danger-zone explanatory copy.
+   - **Rule:** 4
+   - **Severity:** Medium
+   - **Issue:** Important settings details are rendered in muted low-contrast text.
+
+7. **Danger actions rely on red text color without additional shape/status coding**
+   - **Location:** “Export all data” / “Reset workspace” section and red “revoke” / “reset…” labels.
+   - **Rule:** 2
+   - **Severity:** Medium
+   - **Issue:** Destructive semantics are conveyed largely by red color and border/text treatment, without distinct required shape-coded status indicators.
+
+### Other visual defects
+
+1. **Ambiguous interactivity for theme thumbnails**
+   - **Location:** “Appearance” preview swatches.
+   - **Severity:** Medium
+   - **Issue:** They may be selectable, but they look like static samples more than buttons.
+
+2. **Weak visual separation in stacked settings rows**
+   - **Location:** Workspace card rows.
+   - **Severity:** Low
+   - **Issue:** Dividers are faint; labels and controls visually compress.
+
+3. **Sidebar balance issue**
+   - **Location:** Left nav vs main content.
+   - **Severity:** Low
+   - **Issue:** Large empty vertical gutter under sidebar items wastes space and makes the page feel left-heavy.
+
+4. **Edit button too visually subordinate**
+   - **Location:** “Webhook” row.
+   - **Severity:** Medium
+   - **Issue:** The tiny outlined “edit” control is easy to miss next to the toggle.
+
+5. **Destructive panel lacks hierarchy between export and reset**
+   - **Location:** Bottom danger zone.
+   - **Severity:** Medium
+   - **Issue:** Export and reset are both red-emphasized blocks; reset should be more visually isolated than export.
+
+**Violation count for settings-dark.png: 7 rule violations, 5 other defects**
+
+---
+
+## splash-dark.png
+
+### Rule violations
+
+1. **Blue accent used as semantic headline emphasis**
+   - **Location:** Hero headline word “fleet.”
+   - **Rule:** 1
+   - **Severity:** High
+   - **Issue:** Blue is used for brand/content emphasis, not action/focus/selection.
+
+2. **Blue accent used in logo wordmark**
+   - **Location:** “SOUP” logo, blue “U”.
+   - **Rule:** 1
+   - **Severity:** Medium
+   - **Issue:** Accent blue is embedded in brand mark coloration, introducing additional chromatic meaning unrelated to action/focus/selection.
+
+3. **Blue accent used on top-right theme icon button state/outline**
+   - **Location:** Theme button in top-right if active/focus tint is intended.
+   - **Rule:** 1
+   - **Severity:** Low
+   - **Issue:** Minor, but contributes to blue being used in multiple semantic roles across the experience.
+
+4. **Decorative gradients/soft glows present outside hatch ceremony**
+   - **Location:** Large diffuse dark circular glow/gradient in upper-left background; soft vignette-like polygonal shapes at corners.
+   - **Rule:** 5
+   - **Severity:** High
+   - **Issue:** Background includes glow/gradient-style decorative effects. Rule allows only one radial glow at the hatch ceremony moment; this is a generic splash screen, not a hatch event.
+
+5. **Potential low-contrast small card kicker text**
+   - **Location:** “01 — HATCH”, “02 — COMMAND”, “03 — TRUST”.
+   - **Rule:** 4
+   - **Severity:** Medium
+   - **Issue:** These labels appear tiny and muted.
+
+6. **Potential sub-11px card kicker text**
+   - **Location:** Same three feature card eyebrow labels.
+   - **Rule:** 4
+   - **Severity:** Medium
+   - **Issue:** Likely below minimum size.
+
+7. **Secondary CTA has weak button affordance**
+   - **Location:** “Open the Fleet”.
+   - **Rule:** 7
+   - **Severity:** High
+   - **Issue:** It appears to be a plain text link adjacent to the primary CTA, but functions as a key navigation action.
+
+### Other visual defects
+
+1. **Decorative corner shapes distract from centered hero**
+   - **Location:** Upper-left and lower-right background blobs/polygons.
+   - **Severity:** Low
+   - **Issue:** They add visual noise without supporting the content.
+
+2. **CTA spacing is awkward**
+   - **Location:** Between “Hatch your first agent →” and “Open the Fleet”.
+   - **Severity:** Low
+   - **Issue:** Secondary action feels detached rather than grouped as a clear action cluster.
+
+3. **Feature cards are under-emphasized**
+   - **Location:** Bottom three cards.
+   - **Severity:** Low
+   - **Issue:** Borders are subtle and cards sit visually flat against background.
+
+4. **Hero paragraph line breaks look manually forced**
+   - **Location:** Main supporting text under headline.
+   - **Severity:** Low
+   - **Issue:** The wrap creates slightly uneven rhythm and a narrow text block.
+
+**Violation count for splash-dark.png: 7 rule violations, 4 other defects**

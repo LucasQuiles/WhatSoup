@@ -109,6 +109,8 @@ const requiredPackageScripts = {
     'npm run guard:fail-closed-gate',
     'npm run guard:service-units',
     'npm run guard:insecure-tempfile',
+    'npm run guard:no-destructive-git',
+    'npm run guard:grant-resolver',
     'npm run guard:instance-config',
     'npm run guard:guard-test-coverage',
     'npm run guard:lint:src',

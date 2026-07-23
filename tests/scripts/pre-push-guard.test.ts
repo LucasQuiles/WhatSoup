@@ -20,6 +20,11 @@ import {
   commandsForDecision,
   ZERO_SHA,
 } from '../../scripts/pre-push-guard.ts';
+import {
+  CI_EXEMPT_PUSH_GATE_GUARDS,
+  namedInCi as namedInCiWorkflow,
+  pushGateGuards as pushGateGuardsOf,
+} from '../helpers/gate-membership.ts';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const prePushHook = resolve(repoRoot, '.husky/pre-push');
@@ -522,7 +527,7 @@ describe('quality workflow composition', () => {
     expect(setupPythonIndex).toBeGreaterThanOrEqual(0);
     expect(pythonDepsIndex).toBeGreaterThan(setupPythonIndex);
     expect(testIntegrityIndex).toBeGreaterThan(pythonDepsIndex);
-    expect(qualityWorkflow).toContain('uses: actions/setup-python@v5');
+    expect(qualityWorkflow).toMatch(/uses: actions\/setup-python@[0-9a-f]{40}/);
     expect(qualityWorkflow).toContain("python-version: '3.12'");
     expect(qualityWorkflow).toContain('python3 -m pip install --user pytest pytest-cov');
   });
@@ -572,5 +577,111 @@ describe('quality workflow composition', () => {
     expect(stepIndex).toBeGreaterThan(commentIndex);
     expect(tagReleaseWorkflow).toContain('PR and local push gates remain the authoritative non-vacuous author scans.');
     expect(tagReleaseWorkflow).toContain('run: npm run guard:repo:commit-authors');
+  });
+});
+
+/**
+ * Local push gate ⊄ CI: a guard that runs ONLY in `verify:push:branch` is enforced by a
+ * client-side hook, and client-side hooks are advisory. `gh pr merge`, the GitHub merge
+ * button, `--no-verify`, or a clone where husky was never installed all bypass it entirely.
+ *
+ * Real instance (2026-07-22): `guard:transport-patterns` backed three `severity: 'block'`
+ * registry rules — `hygiene.no-wa-jid-literal-in-generic-ui`,
+ * `hygiene.no-whatsapp-copy-in-generic-ui`, `hygiene.no-health-whatsapp-key-read` — and
+ * appeared in NO workflow and not in `verify:release`. Its only CI-executed test asserted
+ * `violations.length > 0`, a smoke test that passes just as happily with MORE violations.
+ * So a PR merged through the UI could ship a new violation of a block rule with nothing
+ * catching it. It is now a named step in `quality.yml`.
+ *
+ * A guard may legitimately have no named CI step when something else runs the same
+ * assertion on the live tree inside the full suite (which CI runs via `coverage:check`).
+ * That is fine — but it must be STATED, not assumed, which is what the exemption map is
+ * for. The second test deletes stale entries by failing when an exemption is no longer
+ * needed, so the map cannot quietly become a list of excuses.
+ */
+/**
+ * The exemption map and the two membership predicates now live in
+ * `tests/helpers/gate-membership.ts`, because a second suite needs the same answer:
+ * `fitness-registry-backing.test.ts` asks whether each `severity: 'block'` registry rule
+ * names a backstop a server-side merge cannot bypass. Two independent definitions of
+ * "gate-reachable" would drift, and a drifting protection claim is precisely the failure
+ * this file was written to catch — so there is one definition and both suites import it.
+ */
+describe('pre-push guard — local/CI enforcement parity for guard steps', () => {
+  const pushGateGuards = pushGateGuardsOf(packageJson.scripts);
+  const namedInCi = (guard: string): boolean => namedInCiWorkflow(guard, qualityWorkflow);
+
+  it('the push gate actually contains guards (the scan is not vacuous)', () => {
+    expect(pushGateGuards.length).toBeGreaterThan(20);
+  });
+
+  it('every push-gate guard is either a named CI step or an explicitly justified exemption', () => {
+    const unbacked = pushGateGuards.filter((g) => !namedInCi(g) && !(g in CI_EXEMPT_PUSH_GATE_GUARDS));
+    expect(
+      unbacked,
+      unbacked.length === 0
+        ? ''
+        : `These guards run ONLY in the local push gate, which any server-side merge bypasses:\n` +
+          unbacked.map((g) => `  - ${g}`).join('\n') +
+          `\nAdd a named step to .github/workflows/quality.yml, or add an entry to ` +
+          `CI_EXEMPT_PUSH_GATE_GUARDS naming the live-tree test that enforces it in the full suite.`,
+    ).toEqual([]);
+  });
+
+  it('no stale exemptions — an exempted guard that gained a CI step must leave the map', () => {
+    const nowRedundant = Object.keys(CI_EXEMPT_PUSH_GATE_GUARDS).filter((g) => namedInCi(g));
+    expect(
+      nowRedundant,
+      `These now have a named CI step, so their exemption is obsolete — delete it: ${nowRedundant.join(', ')}`,
+    ).toEqual([]);
+  });
+
+  it('every exemption names a real guard that the push gate actually runs', () => {
+    const orphaned = Object.keys(CI_EXEMPT_PUSH_GATE_GUARDS).filter((g) => !pushGateGuards.includes(g));
+    expect(orphaned, `exemptions for guards not in verify:push:branch: ${orphaned.join(', ')}`).toEqual([]);
+  });
+
+  it('guard:transport-patterns has a named CI step (the block rules it backs are not hook-only)', () => {
+    // The specific regression. Three severity:'block' rules depended on a client-side hook.
+    expect(qualityWorkflow).toMatch(/npm run guard:transport-patterns/);
+  });
+
+  it('every exemption that claims a backing test names a file that EXISTS', () => {
+    // Without this, deleting the backing test silently converts a justified exemption into
+    // an unenforced guard — the map would keep asserting coverage that no longer exists.
+    const missing = Object.entries(CI_EXEMPT_PUSH_GATE_GUARDS)
+      .filter(([, v]) => v.backedBy !== null)
+      .filter(([, v]) => !existsSync(resolve(repoRoot, v.backedBy as string)))
+      .map(([guard, v]) => `${guard} -> ${v.backedBy as string}`);
+    expect(
+      missing,
+      `exemption(s) naming a backing test that no longer exists: ${missing.join(', ')}`,
+    ).toEqual([]);
+  });
+
+  it('every backing test is actually COLLECTED by the suite CI runs', () => {
+    // Existing on disk is not enough — a test under an excluded path never runs, so the
+    // exemption would rest on a file CI silently skips. vitest.config.ts collects
+    // `tests/**/*.test.ts` and excludes tests/browser/** and tests/browser-motion/**.
+    const include = /^tests\/.+\.test\.tsx?$/;
+    const excluded = [/^tests\/browser\//, /^tests\/browser-motion\//];
+    const uncollected = Object.entries(CI_EXEMPT_PUSH_GATE_GUARDS)
+      .filter(([, v]) => v.backedBy !== null)
+      .filter(([, v]) => {
+        const p = v.backedBy as string;
+        return !include.test(p) || excluded.some((re) => re.test(p));
+      })
+      .map(([guard, v]) => `${guard} -> ${v.backedBy as string}`);
+    expect(
+      uncollected,
+      `backing test(s) outside the collected glob, so CI never runs them: ${uncollected.join(', ')}`,
+    ).toEqual([]);
+  });
+
+  it('every exemption states a reason', () => {
+    const blank = Object.entries(CI_EXEMPT_PUSH_GATE_GUARDS)
+      .filter(([, v]) => v.why.trim().length < 20)
+      .map(([guard]) => guard);
+    expect(blank, `exemption(s) without a substantive reason: ${blank.join(', ')}`).toEqual([]);
   });
 });

@@ -1,0 +1,50 @@
+## fleet-light.png
+
+*   **Top/Left/Center/Right/Bottom + Side Navigation** - Side navigation text labels are misaligned with icons, creating a visual imbalance - Med
+*   **Top/Left/Center/Right/Bottom + "Fleet" Header** - Header text "Fleet" has unusually tight left padding - Low
+*   **Top/Left/Center/Right/Bottom + "Lines" Table Header** - Table header row has inconsistent vertical spacing between header cells - Low
+*   **Top/Left/Center/Right/Bottom + "Lines" Table Row (Personal)** - Overflowing text on the “Personal” line’s channel - Med
+*   **Top/Left/Center/Right/Bottom + "Lines" Table Row (Personal)** - The "grants" bar (color indicators) is very small and difficult to visually interpret - Low
+*   **Top/Left/Center/Right/Bottom + "Lines" Table Row (Community)** - The "grants" bar (color indicators) is very small and difficult to visually interpret - Low
+*   **Top/Left/Center/Right/Bottom + "Lines" Table Row (Studio)** - The "grants" bar (color indicators) is very small and difficult to visually interpret - Low
+*   **Top/Left/Center/Right/Bottom + "Lines" Table Row (Alerts)** - The "grants" bar (color indicators) is very small and difficult to visually interpret - Low
+*   **Top/Left/Center/Right/Bottom + "Lines" Table Row (Support)** - The "grants" bar (color indicators) is very small and difficult to visually interpret - Low
+*   **Top/Left/Center/Right/Bottom + "Lines" Table Row (Announce)** - The "grants" bar (color indicators) is very small and difficult to visually interpret - Low
+*   **Top/Left/Center/Right/Bottom + "Lines" Table Row (Builds)** - The "grants" bar (color indicators) is very small and difficult to visually interpret - Low
+*   **Top/Left/Center/Right/Bottom + "Lines" Table Row (News)** - The "grants" bar (color indicators) is very small and difficult to visually interpret - Low
+*   **Top/Left/Center/Right/Bottom + "Lines" Table Row (ClientDesk)** - The "grants" bar (color indicators) is very small and difficult to visually interpret - Low
+*   **Top/Left/Center/Right/Bottom + "Lines" Table Row (FieldNotes)** - The "grants" bar (color indicators) is very small and difficult to visually interpret - Low
+*   **Right/Top/Center/Right/Bottom + Activity Feed** - Activity Feed entries have inconsistent padding and spacing - Low
+*   **Right/Top/Center/Right/Bottom + Activity Feed Entry (Quinn)** - Long strings in activity feed entry truncated without ellipsis - Med
+*   **Right/Top/Center/Right/Bottom + Activity Feed Entry (Studio)** - Long strings in activity feed entry truncated without ellipsis - Med
+*   **Right/Top/Center/Right/Bottom + Activity Feed Entry (Support)** - Long strings in activity feed entry truncated without ellipsis - Med
+*   **Right/Top/Center/Right/Bottom + Activity Feed Entry (Dream Lab)** - Long strings in activity feed entry truncated without ellipsis - Med
+*   **Right/Top/Center/Right/Bottom + Activity Feed Entry (Skills Hub)** - Long strings in activity feed entry truncated without ellipsis - Med
+*   **Right/Top/Center/Right/Bottom + Activity Feed Entry (Beacon)** - Long strings in activity feed entry truncated without ellipsis - Med
+*   **Right/Top/Center/Right/Bottom + Activity Feed Entry (ClientDesk)** - Long strings in activity feed entry truncated without ellipsis - Med
+
+**Defect Count: 24**
+
+## hatch-light.png
+
+*   **Top/Left/Center/Right/Bottom + Agent Avatar** - Avatar circle overlaps header slightly - Low
+*   **Top/Left/Center/Right/Bottom + Agent Description** - Description text is too light gray on white background, making it almost unreadable - High
+*   **Center/Left/Center/Right/Bottom + "Pick a channel" section** - Channel options are crammed together with insufficient padding, making selection difficult - Med
+*   **Center/Left/Center/Right/Bottom + Messaging Channels** - Messaging channel icons are too small - Low
+*   **Center/Left/Center/Right/Bottom + Social Channels** - Social channel icons are too small - Low
+*   **Center/Left/Center/Right/Bottom + Channel Channels** - Channel channel icons are too small - Low
+*   **Center/Left/Center/Right/Bottom + Channel Icons** - Inconsistent sizing of channel icons makes the layout look disjointed - Low
+*   **Bottom/Center/Left/Right/Bottom + "Send & go live" Button** - Button could use more visual emphasis - Low
+*   **Bottom/Center/Left/Right/Bottom + "Skip ceremony" Button** - Button could use more visual emphasis - Low
+*   **Bottom/Center/Left/Right/Bottom + "Adjust persona" Button** - Button could use more visual emphasis - Low
+
+**Defect Count: 10**
+
+## splash-light.png
+
+*   **Top/Center/Left/Right/Bottom + Title Text "SOUP"** - Text color is similar to the background color, making it difficult to read - High
+*   **Top/Center/Left/Right/Bottom + Title Text "Hatch"** - Text color is similar to the background color, making it difficult to read - High
+*   **Center/Center/Left/Right/Bottom + Body Text** - Body text is difficult to read on white background (low contrast) - High
+*   **Center/Center/Left/Right/Bottom + Icon Alignment** - The placement of the icons do not flow well with the copy - Low
+
+**Defect Count: 4**
