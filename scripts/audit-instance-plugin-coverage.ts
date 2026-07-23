@@ -1,3 +1,4 @@
+import { takeValue } from './lib/cli-args.ts';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -84,11 +85,20 @@ export function parseArgs(argv: string[]): ParsedArgs {
     if (arg === '--help' || arg === '-h') {
       args.help = true;
     } else if (arg === '--root') {
-      args.root = argv[++i] ?? '';
+      // takeValue, not `argv[++i] ?? ''`. The old form made `--root --fail-on-gap` set
+      // root='--fail-on-gap' and leave failOnGap FALSE — an audit the operator explicitly
+      // asked to fail on gaps, silently reporting success instead.
+      const taken = takeValue(argv, i);
+      args.root = taken.value;
+      i = taken.index;
     } else if (arg === '--settings') {
-      args.settingsPath = argv[++i] ?? '';
+      const taken = takeValue(argv, i);
+      args.settingsPath = taken.value;
+      i = taken.index;
     } else if (arg === '--instance') {
-      args.instances.push(argv[++i] ?? '');
+      const taken = takeValue(argv, i);
+      args.instances.push(taken.value);
+      i = taken.index;
     } else if (arg === '--json') {
       args.json = true;
     } else if (arg === '--fail-on-gap') {
