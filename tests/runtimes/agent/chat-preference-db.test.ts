@@ -10,7 +10,7 @@
  * Construction pattern mirrors fallback-state-db.test.ts: real Database,
  * temp file, cleanup after each test.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { unlinkSync, existsSync } from 'node:fs';
@@ -24,6 +24,7 @@ import {
   pruneExpired,
   getLatestChatPreference,
   clearChatPreference,
+  promoteToSticky,
   type ChatModelPreference,
 } from '../../../src/runtimes/agent/chat-preference-db.ts';
 
@@ -349,5 +350,112 @@ describe('chat-scoped read-collapse (latest-writer-wins)', () => {
     // The corrupt row IS the latest by updated_at — the shared validator
     // rejects it fail-safe rather than falling through to SENDER_A's row.
     expect(getLatestChatPreference(db, CHAT_A, NOW)).toBeNull();
+  });
+});
+
+// promoteToSticky — Q-CANARY model-pin `keep` contract (2026-07-23). The
+// compare-and-set that turns the active preference row (the receipt itself,
+// no parallel confirmation state) into a permanent pin: scope='sticky' and
+// expires_at=NULL land in ONE statement, gated on the row still matching
+// what was read, and only the sender who set the row may confirm it.
+// Raw on-disk read, bypassing getPreference's own expiry-based nulling — used
+// ONLY to confirm a rejected promoteToSticky call left the row's columns
+// untouched, independent of whether that row would also read as "expired" at
+// some arbitrary later probe time.
+function rawRow(chatJid: string, senderJid: string): { scope: string; expires_at: number | null; updated_at: number } | undefined {
+  return db.raw
+    .prepare(`SELECT scope, expires_at, updated_at FROM chat_model_preference WHERE chat_jid = ? AND sender_jid = ?`)
+    .get(chatJid, senderJid) as { scope: string; expires_at: number | null; updated_at: number } | undefined;
+}
+
+describe('promoteToSticky (CAS keep-promotion)', () => {
+  it('promotes a live this_thread pin: scope and expires_at flip together, updated_at bumps', () => {
+    setPreference(db, pref({ updatedAt: 1_000, expiresAt: 2_000 }));
+    const result = promoteToSticky(db, CHAT_A, SENDER_A, 1_500);
+    expect(result.outcome).toBe('promoted');
+    expect(result.preference).toMatchObject({ scope: 'sticky', expiresAt: null });
+    const row = getPreference(db, CHAT_A, SENDER_A, 9_999_999);
+    expect(row).toMatchObject({ scope: 'sticky', expiresAt: null });
+    expect(row?.updatedAt).toBeGreaterThan(1_000);
+  });
+
+  it('emits no further mutation for an already-sticky row (idempotent replay)', () => {
+    setPreference(db, pref({ scope: 'sticky', updatedAt: 1_000, expiresAt: null }));
+    const result = promoteToSticky(db, CHAT_A, SENDER_A, 1_500);
+    expect(result.outcome).toBe('already_sticky');
+    expect(getPreference(db, CHAT_A, SENDER_A, 9_999_999)?.updatedAt).toBe(1_000);
+  });
+
+  it('reports absent when nothing was ever pinned for the chat', () => {
+    const result = promoteToSticky(db, CHAT_A, SENDER_A, 1_500);
+    expect(result.preference).toBeNull();
+    expect(result.outcome).toBe('absent');
+  });
+
+  it('reports expired (not absent) for a pin that lapsed before the eligibility instant — never resurrected', () => {
+    setPreference(db, pref({ updatedAt: 1_000, expiresAt: 2_000 }));
+    const result = promoteToSticky(db, CHAT_A, SENDER_A, 2_001); // nowMs past expiresAt
+    expect(result.outcome).toBe('expired');
+    expect(result.preference).toBeNull();
+    expect(rawRow(CHAT_A, SENDER_A)).toMatchObject({ scope: 'this_thread' });
+  });
+
+  it('eligibility uses the CALLER-supplied nowMs, not wall-clock — an on-time receive survives late processing', () => {
+    setPreference(db, pref({ updatedAt: 1_000, expiresAt: 2_000 }));
+    // nowMs = the inbound's own receive time, still inside the window, even
+    // though this assertion itself runs "later" in wall-clock terms.
+    const result = promoteToSticky(db, CHAT_A, SENDER_A, 1_999);
+    expect(result.outcome).toBe('promoted');
+  });
+
+  it('refuses a confirming sender who did not set the chat\'s winning row (actor_mismatch) — never resurrects it under a different actor', () => {
+    setPreference(db, pref({ senderJid: SENDER_A, updatedAt: 1_000, expiresAt: 2_000 }));
+    const result = promoteToSticky(db, CHAT_A, SENDER_B, 1_500);
+    expect(result.outcome).toBe('actor_mismatch');
+    expect(result.preference).toMatchObject({ senderJid: SENDER_A });
+    expect(rawRow(CHAT_A, SENDER_A)).toMatchObject({ scope: 'this_thread' });
+  });
+
+  it('a later pin from a different sender becomes the chat winner — the original setter\'s "keep" is rejected, not resurrected', () => {
+    setPreference(db, pref({ chatJid: CHAT_A, senderJid: SENDER_A, updatedAt: 1_000, expiresAt: 5_000 }));
+    setPreference(db, pref({ chatJid: CHAT_A, senderJid: SENDER_B, updatedAt: 2_000, expiresAt: 5_000 }));
+    const result = promoteToSticky(db, CHAT_A, SENDER_A, 2_500);
+    expect(result.outcome).toBe('actor_mismatch');
+    // Neither row was mutated by the rejected attempt.
+    expect(rawRow(CHAT_A, SENDER_A)).toMatchObject({ scope: 'this_thread', expires_at: 5_000 });
+    expect(rawRow(CHAT_A, SENDER_B)).toMatchObject({ scope: 'this_thread', expires_at: 5_000 });
+  });
+
+  it('rejects promotion when a concurrent writer changes the row between read and write (superseded) — never resurrects a stale receipt', () => {
+    setPreference(db, pref({ updatedAt: 1_000, expiresAt: 5_000 }));
+    const originalPrepare = db.raw.prepare.bind(db.raw);
+    const prepareSpy = vi.spyOn(db.raw, 'prepare').mockImplementation((sql: string) => {
+      const stmt = originalPrepare(sql);
+      if (typeof sql === 'string' && sql.includes(`SET scope = 'sticky'`)) {
+        // Race window: a concurrent writer (a fresh /model pin, a reset+repin,
+        // a second "keep") lands between promoteToSticky's read and its own
+        // CAS write, in the exact window the predicate exists to close.
+        originalPrepare(
+          `UPDATE chat_model_preference SET updated_at = ? WHERE chat_jid = ? AND sender_jid = ?`,
+        ).run(1_200, CHAT_A, SENDER_A);
+      }
+      return stmt;
+    });
+
+    const result = promoteToSticky(db, CHAT_A, SENDER_A, 1_100);
+    prepareSpy.mockRestore();
+
+    expect(result.outcome).toBe('superseded');
+    expect(result.preference).toBeNull();
+    const row = rawRow(CHAT_A, SENDER_A);
+    expect(row?.scope).toBe('this_thread'); // never resurrected as sticky
+    expect(row?.updated_at).toBe(1_200); // the racing writer's version stands
+  });
+
+  it('a corrupt winning row (fail-safe validator) is treated as absent, never confirmed', () => {
+    setPreference(db, pref({ updatedAt: 1_000, expiresAt: 5_000 }));
+    db.raw.prepare(`UPDATE chat_model_preference SET intent = 'banana' WHERE chat_jid = ? AND sender_jid = ?`).run(CHAT_A, SENDER_A);
+    const result = promoteToSticky(db, CHAT_A, SENDER_A, 1_500);
+    expect(result.outcome).toBe('absent');
   });
 });

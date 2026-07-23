@@ -20,6 +20,7 @@ const ROUTE_EVENT_TYPES = [
   'runtime_selected',
   'runtime_switched',
   'model_preference_set',
+  'model_preference_made_sticky',
   'model_preference_cleared',
   'auto_fallback_started',
   'auto_fallback_cleared',
