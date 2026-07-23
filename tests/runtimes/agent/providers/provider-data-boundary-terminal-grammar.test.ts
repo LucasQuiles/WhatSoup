@@ -231,6 +231,37 @@ const INVALID_STREAMS: ReadonlyArray<{
     ],
   },
   {
+    provider: 'openai-api',
+    failure: 'tool call with non-tool terminal reason',
+    records: [
+      data({
+        choices: [{
+          index: 0,
+          delta: {
+            tool_calls: [{
+              index: 0,
+              id: 'call-1',
+              type: 'function',
+              function: { name: 'noop', arguments: '{}' },
+            }],
+          },
+          finish_reason: null,
+        }],
+      }),
+      OPENAI_FINISH,
+      OPENAI_DONE,
+    ],
+  },
+  {
+    provider: 'openai-api',
+    failure: 'tool terminal reason without a tool call',
+    records: [
+      OPENAI_START,
+      data({ choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] }),
+      OPENAI_DONE,
+    ],
+  },
+  {
     provider: 'anthropic-api',
     failure: 'nonempty message_start content',
     records: [
@@ -339,6 +370,39 @@ const INVALID_STREAMS: ReadonlyArray<{
       ANTHROPIC_STOP,
     ],
   },
+  {
+    provider: 'anthropic-api',
+    failure: 'tool use with non-tool stop reason',
+    records: [
+      ANTHROPIC_START,
+      data({
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'tool_use', id: 'call-1', name: 'noop', input: {} },
+      }),
+      data({
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'input_json_delta', partial_json: '{}' },
+      }),
+      ANTHROPIC_BLOCK_STOP,
+      ANTHROPIC_DELTA,
+      ANTHROPIC_STOP,
+    ],
+  },
+  {
+    provider: 'anthropic-api',
+    failure: 'tool stop reason without a tool use',
+    records: [
+      ANTHROPIC_START,
+      data({
+        type: 'message_delta',
+        delta: { stop_reason: 'tool_use', stop_sequence: null },
+        usage: { output_tokens: 1 },
+      }),
+      ANTHROPIC_STOP,
+    ],
+  },
 ];
 
 async function send(provider: ProviderSession): Promise<void> {
@@ -435,6 +499,68 @@ describe('restricted managed-provider terminal and nested grammar', () => {
       await expect(send(session)).resolves.toBeUndefined();
 
       expect(events).toContainEqual({ type: 'assistant_text', text: 'complete' });
+      expect(boundaryEvents.filter((event) => event.eventType === 'rehydration_failure'))
+        .toHaveLength(1);
+    },
+  );
+
+  it.each(PROVIDERS)(
+    'preserves exact $provider assistant chunk order and granularity in shadow',
+    async (provider, makeProvider) => {
+      const events: AgentEvent[] = [];
+      const records = provider === 'openai-api'
+        ? [
+            OPENAI_START,
+            data({ choices: [{ index: 0, delta: { content: 'first-' }, finish_reason: null }] }),
+            data({ choices: [{ index: 0, delta: { content: 'second' }, finish_reason: null }] }),
+            OPENAI_FINISH,
+            OPENAI_DONE,
+          ]
+        : [
+            ANTHROPIC_START,
+            ANTHROPIC_BLOCK_START,
+            data({
+              type: 'content_block_delta',
+              index: 0,
+              delta: { type: 'text_delta', text: 'first-' },
+            }),
+            data({
+              type: 'content_block_delta',
+              index: 0,
+              delta: { type: 'text_delta', text: 'second' },
+            }),
+            ANTHROPIC_BLOCK_STOP,
+            ANTHROPIC_DELTA,
+            ANTHROPIC_STOP,
+          ];
+      fetchMock.mockResolvedValueOnce(response(records));
+      const session = makeProvider();
+      await session.initialize(initOptions(provider, events, 'shadow'));
+
+      await expect(send(session)).resolves.toBeUndefined();
+
+      expect(events.filter((event) => event.type === 'assistant_text')).toEqual([
+        { type: 'assistant_text', text: 'first-' },
+        { type: 'assistant_text', text: 'second' },
+      ]);
+    },
+  );
+
+  it.each(PROVIDERS)(
+    'emits one constrained $provider failure decision when the response body is missing',
+    async (provider, makeProvider) => {
+      const events: AgentEvent[] = [];
+      const boundaryEvents: ProviderBoundaryEvent[] = [];
+      fetchMock.mockResolvedValueOnce(new Response(null, { status: 200 }));
+      const session = makeProvider();
+      await session.initialize(initOptions(provider, events, 'enforce', boundaryEvents));
+
+      await expect(send(session)).resolves.toBeUndefined();
+
+      expect(events).toContainEqual(expect.objectContaining({
+        type: 'result',
+        text: 'No response body',
+      }));
       expect(boundaryEvents.filter((event) => event.eventType === 'rehydration_failure'))
         .toHaveLength(1);
     },

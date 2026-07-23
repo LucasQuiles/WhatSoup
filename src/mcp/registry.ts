@@ -81,7 +81,7 @@ function withZodDescription(schema: ZodType, jsonSchema: JsonSchema): JsonSchema
     : jsonSchema;
 }
 
-function zodToJsonSchema(schema: ZodType): JsonSchema {
+function zodToJsonSchema(schema: ZodType, richRecordSchemas = false): JsonSchema {
   if (schema instanceof ZodString) {
     return withZodDescription(schema, { type: 'string' });
   }
@@ -96,13 +96,13 @@ function zodToJsonSchema(schema: ZodType): JsonSchema {
 
   if (schema instanceof ZodOptional) {
     // Unwrap and mark the inner type while preserving descriptions attached after .optional().
-    return withZodDescription(schema, zodToJsonSchema(schema.unwrap()));
+    return withZodDescription(schema, zodToJsonSchema(schema.unwrap(), richRecordSchemas));
   }
 
   if (schema instanceof ZodArray) {
     return withZodDescription(schema, {
       type: 'array',
-      items: zodToJsonSchema(schema.element),
+      items: zodToJsonSchema(schema.element, richRecordSchemas),
     });
   }
 
@@ -114,10 +114,12 @@ function zodToJsonSchema(schema: ZodType): JsonSchema {
   }
 
   if (schema instanceof ZodRecord) {
-    return withZodDescription(schema, {
-      type: 'object',
-      additionalProperties: zodToJsonSchema(schema.valueSchema),
-    });
+    return withZodDescription(schema, richRecordSchemas
+      ? {
+          type: 'object',
+          additionalProperties: zodToJsonSchema(schema.valueSchema, true),
+        }
+      : { type: 'object' });
   }
 
   if (schema instanceof ZodObject) {
@@ -126,7 +128,7 @@ function zodToJsonSchema(schema: ZodType): JsonSchema {
     const required: string[] = [];
 
     for (const [key, fieldSchema] of Object.entries(shape)) {
-      properties[key] = zodToJsonSchema(fieldSchema);
+      properties[key] = zodToJsonSchema(fieldSchema, richRecordSchemas);
       if (!(fieldSchema instanceof ZodOptional)) {
         required.push(key);
       }
@@ -169,8 +171,9 @@ function buildListSchema(
   tool: ToolDeclaration,
   session: SessionContext,
   sessionIsBound: boolean,
+  richRecordSchemas: boolean,
 ): JsonSchema {
-  const base = zodToJsonSchema(tool.schema);
+  const base = zodToJsonSchema(tool.schema, richRecordSchemas);
 
   if (tool.targetMode !== 'injected') {
     return base;
@@ -224,6 +227,10 @@ export interface McpLivenessSnapshot {
   pendingCount: number;
   oldestCallAgeMs: number | null;
   oldestCallTool: string | null;
+}
+
+export interface ToolListOptions {
+  readonly richRecordSchemas?: boolean;
 }
 
 export class ToolRegistry {
@@ -321,7 +328,7 @@ export class ToolRegistry {
    * - Chat-scoped sessions: see only 'chat' scope tools. Injected tools have
    *   chatJid omitted (auto-filled at call time).
    */
-  listTools(session: SessionContext): Array<{
+  listTools(session: SessionContext, options: ToolListOptions = {}): Array<{
     name: string;
     description: string;
     inputSchema: JsonSchema;
@@ -343,7 +350,7 @@ export class ToolRegistry {
       result.push({
         name: tool.name,
         description: tool.description,
-        inputSchema: buildListSchema(tool, session, isBound),
+        inputSchema: buildListSchema(tool, session, isBound, options.richRecordSchemas === true),
       });
     }
 

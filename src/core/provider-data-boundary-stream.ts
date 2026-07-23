@@ -156,6 +156,7 @@ export function createOpenAIRestrictedStreamGrammar(): RestrictedStreamGrammar {
       const isFinished = typeof finishReason === 'string';
       if (isFinished) {
         if (Object.keys(delta).length !== 0) return false;
+        if ((tools.size > 0) !== (finishReason === 'tool_calls')) return false;
         finished = true;
         sawChoice = true;
         return true;
@@ -236,6 +237,7 @@ export function createAnthropicRestrictedStreamGrammar(): RestrictedStreamGramma
   let sawMessageStart = false;
   let sawMessageDelta = false;
   let sawMessageStop = false;
+  let sawToolUse = false;
   let nextBlockIndex = 0;
 
   return {
@@ -296,6 +298,7 @@ export function createAnthropicRestrictedStreamGrammar(): RestrictedStreamGramma
               || (hasOwn(block, 'input')
                 && (!isObject(block['input']) || !hasOnlyKeys(block['input'], [])))) return false;
             blocks.set(event['index'], { type: 'tool_use', sawInput: false });
+            sawToolUse = true;
             return true;
           }
           return false;
@@ -333,6 +336,7 @@ export function createAnthropicRestrictedStreamGrammar(): RestrictedStreamGramma
           if (!hasOnlyKeys(delta, ['stop_reason', 'stop_sequence'])) return false;
           const stopReason = delta['stop_reason'];
           if (typeof stopReason !== 'string' || !ANTHROPIC_STOP_REASONS.has(stopReason)) return false;
+          if (sawToolUse !== (stopReason === 'tool_use')) return false;
           const stopSequence = delta['stop_sequence'];
           if (stopReason === 'stop_sequence') {
             if (typeof stopSequence !== 'string' || stopSequence.length === 0) return false;

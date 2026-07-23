@@ -123,6 +123,15 @@ import { ensureStandbyNoticeSchema } from '../../../src/runtimes/agent/standby-n
 import { ensureHandoffArtifactSchema, upsertHandoffArtifact } from '../../../src/runtimes/agent/handoff-artifact.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import { emitAlert } from '../../../src/lib/emit-alert.ts';
+import { sanitizeProviderPreviewText } from '../../../src/lib/provider-preview-sanitizer.ts';
+import { createProviderDataBoundary } from '../../../src/core/provider-data-boundary.ts';
+import { PROVIDER_DATA_POLICY_VERSION } from '../../../src/core/provider-data-policy.ts';
+import { OpenAIApiProvider } from '../../../src/runtimes/agent/providers/openai-api.ts';
+import { AnthropicApiProvider } from '../../../src/runtimes/agent/providers/anthropic-api.ts';
+import type {
+  ProviderSession,
+  ProviderSessionOptions,
+} from '../../../src/runtimes/agent/providers/types.ts';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -161,6 +170,73 @@ function makeRuntime(overrides: RuntimeOverrides = {}): AgentRuntime {
   return new AgentRuntime(makeDb(), makeMessenger(), 'test', {
     model: overrides.model ?? 'claude-opus-4-8[1m]',
   });
+}
+
+function managedProviderSuccess(provider: 'openai-api' | 'anthropic-api'): Response {
+  if (provider === 'openai-api') {
+    return new Response([
+      `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: null }] })}`,
+      `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}`,
+      'data: [DONE]',
+      '',
+    ].join('\n\n'), {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    });
+  }
+  return new Response([
+    { type: 'message_start', message: { usage: { input_tokens: 1, output_tokens: 0 } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 1 } },
+    { type: 'message_stop' },
+  ].map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''), {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  });
+}
+
+function fallbackProviderOptions(
+  provider: 'openai-api' | 'anthropic-api',
+  mode: 'shadow' | 'enforce',
+  suffix: string,
+): ProviderSessionOptions {
+  const model = provider === 'openai-api' ? 'gpt-test' : 'claude-test';
+  const providerSessionId = `${provider}-${mode}-${suffix}`;
+  const routePolicy = Object.freeze({
+    provider,
+    model,
+    dataPolicy: 'restricted' as const,
+    policyVersion: PROVIDER_DATA_POLICY_VERSION,
+    policyState: 'classified' as const,
+  });
+  return {
+    cwd: '/workspace/LAB/WhatSoup',
+    systemPrompt: 'fallback boundary test',
+    model,
+    routePolicy,
+    providerBoundaryMode: mode,
+    providerSessionId,
+    providerDataBoundary: createProviderDataBoundary({
+      binding: {
+        provider,
+        model,
+        dataPolicy: 'restricted',
+        policyVersion: PROVIDER_DATA_POLICY_VERSION,
+        providerSessionId,
+      },
+      mode,
+      routeSource: 'fallback',
+    }),
+    instanceName: 'fallback-boundary-test',
+    onEvent: vi.fn(),
+    onCrash: vi.fn(),
+  };
+}
+
+function managedProvider(provider: 'openai-api' | 'anthropic-api'): ProviderSession {
+  return provider === 'openai-api' ? new OpenAIApiProvider() : new AnthropicApiProvider();
 }
 
 /** Bracket-access view of the private fallback state machine. */
@@ -228,6 +304,7 @@ type FallbackView = {
       policyVersion: 'provider-data-policy-v1';
       policyState: 'classified' | 'missing' | 'unsupported';
     },
+    hasCompatibleEnforcedBoundary?: boolean,
   ): string;
   buildHandoffSystemBlock(conversationKey: string, provider: string): (() => string | null) | undefined;
   // Background handoff distiller seams (extracted into HandoffDistillCoordinator).
@@ -328,6 +405,7 @@ describe('AgentRuntime — provider fallback state machine', () => {
     vi.setSystemTime(new Date('2026-06-10T10:00:00Z'));
   });
   afterEach(() => {
+    vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 
@@ -429,10 +507,13 @@ describe('AgentRuntime — provider fallback state machine', () => {
     v.deactivateProviderFallback('test cleanup');
   });
 
-  it('preserves exact recovery emails for the restricted managed broker while trusted fallback stays redacted', () => {
+  it('keeps Task 3 fallback sanitization by default and bypasses only for a compatible enforce boundary', () => {
     const v = view(makeRuntime({ agentFallbackProvider: 'openai-api' }));
+    const token = 'tokFAKE1234567890abcd';
     const email = 'operator@example.com';
-    const msgs = [{ timestamp: 0, senderName: 'Lucas', senderJid: 'l@x', content: `email ${email}` }];
+    const jid = '15551234567@s.whatsapp.net';
+    const raw = `Authorization: Bearer ${token}; email ${email}; jid ${jid}`;
+    const msgs = [{ timestamp: 0, senderName: 'Lucas', senderJid: 'l@x', content: raw }];
     v.activateProviderFallback(null);
     const restrictedRoute = {
       provider: 'openai-api',
@@ -442,13 +523,86 @@ describe('AgentRuntime — provider fallback state machine', () => {
       policyState: 'classified' as const,
     };
     const trustedRoute = { ...restrictedRoute, dataPolicy: 'trusted' as const };
+    const expectedSanitized = sanitizeProviderPreviewText(raw);
 
-    expect(v.formatContextLines(msgs, restrictedRoute)).toContain(email);
-    expect(v.formatContextLines(msgs, restrictedRoute)).not.toContain('[REDACTED_EMAIL]');
-    expect(v.formatContextLines(msgs, trustedRoute)).not.toContain(email);
-    expect(v.formatContextLines(msgs, trustedRoute)).toContain('[REDACTED_EMAIL]');
+    expect(v.formatContextLines(msgs, restrictedRoute)).toContain(expectedSanitized);
+    expect(v.formatContextLines(msgs, restrictedRoute)).not.toContain(token);
+    expect(v.formatContextLines(msgs, restrictedRoute)).not.toContain(email);
+    expect(v.formatContextLines(msgs, restrictedRoute)).not.toContain(jid);
+    expect(v.formatContextLines(msgs, restrictedRoute, false))
+      .toBe(v.formatContextLines(msgs, restrictedRoute));
+    expect(v.formatContextLines(msgs, restrictedRoute, true)).toContain(raw);
+    expect(v.formatContextLines(msgs, trustedRoute, true)).toContain(expectedSanitized);
     v.deactivateProviderFallback('test cleanup');
   });
+
+  it.each(['openai-api', 'anthropic-api'] as const)(
+    'keeps fallback Bearer, email, and JID values out of downstream %s requests in shadow and enforce modes',
+    async (providerName) => {
+      const v = view(makeRuntime({ agentFallbackProvider: providerName }));
+      const token = 'tokFAKE1234567890abcd';
+      const email = 'operator@example.com';
+      const jid = '15551234567@s.whatsapp.net';
+      const raw = `Authorization: Bearer ${token}; email ${email}; jid ${jid}`;
+      const routePolicy = {
+        provider: providerName,
+        model: providerName === 'openai-api' ? 'gpt-test' : 'claude-test',
+        dataPolicy: 'restricted' as const,
+        policyVersion: PROVIDER_DATA_POLICY_VERSION,
+        policyState: 'classified' as const,
+      };
+      const message = [{ timestamp: 0, senderName: 'Lucas', senderJid: 'l@x', content: raw }];
+      const fetchMock = vi.fn(async (_url: string | URL, _init?: RequestInit) =>
+        managedProviderSuccess(providerName));
+      vi.stubGlobal('fetch', fetchMock);
+      v.activateProviderFallback(null);
+
+      const shadowContext = v.formatContextLines(message, routePolicy, false);
+      const shadowProvider = managedProvider(providerName);
+      await shadowProvider.initialize(fallbackProviderOptions(providerName, 'shadow', 'sanitized'));
+      await shadowProvider.sendTurn({
+        role: 'user',
+        conversationKey: 'fallback-shadow',
+        parts: [{ kind: 'text', text: shadowContext }],
+      });
+      const shadowBody = String(fetchMock.mock.calls[0]?.[1]?.body);
+      expect(shadowBody).toContain(sanitizeProviderPreviewText(raw));
+      expect(shadowBody).not.toContain(token);
+      expect(shadowBody).not.toContain(email);
+      expect(shadowBody).not.toContain(jid);
+
+      fetchMock.mockClear();
+      const enforceContext = v.formatContextLines(message, routePolicy, true);
+      const secretProvider = managedProvider(providerName);
+      await secretProvider.initialize(fallbackProviderOptions(providerName, 'enforce', 'secret'));
+      await expect(secretProvider.sendTurn({
+        role: 'user',
+        conversationKey: 'fallback-enforce-secret',
+        parts: [{ kind: 'text', text: enforceContext }],
+      })).rejects.toMatchObject({ code: 'secret_detected' });
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      const identifierRaw = `email ${email}; jid ${jid}`;
+      const identifierContext = v.formatContextLines(
+        [{ ...message[0]!, content: identifierRaw }],
+        routePolicy,
+        true,
+      );
+      const identifierProvider = managedProvider(providerName);
+      await identifierProvider.initialize(fallbackProviderOptions(providerName, 'enforce', 'identifiers'));
+      await identifierProvider.sendTurn({
+        role: 'user',
+        conversationKey: 'fallback-enforce-identifiers',
+        parts: [{ kind: 'text', text: identifierContext }],
+      });
+      const enforceBody = String(fetchMock.mock.calls[0]?.[1]?.body);
+      expect(enforceBody).not.toContain(email);
+      expect(enforceBody).not.toContain(jid);
+      expect(enforceBody).toContain('WSA1:email:');
+      expect(enforceBody).toContain('WSA1:whatsapp_id:');
+      v.deactivateProviderFallback('test cleanup');
+    },
+  );
 
   it('throttles the diagnostic bundle so a fallback storm cannot fan out probes', () => {
     const v = view(makeRuntime({ agentFallbackProvider: 'opencode-cli' }));

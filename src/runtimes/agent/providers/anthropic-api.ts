@@ -261,7 +261,7 @@ export class AnthropicApiProvider implements ProviderSession {
 
       if (result.stagedAssistantMessage) {
         this.messages.push(result.stagedAssistantMessage);
-        if (result.localText !== undefined) {
+        if (result.localText !== undefined && this.boundaryEnforced) {
           this.opts.onEvent({ type: 'assistant_text', text: result.localText });
         }
       }
@@ -509,6 +509,9 @@ export class AnthropicApiProvider implements ProviderSession {
 
     const body = response.body;
     if (!body) {
+      if (this.boundaryRestricted) {
+        this.dataBoundary!.observeProviderResponseFailure('invalid_provider_response');
+      }
       return { text: '', terminalResultText: 'No response body' };
     }
 
@@ -597,7 +600,7 @@ export class AnthropicApiProvider implements ProviderSession {
             if (chunk.length > 0) {
               responseBudget?.observeText(chunk);
               fullText += chunk;
-              if (!this.boundaryRestricted) {
+              if (!this.boundaryEnforced) {
                 this.opts.onEvent({ type: 'assistant_text', text: chunk });
               }
             }

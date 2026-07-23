@@ -1,3 +1,6 @@
+import { isIP } from 'node:net';
+
+import { containsProviderSecretValue } from '../lib/provider-preview-sanitizer.ts';
 import type { ProviderAliasType } from './provider-data-boundary-contract.ts';
 
 export const MAX_BOUNDARY_TEXT_LENGTH = 1024 * 1024;
@@ -31,13 +34,38 @@ const DETECTORS: ReadonlyArray<{
   readonly type: ProviderAliasType;
   readonly pattern: RegExp;
   readonly priority: number;
+  readonly validate?: (value: string) => boolean;
 }> = [
   { type: 'whatsapp_id', pattern: /\b\d{5,}(?:-\d+)?(?::\d+)?@(s\.whatsapp\.net|g\.us|lid|newsletter|broadcast)\b/giu, priority: 100 },
   { type: 'email', pattern: /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu, priority: 90 },
-  { type: 'path', pattern: /(?:\/[A-Z0-9._~-]+){2,}(?:\/[A-Z0-9._~#?=&%+-]+)*/giu, priority: 80 },
-  { type: 'network_identity', pattern: /\b(?:\d{1,3}\.){3}\d{1,3}\b/gu, priority: 70 },
-  { type: 'repository_ref', pattern: /\b[A-Z0-9_.-]+\/[A-Z0-9_.-]+(?:#\d+|@[A-Z0-9._/-]+|\/(?:pull|issues)\/\d+)?\b/giu, priority: 60 },
-  { type: 'network_identity', pattern: /\b(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+(?:local|internal|lan|com|net|org|io|ai|dev|cloud)\b/giu, priority: 50 },
+  {
+    type: 'path',
+    pattern: /(?<![A-Za-z0-9:/])\/(?!\/)[A-Za-z0-9._~-]+(?:\/[A-Za-z0-9._~#?=&%+-]+)*/gu,
+    priority: 85,
+  },
+  {
+    type: 'path',
+    pattern: /(?<![A-Za-z0-9])(?:[A-Za-z]:\\(?:[^\\\r\n:*?"<>|]+\\)*[^\\\r\n:*?"<>|]*|\\\\[A-Za-z0-9._-]+\\[A-Za-z0-9.$_-]+(?:\\[^\\\r\n:*?"<>|]+)*)/gu,
+    priority: 85,
+  },
+  {
+    type: 'network_identity',
+    pattern: /(?<![A-Za-z0-9:])(?:[0-9A-F]{0,4}:){2,7}[0-9A-F]{0,4}(?![A-Za-z0-9:])/giu,
+    priority: 75,
+    validate: (value) => isIP(value) === 6,
+  },
+  {
+    type: 'network_identity',
+    pattern: /\b(?:\d{1,3}\.){3}\d{1,3}\b/gu,
+    priority: 70,
+    validate: (value) => isIP(value) === 4,
+  },
+  {
+    type: 'repository_ref',
+    pattern: /\b(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:#\d+|@[A-Za-z0-9._/-]+|\/(?:pull|issues)\/\d+)|(?:[A-Za-z0-9_.-]*[A-Z][A-Za-z0-9_.-]*\/[A-Za-z0-9_.-]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]*[._-][A-Za-z0-9_.-]+))\b/gu,
+    priority: 60,
+  },
+  { type: 'network_identity', pattern: /\b(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,63}\b/giu, priority: 50 },
   { type: 'phone', pattern: /(?:\+?\d[\d ()-]{8,}\d)/gu, priority: 40 },
 ];
 
@@ -54,6 +82,7 @@ export function collectProviderAliasCandidates(
     detector.pattern.lastIndex = 0;
     for (const match of text.matchAll(detector.pattern)) {
       if (match.index === undefined || match[0].length === 0) continue;
+      if (detector.validate && !detector.validate(match[0])) continue;
       candidates.push({
         start: match.index,
         end: match.index + match[0].length,
@@ -102,11 +131,43 @@ export function containsProviderAliasSyntax(text: string): boolean {
 
 /** Detect reserved syntax fragmented across adjacent fields without rewriting trusted bytes. */
 export function containsProviderAliasSyntaxAcross(texts: readonly string[]): boolean {
+  return scanProviderTextSequence(texts).fragmentedAlias;
+}
+
+export interface ProviderTextSequenceScan {
+  readonly directSecretCount: number;
+  readonly fragmentedSecret: boolean;
+  readonly directAlias: boolean;
+  readonly fragmentedAlias: boolean;
+}
+
+/** Scan one deterministic sequence while distinguishing complete values from cross-field fragments. */
+export function scanProviderTextSequence(texts: readonly string[]): ProviderTextSequenceScan {
   let carry = '';
+  let directSecretCount = 0;
+  let fragmentedSecret = false;
+  let directAlias = false;
+  let fragmentedAlias = false;
   for (const text of texts) {
-    const boundaryWindow = carry + text.slice(0, 512);
-    if (carry.length > 0 && containsProviderAliasSyntax(boundaryWindow)) return true;
+    const prefix = text.slice(0, 512);
+    const textHasSecret = containsProviderSecretValue(text);
+    const textHasAlias = containsProviderAliasSyntax(text);
+    if (textHasSecret) directSecretCount += 1;
+    if (textHasAlias) directAlias = true;
+    if (carry.length > 0) {
+      for (let start = 0; start < carry.length && (!fragmentedSecret || !fragmentedAlias); start += 1) {
+        const suffix = carry.slice(start);
+        if (!fragmentedSecret
+          && !containsProviderSecretValue(suffix)
+          && !containsProviderSecretValue(prefix)
+          && containsProviderSecretValue(suffix + prefix)) fragmentedSecret = true;
+        if (!fragmentedAlias
+          && !containsProviderAliasSyntax(suffix)
+          && !containsProviderAliasSyntax(prefix)
+          && containsProviderAliasSyntax(suffix + prefix)) fragmentedAlias = true;
+      }
+    }
     carry = (carry + text).slice(-512);
   }
-  return false;
+  return { directSecretCount, fragmentedSecret, directAlias, fragmentedAlias };
 }

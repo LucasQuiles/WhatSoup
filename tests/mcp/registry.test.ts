@@ -568,7 +568,7 @@ describe('ToolRegistry', () => {
     expect(schema.properties['selectableCount'].description).toBe('Maximum number of choices');
   });
 
-  it('preserves ZodRecord value schemas as JSON Schema additionalProperties', () => {
+  it('keeps default ZodRecord schemas byte-compatible while rich opt-in preserves value schemas', () => {
     registry.register(
       makeTool({
         schema: z.object({
@@ -577,12 +577,19 @@ describe('ToolRegistry', () => {
         }),
       }),
     );
-    const tools = registry.listTools(makeSession());
-    const schema = tools[0].inputSchema as {
+    const defaultTools = registry.listTools(makeSession());
+    const defaultSchema = defaultTools[0].inputSchema as {
       properties: Record<string, { type: string; additionalProperties?: unknown }>;
     };
-    expect(schema.properties['metadata']).toEqual({ type: 'object', additionalProperties: {} });
-    expect(schema.properties['labels']).toEqual({
+    expect(JSON.stringify(defaultSchema.properties['metadata'])).toBe('{"type":"object"}');
+    expect(JSON.stringify(defaultSchema.properties['labels'])).toBe('{"type":"object"}');
+
+    const richTools = registry.listTools(makeSession(), { richRecordSchemas: true });
+    const richSchema = richTools[0].inputSchema as {
+      properties: Record<string, { type: string; additionalProperties?: unknown }>;
+    };
+    expect(richSchema.properties['metadata']).toEqual({ type: 'object', additionalProperties: {} });
+    expect(richSchema.properties['labels']).toEqual({
       type: 'object',
       additionalProperties: { type: 'array', items: { type: 'string' } },
     });

@@ -183,6 +183,10 @@ export async function executeBridgeTool(
   }
 }
 
+export interface ProviderMcpBridgeOptions {
+  readonly richRecordSchemas?: boolean;
+}
+
 /**
  * Create a provider-native MCP bridge backed by WhatSoup's in-process registry.
  * Used by managed-loop HTTP providers to advertise and execute tools directly.
@@ -190,10 +194,13 @@ export async function executeBridgeTool(
 export function createProviderMcpBridge(
   registry: ToolRegistry,
   session: SessionContext,
+  options: ProviderMcpBridgeOptions = {},
 ): ProviderMcpBridge {
   return {
     listTools(): ProviderMcpTool[] {
-      return registry.listTools(session);
+      return registry.listTools(session, {
+        richRecordSchemas: options.richRecordSchemas === true,
+      });
     },
     async executeTool(name: string, params: Record<string, unknown>): Promise<ProviderMcpToolResult> {
       return normalizeToolResult(await registry.call(name, params, session));

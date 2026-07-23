@@ -1,4 +1,3 @@
-import { containsProviderSecretValue } from '../lib/provider-preview-sanitizer.ts';
 import {
   PROVIDER_ALIAS_TYPES,
   ProviderDataBoundaryError,
@@ -10,6 +9,7 @@ import {
   MAX_BOUNDARY_TEXT_LENGTH,
   MAX_TOOL_DEPTH,
   MAX_TOOL_NODES,
+  scanProviderTextSequence,
 } from './provider-data-boundary-detection.ts';
 
 const TOOL_FIELD_AUTHORIZATIONS: Readonly<Record<string, Readonly<Record<string, ProviderAliasType>>>> = Object.freeze({
@@ -68,6 +68,7 @@ const TOOL_FIELD_AUTHORIZATIONS: Readonly<Record<string, Readonly<Record<string,
   get_profile_picture: Object.freeze({ '/jid': 'whatsapp_id' }),
   get_contact_status: Object.freeze({ '/jid': 'whatsapp_id' }),
   check_whatsapp: Object.freeze({ '/phone_numbers/*': 'phone' }),
+  request_pairing_code: Object.freeze({ '/phoneNumber': 'phone' }),
   block_contact: Object.freeze({ '/jid': 'whatsapp_id' }),
   update_profile_picture: Object.freeze({ '/jid': 'whatsapp_id' }),
   remove_profile_picture: Object.freeze({ '/jid': 'whatsapp_id' }),
@@ -222,8 +223,8 @@ function authorizedAliasType(
 
 export function preflightProviderToolValue(value: unknown): number {
   const ancestors = new WeakSet<object>();
+  const orderedTexts: string[] = [];
   let nodes = 0;
-  let secretCount = 0;
   const walk = (current: unknown, depth: number): void => {
     nodes += 1;
     if (nodes > MAX_TOOL_NODES || depth > MAX_TOOL_DEPTH) {
@@ -231,7 +232,7 @@ export function preflightProviderToolValue(value: unknown): number {
     }
     if (typeof current === 'string') {
       if (current.length > MAX_BOUNDARY_TEXT_LENGTH) throw new ProviderDataBoundaryError('limit_exceeded');
-      if (containsProviderSecretValue(current)) secretCount += 1;
+      orderedTexts.push(current);
       return;
     }
     if (typeof current !== 'object' || current === null) return;
@@ -243,21 +244,27 @@ export function preflightProviderToolValue(value: unknown): number {
       for (const key of Object.keys(current)) {
         if (FORBIDDEN_OBJECT_KEYS.has(key)) throw new ProviderDataBoundaryError('invalid_tool_input');
         if (key.length > MAX_BOUNDARY_TEXT_LENGTH) throw new ProviderDataBoundaryError('limit_exceeded');
-        if (containsProviderSecretValue(key)) secretCount += 1;
+        orderedTexts.push(key);
         walk((current as Record<string, unknown>)[key], depth + 1);
       }
     }
     ancestors.delete(current);
   };
   walk(value, 0);
-  return secretCount;
+  const scan = scanProviderTextSequence(orderedTexts);
+  if (scan.fragmentedAlias) throw new ProviderDataBoundaryError('residual_alias');
+  return scan.directSecretCount + (scan.fragmentedSecret ? 1 : 0);
 }
 
 export function rehydrateAuthorizedProviderToolInput(input: {
   readonly toolName: string;
   readonly value: Record<string, unknown>;
   readonly tools: readonly ProviderBoundaryMcpTool[];
-  readonly authenticate: (alias: string, expectedType: ProviderAliasType) => string;
+  readonly authenticate: (
+    alias: string,
+    expectedType: ProviderAliasType,
+    destinationPointer: string,
+  ) => string;
 }): { output: Record<string, unknown>; aliasCount: number } {
   const advertised = input.tools.find((candidate) => candidate.name === input.toolName);
   if (!advertised) throw new ProviderDataBoundaryError('unknown_tool');
@@ -326,7 +333,7 @@ export function rehydrateAuthorizedProviderToolInput(input: {
       const expectedType = authorizedAliasType(input.toolName, pointer, schema);
       if (expectedType === null) throw new ProviderDataBoundaryError('unauthorized_field');
       aliasCount += 1;
-      return input.authenticate(value, expectedType);
+      return input.authenticate(value, expectedType, pointer);
     }
     if (Array.isArray(value)) {
       const items = schema ? ownValue(schema, 'items') : undefined;

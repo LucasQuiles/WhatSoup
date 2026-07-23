@@ -86,7 +86,22 @@ function openAiSse(deltas: Array<Record<string, unknown>>): Response {
     })
   ))
     ? canonical
-    : [...canonical, { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }];
+    : [...canonical, {
+        choices: [{
+          index: 0,
+          delta: {},
+          finish_reason: canonical.some((chunk) => (
+            Array.isArray(chunk['choices'])
+            && chunk['choices'].some((rawChoice) => {
+              const choice = rawChoice as Record<string, unknown>;
+              const delta = choice['delta'] as Record<string, unknown> | undefined;
+              return Array.isArray(delta?.['tool_calls']) && delta['tool_calls'].length > 0;
+            })
+          ))
+            ? 'tool_calls'
+            : 'stop',
+        }],
+      }];
   return new Response(complete.map((delta) => `data: ${JSON.stringify(delta)}\n\n`).join('') + 'data: [DONE]\n\n', {
     status: 200,
     headers: { 'content-type': 'text/event-stream' },
@@ -98,13 +113,17 @@ function anthropicSse(events: Array<Record<string, unknown>>): Response {
     ? events
     : [{ type: 'message_start', message: { usage: { input_tokens: 1, output_tokens: 0 } } }, ...events];
   const hasMessageDelta = canonical.some((event) => event['type'] === 'message_delta');
+  const hasToolUse = canonical.some((event) => (
+    event['type'] === 'content_block_start'
+    && (event['content_block'] as Record<string, unknown> | undefined)?.['type'] === 'tool_use'
+  ));
   const complete = hasMessageDelta
     ? canonical
     : canonical.flatMap((event) => event['type'] === 'message_stop'
       ? [
           {
             type: 'message_delta',
-            delta: { stop_reason: 'end_turn', stop_sequence: null },
+            delta: { stop_reason: hasToolUse ? 'tool_use' : 'end_turn', stop_sequence: null },
             usage: { output_tokens: 1 },
           },
           event,
@@ -775,5 +794,120 @@ describe('managed provider data boundary integration', () => {
 
     expect(() => dataBoundary.rehydrateProviderText(alias, { surface: 'provider_output' }))
       .toThrowError(expect.objectContaining({ code: 'retired_boundary' }));
+  });
+
+  it.each([
+    ['openai-api', () => new OpenAIApiProvider()],
+    ['anthropic-api', () => new AnthropicApiProvider()],
+  ] as const)('rejects deterministic cross-key secret and alias fragments before %s execution', async (
+    providerName,
+    makeProvider,
+  ) => {
+    for (const [rawArguments, expectedCode] of [
+      [JSON.stringify({ metadata: { cred: 'ential="quoted multiword value"' } }), 'secret_detected'],
+      [JSON.stringify({
+        metadata: { 'prefix ⟦W': `SA1:path:${'1'.repeat(32)}:${'2'.repeat(32)}⟧` },
+      }), 'residual_alias'],
+    ] as const) {
+      const events: AgentEvent[] = [];
+      const executeTool = vi.fn(async () => ({ content: 'must not run', isError: false }));
+      const mcpBridge: ProviderMcpBridge = {
+        listTools: () => [{
+          name: 'configure',
+          description: 'Configure metadata',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              metadata: { type: 'object', additionalProperties: {} },
+            },
+            required: ['metadata'],
+          },
+        }],
+        executeTool,
+      };
+      fetchMock
+        .mockResolvedValueOnce(providerToolCall(providerName, rawArguments))
+        .mockResolvedValueOnce(providerText(providerName, 'complete'));
+      const provider = makeProvider();
+      await provider.initialize(initOptions(providerName, events, mcpBridge));
+
+      await expect(provider.sendTurn({
+        role: 'user',
+        conversationKey: 'chat-key',
+        parts: [{ kind: 'text', text: 'configure' }],
+      })).rejects.toMatchObject({ code: expectedCode });
+
+      expect(executeTool).not.toHaveBeenCalled();
+      expect(events.filter((event) => event.type !== 'init')).toEqual([]);
+      expect(provider.getCheckpoint().providerState?.['messageCount'])
+        .toBe(providerName === 'openai-api' ? 2 : 1);
+      fetchMock.mockReset();
+    }
+  });
+
+  it.each([
+    ['openai-api', () => new OpenAIApiProvider()],
+    ['anthropic-api', () => new AnthropicApiProvider()],
+  ] as const)('authorizes production request_pairing_code.phoneNumber for %s', async (
+    providerName,
+    makeProvider,
+  ) => {
+    const rawPhone = '14155551234';
+    const events: AgentEvent[] = [];
+    const executeTool = vi.fn(async () => ({ content: 'paired', isError: false }));
+    const mcpBridge: ProviderMcpBridge = {
+      listTools: () => [{
+        name: 'request_pairing_code',
+        description: 'Request a pairing code',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            phoneNumber: { type: 'string' },
+          },
+          required: ['phoneNumber'],
+          additionalProperties: false,
+        },
+      }],
+      executeTool,
+    };
+    fetchMock.mockImplementation(async (_url: string, init: RequestInit) => {
+      if (fetchMock.mock.calls.length === 1) {
+        const alias = findAlias(String(init.body), 'phone');
+        const argumentsJson = JSON.stringify({ phoneNumber: alias });
+        return providerName === 'openai-api'
+          ? openAiSse([{ choices: [{ delta: { tool_calls: [{
+              index: 0,
+              id: 'pair-call',
+              function: { name: 'request_pairing_code', arguments: argumentsJson },
+            }] } }] }])
+          : anthropicSse([
+              {
+                type: 'content_block_start',
+                index: 0,
+                content_block: { type: 'tool_use', id: 'pair-call', name: 'request_pairing_code' },
+              },
+              {
+                type: 'content_block_delta',
+                index: 0,
+                delta: { type: 'input_json_delta', partial_json: argumentsJson },
+              },
+              { type: 'content_block_stop', index: 0 },
+              { type: 'message_stop' },
+            ]);
+      }
+      return providerText(providerName, 'complete');
+    });
+    const provider = makeProvider();
+    await provider.initialize(initOptions(providerName, events, mcpBridge));
+
+    await provider.sendTurn({
+      role: 'user',
+      conversationKey: 'chat-key',
+      parts: [{ kind: 'text', text: `pair ${rawPhone}` }],
+    });
+
+    expect(executeTool).toHaveBeenCalledWith('request_pairing_code', {
+      phoneNumber: rawPhone,
+    });
   });
 });

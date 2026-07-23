@@ -39,6 +39,37 @@ describe('SessionManager route policy admission', () => {
     db.close();
   });
 
+  it('reports a compatible enforced boundary only while the restricted managed session is active', async () => {
+    vi.spyOn(OpenAIApiProvider.prototype, 'initialize').mockResolvedValue(undefined);
+    const enforced = new SessionManager({
+      db,
+      messenger: messenger(),
+      chatJid: '15550200@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      model: 'gpt-5',
+      routePolicy: route,
+      providerBoundaryMode: 'enforce',
+    });
+
+    expect(enforced.hasCompatibleEnforcedProviderDataBoundary()).toBe(false);
+    await enforced.spawnSession();
+    expect(enforced.hasCompatibleEnforcedProviderDataBoundary()).toBe(true);
+
+    const shadow = new SessionManager({
+      db,
+      messenger: messenger(),
+      chatJid: '15550209@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      model: 'gpt-5',
+      routePolicy: route,
+      providerBoundaryMode: 'shadow',
+    });
+    await shadow.spawnSession();
+    expect(shadow.hasCompatibleEnforcedProviderDataBoundary()).toBe(false);
+  });
+
   it('threads the exact frozen tuple into provider session options and checkpoint metadata', async () => {
     const initialize = vi.spyOn(OpenAIApiProvider.prototype, 'initialize').mockResolvedValue(undefined);
     const sm = new SessionManager({

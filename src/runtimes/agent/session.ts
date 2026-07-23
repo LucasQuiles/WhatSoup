@@ -710,6 +710,14 @@ export class SessionManager {
     return this.routePolicy;
   }
 
+  hasCompatibleEnforcedProviderDataBoundary(): boolean {
+    return this.active
+      && this.managedProviderSession !== null
+      && this.providerBoundaryMode === 'enforce'
+      && this.routePolicy?.dataPolicy === 'restricted'
+      && (this.provider === 'openai-api' || this.provider === 'anthropic-api');
+  }
+
   // ─── Provider helpers ─────────────────────────────────────────────────────
 
   /** Whether this provider uses a spawn-per-turn model (vs. long-running stdin pipe). */

@@ -14,10 +14,10 @@ import {
 import {
   collectProviderAliasCandidates,
   containsProviderAliasSyntax,
-  containsProviderAliasSyntaxAcross,
   MAX_ALIASES_PER_TRANSFORM,
   MAX_BOUNDARY_TEXT_LENGTH,
   MAX_TRANSFORM_FIELDS,
+  scanProviderTextSequence,
   type ProviderAliasCandidate,
 } from './provider-data-boundary-detection.ts';
 import {
@@ -33,6 +33,12 @@ interface AliasRecord {
   readonly alias: string;
   readonly localValue: string;
   readonly type: ProviderAliasType;
+  readonly provenance?: AliasProvenance;
+}
+
+interface AliasProvenance {
+  readonly toolName: string;
+  readonly fieldPath: string;
 }
 
 const ALIAS_RE = /⟦WSA1:(path|email|whatsapp_id|phone|network_identity|repository_ref|technical_identifier):([0-9a-f]{32}):([0-9a-f]{32})⟧/gu;
@@ -48,8 +54,12 @@ function constantTimeEqual(left: string, right: string): boolean {
   return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
 }
 
-function valueKey(candidate: Pick<ProviderAliasCandidate, 'type' | 'value'>): string {
-  return `${candidate.type}\u0000${candidate.value}`;
+interface ScopedAliasCandidate extends ProviderAliasCandidate {
+  readonly provenance?: AliasProvenance;
+}
+
+function valueKey(candidate: Pick<ScopedAliasCandidate, 'type' | 'value' | 'provenance'>): string {
+  return `${candidate.type}\u0000${candidate.value}\u0000${candidate.provenance?.toolName ?? ''}\u0000${candidate.provenance?.fieldPath ?? ''}`;
 }
 
 export function createProviderDataBoundary(
@@ -125,29 +135,27 @@ export function createProviderDataBoundary(
     };
   };
 
-  const containsSecretAcross = (texts: readonly string[]): boolean => {
-    let carry = '';
-    for (const text of texts) {
-      const boundaryWindow = carry + text.slice(0, 512);
-      if (carry.length > 0 && containsProviderSecretValue(boundaryWindow)) return true;
-      carry = (carry + text).slice(-512);
-    }
-    return false;
-  };
-
-  const macFor = (type: ProviderAliasType, token: string): string => createHmac('sha256', hmacKey)
+  const macFor = (
+    type: ProviderAliasType,
+    token: string,
+    provenance?: AliasProvenance,
+  ): string => createHmac('sha256', hmacKey)
     .update(JSON.stringify([
       binding.policyVersion,
       binding.providerSessionId,
       type,
-      null,
-      null,
+      provenance?.toolName ?? null,
+      provenance?.fieldPath ?? null,
       token,
     ]))
     .digest('hex')
     .slice(0, 32);
 
-  const authenticate = (alias: string, expectedType?: ProviderAliasType): AliasRecord => {
+  const authenticate = (
+    alias: string,
+    expectedType?: ProviderAliasType,
+    destination?: AliasProvenance,
+  ): AliasRecord => {
     assertActive();
     const parsed = EXACT_ALIAS_RE.exec(alias);
     if (!parsed) {
@@ -156,16 +164,22 @@ export function createProviderDataBoundary(
     const type = parsed[1] as ProviderAliasType;
     const mac = parsed[3]!;
     const record = byAlias.get(alias);
-    if (!constantTimeEqual(mac, macFor(type, parsed[2]!)) || record === undefined) {
+    if (!constantTimeEqual(mac, macFor(type, parsed[2]!, record?.provenance)) || record === undefined) {
       throw new ProviderDataBoundaryError('invalid_alias');
     }
     if (expectedType !== undefined && type !== expectedType) {
       throw new ProviderDataBoundaryError('alias_type_mismatch');
     }
+    if (record.provenance && destination && (
+      record.provenance.toolName !== destination.toolName
+      || record.provenance.fieldPath !== destination.fieldPath
+    )) {
+      throw new ProviderDataBoundaryError('invalid_alias');
+    }
     return record;
   };
 
-  const stageAliases = (candidates: readonly ProviderAliasCandidate[]): Map<string, AliasRecord> => {
+  const stageAliases = (candidates: readonly ScopedAliasCandidate[]): Map<string, AliasRecord> => {
     const stagedByValue = new Map<string, AliasRecord>();
     const stagedByAlias = new Map<string, AliasRecord>();
     for (const candidate of candidates) {
@@ -178,9 +192,16 @@ export function createProviderDataBoundary(
           throw new Error('Provider boundary entropy must return the requested byte count');
         }
         const token = hex(tokenBytes);
-        const alias = `⟦WSA1:${candidate.type}:${token}:${macFor(candidate.type, token)}⟧`;
+        const alias = `⟦WSA1:${candidate.type}:${token}:${macFor(candidate.type, token, candidate.provenance)}⟧`;
         if (!byAlias.has(alias) && !stagedByAlias.has(alias)) {
-          record = Object.freeze({ alias, localValue: candidate.value, type: candidate.type });
+          record = Object.freeze({
+            alias,
+            localValue: candidate.value,
+            type: candidate.type,
+            ...(candidate.provenance ? {
+              provenance: Object.freeze({ ...candidate.provenance }),
+            } : {}),
+          });
           break;
         }
       }
@@ -195,7 +216,7 @@ export function createProviderDataBoundary(
 
   const render = (
     text: string,
-    candidates: readonly ProviderAliasCandidate[],
+    candidates: readonly ScopedAliasCandidate[],
     staged: ReadonlyMap<string, AliasRecord>,
   ): string => {
     let cursor = 0;
@@ -209,9 +230,10 @@ export function createProviderDataBoundary(
     return output + text.slice(cursor);
   };
 
-  const exposeTexts = (
+  const exposeTextsWithProvenance = (
     texts: readonly string[],
     _context: { surface: ProviderBoundarySurface },
+    provenances: readonly (AliasProvenance | undefined)[] = [],
   ): string[] => {
     assertActive();
     const startedAt = performance.now();
@@ -225,13 +247,9 @@ export function createProviderDataBoundary(
       throw new ProviderDataBoundaryError('limit_exceeded');
     }
     const overLimit = texts.some((text) => text.length > MAX_BOUNDARY_TEXT_LENGTH);
-    let secretCount = texts.reduce(
-      (count, text) => count + (containsProviderSecretValue(text) ? 1 : 0),
-      0,
-    );
-    if (secretCount === 0 && containsSecretAcross(texts)) secretCount = 1;
-    const hasReservedSyntax = texts.some(containsProviderAliasSyntax)
-      || containsProviderAliasSyntaxAcross(texts);
+    const scan = scanProviderTextSequence(texts);
+    const secretCount = scan.directSecretCount + (scan.fragmentedSecret ? 1 : 0);
+    const hasReservedSyntax = scan.directAlias || scan.fragmentedAlias;
     if (overLimit || secretCount > 0 || hasReservedSyntax) {
       const error = new ProviderDataBoundaryError(
         overLimit ? 'limit_exceeded' : secretCount > 0 ? 'secret_detected' : 'residual_alias',
@@ -241,7 +259,12 @@ export function createProviderDataBoundary(
       if (mode === 'shadow') return [...texts];
       throw error;
     }
-    const candidatesByText = texts.map((text) => collectProviderAliasCandidates(text, technicalIdentifiers));
+    const candidatesByText = texts.map((text, index) => (
+      collectProviderAliasCandidates(text, technicalIdentifiers).map((candidate) => ({
+        ...candidate,
+        ...(provenances[index] ? { provenance: provenances[index] } : {}),
+      }))
+    ));
     const allCandidates = candidatesByText.flat();
     if (allCandidates.length > MAX_ALIASES_PER_TRANSFORM) {
       emit('transform_failure', 0, startedAt, texts.length, 0, 0);
@@ -263,6 +286,11 @@ export function createProviderDataBoundary(
       throw error;
     }
   };
+
+  const exposeTexts = (
+    texts: readonly string[],
+    context: { surface: ProviderBoundarySurface },
+  ): string[] => exposeTextsWithProvenance(texts, context);
 
   const exposeText = (text: string, context: { surface: ProviderBoundarySurface }): string => (
     exposeTexts([text], context)[0]!
@@ -326,7 +354,11 @@ export function createProviderDataBoundary(
         toolName,
         value: input,
         tools,
-        authenticate: (alias, expectedType) => authenticate(alias, expectedType).localValue,
+        authenticate: (alias, expectedType, destinationPointer) => authenticate(
+          alias,
+          expectedType,
+          { toolName, fieldPath: destinationPointer },
+        ).localValue,
       });
       emit('success', 1, startedAt, 1, result.aliasCount, 0);
       return mode === 'shadow' ? input : result.output;
@@ -350,8 +382,77 @@ export function createProviderDataBoundary(
     },
     exposeText,
     exposeTexts,
-    exposeToolResult(_toolName: string, content: string): string {
-      return exposeText(content, { surface: 'tool_result' });
+    exposeToolResult(toolName: string, content: string): string {
+      let parsed: unknown;
+      try {
+        assertProviderToolJsonSafe(content);
+        parsed = JSON.parse(content) as unknown;
+      } catch {
+        return exposeTextsWithProvenance(
+          [content],
+          { surface: 'tool_result' },
+          [{ toolName, fieldPath: '' }],
+        )[0]!;
+      }
+      if (typeof parsed !== 'object' || parsed === null) {
+        return exposeTextsWithProvenance(
+          [content],
+          { surface: 'tool_result' },
+          [{ toolName, fieldPath: '' }],
+        )[0]!;
+      }
+      const startedAt = performance.now();
+      try {
+        const secretCount = preflightProviderToolValue(parsed);
+        if (secretCount > 0) throw new ProviderDataBoundaryError('secret_detected');
+      } catch (error) {
+        const failure = failureEvent(error, 'transform');
+        emit(
+          failure.eventType,
+          failure.success,
+          startedAt,
+          1,
+          0,
+          error instanceof ProviderDataBoundaryError && error.code === 'secret_detected' ? 1 : 0,
+        );
+        if (mode === 'shadow') return content;
+        throw error;
+      }
+      const entries: Array<{ value: string; provenance: AliasProvenance }> = [];
+      const collect = (value: unknown, pointer: string): void => {
+        if (typeof value === 'string') {
+          entries.push({ value, provenance: { toolName, fieldPath: pointer } });
+          return;
+        }
+        if (Array.isArray(value)) {
+          for (const child of value) collect(child, `${pointer}/*`);
+          return;
+        }
+        if (typeof value === 'object' && value !== null) {
+          for (const [key, child] of Object.entries(value)) {
+            collect(child, `${pointer}/${key.replaceAll('~', '~0').replaceAll('/', '~1')}`);
+          }
+        }
+      };
+      collect(parsed, '');
+      const transformed = exposeTextsWithProvenance(
+        entries.map((entry) => entry.value),
+        { surface: 'tool_result' },
+        entries.map((entry) => entry.provenance),
+      );
+      if (mode === 'shadow') return content;
+      let index = 0;
+      const clone = (value: unknown): unknown => {
+        if (typeof value === 'string') return transformed[index++]!;
+        if (Array.isArray(value)) return value.map(clone);
+        if (typeof value === 'object' && value !== null) {
+          const output = Object.create(null) as Record<string, unknown>;
+          for (const [key, child] of Object.entries(value)) output[key] = clone(child);
+          return output;
+        }
+        return value;
+      };
+      return JSON.stringify(clone(parsed));
     },
     inspectToolJson(rawJson: string): boolean {
       assertActive();

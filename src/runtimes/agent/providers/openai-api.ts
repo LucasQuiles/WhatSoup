@@ -252,7 +252,7 @@ export class OpenAIApiProvider implements ProviderSession {
 
       if (result.stagedAssistantMessage) {
         this.messages.push(result.stagedAssistantMessage);
-        if (result.localText !== undefined) {
+        if (result.localText !== undefined && this.boundaryEnforced) {
           this.opts.onEvent({ type: 'assistant_text', text: result.localText });
         }
       }
@@ -467,6 +467,9 @@ export class OpenAIApiProvider implements ProviderSession {
 
     const body = response.body;
     if (!body) {
+      if (this.boundaryRestricted) {
+        this.dataBoundary!.observeProviderResponseFailure('invalid_provider_response');
+      }
       return { text: '', terminalResultText: 'No response body' };
     }
 
@@ -543,7 +546,7 @@ export class OpenAIApiProvider implements ProviderSession {
         if (typeof delta['content'] === 'string' && delta['content'].length > 0) {
           responseBudget?.observeText(delta['content']);
           fullText += delta['content'];
-          if (!this.boundaryRestricted) {
+          if (!this.boundaryEnforced) {
             this.opts.onEvent({ type: 'assistant_text', text: delta['content'] });
           }
         }
