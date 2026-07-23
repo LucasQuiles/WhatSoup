@@ -3564,6 +3564,9 @@ export class AgentRuntime implements Runtime {
         targetMode: 'caller-supplied',
         replayPolicy: 'unsafe',
         core: false,
+        // QR-017 / #1976: inline control-plane tool registered outside
+        // register-all's per-module bracket, so it is tagged explicitly here.
+        group: 'control-plane',
         handler: async (params) => {
           const parsed = EmitHealResultSchema.parse(params);
 
@@ -3643,7 +3646,10 @@ export class AgentRuntime implements Runtime {
     // Requires the fleet-owned restarter injected from the composition root.
     if (!this.sandbox && !this.sandboxPerChat && this.serviceRestarter) {
       const serviceRestarter = this.serviceRestarter;
-      this.registry.register(buildRestartSelfTool({
+      // QR-017 / #1976: inline control-plane tool registered outside
+      // register-all's per-module bracket — tag it via the same withModule seam
+      // so it carries a group like every module tool. Pure taxonomy metadata.
+      this.registry.withModule('control-plane', () => this.registry.register(buildRestartSelfTool({
         instanceName: this.instanceName,
         dataRoot: config.dataRoot,
         resolveChatJid: () => this.currentTurnChatJid ?? this.activeChatJid ?? undefined,
@@ -3656,7 +3662,7 @@ export class AgentRuntime implements Runtime {
         // authenticated transport BEFORE the phone match, so a spoofed @sms actor
         // that collapses to admin digits cannot induce a restart.
         assertAdmin: (session) => assertRestartSelfAdmin(session, { db: this.db, adminPhones: config.adminPhones }),
-      }));
+      })));
     }
 
     // Heal the claude file-store credential from the keychain BEFORE the first
