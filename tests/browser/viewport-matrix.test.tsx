@@ -171,6 +171,9 @@ vi.mock('../../console/src/lib/api', () => ({
     searchMessages: vi.fn(() => Promise.resolve({ results: [], total: 0 })),
     getMessages: vi.fn(() => Promise.resolve([])),
     sendMessage: vi.fn(() => Promise.resolve()),
+    // v3.5 Deployments (T5 b-08): version + fleet liveness queries.
+    getVersion: vi.fn(() => Promise.resolve({ sha: 'abc1234def', remoteSha: 'abc1234def', updateAvailable: false, checkedAt: '' })),
+    getLivez: vi.fn(() => Promise.resolve({ alive: true, instance: 'whatsoup', pid: 1, uptime_seconds: 1814400, started_at: '' })),
   },
   // App now reaches use-websocket (via the connection-status hook), which imports
   // isProductionConsole from lib/api — expose it on the explicit-shape mock.
@@ -250,6 +253,7 @@ import SoupKitchen from '../../console/src/pages/SoupKitchen';
 import LineDetail from '../../console/src/pages/LineDetail';
 import Ops from '../../console/src/pages/Operator';
 import Inbox from '../../console/src/pages/Inbox';
+import Deployments from '../../console/src/pages/Deployments';
 import {
   Drawer,
   DrawerLayout,
@@ -646,6 +650,105 @@ describe('Viewport matrix — Inbox (C-D7-4)', () => {
         expect(root.scrollWidth).toBeLessThanOrEqual(root.clientWidth + 1);
       });
     }
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// DEPLOYMENTS suite (T5 b-08 — v3.5 surface, mockup deployments.html SSOT)
+//
+// The mockup's own breakpoint: summary strip + card bodies go 4→2 columns at
+// @media (max-width: 1000px) — a VIEWPORT query (shared with the agents
+// surface), proven via page.viewport().
+// ---------------------------------------------------------------------------
+
+function wrapDeployments() {
+  return (
+    <QueryClientProvider client={makeQC()}>
+      <ToastContext.Provider value={toastValue}>
+        <MemoryRouter>
+          <Deployments />
+        </MemoryRouter>
+      </ToastContext.Provider>
+    </QueryClientProvider>
+  );
+}
+
+describe('Viewport matrix — v3.5 Deployments (T5 b-08)', () => {
+  beforeEach(async () => {
+    useLinesMock.mockReturnValue({
+      data: [
+        {
+          name: 'personal',
+          mode: 'agent',
+          status: 'online',
+          accessMode: 'allowlist',
+          health: {
+            transport: { kind: 'baileys', connected: true },
+            whatsapp: { connected: true, connection: { state: 'connected' } },
+          },
+        },
+      ],
+    } as never);
+  });
+
+  it('summary strip and card body render 4-column grids at 1440×900', async () => {
+    await page.viewport(1440, 900);
+    const { container } = await render(wrapDeployments());
+    await vi.waitFor(() => {
+      expect(container.querySelector('.deploy-sum')).not.toBeNull();
+    });
+    const sum = container.querySelector('.deploy-sum') as HTMLElement;
+    expect(window.getComputedStyle(sum).gridTemplateColumns.split(' ').length).toBe(4);
+    const dbody = container.querySelector('.deploy-dbody') as HTMLElement;
+    expect(window.getComputedStyle(dbody).gridTemplateColumns.split(' ').length).toBe(4);
+  });
+
+  it('grids stay 4-column at 1001px (just above the mockup threshold)', async () => {
+    await page.viewport(1001, 900);
+    const { container } = await render(wrapDeployments());
+    await vi.waitFor(() => {
+      expect(container.querySelector('.deploy-sum')).not.toBeNull();
+    });
+    const sum = container.querySelector('.deploy-sum') as HTMLElement;
+    expect(window.getComputedStyle(sum).gridTemplateColumns.split(' ').length).toBe(4);
+  });
+
+  it('grids collapse to 2 columns at 1000px (the mockup threshold)', async () => {
+    await page.viewport(1000, 900);
+    const { container } = await render(wrapDeployments());
+    await vi.waitFor(() => {
+      expect(container.querySelector('.deploy-sum')).not.toBeNull();
+    });
+    const sum = container.querySelector('.deploy-sum') as HTMLElement;
+    expect(window.getComputedStyle(sum).gridTemplateColumns.split(' ').length).toBe(2);
+    const dbody = container.querySelector('.deploy-dbody') as HTMLElement;
+    expect(window.getComputedStyle(dbody).gridTemplateColumns.split(' ').length).toBe(2);
+  });
+
+  it('grids stay 2-column at 999px', async () => {
+    await page.viewport(999, 900);
+    const { container } = await render(wrapDeployments());
+    await vi.waitFor(() => {
+      expect(container.querySelector('.deploy-sum')).not.toBeNull();
+    });
+    const sum = container.querySelector('.deploy-sum') as HTMLElement;
+    expect(window.getComputedStyle(sum).gridTemplateColumns.split(' ').length).toBe(2);
+  });
+
+  it('fits 1440×900 with no horizontal overflow (the bead acceptance item)', async () => {
+    await page.viewport(1440, 900);
+    const { container } = await render(wrapDeployments());
+    await vi.waitFor(() => {
+      expect(container.querySelector('.deploy-page')).not.toBeNull();
+    });
+    const root = container.querySelector('.deploy-page') as HTMLElement;
+    expect(root.scrollWidth).toBeLessThanOrEqual(root.clientWidth + 1);
+    // the summary + one card + pair card compose inside the viewport height:
+    // the page itself never scrolls the document (main scrolls internally)
+    expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(
+      document.documentElement.clientWidth + 1,
+    );
   });
 });
 

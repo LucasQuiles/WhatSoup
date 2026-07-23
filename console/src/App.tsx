@@ -19,6 +19,7 @@ import { useToast } from './hooks/toast-context'
 const SoupKitchen = lazy(() => import('./pages/SoupKitchen'))
 const LineDetail = lazy(() => import('./pages/LineDetail'))
 const Inbox = lazy(() => import('./pages/Inbox'))
+const Deployments = lazy(() => import('./pages/Deployments'))
 const Metrics = lazy(() => import('./pages/Metrics'))
 const Operator = lazy(() => import('./pages/Operator'))
 const Landing = lazy(() => import('./pages/Landing'))
@@ -129,7 +130,7 @@ function UnlockedApp({ onLogout, showLogout }: { onLogout: () => void; showLogou
                 <Route path="/agents" element={<ErrorBoundary><SurfaceStub surface="Agents" bead="b-04" /></ErrorBoundary>} />
                 <Route path="/skills" element={<ErrorBoundary><SurfaceStub surface="Skills Hub" bead="b-05" /></ErrorBoundary>} />
                 <Route path="/dream-lab" element={<ErrorBoundary><SurfaceStub surface="Dream Lab" bead="b-06" /></ErrorBoundary>} />
-                <Route path="/deployments" element={<ErrorBoundary><SurfaceStub surface="Deployments" bead="b-08" /></ErrorBoundary>} />
+                <Route path="/deployments" element={<ErrorBoundary><Deployments /></ErrorBoundary>} />
                 <Route path="/settings" element={<ErrorBoundary><SurfaceStub surface="Settings" bead="b-09" /></ErrorBoundary>} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
