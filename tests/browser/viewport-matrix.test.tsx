@@ -250,6 +250,7 @@ import SoupKitchen from '../../console/src/pages/SoupKitchen';
 import LineDetail from '../../console/src/pages/LineDetail';
 import Ops from '../../console/src/pages/Operator';
 import Inbox from '../../console/src/pages/Inbox';
+import SkillsHub from '../../console/src/pages/SkillsHub';
 import {
   Drawer,
   DrawerLayout,
@@ -967,5 +968,51 @@ describe('Viewport matrix — side-panel fold (DD-18r leg 2)', () => {
     const list = container.querySelector('.soup-history-split__list') as HTMLElement;
     expect(list).not.toBeNull();
     expect(window.getComputedStyle(list).width).toBe('288px');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SKILLS HUB suite (v3.5 T5 b-05)
+//
+// The filters rail hides at the mockup's OWN breakpoint — skills-hub.html
+// `@media (max-width:900px)` — the third distinct SSOT breakpoint (chrome/
+// fleet 1100px, agents 1000px, skills 900px). Legs pin the boundary exactly
+// (901/900/899) plus the results column owning its scroll.
+// ---------------------------------------------------------------------------
+
+describe('Viewport matrix — Skills Hub (v3.5 b-05)', () => {
+  it('at 901px: filters rail is visible beside the results column', async () => {
+    await page.viewport(901, 800);
+    const { container } = await render(wrapPage(<SkillsHub />));
+    const rail = container.querySelector<HTMLElement>('.skills-filters');
+    expect(rail).not.toBeNull();
+    expect(window.getComputedStyle(rail!).display).not.toBe('none');
+    expect(window.getComputedStyle(rail!).width).toBe('196px');
+  });
+
+  it('at 900px: filters rail hides (max-width matches at the boundary)', async () => {
+    await page.viewport(900, 800);
+    const { container } = await render(wrapPage(<SkillsHub />));
+    const rail = container.querySelector<HTMLElement>('.skills-filters');
+    expect(rail).not.toBeNull();
+    expect(window.getComputedStyle(rail!).display).toBe('none');
+  });
+
+  it('at 899px: filters rail stays hidden', async () => {
+    await page.viewport(899, 800);
+    const { container } = await render(wrapPage(<SkillsHub />));
+    const rail = container.querySelector<HTMLElement>('.skills-filters');
+    expect(window.getComputedStyle(rail!).display).toBe('none');
+  });
+
+  it('results column owns its scroll at short height (page clips, main scrolls)', async () => {
+    await page.viewport(1440, 500);
+    const { container } = await render(wrapPage(<SkillsHub />));
+    const root = container.querySelector<HTMLElement>('.skills-page');
+    expect(root).not.toBeNull();
+    expect(window.getComputedStyle(root!).overflow).toBe('hidden');
+    const main = container.querySelector<HTMLElement>('.skills-main');
+    expect(main).not.toBeNull();
+    expect(window.getComputedStyle(main!).overflowY).toBe('auto');
   });
 });
