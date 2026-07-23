@@ -7,6 +7,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
+import type { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
 
 // ── Hoisted mocks ───────────────────────────────────────────────────────────
 
@@ -66,6 +67,11 @@ vi.mock('../../../src/logger.ts', () => ({
     error: vi.fn(),
     debug: vi.fn(),
   }),
+}));
+
+vi.mock('../../../src/lib/emit-alert.ts', () => ({
+  emitAlertChecked: vi.fn(),
+  clearAlertSourceChecked: vi.fn(),
 }));
 
 vi.mock('../../../src/core/messages.ts', () => ({
@@ -281,6 +287,21 @@ function expectedTurnRecoveryDetails(): Record<string, number> {
   };
 }
 
+function expectedProviderExecutionDetails(): Record<string, unknown> {
+  return {
+    providerExecution: {
+      active: false,
+      pending: 0,
+      oldestWaitMs: 0,
+      totalWaits: 0,
+      maxPending: 0,
+      lastWaitMs: 0,
+      abortedWaits: 0,
+      pressureActive: false,
+    },
+  };
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
@@ -341,6 +362,7 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         turnFinalizationRetryAttempts: 0,
         turnFinalizationRetryRecoveries: 0,
         turnFinalizationRetryExhaustions: 0,
+        ...expectedProviderExecutionDetails(),
         ...expectedTurnRecoveryDetails(),
         ...expectedFallbackDetails(),
       },
@@ -370,6 +392,7 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         turnFinalizationRetryAttempts: 0,
         turnFinalizationRetryRecoveries: 0,
         turnFinalizationRetryExhaustions: 0,
+        ...expectedProviderExecutionDetails(),
         ...expectedTurnRecoveryDetails(),
         ...expectedFallbackDetails(),
       },
@@ -379,6 +402,25 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
   it('activeSessions is 0 when no sessions exist', () => {
     const snapshot = runtime.getHealthSnapshot();
     expect(snapshot.details['activeSessions']).toBe(0);
+  });
+
+  it('degrades only while provider execution pressure is active', async () => {
+    vi.useFakeTimers();
+    try {
+      const gate = (runtime as unknown as { providerExecutionGate: ProviderExecutionGate }).providerExecutionGate;
+      const first = await gate.acquire();
+      const secondPromise = gate.acquire();
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(runtime.getHealthSnapshot().status).toBe('healthy');
+      await vi.advanceTimersByTimeAsync(1);
+      expect(runtime.getHealthSnapshot().status).toBe('degraded');
+      first.release();
+      const second = await secondPromise;
+      second.release();
+      expect(runtime.getHealthSnapshot().status).toBe('healthy');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('reports degraded while a provider fallback window is active', () => {
@@ -456,6 +498,7 @@ describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
         turnFinalizationRetryAttempts: 0,
         turnFinalizationRetryRecoveries: 0,
         turnFinalizationRetryExhaustions: 0,
+        ...expectedProviderExecutionDetails(),
         ...expectedTurnRecoveryDetails(),
         ...expectedFallbackDetails(),
       },

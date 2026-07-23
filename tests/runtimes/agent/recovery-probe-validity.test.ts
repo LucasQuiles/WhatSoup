@@ -194,7 +194,11 @@ describe('AgentRuntime.probePrimaryProviderRecovered — validity, not presence'
     const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', { model: 'claude-opus-4-8[1m]', cwd: '/tmp/whatsoup-recovery-cwd' }) as AgentRuntime;
     const v = view(runtime);
     await expect(v.probePrimaryProviderRecovered()).resolves.toBe(true);
-    expect(createAdaptersMock).toHaveBeenCalledWith(undefined, { cwd: '/tmp/whatsoup-recovery-cwd' });
+    expect(createAdaptersMock).toHaveBeenCalledWith(undefined, expect.objectContaining({
+      cwd: '/tmp/whatsoup-recovery-cwd',
+      egressProxyPort: undefined,
+      providerExecutionGate: expect.anything(),
+    }));
   });
 
   it('binary primary: tolerates an unset model (coalesces to null) and follows usability', async () => {

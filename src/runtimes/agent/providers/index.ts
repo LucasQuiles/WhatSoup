@@ -20,6 +20,7 @@
 //   5. Add an impl file (parser or API client) here under providers/.
 
 import providerIdsJson from './provider-ids.json' with { type: 'json' };
+import type { ExecutionMode } from './types.ts';
 
 /**
  * Literal tuple type of the canonical provider IDs. TypeScript widens JSON
@@ -73,4 +74,21 @@ export function assertNeverProvider(value: never, context: string): never {
     `[${context}] unknown provider id: ${JSON.stringify(value)}. ` +
       `Valid: ${PROVIDER_IDS.join(', ')}.`,
   );
+}
+
+/** Canonical process-lifecycle model for each provider. */
+export function executionModeForProvider(provider: ProviderId): ExecutionMode {
+  switch (provider) {
+    case 'claude-cli':
+    case 'codex-cli':
+    case 'gemini-cli':
+      return 'persistent_session';
+    case 'opencode-cli':
+      return 'spawn_per_turn';
+    case 'openai-api':
+    case 'anthropic-api':
+      return 'managed_loop';
+    default:
+      return assertNeverProvider(provider, 'providers:executionModeForProvider');
+  }
 }

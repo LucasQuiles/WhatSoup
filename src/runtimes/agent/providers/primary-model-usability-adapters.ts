@@ -17,6 +17,10 @@ import type {
   BinaryModelProbeResult,
   PrimaryModelProbeAdapters,
 } from './primary-model-usability.ts';
+import type {
+  ProviderExecutionGate,
+  ProviderExecutionLease,
+} from '../provider-execution-gate.ts';
 
 export interface PrimaryModelProbeAdapterDeps {
   cwd?: string;
@@ -48,6 +52,8 @@ export interface PrimaryModelProbeAdapterDeps {
    * instance has not opted into the allowlist.
    */
   egressProxyPort?: number;
+  /** Shared OpenCode state-store execution gate owned by the AgentRuntime. */
+  providerExecutionGate?: ProviderExecutionGate;
 }
 
 const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
@@ -105,12 +111,35 @@ async function probeCliModel(
       if (deps.probeBinaryAuthStatus) return deps.probeBinaryAuthStatus(cmd, args, env);
       return probeBinaryCommand(cmd, args, env, options);
     });
-  const result = await probe(
-    binary,
-    modelProbeCommand(provider, model, providerConfig),
-    modelProbeEnv(provider, model, providerConfig, deps),
-    { ...(deps.cwd ? { cwd: deps.cwd } : {}), timeoutMs: CLI_MODEL_PROBE_TIMEOUT_MS },
-  );
+  const args = modelProbeCommand(provider, model, providerConfig);
+  const env = modelProbeEnv(provider, model, providerConfig, deps);
+  let executionLease: ProviderExecutionLease | null = null;
+  if (provider === 'opencode-cli' && deps.providerExecutionGate) {
+    executionLease = await deps.providerExecutionGate.acquire();
+  }
+  const releaseExecutionLease = (): void => {
+    executionLease?.release();
+    executionLease = null;
+  };
+  let result: BinaryAuthStatusResult;
+  try {
+    result = await probe(
+      binary,
+      args,
+      env,
+      {
+        ...(deps.cwd ? { cwd: deps.cwd } : {}),
+        timeoutMs: CLI_MODEL_PROBE_TIMEOUT_MS,
+        ...(executionLease ? { onProcessClosed: releaseExecutionLease } : {}),
+      },
+    );
+    // Injected test/probe adapters predate onProcessClosed and may not invoke
+    // it. Their returned promise is their complete process-lifetime contract.
+    if (deps.probeBinaryCommand || deps.probeBinaryAuthStatus) releaseExecutionLease();
+  } catch (err) {
+    releaseExecutionLease();
+    throw err;
+  }
   return mapCliProbeResult(result);
 }
 

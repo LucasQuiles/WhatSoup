@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createPrimaryModelProbeAdapters } from '../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts';
+import { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
 
 describe('createPrimaryModelProbeAdapters', () => {
   afterEach(() => {
@@ -152,6 +153,30 @@ describe('createPrimaryModelProbeAdapters', () => {
       }),
       expect.objectContaining({ timeoutMs: 15_000 }),
     );
+  });
+
+  it('serializes an OpenCode model probe behind the shared runtime execution lease', async () => {
+    const gate = new ProviderExecutionGate();
+    const activeTurn = await gate.acquire();
+    const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      getProviderBinary: vi.fn(() => 'opencode'),
+      probeBinaryCommand,
+      providerExecutionGate: gate,
+    });
+
+    const probe = adapters.probeBinaryModel?.({
+      provider: 'opencode-cli',
+      model: 'openai/some-model',
+    });
+    await Promise.resolve();
+    expect(probeBinaryCommand).not.toHaveBeenCalled();
+    expect(gate.snapshot()).toMatchObject({ active: true, pending: 1 });
+
+    activeTurn.release();
+    await expect(probe).resolves.toEqual({ status: 'ok' });
+    expect(probeBinaryCommand).toHaveBeenCalledOnce();
+    expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
   });
 
   it('runs the file-store credential heal before a claude-cli probe, but not for opencode-cli', async () => {
