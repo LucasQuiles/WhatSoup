@@ -48,7 +48,19 @@ non-avatar elements (except `agent-dream`, which is the agent-mode channel, not 
 Rule: a surface consumes exactly one namespace; cross-register consumption is a lint
 error (L4 broad enforcement).
 
-## 5. Acceptance gate
+## 5. Settings surface geometry (`--settings-*`, T5 b-09)
+
+Component-register geometry for the Settings surface, all traced to
+`mockups/settings.html` and `17-settings-ia-spec.md`: 190px section nav,
+1080px content measure, panel + airy-row form register, the 32×18px toggle
+(shape-visible both states), 52px appearance swatches (18px/10px bands),
+120px fixed channel control zone, token rows. The section nav goes
+horizontal-scroll at the mockup's own 800px — the sixth distinct SSOT
+breakpoint. Spec SSOT: `tokens-v3.md` §12. Same pattern as b-02…b-08: raw
+mockup dimensions land in the token block once; `settings.css` consumes
+`var()` only.
+
+## 6. Acceptance gate
 
 - [ ] No `channel-*` token carries a hue (computed check).
 - [ ] `agent-hue-*` used only on avatar fills + nowhere else (consumer audit).

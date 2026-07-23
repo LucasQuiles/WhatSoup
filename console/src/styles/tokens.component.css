@@ -137,4 +137,46 @@
   --popover-check-t:  2px;     /* popover checkmark glyph: top offset */
   --popover-check-w:  6px;     /* popover checkmark glyph: stroke box width */
   --popover-check-h:  10px;    /* popover checkmark glyph: stroke box height */
+
+  /* ═══ v3.5 Settings surface geometry (T5 b-09; mockup settings.html SSOT) ═══
+     Every literal traces to the mockup; settings.css consumes var() only.
+     Breakpoint: the section nav goes horizontal-scroll at the mockup's own
+     800px — the sixth distinct SSOT breakpoint (chrome/fleet 1100, agents
+     1000, dream 980, skills 900, inbox 760, settings 800). */
+  --settings-nav-w: 190px;         /* section nav column (mockup .wrap grid) */
+  --settings-nav-pad: 14px 10px;   /* section nav padding (mockup .snav) */
+  --settings-nav-item-gap: 9px;    /* nav item gap (mockup .snav a) */
+  --settings-nav-item-pad: 8px 10px; /* nav item padding (mockup .snav a) */
+  --settings-nav-item-radius: 6px; /* nav item radius (mockup .snav a) */
+  --settings-main-pad: 14px 28px;  /* content column padding (mockup .main) */
+  --settings-main-maxw: 1080px;    /* content column measure (mockup .main) */
+  --settings-h2-mb: 4px;           /* section h2 margin-bottom (mockup h2) */
+  --settings-desc-mb: 6px;         /* section desc margin-bottom (mockup .desc) */
+  --settings-panel-radius: 10px;   /* panel radius (mockup .panel) */
+  --settings-panel-mb: 6px;        /* panel bottom margin (mockup .panel) */
+  --settings-panel-b-pad: 6px 16px; /* panel body padding (mockup .panel-b) */
+  --settings-row-gap: 12px;        /* form row gap (mockup .row) */
+  --settings-row-pad-y: 6px;       /* form row vertical padding (mockup .row) */
+  --settings-ctl-gap: 8px;         /* control zone gap (mockup .row .ctl) */
+  --settings-input-w: 200px;       /* text input width (mockup .inp) */
+  --settings-input-pad: 7px 10px;  /* text input padding (mockup .inp) */
+  --settings-input-radius: 7px;    /* text input radius (mockup .inp) */
+  --settings-tgl-w: 32px;          /* toggle track width (mockup .tgl) */
+  --settings-tgl-h: 18px;          /* toggle track height (mockup .tgl) */
+  --settings-tgl-knob: 14px;       /* toggle knob box (mockup .tgl::after) */
+  --settings-tgl-inset: 2px;       /* toggle knob inset (mockup .tgl::after) */
+  --settings-tgl-travel: 14px;     /* toggle knob travel (mockup .tgl.on::after) */
+  --settings-swatches-gap: 8px;    /* swatch row gap (mockup .swatches) */
+  --settings-sw-w: 52px;           /* swatch width (mockup .sw) */
+  --settings-sw-radius: 8px;       /* swatch radius (mockup .sw) */
+  --settings-sw-a-h: 18px;         /* swatch primary band (mockup .sw .a) */
+  --settings-sw-b-h: 10px;         /* swatch secondary band (mockup .sw .b) */
+  --settings-nchan-gap: 10px;      /* channel row gap (mockup .nchan) */
+  --settings-nchan-pad-y: 5px;     /* channel row vertical padding (mockup .nchan) */
+  --settings-nchan-glyph: 14px;    /* channel glyph canvas (mockup .nchan svg) */
+  --settings-opts-minw: 120px;     /* channel control zone min width (mockup .opts) */
+  --settings-opts-gap: 10px;       /* channel control zone gap (mockup .opts) */
+  --settings-tok-gap: 10px;        /* token row gap (mockup .tok) */
+  --settings-tok-pad-y: 5px;       /* token row vertical padding (mockup .tok) */
+  --settings-acts-gap: 6px;        /* token actions gap (mockup .tok .acts) */
 }

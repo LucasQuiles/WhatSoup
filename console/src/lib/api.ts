@@ -430,6 +430,37 @@ export const api = {
       { method: 'POST', signal: AbortSignal.timeout(15_000) },
     ),
 
+  /** Remove a provider key from the OS keyring (T5 b-09 Settings revoke). */
+  deleteCredential: (service: string) =>
+    apiFetch<{ ok: boolean; service: string; envShadowed?: boolean; inUse?: boolean }>(
+      `/api/credentials/${encodeURIComponent(service)}`,
+      { method: 'DELETE' },
+    ),
+
+  // ── Fleet alert silences (src/fleet/routes/silence.ts) — the only
+  // notification-adjacent prefs with real persistence (fleet-silences.json).
+  getSilences: () =>
+    apiFetch<{
+      silences: Array<{
+        instance: string
+        until: string
+        reason: string | null
+        silencedBy: string
+        createdAt: string
+      }>
+    }>('/api/fleet/silences'),
+
+  silenceLine: (instance: string, durationMinutes: number, reason?: string) =>
+    apiFetch<{ ok: boolean; rule: unknown }>('/api/fleet/silence', {
+      method: 'POST',
+      body: JSON.stringify({ instance, duration_minutes: durationMinutes, reason }),
+    }),
+
+  unsilenceLine: (instance: string) =>
+    apiFetch<{ ok: boolean }>(`/api/fleet/silence/${encodeURIComponent(instance)}`, {
+      method: 'DELETE',
+    }),
+
   createLine: (config: Record<string, unknown>) =>
     apiFetch<{ name: string; healthPort: number }>('/api/lines', {
       method: 'POST',
