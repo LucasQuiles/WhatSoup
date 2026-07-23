@@ -334,14 +334,6 @@ const PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD = (() => {
   if (!Number.isFinite(raw) || raw <= 0) return 12;
   return Math.min(Math.max(Math.trunc(raw), 3), 100);
 })();
-// DUR-02: past T * this multiple, re-alerting every T would repeat forever — the ceiling alert carries `ceiling=true` and no more fire this episode (window still extends).
-const PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE = (() => {
-  const raw = Number(process.env['WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE']);
-  if (!Number.isFinite(raw) || raw <= 0) return 10;
-  return Math.min(Math.max(Math.trunc(raw), 1), 1000);
-})();
-// DUR-02 canary freshness bound, generous over the probe's 15s CLI deadline.
-const FALLBACK_RECOVERY_EVIDENCE_MAX_AGE_MS = 60_000;
 // Opt-in: on an arming provider failure (via the registry dispatcher), run the
 // best-effort diagnostic bundle and emit its findings to the alert outbox.
 // Fire-and-forget — never blocks, delays, or alters the turn's fallback path.
@@ -10165,30 +10157,12 @@ export class AgentRuntime implements Runtime {
     // provider_fallback_activated — keeps its critical default. A
     // probe-confirmed recovery appends the receipt (allowlisted fields only).
     const receiptClause = receipt ? ` ${formatFallbackRecoveryReceiptEvidence(receipt)}` : '';
-    emitAlertChecked(
-      this.instanceName,
-      'provider_fallback_reverted',
-      'Provider fallback window ended — reverted to primary provider',
-      `reason=${reason} turnsServed=${windowTurnsServed} turnsEmpty=${windowTurnsEmpty}`
-        + ` windowMs=${windowMs ?? 'unknown'}${receiptClause}`,
-      'info',
-    );
-    // Recovery clears the activation incident this window opened. Mirrors the
-    // primary_model_unusable → clear pairing above; a clear of a non-open
-    // incident is a downstream no-op, so this is safe across restarts and
-    // manual disables alike.
-    clearAlertSourceChecked(
-      this.instanceName,
-      'provider_fallback_activated',
-      `reason=${reason} windowMs=${windowMs ?? 'unknown'}`,
-    );
+    emitAlertChecked(this.instanceName, 'provider_fallback_reverted', 'Provider fallback window ended — reverted to primary provider', `reason=${reason} turnsServed=${windowTurnsServed} turnsEmpty=${windowTurnsEmpty} windowMs=${windowMs ?? 'unknown'}${receiptClause}`, 'info');
+    // Recovery clears the activation incident this window opened; a clear of a non-open incident is a downstream no-op, safe across restarts and manual disables alike.
+    clearAlertSourceChecked(this.instanceName, 'provider_fallback_activated', `reason=${reason} windowMs=${windowMs ?? 'unknown'}`);
     // DUR-02: fallback_recovery_stalled (CATEGORY-C's never-cleared defect) — gated on receipt + reaching the SAME threshold the emit side uses, so an unstalled revert emits no spurious clear.
     if (receipt && receipt.probeAttemptsAtTransition >= PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD) {
-      clearAlertSourceChecked(
-        this.instanceName,
-        'fallback_recovery_stalled',
-        formatFallbackRecoveryReceiptEvidence(receipt),
-      );
+      clearAlertSourceChecked(this.instanceName, 'fallback_recovery_stalled', formatFallbackRecoveryReceiptEvidence(receipt));
     }
     this.fallbackWindow.activeUntil = null;
     this.fallbackWindow.activatedAt = null;
@@ -10258,15 +10232,9 @@ export class AgentRuntime implements Runtime {
       }
       // Stall alert at T, 2T, 3T ... up to the DUR-02 escalation ceiling, then no repeats (see stallAlertPlan) — counter resets only on deactivation, window keeps extending.
       const atts = this.fallbackProbeAttempts;
-      const plan = stallAlertPlan(atts, PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD, PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE);
+      const plan = stallAlertPlan(atts, PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD);
       if (plan.emit) {
-        emitAlertChecked(
-          this.instanceName,
-          'fallback_recovery_stalled',
-          'Primary provider recovery probe is stalled — fallback window extending indefinitely',
-          `reason=${this.fallbackWindow.armReason ?? 'auth-required'} attempts=${atts} `
-            + `windowEnd=${new Date(until).toISOString()} primaryProvider=${this.agentProvider}${plan.ceiling ? ' ceiling=true' : ''}`,
-        );
+        emitAlertChecked(this.instanceName, 'fallback_recovery_stalled', 'Primary provider recovery probe is stalled — fallback window extending indefinitely', `reason=${this.fallbackWindow.armReason ?? 'auth-required'} attempts=${atts} windowEnd=${new Date(until).toISOString()} primaryProvider=${this.agentProvider}${plan.ceiling ? ' ceiling=true' : ''}`);
       }
       // No scheduleFallbackPrimaryProbe() here: the extension window equals the
       // recheck cadence, so this timer IS the probe cadence. Re-arming the
@@ -10293,7 +10261,6 @@ export class AgentRuntime implements Runtime {
         fallbackProvider: this.fallbackWindow.activeEntry?.provider ?? this.agentProvider,
         fallbackModel: this.fallbackWindow.activeEntry?.model ?? null,
         probeAttemptsAtTransition: this.fallbackProbeAttempts,
-        maxEvidenceAgeMs: FALLBACK_RECOVERY_EVIDENCE_MAX_AGE_MS,
       },
       (err) => log.warn({ err }, 'primary provider recovery probe threw — treating as failed'),
     );

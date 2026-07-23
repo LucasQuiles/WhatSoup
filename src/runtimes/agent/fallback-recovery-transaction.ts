@@ -1,6 +1,15 @@
 import { alertEvidenceValue } from './tool-update.ts';
 import type { PrimaryModelUsabilityResult } from './providers/primary-model-usability.ts';
 
+// DUR-02 canary freshness bound, generous over the probe's 15s CLI deadline (primary-model-usability-adapters.ts) since the result is consumed synchronously right after.
+const MAX_EVIDENCE_AGE_MS = 60_000;
+// DUR-02: past T * this multiple, re-alerting every T would repeat forever — the ceiling alert carries `ceiling=true` and no more fire this episode (window still extends).
+const STALL_CEILING_MULTIPLE = (() => {
+  const raw = Number(process.env['WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE']);
+  if (!Number.isFinite(raw) || raw <= 0) return 10;
+  return Math.min(Math.max(Math.trunc(raw), 1), 1000);
+})();
+
 /**
  * FallbackRecoveryTransaction (DUR-02).
  *
@@ -143,7 +152,6 @@ export interface FallbackRecoveryProbeContext {
   fallbackProvider: string;
   fallbackModel: string | null;
   probeAttemptsAtTransition: number;
-  maxEvidenceAgeMs: number;
 }
 
 /**
@@ -177,7 +185,7 @@ export async function resolveFallbackRecoveryDecision(
     model: ctx.primaryModel,
     checkedAt: Date.now(),
   };
-  return evaluateFallbackRecoveryTransaction(resolvedEvidence, { ...ctx, now: Date.now() });
+  return evaluateFallbackRecoveryTransaction(resolvedEvidence, { ...ctx, now: Date.now(), maxEvidenceAgeMs: MAX_EVIDENCE_AGE_MS });
 }
 
 export interface StallAlertPlan {
@@ -191,8 +199,8 @@ export interface StallAlertPlan {
  * indistinguishable alert forever past a known, indefinite stall is exactly
  * the noise this exists to prevent. The window keeps extending regardless.
  */
-export function stallAlertPlan(attempts: number, threshold: number, ceilingMultiple: number): StallAlertPlan {
-  const ceilingAttempts = threshold * ceilingMultiple;
+export function stallAlertPlan(attempts: number, threshold: number): StallAlertPlan {
+  const ceilingAttempts = threshold * STALL_CEILING_MULTIPLE;
   const isThresholdMultiple = attempts === threshold || (attempts > threshold && (attempts - threshold) % threshold === 0);
   return {
     emit: isThresholdMultiple && attempts <= ceilingAttempts,
