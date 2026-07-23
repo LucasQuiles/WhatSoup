@@ -224,7 +224,10 @@ describe('design-regression.sh guard contracts', () => {
     expect(result.status).toBe(0);
 
     const check15 = checkBlock(output, 15);
-    expect(check15).toContain('Registered waivers: 10');
+    // Derive the expected count from the live registry so adding a waiver
+    // doesn't drift this pin (the registry file is the SSOT).
+    const registryCount = (readFileSync(resolve(process.cwd(), 'console/eslint-waivers.yaml'), 'utf8').match(/^  - id: WVR-/gm) ?? []).length;
+    expect(check15).toContain(`Registered waivers: ${registryCount}`);
     expect(check15).toContain('Untagged disable directives: 0');
     expect(check15).toContain('Unknown source waiver ids: 0');
     expect(check15).toContain('Stale registry TS/TSX scopes: 0');

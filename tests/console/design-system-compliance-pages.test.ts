@@ -263,16 +263,16 @@ describe('design system compliance — Shannon slice', () => {
     expect(ops).toContain('variant="base"')
     expect(ops).toContain('variant="interactive"')
     expect(ops).not.toMatch(/className="[^"]*\bc-card\b/)
-    // SoupKitchen MIGRATED off the raw `.c-card` recipe onto the <Card> primitive
-    // (DD-38, W2-S4 — the LAST raw-recipe page): its 4 surfaces are <Card variant="base">
-    // (one motion-nested, three plain-div 1:1 swaps). Assert the primitive is used and the
-    // raw recipe is gone (no bypass).
-    expect(soupKitchen).toContain('<Card')
-    expect((soupKitchen.match(/<Card\b/g) ?? []).length).toBeGreaterThanOrEqual(4)
-    expect(soupKitchen).toContain('variant="base"')
-    expect(soupKitchen).not.toMatch(/className="[^"]*\bc-card\b/)
-    // C2.3: ToolbarSearch primitive generates aria-label from the label prop.
+    // T5 b-03: SoupKitchen is the v3.5 Fleet surface (mockup fleet.html SSOT).
+    // The panels are fleet-panel sections; interaction affordances route through
+    // the Button/Menu/Popover/TextInput primitives; the table renders on the
+    // Table primitives; virtualization per perf §3 (>50 rows).
+    expect(soupKitchen).toContain('fleet-pagerow')
+    expect(soupKitchen).toContain('Hatch a line')
+    expect(soupKitchen).toContain('fleet-panel')
+    expect(soupKitchen).toContain('useVirtualizer')
     expect(soupKitchen).toContain('label="Search lines"')
+    expect(soupKitchen).not.toMatch(/className="[^"]*\bc-card\b/)
   })
 
   it('KpiCard uses aria-pressed and useId for gradient IDs', () => {

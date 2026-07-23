@@ -58,8 +58,11 @@ describe('design token component classes', () => {
     const soupKitchen = read('console/src/pages/SoupKitchen.tsx')
     const inbox = read('console/src/pages/Inbox.tsx')
 
-    // C2.3: SoupKitchen migrated to ToolbarSearch primitive; no longer uses c-input c-input-search.
-    expect(soupKitchen).toContain('ToolbarSearch')
+    // T5 b-03: SoupKitchen's search moved into the v3.5 filter popover,
+    // rendered through the TextInput FormControl primitive (no raw input,
+    // no legacy c-input classes).
+    expect(soupKitchen).toContain('TextInput')
+    expect(soupKitchen).not.toContain('c-input c-input-search')
     // B4: Inbox migrated to shared SearchInput component — the last raw c-input-search
     // re-roll is gone; Inbox now imports and uses the shared SearchInput producer.
     expect(inbox).toContain('SearchInput')
