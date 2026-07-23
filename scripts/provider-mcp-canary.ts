@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 import {
   runProviderCanary,
   type RunProviderCanaryOptions,
-} from '../src/runtimes/agent/provider-canary-runner.ts';
+} from './lib/provider-canary-runner.ts';
 import {
   isProviderId,
   mcpModeForProvider,

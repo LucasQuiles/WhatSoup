@@ -16,7 +16,7 @@ import {
   buildProviderCanaryInvocation,
   runProviderCanary,
   type ProviderCanaryObservation,
-} from '../../../src/runtimes/agent/provider-canary-runner.ts';
+} from '../../../scripts/lib/provider-canary-runner.ts';
 import { CANARY_CONTRACT_VERSION } from '../../../src/runtimes/agent/provider-canary-proof.ts';
 import {
   acquireProcessLock,

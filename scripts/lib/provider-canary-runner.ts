@@ -7,35 +7,35 @@ import { join } from 'node:path';
 import {
   buildProviderMcpConfigArgs,
   writeProviderMcpConfig,
-} from '../../core/provider-mcp-config.ts';
+} from '../../src/core/provider-mcp-config.ts';
 import {
   deletePrivateFileSync,
   ensurePrivateDirectorySync,
   writeAtomicPrivateFileSync,
   writePrivateFileSync,
-} from '../../lib/private-fs.ts';
+} from '../../src/lib/private-fs.ts';
 import {
   acquireProcessLock,
   releaseProcessLock,
-} from '../../lib/process-lock.ts';
-import { buildChildEnv, getProviderBinary } from './session.ts';
+} from '../../src/lib/process-lock.ts';
+import { buildChildEnv, getProviderBinary } from '../../src/runtimes/agent/session.ts';
 import {
   buildInitializeRequest,
   buildSessionNewRequest,
-} from './providers/gemini-acp-parser.ts';
+} from '../../src/runtimes/agent/providers/gemini-acp-parser.ts';
 import {
   PROVIDER_IDS,
   isProviderId,
   mcpModeForProvider,
   type ProviderId,
-} from './providers/index.ts';
+} from '../../src/runtimes/agent/providers/index.ts';
 import {
   CANARY_CONTRACT_VERSION,
   collectProviderCanaryEvidence,
   providerCanaryReceiptPath,
   validateProviderCanaryReceipt,
   type ProviderCanaryReceipt,
-} from './provider-canary-proof.ts';
+} from '../../src/runtimes/agent/provider-canary-proof.ts';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const POLL_MS = 50;
