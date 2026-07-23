@@ -214,11 +214,18 @@ describe('review pane (mockup .review anatomy)', () => {
   });
 
   it('kind vocab: skills and routine dreams title correctly', () => {
-    render(
+    const { unmount } = render(
       <MemoryRouter>
         <DreamReview dream={makeDream({ id: 'd-2', kind: 'skills', summary: 'add calendar-read' })} metaLine="m" onDecide={() => {}} />
       </MemoryRouter>,
     );
     expect(screen.getByRole('heading', { level: 2, name: 'Skills edit — add calendar-read' })).toBeTruthy();
+    unmount();
+    render(
+      <MemoryRouter>
+        <DreamReview dream={makeDream({ id: 'd-3', kind: 'routine', summary: 'daily summary' })} metaLine="m" onDecide={() => {}} />
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole('heading', { level: 2, name: 'Routine edit — daily summary' })).toBeTruthy();
   });
 });

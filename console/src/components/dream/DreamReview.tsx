@@ -1,4 +1,4 @@
-import type { FC } from 'react';
+import { Fragment, type FC } from 'react';
 import { Button } from '../primitives/Button';
 import { DreamAvatar } from './DreamCard';
 import type { Dream } from './types';
@@ -34,8 +34,8 @@ export const DreamReview: FC<{
         <span className="dream-panel__tag">{dream.diffTarget}</span>
       </div>
       <div className="dream-panel__b dream-diff">
-        {dream.diff.map((sec) => (
-          <span key={sec.title}>
+        {dream.diff.map((sec, si) => (
+          <Fragment key={`sec-${si}`}>
             <span className="dream-diff__sec">{sec.title}</span>
             {sec.lines.map((line, i) => (
               <span
@@ -46,7 +46,7 @@ export const DreamReview: FC<{
                 {line.text}
               </span>
             ))}
-          </span>
+          </Fragment>
         ))}
       </div>
     </div>

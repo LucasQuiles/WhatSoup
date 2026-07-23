@@ -44,7 +44,12 @@ const DreamLab: FC = () => {
             : `${dreams.length} dream${dreams.length === 1 ? "" : "s"} queued`}
         </span>
         <div className="dream-pagerow__spacer" />
-        <Button variant="ghost" disabled title="decision history lands with the Dream API — nothing decided yet">
+        <Button
+          variant="ghost"
+          disabled
+          title="decision history lands with the Dream API — nothing decided yet"
+          aria-description="decision history lands with the Dream API — nothing decided yet"
+        >
           history
         </Button>
       </div>
@@ -75,6 +80,7 @@ const DreamLab: FC = () => {
             className="dream-fstrip"
             disabled
             title="filters activate when dreams exist — the queue is empty today"
+            aria-description="filters activate when dreams exist — the queue is empty today"
           >
             agent: all · type: all · state: queued <span className="dream-fstrip__caret">▾</span>
           </Button>

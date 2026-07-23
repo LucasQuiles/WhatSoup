@@ -25,6 +25,7 @@ export const DreamCard: FC<DreamCardProps> = ({ dream, selected, onSelect, whenL
     variant="ghost"
     className={`dream-dcard${selected ? ' dream-dcard--sel' : ''}`}
     aria-pressed={selected}
+    aria-label={`Review dream from ${dream.agentName}: ${dream.kind} — ${dream.summary}`}
     onClick={() => onSelect(dream.id)}
   >
     <span className="dream-dcard__top">
