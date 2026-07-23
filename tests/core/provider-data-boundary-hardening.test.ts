@@ -10,6 +10,10 @@ import {
   scanProviderTextSequence,
 } from '../../src/core/provider-data-boundary-detection.ts';
 import { PROVIDER_DATA_POLICY_VERSION } from '../../src/core/provider-data-policy.ts';
+import {
+  containsProviderSecretValue,
+  sanitizeProviderSecrets,
+} from '../../src/lib/provider-preview-sanitizer.ts';
 
 function entropy(): (size: number) => Uint8Array {
   let call = 0;
@@ -57,6 +61,113 @@ function aliasFrom(value: string): string {
 }
 
 describe('provider data boundary hardening', () => {
+  it.each([
+    ['early keyed', ['credential=alpha', 'ordinary']],
+    ['late keyed', ['leading', 'credential=alpha', 'ordinary']],
+    ['early Bearer', ['Bearer alpha', 'ordinary']],
+    ['late Bearer', ['leading', 'Bearer alpha', 'ordinary']],
+    ['early known token', [`ghp_${'a'.repeat(16)}`, 'ordinary']],
+    ['late known token', ['leading', `ghp_${'a'.repeat(16)}`, 'ordinary']],
+  ])('counts one direct %s secret followed by a benign field exactly once', (_label, texts) => {
+    const scan = scanProviderTextSequence(texts);
+    const events: ProviderBoundaryEvent[] = [];
+    const broker = boundary(events);
+
+    expect(scan).toMatchObject({
+      directSecretCount: 1,
+      fragmentedSecret: false,
+    });
+    expect(() => broker.exposeTexts(texts, { surface: 'history' }))
+      .toThrowError(expect.objectContaining({ code: 'secret_detected' }));
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      eventType: 'secret_block',
+      secretCount: 1,
+    });
+  });
+
+  it.each([
+    [
+      'keyed direct plus an early two-field keyed fragment',
+      ['credential=alpha ', 'cred', 'ential=beta'],
+    ],
+    [
+      'Bearer direct plus a late three-field Bearer fragment',
+      ['Bearer alpha ', 'ordinary', 'Bea', 'rer ', 'beta'],
+    ],
+    [
+      'known-token direct plus a late two-field known-token fragment',
+      [`ghp_${'a'.repeat(16)} `, 'ordinary', 'ghp_', 'b'.repeat(16)],
+    ],
+  ])('counts %s as one direct and one fragmented secret', (_label, texts) => {
+    const scan = scanProviderTextSequence(texts);
+    const events: ProviderBoundaryEvent[] = [];
+    const broker = boundary(events);
+
+    expect(scan).toMatchObject({
+      directSecretCount: 1,
+      fragmentedSecret: true,
+    });
+    expect(() => broker.exposeTexts(texts, { surface: 'history' }))
+      .toThrowError(expect.objectContaining({ code: 'secret_detected' }));
+    expect(events[0]).toMatchObject({
+      eventType: 'secret_block',
+      secretCount: 2,
+    });
+  });
+
+  it.each([
+    ['embedded GitHub token prefix', 'ordinaryghp_', 'a'.repeat(16)],
+    ['embedded OpenAI token prefix', 'ordinarysk-', 'a'.repeat(16)],
+  ])('keeps %s canonical-negative across fields', (_label, left, right) => {
+    const combined = left + right;
+    const scan = scanProviderTextSequence([left, right]);
+    const broker = boundary();
+    const record = { [left]: right };
+    const tools: ProviderBoundaryMcpTool[] = [{
+      name: 'inspect',
+      inputSchema: {
+        type: 'object',
+        additionalProperties: true,
+      },
+    }];
+
+    expect(containsProviderSecretValue(combined)).toBe(false);
+    expect(sanitizeProviderSecrets(combined)).toBe(combined);
+    expect(scan).toMatchObject({
+      directSecretCount: 0,
+      fragmentedSecret: false,
+    });
+    expect(broker.rehydrateToolInput('inspect', record, tools)).toEqual(record);
+  });
+
+  it.each([
+    ['early two-field Bearer', ['Bear', 'er alpha']],
+    ['late three-field Bearer', ['ordinary', 'values', 'Bea', 'rer ', 'alpha']],
+    ['early two-field known token', ['ghp_', 'a'.repeat(16)]],
+    ['late three-field known token', ['ordinary', 'values', 'gh', 'p_', 'a'.repeat(16)]],
+  ])('detects genuine %s fragments', (_label, texts) => {
+    expect(scanProviderTextSequence(texts)).toMatchObject({
+      directSecretCount: 0,
+      fragmentedSecret: true,
+    });
+  });
+
+  it('keeps global secret regex state stable across repeated direct and boundary scans', () => {
+    const token = `ghp_${'a'.repeat(16)}`;
+    for (let iteration = 0; iteration < 8; iteration += 1) {
+      expect(containsProviderSecretValue(token)).toBe(true);
+      expect(scanProviderTextSequence(['ghp_', 'a'.repeat(16)])).toMatchObject({
+        directSecretCount: 0,
+        fragmentedSecret: true,
+      });
+      expect(scanProviderTextSequence([token, 'ordinary'])).toMatchObject({
+        directSecretCount: 1,
+        fragmentedSecret: false,
+      });
+    }
+  });
+
   it('bounds detector invocations for a maximum-node provider tool record', () => {
     expect(scanProviderTextSequence(['first', 'second']).detectorInvocationCount)
       .toBeLessThanOrEqual(8);

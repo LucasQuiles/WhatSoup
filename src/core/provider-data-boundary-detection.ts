@@ -174,6 +174,7 @@ export interface ProviderTextSequenceScan {
 /** Scan one deterministic sequence while distinguishing complete values from cross-field fragments. */
 export function scanProviderTextSequence(texts: readonly string[]): ProviderTextSequenceScan {
   let carry = '';
+  let carryFieldStarts: number[] = [];
   let directSecretCount = 0;
   let fragmentedSecret = false;
   let directAlias = false;
@@ -191,9 +192,13 @@ export function scanProviderTextSequence(texts: readonly string[]): ProviderText
     detectorInvocationCount += 1;
     return containsProviderAliasSyntaxAcrossBoundary(left, right);
   };
-  const hasSecretAcrossBoundary = (left: string, right: string): boolean => {
+  const hasSecretAcrossBoundary = (
+    left: string,
+    right: string,
+    leftFieldStarts: readonly number[],
+  ): boolean => {
     detectorInvocationCount += 1;
-    return containsProviderSecretValueAcrossBoundary(left, right);
+    return containsProviderSecretValueAcrossBoundary(left, right, leftFieldStarts);
   };
   for (const text of texts) {
     const prefix = text.slice(0, 512);
@@ -202,12 +207,19 @@ export function scanProviderTextSequence(texts: readonly string[]): ProviderText
     if (textHasSecret) directSecretCount += 1;
     if (textHasAlias) directAlias = true;
     if (carry.length > 0) {
-      if (!fragmentedSecret && hasSecretAcrossBoundary(carry, prefix)) fragmentedSecret = true;
+      if (!fragmentedSecret && hasSecretAcrossBoundary(carry, prefix, carryFieldStarts)) {
+        fragmentedSecret = true;
+      }
       if (!fragmentedAlias && hasAliasAcrossBoundary(carry, prefix)) {
         fragmentedAlias = true;
       }
     }
-    carry = (carry + text).slice(-512);
+    const combined = carry + text;
+    const retainedStart = Math.max(0, combined.length - 512);
+    carryFieldStarts = [...new Set([...carryFieldStarts, carry.length])]
+      .filter((start) => start >= retainedStart)
+      .map((start) => start - retainedStart);
+    carry = combined.slice(retainedStart);
   }
   return {
     directSecretCount,

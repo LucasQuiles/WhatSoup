@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createProviderDataBoundary } from '../../../../src/core/provider-data-boundary.ts';
 import type { ProviderBoundaryEvent } from '../../../../src/core/provider-data-boundary.ts';
+import { MAX_TOOL_NODES } from '../../../../src/core/provider-data-boundary-detection.ts';
 import {
   PROVIDER_DATA_POLICY_VERSION,
   type ProviderRoutePolicy,
@@ -646,6 +647,56 @@ describe('managed provider data boundary integration', () => {
     });
 
     expect(executeTool).toHaveBeenCalledWith('configure', { metadata: ordinary });
+  });
+
+  it.each([
+    ['openai-api', () => new OpenAIApiProvider()],
+    ['anthropic-api', () => new AnthropicApiProvider()],
+  ] as const)('passes a maximum-node benign record through the restricted %s entry path', async (
+    providerName,
+    makeProvider,
+  ) => {
+    const entryCount = MAX_TOOL_NODES - 2;
+    const metadata = Object.fromEntries(Array.from(
+      { length: entryCount },
+      (_, index) => [`field_${index}`, `ordinary_${index}`],
+    ));
+    const rawArguments = JSON.stringify({ metadata });
+    const events: AgentEvent[] = [];
+    const executeTool = vi.fn(async (
+      _toolName: string,
+      _input: Record<string, unknown>,
+    ) => ({ content: 'complete', isError: false }));
+    const mcpBridge: ProviderMcpBridge = {
+      listTools: () => [{
+        name: 'configure',
+        description: 'Configure metadata',
+        inputSchema: {
+          type: 'object',
+          properties: { metadata: { type: 'object', additionalProperties: {} } },
+          required: ['metadata'],
+        },
+      }],
+      executeTool,
+    };
+    fetchMock.mockImplementation(async () => fetchMock.mock.calls.length === 1
+      ? providerToolCall(providerName, rawArguments)
+      : providerText(providerName, 'done'));
+    const provider = makeProvider();
+    await provider.initialize(initOptions(providerName, events, mcpBridge));
+
+    expect(Buffer.byteLength(rawArguments, 'utf8')).toBeLessThan(1024 * 1024);
+    await provider.sendTurn({
+      role: 'user',
+      conversationKey: 'chat-key',
+      parts: [{ kind: 'text', text: 'configure maximum benign metadata' }],
+    });
+
+    expect(executeTool).toHaveBeenCalledTimes(1);
+    const input = executeTool.mock.calls[0]![1] as { metadata: Record<string, unknown> };
+    expect(Object.keys(input.metadata)).toHaveLength(entryCount);
+    expect(input.metadata['field_0']).toBe('ordinary_0');
+    expect(input.metadata[`field_${entryCount - 1}`]).toBe(`ordinary_${entryCount - 1}`);
   });
 
   it.each([

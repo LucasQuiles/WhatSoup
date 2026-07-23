@@ -242,6 +242,7 @@ interface ProviderSecretValueSpan {
 function providerSecretValueSpans(
   text: string,
   allowSecretKeySuffix = false,
+  tokenBoundaryStarts: ReadonlySet<number> = new Set(),
 ): ProviderSecretValueSpan[] {
   const spans: ProviderSecretValueSpan[] = [];
   BEARER_TOKEN_RE.lastIndex = 0;
@@ -254,6 +255,8 @@ function providerSecretValueSpans(
   tokenPattern.lastIndex = 0;
   for (const match of text.matchAll(tokenPattern)) {
     if (match.index !== undefined) {
+      const hasCanonicalBoundary = match.index === 0 || !/[A-Za-z0-9_]/u.test(text[match.index - 1]!);
+      if (!hasCanonicalBoundary && !tokenBoundaryStarts.has(match.index)) continue;
       spans.push({ start: match.index, end: match.index + match[0].length });
     }
   }
@@ -277,10 +280,22 @@ export function containsProviderSecretValue(text: string): boolean {
 }
 
 /** Detect a canonical secret match whose span crosses one deterministic field boundary. */
-export function containsProviderSecretValueAcrossBoundary(left: string, right: string): boolean {
+export function containsProviderSecretValueAcrossBoundary(
+  left: string,
+  right: string,
+  leftFieldStarts: readonly number[] = [],
+): boolean {
   const boundary = left.length;
-  return providerSecretValueSpans(left + right, true)
-    .some((span) => span.start < boundary && span.end > boundary);
+  const tokenBoundaryStarts = new Set(leftFieldStarts);
+  const directLeftStarts = new Set(
+    providerSecretValueSpans(left, true, tokenBoundaryStarts).map((span) => span.start),
+  );
+  return providerSecretValueSpans(left + right, true, tokenBoundaryStarts)
+    .some((span) => (
+      span.start < boundary
+      && span.end > boundary
+      && !directLeftStarts.has(span.start)
+    ));
 }
 
 function redactEmailLikeTokens(
