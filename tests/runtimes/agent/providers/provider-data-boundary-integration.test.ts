@@ -970,15 +970,113 @@ describe('managed provider data boundary integration', () => {
       2,
       'one-character keyed value then a distinct token',
     );
+  });
+
+  it.each([
+    ['openai-api', () => new OpenAIApiProvider()],
+    ['anthropic-api', () => new AnthropicApiProvider()],
+  ] as const)('counts same-field assignments through restricted %s', async (
+    providerName,
+    makeProvider,
+  ) => {
     for (const { metadata, secretCount, caseName } of SAME_FIELD_ASSIGNMENT_CASES) {
-      await assertRejected(metadata, secretCount, caseName);
+      fetchMock.mockReset();
+      const events: AgentEvent[] = [];
+      const boundaryEvents: ProviderBoundaryEvent[] = [];
+      const executeTool = vi.fn(async () => ({ content: 'must not run', isError: false }));
+      const mcpBridge: ProviderMcpBridge = {
+        listTools: () => [{
+          name: 'configure',
+          description: 'Configure metadata',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              metadata: {
+                type: 'array',
+                items: { type: 'string' },
+              },
+            },
+            required: ['metadata'],
+          },
+        }],
+        executeTool,
+      };
+      fetchMock.mockImplementation(async () => fetchMock.mock.calls.length === 1
+        ? providerToolCall(providerName, JSON.stringify({ metadata }))
+        : providerText(providerName, 'done'));
+      const provider = makeProvider();
+      await provider.initialize(initOptions(providerName, events, mcpBridge, boundaryEvents));
+
+      await expect(provider.sendTurn({
+        role: 'user',
+        conversationKey: 'chat-key',
+        parts: [{ kind: 'text', text: 'configure same-field metadata' }],
+      })).rejects.toMatchObject({ code: 'secret_detected' });
+
+      expect(fetchMock, caseName).toHaveBeenCalledTimes(1);
+      expect(executeTool, caseName).not.toHaveBeenCalled();
+      expect(events.filter((event) => event.type !== 'init'), caseName).toEqual([]);
+      expect(provider.getCheckpoint().providerState?.['messageCount'], caseName)
+        .toBe(providerName === 'openai-api' ? 2 : 1);
+      expect(
+        boundaryEvents.filter((event) => event.eventType === 'secret_block'),
+        caseName,
+      ).toEqual([expect.objectContaining({ secretCount })]);
     }
+  });
+
+  it.each([
+    ['openai-api', () => new OpenAIApiProvider()],
+    ['anthropic-api', () => new AnthropicApiProvider()],
+  ] as const)('rejects a dense positive field through restricted %s', async (
+    providerName,
+    makeProvider,
+  ) => {
     const denseToken = `ghp_${'d'.repeat(16)}`;
     const denseValue = `password="${
       Array.from({ length: 2_000 }, () => denseToken).join(' ')
     }"`;
     expect(denseValue.length).toBeLessThan(1024 * 1024);
-    await assertRejected([denseValue], 1, 'dense positive candidate field');
+    fetchMock.mockReset();
+    const events: AgentEvent[] = [];
+    const boundaryEvents: ProviderBoundaryEvent[] = [];
+    const executeTool = vi.fn(async () => ({ content: 'must not run', isError: false }));
+    const mcpBridge: ProviderMcpBridge = {
+      listTools: () => [{
+        name: 'configure',
+        description: 'Configure metadata',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            metadata: {
+              type: 'array',
+              items: { type: 'string' },
+            },
+          },
+          required: ['metadata'],
+        },
+      }],
+      executeTool,
+    };
+    fetchMock.mockImplementation(async () => fetchMock.mock.calls.length === 1
+      ? providerToolCall(providerName, JSON.stringify({ metadata: [denseValue] }))
+      : providerText(providerName, 'done'));
+    const provider = makeProvider();
+    await provider.initialize(initOptions(providerName, events, mcpBridge, boundaryEvents));
+
+    await expect(provider.sendTurn({
+      role: 'user',
+      conversationKey: 'chat-key',
+      parts: [{ kind: 'text', text: 'configure dense metadata' }],
+    })).rejects.toMatchObject({ code: 'secret_detected' });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(executeTool).not.toHaveBeenCalled();
+    expect(events.filter((event) => event.type !== 'init')).toEqual([]);
+    expect(provider.getCheckpoint().providerState?.['messageCount'])
+      .toBe(providerName === 'openai-api' ? 2 : 1);
+    expect(boundaryEvents.filter((event) => event.eventType === 'secret_block'))
+      .toEqual([expect.objectContaining({ secretCount: 1 })]);
   });
 
   it.each([

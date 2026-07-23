@@ -303,6 +303,36 @@ describe('provider data boundary hardening', () => {
     },
   );
 
+  it.each(OFFSET_OVERLAPPING_SECRET_ASSIGNMENTS)(
+    'emits canonical offset-overlap count through both broker surfaces for case %#',
+    (assignment) => {
+      const split = 1;
+      const texts = [assignment.slice(0, split), assignment.slice(split)];
+      const exposeEvents: ProviderBoundaryEvent[] = [];
+      const rehydrateEvents: ProviderBoundaryEvent[] = [];
+
+      expect(() => boundary(exposeEvents).exposeTexts(texts, { surface: 'history' }))
+        .toThrowError(expect.objectContaining({ code: 'secret_detected' }));
+      expect(() => boundary(rehydrateEvents).rehydrateToolInput(
+        'inspect',
+        { metadata: texts },
+        [{
+          name: 'inspect',
+          inputSchema: {
+            type: 'object',
+            additionalProperties: true,
+          },
+        }],
+      )).toThrowError(expect.objectContaining({ code: 'secret_detected' }));
+      expect({
+        expose: exposeEvents
+          .find((event) => event.eventType === 'secret_block')?.secretCount,
+        rehydrate: rehydrateEvents
+          .find((event) => event.eventType === 'secret_block')?.secretCount,
+      }).toEqual({ expose: 1, rehydrate: 1 });
+    },
+  );
+
   it('matches canonical counts across deterministic seeded offset-overlap splits', () => {
     for (const [caseIndex, assignment] of SEEDED_OFFSET_OVERLAPS.entries()) {
       const canonical = scanProviderTextSequence([assignment]);
@@ -329,11 +359,8 @@ describe('provider data boundary hardening', () => {
       const rehydrateEvents: ProviderBoundaryEvent[] = [];
       const scan = scanProviderTextSequence([text]);
 
-      expect(scan.directSecretCount + scan.fragmentedSecretCount).toBe(2);
       expect(() => boundary(exposeEvents).exposeTexts([text], { surface: 'history' }))
         .toThrowError(expect.objectContaining({ code: 'secret_detected' }));
-      expect(exposeEvents.filter((event) => event.eventType === 'secret_block'))
-        .toEqual([expect.objectContaining({ secretCount: 2 })]);
       expect(() => boundary(rehydrateEvents).rehydrateToolInput(
         'inspect',
         { metadata: [text] },
@@ -345,8 +372,13 @@ describe('provider data boundary hardening', () => {
           },
         }],
       )).toThrowError(expect.objectContaining({ code: 'secret_detected' }));
-      expect(rehydrateEvents.filter((event) => event.eventType === 'secret_block'))
-        .toEqual([expect.objectContaining({ secretCount: 2 })]);
+      expect({
+        scan: scan.directSecretCount + scan.fragmentedSecretCount,
+        expose: exposeEvents
+          .find((event) => event.eventType === 'secret_block')?.secretCount,
+        rehydrate: rehydrateEvents
+          .find((event) => event.eventType === 'secret_block')?.secretCount,
+      }).toEqual({ scan: 2, expose: 2, rehydrate: 2 });
     },
   );
 
