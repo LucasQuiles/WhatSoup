@@ -495,12 +495,14 @@ describe('strict exact-classification admission', () => {
     const receipt = createRiskClassificationReceipt(root, trustedInput);
     const raw = Buffer.from(receipt.receiptBytes).toString('utf8');
     const value = parsed(receipt.receiptBytes);
+    expect(raw.endsWith('\n')).toBe(true);
+    expect(raw.slice(0, -1)).not.toContain('\n');
 
     const malformed = [
       Buffer.from(raw.replace('"schemaVersion":1', '"schemaVersion":1,"schemaVersion":1')),
       Uint8Array.from([0xff]),
       Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(raw)]),
-      Buffer.from(raw.replace('\n', '\r\n')),
+      Buffer.from(`${raw.slice(0, -1)}\r\n`),
       Buffer.from(`${raw}x`),
     ];
     for (const bytes of malformed) {
