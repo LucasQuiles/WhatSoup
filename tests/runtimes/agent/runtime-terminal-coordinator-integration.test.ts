@@ -1029,6 +1029,35 @@ describe('runtime terminal coordinator integration', () => {
       await expect(runtimeQueue.idle()).rejects.toThrow(/Per-chat inbound sequence FIFO drift/);
       expect(session.sendTurn).not.toHaveBeenCalledWith(runtimeContext.replay.text);
       expect(state.perChatInboundSeqQueue.get(mapKey)).toEqual([999]);
+      expect(runtime.getHealthSnapshot()).toMatchObject({
+        status: 'degraded',
+        details: {
+          turnQueueHalted: true,
+          turnQueueHaltedScopes: 1,
+        },
+      });
+
+      await state.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(mapKey);
+      expect(state.perChatTurnQueues.has(mapKey)).toBe(false);
+
+      const replacementBase = context('per_chat', mapKey, 26, 'turn-after-halt');
+      const replacementContext: RuntimeTurnContext = {
+        ...replacementBase,
+        identity: {
+          ...replacementBase.identity,
+          managerId,
+          generation: owner.generation,
+        },
+      };
+      const replacementTurn: QueuedTurn = {
+        ...turn,
+        sourceMessageId: replacementContext.replay.sourceMessageId,
+        runtimeContext: replacementContext,
+        inboundSeq: 26,
+      };
+      expect(state.runtimeTurnCoordinator.enqueuePerChatRuntimeTurn(mapKey, replacementTurn)).toBe(false);
+      await state.runtimeTurnCoordinator.awaitRejectedRuntimeTurnFinalizations();
+      expect(state.perChatTurnQueues.has(mapKey)).toBe(false);
     } finally {
       db.close();
     }
