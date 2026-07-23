@@ -52,9 +52,17 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from hypothesis import HealthCheck, given
+from hypothesis import settings as hypothesis_settings
+from hypothesis import strategies as st
 
 _COLLECTOR_PATH = Path(__file__).resolve().parents[1] / "bot-errors-collector.py"
 _DISPATCHER_PATH = Path(__file__).resolve().parents[1] / "bot-errors-dispatcher.py"
+
+# Arbitrary text including shell metacharacters (";", "&&", "|", "`", "$(",
+# quotes, whitespace) -- the input domain the argv-shape property test below
+# samples from.
+_hostile_text = st.text(min_size=1, max_size=60)
 
 
 def _load(path: Path, name: str):
@@ -207,29 +215,43 @@ def test_remote_liveness_probe_uses_read_only_ping_command(collector, monkeypatc
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "host,args",
-    [
-        ("host-a", ["/remote/root", "10", "300"]),
-        ("host; rm -rf /", ["/remote/root", "10", "300"]),  # hostile-looking host token
-        ("host-a", ["/remote/root; rm -rf /", "10", "300"]),  # hostile-looking arg token
-    ],
-)
-def test_ssh_json_lines_pipes_only_the_known_claim_script(collector, monkeypatch, host, args):
-    """Regardless of how hostile a host/arg token looks, it must land as a
-    single discrete argv element (never shell-interpolated) and the argv
-    prefix must never be anything but the fixed read-only ssh invocation."""
+@given(host=_hostile_text, arg=_hostile_text)
+@hypothesis_settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+def test_remote_python_command_never_splits_hostile_input_into_extra_argv_tokens(collector, host, arg):
+    """Property: for ANY host/arg string (arbitrary text, including shell
+    metacharacters), remote_python_command() must place it as exactly one
+    opaque argv element -- never shell-interpolated, never split into a
+    second token (which is how a mutating verb could sneak in as its own
+    argv element). Pure function, no subprocess involved."""
+    argv = collector.remote_python_command(host, [arg])
+    expected = [
+        *collector.ssh_command(), "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+        host, *collector.remote_exec_prefix(host), "python3", "-", arg,
+    ]
+    # Exact structural equality is the real invariant: host and arg each land
+    # as their own single list element in the expected position, never
+    # split/expanded/shell-interpolated into extra tokens. (A same-value
+    # host==arg legitimately appears twice -- that's not token-splitting, so
+    # this checks position/structure, not occurrence count.)
+    assert argv == expected
+    assert len(argv) == len(expected)
+    _assert_argv_is_read_only(argv)
+
+
+def test_ssh_json_lines_pipes_only_the_known_claim_script(collector, monkeypatch):
+    """The argv-shape invariant (hostile input never splits into an extra
+    token) is proven above as a property test against the pure
+    remote_python_command() builder. This test covers the rest of the real
+    ssh_json_lines() call path: preflight integration, subprocess.run
+    recording, and that only the vetted script constant is piped."""
     monkeypatch.setattr(collector, "preflight_remote_unreachable", lambda h: None)
     calls = _recorder(monkeypatch, collector, _ok('{"name": "a.json", "claim": "c", "payload": "{}"}\n'))
-    collector.ssh_json_lines(host, collector.REMOTE_CLAIM_SCRIPT, args, 5)
+    collector.ssh_json_lines("host-a", collector.REMOTE_CLAIM_SCRIPT, ["/remote/root", "10", "300"], 5)
     assert len(calls) == 1
     call = calls[0]
     argv = call["cmd"]
-    assert argv == [*collector.ssh_command(), "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, "python3", "-", *args]
+    assert argv == [*collector.ssh_command(), "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "host-a", "python3", "-", "/remote/root", "10", "300"]
     assert call["kwargs"].get("shell") is not True
-    # The hostile-looking host/arg tokens are opaque argv elements, not shell
-    # fragments -- they never introduce a SECOND command into the argv list.
-    assert argv.count("rm") == 0
     # The only thing piped over stdin is the vetted, identical script constant --
     # never an ad hoc/assembled string.
     assert call["kwargs"]["input"] is collector.REMOTE_CLAIM_SCRIPT
@@ -391,18 +413,21 @@ def _scan_remote_script(script_text: str) -> list[str]:
     return violations
 
 
-@pytest.mark.parametrize(
-    "script_name",
-    ["REMOTE_CLAIM_SCRIPT", "REMOTE_ACK_SCRIPT", "REMOTE_WRITEFAIL_CLAIM_SCRIPT", "REMOTE_WRITEFAIL_ACK_SCRIPT"],
-)
-def test_remote_script_cannot_escalate_past_file_relay(collector, script_name):
-    script_text = getattr(collector, script_name)
-    violations = _scan_remote_script(script_text)
-    assert violations == [], f"{script_name} violations: {violations}"
+# Not a fuzzable input domain -- this is a closed checklist over the four
+# real, named script constants the collector actually pipes over stdin, not
+# an arbitrary-input property, so a loop (not @given) is the honest shape.
+_REMOTE_SCRIPT_NAMES = ("REMOTE_CLAIM_SCRIPT", "REMOTE_ACK_SCRIPT", "REMOTE_WRITEFAIL_CLAIM_SCRIPT", "REMOTE_WRITEFAIL_ACK_SCRIPT")
+
+
+def test_remote_script_cannot_escalate_past_file_relay(collector):
+    for script_name in _REMOTE_SCRIPT_NAMES:
+        script_text = getattr(collector, script_name)
+        violations = _scan_remote_script(script_text)
+        assert violations == [], f"{script_name} violations: {violations}"
 
 
 def test_remote_script_scan_parses_as_valid_python(collector):
-    for name in ("REMOTE_CLAIM_SCRIPT", "REMOTE_ACK_SCRIPT", "REMOTE_WRITEFAIL_CLAIM_SCRIPT", "REMOTE_WRITEFAIL_ACK_SCRIPT"):
+    for name in _REMOTE_SCRIPT_NAMES:
         tree = ast.parse(getattr(collector, name))
         assert isinstance(tree, ast.Module)
         assert len(tree.body) > 0
