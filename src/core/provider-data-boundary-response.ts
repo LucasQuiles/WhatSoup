@@ -16,6 +16,7 @@ export interface RestrictedProviderResponseBudget {
   observeText(text: string): void;
   observeToolCall(index: number): void;
   observeToolArguments(argumentsFragment: string): void;
+  observeInvalid(): void;
   assertTerminal(seen: boolean): void;
 }
 
@@ -74,6 +75,9 @@ export function createRestrictedProviderResponseBudget(
         argumentsFragment,
         MAX_BOUNDARY_TEXT_LENGTH,
       );
+    },
+    observeInvalid() {
+      fail('invalid_provider_response');
     },
     assertTerminal(seen: boolean) {
       if (!seen) fail('invalid_provider_response');

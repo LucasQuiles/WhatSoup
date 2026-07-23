@@ -268,7 +268,8 @@ describe('provider API preview redaction', () => {
             '{"type":"message_stop"}',
           ]),
     ]));
-    await driveRestrictedProviderTurn(providerName, makeProvider());
+    await expect(driveRestrictedProviderTurn(providerName, makeProvider()))
+      .rejects.toMatchObject({ code: 'invalid_provider_response' });
     expect(JSON.stringify(warnMock.mock.calls)).not.toContain(hostileContext);
   });
 

@@ -16,14 +16,19 @@
  */
 const MAX_SSE_BUF = 1024 * 1024;
 
-export async function* readSseDataLines(
+export interface SseDataFrame {
+  readonly data: string;
+  readonly rawData: string;
+}
+
+export async function* readSseDataFrames(
   body: ReadableStream<Uint8Array>,
-): AsyncGenerator<string> {
+): AsyncGenerator<SseDataFrame> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
 
-  const drainLines = function* (chunk: string, flush: boolean): Generator<string> {
+  const drainLines = function* (chunk: string, flush: boolean): Generator<SseDataFrame> {
     buffer += chunk;
     const lines = buffer.split('\n');
     buffer = flush ? '' : lines.pop() ?? '';
@@ -40,7 +45,8 @@ export async function* readSseDataLines(
     for (const rawLine of lines) {
       const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
       if (line.startsWith('data: ')) {
-        yield line.slice(6).trim();
+        const rawData = line.slice(6);
+        yield { data: rawData.trim(), rawData };
       }
     }
   };
@@ -59,5 +65,13 @@ export async function* readSseDataLines(
     yield* drainLines(decoder.decode(), true);
   } finally {
     reader.releaseLock();
+  }
+}
+
+export async function* readSseDataLines(
+  body: ReadableStream<Uint8Array>,
+): AsyncGenerator<string> {
+  for await (const frame of readSseDataFrames(body)) {
+    yield frame.data;
   }
 }

@@ -39,6 +39,20 @@ const SHADOW_CASES = PROVIDERS.flatMap(([providerName, makeProvider]) => (
     failure,
   }))
 ));
+const MALFORMED_FRAME_CASES = PROVIDERS.flatMap(([providerName, makeProvider]) => (
+  ([
+    ['malformed_json', '{"broken":'],
+    ['malformed_tool_fragment', '{"choices":[{"delta":{"tool_calls":['],
+    ['whitespace', ' \t '],
+    ['unexpected_json_value', 'null'],
+    ['unexpected_marker', providerName === 'openai-api' ? '[DONE] ' : '[DONE]'],
+  ] as const).map(([failure, malformedFrame]) => ({
+    providerName,
+    makeProvider,
+    failure,
+    malformedFrame,
+  }))
+));
 const MIB = 1024 * 1024;
 
 function entropy(): (size: number) => Uint8Array {
@@ -317,6 +331,109 @@ describe('restricted managed-provider response completion and aggregate budgets'
       expect(events.filter((event) => event.type !== 'init')).toEqual([]);
       expect(provider.getCheckpoint().providerState?.['messageCount'])
         .toBe(providerName === 'openai-api' ? 2 : 1);
+    },
+  );
+
+  it.each(MALFORMED_FRAME_CASES)(
+    'rejects restricted $providerName $failure atomically between provisional content and a valid terminal',
+    async ({ providerName, makeProvider, malformedFrame }) => {
+      const events: AgentEvent[] = [];
+      const boundaryEvents: ProviderBoundaryEvent[] = [];
+      const executeTool = vi.fn(async (_name: string, _params: Record<string, unknown>) => ({
+        content: 'must not run',
+        isError: false,
+      }));
+      fetchMock.mockResolvedValueOnce(sseResponse([
+        ...provisionalToolResponseData(providerName),
+        malformedFrame,
+        terminalData(providerName),
+      ]));
+      const provider = makeProvider();
+      await provider.initialize(initOptions(
+        providerName,
+        events,
+        bridge(executeTool),
+        'enforce',
+        boundaryEvents,
+      ));
+
+      await expect(send(provider)).rejects.toMatchObject({ code: 'invalid_provider_response' });
+
+      expect(executeTool).not.toHaveBeenCalled();
+      expect(events.filter((event) => event.type !== 'init')).toEqual([]);
+      expect(boundaryEvents).toContainEqual(expect.objectContaining({
+        eventType: 'rehydration_failure',
+        success: 0,
+      }));
+      expect(provider.getCheckpoint().providerState?.['messageCount'])
+        .toBe(providerName === 'openai-api' ? 2 : 1);
+    },
+  );
+
+  it.each(MALFORMED_FRAME_CASES)(
+    'observes restricted shadow $providerName $failure while preserving response behavior',
+    async ({ providerName, makeProvider, malformedFrame }) => {
+      const events: AgentEvent[] = [];
+      const boundaryEvents: ProviderBoundaryEvent[] = [];
+      const executeTool = vi.fn(async (_name: string, _params: Record<string, unknown>) => ({
+        content: 'shadow tool result',
+        isError: false,
+      }));
+      fetchMock
+        .mockResolvedValueOnce(sseResponse([
+          ...provisionalToolResponseData(providerName),
+          malformedFrame,
+          terminalData(providerName),
+        ]))
+        .mockResolvedValueOnce(validFinalResponse(providerName));
+      const provider = makeProvider();
+      await provider.initialize(initOptions(
+        providerName,
+        events,
+        bridge(executeTool),
+        'shadow',
+        boundaryEvents,
+      ));
+
+      await expect(send(provider)).resolves.toBeUndefined();
+
+      expect(executeTool).toHaveBeenCalledOnce();
+      expect(events).toContainEqual(expect.objectContaining({
+        type: 'assistant_text',
+        text: 'provisional text',
+      }));
+      expect(events.some((event) => event.type === 'tool_use')).toBe(true);
+      expect(events.some((event) => event.type === 'tool_result')).toBe(true);
+      expect(events.some((event) => event.type === 'result')).toBe(true);
+      expect(boundaryEvents).toContainEqual(expect.objectContaining({
+        eventType: 'rehydration_failure',
+        success: 0,
+      }));
+    },
+  );
+
+  it.each(PROVIDERS)(
+    'counts raw restricted $providerName SSE payload bytes before trimming or parsing',
+    async (providerName, makeProvider) => {
+      const events: AgentEvent[] = [];
+      const executeTool = vi.fn(async (_name: string, _params: Record<string, unknown>) => ({
+        content: 'must not run',
+        isError: false,
+      }));
+      const paddedFrames = Array.from({ length: 520 }, () => `${' '.repeat(4096)}{}`);
+      const pulls = { count: 0 };
+      fetchMock.mockResolvedValueOnce(pullDrivenSseResponse(
+        [...paddedFrames, terminalData(providerName)],
+        pulls,
+      ));
+      const provider = makeProvider();
+      await provider.initialize(initOptions(providerName, events, bridge(executeTool)));
+
+      await expect(send(provider)).rejects.toMatchObject({ code: 'limit_exceeded' });
+
+      expect(pulls.count).toBeLessThanOrEqual(paddedFrames.length);
+      expect(executeTool).not.toHaveBeenCalled();
+      expect(events.filter((event) => event.type !== 'init')).toEqual([]);
     },
   );
 

@@ -23,7 +23,7 @@ import type {
 import { convertMcpToolsToAnthropic, executeBridgeTool, snapshotProviderMcpTools } from './mcp-bridge.ts';
 import { resolveApiKey } from '../../../lib/api-key-resolver.ts';
 import { turnPartsToAnthropicContent } from './media-bridge.ts';
-import { readSseDataLines } from './sse.ts';
+import { readSseDataFrames } from './sse.ts';
 import { stripLoneSurrogates, sanitizeMessageHistory, isSurrogateError } from '../../../core/sanitize-surrogates.ts';
 import { createChildLogger } from '../../../logger.ts';
 import { boundedRetryAfterMs, waitForRateLimitRetry } from './rate-limit-retry.ts';
@@ -520,19 +520,26 @@ export class AnthropicApiProvider implements ProviderSession {
         })
       : undefined;
 
-    for await (const data of readSseDataLines(body)) {
+    for await (const { data, rawData } of readSseDataFrames(body)) {
+      responseBudget?.observeData(rawData);
       if (sawTerminal && this.boundaryRestricted) {
-        this.dataBoundary!.observeProviderResponseFailure('invalid_provider_response');
-        if (this.boundaryEnforced) {
-          throw new ProviderDataBoundaryError('invalid_provider_response');
-        }
+        responseBudget!.observeInvalid();
       }
-      if (data === '[DONE]') continue;
-      responseBudget?.observeData(data);
+      if (data === '[DONE]') {
+        responseBudget?.observeInvalid();
+        continue;
+      }
 
       let event: Record<string, unknown>;
       try {
-        event = JSON.parse(data) as Record<string, unknown>;
+        const parsed = JSON.parse(data) as unknown;
+        if (
+          this.boundaryRestricted
+          && (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))
+        ) {
+          throw new Error('non-object SSE event');
+        }
+        event = parsed as Record<string, unknown>;
       } catch (err) {
         // Malformed SSE chunk - skip, but preserve observability.
         if (this.boundaryRestricted) {
@@ -540,6 +547,7 @@ export class AnthropicApiProvider implements ProviderSession {
         } else {
           log.warn({ err, dataPreview: providerPreview(data, 200), model }, 'malformed SSE chunk from Anthropic API');
         }
+        responseBudget?.observeInvalid();
         continue;
       }
 
