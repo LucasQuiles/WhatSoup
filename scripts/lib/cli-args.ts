@@ -2,7 +2,7 @@
  * Argument-parsing primitives shared by `scripts/*.ts` CLIs.
  *
  * WHY THIS EXISTS, and why it is primitives rather than a parser. A duplication sweep
- * (2026-07-23) found **32 scripts each defining their own `parseArgs`** — the single
+ * (2026-07-23) found **34 scripts each defining their own `parseArgs`** — the single
  * highest-signal duplication in the tree. They are not gratuitous copies: each CLI has a
  * genuinely different option set, so a single schema-driven parser would fit none of them
  * well and forcing one would be a worse outcome than the duplication.
@@ -21,8 +21,8 @@
  * (`design-system-hygiene-guard.ts`) already guard against this by hand; most do not.
  *
  * `takeValue` makes the correct behaviour the easy one. Adopt incrementally: no existing
- * script is required to migrate, and `tests/scripts/cli-args-ratchet.test.ts` stops the
- * hand-rolled count from GROWING without forcing a 32-file rewrite.
+ * script is required to migrate, and `tests/scripts/cli-args.test.ts` stops the
+ * hand-rolled count from GROWING without forcing a 34-file rewrite.
  */
 
 /** A CLI argument-parsing fault, distinguishable from an IO or logic error by callers. */
