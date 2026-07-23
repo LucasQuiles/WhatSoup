@@ -685,6 +685,7 @@ live here, dimension-allowlisted, so the agents stylesheet
   -line`, `--agents-search-icon-stroke`, `--agents-soul-mt`, `--agents-sub-mt`,
   `--agents-dhead-actions-gap`, `--agents-pill-gap/-pad`, `--agents-kv-gap/-pad-y`,
   `--agents-trow-pad-y`, `--agents-lrow-pad-y`, `--agents-irow-pad-y/-st`,
+  `--agents-tgl-travel` (knob travel = track − knob − 2×inset),
   `--agents-integ-gap/-pad-y/-st`, `--agents-inote-mt`, `--agents-mstats-mb`,
   `--agents-mstat-v-mt`, `--agents-empty-pad-y`, `--agents-roster-empty-pad`,
   `--agents-presence-bw` 1.5px (§4 hollow-stroke floor). Font SIZES ride the

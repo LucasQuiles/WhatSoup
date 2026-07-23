@@ -295,7 +295,7 @@
   transition: transform var(--dur-fast) var(--ease-enter);
 }
 .agents-tgl[aria-checked="true"] { background: var(--accent-v35); }
-.agents-tgl[aria-checked="true"]::after { transform: translateX(14px); background: var(--accent-fg-v35); }
+.agents-tgl[aria-checked="true"]::after { transform: translateX(var(--agents-tgl-travel)); background: var(--accent-fg-v35); }
 .agents-tgl:disabled { cursor: default; opacity: 0.85; }
 
 /* assigned-line rows + grant chips */

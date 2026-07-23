@@ -63,6 +63,7 @@
   --agents-tgl-h: 18px;          /* tool toggle track height (mockup .tgl) */
   --agents-tgl-knob: 14px;       /* tool toggle knob (mockup .tgl::after) */
   --agents-tgl-inset: 2px;       /* tool toggle knob inset (mockup .tgl::after) */
+  --agents-tgl-travel: 14px;     /* tool toggle knob travel = track w − knob − 2×inset (mockup) */
   --agents-trow-gap: 10px;       /* tool row gap (mockup .trow) */
   --agents-lrow-gap: 10px;       /* assigned-line row gap (mockup .lrow) */
   --agents-grant-box: 18px;      /* grant chip box (mockup .g) */

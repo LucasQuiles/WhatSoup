@@ -203,7 +203,7 @@ export const ToolsPanel: FC<{ lineName: string; config: Record<string, unknown> 
             aria-checked={row.on}
             aria-label={`${row.label}${row.patch ? '' : ' (read-only — managed in line config)'}`}
             className="agents-tgl"
-            disabled={!row.patch || pendingKey === row.key}
+            disabled={!row.patch || pendingKey !== null}
             onClick={() => void toggle(row)}
           />
           <span className="agents-trow__lbl">{row.label}</span>
