@@ -24,7 +24,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type ReactNode } from 'react'
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, useLocation } from 'react-router-dom'
 import type { LineInstance } from '../../console/src/types'
 
 // ---------------------------------------------------------------------------
@@ -366,6 +366,18 @@ describe('v3.5 inbox — mark-read on open', () => {
     await waitFor(() => expect(container.querySelector('.inbox-thead')).not.toBeNull())
     expect(markReadMock).not.toHaveBeenCalled()
   })
+
+  it('reports mark-read failure via toast and re-invalidates the chats query', async () => {
+    getChatsMock.mockResolvedValue([makeChat('conv-a', { unreadCount: 2 })])
+    markReadMock.mockRejectedValue(new Error('route gone'))
+    const { container, qc } = renderInbox()
+    const invalidateSpy = vi.spyOn(qc, 'invalidateQueries')
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    fireEvent.click(container.querySelector('.inbox-citem')!)
+    await waitFor(() => expect(toastMock.error).toHaveBeenCalled())
+    expect(toastMock.error.mock.calls[0]![0]).toContain('route gone')
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['chats', 'personal'] })
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -480,6 +492,27 @@ describe('v3.5 inbox — composer', () => {
 // ---------------------------------------------------------------------------
 
 describe('v3.5 inbox — load older', () => {
+  it('keeps the load-older control and appends history when an older page is returned', async () => {
+    mockMessages = [makeMessage(5, 'newest'), makeMessage(3, 'oldest')]
+    const olderPage = [makeMessage(2, 'older two'), makeMessage(1, 'older one')]
+    getMessagesMock.mockResolvedValue(olderPage)
+    const { container, qc } = renderInbox()
+    // the useMessages mock bypasses the real queryFn — seed the cache so the
+    // append contract (existing pages THEN older) is exercised honestly.
+    qc.setQueryData(['messages', 'personal', 'conv-a'], mockMessages)
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    fireEvent.click(container.querySelector('.inbox-citem')!)
+    const older = (await waitFor(() => container.querySelector('.inbox-older')!)) as HTMLButtonElement
+    fireEvent.click(older)
+    await waitFor(() => expect(getMessagesMock).toHaveBeenCalledWith('personal', 'conv-a', 3))
+    // a non-empty page: control stays (further pages may exist) and history appends
+    await waitFor(() => {
+      const cached = qc.getQueryData<Array<{ pk: number }>>(['messages', 'personal', 'conv-a'])
+      expect(cached?.map((m) => m.pk)).toEqual([5, 3, 2, 1])
+    })
+    expect(container.querySelector('.inbox-older')).not.toBeNull()
+  })
+
   it('loads older messages from the oldest loaded pk and hides the control at end of history', async () => {
     mockMessages = [makeMessage(5, 'newest'), makeMessage(3, 'oldest')]
     getMessagesMock.mockResolvedValue([]) // no older pages remain
@@ -578,9 +611,25 @@ describe('v3.5 inbox — context cards', () => {
 // ---------------------------------------------------------------------------
 
 describe('v3.5 inbox — deep links', () => {
-  it('selects the linked conversation once', async () => {
-    const { container } = renderInbox(['/inbox?line=personal&chat=conv-a'])
+  it('selects the linked conversation once and cleans the URL params', async () => {
+    // Probe the real router location so the cleanup contract
+    // (setSearchParams({}, { replace: true })) is asserted, not assumed.
+    const seen: Array<{ search: string }> = []
+    function LocationProbe() {
+      seen.push(useLocation())
+      return null
+    }
+    const qc = makeClient()
+    const { container } = render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={['/inbox?line=personal&chat=conv-a']}>
+          <Inbox />
+          <LocationProbe />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
     await waitFor(() => expect(container.querySelector('.inbox-thead')).not.toBeNull())
     expect(container.querySelector('.inbox-thead__nm')!.textContent).toBe('Chat conv-a')
+    await waitFor(() => expect(seen[seen.length - 1]!.search).toBe(''))
   })
 })
