@@ -30,19 +30,51 @@ const OVERLAPPING_SECRET_ASSIGNMENTS = [
   `password="ghp_${'a'.repeat(16)}"`,
   `password=x/ghp_${'b'.repeat(16)}`,
   'password=xBearer alpha',
+  'password=xtoken=Bearer alpha',
+  'password=x/password=Bearer alpha',
+  'password="x token=Bearer alpha"',
+  `password=xtoken=ghp_${'c'.repeat(16)}`,
+  `password=x/token=ghp_${'d'.repeat(16)}`,
+  `password="x token=ghp_${'e'.repeat(16)}"`,
 ] as const;
 
+const SAME_FIELD_ASSIGNMENT_SEPARATORS = [',', ';', '&', '|'] as const;
+
+const EMPTY_FIRST_ASSIGNMENT_CASES = SAME_FIELD_ASSIGNMENT_SEPARATORS.flatMap(
+  (separator) => [
+    {
+      label: `empty before ${separator}`,
+      assignment: `token=${separator}password=beta`,
+    },
+    {
+      label: `whitespace-empty before ${separator}`,
+      assignment: `token= ${separator}password=beta`,
+    },
+  ],
+).flatMap(({ label, assignment }) => Array.from(
+  { length: assignment.length - 1 },
+  (_, index) => {
+    const split = index + 1;
+    return {
+      metadata: [assignment.slice(0, split), assignment.slice(split)],
+      secretCount: 1,
+      caseName: `${label} split ${split}`,
+    };
+  },
+));
+
 const SAME_FIELD_ASSIGNMENT_CASES = [
-  ...[',', ';', '&', '|'].map((separator) => ({
+  ...SAME_FIELD_ASSIGNMENT_SEPARATORS.map((separator) => ({
     metadata: [`token=alpha${separator}password=beta`],
     secretCount: 2,
     caseName: `${separator} separated assignments`,
   })),
-  ...[',', ';', '&', '|'].map((separator) => ({
+  ...SAME_FIELD_ASSIGNMENT_SEPARATORS.map((separator) => ({
     metadata: [`password=alpha${separator}ordinary`],
     secretCount: 1,
     caseName: `${separator} ordinary punctuation`,
   })),
+  ...EMPTY_FIRST_ASSIGNMENT_CASES,
 ] as const;
 
 function entropy(): (size: number) => Uint8Array {
