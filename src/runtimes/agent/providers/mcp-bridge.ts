@@ -6,6 +6,7 @@ import type { ToolRegistry } from '../../../mcp/registry.ts';
 import type { SessionContext, ToolCallResult } from '../../../mcp/types.ts';
 import { createChildLogger } from '../../../logger.ts';
 import {
+  buildProviderMcpConfigArgs,
   generateMcpConfigFile,
   mergeOpencodeConfig,
   mergeSessionProviderConfig,
@@ -24,7 +25,7 @@ import { errorMessage } from '../../../lib/error-message.ts';
 
 const log = createChildLogger('mcp-bridge');
 
-export { generateMcpConfigFile, mergeOpencodeConfig, mergeSessionProviderConfig, writeMcpConfigToPath, writeProviderMcpConfig, writeProviderMcpConfigTarget };
+export { buildProviderMcpConfigArgs, generateMcpConfigFile, mergeOpencodeConfig, writeMcpConfigToPath, writeProviderMcpConfig, writeProviderMcpConfigTarget };
 export type { AdditionalMcpServerConfig, OpencodeProviderConfig };
 
 // ---------------------------------------------------------------------------

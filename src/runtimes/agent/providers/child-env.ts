@@ -35,6 +35,12 @@ export interface BuildBaseChildEnvOptions {
   whatsoupMcpSocket?: string;
   configRoot?: string;
   /**
+   * Suppress all provider credential resolution for non-inference probes.
+   * Production sessions omit this option and retain existing credential
+   * behavior.
+   */
+  providerCredentials?: 'include' | 'omit';
+  /**
    * Egress proxy port (#1607). When set to a positive port number,
    * `buildBaseChildEnv` injects `HTTP_PROXY`/`HTTPS_PROXY` pointed at
    * `http://127.0.0.1:<port>` plus `NO_PROXY=localhost,127.0.0.1` so the

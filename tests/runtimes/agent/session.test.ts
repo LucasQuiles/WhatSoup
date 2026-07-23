@@ -420,6 +420,24 @@ describe('SessionManager', () => {
     expect(sm.getStatus().active).toBe(false);
   });
 
+  it('blocks an unproven provider at the final child-spawn boundary', async () => {
+    const admission = vi.fn(() => {
+      throw new Error('provider MCP canary proof unavailable');
+    });
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'codex-cli',
+      providerCanaryAdmission: admission,
+    });
+
+    await expect(sm.spawnSession()).rejects.toThrow('provider MCP canary proof unavailable');
+    expect(admission).toHaveBeenCalledTimes(1);
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
   it('rechecks actor-socket readiness at the spawn-per-turn child boundary', async () => {
     const sm = new SessionManager({
       db: makeDb(),
@@ -3941,6 +3959,27 @@ describe('buildChildEnv', () => {
     expect(() => buildChildEnv('anthropic-api')).toThrow(/managed-loop provider/);
   });
 
+  it.each([
+    ['claude-cli', 'OPENAI_API_KEY'],
+    ['codex-cli', 'OPENAI_API_KEY'],
+    ['gemini-cli', 'GEMINI_API_KEY'],
+    ['opencode-cli', 'OPENAI_API_KEY'],
+  ])('%s can omit provider credentials for a non-inference canary', (provider, envKey) => {
+    const saved = process.env[envKey];
+    process.env[envKey] = 'must-not-reach-canary';
+    try {
+      const env = buildChildEnv(
+        provider,
+        { providerCredentials: 'omit' },
+        provider === 'opencode-cli' ? 'openai/test-model' : undefined,
+      );
+      expect(env).not.toHaveProperty(envKey);
+    } finally {
+      if (saved === undefined) delete process.env[envKey];
+      else process.env[envKey] = saved;
+    }
+  });
+
   it('claude-cli: forwards OPENAI_API_KEY when set', () => {
     const saved = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = 'sk-test-openai-key';
@@ -4194,6 +4233,41 @@ describe('__provider_switch_for_test', () => {
   it('getProviderArgs for codex-cli includes model when provided', () => {
     const args = __provider_switch_for_test.getProviderArgs('codex-cli', '', '/cwd', undefined, 'gpt-4o', []);
     expect(args).toEqual(['app-server', '--listen', 'stdio://', '--model', 'gpt-4o']);
+  });
+
+  it('getProviderArgs for codex-cli consumes canonical MCP config overrides', () => {
+    const mcpArgs = ['-c', 'mcp_servers.whatsoup.command="proxy"'];
+    const args = __provider_switch_for_test.getProviderArgs(
+      'codex-cli',
+      '',
+      '/cwd',
+      undefined,
+      undefined,
+      [],
+      undefined,
+      mcpArgs,
+    );
+    expect(args).toEqual([
+      'app-server',
+      ...mcpArgs,
+      '--listen',
+      'stdio://',
+    ]);
+  });
+
+  it('getProviderArgs for claude-cli consumes the generated MCP config target', () => {
+    const args = __provider_switch_for_test.getProviderArgs(
+      'claude-cli',
+      'system',
+      '/cwd',
+      undefined,
+      undefined,
+      [],
+      undefined,
+      ['--mcp-config', '/cwd/.mcp.json'],
+    );
+    expect(args).toContain('--mcp-config');
+    expect(args).toContain('/cwd/.mcp.json');
   });
 
   it('getProviderArgs for opencode-cli returns expected base args', () => {

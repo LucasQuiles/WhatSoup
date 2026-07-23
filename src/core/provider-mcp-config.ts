@@ -179,8 +179,9 @@ export function writeProviderMcpConfigTarget(providerId: string, agentCwd: strin
   switch (providerId) {
     case 'claude-cli':
     case 'gemini-cli':
-    case 'codex-cli':
       return join(agentCwd, '.mcp.json');
+    case 'codex-cli':
+      return null;
     case 'opencode-cli':
       return join(agentCwd, 'opencode.json');
     default:
@@ -210,7 +211,6 @@ export function generateMcpConfigFile(
   switch (providerId) {
     case 'claude-cli':
     case 'gemini-cli':
-    case 'codex-cli':
       return {
         mcpServers: Object.fromEntries(
           servers.map((server) => [
@@ -241,9 +241,41 @@ export function generateMcpConfigFile(
         ),
       };
 
+    case 'codex-cli':
     default:
       return null;
   }
+}
+
+function tomlString(value: string): string {
+  return JSON.stringify(value);
+}
+
+function tomlStringArray(values: readonly string[]): string {
+  return `[${values.map(tomlString).join(', ')}]`;
+}
+
+/**
+ * Provider CLI arguments that carry the same generated MCP transport used by
+ * file-configured providers. Codex consumes canonical `mcp_servers` config
+ * overrides; it does not read Claude/Gemini's project `.mcp.json`.
+ */
+export function buildProviderMcpConfigArgs(
+  providerId: string,
+  agentCwd: string,
+  socketPath: string,
+  proxyScriptPath: string,
+): readonly string[] {
+  if (providerId === 'claude-cli') {
+    return ['--mcp-config', join(agentCwd, '.mcp.json')];
+  }
+  if (providerId !== 'codex-cli') return [];
+  const { command, args } = buildMcpLaunchCommand(proxyScriptPath);
+  return [
+    '-c', `mcp_servers.whatsoup.command=${tomlString(command)}`,
+    '-c', `mcp_servers.whatsoup.args=${tomlStringArray(args)}`,
+    '-c', `mcp_servers.whatsoup.env={ WHATSOUP_SOCKET = ${tomlString(socketPath)} }`,
+  ];
 }
 
 /**
@@ -347,7 +379,7 @@ export function mergeOpencodeConfig(
  * returning the absolute path written (or `null` for native-bridge/API
  * providers that need no config file).
  *
- * - claude/gemini/codex -> `<agentCwd>/.mcp.json` (claude `mcpServers` shape,
+ * - claude/gemini -> `<agentCwd>/.mcp.json` (claude `mcpServers` shape,
  *   deterministic overwrite, exactly as before).
  * - opencode-cli -> `<agentCwd>/opencode.json` (opencode `mcp` shape), merged
  *   with any pre-existing user config while preserving unrelated keys and
@@ -384,7 +416,7 @@ export function writeProviderMcpConfig(
     return target;
   }
 
-  // claude / gemini / codex: overwrite .mcp.json with the mcpServers shape.
+  // Claude and Gemini overwrite .mcp.json with the mcpServers shape.
   writePrivateFileSync(target, JSON.stringify(generated, null, 2));
   return target;
 }

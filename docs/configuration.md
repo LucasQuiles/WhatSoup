@@ -918,6 +918,37 @@ may inspect that account's processes or accessible runtime files. Strong
 same-UID adversary isolation requires a separate OS identity or sandbox and is
 outside this transport contract.
 
+#### Provider MCP canary receipts
+
+MCP-capable CLI providers in non-sandbox `per_chat` mode require a private
+host-local transport proof before the selected provider may spawn. Generate it
+explicitly, without a model turn or WhatsApp operation:
+
+```bash
+npm run provider:mcp-canary -- \
+  --provider codex-cli \
+  --state-root /absolute/instance/state/root
+```
+
+Run the command once for each selected CLI provider on that host. It starts the
+real provider under an owned process group with production-generated MCP
+configuration, proves that the dynamic actor socket—not the static decoy—gets
+`initialize` and `tools/list`, proves the checked-in proxy is a descendant, and
+reaps the complete group. Provider configuration, data, temp, and home roots are
+isolated below a mode-`0700` disposable directory; live provider credentials and
+user configuration are not supplied. The receipt is mode `0600` below
+`<state-root>/provider-canaries/`; it contains only redacted platform, binary,
+proxy, and contract bindings.
+
+Receipts are durable rather than calendar-expiring. A platform/architecture,
+provider version or entrypoint, proxy, or canary-contract change makes the
+receipt stale and blocks only that selected CLI in sensitive non-sandbox
+`per_chat` mode. API providers, `single`/`shared` scopes, sandbox-per-chat
+deployments, and other independently proven CLIs remain available.
+Same-provider runs are serialized. A missing binary, lock contention, or
+controller/setup failure preserves an exact prior receipt; a conclusive unsafe
+result after the provider starts invalidates that provider's prior receipt.
+
 #### Primary model usability probe
 
 Agent runtimes launch a non-blocking startup probe for the configured primary conversation model. CLI model probes have a 15-second deadline so cold Claude/OpenCode startup does not create false degraded health. The result is surfaced in the `/health` `instance.primaryModelUsability` block with `status`, `provider`, `model`, optional `reason` / `suggestion`, `checkedAt`, and `probeInFlight`. A configured primary that returns `model-unavailable`, `credential-unavailable`, `provider-unavailable`, `timeout`, or an inconclusive `unknown` probe emits the `primary_model_unusable` operator alert. The alert evidence includes only safe metadata (provider, model, status, reason/suggestion) and never includes raw provider output or credential values.

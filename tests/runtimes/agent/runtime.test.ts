@@ -48,6 +48,8 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
       whatsoupInstance?: string;
       whatsoupMcpSocket?: string;
       providerTransitionReady?: Promise<void>;
+      providerMcpConfigArgs?: readonly string[];
+      providerCanaryAdmission?: () => void;
     } | null;
   } = { current: null };
   const capturedOnEventRef: { current: ((event: AgentEvent) => void) | null } = { current: null };
@@ -120,7 +122,7 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
   return { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRef, capturedOnResumeFailedRef, capturedOnCrashRef, capturedNotifyUserRef };
 });
 
-const { mockRuntimeLogger, mockReaddirSync } = vi.hoisted(() => ({
+const { mockRuntimeLogger, mockReaddirSync, mockReadProviderCanaryAdmission } = vi.hoisted(() => ({
   mockRuntimeLogger: {
     info: vi.fn(),
     warn: vi.fn(),
@@ -128,6 +130,11 @@ const { mockRuntimeLogger, mockReaddirSync } = vi.hoisted(() => ({
     debug: vi.fn(),
   },
   mockReaddirSync: vi.fn(() => ['0', '1', '2']),
+  mockReadProviderCanaryAdmission: vi.fn(() => ({
+    required: true,
+    allowed: true,
+    reason: 'proven',
+  })),
 }));
 
 const { mockKillSessionTree } = vi.hoisted(() => ({
@@ -541,6 +548,39 @@ vi.mock('../../../src/runtimes/agent/providers/primary-model-usability.ts', asyn
 
 vi.mock('../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts', () => ({
   createPrimaryModelProbeAdapters: mockCreatePrimaryModelProbeAdapters,
+}));
+
+vi.mock('../../../src/core/provider-mcp-config.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/core/provider-mcp-config.ts')>();
+  return {
+    ...actual,
+    // Runtime tests mock directory creation and must not write provider config
+    // into the operator's real home. Dedicated config-writer tests cover IO.
+    writeProviderMcpConfig: vi.fn((providerId: string, cwd: string) =>
+      actual.writeProviderMcpConfigTarget(providerId, cwd)),
+  };
+});
+
+vi.mock('../../../src/runtimes/agent/provider-canary-proof.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/runtimes/agent/provider-canary-proof.ts')>();
+  return {
+    ...actual,
+    readProviderCanaryAdmission: mockReadProviderCanaryAdmission,
+  };
+});
+
+vi.mock('../../../src/runtimes/agent/per-chat-mcp-socket-manager.ts', () => ({
+  PerChatMcpSocketManager: class {
+    acquire() {
+      return {
+        socketPath: '/tmp/mock-per-chat-actor.sock',
+        ready: Promise.resolve(),
+      };
+    }
+    release() {}
+    releaseAfter() {}
+    rekey() {}
+  },
 }));
 
 vi.mock('../../../src/mcp/registry.ts', () => ({
@@ -1298,6 +1338,12 @@ describe('AgentRuntime', () => {
     mockRuntimeLogger.warn.mockClear();
     mockRuntimeLogger.error.mockClear();
     mockRuntimeLogger.debug.mockClear();
+    mockReadProviderCanaryAdmission.mockReset();
+    mockReadProviderCanaryAdmission.mockReturnValue({
+      required: true,
+      allowed: true,
+      reason: 'proven',
+    });
     mockEmitAlert.mockClear();
     mockClearAlertSource.mockClear();
     mockCreatePrimaryModelProbeAdapters.mockClear();
@@ -2477,6 +2523,58 @@ describe('AgentRuntime', () => {
       whatsoupInstance: 'line-a',
       whatsoupMcpSocket: '/tmp/rgp-global/.claude/whatsoup.sock',
     });
+
+    await emitAgentResultWithoutTokens('done');
+    await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
+  });
+
+  it('passes canonical Codex mcp_servers config to the production session', async () => {
+    (mockConfig as typeof mockConfig & { agentProvider?: string }).agentProvider = 'codex-cli';
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: '/tmp/codex-mcp-production' });
+
+    await runtime.start();
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hello codex' }));
+
+    expect(capturedSessionManagerOptsRef.current?.providerMcpConfigArgs).toEqual([
+      '-c', expect.stringMatching(/^mcp_servers\.whatsoup\.command=/),
+      '-c', expect.stringMatching(/^mcp_servers\.whatsoup\.args=/),
+      '-c', expect.stringMatching(/^mcp_servers\.whatsoup\.env=/),
+    ]);
+    await emitAgentResultWithoutTokens('done');
+    await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
+  });
+
+  it('wires selected-provider proof admission into sensitive per-chat sessions', async () => {
+    (mockConfig as typeof mockConfig & { agentProvider?: string }).agentProvider = 'codex-cli';
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'line-a', {
+      cwd: '/tmp/codex-proof-admission',
+      sessionScope: 'per_chat',
+    });
+
+    await runtime.start();
+    await sendAndAwaitProviderDispatch(
+      runtime,
+      makeMsg({ content: 'hello codex' }),
+      'test@s.whatsapp.net',
+    );
+
+    const admission = capturedSessionManagerOptsRef.current?.providerCanaryAdmission;
+    expect(admission).toBeTypeOf('function');
+    mockReadProviderCanaryAdmission.mockReturnValueOnce({
+      required: true,
+      allowed: false,
+      reason: 'missing',
+    });
+    expect(() => admission?.()).toThrow('provider MCP canary proof unavailable');
+    expect(mockReadProviderCanaryAdmission).toHaveBeenCalledWith(expect.objectContaining({
+      providerId: 'codex-cli',
+      sessionScope: 'per_chat',
+      sandboxPerChat: false,
+    }));
 
     await emitAgentResultWithoutTokens('done');
     await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
