@@ -212,8 +212,19 @@ fail_root="$tmp/fail-runtime"
 prepare_old_root "$fail_root"
 fakebin="$tmp/fakebin"
 mkdir -p "$fakebin"
-cat > "$fakebin/python3" <<'SH'
+real_python3="$(command -v python3)"
+# Only fail smoke_redaction's invocation (python3 - <root-dir> <<PY ... PY).
+# resolve_managed_files() also calls python3 now (python3 - <manifest.json>
+# <paths...> <<PY ... PY>) to resolve MANAGED_FILES from the runtime
+# manifest -- that call must still succeed so deploy mode reaches its own
+# smoke_redaction step and the auto-rollback path this test exercises,
+# rather than failing earlier for an unrelated reason. Distinguished by the
+# script's second argument: a manifest path (.json) vs. a root directory.
+cat > "$fakebin/python3" <<SH
 #!/usr/bin/env bash
+if [[ "\$2" == *.json ]]; then
+  exec "$real_python3" "\$@"
+fi
 echo "fake python smoke failure" >&2
 exit 9
 SH
@@ -233,5 +244,53 @@ grep -q "BACKUP_VERIFIED=0" "$tmp/fail-deploy.log" || { cat "$tmp/fail-deploy.lo
 assert_backup_metadata "$fail_backup/.bot-errors-backup.json" false null
 grep -q "old:deploy/scripts/bot-errors-emit.py" "$fail_root/deploy/scripts/bot-errors-emit.py" || fail "auto-rollback did not restore old bytes"
 [ ! -e "$fail_root/deploy/scripts/bot-errors-runner.py" ] || fail "auto-rollback did not delete pre-deploy absent file"
+
+# SSOT collapse (pin-reconciliation debt fix): FILES=() no longer carries a
+# hand-maintained sha256 -- expected hashes are resolved from
+# deploy/bot-errors-runtime-manifest.json at startup via
+# BOT_ERRORS_RUNTIME_MANIFEST_PATH (or the real manifest by default). Proves
+# that resolution is a REAL enforcement, not a pass-through: a manifest
+# entry deliberately mismatched against the actual file bytes must still
+# fail closed, exactly like the old hardcoded pin did.
+ssot_root="$tmp/ssot-runtime"
+prepare_current_root "$ssot_root"
+mismatch_manifest="$tmp/mismatch-manifest.json"
+python3 - "$PWD/deploy/bot-errors-runtime-manifest.json" "$mismatch_manifest" <<'PY'
+import json
+import sys
+
+src, dst = sys.argv[1:3]
+with open(src, encoding="utf-8") as handle:
+    data = json.load(handle)
+for entry in data["files"]:
+    if entry["path"] == "deploy/scripts/bot-errors-emit.py":
+        entry["sha256"] = "f" * 64
+with open(dst, "w", encoding="utf-8") as handle:
+    json.dump(data, handle, indent=2)
+PY
+if BOT_ERRORS_RUNTIME_MANIFEST_PATH="$mismatch_manifest" bash "$D" verify "$ssot_root" > "$tmp/ssot-mismatch.log" 2>&1; then
+  cat "$tmp/ssot-mismatch.log"
+  fail "verify did not fail closed on a manifest-vs-file hash mismatch"
+fi
+grep -q "DRIFT.*bot-errors-emit.py" "$tmp/ssot-mismatch.log" || {
+  cat "$tmp/ssot-mismatch.log"
+  fail "manifest-vs-file mismatch was not reported as DRIFT"
+}
+# The real manifest (untouched by the above -- the override pointed at a
+# disposable copy) must still verify this same root clean.
+bash "$D" verify "$ssot_root" > "$tmp/ssot-clean.log" 2>&1 || {
+  cat "$tmp/ssot-clean.log"
+  fail "verify against the real manifest failed for an unmodified root"
+}
+grep -q "VERIFY_OK" "$tmp/ssot-clean.log" || {
+  cat "$tmp/ssot-clean.log"
+  fail "real-manifest verify did not report VERIFY_OK"
+}
+# The FILES=() array itself must no longer carry an embedded sha256 -- the
+# only place a hash can appear now is the manifest this test just proved is
+# authoritative.
+if grep -qE '"[^"]+:[0-9a-f]{64}"' "$D"; then
+  fail "FILES=() still embeds a hand-maintained sha256 -- SSOT collapse incomplete"
+fi
 
 echo "DEPLOYER_MUTATION_PASS"

@@ -375,7 +375,7 @@ Coverage includes: ingest backpressure (semaphore + overflow queue), relay guard
 - `npm run verify:push:branch` — the local pre-push gate: typecheck, targeted tests, and the source/doc/surface guards. It is a **subset** of CI; some gates (the BOT ERRORS sentinel + deployer mutation gate) run only in CI, so reproduce them with `GITHUB_ACTIONS=1` when touching pinned runtime files.
 - `npm run verify:release` / `verify:publish` — broader release/publish gates.
 - Drift guards: `guard:doc-drift`, `guard:public-surface-drift` ([docs/public-surface.md](docs/public-surface.md) is the generated public-surface SSOT), `guard:work-index`, and the ESLint architectural-fitness ring (`guard:lint:src`, see [docs/architecture/fitness-taxonomy.md](docs/architecture/fitness-taxonomy.md)).
-- **Deploy-pin caveat:** `src/lib/bot-errors-outbox.ts` is hash-pinned in *two* places — `deploy/bot-errors-runtime-manifest.json` and `deploy/scripts/whatsoup-bot-errors-deploy.sh`. Any edit must bump both, and only `deploy/scripts/run-sentinel-tests.sh` (CI-only) catches the deployer pin locally.
+- **Deploy-pin note:** `deploy/scripts/whatsoup-bot-errors-deploy.sh` resolves its expected per-file hashes from `deploy/bot-errors-runtime-manifest.json` (the single source of truth) at runtime, so editing a pinned runtime file only requires updating the manifest — there is no second hand-maintained hash to bump. The deployer's own shell test suite (`deploy/scripts/tests/test_deployer_*.sh`) is CI-only (via `deploy/scripts/run-sentinel-tests.sh`); reproduce it locally with `bash deploy/scripts/run-sentinel-tests.sh` when touching pinned runtime files.
 
 ## Auxiliary Packages
 

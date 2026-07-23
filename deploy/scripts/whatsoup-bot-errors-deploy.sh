@@ -17,20 +17,33 @@ set -euo pipefail
 MODE="${1:?usage: deploy|verify|rollback|rollback-lkg|pin ...}"
 ROOT="${2:?missing <root>}"
 
-# F-id : path-relative-to-root : expected current-main sha256
+# The set of paths this deploy bundle manages. Scope is unchanged from
+# before -- only the SOURCE of each path's expected sha256 changes: it used
+# to be hand-maintained inline here (a second hash location that had to be
+# bumped in lockstep with deploy/bot-errors-runtime-manifest.json on every
+# edit, and regularly wasn't). Hashes are now resolved at startup from that
+# manifest -- the same single source of truth npm run
+# guard:bot-errors-runtime-manifest already verifies against -- via
+# resolve_managed_files() below, into MANAGED_FILES ("path:sha256" entries,
+# same shape the rest of this script already expects). This FILES array
+# itself stays a literal, parseable list of bare paths: test tooling
+# (deploy/scripts/tests/test_deployer_mutation.sh,
+# tests/scripts/deployer-static-parity.test.ts) reads it statically out of
+# this file's source text to derive the managed-path set independent of any
+# runtime manifest lookup.
 FILES=(
-  "deploy/scripts/bot-errors-dispatcher.py:9dd0bed46557c60017dbcc04ab959f3a39b7d0c2c473626c9d407a10294b820f"
-  "deploy/scripts/bot-errors-health-check.py:53c50903327e9d27018dc2c571bdfc87dbc29cc602771e005ae9aa96911625f2"
-  "deploy/scripts/bot-errors-heartbeat-watchdog.py:fcafec6acde3c9ab1ed5fcc009e7f9020d2c0fd9ffbeee77ab19caaac84d45bc"
-  "deploy/scripts/bot-errors-q-loop.py:d0924a67effb160fdeff2963212bd598a375dbd8a5c33d6ed5b3706a5f9125d5"
-  "src/lib/bot-errors-outbox.ts:f8ade0f2b2b6531488d7acb4f23cead45f3c471dd5e82faedad5549eeb0f07fc"
-  "deploy/scripts/bot-errors-collector.py:7a7559fae5d3317ac52331832b5a058ceef99387ba599e2e533747297c398c94"
-  "deploy/scripts/bot-errors-emit.py:bcac5e797a7bf421e8f98f9991b5fc7ff8fc1712f8b77ffbdb1dacc00bb38bad"
-  "deploy/scripts/bot-errors-runner.py:f189971ec512b39901c1dbbe2c14de7b1c0fa663008f33fb05d3fc794347b030"
-  "deploy/scripts/lib/__init__.py:438146338f7ceac8c0ecda8d7c6a7fb13fe88a0749bad1accf39ad92e4370da0"
-  "deploy/scripts/lib/bot_errors_redaction.py:274316080daac4fb1949e357e2d1688938a9d44fb63330ed2bef524ef73f4301"
-  "deploy/scripts/lib/bot_errors_daily_health.py:45b9b3e23ffda454a8315c1ec80ffc81c691e8ef37f3b20cb3386eaaa2af5bea"
-  "deploy/scripts/lib/bot_errors_roster.py:d5b0e418a46320bff46e9948b00b58a917922930e0649155db15bb1a6fea335c"
+  "deploy/scripts/bot-errors-dispatcher.py"
+  "deploy/scripts/bot-errors-health-check.py"
+  "deploy/scripts/bot-errors-heartbeat-watchdog.py"
+  "deploy/scripts/bot-errors-q-loop.py"
+  "src/lib/bot-errors-outbox.ts"
+  "deploy/scripts/bot-errors-collector.py"
+  "deploy/scripts/bot-errors-emit.py"
+  "deploy/scripts/bot-errors-runner.py"
+  "deploy/scripts/lib/__init__.py"
+  "deploy/scripts/lib/bot_errors_redaction.py"
+  "deploy/scripts/lib/bot_errors_daily_health.py"
+  "deploy/scripts/lib/bot_errors_roster.py"
 )
 
 sha() {
@@ -42,6 +55,73 @@ sha() {
   fi
   if [[ $rc -ne 0 || -z "$out" ]]; then printf 'SHA_FAILED\n'; return 1; fi
   printf '%s\n' "${out%% *}"
+}
+
+# Resolves each of the given repo-relative paths to a "path:sha256" entry by
+# looking up its expected hash in the runtime manifest (the single source of
+# truth) -- reuses python3, already a hard dependency of this script (see
+# smoke_redaction() and the pin mode below), so this introduces no new
+# external tool dependency. Fails closed: a missing/unparseable manifest, a
+# requested path absent from it, or a malformed hash all abort with a
+# nonzero exit rather than silently deploying against a wrong or stale
+# expectation. Populates the global MANAGED_FILES array on success.
+resolve_managed_files() {
+  local manifest="$1"; shift
+  if [[ ! -f "$manifest" ]]; then
+    echo "FATAL: runtime manifest not found: $manifest" >&2
+    return 3
+  fi
+  local resolved
+  resolved="$(python3 - "$manifest" "$@" <<'PY'
+import json
+import sys
+
+manifest_path = sys.argv[1]
+wanted = sys.argv[2:]
+
+try:
+    with open(manifest_path, encoding="utf-8") as handle:
+        data = json.load(handle)
+except (OSError, json.JSONDecodeError) as exc:
+    print(f"FATAL: cannot read/parse runtime manifest {manifest_path}: {exc}", file=sys.stderr)
+    raise SystemExit(3)
+
+files = data.get("files")
+if not isinstance(files, list):
+    print(f"FATAL: runtime manifest {manifest_path} has no 'files' list", file=sys.stderr)
+    raise SystemExit(3)
+
+by_path = {}
+for entry in files:
+    if not isinstance(entry, dict):
+        continue
+    entry_path = entry.get("path")
+    entry_sha = entry.get("sha256")
+    if isinstance(entry_path, str) and isinstance(entry_sha, str):
+        by_path[entry_path] = entry_sha
+
+missing = [p for p in wanted if p not in by_path]
+if missing:
+    print("FATAL: runtime manifest missing required deploy path(s): " + ", ".join(missing), file=sys.stderr)
+    raise SystemExit(3)
+
+hex_digits = set("0123456789abcdef")
+for p in wanted:
+    sha = by_path[p]
+    if len(sha) != 64 or sha != sha.lower() or any(ch not in hex_digits for ch in sha):
+        print(f"FATAL: runtime manifest sha256 for {p} is not a valid lowercase hex64: {sha!r}", file=sys.stderr)
+        raise SystemExit(3)
+    print(f"{p}:{sha}")
+PY
+  )" || return $?
+  MANAGED_FILES=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && MANAGED_FILES+=("$line")
+  done <<< "$resolved"
+  if [[ ${#MANAGED_FILES[@]} -ne $# ]]; then
+    echo "FATAL: resolved ${#MANAGED_FILES[@]} managed file(s) from $manifest, expected $#" >&2
+    return 3
+  fi
 }
 
 assert_no_symlink_path() {
@@ -60,7 +140,7 @@ assert_no_symlink_path() {
 
 do_verify() {
   local fail=0 r="$1"
-  for entry in "${FILES[@]}"; do
+  for entry in "${MANAGED_FILES[@]}"; do
     local path="${entry%%:*}" want="${entry##*:}" f="$r/${entry%%:*}"
     if ! assert_no_symlink_path "$r" "$path"; then fail=1; continue; fi
     if [[ ! -f "$f" ]]; then echo "  MISSING  $path"; fail=1; continue; fi
@@ -151,7 +231,7 @@ write_last_known_good_pointer() {
 
 is_managed_path() {
   local candidate="$1" entry path
-  for entry in "${FILES[@]}"; do
+  for entry in "${MANAGED_FILES[@]}"; do
     path="${entry%%:*}"
     [[ "$candidate" == "$path" ]] && return 0
   done
@@ -174,7 +254,7 @@ require_backup_dir() {
     [[ -z "$absent_path" ]] && continue
     is_managed_path "$absent_path" || { echo "FATAL: backup .was-absent contains unmanaged path: $absent_path"; return 3; }
   done < "$bkdir/.was-absent"
-  for entry in "${FILES[@]}"; do
+  for entry in "${MANAGED_FILES[@]}"; do
     local_path="${entry%%:*}"
     assert_no_symlink_path "$bkdir" "$local_path" || { echo "FATAL: backup path is unsafe"; return 3; }
   done
@@ -217,6 +297,23 @@ prune_verified_backups() {
   echo "BACKUP_RETENTION_PRUNED=$pruned"
 }
 
+# pin mode operates on an arbitrary caller-supplied manifest/ledger pair (see
+# below) and never touches MANAGED_FILES, so it is exempt from this lookup --
+# it must keep working even if deploy/bot-errors-runtime-manifest.json is
+# absent or mid-edit.
+if [[ "$MODE" != "pin" ]]; then
+  if [[ -n "${BOT_ERRORS_RUNTIME_MANIFEST_PATH:-}" ]]; then
+    # Test/operator override -- lets a caller point at an alternate manifest
+    # (e.g. a disposable copy in a test tmpdir) without touching the real
+    # deploy/bot-errors-runtime-manifest.json.
+    RUNTIME_MANIFEST_PATH="$BOT_ERRORS_RUNTIME_MANIFEST_PATH"
+  else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)" || { echo "FATAL: script directory unavailable"; exit 3; }
+    RUNTIME_MANIFEST_PATH="$SCRIPT_DIR/../bot-errors-runtime-manifest.json"
+  fi
+  resolve_managed_files "$RUNTIME_MANIFEST_PATH" "${FILES[@]}" || exit $?
+fi
+
 case "$MODE" in
   deploy)
     STAGING="${3:?missing <staging-dir>}"
@@ -232,13 +329,13 @@ case "$MODE" in
     # 0) sanity: staging is complete + matches expected shas (don't deploy a bad packet)
     echo "== staging integrity =="; do_verify "$STAGING" || { echo "FATAL: staging incomplete/mismatched"; exit 3; }
     echo "== target safety =="
-    for entry in "${FILES[@]}"; do
+    for entry in "${MANAGED_FILES[@]}"; do
       local_path="${entry%%:*}"
       assert_no_symlink_path "$ROOT" "$local_path" || { echo "FATAL: target path is unsafe"; exit 3; }
     done
     # 1) backup EVERY target path that exists (record absentees for rollback-delete)
     mkdir -p "$BKDIR"; : > "$BKDIR/.was-absent"
-    for entry in "${FILES[@]}"; do
+    for entry in "${MANAGED_FILES[@]}"; do
       local_path="${entry%%:*}"; src="$ROOT/$local_path"
       if [[ -f "$src" ]]; then mkdir -p "$BKDIR/$(dirname "$local_path")"; cp -p "$src" "$BKDIR/$local_path";
       else echo "$local_path" >> "$BKDIR/.was-absent"; fi
@@ -259,7 +356,7 @@ case "$MODE" in
       echo "LAST_KNOWN_GOOD_SKIPPED=backup_not_clean"
     fi
     # 2) materialize from staging
-    for entry in "${FILES[@]}"; do
+    for entry in "${MANAGED_FILES[@]}"; do
       local_path="${entry%%:*}"; dst="$ROOT/$local_path"
       mkdir -p "$(dirname "$dst")"; cp -p "$STAGING/$local_path" "$dst"
     done
@@ -280,11 +377,11 @@ case "$MODE" in
     require_backup_dir "$ROOT" "$BKDIR" || exit 3
     echo "== rollback $ROOT from $BKDIR =="
     echo "== rollback target safety =="
-    for entry in "${FILES[@]}"; do
+    for entry in "${MANAGED_FILES[@]}"; do
       local_path="${entry%%:*}"
       assert_no_symlink_path "$ROOT" "$local_path" || { echo "FATAL: target path is unsafe"; exit 3; }
     done
-    for entry in "${FILES[@]}"; do
+    for entry in "${MANAGED_FILES[@]}"; do
       local_path="${entry%%:*}"
       if [[ -f "$BKDIR/$local_path" ]]; then mkdir -p "$(dirname "$ROOT/$local_path")"; cp -p "$BKDIR/$local_path" "$ROOT/$local_path"; fi
     done
