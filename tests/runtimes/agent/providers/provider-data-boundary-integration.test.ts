@@ -21,6 +21,17 @@ import type {
 } from '../../../../src/runtimes/agent/providers/types.ts';
 import type { AgentEvent } from '../../../../src/runtimes/agent/stream-parser.ts';
 import {
+  captureExactState,
+  captureProviderHistory,
+  exactStateUnchanged,
+  NO_PROVIDER_ANOMALIES,
+  providerAnomalySummary,
+  tryCaptureExactState,
+  type ExactState,
+  type ProviderBoundaryObservation,
+  type ProviderHistoryCapture,
+} from '../../../helpers/provider-atomicity-oracle.ts';
+import {
   EMPTY_ASSIGNMENT_PAIRWISE_CASES,
   everySplit,
   NESTED_KEYLIKE_FACTORIAL_CASES,
@@ -153,236 +164,62 @@ const PROVIDER_EDGE_CASES = PROVIDER_FACTORIES.flatMap(
   })),
 );
 
-interface ProviderBoundaryObservation {
-  split: number;
-  rejectionCode: string | undefined;
-  fetchCalls: number;
-  executeCalls: number;
-  nonInitEventCount: number;
-  historyCaptured: boolean;
-  historyExpectedShape: boolean;
-  historyUnchanged: boolean;
-  checkpointUnchanged: boolean;
-  parsedInputCaptured: boolean;
-  parsedInputSupported: boolean;
-  parsedInputUnchanged: boolean;
-  boundaryEvents: ProviderBoundaryEvent[];
-}
+type ProviderAtomicityFalsifier =
+  | 'history-unavailable'
+  | 'wrong-history-shape'
+  | 'history-mutation'
+  | 'checkpoint-mutation'
+  | 'parsed-input-mutation'
+  | 'parsed-input-unsupported'
+  | 'boundary-event-extra-field'
+  | 'boundary-event-wrong-value';
 
-type ExactState =
-  | {
-    kind: 'primitive';
-    value: null | undefined | string | number | boolean;
-  }
-  | {
-    kind: 'object';
-    prototype: object | null;
-    properties: Array<{
-      key: PropertyKey;
-      configurable: boolean;
-      enumerable: boolean;
-      writable: boolean;
-      value: ExactState;
-    }>;
-  };
-
-function captureExactState(value: unknown, seen = new WeakSet<object>()): ExactState {
-  if (
-    value === null
-    || value === undefined
-    || typeof value === 'string'
-    || typeof value === 'number'
-    || typeof value === 'boolean'
-  ) {
-    return { kind: 'primitive', value };
-  }
-  if (typeof value !== 'object') {
-    throw new Error(`unsupported exact-state value type: ${typeof value}`);
-  }
-  if (seen.has(value)) throw new Error('unsupported cyclic or shared exact-state object');
-  seen.add(value);
-  const prototype = Object.getPrototypeOf(value) as object | null;
-  if (
-    prototype !== null
-    && prototype !== Object.prototype
-    && prototype !== Array.prototype
-  ) {
-    throw new Error('unsupported exact-state object prototype');
-  }
-  const properties = Reflect.ownKeys(value).map((key) => {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (!descriptor || !('value' in descriptor)) {
-      throw new Error('unsupported accessor property in exact-state object');
-    }
-    return {
-      key,
-      configurable: descriptor.configurable ?? false,
-      enumerable: descriptor.enumerable ?? false,
-      writable: descriptor.writable ?? false,
-      value: captureExactState(descriptor.value, seen),
-    };
-  });
-  return {
-    kind: 'object',
-    prototype,
-    properties,
-  };
-}
-
-function tryCaptureExactState(value: unknown): ExactState | undefined {
-  try {
-    return captureExactState(value);
-  } catch {
-    return undefined;
-  }
-}
-
-function exactStateUnchanged(value: unknown, before: ExactState | undefined): boolean {
-  if (!before) return false;
-  const after = tryCaptureExactState(value);
-  return after !== undefined && isDeepStrictEqual(after, before);
-}
-
-interface ProviderHistoryCapture {
-  captured: boolean;
-  expectedShape: boolean;
-  state: ExactState | undefined;
-}
-
-function captureProviderHistory(
-  providerName: 'openai-api' | 'anthropic-api',
-  provider: ProviderSession,
-): ProviderHistoryCapture {
-  const reachable = provider as unknown as {
-    messages?: unknown[];
-    systemPrompt?: string;
-  };
-  const messages = reachable.messages;
-  const systemPrompt = reachable.systemPrompt;
-  const messagesCaptured = Object.hasOwn(reachable, 'messages') && Array.isArray(messages);
-  const systemPromptCaptured = providerName === 'openai-api'
-    ? !Object.hasOwn(reachable, 'systemPrompt')
-    : Object.hasOwn(reachable, 'systemPrompt') && typeof systemPrompt === 'string';
-  const roles = Array.isArray(messages)
-    ? messages.map((message) => (
-      typeof message === 'object' && message !== null && 'role' in message
-        ? String(message.role)
-        : null
-    ))
-    : [];
-  const expectedShape = providerName === 'openai-api'
-    ? isDeepStrictEqual(roles, ['system', 'user'])
-    : isDeepStrictEqual(roles, ['user']) && typeof systemPrompt === 'string';
-  const captured = messagesCaptured && systemPromptCaptured;
-  return {
-    captured,
-    expectedShape,
-    state: captured
-      ? tryCaptureExactState({
-        messages,
-        systemPrompt: providerName === 'anthropic-api' ? systemPrompt : null,
-      })
-      : undefined,
-  };
-}
-
-function expectedBoundaryEvent(
-  secretCount: number,
-): Omit<ProviderBoundaryEvent, 'latencyMs'> {
-  return {
-    policyVersion: PROVIDER_DATA_POLICY_VERSION,
-    mode: 'enforce',
-    providerClass: 'managed_api',
-    routeSource: 'fallback',
-    eventType: 'secret_block',
-    success: 1,
-    transformCount: 1,
-    aliasCount: 0,
-    secretCount,
-  };
-}
-
-function hasExactBoundaryEvent(
-  events: readonly ProviderBoundaryEvent[],
-  secretCount: number,
-): boolean {
-  if (events.length !== 1) return false;
-  const event = events[0]!;
-  const {
-    latencyMs,
-    ...deterministicFields
-  } = event;
-  const eventKeys = Reflect.ownKeys(event);
-  if (eventKeys.some((key) => typeof key !== 'string')) return false;
-  return isDeepStrictEqual(
-    [...eventKeys].sort(),
-    [
-      'policyVersion',
-      'mode',
-      'providerClass',
-      'routeSource',
-      'eventType',
-      'success',
-      'transformCount',
-      'aliasCount',
-      'secretCount',
-      'latencyMs',
-    ].sort(),
-  )
-    && isDeepStrictEqual(deterministicFields, expectedBoundaryEvent(secretCount))
-    && Number.isInteger(latencyMs)
-    && latencyMs >= 0
-    && latencyMs <= 1_000;
-}
-
-function providerAnomalySummary(
-  observations: readonly ProviderBoundaryObservation[],
-  expectedSecretCount: number,
-) {
-  return {
-    rejection: observations
-      .filter(({ rejectionCode }) => rejectionCode !== 'secret_detected')
-      .map(({ split }) => split),
-    fetch: observations.filter(({ fetchCalls }) => fetchCalls !== 1).map(({ split }) => split),
-    execution: observations.filter(({ executeCalls }) => executeCalls !== 0).map(({ split }) => split),
-    events: observations
-      .filter(({ nonInitEventCount }) => nonInitEventCount !== 0)
-      .map(({ split }) => split),
-    historyCaptured: observations
-      .filter(({ historyCaptured }) => !historyCaptured)
-      .map(({ split }) => split),
-    historyShape: observations
-      .filter(({ historyExpectedShape }) => !historyExpectedShape)
-      .map(({ split }) => split),
-    history: observations
-      .filter(({ historyUnchanged }) => !historyUnchanged)
-      .map(({ split }) => split),
-    checkpoint: observations
-      .filter(({ checkpointUnchanged }) => !checkpointUnchanged)
-      .map(({ split }) => split),
-    parsedInput: observations
-      .filter(({ parsedInputCaptured, parsedInputSupported, parsedInputUnchanged }) => (
-        !parsedInputCaptured || !parsedInputSupported || !parsedInputUnchanged
-      ))
-      .map(({ split }) => split),
-    boundaryEvents: observations
-      .filter(({ boundaryEvents }) => !hasExactBoundaryEvent(boundaryEvents, expectedSecretCount))
-      .map(({ split }) => split),
-  };
-}
-
-const NO_PROVIDER_ANOMALIES = {
-  rejection: [],
-  fetch: [],
-  execution: [],
-  events: [],
-  historyCaptured: [],
-  historyShape: [],
-  history: [],
-  checkpoint: [],
-  parsedInput: [],
-  boundaryEvents: [],
-};
+const PROVIDER_ATOMICITY_FALSIFIERS = [
+  {
+    caseName: 'history unavailable',
+    falsifier: 'history-unavailable',
+    expectedChannel: 'historyCaptured',
+  },
+  {
+    caseName: 'wrong provider role shape',
+    falsifier: 'wrong-history-shape',
+    expectedChannel: 'historyShape',
+  },
+  {
+    caseName: 'history state mutation',
+    falsifier: 'history-mutation',
+    expectedChannel: 'history',
+  },
+  {
+    caseName: 'checkpoint state mutation',
+    falsifier: 'checkpoint-mutation',
+    expectedChannel: 'checkpoint',
+  },
+  {
+    caseName: 'parsed-input mutation',
+    falsifier: 'parsed-input-mutation',
+    expectedChannel: 'parsedInput',
+  },
+  {
+    caseName: 'unsupported parsed-input capture',
+    falsifier: 'parsed-input-unsupported',
+    expectedChannel: 'parsedInput',
+  },
+  {
+    caseName: 'extra raw boundary-event field',
+    falsifier: 'boundary-event-extra-field',
+    expectedChannel: 'boundaryEvents',
+  },
+  {
+    caseName: 'wrong raw boundary-event value',
+    falsifier: 'boundary-event-wrong-value',
+    expectedChannel: 'boundaryEvents',
+  },
+] as const satisfies readonly {
+  caseName: string;
+  falsifier: ProviderAtomicityFalsifier;
+  expectedChannel: keyof typeof NO_PROVIDER_ANOMALIES;
+}[];
 
 function entropy(): (size: number) => Uint8Array {
   let call = 0;
@@ -396,6 +233,7 @@ function broker(
   provider: 'openai-api' | 'anthropic-api',
   sessionId: string,
   boundaryEvents: ProviderBoundaryEvent[] = [],
+  falsifier?: ProviderAtomicityFalsifier,
 ) {
   return createProviderDataBoundary({
     binding: {
@@ -408,7 +246,23 @@ function broker(
     mode: 'enforce',
     routeSource: 'fallback',
     entropy: entropy(),
-    eventSink: (event) => boundaryEvents.push(event),
+    eventSink: (event) => {
+      if (falsifier === 'boundary-event-extra-field') {
+        boundaryEvents.push({
+          ...event,
+          unexpectedField: true,
+        } as ProviderBoundaryEvent);
+        return;
+      }
+      if (falsifier === 'boundary-event-wrong-value') {
+        boundaryEvents.push({
+          ...event,
+          eventType: 'success',
+        });
+        return;
+      }
+      boundaryEvents.push(event);
+    },
   });
 }
 
@@ -558,13 +412,14 @@ describe('managed provider data boundary integration', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
+    vi.spyOn(performance, 'now').mockReturnValue(10_000);
     fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
-    vi.clearAllMocks();
+    vi.restoreAllMocks();
   });
 
   const observeRejectedProviderInput = async (
@@ -572,6 +427,7 @@ describe('managed provider data boundary integration', () => {
     makeProvider: () => ProviderSession,
     metadata: string[],
     split: number,
+    falsifier?: ProviderAtomicityFalsifier,
   ): Promise<ProviderBoundaryObservation> => {
     fetchMock.mockReset();
     const events: AgentEvent[] = [];
@@ -596,7 +452,7 @@ describe('managed provider data boundary integration', () => {
     };
     const provider = makeProvider();
     const sessionId = `${providerName}-boundary-session`;
-    const realBoundary = broker(providerName, sessionId, boundaryEvents);
+    const realBoundary = broker(providerName, sessionId, boundaryEvents, falsifier);
     let parsedInput: unknown;
     let parsedInputBefore: ExactState | undefined;
     let historyAtHandoff: ProviderHistoryCapture | undefined;
@@ -606,11 +462,50 @@ describe('managed provider data boundary integration', () => {
       ...realBoundary,
       rehydrateToolInput(toolName, input, tools) {
         parsedInput = input;
+        if (
+          falsifier === 'parsed-input-unsupported'
+          && typeof input === 'object'
+          && input !== null
+        ) {
+          Object.defineProperty(input, Symbol('unsupported-capture'), {
+            configurable: true,
+            value: () => undefined,
+          });
+        }
         parsedInputBefore = tryCaptureExactState(input);
         historyAtHandoff = captureProviderHistory(providerName, provider);
+        if (falsifier === 'history-unavailable') {
+          historyAtHandoff = {
+            ...historyAtHandoff,
+            captured: false,
+          };
+        } else if (falsifier === 'wrong-history-shape') {
+          historyAtHandoff = {
+            ...historyAtHandoff,
+            expectedShape: false,
+          };
+        }
         checkpointAtHandoff = tryCaptureExactState(provider.getCheckpoint());
+        if (falsifier === 'checkpoint-mutation') {
+          checkpointAtHandoff = captureExactState({ mutated: true });
+        }
         boundaryHandoffEventStart = boundaryEvents.length;
-        return realBoundary.rehydrateToolInput(toolName, input, tools);
+        try {
+          return realBoundary.rehydrateToolInput(toolName, input, tools);
+        } finally {
+          if (
+            falsifier === 'parsed-input-mutation'
+            && typeof input === 'object'
+            && input !== null
+          ) {
+            Object.defineProperty(input, 'postHandoffMutation', {
+              configurable: true,
+              enumerable: true,
+              value: true,
+              writable: true,
+            });
+          }
+        }
       },
     };
     fetchMock.mockImplementation(async () => fetchMock.mock.calls.length === 1
@@ -634,6 +529,13 @@ describe('managed provider data boundary integration', () => {
         : 'unexpected_error';
     }
 
+    if (falsifier === 'history-mutation') {
+      const reachable = provider as unknown as {
+        messages?: Array<Record<string, unknown>>;
+      };
+      const firstMessage = reachable.messages?.[0];
+      if (firstMessage) firstMessage['content'] = 'mutated after provider handoff';
+    }
     const historyAfter = captureProviderHistory(providerName, provider);
     return {
       split,
@@ -1398,6 +1300,77 @@ describe('managed provider data boundary integration', () => {
       'one-character keyed value then a distinct token',
     );
   });
+
+  it('binds every provider atomicity falsifier to one literal anomaly channel', () => {
+    expect(PROVIDER_ATOMICITY_FALSIFIERS).toEqual([
+      {
+        caseName: 'history unavailable',
+        falsifier: 'history-unavailable',
+        expectedChannel: 'historyCaptured',
+      },
+      {
+        caseName: 'wrong provider role shape',
+        falsifier: 'wrong-history-shape',
+        expectedChannel: 'historyShape',
+      },
+      {
+        caseName: 'history state mutation',
+        falsifier: 'history-mutation',
+        expectedChannel: 'history',
+      },
+      {
+        caseName: 'checkpoint state mutation',
+        falsifier: 'checkpoint-mutation',
+        expectedChannel: 'checkpoint',
+      },
+      {
+        caseName: 'parsed-input mutation',
+        falsifier: 'parsed-input-mutation',
+        expectedChannel: 'parsedInput',
+      },
+      {
+        caseName: 'unsupported parsed-input capture',
+        falsifier: 'parsed-input-unsupported',
+        expectedChannel: 'parsedInput',
+      },
+      {
+        caseName: 'extra raw boundary-event field',
+        falsifier: 'boundary-event-extra-field',
+        expectedChannel: 'boundaryEvents',
+      },
+      {
+        caseName: 'wrong raw boundary-event value',
+        falsifier: 'boundary-event-wrong-value',
+        expectedChannel: 'boundaryEvents',
+      },
+    ]);
+  });
+
+  it.each(PROVIDER_ATOMICITY_FALSIFIERS)(
+    'isolates provider atomicity falsifier: $caseName [$expectedChannel]',
+    async ({ caseName, falsifier, expectedChannel }) => {
+      const source = 'token=alpha,password=beta';
+      const split = source.indexOf(',') + 1;
+      const observation = await observeRejectedProviderInput(
+        'openai-api',
+        () => new OpenAIApiProvider(),
+        [source.slice(0, split), source.slice(split)],
+        split,
+        falsifier,
+      );
+      const anomalySplits = providerAnomalySummary([observation], 2);
+      expect({
+        caseName,
+        expectedChannel,
+        observedMarker: anomalySplits[expectedChannel],
+      }).toEqual({
+        caseName,
+        expectedChannel,
+        observedMarker: [split],
+      });
+      expect(anomalySplits).toEqual(NO_PROVIDER_ANOMALIES);
+    },
+  );
 
   it.each(SUCCESSOR_PROVIDER_SPLIT_CASES)(
     'executes every $caseName split independently through restricted $providerName',
