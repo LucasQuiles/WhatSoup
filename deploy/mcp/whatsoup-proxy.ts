@@ -2,23 +2,25 @@
 /**
  * whatsoup-proxy.ts — stdio-to-Unix-socket relay for Claude Code MCP integration.
  *
- * Reads WHATSOUP_SOCKET from env, connects to that Unix socket, and relays
- * JSON-RPC lines between stdin/stdout and the socket. Pure transport — no MCP
- * awareness or tool knowledge.
+ * Prefers the actor-bound WHATSOUP_MCP_SOCKET, then falls back to the static
+ * WHATSOUP_SOCKET for compatibility outside eligible per-chat sessions.
  */
 
 import { createConnection } from 'node:net';
 import { createInterface } from 'node:readline';
 
-const socketPath = process.env['WHATSOUP_SOCKET'];
+const socketPath =
+  process.env['WHATSOUP_MCP_SOCKET']?.trim()
+  || process.env['WHATSOUP_SOCKET']?.trim();
+
+const unavailable = {
+  jsonrpc: '2.0',
+  id: null,
+  error: { code: -32603, message: 'MCP transport unavailable' },
+};
 
 if (!socketPath) {
-  const err = {
-    jsonrpc: '2.0',
-    id: null,
-    error: { code: -32603, message: 'WHATSOUP_SOCKET env var is not set' },
-  };
-  process.stdout.write(JSON.stringify(err) + '\n');
+  process.stdout.write(JSON.stringify(unavailable) + '\n');
   process.exit(1);
 }
 
@@ -27,13 +29,8 @@ const socket = createConnection(socketPath);
 // silently corrupted to U+FFFD before the line-delimited JSON-RPC is parsed.
 socket.setEncoding('utf8');
 
-socket.on('error', (err: NodeJS.ErrnoException) => {
-  const response = {
-    jsonrpc: '2.0',
-    id: null,
-    error: { code: -32603, message: `Socket connection error: ${err.message}` },
-  };
-  process.stdout.write(JSON.stringify(response) + '\n');
+socket.on('error', () => {
+  process.stdout.write(JSON.stringify(unavailable) + '\n');
   process.exit(1);
 });
 

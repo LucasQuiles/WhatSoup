@@ -1189,4 +1189,63 @@ describe("F-STICKY-ACTOR: actorResolver overrides the per-request actor (D2)", (
   it("no resolver leaves the base-session actor unchanged (back-compat)", async () => {
     expect(await observeActor(undefined, "base-actor")).toBe("base-actor");
   });
+
+  it("rejects provider-supplied actor context before tool dispatch", async () => {
+    const handler = vi.fn(async () => "unreachable");
+    registry.register(makeTool({
+      name: "actor_override_tool",
+      scope: "global",
+      schema: z.object({ actorJid: z.string().optional() }),
+      handler,
+    }));
+    server = new WhatSoupSocketServer(
+      socketPath,
+      registry,
+      makeSession({ actorJid: "base-actor" }),
+      () => "resolver-actor",
+    );
+    server.start();
+    await waitForSocket(socketPath);
+
+    const response = await sendJsonRpc(socketPath, {
+      jsonrpc: "2.0", id: 9, method: "tools/call",
+      params: { name: "actor_override_tool", arguments: { actorJid: "forged-actor" } },
+    });
+
+    expect(response).toEqual({
+      jsonrpc: "2.0",
+      id: 9,
+      error: { code: -32602, message: "Reserved session context" },
+    });
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("rejects provider-supplied conversation context before tool dispatch", async () => {
+    const handler = vi.fn(async () => "unreachable");
+    registry.register(makeTool({
+      name: "conversation_override_tool",
+      scope: "global",
+      schema: z.object({ conversationKey: z.string().optional() }),
+      handler,
+    }));
+    server = new WhatSoupSocketServer(
+      socketPath,
+      registry,
+      makeSession({ conversationKey: "bound-chat" }),
+    );
+    server.start();
+    await waitForSocket(socketPath);
+
+    const response = await sendJsonRpc(socketPath, {
+      jsonrpc: "2.0", id: 10, method: "tools/call",
+      params: { name: "conversation_override_tool", arguments: { conversationKey: "other-chat" } },
+    });
+
+    expect(response).toEqual({
+      jsonrpc: "2.0",
+      id: 10,
+      error: { code: -32602, message: "Reserved session context" },
+    });
+    expect(handler).not.toHaveBeenCalled();
+  });
 });

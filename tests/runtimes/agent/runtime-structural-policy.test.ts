@@ -53,11 +53,18 @@ describe('AgentRuntime structural policy', () => {
     const crashBody = methodSource(source, 'cleanupPerChatCrashTurnState');
 
     expect(terminalCleanup).toContain('this.cleanupPerChatGenerationState(mapKey, options);');
-    expect(terminalCleanup).toContain('this.teardownPerChatActorSocket(mapKey);');
+    expect(terminalCleanup).toContain(
+      'if (!options.preserveActorSocket) this.teardownPerChatActorSocket(mapKey);',
+    );
     expect(resetOwnedSession).toContain('this.cleanupPerChatGenerationState(mapKey);');
     expect(resetOwnedSession).not.toContain('this.cleanupPerChatState(mapKey);');
     expect(resetOwnedSession).not.toContain('this.teardownPerChatActorSocket(mapKey);');
-    expect(idleEviction).toContain('this.cleanupPerChatState(mapKey);');
+    expect(idleEviction).toContain(
+      'this.cleanupPerChatState(mapKey, { preserveActorSocket: true });',
+    );
+    expect(idleEviction).toContain(
+      'this.perChatMcpSocketManager.releaseAfter(mapKey, childStopped);',
+    );
     expect(failedWorkspaceCreation).toContain('this.cleanupPerChatState(workspaceKey);');
     expect(exhaustedSession).toContain(
       'this.cleanupPerChatState(releaseKey, { preserveCrashHistory: true });',
@@ -104,7 +111,9 @@ describe('AgentRuntime structural policy', () => {
     }
 
     expect(terminalCleanup).toContain('this.cleanupPerChatGenerationState(mapKey, options);');
-    expect(terminalCleanup).toContain('this.teardownPerChatActorSocket(mapKey);');
+    expect(terminalCleanup).toContain(
+      'if (!options.preserveActorSocket) this.teardownPerChatActorSocket(mapKey);',
+    );
     expect(terminalCleanup).toContain('this.lastSpawnRouteProvider.delete(conversationKey);');
     expect(terminalCleanup).toContain('this.lastPinBlockNotice.delete(conversationKey);');
 
@@ -112,24 +121,13 @@ describe('AgentRuntime structural policy', () => {
     expect(helperBody).toContain('clearPendingPollTimers(pending);');
     expect(helperBody).toContain('this.pendingPolls.questions.delete(mapKey);');
 
-    // teardownPerChatActorSocket's implementation lives in chat-transport.ts (pure
-    // move); runtime.ts keeps only a thin delegating wrapper, so this reads the
-    // extracted module and its port-parameterized form of the same invariant.
-    const teardownBody = functionSource(await readChatTransportSource(), 'teardownPerChatActorSocket');
-    expect(teardownBody).toContain('port.perChatExecActorQueue.delete(mapKey);');
-    expect(teardownBody).toContain('port.perChatSocketResources.delete(mapKey);');
-    expect(teardownBody).toContain('sockRes.socketServer.stop();');
   });
 
-  it('QR-247: the global-broadcast gate is INSTANCE-GLOBAL (usesPerChatActorSocket), never presence-based on a per-chat socket', async () => {
+  it('QR-247: the global-broadcast gate is instance-global and never resource-presence-based', async () => {
     const source = await readRuntimeSource();
-    // Security invariant: the shared global socket MUST stay actor-less for claude-cli
-    // per_chat so a non-claude fallback subprocess reading it is fail-closed (deny). The
-    // skip must be instance-global — a presence gate (perChatSocketResources.has) would
-    // broadcast the first-message sender onto the global socket before that chat's
-    // per-chat socket exists, reopening the QR-247 confused-deputy race for the fallback
-    // path. Pin the gate form AND the single-writer invariant on the global actor.
-    expect(source).toContain('if (!this.usesPerChatActorSocket()) {');
+    expect(source).toContain('if (this.shouldBroadcastGlobalActor()) {');
+    expect(methodSource(source, 'shouldBroadcastGlobalActor'))
+      .toContain("return this.sessionScope !== 'per_chat';");
     const globalActorWrites = source.match(/globalSocketServer\?\.updateActorJid\(msg\.senderJid\)/g) ?? [];
     expect(globalActorWrites).toHaveLength(1);
   });

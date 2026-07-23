@@ -2,10 +2,12 @@ import { createServer } from 'node:net';
 import type { Server, Socket } from 'node:net';
 import { unlinkSync } from 'node:fs';
 import { createChildLogger } from '../logger.ts';
+import { toConversationKey } from '../core/conversation-key.ts';
 import type { ToolRegistry } from './registry.ts';
 import { makeConversationBinding, type SessionContext } from './types.ts';
 
 const log = createChildLogger('WhatSoupSocketServer');
+const RESERVED_SESSION_ARGUMENTS = new Set(['actorJid', 'conversationKey']);
 
 interface JsonRpcRequest {
   jsonrpc: string;
@@ -80,11 +82,18 @@ export class WhatSoupSocketServer {
   }
 
   start(): void {
-    // Crash recovery: remove stale socket file if present
-    try {
-      unlinkSync(this.socketPath);
-    } catch {
-      // File didn't exist — that's fine
+    void this.startAndWait().catch((err) => {
+      log.error({ err }, 'server failed to start');
+    });
+  }
+
+  async startAndWait(options: { unlinkExisting?: boolean } = {}): Promise<void> {
+    if (options.unlinkExisting !== false) {
+      try {
+        unlinkSync(this.socketPath);
+      } catch {
+        // File didn't exist — that's fine
+      }
     }
 
     const MAX_BUF = 1_024 * 1_024; // 1 MB — prevent memory DoS from no-newline streams
@@ -197,8 +206,19 @@ export class WhatSoupSocketServer {
 
     this.server.maxConnections = MAX_CONNECTIONS;
 
-    this.server.listen(this.socketPath, () => {
-      log.info({ socketPath: this.socketPath }, 'MCP socket server listening');
+    await new Promise<void>((resolve, reject) => {
+      const onError = (err: Error): void => {
+        this.server?.off('listening', onListening);
+        reject(err);
+      };
+      const onListening = (): void => {
+        this.server?.off('error', onError);
+        log.info({ socketPath: this.socketPath }, 'MCP socket server listening');
+        resolve();
+      };
+      this.server!.once('error', onError);
+      this.server!.once('listening', onListening);
+      this.server!.listen(this.socketPath);
     });
 
     this.server.on('error', (err) => {
@@ -206,7 +226,7 @@ export class WhatSoupSocketServer {
     });
   }
 
-  stop(): void {
+  stop(options: { unlinkSocket?: boolean } = {}): void {
     for (const socket of this.activeSockets.values()) {
       socket.destroy();
     }
@@ -215,10 +235,12 @@ export class WhatSoupSocketServer {
     if (this.server) {
       this.server.close();
       this.server = null;
-      try {
-        unlinkSync(this.socketPath);
-      } catch {
-        // Already gone — that's fine
+      if (options.unlinkSocket !== false) {
+        try {
+          unlinkSync(this.socketPath);
+        } catch {
+          // Already gone — that's fine
+        }
       }
     }
   }
@@ -291,7 +313,7 @@ export class WhatSoupSocketServer {
       log.warn({ socketPath: this.socketPath }, 'updateConversationBinding refused — socket has no conversation binding');
       return;
     }
-    const next = makeConversationBinding(current.conversationKey, deliveryJid);
+    const next = makeConversationBinding(toConversationKey(deliveryJid), deliveryJid);
     const install = (session: SessionContext): void => {
       session.binding = next;
       session.conversationKey = next.conversationKey;
@@ -332,6 +354,13 @@ export class WhatSoupSocketServer {
           const params = req.params as { name?: string; arguments?: Record<string, unknown> } | undefined;
           const name = params?.name ?? '';
           const args = params?.arguments ?? {};
+          if (Object.keys(args).some((key) => RESERVED_SESSION_ARGUMENTS.has(key))) {
+            return {
+              jsonrpc: '2.0',
+              id,
+              error: { code: -32602, message: 'Reserved session context' },
+            };
+          }
           const callResult = await this.registry.call(name, args, session);
           return {
             jsonrpc: '2.0',

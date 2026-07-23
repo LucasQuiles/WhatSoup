@@ -117,6 +117,8 @@ vi.mock('../../../src/config.ts', () => ({
     toolUpdateMode: 'full',
     toolUpdateRedirectJid: null,
     textAggregateDelayMs: 2_000,
+    agentProvider: 'claude-cli',
+    agentFallbacks: [],
     stateRoot: '/tmp/whatsoup-test-state-idle',
     restartLoopGuard: { enabled: true, maxRestarts: 3, windowMs: 300_000 },
     mediaDir: '/tmp/whatsoup-test-media/tmp',
@@ -145,8 +147,19 @@ vi.mock('../../../src/core/workspace.ts', () => ({
 
 vi.mock('../../../src/mcp/socket-server.ts', () => ({
   WhatSoupSocketServer: vi.fn().mockImplementation(function () {
-    return { start: vi.fn(), stop: vi.fn(), updateDeliveryJid: vi.fn(), updateActorJid: vi.fn(), updateConversationKey: vi.fn() };
+    return { start: vi.fn(), startAndWait: vi.fn(async () => {}), stop: vi.fn(), updateDeliveryJid: vi.fn(), updateActorJid: vi.fn(), updateConversationKey: vi.fn() };
   }),
+}));
+
+vi.mock('../../../src/runtimes/agent/per-chat-mcp-socket-manager.ts', () => ({
+  PerChatMcpSocketManager: class {
+    acquire() {
+      return { socketPath: '/tmp/idle-actor.sock', ready: Promise.resolve() };
+    }
+    release() {}
+    releaseAfter(_identity: string, _childStopped: Promise<void>) {}
+    rekey() {}
+  },
 }));
 
 vi.mock('../../../src/mcp/registry.ts', () => ({
@@ -340,6 +353,35 @@ describe('idle session eviction — LRU ceiling and poll guard', () => {
     // The canonical teardown must run — otherwise eviction leaks auxiliary state.
     expect(rt.perChatTurnText.has('auxchat')).toBe(false);
     expect(rt.perChatInboundSeqQueue.has('auxchat')).toBe(false);
+  });
+
+  it('holds actor-socket replacement readiness until the evicted child proves stopped', async () => {
+    let proveStopped!: () => void;
+    const shutdown = vi.fn(() => new Promise<void>((resolve) => { proveStopped = resolve; }));
+    const s = {
+      ...fakeSession({ lastAgoMs: 3 * 60 * 60 * 1000 }),
+      shutdown,
+    };
+    const { runtime } = await seededRuntime({ orderingchat: s });
+    const manager = (runtime as unknown as {
+      perChatMcpSocketManager: {
+        releaseAfter(identity: string, childStopped: Promise<void>): void;
+      };
+    }).perChatMcpSocketManager;
+    const releaseAfter = vi.spyOn(manager, 'releaseAfter');
+
+    (runtime as unknown as { sweepIdleSessions: () => void }).sweepIdleSessions();
+
+    expect(shutdown).toHaveBeenCalledWith(true);
+    expect(releaseAfter).toHaveBeenCalledTimes(1);
+    expect(releaseAfter.mock.calls[0]![0]).toBe('orderingchat');
+    let terminal = false;
+    void releaseAfter.mock.calls[0]![1].then(() => { terminal = true; });
+    await Promise.resolve();
+    expect(terminal).toBe(false);
+    proveStopped();
+    await releaseAfter.mock.calls[0]![1];
+    expect(terminal).toBe(true);
   });
 
   it('does NOT suspend an idle session with images buffered mid-coalesce (would drop the images)', async () => {

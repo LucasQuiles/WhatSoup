@@ -358,6 +358,52 @@ describe('SessionManager', () => {
     );
   });
 
+  it('rejects an eligible persistent child before spawn when actor-socket readiness fails', async () => {
+    const rejection = new Error('actor socket readiness failed');
+    let rejectReady!: (error: Error) => void;
+    const ready = new Promise<void>((_resolve, reject) => {
+      rejectReady = reject;
+    });
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      whatsoupMcpSocket: '/private/actor.sock',
+      mcpSocketReady: ready,
+    });
+
+    const spawning = sm.spawnSession();
+    await Promise.resolve();
+    expect(spawn).not.toHaveBeenCalled();
+    rejectReady(rejection);
+
+    await expect(spawning).rejects.toBe(rejection);
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('rechecks actor-socket readiness at the spawn-per-turn child boundary', async () => {
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+      whatsoupMcpSocket: '/private/actor.sock',
+      mcpSocketReady: Promise.resolve(),
+    });
+    await sm.spawnSession();
+    vi.mocked(spawn).mockClear();
+    const rejection = new Error('actor socket no longer ready');
+    const failedReady = Promise.reject(rejection);
+    void failedReady.catch(() => {});
+    (sm as unknown as { mcpSocketReady: Promise<void> }).mcpSocketReady = failedReady;
+
+    await expect(sm.sendTurn('blocked turn')).rejects.toBe(rejection);
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
   // @check CHK-019
   // @traces CON-003.AC-02
   it('spawnSession passes bypassPermissions in args', async () => {
@@ -3824,6 +3870,27 @@ import {
 } from '../../../src/runtimes/agent/session.ts';
 
 describe('buildChildEnv', () => {
+  it.each([
+    ['claude-cli', undefined],
+    ['codex-cli', undefined],
+    ['gemini-cli', undefined],
+    ['opencode-cli', 'openai/test-model'],
+  ])('%s receives the explicit actor socket at the child environment boundary', (provider, model) => {
+    const savedOpenAi = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'test-only-key';
+    try {
+      const env = buildChildEnv(
+        provider,
+        { whatsoupMcpSocket: '/private/actor-bound.sock' },
+        model,
+      );
+      expect(env.WHATSOUP_MCP_SOCKET).toBe('/private/actor-bound.sock');
+    } finally {
+      if (savedOpenAi === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = savedOpenAi;
+    }
+  });
+
   it('throws for unknown provider id', () => {
     expect(() => buildChildEnv('not-a-provider')).toThrow(/unknown provider id/);
   });
@@ -4740,6 +4807,7 @@ describe('spawn-per-turn error branches', () => {
     await sm.spawnSession();
     // sendTurn spawns a NEW child (spawn-per-turn). Capture it after spawn.
     const sendPromise = sm.sendTurn('hello');
+    await Promise.resolve();
 
     // The new child spawned by sendTurn registers its own 'error' handler.
     // It's the LAST set of mock calls after sendTurn.
@@ -4766,6 +4834,7 @@ describe('spawn-per-turn error branches', () => {
 
     await sm.spawnSession();
     const sendPromise = sm.sendTurn('hello');
+    await Promise.resolve();
 
     const allOnCalls = (mockChild.on as ReturnType<typeof vi.fn>).mock.calls;
     const errHandlerCall = [...allOnCalls].reverse().find((c: unknown[]) => c[0] === 'error');

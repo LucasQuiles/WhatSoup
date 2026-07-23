@@ -67,3 +67,19 @@ export function executionModeForProvider(provider: ProviderId): ExecutionMode {
       return assertNeverProvider(provider, 'providers:executionModeForProvider');
   }
 }
+
+/** Exhaustive WhatSoup MCP exposure decision for every supported provider. */
+export function mcpModeForProvider(provider: ProviderId): ProviderMcpMode {
+  switch (provider) {
+    case 'claude-cli':
+    case 'codex-cli':
+    case 'gemini-cli':
+    case 'opencode-cli':
+      return 'stdio_proxy';
+    case 'openai-api':
+    case 'anthropic-api':
+      return 'none';
+    default:
+      return assertNeverProvider(provider, 'providers:mcpModeForProvider');
+  }
+}

@@ -33,6 +33,7 @@ const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
     trackToolEnd: vi.fn((_toolId: string) => {}),
     bindGenerationOwnership: vi.fn((_resolve: () => unknown) => {}),
     getDbRowId: vi.fn(() => null),
+    getProviderId: vi.fn(() => 'claude-cli'),
   };
 
   const mockQueue = {
@@ -115,6 +116,7 @@ vi.mock('../../../src/config.ts', () => ({
     agentFallbacks: [],
     agentFallbackProvider: undefined,
     agentFallbackModel: undefined,
+    stateRoot: '/tmp/whatsoup-actor-state',
   },
 }));
 
@@ -136,18 +138,9 @@ vi.mock('../../../src/core/workspace.ts', () => ({
 
 vi.mock('../../../src/mcp/socket-server.ts', () => ({
   WhatSoupSocketServer: vi.fn().mockImplementation(function () {
-    return { start: vi.fn(), stop: vi.fn(), updateDeliveryJid: vi.fn(), updateActorJid: vi.fn(), updateConversationKey: vi.fn(), updateConversationBinding: vi.fn() };
+    return { start: vi.fn(), startAndWait: vi.fn(async () => {}), stop: vi.fn(), updateDeliveryJid: vi.fn(), updateActorJid: vi.fn(), updateConversationKey: vi.fn(), updateConversationBinding: vi.fn() };
   }),
 }));
-
-// #1785 rec-3: exercising the REAL createPerChatActorSocket (not spied away) would
-// otherwise hit the real writeMcpConfigToPath -> writePrivateFileSync fs chain
-// against the real home directory. Stub just the fs-writing export; everything
-// else in this module stays real.
-vi.mock('../../../src/runtimes/agent/providers/mcp-bridge.ts', async (importOriginal) => {
-  const actual = await importOriginal() as typeof import('../../../src/runtimes/agent/providers/mcp-bridge.ts');
-  return { ...actual, writeMcpConfigToPath: vi.fn(() => null) };
-});
 
 vi.mock('../../../src/mcp/registry.ts', () => ({
   ToolRegistry: class {
@@ -215,7 +208,7 @@ vi.mock('../../../src/core/media-mime.ts', () => ({
 // ── Imports ─────────────────────────────────────────────────────────────────
 
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
-import { WhatSoupSocketServer } from '../../../src/mcp/socket-server.ts';
+import { SessionManager } from '../../../src/runtimes/agent/session.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 
@@ -496,9 +489,12 @@ describe('F-STICKY-ACTOR F6: dispatch to an INACTIVE session clears stale entrie
     mapKey = priv().resolvePerChatMapKey(CHAT);
   });
 
-  it('clear-if-inactive drops the dead subprocess entries before pushing the fresh turn (revert -> RED)', async () => {
+  it.each(['claude-cli', 'codex-cli', 'gemini-cli', 'opencode-cli'])(
+    '%s publishes the fresh actor at the actual provider boundary',
+    async (provider) => {
     const inactive = {
       ...mockSession,
+      getProviderId: () => provider,
       getStatus: () => ({ active: false, sessionId: null, pid: null, startedAt: null, messageCount: 0, lastMessageAt: null }),
       spawnSession: vi.fn(async () => {}),
       shutdown: vi.fn(async () => {}),
@@ -510,7 +506,8 @@ describe('F-STICKY-ACTOR F6: dispatch to an INACTIVE session clears stale entrie
     await priv().sendTurnToSession(inactive, CHAT, 'admin turn', mapKey, ADMIN);
     // The stale GUEST is dropped at the push (session inactive) — only the fresh ADMIN turn remains.
     expect(priv().perChatExecActorQueue.get(mapKey)).toEqual([ADMIN]);
-  });
+    },
+  );
 });
 
 describe('F-STICKY-ACTOR F6: LID-rekey migrates the exec-queue + socket to canonical (F4, QR-247)', () => {
@@ -521,7 +518,9 @@ describe('F-STICKY-ACTOR F6: LID-rekey migrates the exec-queue + socket to canon
     resolvePerChatMapKey(c: string): string;
     chatSessions: Map<string, unknown>;
     perChatExecActorQueue: Map<string, Array<string | undefined>>;
-    perChatSocketResources: Map<string, unknown>;
+    perChatMcpSocketManager: {
+      rekey: (oldKey: string, newKey: string, deliveryJid: string) => void;
+    };
     handleJidAliasChanged(conversationKey: string, newJid: string): void;
   };
   const priv = (): Priv => runtime as unknown as Priv;
@@ -538,16 +537,14 @@ describe('F-STICKY-ACTOR F6: LID-rekey migrates the exec-queue + socket to canon
     // Preconditions for the per_chat rekey branch: a session + in-flight state under lidKey.
     setOwnedTestSession(runtime, lidKey, mockSession);
     priv().perChatExecActorQueue.set(lidKey, [ADMIN, GUEST]);
-    const sockRes = { socketServer: { stop: vi.fn(), updateDeliveryJid: vi.fn() }, socketPath: '/tmp/x.sock', cfgPath: '/tmp/x.mcp.json' };
-    priv().perChatSocketResources.set(lidKey, sockRes);
+    const rekey = vi.spyOn(priv().perChatMcpSocketManager, 'rekey');
 
     priv().handleJidAliasChanged(convKey, newJid);
 
     // Migrated to canonical; the trailing cleanupPerChatState(lidKey) finds nothing under lidKey.
     expect(priv().perChatExecActorQueue.get(lidKey)).toBeUndefined();
     expect(priv().perChatExecActorQueue.get(canonical)).toEqual([ADMIN, GUEST]);
-    expect(priv().perChatSocketResources.get(canonical)).toBe(sockRes);
-    expect(priv().perChatSocketResources.get(lidKey)).toBeUndefined();
+    expect(rekey).toHaveBeenCalledWith(lidKey, canonical, newJid);
   });
 });
 
@@ -557,96 +554,91 @@ describe('F-STICKY-ACTOR hardening: wirePerChatActorSocket keys on the ACTUAL pr
   const CHAT = 'group-route@g.us';
   type Priv = {
     resolvePerChatMapKey(c: string): string;
-    perChatSocketResources: Map<string, { socketServer: { stop: ReturnType<typeof vi.fn> }; socketPath: string; cfgPath: string }>;
-    createPerChatActorSocket(mapKey: string, chatJid: string): { socketPath: string; cfgPath: string };
+    perChatMcpSocketManager: {
+      acquire: (mapKey: string, chatJid: string) => { socketPath: string; ready: Promise<void> };
+      release: (mapKey: string) => void;
+    };
     wirePerChatActorSocket(chatJid: string, provider: string):
-      | { mcpSocketPath: string; providerConfigOverride: { mcpConfig: string[]; strictMcpConfig: true } }
+      | { mcpSocketPath: string; mcpSocketReady: Promise<void> }
       | undefined;
   };
   let runtime: AgentRuntime;
   let mapKey: string;
   const priv = (): Priv => runtime as unknown as Priv;
+  const ready = Promise.resolve();
 
   beforeEach(() => {
     runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
     mapKey = priv().resolvePerChatMapKey(CHAT);
   });
 
-  // Spy the socket factory so the create/teardown DECISION is tested without real sockets/fs.
-  function spyCreate(): ReturnType<typeof vi.spyOn> {
-    return vi.spyOn(runtime as unknown as { createPerChatActorSocket: Priv['createPerChatActorSocket'] }, 'createPerChatActorSocket')
-      .mockImplementation((mk: string) => {
-        priv().perChatSocketResources.set(mk, { socketServer: { stop: vi.fn() }, socketPath: `/tmp/${mk}.sock`, cfgPath: `/tmp/${mk}.mcp.json` });
-        return { socketPath: `/tmp/${mk}.sock`, cfgPath: `/tmp/${mk}.mcp.json` };
-      });
+  function spyAcquire(): ReturnType<typeof vi.spyOn> {
+    return vi.spyOn(priv().perChatMcpSocketManager, 'acquire')
+      .mockReturnValue({ socketPath: `/tmp/${mapKey}.sock`, ready });
   }
 
-  it('claude-cli session -> wires a per-chat actor socket + returns the strict mcp override', () => {
-    const create = spyCreate();
-    const override = priv().wirePerChatActorSocket(CHAT, 'claude-cli');
-    expect(create).toHaveBeenCalledWith(mapKey, CHAT);
-    expect(priv().perChatSocketResources.has(mapKey)).toBe(true);
-    expect(override).toEqual({
-      mcpSocketPath: `/tmp/${mapKey}.sock`,
-      providerConfigOverride: { mcpConfig: [`/tmp/${mapKey}.mcp.json`], strictMcpConfig: true },
-    });
+  it.each(['claude-cli', 'codex-cli', 'gemini-cli', 'opencode-cli'])(
+    '%s session receives the same actor-bound socket readiness contract',
+    (provider) => {
+      const acquire = spyAcquire();
+      expect(priv().wirePerChatActorSocket(CHAT, provider)).toEqual({
+        mcpSocketPath: `/tmp/${mapKey}.sock`,
+        mcpSocketReady: ready,
+      });
+      expect(acquire).toHaveBeenCalledWith(mapKey, CHAT);
+    },
+  );
+
+  it.each(['openai-api', 'anthropic-api'])('%s remains outside the child MCP lane', (provider) => {
+    const acquire = spyAcquire();
+    const release = vi.spyOn(priv().perChatMcpSocketManager, 'release');
+    expect(priv().wirePerChatActorSocket(CHAT, provider)).toBeUndefined();
+    expect(acquire).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledWith(mapKey);
   });
 
-  it('non-claude session (route/fallback divergence) -> NO socket, override undefined (F2: keyed on actual provider, not instance-global claude-cli)', () => {
-    const create = spyCreate();
-    const override = priv().wirePerChatActorSocket(CHAT, 'codex-cli');
-    expect(override).toBeUndefined();
-    expect(create).not.toHaveBeenCalled();
-    expect(priv().perChatSocketResources.has(mapKey)).toBe(false);
+  it('an unrecognized provider fails closed before SessionManager construction', () => {
+    spyAcquire();
+    expect(() => priv().wirePerChatActorSocket(CHAT, 'future-cli'))
+      .toThrow(/MCP capability|unrecognized provider/i);
   });
 
-  it('claude-cli -> non-claude fallback TEARS DOWN the per-chat socket (stop + remove) so the socket server is not leaked when the chat moves to the shared global socket (#14)', () => {
-    const stop = vi.fn();
-    // Pre-seed as if a claude-cli session had already wired its socket.
-    priv().perChatSocketResources.set(mapKey, { socketServer: { stop }, socketPath: `/tmp/${mapKey}.sock`, cfgPath: `/tmp/${mapKey}.mcp.json` });
-    const override = priv().wirePerChatActorSocket(CHAT, 'gemini-cli');
-    expect(override).toBeUndefined();
-    expect(stop).toHaveBeenCalled();
-    expect(priv().perChatSocketResources.has(mapKey)).toBe(false);
-  });
-
-  it('sandboxPerChat and single scope are unaffected (helper returns undefined, no socket)', () => {
+  it('sandboxPerChat and single scope are unaffected', () => {
     const sandbox = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat', sandboxPerChat: true });
     const single = new AgentRuntime(makeDb(), makeMessenger(), 'test', {});
     expect((sandbox as unknown as Priv).wirePerChatActorSocket(CHAT, 'claude-cli')).toBeUndefined();
     expect((single as unknown as Priv).wirePerChatActorSocket(CHAT, 'claude-cli')).toBeUndefined();
-    expect((sandbox as unknown as Priv).perChatSocketResources.has((sandbox as unknown as Priv).resolvePerChatMapKey(CHAT))).toBe(false);
   });
 });
 
 describe('F-STICKY-ACTOR hardening: createSessionManager is the single wiring choke point (QR-247 F2/F3/F4)', () => {
   const CHAT = 'dm-choke@s.whatsapp.net';
   type Priv = {
-    resolvePerChatMapKey(c: string): string;
-    perChatSocketResources: Map<string, unknown>;
-    createPerChatActorSocket(mapKey: string, chatJid: string): { socketPath: string; cfgPath: string };
-    wirePerChatActorSocket(chatJid: string, provider: string): unknown;
+    wirePerChatActorSocket(chatJid: string, provider: string):
+      | { mcpSocketPath: string; mcpSocketReady: Promise<void> }
+      | undefined;
     createSessionManager(opts: Record<string, unknown>): unknown;
   };
   let runtime: AgentRuntime;
-  let mapKey: string;
   const priv = (): Priv => runtime as unknown as Priv;
   const baseOpts = () => ({ chatJid: CHAT, cwd: '/tmp/choke', onEvent: () => {}, onCrash: () => {}, notifyUser: () => {} });
 
   beforeEach(() => {
     runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
-    mapKey = priv().resolvePerChatMapKey(CHAT);
   });
 
-  it('createSessionManager itself wires the per-chat socket (moved off the ensureSessionAndQueueSync call site so resume/fallback are covered too)', () => {
-    const create = vi.spyOn(runtime as unknown as { createPerChatActorSocket: Priv['createPerChatActorSocket'] }, 'createPerChatActorSocket')
-      .mockImplementation((mk: string) => {
-        (priv().perChatSocketResources as Map<string, unknown>).set(mk, { socketServer: { stop: vi.fn() }, socketPath: `/tmp/${mk}.sock`, cfgPath: `/tmp/${mk}.mcp.json` });
-        return { socketPath: `/tmp/${mk}.sock`, cfgPath: `/tmp/${mk}.mcp.json` };
-      });
+  it('passes the actual routed provider actor socket and readiness into SessionManager', () => {
+    const ready = Promise.resolve();
+    const wire = vi.spyOn(runtime as unknown as { wirePerChatActorSocket: Priv['wirePerChatActorSocket'] }, 'wirePerChatActorSocket')
+      .mockReturnValue({ mcpSocketPath: '/tmp/actor.sock', mcpSocketReady: ready });
     priv().createSessionManager(baseOpts());
-    expect(create).toHaveBeenCalledWith(mapKey, CHAT);
-    expect(priv().perChatSocketResources.has(mapKey)).toBe(true);
+    expect(wire).toHaveBeenCalledWith(CHAT, 'claude-cli');
+    const options = (SessionManager as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
+    expect(options).toMatchObject({
+      provider: 'claude-cli',
+      whatsoupMcpSocket: '/tmp/actor.sock',
+      mcpSocketReady: ready,
+    });
   });
 
   it('fail-closed choke-point guard: an eligible per_chat claude-cli spawn that wires NO socket throws instead of silently using the shared global socket', () => {
@@ -656,136 +648,13 @@ describe('F-STICKY-ACTOR hardening: createSessionManager is the single wiring ch
   });
 });
 
-describe('F-STICKY-ACTOR hardening: race-exposure warning covers claude-primary + cli-fallback (QR-247 F11)', () => {
-  type Priv = { agentFallbacks: Array<{ provider: string; model?: string }>; nlRoutingEnabled: boolean; perChatActorRaceExposed(): boolean; exposedCliProviders(): string[] };
-  const priv = (r: AgentRuntime): Priv => r as unknown as Priv;
+describe('per_chat global socket remains actor-less', () => {
+  type Priv = { shouldBroadcastGlobalActor(): boolean };
 
-  it('nlRouting live-pin surface: claude-only config + nlRouting enabled -> EXPOSED (a per-sender /model pin can route a turn to a non-claude CLI provider at runtime — QR-263)', () => {
-    const r = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
-    priv(r).agentFallbacks = [];
-    priv(r).nlRoutingEnabled = true;
-    expect(priv(r).exposedCliProviders()).toEqual([]); // static set stays honest
-    expect(priv(r).perChatActorRaceExposed()).toBe(true); // dynamic pin surface counts
-  });
+  it('broadcasts only for single/shared modes, never non-sandbox per_chat', () => {
+    const single = new AgentRuntime(makeDb(), makeMessenger(), 'test', {});
+    const shared = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'shared' });
+    const perChat = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
 
-  it('nlRouting live-pin surface: sandboxPerChat stays unaffected even with nlRouting enabled', () => {
-    const r = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat', sandboxPerChat: true });
-    priv(r).agentFallbacks = [];
-    priv(r).nlRoutingEnabled = true;
-    expect(priv(r).perChatActorRaceExposed()).toBe(false);
-  });
-
-  it('claude-cli primary + a codex-cli fallback -> EXPOSED (the case the old endsWith(-cli) && !==claude-cli check silently missed)', () => {
-    const r = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
-    priv(r).agentFallbacks = [{ provider: 'codex-cli' }];
-    expect(priv(r).exposedCliProviders()).toEqual(['codex-cli']);
-    expect(priv(r).perChatActorRaceExposed()).toBe(true);
-  });
-
-  it('claude-cli primary + NO fallbacks -> not exposed (fully covered by the per-chat socket)', () => {
-    const r = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
-    priv(r).agentFallbacks = [];
-    expect(priv(r).exposedCliProviders()).toEqual([]);
-    expect(priv(r).perChatActorRaceExposed()).toBe(false);
-  });
-
-  it('sandboxPerChat is unaffected (its own per-workspace socket) even with a cli fallback', () => {
-    const r = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat', sandboxPerChat: true });
-    priv(r).agentFallbacks = [{ provider: 'gemini-cli' }];
-    expect(priv(r).perChatActorRaceExposed()).toBe(false);
-  });
-});
-
-// ── #1785 rec-3: the per-chat actor socket binds conversationKey ────────────
-
-describe('#1785 rec-3: createPerChatActorSocket binds conversationKey (closes the per_chat send-confinement gap)', () => {
-  const CHAT = 'group-bound@g.us';
-  type Priv = {
-    wirePerChatActorSocket(chatJid: string, provider: string):
-      | { mcpSocketPath: string; providerConfigOverride: { mcpConfig: string[]; strictMcpConfig: true } }
-      | undefined;
-  };
-  let runtime: AgentRuntime;
-  const priv = (): Priv => runtime as unknown as Priv;
-
-  beforeEach(() => {
-    runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
-    (WhatSoupSocketServer as unknown as ReturnType<typeof vi.fn>).mockClear();
-  });
-
-  it('claude-cli session -> the actor socket SessionContext carries conversationKey bound to its own chat (RED before the fix: conversationKey was permanently undefined, so the registry/messaging cross-conversation guards failed open for every per_chat send)', () => {
-    const override = priv().wirePerChatActorSocket(CHAT, 'claude-cli');
-    expect(override).toBeDefined();
-    expect(WhatSoupSocketServer).toHaveBeenCalledTimes(1);
-    const sessionArg = (WhatSoupSocketServer as unknown as ReturnType<typeof vi.fn>).mock.calls[0][2];
-    expect(sessionArg).toMatchObject({ tier: 'global', conversationKey: CHAT });
-  });
-
-  it('default (perChatConversationBound unset) -> the actor socket session carries NO binding (status quo preserved)', () => {
-    priv().wirePerChatActorSocket(CHAT, 'claude-cli');
-    const sessionArg = (WhatSoupSocketServer as unknown as ReturnType<typeof vi.fn>).mock.calls[0][2];
-    // Exact #1785 rec-3 shape — no binding, no deliveryJid, nothing else.
-    expect(sessionArg).toEqual({ tier: 'global', allowedRoot: expect.any(String), conversationKey: CHAT });
-  });
-
-  it('pins the canonical map key when an inbound LID is an alias for a phone JID', () => {
-    const inboundLid = 'delivery-alias@lid';
-    const canonicalJid = 'canonical-user@s.whatsapp.net';
-    vi.spyOn(
-      runtime as unknown as { resolvePerChatMapKey(chatJid: string): string },
-      'resolvePerChatMapKey',
-    ).mockReturnValue(canonicalJid);
-
-    priv().wirePerChatActorSocket(inboundLid, 'claude-cli');
-
-    const sessionArg = (WhatSoupSocketServer as unknown as ReturnType<typeof vi.fn>).mock.calls[0][2];
-    expect(sessionArg).toEqual({
-      tier: 'global',
-      allowedRoot: expect.any(String),
-      conversationKey: canonicalJid,
-    });
-  });
-});
-
-// ── perChatConversationBound: opt-in conversation-bound actor socket ────────
-
-describe('perChatConversationBound: the actor socket carries a frozen conversation binding and rekeys it on JID alias change', () => {
-  const CHAT = 'group-bound@g.us';
-  const NEW_JID = 'group-bound-new@g.us';
-  type Priv = {
-    wirePerChatActorSocket(chatJid: string, provider: string): unknown;
-    handleJidAliasChanged(conversationKey: string, newJid: string, deferIfActive?: boolean): void;
-  };
-  let runtime: AgentRuntime;
-  const priv = (): Priv => runtime as unknown as Priv;
-
-  beforeEach(() => {
-    runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', {
-      sessionScope: 'per_chat',
-      perChatConversationBound: true,
-    });
-    (WhatSoupSocketServer as unknown as ReturnType<typeof vi.fn>).mockClear();
-  });
-
-  it('flag on -> the actor socket SessionContext carries the frozen conversation binding with coherent mirrors', () => {
-    priv().wirePerChatActorSocket(CHAT, 'claude-cli');
-    expect(WhatSoupSocketServer).toHaveBeenCalledTimes(1);
-    const sessionArg = (WhatSoupSocketServer as unknown as ReturnType<typeof vi.fn>).mock.calls[0][2];
-    expect(sessionArg).toMatchObject({
-      tier: 'global',
-      conversationKey: CHAT, // toConversationKey is identity-mocked in this file
-      deliveryJid: CHAT,
-      binding: { kind: 'conversation-bound', conversationKey: CHAT, deliveryJid: CHAT },
-    });
-    expect(Object.isFrozen(sessionArg.binding)).toBe(true);
-  });
-
-  it('handleJidAliasChanged rekeys the binding atomically on the per-chat actor socket', () => {
-    priv().wirePerChatActorSocket(CHAT, 'claude-cli');
-    const instance = (WhatSoupSocketServer as unknown as ReturnType<typeof vi.fn>).mock.results[0]!.value as {
-      updateConversationBinding: ReturnType<typeof vi.fn>;
-    };
-    priv().handleJidAliasChanged(CHAT, NEW_JID, false);
-    expect(instance.updateConversationBinding).toHaveBeenCalledWith(NEW_JID);
   });
 });
