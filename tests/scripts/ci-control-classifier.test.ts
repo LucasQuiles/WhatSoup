@@ -946,6 +946,14 @@ describe('classifier CLI', () => {
       expect(result.stderr).toBe('');
       expect(result.stdout).not.toContain(root);
     }
+
+    const human = invoke([
+      '--event', 'unsupported', '--candidate', baseOid, '--base', baseOid,
+      '--manifest-digest', manifestDigest,
+    ]);
+    expect(human.exitCode).toBe(2);
+    expect(human.stdout).toBe('');
+    expect(human.stderr).toContain('INCONCLUSIVE ci.input.event-invalid');
   });
 
   it('emits one terminal JSON result with the direct classifier exit code', () => {

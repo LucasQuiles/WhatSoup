@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { pathToFileURL } from 'node:url';
 
-import { isHelpFlag } from './lib/cli-args.ts';
+import { isHelpFlag, parseClosedOptions } from './lib/cli-args.ts';
 import {
   ControlManifestError,
   buildControlInventory,
@@ -41,32 +41,26 @@ function emitFailure(code: string, json: boolean, output: ManifestCliOutput): 2 
   return 2;
 }
 
-function parseArguments(args: readonly string[]):
-  | { help: true }
-  | { help: false; command: ManifestCommand; json: boolean }
-  | { error: string; json: boolean } {
-  if (args.length === 1 && isHelpFlag(args[0]!)) return { help: true };
-  const jsonCount = args.filter((arg) => arg === '--json').length;
-  const json = jsonCount > 0;
-  if (jsonCount > 1) return { error: 'ci.input.duplicate-option', json };
-  const command = args[0];
-  if (command !== 'validate' && command !== 'inventory') return { error: 'ci.input.command-invalid', json };
-  if (args.slice(1).some((arg) => arg !== '--json')) return { error: 'ci.input.option-unknown', json };
-  return { help: false, command, json };
-}
-
 export function runManifestCli(args: readonly string[], cwd: string, output: ManifestCliOutput): 0 | 2 {
-  const parsed = parseArguments(args);
-  if ('error' in parsed) return emitFailure(parsed.error, parsed.json, output);
-  if (parsed.help) {
+  if (args.length === 1 && isHelpFlag(args[0]!)) {
     output.stdout(USAGE);
     return 0;
   }
+  const json = args.includes('--json');
+  const command = args[0];
+  if (command !== 'validate' && command !== 'inventory') {
+    return emitFailure('ci.input.command-invalid', json, output);
+  }
+  const parsed = parseClosedOptions(args.slice(1), {
+    booleanOptions: ['--json'],
+    valueOptions: [],
+  });
+  if (parsed.error !== null) return emitFailure(parsed.error, json, output);
   try {
     const manifest = loadControlManifest(cwd);
-    if (parsed.command === 'inventory') {
+    if (command === 'inventory') {
       const inventory = buildControlInventory(manifest);
-      if (parsed.json) output.stdout(jsonLine(inventory));
+      if (json) output.stdout(jsonLine(inventory));
       else output.stdout(`PASS ci.manifest.inventory\nControls: ${inventory.controls.length}\nDigest: ${inventory.manifestDigest}\n`);
       return 0;
     }
@@ -77,12 +71,12 @@ export function runManifestCli(args: readonly string[], cwd: string, output: Man
       code: 'ci.manifest.valid',
       manifestDigest: digestControlManifest(manifest),
     };
-    if (parsed.json) output.stdout(jsonLine(result));
+    if (json) output.stdout(jsonLine(result));
     else output.stdout(`PASS ${result.code}\nDigest: ${result.manifestDigest}\n`);
     return 0;
   } catch (error) {
     const code = error instanceof ControlManifestError ? error.issue.code : 'ci.manifest.unavailable';
-    return emitFailure(code, parsed.json, output);
+    return emitFailure(code, json, output);
   }
 }
 

@@ -21,6 +21,7 @@ import {
   assertKnownFlag,
   isFlagToken,
   isHelpFlag,
+  parseClosedOptions,
   takeNumber,
   takeValue,
 } from '../../scripts/lib/cli-args.ts';
@@ -104,10 +105,40 @@ describe('isHelpFlag', () => {
   });
 });
 
+describe('parseClosedOptions', () => {
+  const schema = {
+    booleanOptions: ['--json'] as const,
+    valueOptions: ['--base', '--candidate'] as const,
+  };
+
+  it('parses only the declared boolean and value options', () => {
+    const parsed = parseClosedOptions(
+      ['--base', 'a'.repeat(40), '--json', '--candidate', 'b'.repeat(40)],
+      schema,
+    );
+    expect(parsed.error).toBeNull();
+    expect([...parsed.flags]).toEqual(['--json']);
+    expect([...parsed.values]).toEqual([
+      ['--base', 'a'.repeat(40)],
+      ['--candidate', 'b'.repeat(40)],
+    ]);
+  });
+
+  it.each([
+    [['--unknown'], 'ci.input.option-unknown'],
+    [['--json', '--json'], 'ci.input.duplicate-option'],
+    [['--base', 'one', '--base', 'two'], 'ci.input.duplicate-option'],
+    [['--base'], 'ci.input.option-value-missing'],
+    [['--base', '--json'], 'ci.input.option-value-missing'],
+  ] as const)('fails closed for %j', (args, code) => {
+    expect(parseClosedOptions(args, schema).error).toBe(code);
+  });
+});
+
 /**
  * Warn-level ratchet on hand-rolled parsers.
  *
- * 34 scripts define their own `parseArgs` or `parseArguments`. Rewriting all of them is a large, low-value,
+ * 32 scripts define their own `parseArgs` or `parseArguments`. Rewriting all of them is a large, low-value,
  * high-blast-radius change across many lanes, so this does NOT demand that. It pins the
  * count so the number cannot grow: existing debt is tolerated, new debt is blocked — the
  * same shape as the `arch.ssot-*` count ratchets.
@@ -115,10 +146,10 @@ describe('isHelpFlag', () => {
  * Lowering the baseline as scripts migrate is expected and the assertion says so.
  */
 describe('hand-rolled parseArgs ratchet', () => {
-  const HAND_ROLLED_PARSEARGS_BASELINE = 34;
+  const HAND_ROLLED_PARSEARGS_BASELINE = 32;
 
   const scriptsDefiningParseArgs = (): string[] =>
-    execFileSync('git', ['grep', '-E', '-l', 'function parse(Args|Arguments)', 'HEAD', '--', 'scripts/*.ts'], {
+    execFileSync('git', ['grep', '-E', '-l', 'function parse(Args|Arguments)', '--', 'scripts/*.ts'], {
       cwd: repoRoot,
       encoding: 'utf8',
       maxBuffer: 16 * 1024 * 1024,
