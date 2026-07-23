@@ -203,7 +203,11 @@ jobs:
       # verify:push:branch is bypassed by any server-side merge, which is exactly what
       # tests/scripts/pre-push-guard.test.ts caught when this shipped push-gate-only.
       - name: Baseline growth guard
-        run: npm run guard:baseline-growth -- --candidate "$GITHUB_SHA"
+        env:
+          BASELINE_BASE_OID: ${{ github.event_name == 'push' && github.event.before || github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: |
+          set -euo pipefail
+          npm run guard:baseline-growth -- --base "$BASELINE_BASE_OID" --candidate "$GITHUB_SHA"
 
       - name: Documentation drift guard
         run: npm run guard:doc-drift

@@ -154,7 +154,9 @@ describe('baseline growth guard — the red proof', () => {
 
   it('PASSES (exit 0) when a baseline is unchanged', () => {
     const dir = makeRepo(3);
-    const { status, out } = runGuard(['--repo', dir, '--base', 'HEAD']);
+    writeFileSync(join(dir, 'README.md'), 'unrelated candidate change\n');
+    commitCandidate(dir, 'leave baseline unchanged');
+    const { status, out } = runGuard(['--repo', dir, '--base', 'HEAD^']);
     expect(status, out).toBe(0);
   });
 
@@ -193,8 +195,10 @@ describe('baseline growth guard — the red proof', () => {
     );
     git(dir, ['add', '-A']);
     git(dir, ['commit', '-qm', 'wrong shape']);
+    writeFileSync(join(dir, 'README.md'), 'unrelated candidate change\n');
+    commitCandidate(dir, 'retain wrong shape');
 
-    const { status, out } = runGuard(['--repo', dir, '--base', 'HEAD']);
+    const { status, out } = runGuard(['--repo', dir, '--base', 'HEAD^']);
     expect(status, `expected INCONCLUSIVE, got ${status}.\n${out}`).toBe(2);
     expect(out, 'the broken baseline must be named').toMatch(/boundary-baseline\.json/);
     expect(out).toMatch(/could not be weighed|unwatched/);
@@ -218,6 +222,36 @@ describe('baseline growth guard — the red proof', () => {
     const { status, out } = runGuard(['--repo', dir, '--candidate', 'no-such-revision']);
     expect(status, out).toBe(2);
     expect(out).toMatch(/candidate revision/i);
+  });
+
+  it('is INCONCLUSIVE when the base equals the candidate', () => {
+    const dir = makeRepo(2);
+    const { status, out } = runGuard(['--repo', dir, '--base', 'HEAD', '--candidate', 'HEAD']);
+    expect(status, out).toBe(2);
+    expect(out).toMatch(/must differ/i);
+  });
+
+  it('is INCONCLUSIVE when the base is not an ancestor of the candidate', () => {
+    const dir = makeRepo(2);
+    const tree = git(dir, ['rev-parse', 'HEAD^{tree}']).trim();
+    const unrelated = git(dir, ['commit-tree', tree, '-m', 'unrelated root']).trim();
+    const { status, out } = runGuard([
+      '--repo',
+      dir,
+      '--base',
+      unrelated,
+      '--candidate',
+      'HEAD',
+    ]);
+    expect(status, out).toBe(2);
+    expect(out).toMatch(/not an ancestor/i);
+  });
+
+  it('is INCONCLUSIVE instead of self-comparing when the default base resolves to candidate', () => {
+    const dir = makeRepo(2);
+    const { status, out } = runGuard(['--repo', dir]);
+    expect(status, out).toBe(2);
+    expect(out).toMatch(/must differ/i);
   });
 
   it('refuses a flag-shaped candidate value instead of using it as a revision', () => {
@@ -282,7 +316,15 @@ describe('registry coverage — the scan cannot silently narrow', () => {
 describe('remote exact-revision wiring', () => {
   it('binds the blocking workflow step to the exact GitHub candidate OID', () => {
     const workflow = readFileSync(resolve(repoRoot, '.github/workflows/quality.yml'), 'utf8');
-    expect(workflow).toContain('npm run guard:baseline-growth -- --candidate "$GITHUB_SHA"');
+    expect(workflow).toContain('--candidate "$GITHUB_SHA"');
+  });
+
+  it('binds the base to the exact event predecessor for push, PR, and merge-group runs', () => {
+    const workflow = readFileSync(resolve(repoRoot, '.github/workflows/quality.yml'), 'utf8');
+    expect(workflow).toContain("github.event_name == 'push' && github.event.before");
+    expect(workflow).toContain("github.event_name == 'pull_request' && github.event.pull_request.base.sha");
+    expect(workflow).toContain('github.event.merge_group.base_sha');
+    expect(workflow).toContain('--base "$BASELINE_BASE_OID" --candidate "$GITHUB_SHA"');
   });
 });
 

@@ -124,6 +124,22 @@ function resolveBase(explicit: string | null, repoRoot: string, candidateOid: st
   return null;
 }
 
+function baseRelationError(baseOid: string, candidateOid: string, repoRoot: string): string | null {
+  if (baseOid === candidateOid) {
+    return 'base and candidate must differ; comparing a revision with itself cannot detect growth';
+  }
+  try {
+    execFileSync('git', ['merge-base', '--is-ancestor', baseOid, candidateOid], {
+      cwd: repoRoot,
+      env: cleanGitEnv(),
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    return null;
+  } catch {
+    return `base ${baseOid} is not an ancestor of candidate ${candidateOid}`;
+  }
+}
+
 /**
  * The three genuinely different answers to "how much does this baseline tolerate here?".
  *
@@ -199,6 +215,11 @@ function main(): number {
         'baseline growth cannot be ruled out. Fetch the base branch and re-run, or pass ' +
         '--base <rev> explicitly.',
     );
+    return EXIT_INCONCLUSIVE;
+  }
+  const relationError = baseRelationError(base, candidate, repoRoot);
+  if (relationError !== null) {
+    console.error(`FAIL(inconclusive): ${relationError}. Supply the exact trusted event base.`);
     return EXIT_INCONCLUSIVE;
   }
 
