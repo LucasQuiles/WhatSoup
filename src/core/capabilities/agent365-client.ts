@@ -118,7 +118,6 @@ export type Agent365SendOnceResult =
       | 'mail_send_not_ready'
       | 'mail_request_invalid'
       | 'mail_request_rejected'
-      | 'mail_operation_conflict'
       | 'backend_failed_pre_send';
   };
 
