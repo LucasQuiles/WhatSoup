@@ -9,6 +9,7 @@ import {
 } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { isRecord } from '../../src/lib/type-guards.ts';
 
 const MAX_RECORD_BYTES = 1024 * 1024;
 const PRIVATE_DIRECTORY_MODE = 0o700;
@@ -124,18 +125,22 @@ export const PRIVATE_OPERATION_EVIDENCE_REQUIREMENTS: Readonly<
     pre: { candidate_plist_valid: true },
     post: {
       launchd_processes: 1,
-      port_owners: 1,
-      socket_owners: 1,
+      expected_port_owners: 1,
+      global_socket_owners: 1,
       health_status: 'healthy',
       provider_usability: 'usable',
+      model_probe_in_flight: false,
     },
   },
   retire_quarantine_deliveries: {
     pre: {
       backup_present: true,
+      backup_mode: 384,
       backup_quick_check: 'pass',
       schema_hash: null,
       actionable_rows: null,
+      expected_pre_rows: null,
+      observed_pre_rows: null,
     },
     post: {
       actionable_rows: 0,
@@ -156,18 +161,31 @@ export const PRIVATE_OPERATION_EVIDENCE_REQUIREMENTS: Readonly<
     pre: { checks_planned: null },
     post: {
       launchd_processes: 1,
+      expected_port_owners: 1,
+      global_socket_owners: 1,
       health_status: 'healthy',
       whatsapp_status: 'connected',
       recent_disconnects: null,
+      recent_disconnect_threshold: null,
       provider_usability: 'usable',
+      model_probe_in_flight: false,
       sqlite_quick_check: 'pass',
+      sqlite_schema_version: null,
+      sqlite_schema_required: null,
       arc_status: 'loaded',
+      arc_consumer_match: true,
+      arc_payload_sha: null,
+      arc_canonical_sha: null,
       plaintext_plist_absent: true,
       private_modes_valid: true,
       turn_queue_halted: false,
       turn_queue_halted_scopes: 0,
       retired_rows: null,
       access_status: null,
+      tailscale_node_id_hash: null,
+      tailscale_hostname_hash: null,
+      tailscale_tags_hash: null,
+      tailscale_node_online: true,
       tailscale_expiry_disabled: true,
     },
   },
@@ -317,10 +335,6 @@ function issue(
   return { kind, path: jsonPath, ...definitions[kind] };
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
 function rfc3339Epoch(value: unknown): number | null {
   if (typeof value !== 'string') return null;
   const match = RFC3339_RE.exec(value);
@@ -445,7 +459,7 @@ function validateActionEvidence(
   stepPath: string,
   errors: PrivateOperationRecordError[],
 ): void {
-  if (status !== 'completed' && status !== 'aborted') return;
+  if (status !== 'completed' && status !== 'aborted' && status !== 'skipped') return;
   const requirement = PRIVATE_OPERATION_EVIDENCE_REQUIREMENTS[action];
   validateRequiredEvidence(
     preEvidence,
@@ -488,6 +502,7 @@ function validateActionEvidence(
     action === 'retire_quarantine_deliveries'
     && (
       preEvidence.actionable_rows !== targetIds.length
+      || preEvidence.expected_pre_rows !== preEvidence.observed_pre_rows
       || postEvidence.changed_rows !== targetIds.length
     )
   ) {
@@ -569,7 +584,11 @@ function validateStep(
     errors.push(issue('chronology_invalid', stepPath));
   }
 
-  const requiresEvidence = status === 'completed' || status === 'aborted';
+  if (status === 'skipped') {
+    errors.push(issue('state_invalid', `${stepPath}.status`));
+  }
+  const requiresEvidence =
+    status === 'completed' || status === 'aborted' || status === 'skipped';
   validateEvidence(value.pre_evidence, `${stepPath}.pre_evidence`, requiresEvidence, errors);
   validateEvidence(value.post_evidence, `${stepPath}.post_evidence`, requiresEvidence, errors);
   if (
@@ -588,7 +607,7 @@ function validateStep(
     );
   }
 
-  if (status === 'aborted') {
+  if (status === 'aborted' || status === 'skipped') {
     if (
       typeof value.reason_code !== 'string'
       || !(PRIVATE_OPERATION_ABORT_REASONS as readonly string[]).includes(value.reason_code)
@@ -619,7 +638,9 @@ function validateStepOrder(
     ) {
       errors.push(issue('state_invalid', `${stepPath}.status`));
     }
-    if (status === 'planned' || status === 'aborted') gateReached = true;
+    if (status === 'planned' || status === 'aborted' || status === 'skipped') {
+      gateReached = true;
+    }
 
     const startedAt = status === 'skipped' ? step.completed_at : step.started_at;
     const startedEpoch = rfc3339Epoch(startedAt);
@@ -635,6 +656,51 @@ function validateStepOrder(
       ));
     }
     if (completedEpoch !== null) lastTimestamp = completedEpoch;
+  }
+}
+
+function validateCrossStepEvidence(
+  steps: readonly unknown[],
+  errors: PrivateOperationRecordError[],
+): void {
+  const tailscale = isRecord(steps[0]) && isRecord(steps[0].post_evidence)
+    ? steps[0].post_evidence
+    : null;
+  const retirement = isRecord(steps[4]) ? steps[4] : null;
+  const acceptanceStep = isRecord(steps[6]) ? steps[6] : null;
+  const acceptance = acceptanceStep !== null && isRecord(acceptanceStep.post_evidence)
+    ? acceptanceStep.post_evidence
+    : null;
+  if (
+    tailscale === null
+    || retirement === null
+    || retirement.status !== 'completed'
+    || acceptance === null
+    || acceptanceStep?.status !== 'completed'
+  ) {
+    return;
+  }
+
+  const retirementTargets = Array.isArray(retirement.target_ids)
+    ? retirement.target_ids.length
+    : -1;
+  const invalid = [
+    acceptance.sqlite_schema_version !== acceptance.sqlite_schema_required,
+    acceptance.arc_payload_sha !== acceptance.arc_canonical_sha,
+    acceptance.retired_rows !== retirementTargets,
+    acceptance.tailscale_node_id_hash !== tailscale.node_id_hash,
+    acceptance.tailscale_hostname_hash !== tailscale.hostname_hash,
+    acceptance.tailscale_tags_hash !== tailscale.tags_hash,
+    typeof acceptance.recent_disconnects !== 'number',
+    typeof acceptance.recent_disconnect_threshold !== 'number',
+    (
+      typeof acceptance.recent_disconnects === 'number'
+      && typeof acceptance.recent_disconnect_threshold === 'number'
+      && acceptance.recent_disconnects >= acceptance.recent_disconnect_threshold
+    ),
+  ].some(Boolean);
+  if (invalid) {
+    errors.push(issue('evidence_invalid', '$.steps[6].post_evidence'));
   }
 }
 
@@ -663,7 +729,7 @@ export function validatePrivateOperationRecordValue(
   }
   if (
     typeof value.operator_identity !== 'string'
-    || !OPAQUE_ID_RE.test(value.operator_identity)
+    || !TARGET_ID_RE.test(value.operator_identity)
   ) {
     errors.push(issue('schema_invalid', '$.operator_identity'));
   }
@@ -679,6 +745,7 @@ export function validatePrivateOperationRecordValue(
     }
     steps.forEach((step, index) => validateStep(step, index, errors));
     validateStepOrder(steps, value.created_at, errors);
+    validateCrossStepEvidence(steps, errors);
   }
 
   if (errors.length > 0) {
@@ -852,23 +919,21 @@ function requiredEvidenceSchema(
   fields: EvidenceFields,
   enforceExpected = true,
 ): Record<string, unknown> {
-  const expected = enforceExpected
-    ? Object.entries(fields).filter((entry): entry is [string, EvidenceValue] =>
-        entry[1] !== null)
-    : [];
   return {
+    type: 'object',
     required: Object.keys(fields),
-    ...(expected.length === 0
-      ? {}
-      : { properties: Object.fromEntries(
-          expected.map(([key, value]) => [key, { const: value }]),
-        ) }),
+    properties: Object.fromEntries(
+      Object.entries(fields).map(([key, expected]) => [
+        key,
+        enforceExpected && expected !== null ? { const: expected } : {},
+      ]),
+    ),
   };
 }
 
 function actionEvidenceSchemaRule(
   action: PrivateOperationAction,
-  status: 'completed' | 'aborted',
+  status: 'completed' | 'aborted' | 'skipped',
 ): Record<string, unknown> {
   const requirement = PRIVATE_OPERATION_EVIDENCE_REQUIREMENTS[action];
   return {
@@ -883,7 +948,7 @@ function actionEvidenceSchemaRule(
           status === 'completed' ? requirement.post : { gate_status: 'fail' },
         ),
         ...(ACTIONS_REQUIRING_TARGET_IDS.has(action)
-          ? { target_ids: { minItems: 1 } }
+          ? { target_ids: { type: 'array', minItems: 1 } }
           : {}),
       },
     },
@@ -893,6 +958,7 @@ function actionEvidenceSchemaRule(
 const ACTION_EVIDENCE_SCHEMA_RULES = PRIVATE_OPERATION_ACTIONS.flatMap((action) => [
   actionEvidenceSchemaRule(action, 'completed'),
   actionEvidenceSchemaRule(action, 'aborted'),
+  actionEvidenceSchemaRule(action, 'skipped'),
 ]);
 
 function stepStatusSchemaRule(
@@ -900,15 +966,23 @@ function stepStatusSchemaRule(
 ): Record<string, unknown> {
   const planned = status === 'planned';
   const skipped = status === 'skipped';
-  const aborted = status === 'aborted';
+  const failed = status === 'aborted' || status === 'skipped';
   return {
     if: {
       properties: { status: { const: status } },
       required: ['status'],
     },
     then: {
-      ...(aborted ? { required: ['reason_code'] } : { not: { required: ['reason_code'] } }),
+      ...(failed
+        ? { required: ['reason_code'] }
+        : {
+            not: {
+              properties: { reason_code: {} },
+              required: ['reason_code'],
+            },
+          }),
       properties: {
+        reason_code: { enum: PRIVATE_OPERATION_ABORT_REASONS },
         started_at: planned || skipped ? { const: null } : RFC3339_SCHEMA,
         completed_at: planned ? { const: null } : RFC3339_SCHEMA,
       },
@@ -916,10 +990,50 @@ function stepStatusSchemaRule(
   };
 }
 
+const COMMON_STEP_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  allOf: [
+    ...PRIVATE_OPERATION_STEP_STATUSES.map(stepStatusSchemaRule),
+    ...ACTION_EVIDENCE_SCHEMA_RULES,
+    {
+      not: {
+        properties: { status: { const: 'skipped' } },
+        required: ['status'],
+      },
+    },
+  ],
+  required: [
+    'sequence',
+    'action',
+    'status',
+    'started_at',
+    'completed_at',
+    'target_ids',
+    'pre_evidence',
+    'post_evidence',
+  ],
+  properties: {
+    sequence: { type: 'integer', minimum: 1 },
+    action: { enum: PRIVATE_OPERATION_ACTIONS },
+    status: { enum: PRIVATE_OPERATION_STEP_STATUSES },
+    started_at: { anyOf: [RFC3339_SCHEMA, { type: 'null' }] },
+    completed_at: { anyOf: [RFC3339_SCHEMA, { type: 'null' }] },
+    target_ids: {
+      type: 'array',
+      uniqueItems: true,
+      items: { type: 'string', pattern: TARGET_ID_RE.source },
+    },
+    pre_evidence: STRUCTURED_EVIDENCE_SCHEMA,
+    post_evidence: STRUCTURED_EVIDENCE_SCHEMA,
+    reason_code: { enum: PRIVATE_OPERATION_ABORT_REASONS },
+  },
+} as const;
+
 export const PRIVATE_OPERATION_RECORD_SCHEMA = {
   $schema: 'https://json-schema.org/draft/2020-12/schema',
   $comment:
-    'Runtime semantic constraints additionally enforce calendar-valid RFC3339 values, consecutive sequence values, nondecreasing timestamps, completed/skipped prefix state, post-gate planned state, Tailscale identity continuity, retirement cardinality, and access identity equality. The schema requires each host action once in dependency order.',
+    'Runtime semantic constraints additionally enforce calendar-valid RFC3339 values, consecutive sequence values, nondecreasing timestamps, a completed prefix followed only by planned steps after an incomplete or aborted gate, invalid skipped statuses, Tailscale identity continuity, retirement cardinality, and access identity equality. The schema requires each host action once in dependency order.',
   type: 'object',
   additionalProperties: false,
   required: [
@@ -934,53 +1048,26 @@ export const PRIVATE_OPERATION_RECORD_SCHEMA = {
     schema_version: { const: 1 },
     run_id: { type: 'string', pattern: OPAQUE_ID_RE.source },
     created_at: RFC3339_SCHEMA,
-    operator_identity: { type: 'string', pattern: OPAQUE_ID_RE.source },
+    operator_identity: { type: 'string', pattern: TARGET_ID_RE.source },
     target_commit: { type: 'string', pattern: FULL_COMMIT_RE.source },
     steps: {
       type: 'array',
       minItems: PRIVATE_OPERATION_ACTIONS.length,
       maxItems: PRIVATE_OPERATION_ACTIONS.length,
-      prefixItems: PRIVATE_OPERATION_ACTIONS.map((action) => ({
-        properties: { action: { const: action } },
-        required: ['action'],
-      })),
-      items: {
-        type: 'object',
-        additionalProperties: false,
+      prefixItems: PRIVATE_OPERATION_ACTIONS.map((action, index) => ({
         allOf: [
-          ...PRIVATE_OPERATION_STEP_STATUSES.map(stepStatusSchemaRule),
-          ...ACTION_EVIDENCE_SCHEMA_RULES,
+          COMMON_STEP_SCHEMA,
+          {
+            type: 'object',
+            properties: {
+              action: { const: action },
+              sequence: { const: index + 1 },
+            },
+            required: ['action', 'sequence'],
+          },
         ],
-        required: [
-          'sequence',
-          'action',
-          'status',
-          'started_at',
-          'completed_at',
-          'target_ids',
-          'pre_evidence',
-          'post_evidence',
-        ],
-        properties: {
-          sequence: { type: 'integer', minimum: 1 },
-          action: { enum: PRIVATE_OPERATION_ACTIONS },
-          status: { enum: PRIVATE_OPERATION_STEP_STATUSES },
-          started_at: {
-            anyOf: [RFC3339_SCHEMA, { type: 'null' }],
-          },
-          completed_at: {
-            anyOf: [RFC3339_SCHEMA, { type: 'null' }],
-          },
-          target_ids: {
-            type: 'array',
-            uniqueItems: true,
-            items: { type: 'string', pattern: TARGET_ID_RE.source },
-          },
-          pre_evidence: STRUCTURED_EVIDENCE_SCHEMA,
-          post_evidence: STRUCTURED_EVIDENCE_SCHEMA,
-          reason_code: { enum: PRIVATE_OPERATION_ABORT_REASONS },
-        },
-      },
+      })),
+      items: false,
     },
   },
 } as const;

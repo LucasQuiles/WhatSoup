@@ -6,7 +6,7 @@ import {
   PRIVATE_OPERATION_RECORD_SCHEMA,
   validatePrivateOperationRecordFile,
   type PrivateOperationRecordError,
-} from '../src/lib/private-operation-record.ts';
+} from './lib/private-operation-record.ts';
 import { takeValue } from './lib/cli-args.ts';
 
 type ExitCode = 0 | 1 | 2;

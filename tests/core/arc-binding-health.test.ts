@@ -1,4 +1,10 @@
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  realpathSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -16,21 +22,26 @@ function repoWithArcToml(content: string): string {
 }
 
 describe('readArcBindingHealth', () => {
-  it('uses a trimmed non-empty explicit root before the working directory', () => {
+  it('accepts an explicit root only when its realpath matches the source-anchored checkout', () => {
+    const reviewedRoot = repoWithArcToml('');
+    const linkRoot = `${reviewedRoot}-link`;
+    symlinkSync(reviewedRoot, linkRoot);
+
     expect(resolveArcRepoRoot(
-      { WHATSOUP_REPO_ROOT: '  /reviewed/checkout  ' },
-      '/working/directory',
-    )).toBe('/reviewed/checkout');
+      { WHATSOUP_REPO_ROOT: `  ${linkRoot}  ` },
+      reviewedRoot,
+    )).toBe(realpathSync(reviewedRoot));
   });
 
-  it('uses the working directory when the explicit root is empty or whitespace', () => {
-    expect(resolveArcRepoRoot({ WHATSOUP_REPO_ROOT: '   ' }, '/working/directory'))
-      .toBe('/working/directory');
-    expect(resolveArcRepoRoot({}, '/working/directory')).toBe('/working/directory');
+  it('uses the source-anchored checkout rather than cwd when the explicit root is empty', () => {
+    const reviewedRoot = repoWithArcToml('');
+    expect(resolveArcRepoRoot({ WHATSOUP_REPO_ROOT: '   ' }, reviewedRoot))
+      .toBe(realpathSync(reviewedRoot));
+    expect(resolveArcRepoRoot({}, reviewedRoot)).toBe(realpathSync(reviewedRoot));
   });
 
-  it('does not fall back to a valid working-directory binding when an explicit root is missing', () => {
-    const workingRoot = repoWithArcToml([
+  it('fails closed when an explicit root does not match the source-anchored checkout', () => {
+    const reviewedRoot = repoWithArcToml([
       'arc_version = "0.1.0"',
       'consumer = "whatsoup"',
       'modules = []',
@@ -39,15 +50,16 @@ describe('readArcBindingHealth', () => {
       `payload_sha = "sha256:${'a'.repeat(64)}"`,
       '',
     ].join('\n'));
-    const missingExplicitRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup-arc-explicit-missing.'));
+    const otherRoot = repoWithArcToml('');
     const resolved = resolveArcRepoRoot(
-      { WHATSOUP_REPO_ROOT: missingExplicitRoot },
-      workingRoot,
+      { WHATSOUP_REPO_ROOT: otherRoot },
+      reviewedRoot,
     );
 
+    expect(resolved).toBeNull();
     expect(readArcBindingHealth(resolved)).toEqual({
       loaded: false,
-      reason: '.arc/arc.toml missing',
+      reason: 'repository root invalid',
     });
   });
 

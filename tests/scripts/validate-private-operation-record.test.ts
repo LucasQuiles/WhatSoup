@@ -2,15 +2,20 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { run } from '../../scripts/validate-private-operation-record.ts';
-import { PRIVATE_OPERATION_ACTIONS } from '../../src/lib/private-operation-record.ts';
+import {
+  PRIVATE_OPERATION_ACTIONS,
+  PRIVATE_OPERATION_RECORD_SCHEMA,
+} from '../../scripts/lib/private-operation-record.ts';
 
 const tempRoots: string[] = [];
 
@@ -130,26 +135,45 @@ describe('validate-private-operation-record CLI', () => {
               minItems: PRIVATE_OPERATION_ACTIONS.length,
               maxItems: PRIVATE_OPERATION_ACTIONS.length,
               prefixItems: expect.any(Array),
-              items: {
-                allOf: expect.any(Array),
-                properties: {
-                  pre_evidence: {
-                    additionalProperties: { oneOf: expect.any(Array) },
-                    propertyNames: { allOf: expect.any(Array) },
-                  },
-                  target_ids: {
-                    items: {
-                      pattern: expect.stringContaining('(?:\\d[._:-]*){7}'),
-                    },
-                  },
-                },
-              },
+              items: false,
             },
           },
         },
       },
     });
+    const schemas = result.output.schemas as Record<string, unknown>;
+    const recordSchema = schemas.record as typeof PRIVATE_OPERATION_RECORD_SCHEMA;
+    const commonStep = recordSchema.properties.steps.prefixItems[0].allOf[0] as {
+      allOf: readonly unknown[];
+      properties: {
+        pre_evidence: Record<string, unknown>;
+        target_ids: { items: { pattern: string } };
+      };
+    };
+    expect(commonStep.allOf).toEqual(expect.any(Array));
+    expect(commonStep.properties.pre_evidence).toMatchObject({
+      additionalProperties: { oneOf: expect.any(Array) },
+      propertyNames: { allOf: expect.any(Array) },
+    });
+    expect(commonStep.properties.target_ids.items.pattern)
+      .toContain('(?:\\d[._:-]*){7}');
     expect(result.raw.trim().split('\n')).toHaveLength(1);
+  });
+
+  it('emits exactly one JSON object through the documented silent npm invocation', () => {
+    const result = spawnSync(
+      'npm',
+      ['--silent', 'run', 'validate-private-operation-record', '--', 'schema'],
+      { cwd: process.cwd(), encoding: 'utf8' },
+    );
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim().split('\n')).toHaveLength(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({ ok: true, command: 'schema' });
+    for (const file of ['docs/runbook.md', 'docs/public-surface.md']) {
+      expect(readFileSync(file, 'utf8')).toContain(
+        'npm --silent run validate-private-operation-record',
+      );
+    }
   });
 
   it('validates an absolute private record and emits exactly one JSON object', () => {

@@ -771,11 +771,11 @@ export function findPublicSurfaceDrift(
 }
 
 export function extractNpmScriptName(cell: string): string | null {
-  // Script column shape: `` `npm run <name>` ``
+  // Script column shape: `` `npm [--silent] run <name>` ``
   const ticked = cell.match(/`([^`]+)`/);
   const body = ticked ? ticked[1] : cell.trim();
   if (!body) return null;
-  const match = body.match(/^npm\s+run\s+([^\s]+)/);
+  const match = body.match(/^npm\s+(?:--silent\s+)?run\s+([^\s]+)/);
   return match ? match[1] ?? null : null;
 }
 

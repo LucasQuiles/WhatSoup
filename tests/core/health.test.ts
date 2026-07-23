@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createServer } from 'node:http';
 import { request } from 'node:http';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -314,35 +314,24 @@ describe('GET /health', () => {
     }
   });
 
-  it('surfaces safe ARC binding metadata from runtime health', async () => {
+  it('binds ARC health to the source checkout and rejects a different explicit root', async () => {
     const repoRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup-health-arc.'));
-    mkdirSync(path.join(repoRoot, '.arc'));
-    writeFileSync(path.join(repoRoot, '.arc', 'arc.toml'), [
-      'arc_version = "0.1.0"',
-      'consumer = "whatsoup"',
-      'modules = ["app-runtime", "telemetry", "verification"]',
-      'emits = ["verification-record"]',
-      '',
-      '[source]',
-      'binding = "bindings/whatsoup.arc.json"',
-      `payload_sha = "sha256:${'b'.repeat(64)}"`,
-      'generated_by = "arc adopt"',
-      '',
-    ].join('\n'), 'utf8');
     const prev = process.env.WHATSOUP_REPO_ROOT;
     process.env.WHATSOUP_REPO_ROOT = repoRoot;
     try {
-      const { status, body } = await httpReq(port, '/health', 'GET');
-      expect(status).toBe(200);
-      const json = JSON.parse(body);
-      expect(json.arc).toEqual({
+      const mismatch = await httpReq(port, '/health', 'GET');
+      expect(JSON.parse(mismatch.body).arc).toEqual({
+        loaded: false,
+        reason: 'repository root invalid',
+      });
+
+      delete process.env.WHATSOUP_REPO_ROOT;
+      const sourceAnchored = await httpReq(port, '/health', 'GET');
+      expect(sourceAnchored.status).toBe(200);
+      expect(JSON.parse(sourceAnchored.body).arc).toMatchObject({
         loaded: true,
         consumer: 'whatsoup',
-        arcVersion: '0.1.0',
-        modules: ['app-runtime', 'telemetry', 'verification'],
-        emits: ['verification-record'],
-        binding: 'bindings/whatsoup.arc.json',
-        payloadSha: `sha256:${'b'.repeat(64)}`,
+        payloadSha: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
       });
     } finally {
       if (prev === undefined) {
