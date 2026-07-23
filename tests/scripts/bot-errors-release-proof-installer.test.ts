@@ -6,7 +6,7 @@ import {
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const INSTALLER = join(process.cwd(), 'deploy/scripts/install-bot-errors-release-proof.sh');
 const SYNTH_HOST = 'rp-test-host';
@@ -41,15 +41,74 @@ function sha256(text: string): string {
   return createHash('sha256').update(text).digest('hex');
 }
 
+/**
+ * TWO bounds, deliberately paired, because each alone was measured to be insufficient.
+ *
+ * Every test here drives the real installer through `spawnSync`, so the cost is subprocess
+ * and filesystem work — essential, not something the suite could compute faster. Two
+ * distinct things can go wrong: the child is SLOW (finite, but slower than a budget), or
+ * the child HANGS (never returns). They need different mechanisms.
+ *
+ * Measurement 1 — a vitest timeout cannot PREEMPT a synchronous child. Same file, budget
+ * on and off:
+ *
+ *   await setTimeout(12s)       -> fails at 10004ms; preempted by the test budget.
+ *   spawnSync('sleep',['12'])   -> fails at 12009ms; ran to completion, judged afterwards.
+ *
+ * That is why a bare `vi.setConfig({ testTimeout: 60_000 })` was reverted as an
+ * "ineffective timeout override". The mechanism objection was CORRECT: it does nothing
+ * about a hang. It is not, however, useless — it is the only thing that stops a
+ * slow-but-finite child from failing the suite, which was the original flake (11 tests at
+ * 2.1–2.9s against a 10s default, on runners several times slower).
+ *
+ * Measurement 2 — a child bound only helps if it fires BEFORE the test budget:
+ *
+ *   child timeout 3s  (below the 10s default) -> PASSES; the hang is caught at the child
+ *                                                with an explanatory message.
+ *   child timeout 15s (above the 10s default) -> FAILS at 15003ms with vitest's generic
+ *                                                "Test timed out in 10000ms"; the child-level
+ *                                                message never surfaces.
+ *
+ * So a child bound set above the test budget is useless for diagnosis, and a test budget
+ * without a child bound is useless against hangs. Set together, with the child bound
+ * strictly inside the test budget, they cover both:
+ *
+ *   slow child (e.g. 20s under CI load) -> under both bounds; passes. Flake fixed.
+ *   hung child                          -> killed at 45s, reported as a HANG by
+ *                                          assertNotTimedOut, comfortably inside the 60s
+ *                                          test budget. Hang fixed, and diagnosable.
+ */
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
+
+/** Must stay strictly below the testTimeout above — see Measurement 2. */
+const CHILD_TIMEOUT_MS = 45_000;
+
+/**
+ * A timed-out `spawnSync` returns `error` set and `status === null`, which is easy to
+ * misread as an ordinary non-zero exit. Callers must be able to tell "the installer
+ * rejected this" from "the installer never finished", so name it explicitly.
+ */
+function assertNotTimedOut(label: string, result: ReturnType<typeof spawnSync>): void {
+  const err = result.error as (NodeJS.ErrnoException & { code?: string }) | undefined;
+  if (err?.code === 'ETIMEDOUT' || (result.error && result.status === null)) {
+    throw new Error(
+      `${label} did not finish within ${CHILD_TIMEOUT_MS}ms and was killed (signal=${String(result.signal)}). ` +
+        'This is a HANG, not a failing assertion — do not raise the budget without finding out why it hung.',
+    );
+  }
+}
+
 function fixtureGit(root: string, args: string[]): string {
   const result = spawnSync('git', ['-C', root, ...args], {
     encoding: 'utf8',
+    timeout: CHILD_TIMEOUT_MS,
     env: {
       ...process.env,
       GIT_CONFIG_GLOBAL: '/dev/null',
       GIT_CONFIG_SYSTEM: '/dev/null',
     },
   });
+  assertNotTimedOut(`fixture git ${args.join(' ')}`, result);
   if (result.status !== 0) {
     throw new Error(`fixture git ${args.join(' ')} failed: ${result.stderr}`);
   }
@@ -148,8 +207,9 @@ function makeFixture(): Fixture {
 }
 
 function runInstaller(fx: Fixture, args: string[], extraEnv: Record<string, string> = {}) {
-  return spawnSync('bash', [INSTALLER, ...args], {
+  const result = spawnSync('bash', [INSTALLER, ...args], {
     encoding: 'utf8',
+    timeout: CHILD_TIMEOUT_MS,
     env: {
       ...process.env,
       HOME: fx.home,
@@ -161,6 +221,10 @@ function runInstaller(fx: Fixture, args: string[], extraEnv: Record<string, stri
       ...extraEnv,
     },
   });
+  // Tests assert on `status`; a timed-out child reports status null, which would otherwise
+  // read as an unexpected-but-plausible installer outcome rather than as a hang.
+  assertNotTimedOut(`installer ${args.join(' ')}`, result);
+  return result;
 }
 
 /** Recursive dir snapshot: sorted "relpath sha256(content)" lines; dirs as "relpath/ dir". */
