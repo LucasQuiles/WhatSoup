@@ -58,12 +58,15 @@ export function fallbackReconfirmationOutcome(
 export function savedPreferenceLine(
   pref: { intent: string; requestedProvider: string | null; requestedModel: string | null; modelPinVerified: boolean | null; expiresAt: number | null } | null,
   fallbackActive: boolean,
+  honoredWithinFallback = false,
   now = Date.now(),
 ): string {
   if (!pref) return 'Saved preference: none';
   const target = (pref.modelPinVerified === true ? pref.requestedModel : null) ?? pref.requestedProvider ?? pref.intent;
   const expiry = pref.expiresAt === null ? '' : ` (expires in ~${Math.max(1, Math.round((pref.expiresAt - now) / 3_600_000))}h)`;
-  return `Saved preference: ${target}${expiry}${fallbackActive ? ' — health fallback currently decides new sessions' : ' — steers new sessions'}`;
+  const effect = honoredWithinFallback ? ' — active within the health fallback provider' :
+    fallbackActive ? ' — health fallback currently decides new sessions' : ' — steers new sessions';
+  return `Saved preference: ${target}${expiry}${effect}`;
 }
 
 /**

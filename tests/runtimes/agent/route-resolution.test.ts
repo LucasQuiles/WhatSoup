@@ -2,7 +2,8 @@
  * Unit matrix for the pure route-resolution core (PR-plan v2 slice 2, B1).
  *
  * Contract under test — precedence, strict-pin semantics:
- *   1. active fallback window: health beats preference, visibly (source records it)
+ *   1. active fallback window: health selects the provider; an exact verified,
+ *      credentialed model pin may refine only that provider's model
  *   2. strict pin: eligible → pinned provider; ineligible → pin_blocked_default
  *      (NEVER the pinned provider via another route — zero silent-fallback paths)
  *   3. tier-mapped intent (strongest/fastest) via instance-config tier map;
@@ -12,7 +13,11 @@
  * intent classes it cannot map must leave the provider unchanged.
  */
 import { describe, it, expect } from 'vitest';
-import { resolveRoute, type RouteInputs } from '../../../src/runtimes/agent/route-resolution.ts';
+import {
+  isPinnedModelEligible,
+  resolveRoute,
+  type RouteInputs,
+} from '../../../src/runtimes/agent/route-resolution.ts';
 import type { ChatModelPreference } from '../../../src/runtimes/agent/chat-preference-db.ts';
 
 function pref(overrides: Partial<ChatModelPreference> = {}): ChatModelPreference {
@@ -40,6 +45,7 @@ function inputs(overrides: Partial<RouteInputs> = {}): RouteInputs {
     fallbackEntry: null,
     pref: null,
     pinnedProviderEligible: false,
+    pinnedModelEligible: false,
     tierMap: null,
     tierProviderEligible: false,
     // Empty by default: no test relies on a threaded model unless it opts in
@@ -69,6 +75,53 @@ describe('resolveRoute precedence', () => {
     expect(d).toEqual({
       provider: 'opencode-cli',
       model: 'glm-4.7',
+      source: 'fallback',
+      reasonCode: 'fallback_window_active',
+    });
+  });
+
+  it('keeps provider failover authoritative while honoring a verified eligible model pin on that provider', () => {
+    const d = resolveRoute(inputs({
+      fallbackEntry: { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
+      pref: pref({
+        intent: 'provider_specific',
+        requestedProvider: 'opencode-cli',
+        requestedModel: 'glm/glm-5.2',
+        validatedProvider: 'opencode-cli',
+        modelPinVerified: true,
+      }),
+      pinnedProviderEligible: true,
+      pinnedModelEligible: true,
+    }));
+    expect(d).toEqual({
+      provider: 'opencode-cli',
+      model: 'glm/glm-5.2',
+      source: 'fallback',
+      reasonCode: 'fallback_window_active_model_pin',
+    });
+  });
+
+  it.each<[string, Partial<ChatModelPreference>, boolean]>([
+    ['uncredentialed model', {}, false],
+    ['unverified model', { modelPinVerified: false }, true],
+    ['different provider', { requestedProvider: 'codex-cli', validatedProvider: 'codex-cli' }, true],
+  ])('does not let a %s displace the selected fallback model', (_label, prefChanges, pinnedModelEligible) => {
+    const d = resolveRoute(inputs({
+      fallbackEntry: { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
+      pref: pref({
+        intent: 'provider_specific',
+        requestedProvider: 'opencode-cli',
+        requestedModel: 'glm/glm-5.2',
+        validatedProvider: 'opencode-cli',
+        modelPinVerified: true,
+        ...prefChanges,
+      }),
+      pinnedProviderEligible: true,
+      pinnedModelEligible,
+    }));
+    expect(d).toEqual({
+      provider: 'opencode-cli',
+      model: 'kimi/kimi-k3',
       source: 'fallback',
       reasonCode: 'fallback_window_active',
     });
@@ -256,5 +309,37 @@ describe('resolveRoute precedence', () => {
     }));
     expect(d.provider).toBe('claude-cli');
     expect(d.source).toBe('tier_unconfigured_default');
+  });
+});
+
+describe('isPinnedModelEligible', () => {
+  const verifiedPin = pref({
+    intent: 'provider_specific',
+    requestedProvider: 'opencode-cli',
+    requestedModel: 'glm/glm-5.2',
+    validatedProvider: 'opencode-cli',
+    modelPinVerified: true,
+  });
+  const entries = [
+    { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
+    { provider: 'opencode-cli', model: 'glm/glm-5.2' },
+  ];
+
+  it('requires the exact configured entry to be credentialed', () => {
+    const checked: string[] = [];
+    expect(isPinnedModelEligible(verifiedPin, entries, (entry) => {
+      checked.push(entry.model ?? '');
+      return entry.model === 'glm/glm-5.2';
+    })).toBe(true);
+    expect(checked).toEqual(['glm/glm-5.2']);
+  });
+
+  it.each([
+    ['missing exact model', verifiedPin, entries.slice(0, 1), true],
+    ['missing credential', verifiedPin, entries, false],
+    ['unverified pin', { ...verifiedPin, modelPinVerified: false }, entries, true],
+    ['provider mismatch', { ...verifiedPin, validatedProvider: 'codex-cli' }, entries, true],
+  ])('rejects %s', (_label, candidate, configured, credentialed) => {
+    expect(isPinnedModelEligible(candidate, configured, () => credentialed)).toBe(false);
   });
 });
