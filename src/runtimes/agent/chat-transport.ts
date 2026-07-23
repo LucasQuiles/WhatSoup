@@ -39,7 +39,9 @@ export interface ChatTransportPort {
   readonly sandboxPerChat: boolean;
   readonly perChatConversationBound: boolean;
   readonly registry: ToolRegistry;
+  /** Live read, not a value captured at host-construction time — tests (and the /model-fallback surface) reassign this on the runtime after construction. */
   readonly agentFallbacks: AgentFallbackEntry[];
+  /** Live read, not a value captured at host-construction time — see agentFallbacks. */
   readonly nlRoutingEnabled: boolean;
   readonly shared: boolean;
   readonly instanceName: string;
@@ -57,6 +59,20 @@ export interface ChatTransportPort {
   >;
   readonly operationTrackers: Map<string, OperationTracker>;
   resolvePerChatMapKey(chatJid: string): string;
+  /**
+   * Sibling-call delegates. Each routes back through the runtime's own
+   * (spy-able) private method rather than calling the peer free function in
+   * this module directly — the original code reached these through `this.`,
+   * so a caller (test or otherwise) that mocks the runtime's method must
+   * still intercept the call. Only the functions actually called by another
+   * function in this module need an entry here.
+   */
+  resolveExecutingActor(chatJid: string): string | undefined;
+  derivePerChatSocketPath(chatJid: string): string;
+  teardownPerChatActorSocket(mapKey: string): void;
+  createPerChatActorSocket(mapKey: string, chatJid: string): { socketPath: string; cfgPath: string };
+  exposedCliProviders(): string[];
+  getQueueForChat(chatJid: string, mapKey?: string): IOutboundQueue | null;
 }
 
 export function resolveExecutingActor(port: ChatTransportPort, chatJid: string): string | undefined {
@@ -101,7 +117,7 @@ export function createPerChatActorSocket(
   mapKey: string,
   chatJid: string,
 ): { socketPath: string; cfgPath: string } {
-  const socketPath = derivePerChatSocketPath(port, chatJid);
+  const socketPath = port.derivePerChatSocketPath(chatJid);
   // Ensure <cwd>/.claude exists (mirrors the global-socket setup at startup). In
   // production the dir already exists; wiring now runs from more spawn paths
   // (resume / provider-fallback), so make socket creation self-sufficient.
@@ -113,7 +129,7 @@ export function createPerChatActorSocket(
     socketPath,
     port.registry,
     perChatActorSession(chatJid, port.cwd ?? homedir(), port.perChatConversationBound),
-    () => resolveExecutingActor(port, chatJid),
+    () => port.resolveExecutingActor(chatJid),
   );
   socketServer.start();
   port.perChatSocketResources.set(mapKey, { socketServer, socketPath, cfgPath });
@@ -141,13 +157,13 @@ export function wirePerChatActorSocket(
   if (port.sessionScope !== 'per_chat' || port.sandboxPerChat) return undefined;
   const mapKey = port.resolvePerChatMapKey(chatJid);
   if (provider !== 'claude-cli') {
-    teardownPerChatActorSocket(port, mapKey);
+    port.teardownPerChatActorSocket(mapKey);
     return undefined;
   }
   const existing = port.perChatSocketResources.get(mapKey);
   const { socketPath, cfgPath } = existing
     ? { socketPath: existing.socketPath, cfgPath: existing.cfgPath }
-    : createPerChatActorSocket(port, mapKey, chatJid);
+    : port.createPerChatActorSocket(mapKey, chatJid);
   return { mcpSocketPath: socketPath, providerConfigOverride: { mcpConfig: [cfgPath], strictMcpConfig: true } };
 }
 
@@ -175,7 +191,7 @@ export function exposedCliProviders(port: ChatTransportPort): string[] {
 /** F-STICKY-ACTOR (QR-247): true when a non-sandbox per_chat instance has ANY non-claude subprocess CLI provider on the shared global socket, so the concurrent-sender actor race is NOT closed for it. Covers the STATIC config surface (primary OR fallback) and — QR-263 — the DYNAMIC nlRouting surface (a live per-sender pin can select a non-claude CLI provider at runtime even when the static config is claude-only). Drives the honest startup warning (F11). */
 export function perChatActorRaceExposed(port: ChatTransportPort): boolean {
   if (port.sessionScope !== 'per_chat' || port.sandboxPerChat) return false;
-  return exposedCliProviders(port).length > 0 || port.nlRoutingEnabled;
+  return port.exposedCliProviders().length > 0 || port.nlRoutingEnabled;
 }
 
 export function findMapKeyForSession(
@@ -257,7 +273,7 @@ export function sendDirect(port: ChatTransportPort, chatJid: string, text: strin
     );
     return;
   }
-  const queue = getQueueForChat(port, chatJid);
+  const queue = port.getQueueForChat(chatJid);
   if (queue) {
     queue.enqueueText(text);
   } else {

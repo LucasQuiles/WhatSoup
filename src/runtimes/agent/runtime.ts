@@ -2551,27 +2551,39 @@ export class AgentRuntime implements Runtime {
    */
   private createChatTransportHost(): ChatTransportPort {
     const runtime = this;
+    // Every data field is a live getter, not a value/reference captured once
+    // here — several tests replace these (chatSessions/chatQueues/
+    // operationTrackers with Observed* wrapper Maps, agentFallbacks/
+    // nlRoutingEnabled by direct field assignment) on the runtime instance
+    // AFTER construction to observe mutations or set up scenarios. A captured
+    // reference would keep reading the pre-test-setup value.
     return {
-      cwd: runtime.cwd,
-      sessionScope: runtime.sessionScope,
-      sandboxPerChat: runtime.sandboxPerChat,
-      perChatConversationBound: runtime.perChatConversationBound,
-      registry: runtime.registry,
-      agentFallbacks: runtime.agentFallbacks,
-      nlRoutingEnabled: runtime.nlRoutingEnabled,
-      shared: runtime.shared,
-      instanceName: runtime.instanceName,
-      messenger: runtime.messenger,
+      get cwd() { return runtime.cwd; },
+      get sessionScope() { return runtime.sessionScope; },
+      get sandboxPerChat() { return runtime.sandboxPerChat; },
+      get perChatConversationBound() { return runtime.perChatConversationBound; },
+      get registry() { return runtime.registry; },
+      get agentFallbacks() { return runtime.agentFallbacks; },
+      get nlRoutingEnabled() { return runtime.nlRoutingEnabled; },
+      get shared() { return runtime.shared; },
+      get instanceName() { return runtime.instanceName; },
+      get messenger() { return runtime.messenger; },
       get effectiveProvider() { return runtime.effectiveProvider; },
       get queue() { return runtime.queue; },
       get operationTracker() { return runtime.operationTracker; },
-      chatSessions: runtime.chatSessions,
-      chatQueues: runtime.chatQueues,
-      outboundQueues: runtime.outboundQueues,
-      perChatExecActorQueue: runtime.perChatExecActorQueue,
-      perChatSocketResources: runtime.perChatSocketResources,
-      operationTrackers: runtime.operationTrackers,
+      get chatSessions() { return runtime.chatSessions; },
+      get chatQueues() { return runtime.chatQueues; },
+      get outboundQueues() { return runtime.outboundQueues; },
+      get perChatExecActorQueue() { return runtime.perChatExecActorQueue; },
+      get perChatSocketResources() { return runtime.perChatSocketResources; },
+      get operationTrackers() { return runtime.operationTrackers; },
       resolvePerChatMapKey: (chatJid) => runtime.resolvePerChatMapKey(chatJid),
+      resolveExecutingActor: (chatJid) => runtime.resolveExecutingActor(chatJid),
+      derivePerChatSocketPath: (chatJid) => runtime.derivePerChatSocketPath(chatJid),
+      teardownPerChatActorSocket: (mapKey) => runtime.teardownPerChatActorSocket(mapKey),
+      createPerChatActorSocket: (mapKey, chatJid) => runtime.createPerChatActorSocket(mapKey, chatJid),
+      exposedCliProviders: () => runtime.exposedCliProviders(),
+      getQueueForChat: (chatJid, mapKey) => runtime.getQueueForChat(chatJid, mapKey),
     };
   }
 
