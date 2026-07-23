@@ -179,4 +179,5 @@
   --settings-tok-gap: 10px;        /* token row gap (mockup .tok) */
   --settings-tok-pad-y: 5px;       /* token row vertical padding (mockup .tok) */
   --settings-acts-gap: 6px;        /* token actions gap (mockup .tok .acts) */
+  --settings-sub-mt: 1px;          /* row sub margin-top (mockup .row .sub) */
 }

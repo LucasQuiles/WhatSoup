@@ -63,6 +63,11 @@ vi.mock('../../console/src/pages/Inbox', () => ({
   default: () => <section aria-label="Inbox route"><h1>Inbox</h1></section>,
 }));
 
+// Settings graduated from the stub at T5 b-09: same landmark-shaped sentinel.
+vi.mock('../../console/src/pages/Settings', () => ({
+  default: () => <section aria-label="Settings route"><h1>Settings</h1></section>,
+}));
+
 vi.mock('../../console/src/pages/Operator', () => ({
   default: () => <section aria-label="Ops route"><h1>Ops</h1></section>,
 }));

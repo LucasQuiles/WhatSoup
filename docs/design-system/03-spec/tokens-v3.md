@@ -673,4 +673,4 @@ direct-edit controls, one danger area).
   travel}` (32×18px track, 14px knob/travel — shape-visible both states),
   `--settings-sw*` (52px swatch, 18px/10px bands), `--settings-nchan-*`,
   `--settings-opts-{minw,gap}` (120px fixed control zone), `--settings-tok-*`,
-  `--settings-acts-gap`.
+  `--settings-acts-gap`, `--settings-sub-mt` (row sub tuck).
