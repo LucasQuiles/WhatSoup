@@ -43,12 +43,42 @@ function makeBranchRepo(): string {
   return repo;
 }
 
+function makeEmptyRepo(): string {
+  const repo = mkdtempSync(join(tmpdir(), 'repo-hygiene-empty-'));
+  tempRepos.push(repo);
+  git(repo, ['init', '-b', 'main']);
+  git(repo, ['config', 'user.name', 'WhatSoup Guard']);
+  git(repo, ['config', 'user.email', 'guard@users.noreply.github.com']);
+  return repo;
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   for (const repo of tempRepos.splice(0)) {
     rmSync(repo, { recursive: true, force: true });
   }
   process.exitCode = undefined;
+});
+
+describe('repo hygiene guard — release-hygiene refuses a whole-tree scan of zero files', () => {
+  it('release-hygiene is INCONCLUSIVE (exit 2) when no release-hygiene file is tracked', () => {
+    // release-hygiene is git ls-files intersected with a fixed list; on an empty tree the
+    // intersection is empty and it printed "repo hygiene guard passed" having read nothing.
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    run(['--release-hygiene'], makeEmptyRepo());
+    expect(process.exitCode, 'a zero-file release-hygiene scan must not pass').toBe(2);
+    expect(error.mock.calls.flat().join(' ')).toMatch(/INCONCLUSIVE/i);
+    expect(log.mock.calls.flat().join(' ')).not.toMatch(/passed/i);
+  });
+
+  it('staged mode STILL PASSES (exit 0) on an empty index — diff-scope is exempt from the floor', () => {
+    // The mode gate: staged scans the diff, where an empty set is legitimately nothing. Only
+    // the whole-tree release-hygiene mode is floored; flooring staged would block clean commits.
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    run(['--staged'], makeEmptyRepo());
+    expect(process.exitCode ?? 0).toBe(0);
+  });
 });
 
 describe('repo hygiene guard', () => {

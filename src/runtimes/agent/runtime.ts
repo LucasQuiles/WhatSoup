@@ -107,7 +107,7 @@ import {
   type PreferenceIntent,
 } from './chat-preference-db.ts';
 import { preferenceKeys } from './preference-keys.ts';
-import { resolveRoute, type RouteDecision } from './route-resolution.ts';
+import { isPinnedModelEligible, resolveRoute, type RouteDecision } from './route-resolution.ts';
 import { decideModelPinResolution } from './config-surface.ts';
 import type { fetchAnthropicModelIdsWithStatus } from '../../lib/model-advisor.ts';
 import { deriveChatScope, emitRouteEvent, type ModelRouteEvent } from './route-events.ts';
@@ -8421,6 +8421,11 @@ export class AgentRuntime implements Runtime {
         fallbackEntry: this.effectiveFallbackEntry,
         pref,
         pinnedProviderEligible: pinned !== null && routable.includes(pinned),
+        pinnedModelEligible: isPinnedModelEligible(
+          pref,
+          this.agentFallbacks,
+          (entry) => this.isEntryCredentialed(entry),
+        ),
         tierMap: config.nlRoutingTiers,
         tierProviderEligible: tierProvider !== undefined && routable.includes(tierProvider),
         // Finding 2 fix: the same agentFallbacks entries that
@@ -8440,14 +8445,11 @@ export class AgentRuntime implements Runtime {
       // deliberate fail-open to the provider-level route already decided
       // above, not a bug: resolveRouteForTurn never fetches a catalogue or
       // persists (that is verifyModelPinAgainstCatalogue's job, at pin time).
-      // Gated on decision.source === 'preference' (not the looser
-      // `!== 'fallback'`): the model override may only apply when the route
-      // decision is ITSELF honoring the preference. 'fallback' means health
-      // beats preference — the operator's failover model must win, never
-      // the user's pin. 'pin_blocked_default' means the pin's provider was
-      // ineligible and we fell to the default provider — forcing the
-      // pinned model onto that unrelated default route would be wrong too,
-      // even if validatedProvider happens to coincide with it.
+      // Gated on decision.source === 'preference': the pure resolver already
+      // handles the narrower active-fallback case by requiring an exact
+      // configured, credentialed model on the health-selected provider.
+      // Applying this broader provider-match rule to fallback or
+      // pin_blocked_default decisions would bypass that stricter proof.
       if (pref?.requestedModel != null && decision.source === 'preference') {
         const modelPinDecision = decideModelPinResolution(
           { requestedModel: pref.requestedModel, validatedProvider: pref.validatedProvider, modelPinVerified: pref.modelPinVerified },
@@ -8963,7 +8965,11 @@ export class AgentRuntime implements Runtime {
     // verified (Task H honesty rule) — an unverified/deferred model pin
     // would otherwise claim to be serving a model that was never confirmed
     // to exist; it falls back to the provider/intent, same as before.
-    const prefLine = savedPreferenceLine(pref, this.isFallbackWindowActive);
+    const prefLine = savedPreferenceLine(
+      pref,
+      this.isFallbackWindowActive,
+      next.reasonCode === 'fallback_window_active_model_pin',
+    );
     // B25 F8: the active-window and Next lines were model-blind — a
     // same-provider window pinning a DIFFERENT model rendered without the
     // model and suppressed the Next line entirely. Render "provider (model)"

@@ -787,8 +787,11 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(menu).toContain('Reply `/model N` to switch to that one.');
     });
 
-    it('marks and acknowledges the effective fallback route instead of claiming the saved primary preference is current', async () => {
-      cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'haiku-fast' }];
+    it('acknowledges a verified exact model pin honored within the active fallback provider', async () => {
+      cfgAny().agentFallbacks = [
+        { provider: 'claude-cli', model: 'haiku-fast' },
+        { provider: 'claude-cli', model: 'claude-opus-4-8' },
+      ];
       const anthropicFn = vi.fn().mockResolvedValue({
         status: 'ok',
         ids: ['claude-opus-4-8', 'haiku-fast'],
@@ -815,13 +818,16 @@ describe('NL routing handlers (nlRouting flag)', () => {
         content: '/model 1',
         messageId: 'model-primary-during-fallback',
       }));
-      expect(allReplies(sentMessages).join('\n')).toContain(
-        'Saved claude-opus-4-8 as this chat\'s 24h preference. Health fallback is active; new sessions still use claude-cli (haiku-fast) until recovery.',
-      );
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('Now answering with claude-opus-4-8');
+      expect(reply).not.toContain('new sessions still use claude-cli (haiku-fast)');
     });
 
-    it('reconfirms a saved model as a preference without claiming it displaced the live fallback', async () => {
-      cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'haiku-fast' }];
+    it('reconfirms a verified exact model pin without falsely claiming fallback overrides it', async () => {
+      cfgAny().agentFallbacks = [
+        { provider: 'claude-cli', model: 'haiku-fast' },
+        { provider: 'claude-cli', model: 'claude-opus-4-8' },
+      ];
       const anthropicFn = vi.fn().mockResolvedValue({
         status: 'ok',
         ids: ['claude-opus-4-8', 'haiku-fast'],
@@ -842,9 +848,9 @@ describe('NL routing handlers (nlRouting flag)', () => {
       sentMessages.length = 0;
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'reconfirm-primary' }));
 
-      expect(allReplies(sentMessages).join('\n')).toContain(
-        'Saved preference remains claude-opus-4-8 (extended for 24h). Health fallback is active; new sessions still use claude-cli (haiku-fast) until recovery.',
-      );
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('Already set — extended for another 24h');
+      expect(reply).not.toContain('new sessions still use claude-cli (haiku-fast)');
     });
 
     it('keeps the live session marked active when fallback only controls the next session', async () => {
@@ -1100,16 +1106,11 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(status).toContain('Saved preference: exotic/model-x');
     });
 
-    it('a verified model pin does NOT override an active health failover (source=fallback), even when validatedProvider matches the fallback provider', async () => {
-      // resolveRoute's fallback branch returns EARLY on an active window
-      // ("health beats preference" — route-resolution.ts) with the
-      // OPERATOR-configured fallback model, before it ever reads pref. Task
-      // H's sync-consumption block only applies when `decision.source ===
-      // 'preference'` — during a fallback window `decision.source` is
-      // 'fallback', so the pin is never consulted, even if the user's
-      // verified pin happens to be validated against the SAME provider the
-      // fallback window selected. Health beats preference, full stop.
-      cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'claude-haiku-4-5' }];
+    it('a verified exact model pin refines an active health failover only within its selected provider', async () => {
+      cfgAny().agentFallbacks = [
+        { provider: 'claude-cli', model: 'claude-haiku-4-5' },
+        { provider: 'claude-cli', model: 'claude-sonnet-5' },
+      ];
       const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
       const prefMod = await import('../../../src/runtimes/agent/chat-preference-db.ts');
       const keysMod = await import('../../../src/runtimes/agent/preference-keys.ts');
@@ -1139,10 +1140,10 @@ describe('NL routing handlers (nlRouting flag)', () => {
       const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
       expect(status).toBeDefined();
       expect(status).toContain('Fallback: active');
-      // The fallback's operator-configured model wins — the verified pin
-      // (even same-provider) never bleeds into an active failover window.
-      expect(status).toContain('Model: claude-haiku-4-5');
-      expect(status).not.toContain('Model: claude-sonnet-5');
+      expect(status).toContain('Model: claude-sonnet-5');
+      expect(status).not.toContain('Model: claude-haiku-4-5');
+      expect(status).toContain('Saved preference: claude-sonnet-5');
+      expect(status).toContain('active within the health fallback provider');
     });
 
     it('a verified model pin does NOT leak onto a pin_blocked_default route, even when validatedProvider coincidentally matches the default provider', async () => {
