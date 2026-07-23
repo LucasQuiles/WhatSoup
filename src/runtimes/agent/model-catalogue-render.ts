@@ -155,6 +155,26 @@ export function fallbackProviderDescriptor(
 }
 
 /**
+ * The CONFIGURED (provider, model) pairs this instance carries: the primary
+ * (when a model is configured) plus every fallback entry that names a concrete
+ * model. The SINGLE gatherer of the pickable/selectable configured set — the
+ * `/model list` dynamic menu builds its pool from this (below), and the
+ * `/model <vendor/model>` direct selector resolves an explicit id against it
+ * (model-pin.ts). Both consuming the one list is the invariant that a direct
+ * pick can only ever name something the numbered menu could also show — kept
+ * true by construction, not by two hand-synced copies. Reads only
+ * ModelCatalogueRenderPort fields (no config import — ring-boundary discipline).
+ */
+export function configuredModelEntries(port: ModelCatalogueRenderPort): Array<{ provider: string; model: string }> {
+  const entries: Array<{ provider: string; model: string }> = [];
+  if (port.model !== undefined) entries.push({ provider: port.agentProvider, model: port.model });
+  for (const e of port.agentFallbacks) {
+    if (e.model !== undefined) entries.push({ provider: e.provider, model: e.model });
+  }
+  return entries;
+}
+
+/**
  * Send the DYNAMIC pickable model menu as the follow-up to the config-
  * derived `/model list` block (which the caller already delivered).
  * D6/D16/D17: the pickable set is the primary (if a model is configured)
@@ -189,11 +209,7 @@ export async function sendDynamicModelCatalogueSection(
   try {
     const { live, next } = port.loadRouteView(chatJid, senderJid);
     const active = displayedRoute(live, next);
-    const candidates: Array<{ provider: string; model: string }> = [];
-    if (port.model !== undefined) candidates.push({ provider: port.agentProvider, model: port.model });
-    for (const e of port.agentFallbacks) {
-      if (e.model !== undefined) candidates.push({ provider: e.provider, model: e.model });
-    }
+    const candidates = configuredModelEntries(port);
     const pool = filter
       ? candidates.filter((e) => e.model.toLowerCase().includes(filter.toLowerCase()))
       : candidates;

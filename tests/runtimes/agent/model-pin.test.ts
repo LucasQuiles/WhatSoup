@@ -1851,4 +1851,137 @@ describe('NL routing handlers (nlRouting flag)', () => {
     });
   });
 
+  // ── Slice 1: /model <vendor/model> direct selector ─────────────────────────
+  // The power-user one-step path — pin an EXACT configured model id without
+  // first walking the numbered menu. Resolves against the same configured
+  // (provider, model) set /model list enumerates and reuses the same
+  // record→verify→recycle→echo sink as /model N (pinConfiguredModelEntry), so
+  // pins are byte-identical to the numbered pick. The F07 routability gate is
+  // this path's own responsibility (the numbered snapshot only holds routable
+  // entries) — a configured-but-non-routable id must be rejected at SET time.
+  describe('configured model-id direct selection (Slice 1)', () => {
+    it('pins an exact configured model id in one step, verified, without a prior menu snapshot', async () => {
+      // opencode-cli as the PRIMARY (agentProvider) makes it unconditionally
+      // routable (isEntryCredentialed's same-provider shortcut) AND honored by
+      // resolveRouteForTurn, so the pin + recycle are deterministic with no
+      // keyring dependency; the cross-provider F07 gate is exercised below.
+      // A slash-bearing id is required — MODEL_ID_RE mandates the vendor/model
+      // shape (a slash-less claude model is not an explicit id).
+      cfgAny().agentProvider = 'opencode-cli';
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'glm/glm-5.2' }];
+      const listFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['kimi/kimi-k3', 'glm/glm-5.2'] });
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'kimi/kimi-k3', modelCatalogueListFn: listFn });
+      // A live session on the default route (opencode-cli/kimi-k3) so the new
+      // pin (opencode-cli/glm-5.2) is a genuine switch → recycled echo.
+      (mockSession as unknown as { getProviderId: ReturnType<typeof vi.fn> }).getProviderId.mockReturnValue('opencode-cli');
+      (mockSession as unknown as { getModelRef: ReturnType<typeof vi.fn> }).getModelRef.mockReturnValue('kimi/kimi-k3');
+      (runtime as unknown as { session: typeof mockSession; activeChatJid: string | null }).session = mockSession;
+      (runtime as unknown as { activeChatJid: string | null }).activeChatJid = CHAT;
+
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model glm/glm-5.2' }));
+
+      // Row shape is byte-identical to the C3 '/model N' HIT test — the shared
+      // pinConfiguredModelEntry sink means the selector and the numbered pick
+      // produce the same durable pin (convergence, proven by construction).
+      const rows = prefRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].intent).toBe('provider_specific');
+      expect(rows[0].requested_provider).toBe('opencode-cli');
+      expect(rows[0].requested_model).toBe('glm/glm-5.2');
+      expect(rows[0].validated_provider).toBe('opencode-cli');
+      expect(rows[0].model_pin_verified).toBe(1);
+      expect(listFn).toHaveBeenCalledTimes(1);
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('Now answering with glm/glm-5.2');
+      expect(reply).toContain('reply keep to make it permanent, /reset to undo');
+      // Not a reject, not a stale-defer.
+      expect(reply).not.toContain("isn't configured");
+      expect(reply).not.toContain("isn't available");
+      expect(reply).not.toContain('pending a catalogue check');
+    });
+
+    it('pins a credentialed NON-PRIMARY fallback model id — the F07 gate ACCEPT path (verified row written)', async () => {
+      // The realistic selector use the reject cases below and the happy-path
+      // above don't cover: the primary is claude-cli and the id names a
+      // CREDENTIALED non-primary FALLBACK (opencode-cli). The F07 gate must
+      // ADMIT it via routablePinTargets' credential resolution — NOT the
+      // same-provider shortcut the opencode-as-primary happy-path exercised.
+      // routablePinTargets does real per-model keyring I/O, so mock it to
+      // include opencode-cli (routable in prod; the test env lacks its
+      // per-model creds), mirroring the hybrid selector test. The row +
+      // verified bit are the deterministic gap-closer; the exact echo (recycle
+      // vs noop) depends on live-session state this test doesn't fix, so it's
+      // asserted only as "a success naming the model, never a reject".
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'glm/glm-5.2' }];
+      const listFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['glm/glm-5.2'] });
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueListFn: listFn });
+      (runtime as unknown as { routablePinTargets: () => string[] }).routablePinTargets = () => ['claude-cli', 'opencode-cli'];
+
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model glm/glm-5.2' }));
+
+      const rows = prefRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].requested_provider).toBe('opencode-cli');
+      expect(rows[0].requested_model).toBe('glm/glm-5.2');
+      expect(rows[0].validated_provider).toBe('opencode-cli');
+      expect(rows[0].model_pin_verified).toBe(1);
+      expect(listFn).toHaveBeenCalledTimes(1);
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('glm/glm-5.2');
+      expect(reply).not.toContain("isn't available");
+      expect(reply).not.toContain("isn't configured");
+      expect(reply).not.toContain('matches more than one');
+    });
+
+    it('rejects an unconfigured model id locally without writing a row or dispatching an agent turn', async () => {
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'glm/glm-5.2' }];
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model vendor/not-configured' }));
+
+      expect(prefRows()).toHaveLength(0);
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain("vendor/not-configured isn't configured on this instance");
+      expect(reply).toContain('/model list');
+    });
+
+    it('rejects an ambiguous configured model id instead of choosing a provider by array order', async () => {
+      cfgAny().agentFallbacks = [
+        { provider: 'opencode-cli', model: 'shared/model-x' },
+        { provider: 'codex-cli', model: 'shared/model-x' },
+      ];
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model shared/model-x' }));
+
+      expect(prefRows()).toHaveLength(0);
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('matches more than one configured route');
+      expect(reply).toContain('/model list');
+    });
+
+    it('rejects a configured-but-NON-ROUTABLE model id at SET time — F07 parity with /model <provider>, no row written', async () => {
+      // A model configured under a provider the instance can't honor (no
+      // credential): `/model <provider>` already rejects it at SET time (F07,
+      // see the uncredentialed-fallback test above); `/model <id>` MUST too, or
+      // the direct selector could pin a route that hard-fails or silently falls
+      // back. `absentService` mirrors the provider-id F07 test — no keychain
+      // dependency (the service is absent from every store → credential null).
+      const absentService = `wa-test-absent-${Math.random().toString(36).slice(2)}`;
+      cfgAny().agentProviderConfig = { apiKeyService: absentService };
+      cfgAny().agentFallbacks = [{ provider: 'anthropic-api', model: 'anthropic/claude-test-x' }];
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model anthropic/claude-test-x' }));
+
+      // The F07 invariant: no un-honorable pin is written at SET time.
+      expect(prefRows()).toHaveLength(0);
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain("isn't available on this instance");
+      expect(reply).toContain('/model list');
+      // Must NOT have reached the pin/defer tail (that echo would leak here).
+      expect(reply).not.toContain('pending a catalogue check');
+      expect(reply).not.toContain('Now answering with');
+    });
+  });
 });
