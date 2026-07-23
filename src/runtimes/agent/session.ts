@@ -56,6 +56,10 @@ import {
   buildOpenCodeRunArgs,
   opencodeUsesConfigModel,
 } from './providers/opencode-execution-profile.ts';
+import type {
+  ProviderExecutionGate,
+  ProviderExecutionLease,
+} from './provider-execution-gate.ts';
 
 const log = createChildLogger('session-manager');
 
@@ -188,6 +192,8 @@ export interface SessionManagerOptions {
   routingSystemBlock?: () => string | null;
   /** Egress proxy port (#1607) — forwarded into buildChildEnv's baseOpts so spawned children pick up HTTP_PROXY/HTTPS_PROXY. Undefined when the instance has no allowedEgress. */
   egressProxyPort?: number;
+  /** Shared process-lifetime gate for providers whose local state store is single-writer. */
+  providerExecutionGate?: ProviderExecutionGate;
 }
 
 /**
@@ -546,6 +552,7 @@ export class SessionManager {
   private readonly handoffSystemBlock: (() => string | null) | undefined;
   private readonly routingSystemBlock: (() => string | null) | undefined;
   private readonly egressProxyPort: number | undefined;
+  private readonly providerExecutionGate: ProviderExecutionGate | undefined;
 
   private systemPrompt: string = '';
 
@@ -625,6 +632,8 @@ export class SessionManager {
     SessionGenerationIdentity | null
   >();
   private readonly childTreeMarkers = new WeakMap<ReturnType<typeof spawn>, string>();
+  private readonly childExecutionLeases = new WeakMap<ReturnType<typeof spawn>, ProviderExecutionLease>();
+  private providerExecutionWaitAbort: AbortController | null = null;
   private readonly shutdownKillTimers = new Map<
     ReturnType<typeof spawn>,
     ShutdownKillTimerEntry
@@ -677,6 +686,7 @@ export class SessionManager {
     this.handoffSystemBlock = opts.handoffSystemBlock;
     this.routingSystemBlock = opts.routingSystemBlock;
     this.egressProxyPort = opts.egressProxyPort;
+    this.providerExecutionGate = opts.providerExecutionGate;
 
     // Initialize budget enforcement if configured
     const budgetConfig = opts.providerConfig?.budget as BudgetConfig | undefined;
@@ -1897,6 +1907,13 @@ export class SessionManager {
     this.pendingToolIds.clear();
   }
 
+  private releaseProviderExecutionLease(child: ReturnType<typeof spawn>): void {
+    const lease = this.childExecutionLeases.get(child);
+    if (!lease) return;
+    this.childExecutionLeases.delete(child);
+    lease.release();
+  }
+
   /**
    * Release the exact provider request owner after its terminal result has been
    * admitted, or after the owning provider has been proven dead.
@@ -2133,6 +2150,18 @@ export class SessionManager {
 
   /** Write a user message turn to the agent — via stdin (Claude) or spawn-per-turn (others). */
   async sendTurn(text: string): Promise<void> {
+    return this.sendTurnAtProviderBoundary(text);
+  }
+
+  /**
+   * Dispatch a turn and invoke the callback only at the exact provider boundary.
+   * The separate method preserves sendTurn's stable one-argument contract for
+   * callers that do not publish runtime ownership evidence.
+   */
+  async sendTurnAtProviderBoundary(
+    text: string,
+    onProviderBoundaryReady?: () => void,
+  ): Promise<void> {
     this.db.assertWritableCompatibility();
     if (!this.active) {
       throw new Error('No active session. Call spawnSession() first.');
@@ -2187,6 +2216,12 @@ export class SessionManager {
       const providerSession = this.managedProviderSession;
       const generationIdentity = this.managedProviderGeneration;
 
+      try {
+        onProviderBoundaryReady?.();
+      } catch (err) {
+        this.completeProviderTurn(providerTurnToken);
+        throw err;
+      }
       this.clearTurnWatchdog();
       this.armWatchdog(providerSession, generationIdentity);
       try {
@@ -2235,6 +2270,25 @@ export class SessionManager {
         this.openCodeParser.reset();
       }
 
+      let executionLease: ProviderExecutionLease | null = null;
+      if (this.provider === 'opencode-cli' && this.providerExecutionGate) {
+        const waitAbort = new AbortController();
+        this.providerExecutionWaitAbort = waitAbort;
+        try {
+          executionLease = await this.providerExecutionGate.acquire({ signal: waitAbort.signal });
+        } catch (err) {
+          this.completeProviderTurn(providerTurnToken);
+          throw err;
+        } finally {
+          if (this.providerExecutionWaitAbort === waitAbort) this.providerExecutionWaitAbort = null;
+        }
+        if (!this.active) {
+          executionLease.release();
+          this.completeProviderTurn(providerTurnToken);
+          throw new Error('PROVIDER_EXECUTION_WAIT_ABORTED: session ended before dispatch');
+        }
+      }
+
       // Spawn-per-turn providers: kill any existing process and spawn a new one
       // with the user prompt appended as a CLI argument.
       if (this.child) {
@@ -2242,6 +2296,7 @@ export class SessionManager {
         try {
           await this.killChildTree(child, 'SIGTERM');
         } catch (err) {
+          executionLease?.release();
           this.completeProviderTurn(providerTurnToken);
           log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap replaced provider process tree');
           throw new Error('Cannot replace provider while prior process-tree cleanup is inconclusive', {
@@ -2261,11 +2316,20 @@ export class SessionManager {
         binary = this.getProviderBinary();
         parse = this.getParser();
       } catch (err) {
+        executionLease?.release();
         this.completeProviderTurn(providerTurnToken);
         throw err;
       }
       let sawResult = false;
       let boundarySettled = false;
+
+      try {
+        onProviderBoundaryReady?.();
+      } catch (err) {
+        executionLease?.release();
+        this.completeProviderTurn(providerTurnToken);
+        throw err;
+      }
 
       const dispatchSpawnPerTurnEvent = (event: AgentEvent): void => {
         if (this.activeProviderTurnToken !== providerTurnToken) return;
@@ -2293,10 +2357,16 @@ export class SessionManager {
             ),
           });
         } catch (err) {
+          executionLease?.release();
           this.completeProviderTurn(providerTurnToken);
           throw err;
         }
       })();
+
+      if (executionLease) {
+        this.childExecutionLeases.set(child, executionLease);
+        executionLease = null;
+      }
 
       const childGeneration = this.resolveGenerationOwnership?.() ?? null;
       this.childGenerations.set(child, childGeneration);
@@ -2396,6 +2466,7 @@ export class SessionManager {
       // its stdio streams have closed. This makes the final unterminated record
       // part of the same atomic boundary decision.
       child.on('close', (code, signal) => {
+        this.releaseProviderExecutionLease(child);
         const superseded = this.child !== child;
         this.clearShutdownKillTimer(child, childGeneration);
         if (superseded) return;
@@ -2614,6 +2685,13 @@ export class SessionManager {
         throw new Error('Child process stdin is not available');
       }
 
+      try {
+        onProviderBoundaryReady?.();
+      } catch (err) {
+        this.completeProviderTurn(providerTurnToken);
+        throw err;
+      }
+
       let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
       try {
         await Promise.race([
@@ -2709,6 +2787,8 @@ export class SessionManager {
    *                  false = ended (user chose /new, not resumable).
    */
   async shutdown(suspend = true): Promise<void> {
+    this.providerExecutionWaitAbort?.abort();
+    this.providerExecutionWaitAbort = null;
     this.clearTurnWatchdog();
     this.clearStalledOpKill();
     this.active = false; // Suppress crash notification for clean shutdown

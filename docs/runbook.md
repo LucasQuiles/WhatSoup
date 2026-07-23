@@ -513,12 +513,33 @@ journalctl --user -u whatsoup@chat-bot -n 100 | grep -i enrich
 
 **Common causes for agent instances:**
 - Recent session crashes — check `durability.quarantinedOutbound` and `recentCrashCount` in the health JSON
+- Sustained OpenCode contention — inspect `runtime.agent.providerExecution`; `pressureActive=true` means a queued turn has waited at least 30 seconds
 
 On `agent_respawn_failed` / auto-respawn exhaustion, do not delete the session, queue, or
 checkpoint to force green health. The runtime marks that manager exhausted and defers destructive
 cleanup until the crashed turn's evidence reaches durable terminal state; a journaled turn with
 no immutable context is retained instead. Even after proof-gated cleanup, crash history remains
 degraded so the exhausted episode is not hidden.
+
+For `provider_execution_queue_pressure` or a crash classified
+`provider_state_locked`, correlate before intervening:
+
+```bash
+curl -s http://127.0.0.1:9091/health | python3 -c \
+  "import json,sys; print(json.load(sys.stdin)['runtime']['agent']['providerExecution'])"
+pgrep -af opencode
+journalctl --user -u whatsoup@chat-bot --since '-15 min' --no-pager | \
+  grep -E 'database is locked|LockTimeoutError|provider execution queue'
+```
+
+The runtime gate should keep its own OpenCode children single-flight. Do not kill
+an active process solely because it has non-zero RSS growth: confirm queue age,
+child activity, I/O wait, and lock errors. The warning self-clears only after the
+lane is idle. If multiple OpenCode processes remain, identify whether another
+WhatSoup service or an external command shares the same XDG data directory; the
+in-process gate cannot serialize those processes. Preserve the database and WAL
+for diagnosis. A timed-out `PRAGMA quick_check` is inconclusive, not proof of a
+healthy or corrupt database.
 
 ---
 
@@ -1351,6 +1372,7 @@ machine-readable disposition registry for sources that participate in fault clas
 | `outbound_flood` | `src/transport/connection.ts` | `src/core/health.ts`; correlate distinct sends, source inbound IDs, and echo state |
 | `bead_proposal_backlog` | `src/core/substrate/poller.ts` | Proposal state and `review_by_at`, not message volume |
 | `fallback_recovery_stalled` | `src/runtimes/agent/runtime.ts` | Persisted fallback window plus current primary-provider recovery probe |
+| `provider_execution_queue_pressure` | `src/runtimes/agent/provider-execution-gate.ts` and `src/runtimes/agent/runtime.ts` | `runtime.agent.providerExecution`, exact OpenCode child lifetimes, and external processes sharing the XDG data root; recovery requires an idle gate |
 | `agent_reply_guarantee_breach` | `src/runtimes/agent/turn-finalizer.ts` | Exact terminal record, inbound failure class, delivery proof, and continuity-candidate row |
 | `release-drift` | `scripts/live-release-drift-alert.ts` | Release manifest, artifact tree, and running service provenance |
 | `heartbeat-watchdog` | `deploy/scripts/bot-errors-heartbeat-watchdog.py` | Roster entry and current producer heartbeat; retired entries must not page |

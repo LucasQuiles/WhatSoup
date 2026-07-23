@@ -104,6 +104,8 @@ describe('provider crash diagnostics', () => {
     ['429 Too Many Requests', 'provider_rate_limit'],
     ['spawn claude ENOENT', 'provider_binary_missing'],
     ['Permission denied opening credential cache', 'provider_permission_denied'],
+    ['effect/sql/SqlError/LockTimeoutError: SQLiteError: database is locked', 'provider_state_locked'],
+    ['SQLite busy timeout while database remained locked', 'provider_state_locked'],
     ['ECONNRESET while reading stream', 'provider_network_error'],
     ['Gateway timeout from provider', 'provider_timeout'],
     ['Internal server error 500', 'provider_server_error'],
@@ -123,8 +125,18 @@ describe('provider crash diagnostics', () => {
     ['TypeError: x is undefined at line 503 of foo.ts'],
     ['request took 550 ms before crashing'],
     ['request took 550ms before crashing'],
+    ['provider account is locked pending verification'],
+    ['project workspace locked by another operation'],
   ])('does NOT classify %s as provider_server_error', (text) => {
     expect(classifyProviderCrash(text)).not.toBe('provider_server_error');
+  });
+
+  it.each([
+    ['provider account is locked pending verification'],
+    ['project workspace locked by another operation'],
+    ['database migration timed out without a lock error'],
+  ])('does NOT classify %s as provider_state_locked', (text) => {
+    expect(classifyProviderCrash(text)).not.toBe('provider_state_locked');
   });
 
   it('keeps the newest bounded stderr preview', () => {

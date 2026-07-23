@@ -84,6 +84,11 @@
       "owner": "deploy/scripts/bot-errors-health-check.py",
       "test": "tests/scripts/bot-errors-health-check.test.ts"
     },
+    "provider_execution_queue_pressure": {
+      "disposition": "warning_sustained_local_provider_contention",
+      "owner": "src/runtimes/agent/provider-execution-gate.ts",
+      "test": "tests/runtimes/agent/runtime.test.ts"
+    },
     "provider_probe_failed": {
       "disposition": "operator_recoverable",
       "owner": "deploy/scripts/bot-errors-health-check.py",
@@ -93,6 +98,11 @@
       "disposition": "time_or_operator_recoverable",
       "owner": "deploy/scripts/bot-errors-health-check.py",
       "test": "tests/scripts/bot-errors-health-check.test.ts"
+    },
+    "provider_state_locked": {
+      "disposition": "local_provider_state_contention",
+      "owner": "src/runtimes/agent/provider-crash-diagnostics.ts",
+      "test": "tests/runtimes/agent/provider-crash-diagnostics.test.ts"
     },
     "provider_timeout": {
       "disposition": "transient_or_operator_recoverable",

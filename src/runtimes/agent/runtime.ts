@@ -51,7 +51,7 @@ import {
   DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS,
   ReplyGuaranteeManager,
 } from '../../core/reply-guarantee.ts';
-import { emitAlertChecked, clearAlertSourceChecked } from '../../lib/emit-alert.ts';
+import { clearAlertSourceChecked, emitAlertChecked } from '../../lib/emit-alert.ts';
 import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
 import { resolveProviderCredentialState, isProviderRoutable, spawnFailureCredentialNote } from '../../lib/provider-credential-eligibility.ts';
 import { createChildLogger } from '../../logger.ts';
@@ -85,6 +85,8 @@ import {
   getProviderBinary,
   type SessionCrashInfo,
 } from './session.ts';
+import { createProviderExecutionGate, ProviderExecutionGate } from './provider-execution-gate.ts';
+import { dispatchProviderTurn } from './provider-boundary-dispatch.ts';
 import {
   OutboundQueue,
   type IOutboundQueue,
@@ -825,6 +827,7 @@ export class AgentRuntime implements Runtime {
    *  against what the user actually saw. Not wired to any consumer besides
    *  the /model list render + apply path added in this task. */
   private readonly catalogueSnapshot: CatalogueSnapshotCache;
+  private readonly providerExecutionGate: ProviderExecutionGate;
 
   // single mode: one session, one queue
   private session: SessionManager | null = null;
@@ -2390,6 +2393,7 @@ export class AgentRuntime implements Runtime {
     this.pollPersistence = new PendingPollPersistence(db);
     this.messenger = messenger;
     this.instanceName = instanceName ?? 'personal';
+    this.providerExecutionGate = createProviderExecutionGate(this.instanceName);
     this.runtimeTurnSupervisor = new RuntimeTurnSupervisor(
       this.instanceName,
       () => this.durability,
@@ -4756,36 +4760,29 @@ export class AgentRuntime implements Runtime {
       await stopCancelledSpawn();
       return;
     }
-    beforeUserSend?.();
-
-    // Publish the execution actor only when this exact request is ready to cross
-    // the provider boundary. Earlier placement leaked actors from cancelled or
-    // context-blocked sends. The one-flight SessionManager invariant makes this
-    // entry the provider request at FIFO HEAD.
     let actorPushed = false;
-    if (this.usesPerChatActorSocket() && effectiveMapKey !== undefined) {
-      if (!session.getStatus().active) this.perChatExecActorQueue.delete(effectiveMapKey);
-      const execQ = this.perChatExecActorQueue.get(effectiveMapKey) ?? [];
-      execQ.push(actorJid);
-      this.perChatExecActorQueue.set(effectiveMapKey, execQ);
-      actorPushed = true;
-      if (systemTurnLease) {
-        this.systemTurnExecActors.set(systemTurnLease.id, {
-          scopeKey: effectiveMapKey,
-          actorJid,
-        });
+    const onProviderBoundaryReady = (): void => {
+      beforeUserSend?.();
+      // Publish actor and typing evidence only when provider execution begins.
+      if (this.usesPerChatActorSocket() && effectiveMapKey !== undefined) {
+        if (!session.getStatus().active) this.perChatExecActorQueue.delete(effectiveMapKey);
+        const execQ = this.perChatExecActorQueue.get(effectiveMapKey) ?? [];
+        execQ.push(actorJid);
+        this.perChatExecActorQueue.set(effectiveMapKey, execQ);
+        actorPushed = true;
+        if (systemTurnLease) {
+          this.systemTurnExecActors.set(systemTurnLease.id, {
+            scopeKey: effectiveMapKey,
+            actorJid,
+          });
+        }
       }
-    }
-
-    // Assert typing immediately so the user sees the indicator while the agent thinks.
-    // Without this, there's a visible gap between message receipt and first tool call.
-    const queue = this.getQueueForChat(chatJid, effectiveMapKey);
-    if (queue) queue.indicateTyping();
-
+      const queue = this.getQueueForChat(chatJid, effectiveMapKey);
+      if (queue) queue.indicateTyping();
+    };
     try {
-      await session.sendTurn(
-        contextPreamble === null ? text : `${contextPreamble}\n\n[Current message]\n${text}`,
-      );
+      const turnText = contextPreamble === null ? text : `${contextPreamble}\n\n[Current message]\n${text}`;
+      await dispatchProviderTurn(session, turnText, onProviderBoundaryReady);
     } catch (err) {
       if (actorPushed && effectiveMapKey !== undefined) {
         this.removeFailedExecutingActor(effectiveMapKey, actorJid, systemTurnLease);
@@ -6988,6 +6985,7 @@ export class AgentRuntime implements Runtime {
 
   getHealthSnapshot(): RuntimeHealth {
     const fallbackState = this.getFallbackState();
+    const providerExecution = this.providerExecutionGate.snapshot();
     const finalizationHealth = this.runtimeTurnSupervisor.health();
     const recoveryHealth = this.getTurnRecoveryHealthDetails();
     const finalizationDegraded =
@@ -7029,6 +7027,7 @@ export class AgentRuntime implements Runtime {
       if (finalizationDegraded && healthStatus === 'healthy') {
         healthStatus = 'degraded';
       }
+      if (providerExecution.pressureActive && healthStatus === 'healthy') healthStatus = 'degraded';
       return {
         status: healthStatus,
         details: {
@@ -7051,6 +7050,7 @@ export class AgentRuntime implements Runtime {
             ),
           },
           unownedProviderEventRejects: this.unownedProviderEventRejects,
+          providerExecution,
           turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
           turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
           turnFinalizationRetryAttempts: finalizationHealth.retryAttempts,
@@ -7069,9 +7069,9 @@ export class AgentRuntime implements Runtime {
         ? 'degraded'
         : fallbackState.fallbackActiveUntil !== null
           ? 'degraded'
-          : finalizationDegraded
+          : finalizationDegraded || providerExecution.pressureActive
             ? 'degraded'
-          : 'healthy';
+            : 'healthy';
     return {
       status: healthStatus,
       details: {
@@ -7091,6 +7091,7 @@ export class AgentRuntime implements Runtime {
           ),
         },
         unownedProviderEventRejects: this.unownedProviderEventRejects,
+        providerExecution,
         turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
         turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
         turnFinalizationRetryAttempts: finalizationHealth.retryAttempts,
@@ -10317,9 +10318,7 @@ export class AgentRuntime implements Runtime {
       probeInFlight: true,
     };
 
-    const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, {
-      cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port,
-    });
+    const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port, providerExecutionGate: this.providerExecutionGate });
     void Promise.resolve()
       .then(() => probePrimaryModelUsability(target, adapters))
       .then((result) => this.recordPrimaryModelUsability(result, trigger))
@@ -10393,7 +10392,7 @@ export class AgentRuntime implements Runtime {
   private async probePrimaryProviderRecovered(): Promise<boolean> {
     const result = await probePrimaryModelUsability(
       { provider: this.agentProvider, model: this.model ?? null },
-      createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port }),
+      createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port, providerExecutionGate: this.providerExecutionGate }),
     );
     return result.status === 'usable';
   }
@@ -10435,7 +10434,7 @@ export class AgentRuntime implements Runtime {
         },
         runPrimaryModelUsability: () => probePrimaryModelUsability(
           { provider: this.agentProvider, model: this.model ?? null },
-          createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port }),
+          createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port, providerExecutionGate: this.providerExecutionGate }),
         ),
         runPrimaryRecoveryProbe: () => this.probePrimaryProviderRecovered(),
         accountAuthDeps: {
@@ -11026,6 +11025,7 @@ export class AgentRuntime implements Runtime {
       handoffSystemBlock: this.buildHandoffSystemBlock(conversationKey, route ? route.provider : this.effectiveProvider),
       routingSystemBlock: config.nlRouting ? () => this.buildRoutingContractBlock(route ? route.provider : this.effectiveProvider) : undefined,
       egressProxyPort: this.egressProxy?.port,
+      providerExecutionGate: this.providerExecutionGate,
     });
     this.sessionManagerIds.set(session, randomUUID());
     this.sessionEventToolScopes.set(

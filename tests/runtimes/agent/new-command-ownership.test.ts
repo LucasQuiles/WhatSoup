@@ -337,15 +337,17 @@ describe('per-chat /new ownership transition', () => {
       if (!initialQueue) throw new Error('real outbound queue was not created');
       const indicateTyping = vi.spyOn(initialQueue, 'indicateTyping');
       const routedTurns: Array<{ mapKey: string | null; text: string }> = [];
-      const realSendTurn = currentManager.sendTurn.bind(currentManager);
-      currentManager.sendTurn = async (text: string) => {
-        const activeMapKey = sessions.get(canonicalKey) === currentManager
-          ? canonicalKey
-          : sessions.get(lidKey) === currentManager
-            ? lidKey
-            : null;
-        routedTurns.push({ mapKey: activeMapKey, text });
-        await realSendTurn(text);
+      const realSendTurnAtProviderBoundary = currentManager.sendTurnAtProviderBoundary.bind(currentManager);
+      currentManager.sendTurnAtProviderBoundary = async (text: string, onReady?: () => void) => {
+        await realSendTurnAtProviderBoundary(text, () => {
+          const activeMapKey = sessions.get(canonicalKey) === currentManager
+            ? canonicalKey
+            : sessions.get(lidKey) === currentManager
+              ? lidKey
+              : null;
+          routedTurns.push({ mapKey: activeMapKey, text });
+          onReady?.();
+        });
         if (text.includes('[Recent chat context')) {
           void contextResultRelease.then(() => {
             (currentManager as any).onEvent({ type: 'result', text: null });
