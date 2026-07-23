@@ -495,16 +495,38 @@ describe('EnrichmentPoller', () => {
     expect(markMessagesProcessed).not.toHaveBeenCalled();
   });
 
-  it('does NOT mark messages as processed when DB fetch throws', async () => {
+  it('does NOT mark messages as processed when DB fetch throws, and records an enrichment_runs failure row instead of a silent skip', async () => {
     vi.mocked(getUnprocessedMessages).mockImplementation(() => {
       throw new Error('DB connection lost');
     });
 
-    const { poller } = makePoller();
+    const db = makeMockDb();
+    const { poller } = makePoller(db);
     await triggerOneCycle(poller); // should not throw
 
     expect(markMessagesProcessed).not.toHaveBeenCalled();
     expect(extractFacts).not.toHaveBeenCalled();
+
+    // Before this fix, a fetch failure logged and returned with zero rows
+    // written to enrichment_runs — a failed cycle was durably invisible.
+    // Now it must persist a terminal-failure row: error set (non-null,
+    // carrying the underlying message), completed_at set (via the same
+    // datetime('now') the success path uses), and messages_processed known
+    // at failure time (0 — nothing was fetched before the throw).
+    const insertCall = db._prepareFn.mock.calls.find(([sql]) =>
+      (sql as string).includes('INSERT INTO enrichment_runs'),
+    );
+    expect(insertCall?.[0]).toContain('error');
+    expect(insertCall?.[0]).toContain("datetime('now')");
+
+    expect(db._runFn).toHaveBeenCalledTimes(1);
+    const runArgs = db._runFn.mock.calls[0] as unknown[];
+    const errorArg = runArgs[runArgs.length - 1];
+    expect(typeof errorArg).toBe('string');
+    expect(errorArg).toContain('DB connection lost');
+    expect(runArgs).toContain(0); // messages_processed known at failure time
+
+    expect(poller.lastRunAt).not.toBeNull();
   });
 
   it('marks with error only after max retries (3), not before', async () => {
@@ -657,45 +679,6 @@ describe('EnrichmentPoller', () => {
       { err: runErr },
       'enrichment: failed to write enrichment_runs record',
     );
-    expect(poller.lastRunAt).not.toBeNull();
-  });
-
-  it('records an enrichment_runs row with a non-null error when cycle processing throws (not a silent skip)', async () => {
-    // Simulate an unanticipated bug that escapes every per-segment try/catch
-    // already in the cycle (extractFacts/validateFacts/enqueueFacts failures
-    // are all guarded) by poisoning a property read on the message itself —
-    // this throws inside the chat-grouping step, before any per-chat try
-    // block exists to catch it, which is exactly the "cycle blows up before
-    // reaching the success INSERT" gap this test targets.
-    const poisoned = makeStoredMsg({ pk: 999 });
-    Object.defineProperty(poisoned, 'chatJid', {
-      get() {
-        throw new Error('chatJid access exploded');
-      },
-    });
-    vi.mocked(getUnprocessedMessages).mockReturnValue([poisoned]);
-
-    const db = makeMockDb();
-    const { poller } = makePoller(db);
-    await triggerOneCycle(poller); // must not throw past runCycle
-
-    expect(db._prepareFn).toHaveBeenCalledWith(
-      expect.stringContaining('INSERT INTO enrichment_runs'),
-    );
-    const insertCall = db._prepareFn.mock.calls.find(([sql]) =>
-      (sql as string).includes('INSERT INTO enrichment_runs'),
-    );
-    expect(insertCall?.[0]).toContain('error');
-
-    expect(db._runFn).toHaveBeenCalledTimes(1);
-    const runArgs = db._runFn.mock.calls[0] as unknown[];
-    const errorArg = runArgs[runArgs.length - 1];
-    expect(typeof errorArg).toBe('string');
-    expect(errorArg).toContain('chatJid access exploded');
-
-    // No messages were successfully grouped/processed before the throw.
-    expect(runArgs).toContain(0);
-
     expect(poller.lastRunAt).not.toBeNull();
   });
 

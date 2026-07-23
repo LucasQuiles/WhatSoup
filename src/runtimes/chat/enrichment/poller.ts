@@ -79,31 +79,27 @@ export class EnrichmentPoller {
     const cycleStart = Date.now();
     const runId = process.env.MW_MIND_RUN_ID;
 
-    let messages: StoredMessage[];
-    try {
-      messages = getUnprocessedMessages(this.db, config.enrichmentBatchSize);
-    } catch (err) {
-      log.error({ err }, 'enrichment: failed to fetch unprocessed messages');
-      return;
-    }
-
-    if (messages.length === 0) return;
-
-    log.debug({ count: messages.length }, 'enrichment: processing messages');
-
     let totalExtracted = 0;
     let totalQueued = 0;
     const successPks: number[] = [];
     const failedPks: number[] = [];
 
-    // Every per-chat-segment failure below (extraction, validation, enqueue)
-    // is already caught and handled inline so the cycle can continue with
-    // the next chat. This outer try/catch is a safety net for anything that
-    // escapes that segment-level handling — e.g. a bug in the grouping or
-    // accounting logic itself — so a genuinely unanticipated throw still
-    // produces a durable enrichment_runs row instead of silently vanishing
-    // before reaching the success-path INSERT below.
+    // Everything from the message fetch through the success-path INSERT
+    // lives in one try/catch. Per-chat-segment failures below (extraction,
+    // validation, enqueue) already have their own inline handling so the
+    // cycle can continue with the next chat — this outer catch is what
+    // fires for anything that escapes ALL of that step-level handling
+    // (including the message fetch itself, which previously logged and
+    // returned with zero durable evidence on failure). Any such throw
+    // records a terminal-failure enrichment_runs row using whatever counts
+    // were known before the throw, instead of the cycle vanishing silently.
     try {
+      const messages = getUnprocessedMessages(this.db, config.enrichmentBatchSize);
+
+      if (messages.length === 0) return;
+
+      log.debug({ count: messages.length }, 'enrichment: processing messages');
+
       // Group by chatJid
       const byChat = new Map<string, StoredMessage[]>();
       for (const msg of messages) {
@@ -208,14 +204,44 @@ export class EnrichmentPoller {
       } catch (err) {
         log.error({ err }, 'enrichment: failed to mark messages with error');
       }
+
+      const messagesProcessed = successPks.length + failedPks.length;
+      const durationMs = Date.now() - cycleStart;
+
+      // Write to enrichment_runs table. `facts_upserted` is retained as the
+      // column name for wire-compatibility with existing metrics readers; the
+      // value now represents facts successfully queued for external export. It
+      // is not proof that a Pinecone upsert has happened.
+      try {
+        this.db.raw.prepare(`
+          INSERT INTO enrichment_runs (started_at, completed_at, messages_processed, facts_extracted, facts_upserted)
+          VALUES (?, datetime('now'), ?, ?, ?)
+        `).run(new Date(cycleStart).toISOString(), messagesProcessed, totalExtracted, totalQueued);
+      } catch (err) {
+        log.error({ err }, 'enrichment: failed to write enrichment_runs record');
+      }
+
+      log.info(
+        {
+          messagesProcessed,
+          factsExtracted: totalExtracted,
+          factsQueued: totalQueued,
+          durationMs,
+          ...(runId ? { runId } : {}),
+        },
+        'enrichment: cycle complete',
+      );
+
+      this.lastRunAt = new Date().toISOString();
     } catch (err) {
-      // Unexpected throw that escaped all of the above segment-level
-      // handling. Record a terminal-failure enrichment_runs row — using
-      // whatever counts were accumulated before the throw — instead of
-      // letting the cycle vanish with no evidence at all.
+      // Unexpected throw that escaped every step-level handler above —
+      // including a message-fetch failure, which is the realistic case:
+      // a DB error here used to just log and return with no durable
+      // evidence at all. Record a terminal-failure enrichment_runs row
+      // using whatever counts were accumulated before the throw.
       const messagesProcessedAtFailure = successPks.length + failedPks.length;
       const message = err instanceof Error ? err.message : String(err);
-      log.error({ err }, 'enrichment: cycle processing failed — recording failure run');
+      log.error({ err }, 'enrichment: cycle failed — recording failure run');
       try {
         this.db.raw.prepare(`
           INSERT INTO enrichment_runs (started_at, completed_at, messages_processed, facts_extracted, facts_upserted, error)
@@ -225,36 +251,6 @@ export class EnrichmentPoller {
         log.error({ err: writeErr }, 'enrichment: failed to write enrichment_runs failure record');
       }
       this.lastRunAt = new Date().toISOString();
-      return;
     }
-
-    const messagesProcessed = successPks.length + failedPks.length;
-    const durationMs = Date.now() - cycleStart;
-
-    // Write to enrichment_runs table. `facts_upserted` is retained as the
-    // column name for wire-compatibility with existing metrics readers; the
-    // value now represents facts successfully queued for external export. It
-    // is not proof that a Pinecone upsert has happened.
-    try {
-      this.db.raw.prepare(`
-        INSERT INTO enrichment_runs (started_at, completed_at, messages_processed, facts_extracted, facts_upserted)
-        VALUES (?, datetime('now'), ?, ?, ?)
-      `).run(new Date(cycleStart).toISOString(), messagesProcessed, totalExtracted, totalQueued);
-    } catch (err) {
-      log.error({ err }, 'enrichment: failed to write enrichment_runs record');
-    }
-
-    log.info(
-      {
-        messagesProcessed,
-        factsExtracted: totalExtracted,
-        factsQueued: totalQueued,
-        durationMs,
-        ...(runId ? { runId } : {}),
-      },
-      'enrichment: cycle complete',
-    );
-
-    this.lastRunAt = new Date().toISOString();
   }
 }
