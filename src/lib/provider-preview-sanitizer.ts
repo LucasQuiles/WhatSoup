@@ -54,7 +54,14 @@ const PRESERVABLE_MENTION = /^@(?:\+?\d{5,}|[A-Za-z][A-Za-z0-9._-]*)$/;
 // be recognized by the other (packet: "SHARE that regex ... so they cannot drift").
 const KNOWN_TOKEN_PREFIX = '(?:sk|pk|rk|ghp|github_pat|xox[baprs]|ya29|AIza)';
 const KNOWN_TOKEN_RE = new RegExp(`\\b${KNOWN_TOKEN_PREFIX}[-_A-Za-z0-9]{12,}\\b`, 'g');
+const KNOWN_TOKEN_SUFFIX_RE = new RegExp(`${KNOWN_TOKEN_PREFIX}[-_A-Za-z0-9]{12,}\\b`, 'g');
 const KNOWN_TOKEN_PREFIX_RE = new RegExp(`^${KNOWN_TOKEN_PREFIX}`);
+const BEARER_TOKEN_RE = /Bearer\s+[A-Za-z0-9._~+/=-]+/gi;
+const SECRET_KEY_TERMINAL_RE = /(?:token|secret|password|passphrase|api_?key)$/;
+const SECRET_KEY_BOUNDARY_SUFFIX =
+  '(?:private_?key|signing_?key|secret_?access_?key|cookie|credential|session|pat)';
+const SECRET_KEY_BOUNDARY_RE = new RegExp(`(?:^|_)${SECRET_KEY_BOUNDARY_SUFFIX}$`);
+const SECRET_KEY_SUFFIX_RE = new RegExp(`${SECRET_KEY_BOUNDARY_SUFFIX}$`);
 
 // T8-F3 (E4 fix): a value truncated for DISPLAY (backtick-wrapped, ending in an
 // ellipsis) has already destroyed whatever it previews — masking it protects
@@ -84,32 +91,70 @@ function isSecretKey(key: string): boolean {
     const suffixLength = normalized.length - match.index - match[0].length;
     if (prefixLength <= 20 && suffixLength <= 20) return true;
   }
-  return /(?:token|secret|password|passphrase|api_?key)$/.test(normalized)
-    || /(?:^|_)(?:private_?key|signing_?key|secret_?access_?key|cookie|credential|session|pat)$/.test(normalized);
+  return SECRET_KEY_TERMINAL_RE.test(normalized) || SECRET_KEY_BOUNDARY_RE.test(normalized);
 }
 
-function keyedValueStart(text: string, delimiterIndex: number): number | null {
+function secretKeySuffixStart(key: string): number | null {
+  const normalized = key.toLowerCase().replace(/[.-]+/g, '_');
+  const candidates: number[] = [];
+  const apiKeyMarker = /api_?key/g;
+  for (const match of normalized.matchAll(apiKeyMarker)) {
+    const suffixLength = normalized.length - match.index - match[0].length;
+    if (suffixLength <= 20) candidates.push(match.index);
+  }
+  for (const pattern of [SECRET_KEY_TERMINAL_RE, SECRET_KEY_SUFFIX_RE]) {
+    const match = pattern.exec(normalized);
+    if (match?.index !== undefined) candidates.push(match.index);
+  }
+  return candidates.length === 0 ? null : Math.min(...candidates);
+}
+
+interface KeyedValueStart {
+  readonly secretStart: number;
+  readonly valueStart: number;
+}
+
+function keyedValueStart(
+  text: string,
+  delimiterIndex: number,
+  allowSecretKeySuffix: boolean,
+): KeyedValueStart | null {
   let keyEnd = delimiterIndex;
   while (keyEnd > 0 && /\s/.test(text[keyEnd - 1]!)) keyEnd -= 1;
   let keyStart = keyEnd;
+  let usedSecretKeySuffix = false;
   const closingQuote = text[keyEnd - 1];
   if (closingQuote === '"' || closingQuote === "'") {
     let contentStart = keyEnd - 1;
     while (contentStart > 0 && /[A-Za-z0-9_.-]/.test(text[contentStart - 1]!)) contentStart -= 1;
     if (text[contentStart - 1] !== closingQuote) return null;
     keyStart = contentStart - 1;
-    if (!isSecretKey(text.slice(contentStart, keyEnd - 1))) return null;
+    const key = text.slice(contentStart, keyEnd - 1);
+    if (!isSecretKey(key)) {
+      const suffixStart = allowSecretKeySuffix ? secretKeySuffixStart(key) : null;
+      if (suffixStart === null) return null;
+      keyStart = contentStart + suffixStart;
+      usedSecretKeySuffix = true;
+    }
   } else {
     while (keyStart > 0 && /[A-Za-z0-9_.-]/.test(text[keyStart - 1]!)) keyStart -= 1;
-    if (keyStart === keyEnd || !isSecretKey(text.slice(keyStart, keyEnd))) return null;
+    if (keyStart === keyEnd) return null;
+    const key = text.slice(keyStart, keyEnd);
+    if (!isSecretKey(key)) {
+      const suffixStart = allowSecretKeySuffix ? secretKeySuffixStart(key) : null;
+      if (suffixStart === null) return null;
+      keyStart += suffixStart;
+      usedSecretKeySuffix = true;
+    }
   }
-  if (keyStart > 0 && /[A-Za-z0-9_]/.test(text[keyStart - 1]!)) return null;
+  if (!usedSecretKeySuffix && keyStart > 0 && /[A-Za-z0-9_]/.test(text[keyStart - 1]!)) return null;
   let valueStart = delimiterIndex + 1;
   while (valueStart < text.length && /\s/.test(text[valueStart]!)) valueStart += 1;
-  return valueStart;
+  return { secretStart: keyStart, valueStart };
 }
 
 interface KeyedSecretValue {
+  readonly secretStart: number;
   readonly valueStart: number;
   readonly valueEnd: number;
   readonly quote: '"' | "'" | null;
@@ -117,13 +162,14 @@ interface KeyedSecretValue {
   readonly redact: boolean;
 }
 
-function keyedSecretValues(text: string): KeyedSecretValue[] {
+function keyedSecretValues(text: string, allowSecretKeySuffix = false): KeyedSecretValue[] {
   const values: KeyedSecretValue[] = [];
   let consumedThrough = 0;
   for (const match of text.matchAll(ASSIGNMENT_DELIMITER)) {
     if (match.index < consumedThrough) continue;
-    const valueStart = keyedValueStart(text, match.index);
-    if (valueStart === null) continue;
+    const start = keyedValueStart(text, match.index, allowSecretKeySuffix);
+    if (start === null) continue;
+    const { secretStart, valueStart } = start;
     const opening = text[valueStart];
     if (opening === '"' || opening === "'") {
       let valueEnd = valueStart + 1;
@@ -137,6 +183,7 @@ function keyedSecretValues(text: string): KeyedSecretValue[] {
       }
       const closed = text[valueEnd] === opening;
       values.push({
+        secretStart,
         valueStart,
         valueEnd,
         quote: opening,
@@ -150,6 +197,7 @@ function keyedSecretValues(text: string): KeyedSecretValue[] {
     while (valueEnd < text.length && !/\s/.test(text[valueEnd]!)) valueEnd += 1;
     const value = text.slice(valueStart, valueEnd);
     values.push({
+      secretStart,
       valueStart,
       valueEnd,
       quote: null,
@@ -179,17 +227,60 @@ function redactKeyedSecretValues(text: string): string {
 }
 
 export function sanitizeProviderSecrets(text: string): string {
+  BEARER_TOKEN_RE.lastIndex = 0;
+  KNOWN_TOKEN_RE.lastIndex = 0;
   return redactKeyedSecretValues(text)
-    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
+    .replace(BEARER_TOKEN_RE, 'Bearer [REDACTED]')
     .replace(KNOWN_TOKEN_RE, '[REDACTED_TOKEN]');
+}
+
+interface ProviderSecretValueSpan {
+  readonly start: number;
+  readonly end: number;
+}
+
+function providerSecretValueSpans(
+  text: string,
+  allowSecretKeySuffix = false,
+): ProviderSecretValueSpan[] {
+  const spans: ProviderSecretValueSpan[] = [];
+  BEARER_TOKEN_RE.lastIndex = 0;
+  for (const match of text.matchAll(BEARER_TOKEN_RE)) {
+    if (match.index !== undefined) {
+      spans.push({ start: match.index, end: match.index + match[0].length });
+    }
+  }
+  const tokenPattern = allowSecretKeySuffix ? KNOWN_TOKEN_SUFFIX_RE : KNOWN_TOKEN_RE;
+  tokenPattern.lastIndex = 0;
+  for (const match of text.matchAll(tokenPattern)) {
+    if (match.index !== undefined) {
+      spans.push({ start: match.index, end: match.index + match[0].length });
+    }
+  }
+  for (const value of keyedSecretValues(text, allowSecretKeySuffix)) {
+    if (!value.redact) continue;
+    spans.push({
+      start: value.secretStart,
+      end: value.closed ? value.valueEnd + 1 : value.valueEnd,
+    });
+  }
+  return spans;
 }
 
 /** Secret-only predicate for fail-closed provider boundaries. */
 export function containsProviderSecretValue(text: string): boolean {
-  if (/Bearer\s+[A-Za-z0-9._~+/=-]+/i.test(text)) return true;
+  BEARER_TOKEN_RE.lastIndex = 0;
+  if (BEARER_TOKEN_RE.test(text)) return true;
   KNOWN_TOKEN_RE.lastIndex = 0;
   if (KNOWN_TOKEN_RE.test(text)) return true;
   return keyedSecretValues(text).some((value) => value.redact);
+}
+
+/** Detect a canonical secret match whose span crosses one deterministic field boundary. */
+export function containsProviderSecretValueAcrossBoundary(left: string, right: string): boolean {
+  const boundary = left.length;
+  return providerSecretValueSpans(left + right, true)
+    .some((span) => span.start < boundary && span.end > boundary);
 }
 
 function redactEmailLikeTokens(

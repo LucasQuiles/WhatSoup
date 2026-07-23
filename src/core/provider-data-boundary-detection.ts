@@ -1,6 +1,9 @@
 import { isIP } from 'node:net';
 
-import { containsProviderSecretValue } from '../lib/provider-preview-sanitizer.ts';
+import {
+  containsProviderSecretValue,
+  containsProviderSecretValueAcrossBoundary,
+} from '../lib/provider-preview-sanitizer.ts';
 import type { ProviderAliasType } from './provider-data-boundary-contract.ts';
 
 export const MAX_BOUNDARY_TEXT_LENGTH = 1024 * 1024;
@@ -17,7 +20,9 @@ export interface ProviderAliasCandidate {
   readonly priority: number;
 }
 
-const ALIAS_SUSPECT_RE = /(?:[⟦［\[]\s*WSA1|WSA1\s*[:：])/u;
+const ALIAS_SUSPECT_PATTERN = '(?:[⟦［\\[]\\s*WSA1|WSA1\\s*[:：])';
+const ALIAS_SUSPECT_RE = new RegExp(ALIAS_SUSPECT_PATTERN, 'u');
+const ALIAS_SUSPECT_GLOBAL_RE = new RegExp(ALIAS_SUSPECT_PATTERN, 'gu');
 const ALIAS_FORMAT_CHAR_RE = /[\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/gu;
 const ALIAS_CONFUSABLES: Readonly<Record<string, string>> = Object.freeze({
   'Ԝ': 'W',
@@ -129,6 +134,30 @@ export function containsProviderAliasSyntax(text: string): boolean {
   return skeleton !== comparison && ALIAS_SUSPECT_RE.test(skeleton);
 }
 
+function aliasSyntaxViews(text: string): readonly string[] {
+  const comparison = text.normalize('NFKC').replace(ALIAS_FORMAT_CHAR_RE, '');
+  const skeleton = Array.from(comparison, (character) => ALIAS_CONFUSABLES[character] ?? character).join('');
+  return [text, comparison, skeleton];
+}
+
+function containsProviderAliasSyntaxAcrossBoundary(left: string, right: string): boolean {
+  const leftViews = aliasSyntaxViews(left);
+  const rightViews = aliasSyntaxViews(right);
+  for (let viewIndex = 0; viewIndex < leftViews.length; viewIndex += 1) {
+    const leftView = leftViews[viewIndex]!;
+    const combined = leftView + rightViews[viewIndex]!;
+    ALIAS_SUSPECT_GLOBAL_RE.lastIndex = 0;
+    for (const match of combined.matchAll(ALIAS_SUSPECT_GLOBAL_RE)) {
+      if (
+        match.index !== undefined
+        && match.index < leftView.length
+        && match.index + match[0].length > leftView.length
+      ) return true;
+    }
+  }
+  return false;
+}
+
 /** Detect reserved syntax fragmented across adjacent fields without rewriting trusted bytes. */
 export function containsProviderAliasSyntaxAcross(texts: readonly string[]): boolean {
   return scanProviderTextSequence(texts).fragmentedAlias;
@@ -139,6 +168,7 @@ export interface ProviderTextSequenceScan {
   readonly fragmentedSecret: boolean;
   readonly directAlias: boolean;
   readonly fragmentedAlias: boolean;
+  readonly detectorInvocationCount: number;
 }
 
 /** Scan one deterministic sequence while distinguishing complete values from cross-field fragments. */
@@ -148,26 +178,42 @@ export function scanProviderTextSequence(texts: readonly string[]): ProviderText
   let fragmentedSecret = false;
   let directAlias = false;
   let fragmentedAlias = false;
+  let detectorInvocationCount = 0;
+  const hasSecret = (text: string): boolean => {
+    detectorInvocationCount += 1;
+    return containsProviderSecretValue(text);
+  };
+  const hasAlias = (text: string): boolean => {
+    detectorInvocationCount += 1;
+    return containsProviderAliasSyntax(text);
+  };
+  const hasAliasAcrossBoundary = (left: string, right: string): boolean => {
+    detectorInvocationCount += 1;
+    return containsProviderAliasSyntaxAcrossBoundary(left, right);
+  };
+  const hasSecretAcrossBoundary = (left: string, right: string): boolean => {
+    detectorInvocationCount += 1;
+    return containsProviderSecretValueAcrossBoundary(left, right);
+  };
   for (const text of texts) {
     const prefix = text.slice(0, 512);
-    const textHasSecret = containsProviderSecretValue(text);
-    const textHasAlias = containsProviderAliasSyntax(text);
+    const textHasSecret = hasSecret(text);
+    const textHasAlias = hasAlias(text);
     if (textHasSecret) directSecretCount += 1;
     if (textHasAlias) directAlias = true;
     if (carry.length > 0) {
-      for (let start = 0; start < carry.length && (!fragmentedSecret || !fragmentedAlias); start += 1) {
-        const suffix = carry.slice(start);
-        if (!fragmentedSecret
-          && !containsProviderSecretValue(suffix)
-          && !containsProviderSecretValue(prefix)
-          && containsProviderSecretValue(suffix + prefix)) fragmentedSecret = true;
-        if (!fragmentedAlias
-          && !containsProviderAliasSyntax(suffix)
-          && !containsProviderAliasSyntax(prefix)
-          && containsProviderAliasSyntax(suffix + prefix)) fragmentedAlias = true;
+      if (!fragmentedSecret && hasSecretAcrossBoundary(carry, prefix)) fragmentedSecret = true;
+      if (!fragmentedAlias && hasAliasAcrossBoundary(carry, prefix)) {
+        fragmentedAlias = true;
       }
     }
     carry = (carry + text).slice(-512);
   }
-  return { directSecretCount, fragmentedSecret, directAlias, fragmentedAlias };
+  return {
+    directSecretCount,
+    fragmentedSecret,
+    directAlias,
+    fragmentedAlias,
+    detectorInvocationCount,
+  };
 }

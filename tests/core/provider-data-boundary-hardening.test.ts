@@ -5,6 +5,10 @@ import {
   type ProviderBoundaryEvent,
   type ProviderBoundaryMcpTool,
 } from '../../src/core/provider-data-boundary.ts';
+import {
+  MAX_TOOL_NODES,
+  scanProviderTextSequence,
+} from '../../src/core/provider-data-boundary-detection.ts';
 import { PROVIDER_DATA_POLICY_VERSION } from '../../src/core/provider-data-policy.ts';
 
 function entropy(): (size: number) => Uint8Array {
@@ -53,6 +57,69 @@ function aliasFrom(value: string): string {
 }
 
 describe('provider data boundary hardening', () => {
+  it('bounds detector invocations for a maximum-node provider tool record', () => {
+    expect(scanProviderTextSequence(['first', 'second']).detectorInvocationCount)
+      .toBeLessThanOrEqual(8);
+    const entries = Array.from(
+      { length: MAX_TOOL_NODES - 1 },
+      (_, index) => [`field_${index}`, `ordinary_${index}`] as const,
+    );
+    const record = Object.fromEntries(entries);
+    const orderedTexts = entries.flatMap(([key, value]) => [key, value]);
+    const scan = scanProviderTextSequence(orderedTexts);
+    const broker = boundary();
+    const tools: ProviderBoundaryMcpTool[] = [{
+      name: 'inspect',
+      inputSchema: {
+        type: 'object',
+        additionalProperties: true,
+      },
+    }];
+
+    expect(scan.detectorInvocationCount).toBeLessThanOrEqual(orderedTexts.length * 4);
+    expect(JSON.stringify(record).length).toBeLessThan(1024 * 1024);
+    expect(() => broker.inspectToolJson(JSON.stringify(record))).not.toThrow();
+    expect(broker.rehydrateToolInput('inspect', record, tools)).toEqual(record);
+  });
+
+  it.each([
+    ['early two-field secret', ['cred', 'ential="quoted multiword value"'], 'secret_detected'],
+    ['late two-field secret', ['ordinary', 'values', 'cred', 'ential="quoted multiword value"'], 'secret_detected'],
+    ['early three-field secret', ['cre', 'den', 'tial="quoted multiword value"'], 'secret_detected'],
+    ['late three-field secret', ['ordinary', 'values', 'cre', 'den', 'tial="quoted multiword value"'], 'secret_detected'],
+    ['early two-field alias', ['⟦W', `SA1:path:${'1'.repeat(32)}:${'2'.repeat(32)}⟧`], 'residual_alias'],
+    ['late two-field alias', ['ordinary', 'values', '⟦W', `SA1:path:${'1'.repeat(32)}:${'2'.repeat(32)}⟧`], 'residual_alias'],
+    ['early three-field alias', ['⟦', 'W', `SA1:path:${'1'.repeat(32)}:${'2'.repeat(32)}⟧`], 'residual_alias'],
+    ['late three-field alias', ['ordinary', 'values', '⟦', 'W', `SA1:path:${'1'.repeat(32)}:${'2'.repeat(32)}⟧`], 'residual_alias'],
+  ])('rejects %s fragments in provider tool arrays', (_label, fragments, code) => {
+    const broker = boundary();
+    const tools: ProviderBoundaryMcpTool[] = [{
+      name: 'inspect',
+      inputSchema: {
+        type: 'object',
+        additionalProperties: true,
+      },
+    }];
+
+    expect(() => broker.rehydrateToolInput('inspect', { metadata: fragments }, tools))
+      .toThrowError(expect.objectContaining({ code }));
+  });
+
+  it('detects a late fragmented alias even when the carry contains a complete direct alias', () => {
+    const directAlias = `⟦WSA1:path:${'a'.repeat(32)}:${'b'.repeat(32)}⟧`;
+    const fragments = [
+      directAlias,
+      'ordinary',
+      '⟦',
+      'W',
+      `SA1:path:${'1'.repeat(32)}:${'2'.repeat(32)}⟧`,
+    ];
+    const scan = scanProviderTextSequence(fragments);
+
+    expect(scan.directAlias).toBe(true);
+    expect(scan.fragmentedAlias).toBe(true);
+  });
+
   it.each([
     [
       'secret assignment',
