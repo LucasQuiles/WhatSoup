@@ -247,14 +247,16 @@ describe('v3.5 settings — API tokens (provider keys, write-only)', () => {
     await waitFor(() => expect(verifyCredentialMock).toHaveBeenCalledWith('deepseek'))
     await waitFor(() => expect(container.querySelector('#tokens')!.textContent).toContain('valid'))
 
-    // setting a NEW key must drop the old key's verdict
+    // setting a NEW key must drop the old key's verdict — strong form:
+    // the row provably still renders (positive control), the verdict is gone.
     const input = container.querySelector('#tokens input')! as HTMLInputElement
     fireEvent.change(input, { target: { value: 'sk-new-456' } })
     const setBtn = [...container.querySelectorAll('#tokens button')].find((b) => b.textContent === 'set')!
     fireEvent.click(setBtn)
     await waitFor(() => expect(toastMock.success).toHaveBeenCalled())
-    const statusEl = container.querySelector('#tokens .settings-sub--status')
-    expect(statusEl).toBeNull()
+    const tokensSection = container.querySelector('#tokens')!
+    expect(tokensSection.textContent).toContain('deepseek') // row still renders
+    expect(tokensSection.textContent).not.toContain('valid')
   })
 
   it('revoke deletes the key; the session lock row calls lockConsole', async () => {
