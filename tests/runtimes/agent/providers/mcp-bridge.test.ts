@@ -36,7 +36,7 @@ describe('generateMcpConfigFile – oracle comparison', () => {
 
   it('codex-cli does not emit the unsupported project JSON shape', () => {
     const result = generateMcpConfigFile('codex-cli', socketPath, proxyScript);
-    expect(result).toBeNull();
+    expect(result).toStrictEqual(null);
   });
 
   it('API providers return null (no config file needed)', () => {

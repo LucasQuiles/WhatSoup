@@ -348,7 +348,7 @@ describe('generateMcpConfigFile', () => {
 
   it('codex-cli → leaves file config to its canonical mcp_servers argv adapter', () => {
     const result = generateMcpConfigFile('codex-cli', '/tmp/whatsoup.sock', '/tmp/proxy.ts');
-    expect(result).toBeNull();
+    expect(result).toStrictEqual(null);
   });
 
   it('openai-api → returns null', () => {
