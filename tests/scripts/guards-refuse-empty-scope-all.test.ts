@@ -8,6 +8,14 @@
  * empty tree" back to "certifies it" — the gap that existed from 2026-07-22 until #2102, and
  * that a hand-run sweep (run twice, then wrong once) never actually closed.
  *
+ * BOTH FILES COEXIST BY DESIGN — do not fold one into the other. The two overlap only on the
+ * bare "exit 2 on an empty tree" assertion for those four guards; their jobs differ. The
+ * original is the DEEP behavioural spec for the four exemplars — it also pins the decoy-checkout
+ * regression (dirs present but empty, which the reverted presence-proxy fix passed) and the
+ * examined-count reporting, cases this file deliberately does not replicate. This file is the
+ * BREADTH ratchet + resolver self-test across all 56 guards. Deep spec for the exemplars,
+ * broad ratchet for the surface: the small overlap is the seam between them, not duplication.
+ *
  * WHY SCOPE-INPUT, NOT "IS IT A SET-SCANNER". The empty-scope behaviour IS the check; there is
  * no need to adjudicate each guard's internals. Classification is mechanical — how does the
  * guard decide WHAT to examine — and the class decides how it is probed:
