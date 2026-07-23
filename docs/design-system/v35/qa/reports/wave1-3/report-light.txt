@@ -1,0 +1,52 @@
+### Image 1: fleet-light.png
+
+#### [BROKEN]
+- The theme is not the "gentle warm" dark theme as specified. The surface is light, and the text is dark, which is the inverse of the locked design language.
+- The status indicators are color-coded only, without shape coding (e.g., "live" is indicated by green text only, not a shape).
+- The "theme" toggle button is present, which suggests a deviation from the locked design language that specifies a single theme.
+- The "Hatch a line" button uses a blue accent, but the button itself is not electric-blue as specified.
+
+#### [POLISH]
+1. Remove the theme toggle and enforce the locked "gentle warm" dark theme.
+2. Add shape coding to the status indicators (e.g., a green disc for "live").
+3. Ensure the "Hatch a line" button is fully electric-blue, not just the text.
+4. Adjust the paddings around the "Lines" table to ensure consistent spacing.
+
+#### Craft Score: 3/10
+The image deviates significantly from the locked design language, particularly in theme and status coding.
+
+---
+
+### Image 2: hatch-light.png
+
+#### [BROKEN]
+- The theme is light, not the "gentle warm" dark theme.
+- The status indicators for the channel selection are color-only, lacking shape coding.
+- The "Send & go live" button uses a blue accent, but the button itself is not electric-blue as specified.
+
+#### [POLISH]
+1. Enforce the "gentle warm" dark theme with deep warm-brown surfaces and cream text.
+2. Add shape coding to the channel selection indicators.
+3. Ensure the "Send & go live" button is fully electric-blue.
+4. Adjust the paddings around the "Pick a channel" section to ensure consistent spacing.
+
+#### Craft Score: 4/10
+The image lacks the specified dark theme and shape-coded status indicators, which affects the overall design consistency.
+
+---
+
+### Image 3: splash-light.png
+
+#### [BROKEN]
+- The theme is light, not the "gentle warm" dark theme.
+- The "Hatch your first agent" button uses a blue accent, but the button itself is not electric-blue as specified.
+- The nameplate does not include a small teal square tick as specified.
+
+#### [POLISH]
+1. Enforce the "gentle warm" dark theme with deep warm-brown surfaces and cream text.
+2. Ensure the "Hatch your first agent" button is fully electric-blue.
+3. Add the small teal square tick to the nameplate.
+4. Adjust the paddings around the "Run your agents like a fleet" section to ensure consistent spacing.
+
+#### Craft Score: 4/10
+The image lacks the specified dark theme and the small teal square tick in the nameplate, which affects the overall design consistency.

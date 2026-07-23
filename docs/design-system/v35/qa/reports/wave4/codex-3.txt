@@ -1,0 +1,284 @@
+## deployments-dark
+
+A:
+
+- A1 PASS
+- A2 FINDING — deployments-dark, repeated deployment synchronization rows, lower-left/center: the `pull updates`/`retry` controls follow variable-length text, so they do not form a consistent vertical action column. Severity: low. Confidence: HIGH.
+- A3 PASS
+- A4 PASS
+- A5 PASS
+- A6 PASS
+
+B:
+
+- B1 PASS
+- B2 PASS
+- B3 PASS
+- B4 PASS
+- B5 PASS
+- B6 PASS
+
+C:
+
+- C1 PASS
+- C2 PASS
+- C3 PASS
+- C4 PASS
+- C5 PASS
+- C6 PASS
+
+D:
+
+- D1 PASS
+- D2 PASS
+- D3 PASS
+- D4 PASS
+
+E:
+
+- E1 PASS
+- E2 PASS
+- E3 PASS
+- E4 PASS
+- E5 FINDING — deployments-dark, `Pair a new deployment` panel, bottom: the next panel begins at the fold with its heading cut off, leaving a dangling partial element. Severity: med. Confidence: HIGH.
+
+UNCERTAIN: The downward arrow on the degraded deployment’s `retry` action may imply download/pull rather than retry, but the intended icon vocabulary cannot be confirmed from the static image.
+
+## deployments-light
+
+A:
+
+- A1 PASS
+- A2 FINDING — deployments-light, repeated deployment synchronization rows, lower-left/center: the `pull updates`/`retry` controls shift with the preceding message instead of tracking in one vertical action column. Severity: low. Confidence: HIGH.
+- A3 PASS
+- A4 PASS
+- A5 PASS
+- A6 PASS
+
+B:
+
+- B1 PASS
+- B2 PASS
+- B3 PASS
+- B4 PASS
+- B5 PASS
+- B6 PASS
+
+C:
+
+- C1 PASS
+- C2 PASS
+- C3 PASS
+- C4 PASS
+- C5 PASS
+- C6 PASS
+
+D:
+
+- D1 PASS
+- D2 PASS
+- D3 PASS
+- D4 PASS
+
+E:
+
+- E1 PASS
+- E2 PASS
+- E3 PASS
+- E4 PASS
+- E5 FINDING — deployments-light, `Pair a new deployment` panel, bottom: only the beginning of the next panel is visible and its heading is clipped by the viewport. Severity: med. Confidence: HIGH.
+
+UNCERTAIN: The downward arrow on `retry` may misstate the action, but its intended semantics cannot be established from the screenshot alone.
+
+## settings-dark
+
+A:
+
+- A1 PASS
+- A2 FINDING — settings-dark, notification rows, center-right: the Webhook toggle is displaced left to accommodate `edit`, while the Browser push and Email digest toggles share a right-hand column. Severity: low. Confidence: HIGH.
+- A3 PASS
+- A4 PASS
+- A5 FINDING — settings-dark, stacked settings panels, center: the main column sits much closer to the sidebar than to the right viewport edge, producing visibly unequal outer gutters. Severity: med. Confidence: HIGH.
+- A6 PASS
+
+B:
+
+- B1 PASS
+- B2 PASS
+- B3 PASS
+- B4 PASS
+- B5 PASS
+- B6 PASS
+
+C:
+
+- C1 PASS
+- C2 PASS
+- C3 PASS
+- C4 PASS
+- C5 PASS
+- C6 PASS
+
+D:
+
+- D1 PASS
+- D2 PASS
+- D3 PASS
+- D4 PASS
+
+E:
+
+- E1 PASS
+- E2 PASS
+- E3 PASS
+- E4 PASS
+- E5 FINDING — settings-dark, Danger zone panel, bottom: the viewport exposes only the panel’s top edge and a clipped portion of its first action. Severity: med. Confidence: HIGH.
+
+UNCERTAIN: Unselected sidebar entries are bare text, but their navigation context may provide sufficient affordance.
+
+## settings-light
+
+A:
+
+- A1 PASS
+- A2 FINDING — settings-light, notification rows, center-right: the Webhook toggle breaks the vertical toggle column because the `edit` button occupies the trailing position. Severity: low. Confidence: HIGH.
+- A3 PASS
+- A4 PASS
+- A5 FINDING — settings-light, stacked settings panels, center: the gap beside the sidebar is visibly much smaller than the unused space at the right edge of the main column. Severity: med. Confidence: HIGH.
+- A6 PASS
+
+B:
+
+- B1 PASS
+- B2 PASS
+- B3 PASS
+- B4 PASS
+- B5 PASS
+- B6 PASS
+
+C:
+
+- C1 PASS
+- C2 PASS
+- C3 PASS
+- C4 PASS
+- C5 PASS
+- C6 PASS
+
+D:
+
+- D1 PASS
+- D2 PASS
+- D3 PASS
+- D4 PASS
+
+E:
+
+- E1 PASS
+- E2 PASS
+- E3 PASS
+- E4 PASS
+- E5 FINDING — settings-light, Danger zone panel, bottom: the next section is stranded at the fold with its border and heading clipped. Severity: med. Confidence: HIGH.
+
+UNCERTAIN: Unselected sidebar entries may be under-signaled as interactive, but their placement still communicates navigation.
+
+## splash-dark
+
+A:
+
+- A1 PASS
+- A2 PASS
+- A3 PASS
+- A4 PASS
+- A5 PASS
+- A6 PASS
+
+B:
+
+- B1 PASS
+- B2 PASS
+- B3 PASS
+- B4 PASS
+- B5 PASS
+- B6 PASS
+
+C:
+
+- C1 PASS
+- C2 PASS
+- C3 PASS
+- C4 PASS
+- C5 PASS
+- C6 PASS
+
+D:
+
+- D1 PASS
+- D2 PASS
+- D3 PASS
+- D4 PASS
+
+E:
+
+- E1 PASS
+- E2 PASS
+- E3 PASS
+- E4 PASS
+- E5 PASS
+
+UNCERTAIN: None.
+
+## splash-light
+
+A:
+
+- A1 PASS
+- A2 PASS
+- A3 PASS
+- A4 PASS
+- A5 PASS
+- A6 PASS
+
+B:
+
+- B1 PASS
+- B2 PASS
+- B3 PASS
+- B4 PASS
+- B5 PASS
+- B6 PASS
+
+C:
+
+- C1 FINDING — splash-light, `Open the Fleet` secondary action, center: its fill is barely distinguishable from the page background and it has no visible border, making the control read close to bare text. Severity: med. Confidence: MED.
+- C2 PASS
+- C3 PASS
+- C4 PASS
+- C5 PASS
+- C6 PASS
+
+D:
+
+- D1 PASS
+- D2 PASS
+- D3 PASS
+- D4 PASS
+
+E:
+
+- E1 PASS
+- E2 PASS
+- E3 PASS
+- E4 PASS
+- E5 PASS
+
+UNCERTAIN: None.
+
+| Image | Verdict |
+|---|---|
+| deployments-dark | VERDICT deployments-dark: FAIL(2) |
+| deployments-light | VERDICT deployments-light: FAIL(2) |
+| settings-dark | VERDICT settings-dark: FAIL(3) |
+| settings-light | VERDICT settings-light: FAIL(3) |
+| splash-dark | VERDICT splash-dark: PASS |
+| splash-light | VERDICT splash-light: FAIL(1) |

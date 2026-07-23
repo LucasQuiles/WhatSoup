@@ -1,0 +1,54 @@
+## skills-hub-dark
+A: A1 top/right action cluster: hub switcher, theme, Upload do not share a common vertical centerline with each other (Upload taller/heavier) — med — HIGH; A3 card icons (pinecone/whatsapp/auto-seo/dream-lab/m365/scheduled): several glyphs sit optically low or uneven inside rounded squares — med — MED; A5 left sidebar vs main list: outer left edge of cards aligns, PASS on gutters otherwise
+B: B1 card action row: pinecone has two buttons (configure + update) while siblings have one; trailing actions do not share consistent right-edge padding rhythm vs card body — med — HIGH; B3 status/meta badges: "installed" green text weight/size drifts vs "OFFICIAL/LOCAL/COMMUNITY" chips; version string on scheduled-tasks mixes into status at same weight — med — HIGH; B4 COMPAT/HARNESS chips: diamond markers (G/O/cht) render larger optical mass than square letter chips beside them — low — HIGH; B6 SOURCE "Official" vs badge "OFFICIAL"; "3RD-PARTY" vs filter vocabulary — low — HIGH
+C: C1 sidebar filter rows (TYPE/SOURCE/STATUS): bare text counts, only "All" has fill — unselected rows read non-interactive — med — HIGH; C1 "sort: relevance" looks like a chip but competes with real buttons — low — MED; C2 scheduled-tasks bottom card: COMPAT bar and card bottom clipped by viewport — high — HIGH; C4 installed vs not-installed: "install"/"review & install" vs "configure" is the only cue; no shared installed marker on m365 — med — HIGH; C6 auto-seo-suite icon is an empty dark square (missing glyph) — high — HIGH
+D: D1 pinecone-search COMPAT row: COMPAT + 5 letters + HARNESS + 3 mode chips + gemini note = overcrowded single bar — high — HIGH; D4 card title row: OFFICIAL/installed/version/actions all fight title for primacy — med — HIGH
+E: E2 left sidebar large empty lower region while main list is dense and clipped — med — HIGH; E5 last card (scheduled-tasks) cut mid-control at fold — high — HIGH
+UNCERTAIN: whether dream-lab-persona circular icon glyph is intentionally monochrome or missing brand color
+
+## skills-hub-light
+A: A3 same card icon centering issues as dark — med — MED; A1 top actions: same Upload vs theme height mismatch — low — HIGH
+B: B1 same trailing-action count mismatch across cards — med — HIGH; B3 same status/badge type-role drift — med — HIGH; B5 vs dark: structure matches (parity OK) — PASS; B6 same Official/OFFICIAL and 3RD-PARTY casing drift — low — HIGH
+C: C1 sidebar bare-text filters — med — HIGH; C2 scheduled-tasks clipped at bottom — high — HIGH; C6 auto-seo-suite empty icon square — high — HIGH; C4 install-state legibility same gap — med — HIGH
+D: D1 pinecone COMPAT bar overcrowding — high — HIGH; D4 title-row emphasis competition — med — HIGH
+E: E2 sidebar dead lower zone vs clipped list — med — HIGH; E5 scheduled-tasks cut at fold — high — HIGH
+UNCERTAIN: none additional
+
+## dream-lab-dark
+A: A2 left queue list: avatar column OK, but metadata ("suggested … instance") wraps inconsistently — Mercy rows show email-wrapped instance on two lines vs Quinn one line, ragged text columns — med — HIGH; A4 Impact section: three columns (APPLIES TO / REVERSIBLE / RISK) headers align, values OK; A1 queue cards top edges OK
+B: B1 queue cards: selected Quinn has blue focus ring; padding inside Mercy cards appears equal — PASS; B3 section headers Proposed diff / Impact / Recent decisions consistent; B6 "PERSONA" chip vs page title "Persona edit" OK
+C: C1 "edit then approve…" bare outline vs filled Approve — OK affordance; filters chip "agent: all · type: all · state: queued" looks editable but weak affordance (no chevron/dropdown cue) — med — MED; C2 left queue Mercy instance lines truncated/wrapped awkwardly ("help@shinycartel" broken) — med — HIGH; C5 page identity clear (Dream Lab + Persona edit)
+D: D2 header "QUEUED · REVIEW IN ORDER" plus "+ 3 dreams queued" partially redundant — low — HIGH; D4 quote block vs diff: OK hierarchy
+E: E1 left column below FILTERS is empty dead zone — med — HIGH; E2 main column dense, left column sparse underused — med — HIGH; E4 overall left-heavy chrome with thin queue — low — MED
+UNCERTAIN: whether "view chat context" secondary weight is intentional
+
+## dream-lab-light
+A: A2 same Mercy metadata wrap/column drift as dark — med — HIGH
+B: B5 structural parity with dark OK — PASS; B1/B3 OK
+C: C1 filters chip weak affordance — med — MED; C2 Mercy instance wrap/truncation — med — HIGH
+D: D2 queued count vs QUEUED label redundancy — low — HIGH
+E: E1 dead zone under FILTERS — med — HIGH; E2 cramped-vs-wasted same as dark — med — HIGH
+UNCERTAIN: none additional
+
+## inbox-dark
+A: A2 conversation list: avatars align; timestamps right-align; agent chips drift (Quinn/Beacon/Mercy positions vary with preview text length) — med — HIGH; A3 channel filter icons and composer icons appear centered — PASS; A4 thread header "Lucas Quiles" vs meta line OK; A1 Direct/Rooms segmented control OK
+B: B1 list rows: some rows one agent chip, some two + takeover — padding uneven vertically (WHATSOUP row taller) — med — HIGH; B3 unread counts in filled circles vs dim "1" on TW — role OK; B4 right rail icons (whatsapp/signal/x/email) size consistent — PASS; B6 "takeover" chip vs toggle label "takeover" OK
+C: C1 composer utility icons (attach/mic/poll/schedule) read as controls — PASS; C1 "takeover" toggle has track — PASS; C2 PERSON email "lhq…@gmail···" ellipsis OK; C2 list previews truncate with no ellipsis mid-sentence on several rows (hard clip) — med — MED; C4 Direct selected vs Rooms: Rooms darker fill in dark theme = selected Rooms looks active while blue bar on list indicates Direct thread — segmented control state ambiguous — high — HIGH; C4 unread vs read: LQ row bold/weight difference subtle — med — MED; C5 thread primary action (composer) clear
+D: D1 WHATSOUP row: avatar + title + preview + count + Quinn chip + takeover chip = density hotspot — high — HIGH; D3 purple agent chips + amber takeover + blue All filter all shout — med — HIGH; D4 right rail PERSON contact list visual weight ≈ thread messages — low — MED
+E: E1 large empty lower thread region (messages clustered top) — med — HIGH; E2 thread whitespace vs tight left list — med — HIGH; E5 viewport OK, composer anchored
+UNCERTAIN: whether SM row missing unread badge is state or defect
+
+## inbox-light
+A: A2 same agent-chip horizontal drift in list — med — HIGH
+B: B1 WHATSOUP row height/padding outlier — med — HIGH; B5 vs dark: Direct/Rooms selected appearance differs (light: Direct white/raised, Rooms beige; dark: Direct dark, Rooms darker) — structural intent same but selected-state mapping flips readability — med — HIGH (flag under C4/B5)
+C: C4 Direct/Rooms selected state still weak (Rooms beige can read as selected tab) — high — HIGH; C2 list preview hard clips — med — MED; C1 affordances OK
+D: D1 WHATSOUP density hotspot — high — HIGH; D3 competing chips/emphasis — med — HIGH
+E: E1 empty lower thread body — med — HIGH; E2 same imbalance — med — HIGH
+UNCERTAIN: none additional
+
+VERDICT skills-hub-dark: FAIL(18)
+VERDICT skills-hub-light: FAIL(16)
+VERDICT dream-lab-dark: FAIL(9)
+VERDICT dream-lab-light: FAIL(8)
+VERDICT inbox-dark: FAIL(14)
+VERDICT inbox-light: FAIL(12)

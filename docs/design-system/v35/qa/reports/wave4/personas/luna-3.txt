@@ -1,0 +1,58 @@
+## deployments-dark
+
+A: A1 PASS; **A2 — deployments-dark, deployment-card headers, center: the status/version clusters begin at visibly different horizontal positions across repeated cards, breaking the vertical scan column; severity low; confidence HIGH.** A3 PASS; A4 PASS; A5 PASS; A6 PASS.
+
+B: B1 PASS; B2 PASS; B3 PASS; B4 PASS; B5 UNCERTAIN; B6 PASS.
+
+C: C1 PASS; C2 PASS; C3 PASS; **C4 — deployments-dark, field-pi Lines metric, lower-center: this card shows only “2” while sibling cards show used/capacity ratios, leaving its capacity state ambiguous; severity med; confidence HIGH.** C5 PASS; C6 PASS.
+
+D: D1 PASS; D2 PASS; D3 PASS; D4 PASS.
+
+E: E1 PASS; **E2 — deployments-dark, Pair a new deployment panel, bottom: instructions and controls occupy only the left portion while most of the sibling panel area remains unused; severity med; confidence HIGH.** E3 PASS; E4 PASS; E5 PASS.
+
+UNCERTAIN:
+
+- B5 — Cross-theme parity cannot be evaluated without the light-theme counterpart.
+- The Total Lines aggregate does not match the visible per-deployment used counts, but the summary may include lines not represented by those figures.
+- The nest-2 header is substantially denser than its siblings, but its elements remain separable without visible collision.
+
+## settings-dark
+
+A: A1 PASS; **A2 — settings-dark, notification rows, center-right: “attention only” and “daily 08:00” occupy the trailing metadata column, while Webhook’s “all events” sits beside its title, breaking repeated-row column tracking; severity low; confidence HIGH.** A3 PASS; A4 PASS; A5 PASS; A6 PASS.
+
+B: B1 PASS; B2 PASS; B3 PASS; **B4 — settings-dark, notification-channel icons, center: the Browser push speech bubble is visibly larger and heavier than the Webhook and Email digest sibling icons; severity low; confidence HIGH.** B5 UNCERTAIN; B6 PASS.
+
+C: C1 PASS; C2 PASS; C3 PASS; C4 PASS; C5 PASS; **C6 — settings-dark, Webhook and Email digest rows, center-left: both distinct notification types use the same generic solid rectangle, making the icons look placeholder-like and indistinguishable; severity med; confidence HIGH.**
+
+D: D1 PASS; **D2 — settings-dark, Danger zone, bottom: the deactivation and two-confirmation warning is repeated immediately inside the Reset workspace card after appearing directly above it; severity low; confidence HIGH.** D3 PASS; D4 PASS.
+
+E: E1 PASS; E2 PASS; E3 PASS; E4 PASS; E5 PASS.
+
+UNCERTAIN:
+
+- B5 — Cross-theme parity cannot be evaluated without the light-theme counterpart.
+- The unselected settings subnavigation entries are bare text, but their navigation context may provide sufficient affordance.
+- The large unused lower portion of the secondary settings rail may be intentional persistent-navigation capacity.
+- The Workspace name field does not visibly disclose whether it is editable or read-only, but static imagery cannot confirm the interaction state.
+
+## splash-dark
+
+A: A1 PASS; A2 PASS; A3 PASS; A4 PASS; A5 PASS; A6 PASS.
+
+B: B1 PASS; B2 PASS; B3 PASS; B4 PASS; B5 UNCERTAIN; B6 PASS.
+
+C: C1 PASS; C2 PASS; C3 PASS; C4 PASS; C5 PASS; C6 PASS.
+
+D: D1 PASS; D2 PASS; D3 PASS; D4 PASS.
+
+E: E1 PASS; E2 PASS; E3 PASS; E4 PASS; E5 PASS.
+
+UNCERTAIN:
+
+- B5 — Cross-theme parity cannot be evaluated without the light-theme counterpart.
+- The Open the Fleet button uses subdued dark-on-dark treatment, but its outline remains visible enough to avoid a confirmed affordance failure.
+- The gap between the CTA row and feature cards is conspicuous, but remains plausibly intentional marketing spacing.
+
+VERDICT deployments-dark: FAIL(3)  
+VERDICT settings-dark: FAIL(4)  
+VERDICT splash-dark: PASS

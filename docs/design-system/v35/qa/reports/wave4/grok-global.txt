@@ -1,0 +1,40 @@
+## Cross-surface findings
+
+**G1** · theme-toggle composition · `fleet`, `agents`, `skills-hub`, `dream-lab`, `inbox`, `deployments`, `settings` vs `hatch`, `splash`  
+Operator surfaces render a labeled pill (sun icon + “theme”) in the top-right action cluster. Hatch and splash render an icon-only sun control in the same corner. Theme-toggle is not identical across surfaces. · HIGH
+
+**G1** · nameplate placement · `fleet` vs `agents`, `skills-hub`, `dream-lab`, `inbox`, `deployments`, `settings`  
+Fleet anchors the SOUP wordmark at the top of the left nav rail. The other six operator surfaces place SOUP in the top header bar, left of the page title. Nameplate position/composition drifts inside the operator set. · HIGH
+
+**G1** · page chrome / global nav rail · `fleet` vs `agents`, `skills-hub`, `dream-lab`, `inbox`, `deployments`, `settings`  
+Only Fleet shows the persistent app rail (OPERATE / CREATE / SYSTEM → Fleet, Agents, Inbox, Ops, Skills, Dream Lab, Settings). All other operator surfaces omit that chrome entirely and substitute contextual side columns. Page chrome is not shared. · HIGH
+
+**G1** · header action cluster · `inbox`, `settings`, `dream-lab` vs `fleet`, `agents`, `skills-hub`, `deployments`  
+Fleet / Agents / Skills Hub / Deployments place theme immediately left of a primary header CTA. Inbox and Settings ship theme alone; Dream Lab pairs theme with a secondary “history” control and no primary. Top-right header composition is not stable across operator surfaces. · MED
+
+**G4** · page title size/placement · `fleet` vs `agents`, `skills-hub`, `dream-lab`, `inbox`, `deployments`, `settings`  
+Fleet’s page title is a large in-content heading (“Fleet”) beneath the top strip. On the other operator surfaces the page title sits in the header bar at chrome scale beside SOUP. Page-title ramp is not shared. · HIGH
+
+**G2** · destructive / irreversible actions · `agents` vs `settings`, `dream-lab`  
+Settings “revoke” and Dream Lab “Reject” use red outline treatment. Agents instance “kill” controls use the same neutral gray outline as non-destructive row actions (“pause”, “console”, “logs”). Same action class, drifted style across surfaces. · HIGH
+
+**G2** · primary header CTA vocabulary · `skills-hub` vs `fleet`, `agents`, `deployments`  
+Fleet “+ Hatch a line”, Agents “+ New agent”, Deployments “+ Pair deployment” share blue-filled “+ Verb” primaries. Skills Hub’s header primary is blue-filled but labeled “Upload” with an upload chevron—no “+” affix—breaking the primary CTA pattern. · MED
+
+**G6** · live/status marker treatment · `inbox` vs `fleet`, `agents`, `deployments`  
+Fleet line STATE, Agents identity header, and Deployments health use filled status pills (e.g. green “live” / “healthy”). Inbox LINE panel renders “live” as a bare green dot + text with no pill chrome. Status marker vocabulary is not identical. · HIGH
+
+**G7** · operator density register · `settings` vs `fleet`, `agents`, `skills-hub`, `deployments`, `inbox`, `dream-lab`  
+Settings uses a loose form register (large section gaps, airy rows). The other operator surfaces share a denser data/console register (tables, tight panel stacks, list rows). Settings breaks the operator density band. · MED
+
+---
+
+VERDICT fleet-dark: FAIL(8)
+VERDICT hatch-dark: FAIL(1)
+VERDICT agents-dark: FAIL(8)
+VERDICT skills-hub-dark: FAIL(7)
+VERDICT dream-lab-dark: FAIL(6)
+VERDICT inbox-dark: FAIL(6)
+VERDICT deployments-dark: FAIL(7)
+VERDICT settings-dark: FAIL(7)
+VERDICT splash-dark: FAIL(1)

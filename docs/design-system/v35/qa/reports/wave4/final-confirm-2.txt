@@ -1,0 +1,95 @@
+## fleet-dark
+A: PASS
+
+B: findings
+- B4 | fleet-dark | Lines table, grants column | center-left | The dashed `H` grant chip iconography reads visually lighter/smaller than the solid `S`/`P` grant chips in the same column, making same-context chip contents inconsistent | severity med | confidence MED
+
+C: findings
+- C3 | fleet-dark | Activity panel footer health dots | bottom-right | The row of tiny status dots is visibly much smaller than neighboring controls/text and reads cramped as an interactive/status target area | severity low | confidence MED
+- C5 | fleet-dark | Top header actions | top-right | The primary action is not obvious at first glance because the alert pill near the page title competes strongly with the blue action button for first attention | severity med | confidence MED
+
+D: findings
+- D1 | fleet-dark | Lines table rows | center-left | Several rows carry status marker, title, identifier, channel icon, agent badge, mode chip, state chip, grants chips, mini chart, and overflow button in one line, producing a density hotspot | severity med | confidence HIGH
+- D4 | fleet-dark | Lines table, line column | center-left | Secondary identifiers within the line names are visually close in weight to the primary line names, especially on rows like Personal/Community/Studio, weakening hierarchy | severity med | confidence MED
+
+E: findings
+- E2 | fleet-dark | Main content vs lower sidebar hosts | left-bottom | The central table is densely packed while the lower-left host area sits comparatively underused, creating squeezed-versus-wasted imbalance | severity low | confidence MED
+- E5 | fleet-dark | Lines table | bottom-center | The viewport cuts the table with the final row only partially visible, leaving a dangling partial element at the fold | severity med | confidence HIGH
+
+UNCERTAIN:
+- The sort and filter buttons may not share exactly identical internal icon/text spacing, but the static screenshot is not clear enough to confirm.
+
+## fleet-light
+A: PASS
+
+B: findings
+- B4 | fleet-light | Lines table, grants column | center-left | The dashed `H` grant chip iconography reads visually lighter/smaller than the solid `S`/`P` grant chips in the same column, making same-context chip contents inconsistent | severity med | confidence MED
+- B5 | fleet-light | Activity panel footer health dots | bottom-right | The light-theme footer shows the health dots ending with a pale trailing dot/mark that is not clearly mirrored in the dark-theme footer, indicating a small structural/content mismatch across themes | severity low | confidence MED
+
+C: findings
+- C3 | fleet-light | Activity panel footer health dots | bottom-right | The row of tiny status dots is visibly much smaller than neighboring controls/text and reads cramped as a target/status area | severity low | confidence MED
+- C5 | fleet-light | Top header actions | top-right | The primary action is not obvious at first glance because the alert pill near the page title competes strongly with the blue action button for first attention | severity med | confidence MED
+
+D: findings
+- D1 | fleet-light | Lines table rows | center-left | Several rows carry status marker, title, identifier, channel icon, agent badge, mode chip, state chip, grants chips, mini chart, and overflow button in one line, producing a density hotspot | severity med | confidence HIGH
+- D4 | fleet-light | Lines table, line column | center-left | Secondary identifiers within the line names are visually close in weight to the primary line names, especially on rows like Personal/Community/Studio, weakening hierarchy | severity med | confidence MED
+
+E: findings
+- E2 | fleet-light | Main content vs lower sidebar hosts | left-bottom | The central table is densely packed while the lower-left host area sits comparatively underused, creating squeezed-versus-wasted imbalance | severity low | confidence MED
+- E5 | fleet-light | Lines table | bottom-center | The viewport cuts the table with the final row only partially visible, leaving a dangling partial element at the fold | severity med | confidence HIGH
+
+UNCERTAIN:
+- The sort and filter buttons may not share exactly identical internal icon/text spacing, but the static screenshot is not clear enough to confirm.
+
+## agents-dark
+A: findings
+- A5 | agents-dark | Left rail cards vs search field | left-center | The search field and stacked agent cards do not share the same outer right edge as cleanly as expected; the selected Quinn card appears to project slightly differently than the rest of the column | severity low | confidence MED
+
+B: findings
+- B1 | agents-dark | Left agent list cards | left-center | Vertical spacing between stacked agent cards is consistent, but the dashed “Hatch an agent” card sits with a visibly different gap rhythm from the cards above | severity low | confidence HIGH
+- B3 | agents-dark | Left agent list metadata | left-center | Similar metadata roles are styled inconsistently: the purple “1 dream/2 dreams” callouts draw much more emphasis than adjacent line/instance metadata in the same role band | severity med | confidence HIGH
+
+C: findings
+- C2 | agents-dark | Assigned lines card, Builds row | center-left | The row content is faded and visually clipped/de-emphasized to the point that the line entry is hard to parse as intact content | severity low | confidence MED
+- C4 | agents-dark | Tool permissions toggles | upper-right center | Toggle states rely heavily on fill color with very subtle positional difference, making on/off scanning ambiguous at a glance across the list | severity med | confidence MED
+- C5 | agents-dark | Main detail surface header | top-center | The page identity is split between “Agents,” breadcrumb text, selected card, and large agent header, so the immediate focal point is diluted on first scan | severity med | confidence MED
+
+D: findings
+- D1 | agents-dark | Instances rows | right-center | Each instance row combines status dot, name, age, identifier, and two action buttons in a tight band, making the rows the strongest density hotspot on the page | severity med | confidence HIGH
+- D3 | agents-dark | Top area with agent header and actions | top-right center | Large agent name, green live pill, blue global CTA, outline edit button, and red retire button all compete for emphasis in the same viewing zone | severity med | confidence HIGH
+- D4 | agents-dark | Agent header metadata line | top-center | The hatched date and archetype metadata under the quote is visually close to the quote/body emphasis, making secondary information read too loudly | severity low | confidence MED
+
+E: findings
+- E2 | agents-dark | Left column vs lower-right content | left-center / bottom-right | The left roster column is tightly packed while parts of the lower-right memory area have much more open space, creating uneven use of the canvas | severity low | confidence MED
+- E5 | agents-dark | Bottom row cards | bottom-center/right | The viewport cuts into the lower cards, leaving Memory content and adjacent sections partially visible rather than fully resolved | severity med | confidence HIGH
+
+UNCERTAIN:
+- The provider/model/fallback value alignment in the Brain card may have minor baseline drift, but the screenshot does not make it fully confirmable.
+
+## settings-dark
+A: PASS
+
+B: findings
+- B1 | settings-dark | Workspace panel rows | upper-right center | The internal row heights/padding in the Workspace section feel uneven, with the Appearance row visually taller/more open than neighboring rows of the same pattern | severity low | confidence MED
+- B3 | settings-dark | Section headings vs danger heading | lower-center | “Danger zone” uses a much stronger color emphasis than other same-level section headers, creating a type-role drift beyond normal section labeling | severity low | confidence MED
+
+C: findings
+- C4 | settings-dark | Appearance theme choices | upper-right center | The three theme swatches do not make the selected state instantly obvious because two blue-accent cues appear at once: one swatch has a blue outline while another contains a blue fill block | severity med | confidence HIGH
+- C4 | settings-dark | Notifications and reduced motion toggles | center-right | Enabled and disabled toggles are visually close in treatment and require careful inspection to distinguish, reducing state legibility | severity med | confidence MED
+
+D: findings
+- D2 | settings-dark | Theme controls | top-right and Workspace section upper-right | There is redundant chrome for appearance control: a global “theme” button in the top bar and a separate Appearance selector in Workspace both present theme-changing UI on the same screen | severity med | confidence HIGH
+- D4 | settings-dark | Danger zone card | bottom-center | The red heading and red outlined destructive button share nearly the same visual weight, making supporting explanatory text recede too far for a high-risk action area | severity low | confidence MED
+
+E: findings
+- E1 | settings-dark | Left sidebar lower-middle | left-bottom | There is a large empty zone between the main nav groups and the Hosts block that does not appear to serve content or balance | severity low | confidence HIGH
+- E2 | settings-dark | Main content column vs viewport width | center-right | Settings content is compressed into a relatively narrow central column while substantial horizontal space remains unused to the right inside the viewport | severity med | confidence HIGH
+- E3 | settings-dark | Main settings layout | center-right | The content column occupies only a narrow strip of the available canvas, wasting width that could otherwise support the form-like settings layout | severity med | confidence HIGH
+
+UNCERTAIN:
+- The API token action buttons may not be perfectly aligned row-to-row, but the screenshot is not sharp enough to confirm a definite drift.
+
+VERDICT fleet-dark: FAIL(7)
+VERDICT fleet-light: FAIL(8)
+VERDICT agents-dark: FAIL(10)
+VERDICT settings-dark: FAIL(9)

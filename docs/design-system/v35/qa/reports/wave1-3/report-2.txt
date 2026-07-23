@@ -1,0 +1,42 @@
+### Image 1: skills-hub-dark.png
+
+#### [BROKEN]
+- None
+
+#### [POLISH]
+1. The "sort: relevance" button is too subtle; consider a slightly bolder text or a small icon to draw attention.
+2. The "configure" and "update" buttons could have a bit more padding to make them more clickable and less cramped.
+3. The "COMPAT" section could be more visually distinct, perhaps with a slight background tint or a border to separate it from the main content.
+
+#### Craft Score: 8
+- The surface feels warm and professional, but the hierarchy could be slightly improved for better legibility.
+
+---
+
+### Image 2: dream-lab-dark.png
+
+#### [BROKEN]
+- None
+
+#### [POLISH]
+1. The "Proposed diff" section could benefit from a bit more vertical spacing between the lines of code for better readability.
+2. The "Impact" section could be more visually distinct, perhaps with a slight background tint or a border to separate it from the main content.
+3. The "Recent decisions" section could be more compact, with a bit less padding between the items to save space and improve density.
+
+#### Craft Score: 7
+- The surface feels calm and professional, but the hierarchy and density could be improved for better readability and visual flow.
+
+---
+
+### Image 3: inbox-dark.png
+
+#### [BROKEN]
+- None
+
+#### [POLISH]
+1. The "takeover" toggle could be more visually distinct, perhaps with a slight background tint or a border to separate it from the main content.
+2. The "Message as yourself" input field could have a bit more padding to make it more clickable and less cramped.
+3. The "Recent decisions" section could be more compact, with a bit less padding between the items to save space and improve density.
+
+#### Craft Score: 8
+- The surface feels warm and professional, but the hierarchy and density could be slightly improved for better legibility and visual flow.

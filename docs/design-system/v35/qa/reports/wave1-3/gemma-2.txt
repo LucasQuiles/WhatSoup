@@ -1,0 +1,44 @@
+Okay, here's a defect breakdown for each image, adhering to your strict requirements.
+
+**skills-hub-dark.png**
+
+*   **Top/Left/Center/Right/Bottom + "piconesearch" title area:** Truncated title text "piconesearch" is cut off, losing information. Severity: High
+*   **Top/Left/Center/Right/Bottom + "piconesearch" Compat section:** Compat icons are very close together with little spacing, impacting readability. Severity: Med
+*   **Top/Left/Center/Right/Bottom + "whatsapp-fleet-tools" title area:** Truncated title text "whatsapp-fleet-tools" is cut off, losing information. Severity: High
+*   **Top/Left/Center/Right/Bottom + "whatsapp-fleet-tools" Compat section:** Compat icons are very close together with little spacing, impacting readability. Severity: Med
+*   **Top/Left/Center/Right/Bottom + "auto-seo-suite" title area:** Long text description under "auto-seo-suite" is difficult to read due to low contrast with the dark background and text wrapping. Severity: Med
+*   **Top/Left/Center/Right/Bottom + "auto-seo-suite" Compat section:** Compat icons are very close together with little spacing, impacting readability. Severity: Med
+*   **Top/Left/Center/Right/Bottom + "dream-lab-persona" title area:** Truncated title text "dream-lab-persona" is cut off, losing information. Severity: High
+*   **Top/Left/Center/Right/Bottom + "dream-lab-persona" Compat section:** Compat icons are very close together with little spacing, impacting readability. Severity: Med
+*   **Top/Left/Center/Right/Bottom + "m365-connector" title area:** Truncated title text "m365-connector" is cut off, losing information. Severity: High
+*   **Top/Left/Center/Right/Bottom + "m365-connector" Compat section:** Compat icons are very close together with little spacing, impacting readability. Severity: Med
+*   **Top/Left/Center/Right/Bottom + "scheduled-tasks" title area:** Truncated title text "scheduled-tasks" is cut off, losing information. Severity: High
+*   **Top/Left/Center/Right/Bottom + "scheduled-tasks" Compat section:** Compat icons are very close together with little spacing, impacting readability. Severity: Med
+*   **Right side filter area:** Filter labels (“TYPE”, “SOURCE”, “STATUS”) have inconsistent padding/spacing. Severity: Low
+
+**Defect Count: 13**
+
+**dream-lab-dark.png**
+
+*   **Top/Left/Center/Right/Bottom + "Quinn" persona header:** "persona — tone" text appears slightly misaligned/overlapping with the persona icon. Severity: Med
+*   **Top/Left/Center/Right/Bottom + Proposed diff section:** The text "tone is complete and professional, with full greetings and sign-offs" has a slight contrast issue against the background, making it hard to read. Severity: Med
+*   **Top/Left/Center/Right/Bottom + Proposed diff section:** Long text blocks in "Proposed Diff" run together without proper spacing/breaks, making it difficult to scan. Severity: Med
+*   **Top/Left/Center/Right/Bottom + Impact section (Applies to, Reversible, Risk):**  Column alignment is inconsistent between the labels and the values. Severity: Med
+*   **Right Side Filters:** Filters are very narrow and text overflows making the full label unreadable. Severity: High
+*   **Recent Decisions section:**  The list items have inconsistent vertical spacing between them. Severity: Low
+*   **Recent Decisions section:** The age indicator (e.g., "2d", "4d") has very low contrast, making it hard to read. Severity: Med
+
+**Defect Count: 7**
+
+**inbox-dark.png**
+
+*   **Top/Left/Center/Right/Bottom + “Lucas Quiles” title:** Title is overflowing into right border. Severity: High
+*   **Top/Left/Center/Right/Bottom + “Lucas Quiles” nameplate:** The color of the text makes it difficult to read against the dark background. Severity: High
+*   **Top/Left/Center/Right/Bottom + “Quinn” message context:**  "persona - tone" text is nearly unreadable due to low contrast. Severity: High
+*   **Top/Left/Center/Right/Bottom + “Quinn” message context:** Text is cut off. Severity: High
+*   **Top/Left/Center/Right/Bottom + "Mercy" message context:** "skills — add calendar-read" text is nearly unreadable due to low contrast. Severity: High
+*   **Top/Left/Center/Right/Bottom + "Mercy" message context:** Text is cut off. Severity: High
+*   **Top/Left/Center/Right/Bottom + “Mercy” message context:**  The spacing between the name and text is inconsistent. Severity: Low
+*   **Right Side Filters:** Text overflowing on filter selection. Severity: High
+
+**Defect Count: 8**

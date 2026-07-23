@@ -1,0 +1,29 @@
+1. **[G1 · HIGH]** `fleet-dark` — brand/nameplate chrome, top/left: the SOUP wordmark and “FLEET” label occupy a permanent side rail while the page title sits in a separate header. Agents, Skills Hub, Dream Lab, Inbox, Deployments, and Settings place wordmark and title together in the top bar.
+
+2. **[G1 · HIGH]** `agents-dark` and `inbox-dark` — page headers, top/left: Agents adds a breadcrumb beneath its title, while Inbox adds channel filters beneath its title. Both create two-tier headers; the other operator surfaces use a single-row nameplate/header.
+
+3. **[G1 · HIGH]** `hatch-dark` and `splash-dark` — theme toggle, top/right: both journey surfaces render an icon-only control, whereas every operator surface uses the same icon plus the “theme” label.
+
+4. **[G1 · HIGH]** `hatch-dark` — theme toggle, top/right: the control aligns to the right edge of the centered journey frame rather than the viewport/header edge used by Splash and the operator surfaces.
+
+5. **[G1 · HIGH]** `splash-dark` — SOUP nameplate, top/center: the wordmark is embedded in the hero and no header nameplate exists. Hatch retains a dedicated upper-left journey nameplate, and operator surfaces retain one in the top bar.
+
+6. **[G2 · HIGH]** `skills-hub-dark` and `deployments-dark` — update controls, center/right: Skills Hub renders “update 2.4.1” and “update” as neutral outlined buttons; Deployments renders “update to 3.2.1” and related update actions with blue-accent outlines.
+
+7. **[G2 · HIGH]** `hatch-dark` and `splash-dark` — secondary journey actions, center: Hatch renders “Skip ceremony” and “Adjust persona” as outlined buttons, while Splash renders the secondary “Open the Fleet” CTA as a borderless dark-filled button.
+
+8. **[G5 · HIGH]** `inbox-dark` — page body, left/center/right: the filter strip and three-column workspace run edge-to-edge and meet surrounding dividers directly. Other operator bodies preserve a visible outer gutter before their first cards or panels.
+
+9. **[G6 · HIGH]** `inbox-dark` — live-state component in the right “LINE” panel: “live” is rendered as a bare dot-and-text pair. Fleet and Agents render the same live state as a dot inside a filled green status pill.
+
+| Verdict |
+|---|
+| VERDICT fleet-dark: FAIL(1) |
+| VERDICT hatch-dark: FAIL(3) |
+| VERDICT agents-dark: FAIL(1) |
+| VERDICT skills-hub-dark: FAIL(1) |
+| VERDICT dream-lab-dark: PASS |
+| VERDICT inbox-dark: FAIL(3) |
+| VERDICT deployments-dark: FAIL(1) |
+| VERDICT settings-dark: PASS |
+| VERDICT splash-dark: FAIL(3) |

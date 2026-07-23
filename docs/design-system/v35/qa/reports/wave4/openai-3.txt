@@ -1,0 +1,106 @@
+## deployments-dark
+A: PASS
+
+B: PASS
+
+C: PASS
+
+D: PASS
+
+E: findings
+- E2 | deployments-dark | bottom pairing panel + code entry block | bottom-center/right | The left explanatory area is much wider while the actionable code entry cluster is compressed into a narrow right slice, creating a squeezed-vs-underused imbalance within the same section. | severity med | confidence HIGH
+
+UNCERTAIN:
+- The sidebar host list at bottom-left may be slightly cramped against the viewport edge, but the screenshot crop makes this hard to confirm.
+
+## deployments-light
+A: PASS
+
+B: PASS
+
+C: PASS
+
+D: PASS
+
+E: findings
+- E2 | deployments-light | bottom pairing panel + code entry block | bottom-center/right | The left explanatory area is much wider while the actionable code entry cluster is compressed into a narrow right slice, creating a squeezed-vs-underused imbalance within the same section. | severity med | confidence HIGH
+
+UNCERTAIN:
+- The sidebar host list at bottom-left may be slightly cramped against the viewport edge, but the screenshot crop makes this hard to confirm.
+
+## settings-dark
+A: findings
+- A4 | settings-dark | API tokens row action buttons (“rotate” / “revoke”) | center-right | In both token rows, the two trailing buttons do not sit on a shared baseline; the red “revoke” button sits visibly lower than the neighboring “rotate” button. | severity med | confidence HIGH
+
+B: PASS
+
+C: findings
+- C1 | settings-dark | left subnavigation items “Notifications”, “API tokens”, “Danger zone” | upper-left/center-left | These inactive section items read as plain text with no persistent control shape, making them more like labels than clickable navigation compared with the selected pill-shaped item. | severity med | confidence MED
+
+D: PASS
+
+E: findings
+- E1 | settings-dark | left navigation column lower area above HOSTS | bottom-left | There is a large empty block between the settings subnav and the HOSTS section with no apparent structural purpose. | severity low | confidence HIGH
+- E2 | settings-dark | main settings content vs left settings subnav | center-left/center-right | The subnav uses a relatively narrow strip while the main pane carries long rows and controls, yet a large amount of vertical space remains unused in the left pane, producing a squeezed-content vs idle-column imbalance. | severity low | confidence MED
+
+UNCERTAIN:
+- The “Danger zone” section may be cut off by the viewport fold in a way that hides expected bottom padding, but the screenshot ends before that can be confirmed.
+
+## settings-light
+A: findings
+- A4 | settings-light | API tokens row action buttons (“rotate” / “revoke”) | center-right | In both token rows, the two trailing buttons do not sit on a shared baseline; the red “revoke” button sits visibly lower than the neighboring “rotate” button. | severity med | confidence HIGH
+
+B: PASS
+
+C: findings
+- C1 | settings-light | left subnavigation items “Notifications”, “API tokens”, “Danger zone” | upper-left/center-left | These inactive section items read as plain text with no persistent control shape, making them more like labels than clickable navigation compared with the selected pill-shaped item. | severity med | confidence MED
+
+D: PASS
+
+E: findings
+- E1 | settings-light | left navigation column lower area above HOSTS | bottom-left | There is a large empty block between the settings subnav and the HOSTS section with no apparent structural purpose. | severity low | confidence HIGH
+- E2 | settings-light | main settings content vs left settings subnav | center-left/center-right | The subnav uses a relatively narrow strip while the main pane carries long rows and controls, yet a large amount of vertical space remains unused in the left pane, producing a squeezed-content vs idle-column imbalance. | severity low | confidence MED
+
+UNCERTAIN:
+- The “Danger zone” section may be cut off by the viewport fold in a way that hides expected bottom padding, but the screenshot ends before that can be confirmed.
+
+## splash-dark
+A: findings
+- A6 | splash-dark | hero stack (logo, headline, body, CTA row, feature cards) | center | The main centered composition sits slightly left of the optical center of the canvas, with visibly more open space on the right side of the central content block than on the left. | severity med | confidence MED
+
+B: PASS
+
+C: PASS
+
+D: PASS
+
+E: findings
+- E1 | splash-dark | upper-right to mid-right background area outside the hero | top-right/center-right | A broad empty field surrounds the small theme button and contributes no additional content or balancing element. | severity low | confidence MED
+- E4 | splash-dark | overall page composition | center-left/center-right | The page feels left-weighted because the large watermark circle in the upper-left and the slightly left-shifted hero outweigh the sparse right side. | severity med | confidence MED
+
+UNCERTAIN:
+- The feature-card group may also be a touch left of the hero buttons, but the offset is subtle and could be optical due to card copy lengths.
+
+## splash-light
+A: findings
+- A6 | splash-light | hero stack (logo, headline, body, CTA row, feature cards) | center | The main centered composition sits slightly left of the optical center of the canvas, with visibly more open space on the right side of the central content block than on the left. | severity med | confidence MED
+
+B: PASS
+
+C: PASS
+
+D: PASS
+
+E: findings
+- E1 | splash-light | upper-right to mid-right background area outside the hero | top-right/center-right | A broad empty field surrounds the small theme button and contributes no additional content or balancing element. | severity low | confidence MED
+- E4 | splash-light | overall page composition | center-left/center-right | The page feels left-weighted because the large watermark circle in the upper-left and the slightly left-shifted hero outweigh the sparse right side. | severity med | confidence MED
+
+UNCERTAIN:
+- The feature-card group may also be a touch left of the hero buttons, but the offset is subtle and could be optical due to card copy lengths.
+
+VERDICT deployments-dark: FAIL(1)
+VERDICT deployments-light: FAIL(1)
+VERDICT settings-dark: FAIL(4)
+VERDICT settings-light: FAIL(4)
+VERDICT splash-dark: FAIL(3)
+VERDICT splash-light: FAIL(3)
