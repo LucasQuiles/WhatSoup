@@ -333,6 +333,42 @@ describe('probeBinaryAuthStatus', () => {
     vi.useRealTimers();
   });
 
+  it('does not report process closure at timeout before the child actually closes', async () => {
+    vi.useFakeTimers();
+    try {
+      const onProcessClosed = vi.fn();
+      const child = new EventEmitter() as EventEmitter & {
+        pid: number;
+        stdout: EventEmitter;
+        stderr: EventEmitter;
+        kill: ReturnType<typeof vi.fn>;
+      };
+      child.pid = 9911;
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.kill = vi.fn(() => true);
+      const spawnImpl = vi.fn(() => child) as unknown as SpawnImpl;
+      const probe = probeBinaryCommand(
+        'opencode',
+        ['run', 'probe'],
+        {},
+        { timeoutMs: 15_000, onProcessClosed },
+        spawnImpl,
+      );
+
+      await vi.advanceTimersByTimeAsync(15_001);
+      await expect(probe).resolves.toMatchObject({ status: 'failed' });
+      expect(onProcessClosed).not.toHaveBeenCalled();
+
+      child.emit('close', null, 'SIGTERM');
+      expect(onProcessClosed).toHaveBeenCalledOnce();
+      child.emit('close', null, 'SIGTERM');
+      expect(onProcessClosed).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not escalate to SIGKILL when the child dies on the first kill', async () => {
     vi.useFakeTimers();
     let childRef: EventEmitter | null = null;

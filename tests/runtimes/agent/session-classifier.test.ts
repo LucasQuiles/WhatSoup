@@ -23,15 +23,19 @@ function insertSession(fields: {
   claudePid: number;
   chatJid?: string;
   status?: string;
+  provider?: string;
 }): number {
   const result = db.raw.prepare(`
-    INSERT INTO agent_sessions (session_id, claude_pid, started_in_directory, chat_jid, status, started_at)
-    VALUES (?, ?, '/tmp', ?, ?, datetime('now'))
+    INSERT INTO agent_sessions (
+      session_id, claude_pid, started_in_directory, chat_jid, status, provider, started_at
+    )
+    VALUES (?, ?, '/tmp', ?, ?, ?, datetime('now'))
   `).run(
     fields.sessionId ?? null,
     fields.claudePid,
     fields.chatJid ?? null,
     fields.status ?? 'active',
+    fields.provider ?? 'claude-cli',
   );
   return Number(result.lastInsertRowid);
 }
@@ -146,6 +150,67 @@ describe('classifyActiveSessions', () => {
     const results = classifyActiveSessions(db, durability, allAliveNotOwned);
     expect(results).toHaveLength(1);
     expect(results[0].classification).toBe('authoritative_live');
+  });
+
+  it('keeps a spawn-per-turn logical session authoritative when its durable PID is zero', () => {
+    insertSession({
+      claudePid: 0,
+      sessionId: 'managed-session',
+      chatJid: '12345@s.whatsapp.net',
+      provider: 'opencode-cli',
+    });
+    durability.upsertSessionCheckpoint('12345', {
+      // Spawn-per-turn providers retain the most recent transient child PID in
+      // the checkpoint while the durable agent row legitimately has no resident
+      // child. Logical session identity, not PID equality, owns the session.
+      claudePid: 9911,
+      sessionId: 'managed-session',
+      sessionStatus: 'active',
+    });
+
+    const results = classifyActiveSessions(db, durability, allDead);
+
+    expect(results).toHaveLength(1);
+    expect(results[0].classification).toBe('authoritative_live');
+    expect(results[0].reason).toContain('logical session');
+  });
+
+  it('still reclaims a resident provider when the matching checkpoint PID is dead', () => {
+    insertSession({
+      claudePid: 1000,
+      sessionId: 'resident-session',
+      chatJid: '12345@s.whatsapp.net',
+      provider: 'claude-cli',
+    });
+    durability.upsertSessionCheckpoint('12345', {
+      claudePid: 1000,
+      sessionId: 'resident-session',
+      sessionStatus: 'active',
+    });
+
+    const results = classifyActiveSessions(db, durability, allDead);
+
+    expect(results).toHaveLength(1);
+    expect(results[0].classification).toBe('stale_dead');
+  });
+
+  it('fails closed for an unknown provider even when its logical session ID matches', () => {
+    insertSession({
+      claudePid: 0,
+      sessionId: 'unknown-session',
+      chatJid: '12345@s.whatsapp.net',
+      provider: 'future-provider',
+    });
+    durability.upsertSessionCheckpoint('12345', {
+      claudePid: 9911,
+      sessionId: 'unknown-session',
+      sessionStatus: 'active',
+    });
+
+    const results = classifyActiveSessions(db, durability, allAliveNotOwned);
+
+    expect(results).toHaveLength(1);
+    expect(results[0].classification).not.toBe('authoritative_live');
   });
 
   // ── PID ownership verification ──
