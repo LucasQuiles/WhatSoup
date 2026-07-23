@@ -83,6 +83,7 @@ import { ToastContext } from '../../console/src/hooks/toast-context';
 import type { ToastContextValue } from '../../console/src/hooks/toast-context';
 import type { LineInstance, ChatItem, Message } from '../../console/src/types';
 import NavRail from '../../console/src/components/chrome/NavRail';
+import Agents from '../../console/src/pages/Agents';
 import { SummaryTab } from '../../console/src/components/line-detail/SummaryTab';
 import { HistoryTab } from '../../console/src/components/line-detail/HistoryTab';
 import '../../console/src/index.css';
@@ -967,5 +968,90 @@ describe('Viewport matrix — side-panel fold (DD-18r leg 2)', () => {
     const list = container.querySelector('.soup-history-split__list') as HTMLElement;
     expect(list).not.toBeNull();
     expect(window.getComputedStyle(list).width).toBe('288px');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AGENTS suite (v3.5 T5 b-04)
+//
+// The Agents surface stacks at the mockup's OWN breakpoint — agents.html
+// `@media (max-width:1000px)` — NOT the chrome/fleet 1100px idiom. Legs pin
+// the boundary exactly (1001/1000/999) plus the acceptance item: internal
+// detail scroll preserved (roster + detail scroll independently; the page
+// itself does not).
+// ---------------------------------------------------------------------------
+
+describe('Viewport matrix — Agents (v3.5 b-04)', () => {
+  const agentLine: LineInstance = {
+    name: 'quinn',
+    phone: '+15550001234',
+    mode: 'agent',
+    status: 'online',
+    accessMode: 'open',
+    healthPort: 9100,
+    uptime: '2h',
+    messagesTotal: 128,
+    health: null,
+    heartbeat: [],
+    lastActive: new Date().toISOString(),
+    error: null,
+  };
+
+  beforeEach(() => {
+    useLinesMock.mockReturnValue({ data: [agentLine] });
+    useLineMock.mockReturnValue({ data: agentLine });
+    useProviderStatusMock.mockReturnValue({
+      data: {
+        primary: { provider: 'test-provider', model: 'test-model-1', keyPresent: true },
+        fallback: { provider: null, model: null, keyPresent: null, active: false, activeUntil: null },
+      },
+    });
+    useLiveSessionsMock.mockReturnValue({ data: { observedAt: null, sessions: [], anomalyCount: 0 } });
+  });
+
+  it('at 1001px: wrap is roster+detail side-by-side and the panel grid is 2-up', async () => {
+    await page.viewport(1001, 800);
+    const { container } = await render(wrapPage(<Agents />));
+    const wrap = container.querySelector<HTMLElement>('.agents-wrap');
+    expect(wrap).not.toBeNull();
+    expect(window.getComputedStyle(wrap!).gridTemplateColumns.split(' ').length).toBe(2);
+    const grid = container.querySelector<HTMLElement>('.agents-grid');
+    expect(grid).not.toBeNull();
+    expect(window.getComputedStyle(grid!).gridTemplateColumns.split(' ').length).toBe(2);
+  });
+
+  it('at 1000px: wrap and panel grid stack (max-width matches at the boundary)', async () => {
+    await page.viewport(1000, 800);
+    const { container } = await render(wrapPage(<Agents />));
+    const wrap = container.querySelector<HTMLElement>('.agents-wrap');
+    expect(wrap).not.toBeNull();
+    expect(window.getComputedStyle(wrap!).gridTemplateColumns.split(' ').length).toBe(1);
+    const grid = container.querySelector<HTMLElement>('.agents-grid');
+    expect(grid).not.toBeNull();
+    expect(window.getComputedStyle(grid!).gridTemplateColumns.split(' ').length).toBe(1);
+    // roster loses its right border and gains the bottom rule (mockup SSOT)
+    const roster = container.querySelector<HTMLElement>('.agents-roster');
+    expect(window.getComputedStyle(roster!).borderRightWidth).toBe('0px');
+    expect(window.getComputedStyle(roster!).borderBottomWidth).toBe('1px');
+  });
+
+  it('at 999px: wrap and panel grid are stacked', async () => {
+    await page.viewport(999, 800);
+    const { container } = await render(wrapPage(<Agents />));
+    const wrap = container.querySelector<HTMLElement>('.agents-wrap');
+    expect(window.getComputedStyle(wrap!).gridTemplateColumns.split(' ').length).toBe(1);
+  });
+
+  it('internal detail scroll preserved: page clips, roster + detail own their scroll', async () => {
+    await page.viewport(1440, 500);
+    const { container } = await render(wrapPage(<Agents />));
+    const root = container.querySelector<HTMLElement>('.agents-page');
+    expect(root).not.toBeNull();
+    expect(window.getComputedStyle(root!).overflow).toBe('hidden');
+    const detail = container.querySelector<HTMLElement>('.agents-detail');
+    expect(detail).not.toBeNull();
+    expect(window.getComputedStyle(detail!).overflowY).toBe('auto');
+    const roster = container.querySelector<HTMLElement>('.agents-roster');
+    expect(window.getComputedStyle(roster!).overflowY).toBe('auto');
   });
 });

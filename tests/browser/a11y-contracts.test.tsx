@@ -67,6 +67,13 @@ vi.mock('../../console/src/pages/Operator', () => ({
   default: () => <section aria-label="Ops route"><h1>Ops</h1></section>,
 }));
 
+// T5 b-04: /agents graduated off SurfaceStub onto the real surface — mock it
+// like the other graduated pages (landmark law is pinned app-shell-wide; the
+// surface's own contracts live in tests/console/agents.test.tsx).
+vi.mock('../../console/src/pages/Agents', () => ({
+  default: () => <section aria-label="Agents route"><h1>Agents</h1></section>,
+}));
+
 // ChatPicker reaches lib/api for async contact search. Stub it so the browser
 // network sentinel remains quiet.
 vi.mock('../../console/src/lib/api', () => ({
