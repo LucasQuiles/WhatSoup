@@ -1,5 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { DURATION_PATTERN } from '../lib/duration.ts';
 import { safeErrorMessage } from '../lib/error-utils.ts';
 import { loadPolicy } from '../policy/loader.ts';
 import { openDatabase, type StoreLogger } from '../store/connection.ts';
@@ -30,7 +31,6 @@ type OptionResult<T> = { ok: true; value: T } | { ok: false; message: string };
 const STATE_FILE = 'state.sqlite';
 const MUTE_USAGE = 'usage: whatsoup-guard mute --state-dir <dir> --host <host> --domain <domain> --duration <Ns|Nm|Nh|Nd> --reason <text> [--policy <policy.yaml>]\n';
 const STATUS_USAGE = 'usage: whatsoup-guard status --state-dir <dir>\n';
-const DURATION_PATTERN = /^([1-9]\d*)([smhd])$/;
 const UNIT_MS: Record<string, number> = {
   s: 1000,
   m: 60 * 1000,

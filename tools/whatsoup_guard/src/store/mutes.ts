@@ -1,4 +1,5 @@
 import type { Database } from 'better-sqlite3';
+import { formatDurationMs } from '../../../../src/lib/capability-grant.ts';
 import { MuteSchema, type Domain, type Mute } from '../types.ts';
 import type { EventStore } from './events.ts';
 
@@ -175,13 +176,4 @@ function parseIso(value: string, label: string): number {
     throw new Error(`mute ${label} must be an ISO timestamp`);
   }
   return parsed;
-}
-
-function formatDurationMs(ms: number): string {
-  if (ms % DAY_MS === 0) return `${ms / DAY_MS}d`;
-  const hourMs = 60 * 60 * 1000;
-  if (ms % hourMs === 0) return `${ms / hourMs}h`;
-  const minuteMs = 60 * 1000;
-  if (ms % minuteMs === 0) return `${ms / minuteMs}m`;
-  return `${Math.round(ms / 1000)}s`;
 }
