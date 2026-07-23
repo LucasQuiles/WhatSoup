@@ -584,6 +584,22 @@ export function runPublicationGuard(argv = process.argv.slice(2), cwd = process.
     return 0;
   }
 
+  // Non-vacuity floor for the whole-tree modes. `all` and `release` audit the set of TRACKED
+  // files (git ls-files); zero tracked files means the scope resolved to an empty/wrong tree,
+  // and "0 issues over 0 files" must not read as a pass. Gated on mode: `staged` scans the
+  // commit's ADDED lines, where an empty set is legitimate (committing with nothing staged is
+  // normal, and .husky/pre-commit runs guard:publication:staged), so it is deliberately exempt.
+  if (args.mode !== 'staged') {
+    const trackedCount = git(['ls-files'], cwd).split(/\r?\n/).filter(Boolean).length;
+    if (trackedCount === 0) {
+      console.error(
+        `publication-guard: INCONCLUSIVE — 0 tracked files under ${cwd} in ${args.mode} mode. ` +
+          'A publication audit over an empty tree certifies nothing, which is not a pass.',
+      );
+      return 2;
+    }
+  }
+
   const issues =
     args.mode === 'staged'
       ? validateStaged(cwd)
