@@ -98,6 +98,21 @@ export interface ToolDeclaration {
    * docs/tools.md for the authoritative model.)
    */
   sensitive?: boolean;
+  /**
+   * Functional group tag (QR-017 / #1976 — progressive-disclosure taxonomy).
+   * OPTIONAL and backward-compatible: untagged tools remain valid. Populated
+   * at the registration seam (ToolRegistry.withModule, driven by
+   * register-all.ts's per-module runModule) so a whole module's tools share
+   * one group with no per-tool edits; the ~2 inline runtime tools are tagged
+   * explicitly at their registration site.
+   *
+   * This is PURE metadata: it is carried on the declaration but NOT acted on.
+   * It does not affect listTools() advertisement or call() authorization —
+   * later disclosure work (#1976 §3.1+) may use it to filter what is
+   * *advertised*, never what is *authorized* (advertise != authorize; see §0
+   * of the design).
+   */
+  group?: string;
   handler: (params: Record<string, unknown>, session: SessionContext) => Promise<unknown>;
 }
 
