@@ -57,7 +57,7 @@
     "guard:node-pin-consistency": "bash scripts/run-with-pinned-node.sh scripts/check-node-pin-consistency.ts",
     "guard:instance-config": "bash scripts/run-with-pinned-node.sh scripts/check-instance-config.ts",
     "guard:fail-closed-gate": "bash scripts/run-with-pinned-node.sh scripts/fail-closed-gate-guard.ts",
-    "guard:durability-writer": "node --experimental-strip-types scripts/durability-writer-guard.ts",
+    "guard:durability-writer": "bash scripts/run-with-pinned-node.sh scripts/durability-writer-guard.ts",
     "guard:service-units": "bash scripts/run-with-pinned-node.sh scripts/check-service-units.ts",
     "guard:insecure-tempfile": "bash scripts/run-with-pinned-node.sh scripts/check-insecure-tempfile.ts",
     "guard:no-destructive-git": "bash scripts/run-with-pinned-node.sh scripts/no-destructive-git-guard.ts",
