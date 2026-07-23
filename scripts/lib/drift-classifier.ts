@@ -215,6 +215,14 @@ const PATH_RULES: ReadonlyArray<{ test: (p: string) => boolean; drift: DriftClas
     test: (p) => p.startsWith('deploy/') || p.startsWith('phonectl/') || p.startsWith('config/'),
   },
   {
+    // A versioned capability/API contract (e.g. contracts/agent365-whatsoup-v1.json)
+    // is a cross-cutting behavioural surface: a drift here invalidates every consumer's
+    // reuse receipt, so it classifies at the same conservative level as shared runtime.
+    label: 'versioned capability or API contract',
+    drift: 'SHARED_RUNTIME',
+    test: (p) => p.startsWith('contracts/'),
+  },
+  {
     label: 'shared runtime library or cross-cutting core module',
     drift: 'SHARED_RUNTIME',
     test: (p) => p.startsWith('src/lib/') || p.startsWith('src/core/'),
