@@ -38,6 +38,8 @@ const CONFIG: OperationTrackerConfig = {
   thinkingStallMs: 300_000,
   progressPlaceholderRateLimitMs: PROGRESS_PLACEHOLDER_RATE_FLOOR_MS,
   maxStatusMessagesPerTurn: Number.MAX_SAFE_INTEGER,
+  maxStatusMessagesPerWindow: Number.MAX_SAFE_INTEGER,
+  statusMessageWindowMs: 300_000,
   toolThresholds: {
     agent:   { expectedMs: 120_000, slowMultiplier: 1.5, stallMultiplier: 3 },
     bash:    { expectedMs: 15_000,  slowMultiplier: 2,   stallMultiplier: 5 },
