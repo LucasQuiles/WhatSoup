@@ -31,11 +31,12 @@
  * Ops:
  *   • No horizontal page overflow sweep (cheap; no named DD leg).
  *
- * Inbox (C-D7-4 — unblocked since B4 landed):
- *   • Contact pane present (display != "none") when soup-inbox-layout container
- *     is ≥1080px (wrapper-width technique — CONTAINER query, not viewport).
- *   • Contact pane computed display = "none" when container is <1080px.
- *   • Chat-list pane and thread pane both present at named widths.
+ * Inbox (T5 b-07 — v3.5 surface, mockup inbox.html SSOT):
+ *   • Context pane collapse at the mockup's own 1100px VIEWPORT threshold.
+ *   • CSS-only master-detail switch at the mockup's 760px breakpoint (fifth
+ *     distinct SSOT breakpoint; data-mobile-detail mirrors selection state).
+ *   • Composer uniform control height — caps, input, Send all compute to
+ *     var(--inbox-composer-h) = 36px (the bead acceptance item).
  *   • No horizontal overflow at the full viewport matrix.
  *
  * Drawer squeeze (DD-18r deterministic backstop — delivered here, not in the
@@ -54,8 +55,9 @@
  * CONTAINER vs VIEWPORT (d7-investigation §6.9)
  * ================================================
  * Fleet stacking is a VIEWPORT media query (tailwind `lg` = 64rem = 1024px)
- * → proven via page.viewport(). Drawer squeeze and Inbox contact-pane collapse
- * are CONTAINER queries → proven via wrapper-width technique in this file.
+ * → proven via page.viewport(). Drawer squeeze is a CONTAINER query → proven
+ * via wrapper-width technique. The v3.5 Inbox (b-07) uses VIEWPORT queries
+ * (the mockup's own) → proven via page.viewport().
  *
  * NO-BACKEND STRATEGY
  * ====================
@@ -118,6 +120,17 @@ const useRateLimitsMock = vi.hoisted(() => vi.fn(() => ({ data: undefined, isLoa
 // the explicit-shape factory must provide it or the import errors at load.
 const useLiveSessionsMock = vi.hoisted(() => vi.fn(() => ({ data: undefined, isLoading: false, freshness: { observedAt: null, stale: false } })));
 const useApprovalsMock = vi.hoisted(() => vi.fn(() => ({ data: undefined, isLoading: false, freshness: { observedAt: null, stale: false } })));
+// v3.5 Inbox (T5 b-07): chats fixture served by the getChatsQueryOptions mock.
+const inboxChatsFixture = vi.hoisted(() => [
+  {
+    conversationKey: 'conv-a',
+    name: 'Fixture Chat',
+    lastMessagePreview: 'preview',
+    lastMessageAt: '2026-07-23T12:00:00.000Z',
+    unreadCount: 0,
+    isGroup: false,
+  },
+]);
 
 vi.mock('../../console/src/hooks/use-fleet', () => ({
   useLines: useLinesMock,
@@ -134,11 +147,18 @@ vi.mock('../../console/src/hooks/use-fleet', () => ({
   useRateLimits: useRateLimitsMock,
   useLiveSessions: useLiveSessionsMock,
   useApprovals: useApprovalsMock,
-  // Query option factories — not directly consumed by any component under test;
-  // included to prevent "not a function" errors if the module is transitively loaded.
+  // Query option factories — getChatsQueryOptions must be FUNCTIONAL: the
+  // v3.5 Inbox composes per-line chats queries through it inside useQueries.
+  // The queryFn serves the hoisted fixture (retry off) so no network fires.
   getLinesQueryOptions: vi.fn(),
   getLineQueryOptions: vi.fn(),
-  getChatsQueryOptions: vi.fn(),
+  getChatsQueryOptions: (name: string) => ({
+    queryKey: ['chats', name],
+    queryFn: () => Promise.resolve(inboxChatsFixture),
+    enabled: !!name,
+    retry: false,
+    staleTime: Infinity,
+  }),
   getMessagesQueryOptions: vi.fn(),
   // computeKpis is re-exported by use-fleet but SoupKitchen imports it from
   // lib/compute-kpis directly — not needed here.
@@ -171,6 +191,9 @@ vi.mock('../../console/src/lib/api', () => ({
     searchMessages: vi.fn(() => Promise.resolve({ results: [], total: 0 })),
     getMessages: vi.fn(() => Promise.resolve([])),
     sendMessage: vi.fn(() => Promise.resolve()),
+    // v3.5 Inbox: mark-read on open + context-pane checkpoint query.
+    markRead: vi.fn(() => Promise.resolve()),
+    getCheckpoints: vi.fn(() => Promise.resolve({ observedAt: '', checkpoints: [] })),
   },
   // App now reaches use-websocket (via the connection-status hook), which imports
   // isProductionConsole from lib/api — expose it on the explicit-shape mock.
@@ -216,30 +239,10 @@ vi.mock('../../console/src/hooks/use-virtual-messages', () => ({
   }),
 }));
 
-// lib/inbox-chat-selection: resolveCurrentChat returns null (no active chat).
-vi.mock('../../console/src/lib/inbox-chat-selection', () => ({
-  resolveCurrentChat: () => null,
-}));
-
 // lib/inbox-virtualization: pure helpers; stub to isolate from data shape.
 vi.mock('../../console/src/lib/inbox-virtualization', () => ({
   toChronologicalMessages: (msgs: unknown[]) => (Array.isArray(msgs) ? msgs : []),
   selectVirtualMessageRows: () => [],
-}));
-
-// ChatList — stub to avoid the listbox keyboard logic in this layout suite.
-vi.mock('../../console/src/components/ChatList', () => ({
-  default: () => <div data-testid="chat-list-stub" />,
-}));
-
-// MessageBubble — stub to avoid message-bubble rendering in this layout suite.
-vi.mock('../../console/src/components/MessageBubble', () => ({
-  default: () => <div data-testid="message-bubble-stub" />,
-}));
-
-// SaveContactDialog — stub the dialog component used by Inbox.
-vi.mock('../../console/src/components/SaveContactDialog', () => ({
-  SaveContactDialog: () => null,
 }));
 
 // ---------------------------------------------------------------------------
@@ -523,115 +526,153 @@ describe('Viewport matrix — Ops', () => {
 });
 
 // ---------------------------------------------------------------------------
-// INBOX suites (C-D7-4 — unblocked since B4 landed)
+// INBOX suites (T5 b-07 — v3.5 surface, mockup inbox.html SSOT)
 //
-// The Inbox contact-pane collapse is a CONTAINER query on .soup-inbox-layout
-// (primitives.css:1560–1568): @container (max-width: 1079px) { .soup-inbox-contact
-// { display: none; } }. We control the container width via an explicit wrapper
-// style — page.viewport() cannot prove a container query (d7-investigation §6.9).
+// The v3.5 inbox collapse rules are VIEWPORT media queries (the mockup's own):
+//   @media (max-width: 1100px) { .inbox-ctx { display: none; } wrap → 280px 1fr }
+//   @media (max-width: 760px)  { wrap → 1fr; CSS-only master-detail switch on
+//                                data-mobile-detail (React selection state) }
+// so they are proven via page.viewport() directly (d7-investigation §6.9 —
+// the retired v3 band was a container query; this surface is not).
 // ---------------------------------------------------------------------------
 
-/**
- * Wrap Inbox in a sized div so the container query evaluates against the
- * wrapper width, not the viewport. Also wraps in all required providers.
- */
-function wrapInbox(containerWidthPx: number) {
+/** Render the v3.5 Inbox with providers. The useLines mock supplies one line. */
+function wrapInboxV35() {
   return (
     <QueryClientProvider client={makeQC()}>
       <ToastContext.Provider value={toastValue}>
         <MemoryRouter>
-          {/* The explicit width forces soup-inbox-layout's container query to
-              evaluate at the supplied width regardless of viewport size. */}
-          <div style={{ width: `${containerWidthPx}px`, overflow: 'hidden' }}>
-            <Inbox />
-          </div>
+          <Inbox />
         </MemoryRouter>
       </ToastContext.Provider>
     </QueryClientProvider>
   );
 }
 
-describe('Viewport matrix — Inbox (C-D7-4)', () => {
+describe('Viewport matrix — v3.5 Inbox (T5 b-07)', () => {
+  beforeEach(async () => {
+    useLinesMock.mockReturnValue({
+      data: [
+        {
+          name: 'personal',
+          mode: 'chat',
+          status: 'running',
+          accessMode: 'allowlist',
+          health: {
+            transport: { kind: 'baileys', connected: true },
+            whatsapp: { connected: true, connection: { state: 'connected' } },
+          },
+        },
+      ],
+    } as never);
+    useMessagesMock.mockReturnValue({
+      data: [
+        {
+          pk: 1,
+          conversationKey: 'conv-a',
+          senderName: 'Fixture Sender',
+          senderJid: '',
+          content: 'hello',
+          timestamp: '2026-07-23T12:00:00.000Z',
+          fromMe: false,
+          type: 'text',
+        },
+      ],
+    } as never);
+  });
 
-  describe('contact-pane collapse — container query at 1080px threshold', () => {
-    /**
-     * primitives.css Inbox layout band:
-     *   .soup-inbox-layout { container-type: inline-size; }
-     *   @container (max-width: 1079px) { .soup-inbox-contact { display: none; } }
-     *
-     * At container >=1080px: contact pane must not be display:none.
-     * At container <1080px:  contact pane must be display:none.
-     */
-    it('contact pane present (display != none) at 1280px container width', async () => {
+  describe('context pane collapse — viewport query at the mockup 1100px threshold', () => {
+    it('context pane present and 3-column grid at 1440×900', async () => {
       await page.viewport(1440, 900);
-      const { container } = await render(wrapInbox(1280));
-
-      const contactPane = container.querySelector('.soup-inbox-contact') as HTMLElement | null;
-      if (!contactPane) {
-        // Pane may not render if no line is selected — assert it exists.
-        expect(container.querySelector('.soup-inbox-contact')).not.toBeNull();
-        return;
-      }
-      const display = window.getComputedStyle(contactPane).display;
-      expect(display).not.toBe('none');
+      const { container } = await render(wrapInboxV35());
+      const ctx = container.querySelector('.inbox-ctx') as HTMLElement | null;
+      expect(ctx).not.toBeNull();
+      expect(window.getComputedStyle(ctx!).display).not.toBe('none');
+      const wrap = container.querySelector('.inbox-wrap') as HTMLElement;
+      expect(window.getComputedStyle(wrap).gridTemplateColumns.split(' ').length).toBe(3);
     });
 
-    it('contact pane present (display != none) at 1200px container width (safely above threshold)', async () => {
-      // The @container (max-width: 1079px) rule collapses the pane at <1080px.
-      // We use 1200px (safely above) to avoid subpixel boundary ambiguity.
-      await page.viewport(1440, 900);
-      const { container } = await render(wrapInbox(1200));
-
-      const contactPane = container.querySelector('.soup-inbox-contact') as HTMLElement | null;
-      if (!contactPane) {
-        expect(container.querySelector('.soup-inbox-contact')).not.toBeNull();
-        return;
-      }
-      const display = window.getComputedStyle(contactPane).display;
-      expect(display).not.toBe('none');
+    it('context pane present at 1101px (just above the mockup threshold)', async () => {
+      await page.viewport(1101, 900);
+      const { container } = await render(wrapInboxV35());
+      const ctx = container.querySelector('.inbox-ctx') as HTMLElement | null;
+      expect(ctx).not.toBeNull();
+      expect(window.getComputedStyle(ctx!).display).not.toBe('none');
     });
 
-    it('contact pane collapsed (display = none) at 1079px container width (just below threshold)', async () => {
-      await page.viewport(1440, 900);
-      const { container } = await render(wrapInbox(1079));
-
-      const contactPane = container.querySelector('.soup-inbox-contact') as HTMLElement | null;
-      if (!contactPane) {
-        // If the element is not in the DOM at all, the pane is collapsed — pass.
-        return;
-      }
-      const display = window.getComputedStyle(contactPane).display;
-      expect(display).toBe('none');
+    it('context pane collapsed (display = none) at 1100px (the mockup threshold)', async () => {
+      await page.viewport(1100, 900);
+      const { container } = await render(wrapInboxV35());
+      const ctx = container.querySelector('.inbox-ctx') as HTMLElement | null;
+      expect(ctx).not.toBeNull();
+      expect(window.getComputedStyle(ctx!).display).toBe('none');
+      // grid drops to the narrow 2-column form
+      const wrap = container.querySelector('.inbox-wrap') as HTMLElement;
+      expect(window.getComputedStyle(wrap).gridTemplateColumns.split(' ').length).toBe(2);
     });
 
-    it('contact pane collapsed (display = none) at 768px container width', async () => {
-      await page.viewport(1440, 900);
-      const { container } = await render(wrapInbox(768));
-
-      const contactPane = container.querySelector('.soup-inbox-contact') as HTMLElement | null;
-      if (!contactPane) {
-        return;
-      }
-      const display = window.getComputedStyle(contactPane).display;
-      expect(display).toBe('none');
+    it('context pane collapsed at 1000px (below threshold)', async () => {
+      await page.viewport(1000, 900);
+      const { container } = await render(wrapInboxV35());
+      const ctx = container.querySelector('.inbox-ctx') as HTMLElement | null;
+      expect(window.getComputedStyle(ctx!).display).toBe('none');
     });
   });
 
-  describe('chat-list and thread panes present', () => {
-    it('chat-list pane present at 1280px container', async () => {
-      await page.viewport(1440, 900);
-      const { container } = await render(wrapInbox(1280));
-      // Chat-list pane carries the --inbox-pane-chats width class; the ChatList
-      // stub renders inside it.
-      const chatListStub = container.querySelector('[data-testid="chat-list-stub"]');
-      expect(chatListStub).not.toBeNull();
+  describe('master-detail switch — the mockup 760px breakpoint (fifth SSOT breakpoint)', () => {
+    it('list mode hides the thread at 760px; both panes present at 761px', async () => {
+      await page.viewport(760, 800);
+      const { container } = await render(wrapInboxV35());
+      // no selection → data-mobile-detail="list": thread hidden, list visible
+      const page1 = container.querySelector('.inbox-page') as HTMLElement;
+      expect(page1.getAttribute('data-mobile-detail')).toBe('list');
+      const thread = container.querySelector('.inbox-thread') as HTMLElement;
+      expect(window.getComputedStyle(thread).display).toBe('none');
+      const list = container.querySelector('.inbox-list') as HTMLElement;
+      expect(window.getComputedStyle(list).display).not.toBe('none');
+
+      await page.viewport(761, 800);
+      expect(window.getComputedStyle(thread).display).not.toBe('none');
     });
 
-    it('chat-list pane present at 768px container', async () => {
+    it('selecting a conversation flips to thread mode: list hides at 760px', async () => {
+      await page.viewport(760, 800);
+      const { container } = await render(wrapInboxV35());
+      await vi.waitFor(() => {
+        expect(container.querySelector('.inbox-citem')).not.toBeNull();
+      });
+      const item = container.querySelector('.inbox-citem') as HTMLElement | null;
+      item!.click();
+      const pageEl = container.querySelector('.inbox-page') as HTMLElement;
+      await vi.waitFor(() => {
+        expect(pageEl.getAttribute('data-mobile-detail')).toBe('thread');
+      });
+      const list = container.querySelector('.inbox-list') as HTMLElement;
+      expect(window.getComputedStyle(list).display).toBe('none');
+      // back affordance appears only in this mode
+      const back = container.querySelector('.inbox-back') as HTMLElement;
+      expect(window.getComputedStyle(back).display).not.toBe('none');
+    });
+  });
+
+  describe('composer uniform control height — the bead acceptance item', () => {
+    it('caps, input, and Send all compute to the --inbox-composer-h 36px', async () => {
       await page.viewport(1440, 900);
-      const { container } = await render(wrapInbox(768));
-      const chatListStub = container.querySelector('[data-testid="chat-list-stub"]');
-      expect(chatListStub).not.toBeNull();
+      const { container } = await render(wrapInboxV35());
+      await vi.waitFor(() => {
+        expect(container.querySelector('.inbox-citem')).not.toBeNull();
+      });
+      const item = container.querySelector('.inbox-citem') as HTMLElement | null;
+      item!.click();
+      await vi.waitFor(() => {
+        expect(container.querySelector('.inbox-cap')).not.toBeNull();
+      });
+      const cap = container.querySelector('.inbox-cap') as HTMLElement;
+      const input = container.querySelector('.inbox-input') as HTMLElement;
+      const send = container.querySelector('.inbox-send') as HTMLElement;
+      expect(cap.getBoundingClientRect().height).toBe(36);
+      expect(input.getBoundingClientRect().height).toBe(36);
+      expect(send.getBoundingClientRect().height).toBe(36);
     });
   });
 
@@ -639,8 +680,8 @@ describe('Viewport matrix — Inbox (C-D7-4)', () => {
     for (const vp of VIEWPORTS) {
       it(`Inbox: no horizontal overflow at ${vp.label}`, async () => {
         await page.viewport(vp.width, vp.height);
-        const { container } = await render(wrapInbox(vp.width));
-        const root = container.firstElementChild as HTMLElement;
+        const { container } = await render(wrapInboxV35());
+        const root = container.querySelector('.inbox-page') as HTMLElement;
         if (!root) return;
         // Allow 1px subpixel rounding tolerance (C-D7-6).
         expect(root.scrollWidth).toBeLessThanOrEqual(root.clientWidth + 1);

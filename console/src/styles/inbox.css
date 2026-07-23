@@ -52,6 +52,7 @@
   color: var(--text-2-v35);
   font: 500 var(--text-sm) / 1.3 var(--font-mono);
   cursor: pointer;
+  height: auto; /* release the soup-btn md height — mockup chips are padding-defined */
 }
 .inbox-chip:hover { color: var(--text-1-v35); }
 .inbox-chip--on {
@@ -97,6 +98,7 @@
   padding: var(--inbox-seg-btn-pad-y) 0;
   border-radius: var(--inbox-seg-btn-radius);
   cursor: pointer;
+  height: auto; /* release the soup-btn md height — mockup seg is padding-defined */
 }
 .inbox-seg button.on {
   background: color-mix(in srgb, var(--accent-v35) 12%, transparent);
@@ -295,6 +297,7 @@
   padding: var(--inbox-sys-pad);
   border-radius: var(--chrome-pill-radius);
   cursor: pointer;
+  height: auto; /* release the soup-btn md height — pill anatomy */
 }
 .inbox-older:hover { color: var(--text-1-v35); }
 .inbox-older:disabled { opacity: var(--opacity-disabled); cursor: default; }
@@ -310,6 +313,7 @@
   border-radius: var(--chrome-pill-radius);
   cursor: pointer;
   box-shadow: var(--shadow-lift-v35);
+  height: auto; /* release the soup-btn md height — pill anatomy */
 }
 
 /* message rows (mockup .mrow / .ma / .bub) */
@@ -507,6 +511,7 @@
   font: 600 var(--text-body) / 1 var(--font-body);
   cursor: pointer;
   padding: 0;
+  height: auto; /* ghost affordance — no fixed height */
 }
 
 /* ── Mockup breakpoints (SSOT @media) ── */

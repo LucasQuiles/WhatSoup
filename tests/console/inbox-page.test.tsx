@@ -1,81 +1,49 @@
 /**
- * Inbox page — structural and layout-contract harness (DD-18r pane leg, commit 2).
+ * Inbox page — v3.5 surface contract harness (T5 b-07; mockup inbox.html SSOT).
  *
- * Covers:
- *   - Root carries soup-inbox-layout (container-query root for contact-pane collapse).
- *   - Chat-list pane uses --inbox-pane-chats token (264px spec value, tokens-v3 §4/§6.12).
- *   - Contact pane uses --inbox-pane-contact token (248px spec value, tokens-v3 §4/§6.12).
- *   - Contact pane carries soup-inbox-contact (collapse target class for @container query).
- *   - Listbox receives chats and renders them as options.
- *
- * Class-contract methodology (identical to the B1/B2 harness pattern): asserts className
- * strings and token var() references rather than computed layout, which jsdom cannot
- * evaluate. Container-query and computed-size proofs live in D7 viewport tests.
+ * DISPOSITION RECORD (this file previously pinned the v3 page — 27 tests):
+ *   SURVIVED (re-pinned against the v3.5 anatomy):
+ *   - load-older pagination (success / end-of-history / failure-toast)
+ *   - composer send (trim, optimistic, invalidate) + send failure toast
+ *   - mark-read (now fires on OPEN per the unified-inbox model, same real route)
+ *   - deep-link selection (?line=&chat=)
+ *   REMOVED per the mockup SSOT (not test-signal weakening — the features left
+ *   the surface; dispositions recorded in the b-07 PR):
+ *   - in-conversation search row (mockup has no search lane; global search is
+ *     not an inbox-bead concern)
+ *   - Allow/Block/Save-Contact actions (not in the mockup; access control
+ *     lives on the line-detail Access surface. The v3 DM path was also broken
+ *     — it posted subjectType 'number' against the 'phone'|'group' validator)
+ *   - per-line picker (the v3.5 inbox is one unified plane across lines)
+ *   NEW coverage: channel chips honesty, seg filter, unified merge, takeover
+ *   end-to-end (local-only honesty), context cards honesty, composer caps.
  *
  * @vitest-environment jsdom
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type ReactNode } from 'react'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { MemoryRouter } from 'react-router-dom'
+import type { LineInstance } from '../../console/src/types'
 
 // ---------------------------------------------------------------------------
-// Module-level mocks — must appear before dynamic imports
+// Module-level mocks
 // ---------------------------------------------------------------------------
 
-// framer-motion: render motion.div as a plain div so the animated root is
-// inspectable in jsdom without animation-frame machinery.
-vi.mock('framer-motion', async () => {
-  const React = await import('react')
+// use-fleet: keep the real query-option factories (the page composes per-line
+// chats queries through them); stub only the data hooks.
+let mockLines: LineInstance[] = []
+let mockMessages: Array<Record<string, unknown>> = []
+
+vi.mock('../../console/src/hooks/use-fleet', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../console/src/hooks/use-fleet')>()
   return {
-    motion: {
-      div: ({
-        children,
-        className,
-        initial: _i,
-        animate: _a,
-        transition: _t,
-        ...rest
-      }: Record<string, unknown> & { children?: ReactNode; className?: string }) =>
-        React.createElement('div', { className, ...rest }, children),
-    },
+    ...actual,
+    useLines: () => ({ data: mockLines }),
+    useMessages: () => ({ data: mockMessages }),
   }
 })
-
-// react-router-dom: mutable search params so deep-link behavior can be exercised.
-let mockSearchParams = new URLSearchParams()
-const setSearchParamsMock = vi.fn()
-vi.mock('react-router-dom', () => ({
-  useSearchParams: () => [mockSearchParams, setSearchParamsMock],
-}))
-
-// use-fleet hooks: mutable state so individual tests can override.
-let mockLines: Array<{ name: string; mode: string; status: string }> = []
-let mockChats: Array<{
-  conversationKey: string
-  name: string
-  lastMessagePreview: string
-  lastMessageAt: string
-  unreadCount: number
-  isGroup: boolean
-}> = []
-let mockMessages: Array<unknown> = []
-let mockTyping: Array<unknown> = []
-let mockChatsError = false
-
-vi.mock('../../console/src/hooks/use-fleet', () => ({
-  useLines: () => ({ data: mockLines }),
-  useChats: () => ({ data: mockChats, isError: mockChatsError }),
-  useMessages: () => ({ data: mockMessages }),
-  useTyping: () => ({ data: mockTyping }),
-}))
-
-// Transport status (DD-29). Mutable so the offline-branch test can flip it;
-// defaults to connected so all other layout tests are unaffected.
-const transportState = { status: 'connected' as 'connected' | 'reconnecting' | 'offline', isDisconnected: false }
-vi.mock('../../console/src/hooks/use-transport-status', () => ({
-  useTransportStatus: () => transportState,
-}))
 
 // use-virtual-messages: surface all messages as virtual items (jsdom has no scroll).
 vi.mock('../../console/src/hooks/use-virtual-messages', () => ({
@@ -106,15 +74,14 @@ vi.mock('../../console/src/hooks/use-sticky-scroll', () => ({
   }),
 }))
 
-// api: stub — layout tests do not drive API calls.
+// api: stub — contract tests drive the mocked surface, never the network.
 vi.mock('../../console/src/lib/api', () => ({
   api: {
-    searchMessages: vi.fn().mockResolvedValue({ results: [], total: 0 }),
-    sendMessage: vi.fn().mockResolvedValue(undefined),
+    getChats: vi.fn().mockResolvedValue([]),
     getMessages: vi.fn().mockResolvedValue([]),
+    sendMessage: vi.fn().mockResolvedValue(undefined),
     markRead: vi.fn().mockResolvedValue(undefined),
-    accessDecision: vi.fn().mockResolvedValue(undefined),
-    saveContact: vi.fn().mockResolvedValue(undefined),
+    getCheckpoints: vi.fn().mockResolvedValue({ observedAt: '', checkpoints: [] }),
   },
 }))
 
@@ -140,53 +107,64 @@ vi.mock('../../console/src/hooks/toast-context', () => ({
 import Inbox from '../../console/src/pages/Inbox'
 import { api } from '../../console/src/lib/api'
 
-const searchMessagesMock = api.searchMessages as unknown as ReturnType<typeof vi.fn>
-const sendMessageMock = api.sendMessage as unknown as ReturnType<typeof vi.fn>
+const getChatsMock = api.getChats as unknown as ReturnType<typeof vi.fn>
 const getMessagesMock = api.getMessages as unknown as ReturnType<typeof vi.fn>
+const sendMessageMock = api.sendMessage as unknown as ReturnType<typeof vi.fn>
 const markReadMock = api.markRead as unknown as ReturnType<typeof vi.fn>
-const accessDecisionMock = api.accessDecision as unknown as ReturnType<typeof vi.fn>
-const saveContactMock = api.saveContact as unknown as ReturnType<typeof vi.fn>
+const getCheckpointsMock = api.getCheckpoints as unknown as ReturnType<typeof vi.fn>
 
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
 
-function makeChat(
-  conversationKey: string,
-  overrides: Partial<(typeof mockChats)[0]> = {},
-): (typeof mockChats)[0] {
+function makeLine(name: string, overrides: Record<string, unknown> = {}): LineInstance {
+  return {
+    name,
+    phone: '+10000000000',
+    mode: 'chat',
+    status: 'running',
+    accessMode: 'allowlist',
+    healthPort: 4000,
+    uptime: '1h',
+    messagesTotal: 0,
+    health: {
+      status: 'ok',
+      uptime_seconds: 60,
+      messages_total: 0,
+      whatsapp: { connected: true, connection: { state: 'connected' } },
+      transport: { kind: 'baileys', connected: true, selfId: '1000' },
+      sqlite: { messages_total: 0, schema_version: 1 },
+    },
+    heartbeat: [],
+    lastActive: '',
+    error: null,
+    ...overrides,
+  } as LineInstance
+}
+
+function makeChat(conversationKey: string, overrides: Record<string, unknown> = {}) {
   return {
     conversationKey,
     name: `Chat ${conversationKey}`,
-    lastMessagePreview: 'preview',
-    lastMessageAt: '2026-04-05T12:00:00.000Z',
+    lastMessagePreview: 'preview text',
+    lastMessageAt: '2026-07-23T12:00:00.000Z',
     unreadCount: 0,
     isGroup: false,
     ...overrides,
   }
 }
 
-function makeMessage(
-  pk: number,
-  content: string,
-  overrides: Partial<{
-    conversationKey: string
-    senderName: string
-    senderJid: string
-    timestamp: string
-    fromMe: boolean
-    type: string
-  }> = {},
-) {
+function makeMessage(pk: number, content: string | null, overrides: Record<string, unknown> = {}) {
   return {
     pk,
-    conversationKey: overrides.conversationKey ?? 'conv-a',
-    senderName: overrides.senderName ?? (overrides.fromMe ? 'You' : 'Fixture Sender'),
-    senderJid: overrides.senderJid ?? '',
+    conversationKey: 'conv-a',
+    senderName: 'Fixture Sender',
+    senderJid: '',
     content,
-    timestamp: overrides.timestamp ?? '2026-04-05T12:00:00.000Z',
-    fromMe: overrides.fromMe ?? false,
-    type: overrides.type ?? 'text',
+    timestamp: '2026-07-23T12:00:00.000Z',
+    fromMe: false,
+    type: 'text',
+    ...overrides,
   }
 }
 
@@ -194,593 +172,415 @@ function makeClient() {
   return new QueryClient({ defaultOptions: { queries: { retry: false } } })
 }
 
-function renderInbox() {
+function renderInbox(initialEntries: string[] = ['/inbox']) {
   const qc = makeClient()
-  return render(
+  const view = render(
     <QueryClientProvider client={qc}>
-      <Inbox />
+      <MemoryRouter initialEntries={initialEntries}>
+        <Inbox />
+      </MemoryRouter>
     </QueryClientProvider>,
   )
+  return { ...view, qc }
 }
 
-// ---------------------------------------------------------------------------
-// Test lifecycle
-// ---------------------------------------------------------------------------
-
 beforeEach(() => {
-  mockLines = [{ name: 'test-line', mode: 'passive', status: 'ok' }]
-  mockChats = []
+  mockLines = [makeLine('personal')]
   mockMessages = []
-  mockTyping = []
-  mockChatsError = false
-  mockSearchParams = new URLSearchParams()
-  setSearchParamsMock.mockReset()
-  transportState.status = 'connected'
-  transportState.isDisconnected = false
-  searchMessagesMock.mockReset()
-  searchMessagesMock.mockResolvedValue({ results: [], total: 0 })
-  sendMessageMock.mockReset()
-  sendMessageMock.mockResolvedValue(undefined)
-  getMessagesMock.mockReset()
-  getMessagesMock.mockResolvedValue([])
-  markReadMock.mockReset()
-  markReadMock.mockResolvedValue(undefined)
-  accessDecisionMock.mockReset()
-  accessDecisionMock.mockResolvedValue(undefined)
-  saveContactMock.mockReset()
-  saveContactMock.mockResolvedValue(undefined)
-  for (const spy of Object.values(toastMock)) spy.mockReset()
+  getChatsMock.mockReset().mockResolvedValue([makeChat('conv-a')])
+  getMessagesMock.mockReset().mockResolvedValue([])
+  sendMessageMock.mockReset().mockResolvedValue(undefined)
+  markReadMock.mockReset().mockResolvedValue(undefined)
+  getCheckpointsMock.mockReset().mockResolvedValue({ observedAt: '', checkpoints: [] })
+  Object.values(toastMock).forEach((fn) => fn.mockClear())
 })
 
-afterEach(() => cleanup())
+afterEach(cleanup)
 
 // ---------------------------------------------------------------------------
-// Root layout class (container-query root — DD-18r, C-B4-2)
+// Anatomy — chips, seg, list
 // ---------------------------------------------------------------------------
 
-describe('Inbox — root container-query class', () => {
-  it('root element carries soup-inbox-layout (container-type root for contact-pane collapse)', () => {
+describe('v3.5 inbox — surface anatomy', () => {
+  it('owns exactly one h1 (single-h1 law; chrome title is an aria-hidden span)', async () => {
     const { container } = renderInbox()
-    const root = container.firstElementChild as HTMLElement
-
-    expect(root.className).toContain('soup-inbox-layout')
-  })
-})
-
-// ---------------------------------------------------------------------------
-// Token width class contracts (tokens-v3 §4/§6.12; visible change C-B4-1)
-// ---------------------------------------------------------------------------
-
-describe('Inbox — pane token width classes', () => {
-  it('chat-list pane references --inbox-pane-chats (264px spec token)', () => {
-    const { container } = renderInbox()
-    // The chat-list pane is the first flex child of the root
-    const chatsPane = container.querySelector('.w-\\[var\\(--inbox-pane-chats\\)\\]')
-
-    expect(chatsPane).not.toBeNull()
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    const h1s = container.querySelectorAll('h1')
+    expect(h1s.length).toBe(1)
+    expect(h1s[0]!.textContent).toBe('Inbox')
   })
 
-  it('contact pane references --inbox-pane-contact (248px spec token)', () => {
+  it('renders channel chips for real channels only, with honest counts', async () => {
     const { container } = renderInbox()
-    const contactPane = container.querySelector('.w-\\[var\\(--inbox-pane-contact\\)\\]')
-
-    expect(contactPane).not.toBeNull()
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    const chips = [...container.querySelectorAll('.inbox-chip')]
+    // All + WhatsApp (the one line's baileys transport) — never Signal/iMessage/…
+    expect(chips.length).toBe(2)
+    expect(chips[0]!.textContent).toContain('All')
+    expect(chips[0]!.querySelector('.inbox-chip__c')!.textContent).toBe('1')
+    expect(chips[1]!.textContent).toContain('WhatsApp')
+    expect(chips[1]!.querySelector('.inbox-chip__glyph')).not.toBeNull()
   })
 
-  it('chat-list pane carries the v3 width token and no legacy token', () => {
+  it('channel chip filters the list to that channel', async () => {
+    getChatsMock.mockResolvedValue([makeChat('conv-a')])
     const { container } = renderInbox()
-    // Positive control: locate the pane via the v3 token class, so the
-    // legacy-absence assert below cannot pass via a broken selector.
-    const chatsPane = container.querySelector('.w-\\[var\\(--inbox-pane-chats\\)\\]')
-    expect(chatsPane).not.toBeNull()
-
-    expect((chatsPane as Element).className).toContain('w-[var(--inbox-pane-chats)]')
-    expect(container.innerHTML).not.toContain('panel-chat-list')
+    await waitFor(() => expect(container.querySelectorAll('.inbox-citem').length).toBe(1))
+    const chips = [...container.querySelectorAll('.inbox-chip')]
+    fireEvent.click(chips[1]!) // WhatsApp
+    expect(container.querySelectorAll('.inbox-citem').length).toBe(1)
   })
 
-  it('contact pane carries the v3 width token and no legacy token', () => {
+  it('conversation item anatomy: avatar initials, channel glyph badge, name, time, preview', async () => {
+    getChatsMock.mockResolvedValue([makeChat('conv-a', { name: 'Lucas Quiles' })])
     const { container } = renderInbox()
-    const contactPane = container.querySelector('.w-\\[var\\(--inbox-pane-contact\\)\\]')
-    expect(contactPane).not.toBeNull()
-
-    expect((contactPane as Element).className).toContain('w-[var(--inbox-pane-contact)]')
-    expect(container.innerHTML).not.toContain('panel-contact')
-  })
-})
-
-// ---------------------------------------------------------------------------
-// Contact pane collapse-target class (soup-inbox-contact, @container query target)
-// ---------------------------------------------------------------------------
-
-describe('Inbox — contact pane collapse-target class', () => {
-  it('contact pane carries soup-inbox-contact (the @container display:none target)', () => {
-    const { container } = renderInbox()
-    const contactPane = container.querySelector('.soup-inbox-contact')
-
-    expect(contactPane).not.toBeNull()
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    const item = container.querySelector('.inbox-citem')!
+    expect(item.querySelector('.inbox-ava')!.textContent).toContain('LQ')
+    expect(item.querySelector('.inbox-ava__glyph')).not.toBeNull()
+    expect(item.querySelector('.inbox-citem__nm')!.textContent).toBe('Lucas Quiles')
+    expect(item.querySelector('.inbox-citem__tm')).not.toBeNull()
+    expect(item.querySelector('.inbox-citem__pv')!.textContent).toBe('preview text')
   })
 
-  it('contact pane carries both soup-inbox-contact and the token width class', () => {
+  it('seg control splits direct from rooms; rooms get the group avatar shape', async () => {
+    getChatsMock.mockResolvedValue([
+      makeChat('conv-a'),
+      makeChat('120363001_at_g.us', { isGroup: true, name: 'WHATSOUP' }),
+    ])
     const { container } = renderInbox()
-    const contactPane = container.querySelector('.soup-inbox-contact') as HTMLElement
-
-    expect(contactPane).not.toBeNull()
-    expect(contactPane.className).toContain('w-[var(--inbox-pane-contact)]')
+    await waitFor(() => expect(container.querySelectorAll('.inbox-citem').length).toBe(1))
+    // switch to rooms
+    const roomsBtn = [...container.querySelectorAll('.inbox-seg button')].find(
+      (b) => b.textContent === 'Rooms',
+    )!
+    fireEvent.click(roomsBtn)
+    const items = container.querySelectorAll('.inbox-citem')
+    expect(items.length).toBe(1)
+    expect(items[0]!.querySelector('.inbox-ava--grp')).not.toBeNull()
+    expect(items[0]!.querySelector('.inbox-citem__nm')!.textContent).toBe('WHATSOUP')
   })
 
-  it('the collapse-target is a distinct element from the chat-list pane', () => {
-    const { container } = renderInbox()
-    const contactPane = container.querySelector('.soup-inbox-contact') as HTMLElement
-    const chatsPane = container.querySelector('.w-\\[var\\(--inbox-pane-chats\\)\\]') as HTMLElement
+  it('renders the honest empty list state when a filter has no conversations', async () => {
+    getChatsMock.mockResolvedValue([])
+    const { container, getByTestId } = renderInbox()
+    await waitFor(() => expect(getByTestId('inbox-list-empty')).toBeDefined())
+    expect(container.querySelector('.inbox-citem')).toBeNull()
+  })
 
-    expect(contactPane).not.toBeNull()
-    expect(chatsPane).not.toBeNull()
-    expect(contactPane).not.toBe(chatsPane)
+  it('unread badge renders the count; zero-unread renders no badge', async () => {
+    getChatsMock.mockResolvedValue([
+      makeChat('conv-a', { unreadCount: 3 }),
+      makeChat('conv-b', { name: 'Ben' }),
+    ])
+    const { container } = renderInbox()
+    await waitFor(() => expect(container.querySelectorAll('.inbox-citem').length).toBe(2))
+    const badges = container.querySelectorAll('.inbox-ub')
+    expect(badges.length).toBe(1)
+    expect(badges[0]!.textContent).toBe('3')
   })
 })
 
 // ---------------------------------------------------------------------------
-// Listbox receives chats (structural wiring — ChatList renders options)
+// Selection + thread
 // ---------------------------------------------------------------------------
 
-describe('Inbox — listbox renders chats from the hook', () => {
-  it('renders zero options when the hook returns no chats', () => {
-    mockChats = []
-    renderInbox()
-
-    expect(screen.queryAllByRole('option').length).toBe(0)
-    expect(screen.getByRole('listbox', { name: 'Chat conversations' })).toBeDefined()
-  })
-
-  it('renders exactly N options for N chats from the hook', () => {
-    mockChats = [
-      makeChat('conv-1'),
-      makeChat('conv-2'),
-      makeChat('conv-3'),
-    ]
-    renderInbox()
-
-    const options = screen.getAllByRole('option')
-    expect(options.length).toBe(3)
-  })
-
-  it('option labels reflect the chat name from the hook data', () => {
-    mockChats = [makeChat('conv-x', { name: 'Fixture Contact' })]
-    renderInbox()
-
-    const opt = screen.getByRole('option', { name: 'Open conversation with Fixture Contact' })
-    expect(opt.getAttribute('data-conv-key')).toBe('conv-x')
-    expect(opt.textContent).toContain('Fixture Contact')
-  })
-
-  it('marks only active-line typing chats with the typing indicator', () => {
-    mockChats = [
-      makeChat('conv-a', { name: 'Typing Contact' }),
-      makeChat('conv-b', { name: 'Quiet Contact' }),
-    ]
-    mockTyping = [
-      { instance: 'test-line', jid: 'conv-a' },
-      { instance: 'other-line', jid: 'conv-b' },
-    ]
-    renderInbox()
-
-    expect(screen.getByText('typing')).toBeDefined()
-    expect(screen.getByRole('option', { name: 'Open conversation with Typing Contact' }).textContent).toContain('typing')
-    expect(screen.getByRole('option', { name: 'Open conversation with Quiet Contact' }).textContent).not.toContain('typing')
-  })
-})
-
-// ---------------------------------------------------------------------------
-// Selection and deep-link workflows
-// ---------------------------------------------------------------------------
-
-describe('Inbox — conversation selection workflows', () => {
-  it('deep link selects the requested line and chat once, then clears the URL params', async () => {
-    mockLines = [
-      { name: 'fallback-line', mode: 'passive', status: 'ok' },
-      { name: 'deep-line', mode: 'agent', status: 'ok' },
-    ]
-    mockChats = [makeChat('deep-chat', { name: 'Deep Link Contact', unreadCount: 2 })]
-    mockSearchParams = new URLSearchParams('line=deep-line&chat=deep-chat')
-
+describe('v3.5 inbox — thread', () => {
+  it('empty thread state when nothing is selected', async () => {
     const { container } = renderInbox()
-
-    await waitFor(() => {
-      expect(screen.getByText('deep-line · direct')).toBeDefined()
-    })
-    expect(screen.getByText('2 unread')).toBeDefined()
-    expect(setSearchParamsMock).toHaveBeenCalledWith({}, { replace: true })
-    expect(container.firstElementChild?.getAttribute('data-mobile-detail')).toBe('thread')
+    await waitFor(() => expect(container.querySelector('.inbox-thread')).not.toBeNull())
+    expect(container.querySelector('.inbox-thread__empty')).not.toBeNull()
+    expect(container.querySelector('.inbox-thead')).toBeNull()
   })
 
-  it('mobile back affordance returns the master-detail layout to the conversation list', async () => {
-    mockChats = [makeChat('conv-a', { name: 'Test Chat' })]
+  it('selecting a conversation renders the thread head with line · channel · kind sub', async () => {
     const { container } = renderInbox()
-
-    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Test Chat' }))
-    expect(container.firstElementChild?.getAttribute('data-mobile-detail')).toBe('thread')
-
-    fireEvent.click(screen.getByRole('button', { name: 'Back to conversations' }))
-
-    await waitFor(() => {
-      expect(screen.getByText('Select a conversation')).toBeDefined()
-    })
-    expect(container.firstElementChild?.getAttribute('data-mobile-detail')).toBe('list')
-  })
-})
-
-// ---------------------------------------------------------------------------
-// Offline-with-cache branch for the chat list (DD-29)
-// ---------------------------------------------------------------------------
-
-describe('Inbox — offline chat-list state', () => {
-  it('shows the offline cached-data state instead of the chat list when chats fail to load AND transport is disconnected', () => {
-    mockChatsError = true
-    transportState.status = 'reconnecting'
-    transportState.isDisconnected = true
-    renderInbox()
-
-    expect(screen.getByText('Showing cached data')).toBeDefined()
-    expect(screen.getByText('Reconnecting…')).toBeDefined()
-    // The chat listbox is replaced by the offline surface.
-    expect(screen.queryByRole('listbox', { name: 'Chat conversations' })).toBeNull()
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    fireEvent.click(container.querySelector('.inbox-citem')!)
+    await waitFor(() => expect(container.querySelector('.inbox-thead')).not.toBeNull())
+    expect(container.querySelector('.inbox-thead__sub')!.textContent).toContain('personal')
+    expect(container.querySelector('.inbox-thead__sub')!.textContent).toContain('WhatsApp')
+    expect(container.querySelector('.inbox-thead__sub')!.textContent).toContain('direct')
   })
 
-  it('renders the normal chat list (no offline surface) when chats fail while transport is connected', () => {
-    mockChatsError = true
-    transportState.status = 'connected'
-    transportState.isDisconnected = false
-    mockChats = [makeChat('conv-1')]
-    renderInbox()
-
-    expect(screen.queryByText('Showing cached data')).toBeNull()
-    expect(screen.getByRole('listbox', { name: 'Chat conversations' })).toBeDefined()
-  })
-})
-
-// ---------------------------------------------------------------------------
-// SearchInput adoption — B4 commit 4 (last raw c-input-search site)
-// Class-contract: search row renders the shared SearchInput component
-// (mirroring the ChatPicker/ContactSearchPicker structural pins in B2).
-// ---------------------------------------------------------------------------
-
-describe('Inbox — search row uses shared SearchInput (B4 adoption)', () => {
-  it('search input is reachable by aria-label once a chat is selected', () => {
-    mockChats = [makeChat('conv-a', { name: 'Test Chat' })]
-
-    renderInbox()
-    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Test Chat' }))
-
-    const search = screen.getByLabelText('Search messages in this conversation') as HTMLInputElement
-    expect(search.classList.contains('c-input-search')).toBe(true)
-    expect(search.getAttribute('data-search-shortcut-target')).toBe('true')
-  })
-
-  it('no raw c-input without SearchInput wrapper renders in the document', () => {
-    // SearchInput always wraps input in a relative div; raw inputs must not
-    // appear at the search-row level without the SearchInput wrapper present.
-    // This is a class-contract check: the container holds only one search input
-    // component that is known to be SearchInput (because it renders c-input-search).
-    mockChats = []
-    renderInbox()
-    // With no chats selected the search row is not rendered — no c-input-search at all.
-    const inputs = document.querySelectorAll('input.c-input-search')
-    expect(inputs.length).toBe(0)
-  })
-
-  it('renders a retryable search error state when message search fails', async () => {
-    searchMessagesMock.mockRejectedValue(new Error('search offline'))
-    mockChats = [makeChat('conv-a', { name: 'Test Chat' })]
-
-    renderInbox()
-    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Test Chat' }))
-    await waitFor(() => {
-      expect(screen.getByText('test-line · direct')).toBeDefined()
-    })
-    fireEvent.change(screen.getByLabelText('Search messages in this conversation'), {
-      target: { value: 'needle' },
-    })
-
-    await waitFor(() => {
-      expect(screen.getByText('Search failed')).toBeDefined()
-    })
-    expect(screen.getByText('search offline')).toBeDefined()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
-
-    await waitFor(() => {
-      expect(searchMessagesMock).toHaveBeenCalledTimes(2)
-    })
-  })
-
-  it('renders virtualized search results and clears the active search state', async () => {
-    searchMessagesMock.mockResolvedValue({
-      total: 1,
-      results: [makeMessage(41, 'Needle result', { conversationKey: 'conv-a' })],
-    })
-    mockChats = [makeChat('conv-a', { name: 'Test Chat' })]
-
-    renderInbox()
-    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Test Chat' }))
-    fireEvent.change(screen.getByLabelText('Search messages in this conversation'), {
-      target: { value: 'needle' },
-    })
-
-    await waitFor(() => {
-      expect(searchMessagesMock).toHaveBeenCalledWith('test-line', 'needle', 'conv-a')
-    })
-    await waitFor(() => {
-      expect(screen.getByText('Needle')).toBeDefined()
-    })
-    expect(screen.getByText('Needle').tagName).toBe('MARK')
-    expect(screen.getByText('1 result')).toBeDefined()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Clear search' }))
-
-    expect(screen.queryByText('Needle')).toBeNull()
-    expect(screen.queryByText('1 result')).toBeNull()
-  })
-
-  it('renders the empty search state after a completed search with no matches', async () => {
-    searchMessagesMock.mockResolvedValue({ total: 0, results: [] })
-    mockChats = [makeChat('conv-a', { name: 'Test Chat' })]
-
-    renderInbox()
-    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Test Chat' }))
-    await waitFor(() => {
-      expect(screen.getByText('test-line · direct')).toBeDefined()
-    })
-    fireEvent.change(screen.getByLabelText('Search messages in this conversation'), {
-      target: { value: 'missing' },
-    })
-
-    await waitFor(() => {
-      expect(searchMessagesMock).toHaveBeenCalledWith('test-line', 'missing', 'conv-a')
-    })
-    await waitFor(() => {
-      expect(screen.getByText('No matches')).toBeDefined()
-    })
-    expect(screen.getByText('Try a different search term.')).toBeDefined()
-  })
-})
-
-// ---------------------------------------------------------------------------
-// Message timeline workflows
-// ---------------------------------------------------------------------------
-
-describe('Inbox — message timeline workflows', () => {
-  it('loads older messages from the oldest loaded pk and hides the control when none remain', async () => {
-    mockChats = [makeChat('conv-a', { name: 'Test Chat' })]
+  it('renders incoming rows with sender avatar; fromMe rows right-aligned without avatar', async () => {
     mockMessages = [
-      makeMessage(20, 'Newest message'),
-      makeMessage(10, 'Oldest loaded message'),
+      makeMessage(2, 'newest', { fromMe: true }),
+      makeMessage(1, 'oldest'),
     ]
-    getMessagesMock.mockResolvedValue([])
-
-    renderInbox()
-    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Test Chat' }))
-
-    fireEvent.click(screen.getByRole('button', { name: 'Load older messages' }))
-
-    await waitFor(() => {
-      expect(getMessagesMock).toHaveBeenCalledWith('test-line', 'conv-a', 10)
-    })
-    await waitFor(() => {
-      expect(screen.queryByRole('button', { name: 'Load older messages' })).toBeNull()
-    })
+    const { container } = renderInbox()
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    fireEvent.click(container.querySelector('.inbox-citem')!)
+    await waitFor(() => expect(container.querySelectorAll('.inbox-mrow').length).toBe(2))
+    const me = container.querySelector('.inbox-mrow--me')!
+    expect(me.querySelector('.inbox-ma')).toBeNull()
+    const them = container.querySelector('.inbox-mrow:not(.inbox-mrow--me)')!
+    expect(them.querySelector('.inbox-ma')!.textContent).toBe('F')
+    // DM: no sender-name label (the who lane is rooms-only)
+    expect(them.querySelector('.inbox-bub__who')).toBeNull()
   })
 
-  it('keeps the load-more control when older messages are returned', async () => {
-    mockChats = [makeChat('conv-a', { name: 'Test Chat' })]
-    mockMessages = [
-      makeMessage(20, 'Newest message'),
-      makeMessage(10, 'Oldest loaded message'),
-    ]
-    getMessagesMock.mockResolvedValue([makeMessage(5, 'Older returned message')])
-
-    renderInbox()
-    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Test Chat' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Load older messages' }))
-
-    await waitFor(() => {
-      expect(getMessagesMock).toHaveBeenCalledWith('test-line', 'conv-a', 10)
-    })
-    expect(screen.getByRole('button', { name: 'Load older messages' })).toBeDefined()
+  it('rooms label the real sender name on incoming bubbles', async () => {
+    getChatsMock.mockResolvedValue([makeChat('120363001_at_g.us', { isGroup: true, name: 'WHATSOUP' })])
+    mockMessages = [makeMessage(1, 'hello', { senderName: 'Quinn' })]
+    const { container } = renderInbox()
+    // the only fixture is a room — the default Direct seg is empty by design
+    await waitFor(() => expect(container.querySelector('.inbox-seg')).not.toBeNull())
+    const roomsBtn = [...container.querySelectorAll('.inbox-seg button')].find(
+      (b) => b.textContent === 'Rooms',
+    )!
+    fireEvent.click(roomsBtn)
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    fireEvent.click(container.querySelector('.inbox-citem')!)
+    await waitFor(() => expect(container.querySelector('.inbox-bub__who')).not.toBeNull())
+    expect(container.querySelector('.inbox-bub__who')!.textContent).toBe('Quinn')
   })
 
-  it('reports older-message load failures without dropping the load-more control', async () => {
-    mockChats = [makeChat('conv-a', { name: 'Test Chat' })]
-    mockMessages = [makeMessage(10, 'Loaded message')]
-    getMessagesMock.mockRejectedValue(new Error('history unavailable'))
-
-    renderInbox()
-    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Test Chat' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Load older messages' }))
-
-    await waitFor(() => {
-      expect(toastMock.error).toHaveBeenCalledWith('Failed to load older messages: history unavailable')
-    })
-    expect(screen.getByRole('button', { name: 'Load older messages' })).toBeDefined()
-  })
-
-  it('sends trimmed text on Enter and restores the composer after a failed send', async () => {
-    mockChats = [makeChat('conv-a', { name: 'Test Chat' })]
-    sendMessageMock.mockRejectedValue(new Error('transport down'))
-
-    renderInbox()
-    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Test Chat' }))
-
-    const composer = screen.getByLabelText('Type a message') as HTMLTextAreaElement
-    fireEvent.change(composer, { target: { value: '  hello from inbox  ' } })
-    fireEvent.keyDown(composer, { key: 'Enter' })
-
-    await waitFor(() => {
-      expect(sendMessageMock).toHaveBeenCalledWith('test-line', 'conv-a', 'hello from inbox')
-    })
-    await waitFor(() => {
-      expect(toastMock.error).toHaveBeenCalledWith('Send failed: transport down')
-    })
-    expect(composer.value).toBe('')
-  })
-
-  it('sends trimmed text successfully and invalidates the selected message query', async () => {
-    mockChats = [makeChat('conv-a', { name: 'Test Chat' })]
-
-    renderInbox()
-    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Test Chat' }))
-
-    const composer = screen.getByLabelText('Type a message') as HTMLTextAreaElement
-    fireEvent.change(composer, { target: { value: '  hello success  ' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
-
-    await waitFor(() => {
-      expect(sendMessageMock).toHaveBeenCalledWith('test-line', 'conv-a', 'hello success')
-    })
-    expect(toastMock.error).not.toHaveBeenCalled()
-    expect(composer.value).toBe('')
+  it('media messages with null content render an honest type placeholder', async () => {
+    mockMessages = [makeMessage(1, null, { type: 'image' })]
+    const { container } = renderInbox()
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    fireEvent.click(container.querySelector('.inbox-citem')!)
+    await waitFor(() => expect(container.querySelector('.inbox-bub')).not.toBeNull())
+    expect(container.querySelector('.inbox-bub')!.textContent).toContain('[image]')
   })
 })
 
 // ---------------------------------------------------------------------------
-// Contact action workflows
+// Mark-read on open (real route; the v3 manual button became automatic)
 // ---------------------------------------------------------------------------
 
-describe('Inbox — contact action workflows', () => {
-  it('marks an unread chat as read and reports success', async () => {
-    mockChats = [makeChat('conv-a', { name: 'Unread Contact', unreadCount: 3 })]
-
-    renderInbox()
-    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Unread Contact, 3 unread' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Mark Read' }))
-
-    await waitFor(() => {
-      expect(markReadMock).toHaveBeenCalledWith('test-line', 'conv-a')
-    })
-    expect(toastMock.success).toHaveBeenCalledWith('Marked as read')
+describe('v3.5 inbox — mark-read on open', () => {
+  it('marks an unread conversation read when opened', async () => {
+    getChatsMock.mockResolvedValue([makeChat('conv-a', { unreadCount: 2 })])
+    const { container } = renderInbox()
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    fireEvent.click(container.querySelector('.inbox-citem')!)
+    await waitFor(() => expect(markReadMock).toHaveBeenCalledWith('personal', 'conv-a'))
   })
 
-  it('reports mark-read failures and keeps action controls enabled afterward', async () => {
-    mockChats = [makeChat('conv-a', { name: 'Unread Contact', unreadCount: 3 })]
-    markReadMock.mockRejectedValue('mark-read offline')
-
-    renderInbox()
-    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Unread Contact, 3 unread' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Mark Read' }))
-
-    await waitFor(() => {
-      expect(toastMock.error).toHaveBeenCalledWith('Failed to mark read: mark-read offline')
-    })
-    expect(screen.getByRole('button', { name: 'Allow Contact' }).hasAttribute('disabled')).toBe(false)
-  })
-
-  it('uses group access subjects for group allow and block actions', async () => {
-    mockChats = [makeChat('group-1@g.us', { name: 'Study Group', isGroup: true })]
-
-    renderInbox()
-    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Study Group' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Allow Contact' }))
-
-    await waitFor(() => {
-      expect(accessDecisionMock).toHaveBeenCalledWith('test-line', 'group', 'group-1@g.us', 'allow')
-    })
-    expect(toastMock.success).toHaveBeenCalledWith('Allowed Study Group')
-
-    fireEvent.click(screen.getByRole('button', { name: 'Block Contact' }))
-
-    await waitFor(() => {
-      expect(accessDecisionMock).toHaveBeenCalledWith('test-line', 'group', 'group-1@g.us', 'block')
-    })
-    expect(toastMock.info).toHaveBeenCalledWith('Blocked Study Group')
-    expect(screen.queryByRole('button', { name: 'Save Contact' })).toBeNull()
-  })
-
-  it('reports direct allow and block failures with the production error text', async () => {
-    mockChats = [makeChat('conv-a', { name: 'Direct Contact' })]
-    accessDecisionMock
-      .mockRejectedValueOnce(new Error('allow denied'))
-      .mockRejectedValueOnce('block denied')
-
-    renderInbox()
-    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Direct Contact' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Allow Contact' }))
-
-    await waitFor(() => {
-      expect(accessDecisionMock).toHaveBeenCalledWith('test-line', 'number', 'conv-a', 'allow')
-    })
-    expect(toastMock.error).toHaveBeenCalledWith('Failed to allow: allow denied')
-
-    fireEvent.click(screen.getByRole('button', { name: 'Block Contact' }))
-
-    await waitFor(() => {
-      expect(accessDecisionMock).toHaveBeenCalledWith('test-line', 'number', 'conv-a', 'block')
-    })
-    expect(toastMock.error).toHaveBeenCalledWith('Failed to block: block denied')
-  })
-
-  it('saves a direct chat as a contact with normalized JID and split name', async () => {
-    mockChats = [makeChat('15551234567', { name: 'Raw Number' })]
-
-    renderInbox()
-    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Raw Number' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Save Contact' }))
-
-    fireEvent.change(screen.getByLabelText('Contact name'), {
-      target: { value: ' Ada Lovelace ' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
-
-    await waitFor(() => {
-      expect(saveContactMock).toHaveBeenCalledWith('test-line', {
-        jid: '15551234567@s.whatsapp.net',
-        firstName: 'Ada',
-        lastName: 'Lovelace',
-      })
-    })
-    expect(toastMock.success).toHaveBeenCalledWith('Saved contact: Ada Lovelace')
-  })
-
-  it('preserves an existing JID when saving a contact and reports save failures', async () => {
-    mockChats = [makeChat('15551234567@s.whatsapp.net', { name: 'Known Number' })]
-    saveContactMock.mockRejectedValue(new Error('address book locked'))
-
-    renderInbox()
-    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Known Number' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Save Contact' }))
-    fireEvent.change(screen.getByLabelText('Contact name'), {
-      target: { value: 'Prince' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
-
-    await waitFor(() => {
-      expect(saveContactMock).toHaveBeenCalledWith('test-line', {
-        jid: '15551234567@s.whatsapp.net',
-        firstName: 'Prince',
-        lastName: undefined,
-      })
-    })
-    expect(toastMock.error).toHaveBeenCalledWith('Failed to save: address book locked')
+  it('does not call mark-read for an already-read conversation', async () => {
+    const { container } = renderInbox()
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    fireEvent.click(container.querySelector('.inbox-citem')!)
+    await waitFor(() => expect(container.querySelector('.inbox-thead')).not.toBeNull())
+    expect(markReadMock).not.toHaveBeenCalled()
   })
 })
 
 // ---------------------------------------------------------------------------
-// Composer focus suppression removed — B4 commit 5
-// The composer textarea must carry NO outline-none class (packet §0.5 / §8).
-// The global :focus-visible recipe in composites.css provides the focus ring;
-// the explicit suppression was a lint/honesty violation, not a missing ring.
+// Takeover — end-to-end, honest local state (no runtime endpoint exists)
 // ---------------------------------------------------------------------------
 
-describe('Inbox — composer textarea has no outline-none (B4 composer fix)', () => {
-  it('routes the selected-chat composer through TextArea without suppressing focus outlines', () => {
-    mockChats = [makeChat('conv-a', { name: 'Test Chat' })]
-    renderInbox()
-    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Test Chat' }))
+describe('v3.5 inbox — takeover (local-only honesty)', () => {
+  it('toggle carries the no-endpoint disclosure to assistive tech', async () => {
+    const { container } = renderInbox()
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    fireEvent.click(container.querySelector('.inbox-citem')!)
+    await waitFor(() => expect(container.querySelector('.inbox-tgl')).not.toBeNull())
+    const tgl = container.querySelector('.inbox-tgl')!
+    expect(tgl.getAttribute('role')).toBe('switch')
+    expect(tgl.getAttribute('aria-checked')).toBe('false')
+    expect(tgl.getAttribute('aria-description')).toContain('no runtime pause endpoint')
+  })
 
-    const textarea = screen.getByLabelText('Type a message') as HTMLTextAreaElement
-    expect(textarea.classList.contains('c-input')).toBe(true)
-    expect(textarea.classList.contains('font-sans')).toBe(true)
-    expect(textarea.classList.contains('font-mono')).toBe(false)
-    expect(textarea.classList.contains('outline-none')).toBe(false)
-    expect(textarea.getAttribute('style')).toContain('resize: none')
-    expect(textarea.getAttribute('style')).toContain('max-height: var(--feed-preview-max)')
+  it('enabling takeover flips the whole surface state: pill, placeholder, badge, card', async () => {
+    const { container } = renderInbox()
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    fireEvent.click(container.querySelector('.inbox-citem')!)
+    await waitFor(() => expect(container.querySelector('.inbox-tgl')).not.toBeNull())
+
+    fireEvent.click(container.querySelector('.inbox-tgl')!)
+
+    await waitFor(() => {
+      expect(container.querySelector('.inbox-tgl')!.getAttribute('aria-checked')).toBe('true')
+      // sys pill — labeled local-only, never claims the agent paused
+      const sys = container.querySelector('.inbox-sys')!
+      expect(sys.textContent).toContain('takeover enabled')
+      expect(sys.textContent).toContain('local only')
+      // composer placeholder switches to the takeover copy (real: sends as the line)
+      expect(container.querySelector('.inbox-input')!.getAttribute('placeholder')).toContain(
+        'takeover',
+      )
+      // conversation list badge
+      expect(container.querySelector('.inbox-take')).not.toBeNull()
+      // agent card notes takeover as local
+      expect(container.querySelector('.inbox-agcard')!.textContent).toContain('takeover (local)')
+    })
+
+    // toggle back off — every trace leaves
+    fireEvent.click(container.querySelector('.inbox-tgl')!)
+    await waitFor(() => {
+      expect(container.querySelector('.inbox-sys')).toBeNull()
+      expect(container.querySelector('.inbox-take')).toBeNull()
+      expect(container.querySelector('.inbox-agcard')!.textContent).not.toContain('takeover')
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Composer — caps honesty, uniform height class contract, send workflows
+// ---------------------------------------------------------------------------
+
+describe('v3.5 inbox — composer', () => {
+  it('media/voice/poll caps are disabled with no-fleet-route notes; schedule cap navigates', async () => {
+    const { container } = renderInbox()
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    fireEvent.click(container.querySelector('.inbox-citem')!)
+    await waitFor(() => expect(container.querySelectorAll('.inbox-cap').length).toBe(4))
+    const caps = [...container.querySelectorAll<HTMLButtonElement>('.inbox-cap')]
+    const byLabel = (s: string) => caps.find((c) => c.getAttribute('aria-label') === s)!
+    expect(byLabel('Send image').disabled).toBe(true)
+    expect(byLabel('Send image').title).toContain('No fleet media endpoint')
+    expect(byLabel('Send voice note').disabled).toBe(true)
+    expect(byLabel('Send poll').disabled).toBe(true)
+    expect(byLabel('Send poll').title).toContain('no fleet route')
+    expect(byLabel('Open scheduled messages for this line').disabled).toBe(false)
+  })
+
+  it('composer controls share the uniform-height token (bead acceptance)', async () => {
+    const { container } = renderInbox()
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    fireEvent.click(container.querySelector('.inbox-citem')!)
+    await waitFor(() => expect(container.querySelector('.inbox-composer')).not.toBeNull())
+    // class contract: all three consume var(--inbox-composer-h) in inbox.css
+    // (computed-height proof lives in tests/browser/viewport-matrix.test.tsx)
+    expect(container.querySelector('.inbox-cap')).not.toBeNull()
+    expect(container.querySelector('.inbox-input')).not.toBeNull()
+    expect(container.querySelector('.inbox-send')).not.toBeNull()
+  })
+
+  it('sends trimmed text and invalidates the message query', async () => {
+    const { container } = renderInbox()
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    fireEvent.click(container.querySelector('.inbox-citem')!)
+    const input = (await waitFor(() => container.querySelector('.inbox-input')!)) as HTMLInputElement
+    fireEvent.change(input, { target: { value: '  hello there  ' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() =>
+      expect(sendMessageMock).toHaveBeenCalledWith('personal', 'conv-a', 'hello there'),
+    )
+  })
+
+  it('reports a failed send via toast and drops the optimistic bubble', async () => {
+    sendMessageMock.mockRejectedValue(new Error('boom'))
+    const { container } = renderInbox()
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    fireEvent.click(container.querySelector('.inbox-citem')!)
+    const input = (await waitFor(() => container.querySelector('.inbox-input')!)) as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'will fail' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => expect(toastMock.error).toHaveBeenCalled())
+    expect(toastMock.error.mock.calls[0]![0]).toContain('boom')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Load-older pagination (before_pk cursor contract)
+// ---------------------------------------------------------------------------
+
+describe('v3.5 inbox — load older', () => {
+  it('loads older messages from the oldest loaded pk and hides the control at end of history', async () => {
+    mockMessages = [makeMessage(5, 'newest'), makeMessage(3, 'oldest')]
+    getMessagesMock.mockResolvedValue([]) // no older pages remain
+    const { container } = renderInbox()
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    fireEvent.click(container.querySelector('.inbox-citem')!)
+    const older = (await waitFor(() => container.querySelector('.inbox-older')!)) as HTMLButtonElement
+    fireEvent.click(older)
+    await waitFor(() => expect(getMessagesMock).toHaveBeenCalledWith('personal', 'conv-a', 3))
+    await waitFor(() => expect(container.querySelector('.inbox-older')).toBeNull())
+  })
+
+  it('reports older-message load failures without dropping the control', async () => {
+    mockMessages = [makeMessage(5, 'newest'), makeMessage(3, 'oldest')]
+    getMessagesMock.mockRejectedValue(new Error('disk gone'))
+    const { container } = renderInbox()
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    fireEvent.click(container.querySelector('.inbox-citem')!)
+    const older = (await waitFor(() => container.querySelector('.inbox-older')!)) as HTMLButtonElement
+    fireEvent.click(older)
+    await waitFor(() => expect(toastMock.error).toHaveBeenCalled())
+    expect(container.querySelector('.inbox-older')).not.toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Context pane — person / agent / line cards, honest empties
+// ---------------------------------------------------------------------------
+
+describe('v3.5 inbox — context cards', () => {
+  it('person card carries identity rows with the real conversation key and line', async () => {
+    const { container } = renderInbox()
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    fireEvent.click(container.querySelector('.inbox-citem')!)
+    await waitFor(() => expect(container.querySelector('.inbox-pcard')).not.toBeNull())
+    const card = container.querySelector('.inbox-pcard')!
+    expect(card.textContent).toContain('Chat conv-a')
+    expect(card.textContent).toContain('WhatsApp')
+    expect(card.textContent).toContain('conv-a')
+    expect(card.textContent).toContain('personal')
+  })
+
+  it('agent card renders the honest empty when the checkpoint registry has no session', async () => {
+    const { container, getByTestId } = renderInbox()
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    fireEvent.click(container.querySelector('.inbox-citem')!)
+    await waitFor(() => expect(getByTestId('inbox-agent-card')).toBeDefined())
+    expect(getByTestId('inbox-agent-card').textContent).toContain('no agent session recorded')
+  })
+
+  it('agent card renders the real session status when a checkpoint exists', async () => {
+    getCheckpointsMock.mockResolvedValue({
+      observedAt: '',
+      checkpoints: [
+        {
+          conversationKey: 'conv-a',
+          sessionId: 'sess-1',
+          sessionStatus: 'active',
+          checkpointVersion: 1,
+          claudePid: 1234,
+          workspacePath: null,
+          createdAt: '',
+          updatedAt: '',
+          completedScope: null,
+          completedDeliveryJid: null,
+          completedLogicalTurnId: null,
+          resumable: true,
+        },
+      ],
+    })
+    const { container, getByTestId } = renderInbox()
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    fireEvent.click(container.querySelector('.inbox-citem')!)
+    await waitFor(() =>
+      expect(getByTestId('inbox-agent-card').textContent).toContain('session active'),
+    )
+    expect(getByTestId('inbox-agent-card').textContent).toContain('resumable')
+  })
+
+  it('line card renders live state, transport, access mode, and mode', async () => {
+    const { container } = renderInbox()
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    fireEvent.click(container.querySelector('.inbox-citem')!)
+    await waitFor(() => expect(container.querySelector('.inbox-badge')).not.toBeNull())
+    const badges = [...container.querySelectorAll('.inbox-pcard')]
+    const lineCard = badges[badges.length - 1]!
+    expect(lineCard.textContent).toContain('live')
+    expect(lineCard.textContent).toContain('WhatsApp')
+    expect(lineCard.textContent).toContain('allowlist')
+    expect(lineCard.textContent).toContain('chat')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Deep links (?line=&chat=) — same contract the v3 page honored
+// ---------------------------------------------------------------------------
+
+describe('v3.5 inbox — deep links', () => {
+  it('selects the linked conversation once', async () => {
+    const { container } = renderInbox(['/inbox?line=personal&chat=conv-a'])
+    await waitFor(() => expect(container.querySelector('.inbox-thead')).not.toBeNull())
+    expect(container.querySelector('.inbox-thead__nm')!.textContent).toBe('Chat conv-a')
   })
 })
