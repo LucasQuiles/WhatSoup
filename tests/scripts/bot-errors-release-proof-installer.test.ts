@@ -78,10 +78,16 @@ function sha256(text: string): string {
  *                                          assertNotTimedOut, comfortably inside the 60s
  *                                          test budget. Hang fixed, and diagnosable.
  */
-vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
+const TEST_TIMEOUT_MS = 60_000;
+vi.setConfig({ testTimeout: TEST_TIMEOUT_MS, hookTimeout: TEST_TIMEOUT_MS });
 
-/** Must stay strictly below the testTimeout above — see Measurement 2. */
-const CHILD_TIMEOUT_MS = 45_000;
+/**
+ * DERIVED, not independently chosen, so the ordering Measurement 2 establishes cannot be
+ * broken by editing one number. A comment saying "must stay below" is enforced by nobody;
+ * subtraction is enforced by arithmetic. The 15s headroom is the margin for the child to
+ * be killed and the assertion to run before the test budget expires.
+ */
+const CHILD_TIMEOUT_MS = TEST_TIMEOUT_MS - 15_000;
 
 /**
  * A timed-out `spawnSync` returns `error` set and `status === null`, which is easy to
