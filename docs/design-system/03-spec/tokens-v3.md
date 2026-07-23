@@ -678,7 +678,8 @@ console register where the mockup matches it.
   (12px radius, 2px group-sender accent), `--inbox-sys-pad` (system pill).
 - **Composer** — `--inbox-composer-{gap,pad,h}` with **`--inbox-composer-h` 36px
   the uniform control height (bead acceptance item)** consumed by caps, input,
-  and Send alike; `--inbox-cap-radius`, `--inbox-input-{radius,pad}`.
+  and Send alike; `--inbox-cap-radius`, `--inbox-input-{radius,pad}`,
+  `--inbox-send-pad-x` (mockup .btn horizontal rhythm).
 - **Context pane** — `--inbox-ctx-{pad,h3-m}`, `--inbox-pcard-*`,
   `--inbox-idrow-{gap,pad-y}`, `--inbox-agcard-*`, `--tracking-inbox-caps` 0.1em.
 - **Retired** — `--inbox-pane-chats` / `--inbox-pane-contact` (v3 pane widths):

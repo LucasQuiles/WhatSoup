@@ -194,6 +194,7 @@
   --inbox-caps-gap: 4px;          /* composer caps gap (mockup .caps) */
   --inbox-composer-h: 36px;       /* uniform composer control height — bead acceptance (mockup .cap/input/Send) */
   --inbox-cap-radius: 8px;        /* composer cap radius (mockup .cap) */
+  --inbox-send-pad-x: 14px;       /* Send horizontal padding (mockup .btn) */
   --inbox-input-radius: 9px;      /* composer input radius (mockup .composer input) */
   --inbox-input-pad: 9px 12px;    /* composer input padding (mockup .composer input) */
   --inbox-ctx-pad: 14px;          /* context pane padding (mockup .ctx) */
