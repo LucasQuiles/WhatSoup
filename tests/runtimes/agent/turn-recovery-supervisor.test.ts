@@ -514,6 +514,48 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
     const jobAfterSecond = durability.getTurnRecoveryJob(jobId);
     expect(jobAfterSecond).toMatchObject({ state: 'claimed', attempt_count: 2 });
   });
+
+  it('PRE-DISPATCH SKIP GUARD (boterr-lead ruling): source already proven at claim time -- completes directly via completeTurnRecoveryJob, dispatchReplay is NEVER invoked', async () => {
+    const { jobId, sourceInboundSeq } = crashOneSourceTurn();
+    // Source already proven BEFORE the supervisor ever claims this job --
+    // stands in for a successor job (a real second recovery job in
+    // production; see the extended e2e in
+    // tests/runtimes/agent/turn-recovery-live-wiring.test.ts) having already
+    // delivered it for real. crashOneSourceTurn's default
+    // resolveOriginalDelivery:true already marks the original delivery
+    // 'quarantined' (the outbound half of the proof); completeInbound
+    // supplies the missing source-inbound half.
+    durability.completeInbound(sourceInboundSeq, 'response_sent');
+
+    let dispatchCalls = 0;
+    const supervisor = new TurnRecoverySupervisor({
+      instanceName: 'brick-instance',
+      durability: () => durability,
+      freshOwnerIdentity: (): TurnRecoveryOwnerIdentity => ({
+        logicalTurnId: 'brick-recovery-owner-preproven',
+        managerId: 'brick-supervisor',
+        generation: 1,
+      }),
+      dispatchReplay: async (): Promise<TurnRecoveryReplayDispatchResult> => {
+        dispatchCalls += 1;
+        throw new Error('dispatchReplay must never be called when the source is already proven at claim time');
+      },
+    });
+
+    const scan = await supervisor.scanOnce();
+
+    // If the pre-dispatch guard did NOT fire, dispatchReplay would run,
+    // throw, get caught by claimAndReplay's own try/catch (converted to a
+    // retryable_failure, not a test crash), and this job would requeue
+    // instead of completing -- so completed:1 + dispatchCalls:0 together are
+    // the unambiguous, non-vacuous signal the guard actually short-circuited
+    // dispatch, not just that SOME outcome happened to look similar.
+    expect(scan).toMatchObject({ claimed: 1, completed: 1, processingErrors: 0 });
+    expect(dispatchCalls).toBe(0);
+
+    const job = durability.getTurnRecoveryJob(jobId);
+    expect(job).toMatchObject({ state: 'completed' });
+  });
 });
 
 describe('TurnRecoverySupervisor — deadman heartbeat evaluation', () => {
