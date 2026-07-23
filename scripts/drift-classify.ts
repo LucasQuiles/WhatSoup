@@ -18,6 +18,7 @@
  */
 import { spawnSync } from 'node:child_process';
 
+import { cleanGitEnv } from './lib/guard-core.ts';
 import {
   EXIT_CONTINUE,
   EXIT_INCONCLUSIVE,
@@ -27,6 +28,12 @@ import {
 } from './lib/drift-classifier.ts';
 
 const GIT_TIMEOUT_MS = 30_000;
+
+/**
+ * 64 MiB, matching `guard-core`. A large tree's `ls-tree` overflows the 1 MiB default and
+ * would surface as a spawn failure — i.e. INCONCLUSIVE — rather than a real verdict.
+ */
+const MAX_GIT_BUFFER = 64 * 1024 * 1024;
 
 interface Args {
   base?: string;
@@ -54,8 +61,9 @@ export function trackedPaths(cwd: string): string[] | null {
   const r = spawnSync('git', ['ls-tree', '-r', 'HEAD', '--name-only'], {
     cwd,
     encoding: 'utf8',
+    env: cleanGitEnv(),
     timeout: GIT_TIMEOUT_MS,
-    maxBuffer: 64 * 1024 * 1024,
+    maxBuffer: MAX_GIT_BUFFER,
   });
   if (r.error || r.status !== 0) return null;
   return r.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
@@ -118,7 +126,9 @@ export function changedPaths(from: string, to: string, cwd: string): string[] | 
   const r = spawnSync('git', ['diff', '--name-only', `${from}..${to}`], {
     cwd,
     encoding: 'utf8',
+    env: cleanGitEnv(),
     timeout: GIT_TIMEOUT_MS,
+    maxBuffer: MAX_GIT_BUFFER,
   });
   if (r.error || r.status !== 0) return null;
   return r.stdout.split('\n').map((s) => s.trim()).filter(Boolean);

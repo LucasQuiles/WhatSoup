@@ -14,7 +14,7 @@
  *   3. An unrecognised path must force UNKNOWN. Defaulting it to DISJOINT_CODE is exactly
  *      how a new policy surface gets treated as inert.
  */
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -353,6 +353,26 @@ describe('--self-check — what the CI step actually runs', () => {
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
+  });
+
+  it('survives a poisoned GIT_DIR/GIT_WORK_TREE environment', () => {
+    // Guards run from git hooks, which is exactly where GIT_DIR and GIT_WORK_TREE are set.
+    // Without guard-core's cleanGitEnv(), git resolves against the poisoned repo, ls-tree
+    // fails, and the step reports INCONCLUSIVE — fail-closed, but a spurious CI failure in
+    // the one context guards are most often invoked from. Verified by removing cleanGitEnv:
+    // the self-check then prints "could not enumerate tracked files".
+    const r = spawnSync(
+      process.execPath,
+      ['--disable-warning=ExperimentalWarning', '--experimental-strip-types',
+       resolve(repoRoot, 'scripts/drift-classify.ts'), '--self-check'],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        env: { ...process.env, GIT_DIR: '/poison/nope.git', GIT_WORK_TREE: '/poison' },
+      },
+    );
+    expect(r.status, `poisoned env produced:\n${r.stdout}${r.stderr}`).toBe(0);
+    expect(`${r.stdout}${r.stderr}`).not.toMatch(/could not enumerate/);
   });
 
   it('trackedPaths returns null on a non-repo rather than an empty list', () => {
