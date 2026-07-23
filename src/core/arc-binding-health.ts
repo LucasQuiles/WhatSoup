@@ -18,6 +18,14 @@ export interface ArcBindingHealthMissing {
 
 export type ArcBindingHealth = ArcBindingHealthLoaded | ArcBindingHealthMissing;
 
+export function resolveArcRepoRoot(
+  env: { WHATSOUP_REPO_ROOT?: string } = process.env,
+  cwd = process.cwd(),
+): string {
+  const explicitRoot = env.WHATSOUP_REPO_ROOT?.trim();
+  return explicitRoot ? explicitRoot : cwd;
+}
+
 function parseStringLine(text: string, key: string): string {
   const prefix = `${key} = "`;
   const line = text.split('\n').find((entry) => entry.startsWith(prefix));

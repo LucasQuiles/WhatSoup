@@ -3,7 +3,10 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { readArcBindingHealth } from '../../src/core/arc-binding-health.ts';
+import {
+  readArcBindingHealth,
+  resolveArcRepoRoot,
+} from '../../src/core/arc-binding-health.ts';
 
 function repoWithArcToml(content: string): string {
   const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-arc-health.'));
@@ -13,6 +16,41 @@ function repoWithArcToml(content: string): string {
 }
 
 describe('readArcBindingHealth', () => {
+  it('uses a trimmed non-empty explicit root before the working directory', () => {
+    expect(resolveArcRepoRoot(
+      { WHATSOUP_REPO_ROOT: '  /reviewed/checkout  ' },
+      '/working/directory',
+    )).toBe('/reviewed/checkout');
+  });
+
+  it('uses the working directory when the explicit root is empty or whitespace', () => {
+    expect(resolveArcRepoRoot({ WHATSOUP_REPO_ROOT: '   ' }, '/working/directory'))
+      .toBe('/working/directory');
+    expect(resolveArcRepoRoot({}, '/working/directory')).toBe('/working/directory');
+  });
+
+  it('does not fall back to a valid working-directory binding when an explicit root is missing', () => {
+    const workingRoot = repoWithArcToml([
+      'arc_version = "0.1.0"',
+      'consumer = "whatsoup"',
+      'modules = []',
+      'emits = []',
+      'binding = "bindings/whatsoup.arc.json"',
+      `payload_sha = "sha256:${'a'.repeat(64)}"`,
+      '',
+    ].join('\n'));
+    const missingExplicitRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup-arc-explicit-missing.'));
+    const resolved = resolveArcRepoRoot(
+      { WHATSOUP_REPO_ROOT: missingExplicitRoot },
+      workingRoot,
+    );
+
+    expect(readArcBindingHealth(resolved)).toEqual({
+      loaded: false,
+      reason: '.arc/arc.toml missing',
+    });
+  });
+
   it('loads safe ARC metadata from generated arc.toml', () => {
     const root = repoWithArcToml([
       'arc_version = "0.1.0"',

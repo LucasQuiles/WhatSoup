@@ -96,6 +96,7 @@ describe('LoopLagSampler', () => {
       sampleCount: 1,
       p95LagMs: 0,
       locallyStarved: false,
+      discontinuityCount: 0,
     });
 
     sampler.stop();
@@ -112,6 +113,7 @@ describe('LoopLagSampler', () => {
       sampleCount: 19,
       p95LagMs: 251,
       locallyStarved: false,
+      discontinuityCount: 0,
     });
 
     sampler.stop();
@@ -123,6 +125,7 @@ describe('LoopLagSampler', () => {
       sampleCount: 20,
       p95LagMs: 0,
       locallyStarved: false,
+      discontinuityCount: 0,
     });
 
     sampler.stop();
@@ -134,6 +137,7 @@ describe('LoopLagSampler', () => {
       sampleCount: 20,
       p95LagMs: 251,
       locallyStarved: true,
+      discontinuityCount: 0,
     });
 
     sampler.stop();
@@ -145,20 +149,18 @@ describe('LoopLagSampler', () => {
       sampleCount: 20,
       p95LagMs: 250,
       locallyStarved: false,
+      discontinuityCount: 0,
     });
 
     sampler.stop();
   });
 
-  it('evaluates exactly one provisional overdue sample without mutating the window', () => {
+  it('retains an exactly-10-second overdue observation without assuming one outlier starves p95', () => {
     const sampler = createSampler();
     sampler.start();
     for (let index = 0; index < LOOP_LAG_WINDOW_SAMPLES - 1; index += 1) recordLag(0);
 
-    const internal = sampler as unknown as { samples: number[]; expectedAtMs: number | null };
-    const completedBeforeSnapshot = [...internal.samples];
-    const expectedBeforeSnapshot = internal.expectedAtMs;
-    nowMs += 5_000;
+    nowMs += LOOP_LAG_SAMPLE_INTERVAL_MS + 10_000;
 
     const first = sampler.snapshot();
     const second = sampler.snapshot();
@@ -166,11 +168,69 @@ describe('LoopLagSampler', () => {
       sampleCount: 20,
       p95LagMs: 0,
       locallyStarved: false,
+      discontinuityCount: 0,
     });
     expect(second).toEqual(first);
-    expect(internal.samples).toEqual(completedBeforeSnapshot);
-    expect(internal.expectedAtMs).toBe(expectedBeforeSnapshot);
 
+    sampler.stop();
+  });
+
+  it('resets the retained window for gaps above 10 seconds without retaining the gap', () => {
+    const sampler = createSampler();
+    sampler.start();
+    for (let index = 0; index < LOOP_LAG_WINDOW_SAMPLES; index += 1) recordLag(251);
+    expect(sampler.snapshot().locallyStarved).toBe(true);
+
+    nowMs += LOOP_LAG_SAMPLE_INTERVAL_MS + 10_001;
+
+    expect(sampler.snapshot()).toEqual({
+      sampleCount: 0,
+      p95LagMs: null,
+      locallyStarved: false,
+      discontinuityCount: 1,
+    });
+    sampler.stop();
+  });
+
+  it.each(['timer-first', 'snapshot-first'] as const)(
+    'consumes one physical discontinuity exactly once when observed %s',
+    (order) => {
+      const sampler = createSampler();
+      sampler.start();
+      nowMs += LOOP_LAG_SAMPLE_INTERVAL_MS + 10_001;
+
+      if (order === 'timer-first') {
+        vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
+        expect(sampler.snapshot().discontinuityCount).toBe(1);
+      } else {
+        expect(sampler.snapshot().discontinuityCount).toBe(1);
+        vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
+      }
+
+      expect(sampler.snapshot().discontinuityCount).toBe(1);
+      sampler.stop();
+    },
+  );
+
+  it('saturates the process-lifetime discontinuity counter and preserves it across restart', () => {
+    const sampler = createSampler();
+    const internal = sampler as unknown as { discontinuityCount: number };
+    internal.discontinuityCount = Number.MAX_SAFE_INTEGER - 1;
+    sampler.start();
+
+    nowMs += LOOP_LAG_SAMPLE_INTERVAL_MS + 10_001;
+    expect(sampler.snapshot().discontinuityCount).toBe(Number.MAX_SAFE_INTEGER);
+    nowMs += LOOP_LAG_SAMPLE_INTERVAL_MS + 10_001;
+    expect(sampler.snapshot().discontinuityCount).toBe(Number.MAX_SAFE_INTEGER);
+
+    sampler.stop();
+    sampler.start();
+    expect(sampler.snapshot()).toEqual({
+      sampleCount: 0,
+      p95LagMs: null,
+      locallyStarved: false,
+      discontinuityCount: Number.MAX_SAFE_INTEGER,
+    });
     sampler.stop();
   });
 
@@ -186,6 +246,7 @@ describe('LoopLagSampler', () => {
       sampleCount: 20,
       p95LagMs: 0,
       locallyStarved: false,
+      discontinuityCount: 0,
     });
 
     sampler.stop();
@@ -208,6 +269,7 @@ describe('LoopLagSampler', () => {
       sampleCount: 0,
       p95LagMs: null,
       locallyStarved: false,
+      discontinuityCount: 0,
     });
 
     sampler.start();
@@ -235,6 +297,7 @@ interface FakeSamplerControl {
     sampleCount: number;
     p95LagMs: number | null;
     locallyStarved: boolean;
+    discontinuityCount: number;
   }): void;
 }
 
@@ -243,6 +306,7 @@ function createFakeSampler(locallyStarved = false): FakeSamplerControl {
     sampleCount: locallyStarved ? 20 : 0,
     p95LagMs: locallyStarved ? 300 : null,
     locallyStarved,
+    discontinuityCount: 0,
   };
   const start = vi.fn();
   const stop = vi.fn();
@@ -421,6 +485,7 @@ describe('HealthPoller probe liveness', () => {
       sampleCount: 20,
       p95LagMs: expectedP95LagMs,
       locallyStarved: expectedLocallyStarved,
+      discontinuityCount: 0,
     });
     expect(poller.getStatus('remote-1')).toMatchObject({
       status: 'degraded',
@@ -484,6 +549,53 @@ describe('HealthPoller probe liveness', () => {
     poller.stop();
   });
 
+  it('does not misclassify an abort after a suspend-sized discontinuity as local starvation', async () => {
+    let samplerNowMs = 0;
+    let settleAbort: (() => void) | undefined;
+    const sampler = new LoopLagSampler({ now: () => samplerNowMs });
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(onlineHealth()) })
+      .mockImplementation((_url: string, init?: RequestInit) => new Promise((_resolve, reject) => {
+        const rejectAsAbort = (): void => reject(abortError());
+        init?.signal?.addEventListener('abort', rejectAsAbort, { once: true });
+        settleAbort = rejectAsAbort;
+      }));
+    const poller = new HealthPoller(
+      () => new Map([['remote-1', makeInstance('remote-1', 9100)]]),
+      'self',
+      vi.fn().mockReturnValue({}),
+      60_000,
+      sampler,
+    );
+
+    await poller.start();
+    for (let index = 0; index < LOOP_LAG_WINDOW_SAMPLES; index += 1) {
+      samplerNowMs += LOOP_LAG_SAMPLE_INTERVAL_MS + 300;
+      vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
+    }
+    expect(sampler.snapshot().locallyStarved).toBe(true);
+
+    samplerNowMs += LOOP_LAG_SAMPLE_INTERVAL_MS + 10_001;
+    const failingPoll = privatePoll(poller);
+    expect(settleAbort).toBeTypeOf('function');
+    settleAbort!();
+    await failingPoll;
+
+    expect(sampler.snapshot()).toEqual({
+      sampleCount: 0,
+      p95LagMs: null,
+      locallyStarved: false,
+      discontinuityCount: 1,
+    });
+    expect(poller.getStatus('remote-1')).toMatchObject({
+      status: 'degraded',
+      statusConfidence: 'inferred',
+      statusReason: 'health_poll_failed_transient',
+      error: 'The operation was aborted',
+    });
+    poller.stop();
+  });
+
   it('suppresses escalation during corroborated local starvation but preserves counters and age', async () => {
     const sampler = createFakeSampler(true);
     mockFetch
@@ -523,7 +635,12 @@ describe('HealthPoller probe liveness', () => {
     expect(pollerState(poller).failureStartedAt.get('remote-1')).toBe(failureStartedAt);
     expect(alertFns.emitAlert).not.toHaveBeenCalled();
 
-    sampler.setSnapshot({ sampleCount: 20, p95LagMs: 0, locallyStarved: false });
+    sampler.setSnapshot({
+      sampleCount: 20,
+      p95LagMs: 0,
+      locallyStarved: false,
+      discontinuityCount: 0,
+    });
     await vi.advanceTimersByTimeAsync(15_000);
     expect(poller.getStatus('remote-1')).toMatchObject({
       status: 'unreachable',

@@ -1039,7 +1039,37 @@ sqlite3 $DB \
    VALUES ('phone', '15551234567', 'allowed', 'Alice', datetime('now'));"
 ```
 
-### 7.4 Check Inbound/Outbound Durability State
+### 7.5 Validate a Private Host-Operation Record
+
+Host remediation receipts live outside the repository under
+`~/.local/state/whatsoup/private-ops/`. The directory must be owned by the
+operator with mode `0700`; each JSON record must be owned by the operator with
+mode `0600`. The validator is read-only and never contacts the network or
+loads credentials.
+
+Inspect the closed action/status/reason registries and command schemas:
+
+```bash
+npm run validate-private-operation-record -- schema
+```
+
+Validate one record before the first mutation and after every completed or
+aborted step:
+
+```bash
+npm run validate-private-operation-record -- \
+  validate \
+  --record "$HOME/.local/state/whatsoup/private-ops/<record>.json" \
+  --format json
+```
+
+The command emits exactly one JSON object. Exit `0` means the schema-v1 record
+is valid; exit `1` identifies an actionable record, mode, ownership, or
+completeness failure; exit `2` means the file could not be read safely.
+Diagnostics contain stable kinds and JSON paths but never rejected values, raw
+file content, private target IDs, or filesystem paths.
+
+### 7.6 Check Inbound/Outbound Durability State
 
 ```bash
 DB=~/.local/share/whatsoup/instances/sandbox-agent/bot.db
@@ -1117,7 +1147,7 @@ It fails on a busy writer, a changed database file, schema drift, a partial sour
 or a later-only corroborated delivery. Coordinate against a live writer rather than retrying blindly.
 An exact repeated invocation is idempotent; changed evidence is rejected.
 
-### 7.5 Useful SQL Queries
+### 7.7 Useful SQL Queries
 
 ```bash
 DB=~/.local/share/whatsoup/instances/sandbox-agent/bot.db

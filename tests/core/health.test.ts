@@ -4232,7 +4232,12 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       mockHealthLogger.warn.mockClear();
     });
 
-    function fakeLoopLagSampler(snapshot: { sampleCount: number; p95LagMs: number | null; locallyStarved: boolean }) {
+    function fakeLoopLagSampler(snapshot: {
+      sampleCount: number;
+      p95LagMs: number | null;
+      locallyStarved: boolean;
+      discontinuityCount: number;
+    }) {
       return {
         start: vi.fn(),
         stop: vi.fn(),
@@ -4250,12 +4255,18 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
         sample_count: expect.any(Number),
         locally_starved: false,
         starvation_threshold_ms: 250,
+        discontinuity_count: expect.any(Number),
       });
       expect(json.event_loop.lag_p95_ms === null || typeof json.event_loop.lag_p95_ms === 'number').toBe(true);
     });
 
     it('folds a starved sampler snapshot into the event_loop body and degrades status', async () => {
-      const sampler = fakeLoopLagSampler({ sampleCount: 20, p95LagMs: 412, locallyStarved: true });
+      const sampler = fakeLoopLagSampler({
+        sampleCount: 20,
+        p95LagMs: 412,
+        locallyStarved: true,
+        discontinuityCount: 3,
+      });
       const deps = makeDeps(db, { loopLagSampler: sampler as any });
       ({ server, port } = await buildTestServer(deps));
 
@@ -4268,11 +4279,17 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
         sample_count: 20,
         locally_starved: true,
         starvation_threshold_ms: 250,
+        discontinuity_count: 3,
       });
     });
 
     it('logs a warning when the sampler reports local starvation', async () => {
-      const sampler = fakeLoopLagSampler({ sampleCount: 20, p95LagMs: 500, locallyStarved: true });
+      const sampler = fakeLoopLagSampler({
+        sampleCount: 20,
+        p95LagMs: 500,
+        locallyStarved: true,
+        discontinuityCount: 0,
+      });
       const deps = makeDeps(db, { loopLagSampler: sampler as any });
       ({ server, port } = await buildTestServer(deps));
 
@@ -4283,8 +4300,70 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       );
     });
 
+    it('rate-limits continuous starvation warnings using monotonic time without hiding health', async () => {
+      let nowMs = 1_000;
+      const sampler = fakeLoopLagSampler({
+        sampleCount: 20,
+        p95LagMs: 500,
+        locallyStarved: true,
+        discontinuityCount: 2,
+      });
+      const deps = makeDeps(db, {
+        loopLagSampler: sampler as any,
+        loopLagWarningNow: () => nowMs,
+      });
+      ({ server, port } = await buildTestServer(deps));
+
+      const first = JSON.parse((await httpReq(port, '/health', 'GET')).body);
+      nowMs += 299_999;
+      const suppressed = JSON.parse((await httpReq(port, '/health', 'GET')).body);
+      expect(first.status).toBe('degraded');
+      expect(suppressed.status).toBe('degraded');
+      expect(suppressed.event_loop.discontinuity_count).toBe(2);
+      expect(mockHealthLogger.warn).toHaveBeenCalledTimes(1);
+
+      nowMs += 1;
+      await httpReq(port, '/health', 'GET');
+      expect(mockHealthLogger.warn).toHaveBeenCalledTimes(2);
+    });
+
+    it('warns immediately when starvation re-enters inside the repeat interval', async () => {
+      let nowMs = 1_000;
+      const snapshot = {
+        sampleCount: 20,
+        p95LagMs: 500,
+        locallyStarved: true,
+        discontinuityCount: 0,
+      };
+      const sampler = fakeLoopLagSampler(snapshot);
+      const deps = makeDeps(db, {
+        loopLagSampler: sampler as any,
+        loopLagWarningNow: () => nowMs,
+      });
+      ({ server, port } = await buildTestServer(deps));
+
+      await httpReq(port, '/health', 'GET');
+      sampler.snapshot.mockReturnValue({
+        ...snapshot,
+        p95LagMs: 0,
+        locallyStarved: false,
+      });
+      nowMs += 1;
+      await httpReq(port, '/health', 'GET');
+      sampler.snapshot.mockReturnValue(snapshot);
+      nowMs += 1;
+      await httpReq(port, '/health', 'GET');
+
+      expect(mockHealthLogger.warn).toHaveBeenCalledTimes(2);
+    });
+
     it('does not log a starvation warning when the sampler is not starved', async () => {
-      const sampler = fakeLoopLagSampler({ sampleCount: 3, p95LagMs: 10, locallyStarved: false });
+      const sampler = fakeLoopLagSampler({
+        sampleCount: 3,
+        p95LagMs: 10,
+        locallyStarved: false,
+        discontinuityCount: 0,
+      });
       const deps = makeDeps(db, { loopLagSampler: sampler as any });
       ({ server, port } = await buildTestServer(deps));
 
@@ -4296,7 +4375,12 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
     });
 
     it('stops the injected sampler when the server closes', async () => {
-      const sampler = fakeLoopLagSampler({ sampleCount: 0, p95LagMs: null, locallyStarved: false });
+      const sampler = fakeLoopLagSampler({
+        sampleCount: 0,
+        p95LagMs: null,
+        locallyStarved: false,
+        discontinuityCount: 0,
+      });
       const deps = makeDeps(db, { loopLagSampler: sampler as any });
       ({ server, port } = await buildTestServer(deps));
       expect(sampler.start).toHaveBeenCalled();

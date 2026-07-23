@@ -22,6 +22,7 @@
     "backfill-enrichment": "bash scripts/run-with-pinned-node.sh scripts/backfill-enrichment.ts",
     "token-window": "bash scripts/run-with-pinned-node.sh scripts/token-window.ts",
     "close-recovery-catchup": "bash scripts/run-with-pinned-node.sh scripts/close-recovery-catchup.ts",
+    "validate-private-operation-record": "bash scripts/run-with-pinned-node.sh scripts/validate-private-operation-record.ts",
     "guard:publication": "bash scripts/run-with-pinned-node.sh scripts/publication-guard.ts",
     "guard:publication:all": "npm run guard:publication -- --all",
     "guard:publication:release": "npm run guard:publication -- --release",
