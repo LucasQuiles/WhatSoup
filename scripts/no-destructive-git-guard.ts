@@ -243,14 +243,24 @@ function normalizeGitCommand(tokens: string[]): string | null {
   return `git ${tokens.slice(m).join(' ')}`;
 }
 
-function scanFile(abs: string, rel: string): Finding[] {
+/**
+ * `analysed` is false when the file was skipped without being parsed. The caller counts only
+ * analysed files: counting every file the walker touched would let a surface directory
+ * containing nothing but data files report a non-zero examined count while reading no shell.
+ */
+interface FileScan {
+  findings: Finding[];
+  analysed: boolean;
+}
+
+function scanFile(abs: string, rel: string): FileScan {
   const out: Finding[] = [];
   const isSh = abs.endsWith('.sh');
   const hasDotInBase = path.basename(abs).includes('.');
   const husky = isHuskyPath(rel);
   // A dot-bearing extension that is NOT `.sh` (and not a husky hook) is skipped WITHOUT
   // reading — .ts/.py/.json/.md/.plist data files are out of scope.
-  if (!isSh && !husky && hasDotInBase) return out;
+  if (!isSh && !husky && hasDotInBase) return { findings: out, analysed: false };
 
   const lines = readFileSync(abs, 'utf8').split('\n');
 
@@ -261,7 +271,7 @@ function scanFile(abs: string, rel: string): Finding[] {
     if (SHELL_SHEBANG.test(firstLine)) {
       shell = true;
     } else {
-      return out; // not a recognised shell script — skip (binary / data / other-lang guard)
+      return { findings: out, analysed: false }; // not a recognised shell script — skip (binary / data / other-lang guard)
     }
   }
 
@@ -303,16 +313,32 @@ function scanFile(abs: string, rel: string): Finding[] {
     // when the opening line itself was allow-suppressed.
     if (opened !== null) heredoc = opened;
   }
-  return out;
+
+
+  return { findings: out, analysed: true };
 }
 
-export function scanForDestructiveGit(root: string): Finding[] {
+/**
+ * Scan result plus the number of files actually READ. The count, not the presence of the
+ * surface directories, is what distinguishes "examined the tree and found nothing" from
+ * "examined nothing" — SURFACE_DIRS can all exist and be empty, which is precisely how the
+ * reverted version of this refusal (`9cf044d45`) still certified a zero-file scan.
+ */
+export interface DestructiveGitScan {
+  findings: Finding[];
+  /** Files actually PARSED as shell — not files merely walked past. */
+  filesExamined: number;
+}
+
+/** Counting scan. `scanForDestructiveGit` keeps the original findings-only contract. */
+export function scanForDestructiveGitCounted(root: string): DestructiveGitScan {
   // Fail-closed: a missing/unreadable root must throw (propagated to main()'s catch →
   // non-zero exit), never be swallowed into a clean-looking empty result.
   if (!existsSync(root)) {
     throw new Error(`scan root does not exist: ${root}`);
   }
   const findings: Finding[] = [];
+  let filesExamined = 0;
   const walk = (dir: string): void => {
     for (const name of readdirSync(dir)) {
       if (SKIP_DIRS.has(name)) continue;
@@ -321,7 +347,9 @@ export function scanForDestructiveGit(root: string): Finding[] {
       if (st.isDirectory()) {
         walk(abs);
       } else {
-        findings.push(...scanFile(abs, path.relative(root, abs)));
+        const scan = scanFile(abs, path.relative(root, abs));
+        if (scan.analysed) filesExamined += 1;
+        findings.push(...scan.findings);
       }
     }
   };
@@ -332,23 +360,44 @@ export function scanForDestructiveGit(root: string): Finding[] {
     if (st.isDirectory()) {
       walk(abs);
     } else {
-      findings.push(...scanFile(abs, path.relative(root, abs)));
+      const scan = scanFile(abs, path.relative(root, abs));
+      if (scan.analysed) filesExamined += 1;
+      findings.push(...scan.findings);
     }
   }
-  return findings;
+  return { findings, filesExamined };
+}
+
+/** Findings only — pure, and legitimately allowed to return []. Unit tests use this. */
+export function scanForDestructiveGit(root: string): Finding[] {
+  return scanForDestructiveGitCounted(root).findings;
 }
 
 function main(): number {
   const root = process.argv[2] ?? process.cwd();
-  let findings: Finding[];
+  let scan: DestructiveGitScan;
   try {
-    findings = scanForDestructiveGit(root);
+    scan = scanForDestructiveGitCounted(root);
   } catch (err) {
     console.error(`[no-destructive-git] FATAL ${(err as Error).message}`); // fail-closed
     return 2;
   }
+  const { findings, filesExamined } = scan;
+
+  // Refuse to certify a tree that was never read. This backs severity:'block' rule
+  // process.no-destructive-git. Checking that SURFACE_DIRS exist is NOT sufficient: they
+  // can all be present and empty, which satisfies the proxy while reading zero files.
+  if (filesExamined === 0) {
+    console.error(
+      `[no-destructive-git] INCONCLUSIVE — examined 0 files under ${root} ` +
+        `(looked in ${SURFACE_DIRS.join(', ')}); refusing to report "clean" for a tree ` +
+        'that was never read',
+    );
+    return 2;
+  }
+
   if (findings.length === 0) {
-    console.log('[no-destructive-git] clean (0 findings)');
+    console.log(`[no-destructive-git] clean (0 findings across ${filesExamined} file(s))`);
     return 0;
   }
   for (const f of findings) {

@@ -470,6 +470,22 @@ export function run(
     return { allViolations, newViolations: [], baselinedViolations: allViolations };
   }
 
+  // Refuse to certify a tree that was never read. This backs severity:'block' rule
+  // arch.import-boundaries, so "passed (no violations)" from a zero-file scan is a false
+  // green on a blocking gate. The check is on files READ, not on `src/` existing: a decoy
+  // checkout with an empty `src/` satisfies any presence proxy while reading nothing —
+  // which is how the reverted version of this refusal (`9cf044d45`) still passed.
+  const scannedFiles = walkSrcFiles(repoRoot).length;
+  if (scannedFiles === 0) {
+    console.error(
+      `import boundary check INCONCLUSIVE — examined 0 source file(s) under ` +
+        `${path.join(repoRoot, 'src')}; refusing to report "passed" for a tree that was ` +
+        'never read',
+    );
+    process.exitCode = 2;
+    return { allViolations, newViolations: [], baselinedViolations: [] };
+  }
+
   // Default: check mode with ratchet
   const baseline = loadBaseline(repoRoot);
   const baselined = new Set(baseline.map(violationKey));
@@ -491,10 +507,10 @@ export function run(
     }
     process.exitCode = 1;
   } else if (allViolations.length === 0) {
-    console.log('import boundary check passed (no violations)');
+    console.log(`import boundary check passed (no violations across ${scannedFiles} file(s))`);
   } else {
     console.log(
-      `import boundary check passed (${baselinedViolations.length} grandfathered violation(s) in baseline)`,
+      `import boundary check passed (${baselinedViolations.length} grandfathered violation(s) in baseline, ${scannedFiles} file(s) examined)`,
     );
   }
 
