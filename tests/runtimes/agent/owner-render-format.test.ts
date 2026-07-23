@@ -51,10 +51,13 @@ describe('owner-render-format', () => {
         modelPinVerified: true,
         expiresAt: 3_600_000,
       };
-      expect(savedPreferenceLine(pref, true, 0)).toBe(
+      expect(savedPreferenceLine(pref, true, false, 0)).toBe(
         'Saved preference: glm/glm-5.2 (expires in ~1h) — health fallback currently decides new sessions',
       );
-      expect(savedPreferenceLine(null, false, 0)).toBe('Saved preference: none');
+      expect(savedPreferenceLine(pref, true, true, 0)).toBe(
+        'Saved preference: glm/glm-5.2 (expires in ~1h) — active within the health fallback provider',
+      );
+      expect(savedPreferenceLine(null, false, false, 0)).toBe('Saved preference: none');
     });
   });
 

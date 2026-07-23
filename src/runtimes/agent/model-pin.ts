@@ -447,10 +447,26 @@ export function recycleLiveSession(
  */
 export function renderPinOutcomeEcho(
   port: ModelPinPort,
+  chatJid: string,
+  senderJid: string,
   label: string,
   outcome: RouteRecycleOutcome,
 ): string {
-  return renderPinPreferenceOutcome(label, outcome, fallbackRouteLabel(port.effectiveFallbackEntry));
+  return renderPinPreferenceOutcome(
+    label,
+    outcome,
+    fallbackRouteForResolvedPreference(port, chatJid, senderJid),
+  );
+}
+
+function fallbackRouteForResolvedPreference(
+  port: ModelPinPort,
+  chatJid: string,
+  senderJid: string,
+): string | null {
+  return port.resolveRouteForTurn(chatJid, senderJid).reasonCode === 'fallback_window_active_model_pin'
+    ? null
+    : fallbackRouteLabel(port.effectiveFallbackEntry);
 }
 
 /**
@@ -480,12 +496,12 @@ export function echoReconfirmOutcome(
   const fallbackOutcome = fallbackReconfirmationOutcome(
     label,
     alreadySetText,
-    fallbackRouteLabel(port.effectiveFallbackEntry),
+    fallbackRouteForResolvedPreference(port, chatJid, senderJid),
   );
   if (fallbackOutcome) return fallbackOutcome;
   const recycleOutcome = applyRouteChangeAndRecycle(port, chatJid, senderJid, perChatMapKey);
   if (recycleOutcome === 'noop') return alreadySetText;
-  return renderPinOutcomeEcho(port, label, recycleOutcome);
+  return renderPinOutcomeEcho(port, chatJid, senderJid, label, recycleOutcome);
 }
 
 /**
@@ -579,7 +595,7 @@ export async function handleModelCommand(
     // Task G: apply the switch immediately (idle) or defer it to the
     // next message (busy) — the echo below discloses which.
     const recycleOutcome = applyRouteChangeAndRecycle(port, chatJid, senderJid, perChatMapKey);
-    port.sendDirect(chatJid, renderPinOutcomeEcho(port, `\`${entry.providerId}\``, recycleOutcome));
+    port.sendDirect(chatJid, renderPinOutcomeEcho(port, chatJid, senderJid, `\`${entry.providerId}\``, recycleOutcome));
     return;
   }
   // D6/D10/D16: `/model N` / `/model N<letter>` — a named-model pin
@@ -639,7 +655,7 @@ export async function handleModelCommand(
       );
       return;
     }
-    port.sendDirect(chatJid, renderPinOutcomeEcho(port, entry.id, recycleOutcome));
+    port.sendDirect(chatJid, renderPinOutcomeEcho(port, chatJid, senderJid, entry.id, recycleOutcome));
     return;
   }
   const isIntent = sub === 'strongest' || sub === 'fastest';
@@ -697,5 +713,5 @@ export async function handleModelCommand(
     return;
   }
   const recycleOutcome = applyRouteChangeAndRecycle(port, chatJid, senderJid, perChatMapKey);
-  port.sendDirect(chatJid, renderPinOutcomeEcho(port, what, recycleOutcome));
+  port.sendDirect(chatJid, renderPinOutcomeEcho(port, chatJid, senderJid, what, recycleOutcome));
 }
