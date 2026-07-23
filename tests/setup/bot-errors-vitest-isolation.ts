@@ -44,7 +44,12 @@ chmodSync(isolatedHome, 0o700);
 mkdirSync(isolatedTmpdir, { mode: 0o700 });
 writeFileSync(ownershipMarker, ownershipToken, { mode: 0o600 });
 
-afterAll(() => {
+let isolatedHomeRemoved = false;
+
+function removeIsolatedHome(): void {
+  if (isolatedHomeRemoved) {
+    return;
+  }
   const stat = lstatSync(isolatedHome);
   const resolved = realpathSync(isolatedHome);
   const fromTempRoot = relative(tempRoot, resolved);
@@ -57,7 +62,22 @@ afterAll(() => {
   if (readFileSync(ownershipMarker, 'utf8') !== ownershipToken) {
     throw new Error('refusing to remove Vitest HOME without its ownership marker');
   }
-  rmSync(isolatedHome, { recursive: true });
+  rmSync(isolatedHome, { recursive: true, force: true });
+  isolatedHomeRemoved = true;
+}
+
+afterAll(() => {
+  removeIsolatedHome();
+});
+
+// afterAll only runs after a completed test-file run; collection-only passes
+// (`vitest list`) and bailed/crashed workers exit without it and leak the dir.
+process.once('exit', () => {
+  try {
+    removeIsolatedHome();
+  } catch {
+    // Never throw during process exit; an unowned dir is left in place.
+  }
 });
 
 process.env['WHATSOUP_VITEST_HOME'] = isolatedHome;

@@ -941,6 +941,23 @@ instead of leaving the turn indefinitely processing. A symlink-protected
 startup to fail with a bounded non-secret configuration error; it does not
 continue with an unwritten MCP configuration or an implicit agent.
 
+OpenCode processes in one WhatSoup runtime share OpenCode's local SQLite state.
+WhatSoup therefore serializes OpenCode turn and model-usability `run` process
+lifetimes across chats and probes in that runtime, including the post-result or
+post-timeout cleanup interval through the child's `close` event. Waiting does
+not publish provider-turn ownership or assert typing. A wait
+that reaches 30 seconds emits the warning source
+`provider_execution_queue_pressure`; the source clears only when both the active
+lease and FIFO queue are empty. `GET /health` exposes the process-local snapshot
+at `runtime.agent.providerExecution`: `active`, `pending`, `oldestWaitMs`,
+`totalWaits`, `maxPending`, `lastWaitMs`, `abortedWaits`, and `pressureActive`.
+Sustained pressure degrades runtime health. This gate is process-local: separately
+launched OpenCode commands or another WhatSoup process using the same XDG data
+directory are not serialized and remain an explicit operational limitation.
+SQLite/LockTimeout crash text is classified as `provider_state_locked` in the
+existing crash, heal, and respawn evidence; generic account or workspace "locked"
+messages do not match.
+
 **Routing and auth (API providers):** `openai-api` / `anthropic-api` consume
 `baseUrl` directly as the endpoint of the managed HTTP loop (default
 `https://api.openai.com/v1` for `openai-api`), so any OpenAI-compatible

@@ -35,6 +35,9 @@ interface RunResult {
   warningCount: number;
   errorCount: number;
   fatal: boolean;
+  /** How many files ESLint actually linted. Zero means the globs matched nothing —
+   *  `errorOnUnmatchedPattern: false` turns that into a silent clean pass unless refused. */
+  filesLinted: number;
 }
 
 /**
@@ -74,7 +77,7 @@ export async function runEslintFitness(cwd: string = repoRoot): Promise<RunResul
     }
   }
 
-  return { issues, warningCount, errorCount, fatal };
+  return { issues, warningCount, errorCount, fatal, filesLinted: results.length };
 }
 
 function printIssues(issues: GuardIssue[]): void {
@@ -111,11 +114,23 @@ export async function run(
     return;
   }
 
+  // Non-vacuity floor. `errorOnUnmatchedPattern: false` means globs that match nothing yield
+  // zero results and a clean pass — a scan that examined no files. A guard that certifies an
+  // empty tree is a fail-open guard, the same class refused across the #2102 guards.
+  if (result.filesLinted === 0) {
+    console.error(
+      'eslint fitness ring: INCONCLUSIVE — ESLint matched 0 files under the fitness globs ' +
+        '(src/, scripts/, tests/). A ring that linted no files finds no errors trivially, which is not a pass.',
+    );
+    process.exitCode = 2;
+    return;
+  }
+
   if (result.issues.length > 0) {
     printIssues(result.issues);
   }
 
-  const summary = `eslint fitness ring: ${result.warningCount} warning(s), ${result.errorCount} error(s)`;
+  const summary = `eslint fitness ring: ${result.warningCount} warning(s), ${result.errorCount} error(s), ${result.filesLinted} file(s) linted`;
 
   // Errors (configured-error rules or parser fatals) fail the guard. Warnings do
   // not — they are the intended visible-but-non-blocking signal.

@@ -38,6 +38,20 @@ export interface GrantResolverFinding {
 }
 
 /**
+ * A scan result that carries HOW MANY files were examined, not just what was found.
+ * Zero findings over zero files is "I never looked at src/", which must not read as clean —
+ * the same non-vacuity discipline as check-insecure-tempfile / no-destructive-git (#2102).
+ */
+export interface GrantResolverScan {
+  findings: GrantResolverFinding[];
+  filesExamined: number;
+}
+
+const EXIT_PASS = 0;
+const EXIT_BLOCK = 1;
+const EXIT_INCONCLUSIVE = 2;
+
+/**
  * Allowlisted inline `isAdminPhone(resolvePhoneFromJid(...))` sites that are
  * intentionally NOT routed through the grant primitive. Each carries a
  * justification; a reviewer adding a row must explain why the site is
@@ -119,11 +133,16 @@ function walkTsFiles(root: string, dir: string, acc: string[]): void {
   }
 }
 
-/** Scan every non-test `.ts` file under `src/` for ungated grant compositions. */
-export function scanRepoGrantResolvers(cwd: string): GrantResolverFinding[] {
+/**
+ * Scan every non-test `.ts` file under `src/`, reporting BOTH the findings and how many
+ * files were examined. The count is what lets `main` tell "scanned src/ and found nothing"
+ * apart from "src/ was empty or absent, so nothing was scanned".
+ */
+export function scanRepoGrantResolversCounted(cwd: string): GrantResolverScan {
   const candidates: string[] = [];
   walkTsFiles(cwd, path.join(cwd, 'src'), candidates);
   const findings: GrantResolverFinding[] = [];
+  let filesExamined = 0;
   for (const rel of candidates) {
     let content: string;
     try {
@@ -131,25 +150,45 @@ export function scanRepoGrantResolvers(cwd: string): GrantResolverFinding[] {
     } catch {
       continue;
     }
+    filesExamined += 1;
     findings.push(...scanFileForGrantResolvers(rel, content));
   }
-  return findings;
+  return { findings, filesExamined };
 }
 
-function main(): void {
+/** Back-compat: findings only. Prefer `scanRepoGrantResolversCounted` for the vacuity check. */
+export function scanRepoGrantResolvers(cwd: string): GrantResolverFinding[] {
+  return scanRepoGrantResolversCounted(cwd).findings;
+}
+
+function main(): number {
   const cwd = process.cwd();
-  const findings = scanRepoGrantResolvers(cwd);
+  const { findings, filesExamined } = scanRepoGrantResolversCounted(cwd);
+
+  if (filesExamined === 0) {
+    // No `.ts` under src/ means the tree was never examined — refusing to certify it.
+    // A location check (does src/ exist) is not a work check (were any files read).
+    console.error(
+      `grant-resolver-inventory-guard: INCONCLUSIVE — examined 0 source file(s) under ${path.join(cwd, 'src')}. ` +
+        'A scan that read zero files cannot certify the grant-composition invariant, which is not a pass.',
+    );
+    return EXIT_INCONCLUSIVE;
+  }
+
   if (findings.length === 0) {
-    console.log('grant-resolver-inventory-guard: no ungated isAdminPhone(resolvePhoneFromJid(...)) grant compositions (invariant.qr143-grant-primitive)');
-    return;
+    console.log(
+      `grant-resolver-inventory-guard: no ungated isAdminPhone(resolvePhoneFromJid(...)) grant compositions ` +
+        `across ${filesExamined} source file(s) (invariant.qr143-grant-primitive)`,
+    );
+    return EXIT_PASS;
   }
   console.error('grant-resolver-inventory-guard: ungated grant composition(s) detected — route through resolvePhoneFromJidForGrant or allowlist with justification (invariant.qr143-grant-primitive):');
   for (const f of findings) {
     console.error(`  ${f.file}:${f.line} ${f.detail}`);
   }
-  process.exitCode = 1;
+  return EXIT_BLOCK;
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
-  main();
+  process.exit(main());
 }

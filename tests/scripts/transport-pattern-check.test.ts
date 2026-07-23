@@ -7,6 +7,7 @@ import {
   loadRuleSpecs,
   scanRule,
   scanAll,
+  collectScannableFiles,
   partitionByBaseline,
   run,
   ENFORCED_RULE_IDS,
@@ -232,6 +233,17 @@ describe('transport-pattern-check', () => {
       expect(code).toBe(2);
       expect(errSpy).toHaveBeenCalled();
     });
+
+    it('is INCONCLUSIVE (exit 2), never a pass, when the rule globs match 0 files', async () => {
+      // Before the floor, an empty root printed "passed (0 total, 0 baselined, 0 new)" having
+      // walked nothing — a false green. fixtureRoot is a fresh empty dir, so no glob resolves.
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const code = await run([], fixtureRoot);
+      expect(code, 'a zero-file scan must not pass').toBe(2);
+      expect(errSpy.mock.calls.flat().join(' ')).toMatch(/INCONCLUSIVE/i);
+      expect(logSpy.mock.calls.flat().join(' ')).not.toMatch(/passed/i);
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -246,6 +258,13 @@ describe('transport-pattern-check', () => {
       const ruleIds = new Set(violations.map((v) => v.ruleId));
       expect(ruleIds.has('hygiene.no-wa-jid-literal-in-generic-ui')).toBe(true);
       expect(ruleIds.has('hygiene.no-health-whatsapp-key-read')).toBe(true);
+    });
+
+    it('the real repo scans MANY files, so the floor never fires on a real tree', () => {
+      // The counterpart to the empty-root refusal: proves the floor discriminates a real
+      // scan from a vacuous one rather than refusing everything.
+      const repoRoot = path.resolve(import.meta.dirname, '../..');
+      expect(collectScannableFiles(repoRoot).size).toBeGreaterThan(50);
     });
   });
 });

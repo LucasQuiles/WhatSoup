@@ -1001,6 +1001,27 @@ describe('reply guarantee breach visibility', () => {
     expect(h.markContinuityCandidateIfNoTerminalOutbound).not.toHaveBeenCalled();
   });
 
+  it('fires for a typed pre-dispatch fault that dropped an admitted turn', () => {
+    const h = harness({}, FAILED_RECEIPT);
+    const result = run(h.durability, {
+      attemptOutcome: { kind: 'admission_rejected', class: 'pre_dispatch_error' },
+      answerOpIds: [],
+    });
+
+    expect(terminalResult(result).terminal.inboundDisposition).toBe('failed_terminal');
+    expect(h.markContinuityCandidateIfNoTerminalOutbound).toHaveBeenCalledExactlyOnceWith(
+      IDENTITY.inboundSeq,
+      'runtime_fault_no_terminal_outbound',
+      'runtime_fault_disarm',
+    );
+    expect(emitAlertMock).toHaveBeenCalledWith(
+      'agent-alpha',
+      'agent_reply_guarantee_breach',
+      expect.any(String),
+      expect.stringContaining('attempt_failure_class=pre_dispatch_error'),
+    );
+  });
+
   it('does not fire for a delivered turn', () => {
     const h = harness({ 7: 'echoed' });
     const result = run(h.durability, { answerOpIds: [7] });

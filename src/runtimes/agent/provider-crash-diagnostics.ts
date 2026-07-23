@@ -1,6 +1,9 @@
 // Shared, non-secret provider crash diagnostics for agent runtime alerts.
 
-import type { AgentFailureClass } from './failure-taxonomy.ts';
+import {
+  isProviderStateLockedMessage,
+  type AgentFailureClass,
+} from './failure-taxonomy.ts';
 import { sanitizeProviderPreviewText } from './provider-preview-sanitizer.ts';
 
 const PROVIDER_CRASH_PREVIEW_MAX = 1_000;
@@ -45,6 +48,7 @@ export function appendProviderCrashPreview(
 export function classifyProviderCrash(text: string): AgentFailureClass | undefined {
   const lower = text.toLowerCase();
   if (!lower.trim()) return undefined;
+  if (isProviderStateLockedMessage(lower)) return 'provider_state_locked';
   if (lower.includes('enoent') || lower.includes('command not found')) return 'provider_binary_missing';
   if (
     lower.includes('permission denied') ||
