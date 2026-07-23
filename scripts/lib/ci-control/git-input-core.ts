@@ -172,6 +172,7 @@ export interface ExactBudgetedAddedLineSetV1 extends ExactAddedLineSetV1 {
 
 export type ExactGitInputErrorCode =
   | "ci.input.history-graft-present"
+  | "ci.input.git-control-unavailable"
   | "ci.input.revision-unavailable"
   | "ci.input.commit-range-unavailable"
   | "ci.input.commit-range-malformed"
@@ -235,11 +236,22 @@ export const MODE_TYPES: Readonly<Record<ChangeModeV1, ChangeObjectTypeV1>> = {
   "160000": "gitlink",
 };
 
+function gitControlUnavailable(): ExactGitInputError {
+  return new ExactGitInputError(
+    "ci.input.git-control-unavailable",
+    "ci.input.git-control-unavailable",
+  );
+}
+
 export function gitEnvironment(): NodeJS.ProcessEnv {
   return {
     ...cleanGitEnv(),
+    GIT_CONFIG_COUNT: "1",
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_KEY_0: "advice.graftFileDeprecated",
+    GIT_CONFIG_VALUE_0: "false",
+    GIT_GRAFT_FILE: "/dev/null",
     GIT_NO_LAZY_FETCH: "1",
     GIT_NO_REPLACE_OBJECTS: "1",
     GIT_OPTIONAL_LOCKS: "0",
@@ -249,9 +261,14 @@ export function gitEnvironment(): NodeJS.ProcessEnv {
 
 function boundedControlPath(path: string): string | null {
   const metadata = lstatSync(path, { throwIfNoEntry: false });
-  if (metadata === undefined || !metadata.isFile() || metadata.size > 4_096) return null;
+  if (metadata === undefined) return null;
+  if (!metadata.isFile() || metadata.size > 4_096) {
+    throw gitControlUnavailable();
+  }
   const value = readFileSync(path, "utf8");
-  if (!value.endsWith("\n") || value.slice(0, -1).includes("\n")) return null;
+  if (!value.endsWith("\n") || value.slice(0, -1).includes("\n")) {
+    throw gitControlUnavailable();
+  }
   return value.slice(0, -1);
 }
 
@@ -263,8 +280,13 @@ function gitCommonDirFromFilesystem(cwd: string): string | null {
     if (metadata?.isDirectory()) return dotGit;
     if (metadata?.isFile()) {
       const pointer = boundedControlPath(dotGit);
-      if (pointer === null || !pointer.startsWith("gitdir: ")) return null;
+      if (pointer === null || !pointer.startsWith("gitdir: ")) {
+        throw gitControlUnavailable();
+      }
       const rawGitDir = pointer.slice("gitdir: ".length);
+      if (rawGitDir.length === 0) {
+        throw gitControlUnavailable();
+      }
       const gitDir = isAbsolute(rawGitDir) ? rawGitDir : resolve(cursor, rawGitDir);
       const common = boundedControlPath(join(gitDir, "commondir"));
       return common === null
@@ -272,6 +294,15 @@ function gitCommonDirFromFilesystem(cwd: string): string | null {
         : isAbsolute(common)
         ? common
         : resolve(gitDir, common);
+    }
+    if (metadata !== undefined) {
+      throw gitControlUnavailable();
+    }
+    const bareHead = lstatSync(join(cursor, "HEAD"), { throwIfNoEntry: false });
+    const bareObjects = lstatSync(join(cursor, "objects"), { throwIfNoEntry: false });
+    if (bareHead?.isFile() && bareObjects?.isDirectory()) return cursor;
+    if (bareHead !== undefined || bareObjects !== undefined) {
+      throw gitControlUnavailable();
     }
     const parent = dirname(cursor);
     if (parent === cursor) return null;
@@ -281,13 +312,19 @@ function gitCommonDirFromFilesystem(cwd: string): string | null {
 
 /** Reject legacy graft metadata before any Git command can interpret rewritten ancestry. */
 export function assertNoLegacyGrafts(cwd: string): void {
-  const commonDir = gitCommonDirFromFilesystem(cwd);
-  if (commonDir === null) return;
-  if (lstatSync(join(commonDir, "info", "grafts"), { throwIfNoEntry: false }) !== undefined) {
+  try {
+    const commonDir = gitCommonDirFromFilesystem(cwd);
+    if (commonDir === null) return;
+    if (lstatSync(join(commonDir, "info", "grafts"), { throwIfNoEntry: false }) === undefined) {
+      return;
+    }
     throw new ExactGitInputError(
       "ci.input.history-graft-present",
       "ci.input.history-graft-present",
     );
+  } catch (error) {
+    if (error instanceof ExactGitInputError) throw error;
+    throw gitControlUnavailable();
   }
 }
 

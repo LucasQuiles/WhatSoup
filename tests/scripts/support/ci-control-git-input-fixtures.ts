@@ -229,6 +229,10 @@ const fail = (message, code) => { fs.writeSync(2, message); process.exit(code); 
 if (process.cwd() !== scenario.cwd) fail('unexpected cwd', 91);
 if (args[0] !== '--no-replace-objects') fail('replacement isolation missing', 92);
 if (process.env.GIT_NO_REPLACE_OBJECTS !== '1') fail('replace env missing', 93);
+if (process.env.GIT_GRAFT_FILE !== '/dev/null') fail('graft isolation missing', 98);
+if (process.env.GIT_CONFIG_COUNT !== '1') fail('explicit config count missing', 99);
+if (process.env.GIT_CONFIG_KEY_0 !== 'advice.graftFileDeprecated') fail('graft advice key missing', 100);
+if (process.env.GIT_CONFIG_VALUE_0 !== 'false') fail('graft advice value missing', 101);
 if (process.env.GIT_NO_LAZY_FETCH !== '1') fail('lazy fetch env missing', 94);
 if (process.env.GIT_OPTIONAL_LOCKS !== '0') fail('optional locks env missing', 95);
 for (const name of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE']) {

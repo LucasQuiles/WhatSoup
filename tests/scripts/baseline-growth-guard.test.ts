@@ -11,7 +11,16 @@
  * revision resolution, weighing, and comparison are all the production code path.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -254,11 +263,53 @@ describe('baseline growth guard — the red proof', () => {
     const before = runGuard(['--repo', dir, '--candidate', candidate]);
     expect(before.status, before.out).toBe(1);
 
+    const bareContainer = mkdtempSync(join(tmpdir(), 'baseline-growth-bare-'));
+    tempRoots.push(bareContainer);
+    const bare = join(bareContainer, 'repo.git');
+    execFileSync('git', ['clone', '--bare', '--quiet', dir, bare], {
+      env: { ...process.env, GIT_DIR: undefined, GIT_WORK_TREE: undefined } as NodeJS.ProcessEnv,
+    });
+    git(bare, ['update-ref', 'refs/remotes/origin/main', advancedRemote]);
+    const bareBefore = runGuard(['--repo', bare, '--candidate', candidate]);
+    expect(bareBefore.status, bareBefore.out).toBe(1);
+
     mkdirSync(join(dir, '.git/info'), { recursive: true });
     writeFileSync(join(dir, '.git/info/grafts'), `${candidate} ${advancedRemote}\n`);
     const after = runGuard(['--repo', dir, '--candidate', candidate]);
     expect(after.status, after.out).toBe(2);
     expect(after.out).toMatch(/graft/i);
+
+    mkdirSync(join(bare, 'info'), { recursive: true });
+    writeFileSync(join(bare, 'info/grafts'), `${candidate} ${advancedRemote}\n`);
+    const bareAfter = runGuard(['--repo', bare, '--candidate', candidate]);
+    expect(bareAfter.status, bareAfter.out).toBe(2);
+    expect(bareAfter.out).toMatch(/graft/i);
+  });
+
+  it('is INCONCLUSIVE without leaking paths when the repository control path is a symlink', () => {
+    const dir = makeRepo(2);
+    const realBase = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeBoundary(dir, 5);
+    commitCandidate(dir, 'grow candidate baseline');
+    const candidate = git(dir, ['rev-parse', 'HEAD']).trim();
+    const candidateTree = git(dir, ['rev-parse', `${candidate}^{tree}`]).trim();
+    const advancedRemote = git(
+      dir,
+      ['commit-tree', candidateTree, '-p', realBase, '-m', 'advanced remote with same weight'],
+    ).trim();
+    git(dir, ['update-ref', 'refs/remotes/origin/main', advancedRemote]);
+
+    const realGitDir = join(dir, '.git-real');
+    renameSync(join(dir, '.git'), realGitDir);
+    symlinkSync('.git-real', join(dir, '.git'));
+    mkdirSync(join(realGitDir, 'info'), { recursive: true });
+    writeFileSync(join(realGitDir, 'info/grafts'), `${candidate} ${advancedRemote}\n`);
+
+    const result = runGuard(['--repo', dir, '--candidate', candidate]);
+    expect(result.status, result.out).toBe(2);
+    expect(result.out).toContain('ci.input.git-control-unavailable');
+    expect(result.out).not.toContain(dir);
+    expect(result.out).not.toContain('Remove legacy Git graft metadata');
   });
 
   it('PASSES (exit 0) when a baseline is unchanged', () => {

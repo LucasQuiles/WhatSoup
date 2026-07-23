@@ -30,6 +30,7 @@ import {
 } from './lib/baseline-weight.ts';
 import { CliArgError, assertKnownFlag, isHelpFlag, takeValue } from './lib/cli-args.ts';
 import {
+  ExactGitInputError,
   FULL_OID,
   UTF8,
   assertNoLegacyGrafts,
@@ -255,7 +256,13 @@ function main(): number {
   try {
     assertNoLegacyGrafts(repoRoot);
   } catch (error) {
-    console.error(`FAIL(inconclusive): ${errorMessage(error)}. Remove legacy Git graft metadata.`);
+    const code = error instanceof ExactGitInputError
+      ? error.code
+      : 'ci.input.git-control-unavailable';
+    const remediation = code === 'ci.input.history-graft-present'
+      ? 'Remove legacy Git graft metadata before retrying.'
+      : 'Repair or select a trustworthy repository control path before retrying.';
+    console.error(`FAIL(inconclusive): ${code}. ${remediation}`);
     return EXIT_INCONCLUSIVE;
   }
   const candidate = resolveCommit(options.candidate, repoRoot);

@@ -798,6 +798,42 @@ describe('exact commit range', () => {
     }), 'ci.input.history-graft-present');
   });
 
+  it('rejects malformed repository control metadata with a sanitized unavailable result', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ci-control-malformed-gitdir-'));
+    registerTemporaryRoot(root);
+    writeFileSync(join(root, '.git'), 'gitdir: missing-terminal-newline', 'utf8');
+
+    let thrown: unknown;
+    try {
+      readExactCommitRange(root, {
+        baseOid: 'a'.repeat(40),
+        remoteOid: null,
+        localOid: 'b'.repeat(40),
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toMatchObject({ code: 'ci.input.git-control-unavailable' });
+    expect(String(thrown)).not.toContain(root);
+    expectNoVisibleCause(thrown);
+  });
+
+  it('accepts a valid linked-worktree control path as a safe neighbor', () => {
+    const { root, baseOid } = fixture();
+    write(root, 'candidate.txt', 'candidate\n');
+    const localOid = commit(root, 'candidate');
+    const container = mkdtempSync(join(tmpdir(), 'ci-control-linked-worktree-'));
+    registerTemporaryRoot(container);
+    const linked = join(container, 'linked');
+    git(root, ['worktree', 'add', '--quiet', '--detach', linked, localOid]);
+
+    expect(readExactCommitRange(linked, {
+      baseOid,
+      remoteOid: null,
+      localOid,
+    })).toMatchObject({ baseOid, localOid });
+  });
+
   it('rejects malformed runtime records before Git or accessor evaluation', () => {
     const oid = 'a'.repeat(40);
     const malformed: unknown[] = [
@@ -1196,29 +1232,27 @@ describe('exact commit range', () => {
 
 describe('exact commit metadata', () => {
   it('uses only the closed policy-neutral static import surface', () => {
-    const expectedImports = new Map<string, string[]>([
-      ['scripts/lib/ci-control/git-input.ts', [
+    const assertImportSurface = (path: string, expected: string[]): void => {
+      const source = readFileSync(join(process.cwd(), path), 'utf8');
+      const specifiers = extractModuleSpecifiers(source);
+      expect([...new Set(specifiers)].sort(), path).toEqual(expected);
+      expect(source, path).not.toMatch(/\bimport\s*\(/u);
+      expect(source, path).not.toMatch(/\b(?:require|createRequire)\s*\(/u);
+    };
+
+    assertImportSurface('scripts/lib/ci-control/git-input.ts', [
         './git-input-core.ts',
         'node:child_process',
         'node:util',
-      ]],
-      ['scripts/lib/ci-control/git-input-core.ts', [
+    ]);
+    assertImportSurface('scripts/lib/ci-control/git-input-core.ts', [
         '../../../src/lib/git-env.ts',
         'node:child_process',
         'node:crypto',
         'node:fs',
         'node:path',
         'node:util',
-      ]],
     ]);
-    expect(expectedImports.size).toBe(2);
-    for (const [path, expected] of expectedImports) {
-      const source = readFileSync(join(process.cwd(), path), 'utf8');
-      const specifiers = extractModuleSpecifiers(source);
-      expect([...new Set(specifiers)].sort(), path).toEqual(expected);
-      expect(source, path).not.toMatch(/\bimport\s*\(/u);
-      expect(source, path).not.toMatch(/\b(?:require|createRequire)\s*\(/u);
-    }
   });
 
   it('reads the requested exact commit rather than a later safe ambient HEAD', () => {
