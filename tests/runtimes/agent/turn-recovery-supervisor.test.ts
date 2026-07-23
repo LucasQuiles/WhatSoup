@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Database } from '../../../src/core/database.ts';
 import {
   DurabilityEngine,
@@ -346,6 +346,59 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
     });
   });
 
+  it('renews the lease while a long-running replay dispatch is pending (PRESTAGE-T4 point 7)', async () => {
+    vi.useFakeTimers();
+    try {
+      const { jobId, conversationKey, sourceInboundSeq } = crashOneSourceTurn({ suffix: 'lease' });
+      const renewSpy = vi.spyOn(durability, 'renewTurnRecoveryClaim');
+
+      // Deferred, not a real setTimeout: the dispatch "completes" only when
+      // this test explicitly releases it, after fake time has been advanced
+      // past the renewal interval — proves renewal fires WHILE dispatch is
+      // still pending, not merely that it could fire eventually.
+      let resolveDispatch: () => void = () => {};
+      const dispatchGate = new Promise<void>((resolve) => { resolveDispatch = resolve; });
+
+      const supervisor = new TurnRecoverySupervisor({
+        instanceName: 'brick-instance',
+        durability: () => durability,
+        // leaseSeconds=3 -> renewal interval = max(1000, 1500) = 1500ms, so
+        // the first renewal fires with 1500ms of margin before the 3000ms
+        // lease would otherwise expire.
+        leaseSeconds: 3,
+        freshOwnerIdentity: (): TurnRecoveryOwnerIdentity => ({
+          logicalTurnId: 'brick-recovery-owner-lease',
+          managerId: 'brick-supervisor',
+          generation: 1,
+        }),
+        dispatchReplay: async (): Promise<TurnRecoveryReplayDispatchResult> => {
+          await dispatchGate;
+          durability.completeInbound(sourceInboundSeq, 'response_sent');
+          return { kind: 'delivered' };
+        },
+      });
+
+      const scanPromise = supervisor.scanOnce();
+      // Flush the synchronous claim -> dispatchReplay() call chain so the
+      // renewal interval is armed before advancing fake time past it.
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(renewSpy).toHaveBeenCalled();
+      expect(supervisor.health().leaseRenewals).toBeGreaterThanOrEqual(1);
+      expect(supervisor.health().leaseRenewalFailures).toBe(0);
+
+      resolveDispatch();
+      const result = await scanPromise;
+      expect(result.completed).toBe(1);
+
+      const job = durability.getTurnRecoveryJob(jobId);
+      expect(job?.state).toBe('completed');
+      expect(() => attemptAdmission('per_chat', conversationKey)).not.toThrow();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does NOT claim or dispatch a due, replay-safe job whose ORIGINAL delivery is still ambiguous — the duplicate-send guard', async () => {
     // #2079's periodic reconciler has not reached this row yet (still
     // maybe_sent) — completeTurnRecoveryJob would refuse to close the job
@@ -410,6 +463,8 @@ describe('TurnRecoverySupervisor — deadman heartbeat evaluation', () => {
         reassignments: 0,
         dispatchFailures: 0,
         processingErrors: 0,
+        leaseRenewals: 0,
+        leaseRenewalFailures: 0,
         storeCounts: null,
       },
       { nowMs: 1_000_000, staleAfterMs: 60_000 },
@@ -429,6 +484,8 @@ describe('TurnRecoverySupervisor — deadman heartbeat evaluation', () => {
         reassignments: 0,
         dispatchFailures: 0,
         processingErrors: 0,
+        leaseRenewals: 0,
+        leaseRenewalFailures: 0,
         storeCounts: null,
       },
       { nowMs: 1_000_000, staleAfterMs: 60_000 },
@@ -448,6 +505,8 @@ describe('TurnRecoverySupervisor — deadman heartbeat evaluation', () => {
         reassignments: 0,
         dispatchFailures: 0,
         processingErrors: 0,
+        leaseRenewals: 0,
+        leaseRenewalFailures: 0,
         storeCounts: null,
       },
       { nowMs: 1_000_000, staleAfterMs: 60_000 },

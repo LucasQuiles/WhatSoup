@@ -135,6 +135,8 @@ export interface TurnRecoverySupervisorHealth {
   readonly reassignments: number;
   readonly dispatchFailures: number;
   readonly processingErrors: number;
+  readonly leaseRenewals: number;
+  readonly leaseRenewalFailures: number;
   readonly storeCounts: TurnRecoverySupervisorCounts | null;
 }
 
@@ -211,6 +213,8 @@ export class TurnRecoverySupervisor {
   private reassignments = 0;
   private dispatchFailures = 0;
   private processingErrors = 0;
+  private leaseRenewals = 0;
+  private leaseRenewalFailures = 0;
   private lastScanAt: number | null = null;
 
   constructor(deps: TurnRecoverySupervisorDeps) {
@@ -258,6 +262,8 @@ export class TurnRecoverySupervisor {
       reassignments: this.reassignments,
       dispatchFailures: this.dispatchFailures,
       processingErrors: this.processingErrors,
+      leaseRenewals: this.leaseRenewals,
+      leaseRenewalFailures: this.leaseRenewalFailures,
       storeCounts: durability ? durability.getTurnRecoverySupervisorCounts() : null,
     };
   }
@@ -439,7 +445,9 @@ export class TurnRecoverySupervisor {
     // replay-relevant fields (sender/text/scope/conversation) are immutable.
     let outcome: TurnRecoveryReplayDispatchResult;
     try {
-      outcome = await this.dispatchReplay(job, fence);
+      outcome = await this.renewLeaseWhilePending(
+        durability, jobId, owner, fence, this.dispatchReplay(job, fence),
+      );
     } catch (err) {
       this.dispatchFailures += 1;
       log.warn({ err, jobId }, 'turn recovery supervisor replay dispatch threw');
@@ -482,6 +490,48 @@ export class TurnRecoverySupervisor {
       'turn recovery supervisor replay dispatch reported a newly-unsafe job',
     );
     return { ...baseDelta, claimed: 1 };
+  }
+
+  /**
+   * PRESTAGE-T4 point 7: renew the lease during a long provider turn. A
+   * replay runs through the full normal provider/session pipeline, which can
+   * take far longer than `leaseSeconds`; without renewal an in-flight replay
+   * would have its own claim expire and get reassigned to a fresh owner
+   * mid-flight, producing two concurrent replays of the same job. Renews at
+   * half the lease duration so a single transient renewal failure still
+   * leaves margin before the lease actually lapses. A renewal failure (fence
+   * gone stale — e.g. this claim WAS reassigned out from under us) is
+   * logged and renewal simply stops; it is not a second failure path: the
+   * eventual complete/requeue call after `pending` settles re-checks the
+   * SAME fence and fails there if ownership was truly lost, which
+   * `claimAndReplay`'s existing catch blocks already handle.
+   */
+  private async renewLeaseWhilePending<T>(
+    durability: TurnRecoverySupervisorDurability,
+    jobId: number,
+    owner: TurnRecoveryOwnerIdentity,
+    fence: TurnRecoveryClaimFence,
+    pending: Promise<T>,
+  ): Promise<T> {
+    let stale = false;
+    const renewalIntervalMs = Math.max(1_000, Math.floor((this.leaseSeconds * 1000) / 2));
+    const timer = setInterval(() => {
+      if (stale) return;
+      try {
+        durability.renewTurnRecoveryClaim(jobId, owner, fence, { leaseSeconds: this.leaseSeconds });
+        this.leaseRenewals += 1;
+      } catch (err) {
+        this.leaseRenewalFailures += 1;
+        stale = true;
+        log.warn({ err, jobId }, 'turn recovery supervisor lease renewal failed; stopping renewal for this replay');
+      }
+    }, renewalIntervalMs);
+    timer.unref?.();
+    try {
+      return await pending;
+    } finally {
+      clearInterval(timer);
+    }
   }
 }
 
