@@ -30,6 +30,7 @@ import ConfirmDialog from "../components/ConfirmDialog";
 import { FleetKpis } from "../components/fleet/FleetKpis";
 import { LineRow } from "../components/fleet/LineRow";
 import { HeartbeatRail } from "../components/fleet/HeartbeatRail";
+import { channelKindOf } from "../components/fleet/channel-kind";
 import { api } from "../lib/api";
 import { useToast } from "../hooks/toast-context";
 import { formatRelative } from "../lib/format-time";
@@ -453,11 +454,11 @@ const SoupKitchen: FC = () => {
   }, [lines]);
 
   /** Distinct channel kinds across the fleet — the mockup's "N across M
-   *  channels" count line. */
+   *  channels" count line. Goes through the generic-first accessor
+   *  (channelKindOf) so transport aliases collapse to one glyph kind and
+   *  the legacy Baileys-key read stays in its designated home. */
   const channelCount = useMemo(() => {
-    const kinds = new Set(
-      lines.map((l) => l.health?.transport?.kind ?? (l.health?.whatsapp ? "baileys" : "unknown"))
-    );
+    const kinds = new Set(lines.map((l) => channelKindOf(l)));
     return kinds.size;
   }, [lines]);
 

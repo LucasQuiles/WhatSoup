@@ -22,7 +22,7 @@ import { isLineConnected } from '../../lib/compute-kpis';
 import { Checkbox, TableRow, TableCell, type RowSeverity } from '../primitives';
 import FleetRowMenu from '../FleetRowMenu';
 import { ChannelGlyph, type ChannelTag } from './ChannelGlyph';
-import { channelKindOf, type ChannelKind } from './channel-kind';
+import { channelKindOf, CHANNEL_LABEL } from './channel-kind';
 import { LineSpark } from './LineSpark';
 
 interface LineRowProps {
@@ -34,23 +34,6 @@ interface LineRowProps {
   onToggleSelected: (name: string, next: boolean) => void;
   rowRef?: RefObject<HTMLElement | null>;
 }
-
-const CHANNEL_LABEL: Record<ChannelKind, string> = {
-  wa: 'WhatsApp',
-  signal: 'Signal',
-  imessage: 'iMessage',
-  sms: 'SMS',
-  discord: 'Discord',
-  telegram: 'Telegram',
-  x: 'X',
-  linkedin: 'LinkedIn',
-  reddit: 'Reddit',
-  instagram: 'Instagram',
-  facebook: 'Facebook',
-  email: 'Email',
-  slack: 'Slack',
-  teams: 'Teams',
-};
 
 function channelTagOf(line: LineInstance): { tag: ChannelTag; label: string } {
   if (isLineConnected(line)) return { tag: 'ok', label: 'connected' };

@@ -88,7 +88,7 @@ interface ChannelGlyphProps {
   tag: ChannelTag;
   /** dim variant (deactivated lines): recessed ink, never invisible (§4.3). */
   dim?: boolean;
-  /** Accessible label, e.g. "WhatsApp · connected". */
+  /** Accessible label, e.g. "Signal · connected". */
   title: string;
 }
 

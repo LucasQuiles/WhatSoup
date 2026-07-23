@@ -45,3 +45,23 @@ export function channelKindOf(line: LineInstance): ChannelKind {
   // Baileys lines predate the generic transport block (types.ts §health).
   return line.health?.whatsapp ? 'wa' : 'sms';
 }
+
+/** Per-transport display label for a glyph kind — the copy variants the
+ *  no-WhatsApp-presuming-copy rule exists to force: each channel names
+ *  itself, so Signal/iMessage lines are never mislabeled. */
+export const CHANNEL_LABEL: Record<ChannelKind, string> = {
+  wa: 'WhatsApp',
+  signal: 'Signal',
+  imessage: 'iMessage',
+  sms: 'SMS',
+  discord: 'Discord',
+  telegram: 'Telegram',
+  x: 'X',
+  linkedin: 'LinkedIn',
+  reddit: 'Reddit',
+  instagram: 'Instagram',
+  facebook: 'Facebook',
+  email: 'Email',
+  slack: 'Slack',
+  teams: 'Teams',
+};
