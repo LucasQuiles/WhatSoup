@@ -64,6 +64,7 @@ export interface TurnRecoverySupervisorDurability {
   getTurnRecoverySupervisorCounts(): TurnRecoverySupervisorCounts;
   recoverStaleTurnRecoveryJobs(limit?: number): { requeued: number; exhausted: number };
   getTurnRecoveryOriginalDeliveryStatus(jobId: number): { outboundStatus: string } | undefined;
+  getTurnRecoverySourceProof(jobId: number): { processingStatus: string; outboundStatus: string } | undefined;
 }
 
 /**
@@ -80,6 +81,15 @@ export interface TurnRecoverySupervisorDurability {
 const ORIGINAL_DELIVERY_TERMINAL_STATUSES: ReadonlySet<string> = new Set([
   'echoed', 'failed_permanent', 'quarantined',
 ]);
+
+/**
+ * Terminal inbound-processing states for the SOURCE inbound row — the other
+ * half of the exact proof `completeTurnRecoveryJob` demands before it will
+ * close a job (turn-recovery-store.ts). Paired with
+ * `ORIGINAL_DELIVERY_TERMINAL_STATUSES` (reused unchanged — same accepted
+ * outbound values) in the already-delivered-source pre-dispatch check below.
+ */
+const SOURCE_INBOUND_TERMINAL_STATUSES: ReadonlySet<string> = new Set(['complete', 'failed']);
 
 export type TurnRecoveryReplayDispatchResult =
   | { readonly kind: 'delivered' }
@@ -497,6 +507,43 @@ export class TurnRecoverySupervisor {
     this.claims += 1;
 
     const fence: TurnRecoveryClaimFence = { claimToken: claim.claimToken, claimEpoch: claim.claimEpoch };
+
+    // Already-delivered-source pre-dispatch guard (boterr-lead ruling): a
+    // job's source can become proven WITHOUT this job's own dispatch ever
+    // running — e.g. an EARLIER replay of this same job itself deferred to
+    // a NEW recovery job (see dispatchTurnRecoveryReplayForJob's post-check,
+    // turn-recovery-dispatch.ts), that successor has since completed for
+    // real, and this job is only now being reclaimed after backoff. At that
+    // point the successor is no longer outstanding, so the excludeJobId
+    // admission check no longer blocks this claim — but dispatching again
+    // would re-invoke the session for content that ALREADY went out. Check
+    // the SAME proof completeTurnRecoveryJob demands BEFORE ever calling
+    // dispatchReplay; if it already holds, this job's fate is decided —
+    // close it directly and never dispatch.
+    let sourceProof: { processingStatus: string; outboundStatus: string } | undefined;
+    try {
+      sourceProof = durability.getTurnRecoverySourceProof(jobId);
+    } catch (err) {
+      this.processingErrors += 1;
+      log.warn({ err, jobId }, 'turn recovery supervisor pre-dispatch source-proof check failed');
+      return { ...baseDelta, claimed: 1, processingErrors: 1 };
+    }
+    if (
+      sourceProof
+      && SOURCE_INBOUND_TERMINAL_STATUSES.has(sourceProof.processingStatus)
+      && ORIGINAL_DELIVERY_TERMINAL_STATUSES.has(sourceProof.outboundStatus)
+    ) {
+      try {
+        const result = durability.completeTurnRecoveryJob(jobId, owner, fence);
+        this.completions += 1;
+        return { ...baseDelta, claimed: 1, completed: result.applied ? 1 : 0 };
+      } catch (err) {
+        this.processingErrors += 1;
+        log.error({ err, jobId }, 'turn recovery supervisor completion failed after already-proven pre-dispatch check');
+        return { ...baseDelta, claimed: 1, processingErrors: 1 };
+      }
+    }
+
     // `getOutstandingTurnRecoveryJobsForSupervisor` deliberately hides live
     // (non-expired) claims, so the just-claimed row can no longer be
     // re-fetched through it — thread the pre-claim row through instead; its
