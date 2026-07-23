@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createProviderDataBoundary } from '../../../../src/core/provider-data-boundary.ts';
-import type { ProviderBoundaryEvent } from '../../../../src/core/provider-data-boundary.ts';
+import type {
+  ProviderBoundaryEvent,
+  ProviderDataBoundary,
+} from '../../../../src/core/provider-data-boundary.ts';
 import { MAX_TOOL_NODES } from '../../../../src/core/provider-data-boundary-detection.ts';
 import {
   PROVIDER_DATA_POLICY_VERSION,
@@ -18,6 +21,7 @@ import type { AgentEvent } from '../../../../src/runtimes/agent/stream-parser.ts
 import {
   EMPTY_ASSIGNMENT_PAIRWISE_CASES,
   everySplit,
+  NESTED_OWNERSHIP_COORDINATE_CASES,
   NESTED_KEYLIKE_SEAM_CASES,
   SAME_FIELD_ASSIGNMENT_SEPARATORS,
 } from '../../../helpers/provider-boundary-successor-cases.ts';
@@ -74,6 +78,140 @@ const SUCCESSOR_PROVIDER_SPLIT_CASES = PROVIDER_FACTORIES.flatMap(
     makeProvider,
   })),
 );
+
+const PROVIDER_OWNERSHIP_EDGE_CASES = [512, 65_536].flatMap((offset) => (
+  NESTED_OWNERSHIP_COORDINATE_CASES
+    .filter(({ coordinate, family }) => coordinate === 'nestedGrammarStart' && (
+      family === 'bearer' || family === 'known-token'
+    ))
+    .filter(({ assignment, family }) => (
+      family === 'bearer'
+        ? assignment === NESTED_KEYLIKE_SEAM_CASES[0]!.assignment
+        : assignment === NESTED_KEYLIKE_SEAM_CASES[3]!.assignment
+    ))
+    .map(({ assignment, caseName, coordinateRelativeIndex, family }) => {
+      const fillerLength = offset - coordinateRelativeIndex;
+      const source = `${'x'.repeat(fillerLength - 1)} ${assignment}`;
+      return {
+        caseName: `${family} ${caseName} ownership edge ${offset}`,
+        source,
+        split: offset,
+        actualEdgeOffset: source.indexOf(family === 'bearer' ? 'Bearer' : 'ghp_'),
+        expectedSecretCount: 1,
+      };
+    })
+));
+
+const PROVIDER_SEPARATOR_EDGE_CONTROLS = SAME_FIELD_ASSIGNMENT_SEPARATORS.flatMap(
+  (separator) => {
+    const nonempty = `token=alpha${separator}password=beta`;
+    const ordinary = `password=alpha${separator}ordinary`;
+    const multiple = `token=alpha${separator}password=beta;credential=gamma`;
+    return [
+      {
+        caseName: `nonempty ${separator} separator edge`,
+        source: nonempty,
+        split: nonempty.indexOf(separator) + 1,
+        actualEdgeOffset: nonempty.indexOf(separator) + 1,
+        expectedSecretCount: 2,
+      },
+      {
+        caseName: `ordinary ${separator} separator edge`,
+        source: ordinary,
+        split: ordinary.indexOf(separator) + 1,
+        actualEdgeOffset: ordinary.indexOf(separator) + 1,
+        expectedSecretCount: 1,
+      },
+      {
+        caseName: `multiple-real ${separator} separator edge`,
+        source: multiple,
+        split: multiple.indexOf(separator) + 1,
+        actualEdgeOffset: multiple.indexOf(separator) + 1,
+        expectedSecretCount: 3,
+      },
+    ];
+  },
+);
+
+const PROVIDER_EDGE_CASES = PROVIDER_FACTORIES.flatMap(
+  ([providerName, makeProvider]) => [
+    ...PROVIDER_OWNERSHIP_EDGE_CASES,
+    ...PROVIDER_SEPARATOR_EDGE_CONTROLS,
+  ].map((edgeCase) => ({
+    ...edgeCase,
+    providerName,
+    makeProvider,
+  })),
+);
+
+interface ProviderBoundaryObservation {
+  split: number;
+  rejectionCode: string | undefined;
+  fetchCalls: number;
+  executeCalls: number;
+  nonInitEventCount: number;
+  historyUnchanged: boolean;
+  checkpointUnchanged: boolean;
+  parsedInputCaptured: boolean;
+  parsedInputUnchanged: boolean;
+  boundaryEventVector: Array<{ eventType: string; secretCount: number }>;
+}
+
+function reachableProviderHistory(provider: ProviderSession): unknown {
+  const reachable = provider as unknown as {
+    messages?: unknown[];
+    systemPrompt?: string;
+  };
+  return structuredClone({
+    messages: reachable.messages,
+    systemPrompt: reachable.systemPrompt ?? null,
+  });
+}
+
+function providerAnomalySummary(
+  observations: readonly ProviderBoundaryObservation[],
+  expectedSecretCount: number,
+) {
+  const expectedEventVector = JSON.stringify([{
+    eventType: 'secret_block',
+    secretCount: expectedSecretCount,
+  }]);
+  return {
+    rejection: observations
+      .filter(({ rejectionCode }) => rejectionCode !== 'secret_detected')
+      .map(({ split }) => split),
+    fetch: observations.filter(({ fetchCalls }) => fetchCalls !== 1).map(({ split }) => split),
+    execution: observations.filter(({ executeCalls }) => executeCalls !== 0).map(({ split }) => split),
+    events: observations
+      .filter(({ nonInitEventCount }) => nonInitEventCount !== 0)
+      .map(({ split }) => split),
+    history: observations
+      .filter(({ historyUnchanged }) => !historyUnchanged)
+      .map(({ split }) => split),
+    checkpoint: observations
+      .filter(({ checkpointUnchanged }) => !checkpointUnchanged)
+      .map(({ split }) => split),
+    parsedInput: observations
+      .filter(({ parsedInputCaptured, parsedInputUnchanged }) => (
+        !parsedInputCaptured || !parsedInputUnchanged
+      ))
+      .map(({ split }) => split),
+    boundaryEvents: observations
+      .filter(({ boundaryEventVector }) => JSON.stringify(boundaryEventVector) !== expectedEventVector)
+      .map(({ split }) => split),
+  };
+}
+
+const NO_PROVIDER_ANOMALIES = {
+  rejection: [],
+  fetch: [],
+  execution: [],
+  events: [],
+  history: [],
+  checkpoint: [],
+  parsedInput: [],
+  boundaryEvents: [],
+};
 
 function entropy(): (size: number) => Uint8Array {
   let call = 0;
@@ -257,6 +395,94 @@ describe('managed provider data boundary integration', () => {
     vi.unstubAllGlobals();
     vi.clearAllMocks();
   });
+
+  const observeRejectedProviderInput = async (
+    providerName: 'openai-api' | 'anthropic-api',
+    makeProvider: () => ProviderSession,
+    metadata: string[],
+    split: number,
+  ): Promise<ProviderBoundaryObservation> => {
+    fetchMock.mockReset();
+    const events: AgentEvent[] = [];
+    const boundaryEvents: ProviderBoundaryEvent[] = [];
+    const executeTool = vi.fn(async () => ({ content: 'must not run', isError: false }));
+    const mcpBridge: ProviderMcpBridge = {
+      listTools: () => [{
+        name: 'configure',
+        description: 'Configure metadata',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            metadata: {
+              type: 'array',
+              items: { type: 'string' },
+            },
+          },
+          required: ['metadata'],
+        },
+      }],
+      executeTool,
+    };
+    const provider = makeProvider();
+    const sessionId = `${providerName}-boundary-session`;
+    const realBoundary = broker(providerName, sessionId, boundaryEvents);
+    let parsedInput: unknown;
+    let parsedInputBefore: unknown;
+    let historyAtHandoff: unknown;
+    let checkpointAtHandoff: unknown;
+    let boundaryHandoffEventStart: number | undefined;
+    const boundaryProxy: ProviderDataBoundary = {
+      ...realBoundary,
+      rehydrateToolInput(toolName, input, tools) {
+        parsedInput = input;
+        parsedInputBefore = structuredClone(input);
+        historyAtHandoff = reachableProviderHistory(provider);
+        checkpointAtHandoff = structuredClone(provider.getCheckpoint());
+        boundaryHandoffEventStart = boundaryEvents.length;
+        return realBoundary.rehydrateToolInput(toolName, input, tools);
+      },
+    };
+    fetchMock.mockImplementation(async () => fetchMock.mock.calls.length === 1
+      ? providerToolCall(providerName, JSON.stringify({ metadata }))
+      : providerText(providerName, 'done'));
+    const options = initOptions(providerName, events, mcpBridge, boundaryEvents);
+    options.providerDataBoundary = boundaryProxy;
+    await provider.initialize(options);
+    boundaryEvents.length = 0;
+
+    let rejectionCode: string | undefined;
+    try {
+      await provider.sendTurn({
+        role: 'user',
+        conversationKey: 'chat-key',
+        parts: [{ kind: 'text', text: 'configure successor split metadata' }],
+      });
+    } catch (error) {
+      rejectionCode = typeof error === 'object' && error !== null && 'code' in error
+        ? String(error.code)
+        : 'unexpected_error';
+    }
+
+    return {
+      split,
+      rejectionCode,
+      fetchCalls: fetchMock.mock.calls.length,
+      executeCalls: executeTool.mock.calls.length,
+      nonInitEventCount: events.filter((event) => event.type !== 'init').length,
+      historyUnchanged: JSON.stringify(reachableProviderHistory(provider))
+        === JSON.stringify(historyAtHandoff),
+      checkpointUnchanged: JSON.stringify(provider.getCheckpoint())
+        === JSON.stringify(checkpointAtHandoff),
+      parsedInputCaptured: parsedInput !== undefined,
+      parsedInputUnchanged: JSON.stringify(parsedInput) === JSON.stringify(parsedInputBefore),
+      boundaryEventVector: boundaryEvents
+        .slice(boundaryHandoffEventStart)
+        .map(({ eventType, secretCount }) => ({
+          eventType,
+          secretCount,
+        })),
+    };
+  };
 
   it('buffers split OpenAI aliases, rehydrates once, and keeps provider history brokered', async () => {
     const rawPath = '/workspace/LAB/WhatSoup/package.json';
@@ -1005,101 +1231,53 @@ describe('managed provider data boundary integration', () => {
   it.each(SUCCESSOR_PROVIDER_SPLIT_CASES)(
     'executes every $caseName split independently through restricted $providerName',
     async ({ providerName, makeProvider, source }) => {
-      const observations = [];
+      const observations: ProviderBoundaryObservation[] = [];
       for (const { left, right, split } of everySplit(source)) {
-        fetchMock.mockReset();
-        const metadata = [left, right];
-        const originalMetadata = [...metadata];
-        const events: AgentEvent[] = [];
-        const boundaryEvents: ProviderBoundaryEvent[] = [];
-        const executeTool = vi.fn(async () => ({ content: 'must not run', isError: false }));
-        const mcpBridge: ProviderMcpBridge = {
-          listTools: () => [{
-            name: 'configure',
-            description: 'Configure metadata',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                metadata: {
-                  type: 'array',
-                  items: { type: 'string' },
-                },
-              },
-              required: ['metadata'],
-            },
-          }],
-          executeTool,
-        };
-        fetchMock.mockImplementation(async () => fetchMock.mock.calls.length === 1
-          ? providerToolCall(providerName, JSON.stringify({ metadata }))
-          : providerText(providerName, 'done'));
-        const provider = makeProvider();
-        await provider.initialize(initOptions(providerName, events, mcpBridge, boundaryEvents));
-        let rejectionCode: string | undefined;
-        try {
-          await provider.sendTurn({
-            role: 'user',
-            conversationKey: 'chat-key',
-            parts: [{ kind: 'text', text: 'configure successor split metadata' }],
-          });
-        } catch (error) {
-          rejectionCode = typeof error === 'object' && error !== null && 'code' in error
-            ? String(error.code)
-            : 'unexpected_error';
-        }
-
-        observations.push({
+        observations.push(await observeRejectedProviderInput(
+          providerName,
+          makeProvider,
+          [left, right],
           split,
-          rejectionCode,
-          fetchCalls: fetchMock.mock.calls.length,
-          executeCalls: executeTool.mock.calls.length,
-          nonInitEventCount: events.filter((event) => event.type !== 'init').length,
-          messageCount: provider.getCheckpoint().providerState?.['messageCount'],
-          metadataUnchanged: JSON.stringify(metadata) === JSON.stringify(originalMetadata),
-          secretBlockCounts: boundaryEvents
-            .filter((event) => event.eventType === 'secret_block')
-            .map((event) => event.secretCount),
-        });
+        ));
       }
 
-      const expectedMessageCount = providerName === 'openai-api' ? 2 : 1;
-      const anomalySplits = {
-        rejection: observations
-          .filter(({ rejectionCode }) => rejectionCode !== 'secret_detected')
-          .map(({ split }) => split),
-        fetch: observations.filter(({ fetchCalls }) => fetchCalls !== 1).map(({ split }) => split),
-        execution: observations
-          .filter(({ executeCalls }) => executeCalls !== 0)
-          .map(({ split }) => split),
-        events: observations
-          .filter(({ nonInitEventCount }) => nonInitEventCount !== 0)
-          .map(({ split }) => split),
-        history: observations
-          .filter(({ messageCount }) => messageCount !== expectedMessageCount)
-          .map(({ split }) => split),
-        mutation: observations
-          .filter(({ metadataUnchanged }) => !metadataUnchanged)
-          .map(({ split }) => split),
-        exactCount: observations
-          .filter(({ secretBlockCounts }) => (
-            secretBlockCounts.length !== 1 || secretBlockCounts[0] !== 1
-          ))
-          .map(({ split }) => split),
-      };
       expect({
         executedSplits: observations.length,
-        anomalySplits,
+        anomalySplits: providerAnomalySummary(observations, 1),
       }).toEqual({
         executedSplits: source.length - 1,
-        anomalySplits: {
-          rejection: [],
-          fetch: [],
-          execution: [],
-          events: [],
-          history: [],
-          mutation: [],
-          exactCount: [],
-        },
+        anomalySplits: NO_PROVIDER_ANOMALIES,
+      });
+    },
+  );
+
+  it.each(PROVIDER_EDGE_CASES)(
+    'keeps $caseName exact through restricted $providerName',
+    async ({
+      actualEdgeOffset,
+      providerName,
+      makeProvider,
+      source,
+      split,
+      expectedSecretCount,
+    }) => {
+      const observation = await observeRejectedProviderInput(
+        providerName,
+        makeProvider,
+        [source.slice(0, split), source.slice(split)],
+        split,
+      );
+      expect({
+        actualEdgeOffset,
+        boundaryEventVector: observation.boundaryEventVector,
+        anomalySplits: providerAnomalySummary([observation], expectedSecretCount),
+      }).toEqual({
+        actualEdgeOffset: split,
+        boundaryEventVector: [{
+          eventType: 'secret_block',
+          secretCount: expectedSecretCount,
+        }],
+        anomalySplits: NO_PROVIDER_ANOMALIES,
       });
     },
   );

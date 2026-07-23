@@ -8,9 +8,9 @@ export const SECRET_ASSIGNMENT_KEYS = [
 
 export const SAME_FIELD_ASSIGNMENT_SEPARATORS = [',', ';', '&', '|'] as const;
 
-const EMPTY_VALUE_KINDS = ['empty', 'whitespace-empty'] as const;
-const SPACING_KINDS = ['tight', 'after-separator', 'around-assignment'] as const;
-const SECOND_VALUE_KINDS = ['unquoted', 'quoted'] as const;
+export const EMPTY_VALUE_KINDS = ['empty', 'whitespace-empty'] as const;
+export const SPACING_KINDS = ['tight', 'after-separator', 'around-assignment'] as const;
+export const SECOND_VALUE_KINDS = ['unquoted', 'quoted'] as const;
 
 const PAIRWISE_AXES = [
   SECRET_ASSIGNMENT_KEYS,
@@ -97,9 +97,7 @@ function assignmentSource(
     + `${selectedSpacing.afterAssignment}${secondValue}`;
 }
 
-export const EMPTY_ASSIGNMENT_PAIRWISE_CASES = deterministicPairwiseRows(
-  PAIRWISE_AXES.map((axis) => axis.length),
-).map((row, index) => {
+function assignmentCase(row: PairwiseRow, index: number, family: string) {
   const [
     outerKeyIndex,
     innerKeyIndex,
@@ -114,21 +112,37 @@ export const EMPTY_ASSIGNMENT_PAIRWISE_CASES = deterministicPairwiseRows(
   const emptyKind = EMPTY_VALUE_KINDS[emptyKindIndex]!;
   const spacingKind = SPACING_KINDS[spacingKindIndex]!;
   const secondValueKind = SECOND_VALUE_KINDS[secondValueKindIndex]!;
+  const source = assignmentSource(
+    outerKey,
+    innerKey,
+    separator,
+    emptyKind,
+    spacingKind,
+    secondValueKind,
+  );
 
   return {
-    caseName: `pairwise ${index}: ${outerKey}/${innerKey}/${separator}/`
+    caseName: `${family} ${index}: ${outerKey}/${innerKey}/${separator}/`
       + `${emptyKind}/${spacingKind}/${secondValueKind}`,
-    source: assignmentSource(
-      outerKey,
-      innerKey,
-      separator,
-      emptyKind,
-      spacingKind,
-      secondValueKind,
-    ),
+    source,
+    outerKey,
+    innerKey,
+    separator,
+    emptyKind,
+    spacingKind,
+    secondValueKind,
+    separatorEdgeSplit: source.indexOf(separator) + 1,
     pairKeys: pairKeys(row),
   };
-});
+}
+
+export const EMPTY_ASSIGNMENT_PAIRWISE_CASES = deterministicPairwiseRows(
+  PAIRWISE_AXES.map((axis) => axis.length),
+).map((row, index) => assignmentCase(row, index, 'pairwise'));
+
+export const EMPTY_ASSIGNMENT_FULL_CARTESIAN_CASES = cartesianIndices(
+  PAIRWISE_AXES.map((axis) => axis.length),
+).map((row, index) => assignmentCase(row, index, 'cartesian'));
 
 export const EXPECTED_PAIRWISE_KEYS = new Set(
   cartesianIndices(PAIRWISE_AXES.map((axis) => axis.length)).flatMap(pairKeys),
@@ -162,37 +176,70 @@ export const NESTED_KEYLIKE_SEAM_CASES = NESTED_KEYLIKE_SECRET_ASSIGNMENTS.map(
     const marker = assignment.includes('Bearer') ? 'Bearer' : 'ghp_';
     const markerOffset = assignment.indexOf(marker);
     if (markerOffset < 0) throw new Error(`missing nested marker in case ${index}`);
+    const identityStart = marker === 'Bearer'
+      ? markerOffset + 'Bearer '.length
+      : markerOffset;
     return {
       assignment,
       caseName: `nested case ${index}`,
+      family: marker === 'Bearer' ? 'bearer' : 'known-token',
+      nestedGrammarStart: markerOffset,
+      identityStart,
       seamRelativeIndex: markerOffset + marker.length,
     };
   },
 );
 
+export const NESTED_OWNERSHIP_COORDINATE_CASES = NESTED_KEYLIKE_SEAM_CASES.flatMap(
+  (seamCase) => [
+    {
+      ...seamCase,
+      coordinate: 'nestedGrammarStart' as const,
+      coordinateRelativeIndex: seamCase.nestedGrammarStart,
+    },
+    {
+      ...seamCase,
+      coordinate: 'identityStart' as const,
+      coordinateRelativeIndex: seamCase.identityStart,
+    },
+  ],
+);
+
 export const NONEMPTY_PAIRWISE_CONTROLS = EMPTY_ASSIGNMENT_PAIRWISE_CASES.map(
-  ({ caseName, source }) => ({
-    caseName: `nonempty control for ${caseName}`,
-    source: source.replace(/^[a-z_]+=\s*/u, (prefix) => `${prefix}alpha`),
-    secretCount: 2,
-  }),
+  ({ caseName, source, separator }) => {
+    const nonemptySource = source.replace(/^[a-z_]+=\s*/u, (prefix) => `${prefix}alpha`);
+    return {
+      caseName: `nonempty control for ${caseName}`,
+      source: nonemptySource,
+      secretCount: 2,
+      separatorEdgeSplits: [nonemptySource.indexOf(separator) + 1],
+    };
+  },
 );
 
 export const ORDINARY_PUNCTUATION_CONTROLS = SECRET_ASSIGNMENT_KEYS.flatMap(
-  (key) => SAME_FIELD_ASSIGNMENT_SEPARATORS.map((separator) => ({
-    caseName: `${key} followed by ordinary punctuation ${separator}`,
-    source: `${key}=alpha${separator}ordinary`,
-    secretCount: 1,
-  })),
+  (key) => SAME_FIELD_ASSIGNMENT_SEPARATORS.map((separator) => {
+    const source = `${key}=alpha${separator}ordinary`;
+    return {
+      caseName: `${key} followed by ordinary punctuation ${separator}`,
+      source,
+      secretCount: 1,
+      separatorEdgeSplits: [source.indexOf(separator) + 1],
+    };
+  }),
 );
 
 export const MULTIPLE_REAL_ASSIGNMENT_CONTROLS = SECRET_ASSIGNMENT_KEYS.map(
-  (outerKey, index) => ({
-    caseName: `three real assignments beginning with ${outerKey}`,
-    source: `${outerKey}=alpha,${SECRET_ASSIGNMENT_KEYS[(index + 1) % 5]}=beta;`
-      + `${SECRET_ASSIGNMENT_KEYS[(index + 2) % 5]}=gamma`,
-    secretCount: 3,
-  }),
+  (outerKey, index) => {
+    const source = `${outerKey}=alpha,${SECRET_ASSIGNMENT_KEYS[(index + 1) % 5]}=beta;`
+      + `${SECRET_ASSIGNMENT_KEYS[(index + 2) % 5]}=gamma`;
+    return {
+      caseName: `three real assignments beginning with ${outerKey}`,
+      source,
+      secretCount: 3,
+      separatorEdgeSplits: [source.indexOf(',') + 1, source.indexOf(';') + 1],
+    };
+  },
 );
 
 export function everySplit(source: string): Array<{
