@@ -168,6 +168,120 @@ describe('provider data boundary hardening', () => {
     }
   });
 
+  it.each([
+    [
+      'relaxed keyed negative before split password',
+      ['ordinarycredential=alpha', 'pass', 'word=beta'],
+      0,
+      'ordinarycredential=alpha',
+    ],
+    [
+      'relaxed keyed negative before split token',
+      ['ordinarycredential=alpha', 'to', 'ken=beta'],
+      0,
+      'ordinarycredential=alpha',
+    ],
+    [
+      'relaxed keyed negative before split quoted password',
+      ['ordinarycredential=alpha', 'pass', 'word="quoted value"'],
+      0,
+      'ordinarycredential=alpha',
+    ],
+    [
+      'direct keyed secret before split password',
+      ['credential=alpha', 'pass', 'word=beta'],
+      1,
+      'credential=[REDACTED]',
+    ],
+    [
+      'direct keyed secret before split token',
+      ['credential=alpha', 'to', 'ken=beta'],
+      1,
+      'credential=[REDACTED]',
+    ],
+    [
+      'direct keyed secret before split quoted password',
+      ['credential=alpha', 'pass', 'word="quoted value"'],
+      1,
+      'credential=[REDACTED]',
+    ],
+  ] as const)('does not let an earlier keyed candidate shadow a %s', (
+    _label,
+    texts,
+    directSecretCount,
+    sanitizedEarlier,
+  ) => {
+    const earlier = texts[0];
+    const scan = scanProviderTextSequence(texts);
+    const events: ProviderBoundaryEvent[] = [];
+
+    expect(containsProviderSecretValue(earlier)).toBe(directSecretCount === 1);
+    expect(sanitizeProviderSecrets(earlier)).toBe(sanitizedEarlier);
+    expect(scan).toMatchObject({
+      directSecretCount,
+      fragmentedSecret: true,
+    });
+    expect(() => boundary(events).exposeTexts(texts, { surface: 'history' }))
+      .toThrowError(expect.objectContaining({ code: 'secret_detected' }));
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      eventType: 'secret_block',
+      secretCount: directSecretCount + 1,
+    });
+    expect(() => boundary().rehydrateToolInput('inspect', { metadata: texts }, [{
+      name: 'inspect',
+      inputSchema: {
+        type: 'object',
+        additionalProperties: true,
+      },
+    }])).toThrowError(expect.objectContaining({ code: 'secret_detected' }));
+  });
+
+  it.each([
+    [
+      'embedded known-token negative before a field-start token',
+      [`ordinaryghp_${'x'.repeat(16)}`, 'ghp_', 'y'.repeat(16)],
+      0,
+      `ordinaryghp_${'x'.repeat(16)}`,
+    ],
+    [
+      'direct known token before a distinct field-start token',
+      [`ghp_${'x'.repeat(16)}`, 'ghp_', 'y'.repeat(16)],
+      1,
+      '[REDACTED_TOKEN]',
+    ],
+  ] as const)('does not let an earlier known-token candidate shadow a %s', (
+    _label,
+    texts,
+    directSecretCount,
+    sanitizedEarlier,
+  ) => {
+    const earlier = texts[0];
+    const scan = scanProviderTextSequence(texts);
+    const events: ProviderBoundaryEvent[] = [];
+
+    expect(containsProviderSecretValue(earlier)).toBe(directSecretCount === 1);
+    expect(sanitizeProviderSecrets(earlier)).toBe(sanitizedEarlier);
+    expect(scan).toMatchObject({
+      directSecretCount,
+      fragmentedSecret: true,
+    });
+    expect(() => boundary(events).exposeTexts(texts, { surface: 'history' }))
+      .toThrowError(expect.objectContaining({ code: 'secret_detected' }));
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      eventType: 'secret_block',
+      secretCount: directSecretCount + 1,
+    });
+    expect(() => boundary().rehydrateToolInput('inspect', { metadata: texts }, [{
+      name: 'inspect',
+      inputSchema: {
+        type: 'object',
+        additionalProperties: true,
+      },
+    }])).toThrowError(expect.objectContaining({ code: 'secret_detected' }));
+  });
+
   it('bounds detector invocations for a maximum-node provider tool record', () => {
     expect(scanProviderTextSequence(['first', 'second']).detectorInvocationCount)
       .toBeLessThanOrEqual(8);

@@ -53,9 +53,12 @@ const PRESERVABLE_MENTION = /^@(?:\+?\d{5,}|[A-Za-z][A-Za-z0-9._-]*)$/;
 // redactKeyedSecretValues) can never drift apart — a prefix recognized by one MUST
 // be recognized by the other (packet: "SHARE that regex ... so they cannot drift").
 const KNOWN_TOKEN_PREFIX = '(?:sk|pk|rk|ghp|github_pat|xox[baprs]|ya29|AIza)';
-const KNOWN_TOKEN_RE = new RegExp(`\\b${KNOWN_TOKEN_PREFIX}[-_A-Za-z0-9]{12,}\\b`, 'g');
-const KNOWN_TOKEN_SUFFIX_RE = new RegExp(`${KNOWN_TOKEN_PREFIX}[-_A-Za-z0-9]{12,}\\b`, 'g');
+const KNOWN_TOKEN_VALUE = `${KNOWN_TOKEN_PREFIX}[-_A-Za-z0-9]{12,}\\b`;
+const KNOWN_TOKEN_RE = new RegExp(`\\b${KNOWN_TOKEN_VALUE}`, 'g');
+const KNOWN_TOKEN_PREFIX_AT_START_RE = new RegExp(KNOWN_TOKEN_PREFIX, 'y');
 const KNOWN_TOKEN_PREFIX_RE = new RegExp(`^${KNOWN_TOKEN_PREFIX}`);
+const KNOWN_TOKEN_CHAR_RE = /[-_A-Za-z0-9]/u;
+const WORD_CHAR_RE = /[A-Za-z0-9_]/u;
 const BEARER_TOKEN_RE = /Bearer\s+[A-Za-z0-9._~+/=-]+/gi;
 const SECRET_KEY_TERMINAL_RE = /(?:token|secret|password|passphrase|api_?key)$/;
 const SECRET_KEY_BOUNDARY_SUFFIX =
@@ -162,19 +165,82 @@ interface KeyedSecretValue {
   readonly redact: boolean;
 }
 
-function keyedSecretValues(text: string, allowSecretKeySuffix = false): KeyedSecretValue[] {
+interface BoundaryCandidateIndex {
+  readonly unquotedEnds: Uint32Array;
+  readonly singleQuoteEnds: Uint32Array;
+  readonly doubleQuoteEnds: Uint32Array;
+  readonly tokenMatchEnds: Int32Array;
+}
+
+function createBoundaryCandidateIndex(text: string): BoundaryCandidateIndex {
+  const length = text.length;
+  const unquotedEnds = new Uint32Array(length).fill(length);
+  const singleQuoteEnds = new Uint32Array(length).fill(length);
+  const doubleQuoteEnds = new Uint32Array(length).fill(length);
+  const tokenMatchEnds = new Int32Array(length).fill(-1);
+  let previousSingleQuote = -1;
+  let previousDoubleQuote = -1;
+  let backslashRun = 0;
+  for (let index = 0; index < length; index += 1) {
+    const char = text[index]!;
+    const escaped = backslashRun % 2 === 1;
+    if (char === "'" && !escaped) {
+      if (previousSingleQuote !== -1) singleQuoteEnds[previousSingleQuote] = index;
+      previousSingleQuote = index;
+    }
+    if (char === '"' && !escaped) {
+      if (previousDoubleQuote !== -1) doubleQuoteEnds[previousDoubleQuote] = index;
+      previousDoubleQuote = index;
+    }
+    backslashRun = char === '\\' ? backslashRun + 1 : 0;
+  }
+  let nextWhitespace = length;
+  let greatestTokenBoundary = -1;
+  for (let index = length - 1; index >= 0; index -= 1) {
+    const char = text[index]!;
+    if (/\s/u.test(char)) nextWhitespace = index;
+    else unquotedEnds[index] = nextWhitespace;
+    if (!KNOWN_TOKEN_CHAR_RE.test(char)) {
+      greatestTokenBoundary = -1;
+      continue;
+    }
+    const nextIsWord = index + 1 < length && WORD_CHAR_RE.test(text[index + 1]!);
+    if (greatestTokenBoundary === -1 && WORD_CHAR_RE.test(char) !== nextIsWord) {
+      greatestTokenBoundary = index + 1;
+    }
+    tokenMatchEnds[index] = greatestTokenBoundary;
+  }
+  return {
+    unquotedEnds,
+    singleQuoteEnds,
+    doubleQuoteEnds,
+    tokenMatchEnds,
+  };
+}
+
+function keyedSecretValues(
+  text: string,
+  allowSecretKeySuffix = false,
+  boundaryIndex?: BoundaryCandidateIndex,
+): KeyedSecretValue[] {
   const values: KeyedSecretValue[] = [];
+  let candidateIndex = boundaryIndex;
   let consumedThrough = 0;
   for (const match of text.matchAll(ASSIGNMENT_DELIMITER)) {
-    if (match.index < consumedThrough) continue;
+    if (!allowSecretKeySuffix && match.index < consumedThrough) continue;
     const start = keyedValueStart(text, match.index, allowSecretKeySuffix);
     if (start === null) continue;
+    if (allowSecretKeySuffix && !candidateIndex) {
+      candidateIndex = createBoundaryCandidateIndex(text);
+    }
     const { secretStart, valueStart } = start;
     const opening = text[valueStart];
     if (opening === '"' || opening === "'") {
-      let valueEnd = valueStart + 1;
+      let valueEnd = candidateIndex
+        ? (opening === '"' ? candidateIndex.doubleQuoteEnds : candidateIndex.singleQuoteEnds)[valueStart]!
+        : valueStart + 1;
       let escaped = false;
-      while (valueEnd < text.length) {
+      while (!candidateIndex && valueEnd < text.length) {
         const char = text[valueEnd]!;
         if (escaped) escaped = false;
         else if (char === '\\') escaped = true;
@@ -190,11 +256,13 @@ function keyedSecretValues(text: string, allowSecretKeySuffix = false): KeyedSec
         closed,
         redact: true,
       });
-      consumedThrough = closed ? valueEnd + 1 : valueEnd;
+      if (!allowSecretKeySuffix) consumedThrough = closed ? valueEnd + 1 : valueEnd;
       continue;
     }
-    let valueEnd = valueStart;
-    while (valueEnd < text.length && !/\s/.test(text[valueEnd]!)) valueEnd += 1;
+    let valueEnd = candidateIndex?.unquotedEnds[valueStart] ?? valueStart;
+    while (!candidateIndex && valueEnd < text.length && !/\s/.test(text[valueEnd]!)) {
+      valueEnd += 1;
+    }
     const value = text.slice(valueStart, valueEnd);
     values.push({
       secretStart,
@@ -204,7 +272,7 @@ function keyedSecretValues(text: string, allowSecretKeySuffix = false): KeyedSec
       closed: false,
       redact: value.length > 0 && !isDisplayTruncatedNonSecret(value),
     });
-    consumedThrough = valueEnd;
+    if (!allowSecretKeySuffix) consumedThrough = valueEnd;
   }
   return values;
 }
@@ -245,22 +313,43 @@ function providerSecretValueSpans(
   tokenBoundaryStarts: ReadonlySet<number> = new Set(),
 ): ProviderSecretValueSpan[] {
   const spans: ProviderSecretValueSpan[] = [];
+  let boundaryIndex: BoundaryCandidateIndex | undefined;
+  const tokenSpans = new Set<string>();
+  const addTokenSpan = (start: number, end: number): void => {
+    const key = `${start}:${end}`;
+    if (tokenSpans.has(key)) return;
+    tokenSpans.add(key);
+    spans.push({ start, end });
+  };
   BEARER_TOKEN_RE.lastIndex = 0;
   for (const match of text.matchAll(BEARER_TOKEN_RE)) {
     if (match.index !== undefined) {
       spans.push({ start: match.index, end: match.index + match[0].length });
     }
   }
-  const tokenPattern = allowSecretKeySuffix ? KNOWN_TOKEN_SUFFIX_RE : KNOWN_TOKEN_RE;
-  tokenPattern.lastIndex = 0;
-  for (const match of text.matchAll(tokenPattern)) {
+  KNOWN_TOKEN_RE.lastIndex = 0;
+  for (const match of text.matchAll(KNOWN_TOKEN_RE)) {
     if (match.index !== undefined) {
-      const hasCanonicalBoundary = match.index === 0 || !/[A-Za-z0-9_]/u.test(text[match.index - 1]!);
-      if (!hasCanonicalBoundary && !tokenBoundaryStarts.has(match.index)) continue;
-      spans.push({ start: match.index, end: match.index + match[0].length });
+      addTokenSpan(match.index, match.index + match[0].length);
     }
   }
-  for (const value of keyedSecretValues(text, allowSecretKeySuffix)) {
+  if (allowSecretKeySuffix) {
+    for (const start of tokenBoundaryStarts) {
+      KNOWN_TOKEN_PREFIX_AT_START_RE.lastIndex = start;
+      const prefixMatch = KNOWN_TOKEN_PREFIX_AT_START_RE.exec(text);
+      if (prefixMatch?.index === start && !boundaryIndex) {
+        boundaryIndex = createBoundaryCandidateIndex(text);
+      }
+      const end = boundaryIndex?.tokenMatchEnds[start] ?? -1;
+      if (
+        prefixMatch?.index === start
+        && end - start - prefixMatch[0].length >= 12
+      ) {
+        addTokenSpan(start, end);
+      }
+    }
+  }
+  for (const value of keyedSecretValues(text, allowSecretKeySuffix, boundaryIndex)) {
     if (!value.redact) continue;
     spans.push({
       start: value.secretStart,

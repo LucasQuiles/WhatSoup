@@ -169,6 +169,7 @@ function initOptions(
   provider: 'openai-api' | 'anthropic-api',
   events: AgentEvent[],
   mcpBridge?: ProviderMcpBridge,
+  boundaryEvents: ProviderBoundaryEvent[] = [],
 ): ProviderSessionOptions {
   const sessionId = `${provider}-boundary-session`;
   return {
@@ -178,7 +179,7 @@ function initOptions(
     routePolicy: Object.freeze({ ...restrictedRoute, provider, model: provider === 'openai-api' ? 'gpt-test' : 'claude-test' }),
     providerBoundaryMode: 'enforce',
     providerSessionId: sessionId,
-    providerDataBoundary: broker(provider, sessionId),
+    providerDataBoundary: broker(provider, sessionId, boundaryEvents),
     instanceName: 'boundary-test',
     onEvent: (event) => events.push(event),
     onCrash: vi.fn(),
@@ -697,6 +698,109 @@ describe('managed provider data boundary integration', () => {
     expect(Object.keys(input.metadata)).toHaveLength(entryCount);
     expect(input.metadata['field_0']).toBe('ordinary_0');
     expect(input.metadata[`field_${entryCount - 1}`]).toBe(`ordinary_${entryCount - 1}`);
+  });
+
+  it.each([
+    [
+      'openai-api',
+      () => new OpenAIApiProvider(),
+      'keyed negative then password',
+      ['ordinarycredential=alpha', 'pass', 'word=beta'],
+      1,
+    ],
+    [
+      'openai-api',
+      () => new OpenAIApiProvider(),
+      'direct keyed then token',
+      ['credential=alpha', 'to', 'ken=beta'],
+      2,
+    ],
+    [
+      'openai-api',
+      () => new OpenAIApiProvider(),
+      'embedded token negative then field-start token',
+      [`ordinaryghp_${'x'.repeat(16)}`, 'ghp_', 'y'.repeat(16)],
+      1,
+    ],
+    [
+      'openai-api',
+      () => new OpenAIApiProvider(),
+      'direct token then distinct field-start token',
+      [`ghp_${'x'.repeat(16)}`, 'ghp_', 'y'.repeat(16)],
+      2,
+    ],
+    [
+      'anthropic-api',
+      () => new AnthropicApiProvider(),
+      'keyed negative then password',
+      ['ordinarycredential=alpha', 'pass', 'word=beta'],
+      1,
+    ],
+    [
+      'anthropic-api',
+      () => new AnthropicApiProvider(),
+      'direct keyed then token',
+      ['credential=alpha', 'to', 'ken=beta'],
+      2,
+    ],
+    [
+      'anthropic-api',
+      () => new AnthropicApiProvider(),
+      'embedded token negative then field-start token',
+      [`ordinaryghp_${'x'.repeat(16)}`, 'ghp_', 'y'.repeat(16)],
+      1,
+    ],
+    [
+      'anthropic-api',
+      () => new AnthropicApiProvider(),
+      'direct token then distinct field-start token',
+      [`ghp_${'x'.repeat(16)}`, 'ghp_', 'y'.repeat(16)],
+      2,
+    ],
+  ] as const)('rejects non-shadowing fragments through the restricted %s entry path', async (
+    providerName,
+    makeProvider,
+    hostileCase,
+    texts,
+    secretCount,
+  ) => {
+    const events: AgentEvent[] = [];
+    const boundaryEvents: ProviderBoundaryEvent[] = [];
+    const executeTool = vi.fn(async () => ({ content: 'must not run', isError: false }));
+    const mcpBridge: ProviderMcpBridge = {
+      listTools: () => [{
+        name: 'configure',
+        description: 'Configure metadata',
+        inputSchema: {
+          type: 'object',
+          properties: { metadata: { type: 'object', additionalProperties: {} } },
+          required: ['metadata'],
+        },
+      }],
+      executeTool,
+    };
+    const metadata = {
+      [texts[0]]: texts[1],
+      [texts[2]]: '',
+    };
+    fetchMock.mockImplementation(async () => fetchMock.mock.calls.length === 1
+      ? providerToolCall(providerName, JSON.stringify({ metadata }))
+      : providerText(providerName, 'done'));
+    const provider = makeProvider();
+    await provider.initialize(initOptions(providerName, events, mcpBridge, boundaryEvents));
+
+    await expect(provider.sendTurn({
+      role: 'user',
+      conversationKey: 'chat-key',
+      parts: [{ kind: 'text', text: `configure ${hostileCase}` }],
+    })).rejects.toBeInstanceOf(Error);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(executeTool).not.toHaveBeenCalled();
+    expect(events.filter((event) => event.type === 'tool_use' || event.type === 'tool_result'))
+      .toEqual([]);
+    expect(boundaryEvents.filter((event) => event.eventType === 'secret_block'))
+      .toEqual([expect.objectContaining({ secretCount })]);
   });
 
   it.each([
