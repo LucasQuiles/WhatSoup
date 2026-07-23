@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { pathToFileURL } from 'node:url';
 
+import { isHelpFlag } from './lib/cli-args.ts';
 import {
   ControlManifestError,
   buildControlInventory,
@@ -44,7 +45,7 @@ function parseArguments(args: readonly string[]):
   | { help: true }
   | { help: false; command: ManifestCommand; json: boolean }
   | { error: string; json: boolean } {
-  if (args.length === 1 && args[0] === '--help') return { help: true };
+  if (args.length === 1 && isHelpFlag(args[0]!)) return { help: true };
   const jsonCount = args.filter((arg) => arg === '--json').length;
   const json = jsonCount > 0;
   if (jsonCount > 1) return { error: 'ci.input.duplicate-option', json };

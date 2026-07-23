@@ -314,6 +314,38 @@ describe('exact-object CLI boundary', () => {
     ], first.root)).toBe(EXIT_INCONCLUSIVE);
   });
 
+  it('keeps the native outcome inconclusive when candidate policy cannot be admitted', () => {
+    const { root, baseOid, manifestDigest } = fixture();
+    write(root, 'docs/observed.md', 'observed\n');
+    const observedOid = commit(root, 'observed docs');
+    git(root, ['checkout', '--quiet', '-b', 'candidate-policy', baseOid]);
+    const manifestPath = join(root, 'controls/ci-control-manifest.json');
+    const candidateManifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+      riskRules: Array<{ id: string; tier: string }>;
+    };
+    const policyRule = candidateManifest.riskRules.find(({ id }) => id === 'risk.control-policy');
+    if (policyRule === undefined) throw new Error('fixture policy rule missing');
+    policyRule.tier = 'low';
+    write(root, 'controls/ci-control-manifest.json', `${JSON.stringify(candidateManifest, null, 2)}\n`);
+    const candidateOid = commit(root, 'candidate weakens policy');
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+    expect(main([
+      '--base', baseOid, '--observed', observedOid,
+      '--candidate', candidateOid, '--manifest-digest', manifestDigest, '--json',
+    ], root)).toBe(EXIT_INCONCLUSIVE);
+    const result = JSON.parse(String(stdout.mock.calls.at(-1)?.[0]));
+    expect(result).toMatchObject({
+      outcome: 'inconclusive',
+      exitCode: EXIT_INCONCLUSIVE,
+      nativeOutcome: 'inconclusive',
+      observedNativeOutcome: 'pass',
+      candidateNativeOutcome: 'inconclusive',
+      verdict: { drift: 'UNKNOWN' },
+    });
+    expect(result.candidateNativeCauseCodes).toContain('ci.classification.candidate-policy-changed');
+  });
+
   it('returns INCONCLUSIVE for a manifest mismatch or missing object', () => {
     const { root, baseOid } = fixture();
     write(root, 'docs/observed.md', 'observed\n');

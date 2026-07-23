@@ -12,6 +12,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { takeValue } from './lib/cli-args.ts';
 import {
+  CLASSIFIER_RUNTIME_SOURCE_PATHS,
   readControlManifestAtRevision,
 } from './lib/ci-control/classifier.ts';
 import {
@@ -42,9 +43,11 @@ const USAGE = 'Usage: npm run drift:classify -- --base <40-hex> --observed <40-h
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const DRIFT_ADAPTER_SOURCE_PATHS = [
   'scripts/drift-classify.ts',
-  'scripts/lib/drift-classifier.ts',
-  'scripts/lib/ci-control/classification-admission.ts',
   'scripts/lib/cli-args.ts',
+  'scripts/lib/ci-control/classification-admission.ts',
+  'scripts/lib/ci-control/preconditions.ts',
+  'scripts/lib/drift-classifier.ts',
+  ...CLASSIFIER_RUNTIME_SOURCE_PATHS,
 ] as const;
 
 /** Native report-only evidence; a protected adapter must create ci-control-result-v1. */
@@ -67,6 +70,8 @@ export interface NativeDriftObservationV1 {
     candidateChangeSetDigest: string | null;
   };
   nativeOutcome: 'pass' | 'inconclusive';
+  observedNativeOutcome: 'pass' | 'inconclusive';
+  candidateNativeOutcome: 'pass' | 'inconclusive' | null;
   nativeCauseCompleteness: 'complete' | 'unavailable';
   nativeCauseCodes: string[];
   observedNativeCauseCodes: string[];
@@ -193,6 +198,8 @@ function projection(
   options: {
     forceInconclusive?: boolean;
     nativeOutcome?: NativeDriftObservationV1['nativeOutcome'];
+    observedNativeOutcome?: NativeDriftObservationV1['observedNativeOutcome'];
+    candidateNativeOutcome?: NativeDriftObservationV1['candidateNativeOutcome'];
     observedNativeReasons?: readonly string[];
     candidateNativeReasons?: readonly string[];
     trackedPathCount?: number;
@@ -219,6 +226,10 @@ function projection(
     adapterDigest: observedAdapterDigest,
     bindings,
     nativeOutcome: options.nativeOutcome ?? (verdict.drift === 'UNKNOWN' ? 'inconclusive' : 'pass'),
+    observedNativeOutcome: options.observedNativeOutcome
+      ?? options.nativeOutcome
+      ?? (verdict.drift === 'UNKNOWN' ? 'inconclusive' : 'pass'),
+    candidateNativeOutcome: options.candidateNativeOutcome ?? null,
     nativeCauseCompleteness: forcedInconclusive || verdict.drift === 'UNKNOWN' ? 'unavailable' : 'complete',
     nativeCauseCodes: allNativeReasons,
     observedNativeCauseCodes: [...(options.observedNativeReasons ?? nativeReasons)],
@@ -379,7 +390,11 @@ export function main(argv: readonly string[], cwd: string): number {
       observedChangeSetDigest: observed.changeSetDigest,
       candidateChangeSetDigest: candidate?.changeSetDigest ?? null,
     }, {
-      nativeOutcome: observed.outcome,
+      nativeOutcome: observed.outcome === 'pass' && (candidate === null || candidate.outcome === 'pass')
+        ? 'pass'
+        : 'inconclusive',
+      observedNativeOutcome: observed.outcome,
+      candidateNativeOutcome: candidate?.outcome ?? null,
       observedNativeReasons: observed.reasons,
       candidateNativeReasons: candidate?.reasons ?? [],
     });

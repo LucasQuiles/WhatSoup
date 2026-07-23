@@ -1,8 +1,7 @@
 import { execFileSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative, resolve } from 'node:path';
-import ts from 'typescript';
+import { dirname, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { runClassifierCli } from '../../scripts/ci-control-classify.ts';
@@ -19,6 +18,7 @@ import {
 } from '../../scripts/lib/ci-control/classifier.ts';
 import { readExactChangeFacts } from '../../scripts/lib/ci-control/git-input.ts';
 import { digestControlManifest, loadControlManifest } from '../../scripts/lib/ci-control/manifest.ts';
+import { runtimeSourceClosure } from '../helpers/runtime-source-closure.ts';
 
 const projectRoot = resolve(import.meta.dirname, '../..');
 const temporaryRoots: string[] = [];
@@ -88,47 +88,6 @@ function input(baseOid: string, candidateOid: string, manifestDigest: string, ov
 
 function classify(root: string, baseOid: string, candidateOid: string, manifestDigest: string) {
   return classifyExactRevision(root, input(baseOid, candidateOid, manifestDigest));
-}
-
-function runtimeSourceClosure(entryPath: string, sourceRoot = projectRoot): string[] {
-  const pending = [resolve(sourceRoot, entryPath)];
-  const visited = new Set<string>();
-  while (pending.length > 0) {
-    const sourcePath = pending.pop()!;
-    if (visited.has(sourcePath)) continue;
-    visited.add(sourcePath);
-    const source = ts.createSourceFile(sourcePath, readFileSync(sourcePath, 'utf8'), ts.ScriptTarget.Latest, true);
-    const visit = (node: ts.Node): void => {
-      let specifier = (ts.isImportDeclaration(node) || ts.isExportDeclaration(node))
-        && node.moduleSpecifier !== undefined && ts.isStringLiteral(node.moduleSpecifier)
-        ? node.moduleSpecifier.text
-        : null;
-      if (specifier === null && ts.isCallExpression(node)) {
-        const isDynamicImport = node.expression.kind === ts.SyntaxKind.ImportKeyword;
-        const isRequire = ts.isIdentifier(node.expression) && node.expression.text === 'require';
-        if (isDynamicImport || isRequire) {
-          const argument = node.arguments[0];
-          const validArity = isDynamicImport
-            ? node.arguments.length === 1 || node.arguments.length === 2
-            : node.arguments.length === 1;
-          if (!validArity || argument === undefined || !ts.isStringLiteralLike(argument)) {
-            throw new Error(`unbounded runtime import in ${relative(sourceRoot, sourcePath)}`);
-          }
-          specifier = argument.text;
-        }
-      }
-      if (specifier?.startsWith('.') === true) {
-        const unresolved = resolve(dirname(sourcePath), specifier);
-        const dependency = [unresolved, `${unresolved}.ts`, join(unresolved, 'index.ts')]
-          .find((candidate) => existsSync(candidate));
-        if (dependency === undefined) throw new Error(`unresolved local import in ${relative(sourceRoot, sourcePath)}`);
-        pending.push(dependency);
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(source);
-  }
-  return [...visited].map((path) => relative(sourceRoot, path).replaceAll('\\', '/')).sort();
 }
 
 const LOW_CONTROLS = [
@@ -263,7 +222,7 @@ describe('exact Git-object input', () => {
 describe('exact revision classification', () => {
   it('digests the bounded runtime source inventory and rejects symlink substitution', () => {
     expect([...CLASSIFIER_TOOL_SOURCE_PATHS].sort()).toEqual(
-      runtimeSourceClosure('scripts/ci-control-classify.ts'),
+      runtimeSourceClosure('scripts/ci-control-classify.ts', projectRoot),
     );
     const sourceRoot = mkdtempSync(join(tmpdir(), 'ci-control-source-identity-'));
     temporaryRoots.push(sourceRoot);
@@ -959,6 +918,7 @@ describe('classifier CLI', () => {
       [['--event', 'local', '--candidate', baseOid, '--base', baseOid, '--manifest-digest', manifestDigest, '--risk', 'low'], 'ci.input.option-unknown'],
       [['--event', 'local', '--candidate', baseOid.slice(0, 12), '--base', baseOid, '--manifest-digest', manifestDigest], 'ci.input.revision-invalid'],
       [['--event', 'local', '--candidate', 'HEAD', '--base', baseOid, '--manifest-digest', manifestDigest], 'ci.input.revision-invalid'],
+      [['--event', 'local', '--candidate'], 'ci.input.option-value-missing'],
       [['--event', 'local', '--candidate', baseOid, '--candidate', baseOid, '--base', baseOid, '--manifest-digest', manifestDigest], 'ci.input.duplicate-option'],
       [['--event', 'local', '--candidate', baseOid, '--base', baseOid, '--manifest-digest', manifestDigest, '--unknown'], 'ci.input.option-unknown'],
     ] as const) {

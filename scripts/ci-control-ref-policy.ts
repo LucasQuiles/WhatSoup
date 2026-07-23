@@ -24,6 +24,21 @@ const TRUSTED_GIT = '/usr/bin/git';
 const GIT_TIMEOUT_MS = 10_000;
 const MAX_GIT_OUTPUT_BYTES = 1_000_000;
 
+export const REF_POLICY_TOOL_SOURCE_PATHS = [
+  'scripts/ci-control-ref-policy.ts',
+  'scripts/lib/ci-control/manifest.ts',
+  'scripts/lib/ci-control/reasons.ts',
+  'scripts/lib/ci-control/ref-policy.ts',
+  'scripts/lib/cli-args.ts',
+  'scripts/lib/verification/boundary-run/contracts.ts',
+  'scripts/lib/verification/boundary-run/model.ts',
+  'scripts/lib/verification/boundary-run/schema.ts',
+  'scripts/lib/verification/boundary-run/shared.ts',
+  'scripts/lib/verification/boundary-run/worktree.ts',
+  'src/lib/git-env.ts',
+  'src/lib/type-guards.ts',
+] as const;
+
 interface RefPolicyCliRuntime {
   stdout: (text: string) => void;
   stderr: (text: string) => void;

@@ -1,16 +1,18 @@
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { cleanGitEnv } from '../../../src/lib/git-env.ts';
 import {
   ExactGitInputError,
   readExactChangeFacts,
   readExactTreePaths,
   type ChangeFactV1,
 } from './git-input.ts';
+import {
+  gitBytes as exactGitBytes,
+  type ExactGitInputErrorCode,
+} from './git-input-core.ts';
 import {
   ControlManifestError,
   digestControlManifest,
@@ -88,12 +90,10 @@ const ALL_REVALIDATION = ['aggregate', 'classification', 'execution-plan', 'merg
 const METADATA_REVALIDATION = ['aggregate', 'classification', 'merge-result', 'metadata'];
 const MAX_GIT_BYTES = 32 * 1024 * 1024;
 const FULL_SUITE_FALLBACK = '@full-suite:coverage:check';
-const GIT_TIMEOUT_MS = 30_000;
 const MAX_CLASSIFIER_SOURCE_BYTES = 8 * 1024 * 1024;
 const MAX_CLASSIFIER_SOURCE_FILE_BYTES = 2 * 1024 * 1024;
 
-export const CLASSIFIER_TOOL_SOURCE_PATHS = [
-  'scripts/ci-control-classify.ts',
+export const CLASSIFIER_RUNTIME_SOURCE_PATHS = [
   'scripts/lib/ci-control/classifier.ts',
   'scripts/lib/ci-control/git-input-core.ts',
   'scripts/lib/ci-control/git-input.ts',
@@ -107,6 +107,12 @@ export const CLASSIFIER_TOOL_SOURCE_PATHS = [
   'scripts/lib/verification/boundary-run/worktree.ts',
   'src/lib/git-env.ts',
   'src/lib/type-guards.ts',
+] as const;
+
+export const CLASSIFIER_TOOL_SOURCE_PATHS = [
+  'scripts/ci-control-classify.ts',
+  'scripts/lib/cli-args.ts',
+  ...CLASSIFIER_RUNTIME_SOURCE_PATHS,
 ] as const;
 
 export class LineageLeaseError extends Error {
@@ -135,27 +141,12 @@ interface ClassifierToolSourceObservation {
   latestChangeTimeMs: number;
 }
 
-function exactGitEnvironment(): NodeJS.ProcessEnv {
-  return {
-    ...cleanGitEnv(),
-    GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: '/dev/null',
-    GIT_NO_LAZY_FETCH: '1',
-    GIT_NO_REPLACE_OBJECTS: '1',
-    GIT_OPTIONAL_LOCKS: '0',
-    GIT_TERMINAL_PROMPT: '0',
-  };
-}
-
-function gitBytes(cwd: string, args: string[]): Buffer {
-  return execFileSync('git', args, {
-    cwd,
-    env: exactGitEnvironment(),
-    maxBuffer: MAX_GIT_BYTES,
-    timeout: GIT_TIMEOUT_MS,
-    killSignal: 'SIGKILL',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+function gitBytes(
+  cwd: string,
+  args: string[],
+  code: ExactGitInputErrorCode = 'ci.input.revision-unavailable',
+): Buffer {
+  return exactGitBytes(cwd, args, code, MAX_GIT_BYTES);
 }
 
 function gitText(cwd: string, args: string[]): string {
@@ -201,7 +192,9 @@ function isShallowRepository(cwd: string): boolean {
 function mergeBase(cwd: string, baseOid: string, candidateOid: string): string {
   let output: string;
   try {
-    output = gitText(cwd, ['merge-base', '--all', baseOid, candidateOid]);
+    output = gitBytes(cwd, ['merge-base', '--all', baseOid, candidateOid], 'ci.classification.merge-base-unavailable')
+      .toString('utf8')
+      .trim();
   } catch (error) {
     throw new Error('ci.classification.merge-base-unavailable', { cause: error });
   }

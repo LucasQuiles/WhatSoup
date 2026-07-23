@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { runManifestCli } from '../../scripts/ci-control-manifest.ts';
+import { REF_POLICY_TOOL_SOURCE_PATHS } from '../../scripts/ci-control-ref-policy.ts';
 import { DRIFT_ADAPTER_SOURCE_PATHS } from '../../scripts/drift-classify.ts';
 import {
   MAX_CONTROL_COUNT,
@@ -16,6 +17,7 @@ import {
   type ControlManifestV1,
 } from '../../scripts/lib/ci-control/manifest.ts';
 import { CLASSIFIER_TOOL_SOURCE_PATHS } from '../../scripts/lib/ci-control/classifier.ts';
+import { runtimeSourceClosure } from '../helpers/runtime-source-closure.ts';
 
 const root = resolve(import.meta.dirname, '../..');
 const temporaryRoots: string[] = [];
@@ -140,6 +142,8 @@ function reverseObjectKeys(value: unknown): unknown {
 describe('canonical CI control manifest', () => {
   it('loads the checked-in manifest and advertises only observed controls', () => {
     const loaded = loadControlManifest(root);
+    expect([...DRIFT_ADAPTER_SOURCE_PATHS].sort()).toEqual(runtimeSourceClosure('scripts/drift-classify.ts', root));
+    expect([...REF_POLICY_TOOL_SOURCE_PATHS].sort()).toEqual(runtimeSourceClosure('scripts/ci-control-ref-policy.ts', root));
     expect(validateControlManifest(loaded)).toEqual([]);
     const inventory = buildControlInventory(loaded);
     expect(inventory.schemaVersion).toBe(1);
@@ -191,6 +195,12 @@ describe('canonical CI control manifest', () => {
       digestBinding: 'exact',
       freshness: 'receipt',
     });
+    expect(loaded.controls.find(({ id }) => id === 'ci.outgoing-ref-policy')?.evidence).toMatchObject({
+      schemaVersion: 1,
+      paths: REF_POLICY_TOOL_SOURCE_PATHS,
+      digestBinding: 'exact',
+      freshness: 'receipt',
+    });
     expect(loaded.controls.find(({ id }) => id === 'ci.lineage-drift-observer')).toMatchObject({
       availability: 'report-only',
       mode: 'block',
@@ -207,6 +217,12 @@ describe('canonical CI control manifest', () => {
       mode: 'warn',
       stages: ['pull-request', 'merge-group', 'default-branch'],
       implementation: { commandId: 'guard:drift-coverage' },
+      evidence: {
+        schemaVersion: 1,
+        paths: DRIFT_ADAPTER_SOURCE_PATHS,
+        digestBinding: 'exact',
+        freshness: 'same-process',
+      },
     });
     expect(loaded.riskRules.length).toBeGreaterThan(0);
     expect(loaded.riskRules.find(({ id }) => id === 'risk.control-policy')?.pathPrefixes)

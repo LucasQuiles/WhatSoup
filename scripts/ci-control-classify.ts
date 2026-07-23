@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { pathToFileURL } from 'node:url';
 
+import { takeValue } from './lib/cli-args.ts';
 import {
   classifyExactRevision,
   type ExactRevisionInput,
@@ -61,10 +62,15 @@ function parseArguments(args: readonly string[]):
     }
     if (!allowed.has(option)) return { error: 'ci.input.option-unknown', json };
     if (values.has(option)) return { error: 'ci.input.duplicate-option', json };
-    const value = args[index + 1];
-    if (value === undefined || value.startsWith('--')) return { error: 'ci.input.option-value-missing', json };
+    let value: string;
+    try {
+      const taken = takeValue(args, index, option);
+      value = taken.value;
+      index = taken.index;
+    } catch {
+      return { error: 'ci.input.option-value-missing', json };
+    }
     values.set(option, value);
-    index += 1;
   }
 
   const event = values.get('--event');

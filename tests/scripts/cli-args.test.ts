@@ -107,7 +107,7 @@ describe('isHelpFlag', () => {
 /**
  * Warn-level ratchet on hand-rolled parsers.
  *
- * 32 scripts define their own `parseArgs`. Rewriting all of them is a large, low-value,
+ * 34 scripts define their own `parseArgs` or `parseArguments`. Rewriting all of them is a large, low-value,
  * high-blast-radius change across many lanes, so this does NOT demand that. It pins the
  * count so the number cannot grow: existing debt is tolerated, new debt is blocked — the
  * same shape as the `arch.ssot-*` count ratchets.
@@ -115,10 +115,10 @@ describe('isHelpFlag', () => {
  * Lowering the baseline as scripts migrate is expected and the assertion says so.
  */
 describe('hand-rolled parseArgs ratchet', () => {
-  const HAND_ROLLED_PARSEARGS_BASELINE = 32;
+  const HAND_ROLLED_PARSEARGS_BASELINE = 34;
 
   const scriptsDefiningParseArgs = (): string[] =>
-    execFileSync('git', ['grep', '-l', 'function parseArgs', 'HEAD', '--', 'scripts/*.ts'], {
+    execFileSync('git', ['grep', '-E', '-l', 'function parse(Args|Arguments)', 'HEAD', '--', 'scripts/*.ts'], {
       cwd: repoRoot,
       encoding: 'utf8',
       maxBuffer: 16 * 1024 * 1024,
