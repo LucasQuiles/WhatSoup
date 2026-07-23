@@ -19,6 +19,7 @@
 import { spawnSync } from 'node:child_process';
 
 import {
+  EXIT_CONTINUE,
   EXIT_INCONCLUSIVE,
   classifyDrift,
   exitCodeFor,
@@ -32,18 +33,78 @@ interface Args {
   observed: string;
   candidate?: string;
   json: boolean;
+  selfCheck: boolean;
 }
 
 export function parseArgs(argv: readonly string[]): Args {
-  const args: Args = { observed: 'origin/main', json: false };
+  const args: Args = { observed: 'origin/main', json: false, selfCheck: false };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--base') args.base = argv[++i];
     else if (a === '--observed') args.observed = argv[++i] ?? args.observed;
     else if (a === '--candidate') args.candidate = argv[++i];
     else if (a === '--json') args.json = true;
+    else if (a === '--self-check') args.selfCheck = true;
   }
   return args;
+}
+
+/** Every path tracked at HEAD, or null if git could not answer. */
+export function trackedPaths(cwd: string): string[] | null {
+  const r = spawnSync('git', ['ls-tree', '-r', 'HEAD', '--name-only'], {
+    cwd,
+    encoding: 'utf8',
+    timeout: GIT_TIMEOUT_MS,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  if (r.error || r.status !== 0) return null;
+  return r.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * `--self-check`: can this classifier still understand this repository?
+ *
+ * Classifies every tracked file and fails ONLY on INCONCLUSIVE — i.e. a path matching no
+ * rule. Deliberately not a drift check: real drift legitimately returns 1 (stop) all the
+ * time, so gating CI on the drift verdict itself would be pure noise. What is NOT normal is
+ * the classifier meeting a surface it does not recognise, because from that moment every
+ * verdict touching that surface silently degrades to "I don't know".
+ *
+ * This runs the real CLI end-to-end — arg parsing, git invocation, exit code — which the
+ * unit tests exercise only in pieces.
+ */
+function selfCheck(cwd: string): number {
+  const files = trackedPaths(cwd);
+  if (files === null) {
+    console.error('drift-classify --self-check: INCONCLUSIVE — could not enumerate tracked files');
+    return EXIT_INCONCLUSIVE;
+  }
+  if (files.length < 100) {
+    // A near-empty listing would otherwise pass trivially: nothing to classify, nothing
+    // unclassified, green. Same false-green shape the empty-scope guards exist for.
+    console.error(
+      `drift-classify --self-check: INCONCLUSIVE — only ${files.length} tracked file(s); ` +
+        'refusing to certify classifier coverage against a tree that was never really examined',
+    );
+    return EXIT_INCONCLUSIVE;
+  }
+  const verdict = classifyDrift(files);
+  if (verdict.unclassified.length > 0) {
+    console.error(
+      `drift-classify --self-check: INCONCLUSIVE — ${verdict.unclassified.length} of ${files.length} ` +
+        'tracked path(s) match no classification rule, so any drift touching them returns no verdict:',
+    );
+    for (const u of verdict.unclassified.slice(0, 25)) console.error(`    ${u}`);
+    console.error('  Add a PATH_RULES entry in scripts/lib/drift-classifier.ts.');
+    return EXIT_INCONCLUSIVE;
+  }
+  const counts = new Map<string, number>();
+  for (const c of verdict.classifications) counts.set(c.drift, (counts.get(c.drift) ?? 0) + 1);
+  const summary = [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k}=${n}`);
+  console.log(
+    `drift-classify --self-check: all ${files.length} tracked path(s) classify (${summary.join(', ')})`,
+  );
+  return EXIT_CONTINUE;
 }
 
 /**
@@ -65,6 +126,7 @@ export function changedPaths(from: string, to: string, cwd: string): string[] | 
 
 function main(argv: readonly string[], cwd: string): number {
   const args = parseArgs(argv);
+  if (args.selfCheck) return selfCheck(cwd);
   if (!args.base) {
     console.error(
       'drift-classify: INCONCLUSIVE — --base <oid> is required; without the OID the evidence ' +

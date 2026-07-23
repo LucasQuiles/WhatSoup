@@ -278,6 +278,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.guard-publication-staged` | `npm run guard:publication:staged` | `package.json` | stable | active | Publication audit guard for pre-commit use |
 | `cli:npm.guard-pre-push` | `npm run guard:pre-push` | `package.json` | internal | active | Pre-push hook; not part of operator surface but exposed for CI |
 | `cli:npm.drift-classify` | `npm run drift:classify` | `package.json` | stable | active | Classify how `main` has drifted from the base an evidence set was earned against, and which receipt sensitivity tags that invalidates. Exits 0 continue / 1 stop / 2 INCONCLUSIVE |
+| `cli:npm.guard-drift-coverage` | `npm run guard:drift-coverage` | `package.json` | stable | active | CI gate: assert the drift classifier still recognises every tracked path. Exits 2 INCONCLUSIVE on an unclassified surface; never gates on the drift verdict itself |
 | `cli:npm.guard-doc-drift` | `npm run guard:doc-drift` | `package.json` | stable | active | Verify cross-doc references resolve on disk |
 | `cli:npm.guard-doc-tally` | `npm run guard:doc-tally` | `package.json` | stable | active | Verify hand-maintained tally docs declared header count matches actual body row count (doc-tally split-brain, #1524 class) |
 | `cli:npm.guard-design-system-hygiene` | `npm run guard:design-system-hygiene` | `package.json` | internal | active | Staged/changed-range guard requiring tracked design-system SSOT docs for token, lint, and QA harness changes |

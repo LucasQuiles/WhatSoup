@@ -15,12 +15,15 @@
  *      how a new policy surface gets treated as inert.
  */
 import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
-import { changedPaths, main, parseArgs } from '../../scripts/drift-classify.ts';
+import { changedPaths, main, parseArgs, trackedPaths } from '../../scripts/drift-classify.ts';
 
 import {
   DRIFT_CLASSES,
@@ -326,5 +329,38 @@ describe('live tree — coverage is byte-derived, not imagined', () => {
     // The bulk of a source repo is ordinary component code; if that is not true, an
     // over-broad rule has swallowed it.
     expect(counts.get('DISJOINT_CODE') ?? 0).toBeGreaterThan(counts.get('POLICY_OR_WORKFLOW') ?? 0);
+  });
+});
+
+describe('--self-check — what the CI step actually runs', () => {
+  it('parses the flag', () => {
+    expect(parseArgs(['--self-check']).selfCheck).toBe(true);
+    expect(parseArgs([]).selfCheck).toBe(false);
+  });
+
+  it('passes against the real repo, and needs no --base to do so', () => {
+    // The CI step invokes exactly this. It must not require a drift range, because there
+    // isn't a meaningful one at PR time.
+    expect(main(['--self-check'], repoRoot)).toBe(EXIT_CONTINUE);
+  });
+
+  it('is INCONCLUSIVE, not clean, when the tree cannot be enumerated', () => {
+    // A non-repo directory: git ls-tree fails, and "could not look" must not read as
+    // "nothing to classify, all good".
+    const tmp = mkdtempSync(join(tmpdir(), 'drift-selfcheck-'));
+    try {
+      expect(main(['--self-check'], tmp)).toBe(EXIT_INCONCLUSIVE);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('trackedPaths returns null on a non-repo rather than an empty list', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'drift-tracked-'));
+    try {
+      expect(trackedPaths(tmp)).toBeNull();
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });
