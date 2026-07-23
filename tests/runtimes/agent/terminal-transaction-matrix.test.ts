@@ -190,7 +190,7 @@ describe('runtime terminal transaction reachability', () => {
     }
   });
 
-  it('settles a processor failure before provider dispatch as admission rejection', async () => {
+  it('classifies a processor failure before provider dispatch as a typed pre-dispatch fault', async () => {
     const db = new Database(':memory:');
     db.open();
     try {
@@ -214,8 +214,14 @@ describe('runtime terminal transaction reachability', () => {
 
       expect(durability.getTurnTerminal(seq, 'turn-pre-dispatch-throw', 1)).toMatchObject({
         attempt_kind: 'admission_rejected',
+        attempt_failure_class: 'pre_dispatch_error',
         inbound_disposition: 'failed_terminal',
       });
+      expect(
+        (db.raw
+          .prepare('SELECT failure_class FROM inbound_events WHERE seq = ?')
+          .get(seq) as { failure_class: string | null }).failure_class,
+      ).toBe('pre_dispatch_error');
       expect(state.perChatInboundSeqQueue.has(mapKey)).toBe(false);
     } finally {
       db.close();
@@ -243,7 +249,7 @@ describe('runtime terminal transaction reachability', () => {
 
       expect(durability.getTurnTerminal(seq, logicalTurnId, 1)).toMatchObject({
         attempt_kind: 'admission_rejected',
-        attempt_failure_class: null,
+        attempt_failure_class: 'pre_dispatch_error',
         inbound_disposition: 'failed_terminal',
       });
     } finally {
