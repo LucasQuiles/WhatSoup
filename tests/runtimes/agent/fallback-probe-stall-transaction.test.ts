@@ -330,7 +330,6 @@ describe('AgentRuntime — FallbackRecoveryTransaction wiring', () => {
       requestedModel: null,
       validatedProvider: null,
       modelPinVerified: null,
-      requestedEffort: null,
     });
 
     const runtime = makeRuntime(realDb);
