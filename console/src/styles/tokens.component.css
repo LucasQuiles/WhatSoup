@@ -31,6 +31,8 @@
   --tracking-sec: 0.12em;          /* rail section caps tracking (mockup .nav-sec) */
   --tracking-chrome-title: -0.02em; /* chrome header h1 tracking (mockup h1) */
   /* ═══ v3.5 Fleet surface geometry (T5 b-03; mockup fleet.html SSOT) ═══ */
+  --fleet-pagerow-gap: 14px;     /* surface h1 row item gap (mockup header gap) */
+  --fleet-pagerow-pad: 14px 22px 12px; /* surface h1 row padding (mockup header padding) */
   --fleet-pad-x: 22px;           /* content horizontal gutter (mockup .kpis/.content padding) */
   --fleet-kpi-pad: 12px 14px;    /* kpi card padding (mockup .kpi) */
   --fleet-panelhead-pad: 10px 16px; /* panel header row (mockup .panel-h) */

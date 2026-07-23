@@ -23,8 +23,8 @@
 .fleet-pagerow {
   display: flex;
   align-items: center;
-  gap: var(--chrome-header-gap);
-  padding: var(--chrome-header-pad);
+  gap: var(--fleet-pagerow-gap);
+  padding: var(--fleet-pagerow-pad);
   padding-bottom: 0;
 }
 .fleet-pagerow h1 {

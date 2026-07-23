@@ -51,7 +51,8 @@ error (L4 broad enforcement).
 ## 5. Fleet surface geometry (`--fleet-*`, T5 b-03)
 
 Component-register geometry for the Fleet surface, all traced to `mockups/fleet.html`
-and `11-channel-glyphography.md` §1: `--fleet-pad-x`, `--fleet-kpi-pad`,
+and `11-channel-glyphography.md` §1: `--fleet-pagerow-gap`, `--fleet-pagerow-pad`,
+`--fleet-pad-x`, `--fleet-kpi-pad`,
 `--fleet-panelhead-pad`, `--fleet-activity-w`, `--fleet-row-pad`, `--fleet-head-pad`,
 `--fleet-ev-pad`, `--fleet-chan-box`, `--fleet-avatar-box`, `--fleet-grant-box`,
 `--fleet-spark-h`, `--fleet-spark-w`, `--fleet-chan-tag-keyline`, `--tracking-kpi`,
@@ -65,6 +66,16 @@ carried features): `--fleet-current-edge`, `--fleet-select-inset`,
 `--fleet-filterpop-pad`. Same pattern as the b-02 `--chrome-*` block: raw mockup
 dimensions land here once; `fleet.css` consumes `var()` only. Half-step tokens
 (`--sp-*h`, DD-9 retirement queue) are not consumed by the Fleet surface.
+
+Shared primitives consumed by design (cross-review ruling, b-03): the fleet
+stylesheet reads four tokens housed under the b-02 `--chrome-*` prefix that are
+cross-surface *laws*, not chrome layout — `--chrome-micro-radius` 1px +
+`--chrome-pill-radius` 99px (badge.md shape family), `--chrome-icon` 16px
+(11-channel-glyphography §1 glyph floor), `--tracking-chrome-title` −0.02em (the
+product h1 voice, Bricolage, identical in every mockup). Fleet *layout* never
+reads chrome tokens: the surface h1 row takes its own `--fleet-pagerow-*`
+(mockup `header` literals — same values by SSOT, independently owned) so a chrome
+header change cannot shift the fleet surface.
 
 ## 6. Acceptance gate
 

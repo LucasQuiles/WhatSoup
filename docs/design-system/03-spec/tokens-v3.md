@@ -662,9 +662,15 @@ live here, dimension-allowlisted, so the fleet stylesheet
 (`console/src/styles/fleet.css`) consumes `var()` only. Full trace table:
 `docs/design-system/v35/16-tokens-v3-addendum.md` §5.
 
-- **Layout** — `--fleet-pad-x` 22px (content gutter), `--fleet-activity-w` 320px
+- **Layout** — `--fleet-pagerow-gap` 14px / `--fleet-pagerow-pad` 14px 22px 12px
+  (surface h1 row, mockup `header` literals — same rhythm as the global header,
+  independently owned so chrome changes cannot shift the surface), `--fleet-pad-x`
+  22px (content gutter), `--fleet-activity-w` 320px
   (activity column; mockup `.content` grid stacks at `max-width:1100px`),
-  `--fleet-panelhead-pad`, `--fleet-panelhead-gap`.
+  `--fleet-panelhead-pad`, `--fleet-panelhead-gap`. Shared *laws* stay under the
+  b-02 chrome prefix and are consumed by design: `--chrome-micro-radius`,
+  `--chrome-pill-radius` (badge.md shape family), `--chrome-icon` (glyph floor),
+  `--tracking-chrome-title` (h1 voice).
 - **KPI strip** — `--fleet-kpi-pad`, `--fleet-kpi-lift` 2px (hover lift),
   `--fleet-kpi-d-mt`, `--tracking-kpi` 0.1em.
 - **Lines table** — `--fleet-row-pad`, `--fleet-head-pad`, `--fleet-lcell-maxw` 26ch,
