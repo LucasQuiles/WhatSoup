@@ -89,6 +89,7 @@ export class MuteStore {
         ts: nowIso,
         kind: 'mute_expire',
         domain: eventDomain(mute.domain),
+        severity: 'info',
         scope_id: mute.host,
         payload: {
           mute_id: mute.id,
@@ -122,7 +123,11 @@ export class MuteStore {
     if (!Number.isFinite(nowMs)) throw new Error('mute now clock is invalid');
     if (expiresAtMs <= nowMs) throw new Error('mute expires_at must be in the future');
     const maxDurationMs = this.options.maxDurationMs ?? DAY_MS;
-    if (expiresAtMs - nowMs > maxDurationMs) throw new Error('mute duration exceeds maximum');
+    if (expiresAtMs - nowMs > maxDurationMs) {
+      throw new Error(
+        `mute duration exceeds maximum (requested ${formatDurationMs(expiresAtMs - nowMs)}, max ${formatDurationMs(maxDurationMs)})`,
+      );
+    }
   }
 
   private rowsToMutes(rows: MuteRow[]): Mute[] {
@@ -170,4 +175,13 @@ function parseIso(value: string, label: string): number {
     throw new Error(`mute ${label} must be an ISO timestamp`);
   }
   return parsed;
+}
+
+function formatDurationMs(ms: number): string {
+  if (ms % DAY_MS === 0) return `${ms / DAY_MS}d`;
+  const hourMs = 60 * 60 * 1000;
+  if (ms % hourMs === 0) return `${ms / hourMs}h`;
+  const minuteMs = 60 * 1000;
+  if (ms % minuteMs === 0) return `${ms / minuteMs}m`;
+  return `${Math.round(ms / 1000)}s`;
 }

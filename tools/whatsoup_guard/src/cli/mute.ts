@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { safeErrorMessage } from '../lib/error-utils.ts';
+import { loadPolicy } from '../policy/loader.ts';
 import { openDatabase, type StoreLogger } from '../store/connection.ts';
 import { EventStore } from '../store/events.ts';
 import { MuteStore } from '../store/mutes.ts';
@@ -17,6 +18,7 @@ interface MuteOptions {
   domain: string;
   duration: string;
   reason: string;
+  policyPath?: string;
 }
 
 interface StatusOptions {
@@ -26,7 +28,7 @@ interface StatusOptions {
 type OptionResult<T> = { ok: true; value: T } | { ok: false; message: string };
 
 const STATE_FILE = 'state.sqlite';
-const MUTE_USAGE = 'usage: whatsoup-guard mute --state-dir <dir> --host <host> --domain <domain> --duration <Ns|Nm|Nh|Nd> --reason <text>\n';
+const MUTE_USAGE = 'usage: whatsoup-guard mute --state-dir <dir> --host <host> --domain <domain> --duration <Ns|Nm|Nh|Nd> --reason <text> [--policy <policy.yaml>]\n';
 const STATUS_USAGE = 'usage: whatsoup-guard status --state-dir <dir>\n';
 const DURATION_PATTERN = /^([1-9]\d*)([smhd])$/;
 const UNIT_MS: Record<string, number> = {
@@ -51,6 +53,22 @@ export async function muteCommand(args: string[], deps: MuteCommandDeps): Promis
     return 2;
   }
 
+  let maxDurationMs: number | undefined;
+  if (parsed.value.policyPath !== undefined) {
+    try {
+      const policy = loadPolicy(parsed.value.policyPath);
+      const policyMax = parseDurationMs(policy.mute_constraints.default_max_duration);
+      if (!policyMax.ok) {
+        deps.write(`mute: policy default_max_duration is invalid: ${policyMax.message}\n`);
+        return 1;
+      }
+      maxDurationMs = policyMax.value;
+    } catch (error) {
+      deps.write(`mute: ${safeErrorMessage(error)}\n`);
+      return 1;
+    }
+  }
+
   mkdirSync(parsed.value.stateDir, { recursive: true });
 
   let db: ReturnType<typeof openDatabase> | undefined;
@@ -58,7 +76,11 @@ export async function muteCommand(args: string[], deps: MuteCommandDeps): Promis
     const now = currentDate(deps);
     db = openDatabase(join(parsed.value.stateDir, STATE_FILE), databaseOptions(deps));
     const events = new EventStore(db, join(parsed.value.stateDir, 'events.jsonl'));
-    const store = new MuteStore(db, { ...databaseOptions(deps), events });
+    const store = new MuteStore(db, {
+      ...databaseOptions(deps),
+      events,
+      ...(maxDurationMs !== undefined ? { maxDurationMs } : {}),
+    });
     const expiresAt = new Date(now.getTime() + duration.value).toISOString();
     const id = store.create({
       host: parsed.value.host,
@@ -112,7 +134,7 @@ export async function statusCommand(args: string[], deps: MuteCommandDeps): Prom
 }
 
 function parseMuteOptions(args: string[]): OptionResult<MuteOptions> {
-  const parsed = parseFlagValues(args, new Set(['--state-dir', '--host', '--domain', '--duration', '--reason']));
+  const parsed = parseFlagValues(args, new Set(['--state-dir', '--host', '--domain', '--duration', '--reason', '--policy']));
   if (!parsed.ok) return parsed;
 
   const options = {
@@ -127,6 +149,8 @@ function parseMuteOptions(args: string[]): OptionResult<MuteOptions> {
     if (value.trim().length === 0) return { ok: false, message: `missing required option: ${label}` };
   }
 
+  const policyPath = parsed.value.get('--policy');
+
   return {
     ok: true,
     value: {
@@ -135,6 +159,7 @@ function parseMuteOptions(args: string[]): OptionResult<MuteOptions> {
       domain: options['--domain'],
       duration: options['--duration'],
       reason: options['--reason'],
+      ...(policyPath !== undefined ? { policyPath } : {}),
     },
   };
 }

@@ -170,6 +170,23 @@ describe('MuteStore', () => {
     expect(() => store.create(input({ expires_at: new Date(NOW.getTime() + 3 * HOUR).toISOString() }))).toThrow(/maximum/);
   });
 
+  it('reports the requested and maximum duration truthfully on rejection, never silently clamping', () => {
+    const store = freshStore({ maxDurationMs: 2 * HOUR });
+
+    expect(() => store.create(input({ expires_at: new Date(NOW.getTime() + 3 * HOUR).toISOString() })))
+      .toThrow('mute duration exceeds maximum (requested 3h, max 2h)');
+    expect(store.listActive(NOW.toISOString())).toHaveLength(0);
+  });
+
+  it('accepts a policy-derived 72h maxDurationMs while a 24h store still rejects the same request', () => {
+    const permissive = freshStore({ maxDurationMs: 72 * HOUR });
+    const strict = freshStore({ maxDurationMs: 24 * HOUR });
+    const seventyTwoHours = input({ expires_at: new Date(NOW.getTime() + 72 * HOUR).toISOString() });
+
+    expect(permissive.create(seventyTwoHours)).toBeGreaterThan(0);
+    expect(() => strict.create(seventyTwoHours)).toThrow('mute duration exceeds maximum (requested 3d, max 1d)');
+  });
+
   it('rejects forbidden domains by default', () => {
     const store = freshStore();
 

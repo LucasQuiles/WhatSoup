@@ -73,7 +73,7 @@ export const TransportSchema = z.object({
 export type Transport = z.infer<typeof TransportSchema>;
 
 export const MuteConstraintsSchema = z.object({
-  default_max_duration: z.string().min(1),
+  default_max_duration: z.string().regex(/^[1-9]\d*[smhd]$/, 'default_max_duration must be a duration like 8h, 30m, or 90s'),
   forbidden_domains: z.array(z.string().min(1)),
   wildcard_blocks_remediation: z.boolean(),
 }).strict();
