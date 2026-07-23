@@ -2,8 +2,14 @@ import { describe, it, expect } from 'vitest';
 import {
   OWNER_BULLET,
   bulletedSection,
+  displayedRoute,
+  fallbackReconfirmationOutcome,
+  fallbackRouteLabel,
+  isDisplayedRoute,
   modifierSuffix,
   modelModifierTags,
+  renderPinPreferenceOutcome,
+  savedPreferenceLine,
   formatAvailableModels,
   isStructuralCatalogueAbsence,
   resolveModelSelector,
@@ -16,6 +22,42 @@ import {
 // never a long joined single line); model modifiers are config-derived FACTS
 // only (D7) — the catalog is silent for IDs it does not recognize.
 describe('owner-render-format', () => {
+  describe('route truth', () => {
+    const primary = { provider: 'claude-cli', model: 'claude-opus-4-8' };
+    const fallback = { provider: 'opencode-cli', model: 'kimi/kimi-k3' };
+
+    it('marks the live route when one exists and otherwise marks the effective next route', () => {
+      expect(displayedRoute(primary, fallback)).toBe(primary);
+      expect(displayedRoute(null, fallback)).toBe(fallback);
+      expect(isDisplayedRoute({ ...fallback }, displayedRoute(null, fallback))).toBe(true);
+      expect(isDisplayedRoute(primary, displayedRoute(null, fallback))).toBe(false);
+    });
+
+    it('discloses that a saved pin does not displace an active health fallback', () => {
+      const label = fallbackRouteLabel(fallback);
+      expect(renderPinPreferenceOutcome('glm/glm-5.2', 'noop', label)).toContain(
+        'Health fallback is active; new sessions still use opencode-cli (kimi/kimi-k3)',
+      );
+      expect(fallbackReconfirmationOutcome('glm/glm-5.2', '_Already set (sticky)._', label)).toContain(
+        '(permanent)',
+      );
+    });
+
+    it('labels a preference as saved while fallback decides the active route', () => {
+      const pref = {
+        intent: 'provider_specific',
+        requestedProvider: 'opencode-cli',
+        requestedModel: 'glm/glm-5.2',
+        modelPinVerified: true,
+        expiresAt: 3_600_000,
+      };
+      expect(savedPreferenceLine(pref, true, 0)).toBe(
+        'Saved preference: glm/glm-5.2 (expires in ~1h) — health fallback currently decides new sessions',
+      );
+      expect(savedPreferenceLine(null, false, 0)).toBe('Saved preference: none');
+    });
+  });
+
   describe('bulletedSection', () => {
     it('renders a header followed by one bullet per item, never a joined single line', () => {
       const out = bulletedSection('Fallback chain (configured):', [
