@@ -6,6 +6,7 @@
 import { jidPattern } from './redaction-patterns.ts';
 
 const ASSIGNMENT_DELIMITER = /[:=]/g;
+const UNQUOTED_ASSIGNMENT_SEPARATORS = new Set([',', ';', '&', '|']);
 const EMAIL_TOKEN_CHAR = /[A-Za-z0-9._%+@-]/;
 const TRAILING_EMAIL_PUNCTUATION = new Set(['.', ':']);
 
@@ -189,6 +190,46 @@ function keyedValueStart(
   return { secretStart: keyStart, valueStart };
 }
 
+function startsSecretAssignmentAfter(
+  text: string,
+  separatorIndex: number,
+  workCounter?: ProviderSecretBoundaryWorkCounter,
+): boolean {
+  if (!UNQUOTED_ASSIGNMENT_SEPARATORS.has(text[separatorIndex]!)) return false;
+  let cursor = separatorIndex + 1;
+  while (cursor < text.length && /\s/u.test(text[cursor]!)) {
+    addBoundaryWork(workCounter, 1);
+    cursor += 1;
+  }
+  const openingQuote = text[cursor];
+  let key = '';
+  if (openingQuote === '"' || openingQuote === "'") {
+    const keyStart = cursor + 1;
+    cursor = keyStart;
+    while (cursor < text.length && /[A-Za-z0-9_.-]/u.test(text[cursor]!)) {
+      addBoundaryWork(workCounter, 1);
+      cursor += 1;
+    }
+    if (text[cursor] !== openingQuote) return false;
+    key = text.slice(keyStart, cursor);
+    cursor += 1;
+  } else {
+    const keyStart = cursor;
+    while (cursor < text.length && /[A-Za-z0-9_.-]/u.test(text[cursor]!)) {
+      addBoundaryWork(workCounter, 1);
+      cursor += 1;
+    }
+    if (cursor === keyStart) return false;
+    key = text.slice(keyStart, cursor);
+  }
+  while (cursor < text.length && /\s/u.test(text[cursor]!)) {
+    addBoundaryWork(workCounter, 1);
+    cursor += 1;
+  }
+  addBoundaryWork(workCounter, key.length + 1);
+  return (text[cursor] === ':' || text[cursor] === '=') && isSecretKey(key);
+}
+
 interface KeyedSecretValue {
   readonly secretStart: number;
   readonly valueStart: number;
@@ -235,12 +276,15 @@ function createBoundaryCandidateIndex(
     }
     backslashRun = char === '\\' ? backslashRun + 1 : 0;
   }
-  let nextWhitespace = length;
+  let nextUnquotedEnd = length;
   let greatestTokenBoundary = -1;
   for (let index = length - 1; index >= 0; index -= 1) {
     const char = text[index]!;
-    if (/\s/u.test(char)) nextWhitespace = index;
-    else unquotedEnds[index] = nextWhitespace;
+    if (
+      /\s/u.test(char)
+      || startsSecretAssignmentAfter(text, index, workCounter)
+    ) nextUnquotedEnd = index;
+    else unquotedEnds[index] = nextUnquotedEnd;
     if (!KNOWN_TOKEN_CHAR_RE.test(char)) {
       greatestTokenBoundary = -1;
       continue;
@@ -312,7 +356,12 @@ function keyedSecretValues(
       continue;
     }
     let valueEnd = candidateIndex?.unquotedEnds[valueStart] ?? valueStart;
-    while (!candidateIndex && valueEnd < text.length && !/\s/.test(text[valueEnd]!)) {
+    while (
+      !candidateIndex
+      && valueEnd < text.length
+      && !/\s/u.test(text[valueEnd]!)
+      && !startsSecretAssignmentAfter(text, valueEnd, workCounter)
+    ) {
       addBoundaryWork(workCounter, 1);
       valueEnd += 1;
     }
@@ -360,14 +409,17 @@ interface ProviderSecretValueSpan {
   readonly end: number;
   /** Stable start of the semantic value, used across overlapping scan windows. */
   readonly identityStart: number;
-  readonly keyedContentStarts: readonly number[];
-  readonly nestedGrammarStarts: readonly number[];
+  readonly keyedContentStart: number | null;
+  readonly keyedContentEnd: number | null;
+  readonly nestedGrammarStart: number | null;
+  readonly canonicalNestedGrammar: boolean;
 }
 
 const EMPTY_FIELD_BOUNDARY_STARTS: ReadonlySet<number> = new Set();
 
 function mergeProviderSecretSpanGroups(
   groups: readonly ProviderSecretValueSpan[][],
+  mergeOverlaps: boolean,
   workCounter?: ProviderSecretBoundaryWorkCounter,
 ): ProviderSecretValueSpan[] {
   const cursors = groups.map(() => 0);
@@ -393,51 +445,47 @@ function mergeProviderSecretSpanGroups(
     addBoundaryWork(workCounter, groups.length + 1);
     cursors[selectedGroup] = cursors[selectedGroup]! + 1;
     const previous = merged.at(-1);
-    if (previous && selected.start < previous.end) {
-      addBoundaryWork(
-        workCounter,
-        previous.keyedContentStarts.length
-          + selected.keyedContentStarts.length
-          + previous.nestedGrammarStarts.length
-          + selected.nestedGrammarStarts.length,
-      );
+    if (
+      previous
+      && !mergeOverlaps
+      && previous.start === selected.start
+      && previous.end === selected.end
+      && previous.identityStart === selected.identityStart
+    ) {
+      continue;
+    }
+    if (mergeOverlaps && previous && selected.start < previous.end) {
+      addBoundaryWork(workCounter, 1);
+      const keyedContentStart = previous.keyedContentStart === null
+        ? selected.keyedContentStart
+        : selected.keyedContentStart === null
+          ? previous.keyedContentStart
+          : Math.min(previous.keyedContentStart, selected.keyedContentStart);
+      const keyedContentEnd = previous.keyedContentEnd === null
+        ? selected.keyedContentEnd
+        : selected.keyedContentEnd === null
+          ? previous.keyedContentEnd
+          : Math.max(previous.keyedContentEnd, selected.keyedContentEnd);
+      const nestedGrammarStart = previous.nestedGrammarStart === null
+        ? selected.nestedGrammarStart
+        : selected.nestedGrammarStart === null
+          ? previous.nestedGrammarStart
+          : Math.min(previous.nestedGrammarStart, selected.nestedGrammarStart);
       merged[merged.length - 1] = {
         start: Math.min(previous.start, selected.start),
         end: Math.max(previous.end, selected.end),
         identityStart: Math.min(previous.identityStart, selected.identityStart),
-        keyedContentStarts: [
-          ...previous.keyedContentStarts,
-          ...selected.keyedContentStarts,
-        ],
-        nestedGrammarStarts: [
-          ...previous.nestedGrammarStarts,
-          ...selected.nestedGrammarStarts,
-        ],
+        keyedContentStart,
+        keyedContentEnd,
+        nestedGrammarStart,
+        canonicalNestedGrammar:
+          previous.canonicalNestedGrammar || selected.canonicalNestedGrammar,
       };
     } else {
       merged.push(selected);
     }
   }
   return merged;
-}
-
-function uniqueProviderSecretSpans(
-  groups: readonly ProviderSecretValueSpan[][],
-  workCounter?: ProviderSecretBoundaryWorkCounter,
-): ProviderSecretValueSpan[] {
-  const spans: ProviderSecretValueSpan[] = [];
-  const seen = new Set<string>();
-  for (const group of groups) {
-    for (const span of group) {
-      addBoundaryWork(workCounter, 1);
-      const key = `${span.start}:${span.end}:${span.identityStart}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        spans.push(span);
-      }
-    }
-  }
-  return spans;
 }
 
 function providerSecretValueSpans(
@@ -460,8 +508,10 @@ function providerSecretValueSpans(
         start: match.index,
         end: match.index + match[0].length,
         identityStart: match.index + valueOffset,
-        keyedContentStarts: [],
-        nestedGrammarStarts: [match.index],
+        keyedContentStart: null,
+        keyedContentEnd: null,
+        nestedGrammarStart: match.index,
+        canonicalNestedGrammar: true,
       });
     }
   }
@@ -473,8 +523,10 @@ function providerSecretValueSpans(
         start: match.index,
         end: match.index + match[0].length,
         identityStart: match.index,
-        keyedContentStarts: [],
-        nestedGrammarStarts: [match.index],
+        keyedContentStart: null,
+        keyedContentEnd: null,
+        nestedGrammarStart: match.index,
+        canonicalNestedGrammar: true,
       });
     }
   }
@@ -495,8 +547,10 @@ function providerSecretValueSpans(
           start,
           end,
           identityStart: start,
-          keyedContentStarts: [],
-          nestedGrammarStarts: [start],
+          keyedContentStart: null,
+          keyedContentEnd: null,
+          nestedGrammarStart: start,
+          canonicalNestedGrammar: false,
         });
       }
     }
@@ -513,8 +567,10 @@ function providerSecretValueSpans(
       start: value.secretStart,
       end: value.closed ? value.valueEnd + 1 : value.valueEnd,
       identityStart: value.valueStart,
-      keyedContentStarts: [value.valueStart + (value.quote === null ? 0 : 1)],
-      nestedGrammarStarts: [],
+      keyedContentStart: value.valueStart + (value.quote === null ? 0 : 1),
+      keyedContentEnd: value.valueEnd,
+      nestedGrammarStart: null,
+      canonicalNestedGrammar: false,
     });
   }
   const groups = [bearerSpans, knownTokenSpans, fieldStartTokenSpans, keyedSpans];
@@ -522,8 +578,8 @@ function providerSecretValueSpans(
   // Relaxed boundary candidates must retain distinct starts: an earlier greedy
   // candidate can overlap a later real field-start secret.
   return allowSecretKeySuffix
-    ? uniqueProviderSecretSpans(groups, workCounter)
-    : mergeProviderSecretSpanGroups(groups, workCounter);
+    ? mergeProviderSecretSpanGroups(groups, false, workCounter)
+    : mergeProviderSecretSpanGroups(groups, true, workCounter);
 }
 
 export interface ProviderSecretTextSequenceScan {
@@ -577,26 +633,80 @@ function spanCrossesFieldBoundary(
   return boundaryCounts[span.end - 1]! > boundaryCounts[span.start]!;
 }
 
+interface ProviderSecretOccurrence {
+  readonly identityStart: number;
+  readonly keyedContentStart: number | null;
+  readonly nestedGrammarStart: number | null;
+  readonly direct: boolean;
+}
+
+interface ProviderNestedOwnerLink {
+  readonly identityStart: number;
+  readonly keyedContentStart: number;
+}
+
+function linkNestedGrammarOwners(
+  keyedSpans: readonly ProviderSecretValueSpan[],
+  segmentSpans: readonly ProviderSecretValueSpan[],
+  segmentStart: number,
+  ownerLinks: Map<number, ProviderNestedOwnerLink>,
+  workCounter: ProviderSecretBoundaryWorkCounter,
+): void {
+  let keyedIndex = 0;
+  const activeKeyedSpans: ProviderSecretValueSpan[] = [];
+  for (const nestedSpan of segmentSpans) {
+    if (
+      !nestedSpan.canonicalNestedGrammar
+      || nestedSpan.nestedGrammarStart === null
+    ) continue;
+    const nestedStart = nestedSpan.nestedGrammarStart;
+    while (
+      keyedIndex < keyedSpans.length
+      && keyedSpans[keyedIndex]!.keyedContentStart! <= nestedStart
+    ) {
+      addBoundaryWork(workCounter, 1);
+      activeKeyedSpans.push(keyedSpans[keyedIndex]!);
+      keyedIndex += 1;
+    }
+    while (
+      activeKeyedSpans.length > 0
+      && activeKeyedSpans.at(-1)!.keyedContentEnd! <= nestedStart
+    ) {
+      addBoundaryWork(workCounter, 1);
+      activeKeyedSpans.pop();
+    }
+    const owner = activeKeyedSpans.at(-1);
+    addBoundaryWork(workCounter, 1);
+    if (
+      !owner
+      || owner.keyedContentStart === null
+      || owner.keyedContentEnd === null
+      || nestedStart >= owner.keyedContentEnd
+    ) continue;
+    const absoluteNestedStart = segmentStart + nestedStart;
+    const absoluteKeyedStart = segmentStart + owner.keyedContentStart;
+    const previous = ownerLinks.get(absoluteNestedStart);
+    if (!previous || absoluteKeyedStart > previous.keyedContentStart) {
+      ownerLinks.set(absoluteNestedStart, {
+        identityStart: segmentStart + owner.identityStart,
+        keyedContentStart: absoluteKeyedStart,
+      });
+    }
+  }
+}
+
 /**
  * Count canonical direct and cross-field secret values with bounded segment overlap.
- * Segment overlap is fixed at the historical 512-character carry and is de-duplicated
- * by absolute secret-value identity.
+ * Segment overlap is fixed at the historical 512-character carry. Nested grammars
+ * canonicalize to the latest keyed interval in the combined segment that contains them.
  */
 export function scanProviderSecretTextSequence(
   texts: readonly string[],
 ): ProviderSecretTextSequenceScan {
   const workCounter: ProviderSecretBoundaryWorkCounter = { units: 0 };
-  const directIdentities = new Set<number>();
-  const directSpans: Array<Pick<
-    ProviderSecretValueSpan,
-    'identityStart' | 'keyedContentStarts' | 'nestedGrammarStarts'
-  >> = [];
-  // Collapse only grammar matches that begin at the exact keyed-value content
-  // position; ordinary overlap must remain separately countable.
-  const directKeyedContentStarts = new Set<number>();
-  const directNestedGrammarStarts = new Set<number>();
+  const occurrences: ProviderSecretOccurrence[] = [];
+  const nestedOwnerLinks = new Map<number, ProviderNestedOwnerLink>();
   const completeFieldCandidateIdentities = new Set<number>();
-  const fragmentedIdentities = new Set<number>();
   let globalOffset = 0;
   let detectorInvocationCount = 0;
   let segmentChunks: string[] = [];
@@ -614,19 +724,16 @@ export function scanProviderSecretTextSequence(
       workCounter,
     )) {
       addBoundaryWork(workCounter, 1);
-      directSpans.push({
+      occurrences.push({
         identityStart: globalOffset + span.identityStart,
-        keyedContentStarts: span.keyedContentStarts.map((start) => globalOffset + start),
-        nestedGrammarStarts: span.nestedGrammarStarts.map((start) => globalOffset + start),
+        keyedContentStart: span.keyedContentStart === null
+          ? null
+          : globalOffset + span.keyedContentStart,
+        nestedGrammarStart: span.nestedGrammarStart === null
+          ? null
+          : globalOffset + span.nestedGrammarStart,
+        direct: true,
       });
-      for (const start of span.keyedContentStarts) {
-        addBoundaryWork(workCounter, 1);
-        directKeyedContentStarts.add(globalOffset + start);
-      }
-      for (const start of span.nestedGrammarStarts) {
-        addBoundaryWork(workCounter, 1);
-        directNestedGrammarStarts.add(globalOffset + start);
-      }
     }
     for (const span of providerSecretValueSpans(
       text,
@@ -638,16 +745,6 @@ export function scanProviderSecretTextSequence(
       completeFieldCandidateIdentities.add(globalOffset + span.identityStart);
     }
     globalOffset += text.length;
-  }
-
-  for (const span of directSpans) {
-    const nestedMatchesKeyed = span.nestedGrammarStarts.some((start) => (
-      directKeyedContentStarts.has(start)
-    ));
-    addBoundaryWork(workCounter, span.nestedGrammarStarts.length);
-    if (span.keyedContentStarts.length > 0 || !nestedMatchesKeyed) {
-      directIdentities.add(span.identityStart);
-    }
   }
 
   globalOffset = 0;
@@ -670,45 +767,45 @@ export function scanProviderSecretTextSequence(
       uniqueBoundaries,
       workCounter,
     );
-    const crossingSpans: ProviderSecretValueSpan[] = [];
-    for (const span of providerSecretValueSpans(
+    const segmentSpans = providerSecretValueSpans(
       segmentText,
       true,
       boundarySet,
       workCounter,
-    )) {
+    );
+    const crossingSpans: ProviderSecretValueSpan[] = [];
+    const keyedSpans: ProviderSecretValueSpan[] = [];
+    for (const span of segmentSpans) {
       addBoundaryWork(workCounter, 1);
       if (
-        spanCrossesFieldBoundary(span, boundaryCounts)
-        && !completeFieldCandidateIdentities.has(segmentStart + span.identityStart)
+        span.keyedContentStart !== null
+        && span.keyedContentEnd !== null
       ) {
-        crossingSpans.push(span);
+        keyedSpans.push(span);
       }
+      if (spanCrossesFieldBoundary(span, boundaryCounts)) crossingSpans.push(span);
     }
-    const fragmentedKeyedContentStarts = new Set<number>();
+    linkNestedGrammarOwners(
+      keyedSpans,
+      segmentSpans,
+      segmentStart,
+      nestedOwnerLinks,
+      workCounter,
+    );
     for (const span of crossingSpans) {
-      for (const start of span.keyedContentStarts) {
-        addBoundaryWork(workCounter, 1);
-        fragmentedKeyedContentStarts.add(segmentStart + start);
-      }
-    }
-    for (const span of crossingSpans) {
-      const keyedMatchesDirectNested = span.keyedContentStarts.some((start) => (
-        directNestedGrammarStarts.has(segmentStart + start)
-      ));
-      const nestedMatchesKeyed = span.nestedGrammarStarts.some((start) => {
-        const absoluteStart = segmentStart + start;
-        return directKeyedContentStarts.has(absoluteStart)
-          || fragmentedKeyedContentStarts.has(absoluteStart);
+      const identityStart = segmentStart + span.identityStart;
+      addBoundaryWork(workCounter, 1);
+      if (completeFieldCandidateIdentities.has(identityStart)) continue;
+      occurrences.push({
+        identityStart,
+        keyedContentStart: span.keyedContentStart === null
+          ? null
+          : segmentStart + span.keyedContentStart,
+        nestedGrammarStart: span.nestedGrammarStart === null
+          ? null
+          : segmentStart + span.nestedGrammarStart,
+        direct: false,
       });
-      addBoundaryWork(
-        workCounter,
-        span.keyedContentStarts.length * 2 + span.nestedGrammarStarts.length * 2,
-      );
-      if (!keyedMatchesDirectNested && !nestedMatchesKeyed) {
-        addBoundaryWork(workCounter, 1);
-        fragmentedIdentities.add(segmentStart + span.identityStart);
-      }
     }
   };
   const retainSegmentOverlap = (): void => {
@@ -758,9 +855,33 @@ export function scanProviderSecretTextSequence(
   }
   analyzeSegment();
 
+  const semanticValues = new Map<number, { direct: boolean; fragmented: boolean }>();
+  for (const occurrence of occurrences) {
+    addBoundaryWork(workCounter, 1);
+    const owner = occurrence.keyedContentStart === null
+      && occurrence.nestedGrammarStart !== null
+      ? nestedOwnerLinks.get(occurrence.nestedGrammarStart)?.identityStart
+      : undefined;
+    const identityStart = owner ?? occurrence.identityStart;
+    const value = semanticValues.get(identityStart) ?? {
+      direct: false,
+      fragmented: false,
+    };
+    if (occurrence.direct) value.direct = true;
+    else value.fragmented = true;
+    semanticValues.set(identityStart, value);
+  }
+  let directSecretCount = 0;
+  let fragmentedSecretCount = 0;
+  for (const value of semanticValues.values()) {
+    addBoundaryWork(workCounter, 1);
+    if (value.direct) directSecretCount += 1;
+    else if (value.fragmented) fragmentedSecretCount += 1;
+  }
+
   return {
-    directSecretCount: directIdentities.size,
-    fragmentedSecretCount: fragmentedIdentities.size,
+    directSecretCount,
+    fragmentedSecretCount,
     detectorInvocationCount,
     workUnitCount: workCounter.units,
   };
