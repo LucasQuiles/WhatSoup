@@ -24,6 +24,12 @@ const restrictedRoute: ProviderRoutePolicy = Object.freeze({
   policyState: 'classified',
 });
 
+const OVERLAPPING_SECRET_ASSIGNMENTS = [
+  'token=Bearer alpha',
+  'password="Bearer alpha"',
+  `password="ghp_${'a'.repeat(16)}"`,
+] as const;
+
 function entropy(): (size: number) => Uint8Array {
   let call = 0;
   return (size) => {
@@ -851,7 +857,7 @@ describe('managed provider data boundary integration', () => {
       await expect(provider.sendTurn({
         role: 'user',
         conversationKey: 'chat-key',
-        parts: [{ kind: 'text', text: `configure ${caseName}` }],
+        parts: [{ kind: 'text', text: 'configure exact-count metadata' }],
       })).rejects.toMatchObject({ code: 'secret_detected' });
 
       expect(fetchMock, caseName).toHaveBeenCalledTimes(1);
@@ -864,6 +870,91 @@ describe('managed provider data boundary integration', () => {
         caseName,
       ).toEqual([expect.objectContaining({ secretCount })]);
     }
+  });
+
+  it.each([
+    ['openai-api', () => new OpenAIApiProvider()],
+    ['anthropic-api', () => new AnthropicApiProvider()],
+  ] as const)('deduplicates split overlapping secrets through restricted %s', async (
+    providerName,
+    makeProvider,
+  ) => {
+    const assertRejected = async (
+      metadata: readonly string[],
+      secretCount: number,
+      caseName: string,
+    ): Promise<void> => {
+      fetchMock.mockReset();
+      const events: AgentEvent[] = [];
+      const boundaryEvents: ProviderBoundaryEvent[] = [];
+      const executeTool = vi.fn(async () => ({ content: 'must not run', isError: false }));
+      const mcpBridge: ProviderMcpBridge = {
+        listTools: () => [{
+          name: 'configure',
+          description: 'Configure metadata',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              metadata: {
+                type: 'array',
+                items: { type: 'string' },
+              },
+            },
+            required: ['metadata'],
+          },
+        }],
+        executeTool,
+      };
+      fetchMock.mockImplementation(async () => fetchMock.mock.calls.length === 1
+        ? providerToolCall(providerName, JSON.stringify({ metadata }))
+        : providerText(providerName, 'done'));
+      const provider = makeProvider();
+      await provider.initialize(initOptions(providerName, events, mcpBridge, boundaryEvents));
+
+      await expect(provider.sendTurn({
+        role: 'user',
+        conversationKey: 'chat-key',
+        parts: [{ kind: 'text', text: 'configure overlap metadata' }],
+      })).rejects.toMatchObject({ code: 'secret_detected' });
+
+      expect(fetchMock, caseName).toHaveBeenCalledTimes(1);
+      expect(executeTool, caseName).not.toHaveBeenCalled();
+      expect(events.filter((event) => event.type !== 'init'), caseName).toEqual([]);
+      expect(provider.getCheckpoint().providerState?.['messageCount'], caseName)
+        .toBe(providerName === 'openai-api' ? 2 : 1);
+      expect(
+        boundaryEvents.filter((event) => event.eventType === 'secret_block'),
+        caseName,
+      ).toEqual([expect.objectContaining({ secretCount })]);
+    };
+
+    for (const assignment of OVERLAPPING_SECRET_ASSIGNMENTS) {
+      for (let split = 1; split < assignment.length; split += 1) {
+        await assertRejected(
+          [assignment.slice(0, split), assignment.slice(split)],
+          1,
+          `${assignment} split ${split}`,
+        );
+      }
+      const split = Math.floor(assignment.length / 2);
+      await assertRejected([
+        assignment.slice(0, split),
+        assignment.slice(split),
+        ' ',
+        'pass',
+        'word=beta',
+      ], 2, `${assignment} plus distinct fragment`);
+    }
+    await assertRejected(
+      ['token=Bearer alpha', 'password="Bearer beta"'],
+      2,
+      'two separate overlapping direct values',
+    );
+    await assertRejected(
+      ['password=x', `ghp_${'c'.repeat(16)}`],
+      2,
+      'one-character keyed value then a distinct token',
+    );
   });
 
   it.each([

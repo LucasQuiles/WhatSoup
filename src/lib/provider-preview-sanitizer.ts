@@ -360,6 +360,8 @@ interface ProviderSecretValueSpan {
   readonly end: number;
   /** Stable start of the semantic value, used across overlapping scan windows. */
   readonly identityStart: number;
+  readonly keyedContentStarts: readonly number[];
+  readonly nestedGrammarStarts: readonly number[];
 }
 
 const EMPTY_FIELD_BOUNDARY_STARTS: ReadonlySet<number> = new Set();
@@ -392,10 +394,25 @@ function mergeProviderSecretSpanGroups(
     cursors[selectedGroup] = cursors[selectedGroup]! + 1;
     const previous = merged.at(-1);
     if (previous && selected.start < previous.end) {
+      addBoundaryWork(
+        workCounter,
+        previous.keyedContentStarts.length
+          + selected.keyedContentStarts.length
+          + previous.nestedGrammarStarts.length
+          + selected.nestedGrammarStarts.length,
+      );
       merged[merged.length - 1] = {
         start: Math.min(previous.start, selected.start),
         end: Math.max(previous.end, selected.end),
         identityStart: Math.min(previous.identityStart, selected.identityStart),
+        keyedContentStarts: [
+          ...previous.keyedContentStarts,
+          ...selected.keyedContentStarts,
+        ],
+        nestedGrammarStarts: [
+          ...previous.nestedGrammarStarts,
+          ...selected.nestedGrammarStarts,
+        ],
       };
     } else {
       merged.push(selected);
@@ -443,6 +460,8 @@ function providerSecretValueSpans(
         start: match.index,
         end: match.index + match[0].length,
         identityStart: match.index + valueOffset,
+        keyedContentStarts: [],
+        nestedGrammarStarts: [match.index],
       });
     }
   }
@@ -454,6 +473,8 @@ function providerSecretValueSpans(
         start: match.index,
         end: match.index + match[0].length,
         identityStart: match.index,
+        keyedContentStarts: [],
+        nestedGrammarStarts: [match.index],
       });
     }
   }
@@ -470,7 +491,13 @@ function providerSecretValueSpans(
         prefixMatch?.index === start
         && end - start - prefixMatch[0].length >= 12
       ) {
-        fieldStartTokenSpans.push({ start, end, identityStart: start });
+        fieldStartTokenSpans.push({
+          start,
+          end,
+          identityStart: start,
+          keyedContentStarts: [],
+          nestedGrammarStarts: [start],
+        });
       }
     }
   }
@@ -486,6 +513,8 @@ function providerSecretValueSpans(
       start: value.secretStart,
       end: value.closed ? value.valueEnd + 1 : value.valueEnd,
       identityStart: value.valueStart,
+      keyedContentStarts: [value.valueStart + (value.quote === null ? 0 : 1)],
+      nestedGrammarStarts: [],
     });
   }
   const groups = [bearerSpans, knownTokenSpans, fieldStartTokenSpans, keyedSpans];
@@ -558,6 +587,14 @@ export function scanProviderSecretTextSequence(
 ): ProviderSecretTextSequenceScan {
   const workCounter: ProviderSecretBoundaryWorkCounter = { units: 0 };
   const directIdentities = new Set<number>();
+  const directSpans: Array<Pick<
+    ProviderSecretValueSpan,
+    'identityStart' | 'keyedContentStarts' | 'nestedGrammarStarts'
+  >> = [];
+  // Collapse only grammar matches that begin at the exact keyed-value content
+  // position; ordinary overlap must remain separately countable.
+  const directKeyedContentStarts = new Set<number>();
+  const directNestedGrammarStarts = new Set<number>();
   const completeFieldCandidateIdentities = new Set<number>();
   const fragmentedIdentities = new Set<number>();
   let globalOffset = 0;
@@ -577,7 +614,19 @@ export function scanProviderSecretTextSequence(
       workCounter,
     )) {
       addBoundaryWork(workCounter, 1);
-      directIdentities.add(globalOffset + span.identityStart);
+      directSpans.push({
+        identityStart: globalOffset + span.identityStart,
+        keyedContentStarts: span.keyedContentStarts.map((start) => globalOffset + start),
+        nestedGrammarStarts: span.nestedGrammarStarts.map((start) => globalOffset + start),
+      });
+      for (const start of span.keyedContentStarts) {
+        addBoundaryWork(workCounter, 1);
+        directKeyedContentStarts.add(globalOffset + start);
+      }
+      for (const start of span.nestedGrammarStarts) {
+        addBoundaryWork(workCounter, 1);
+        directNestedGrammarStarts.add(globalOffset + start);
+      }
     }
     for (const span of providerSecretValueSpans(
       text,
@@ -589,6 +638,16 @@ export function scanProviderSecretTextSequence(
       completeFieldCandidateIdentities.add(globalOffset + span.identityStart);
     }
     globalOffset += text.length;
+  }
+
+  for (const span of directSpans) {
+    const nestedMatchesKeyed = span.nestedGrammarStarts.some((start) => (
+      directKeyedContentStarts.has(start)
+    ));
+    addBoundaryWork(workCounter, span.nestedGrammarStarts.length);
+    if (span.keyedContentStarts.length > 0 || !nestedMatchesKeyed) {
+      directIdentities.add(span.identityStart);
+    }
   }
 
   globalOffset = 0;
@@ -611,17 +670,44 @@ export function scanProviderSecretTextSequence(
       uniqueBoundaries,
       workCounter,
     );
+    const crossingSpans: ProviderSecretValueSpan[] = [];
     for (const span of providerSecretValueSpans(
       segmentText,
       true,
       boundarySet,
       workCounter,
     )) {
-      if (!spanCrossesFieldBoundary(span, boundaryCounts)) continue;
-      const identity = segmentStart + span.identityStart;
-      if (!completeFieldCandidateIdentities.has(identity)) {
+      addBoundaryWork(workCounter, 1);
+      if (
+        spanCrossesFieldBoundary(span, boundaryCounts)
+        && !completeFieldCandidateIdentities.has(segmentStart + span.identityStart)
+      ) {
+        crossingSpans.push(span);
+      }
+    }
+    const fragmentedKeyedContentStarts = new Set<number>();
+    for (const span of crossingSpans) {
+      for (const start of span.keyedContentStarts) {
         addBoundaryWork(workCounter, 1);
-        fragmentedIdentities.add(identity);
+        fragmentedKeyedContentStarts.add(segmentStart + start);
+      }
+    }
+    for (const span of crossingSpans) {
+      const keyedMatchesDirectNested = span.keyedContentStarts.some((start) => (
+        directNestedGrammarStarts.has(segmentStart + start)
+      ));
+      const nestedMatchesKeyed = span.nestedGrammarStarts.some((start) => {
+        const absoluteStart = segmentStart + start;
+        return directKeyedContentStarts.has(absoluteStart)
+          || fragmentedKeyedContentStarts.has(absoluteStart);
+      });
+      addBoundaryWork(
+        workCounter,
+        span.keyedContentStarts.length * 2 + span.nestedGrammarStarts.length * 2,
+      );
+      if (!keyedMatchesDirectNested && !nestedMatchesKeyed) {
+        addBoundaryWork(workCounter, 1);
+        fragmentedIdentities.add(segmentStart + span.identityStart);
       }
     }
   };

@@ -73,6 +73,12 @@ const QUOTED_ASSIGNMENT_SPLITS = [
   ] as const,
 ));
 
+const OVERLAPPING_SECRET_ASSIGNMENTS = [
+  'token=Bearer alpha',
+  'password="Bearer alpha"',
+  `password="ghp_${'a'.repeat(16)}"`,
+] as const;
+
 describe('provider data boundary hardening', () => {
   it.each([
     ['early keyed', ['credential=alpha', 'ordinary']],
@@ -187,6 +193,77 @@ describe('provider data boundary hardening', () => {
       .toThrowError(expect.objectContaining({ code: 'secret_detected' }));
     expect(events.filter((event) => event.eventType === 'secret_block'))
       .toEqual([expect.objectContaining({ secretCount })]);
+  });
+
+  it.each(OVERLAPPING_SECRET_ASSIGNMENTS)(
+    'matches the canonical count for every split of %s',
+    (assignment) => {
+      const canonical = scanProviderTextSequence([assignment]);
+      expect(canonical.directSecretCount + canonical.fragmentedSecretCount).toBe(1);
+
+      for (let split = 1; split < assignment.length; split += 1) {
+        const texts = [assignment.slice(0, split), assignment.slice(split)];
+        const scan = scanProviderTextSequence(texts);
+        const exposeEvents: ProviderBoundaryEvent[] = [];
+        const rehydrateEvents: ProviderBoundaryEvent[] = [];
+
+        expect(scan.directSecretCount + scan.fragmentedSecretCount, `split ${split}`)
+          .toBe(1);
+        expect(() => boundary(exposeEvents).exposeTexts(texts, { surface: 'history' }))
+          .toThrowError(expect.objectContaining({ code: 'secret_detected' }));
+        expect(exposeEvents.filter((event) => event.eventType === 'secret_block'))
+          .toEqual([expect.objectContaining({ secretCount: 1 })]);
+        expect(() => boundary(rehydrateEvents).rehydrateToolInput(
+          'inspect',
+          { metadata: texts },
+          [{
+            name: 'inspect',
+            inputSchema: {
+              type: 'object',
+              additionalProperties: true,
+            },
+          }],
+        )).toThrowError(expect.objectContaining({ code: 'secret_detected' }));
+        expect(rehydrateEvents.filter((event) => event.eventType === 'secret_block'))
+          .toEqual([expect.objectContaining({ secretCount: 1 })]);
+      }
+    },
+  );
+
+  it.each(OVERLAPPING_SECRET_ASSIGNMENTS)(
+    'keeps a distinct later fragment when %s is split',
+    (assignment) => {
+      const split = Math.floor(assignment.length / 2);
+      const texts = [
+        assignment.slice(0, split),
+        assignment.slice(split),
+        ' ',
+        'pass',
+        'word=beta',
+      ];
+      const events: ProviderBoundaryEvent[] = [];
+      const scan = scanProviderTextSequence(texts);
+
+      expect(scan.directSecretCount + scan.fragmentedSecretCount).toBe(2);
+      expect(() => boundary(events).exposeTexts(texts, { surface: 'history' }))
+        .toThrowError(expect.objectContaining({ code: 'secret_detected' }));
+      expect(events.filter((event) => event.eventType === 'secret_block'))
+        .toEqual([expect.objectContaining({ secretCount: 2 })]);
+    },
+  );
+
+  it.each([
+    ['overlapping direct values', ['token=Bearer alpha', 'password="Bearer beta"']],
+    ['one-character keyed value then a token', ['password=x', `ghp_${'c'.repeat(16)}`]],
+  ])('counts two separate %s twice', (_label, texts) => {
+    const events: ProviderBoundaryEvent[] = [];
+    const scan = scanProviderTextSequence(texts);
+
+    expect(scan.directSecretCount + scan.fragmentedSecretCount).toBe(2);
+    expect(() => boundary(events).exposeTexts(texts, { surface: 'history' }))
+      .toThrowError(expect.objectContaining({ code: 'secret_detected' }));
+    expect(events.filter((event) => event.eventType === 'secret_block'))
+      .toEqual([expect.objectContaining({ secretCount: 2 })]);
   });
 
   it.each(QUOTED_ASSIGNMENT_SPLITS)(
