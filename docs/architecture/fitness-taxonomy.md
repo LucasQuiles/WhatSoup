@@ -133,16 +133,21 @@ Current baseline measurements:
 
 | rule | path | lines | ceiling |
 |------|------|-------|---------|
-| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 12940 | 12940 |
+| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 12937 | 12937 |
 | `arch.file-size` | `tests/runtimes/agent/runtime.test.ts` | 17396 | 17396 |
 
-Intentional bump (both twins, per protocol): +105 lines in
-`src/runtimes/agent/runtime.ts` (12256 → 12361) for the D-4 v1.1 additions
-(boot-time `consumeQueuedPollDecisions` + the textFallback branch on
-`resolvePollDecisionFromConsole` — state-interleaved with the runtime's
-poll-resolution machinery, deliberately reusing the existing vote/typed-answer
-paths rather than new subsystems). Slicing considered; the code IS the
-poll-resolution path's own class (#1977 decomposition is the separate lane).
+Intentional bump (both twins, per protocol): **+576 lines** in
+`src/runtimes/agent/runtime.ts` (12361 → 12937) and **+817** in the test twin
+(16579 → 17396) for the **`/model` selection increment 1** — the configured-only
+model catalogue, the chat-scoped per-(chat,sender) pin with its verify/recycle
+chain, and the session-recycle path (plus `provider-descriptor` and the
+catalogue/snapshot-cache test suites). The runtime additions are the pin-apply
+and route-resolution paths' own class: they extend the existing route/session
+machinery (`recordRouteModelPin` → verify → `applyRouteChangeAndRecycle`)
+rather than introducing a parallel subsystem. Slicing was considered and
+rejected for this increment; the runtime decomposition is the separate #1977
+lane. Ceilings are set to the measured `wc -l` of the resolved tree, not
+over-provisioned.
 
 The `ceiling` column (the `maxLines` field on each measurement in `baseline.json`) is a **blocking
 growth ceiling**. `tests/scripts/fitness-file-size-warning-budget.test.ts` measures each file's
