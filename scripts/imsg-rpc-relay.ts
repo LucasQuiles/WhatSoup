@@ -33,9 +33,12 @@ export function parseImsgRpcRelayArgs(args: readonly string[]): ImsgRpcRelayInvo
   return { socketPath, imsgBinary };
 }
 
-export async function runImsgRpcRelay(args: readonly string[]): Promise<void> {
+export async function runImsgRpcRelay(
+  args: readonly string[],
+  startRelay: typeof startImsgRpcRelay = startImsgRpcRelay,
+): Promise<void> {
   const invocation = parseImsgRpcRelayArgs(args);
-  const relay = startImsgRpcRelay({
+  const relay = startRelay({
     socketPath: invocation.socketPath,
     imsgBinary: invocation.imsgBinary,
     supportedVersions: SUPPORTED_IMSG_VERSIONS,
@@ -50,8 +53,13 @@ export async function runImsgRpcRelay(args: readonly string[]): Promise<void> {
   };
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
-  await relay.ready;
-  await relay.stopped;
+  try {
+    await relay.ready;
+    await relay.stopped;
+  } finally {
+    process.off('SIGINT', stop);
+    process.off('SIGTERM', stop);
+  }
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
