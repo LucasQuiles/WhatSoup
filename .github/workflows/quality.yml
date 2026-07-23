@@ -209,6 +209,18 @@ jobs:
           set -euo pipefail
           npm run guard:baseline-growth -- --base "$BASELINE_BASE_OID" --candidate "$GITHUB_SHA"
 
+      # `guard:boundaries` checks import DIRECTION; nothing checked for CYCLES. Ships with
+      # an EMPTY baseline because src/ measured 433 modules / 1176 runtime edges / 0 cycles
+      # — so any cycle reported here is new. Type-only imports are excluded: TypeScript
+      # erases them, and counting them is what made an earlier regex prototype report three
+      # cycles that do not exist.
+      #
+      # Named CI step, not push-gate-only: tests/scripts/pre-push-guard.test.ts requires
+      # parity, because a local-only guard is bypassed by any server-side merge.
+      - name: Import cycle guard
+        run: npm run guard:import-cycle
+
+
       - name: Documentation drift guard
         run: npm run guard:doc-drift
 
