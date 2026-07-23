@@ -556,7 +556,11 @@ describe('EnrichmentPoller', () => {
     expect(errorArg).toContain('DB connection lost');
     expect(runArgs).toContain(0); // messages_processed known at failure time
 
-    expect(poller.lastRunAt).not.toBeNull();
+    // A failed cycle must NOT advance lastRunAt — getHealthSnapshot()
+    // (src/runtimes/chat/runtime.ts) derives `degraded` purely from
+    // lastRunAt staleness, and refreshing it on every failed cycle would
+    // mask a persistently failing poller as healthy forever.
+    expect(poller.lastRunAt).toBeNull();
   });
 
   it('persists a real enrichment_runs row with a non-null error when the fetch throws (real SQLite)', async () => {
@@ -582,10 +586,40 @@ describe('EnrichmentPoller', () => {
       expect(rows[0].error).toBe('DB connection lost');
       expect(rows[0].completed_at).not.toBeNull();
       expect(rows[0].messages_processed).toBe(0);
-      expect(poller.lastRunAt).not.toBeNull();
+      expect(poller.lastRunAt).toBeNull();
     } finally {
       realDb.close();
     }
+  });
+
+  it('does NOT advance lastRunAt when a cycle throws — from null and from a prior successful value', async () => {
+    // getHealthSnapshot() (src/runtimes/chat/runtime.ts) computes `degraded`
+    // purely from staleness of lastRunAt. If a failing cycle refreshed it,
+    // a persistently failing poller would read healthy forever while error
+    // rows pile up in enrichment_runs. lastRunAt must only move forward on
+    // a cycle that actually completed (success path).
+    const { poller } = makePoller();
+
+    // From null: the very first cycle fails.
+    vi.mocked(getUnprocessedMessages).mockImplementation(() => {
+      throw new Error('DB connection lost');
+    });
+    expect(poller.lastRunAt).toBeNull();
+    await triggerOneCycle(poller);
+    expect(poller.lastRunAt).toBeNull();
+
+    // From a prior successful value: a later cycle succeeds, then fails.
+    vi.mocked(getUnprocessedMessages).mockReturnValue([makeStoredMsg({ pk: 401 })]);
+    vi.mocked(extractFacts).mockResolvedValue([]);
+    await triggerOneCycle(poller);
+    const lastRunAtAfterSuccess = poller.lastRunAt;
+    expect(lastRunAtAfterSuccess).not.toBeNull();
+
+    vi.mocked(getUnprocessedMessages).mockImplementation(() => {
+      throw new Error('DB connection lost again');
+    });
+    await triggerOneCycle(poller);
+    expect(poller.lastRunAt).toBe(lastRunAtAfterSuccess);
   });
 
   it('marks with error only after max retries (3), not before', async () => {

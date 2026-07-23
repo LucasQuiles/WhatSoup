@@ -239,6 +239,14 @@ export class EnrichmentPoller {
       // a DB error here used to just log and return with no durable
       // evidence at all. Record a terminal-failure enrichment_runs row
       // using whatever counts were accumulated before the throw.
+      //
+      // Deliberately do NOT update lastRunAt here: getHealthSnapshot()
+      // (src/runtimes/chat/runtime.ts) derives `degraded` purely from
+      // staleness of lastRunAt. A failed cycle must leave it frozen at its
+      // last successful value (or null) so a persistently failing fetch
+      // still trips the staleness window instead of refreshing on every
+      // failed attempt and reading healthy forever while error rows pile
+      // up in enrichment_runs.
       const messagesProcessedAtFailure = successPks.length + failedPks.length;
       const message = err instanceof Error ? err.message : String(err);
       log.error({ err }, 'enrichment: cycle failed — recording failure run');
@@ -250,7 +258,6 @@ export class EnrichmentPoller {
       } catch (writeErr) {
         log.error({ err: writeErr }, 'enrichment: failed to write enrichment_runs failure record');
       }
-      this.lastRunAt = new Date().toISOString();
     }
   }
 }
