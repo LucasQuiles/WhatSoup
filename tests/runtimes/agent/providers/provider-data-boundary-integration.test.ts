@@ -28,6 +28,21 @@ const OVERLAPPING_SECRET_ASSIGNMENTS = [
   'token=Bearer alpha',
   'password="Bearer alpha"',
   `password="ghp_${'a'.repeat(16)}"`,
+  `password=x/ghp_${'b'.repeat(16)}`,
+  'password=xBearer alpha',
+] as const;
+
+const SAME_FIELD_ASSIGNMENT_CASES = [
+  ...[',', ';', '&', '|'].map((separator) => ({
+    metadata: [`token=alpha${separator}password=beta`],
+    secretCount: 2,
+    caseName: `${separator} separated assignments`,
+  })),
+  ...[',', ';', '&', '|'].map((separator) => ({
+    metadata: [`password=alpha${separator}ordinary`],
+    secretCount: 1,
+    caseName: `${separator} ordinary punctuation`,
+  })),
 ] as const;
 
 function entropy(): (size: number) => Uint8Array {
@@ -955,6 +970,15 @@ describe('managed provider data boundary integration', () => {
       2,
       'one-character keyed value then a distinct token',
     );
+    for (const { metadata, secretCount, caseName } of SAME_FIELD_ASSIGNMENT_CASES) {
+      await assertRejected(metadata, secretCount, caseName);
+    }
+    const denseToken = `ghp_${'d'.repeat(16)}`;
+    const denseValue = `password="${
+      Array.from({ length: 2_000 }, () => denseToken).join(' ')
+    }"`;
+    expect(denseValue.length).toBeLessThan(1024 * 1024);
+    await assertRejected([denseValue], 1, 'dense positive candidate field');
   });
 
   it.each([
