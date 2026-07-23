@@ -36,7 +36,7 @@ const RAW_CATALOG: Array<Omit<PluginCatalogEntry, 'source'>> = [
   { key: 'tmup@tmup-dev', label: 'tmup', description: 'Multi-agent task coordination via tmux', category: 'dev' },
   { key: 'ralph-loop-v2@ralph-loop-v2-dev', label: 'Ralph Loop v2', description: 'Hardened iteration loops with telemetry', category: 'dev' },
   { key: 'plugin-dev@claude-plugins-official', label: 'Plugin Dev', description: 'Plugin creation and validation tools', category: 'dev' },
-  { key: 'superpowers-developing-for-claude-code@superpowers-marketplace', label: 'CC Dev Docs', description: 'Official CC documentation', category: 'dev' },
+  { key: 'superpowers-developing-for-claude-code@superpowers-marketplace', label: 'CC Dev Docs', description: 'Claude-Code official documentation', category: 'dev' },
   { key: 'feature-dev@claude-plugins-official', label: 'Feature Dev', description: 'Guided feature development workflow', category: 'dev' },
   { key: 'code-review@claude-plugins-official', label: 'Code Review', description: 'Confidence-based code review', category: 'dev' },
   { key: 'frontend-design@claude-plugins-official', label: 'Frontend Design', description: 'Production-grade UI generation', category: 'dev' },
@@ -71,7 +71,7 @@ export const CATEGORY_LABELS: Record<PluginCategory, string> = {
   core: 'Core',
   dev: 'Development',
   integration: 'Integrations',
-  lsp: 'Language servers',
+  lsp: 'Language Servers',
 };
 
 /** The wizard's plugin picker consumes the catalog in its declared order. */
