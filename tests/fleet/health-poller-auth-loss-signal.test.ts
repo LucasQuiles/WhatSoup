@@ -1,11 +1,33 @@
 /**
- * #1786: HealthPoller writes/resolves the durable auth_loss_signal latch.
+ * #1786 / P2: HealthPoller writes the durable `auth_loss_signal` latch into the
+ * TARGET INSTANCE's own persistent, migrated SQLite DB — not into the fleet
+ * server's throwaway `:memory:` handle.
  *
- * The in-memory `instance_logged_out` alert state does not survive a fleet restart;
- * the durable table does. These tests prove the poller records a confirmed logged_out
- * as a durable row (idempotently) and resolves it on a proven recovery.
+ * Production-faithful fixture (the fixture-vs-prod divergence that hid the bug):
+ *  - the instance DB is a real on-disk file, migrated via `core/database.ts`'s
+ *    `Database.open()` (same path production instances use — includes
+ *    migration 33, which creates `auth_loss_signal`), then closed so the
+ *    poller's own `FleetDbReader.queryWrite` opens its own writable handle —
+ *    exactly as `db-reader.ts:200` / `index.ts:645` already do for LID sync.
+ *  - the fleet server's own "self" db is a bare, unmigrated `DatabaseSync(':memory:')`
+ *    — this mirrors `standalone.ts:16` (`new DatabaseSync(':memory:')`), the exact
+ *    production binding PR #2023 fed straight into `AuthLossSignalStore`.
+ *
+ * A prior version of this test constructed `AuthLossSignalStore` directly against
+ * a pre-migrated `Database` wrapper handed straight to the poller — that shortcut
+ * bypassed `deps.db`/`FleetDbReader` entirely and hid the bug PR #2023 introduced
+ * (writes landing in `:memory:`, silently swallowed). This version drives the
+ * poller exactly the way production wires it (a `FleetDbReader` whose `queryWrite`
+ * opens the instance's own `dbPath`) and asserts against the instance's own on-disk
+ * DB — proven RED against the pre-fix `AuthLossSignalStore(deps.db)` binding before
+ * the fix landed (see git history / PR description for the captured RED output).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { realpathSync, unlinkSync, existsSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 
 const alertFns = vi.hoisted(() => ({
   emitAlert: vi.fn(() => ({ ok: true, channel: 'outbox', status: 'durably_queued' })),
@@ -34,10 +56,27 @@ vi.mock('../../src/logger.ts', () => ({
 }));
 
 import { HealthPoller, type InstanceHealth } from '../../src/fleet/health-poller.ts';
-import { AuthLossSignalStore } from '../../src/fleet/auth-loss-signal-store.ts';
+import { FleetDbReader } from '../../src/fleet/db-reader.ts';
 import { Database } from '../../src/core/database.ts';
 
-/** Health body that classifies as a confirmed `logged_out` (explicit 401 + backoff/0). */
+function tmpFile(): string {
+  return join(realpathSync(tmpdir()), `whatsoup-authloss-p2-${randomBytes(8).toString('hex')}.db`);
+}
+
+function cleanupDbFile(path: string): void {
+  for (const suffix of ['', '-wal', '-shm']) {
+    const full = path + suffix;
+    if (existsSync(full)) {
+      try {
+        unlinkSync(full);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
+/** Health body that classifies as a confirmed `logged_out` (explicit 401 + loggedOut). */
 function loggedOutBody(): Record<string, unknown> {
   return {
     status: 'unhealthy',
@@ -54,124 +93,89 @@ function loggedOutBody(): Record<string, unknown> {
   };
 }
 
-const INSTANCE = 'loops';
-function selfInstance(): Map<string, InstanceHealth> {
-  return new Map([[INSTANCE, { name: INSTANCE, type: 'agent', accessMode: 'allowlist', healthPort: 9001, healthToken: null }]]);
+function onlineSelf(): Record<string, unknown> {
+  return {
+    status: 'healthy',
+    generated_at: new Date().toISOString(),
+    whatsapp: {
+      connected: true,
+      account_jid: 'self@s.whatsapp.net',
+      connection: { state: 'connected', reconnect_phase: null, reconnect_attempts: 0, auth_failure_class: 'none' },
+    },
+  };
 }
-function activeRows(db: Database): Array<{ instance: string; classifier: string; reason: string; confidence: string }> {
-  return db.raw
-    .prepare("SELECT instance, classifier, reason, confidence FROM auth_loss_signal WHERE resolved_at IS NULL")
-    .all() as Array<{ instance: string; classifier: string; reason: string; confidence: string }>;
+
+/** Read active (unresolved) auth_loss_signal rows straight from the instance's own DB file. */
+function activeInstanceRows(
+  dbPath: string,
+): Array<{ instance: string; classifier: string; reason: string; confidence: string }> {
+  const raw = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    return raw
+      .prepare('SELECT instance, classifier, reason, confidence FROM auth_loss_signal WHERE resolved_at IS NULL')
+      .all() as Array<{ instance: string; classifier: string; reason: string; confidence: string }>;
+  } finally {
+    raw.close();
+  }
 }
 
-describe('HealthPoller durable auth-loss signal (#1786)', () => {
-  let db: Database;
-  let store: AuthLossSignalStore;
-  let poller: HealthPoller;
+const SELF = 'self';
+const REMOTE = 'remote-1';
 
-  beforeEach(() => {
-    db = new Database(':memory:');
-    db.open();
-    store = new AuthLossSignalStore(db.raw);
-    vi.clearAllMocks();
-  });
-  afterEach(() => {
-    poller?.stop();
-    db.close();
-  });
+function remoteInstances(instanceDbPath: string): Map<string, InstanceHealth> {
+  return new Map<string, InstanceHealth>([
+    [SELF, { name: SELF, type: 'agent', accessMode: 'allowlist', healthPort: 9000, dbPath: '', healthToken: null }],
+    [REMOTE, { name: REMOTE, type: 'chat', accessMode: 'open', healthPort: 9100, dbPath: instanceDbPath, healthToken: null }],
+  ]);
+}
 
-  it('records a durable auth_loss_signal row on a confirmed logged_out classification', async () => {
-    poller = new HealthPoller(selfInstance, INSTANCE, loggedOutBody, 5_000, undefined, store);
-    await poller.start();
-
-    const rows = activeRows(db);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({
-      instance: INSTANCE,
-      classifier: 'logged_out',
-      reason: 'whatsapp_auth_loss_with_disconnect_corroboration',
-      confidence: 'confirmed',
-    });
-  });
-
-  it('is idempotent — repeated logged_out polls keep exactly one active row', async () => {
-    poller = new HealthPoller(selfInstance, INSTANCE, loggedOutBody, 5_000, undefined, store);
-    await poller.start();
-    await poller.start(); // no-op second start; simulate a second observation via the store dedup
-    // A second explicit record must dedup, not duplicate:
-    store.record({ instance: INSTANCE, host: INSTANCE, classifier: 'logged_out', reason: 'whatsapp_auth_loss_with_disconnect_corroboration', confidence: 'confirmed' });
-    expect(activeRows(db)).toHaveLength(1);
-  });
-
-  it('does nothing when no store is injected (backward compatible)', async () => {
-    poller = new HealthPoller(selfInstance, INSTANCE, loggedOutBody, 5_000);
-    await poller.start();
-    // No throw, no store — the poller behaves as before.
-    expect(activeRows(db)).toHaveLength(0);
-  });
-});
-
-/**
- * Remote-instance path (#1786). A fleet host polls OTHER instances over HTTP; a confirmed
- * de-link there is routed through `classifyLoggedOutSignal` → `updateLoggedOutFromConfirmation`,
- * a DIFFERENT path than the self-health `classifyHealthSnapshot` branch above. The durable
- * writer must fire here too, or every remote de-link (incl. hard 401/loggedOut logouts) is
- * invisible across restart — the exact #1786 defect for the primary fleet-monitoring case.
- *
- * NOTE (test footgun): the body is served over HTTP **200** with a nested
- * `whatsapp.connection.last_status_code: 401`. A transport-level 401 response would
- * short-circuit to `degraded` (health_probe_auth_failed) BEFORE the confirmation classifier
- * runs, so a 401 status here would prove nothing.
- */
-describe('HealthPoller durable auth-loss signal — remote confirmation path (#1786)', () => {
-  let db: Database;
-  let store: AuthLossSignalStore;
-  let poller: HealthPoller;
+describe("HealthPoller durable auth-loss signal — writes into the instance's own persistent DB (#1786 P2)", () => {
+  let instanceDbPath: string;
+  let dbReader: FleetDbReader;
   let mockFetch: ReturnType<typeof vi.fn>;
-
-  const REMOTE = 'remote-1';
-  function remoteInstances(): Map<string, InstanceHealth> {
-    return new Map<string, InstanceHealth>([
-      ['self', { name: 'self', type: 'agent', accessMode: 'allowlist', healthPort: 9000, healthToken: null }],
-      [REMOTE, { name: REMOTE, type: 'chat', accessMode: 'open', healthPort: 9100, healthToken: null }],
-    ]);
-  }
-  function onlineSelf(): Record<string, unknown> {
-    return {
-      status: 'healthy',
-      generated_at: new Date().toISOString(),
-      whatsapp: {
-        connected: true,
-        account_jid: 'self@s.whatsapp.net',
-        connection: { state: 'connected', reconnect_phase: null, reconnect_attempts: 0, auth_failure_class: 'none' },
-      },
-    };
-  }
+  let poller: HealthPoller;
 
   beforeEach(() => {
-    db = new Database(':memory:');
-    db.open();
-    store = new AuthLossSignalStore(db.raw);
+    instanceDbPath = tmpFile();
+    // Seed a real, migrated, on-disk instance DB — same construction path production
+    // uses (Database.open() runs every migration up to CURRENT_SCHEMA_MIGRATION,
+    // including migration 33 which creates `auth_loss_signal`) — then close it so the
+    // poller path under test opens its OWN writable connection against `dbPath`,
+    // exactly as `FleetDbReader.queryWrite` does for a real remote instance.
+    const seed = new Database(instanceDbPath);
+    seed.open();
+    seed.close();
+
+    // Production binding under test: the fleet server's own "self" db is a bare,
+    // unmigrated :memory: — mirrors standalone.ts:16 / index.ts's `deps.db`. The
+    // durable writer must NEVER target this handle for a remote instance; it must
+    // resolve dbPath from the instance itself and open its OWN connection there
+    // (FleetDbReader.queryWrite — the seam already used for cross-instance LID sync).
+    const fleetSelfDb = new DatabaseSync(':memory:');
+    dbReader = new FleetDbReader(SELF, fleetSelfDb);
+
     mockFetch = vi.fn();
     vi.clearAllMocks();
     vi.stubGlobal('fetch', mockFetch);
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-05-20T12:00:00.000Z'));
   });
+
   afterEach(() => {
     poller?.stop();
     vi.useRealTimers();
     vi.unstubAllGlobals();
-    db.close();
+    cleanupDbFile(instanceDbPath);
   });
 
-  it('records a durable row for a REMOTE confirmed logged_out (explicit_auth_loss via the confirmation path)', async () => {
+  it('records a durable auth_loss_signal row in the INSTANCE db for a remote confirmed logged_out', async () => {
     mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve(loggedOutBody()) });
-    poller = new HealthPoller(remoteInstances, 'self', () => onlineSelf(), 5_000, undefined, store);
+
+    poller = new HealthPoller(() => remoteInstances(instanceDbPath), SELF, () => onlineSelf(), 5_000, undefined, dbReader);
     poller.start();
     await vi.advanceTimersByTimeAsync(0);
 
-    const rows = activeRows(db);
+    const rows = activeInstanceRows(instanceDbPath);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       instance: REMOTE,
@@ -181,12 +185,43 @@ describe('HealthPoller durable auth-loss signal — remote confirmation path (#1
     });
   });
 
-  it('is idempotent — repeated remote logged_out polls keep exactly one active row', async () => {
+  it('is idempotent — a second identical logged_out poll keeps exactly one active row in the instance db', async () => {
     mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve(loggedOutBody()) });
-    poller = new HealthPoller(remoteInstances, 'self', () => onlineSelf(), 5_000, undefined, store);
+
+    poller = new HealthPoller(() => remoteInstances(instanceDbPath), SELF, () => onlineSelf(), 5_000, undefined, dbReader);
     poller.start();
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(5_000); // second poll, same de-linked state
-    expect(activeRows(db)).toHaveLength(1);
+
+    expect(activeInstanceRows(instanceDbPath)).toHaveLength(1);
+  });
+
+  it('does nothing when no dbReader is injected (backward compatible)', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve(loggedOutBody()) });
+
+    poller = new HealthPoller(() => remoteInstances(instanceDbPath), SELF, () => onlineSelf(), 5_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(activeInstanceRows(instanceDbPath)).toHaveLength(0);
+  });
+
+  it('fails closed — logs loudly (never silently swallows) when the write target lacks the migrated table', async () => {
+    // Self-path: classifyHealthSnapshot's logged_out branch routes through
+    // recordDurableAuthLoss → writeDurableAuthLoss(selfName, ...). dbReader.queryWrite
+    // shortcuts name===selfName straight to the fleet server's own selfDb — a bare,
+    // unmigrated :memory: with no auth_loss_signal table. This must log at warn with
+    // the instance name, dbPath, and underlying error — never throw, never be silent.
+    poller = new HealthPoller(() => remoteInstances(instanceDbPath), SELF, () => loggedOutBody(), 5_000, undefined, dbReader);
+
+    await expect(poller.start()).resolves.not.toThrow();
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: SELF,
+        error: expect.stringContaining('no such table'),
+      }),
+      'failed to record durable auth-loss signal (#1786)',
+    );
   });
 });

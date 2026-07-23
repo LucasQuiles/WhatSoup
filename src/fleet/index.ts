@@ -7,7 +7,6 @@ import { jsonResponse, parseRoute, parseQueryString, readBody, extractBearer } f
 import { cleanGitEnv } from '../lib/git-env.ts';
 import { FleetDiscovery } from './discovery.ts';
 import { HealthPoller } from './health-poller.ts';
-import { AuthLossSignalStore } from './auth-loss-signal-store.ts';
 import { FleetDbReader } from './db-reader.ts';
 import { createStaticHandler } from './static.ts';
 import { createLivenessHandler } from './livez.ts';
@@ -753,17 +752,18 @@ function buildCredentialDeps(deps: RouteDeps): CredentialDeps {
 
 export function createFleetServer(deps: FleetDeps) {
   const discovery = new FleetDiscovery();
+  const dbReader = new FleetDbReader(deps.selfName, deps.db);
   const healthPoller = new HealthPoller(
     () => discovery.getInstances() as any,
     deps.selfName,
     deps.getSelfHealth,
     undefined,
     undefined,
-    // #1786: give the durable auth_loss_signal latch a production writer so a de-linked
-    // instance leaves a restart-surviving record instead of only an in-memory boolean.
-    new AuthLossSignalStore(deps.db),
+    // #1786 (P2 fix): give the durable auth_loss_signal latch a production writer that
+    // targets each instance's OWN persistent, migrated DB via dbReader.queryWrite — never
+    // deps.db (the fleet server's own throwaway :memory: handle in production, standalone.ts).
+    dbReader,
   );
-  const dbReader = new FleetDbReader(deps.selfName, deps.db);
 
   // Determine dist directory for static files
   const distDir = path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..', 'dist');

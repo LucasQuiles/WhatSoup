@@ -13,6 +13,7 @@ import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottleDetailed, recordAlertThrot
 import { isInstanceSilenced } from './silence-manager.ts';
 import { hasExplicitAuthLossSignal } from './auth-loss-signals.ts';
 import { AuthLossSignalStore, type AuthLossSignalInput } from './auth-loss-signal-store.ts';
+import type { FleetDbReader } from './db-reader.ts';
 import { jidPattern } from '../lib/redaction-patterns.ts';
 import {
   LOOP_LAG_STARVATION_THRESHOLD_MS,
@@ -78,6 +79,15 @@ export interface InstanceHealth {
   type: string;
   accessMode: string;
   healthPort: number;
+  /**
+   * Path to the instance's own persistent, migrated SQLite DB (mirrors
+   * `DiscoveredInstance.dbPath` in `./discovery.ts`). Already present at
+   * runtime — `index.ts` passes `discovery.getInstances()` through this
+   * type — added here so the durable auth-loss writer (`writeDurableAuthLoss`)
+   * can resolve a real write target via `FleetDbReader.queryWrite` instead of
+   * the broken `:memory:` binding (#1786 P2).
+   */
+  dbPath: string;
   healthToken: string | null;
 }
 
@@ -618,12 +628,17 @@ export class HealthPoller {
   private targetPids: Map<string, number> = new Map();
   private readonly loopLagSampler: LoopLagSampler;
   /**
-   * Durable auth-loss latch writer (#1786). Optional: when null the poller behaves
-   * exactly as before. When provided, a confirmed `logged_out` classification records a
-   * durable, restart-surviving row (the in-memory `instance_logged_out` alert state does
-   * not survive a fleet restart; this table does), and a proven recovery resolves it.
+   * Durable auth-loss latch writer (#1786, P2 fix). Optional: when null the poller
+   * behaves exactly as before (no-op). When provided, a confirmed `logged_out`
+   * classification records a durable, restart-surviving row into the TARGET
+   * INSTANCE's own persistent, migrated DB — resolved per-write via
+   * `dbReader.queryWrite(name, dbPath, ...)` (the same seam already used for
+   * cross-instance LID sync at `index.ts:645`) — never the fleet server's own
+   * throwaway `deps.db` handle. The in-memory `instance_logged_out` alert state
+   * does not survive a fleet restart; this table does, and a proven recovery
+   * resolves it.
    */
-  private readonly authLossStore: AuthLossSignalStore | null;
+  private readonly dbReader: FleetDbReader | null;
 
   constructor(
     getInstances: () => Map<string, InstanceHealth>,
@@ -631,14 +646,14 @@ export class HealthPoller {
     getSelfHealth: () => Record<string, unknown>,
     intervalMs = 5_000,
     loopLagSampler = new LoopLagSampler(),
-    authLossStore: AuthLossSignalStore | null = null,
+    dbReader: FleetDbReader | null = null,
   ) {
     this.getInstances = getInstances;
     this.selfName = selfName;
     this.getSelfHealth = getSelfHealth;
     this.intervalMs = intervalMs;
     this.loopLagSampler = loopLagSampler;
-    this.authLossStore = authLossStore;
+    this.dbReader = dbReader;
     const throttle = loadAlertThrottleDetailed();
     this.persistedAlertThrottle = throttle.entries;
     this.alertThrottleLoadErrorCode = throttle.loadError?.code ?? (throttle.loadError ? 'UNKNOWN' : null);
@@ -1532,8 +1547,13 @@ export class HealthPoller {
   }
 
   /**
-   * #1786: persist a de-link as a durable, restart-surviving `auth_loss_signal` row. The
-   * in-memory `instance_logged_out` alert dies on a fleet restart; this table does not.
+   * #1786 (P2 fix): persist a de-link as a durable, restart-surviving `auth_loss_signal`
+   * row IN THE TARGET INSTANCE'S OWN PERSISTENT DB. The in-memory `instance_logged_out`
+   * alert dies on a fleet restart; this table does not — but only if it is written to a
+   * DB that actually survives, which is the instance's own migrated `dbPath`, never the
+   * fleet server's own `deps.db` (a bare, unmigrated `:memory:` in production —
+   * `standalone.ts:16` — against which `INSERT INTO auth_loss_signal` throws `no such
+   * table`, previously swallowed here silently).
    *
    * There are TWO poll paths that reach a `logged_out` state, and BOTH record here:
    *   - self-health / classifier path — `classifyHealthSnapshot` → updateFromHealthSnapshot →
@@ -1546,18 +1566,23 @@ export class HealthPoller {
    * The store dedups on (instance, classifier, unresolved) → per-poll calls are idempotent.
    * (`logged_out` and `weak_logged_out_signal` are distinct classifiers and dedup independently,
    * so a weak→explicit escalation leaves two rows until the resolver — a tracked follow-up —
-   * supersedes the weak one.) No-op without an injected store. Best-effort: a store fault must
-   * never break the poll loop.
+   * supersedes the weak one.) No-op without an injected `dbReader`. Best-effort: `queryWrite`
+   * already wraps its own try/catch (open/write/close against a real DB file can legitimately
+   * fail transiently — e.g. instance DB locked or the instance directory gone) so a fault here
+   * never breaks the poll loop — but it is NEVER silently swallowed: a failed write always logs
+   * at `warn` with the instance name, dbPath, and underlying error, because a missing table on a
+   * genuinely migrated instance DB is a real bug, not a transient condition.
    */
   private writeDurableAuthLoss(
     name: string,
     signal: Pick<AuthLossSignalInput, 'classifier' | 'reason' | 'confidence'>,
   ): void {
-    if (this.authLossStore === null) return;
-    try {
-      this.authLossStore.record({ instance: name, host: this.selfName, ...signal });
-    } catch (err) {
-      log.warn({ err, name }, 'failed to record durable auth-loss signal (#1786)');
+    if (this.dbReader === null) return;
+    const dbPath = this.getInstances().get(name)?.dbPath ?? '';
+    const result = this.dbReader.queryWrite(name, dbPath, (rawDb) =>
+      new AuthLossSignalStore(rawDb).record({ instance: name, host: this.selfName, ...signal }));
+    if (!result.ok) {
+      log.warn({ name, dbPath, error: result.error }, 'failed to record durable auth-loss signal (#1786)');
     }
   }
 
