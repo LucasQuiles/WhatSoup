@@ -11,9 +11,9 @@ describe('COMMAND_REGISTRY', () => {
     expect(new Set(names).size).toBe(names.length);
   });
 
-  it('seeds exactly the eight commands the classifier knows today', () => {
+  it('seeds exactly the seven commands the classifier knows today (D11/D12: /why removed)', () => {
     expect(COMMAND_REGISTRY.map((c) => c.name).sort()).toEqual(
-      ['help', 'kill-session', 'model', 'new', 'reset', 'sessions', 'status', 'why'],
+      ['help', 'kill-session', 'model', 'new', 'reset', 'sessions', 'status'],
     );
   });
 
@@ -84,7 +84,7 @@ describe('COMMAND_REGISTRY', () => {
     expect(status.sensitiveFields).toEqual(['pid', 'sessionId']);
   });
 
-  it('flags model/why/reset as routing aliases and only those', () => {
+  it('flags model/reset as routing aliases and only those (D11/D12: /why removed)', () => {
     // Deviation (labeled, T1-REPORT.md): the packet's verbatim `COMMAND_REGISTRY
     // .filter((c) => c.routingAlias)` does not typecheck — `as const satisfies
     // readonly CommandSpec[]` keeps COMMAND_REGISTRY's narrow per-entry literal
@@ -94,12 +94,22 @@ describe('COMMAND_REGISTRY', () => {
     // uses at the two `for (const c of COMMAND_REGISTRY as readonly CommandSpec[])`
     // sites above. Semantics-preserving; runtime behavior is unchanged.
     expect((COMMAND_REGISTRY as readonly CommandSpec[]).filter((c) => c.routingAlias).map((c) => c.name).sort())
-      .toEqual(['model', 'reset', 'why']);
+      .toEqual(['model', 'reset']);
   });
 
   it('carries the /model sub-verbs as membership data (D5), matching today’s classifier set', () => {
     // B26: 'list' (the config-derived model catalogue) joined the verb set.
-    expect(getCommandSpec('model').subVerbs).toEqual(['status', 'list', 'default', 'strongest', 'fastest']);
+    // D12: 'default' is dropped from the standalone verb set.
+    expect(getCommandSpec('model').subVerbs).toEqual(['status', 'list', 'strongest', 'fastest']);
+  });
+
+  it('model subVerbs no longer include standalone default (D12)', () => {
+    const model = COMMAND_REGISTRY.find((c) => c.name === 'model')!;
+    expect(model.subVerbs).toEqual(['status', 'list', 'strongest', 'fastest']);
+  });
+
+  it('why is removed from the registry (D11)', () => {
+    expect(COMMAND_REGISTRY.find((c) => (c.name as string) === 'why')).toBeUndefined();
   });
 
   it('getCommandSpec throws on an unknown command (fail-closed lookup)', () => {

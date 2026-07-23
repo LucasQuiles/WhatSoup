@@ -22,6 +22,8 @@ import {
   setPreference,
   clearPreference,
   pruneExpired,
+  getLatestChatPreference,
+  clearChatPreference,
   type ChatModelPreference,
 } from '../../../src/runtimes/agent/chat-preference-db.ts';
 
@@ -266,5 +268,86 @@ describe('model pin storage', () => {
     expect(names).toContain('requested_model');
     expect(names).toContain('validated_provider');
     expect(names).toContain('model_pin_verified');
+  });
+});
+
+// D13/D13a — chat-scoped READ-COLLAPSE. Per-sender rows are RETAINED (the
+// primary key and write path are unchanged); these two functions add a
+// chat-scoped VIEW over them: the newest row wins on read, and a clear
+// removes every row for the chat. getPreference/clearPreference (above)
+// keep their exact per-sender contract — only the new functions are
+// chat-scoped.
+describe('chat-scoped read-collapse (latest-writer-wins)', () => {
+  it('returns the latest pin for the chat regardless of sender', () => {
+    setPreference(
+      db,
+      pref({ chatJid: CHAT_A, senderJid: SENDER_A, intent: 'provider_specific', requestedProvider: 'openai', updatedAt: 100, expiresAt: null }),
+    );
+    setPreference(
+      db,
+      pref({ chatJid: CHAT_A, senderJid: SENDER_B, intent: 'provider_specific', requestedProvider: 'kimi', updatedAt: 200, expiresAt: null }),
+    );
+    const got = getLatestChatPreference(db, CHAT_A, NOW);
+    expect(got?.requestedProvider).toBe('kimi');
+    // Row-derived audit trail (D13a): the winning sender comes from the row,
+    // not a passed arg — getLatestChatPreference has no sender parameter.
+    expect(got?.senderJid).toBe(SENDER_B);
+  });
+
+  it('skips expired rows when choosing the latest', () => {
+    setPreference(db, pref({ chatJid: CHAT_A, senderJid: SENDER_A, updatedAt: 300, expiresAt: 1_000 }));
+    expect(getLatestChatPreference(db, CHAT_A, 2_000)).toBeNull();
+  });
+
+  it('a fresh row wins over a newer-but-expired row', () => {
+    setPreference(
+      db,
+      pref({ chatJid: CHAT_A, senderJid: SENDER_A, intent: 'provider_specific', requestedProvider: 'openai', updatedAt: 100, expiresAt: null }),
+    );
+    // Newer updated_at than SENDER_A's row, but expired at NOW=1_500.
+    setPreference(db, pref({ chatJid: CHAT_A, senderJid: SENDER_B, updatedAt: 400, expiresAt: 200 }));
+    expect(getLatestChatPreference(db, CHAT_A, NOW)?.requestedProvider).toBe('openai');
+  });
+
+  it('defaults now to Date.now() the same way getPreference does', () => {
+    setPreference(db, pref({ chatJid: CHAT_A, senderJid: SENDER_A, expiresAt: null }));
+    expect(() => getLatestChatPreference(db, CHAT_A)).not.toThrow();
+  });
+
+  it('clearChatPreference deletes every row for the chat', () => {
+    setPreference(db, pref({ chatJid: CHAT_A, senderJid: SENDER_A }));
+    setPreference(db, pref({ chatJid: CHAT_A, senderJid: SENDER_B }));
+    clearChatPreference(db, CHAT_A);
+    expect(getLatestChatPreference(db, CHAT_A, NOW)).toBeNull();
+    const rows = db.raw.prepare(`SELECT COUNT(*) AS n FROM chat_model_preference WHERE chat_jid = ?`).get(CHAT_A) as { n: number };
+    expect(rows.n).toBe(0);
+  });
+
+  it('clearChatPreference is idempotent (double-clear does not throw)', () => {
+    setPreference(db, pref({ chatJid: CHAT_A, senderJid: SENDER_A }));
+    clearChatPreference(db, CHAT_A);
+    expect(() => clearChatPreference(db, CHAT_A)).not.toThrow();
+  });
+
+  it('clearChatPreference is chat-scoped (leaves other chats intact)', () => {
+    setPreference(db, pref({ chatJid: CHAT_A, senderJid: SENDER_A }));
+    setPreference(db, pref({ chatJid: CHAT_B, senderJid: SENDER_A }));
+    clearChatPreference(db, CHAT_A);
+    expect(getLatestChatPreference(db, CHAT_B, NOW)).not.toBeNull();
+  });
+
+  it('a corrupt latest row reads back null (fail-safe preserved via the shared validator)', () => {
+    // Older, valid row from SENDER_A, then a newer row from SENDER_B that
+    // gets corrupted at the SQL layer after insert — mirrors the "out-of-
+    // contract intent value" technique in the load-validation block above,
+    // aimed at the row that ORDER BY updated_at DESC would otherwise pick.
+    setPreference(db, pref({ chatJid: CHAT_A, senderJid: SENDER_A, updatedAt: 100 }));
+    setPreference(db, pref({ chatJid: CHAT_A, senderJid: SENDER_B, updatedAt: 200 }));
+    db.raw
+      .prepare(`UPDATE chat_model_preference SET intent = 'banana' WHERE chat_jid = ? AND sender_jid = ?`)
+      .run(CHAT_A, SENDER_B);
+    // The corrupt row IS the latest by updated_at — the shared validator
+    // rejects it fail-safe rather than falling through to SENDER_A's row.
+    expect(getLatestChatPreference(db, CHAT_A, NOW)).toBeNull();
   });
 });
