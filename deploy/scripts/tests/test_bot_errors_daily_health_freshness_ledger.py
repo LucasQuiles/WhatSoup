@@ -57,6 +57,14 @@ from lib.bot_errors_daily_health import (  # noqa: E402
 )
 
 
+# Default observation time for the fixture's own createdAt. Requirement 2 (use
+# the event's own trustworthy observation time, never dispatch wall-clock) and
+# requirement 3 (fail closed on malformed/absent time) mean createdAt is now a
+# load-bearing field for every freshness-recording test, not incidental data.
+_DEFAULT_CREATED_AT = "2026-07-22T11:20:00Z"
+_DEFAULT_CREATED_EPOCH = 1784719200
+
+
 def _daily_health_event(**kwargs: Any) -> dict[str, Any]:
     base = {
         "id": "evt-dh-001",
@@ -65,6 +73,7 @@ def _daily_health_event(**kwargs: Any) -> dict[str, Any]:
         "eventType": "alert",
         "summary": "daily health",
         "machine": _MACHINE,
+        "createdAt": _DEFAULT_CREATED_AT,
         "diagnostics": {"relay": {"remoteHost": _HOST_A}},
     }
     base.update(kwargs)
@@ -181,6 +190,105 @@ def test_ledger_survives_load_incident_state_roundtrip(tmp_path):
         assert reloaded["dailyHealthFreshness"][_HOST_A]["lastSeenAt"] > 0
     finally:
         os.environ.pop("BOT_ERRORS_STATE_DIR", None)
+
+
+def test_record_freshness_covers_recovery_clear_event():
+    # A daily-health clear (recovery) event is still a daily-health event for
+    # liveness purposes; the ledger cares about "host is alive and reporting",
+    # not the alert/clear distinction.
+    state: dict[str, Any] = {}
+    event = _daily_health_event(eventType="clear", severity="warning")
+    assert _disp.record_daily_health_freshness(event, state) == _HOST_A
+    assert _HOST_A in state["dailyHealthFreshness"]
+
+
+# ---------------------------------------------------------------------------
+# 2b. Observation time — requirement 2 (event's own time, never dispatch
+# wall-clock) and requirement 3 (fail closed on malformed/absent time, never
+# manufacture freshness)
+# ---------------------------------------------------------------------------
+
+def test_record_freshness_uses_event_created_at_not_dispatch_clock(monkeypatch):
+    # The dispatcher may process a backlogged event long after it was
+    # produced. Freshness must reflect when the host actually reported
+    # (createdAt), never the moment the dispatcher happened to get to it.
+    monkeypatch.setattr(_disp.time, "time", lambda: _DEFAULT_CREATED_EPOCH + 999_999)
+    state: dict[str, Any] = {}
+    _disp.record_daily_health_freshness(_daily_health_event(), state)
+    record = state["dailyHealthFreshness"][_HOST_A]
+    assert record["lastSeenAt"] == _DEFAULT_CREATED_EPOCH, (
+        f"expected event's own createdAt epoch, got a dispatch-wall-clock value: {record}"
+    )
+    assert record["lastSeenIso"] == _DEFAULT_CREATED_AT
+
+
+def test_record_freshness_fails_closed_on_missing_created_at():
+    state: dict[str, Any] = {}
+    event = _daily_health_event()
+    del event["createdAt"]
+    assert _disp.record_daily_health_freshness(event, state) is None
+    assert "dailyHealthFreshness" not in state
+
+
+def test_record_freshness_fails_closed_on_malformed_created_at():
+    state: dict[str, Any] = {}
+    event = _daily_health_event(createdAt="not-a-timestamp")
+    assert _disp.record_daily_health_freshness(event, state) is None
+    assert "dailyHealthFreshness" not in state
+
+
+def test_record_freshness_fails_closed_does_not_clobber_existing_entry():
+    # A malformed later event must not overwrite a previously-good stamp with
+    # nothing, and must not silently fall back to "now".
+    state: dict[str, Any] = {"dailyHealthFreshness": {_HOST_A: {"lastSeenAt": 111, "lastSeenIso": "prior"}}}
+    event = _daily_health_event(createdAt="")
+    assert _disp.record_daily_health_freshness(event, state) is None
+    assert state["dailyHealthFreshness"][_HOST_A] == {"lastSeenAt": 111, "lastSeenIso": "prior"}
+
+
+# ---------------------------------------------------------------------------
+# 2c. Monotonicity — a genuinely OLDER event absorbed after a fresher one
+# already stamped the ledger must never regress it. This is a NEW edge
+# introduced by requirement 2 (event's-own-time semantics): pre-fix
+# dispatch-wall-clock stamps were monotonic by construction (real time only
+# moves forward), so out-of-order absorption could not regress anything.
+# Once the stamp is the event's own createdAt, a backlogged file surfacing
+# out of order, a delayed replay, or storm-collapse/dedupe processing members
+# out of creation order can absorb an old event AFTER a fresh one -- without
+# a guard that would rewind the ledger and manufacture a false "cadence
+# stale" alert for a host that is actually live.
+# ---------------------------------------------------------------------------
+
+def test_record_freshness_is_monotonic_rejects_older_event_after_fresher_stamp():
+    state: dict[str, Any] = {}
+    fresh_event = _daily_health_event(createdAt=_DEFAULT_CREATED_AT)
+    assert _disp.record_daily_health_freshness(fresh_event, state) == _HOST_A
+    fresh_record = dict(state["dailyHealthFreshness"][_HOST_A])
+
+    older_event = _daily_health_event(
+        id="evt-dh-002", createdAt=_disp.iso_from_epoch(_DEFAULT_CREATED_EPOCH - 3600)
+    )
+    result = _disp.record_daily_health_freshness(older_event, state)
+
+    assert result is None, "an older event must not report itself as recorded"
+    assert state["dailyHealthFreshness"][_HOST_A] == fresh_record, (
+        "a genuinely older event must never regress an already-fresher stamp"
+    )
+
+
+def test_record_freshness_monotonic_guard_allows_equal_or_newer():
+    # Not over-strict: a newer event still advances the stamp, and the very
+    # first write for a host (no existing entry) always succeeds -- the
+    # guard treats an absent entry as -infinity, not as a floor of "now".
+    state: dict[str, Any] = {}
+    older_event = _daily_health_event(
+        id="evt-dh-002", createdAt=_disp.iso_from_epoch(_DEFAULT_CREATED_EPOCH - 3600)
+    )
+    assert _disp.record_daily_health_freshness(older_event, state) == _HOST_A
+
+    newer_event = _daily_health_event(createdAt=_DEFAULT_CREATED_AT)
+    assert _disp.record_daily_health_freshness(newer_event, state) == _HOST_A
+    assert state["dailyHealthFreshness"][_HOST_A]["lastSeenAt"] == _DEFAULT_CREATED_EPOCH
 
 
 # ---------------------------------------------------------------------------
