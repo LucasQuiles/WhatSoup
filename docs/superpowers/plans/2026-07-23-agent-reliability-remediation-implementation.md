@@ -66,10 +66,18 @@ Create `fix/agent-provider-actor-isolation-20260723` from refreshed `main`.
   `WHATSOUP_MCP_SOCKET` or fail before child spawn.
 - [ ] Prove with one real-provider integration canary per eligible CLI that the
   provider child propagates `WHATSOUP_MCP_SOCKET` to its MCP proxy despite the
-  static compatibility config. An unproven provider remains fail-closed.
+  static compatibility config. The actual provider process group must launch
+  the checked-in proxy, complete `initialize` and `tools/list` on the dynamic
+  socket, make zero static-socket connections, and be fully reaped without a
+  model turn or WhatsApp operation. Bind a redacted host-local receipt to the
+  provider binary, platform, proxy, and canary contract. A missing, stale, or
+  unproven receipt blocks only that provider in sensitive non-sandbox per-chat
+  mode.
 - [ ] Derive eligibility from the actual session/provider child, not the
-  instance default, and tear down the actor socket only after the owning child
-  process tree has settled.
+  instance default. Use one provider-config adapter in production and canaries.
+  Use one generic per-chat transition barrier across CLI and API modes; retain
+  the actor socket after failed stop proof and remove it only after final
+  logical-session teardown with successful child-stop proof.
 - [ ] Keep the shared/global socket actorless in every non-sandbox per-chat
   runtime. Publish actor FIFO state only to the actual eligible session socket.
 - [ ] Run targeted tests and typechecks, then the requested verification, gap,
@@ -113,7 +121,9 @@ Create `fix/agent-suspend-platform-hardening-20260723` from refreshed `main`.
   precedence; add the schema-version-1 private record validator.
 - [ ] The validator uses closed action, step-status, and abort-reason registries;
   receipts contain structured counts/hashes/statuses and never free-form raw
-  errors.
+  errors. It enforces the seven-action host dependency order, a
+  completed/skipped prefix, and a planned suffix after the first planned or
+  aborted gate.
 - [ ] Expose `validate-private-operation-record schema` and a read-only
   `validate --record <absolute-path> --format json` command. Emit one
   schema-valid JSON object; use exit `0` for valid, `1` for actionable record
@@ -128,9 +138,15 @@ Create `fix/agent-suspend-platform-hardening-20260723` from refreshed `main`.
 - [ ] Review every PR diff against the design, current `main`, public surfaces,
   upstream overlap, runtime fitness, and cross-lane compatibility. Resolve all
   critical/important findings and rerun fresh verification.
+- [ ] Merge order is provider actor isolation first; then rebase queue-health
+  truth and suspend/platform hardening independently onto the resulting
+  `main`. Resolve their stable health-contract overlap in each rebased PR and
+  rerun its complete gate. Do not merge without separate owner authorization.
 - [ ] Create and validate the private operation record. Verify the exact
   Tailscale node and disable key expiry as the first host mutation.
-- [ ] After required PRs merge, migrate credentials into private stores,
+- [ ] After suspend/platform hardening is merged, create the private record with
+  the merged validator. After all three PRs merge, migrate credentials into
+  private stores,
   validate a credential-free plist, stop and converge within 30 seconds,
   bootstrap, and converge health within 60 seconds.
 - [ ] Prove one process, healthy authenticated status, WhatsApp connectivity,

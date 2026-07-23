@@ -278,9 +278,12 @@ socket in that mode.
 
 Actor socket creation precedes provider launch. One socket belongs to one
 logical per-chat session and may be reused by sequential primary, fallback, or
-routed provider children for that same session; provider children for the same
-session must not overlap during a transition. The provider receives the socket
-only in its child environment.
+routed provider children for that same session. One generic per-chat provider
+transition barrier applies regardless of MCP mode: no replacement CLI child or
+managed API session may start until the previous provider execution has fully
+stopped and its session-scoped effects have terminalized. An intra-session
+transition preserves the actor socket while it waits. The provider receives the
+socket only in its child environment when its MCP capability requires it.
 
 The socket lives under a mode-`0700` directory below the configured runtime
 state root, is mode `0600`, and is owned by the agent process UID. Its
@@ -292,10 +295,15 @@ same-UID socket may be unlinked as stale. A symlink, non-socket, or
 foreign-owned path is rejected. The server never scans or glob-deletes
 unrelated sockets.
 
-Session teardown removes the actor-bound socket and server after the child has
-stopped. Cleanup is idempotent and applies to normal exit, provider failure,
-fallback transitions, kill, and runtime shutdown. A cleanup failure is logged
-without identifiers and makes the applicable host acceptance check fail.
+Final logical-session teardown removes the actor-bound socket and server only
+after child-stop proof. Provider failure or a primary/fallback/routed transition
+retains the socket and transition barrier until a later successful stop proof;
+a rejected or missing proof remains fail-closed and blocks replacement. Cleanup
+is idempotent for normal exit, kill, and runtime shutdown. It verifies that the
+exact owned socket identity still occupies the deterministic path before
+unlinking it. A cleanup failure retains ownership, follows the common redaction
+rule above (including no socket path or raw error), and makes the applicable
+host acceptance check fail.
 
 The MCP server remains the authorization boundary: actor identity is derived
 from the bound socket/server context, not from provider-supplied request
@@ -322,6 +330,9 @@ Tests will prove:
 - an unrecognized CLI provider exposing WhatSoup MCP also fails closed until
   actor-socket wiring is available;
 - fallback and natural-language routing retain the same actor binding;
+- CLI-to-CLI, CLI-to-API, API-to-CLI, and API-to-API transitions do not overlap;
+- a rejected child-stop proof retains the socket and blocks replacement until a
+  later successful proof;
 - an eligible launch with no actor socket fails before child spawn;
 - two concurrent chat sessions receive distinct sockets and actors; and
 - normal and exceptional teardown remove only the owning session's socket;
@@ -329,6 +340,28 @@ Tests will prove:
 - a live, foreign-owned, symlink, or non-socket collision is rejected without
   unlinking it;
 - socket permissions and ownership match the runtime contract.
+
+Each eligible CLI also requires a host-local, provider-specific canary receipt
+before admission to a non-sandbox per-chat session. The canary runs the actual
+provider binary without a model turn or WhatsApp operation. It supplies a
+production-generated static MCP config that points at a decoy socket and a
+child-only `WHATSOUP_MCP_SOCKET` that points at a dynamic actor socket. A pass
+requires the checked-in proxy to run as a descendant of the owned provider
+process group, the dynamic socket to receive MCP `initialize` and `tools/list`,
+the static socket to receive zero connections, and the entire process group to
+be reaped within the bounded timeout.
+
+The redacted receipt is stored below the runtime state root and binds the
+provider ID, platform/architecture, binary version and entrypoint digest, proxy
+digest, and canary-contract version. It contains no paths, argv, provider
+output, host/user names, socket names, model/session/chat identifiers, or
+credentials. Missing binaries, unsupported config, timeouts, empty
+observations, stale/mismatched receipts, and surviving descendants are
+`unproven`, never pass. Admission blocks only that selected eligible provider
+in the sensitive non-sandbox per-chat mode; it does not disable other proven
+CLI providers, API providers, shared/single scopes, or sandbox-per-chat
+deployments. Provider-specific config generation used by the canary and runtime
+is one shared adapter; a canary-only override may not hide production drift.
 
 ## Host Remediation
 
@@ -360,9 +393,13 @@ closed status values. An aborted step uses one content-free reason code:
 `operator_cancelled`; it does not store a free-form error.
 
 A repository-owned validator checks the schema, mode and ownership, ordered
-step receipts, required pre/post evidence, closed action/reason registries, and
-forbidden sensitive fields before the first mutation and after every completed
-or aborted step. Validation failure stops the run.
+step receipts, required pre/post evidence, closed action/reason registries,
+host-action dependencies, and forbidden sensitive fields before the first
+mutation and after every completed or aborted step. The seven-action registry
+orders Tailscale preservation, credential migration, health-token rotation,
+launchd restart, quarantine retirement, access resolution, and final host
+acceptance. Completed/skipped steps form a prefix; a planned or aborted gate
+leaves every later step planned. Validation failure stops the run.
 
 The validator is exposed as the read-only repository CLI
 `validate-private-operation-record`. Its `schema` subcommand returns the
