@@ -197,10 +197,10 @@ describe('App renders — v3.5 route shells (T5 b-02)', () => {
   });
 
   it('stub surfaces render the honest placeholder naming their bead', async () => {
+    // T5 b-06: /dream-lab graduated off the stub onto the real v3.5 surface.
     const cases: Array<[string, string, string]> = [
       ['/agents', 'Agents', 'b-04'],
       ['/skills', 'Skills Hub', 'b-05'],
-      ['/dream-lab', 'Dream Lab', 'b-06'],
       ['/deployments', 'Deployments', 'b-08'],
       ['/settings', 'Settings', 'b-09'],
     ];
