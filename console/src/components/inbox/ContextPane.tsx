@@ -9,7 +9,8 @@
  */
 import { useQuery } from '@tanstack/react-query'
 import type { Conversation } from '../../lib/inbox-unified'
-import { CHANNEL_LABEL, conversationInitials } from '../../lib/inbox-unified'
+import { conversationInitials } from '../../lib/inbox-unified'
+import { CHANNEL_LABEL, transportConnectedOf } from '../../lib/transport-identity'
 import { api } from '../../lib/api'
 import type { LineInstance } from '../../types'
 import { ChannelGlyph } from './channel-glyphs'
@@ -32,8 +33,7 @@ export function ContextPane({
     (c) => c.conversationKey === conversation.conversationKey,
   )
 
-  const connected =
-    line?.health?.transport?.connected ?? line?.health?.whatsapp?.connected ?? null
+  const connected = transportConnectedOf(line)
 
   return (
     <aside className="inbox-ctx" aria-label="Conversation context">

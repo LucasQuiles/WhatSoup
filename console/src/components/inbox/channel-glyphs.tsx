@@ -8,7 +8,7 @@
 import type { InboxChannel } from '../../lib/inbox-unified'
 
 const GLYPH_PATHS: Record<Exclude<InboxChannel, 'unknown'>, string> = {
-  whatsapp: 'M8 1a7 7 0 0 0-6 10.5L1 15l3.6-1A7 7 0 1 0 8 1z',
+  wa: 'M8 1a7 7 0 0 0-6 10.5L1 15l3.6-1A7 7 0 1 0 8 1z',
   signal: 'M8 2a5 5 0 0 1 5 5c0 3 1 4 1 4H2s1-1 1-4a5 5 0 0 1 5-5z',
   imessage:
     'M2 2h12a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H7l-4 3v-3H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z',

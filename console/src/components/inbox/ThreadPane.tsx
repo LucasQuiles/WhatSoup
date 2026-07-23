@@ -14,11 +14,11 @@ import { useQueryClient } from '@tanstack/react-query'
 import type { Message } from '../../types'
 import type { Conversation } from '../../lib/inbox-unified'
 import {
-  CHANNEL_LABEL,
   conversationInitials,
   formatBubbleTime,
   senderInitial,
 } from '../../lib/inbox-unified'
+import { CHANNEL_LABEL } from '../../lib/transport-identity'
 import { useStickyScroll } from '../../hooks/use-sticky-scroll'
 import { useVirtualMessages } from '../../hooks/use-virtual-messages'
 import { selectVirtualMessageRows, toChronologicalMessages } from '../../lib/inbox-virtualization'

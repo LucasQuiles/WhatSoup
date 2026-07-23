@@ -11,17 +11,12 @@
  * - No per-chat agent/paused field exists; nothing here invents one.
  */
 import type { ChatItem, LineInstance } from '../types.js'
+import type { TransportChannel } from './transport-identity.js'
+import { channelOf } from './transport-identity.js'
 
-/** Channel vocabulary the inbox knows how to glyph (11-channel-glyphography §1). */
-export type InboxChannel =
-  | 'whatsapp'
-  | 'signal'
-  | 'imessage'
-  | 'sms'
-  | 'email'
-  | 'discord'
-  | 'x'
-  | 'unknown'
+/** Channel vocabulary the inbox glyphs (11-channel-glyphography §1) — the
+ *  console-wide transport-identity home owns the mapping and labels. */
+export type InboxChannel = TransportChannel
 
 export interface Conversation {
   /** Owning line instance name — conversationKey is only unique per line. */
@@ -42,45 +37,6 @@ export function conversationId(line: string, conversationKey: string): string {
   return `${line}\n${conversationKey}`
 }
 
-/**
- * Map a line's transport kind to the inbox channel vocabulary.
- * `baileys` is the WhatsApp transport id (src/transport/registry.ts);
- * `twilio` carries SMS. Unknown/absent health stays honest as 'unknown'.
- */
-export function channelForLine(line: LineInstance | undefined): InboxChannel {
-  const kind = line?.health?.transport?.kind
-  switch (kind) {
-    case 'baileys':
-      return 'whatsapp'
-    case 'signal':
-      return 'signal'
-    case 'imessage':
-      return 'imessage'
-    case 'twilio':
-      return 'sms'
-    case 'email':
-      return 'email'
-    case 'discord':
-      return 'discord'
-    case 'x':
-      return 'x'
-    default:
-      return 'unknown'
-  }
-}
-
-/** Human label per channel (chip + context pane identity row). */
-export const CHANNEL_LABEL: Record<InboxChannel, string> = {
-  whatsapp: 'WhatsApp',
-  signal: 'Signal',
-  imessage: 'iMessage',
-  sms: 'SMS',
-  email: 'Email',
-  discord: 'Discord',
-  x: 'X',
-  unknown: 'Channel',
-}
-
 /** Merge every line's chat page into one recency-sorted conversation plane. */
 export function mergeConversations(
   lines: readonly LineInstance[],
@@ -90,7 +46,7 @@ export function mergeConversations(
   for (const line of lines) {
     const chats = chatsByLine.get(line.name)
     if (!chats) continue
-    const channel = channelForLine(line)
+    const channel = channelOf(line)
     for (const chat of chats) {
       merged.push({
         line: line.name,
@@ -117,7 +73,7 @@ export function mergeConversations(
 export function presentChannels(conversations: readonly Conversation[]): InboxChannel[] {
   const seen = new Set<InboxChannel>()
   for (const c of conversations) seen.add(c.channel)
-  const order: InboxChannel[] = ['whatsapp', 'signal', 'imessage', 'sms', 'discord', 'email', 'x', 'unknown']
+  const order: InboxChannel[] = ['wa', 'signal', 'imessage', 'sms', 'discord', 'email', 'x', 'unknown']
   return order.filter((k) => seen.has(k))
 }
 

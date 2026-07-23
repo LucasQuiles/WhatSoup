@@ -5,7 +5,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ChatItem, LineInstance } from '../../console/src/types'
 import {
-  channelForLine,
   conversationId,
   conversationInitials,
   countByChannel,
@@ -17,6 +16,7 @@ import {
   presentChannels,
   senderInitial,
 } from '../../console/src/lib/inbox-unified'
+import { channelOf } from '../../console/src/lib/transport-identity'
 
 function line(name: string, kind?: string): LineInstance {
   return {
@@ -39,17 +39,17 @@ function chat(key: string, overrides: Partial<ChatItem> = {}): ChatItem {
   }
 }
 
-describe('channelForLine', () => {
+describe('channelOf (transport-identity home)', () => {
   it('maps transport kinds to the channel vocabulary', () => {
-    expect(channelForLine(line('a', 'baileys'))).toBe('whatsapp')
-    expect(channelForLine(line('a', 'signal'))).toBe('signal')
-    expect(channelForLine(line('a', 'imessage'))).toBe('imessage')
-    expect(channelForLine(line('a', 'twilio'))).toBe('sms')
+    expect(channelOf(line('a', 'baileys'))).toBe('wa')
+    expect(channelOf(line('a', 'signal'))).toBe('signal')
+    expect(channelOf(line('a', 'imessage'))).toBe('imessage')
+    expect(channelOf(line('a', 'twilio'))).toBe('sms')
   })
   it('stays honest on absent or unknown health', () => {
-    expect(channelForLine(line('a'))).toBe('unknown')
-    expect(channelForLine(line('a', 'carrier-pigeon'))).toBe('unknown')
-    expect(channelForLine(undefined)).toBe('unknown')
+    expect(channelOf(line('a'))).toBe('unknown')
+    expect(channelOf(line('a', 'carrier-pigeon'))).toBe('unknown')
+    expect(channelOf(undefined)).toBe('unknown')
   })
 })
 
@@ -62,7 +62,7 @@ describe('mergeConversations', () => {
     ])
     const merged = mergeConversations(lines, byLine)
     expect(merged.map((c) => c.conversationKey)).toEqual(['b', 'c', 'a'])
-    expect(merged[0]!.channel).toBe('whatsapp')
+    expect(merged[0]!.channel).toBe('wa')
     expect(merged[1]!.channel).toBe('signal')
     expect(merged[1]!.line).toBe('sig')
   })
@@ -90,9 +90,9 @@ describe('presentChannels / countByChannel', () => {
         ['wa', [chat('w1'), chat('w2')]],
       ]),
     )
-    expect(presentChannels(merged)).toEqual(['whatsapp', 'signal'])
+    expect(presentChannels(merged)).toEqual(['wa', 'signal'])
     const counts = countByChannel(merged)
-    expect(counts.get('whatsapp')).toBe(2)
+    expect(counts.get('wa')).toBe(2)
     expect(counts.get('signal')).toBe(1)
   })
 })
@@ -109,7 +109,7 @@ describe('filterConversations', () => {
     expect(filterConversations(merged, 'all', 'rooms').map((c) => c.conversationKey)).toEqual(['g_at_g.us'])
   })
   it('channel narrows within the seg', () => {
-    expect(filterConversations(merged, 'whatsapp', 'direct').length).toBe(1)
+    expect(filterConversations(merged, 'wa', 'direct').length).toBe(1)
     expect(filterConversations(merged, 'signal', 'direct').length).toBe(0)
   })
 })

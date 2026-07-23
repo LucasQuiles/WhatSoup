@@ -34,7 +34,7 @@ import { ConversationList } from '../components/inbox/ConversationList'
 import { ThreadPane } from '../components/inbox/ThreadPane'
 import { ContextPane } from '../components/inbox/ContextPane'
 import { ChannelGlyph } from '../components/inbox/channel-glyphs'
-import { CHANNEL_LABEL } from '../lib/inbox-unified'
+import { CHANNEL_LABEL } from '../lib/transport-identity'
 import { Button } from '../components/primitives/Button'
 import EmptyState from '../components/EmptyState'
 
