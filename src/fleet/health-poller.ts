@@ -1286,6 +1286,7 @@ export class HealthPoller {
     const connection = this.readRecord(whatsapp?.['connection']);
     const instance = this.readRecord(health['instance']);
     const turnCapability = this.readRecord(health['turn_capability']);
+    const controlPeer = this.readRecord(health['control_peer']);
     const runtime = this.readRecord(health['runtime']);
     const runtimeAgent = this.readRecord(runtime?.['agent']);
     const providerExecution = this.readRecord(runtimeAgent?.['providerExecution']);
@@ -1305,6 +1306,10 @@ export class HealthPoller {
     const recoveryBlockedUnsafe = this.readNumber(runtimeAgent?.['turnRecoveryBlockedUnsafe']);
     const recoveryQuarantinedDelivery = this.readNumber(
       runtimeAgent?.['turnRecoveryQuarantinedDelivery'],
+    );
+    const controlPeerConfigured = controlPeer?.['configured'];
+    const controlPeerSuppressedUnavailableAlerts = this.readNumber(
+      controlPeer?.['suppressed_unavailable_alerts'],
     );
     const degradationCausesRaw = health['degradation_causes'];
     const degradationCauses = Array.isArray(degradationCausesRaw)
@@ -1364,6 +1369,8 @@ export class HealthPoller {
       `turn_recovery_outstanding=${recoveryOutstanding === null ? 'unknown' : String(recoveryOutstanding)}`,
       `turn_recovery_blocked_unsafe=${recoveryBlockedUnsafe === null ? 'unknown' : String(recoveryBlockedUnsafe)}`,
       `turn_recovery_quarantined_delivery=${recoveryQuarantinedDelivery === null ? 'unknown' : String(recoveryQuarantinedDelivery)}`,
+      `control_peer_configured=${String(controlPeerConfigured ?? 'unknown')}`,
+      `control_peer_suppressed_unavailable_alerts=${controlPeerSuppressedUnavailableAlerts === null ? 'unknown' : String(controlPeerSuppressedUnavailableAlerts)}`,
     ].join('\n');
     const shouldAlert = polls >= HEALTH_BODY_DEGRADED_ALERT_POLLS
       && dwellMs >= HEALTH_BODY_DEGRADED_ALERT_DWELL_MS;

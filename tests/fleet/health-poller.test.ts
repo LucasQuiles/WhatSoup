@@ -111,6 +111,8 @@ function makeOperationalFallbackHealth(overrides: {
   recoveryOutstanding?: number;
   recoveryBlockedUnsafe?: number;
   recoveryQuarantinedDelivery?: number;
+  controlPeerConfigured?: boolean;
+  controlPeerSuppressedUnavailableAlerts?: number;
   whatsappConnected?: boolean;
   connectionState?: string;
   fallbackChainExhausted?: boolean;
@@ -150,6 +152,10 @@ function makeOperationalFallbackHealth(overrides: {
         turnRecoveryBlockedUnsafe: overrides.recoveryBlockedUnsafe ?? 0,
         turnRecoveryQuarantinedDelivery: overrides.recoveryQuarantinedDelivery ?? 0,
       },
+    },
+    control_peer: {
+      configured: overrides.controlPeerConfigured ?? true,
+      suppressed_unavailable_alerts: overrides.controlPeerSuppressedUnavailableAlerts ?? 0,
     },
     whatsapp: {
       connected: overrides.whatsappConnected ?? true,
@@ -649,6 +655,8 @@ describe('HealthPoller', () => {
         providerExecutionOldestWaitMs: 87_000,
         recoveryBlockedUnsafe: 6,
         recoveryQuarantinedDelivery: 1,
+        controlPeerConfigured: false,
+        controlPeerSuppressedUnavailableAlerts: 11,
       })),
     });
 
@@ -669,6 +677,8 @@ describe('HealthPoller', () => {
     expect(alertEvidence).toContain('provider_execution_oldest_wait_ms=87000');
     expect(alertEvidence).toContain('turn_recovery_blocked_unsafe=6');
     expect(alertEvidence).toContain('turn_recovery_quarantined_delivery=1');
+    expect(alertEvidence).toContain('control_peer_configured=false');
+    expect(alertEvidence).toContain('control_peer_suppressed_unavailable_alerts=11');
 
     poller.stop();
   });
