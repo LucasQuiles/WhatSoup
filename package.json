@@ -17,6 +17,7 @@
     "setup": "bash deploy/setup.sh",
     "auth": "bash scripts/run-with-pinned-node.sh src/transport/auth.ts",
     "auth:instance": "bash scripts/run-with-pinned-node.sh src/bootstrap-auth.ts",
+    "imsg:relay": "bash scripts/run-with-pinned-node.sh scripts/imsg-rpc-relay.ts",
     "agent:lease": "bash scripts/run-with-pinned-node.sh scripts/agent-lease.ts",
     "audit:instance-plugins": "bash scripts/run-with-pinned-node.sh scripts/audit-instance-plugin-coverage.ts",
     "backfill-enrichment": "bash scripts/run-with-pinned-node.sh scripts/backfill-enrichment.ts",

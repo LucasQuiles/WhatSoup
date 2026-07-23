@@ -1,9 +1,24 @@
 // tests/transport/imessage/adapter-lifecycle.test.ts
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ImessageAdapter } from '../../../src/transport/imessage/adapter.ts';
-import { MockImessagePort, makeImessageConfig } from './mock-port.ts';
+import {
+  MockImessagePort,
+  imessageCursorOffset,
+  imessagePage,
+  makeImessageConfig,
+} from './mock-port.ts';
 import type { AdapterHealth, InboundMessage } from '../../../src/transport/contract/index.ts';
-import type { InboundImessage } from '../../../src/transport/imessage/port.ts';
+import type { InboundImessage, InboundImessagePage } from '../../../src/transport/imessage/port.ts';
+
+function pageFrom(
+  records: readonly InboundImessage[],
+  pageSize = 500,
+  cursor: string | null = null,
+) {
+  const offset = imessageCursorOffset(cursor);
+  const page = records.slice(offset, offset + pageSize);
+  return imessagePage(page, page.length === pageSize ? offset + pageSize : null);
+}
 
 describe('ImessageAdapter — lifecycle', () => {
   it('connect() calls verifyCredentials and transitions to connected', async () => {
@@ -108,22 +123,62 @@ describe('ImessageAdapter — poll loop', () => {
     port.listInboundSince = vi.fn(async (
       since: Date,
       pageSize = 500,
-      offset = 0,
-    ) => records
-      .filter((record) => record.timestamp >= since.getTime())
-      .slice(offset, offset + pageSize));
+      cursor: string | null = null,
+    ) => pageFrom(
+      records.filter((record) => record.timestamp >= since.getTime()),
+      pageSize,
+      cursor,
+    ));
     const adapter = new ImessageAdapter(makeImessageConfig({ pollIntervalMs: 0 }), port);
     await adapter.connect();
     await adapter.pollOnce();
     await adapter.pollOnce();
 
-    expect(port.listInboundSince).toHaveBeenNthCalledWith(1, new Date(0), 500, 0);
-    expect(port.listInboundSince).toHaveBeenNthCalledWith(2, new Date(now - 500), 500, 1);
+    expect(port.listInboundSince).toHaveBeenNthCalledWith(1, new Date(0), 500, null);
+    expect(port.listInboundSince).toHaveBeenNthCalledWith(2, new Date(now - 500), 500, 'mock:complete');
 
     await adapter.disconnect();
   });
 
-  it('resets an incomplete continuation when reconnecting', async () => {
+  it('replays the inclusive boundary so a newly visible timestamp tie is not skipped', async () => {
+    const first = {
+      guid: 'same-time-first',
+      from: 'user@users.noreply.github.com',
+      to: 'bot@users.noreply.github.com',
+      body: 'first',
+      fromMe: false,
+      kind: 'text',
+      timestamp: 1_000,
+    };
+    const insertedBefore = { ...first, guid: 'same-time-inserted-before', body: 'inserted' };
+    let call = 0;
+    const port = new MockImessagePort();
+    port.listInboundSince = vi.fn(async (
+      _since: Date,
+      _pageSize = 500,
+      cursor: string | null = null,
+    ) => {
+      call += 1;
+      const rows = call === 1 ? [first] : [insertedBefore, first];
+      return pageFrom(rows, 500, cursor);
+    });
+    const adapter = new ImessageAdapter(makeImessageConfig({ pollIntervalMs: 0 }), port);
+    const received: InboundMessage[] = [];
+    adapter.on('message', (message) => received.push(message));
+    await adapter.connect();
+
+    await adapter.pollOnce();
+    await adapter.pollOnce();
+
+    expect(received.map((message) => message.ref.id)).toEqual([
+      'same-time-first',
+      'same-time-inserted-before',
+    ]);
+    expect(port.listInboundSince).toHaveBeenNthCalledWith(2, new Date(1_000), 500, 'mock:complete');
+    await adapter.disconnect();
+  });
+
+  it('preserves an incomplete provider cursor when reconnecting', async () => {
     const now = 1_700_000_000_000;
     vi.setSystemTime(now);
     let records: InboundImessage[] = Array.from({ length: 5000 }, (_, index) => ({
@@ -139,10 +194,14 @@ describe('ImessageAdapter — poll loop', () => {
     port.listInboundSince = vi.fn(async (
       since: Date,
       pageSize = 500,
-      offset = 0,
-    ) => records
-      .filter((record) => record.timestamp >= since.getTime())
-      .slice(offset, offset + pageSize));
+      cursor: string | null = null,
+    ) => records.length === 1
+      ? imessagePage(records)
+      : pageFrom(
+        records.filter((record) => record.timestamp >= since.getTime()),
+        pageSize,
+        cursor,
+      ));
     const adapter = new ImessageAdapter(makeImessageConfig({ pollIntervalMs: 1000 }), port);
     const received: InboundMessage[] = [];
     adapter.on('message', (message) => received.push(message));
@@ -167,14 +226,14 @@ describe('ImessageAdapter — poll loop', () => {
     expect(received.map((message) => message.ref.id)).toEqual(['fresh-after-reconnect']);
     expect(port.listInboundSince).toHaveBeenNthCalledWith(
       11,
-      new Date(now + 9_000),
+      new Date(now - 1_000),
       500,
-      0,
+      'mock:offset:5000',
     );
     await adapter.disconnect();
   });
 
-  it('resets an incomplete continuation after auth-required reconnect', async () => {
+  it('preserves an incomplete continuation after auth-required reconnect', async () => {
     const now = 1_700_000_000_000;
     vi.setSystemTime(now);
     const fullPage = Array.from({ length: 500 }, (_, index) => ({
@@ -200,14 +259,12 @@ describe('ImessageAdapter — poll loop', () => {
     port.listInboundSince = vi.fn(async (
       since: Date,
       pageSize = 500,
-      offset = 0,
+      cursor: string | null = null,
     ) => {
       if (authenticated) {
-        return fresh
-          .filter((record) => record.timestamp >= since.getTime())
-          .slice(offset, offset + pageSize);
+        return imessagePage(fresh.filter((record) => record.timestamp >= since.getTime()));
       }
-      if (offset === 0) return fullPage;
+      if (cursor === null) return imessagePage(fullPage, 500);
       throw Object.assign(new Error('expired credential'), { status: 401 });
     });
     const adapter = new ImessageAdapter(makeImessageConfig({ pollIntervalMs: 1000 }), port);
@@ -225,14 +282,69 @@ describe('ImessageAdapter — poll loop', () => {
     expect(received.map((message) => message.ref.id)).toEqual(['fresh-after-auth']);
     expect(port.listInboundSince).toHaveBeenNthCalledWith(
       3,
-      new Date(now + 9_000),
+      new Date(now - 1_000),
       500,
-      0,
+      'mock:offset:500',
     );
     await adapter.disconnect();
   });
 
-  it('resets a completed boundary offset when reconnecting beyond its lookback', async () => {
+  it('resumes the committed provider cursor after auth recovery', async () => {
+    const now = 10_000;
+    vi.setSystemTime(now);
+    const fullPage: InboundImessage[] = Array.from({ length: 500 }, (_, index) => ({
+      guid: `auth-backlog-${index}`,
+      from: 'user@users.noreply.github.com',
+      to: 'bot@users.noreply.github.com',
+      body: null,
+      fromMe: false,
+      kind: 'reaction',
+      timestamp: 9_000,
+    }));
+    const pending: InboundImessage = {
+      guid: 'pending-before-auth-recovery',
+      from: 'user@users.noreply.github.com',
+      to: 'bot@users.noreply.github.com',
+      body: 'pending',
+      fromMe: false,
+      kind: 'text',
+      timestamp: 9_500,
+    };
+    let authenticated = false;
+    const port = new MockImessagePort();
+    port.listInboundSince = vi.fn(async (
+      since: Date,
+      pageSize = 500,
+      cursor: string | null = null,
+    ) => {
+      if (!authenticated && cursor !== null) {
+        throw Object.assign(new Error('expired credential'), { status: 401 });
+      }
+      if (authenticated) return imessagePage([pending]);
+      return pageFrom(
+        [...fullPage, pending].filter((record) => record.timestamp >= since.getTime()),
+        pageSize,
+        cursor,
+      );
+    });
+    const adapter = new ImessageAdapter(makeImessageConfig({ pollIntervalMs: 1000 }), port);
+    const received: InboundMessage[] = [];
+    adapter.on('message', (message) => received.push(message));
+    await adapter.connect();
+    await adapter.pollOnce();
+    expect(adapter.state().state).toBe('auth_required');
+
+    authenticated = true;
+    vi.setSystemTime(30_000);
+    await adapter.connect();
+    await adapter.pollOnce();
+
+    expect(received.map((message) => message.ref.id)).toEqual(['pending-before-auth-recovery']);
+    expect(port.listInboundSince).toHaveBeenNthCalledWith(3, new Date(9_000), 500, 'mock:offset:500');
+    await adapter.disconnect();
+  });
+
+  it('preserves a completed provider high-water mark when reconnecting', async () => {
     const now = 1_700_000_000_000;
     vi.setSystemTime(now);
     let records = [{
@@ -248,10 +360,14 @@ describe('ImessageAdapter — poll loop', () => {
     port.listInboundSince = vi.fn(async (
       since: Date,
       pageSize = 500,
-      offset = 0,
-    ) => records
-      .filter((record) => record.timestamp >= since.getTime())
-      .slice(offset, offset + pageSize));
+      cursor: string | null = null,
+    ) => records.length === 1 && records[0]?.guid === 'fresh-after-completed-boundary'
+      ? imessagePage(records)
+      : pageFrom(
+        records.filter((record) => record.timestamp >= since.getTime()),
+        pageSize,
+        cursor,
+      ));
     const adapter = new ImessageAdapter(makeImessageConfig({ pollIntervalMs: 1000 }), port);
     const received: InboundMessage[] = [];
     adapter.on('message', (message) => received.push(message));
@@ -279,9 +395,9 @@ describe('ImessageAdapter — poll loop', () => {
     ]);
     expect(port.listInboundSince).toHaveBeenNthCalledWith(
       2,
-      new Date(now + 9_000),
+      new Date(now),
       500,
-      0,
+      'mock:complete',
     );
     await adapter.disconnect();
   });
@@ -310,14 +426,14 @@ describe('ImessageAdapter — poll loop', () => {
     port.listInboundSince = vi.fn(async (
       _since: Date,
       _pageSize = 500,
-      offset = 0,
+      cursor: string | null = null,
     ) => {
-      if (offset === 0) return fullPage;
+      if (cursor === null) return imessagePage(fullPage, 500);
       if (failContinuation) {
         failContinuation = false;
         throw new Error('ECONNRESET');
       }
-      return [valid];
+      return imessagePage([valid]);
     });
     const adapter = new ImessageAdapter(makeImessageConfig({ pollIntervalMs: 0 }), port);
     const received: InboundMessage[] = [];
@@ -330,7 +446,7 @@ describe('ImessageAdapter — poll loop', () => {
     await adapter.pollOnce();
 
     expect(received.map((message) => message.ref.id)).toEqual(['valid-after-transient-page']);
-    expect(port.listInboundSince).toHaveBeenNthCalledWith(3, new Date(0), 500, 500);
+    expect(port.listInboundSince).toHaveBeenNthCalledWith(3, new Date(0), 500, 'mock:offset:500');
     await adapter.disconnect();
   });
 
@@ -362,13 +478,13 @@ describe('ImessageAdapter — poll loop', () => {
     port.listInboundSince = vi.fn(async (
       _since: Date,
       _pageSize = 500,
-      offset = 0,
+      cursor: string | null = null,
     ) => {
-      if (reconnected) return offset === 0 ? [fresh] : [];
-      if (offset === 0) return fullPage;
+      if (reconnected) return imessagePage([fresh]);
+      if (cursor === null) return imessagePage(fullPage, 500);
       continuationStarted();
-      return new Promise<readonly typeof stale[]>((resolve) => {
-        resolveContinuation = resolve;
+      return new Promise<InboundImessagePage>((resolve) => {
+        resolveContinuation = (records) => resolve(imessagePage(records));
       });
     });
     const adapter = new ImessageAdapter(makeImessageConfig({ pollIntervalMs: 0 }), port);
@@ -379,15 +495,13 @@ describe('ImessageAdapter — poll loop', () => {
     const polling = adapter.pollOnce();
     await started;
     await adapter.disconnect();
-    resolveContinuation([stale]);
-    await polling;
-    expect(received).toHaveLength(0);
-
     reconnected = true;
     await adapter.connect();
+    resolveContinuation([stale]);
+    await polling;
     await adapter.pollOnce();
     expect(received.map((message) => message.ref.id)).toEqual(['fresh-after-in-flight-disconnect']);
-    expect(port.listInboundSince).toHaveBeenNthCalledWith(3, new Date(0), 500, 0);
+    expect(port.listInboundSince).toHaveBeenNthCalledWith(3, new Date(0), 500, 'mock:offset:500');
     await adapter.disconnect();
   });
 });

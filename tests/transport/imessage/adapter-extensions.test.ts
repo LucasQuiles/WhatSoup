@@ -29,13 +29,13 @@ describe('ImessageAdapter — SupportsReactions', () => {
     });
   });
 
-  it('unreact() calls port.sendReaction with empty emoji and remove:true', async () => {
+  it('unreact() retains the reaction kind and sets remove:true', async () => {
     const { adapter, port, channelId } = makeAdapter();
     const target = peerMessageRef(channelId, 'user@example.com', 'guid-123');
 
     await adapter.unreact(target, '❤️');
 
-    expect(port.reactions[0]).toMatchObject({ emoji: '', remove: true });
+    expect(port.reactions[0]).toMatchObject({ emoji: '❤️', remove: true });
   });
 
   it('react() rejects a cross-channel target', async () => {

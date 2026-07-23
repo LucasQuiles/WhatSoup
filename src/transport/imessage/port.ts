@@ -1,6 +1,6 @@
 // src/transport/imessage/port.ts
 // Narrow provider boundary for iMessage operations — abstracts over the two
-// supported backends (macOS-native `imsg` daemon and BlueBubbles HTTP Server).
+// supported backends (macOS-native `imsg rpc` and BlueBubbles HTTP Server).
 //
 // Both backends implement this interface; the adapter depends only on it.
 // One-way dependency: adapter knows contract; port knows provider shapes.
@@ -19,13 +19,13 @@ export interface SendImessageArgs {
   readonly recipient: string;
   /** Message body. iMessage supports long messages; no per-message cap here. */
   readonly body: string;
-  /** Optional subject (iMessage subject lines are optional and rarely used). */
+  /** Optional subject. BlueBubbles supports it; the imsg `send` method rejects it. */
   readonly subject?: string;
 }
 
 /**
  * A single iMessage envelope returned from the provider. Mirrors what both
- * the imsg daemon and BlueBubbles `/api/v1/chat/query` surface, narrowed to
+ * `imsg rpc` and BlueBubbles `/api/v1/chat/query` surface, narrowed to
  * the fields the adapter actually consumes.
  */
 export interface InboundImessage {
@@ -51,13 +51,28 @@ export interface InboundImessage {
 }
 
 /**
+ * One raw-provider page after record normalization.
+ *
+ * `cursor` is opaque to the adapter and owned by the provider port. It must
+ * advance only after the whole raw page has been validated. `hasMore` means
+ * the same provider snapshot still has unread rows; a false value leaves the
+ * returned cursor as the durable high-water mark for the next poll.
+ */
+export interface InboundImessagePage {
+  readonly records: readonly InboundImessage[];
+  readonly cursor: string;
+  readonly hasMore: boolean;
+}
+
+/**
  * Error shape the provider boundary surfaces on failure.
  * The adapter (not the port) maps these to typed TransportError subclasses.
  */
 export interface ImessagePortError {
   readonly message: string;
-  readonly code?: string;   // backend-specific code (BlueBubbles HTTP path, imsg daemon error class)
+  readonly code?: string;   // backend-specific code (BlueBubbles HTTP path, imsg RPC error class)
   readonly status?: number; // HTTP status code (BlueBubbles) or synthesized code (imsg)
+  readonly phase?: 'not_started' | 'provider_call_started' | 'ack_received';
 }
 
 /** Arguments for reacting to an iMessage. */
@@ -92,7 +107,7 @@ export interface SendTypingArgs {
 }
 
 /**
- * Narrow provider seam for iMessage operations. Both the imsg daemon port
+ * Narrow provider seam for iMessage operations. Both the imsg RPC port
  * and the BlueBubbles HTTP port implement this interface.
  *
  * All methods are async and may throw errors matching ImessagePortError.
@@ -102,7 +117,7 @@ export interface ImessagePort {
   /**
    * Verify the backend is reachable and our credentials/session are valid.
    * For BlueBubbles: GET /api/v1/ping with the configured password.
-   * For imsg: ping the daemon socket and check the chat.db is readable.
+   * For imsg: reach the local relay and prove chat.db is readable.
    */
   verifyCredentials(): Promise<void>;
 
@@ -116,12 +131,19 @@ export interface ImessagePort {
    * and our own outbound echoes). `fromMe` on each record distinguishes
    * direction; same contract as Signal/Twilio ports.
    *
-   * Boundary is INCLUSIVE (timestamp >= since); callers MUST dedupe by `guid`.
-   * Ordered ascending by timestamp. `offset` is a stable continuation within
-   * the inclusive result set and MUST be applied before returning the page;
-   * callers use it to drain timestamp ties without loss.
+   * Boundary is INCLUSIVE (timestamp >= since) for a null bootstrap cursor;
+   * callers MUST dedupe by `guid`. Ordered ascending by provider cursor. Once
+   * bootstrapped, `cursor` is the authoritative provider high-water mark and
+   * `since` is only a compatibility/lookback bound.
    */
-  listInboundSince(since: Date, pageSize?: number, offset?: number): Promise<readonly InboundImessage[]>;
+  listInboundSince(
+    since: Date,
+    pageSize?: number,
+    cursor?: string | null,
+  ): Promise<InboundImessagePage>;
+
+  /** Drop any cached transport connection. Safe to call repeatedly. */
+  resetConnection?(): void;
 
   /**
    * Send a reaction to a prior message. iMessage's tapback protocol supports

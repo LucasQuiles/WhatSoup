@@ -24,6 +24,7 @@ import type {
   ImessagePort,
   ImessagePortError,
   InboundImessage,
+  InboundImessagePage,
   ReactImessageArgs,
   SendImessageArgs,
   SendReadReceiptArgs,
@@ -100,6 +101,7 @@ export function createHttpClient(config: ImessageConfig): BlueBubblesHttpClient 
 
 /** BlueBubbles message record (fields the port consumes). */
 interface BbMessage {
+  originalROWID?: number;
   guid?: string;
   text?: string | null;
   isFromMe?: boolean;
@@ -107,6 +109,101 @@ interface BbMessage {
   chats?: Array<{ guid?: string }>;
   dateCreated?: number;
   itemType?: number;
+}
+
+interface BbCursorState {
+  readonly version: 1;
+  readonly afterRowId: number;
+  readonly upperRowId: number | null;
+  readonly bootstrapAfterMs: number | null;
+}
+
+interface BbQueryMetadata {
+  readonly offset?: unknown;
+  readonly limit?: unknown;
+  readonly count?: unknown;
+  readonly total?: unknown;
+}
+
+const BB_CURSOR_PREFIX = 'bb1:';
+const BLUEBUBBLES_MAX_PAGE_SIZE = 1000;
+const APPLE_EPOCH_UNIX_MS = 978_307_200_000;
+
+function malformedResponse(message: string): ImessagePortError {
+  return { message, code: 'MalformedResponse', status: 502 };
+}
+
+function isSafeNonNegativeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function encodeCursor(state: BbCursorState): string {
+  return BB_CURSOR_PREFIX + Buffer.from(JSON.stringify(state), 'utf8').toString('base64url');
+}
+
+function decodeCursor(cursor: string): BbCursorState {
+  if (!cursor.startsWith(BB_CURSOR_PREFIX)) {
+    throw { message: 'invalid bluebubbles inbound cursor', code: 'BadCursor', status: 400 } satisfies ImessagePortError;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(cursor.slice(BB_CURSOR_PREFIX.length), 'base64url').toString('utf8'));
+  } catch {
+    throw { message: 'invalid bluebubbles inbound cursor', code: 'BadCursor', status: 400 } satisfies ImessagePortError;
+  }
+  const state = parsed as Partial<BbCursorState> | null;
+  if (state === null
+    || state.version !== 1
+    || !isSafeNonNegativeInteger(state.afterRowId)
+    || (state.upperRowId !== null && !isSafeNonNegativeInteger(state.upperRowId))
+    || (state.bootstrapAfterMs !== null && !isSafeNonNegativeInteger(state.bootstrapAfterMs))) {
+    throw { message: 'invalid bluebubbles inbound cursor', code: 'BadCursor', status: 400 } satisfies ImessagePortError;
+  }
+  return {
+    version: 1,
+    afterRowId: state.afterRowId,
+    upperRowId: state.upperRowId,
+    bootstrapAfterMs: state.bootstrapAfterMs,
+  };
+}
+
+function parseQueryPage(
+  result: unknown,
+  requestedLimit: number,
+): readonly BbMessage[] {
+  if (typeof result !== 'object' || result === null) {
+    throw malformedResponse('bluebubbles query returned a non-object response');
+  }
+  const data = (result as { data?: unknown }).data;
+  const metadata = (result as { metadata?: BbQueryMetadata }).metadata;
+  if (!Array.isArray(data) || typeof metadata !== 'object' || metadata === null) {
+    throw malformedResponse('bluebubbles query omitted data or metadata');
+  }
+  if (metadata.offset !== 0
+    || metadata.limit !== requestedLimit
+    || metadata.count !== data.length
+    || !isSafeNonNegativeInteger(metadata.total)) {
+    throw malformedResponse('bluebubbles query metadata did not match the requested page');
+  }
+  return data as BbMessage[];
+}
+
+function validateRawMessage(
+  message: BbMessage,
+  afterRowId: number,
+  upperRowId: number,
+): number {
+  const rowId = message.originalROWID;
+  if (!Number.isSafeInteger(rowId)
+    || (rowId as number) <= afterRowId
+    || (rowId as number) > upperRowId
+    || typeof message.guid !== 'string'
+    || message.guid === ''
+    || typeof message.dateCreated !== 'number'
+    || !Number.isFinite(message.dateCreated)) {
+    throw malformedResponse('bluebubbles query returned an invalid or out-of-window message row');
+  }
+  return rowId as number;
 }
 
 /** iMessage tapback emoji → BlueBubbles reactionType. Removal prefixes '-'. */
@@ -183,38 +280,121 @@ export class BlueBubblesPort implements ImessagePort {
     return { guid };
   }
 
-  async listInboundSince(since: Date, pageSize?: number, offset = 0): Promise<readonly InboundImessage[]> {
-    if (pageSize !== undefined && (!Number.isInteger(pageSize) || pageSize <= 0)) {
+  async listInboundSince(
+    since: Date,
+    pageSize?: number,
+    cursor: string | null = null,
+  ): Promise<InboundImessagePage> {
+    if (pageSize !== undefined
+      && (!Number.isInteger(pageSize) || pageSize <= 0 || pageSize > BLUEBUBBLES_MAX_PAGE_SIZE)) {
       throw new RangeError(`pageSize must be a positive integer, got ${pageSize}`);
     }
-    if (!Number.isInteger(offset) || offset < 0) {
-      throw new RangeError(`offset must be a non-negative integer, got ${offset}`);
+    const sinceMs = since.getTime();
+    if (!Number.isFinite(sinceMs) || sinceMs < 0) {
+      throw new RangeError('since must be a valid non-negative date');
+    }
+    const limit = pageSize ?? 100;
+    let state: BbCursorState = cursor === null
+      ? { version: 1, afterRowId: 0, upperRowId: null, bootstrapAfterMs: sinceMs }
+      : decodeCursor(cursor);
+
+    if (state.upperRowId === null) {
+      const upperResult = await this.http({
+        method: 'POST',
+        path: '/message/query',
+        body: {
+          limit: 1,
+          offset: 0,
+          sort: 'ASC',
+          with: ['chats', 'handle'],
+          where: [{
+            statement: 'message.ROWID = (SELECT MAX(bb_hi.ROWID) FROM message AS bb_hi)',
+            args: {},
+          }],
+        },
+      });
+      const upperRows = parseQueryPage(upperResult, 1);
+      if (upperRows.length === 0) {
+        return {
+          records: [],
+          cursor: encodeCursor({ ...state, bootstrapAfterMs: null }),
+          hasMore: false,
+        };
+      }
+      const upperRowId = validateRawMessage(upperRows[0]!, -1, Number.MAX_SAFE_INTEGER);
+      if (upperRowId <= state.afterRowId) {
+        return {
+          records: [],
+          cursor: encodeCursor({ version: 1, afterRowId: state.afterRowId, upperRowId: null, bootstrapAfterMs: null }),
+          hasMore: false,
+        };
+      }
+      state = { ...state, upperRowId };
+    }
+
+    const upperRowId = state.upperRowId;
+    if (upperRowId === null) {
+      throw malformedResponse('bluebubbles cursor did not establish an upper ROWID');
+    }
+    const bootstrapPredicate = state.bootstrapAfterMs === null
+      ? ''
+      : ' AND bb_page.date >= (:afterUnixMs - :appleEpochUnixMs) * 1000000';
+    const args: Record<string, number> = {
+      afterRowId: state.afterRowId,
+      upperRowId,
+      pageLimit: limit,
+    };
+    if (state.bootstrapAfterMs !== null) {
+      args.afterUnixMs = state.bootstrapAfterMs;
+      args.appleEpochUnixMs = APPLE_EPOCH_UNIX_MS;
     }
     const result = await this.http({
       method: 'POST',
       path: '/message/query',
       body: {
-        limit: pageSize ?? 100,
-        offset,
+        limit,
+        offset: 0,
         sort: 'ASC',
-        after: since.getTime(),
         with: ['chats', 'handle'],
+        where: [{
+          statement: `message.ROWID IN (SELECT bb_page.ROWID FROM message AS bb_page WHERE bb_page.ROWID > :afterRowId AND bb_page.ROWID <= :upperRowId${bootstrapPredicate} ORDER BY bb_page.ROWID ASC LIMIT :pageLimit)`,
+          args,
+        }],
       },
-    }) as { data?: BbMessage[] } | undefined;
-
-    const sinceMs = since.getTime();
-    const out: InboundImessage[] = [];
-    for (const raw of result?.data ?? []) {
+    });
+    const rawRows = parseQueryPage(result, limit);
+    const seenRowIds = new Set<number>();
+    const normalizedRows: Array<{ rowId: number; message: InboundImessage }> = [];
+    for (const raw of rawRows) {
+      const rowId = validateRawMessage(raw, state.afterRowId, upperRowId);
+      if (seenRowIds.has(rowId)) {
+        throw malformedResponse('bluebubbles query returned a duplicate message ROWID');
+      }
+      seenRowIds.add(rowId);
       const normalized = normalizeMessage(raw);
-      if (!normalized) continue;
-      // Inclusive boundary: at-least-once delivery; callers dedupe by guid.
-      if (normalized.timestamp < sinceMs) continue;
-      out.push(normalized);
+      if (normalized === null) {
+        throw malformedResponse('bluebubbles query returned a message that could not be normalized');
+      }
+      normalizedRows.push({ rowId, message: normalized });
     }
-    // Sort BEFORE capping: the contract is ascending-by-timestamp, so the
-    // pageSize cap must keep the OLDEST messages, not the first-arriving.
-    out.sort((a, b) => a.timestamp - b.timestamp);
-    return pageSize !== undefined ? out.slice(0, pageSize) : out;
+    normalizedRows.sort((left, right) => left.rowId - right.rowId);
+
+    if (normalizedRows.length === 0) {
+      return {
+        records: [],
+        cursor: encodeCursor({ version: 1, afterRowId: upperRowId, upperRowId: null, bootstrapAfterMs: null }),
+        hasMore: false,
+      };
+    }
+    const lastRowId = normalizedRows[normalizedRows.length - 1]!.rowId;
+    const hasMore = rawRows.length === limit && lastRowId < upperRowId;
+    return {
+      records: normalizedRows.map(({ message }) => message),
+      cursor: encodeCursor(hasMore
+        ? { ...state, afterRowId: lastRowId }
+        : { version: 1, afterRowId: upperRowId, upperRowId: null, bootstrapAfterMs: null }),
+      hasMore,
+    };
   }
 
   async sendReaction(args: ReactImessageArgs): Promise<void> {
