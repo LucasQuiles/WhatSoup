@@ -32,6 +32,21 @@ const ROUTING_MODEL_VERBS = new Set(REGISTRY.find((c) => c.name === 'model')?.su
  *  also counts as structured. */
 const MODEL_INDEX_RE = /^\d+[a-z]?$/i;
 
+/** An explicit `vendor/model` id, e.g. "opencode-cli/kimi-k3" or
+ *  "anthropic/claude-x" (Slice 1 direct selector). The mandatory slash is what
+ *  distinguishes a full model id from a bare provider id ("opencode-cli", no
+ *  slash — handled by isProviderId) or free text ("the best kimi" — spaces,
+ *  forwarded to the agent, F04). Each segment is the restricted id charset. */
+const MODEL_ID_RE = /^[A-Za-z0-9._:-]+(?:\/[A-Za-z0-9._:-]+)+$/;
+
+/** True for a single-token explicit model id of the `vendor/model` shape the
+ *  `/model <id>` direct selector owns (Slice 1). Kept a pure predicate so both
+ *  the classifier (below) and the handler (model-pin.ts) share one definition
+ *  of "is this an explicit model id" and can never disagree. */
+export function isExplicitModelId(value: string): boolean {
+  return MODEL_ID_RE.test(value);
+}
+
 /** True when `parts` (the full `/model ...` token list; `parts[0]` is always
  *  "model") matches the STRUCTURED /model grammar the bot owns locally under
  *  the agent-assisted design (owner decision 2026-07-20): bare `/model`, a
@@ -45,7 +60,11 @@ function isStructuredModelArg(parts: readonly string[]): boolean {
   const arg1 = parts[1].toLowerCase();
   if (arg1 === 'list') return true; // bare "list" or with a filter tail of any length
   if (parts.length === 2) {
-    return ROUTING_MODEL_VERBS.has(arg1) || isProviderId(arg1) || MODEL_INDEX_RE.test(parts[1]);
+    // A `vendor/model` id (isExplicitModelId, case-preserved parts[1]) is the
+    // Slice-1 direct selector — owned locally so `/model opencode-cli/kimi-k3`
+    // pins in one step. Free text (spaces) and slash-less tokens still forward
+    // to the agent's own /model (F04).
+    return ROUTING_MODEL_VERBS.has(arg1) || isProviderId(arg1) || MODEL_INDEX_RE.test(parts[1]) || isExplicitModelId(parts[1]);
   }
   if (parts.length === 3 && /^\d+$/.test(parts[1]) && parts[2].toLowerCase() === 'default') {
     return true;

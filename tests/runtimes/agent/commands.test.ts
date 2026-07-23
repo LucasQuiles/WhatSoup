@@ -212,6 +212,23 @@ describe('routing aliases — forwarded-capability fallthrough (F04)', () => {
     expect(classifyInput('/model strongest please', NL)).toEqual({ type: 'forwarded', text: '/model strongest please' });
   });
 
+  it('Slice 1: /model <vendor/model> is a local direct selector; slash-less and free-text stay forwarded (F04)', () => {
+    // The new local grammar — a slashed vendor/model id classifies local so
+    // the direct selector (model-pin.ts) can pin it in one step.
+    expect(classifyInput('/model opencode-cli/kimi-k3', NL)).toEqual({ type: 'local', command: 'model', args: 'opencode-cli/kimi-k3' });
+    expect(classifyInput('/model anthropic/claude-opus-4-8', NL)).toEqual({ type: 'local', command: 'model', args: 'anthropic/claude-opus-4-8' });
+    // Case is PRESERVED in args (model ids are case-sensitive) even though the
+    // command name is lowercased.
+    expect(classifyInput('/model Vendor/Model-X', NL)).toEqual({ type: 'local', command: 'model', args: 'Vendor/Model-X' });
+    // A slash-less token is NOT a vendor/model id — it stays on the
+    // provider-id/verb path or forwards, unchanged by Slice 1 (F04).
+    expect(classifyInput('/model gpt-4o', NL)).toEqual({ type: 'forwarded', text: '/model gpt-4o' });
+    // Free text (spaces) still forwards to the agent's own /model.
+    expect(classifyInput('/model the best kimi', NL)).toEqual({ type: 'forwarded', text: '/model the best kimi' });
+    // Flag OFF: even a vendor/model id forwards — byte-identical to today.
+    expect(classifyInput('/model opencode-cli/kimi-k3')).toEqual({ type: 'forwarded', text: '/model opencode-cli/kimi-k3' });
+  });
+
   it('/why is removed: forwards whether bare or arged (D11)', () => {
     expect(classifyInput('/why because', NL)).toEqual({ type: 'forwarded', text: '/why because' });
     expect(classifyInput('/why', NL)).toEqual({ type: 'forwarded', text: '/why' });
