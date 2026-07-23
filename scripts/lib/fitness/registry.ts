@@ -273,7 +273,11 @@ export const fitnessRules = [
     detect: 'mechanical',
     rings: ['guard'],
     severity: 'block',
-    implementedBy: ['guard:repo:staged', 'guard:repo:branch-diff'],
+    // Three invocation paths reach the same `internal-workstream-label` pattern in
+    // repo-hygiene-guard.ts. `release-hygiene` (scanTrackedFiles) is listed because it is
+    // the ONLY one wired into tag-release-gate.yml — omitting it hid the fact that this
+    // rule is covered on the tag path while its neighbours are not.
+    implementedBy: ['guard:repo:staged', 'guard:repo:branch-diff', 'guard:repo:release-hygiene'],
     source: ['feedback:hygiene_internal_labels', 'existing:repo-hygiene-guard'],
   },
   {
