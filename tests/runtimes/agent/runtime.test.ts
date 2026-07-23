@@ -15669,7 +15669,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(status).toBeDefined();
     // D13a copy fix: chat-scoped, last-writer-wins — "for you" mis-implies
     // per-user ownership, so the line now names the chat, not the sender.
-    expect(status).toContain('This chat is on strongest');
+    expect(status).toContain('Saved preference: strongest');
     expect(status).toContain('steers new sessions');
     // b28 r2b: the Delegation/Authority display lines were removed from this
     // surface (the invariant lives in the system prompt). D11: /why is gone —
@@ -15804,13 +15804,13 @@ describe('NL routing handlers (nlRouting flag)', () => {
     // than "none". (Pre-D13 this test asserted 'Preference: none' for B —
     // that was the old per-sender READ contract; the owner chose
     // last-writer-wins for the read side. C3's copy fix closes the "for you"
-    // nuance flagged here — the render now says "This chat is on X", which
-    // is accurate for B, a non-authoring viewer, too.)
+    // nuance flagged here — the render now labels the saved chat preference
+    // without claiming that it is necessarily the active route.)
     const { runtime, sentMessages } = makeRoutingRuntime();
     await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_A, isGroup: true, content: '/model strongest' }));
     await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_B, isGroup: true, content: '/model status', messageId: 'msg-2' }));
     const bStatus = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
-    expect(bStatus).toContain('This chat is on strongest');
+    expect(bStatus).toContain('Saved preference: strongest');
     // WRITE stays per-sender — unchanged (only the read collapsed).
     const rows = prefRows();
     expect(rows).toHaveLength(1);
@@ -16166,7 +16166,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
     const replies = allReplies(sentMessages);
     expect(replies.some((t) => t.includes('*Current route:*'))).toBe(true);
-    expect(replies.some((t) => t.includes('Preference: none'))).toBe(true);
+    expect(replies.some((t) => t.includes('Saved preference: none'))).toBe(true);
     expect(replies.some((t) => t.includes('Something went wrong'))).toBe(false);
   });
 
@@ -16419,6 +16419,48 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(status).toContain('Model: haiku-fast');
     expect(status).not.toContain('Model: haiku-fast (configured)');
     expect(status).not.toContain('claude-opus-4-8 (configured)');
+  });
+
+  it('reports the live route separately from the saved preference and effective fallback route', async () => {
+    cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'haiku-fast' }];
+    const anthropicFn = vi.fn().mockResolvedValue({
+      status: 'ok',
+      ids: ['claude-opus-4-8', 'haiku-fast'],
+    });
+    const { runtime, sentMessages } = makeRoutingRuntime({
+      model: 'claude-opus-4-8',
+      modelCatalogueAnthropicFn: anthropicFn,
+    });
+    const state = runtime as unknown as {
+      session: typeof mockSession;
+      fallbackWindow: { activeUntil: number | null; activeEntry: unknown };
+    };
+    state.fallbackWindow.activeUntil = Date.now() + 60_000;
+    state.fallbackWindow.activeEntry = { provider: 'claude-cli', model: 'haiku-fast' };
+
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'pin-primary' }));
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status', messageId: 'fallback-status' }));
+    const fallbackStatus = allReplies(sentMessages).findLast((t) => t.includes('*Current route:*'));
+    expect(fallbackStatus).toContain('Model: haiku-fast');
+    expect(fallbackStatus).toContain('Saved preference: claude-opus-4-8');
+    expect(fallbackStatus).toContain('health fallback currently decides new sessions');
+    expect(fallbackStatus).not.toContain('This chat is on claude-opus-4-8');
+
+    mockSession.getStatus.mockReturnValue({
+      active: true,
+      pid: 42,
+      sessionId: 'live-primary',
+      startedAt: new Date().toISOString(),
+      messageCount: 1,
+      lastMessageAt: new Date().toISOString(),
+    });
+    (mockSession as unknown as Record<string, unknown>).getModelRef = vi.fn(() => 'claude-opus-4-8');
+    state.session = mockSession;
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status', messageId: 'live-status' }));
+    const liveStatus = allReplies(sentMessages).findLast((t) => t.includes('*Current route:*'));
+    expect(liveStatus).toContain('Model: claude-opus-4-8 (configured)');
+    expect(liveStatus).toContain('Next session: claude-cli (haiku-fast)');
   });
 
   // ── b28 r2b: /model status drops the Delegation + Authority DISPLAY lines ──
