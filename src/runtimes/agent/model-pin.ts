@@ -11,6 +11,7 @@
  * characterization suite in tests/runtimes/agent/model-pin.test.ts.
  */
 import type { Database } from '../../core/database.ts';
+import type { AgentFallbackEntry } from '../../core/fallback-chain.ts';
 import type { IncomingMessage } from '../../core/types.ts';
 import { createChildLogger } from '../../logger.ts';
 import { GLOBAL_CONVERSATION_KEY, toConversationKey } from '../../core/conversation-key.ts';
@@ -38,6 +39,11 @@ import {
   sendModelCatalogue,
   type ModelCatalogueRenderPort,
 } from './model-catalogue-render.ts';
+import {
+  fallbackReconfirmationOutcome,
+  fallbackRouteLabel,
+  renderPinPreferenceOutcome,
+} from './owner-render-format.ts';
 
 // Same component name as AgentRuntime: the warnings below keep their existing
 // `component: 'agent-runtime'` log binding (no observable change).
@@ -78,6 +84,7 @@ export interface ModelPinPort extends ModelCatalogueRenderPort {
   };
   readonly modelCatalogueListFn: typeof listModelCatalog | undefined;
   readonly modelCatalogueAnthropicFn: typeof fetchAnthropicModelIdsWithStatus | undefined;
+  readonly effectiveFallbackEntry: AgentFallbackEntry | null;
   session: SessionManager | null;
   queue: IOutboundQueue | null;
   activeChatJid: string | null;
@@ -438,14 +445,12 @@ export function recycleLiveSession(
  * for 24h" shape is kept ONLY for a no-op (nothing to recycle); a genuine
  * switch says so, honestly distinguishing "now" from "next message".
  */
-export function renderPinOutcomeEcho(label: string, outcome: RouteRecycleOutcome): string {
-  if (outcome === 'recycled') {
-    return `_Now answering with ${label}. reply keep to make it permanent, /reset to undo._`;
-  }
-  if (outcome === 'deferred') {
-    return `_${label} is pinned — it'll answer from your next message. reply keep to make it permanent, /reset to undo._`;
-  }
-  return `_Pinned ${label} for 24h — reply keep to make it permanent, /reset to undo._`;
+export function renderPinOutcomeEcho(
+  port: ModelPinPort,
+  label: string,
+  outcome: RouteRecycleOutcome,
+): string {
+  return renderPinPreferenceOutcome(label, outcome, fallbackRouteLabel(port.effectiveFallbackEntry));
 }
 
 /**
@@ -472,9 +477,15 @@ export function echoReconfirmOutcome(
   label: string,
   alreadySetText: string,
 ): string {
+  const fallbackOutcome = fallbackReconfirmationOutcome(
+    label,
+    alreadySetText,
+    fallbackRouteLabel(port.effectiveFallbackEntry),
+  );
+  if (fallbackOutcome) return fallbackOutcome;
   const recycleOutcome = applyRouteChangeAndRecycle(port, chatJid, senderJid, perChatMapKey);
   if (recycleOutcome === 'noop') return alreadySetText;
-  return renderPinOutcomeEcho(label, recycleOutcome);
+  return renderPinOutcomeEcho(port, label, recycleOutcome);
 }
 
 /**
@@ -568,7 +579,7 @@ export async function handleModelCommand(
     // Task G: apply the switch immediately (idle) or defer it to the
     // next message (busy) — the echo below discloses which.
     const recycleOutcome = applyRouteChangeAndRecycle(port, chatJid, senderJid, perChatMapKey);
-    port.sendDirect(chatJid, renderPinOutcomeEcho(`\`${entry.providerId}\``, recycleOutcome));
+    port.sendDirect(chatJid, renderPinOutcomeEcho(port, `\`${entry.providerId}\``, recycleOutcome));
     return;
   }
   // D6/D10/D16: `/model N` / `/model N<letter>` — a named-model pin
@@ -628,7 +639,7 @@ export async function handleModelCommand(
       );
       return;
     }
-    port.sendDirect(chatJid, renderPinOutcomeEcho(entry.id, recycleOutcome));
+    port.sendDirect(chatJid, renderPinOutcomeEcho(port, entry.id, recycleOutcome));
     return;
   }
   const isIntent = sub === 'strongest' || sub === 'fastest';
@@ -686,5 +697,5 @@ export async function handleModelCommand(
     return;
   }
   const recycleOutcome = applyRouteChangeAndRecycle(port, chatJid, senderJid, perChatMapKey);
-  port.sendDirect(chatJid, renderPinOutcomeEcho(what, recycleOutcome));
+  port.sendDirect(chatJid, renderPinOutcomeEcho(port, what, recycleOutcome));
 }

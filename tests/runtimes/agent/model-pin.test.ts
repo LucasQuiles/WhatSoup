@@ -673,7 +673,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(prefRows()).toHaveLength(0);
     await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_A, isGroup: true, content: '/model status', messageId: 'msg-3' }));
     const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
-    expect(status).toContain('Preference: none');
+    expect(status).toContain('Saved preference: none');
     await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_B, isGroup: true, content: 'hello there', messageId: 'msg-4' }));
     const opts = capturedSessionManagerOptsRef.current as unknown as { provider?: string };
     expect(opts?.provider).toBe('claude-cli');
@@ -801,10 +801,96 @@ describe('NL routing handlers (nlRouting flag)', () => {
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
       const menu = allReplies(sentMessages).find((t) => t.includes('*Pick a model:*'));
       expect(menu).toBeDefined();
-      expect(menu).toContain('1. claude-cli (claude-opus-4-8) (current)');
+      expect(menu).toContain('1. claude-cli (claude-opus-4-8) (active route)');
       expect(menu).toContain('2. opencode-cli (kimi/kimi-k3)');
       expect(menu).toContain('3. opencode-cli (glm/glm-5.2)');
       expect(menu).toContain('Reply `/model N` to switch to that one.');
+    });
+
+    it('marks and acknowledges the effective fallback route instead of claiming the saved primary preference is current', async () => {
+      cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'haiku-fast' }];
+      const anthropicFn = vi.fn().mockResolvedValue({
+        status: 'ok',
+        ids: ['claude-opus-4-8', 'haiku-fast'],
+      });
+      const { runtime, sentMessages } = makeRoutingRuntime({
+        model: 'claude-opus-4-8',
+        modelCatalogueAnthropicFn: anthropicFn,
+      });
+      const state = runtime as unknown as {
+        fallbackWindow: { activeUntil: number | null; activeEntry: unknown };
+      };
+      state.fallbackWindow.activeUntil = Date.now() + 60_000;
+      state.fallbackWindow.activeEntry = { provider: 'claude-cli', model: 'haiku-fast' };
+
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      const menu = allReplies(sentMessages).find((t) => t.includes('*Pick a model:*'));
+      expect(menu).toContain('1. claude-cli (claude-opus-4-8)');
+      expect(menu).not.toContain('claude-opus-4-8) (active route)');
+      expect(menu).toContain('2. claude-cli (haiku-fast) (active route)');
+
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: '/model 1',
+        messageId: 'model-primary-during-fallback',
+      }));
+      expect(allReplies(sentMessages).join('\n')).toContain(
+        'Saved claude-opus-4-8 as this chat\'s 24h preference. Health fallback is active; new sessions still use claude-cli (haiku-fast) until recovery.',
+      );
+    });
+
+    it('reconfirms a saved model as a preference without claiming it displaced the live fallback', async () => {
+      cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'haiku-fast' }];
+      const anthropicFn = vi.fn().mockResolvedValue({
+        status: 'ok',
+        ids: ['claude-opus-4-8', 'haiku-fast'],
+      });
+      const { runtime, sentMessages } = makeRoutingRuntime({
+        model: 'claude-opus-4-8',
+        modelCatalogueAnthropicFn: anthropicFn,
+      });
+      const state = runtime as unknown as {
+        fallbackWindow: { activeUntil: number | null; activeEntry: unknown };
+      };
+      state.fallbackWindow.activeUntil = Date.now() + 60_000;
+      state.fallbackWindow.activeEntry = { provider: 'claude-cli', model: 'haiku-fast' };
+
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'pin-primary' }));
+      mockQueue.enqueueText.mockClear();
+      sentMessages.length = 0;
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'reconfirm-primary' }));
+
+      expect(allReplies(sentMessages).join('\n')).toContain(
+        'Saved preference remains claude-opus-4-8 (extended for 24h). Health fallback is active; new sessions still use claude-cli (haiku-fast) until recovery.',
+      );
+    });
+
+    it('keeps the live session marked active when fallback only controls the next session', async () => {
+      cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'haiku-fast' }];
+      mockSession.getStatus.mockReturnValue({
+        active: true,
+        pid: 42,
+        sessionId: 'live-primary',
+        startedAt: new Date().toISOString(),
+        messageCount: 1,
+        lastMessageAt: new Date().toISOString(),
+      });
+      (mockSession as unknown as Record<string, unknown>).getModelRef = vi.fn(() => 'claude-opus-4-8');
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      const state = runtime as unknown as {
+        session: typeof mockSession;
+        fallbackWindow: { activeUntil: number | null; activeEntry: unknown };
+      };
+      state.session = mockSession;
+      state.fallbackWindow.activeUntil = Date.now() + 60_000;
+      state.fallbackWindow.activeEntry = { provider: 'claude-cli', model: 'haiku-fast' };
+
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      const menu = allReplies(sentMessages).find((t) => t.includes('*Pick a model:*'));
+      expect(menu).toContain('1. claude-cli (claude-opus-4-8) (active route)');
+      expect(menu).not.toContain('haiku-fast) (active route)');
     });
 
     it('snapshots the SAME ordered (providerId, id) entries the numbers were rendered from (shared-entries invariant)', async () => {
@@ -849,7 +935,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
       await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_B, isGroup: true, content: '/model list', messageId: 'msg-2' }));
       const bMenu = allReplies(sentMessages).find((t) => t.includes('*Pick a model:*'));
       expect(bMenu).toBeDefined();
-      expect(bMenu).toContain('1. claude-cli (claude-opus-4-8) (current)');
+      expect(bMenu).toContain('1. claude-cli (claude-opus-4-8) (active route)');
       expect(bMenu).toContain('2. opencode-cli (kimi/kimi-k3)');
       expect(bMenu).toContain('3. opencode-cli (glm/glm-5.2)');
 
@@ -874,7 +960,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(config).toContain('• Fallback: codex-cli');
       const menu = allReplies(sentMessages).find((t) => t.includes('*Pick a model:*'));
       expect(menu).toBeDefined();
-      expect(menu).toContain('1. claude-cli (claude-opus-4-8) (current)');
+      expect(menu).toContain('1. claude-cli (claude-opus-4-8) (active route)');
       expect(menu).not.toContain('codex-cli');
     });
   });
@@ -937,7 +1023,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status', messageId: 'msg-3' }));
       const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
       expect(status).toBeDefined();
-      expect(status).toContain('This chat is on claude-sonnet-5');
+      expect(status).toContain('Saved preference: claude-sonnet-5');
       // Task H: the Model: line is now pin-aware — the sync hot path in
       // resolveRouteForTurn set route.model to the verified pin, distinct
       // from the configured primary (claude-opus-4-8).
@@ -1031,7 +1117,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
       // The preference DECLARATION line is a separate honesty axis (verified
       // bit only, same as the existing provider-pin behavior) — it still
       // names the pin even though it isn't the one actually serving.
-      expect(status).toContain('This chat is on exotic/model-x');
+      expect(status).toContain('Saved preference: exotic/model-x');
     });
 
     it('a verified model pin does NOT override an active health failover (source=fallback), even when validatedProvider matches the fallback provider', async () => {
@@ -1591,7 +1677,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
         messageId: 'msg-3',
       }));
       expect(allReplies(sentMessages).filter((text) => text.includes('*Current route:*')).pop())
-        .toContain('This chat is on kimi/kimi-k3');
+        .toContain('Saved preference: kimi/kimi-k3');
     });
 
     it('forwards bare keep unchanged when no live pin exists', async () => {
