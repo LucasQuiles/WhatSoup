@@ -18,6 +18,7 @@
  */
 import { spawnSync } from 'node:child_process';
 
+import { cleanGitEnv } from './lib/guard-core.ts';
 import {
   EXIT_CONTINUE,
   EXIT_INCONCLUSIVE,
@@ -27,6 +28,12 @@ import {
 } from './lib/drift-classifier.ts';
 
 const GIT_TIMEOUT_MS = 30_000;
+
+/**
+ * 64 MiB, matching `guard-core`. A large tree's `ls-tree` overflows the 1 MiB default and
+ * would surface as a spawn failure — i.e. INCONCLUSIVE — rather than a real verdict.
+ */
+const MAX_GIT_BUFFER = 64 * 1024 * 1024;
 
 interface Args {
   base?: string;
@@ -49,16 +56,38 @@ export function parseArgs(argv: readonly string[]): Args {
   return args;
 }
 
-/** Every path tracked at HEAD, or null if git could not answer. */
-export function trackedPaths(cwd: string): string[] | null {
-  const r = spawnSync('git', ['ls-tree', '-r', 'HEAD', '--name-only'], {
+/**
+ * Run a git command and return its output lines, or `null` if git could not answer.
+ *
+ * NULL, NOT `[]`. An empty array is a real result meaning "nothing changed"; `null` means
+ * "I could not look". Conflating them is exactly how an unexaminable tree gets certified,
+ * and keeping them distinct is what lets `main` route a failure into
+ * `ClassifyOptions.analysisFailed` and report INCONCLUSIVE rather than a verdict.
+ *
+ * Deliberately NOT `guard-core`'s `git()`/`gitList()`, which use `execFileSync` and THROW
+ * on non-zero exit — this module needs the failure as a value, not an exception. It does
+ * borrow that module's environment and buffer policy, which is the part worth sharing:
+ * `cleanGitEnv()` stops an ambient `GIT_DIR` (set whenever a guard runs from a git hook)
+ * resolving these commands against the wrong repository.
+ *
+ * One helper rather than two near-identical functions: the earlier pair had drifted
+ * already, with `maxBuffer` set on one call site and not the other.
+ */
+function gitLinesOrNull(args: string[], cwd: string): string[] | null {
+  const r = spawnSync('git', args, {
     cwd,
     encoding: 'utf8',
+    env: cleanGitEnv(),
     timeout: GIT_TIMEOUT_MS,
-    maxBuffer: 64 * 1024 * 1024,
+    maxBuffer: MAX_GIT_BUFFER,
   });
   if (r.error || r.status !== 0) return null;
-  return r.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+  return r.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
+}
+
+/** Every path tracked at HEAD, or null if git could not answer. */
+export function trackedPaths(cwd: string): string[] | null {
+  return gitLinesOrNull(['ls-tree', '-r', 'HEAD', '--name-only'], cwd);
 }
 
 /**
@@ -115,13 +144,7 @@ function selfCheck(cwd: string): number {
  * representation — that conflation is precisely how an unexaminable tree gets certified.
  */
 export function changedPaths(from: string, to: string, cwd: string): string[] | null {
-  const r = spawnSync('git', ['diff', '--name-only', `${from}..${to}`], {
-    cwd,
-    encoding: 'utf8',
-    timeout: GIT_TIMEOUT_MS,
-  });
-  if (r.error || r.status !== 0) return null;
-  return r.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+  return gitLinesOrNull(['diff', '--name-only', `${from}..${to}`], cwd);
 }
 
 function main(argv: readonly string[], cwd: string): number {

@@ -14,7 +14,7 @@
  *   3. An unrecognised path must force UNKNOWN. Defaulting it to DISJOINT_CODE is exactly
  *      how a new policy surface gets treated as inert.
  */
-import { execFileSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -286,24 +286,25 @@ describe('live tree — coverage is byte-derived, not imagined', () => {
    * appeared — add a rule for it, deliberately, rather than letting drift touching it
    * silently become INCONCLUSIVE.
    */
-  const trackedFiles = (): string[] =>
-    execFileSync('git', ['ls-tree', '-r', 'HEAD', '--name-only'], {
-      cwd: repoRoot,
-      encoding: 'utf8',
-      maxBuffer: 64 * 1024 * 1024,
-    })
-      .split('\n')
-      .filter(Boolean);
+  // Uses the PRODUCTION path enumerator rather than a parallel `execFileSync` of the same
+  // git command. An earlier draft re-implemented it here; two implementations of one git
+  // call in a file that already imports the real one can drift apart, and the coverage
+  // assertion below is only meaningful if it examines the same list the CI step examines.
+  // Computed once — it costs a subprocess, and three assertions share the answer.
+  const files: string[] = (() => {
+    const f = trackedPaths(repoRoot);
+    if (f === null) throw new Error('git ls-tree failed — cannot assess classifier coverage');
+    return f;
+  })();
 
   it('the scan is not vacuous — this repo really does have thousands of tracked files', () => {
     // Without this, a failed `git ls-tree` returning nothing would make the assertion below
     // pass trivially: zero files, zero unclassified, green. Same false-green shape the
     // empty-scope guards were built for.
-    expect(trackedFiles().length).toBeGreaterThan(1000);
+    expect(files.length).toBeGreaterThan(1000);
   });
 
   it('every tracked file on the live tree classifies — no path falls through to UNKNOWN', () => {
-    const files = trackedFiles();
     const verdict = classifyDrift(files);
     expect(
       verdict.unclassified,
@@ -322,7 +323,7 @@ describe('live tree — coverage is byte-derived, not imagined', () => {
     // 100% coverage while making every verdict POLICY_OR_WORKFLOW. Coverage alone cannot
     // detect that; distribution can.
     const counts = new Map<string, number>();
-    for (const c of classifyDrift(trackedFiles()).classifications) {
+    for (const c of classifyDrift(files).classifications) {
       counts.set(c.drift, (counts.get(c.drift) ?? 0) + 1);
     }
     expect(counts.size, `only ${counts.size} distinct class(es) used`).toBeGreaterThanOrEqual(5);
@@ -353,6 +354,26 @@ describe('--self-check — what the CI step actually runs', () => {
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
+  });
+
+  it('survives a poisoned GIT_DIR/GIT_WORK_TREE environment', () => {
+    // Guards run from git hooks, which is exactly where GIT_DIR and GIT_WORK_TREE are set.
+    // Without guard-core's cleanGitEnv(), git resolves against the poisoned repo, ls-tree
+    // fails, and the step reports INCONCLUSIVE — fail-closed, but a spurious CI failure in
+    // the one context guards are most often invoked from. Verified by removing cleanGitEnv:
+    // the self-check then prints "could not enumerate tracked files".
+    const r = spawnSync(
+      process.execPath,
+      ['--disable-warning=ExperimentalWarning', '--experimental-strip-types',
+       resolve(repoRoot, 'scripts/drift-classify.ts'), '--self-check'],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        env: { ...process.env, GIT_DIR: '/poison/nope.git', GIT_WORK_TREE: '/poison' },
+      },
+    );
+    expect(r.status, `poisoned env produced:\n${r.stdout}${r.stderr}`).toBe(0);
+    expect(`${r.stdout}${r.stderr}`).not.toMatch(/could not enumerate/);
   });
 
   it('trackedPaths returns null on a non-repo rather than an empty list', () => {
