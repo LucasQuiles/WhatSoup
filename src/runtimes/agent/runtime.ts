@@ -2577,6 +2577,7 @@ export class AgentRuntime implements Runtime {
       get perChatExecActorQueue() { return runtime.perChatExecActorQueue; },
       get perChatSocketResources() { return runtime.perChatSocketResources; },
       get operationTrackers() { return runtime.operationTrackers; },
+      get operationTrackerConfig() { return config.operationTracker; },
       resolvePerChatMapKey: (chatJid) => runtime.resolvePerChatMapKey(chatJid),
       resolveExecutingActor: (chatJid) => runtime.resolveExecutingActor(chatJid),
       derivePerChatSocketPath: (chatJid) => runtime.derivePerChatSocketPath(chatJid),

@@ -16,7 +16,6 @@ import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { createChildLogger } from '../../logger.ts';
-import { config } from '../../config.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import type { Messenger } from '../../core/types.ts';
 import type { AgentFallbackEntry } from '../../core/fallback-chain.ts';
@@ -27,6 +26,18 @@ import { writeMcpConfigToPath } from './providers/mcp-bridge.ts';
 import type { SessionManager } from './session.ts';
 import type { IOutboundQueue } from './outbound-queue.ts';
 import { OperationTracker, type ProgressEvent } from './operation-tracker.ts';
+
+/**
+ * Structurally derived from OperationTracker's own constructor rather than
+ * imported from src/config.ts directly — a value/type import of config.ts
+ * here would be a NEW runtime-code-imports-composition-code ring-boundary
+ * violation (guard:ring-boundary-ratchet counts import statements
+ * regardless of `import type`; see eslint-rules/ring-boundaries.mjs). This
+ * derivation is exactly the config.ts-declared OperationTrackerConfig type
+ * with zero extra coupling — runtime.ts already carries the grandfathered
+ * config.ts import and threads the concrete value through the port.
+ */
+type OperationTrackerConfig = ConstructorParameters<typeof OperationTracker>[1];
 
 // Same component name as AgentRuntime: the log lines below keep their
 // existing `component: 'agent-runtime'` binding (no observable change).
@@ -58,6 +69,8 @@ export interface ChatTransportPort {
     { socketServer: WhatSoupSocketServer; socketPath: string; cfgPath: string }
   >;
   readonly operationTrackers: Map<string, OperationTracker>;
+  /** Threaded from runtime.ts's own `config` import (src/config.ts) rather than importing `config` here — this module stays out of the composition ring, matching the model-pin.ts precedent (createModelPinHost's `nlRoutingTiers: config.nlRoutingTiers`). */
+  readonly operationTrackerConfig: OperationTrackerConfig;
   resolvePerChatMapKey(chatJid: string): string;
   /**
    * Sibling-call delegates. Each routes back through the runtime's own
@@ -233,10 +246,10 @@ export function createOperationTracker(
   session: SessionManager,
   resolveQueue: () => IOutboundQueue | null | undefined,
 ): OperationTracker | null {
-  if (!config.operationTracker?.enabled) return null;
+  if (!port.operationTrackerConfig?.enabled) return null;
   return new OperationTracker(
     port.instanceName,
-    config.operationTracker,
+    port.operationTrackerConfig,
     {
       onProgress: (event: ProgressEvent) => {
         const q = resolveQueue();
