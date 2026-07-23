@@ -48,7 +48,20 @@ non-avatar elements (except `agent-dream`, which is the agent-mode channel, not 
 Rule: a surface consumes exactly one namespace; cross-register consumption is a lint
 error (L4 broad enforcement).
 
-## 5. Acceptance gate
+## 5. Journey surfaces geometry (`--journey-*`, T5 b-10)
+
+Component-register geometry for the journey surfaces (splash + hatch flow),
+all traced to `mockups/splash.html` and `mockups/hatch.html`: 860px shell,
+crumb + step rail, journey card (`--r-journey-lg`), kind/channel/agent/link
+step anatomies, the ceremony (120px lockup, radial one-shot glow per 13-§2,
+72px avatar, eggshell frame, beats, first-message bar), and the splash
+(hero, proof cards, watermark canvases). **Radii consume the JOURNEY register
+exclusively** (the bead acceptance item). Breakpoints: props stack ≤700px,
+card tightens ≤640px. Spec SSOT: `tokens-v3.md` §12. Same pattern as
+b-02…b-09: raw mockup dimensions land in the token block once; `journey.css`
+consumes `var()` only.
+
+## 6. Acceptance gate
 
 - [ ] No `channel-*` token carries a hue (computed check).
 - [ ] `agent-hue-*` used only on avatar fills + nowhere else (consumer audit).
