@@ -57,7 +57,6 @@ export interface DriftClassSpec {
   invalidates: readonly SensitivityTag[];
   why: string;
 }
-
 const ALL_BASE_DERIVED_SENSITIVITY = [
   'base-sensitive',
   'merge-sensitive',

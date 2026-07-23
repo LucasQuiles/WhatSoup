@@ -428,6 +428,8 @@ describe('report-only outgoing ref policy CLI', () => {
     for (const args of [
       ['--unknown'],
       ['--json', '--json'],
+      ['--remote-name'],
+      ['--remote-name', '--json'],
       ['--policy', 'candidate.json'],
       ['--allow-delete', 'refs/heads/main'],
     ]) {

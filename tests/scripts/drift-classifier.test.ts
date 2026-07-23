@@ -48,7 +48,6 @@ afterEach(() => {
   vi.restoreAllMocks();
   for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
-
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, {
     cwd,

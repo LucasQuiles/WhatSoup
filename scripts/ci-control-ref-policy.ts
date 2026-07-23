@@ -4,6 +4,7 @@ import { readFileSync, readSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 import { cleanGitEnv } from '../src/lib/git-env.ts';
+import { takeValue } from './lib/cli-args.ts';
 import { digestControlManifest, loadControlManifest } from './lib/ci-control/manifest.ts';
 import {
   MAX_PRE_PUSH_INPUT_BYTES,
@@ -56,7 +57,7 @@ function boundedStdin(): Uint8Array {
   return Buffer.concat(chunks, total);
 }
 
-function parseArgs(args: readonly string[]): ParsedArgs {
+function parseRefPolicyArgs(args: readonly string[]): ParsedArgs {
   const parsed: ParsedArgs = { help: false, json: false, remoteName: null, remoteLocation: null };
   const seen = new Set<string>();
   for (let index = 0; index < args.length; index += 1) {
@@ -68,9 +69,14 @@ function parseArgs(args: readonly string[]): ParsedArgs {
     if (option === '--help') parsed.help = true;
     else if (option === '--json') parsed.json = true;
     else {
-      const value = args[index + 1];
-      if (value === undefined || value.startsWith('--')) throw new RefPolicyError('ci.refs.input-malformed');
-      index += 1;
+      let value: string;
+      try {
+        const taken = takeValue(args, index, option);
+        value = taken.value;
+        index = taken.index;
+      } catch {
+        throw new RefPolicyError('ci.refs.input-malformed');
+      }
       if (option === '--remote-name') parsed.remoteName = value;
       else parsed.remoteLocation = value;
     }
@@ -192,7 +198,7 @@ export function runRefPolicyCli(
   runtime: RefPolicyCliRuntime = defaultRuntime,
 ): 0 | 1 | 2 {
   try {
-    const options = parseArgs(args);
+    const options = parseRefPolicyArgs(args);
     if (options.help) {
       runtime.stdout('Usage: npm --silent run ci:ref-policy -- --remote-name <name> --remote-location <location> --json\n');
       return 0;

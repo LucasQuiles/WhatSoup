@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { takeValue } from './lib/cli-args.ts';
 import {
   readControlManifestAtRevision,
 } from './lib/ci-control/classifier.ts';
@@ -43,6 +44,7 @@ export const DRIFT_ADAPTER_SOURCE_PATHS = [
   'scripts/drift-classify.ts',
   'scripts/lib/drift-classifier.ts',
   'scripts/lib/ci-control/classification-admission.ts',
+  'scripts/lib/cli-args.ts',
 ] as const;
 
 /** Native report-only evidence; a protected adapter must create ci-control-result-v1. */
@@ -87,13 +89,15 @@ interface Args {
   error?: string;
 }
 
+const VALUE_FLAGS = new Set(['--base', '--observed', '--candidate', '--manifest-digest']);
+const BOOLEAN_FLAGS = new Set(['--json', '--self-check', '--help']);
+
 export function parseArgs(argv: readonly string[]): Args {
   const args: Args = { json: argv.includes('--json'), selfCheck: false, help: false };
   const seen = new Set<string>();
-  const valued = new Set(['--base', '--observed', '--candidate', '--manifest-digest']);
   for (let index = 0; index < argv.length; index += 1) {
     const option = argv[index]!;
-    if (!valued.has(option) && !['--json', '--self-check', '--help'].includes(option)) {
+    if (!VALUE_FLAGS.has(option) && !BOOLEAN_FLAGS.has(option)) {
       return { ...args, error: 'ci.input.option-unknown' };
     }
     if (seen.has(option)) return { ...args, error: 'ci.input.duplicate-option' };
@@ -102,13 +106,18 @@ export function parseArgs(argv: readonly string[]): Args {
     else if (option === '--self-check') args.selfCheck = true;
     else if (option === '--help') args.help = true;
     else {
-      const value = argv[index + 1];
-      if (value === undefined || value.startsWith('--')) return { ...args, error: 'ci.input.option-value-missing' };
+      let value: string;
+      try {
+        const taken = takeValue(argv, index, option);
+        value = taken.value;
+        index = taken.index;
+      } catch {
+        return { ...args, error: 'ci.input.option-value-missing' };
+      }
       if (option === '--base') args.base = value;
       else if (option === '--observed') args.observed = value;
       else if (option === '--candidate') args.candidate = value;
       else args.manifestDigest = value;
-      index += 1;
     }
   }
   if (args.help && argv.length !== 1) return { ...args, error: 'ci.input.option-conflict' };
