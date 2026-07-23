@@ -64,6 +64,8 @@ interface LiveWiringRuntimeState extends RuntimeState {
     scanOnce(): Promise<{
       scanned: number;
       claimed: number;
+      completed: number;
+      requeued: number;
       skippedUnsupportedScope: number;
       skippedNotDispatchable: number;
     }>;
@@ -397,41 +399,38 @@ describe('AgentRuntime.dispatchTurnRecoveryReplay — live wiring (PRESTAGE-T4 P
 
     // THE QUESTION under test: does reclaiming J re-invoke session.sendTurn
     // -- asking the agent to reprocess/resend content a DIFFERENT job (J2)
-    // already genuinely delivered -- before this fix's proof-check ever
-    // gets a chance to run (that check only runs AFTER processPerChatTurn
-    // resolves, i.e. after sendTurn has already been called)?
+    // already genuinely delivered? verifyProvenBeforeDelivered's PRE-check
+    // (turn-recovery-dispatch.ts) is supposed to catch exactly this: at
+    // reclaim time the shared source is ALREADY proven (J2's completion set
+    // processing_status='complete'; J's own original delivery has been
+    // 'quarantined' since creation), so dispatchReplay should never even be
+    // called -- no fresh completion is registered, session.sendTurn is
+    // never invoked, and scan2 should settle quickly on its own.
     await vi.waitFor(() => {
       expect(state.perChatRuntimeTurnCompletions.has(mapKey) || session.sendTurn.mock.calls.length > 1).toBe(true);
-    }, { timeout: 2000 }).catch(() => {});
+    }, { timeout: 500 }).catch(() => {});
     if (state.perChatRuntimeTurnCompletions.has(mapKey)) {
       state.perChatRuntimeTurnCompletions.get(mapKey)!.resolve();
     }
-    await scan2;
+    const result2 = await scan2;
 
     // OBSERVED (boterr-lead's required proof, run for real -- not predicted):
-    // session.sendTurn IS called a second time here. Once J2 completes and
-    // is no longer outstanding, hasOutstandingTurnRecoveryForScope(...,
-    // {excludeJobId: J}) admits J's reclaim exactly as it should (nothing
-    // else blocks it), and beginPerChatRuntimeTurn/sendTurnPerChat dispatch
-    // a fresh turn to the session BEFORE this fix's verifyProvenBeforeDelivered
-    // check ever runs -- that check only inspects the OUTCOME of
-    // processPerChatTurn, which is already too late to prevent the runtime
-    // from asking the agent to reprocess/resend content J2 already
-    // delivered. Neither existing pre-claim guard catches this:
-    // getTurnRecoveryOriginalDeliveryStatus checks J's OWN original
-    // delivery (already 'quarantined' from creation, unrelated to J2's
-    // completion), and excludeJobId's admission check is scoped to "any
-    // OTHER outstanding job", not "has this job's own source since been
-    // delivered by whatever superseded it".
-    //
-    // This is the KNOWN, OPEN residual boterr-lead's ruling anticipated --
-    // reported, not fixed here (their explicit instruction: STOP and
-    // report, they rule scope on the follow-up guard). Asserting the
-    // CURRENT observed value keeps this test green and the finding visible,
-    // rather than committing a permanently-red test or silently
-    // implementing a fix that wasn't ruled. Whoever picks up the follow-up
-    // guard: flip this back to toHaveBeenCalledTimes(1) as the acceptance
-    // check once it lands.
-    expect(session.sendTurn).toHaveBeenCalledTimes(2);
+    // the pre-check catches it. session.sendTurn is called EXACTLY ONCE
+    // total -- J's round-2 reclaim never reaches processPerChatTurn at all.
+    // The prior (now-fixed) gap: neither existing pre-claim guard catches
+    // this case -- getTurnRecoveryOriginalDeliveryStatus checks J's OWN
+    // original delivery (already 'quarantined' from creation, unrelated to
+    // J2's completion), and excludeJobId's admission check is scoped to
+    // "any OTHER outstanding job", not "has this job's own source since
+    // been delivered by whatever superseded it". verifyProvenBeforeDelivered's
+    // pre-check closes that gap by reusing the SAME store proof
+    // completeTurnRecoveryJob demands, checked BEFORE dispatch instead of
+    // only after.
+    expect(session.sendTurn).toHaveBeenCalledTimes(1);
+    expect(result2.claimed).toBe(1);
+    expect(result2.completed).toBe(1);
+
+    const job = durability.getTurnRecoveryJob(jobId)!;
+    expect(job.state).toBe('completed');
   });
 });
