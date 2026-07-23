@@ -34,6 +34,40 @@ to differ between a source tree and a running release. Examples include
 `node_modules/**`, logs, SQLite databases, auth directories, local artifacts,
 and the release manifest itself.
 
+## Restart-Safety Enforcement (preflight gate)
+
+`deploy/preflight-check.sh` is the restart-safety gate the launch wrapper
+(`deploy/whatsoup`) runs before every restart. For a non-git release export
+(the deployed shape a release-root directory takes — see Boundaries above), it
+now treats the manifest as a hard release-pipeline invariant, not an advisory
+file:
+
+1. **Missing** — `.whatsoup-release-manifest.json` does not exist at the
+   release root. Refuses to start (exit `3`), reporting
+   `release export lacks .whatsoup-release-manifest.json`.
+2. **Malformed** — the file exists but is not valid JSON (truncated, corrupted,
+   binary). Refuses to start (exit `3`), reporting `release manifest is
+   malformed` with an `invalid-json` reason.
+3. **Schema-invalid** — the file is valid JSON but does not satisfy the
+   manifest schema (missing `schemaVersion`/`source`/`release`/`rollback`).
+   Refuses to start (exit `3`), reporting `release manifest is malformed` with
+   an `invalid-schema` reason.
+4. **Valid** — the manifest exists, parses, and satisfies the schema. Preflight
+   proceeds (`PREFLIGHT-OK: release manifest present and schema-valid`); this
+   does **not** run a full drift comparison against the release's files (see
+   Drift Detection below) — it only proves the manifest itself is trustworthy
+   input for one.
+
+The validation reuses `parseReleaseSnapshotManifest` from
+`scripts/release-snapshot-plan.ts` (`--validate-manifest <path>`) — the same
+parser Drift Detection uses — so this gate and drift detection never disagree
+about what counts as a valid manifest. This closes the gap behind the
+2026-07-16 incident: `WhatSoup-release-ee35101f` shipped to multiple hosts
+without a manifest and nothing on the restart path caught it before every host
+flagged permanent release-drift. Backfilling or repairing a manifest on an
+already-deployed release is a live host mutation and needs separate approval;
+this gate only decides whether a restart of the tree AS FOUND is safe.
+
 ## Dry-Run Planning
 
 Generate a deterministic plan before a re-cut:
