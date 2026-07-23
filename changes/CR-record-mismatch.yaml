@@ -1,9 +1,0 @@
-# Defect fixture: the record's declared id does NOT match its filename (changes/CR-record-mismatch.yaml).
-# A commit whose Change-Record trailer points at CR-record-mismatch resolves this file but the
-# internal id disagrees -> evidence.trailer.record-mismatch (BLOCK). The record is present and
-# readable, so this is a provable mismatch, not missing/unreadable evidence.
-id: CR-some-other-record
-intent: feature
-declaredRisk: standard
-components:
-  - scripts/ci-change-record

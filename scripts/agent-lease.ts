@@ -722,7 +722,7 @@ function planAcquire(options: AcquireOptions): AcquirePlan | LeaseFailure {
       testedMergeOid: null,
     },
     bindings: computeBindings(facts, options.planPath),
-    allowedPaths: options.allowedPaths ?? [],
+    allowedPaths: options.allowedPaths ?? ['.'],
     createdAt: timestamp,
     heartbeatAt: timestamp,
     expiresAt: new Date(now.getTime() + ttlSeconds * 1000).toISOString(),
@@ -1300,7 +1300,7 @@ export function takeoverLease(options: TakeoverOptions): LeaseResult {
       testedMergeOid: null,
     },
     bindings: computeBindings(facts, options.planPath),
-    allowedPaths: options.allowedPaths ?? [],
+    allowedPaths: options.allowedPaths ?? previous.allowedPaths,
     createdAt: now.toISOString(),
     heartbeatAt: now.toISOString(),
     expiresAt: new Date(now.getTime() + ttlSeconds * 1000).toISOString(),
@@ -1335,7 +1335,7 @@ Options:
   --session <id>         Session id of the writer
   --tool <id>            Tool identity of the writer
   --mode <write|read>    Lease mode (default: write)
-  --allow <path>         Allowed path (repeatable; omitted means deny all paths)
+  --allow <path>         Allowed path (repeatable; default: whole repository)
   --expect-branch <b>    Refuse unless the worktree is on this branch
   --expect-head <oid>    Refuse unless HEAD is this OID
   --base-oid <oid>       Immutable task base OID (default: current HEAD)

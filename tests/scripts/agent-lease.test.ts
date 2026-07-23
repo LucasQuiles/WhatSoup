@@ -666,16 +666,16 @@ describe('agent-lease takeover', () => {
     expect(live.record.leaseId).toBe(result.record.leaseId);
   });
 
-  it('defaults omitted takeover allowedPaths to deny-all instead of inheriting a broad predecessor scope', () => {
+  it('preserves the predecessor scope when takeover allowedPaths are omitted', () => {
     const repo = initRepo();
-    makeAbandonable(repo, acquireOk(repo, 'session-a', { allowedPaths: ['.'] }));
+    makeAbandonable(repo, acquireOk(repo, 'session-a', { allowedPaths: ['src'] }));
 
     const result = takeoverLease({ cwd: repo, taskId: 'task-2', sessionId: 'session-b', toolIdentity: 'vitest' });
     expect(result.kind).toBe('ok');
     if (result.kind !== 'ok') throw new Error(`${result.reason}: ${result.message}`);
 
-    expect(result.record.allowedPaths).toEqual([]);
-    expect(checkAllowedPaths(result.record, ['src/core/db.ts'])).toEqual(['src/core/db.ts']);
+    expect(result.record.allowedPaths).toEqual(['src']);
+    expect(checkAllowedPaths(result.record, ['src/core/db.ts', 'docs/runbook.md'])).toEqual(['docs/runbook.md']);
   });
 
   it('preserves explicit whole-repository takeover scope for compatibility', () => {
@@ -855,11 +855,20 @@ describe('agent-lease allowedPaths', () => {
     expect(checkAllowedPaths(record, ['src/core/db.ts'])).toEqual(['src/core/db.ts']);
   });
 
-  it('defaults omitted allowedPaths to deny-all rather than the whole repository', () => {
+  it('preserves the established whole-repository default when allowedPaths are omitted', () => {
     const repo = initRepo();
     const record = acquireOk(repo, 'session-a');
-    expect(record.allowedPaths).toEqual([]);
-    expect(checkAllowedPaths(record, ['src/core/db.ts'])).toEqual(['src/core/db.ts']);
+    expect(record.allowedPaths).toEqual(['.']);
+    expect(checkAllowedPaths(record, ['src/core/db.ts'])).toEqual([]);
+  });
+
+  it('preserves the whole-repository default through the public CLI', () => {
+    const repo = initRepo();
+    const cli = runCli(repo, ['acquire', '--task', 't', '--session', 's', '--tool', 'vitest']);
+    expect(cli.code).toBe(0);
+    const parsed = parseLeaseRecord(readLeaseRaw(repo));
+    if (!parsed.valid) throw new Error(parsed.problem);
+    expect(parsed.record.allowedPaths).toEqual(['.']);
   });
 
   it('treats "." as a whole-repository allowlist', () => {

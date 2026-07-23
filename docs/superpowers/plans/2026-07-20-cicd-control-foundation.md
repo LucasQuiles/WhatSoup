@@ -25,11 +25,13 @@
 `5b682e90c643886603a5d11c863a69c1f8d91459`; and CP-F4a/F4b/F4c0 through the
 finite-clock and canonical-decision-owner precursors at `838aced01`, `f0a23fa36`,
 `24d33f302`, `3e4f6aa7b`, `518d2af78`, `58e480af6`, `5fc2d34f4`, and
-`6e100ba75`. The additive change-record leaf is preserved locally at
+`6e100ba75`. The additive change-record leaf is preserved in history at
 `72f86cc145c374cbf1aefd62e482de276d08f872`, but it is quarantined and unpromoted:
 independent review proved missing exact source/policy/tool/precondition/attempt bindings,
 two trailer-validation bypasses, raw author-controlled output, and incomplete CLI/limit
-tests. Its attempted push did not update the remote branch; the masked pipeline status is
+tests. The landing repair removes that leaf, its synthetic production records, schema,
+tests, and reason rows from the shippable tree; CR-P0.1 remains a future admitted bead.
+Its attempted push did not update the remote branch; the masked pipeline status is
 discarded, and the remote remained `9fc8a640845d581025b6e7997c0de70b55478a1e` at the
 2026-07-22 readback. CP-WA1, the P0.1 repair bead below, active H1d cutover,
 CP-F4c1/c2/c3, and CP-F5 remain incomplete.
@@ -4583,6 +4585,50 @@ evaluation, portability, artifacts, and deployment also remain explicitly incomp
 Neither this task nor a green regression bundle may advertise or authorize those
 capabilities.
 
+#### Owner-approved bootstrap landing packet (2026-07-22)
+
+The owner separately authorized checking, verifying, validating, landing, and shipping the
+current source-only control-plane foundation. That authorization does not mark Task 7 or
+any incomplete control complete. It admits one bootstrap publication path solely to place
+reviewed, quarantined/report-only source and planning artifacts behind an ordinary pull
+request. Packet entry is bound to topic `3983420c453c8b0b0312fb6236ddaa81f53954b9`,
+observed `origin/main` `679b21daa524dcd7db8bf6876cab36ec05f852eb`, and reconciled
+tree `531df34bb4e460e1c7a5a70b4d63b1c984aa8947`; the repair commit and final remote
+observation replace those candidate bindings rather than inheriting their evidence. The
+packet requires each condition at its named pre-push, post-push, pre-merge, or post-merge
+boundary:
+
+1. remove the quarantined `72f86cc` change-record leaf from the candidate tree rather than
+   publishing a known-invalid control;
+2. restore the published `agent:lease` omitted-scope compatibility while keeping that
+   command explicitly experimental and non-authoritative;
+3. describe `ci:classify` as caller-bound report-only evidence, never protected-policy or
+   aggregate authorization;
+4. preserve one writer, the immutable candidate/base/remote identities, the exact admitted
+   patch, and all stale-evidence invalidations in the integration lease;
+5. obtain independent exact-source review and terminal pinned-runtime focused, integration,
+   test-integrity, publication, existing `verify:push:branch` branch-gate, and existing
+   `verify:release` source-readiness evidence from committed bytes, retaining both commands'
+   declared limitations and making no artifact-assurance claim;
+6. observe `origin/main` again immediately before push, reconcile relevant drift without
+   rebasing shared history, and rerun the invalidated dependency closure;
+7. immediately before push, prove the clean `HEAD` and topic ref both equal the final
+   candidate OID; use the SSH remote and that full immutable 40-hex OID as the source
+   refspec, permit no force update, allow the current repository-owned pre-push hook to run
+   its legacy ambient-HEAD branch gate without crediting it as exact-ref or H1d evidence,
+   then require terminal remote readback equal to the full pushed OID;
+8. land only through an ordinary pull request after the repository's required checks and
+   independent approval pass, then read back the merged `main` OID and run the declared
+   post-merge validation;
+9. make no hosted-settings, credential, artifact-publication, deployment, or required-check
+   mutation, and do not close CP-WA1, active H1d, CP-F4, CP-TR1, CP-F5, workflow,
+   portability, artifact, or deployment work.
+
+Any source, plan, policy, toolchain, remote, hook, check, approval, or process-identity
+drift invalidates this one-off packet. The normal Task 7 remote-write stop remains the
+default for later beads; this packet is not reusable authority and cannot be cited as
+evidence that the planned enforcement system is active.
+
 **Historical source-split checkpoint (22 paths, committed at `626db87d…`; do not
 restage in this follow-up):**
 
@@ -4685,7 +4731,6 @@ PATH=/opt/homebrew/opt/python@3.12/libexec/bin:/usr/bin:/bin:/usr/sbin:/sbin:/op
   tests/scripts/ci-control-attempt.test.ts \
   tests/scripts/ci-control-git-input.test.ts \
   tests/scripts/ci-control-git-object-input.test.ts \
-  tests/scripts/ci-change-record.test.ts \
   tests/scripts/check-coverage-thresholds.test.ts \
   tests/scripts/ci-control-classifier.test.ts \
   tests/scripts/ci-control-classification-admission.test.ts \
@@ -4726,9 +4771,10 @@ while still admitting the exact GNU timeout executable required by boundary-run 
 Record both observed tool identities in the precondition receipt; do not reinterpret
 either bootstrap failure as a product defect.
 
-Expected: all 31 listed files and 970 tests execute and pass without retries or filters that
-mask mandatory work; both typechecks pass. Explicitly compare requested and executed file
-sets so a test runner that silently ignores nonexistent filters cannot satisfy this step.
+Expected: all 30 listed files execute; 958 tests pass and the one declared
+environment-specific test remains explicitly skipped, with no retries or filters that mask
+mandatory work; both typechecks pass. Explicitly compare requested and executed file sets
+so a test runner that silently ignores nonexistent filters cannot satisfy this step.
 
 - [ ] **Step 1a: Revalidate and admit the existing workflow/portability plan and CP-GL1 ordering**
 
@@ -4866,7 +4912,6 @@ PATH=/opt/homebrew/opt/python@3.12/libexec/bin:/usr/bin:/bin:/usr/sbin:/sbin:/op
   tests/scripts/ci-control-attempt.test.ts \
   tests/scripts/ci-control-git-input.test.ts \
   tests/scripts/ci-control-git-object-input.test.ts \
-  tests/scripts/ci-change-record.test.ts \
   tests/scripts/check-coverage-thresholds.test.ts \
   tests/scripts/ci-control-classifier.test.ts \
   tests/scripts/ci-control-classification-admission.test.ts \
@@ -4919,7 +4964,8 @@ Do not reuse the precommit suite or coverage result: the reconciliation commit c
 invalidated it.
 
 Expected: clean worktree/index, the exact admitted reconciliation set, every post-commit
-guard, all 31 focused files/970 tests, the present control-precursor regression bundle, and
+guard, all 30 focused files with 958 passing and one declared environment-specific skip,
+the present control-precursor regression bundle, and
 unfiltered full coverage pass from committed bytes. Revalidate HEAD and `origin/main`; any
 drift invalidates these bootstrap results. This closes only the three bounded repairs named
 at Task 7 entry and records current planning state. CP-F2f, CP-WA1, active H1d, CP-F4,

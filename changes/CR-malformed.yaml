@@ -1,4 +1,0 @@
-# Defect fixture: present and readable, but not a valid YAML mapping (a bare scalar).
-# A present-but-unparseable record is provably not a valid record -> evidence.trailer.record-mismatch
-# (BLOCK), reserved distinct from INCONCLUSIVE (which is only for undeterminable/unreadable evidence).
-just a bare scalar, not a mapping
