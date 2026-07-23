@@ -135,3 +135,67 @@ export function formatFallbackRecoveryReceiptEvidence(receipt: FallbackRecoveryR
     `probe_attempts=${receipt.probeAttemptsAtTransition}`,
   ].join(' ');
 }
+
+export interface FallbackRecoveryProbeContext {
+  instanceName: string;
+  primaryProvider: string;
+  primaryModel: string | null;
+  fallbackProvider: string;
+  fallbackModel: string | null;
+  probeAttemptsAtTransition: number;
+  maxEvidenceAgeMs: number;
+}
+
+/**
+ * Runs `probe` once and evaluates the transaction against its result — the
+ * shared core behind runtime.ts's revert-timer and standing-probe paths, so
+ * neither duplicates evidence capture. `probe` receives an `onEvidence`
+ * callback (never a shared field: concurrent callers on the same instance,
+ * e.g. the diagnostic bundle, must not race the read) and resolves to the
+ * collapsed boolean; a caller whose probe never invokes the callback (a
+ * bare-boolean test stub) gets a synthesized evidence sample instead.
+ */
+export async function resolveFallbackRecoveryDecision(
+  probe: (onEvidence: (evidence: FallbackRecoveryEvidence) => void) => Promise<boolean>,
+  ctx: FallbackRecoveryProbeContext,
+  onProbeError: (err: unknown) => void,
+): Promise<FallbackRecoveryDecision> {
+  let evidence: FallbackRecoveryEvidence | null = null;
+  // Promise.resolve().then(...) — not a direct probe(...).catch(...) — so a
+  // test stub that replaces the probe with a plain synchronous function
+  // (returning a raw boolean, not a Promise) still normalizes safely instead
+  // of throwing on a missing .catch.
+  const recovered = await Promise.resolve()
+    .then(() => probe((e) => { evidence = e; }))
+    .catch((err) => {
+      onProbeError(err);
+      return false;
+    });
+  const resolvedEvidence: FallbackRecoveryEvidence = evidence ?? {
+    status: recovered ? 'usable' : 'unknown',
+    provider: ctx.primaryProvider,
+    model: ctx.primaryModel,
+    checkedAt: Date.now(),
+  };
+  return evaluateFallbackRecoveryTransaction(resolvedEvidence, { ...ctx, now: Date.now() });
+}
+
+export interface StallAlertPlan {
+  emit: boolean;
+  ceiling: boolean;
+}
+
+/**
+ * DUR-02 bounded escalation: fire at T, 2T, 3T ... up to `ceilingMultiple * T`
+ * (marking the ceiling hit distinctly), then stop — repeating an
+ * indistinguishable alert forever past a known, indefinite stall is exactly
+ * the noise this exists to prevent. The window keeps extending regardless.
+ */
+export function stallAlertPlan(attempts: number, threshold: number, ceilingMultiple: number): StallAlertPlan {
+  const ceilingAttempts = threshold * ceilingMultiple;
+  const isThresholdMultiple = attempts === threshold || (attempts > threshold && (attempts - threshold) % threshold === 0);
+  return {
+    emit: isThresholdMultiple && attempts <= ceilingAttempts,
+    ceiling: attempts === ceilingAttempts,
+  };
+}

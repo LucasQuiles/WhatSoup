@@ -231,8 +231,10 @@ import {
 import { createPrimaryModelProbeAdapters } from './providers/primary-model-usability-adapters.ts';
 import { ensureClaudeFileStoreCredential } from './providers/claude-filestore-heal.ts';
 import {
-  evaluateFallbackRecoveryTransaction,
   formatFallbackRecoveryReceiptEvidence,
+  resolveFallbackRecoveryDecision,
+  stallAlertPlan,
+  type FallbackRecoveryDecision,
   type FallbackRecoveryEvidence,
   type FallbackRecoveryReceipt,
 } from './fallback-recovery-transaction.ts';
@@ -332,24 +334,13 @@ const PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD = (() => {
   if (!Number.isFinite(raw) || raw <= 0) return 12;
   return Math.min(Math.max(Math.trunc(raw), 3), 100);
 })();
-// DUR-02 bounded escalation: beyond T * this multiple consecutive failed
-// extension probes, the stall is a known, indefinite condition — re-alerting
-// at every further multiple of T would repeat an indistinguishable alert
-// forever. The alert AT the ceiling multiple carries `ceiling=true` (a state
-// change, not a repeat); no further re-alerts fire for the rest of the
-// episode. A successful probe still resets the episode — and the ceiling —
-// exactly once, same as the counter itself. Default 10 keeps every existing
-// T/2T/3T re-alert scenario (well below 10T) unaffected.
+// DUR-02: past T * this multiple, re-alerting every T would repeat forever — the ceiling alert carries `ceiling=true` and no more fire this episode (window still extends).
 const PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE = (() => {
   const raw = Number(process.env['WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE']);
   if (!Number.isFinite(raw) || raw <= 0) return 10;
   return Math.min(Math.max(Math.trunc(raw), 1), 1000);
 })();
-// DUR-02 canary freshness bound: the probe's own CLI deadline is 15 s
-// (CLI_MODEL_PROBE_TIMEOUT_MS in primary-model-usability-adapters.ts) and
-// FallbackRecoveryTransaction consumes the result synchronously in the same
-// promise chain, so 60 s is generous headroom against event-loop scheduling
-// delay while still rejecting a genuinely stale/replayed evidence sample.
+// DUR-02 canary freshness bound, generous over the probe's 15s CLI deadline.
 const FALLBACK_RECOVERY_EVIDENCE_MAX_AGE_MS = 60_000;
 // Opt-in: on an arming provider failure (via the registry dispatcher), run the
 // best-effort diagnostic bundle and emit its findings to the alert outbox.
@@ -10130,25 +10121,11 @@ export class AgentRuntime implements Runtime {
 
   /**
    * Clear the fallback window + timer, reverting new sessions to the primary
-   * provider. `receipt` is present only for a probe-confirmed recovery
-   * (reason `'primary-probe-ok'`) that already passed
-   * FallbackRecoveryTransaction's canary validation (DUR-02) — it carries the
-   * fresh usability evidence that must be REUSED, not discarded, and drives
-   * the dual clear below.
-   *
-   * Ordering is crash-safety-critical: every durable emission (the
-   * auto_fallback_cleared route-event receipt, the provider_fallback_reverted
-   * alert, and — when a receipt is present — the typed clears of BOTH
-   * provider_fallback_activated and fallback_recovery_stalled) happens BEFORE
-   * any local counter reset and BEFORE the persisted-window DB clear. If the
-   * process crashes between the durable emissions and clearFallbackState, a
-   * restart still finds the persisted window, re-probes, and replays this
-   * same path — clearing an already-cleared or non-open incident is a
-   * documented no-op, so the replay is idempotent. The reverse order (state
-   * cleared first) can silently strand an open incident forever: a crash
-   * after clearFallbackState but before the clears means restart finds
-   * nothing to restore, never re-probes, and the stall alert — CATEGORY-C's
-   * `probeAttempts: 403+, fallbackReverts: 0` defect — never clears.
+   * provider. `receipt` (DUR-02, probe-confirmed only) drives the dual clear
+   * below. Every durable emission fires BEFORE the counter reset and the
+   * persisted-window DB clear, so a crash mid-transition replays idempotently
+   * on restart instead of stranding an open incident (CATEGORY-C's
+   * `probeAttempts: 403+, fallbackReverts: 0`).
    */
   private deactivateProviderFallback(reason: string, receipt: FallbackRecoveryReceipt | null = null): void {
     if (this.revertTimer) {
@@ -10166,8 +10143,6 @@ export class AgentRuntime implements Runtime {
     // Per-window deltas against the arm-time snapshots — the lifetime counters
     // are NOT reset here (getFallbackState keeps reporting process totals).
     const { served: windowTurnsServed, empty: windowTurnsEmpty } = this.fallbackMetrics.windowDeltas();
-
-    // ---- Durable receipts + typed clears FIRST (crash-safe ordering) ----
     // Slice-4 observability: one auto_fallback_cleared per window. Recovery
     // restores QUIETLY — the record is /why-retrievable, not a user notice
     // (UH-003).
@@ -10188,9 +10163,7 @@ export class AgentRuntime implements Runtime {
     // "investigate/remediate" a healthy revert is pure noise (it was firing
     // critical for clean window-elapsed cycles). The matching FAULT alert —
     // provider_fallback_activated — keeps its critical default. A
-    // probe-confirmed recovery appends the immutable transition receipt
-    // (allowlisted fields only — see formatFallbackRecoveryReceiptEvidence)
-    // so the fresh usability evidence is reused, not discarded.
+    // probe-confirmed recovery appends the receipt (allowlisted fields only).
     const receiptClause = receipt ? ` ${formatFallbackRecoveryReceiptEvidence(receipt)}` : '';
     emitAlertChecked(
       this.instanceName,
@@ -10209,21 +10182,7 @@ export class AgentRuntime implements Runtime {
       'provider_fallback_activated',
       `reason=${reason} windowMs=${windowMs ?? 'unknown'}`,
     );
-    // DUR-02: the stall incident this SAME window may have opened (see
-    // PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD) is a SEPARATE incident key
-    // from the activation cleared above and was never cleared anywhere in
-    // this file before this change — the live CATEGORY-C defect
-    // (`probeAttempts: 403+`, `fallbackReverts: 0`): the probe kept
-    // succeeding downstream of a revert that never happened, and once it did
-    // revert, the stall alert it had raised stayed open forever. Gated on
-    // BOTH `receipt` presence (a manual or window-elapsed deactivation never
-    // opened this incident, so clearing it there would be a false "recovery
-    // confirmed" claim) AND the receipt's own probe-attempt count reaching
-    // the SAME threshold the emit side uses — `probeAttemptsAtTransition` is
-    // monotonic within one stall episode, so `>= T` at commit time is exactly
-    // "a stall alert fired for this episode"; clearing unconditionally on any
-    // receipt would emit a spurious clear for every ordinary probe-confirmed
-    // revert that never reached the stall threshold at all.
+    // DUR-02: fallback_recovery_stalled (CATEGORY-C's never-cleared defect) — gated on receipt + reaching the SAME threshold the emit side uses, so an unstalled revert emits no spurious clear.
     if (receipt && receipt.probeAttemptsAtTransition >= PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD) {
       clearAlertSourceChecked(
         this.instanceName,
@@ -10231,8 +10190,6 @@ export class AgentRuntime implements Runtime {
         formatFallbackRecoveryReceiptEvidence(receipt),
       );
     }
-
-    // ---- Local + persisted state mutation LAST ----
     this.fallbackWindow.activeUntil = null;
     this.fallbackWindow.activatedAt = null;
     this.fallbackWindow.armReason = null;
@@ -10272,104 +10229,74 @@ export class AgentRuntime implements Runtime {
     // spawnSync froze the WHOLE event loop for the same duration, forever on
     // a dead auth primary.
     const windowAtProbe = this.fallbackWindow.activeUntil;
-    // DUR-02: captured via probePrimaryProviderRecovered's onEvidence
-    // callback into a variable scoped to THIS invocation's closure — never a
-    // shared instance field (a concurrent diagnostic-bundle probe on the same
-    // instance would otherwise race the read). A test (or the diagnostic
-    // bundle) that replaces probePrimaryProviderRecovered with a bare boolean
-    // stub never invokes the callback, so `evidence` stays null and the
-    // synthesis fallback below reconstructs an equivalent sample from the
-    // boolean — old test semantics are preserved unchanged.
-    let evidence: FallbackRecoveryEvidence | null = null;
-    void Promise.resolve()
-      .then(() => this.probePrimaryProviderRecovered((e) => { evidence = e; }))
-      .catch((err) => {
-        // probePrimaryProviderRecovered never throws by contract; this guards
-        // test stubs and future edits — a throwing probe is a failed probe.
-        log.warn({ err }, 'primary provider recovery probe threw — treating as failed');
-        return false;
-      })
-      .then((recovered) => {
-        // Stale-result guards: drop the probe outcome if the window was
-        // deactivated or re-armed while the probe was in flight (a stale
-        // extend would shorten a fresh window; the next cadence re-probes).
-        if (this.fallbackWindow.activeUntil === null || this.fallbackWindow.activeUntil !== windowAtProbe) return;
-        // DUR-02: the SAME probe result drives the transition — captured
-        // before any reset so the receipt's probeAttemptsAtTransition is
-        // provably not lossy (LIVE-ALERT-CORRELATION requirement 4).
-        const resolvedEvidence: FallbackRecoveryEvidence = evidence ?? {
-          status: recovered ? 'usable' : 'unknown',
-          provider: this.agentProvider,
-          model: this.model ?? null,
-          checkedAt: Date.now(),
-        };
-        const decision = evaluateFallbackRecoveryTransaction(resolvedEvidence, {
-          instanceName: this.instanceName,
-          primaryProvider: this.agentProvider,
-          primaryModel: this.model ?? null,
-          fallbackProvider: this.fallbackWindow.activeEntry?.provider ?? this.agentProvider,
-          fallbackModel: this.fallbackWindow.activeEntry?.model ?? null,
-          probeAttemptsAtTransition: this.fallbackProbeAttempts,
-          now: Date.now(),
-          maxEvidenceAgeMs: FALLBACK_RECOVERY_EVIDENCE_MAX_AGE_MS,
-        });
-        if (decision.commit) {
-          this.deactivateProviderFallback('primary-probe-ok', decision.receipt);
-          return;
-        }
-        this.fallbackProbeAttempts += 1;
-        const now = Date.now();
-        const until = now + PROVIDER_FALLBACK_PRIMARY_RECHECK_MS;
-        this.fallbackWindow.activeUntil = until;
-        this.revertTimer = setTimeout(() => {
-          this.handleFallbackRevertTimer();
-        }, PROVIDER_FALLBACK_PRIMARY_RECHECK_MS);
-        this.revertTimer.unref?.();
-        try {
-          saveFallbackState(this.db, {
-            activeUntil: until,
-            activatedAt: this.fallbackWindow.activatedAt ?? now,
-            reason: this.fallbackWindow.armReason ?? 'auth-required',
-            // Persist the stall clock with the window so a restart mid-stall
-            // resumes the count instead of resetting it.
-            probeAttempts: this.fallbackProbeAttempts,
-          });
-        } catch (err) {
-          log.warn({ err }, 'failed to extend persisted fallback window after failed recovery probe');
-        }
-        // Stall alert at threshold and every subsequent multiple (T, 2T, 3T
-        // ... up to the DUR-02 escalation ceiling, then no further repeats —
-        // see PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE). Re-alerting on
-        // multiples surfaces a long-running stall without drowning operators
-        // with per-probe noise. The counter only resets on deactivation.
-        // Extension continues regardless — surfacing must never strand the
-        // instance on a dead primary.
-        const T = PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD;
-        const ceilingAtts = T * PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE;
-        const atts = this.fallbackProbeAttempts;
-        const isThresholdMultiple = atts === T || (atts > T && (atts - T) % T === 0);
-        if (isThresholdMultiple && atts <= ceilingAtts) {
-          const ceilingClause = atts === ceilingAtts ? ' ceiling=true' : '';
-          emitAlertChecked(
-            this.instanceName,
-            'fallback_recovery_stalled',
-            'Primary provider recovery probe is stalled — fallback window extending indefinitely',
-            `reason=${this.fallbackWindow.armReason ?? 'auth-required'} attempts=${atts} `
-              + `windowEnd=${new Date(until).toISOString()} primaryProvider=${this.agentProvider}${ceilingClause}`,
-          );
-        }
-        // No scheduleFallbackPrimaryProbe() here: the extension window equals the
-        // recheck cadence, so this timer IS the probe cadence. Re-arming the
-        // standing probe alongside it produced a double-probe (two probes per
-        // cadence); the standing probe's guard makes it a no-op in this state.
-        log.warn({
-          instanceName: this.instanceName,
-          primaryProvider: this.agentProvider,
-          fallbackProvider: this.fallbackWindow.activeEntry?.provider,
-          reason: this.fallbackWindow.armReason,
+    void this.probeAndEvaluateFallbackRecovery().then((decision) => {
+      // Stale-result guard: window was deactivated/re-armed mid-flight.
+      if (this.fallbackWindow.activeUntil === null || this.fallbackWindow.activeUntil !== windowAtProbe) return;
+      if (decision.commit) {
+        this.deactivateProviderFallback('primary-probe-ok', decision.receipt);
+        return;
+      }
+      this.fallbackProbeAttempts += 1;
+      const now = Date.now();
+      const until = now + PROVIDER_FALLBACK_PRIMARY_RECHECK_MS;
+      this.fallbackWindow.activeUntil = until;
+      this.revertTimer = setTimeout(() => {
+        this.handleFallbackRevertTimer();
+      }, PROVIDER_FALLBACK_PRIMARY_RECHECK_MS);
+      this.revertTimer.unref?.();
+      try {
+        saveFallbackState(this.db, {
+          activeUntil: until,
+          activatedAt: this.fallbackWindow.activatedAt ?? now,
+          reason: this.fallbackWindow.armReason ?? 'auth-required',
+          // Persist the stall clock with the window so a restart mid-stall
+          // resumes the count instead of resetting it.
           probeAttempts: this.fallbackProbeAttempts,
-        }, 'primary provider recovery probe still failing; keeping fallback armed');
-      });
+        });
+      } catch (err) {
+        log.warn({ err }, 'failed to extend persisted fallback window after failed recovery probe');
+      }
+      // Stall alert at T, 2T, 3T ... up to the DUR-02 escalation ceiling, then no repeats (see stallAlertPlan) — counter resets only on deactivation, window keeps extending.
+      const atts = this.fallbackProbeAttempts;
+      const plan = stallAlertPlan(atts, PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD, PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE);
+      if (plan.emit) {
+        emitAlertChecked(
+          this.instanceName,
+          'fallback_recovery_stalled',
+          'Primary provider recovery probe is stalled — fallback window extending indefinitely',
+          `reason=${this.fallbackWindow.armReason ?? 'auth-required'} attempts=${atts} `
+            + `windowEnd=${new Date(until).toISOString()} primaryProvider=${this.agentProvider}${plan.ceiling ? ' ceiling=true' : ''}`,
+        );
+      }
+      // No scheduleFallbackPrimaryProbe() here: the extension window equals the
+      // recheck cadence, so this timer IS the probe cadence. Re-arming the
+      // standing probe alongside it produced a double-probe (two probes per
+      // cadence); the standing probe's guard makes it a no-op in this state.
+      log.warn({
+        instanceName: this.instanceName,
+        primaryProvider: this.agentProvider,
+        fallbackProvider: this.fallbackWindow.activeEntry?.provider,
+        reason: this.fallbackWindow.armReason,
+        probeAttempts: this.fallbackProbeAttempts,
+      }, 'primary provider recovery probe still failing; keeping fallback armed');
+    });
+  }
+
+  /** DUR-02: thin delegator — see resolveFallbackRecoveryDecision (fallback-recovery-transaction.ts) for the shared probe/evaluate core. */
+  private probeAndEvaluateFallbackRecovery(): Promise<FallbackRecoveryDecision> {
+    return resolveFallbackRecoveryDecision(
+      (onEvidence) => this.probePrimaryProviderRecovered(onEvidence),
+      {
+        instanceName: this.instanceName,
+        primaryProvider: this.agentProvider,
+        primaryModel: this.model ?? null,
+        fallbackProvider: this.fallbackWindow.activeEntry?.provider ?? this.agentProvider,
+        fallbackModel: this.fallbackWindow.activeEntry?.model ?? null,
+        probeAttemptsAtTransition: this.fallbackProbeAttempts,
+        maxEvidenceAgeMs: FALLBACK_RECOVERY_EVIDENCE_MAX_AGE_MS,
+      },
+      (err) => log.warn({ err }, 'primary provider recovery probe threw — treating as failed'),
+    );
   }
 
   /**
@@ -10396,43 +10323,18 @@ export class AgentRuntime implements Runtime {
       if (this.fallbackWindow.activeUntil === null || !this.fallbackWindow.recoveryProbeRequired) return;
       this.fallbackLastProbeAt = Date.now();
       const windowAtProbe = this.fallbackWindow.activeUntil;
-      // DUR-02: see handleFallbackRevertTimer's identical comment — a
-      // per-invocation closure local, never a shared instance field.
-      let evidence: FallbackRecoveryEvidence | null = null;
-      void Promise.resolve()
-        .then(() => this.probePrimaryProviderRecovered((e) => { evidence = e; }))
-        .catch((err) => {
-          log.warn({ err }, 'primary provider recovery probe threw — treating as failed');
-          return false;
-        })
-        .then((recovered) => {
-          if (
-            this.fallbackWindow.activeUntil === null ||
-            !this.fallbackWindow.recoveryProbeRequired ||
-            this.fallbackWindow.activeUntil !== windowAtProbe
-          ) return;
-          const resolvedEvidence: FallbackRecoveryEvidence = evidence ?? {
-            status: recovered ? 'usable' : 'unknown',
-            provider: this.agentProvider,
-            model: this.model ?? null,
-            checkedAt: Date.now(),
-          };
-          const decision = evaluateFallbackRecoveryTransaction(resolvedEvidence, {
-            instanceName: this.instanceName,
-            primaryProvider: this.agentProvider,
-            primaryModel: this.model ?? null,
-            fallbackProvider: this.fallbackWindow.activeEntry?.provider ?? this.agentProvider,
-            fallbackModel: this.fallbackWindow.activeEntry?.model ?? null,
-            probeAttemptsAtTransition: this.fallbackProbeAttempts,
-            now: Date.now(),
-            maxEvidenceAgeMs: FALLBACK_RECOVERY_EVIDENCE_MAX_AGE_MS,
-          });
-          if (decision.commit) {
-            this.deactivateProviderFallback('primary-probe-ok', decision.receipt);
-            return;
-          }
-          this.scheduleFallbackPrimaryProbe();
-        });
+      void this.probeAndEvaluateFallbackRecovery().then((decision) => {
+        if (
+          this.fallbackWindow.activeUntil === null ||
+          !this.fallbackWindow.recoveryProbeRequired ||
+          this.fallbackWindow.activeUntil !== windowAtProbe
+        ) return;
+        if (decision.commit) {
+          this.deactivateProviderFallback('primary-probe-ok', decision.receipt);
+          return;
+        }
+        this.scheduleFallbackPrimaryProbe();
+      });
     }, PROVIDER_FALLBACK_PRIMARY_RECHECK_MS);
     this.fallbackPrimaryProbeTimer.unref?.();
   }
@@ -10520,19 +10422,8 @@ export class AgentRuntime implements Runtime {
    * real model-usability success, not credential presence: a revoked API key or
    * expired OAuth token can still be present in the key store while live turns
    * continue returning auth failures. The probe is timeout-bounded and never
-   * rejects.
-   *
-   * `onEvidence` (DUR-02) receives the FULL usability result — not just the
-   * collapsed boolean — synchronously before this resolves, so a caller that
-   * needs to reuse (never discard) the evidence for FallbackRecoveryTransaction
-   * can capture it into a variable scoped to its OWN promise chain. This is
-   * deliberately NOT a shared instance field: kickDiagnosticBundle's
-   * diagnostic probe also calls this same method (via `runPrimaryRecoveryProbe`)
-   * and can overlap the revert-timer's or standing-probe's own call — a shared
-   * field would let one caller's result clobber another's between resolution
-   * and read. Callers that omit the callback (the diagnostic bundle, and any
-   * test that replaces this method wholesale with a bare boolean stub) see no
-   * change in behavior.
+   * rejects. `onEvidence` (DUR-02) gets the full result before this resolves;
+   * see resolveFallbackRecoveryDecision for why a callback, not a field.
    */
   private async probePrimaryProviderRecovered(
     onEvidence?: (evidence: FallbackRecoveryEvidence) => void,
