@@ -187,6 +187,14 @@ jobs:
           printf 'chore(ci): guard smoke\n' > "$msg"
           npm run guard:repo:commit-msg -- "$msg"
 
+      # Runs the drift classifier CLI end-to-end against the real tree. Fails ONLY on
+      # INCONCLUSIVE — an unrecognised path — never on the drift verdict itself, which is
+      # legitimately a "stop" much of the time and would be pure noise as a gate. An
+      # unclassified surface means every future verdict touching it silently degrades to
+      # "I do not know", which is the failure worth catching at PR time.
+      - name: Drift classifier coverage
+        run: npm run guard:drift-coverage
+
       - name: Documentation drift guard
         run: npm run guard:doc-drift
 
