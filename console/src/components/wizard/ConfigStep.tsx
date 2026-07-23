@@ -1,4 +1,5 @@
 import { type FC, type ChangeEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ALL_PLUGINS, CATEGORY_LABELS } from '../../lib/plugin-catalog';
 import { Check, Lock, List, MessageCircle, Users } from 'lucide-react'
 import CardSelector from '../CardSelector'
 import TagInput from '../TagInput'
@@ -35,42 +36,8 @@ interface AgentOptions {
   fallbackModel?: string
 }
 
-/** All known plugins. Order determines display order in the UI. */
-const ALL_PLUGINS: { key: string; label: string; description: string; category: 'core' | 'dev' | 'integration' | 'lsp' }[] = [
-  // Core
-  { key: 'superpowers@superpowers-marketplace', label: 'Superpowers', description: 'Brainstorming, TDD, debugging, plans, verification', category: 'core' },
-  { key: 'episodic-memory@superpowers-marketplace', label: 'Episodic Memory', description: 'Cross-session conversation memory', category: 'core' },
-  { key: 'commit-commands@claude-plugins-official', label: 'Commit Commands', description: 'Git commit, push, PR workflows', category: 'core' },
-  { key: 'elements-of-style@superpowers-marketplace', label: 'Elements of Style', description: 'Writing quality for docs and messages', category: 'core' },
-  { key: 'claude-md-management@claude-plugins-official', label: 'CLAUDE.md Management', description: 'Audit and improve instruction files', category: 'core' },
-  { key: 'hookify@claude-plugins-official', label: 'Hookify', description: 'Create hooks from conversation analysis', category: 'core' },
-  // Dev
-  { key: 'sdlc-os@sdlc-os-dev', label: 'SDLC-OS', description: 'Multi-agent SDLC workflow (45 agents, heavy context)', category: 'dev' },
-  { key: 'tmup@tmup-dev', label: 'tmup', description: 'Multi-agent task coordination via tmux', category: 'dev' },
-  { key: 'ralph-loop-v2@ralph-loop-v2-dev', label: 'Ralph Loop v2', description: 'Hardened iteration loops with telemetry', category: 'dev' },
-  { key: 'plugin-dev@claude-plugins-official', label: 'Plugin Dev', description: 'Plugin creation and validation tools', category: 'dev' },
-  { key: 'superpowers-developing-for-claude-code@superpowers-marketplace', label: 'CC Dev Docs', description: 'Claude Code official documentation', category: 'dev' },
-  { key: 'feature-dev@claude-plugins-official', label: 'Feature Dev', description: 'Guided feature development workflow', category: 'dev' },
-  { key: 'code-review@claude-plugins-official', label: 'Code Review', description: 'Confidence-based code review', category: 'dev' },
-  { key: 'frontend-design@claude-plugins-official', label: 'Frontend Design', description: 'Production-grade UI generation', category: 'dev' },
-  { key: 'security-guidance@claude-plugins-official', label: 'Security Guidance', description: 'Security best practices', category: 'dev' },
-  // Integrations
-  { key: 'microsoft_365@microsoft-365-dev', label: 'Microsoft 365', description: 'Email, calendar, Teams, SharePoint', category: 'integration' },
-  { key: 'microsoft-docs@claude-plugins-official', label: 'Microsoft Docs', description: 'Official Microsoft documentation search', category: 'integration' },
-  { key: 'superpowers-chrome@superpowers-marketplace', label: 'Chrome DevTools', description: 'Browser inspection and automation', category: 'integration' },
-  { key: 'superpowers-lab@superpowers-marketplace', label: 'Superpowers Lab', description: 'Slack, Windows VM, tmux, duplicate detection', category: 'integration' },
-  { key: 'playwright@claude-plugins-official', label: 'Playwright', description: 'Browser automation and testing', category: 'integration' },
-  // LSP
-  { key: 'pyright-lsp@claude-plugins-official', label: 'Pyright LSP', description: 'Python language server', category: 'lsp' },
-  { key: 'typescript-lsp@claude-plugins-official', label: 'TypeScript LSP', description: 'TypeScript language server', category: 'lsp' },
-]
-
-const CATEGORY_LABELS: Record<string, string> = {
-  core: 'Core',
-  dev: 'Development',
-  integration: 'Integrations',
-  lsp: 'Language Servers',
-}
+// ALL_PLUGINS + CATEGORY_LABELS now live in lib/plugin-catalog (T5 b-05) —
+// the Skills Hub reads the same SSOT.
 
 const ACCESS_ICONS = {
   self_only: <Lock size={24} />,
