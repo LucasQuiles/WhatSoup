@@ -27,6 +27,7 @@
     "guard:publication:release": "npm run guard:publication -- --release",
     "guard:publication:staged": "npm run guard:publication -- --staged",
     "guard:pre-push": "bash scripts/run-with-pinned-node.sh scripts/pre-push-guard.ts",
+    "drift:classify": "bash scripts/run-with-pinned-node.sh scripts/drift-classify.ts",
     "guard:doc-drift": "bash scripts/run-with-pinned-node.sh scripts/doc-drift-check.ts",
     "guard:doc-tally": "bash scripts/run-with-pinned-node.sh scripts/guard-doc-tally.ts",
     "guard:design-system-hygiene": "bash scripts/run-with-pinned-node.sh scripts/design-system-hygiene-guard.ts",
