@@ -17,15 +17,26 @@ import {
 import {
   EMPTY_ASSIGNMENT_FULL_CARTESIAN_CASES,
   EMPTY_ASSIGNMENT_PAIRWISE_CASES,
+  EMPTY_VALUE_KINDS,
   everySplit,
   EXPECTED_PAIRWISE_KEYS,
   MULTIPLE_REAL_ASSIGNMENT_CONTROLS,
+  NESTED_INNER_KEYS,
   NESTED_KEYLIKE_FILLER_OFFSETS,
+  NESTED_KEYLIKE_FACTORIAL_CASES,
   NESTED_OWNERSHIP_COORDINATE_CASES,
   NESTED_KEYLIKE_SEAM_CASES,
+  NESTED_LAYOUT_KINDS,
+  NESTED_OUTER_KEYS,
+  NESTED_QUOTE_KINDS,
+  NESTED_SECRET_FAMILIES,
   NONEMPTY_PAIRWISE_CONTROLS,
   OBSERVED_PAIRWISE_KEYS,
   ORDINARY_PUNCTUATION_CONTROLS,
+  SAME_FIELD_ASSIGNMENT_SEPARATORS,
+  SECOND_VALUE_KINDS,
+  SECRET_ASSIGNMENT_KEYS,
+  SPACING_KINDS,
 } from '../helpers/provider-boundary-successor-cases.ts';
 
 function entropy(): (size: number) => Uint8Array {
@@ -493,6 +504,114 @@ describe('provider data boundary hardening', () => {
     },
   );
 
+  it('executes the independent nested quote-layout-key factorial across every split', () => {
+    const expectedTuples: string[] = [];
+    for (const outerKey of ['password', 'token', 'credential']) {
+      for (const innerKey of ['password', 'token', 'session']) {
+        for (const layout of ['adjacent', 'slash', 'whitespace']) {
+          for (const quoteKind of ['unquoted', 'quoted']) {
+            for (const family of ['bearer', 'known-token']) {
+              expectedTuples.push([
+                outerKey,
+                innerKey,
+                layout,
+                quoteKind,
+                family,
+              ].join('|'));
+            }
+          }
+        }
+      }
+    }
+
+    const actualTuples = NESTED_KEYLIKE_FACTORIAL_CASES.map((row) => [
+      row.outerKey,
+      row.innerKey,
+      row.layout,
+      row.quoteKind,
+      row.family,
+    ].join('|'));
+    const requiredSources = [
+      'password="xtoken=Bearer alpha"',
+      'password="x/password=Bearer alpha"',
+      'password="xpassword=Bearer alpha"',
+      `password="xtoken=ghp_${'z'.repeat(16)}"`,
+      `password="x/token=ghp_${'z'.repeat(16)}"`,
+    ];
+    let executedSplits = 0;
+    let canonicalAnomalies = 0;
+    const anomalyCounts: Record<string, number> = {
+      scan: 0,
+      exposeCode: 0,
+      rehydrateCode: 0,
+      exposeEvents: 0,
+      rehydrateEvents: 0,
+      mutation: 0,
+    };
+
+    for (const { assignment, expectedSecretCount } of NESTED_KEYLIKE_FACTORIAL_CASES) {
+      const canonical = scanProviderTextSequence([assignment]);
+      if (
+        canonical.directSecretCount + canonical.fragmentedSecretCount
+        !== expectedSecretCount
+      ) {
+        canonicalAnomalies += 1;
+      }
+      for (const { left, right, split } of everySplit(assignment)) {
+        executedSplits += 1;
+        for (const kind of splitAnomalyKinds(
+          observeBoundarySplit(left, right, split),
+          expectedSecretCount,
+        )) {
+          anomalyCounts[kind] = (anomalyCounts[kind] ?? 0) + 1;
+        }
+      }
+    }
+
+    expect({
+      axes: {
+        outerKeys: NESTED_OUTER_KEYS,
+        innerKeys: NESTED_INNER_KEYS,
+        layouts: NESTED_LAYOUT_KINDS,
+        quotes: NESTED_QUOTE_KINDS,
+        families: NESTED_SECRET_FAMILIES,
+      },
+      tuples: [...actualTuples].sort(),
+      requiredSourcesPresent: requiredSources.every((source) => (
+        NESTED_KEYLIKE_FACTORIAL_CASES.some(({ assignment }) => assignment === source)
+      )),
+      rows: NESTED_KEYLIKE_FACTORIAL_CASES.length,
+      uniqueSources: new Set(
+        NESTED_KEYLIKE_FACTORIAL_CASES.map(({ assignment }) => assignment),
+      ).size,
+      executedSplits,
+      canonicalAnomalies,
+      anomalyCounts,
+    }).toEqual({
+      axes: {
+        outerKeys: ['password', 'token', 'credential'],
+        innerKeys: ['password', 'token', 'session'],
+        layouts: ['adjacent', 'slash', 'whitespace'],
+        quotes: ['unquoted', 'quoted'],
+        families: ['bearer', 'known-token'],
+      },
+      tuples: [...expectedTuples].sort(),
+      requiredSourcesPresent: true,
+      rows: 108,
+      uniqueSources: 108,
+      executedSplits: 3_672,
+      canonicalAnomalies: 0,
+      anomalyCounts: {
+        scan: 0,
+        exposeCode: 0,
+        rehydrateCode: 0,
+        exposeEvents: 0,
+        rehydrateEvents: 0,
+        mutation: 0,
+      },
+    });
+  });
+
   it.each(NESTED_KEYLIKE_FILLER_OFFSETS.flatMap((offset) => (
     NESTED_OWNERSHIP_COORDINATE_CASES.map((coordinateCase) => ({
       ...coordinateCase,
@@ -545,6 +664,58 @@ describe('provider data boundary hardening', () => {
 
   it('proves the deterministic empty-assignment matrix covers every pair of axis values', () => {
     expect([...OBSERVED_PAIRWISE_KEYS].sort()).toEqual([...EXPECTED_PAIRWISE_KEYS].sort());
+  });
+
+  it('binds the full Cartesian grammar to literal required axes and tuples', () => {
+    const expectedTuples: string[] = [];
+    for (const outerKey of ['token', 'password', 'credential', 'session', 'api_key']) {
+      for (const innerKey of ['token', 'password', 'credential', 'session', 'api_key']) {
+        for (const separator of [',', ';', '&', '|']) {
+          for (const emptyKind of ['empty', 'whitespace-empty']) {
+            for (const spacingKind of ['tight', 'after-separator', 'around-assignment']) {
+              for (const secondValueKind of ['unquoted', 'quoted']) {
+                expectedTuples.push([
+                  outerKey,
+                  innerKey,
+                  separator,
+                  emptyKind,
+                  spacingKind,
+                  secondValueKind,
+                ].join('|'));
+              }
+            }
+          }
+        }
+      }
+    }
+    const actualTuples = EMPTY_ASSIGNMENT_FULL_CARTESIAN_CASES.map((row) => [
+      row.outerKey,
+      row.innerKey,
+      row.separator,
+      row.emptyKind,
+      row.spacingKind,
+      row.secondValueKind,
+    ].join('|'));
+
+    expect({
+      axes: {
+        keys: SECRET_ASSIGNMENT_KEYS,
+        separators: SAME_FIELD_ASSIGNMENT_SEPARATORS,
+        emptyKinds: EMPTY_VALUE_KINDS,
+        spacingKinds: SPACING_KINDS,
+        secondValueKinds: SECOND_VALUE_KINDS,
+      },
+      tuples: [...actualTuples].sort(),
+    }).toEqual({
+      axes: {
+        keys: ['token', 'password', 'credential', 'session', 'api_key'],
+        separators: [',', ';', '&', '|'],
+        emptyKinds: ['empty', 'whitespace-empty'],
+        spacingKinds: ['tight', 'after-separator', 'around-assignment'],
+        secondValueKinds: ['unquoted', 'quoted'],
+      },
+      tuples: [...expectedTuples].sort(),
+    });
   });
 
   it('executes the full 5x5x4x2x3x2 empty-assignment grammar across every split', () => {

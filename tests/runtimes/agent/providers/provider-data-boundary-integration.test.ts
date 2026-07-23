@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from 'node:util';
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createProviderDataBoundary } from '../../../../src/core/provider-data-boundary.ts';
@@ -21,8 +23,8 @@ import type { AgentEvent } from '../../../../src/runtimes/agent/stream-parser.ts
 import {
   EMPTY_ASSIGNMENT_PAIRWISE_CASES,
   everySplit,
-  NESTED_OWNERSHIP_COORDINATE_CASES,
-  NESTED_KEYLIKE_SEAM_CASES,
+  NESTED_KEYLIKE_FACTORIAL_CASES,
+  NESTED_KEYLIKE_PROVIDER_CASES,
   SAME_FIELD_ASSIGNMENT_SEPARATORS,
 } from '../../../helpers/provider-boundary-successor-cases.ts';
 
@@ -61,13 +63,15 @@ const PROVIDER_FACTORIES = [
 ] as const;
 
 const SUCCESSOR_SPLIT_CASES = [
-  ...NESTED_KEYLIKE_SEAM_CASES.map(({ assignment, caseName }) => ({
+  ...NESTED_KEYLIKE_PROVIDER_CASES.map(({ assignment, caseName, expectedSecretCount }) => ({
     caseName,
     source: assignment,
+    expectedSecretCount,
   })),
   ...EMPTY_ASSIGNMENT_PAIRWISE_CASES.map(({ caseName, source }) => ({
     caseName,
     source,
+    expectedSecretCount: 1,
   })),
 ] as const;
 
@@ -80,21 +84,26 @@ const SUCCESSOR_PROVIDER_SPLIT_CASES = PROVIDER_FACTORIES.flatMap(
 );
 
 const PROVIDER_OWNERSHIP_EDGE_CASES = [512, 65_536].flatMap((offset) => (
-  NESTED_OWNERSHIP_COORDINATE_CASES
-    .filter(({ coordinate, family }) => coordinate === 'nestedGrammarStart' && (
-      family === 'bearer' || family === 'known-token'
+  NESTED_KEYLIKE_FACTORIAL_CASES
+    .filter(({ outerKey, innerKey, layout, quoteKind, family }) => (
+      (outerKey === 'password'
+        && innerKey === 'password'
+        && layout === 'adjacent'
+        && quoteKind === 'quoted'
+        && family === 'bearer')
+      || (outerKey === 'credential'
+        && innerKey === 'session'
+        && layout === 'slash'
+        && quoteKind === 'quoted'
+        && family === 'known-token')
     ))
-    .filter(({ assignment, family }) => (
-      family === 'bearer'
-        ? assignment === NESTED_KEYLIKE_SEAM_CASES[0]!.assignment
-        : assignment === NESTED_KEYLIKE_SEAM_CASES[3]!.assignment
-    ))
-    .map(({ assignment, caseName, coordinateRelativeIndex, family }) => {
-      const fillerLength = offset - coordinateRelativeIndex;
+    .map(({ assignment, caseName, nestedGrammarStart, family }) => {
+      const fillerLength = offset - nestedGrammarStart;
       const source = `${'x'.repeat(fillerLength - 1)} ${assignment}`;
       return {
         caseName: `${family} ${caseName} ownership edge ${offset}`,
         source,
+        sourceSuffix: assignment,
         split: offset,
         actualEdgeOffset: source.indexOf(family === 'bearer' ? 'Bearer' : 'ghp_'),
         expectedSecretCount: 1,
@@ -150,32 +159,186 @@ interface ProviderBoundaryObservation {
   fetchCalls: number;
   executeCalls: number;
   nonInitEventCount: number;
+  historyCaptured: boolean;
+  historyExpectedShape: boolean;
   historyUnchanged: boolean;
   checkpointUnchanged: boolean;
   parsedInputCaptured: boolean;
+  parsedInputSupported: boolean;
   parsedInputUnchanged: boolean;
-  boundaryEventVector: Array<{ eventType: string; secretCount: number }>;
+  boundaryEvents: ProviderBoundaryEvent[];
 }
 
-function reachableProviderHistory(provider: ProviderSession): unknown {
+type ExactState =
+  | {
+    kind: 'primitive';
+    value: null | undefined | string | number | boolean;
+  }
+  | {
+    kind: 'object';
+    prototype: object | null;
+    properties: Array<{
+      key: PropertyKey;
+      configurable: boolean;
+      enumerable: boolean;
+      writable: boolean;
+      value: ExactState;
+    }>;
+  };
+
+function captureExactState(value: unknown, seen = new WeakSet<object>()): ExactState {
+  if (
+    value === null
+    || value === undefined
+    || typeof value === 'string'
+    || typeof value === 'number'
+    || typeof value === 'boolean'
+  ) {
+    return { kind: 'primitive', value };
+  }
+  if (typeof value !== 'object') {
+    throw new Error(`unsupported exact-state value type: ${typeof value}`);
+  }
+  if (seen.has(value)) throw new Error('unsupported cyclic or shared exact-state object');
+  seen.add(value);
+  const prototype = Object.getPrototypeOf(value) as object | null;
+  if (
+    prototype !== null
+    && prototype !== Object.prototype
+    && prototype !== Array.prototype
+  ) {
+    throw new Error('unsupported exact-state object prototype');
+  }
+  const properties = Reflect.ownKeys(value).map((key) => {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !('value' in descriptor)) {
+      throw new Error('unsupported accessor property in exact-state object');
+    }
+    return {
+      key,
+      configurable: descriptor.configurable ?? false,
+      enumerable: descriptor.enumerable ?? false,
+      writable: descriptor.writable ?? false,
+      value: captureExactState(descriptor.value, seen),
+    };
+  });
+  return {
+    kind: 'object',
+    prototype,
+    properties,
+  };
+}
+
+function tryCaptureExactState(value: unknown): ExactState | undefined {
+  try {
+    return captureExactState(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function exactStateUnchanged(value: unknown, before: ExactState | undefined): boolean {
+  if (!before) return false;
+  const after = tryCaptureExactState(value);
+  return after !== undefined && isDeepStrictEqual(after, before);
+}
+
+interface ProviderHistoryCapture {
+  captured: boolean;
+  expectedShape: boolean;
+  state: ExactState | undefined;
+}
+
+function captureProviderHistory(
+  providerName: 'openai-api' | 'anthropic-api',
+  provider: ProviderSession,
+): ProviderHistoryCapture {
   const reachable = provider as unknown as {
     messages?: unknown[];
     systemPrompt?: string;
   };
-  return structuredClone({
-    messages: reachable.messages,
-    systemPrompt: reachable.systemPrompt ?? null,
-  });
+  const messages = reachable.messages;
+  const systemPrompt = reachable.systemPrompt;
+  const messagesCaptured = Object.hasOwn(reachable, 'messages') && Array.isArray(messages);
+  const systemPromptCaptured = providerName === 'openai-api'
+    ? !Object.hasOwn(reachable, 'systemPrompt')
+    : Object.hasOwn(reachable, 'systemPrompt') && typeof systemPrompt === 'string';
+  const roles = Array.isArray(messages)
+    ? messages.map((message) => (
+      typeof message === 'object' && message !== null && 'role' in message
+        ? String(message.role)
+        : null
+    ))
+    : [];
+  const expectedShape = providerName === 'openai-api'
+    ? isDeepStrictEqual(roles, ['system', 'user'])
+    : isDeepStrictEqual(roles, ['user']) && typeof systemPrompt === 'string';
+  const captured = messagesCaptured && systemPromptCaptured;
+  return {
+    captured,
+    expectedShape,
+    state: captured
+      ? tryCaptureExactState({
+        messages,
+        systemPrompt: providerName === 'anthropic-api' ? systemPrompt : null,
+      })
+      : undefined,
+  };
+}
+
+function expectedBoundaryEvent(
+  secretCount: number,
+): Omit<ProviderBoundaryEvent, 'latencyMs'> {
+  return {
+    policyVersion: PROVIDER_DATA_POLICY_VERSION,
+    mode: 'enforce',
+    providerClass: 'managed_api',
+    routeSource: 'fallback',
+    eventType: 'secret_block',
+    success: 1,
+    transformCount: 1,
+    aliasCount: 0,
+    secretCount,
+  };
+}
+
+function hasExactBoundaryEvent(
+  events: readonly ProviderBoundaryEvent[],
+  secretCount: number,
+): boolean {
+  if (events.length !== 1) return false;
+  const event = events[0]!;
+  const {
+    latencyMs,
+    ...deterministicFields
+  } = event;
+  const eventKeys = Reflect.ownKeys(event);
+  if (eventKeys.some((key) => typeof key !== 'string')) return false;
+  return isDeepStrictEqual(
+    [...eventKeys].sort(),
+    [
+      'policyVersion',
+      'mode',
+      'providerClass',
+      'routeSource',
+      'eventType',
+      'success',
+      'transformCount',
+      'aliasCount',
+      'secretCount',
+      'latencyMs',
+    ].sort(),
+  )
+    && isDeepStrictEqual(deterministicFields, expectedBoundaryEvent(secretCount))
+    && Number.isInteger(latencyMs)
+    && latencyMs >= 0
+    && latencyMs <= 1_000;
 }
 
 function providerAnomalySummary(
   observations: readonly ProviderBoundaryObservation[],
   expectedSecretCount: number,
 ) {
-  const expectedEventVector = JSON.stringify([{
-    eventType: 'secret_block',
-    secretCount: expectedSecretCount,
-  }]);
   return {
     rejection: observations
       .filter(({ rejectionCode }) => rejectionCode !== 'secret_detected')
@@ -185,6 +348,12 @@ function providerAnomalySummary(
     events: observations
       .filter(({ nonInitEventCount }) => nonInitEventCount !== 0)
       .map(({ split }) => split),
+    historyCaptured: observations
+      .filter(({ historyCaptured }) => !historyCaptured)
+      .map(({ split }) => split),
+    historyShape: observations
+      .filter(({ historyExpectedShape }) => !historyExpectedShape)
+      .map(({ split }) => split),
     history: observations
       .filter(({ historyUnchanged }) => !historyUnchanged)
       .map(({ split }) => split),
@@ -192,12 +361,12 @@ function providerAnomalySummary(
       .filter(({ checkpointUnchanged }) => !checkpointUnchanged)
       .map(({ split }) => split),
     parsedInput: observations
-      .filter(({ parsedInputCaptured, parsedInputUnchanged }) => (
-        !parsedInputCaptured || !parsedInputUnchanged
+      .filter(({ parsedInputCaptured, parsedInputSupported, parsedInputUnchanged }) => (
+        !parsedInputCaptured || !parsedInputSupported || !parsedInputUnchanged
       ))
       .map(({ split }) => split),
     boundaryEvents: observations
-      .filter(({ boundaryEventVector }) => JSON.stringify(boundaryEventVector) !== expectedEventVector)
+      .filter(({ boundaryEvents }) => !hasExactBoundaryEvent(boundaryEvents, expectedSecretCount))
       .map(({ split }) => split),
   };
 }
@@ -207,6 +376,8 @@ const NO_PROVIDER_ANOMALIES = {
   fetch: [],
   execution: [],
   events: [],
+  historyCaptured: [],
+  historyShape: [],
   history: [],
   checkpoint: [],
   parsedInput: [],
@@ -427,17 +598,17 @@ describe('managed provider data boundary integration', () => {
     const sessionId = `${providerName}-boundary-session`;
     const realBoundary = broker(providerName, sessionId, boundaryEvents);
     let parsedInput: unknown;
-    let parsedInputBefore: unknown;
-    let historyAtHandoff: unknown;
-    let checkpointAtHandoff: unknown;
+    let parsedInputBefore: ExactState | undefined;
+    let historyAtHandoff: ProviderHistoryCapture | undefined;
+    let checkpointAtHandoff: ExactState | undefined;
     let boundaryHandoffEventStart: number | undefined;
     const boundaryProxy: ProviderDataBoundary = {
       ...realBoundary,
       rehydrateToolInput(toolName, input, tools) {
         parsedInput = input;
-        parsedInputBefore = structuredClone(input);
-        historyAtHandoff = reachableProviderHistory(provider);
-        checkpointAtHandoff = structuredClone(provider.getCheckpoint());
+        parsedInputBefore = tryCaptureExactState(input);
+        historyAtHandoff = captureProviderHistory(providerName, provider);
+        checkpointAtHandoff = tryCaptureExactState(provider.getCheckpoint());
         boundaryHandoffEventStart = boundaryEvents.length;
         return realBoundary.rehydrateToolInput(toolName, input, tools);
       },
@@ -463,24 +634,24 @@ describe('managed provider data boundary integration', () => {
         : 'unexpected_error';
     }
 
+    const historyAfter = captureProviderHistory(providerName, provider);
     return {
       split,
       rejectionCode,
       fetchCalls: fetchMock.mock.calls.length,
       executeCalls: executeTool.mock.calls.length,
       nonInitEventCount: events.filter((event) => event.type !== 'init').length,
-      historyUnchanged: JSON.stringify(reachableProviderHistory(provider))
-        === JSON.stringify(historyAtHandoff),
-      checkpointUnchanged: JSON.stringify(provider.getCheckpoint())
-        === JSON.stringify(checkpointAtHandoff),
+      historyCaptured: historyAtHandoff?.captured === true && historyAfter.captured,
+      historyExpectedShape: historyAtHandoff?.expectedShape === true
+        && historyAfter.expectedShape,
+      historyUnchanged: historyAtHandoff?.state !== undefined
+        && historyAfter.state !== undefined
+        && isDeepStrictEqual(historyAfter.state, historyAtHandoff.state),
+      checkpointUnchanged: exactStateUnchanged(provider.getCheckpoint(), checkpointAtHandoff),
       parsedInputCaptured: parsedInput !== undefined,
-      parsedInputUnchanged: JSON.stringify(parsedInput) === JSON.stringify(parsedInputBefore),
-      boundaryEventVector: boundaryEvents
-        .slice(boundaryHandoffEventStart)
-        .map(({ eventType, secretCount }) => ({
-          eventType,
-          secretCount,
-        })),
+      parsedInputSupported: parsedInputBefore !== undefined,
+      parsedInputUnchanged: exactStateUnchanged(parsedInput, parsedInputBefore),
+      boundaryEvents: boundaryEvents.slice(boundaryHandoffEventStart),
     };
   };
 
@@ -1230,7 +1401,7 @@ describe('managed provider data boundary integration', () => {
 
   it.each(SUCCESSOR_PROVIDER_SPLIT_CASES)(
     'executes every $caseName split independently through restricted $providerName',
-    async ({ providerName, makeProvider, source }) => {
+    async ({ providerName, makeProvider, source, expectedSecretCount }) => {
       const observations: ProviderBoundaryObservation[] = [];
       for (const { left, right, split } of everySplit(source)) {
         observations.push(await observeRejectedProviderInput(
@@ -1243,13 +1414,66 @@ describe('managed provider data boundary integration', () => {
 
       expect({
         executedSplits: observations.length,
-        anomalySplits: providerAnomalySummary(observations, 1),
+        anomalySplits: providerAnomalySummary(observations, expectedSecretCount),
       }).toEqual({
         executedSplits: source.length - 1,
         anomalySplits: NO_PROVIDER_ANOMALIES,
       });
     },
   );
+
+  it('binds the representative provider and ownership-edge rosters literally', () => {
+    expect(NESTED_KEYLIKE_PROVIDER_CASES.map(({ assignment, expectedSecretCount }) => ({
+      assignment,
+      expectedSecretCount,
+    }))).toEqual([
+      { assignment: 'password="xpassword=Bearer alpha"', expectedSecretCount: 1 },
+      {
+        assignment: `password="x/token=ghp_${'z'.repeat(16)}"`,
+        expectedSecretCount: 1,
+      },
+      {
+        assignment: `token="x password=ghp_${'z'.repeat(16)}"`,
+        expectedSecretCount: 1,
+      },
+      { assignment: 'token=x session=Bearer alpha', expectedSecretCount: 2 },
+      {
+        assignment: `credential="xpassword=ghp_${'z'.repeat(16)}"`,
+        expectedSecretCount: 1,
+      },
+      { assignment: 'credential=x/token=Bearer alpha', expectedSecretCount: 1 },
+    ]);
+    expect(PROVIDER_OWNERSHIP_EDGE_CASES.map(({
+      actualEdgeOffset,
+      sourceSuffix,
+      split,
+    }) => ({
+      actualEdgeOffset,
+      sourceSuffix,
+      split,
+    }))).toEqual([
+      {
+        actualEdgeOffset: 512,
+        sourceSuffix: 'password="xpassword=Bearer alpha"',
+        split: 512,
+      },
+      {
+        actualEdgeOffset: 512,
+        sourceSuffix: `credential="x/session=ghp_${'z'.repeat(16)}"`,
+        split: 512,
+      },
+      {
+        actualEdgeOffset: 65_536,
+        sourceSuffix: 'password="xpassword=Bearer alpha"',
+        split: 65_536,
+      },
+      {
+        actualEdgeOffset: 65_536,
+        sourceSuffix: `credential="x/session=ghp_${'z'.repeat(16)}"`,
+        split: 65_536,
+      },
+    ]);
+  });
 
   it.each(PROVIDER_EDGE_CASES)(
     'keeps $caseName exact through restricted $providerName',
@@ -1269,14 +1493,11 @@ describe('managed provider data boundary integration', () => {
       );
       expect({
         actualEdgeOffset,
-        boundaryEventVector: observation.boundaryEventVector,
+        boundaryEventCount: observation.boundaryEvents.length,
         anomalySplits: providerAnomalySummary([observation], expectedSecretCount),
       }).toEqual({
         actualEdgeOffset: split,
-        boundaryEventVector: [{
-          eventType: 'secret_block',
-          secretCount: expectedSecretCount,
-        }],
+        boundaryEventCount: 1,
         anomalySplits: NO_PROVIDER_ANOMALIES,
       });
     },

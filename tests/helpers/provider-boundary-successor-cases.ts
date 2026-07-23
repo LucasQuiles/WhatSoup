@@ -11,6 +11,11 @@ export const SAME_FIELD_ASSIGNMENT_SEPARATORS = [',', ';', '&', '|'] as const;
 export const EMPTY_VALUE_KINDS = ['empty', 'whitespace-empty'] as const;
 export const SPACING_KINDS = ['tight', 'after-separator', 'around-assignment'] as const;
 export const SECOND_VALUE_KINDS = ['unquoted', 'quoted'] as const;
+export const NESTED_OUTER_KEYS = ['password', 'token', 'credential'] as const;
+export const NESTED_INNER_KEYS = ['password', 'token', 'session'] as const;
+export const NESTED_LAYOUT_KINDS = ['adjacent', 'slash', 'whitespace'] as const;
+export const NESTED_QUOTE_KINDS = ['unquoted', 'quoted'] as const;
+export const NESTED_SECRET_FAMILIES = ['bearer', 'known-token'] as const;
 
 const PAIRWISE_AXES = [
   SECRET_ASSIGNMENT_KEYS,
@@ -150,6 +155,77 @@ export const EXPECTED_PAIRWISE_KEYS = new Set(
 
 export const OBSERVED_PAIRWISE_KEYS = new Set(
   EMPTY_ASSIGNMENT_PAIRWISE_CASES.flatMap(({ pairKeys: keys }) => keys),
+);
+
+export const NESTED_KEYLIKE_FACTORIAL_CASES = NESTED_OUTER_KEYS.flatMap(
+  (outerKey) => NESTED_INNER_KEYS.flatMap(
+    (innerKey) => NESTED_LAYOUT_KINDS.flatMap(
+      (layout) => NESTED_QUOTE_KINDS.flatMap(
+        (quoteKind) => NESTED_SECRET_FAMILIES.map((family) => {
+          const layoutPrefix = layout === 'adjacent' ? '' : layout === 'slash' ? '/' : ' ';
+          const secret = family === 'bearer'
+            ? 'Bearer alpha'
+            : `ghp_${'z'.repeat(16)}`;
+          const value = `x${layoutPrefix}${innerKey}=${secret}`;
+          const assignment = `${outerKey}=${quoteKind === 'quoted' ? `"${value}"` : value}`;
+          const marker = family === 'bearer' ? 'Bearer' : 'ghp_';
+          const nestedGrammarStart = assignment.indexOf(marker);
+          if (nestedGrammarStart < 0) {
+            throw new Error(`missing nested marker in ${assignment}`);
+          }
+          return {
+            assignment,
+            caseName: `${outerKey}/${innerKey}/${layout}/${quoteKind}/${family}`,
+            outerKey,
+            innerKey,
+            layout,
+            quoteKind,
+            family,
+            nestedGrammarStart,
+            identityStart: family === 'bearer'
+              ? nestedGrammarStart + 'Bearer '.length
+              : nestedGrammarStart,
+            expectedSecretCount: layout === 'whitespace' && quoteKind === 'unquoted' ? 2 : 1,
+          };
+        }),
+      ),
+    ),
+  ),
+);
+
+export const NESTED_KEYLIKE_PROVIDER_CASES = NESTED_KEYLIKE_FACTORIAL_CASES.filter(
+  ({ outerKey, innerKey, layout, quoteKind, family }) => (
+    (outerKey === 'password'
+      && innerKey === 'password'
+      && layout === 'adjacent'
+      && quoteKind === 'quoted'
+      && family === 'bearer')
+    || (outerKey === 'password'
+      && innerKey === 'token'
+      && layout === 'slash'
+      && quoteKind === 'quoted'
+      && family === 'known-token')
+    || (outerKey === 'token'
+      && innerKey === 'session'
+      && layout === 'whitespace'
+      && quoteKind === 'unquoted'
+      && family === 'bearer')
+    || (outerKey === 'credential'
+      && innerKey === 'password'
+      && layout === 'adjacent'
+      && quoteKind === 'quoted'
+      && family === 'known-token')
+    || (outerKey === 'credential'
+      && innerKey === 'token'
+      && layout === 'slash'
+      && quoteKind === 'unquoted'
+      && family === 'bearer')
+    || (outerKey === 'token'
+      && innerKey === 'password'
+      && layout === 'whitespace'
+      && quoteKind === 'quoted'
+      && family === 'known-token')
+  ),
 );
 
 export const NESTED_KEYLIKE_SECRET_ASSIGNMENTS = [
