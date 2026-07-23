@@ -54,13 +54,24 @@ function isComment(line: string): boolean {
   return line.trimStart().startsWith('#');
 }
 
-function scanFile(abs: string, rel: string): Finding[] {
+/**
+ * `analysed` is false when the file was skipped without being parsed (wrong extension, no
+ * recognised shebang). It exists so the caller can count files it genuinely READ: counting
+ * every file the walker touched would let a directory holding only a `package.json` report
+ * "1 file examined" and satisfy the non-vacuity check while analysing nothing.
+ */
+interface FileScan {
+  findings: Finding[];
+  analysed: boolean;
+}
+
+function scanFile(abs: string, rel: string): FileScan {
   const out: Finding[] = [];
   const py = abs.endsWith('.py');
   const sh = abs.endsWith('.sh');
   // A file with a dot-bearing extension that is NOT .py/.sh is skipped without reading.
   const hasDotInBase = path.basename(abs).includes('.');
-  if (!py && !sh && hasDotInBase) return out;
+  if (!py && !sh && hasDotInBase) return { findings: out, analysed: false };
 
   const lines = readFileSync(abs, 'utf8').split('\n');
 
@@ -74,7 +85,7 @@ function scanFile(abs: string, rel: string): Finding[] {
     } else if (/^#!.*\b(?:ba|da|k|z)?sh\b/.test(firstLine)) {
       isSh = true;
     } else {
-      return out; // no recognised shebang — skip (binary / data guard)
+      return { findings: out, analysed: false }; // no recognised shebang (binary / data guard)
     }
   }
   lines.forEach((raw, i) => {
@@ -87,11 +98,28 @@ function scanFile(abs: string, rel: string): Finding[] {
     if (isSh && SH_REDIRECT.test(line)) push('sh-redirect');
     if (isSh && SH_MKTEMP_BARE.test(line)) push('sh-mktemp');
   });
-  return out;
+  return { findings: out, analysed: true };
 }
 
-export function scanForInsecureTempfile(root: string): Finding[] {
+/**
+ * Scan result plus the number of files actually READ.
+ *
+ * The count is the whole point. A presence check ("does package.json exist?") proves the
+ * scan was pointed somewhere plausible, not that it examined anything — a checkout whose
+ * directories all exist but are empty passes every such proxy while reading zero files.
+ * That gap is why the first attempt at this refusal (`9cf044d45`) was reverted as
+ * incomplete.
+ */
+export interface InsecureTempfileScan {
+  findings: Finding[];
+  /** Files actually PARSED (.py/.sh or a matching shebang) — not files merely walked past. */
+  filesExamined: number;
+}
+
+/** Counting scan. `scanForInsecureTempfile` keeps the original findings-only contract. */
+export function scanForInsecureTempfileCounted(root: string): InsecureTempfileScan {
   const findings: Finding[] = [];
+  let filesExamined = 0;
   // Relative-path directory exclusions (vs the SKIP_DIRS basename set). Both are
   // computed against the scan ROOT, so they do NOT fire when the scan root IS the
   // excluded directory — unit tests call scanForInsecureTempfile(redDir) directly
@@ -110,25 +138,47 @@ export function scanForInsecureTempfile(root: string): Finding[] {
         if (SKIP_RELPATHS.has(path.relative(root, abs))) continue;
         walk(abs);
       } else {
-        findings.push(...scanFile(abs, path.relative(root, abs)));
+        const scan = scanFile(abs, path.relative(root, abs));
+        if (scan.analysed) filesExamined += 1;
+        findings.push(...scan.findings);
       }
     }
   };
   walk(root);
-  return findings;
+  return { findings, filesExamined };
+}
+
+/** Findings only — pure, and legitimately allowed to return []. Unit tests use this. */
+export function scanForInsecureTempfile(root: string): Finding[] {
+  return scanForInsecureTempfileCounted(root).findings;
 }
 
 function main(): number {
   const root = process.argv[2] ?? process.cwd();
-  let findings: Finding[];
+  let scan: InsecureTempfileScan;
   try {
-    findings = scanForInsecureTempfile(root);
+    scan = scanForInsecureTempfileCounted(root);
   } catch (err) {
     console.error(`[insecure-tempfile] FATAL ${(err as Error).message}`); // fail-closed
     return 2;
   }
+  const { findings, filesExamined } = scan;
+
+  // Refuse to certify a tree that was never read. This backs severity:'block' rule
+  // test.insecure-tempfile, so "clean" from a zero-file scan is a false green on a
+  // blocking gate. The check is on files READ, not on paths existing: a decoy checkout
+  // whose directories are all present but empty satisfies any presence proxy while
+  // reading nothing, which is exactly how the reverted version of this refusal failed.
+  if (filesExamined === 0) {
+    console.error(
+      `[insecure-tempfile] INCONCLUSIVE — examined 0 files under ${root}; refusing to ` +
+        'report "clean" for a tree that was never read',
+    );
+    return 2;
+  }
+
   if (findings.length === 0) {
-    console.log('[insecure-tempfile] clean (0 findings)');
+    console.log(`[insecure-tempfile] clean (0 findings across ${filesExamined} file(s))`);
     return 0;
   }
   for (const f of findings) console.error(`  ${f.kind}  ${f.file}:${f.line}  ${f.snippet}`);
