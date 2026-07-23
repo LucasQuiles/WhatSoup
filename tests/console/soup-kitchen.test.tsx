@@ -477,7 +477,13 @@ describe('lines table (mockup single-line anatomy)', () => {
         makeLine({
           name: 'wa-line',
           status: 'online',
-          health: { whatsapp: { connected: true, connection: { state: 'connected' } } },
+          health: {
+            status: 'ok',
+            uptime_seconds: 7200,
+            messages_total: 50,
+            whatsapp: { connected: true, connection: { state: 'connected' } },
+            sqlite: { messages_total: 50, schema_version: 42 },
+          },
         }),
       ],
     });
