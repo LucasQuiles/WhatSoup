@@ -17,6 +17,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { afterAll, describe, expect, it } from 'vitest';
+import { parseDocument } from 'yaml';
 
 import { BASELINE_REGISTRY } from '../../scripts/lib/baseline-weight.ts';
 
@@ -69,6 +70,12 @@ function commitCandidate(dir: string, message: string): void {
   git(dir, ['commit', '-qm', message]);
 }
 
+function replacementCommitFromWorktree(dir: string, parent: string, message: string): string {
+  git(dir, ['add', '-A']);
+  const tree = git(dir, ['write-tree']).trim();
+  return git(dir, ['commit-tree', tree, '-p', parent, '-m', message]).trim();
+}
+
 /**
  * Run the guard and return its raw result.
  *
@@ -91,6 +98,8 @@ describe('baseline growth guard — the red proof', () => {
     const dir = makeRepo(2);
     writeBoundary(dir, 5); // institutionalise 3 more violations
     commitCandidate(dir, 'grow baseline');
+    const baseOid = git(dir, ['rev-parse', 'HEAD^']).trim();
+    const candidateOid = git(dir, ['rev-parse', 'HEAD']).trim();
 
     // Spelled out inline with the guard path as a literal, rather than via runGuard():
     // `guard-test-coverage-check.ts` proves failure-path coverage from the AST, and it
@@ -121,6 +130,7 @@ describe('baseline growth guard — the red proof', () => {
     expect(out).toMatch(/boundary-baseline\.json/);
     expect(out, 'the message must state the actual weights').toMatch(/2 -> 5/);
     expect(out, 'and must say what to do instead').toMatch(/may only shrink/);
+    expect(out).toContain(`--base ${baseOid} --candidate ${candidateOid}`);
   });
 
   it('PASSES (exit 0) when a baseline shrinks', () => {
@@ -149,6 +159,35 @@ describe('baseline growth guard — the red proof', () => {
     writeBoundary(dir, 9); // ambient bytes must not change the exact candidate decision
 
     const { status, out } = runGuard(['--repo', dir, '--base', 'HEAD^', '--candidate', 'HEAD']);
+    expect(status, out).toBe(0);
+  });
+
+  it('BLOCKS committed growth even when a replacement ref points at safe bytes', () => {
+    const dir = makeRepo(2);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeBoundary(dir, 5);
+    commitCandidate(dir, 'grow baseline');
+    const candidate = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeBoundary(dir, 2);
+    const replacement = replacementCommitFromWorktree(dir, base, 'safe replacement');
+    git(dir, ['replace', candidate, replacement]);
+
+    const { status, out } = runGuard(['--repo', dir, '--base', base, '--candidate', candidate]);
+    expect(status, out).toBe(1);
+    expect(out).toMatch(/2 -> 5/);
+  });
+
+  it('PASSES committed shrink even when a replacement ref points at larger bytes', () => {
+    const dir = makeRepo(5);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeBoundary(dir, 1);
+    commitCandidate(dir, 'shrink baseline');
+    const candidate = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeBoundary(dir, 9);
+    const replacement = replacementCommitFromWorktree(dir, base, 'hostile replacement');
+    git(dir, ['replace', candidate, replacement]);
+
+    const { status, out } = runGuard(['--repo', dir, '--base', base, '--candidate', candidate]);
     expect(status, out).toBe(0);
   });
 
@@ -314,24 +353,48 @@ describe('registry coverage — the scan cannot silently narrow', () => {
 });
 
 describe('remote exact-revision wiring', () => {
-  it('binds the blocking workflow step to the exact GitHub candidate OID', () => {
+  const expectedBaseExpression =
+    "${{ github.event_name == 'push' && github.event.before || github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}";
+  const expectedRun =
+    'set -euo pipefail\nnpm run guard:baseline-growth -- --base "$BASELINE_BASE_OID" --candidate "$GITHUB_SHA"';
+
+  function wiringFailures(workflow: string): string[] {
+    const parsed = parseDocument(workflow, { merge: false, stringKeys: true, uniqueKeys: true });
+    if (parsed.errors.length > 0) return parsed.errors.map((error) => error.message);
+    const root = parsed.toJS({ maxAliasCount: 20 }) as {
+      jobs?: { quality?: { steps?: Array<Record<string, unknown>> } };
+    };
+    const steps = root.jobs?.quality?.steps ?? [];
+    const matching = steps.filter((step) => step.name === 'Baseline growth guard');
+    if (matching.length !== 1) return [`expected one baseline step, got ${matching.length}`];
+    const step = matching[0]!;
+    const env = step.env as Record<string, unknown> | undefined;
+    return [
+      env?.BASELINE_BASE_OID === expectedBaseExpression ? null : 'exact base expression missing',
+      typeof step.run === 'string' && step.run.trim() === expectedRun
+        ? null
+        : 'exact fail-closed command missing',
+      'if' in step ? 'baseline step must not be conditional' : null,
+      'continue-on-error' in step ? 'baseline step must not ignore failure' : null,
+    ].filter((failure): failure is string => failure !== null);
+  }
+
+  it('structurally binds the blocking step to exact event base and candidate OIDs', () => {
     const workflow = readFileSync(resolve(repoRoot, '.github/workflows/quality.yml'), 'utf8');
-    expect(workflow).toContain('--candidate "$GITHUB_SHA"');
+    expect(wiringFailures(workflow)).toEqual([]);
   });
 
-  it('binds the base to the exact event predecessor for push, PR, and merge-group runs', () => {
+  it('rejects a workflow mutation that weakens the exact candidate binding', () => {
     const workflow = readFileSync(resolve(repoRoot, '.github/workflows/quality.yml'), 'utf8');
-    expect(workflow).toContain("github.event_name == 'push' && github.event.before");
-    expect(workflow).toContain("github.event_name == 'pull_request' && github.event.pull_request.base.sha");
-    expect(workflow).toContain('github.event.merge_group.base_sha');
-    expect(workflow).toContain('--base "$BASELINE_BASE_OID" --candidate "$GITHUB_SHA"');
+    const weakened = workflow.replace('--candidate "$GITHUB_SHA"', '--candidate HEAD');
+    expect(wiringFailures(weakened)).toContain('exact fail-closed command missing');
   });
 });
 
 describe('the guard runs clean on this branch', () => {
   it('reports no baseline growth against the merge base', () => {
     // Green-on-arrival: wiring a guard that is already red would block every unrelated PR.
-    const { status, out } = runGuard([]);
+    const { status, out } = runGuard(['--base', 'HEAD^', '--candidate', 'HEAD']);
     expect(status, `guard is not green on arrival:\n${out}`).toBe(0);
   });
 });

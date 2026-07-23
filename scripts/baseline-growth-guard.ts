@@ -18,7 +18,6 @@
  *   2  INCONCLUSIVE — a revision or document could not be read, so growth cannot be ruled
  *      out. Never reported as a pass: "could not look" is not "nothing changed".
  */
-import { execFileSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -30,12 +29,18 @@ import {
   weighBaseline,
 } from './lib/baseline-weight.ts';
 import { CliArgError, assertKnownFlag, isHelpFlag, takeValue } from './lib/cli-args.ts';
-import { cleanGitEnv } from './lib/guard-core.ts';
-import { readGitTextAtRevision } from './lib/semantic-quality/git-tree.ts';
+import {
+  FULL_OID,
+  MAX_EXACT_SINGLE_BLOB_BYTES,
+  UTF8,
+  gitBytes,
+  type ExactGitInputErrorCode,
+} from './lib/ci-control/git-input-core.ts';
 
 const EXIT_PASS = 0;
 const EXIT_BLOCK = 1;
 const EXIT_INCONCLUSIVE = 2;
+const MAX_GIT_IDENTITY_BYTES = 64 * 1024;
 
 const defaultRepoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -88,18 +93,16 @@ function parseOptions(argv: readonly string[]): Options | 'help' {
  */
 function resolveCommit(revision: string, repoRoot: string): string | null {
   try {
-    const out = execFileSync(
-      'git',
+    const out = UTF8.decode(
+      gitBytes(
+        repoRoot,
       ['rev-parse', '--verify', '--end-of-options', `${revision}^{commit}`],
-      {
-        cwd: repoRoot,
-        encoding: 'utf8',
-        env: cleanGitEnv(),
-        stdio: ['ignore', 'pipe', 'pipe'],
-      },
+        'ci.input.revision-unavailable',
+        MAX_GIT_IDENTITY_BYTES,
+      ),
     );
     const oid = out.trim();
-    return /^[0-9a-f]{40}$/.test(oid) ? oid : null;
+    return FULL_OID.test(oid) ? oid : null;
   } catch {
     return null;
   }
@@ -109,12 +112,14 @@ function resolveBase(explicit: string | null, repoRoot: string, candidateOid: st
   if (explicit) return resolveCommit(explicit, repoRoot);
   for (const baseRef of ['origin/main', 'main']) {
     try {
-      const out = execFileSync('git', ['merge-base', baseRef, candidateOid], {
-        cwd: repoRoot,
-        encoding: 'utf8',
-        env: cleanGitEnv(),
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
+      const out = UTF8.decode(
+        gitBytes(
+          repoRoot,
+          ['merge-base', baseRef, candidateOid],
+          'ci.classification.merge-base-unavailable',
+          MAX_GIT_IDENTITY_BYTES,
+        ),
+      );
       const oid = out.trim();
       if (oid) return oid;
     } catch {
@@ -129,11 +134,12 @@ function baseRelationError(baseOid: string, candidateOid: string, repoRoot: stri
     return 'base and candidate must differ; comparing a revision with itself cannot detect growth';
   }
   try {
-    execFileSync('git', ['merge-base', '--is-ancestor', baseOid, candidateOid], {
-      cwd: repoRoot,
-      env: cleanGitEnv(),
-      stdio: ['ignore', 'ignore', 'pipe'],
-    });
+    gitBytes(
+      repoRoot,
+      ['merge-base', '--is-ancestor', baseOid, candidateOid],
+      'ci.classification.merge-base-unavailable',
+      MAX_GIT_IDENTITY_BYTES,
+    );
     return null;
   } catch {
     return `base ${baseOid} is not an ancestor of candidate ${candidateOid}`;
@@ -155,17 +161,36 @@ type Weighing =
   | { kind: 'absent' }
   | { kind: 'error'; message: string };
 
+function exactGitText(
+  repoRoot: string,
+  args: readonly string[],
+  code: ExactGitInputErrorCode,
+  maxBytes: number,
+): string {
+  return UTF8.decode(gitBytes(repoRoot, args, code, maxBytes));
+}
+
 function weighAt(revision: string, path: string, repoRoot: string): Weighing {
   let text: string;
   try {
-    text = readGitTextAtRevision({ cwd: repoRoot, revision, path });
-  } catch (error) {
-    // A path missing at a revision is genuinely absent there; anything else is a real
-    // read failure and must stay distinguishable from it.
-    const message = error instanceof Error ? error.message : String(error);
-    if (/does not exist|exists on disk, but not in|path .* does not exist/i.test(message)) {
-      return { kind: 'absent' };
+    const listing = exactGitText(
+      repoRoot,
+      ['ls-tree', '-z', '--name-only', revision, '--', path],
+      'ci.input.tree-entry-unavailable',
+      MAX_GIT_IDENTITY_BYTES,
+    );
+    if (listing.length === 0) return { kind: 'absent' };
+    if (listing !== `${path}\0`) {
+      return { kind: 'error', message: `${path} did not resolve to one exact tree entry` };
     }
+    text = exactGitText(
+      repoRoot,
+      ['cat-file', 'blob', `${revision}:${path}`],
+      'ci.input.blob-unavailable',
+      MAX_EXACT_SINGLE_BLOB_BYTES,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
     return { kind: 'error', message };
   }
 
@@ -285,7 +310,8 @@ function main(): number {
   if (grew.length > 0) {
     console.error(
       `\n${grew.length} baseline(s) grew against ${base}. Reproduce with:\n` +
-        '  ./scripts/run-with-pinned-node.sh scripts/baseline-growth-guard.ts --json',
+        `  ./scripts/run-with-pinned-node.sh scripts/baseline-growth-guard.ts ` +
+        `--base ${base} --candidate ${candidate} --json`,
     );
     return EXIT_BLOCK;
   }
