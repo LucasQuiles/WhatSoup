@@ -81,6 +81,8 @@
   flex-direction: column;
 }
 .inbox-list__scroll { flex: 1; overflow: auto; min-height: 0; }
+.inbox-list__lane { position: relative; }
+.inbox-list__row { position: absolute; top: 0; left: 0; width: 100%; }
 .inbox-list__empty {
   color: var(--text-3-v35);
   font: 400 var(--text-data) / 1.35 var(--font-body);
@@ -403,11 +405,15 @@
   height: var(--inbox-composer-h);
   color: var(--text-1-v35);
   font: inherit;
-  outline: none;
   min-width: 0;
 }
 .inbox-input::placeholder { color: var(--text-3-v35); }
 .inbox-input:focus { border-color: var(--accent-v35); }
+/* Focus ring — the design language's global idiom; never suppressed. */
+.inbox-input:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
 .inbox-send {
   height: var(--inbox-composer-h);
   padding: 0 var(--inbox-send-pad-x);

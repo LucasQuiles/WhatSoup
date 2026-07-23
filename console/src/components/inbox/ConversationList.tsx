@@ -117,7 +117,7 @@ export function ConversationList({
             No conversations
           </div>
         ) : virtualized ? (
-          <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
+          <div className="inbox-list__lane" style={{ height: virtualizer.getTotalSize() }}>
             {virtualizer.getVirtualItems().map((row) => {
               const c = conversations[row.index]!
               const id = conversationId(c.line, c.conversationKey)
@@ -126,7 +126,8 @@ export function ConversationList({
                   key={id}
                   data-index={row.index}
                   ref={virtualizer.measureElement}
-                  style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${row.start}px)` }}
+                  className="inbox-list__row"
+                  style={{ transform: `translateY(${row.start}px)` }}
                 >
                   <ConversationItem
                     conversation={c}
