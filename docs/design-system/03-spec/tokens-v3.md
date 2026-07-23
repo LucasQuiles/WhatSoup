@@ -652,3 +652,35 @@ stylesheet (`console/src/styles/chrome.css`) consumes `var()` only: colors from 
   caps).
 - **Shape details** — `--chrome-micro-radius` 1px (tick/dot/host-warn corner; badge.md
   shape family), `--chrome-pill-radius` 99px + `--chrome-attn-pad` (header attn pill).
+
+## 12. v3.5 inbox geometry (docs/design-system/v35/mockups/inbox.html, landed b-07)
+
+Component-tier dimension tokens in `console/src/styles/tokens.component.css`, single
+`:root` scope (theme-independent geometry; parity count unaffected). Mockup literals
+are the visual SSOT — they live in the `--inbox-*` block once, so `inbox.css`
+consumes `var()` only. Colors from the `-v35` semantic addendum (§A), radii from the
+console register where the mockup matches it.
+
+- **Chips row** — `--inbox-chips-{gap,pad}`, `--inbox-chip-{gap,pad}` (channel filter
+  chips, radius `--chrome-pill-radius`).
+- **3-pane grid** — `--inbox-list-w` 300px / `--inbox-list-w-narrow` 280px /
+  `--inbox-ctx-w` 260px, `--inbox-wrap-mt`. Breakpoints are the mockup's own:
+  context pane hides ≤1100px (shared with chrome), list hides ≤760px — the fifth
+  distinct SSOT stacking breakpoint (chrome/fleet 1100, agents 1000, dream 980,
+  skills 900, inbox 760).
+- **List anatomy** — `--inbox-seg-*`, `--inbox-citem-*`, `--inbox-ava` 34px
+  (`--inbox-ava-radius` 9px direct / `--inbox-ava-grp-radius` 6px rooms),
+  `--inbox-ava-glyph` 12px channel badge with `--inbox-ava-glyph-off` −3px corner
+  offset, `--inbox-badges-*`, `--inbox-ub-pad` (unread + takeover badges).
+- **Thread anatomy** — `--inbox-thead-*`, takeover toggle `--inbox-tgl-{w,h,knob,
+  inset,travel}` (32×18px track, 14px knob, 14px travel), `--inbox-msgs-*`,
+  `--inbox-mrow-{gap,maxw}` (78% row cap), `--inbox-ma` 24px, `--inbox-bub-*`
+  (12px radius, 2px group-sender accent), `--inbox-sys-pad` (system pill).
+- **Composer** — `--inbox-composer-{gap,pad,h}` with **`--inbox-composer-h` 36px
+  the uniform control height (bead acceptance item)** consumed by caps, input,
+  and Send alike; `--inbox-cap-radius`, `--inbox-input-{radius,pad}`.
+- **Context pane** — `--inbox-ctx-{pad,h3-m}`, `--inbox-pcard-*`,
+  `--inbox-idrow-{gap,pad-y}`, `--inbox-agcard-*`, `--tracking-inbox-caps` 0.1em.
+- **Retired** — `--inbox-pane-chats` / `--inbox-pane-contact` (v3 pane widths):
+  the v3 inbox page they sized is replaced by this surface; the v3.5 grid owns
+  pane widths.

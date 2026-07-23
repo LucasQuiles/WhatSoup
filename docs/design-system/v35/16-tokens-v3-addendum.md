@@ -48,7 +48,22 @@ non-avatar elements (except `agent-dream`, which is the agent-mode channel, not 
 Rule: a surface consumes exactly one namespace; cross-register consumption is a lint
 error (L4 broad enforcement).
 
-## 5. Acceptance gate
+## 5. Inbox surface geometry (`--inbox-*`, T5 b-07)
+
+Component-register geometry for the Inbox surface, all traced to `mockups/inbox.html`:
+channel chips row, seg control, conversation list (300px, avatar anatomy with the
+12px channel-glyph badge, unread + takeover badges), thread (bottom-anchored message
+lane, 78% row cap, takeover toggle 32×18px with 14px knob/travel), **composer with
+the uniform 36px control height — the bead acceptance item** (caps, input, and Send
+all consume `--inbox-composer-h`), and the context pane (person/agent/line cards,
+identity rows). Breakpoints are the mockup's own: context pane hides ≤1100px,
+list hides ≤760px — the fifth distinct SSOT stacking breakpoint (chrome/fleet
+1100px, agents 1000px, dream 980px, skills 900px, inbox 760px). Spec SSOT:
+`tokens-v3.md` §12. Same pattern as b-02…b-06: raw mockup dimensions land in the
+token block once; `inbox.css` consumes `var()` only. The v3 pane widths
+(`--inbox-pane-chats`/`--inbox-pane-contact`) are retired with the v3 page.
+
+## 6. Acceptance gate
 
 - [ ] No `channel-*` token carries a hue (computed check).
 - [ ] `agent-hue-*` used only on avatar fills + nowhere else (consumer audit).
