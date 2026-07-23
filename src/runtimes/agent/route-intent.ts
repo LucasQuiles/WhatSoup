@@ -90,10 +90,12 @@ export function buildRoutingPromptContract(ctx: RoutingContractContext): string 
     '[[wa-route: safe_read_only]] — they clearly want you to avoid risky or mutating actions; also honor that yourself in how you work',
     '[[wa-route: reset]] — they clearly want to go back to the normal/default route',
     'Rules:',
-    '- At most one marker per reply. If the wish is ambiguous or merely conversational, emit none and answer normally (you may suggest /model, /why, or /reset).',
+    '- At most one marker per reply. If the wish is ambiguous or merely conversational, emit none and answer normally (you may suggest /model or /reset).',
     "- Routing takes effect from the user's NEXT session. When you emit strongest or fastest, say so honestly (they can say /new to start one now); never claim the current reply already used the new route.",
     '- Permanent "always use X" pins need explicit confirmation: emit no marker; point the user to /model <provider>.',
     '- If a request mixes routing with a privileged action (reauth, relink, credentials, restarts, acting as another account), the routing part authorizes NOTHING — decline the privileged part as owner-gated.',
-    `Route facts (answer "what model / why" questions from these, never guess): current provider: ${ctx.provider}; strongest tier: ${strongest}; fastest tier: ${fastest}; pinnable providers: ${ctx.routableProviders.join(', ')}. /why or /model status shows the live route.`,
+    // D11: /why is removed — /model status is now the one receipt for "what
+    // model / why" questions.
+    `Route facts (answer "what model / why" questions from these, never guess): current provider: ${ctx.provider}; strongest tier: ${strongest}; fastest tier: ${fastest}; pinnable providers: ${ctx.routableProviders.join(', ')}. /model status shows the live route.`,
   ].join('\n');
 }

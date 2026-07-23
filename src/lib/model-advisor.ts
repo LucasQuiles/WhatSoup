@@ -311,6 +311,36 @@ export async function fetchAnthropicModelIdsWithStatus(
   return { status: 'ok', ids: result.ids };
 }
 
+const OPENAI_MODELS_URL = 'https://api.openai.com/v1/models';
+
+/** OpenAI-only live model listing, classified — the openai-adapter sibling of
+ *  {@link AnthropicModelsResult}. OpenAI has no OAuth/CLI-refreshed credential
+ *  concept (API key only), so there is no 'credential-expired' state here. */
+export type OpenAIModelsResult =
+  | { status: 'ok'; ids: string[] }
+  | { status: 'no-key' }
+  | { status: 'failed'; category: ModelFetchFailureCategory };
+
+/**
+ * Fetch the OpenAI account's live model catalogue for the `/config model`
+ * resolver (openai harness). Reuses the internal `fetchModelIds` + the shared
+ * classifier — same DRY reasoning as {@link fetchAnthropicModelIdsWithStatus}:
+ * deliberately NOT `fetchLiveModelIdsWithStatus`, which flattens every vendor
+ * into one list and cannot tag an id's vendor, so a claude id could render
+ * under an `openai /v1/models` provenance line (Q 2b). The URL matches the
+ * qualified `openai` probe endpoint in `provider-credential-probes.ts`
+ * (proven to 401 cleanly on a bad key).
+ */
+export async function fetchOpenAIModelIdsWithStatus(): Promise<OpenAIModelsResult> {
+  const openaiKey = resolveApiKey({ envVar: 'OPENAI_API_KEY' });
+  if (!openaiKey) return { status: 'no-key' };
+  const result = await fetchModelIds(OPENAI_MODELS_URL, { Authorization: `Bearer ${openaiKey}` }, 'openai');
+  if (result.failure) {
+    return { status: 'failed', category: classifyModelFetchFailure(result.failure) };
+  }
+  return { status: 'ok', ids: result.ids };
+}
+
 // ---------------------------------------------------------------------------
 // Live-ID cache + symbolic model resolution
 //

@@ -98,21 +98,32 @@ import {
   ensureChatPreferenceSchema,
   getPreference,
   setPreference,
-  clearPreference,
   pruneExpired,
+  getLatestChatPreference,
+  clearChatPreference,
   type ChatModelPreference,
   type PreferenceIntent,
 } from './chat-preference-db.ts';
 import { preferenceKeys } from './preference-keys.ts';
 import { resolveRoute, type RouteDecision } from './route-resolution.ts';
+import { decideModelPinResolution } from './config-surface.ts';
+import type { fetchAnthropicModelIdsWithStatus } from '../../lib/model-advisor.ts';
 import { deriveChatScope, emitRouteEvent, type ModelRouteEvent } from './route-events.ts';
 import { buildRoutingPromptContract, extractRouteIntents } from './route-intent.ts';
-import { isProviderId } from './providers/index.ts';
+import { createCatalogueSnapshotCache, type CatalogueSnapshotCache } from './model-snapshot-cache.ts';
+import { tiersConfigured as modelTiersConfigured } from './model-catalogue-render.ts';
+import {
+  handleModelCommand,
+  applyRouteChangeAndRecycle as applyRouteChangeAndRecycleForPort,
+  consumePendingRecycleIfIdle as consumePendingRecycleIfIdleForPort,
+  PREFERENCE_TTL_MS,
+  type ModelPinPort,
+  type RouteRecycleOutcome,
+} from './model-pin.ts';
 import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
 import { formatChatRefForOwner } from '../../core/chat-display-name.ts';
-import { OWNER_BULLET, bulletedSection, modelModifierTags, modifierSuffix, formatAvailableModels, MODEL_CATALOGUE_CAP } from './owner-render-format.ts';
-import { resolveModelCatalogue } from './model-catalogue-resolver.ts';
+import { bulletedSection } from './owner-render-format.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
 import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
@@ -209,7 +220,7 @@ import {
   type OpencodeProviderConfig,
 } from './providers/mcp-bridge.ts';
 import { verifyFallbackCredential } from './providers/credential-verify.ts';
-import { probeFallbackBinary, probeModelCatalog, probeBinaryAuthStatus } from './providers/binary-preflight.ts';
+import { probeFallbackBinary, probeModelCatalog, probeBinaryAuthStatus, type listModelCatalog } from './providers/binary-preflight.ts';
 import {
   probePrimaryModelUsability,
   primaryModelUsabilityRequiresAlert,
@@ -492,6 +503,16 @@ export interface AgentRuntimeOptions {
    * registered (the agent cannot restart itself without it).
    */
   serviceRestarter?: ServiceRestarter;
+  /**
+   * Test-injectable catalogue probes for the `/model N` pin-time verify
+   * (Task H — resolveModelCatalogue's own listFn/anthropicFn seam, threaded
+   * one level further out so a test constructing the runtime can supply a
+   * fake catalogue without spawning a real binary or hitting a real
+   * keychain). Undefined in production — resolveModelCatalogue falls back
+   * to the real probes.
+   */
+  modelCatalogueListFn?: typeof listModelCatalog;
+  modelCatalogueAnthropicFn?: typeof fetchAnthropicModelIdsWithStatus;
 }
 
 export type RuntimePrimaryModelUsability = PrimaryModelUsabilityResult & {
@@ -613,9 +634,6 @@ export {
   isProviderModelUnavailableMessage,
 } from './failure-taxonomy.ts';
 import { errorMessage } from '../../lib/error-message.ts';
-
-/** TTL for this_thread route preferences (echoed in user copy as "24h"). */
-const PREFERENCE_TTL_MS = 24 * 60 * 60 * 1000;
 
 function providerDisplayName(provider: string): string {
   switch (provider) {
@@ -788,6 +806,9 @@ export class AgentRuntime implements Runtime {
    *  independent of the static primary/fallback config. Mutable only in tests. */
   private nlRoutingEnabled: boolean = config.nlRouting === true;
   private readonly serviceRestarter: ServiceRestarter | undefined;
+  /** Task H injectable catalogue seam (AgentRuntimeOptions doc comment) — undefined in production. */
+  private readonly modelCatalogueListFn: typeof listModelCatalog | undefined;
+  private readonly modelCatalogueAnthropicFn: typeof fetchAnthropicModelIdsWithStatus | undefined;
   private readonly pluginDirs: string[];
   private readonly enabledPlugins: Record<string, boolean> | undefined;
   private readonly allowM365Mutations: boolean | undefined;
@@ -799,6 +820,11 @@ export class AgentRuntime implements Runtime {
   private readonly agentFallbacks: AgentFallbackEntry[];
   private readonly replyGuaranteeTimeoutMs: number;
   private readonly registry: ToolRegistry;
+  /** Coordinate snapshot for numbered-drill stability (D16/D17) — the exact
+   *  ordered catalogue a `/model list` render showed, so `/model N` resolves
+   *  against what the user actually saw. Not wired to any consumer besides
+   *  the /model list render + apply path added in this task. */
+  private readonly catalogueSnapshot: CatalogueSnapshotCache;
 
   // single mode: one session, one queue
   private session: SessionManager | null = null;
@@ -1422,35 +1448,41 @@ export class AgentRuntime implements Runtime {
     });
   }
 
-  private assertNoActiveUserTurn(scopeKey: string): void {
+  /**
+   * True while a turn is dispatching/pending for scopeKey — per-chat
+   * (perChatInboundSeqQueue + that chat's runtime TurnQueue) or the single/
+   * shared scope (currentInboundSeq/currentTurnChatJid + the global
+   * turnQueue). Pure predicate, no throw — shared by assertNoActiveUserTurn
+   * (which throws for command rejection) and Task G's recycle gating (which
+   * must never throw: a busy chat defers the recycle instead of rejecting
+   * the pin that triggered it).
+   */
+  private isTurnInFlight(scopeKey: string): boolean {
     if (this.sessionScope === 'per_chat') {
       const runtimeQueue = this.perChatTurnQueues.get(scopeKey);
-      if (
+      return (
         (this.perChatInboundSeqQueue.get(scopeKey)?.length ?? 0) > 0
         || runtimeQueue?.isProcessing === true
         || (runtimeQueue?.pending ?? 0) > 0
-      ) {
-        throw new AgentCommandRuntimeError(
-          'turn_in_progress',
-          'agent command rejected because the target chat already has a turn in progress',
-          409,
-        );
-      }
-      return;
+      );
     }
-
-    if (
+    return (
       this.currentInboundSeq !== undefined
       || this.currentTurnChatJid !== null
       || this.turnQueue.isProcessing
       || this.turnQueue.pending > 0
-    ) {
-      throw new AgentCommandRuntimeError(
-        'turn_in_progress',
-        'agent command rejected because the agent already has a turn in progress',
-        409,
-      );
-    }
+    );
+  }
+
+  private assertNoActiveUserTurn(scopeKey: string): void {
+    if (!this.isTurnInFlight(scopeKey)) return;
+    throw new AgentCommandRuntimeError(
+      'turn_in_progress',
+      this.sessionScope === 'per_chat'
+        ? 'agent command rejected because the target chat already has a turn in progress'
+        : 'agent command rejected because the agent already has a turn in progress',
+      409,
+    );
   }
 
   private getOpenFileDescriptorCount(): number | null {
@@ -1831,6 +1863,14 @@ export class AgentRuntime implements Runtime {
   private readonly perChatRuntimeTurnScopeRefs = new Map<string, PerChatRuntimeScopeRef>();
   /** One FIFO per chat: provider dispatch N+1 waits for turn N's durable outcome. */
   private perChatTurnQueues = new Map<string, TurnQueue>();
+  /**
+   * Task G (D14): scope keys (per-chat mapKey, or GLOBAL_TOOL_SCOPE_KEY for
+   * single/shared) whose live session recycle was deferred because a turn
+   * was in flight at pin time. Consumed at the next turn-idle boundary — the
+   * top of ensureSessionAndQueueSync, which every inbound message reaches
+   * BEFORE any turn dispatch (see consumePendingRecycleIfIdle).
+   */
+  private pendingRecycle = new Set<string>();
   /** Mutable callback key for a queue that may be re-keyed from LID to phone JID. */
   private readonly perChatTurnQueueKeys = new WeakMap<TurnQueue, PerChatRuntimeScopeRef>();
   /** The sole shared/singleton user turn whose provider result is still unresolved. */
@@ -1842,6 +1882,8 @@ export class AgentRuntime implements Runtime {
   private readonly runtimeTurnSupervisor: RuntimeTurnSupervisor<RuntimeTurnPostEffects>;
   private readonly runtimeTurnHost: RuntimeTurnCoordinatorPort & RuntimeResultHandlerPort;
   private readonly runtimeTurnCoordinator: RuntimeTurnCoordinator;
+  /** Host object backing model-pin.ts / model-catalogue-render.ts (the `/model` surface). */
+  private readonly modelPinHost: ModelPinPort;
   private readonly runtimeTurnAfterTerminal = new Map<string, RuntimeTurnAfterTerminalAction>();
   private readonly recoveryManagerId = randomUUID();
   private recoveryGeneration = 0;
@@ -2369,6 +2411,8 @@ export class AgentRuntime implements Runtime {
     this.sandboxPerChat = options?.sandboxPerChat ?? false;
     this.perChatConversationBound = options?.perChatConversationBound ?? false;
     this.serviceRestarter = options?.serviceRestarter;
+    this.modelCatalogueListFn = options?.modelCatalogueListFn;
+    this.modelCatalogueAnthropicFn = options?.modelCatalogueAnthropicFn;
     this.workspaceSweeper = new WorkspaceSweeper(
       this.sandboxPerChat,
       this.workspaceResources,
@@ -2398,6 +2442,7 @@ export class AgentRuntime implements Runtime {
     );
     this.registry = new ToolRegistry();
     this.registerAllTools();
+    this.catalogueSnapshot = createCatalogueSnapshotCache();
 
     this.turnQueue = new TurnQueue({
       maxDepth: config.agentMaxQueueDepth,
@@ -2411,6 +2456,7 @@ export class AgentRuntime implements Runtime {
     this.turnQueue.setProcessor((turn) => this.processTurn(turn));
     this.runtimeTurnHost = this.createRuntimeTurnHost();
     this.runtimeTurnCoordinator = new RuntimeTurnCoordinator(this.runtimeTurnHost);
+    this.modelPinHost = this.createModelPinHost();
 
     // Subscribe to poll vote events for AskUserQuestion → Poll bridge
     const connection = this.messenger as ConnectionManager;
@@ -2422,6 +2468,54 @@ export class AgentRuntime implements Runtime {
         this.handlePollVoteFailed(data);
       });
     }
+  }
+
+  /**
+   * Host object for the extracted `/model` surface (model-pin.ts,
+   * model-catalogue-render.ts) — same shape as createRuntimeTurnHost: readonly
+   * state is captured by value, the four fields recycleLiveSession mutates are
+   * get/set pairs, and every collaborator is a bound delegate.
+   */
+  private createModelPinHost(): ModelPinPort {
+    const runtime = this;
+    return {
+      db: runtime.db,
+      instanceName: runtime.instanceName,
+      sessionScope: runtime.sessionScope,
+      agentProvider: runtime.agentProvider,
+      agentProviderConfig: runtime.agentProviderConfig,
+      model: runtime.model,
+      agentFallbacks: runtime.agentFallbacks,
+      catalogueSnapshot: runtime.catalogueSnapshot,
+      nlRoutingTiers: config.nlRoutingTiers,
+      pendingRecycle: runtime.pendingRecycle,
+      chatSessions: runtime.chatSessions,
+      chatQueues: runtime.chatQueues,
+      modelCatalogueListFn: runtime.modelCatalogueListFn,
+      modelCatalogueAnthropicFn: runtime.modelCatalogueAnthropicFn,
+      get runtimeTurnCoordinator() { return runtime.runtimeTurnCoordinator; },
+      get session() { return runtime.session; },
+      set session(value) { runtime.session = value; },
+      get queue() { return runtime.queue; },
+      set queue(value) { runtime.queue = value; },
+      get activeChatJid() { return runtime.activeChatJid; },
+      set activeChatJid(value) { runtime.activeChatJid = value; },
+      get operationTracker() { return runtime.operationTracker; },
+      set operationTracker(value) { runtime.operationTracker = value; },
+      sendDirect: (chatJid, text) => runtime.sendDirect(chatJid, text),
+      resolveRouteForTurn: (chatJid, actorJid) => runtime.resolveRouteForTurn(chatJid, actorJid),
+      resolvePerChatMapKey: (chatJid) => runtime.resolvePerChatMapKey(chatJid),
+      isTurnInFlight: (scopeKey) => runtime.isTurnInFlight(scopeKey),
+      getActiveQueue: () => runtime.getActiveQueue(),
+      deleteOwnedPerChatSession: (mapKey, expected) => runtime.deleteOwnedPerChatSession(mapKey, expected),
+      cleanupPerChatState: (mapKey, options) => runtime.cleanupPerChatState(mapKey, options),
+      cleanupGlobalAutoCompactState: () => runtime.cleanupGlobalAutoCompactState(),
+      emitRouteEventChecked: (ev) => runtime.emitRouteEventChecked(ev),
+      recordRoutePreference: (chatJid, chatKey, senderKey, intent, requestedProvider) =>
+        runtime.recordRoutePreference(chatJid, chatKey, senderKey, intent, requestedProvider),
+      routablePinTargets: () => runtime.routablePinTargets(),
+      renderRouteStatus: (chatJid, senderJid) => runtime.renderRouteStatus(chatJid, senderJid),
+    };
   }
 
   private createRuntimeTurnHost(): RuntimeTurnCoordinatorPort & RuntimeResultHandlerPort {
@@ -2846,6 +2940,18 @@ export class AgentRuntime implements Runtime {
           if (this.resumeFailedHandling.has(lidKey)) {
             this.resumeFailedHandling.delete(lidKey);
             this.resumeFailedHandling.add(canonical);
+          }
+          // MINOR 4 (final-review): carry a deferred route recycle (Task G,
+          // a /model pin that arrived while the chat was busy) onto the
+          // canonical key too — without this, a mapKey migration between the
+          // defer and its consumption (ensureSessionAndQueueSync's next-
+          // inbound check, keyed by the CURRENT canonical key) would strand
+          // the flag under the dead lidKey and silently drop the recycle
+          // (the pin still applies on the next fresh spawn, so this is
+          // non-destructive either way — but cheap to carry correctly).
+          if (this.pendingRecycle.has(lidKey)) {
+            this.pendingRecycle.delete(lidKey);
+            this.pendingRecycle.add(canonical);
           }
           // Migrate auto-compact cooldown/last-success/rapid-rearm/measure state
           // from the LID key onto the canonical JID (silent timers, boundary set,
@@ -4033,109 +4139,17 @@ export class AgentRuntime implements Runtime {
 
           case 'model': {
             // NL-first routing alias (owner-approved design). Records a
-            // per-sender REASONING preference and renders route visibility —
+            // chat-scoped REASONING preference and renders route visibility —
             // never tool, mutation, or authority changes (capability-preserved
             // routing). Reachable only when agentOptions.nlRouting is true (the
-            // classifier gates on the same flag).
-            const sub = (classified.args ?? 'status').trim().toLowerCase();
-            const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, msg.senderJid);
-            if (sub === '' || sub === 'status') {
-              // Opportunistic retention sweep on read (F13); also runs at init.
-              // Fail-open (R11): a store error on the sweep must not throw out of
-              // this read-only handler — status still renders on the default route.
-              try {
-                pruneExpired(this.db);
-              } catch (err) {
-                log.warn({ err, instance: this.instanceName }, 'pruneExpired failed during /model status - continuing');
-              }
-              // B26: bare /model gets ONE discoverability affordance line for
-              // the catalogue; an explicit /model status stays as-is.
-              const routeStatus = this.renderRouteStatus(chatJid, msg.senderJid);
-              this.sendDirect(
-                chatJid,
-                classified.args === undefined
-                  ? `${routeStatus}\n_/model list — see what you can pick_`
-                  : routeStatus,
-              );
-              break;
-            }
-            if (sub === 'list' || sub.startsWith('list ')) {
-              // The config-derived pin/primary block renders synchronously and
-              // unconditionally (Q 2b#1). The DYNAMIC per-harness available-models
-              // section is appended by an async, fire-and-forget path so a slow or
-              // failed harness probe never holds the turn (Q 2b#3); it degrades
-              // independently to a reason-specific "unavailable" line.
-              const rawArgs = (classified.args ?? '').trim();
-              const filter = sub === 'list'
-                ? null
-                : rawArgs.slice(rawArgs.toLowerCase().indexOf('list ') + 'list '.length).trim() || null;
-              // The config-derived pin/primary block sends IMMEDIATELY so "what
-              // am I on" never waits on — or is lost to — the catalogue probe
-              // (Q 2b#1).
-              this.sendDirect(chatJid, this.renderModelCatalogue());
-              // The dynamic per-harness available-models section follows as a
-              // separate message once the bounded + cached probe resolves —
-              // fire-and-forget so a slow harness never holds the turn (Q 2b#3).
-              void this.sendDynamicModelCatalogueSection(chatJid, filter);
-              break;
-            }
-            if (sub === 'default') {
-              // R8: clear the sender's route override, then forward /model
-              // default to the CLI so its own model reset still runs — do not
-              // shadow that base capability. The forwarded turn owns terminal
-              // inbound durability, so this path must NOT complete it locally.
-              this.clearRoutePreference(chatJid, chatKey, senderKey);
-              forwardAfterLocalCommand = content as string;
-              break;
-            }
-            const isIntent = sub === 'strongest' || sub === 'fastest';
-            const isProvider = isProviderId(sub);
-            if (isProvider) {
-              const routable = this.routablePinTargets();
-              if (!routable.includes(sub)) {
-                // A pin this instance cannot honor must fail at SET time (F07):
-                // recording it would force slice-2 resolution into either a
-                // hard-fail or a silent fallback. No row is written.
-                this.sendDirect(
-                  chatJid,
-                  `_${sub} isn't available on this instance. Available: ${routable.join(', ')}. /model status shows the current route._`,
-                );
-                break;
-              }
-            }
-            if (!isIntent && !isProvider) {
-              // Out-of-contract value: no state change, honest reply (UH-001).
-              // Never echo unbounded user text into a (possibly group) chat:
-              // strip markdown-breaking chars and cap the length (F03).
-              // Defense-in-depth: unreachable while classifyInput admits only the
-              // recognized /model grammar (bare | verb | provider-id), so a
-              // non-verb/non-provider `sub` never arrives here. Kept as a
-              // fail-safe against any future widening of that grammar (F03).
-              const safeSub = sub.replace(/[`_*\n\r]/g, '').slice(0, 24) + (sub.length > 24 ? '…' : '');
-              this.sendDirect(
-                chatJid,
-                `_I do not recognize "${safeSub}". Use /model status to see available routes._`,
-              );
-              break;
-            }
-            const intent = isIntent ? (sub as 'strongest' | 'fastest') : 'provider_specific';
-            const requestedProvider = isProvider ? sub : null;
-            const outcome = this.recordRoutePreference(chatJid, chatKey, senderKey, intent, requestedProvider);
-            if (outcome === 'refreshed') {
-              this.sendDirect(chatJid, '_Already set — extended for another 24h. /reset to go back to the default route._');
-              break;
-            }
-            if (outcome === 'sticky_kept') {
-              this.sendDirect(chatJid, '_Already set (sticky). /reset to go back to the default route._');
-              break;
-            }
-            const what = isProvider ? `\`${sub}\`` : `my ${sub} model`;
-            this.sendDirect(chatJid, `_Okay — preferring ${what} for you in this chat (24h). Applies from your next session — say /new to start one now._`);
-            break;
-          }
-
-          case 'why': {
-            this.sendDirect(chatJid, this.renderRouteWhy(chatJid, msg.senderJid));
+            // classifier gates on the same flag). The handler body lives in
+            // model-pin.ts over this runtime's ModelPinPort host.
+            await handleModelCommand(this.modelPinHost, {
+              chatJid,
+              senderJid: msg.senderJid,
+              args: classified.args,
+              perChatMapKey,
+            });
             break;
           }
 
@@ -4144,6 +4158,10 @@ export class AgentRuntime implements Runtime {
             // the reply is identical, so a doubled /reset cannot spam or error.
             const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, msg.senderJid);
             this.clearRoutePreference(chatJid, chatKey, senderKey);
+            // Task G: /reset undoes just as immediately as a pin applies —
+            // recycle back toward the default route (idle now, or deferred to
+            // the next message if a turn is in flight).
+            this.applyRouteChangeAndRecycle(chatJid, msg.senderJid, perChatMapKey);
             break;
           }
 
@@ -4151,9 +4169,12 @@ export class AgentRuntime implements Runtime {
             // W1-T5: registry-derived render (help-render.ts), pure functions
             // of (registry, {nlRouting}) — no runtime reads (R3c-1.3). Detail
             // shares the flag: alias commands hide local semantics when off (D7).
+            // D15: tiersConfigured is a config read, kept in the runtime layer
+            // and passed IN — help-render.ts stays a pure function of its args.
+            const helpOpts = { nlRouting: config.nlRouting === true, tiersConfigured: modelTiersConfigured(config.nlRoutingTiers) };
             const helpText = classified.args
-              ? renderHelpDetail(classified.args, { nlRouting: config.nlRouting === true })
-              : renderHelp({ nlRouting: config.nlRouting === true });
+              ? renderHelpDetail(classified.args, helpOpts)
+              : renderHelp(helpOpts);
             this.sendDirect(chatJid, helpText);
             break;
           }
@@ -8402,6 +8423,31 @@ export class AgentRuntime implements Runtime {
         // routablePinTargets' own dedup.
         configuredModelByProvider: this.configuredModelByProvider(),
       });
+      // Task H — sync consumption of a verified model pin (decideModelPinResolution's
+      // hot path: verified + same provider needs no catalogue, so this stays
+      // pure-sync, no I/O beyond the pref already read above). A provider
+      // change since verification (or an unverified/deferred pin) falls to
+      // `needs-catalogue` with no catalogue supplied here — that is a
+      // deliberate fail-open to the provider-level route already decided
+      // above, not a bug: resolveRouteForTurn never fetches a catalogue or
+      // persists (that is verifyModelPinAgainstCatalogue's job, at pin time).
+      // Gated on decision.source === 'preference' (not the looser
+      // `!== 'fallback'`): the model override may only apply when the route
+      // decision is ITSELF honoring the preference. 'fallback' means health
+      // beats preference — the operator's failover model must win, never
+      // the user's pin. 'pin_blocked_default' means the pin's provider was
+      // ineligible and we fell to the default provider — forcing the
+      // pinned model onto that unrelated default route would be wrong too,
+      // even if validatedProvider happens to coincide with it.
+      if (pref?.requestedModel != null && decision.source === 'preference') {
+        const modelPinDecision = decideModelPinResolution(
+          { requestedModel: pref.requestedModel, validatedProvider: pref.validatedProvider, modelPinVerified: pref.modelPinVerified },
+          decision.provider,
+        );
+        if (modelPinDecision.action === 'use') {
+          decision.model = modelPinDecision.modelId;
+        }
+      }
       return { ...decision, pinnedProvider: pinned };
     } catch (err) {
       log.warn({ err, instance: this.instanceName }, 'route resolution failed - routing on default');
@@ -8418,15 +8464,22 @@ export class AgentRuntime implements Runtime {
   /**
    * Canonical-keyed preference read with fail-open (C3): owns key derivation
    * (preferenceKeys) AND the fail-open contract, so every reader — the spawn
-   * path, /model status, and /why — degrades identically on a store error
-   * (warn + treat as no preference) instead of one path throwing out of a
-   * read-only command. A preference read failure must never surface as an
-   * error or drop a turn.
+   * path and /model status — degrades identically on a store error (warn +
+   * treat as no preference) instead of one path throwing out of a read-only
+   * command. A preference read failure must never surface as an error or
+   * drop a turn.
+   *
+   * D13/D13a (2026-07-20): chat-scoped, last-writer-wins — reads the LATEST
+   * non-expired pin across every sender in the chat via
+   * getLatestChatPreference, not just this senderJid's own row. WRITES stay
+   * per-sender (setPreference/recordRoutePreference), so senderJid is still
+   * needed here for canonicalization (preferenceKeys) even though the read
+   * itself no longer filters by sender.
    */
   private loadSenderPreference(chatJid: string, senderJid: string): ChatModelPreference | null {
     try {
-      const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, senderJid);
-      return getPreference(this.db, chatKey, senderKey);
+      const { chatKey } = preferenceKeys(this.db, chatJid, senderJid);
+      return getLatestChatPreference(this.db, chatKey);
     } catch (err) {
       log.warn({ err, instance: this.instanceName }, 'preference read failed - routing on default');
       return null;
@@ -8594,9 +8647,15 @@ export class AgentRuntime implements Runtime {
 
   /** Store clear + route event without the reply echo. The NL typed-intent
    *  path acknowledges through the agent's own reply (prompt contract), so
-   *  a runtime echo on top would double-message. */
+   *  a runtime echo on top would double-message.
+   *
+   *  D13: chat-scoped clear — pairs with the chat-scoped read, so /reset
+   *  removes every sender's row for the chat, not just the caller's own.
+   *  senderKey is unused here now (kept in the signature — callers still
+   *  derive it via preferenceKeys for the write paths they share it with). */
   private clearRoutePreferenceSilent(chatJid: string, chatKey: string, senderKey: string): void {
-    clearPreference(this.db, chatKey, senderKey);
+    void senderKey;
+    clearChatPreference(this.db, chatKey);
     this.emitRouteEventChecked({
       event: 'model_preference_cleared',
       conversationKey: toConversationKey(chatJid),
@@ -8623,7 +8682,17 @@ export class AgentRuntime implements Runtime {
   ): 'set' | 'refreshed' | 'sticky_kept' {
     const now = Date.now();
     const existing = getPreference(this.db, chatKey, senderKey, now);
-    if (existing && existing.intent === intent && existing.requestedProvider === requestedProvider) {
+    // D6/D10: `existing.requestedModel === null` is part of the dedup guard —
+    // this write path always carries NO model (see below), so a re-confirm
+    // must only "refresh" a row that ALSO carries no model. Without this, a
+    // prior model-level pin (recordRouteModelPin) on the same provider would
+    // dedup-match on intent+provider alone and the refresh branch's `{
+    // ...existing, ... }` spread would silently PRESERVE the stale
+    // requestedModel/validatedProvider/modelPinVerified fields — so `/model N
+    // default` after `/model N` would say "Already set" and leave the model
+    // pin in place instead of clearing it to a provider-only default. Forcing
+    // the full-overwrite ("set") branch here correctly drops the model dimension.
+    if (existing && existing.intent === intent && existing.requestedProvider === requestedProvider && existing.requestedModel === null) {
       // Re-confirmation refreshes the TTL (F08) — "already set" must stay
       // true for a full window after the user re-asserts it. Sticky rows
       // (expiresAt null) are never demoted to ephemeral by a repeat.
@@ -8645,8 +8714,8 @@ export class AgentRuntime implements Runtime {
       // this_thread preferences are ephemeral by design (24h TTL);
       // sticky pins require explicit confirmation and are a later slice.
       expiresAt: now + PREFERENCE_TTL_MS,
-      // Provider-pin path — carries no MODEL pin (that arrives via the /config
-      // model // /model <N> write path in a later slice).
+      // Provider-pin path — carries no MODEL pin (that is recordRouteModelPin,
+      // the /model <N> write path, below).
       requestedModel: null,
       validatedProvider: null,
       modelPinVerified: null,
@@ -8661,6 +8730,19 @@ export class AgentRuntime implements Runtime {
       reasonCode: requestedProvider ? 'user_pin_set' : `intent_${intent}_set`,
     });
     return 'set';
+  }
+
+  /**
+   * Task G (D14) route recycle — thin delegator to model-pin.ts. Kept as a
+   * private method (rather than inlining the port call at each site) because
+   * /reset and the recycle characterization suite both reach it by name.
+   */
+  private applyRouteChangeAndRecycle(
+    chatJid: string,
+    senderJid: string,
+    perChatMapKey: string | undefined,
+  ): RouteRecycleOutcome {
+    return applyRouteChangeAndRecycleForPort(this.modelPinHost, chatJid, senderJid, perChatMapKey);
   }
 
   /**
@@ -8831,96 +8913,14 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
-   * B26 /model list — the model catalogue. Rendered ENTIRELY from config
-   * (honesty contract: the served weight is unobservable, so nothing here is
-   * presented as what actually serves — the primary and every fallback entry
-   * are configuration, and the tier vocabulary maps to nlRoutingTiers or is
-   * honestly declared unconfigured). Names follow the shipped F8 convention:
-   * provider (model).
-   */
-  private renderModelCatalogue(): string {
-    const primary = this.model !== undefined
-      ? `${this.agentProvider} (${this.model} — configured)`
-      : `${this.agentProvider} (provider default — no model configured)`;
-    // Tier vocabulary: default always exists (the primary route). strongest/
-    // fastest resolve ONLY through nlRoutingTiers — absent map means they
-    // degrade to the default route, and the catalogue must say so rather than
-    // imply they resolve somewhere specific (canary shape: tiers unset).
-    const tiers = config.nlRoutingTiers;
-    const tiersConfigured = tiers !== null && tiers !== undefined && (tiers.strongest !== undefined || tiers.fastest !== undefined);
-    const tierLine = tiersConfigured
-      ? `Tiers: default → primary route; strongest → ${tiers.strongest ?? 'not configured (default route)'}; fastest → ${tiers.fastest ?? 'not configured (default route)'}`
-      : 'Tiers: default → primary route; strongest/fastest: tiers not configured on this line — default routing only';
-    // b28 r2d: one `• ` bullet per MODEL (primary + each fallback). Each bullet
-    // carries its provider + config-derived modifiers ONLY (D7): a catalog
-    // lifecycle advisory keyed off the configured model ID (silent for IDs the
-    // catalog does not recognize, e.g. third-party kimi/glm) and a tier tag
-    // when the provider is a configured nlRoutingTiers target. The served
-    // weight stays unobservable — the caveat is the trailing _italic_ line.
-    const modelBullets: string[] = [
-      `Primary: ${primary}${modifierSuffix(modelModifierTags(this.model, this.agentProvider, tiers))}`,
-    ];
-    if (this.agentFallbacks.length > 0) {
-      for (const e of this.agentFallbacks) {
-        const label = e.model ? `${e.provider} (${e.model})` : e.provider;
-        modelBullets.push(`Fallback: ${label}${modifierSuffix(modelModifierTags(e.model, e.provider, tiers))}`);
-      }
-    } else {
-      modelBullets.push('Fallbacks: none configured');
-    }
-    return [
-      '*Models on this line* (from config)',
-      ...modelBullets.map((b) => `${OWNER_BULLET}${b}`),
-      tierLine,
-      'Pin: `/model provider-id` — prefers it for you here (24h). Back: `/model default` or `/reset`.',
-      '_Which weight actually serves is not observable here._',
-    ].join('\n');
-  }
-
-  /**
-   * Send the DYNAMIC per-harness available-models section as the follow-up to
-   * the config-derived `/model list` block (which the caller already delivered).
-   * Fire-and-forget: the catalogue source (an opencode spawn or an anthropic
-   * HTTP call) is bounded + cached, but a slow harness must never hold the turn
-   * (Q 2b#3). Never throws — the resolver is total; the catch is a belt so a bug
-   * here just omits the section (the config block already went out).
-   */
-  private async sendDynamicModelCatalogueSection(chatJid: string, filter: string | null): Promise<void> {
-    try {
-      const provider = this.agentProvider;
-      const binary = getProviderBinary(provider) ?? provider;
-      const listing = await resolveModelCatalogue(provider, binary, { nowMs: Date.now() });
-      // `/model list` is a DIRECT, solicited request, so it ALWAYS renders — even
-      // on structural absence (no-adapter / no-credential), where the NAMED reason
-      // ("no catalogue adapter for codex-cli") is the true answer and silence would
-      // leave the user unable to tell "unsupported here" from "broken" (Q 2026-07-20:
-      // silence is a bad answer to a direct question). OAuth sourcing makes a healthy
-      // claude-cli harness `ok`, so a structural reason here is now rare + informative,
-      // not the permanent dead-end the earlier suppression guarded against. Suppression
-      // of structural absence belongs to a future UNSOLICITED/aggregate render (the
-      // /config overview), which gates on isStructuralCatalogueAbsence.
-      this.sendDirect(chatJid, formatAvailableModels({
-        harnessLabel: provider,
-        currentModelId: this.model ?? null,
-        fallbackModelIds: this.agentFallbacks
-          .map((e) => e.model)
-          .filter((m): m is string => m !== undefined),
-        listing,
-        filter,
-        cap: MODEL_CATALOGUE_CAP,
-      }));
-    } catch (err) {
-      log.warn({ err, instance: this.instanceName }, '/model list dynamic catalogue section failed');
-    }
-  }
-
-  /**
    * End-user route status (/model status). Visibility policy (capability-
    * preserved routing): provider, model route, preference, and fallback state
    * only — never tool names, socket paths, pids, account JIDs, or
    * cross-conversation metadata. (b28 r2b removed the Delegation/Authority
    * DISPLAY lines; the invariant they described lives in the agent system
-   * prompt + security layer and the /why receipt, not this status surface.)
+   * prompt + security layer. D11/D12: /why is removed — its "no delegation"
+   * reassurance is folded into the trailing line of this render below rather
+   * than lost.)
    */
   private renderRouteStatus(chatJid: string, senderJid: string): string {
     const { live, pref, next } = this.loadRouteView(chatJid, senderJid);
@@ -8945,8 +8945,16 @@ export class AgentRuntime implements Runtime {
       live ? live.model : next.model,
       live ? live.provider : nextProvider,
     );
+    // Copy fix: the read is chat-scoped, last-writer-wins (D13/D13a) — "for
+    // you" mis-implies per-user ownership even when a DIFFERENT sender set
+    // it. "This chat is on X" is accurate in both a DM and a group, and never
+    // names the setter (that would reintroduce the internal-concept leak the
+    // plain-language rule bans). A model pin shows the model ONLY once
+    // verified (Task H honesty rule) — an unverified/deferred model pin
+    // would otherwise claim to be serving a model that was never confirmed
+    // to exist; it falls back to the provider/intent, same as before.
     const prefLine = pref
-      ? `Preference: ${pref.requestedProvider ?? pref.intent} for you in this chat` +
+      ? `This chat is on ${(pref.modelPinVerified === true ? pref.requestedModel : null) ?? (pref.requestedProvider ?? pref.intent)}` +
         (pref.expiresAt !== null
           ? ` (expires in ~${Math.max(1, Math.round((pref.expiresAt - Date.now()) / 3_600_000))}h)`
           : '') +
@@ -8974,39 +8982,18 @@ export class AgentRuntime implements Runtime {
       live && (live.provider !== nextProvider || (live.model ?? null) !== (next.model ?? null))
         ? `\nNext session: ${nextRouteLabel}`
         : '';
-    // b28 r2b: the Delegation + Authority lines are removed from this render
-    // (owner ruling: not about model/route status). DISPLAY-only removal — the
-    // routing-never-changes-authority invariant remains in the agent system
-    // prompt + security layer and on the /why receipt (renderRouteWhy).
+    // b28 r2b: the Delegation + Authority DISPLAY lines are removed from this
+    // render (owner ruling: not about model/route status). D11/D12: the
+    // underlying invariant is not lost — the former /why receipt's
+    // reassurance is folded into the trailing italic line below now that
+    // /why itself is gone.
     return (
       `*Current route:* ${provider}${live ? '' : ' (no live session — next session route)'}\n` +
       `Model: ${model}\n` +
       `${prefLine}\n` +
-      `${fallbackLine}${nextLine}`
+      `${fallbackLine}${nextLine}\n` +
+      '_No delegation; routing never changes what I am allowed to do._'
     );
-  }
-
-  /** Compact route receipt (/why): what answered and why, one line. */
-  private renderRouteWhy(chatJid: string, senderJid: string): string {
-    const { live, pref, next } = this.loadRouteView(chatJid, senderJid);
-    // With no live session, report the provider the NEXT spawn will use (R7)
-    // — the pinned/tier provider, not the fallback-only effectiveProvider.
-    const provider = live?.provider ?? (next.provider || 'unknown-provider');
-    const reason = live
-      ? this.isFallbackWindowActive && live.provider !== next.provider
-        ? "serving this chat's current session (new sessions use the fallback route)"
-        : "serving this chat's current session"
-      : next.source === 'fallback'
-        ? 'a fallback window is active'
-        : next.source === 'preference'
-          ? 'your preferred route for the next session'
-          : next.source === 'pin_blocked_default'
-            ? 'your pinned provider is unavailable — using the default route'
-            : 'instance default route';
-    const prefNote = pref
-      ? '; your preference steers new sessions'
-      : '';
-    return `_Route: ${provider} (${reason})${prefNote}. No delegation; routing never changes what I am allowed to do._`;
   }
 
   /**
@@ -11241,6 +11228,16 @@ export class AgentRuntime implements Runtime {
     initialMapKey: string = this.resolvePerChatMapKey(chatJid),
     actorJid?: string,
   ): void {
+    // Task G (D14): consume a deferred route recycle BEFORE the "does a
+    // session already exist" checks below — every inbound message reaches
+    // this point ahead of any turn dispatch, so this is the turn-idle
+    // boundary a busy-time pin deferred to. Detaching here (only when truly
+    // idle) makes the per_chat/single checks below see no session and
+    // respawn fresh via createSessionManager, which re-resolves the route.
+    consumePendingRecycleIfIdleForPort(
+      this.modelPinHost,
+      this.sessionScope === 'per_chat' ? initialMapKey : GLOBAL_TOOL_SCOPE_KEY,
+    );
     if (this.sessionScope === 'per_chat') {
       // per_chat: independent session + queue per canonical chat key
       if (!this.chatSessions.has(initialMapKey)) {

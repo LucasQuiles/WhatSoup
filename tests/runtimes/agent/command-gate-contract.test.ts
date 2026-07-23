@@ -56,6 +56,10 @@ const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
     setDurability: vi.fn((_durability: unknown) => {}),
     bindGenerationOwnership: vi.fn((_resolve: () => unknown) => {}),
     getProviderId: vi.fn((): string => 'claude-cli'),
+    // Task G (D14): applyRouteChangeAndRecycle's diff-gate reads this on
+    // every live session, same as getProviderId — a real SessionManager
+    // always has it (session.ts), so the mock must too.
+    getModelRef: vi.fn((): string | undefined => undefined),
   };
   const mockQueue = {
     enqueueText: vi.fn(),
@@ -534,8 +538,8 @@ describe('B22 group 1: authorization matrix', () => {
 
 describe('B22 group 2: every COMMAND_REGISTRY entry has a local handler', () => {
   beforeEach(() => {
-    // Routing aliases (/model /why /reset) classify local only under the
-    // nlRouting flag; the coverage sweep must reach their handlers too.
+    // Routing aliases (/model /reset — D11 dropped /why) classify local only
+    // under the nlRouting flag; the coverage sweep must reach their handlers too.
     cfgAny().nlRouting = true;
     cfgAny().agentProvider = 'claude-cli';
   });
@@ -550,7 +554,7 @@ describe('B22 group 2: every COMMAND_REGISTRY entry has a local handler', () => 
     // this set, forcing its author into this file where groups 2 and 3 pick
     // the entry up automatically and the matrix in group 1 must be reviewed.
     expect([...COMMAND_REGISTRY].map((c) => c.name).sort()).toEqual(
-      ['help', 'kill-session', 'model', 'new', 'reset', 'sessions', 'status', 'why'].sort(),
+      ['help', 'kill-session', 'model', 'new', 'reset', 'sessions', 'status'].sort(),
     );
   });
 
