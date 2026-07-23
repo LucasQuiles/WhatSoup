@@ -312,6 +312,9 @@ function ProviderKeyRow({ service }: { service: string }) {
     onSuccess: () => {
       toast.success(`${service} key stored in the OS keyring`)
       setValue('')
+      // The stored key replaced whatever was there — a prior verify verdict
+      // belongs to the old key and must not linger as a false attestation.
+      setStatus(null)
     },
     onError: (e) => toast.error(`Store failed: ${e instanceof Error ? e.message : e}`),
   })
@@ -336,6 +339,8 @@ function ProviderKeyRow({ service }: { service: string }) {
           {status ? <span className="settings-sub settings-sub--status">{status}</span> : null}
           <TextInput
             aria-label={`New ${service} key`}
+            type="password"
+            autoComplete="off"
             value={value}
             onChange={(e) => setValue(e.target.value)}
             placeholder="new key…"

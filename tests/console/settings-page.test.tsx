@@ -227,20 +227,34 @@ describe('v3.5 settings — API tokens (provider keys, write-only)', () => {
     expect(t.textContent).not.toContain('created')
   })
 
-  it('set posts the key and clears the input; verify shows the returned status', async () => {
+  it('set posts the key, clears the input, and masks entry (type=password)', async () => {
     const { container } = renderPage()
     await waitFor(() => expect(container.querySelector('#tokens')).not.toBeNull())
     const input = container.querySelector('#tokens input')! as HTMLInputElement
+    expect(input.type).toBe('password')
     fireEvent.change(input, { target: { value: 'sk-test-123' } })
     const setBtn = [...container.querySelectorAll('#tokens button')].find((b) => b.textContent === 'set')!
     fireEvent.click(setBtn)
     await waitFor(() => expect(setCredentialMock).toHaveBeenCalledWith('deepseek', 'sk-test-123'))
     await waitFor(() => expect(toastMock.success).toHaveBeenCalled())
+  })
 
+  it('verify shows the returned status — and a later set clears it (no false attestation)', async () => {
+    const { container } = renderPage()
+    await waitFor(() => expect(container.querySelector('#tokens')).not.toBeNull())
     const verifyBtn = [...container.querySelectorAll('#tokens button')].find((b) => b.textContent === 'verify')!
     fireEvent.click(verifyBtn)
     await waitFor(() => expect(verifyCredentialMock).toHaveBeenCalledWith('deepseek'))
     await waitFor(() => expect(container.querySelector('#tokens')!.textContent).toContain('valid'))
+
+    // setting a NEW key must drop the old key's verdict
+    const input = container.querySelector('#tokens input')! as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'sk-new-456' } })
+    const setBtn = [...container.querySelectorAll('#tokens button')].find((b) => b.textContent === 'set')!
+    fireEvent.click(setBtn)
+    await waitFor(() => expect(toastMock.success).toHaveBeenCalled())
+    const statusEl = container.querySelector('#tokens .settings-sub--status')
+    expect(statusEl).toBeNull()
   })
 
   it('revoke deletes the key; the session lock row calls lockConsole', async () => {
