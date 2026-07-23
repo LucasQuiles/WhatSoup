@@ -101,6 +101,7 @@ import {
   pruneExpired,
   getLatestChatPreference,
   clearChatPreference,
+  promoteToSticky,
   type ChatModelPreference,
   type PreferenceIntent,
 } from './chat-preference-db.ts';
@@ -634,6 +635,11 @@ export {
   isProviderModelUnavailableMessage,
 } from './failure-taxonomy.ts';
 import { errorMessage } from '../../lib/error-message.ts';
+
+// Only the receipt's promised bare reply mutates routing. Conversational uses
+// such as "please keep it" must continue to the agent unchanged.
+const BARE_KEEP_RE = /^\s*keep[\s!.]*$/i;
+
 
 function providerDisplayName(provider: string): string {
   switch (provider) {
@@ -3937,6 +3943,19 @@ export class AgentRuntime implements Runtime {
     }
     const classified = classifyInput(content as string, { routingAliases: config.nlRouting });
 
+    if (classified.type === 'message' && BARE_KEEP_RE.test(classified.text)) {
+      // Eligibility (expiry, actor match) is evaluated at the inbound's OWN
+      // receive time — msg.timestamp (epoch seconds) — never Date.now() here,
+      // so provider-queue pressure delaying this turn's processing cannot
+      // turn an on-time "keep" into a false "expired" refusal.
+      const keepReply = this.handleBareKeep(chatJid, msg.senderJid, msg.timestamp * 1000);
+      if (keepReply !== null) {
+        this.sendDirect(chatJid, keepReply);
+        this.completeLocalTextHandling(msg);
+        return;
+      }
+    }
+
     // Set only by /model default (R8): the handler clears the route pref
     // locally and then falls through to forward the raw command so the agent
     // CLI's own /model default reset still runs. Null for every other command.
@@ -4362,16 +4381,7 @@ export class AgentRuntime implements Runtime {
         }
       }
       if (forwardAfterLocalCommand === null) {
-        if (msg.inboundSeq !== undefined) {
-          // Terminal durability completion for ANY locally-handled command (R14).
-          // Local handling never reaches the turn path that completes the inbound
-          // journal, so the row would stay 'processing' and restart recovery would
-          // falsely mark it failed. This covers the routing aliases AND the base
-          // local commands (/new /status /help /sessions /kill-session), closing
-          // the pre-existing stuck-'processing' gap once for all of them instead
-          // of a per-command name-list opt-in.
-          this.durability?.completeInbound(msg.inboundSeq, 'local_command_handled');
-        }
+        this.completeLocalTextHandling(msg);
         return;
       }
       // R8 fall-through: /model default cleared the route pref above; forward
@@ -8278,6 +8288,67 @@ export class AgentRuntime implements Runtime {
       try { sockRes.socketServer.stop(); } catch (err) { log.warn({ err, mapKey }, 'per-chat socket stop failed'); }
       try { unlinkSync(sockRes.cfgPath); } catch { /* best-effort */ }
       this.perChatSocketResources.delete(mapKey);
+    }
+  }
+
+  /** Complete inbound durability for text handled without an agent turn. */
+  private completeLocalTextHandling(msg: IncomingMessage): void {
+    if (msg.inboundSeq !== undefined) {
+      this.durability?.completeInbound(msg.inboundSeq, 'local_command_handled');
+    }
+  }
+
+  /**
+   * Promote the chat's current live route preference to a permanent pin.
+   * `nowMs` is the caller's eligibility instant (the inbound's own receive
+   * time — see the call site). Delegates the actual compare-and-set to
+   * `promoteToSticky` (chat-preference-db.ts, the preference SSOT): only the
+   * row that is STILL the chat's winning preference at `nowMs` AND still
+   * belongs to the confirming sender is promoted — never a stale, reset, or
+   * someone-else's pin. Returns null ONLY for `absent` (nothing pending for
+   * this chat), which lets the bare "keep" fall through as ordinary text;
+   * every other outcome is handled locally with a truthful, visible reply.
+   */
+  private handleBareKeep(chatJid: string, senderJid: string, nowMs: number): string | null {
+    const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, senderJid);
+
+    let result: ReturnType<typeof promoteToSticky>;
+    try {
+      result = promoteToSticky(this.db, chatKey, senderKey, nowMs);
+    } catch (err) {
+      log.warn({ err, instance: this.instanceName }, 'keep: preference promotion failed');
+      return `_Couldn't confirm that pin right now — nothing changed. Try again, or /model to re-pin._`;
+    }
+
+    const label = result.preference
+      ? (result.preference.modelPinVerified === true ? result.preference.requestedModel : null)
+        ?? (result.preference.requestedProvider ?? result.preference.intent)
+      : null;
+
+    switch (result.outcome) {
+      case 'absent':
+        return null;
+      case 'expired':
+        return `_That pin already expired. /model to set a new one._`;
+      case 'actor_mismatch':
+        return `_Only whoever set this chat's pin can keep it. /model to set your own._`;
+      case 'superseded':
+        return `_That pin changed before "keep" landed — nothing was promoted. /model to check the current route._`;
+      case 'already_sticky':
+        return `_${label} is already kept for this chat. /reset to undo._`;
+      case 'promoted': {
+        const pref = result.preference!;
+        this.emitRouteEventChecked({
+          event: 'model_preference_made_sticky',
+          conversationKey: toConversationKey(chatJid),
+          provider: pref.requestedProvider ?? `intent:${pref.intent}`,
+          modelRef: pref.requestedModel,
+          source: 'user',
+          userVisible: true,
+          reasonCode: 'user_pin_kept',
+        });
+        return `_Keeping ${label} for this chat until you /reset._`;
+      }
     }
   }
 
