@@ -4264,10 +4264,9 @@ describe('__provider_switch_for_test', () => {
       undefined,
       [],
       undefined,
-      ['--mcp-config', '/cwd/.mcp.json'],
+      ['--mcp-config=/cwd/.mcp.json'],
     );
-    expect(args).toContain('--mcp-config');
-    expect(args).toContain('/cwd/.mcp.json');
+    expect(args).toContain('--mcp-config=/cwd/.mcp.json');
   });
 
   it('getProviderArgs for opencode-cli returns expected base args', () => {
@@ -5440,10 +5439,8 @@ describe('providerConfig-driven claude-cli args', () => {
     await sm.spawnSession();
 
     const args: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls[0][1];
-    const mcpIdx = args.indexOf('--mcp-config');
-    expect(mcpIdx).toBeGreaterThan(-1);
-    expect(args[mcpIdx + 1]).toBe('/path/to/mcp1.json');
-    expect(args[mcpIdx + 2]).toBe('/path/to/mcp2.json');
+    expect(args).toContain('--mcp-config=/path/to/mcp1.json');
+    expect(args).toContain('--mcp-config=/path/to/mcp2.json');
   });
 
   it('--mcp-config with string is forwarded directly', async () => {
@@ -5456,9 +5453,7 @@ describe('providerConfig-driven claude-cli args', () => {
     await sm.spawnSession();
 
     const args: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls[0][1];
-    const mcpIdx = args.indexOf('--mcp-config');
-    expect(mcpIdx).toBeGreaterThan(-1);
-    expect(args[mcpIdx + 1]).toBe('/path/to/mcp.json');
+    expect(args).toContain('--mcp-config=/path/to/mcp.json');
   });
 
   it('--setting-sources is forwarded when settingSources is set', async () => {

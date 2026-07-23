@@ -52,8 +52,11 @@ describe('provider canary invocation adapter', () => {
 
     expect(rows.map((row) => row.binary)).toEqual(['claude', 'codex', 'gemini', 'opencode']);
     expect(rows[0].args).toEqual([
-      '--mcp-config', join(root, '.mcp.json'),
-      'mcp', 'list',
+      `--settings=${join(root, '.whatsoup-canary-settings.json')}`,
+      '--strict-mcp-config',
+      `--mcp-config=${join(root, '.mcp.json')}`,
+      'mcp',
+      'list',
     ]);
     expect(rows[1].args.slice(0, 1)).toEqual(['app-server']);
     expect(rows[1].args.join('\n')).toContain('mcp_servers.whatsoup');

@@ -2527,6 +2527,7 @@ describe('AgentRuntime', () => {
       '-c', expect.stringMatching(/^mcp_servers\.whatsoup\.command=/),
       '-c', expect.stringMatching(/^mcp_servers\.whatsoup\.args=/),
       '-c', expect.stringMatching(/^mcp_servers\.whatsoup\.env=/),
+      '-c', 'mcp_servers.whatsoup.env_vars=["WHATSOUP_MCP_SOCKET"]',
     ]);
     await emitAgentResultWithoutTokens('done');
     await (runtime as unknown as { turnChain: Promise<void> }).turnChain;

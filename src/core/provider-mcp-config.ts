@@ -267,7 +267,7 @@ export function buildProviderMcpConfigArgs(
   proxyScriptPath: string,
 ): readonly string[] {
   if (providerId === 'claude-cli') {
-    return ['--mcp-config', join(agentCwd, '.mcp.json')];
+    return [`--mcp-config=${join(agentCwd, '.mcp.json')}`];
   }
   if (providerId !== 'codex-cli') return [];
   const { command, args } = buildMcpLaunchCommand(proxyScriptPath);
@@ -275,6 +275,7 @@ export function buildProviderMcpConfigArgs(
     '-c', `mcp_servers.whatsoup.command=${tomlString(command)}`,
     '-c', `mcp_servers.whatsoup.args=${tomlStringArray(args)}`,
     '-c', `mcp_servers.whatsoup.env={ WHATSOUP_SOCKET = ${tomlString(socketPath)} }`,
+    '-c', `mcp_servers.whatsoup.env_vars=${tomlStringArray(['WHATSOUP_MCP_SOCKET'])}`,
   ];
 }
 

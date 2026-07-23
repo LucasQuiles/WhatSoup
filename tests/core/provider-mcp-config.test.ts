@@ -145,6 +145,7 @@ describe('generateMcpConfigFile', () => {
       '-c', expect.stringMatching(/^mcp_servers\.whatsoup\.command=/),
       '-c', expect.stringMatching(/^mcp_servers\.whatsoup\.args=/),
       '-c', expect.stringMatching(/^mcp_servers\.whatsoup\.env=/),
+      '-c', 'mcp_servers.whatsoup.env_vars=["WHATSOUP_MCP_SOCKET"]',
     ]);
     expect(args.join('\n')).toContain('WHATSOUP_SOCKET');
     expect(args.join('\n')).toContain(JSON.stringify(SOCKET));
@@ -152,7 +153,7 @@ describe('generateMcpConfigFile', () => {
 
   it('makes Claude consume the generated production target explicitly', () => {
     expect(buildProviderMcpConfigArgs('claude-cli', '/agent/cwd', SOCKET, PROXY))
-      .toEqual(['--mcp-config', join('/agent/cwd', '.mcp.json')]);
+      .toEqual([`--mcp-config=${join('/agent/cwd', '.mcp.json')}`]);
     expect(buildProviderMcpConfigArgs('gemini-cli', '/agent/cwd', SOCKET, PROXY)).toEqual([]);
     expect(buildProviderMcpConfigArgs('opencode-cli', '/agent/cwd', SOCKET, PROXY)).toEqual([]);
   });

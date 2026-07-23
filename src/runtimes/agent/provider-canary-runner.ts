@@ -12,6 +12,7 @@ import {
   deletePrivateFileSync,
   ensurePrivateDirectorySync,
   writeAtomicPrivateFileSync,
+  writePrivateFileSync,
 } from '../../lib/private-fs.ts';
 import {
   acquireProcessLock,
@@ -107,8 +108,26 @@ export function buildProviderCanaryInvocation(
   const binary = binaryOverride ?? getProviderBinary(providerId);
   if (!binary) throw new Error('eligible provider binary is unavailable');
   switch (providerId) {
-    case 'claude-cli':
-      return { providerId, binary, args: [...configArgs, 'mcp', 'list'], cwd, stdinFrames: [] };
+    case 'claude-cli': {
+      const settingsPath = join(cwd, '.whatsoup-canary-settings.json');
+      writePrivateFileSync(
+        settingsPath,
+        `${JSON.stringify({ enableAllProjectMcpServers: true })}\n`,
+      );
+      return {
+        providerId,
+        binary,
+        args: [
+          `--settings=${settingsPath}`,
+          '--strict-mcp-config',
+          ...configArgs,
+          'mcp',
+          'list',
+        ],
+        cwd,
+        stdinFrames: [],
+      };
+    }
     case 'codex-cli':
       return {
         providerId,

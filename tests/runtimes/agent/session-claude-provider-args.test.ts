@@ -47,7 +47,10 @@ describe('claude-cli resolveProviderArgs providerConfig flags', () => {
       agents: { reviewer: {} },
     });
     expect(a).toEqual(expect.arrayContaining(['--tools', 'Read', 'Bash']));
-    expect(a).toEqual(expect.arrayContaining(['--mcp-config', '/a.json', '/b.json']));
+    expect(a).toEqual(expect.arrayContaining([
+      '--mcp-config=/a.json',
+      '--mcp-config=/b.json',
+    ]));
     expect(a).toEqual(expect.arrayContaining(['--setting-sources', 'project']));
     expect(a).toEqual(expect.arrayContaining(['--effort', 'high']));
     expect(a).toEqual(expect.arrayContaining(['--agents', JSON.stringify({ reviewer: {} })]));

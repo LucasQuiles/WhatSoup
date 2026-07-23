@@ -455,8 +455,8 @@ function resolveProviderArgs(
       const mcpConfigArgs = mcpConfigs === undefined
         ? []
         : Array.isArray(mcpConfigs)
-          ? ['--mcp-config', ...mcpConfigs.map(String)]
-          : ['--mcp-config', String(mcpConfigs)];
+          ? mcpConfigs.map((config) => `--mcp-config=${String(config)}`)
+          : [`--mcp-config=${String(mcpConfigs)}`];
       const settingSources = typeof providerConfig?.['settingSources'] === 'string'
         ? ['--setting-sources', providerConfig['settingSources']]
         : [];
