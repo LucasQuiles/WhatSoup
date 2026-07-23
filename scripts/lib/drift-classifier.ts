@@ -161,6 +161,15 @@ const PATH_RULES: ReadonlyArray<{ test: (p: string) => boolean; drift: DriftClas
       p === 'package.json' ||
       p.startsWith('.claude/fitness/') ||
       p.startsWith('docs/enforcement/') ||
+      // NOTE — this guard-name heuristic is a SECOND encoding of a fact
+      // `scripts/guard-test-coverage-check.ts:89` already owns
+      // (`name.includes('guard') || name.startsWith('check-')`). Not imported from there
+      // on purpose: that predicate lives inside a function that reads the filesystem, and
+      // this module is pure by design. The duplication is low-risk because the `scripts/`
+      // catch-all below yields the SAME verdict for every path this branch matches — the
+      // only thing lost if they drift is the precise `rule` label. If a third guard-naming
+      // convention is ever added, both places need it.
+      //
       // BOTH naming conventions. The repo uses `import-boundary-check.ts` AND
       // `check-insecure-tempfile.ts` for the same kind of thing; the first draft of this
       // rule matched only the suffix form, so `check-*` fell through to no rule at all.

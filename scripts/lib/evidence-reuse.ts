@@ -34,6 +34,13 @@ import {
  * Matched by prefix on the receipt's `invocation`, longest match first, so
  * `guard:repo:commit-authors` can differ from `guard:repo` without ordering hazards.
  */
+/**
+ * Shared because two entries below need it verbatim: this repo names lint steps both
+ * `lint:*` and `guard:lint:*`, the same dual-convention split that PATH_RULES has for
+ * guard scripts. One literal, so the two entries cannot drift apart if one is edited.
+ */
+const LINT_WHY = 'candidate sources judged by rules that can themselves change';
+
 const INVOCATION_TAGS: ReadonlyArray<{ prefix: string; tags: readonly SensitivityTag[]; why: string }> = [
   // Pure formatters and type checks read only the candidate tree.
   { prefix: 'format', tags: ['candidate-only'], why: 'reads only the candidate tree' },
@@ -45,12 +52,12 @@ const INVOCATION_TAGS: ReadonlyArray<{ prefix: string; tags: readonly Sensitivit
   {
     prefix: 'lint',
     tags: ['candidate-only', 'policy-sensitive'],
-    why: 'candidate sources judged by rules that can themselves change',
+    why: LINT_WHY,
   },
   {
     prefix: 'guard:lint',
     tags: ['candidate-only', 'policy-sensitive'],
-    why: 'candidate sources judged by rules that can themselves change',
+    why: LINT_WHY,
   },
   // Anything comparing against the repo's own tree depends on the base.
   {
