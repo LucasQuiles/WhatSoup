@@ -134,10 +134,8 @@ describe('classifyInput', () => {
   });
 
   describe('edge cases', () => {
-    it('bare slash "/" returns forwarded (no command name)', () => {
-      // "/" → commandName is "" which is not a local command
-      const result = classifyInput('/');
-      expect(result.type).toBe('forwarded');
+    it.each(['/', '/ ', '/\t', '/\n'])('bare slash input %j opens the local help menu', (input) => {
+      expect(classifyInput(input)).toEqual({ type: 'local', command: 'help' });
     });
 
     it('command name is extracted from first whitespace-delimited token', () => {
@@ -244,8 +242,8 @@ describe('routing aliases — trailing whitespace grammar (R10)', () => {
     expect(classifyInput('/new ')).toEqual({ type: 'local', command: 'new' });
   });
 
-  it('a bare slash with only whitespace still forwards (no command name)', () => {
-    expect(classifyInput('/ ').type).toBe('forwarded');
+  it('routing-alias mode does not change the bare slash menu', () => {
+    expect(classifyInput('/ ', NL)).toEqual({ type: 'local', command: 'help' });
   });
 });
 

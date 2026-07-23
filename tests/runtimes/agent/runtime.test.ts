@@ -2890,7 +2890,7 @@ describe('AgentRuntime', () => {
   // so it finalizes its row itself (markInboundSkipped/'not_authorized', B21-A F1)
   // — no early-return path may leave a row stranded in 'processing'.
   describe('local-command inbound finalization (W2a)', () => {
-    it('finalizes the journaled inbound row for a /help local command', async () => {
+    it.each(['/help', '/'])('finalizes the journaled inbound row for local help input %s', async (content) => {
       const db = makeDb();
       const { messenger } = makeMessenger();
       const runtime = new AgentRuntime(db, messenger);
@@ -2900,8 +2900,8 @@ describe('AgentRuntime', () => {
       runtime.setDurability(durability);
       await runtime.start();
 
-      const seq = durability.journalInbound('m-help', 'k-help', 'test@s.whatsapp.net', 'agent');
-      await sendAndDrain(runtime, makeMsg({ content: '/help', inboundSeq: seq }));
+      const seq = durability.journalInbound(`m-help-${content.length}`, 'k-help', 'test@s.whatsapp.net', 'agent');
+      await sendAndDrain(runtime, makeMsg({ content, inboundSeq: seq }));
 
       const row = duraDb.raw.prepare(
         'SELECT processing_status, terminal_reason FROM inbound_events WHERE seq = ?',
@@ -4774,13 +4774,13 @@ describe('AgentRuntime', () => {
     expect(enqueuedTexts.some((t) => t.includes('No active session'))).toBe(true);
   });
 
-  it('handleMessage /help sends help text', async () => {
+  it.each(['/help', '/'])('handleMessage %s sends local help text', async (content) => {
     const db = makeDb();
     const { messenger } = makeMessenger();
 
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: '/help' }));
+    await runtime.handleMessage(makeMsg({ content }));
 
     const enqueuedTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
     expect(enqueuedTexts.some((t) => t.includes('/new'))).toBe(true);
