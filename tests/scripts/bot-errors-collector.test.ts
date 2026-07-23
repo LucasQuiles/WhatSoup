@@ -29,6 +29,67 @@ exit 255
   return script;
 }
 
+function writeMalformedOutputFakeSsh(root: string): string {
+  // Simulates an SSH session that completes successfully (rc=0) but whose
+  // remote python emitted a line that is not valid JSON — a protocol/encoding
+  // failure distinct from SSH/transport unreachability (writeFakeSsh's rc=255
+  // path). Used to prove DUR-03 classifies the two differently.
+  const script = join(root, 'fake-ssh-malformed.sh');
+  writeFileSync(
+    script,
+    `#!/bin/sh
+echo "not-json-output-from-remote"
+exit 0
+`,
+    { mode: 0o700 },
+  );
+  chmodSync(script, 0o700);
+  return script;
+}
+
+function writeFakeSshWithSecretStderr(root: string): string {
+  // Same shape as writeFakeSsh but the failure stderr carries a credential-
+  // shaped token, so the retained failure detail can be asserted redacted.
+  const script = join(root, 'fake-ssh-secret-stderr.sh');
+  writeFileSync(
+    script,
+    `#!/bin/sh
+if [ "$FAKE_SSH_MODE" = "success" ]; then
+  exit 0
+fi
+echo "Authorization: Bearer sk_live_ABCDEF1234567890abcdef" >&2
+exit 255
+`,
+    { mode: 0o700 },
+  );
+  chmodSync(script, 0o700);
+  return script;
+}
+
+function runUpdateFailureRetention(errorText: string, exceptionKind: 'runtime' | 'json_decode') {
+  const excExpr =
+    exceptionKind === 'json_decode'
+      ? `json.JSONDecodeError("Expecting value", "bad", 0)`
+      : `RuntimeError(${JSON.stringify(errorText)})`;
+  return spawnSync(
+    'python3',
+    [
+      '-c',
+      `
+import importlib.util, json
+spec = importlib.util.spec_from_file_location("bot_errors_collector", "deploy/scripts/bot-errors-collector.py")
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+record = {}
+exc = ${excExpr}
+m.update_failure_retention(record, exc, ${JSON.stringify(errorText)})
+print(json.dumps(record))
+`,
+    ],
+    { cwd: process.cwd(), encoding: 'utf8' },
+  );
+}
+
 function writeExecFakeSsh(root: string): string {
   const script = join(root, 'fake-ssh-exec.sh');
   writeFileSync(
@@ -1260,5 +1321,132 @@ exec(collector.REMOTE_WRITEFAIL_ACK_SCRIPT, {"__name__": "__main__"})
     const summary = JSON.parse(result.stdout) as { failed: number; remotesSucceeded: number };
     expect(summary.failed).toBeGreaterThanOrEqual(1);
     expect(summary.remotesSucceeded).toBe(0);
+  });
+
+  it('retains prior failure detail and records recovery state across fail, fail, success (DUR-03)', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    mkdirSync(join(tmpRoot, 'outbox'), { recursive: true, mode: 0o700 });
+    const fakeSsh = writeFakeSsh(tmpRoot);
+
+    type RetentionState = {
+      remotes?: Record<
+        string,
+        {
+          lastError?: string | null;
+          failureRetention?: {
+            status?: string;
+            failureClass?: string;
+            lastFailureDetail?: string;
+            firstObservedAt?: number;
+            firstObservedIso?: string;
+            lastObservedAt?: number;
+            lastObservedIso?: string;
+            lastSuccessAt?: number;
+            lastSuccessIso?: string;
+          };
+        }
+      >;
+    };
+    const readState = () =>
+      JSON.parse(readFileSync(join(tmpRoot, 'collector-state.json'), 'utf8')) as RetentionState;
+
+    const firstFailure = runCollector(fakeSsh, 'fail');
+    expect(firstFailure.status).toBe(1);
+    const afterFirstFailure = readState().remotes?.mini5?.failureRetention;
+    expect(afterFirstFailure).toMatchObject({
+      status: 'failing',
+      failureClass: 'ssh_failure',
+    });
+    expect(typeof afterFirstFailure?.lastFailureDetail).toBe('string');
+    expect(afterFirstFailure?.lastFailureDetail?.length).toBeGreaterThan(0);
+    expect(afterFirstFailure?.firstObservedAt).toBeDefined();
+    expect(afterFirstFailure?.lastObservedAt).toBeDefined();
+    expect((afterFirstFailure?.lastObservedAt ?? 0) >= (afterFirstFailure?.firstObservedAt ?? 0)).toBe(true);
+    expect(afterFirstFailure?.lastSuccessAt).toBeUndefined();
+
+    const secondFailure = runCollector(fakeSsh, 'fail');
+    expect(secondFailure.status).toBe(1);
+    const afterSecondFailure = readState().remotes?.mini5?.failureRetention;
+    // Same ongoing episode: first-observed is pinned, class is unchanged, and
+    // the retained record did not get replaced by a fresh empty one.
+    expect(afterSecondFailure?.status).toBe('failing');
+    expect(afterSecondFailure?.failureClass).toBe('ssh_failure');
+    expect(afterSecondFailure?.firstObservedAt).toBe(afterFirstFailure?.firstObservedAt);
+
+    const recovery = runCollector(fakeSsh, 'success');
+    expect(recovery.status).toBe(0);
+    const afterRecovery = readState().remotes?.mini5;
+    // Aggregate counters behave exactly as before (untouched by DUR-03):
+    // lastError is still wiped on success.
+    expect(afterRecovery?.lastError).toBeNull();
+    // But the retained failure record survives the transition to success and
+    // now also carries recovery state — this is the DUR-03 contract.
+    const retention = afterRecovery?.failureRetention;
+    expect(retention?.status).toBe('recovered');
+    expect(retention?.failureClass).toBe('ssh_failure');
+    expect(retention?.lastFailureDetail).toBe(afterSecondFailure?.lastFailureDetail);
+    expect(retention?.firstObservedAt).toBe(afterFirstFailure?.firstObservedAt);
+    expect(retention?.lastSuccessAt).toBeDefined();
+    expect(retention?.lastSuccessIso).toBeDefined();
+
+    // Atomic write: no leftover temp files, state file is a single valid JSON doc.
+    const leftoverTemps = readdirSync(tmpRoot).filter((name) => name.includes('.tmp'));
+    expect(leftoverTemps).toEqual([]);
+  });
+
+  it('classifies malformed remote claim output separately from an SSH transport failure (DUR-03)', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    mkdirSync(join(tmpRoot, 'outbox'), { recursive: true, mode: 0o700 });
+
+    const sshFailure = writeFakeSsh(tmpRoot);
+    const sshResult = runCollector(sshFailure, 'fail');
+    expect(sshResult.status).toBe(1);
+    const sshState = JSON.parse(readFileSync(join(tmpRoot, 'collector-state.json'), 'utf8')) as {
+      remotes?: Record<string, { failureRetention?: { failureClass?: string } }>;
+    };
+    expect(sshState.remotes?.mini5?.failureRetention?.failureClass).toBe('ssh_failure');
+    rmSync(tmpRoot, { recursive: true, force: true });
+
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    mkdirSync(join(tmpRoot, 'outbox'), { recursive: true, mode: 0o700 });
+    const malformedSsh = writeMalformedOutputFakeSsh(tmpRoot);
+    const malformedResult = runCollector(malformedSsh, 'fail');
+    expect(malformedResult.status).toBe(1);
+    const malformedState = JSON.parse(readFileSync(join(tmpRoot, 'collector-state.json'), 'utf8')) as {
+      remotes?: Record<string, { failureRetention?: { failureClass?: string } }>;
+    };
+    expect(malformedState.remotes?.mini5?.failureRetention?.failureClass).toBe('malformed_remote_output');
+  });
+
+  it('redacts credential-shaped text out of the retained failure detail (DUR-03)', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    mkdirSync(join(tmpRoot, 'outbox'), { recursive: true, mode: 0o700 });
+    const fakeSsh = writeFakeSshWithSecretStderr(tmpRoot);
+
+    const result = runCollector(fakeSsh, 'fail');
+    expect(result.status).toBe(1);
+    const state = JSON.parse(readFileSync(join(tmpRoot, 'collector-state.json'), 'utf8')) as {
+      remotes?: Record<string, { failureRetention?: { lastFailureDetail?: string } }>;
+    };
+    const detail = state.remotes?.mini5?.failureRetention?.lastFailureDetail ?? '';
+    expect(detail).toContain('[REDACTED]');
+    expect(detail).not.toContain('sk_live_ABCDEF1234567890abcdef');
+  });
+
+  it('bounds the retained failure detail length instead of growing without limit (DUR-03)', () => {
+    const hugeError = 'x'.repeat(5000);
+    const result = runUpdateFailureRetention(hugeError, 'runtime');
+    expect(result.status).toBe(0);
+    const record = JSON.parse(result.stdout) as { failureRetention?: { lastFailureDetail?: string } };
+    const detail = record.failureRetention?.lastFailureDetail ?? '';
+    expect(detail.length).toBeGreaterThan(0);
+    expect(detail.length).toBeLessThan(5000);
+  });
+
+  it('classifies a JSONDecodeError as malformed_remote_output at the function level (DUR-03)', () => {
+    const result = runUpdateFailureRetention('irrelevant for this branch', 'json_decode');
+    expect(result.status).toBe(0);
+    const record = JSON.parse(result.stdout) as { failureRetention?: { failureClass?: string } };
+    expect(record.failureRetention?.failureClass).toBe('malformed_remote_output');
   });
 });
