@@ -137,7 +137,7 @@ import {
 } from './runtime-turn-context.ts';
 import { resolveResumeIdentity, type PersistedResumeIdentity } from './resume-identity.ts';
 import type { FinalizeRuntimeTurnResult } from './turn-finalizer.ts';
-import { RuntimeTurnSupervisor } from './runtime-turn-supervisor.ts';
+import { runtimeTurnRecoveryIsDegraded, RuntimeTurnSupervisor } from './runtime-turn-supervisor.ts';
 import { CrashTracker } from './crash-tracker.ts';
 import { AutoCompactController, AUTO_COMPACT_RAPID_REARM_WINDOW_MS } from './auto-compact-controller.ts';
 import { ImageCoalescer } from './image-coalescer.ts';
@@ -2829,8 +2829,9 @@ export class AgentRuntime implements Runtime {
     // All co-keyed maps must be migrated atomically.
     if (this.sessionScope === 'per_chat' && !this.sandboxPerChat) {
       const lidKey = `${conversationKey}@lid`;
+      const canonical = canonicalizeChatJid(newJid, this.db);
+      this.runtimeTurnCoordinator.rekeyPerChatTurnQueueHaltScope(lidKey, canonical);
       if (this.chatSessions.has(lidKey)) {
-        const canonical = canonicalizeChatJid(newJid, this.db);
         if (canonical !== lidKey && !this.chatSessions.has(canonical)) {
           const legacyProviderTurn = this.legacyProviderTurnOwners.get(lidKey);
           if (legacyProviderTurn && this.legacyProviderTurnOwners.has(canonical)) {
@@ -6992,14 +6993,8 @@ export class AgentRuntime implements Runtime {
     const providerExecution = this.providerExecutionGate.snapshot();
     const finalizationHealth = this.runtimeTurnSupervisor.health();
     const recoveryHealth = this.getTurnRecoveryHealthDetails();
-    const finalizationDegraded =
-      finalizationHealth.retainedRetries > 0
-      || finalizationHealth.degradedScopes > 0
-      || recoveryHealth.turnRecoveryOutstanding > 0
-      || recoveryHealth.turnRecoveryExhausted > 0
-      || recoveryHealth.turnRecoveryOpenRecoveries > 0
-      || recoveryHealth.turnRecoveryCorruptLinks > 0
-      || recoveryHealth.turnRecoveryEchoConflicts > 0;
+    const finalizationDegraded = runtimeTurnRecoveryIsDegraded(finalizationHealth, recoveryHealth);
+    const turnQueueHealth = this.runtimeTurnCoordinator.turnQueueHaltHealth(this.sessionScope === 'per_chat');
     if (this.sessionScope === 'per_chat') {
       const sessions = [...this.chatSessions.values()];
       let activeSessions = 0;
@@ -7031,6 +7026,7 @@ export class AgentRuntime implements Runtime {
       if (finalizationDegraded && healthStatus === 'healthy') {
         healthStatus = 'degraded';
       }
+      if (turnQueueHealth.turnQueueHalted && healthStatus === 'healthy') healthStatus = 'degraded';
       if (providerExecution.pressureActive && healthStatus === 'healthy') healthStatus = 'degraded';
       return {
         status: healthStatus,
@@ -7060,6 +7056,7 @@ export class AgentRuntime implements Runtime {
           turnFinalizationRetryAttempts: finalizationHealth.retryAttempts,
           turnFinalizationRetryRecoveries: finalizationHealth.retryRecoveries,
           turnFinalizationRetryExhaustions: finalizationHealth.retryExhaustions,
+          ...turnQueueHealth,
           ...recoveryHealth,
           ...fallbackState,
         },
@@ -7069,7 +7066,9 @@ export class AgentRuntime implements Runtime {
     const status = this.session?.getStatus();
     // If a session exists but its child process is not active, it has crashed
     const healthStatus: RuntimeHealth['status'] =
-      this.session !== null && status?.active === false
+      turnQueueHealth.turnQueueHalted
+        ? 'unhealthy'
+        : this.session !== null && status?.active === false
         ? 'degraded'
         : fallbackState.fallbackActiveUntil !== null
           ? 'degraded'
@@ -7101,6 +7100,7 @@ export class AgentRuntime implements Runtime {
         turnFinalizationRetryAttempts: finalizationHealth.retryAttempts,
         turnFinalizationRetryRecoveries: finalizationHealth.retryRecoveries,
         turnFinalizationRetryExhaustions: finalizationHealth.retryExhaustions,
+        ...turnQueueHealth,
         ...recoveryHealth,
         ...fallbackState,
       },

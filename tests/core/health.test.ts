@@ -1400,6 +1400,8 @@ describe('GET /health', () => {
           effectiveProvider: 'openai-api',
           fallbackActiveUntil: Date.now() + 600_000,
           fallbackReason: 'usage-limit',
+          turnQueueHalted: true,
+          turnQueueHaltedScopes: 2,
         },
       }),
       getFallbackState: () => null,
@@ -1416,6 +1418,8 @@ describe('GET /health', () => {
     const json = JSON.parse(body);
     expect(json.status).toBe('degraded');
     expect(json.runtime.agent.effectiveProvider).toBe('openai-api');
+    expect(json.runtime.agent.turnQueueHalted).toBe(true);
+    expect(json.runtime.agent.turnQueueHaltedScopes).toBe(2);
     db2.close();
   });
 
@@ -1461,6 +1465,8 @@ describe('GET /health', () => {
         details: {
           activeSessions: 0,
           lastTurnErrorClass: 'auth-required',
+          turnQueueHalted: true,
+          turnQueueHaltedScopes: 1,
         },
       }),
       getFallbackState: () => null,
@@ -1476,6 +1482,8 @@ describe('GET /health', () => {
     expect(status).toBe(503);
     const json = JSON.parse(body);
     expect(json.status).toBe('unhealthy');
+    expect(json.runtime.agent.turnQueueHalted).toBe(true);
+    expect(json.runtime.agent.turnQueueHaltedScopes).toBe(1);
     expect(json.runtime.agent.lastTurnErrorClass).toBe('auth-required');
     db2.close();
   });
