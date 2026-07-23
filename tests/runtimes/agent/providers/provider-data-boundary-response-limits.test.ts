@@ -159,41 +159,45 @@ function terminalData(provider: ManagedProvider): string {
 function validFinalResponse(provider: ManagedProvider): Response {
   return provider === 'openai-api'
     ? sseResponse([
-        JSON.stringify({ choices: [{ delta: { content: 'complete' } }] }),
+        JSON.stringify({ choices: [{ index: 0, delta: { content: 'complete' } }] }),
         terminalData(provider),
       ])
     : sseResponse([
+        JSON.stringify({ type: 'message_start', message: { usage: { input_tokens: 1, output_tokens: 0 } } }),
         JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
         JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'complete' } }),
+        JSON.stringify({ type: 'content_block_stop', index: 0 }),
         terminalData(provider),
       ]);
 }
 
 function provisionalToolResponseData(provider: ManagedProvider): string[] {
   return provider === 'openai-api'
-    ? [JSON.stringify({ choices: [{ delta: {
+    ? [JSON.stringify({ choices: [{ index: 0, delta: {
         content: 'provisional text',
         tool_calls: [{
           index: 0,
           id: 'provisional-call',
+          type: 'function',
           function: { name: 'noop', arguments: '{}' },
         }],
       } }] })]
     : [
+        JSON.stringify({ type: 'message_start', message: { usage: { input_tokens: 1, output_tokens: 0 } } }),
         JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
         JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'provisional text' } }),
+        JSON.stringify({ type: 'content_block_stop', index: 0 }),
         JSON.stringify({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'provisional-call', name: 'noop' } }),
         JSON.stringify({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{}' } }),
+        JSON.stringify({ type: 'content_block_stop', index: 1 }),
       ];
 }
 
 function overflowData(provider: ManagedProvider, overflow: 'response' | 'text' | 'tool_arguments' | 'tool_calls'): string[] {
   if (overflow === 'response') {
-    return Array.from({ length: 520 }, (_, index) => JSON.stringify({
-      type: 'ignored_budget_padding',
-      index,
-      padding: 'x'.repeat(4096),
-    }));
+    return Array.from({ length: 520 }, () => `${' '.repeat(4096)}${JSON.stringify(provider === 'openai-api'
+      ? { choices: [], usage: {} }
+      : { type: 'ping' })}`);
   }
   if (overflow === 'text') {
     // Each fragment is below the character limit but their aggregate UTF-8
@@ -201,10 +205,11 @@ function overflowData(provider: ManagedProvider, overflow: 'response' | 'text' |
     const text = 'é'.repeat(Math.floor(MIB / 4) + 1);
     return provider === 'openai-api'
       ? [
-          JSON.stringify({ choices: [{ delta: { content: text } }] }),
-          JSON.stringify({ choices: [{ delta: { content: text } }] }),
+          JSON.stringify({ choices: [{ index: 0, delta: { content: text } }] }),
+          JSON.stringify({ choices: [{ index: 0, delta: { content: text } }] }),
         ]
       : [
+          JSON.stringify({ type: 'message_start', message: { usage: { input_tokens: 1, output_tokens: 0 } } }),
           JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
           JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } }),
           JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } }),
@@ -217,11 +222,12 @@ function overflowData(provider: ManagedProvider, overflow: 'response' | 'text' |
     const splitAt = Math.floor(rawArguments.length / 2);
     const fragments = [rawArguments.slice(0, splitAt), rawArguments.slice(splitAt)];
     return provider === 'openai-api'
-      ? fragments.map((argumentsFragment, index) => JSON.stringify({ choices: [{ delta: { tool_calls: [{
+      ? fragments.map((argumentsFragment, index) => JSON.stringify({ choices: [{ index: 0, delta: { tool_calls: [{
           index: 0,
-          ...(index === 0 ? { id: 'oversized-call', function: { name: 'noop', arguments: argumentsFragment } } : { function: { arguments: argumentsFragment } }),
+          ...(index === 0 ? { id: 'oversized-call', type: 'function', function: { name: 'noop', arguments: argumentsFragment } } : { function: { arguments: argumentsFragment } }),
         }] } }] }))
       : [
+          JSON.stringify({ type: 'message_start', message: { usage: { input_tokens: 1, output_tokens: 0 } } }),
           JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'oversized-call', name: 'noop' } }),
           ...fragments.map((partialJson) => JSON.stringify({
             type: 'content_block_delta',
@@ -231,16 +237,28 @@ function overflowData(provider: ManagedProvider, overflow: 'response' | 'text' |
         ];
   }
   return provider === 'openai-api'
-    ? Array.from({ length: 1025 }, (_, index) => JSON.stringify({ choices: [{ delta: { tool_calls: [{
+    ? Array.from({ length: 1025 }, (_, index) => JSON.stringify({ choices: [{ index: 0, delta: { tool_calls: [{
         index,
         id: `call-${index}`,
+        type: 'function',
         function: { name: 'noop', arguments: '{}' },
       }] } }] }))
-    : Array.from({ length: 1025 }, (_, index) => JSON.stringify({
-        type: 'content_block_start',
-        index,
-        content_block: { type: 'tool_use', id: `call-${index}`, name: 'noop' },
-      }));
+    : [
+        JSON.stringify({ type: 'message_start', message: { usage: { input_tokens: 1, output_tokens: 0 } } }),
+        ...Array.from({ length: 1025 }, (_, index) => [
+          JSON.stringify({
+            type: 'content_block_start',
+            index,
+            content_block: { type: 'tool_use', id: `call-${index}`, name: 'noop' },
+          }),
+          JSON.stringify({
+            type: 'content_block_delta',
+            index,
+            delta: { type: 'input_json_delta', partial_json: '{}' },
+          }),
+          JSON.stringify({ type: 'content_block_stop', index }),
+        ]).flat(),
+      ];
 }
 
 function bridge(executeTool: ProviderMcpBridge['executeTool']): ProviderMcpBridge {
@@ -420,7 +438,10 @@ describe('restricted managed-provider response completion and aggregate budgets'
         content: 'must not run',
         isError: false,
       }));
-      const paddedFrames = Array.from({ length: 520 }, () => `${' '.repeat(4096)}{}`);
+      const payload = providerName === 'openai-api'
+        ? JSON.stringify({ choices: [], usage: {} })
+        : JSON.stringify({ type: 'ping' });
+      const paddedFrames = Array.from({ length: 520 }, () => `${' '.repeat(4096)}${payload}`);
       const pulls = { count: 0 };
       fetchMock.mockResolvedValueOnce(pullDrivenSseResponse(
         [...paddedFrames, terminalData(providerName)],

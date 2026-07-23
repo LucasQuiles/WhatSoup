@@ -41,8 +41,13 @@ import {
   snapshotProviderDataBoundary,
 } from '../../../core/provider-data-boundary.ts';
 import { exposeProviderTurnParts } from '../../../core/provider-data-boundary-turn.ts';
-import { mapRestrictedProviderApiError } from '../../../core/provider-data-boundary-http.ts';
+import {
+  mapRestrictedProviderApiError,
+  readBoundedProviderErrorText,
+} from '../../../core/provider-data-boundary-http.ts';
 import { createRestrictedProviderResponseBudget } from '../../../core/provider-data-boundary-response.ts';
+import { createOpenAIRestrictedStreamGrammar } from '../../../core/provider-data-boundary-stream.ts';
+import { assertProviderToolJsonSafe } from '../../../core/provider-data-boundary-tool.ts';
 
 const log = createChildLogger('openai-api-provider');
 
@@ -417,7 +422,8 @@ export class OpenAIApiProvider implements ProviderSession {
     }
 
     if (!response.ok) {
-      const errText = await response.text().catch(() => '(unreadable)');
+      const errText = await readBoundedProviderErrorText(response)
+        .catch(() => this.boundaryRestricted ? '' : '(unreadable)');
 
       // Self-heal: surrogate corruption
       if (response.status === 400 && isSurrogateError(errText) && !selfHealAttempt) {
@@ -476,14 +482,22 @@ export class OpenAIApiProvider implements ProviderSession {
           onFailure: (code) => this.dataBoundary!.observeProviderResponseFailure(code),
         })
       : undefined;
+    const responseGrammar = this.boundaryRestricted
+      ? createOpenAIRestrictedStreamGrammar()
+      : undefined;
 
-    for await (const { data, rawData } of readSseDataFrames(body)) {
-      responseBudget?.observeData(rawData);
+    for await (const { data, rawData, eventName } of readSseDataFrames(body, responseBudget ? {
+      onWireBytes: (byteLength) => responseBudget.observeWireBytes(byteLength),
+      onUnexpectedLine: () => responseBudget.observeInvalid(),
+    } : undefined)) {
       if (data === '[DONE]') {
         if (this.boundaryRestricted && rawData !== '[DONE]') {
           responseBudget!.observeInvalid();
         }
         if (sawTerminal && this.boundaryRestricted) {
+          responseBudget!.observeInvalid();
+        }
+        if (responseGrammar && !responseGrammar.finish()) {
           responseBudget!.observeInvalid();
         }
         sawTerminal = true;
@@ -495,6 +509,7 @@ export class OpenAIApiProvider implements ProviderSession {
 
       let chunk: Record<string, unknown>;
       try {
+        if (responseGrammar) assertProviderToolJsonSafe(data);
         const parsed = JSON.parse(data) as unknown;
         if (
           this.boundaryRestricted
@@ -512,6 +527,9 @@ export class OpenAIApiProvider implements ProviderSession {
         }
         responseBudget?.observeInvalid();
         continue;
+      }
+      if (responseGrammar && !responseGrammar.observe(chunk, eventName)) {
+        responseBudget!.observeInvalid();
       }
 
       const choices = chunk['choices'] as Array<Record<string, unknown>> | undefined;

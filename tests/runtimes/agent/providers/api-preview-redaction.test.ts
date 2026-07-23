@@ -246,10 +246,12 @@ describe('provider API preview redaction', () => {
         { status: 400 },
       ))
       .mockResolvedValueOnce(providerName === 'openai-api'
-        ? makeSseResponse(['{"choices":[{"delta":{"content":"recovered"}}]}', '[DONE]'])
+        ? makeSseResponse(['{"choices":[{"index":0,"delta":{"content":"recovered"}}]}', '[DONE]'])
         : makeSseResponse([
+            '{"type":"message_start","message":{"usage":{"input_tokens":1,"output_tokens":0}}}',
             '{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
             '{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"recovered"}}',
+            '{"type":"content_block_stop","index":0}',
             '{"type":"message_stop"}',
           ]));
     await driveRestrictedProviderTurn(providerName, makeProvider());
@@ -261,10 +263,12 @@ describe('provider API preview redaction', () => {
     fetchMock.mockResolvedValueOnce(makeSseResponse([
       `malformed ${hostileContext}`,
       ...(providerName === 'openai-api'
-        ? ['{"choices":[{"delta":{"content":"done"}}]}', '[DONE]']
+        ? ['{"choices":[{"index":0,"delta":{"content":"done"}}]}', '[DONE]']
         : [
+            '{"type":"message_start","message":{"usage":{"input_tokens":1,"output_tokens":0}}}',
             '{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
             '{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}}',
+            '{"type":"content_block_stop","index":0}',
             '{"type":"message_stop"}',
           ]),
     ]));

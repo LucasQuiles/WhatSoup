@@ -12,7 +12,7 @@ function utf8Bytes(value: string): number {
 }
 
 export interface RestrictedProviderResponseBudget {
-  observeData(data: string): void;
+  observeWireBytes(byteLength: number): void;
   observeText(text: string): void;
   observeToolCall(index: number): void;
   observeToolArguments(argumentsFragment: string): void;
@@ -51,8 +51,16 @@ export function createRestrictedProviderResponseBudget(
   };
 
   return Object.freeze({
-    observeData(data: string) {
-      responseBytes = addWithinLimit(responseBytes, data, MAX_RESTRICTED_RESPONSE_BYTES);
+    observeWireBytes(byteLength: number) {
+      if (!Number.isSafeInteger(byteLength) || byteLength < 0) {
+        fail('invalid_provider_response');
+        return;
+      }
+      const next = responseBytes + byteLength;
+      if (!Number.isSafeInteger(next) || next > MAX_RESTRICTED_RESPONSE_BYTES) {
+        fail('limit_exceeded');
+      }
+      responseBytes = next;
     },
     observeText(text: string) {
       textBytes = addWithinLimit(textBytes, text, MAX_BOUNDARY_TEXT_LENGTH);

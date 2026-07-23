@@ -52,14 +52,43 @@ function broker(
 }
 
 function openAiSse(deltas: Array<Record<string, unknown>>): Response {
-  return new Response(deltas.map((delta) => `data: ${JSON.stringify(delta)}\n\n`).join('') + 'data: [DONE]\n\n', {
+  const canonical = deltas.map((delta) => {
+    if (!Array.isArray(delta['choices'])) return delta;
+    return {
+      ...delta,
+      choices: delta['choices'].map((rawChoice, choiceIndex) => {
+        const choice = rawChoice as Record<string, unknown>;
+        const rawDelta = choice['delta'] as Record<string, unknown> | undefined;
+        const toolCalls = Array.isArray(rawDelta?.['tool_calls'])
+          ? rawDelta['tool_calls'].map((rawToolCall) => {
+              const toolCall = rawToolCall as Record<string, unknown>;
+              return { type: 'function', ...toolCall };
+            })
+          : undefined;
+        return {
+          index: choiceIndex,
+          ...choice,
+          ...(rawDelta ? {
+            delta: {
+              ...rawDelta,
+              ...(toolCalls ? { tool_calls: toolCalls } : {}),
+            },
+          } : {}),
+        };
+      }),
+    };
+  });
+  return new Response(canonical.map((delta) => `data: ${JSON.stringify(delta)}\n\n`).join('') + 'data: [DONE]\n\n', {
     status: 200,
     headers: { 'content-type': 'text/event-stream' },
   });
 }
 
 function anthropicSse(events: Array<Record<string, unknown>>): Response {
-  return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''), {
+  const canonical = events[0]?.['type'] === 'message_start'
+    ? events
+    : [{ type: 'message_start', message: { usage: { input_tokens: 1, output_tokens: 0 } } }, ...events];
+  return new Response(canonical.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''), {
     status: 200,
     headers: { 'content-type': 'text/event-stream' },
   });
@@ -312,6 +341,7 @@ describe('managed provider data boundary integration', () => {
           { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
           { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'safe prefix ' } },
           { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: lateSecret } },
+          { type: 'content_block_stop', index: 0 },
           { type: 'message_stop' },
         ]));
     const provider = makeProvider();
@@ -502,15 +532,15 @@ describe('managed provider data boundary integration', () => {
           } }] }]);
         }
         return anthropicSse([
-          { type: 'content_block_start', index: 2, content_block: { type: 'text', text: '' } },
-          { type: 'content_block_delta', index: 2, delta: { type: 'text_delta', text: 'safe text that must remain provisional' } },
-          { type: 'content_block_stop', index: 2 },
-          { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'valid-first', name: 'boundary_read_file' } },
-          { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify({ path: alias }) } },
+          { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+          { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'safe text that must remain provisional' } },
           { type: 'content_block_stop', index: 0 },
-          { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'hostile-late', name: 'boundary_read_file' } },
-          { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: lateArguments } },
+          { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'valid-first', name: 'boundary_read_file' } },
+          { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: JSON.stringify({ path: alias }) } },
           { type: 'content_block_stop', index: 1 },
+          { type: 'content_block_start', index: 2, content_block: { type: 'tool_use', id: 'hostile-late', name: 'boundary_read_file' } },
+          { type: 'content_block_delta', index: 2, delta: { type: 'input_json_delta', partial_json: lateArguments } },
+          { type: 'content_block_stop', index: 2 },
           { type: 'message_stop' },
         ]);
       });
@@ -646,6 +676,7 @@ describe('managed provider data boundary integration', () => {
       : anthropicSse([
           { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
           { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: secret } },
+          { type: 'content_block_stop', index: 0 },
           { type: 'message_stop' },
         ]));
 

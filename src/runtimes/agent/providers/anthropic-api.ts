@@ -40,8 +40,13 @@ import {
   snapshotProviderDataBoundary,
 } from '../../../core/provider-data-boundary.ts';
 import { exposeProviderTurnParts } from '../../../core/provider-data-boundary-turn.ts';
-import { mapRestrictedProviderApiError } from '../../../core/provider-data-boundary-http.ts';
+import {
+  mapRestrictedProviderApiError,
+  readBoundedProviderErrorText,
+} from '../../../core/provider-data-boundary-http.ts';
 import { createRestrictedProviderResponseBudget } from '../../../core/provider-data-boundary-response.ts';
+import { createAnthropicRestrictedStreamGrammar } from '../../../core/provider-data-boundary-stream.ts';
+import { assertProviderToolJsonSafe } from '../../../core/provider-data-boundary-tool.ts';
 
 const log = createChildLogger('anthropic-api-provider');
 
@@ -441,7 +446,8 @@ export class AnthropicApiProvider implements ProviderSession {
     }
 
     if (!response.ok) {
-      const errText = await response.text().catch(() => '(unreadable)');
+      const errText = await readBoundedProviderErrorText(response)
+        .catch(() => this.boundaryRestricted ? '' : '(unreadable)');
 
       // ── Self-heal: surrogate corruption in message history ──────────────
       // If the API rejects the payload due to lone surrogates and we haven't
@@ -519,9 +525,14 @@ export class AnthropicApiProvider implements ProviderSession {
           onFailure: (code) => this.dataBoundary!.observeProviderResponseFailure(code),
         })
       : undefined;
+    const responseGrammar = this.boundaryRestricted
+      ? createAnthropicRestrictedStreamGrammar()
+      : undefined;
 
-    for await (const { data, rawData } of readSseDataFrames(body)) {
-      responseBudget?.observeData(rawData);
+    for await (const { data, eventName } of readSseDataFrames(body, responseBudget ? {
+      onWireBytes: (byteLength) => responseBudget.observeWireBytes(byteLength),
+      onUnexpectedLine: () => responseBudget.observeInvalid(),
+    } : undefined)) {
       if (sawTerminal && this.boundaryRestricted) {
         responseBudget!.observeInvalid();
       }
@@ -532,6 +543,7 @@ export class AnthropicApiProvider implements ProviderSession {
 
       let event: Record<string, unknown>;
       try {
+        if (responseGrammar) assertProviderToolJsonSafe(data);
         const parsed = JSON.parse(data) as unknown;
         if (
           this.boundaryRestricted
@@ -549,6 +561,9 @@ export class AnthropicApiProvider implements ProviderSession {
         }
         responseBudget?.observeInvalid();
         continue;
+      }
+      if (responseGrammar && !responseGrammar.observe(event, eventName)) {
+        responseBudget!.observeInvalid();
       }
 
       const eventType = event['type'] as string | undefined;
@@ -628,6 +643,9 @@ export class AnthropicApiProvider implements ProviderSession {
         }
 
         case 'message_stop':
+          if (responseGrammar && !responseGrammar.finish()) {
+            responseBudget!.observeInvalid();
+          }
           sawTerminal = true;
           break;
 

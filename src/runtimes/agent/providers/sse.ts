@@ -19,14 +19,25 @@ const MAX_SSE_BUF = 1024 * 1024;
 export interface SseDataFrame {
   readonly data: string;
   readonly rawData: string;
+  readonly eventName?: string;
+}
+
+export interface SseReadObserver {
+  /** Observe the exact bytes received from the wire before decoding/filtering. */
+  readonly onWireBytes?: (byteLength: number) => void;
+  /** Observe any non-empty physical line that the legacy data-only parser discards. */
+  readonly onUnexpectedLine?: () => void;
 }
 
 export async function* readSseDataFrames(
   body: ReadableStream<Uint8Array>,
+  observer?: SseReadObserver,
 ): AsyncGenerator<SseDataFrame> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let completed = false;
+  let pendingEventName: string | undefined;
 
   const drainLines = function* (chunk: string, flush: boolean): Generator<SseDataFrame> {
     buffer += chunk;
@@ -46,7 +57,24 @@ export async function* readSseDataFrames(
       const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
       if (line.startsWith('data: ')) {
         const rawData = line.slice(6);
-        yield { data: rawData.trim(), rawData };
+        const eventName = pendingEventName;
+        pendingEventName = undefined;
+        yield { data: rawData.trim(), rawData, ...(eventName ? { eventName } : {}) };
+      } else if (line.startsWith('event: ')) {
+        const eventName = line.slice(7);
+        if (pendingEventName !== undefined || !/^[a-z][a-z0-9_]*$/u.test(eventName)) {
+          observer?.onUnexpectedLine?.();
+          pendingEventName = undefined;
+        } else {
+          pendingEventName = eventName;
+        }
+      } else if (line.length === 0) {
+        if (pendingEventName !== undefined) {
+          observer?.onUnexpectedLine?.();
+          pendingEventName = undefined;
+        }
+      } else if (line.length > 0) {
+        observer?.onUnexpectedLine?.();
       }
     }
   };
@@ -54,7 +82,11 @@ export async function* readSseDataFrames(
   try {
     while (true) {
       const { done, value } = await reader.read();
-      if (done) break;
+      if (done) {
+        completed = true;
+        break;
+      }
+      observer?.onWireBytes?.(value.byteLength);
       yield* drainLines(decoder.decode(value, { stream: true }), false);
     }
 
@@ -63,7 +95,14 @@ export async function* readSseDataFrames(
     // without a trailing newline is emitted here. `buffer` is always '' after
     // a flush drain, so no further leftover-buffer handling is reachable.
     yield* drainLines(decoder.decode(), true);
+    if (pendingEventName !== undefined) {
+      observer?.onUnexpectedLine?.();
+      pendingEventName = undefined;
+    }
   } finally {
+    if (!completed) {
+      await reader.cancel().catch(() => undefined);
+    }
     reader.releaseLock();
   }
 }
