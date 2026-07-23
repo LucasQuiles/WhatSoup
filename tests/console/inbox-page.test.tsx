@@ -122,7 +122,7 @@ function makeLine(name: string, overrides: Record<string, unknown> = {}): LineIn
     name,
     phone: '+10000000000',
     mode: 'chat',
-    status: 'running',
+    status: 'online',
     accessMode: 'allowlist',
     healthPort: 4000,
     uptime: '1h',
