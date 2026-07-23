@@ -448,6 +448,72 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
     expect(secondScan.completed).toBe(1);
     expect(dispatchCalls).toBe(1);
   });
+
+  it('SETTLING TEST (boterr-lead PR1 adjudication): claim -> dispatch(delivered) -> completeTurnRecoveryJob refuses (source inbound not yet terminal) -> claim expires -> reclaim -- does the second scan re-dispatch?', async () => {
+    const { jobId } = crashOneSourceTurn();
+
+    let dispatchCalls = 0;
+    const supervisor = new TurnRecoverySupervisor({
+      instanceName: 'brick-instance',
+      durability: () => durability,
+      freshOwnerIdentity: (): TurnRecoveryOwnerIdentity => ({
+        logicalTurnId: 'brick-recovery-owner-settling',
+        managerId: 'brick-supervisor',
+        generation: 1,
+      }),
+      dispatchReplay: async (): Promise<TurnRecoveryReplayDispatchResult> => {
+        dispatchCalls += 1;
+        // Deliberately does NOT call completeInbound: the replay reports a
+        // genuine successful send (delivered), but the ORIGINAL source
+        // inbound is left non-terminal. This forces completeTurnRecoveryJob's
+        // own SQL gate (turn-recovery-store.ts:1187-1197) to throw
+        // ('Recovery source inbound must be terminal before job
+        // completion'), reproducing exactly the scenario from the
+        // reachability read: a real dispatch succeeded, but the completion
+        // bookkeeping cannot close the job on this attempt.
+        return { kind: 'delivered' };
+      },
+    });
+
+    const firstScan = await supervisor.scanOnce();
+    expect(firstScan.claimed).toBe(1);
+    expect(firstScan.completed).toBe(0);
+    expect(firstScan.processingErrors).toBe(1);
+    expect(dispatchCalls).toBe(1);
+
+    const jobAfterFirst = durability.getTurnRecoveryJob(jobId);
+    expect(jobAfterFirst).toMatchObject({ state: 'claimed', attempt_count: 1 });
+
+    // Simulate real-time lease expiry deterministically instead of a real
+    // wall-clock wait: claim_expires_at is not one of the immutable-envelope
+    // trigger's protected columns (only identity/routing fields are), so
+    // backdating it directly is a safe, faithful stand-in for "leaseSeconds
+    // has genuinely elapsed" — recoverStaleTurnRecoveryJobs reads exactly
+    // this column to decide staleness.
+    db.raw.prepare(`UPDATE turn_recovery_jobs SET claim_expires_at = datetime('now', '-10 seconds') WHERE id = ?`)
+      .run(jobId);
+
+    const secondScan = await supervisor.scanOnce();
+
+    // SETTLED (real, observed values — not a prediction): the second scan's
+    // stale-claim sweep (recoverStaleTurnRecoveryJobs, called at the top of
+    // runScan before enumeration) already transitions the job pending ->
+    // claimed's expiry is swept BEFORE processJob ever sees it as 'claimed',
+    // so it is re-enumerated as 'pending' and re-claimed via the ORDINARY
+    // pending-claim path, not the explicit reassignment branch — hence
+    // `reassigned: 0`, not 1 as a naive prediction would expect. The
+    // dispatcher-facing outcome is unambiguous: dispatchCalls reaches 2.
+    // This IS the confirmed double-send surface: nothing in claimAndReplay
+    // distinguishes "this job's own prior replay may already have sent for
+    // real" from an ordinary reclaim of abandoned work, so the second scan
+    // re-dispatches through the exact same path a genuinely-never-attempted
+    // job would take.
+    expect(secondScan).toMatchObject({ claimed: 1, reassigned: 0, completed: 0, processingErrors: 1 });
+    expect(dispatchCalls).toBe(2);
+
+    const jobAfterSecond = durability.getTurnRecoveryJob(jobId);
+    expect(jobAfterSecond).toMatchObject({ state: 'claimed', attempt_count: 2 });
+  });
 });
 
 describe('TurnRecoverySupervisor — deadman heartbeat evaluation', () => {
