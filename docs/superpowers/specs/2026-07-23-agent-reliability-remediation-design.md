@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-23
 **Target:** WhatSoup `main` and an affected macOS agent deployment
-**Status:** pending — approved design awaiting written-spec review
+**Status:** pending — owner decisions incorporated; awaiting written-spec review
 
 ## Context
 
@@ -100,12 +100,20 @@ errors, or error strings. In shared mode, the shared queue contributes one
 halted scope. In per-chat mode, each halted per-chat queue contributes one; the
 otherwise-unused shared queue is not counted.
 
+A halt is permanent for the lifetime of that `TurnQueue` object. This change
+does not add an administrative unhalt API or automatic retry of the
+unfinalizable turn. Operator recovery is a controlled process restart, which
+constructs new queue objects after the durable turn state has been captured.
+
 ### Health semantics
 
 - A halted shared/global queue is a complete admission-path outage and makes the
   runtime and top-level health `unhealthy`; `/health` returns HTTP 503.
 - One or more halted per-chat queues represent a partial outage and make the
   runtime and top-level health `degraded`; `/health` remains HTTP 200.
+- The per-chat rule also applies when every currently materialized per-chat
+  queue is halted. The runtime has no complete denominator for future chat
+  scopes, so it must not infer a global outage from the current map alone.
 - An unhalted queue does not change status.
 - Existing, more severe health state wins; the new projection never upgrades
   health.
@@ -117,6 +125,8 @@ The response exposes the two content-free fields under `runtime.agent`.
 Tests will prove:
 
 - a queue reports unhalted initially and halted after an unfinalizable failure;
+- a halt persists for the queue-object lifetime and a newly constructed queue is
+  unhalted;
 - a shared halted queue produces runtime `unhealthy`, top-level `unhealthy`, and
   HTTP 503;
 - a per-chat halted queue produces runtime and top-level `degraded` with HTTP
@@ -129,10 +139,14 @@ Tests will prove:
 
 ### Discontinuity model
 
-The event-loop sampler observes 20 expected 500 ms timer intervals, for a
-10-second bounded window. A single scheduling gap longer than that entire
-window cannot be classified meaningfully from the retained samples and is
-treated as a clock/scheduling discontinuity:
+The event-loop sampler retains its injected monotonic clock source
+(`performance.now()` by default); wall-clock time must not be used for sampling
+or warning intervals. It observes 20 expected 500 ms timer intervals, for a
+10-second bounded window. A scheduling gap is the monotonic difference between
+the current observation and the next expected timer observation. A gap strictly
+greater than the entire 10-second window cannot be classified meaningfully from
+the retained samples and is treated as a clock/scheduling discontinuity.
+Exactly 10 seconds remains a starvation sample:
 
 1. discard the pre-gap observation window;
 2. start a new window from the current observation;
@@ -149,17 +163,23 @@ CPU/event-loop blocking visible.
 
 ### Warning deduplication
 
-Both the timer callback and `snapshot()` apply the same discontinuity
-observation so a health request immediately after wake cannot briefly publish a
-false starvation sample. One physical gap increments the counter at most once.
+Both the timer callback and `snapshot()` call one shared, synchronous
+observation transition. That transition compares the current monotonic time,
+increments and resets on a discontinuity, and advances the next expected
+observation before returning. Whichever caller observes a physical gap first
+consumes it; the other caller therefore cannot increment the counter again.
+This lets a health request immediately after wake avoid briefly publishing a
+false starvation sample.
 
 Health status and metrics are evaluated on every request. Only the duplicate
 warning log is rate-limited with a five-minute in-process repeat interval:
 
 - log immediately when the sampler first enters a locally-starved state;
 - suppress repeated warnings for five minutes while remaining starved;
-- log again after the interval if starvation persists; and
-- reset the transition latch once the sampler is no longer starved.
+- log again five minutes after the most recent warning if starvation persists;
+  and
+- reset the transition latch once the sampler is no longer starved, so a later
+  re-entry logs immediately even if five minutes have not elapsed.
 
 Suppression never changes `locally_starved`, lag metrics, health status, or the
 discontinuity counter.
@@ -168,8 +188,10 @@ discontinuity counter.
 
 The generated agent launchd plist will set `WorkingDirectory` to the reviewed
 WhatSoup checkout. The health job will therefore find the tracked
-`.arc/arc.toml` through its existing repository-root resolution. If an explicit
-`WHATSOUP_REPO_ROOT` is used, it must resolve to the same reviewed checkout.
+`.arc/arc.toml` through its existing repository-root resolution. An explicit,
+non-empty `WHATSOUP_REPO_ROOT` takes precedence over the working directory and
+must resolve to the same reviewed checkout. A missing or invalid ARC binding is
+reported by health; it does not silently resolve from a different directory.
 
 Launchd rendering and drift tests will cover `WorkingDirectory`; ARC health
 tests will cover a valid tracked binding and a missing binding.
@@ -181,10 +203,16 @@ Fake-timer tests will prove:
 - ordinary sub-threshold lag is healthy;
 - a genuine 250 ms-or-greater lag inside the observation window remains
   starvation;
+- an exactly 10-second gap remains a starvation sample while a gap greater than
+  10 seconds is a discontinuity;
 - a gap longer than the observation window resets samples, increments the
   discontinuity counter, and does not report starvation solely for the gap;
+- timer-first and snapshot-first observation of the same gap each increment the
+  counter exactly once;
 - the discontinuity counter saturates safely;
 - repeated health requests do not emit unbounded duplicate warnings;
+- leaving and re-entering starvation logs immediately, while continuous
+  starvation logs at most once per five minutes;
 - warning suppression does not hide degraded health; and
 - generated launchd configuration has the reviewed working directory.
 
@@ -192,43 +220,70 @@ Fake-timer tests will prove:
 
 ### Required invariant
 
-Every non-sandbox per-chat CLI session eligible to call WhatSoup MCP tools must
-use the actor-bound Unix socket minted for that session. The invariant applies
-equally to primary, fallback, and routed CLI providers:
+Every non-sandbox per-chat CLI session whose child configuration exposes
+WhatSoup MCP tools is eligible and must use the actor-bound Unix socket minted
+for its logical per-chat session. Eligibility is capability-driven, not
+primary-provider-driven: it is evaluated from the actual provider selected for
+each primary, fallback, or routed child. The current supported eligible
+providers are:
 
 - Claude CLI
 - Codex CLI
 - Gemini CLI
 - OpenCode CLI
 
-API-only providers that do not launch MCP clients remain outside this path.
+API-only providers that do not launch MCP clients remain outside this path. A
+future or unrecognized CLI provider that exposes WhatSoup MCP is eligible and
+must fail closed until it can receive the actor-bound socket; it must not use
+the static socket merely because it is absent from the current provider list.
 
 ### Socket selection
 
 Provider MCP config continues to contain the static `WHATSOUP_SOCKET` as a
-compatibility fallback for provider processes that do not receive a
-session-bound socket. The stdio proxy changes socket precedence to:
+compatibility fallback for processes outside eligible per-chat sessions. The
+stdio proxy changes socket precedence to:
 
 1. non-empty `WHATSOUP_MCP_SOCKET`;
 2. non-empty `WHATSOUP_SOCKET`;
 3. fail with a content-free JSON-RPC configuration error.
 
+The configuration error uses JSON-RPC code `-32603`, the fixed message
+`MCP transport unavailable`, and no `data` member. It must not include socket
+paths, environment values, provider names, session identifiers, chat
+identifiers, hostnames, usernames, or request content.
+
 When the agent runtime launches an eligible non-sandbox per-chat CLI session,
-it must provide `WHATSOUP_MCP_SOCKET` for that exact session. The runtime must
-fail closed before launching an eligible session if it cannot produce the
-actor-bound socket. It must never silently fall back to the global socket in
-that mode.
+it must provide `WHATSOUP_MCP_SOCKET` in that child's explicit environment. The
+runtime must verify that the value is non-empty and names its live actor-bound
+server before spawning the child. It must fail closed before launch if it
+cannot prove those conditions, even when `WHATSOUP_SOCKET` is present. It must
+never silently fall back to the global socket in that mode.
 
 ### Lifecycle
 
-Actor socket creation precedes provider launch. The provider receives the socket
-only in its child environment. Session teardown removes the actor-bound socket
-and server after the child has stopped. Cleanup is idempotent and applies to
-normal exit, provider failure, fallback transitions, kill, and runtime shutdown.
+Actor socket creation precedes provider launch. One socket belongs to one
+logical per-chat session and may be reused by sequential primary, fallback, or
+routed provider children for that same session; provider children for the same
+session must not overlap during a transition. The provider receives the socket
+only in its child environment.
+
+The socket lives under a mode-`0700` runtime-owned directory, is mode `0600`,
+and is owned by the agent process UID. Its deterministic path is unique to the
+logical per-chat session. Before binding, the server unlinks only that exact
+known path, which recovers a stale file left by process crash or power loss
+without scanning or glob-deleting unrelated sockets.
+
+Session teardown removes the actor-bound socket and server after the child has
+stopped. Cleanup is idempotent and applies to normal exit, provider failure,
+fallback transitions, kill, and runtime shutdown. A cleanup failure is logged
+without identifiers and makes the applicable host acceptance check fail.
 
 The MCP server remains the authorization boundary: actor identity is derived
 from the bound socket/server context, not from provider-supplied request
-content.
+content. The socket context pins the logical conversation, while the server's
+per-request actor resolver reads the actor of the currently executing turn and
+denies sensitive tools when no owned executing actor exists. A child cannot
+select or override either value in request content.
 
 ### Tests
 
@@ -238,12 +293,33 @@ Tests will prove:
 - the static socket remains compatible outside eligible per-chat sessions;
 - missing both sockets fails with a redacted JSON-RPC error;
 - Claude, Codex, Gemini, and OpenCode per-chat launches receive the actor socket;
+- an eligible launch with only `WHATSOUP_SOCKET` present fails before child
+  spawn;
+- an unrecognized CLI provider exposing WhatSoup MCP also fails closed until
+  actor-socket wiring is available;
 - fallback and natural-language routing retain the same actor binding;
 - an eligible launch with no actor socket fails before child spawn;
 - two concurrent chat sessions receive distinct sockets and actors; and
-- normal and exceptional teardown remove only the owning session's socket.
+- normal and exceptional teardown remove only the owning session's socket;
+- a stale exact-path socket is replaced safely on the next bind; and
+- socket permissions and ownership match the runtime contract.
 
 ## Host Remediation
+
+### Private operation record
+
+The host operation uses a timestamped JSON record outside every repository
+under `$HOME/.local/state/whatsoup/private-ops/`. The directory is mode `0700`
+and each record is mode `0600`, owned by the operator account. The record has a
+schema version, run ID, creation timestamp, operator identity, target commit,
+and an ordered step list. Each step records its action, opaque private target
+IDs where required, start and completion timestamps, pre- and post-operation
+counts or hashes, result, and any abort reason.
+
+The record never stores credential values, message content, raw errors, full
+JIDs, or full phone numbers. It remains in the host's private backed-up state
+until all associated pull requests and host acceptance evidence are complete.
+Deletion is a separate owner-authorized operation.
 
 ### Launchd and credentials
 
@@ -255,14 +331,29 @@ Regenerate the agent plist from reviewed repository tooling with:
 - provider credentials loaded from the supported macOS Keychain or a
   mode-`0600` private token file, as supported by the deployment scripts.
 
-Rotate the exposed local health token. Rotate provider credentials through their
-upstream provider controls when the provider supports a safe, verifiable
-rotation path; otherwise record the rotation gap explicitly and remove the
-plaintext plist copy only after confirming the private store works. Never print
-secret values during migration or validation.
+Credential migration and rotation use this order:
 
-Restart through launchd, then prove exactly one agent process owns its expected
-port and socket.
+1. copy the currently working provider credential from the plist into its
+   supported private store without printing it;
+2. prove the private store can load that credential;
+3. generate and validate a credential-free candidate plist;
+4. generate a new local health token directly into the private store;
+5. stop the launchd job, wait for zero matching processes and no owner of the
+   expected port or sockets, atomically install the candidate plist, and
+   bootstrap the job;
+6. prove exactly one launchd-managed process, validate health with the new
+   token, and prove provider usability; and
+7. where supported, issue a new provider credential into the private store,
+   validate it, then revoke the exposed credential upstream.
+
+If private-store loading, plist validation, stop convergence, bootstrap,
+single-process convergence, health authentication, or provider usability
+fails, stop the run and record the abort. Do not continue to quarantine,
+access, or Tailscale mutations. Do not restore a plist containing exposed
+credentials; correct the credential-free candidate or issue another new
+credential. When an upstream provider has no safe, verifiable rotation path,
+record that explicit gap after removing the plaintext plist copy. Never print
+secret values during migration or validation.
 
 ### Quarantine
 
@@ -271,10 +362,17 @@ backup before mutation. Retire only the three locally reviewed row IDs as
 `failed_permanent` deliveries. Keep exact IDs in the private operation record,
 not the public repository. Do not resend them. Validate:
 
-- the backup exists;
+- the backup exists, is mode `0600`, passes SQLite `quick_check`, and has the
+  expected pre-mutation schema and row counts;
 - the three exact rows are no longer actionable;
 - no additional row changed; and
 - no outbound submission or echo was created by the operation.
+
+The backup is forensic evidence and an input to a scoped repair, not a
+whole-database rollback image. Never restore it wholesale because that would
+make the three intentionally retired rows actionable again. If validation
+finds an unintended mutation, stop and repair only the unintended rows in a
+new transaction while preserving the three reviewed retirements.
 
 ### Access request
 
@@ -304,10 +402,29 @@ After remediation, verify:
 - ARC binding present;
 - no plaintext credentials in the plist;
 - private credential/token file permissions;
+- private operation record location, schema, and permissions;
 - no halted queue;
 - the three quarantine rows retired with backup evidence;
 - the access queue resolved or explicitly blocked on identity proof; and
 - Tailscale online with key expiry disabled.
+
+Every mutating subsection is a gate. A failed precondition or postcondition
+stops later host mutations, records the abort and evidence gathered so far, and
+leaves the remaining steps pending.
+
+### Code-to-operation dependencies
+
+| Host operation | Required reviewed code |
+| --- | --- |
+| Queue-halt health acceptance and restart recovery | Queue-health truth merged to `main` |
+| Working directory, ARC, discontinuity, credential-free plist, and launchd restart | Suspend/platform hardening merged to `main` |
+| Actor-socket permissions, binding, and provider routing acceptance | Provider actor isolation merged to `main` |
+| Quarantine retirement | Existing reviewed retirement script; independent of the three new branches |
+| Access-request identity decision | Existing reviewed access tooling; independent of the three new branches |
+| Tailscale expiry change | Tailscale admin control plane; independent of the three new branches |
+
+Independent operations still wait for the launchd and credential gate to leave
+the agent healthy with exactly one process.
 
 ## Rollout and Rollback
 
@@ -319,9 +436,10 @@ backup where applicable.
 Rollback consists of:
 
 - restoring the prior reviewed `main` commit and regenerating the plist;
-- restoring the prior plist only if it contains no exposed secret values;
-- restoring the quarantine database backup only if validation proves the
-  retirement operation changed unintended rows; and
+- regenerating a credential-free plist rather than restoring a prior plist that
+  contains exposed secret values;
+- repairing unintended quarantine changes transactionally without restoring the
+  database wholesale or reversing the three reviewed retirements; and
 - re-enabling Tailscale expiry through the admin control plane if policy
   requires it.
 
