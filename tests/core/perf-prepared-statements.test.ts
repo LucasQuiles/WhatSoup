@@ -33,11 +33,12 @@ describe('prepared statement caching', () => {
     // the two recovery-owner reclaim statements (#1749: the bucket-4 reclaimable
     // sweep query + the dead-delivery job reclaim update), the two maybe_sent
     // durability-debt diagnostics (#1865: the maybe_sent count + oldest-submitted-at
-    // staleness probes that drive /health degradation), and the PR-C
+    // staleness probes that drive /health degradation), the open-inbound health scan,
+    // and the PR-C
     // supersedeOutstandingStatus statement (one outstanding status ping per chat),
     // plus seven durable inbound admission/replay statements.
     // Lifecycle methods must not prepare SQL per call.
-    expect(prepareSpy).toHaveBeenCalledTimes(119);
+    expect(prepareSpy).toHaveBeenCalledTimes(120);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');
