@@ -1,4 +1,4 @@
-import net, { type Socket } from 'node:net';
+import net, { type Server, type Socket } from 'node:net';
 import {
   chmodSync,
   lstatSync,
@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { startImsgRpcRelay, type ImsgRpcRelay } from '../../../src/transport/imessage/imsg-rpc-relay.ts';
 
 const roots: string[] = [];
@@ -249,7 +249,29 @@ describe('imsg rpc relay', () => {
     writeFileSync(fx.socketPath, 'replacement');
 
     await relay.close();
+    await expect(relay.stopped).resolves.toBeUndefined();
 
     expect(readFileSync(fx.socketPath, 'utf8')).toBe('replacement');
+  });
+
+  it('surfaces a post-listen server error and cleans up the relay socket', async () => {
+    const fx = fixture();
+    const createServer = net.createServer;
+    let observedServer: Server | undefined;
+    const createServerSpy = vi.spyOn(net, 'createServer').mockImplementation(((options, listener) => {
+      observedServer = createServer(options, listener);
+      return observedServer;
+    }) as typeof net.createServer);
+    try {
+      const relay = await start(fx);
+
+      expect(observedServer).toBeDefined();
+      observedServer!.emit('error', new Error('injected post-listen failure'));
+
+      await expect(relay.stopped).rejects.toThrow(/server failed after startup/i);
+      expect(() => lstatSync(fx.socketPath)).toThrow();
+    } finally {
+      createServerSpy.mockRestore();
+    }
   });
 });

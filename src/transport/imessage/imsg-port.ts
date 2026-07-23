@@ -450,7 +450,12 @@ export class ImsgPort implements ImessagePort {
     const cursorState = cursor === null ? { version: 1 as const, rowId: 0 } : decodeImsgCursor(cursor);
     if (this.activeSubscription === null) {
       if (cursor === null) {
-        await this.bootstrapInbound(since, cursorState.rowId);
+        try {
+          await this.bootstrapInbound(since, cursorState.rowId);
+        } catch (error) {
+          this.resetConnection();
+          throw error;
+        }
       } else {
         await this.subscribe(cursorState.rowId);
       }
@@ -574,14 +579,29 @@ export class ImsgPort implements ImessagePort {
   }
 
   private applyNotification(method: string, params: unknown): void {
-    if (typeof params !== 'object' || params === null) return;
+    if (method !== 'message' && method !== 'error') return;
+    if (typeof params !== 'object' || params === null) {
+      this.notificationFailure = imsgError(
+        `imsg watch returned malformed ${method} notification params`,
+        'MalformedResponse',
+        502,
+      );
+      return;
+    }
     const subscription = (params as { subscription?: unknown }).subscription;
+    if (!Number.isSafeInteger(subscription) || Number(subscription) <= 0) {
+      this.notificationFailure = imsgError(
+        `imsg watch returned malformed ${method} subscription`,
+        'MalformedResponse',
+        502,
+      );
+      return;
+    }
     if (subscription !== this.activeSubscription) return;
     if (method === 'error') {
       this.notificationFailure = imsgError('imsg watch subscription failed', 'WatchError', 503);
       return;
     }
-    if (method !== 'message') return;
     const message = (params as { message?: unknown }).message;
     if (typeof message !== 'object' || message === null) {
       this.notificationFailure = imsgError('imsg watch returned a malformed message', 'MalformedResponse', 502);

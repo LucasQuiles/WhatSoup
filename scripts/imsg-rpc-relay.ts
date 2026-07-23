@@ -51,6 +51,7 @@ export async function runImsgRpcRelay(args: readonly string[]): Promise<void> {
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
   await relay.ready;
+  await relay.stopped;
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {

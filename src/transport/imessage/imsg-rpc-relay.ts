@@ -47,6 +47,7 @@ export interface ImsgRpcRelayOptions {
 
 export interface ImsgRpcRelay {
   readonly ready: Promise<void>;
+  readonly stopped: Promise<void>;
   close(): Promise<void>;
 }
 
@@ -294,6 +295,21 @@ export function startImsgRpcRelay(options: ImsgRpcRelayOptions): ImsgRpcRelay {
   let activeSession: RelaySession | null = null;
   let socketIdentity: SocketIdentity | null = null;
   let closePromise: Promise<void> | null = null;
+  let stoppedSettled = false;
+  let resolveStopped: () => void = () => undefined;
+  let rejectStopped: (error: Error) => void = () => undefined;
+  const stopped = new Promise<void>((resolve, reject) => {
+    resolveStopped = resolve;
+    rejectStopped = reject;
+  });
+  void stopped.catch(() => undefined);
+
+  const settleStopped = (error?: Error): void => {
+    if (stoppedSettled) return;
+    stoppedSettled = true;
+    if (error === undefined) resolveStopped();
+    else rejectStopped(error);
+  };
 
   const shutdown = async (): Promise<void> => {
     const session = activeSession;
@@ -334,15 +350,20 @@ export function startImsgRpcRelay(options: ImsgRpcRelayOptions): ImsgRpcRelay {
       });
       activeSession = session;
     });
+    let startupServerError: Error | null = null;
+    let onStartupServerError: ((error: Error) => void) | null = null;
     await new Promise<void>((resolve, reject) => {
       const currentServer = server;
       if (currentServer === null) {
         reject(new Error('imsg relay server initialization failed'));
         return;
       }
-      currentServer.once('error', reject);
+      onStartupServerError = (error: Error): void => {
+        startupServerError = error;
+        reject(error);
+      };
+      currentServer.once('error', onStartupServerError);
       currentServer.listen(options.socketPath, () => {
-        currentServer.off('error', reject);
         resolve();
       });
     });
@@ -350,21 +371,53 @@ export function startImsgRpcRelay(options: ImsgRpcRelayOptions): ImsgRpcRelay {
     const stat = await lstat(options.socketPath);
     if (!stat.isSocket()) throw new Error('imsg relay failed to create a UNIX socket');
     socketIdentity = { dev: stat.dev, ino: stat.ino, uid: stat.uid };
+    if (startupServerError !== null) throw startupServerError;
+    const currentServer = server;
+    if (currentServer === null || onStartupServerError === null) {
+      throw new Error('imsg relay server initialization failed');
+    }
+    currentServer.off('error', onStartupServerError);
+    currentServer.on('error', () => {
+      if (closing) return;
+      closing = true;
+      const runtimeFailure = new Error('imsg relay server failed after startup');
+      closePromise = (async () => {
+        try {
+          await shutdown();
+        } finally {
+          settleStopped(runtimeFailure);
+        }
+      })();
+      void closePromise.catch(() => undefined);
+    });
   })().catch(async (error: unknown) => {
     closing = true;
-    await shutdown();
+    try {
+      await shutdown();
+      settleStopped();
+    } catch {
+      settleStopped(new Error('imsg relay cleanup failed during startup'));
+    }
     throw error;
   });
 
   return {
     ready,
+    stopped,
     close(): Promise<void> {
       if (closePromise !== null) return closePromise;
       closing = true;
       closePromise = (async () => {
         await ready.catch(() => undefined);
-        await shutdown();
+        try {
+          await shutdown();
+          settleStopped();
+        } catch (error) {
+          settleStopped(new Error('imsg relay shutdown failed'));
+          throw error;
+        }
       })();
+      void closePromise.catch(() => undefined);
       return closePromise;
     },
   };

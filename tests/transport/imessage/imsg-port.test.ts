@@ -200,6 +200,56 @@ describe('ImsgPort — listInboundSince', () => {
     expect(page.records.map((message) => message.guid)).toEqual(['raced']);
   });
 
+  it('restarts bootstrap after post-subscribe history failure', async () => {
+    const { port, mock } = makePort();
+    const message = rec({ id: 7, guid: 'recovered-history' });
+    let historyCall = 0;
+    mock.on('chats.list', () => ({ chats: [{ id: 42 }] }));
+    mock.on('watch.subscribe', () => ({ subscription: historyCall }));
+    mock.on('messages.history', () => {
+      historyCall += 1;
+      if (historyCall === 2) {
+        throw {
+          message: 'injected post-subscribe history failure',
+          code: 'MalformedResponse',
+          status: 502,
+        } satisfies ImessagePortError;
+      }
+      return { messages: [message] };
+    });
+
+    await expect(port.listInboundSince(new Date(0))).rejects.toMatchObject({
+      code: 'MalformedResponse',
+    });
+    const callsAfterFailure = mock.calls.length;
+
+    const recovered = await port.listInboundSince(new Date(0));
+
+    expect(mock.closeCalls).toBe(1);
+    expect(mock.calls.slice(callsAfterFailure).map(({ method }) => method)).toEqual([
+      'chats.list',
+      'messages.history',
+      'watch.subscribe',
+      'chats.list',
+      'messages.history',
+    ]);
+    expect(recovered.records.map(({ guid }) => guid)).toEqual(['recovered-history']);
+  });
+
+  it('fails closed on malformed params for a known watch notification', async () => {
+    const { port, mock } = makePort();
+    bootstrap(mock, []);
+    mock.on('watch.subscribe', () => {
+      mock.emitNotification('message', null);
+      return { subscription: 1 };
+    });
+
+    await expect(port.listInboundSince(new Date(0))).rejects.toMatchObject({
+      code: 'MalformedResponse',
+    });
+    expect(mock.closeCalls).toBe(1);
+  });
+
   it('resubscribes from the exclusive rowid cursor after a connection reset', async () => {
     const { port, mock } = makePort();
     bootstrap(mock, [rec({ id: 7, guid: 'g-7' })]);
