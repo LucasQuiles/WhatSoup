@@ -14,6 +14,7 @@ import {
   MODE_TYPES,
   UTF8,
   ZERO_OID,
+  assertNoLegacyGrafts,
   gitBytes,
   gitEnvironment,
   readExactBlobsWithinAggregateBudget,
@@ -629,6 +630,7 @@ function addedLineGitBytes(
   args: readonly string[],
   maxBuffer: number,
 ): Buffer {
+  assertNoLegacyGrafts(cwd);
   try {
     return execFileSync("git", ["--no-replace-objects", ...args], {
       cwd,

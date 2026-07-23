@@ -784,6 +784,20 @@ function rangeResponses(
 }
 
 describe('exact commit range', () => {
+  it('rejects legacy graft metadata before interpreting ancestry', () => {
+    const { root, baseOid } = fixture();
+    write(root, 'one.txt', 'one\n');
+    const localOid = commit(root, 'candidate');
+    mkdirSync(join(root, '.git/info'), { recursive: true });
+    writeFileSync(join(root, '.git/info/grafts'), `${localOid} ${baseOid}\n`);
+
+    expectCode(() => readExactCommitRange(root, {
+      baseOid,
+      remoteOid: null,
+      localOid,
+    }), 'ci.input.history-graft-present');
+  });
+
   it('rejects malformed runtime records before Git or accessor evaluation', () => {
     const oid = 'a'.repeat(40);
     const malformed: unknown[] = [
@@ -1192,6 +1206,8 @@ describe('exact commit metadata', () => {
         '../../../src/lib/git-env.ts',
         'node:child_process',
         'node:crypto',
+        'node:fs',
+        'node:path',
         'node:util',
       ]],
     ]);

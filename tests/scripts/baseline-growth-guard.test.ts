@@ -11,10 +11,11 @@
  * revision resolution, weighing, and comparison are all the production code path.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { deflateSync } from 'node:zlib';
 
 import { afterAll, describe, expect, it } from 'vitest';
 import { parseDocument } from 'yaml';
@@ -74,6 +75,22 @@ function replacementCommitFromWorktree(dir: string, parent: string, message: str
   git(dir, ['add', '-A']);
   const tree = git(dir, ['write-tree']).trim();
   return git(dir, ['commit-tree', tree, '-p', parent, '-m', message]).trim();
+}
+
+function overwriteLooseBlob(dir: string, oid: string, bytes: Buffer): void {
+  const object = Buffer.concat([Buffer.from(`blob ${bytes.byteLength}\0`), bytes]);
+  const path = join(dir, '.git/objects', oid.slice(0, 2), oid.slice(2));
+  chmodSync(path, 0o600);
+  writeFileSync(path, deflateSync(object));
+}
+
+function hashBlob(dir: string, bytes: string): string {
+  return execFileSync('git', ['hash-object', '-w', '--stdin'], {
+    cwd: dir,
+    input: bytes,
+    encoding: 'utf8',
+    env: { ...process.env, GIT_DIR: undefined, GIT_WORK_TREE: undefined } as NodeJS.ProcessEnv,
+  }).trim();
 }
 
 /**
@@ -189,6 +206,59 @@ describe('baseline growth guard — the red proof', () => {
 
     const { status, out } = runGuard(['--repo', dir, '--base', base, '--candidate', candidate]);
     expect(status, out).toBe(0);
+  });
+
+  it('is INCONCLUSIVE when loose object bytes do not match the candidate blob identity', () => {
+    const dir = makeRepo(2);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeBoundary(dir, 5);
+    commitCandidate(dir, 'grow baseline');
+    const candidate = git(dir, ['rev-parse', 'HEAD']).trim();
+    const path = '.claude/fitness/boundary-baseline.json';
+    const candidateBlob = git(dir, ['rev-parse', `${candidate}:${path}`]).trim();
+    writeBoundary(dir, 2);
+    overwriteLooseBlob(dir, candidateBlob, readFileSync(join(dir, path)));
+
+    const { status, out } = runGuard(['--repo', dir, '--base', base, '--candidate', candidate]);
+    expect(status, out).toBe(2);
+    expect(out).toContain('ci.input.blob-identity-mismatch');
+  });
+
+  it('is INCONCLUSIVE when a registered baseline path becomes a symlink', () => {
+    const dir = makeRepo(2);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    const path = '.claude/fitness/boundary-baseline.json';
+    const symlinkBlob = hashBlob(dir, '[]');
+    git(dir, ['update-index', '--add', '--cacheinfo', `120000,${symlinkBlob},${path}`]);
+    git(dir, ['commit', '-qm', 'replace baseline with symlink']);
+    const candidate = git(dir, ['rev-parse', 'HEAD']).trim();
+
+    const { status, out } = runGuard(['--repo', dir, '--base', base, '--candidate', candidate]);
+    expect(status, out).toBe(2);
+    expect(out).toMatch(/regular non-executable blob/);
+  });
+
+  it('is INCONCLUSIVE when legacy graft metadata can rewrite ancestry', () => {
+    const dir = makeRepo(2);
+    const realBase = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeBoundary(dir, 5);
+    commitCandidate(dir, 'grow candidate baseline');
+    const candidate = git(dir, ['rev-parse', 'HEAD']).trim();
+    const candidateTree = git(dir, ['rev-parse', `${candidate}^{tree}`]).trim();
+    const advancedRemote = git(
+      dir,
+      ['commit-tree', candidateTree, '-p', realBase, '-m', 'advanced remote with same weight'],
+    ).trim();
+    git(dir, ['update-ref', 'refs/remotes/origin/main', advancedRemote]);
+
+    const before = runGuard(['--repo', dir, '--candidate', candidate]);
+    expect(before.status, before.out).toBe(1);
+
+    mkdirSync(join(dir, '.git/info'), { recursive: true });
+    writeFileSync(join(dir, '.git/info/grafts'), `${candidate} ${advancedRemote}\n`);
+    const after = runGuard(['--repo', dir, '--candidate', candidate]);
+    expect(after.status, after.out).toBe(2);
+    expect(after.out).toMatch(/graft/i);
   });
 
   it('PASSES (exit 0) when a baseline is unchanged', () => {

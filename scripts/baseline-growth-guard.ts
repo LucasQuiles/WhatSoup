@@ -31,10 +31,11 @@ import {
 import { CliArgError, assertKnownFlag, isHelpFlag, takeValue } from './lib/cli-args.ts';
 import {
   FULL_OID,
-  MAX_EXACT_SINGLE_BLOB_BYTES,
   UTF8,
+  assertNoLegacyGrafts,
   gitBytes,
-  type ExactGitInputErrorCode,
+  readExactBlobs,
+  readExactTreeEntries,
 } from './lib/ci-control/git-input-core.ts';
 
 const EXIT_PASS = 0;
@@ -161,46 +162,72 @@ type Weighing =
   | { kind: 'absent' }
   | { kind: 'error'; message: string };
 
-function exactGitText(
-  repoRoot: string,
-  args: readonly string[],
-  code: ExactGitInputErrorCode,
-  maxBytes: number,
-): string {
-  return UTF8.decode(gitBytes(repoRoot, args, code, maxBytes));
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
-function weighAt(revision: string, path: string, repoRoot: string): Weighing {
-  let text: string;
+function weighRevision(revision: string, repoRoot: string): ReadonlyMap<string, Weighing> {
+  const paths = BASELINE_REGISTRY.map(({ path }) => path).sort((left, right) =>
+    Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8')),
+  );
+  const results = new Map<string, Weighing>();
+  let entries: ReturnType<typeof readExactTreeEntries>['entries'];
   try {
-    const listing = exactGitText(
-      repoRoot,
-      ['ls-tree', '-z', '--name-only', revision, '--', path],
-      'ci.input.tree-entry-unavailable',
-      MAX_GIT_IDENTITY_BYTES,
-    );
-    if (listing.length === 0) return { kind: 'absent' };
-    if (listing !== `${path}\0`) {
-      return { kind: 'error', message: `${path} did not resolve to one exact tree entry` };
-    }
-    text = exactGitText(
-      repoRoot,
-      ['cat-file', 'blob', `${revision}:${path}`],
-      'ci.input.blob-unavailable',
-      MAX_EXACT_SINGLE_BLOB_BYTES,
-    );
+    entries = readExactTreeEntries(repoRoot, { candidateOid: revision, paths }).entries;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { kind: 'error', message };
+    const message = errorMessage(error);
+    return new Map(paths.map((path) => [path, { kind: 'error', message }] as const));
   }
 
-  const entry = BASELINE_REGISTRY.find((b) => b.path === path);
-  if (!entry) return { kind: 'error', message: `${path} is not in BASELINE_REGISTRY` };
-  try {
-    return { kind: 'weight', value: weighBaseline(entry.shape, JSON.parse(text)) };
-  } catch (error) {
-    return { kind: 'error', message: error instanceof Error ? error.message : String(error) };
+  const blobOids: string[] = [];
+  for (const entry of entries) {
+    if (entry.presence === 'absent') {
+      results.set(entry.path, { kind: 'absent' });
+      continue;
+    }
+    if (entry.mode !== '100644' || entry.objectType !== 'blob' || entry.objectOid === null) {
+      results.set(entry.path, {
+        kind: 'error',
+        message: `${entry.path} must be a regular non-executable blob`,
+      });
+      continue;
+    }
+    blobOids.push(entry.objectOid);
   }
+
+  let bytesByOid: ReadonlyMap<string, Uint8Array>;
+  try {
+    bytesByOid = new Map(
+      readExactBlobs(repoRoot, blobOids).map(({ oid, bytes }) => [oid, bytes] as const),
+    );
+  } catch (error) {
+    const message = errorMessage(error);
+    for (const entry of entries) {
+      if (!results.has(entry.path)) results.set(entry.path, { kind: 'error', message });
+    }
+    return results;
+  }
+
+  const registryByPath = new Map(BASELINE_REGISTRY.map((entry) => [entry.path, entry] as const));
+  for (const entry of entries) {
+    if (results.has(entry.path)) continue;
+    const registryEntry = registryByPath.get(entry.path);
+    const bytes = entry.objectOid === null ? undefined : bytesByOid.get(entry.objectOid);
+    if (registryEntry === undefined || bytes === undefined) {
+      results.set(entry.path, { kind: 'error', message: `${entry.path} has no exact blob bytes` });
+      continue;
+    }
+    try {
+      const text = UTF8.decode(bytes);
+      results.set(entry.path, {
+        kind: 'weight',
+        value: weighBaseline(registryEntry.shape, JSON.parse(text)),
+      });
+    } catch (error) {
+      results.set(entry.path, { kind: 'error', message: errorMessage(error) });
+    }
+  }
+  return results;
 }
 
 function main(): number {
@@ -225,6 +252,12 @@ function main(): number {
   }
 
   const repoRoot = options.repo;
+  try {
+    assertNoLegacyGrafts(repoRoot);
+  } catch (error) {
+    console.error(`FAIL(inconclusive): ${errorMessage(error)}. Remove legacy Git graft metadata.`);
+    return EXIT_INCONCLUSIVE;
+  }
   const candidate = resolveCommit(options.candidate, repoRoot);
   if (candidate === null) {
     console.error(
@@ -250,10 +283,18 @@ function main(): number {
 
   const shapeErrors: string[] = [];
   const comparable: WeighedBaseline[] = [];
+  const baseWeighings = weighRevision(base, repoRoot);
+  const candidateWeighings = weighRevision(candidate, repoRoot);
 
   for (const entry of BASELINE_REGISTRY) {
-    const atBase = weighAt(base, entry.path, repoRoot);
-    const atHead = weighAt(candidate, entry.path, repoRoot);
+    const atBase = baseWeighings.get(entry.path) ?? {
+      kind: 'error' as const,
+      message: `${entry.path} has no base result`,
+    };
+    const atHead = candidateWeighings.get(entry.path) ?? {
+      kind: 'error' as const,
+      message: `${entry.path} has no candidate result`,
+    };
 
     // A registry row that cannot be weighed is a BROKEN GUARD, not a clean baseline. It is
     // reported by path and message so it gets fixed, never dropped.

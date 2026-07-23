@@ -1,5 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { lstatSync, readFileSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { TextDecoder, types as utilTypes } from "node:util";
 
 import { cleanGitEnv } from "../../../src/lib/git-env.ts";
@@ -169,6 +171,7 @@ export interface ExactBudgetedAddedLineSetV1 extends ExactAddedLineSetV1 {
 }
 
 export type ExactGitInputErrorCode =
+  | "ci.input.history-graft-present"
   | "ci.input.revision-unavailable"
   | "ci.input.commit-range-unavailable"
   | "ci.input.commit-range-malformed"
@@ -244,12 +247,57 @@ export function gitEnvironment(): NodeJS.ProcessEnv {
   };
 }
 
+function boundedControlPath(path: string): string | null {
+  const metadata = lstatSync(path, { throwIfNoEntry: false });
+  if (metadata === undefined || !metadata.isFile() || metadata.size > 4_096) return null;
+  const value = readFileSync(path, "utf8");
+  if (!value.endsWith("\n") || value.slice(0, -1).includes("\n")) return null;
+  return value.slice(0, -1);
+}
+
+function gitCommonDirFromFilesystem(cwd: string): string | null {
+  let cursor = resolve(cwd);
+  for (;;) {
+    const dotGit = join(cursor, ".git");
+    const metadata = lstatSync(dotGit, { throwIfNoEntry: false });
+    if (metadata?.isDirectory()) return dotGit;
+    if (metadata?.isFile()) {
+      const pointer = boundedControlPath(dotGit);
+      if (pointer === null || !pointer.startsWith("gitdir: ")) return null;
+      const rawGitDir = pointer.slice("gitdir: ".length);
+      const gitDir = isAbsolute(rawGitDir) ? rawGitDir : resolve(cursor, rawGitDir);
+      const common = boundedControlPath(join(gitDir, "commondir"));
+      return common === null
+        ? gitDir
+        : isAbsolute(common)
+        ? common
+        : resolve(gitDir, common);
+    }
+    const parent = dirname(cursor);
+    if (parent === cursor) return null;
+    cursor = parent;
+  }
+}
+
+/** Reject legacy graft metadata before any Git command can interpret rewritten ancestry. */
+export function assertNoLegacyGrafts(cwd: string): void {
+  const commonDir = gitCommonDirFromFilesystem(cwd);
+  if (commonDir === null) return;
+  if (lstatSync(join(commonDir, "info", "grafts"), { throwIfNoEntry: false }) !== undefined) {
+    throw new ExactGitInputError(
+      "ci.input.history-graft-present",
+      "ci.input.history-graft-present",
+    );
+  }
+}
+
 export function gitBytes(
   cwd: string,
   args: readonly string[],
   code: ExactGitInputErrorCode,
   maxBuffer: number,
 ): Buffer {
+  assertNoLegacyGrafts(cwd);
   try {
     return execFileSync("git", ["--no-replace-objects", ...args], {
       cwd,
@@ -281,6 +329,7 @@ function exactInputGitBytes(
   >,
   maxBuffer: number,
 ): Buffer {
+  assertNoLegacyGrafts(cwd);
   try {
     return execFileSync("git", ["--no-replace-objects", ...args], {
       cwd,
@@ -657,6 +706,7 @@ function boundedEvidenceGitBytes(
   maxBuffer: number,
   codes: EvidenceGitErrorCodes,
 ): Buffer {
+  assertNoLegacyGrafts(cwd);
   try {
     return execFileSync("git", ["--no-replace-objects", ...args], {
       cwd,
