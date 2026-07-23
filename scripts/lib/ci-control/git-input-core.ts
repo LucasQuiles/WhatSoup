@@ -266,10 +266,14 @@ function boundedControlPath(path: string): string | null {
     throw gitControlUnavailable();
   }
   const value = readFileSync(path, "utf8");
-  if (!value.endsWith("\n") || value.slice(0, -1).includes("\n")) {
+  if (!value.endsWith("\n")) {
     throw gitControlUnavailable();
   }
-  return value.slice(0, -1);
+  const line = value.endsWith("\r\n") ? value.slice(0, -2) : value.slice(0, -1);
+  if (line.includes("\n") || line.includes("\r")) {
+    throw gitControlUnavailable();
+  }
+  return line;
 }
 
 function gitCommonDirFromFilesystem(cwd: string): string | null {
@@ -352,7 +356,7 @@ export function gitBytes(
         : candidate.code === "ENOBUFS"
         ? "ci.classification.change-set-budget"
         : code;
-    throw new ExactGitInputError(failureCode, failureCode, { cause: error });
+    throw new ExactGitInputError(failureCode, failureCode);
   }
 }
 
@@ -383,7 +387,7 @@ function exactInputGitBytes(
       : candidate.code === "ENOBUFS"
       ? budgetCode
       : failureCode;
-    throw new ExactGitInputError(code, code, { cause: error });
+    throw new ExactGitInputError(code, code);
   }
 }
 

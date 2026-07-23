@@ -1,7 +1,7 @@
 import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 
@@ -528,6 +528,58 @@ describe('report-only outgoing ref policy CLI', () => {
       expect(facts[0]).toMatchObject({ relation: 'non-fast-forward', localRefOid: localOid });
       expect(evaluateOutgoingRefPolicy(policy(), remote, updates, facts, MANIFEST_DIGEST))
         .toMatchObject({ outcome: 'block', exitCode: 1, code: 'ci.refs.force-update-prohibited' });
+    } finally {
+      rmSync(repository, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects legacy graft metadata before deriving outgoing-ref ancestry', () => {
+    const repository = mkdtempSync(resolve(tmpdir(), 'ci-ref-policy-graft-'));
+    const git = (args: string[], input?: string) => execFileSync('/usr/bin/git', args, {
+      cwd: repository,
+      encoding: 'utf8',
+      input,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: 'CI fixture',
+        GIT_AUTHOR_EMAIL: 'ci-fixture@example.invalid',
+        GIT_COMMITTER_NAME: 'CI fixture',
+        GIT_COMMITTER_EMAIL: 'ci-fixture@example.invalid',
+        GIT_CONFIG_NOSYSTEM: '1',
+        GIT_CONFIG_GLOBAL: '/dev/null',
+      },
+    }).trim();
+    try {
+      git(['init', '--quiet', '--object-format=sha1']);
+      const tree = git(['mktree'], '');
+      const remoteOid = git(['commit-tree', tree, '-m', 'remote']);
+      const localOid = git(['commit-tree', tree, '-m', 'unrelated-local']);
+      git(['update-ref', 'refs/heads/topic', localOid]);
+      mkdirSync(resolve(repository, '.git/info'), { recursive: true });
+      writeFileSync(resolve(repository, '.git/info/grafts'), `${localOid} ${remoteOid}\n`, 'utf8');
+      const input = Buffer.from(`refs/heads/topic ${localOid} refs/heads/topic ${remoteOid}\n`);
+      const updates = parsePrePushInput(input);
+
+      expect(() => resolveNativeRefGraphFacts(repository, policy(), updates))
+        .toThrowError(/ci\.input\.history-graft-present/);
+
+      const stdout: string[] = [];
+      const exitCode = runRefPolicyCli(
+        ['--remote-name', 'origin', '--remote-location', SCP_REMOTE, '--json'],
+        root,
+        {
+          stdout: (text) => stdout.push(text),
+          stderr: () => undefined,
+          readInput: () => input,
+          resolveGraphFacts: () => resolveNativeRefGraphFacts(repository, policy(), updates),
+          now: () => new Date('2026-07-20T00:00:00.000Z'),
+        },
+      );
+      expect(exitCode).toBe(2);
+      expect(validateRefPolicyReceipt(JSON.parse(stdout.join('')))).toMatchObject({
+        outcome: 'inconclusive',
+        code: 'ci.refs.graph-unavailable',
+      });
     } finally {
       rmSync(repository, { recursive: true, force: true });
     }

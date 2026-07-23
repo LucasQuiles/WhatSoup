@@ -3,8 +3,8 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, readSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
-import { cleanGitEnv } from '../src/lib/git-env.ts';
 import { takeValue } from './lib/cli-args.ts';
+import { assertNoLegacyGrafts, gitEnvironment } from './lib/ci-control/git-input-core.ts';
 import { digestControlManifest, loadControlManifest } from './lib/ci-control/manifest.ts';
 import {
   MAX_PRE_PUSH_INPUT_BYTES,
@@ -27,6 +27,7 @@ const MAX_GIT_OUTPUT_BYTES = 1_000_000;
 export const REF_POLICY_TOOL_SOURCE_PATHS = [
   'scripts/ci-control-ref-policy.ts',
   'scripts/lib/ci-control/manifest.ts',
+  'scripts/lib/ci-control/git-input-core.ts',
   'scripts/lib/ci-control/reasons.ts',
   'scripts/lib/ci-control/ref-policy.ts',
   'scripts/lib/cli-args.ts',
@@ -104,9 +105,10 @@ function parseRefPolicyArgs(args: readonly string[]): ParsedArgs {
 }
 
 function git(cwd: string, args: readonly string[]): { status: number | null; stdout: string } {
+  assertNoLegacyGrafts(cwd);
   const result = spawnSync(TRUSTED_GIT, args, {
     cwd,
-    env: { ...cleanGitEnv(), GIT_NO_REPLACE_OBJECTS: '1' },
+    env: gitEnvironment(),
     encoding: 'utf8',
     maxBuffer: MAX_GIT_OUTPUT_BYTES,
     timeout: GIT_TIMEOUT_MS,

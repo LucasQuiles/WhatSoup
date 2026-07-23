@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -798,6 +799,22 @@ describe('exact commit range', () => {
     }), 'ci.input.history-graft-present');
   });
 
+  it('rejects graft metadata behind a CRLF-terminated gitfile control path', () => {
+    const { root, baseOid } = fixture();
+    write(root, 'one.txt', 'one\n');
+    const localOid = commit(root, 'candidate');
+    renameSync(join(root, '.git'), join(root, '.git-real'));
+    writeFileSync(join(root, '.git'), 'gitdir: .git-real\r\n', 'utf8');
+    mkdirSync(join(root, '.git-real/info'), { recursive: true });
+    writeFileSync(join(root, '.git-real/info/grafts'), `${localOid} ${baseOid}\n`, 'utf8');
+
+    expectCode(() => readExactCommitRange(root, {
+      baseOid,
+      remoteOid: null,
+      localOid,
+    }), 'ci.input.history-graft-present');
+  });
+
   it('rejects malformed repository control metadata with a sanitized unavailable result', () => {
     const root = mkdtempSync(join(tmpdir(), 'ci-control-malformed-gitdir-'));
     registerTemporaryRoot(root);
@@ -815,6 +832,28 @@ describe('exact commit range', () => {
     }
     expect(thrown).toMatchObject({ code: 'ci.input.git-control-unavailable' });
     expect(String(thrown)).not.toContain(root);
+    expectNoVisibleCause(thrown);
+  });
+
+  it('does not retain raw child-process stderr in exact-range errors', () => {
+    const privateFixture = 'private-repository-path-to-stderr';
+    let thrown: unknown;
+    try {
+      withGitShim({
+        [responseKey(['rev-parse', '--show-object-format'])]: {
+          stderr: privateFixture,
+          exit: 23,
+        },
+      }, (cwd) => readExactCommitRange(cwd, {
+        baseOid: 'a'.repeat(40),
+        remoteOid: null,
+        localOid: 'b'.repeat(40),
+      }));
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toMatchObject({ code: 'ci.input.commit-range-unavailable' });
+    expect(String(thrown)).not.toContain(privateFixture);
     expectNoVisibleCause(thrown);
   });
 
