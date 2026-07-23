@@ -652,3 +652,38 @@ stylesheet (`console/src/styles/chrome.css`) consumes `var()` only: colors from 
   caps).
 - **Shape details** — `--chrome-micro-radius` 1px (tick/dot/host-warn corner; badge.md
   shape family), `--chrome-pill-radius` 99px + `--chrome-attn-pad` (header attn pill).
+
+## 15. v3.5 dream-lab geometry (docs/design-system/v35/mockups/dream-lab.html, landed b-06)
+
+Component-tier `--dream-*` dimension + tracking tokens in
+`console/src/styles/tokens.component.css`, single `:root` scope (theme-independent
+geometry; parity count unaffected). The mockup literals are the visual SSOT — they
+live here, dimension-allowlisted, so the dream stylesheet
+(`console/src/styles/dream.css`) consumes `var()` only.
+
+- **Page row** — `--dream-pagerow-gap/-pad` (mockup `header` literals, independently
+  owned) + queued pill (`--dream-qpill-gap/-pad`).
+- **Queue rail** — `--dream-queue-w` 340px + pad/gap; section heads
+  (`--dream-qhead-pad/-mt`, `--tracking-dream-qhead` 0.1em), filters strip
+  (`--dream-fstrip-*`), dream cards (`--dream-dcard-*`), type tag
+  (`--dream-dtag-pad`, `--tracking-dream-dtag`), history rows
+  (`--dream-hrow-*`, `--dream-hst-pad`, `--dream-hwhen-pad`).
+- **Avatar slots (12-agent-identity §2)** — `--dream-avatar-sm` 26px/7px radius
+  (queue card), `--dream-avatar-lg` 44px/11px radius (review head); fills consume
+  `--agent-hue-0..7` (avatar fills only, §A gate); the ✦ rationale accent is
+  `--agent-dream` (agent-mode channel, not identity).
+- **Review pane** — `--dream-review-pad/-gap`, rhead + meta, panels
+  (`--dream-panel-*`), rationale (`--dream-rationale-*`, quote capped 68ch),
+  **diff capped `--dream-diff-maxw` 72ch (acceptance item)** + line/section
+  geometry, impact columns, decision actions + tucked note. Micro-geometry:
+  `--dream-dcard-what-mt`, `--dream-hist-pad-y`, `--dream-impact-col-minw`
+  (documented deviation — wrap guard), `--dream-empty-pad-y` (deviation).
+- **Stacking breakpoint is the mockup's own** — dream-lab.html `@media
+  (max-width:980px)` stacks `.wrap`; the fourth distinct SSOT breakpoint
+  (chrome/fleet 1100px, agents 1000px, dream 980px, skills 900px), browser-pinned
+  at 979/980/981.
+
+Font SIZES ride the `--text-*` scale + `--type-title` composite (weight/leading
+raw, fleet idiom); hairlines are `var(--bw)`; diff del/add washes consume the
+status-channel color-mix idiom. Half-step tokens (`--sp-*h`, DD-9 retirement
+queue) are not consumed by the Dream Lab surface.
