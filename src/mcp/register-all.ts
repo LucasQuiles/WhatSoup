@@ -131,7 +131,11 @@ export function registerAllTools(
     fn: (register: (tool: ToolDeclaration) => void) => void,
   ): void => {
     try {
-      fn(makeRegister(name, core));
+      // QR-017 / #1976: bracket the whole module under its name so every tool
+      // it registers — whether via the direct Pattern-1 body or the Pattern-2/3
+      // `register` callback — is stamped with `name` as its group. Pure taxonomy
+      // metadata; no behaviour change (listTools/call untouched).
+      registry.withModule(name, () => fn(makeRegister(name, core)));
     } catch (err) {
       failures.push({ module: name, core, err });
       if (core) {
