@@ -14,30 +14,22 @@ import { Plus, RotateCw } from "lucide-react";
 const AddLineWizard = lazy(() => import("../components/AddLineWizard"));
 import { motion } from "framer-motion";
 import { useQueryClient } from "@tanstack/react-query";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { useLines, useFeed, useLogs } from "../hooks/use-fleet";
 import { useTransportStatus } from "../hooks/use-transport-status";
 import EmptyState from "../components/EmptyState";
 import { useDrawerPlacement } from "../hooks/useViewportPlacement";
 import { useFleetMetrics } from "../hooks/use-metrics";
-import { computeKpis, isLineConnected } from "../lib/compute-kpis";
-import {
-  deriveFleetMessageSparklines,
-  deriveFleetSessionSparklines,
-} from "../lib/metrics-sparklines";
-import type { FeedEvent, LineInstance, Mode, MetricsRange } from "../types";
-import type { ChartKey } from "../components/ChartPanel";
-import KpiCard from "../components/KpiCard";
+import { computeKpis } from "../lib/compute-kpis";
+import type { FeedEvent, LineInstance, Mode } from "../types";
 import AlertBanner from "../components/AlertBanner";
 import ActivityFeed from "../components/ActivityFeed";
 import FilterPill from "../components/FilterPill";
-import { ChartPanel } from "../components/ChartPanel";
-import { FleetMetricsChart } from "../components/FleetMetricsChart";
-import { FleetTokenChart } from "../components/FleetTokenChart";
-import { FleetSessionChart } from "../components/FleetSessionChart";
-import LineTags from "../components/LineTags";
-import FleetRowMenu from "../components/FleetRowMenu";
 import BulkActionBar from "../components/BulkActionBar";
 import ConfirmDialog from "../components/ConfirmDialog";
+import { FleetKpis } from "../components/fleet/FleetKpis";
+import { LineRow } from "../components/fleet/LineRow";
+import { HeartbeatRail } from "../components/fleet/HeartbeatRail";
 import { api } from "../lib/api";
 import { useToast } from "../hooks/toast-context";
 import { formatRelative } from "../lib/format-time";
@@ -45,7 +37,6 @@ import {
   formatPhone,
   displayInstanceName,
   formatCompact,
-  formatCount,
 } from "../lib/text-utils";
 import { getProvider, getProviderColor } from "../lib/providers";
 import {
@@ -58,38 +49,24 @@ import {
   TableEmpty,
   TableError,
   EM_DASH,
-  Toolbar,
-  ToolbarFilters,
-  ToolbarSearch,
-  ToolbarSpring,
-  ToolbarTimeRange,
-  StatusCell,
-  ModeBadge,
-  Checkbox,
-  Card,
   Button,
   DrawerLayout,
   Drawer,
   DrawerHeader,
   DrawerBody,
   LogStream,
+  Menu,
+  MenuItem,
+  Popover,
+  Checkbox,
+  StatusCell,
+  ModeBadge,
   type SortState,
-  type RowSeverity,
-  type TimeRangeOption,
 } from "../components/primitives";
-import { statusNeedsAttention, statusAlertMessage, statusSeverity } from "../lib/status-severity";
+import { TextInput } from "../components/primitives/FormControl";
+import { statusNeedsAttention, statusAlertMessage } from "../lib/status-severity";
 
 const ease = [0.22, 1, 0.36, 1] as const;
-
-type KpiFilter =
-  | "connected"
-  | "attention"
-  | "unread"
-  | "agent"
-  | "sent"
-  | "received"
-  | "media"
-  | null;
 
 type SortKey =
   | "mode"
@@ -105,9 +82,9 @@ type SortKey =
   | "active"
   | null;
 
-/** Column count for colSpan states (includes the leading select column
- * and the trailing Actions column). */
-const COL_COUNT = 14;
+/** Column count for colSpan states (shape, line, channel, agent, mode, state,
+ * grants, 7d spark, row menu). */
+const COL_COUNT = 9;
 
 const modeFilterOptions: (Mode | "all")[] = ["all", "passive", "chat", "agent"];
 
@@ -117,26 +94,28 @@ const modeTextClass: Record<Mode, string> = {
   agent: "text-m-agt",
 };
 
-const RANGE_OPTIONS: TimeRangeOption[] = [
-  { label: "24h", value: "24h" },
-  { label: "7d", value: "7d" },
-  { label: "30d", value: "30d" },
+/** Sort menu options — keys restricted to what the v3.5 row anatomy surfaces
+ *  (provider/chats/groups sorts dropped with their columns). */
+const SORT_OPTIONS: { key: Exclude<SortKey, null>; label: string }[] = [
+  { key: "name", label: "Name" },
+  { key: "mode", label: "Mode" },
+  { key: "unread", label: "Unread" },
+  { key: "sent", label: "Messages sent" },
+  { key: "recv", label: "Messages received" },
+  { key: "tokens", label: "Tokens" },
+  { key: "sessions", label: "Sessions" },
+  { key: "active", label: "Last active" },
 ];
+
 const EMPTY_LINES: LineInstance[] = [];
 const EMPTY_FEED: FeedEvent[] = [];
 
-function chartColStyle(key: ChartKey, expanded: ChartKey | null) {
-  if (expanded !== null && expanded !== key) {
-    return {
-      flex: 0,
-      opacity: 0,
-      minWidth: 0,
-      width: 0,
-      overflow: "hidden" as const,
-    };
-  }
-  return { flex: 1, opacity: 1 };
-}
+/** perf §3 virtualization ruling: the lines table virtualizes above 50 rows
+ *  (owner scale N=200); below that, plain render. */
+const VIRTUALIZE_ABOVE = 50;
+/** Estimated row height for the virtualizer (td padding + single-line
+ *  anatomy); rows are fixed-height by construction. */
+const ROW_ESTIMATE = 38;
 
 // ---------------------------------------------------------------------------
 // FleetDrawer — line inspector panel
@@ -339,7 +318,7 @@ const FleetDrawer: FC<FleetDrawerProps> = ({
 };
 
 // ---------------------------------------------------------------------------
-// SoupKitchen page
+// SoupKitchen page — v3.5 Fleet surface (T5 b-03; mockup fleet.html SSOT)
 // ---------------------------------------------------------------------------
 
 const SoupKitchen: FC = () => {
@@ -378,11 +357,10 @@ const SoupKitchen: FC = () => {
     feedQueryError?.message ??
     "Unable to load fleet data";
 
-  const [activeKpi, setActiveKpi] = useState<KpiFilter>(null);
-  const [expandedChart, setExpandedChart] = useState<ChartKey | null>(null);
-  const [chartRange, setChartRange] = useState<MetricsRange>("24h");
   const [modeFilter, setModeFilter] = useState<Mode | "all">("all");
   const [search, setSearch] = useState("");
+  const [filterOpen, setFilterOpen] = useState(false);
+  const filterAnchorRef = useRef<HTMLButtonElement | null>(null);
   const [showAddWizard, setShowAddWizard] = useState(false);
   // C-B3W4-3: latched mount — keep wizard mounted after first open
   // so useDismissable can restore focus and exit motion can complete.
@@ -426,38 +404,31 @@ const SoupKitchen: FC = () => {
     []
   );
 
-  // Derive the SortState object consumed by TableHeaderCell.
-  const sortState: SortState = useMemo(
-    () => ({
-      key: sortKey ?? "",
-      dir: sortKey ? sortDir : "none",
-    }),
-    [sortKey, sortDir]
+  // Sort menu activation: re-selecting the active key flips direction;
+  // selecting a new key sorts descending (heaviest first — ops register).
+  const handleSortOption = useCallback(
+    (key: Exclude<SortKey, null>) => {
+      if (sortKey === key) {
+        setSortDir((d) => (d === "desc" ? "asc" : "desc"));
+      } else {
+        handleSort({ key, dir: "desc" });
+      }
+    },
+    [sortKey, handleSort]
   );
 
   const kpis = useMemo(() => computeKpis(lines), [lines]);
-  const {
-    data: fleetMetrics,
-    isLoading: metricsLoading,
-    isError: metricsError,
-    refetch: metricsRefetch,
-  } = useFleetMetrics(chartRange);
-  const messageSparklines = useMemo(
-    () => deriveFleetMessageSparklines(fleetMetrics?.messageVolume),
-    [fleetMetrics?.messageVolume]
-  );
-  const sessionSparklines = useMemo(
-    () => deriveFleetSessionSparklines(fleetMetrics?.sessionActivity),
-    [fleetMetrics?.sessionActivity]
-  );
-
-  function toggleKpi(kpiKey: KpiFilter, chartKey: ChartKey | null = null) {
-    const next = activeKpi === kpiKey ? null : kpiKey;
-    setActiveKpi(next);
-    if (chartKey) {
-      setExpandedChart(next === null ? null : chartKey);
-    }
-  }
+  // Fleet-level 24h metrics feed exactly one KPI card (Tokens 24h); the v3.5
+  // Fleet surface carries no charts (they live at /metrics until b-09a
+  // absorbs them into Ops per 02-mapping §2 E4).
+  const { data: fleetMetrics } = useFleetMetrics("24h");
+  const tokens24h = useMemo(() => {
+    if (!fleetMetrics?.meta?.hasTokenData) return null;
+    return fleetMetrics.tokenUsage.reduce(
+      (sum, b) => sum + b.input + b.output,
+      0
+    );
+  }, [fleetMetrics]);
 
   const alerts = useMemo(
     () =>
@@ -481,31 +452,17 @@ const SoupKitchen: FC = () => {
     return counts;
   }, [lines]);
 
+  /** Distinct channel kinds across the fleet — the mockup's "N across M
+   *  channels" count line. */
+  const channelCount = useMemo(() => {
+    const kinds = new Set(
+      lines.map((l) => l.health?.transport?.kind ?? (l.health?.whatsapp ? "baileys" : "unknown"))
+    );
+    return kinds.size;
+  }, [lines]);
+
   const filtered = useMemo(() => {
     let result = lines;
-
-    if (activeKpi === "connected")
-      // Transport connectivity, not health-state (#1881): shared with the KPI
-      // count so the filtered rows equal the "Connected" tile. Includes a
-      // degraded-but-connected line.
-      result = result.filter((l) => isLineConnected(l));
-    else if (activeKpi === "attention")
-      result = result.filter(
-        (l) => statusNeedsAttention(l.status) || l.error
-      );
-    else if (activeKpi === "unread")
-      result = result.filter((l) => (l.unread ?? 0) > 0);
-    else if (activeKpi === "agent")
-      result = result.filter((l) => l.mode === "agent");
-    else if (activeKpi === "sent")
-      result = result.filter((l) => (l.messageStats?.sent ?? 0) > 0);
-    else if (activeKpi === "received")
-      result = result.filter((l) => (l.messageStats?.received ?? 0) > 0);
-    else if (activeKpi === "media")
-      result = result.filter((l) => {
-        const s = l.messageStats;
-        return s ? s.images + s.audio + s.documents > 0 : false;
-      });
 
     if (modeFilter !== "all")
       result = result.filter((l) => l.mode === modeFilter);
@@ -579,10 +536,7 @@ const SoupKitchen: FC = () => {
     }
 
     return result;
-  }, [lines, activeKpi, modeFilter, search, sortKey, sortDir]);
-
-  const meta = fleetMetrics?.meta;
-  const instancesFailed = meta?.instancesFailed ?? 0;
+  }, [lines, modeFilter, search, sortKey, sortDir]);
 
   const openDrawer = useCallback((name: string) => {
     setSelectedName(name);
@@ -600,7 +554,7 @@ const SoupKitchen: FC = () => {
   );
 
   // Bulk select handlers — toggling a row's checkbox MUST NOT open the drawer
-  // (the checkbox cell stops propagation, see render below). The set is keyed
+  // (the checkbox cell stops propagation, see LineRow). The set is keyed
   // on the raw line name (not the display name) so the underlying lifecycle
   // API can consume it without re-deriving keys.
   const toggleSelected = useCallback((name: string, next: boolean) => {
@@ -736,282 +690,126 @@ const SoupKitchen: FC = () => {
     />
   );
 
+  // Rows virtualization (perf §3 ruling — the acceptance item for b-03):
+  // >50 rows → windowed render with spacer rows preserving <table> semantics;
+  // ≤50 → plain render. The hook runs unconditionally; `enabled` gates work.
+  const rowsRef = useRef<HTMLDivElement>(null);
+  // eslint-disable-next-line react-hooks/incompatible-library -- waiver:WVR-016 @tanstack/react-virtual's useVirtualizer is flagged by the react-hooks compiler heuristic but is a stable supported library hook; expires 2026-12-31
+  const virtualizer = useVirtualizer({
+    count: filtered.length,
+    getScrollElement: () => rowsRef.current,
+    estimateSize: () => ROW_ESTIMATE,
+    overscan: 10,
+    enabled: filtered.length > VIRTUALIZE_ABOVE,
+  });
+  const virtualItems = virtualizer.getVirtualItems();
+  const virtualized = filtered.length > VIRTUALIZE_ABOVE && virtualItems.length > 0;
+
   return (
-    <div className="flex flex-col flex-1 min-h-0 overflow-x-hidden overflow-y-auto p-[var(--sp-4)] gap-[var(--sp-3)]">
-      {/* KPI Strip — flex-wrap: multiple rows at narrow widths, no horizontal overflow (DD-18) */}
-      <motion.div
-        initial={{ opacity: 0, y: -8 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5, ease }}
-        className="flex-shrink-0"
-      >
-        <Card variant="base" className="flex flex-wrap gap-[var(--sp-2)] p-[var(--sp-2)]">
-        <KpiCard
-          value={kpis.connected}
-          label="Lines Connected"
-          color="text-s-ok"
-          onClick={() => toggleKpi("connected")}
-          active={activeKpi === "connected"}
-        />
-        {/* #1881 criterion 5: "Connected" collapses a confirmed disconnect and
-            an unproven row (stale / missing health data) into one "not
-            connected" remainder. Surface the coverage count so the
-            denominator is explicit — display-only, not a filter, mirroring
-            the Metrics "Total Lines" tile (KpiCard without onClick/active). */}
-        <KpiCard
-          value={kpis.connectivityUnknown}
-          label="Connectivity Unknown"
-          color="neutral"
-          suffix={`of ${lines.length}`}
-        />
-        <KpiCard
-          value={kpis.needAttention}
-          label="Need Attention"
-          color="text-s-crit"
-          onClick={() => toggleKpi("attention")}
-          active={activeKpi === "attention"}
-        />
-        <KpiCard
-          value={formatCount(kpis.totalSent)}
-          label="Messages Sent"
-          color="neutral"
-          onClick={() => toggleKpi("sent", "messages")}
-          active={activeKpi === "sent"}
-          sparkData={messageSparklines?.outbound}
-        />
-        <KpiCard
-          value={formatCount(kpis.totalReceived)}
-          label="Messages Received"
-          color="neutral"
-          onClick={() => toggleKpi("received", "messages")}
-          active={activeKpi === "received"}
-          sparkData={messageSparklines?.inbound}
-        />
-        <KpiCard
-          value={kpis.agentSessions}
-          label="Agent Sessions"
-          color="neutral"
-          onClick={() => toggleKpi("agent", "sessions")}
-          active={activeKpi === "agent"}
-          sparkData={sessionSparklines?.active}
-        />
-        <KpiCard
-          value={kpis.unread}
-          label="Unread"
-          color="text-s-warn"
-          onClick={() => toggleKpi("unread")}
-          active={activeKpi === "unread"}
-        />
-        <KpiCard
-          value={formatCount(kpis.totalMedia)}
-          label="Media Processed"
-          color="neutral"
-          onClick={() => toggleKpi("media", "messages")}
-          active={activeKpi === "media"}
-          sparkData={messageSparklines?.media}
-        />
-        {/* #1879 crit 3: Messages Sent/Received/Media Processed are summed
-            from messageStats, which can be a faulted-DB fallback rather than
-            a real zero. Surface the coverage count so the denominator is
-            explicit — display-only, mirroring the Connectivity Unknown
-            idiom above. */}
-        <KpiCard
-          value={kpis.metricsUnavailable}
-          label="Metrics Unavailable"
-          color="neutral"
-          suffix={`of ${lines.length}`}
-        />
-        {/* compute-kpis `staleExcluded` (#1762 rem-2): stale lines' carried-
-            forward health bodies are excluded from the Unread / Agent
-            Sessions totals. Surface HOW MUCH of this strip is carried data
-            so the exclusion is operator-visible, completing the coverage
-            trio (Connectivity Unknown / Metrics Unavailable / Carried
-            Health). Display-only, same idiom. */}
-        <KpiCard
-          value={kpis.staleExcluded}
-          label="Carried Health"
-          color="neutral"
-          suffix={`of ${lines.length}`}
-        />
-        {/* D-3/F-UX-4: the strip itself carries the #1925 query-plane
-            freshness marker (same idiom as Metrics.tsx) — per-row tags show
-            SERVER health-poll age; this shows the CLIENT query plane. */}
-        {linesFreshness && linesFreshness.observedAt !== null && (
-          <span
-            className={`c-label w-full${linesFreshness.stale ? ' text-s-warn' : ''}`}
-            title={
-              linesFreshness.stale
-                ? `Fleet lines carried forward — last successful fetch ${formatRelative(new Date(linesFreshness.observedAt).toISOString())}`
-                : `Last successful fleet lines fetch ${formatRelative(new Date(linesFreshness.observedAt).toISOString())}`
-            }
-          >
-            {linesFreshness.stale
-              ? `stale · ${formatRelative(new Date(linesFreshness.observedAt).toISOString())}`
-              : `observed ${formatRelative(new Date(linesFreshness.observedAt).toISOString())}`}
-          </span>
-        )}
-        </Card>
-      </motion.div>
-
-      {/* Charts Section */}
-      <Card variant="base" className="flex-shrink-0 p-[var(--sp-2)] flex flex-col gap-[var(--sp-2)]">
-        <div className="flex items-center justify-between">
-          <h2 className="c-heading-lg">Metrics</h2>
-          <ToolbarTimeRange
-            label="Chart range"
-            options={RANGE_OPTIONS}
-            value={chartRange}
-            onChange={(v) => setChartRange(v as MetricsRange)}
-          />
-        </div>
-
-        {/* Chart Row — 3-up with expansion; transitions removed for snap (DD-18) */}
-        <div
-          className="flex"
-          style={{ gap: expandedChart ? 0 : "var(--sp-2)" }}
+    <div className="fleet">
+      {/* Page row — surface-owned h1 (single-h1 law) + the mockup's primary
+          action. The chrome header carries the title span, attention pill,
+          and theme toggle above this row. */}
+      <div className="fleet-pagerow">
+        <h1>Fleet</h1>
+        <div className="spacer" />
+        <Button
+          variant="primary"
+          size="sm"
+          icon={<Plus size={16} strokeWidth={1.75} />}
+          onClick={() => { setShowAddWizard(true); setWizardEverOpened(true); }}
         >
-          <div
-            className="c-chart-expand-col"
-            style={chartColStyle("messages", expandedChart)}
-          >
-            <ChartPanel
-              title={`Message Volume (${chartRange})`}
-              isLoading={metricsLoading}
-              isError={metricsError}
-              hasData={meta?.hasMessageData ?? false}
-              instancesFailed={instancesFailed}
-              expanded={expandedChart === "messages"}
-              onRetry={() => metricsRefetch()}
-            >
-              {fleetMetrics?.messageVolume && (
-                <FleetMetricsChart
-                  data={fleetMetrics.messageVolume}
-                  range={chartRange}
-                />
-              )}
-            </ChartPanel>
-          </div>
+          Hatch a line
+        </Button>
+      </div>
 
-          <div
-            className="c-chart-expand-col"
-            style={chartColStyle("tokens", expandedChart)}
-          >
-            <ChartPanel
-              title={`Token Usage (${chartRange})`}
-              isLoading={metricsLoading}
-              isError={metricsError}
-              hasData={meta?.hasTokenData ?? false}
-              instancesFailed={instancesFailed}
-              expanded={expandedChart === "tokens"}
-              onRetry={() => metricsRefetch()}
-            >
-              {fleetMetrics?.tokenUsage && (
-                <FleetTokenChart
-                  data={fleetMetrics.tokenUsage}
-                  byProvider={fleetMetrics.tokenUsageByProvider}
-                  providers={fleetMetrics.meta?.providers}
-                  range={chartRange}
-                />
-              )}
-            </ChartPanel>
-          </div>
+      <FleetKpis
+        kpis={kpis}
+        lineCount={lines.length}
+        tokens24h={tokens24h}
+        freshness={linesFreshness}
+      />
 
-          <div
-            className="c-chart-expand-col"
-            style={chartColStyle("sessions", expandedChart)}
-          >
-            <ChartPanel
-              title={`Session Activity (${chartRange})`}
-              isLoading={metricsLoading}
-              isError={metricsError}
-              hasData={meta?.hasSessionData ?? false}
-              instancesFailed={instancesFailed}
-              expanded={expandedChart === "sessions"}
-              onRetry={() => metricsRefetch()}
-            >
-              {fleetMetrics?.sessionActivity && (
-                <FleetSessionChart
-                  data={fleetMetrics.sessionActivity}
-                  byProvider={fleetMetrics.sessionActivityByProvider}
-                  providers={fleetMetrics.meta?.providers}
-                  range={chartRange}
-                />
-              )}
-            </ChartPanel>
-          </div>
-        </div>
-      </Card>
-
-      {/* Alert Banner */}
       <AlertBanner alerts={alerts} />
 
-      {/* Main area — instances table + activity feed */}
+      {/* Main area — Lines panel + Activity panel (mockup .content grid) */}
       <motion.div
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         transition={{ duration: 0.5, delay: 0.1, ease }}
-        className="flex flex-col lg:flex-row flex-1 min-h-[var(--fleet-pane-min-h)] gap-[var(--sp-3)]"
+        className="fleet-content"
       >
-        {/* Connection Table */}
-        <Card variant="base" className="flex flex-col overflow-hidden min-h-[var(--fleet-pane-min-h)] lg:basis-0 lg:grow-[3]">
-          {/* Lines heading — layout hierarchy: above the toolbar anatomy */}
-          <h2 className="c-heading-lg flex-shrink-0 px-[var(--sp-3)] pt-[var(--sp-2)]">
-            Lines
-          </h2>
-
-          {/* Toolbar — filter group + search + primary action; no time-range (C-2) */}
-          <Toolbar
-            aria-label="Instance filters"
-            className="flex-shrink-0"
-          >
-            <ToolbarFilters label="Mode filter">
-              {modeFilterOptions.map((m) => (
-                <FilterPill
-                  key={m}
-                  label={m === "all" ? "All" : m}
-                  isActive={modeFilter === m}
-                  activeColor={m === "all" ? "text-text-2" : modeTextClass[m]}
-                  onClick={() => setModeFilter(m)}
-                  count={modeCounts[m]}
-                />
-              ))}
-            </ToolbarFilters>
-
-            <ToolbarSpring />
-
-            <ToolbarSearch
-              label="Search lines"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search lines..." shortcutTarget
-            />
-
-            <Button
-              variant="primary"
-              size="sm"
-              icon={<Plus size={16} strokeWidth={1.75} />}
-              className="flex-shrink-0"
-              onClick={() => { setShowAddWizard(true); setWizardEverOpened(true); }}
+        <section className="fleet-panel" aria-label="Lines">
+          <div className="fleet-panel__h">
+            <h2>Lines</h2>
+            <span className="fleet-panel__count">
+              {filtered.length} across {channelCount} channel{channelCount === 1 ? "" : "s"}
+            </span>
+            <div className="spacer" />
+            <Menu
+              label="Sort lines"
+              triggerLabel="⇅ sort"
+              triggerLabelText={`Sort lines${sortKey ? ` (current: ${sortKey} ${sortDir})` : ""}`}
             >
-              Add Line
+              {SORT_OPTIONS.map((o) => (
+                <MenuItem key={o.key} onSelect={() => handleSortOption(o.key)}>
+                  {o.label}
+                  {sortKey === o.key ? (sortDir === "asc" ? " ↑" : " ↓") : ""}
+                </MenuItem>
+              ))}
+            </Menu>
+            <Button
+              variant="ghost"
+              size="sm"
+              ref={filterAnchorRef}
+              aria-haspopup="dialog"
+              aria-expanded={filterOpen}
+              onClick={() => setFilterOpen((v) => !v)}
+            >
+              filter{modeFilter !== "all" || search ? ` · ${modeFilter !== "all" ? modeFilter : "search"}` : ""}
             </Button>
-          </Toolbar>
+            <Popover
+              open={filterOpen}
+              onClose={() => setFilterOpen(false)}
+              anchorRef={filterAnchorRef}
+              aria-label="Line filters"
+            >
+              <div className="fleet-filterpop">
+                <div className="fleet-filterpop__modes">
+                  {modeFilterOptions.map((m) => (
+                    <FilterPill
+                      key={m}
+                      label={m === "all" ? "All" : m}
+                      isActive={modeFilter === m}
+                      activeColor={m === "all" ? "text-text-2" : modeTextClass[m]}
+                      onClick={() => setModeFilter(m)}
+                      count={modeCounts[m]}
+                    />
+                  ))}
+                </div>
+                <TextInput
+                  type="search"
+                  className="fleet-filterpop__search"
+                  aria-label="Search lines"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search lines..."
+                />
+              </div>
+            </Popover>
+          </div>
 
-          {/* Bulk action bar — sticky surface shown only when ≥1 row is
-              selected. Gated behind canManageLines so an operator without
-              the capability never sees the bar. The bar returns null when
-              count is 0 (see BulkActionBar.tsx) so the parent does not need
-              a render-gate. */}
+          {/* Bulk action bar — surfaces only with ≥1 selected row (the bar
+              itself also null-renders at 0). The selection path is the
+              hover/focus reveal on the leading shape cell. */}
           {canManageLines && (
-            <div className="flex-shrink-0 px-[var(--sp-3)] pb-[var(--sp-2)]">
-              <BulkActionBar
-                count={selectedNames.size}
-                onRestart={handleBulkRestart}
-                onStop={requestBulkStop}
-                onDelete={requestBulkDelete}
-                onClear={clearSelection}
-              />
-            </div>
+            <BulkActionBar
+              count={selectedNames.size}
+              onRestart={handleBulkRestart}
+              onStop={requestBulkStop}
+              onDelete={requestBulkDelete}
+              onClear={clearSelection}
+            />
           )}
 
           {/* DrawerLayout — squeeze: table is flex sibling of the drawer at ≥1080px */}
@@ -1019,24 +817,16 @@ const SoupKitchen: FC = () => {
             className="flex-1 min-h-0 overflow-hidden"
             drawer={drawerEl}
           >
-            {/* Table region — governed x-scroll; never page-level overflow */}
-            <div className="min-h-0 min-w-0 overflow-y-auto overflow-x-auto scrollbar-hide h-full">
-              <Table density="compressed">
+            <div className="fleet-rows" ref={rowsRef}>
+              <Table density="compressed" className="fleet-table">
                 <TableHeader>
-
                   <tr>
-                    {/* Col 0: Bulk-select — "select all" Checkbox in the header,
-                        per-row Checkbox in the body. The header checkbox is
-                        checked when every visible line is selected, and
-                        indeterminate when some (but not all) are. The cell
-                        stops propagation so toggling never opens the drawer. */}
-                    {canManageLines && (
-                      <TableHeaderCell
-                        aria-label="Select all lines"
-                        className="soup-bulk-cell"
-                      >
+                    <TableHeaderCell aria-label="Status">
+                      {canManageLines && (
                         <span
-                          className="soup-bulk-cell__inner"
+                          className={`fleet-select fleet-select--all${
+                            selectedNames.size > 0 ? " fleet-select--on" : ""
+                          }`}
                           onClick={(e) => e.stopPropagation()}
                           onKeyDown={(e) => e.stopPropagation()}
                         >
@@ -1048,111 +838,34 @@ const SoupKitchen: FC = () => {
                             disabled={visibleNames.length === 0}
                           />
                         </span>
-                      </TableHeaderCell>
-                    )}
-                    {/* Col 1: Status+name — StatusCell (shape law) */}
-                    <TableHeaderCell
-                      sortKey="name"
-                      sort={sortState}
-                      onSort={handleSort}
-                    >
-                      Line
+                      )}
                     </TableHeaderCell>
-                    {/* Col 1: Mode badge */}
-                    <TableHeaderCell
-                      sortKey="mode"
-                      sort={sortState}
-                      onSort={handleSort}
-                    >
-                      Mode
-                    </TableHeaderCell>
-                    <TableHeaderCell
-                      sortKey="chats"
-                      sort={sortState}
-                      onSort={handleSort}
-                    >
-                      Chats
-                    </TableHeaderCell>
-                    <TableHeaderCell
-                      sortKey="groups"
-                      sort={sortState}
-                      onSort={handleSort}
-                    >
-                      Groups
-                    </TableHeaderCell>
-                    <TableHeaderCell
-                      sortKey="unread"
-                      sort={sortState}
-                      onSort={handleSort}
-                    >
-                      Unread
-                    </TableHeaderCell>
-                    <TableHeaderCell
-                      sortKey="sent"
-                      sort={sortState}
-                      onSort={handleSort}
-                    >
-                      Sent
-                    </TableHeaderCell>
-                    <TableHeaderCell
-                      sortKey="recv"
-                      sort={sortState}
-                      onSort={handleSort}
-                    >
-                      Recv
-                    </TableHeaderCell>
-                    <TableHeaderCell
-                      sortKey="tokens"
-                      sort={sortState}
-                      onSort={handleSort}
-                    >
-                      Tokens
-                    </TableHeaderCell>
-                    <TableHeaderCell
-                      sortKey="sessions"
-                      sort={sortState}
-                      onSort={handleSort}
-                    >
-                      Sessions
-                    </TableHeaderCell>
-                    <TableHeaderCell
-                      sortKey="provider"
-                      sort={sortState}
-                      onSort={handleSort}
-                    >
-                      Provider
-                    </TableHeaderCell>
-                    {/* Not sortable */}
-                    <TableHeaderCell>Tags</TableHeaderCell>
-                    <TableHeaderCell
-                      sortKey="active"
-                      sort={sortState}
-                      onSort={handleSort}
-                    >
-                      Active
-                    </TableHeaderCell>
-                    {/* Trailing actions column — per-row overflow Menu. Not
-                        sortable; header label is screen-reader only. */}
+                    <TableHeaderCell>Line</TableHeaderCell>
+                    <TableHeaderCell>Channel</TableHeaderCell>
+                    <TableHeaderCell>Agent</TableHeaderCell>
+                    <TableHeaderCell>Mode</TableHeaderCell>
+                    <TableHeaderCell>State</TableHeaderCell>
+                    <TableHeaderCell>Grants</TableHeaderCell>
+                    <TableHeaderCell>7d</TableHeaderCell>
                     <TableHeaderCell>
                       <span className="sr-only">Actions</span>
                     </TableHeaderCell>
                   </tr>
                 </TableHeader>
-
                 <TableBody>
                   {fleetLoadError && transport.isDisconnected ? (
                     // Transport drop: read as offline-with-cache, not a hard
                     // failure (DD-29). The error branch below still owns genuine
                     // errors while connected.
-                    <tr className="soup-table-row soup-table-row--state">
-                      <td className="soup-table-td soup-table-td--state" colSpan={COL_COUNT}>
+                    <TableRow>
+                      <TableCell colSpan={COL_COUNT}>
                         <EmptyState
                           variant="offline"
                           title="Showing cached data"
                           description="Reconnecting…"
                         />
-                      </td>
-                    </tr>
+                      </TableCell>
+                    </TableRow>
                   ) : fleetLoadError ? (
                     <TableError
                       colSpan={COL_COUNT}
@@ -1176,210 +889,74 @@ const SoupKitchen: FC = () => {
                       colSpan={COL_COUNT}
                       message="No instances match the current filters"
                     />
+                  ) : virtualized ? (
+                    <>
+                      <TableRow aria-hidden="true">
+                        <TableCell colSpan={COL_COUNT} style={{ padding: 0, border: 0, height: virtualItems[0].start }} />
+                      </TableRow>
+                      {virtualItems.map((vi) => {
+                        const line = filtered[vi.index];
+                        return (
+                          <LineRow
+                            key={line.name}
+                            line={line}
+                            current={selectedName === line.name}
+                            selected={selectedNames.has(line.name)}
+                            canManage={canManageLines}
+                            onActivate={openDrawer}
+                            onToggleSelected={toggleSelected}
+                            rowRef={selectedRowRef}
+                          />
+                        );
+                      })}
+                      <TableRow aria-hidden="true">
+                        <TableCell
+                          colSpan={COL_COUNT}
+                          style={{
+                            padding: 0,
+                            border: 0,
+                            height:
+                              virtualizer.getTotalSize() -
+                              virtualItems[virtualItems.length - 1].end,
+                          }}
+                        />
+                      </TableRow>
+                    </>
                   ) : (
-                    filtered.map((line) => {
-                      const _statusSev = statusSeverity(line.status);
-                      const severity: RowSeverity | undefined =
-                        _statusSev === "crit" ? "crit" :
-                        _statusSev === "warn" ? "warn" :
-                        undefined;
-                      const isError = _statusSev === "crit";
-                      const isCurrent = selectedName === line.name;
-                      const sent = line.messageStats?.sent ?? 0;
-                      const recv = line.messageStats?.received ?? 0;
-                      const lastActiveLabel = line.lastActive ? formatRelative(line.lastActive) : "Never";
-
-                      return (
-                        <TableRow
-                          key={line.name}
-                          interactive
-                          severity={severity}
-                          current={isCurrent}
-                          ref={
-                            isCurrent
-                              ? (el) => {
-                                  if (el) selectedRowRef.current = el;
-                                }
-                              : undefined
-                          }
-                          onActivate={() => openDrawer(line.name)}
-                        >
-                          {/* Col 0: per-row select Checkbox — gated behind
-                              canManageLines. The cell stops propagation
-                              (mirrors soup-menu-trigger-cell) so toggling
-                              selection never opens the row drawer. */}
-                          {canManageLines && (
-                            <TableCell
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              <span
-                                className="soup-bulk-cell__inner"
-                                onClick={(e) => e.stopPropagation()}
-                                onKeyDown={(e) => e.stopPropagation()}
-                              >
-                                <Checkbox
-                                  checked={selectedNames.has(line.name)}
-                                  onChange={(next) =>
-                                    toggleSelected(line.name, next)
-                                  }
-                                  label={`Select ${displayInstanceName(line.name)}`}
-                                />
-                              </span>
-                            </TableCell>
-                          )}
-                          {/* Col 1: StatusCell shape + name label (C-1 resolution) */}
-                          <TableCell>
-                            <StatusCell
-                              status={line.status}
-                              name={displayInstanceName(line.name)}
-                              carried={line.stale}
-                            />
-                            <span className="c-label">
-                              {formatPhone(line.phone)}
-                            </span>
-                            {/* #1877 crit 5: surface the AGE of the last live
-                                health observation on the line-list surface
-                                itself, not only the ProvidersKeysCard detail
-                                (#1762 seam — same stale/healthObservedAt
-                                fields, same "as of Xm ago" idiom). This must
-                                render even when the server has NOT flagged
-                                the line stale: a connected tab's displayed
-                                health/counters can still be up to
-                                POLL_LINES_WS_BACKSTOP old, and the issue's
-                                point is that an operator can't tell that from
-                                the "connected" indicator alone. `stale` only
-                                changes the styling/wording (carried-forward
-                                vs. live-poll framing), not whether the age
-                                shows at all. */}
-                            {(line.stale || line.healthObservedAt) && (
-                              <span
-                                className={`c-label${line.stale ? ' text-s-warn' : ''}`}
-                                title={
-                                  line.stale
-                                    ? (line.healthObservedAt
-                                        ? `Health carried forward — last live poll ${formatRelative(line.healthObservedAt)}`
-                                        : 'Health data is stale — the poller is currently failing')
-                                    : `Last live health poll ${formatRelative(line.healthObservedAt)}`
-                                }
-                              >
-                                {line.stale
-                                  ? `stale · ${line.healthObservedAt ? formatRelative(line.healthObservedAt) : 'unknown'}`
-                                  : `observed ${formatRelative(line.healthObservedAt)}`}
-                              </span>
-                            )}
-                          </TableCell>
-                          {/* Col 2: Mode badge kept as separate column */}
-                          <TableCell>
-                            <ModeBadge mode={line.mode} />
-                          </TableCell>
-                          <TableCell numeric>
-                            <span className="c-data text-text-2">
-                              {line.chatCounts?.chats ?? 0}
-                            </span>
-                          </TableCell>
-                          <TableCell numeric>
-                            <span className="c-data text-text-2">
-                              {line.chatCounts?.groups ?? 0}
-                            </span>
-                          </TableCell>
-                          <TableCell numeric>
-                            {(line.unread ?? 0) > 0 ? (
-                              <span className="c-data text-s-warn font-medium">
-                                {line.unread}
-                              </span>
-                            ) : (
-                              <span className="c-data text-text-3">0</span>
-                            )}
-                          </TableCell>
-                          <TableCell numeric>
-                            <span className="c-data" style={{ color: "var(--text-2)" }}>
-                              {String.fromCharCode(0x2191)}
-                              {sent}
-                            </span>
-                          </TableCell>
-                          <TableCell numeric>
-                            <span className="c-data" style={{ color: "var(--text-2)" }}>
-                              {String.fromCharCode(0x2193)}
-                              {recv}
-                            </span>
-                          </TableCell>
-                          <TableCell numeric>
-                            {(line.tokenUsage?.input ?? 0) > 0 ? (
-                              <span
-                                className="c-data text-text-2"
-                                title={`${formatCount(line.tokenUsage?.input)} in / ${formatCount(line.tokenUsage?.output)} out`}
-                              >
-                                {formatCompact(
-                                  (line.tokenUsage?.input ?? 0) +
-                                    (line.tokenUsage?.output ?? 0)
-                                )}
-                              </span>
-                            ) : (
-                              <EM_DASH />
-                            )}
-                          </TableCell>
-                          <TableCell numeric>
-                            {line.mode === "agent" ? (
-                              <span className="c-data font-medium" style={{ color: "var(--text-2)" }}>
-                                {line.totalSessions ?? 0}
-                              </span>
-                            ) : (
-                              <EM_DASH />
-                            )}
-                          </TableCell>
-                          <TableCell>
-                            <span
-                              className="c-data"
-                              style={{
-                                color: getProviderColor(
-                                  line.provider ?? "claude-cli"
-                                ).stroke,
-                              }}
-                            >
-                              {getProvider(line.provider ?? "claude-cli")
-                                ?.shortName ?? "Claude"}
-                            </span>
-                          </TableCell>
-                          <TableCell>
-                            <LineTags line={line} />
-                          </TableCell>
-                          <TableCell numeric>
-                            <span
-                              title={lastActiveLabel}
-                              className={`c-data whitespace-nowrap ${isError ? "text-s-crit" : "text-text-2"}`}
-                            >
-                              {line.lastActive ? (
-                                lastActiveLabel
-                              ) : (
-                                <EM_DASH />
-                              )}
-                            </span>
-                          </TableCell>
-                          {/* Trailing actions — per-row overflow Menu
-                              (Restart / Stop / Delete). Gated behind canAct so
-                              an operator without the capability sees no menu,
-                              mirroring ActivityFeed's per-row action gate. */}
-                          <TableCell>
-                            <FleetRowMenu name={line.name} canAct={canManageLines} />
-                          </TableCell>
-                        </TableRow>
-                      );
-                    })
+                    filtered.map((line) => (
+                      <LineRow
+                        key={line.name}
+                        line={line}
+                        current={selectedName === line.name}
+                        selected={selectedNames.has(line.name)}
+                        canManage={canManageLines}
+                        onActivate={openDrawer}
+                        onToggleSelected={toggleSelected}
+                        rowRef={selectedRowRef}
+                      />
+                    ))
                   )}
                 </TableBody>
               </Table>
             </div>
           </DrawerLayout>
-        </Card>
+        </section>
 
-        {/* Activity Feed */}
-        <Card variant="base" className="flex flex-col overflow-hidden min-h-[var(--fleet-pane-min-h)] lg:basis-0 lg:flex-1 lg:min-w-[var(--feed-min-w)]">
-          <ActivityFeed
-            events={feed}
-            error={feedError ? feedLoadErrorMessage : undefined}
-            onRetry={feedError ? () => { void refetchFeed() } : undefined}
-          />
-        </Card>
+        {/* Activity panel — feed + heartbeat rail (mockup right column) */}
+        <section className="fleet-panel" aria-label="Activity">
+          <div className="fleet-panel__h">
+            <h2>Activity</h2>
+            <span className="fleet-panel__count">live</span>
+          </div>
+          <div className="fleet-feed">
+            <ActivityFeed
+              events={feed}
+              error={feedError ? feedLoadErrorMessage : undefined}
+              onRetry={feedError ? () => { void refetchFeed() } : undefined}
+            />
+          </div>
+          <HeartbeatRail lines={lines} />
+        </section>
       </motion.div>
 
       <Suspense fallback={null}>

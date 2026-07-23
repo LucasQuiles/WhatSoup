@@ -31,7 +31,7 @@
 #   WVR-013 RETIRED — .c-kpi-hover shadow migrated to --shadow-hover (raw-color-css 1→0).
 # Suppression hygiene (2026-06-14):
 #   WVR-015 UPDATED — useExitPresence must clear stale close dwell state on reopen.
-# Remaining: 10 entries (WVR-001, WVR-002, WVR-005..WVR-009, WVR-011..WVR-012, WVR-015).
+# Remaining: 11 entries (WVR-001, WVR-002, WVR-005..WVR-009, WVR-011..WVR-012, WVR-015..WVR-016).
 
 waivers:
   - id: WVR-001
@@ -211,4 +211,16 @@ waivers:
     status: temporary
     expiration_phase: D-series-close
     cleanup_trigger: modal/drawer presence primitive rewrite or React hook guidance change
+    user_approval_required: no
+  - id: WVR-016
+    rule: react-hooks/incompatible-library
+    owner: console-maintainer
+    reason: "@tanstack/react-virtual useVirtualizer trips the compiler heuristic; library hook is stable and supported. Same posture as WVR-009, new callsite for the b-03 lines-table virtualization (perf §3 ruling)."
+    scope: console/src/pages/SoupKitchen.tsx:697
+    expiry: 2026-12-31
+    replacement_plan: remove when react-hooks lint adds first-party support for tanstack virtual.
+    safer_alternative_considered: rewriting virtualization in-house — rejected, regression risk.
+    status: temporary
+    expiration_phase: C4
+    cleanup_trigger: react-hooks plugin/library compatibility update
     user_approval_required: no
