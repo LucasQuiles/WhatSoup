@@ -30,6 +30,59 @@
   --tracking-ctx: 0.18em;          /* nameplate ctx caps tracking (mockup .ctx) */
   --tracking-sec: 0.12em;          /* rail section caps tracking (mockup .nav-sec) */
   --tracking-chrome-title: -0.02em; /* chrome header h1 tracking (mockup h1) */
+  /* ═══ v3.5 Skills Hub surface geometry (T5 b-05; mockup skills-hub.html SSOT) ═══ */
+  --skills-pagerow-gap: 14px;    /* surface h1 row item gap (mockup header gap) */
+  --skills-pagerow-pad: 14px 22px 12px; /* surface h1 row padding (mockup header padding) */
+  --skills-modebar-gap: 4px;     /* hub mode toggle gap (mockup .modebar) */
+  --skills-modebar-pad: 3px;     /* hub mode toggle frame padding (mockup .modebar) */
+  --skills-modebar-radius: 8px;  /* hub mode toggle frame radius (mockup .modebar) */
+  --skills-modebar-btn-pad: 6px 12px; /* mode button padding (mockup .modebar button) */
+  --skills-modebar-btn-radius: 6px; /* mode button radius (mockup .modebar button) */
+  --skills-filters-w: 196px;     /* filters rail width (mockup .filters) */
+  --skills-filters-pad: 14px 12px; /* filters rail padding (mockup .filters) */
+  --skills-fsec-m: 12px 0 6px;   /* filter section heading margin (mockup .fsec) */
+  --skills-fitem-pad: 6px 8px;   /* filter item padding (mockup .fitem) */
+  --skills-fitem-gap: 8px;       /* filter item gap (mockup .fitem) */
+  --skills-fitem-radius: 6px;    /* filter item radius (mockup .fitem) */
+  --skills-main-pad: 14px 18px 24px; /* results column padding (mockup .main) */
+  --skills-toolbar-gap: 10px;    /* toolbar gap (mockup .toolbar) */
+  --skills-toolbar-mb: 10px;     /* toolbar margin-bottom (mockup .toolbar) */
+  --skills-search-pad: 9px 12px; /* toolbar search padding (mockup .search) */
+  --skills-search-gap: 8px;      /* toolbar search gap (mockup .search) */
+  --skills-search-radius: 8px;   /* toolbar search radius (mockup .search) */
+  --skills-icon-search: 13px;    /* search glyph box (mockup .search svg) */
+  --skills-search-icon-stroke: 1.6; /* search glyph stroke width (mockup) */
+  --skills-scard-pad: 10px 14px; /* result card padding (mockup .scard) */
+  --skills-scard-mb: 8px;        /* result card stack margin (mockup .scard) */
+  --skills-scard-radius: 10px;   /* result card radius (mockup .scard) */
+  --skills-scard-gap: 12px;      /* result card top-row gap (mockup .scard .top) */
+  --skills-scard-hover-lift: 2px; /* result card hover lift (mockup .scard:hover) */
+  --skills-sicon: 34px;          /* result icon box (mockup .sicon) */
+  --skills-sicon-radius: 8px;    /* result icon radius (mockup .sicon) */
+  --skills-sicon-glyph: 16px;    /* result icon glyph box (mockup .sicon svg) */
+  --skills-src-pad: 3px 8px;     /* source badge padding (mockup .src) */
+  --skills-acts-gap: 6px;        /* card action cluster gap (mockup .scard .acts) */
+  --skills-compat-mt: 9px;       /* compat strip margin-top (mockup .compat) */
+  --skills-compat-pad: 6px 10px; /* compat strip padding (mockup .compat) */
+  --skills-compat-gap: 14px;     /* compat strip section gap (mockup .compat) */
+  --skills-compat-radius: 8px;   /* compat strip radius (mockup .compat) */
+  --skills-cset-gap: 4px;        /* compat cell-set gap (mockup .cset) */
+  --skills-cdot-h: 20px;         /* compat cell height (mockup .cdot) */
+  --skills-cdot-minw: 20px;      /* compat cell min width (mockup .cdot) */
+  --skills-cdot-pad-x: 4px;      /* compat cell horizontal padding (mockup .cdot) */
+  --skills-cdot-radius: 4px;     /* compat cell radius (mockup .cdot) */
+  --skills-cdot-warn-radius: 3px; /* compat partial cell radius (mockup .cdot.warn) */
+  --skills-warnnote-mt: 8px;     /* warn-note margin-top (mockup .warn-note) */
+  --skills-warnnote-pad: 7px 10px; /* warn-note padding (mockup .warn-note) */
+  --skills-warnnote-gap: 8px;    /* warn-note gap (mockup .warn-note) */
+  --skills-warnnote-radius: 8px; /* warn-note radius (mockup .warn-note) */
+  --skills-legend-lh: 1.8;       /* legend line-height (mockup .filters .fitem legend) */
+  --skills-desc-mt: 1px;         /* result card description margin-top (mockup .scard .desc) */
+  --skills-warnnote-icon-mt: 1px; /* warn-note icon optical offset (mockup .warn-note svg) */
+  --skills-empty-pad-y: 6px;     /* honest-empty vertical padding (documented deviation) */
+  --tracking-skills-fsec: 0.1em; /* filter section caps tracking (mockup .fsec) */
+  --tracking-skills-src: 0.06em; /* source badge caps tracking (mockup .src) */
+  --tracking-skills-compat: 0.06em; /* compat label caps tracking (mockup .compat .lbl) */
   /* ═══ Element sizes — from design spec §2 ═══ */
   --dot-table: 8px;          /* status dot in tables */
   --dot-feed: 6px;           /* status dot in feeds */
