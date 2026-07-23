@@ -15,7 +15,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
-import { scanDurabilityWriterInvariant, type SchemaSnapshot } from '../../scripts/durability-writer-guard.ts';
+import {
+  scanDurabilityWriterInvariant,
+  evaluateDurabilityWriterInvariant,
+  type SchemaSnapshot,
+} from '../../scripts/durability-writer-guard.ts';
 import {
   KNOWN_STATUS_TABLES,
   NON_STATUS_TABLES,
@@ -266,6 +270,64 @@ describe('durability-writer-guard — beads unwired-terminal declared exception'
     expect(TRACKED_UNWIRED_TERMINAL[0]?.terminalValue).toBe('failed');
     expect(TRACKED_UNWIRED_TERMINAL[0]?.issue).toBe('#1789');
     expect((TRACKED_UNWIRED_TERMINAL[0]?.reason ?? '').trim().length).toBeGreaterThan(0);
+  });
+});
+
+describe('durability-writer-guard — exit-code contract (evaluateDurabilityWriterInvariant)', () => {
+  // Coordinator review finding: main() only wrapped the async loadSnapshot()
+  // in try/catch; a throw inside the synchronous scan (e.g. a DatabaseSync
+  // failure in columnsByTable) fell through to Node's unhandled-rejection
+  // default, exit 1 — not the contracted exit 2 (inconclusive). Fail-closed
+  // was preserved (never a false 0), but the exit-CODE contract was violated:
+  // "I could not examine this" must read differently from "I examined it and
+  // found a violation". These tests exercise the fix directly, at the
+  // injectable evaluation layer, without spawning a CLI subprocess.
+
+  it('(i) an empty snapshot is INCONCLUSIVE, not pass and not violation', () => {
+    const outcome = evaluateDurabilityWriterInvariant(new Map(), repoRoot);
+    expect(outcome.status).toBe('inconclusive');
+    if (outcome.status === 'inconclusive') {
+      expect(outcome.reason).toMatch(/zero tables/i);
+    }
+  });
+
+  it('(ii) a throw inside the scan maps to INCONCLUSIVE, never a silent pass', () => {
+    // A snapshot whose .keys() throws forces an exception at the very first
+    // line of scanDurabilityWriterInvariant's check (1) — proving the wrapper
+    // catches a throw from *inside* the scan, not just the async load.
+    const throwingSnapshot = {
+      size: 1,
+      keys(): IterableIterator<string> {
+        throw new Error('boom: simulated scan-time failure');
+      },
+    } as unknown as SchemaSnapshot;
+    const outcome = evaluateDurabilityWriterInvariant(throwingSnapshot, repoRoot);
+    expect(outcome.status).toBe('inconclusive');
+    if (outcome.status === 'inconclusive') {
+      expect(outcome.reason).toMatch(/scan threw/i);
+      expect(outcome.reason).toMatch(/boom: simulated scan-time failure/);
+    }
+  });
+
+  it('a clean real-repo scan through the evaluation wrapper is "pass", not "violation" or "inconclusive"', async () => {
+    const snapshot = await loadRealSnapshot();
+    const outcome = evaluateDurabilityWriterInvariant(snapshot, repoRoot);
+    expect(outcome.status).toBe('pass');
+  });
+
+  it('a real violation through the evaluation wrapper is "violation", not "inconclusive"', () => {
+    const snapshot: SchemaSnapshot = new Map([
+      ['synthetic_violation', { createSql: 'CREATE TABLE synthetic_violation (id INTEGER PRIMARY KEY)', indexes: [] }],
+    ]);
+    const outcome = evaluateDurabilityWriterInvariant(snapshot, repoRoot, {
+      registry: [],
+      trackedReserved: [],
+      knownStatusTables: new Set(),
+      nonStatusTables: new Set(),
+      reservedTables: new Set(),
+      nonStatusJustifications: {},
+    });
+    expect(outcome.status).toBe('violation');
   });
 });
 

@@ -63,11 +63,19 @@
 //       proof via SQLite persistence tests (Tasks 1-2), which this guard does
 //       not attempt to replace.
 //
-//   (4) NON-VACUITY. If the schema snapshot cannot be loaded, or loads with
-//       zero tables, the guard exits 2 (INCONCLUSIVE) — never 0. An empty or
-//       failed scan must never read as "clean".
+//   (4) NON-VACUITY. An empty schema snapshot, or a THROW anywhere inside the
+//       scan itself (not just the async load), maps to INCONCLUSIVE (exit 2)
+//       — never 0, and never an uncaught exception falling through to Node's
+//       default exit 1. `evaluateDurabilityWriterInvariant` wraps the
+//       empty-snapshot check and the call to `scanDurabilityWriterInvariant`
+//       in ONE try/catch and returns a discriminated
+//       `{status:'pass'|'violation'|'inconclusive', ...}` result — the same
+//       function `main()` calls and tests call directly, so the exit-2
+//       contract is unit-testable without spawning a CLI subprocess. `main()`
+//       additionally carries a `.catch()` on its own invocation as a second,
+//       belt-and-braces layer.
 //
-// Exit codes: 0 pass, 1 violation, 2 inconclusive (schema unreadable/empty).
+// Exit codes: 0 pass, 1 violation, 2 inconclusive (schema unreadable/empty/scan threw).
 
 import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
@@ -121,6 +129,17 @@ export interface DurabilityWriterScanResult {
   tablesScanned: number;
   registryTablesChecked: number;
 }
+
+/**
+ * Discriminated outcome of the injectable evaluation path (see
+ * `evaluateDurabilityWriterInvariant`). `'inconclusive'` carries a `reason`
+ * instead of a `result` — there is no scan result to report when the scan
+ * itself never completed.
+ */
+export type DurabilityWriterOutcome =
+  | { status: 'pass'; result: DurabilityWriterScanResult }
+  | { status: 'violation'; result: DurabilityWriterScanResult }
+  | { status: 'inconclusive'; reason: string };
 
 const STATUS_LIKE_COLUMN_RE = /status|state|error|outcome|failed/i;
 
@@ -327,6 +346,38 @@ export function scanDurabilityWriterInvariant(
   return { findings, tablesScanned: snapshot.size, registryTablesChecked };
 }
 
+/**
+ * The injectable, synchronous evaluation path. Wraps the empty-snapshot
+ * check AND the call to `scanDurabilityWriterInvariant` in ONE try/catch, so
+ * a throw ANYWHERE in the scan — a malformed snapshot, a `DatabaseSync`
+ * failure inside `columnsByTable`, or anything else — maps to
+ * `'inconclusive'` rather than propagating as an uncaught exception (which
+ * Node would otherwise turn into a plain exit 1, indistinguishable from a
+ * genuine violation). This is what `main()` calls, and what tests call
+ * directly to prove the exit-2 contract without spawning a CLI subprocess.
+ */
+export function evaluateDurabilityWriterInvariant(
+  snapshot: SchemaSnapshot,
+  repoRoot: string,
+  input: DurabilityWriterRegistryInput = {},
+): DurabilityWriterOutcome {
+  try {
+    if (snapshot.size === 0) {
+      return {
+        status: 'inconclusive',
+        reason: 'migratedSchemaSnapshot() returned zero tables; nothing was scanned',
+      };
+    }
+    const result = scanDurabilityWriterInvariant(snapshot, repoRoot, input);
+    return result.findings.length === 0 ? { status: 'pass', result } : { status: 'violation', result };
+  } catch (err) {
+    return {
+      status: 'inconclusive',
+      reason: `scan threw: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.join(SCRIPT_DIR, '..');
 
@@ -335,6 +386,26 @@ async function loadSnapshot(): Promise<SchemaSnapshot> {
     migratedSchemaSnapshot: () => SchemaSnapshot;
   };
   return mod.migratedSchemaSnapshot();
+}
+
+/** Thin CLI mapping: outcome -> stdout/stderr text + process.exitCode. All the logic lives above. */
+function reportOutcome(outcome: DurabilityWriterOutcome): void {
+  if (outcome.status === 'inconclusive') {
+    console.error(`durability-writer-guard: INCONCLUSIVE — ${outcome.reason}`);
+    process.exitCode = 2;
+    return;
+  }
+  if (outcome.status === 'pass') {
+    console.log(
+      `durability-writer-guard: PASS — ${outcome.result.tablesScanned} table(s) classified, ${outcome.result.registryTablesChecked} status table(s) writer-checked (invariant #1789)`,
+    );
+    return;
+  }
+  console.error(`durability-writer-guard: FAIL — ${outcome.result.findings.length} violation(s) (invariant #1789):`);
+  for (const finding of outcome.result.findings) {
+    console.error(`  [${finding.kind}] ${finding.table}: ${finding.detail}`);
+  }
+  process.exitCode = 1;
 }
 
 async function main(): Promise<void> {
@@ -349,28 +420,18 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (snapshot.size === 0) {
-    console.error('durability-writer-guard: INCONCLUSIVE — migratedSchemaSnapshot() returned zero tables; nothing was scanned');
-    process.exitCode = 2;
-    return;
-  }
-
-  const result = scanDurabilityWriterInvariant(snapshot, REPO_ROOT);
-
-  if (result.findings.length === 0) {
-    console.log(
-      `durability-writer-guard: PASS — ${result.tablesScanned} table(s) classified, ${result.registryTablesChecked} status table(s) writer-checked (invariant #1789)`,
-    );
-    return;
-  }
-
-  console.error(`durability-writer-guard: FAIL — ${result.findings.length} violation(s) (invariant #1789):`);
-  for (const finding of result.findings) {
-    console.error(`  [${finding.kind}] ${finding.table}: ${finding.detail}`);
-  }
-  process.exitCode = 1;
+  reportOutcome(evaluateDurabilityWriterInvariant(snapshot, REPO_ROOT));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main();
+  // Belt-and-braces: main() itself should never throw (loadSnapshot and
+  // evaluateDurabilityWriterInvariant both catch internally), but a bare,
+  // uncaught rejection here would hit Node's unhandled-rejection default
+  // (exit 1) instead of the contracted exit 2 — so catch defensively too.
+  main().catch((err) => {
+    console.error(
+      `durability-writer-guard: INCONCLUSIVE — unexpected error: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    process.exitCode = 2;
+  });
 }
