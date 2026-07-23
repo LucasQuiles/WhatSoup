@@ -294,6 +294,12 @@ describe('restricted managed-provider closed SSE grammar', () => {
       dataRecord(JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'named complete' } })),
       'event: content_block_stop',
       dataRecord(JSON.stringify({ type: 'content_block_stop', index: 0 })),
+      'event: message_delta',
+      dataRecord(JSON.stringify({
+        type: 'message_delta',
+        delta: { stop_reason: 'end_turn', stop_sequence: null },
+        usage: { output_tokens: 1 },
+      })),
       'event: message_stop',
       dataRecord(JSON.stringify({ type: 'message_stop' })),
     ]));

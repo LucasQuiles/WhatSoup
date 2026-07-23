@@ -78,7 +78,16 @@ function openAiSse(deltas: Array<Record<string, unknown>>): Response {
       }),
     };
   });
-  return new Response(canonical.map((delta) => `data: ${JSON.stringify(delta)}\n\n`).join('') + 'data: [DONE]\n\n', {
+  const complete = canonical.some((chunk) => (
+    Array.isArray(chunk['choices'])
+    && chunk['choices'].some((rawChoice) => {
+      const choice = rawChoice as Record<string, unknown>;
+      return typeof choice['finish_reason'] === 'string';
+    })
+  ))
+    ? canonical
+    : [...canonical, { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }];
+  return new Response(complete.map((delta) => `data: ${JSON.stringify(delta)}\n\n`).join('') + 'data: [DONE]\n\n', {
     status: 200,
     headers: { 'content-type': 'text/event-stream' },
   });
@@ -88,7 +97,20 @@ function anthropicSse(events: Array<Record<string, unknown>>): Response {
   const canonical = events[0]?.['type'] === 'message_start'
     ? events
     : [{ type: 'message_start', message: { usage: { input_tokens: 1, output_tokens: 0 } } }, ...events];
-  return new Response(canonical.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''), {
+  const hasMessageDelta = canonical.some((event) => event['type'] === 'message_delta');
+  const complete = hasMessageDelta
+    ? canonical
+    : canonical.flatMap((event) => event['type'] === 'message_stop'
+      ? [
+          {
+            type: 'message_delta',
+            delta: { stop_reason: 'end_turn', stop_sequence: null },
+            usage: { output_tokens: 1 },
+          },
+          event,
+        ]
+      : [event]);
+  return new Response(complete.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''), {
     status: 200,
     headers: { 'content-type': 'text/event-stream' },
   });

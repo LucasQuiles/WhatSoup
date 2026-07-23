@@ -494,6 +494,9 @@ export class OpenAIApiProvider implements ProviderSession {
         if (this.boundaryRestricted && rawData !== '[DONE]') {
           responseBudget!.observeInvalid();
         }
+        if (this.boundaryRestricted && eventName !== undefined) {
+          responseBudget!.observeInvalid();
+        }
         if (sawTerminal && this.boundaryRestricted) {
           responseBudget!.observeInvalid();
         }

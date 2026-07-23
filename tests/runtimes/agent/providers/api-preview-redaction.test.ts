@@ -246,12 +246,17 @@ describe('provider API preview redaction', () => {
         { status: 400 },
       ))
       .mockResolvedValueOnce(providerName === 'openai-api'
-        ? makeSseResponse(['{"choices":[{"index":0,"delta":{"content":"recovered"}}]}', '[DONE]'])
+        ? makeSseResponse([
+            '{"choices":[{"index":0,"delta":{"content":"recovered"}}]}',
+            '{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+            '[DONE]',
+          ])
         : makeSseResponse([
             '{"type":"message_start","message":{"usage":{"input_tokens":1,"output_tokens":0}}}',
             '{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
             '{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"recovered"}}',
             '{"type":"content_block_stop","index":0}',
+            '{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}',
             '{"type":"message_stop"}',
           ]));
     await driveRestrictedProviderTurn(providerName, makeProvider());

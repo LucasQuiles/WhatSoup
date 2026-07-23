@@ -160,6 +160,7 @@ function validFinalResponse(provider: ManagedProvider): Response {
   return provider === 'openai-api'
     ? sseResponse([
         JSON.stringify({ choices: [{ index: 0, delta: { content: 'complete' } }] }),
+        JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }),
         terminalData(provider),
       ])
     : sseResponse([
@@ -167,6 +168,11 @@ function validFinalResponse(provider: ManagedProvider): Response {
         JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
         JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'complete' } }),
         JSON.stringify({ type: 'content_block_stop', index: 0 }),
+        JSON.stringify({
+          type: 'message_delta',
+          delta: { stop_reason: 'end_turn', stop_sequence: null },
+          usage: { output_tokens: 1 },
+        }),
         terminalData(provider),
       ]);
 }
@@ -195,9 +201,18 @@ function provisionalToolResponseData(provider: ManagedProvider): string[] {
 
 function overflowData(provider: ManagedProvider, overflow: 'response' | 'text' | 'tool_arguments' | 'tool_calls'): string[] {
   if (overflow === 'response') {
-    return Array.from({ length: 520 }, () => `${' '.repeat(4096)}${JSON.stringify(provider === 'openai-api'
+    const frames = Array.from({ length: 520 }, () => `${' '.repeat(4096)}${JSON.stringify(provider === 'openai-api'
       ? { choices: [], usage: {} }
       : { type: 'ping' })}`);
+    return provider === 'openai-api'
+      ? frames
+      : [
+          JSON.stringify({
+            type: 'message_start',
+            message: { usage: { input_tokens: 1, output_tokens: 0 } },
+          }),
+          ...frames,
+        ];
   }
   if (overflow === 'text') {
     // Each fragment is below the character limit but their aggregate UTF-8
@@ -444,7 +459,16 @@ describe('restricted managed-provider response completion and aggregate budgets'
       const paddedFrames = Array.from({ length: 520 }, () => `${' '.repeat(4096)}${payload}`);
       const pulls = { count: 0 };
       fetchMock.mockResolvedValueOnce(pullDrivenSseResponse(
-        [...paddedFrames, terminalData(providerName)],
+        [
+          ...(providerName === 'anthropic-api'
+            ? [JSON.stringify({
+                type: 'message_start',
+                message: { usage: { input_tokens: 1, output_tokens: 0 } },
+              })]
+            : []),
+          ...paddedFrames,
+          terminalData(providerName),
+        ],
         pulls,
       ));
       const provider = makeProvider();
