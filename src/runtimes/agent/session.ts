@@ -613,6 +613,7 @@ export class SessionManager {
   >();
   private readonly childTreeMarkers = new WeakMap<ReturnType<typeof spawn>, string>();
   private readonly childExecutionLeases = new WeakMap<ReturnType<typeof spawn>, ProviderExecutionLease>();
+  private readonly watchdogNotifiedChildren = new WeakSet<ReturnType<typeof spawn>>();
   private providerExecutionWaitAbort: AbortController | null = null;
   private readonly shutdownKillTimers = new Map<
     ReturnType<typeof spawn>,
@@ -1821,7 +1822,9 @@ export class SessionManager {
           generationIdentity: childGeneration,
           ...this.buildCrashMetadata(),
         });
-        this.notifyUnexpectedExit(code, signal, childGeneration);
+        if (!this.watchdogNotifiedChildren.delete(child)) {
+          this.notifyUnexpectedExit(code, signal, childGeneration);
+        }
       }
     });
   }
@@ -1861,6 +1864,24 @@ export class SessionManager {
         .sendMessage(chatJid, msg)
         .catch((err) => log.error({ err }, 'failed to send crash notice'));
     });
+  }
+
+  private notifyWatchdogTimeout(
+    msg: string,
+    child?: ReturnType<typeof spawn>,
+  ): void {
+    if (child) this.watchdogNotifiedChildren.add(child);
+    if (this.notifyUser) {
+      try {
+        this.notifyUser(msg);
+        return;
+      } catch (err) {
+        log.error({ err, chatJid: this.chatJid }, 'watchdog timeout queue notification failed');
+      }
+    }
+    this.messenger
+      .sendMessage(this.chatJid, msg)
+      .catch((err) => log.error({ err, chatJid: this.chatJid }, 'failed to send watchdog timeout notice'));
   }
 
   clearTurnWatchdog(): void {
@@ -1996,8 +2017,8 @@ export class SessionManager {
     this.watchdogHard = null;
     if (!this.active) return;
 
-    const inactivityMinutes = Math.round(watchdogHardMsForProvider(this.provider) / 60_000);
-    const terminationNotice = `_Session terminated after ${inactivityMinutes} minutes of inactivity — restarting._`;
+    const timeoutMinutes = Math.round(watchdogHardMsForProvider(this.provider) / 60_000);
+    const terminationNotice = `_Agent turn timed out after ${timeoutMinutes} minutes without completing and was stopped._`;
 
     if (managedProviderSession !== null) {
       const accepted = this.crashManagedProviderSession(
@@ -2008,7 +2029,7 @@ export class SessionManager {
       );
       if (accepted && this.isCurrentGeneration(managedProviderGeneration)) {
         log.warn({ sessionId: this.sessionId, provider: this.provider, reason: 'turn_watchdog' }, 'turn watchdog fired — killing stalled managed provider session');
-        this.notifyUser?.(terminationNotice);
+        this.notifyWatchdogTimeout(terminationNotice);
       }
       return;
     }
@@ -2017,11 +2038,8 @@ export class SessionManager {
 
     if (this.child === null) return;
     log.warn({ sessionId: this.sessionId, pid: this.child?.pid, reason: 'turn_watchdog' }, 'turn watchdog fired — killing stalled Claude process');
-    // Notify user with a specific message before the kill — the generic crash
-    // notice ("Agent session crashed") follows via the exit handler, but this
-    // message explains WHY it was terminated.
-    this.notifyUser?.(terminationNotice);
     const child = this.child;
+    this.notifyWatchdogTimeout(terminationNotice, child);
     void this.killChildTree(child, 'SIGKILL').catch((err) => {
       log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap watchdog provider process tree');
     });
@@ -2563,9 +2581,12 @@ export class SessionManager {
                 )
               : this.buildCrashMetadata()),
           });
+          const watchdogNoticeAlreadySent = this.watchdogNotifiedChildren.delete(child);
           if (missingTerminalResult) {
-            this.notifyUser?.('_Agent provider ended before completing the turn. Send your message again to retry._');
-          } else {
+            if (!watchdogNoticeAlreadySent) {
+              this.notifyUser?.('_Agent provider ended before completing the turn. Send your message again to retry._');
+            }
+          } else if (!watchdogNoticeAlreadySent) {
             this.notifyUnexpectedExit(code, signal, childGeneration);
           }
         } else {

@@ -207,6 +207,81 @@ describe('SessionManager spawn-per-turn child handlers (opencode-cli)', () => {
     expect(info.exitCode).toBe(7);
   });
 
+  it('watchdog death emits one truthful timeout notice without a generic SIGKILL duplicate', async () => {
+    const { sm, notifyUser, onCrash } = await makeOpencodeSession();
+    await sm.sendTurn('hello');
+
+    (sm as unknown as { handleWatchdogHard: () => void }).handleWatchdogHard();
+
+    expect(notifyUser).toHaveBeenCalledTimes(1);
+    expect(notifyUser.mock.calls[0]![0]).toMatch(/timed out after 30 minutes without completing/i);
+    expect(notifyUser.mock.calls[0]![0]).not.toMatch(/inactivity|restarting/i);
+
+    child._exitCb?.(null, 'SIGKILL');
+    child._closeCb?.(null, 'SIGKILL');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(onCrash).toHaveBeenCalledTimes(1);
+    expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({ signal: 'SIGKILL' }));
+    expect(notifyUser).toHaveBeenCalledTimes(1);
+  });
+
+  it('watchdog timeout uses the messenger fallback once when no queue callback exists', async () => {
+    const { sm, sentMessages } = await makeOpencodeSession({ notifyUser: undefined });
+    await sm.sendTurn('hello');
+
+    (sm as unknown as { handleWatchdogHard: () => void }).handleWatchdogHard();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(sentMessages).toEqual([
+      expect.objectContaining({
+        jid: CHAT_JID,
+        text: expect.stringMatching(/timed out after 30 minutes without completing/i),
+      }),
+    ]);
+
+    child._exitCb?.(null, 'SIGKILL');
+    child._closeCb?.(null, 'SIGKILL');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(sentMessages).toHaveLength(1);
+  });
+
+  it('watchdog timeout falls back to the messenger when the queue callback throws', async () => {
+    const failingNotifyUser = vi.fn(() => {
+      throw new Error('queue unavailable');
+    });
+    const { sm, sentMessages } = await makeOpencodeSession({ notifyUser: failingNotifyUser });
+    await sm.sendTurn('hello');
+
+    (sm as unknown as { handleWatchdogHard: () => void }).handleWatchdogHard();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(failingNotifyUser).toHaveBeenCalledTimes(1);
+    expect(sentMessages).toEqual([
+      expect.objectContaining({
+        jid: CHAT_JID,
+        text: expect.stringMatching(/timed out after 30 minutes without completing/i),
+      }),
+    ]);
+  });
+
+  it('watchdog timeout suppresses the missing-result notice when the child wins the kill race', async () => {
+    const { sm, notifyUser, onCrash } = await makeOpencodeSession();
+    await sm.sendTurn('hello');
+
+    (sm as unknown as { handleWatchdogHard: () => void }).handleWatchdogHard();
+    child._exitCb?.(0, null);
+    child._closeCb?.(0, null);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({
+      crashClass: 'provider_stream_corrupt',
+    }));
+    expect(notifyUser).toHaveBeenCalledTimes(1);
+    expect(notifyUser.mock.calls[0]![0]).toMatch(/timed out after 30 minutes without completing/i);
+  });
+
   it('drained close (code 0) without a terminal result fails closed exactly once', async () => {
     const events: AgentEvent[] = [];
     const { sm, notifyUser, onCrash } = await makeOpencodeSession({

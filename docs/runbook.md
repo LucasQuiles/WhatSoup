@@ -721,7 +721,7 @@ The operation tracker monitors each tool invocation and thinking gap. Stream-jso
 3. **Hard watchdog backstop** — no activity for 30 minutes (not configurable via `operationTracker`)
    - Reset on any agent activity (tool_use, tool_result, assistant_text) **and on every inbound user message**, so it only catches sessions that go fully silent. The stalled-operation kill (step 1) is what bounds a single hung tool while the user keeps messaging.
    - Sends SIGKILL to the provider process
-   - User receives "_Session terminated after 30 minutes of inactivity — restarting._"
+   - User receives one truthful timeout notice: "_Agent turn timed out after 30 minutes without completing and was stopped._"
    - Session is marked as crashed; a new session spawns on the next inbound message
 
 **Diagnostic steps:**
