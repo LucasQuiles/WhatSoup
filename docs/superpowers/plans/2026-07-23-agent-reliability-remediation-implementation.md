@@ -1,0 +1,142 @@
+# Agent Reliability Remediation Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use
+> superpowers:subagent-driven-development or superpowers:executing-plans.
+> Every behavior change follows test-first red-green-refactor. Between cycles,
+> run verification, gap analysis, hypothesis falsification, duplication review,
+> and architectural fitness/simplification.
+
+**Goal:** Make halted queues visible, make event-loop health suspend-aware,
+preserve per-chat MCP actor isolation across every eligible CLI provider, and
+remediate the affected macOS host without replaying unsafe deliveries or
+exposing secrets.
+
+**Architecture:** Deliver three independent branches from refreshed `main`.
+Provider actor isolation lands first because it closes the highest-risk
+authorization gap and extracts current runtime code before the file-size
+ratchet tightens. Queue-health truth and suspend/platform hardening remain
+separate main-based changes. Host operations are fail-closed and recorded in a
+private schema-version-1 receipt.
+
+**Tech Stack:** TypeScript 5.9, Node.js 24, Vitest 4, Unix sockets, launchd,
+SQLite, macOS private credential stores, ARC, and Tailscale admin controls.
+
+## Global Constraints
+
+- Refresh live `origin/main` and inspect overlapping open PRs before every
+  branch. Preserve merged route/fallback behavior; do not import stacked work.
+- Do not increase runtime or test fitness baselines. Extract cohesive code
+  before adding new runtime behavior.
+- Masked, partial, stale-head, empty-scope, or environment-invalid checks are
+  inconclusive.
+- Never expose raw JIDs, chat identifiers, socket paths, secrets, message
+  content, or raw host errors in new health, logs, or JSON-RPC errors.
+- Use the configured SSH remote, one PR per branch, and no merge without
+  separate authorization.
+- Host mutations require the private operation record and exact precondition
+  checks. Never restore an exposed plist or make retired deliveries replayable.
+
+## Task 1: Finalize and publish the contract
+
+- [ ] Amend the approved design with strict `> 250 ms` lag semantics, exhaustive
+  provider capability mapping, awaitable socket readiness, state-root socket
+  placement, Tailscale-first ordering, exact host timeouts, and acceptance
+  predicates.
+- [ ] Regenerate the work index and pass publication, tally, documentation,
+  non-vacuity, diff, and repository staged guards.
+- [ ] Commit and push the design and this plan on
+  `fix/agent-queue-health-20260723`.
+
+## Task 2: Provider actor isolation
+
+Create `fix/agent-provider-actor-isolation-20260723` from refreshed `main`.
+
+- [ ] RED: add exhaustive provider MCP-mode, socket readiness, proxy precedence,
+  content-free error, actor-bound child environment, concurrent-chat,
+  request-override, rekey, stale-socket, cleanup, and fallback non-overlap tests.
+- [ ] GREEN: add the exhaustive MCP capability to the closed provider registry;
+  extract a per-chat MCP socket manager below the runtime state root; make socket
+  startup awaitable; await readiness at the central child-spawn boundary; and
+  preserve the actual routed/fallback provider selected by current `main`.
+- [ ] Exact-path collision handling distinguishes a live duplicate socket from
+  an unreachable same-UID stale socket. Reject live, foreign-owned, symlink, and
+  non-socket paths without unlinking them.
+- [ ] Keep static `WHATSOUP_SOCKET` compatibility only outside eligible
+  per-chat CLI sessions. Eligible sessions receive a live
+  `WHATSOUP_MCP_SOCKET` or fail before child spawn.
+- [ ] Prove with one real-provider integration canary per eligible CLI that the
+  provider child propagates `WHATSOUP_MCP_SOCKET` to its MCP proxy despite the
+  static compatibility config. An unproven provider remains fail-closed.
+- [ ] Derive eligibility from the actual session/provider child, not the
+  instance default, and tear down the actor socket only after the owning child
+  process tree has settled.
+- [ ] Keep the shared/global socket actorless in every non-sandbox per-chat
+  runtime. Publish actor FIFO state only to the actual eligible session socket.
+- [ ] Run targeted tests and typechecks, then the requested verification, gap,
+  hypothesis, deduplication, and fitness pass. Fix blocking findings.
+- [ ] Pass applicable repository guards, commit, push, and open a main-based PR.
+
+## Task 3: Queue-health truth
+
+Create `fix/agent-queue-health-truth-20260723` from refreshed `main`.
+
+- [ ] RED: test queue-object lifetime halt state, active-mode aggregation,
+  shared/per-chat/all-materialized-per-chat severity and HTTP behavior, scope
+  counts, composition with stronger health states, and privacy.
+- [ ] GREEN: expose a content-free halt accessor and publish only
+  `turnQueueHalted` and `turnQueueHaltedScopes` under `runtime.agent`.
+- [ ] Preserve process-lifetime recovery semantics with a halted-scope latch
+  driven by the queue's actual halt transition. The latch survives
+  `/kill-session` deletion, delayed halt races, and LID/JID rekeying; admission
+  consults it before creating any replacement queue. Restart clears it.
+- [ ] A shared halt is unhealthy/503; any per-chat halt is degraded/200.
+  Existing stronger health wins. Do not add an unhalt API.
+- [ ] Update the stable public health contract. Extend exact-cause alerting only
+  if its interface has merged to `main`; otherwise preserve generic alerting.
+- [ ] Run targeted tests/typechecks and the five requested review passes, then
+  applicable guards. Commit, push, and open a main-based PR.
+
+## Task 4: Suspend and platform hardening
+
+Create `fix/agent-suspend-platform-hardening-20260723` from refreshed `main`.
+
+- [ ] RED: cover exactly-250/greater-than-250 ms; prove an exactly-10-second
+  observation is retained without incrementing the discontinuity counter
+  (without assuming one outlier makes p95 starved); prove greater-than-10
+  seconds resets without retaining the gap; and cover timer/snapshot single
+  consumption, saturation, sampler restart, warning entry/re-entry/rate
+  limiting, poller behavior, launchd working directory, ARC root precedence,
+  and private-operation-record validation.
+- [ ] GREEN: share one monotonic observation transition; publish a saturating
+  process-local discontinuity counter; rate-limit only warning logs; add
+  deterministic launchd working directory and non-empty explicit ARC-root
+  precedence; add the schema-version-1 private record validator.
+- [ ] The validator uses closed action, step-status, and abort-reason registries;
+  receipts contain structured counts/hashes/statuses and never free-form raw
+  errors.
+- [ ] Expose `validate-private-operation-record schema` and a read-only
+  `validate --record <absolute-path> --format json` command. Emit one
+  schema-valid JSON object; use exit `0` for valid, `1` for actionable record
+  failure, and `2` for infrastructure/read failure.
+- [ ] Preserve health evaluation on every request and existing strict
+  `p95 > 250 ms` behavior.
+- [ ] Run targeted tests/typechecks and the five requested review passes, then
+  applicable guards. Commit, push, and open a main-based PR.
+
+## Task 5: Cross-lane verification and host remediation
+
+- [ ] Review every PR diff against the design, current `main`, public surfaces,
+  upstream overlap, runtime fitness, and cross-lane compatibility. Resolve all
+  critical/important findings and rerun fresh verification.
+- [ ] Create and validate the private operation record. Verify the exact
+  Tailscale node and disable key expiry as the first host mutation.
+- [ ] After required PRs merge, migrate credentials into private stores,
+  validate a credential-free plist, stop and converge within 30 seconds,
+  bootstrap, and converge health within 60 seconds.
+- [ ] Prove one process, healthy authenticated status, WhatsApp connectivity,
+  model usability, SQLite/ARC integrity, secret-free plist, private modes,
+  unhalted queues, and actor-socket ownership.
+- [ ] Dry-run and retire only the three reviewed quarantine rows. Resolve access
+  only with exact identity proof. Record every receipt or abort.
+- [ ] Finish with clean worktrees, pushed branches, three main-based PRs, and an
+  explicit list of skipped or inconclusive checks.

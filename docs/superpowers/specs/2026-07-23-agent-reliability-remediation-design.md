@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-23
 **Target:** WhatSoup `main` and an affected macOS agent deployment
-**Status:** pending — owner decisions incorporated; awaiting written-spec review
+**Status:** approved — owner decisions incorporated; implementation authorized
 
 ## Context
 
@@ -42,7 +42,8 @@ must remain observable.
 1. Make `/health` reflect every halted turn queue without exposing chat
    identifiers or raw errors.
 2. Distinguish machine suspend/resume discontinuities from genuine scheduler
-   starvation while preserving the existing 250 ms starvation threshold.
+   starvation while preserving the existing strict `> 250 ms` starvation
+   threshold.
 3. Ensure every eligible per-chat CLI provider connects through the actor-bound
    socket for that session, including fallback providers.
 4. Make the launchd job deterministic, ARC-aware, and free of embedded
@@ -104,6 +105,12 @@ A halt is permanent for the lifetime of that `TurnQueue` object. This change
 does not add an administrative unhalt API or automatic retry of the
 unfinalizable turn. Operator recovery is a controlled process restart, which
 constructs new queue objects after the durable turn state has been captured.
+Session cleanup must not bypass this rule. The runtime retains a process-local
+halted-scope latch set from each queue's actual halt transition. The latch
+survives queue-object deletion, follows LID/JID scope rekeying, and is consulted
+before lazily creating a replacement per-chat queue. This also covers a delayed
+halt that races `/kill-session` cleanup. A later inbound turn remains rejected
+until process restart instead of silently creating a fresh admission queue.
 
 ### Health semantics
 
@@ -127,6 +134,8 @@ Tests will prove:
 - a queue reports unhalted initially and halted after an unfinalizable failure;
 - a halt persists for the queue-object lifetime and a newly constructed queue is
   unhalted;
+- `/kill-session`, delayed halt races, and LID/JID rekeying preserve the
+  process-local halted-scope latch, so the next inbound turn remains rejected;
 - a shared halted queue produces runtime `unhealthy`, top-level `unhealthy`, and
   HTTP 503;
 - a per-chat halted queue produces runtime and top-level `degraded` with HTTP
@@ -157,9 +166,10 @@ The counter saturates at `Number.MAX_SAFE_INTEGER` rather than wrapping. Health
 adds `event_loop.discontinuity_count`. This is process-local diagnostic state,
 not a durable incident counter.
 
-Scheduling delays at or above the existing 250 ms threshold that do not exceed
-the full observation window remain starvation samples. This keeps genuine
-CPU/event-loop blocking visible.
+Scheduling delays strictly greater than the existing 250 ms threshold that do
+not exceed the full observation window remain starvation samples. Exactly
+250 ms remains healthy. This keeps genuine CPU/event-loop blocking visible
+without silently changing the existing boundary.
 
 ### Warning deduplication
 
@@ -201,8 +211,8 @@ tests will cover a valid tracked binding and a missing binding.
 Fake-timer tests will prove:
 
 - ordinary sub-threshold lag is healthy;
-- a genuine 250 ms-or-greater lag inside the observation window remains
-  starvation;
+- exactly 250 ms remains healthy while greater-than-250 ms lag inside the
+  observation window remains starvation;
 - an exactly 10-second gap remains a starvation sample while a gap greater than
   10 seconds is a discontinuity;
 - a gap longer than the observation window resets samples, increments the
@@ -224,8 +234,10 @@ Every non-sandbox per-chat CLI session whose child configuration exposes
 WhatSoup MCP tools is eligible and must use the actor-bound Unix socket minted
 for its logical per-chat session. Eligibility is capability-driven, not
 primary-provider-driven: it is evaluated from the actual provider selected for
-each primary, fallback, or routed child. The current supported eligible
-providers are:
+each primary, fallback, or routed child. The closed `ProviderId` registry has
+one exhaustive MCP-mode mapping. Adding a provider ID therefore requires an
+explicit MCP capability decision rather than relying on a name suffix or
+runtime guess. The current supported eligible providers are:
 
 - Claude CLI
 - Codex CLI
@@ -255,9 +267,12 @@ identifiers, hostnames, usernames, or request content.
 When the agent runtime launches an eligible non-sandbox per-chat CLI session,
 it must provide `WHATSOUP_MCP_SOCKET` in that child's explicit environment. The
 runtime must verify that the value is non-empty and names its live actor-bound
-server before spawning the child. It must fail closed before launch if it
-cannot prove those conditions, even when `WHATSOUP_SOCKET` is present. It must
-never silently fall back to the global socket in that mode.
+server before spawning the child. Socket startup is awaitable and resolves only
+after bind, permission, ownership, and liveness checks succeed. The central
+persistent/spawn-per-turn child-spawn boundary awaits that readiness result. It
+must fail closed before launch if it cannot prove those conditions, even when
+`WHATSOUP_SOCKET` is present. It must never silently fall back to the global
+socket in that mode.
 
 ### Lifecycle
 
@@ -267,11 +282,15 @@ routed provider children for that same session; provider children for the same
 session must not overlap during a transition. The provider receives the socket
 only in its child environment.
 
-The socket lives under a mode-`0700` runtime-owned directory, is mode `0600`,
-and is owned by the agent process UID. Its deterministic path is unique to the
-logical per-chat session. Before binding, the server unlinks only that exact
-known path, which recovers a stale file left by process crash or power loss
-without scanning or glob-deleting unrelated sockets.
+The socket lives under a mode-`0700` directory below the configured runtime
+state root, is mode `0600`, and is owned by the agent process UID. Its
+deterministic filename is derived from a one-way digest of the logical
+conversation identity; no raw JID appears in the path. Before binding, the
+server examines only that exact known path. A live same-UID socket is treated as
+a duplicate-process collision and rejected without unlinking. An unreachable
+same-UID socket may be unlinked as stale. A symlink, non-socket, or
+foreign-owned path is rejected. The server never scans or glob-deletes
+unrelated sockets.
 
 Session teardown removes the actor-bound socket and server after the child has
 stopped. Cleanup is idempotent and applies to normal exit, provider failure,
@@ -284,6 +303,11 @@ content. The socket context pins the logical conversation, while the server's
 per-request actor resolver reads the actor of the currently executing turn and
 denies sensitive tools when no owned executing actor exists. A child cannot
 select or override either value in request content.
+
+In a non-sandbox per-chat runtime, the shared/global socket remains actorless
+regardless of the configured primary provider. Actor FIFO publication is gated
+by the actual current session provider's exhaustive MCP capability and is
+published only to that session's actor-bound socket.
 
 ### Tests
 
@@ -302,6 +326,8 @@ Tests will prove:
 - two concurrent chat sessions receive distinct sockets and actors; and
 - normal and exceptional teardown remove only the owning session's socket;
 - a stale exact-path socket is replaced safely on the next bind; and
+- a live, foreign-owned, symlink, or non-socket collision is rejected without
+  unlinking it;
 - socket permissions and ownership match the runtime contract.
 
 ## Host Remediation
@@ -321,6 +347,42 @@ JIDs, or full phone numbers. It remains in the host's private backed-up state
 until all associated pull requests and host acceptance evidence are complete.
 Deletion is a separate owner-authorized operation.
 
+The record uses schema version `1`. Its top level contains
+`schema_version: 1`, an opaque `run_id`, RFC 3339 `created_at`, operator
+identity, full target commit SHA, and `steps`. Each step has a consecutive
+integer `sequence`, an action from the closed host-operation action registry,
+RFC 3339 start/completion timestamps, status
+`planned | completed | aborted | skipped`, opaque target IDs where required,
+and structured pre/post evidence containing only counts, hashes, booleans, or
+closed status values. An aborted step uses one content-free reason code:
+`precondition_failed`, `postcondition_failed`, `timeout`,
+`identity_unproven`, `control_plane_error`, `validation_failed`, or
+`operator_cancelled`; it does not store a free-form error.
+
+A repository-owned validator checks the schema, mode and ownership, ordered
+step receipts, required pre/post evidence, closed action/reason registries, and
+forbidden sensitive fields before the first mutation and after every completed
+or aborted step. Validation failure stops the run.
+
+The validator is exposed as the read-only repository CLI
+`validate-private-operation-record`. Its `schema` subcommand returns the
+command input/output JSON Schemas and read-only effect metadata without
+network or credentials. Its `validate` subcommand requires
+`--record <absolute-path> --format json` and emits exactly one JSON object on
+stdout. Success exits `0`; an actionable schema, permission, ownership, or
+completeness failure exits `1`; an infrastructure/read failure exits `2`.
+Errors contain stable `kind`, JSON path, content-free message, retryability,
+and hint fields but never rejected values or raw file content.
+
+### Tailscale access preservation
+
+After the private record and exact node-identity preflight pass, use the
+Tailscale admin control plane to disable key expiry for that node as the first
+host mutation. Verify the same node ID, hostname, tags, online state, and
+expiry-disabled state. Do not run `tailscale up --force-reauth` remotely.
+Failure stops all later host mutations. A later unrelated failure leaves expiry
+disabled; re-enabling it requires a separate owner policy decision.
+
 ### Launchd and credentials
 
 Regenerate the agent plist from reviewed repository tooling with:
@@ -338,18 +400,20 @@ Credential migration and rotation use this order:
 2. prove the private store can load that credential;
 3. generate and validate a credential-free candidate plist;
 4. generate a new local health token directly into the private store;
-5. stop the launchd job, wait for zero matching processes and no owner of the
-   expected port or sockets, atomically install the candidate plist, and
-   bootstrap the job;
+5. stop the launchd job, poll once per second for at most 30 seconds for zero
+   matching processes and no owner of the expected port or sockets, atomically
+   install the candidate plist, and bootstrap the job;
 6. prove exactly one launchd-managed process, validate health with the new
    token, and prove provider usability; and
 7. where supported, issue a new provider credential into the private store,
    validate it, then revoke the exposed credential upstream.
 
-If private-store loading, plist validation, stop convergence, bootstrap,
+After bootstrap, poll health once every two seconds for at most 60 seconds. If
+private-store loading, plist validation, stop convergence, bootstrap,
 single-process convergence, health authentication, or provider usability
-fails, stop the run and record the abort. Do not continue to quarantine,
-access, or Tailscale mutations. Do not restore a plist containing exposed
+fails, stop the run and record the abort. Do not continue to quarantine or
+access mutations. The completed Tailscale access-preservation step is not
+rolled back automatically. Do not restore a plist containing exposed
 credentials; correct the credential-free candidate or issue another new
 credential. When an upstream provider has no safe, verifiable rotation path,
 record that explicit gap after removing the plaintext plist copy. Never print
@@ -382,31 +446,28 @@ number. If it matches the verified owner identity, allow it. If identity cannot
 be proven, leave it pending and report that as an explicit operational blocker;
 do not guess or block it automatically.
 
-### Tailscale
-
-Use the Tailscale admin control plane to disable key expiry for the exact node
-ID recorded in the private operation record. Verify that the node remains
-online and no expiry is reported. Do not run `tailscale up --force-reauth`
-remotely because it can sever the only access path.
-
 ### Host acceptance checks
 
 After remediation, verify:
 
-- one launchd-managed agent process;
-- expected port and socket ownership;
-- `/health` status and HTTP code;
-- WhatsApp connected state and bounded recent churn;
-- model usability;
-- SQLite quick check and expected schema;
-- ARC binding present;
+- exactly one launchd-managed agent process and that process owns the expected
+  port and global socket;
+- authenticated `/health` returns HTTP 200 with top-level status `healthy`;
+- WhatsApp is connected and its recent disconnect count is below the
+  response's published degraded threshold;
+- primary model usability is `usable` with no usability probe in flight;
+- SQLite `quick_check` passes with the expected schema;
+- ARC is loaded for consumer `whatsoup` and its payload SHA matches
+  `.arc/.canonical-sha`;
 - no plaintext credentials in the plist;
 - private credential/token file permissions;
-- private operation record location, schema, and permissions;
-- no halted queue;
+- schema-version-1 private operation record location, completeness, ownership,
+  and permissions;
+- `turnQueueHalted` is false and `turnQueueHaltedScopes` is zero;
 - the three quarantine rows retired with backup evidence;
 - the access queue resolved or explicitly blocked on identity proof; and
-- Tailscale online with key expiry disabled.
+- the exact Tailscale node remains online with unchanged tags and key expiry
+  disabled.
 
 Every mutating subsection is a gate. A failed precondition or postcondition
 stops later host mutations, records the abort and evidence gathered so far, and
@@ -423,8 +484,9 @@ leaves the remaining steps pending.
 | Access-request identity decision | Existing reviewed access tooling; independent of the three new branches |
 | Tailscale expiry change | Tailscale admin control plane; independent of the three new branches |
 
-Independent operations still wait for the launchd and credential gate to leave
-the agent healthy with exactly one process.
+Tailscale access preservation runs first because it protects the remote repair
+path. Other independent operations still wait for the launchd and credential
+gate to leave the agent healthy with exactly one process.
 
 ## Rollout and Rollback
 
@@ -440,8 +502,8 @@ Rollback consists of:
   contains exposed secret values;
 - repairing unintended quarantine changes transactionally without restoring the
   database wholesale or reversing the three reviewed retirements; and
-- re-enabling Tailscale expiry through the admin control plane if policy
-  requires it.
+- leaving Tailscale expiry disabled after an unrelated failure unless a
+  separate owner policy decision explicitly requires re-enabling it.
 
 Quarantined messages are not made replayable as part of rollback. Credential
 rotation is not rolled back to exposed values; a new credential is issued
