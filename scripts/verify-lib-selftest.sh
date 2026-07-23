@@ -30,13 +30,17 @@ echo "-- absence over an unreadable file must be INCONCLUSIVE, not 'absent' --"
 assert_absent "unreadable file" "needle" /definitely/not/here; echo "   rc=$?  (want 2)"
 echo
 echo "-- absence over a real file with no match is a genuine PASS --"
-printf 'alpha\nbeta\n' > /tmp/vl-fixture.txt
-assert_absent "real absence" "needle" /tmp/vl-fixture.txt; echo "   rc=$?  (want 0)"
+# mktemp, not a hardcoded /tmp path: a predictable name is a TOCTOU race and a
+# cross-user-readable file. Caught by the repo's own guard:insecure-tempfile on the push
+# gate -- the guard working correctly on the file that verifies verification.
+_vl_dir=$(mktemp -d "${TMPDIR:-/tmp}/vl-selftest.XXXXXX")
+trap 'rm -rf "$_vl_dir"' EXIT
+printf 'alpha\nbeta\n' > "$_vl_dir/clean.txt"
+assert_absent "real absence" "needle" "$_vl_dir/clean.txt"; echo "   rc=$?  (want 0)"
 echo
 echo "-- and a real hit still FAILS --"
-printf 'alpha\nneedle here\n' > /tmp/vl-fixture2.txt
-assert_absent "real hit" "needle" /tmp/vl-fixture2.txt; echo "   rc=$?  (want 1)"
-rm -f /tmp/vl-fixture.txt /tmp/vl-fixture2.txt
+printf 'alpha\nneedle here\n' > "$_vl_dir/hit.txt"
+assert_absent "real hit" "needle" "$_vl_dir/hit.txt"; echo "   rc=$?  (want 1)"
 echo
 verify_exit; rc=$?
 echo "FINAL rc=$rc  (want 2 — inconclusive outranks fail and pass)"
