@@ -157,13 +157,22 @@ export function fallbackProviderDescriptor(
 /**
  * The CONFIGURED (provider, model) pairs this instance carries: the primary
  * (when a model is configured) plus every fallback entry that names a concrete
- * model. The SINGLE gatherer of the pickable/selectable configured set — the
- * `/model list` dynamic menu builds its pool from this (below), and the
- * `/model <vendor/model>` direct selector resolves an explicit id against it
- * (model-pin.ts). Both consuming the one list is the invariant that a direct
- * pick can only ever name something the numbered menu could also show — kept
- * true by construction, not by two hand-synced copies. Reads only
- * ModelCatalogueRenderPort fields (no config import — ring-boundary discipline).
+ * model. The single gatherer of the CONFIGURED-set surfaces — the `/model list`
+ * dynamic menu builds its pool from this (below), and the `/model <vendor/model>`
+ * direct selector resolves an explicit id against it (model-pin.ts). Both
+ * consuming the one list is the invariant that a direct pick names something
+ * the numbered flat menu could also show — kept true by construction.
+ *
+ * SCOPE (Slice 2, owner-ratified): this is NOT the only pickable surface. The
+ * two-level drill-down's Level-2 (model-pin.ts sendModelDrillModelLevel) is a
+ * DISCOVERY surface — it renders the provider's FULL LIVE catalogue, a superset
+ * of the configured set, so a drill leaf pin can name a model this list does
+ * not (that is the point: surfacing models beyond what is pre-configured). The
+ * drill therefore does NOT preserve the configured-set invariant, and the
+ * direct selector deliberately rejects an unconfigured id the drill would pin —
+ * a known, owner-accepted asymmetry (see MODEL-STACK-OWED-DEBT: widened
+ * model-granular routability). Reads only ModelCatalogueRenderPort fields (no
+ * config import — ring-boundary discipline).
  */
 export function configuredModelEntries(port: ModelCatalogueRenderPort): Array<{ provider: string; model: string }> {
   const entries: Array<{ provider: string; model: string }> = [];
