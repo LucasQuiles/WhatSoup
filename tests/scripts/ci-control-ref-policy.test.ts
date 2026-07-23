@@ -578,8 +578,51 @@ describe('report-only outgoing ref policy CLI', () => {
       expect(exitCode).toBe(2);
       expect(validateRefPolicyReceipt(JSON.parse(stdout.join('')))).toMatchObject({
         outcome: 'inconclusive',
-        code: 'ci.refs.graph-unavailable',
+        code: 'ci.refs.history-graft-present',
       });
+      expect(reasonDefinition('ci.refs.history-graft-present')).toMatchObject({
+        retryClass: 'after-precondition-repair',
+        remediationClass: 'environment-setup',
+      });
+      expect(stdout.join('')).not.toContain(repository);
+      expect(stdout.join('')).not.toContain(localOid);
+    } finally {
+      rmSync(repository, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves unavailable repository-control metadata as a sanitized ref-policy cause', () => {
+    const repository = mkdtempSync(resolve(tmpdir(), 'ci-ref-policy-control-'));
+    try {
+      mkdirSync(resolve(repository, 'controls'));
+      copyFileSync(
+        resolve(root, 'controls/ci-control-manifest.json'),
+        resolve(repository, 'controls/ci-control-manifest.json'),
+      );
+      writeFileSync(resolve(repository, '.git'), 'private malformed control path', 'utf8');
+      const stdout: string[] = [];
+      const exitCode = runRefPolicyCli(
+        ['--remote-name', 'origin', '--remote-location', SCP_REMOTE, '--json'],
+        repository,
+        {
+          stdout: (text) => stdout.push(text),
+          stderr: () => undefined,
+          readInput: () => Buffer.from(`refs/heads/topic ${B} refs/heads/topic ${ZERO_OID}\n`),
+          resolveGraphFacts: resolveNativeRefGraphFacts,
+          now: () => new Date('2026-07-20T00:00:00.000Z'),
+        },
+      );
+      expect(exitCode).toBe(2);
+      expect(validateRefPolicyReceipt(JSON.parse(stdout.join('')))).toMatchObject({
+        outcome: 'inconclusive',
+        code: 'ci.refs.git-control-unavailable',
+      });
+      expect(reasonDefinition('ci.refs.git-control-unavailable')).toMatchObject({
+        retryClass: 'after-precondition-repair',
+        remediationClass: 'environment-setup',
+      });
+      expect(stdout.join('')).not.toContain(repository);
+      expect(stdout.join('')).not.toContain('private malformed control path');
     } finally {
       rmSync(repository, { recursive: true, force: true });
     }
@@ -651,6 +694,8 @@ describe('outgoing ref reason catalog', () => {
       'ci.refs.input-duplicate',
       'ci.refs.remote-identity-unavailable',
       'ci.refs.policy-unknown',
+      'ci.refs.history-graft-present',
+      'ci.refs.git-control-unavailable',
       'ci.refs.graph-unavailable',
       'ci.refs.local-source-unbound',
       'ci.refs.object-format-unsupported',

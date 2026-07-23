@@ -4,7 +4,11 @@ import { readFileSync, readSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 import { takeValue } from './lib/cli-args.ts';
-import { assertNoLegacyGrafts, gitEnvironment } from './lib/ci-control/git-input-core.ts';
+import {
+  ExactGitInputError,
+  assertNoLegacyGrafts,
+  gitEnvironment,
+} from './lib/ci-control/git-input-core.ts';
 import { digestControlManifest, loadControlManifest } from './lib/ci-control/manifest.ts';
 import {
   MAX_PRE_PUSH_INPUT_BYTES,
@@ -209,6 +213,16 @@ const defaultRuntime: RefPolicyCliRuntime = {
   now: () => new Date(),
 };
 
+function refPolicyFailureCode(error: unknown): string {
+  if (error instanceof RefPolicyError) return error.code;
+  if (!(error instanceof ExactGitInputError)) return 'ci.refs.graph-unavailable';
+  switch (error.code) {
+    case 'ci.input.history-graft-present': return 'ci.refs.history-graft-present';
+    case 'ci.input.git-control-unavailable': return 'ci.refs.git-control-unavailable';
+    default: return 'ci.refs.graph-unavailable';
+  }
+}
+
 export function runRefPolicyCli(
   args: readonly string[],
   cwd = process.cwd(),
@@ -237,7 +251,7 @@ export function runRefPolicyCli(
     runtime.stdout(Buffer.from(serializeRefPolicyReceipt(receipt)).toString('utf8'));
     return receipt.exitCode;
   } catch (error) {
-    const code = error instanceof RefPolicyError ? error.code : 'ci.refs.graph-unavailable';
+    const code = refPolicyFailureCode(error);
     runtime.stdout(Buffer.from(serializeRefPolicyReceipt(buildInconclusiveRefPolicyReceipt(code, runtime.now()))).toString('utf8'));
     return 2;
   }
