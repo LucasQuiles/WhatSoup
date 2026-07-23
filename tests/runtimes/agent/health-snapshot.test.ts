@@ -600,8 +600,23 @@ describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
     });
   });
 
-  it('reports a shared admission halt as unhealthy and restart clears it', () => {
+  it('ignores the inactive TurnQueue in single mode', () => {
     const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test');
+    capturedTurnQueues.at(-1)!.halt();
+
+    expect(runtime.getHealthSnapshot()).toMatchObject({
+      status: 'healthy',
+      details: {
+        turnQueueHalted: false,
+        turnQueueHaltedScopes: 0,
+      },
+    });
+  });
+
+  it('reports a shared admission halt as unhealthy and restart clears it', () => {
+    const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', {
+      sessionScope: 'shared',
+    });
     capturedTurnQueues.at(-1)!.halt();
 
     expect(runtime.getHealthSnapshot()).toMatchObject({
@@ -612,7 +627,9 @@ describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
       },
     });
 
-    const restarted = new AgentRuntime(makeDb(), makeMessenger(), 'test');
+    const restarted = new AgentRuntime(makeDb(), makeMessenger(), 'test', {
+      sessionScope: 'shared',
+    });
     expect(restarted.getHealthSnapshot()).toMatchObject({
       status: 'healthy',
       details: {

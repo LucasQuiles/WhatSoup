@@ -155,8 +155,10 @@ export class RuntimeTurnCoordinator {
     this.host = host;
   }
 
-turnQueueHaltHealth(perChatMode: boolean): TurnQueueHaltHealth {
-  return this.turnQueueHalts.snapshot(perChatMode, this.host.turnQueue.isHalted);
+turnQueueHaltHealth(
+  sessionScope: 'single' | 'shared' | 'per_chat',
+): TurnQueueHaltHealth {
+  return this.turnQueueHalts.snapshot(sessionScope, this.host.turnQueue.isHalted);
 }
 
 rekeyPerChatTurnQueueHaltScope(fromScopeKey: string, toScopeKey: string): void {

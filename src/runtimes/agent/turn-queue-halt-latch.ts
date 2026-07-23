@@ -7,10 +7,13 @@ export class TurnQueueHaltLatch {
   private readonly haltedScopes = new Set<string>();
   private readonly scopeAliases = new Map<string, string>();
 
-  snapshot(perChatMode: boolean, sharedQueueHalted: boolean): TurnQueueHaltHealth {
-    const turnQueueHaltedScopes = perChatMode
+  snapshot(
+    sessionScope: 'single' | 'shared' | 'per_chat',
+    sharedQueueHalted: boolean,
+  ): TurnQueueHaltHealth {
+    const turnQueueHaltedScopes = sessionScope === 'per_chat'
       ? this.haltedScopes.size
-      : sharedQueueHalted ? 1 : 0;
+      : sessionScope === 'shared' && sharedQueueHalted ? 1 : 0;
     return {
       turnQueueHalted: turnQueueHaltedScopes > 0,
       turnQueueHaltedScopes,

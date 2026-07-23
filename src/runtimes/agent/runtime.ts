@@ -6994,7 +6994,7 @@ export class AgentRuntime implements Runtime {
     const finalizationHealth = this.runtimeTurnSupervisor.health();
     const recoveryHealth = this.getTurnRecoveryHealthDetails();
     const finalizationDegraded = runtimeTurnRecoveryIsDegraded(finalizationHealth, recoveryHealth);
-    const turnQueueHealth = this.runtimeTurnCoordinator.turnQueueHaltHealth(this.sessionScope === 'per_chat');
+    const turnQueueHealth = this.runtimeTurnCoordinator.turnQueueHaltHealth(this.sessionScope);
     if (this.sessionScope === 'per_chat') {
       const sessions = [...this.chatSessions.values()];
       let activeSessions = 0;
