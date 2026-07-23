@@ -253,7 +253,7 @@ export function preflightProviderToolValue(value: unknown): number {
   walk(value, 0);
   const scan = scanProviderTextSequence(orderedTexts);
   if (scan.fragmentedAlias) throw new ProviderDataBoundaryError('residual_alias');
-  return scan.directSecretCount + (scan.fragmentedSecret ? 1 : 0);
+  return scan.directSecretCount + scan.fragmentedSecretCount;
 }
 
 export function rehydrateAuthorizedProviderToolInput(input: {

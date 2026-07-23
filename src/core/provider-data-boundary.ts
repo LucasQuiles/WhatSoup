@@ -248,7 +248,7 @@ export function createProviderDataBoundary(
     }
     const overLimit = texts.some((text) => text.length > MAX_BOUNDARY_TEXT_LENGTH);
     const scan = scanProviderTextSequence(texts);
-    const secretCount = scan.directSecretCount + (scan.fragmentedSecret ? 1 : 0);
+    const secretCount = scan.directSecretCount + scan.fragmentedSecretCount;
     const hasReservedSyntax = scan.directAlias || scan.fragmentedAlias;
     if (overLimit || secretCount > 0 || hasReservedSyntax) {
       const error = new ProviderDataBoundaryError(

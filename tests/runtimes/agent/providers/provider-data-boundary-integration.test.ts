@@ -806,6 +806,170 @@ describe('managed provider data boundary integration', () => {
   it.each([
     ['openai-api', () => new OpenAIApiProvider()],
     ['anthropic-api', () => new AnthropicApiProvider()],
+  ] as const)('reports exact secret counts through the restricted %s entry path', async (
+    providerName,
+    makeProvider,
+  ) => {
+    const cases = [
+      ['benign left plus one direct secret', ['ordinary', 'token=beta'], 1],
+      ['two direct secrets', ['token=alpha', 'password=beta'], 2],
+      ['two distinct fragments', ['pass', 'word=alpha', 'ordinary', 'to', 'ken=beta'], 2],
+      [
+        'one direct plus two distinct fragments',
+        ['credential=gamma', 'pass', 'word=alpha', 'ordinary', 'to', 'ken=beta'],
+        3,
+      ],
+    ] as const;
+    for (const [caseName, metadata, secretCount] of cases) {
+      fetchMock.mockReset();
+      const events: AgentEvent[] = [];
+      const boundaryEvents: ProviderBoundaryEvent[] = [];
+      const executeTool = vi.fn(async () => ({ content: 'must not run', isError: false }));
+      const mcpBridge: ProviderMcpBridge = {
+        listTools: () => [{
+          name: 'configure',
+          description: 'Configure metadata',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              metadata: {
+                type: 'array',
+                items: { type: 'string' },
+              },
+            },
+            required: ['metadata'],
+          },
+        }],
+        executeTool,
+      };
+      fetchMock.mockImplementation(async () => fetchMock.mock.calls.length === 1
+        ? providerToolCall(providerName, JSON.stringify({ metadata }))
+        : providerText(providerName, 'done'));
+      const provider = makeProvider();
+      await provider.initialize(initOptions(providerName, events, mcpBridge, boundaryEvents));
+
+      await expect(provider.sendTurn({
+        role: 'user',
+        conversationKey: 'chat-key',
+        parts: [{ kind: 'text', text: `configure ${caseName}` }],
+      })).rejects.toMatchObject({ code: 'secret_detected' });
+
+      expect(fetchMock, caseName).toHaveBeenCalledTimes(1);
+      expect(executeTool, caseName).not.toHaveBeenCalled();
+      expect(events.filter((event) => event.type !== 'init'), caseName).toEqual([]);
+      expect(provider.getCheckpoint().providerState?.['messageCount'], caseName)
+        .toBe(providerName === 'openai-api' ? 2 : 1);
+      expect(
+        boundaryEvents.filter((event) => event.eventType === 'secret_block'),
+        caseName,
+      ).toEqual([expect.objectContaining({ secretCount })]);
+    }
+  });
+
+  it.each([
+    ['openai-api', () => new OpenAIApiProvider()],
+    ['anthropic-api', () => new AnthropicApiProvider()],
+  ] as const)('rejects every quoted-key split through the restricted %s entry path', async (
+    providerName,
+    makeProvider,
+  ) => {
+    for (const assignment of ['"password"="beta"', '"token"="beta"']) {
+      for (let split = 1; split < assignment.length; split += 1) {
+        fetchMock.mockReset();
+        const events: AgentEvent[] = [];
+        const boundaryEvents: ProviderBoundaryEvent[] = [];
+        const executeTool = vi.fn(async () => ({ content: 'must not run', isError: false }));
+        const mcpBridge: ProviderMcpBridge = {
+          listTools: () => [{
+            name: 'configure',
+            description: 'Configure metadata',
+            inputSchema: {
+              type: 'object',
+              properties: { metadata: { type: 'object', additionalProperties: {} } },
+              required: ['metadata'],
+            },
+          }],
+          executeTool,
+        };
+        const left = assignment.slice(0, split);
+        const right = assignment.slice(split);
+        const metadata = {
+          ordinary: left,
+          [right]: '',
+        };
+        fetchMock.mockImplementation(async () => fetchMock.mock.calls.length === 1
+          ? providerToolCall(providerName, JSON.stringify({ metadata }))
+          : providerText(providerName, 'done'));
+        const provider = makeProvider();
+        await provider.initialize(initOptions(providerName, events, mcpBridge, boundaryEvents));
+        await expect(provider.sendTurn({
+          role: 'user',
+          conversationKey: 'chat-key',
+          parts: [{ kind: 'text', text: 'configure ordinary metadata' }],
+        })).rejects.toMatchObject({ code: 'secret_detected' });
+
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(executeTool).not.toHaveBeenCalled();
+        expect(events.filter((event) => event.type !== 'init')).toEqual([]);
+        expect(provider.getCheckpoint().providerState?.['messageCount'])
+          .toBe(providerName === 'openai-api' ? 2 : 1);
+        expect(boundaryEvents.filter((event) => event.eventType === 'secret_block'))
+          .toEqual([expect.objectContaining({ secretCount: 1 })]);
+      }
+    }
+  });
+
+  it.each([
+    ['openai-api', () => new OpenAIApiProvider()],
+    ['anthropic-api', () => new AnthropicApiProvider()],
+  ] as const)('passes exact maximum-node candidate-dense JSON through restricted %s', async (
+    providerName,
+    makeProvider,
+  ) => {
+    const metadata = Array.from({ length: MAX_TOOL_NODES - 2 }, () => 'xcredential=a');
+    const rawArguments = JSON.stringify({ metadata });
+    const events: AgentEvent[] = [];
+    const executeTool = vi.fn(async (
+      _toolName: string,
+      _input: Record<string, unknown>,
+    ) => ({ content: 'complete', isError: false }));
+    const mcpBridge: ProviderMcpBridge = {
+      listTools: () => [{
+        name: 'configure',
+        description: 'Configure metadata',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            metadata: {
+              type: 'array',
+              items: { type: 'string' },
+            },
+          },
+          required: ['metadata'],
+        },
+      }],
+      executeTool,
+    };
+    fetchMock.mockImplementation(async () => fetchMock.mock.calls.length === 1
+      ? providerToolCall(providerName, rawArguments)
+      : providerText(providerName, 'done'));
+    const provider = makeProvider();
+    await provider.initialize(initOptions(providerName, events, mcpBridge));
+
+    expect(Buffer.byteLength(rawArguments, 'utf8')).toBeLessThan(1024 * 1024);
+    await provider.sendTurn({
+      role: 'user',
+      conversationKey: 'chat-key',
+      parts: [{ kind: 'text', text: 'configure candidate-dense metadata' }],
+    });
+
+    expect(executeTool).toHaveBeenCalledTimes(1);
+    expect(executeTool).toHaveBeenCalledWith('configure', { metadata });
+  });
+
+  it.each([
+    ['openai-api', () => new OpenAIApiProvider()],
+    ['anthropic-api', () => new AnthropicApiProvider()],
   ] as const)('rejects hostile JSON inside empty-schema %s record values', async (
     providerName,
     makeProvider,

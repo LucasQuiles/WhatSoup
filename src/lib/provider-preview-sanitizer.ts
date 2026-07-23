@@ -133,6 +133,7 @@ function keyedValueStart(
   text: string,
   delimiterIndex: number,
   allowSecretKeySuffix: boolean,
+  fieldBoundaryStarts: ReadonlySet<number>,
   workCounter?: ProviderSecretBoundaryWorkCounter,
 ): KeyedValueStart | null {
   let keyEnd = delimiterIndex;
@@ -174,7 +175,12 @@ function keyedValueStart(
       usedSecretKeySuffix = true;
     }
   }
-  if (!usedSecretKeySuffix && keyStart > 0 && /[A-Za-z0-9_]/.test(text[keyStart - 1]!)) return null;
+  if (
+    !usedSecretKeySuffix
+    && keyStart > 0
+    && /[A-Za-z0-9_]/.test(text[keyStart - 1]!)
+    && !fieldBoundaryStarts.has(keyStart)
+  ) return null;
   let valueStart = delimiterIndex + 1;
   while (valueStart < text.length && /\s/.test(text[valueStart]!)) {
     addBoundaryWork(workCounter, 1);
@@ -194,6 +200,8 @@ interface KeyedSecretValue {
 
 interface BoundaryCandidateIndex {
   readonly unquotedEnds: Uint32Array;
+  // Quote closures remain delimiter-specific: a shared table could close a
+  // single-quoted value with a double quote (or vice versa).
   readonly singleQuoteEnds: Uint32Array;
   readonly doubleQuoteEnds: Uint32Array;
   readonly tokenMatchEnds: Int32Array;
@@ -204,7 +212,9 @@ function createBoundaryCandidateIndex(
   workCounter?: ProviderSecretBoundaryWorkCounter,
 ): BoundaryCandidateIndex {
   const length = text.length;
-  addBoundaryWork(workCounter, length * 2);
+  // Four typed arrays are zero-initialized and filled, then two linear scans
+  // populate them. Charge all ten source-length passes.
+  addBoundaryWork(workCounter, length * 10);
   const unquotedEnds = new Uint32Array(length).fill(length);
   const singleQuoteEnds = new Uint32Array(length).fill(length);
   const doubleQuoteEnds = new Uint32Array(length).fill(length);
@@ -254,6 +264,7 @@ function keyedSecretValues(
   allowSecretKeySuffix = false,
   boundaryIndex?: BoundaryCandidateIndex,
   workCounter?: ProviderSecretBoundaryWorkCounter,
+  fieldBoundaryStarts: ReadonlySet<number> = new Set(),
 ): KeyedSecretValue[] {
   const values: KeyedSecretValue[] = [];
   let candidateIndex = boundaryIndex;
@@ -262,7 +273,13 @@ function keyedSecretValues(
   for (const match of text.matchAll(ASSIGNMENT_DELIMITER)) {
     addBoundaryWork(workCounter, 1);
     if (!allowSecretKeySuffix && match.index < consumedThrough) continue;
-    const start = keyedValueStart(text, match.index, allowSecretKeySuffix, workCounter);
+    const start = keyedValueStart(
+      text,
+      match.index,
+      allowSecretKeySuffix,
+      fieldBoundaryStarts,
+      workCounter,
+    );
     if (start === null) continue;
     if (allowSecretKeySuffix && !candidateIndex) {
       candidateIndex = createBoundaryCandidateIndex(text, workCounter);
@@ -341,39 +358,107 @@ export function sanitizeProviderSecrets(text: string): string {
 interface ProviderSecretValueSpan {
   readonly start: number;
   readonly end: number;
+  /** Stable start of the semantic value, used across overlapping scan windows. */
+  readonly identityStart: number;
+}
+
+const EMPTY_FIELD_BOUNDARY_STARTS: ReadonlySet<number> = new Set();
+
+function mergeProviderSecretSpanGroups(
+  groups: readonly ProviderSecretValueSpan[][],
+  workCounter?: ProviderSecretBoundaryWorkCounter,
+): ProviderSecretValueSpan[] {
+  const cursors = groups.map(() => 0);
+  const merged: ProviderSecretValueSpan[] = [];
+  while (true) {
+    let selectedGroup = -1;
+    let selected: ProviderSecretValueSpan | undefined;
+    for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
+      const candidate = groups[groupIndex]![cursors[groupIndex]!];
+      if (
+        candidate
+        && (
+          !selected
+          || candidate.start < selected.start
+          || (candidate.start === selected.start && candidate.end < selected.end)
+        )
+      ) {
+        selectedGroup = groupIndex;
+        selected = candidate;
+      }
+    }
+    if (!selected || selectedGroup === -1) break;
+    addBoundaryWork(workCounter, groups.length + 1);
+    cursors[selectedGroup] = cursors[selectedGroup]! + 1;
+    const previous = merged.at(-1);
+    if (previous && selected.start < previous.end) {
+      merged[merged.length - 1] = {
+        start: Math.min(previous.start, selected.start),
+        end: Math.max(previous.end, selected.end),
+        identityStart: Math.min(previous.identityStart, selected.identityStart),
+      };
+    } else {
+      merged.push(selected);
+    }
+  }
+  return merged;
+}
+
+function uniqueProviderSecretSpans(
+  groups: readonly ProviderSecretValueSpan[][],
+  workCounter?: ProviderSecretBoundaryWorkCounter,
+): ProviderSecretValueSpan[] {
+  const spans: ProviderSecretValueSpan[] = [];
+  const seen = new Set<string>();
+  for (const group of groups) {
+    for (const span of group) {
+      addBoundaryWork(workCounter, 1);
+      const key = `${span.start}:${span.end}:${span.identityStart}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        spans.push(span);
+      }
+    }
+  }
+  return spans;
 }
 
 function providerSecretValueSpans(
   text: string,
   allowSecretKeySuffix = false,
-  tokenBoundaryStarts: ReadonlySet<number> = new Set(),
+  fieldBoundaryStarts: ReadonlySet<number> = EMPTY_FIELD_BOUNDARY_STARTS,
   workCounter?: ProviderSecretBoundaryWorkCounter,
 ): ProviderSecretValueSpan[] {
-  const spans: ProviderSecretValueSpan[] = [];
+  const bearerSpans: ProviderSecretValueSpan[] = [];
+  const knownTokenSpans: ProviderSecretValueSpan[] = [];
+  const fieldStartTokenSpans: ProviderSecretValueSpan[] = [];
+  const keyedSpans: ProviderSecretValueSpan[] = [];
   let boundaryIndex: BoundaryCandidateIndex | undefined;
-  const tokenSpans = new Set<string>();
-  const addTokenSpan = (start: number, end: number): void => {
-    const key = `${start}:${end}`;
-    if (tokenSpans.has(key)) return;
-    tokenSpans.add(key);
-    spans.push({ start, end });
-  };
   addBoundaryWork(workCounter, text.length);
   BEARER_TOKEN_RE.lastIndex = 0;
   for (const match of text.matchAll(BEARER_TOKEN_RE)) {
     if (match.index !== undefined) {
-      spans.push({ start: match.index, end: match.index + match[0].length });
+      const valueOffset = match[0].search(/\s/u) + 1;
+      bearerSpans.push({
+        start: match.index,
+        end: match.index + match[0].length,
+        identityStart: match.index + valueOffset,
+      });
     }
   }
   addBoundaryWork(workCounter, text.length);
   KNOWN_TOKEN_RE.lastIndex = 0;
   for (const match of text.matchAll(KNOWN_TOKEN_RE)) {
     if (match.index !== undefined) {
-      addTokenSpan(match.index, match.index + match[0].length);
+      knownTokenSpans.push({
+        start: match.index,
+        end: match.index + match[0].length,
+        identityStart: match.index,
+      });
     }
   }
   if (allowSecretKeySuffix) {
-    for (const start of tokenBoundaryStarts) {
+    for (const start of fieldBoundaryStarts) {
       addBoundaryWork(workCounter, 1);
       KNOWN_TOKEN_PREFIX_AT_START_RE.lastIndex = start;
       const prefixMatch = KNOWN_TOKEN_PREFIX_AT_START_RE.exec(text);
@@ -385,7 +470,7 @@ function providerSecretValueSpans(
         prefixMatch?.index === start
         && end - start - prefixMatch[0].length >= 12
       ) {
-        addTokenSpan(start, end);
+        fieldStartTokenSpans.push({ start, end, identityStart: start });
       }
     }
   }
@@ -394,14 +479,205 @@ function providerSecretValueSpans(
     allowSecretKeySuffix,
     boundaryIndex,
     workCounter,
+    fieldBoundaryStarts,
   )) {
     if (!value.redact) continue;
-    spans.push({
+    keyedSpans.push({
       start: value.secretStart,
       end: value.closed ? value.valueEnd + 1 : value.valueEnd,
+      identityStart: value.valueStart,
     });
   }
-  return spans;
+  const groups = [bearerSpans, knownTokenSpans, fieldStartTokenSpans, keyedSpans];
+  // Canonical per-field spans may merge overlapping grammars for one value.
+  // Relaxed boundary candidates must retain distinct starts: an earlier greedy
+  // candidate can overlap a later real field-start secret.
+  return allowSecretKeySuffix
+    ? uniqueProviderSecretSpans(groups, workCounter)
+    : mergeProviderSecretSpanGroups(groups, workCounter);
+}
+
+export interface ProviderSecretTextSequenceScan {
+  readonly directSecretCount: number;
+  readonly fragmentedSecretCount: number;
+  readonly detectorInvocationCount: number;
+  readonly workUnitCount: number;
+}
+
+const MAX_SECRET_SEQUENCE_SEGMENT_LENGTH = 64 * 1024;
+const SECRET_SEQUENCE_OVERLAP = 512;
+
+function boundaryPrefixCounts(
+  length: number,
+  boundaries: readonly number[],
+  workCounter: ProviderSecretBoundaryWorkCounter,
+): Uint32Array {
+  // Two typed-array initializations, one prefix fill, and one marker write per
+  // real boundary are included in the deterministic receipt.
+  addBoundaryWork(workCounter, length * 3 + boundaries.length);
+  const markers = new Uint8Array(length + 1);
+  for (const boundary of boundaries) {
+    if (boundary > 0 && boundary < length) markers[boundary] = 1;
+  }
+  const counts = new Uint32Array(length + 1);
+  for (let index = 1; index <= length; index += 1) {
+    counts[index] = counts[index - 1]! + markers[index]!;
+  }
+  return counts;
+}
+
+function uniqueOrderedBoundaries(
+  boundaries: readonly number[],
+  workCounter: ProviderSecretBoundaryWorkCounter,
+): number[] {
+  addBoundaryWork(workCounter, boundaries.length);
+  const unique: number[] = [];
+  let previous = -1;
+  for (const boundary of boundaries) {
+    if (boundary !== previous) unique.push(boundary);
+    previous = boundary;
+  }
+  return unique;
+}
+
+function spanCrossesFieldBoundary(
+  span: ProviderSecretValueSpan,
+  boundaryCounts: Uint32Array,
+): boolean {
+  if (span.end <= span.start + 1) return false;
+  return boundaryCounts[span.end - 1]! > boundaryCounts[span.start]!;
+}
+
+/**
+ * Count canonical direct and cross-field secret values with bounded segment overlap.
+ * Segment overlap is fixed at the historical 512-character carry and is de-duplicated
+ * by absolute secret-value identity.
+ */
+export function scanProviderSecretTextSequence(
+  texts: readonly string[],
+): ProviderSecretTextSequenceScan {
+  const workCounter: ProviderSecretBoundaryWorkCounter = { units: 0 };
+  const directIdentities = new Set<number>();
+  const completeFieldCandidateIdentities = new Set<number>();
+  const fragmentedIdentities = new Set<number>();
+  let globalOffset = 0;
+  let detectorInvocationCount = 0;
+  let segmentChunks: string[] = [];
+  let segmentLength = 0;
+  let segmentStart = 0;
+  let segmentBoundaries: number[] = [];
+
+  for (const text of texts) {
+    addBoundaryWork(workCounter, 1);
+    detectorInvocationCount += 1;
+    for (const span of providerSecretValueSpans(
+      text,
+      false,
+      EMPTY_FIELD_BOUNDARY_STARTS,
+      workCounter,
+    )) {
+      addBoundaryWork(workCounter, 1);
+      directIdentities.add(globalOffset + span.identityStart);
+    }
+    for (const span of providerSecretValueSpans(
+      text,
+      true,
+      EMPTY_FIELD_BOUNDARY_STARTS,
+      workCounter,
+    )) {
+      addBoundaryWork(workCounter, 1);
+      completeFieldCandidateIdentities.add(globalOffset + span.identityStart);
+    }
+    globalOffset += text.length;
+  }
+
+  globalOffset = 0;
+  const materializeSegment = (): string => {
+    if (segmentChunks.length === 1) return segmentChunks[0]!;
+    addBoundaryWork(workCounter, segmentLength);
+    const segmentText = segmentChunks.join('');
+    segmentChunks = [segmentText];
+    return segmentText;
+  };
+  const analyzeSegment = (): void => {
+    if (segmentLength === 0 || segmentBoundaries.length === 0) return;
+    detectorInvocationCount += 1;
+    const segmentText = materializeSegment();
+    const uniqueBoundaries = uniqueOrderedBoundaries(segmentBoundaries, workCounter);
+    addBoundaryWork(workCounter, uniqueBoundaries.length);
+    const boundarySet = new Set(uniqueBoundaries);
+    const boundaryCounts = boundaryPrefixCounts(
+      segmentLength,
+      uniqueBoundaries,
+      workCounter,
+    );
+    for (const span of providerSecretValueSpans(
+      segmentText,
+      true,
+      boundarySet,
+      workCounter,
+    )) {
+      if (!spanCrossesFieldBoundary(span, boundaryCounts)) continue;
+      const identity = segmentStart + span.identityStart;
+      if (!completeFieldCandidateIdentities.has(identity)) {
+        addBoundaryWork(workCounter, 1);
+        fragmentedIdentities.add(identity);
+      }
+    }
+  };
+  const retainSegmentOverlap = (): void => {
+    const segmentText = materializeSegment();
+    const retainedLength = Math.min(SECRET_SEQUENCE_OVERLAP, segmentLength);
+    const retainedStart = segmentLength - retainedLength;
+    addBoundaryWork(workCounter, retainedLength);
+    segmentStart += retainedStart;
+    segmentChunks = [segmentText.slice(retainedStart)];
+    segmentLength = retainedLength;
+    segmentBoundaries = segmentBoundaries
+      .filter((boundary) => boundary >= retainedStart)
+      .map((boundary) => boundary - retainedStart);
+  };
+  const flushForCapacity = (nextLength: number): void => {
+    if (
+      segmentLength > 0
+      && segmentLength + nextLength > MAX_SECRET_SEQUENCE_SEGMENT_LENGTH
+    ) {
+      analyzeSegment();
+      retainSegmentOverlap();
+    }
+  };
+  const appendContiguous = (value: string, valueStart: number): void => {
+    flushForCapacity(value.length);
+    if (segmentLength === 0) segmentStart = valueStart;
+    else segmentBoundaries.push(segmentLength);
+    segmentChunks.push(value);
+    segmentLength += value.length;
+  };
+
+  for (const text of texts) {
+    addBoundaryWork(workCounter, 1);
+    if (text.length <= SECRET_SEQUENCE_OVERLAP) {
+      appendContiguous(text, globalOffset);
+      globalOffset += text.length;
+      continue;
+    }
+    appendContiguous(text.slice(0, SECRET_SEQUENCE_OVERLAP), globalOffset);
+    analyzeSegment();
+    addBoundaryWork(workCounter, SECRET_SEQUENCE_OVERLAP * 2);
+    segmentChunks = [text.slice(-SECRET_SEQUENCE_OVERLAP)];
+    segmentLength = SECRET_SEQUENCE_OVERLAP;
+    segmentStart = globalOffset + text.length - SECRET_SEQUENCE_OVERLAP;
+    segmentBoundaries = [];
+    globalOffset += text.length;
+  }
+  analyzeSegment();
+
+  return {
+    directSecretCount: directIdentities.size,
+    fragmentedSecretCount: fragmentedIdentities.size,
+    detectorInvocationCount,
+    workUnitCount: workCounter.units,
+  };
 }
 
 /** Secret-only predicate for fail-closed provider boundaries. */

@@ -1,8 +1,7 @@
 import { isIP } from 'node:net';
 
 import {
-  containsProviderSecretValue,
-  containsProviderSecretValueAcrossBoundary,
+  scanProviderSecretTextSequence,
 } from '../lib/provider-preview-sanitizer.ts';
 import type { ProviderAliasType } from './provider-data-boundary-contract.ts';
 
@@ -165,6 +164,7 @@ export function containsProviderAliasSyntaxAcross(texts: readonly string[]): boo
 
 export interface ProviderTextSequenceScan {
   readonly directSecretCount: number;
+  readonly fragmentedSecretCount: number;
   readonly fragmentedSecret: boolean;
   readonly directAlias: boolean;
   readonly fragmentedAlias: boolean;
@@ -176,17 +176,10 @@ export interface ProviderTextSequenceScan {
 /** Scan one deterministic sequence while distinguishing complete values from cross-field fragments. */
 export function scanProviderTextSequence(texts: readonly string[]): ProviderTextSequenceScan {
   let carry = '';
-  let carryFieldStarts: number[] = [];
-  let directSecretCount = 0;
-  let fragmentedSecret = false;
   let directAlias = false;
   let fragmentedAlias = false;
-  let detectorInvocationCount = 0;
-  const secretBoundaryWork = { units: 0 };
-  const hasSecret = (text: string): boolean => {
-    detectorInvocationCount += 1;
-    return containsProviderSecretValue(text);
-  };
+  const secretScan = scanProviderSecretTextSequence(texts);
+  let detectorInvocationCount = secretScan.detectorInvocationCount;
   const hasAlias = (text: string): boolean => {
     detectorInvocationCount += 1;
     return containsProviderAliasSyntax(text);
@@ -195,46 +188,24 @@ export function scanProviderTextSequence(texts: readonly string[]): ProviderText
     detectorInvocationCount += 1;
     return containsProviderAliasSyntaxAcrossBoundary(left, right);
   };
-  const hasSecretAcrossBoundary = (
-    left: string,
-    right: string,
-    leftFieldStarts: readonly number[],
-  ): boolean => {
-    detectorInvocationCount += 1;
-    return containsProviderSecretValueAcrossBoundary(
-      left,
-      right,
-      leftFieldStarts,
-      secretBoundaryWork,
-    );
-  };
   for (const text of texts) {
     const prefix = text.slice(0, 512);
-    const textHasSecret = hasSecret(text);
     const textHasAlias = hasAlias(text);
-    if (textHasSecret) directSecretCount += 1;
     if (textHasAlias) directAlias = true;
     if (carry.length > 0) {
-      if (!fragmentedSecret && hasSecretAcrossBoundary(carry, prefix, carryFieldStarts)) {
-        fragmentedSecret = true;
-      }
       if (!fragmentedAlias && hasAliasAcrossBoundary(carry, prefix)) {
         fragmentedAlias = true;
       }
     }
-    const combined = carry + text;
-    const retainedStart = Math.max(0, combined.length - 512);
-    carryFieldStarts = [...new Set([...carryFieldStarts, carry.length])]
-      .filter((start) => start >= retainedStart)
-      .map((start) => start - retainedStart);
-    carry = combined.slice(retainedStart);
+    carry = (carry + text).slice(-512);
   }
   return {
-    directSecretCount,
-    fragmentedSecret,
+    directSecretCount: secretScan.directSecretCount,
+    fragmentedSecretCount: secretScan.fragmentedSecretCount,
+    fragmentedSecret: secretScan.fragmentedSecretCount > 0,
     directAlias,
     fragmentedAlias,
     detectorInvocationCount,
-    secretBoundaryWorkUnitCount: secretBoundaryWork.units,
+    secretBoundaryWorkUnitCount: secretScan.workUnitCount,
   };
 }

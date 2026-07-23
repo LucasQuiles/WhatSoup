@@ -60,6 +60,19 @@ function aliasFrom(value: string): string {
   return alias;
 }
 
+const QUOTED_ASSIGNMENT_SPLITS = [
+  '"password"="beta"',
+  '"token"="beta"',
+].flatMap((assignment) => Array.from(
+  { length: assignment.length - 1 },
+  (_, index) => [
+    assignment,
+    index + 1,
+    assignment.slice(0, index + 1),
+    assignment.slice(index + 1),
+  ] as const,
+));
+
 describe('provider data boundary hardening', () => {
   it.each([
     ['early keyed', ['credential=alpha', 'ordinary']],
@@ -115,6 +128,93 @@ describe('provider data boundary hardening', () => {
       secretCount: 2,
     });
   });
+
+  it.each([
+    ['benign left plus one direct secret', ['ordinary', 'token=beta'], 1, 0],
+    ['two direct secrets', ['token=alpha', 'password=beta'], 2, 0],
+    [
+      'two distinct fragments',
+      ['pass', 'word=alpha', 'ordinary', 'to', 'ken=beta'],
+      0,
+      2,
+    ],
+    [
+      'one direct plus two distinct fragments',
+      ['credential=gamma', 'pass', 'word=alpha', 'ordinary', 'to', 'ken=beta'],
+      1,
+      2,
+    ],
+  ] as const)('reports exact canonical counts for %s', (
+    _label,
+    texts,
+    directSecretCount,
+    fragmentedSecretCount,
+  ) => {
+    const events: ProviderBoundaryEvent[] = [];
+    const scan = scanProviderTextSequence(texts);
+
+    expect(scan).toMatchObject({
+      directSecretCount,
+      fragmentedSecret: fragmentedSecretCount > 0,
+      fragmentedSecretCount,
+    });
+    expect(() => boundary(events).exposeTexts(texts, { surface: 'history' }))
+      .toThrowError(expect.objectContaining({ code: 'secret_detected' }));
+    expect(events.filter((event) => event.eventType === 'secret_block'))
+      .toEqual([expect.objectContaining({
+        secretCount: directSecretCount + fragmentedSecretCount,
+      })]);
+  });
+
+  it.each([
+    ['keyed Bearer value', ['token=Bearer alpha'], 1],
+    ['quoted keyed Bearer value', ['password="Bearer alpha"'], 1],
+    ['quoted keyed known-token value', [`password="ghp_${'a'.repeat(16)}"`], 1],
+    ['overlapping keyed value plus a distinct secret', [
+      'password="Bearer alpha"',
+      `ghp_${'b'.repeat(16)}`,
+    ], 2],
+  ] as const)('counts overlapping detector grammars once for %s', (
+    _label,
+    texts,
+    secretCount,
+  ) => {
+    const events: ProviderBoundaryEvent[] = [];
+    const scan = scanProviderTextSequence(texts);
+
+    expect(scan.directSecretCount + scan.fragmentedSecretCount).toBe(secretCount);
+    expect(() => boundary(events).exposeTexts(texts, { surface: 'history' }))
+      .toThrowError(expect.objectContaining({ code: 'secret_detected' }));
+    expect(events.filter((event) => event.eventType === 'secret_block'))
+      .toEqual([expect.objectContaining({ secretCount })]);
+  });
+
+  it.each(QUOTED_ASSIGNMENT_SPLITS)(
+    'detects %s split at %i with and without a word-ending prior field',
+    (assignment, _split, left, right) => {
+      expect(containsProviderSecretValue(assignment)).toBe(true);
+      expect(sanitizeProviderSecrets(assignment)).not.toBe(assignment);
+      for (const texts of [[left, right], ['ordinary', left, right]]) {
+        const events: ProviderBoundaryEvent[] = [];
+        const scan = scanProviderTextSequence(texts);
+        const totalSecretCount = scan.directSecretCount + scan.fragmentedSecretCount;
+
+        expect(totalSecretCount).toBe(1);
+        expect(scan.fragmentedSecret || scan.directSecretCount > 0).toBe(true);
+        expect(() => boundary(events).exposeTexts(texts, { surface: 'history' }))
+          .toThrowError(expect.objectContaining({ code: 'secret_detected' }));
+        expect(events.filter((event) => event.eventType === 'secret_block'))
+          .toEqual([expect.objectContaining({ secretCount: 1 })]);
+        expect(() => boundary().rehydrateToolInput('inspect', { metadata: texts }, [{
+          name: 'inspect',
+          inputSchema: {
+            type: 'object',
+            additionalProperties: true,
+          },
+        }])).toThrowError(expect.objectContaining({ code: 'secret_detected' }));
+      }
+    },
+  );
 
   it.each([
     ['embedded GitHub token prefix', 'ordinaryghp_', 'a'.repeat(16)],
@@ -316,10 +416,78 @@ describe('provider data boundary hardening', () => {
       const inspectedCharacters = fieldCount * value.length;
 
       expect(scan.secretBoundaryWorkUnitCount).toBeGreaterThan(0);
-      expect(scan.secretBoundaryWorkUnitCount).toBeLessThanOrEqual(inspectedCharacters * 24);
+      expect(scan.secretBoundaryWorkUnitCount)
+        .toBeLessThanOrEqual((inspectedCharacters + fieldCount) * 48);
       expect(scan.detectorInvocationCount).toBeLessThanOrEqual(fieldCount * 4);
     },
   );
+
+  it.each([
+    ['password', 'pass', 'word=beta'],
+    ['quoted password', '"pass', 'word"="beta"'],
+  ] as const)('preserves the 512-character carry across a 64 KiB flush for %s', (
+    _label,
+    left,
+    right,
+  ) => {
+    const filler = [
+      ...Array.from({ length: 127 }, () => 'x'.repeat(512)),
+      'x'.repeat(506),
+    ];
+    const texts = [...filler, left, right];
+    const scan = scanProviderTextSequence(texts);
+
+    const charactersBeforeRight = filler
+      .reduce((total, value) => total + value.length, 0) + left.length;
+    expect(charactersBeforeRight).toBe(65_530 + left.length);
+    expect(charactersBeforeRight + right.length).toBeGreaterThan(65_536);
+    expect(scan).toMatchObject({
+      directSecretCount: 0,
+      fragmentedSecretCount: 1,
+    });
+    expect(scan.detectorInvocationCount).toBeLessThanOrEqual(texts.length * 4);
+  });
+
+  it.each([
+    [100, 'xcredential=a'],
+    [500, 'xcredential=a'],
+    [1_000, 'ordinarycredential=a='],
+    [9_999, 'ordinarycredential=a='],
+  ] as const)(
+    'bounds source-linear work for %i short candidate-dense fields',
+    (fieldCount, value) => {
+      const texts = Array.from({ length: fieldCount }, () => value);
+      const scan = scanProviderTextSequence(texts);
+      const sourceCharacters = fieldCount * value.length;
+
+      expect(scan).toMatchObject({
+        directSecretCount: 0,
+        fragmentedSecret: false,
+        fragmentedSecretCount: 0,
+      });
+      expect(scan.secretBoundaryWorkUnitCount)
+        .toBeLessThanOrEqual((sourceCharacters + fieldCount) * 48);
+      expect(boundary().exposeTexts(texts, { surface: 'history' })).toEqual(texts);
+    },
+  );
+
+  it('passes an exact maximum-node short candidate-dense record through the broker', () => {
+    const metadata = Array.from({ length: MAX_TOOL_NODES - 2 }, () => 'xcredential=a');
+    const record = { metadata };
+    const raw = JSON.stringify(record);
+    const broker = boundary();
+    const tools: ProviderBoundaryMcpTool[] = [{
+      name: 'inspect',
+      inputSchema: {
+        type: 'object',
+        additionalProperties: true,
+      },
+    }];
+
+    expect(Buffer.byteLength(raw, 'utf8')).toBeLessThan(1024 * 1024);
+    expect(() => broker.inspectToolJson(raw)).not.toThrow();
+    expect(broker.rehydrateToolInput('inspect', record, tools)).toEqual(record);
+  });
 
   it.each([
     ['early two-field secret', ['cred', 'ential="quoted multiword value"'], 'secret_detected'],
