@@ -30,7 +30,10 @@ vi.mock('../../console/src/hooks/use-console-session', () => ({
 }));
 
 vi.mock('../../console/src/hooks/use-fleet', () => ({
-  useLines: () => ({ data: [] }),
+  // One fixture line: a zero-line fleet is genuinely first-run (T5 b-10
+  // redirects / → /welcome), which is correct behavior this suite is not
+  // about — the landmark law is pinned per-route on a normal fleet.
+  useLines: () => ({ data: [{ name: 'support', status: 'online', mode: 'chat', unread: 0 }] }),
 }));
 
 vi.mock('../../console/src/hooks/use-update-check', () => ({
