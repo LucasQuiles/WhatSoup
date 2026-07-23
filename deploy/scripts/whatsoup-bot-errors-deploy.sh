@@ -24,7 +24,7 @@ FILES=(
   "deploy/scripts/bot-errors-heartbeat-watchdog.py:fcafec6acde3c9ab1ed5fcc009e7f9020d2c0fd9ffbeee77ab19caaac84d45bc"
   "deploy/scripts/bot-errors-q-loop.py:d0924a67effb160fdeff2963212bd598a375dbd8a5c33d6ed5b3706a5f9125d5"
   "src/lib/bot-errors-outbox.ts:f8ade0f2b2b6531488d7acb4f23cead45f3c471dd5e82faedad5549eeb0f07fc"
-  "deploy/scripts/bot-errors-collector.py:f169290fdfe1543028a29b7c4d752e94a51564960ee9b052f3d217e74cc8ffd5"
+  "deploy/scripts/bot-errors-collector.py:7a7559fae5d3317ac52331832b5a058ceef99387ba599e2e533747297c398c94"
   "deploy/scripts/bot-errors-emit.py:bcac5e797a7bf421e8f98f9991b5fc7ff8fc1712f8b77ffbdb1dacc00bb38bad"
   "deploy/scripts/bot-errors-runner.py:f189971ec512b39901c1dbbe2c14de7b1c0fa663008f33fb05d3fc794347b030"
   "deploy/scripts/lib/__init__.py:438146338f7ceac8c0ecda8d7c6a7fb13fe88a0749bad1accf39ad92e4370da0"
