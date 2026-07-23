@@ -313,7 +313,7 @@ function scanFile(abs: string, rel: string): FileScan {
     // when the opening line itself was allow-suppressed.
     if (opened !== null) heredoc = opened;
   }
-  
+
 
   return { findings: out, analysed: true };
 }
