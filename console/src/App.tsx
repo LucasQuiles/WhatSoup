@@ -23,6 +23,7 @@ const Metrics = lazy(() => import('./pages/Metrics'))
 const Operator = lazy(() => import('./pages/Operator'))
 const Landing = lazy(() => import('./pages/Landing'))
 const SurfaceStub = lazy(() => import('./pages/SurfaceStub'))
+const DreamLab = lazy(() => import('./pages/DreamLab'))
 
 // Modal code splitting — loaded only when opened
 const UpdateModal = lazy(() => import('./components/UpdateModal'))
@@ -128,7 +129,7 @@ function UnlockedApp({ onLogout, showLogout }: { onLogout: () => void; showLogou
                     b-09 Settings). */}
                 <Route path="/agents" element={<ErrorBoundary><SurfaceStub surface="Agents" bead="b-04" /></ErrorBoundary>} />
                 <Route path="/skills" element={<ErrorBoundary><SurfaceStub surface="Skills Hub" bead="b-05" /></ErrorBoundary>} />
-                <Route path="/dream-lab" element={<ErrorBoundary><SurfaceStub surface="Dream Lab" bead="b-06" /></ErrorBoundary>} />
+                <Route path="/dream-lab" element={<ErrorBoundary><DreamLab /></ErrorBoundary>} />
                 <Route path="/deployments" element={<ErrorBoundary><SurfaceStub surface="Deployments" bead="b-08" /></ErrorBoundary>} />
                 <Route path="/settings" element={<ErrorBoundary><SurfaceStub surface="Settings" bead="b-09" /></ErrorBoundary>} />
                 <Route path="*" element={<Navigate to="/" replace />} />

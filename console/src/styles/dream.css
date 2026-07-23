@@ -1,0 +1,229 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   v3.5 Dream Lab surface (T5 b-06) — mockup dream-lab.html SSOT.
+   Consumes the --dream-* component geometry (tokens.component.css) and the
+   -v35 semantic color register only; raw mockup dimensions never land here.
+   Font SIZES come from the --text-* and --type-* scales (weight + leading
+   raw, the b-03 fleet idiom); 1px hairlines are var(--bw).
+   Layout note: the queue stacks at the mockup @media (max-width:980px) —
+   the fourth distinct SSOT breakpoint (chrome/fleet 1100px, agents 1000px,
+   dream 980px, skills 900px; pinned in tests/browser/viewport-matrix.test.tsx).
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Page root: owns its column; queue + review scroll internally ── */
+.dream-page {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ── Page row: surface-owned h1 (single-h1 law) + queued pill + history ── */
+.dream-pagerow {
+  display: flex;
+  align-items: center;
+  gap: var(--dream-pagerow-gap);
+  padding: var(--dream-pagerow-pad);
+  padding-bottom: 0;
+}
+.dream-pagerow h1 {
+  font: 700 var(--text-lg) / 1.35 var(--font-display);
+  letter-spacing: var(--tracking-chrome-title); /* product h1 voice — consumed by design */
+  color: var(--text-1-v35);
+  margin: 0;
+}
+.dream-qpill {
+  display: flex;
+  align-items: center;
+  gap: var(--dream-qpill-gap);
+  padding: var(--dream-qpill-pad);
+  border-radius: var(--chrome-pill-radius);
+  background: var(--surface-inset-v35);
+  border: var(--bw) solid var(--border-subtle-v35);
+  color: var(--text-2-v35);
+  font: 600 var(--text-data) / 1.3 var(--font-mono);
+}
+.dream-qpill__ic { color: var(--agent-dream); }
+.dream-pagerow__spacer { flex: 1; }
+
+/* ── Wrap: queue rail + review (stacks ≤980px per mockup) ── */
+.dream-wrap { flex: 1; display: grid; grid-template-columns: var(--dream-queue-w) 1fr; min-height: 0; }
+
+/* ── Queue rail ── */
+.dream-queue {
+  border-right: var(--bw) solid var(--border-hairline-v35);
+  overflow: auto;
+  padding: var(--dream-queue-pad);
+  display: flex;
+  flex-direction: column;
+  gap: var(--dream-queue-gap);
+}
+.dream-qhead {
+  font: 600 var(--text-sm) / 1.3 var(--font-mono);
+  letter-spacing: var(--tracking-dream-qhead);
+  color: var(--text-3-v35);
+  text-transform: uppercase;
+  padding: var(--dream-qhead-pad);
+}
+.dream-qhead--mt { margin-top: var(--dream-qhead-mt); }
+.dream-fstrip {
+  height: auto;
+  justify-content: flex-start;
+  display: flex;
+  align-items: center;
+  gap: var(--dream-fstrip-gap);
+  width: 100%;
+  padding: var(--dream-fstrip-pad);
+  border-radius: var(--dream-fstrip-radius);
+  border: var(--bw) solid var(--border-subtle-v35);
+  background: transparent;
+  color: var(--text-2-v35);
+  font: 500 var(--text-sm) / 1.3 var(--font-mono);
+  letter-spacing: normal;
+}
+.dream-fstrip:hover { border-color: var(--border-hairline-v35); color: var(--text-1-v35); background: transparent; box-shadow: none; }
+.dream-fstrip__caret { margin-left: auto; color: var(--text-3-v35); }
+.dream-fstrip:disabled { cursor: default; }
+
+/* dream card (mockup .dcard) */
+.dream-dcard {
+  height: auto;
+  justify-content: flex-start;
+  display: block;
+  font: inherit;
+  letter-spacing: normal;
+  background: var(--surface-raised-v35);
+  border: var(--bw) solid var(--border-hairline-v35);
+  border-radius: var(--dream-dcard-radius);
+  padding: var(--dream-dcard-pad);
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  color: inherit;
+  transition: transform var(--dur-fast) var(--ease-enter), box-shadow var(--dur-fast) var(--ease-enter), border-color var(--dur-fast) var(--ease-enter);
+}
+.dream-dcard:hover { transform: translateY(calc(-1 * var(--dream-dcard-hover-lift))); box-shadow: var(--shadow-lift-v35); }
+.dream-dcard--sel { border-color: var(--accent-v35); box-shadow: 0 0 0 1px var(--accent-v35); }
+.dream-dcard--sel:hover { transform: none; box-shadow: 0 0 0 1px var(--accent-v35); }
+.dream-dcard__top { display: flex; align-items: center; gap: var(--dream-dcard-gap); }
+.dream-dcard__nameblock { min-width: 0; }
+.dream-dcard__nm { font: 700 var(--text-body) / 1.3 var(--font-display); color: var(--text-1-v35); }
+.dream-dcard__what { color: var(--text-3-v35); font-size: var(--text-data); margin-top: var(--dream-dcard-what-mt); }
+.dream-dtag {
+  margin-left: auto;
+  font: 600 var(--text-sm) / 1.1 var(--font-mono);
+  letter-spacing: var(--tracking-dream-dtag);
+  padding: var(--dream-dtag-pad);
+  border-radius: var(--chrome-pill-radius);
+  text-transform: uppercase;
+  flex: none;
+  background: var(--surface-inset-v35);
+  border: var(--bw) solid var(--border-subtle-v35);
+  color: var(--text-2-v35);
+}
+.dream-dcard__why { display: block; color: var(--text-2-v35); font-size: var(--text-data); margin-top: var(--dream-dcard-why-mt); font-style: italic; }
+.dream-dcard__when { display: block; font: 400 var(--text-sm) / 1.3 var(--font-mono); color: var(--text-3-v35); margin-top: var(--dream-dcard-when-mt); }
+.dream-dcard__when .dream-inst { white-space: nowrap; }
+
+/* ── Avatar (12-agent-identity §1: hue+initials; §2 sm/lg slots) ── */
+.dream-av {
+  width: var(--dream-avatar-sm);
+  height: var(--dream-avatar-sm);
+  border-radius: var(--dream-avatar-sm-radius);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 700 var(--text-sm) / 1 var(--font-body);
+  color: var(--agent-avatar-ink);
+  flex: none;
+}
+.dream-av--lg {
+  width: var(--dream-avatar-lg);
+  height: var(--dream-avatar-lg);
+  border-radius: var(--dream-avatar-lg-radius);
+  font-size: var(--text-lg);
+}
+
+/* ── Recently decided (mockup .hist/.hrow) ── */
+.dream-hist { padding: var(--dream-hist-pad-y) 0; }
+.dream-hrow { display: flex; align-items: center; gap: var(--dream-hrow-gap); padding: var(--dream-hrow-pad-y) 0; border-bottom: var(--bw) solid var(--border-hairline-v35); font-size: var(--text-data); }
+.dream-hrow:last-child { border: none; }
+.dream-hst {
+  font: 700 var(--text-sm) / 1.1 var(--font-mono);
+  padding: var(--dream-hst-pad);
+  border-radius: var(--chrome-pill-radius);
+  text-transform: uppercase;
+  flex: none;
+}
+.dream-hst--approved { background: var(--status-ok-wash); color: var(--status-ok-fg); }
+.dream-hst--approved::before { content: "✓ "; }
+.dream-hst--rejected { background: var(--status-crit-wash); color: var(--status-crit-fg); }
+.dream-hst--rejected::before { content: "✕ "; }
+.dream-hrow p { color: var(--text-2-v35); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin: 0; }
+.dream-hrow .dream-hwhen { margin-left: auto; flex: none; padding: var(--dream-hwhen-pad); font: 400 var(--text-sm) / 1.3 var(--font-mono); color: var(--text-3-v35); background: var(--surface-inset-v35); border: var(--bw) solid var(--border-hairline-v35); border-radius: var(--chrome-pill-radius); }
+
+/* ── Review pane (internal scroll preserved) ── */
+.dream-review { overflow: auto; padding: var(--dream-review-pad); display: flex; flex-direction: column; gap: var(--dream-review-gap); min-width: 0; }
+.dream-rhead { display: flex; align-items: flex-start; gap: var(--dream-rhead-gap); }
+.dream-rhead__body { flex: 1; min-width: 0; }
+.dream-rhead h2 {
+  font: var(--type-title);
+  letter-spacing: var(--tracking-chrome-title);
+  color: var(--text-1-v35);
+  margin: 0;
+}
+.dream-rhead__meta { font: 400 var(--text-sm) / 1.45 var(--font-mono); color: var(--text-3-v35); margin-top: var(--dream-rhead-meta-mt); }
+
+/* rationale (mockup .rationale) */
+.dream-rationale {
+  display: flex;
+  gap: var(--dream-rationale-gap);
+  align-items: flex-start;
+  background: var(--surface-inset-v35);
+  border: var(--bw) solid var(--border-hairline-v35);
+  border-radius: var(--dream-rationale-radius);
+  padding: var(--dream-rationale-pad);
+}
+.dream-rationale__ic { color: var(--agent-dream); flex: none; }
+.dream-rationale p { color: var(--text-2-v35); font-size: var(--text-data); font-style: italic; max-width: var(--dream-rationale-maxw); margin: 0; }
+
+/* review panels */
+.dream-panel { background: var(--surface-raised-v35); border: var(--bw) solid var(--border-hairline-v35); border-radius: var(--dream-panel-radius); min-width: 0; }
+.dream-panel__h { display: flex; align-items: center; gap: var(--dream-panelhead-gap); padding: var(--dream-panelhead-pad); border-bottom: var(--bw) solid var(--border-hairline-v35); }
+.dream-panel__h h3 { font: 600 var(--text-data) / 1.45 var(--font-body); color: var(--text-1-v35); margin: 0; }
+.dream-panel__tag { font: 500 var(--text-sm) / 1.3 var(--font-mono); color: var(--text-3-v35); }
+.dream-panel__b { padding: var(--dream-panelbody-pad); }
+
+/* proposed diff (mockup .diff — capped 72ch, the bead acceptance item) */
+.dream-diff { font: 400 var(--text-data) / 1.7 var(--font-mono); max-width: var(--dream-diff-maxw); }
+.dream-diff__sec { color: var(--text-3-v35); font-size: var(--text-sm); letter-spacing: var(--tracking-dream-diff-sec); text-transform: uppercase; margin: var(--dream-diff-sec-m); display: block; }
+.dream-diff__sec:first-child { margin-top: 0; }
+.dream-diff__line { padding: var(--dream-diff-line-pad); border-radius: var(--dream-diff-line-radius); display: block; }
+.dream-diff__line--del { background: var(--status-crit-wash); color: var(--status-crit-fg); text-decoration: line-through; text-decoration-color: var(--status-crit-border); }
+.dream-diff__line--add { background: var(--status-ok-wash); color: var(--status-ok-fg); }
+.dream-diff__line--keep { color: var(--text-2-v35); }
+
+/* impact columns */
+.dream-impact { display: flex; gap: var(--dream-impact-gap); flex-wrap: wrap; }
+.dream-impact__col { flex: 1; min-width: var(--dream-impact-col-minw); }
+.dream-impact__k { font: 600 var(--text-sm) / 1.3 var(--font-mono); letter-spacing: var(--tracking-dream-impact-k); color: var(--text-3-v35); text-transform: uppercase; margin-bottom: var(--dream-impact-k-mb); }
+.dream-impact__v { font-size: var(--text-data); color: var(--text-2-v35); }
+.dream-impact__v b { color: var(--text-1-v35); }
+
+/* decision actions */
+.dream-actions { display: flex; gap: var(--dream-actions-gap); align-items: center; flex-wrap: wrap; }
+.dream-actions-note { color: var(--text-3-v35); font-size: var(--text-data); margin-top: var(--dream-actions-note-mt); }
+
+/* honest-empty states (never fabricated dreams) */
+.dream-empty { color: var(--text-3-v35); font: 400 var(--text-data) / 1.35 var(--font-body); padding: var(--dream-empty-pad-y) 0; }
+
+/* ── Mockup stacking breakpoint (SSOT: @media max-width:980px) ── */
+@media (max-width: 980px) {
+  .dream-wrap { grid-template-columns: 1fr; }
+  .dream-queue { border-right: none; border-bottom: var(--bw) solid var(--border-hairline-v35); }
+}
+
+/* ── Light presence: card separation per the locked token consumption ── */
+[data-theme="light"] .dream-dcard,
+[data-theme="light"] .dream-panel,
+[data-theme="light"] .dream-rationale { box-shadow: var(--shadow-rest-v35); }
