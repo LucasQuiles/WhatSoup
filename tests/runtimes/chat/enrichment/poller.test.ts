@@ -64,6 +64,10 @@ import { EnrichmentPoller } from '../../../../src/runtimes/chat/enrichment/polle
 import type { LLMProvider } from '../../../../src/runtimes/chat/providers/types.ts';
 import type { PineconeMemory } from '../../../../src/runtimes/chat/providers/pinecone.ts';
 import type { StoredMessage } from '../../../../src/core/messages.ts';
+// Real SQLite (not mocked) for the persistence checks below — proves the
+// enrichment_runs row actually lands with the right values, not just that
+// the writer was invoked with the right-looking arguments.
+import { Database } from '../../../../src/core/database.ts';
 import {
   getUnprocessedMessages,
   getUnprocessedCount,
@@ -289,6 +293,32 @@ describe('EnrichmentPoller', () => {
     const [sql] = db._prepareFn.mock.calls[0] as [string];
     expect(sql).not.toContain('error');
     expect(db._runFn.mock.calls[0]).toHaveLength(4);
+  });
+
+  it('persists a real enrichment_runs row with error IS NULL on a successful cycle (real SQLite)', async () => {
+    // The mock-based tests above prove the writer is *called* correctly;
+    // this proves the row actually *lands* — real SQLite, no db.raw stub.
+    const realDb = new Database(':memory:');
+    realDb.open();
+    try {
+      vi.mocked(getUnprocessedMessages).mockReturnValue([makeStoredMsg({ pk: 6 })]);
+      vi.mocked(extractFacts).mockResolvedValue([]);
+
+      const { poller } = makePoller(realDb as unknown as ReturnType<typeof makeMockDb>);
+      await triggerOneCycle(poller);
+
+      const rows = realDb.raw.prepare('SELECT * FROM enrichment_runs').all() as Array<{
+        error: string | null;
+        completed_at: string | null;
+        messages_processed: number;
+      }>;
+      expect(rows).toHaveLength(1);
+      expect(rows[0].error).toBeNull();
+      expect(rows[0].completed_at).not.toBeNull();
+      expect(rows[0].messages_processed).toBe(1);
+    } finally {
+      realDb.close();
+    }
   });
 
   it('marks all messages in a chat segment as processed when 0 facts extracted', async () => {
@@ -527,6 +557,35 @@ describe('EnrichmentPoller', () => {
     expect(runArgs).toContain(0); // messages_processed known at failure time
 
     expect(poller.lastRunAt).not.toBeNull();
+  });
+
+  it('persists a real enrichment_runs row with a non-null error when the fetch throws (real SQLite)', async () => {
+    // Same scenario as the mock-based test above, but against real SQLite —
+    // proves the failure row actually lands with the right column values,
+    // not just that the writer was invoked with the right-looking arguments.
+    const realDb = new Database(':memory:');
+    realDb.open();
+    try {
+      vi.mocked(getUnprocessedMessages).mockImplementation(() => {
+        throw new Error('DB connection lost');
+      });
+
+      const { poller } = makePoller(realDb as unknown as ReturnType<typeof makeMockDb>);
+      await triggerOneCycle(poller);
+
+      const rows = realDb.raw.prepare('SELECT * FROM enrichment_runs').all() as Array<{
+        error: string | null;
+        completed_at: string | null;
+        messages_processed: number;
+      }>;
+      expect(rows).toHaveLength(1);
+      expect(rows[0].error).toBe('DB connection lost');
+      expect(rows[0].completed_at).not.toBeNull();
+      expect(rows[0].messages_processed).toBe(0);
+      expect(poller.lastRunAt).not.toBeNull();
+    } finally {
+      realDb.close();
+    }
   });
 
   it('marks with error only after max retries (3), not before', async () => {
