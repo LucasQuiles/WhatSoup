@@ -106,6 +106,8 @@ export interface BinaryAuthStatusResult {
 export interface BinaryCommandProbeOptions {
   cwd?: string;
   timeoutMs?: number;
+  /** Called once spawn is proven absent or the child emits close. */
+  onProcessClosed?: () => void;
 }
 
 /** Grace period between the timeout kill (SIGTERM) and the SIGKILL escalation. */
@@ -152,6 +154,13 @@ export async function probeBinaryCommand(
     // cannot hit a TDZ (same hazard as probeFallbackBinary above).
     let killTimer: ReturnType<typeof setTimeout> | undefined;
     let killEscalationTimer: ReturnType<typeof setTimeout> | undefined;
+    let processClosedNotified = false;
+
+    const notifyProcessClosed = (): void => {
+      if (processClosedNotified) return;
+      processClosedNotified = true;
+      options.onProcessClosed?.();
+    };
 
     const combinedOutput = (): string => `${stdoutBuffer}\n${stderrBuffer}`.trim();
 
@@ -170,6 +179,7 @@ export async function probeBinaryCommand(
         windowsHide: true,
       });
     } catch {
+      notifyProcessClosed();
       settle({ status: 'failed', output: '' });
       return;
     }
@@ -197,12 +207,16 @@ export async function probeBinaryCommand(
     child.on('error', () => {
       clearTimeout(killTimer);
       clearTimeout(killEscalationTimer);
+      // A failed spawn has no process lifetime to protect. For errors from an
+      // already-spawned child, retain ownership until its close event.
+      if (child.pid === undefined) notifyProcessClosed();
       settle({ status: 'failed', output: combinedOutput() });
     });
 
     child.on('close', (code) => {
       clearTimeout(killTimer);
       clearTimeout(killEscalationTimer);
+      notifyProcessClosed();
       settle({ status: code === 0 ? 'ok' : 'failed', output: combinedOutput() });
     });
   });

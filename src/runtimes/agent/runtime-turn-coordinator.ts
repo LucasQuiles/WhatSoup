@@ -1232,7 +1232,11 @@ async finalizePerChatProcessorError(
       this.clearUndispatchedRuntimeTurnCancellation(context);
       return;
     }
-    await this.finalizeUndispatchedRuntimeTurnAndWait(context, { value: mapKey });
+    await this.finalizeUndispatchedRuntimeTurnAndWait(
+      context,
+      { value: mapKey },
+      { kind: 'admission_rejected', class: 'pre_dispatch_error' },
+    );
     return;
   }
   const queue = this.host.getQueueForChat(turn.chatJid, mapKey);
@@ -1274,7 +1278,11 @@ async finalizeSharedProcessorError(
     this.host.currentRuntimeTurnContext?.identity.logicalTurnId
       !== context.identity.logicalTurnId
   ) {
-    await this.finalizeUndispatchedRuntimeTurnAndWait(context);
+    await this.finalizeUndispatchedRuntimeTurnAndWait(
+      context,
+      undefined,
+      { kind: 'admission_rejected', class: 'pre_dispatch_error' },
+    );
     if (this.host.currentInboundSeq === context.identity.inboundSeq) {
       this.host.getQueueForChat(turn.chatJid)?.setInboundSeq(undefined);
       this.host.currentInboundSeq = undefined;
