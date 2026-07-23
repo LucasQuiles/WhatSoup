@@ -366,7 +366,10 @@ describe('PerChatMcpSocketManager', () => {
     );
     const state = manager as unknown as {
       resources: Map<string, { identity: { value: string } }>;
-      teardownBarriers: Map<string, { identity: { value: string } }>;
+      teardownBarriers: Map<string, {
+        identity: { value: string };
+        ready: Promise<void>;
+      }>;
     };
 
     expect(() => manager.rekey(sourceIdentity, targetIdentity, targetIdentity))

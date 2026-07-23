@@ -569,20 +569,6 @@ vi.mock('../../../src/runtimes/agent/provider-canary-proof.ts', async (importOri
   };
 });
 
-vi.mock('../../../src/runtimes/agent/per-chat-mcp-socket-manager.ts', () => ({
-  PerChatMcpSocketManager: class {
-    acquire() {
-      return {
-        socketPath: '/tmp/mock-per-chat-actor.sock',
-        ready: Promise.resolve(),
-      };
-    }
-    release() {}
-    releaseAfter() {}
-    rekey() {}
-  },
-}));
-
 vi.mock('../../../src/mcp/registry.ts', () => ({
   ToolRegistry: class {
     register = vi.fn();
