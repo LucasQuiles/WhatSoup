@@ -112,7 +112,7 @@ const SCOPE_MAP: Record<string, ScopeEntry> = {
 
   // ---- skip-diff-scoped: empty diff/index is legitimately nothing (not a whole-tree scan) ----
   'design-system-hygiene': { class: 'skip-diff-scoped', reason: 'scans STAGED files; empty index -> legitimately clean (exit 0), not vacuity' },
-  repo: { class: 'skip-diff-scoped', reason: 'default mode staged scans ADDED lines; empty index -> legitimately clean' },
+  repo: { class: 'skip-diff-scoped', reason: 'default mode staged scans ADDED lines; empty index -> legitimately clean. Its whole-tree release-hygiene mode is floored + covered by MODE_PROBES below' },
   'pre-push': { class: 'skip-diff-scoped', reason: 'consumes stdin ref updates; no push context -> "delete-only" no-op, not a tree scan' },
   'semantic-quality': { class: 'skip-diff-scoped', reason: 'evaluates a push CANDIDATE receipt; candidate-unavailable -> no-op, not a tree scan' },
 
@@ -136,7 +136,7 @@ const SCOPE_MAP: Record<string, ScopeEntry> = {
   'publication:all': { class: 'skip-alias', reason: 'alias -> guard:publication (all mode floored + tested this session)' },
   'publication:release': { class: 'skip-alias', reason: 'alias -> guard:publication (release mode floored + tested in publication-guard.test.ts)' },
   'publication:staged': { class: 'skip-alias', reason: 'alias -> guard:publication (staged is diff-scoped; empty index legitimately clean)' },
-  'repo:release-hygiene': { class: 'skip-alias', reason: 'alias -> guard:repo (release-hygiene mode)' },
+  'repo:release-hygiene': { class: 'skip-alias', reason: 'alias -> guard:repo --release-hygiene (whole-tree mode; floored this session, probed in MODE_PROBES)' },
   'repo:commit-msg': { class: 'skip-alias', reason: 'alias -> guard:repo (commit-msg mode; message-scoped)' },
   'repo:commit-authors': { class: 'skip-alias', reason: 'alias -> guard:repo (commit-range-scoped)' },
   'repo:staged': { class: 'skip-alias', reason: 'alias -> guard:repo (staged; empty index legitimately clean)' },
@@ -262,6 +262,30 @@ describe('fixed-artifact guards fail closed (never certify) an empty tree', () =
   it.each(probeNonzero)('$name exits non-zero on an empty tree', ({ command, key }) => {
     const { status, output } = probeGuardAgainstEmptyTree(command, SCOPE_MAP[key]!);
     expect(status, `guard:${key} exited 0 (certified an empty tree!); output:\n${output}`).not.toBe(0);
+  }, 120_000);
+});
+
+/**
+ * Multi-mode guards. The base-command probe above tests only a guard's DEFAULT mode, so a
+ * whole-tree mode reachable through a flag (via the `:release`/`:release-hygiene` aliases wired
+ * into verify:release) can hide a vacuity the base probe never exercises. `publication`'s
+ * default is `all` (already whole-tree, covered above); `repo`'s default is `staged`
+ * (diff-scoped), so its whole-tree `release-hygiene` mode needs its own probe. Both must refuse
+ * an empty tree — an independent classification pass found `repo --release-hygiene` silently
+ * certifying one before this floor landed.
+ */
+const MODE_PROBES = [
+  { label: 'repo --release-hygiene', script: 'scripts/repo-hygiene-guard.ts', args: ['--release-hygiene'] },
+  { label: 'publication --release', script: 'scripts/publication-guard.ts', args: ['--release'] },
+] as const;
+
+describe('multi-mode guards refuse an empty tree in their whole-tree modes', () => {
+  it.each(MODE_PROBES)('$label exits 2 INCONCLUSIVE on an empty tree', ({ script, args }) => {
+    const [cmd, argv] = argvFor('node-strip', join(repoRoot, script), [...args]);
+    const r = spawnSync(cmd, argv, { cwd: freshEmptyGitRepo(), encoding: 'utf8', timeout: 120_000 });
+    const output = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+    expect(r.status, `${script} ${args.join(' ')} on an empty tree; output:\n${output}`).toBe(2);
+    expect(output).toMatch(/INCONCLUSIVE/i);
   }, 120_000);
 });
 
