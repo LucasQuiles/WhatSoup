@@ -137,11 +137,121 @@ describe('resolveModelCatalogue — claude-cli', () => {
 });
 
 describe('resolveModelCatalogue — unadapted harness', () => {
+  // codex-cli/gemini-cli were the "unadapted" example before Task B wired them
+  // up below — a synthetic harness id keeps this case's intent (a genuinely
+  // unhandled provider still names itself in the reason) unambiguous now that
+  // both are real adapters.
   it('names the harness in a no-adapter reason', async () => {
+    const out = await resolveModelCatalogue('unknown-harness', 'unknown', { nowMs: T0 });
+    expect(out).toStrictEqual({
+      status: 'unavailable',
+      reason: { kind: 'no-adapter', harness: 'unknown-harness' },
+      asOfLabel: 'just now',
+    });
+  });
+});
+
+describe('resolveModelCatalogue — openai', () => {
+  it('returns ok with the openai source label on a fresh probe and caches it', async () => {
+    const openaiFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['gpt-x'] });
+    const out = await resolveModelCatalogue('openai', '', { nowMs: T0, openaiFn });
+    expect(out).toStrictEqual({
+      status: 'ok',
+      ids: ['gpt-x'],
+      sourceLabel: 'openai /v1/models',
+      asOfLabel: 'just now',
+    });
+    expect(openaiFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('openai adapter returns ids on success', async () => {
+    const l = await resolveModelCatalogue('openai', '', { nowMs: 1, openaiFn: async () => ({ status: 'ok', ids: ['gpt-x'] }) });
+    expect(l).toMatchObject({ status: 'ok', ids: ['gpt-x'] });
+  });
+
+  it('openai adapter fails open (no throw) on error', async () => {
+    const l = await resolveModelCatalogue('openai', '', { nowMs: 1, openaiFn: async () => { throw new Error('503'); } });
+    expect(l.status).toBe('unavailable'); // disclosed, not thrown
+  });
+
+  it('also resolves via the openai-api provider id (the live runtime.ts call-site string)', async () => {
+    const openaiFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['gpt-x'] });
+    const out = await resolveModelCatalogue('openai-api', '', { nowMs: T0, openaiFn });
+    expect(out.status).toBe('ok');
+  });
+
+  it('serves the cache within TTL without re-fetching', async () => {
+    const openaiFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['gpt-x'] });
+    await resolveModelCatalogue('openai', '', { nowMs: T0, openaiFn });
+    const out = await resolveModelCatalogue('openai', '', { nowMs: T0 + 30_000, openaiFn });
+    expect(out.status).toBe('ok');
+    expect(openaiFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('maps no-key to the no-key reason', async () => {
+    const openaiFn = vi.fn().mockResolvedValue({ status: 'no-key' });
+    const out = await resolveModelCatalogue('openai', '', { nowMs: T0, openaiFn });
+    expect(out).toStrictEqual({ status: 'unavailable', reason: { kind: 'no-key' }, asOfLabel: 'just now' });
+  });
+
+  it('maps a classified unauthorized failure to key-rejected', async () => {
+    const openaiFn = vi.fn().mockResolvedValue({ status: 'failed', category: 'unauthorized' });
+    const out = await resolveModelCatalogue('openai', '', { nowMs: T0, openaiFn });
+    expect(out).toStrictEqual({ status: 'unavailable', reason: { kind: 'key-rejected' }, asOfLabel: 'just now' });
+  });
+
+  it('serves a stale cache (with disclosed age) when a later re-probe throws', async () => {
+    const openaiFn = vi.fn()
+      .mockResolvedValueOnce({ status: 'ok', ids: ['gpt-x'] })
+      .mockRejectedValueOnce(new Error('network down'));
+    await resolveModelCatalogue('openai', '', { nowMs: T0, openaiFn });
+    const out = await resolveModelCatalogue('openai', '', { nowMs: T0 + 5 * 60_000, openaiFn });
+    expect(out).toStrictEqual({
+      status: 'ok',
+      ids: ['gpt-x'],
+      sourceLabel: 'openai /v1/models',
+      asOfLabel: '5m ago',
+    });
+  });
+
+  it('does NOT stale-serve on no-key even with a prior cache — a structural absence answers immediately', async () => {
+    const openaiFn = vi.fn()
+      .mockResolvedValueOnce({ status: 'ok', ids: ['gpt-x'] })
+      .mockResolvedValueOnce({ status: 'no-key' });
+    await resolveModelCatalogue('openai', '', { nowMs: T0, openaiFn });
+    const out = await resolveModelCatalogue('openai', '', { nowMs: T0 + 5 * 60_000, openaiFn });
+    expect(out).toStrictEqual({ status: 'unavailable', reason: { kind: 'no-key' }, asOfLabel: 'just now' });
+  });
+});
+
+describe('resolveModelCatalogue — codex-cli', () => {
+  // VERIFIED 2026-07-20 (live `codex --help` on this host): no `models`
+  // subcommand exists — `codex models` is parsed as a chat PROMPT, not a
+  // listing command. No call site injects a codex fn (there is no dep slot
+  // for one — see the seam comment on resolveCodex), so this no-adapter
+  // reason is the ONLY reachable production behavior, not one branch of a
+  // probe/cache path.
+  it('names codex-cli in a no-adapter reason (the only reachable production behavior)', async () => {
     const out = await resolveModelCatalogue('codex-cli', 'codex', { nowMs: T0 });
     expect(out).toStrictEqual({
       status: 'unavailable',
       reason: { kind: 'no-adapter', harness: 'codex-cli' },
+      asOfLabel: 'just now',
+    });
+  });
+});
+
+describe('resolveModelCatalogue — gemini-cli', () => {
+  // Per the reason-evidence comment on resolveGemini: official docs show model
+  // selection as an in-session `/model manage|set` command, not a standalone
+  // `gemini models` listing surface. No call site injects a gemini fn (there
+  // is no dep slot for one), so this no-adapter reason is the ONLY reachable
+  // production behavior, not one branch of a probe/cache path.
+  it('names gemini-cli in a no-adapter reason (the only reachable production behavior)', async () => {
+    const out = await resolveModelCatalogue('gemini-cli', 'gemini', { nowMs: T0 });
+    expect(out).toStrictEqual({
+      status: 'unavailable',
+      reason: { kind: 'no-adapter', harness: 'gemini-cli' },
       asOfLabel: 'just now',
     });
   });
