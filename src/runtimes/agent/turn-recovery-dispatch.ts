@@ -57,34 +57,31 @@ export function createTurnRecoverySupervisorForRuntime(deps: {
 }
 
 /**
- * Real implementation of `TurnRecoveryReplayDispatcher` (PRESTAGE-T4), given
- * an already-resolved live session for the job's chat (the caller checks
- * `chatSessions` first — that lookup needs AgentRuntime's private state, so
- * it stays in the thin runtime.ts wrapper). Reuses the exact per_chat
- * live-turn pipeline — `createRuntimeTurnForDispatch` -> `processPerChatTurn`
- * (-> `sendTurnPerChat` -> `beginRuntimeTurnEvidence` with `excludeJobId` ->
- * `createRuntimeTurnCompletion` -> `session.sendTurn` -> await
- * `completion.promise`) — not a second, parallel dispatch path.
- *
- * A clean resolution here does NOT itself mark the job complete:
- * `completeTurnRecoveryJob` (called by the supervisor after this returns
- * `delivered`) independently re-validates genuine echo/finalization proof
- * via its own SQL gate — so an imperfect `delivered` classification here
- * cannot falsely complete a job; it would throw there instead, caught and
- * counted as a processing error by the supervisor's existing handling.
- *
- * `blocked_unsafe_detected` is not produced by this implementation yet — no
- * reliable signal for "newly discovered unsafe" has been wired from the
- * dispatch outcome; every failure here classifies as `retryable_failure` for
- * now (bounded by the existing exhaustion ceiling).
+ * Real `TurnRecoveryReplayDispatcher` (PRESTAGE-T4): reuses the exact
+ * per_chat live-turn pipeline (createRuntimeTurnForDispatch ->
+ * processPerChatTurn -> sendTurnPerChat -> beginRuntimeTurnEvidence with
+ * excludeJobId -> createRuntimeTurnCompletion -> session.sendTurn -> await
+ * completion.promise), not a second, parallel dispatch path. `delivered`
+ * does NOT itself mark the job complete: completeTurnRecoveryJob (called by
+ * the supervisor next) independently re-validates echo/finalization proof,
+ * so an imperfect classification here cannot falsely complete a job.
+ * `blocked_unsafe_detected` is not produced yet; every failure here is
+ * `retryable_failure` (bounded by the existing exhaustion ceiling).
  */
-export async function dispatchTurnRecoveryReplayViaSession(
+export async function dispatchTurnRecoveryReplayForJob(
   coordinator: RuntimeTurnCoordinator,
-  session: SessionManager,
-  mapKey: string,
-  job: TurnRecoveryJobRow,
+  resolvePerChatMapKey: (deliveryJid: string) => string,
+  getSession: (mapKey: string) => SessionManager | undefined,
   requireSessionToolScopeKey: (session: SessionManager) => string,
+  job: TurnRecoveryJobRow,
 ): Promise<TurnRecoveryReplayDispatchResult> {
+  // supportedScopes/isDispatchable already filter these before claiming;
+  // re-checked here so this can never silently "deliver" otherwise.
+  if (job.scope !== 'per_chat') return { kind: 'retryable_failure' };
+  const mapKey = resolvePerChatMapKey(job.delivery_jid);
+  const session = getSession(mapKey);
+  if (!session) return { kind: 'retryable_failure' };
+
   const source: RuntimeTurnSourceSnapshot = {
     sourceMessageId: job.source_message_id,
     conversationKey: job.conversation_key,
@@ -134,4 +131,17 @@ export async function dispatchTurnRecoveryReplayViaSession(
     return { kind: 'retryable_failure' };
   }
   return { kind: 'delivered' };
+}
+
+/** Shutdown wrapper so runtime.ts's shutdown() stays a 2-line call site. */
+export async function shutdownTurnRecoverySupervisorSafely(
+  supervisor: TurnRecoverySupervisor,
+): Promise<unknown> {
+  try {
+    await supervisor.shutdown();
+    return null;
+  } catch (err) {
+    log.error({ err }, 'turn recovery supervisor scan in flight remained unresolved during shutdown');
+    return err;
+  }
 }

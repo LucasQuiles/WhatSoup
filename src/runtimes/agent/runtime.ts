@@ -10,10 +10,7 @@ import type {
 } from '../../core/durability.ts';
 import type { TurnRecoveryClaimFence, TurnRecoveryJobRow } from '../../core/turn-recovery-store.ts';
 import type { TurnRecoverySupervisor, TurnRecoveryReplayDispatchResult } from './turn-recovery-supervisor.ts';
-import {
-  createTurnRecoverySupervisorForRuntime,
-  dispatchTurnRecoveryReplayViaSession,
-} from './turn-recovery-dispatch.ts';
+import { createTurnRecoverySupervisorForRuntime, dispatchTurnRecoveryReplayForJob, shutdownTurnRecoverySupervisorSafely } from './turn-recovery-dispatch.ts';
 import { splitInputTokenUsage, type AgentEvent } from './stream-parser.ts';
 import {
   classifyProviderFailure,
@@ -2421,14 +2418,11 @@ export class AgentRuntime implements Runtime {
       () => this.durability,
       (result, retained) => this.runtimeTurnCoordinator.applyRecoveredRuntimeTurnFinalization(result, retained),
     );
-    // PRESTAGE-T4: started once durability is available (setDurability),
-    // stopped at shutdown. Wiring lives in turn-recovery-dispatch.ts.
+    // PRESTAGE-T4 (started in setDurability, stopped at shutdown; see turn-recovery-dispatch.ts):
     this.turnRecoverySupervisor = createTurnRecoverySupervisorForRuntime({
-      instanceName: this.instanceName,
-      getDurability: () => this.durability,
+      instanceName: this.instanceName, getDurability: () => this.durability,
       dispatchReplay: (job, fence) => this.dispatchTurnRecoveryReplay(job, fence),
-      recoveryManagerId: this.recoveryManagerId,
-      nextRecoveryGeneration: () => ++this.recoveryGeneration,
+      recoveryManagerId: this.recoveryManagerId, nextRecoveryGeneration: () => ++this.recoveryGeneration,
       hasSessionForChat: (deliveryJid) => this.chatSessions.has(this.resolvePerChatMapKey(deliveryJid)),
     });
     this.handoffDistill = new HandoffDistillCoordinator({
@@ -2793,9 +2787,7 @@ export class AgentRuntime implements Runtime {
     if (this.queue) this.queue.setDurability(engine);
     for (const q of this.outboundQueues.values()) q.setDurability(engine);
     for (const q of this.chatQueues.values()) q.setDurability(engine);
-    // PRESTAGE-T4: durability is required before the supervisor can scan;
-    // start() is idempotent against an already-started loop.
-    this.turnRecoverySupervisor.start();
+    this.turnRecoverySupervisor.start(); // PRESTAGE-T4; idempotent
   }
 
   /**
@@ -4974,11 +4966,7 @@ export class AgentRuntime implements Runtime {
     runtimeContext?: RuntimeTurnContext,
     scopeRef?: PerChatRuntimeScopeRef,
     systemTurnLease?: SystemTurnLeaseToken,
-    // PRESTAGE-T4: set only by the turn-recovery supervisor's own replay
-    // dispatch, so its admission check excludes its own still-`claimed` job
-    // (see beginRuntimeTurnEvidence's doc comment). Every other caller omits
-    // it, so their admission predicate is unchanged.
-    excludeJobId?: number,
+    excludeJobId?: number, // PRESTAGE-T4: set only by the recovery supervisor's own replay; see beginRuntimeTurnEvidence
   ): Promise<void> {
     mapKey = scopeRef?.value ?? mapKey;
     const dispatchAllowed = runtimeContext === undefined
@@ -5194,34 +5182,11 @@ export class AgentRuntime implements Runtime {
     return completion;
   }
 
-  /**
-   * Real implementation of `TurnRecoveryReplayDispatcher` (PRESTAGE-T4); body
-   * lives in turn-recovery-dispatch.ts (arch.file-size). Only the session
-   * lookup stays here — it needs private AgentRuntime state.
-   */
-  private async dispatchTurnRecoveryReplay(
-    job: TurnRecoveryJobRow,
-    _fence: TurnRecoveryClaimFence,
-  ): Promise<TurnRecoveryReplayDispatchResult> {
-    if (job.scope !== 'per_chat') {
-      // supportedScopes already filters this before claiming; never silently
-      // "deliver" an unsupported scope if it somehow reaches here anyway.
-      return { kind: 'retryable_failure' };
-    }
-    const mapKey = this.resolvePerChatMapKey(job.delivery_jid);
-    const session = this.chatSessions.get(mapKey);
-    if (!session) {
-      // isDispatchable already checked this before claiming; a session torn
-      // down in the narrow window since then is a genuine race, not the
-      // common "no session yet" case that isDispatchable exists to skip.
-      return { kind: 'retryable_failure' };
-    }
-    return dispatchTurnRecoveryReplayViaSession(
-      this.runtimeTurnCoordinator,
-      session,
-      mapKey,
-      job,
-      (s) => this.requireSessionToolScopeKey(s),
+  /** Real TurnRecoveryReplayDispatcher (PRESTAGE-T4); body in turn-recovery-dispatch.ts (arch.file-size). */
+  private async dispatchTurnRecoveryReplay(job: TurnRecoveryJobRow, _fence: TurnRecoveryClaimFence): Promise<TurnRecoveryReplayDispatchResult> {
+    return dispatchTurnRecoveryReplayForJob(
+      this.runtimeTurnCoordinator, (jid) => this.resolvePerChatMapKey(jid),
+      (mapKey) => this.chatSessions.get(mapKey), (s) => this.requireSessionToolScopeKey(s), job,
     );
   }
 
@@ -7664,12 +7629,8 @@ export class AgentRuntime implements Runtime {
       preserveRuntimeTurnState = true;
       log.error({ err }, 'runtime turn finalizations remained unresolved during shutdown');
     }
-    try {
-      await this.turnRecoverySupervisor.shutdown();
-    } catch (err) {
-      shutdownFailures.push(err);
-      log.error({ err }, 'turn recovery supervisor scan in flight remained unresolved during shutdown');
-    }
+    const trErr = await shutdownTurnRecoverySupervisorSafely(this.turnRecoverySupervisor);
+    if (trErr) shutdownFailures.push(trErr);
     try {
       await this.runtimeTurnCoordinator.awaitUndispatchedCrashFinalizations();
     } catch (err) {
