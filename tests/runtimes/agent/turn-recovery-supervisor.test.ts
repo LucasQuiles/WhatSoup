@@ -88,7 +88,7 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
    * still-ambiguous original send.
    */
   function crashOneSourceTurn(
-    options: { resolveOriginalDelivery?: boolean } = {},
+    options: { resolveOriginalDelivery?: boolean; suffix?: string } = {},
   ): {
     jobId: number;
     conversationKey: string;
@@ -97,15 +97,20 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
     deliveryOpId: number;
   } {
     const resolveOriginalDelivery = options.resolveOriginalDelivery ?? true;
+    // Suffix distinguishes independent crashed source turns seeded into the
+    // SAME scope (e.g. the "second unrelated job still blocks" excludeJobId
+    // assertion) — without it, a second call would re-journal the same
+    // wamid into the same conversation and collide with the first job.
+    const suffix = options.suffix ?? 'brick';
     const conversationKey = 'brick-lab-chat';
     const deliveryJid = 'brick-lab-chat:1@g.us';
     const inboundSeq = durability.journalInbound(
-      'wamid-brick-source',
+      `wamid-brick-source-${suffix}`,
       conversationKey,
       deliveryJid,
       'agent',
     );
-    const terminal = terminalResult(inboundSeq, 'brick');
+    const terminal = terminalResult(inboundSeq, suffix);
     const identity = { ...terminal.result.identity, inboundSeq, conversationKey, deliveryJid };
     const deliveryOpId = durability.createOutboundOp({
       conversationKey,
@@ -120,7 +125,7 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
       identity,
       deliveryEvidence: { kind: 'enqueued', opId: deliveryOpId },
     };
-    const envelope = replayEnvelope('brick', { sourceMessageId: 'wamid-brick-source' });
+    const envelope = replayEnvelope(suffix, { sourceMessageId: `wamid-brick-source-${suffix}` });
     const params = {
       ...toTurnFinalizationPersistence(result, terminal.owner),
       recoveryJob: toTurnRecoveryJobPersistence(result, terminal.owner, envelope),
@@ -150,14 +155,29 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
   }
 
   /**
-   * Mirrors the EXACT production admission gate — the durable-recovery half
-   * of `RuntimeTurnCoordinator.beginRuntimeTurnEvidence`
-   * (runtime-turn-coordinator.ts:368-381) — without constructing a full
-   * coordinator/host: same predicate, same throw. A new inbound is
-   * "rejected" iff this throws; "admitted" iff it does not.
+   * Calls the REAL `hasOutstandingTurnRecoveryForScope` — the actual store
+   * predicate `RuntimeTurnCoordinator.beginRuntimeTurnEvidence`
+   * (runtime-turn-coordinator.ts:368-393) gates admission on, against a real
+   * SQLite-backed `DurabilityEngine` — not a reimplementation. Only the
+   * throw-wrapping and the second (unrelated, in-memory) `runtimeTurnSupervisor
+   * .canAccept` check are elided, since constructing a full coordinator/host
+   * is out of scope here and that second check is orthogonal to durable
+   * recovery admission. `excludeJobId` threads straight through to the real
+   * SQL so a bug in the exclusion predicate itself would fail these tests,
+   * not just a bug in whether it's wired up.
    */
-  function attemptAdmission(scope: 'per_chat' | 'shared' | 'singleton', conversationKey: string): void {
-    if (durability.hasOutstandingTurnRecoveryForScope(scope, conversationKey)) {
+  function attemptAdmission(
+    scope: 'per_chat' | 'shared' | 'singleton',
+    conversationKey: string,
+    excludeJobId?: number,
+  ): void {
+    if (
+      durability.hasOutstandingTurnRecoveryForScope(
+        scope,
+        conversationKey,
+        excludeJobId !== undefined ? { excludeJobId } : undefined,
+      )
+    ) {
       throw new Error('Runtime turn scope is blocked by outstanding durable recovery');
     }
   }
@@ -259,6 +279,71 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
     expect(() => attemptAdmission('per_chat', conversationKey)).toThrow(
       'Runtime turn scope is blocked by outstanding durable recovery',
     );
+  });
+
+  describe('admission self-block — excludeJobId (PRESTAGE-T4)', () => {
+    /**
+     * Without `excludeJobId`, a supervisor replaying its own claimed job
+     * through the normal admission gate would find that SAME job still
+     * outstanding in-scope and throw — deadlocking against itself, since the
+     * job cannot reach a terminal state until the replay it is gating
+     * completes. These three assertions exercise the REAL
+     * `hasOutstandingTurnRecoveryForScope` SQL (via `attemptAdmission`, not a
+     * reimplementation) — a bug in the exclusion predicate's SQL itself
+     * would fail these, not just a bug in whether the parameter is threaded.
+     */
+
+    it('(1) a different inbound for the same scope is still rejected while the job is outstanding', () => {
+      const { conversationKey } = crashOneSourceTurn();
+      expect(() => attemptAdmission('per_chat', conversationKey)).toThrow(
+        'Runtime turn scope is blocked by outstanding durable recovery',
+      );
+    });
+
+    it('(2) the supervisor own replay is admitted via excludeJobId while its own job is still claimed', () => {
+      const { jobId, conversationKey } = crashOneSourceTurn();
+
+      // Claim the job as the supervisor would before dispatching replay —
+      // state moves pending -> claimed, still outstanding by the plain check.
+      const claim = durability.claimTurnRecoveryJob(
+        jobId,
+        { logicalTurnId: 'brick-source-turn', managerId: 'manager-source', generation: 3 },
+        { claimToken: 'claim-excludejobid-2', leaseSeconds: 120 },
+      );
+      expect(claim.applied).toBe(true);
+      expect(durability.getTurnRecoveryJob(jobId)?.state).toBe('claimed');
+
+      // Without exclusion: the job's own claim still blocks (proves the
+      // self-block condition is real, not hypothetical).
+      expect(() => attemptAdmission('per_chat', conversationKey)).toThrow(
+        'Runtime turn scope is blocked by outstanding durable recovery',
+      );
+
+      // With exclusion: the supervisor's OWN replay for this exact job is
+      // admitted — this is the fix. Real SQL, real excludeJobId bind.
+      expect(() => attemptAdmission('per_chat', conversationKey, jobId)).not.toThrow();
+    });
+
+    it('(3) a second, unrelated outstanding job in the same scope still blocks even with the first excluded', () => {
+      const first = crashOneSourceTurn({ suffix: 'one' });
+      // Second, independently crashed source turn in the SAME scope —
+      // proves excludeJobId is a scalpel (excludes exactly one row), not a
+      // scope-wide bypass that would silently unblock every other job too.
+      const second = crashOneSourceTurn({ suffix: 'two' });
+      expect(second.jobId).not.toBe(first.jobId);
+
+      // Excluding the first job must NOT admit — the second job (untouched,
+      // still pending) is still outstanding in the same scope.
+      expect(() => attemptAdmission('per_chat', first.conversationKey, first.jobId)).toThrow(
+        'Runtime turn scope is blocked by outstanding durable recovery',
+      );
+
+      // Sanity: excluding the SECOND job instead leaves the first blocking —
+      // confirms the exclusion targets the specific id, not "any one job".
+      expect(() => attemptAdmission('per_chat', second.conversationKey, second.jobId)).toThrow(
+        'Runtime turn scope is blocked by outstanding durable recovery',
+      );
+    });
   });
 
   it('does NOT claim or dispatch a due, replay-safe job whose ORIGINAL delivery is still ambiguous — the duplicate-send guard', async () => {

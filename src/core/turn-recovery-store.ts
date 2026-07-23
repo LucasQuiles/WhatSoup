@@ -881,14 +881,19 @@ export class TurnRecoveryStore {
         LEFT JOIN inbound_events i ON i.seq = j.source_inbound_seq
         LEFT JOIN outbound_ops o ON o.id = t.delivery_op_id
       `),
+      // job_id is carried through both arms (NULL in the second: a terminal
+      // record not yet promoted to a job row can never BE the excluded job)
+      // so the exclusion is one uniform outer-query predicate instead of two
+      // arm-specific ones — a job actively claimed by the caller's own
+      // supervisor replay must not block that replay's own admission check.
       hasOutstandingTurnRecoveryForScope: prepare(`
         SELECT 1 AS found
         FROM (
-          SELECT j.scope, j.conversation_key
+          SELECT j.scope, j.conversation_key, j.id AS job_id
           FROM turn_recovery_jobs j
           WHERE j.state IN ('pending', 'claimed')
           UNION ALL
-          SELECT t.scope, t.conversation_key
+          SELECT t.scope, t.conversation_key, j.id AS job_id
           FROM turn_terminal_records t
           LEFT JOIN turn_recovery_jobs j ON j.terminal_record_id = t.id
           WHERE t.inbound_disposition = 'transferred_to_recovery_owner'
@@ -896,6 +901,7 @@ export class TurnRecoveryStore {
         ) outstanding
         WHERE outstanding.scope = ?
           AND (outstanding.scope <> 'per_chat' OR outstanding.conversation_key = ?)
+          AND (? IS NULL OR outstanding.job_id IS NULL OR outstanding.job_id != ?)
         LIMIT 1
       `),
     };
@@ -1722,18 +1728,35 @@ export class TurnRecoveryStore {
     return row ? { outboundStatus: row.outbound_status } : undefined;
   }
 
+  /**
+   * `options.excludeJobId` lets a caller that already owns a specific
+   * recovery job (a supervisor replaying its own claimed job) ask "is this
+   * scope blocked by OTHER outstanding recovery work" without the job it is
+   * actively replaying counting as its own blocker — see PRESTAGE-T4's
+   * admission self-block finding: without this, a supervisor replay dispatch
+   * through the normal admission gate would find its own `claimed` job still
+   * outstanding in-scope and deadlock against itself, since the job cannot
+   * reach a terminal state until the replay it is gating completes.
+   */
   hasOutstandingTurnRecoveryForScope(
     scope: 'per_chat' | 'shared' | 'singleton',
     conversationKey: string,
+    options?: { excludeJobId?: number },
   ): boolean {
     validateBoundedRequired(
       conversationKey,
       'Recovery conversation key',
       TURN_RECOVERY_MAX_ID_BYTES,
     );
+    const excludeJobId = options?.excludeJobId;
+    if (excludeJobId !== undefined) {
+      validatePositiveSafeInteger(excludeJobId, 'Recovery job ID');
+    }
     return this.statements.hasOutstandingTurnRecoveryForScope.get(
       scope,
       conversationKey,
+      excludeJobId ?? null,
+      excludeJobId ?? null,
     ) !== undefined;
   }
 

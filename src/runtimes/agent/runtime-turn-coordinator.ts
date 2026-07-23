@@ -365,13 +365,27 @@ createRuntimeTurnForDispatch(args: {
   return context;
 }
 
-beginRuntimeTurnEvidence(queue: IOutboundQueue, context: RuntimeTurnContext): void {
+/**
+ * `excludeJobId` is set only by the turn-recovery supervisor's own replay
+ * dispatch (PRESTAGE-T4): that replay's admission check must not find its
+ * OWN still-`claimed` job and self-block — the job cannot reach a terminal
+ * state until this very replay completes, so without the exclusion every
+ * supervisor-driven replay would deadlock against itself on its first
+ * admission check. Every other caller (normal live turns) omits it, so
+ * their admission predicate is unchanged.
+ */
+beginRuntimeTurnEvidence(
+  queue: IOutboundQueue,
+  context: RuntimeTurnContext,
+  excludeJobId?: number,
+): void {
   const durability = this.host.durability;
   if (
     typeof durability?.hasOutstandingTurnRecoveryForScope === 'function'
     && durability.hasOutstandingTurnRecoveryForScope(
       context.identity.scope,
       context.identity.conversationKey,
+      excludeJobId !== undefined ? { excludeJobId } : undefined,
     )
   ) {
     throw new Error('Runtime turn scope is blocked by outstanding durable recovery');

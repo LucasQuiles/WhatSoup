@@ -1236,8 +1236,9 @@ export class DurabilityEngine {
   hasOutstandingTurnRecoveryForScope(
     scope: 'per_chat' | 'shared' | 'singleton',
     conversationKey: string,
+    options?: { excludeJobId?: number },
   ): boolean {
-    return this.turnRecovery.hasOutstandingTurnRecoveryForScope(scope, conversationKey);
+    return this.turnRecovery.hasOutstandingTurnRecoveryForScope(scope, conversationKey, options);
   }
 
   // ── Outbound ops ──
