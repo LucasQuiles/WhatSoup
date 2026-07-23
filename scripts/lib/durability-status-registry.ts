@@ -19,6 +19,18 @@
 // Completeness is TOTAL by design — the guard's check (1) fails closed on any
 // migrated table this file does not mention, which is what forces a future
 // author touching schema to register it here rather than ship silently.
+//
+// HONEST SCOPE, precisely (a gap this file used to overclaim past): "every
+// table" above means every table `migratedSchemaSnapshot()` returns, PLUS
+// every table discovered by the guard's static `CREATE TABLE` scan across
+// `src/**/*.ts` that is declared self-provisioned or excluded below
+// (`SELF_PROVISIONED`, `DISCOVERY_EXCLUSIONS`). Six real, live tables are
+// created OUTSIDE the migration registry by self-provisioning `ensureXSchema`
+// functions and are invisible to `migratedSchemaSnapshot()` — a completeness
+// claim scoped only to the snapshot would silently miss them. The discovery
+// scan (guard check 1b) is what closes that blind spot: any `CREATE TABLE`
+// text occurrence under `src/` that isn't in the snapshot, `SELF_PROVISIONED`,
+// or `DISCOVERY_EXCLUSIONS` fails the guard.
 
 /** How a status column's known vocabulary was established. */
 export type VocabularySource = 'sql-check' | 'ts-union' | 'literal';
@@ -72,6 +84,29 @@ export interface UnwiredTerminalEntry {
   reason: string;
   /** Non-empty: the tracking issue for the gap. */
   issue: string;
+}
+
+export interface SelfProvisionedEntry {
+  /** A real, live table created OUTSIDE the migration registry — invisible to `migratedSchemaSnapshot()`. */
+  table: string;
+  /** Repo-relative `src/` module whose `ensureXSchema`-style function self-provisions this table. */
+  module: string;
+  /** Non-empty: why this table lives outside the numbered migration registry. */
+  reason: string;
+  /**
+   * Required ONLY if this table's DDL text matches the anti-dodge
+   * `STATUS_LIKE_COLUMN_RE` (guard check 1b's extension, enforced): a
+   * truthful explanation of why the status-shaped column isn't a
+   * #1789-relevant status column. Optional otherwise.
+   */
+  justification?: string;
+}
+
+export interface DiscoveryExclusionEntry {
+  /** A `CREATE TABLE` name the discovery scan will find, that is NOT a real persisted table. */
+  table: string;
+  /** Non-empty: why a discovered CREATE TABLE for this name never yields a lasting table. */
+  reason: string;
 }
 
 /**
@@ -183,9 +218,14 @@ export const REGISTRY: DurabilityStatusEntry[] = [
     statusColumn: null,
     vocabulary: [],
     // Failure-by-construction: every row IS failure evidence (an undecryptable
-    // inbound message). There is no status enum to enforce — the terminal
-    // "value" is the INSERT itself, modelled honestly as a literal rather than
-    // invented status vocabulary.
+    // inbound message) — there is no status enum to enforce. terminalFailureValues
+    // is therefore not a real status value, it's literally the table name.
+    // HONESTY NOTE: this means the guard's check (3) — "the literal appears in
+    // the writer site" — only proves this module's TEXT mentions
+    // 'decryption_failures' (near-tautological: any module that inserts into
+    // a table necessarily contains that table's own name somewhere). It does
+    // NOT prove a failure row is actually written on decryption failure; the
+    // real behavioral proof for that lives in tests/core/decryption-failures.test.ts.
     vocabularySource: 'literal',
     terminalFailureValues: ['decryption_failures'],
     writerSites: ['src/core/database.ts'], // storeDecryptionFailure()
@@ -202,10 +242,16 @@ export const REGISTRY: DurabilityStatusEntry[] = [
     table: 'enrichment_runs',
     statusColumn: 'error',
     // Free text (the caught error's .message) — there is no fixed failure
-    // vocabulary to enumerate. The "terminal literal" checked is therefore the
-    // INSERT target's table name, which is what actually binds the guard's
-    // declaration-existence check to the correct writer module rather than to
-    // the word "error", which would match almost any file.
+    // vocabulary to enumerate. terminalFailureValues is therefore not a real
+    // status value, it's literally the table name (chosen over the near-vacuous
+    // word "error", which would match almost any file).
+    // HONESTY NOTE: this means the guard's check (3) only proves this module's
+    // TEXT references 'enrichment_runs' — a much weaker claim than "the failure
+    // write is proven to execute" (near-tautological: any module that inserts
+    // into a table necessarily contains that table's own name somewhere). The
+    // real behavioral proof that a failure row is written on cycle failure
+    // lives in the Task 1-2 SQLite persistence tests
+    // (tests/runtimes/chat/enrichment/poller.test.ts), not this declaration.
     vocabulary: [],
     vocabularySource: 'literal',
     terminalFailureValues: ['enrichment_runs'],
@@ -276,9 +322,13 @@ export const TRACKED_UNWIRED_TERMINAL: UnwiredTerminalEntry[] = [
 
 /**
  * Every remaining table in `migratedSchemaSnapshot()` (src/core/database.ts),
- * classified as NOT status-bearing durability. Completeness is total: this set
- * plus `KNOWN_STATUS_TABLES` plus `RESERVED_TABLES` must equal every migrated
- * table, with no overlaps — the guard's check (1) enforces both directions.
+ * classified as NOT status-bearing durability. Completeness over the MIGRATED
+ * SNAPSHOT is total: this set plus `KNOWN_STATUS_TABLES` plus
+ * `RESERVED_TABLES` must equal every migrated table, with no overlaps — the
+ * guard's check (1) enforces both directions. (Completeness over every table
+ * that EXISTS is a separate, wider claim covered by check 1b's discovery
+ * scan against `SELF_PROVISIONED` + `DISCOVERY_EXCLUSIONS` below — this set
+ * does not need to, and does not, mention those six self-provisioned tables.)
  */
 export const NON_STATUS_TABLES: Set<string> = new Set([
   'access_list',
@@ -336,8 +386,70 @@ export const NON_STATUS_JUSTIFICATIONS: Record<string, string> = {
   messages: "enrichment_error is a per-message denormalized cache of the last enrichment attempt's error text; the message row is content storage, not an operation-attempt whose own completion is asserted — the run-level terminal failure lives in enrichment_runs.error, a registered KNOWN_STATUS_TABLES entry.",
 };
 
+/**
+ * Real, live tables created OUTSIDE the numbered migration registry by their
+ * own self-managed `ensureXSchema(db)` function (`db.raw.exec('CREATE TABLE
+ * IF NOT EXISTS ...')` called lazily, not wired into `MIGRATIONS` in
+ * `src/core/database.ts`) — invisible to `migratedSchemaSnapshot()`, which
+ * only replays that migration registry. Verified directly against this
+ * worktree: each module below is read by the guard's discovery-scan
+ * anti-dodge extension (check 1b), which also confirms none of their DDL
+ * text matches the status-shaped-column regex today (so `justification` is
+ * unset on all six; it becomes required the day one does).
+ */
+export const SELF_PROVISIONED: SelfProvisionedEntry[] = [
+  {
+    table: 'agent_fallback_state',
+    module: 'src/runtimes/agent/fallback-state-db.ts',
+    reason: 'singleton usage-limit fallback-state row; self-managed schema (ensureFallbackStateSchema), not a numbered global migration.',
+  },
+  {
+    table: 'agent_handoff_artifacts',
+    module: 'src/runtimes/agent/handoff-artifact.ts',
+    reason: 'cross-harness handoff-artifact cache (distilled summary + seeded artifacts); self-managed schema (ensureHandoffArtifactSchema), an optimisation that never blocks a turn.',
+  },
+  {
+    table: 'chat_model_preference',
+    module: 'src/runtimes/agent/chat-preference-db.ts',
+    reason: 'per-sender model/provider preference store; self-managed schema (ensureChatPreferenceSchema), not a numbered global migration.',
+  },
+  {
+    table: 'command_surface_prefs',
+    module: 'src/runtimes/agent/command-surface-prefs-db.ts',
+    reason: 'per-sender command-surface preference store; self-managed schema (ensureCommandSurfacePrefsSchema), generalizes the chat-preference-db.ts convention.',
+  },
+  {
+    table: 'pending_poll_decisions',
+    module: 'src/fleet/routes/approvals.ts',
+    reason: 'offline durable fallback queue for poll decisions when the fleet proxy returns 502 (v1.1 design D2(b)); created lazily inline at the write site, not a numbered global migration.',
+  },
+  {
+    table: 'standby_notice',
+    module: 'src/runtimes/agent/standby-notice.ts',
+    reason: 'one-pending-notice-per-conversation stash for standby-provider handoff; self-managed schema (ensureStandbyNoticeSchema), not a numbered global migration.',
+  },
+];
+
+/**
+ * Table names the discovery scan (guard check 1b) WILL find via a
+ * `CREATE TABLE` text occurrence, that are NOT real persisted tables — so a
+ * hit needs an exclusion, not a `SELF_PROVISIONED` registration.
+ */
+export const DISCOVERY_EXCLUSIONS: DiscoveryExclusionEntry[] = [
+  {
+    table: 'outbound_sends_v26',
+    reason: "migration-26 transient create->copy->rename artifact (src/core/database.ts:521-575): outbound_sends_v26 is CREATEd, populated from the old outbound_sends via INSERT...SELECT, then the old table is DROPped and this one RENAMEd to outbound_sends — it never exists as a persisted table under its own name, so it never appears in migratedSchemaSnapshot() and needs no SELF_PROVISIONED entry.",
+  },
+];
+
 /** Derived: table names with a registered status-writer entry. */
 export const KNOWN_STATUS_TABLES: Set<string> = new Set(REGISTRY.map((entry) => entry.table));
 
 /** Derived: table names covered by the one declared reserved exception. */
 export const RESERVED_TABLES: Set<string> = new Set(TRACKED_RESERVED.map((entry) => entry.table));
+
+/** Derived: table names self-provisioned outside the migration registry. */
+export const SELF_PROVISIONED_TABLES: Set<string> = new Set(SELF_PROVISIONED.map((entry) => entry.table));
+
+/** Derived: table names excluded from the discovery scan (transient DDL artifacts). */
+export const DISCOVERY_EXCLUSION_TABLES: Set<string> = new Set(DISCOVERY_EXCLUSIONS.map((entry) => entry.table));

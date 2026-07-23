@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 
 import {
   scanDurabilityWriterInvariant,
@@ -27,16 +27,28 @@ import {
   REGISTRY,
   TRACKED_RESERVED,
   TRACKED_UNWIRED_TERMINAL,
+  SELF_PROVISIONED,
+  DISCOVERY_EXCLUSIONS,
 } from '../../scripts/lib/durability-status-registry.ts';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const guardPath = resolve(repoRoot, 'scripts/durability-writer-guard.ts');
 
-async function loadRealSnapshot(): Promise<SchemaSnapshot> {
-  const mod = (await import(pathToFileURL(resolve(repoRoot, 'src/core/database.ts')).href)) as {
-    migratedSchemaSnapshot: () => SchemaSnapshot;
-  };
-  return mod.migratedSchemaSnapshot();
+// Memoized: migratedSchemaSnapshot() replays all migrations against a fresh
+// in-memory DB (~25ms). 9 `it`s across this file need the real schema and
+// none of them mutate the returned Map (read-only consumers), so compute it
+// once and reuse the same Map instead of replaying 45 migrations 9 times.
+let realSnapshotPromise: Promise<SchemaSnapshot> | null = null;
+function loadRealSnapshot(): Promise<SchemaSnapshot> {
+  if (!realSnapshotPromise) {
+    realSnapshotPromise = (async () => {
+      const mod = (await import(pathToFileURL(resolve(repoRoot, 'src/core/database.ts')).href)) as {
+        migratedSchemaSnapshot: () => SchemaSnapshot;
+      };
+      return mod.migratedSchemaSnapshot();
+    })();
+  }
+  return realSnapshotPromise;
 }
 
 describe('durability-writer-guard — registry completeness (case a)', () => {
@@ -142,6 +154,16 @@ describe('durability-writer-guard — RED-GREEN teeth (case c)', () => {
       nonStatusTables: new Set(),
       reservedTables: new Set(['synthetic_reserved']),
       nonStatusJustifications: {},
+      // This test asserts the WHOLE findings array is empty, so the
+      // self-provisioned discovery check (1b) — which otherwise defaults to
+      // a REAL scan of this repo's actual src/ tree, regardless of the tiny
+      // synthetic snapshot above — must be suppressed here, or every real
+      // table the synthetic snapshot doesn't mention would spuriously report
+      // as "unregistered". selfProvisioned/discoveryExclusions are left at
+      // their real defaults deliberately: those still read the real (clean)
+      // module files, proving this override doesn't silently hide a genuine
+      // self-provisioned-entry problem, only the unrelated discovery noise.
+      discovered: new Map(),
     });
     expect(result.findings).toHaveLength(0);
   });
@@ -273,6 +295,140 @@ describe('durability-writer-guard — beads unwired-terminal declared exception'
   });
 });
 
+describe('durability-writer-guard — self-provisioned discovery (completeness blind-spot fix)', () => {
+  // Gap-analysis finding: six real, live tables (agent_fallback_state,
+  // agent_handoff_artifacts, chat_model_preference, command_surface_prefs,
+  // pending_poll_decisions, standby_notice) are created OUTSIDE the migration
+  // registry by self-managed ensureXSchema() functions and are invisible to
+  // migratedSchemaSnapshot() — while the registry/guard used to claim
+  // completeness over "every table". Check (1b) closes the blind spot with a
+  // static CREATE TABLE discovery scan across src/**/*.ts.
+
+  it('FAILS a synthetic discovered-but-unregistered table', () => {
+    const result = scanDurabilityWriterInvariant(new Map(), repoRoot, {
+      registry: [],
+      trackedReserved: [],
+      trackedUnwiredTerminal: [],
+      knownStatusTables: new Set(),
+      nonStatusTables: new Set(),
+      reservedTables: new Set(),
+      nonStatusJustifications: {},
+      selfProvisioned: [],
+      discoveryExclusions: [],
+      // Injected discovery result — proves the check independent of a real
+      // disk scan: this table is discovered (as if a real `CREATE TABLE`
+      // were found under src/) but is nowhere in the snapshot, SELF_PROVISIONED,
+      // or DISCOVERY_EXCLUSIONS.
+      discovered: new Map([['synthetic_discovered_unregistered', ['src/fake/module.ts']]]),
+    });
+    expect(
+      result.findings.filter(
+        (f) => f.table === 'synthetic_discovered_unregistered' && f.kind === 'unregistered-self-provisioned-table',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('FAILS a synthetic self-provisioned entry whose DDL has a status-shaped column and no justification', () => {
+    // Points a synthetic SELF_PROVISIONED entry at a REAL, existing module
+    // (src/core/durability.ts) under a table name that does NOT literally
+    // appear as `CREATE TABLE <name>` there, so DDL extraction falls back to
+    // scanning the whole file — which genuinely contains status-shaped text
+    // (e.g. ToolCallStatus), exercising the anti-dodge path without needing
+    // a throwaway fixture file on disk.
+    const result = scanDurabilityWriterInvariant(new Map(), repoRoot, {
+      registry: [],
+      trackedReserved: [],
+      trackedUnwiredTerminal: [],
+      knownStatusTables: new Set(),
+      nonStatusTables: new Set(),
+      reservedTables: new Set(),
+      nonStatusJustifications: {},
+      discovered: new Map(),
+      selfProvisioned: [
+        {
+          table: 'synthetic_self_provisioned_no_justification',
+          module: 'src/core/durability.ts',
+          reason: 'exercised only by this test',
+          // the defect: no justification, even though the module's text is status-shaped
+        },
+      ],
+      discoveryExclusions: [],
+    });
+    expect(
+      result.findings.filter(
+        (f) =>
+          f.table === 'synthetic_self_provisioned_no_justification' &&
+          f.kind === 'self-provisioned-anti-dodge-unjustified',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('control: a justified self-provisioned status-shaped column produces no anti-dodge finding', () => {
+    const result = scanDurabilityWriterInvariant(new Map(), repoRoot, {
+      registry: [],
+      trackedReserved: [],
+      trackedUnwiredTerminal: [],
+      knownStatusTables: new Set(),
+      nonStatusTables: new Set(),
+      reservedTables: new Set(),
+      nonStatusJustifications: {},
+      discovered: new Map(),
+      selfProvisioned: [
+        {
+          table: 'synthetic_self_provisioned_justified',
+          module: 'src/core/durability.ts',
+          reason: 'exercised only by this test',
+          justification: 'exercised only by this test — the status-shaped text is not a real column of this synthetic table',
+        },
+      ],
+      discoveryExclusions: [],
+    });
+    expect(
+      result.findings.filter((f) => f.table === 'synthetic_self_provisioned_justified'),
+    ).toHaveLength(0);
+  });
+
+  it('the real SELF_PROVISIONED registry (all 6 tables) passes clean against the real repo', async () => {
+    const snapshot = await loadRealSnapshot();
+    const result = scanDurabilityWriterInvariant(snapshot, repoRoot, { registry: [], trackedReserved: [], trackedUnwiredTerminal: [] });
+    const selfProvisionedFindings = result.findings.filter((f) =>
+      SELF_PROVISIONED.some((entry) => entry.table === f.table),
+    );
+    expect(selfProvisionedFindings).toHaveLength(0);
+  });
+
+  it('the real discovery scan against the real repo produces no unregistered-self-provisioned-table findings', async () => {
+    const snapshot = await loadRealSnapshot();
+    const result = scanDurabilityWriterInvariant(snapshot, repoRoot, { registry: [], trackedReserved: [], trackedUnwiredTerminal: [] });
+    expect(result.findings.filter((f) => f.kind === 'unregistered-self-provisioned-table')).toHaveLength(0);
+  });
+
+  it('SELF_PROVISIONED declares exactly the six known self-provisioned tables', () => {
+    const tables = SELF_PROVISIONED.map((e) => e.table).sort();
+    expect(tables).toEqual(
+      [
+        'agent_fallback_state',
+        'agent_handoff_artifacts',
+        'chat_model_preference',
+        'command_surface_prefs',
+        'pending_poll_decisions',
+        'standby_notice',
+      ].sort(),
+    );
+    for (const entry of SELF_PROVISIONED) {
+      expect(entry.table.trim().length, `${entry.table} needs a non-empty table`).toBeGreaterThan(0);
+      expect(entry.module.trim().length, `${entry.table} needs a non-empty module`).toBeGreaterThan(0);
+      expect(entry.reason.trim().length, `${entry.table} needs a non-empty reason`).toBeGreaterThan(0);
+    }
+  });
+
+  it('DISCOVERY_EXCLUSIONS declares exactly outbound_sends_v26 with a non-empty reason', () => {
+    expect(DISCOVERY_EXCLUSIONS).toHaveLength(1);
+    expect(DISCOVERY_EXCLUSIONS[0]?.table).toBe('outbound_sends_v26');
+    expect((DISCOVERY_EXCLUSIONS[0]?.reason ?? '').trim().length).toBeGreaterThan(0);
+  });
+});
+
 describe('durability-writer-guard — exit-code contract (evaluateDurabilityWriterInvariant)', () => {
   // Coordinator review finding: main() only wrapped the async loadSnapshot()
   // in try/catch; a throw inside the synchronous scan (e.g. a DatabaseSync
@@ -332,21 +488,26 @@ describe('durability-writer-guard — exit-code contract (evaluateDurabilityWrit
 });
 
 describe('durability-writer-guard — CLI end-to-end', () => {
-  it('exits 0 on this repo (real registry, real schema)', () => {
+  // Both assertions below need the guard's real CLI behavior on the real
+  // repo; spawning the subprocess is the expensive part, so spawn once in
+  // beforeAll and assert both expectations against the single result rather
+  // than launching the identical process twice.
+  let cli: { status: number | null; output: string };
+
+  beforeAll(() => {
     const r = spawnSync(
       process.execPath,
       ['--disable-warning=ExperimentalWarning', '--experimental-strip-types', guardPath],
       { cwd: repoRoot, encoding: 'utf8', timeout: 120_000 },
     );
-    expect(r.status, `guard exited ${r.status}; output:\n${r.stdout ?? ''}${r.stderr ?? ''}`).toBe(0);
+    cli = { status: r.status, output: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+  });
+
+  it('exits 0 on this repo (real registry, real schema)', () => {
+    expect(cli.status, `guard exited ${cli.status}; output:\n${cli.output}`).toBe(0);
   });
 
   it('reports how many tables it examined, so a pass is checkable', () => {
-    const r = spawnSync(
-      process.execPath,
-      ['--disable-warning=ExperimentalWarning', '--experimental-strip-types', guardPath],
-      { cwd: repoRoot, encoding: 'utf8', timeout: 120_000 },
-    );
-    expect(`${r.stdout ?? ''}${r.stderr ?? ''}`).toMatch(/\d+[^\n]{0,32}table/i);
+    expect(cli.output).toMatch(/\d+[^\n]{0,32}table/i);
   });
 });
