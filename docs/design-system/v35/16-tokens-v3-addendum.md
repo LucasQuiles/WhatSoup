@@ -48,7 +48,25 @@ non-avatar elements (except `agent-dream`, which is the agent-mode channel, not 
 Rule: a surface consumes exactly one namespace; cross-register consumption is a lint
 error (L4 broad enforcement).
 
-## 5. Acceptance gate
+## 5. Fleet surface geometry (`--fleet-*`, T5 b-03)
+
+Component-register geometry for the Fleet surface, all traced to `mockups/fleet.html`
+and `11-channel-glyphography.md` §1: `--fleet-pad-x`, `--fleet-kpi-pad`,
+`--fleet-panelhead-pad`, `--fleet-activity-w`, `--fleet-row-pad`, `--fleet-head-pad`,
+`--fleet-ev-pad`, `--fleet-chan-box`, `--fleet-avatar-box`, `--fleet-grant-box`,
+`--fleet-spark-h`, `--fleet-spark-w`, `--fleet-chan-tag-keyline`, `--tracking-kpi`,
+`--tracking-fleet-head`, `--tracking-badge`, plus the micro-geometry the mockup
+specifies off the 4px grid: `--fleet-kpi-lift`, `--fleet-kpi-d-mt`,
+`--fleet-panelhead-gap`, `--fleet-chan-tag-offset`, `--fleet-mode-gap`,
+`--fleet-mode-dot`, `--fleet-badge-gap`, `--fleet-badge-pad`, `--fleet-grant-gap`,
+`--fleet-spark-gap`, `--fleet-rowbtn-pad`, `--fleet-hb-gap`, `--fleet-hb-bar-gap`,
+`--fleet-lcell-maxw`, and three documented-deviation tokens (no mockup row —
+carried features): `--fleet-current-edge`, `--fleet-select-inset`,
+`--fleet-filterpop-pad`. Same pattern as the b-02 `--chrome-*` block: raw mockup
+dimensions land here once; `fleet.css` consumes `var()` only. Half-step tokens
+(`--sp-*h`, DD-9 retirement queue) are not consumed by the Fleet surface.
+
+## 6. Acceptance gate
 
 - [ ] No `channel-*` token carries a hue (computed check).
 - [ ] `agent-hue-*` used only on avatar fills + nowhere else (consumer audit).
