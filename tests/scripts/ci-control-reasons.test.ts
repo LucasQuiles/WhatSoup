@@ -241,4 +241,27 @@ describe('CP-F2e immutable taxonomy registry', () => {
       expect(definition.fixtures.unavailableEvidence, definition.code).not.toBe(`${definition.code}:unavailable-evidence`);
     }
   });
+
+  it('keeps missing evidence, failed preconditions, and failed attempts diagnostically distinct', () => {
+    const missing = reasonDefinition('ci.required-check.missing');
+    const precondition = reasonDefinition('ci.input.precondition-unproven');
+    const attempt = reasonDefinition('ci.execution.attempt-inconclusive');
+
+    expect(missing).not.toBeNull();
+    expect(precondition).not.toBeNull();
+    expect(attempt).not.toBeNull();
+    expect(new Set([
+      missing!.messageTemplate.summary,
+      precondition!.messageTemplate.summary,
+      attempt!.messageTemplate.summary,
+    ])).toHaveLength(3);
+    expect(missing!.messageTemplate.guidance.join(' ')).toMatch(/regenerate|required.*evidence/i);
+    expect(precondition!.messageTemplate.guidance.join(' ')).toMatch(/precondition|setup/i);
+    expect(attempt!.messageTemplate.summary).toMatch(/terminal.*attempt.*required assurance.*not complete/i);
+    expect(attempt!.messageTemplate.summary).not.toMatch(/did not produce.*terminal evidence/i);
+    expect(attempt!.messageTemplate.guidance.join(' ')).toMatch(/attempt|terminal|process/i);
+    expect(attempt!.messageTemplate.guidance.join(' ')).toMatch(/reaped|ended/i);
+    expect(attempt!.messageTemplate.guidance.join(' ')).toMatch(/failure condition|cause/i);
+    expect(attempt!.messageTemplate.guidance.join(' ')).not.toMatch(/terminate/i);
+  });
 });

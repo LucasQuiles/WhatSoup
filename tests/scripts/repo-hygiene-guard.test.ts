@@ -1139,6 +1139,21 @@ The migrated group was 1203631234567890@g.us.
         error: { code: 'repo-hygiene.exact-range.tool-mismatch' },
       });
 
+      const otherDigest = `sha256:${'0'.repeat(64)}`;
+      for (const field of ['toolDigest', 'policyDigest'] as const) {
+        const colludingPayload = { ...payload, [field]: otherDigest };
+        const colludingArtifact = artifactForPayload(colludingPayload);
+        const colludingExpected = expectedForArtifact(
+          colludingArtifact,
+          requireArtifactBindingFields(colludingPayload),
+          { baseOid, remoteOid: null, localOid },
+        );
+        expect(validateRepoHygieneExactRangeArtifact(colludingArtifact, colludingExpected)).toEqual({
+          ok: false,
+          error: { code: `repo-hygiene.exact-range.${field === 'toolDigest' ? 'tool' : 'policy'}-mismatch` },
+        });
+      }
+
       const unknown = { ...payload, unexpected: true };
       expect(validateRepoHygieneExactRangeArtifact(artifactForPayload(unknown), expected).ok).toBe(false);
 

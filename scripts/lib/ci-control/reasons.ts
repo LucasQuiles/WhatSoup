@@ -228,7 +228,10 @@ const REASONS = deepFreeze([
     code: 'ci.required-check.missing', outcome: 'inconclusive', guidanceKind: 'evidence-recovery', metadataState: 'complete',
     canonicalOwner: 'ci-policy-owner', applicableStages: ['pull-request', 'merge-group', 'default-branch', 'release', 'deployment'],
     requiredIdentityBindings: ['candidateOid', 'policyDigest', 'toolDigest', 'attemptDigest'],
-    messageTemplate: { summary: 'The required evidence did not prove the declared boundary.', guidance: ['Repair the named precondition.', 'Replay the focused check.'] },
+    messageTemplate: {
+      summary: 'A required control did not produce trusted evidence for this exact boundary.',
+      guidance: ['Regenerate the missing result for the exact revision.', 'Rerun the aggregate gate after the required evidence is terminal.'],
+    },
   }),
   defineReason({
     code: 'ci.required-check.warning-only',
@@ -242,13 +245,23 @@ const REASONS = deepFreeze([
     code: 'ci.input.precondition-unproven', outcome: 'inconclusive', guidanceKind: 'precondition-correction', metadataState: 'complete',
     canonicalOwner: 'ci-policy-owner', applicableStages: ALL_EXECUTION_STAGES,
     requiredIdentityBindings: ['candidateOid', 'policyDigest', 'toolDigest', 'attemptDigest'],
-    messageTemplate: { summary: 'The required evidence did not prove the declared boundary.', guidance: ['Repair the named precondition.', 'Replay the focused check.'] },
+    messageTemplate: {
+      summary: 'A required execution precondition was not proven.',
+      guidance: ['Repair the named precondition or setup without patching product behavior.', 'Replay the focused check with a new precondition receipt.'],
+    },
   }),
   defineReason({
     code: 'ci.execution.attempt-inconclusive', outcome: 'inconclusive', guidanceKind: 'evidence-recovery', metadataState: 'complete',
     canonicalOwner: 'ci-policy-owner', applicableStages: ALL_EXECUTION_STAGES,
     requiredIdentityBindings: ['candidateOid', 'policyDigest', 'toolDigest', 'attemptDigest'],
-    messageTemplate: { summary: 'The required evidence did not prove the declared boundary.', guidance: ['Repair the named precondition.', 'Replay the focused check.'] },
+    messageTemplate: {
+      summary: 'The terminal attempt proved that required assurance did not complete.',
+      guidance: [
+        'Preserve the failed attempt receipt and its proof that the owned process group was reaped.',
+        'Correct or clear the named failure condition before issuing a new attempt identity.',
+        'Regenerate terminal evidence for the exact revision.',
+      ],
+    },
   }),
   defineReason({ code: 'ci.execution.stale-receipt', outcome: 'inconclusive', guidanceKind: 'evidence-recovery', lifecycle: 'deprecated', supersededBy: 'evidence.receipt.attempt.stale' }),
   defineReason({ code: 'ci.execution.invalid-receipt', outcome: 'inconclusive', guidanceKind: 'evidence-recovery' }),

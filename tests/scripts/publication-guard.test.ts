@@ -916,6 +916,7 @@ describe('publication guard exact-range native receipt', () => {
       'publication-guard.ts',
       'git-input-core.ts',
       'git-input.ts',
+      'exact-range-provenance.ts',
       'guard-core.ts',
       'boundary-run/shared.ts',
       'boundary-run/schema.ts',
@@ -929,6 +930,7 @@ describe('publication guard exact-range native receipt', () => {
       ['publication-guard.ts', 'scripts/publication-guard.ts'],
       ['git-input-core.ts', 'scripts/lib/ci-control/git-input-core.ts'],
       ['git-input.ts', 'scripts/lib/ci-control/git-input.ts'],
+      ['exact-range-provenance.ts', 'scripts/lib/ci-control/exact-range-provenance.ts'],
       ['guard-core.ts', 'scripts/lib/guard-core.ts'],
       ['boundary-run/shared.ts', 'scripts/lib/verification/boundary-run/shared.ts'],
       ['boundary-run/schema.ts', 'scripts/lib/verification/boundary-run/schema.ts'],
@@ -1119,6 +1121,32 @@ describe('publication guard exact-range native receipt', () => {
       expectedPayloadSha256: built.artifact.binding.payloadSha256,
     });
     expect(result).toEqual({ ok: false, error: { code: 'publication.exact-range.receipt-invalid' } });
+  });
+
+  it('rejects colluding expected and receipt provenance against the current native owner', () => {
+    const { repo, baseOid } = makeExactRangeRepo();
+    const localOid = commitExactFile(repo, 'note.txt', 'provenance-safe\n', 'provenance fixture');
+    const built = createPublicationExactRangeArtifact(repo, { baseOid, remoteOid: null, localOid });
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    const otherDigest = `sha256:${'0'.repeat(64)}`;
+
+    for (const field of ['toolDigest', 'policyDigest'] as const) {
+      const rebound = reboundArtifact(built, (payload) => { payload[field] = otherDigest; });
+      const result = validatePublicationExactRangeArtifact(rebound.artifact, {
+        baseOid,
+        remoteOid: null,
+        localOid,
+        currentToolDigest: field === 'toolDigest' ? otherDigest : currentPublicationToolDigest(),
+        currentPolicyDigest: field === 'policyDigest' ? otherDigest : currentPublicationPolicyDigest(),
+        expectedPayloadByteLength: rebound.payloadByteLength,
+        expectedPayloadSha256: rebound.payloadSha256,
+      });
+      expect(result).toEqual({
+        ok: false,
+        error: { code: `publication.exact-range.${field === 'toolDigest' ? 'tool' : 'policy'}-mismatch` },
+      });
+    }
   });
 
   it('rejects semantic cause, scope, budget, and lineage mutations under a newly frozen binding', () => {

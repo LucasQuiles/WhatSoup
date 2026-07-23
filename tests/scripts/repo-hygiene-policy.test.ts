@@ -18,10 +18,15 @@ import {
   privateHostLabels as internalPrivateHostLabels,
 } from '../../scripts/lib/repo-hygiene-policy.ts';
 
-function framedToolBytes(guardBytes: Buffer, policyBytes: Buffer): Buffer {
+function framedToolBytes(
+  guardBytes: Buffer,
+  policyBytes: Buffer,
+  exactRangeProvenanceBytes: Buffer,
+): Buffer {
   const sources = [
     { id: 'scripts/repo-hygiene-guard.ts', bytes: guardBytes },
     { id: 'scripts/lib/repo-hygiene-policy.ts', bytes: policyBytes },
+    { id: 'scripts/lib/ci-control/exact-range-provenance.ts', bytes: exactRangeProvenanceBytes },
   ];
   const chunks: Buffer[] = [Buffer.from('repo-hygiene-tool-v1\0', 'utf8')];
   for (const source of sources) {
@@ -81,12 +86,19 @@ describe('repository hygiene policy extraction', () => {
   it('binds the guard and extracted policy bytes through deterministic framing', () => {
     const guardBytes = readFileSync(join(process.cwd(), 'scripts/repo-hygiene-guard.ts'));
     const policyBytes = readFileSync(join(process.cwd(), 'scripts/lib/repo-hygiene-policy.ts'));
-    const framed = framedToolBytes(guardBytes, policyBytes);
+    const exactRangeProvenanceBytes = readFileSync(
+      join(process.cwd(), 'scripts/lib/ci-control/exact-range-provenance.ts'),
+    );
+    const framed = framedToolBytes(guardBytes, policyBytes, exactRangeProvenanceBytes);
     expect(currentRepoHygieneToolDigest()).toBe(sha256(framed));
 
     const mutatedPolicy = Buffer.from(policyBytes);
     mutatedPolicy[mutatedPolicy.byteLength - 1] ^= 1;
-    expect(sha256(framedToolBytes(guardBytes, mutatedPolicy))).not.toBe(currentRepoHygieneToolDigest());
+    expect(sha256(framedToolBytes(guardBytes, mutatedPolicy, exactRangeProvenanceBytes))).not.toBe(currentRepoHygieneToolDigest());
+
+    const mutatedProvenance = Buffer.from(exactRangeProvenanceBytes);
+    mutatedProvenance[mutatedProvenance.byteLength - 1] ^= 1;
+    expect(sha256(framedToolBytes(guardBytes, policyBytes, mutatedProvenance))).not.toBe(currentRepoHygieneToolDigest());
   });
 
   it('keeps declared module references one-way, rejects loader roots, and preserves the facade', () => {

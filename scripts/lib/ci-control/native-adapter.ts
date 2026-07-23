@@ -15,8 +15,6 @@ import {
 import { assertBoundedEvidenceGraph } from './preconditions.ts';
 import type { NativeEvidenceV1 } from './result.ts';
 import {
-  currentRepoHygienePolicyDigest,
-  currentRepoHygieneToolDigest,
   validateRepoHygieneExactRangeArtifact,
   type RepoHygieneExactRangeArtifactV1,
   type RepoHygieneExactRangeExpectedV1,
@@ -139,22 +137,8 @@ export function adaptRepoHygieneExactRangeReportOnly(
   expected: RepoHygieneExactRangeExpectedV1,
 ): NativeExactRangeReportOnlyObservationV1<RepoHygieneExactRangeReceiptV1> {
   try {
-    let currentToolDigest: string | null = null;
-    let currentPolicyDigest: string | null = null;
-    try {
-      currentToolDigest = currentRepoHygieneToolDigest();
-      currentPolicyDigest = currentRepoHygienePolicyDigest();
-    } catch {
-      // The owner validator still receives the artifact exactly once below.
-    }
     const validation = validateRepoHygieneExactRangeArtifact(artifact, expected);
     if (!validation.ok) return unavailableExactRange(validation.error.code);
-    if (expected.currentToolDigest !== currentToolDigest) {
-      return unavailableExactRange('repo-hygiene.exact-range.tool-mismatch');
-    }
-    if (expected.currentPolicyDigest !== currentPolicyDigest) {
-      return unavailableExactRange('repo-hygiene.exact-range.policy-mismatch');
-    }
     return exactRangeObservation(
       validation.receipt,
       expected.expectedPayloadSha256,

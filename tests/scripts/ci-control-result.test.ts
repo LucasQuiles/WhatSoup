@@ -69,6 +69,7 @@ import {
 } from '../../scripts/publication-guard.ts';
 import { buildBoundaryReceipt } from '../../scripts/lib/semantic-quality/receipt.ts';
 import { canonicalizeBoundaryRun } from '../../scripts/lib/verification/boundary-run/shared.ts';
+import { reasonDefinition } from '../../scripts/lib/ci-control/reasons.ts';
 import { OID as BOUNDARY_OID, validManifest } from './verify-boundary-run/support.ts';
 
 const OID = '0123456789abcdef0123456789abcdef01234567';
@@ -634,10 +635,30 @@ function makeResult(overrides: Record<string, unknown> = {}) {
 }
 
 function makeDiagnostic(outcome: 'warn' | 'block' | 'inconclusive', overrides: Record<string, unknown> = {}) {
+  const code = String(overrides.code ?? (outcome === 'warn'
+    ? 'quality.semantic.finding.warning'
+    : outcome === 'block'
+      ? 'ci.native.semantic-quality'
+      : 'ci.required-check.missing'));
+  const reason = reasonDefinition(code);
+  const inconclusiveRecovery = {
+    'ci.required-check.missing': {
+      nextBestAction: 'Regenerate the missing result for the exact revision.',
+      retryCondition: 'the missing result is terminal and bound to the exact revision',
+    },
+    'ci.input.precondition-unproven': {
+      nextBestAction: 'Repair the named precondition without changing product source.',
+      retryCondition: 'the named precondition is proven by a new receipt',
+    },
+    'ci.execution.attempt-inconclusive': {
+      nextBestAction: 'Correct or clear the named attempt failure condition, issue a new attempt identity, and regenerate terminal evidence.',
+      retryCondition: 'the named attempt failure condition is corrected or cleared and a new attempt identity is issued for the exact revision',
+    },
+  }[code];
   const result = makeResult({
     outcome,
     exitCode: exitCodeForOutcome(outcome),
-    code: outcome === 'warn' ? 'quality.semantic.finding.warning' : outcome === 'block' ? 'ci.native.semantic-quality' : 'ci.required-check.missing',
+    code,
     owner: outcome === 'warn' || outcome === 'block' ? 'semantic-quality-decision-owner' : 'ci-policy-owner',
     severity: outcome === 'block' ? 'high' : 'medium',
     confidence: outcome === 'inconclusive' ? 'inconclusive' : 'proven',
@@ -645,17 +666,9 @@ function makeDiagnostic(outcome: 'warn' | 'block' | 'inconclusive', overrides: R
     findingId: 'finding-1',
     rootCauseId: 'finding-1',
     location: { kind: 'manifest-key', name: 'controls.semantic-quality' },
-    why: outcome === 'warn'
-      ? 'The native semantic-quality owner reported an actionable advisory finding.'
-      : outcome === 'block'
-        ? 'The native semantic-quality owner proved a blocking finding.'
-        : 'The required evidence did not prove the declared boundary.',
+    why: reason?.messageTemplate.summary ?? null,
     impact: 'The exact candidate cannot be authorized.',
-    guidance: outcome === 'warn'
-      ? ['Repair the native semantic finding before its governed expiry; do not treat the warning as passing mandatory evidence.']
-      : outcome === 'block'
-        ? ['Repair the canonical native semantic finding without changing its rule, severity, or exception owner.']
-        : ['Repair the named precondition.', 'Replay the focused check.'],
+    guidance: reason === null ? [] : [...reason.messageTemplate.guidance],
     nativeEvidence: outcome === 'warn' || outcome === 'block' ? SEMANTIC_NATIVE_EVIDENCE : null,
     warningGovernance: outcome === 'warn' ? WARNING_GOVERNANCE : null,
     validUntil: outcome === 'warn' ? WARNING_GOVERNANCE.expiresAt : VALID_UNTIL,
@@ -666,10 +679,14 @@ function makeDiagnostic(outcome: 'warn' | 'block' | 'inconclusive', overrides: R
     reproduce: { command: 'npm run verify:pr', preconditions: ['exact Git objects exist'] },
     verify: { commands: ['npm run test:focused', 'npm run test:affected'], expected: ['unsafe fixture fails', 'safe neighbor passes'] },
     retryable: true,
-    retryConditions: outcome === 'inconclusive' ? ['named precondition is repaired'] : ['the canonical source owner has changed'],
-    retryClass: outcome === 'inconclusive' ? 'after-evidence-regeneration' : 'after-source-change',
-    remediationClass: outcome === 'inconclusive' ? 'exact-revision-rerun' : 'source-patch',
-    nextBestAction: outcome === 'inconclusive' ? 'Repair the named precondition.' : 'Patch the canonical owner.',
+    retryConditions: outcome === 'inconclusive'
+      ? [inconclusiveRecovery?.retryCondition ?? 'the named evidence-recovery condition is satisfied']
+      : ['the canonical source owner has changed'],
+    retryClass: reason?.retryClass ?? (outcome === 'inconclusive' ? 'after-evidence-regeneration' : 'after-source-change'),
+    remediationClass: reason?.remediationClass ?? (outcome === 'inconclusive' ? 'exact-revision-rerun' : 'source-patch'),
+    nextBestAction: outcome === 'inconclusive'
+      ? inconclusiveRecovery?.nextBestAction ?? 'Regenerate evidence for the exact revision.'
+      : 'Patch the canonical owner.',
     exception: { eligible: false, approvalRole: null },
     relatedFindings: ['dependent-fixture'],
     relatedFindingIds: ['dependent-fixture'],
@@ -1025,6 +1042,48 @@ describe('CP-F2 parsing, bounds, canonical bytes, and safe feedback', () => {
     expect(() => renderControlResult(result as never, { ...publicOutputOptions(), expectedScannerPolicyReceipt: driftedReceipt })).toThrow(/scanner|public output|policy/i);
   });
 
+  it('renders root-cause-specific recovery for missing evidence, setup failure, and failed attempts', () => {
+    const failedPreconditions = makePreconditions({
+      outcome: 'inconclusive',
+      fixture: { created: false, digest: null },
+    });
+    const cases = [
+      {
+        code: 'ci.required-check.missing',
+        nextBestAction: 'Regenerate the missing result for the exact revision.',
+        retryCondition: 'the missing result is terminal and bound to the exact revision',
+      },
+      {
+        code: 'ci.input.precondition-unproven',
+        nextBestAction: 'Repair the named precondition without changing product source.',
+        retryCondition: 'the named precondition is proven by a new receipt',
+        preconditionReceipt: failedPreconditions,
+      },
+      {
+        code: 'ci.execution.attempt-inconclusive',
+        nextBestAction: 'Correct or clear the named attempt failure condition, issue a new attempt identity, and regenerate terminal evidence.',
+        retryCondition: 'the named attempt failure condition is corrected or cleared and a new attempt identity is issued for the exact revision',
+      },
+    ] as const;
+
+    for (const expected of cases) {
+      const result = makeDiagnostic('inconclusive', {
+        code: expected.code,
+        ...('preconditionReceipt' in expected ? { preconditionReceipt: expected.preconditionReceipt } : {}),
+      });
+      expect(result.nextBestAction).toBe(expected.nextBestAction);
+      expect(result.retryConditions).toEqual([expected.retryCondition]);
+      const rendered = renderControlResult(result as never, {
+        ...noNativePublicOutputOptions(),
+        ...('preconditionReceipt' in expected
+          ? { expectedPreconditions: expectedPreconditions(expected.preconditionReceipt) }
+          : {}),
+      });
+      expect(rendered).toContain(expected.nextBestAction);
+      expect(rendered).toContain(expected.retryCondition);
+    }
+  });
+
   it('requires the stable fingerprint derived from safe causal fields', () => {
     const result = makeDiagnostic('block');
     expect(result.fingerprint).toMatch(/^fp:v1:[0-9a-f]{64}$/);
@@ -1055,6 +1114,10 @@ describe('CP-F2 precondition and terminal evidence', () => {
     const receipt = makePreconditions();
     expect(validatePreconditionReceipt(receipt, { now: NOW, expected: expectedPreconditions() })).toEqual(receipt);
     expect(preconditionDigest(receipt as never, { now: NOW, expected: expectedPreconditions(receipt) })).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(() => validateControlResult(
+      makeDiagnostic('inconclusive', { code: 'ci.input.precondition-unproven' }),
+      noNativeValidationOptions(),
+    )).toThrow(/precondition.*pass|proven.*precondition/i);
     expect(() => validatePreconditionReceipt(makePreconditions({ runtime: { name: 'node', version: 'unsupported', digest: DIGEST } }), { now: NOW, expected: expectedPreconditions() })).toThrow(/trusted|runtime|precondition/i);
     for (const mutation of [
       { runtime: { name: 'node', version: 'unsupported', digest: DIGEST }, outcome: 'inconclusive' },
@@ -1503,7 +1566,7 @@ describe('CP-F2 exact-set aggregation and thin native adapters', () => {
           fixture.publicationBlock,
           { ...publicationExpected, currentPolicyDigest: OTHER_DIGEST },
         ),
-        status: 'publication.exact-range.receipt-invalid',
+        status: 'publication.exact-range.policy-mismatch',
       },
     ];
     for (const { observation, status } of cases) {
@@ -1549,7 +1612,10 @@ describe('CP-F2 exact-set aggregation and thin native adapters', () => {
       currentToolDigest: OTHER_DIGEST,
       currentPolicyDigest: OTHER_DIGEST,
     };
-    expect(validateRepoHygieneExactRangeArtifact(rebound, colludingExpected).ok).toBe(true);
+    expect(validateRepoHygieneExactRangeArtifact(rebound, colludingExpected)).toEqual({
+      ok: false,
+      error: { code: 'repo-hygiene.exact-range.tool-mismatch' },
+    });
     expect(adaptRepoHygieneExactRangeReportOnly(rebound, colludingExpected)).toEqual({
       authorization: 'report-only',
       outcome: 'inconclusive',

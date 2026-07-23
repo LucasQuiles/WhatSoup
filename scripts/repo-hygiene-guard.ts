@@ -28,6 +28,7 @@ import {
 } from './lib/ci-control/git-input.ts';
 import { canonicalizeBoundaryRun } from './lib/verification/boundary-run/shared.ts';
 import { parseBoundaryJsonBytes } from './lib/verification/boundary-run/schema.ts';
+import { validateExactRangeProvenance } from './lib/ci-control/exact-range-provenance.ts';
 import {
   addedLinePatterns,
   allowedEnvVarNameToken,
@@ -736,6 +737,9 @@ const GUARD_CORE_MODULE_PATH = fileURLToPath(new URL('./lib/guard-core.ts', impo
 const REPO_HYGIENE_POLICY_MODULE_PATH = fileURLToPath(
   new URL('./lib/repo-hygiene-policy.ts', import.meta.url),
 );
+const EXACT_RANGE_PROVENANCE_MODULE_PATH = fileURLToPath(
+  new URL('./lib/ci-control/exact-range-provenance.ts', import.meta.url),
+);
 const REPO_HYGIENE_POLICY_PROJECTION_COVERAGE = Object.freeze([
   'base-line-sets',
   'child-process-shell-true',
@@ -936,6 +940,7 @@ function readToolBytes(): Buffer {
   const sources = [
     { id: 'scripts/repo-hygiene-guard.ts', bytes: readFileSync(MODULE_PATH) },
     { id: 'scripts/lib/repo-hygiene-policy.ts', bytes: readFileSync(REPO_HYGIENE_POLICY_MODULE_PATH) },
+    { id: 'scripts/lib/ci-control/exact-range-provenance.ts', bytes: readFileSync(EXACT_RANGE_PROVENANCE_MODULE_PATH) },
   ];
   const chunks: Buffer[] = [Buffer.from('repo-hygiene-tool-v1\0', 'utf8')];
   for (const source of sources) {
@@ -1823,14 +1828,18 @@ export function validateRepoHygieneExactRangeArtifact(
         'schemaVersion', 'detectorId', 'payloadByteLength', 'payloadSha256',
       ]);
     const bytes = artifactRecord?.payloadBytes;
+    const provenance = expectedRecord === null
+      ? 'receipt-invalid'
+      : validateExactRangeProvenance(
+        expectedRecord.currentToolDigest,
+        expectedRecord.currentPolicyDigest,
+        currentRepoHygieneToolDigest(),
+        currentRepoHygienePolicyDigest(),
+      );
     if (
       artifactRecord === null
       || expectedRecord === null
       || expectedLineage === null
-      || typeof expectedRecord.currentToolDigest !== 'string'
-      || !SHA256.test(expectedRecord.currentToolDigest)
-      || typeof expectedRecord.currentPolicyDigest !== 'string'
-      || !SHA256.test(expectedRecord.currentPolicyDigest)
       || !safeInteger(expectedRecord.expectedPayloadByteLength, 4 * 1024 * 1024)
       || typeof expectedRecord.expectedPayloadSha256 !== 'string'
       || !SHA256.test(expectedRecord.expectedPayloadSha256)
@@ -1841,6 +1850,9 @@ export function validateRepoHygieneExactRangeArtifact(
       || typeof binding.payloadSha256 !== 'string'
       || !SHA256.test(binding.payloadSha256)
     ) return exactRangeFailure('repo-hygiene.exact-range.receipt-invalid');
+    if (provenance !== 'valid') {
+      return exactRangeFailure(`repo-hygiene.exact-range.${provenance}`);
+    }
     if (
       binding.payloadByteLength !== expectedRecord.expectedPayloadByteLength
       || binding.payloadSha256 !== expectedRecord.expectedPayloadSha256

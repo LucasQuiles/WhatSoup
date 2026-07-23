@@ -33,6 +33,7 @@ import {
 } from './lib/ci-control/git-input.ts';
 import { canonicalizeBoundaryRun } from './lib/verification/boundary-run/shared.ts';
 import { parseBoundaryJsonBytes } from './lib/verification/boundary-run/schema.ts';
+import { validateExactRangeProvenance } from './lib/ci-control/exact-range-provenance.ts';
 
 export { isTextCandidate, normalizeRepoPath } from './lib/guard-core.ts';
 
@@ -648,6 +649,7 @@ const PUBLICATION_TOOL_PATHS = Object.freeze([
   { id: 'publication-guard.ts', path: PUBLICATION_MODULE_PATH },
   { id: 'git-input-core.ts', path: fileURLToPath(new URL('./lib/ci-control/git-input-core.ts', import.meta.url)) },
   { id: 'git-input.ts', path: fileURLToPath(new URL('./lib/ci-control/git-input.ts', import.meta.url)) },
+  { id: 'exact-range-provenance.ts', path: fileURLToPath(new URL('./lib/ci-control/exact-range-provenance.ts', import.meta.url)) },
   { id: 'guard-core.ts', path: fileURLToPath(new URL('./lib/guard-core.ts', import.meta.url)) },
   { id: 'boundary-run/shared.ts', path: fileURLToPath(new URL('./lib/verification/boundary-run/shared.ts', import.meta.url)) },
   { id: 'boundary-run/schema.ts', path: fileURLToPath(new URL('./lib/verification/boundary-run/schema.ts', import.meta.url)) },
@@ -1743,16 +1745,18 @@ export function validatePublicationExactRangeArtifact(
       'schemaVersion', 'detectorId', 'payloadByteLength', 'payloadSha256',
     ]);
     const bytes = artifactRecord?.payloadBytes;
+    const provenance = expectedRecord === null
+      ? 'receipt-invalid'
+      : validateExactRangeProvenance(
+        expectedRecord.currentToolDigest,
+        expectedRecord.currentPolicyDigest,
+        currentPublicationToolDigest(),
+        currentPublicationPolicyDigest(),
+      );
     if (
       artifactRecord === null
       || expectedRecord === null
       || expectedLineage === null
-      || typeof expectedRecord.currentToolDigest !== 'string'
-      || !SHA256.test(expectedRecord.currentToolDigest)
-      || expectedRecord.currentToolDigest !== currentPublicationToolDigest()
-      || typeof expectedRecord.currentPolicyDigest !== 'string'
-      || !SHA256.test(expectedRecord.currentPolicyDigest)
-      || expectedRecord.currentPolicyDigest !== currentPublicationPolicyDigest()
       || !publicationSafeInteger(expectedRecord.expectedPayloadByteLength, 4 * 1024 * 1024)
       || typeof expectedRecord.expectedPayloadSha256 !== 'string'
       || !SHA256.test(expectedRecord.expectedPayloadSha256)
@@ -1763,6 +1767,9 @@ export function validatePublicationExactRangeArtifact(
       || typeof binding.payloadSha256 !== 'string'
       || !SHA256.test(binding.payloadSha256)
     ) return publicationExactRangeFailure('publication.exact-range.receipt-invalid');
+    if (provenance !== 'valid') {
+      return publicationExactRangeFailure(`publication.exact-range.${provenance}`);
+    }
     if (
       binding.payloadByteLength !== expectedRecord.expectedPayloadByteLength
       || binding.payloadSha256 !== expectedRecord.expectedPayloadSha256

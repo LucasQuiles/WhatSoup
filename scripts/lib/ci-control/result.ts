@@ -691,6 +691,7 @@ function validateControlResultInternal(value: unknown, options: ControlValidatio
   const platformMismatch = preconditions.host.os !== platform.os || preconditions.host.architecture !== platform.architecture || `${preconditions.runtime.name}@${preconditions.runtime.version}` !== platform.runtime || preconditions.host.digest !== platform.observedCapabilitiesDigest;
   if ((revisionMismatch || platformMismatch) && !(preconditions.outcome === 'inconclusive' && outcome === 'inconclusive')) throw new Error('precondition revision or platform binding mismatch');
   if (preconditions.outcome !== 'pass' && (outcome !== 'inconclusive' || result.code !== 'ci.input.precondition-unproven')) throw new Error('unproven precondition must be the primary inconclusive cause code');
+  if (preconditions.outcome === 'pass' && result.code === 'ci.input.precondition-unproven') throw new Error('proven precondition cannot use the precondition-unproven cause code');
   if (attempt.lifecycle === 'terminal') {
     if (attempt.rawExit !== result.exitCode || attempt.rawSignal !== null || attempt.timedOut) throw new Error('terminal direct status does not match the declared outcome');
   } else if (preconditions.outcome === 'pass' && (outcome !== 'inconclusive' || result.code !== 'ci.execution.attempt-inconclusive')) {
