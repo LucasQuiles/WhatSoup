@@ -829,8 +829,10 @@ must preserve identities and proof provenance through a dedicated forward migrat
 ### `enrichment_runs` (#1789 failure-row addition)
 
 Not part of the inbound/outbound durability journal above — `enrichment_runs` is written by
-`EnrichmentPoller` (`src/runtimes/chat/enrichment/poller.ts`), one row per fact-extraction cycle.
-It is documented here because the #1789 durability-writer invariant guard
+`EnrichmentPoller` (`src/runtimes/chat/enrichment/poller.ts`), one row per non-empty
+fact-extraction cycle (a cycle that finds no unprocessed messages returns before any write; a
+cycle that throws now writes a failure row — see below). It is documented here because the #1789
+durability-writer invariant guard
 (`scripts/durability-writer-guard.ts`) treats it as one of the two tables the invariant was built
 to fix, alongside `recovery_runs` above.
 
