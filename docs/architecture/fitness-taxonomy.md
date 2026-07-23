@@ -133,22 +133,12 @@ Current baseline measurements:
 
 | rule | path | lines | ceiling |
 |------|------|-------|---------|
-| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 12426 | 12426 |
-| `arch.file-size` | `tests/runtimes/agent/runtime.test.ts` | 16745 | 16745 |
+| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 12361 | 12361 |
+| `arch.file-size` | `tests/runtimes/agent/runtime.test.ts` | 16579 | 16579 |
 
-Intentional bump (both twins, per protocol): +65 lines in
-`src/runtimes/agent/runtime.ts` (12361 → 12426) for the Q-CANARY model-pin
-`keep` contract (2026-07-23): bare-`keep` interception (`BARE_KEEP_RE`,
-`handleBareKeep`) promotes a chat's live route preference to a permanent
-pin via `promoteToSticky` (chat-preference-db.ts) — a compare-and-set keyed
-on the row's own `updated_at`, so a receipt can never be confirmed after it
-expired, was reset, or was superseded by a newer pin, and only the sender
-who set the pin may confirm it. State-interleaved with the existing
-preference store and route-event sidecar rather than a new subsystem.
-
-Prior intentional bump: +105 lines in `src/runtimes/agent/runtime.ts`
-(12256 → 12361) for the D-4 v1.1 additions (boot-time
-`consumeQueuedPollDecisions` + the textFallback branch on
+Intentional bump (both twins, per protocol): +105 lines in
+`src/runtimes/agent/runtime.ts` (12256 → 12361) for the D-4 v1.1 additions
+(boot-time `consumeQueuedPollDecisions` + the textFallback branch on
 `resolvePollDecisionFromConsole` — state-interleaved with the runtime's
 poll-resolution machinery, deliberately reusing the existing vote/typed-answer
 paths rather than new subsystems). Slicing considered; the code IS the

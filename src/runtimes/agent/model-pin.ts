@@ -11,14 +11,17 @@
  * characterization suite in tests/runtimes/agent/model-pin.test.ts.
  */
 import type { Database } from '../../core/database.ts';
+import type { IncomingMessage } from '../../core/types.ts';
 import { createChildLogger } from '../../logger.ts';
 import { GLOBAL_CONVERSATION_KEY, toConversationKey } from '../../core/conversation-key.ts';
 import type { fetchAnthropicModelIdsWithStatus } from '../../lib/model-advisor.ts';
+import type { CommandResult } from './commands.ts';
 import {
   getPreference,
   setPreference,
   pruneExpired,
   clearChatPreference,
+  promoteToSticky,
   type PreferenceIntent,
 } from './chat-preference-db.ts';
 import { preferenceKeys } from './preference-keys.ts';
@@ -45,6 +48,11 @@ const GLOBAL_TOOL_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
 
 /** TTL for an ephemeral (non-sticky) route preference row. */
 export const PREFERENCE_TTL_MS = 24 * 60 * 60 * 1000;
+
+// Only the receipt's promised bare reply mutates routing (Q-CANARY model-pin
+// `keep` contract, 2026-07-23). Conversational uses such as "please keep it"
+// must continue to the agent unchanged.
+const BARE_KEEP_RE = /^\s*keep[\s!.]*$/i;
 
 /**
  * Task G (D14) — outcome of applyRouteChangeAndRecycle: 'recycled' (idle,
@@ -94,6 +102,84 @@ export interface ModelPinPort extends ModelCatalogueRenderPort {
   ): 'set' | 'refreshed' | 'sticky_kept';
   routablePinTargets(): string[];
   renderRouteStatus(chatJid: string, senderJid: string): string;
+  /** Terminal durability completion for text handled locally without an
+   *  agent turn (R14 shape) — a no-op when inboundSeq is undefined. */
+  completeLocalInbound(inboundSeq: number | undefined): void;
+}
+
+/**
+ * Full bare-`keep` interception (Q-CANARY model-pin `keep` contract,
+ * 2026-07-23) — the ONE call site runtime.ts needs. Only the receipt's
+ * promised bare reply mutates routing; conversational uses like "please keep
+ * it" continue to the agent unchanged (BARE_KEEP_RE requires an exact match).
+ * Eligibility is evaluated at `msg.timestamp` (the inbound's own receive
+ * time, epoch seconds), never `Date.now()` at processing time, so a
+ * provider-queue delay cannot turn an on-time reply into a false "expired"
+ * refusal. Returns true iff this call fully handled the inbound (sent the
+ * reply and terminalized the durability row) — the caller must return
+ * immediately without any further dispatch.
+ */
+export function tryHandleBareKeep(port: ModelPinPort, classified: CommandResult, chatJid: string, msg: IncomingMessage): boolean {
+  if (classified.type !== 'message' || !BARE_KEEP_RE.test(classified.text)) return false;
+  const keepReply = handleBareKeep(port, chatJid, msg.senderJid, msg.timestamp * 1000);
+  if (keepReply === null) return false;
+  port.sendDirect(chatJid, keepReply);
+  port.completeLocalInbound(msg.inboundSeq);
+  return true;
+}
+
+/**
+ * Promote the chat's current live route preference to a permanent pin.
+ * `nowMs` is the caller's eligibility instant. Delegates the actual
+ * compare-and-set to `promoteToSticky` (chat-preference-db.ts, the
+ * preference SSOT): only the row that is STILL the chat's winning preference
+ * at `nowMs` AND still belongs to the confirming sender is promoted — never
+ * a stale, reset, or someone-else's pin. Returns null ONLY for `absent`
+ * (nothing pending for this chat), which lets the bare "keep" fall through
+ * as ordinary text via {@link tryHandleBareKeep}; every other outcome is
+ * handled locally with a truthful, visible reply.
+ */
+function handleBareKeep(port: ModelPinPort, chatJid: string, senderJid: string, nowMs: number): string | null {
+  const { chatKey, senderKey } = preferenceKeys(port.db, chatJid, senderJid);
+
+  let result: ReturnType<typeof promoteToSticky>;
+  try {
+    result = promoteToSticky(port.db, chatKey, senderKey, nowMs);
+  } catch (err) {
+    log.warn({ err, instance: port.instanceName }, 'keep: preference promotion failed');
+    return `_Couldn't confirm that pin right now — nothing changed. Try again, or /model to re-pin._`;
+  }
+
+  const label = result.preference
+    ? (result.preference.modelPinVerified === true ? result.preference.requestedModel : null)
+      ?? (result.preference.requestedProvider ?? result.preference.intent)
+    : null;
+
+  switch (result.outcome) {
+    case 'absent':
+      return null;
+    case 'expired':
+      return `_That pin already expired. /model to set a new one._`;
+    case 'actor_mismatch':
+      return `_Only whoever set this chat's pin can keep it. /model to set your own._`;
+    case 'superseded':
+      return `_That pin changed before "keep" landed — nothing was promoted. /model to check the current route._`;
+    case 'already_sticky':
+      return `_${label} is already kept for this chat. /reset to undo._`;
+    case 'promoted': {
+      const pref = result.preference!;
+      port.emitRouteEventChecked({
+        event: 'model_preference_made_sticky',
+        conversationKey: toConversationKey(chatJid),
+        provider: pref.requestedProvider ?? `intent:${pref.intent}`,
+        modelRef: pref.requestedModel,
+        source: 'user',
+        userVisible: true,
+        reasonCode: 'user_pin_kept',
+      });
+      return `_Keeping ${label} for this chat until you /reset._`;
+    }
+  }
 }
 
 /**
