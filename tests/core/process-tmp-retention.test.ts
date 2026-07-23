@@ -61,14 +61,49 @@ describe('runProcessTmpCleanup', () => {
     expect(existsSync(recentFile)).toBe(true);
   });
 
-  it('skips directories inside process tmp', () => {
+  it('recursively removes a stale directory (orphaned browser/profile temp) and counts its bytes', () => {
     const root = makeRoot();
-    mkdirSync(join(root, 'nested'));
+    const staleDir = join(root, 'com.google.Chrome.chrome_url_fetcher_.stale');
+    mkdirSync(staleDir);
+    const inner = makeFile(staleDir, 'blob', 'chrome-scratch'); // 14 bytes
+    // Age both the dir and its contents past maxAge.
+    setAge(inner, DEFAULT_PROCESS_TMP_RETENTION.maxAgeMs + 10_000);
+    setAge(staleDir, DEFAULT_PROCESS_TMP_RETENTION.maxAgeMs + 10_000);
+
+    const result = runProcessTmpCleanup(root, DEFAULT_PROCESS_TMP_RETENTION.maxAgeMs);
+
+    expect(result).toEqual({ deleted: 1, skipped: 0, bytesFreed: 14 });
+    expect(existsSync(staleDir)).toBe(false);
+  });
+
+  it('preserves a directory with a recently-touched child (in-use temp)', () => {
+    const root = makeRoot();
+    const liveDir = join(root, 'playwright_chromiumdev_profile-live');
+    mkdirSync(liveDir);
+    const oldInner = makeFile(liveDir, 'old', 'x');
+    const freshInner = makeFile(liveDir, 'fresh', 'y');
+    // Directory + one child are old, but a live browser just touched a file.
+    setAge(liveDir, DEFAULT_PROCESS_TMP_RETENTION.maxAgeMs + 10_000);
+    setAge(oldInner, DEFAULT_PROCESS_TMP_RETENTION.maxAgeMs + 10_000);
+    setAge(freshInner, 1_000);
 
     const result = runProcessTmpCleanup(root, DEFAULT_PROCESS_TMP_RETENTION.maxAgeMs);
 
     expect(result).toEqual({ deleted: 0, skipped: 0, bytesFreed: 0 });
-    expect(existsSync(join(root, 'nested'))).toBe(true);
+    expect(existsSync(liveDir)).toBe(true);
+  });
+
+  it('preserves a wholly-recent directory', () => {
+    const root = makeRoot();
+    const recentDir = join(root, 'recent');
+    mkdirSync(recentDir);
+    setAge(makeFile(recentDir, 'file', 'z'), 1_000);
+    setAge(recentDir, 1_000);
+
+    const result = runProcessTmpCleanup(root, DEFAULT_PROCESS_TMP_RETENTION.maxAgeMs);
+
+    expect(result).toEqual({ deleted: 0, skipped: 0, bytesFreed: 0 });
+    expect(existsSync(recentDir)).toBe(true);
   });
 
   it('returns zeros when the process tmp directory does not exist', () => {
