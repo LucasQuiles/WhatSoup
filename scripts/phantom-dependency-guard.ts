@@ -27,7 +27,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { lstatSync, readFileSync } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import ts from 'typescript';
@@ -94,20 +94,64 @@ function parseOptions(argv: readonly string[]): Options | 'help' {
   return options;
 }
 
-/** Escape control characters so a repository path cannot reshape terminal output. */
-function safePath(path: string): string {
-  return JSON.stringify(path).slice(1, -1);
+/** Escape control and formatting characters that can reshape or visually reorder output. */
+function escapeUnsafeUnicode(value: string): string {
+  return value.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, (character) => {
+    let escaped = '';
+    for (let index = 0; index < character.length; index++) {
+      escaped += `\\u${character.charCodeAt(index).toString(16).padStart(4, '0')}`;
+    }
+    return escaped;
+  });
+}
+
+function safeScalar(value: string): string {
+  return escapeUnsafeUnicode(JSON.stringify(value).slice(1, -1));
+}
+
+function safeJson(value: unknown): string {
+  return escapeUnsafeUnicode(JSON.stringify(value));
+}
+
+/** Require an in-repository regular file with no symlinked ancestor below the repo root. */
+function isRegularRepoFile(repoRoot: string, file: string): boolean {
+  const repoRelative = relative(repoRoot, file);
+  if (
+    repoRelative.length === 0 ||
+    repoRelative === '..' ||
+    repoRelative.startsWith(`..${sep}`) ||
+    isAbsolute(repoRelative)
+  ) {
+    return false;
+  }
+
+  const components = repoRelative.split(sep);
+  let current = repoRoot;
+  for (let index = 0; index < components.length; index++) {
+    current = join(current, components[index]!);
+    const stat = lstatSync(current);
+    if (index === components.length - 1 ? !stat.isFile() : !stat.isDirectory()) return false;
+  }
+  return true;
 }
 
 /** Distinguish an absent manifest from one that exists but cannot be trusted. */
-function declaredAt(dir: string, cache: Map<string, ManifestDeclarations>): ManifestDeclarations {
+function declaredAt(
+  dir: string,
+  repoRoot: string,
+  cache: Map<string, ManifestDeclarations>,
+): ManifestDeclarations {
   const cached = cache.get(dir);
   if (cached !== undefined) return cached;
 
   const manifest = join(dir, 'package.json');
   let result: ManifestDeclarations;
   try {
-    lstatSync(manifest);
+    if (!isRegularRepoFile(repoRoot, manifest)) {
+      result = { state: 'unreadable' };
+      cache.set(dir, result);
+      return result;
+    }
   } catch (error) {
     result =
       (error as NodeJS.ErrnoException).code === 'ENOENT'
@@ -155,7 +199,7 @@ function declaredFor(
   let dir = dirname(resolve(repoRoot, file));
 
   for (;;) {
-    const manifest = declaredAt(dir, cache);
+    const manifest = declaredAt(dir, repoRoot, cache);
     if (manifest.state === 'readable') {
       found = true;
       for (const name of manifest.declarations) union.add(name);
@@ -177,7 +221,12 @@ function collectImportSites(repoRoot: string, files: readonly string[]): ImportC
   for (const file of files) {
     let text: string;
     try {
-      text = readFileSync(join(repoRoot, file), 'utf8');
+      const source = join(repoRoot, file);
+      if (!isRegularRepoFile(repoRoot, source)) {
+        unreadableFiles.push(file);
+        continue;
+      }
+      text = readFileSync(source, 'utf8');
     } catch {
       unreadableFiles.push(file);
       continue;
@@ -248,25 +297,21 @@ function main(): number {
   if (unreadableFiles.length > 0) {
     if (options.json) {
       console.log(
-        JSON.stringify(
-          {
-            files: files.length,
-            importSites: sites.length,
-            phantoms: [],
-            unverifiable: [],
-            unreadableFiles,
-            unreadableManifests: [],
-          },
-          null,
-          2,
-        ),
+        safeJson({
+          files: files.length,
+          importSites: sites.length,
+          phantoms: [],
+          unverifiable: [],
+          unreadableFiles,
+          unreadableManifests: [],
+        }),
       );
     } else {
       console.error(
         `FAIL(inconclusive): ${unreadableFiles.length} tracked source file(s) could not be ` +
           'read, so the import set is incomplete:',
       );
-      for (const file of unreadableFiles) console.error(`  ${safePath(file)}`);
+      for (const file of unreadableFiles) console.error(`  ${safeScalar(file)}`);
     }
     return EXIT_INCONCLUSIVE;
   }
@@ -293,25 +338,21 @@ function main(): number {
     const manifests = [...unreadableManifests].sort();
     if (options.json) {
       console.log(
-        JSON.stringify(
-          {
-            files: files.length,
-            importSites: sites.length,
-            phantoms: [],
-            unverifiable: [],
-            unreadableFiles: [],
-            unreadableManifests: manifests,
-          },
-          null,
-          2,
-        ),
+        safeJson({
+          files: files.length,
+          importSites: sites.length,
+          phantoms: [],
+          unverifiable: [],
+          unreadableFiles: [],
+          unreadableManifests: manifests,
+        }),
       );
     } else {
       console.error(
         `FAIL(inconclusive): ${manifests.length} package.json file(s) in an importer's ` +
           'declaration chain could not be read or parsed:',
       );
-      for (const manifest of manifests) console.error(`  ${safePath(manifest)}`);
+      for (const manifest of manifests) console.error(`  ${safeScalar(manifest)}`);
     }
     return EXIT_INCONCLUSIVE;
   }
@@ -322,11 +363,7 @@ function main(): number {
 
   if (options.json) {
     console.log(
-      JSON.stringify(
-        { files: files.length, importSites: sites.length, phantoms, unverifiable },
-        null,
-        2,
-      ),
+      safeJson({ files: files.length, importSites: sites.length, phantoms, unverifiable }),
     );
   }
 
@@ -338,7 +375,9 @@ function main(): number {
           'be checked:',
       );
       for (const finding of unverifiable) {
-        console.error(`  ${finding.packageName} — e.g. ${safePath(finding.files[0]!)}`);
+        console.error(
+          `  ${safeScalar(finding.packageName)} — e.g. ${safeScalar(finding.files[0]!)}`,
+        );
       }
     }
     return EXIT_INCONCLUSIVE;
@@ -348,8 +387,10 @@ function main(): number {
     if (!options.json) {
       console.error(`FAIL(phantom-dependency): ${phantoms.length} undeclared package(s):`);
       for (const finding of phantoms) {
-        console.error(`\n  ${finding.packageName} — imported by ${finding.files.length} file(s):`);
-        for (const file of finding.files.slice(0, 5)) console.error(`    ${safePath(file)}`);
+        console.error(
+          `\n  ${safeScalar(finding.packageName)} — imported by ${finding.files.length} file(s):`,
+        );
+        for (const file of finding.files.slice(0, 5)) console.error(`    ${safeScalar(file)}`);
       }
       console.error(
         '\nThese resolve today only because something else hoisted them into node_modules; ' +

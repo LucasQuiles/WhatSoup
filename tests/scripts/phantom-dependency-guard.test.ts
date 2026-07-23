@@ -144,6 +144,30 @@ describe('phantom-dependency guard — the red proof', () => {
     expect(out).not.toContain(dir);
   });
 
+  it('is INCONCLUSIVE when a manifest in the import chain is a symlink', () => {
+    const dir = makeRepo(
+      { 'tools/sub/x.ts': `import ambient from 'ambient-pkg';\nexport const x = ambient;\n` },
+      { '': ['pino'], 'tools/sub': ['pino'] },
+    );
+    const ambientDir = mkdtempSync(join(tmpdir(), 'phantom-dep-ambient-manifest-'));
+    tempRoots.push(ambientDir);
+    const ambientManifest = join(ambientDir, 'package.json');
+    writeFileSync(
+      ambientManifest,
+      JSON.stringify({ name: 'ambient', dependencies: { 'ambient-pkg': '1.0.0' } }),
+    );
+    rmSync(join(dir, 'tools/sub/package.json'));
+    symlinkSync(ambientManifest, join(dir, 'tools/sub/package.json'));
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'replace manifest with symlink']);
+
+    const { status, out } = runGuard(['--repo', dir]);
+    expect(status, `a symlinked manifest must not import declarations from ambient bytes:\n${out}`).toBe(2);
+    expect(out).toMatch(/tools\/sub\/package\.json/);
+    expect(out).toMatch(/inconclusive/i);
+    expect(out).not.toContain(ambientDir);
+  });
+
   it('is INCONCLUSIVE when a tracked source file cannot be read', () => {
     const dir = makeRepo({}, { '': ['pino'] });
     symlinkSync('missing-target.ts', join(dir, 'src/unreadable.ts'));
@@ -155,6 +179,55 @@ describe('phantom-dependency guard — the red proof', () => {
     expect(out).toMatch(/src\/unreadable\.ts/);
     expect(out).toMatch(/inconclusive/i);
     expect(out).not.toContain(dir);
+  });
+
+  it('is INCONCLUSIVE when a tracked source file is a readable symlink', () => {
+    const dir = makeRepo(
+      { 'src/linked.ts': `export const original = true;\n` },
+      { '': ['pino'] },
+    );
+    const ambientDir = mkdtempSync(join(tmpdir(), 'phantom-dep-ambient-source-'));
+    tempRoots.push(ambientDir);
+    const ambientSource = join(ambientDir, 'ambient.ts');
+    writeFileSync(
+      ambientSource,
+      `import pino from 'pino';\nexport const ambient = pino;\n`,
+    );
+    rmSync(join(dir, 'src/linked.ts'));
+    symlinkSync(ambientSource, join(dir, 'src/linked.ts'));
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'replace source with symlink']);
+
+    const { status, out } = runGuard(['--repo', dir]);
+    expect(status, `a tracked source symlink must not scan ambient target bytes:\n${out}`).toBe(2);
+    expect(out).toMatch(/src\/linked\.ts/);
+    expect(out).toMatch(/inconclusive/i);
+    expect(out).not.toContain(ambientDir);
+  });
+
+  it('is INCONCLUSIVE when a tracked source has a symlinked ancestor directory', () => {
+    const dir = makeRepo(
+      { 'tools/sub/x.ts': `import pino from 'pino';\nexport const x = pino;\n` },
+      { '': ['pino'], 'tools/sub': ['pino'] },
+    );
+    const ambientDir = mkdtempSync(join(tmpdir(), 'phantom-dep-ambient-ancestor-'));
+    tempRoots.push(ambientDir);
+    writeFileSync(
+      join(ambientDir, 'x.ts'),
+      `import pino from 'pino';\nexport const ambient = pino;\n`,
+    );
+    writeFileSync(
+      join(ambientDir, 'package.json'),
+      JSON.stringify({ name: 'ambient', dependencies: { pino: '1.0.0' } }),
+    );
+    rmSync(join(dir, 'tools/sub'), { recursive: true });
+    symlinkSync(ambientDir, join(dir, 'tools/sub'));
+
+    const { status, out } = runGuard(['--repo', dir]);
+    expect(status, `a symlinked ancestor must not redirect reads to ambient bytes:\n${out}`).toBe(2);
+    expect(out).toMatch(/tools\/sub\/x\.ts/);
+    expect(out).toMatch(/inconclusive/i);
+    expect(out).not.toContain(ambientDir);
   });
 
   it('BLOCKS when a sibling declares it but the importer does not inherit it', () => {
@@ -195,6 +268,51 @@ describe('phantom-dependency guard — the red proof', () => {
     expect(out).toMatch(/ghost-pkg/);
     expect(out).toContain('src/line\\nbreak.ts');
     expect(out).not.toContain('src/line\nbreak.ts');
+  });
+
+  it('escapes control characters in candidate-controlled package names', () => {
+    const dir = makeRepo(
+      {
+        'src/a.ts': String.raw`import forged from 'evil\n::error::forged';
+export const a = forged;
+`,
+      },
+      { '': ['pino'] },
+    );
+    const { status, out } = runGuard(['--repo', dir]);
+    expect(status, out).toBe(1);
+    expect(out).toContain('evil\\n::error::forged');
+    expect(out).not.toContain('evil\n::error::forged');
+    expect(out).not.toMatch(/\n::error::forged/);
+  });
+
+  it('escapes Unicode line and formatting controls in every public projection', () => {
+    const dir = makeRepo(
+      {
+        'src/a.ts': String.raw`import forged from 'evil\u2028::error::line\u2029break\u202eforged\u{e0001}tag';
+export const a = forged;
+`,
+      },
+      { '': ['pino'] },
+    );
+    const { status, out } = runGuard(['--repo', dir]);
+    expect(status, out).toBe(1);
+    expect(out).toContain(
+      'evil\\u2028::error::line\\u2029break\\u202eforged\\udb40\\udc01tag',
+    );
+    expect(out).not.toContain('evil\u2028::error::line\u2029break\u202eforged\u{e0001}tag');
+
+    const jsonResult = runGuard(['--repo', dir, '--json']);
+    expect(jsonResult.status, jsonResult.out).toBe(1);
+    expect(jsonResult.out).toContain(
+      'evil\\u2028::error::line\\u2029break\\u202eforged\\udb40\\udc01tag',
+    );
+    const parsed = JSON.parse(jsonResult.out) as {
+      phantoms: Array<{ packageName: string }>;
+    };
+    expect(parsed.phantoms[0]?.packageName).toBe(
+      'evil\u2028::error::line\u2029break\u202eforged\u{e0001}tag',
+    );
   });
 
   it('IGNORES node builtins in both spellings', () => {
