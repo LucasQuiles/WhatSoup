@@ -1202,6 +1202,10 @@ export class DurabilityEngine {
     return this.turnRecovery.getTurnRecoveryOriginalDeliveryStatus(jobId);
   }
 
+  getTurnRecoverySourceProof(jobId: number): { processingStatus: string; outboundStatus: string } | undefined {
+    return this.turnRecovery.getTurnRecoverySourceProof(jobId);
+  }
+
   /**
    * Enumerates every pending or claimed job for one owner, including pending
    * backoff. Cursors are scoped to one scan cycle; after scanComplete, reset

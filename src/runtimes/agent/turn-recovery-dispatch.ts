@@ -45,7 +45,7 @@ export function createTurnRecoverySupervisorForRuntime(deps: {
   return new TurnRecoverySupervisor({
     instanceName: deps.instanceName,
     durability: deps.getDurability,
-    dispatchReplay: deps.dispatchReplay,
+    dispatchReplay: verifyProvenBeforeDelivered(deps.dispatchReplay, deps.getDurability),
     freshOwnerIdentity: () => ({
       logicalTurnId: `${randomUUID()}:turn-recovery-supervisor`,
       managerId: deps.recoveryManagerId,
@@ -54,6 +54,50 @@ export function createTurnRecoverySupervisorForRuntime(deps: {
     supportedScopes: new Set(['per_chat']),
     isDispatchable: (job) => job.scope === 'per_chat' && deps.hasSessionForChat(job.delivery_jid),
   });
+}
+
+/**
+ * Wraps `dispatchReplay` so a 'delivered' outcome is only reported once the
+ * store's OWN completion proof -- source inbound `processing_status` +
+ * original delivery's outbound status, the exact pair `completeTurnRecoveryJob`
+ * re-verifies before it will close a job -- is actually satisfied.
+ *
+ * Without this: a replay whose OWN finalization is itself
+ * `transferred_to_recovery_owner` (the replay deferred to a NEW recovery job
+ * rather than proving delivery -- `toInboundMutation` skips the inbound
+ * write for that disposition, turn-terminal.ts) still resolves the runtime
+ * turn's completion promise (`applyRuntimeTurnPostEffects` fires for any
+ * `result.kind === 'terminal'`, regardless of disposition), so the dispatcher
+ * reports 'delivered' with no real proof. `completeTurnRecoveryJob` then
+ * throws on the non-terminal source inbound; the claim sits with no further
+ * lease renewal, expires, and the next scan reclaims and RE-dispatches the
+ * SAME job through the ordinary pending-claim path -- a real second send.
+ *
+ * Checking here instead routes that case through the existing, bounded,
+ * visible `retryable_failure` -> `requeueTurnRecoveryJob` -> backoff/
+ * exhaustion path. This job's own `excludeJobId` admission check then
+ * naturally blocks its retry from racing whichever job now owns the
+ * deferred inbound, until that job resolves (or this one exhausts).
+ */
+function verifyProvenBeforeDelivered(
+  dispatchReplay: (
+    job: TurnRecoveryJobRow,
+    fence: TurnRecoveryClaimFence,
+  ) => Promise<TurnRecoveryReplayDispatchResult>,
+  getDurability: () => DurabilityEngine | null,
+): (job: TurnRecoveryJobRow, fence: TurnRecoveryClaimFence) => Promise<TurnRecoveryReplayDispatchResult> {
+  return async (job, fence) => {
+    const outcome = await dispatchReplay(job, fence);
+    if (outcome.kind !== 'delivered') return outcome;
+    // Fail closed: an undefined row (job gone, or claim raced expiry in the
+    // narrow window between dispatch resolving and this check) is not proof
+    // of anything -- treat exactly like an unproven outcome.
+    const proof = getDurability()?.getTurnRecoverySourceProof(job.id);
+    const proven = proof !== undefined
+      && ['complete', 'failed'].includes(proof.processingStatus)
+      && ['echoed', 'failed_permanent', 'quarantined'].includes(proof.outboundStatus);
+    return proven ? outcome : { kind: 'retryable_failure' };
+  };
 }
 
 /**

@@ -1729,6 +1729,25 @@ export class TurnRecoveryStore {
   }
 
   /**
+   * The exact proof pair `completeTurnRecoveryJob` re-verifies (source
+   * inbound `processing_status` + original selected delivery's outbound
+   * status), exposed as a plain read so a dispatcher can classify a replay
+   * outcome BEFORE claiming 'delivered' — reuses `getTurnRecoverySourceInboundStatus`,
+   * the same prepared statement `completeTurnRecoveryJob`'s own diagnostic
+   * branch already runs (turn-recovery-store.ts, `completeTurnRecoveryJob`).
+   * Scoped to a still-live claim, same as that statement; `undefined` covers
+   * "job not found" and "claim expired" alike — callers must fail closed on
+   * either (a claim that raced expiry mid-dispatch is not proof of anything).
+   */
+  getTurnRecoverySourceProof(jobId: number): { processingStatus: string; outboundStatus: string } | undefined {
+    validatePositiveSafeInteger(jobId, 'Recovery job ID');
+    const row = this.statements.getTurnRecoverySourceInboundStatus.get(jobId) as
+      | { processing_status: string; outbound_status: string }
+      | undefined;
+    return row ? { processingStatus: row.processing_status, outboundStatus: row.outbound_status } : undefined;
+  }
+
+  /**
    * `options.excludeJobId` lets a caller that already owns a specific
    * recovery job (a supervisor replaying its own claimed job) ask "is this
    * scope blocked by OTHER outstanding recovery work" without the job it is
