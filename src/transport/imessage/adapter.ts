@@ -13,7 +13,7 @@
 //     delivered, the recipient controls deletion. The adapter does not
 //     declare the 'delete' extension.
 //
-// Both backends (imsg daemon + BlueBubbles HTTP) implement ImessagePort;
+// Both backends (imsg RPC relay + BlueBubbles HTTP) implement ImessagePort;
 // the adapter is backend-agnostic. Backend selection happens at factory time.
 
 import {
@@ -42,6 +42,7 @@ import {
   PayloadTooLargeError,
   PermanentProviderError,
   RateLimitedError,
+  SendAmbiguousError,
   TransientProviderError,
 } from '../contract/errors.ts';
 import type {
@@ -72,6 +73,7 @@ interface PortErrorLike {
   message: string;
   status?: number;
   code?: string;
+  phase?: 'not_started' | 'provider_call_started' | 'ack_received';
 }
 
 // BlueBubbles returns 401 on bad password; imsg surfaces 'UnlinkedAccount' or
@@ -94,6 +96,7 @@ function isImessageRateLimit(err: PortErrorLike): boolean {
 // Transient: 5xx from BlueBubbles, or no-status-no-code network failure
 // (daemon unreachable, socket closed, HTTP timeout).
 function isImessageTransient(err: PortErrorLike): boolean {
+  if (err.status === 501 || err.code === 'UnsupportedMethod') return false;
   if (typeof err.status === 'number' && err.status >= 500) return true;
   if (err.code === 'InternalServerError' || err.code === 'TimeoutError') return true;
   return err.status === undefined && err.code === undefined;
@@ -113,6 +116,15 @@ function mapPortError(
   const pe = err as PortErrorLike;
   const msg = (typeof pe?.message === 'string' && pe.message) ? pe.message : String(err);
 
+  if (pe.code === 'SendAcceptedWithoutId' || pe.code === 'RequestAbortedAfterWrite') {
+    return new SendAmbiguousError({
+      ...base,
+      message: `iMessage send outcome is ambiguous: ${msg}`,
+      providerCode: pe.code,
+      phase: pe.phase ?? (pe.code === 'SendAcceptedWithoutId' ? 'ack_received' : 'provider_call_started'),
+    });
+  }
+
   if (isImessageAuth(pe)) {
     return new AuthRequiredError({ ...base, message: `iMessage auth error: ${msg}`, providerCode: String(pe.code ?? pe.status ?? '') });
   }
@@ -129,9 +141,9 @@ function mapPortError(
 // Dedupe-set capacity. Mirrors the Signal/Twilio 1000-entry cap. iMessage
 // envelopes dedupe on GUID (string), unique per message across both backends.
 // ---------------------------------------------------------------------------
-const DEDUPE_CAP = 1000;
 const INBOUND_PAGE_SIZE = 500;
 const MAX_INBOUND_PAGES_PER_POLL = 10;
+const DEDUPE_CAP = INBOUND_PAGE_SIZE * MAX_INBOUND_PAGES_PER_POLL;
 
 function trimSeenSet(seen: Set<string>): void {
   for (const oldest of seen) {
@@ -146,7 +158,7 @@ function trimSeenSet(seen: Set<string>): void {
 const IMESSAGE_MAX_TEXT = 65_535;
 
 /**
- * ImessageAdapter — iMessage transport via imsg daemon or BlueBubbles Server.
+ * ImessageAdapter — iMessage transport via imsg RPC or BlueBubbles Server.
  *
  * Implements:
  * - TransportAdapter (lifecycle + sendText + on(message|state|error))
@@ -160,7 +172,7 @@ const IMESSAGE_MAX_TEXT = 65_535;
  * gap, not an oversight.
  *
  * The adapter is constructed with an {@link ImessagePort} implementation;
- * the factory selects the backend (imsg daemon socket port or BlueBubbles
+ * the factory selects the backend (imsg relay socket port or BlueBubbles
  * HTTP port) based on imessageConfig.backend.
  */
 export class ImessageAdapter
@@ -189,13 +201,14 @@ export class ImessageAdapter
   private seq = 0;
 
   private lastPolledAt: Date = new Date(0);
-  private inboundOffset = 0;
-  private inboundMaxTimestamp: number | null = null;
-  private inboundMaxTimestampCount = 0;
   private readonly seen: Set<string> = new Set();
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private disposed = false;
-  private polling = false;
+  private cursorInitialized = false;
+  private inboundCursor: string | null = null;
+  private inboundMaxTimestamp: number | null = null;
+  private lifecycleGeneration = 0;
+  private pollingGeneration: number | null = null;
 
   constructor(config: ImessageConfig, port: ImessagePort) {
     // Validation upstream enforces sender presence; direct construction can
@@ -221,18 +234,18 @@ export class ImessageAdapter
     this.pollIntervalMs = config.pollIntervalMs;
     this.inboundMode = config.inboundMode;
 
-    const extensions: ReadonlySet<ExtensionName> = new Set<ExtensionName>([
-      'reactions', 'typing', 'read-receipts',
-    ]);
+    const extensions: ReadonlySet<ExtensionName> = config.backend === 'bluebubbles'
+      ? new Set<ExtensionName>(['reactions', 'typing', 'read-receipts'])
+      : new Set<ExtensionName>();
 
     this.capabilities = {
       channel: this.channelId,
       kind: 'imessage',
       extensions,
       maxTextLength: IMESSAGE_MAX_TEXT,
-      auth: 'token',                  // both backends use a password / pre-shared credential
-      readReceipts: 'conversation',   // iMessage marks conversations read, not individual messages
-      reactions: 'single',            // tapback — one reaction per user per message
+      auth: 'token',                  // capability enum has no local-process-trust variant
+      readReceipts: config.backend === 'bluebubbles' ? 'conversation' : 'none',
+      reactions: config.backend === 'bluebubbles' ? 'single' : 'none',
       media: { maxBytes: 0, mimeAllowlist: [] },  // media deferred to v2
       idempotency: {
         sendText: 'none',
@@ -249,6 +262,7 @@ export class ImessageAdapter
   // ── Lifecycle ────────────────────────────────────────────────────────────
 
   async connect(): Promise<void> {
+    const generation = ++this.lifecycleGeneration;
     if (this.pollTimer !== null) {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
@@ -258,16 +272,19 @@ export class ImessageAdapter
     try {
       await this.port.verifyCredentials();
     } catch (err) {
-      this.transitionTo({ state: 'disconnected', since: new Date() });
+      if (generation === this.lifecycleGeneration) {
+        this.transitionTo({ state: 'disconnected', since: new Date() });
+      }
       throw mapPortError(err, this.channelId, 'connect', this.nextCorrelationId(), 'channel');
     }
-    this.inboundOffset = 0;
-    this.inboundMaxTimestamp = null;
-    this.inboundMaxTimestampCount = 0;
+    if (generation !== this.lifecycleGeneration || this.disposed) return;
+    if (!this.cursorInitialized && this.inboundMode === 'poll' && this.pollIntervalMs > 0) {
+      this.lastPolledAt = new Date(Date.now() - this.pollIntervalMs);
+    }
+    this.cursorInitialized = true;
     this.transitionTo({ state: 'connected', since: new Date() });
 
     if (this.inboundMode === 'poll' && this.pollIntervalMs > 0) {
-      this.lastPolledAt = new Date(Date.now() - this.pollIntervalMs);
       this.pollTimer = setInterval(() => {
         void this.pollOnce();
       }, this.pollIntervalMs);
@@ -275,11 +292,13 @@ export class ImessageAdapter
   }
 
   async disconnect(): Promise<void> {
+    this.lifecycleGeneration += 1;
     this.disposed = true;
     if (this.pollTimer !== null) {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    this.port.resetConnection?.();
     this.transitionTo({ state: 'disconnected', since: new Date() });
   }
 
@@ -385,7 +404,7 @@ export class ImessageAdapter
       await this.port.sendReaction({
         targetGuid: target.id,
         conversation: target.conversation,
-        emoji: remove ? '' : emoji,
+        emoji,
         remove,
       });
     } catch (err) {
@@ -462,27 +481,45 @@ export class ImessageAdapter
   // ── Poll loop ────────────────────────────────────────────────────────────
 
   async pollOnce(): Promise<void> {
-    if (this.disposed || this.polling) return;
+    if (this.disposed) return;
     if (this.health.state !== 'connected') return;
-    this.polling = true;
+    const generation = this.lifecycleGeneration;
+    if (this.pollingGeneration === generation) return;
+    this.pollingGeneration = generation;
     try {
-      await this.pollOnceInner();
+      await this.pollOnceInner(generation);
     } finally {
-      this.polling = false;
+      if (this.pollingGeneration === generation) {
+        this.pollingGeneration = null;
+      }
     }
   }
 
-  private async pollOnceInner(): Promise<void> {
+  private async pollOnceInner(generation: number): Promise<void> {
     for (let page = 0; page < MAX_INBOUND_PAGES_PER_POLL; page += 1) {
+      if (this.disposed || generation !== this.lifecycleGeneration) return;
       let records: readonly InboundImessage[];
+      let cursor: string;
+      let hasMore: boolean;
+      const requestedCursor = this.inboundCursor;
       try {
-        records = await this.port.listInboundSince(
+        const inboundPage = await this.port.listInboundSince(
           this.lastPolledAt,
           INBOUND_PAGE_SIZE,
-          this.inboundOffset,
+          requestedCursor,
         );
+        records = inboundPage.records;
+        cursor = inboundPage.cursor;
+        hasMore = inboundPage.hasMore;
+        if (cursor.length === 0 || (hasMore && cursor === requestedCursor)) {
+          throw {
+            message: 'iMessage provider returned a non-advancing inbound cursor',
+            code: 'MalformedResponse',
+            status: 502,
+          } satisfies ImessagePortError;
+        }
       } catch (err) {
-        if (this.disposed) return;
+        if (this.disposed || generation !== this.lifecycleGeneration) return;
         const mapped = mapPortError(err, this.channelId, 'pollInbound', this.nextCorrelationId(), 'channel');
         this.safeEmit(this.listeners.error, mapped);
         if (mapped instanceof AuthRequiredError) {
@@ -495,31 +532,36 @@ export class ImessageAdapter
         return;
       }
 
-      if (this.disposed) return;
+      if (this.disposed || generation !== this.lifecycleGeneration) return;
 
       for (const record of records) {
         if (this.inboundMaxTimestamp === null || record.timestamp > this.inboundMaxTimestamp) {
           this.inboundMaxTimestamp = record.timestamp;
-          this.inboundMaxTimestampCount = 1;
-        } else if (record.timestamp === this.inboundMaxTimestamp) {
-          this.inboundMaxTimestampCount += 1;
         }
         this.handleInboundRecord(record);
+        if (this.disposed || generation !== this.lifecycleGeneration) return;
       }
+      this.inboundCursor = cursor;
 
-      if (records.length === INBOUND_PAGE_SIZE) {
-        this.inboundOffset += records.length;
+      if (hasMore) {
         continue;
       }
 
       if (this.inboundMaxTimestamp !== null) {
         this.lastPolledAt = new Date(this.inboundMaxTimestamp);
-        this.inboundOffset = this.inboundMaxTimestampCount;
+        this.inboundMaxTimestamp = null;
       }
-      this.inboundMaxTimestamp = null;
-      this.inboundMaxTimestampCount = 0;
       return;
     }
+
+    this.safeEmit(this.listeners.error, new TransientProviderError({
+      channelId: this.channelId,
+      operation: 'pollInbound',
+      correlationId: this.nextCorrelationId(),
+      scope: 'channel',
+      providerCode: 'InboundPageLimit',
+      message: `iMessage inbound scan paused after ${MAX_INBOUND_PAGES_PER_POLL * INBOUND_PAGE_SIZE} raw records; provider cursor retained`,
+    }));
   }
 
   // ── Shared inbound pipeline ───────────────────────────────────────────────
