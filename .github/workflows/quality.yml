@@ -187,6 +187,13 @@ jobs:
           printf 'chore(ci): guard smoke\n' > "$msg"
           npm run guard:repo:commit-msg -- "$msg"
 
+      # Report-only structural self-check: the exact HEAD tree must be covered by the
+      # canonical manifest risk rules. This does not authorize drift or replace the
+      # exact-revision classifier.
+      - name: Drift classifier coverage
+        continue-on-error: true
+        run: npm run guard:drift-coverage
+
       - name: Documentation drift guard
         run: npm run guard:doc-drift
 

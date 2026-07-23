@@ -116,6 +116,13 @@ export interface ExactTreeEntrySetV1 {
   entries: ExactTreeEntryV1[];
 }
 
+export interface ExactTreePathSetV1 {
+  candidateOid: string;
+  treeOid: string;
+  listingDigest: `sha256:${string}`;
+  paths: string[];
+}
+
 export interface ExactAddedLineInputV1 {
   baseOid: string;
   candidateOid: string;
@@ -1147,6 +1154,83 @@ function parseRawTreeEntries(bytes: Buffer): ReadonlyMap<string, ParsedRawTreeEn
     cursor = nameEnd + 21;
   }
   return entries;
+}
+
+/** Enumerate one exact commit tree through the canonical bounded Git execution boundary. */
+export function readExactTreePaths(cwd: string, candidateOid: string): ExactTreePathSetV1 {
+  if (!FULL_OID.test(candidateOid)) throw treeEntryError("ci.input.tree-entry-malformed");
+  let metadata: ExactCommitMetadataV1;
+  try {
+    metadata = readExactCommitMetadata(cwd, [candidateOid])[0]!;
+  } catch (error) {
+    mapTreeCommitError(error);
+  }
+  const bytes = boundedEvidenceGitBytes(
+    cwd,
+    ["ls-tree", "-rz", "--full-tree", metadata.treeOid],
+    MAX_EXACT_AGGREGATE_TREE_BYTES + 1,
+    TREE_GIT_CODES,
+  );
+  const paths = parseExactTreePathListing(bytes);
+  return {
+    candidateOid,
+    treeOid: metadata.treeOid,
+    listingDigest: `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
+    paths,
+  };
+}
+
+export function parseExactTreePathListing(value: Uint8Array): string[] {
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(value);
+  } catch {
+    throw treeEntryError("ci.input.tree-entry-malformed");
+  }
+  if (bytes.byteLength > MAX_EXACT_AGGREGATE_TREE_BYTES) {
+    throw treeEntryError("ci.input.tree-entry-budget");
+  }
+  if (bytes.byteLength > 0 && bytes[bytes.byteLength - 1] !== 0) {
+    throw treeEntryError("ci.input.tree-entry-malformed");
+  }
+  const rows = bytes.byteLength === 0
+    ? []
+    : bytes.subarray(0, bytes.byteLength - 1).toString("binary").split("\0");
+  if (rows.length > MAX_EXACT_TREE_ENTRY_COUNT) {
+    throw treeEntryError("ci.input.tree-entry-budget");
+  }
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const paths: string[] = [];
+  for (const row of rows) {
+    const raw = Buffer.from(row, "binary");
+    const tab = raw.indexOf(0x09);
+    if (tab <= 0) throw treeEntryError("ci.input.tree-entry-malformed");
+    const header = raw.subarray(0, tab).toString("ascii");
+    const pathBytes = raw.subarray(tab + 1);
+    if (!/^(?:040000|100644|100755|120000|160000) (?:blob|tree|commit) [0-9a-f]{40}$/.test(header)) {
+      throw treeEntryError("ci.input.tree-entry-malformed");
+    }
+    if (pathBytes.byteLength === 0 || pathBytes.byteLength > MAX_EXACT_TREE_ENTRY_PATH_BYTES) {
+      throw treeEntryError(pathBytes.byteLength > MAX_EXACT_TREE_ENTRY_PATH_BYTES
+        ? "ci.input.tree-entry-budget"
+        : "ci.input.tree-entry-malformed");
+    }
+    let path: string;
+    try {
+      path = decoder.decode(pathBytes);
+    } catch {
+      throw treeEntryError("ci.input.tree-entry-malformed");
+    }
+    if (path.startsWith("/") || path.endsWith("/") || path.includes("\\")
+      || path.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) {
+      throw treeEntryError("ci.input.tree-entry-malformed");
+    }
+    if (paths.length > 0 && compareUtf8(paths.at(-1)!, path) >= 0) {
+      throw treeEntryError("ci.input.tree-entry-malformed");
+    }
+    paths.push(path);
+  }
+  return paths;
 }
 
 export function readExactTreeEntries(

@@ -198,6 +198,20 @@ describe('CP-F2e immutable taxonomy registry', () => {
     }
   });
 
+  it('registers the drift observer result codes with distinct outcomes', () => {
+    for (const [code, outcome] of [
+      ['git.lineage.base.unchanged', 'pass'],
+      ['git.lineage.base.drift-disjoint', 'warn'],
+      ['git.lineage.base.drift-relevant', 'inconclusive'],
+      ['git.lineage.base.drift-policy', 'inconclusive'],
+      ['git.merge.result.conflict', 'block'],
+    ] as const) {
+      expect(reasonDefinition(code), code).toMatchObject({
+        lifecycle: 'active', metadataState: 'complete', defaultOutcome: outcome,
+      });
+    }
+  });
+
   it('binds P0 definitions to their truthful stages, identities, and actionable fixtures', () => {
     expect(reasonDefinition('integrity.writer.worktree.concurrent')).toMatchObject({
       applicableStages: ['local', 'pre-push', 'pull-request', 'merge-group'],

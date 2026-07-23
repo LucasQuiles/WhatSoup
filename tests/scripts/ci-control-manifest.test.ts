@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { runManifestCli } from '../../scripts/ci-control-manifest.ts';
+import { DRIFT_ADAPTER_SOURCE_PATHS } from '../../scripts/drift-classify.ts';
 import {
   MAX_CONTROL_COUNT,
   MAX_MANIFEST_BYTES,
@@ -147,8 +148,10 @@ describe('canonical CI control manifest', () => {
     expect(Object.fromEntries(inventory.controls.map(({ id, availability }) => [id, availability]))).toEqual({
       'architecture.fitness-lint': 'planned',
       'ci.agent-writer-lease': 'quarantined',
+      'ci.drift-classifier-coverage': 'report-only',
       'ci.exact-revision-classifier': 'canary',
       'ci.hooks.installed': 'report-only',
+      'ci.lineage-drift-observer': 'report-only',
       'ci.outgoing-ref-policy': 'report-only',
       'privacy.publication': 'report-only',
       'repo.hygiene': 'report-only',
@@ -169,7 +172,7 @@ describe('canonical CI control manifest', () => {
     ]);
     expect(loaded.controls.every((entry) => entry.trustClass === 'untrusted-candidate')).toBe(true);
     expect(loaded.controls.filter(({ id }) => ![
-      'ci.agent-writer-lease', 'ci.exact-revision-classifier', 'ci.hooks.installed', 'ci.outgoing-ref-policy',
+      'ci.agent-writer-lease', 'ci.drift-classifier-coverage', 'ci.exact-revision-classifier', 'ci.hooks.installed', 'ci.lineage-drift-observer', 'ci.outgoing-ref-policy',
       'privacy.publication', 'repo.hygiene',
     ].includes(id)).every((entry) => entry.evidence.schemaVersion === null)).toBe(true);
     for (const id of ['repo.hygiene', 'privacy.publication']) {
@@ -187,6 +190,23 @@ describe('canonical CI control manifest', () => {
       paths: CLASSIFIER_TOOL_SOURCE_PATHS,
       digestBinding: 'exact',
       freshness: 'receipt',
+    });
+    expect(loaded.controls.find(({ id }) => id === 'ci.lineage-drift-observer')).toMatchObject({
+      availability: 'report-only',
+      mode: 'block',
+      stages: ['local'],
+      evidence: {
+        schemaVersion: 1,
+        paths: DRIFT_ADAPTER_SOURCE_PATHS,
+        digestBinding: 'exact',
+        freshness: 'same-process',
+      },
+    });
+    expect(loaded.controls.find(({ id }) => id === 'ci.drift-classifier-coverage')).toMatchObject({
+      availability: 'report-only',
+      mode: 'warn',
+      stages: ['pull-request', 'merge-group', 'default-branch'],
+      implementation: { commandId: 'guard:drift-coverage' },
     });
     expect(loaded.riskRules.length).toBeGreaterThan(0);
     expect(loaded.riskRules.find(({ id }) => id === 'risk.control-policy')?.pathPrefixes)
@@ -216,6 +236,11 @@ describe('canonical CI control manifest', () => {
       'bash',
       'scripts/run-with-pinned-node.sh',
       'scripts/ci-control-classify.ts',
+    ]);
+    expect(loaded.canonicalCommands['drift:classify']).toEqual([
+      'bash',
+      'scripts/run-with-pinned-node.sh',
+      'scripts/drift-classify.ts',
     ]);
     expect(loaded.canonicalCommands['ci:ref-policy']).toEqual([
       'bash',

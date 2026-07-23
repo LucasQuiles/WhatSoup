@@ -133,8 +133,10 @@ function runtimeSourceClosure(entryPath: string, sourceRoot = projectRoot): stri
 
 const LOW_CONTROLS = [
   'ci.agent-writer-lease',
+  'ci.drift-classifier-coverage',
   'ci.exact-revision-classifier',
   'ci.hooks.installed',
+  'ci.lineage-drift-observer',
   'ci.outgoing-ref-policy',
   'privacy.publication',
   'repo.hygiene',
@@ -143,8 +145,10 @@ const LOW_CONTROLS = [
 const ALL_CONTROLS = [
   'architecture.fitness-lint',
   'ci.agent-writer-lease',
+  'ci.drift-classifier-coverage',
   'ci.exact-revision-classifier',
   'ci.hooks.installed',
+  'ci.lineage-drift-observer',
   'ci.outgoing-ref-policy',
   'privacy.publication',
   'repo.hygiene',
@@ -357,12 +361,16 @@ describe('exact revision classification', () => {
   });
 
   it.each([
-    ['dependency manifest', 'package.json', '{}\n', 'elevated', ['ci.classification.dependency-manifest']],
+    ['control-bearing package manifest', 'package.json', '{}\n', 'system-wide', ['ci.classification.policy']],
     ['dependency lock', 'package-lock.json', '{}\n', 'elevated', ['ci.classification.dependency-lock']],
+    ['toolchain pin', '.nvmrc', '24\n', 'elevated', ['ci.classification.dependency-manifest']],
+    ['shared runtime', 'src/lib/shared-new.ts', 'export {};\n', 'elevated', ['ci.classification.shared-runtime']],
+    ['generated artifact', 'artifacts/proof-new.json', '{}\n', 'elevated', ['ci.classification.generated-output']],
     ['workflow', '.github/workflows/quality.yml', 'name: quality\n', 'elevated', ['ci.classification.workflow']],
     ['hook', '.husky/pre-push', '#!/bin/sh\n', 'elevated', ['ci.classification.executable-mode', 'ci.classification.hook']],
     ['release', 'deploy/release.json', '{}\n', 'elevated', ['ci.classification.release']],
     ['policy', 'controls/policy.json', '{}\n', 'system-wide', ['ci.classification.policy']],
+    ['enforcement documentation', 'docs/enforcement/new-policy.md', '# policy\n', 'system-wide', ['ci.classification.policy']],
     ['hygiene guard policy', 'scripts/repo-hygiene-guard.ts', 'export {};\n', 'system-wide', ['ci.classification.policy']],
     ['extracted hygiene policy', 'scripts/lib/repo-hygiene-policy.ts', 'export {};\n', 'system-wide', ['ci.classification.policy']],
     ['hygiene policy fixture', 'tests/scripts/repo-hygiene-policy.test.ts', 'export {};\n', 'system-wide', ['ci.classification.policy']],

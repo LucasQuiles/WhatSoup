@@ -48,6 +48,8 @@ import {
   readExactCommitRange,
   readExactCommitMetadata,
   readExactTreeEntries,
+  readExactTreePaths,
+  parseExactTreePathListing,
 } from '../../scripts/lib/ci-control/git-input.ts';
 
 import {
@@ -88,6 +90,65 @@ import {
 afterEach(cleanupTemporaryRoots);
 
 describe('exact candidate tree entries', () => {
+  const listingRow = (path: string): Buffer => Buffer.from(
+    `100644 blob ${'a'.repeat(40)}\t${path}\0`,
+    'utf8',
+  );
+
+  it('bounds and validates full-tree listing bytes before accepting paths', () => {
+    const exactPath = 'a'.repeat(MAX_EXACT_TREE_ENTRY_PATH_BYTES);
+    expect(parseExactTreePathListing(listingRow(exactPath))).toEqual([exactPath]);
+    expectCode(
+      () => parseExactTreePathListing(listingRow(`${exactPath}a`)),
+      'ci.input.tree-entry-budget',
+    );
+    expectCode(
+      () => parseExactTreePathListing(listingRow('safe').subarray(0, -1)),
+      'ci.input.tree-entry-malformed',
+    );
+    const invalidUtf8 = Buffer.concat([
+      Buffer.from(`100644 blob ${'a'.repeat(40)}\t`, 'ascii'),
+      Buffer.from([0xff, 0]),
+    ]);
+    expectCode(
+      () => parseExactTreePathListing(invalidUtf8),
+      'ci.input.tree-entry-malformed',
+    );
+    const hostile = new Proxy(new Uint8Array(), { get: () => { throw new Error('hostile accessor'); } });
+    expectCode(
+      () => parseExactTreePathListing(hostile),
+      'ci.input.tree-entry-malformed',
+    );
+  });
+
+  it('accepts the exact full-tree entry-count boundary and rejects one extra row', () => {
+    const exact = Buffer.concat(Array.from(
+      { length: MAX_EXACT_TREE_ENTRY_COUNT },
+      (_, index) => listingRow(`p${index.toString().padStart(5, '0')}`),
+    ));
+    expect(parseExactTreePathListing(exact)).toHaveLength(MAX_EXACT_TREE_ENTRY_COUNT);
+    expectCode(
+      () => parseExactTreePathListing(Buffer.concat([exact, listingRow('z-extra')])),
+      'ci.input.tree-entry-budget',
+    );
+  });
+
+  it('enumerates one exact commit tree without reading later ambient state', () => {
+    const { root } = fixture();
+    write(root, 'docs/exact.md', 'exact\n');
+    const candidateOid = commit(root, 'exact tree');
+    const candidateTreeOid = git(root, ['rev-parse', `${candidateOid}^{tree}`]);
+    write(root, 'ambient-only.txt', 'ambient\n');
+    commit(root, 'later ambient tree');
+
+    const result = readExactTreePaths(root, candidateOid);
+    expect(result).toMatchObject({ candidateOid, treeOid: candidateTreeOid });
+    expect(result.listingDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(result.paths).toContain('docs/exact.md');
+    expect(result.paths).not.toContain('ambient-only.txt');
+    expect(() => readExactTreePaths(root, 'HEAD')).toThrow(/ci\.input\.tree-entry-malformed/);
+  });
+
   it('reads the explicit candidate with all supported modes, absence, Unicode, and literal glob paths', () => {
     const { root, baseOid } = fixture();
     write(root, 'regular.txt', 'candidate regular\n');

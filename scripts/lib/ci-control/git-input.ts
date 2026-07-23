@@ -63,6 +63,8 @@ export {
   readExactCommitRange,
   readExactCommitMetadata,
   readExactTreeEntries,
+  readExactTreePaths,
+  parseExactTreePathListing,
   readExactBlobs,
 } from "./git-input-core.ts";
 export type {
@@ -80,6 +82,7 @@ export type {
   ExactTreeLookupInputV1,
   ExactTreeEntryV1,
   ExactTreeEntrySetV1,
+  ExactTreePathSetV1,
   ExactAddedLineInputV1,
   ExactAddedLineBudgetV1,
   ExactAddedLineBudgetAccountingV1,

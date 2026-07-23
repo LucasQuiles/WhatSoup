@@ -27,6 +27,7 @@ const CONTROL_DOMAINS = [
   'operability',
 ] as const;
 const CONTROL_STAGES = [
+  'local',
   'pre-commit',
   'commit-message',
   'pre-push',
@@ -367,8 +368,8 @@ function validateEvidence(value: unknown, path: string, problems: ManifestIssue[
   if (record.schemaVersion === null && (record.digestBinding !== 'none' || record.freshness !== 'same-process')) {
     problems.push(issue('ci.manifest.evidence-contract-mismatch', path, 'schema-less evidence cannot claim receipt or digest assurance'));
   }
-  if (record.schemaVersion !== null && (record.digestBinding !== 'exact' || record.freshness !== 'receipt')) {
-    problems.push(issue('ci.manifest.evidence-contract-mismatch', path, 'schema evidence requires exact digest and receipt freshness'));
+  if (record.schemaVersion !== null && record.digestBinding !== 'exact') {
+    problems.push(issue('ci.manifest.evidence-contract-mismatch', path, 'schema evidence requires exact digest binding'));
   }
   return record as unknown as ControlEvidenceV1;
 }

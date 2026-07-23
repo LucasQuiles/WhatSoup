@@ -8,6 +8,7 @@ import { cleanGitEnv } from '../../../src/lib/git-env.ts';
 import {
   ExactGitInputError,
   readExactChangeFacts,
+  readExactTreePaths,
   type ChangeFactV1,
 } from './git-input.ts';
 import {
@@ -86,8 +87,6 @@ const TIER_ORDER: Record<RiskTier, number> = { low: 0, standard: 1, elevated: 2,
 const ALL_REVALIDATION = ['aggregate', 'classification', 'execution-plan', 'merge-result', 'metadata'];
 const METADATA_REVALIDATION = ['aggregate', 'classification', 'merge-result', 'metadata'];
 const MAX_GIT_BYTES = 32 * 1024 * 1024;
-const MAX_TREE_ENTRIES = 100_000;
-const MAX_TREE_PATH_BYTES = 1_024;
 const FULL_SUITE_FALLBACK = '@full-suite:coverage:check';
 const GIT_TIMEOUT_MS = 30_000;
 const MAX_CLASSIFIER_SOURCE_BYTES = 8 * 1024 * 1024;
@@ -219,7 +218,8 @@ function commitTreeOid(cwd: string, oid: string | null): string | null {
   return tree;
 }
 
-function candidateManifest(cwd: string, candidateOid: string): ControlManifestV1 {
+export function readControlManifestAtRevision(cwd: string, candidateOid: string): ControlManifestV1 {
+  requireCommit(cwd, candidateOid);
   const bytes = gitBytes(cwd, ['show', `${candidateOid}:controls/ci-control-manifest.json`]);
   return parseControlManifestBytes(bytes);
 }
@@ -228,7 +228,7 @@ function fallbackManifest(cwd: string, baseOid: string | null): ControlManifestV
   if (baseOid === null || !validOid(baseOid)) return null;
   try {
     requireCommit(cwd, baseOid);
-    return candidateManifest(cwd, baseOid);
+    return readControlManifestAtRevision(cwd, baseOid);
   } catch {
     return null;
   }
@@ -298,29 +298,8 @@ function classifierDigest(): string {
   );
 }
 
-function fullTreeBytes(cwd: string, candidateOid: string): Buffer {
-  return gitBytes(cwd, ['ls-tree', '-rz', '--full-tree', candidateOid]);
-}
-
-function testSuitesFromTree(bytes: Buffer): string[] {
-  if (bytes.length > 0 && bytes[bytes.length - 1] !== 0) throw new Error('ci.classification.graph-unavailable');
-  const decoder = new TextDecoder('utf-8', { fatal: true });
-  const suites: string[] = [];
-  const entries = bytes.subarray(0, bytes.length === 0 ? 0 : bytes.length - 1).toString('binary').split('\0');
-  if (entries.length > MAX_TREE_ENTRIES) throw new Error('ci.classification.graph-unavailable');
-  for (const entry of entries) {
-    if (entry.length === 0) continue;
-    const raw = Buffer.from(entry, 'binary');
-    const tab = raw.indexOf(0x09);
-    if (tab < 0) throw new Error('ci.classification.graph-unavailable');
-    const metadata = raw.subarray(0, tab).toString('ascii');
-    const pathBytes = raw.subarray(tab + 1);
-    if (pathBytes.length === 0 || pathBytes.length > MAX_TREE_PATH_BYTES) throw new Error('ci.classification.graph-unavailable');
-    const path = decoder.decode(pathBytes);
-    if (!/^\d{6} (?:blob|tree|commit) [0-9a-f]{40}$/.test(metadata)) throw new Error('ci.classification.graph-unavailable');
-    if (path.startsWith('tests/') && path.endsWith('.test.ts')) suites.push(path);
-  }
-  return [...new Set(suites)].sort();
+function testSuitesFromTree(paths: readonly string[]): string[] {
+  return paths.filter((path) => path.startsWith('tests/') && path.endsWith('.test.ts'));
 }
 
 function pathMatchesPrefix(candidatePath: string, prefix: string): boolean {
@@ -332,7 +311,7 @@ function higherTier(left: RiskTier, right: RiskTier): RiskTier {
   return TIER_ORDER[left] >= TIER_ORDER[right] ? left : right;
 }
 
-function selectRisk(manifest: ControlManifestV1, facts: ChangeFactV1[]): {
+export function classifyRiskFacts(manifest: ControlManifestV1, facts: readonly ChangeFactV1[]): {
   riskTier: RiskTier;
   reasons: string[];
   inconclusive: boolean;
@@ -423,9 +402,9 @@ function inconclusiveResult(cwd: string, input: ExactRevisionInput, reason: stri
   let graphComplete = false;
   try {
     if (validOid(input.candidateOid) && commitExists(cwd, input.candidateOid)) {
-      const tree = fullTreeBytes(cwd, input.candidateOid);
-      graphDigest = digestBytes(tree);
-      suites = testSuitesFromTree(tree);
+      const tree = readExactTreePaths(cwd, input.candidateOid);
+      graphDigest = tree.listingDigest;
+      suites = testSuitesFromTree(tree.paths);
       graphComplete = true;
     }
   } catch {
@@ -485,7 +464,7 @@ export function classifyExactRevision(cwd: string, input: ExactRevisionInput): R
       throw error;
     }
     try {
-      manifest = candidateManifest(cwd, input.baseOid);
+      manifest = readControlManifestAtRevision(cwd, input.baseOid);
     } catch (error) {
       if (error instanceof ControlManifestError) {
         throw new Error('ci.classification.manifest-invalid', { cause: error });
@@ -524,10 +503,10 @@ export function classifyExactRevision(cwd: string, input: ExactRevisionInput): R
     }
     const evaluatedOid = input.mergeOid ?? input.candidateOid;
     changed = readExactChangeFacts(cwd, input.baseOid, evaluatedOid);
-    const tree = fullTreeBytes(cwd, evaluatedOid);
-    const risk = selectRisk(manifest, changed);
+    const tree = readExactTreePaths(cwd, evaluatedOid);
+    const risk = classifyRiskFacts(manifest, changed);
     try {
-      const evaluatedManifestDigest = digestControlManifest(candidateManifest(cwd, evaluatedOid));
+      const evaluatedManifestDigest = digestControlManifest(readControlManifestAtRevision(cwd, evaluatedOid));
       if (evaluatedManifestDigest !== observedManifestDigest) {
         risk.riskTier = 'system-wide';
         risk.inconclusive = true;
@@ -546,14 +525,14 @@ export function classifyExactRevision(cwd: string, input: ExactRevisionInput): R
       reasons: risk.reasons,
       changed,
       requiredControls: controlsForRisk(manifest, risk.riskTier, risk.inconclusive),
-      requiredSuites: risk.riskTier === 'low' ? [] : testSuitesFromTree(tree),
+      requiredSuites: risk.riskTier === 'low' ? [] : testSuitesFromTree(tree.paths),
       baseOid: input.baseOid,
       candidateOid: input.candidateOid,
       mergeOid: input.mergeOid,
       mergeBaseOid: resolvedMergeBase,
       manifestDigest: observedManifestDigest,
       classifierDigest: classifierDigest(),
-      graphDigest: digestBytes(tree),
+      graphDigest: tree.listingDigest,
       changeSetDigest: digestBytes(canonicalizeBoundaryRun(changed)),
     };
   } catch (error) {
@@ -588,7 +567,7 @@ function treeGroupDigests(cwd: string, baseOid: string | null, remoteOid: string
     if (mergeBase(cwd, baseOid, remoteOid) !== baseOid) return null;
     const groups: Record<keyof TreeGroupDigestsV1, ChangeFactV1[]> = { documentation: [], enforcement: [] };
     for (const fact of readExactChangeFacts(cwd, baseOid, remoteOid)) {
-      const risk = selectRisk(manifest, [fact]);
+      const risk = classifyRiskFacts(manifest, [fact]);
       groups[risk.riskTier === 'low' && !risk.inconclusive ? 'documentation' : 'enforcement'].push(fact);
     }
     return Object.fromEntries(Object.entries(groups).map(([key, facts]) => [key, digestBytes(canonicalizeBoundaryRun(facts))])) as unknown as TreeGroupDigestsV1;
@@ -611,7 +590,7 @@ export function acquireLineageLease(cwd: string, input: LineageLeaseInput): Line
   let manifest: ControlManifestV1;
   try {
     if (input.baseOid === null) throw new Error('base revision is required');
-    manifest = candidateManifest(cwd, input.baseOid);
+    manifest = readControlManifestAtRevision(cwd, input.baseOid);
   } catch (error) {
     if (error instanceof ControlManifestError) {
       throw new LineageLeaseError('ci.lineage.manifest-invalid');

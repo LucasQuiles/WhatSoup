@@ -29,6 +29,8 @@
     "guard:pre-push": "bash scripts/run-with-pinned-node.sh scripts/pre-push-guard.ts",
     "guard:hooks-installed": "bash scripts/run-with-pinned-node.sh scripts/hooks-installed-guard.ts --json",
     "ci:ref-policy": "bash scripts/run-with-pinned-node.sh scripts/ci-control-ref-policy.ts",
+    "drift:classify": "bash scripts/run-with-pinned-node.sh scripts/drift-classify.ts",
+    "guard:drift-coverage": "npm run drift:classify -- --self-check",
     "guard:doc-drift": "bash scripts/run-with-pinned-node.sh scripts/doc-drift-check.ts",
     "guard:doc-tally": "bash scripts/run-with-pinned-node.sh scripts/guard-doc-tally.ts",
     "guard:design-system-hygiene": "bash scripts/run-with-pinned-node.sh scripts/design-system-hygiene-guard.ts",

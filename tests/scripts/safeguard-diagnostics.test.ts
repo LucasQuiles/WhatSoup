@@ -33,6 +33,8 @@ const requiredPackageScripts = {
   'guard:agent-decision-polls': 'node scripts/agent-decision-polls-guard.ts',
   'guard:semantic-quality': 'node scripts/semantic-quality-check.ts',
   'guard:safeguard-diagnostics': 'node scripts/safeguard-diagnostics.ts',
+  'drift:classify': 'node scripts/drift-classify.ts',
+  'guard:drift-coverage': 'npm run drift:classify -- --self-check',
   'guard:fleet-bot-hardening-parity': 'node scripts/check-fleet-bot-hardening-parity.ts',
   'guard:bot-errors-runtime-manifest': 'node scripts/check-bot-errors-runtime-manifest.ts',
   'test:design-guards': 'npm test -- tests/scripts/theme-parity.test.ts tests/scripts/token-spec-drift.test.ts tests/scripts/contrast-matrix.test.ts tests/scripts/shadow-baseline.test.ts tests/scripts/shadow-frozen-inventory.test.ts tests/scripts/raw-form-control-inventory.test.ts tests/scripts/design-regression-guards.test.ts tests/scripts/design-metrics.test.ts tests/scripts/design-burndown-check.test.ts tests/scripts/color-semantics.test.ts tests/scripts/design-resilience-audit.test.ts tests/scripts/font-assets.test.ts tests/scripts/brand-assets.test.ts tests/scripts/design-lint-fixtures.test.ts --pool=forks',
@@ -223,6 +225,9 @@ const requiredQualityWorkflow = [
   '        run: install-test-integrity',
   '      - name: Test integrity baseline check',
   '        run: npm run guard:test-integrity',
+  '      - name: Drift classifier coverage',
+  '        continue-on-error: true',
+  '        run: npm run guard:drift-coverage',
   '      - name: Install console dependencies',
   '        run: npm --prefix console ci',
   '      - name: Design-system hygiene changed files',
@@ -479,6 +484,31 @@ describe('safeguard diagnostics', () => {
       status: 'fail',
       evidence: expect.arrayContaining(['verify:console-browser']),
     });
+  });
+
+  it('fails when Quality loses canonical drift coverage', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace(
+      /      - name: Drift classifier coverage\n        continue-on-error: true\n        run: npm run guard:drift-coverage\n/,
+      '',
+    );
+    expect(mutated).not.toBe(workflow);
+    const result = checkSafeguards(makeRepo({ files: { '.github/workflows/quality.yml': mutated } }));
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-drift-coverage'))
+      .toMatchObject({ status: 'fail' });
+  });
+
+  it('requires the report-only drift coverage step to remain explicitly advisory', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace('        continue-on-error: true\n        run: npm run guard:drift-coverage', '        run: npm run guard:drift-coverage');
+    expect(mutated).not.toBe(workflow);
+    const result = checkSafeguards(makeRepo({ files: { '.github/workflows/quality.yml': mutated } }));
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-drift-coverage'))
+      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining([
+        'run: npm run guard:drift-coverage must declare continue-on-error: true',
+      ]) });
   });
 
   it('fails when a verify chain omits the diagnostic guard', () => {

@@ -251,6 +251,46 @@ const REASONS = deepFreeze([
     },
   }),
   defineReason({
+    code: 'git.lineage.base.unchanged', outcome: 'pass', guidanceKind: 'none', metadataState: 'complete',
+    canonicalOwner: 'ci.git-lineage.owner', applicableStages: ['local', 'pull-request', 'merge-group', 'default-branch'],
+    requiredIdentityBindings: ['baseOid', 'candidateOid', 'policyDigest', 'manifestDigest', 'classifierDigest', 'toolDigest'],
+    messageTemplate: { summary: 'The observed base identity is unchanged.', guidance: ['Retain the exact observation bindings.'] },
+  }),
+  defineReason({
+    code: 'git.lineage.base.drift-disjoint', outcome: 'warn', guidanceKind: 'evidence-recovery', metadataState: 'complete',
+    canonicalOwner: 'ci.git-lineage.owner', applicableStages: ['local', 'pull-request', 'merge-group', 'default-branch'],
+    requiredIdentityBindings: ['baseOid', 'candidateOid', 'policyDigest', 'manifestDigest', 'classifierDigest', 'toolDigest'],
+    messageTemplate: {
+      summary: 'The observed base moved only across a proven disjoint surface.',
+      guidance: ['Preserve eligible candidate-only evidence and regenerate classification, metadata, merge-result, and aggregate evidence.'],
+    },
+    warningPolicy: {
+      owner: 'ci.git-lineage.owner',
+      remediationSlaHours: 8,
+      expiresAfterHours: 12,
+      escalationCondition: 'The disjoint-drift observation expires or later evidence proves relevant drift.',
+      successorCode: 'git.lineage.base.drift-relevant',
+    },
+  }),
+  defineReason({
+    code: 'git.lineage.base.drift-relevant', outcome: 'inconclusive', guidanceKind: 'escalation', metadataState: 'complete',
+    canonicalOwner: 'ci.git-lineage.owner', applicableStages: ['local', 'pull-request', 'merge-group', 'default-branch'],
+    requiredIdentityBindings: ['baseOid', 'candidateOid', 'policyDigest', 'manifestDigest', 'classifierDigest', 'toolDigest'],
+    messageTemplate: { summary: 'The observed base changed evidence-bearing source or dependencies.', guidance: ['Reconcile lineage and replay the invalidated dependency closure before authorization.'] },
+  }),
+  defineReason({
+    code: 'git.lineage.base.drift-policy', outcome: 'inconclusive', guidanceKind: 'escalation', metadataState: 'complete',
+    canonicalOwner: 'ci.git-lineage.owner', applicableStages: ['local', 'pull-request', 'merge-group', 'default-branch'],
+    requiredIdentityBindings: ['baseOid', 'candidateOid', 'policyDigest', 'manifestDigest', 'classifierDigest', 'toolDigest'],
+    messageTemplate: { summary: 'The observed base changed policy, workflow, hooks, or classifier source.', guidance: ['Stop mutation and regenerate every policy-sensitive result under the reconciled judge.'] },
+  }),
+  defineReason({
+    code: 'git.merge.result.conflict', outcome: 'block', guidanceKind: 'escalation', metadataState: 'complete',
+    canonicalOwner: 'ci.git-lineage.owner', applicableStages: ['local', 'pull-request', 'merge-group', 'default-branch'],
+    requiredIdentityBindings: ['baseOid', 'candidateOid', 'policyDigest', 'manifestDigest', 'classifierDigest', 'toolDigest'],
+    messageTemplate: { summary: 'Candidate and observed-base changes overlap on the same structural path.', guidance: ['Preserve both histories and route the conflict to the designated integrator.'] },
+  }),
+  defineReason({
     code: 'ci.execution.attempt-inconclusive', outcome: 'inconclusive', guidanceKind: 'evidence-recovery', metadataState: 'complete',
     canonicalOwner: 'ci-policy-owner', applicableStages: ALL_EXECUTION_STAGES,
     requiredIdentityBindings: ['candidateOid', 'policyDigest', 'toolDigest', 'attemptDigest'],
@@ -267,7 +307,7 @@ const REASONS = deepFreeze([
   defineReason({ code: 'ci.execution.invalid-receipt', outcome: 'inconclusive', guidanceKind: 'evidence-recovery' }),
   defineReason({
     code: 'ci.native.receipt-unavailable', outcome: 'inconclusive', guidanceKind: 'evidence-recovery', metadataState: 'complete',
-    canonicalOwner: 'ci.native-adapter.owner', applicableStages: ['local', 'pre-push', 'pull-request', 'merge-group'],
+    canonicalOwner: 'ci.native-adapter.owner', applicableStages: ['local', 'pre-push', 'pull-request', 'merge-group', 'default-branch'],
     requiredIdentityBindings: ['candidateOid', 'policyDigest', 'toolDigest', 'attemptDigest'],
     messageTemplate: { summary: 'The native detector receipt is unavailable or cannot be trusted.', guidance: ['Regenerate the native receipt for the exact revision and preserve its native cause.'] },
   }),

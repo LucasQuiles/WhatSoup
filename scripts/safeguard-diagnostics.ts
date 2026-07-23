@@ -59,6 +59,7 @@ interface AnchorRequirement {
   anchors: string[];
   requiredUnconditionalRuns?: string[];
   requiredWorkflowJob?: string;
+  requiredRunContinueOnError?: boolean;
   validate?: (text: string) => string[];
   remediation: string;
 }
@@ -86,6 +87,8 @@ const REQUIRED_SCRIPTS = [
   'guard:agent-decision-polls',
   'guard:semantic-quality',
   'guard:safeguard-diagnostics',
+  'drift:classify',
+  'guard:drift-coverage',
   'guard:fleet-bot-hardening-parity',
   'guard:bot-errors-runtime-manifest',
   'test:design-guards',
@@ -406,6 +409,19 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
       'baseline --check --ci',
     ],
     remediation: 'Restore CI fail-closed behavior for missing test-integrity tooling.',
+  },
+  {
+    id: 'quality-ci-drift-coverage',
+    category: 'guard-chain',
+    file: '.github/workflows/quality.yml',
+    anchors: [
+      'name: Drift classifier coverage',
+      'run: npm run guard:drift-coverage',
+    ],
+    requiredUnconditionalRuns: ['run: npm run guard:drift-coverage'],
+    requiredWorkflowJob: 'quality',
+    requiredRunContinueOnError: true,
+    remediation: 'Restore the report-only canonical-manifest coverage self-check in quality.yml.',
   },
   {
     id: 'quality-ci-semantic-shadow',
@@ -958,7 +974,12 @@ function qualityCiPlaywrightTimeoutFailures(text: string): string[] {
   return failures;
 }
 
-function conditionalRunFailures(text: string, runs: string[], requiredJobId?: string): string[] {
+function conditionalRunFailures(
+  text: string,
+  runs: string[],
+  requiredJobId?: string,
+  requiredContinueOnError?: boolean,
+): string[] {
   if (runs.length === 0) return [];
   const { root, failures: parseFailures } = parseWorkflow(text, 'workflow');
   if (!root) return parseFailures;
@@ -1007,7 +1028,12 @@ function conditionalRunFailures(text: string, runs: string[], requiredJobId?: st
       if (hasOwn(step, 'if')) {
         failures.add(`conditional ${requiredRun} (if: ${renderValue(step.if)})`);
       }
-      if (hasOwn(step, 'continue-on-error') && step['continue-on-error'] !== false) {
+      if (requiredContinueOnError !== undefined && step['continue-on-error'] !== requiredContinueOnError) {
+        failures.add(
+          `${requiredRun} must declare continue-on-error: ${String(requiredContinueOnError)}`,
+        );
+      } else if (requiredContinueOnError === undefined
+        && hasOwn(step, 'continue-on-error') && step['continue-on-error'] !== false) {
         failures.add(
           `advisory ${requiredRun} (continue-on-error: ${renderValue(step['continue-on-error'])})`,
         );
@@ -1044,6 +1070,7 @@ function checkAnchors(cwd: string, requirement: AnchorRequirement): DiagnosticCh
     text,
     requirement.requiredUnconditionalRuns ?? [],
     requirement.requiredWorkflowJob,
+    requirement.requiredRunContinueOnError,
   );
   const validationFailures = requirement.validate?.(text) ?? [];
   const failures = [...new Set([
