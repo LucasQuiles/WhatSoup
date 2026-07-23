@@ -14,7 +14,7 @@
     },
     {
       "path": "src/bootstrap.ts",
-      "sha256": "2d4a27dc749ea189c835af8584ac0a0641e47e0728cfdd6d1c7d5f300163f5d1",
+      "sha256": "71944b2d7eab217bbd7d829d88d45dbc0dbefd45644970352ddd664b75f8a1aa",
       "mustContain": [
         "bootstrapCommon"
       ],
@@ -22,7 +22,7 @@
     },
     {
       "path": "src/database-compatibility-bootstrap.ts",
-      "sha256": "5c20e02ce99fc8d9a31ec923c0286e26f08dc983be4d681684774f0afa7b0f61",
+      "sha256": "5d678b41a60b1f385c4c36cb9d81d3f688cd245d7afb273ced28348b9390991a",
       "mustContain": [
         "databaseCompatibilityBootstrap",
         "checkLoadedInstanceDatabase"

@@ -14,6 +14,7 @@ import { DEFAULT_SIGNAL, SIGNAL_UUID_RE, type SignalConfig, type SignalInboundMo
 import { normalizeFallbackEntriesFromAgentOptions } from './core/fallback-chain.ts';
 import { errorMessage } from './lib/error-message.ts';
 import { validateModelRoleValue } from './lib/model-resolver.ts';
+import { ConfigValidationError } from './lib/startup-error.ts';
 
 const APP_NAME = 'whatsoup';
 
@@ -239,17 +240,17 @@ function stringRecordProp(source: Record<string, unknown> | null | undefined, ke
   if (value === undefined) return {};
   const obj = asRecord(value);
   if (!obj) {
-    throw new Error(`${key} must be an object of non-empty string values`);
+    throw new ConfigValidationError(`${key} must be an object of non-empty string values`);
   }
 
   const result: Record<string, string> = {};
   for (const [rawKey, rawValue] of Object.entries(obj)) {
     const alias = rawKey.trim();
     if (alias === '' || typeof rawValue !== 'string' || rawValue.trim() === '') {
-      throw new Error(`${key} must be an object of non-empty string values`);
+      throw new ConfigValidationError(`${key} must be an object of non-empty string values`);
     }
     if (result[alias] !== undefined) {
-      throw new Error(`${key} contains duplicate alias after trimming: ${alias}`);
+      throw new ConfigValidationError(`${key} contains duplicate alias after trimming: ${alias}`);
     }
     result[alias] = rawValue.trim();
   }
@@ -261,7 +262,7 @@ function profileRecordProp(source: Record<string, unknown> | null | undefined, k
   if (value === undefined) return {};
   const obj = asRecord(value);
   if (!obj) {
-    throw new Error(`${key} must be an object of profile names to profile objects`);
+    throw new ConfigValidationError(`${key} must be an object of profile names to profile objects`);
   }
 
   const allowedFields = new Set(['prefix', 'tag', 'linkPreview']);
@@ -269,38 +270,38 @@ function profileRecordProp(source: Record<string, unknown> | null | undefined, k
   for (const [rawName, rawProfile] of Object.entries(obj)) {
     const profileName = rawName.trim();
     if (profileName === '') {
-      throw new Error(`${key} must not contain empty profile names`);
+      throw new ConfigValidationError(`${key} must not contain empty profile names`);
     }
     if (result[profileName] !== undefined) {
-      throw new Error(`${key} contains duplicate profile after trimming: ${profileName}`);
+      throw new ConfigValidationError(`${key} contains duplicate profile after trimming: ${profileName}`);
     }
 
     const profileObj = asRecord(rawProfile);
     if (!profileObj) {
-      throw new Error(`${key}.${profileName} must be an object`);
+      throw new ConfigValidationError(`${key}.${profileName} must be an object`);
     }
     for (const field of Object.keys(profileObj)) {
       if (!allowedFields.has(field)) {
-        throw new Error(`${key}.${profileName} contains unknown field: ${field}`);
+        throw new ConfigValidationError(`${key}.${profileName} contains unknown field: ${field}`);
       }
     }
 
     const profile: Profile = {};
     if (profileObj.prefix !== undefined) {
       if (typeof profileObj.prefix !== 'string') {
-        throw new Error(`${key}.${profileName}.prefix must be a string`);
+        throw new ConfigValidationError(`${key}.${profileName}.prefix must be a string`);
       }
       profile.prefix = profileObj.prefix;
     }
     if (profileObj.tag !== undefined) {
       if (typeof profileObj.tag !== 'string') {
-        throw new Error(`${key}.${profileName}.tag must be a string`);
+        throw new ConfigValidationError(`${key}.${profileName}.tag must be a string`);
       }
       profile.tag = profileObj.tag;
     }
     if (profileObj.linkPreview !== undefined) {
       if (profileObj.linkPreview !== 'auto' && profileObj.linkPreview !== 'off') {
-        throw new Error(`${key}.${profileName}.linkPreview must be "auto" or "off"`);
+        throw new ConfigValidationError(`${key}.${profileName}.linkPreview must be "auto" or "off"`);
       }
       profile.linkPreview = profileObj.linkPreview;
     }
@@ -358,7 +359,7 @@ if (instanceRaw) {
   try {
     instance = JSON.parse(instanceRaw) as Record<string, any>;
   } catch (err) {
-    throw new Error(
+    throw new ConfigValidationError(
       `INSTANCE_CONFIG contains invalid JSON: ${errorMessage(err)}`
     );
   }
@@ -384,7 +385,7 @@ if (instance) {
       typeof instance.paths.configRoot !== 'string' ||
       typeof instance.paths.dataRoot !== 'string' ||
       typeof instance.paths.stateRoot !== 'string') {
-    throw new Error('INSTANCE_CONFIG is missing required paths object');
+    throw new ConfigValidationError('INSTANCE_CONFIG is missing required paths object');
   }
   configRoot = instance.paths.configRoot as string;
   dataRoot = instance.paths.dataRoot as string;
@@ -448,7 +449,7 @@ export function resolveAdminIdentities(
       if (SIGNAL_UUID_RE.test(lower)) return lower;
       const wireIdentity = normalizePhoneE164Wire(trimmed);
       if (!wireIdentity) {
-        throw new Error('Signal admin identity must be a UUID or E.164 phone number');
+        throw new ConfigValidationError('Signal admin identity must be a UUID or E.164 phone number');
       }
       return wireIdentity;
     }
@@ -779,7 +780,7 @@ export function resolveSignalConfig(
 
   const rawMode = src['inboundMode'];
   if (rawMode !== undefined && rawMode !== 'poll') {
-    throw new Error(
+    throw new ConfigValidationError(
       `Invalid signalConfig.inboundMode ${JSON.stringify(rawMode)} — streaming is not implemented; use "poll"`,
     );
   }
@@ -791,19 +792,19 @@ export function resolveSignalConfig(
   const rateLimitSrc = asRecord(src['rateLimit']);
   const pollIntervalMs = numberProp(src, 'pollIntervalMs', DEFAULT_SIGNAL.pollIntervalMs);
   if (!Number.isInteger(pollIntervalMs) || pollIntervalMs <= 0 || pollIntervalMs > 2_147_483_647) {
-    throw new Error('Invalid signalConfig.pollIntervalMs — expected a positive 32-bit timer integer');
+    throw new ConfigValidationError('Invalid signalConfig.pollIntervalMs — expected a positive 32-bit timer integer');
   }
   if (socketPath !== undefined && !isAbsolute(socketPath)) {
-    throw new Error('Invalid signalConfig.socketPath — expected an absolute path');
+    throw new ConfigValidationError('Invalid signalConfig.socketPath — expected an absolute path');
   }
   if (socketPath !== undefined && tcpPort !== undefined) {
-    throw new Error('Invalid signalConfig endpoint — select exactly one of socketPath or tcpPort');
+    throw new ConfigValidationError('Invalid signalConfig endpoint — select exactly one of socketPath or tcpPort');
   }
   if (tcpHost !== undefined && tcpPort === undefined) {
-    throw new Error('Invalid signalConfig endpoint — tcpHost requires tcpPort');
+    throw new ConfigValidationError('Invalid signalConfig endpoint — tcpHost requires tcpPort');
   }
   if (socketPath === undefined && tcpPort === undefined) {
-    throw new Error('Invalid signalConfig endpoint — select exactly one of socketPath or tcpPort');
+    throw new ConfigValidationError('Invalid signalConfig endpoint — select exactly one of socketPath or tcpPort');
   }
   if (
     tcpHost !== undefined &&
@@ -811,7 +812,7 @@ export function resolveSignalConfig(
     tcpHost !== '::1' &&
     tcpHost !== 'localhost'
   ) {
-    throw new Error('Invalid signalConfig endpoint — plaintext TCP must use a loopback host');
+    throw new ConfigValidationError('Invalid signalConfig endpoint — plaintext TCP must use a loopback host');
   }
 
   return {
@@ -989,6 +990,20 @@ const resolvedFallbacks = normalizeFallbackEntriesFromAgentOptions(resolvedAgent
 const resolvedChatOptions = (instance?.chatOptions as Record<string, unknown> | undefined) ?? {};
 const resolvedTranscriptionOptions = (instance?.transcriptionOptions as Record<string, unknown> | undefined) ?? {};
 
+// Load-time model-role validation: a malformed symbolic model value is a permanent
+// config typo. validateModelRoleValue throws a bare Error; convert it to a
+// ConfigValidationError so a model typo exits EX_CONFIG(78) (stops the restart-flap)
+// rather than exit 1. (validateInstanceConfig does NOT validate the model value
+// format, only a top-level/models.conversation consistency rule, so this is the sole
+// gate for symbolic-model typos on the startup path.)
+function configModelRole(value: string, role: string): string {
+  try {
+    return validateModelRoleValue(value, role);
+  } catch (err) {
+    throw new ConfigValidationError(errorMessage(err));
+  }
+}
+
 export const config = {
   // NL-first routing aliases + per-sender preference store (owner-approved
   // PR-plan v2). Default false: flag off keeps behavior byte-identical —
@@ -1020,10 +1035,10 @@ export const config = {
   // (src/lib/model-resolver.ts). Validation throws at load on malformed
   // symbolic values so typos never reach a provider as bogus literal IDs.
   models: {
-    conversation: validateModelRoleValue((instanceModels.conversation as string | undefined) ?? process.env.CONVERSATION_MODEL ?? 'claude-opus-4-8', 'conversation'),
-    extraction: validateModelRoleValue((instanceModels.extraction as string | undefined) ?? process.env.EXTRACTION_MODEL ?? 'claude-sonnet-4-6', 'extraction'),
-    validation: validateModelRoleValue((instanceModels.validation as string | undefined) ?? process.env.VALIDATION_MODEL ?? 'claude-haiku-4-5', 'validation'),
-    fallback: validateModelRoleValue((instanceModels.fallback as string | undefined) ?? process.env.FALLBACK_MODEL ?? 'gpt-5.4', 'fallback'),
+    conversation: configModelRole((instanceModels.conversation as string | undefined) ?? process.env.CONVERSATION_MODEL ?? 'claude-opus-4-8', 'conversation'),
+    extraction: configModelRole((instanceModels.extraction as string | undefined) ?? process.env.EXTRACTION_MODEL ?? 'claude-sonnet-4-6', 'extraction'),
+    validation: configModelRole((instanceModels.validation as string | undefined) ?? process.env.VALIDATION_MODEL ?? 'claude-haiku-4-5', 'validation'),
+    fallback: configModelRole((instanceModels.fallback as string | undefined) ?? process.env.FALLBACK_MODEL ?? 'gpt-5.4', 'fallback'),
   },
 
   // Conversation
@@ -1322,7 +1337,7 @@ export const config = {
   accessMode: (() => {
     const raw = (instance?.accessMode as string | undefined) ?? 'allowlist';
     if (!VALID_ACCESS_MODES.has(raw)) {
-      throw new Error(
+      throw new ConfigValidationError(
         `Invalid accessMode "${raw}" — must be one of: ${[...VALID_ACCESS_MODES].join(', ')}`,
       );
     }
@@ -1339,7 +1354,7 @@ export const config = {
       ?? (instance?.groupSenderPolicy as string | undefined)
       ?? 'any_member';
     if (!VALID_GROUP_SENDER_POLICIES.has(raw)) {
-      throw new Error(
+      throw new ConfigValidationError(
         `Invalid groupSenderPolicy "${raw}" — must be one of: ${[...VALID_GROUP_SENDER_POLICIES].join(', ')}`,
       );
     }
