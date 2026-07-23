@@ -10,6 +10,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { run } from '../../scripts/validate-private-operation-record.ts';
+import { PRIVATE_OPERATION_ACTIONS } from '../../src/lib/private-operation-record.ts';
 
 const tempRoots: string[] = [];
 
@@ -32,16 +33,43 @@ function validRecord(): Record<string, unknown> {
     created_at: '2026-07-23T17:00:00Z',
     operator_identity: 'local-operator',
     target_commit: 'a'.repeat(40),
-    steps: [{
-      sequence: 1,
-      action: 'preserve_tailscale_access',
-      status: 'completed',
-      started_at: '2026-07-23T17:01:00Z',
-      completed_at: '2026-07-23T17:02:00Z',
-      target_ids: ['node-opaque-abc'],
-      pre_evidence: { expiry_disabled: false },
-      post_evidence: { expiry_disabled: true },
-    }],
+    steps: PRIVATE_OPERATION_ACTIONS.map((action, index) => index === 0
+      ? {
+          sequence: 1,
+          action,
+          status: 'completed',
+          started_at: '2026-07-23T17:01:00Z',
+          completed_at: '2026-07-23T17:02:00Z',
+          target_ids: ['node-opaque-abc'],
+          pre_evidence: {
+            node_id_hash: `sha256:${'1'.repeat(64)}`,
+            hostname_hash: `sha256:${'2'.repeat(64)}`,
+            tags_hash: `sha256:${'3'.repeat(64)}`,
+            node_online: true,
+            expiry_disabled: false,
+          },
+          post_evidence: {
+            node_id_hash: `sha256:${'1'.repeat(64)}`,
+            hostname_hash: `sha256:${'2'.repeat(64)}`,
+            tags_hash: `sha256:${'3'.repeat(64)}`,
+            node_online: true,
+            expiry_disabled: true,
+          },
+        }
+      : {
+          sequence: index + 1,
+          action,
+          status: 'planned',
+          started_at: null,
+          completed_at: null,
+          target_ids: action === 'retire_quarantine_deliveries'
+            ? ['101', '102', '103']
+            : action === 'resolve_access_request'
+              ? ['201']
+              : [],
+          pre_evidence: {},
+          post_evidence: {},
+        }),
   };
 }
 
@@ -80,11 +108,30 @@ describe('validate-private-operation-record CLI', () => {
       },
       schemas: {
         validate_input: { type: 'object' },
-        validate_output: { oneOf: expect.any(Array) },
+        validate_output: {
+          oneOf: expect.arrayContaining([
+            expect.objectContaining({
+              properties: expect.objectContaining({
+                errors: expect.objectContaining({
+                  items: expect.objectContaining({
+                    properties: expect.objectContaining({
+                      kind: { enum: expect.any(Array) },
+                    }),
+                  }),
+                }),
+              }),
+            }),
+          ]),
+        },
         record: {
+          $comment: expect.stringContaining('Runtime semantic constraints'),
           properties: {
             steps: {
+              minItems: PRIVATE_OPERATION_ACTIONS.length,
+              maxItems: PRIVATE_OPERATION_ACTIONS.length,
+              prefixItems: expect.any(Array),
               items: {
+                allOf: expect.any(Array),
                 properties: {
                   pre_evidence: {
                     additionalProperties: { oneOf: expect.any(Array) },
@@ -92,7 +139,7 @@ describe('validate-private-operation-record CLI', () => {
                   },
                   target_ids: {
                     items: {
-                      pattern: expect.stringContaining('?!'),
+                      pattern: expect.stringContaining('(?:\\d[._:-]*){7}'),
                     },
                   },
                 },
@@ -113,7 +160,7 @@ describe('validate-private-operation-record CLI', () => {
       ok: true,
       command: 'validate',
       schema_version: 1,
-      step_count: 1,
+      step_count: 7,
     });
     expect(result.raw.trim().split('\n')).toHaveLength(1);
   });

@@ -1069,6 +1069,20 @@ completeness failure; exit `2` means the file could not be read safely.
 Diagnostics contain stable kinds and JSON paths but never rejected values, raw
 file content, private target IDs, or filesystem paths.
 
+The published schema includes the same closed action, status, reason, evidence,
+and error-kind registries enforced by the validator. Runtime validation also
+enforces semantic relationships JSON Schema cannot fully express: timestamps
+must be calendar-valid RFC 3339 values in nondecreasing execution order;
+completed and skipped steps form the executed prefix; every step after the
+first planned or aborted gate remains planned; and each registered host action
+appears once in the published dependency order (Tailscale preservation first,
+then credential/token/launchd gates, then quarantine/access work and final
+acceptance). Action-specific evidence must prove the operation. Tailscale
+evidence in particular pins the node ID, hostname, and tag hashes across
+pre/post receipts and requires the same node to remain online with expiry
+disabled. Full phone-like target IDs are rejected even when prefixed or
+separator-formatted; short numeric database row IDs remain valid.
+
 ### 7.6 Check Inbound/Outbound Durability State
 
 ```bash

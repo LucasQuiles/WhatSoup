@@ -43,7 +43,7 @@ export class LoopLagSampler {
   }
 
   snapshot(): LoopLagSnapshot {
-    this.observe(false);
+    this.observe();
     const p95LagMs = this.percentile95(this.samples);
     return {
       sampleCount: this.samples.length,
@@ -57,13 +57,13 @@ export class LoopLagSampler {
   }
 
   private sample(): void {
-    this.observe(true);
+    this.observe();
   }
 
-  private observe(timerFired: boolean): void {
+  private observe(): void {
     const actualAtMs = this.now();
     const expectedAtMs = this.expectedAtMs;
-    if (expectedAtMs === null || (!timerFired && actualAtMs < expectedAtMs)) return;
+    if (expectedAtMs === null || actualAtMs < expectedAtMs) return;
 
     const lagMs = Math.max(0, actualAtMs - expectedAtMs);
     if (lagMs > LOOP_LAG_DISCONTINUITY_THRESHOLD_MS) {

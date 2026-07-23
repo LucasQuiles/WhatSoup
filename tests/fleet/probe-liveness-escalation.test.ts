@@ -67,7 +67,7 @@ describe('LoopLagSampler', () => {
     vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
   }
 
-  it('samples every 500ms and clamps early callbacks to zero lag', () => {
+  it('samples every 500ms and ignores callbacks earlier than the monotonic expectation', () => {
     const sampler = createSampler();
     sampler.start();
 
@@ -77,8 +77,8 @@ describe('LoopLagSampler', () => {
     nowMs = 100;
     vi.advanceTimersByTime(1);
     expect(sampler.snapshot()).toMatchObject({
-      sampleCount: 1,
-      p95LagMs: 0,
+      sampleCount: 0,
+      p95LagMs: null,
       locallyStarved: false,
     });
 
@@ -193,21 +193,28 @@ describe('LoopLagSampler', () => {
   });
 
   it.each(['timer-first', 'snapshot-first'] as const)(
-    'consumes one physical discontinuity exactly once when observed %s',
+    'produces the same empty window after consuming one physical discontinuity %s',
     (order) => {
       const sampler = createSampler();
       sampler.start();
       nowMs += LOOP_LAG_SAMPLE_INTERVAL_MS + 10_001;
 
+      let snapshot;
       if (order === 'timer-first') {
         vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
-        expect(sampler.snapshot().discontinuityCount).toBe(1);
+        snapshot = sampler.snapshot();
       } else {
-        expect(sampler.snapshot().discontinuityCount).toBe(1);
+        snapshot = sampler.snapshot();
         vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
       }
 
-      expect(sampler.snapshot().discontinuityCount).toBe(1);
+      expect(snapshot).toEqual({
+        sampleCount: 0,
+        p95LagMs: null,
+        locallyStarved: false,
+        discontinuityCount: 1,
+      });
+      expect(sampler.snapshot()).toEqual(snapshot);
       sampler.stop();
     },
   );

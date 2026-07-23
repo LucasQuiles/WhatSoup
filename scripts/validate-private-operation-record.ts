@@ -2,6 +2,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import {
+  PRIVATE_OPERATION_ERROR_KINDS,
   PRIVATE_OPERATION_RECORD_SCHEMA,
   validatePrivateOperationRecordFile,
   type PrivateOperationRecordError,
@@ -26,7 +27,7 @@ const ERROR_SCHEMA = {
   additionalProperties: false,
   required: ['kind', 'path', 'message', 'retryable', 'hint'],
   properties: {
-    kind: { type: 'string' },
+    kind: { enum: PRIVATE_OPERATION_ERROR_KINDS },
     path: { type: 'string' },
     message: { type: 'string' },
     retryable: { type: 'boolean' },
