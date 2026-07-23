@@ -91,114 +91,141 @@ export class EnrichmentPoller {
 
     log.debug({ count: messages.length }, 'enrichment: processing messages');
 
-    // Group by chatJid
-    const byChat = new Map<string, StoredMessage[]>();
-    for (const msg of messages) {
-      const existing = byChat.get(msg.chatJid);
-      if (existing) {
-        existing.push(msg);
-      } else {
-        byChat.set(msg.chatJid, [msg]);
-      }
-    }
-
     let totalExtracted = 0;
     let totalQueued = 0;
     const successPks: number[] = [];
     const failedPks: number[] = [];
 
-    for (const [chatJid, chatMessages] of byChat) {
-      try {
-        const facts = await extractFacts(this.extractionProvider, chatMessages);
-        if (this.stopped) return;
-        totalExtracted = totalExtracted + facts.length;
-
-        if (facts.length === 0) {
-          for (const msg of chatMessages) successPks.push(msg.pk);
-          continue;
-        }
-
-        const validated = await validateFacts(this.validationProvider, facts, chatMessages);
-        if (this.stopped) return;
-
-        if (validated.length === 0) {
-          for (const msg of chatMessages) successPks.push(msg.pk);
-          continue;
-        }
-
-        // Enqueue validated facts for an external Pinecone exporter. Source
-        // messages are marked processed after successful queueing, NOT after
-        // Pinecone write. A deployment-provided bridge, if configured, owns the
-        // remote upsert and calls markFactsExported after Pinecone confirms.
-        //
-        // Queue accounting-gated promotion: we only mark the segment's
-        // messages as processed if the queue accepted every fact without
-        // a hard failure. `failed === 0 && inserted + duplicates === facts.length`
-        // captures both the "all new" and the "some idempotent duplicates"
-        // happy paths; any mismatch means at least one fact did not land
-        // and the source messages must remain eligible for retry.
-        const exportable = validated.map(toExportable);
-        const result = enqueueFacts(this.db, exportable);
-        totalQueued = totalQueued + result.inserted;
-
-        const accountingOk =
-          result.failed === 0 &&
-          result.inserted + result.duplicates === exportable.length;
-
-        if (accountingOk) {
-          for (const msg of chatMessages) successPks.push(msg.pk);
+    // Every per-chat-segment failure below (extraction, validation, enqueue)
+    // is already caught and handled inline so the cycle can continue with
+    // the next chat. This outer try/catch is a safety net for anything that
+    // escapes that segment-level handling — e.g. a bug in the grouping or
+    // accounting logic itself — so a genuinely unanticipated throw still
+    // produces a durable enrichment_runs row instead of silently vanishing
+    // before reaching the success-path INSERT below.
+    try {
+      // Group by chatJid
+      const byChat = new Map<string, StoredMessage[]>();
+      for (const msg of messages) {
+        const existing = byChat.get(msg.chatJid);
+        if (existing) {
+          existing.push(msg);
         } else {
-          log.warn(
-            {
-              chatJid,
-              expected: exportable.length,
-              attempted: result.attempted,
-              inserted: result.inserted,
-              duplicates: result.duplicates,
-              failed: result.failed,
-              segmentMessagePks: chatMessages.map((m) => m.pk),
-              ...(runId ? { runId } : {}),
-            },
-            'enrichment: queue accounting mismatch — segment messages NOT marked processed',
-          );
-        }
-      } catch (err) {
-        log.error({ err, chatJid }, 'enrichment: segment processing failed');
-        const retryPks: number[] = [];
-        for (const msg of chatMessages) {
-          // enrichmentRetries is the count BEFORE this failure (read from DB)
-          const nextRetry = msg.enrichmentRetries + 1;
-          if (nextRetry >= config.enrichmentMaxRetries) {
-            log.warn(
-              { pk: msg.pk, chatJid, retries: nextRetry },
-              'enrichment: message permanently failed — max_retries_exceeded',
-            );
-            failedPks.push(msg.pk);
-          } else {
-            retryPks.push(msg.pk);
-          }
-        }
-        // Persist incremented retry counts for messages that will be retried
-        try {
-          incrementEnrichmentRetries(this.db, retryPks);
-        } catch (dbErr) {
-          log.error({ err: dbErr }, 'enrichment: failed to persist retry counters');
+          byChat.set(msg.chatJid, [msg]);
         }
       }
-    }
 
-    // Mark successes as processed
-    try {
-      markMessagesProcessed(this.db, successPks);
-    } catch (err) {
-      log.error({ err }, 'enrichment: failed to mark messages processed');
-    }
+      for (const [chatJid, chatMessages] of byChat) {
+        try {
+          const facts = await extractFacts(this.extractionProvider, chatMessages);
+          if (this.stopped) return;
+          totalExtracted = totalExtracted + facts.length;
 
-    // Mark terminal failures
-    try {
-      markMessagesWithError(this.db, failedPks, 'max_retries_exceeded');
+          if (facts.length === 0) {
+            for (const msg of chatMessages) successPks.push(msg.pk);
+            continue;
+          }
+
+          const validated = await validateFacts(this.validationProvider, facts, chatMessages);
+          if (this.stopped) return;
+
+          if (validated.length === 0) {
+            for (const msg of chatMessages) successPks.push(msg.pk);
+            continue;
+          }
+
+          // Enqueue validated facts for an external Pinecone exporter. Source
+          // messages are marked processed after successful queueing, NOT after
+          // Pinecone write. A deployment-provided bridge, if configured, owns the
+          // remote upsert and calls markFactsExported after Pinecone confirms.
+          //
+          // Queue accounting-gated promotion: we only mark the segment's
+          // messages as processed if the queue accepted every fact without
+          // a hard failure. `failed === 0 && inserted + duplicates === facts.length`
+          // captures both the "all new" and the "some idempotent duplicates"
+          // happy paths; any mismatch means at least one fact did not land
+          // and the source messages must remain eligible for retry.
+          const exportable = validated.map(toExportable);
+          const result = enqueueFacts(this.db, exportable);
+          totalQueued = totalQueued + result.inserted;
+
+          const accountingOk =
+            result.failed === 0 &&
+            result.inserted + result.duplicates === exportable.length;
+
+          if (accountingOk) {
+            for (const msg of chatMessages) successPks.push(msg.pk);
+          } else {
+            log.warn(
+              {
+                chatJid,
+                expected: exportable.length,
+                attempted: result.attempted,
+                inserted: result.inserted,
+                duplicates: result.duplicates,
+                failed: result.failed,
+                segmentMessagePks: chatMessages.map((m) => m.pk),
+                ...(runId ? { runId } : {}),
+              },
+              'enrichment: queue accounting mismatch — segment messages NOT marked processed',
+            );
+          }
+        } catch (err) {
+          log.error({ err, chatJid }, 'enrichment: segment processing failed');
+          const retryPks: number[] = [];
+          for (const msg of chatMessages) {
+            // enrichmentRetries is the count BEFORE this failure (read from DB)
+            const nextRetry = msg.enrichmentRetries + 1;
+            if (nextRetry >= config.enrichmentMaxRetries) {
+              log.warn(
+                { pk: msg.pk, chatJid, retries: nextRetry },
+                'enrichment: message permanently failed — max_retries_exceeded',
+              );
+              failedPks.push(msg.pk);
+            } else {
+              retryPks.push(msg.pk);
+            }
+          }
+          // Persist incremented retry counts for messages that will be retried
+          try {
+            incrementEnrichmentRetries(this.db, retryPks);
+          } catch (dbErr) {
+            log.error({ err: dbErr }, 'enrichment: failed to persist retry counters');
+          }
+        }
+      }
+
+      // Mark successes as processed
+      try {
+        markMessagesProcessed(this.db, successPks);
+      } catch (err) {
+        log.error({ err }, 'enrichment: failed to mark messages processed');
+      }
+
+      // Mark terminal failures
+      try {
+        markMessagesWithError(this.db, failedPks, 'max_retries_exceeded');
+      } catch (err) {
+        log.error({ err }, 'enrichment: failed to mark messages with error');
+      }
     } catch (err) {
-      log.error({ err }, 'enrichment: failed to mark messages with error');
+      // Unexpected throw that escaped all of the above segment-level
+      // handling. Record a terminal-failure enrichment_runs row — using
+      // whatever counts were accumulated before the throw — instead of
+      // letting the cycle vanish with no evidence at all.
+      const messagesProcessedAtFailure = successPks.length + failedPks.length;
+      const message = err instanceof Error ? err.message : String(err);
+      log.error({ err }, 'enrichment: cycle processing failed — recording failure run');
+      try {
+        this.db.raw.prepare(`
+          INSERT INTO enrichment_runs (started_at, completed_at, messages_processed, facts_extracted, facts_upserted, error)
+          VALUES (?, datetime('now'), ?, ?, ?, ?)
+        `).run(new Date(cycleStart).toISOString(), messagesProcessedAtFailure, totalExtracted, totalQueued, message);
+      } catch (writeErr) {
+        log.error({ err: writeErr }, 'enrichment: failed to write enrichment_runs failure record');
+      }
+      this.lastRunAt = new Date().toISOString();
+      return;
     }
 
     const messagesProcessed = successPks.length + failedPks.length;

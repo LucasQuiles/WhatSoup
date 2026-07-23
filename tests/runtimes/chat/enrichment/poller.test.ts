@@ -283,6 +283,12 @@ describe('EnrichmentPoller', () => {
       expect.stringContaining('INSERT INTO enrichment_runs'),
     );
     expect(db._runFn).toHaveBeenCalledTimes(1);
+    // Success path writes no `error` column at all — SQLite defaults the
+    // omitted column to NULL, and the bound param list has exactly the four
+    // pre-existing values (no fifth error argument tacked on).
+    const [sql] = db._prepareFn.mock.calls[0] as [string];
+    expect(sql).not.toContain('error');
+    expect(db._runFn.mock.calls[0]).toHaveLength(4);
   });
 
   it('marks all messages in a chat segment as processed when 0 facts extracted', async () => {
@@ -651,6 +657,45 @@ describe('EnrichmentPoller', () => {
       { err: runErr },
       'enrichment: failed to write enrichment_runs record',
     );
+    expect(poller.lastRunAt).not.toBeNull();
+  });
+
+  it('records an enrichment_runs row with a non-null error when cycle processing throws (not a silent skip)', async () => {
+    // Simulate an unanticipated bug that escapes every per-segment try/catch
+    // already in the cycle (extractFacts/validateFacts/enqueueFacts failures
+    // are all guarded) by poisoning a property read on the message itself —
+    // this throws inside the chat-grouping step, before any per-chat try
+    // block exists to catch it, which is exactly the "cycle blows up before
+    // reaching the success INSERT" gap this test targets.
+    const poisoned = makeStoredMsg({ pk: 999 });
+    Object.defineProperty(poisoned, 'chatJid', {
+      get() {
+        throw new Error('chatJid access exploded');
+      },
+    });
+    vi.mocked(getUnprocessedMessages).mockReturnValue([poisoned]);
+
+    const db = makeMockDb();
+    const { poller } = makePoller(db);
+    await triggerOneCycle(poller); // must not throw past runCycle
+
+    expect(db._prepareFn).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO enrichment_runs'),
+    );
+    const insertCall = db._prepareFn.mock.calls.find(([sql]) =>
+      (sql as string).includes('INSERT INTO enrichment_runs'),
+    );
+    expect(insertCall?.[0]).toContain('error');
+
+    expect(db._runFn).toHaveBeenCalledTimes(1);
+    const runArgs = db._runFn.mock.calls[0] as unknown[];
+    const errorArg = runArgs[runArgs.length - 1];
+    expect(typeof errorArg).toBe('string');
+    expect(errorArg).toContain('chatJid access exploded');
+
+    // No messages were successfully grouped/processed before the throw.
+    expect(runArgs).toContain(0);
+
     expect(poller.lastRunAt).not.toBeNull();
   });
 
