@@ -44,7 +44,10 @@ interface RecoveryEvidenceStatements {
   hasTurnDeliveryCorroboration: PreparedStatement;
 }
 
-type RecoveryOperation = 'preConnectRecovery' | 'postConnectRecovery';
+type RecoveryOperation =
+  | 'preConnectRecovery'
+  | 'postConnectRecovery'
+  | 'reconcileLiveMaybeSent';
 
 interface RecoveryPhaseFailure {
   phase: string;

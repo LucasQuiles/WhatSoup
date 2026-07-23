@@ -259,6 +259,7 @@ type DurabilityStatements = {
   markSessionOrphaned: PreparedStatement;
   getPendingInbound: PreparedStatement;
   getOutboundByStatus: PreparedStatement;
+  getLiveReconcileMaybeSent: PreparedStatement;
   getRecoverableToolCalls: PreparedStatement;
   markToolReplayed: PreparedStatement;
   markRecoveredToolQuarantined: PreparedStatement;
@@ -532,6 +533,21 @@ export class DurabilityEngine {
       ),
       getOutboundByStatus: prepare(
         `SELECT id, chat_jid, op_type, payload, wa_message_id, replay_policy, created_at, submitted_at, source_inbound_seq, is_terminal FROM outbound_ops WHERE status = ?`,
+      ),
+      getLiveReconcileMaybeSent: prepare(
+        `SELECT o.id, o.chat_jid, o.op_type, o.payload, o.wa_message_id, o.replay_policy,
+                o.created_at, o.submitted_at, o.source_inbound_seq, o.is_terminal
+         FROM outbound_ops o
+         WHERE o.status = 'maybe_sent'
+           AND COALESCE(o.submitted_at, o.created_at) < datetime('now', '-30 seconds')
+           AND NOT EXISTS (
+             SELECT 1
+             FROM turn_terminal_records t
+             JOIN turn_delivery_corroboration c ON c.terminal_record_id = t.id
+             WHERE t.delivery_op_id = o.id
+           )
+         ORDER BY o.id ASC
+         LIMIT 200`,
       ),
       getRecoverableToolCalls: prepare(
         `SELECT id, conversation_key, tool_name, replay_policy, outbound_op_id
@@ -1658,95 +1674,12 @@ export class DurabilityEngine {
       log.warn({ err }, 'postConnectRecovery: error handling stale submitted ops');
     }
 
-    // Step 2: Reconcile `maybe_sent` ops (includes those just promoted in Step 1)
-    try {
-      const maybeSent = this.getOutboundByStatus('maybe_sent');
-      for (const op of maybeSent) {
-        stats.outboundReconciled += 1;
-
-        if (this.recoveryEvidence.hasDeliveryCorroboration(op.id)) {
-          log.info(
-            { opId: op.id },
-            'postConnectRecovery: corroborated selected delivery preserved unchanged',
-          );
-          continue;
-        }
-
-        if (op.wa_message_id) {
-          // Check if message was received via normal ingest (echo confirmation)
-          const found = this.statements.getMessageByWaMessageId.get(op.wa_message_id) as
-            | { pk: number }
-            | undefined;
-
-          if (found) {
-            this.markEchoed(op.id);
-            log.info(
-              { opId: op.id, waMessageId: op.wa_message_id },
-              'postConnectRecovery: maybe_sent confirmed via messages table → echoed',
-            );
-          } else if (op.replay_policy === 'safe' || op.replay_policy === 'read_only') {
-            // Re-enqueue for replay: reset to pending
-            this.statements.resetMaybeSentWithWaToPending.run(op.id);
-            stats.outboundReplayed += 1;
-            log.info(
-              { opId: op.id },
-              'postConnectRecovery: maybe_sent not confirmed, safe/read_only → reset to pending for replay',
-            );
-          } else {
-            this.markQuarantined(op.id);
-            stats.outboundQuarantined += 1;
-            log.warn(
-              { opId: op.id, replayPolicy: op.replay_policy },
-              'postConnectRecovery: maybe_sent not confirmed, non-safe → quarantined',
-            );
-            const alertQueued = emitAlertChecked(
-              config.botName,
-              'outbound_quarantined',
-              `whatsoup@${config.botName} outbound op ${op.id} quarantined`,
-              `replay_policy=${op.replay_policy} wa_message_id=${op.wa_message_id ?? 'none'} reason=not_confirmed_non_safe`,
-            );
-            if (!alertQueued) {
-              recoveryRun.recordFailure(
-                'emit_outbound_quarantine_alert',
-                new Error(`outbound quarantine alert could not be durably queued for op ${op.id}`),
-              );
-            }
-          }
-        } else {
-          // No wa_message_id: definitely not delivered; apply replay policy
-          if (op.replay_policy === 'safe' || op.replay_policy === 'read_only') {
-            this.statements.resetMaybeSentWithoutWaToPending.run(op.id);
-            stats.outboundReplayed += 1;
-            log.info(
-              { opId: op.id },
-              'postConnectRecovery: maybe_sent (no wa_message_id), safe/read_only → reset to pending',
-            );
-          } else {
-            this.markQuarantined(op.id);
-            stats.outboundQuarantined += 1;
-            log.warn(
-              { opId: op.id, replayPolicy: op.replay_policy },
-              'postConnectRecovery: maybe_sent (no wa_message_id), non-safe → quarantined',
-            );
-            const alertQueued = emitAlertChecked(
-              config.botName,
-              'outbound_quarantined',
-              `whatsoup@${config.botName} outbound op ${op.id} quarantined`,
-              `replay_policy=${op.replay_policy} wa_message_id=none reason=no_wa_id_non_safe`,
-            );
-            if (!alertQueued) {
-              recoveryRun.recordFailure(
-                'emit_outbound_quarantine_alert',
-                new Error(`outbound quarantine alert could not be durably queued for op ${op.id}`),
-              );
-            }
-          }
-        }
-      }
-    } catch (err) {
-      recoveryRun.recordFailure('reconcile_maybe_sent_outbound', err);
-      log.warn({ err }, 'postConnectRecovery: error reconciling maybe_sent ops');
-    }
+    // Step 2: Reconcile `maybe_sent` ops (includes those just promoted in Step 1).
+    this.reconcileMaybeSentOutbound(
+      this.getOutboundByStatus('maybe_sent'),
+      recoveryRun,
+      'postConnectRecovery',
+    );
 
     recoveryRun.attestOpenRecoveries();
 
@@ -1810,6 +1743,113 @@ export class DurabilityEngine {
     recoveryRun.finalize();
     log.info(stats, 'postConnectRecovery: complete');
     return stats;
+  }
+
+  /** Reconcile delivery debt created after the one-time post-connect pass. */
+  reconcileLiveMaybeSent(): RecoveryStats {
+    const maybeSent = this.statements.getLiveReconcileMaybeSent.all() as unknown as OutboundOpRow[];
+    if (maybeSent.length === 0) return createRecoveryStats();
+
+    log.info({ count: maybeSent.length }, 'reconcileLiveMaybeSent: starting');
+    const recoveryRun = this.recoveryEvidence.begin(
+      'reconcileLiveMaybeSent',
+      'post_connect_recovery',
+      'live_maybe_sent_recovery',
+      'Live maybe-sent outbound reconciliation',
+    );
+    this.reconcileMaybeSentOutbound(maybeSent, recoveryRun, 'reconcileLiveMaybeSent');
+    recoveryRun.attestOpenRecoveries();
+    recoveryRun.finalize();
+    log.info(recoveryRun.stats, 'reconcileLiveMaybeSent: complete');
+    return recoveryRun.stats;
+  }
+
+  private reconcileMaybeSentOutbound(
+    maybeSent: OutboundOpRow[],
+    recoveryRun: {
+      readonly stats: RecoveryStats;
+      recordFailure(phase: string, error: unknown): void;
+    },
+    operation: 'postConnectRecovery' | 'reconcileLiveMaybeSent',
+  ): void {
+    const { stats } = recoveryRun;
+    try {
+      for (const op of maybeSent) {
+        stats.outboundReconciled += 1;
+
+        if (this.recoveryEvidence.hasDeliveryCorroboration(op.id)) {
+          log.info(
+            { opId: op.id },
+            `${operation}: corroborated selected delivery preserved unchanged`,
+          );
+          continue;
+        }
+
+        if (op.wa_message_id) {
+          const found = this.statements.getMessageByWaMessageId.get(op.wa_message_id) as
+            | { pk: number }
+            | undefined;
+
+          if (found) {
+            this.markEchoed(op.id);
+            log.info(
+              { opId: op.id, waMessageId: op.wa_message_id },
+              `${operation}: maybe_sent confirmed via messages table → echoed`,
+            );
+          } else if (op.replay_policy === 'safe' || op.replay_policy === 'read_only') {
+            this.statements.resetMaybeSentWithWaToPending.run(op.id);
+            stats.outboundReplayed += 1;
+            log.info(
+              { opId: op.id },
+              `${operation}: maybe_sent not confirmed, safe/read_only → reset to pending for replay`,
+            );
+          } else {
+            this.quarantineMaybeSent(op, recoveryRun, 'not_confirmed_non_safe', operation);
+          }
+        } else if (op.replay_policy === 'safe' || op.replay_policy === 'read_only') {
+          this.statements.resetMaybeSentWithoutWaToPending.run(op.id);
+          stats.outboundReplayed += 1;
+          log.info(
+            { opId: op.id },
+            `${operation}: maybe_sent (no wa_message_id), safe/read_only → reset to pending`,
+          );
+        } else {
+          this.quarantineMaybeSent(op, recoveryRun, 'no_wa_id_non_safe', operation);
+        }
+      }
+    } catch (err) {
+      recoveryRun.recordFailure('reconcile_maybe_sent_outbound', err);
+      log.warn({ err }, `${operation}: error reconciling maybe_sent ops`);
+    }
+  }
+
+  private quarantineMaybeSent(
+    op: OutboundOpRow,
+    recoveryRun: {
+      readonly stats: RecoveryStats;
+      recordFailure(phase: string, error: unknown): void;
+    },
+    reason: 'not_confirmed_non_safe' | 'no_wa_id_non_safe',
+    operation: 'postConnectRecovery' | 'reconcileLiveMaybeSent',
+  ): void {
+    this.markQuarantined(op.id);
+    recoveryRun.stats.outboundQuarantined += 1;
+    log.warn(
+      { opId: op.id, replayPolicy: op.replay_policy },
+      `${operation}: maybe_sent non-safe delivery quarantined`,
+    );
+    const alertQueued = emitAlertChecked(
+      config.botName,
+      'outbound_quarantined',
+      `whatsoup@${config.botName} outbound op ${op.id} quarantined`,
+      `replay_policy=${op.replay_policy} wa_message_id=${op.wa_message_id ?? 'none'} reason=${reason}`,
+    );
+    if (!alertQueued) {
+      recoveryRun.recordFailure(
+        'emit_outbound_quarantine_alert',
+        new Error(`outbound quarantine alert could not be durably queued for op ${op.id}`),
+      );
+    }
   }
 
   /** Promote live outbound ops whose echo window expired. */
