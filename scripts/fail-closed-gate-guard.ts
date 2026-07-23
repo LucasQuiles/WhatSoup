@@ -330,12 +330,59 @@ function walkShellFiles(root: string, dir: string, acc: string[]): void {
   }
 }
 
-export function scanRepoGates(cwd: string): GateFinding[] {
+const SCAN_ROOTS = ['scripts', 'deploy', '.husky', 'console/scripts'] as const;
+
+export interface RepoScanResult {
+  findings: GateFinding[];
+  /** Shell files actually read and parsed. Zero means the pass carries no evidence. */
+  scannedFiles: number;
+  /** Which of SCAN_ROOTS were present. A missing `.husky` is normal; all missing is not. */
+  presentRoots: string[];
+}
+
+/**
+ * Scan the repo, reporting WHAT WAS EXAMINED alongside the findings.
+ *
+ * A guard that scans nothing and prints "clean" is a false green — the exact bug class this
+ * guard exists to catch, so it must not commit it itself. Running it against an empty
+ * directory used to give exit 0 and "no shapes found" after examining zero files:
+ * `walkShellFiles` swallows a missing directory (reasonably, since `.husky/` may legitimately
+ * be absent), but nothing noticed when EVERY root was missing, so a renamed `scripts/` would
+ * have quietly reduced this to a no-op that still reported success.
+ *
+ * Two distinct refusals, because they have different causes and different fixes:
+ *   - no scan root present at all → the caller is not at a repo root (wrong cwd, moved tree)
+ *   - roots present but no shell file examined → the scope is wrong, or the tree is stripped
+ *
+ * Both throw, so `main` exits 2 INCONCLUSIVE. "I scanned the tree and it is clean" and
+ * "I scanned nothing" must never share an exit code. Mirrors the contract
+ * `check-insecure-tempfile` already holds for an unreadable root.
+ */
+export function scanRepoGatesDetailed(cwd: string): RepoScanResult {
   const candidates: string[] = [];
-  for (const sub of ['scripts', 'deploy', '.husky', 'console/scripts']) {
-    walkShellFiles(cwd, path.join(cwd, sub), candidates);
+  const presentRoots: string[] = [];
+  for (const sub of SCAN_ROOTS) {
+    const full = path.join(cwd, sub);
+    let present = false;
+    try {
+      present = statSync(full).isDirectory();
+    } catch {
+      present = false;
+    }
+    if (!present) continue;
+    presentRoots.push(sub);
+    walkShellFiles(cwd, full, candidates);
   }
+
+  if (presentRoots.length === 0) {
+    throw new Error(
+      `no scan root present under ${cwd} (looked for ${SCAN_ROOTS.join(', ')}) — ` +
+        'refusing to report "clean" for a tree that was never examined (inconclusive)',
+    );
+  }
+
   const findings: GateFinding[] = [];
+  let scannedFiles = 0;
   for (const rel of candidates) {
     if (!isGateFile(rel)) continue;
     let content: string;
@@ -344,17 +391,43 @@ export function scanRepoGates(cwd: string): GateFinding[] {
     } catch {
       continue;
     }
+    scannedFiles += 1;
     findings.push(...scanGateScript(rel, content));
   }
-  return findings;
+
+  if (scannedFiles === 0) {
+    throw new Error(
+      `examined 0 shell files under ${presentRoots.join(', ')} — no shell gate was read, so ` +
+        'a "clean" result would carry no evidence (inconclusive)',
+    );
+  }
+
+  return { findings, scannedFiles, presentRoots };
+}
+
+/** Findings-only view, for callers that already know the scan was non-vacuous. */
+export function scanRepoGates(cwd: string): GateFinding[] {
+  return scanRepoGatesDetailed(cwd).findings;
 }
 
 function main(): void {
   const cwd = process.cwd();
-  const findings = scanRepoGates(cwd);
+  let scan: RepoScanResult;
+  try {
+    scan = scanRepoGatesDetailed(cwd);
+  } catch (err) {
+    // Exit 2, not 1: "I could not examine the tree" is not the same answer as "I examined
+    // it and found a violation", and neither is the same as clean.
+    console.error(`fail-closed-gate-guard: INCONCLUSIVE — ${(err as Error).message}`);
+    process.exitCode = 2;
+    return;
+  }
+  const { findings, scannedFiles, presentRoots } = scan;
   if (findings.length === 0) {
+    // The counts make the pass self-evidencing: a reader can tell it examined real files
+    // rather than silently scanning nothing.
     console.log(
-      'fail-closed-gate-guard: no fail-open gate, duplicate-zero counter, or masked-pipeline-status shapes found (invariant.fail-closed-gate, execution.pipeline.status-incomplete)',
+      `fail-closed-gate-guard: no fail-open gate, duplicate-zero counter, or masked-pipeline-status shapes found in ${scannedFiles} shell file(s) under ${presentRoots.join(', ')} (invariant.fail-closed-gate, execution.pipeline.status-incomplete)`,
     );
     return;
   }

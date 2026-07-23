@@ -123,6 +123,17 @@ jobs:
       - name: Import boundary guard
         run: npm run guard:boundaries
 
+      # Backs the three block-severity transport hygiene rules
+      # (hygiene.no-wa-jid-literal-in-generic-ui, hygiene.no-whatsapp-copy-in-generic-ui,
+      # hygiene.no-health-whatsapp-key-read). Until this step existed they were enforced
+      # ONLY by the local pre-push hook: absent from verify:release and from every
+      # workflow, so a PR merged through the GitHub UI, `gh pr merge`, `--no-verify`, or a
+      # clone without the hook installed could ship a new violation with nothing catching
+      # it. The guard ratchets against .claude/fitness/transport-patterns-baseline.json --
+      # exit 1 only on NEW violations, so existing baselined debt does not block.
+      - name: Transport pattern guard
+        run: npm run guard:transport-patterns
+
       - name: Repo hygiene staged smoke
         run: npm run guard:repo:staged
 

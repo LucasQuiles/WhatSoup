@@ -16,6 +16,20 @@ rules into hooks, and semantic or human rules into the SDLC review flow.
 - `rings`: hook, eslint, guard, ci, or sdlc.
 - `severity`: block, warn, or advisory.
 - `source`: evidence that caused the rule to exist.
+- `implementedBy`: what actually enforces the rule — npm script names
+  (`guard:transport-patterns`, `typecheck:all`) or repo-relative test paths.
+  **Required for every `severity: 'block'` rule** and asserted by
+  `tests/scripts/fitness-registry-backing.test.ts`, which checks each entry exists
+  and is gate-reachable (a named step in `quality.yml`, or a push-gate guard whose
+  exemption in `tests/helpers/gate-membership.ts` names a live-tree test that the
+  full suite runs). It exists because the rule→enforcement link used to live only in
+  prose here and in `rationale`: four block rules had no occurrence of their rule id
+  anywhere outside the registry and this document, so confirming they were enforced
+  meant archaeology rather than running a check.
+
+  It proves each block rule *declares* a real, unbypassable backstop — not that the
+  backstop detects what the rule describes. That link stays hand-asserted, in
+  `rationale` and in each guard's own tests.
 
 ## Architecture
 

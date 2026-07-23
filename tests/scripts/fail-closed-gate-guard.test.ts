@@ -1,6 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-import { scanGateScript, scanRepoGates } from '../../scripts/fail-closed-gate-guard.ts';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+
+import { scanGateScript, scanRepoGates, scanRepoGatesDetailed } from '../../scripts/fail-closed-gate-guard.ts';
 
 describe('fail-closed-gate-guard — scanGateScript', () => {
   it('flags a success-only gate on a sentinel-captured variable (fail-open)', () => {
@@ -224,5 +228,54 @@ describe('fail-closed-gate-guard — repo scan (regression trap)', () => {
     // Clean HEAD must pass; this arms the trap for future regressions.
     const findings = scanRepoGates(process.cwd());
     expect(findings).toEqual([]);
+  });
+});
+
+/**
+ * A guard that scans nothing and prints "clean" is a false green — which is the exact bug
+ * class this guard exists to catch, so it must not commit it itself.
+ *
+ * Found by running the guard against an empty directory: exit 0, "no shapes found", zero
+ * files examined. `walkShellFiles` swallows a missing directory (reasonably — `.husky/` may
+ * legitimately be absent), but nothing noticed when EVERY scan root was missing, so a
+ * renamed `scripts/` would have silently reduced the guard to a no-op that still reported
+ * success. Compare `check-insecure-tempfile`, which already throws on an unreadable root.
+ *
+ * The distinction that matters: "I scanned the tree and it is clean" and "I scanned nothing"
+ * must not produce the same exit code.
+ */
+describe('fail-closed-gate-guard — non-vacuity', () => {
+  let scratch: string;
+  beforeEach(() => {
+    scratch = mkdtempSync(join(tmpdir(), 'fail-closed-vacuity-'));
+  });
+  afterEach(() => {
+    rmSync(scratch, { recursive: true, force: true });
+  });
+
+  it('THROWS when not one scan root exists, rather than reporting clean', () => {
+    expect(() => scanRepoGates(scratch)).toThrow(/scan root|inconclusive/i);
+  });
+
+  it('still scans when only some roots exist (a missing .husky is normal)', () => {
+    mkdirSync(join(scratch, 'scripts'), { recursive: true });
+    writeFileSync(join(scratch, 'scripts', 'check_thing.sh'), '#!/usr/bin/env bash\necho ok\n');
+    const detail = scanRepoGatesDetailed(scratch);
+    expect(detail.presentRoots).toEqual(['scripts']);
+    expect(detail.scannedFiles).toBe(1);
+    expect(detail.findings).toEqual([]);
+  });
+
+  it('reports how many files it examined, so a pass is self-evidencing', () => {
+    const detail = scanRepoGatesDetailed(process.cwd());
+    expect(detail.scannedFiles).toBeGreaterThan(0);
+    expect(detail.presentRoots.length).toBeGreaterThan(0);
+  });
+
+  it('a present-but-empty scan root is NOT clean — nothing was examined', () => {
+    // An existing directory with no shell files still means zero evidence. Distinct from
+    // the missing-root case above, and equally not a pass.
+    mkdirSync(join(scratch, 'scripts'), { recursive: true });
+    expect(() => scanRepoGates(scratch)).toThrow(/examined 0|no shell/i);
   });
 });
