@@ -195,6 +195,17 @@ jobs:
       - name: Drift classifier coverage
         run: npm run guard:drift-coverage
 
+      # A committed baseline enumerates tolerated debt, and every other baseline guard
+      # compares CURRENT CODE against it — nothing checked the baseline itself, so
+      # "add a violation, re-run --update, commit" was green everywhere. This refuses any
+      # increase in a baseline's tolerated-debt weight against the merge base.
+      #
+      # It must be a NAMED CI STEP, not local-only: a guard wired solely into
+      # verify:push:branch is bypassed by any server-side merge, which is exactly what
+      # tests/scripts/pre-push-guard.test.ts caught when this shipped push-gate-only.
+      - name: Baseline growth guard
+        run: npm run guard:baseline-growth
+
       - name: Documentation drift guard
         run: npm run guard:doc-drift
 
