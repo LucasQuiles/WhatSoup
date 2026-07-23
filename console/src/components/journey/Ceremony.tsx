@@ -88,7 +88,9 @@ export function Ceremony({
         </span>
       </div>
       <div className="journey-name-row">
-        <span className="journey-name">{name}</span>
+        {/* the hatched agent's name IS the page heading at this beat (single-h1
+            law — every earlier step's h1 unmounts with its card) */}
+        <h1 className="journey-name">{name}</h1>
       </div>
       {soul ? <p className="journey-soul">&ldquo;{soul}&rdquo;</p> : null}
       <p className="journey-meta">

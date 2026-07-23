@@ -27,6 +27,7 @@ vi.mock('../../console/src/lib/api', () => ({
       { id: 'openai-api', displayName: 'OpenAI', type: 'api', needsApiKey: true, providerConfig: [] },
     ]),
     createLine: vi.fn().mockResolvedValue({ name: 'quinn', healthPort: 9096 }),
+    updateConfig: vi.fn().mockResolvedValue({}),
     setCredential: vi.fn().mockResolvedValue({ ok: true }),
     sendMessage: vi.fn().mockResolvedValue({ sent: true }),
   },
@@ -130,6 +131,56 @@ describe('hatch flow — step discipline (14-onboarding §1, wave-4 law)', () =>
     fireEvent.change(container.querySelector('#hatch-admin')!, { target: { value: '+1 555 0100' } })
     expect(continueBtn.disabled).toBe(false)
   })
+
+  it('adjust-persona path: an existing line PATCHES config and returns to ceremony — never re-creates', async () => {
+    // Stub the SSE link: emit `connected` immediately so the flow reaches the
+    // ceremony through its real create-then-link cycle.
+    class FakeEventSource {
+      listeners = new Map<string, Array<() => void>>()
+      constructor(public url: string) {
+        queueMicrotask(() => {
+          ;(this.listeners.get('connected') ?? []).forEach((fn) => fn())
+        })
+      }
+      addEventListener(type: string, fn: () => void) {
+        this.listeners.set(type, [...(this.listeners.get(type) ?? []), fn])
+      }
+      close() {}
+    }
+    vi.stubGlobal('EventSource', FakeEventSource)
+
+    const { container } = renderHatch()
+    await waitFor(() => expect(container.textContent).toContain('Pick a kind'))
+    fireEvent.click([...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Continue'))!)
+    await waitFor(() => expect(container.textContent).toContain('Pick a channel'))
+    fireEvent.click([...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Continue with WhatsApp'))!)
+    await waitFor(() => expect(container.textContent).toContain('Name your agent'))
+    fireEvent.change(container.querySelector('#hatch-admin')!, { target: { value: '+1 555 0100' } })
+    fireEvent.click([...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Continue to link'))!)
+
+    // ceremony reached through the real cycle — one create, and the h1 law holds
+    await waitFor(() => expect(container.querySelectorAll('h1').length).toBe(1))
+    expect(createLineMock).toHaveBeenCalledTimes(1)
+
+    // adjust persona → name locked, save patches config, no second create
+    fireEvent.click([...container.querySelectorAll('button')].find((b) => b.textContent === 'Adjust persona')!)
+    await waitFor(() => expect(container.textContent).toContain('Name your agent'))
+    const nameInput = container.querySelector('#hatch-name') as HTMLInputElement
+    expect(nameInput.disabled).toBe(true)
+    expect(nameInput.title).toContain('locked')
+    const saveBtn = [...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Save persona'))!
+    fireEvent.click(saveBtn)
+    await waitFor(() =>
+      expect(api.updateConfig as unknown as ReturnType<typeof vi.fn>).toHaveBeenCalledWith(
+        'quinn',
+        expect.objectContaining({ claudeMd: expect.stringContaining('community room') }),
+      ),
+    )
+    expect(createLineMock).toHaveBeenCalledTimes(1) // still one — the falsifier
+    await waitFor(() => expect(container.querySelectorAll('h1').length).toBe(1))
+
+    vi.unstubAllGlobals()
+  })
 })
 
 describe('ceremony (14-onboarding §5 + 13-§2)', () => {
@@ -166,6 +217,13 @@ describe('ceremony (14-onboarding §5 + 13-§2)', () => {
     const { container } = renderCeremony()
     expect(container.querySelector('.journey-dice')).toBeNull()
     expect([...container.querySelectorAll('button')].find((b) => b.getAttribute('aria-label') === 'Another name')).toBeUndefined()
+  })
+
+  it('keeps exactly one h1 at the ceremony — the agent name (single-h1 law)', () => {
+    const { container } = renderCeremony()
+    const h1s = container.querySelectorAll('h1')
+    expect(h1s.length).toBe(1)
+    expect(h1s[0]!.textContent).toBe('Quinn')
   })
 
   it('Send & go live posts to the admin phone and navigates to the fleet', async () => {

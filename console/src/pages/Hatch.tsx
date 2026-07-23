@@ -75,6 +75,24 @@ export default function Hatch() {
   }
 
   const startLink = async () => {
+    // Adjust-persona path: the line already exists (name locked) — persist the
+    // persona edit via the config deep-merge and return to the ceremony. A
+    // second createLine would 409 on the name and strand the flow.
+    if (lineName) {
+      try {
+        await api.updateConfig(lineName, {
+          ...(kind.type === 'agent' && soul.trim() ? { claudeMd: soul.trim() } : {}),
+          ...(kind.type === 'chat' && soul.trim() ? { systemPrompt: soul.trim() } : {}),
+          ...(model ? { models: { conversation: model } } : {}),
+          agentOptions: { provider: providerId },
+        })
+        toast.success('Persona updated')
+      } catch (e) {
+        toast.error(`Persona update failed: ${e instanceof Error ? e.message : e}`)
+      }
+      setStep(4)
+      return
+    }
     const slug = slugifyName(name)
     if (!slug) {
       toast.error('Name must contain at least one letter')
@@ -225,8 +243,14 @@ export default function Hatch() {
             <div className="journey-field">
               <label className="journey-label" htmlFor="hatch-name">Name</label>
               <div className="journey-name-edit">
-                <TextInput id="hatch-name" value={name} onChange={(e) => setName(e.target.value)} />
-                <Button variant="neutral" aria-label="Another name" title="Another name" onClick={() => setName((n) => rerollName(n))}>
+                <TextInput
+                  id="hatch-name"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  disabled={!!lineName}
+                  title={lineName ? 'The name is locked — the line exists' : undefined}
+                />
+                <Button variant="neutral" aria-label="Another name" title="Another name" disabled={!!lineName} onClick={() => setName((n) => rerollName(n))}>
                   ⚄
                 </Button>
               </div>
@@ -303,7 +327,7 @@ export default function Hatch() {
                 ← Back
               </Button>
               <Button variant="primary" disabled={!agentStepValid} onClick={() => void startLink()}>
-                Continue to link →
+                {lineName ? 'Save persona →' : 'Continue to link →'}
               </Button>
             </div>
           </div>
