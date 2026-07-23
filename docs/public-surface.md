@@ -43,7 +43,7 @@ status; before that cut, documented surfaces still inherit the bootstrap caveat 
 
 ## HTTP API — Fleet server
 
-Canonical route table: [`src/fleet/index.ts:293-348`](../src/fleet/index.ts) (`ROUTES`
+Canonical route table: [`src/fleet/index.ts:294-349`](../src/fleet/index.ts) (`ROUTES`
 array). Operator-facing description: [README §Fleet API](../README.md#fleet-api). The fleet
 server binds to `127.0.0.1:9099` by default and is gated by the root fleet token
 (`Authorization: Bearer`), an audience-scoped ticket, or the legacy `?token=` query string
@@ -109,10 +109,10 @@ server binds to `127.0.0.1:9099` by default and is gated by the root fleet token
 | `http:fleet.silences.list` | `GET /api/fleet/silences` | `src/fleet/index.ts:342` | beta | active | List active fleet-wide alert silences |
 | `http:fleet.silences.add` | `POST /api/fleet/silence` | `src/fleet/index.ts:343` | beta | active | Add a silence rule (instance, duration). Persisted under `~/.config/whatsoup/fleet-silences.json`. |
 | `http:fleet.silences.remove` | `DELETE /api/fleet/silence/:name` | `src/fleet/index.ts:344` | beta | active | Remove a named silence rule |
-| `http:fleet.auth-ticket.mint` | `POST /api/auth-ticket` | `src/fleet/index.ts:936`, `src/fleet/auth-ticket.ts` | stable | active | Mint short-lived API/SSE ticket (root Bearer, or console session cookie + same-origin proof). Loopback TCP source only (C2). |
-| `http:fleet.console-session.create` | `POST /api/console-session` | `src/fleet/index.ts:899` | beta | active | Console unlock: loopback source only (C2), validates the root token + same-origin proof, sets an HttpOnly `SameSite=Strict` session cookie (24h TTL; `Secure` when the unlock arrives over TLS); the browser never holds the root token |
-| `http:fleet.console-session.delete` | `DELETE /api/console-session` | `src/fleet/index.ts:923` | beta | active | Console lock/logout: revokes the presented session and clears the cookie |
-| `http:fleet.ws-ticket.mint` | `POST /api/ws-ticket` | `src/fleet/index.ts:963`, `src/fleet/ws-ticket.ts` | stable | active | Mint short-lived WebSocket ticket (root Bearer, or console session cookie + same-origin proof). Loopback TCP source only (C2). |
+| `http:fleet.auth-ticket.mint` | `POST /api/auth-ticket` | `src/fleet/index.ts:942`, `src/fleet/auth-ticket.ts` | stable | active | Mint short-lived API/SSE ticket (root Bearer, or console session cookie + same-origin proof). Loopback TCP source only (C2). |
+| `http:fleet.console-session.create` | `POST /api/console-session` | `src/fleet/index.ts:905` | beta | active | Console unlock: loopback source only (C2), validates the root token + same-origin proof, sets an HttpOnly `SameSite=Strict` session cookie (24h TTL; `Secure` when the unlock arrives over TLS); the browser never holds the root token |
+| `http:fleet.console-session.delete` | `DELETE /api/console-session` | `src/fleet/index.ts:929` | beta | active | Console lock/logout: revokes the presented session and clears the cookie |
+| `http:fleet.ws-ticket.mint` | `POST /api/ws-ticket` | `src/fleet/index.ts:969`, `src/fleet/ws-ticket.ts` | stable | active | Mint short-lived WebSocket ticket (root Bearer, or console session cookie + same-origin proof). Loopback TCP source only (C2). |
 | `http:fleet.legacy-query-token` | `?token=<root>` on `/api/*` and `/ws/*` | [README §Legacy authentication](../README.md#legacy-authentication-deprecated) | stable | deprecated | Deprecation notice: [2026-05-12 public-surface baseline](releases/2026-05-12-public-surface-baseline.md#deprecations). Removal target: v2.0.0 after 2026-06-30. Use `/api/auth-ticket` or Bearer. Emits one-shot `http_legacy_token_path` / `ws_legacy_token_path` warning. |
 
 ### Health server (per-instance)

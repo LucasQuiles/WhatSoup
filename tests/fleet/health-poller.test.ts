@@ -65,6 +65,7 @@ function makeInstance(overrides: Partial<InstanceHealth> = {}): InstanceHealth {
     type: 'chat',
     accessMode: 'open',
     healthPort: 9100,
+    dbPath: '/tmp/whatsoup-test-instance.db',
     healthToken: null,
     ...overrides,
   };

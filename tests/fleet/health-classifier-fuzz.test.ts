@@ -51,6 +51,7 @@ function makeInstance(): InstanceHealth {
     type: 'chat',
     accessMode: 'open',
     healthPort: 9100,
+    dbPath: '/tmp/whatsoup-test-instance.db',
     healthToken: null,
   };
 }
