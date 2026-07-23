@@ -202,7 +202,6 @@ describe('App renders — v3.5 route shells (T5 b-02)', () => {
       ['/skills', 'Skills Hub', 'b-05'],
       ['/dream-lab', 'Dream Lab', 'b-06'],
       ['/deployments', 'Deployments', 'b-08'],
-      ['/settings', 'Settings', 'b-09'],
     ];
     for (const [path, surface, bead] of cases) {
       cleanup();

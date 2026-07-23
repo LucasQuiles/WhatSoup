@@ -171,7 +171,15 @@ vi.mock('../../console/src/lib/api', () => ({
     searchMessages: vi.fn(() => Promise.resolve({ results: [], total: 0 })),
     getMessages: vi.fn(() => Promise.resolve([])),
     sendMessage: vi.fn(() => Promise.resolve()),
+    // v3.5 Settings (T5 b-09): silences + provider credentials.
+    getSilences: vi.fn(() => Promise.resolve({ silences: [] })),
+    silenceLine: vi.fn(() => Promise.resolve({ ok: true, rule: {} })),
+    unsilenceLine: vi.fn(() => Promise.resolve({ ok: true })),
+    setCredential: vi.fn(() => Promise.resolve({ ok: true, service: 'deepseek' })),
+    verifyCredential: vi.fn(() => Promise.resolve({ service: 'deepseek', status: 'valid' })),
+    deleteCredential: vi.fn(() => Promise.resolve({ ok: true, service: 'deepseek' })),
   },
+  lockConsole: vi.fn(() => Promise.resolve()),
   // App now reaches use-websocket (via the connection-status hook), which imports
   // isProductionConsole from lib/api — expose it on the explicit-shape mock.
   isProductionConsole: () => false,
@@ -250,6 +258,7 @@ import SoupKitchen from '../../console/src/pages/SoupKitchen';
 import LineDetail from '../../console/src/pages/LineDetail';
 import Ops from '../../console/src/pages/Operator';
 import Inbox from '../../console/src/pages/Inbox';
+import Settings from '../../console/src/pages/Settings';
 import {
   Drawer,
   DrawerLayout,
@@ -646,6 +655,83 @@ describe('Viewport matrix — Inbox (C-D7-4)', () => {
         expect(root.scrollWidth).toBeLessThanOrEqual(root.clientWidth + 1);
       });
     }
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// SETTINGS suite (T5 b-09 — v3.5 surface, mockup settings.html SSOT)
+//
+// The mockup's own breakpoint: the section nav goes horizontal-scroll at
+// @media (max-width: 800px) — the SIXTH distinct SSOT breakpoint, a VIEWPORT
+// query proven via page.viewport().
+// ---------------------------------------------------------------------------
+
+function wrapSettings() {
+  return (
+    <QueryClientProvider client={makeQC()}>
+      <ToastContext.Provider value={toastValue}>
+        <MemoryRouter>
+          <Settings />
+        </MemoryRouter>
+      </ToastContext.Provider>
+    </QueryClientProvider>
+  );
+}
+
+describe('Viewport matrix — v3.5 Settings (T5 b-09)', () => {
+  it('section nav + content render the 190px grid at 1440×900', async () => {
+    await page.viewport(1440, 900);
+    const { container } = await render(wrapSettings());
+    await vi.waitFor(() => {
+      expect(container.querySelector('.settings-wrap')).not.toBeNull();
+    });
+    const wrap = container.querySelector('.settings-wrap') as HTMLElement;
+    expect(window.getComputedStyle(wrap).gridTemplateColumns.split(' ').length).toBe(2);
+    const snav = container.querySelector('.settings-snav') as HTMLElement;
+    expect(snav.getBoundingClientRect().width).toBe(190);
+  });
+
+  it('nav stays the column grid at 801px (just above the threshold)', async () => {
+    await page.viewport(801, 900);
+    const { container } = await render(wrapSettings());
+    await vi.waitFor(() => {
+      expect(container.querySelector('.settings-wrap')).not.toBeNull();
+    });
+    const wrap = container.querySelector('.settings-wrap') as HTMLElement;
+    expect(window.getComputedStyle(wrap).gridTemplateColumns.split(' ').length).toBe(2);
+  });
+
+  it('nav goes horizontal-scroll single-column at 800px (the mockup threshold)', async () => {
+    await page.viewport(800, 900);
+    const { container } = await render(wrapSettings());
+    await vi.waitFor(() => {
+      expect(container.querySelector('.settings-wrap')).not.toBeNull();
+    });
+    const wrap = container.querySelector('.settings-wrap') as HTMLElement;
+    expect(window.getComputedStyle(wrap).gridTemplateColumns.split(' ').length).toBe(1);
+    const snav = container.querySelector('.settings-snav') as HTMLElement;
+    expect(window.getComputedStyle(snav).flexDirection).toBe('row');
+  });
+
+  it('nav stays single-column at 799px', async () => {
+    await page.viewport(799, 900);
+    const { container } = await render(wrapSettings());
+    await vi.waitFor(() => {
+      expect(container.querySelector('.settings-wrap')).not.toBeNull();
+    });
+    const wrap = container.querySelector('.settings-wrap') as HTMLElement;
+    expect(window.getComputedStyle(wrap).gridTemplateColumns.split(' ').length).toBe(1);
+  });
+
+  it('fits 1440×900 with no horizontal overflow (the acceptance item)', async () => {
+    await page.viewport(1440, 900);
+    const { container } = await render(wrapSettings());
+    await vi.waitFor(() => {
+      expect(container.querySelector('.settings-page')).not.toBeNull();
+    });
+    const root = container.querySelector('.settings-page') as HTMLElement;
+    expect(root.scrollWidth).toBeLessThanOrEqual(root.clientWidth + 1);
   });
 });
 
