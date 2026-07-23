@@ -344,6 +344,53 @@ describe('guard-test-coverage meta-guard', () => {
     expect(findGuardsMissingTests({ cwd: dir }).semanticGaps).toEqual([]);
   });
 
+  it("accepts vitest's two-argument expect(actual, 'message') form", () => {
+    // REGRESSION. `parseExpectation` bailed on any expect() with more than one argument,
+    // so vitest's idiomatic `expect(actual, 'why this matters')` was invisible to the
+    // failure-proof check. 54 of the 123 files in tests/scripts/ use that form, and a
+    // guard whose ONLY failure assertion carried a message was reported as
+    // `test-does-not-exercise-failure` — pushing the author toward the allowlist or
+    // toward dropping the message. The second argument is the assertion message; the
+    // subject is still arguments[0], so parsing it changes nothing else.
+    const dir = makeFixture([{
+      file: 'sample-guard.ts',
+      writeTest: true,
+      wired: true,
+      testBody: [
+        `import { expect, it } from 'vitest';`,
+        `import { analyzeGuard } from '../../scripts/sample-guard.ts';`,
+        `it('proves the unsafe case', () => {`,
+        `  const result = analyzeGuard('unsafe');`,
+        `  expect(result.ok, 'an unsafe input must not report ok').toBe(false);`,
+        `});`,
+      ].join('\n'),
+    }]);
+
+    expect(findGuardsMissingTests({ cwd: dir }).semanticGaps).toEqual([]);
+  });
+
+  it('still rejects a two-argument expect whose assertion only proves success', () => {
+    // Widening the argument count must not weaken the verdict: a message-carrying
+    // assertion that proves ok=true is still not a failure proof.
+    const dir = makeFixture([{
+      file: 'sample-guard.ts',
+      writeTest: true,
+      wired: true,
+      testBody: [
+        `import { expect, it } from 'vitest';`,
+        `import { analyzeGuard } from '../../scripts/sample-guard.ts';`,
+        `it('only proves the happy path', () => {`,
+        `  const result = analyzeGuard('safe');`,
+        `  expect(result.ok, 'a safe input should report ok').toBe(true);`,
+        `});`,
+      ].join('\n'),
+    }]);
+
+    expect(findGuardsMissingTests({ cwd: dir }).semanticGaps).toContainEqual(
+      expect.objectContaining({ reason: 'test-does-not-exercise-failure' }),
+    );
+  });
+
   it('accepts a linked throw assertion for an imported guard call', () => {
     const dir = makeFixture([{
       file: 'sample-guard.ts',
