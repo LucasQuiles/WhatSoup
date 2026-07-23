@@ -18,6 +18,7 @@
  */
 import { spawnSync } from 'node:child_process';
 
+import { assertKnownFlag, takeValue } from './lib/cli-args.ts';
 import { cleanGitEnv } from './lib/guard-core.ts';
 import {
   EXIT_CONTINUE,
@@ -43,13 +44,22 @@ interface Args {
   selfCheck: boolean;
 }
 
+const KNOWN_FLAGS = ['--base', '--observed', '--candidate', '--json', '--self-check'] as const;
+
+/**
+ * Uses `takeValue` rather than `argv[++i]`. The hand-rolled form silently accepted two
+ * wrong inputs, both measured in this very function before the change: `--base` with no
+ * value dropped the flag entirely, and `--base --json` set base to the string `"--json"` —
+ * which was then handed to git as a ref. See scripts/lib/cli-args.ts.
+ */
 export function parseArgs(argv: readonly string[]): Args {
   const args: Args = { observed: 'origin/main', json: false, selfCheck: false };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
-    if (a === '--base') args.base = argv[++i];
-    else if (a === '--observed') args.observed = argv[++i] ?? args.observed;
-    else if (a === '--candidate') args.candidate = argv[++i];
+    assertKnownFlag(a, KNOWN_FLAGS);
+    if (a === '--base') { const t = takeValue(argv, i, a); args.base = t.value; i = t.index; }
+    else if (a === '--observed') { const t = takeValue(argv, i, a); args.observed = t.value; i = t.index; }
+    else if (a === '--candidate') { const t = takeValue(argv, i, a); args.candidate = t.value; i = t.index; }
     else if (a === '--json') args.json = true;
     else if (a === '--self-check') args.selfCheck = true;
   }
