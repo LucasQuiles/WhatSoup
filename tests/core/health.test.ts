@@ -303,7 +303,10 @@ describe('GET /health', () => {
   it('does not degrade for a recent live inbound inside the watchdog grace window', async () => {
     const db2 = makeDb();
     const durability = new DurabilityEngine(db2);
-    durability.journalInbound('msg-recent-open-health', 'key-open', 'jid-open', 'agent');
+    const seq = durability.journalInbound('msg-recent-open-health', 'key-open', 'jid-open', 'agent');
+    db2.raw
+      .prepare(`UPDATE inbound_events SET received_at = datetime('now', '-2040 seconds') WHERE seq = ?`)
+      .run(seq);
 
     const { server: server2, port: port2 } = await buildTestServer(makeDeps(db2, { durability }));
     try {

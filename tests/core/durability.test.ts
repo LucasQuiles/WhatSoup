@@ -185,18 +185,35 @@ describe('DurabilityEngine', () => {
         oldestOpenInboundAt: null,
       });
 
-      const seq = engine.journalInbound('msg-open-health', 'key-open', 'jid-open', 'agent');
-      db.raw
-        .prepare(`UPDATE inbound_events SET received_at = datetime('now', '-3600 seconds') WHERE seq = ?`)
-        .run(seq);
+      const openStatuses = ['pending', 'preparing', 'queued', 'processing', 'turn_done'] as const;
+      const openSeqs = openStatuses.map((status, index) => {
+        const seq = engine.journalInbound(`msg-open-health-${status}`, 'key-open', 'jid-open', 'agent');
+        db.raw.prepare(`
+          UPDATE inbound_events
+             SET processing_status = ?,
+                 received_at = datetime('now', ?)
+           WHERE seq = ?
+        `).run(status, `-${3600 - index} seconds`, seq);
+        return seq;
+      });
+
+      for (const status of ['complete', 'failed'] as const) {
+        const seq = engine.journalInbound(`msg-terminal-health-${status}`, 'key-open', 'jid-open', 'agent');
+        db.raw.prepare(`
+          UPDATE inbound_events
+             SET processing_status = ?,
+                 received_at = datetime('now', '-7200 seconds')
+           WHERE seq = ?
+        `).run(status, seq);
+      }
 
       const open = engine.getHealthStats();
-      expect(open.openInbound).toBe(1);
+      expect(open.openInbound).toBe(openStatuses.length);
       expect(open.oldestOpenInboundAt).not.toBeNull();
       const ageMs = Date.now() - Date.parse((open.oldestOpenInboundAt as string).replace(' ', 'T') + 'Z');
       expect(ageMs).toBeGreaterThan(30 * 60 * 1000);
 
-      engine.markInboundFailed(seq, 'crash_recovery');
+      for (const seq of openSeqs) engine.markInboundFailed(seq, 'crash_recovery');
       expect(engine.getHealthStats()).toMatchObject({
         openInbound: 0,
         oldestOpenInboundAt: null,
