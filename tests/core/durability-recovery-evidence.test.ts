@@ -1,7 +1,12 @@
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
+import { runMigration45 } from '../../src/core/database-migration-45.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
-import { DurabilityRecoveryEvidence } from '../../src/core/durability-recovery-evidence.ts';
+import {
+  createRecoveryStats,
+  DurabilityRecoveryEvidence,
+} from '../../src/core/durability-recovery-evidence.ts';
 import { ReplyGuaranteeManager } from '../../src/core/reply-guarantee.ts';
 import {
   toTurnFinalizationPersistence,
@@ -633,5 +638,107 @@ describe('durable recovery evidence ordering', () => {
       FROM turn_delivery_corroboration
       WHERE terminal_record_id = ?
     `).get(terminalRecordId)).toEqual({ count: 0 });
+  });
+});
+
+describe('recovery_runs status column', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.open();
+  });
+
+  afterEach(() => db.close());
+
+  it("persists status 'started' for a fresh recovery run", () => {
+    const evidence = new DurabilityRecoveryEvidence(db);
+    const receipt = evidence.start('pre_connect_recovery', 'status-started', 'fresh run');
+
+    expect(db.raw.prepare('SELECT status FROM recovery_runs WHERE id = ?')
+      .get(receipt.recoveryRunId)).toEqual({ status: 'started' });
+  });
+
+  it("persists status 'completed' after finalize", () => {
+    const evidence = new DurabilityRecoveryEvidence(db);
+    const receipt = evidence.start('pre_connect_recovery', 'status-completed', 'finalized run');
+
+    evidence.finalize(receipt, createRecoveryStats(receipt), 'done');
+
+    expect(db.raw.prepare('SELECT status FROM recovery_runs WHERE id = ?')
+      .get(receipt.recoveryRunId)).toEqual({ status: 'completed' });
+  });
+
+  it("persists status 'failed' after recordIncomplete", () => {
+    const evidence = new DurabilityRecoveryEvidence(db);
+    const receipt = evidence.start('pre_connect_recovery', 'status-failed', 'incomplete run');
+
+    evidence.recordIncomplete(
+      receipt,
+      createRecoveryStats(receipt),
+      JSON.stringify({ status: 'incomplete' }),
+    );
+
+    expect(db.raw.prepare('SELECT status FROM recovery_runs WHERE id = ?')
+      .get(receipt.recoveryRunId)).toEqual({ status: 'failed' });
+  });
+
+  it("persists status 'failed' when a recovery run fails via failImmediately", () => {
+    const evidence = new DurabilityRecoveryEvidence(db);
+    const run = evidence.begin(
+      'preConnectRecovery',
+      'pre_connect_recovery',
+      'status-fail-immediately',
+      'fails immediately',
+    );
+
+    expect(() => run.failImmediately('some_phase', new Error('boom'))).toThrow('boom');
+
+    expect(db.raw.prepare(`
+      SELECT status FROM recovery_runs WHERE trigger = 'status-fail-immediately'
+    `).get()).toEqual({ status: 'failed' });
+  });
+});
+
+describe('migration 45 recovery_runs status backfill', () => {
+  it("backfills completed rows to 'completed' and leaves incomplete rows at 'started'", () => {
+    const raw = new DatabaseSync(':memory:');
+    try {
+      raw.exec(`
+        CREATE TABLE recovery_runs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          started_at TEXT NOT NULL DEFAULT (datetime('now')),
+          completed_at TEXT,
+          trigger TEXT NOT NULL,
+          notes TEXT
+        );
+      `);
+      raw.prepare(`
+        INSERT INTO recovery_runs (id, completed_at, trigger)
+        VALUES (1, datetime('now'), 'pre_connect')
+      `).run();
+      raw.prepare(`
+        INSERT INTO recovery_runs (id, completed_at, trigger)
+        VALUES (2, NULL, 'pre_connect')
+      `).run();
+
+      runMigration45(raw);
+
+      expect(raw.prepare('SELECT status FROM recovery_runs WHERE id = 1').get())
+        .toEqual({ status: 'completed' });
+      expect(raw.prepare('SELECT status FROM recovery_runs WHERE id = 2').get())
+        .toEqual({ status: 'started' });
+    } finally {
+      raw.close();
+    }
+  });
+
+  it('is a no-op when recovery_runs does not exist', () => {
+    const raw = new DatabaseSync(':memory:');
+    try {
+      expect(() => runMigration45(raw)).not.toThrow();
+    } finally {
+      raw.close();
+    }
   });
 });
