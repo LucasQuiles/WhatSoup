@@ -59,6 +59,21 @@ export interface ReservedEntry {
   issue: string;
 }
 
+export interface UnwiredTerminalEntry {
+  /** A LIVE, still-classified status-bearing table (stays in KNOWN_STATUS_TABLES / REGISTRY). */
+  table: string;
+  /**
+   * The specific declared terminal-failure value that has NO resolvable
+   * production writer today. Unlike `ReservedEntry`, this does not exempt the
+   * whole table — only this one value's writer-existence proof.
+   */
+  terminalValue: string;
+  /** Non-empty: what's true today and why it isn't fixed yet. */
+  reason: string;
+  /** Non-empty: the tracking issue for the gap. */
+  issue: string;
+}
+
 /**
  * One entry per status-bearing durability table with a resolvable terminal-failure
  * writer, verified directly against this worktree (file:line anchors drift; the
@@ -202,18 +217,18 @@ export const REGISTRY: DurabilityStatusEntry[] = [
     vocabulary: ['active', 'proposed', 'paused', 'completed', 'cancelled', 'failed'],
     vocabularySource: 'sql-check',
     terminalFailureValues: ['failed'],
-    // HONESTY NOTE (verified in this worktree, not carried over from the
-    // census, which was wrong here): `transition()` in beads.ts is the only
-    // function that ever writes `beads.status`, and it is called with
-    // 'completed'/'cancelled'/'active' only — never 'failed'. `update_bead`
-    // explicitly cannot change status. So 'failed' is declared (TERMINAL,
-    // BeadStatus, the SQL CHECK) but has ZERO production writers today — a
-    // live instance of the exact #1789 defect this guard exists to catch.
-    // The guard's per-table check is declaration-existence only (see its
-    // header), so it cannot detect this; wiring a writer is out of this
-    // task's scope. Left registered — with this note — rather than silently
-    // dropped or given an invented writer. See task-4-report.md.
-    writerSites: ['src/core/substrate/beads.ts'],
+    // 'failed' has NO truthful writerSites to declare (verified in this
+    // worktree, not carried over from the census, which was wrong here):
+    // `transition()` in beads.ts is the only function that ever writes
+    // `beads.status`, and it is called with 'completed'/'cancelled'/'active'
+    // only — never 'failed'. `update_bead` explicitly cannot change status.
+    // Declaring beads.ts here anyway (the literal appears in TERMINAL /
+    // BeadStatus, neither of which is a writer) would be exactly the
+    // "literal survives in a comment/constant, not a writer" technicality
+    // the guard's honesty note warns about. Left empty on purpose — see
+    // TRACKED_UNWIRED_TERMINAL below, which is what makes this a DECLARED,
+    // reviewed gap instead of a silent pass or a silent drop.
+    writerSites: [],
   },
 ];
 
@@ -226,6 +241,35 @@ export const TRACKED_RESERVED: ReservedEntry[] = [
   {
     table: 'sweep_runs',
     reason: '0-ref reserved substrate table, no live sweep pipeline',
+    issue: '#1789',
+  },
+];
+
+/**
+ * Declared exceptions for a LIVE status-bearing table (still classified in
+ * KNOWN_STATUS_TABLES / REGISTRY) whose declared terminal-failure value has
+ * NO production writer today. Distinct from `TRACKED_RESERVED`: a reserved
+ * table is exempt entirely; an entry here exempts only the named
+ * `terminalValue` on an otherwise normally-checked table — the table's other
+ * terminal values (if any) still require a resolvable writer.
+ *
+ * This is the fail-closed complement to the guard's declaration-existence
+ * check: an UNDECLARED writer-resolution failure is a violation (exit 1); a
+ * DECLARED one (non-empty reason + issue, same rule as TRACKED_RESERVED) is a
+ * reviewed, tracked gap that passes. Confirmed independently against this
+ * worktree (not the census, which incorrectly claimed `update_bead` as the
+ * writer): `update_bead` is status-protected (its Zod schema has no `status`
+ * field and its own description says "Cannot change kind/owner/status");
+ * `transition()` in beads.ts is the only function that writes `beads.status`,
+ * and its three callers (`completeBead`/`cancelBead`/`approveProposal`) only
+ * ever pass 'completed'/'cancelled'/'active'. No `fail_bead` tool exists.
+ */
+export const TRACKED_UNWIRED_TERMINAL: UnwiredTerminalEntry[] = [
+  {
+    table: 'beads',
+    terminalValue: 'failed',
+    reason:
+      "terminal 'failed' declared (SQL CHECK schema.ts:10 + BeadStatus union + TERMINAL beads.ts:18) but NO production writer sets it — update_bead is status-protected, transition() callers are complete/cancel only; owner decision pending: wire a fail path or drop 'failed' from the vocabulary",
     issue: '#1789',
   },
 ];

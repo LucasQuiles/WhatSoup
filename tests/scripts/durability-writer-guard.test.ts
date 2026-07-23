@@ -22,6 +22,7 @@ import {
   RESERVED_TABLES,
   REGISTRY,
   TRACKED_RESERVED,
+  TRACKED_UNWIRED_TERMINAL,
 } from '../../scripts/lib/durability-status-registry.ts';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -202,6 +203,69 @@ describe('durability-writer-guard — sweep_runs reserved exception (case e)', (
     const snapshot = await loadRealSnapshot();
     const result = scanDurabilityWriterInvariant(snapshot, repoRoot);
     expect(result.findings.filter((f) => f.table === 'sweep_runs')).toHaveLength(0);
+  });
+});
+
+describe('durability-writer-guard — beads unwired-terminal declared exception', () => {
+  // Coordinator-confirmed finding (independently verified): beads.status='failed'
+  // is declared (SQL CHECK schema.ts:10 + BeadStatus union + TERMINAL beads.ts:18)
+  // but has NO production writer — update_bead is status-protected, transition()
+  // callers are complete/cancel/active only. Fail-closed doctrine: an undeclared
+  // violation must FAIL; a known one must be a DECLARED exception
+  // (TRACKED_UNWIRED_TERMINAL), not a pass-by-technicality.
+
+  it('(i) beads WITHOUT its TRACKED_UNWIRED_TERMINAL entry FAILS the guard', async () => {
+    const snapshot = await loadRealSnapshot();
+    const beadsEntry = REGISTRY.find((e) => e.table === 'beads');
+    expect(beadsEntry).toBeDefined();
+    const result = scanDurabilityWriterInvariant(snapshot, repoRoot, {
+      registry: beadsEntry ? [beadsEntry] : [],
+      trackedReserved: [],
+      trackedUnwiredTerminal: [], // the defect: no declared exception for beads' 'failed'
+    });
+    expect(
+      result.findings.filter(
+        (f) => f.table === 'beads' && (f.kind === 'missing-writer-sites' || f.kind === 'writer-literal-not-found'),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('(ii) beads WITH the real TRACKED_UNWIRED_TERMINAL entry passes with no findings', async () => {
+    const snapshot = await loadRealSnapshot();
+    const beadsEntry = REGISTRY.find((e) => e.table === 'beads');
+    expect(beadsEntry).toBeDefined();
+    const result = scanDurabilityWriterInvariant(snapshot, repoRoot, {
+      registry: beadsEntry ? [beadsEntry] : [],
+      trackedReserved: [],
+      trackedUnwiredTerminal: TRACKED_UNWIRED_TERMINAL, // the real, declared exception
+    });
+    expect(result.findings.filter((f) => f.table === 'beads')).toHaveLength(0);
+  });
+
+  it('(iii) a TRACKED_UNWIRED_TERMINAL entry missing issue or reason FAILS', () => {
+    const snapshot: SchemaSnapshot = new Map([
+      ['synthetic_unwired', { createSql: "CREATE TABLE synthetic_unwired (id INTEGER PRIMARY KEY, status TEXT NOT NULL DEFAULT 'ok')", indexes: [] }],
+    ]);
+    const result = scanDurabilityWriterInvariant(snapshot, repoRoot, {
+      registry: [],
+      trackedReserved: [],
+      trackedUnwiredTerminal: [{ table: 'synthetic_unwired', terminalValue: 'failed', reason: '', issue: '' }],
+      knownStatusTables: new Set(),
+      nonStatusTables: new Set(['synthetic_unwired']),
+      reservedTables: new Set(),
+      nonStatusJustifications: { synthetic_unwired: 'exercised only by this test' },
+    });
+    expect(
+      result.findings.filter((f) => f.table === 'synthetic_unwired' && f.kind === 'unwired-terminal-missing-metadata'),
+    ).toHaveLength(1);
+  });
+
+  it('the real registry declares exactly one TRACKED_UNWIRED_TERMINAL entry: beads/failed, issue #1789', () => {
+    expect(TRACKED_UNWIRED_TERMINAL).toHaveLength(1);
+    expect(TRACKED_UNWIRED_TERMINAL[0]?.table).toBe('beads');
+    expect(TRACKED_UNWIRED_TERMINAL[0]?.terminalValue).toBe('failed');
+    expect(TRACKED_UNWIRED_TERMINAL[0]?.issue).toBe('#1789');
+    expect((TRACKED_UNWIRED_TERMINAL[0]?.reason ?? '').trim().length).toBeGreaterThan(0);
   });
 });
 

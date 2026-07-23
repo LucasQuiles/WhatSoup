@@ -32,22 +32,32 @@
 //        future author could hide a genuinely status-bearing table in the
 //        "not our problem" bucket and this guard would never see it again.
 //
-//   (3) PER-TABLE WRITER-DECLARATION CHECK, for every KNOWN_STATUS_TABLES
-//       entry: `terminalFailureValues` must be non-empty, `writerSites` must
-//       be non-empty, every writer site must be a non-test file that exists
-//       under `src/`, and at least one declared terminal-failure literal must
-//       appear as text somewhere in at least one declared writer site.
+//   (3) PER-TABLE WRITER-COVERAGE CHECK, for every KNOWN_STATUS_TABLES entry:
+//       `terminalFailureValues` must be non-empty, and EVERY declared
+//       terminal-failure value must be COVERED — either (a) found as text in
+//       at least one declared, non-test, on-disk `src/` writer site, or
+//       (b) explicitly named by a well-formed `TRACKED_UNWIRED_TERMINAL`
+//       entry (non-empty `reason` + `issue`, same fail-closed rule as
+//       TRACKED_RESERVED). An uncovered value fails the guard; a value with a
+//       malformed unwired-terminal entry (empty reason/issue) fails on BOTH
+//       counts, deliberately, rather than silently passing on a technicality.
 //
-//       HONESTY NOTE, stated plainly because it is easy to over-claim: this is
-//       DECLARATION-EXISTENCE, not runtime proof. It answers "does a plausible
-//       writer module exist and mention the failure value", not "does a live
-//       code path actually reach that write". It fails OPEN if the literal
-//       survives only in a comment, a doc string, or a dead branch, and it
-//       cannot detect a value that is declared in a schema/type but reached by
-//       NO call path at all (see the `beads` entry in the registry, left
-//       registered with that exact gap documented rather than silently
-//       dropped or given an invented writer). The guard's actual teeth are
-//       checks (1)/(2)/(2b) plus the synthetic red-green tests in the
+//       HONESTY NOTE, stated plainly because it is easy to over-claim: path
+//       (a) is DECLARATION-EXISTENCE, not runtime proof. It answers "does a
+//       plausible writer module exist and mention the failure value", not
+//       "does a live code path actually reach that write". It fails OPEN if
+//       the literal survives only in a comment, a doc string, a type
+//       declaration, or a dead branch — which is exactly why a value whose
+//       only "writer" is that kind of technicality must NOT be declared as a
+//       writer site at all; it must go through path (b) instead, as a
+//       reviewed, tracked, DECLARED gap. Two such declared exceptions exist
+//       today, and both are named here rather than left to be rediscovered:
+//       `sweep_runs` (TRACKED_RESERVED — whole table, 0-ref reserved
+//       substrate table, #1789) and `beads`' `'failed'` value
+//       (TRACKED_UNWIRED_TERMINAL — `update_bead` is status-protected,
+//       `transition()` callers are complete/cancel only, no `fail_bead` tool
+//       exists, #1789). The guard's actual teeth are checks (1)/(2)/(2b)/(3)'s
+//       coverage requirement plus the synthetic red-green tests in the
 //       companion test file; the two tables this invariant was built to FIX
 //       (`recovery_runs`, `enrichment_runs`) additionally get real behavioral
 //       proof via SQLite persistence tests (Tasks 1-2), which this guard does
@@ -68,12 +78,14 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   REGISTRY,
   TRACKED_RESERVED,
+  TRACKED_UNWIRED_TERMINAL,
   KNOWN_STATUS_TABLES,
   NON_STATUS_TABLES,
   RESERVED_TABLES,
   NON_STATUS_JUSTIFICATIONS,
   type DurabilityStatusEntry,
   type ReservedEntry,
+  type UnwiredTerminalEntry,
 } from './lib/durability-status-registry.ts';
 
 export type SchemaSnapshot = Map<string, { createSql: string; indexes: string[] }>;
@@ -88,7 +100,8 @@ export interface DurabilityWriterFinding {
     | 'missing-writer-sites'
     | 'writer-site-not-src'
     | 'writer-site-missing'
-    | 'writer-literal-not-found';
+    | 'writer-literal-not-found'
+    | 'unwired-terminal-missing-metadata';
   table: string;
   detail: string;
 }
@@ -96,6 +109,7 @@ export interface DurabilityWriterFinding {
 export interface DurabilityWriterRegistryInput {
   registry?: readonly DurabilityStatusEntry[];
   trackedReserved?: readonly ReservedEntry[];
+  trackedUnwiredTerminal?: readonly UnwiredTerminalEntry[];
   knownStatusTables?: ReadonlySet<string>;
   nonStatusTables?: ReadonlySet<string>;
   reservedTables?: ReadonlySet<string>;
@@ -170,6 +184,7 @@ export function scanDurabilityWriterInvariant(
 ): DurabilityWriterScanResult {
   const registry = input.registry ?? REGISTRY;
   const trackedReserved = input.trackedReserved ?? TRACKED_RESERVED;
+  const trackedUnwiredTerminal = input.trackedUnwiredTerminal ?? TRACKED_UNWIRED_TERMINAL;
   const knownStatusTables = input.knownStatusTables ?? KNOWN_STATUS_TABLES;
   const nonStatusTables = input.nonStatusTables ?? NON_STATUS_TABLES;
   const reservedTables = input.reservedTables ?? RESERVED_TABLES;
@@ -223,7 +238,32 @@ export function scanDurabilityWriterInvariant(
     }
   }
 
-  // (3) per-registered-status-table writer-declaration check.
+  // (2c) unwired-terminal metadata — same fail-closed rule as (2): every
+  // TRACKED_UNWIRED_TERMINAL entry needs a non-empty reason and issue,
+  // checked independently of whether it ends up covering anything below.
+  for (const entry of trackedUnwiredTerminal) {
+    if (!entry.reason?.trim() || !entry.issue?.trim()) {
+      findings.push({
+        kind: 'unwired-terminal-missing-metadata',
+        table: entry.table,
+        detail: `TRACKED_UNWIRED_TERMINAL entry for '${entry.table}' (terminalValue='${entry.terminalValue}') is missing a non-empty reason and/or issue`,
+      });
+    }
+  }
+  // Only WELL-FORMED entries count as a declared exception — a malformed one
+  // must not silently grant coverage just because check (2c) already flagged it.
+  const declaredUnwiredValues = new Map<string, Set<string>>();
+  for (const entry of trackedUnwiredTerminal) {
+    if (!entry.reason?.trim() || !entry.issue?.trim()) continue;
+    const set = declaredUnwiredValues.get(entry.table) ?? new Set<string>();
+    set.add(entry.terminalValue);
+    declaredUnwiredValues.set(entry.table, set);
+  }
+
+  // (3) per-registered-status-table writer-COVERAGE check. Every declared
+  // terminalFailureValue must be either found in a real writer site or
+  // explicitly named by a declared TRACKED_UNWIRED_TERMINAL entry — an
+  // uncovered value is a violation, undeclared or not.
   let registryTablesChecked = 0;
   for (const entry of registry) {
     registryTablesChecked += 1;
@@ -236,18 +276,9 @@ export function scanDurabilityWriterInvariant(
       });
       continue;
     }
-    if (!entry.writerSites || entry.writerSites.length === 0) {
-      findings.push({
-        kind: 'missing-writer-sites',
-        table: entry.table,
-        detail: `registry entry for '${entry.table}' declares no writerSites`,
-      });
-      continue;
-    }
 
-    let anyValidSite = false;
-    let literalFound = false;
-    for (const site of entry.writerSites) {
+    const foundValues = new Set<string>();
+    for (const site of entry.writerSites ?? []) {
       if (!isNonTestSrcFile(site)) {
         findings.push({
           kind: 'writer-site-not-src',
@@ -267,14 +298,28 @@ export function scanDurabilityWriterInvariant(
         });
         continue;
       }
-      anyValidSite = true;
-      if (entry.terminalFailureValues.some((value) => content.includes(value))) literalFound = true;
+      for (const value of entry.terminalFailureValues) {
+        if (content.includes(value)) foundValues.add(value);
+      }
     }
-    if (anyValidSite && !literalFound) {
+
+    const declaredValues = declaredUnwiredValues.get(entry.table) ?? new Set<string>();
+    const uncovered = entry.terminalFailureValues.filter(
+      (value) => !foundValues.has(value) && !declaredValues.has(value),
+    );
+    if (uncovered.length === 0) continue;
+
+    if (!entry.writerSites || entry.writerSites.length === 0) {
+      findings.push({
+        kind: 'missing-writer-sites',
+        table: entry.table,
+        detail: `registry entry for '${entry.table}' declares no writerSites, and terminal-failure value(s) [${uncovered.join(', ')}] have no declared TRACKED_UNWIRED_TERMINAL exception either`,
+      });
+    } else {
       findings.push({
         kind: 'writer-literal-not-found',
         table: entry.table,
-        detail: `none of terminalFailureValues [${entry.terminalFailureValues.join(', ')}] for '${entry.table}' appear as text in any declared writer site (${entry.writerSites.join(', ')})`,
+        detail: `terminal-failure value(s) [${uncovered.join(', ')}] for '${entry.table}' do not appear as text in any declared writer site (${entry.writerSites.join(', ')}) and have no declared TRACKED_UNWIRED_TERMINAL exception`,
       });
     }
   }
