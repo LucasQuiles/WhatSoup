@@ -9,6 +9,7 @@ import {
   type ProviderBoundaryEvent,
   type ProviderBoundarySurface,
   type ProviderDataBoundary,
+  type ProviderResponseFailureCode,
 } from './provider-data-boundary-contract.ts';
 import {
   collectProviderAliasCandidates,
@@ -366,6 +367,10 @@ export function createProviderDataBoundary(
         throw error;
       }
     },
+    observeProviderResponseFailure(_code: ProviderResponseFailureCode): void {
+      assertActive();
+      emit('rehydration_failure', 0, performance.now(), 1, 0, 0);
+    },
     rehydrateProviderText,
     rehydrateToolInput,
     retire(): void {
@@ -388,6 +393,7 @@ export function snapshotProviderDataBoundary(boundary: ProviderDataBoundary): Pr
   const exposeTexts = boundary.exposeTexts.bind(boundary);
   const exposeToolResult = boundary.exposeToolResult.bind(boundary);
   const inspectToolJson = boundary.inspectToolJson.bind(boundary);
+  const observeProviderResponseFailure = boundary.observeProviderResponseFailure.bind(boundary);
   const rehydrateProviderText = boundary.rehydrateProviderText.bind(boundary);
   const rehydrateToolInput = boundary.rehydrateToolInput.bind(boundary);
   const retire = boundary.retire.bind(boundary);
@@ -399,6 +405,7 @@ export function snapshotProviderDataBoundary(boundary: ProviderDataBoundary): Pr
     exposeTexts,
     exposeToolResult,
     inspectToolJson,
+    observeProviderResponseFailure,
     rehydrateProviderText,
     rehydrateToolInput,
     retire,

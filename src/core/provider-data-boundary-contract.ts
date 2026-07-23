@@ -81,7 +81,13 @@ export type ProviderDataBoundaryErrorCode =
   | 'retired_boundary'
   | 'route_drift'
   | 'limit_exceeded'
+  | 'invalid_provider_response'
   | 'entropy_collision';
+
+export type ProviderResponseFailureCode = Extract<
+  ProviderDataBoundaryErrorCode,
+  'limit_exceeded' | 'invalid_provider_response'
+>;
 
 export class ProviderDataBoundaryError extends Error {
   readonly code: ProviderDataBoundaryErrorCode;
@@ -101,6 +107,7 @@ export interface ProviderDataBoundary {
   exposeTexts(texts: readonly string[], context: { surface: ProviderBoundarySurface }): string[];
   exposeToolResult(toolName: string, content: string): string;
   inspectToolJson(rawJson: string): boolean;
+  observeProviderResponseFailure(code: ProviderResponseFailureCode): void;
   rehydrateProviderText(text: string, context: { surface: ProviderBoundarySurface }): string;
   rehydrateToolInput(
     toolName: string,

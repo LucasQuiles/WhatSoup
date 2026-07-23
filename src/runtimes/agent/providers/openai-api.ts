@@ -42,6 +42,7 @@ import {
 } from '../../../core/provider-data-boundary.ts';
 import { exposeProviderTurnParts } from '../../../core/provider-data-boundary-turn.ts';
 import { mapRestrictedProviderApiError } from '../../../core/provider-data-boundary-http.ts';
+import { createRestrictedProviderResponseBudget } from '../../../core/provider-data-boundary-response.ts';
 
 const log = createChildLogger('openai-api-provider');
 
@@ -468,9 +469,32 @@ export class OpenAIApiProvider implements ProviderSession {
     const toolCallAccum: ToolCall[] = [];
     let inputTokens: number | undefined;
     let outputTokens: number | undefined;
+    let sawTerminal = false;
+    const responseBudget = this.boundaryRestricted
+      ? createRestrictedProviderResponseBudget({
+          enforce: this.boundaryEnforced,
+          onFailure: (code) => this.dataBoundary!.observeProviderResponseFailure(code),
+        })
+      : undefined;
 
     for await (const data of readSseDataLines(body)) {
-      if (data === '[DONE]') continue;
+      if (data === '[DONE]') {
+        if (sawTerminal && this.boundaryRestricted) {
+          this.dataBoundary!.observeProviderResponseFailure('invalid_provider_response');
+          if (this.boundaryEnforced) {
+            throw new ProviderDataBoundaryError('invalid_provider_response');
+          }
+        }
+        sawTerminal = true;
+        continue;
+      }
+      if (sawTerminal && this.boundaryRestricted) {
+        this.dataBoundary!.observeProviderResponseFailure('invalid_provider_response');
+        if (this.boundaryEnforced) {
+          throw new ProviderDataBoundaryError('invalid_provider_response');
+        }
+      }
+      responseBudget?.observeData(data);
 
       let chunk: Record<string, unknown>;
       try {
@@ -491,6 +515,7 @@ export class OpenAIApiProvider implements ProviderSession {
       if (delta) {
         // ── Text content ─────────────────────────────────────────────
         if (typeof delta['content'] === 'string' && delta['content'].length > 0) {
+          responseBudget?.observeText(delta['content']);
           fullText += delta['content'];
           if (!this.boundaryRestricted) {
             this.opts.onEvent({ type: 'assistant_text', text: delta['content'] });
@@ -510,12 +535,16 @@ export class OpenAIApiProvider implements ProviderSession {
         if (deltaToolCalls) {
           for (const dtc of deltaToolCalls) {
             const idx = dtc.index;
+            responseBudget?.observeToolCall(idx);
             if (!toolCallAccum[idx]) {
               toolCallAccum[idx] = { id: '', type: 'function', function: { name: '', arguments: '' } };
             }
             if (dtc.id) toolCallAccum[idx].id = dtc.id;
             if (dtc.function?.name) toolCallAccum[idx].function.name += dtc.function.name;
-            if (dtc.function?.arguments) toolCallAccum[idx].function.arguments += dtc.function.arguments;
+            if (dtc.function?.arguments) {
+              responseBudget?.observeToolArguments(dtc.function.arguments);
+              toolCallAccum[idx].function.arguments += dtc.function.arguments;
+            }
           }
         }
       }
@@ -527,6 +556,7 @@ export class OpenAIApiProvider implements ProviderSession {
         if (typeof usage.completion_tokens === 'number') outputTokens = usage.completion_tokens;
       }
     }
+    responseBudget?.assertTerminal(sawTerminal);
 
     // Filter out any sparse-array holes and incomplete tool calls
     const completedToolCalls = toolCallAccum.filter(

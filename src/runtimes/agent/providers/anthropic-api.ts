@@ -41,6 +41,7 @@ import {
 } from '../../../core/provider-data-boundary.ts';
 import { exposeProviderTurnParts } from '../../../core/provider-data-boundary-turn.ts';
 import { mapRestrictedProviderApiError } from '../../../core/provider-data-boundary-http.ts';
+import { createRestrictedProviderResponseBudget } from '../../../core/provider-data-boundary-response.ts';
 
 const log = createChildLogger('anthropic-api-provider');
 
@@ -507,14 +508,27 @@ export class AnthropicApiProvider implements ProviderSession {
 
     let fullText = '';
     // Indexed by content block index
-    const textBlockAccum: Map<number, string> = new Map();
     const toolUseAccum: Map<number, ToolUseAccum> = new Map();
     let inputTokens: number | undefined;
     let outputTokens: number | undefined;
     let cacheReadTokens: number | undefined;
+    let sawTerminal = false;
+    const responseBudget = this.boundaryRestricted
+      ? createRestrictedProviderResponseBudget({
+          enforce: this.boundaryEnforced,
+          onFailure: (code) => this.dataBoundary!.observeProviderResponseFailure(code),
+        })
+      : undefined;
 
     for await (const data of readSseDataLines(body)) {
+      if (sawTerminal && this.boundaryRestricted) {
+        this.dataBoundary!.observeProviderResponseFailure('invalid_provider_response');
+        if (this.boundaryEnforced) {
+          throw new ProviderDataBoundaryError('invalid_provider_response');
+        }
+      }
       if (data === '[DONE]') continue;
+      responseBudget?.observeData(data);
 
       let event: Record<string, unknown>;
       try {
@@ -537,9 +551,8 @@ export class AnthropicApiProvider implements ProviderSession {
           const block = event['content_block'] as Record<string, unknown> | undefined;
           if (!block) break;
 
-          if (block['type'] === 'text') {
-            textBlockAccum.set(index, '');
-          } else if (block['type'] === 'tool_use') {
+          if (block['type'] === 'tool_use') {
+            responseBudget?.observeToolCall(index);
             toolUseAccum.set(index, {
               id: (block['id'] as string) ?? '',
               name: (block['name'] as string) ?? '',
@@ -559,8 +572,7 @@ export class AnthropicApiProvider implements ProviderSession {
           if (deltaType === 'text_delta') {
             const chunk = (delta['text'] as string) ?? '';
             if (chunk.length > 0) {
-              const existing = textBlockAccum.get(index) ?? '';
-              textBlockAccum.set(index, existing + chunk);
+              responseBudget?.observeText(chunk);
               fullText += chunk;
               if (!this.boundaryRestricted) {
                 this.opts.onEvent({ type: 'assistant_text', text: chunk });
@@ -570,6 +582,7 @@ export class AnthropicApiProvider implements ProviderSession {
             const partialJson = (delta['partial_json'] as string) ?? '';
             const existing = toolUseAccum.get(index);
             if (existing) {
+              responseBudget?.observeToolArguments(partialJson);
               existing.inputJson += partialJson;
             }
           }
@@ -606,11 +619,16 @@ export class AnthropicApiProvider implements ProviderSession {
           break;
         }
 
-        // content_block_stop and message_stop require no action
+        case 'message_stop':
+          sawTerminal = true;
+          break;
+
+        // content_block_stop requires no action
         default:
           break;
       }
     }
+    responseBudget?.assertTerminal(sawTerminal);
 
     // Collect completed tool uses
     const completedToolUses = Array.from(toolUseAccum.values()).filter(

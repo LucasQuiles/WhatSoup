@@ -671,10 +671,10 @@ describe('ProviderDataBoundary', () => {
     const protoKeyed = JSON.parse('{"type":"object","properties":{"__proto__":{"type":"string"}}}') as Record<string, unknown>;
 
     expect(() => broker.rehydrateToolInput('poisoned', { path: 'ordinary' }, [{
-      name: 'poisoned', description: 'test', inputSchema: inherited,
+      name: 'poisoned', inputSchema: inherited,
     }])).toThrowError(expect.objectContaining({ code: 'invalid_tool_input' }));
     expect(() => broker.rehydrateToolInput('poisoned', {}, [{
-      name: 'poisoned', description: 'test', inputSchema: protoKeyed,
+      name: 'poisoned', inputSchema: protoKeyed,
     }])).toThrowError(expect.objectContaining({ code: 'invalid_tool_input' }));
   });
 
