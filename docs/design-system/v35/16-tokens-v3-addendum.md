@@ -48,7 +48,18 @@ non-avatar elements (except `agent-dream`, which is the agent-mode channel, not 
 Rule: a surface consumes exactly one namespace; cross-register consumption is a lint
 error (L4 broad enforcement).
 
-## 5. Acceptance gate
+## 5. Deployments surface geometry (`--deploy-*`, T5 b-08)
+
+Component-register geometry for the Deployments surface, all traced to
+`mockups/deployments.html`: surface page row with the admin-lane pill, the 4-cell
+summary strip, deployment cards (38px icon box, state pills on the shared status
+vocabulary, body cells with channel/agent/issue mini-tags, org-hub row anatomy),
+and the pair card (46ch explainer measure, 0.3em-tracked code block). The summary
+strip and card bodies go 4→2 columns at the mockup's own 1000px (shared with the
+agents surface). Spec SSOT: `tokens-v3.md` §12. Same pattern as b-02…b-07: raw
+mockup dimensions land in the token block once; `deploy.css` consumes `var()` only.
+
+## 6. Acceptance gate
 
 - [ ] No `channel-*` token carries a hue (computed check).
 - [ ] `agent-hue-*` used only on avatar fills + nowhere else (consumer audit).

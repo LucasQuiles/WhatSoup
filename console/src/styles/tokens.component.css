@@ -137,4 +137,46 @@
   --popover-check-t:  2px;     /* popover checkmark glyph: top offset */
   --popover-check-w:  6px;     /* popover checkmark glyph: stroke box width */
   --popover-check-h:  10px;    /* popover checkmark glyph: stroke box height */
+
+  /* ═══ v3.5 Deployments surface geometry (T5 b-08; mockup deployments.html SSOT) ═══
+     Every literal traces to the mockup; deploy.css consumes var() only.
+     Breakpoint: summary + card bodies go 4→2 columns at the mockup's own
+     1000px (shared with the agents surface). */
+  --deploy-pagerow-gap: 14px;      /* surface h1 row item gap (mockup header gap) */
+  --deploy-pagerow-pad: 14px 22px 12px; /* surface h1 row padding (mockup header padding) */
+  --deploy-admin-gap: 7px;         /* admin-lane pill gap (mockup .admin) */
+  --deploy-admin-pad: 5px 12px;    /* admin-lane pill padding (mockup .admin) */
+  --deploy-main-pad: 14px 22px;    /* main column padding (mockup .main) */
+  --deploy-sum-gap: 10px;          /* summary strip grid gap (mockup .sum) */
+  --deploy-sum-mb: 10px;           /* summary strip bottom margin (mockup .sum) */
+  --deploy-kpi-pad: 8px 14px;      /* KPI cell padding (mockup .kpi) */
+  --deploy-kpi-radius: 8px;        /* KPI cell radius (mockup .kpi) */
+  --deploy-kpi-v-mt: 2px;          /* KPI value margin-top (mockup .kpi .v) */
+  --deploy-kpi-d-mt: 1px;          /* KPI sub margin-top (mockup .kpi .d) */
+  --deploy-dcard-radius: 12px;     /* deployment card radius (mockup .dcard) */
+  --deploy-dcard-mb: 8px;          /* deployment card bottom margin (mockup .dcard) */
+  --deploy-dhead-gap: 10px;        /* card head gap (mockup .dhead) */
+  --deploy-dhead-pad: 9px 18px;    /* card head padding (mockup .dhead) */
+  --deploy-dicon: 38px;            /* card icon box (mockup .dicon) */
+  --deploy-dicon-radius: 10px;     /* card icon radius (mockup .dicon) */
+  --deploy-dicon-glyph: 18px;      /* card icon glyph canvas (mockup .dicon svg) */
+  --deploy-acts-gap: 6px;          /* head actions gap (mockup .dhead .acts) */
+  --deploy-dcell-pad: 8px 18px;    /* body cell padding (mockup .dcell) */
+  --deploy-mini-gap: 3px;          /* mini-tag row gap (mockup .mini) */
+  --deploy-mini-mt: 4px;           /* mini-tag row margin-top (mockup .mini) */
+  --deploy-mini-pad: 2px 7px;      /* mini-tag padding (mockup .mini span) */
+  --deploy-mini-radius: 5px;       /* mini-tag radius (mockup .mini span) */
+  --deploy-hub-gap: 10px;          /* hub row gap (mockup .hub) */
+  --deploy-hub-pad: 7px 18px;      /* hub row padding (mockup .hub) */
+  --deploy-hub-dot: 8px;           /* hub state dot (mockup .hub .st2) */
+  --deploy-pair-pad: 12px 24px;    /* pair card head padding (mockup .pair .dhead) */
+  --deploy-pair-gap: 6px;          /* pair card stack gap (mockup .pair .dhead) */
+  --deploy-pairrow-gap: 14px;      /* pair code row gap (mockup .pairrow) */
+  --deploy-pairrow-mt: 6px;        /* pair code row margin-top (mockup .pairrow) */
+  --deploy-pi-maxw: 46ch;          /* pair explainer measure (mockup .pi) */
+  --deploy-code-pad: 6px 14px;     /* pair code padding (mockup .code) */
+  --deploy-code-radius: 8px;       /* pair code radius (mockup .code) */
+  --tracking-deploy-kpi: 0.1em;    /* KPI caps tracking (mockup .kpi .k) */
+  --tracking-deploy-cell: 0.08em;  /* body cell caps tracking (mockup .dcell .k) */
+  --tracking-deploy-code: 0.3em;   /* pair code tracking (mockup .code) */
 }

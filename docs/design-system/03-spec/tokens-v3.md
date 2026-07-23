@@ -652,3 +652,24 @@ stylesheet (`console/src/styles/chrome.css`) consumes `var()` only: colors from 
   caps).
 - **Shape details** — `--chrome-micro-radius` 1px (tick/dot/host-warn corner; badge.md
   shape family), `--chrome-pill-radius` 99px + `--chrome-attn-pad` (header attn pill).
+
+## 12. v3.5 deployments geometry (docs/design-system/v35/mockups/deployments.html, landed b-08)
+
+Component-tier dimension tokens in `console/src/styles/tokens.component.css`, single
+`:root` scope (theme-independent geometry; parity count unaffected). Mockup literals
+are the visual SSOT — they live in the `--deploy-*` block once, so `deploy.css`
+consumes `var()` only. Colors from the `-v35` semantic addendum (§A); the state pills
+consume the shared status vocabulary with shape mandatory (●/◆/■).
+
+- **Page row** — `--deploy-pagerow-{gap,pad}`, `--deploy-admin-{gap,pad}` (admin-lane
+  pill), `--deploy-main-pad`.
+- **Summary strip** — `--deploy-sum-{gap,mb}`, `--deploy-kpi-{pad,radius,v-mt,d-mt}`;
+  4→2 columns at the mockup's own 1000px (shared with the agents surface).
+- **Deployment card** — `--deploy-dcard-{radius,mb}`, `--deploy-dhead-{gap,pad}`,
+  `--deploy-dicon{,-radius,-glyph}` (38px box, 18px glyph), `--deploy-acts-gap`,
+  `--deploy-dcell-pad`, `--deploy-mini-{gap,mt,pad,radius}` (channel/agent/issue
+  mini-tags), `--deploy-hub-{gap,pad,dot}` (org-hub row anatomy).
+- **Pair card** — `--deploy-pair-{pad,gap}`, `--deploy-pairrow-{gap,mt}`,
+  `--deploy-pi-maxw` 46ch (explainer measure), `--deploy-code-{pad,radius}` with
+  `--tracking-deploy-code` 0.3em.
+- **Tracking** — `--tracking-deploy-kpi` 0.1em, `--tracking-deploy-cell` 0.08em.
