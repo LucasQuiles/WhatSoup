@@ -235,6 +235,13 @@ describe('registerAllTools tags every module tool (QR-017)', () => {
 // Inline control-plane exception: restart_self is tag-able via the bracket
 // (regression guard for the "frozen return value" risk — buildRestartSelfTool
 // must return a mutable declaration so register()'s in-place stamp succeeds).
+//
+// This taxonomy slice proves the MECHANISM works for the two inline runtime.ts
+// tools (emit_heal_result, restart_self) but deliberately does NOT apply it in
+// runtime.ts: that god-class sits at its arch.file-size ceiling (#1977), and
+// tagging inline there would grow it past the ratchet. Applying the tag to the
+// inline tools is left for a later slice, where disclosure filtering makes it
+// matter and the #1977 decomposition creates the room.
 // ---------------------------------------------------------------------------
 
 describe('inline control-plane tools are tag-able (QR-017)', () => {
