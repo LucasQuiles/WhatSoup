@@ -115,7 +115,7 @@ import { buildRoutingPromptContract, extractRouteIntents } from './route-intent.
 import { createCatalogueSnapshotCache, type CatalogueSnapshotCache } from './model-snapshot-cache.ts';
 import { tiersConfigured as modelTiersConfigured } from './model-catalogue-render.ts';
 import {
-  handleModelCommand,
+  handleModelCommand, tryHandleBareKeep,
   applyRouteChangeAndRecycle as applyRouteChangeAndRecycleForPort,
   consumePendingRecycleIfIdle as consumePendingRecycleIfIdleForPort,
   PREFERENCE_TTL_MS,
@@ -2521,6 +2521,7 @@ export class AgentRuntime implements Runtime {
       routablePinTargets: () => runtime.routablePinTargets(),
       renderRouteStatus: (chatJid, senderJid) => runtime.renderRouteStatus(chatJid, senderJid),
       loadRouteView: (chatJid, senderJid) => runtime.loadRouteView(chatJid, senderJid),
+      completeLocalInbound: (inboundSeq) => { if (inboundSeq !== undefined) runtime.durability?.completeInbound(inboundSeq, 'local_command_handled'); },
     };
   }
 
@@ -3942,6 +3943,7 @@ export class AgentRuntime implements Runtime {
       this.ensureSessionAndQueueSync(chatJid, undefined, msg.senderJid);
     }
     const classified = classifyInput(content as string, { routingAliases: config.nlRouting });
+    if (tryHandleBareKeep(this.modelPinHost, classified, chatJid, msg)) return;
 
     // Set only by /model default (R8): the handler clears the route pref
     // locally and then falls through to forward the raw command so the agent
