@@ -220,6 +220,18 @@ jobs:
       - name: Import cycle guard
         run: npm run guard:import-cycle
 
+      # A package imported but never declared resolves only because something else hoisted
+      # it into node_modules — it works here and breaks on a clean install. Ships with an
+      # EMPTY baseline: measured 1972 tracked files / 9818 import sites / 0 phantoms.
+      # Declarations resolve PER FILE up the package.json chain, because tools/whatsoup_guard
+      # legitimately declares packages the root does not.
+      #
+      # Named CI step, not push-gate-only: tests/scripts/pre-push-guard.test.ts requires
+      # parity for guard:* scripts, since a local-only guard is bypassed by a server-side merge.
+      - name: Phantom dependency guard
+        run: npm run guard:phantom-deps
+
+
 
       - name: Documentation drift guard
         run: npm run guard:doc-drift
