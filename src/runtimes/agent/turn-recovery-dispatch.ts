@@ -145,3 +145,43 @@ export async function shutdownTurnRecoverySupervisorSafely(
     return err;
   }
 }
+
+export interface TurnRecoveryHealthDetails {
+  readonly turnRecoveryOutstanding: number;
+  readonly turnRecoveryPending: number;
+  readonly turnRecoveryLiveClaimed: number;
+  readonly turnRecoveryExpiredClaimed: number;
+  readonly turnRecoveryBlockedUnsafe: number;
+  readonly turnRecoveryExhausted: number;
+  readonly turnRecoveryOpenRecoveries: number;
+  readonly turnRecoveryQuarantinedDelivery: number;
+  readonly turnRecoveryCorruptLinks: number;
+  readonly turnRecoveryOrphanTransfers: number;
+  readonly turnRecoveryEchoConflicts: number;
+}
+
+/** Pure projection of durability's supervisor counts (arch.file-size extraction). */
+export function getTurnRecoveryHealthDetails(
+  durability: DurabilityEngine | null,
+): TurnRecoveryHealthDetails {
+  const counts = typeof durability?.getTurnRecoverySupervisorCounts === 'function'
+    ? durability.getTurnRecoverySupervisorCounts()
+    : {
+      outstanding: 0, pending: 0, liveClaimed: 0, expiredClaimed: 0,
+      blockedUnsafe: 0, exhausted: 0, quarantinedDelivery: 0, corruptLinks: 0,
+      orphanTransfers: 0, echoConflicts: 0, openRecoveries: 0,
+    };
+  return {
+    turnRecoveryOutstanding: counts.outstanding,
+    turnRecoveryPending: counts.pending,
+    turnRecoveryLiveClaimed: counts.liveClaimed,
+    turnRecoveryExpiredClaimed: counts.expiredClaimed,
+    turnRecoveryBlockedUnsafe: counts.blockedUnsafe,
+    turnRecoveryExhausted: counts.exhausted,
+    turnRecoveryOpenRecoveries: counts.openRecoveries,
+    turnRecoveryQuarantinedDelivery: counts.quarantinedDelivery,
+    turnRecoveryCorruptLinks: counts.corruptLinks,
+    turnRecoveryOrphanTransfers: counts.orphanTransfers ?? 0,
+    turnRecoveryEchoConflicts: counts.echoConflicts ?? 0,
+  };
+}

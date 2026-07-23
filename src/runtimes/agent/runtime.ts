@@ -10,7 +10,7 @@ import type {
 } from '../../core/durability.ts';
 import type { TurnRecoveryClaimFence, TurnRecoveryJobRow } from '../../core/turn-recovery-store.ts';
 import type { TurnRecoverySupervisor, TurnRecoveryReplayDispatchResult } from './turn-recovery-supervisor.ts';
-import { createTurnRecoverySupervisorForRuntime, dispatchTurnRecoveryReplayForJob, shutdownTurnRecoverySupervisorSafely } from './turn-recovery-dispatch.ts';
+import { createTurnRecoverySupervisorForRuntime, dispatchTurnRecoveryReplayForJob, shutdownTurnRecoverySupervisorSafely, getTurnRecoveryHealthDetails } from './turn-recovery-dispatch.ts';
 import { splitInputTokenUsage, type AgentEvent } from './stream-parser.ts';
 import {
   classifyProviderFailure,
@@ -1513,33 +1513,10 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  private getTurnRecoveryHealthDetails() {
-    const counts = typeof this.durability?.getTurnRecoverySupervisorCounts === 'function'
-      ? this.durability.getTurnRecoverySupervisorCounts()
-      : {
-      outstanding: 0, pending: 0, liveClaimed: 0, expiredClaimed: 0,
-      blockedUnsafe: 0, exhausted: 0, quarantinedDelivery: 0, corruptLinks: 0,
-      orphanTransfers: 0, echoConflicts: 0, openRecoveries: 0,
-      };
-    return {
-      turnRecoveryOutstanding: counts.outstanding,
-      turnRecoveryPending: counts.pending,
-      turnRecoveryLiveClaimed: counts.liveClaimed,
-      turnRecoveryExpiredClaimed: counts.expiredClaimed,
-      turnRecoveryBlockedUnsafe: counts.blockedUnsafe,
-      turnRecoveryExhausted: counts.exhausted,
-      turnRecoveryOpenRecoveries: counts.openRecoveries,
-      turnRecoveryQuarantinedDelivery: counts.quarantinedDelivery,
-      turnRecoveryCorruptLinks: counts.corruptLinks,
-      turnRecoveryOrphanTransfers: counts.orphanTransfers ?? 0,
-      turnRecoveryEchoConflicts: counts.echoConflicts ?? 0,
-    };
-  }
-
   private logHealthStats(): void {
     const memoryUsage = process.memoryUsage();
     const finalizationHealth = this.runtimeTurnSupervisor.health();
-    const recoveryHealth = this.getTurnRecoveryHealthDetails();
+    const recoveryHealth = getTurnRecoveryHealthDetails(this.durability);
 
     log.info({
       instanceName: this.instanceName,
@@ -2418,8 +2395,7 @@ export class AgentRuntime implements Runtime {
       () => this.durability,
       (result, retained) => this.runtimeTurnCoordinator.applyRecoveredRuntimeTurnFinalization(result, retained),
     );
-    // PRESTAGE-T4 (started in setDurability, stopped at shutdown; see turn-recovery-dispatch.ts):
-    this.turnRecoverySupervisor = createTurnRecoverySupervisorForRuntime({
+    this.turnRecoverySupervisor = createTurnRecoverySupervisorForRuntime({ // started in setDurability, stopped at shutdown
       instanceName: this.instanceName, getDurability: () => this.durability,
       dispatchReplay: (job, fence) => this.dispatchTurnRecoveryReplay(job, fence),
       recoveryManagerId: this.recoveryManagerId, nextRecoveryGeneration: () => ++this.recoveryGeneration,
@@ -5182,8 +5158,7 @@ export class AgentRuntime implements Runtime {
     return completion;
   }
 
-  /** Real TurnRecoveryReplayDispatcher (PRESTAGE-T4); body in turn-recovery-dispatch.ts (arch.file-size). */
-  private async dispatchTurnRecoveryReplay(job: TurnRecoveryJobRow, _fence: TurnRecoveryClaimFence): Promise<TurnRecoveryReplayDispatchResult> {
+  private async dispatchTurnRecoveryReplay(job: TurnRecoveryJobRow, _fence: TurnRecoveryClaimFence): Promise<TurnRecoveryReplayDispatchResult> { // real dispatcher body in turn-recovery-dispatch.ts
     return dispatchTurnRecoveryReplayForJob(
       this.runtimeTurnCoordinator, (jid) => this.resolvePerChatMapKey(jid),
       (mapKey) => this.chatSessions.get(mapKey), (s) => this.requireSessionToolScopeKey(s), job,
@@ -7077,7 +7052,7 @@ export class AgentRuntime implements Runtime {
     const fallbackState = this.getFallbackState();
     const providerExecution = this.providerExecutionGate.snapshot();
     const finalizationHealth = this.runtimeTurnSupervisor.health();
-    const recoveryHealth = this.getTurnRecoveryHealthDetails();
+    const recoveryHealth = getTurnRecoveryHealthDetails(this.durability);
     const finalizationDegraded =
       finalizationHealth.retainedRetries > 0
       || finalizationHealth.degradedScopes > 0
