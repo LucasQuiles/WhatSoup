@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-23
 **Target:** WhatSoup `main` and an affected macOS agent deployment
-**Status:** Approved design, awaiting written-spec review
+**Status:** pending — approved design awaiting written-spec review
 
 ## Context
 
