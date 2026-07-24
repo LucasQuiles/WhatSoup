@@ -18,6 +18,10 @@
 //      the ID list itself is shared via provider-ids.json, so the console
 //      picks up the new ID automatically.
 //   5. Add an impl file (parser or API client) here under providers/.
+//   6. Add the brand grouping in providers/provider-brand.ts BRAND_PROVIDER_ORDER
+//      (which brand it belongs under, and its OAuth/CLI-before-API order) —
+//      the registry test pins every ID to a brand, so a miss fails there; an
+//      unmapped provider would silently vanish from the `/model` drill Level-1.
 
 import providerIdsJson from './provider-ids.json' with { type: 'json' };
 import type { ExecutionMode } from './types.ts';

@@ -493,6 +493,19 @@ append-only `recovery_plans` owner. A non-null `completed_at` is a success recei
 `completed_at` with structured incomplete notes is durable recovery debt and must not be interpreted
 as an in-progress process merely because the service is currently running.
 
+Migration 45 adds a first-class `status` column (`'started'` | `'completed'` | `'failed'`,
+`DEFAULT 'started'`) that disambiguates a null `completed_at` without inferring from absence: a
+row is created `'started'`; `finalize()` sets `status='completed'` together with `completed_at`
+(the success receipt above); `recordIncomplete()` sets `status='failed'` but deliberately does
+**not** set `completed_at` — so `completed_at IS NULL` no longer means only "incomplete or
+interrupted": `status='failed'` is an explicitly recorded incomplete run (structured notes
+present, per the query below), while `status='started'` with a null `completed_at` is a run that
+crashed before either `finalize()` or `recordIncomplete()` ran and is genuinely still open.
+Historical rows backfilled by migration 45 follow the same rule: `completed_at IS NOT NULL`
+became `'completed'`; rows with a null `completed_at` were left at the `'started'` default rather
+than retro-labeled `'failed'`, because a historical incomplete is ambiguous (crash mid-run vs.
+genuinely still in flight at backfill time).
+
 **Useful queries:**
 
 ```sql
@@ -795,7 +808,8 @@ invocation. The row is created open, then updated exactly once with success or i
 |---|---|---|
 | `id` | INTEGER PK | Auto-incrementing run ID. |
 | `started_at` | TEXT | Row insertion timestamp (defaults to `now`). |
-| `completed_at` | TEXT | Success timestamp. `NULL` means the run is incomplete or was interrupted. |
+| `completed_at` | TEXT | Success timestamp, set only by `finalize()`. `NULL` means the run is incomplete or was interrupted — disambiguate with `status` (below) rather than treating `NULL` alone as proof the run is still active. |
+| `status` | TEXT NOT NULL, `DEFAULT 'started'` | Added by migration 45. Terminal values `'completed'` (set by `finalize()`, alongside `completed_at`) and `'failed'` (set by `recordIncomplete()`, which leaves `completed_at` NULL). A row still at `'started'` with a null `completed_at` crashed before either writer ran. |
 | `trigger` | TEXT NOT NULL | `pre_connect` or `post_connect`. |
 | `recovery_plan_id` | TEXT FK | Append-only plan that owns this run and its disposition/corroboration evidence. |
 | `inbound_replayed` | INTEGER | Count of inbound events re-queued for replay. |
@@ -811,3 +825,33 @@ invocation. The row is created open, then updated exactly once with success or i
 Recovery runs and their linked plans, dispositions, corroboration, and closure witnesses are retained
 indefinitely as audit evidence. There is no supported direct-delete or TTL path. Archive/capacity work
 must preserve identities and proof provenance through a dedicated forward migration.
+
+### `enrichment_runs` (#1789 failure-row addition)
+
+Not part of the inbound/outbound durability journal above — `enrichment_runs` is written by
+`EnrichmentPoller` (`src/runtimes/chat/enrichment/poller.ts`), one row per non-empty
+fact-extraction cycle (a cycle that finds no unprocessed messages returns before any write; a
+cycle that throws now writes a failure row — see below). It is documented here because the #1789
+durability-writer invariant guard
+(`scripts/durability-writer-guard.ts`) treats it as one of the two tables the invariant was built
+to fix, alongside `recovery_runs` above.
+
+| Column | Type | Description |
+|---|---|---|
+| `run_id` | INTEGER PK | Auto-incrementing run ID. |
+| `started_at` | TEXT NOT NULL | Cycle start timestamp. |
+| `completed_at` | TEXT | Set on both the success and the failure path (`datetime('now')`). |
+| `messages_processed` | INTEGER | Success/failure counts accumulated before the write. |
+| `facts_extracted` | INTEGER | Same. |
+| `facts_upserted` | INTEGER | Same; column name retained for wire-compatibility with existing metrics readers even though the value now represents facts queued for external export, not a completed Pinecone upsert. |
+| `error` | TEXT | `NULL` on success. As of #1789, set to the caught error's `.message` when a cycle throws past every step-level handler inside `runCycle()` — this is the table's terminal-failure value. |
+
+Before #1789, a cycle that threw past its step-level handlers (most realistically, the initial
+message-fetch call) logged the error and returned with **no durable evidence at all** — no row was
+written for that cycle. `runCycle()`'s outer `catch` now records a failure row with `error` set,
+using whatever `messages_processed`/`facts_extracted`/`facts_upserted` counts were accumulated
+before the throw, so a failed cycle is no longer invisible to anything reading `enrichment_runs`.
+`lastRunAt` is deliberately left unadvanced on this path — `getHealthSnapshot()`
+(`src/runtimes/chat/runtime.ts`) derives `degraded` from `lastRunAt` staleness, so a persistently
+failing cycle must keep tripping that staleness window rather than reading healthy forever while
+failure rows accumulate.

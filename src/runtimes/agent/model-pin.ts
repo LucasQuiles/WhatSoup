@@ -41,10 +41,13 @@ import {
   configuredModelEntries,
   type ModelCatalogueRenderPort,
 } from './model-catalogue-render.ts';
+import { brandOf, listBrands } from './providers/provider-brand.ts';
+import { renderBrandLevel, renderModelLevel, type RenderedLevel } from './model-drilldown-render.ts';
 import {
   fallbackReconfirmationOutcome,
   fallbackRouteLabel,
   renderPinPreferenceOutcome,
+  MODEL_CATALOGUE_CAP,
 } from './owner-render-format.ts';
 
 // Same component name as AgentRuntime: the warnings below keep their existing
@@ -286,6 +289,26 @@ export function recordRouteModelPin(
  *     leave the pin UNVERIFIED exactly as recordRouteModelPin wrote it; a
  *     deliberate fail-open, report 'deferred'.
  */
+/**
+ * The ONE provider-catalogue fetch preamble both the pin-time verify
+ * ({@link verifyModelPinAgainstCatalogue}) and the drill Level-2 render
+ * (`sendModelDrillModelLevel`) need: resolve the provider binary, then fetch
+ * via the injectable listFn/anthropicFn seam (a test never spawns a binary or
+ * hits the keychain). Callers diverge AFTER on the returned listing (verify
+ * runs decideModelPinResolution; the drill renders it). Slice-3 forward-reuse.
+ */
+async function fetchProviderCatalogue(
+  port: ModelPinPort,
+  providerId: string,
+): Promise<Awaited<ReturnType<typeof resolveModelCatalogue>>> {
+  const binary = getProviderBinary(providerId) ?? providerId;
+  return resolveModelCatalogue(providerId, binary, {
+    nowMs: Date.now(),
+    listFn: port.modelCatalogueListFn,
+    anthropicFn: port.modelCatalogueAnthropicFn,
+  });
+}
+
 export async function verifyModelPinAgainstCatalogue(
   port: ModelPinPort,
   chatKey: string,
@@ -293,12 +316,7 @@ export async function verifyModelPinAgainstCatalogue(
   providerId: string,
   model: string,
 ): Promise<'verified' | 'deferred' | { dropped: string }> {
-  const binary = getProviderBinary(providerId) ?? providerId;
-  const listing = await resolveModelCatalogue(providerId, binary, {
-    nowMs: Date.now(),
-    listFn: port.modelCatalogueListFn,
-    anthropicFn: port.modelCatalogueAnthropicFn,
-  });
+  const listing = await fetchProviderCatalogue(port, providerId);
   const catalogue: CatalogueOutcome =
     listing.status === 'ok' ? { available: true, ids: listing.ids } : { available: false };
   const decision = decideModelPinResolution(
@@ -514,16 +532,22 @@ export function echoReconfirmOutcome(
  * selector reuses the EXACT same sink — one verify seam, one echo vocabulary,
  * byte-identical pins — rather than a divergent copy that could drift.
  *
- * ROUTABILITY IS NOT VALIDATED HERE. Both callers resolve to a (provider,
- * model) that is CONFIGURED, not necessarily routable: `configuredModelEntries`
- * and the numbered pick's snapshot (`sendDynamicModelCatalogueSection`) are
- * both credential-UNFILTERED. The selector gates at PROVIDER granularity
- * (`routablePinTargets`) before calling this; the numbered `/model N` pick does
- * not gate at all. Neither gates at MODEL granularity — a model whose provider
- * is routable via a credentialed SIBLING model but which is itself
- * uncredentialed can still be pinned here. A model-level routability gate for
- * BOTH paths is owed debt (needs a model-aware port accessor). A future third
- * caller must therefore NOT assume this sink rejects an un-routable pin.
+ * ROUTABILITY IS NOT VALIDATED HERE, and the (provider, model) is not even
+ * always CONFIGURED. Three callers reach this sink with different resolution
+ * sources: the `/model <id>` direct selector and the flat `/model N` numbered
+ * pick both resolve against the CONFIGURED set (`configuredModelEntries` /
+ * `sendDynamicModelCatalogueSection`, credential-UNFILTERED); the Slice-2 drill
+ * LEAF resolves against the provider's FULL LIVE catalogue (a superset of the
+ * configured set — the discovery surface). Gating varies too: the selector
+ * gates at PROVIDER granularity (`routablePinTargets`), the drill LEAF inherits
+ * only the Level-1 per-PROVIDER gate, and the numbered `/model N` pick does not
+ * gate at all. NONE gates at MODEL granularity — a model whose provider is
+ * routable via a credentialed SIBLING but which is itself uncredentialed can be
+ * pinned here (widened by the drill from "configured models" to "the provider's
+ * whole catalogue"; owner-accepted, see MODEL-STACK-OWED-DEBT). A model-level
+ * gate for all paths is owed debt (needs a model-aware port accessor). A future
+ * caller must therefore NOT assume this sink rejects an un-routable or
+ * unconfigured pin.
  */
 async function pinConfiguredModelEntry(
   port: ModelPinPort,
@@ -582,6 +606,112 @@ async function pinConfiguredModelEntry(
 }
 
 /**
+ * Slice 2 — Level-1 of the `/model` drill-down: the routable BRANDS (one per
+ * brand, credentialed-provider-backed). Pure compute over the port; the
+ * degrade path (routablePinTargets throws — a keychain blip) is fail-open
+ * (R11): the caller writes an empty snapshot + honest copy rather than
+ * throwing out of a read-only menu render. The current route's brand is marked
+ * `(current)` so the user sees where they are without a status readout.
+ */
+function computeBrandLevel(
+  port: ModelPinPort,
+  chatJid: string,
+  senderJid: string,
+): { rendered: RenderedLevel } | { degraded: true } {
+  // Guard the WHOLE body, not just routablePinTargets: resolveRouteForTurn
+  // reads the preference store and can throw the same DB-blip class (the
+  // pruneExpired call above is try/caught for exactly that reason). An escape
+  // here would skip the empty-snapshot write below and leave a STALE FLAT slot
+  // resolvable — the stale-pin this design exists to foreclose.
+  try {
+    const routable = port.routablePinTargets();
+    const brands = listBrands(routable.map((id) => ({ id })));
+    const currentBrand = brandOf(port.resolveRouteForTurn(chatJid, senderJid).provider);
+    return { rendered: renderBrandLevel(brands, currentBrand) };
+  } catch {
+    return { degraded: true };
+  }
+}
+
+/**
+ * Send the drill Level-1 brand menu (bare `/model`, or a `/model N` re-render
+ * when there is no live menu). Always writes the drill 'brand' snapshot BEFORE
+ * sending so a following `/model N` resolves against exactly what was shown —
+ * including on the degrade/empty paths (an empty snapshot makes a following
+ * `/model N` MISS cleanly rather than resolve a stale flat list, since
+ * putDrillSnapshot overwrites the shared latest slot).
+ */
+function sendModelDrillBrandLevel(port: ModelPinPort, chatJid: string, senderJid: string): void {
+  const result = computeBrandLevel(port, chatJid, senderJid);
+  if ('degraded' in result) {
+    port.catalogueSnapshot.putDrillSnapshot(chatJid, senderJid, 'brand', []);
+    port.sendDirect(chatJid, "_Couldn't read your configured providers right now — try again._");
+    return;
+  }
+  const { rendered } = result;
+  port.catalogueSnapshot.putDrillSnapshot(chatJid, senderJid, 'brand', rendered.entries);
+  if (rendered.entries.length === 0) {
+    port.sendDirect(chatJid, '_No providers are set up to pick from yet._');
+    return;
+  }
+  port.sendDirect(chatJid, rendered.text);
+}
+
+/**
+ * Send the drill Level-2 model menu for a brand the user picked at Level-1.
+ * Fetches the provider's live catalogue via the SAME injectable resolver
+ * seam the pin-time verify uses (modelCatalogueListFn/anthropicFn — a test
+ * never spawns a binary). A fetch that is not `ok` degrades honestly and
+ * leaves the Level-1 brand snapshot intact so the user can re-pick, rather
+ * than stranding them. On success writes the drill 'model' snapshot (the leaf
+ * entries) so `/model N` pins the model they saw.
+ */
+async function sendModelDrillModelLevel(
+  port: ModelPinPort,
+  chatJid: string,
+  senderJid: string,
+  brand: string,
+  provider: string,
+): Promise<void> {
+  const listing = await fetchProviderCatalogue(port, provider);
+  if (listing.status !== 'ok') {
+    port.sendDirect(chatJid, `_Couldn't load ${brand} models right now — try again._`);
+    return;
+  }
+  const route = port.resolveRouteForTurn(chatJid, senderJid);
+  const currentModel = route.provider === provider ? route.model : null;
+  // Bound the render the same way the flat menu does (MODEL_CATALOGUE_CAP): a
+  // chatty provider's live catalogue is unbounded, and an uncapped numbered
+  // list makes an unusable WhatsApp message. The snapshot stores exactly what
+  // was SHOWN, so a number always resolves to a visible row.
+  const shown = listing.ids.slice(0, MODEL_CATALOGUE_CAP);
+  const rendered = renderModelLevel(brand, provider, shown, currentModel);
+  port.catalogueSnapshot.putDrillSnapshot(chatJid, senderJid, 'model', rendered.entries);
+  const text = shown.length < listing.ids.length
+    ? `${rendered.text}\n_showing 1–${shown.length} of ${listing.ids.length}_`
+    : rendered.text;
+  port.sendDirect(chatJid, text);
+}
+
+/**
+ * Slice 2 — a `/model N` MISS (no live snapshot, expired, or out-of-range)
+ * discloses "that list moved" and re-renders the CURRENT menu. Kind-aware so a
+ * user who is on the flat `/model list` and types an out-of-range number sees
+ * the flat list again (not a jarring bounce to the drill), while a true
+ * snapshot-miss (no live menu, null) opens the drill Level-1 — the ratified
+ * entry point. A live drill slot re-opens Level-1 too (its brand level is the
+ * stable re-entry).
+ */
+function reRenderCurrentMenuOnMiss(port: ModelPinPort, chatJid: string, senderJid: string): void {
+  port.sendDirect(chatJid, "_That list moved — here's the current one._");
+  if (port.catalogueSnapshot.latestSnapshotKind(chatJid, senderJid) === 'flat') {
+    sendModelCatalogue(port, chatJid, senderJid, null);
+    return;
+  }
+  sendModelDrillBrandLevel(port, chatJid, senderJid);
+}
+
+/**
  * The `/model` alias handler body (NL-first routing alias, owner-approved
  * design). Records a chat-scoped REASONING preference and renders route
  * visibility — never tool, mutation, or authority changes (capability-
@@ -603,24 +733,25 @@ export async function handleModelCommand(
   const { chatJid, senderJid, args, perChatMapKey } = params;
   const sub = (args ?? 'status').trim().toLowerCase();
   const { chatKey, senderKey } = preferenceKeys(port.db, chatJid, senderJid);
+  // Opportunistic retention sweep on read (F13); also runs at init. Hoisted to
+  // the top (Slice 2) so every /model path — incl. the bare-`/model` drill —
+  // sweeps, not just status. Fail-open (R11): a store error must not throw out
+  // of the handler.
+  try {
+    pruneExpired(port.db);
+  } catch (err) {
+    log.warn({ err, instance: port.instanceName }, 'pruneExpired failed during /model - continuing');
+  }
+  if (args === undefined) {
+    // Slice 2: bare `/model` opens the Level-1 brand drill (owner-ratified) —
+    // status moved to the explicit `/model status` below; the L1 `(current)`
+    // brand marker is the at-a-glance substitute.
+    sendModelDrillBrandLevel(port, chatJid, senderJid);
+    return;
+  }
   if (sub === '' || sub === 'status') {
-    // Opportunistic retention sweep on read (F13); also runs at init.
-    // Fail-open (R11): a store error on the sweep must not throw out of
-    // this read-only handler — status still renders on the default route.
-    try {
-      pruneExpired(port.db);
-    } catch (err) {
-      log.warn({ err, instance: port.instanceName }, 'pruneExpired failed during /model status - continuing');
-    }
-    // B26: bare /model gets ONE discoverability affordance line for
-    // the catalogue; an explicit /model status stays as-is.
-    const routeStatus = port.renderRouteStatus(chatJid, senderJid);
-    port.sendDirect(
-      chatJid,
-      args === undefined
-        ? `${routeStatus}\n_/model list — see what you can pick_`
-        : routeStatus,
-    );
+    // Explicit `/model status` (or the defensive empty arg) → the route readout.
+    port.sendDirect(chatJid, port.renderRouteStatus(chatJid, senderJid));
     return;
   }
   if (sub === 'list' || sub.startsWith('list ')) {
@@ -648,10 +779,13 @@ export async function handleModelCommand(
   const nDefaultMatch = /^(\d+)\s+default$/.exec(sub);
   if (nDefaultMatch) {
     const n = parseInt(nDefaultMatch[1]!, 10);
+    // Flat-only: `/model N default` pins a PROVIDER default (no model), which a
+    // drill has no leaf for. resolveCataloguePick is now recency-aware — it
+    // returns null when a newer drill superseded the flat menu, so this never
+    // pins a stale flat provider (the miss re-renders the current menu).
     const entry = port.catalogueSnapshot.resolveCataloguePick(chatJid, senderJid, n);
     if (!entry) {
-      port.sendDirect(chatJid, "_That list moved — here's the current one._");
-      sendModelCatalogue(port, chatJid, senderJid, null);
+      reRenderCurrentMenuOnMiss(port, chatJid, senderJid);
       return;
     }
     const outcome = port.recordRoutePreference(chatJid, chatKey, senderKey, 'provider_specific', entry.providerId);
@@ -675,24 +809,42 @@ export async function handleModelCommand(
     port.sendDirect(chatJid, renderPinOutcomeEcho(port, chatJid, senderJid, `\`${entry.providerId}\``, recycleOutcome));
     return;
   }
-  // D6/D10/D16: `/model N` / `/model N<letter>` — a named-model pin
-  // in ONE step. The optional trailing letter (C1's structured
-  // grammar) is tolerated and ignored; the snapshot is a flat list.
+  // D6/D10/D16 + Slice 2: `/model N` / `/model N<letter>` — resolve N against
+  // whichever menu the user saw most recently (flat list OR drill level), the
+  // ONE recency source. A flat entry pins in one step (Slice-1 behavior); a
+  // drill BRAND entry drills into Level-2; a drill MODEL entry pins the leaf
+  // through the same sink. The optional trailing letter (C1 grammar) is
+  // tolerated and ignored.
   if (/^\d+[a-z]?$/i.test(sub)) {
     const n = parseInt(sub, 10);
-    const entry = port.catalogueSnapshot.resolveCataloguePick(chatJid, senderJid, n);
-    if (!entry) {
-      port.sendDirect(chatJid, "_That list moved — here's the current one._");
-      sendModelCatalogue(port, chatJid, senderJid, null);
+    const pick = port.catalogueSnapshot.resolveLatestPick(chatJid, senderJid, n);
+    if (!pick) {
+      reRenderCurrentMenuOnMiss(port, chatJid, senderJid);
       return;
     }
-    // The record→verify→recycle→echo tail is the shared pin sink (Slice 1) —
-    // the `/model <vendor/model>` direct selector below reuses it verbatim.
+    if (pick.kind === 'flat') {
+      // The record→verify→recycle→echo tail is the shared pin sink (Slice 1) —
+      // the `/model <vendor/model>` direct selector below reuses it verbatim.
+      await pinConfiguredModelEntry(
+        port,
+        { chatJid, senderJid, perChatMapKey, chatKey, senderKey },
+        pick.entry.providerId,
+        pick.entry.id,
+      );
+      return;
+    }
+    if (pick.entry.kind === 'brand') {
+      // Level-1 pick → open Level-2 for that brand's provider. (The union
+      // narrows on `kind` — brand/provider are non-optional on this arm.)
+      await sendModelDrillModelLevel(port, chatJid, senderJid, pick.entry.brand, pick.entry.provider);
+      return;
+    }
+    // Level-2 (model) pick → pin the leaf through the shared sink.
     await pinConfiguredModelEntry(
       port,
       { chatJid, senderJid, perChatMapKey, chatKey, senderKey },
-      entry.providerId,
-      entry.id,
+      pick.entry.provider,
+      pick.entry.model,
     );
     return;
   }
