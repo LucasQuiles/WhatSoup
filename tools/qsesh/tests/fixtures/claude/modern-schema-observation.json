@@ -7,7 +7,7 @@
     "raw-source-hash",
     "raw-source-path"
   ],
-  "classification_policy": "explicit-observed-kind-allowlist-v1",
+  "classification_policy": "explicit-observed-plus-sanitized-fixture-allowlist-v1",
   "content_identity": {
     "all_no_init_content_rows_had_nonempty_session_id": true,
     "no_init_session_count": 5273
@@ -23,6 +23,7 @@
     "tool_result",
     "tool_use"
   ],
+  "observed_control_provenance_type": "production-derived",
   "observed_control_types": [
     "agent-name",
     "ai-title",
@@ -54,7 +55,11 @@
     "parsed_file_count": 5388,
     "selection": "no-init sessions containing user or assistant rows"
   },
-  "provenance_type": "production-derived",
+  "provenance_type": "mixed-explicit-sources",
+  "sanitized_fixture_control_provenance_type": "hand-authored-sanitized-fixture",
+  "sanitized_fixture_control_types": [
+    "fixture_unknown"
+  ],
   "sanitizer_version": "metadata-keys-only-v1",
   "schema_version": 1,
   "source_kind": "owner-scoped local Claude JSONL metadata-only observation"

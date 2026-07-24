@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from qsesh.extractors import claude as claude_extractor
 from qsesh.extractors.claude import (
     CLAUDE_OBSERVED_MODERN_CONTROL_TYPES,
     CLAUDE_OBSERVED_MODERN_SYSTEM_SUBTYPES,
@@ -308,7 +309,7 @@ def test_provenance_has_exact_harness_and_observation_matrix() -> None:
 
     claude = next(entry for entry in corpus if entry["harness"] == "claude")
     assert claude["modern_schema_observation_derivation"] == (
-        "metadata-only structural allowlist from owner-scoped local no-init sessions"
+        "metadata-only production observation plus one sanitized fixture sentinel"
     )
     observation_path = FIXTURE_ROOT / claude["modern_schema_observation_path"]
     assert observation_path.is_file()
@@ -394,6 +395,18 @@ def test_modern_claude_runtime_allowlists_match_sanitized_observation() -> None:
     assert set(observation["observed_control_types"]) == (
         CLAUDE_OBSERVED_MODERN_CONTROL_TYPES
     )
+    assert observation.get("sanitized_fixture_control_types") == ["fixture_unknown"]
+    assert observation.get("provenance_type") == "mixed-explicit-sources"
+    assert observation.get("observed_control_provenance_type") == "production-derived"
+    assert observation.get("sanitized_fixture_control_provenance_type") == (
+        "hand-authored-sanitized-fixture"
+    )
+    assert claude_extractor.CLAUDE_SANITIZED_FIXTURE_CONTROL_TYPES == {
+        "fixture_unknown"
+    }
+    assert getattr(claude_extractor, "CLAUDE_ACCEPTED_CONTROL_TYPES", None) == (
+        CLAUDE_OBSERVED_MODERN_CONTROL_TYPES | {"fixture_unknown"}
+    )
     assert set(observation["observed_system_subtypes"]) == (
         CLAUDE_OBSERVED_MODERN_SYSTEM_SUBTYPES | {"compact_boundary"}
     )
@@ -402,7 +415,7 @@ def test_modern_claude_runtime_allowlists_match_sanitized_observation() -> None:
         "no_init_session_count": 5273,
     }
     assert observation["classification_policy"] == (
-        "explicit-observed-kind-allowlist-v1"
+        "explicit-observed-plus-sanitized-fixture-allowlist-v1"
     )
 
 

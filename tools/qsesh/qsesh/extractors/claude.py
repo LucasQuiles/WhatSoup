@@ -57,7 +57,10 @@ CLAUDE_OBSERVED_MODERN_SYSTEM_SUBTYPES = frozenset(
         "turn_duration",
     }
 )
-_CONTROL_TYPES = CLAUDE_OBSERVED_MODERN_CONTROL_TYPES | {"fixture_unknown"}
+CLAUDE_SANITIZED_FIXTURE_CONTROL_TYPES = frozenset({"fixture_unknown"})
+CLAUDE_ACCEPTED_CONTROL_TYPES = (
+    CLAUDE_OBSERVED_MODERN_CONTROL_TYPES | CLAUDE_SANITIZED_FIXTURE_CONTROL_TYPES
+)
 _USAGE_KEYS = (
     "cache_creation_input_tokens",
     "cache_read_input_tokens",
@@ -261,7 +264,8 @@ class ClaudeExtractor:
         if (
             not isinstance(raw_type, str)
             or _SAFE_KIND(raw_type) is None
-            or raw_type not in {"assistant", "system", "user"} | _CONTROL_TYPES
+            or raw_type
+            not in {"assistant", "system", "user"} | CLAUDE_ACCEPTED_CONTROL_TYPES
         ):
             raise _schema("claude-row-type")
         source_line = f"line:{line_index}"
