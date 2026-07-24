@@ -37,7 +37,7 @@ import {
   withHandoffPrefix as withHandoffPrefixImpl,
   flushPendingHandoffNotice as flushPendingHandoffNoticeImpl,
 } from './handoff-notice-prefix.ts';
-import { sanitizeProviderPreviewText } from './provider-preview-sanitizer.ts';
+import { providerPreview } from './provider-preview-sanitizer.ts';
 import { formatContextLines } from './context-lines.ts';
 import { redactHandoffPii } from './handoff-pii-redactor.ts';
 import { seamForProvider } from './handoff-seam-routing.ts';
@@ -2218,7 +2218,7 @@ export class AgentRuntime implements Runtime {
         chatJid: queue.targetChatJid,
         reason: decision.reason,
         satisfiesReplyGuarantee: decision.satisfiesReplyGuarantee,
-        textPreview: sanitizeProviderPreviewText(text).slice(0, 200),
+        textPreview: providerPreview(text, 200),
       },
       'assistant_text egress gate suppressed non-user-facing text',
     );
@@ -2254,7 +2254,7 @@ export class AgentRuntime implements Runtime {
           {
             chatJid: queue.targetChatJid,
             inboundSeq,
-            textPreview: sanitizeProviderPreviewText(text).slice(0, 200),
+            textPreview: providerPreview(text, 200),
           },
           'send_verification text without origin-chat outbound — reply guarantee stays armed',
         );
@@ -2310,7 +2310,7 @@ export class AgentRuntime implements Runtime {
     if (classification === null) return { suppress: false, ambient: null };
     if (classification.confidence === 'banner') {
       log.warn(
-        { chatJid, kind: classification.kind, textPreview: normalizedText.slice(0, MAX_STREAMED_BANNER_LENGTH) },
+        { chatJid, kind: classification.kind, textPreview: providerPreview(normalizedText, MAX_STREAMED_BANNER_LENGTH) },
         'suppressed provider-failure message from assistant_text',
       );
       return { suppress: true, ambient: null };
@@ -2342,7 +2342,7 @@ export class AgentRuntime implements Runtime {
         chatJid,
         kind: ambient.kind,
         textLength: normalizedText.length,
-        textPreview: normalizedText.slice(0, MAX_STREAMED_BANNER_LENGTH),
+        textPreview: providerPreview(normalizedText, MAX_STREAMED_BANNER_LENGTH),
         outcome: delivered ? 'delivered' : 'suppressed',
       },
       delivered
@@ -6717,7 +6717,7 @@ export class AgentRuntime implements Runtime {
         // but before the next user message. These are model reactions to SDK-injected
         // system-reminders (e.g., TodoWrite) and must not trigger typing or outbound messages.
         if (mapKey !== undefined && this.postTurnGate.has(mapKey)) {
-          log.info({ mapKey, textPreview: event.text.slice(0, 200) }, 'post-turn gate: suppressed phantom assistant_text');
+          log.info({ mapKey, textPreview: providerPreview(event.text, 200) }, 'post-turn gate: suppressed phantom assistant_text');
           break;
         }
         if (this.isSilentCompact(mapKey)) break;
@@ -6850,7 +6850,7 @@ export class AgentRuntime implements Runtime {
         }
         if (event.isError) {
           const toolName = trackedToolName ?? resultToolName ?? 'unknown';
-          const errorPreview = event.content.length > 200 ? event.content.slice(0, 200) + '...' : event.content;
+          const errorPreview = event.content.length > 200 ? `${providerPreview(event.content, 200)}...` : providerPreview(event.content, event.content.length);
           log.warn({ toolId: event.toolId, toolName, error: errorPreview }, 'tool error reported by agent');
           const classification = classifyToolError(toolName, event.content);
           queue.enqueueToolUpdate(classification);
@@ -11712,7 +11712,7 @@ export class AgentRuntime implements Runtime {
 
           // Replay the pending turn that was lost during the failed resume
           if (pendingText && mapKey) {
-            log.info({ chatJid, mapKey, textPreview: pendingText.slice(0, 80) }, 'replaying pending turn after resume failure');
+            log.info({ chatJid, mapKey, textPreview: providerPreview(pendingText, 80) }, 'replaying pending turn after resume failure');
             try {
               await session.sendTurn(pendingText);
             } catch (err) {
@@ -11921,7 +11921,7 @@ export class AgentRuntime implements Runtime {
         tracker?.onAnyActivity();
         // Post-turn gate: suppress phantom assistant_text (same as handleEventWithContext)
         if (this.postTurnGate.has(GLOBAL_TOOL_SCOPE_KEY)) {
-          log.info({ textPreview: event.text.slice(0, 200) }, 'post-turn gate: suppressed phantom assistant_text (shared)');
+          log.info({ textPreview: providerPreview(event.text, 200) }, 'post-turn gate: suppressed phantom assistant_text (shared)');
           break;
         }
         if (this.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY)) break;
@@ -12053,7 +12053,7 @@ export class AgentRuntime implements Runtime {
         }
         if (event.isError) {
           const toolName = trackedToolName ?? resultToolName ?? 'unknown';
-          const errorPreview = event.content.length > 200 ? event.content.slice(0, 200) + '...' : event.content;
+          const errorPreview = event.content.length > 200 ? `${providerPreview(event.content, 200)}...` : providerPreview(event.content, event.content.length);
           log.warn({
             chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid,
             toolId: event.toolId,
