@@ -2927,9 +2927,12 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     try {
       await this.connect();
     } finally {
-      if (this.connectionState !== 'connected') {
-        this.gracefulReconnectInFlight = false;
-      }
+      // Always clear the flag: the purpose of gracefulReconnectInFlight is to
+      // prevent CONCURRENT graceful reconnects, not to suppress future ones.
+      // A conditional clear (only when state !== 'connected') leaves the flag
+      // stuck true if connect() briefly succeeded then disconnected before this
+      // finally ran — permanently blocking all future reconnects. See #2168.
+      this.gracefulReconnectInFlight = false;
     }
   }
 
@@ -2958,9 +2961,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     try {
       await this.connect();
     } finally {
-      if (this.connectionState !== 'connected') {
-        this.gracefulReconnectInFlight = false;
-      }
+      this.gracefulReconnectInFlight = false; // #2168 — always clear, see handleExhausted
     }
   }
 }

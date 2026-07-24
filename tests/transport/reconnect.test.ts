@@ -2108,3 +2108,48 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     await manager.shutdown();
   });
 });
+
+// ---------------------------------------------------------------------------
+// #2168 — gracefulReconnectInFlight must ALWAYS clear, even when connect() succeeds
+// ---------------------------------------------------------------------------
+
+describe('ConnectionManager — gracefulReconnectInFlight flag reset (#2168)', () => {
+  it('clears gracefulReconnectInFlight even when connect() leaves state=connected (the #2168 race)', async () => {
+    const sockets: ReturnType<typeof makeMockSocket>[] = [];
+
+    vi.mocked(makeWASocket).mockImplementation(() => {
+      const s = makeMockSocket();
+      sockets.push(s);
+      return s.mockSock as any;
+    });
+
+    writeValidTestAuth();
+    const manager = new ConnectionManager();
+    await manager.connect();
+
+    // Simulate the race: connect() resolves with connectionState ALREADY 'connected'.
+    // In production this happens when the socket's 'open' event fires during
+    // connect()'s async work. We force it by spying on connect() to set the state
+    // before resolving — this is the exact condition under which the OLD code's
+    // conditional clear (`if (state !== 'connected')`) would leave the flag stuck.
+    const originalConnect = manager.connect.bind(manager);
+    vi.spyOn(manager as any, 'connect').mockImplementation(async function (
+      this: any,
+    ): Promise<void> {
+      await originalConnect();
+      // Force the race condition: state IS 'connected' when connect() resolves.
+      (manager as any).setConnectionState('connected');
+    });
+
+    // Trigger gracefulReconnect — this sets the flag true, calls connect(), then
+    // hits the finally block.
+    await (manager as any).gracefulReconnect(sockets[0]!.mockSock, 'keepalive_failed');
+
+    // With the OLD conditional clear, connectionState === 'connected' means the
+    // flag is NOT cleared — it stays true forever, blocking all future reconnects.
+    // The fix clears unconditionally.
+    expect((manager as any).gracefulReconnectInFlight).toBe(false);
+
+    await manager.shutdown();
+  });
+});
