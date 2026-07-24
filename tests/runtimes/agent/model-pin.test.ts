@@ -478,6 +478,7 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
 import { __resetModelCatalogueCacheForTest } from '../../../src/runtimes/agent/model-catalogue-resolver.ts';
+import { providerConfigEffort } from '../../../src/runtimes/agent/reasoning-control.ts';
 import { Database as RealDatabase } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
 
@@ -589,6 +590,15 @@ describe('NL routing handlers (nlRouting flag)', () => {
     (mockSession as unknown as Record<string, unknown>).getProviderId = vi.fn(
       () => (capturedSessionManagerOptsRef.current as unknown as { provider?: string } | null)?.provider ?? 'claude-cli',
     );
+    // Slice 3: the recycle diff also reads the session's EFFECTIVE spawned
+    // effort. Like getModelRef/getProviderId above, the mock must report the
+    // LATEST construction opts. It calls the REAL providerConfigEffort rather
+    // than re-implementing its guard, so the double cannot silently drift from
+    // the production reader (which would make these tests verify the mock).
+    (mockSession as unknown as Record<string, unknown>).getSpawnedEffort = vi.fn(() => {
+      const pc = (capturedSessionManagerOptsRef.current as unknown as { providerConfig?: Record<string, unknown> } | null)?.providerConfig;
+      return providerConfigEffort(pc);
+    });
   });
 
   afterEach(async () => {
@@ -872,6 +882,80 @@ describe('NL routing handlers (nlRouting flag)', () => {
       const reply = allReplies(sentMessages).join('\n');
       expect(reply).toContain('Already set — extended for another 24h');
       expect(reply).not.toContain('new sessions still use claude-cli (haiku-fast)');
+    });
+
+    // Slice 3 (layer 4 — apply). The menu Level-3 input path now ships too (its
+    // own tests live below); the one-shot `/model N M K` form is the remaining
+    // deferral. These isolate the apply seam both inputs drive:
+    // routeSessionProviderConfig folds a route's effort pin into the spawn
+    // config, and the recycle diff treats an effort-only change as a genuine
+    // change. RED-first: on the pre-Slice-3 code both the config carries no
+    // `effort` and the diff misses it (returns 'noop').
+    describe('Slice 3 — route effort applies to the spawn config + recycle diff', () => {
+      type RSPC = { routeSessionProviderConfig: (r: Record<string, unknown>) => Record<string, unknown> | undefined };
+      type ARCR = { applyRouteChangeAndRecycle: (c: string, s: string, m: string | undefined) => string };
+
+      it('a claude-cli user-pin route carries its effort into providerConfig.effort', () => {
+        const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+        const cfg = (runtime as unknown as RSPC).routeSessionProviderConfig({
+          provider: 'claude-cli', model: 'claude-opus-4-8', source: 'preference', reasonCode: 'user_pin', effort: 'low',
+        });
+        expect(cfg?.effort).toBe('low');
+      });
+
+      it('a route with NO effort override keeps the static providerConfig.effort (no forced harness default)', () => {
+        cfgAny().agentProviderConfig = { effort: 'high' };
+        const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+        const cfg = (runtime as unknown as RSPC).routeSessionProviderConfig({
+          provider: 'claude-cli', model: 'claude-opus-4-8', source: 'default', reasonCode: 'no_preference',
+        });
+        expect(cfg?.effort).toBe('high');
+      });
+
+      it('a non-claude route never gets the pin effort applied (effort is claude-cli-only)', () => {
+        // A static effort is configured so the assertion is CONCRETE: the inherited
+        // static value must survive and the pin's 'low' must never be applied to a
+        // non-claude route (a bare toBeUndefined would not distinguish
+        // "not applied" from "no config at all").
+        cfgAny().agentProviderConfig = { effort: 'high' };
+        const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+        const cfg = (runtime as unknown as RSPC).routeSessionProviderConfig({
+          provider: 'opencode-cli', model: 'kimi/kimi-k3', source: 'preference', reasonCode: 'user_pin', effort: 'low',
+        });
+        expect(cfg?.effort).not.toBe('low');
+        expect(cfg?.effort).toBe('high');
+      });
+
+      it('the recycle diff detects an effort-only change (same provider+model, different effective effort)', () => {
+        cfgAny().agentProviderConfig = { effort: 'high' };
+        const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+        // A live session spawned with effort 'high'.
+        capturedSessionManagerOptsRef.current = {
+          model: 'claude-opus-4-8', provider: 'claude-cli', providerConfig: { effort: 'high' },
+        } as unknown as typeof capturedSessionManagerOptsRef.current;
+        (runtime as unknown as { session: typeof mockSession }).session = mockSession;
+        // The next route pins the SAME model but a DIFFERENT effort.
+        (runtime as unknown as { resolveRouteForTurn: (c: string, s?: string) => unknown }).resolveRouteForTurn = () => ({
+          provider: 'claude-cli', model: 'claude-opus-4-8', source: 'preference', reasonCode: 'user_pin', effort: 'low', pinnedProvider: null,
+        });
+        const outcome = (runtime as unknown as ARCR).applyRouteChangeAndRecycle(CHAT, SENDER_A, undefined);
+        expect(outcome).not.toBe('noop');
+      });
+
+      it('the recycle diff is a no-op when the effective effort is unchanged (no over-recycle, F3)', () => {
+        cfgAny().agentProviderConfig = { effort: 'high' };
+        const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+        capturedSessionManagerOptsRef.current = {
+          model: 'claude-opus-4-8', provider: 'claude-cli', providerConfig: { effort: 'high' },
+        } as unknown as typeof capturedSessionManagerOptsRef.current;
+        (runtime as unknown as { session: typeof mockSession }).session = mockSession;
+        // Same model AND the same EFFECTIVE effort (static 'high', no pin override).
+        (runtime as unknown as { resolveRouteForTurn: (c: string, s?: string) => unknown }).resolveRouteForTurn = () => ({
+          provider: 'claude-cli', model: 'claude-opus-4-8', source: 'default', reasonCode: 'no_preference', pinnedProvider: null,
+        });
+        const outcome = (runtime as unknown as ARCR).applyRouteChangeAndRecycle(CHAT, SENDER_A, undefined);
+        expect(outcome).toBe('noop');
+      });
     });
 
     it('keeps the live session marked active when fallback only controls the next session', async () => {
@@ -1211,14 +1295,16 @@ describe('NL routing handlers (nlRouting flag)', () => {
     it('MISS: /model N against an expired/absent snapshot is a DISCLOSED re-render, never a silent pick', async () => {
       cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
       const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
-      // No prior /model list in this chat — no snapshot exists yet.
+      // No prior menu in this chat — no snapshot exists yet.
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2' }));
       expect(prefRows()).toHaveLength(0);
       const replies = allReplies(sentMessages);
       expect(replies.some((t) => t.includes("That list moved — here's the current one."))).toBe(true);
-      // The disclosure is followed by a fresh, pickable re-render — not silence.
-      expect(replies.some((t) => t.includes('*Configured models*'))).toBe(true);
-      expect(replies.some((t) => t.includes('*Pick a model:*'))).toBe(true);
+      // Slice 2: a true snapshot-miss (no live menu) re-renders the drill
+      // Level-1 brand menu — the ratified entry point (bare /model opens it) —
+      // not the flat catalogue. Disclosure is followed by a fresh, pickable
+      // menu, never silence.
+      expect(replies.some((t) => t.includes('*Pick a provider:*'))).toBe(true);
     });
 
     it('MISS: an out-of-range N against a live snapshot is also a disclosed re-render, no row written', async () => {
@@ -1228,6 +1314,11 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(prefRows()).toHaveLength(0);
       const replies = allReplies(sentMessages);
       expect(replies.some((t) => t.includes("That list moved — here's the current one."))).toBe(true);
+      // Slice 2 ANTI-BOUNCE: the sender is on the FLAT list, so the re-render
+      // is the flat catalogue — an out-of-range typo must not yank them into
+      // the drill (only a TRUE snapshot-miss opens Level-1).
+      expect(replies.some((t) => t.includes('*Configured models*'))).toBe(true);
+      expect(replies.some((t) => t.includes('*Pick a provider:*'))).toBe(false);
     });
 
     it('N-DEFAULT HIT: /model N default resolves the snapshot and pins the PROVIDER only (no model)', async () => {
@@ -1983,6 +2074,241 @@ describe('NL routing handlers (nlRouting flag)', () => {
       // Must NOT have reached the pin/defer tail (that echo would leak here).
       expect(reply).not.toContain('pending a catalogue check');
       expect(reply).not.toContain('Now answering with');
+    });
+  });
+
+  // ── Slice 2: /model two-level drill-down (brand -> model) ───────────────────
+  // Bare /model opens the Level-1 brand menu; /model N on a brand drills to
+  // Level-2 (the provider's live catalogue); /model N on a model pins the leaf
+  // through the SAME pinConfiguredModelEntry sink as the flat /model N. The
+  // flat and drill menus share ONE latest slot (last-write-wins) so /model N
+  // resolves against whichever the user saw most recently.
+  describe('two-level drill-down (Slice 2)', () => {
+    // opencode-cli routable via a mocked routablePinTargets (real per-model
+    // keyring I/O is env-dependent; claude-cli is the always-routable primary).
+    function makeDrillRuntime(listIds: string[] = ['kimi/kimi-k3', 'glm/glm-5.2']) {
+      // opencode-cli Level-2 fetches via listFn; claude-cli (brand 1) via
+      // anthropicFn — inject BOTH so either brand's Level-2 renders (a real
+      // binary/keychain is never touched, Task H guardrail).
+      const listFn = vi.fn().mockResolvedValue({ status: 'ok', ids: listIds });
+      const anthropicFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['claude-opus-4-8', 'claude-sonnet-5'] });
+      const rt = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueListFn: listFn, modelCatalogueAnthropicFn: anthropicFn });
+      cfgAny().agentFallbacks = [
+        { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
+        { provider: 'opencode-cli', model: 'glm/glm-5.2' },
+      ];
+      (rt.runtime as unknown as { routablePinTargets: () => string[] }).routablePinTargets = () => ['claude-cli', 'opencode-cli'];
+      return { ...rt, listFn, anthropicFn };
+    }
+
+    it('bare /model opens the Level-1 brand menu built from routablePinTargets, and snapshots it', async () => {
+      const { runtime, sentMessages } = makeDrillRuntime();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('*Pick a provider:*');
+      expect(reply).toContain('Claude');
+      expect(reply).toContain('OpenCode');
+      expect(reply).toContain('_Reply /model N_');
+      expect(prefRows()).toHaveLength(0);
+    });
+
+    it('/model N on a BRAND entry drills to Level-2 (the provider catalogue), not a pin', async () => {
+      const { runtime, sentMessages, listFn } = makeDrillRuntime();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'm2' }));
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('*OpenCode — pick a model:*');
+      expect(reply).toContain('kimi/kimi-k3');
+      expect(reply).toContain('glm/glm-5.2');
+      expect(listFn).toHaveBeenCalled();
+      expect(prefRows()).toHaveLength(0);
+    });
+
+    it('/model N on a MODEL leaf pins through the shared sink (verified row written)', async () => {
+      const { runtime, sentMessages } = makeDrillRuntime();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'm2' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm3' }));
+      const rows = prefRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].requested_provider).toBe('opencode-cli');
+      expect(rows[0].requested_model).toBe('kimi/kimi-k3');
+      expect(rows[0].model_pin_verified).toBe(1);
+      expect(allReplies(sentMessages).join('\n')).toContain('kimi/kimi-k3');
+    });
+
+    // Slice 3 — Level-3 reasoning-effort menu. claude-cli has native reasoning
+    // control (nativeReasoningControl), so a claude MODEL pick opens Level-3
+    // instead of pinning; opencode-cli has none, so its model pins directly (the
+    // Slice-2 test above, unchanged). RED-first: pre-Slice-3, picking the claude
+    // model writes a pref row immediately (no effort menu, no effort column).
+    it('picking a claude-cli MODEL at Level-2 opens Level-3 (the effort menu), not a pin', async () => {
+      const { runtime, sentMessages } = makeDrillRuntime();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm2' })); // Claude brand → models
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm3' })); // pick claude-opus-4-8
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('reasoning effort:');
+      expect(reply).toContain('Highest');
+      expect(reply).toContain('Default (no override)');
+      expect(prefRows()).toHaveLength(0); // opened Level-3, did NOT pin
+    });
+
+    it('picking an effort level at Level-3 pins the model AT that effort and discloses it in the receipt', async () => {
+      const { runtime, sentMessages } = makeDrillRuntime();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm2' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm3' })); // → Level-3
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm4' })); // pick "Highest" (xhigh)
+      const rows = prefRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].requested_provider).toBe('claude-cli');
+      expect(rows[0].requested_model).toBe('claude-opus-4-8');
+      expect(rows[0].requested_effort).toBe('xhigh');
+      expect(allReplies(sentMessages).join('\n').toLowerCase()).toContain('highest reasoning');
+    });
+
+    it('picking "Default (no override)" at Level-3 pins the model with a null effort (clears any override)', async () => {
+      const { runtime, sentMessages } = makeDrillRuntime();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm2' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm3' })); // → Level-3 (5 rows)
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 5', messageId: 'm4' })); // "Default (no override)"
+      const rows = prefRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].requested_model).toBe('claude-opus-4-8');
+      expect(rows[0].requested_effort).toBeNull();
+      // Terminal behavior assertion: a null effort echoes the model ALONE — the
+      // receipt must NOT claim a reasoning level it did not pin (charter #6).
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('claude-opus-4-8');
+      expect(reply.toLowerCase()).not.toContain('reasoning');
+    });
+
+    it('RECENCY (drill wins): /model list → bare /model → /model 1 drills the DRILL brand, never a flat pin', async () => {
+      const { runtime, sentMessages } = makeDrillRuntime();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model', messageId: 'm2' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm3' }));
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('— pick a model:*');
+      expect(prefRows()).toHaveLength(0);
+    });
+
+    it('RECENCY (flat wins): bare /model → /model list → /model 1 pins the FLAT entry, never drills', async () => {
+      const { runtime } = makeDrillRuntime();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list', messageId: 'm2' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm3' }));
+      const rows = prefRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].requested_provider).toBe('claude-cli');
+    });
+
+    it('RECENCY (/model N default): a drill supersedes the flat list → /model 1 default MISSES, never pins a stale provider (advisor bug guard)', async () => {
+      const { runtime, sentMessages } = makeDrillRuntime();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model', messageId: 'm2' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1 default', messageId: 'm3' }));
+      expect(prefRows()).toHaveLength(0);
+      expect(allReplies(sentMessages).join('\n')).toContain("That list moved — here's the current one.");
+    });
+
+    it('DEGRADE (Level-1): routablePinTargets throwing yields honest copy + a clean-miss snapshot (no stale flat resolve)', async () => {
+      const { runtime, sentMessages } = makeDrillRuntime();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      (runtime as unknown as { routablePinTargets: () => string[] }).routablePinTargets = () => { throw new Error('keychain blip'); };
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model', messageId: 'm2' }));
+      expect(allReplies(sentMessages).join('\n')).toContain("Couldn't read your configured providers right now");
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm3' }));
+      expect(allReplies(sentMessages).join('\n')).toContain("That list moved");
+      expect(prefRows()).toHaveLength(0);
+    });
+
+    it('DEGRADE (Level-2): a provider catalogue fetch that is not ok degrades honestly, no pin', async () => {
+      const listFn = vi.fn().mockResolvedValue({ status: 'unavailable', reason: 'spawn-error' });
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueListFn: listFn });
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
+      (runtime as unknown as { routablePinTargets: () => string[] }).routablePinTargets = () => ['claude-cli', 'opencode-cli'];
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'm2' }));
+      expect(allReplies(sentMessages).join('\n')).toContain("Couldn't load OpenCode models right now");
+      expect(prefRows()).toHaveLength(0);
+    });
+
+    it('/model status still shows the route readout (status moved off bare /model, not removed)', async () => {
+      const { runtime, sentMessages } = makeDrillRuntime();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('*Current route:*');
+      expect(reply).not.toContain('*Pick a provider:*');
+    });
+
+    it('DEGRADE (L1, review M-1): a throw from resolveRouteForTurn (not just routablePinTargets) still writes the empty snapshot — a following /model N misses cleanly, never resolves the stale flat list', async () => {
+      const { runtime, sentMessages } = makeDrillRuntime();
+      // Live flat slot first, so a stale entry exists to (wrongly) resolve.
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      // routablePinTargets SUCCEEDS but resolveRouteForTurn throws — the narrow
+      // window the original guard (wrapping only routablePinTargets) missed.
+      (runtime as unknown as { resolveRouteForTurn: () => never }).resolveRouteForTurn = () => { throw new Error('store blip'); };
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model', messageId: 'm2' }));
+      expect(allReplies(sentMessages).join('\n')).toContain("Couldn't read your configured providers right now");
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm3' }));
+      // The empty drill snapshot overwrote the flat slot → clean miss, no pin.
+      expect(prefRows()).toHaveLength(0);
+      expect(allReplies(sentMessages).join('\n')).toContain('That list moved');
+    });
+
+    it('L2 DISCOVERY (review I-1, owner-ratified): a drill leaf pins a catalogue model that is NOT in the configured set — the direct selector would reject the same id', async () => {
+      // The drill is a discovery surface: Level-2 shows the provider's FULL
+      // live catalogue, a superset of configuredModelEntries. Picking an
+      // otherwise-unconfigured model PINS it (owner decision "full catalogue +
+      // reconcile"), even though `/model opencode/discovered` is rejected by the
+      // direct selector as "not configured". This asymmetry is deliberate.
+      const listFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['opencode/discovered-only'] });
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueListFn: listFn });
+      // opencode-cli is configured with a DIFFERENT model; the catalogue lists
+      // one that is not configured at all.
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
+      (runtime as unknown as { routablePinTargets: () => string[] }).routablePinTargets = () => ['claude-cli', 'opencode-cli'];
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'm2' })); // OpenCode L2
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm3' })); // the discovered-only leaf
+      const rows = prefRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].requested_provider).toBe('opencode-cli');
+      expect(rows[0].requested_model).toBe('opencode/discovered-only'); // NOT in configuredModelEntries
+      expect(rows[0].model_pin_verified).toBe(1);
+      // Cross-check the deliberate asymmetry: the direct selector rejects it.
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model opencode/discovered-only', messageId: 'm4' }));
+      expect(allReplies(sentMessages).join('\n')).toContain("isn't configured on this instance");
+    });
+
+    it('L2 render is capped (review M-2): a chatty provider catalogue is bounded, with an honest "showing 1–N of M" disclosure', async () => {
+      const many = Array.from({ length: 20 }, (_, i) => `opencode/model-${i}`);
+      const listFn = vi.fn().mockResolvedValue({ status: 'ok', ids: many });
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueListFn: listFn });
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'opencode/model-0' }];
+      (runtime as unknown as { routablePinTargets: () => string[] }).routablePinTargets = () => ['claude-cli', 'opencode-cli'];
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'm2' })); // → OpenCode L2
+      const reply = allReplies(sentMessages).join('\n');
+      // Capped at MODEL_CATALOGUE_CAP (12) — the 13th id is not numbered.
+      expect(reply).toContain('12. opencode/model-11');
+      expect(reply).not.toContain('13. opencode/model-12');
+      expect(reply).toContain('showing 1–12 of 20');
     });
   });
 });

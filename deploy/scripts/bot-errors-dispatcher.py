@@ -47,6 +47,10 @@ RECOVERY_DUPLICATE_SUPPRESSION_REASON = (
     "duplicate recovery/info event retained as audit-only; "
     "earliest matching event in the dedupe window remains dispatchable"
 )
+RECOVERED_BEFORE_DELIVERY_REASON = (
+    "incident recovered before its pending alert was delivered; "
+    "alert and clear retained as audit-only"
+)
 TEST_PROVENANCE_SUPPRESSION_REASON = "test-provenance event refused by dispatcher"
 TERMINAL_AUTH_FAILURE_CLASSES = {"pairing_required", "serverside_logout_irreversible"}
 LOGGED_OUT_REASON_KEY = "loggedout"
@@ -1299,7 +1303,7 @@ def close_recovered_daily_health_incidents(event: dict[str, Any], incident_state
     return recovered
 
 
-def absorb_daily_health_signal(event: dict[str, Any], incident_state: dict[str, Any]) -> tuple[str | None, list[str]]:
+def absorb_daily_health_signal(event: dict[str, Any], incident_state: dict[str, Any]) -> list[str]:
     """Stamp freshness and (when applicable) close recovered incidents for a
     daily-health event, regardless of which terminal path actually consumes
     it (TRUTH-01).
@@ -1318,14 +1322,27 @@ def absorb_daily_health_signal(event: dict[str, Any], incident_state: dict[str, 
     host/observation-time gates in ``record_daily_health_freshness``).
     Closure mirrors process_one's own gate — exact source ``"daily-health"``
     and not a clear-type event — so behavior at each call site matches what
-    process_one would have done had the event reached it. Returns
-    ``(host_recorded, recovered_incident_keys)``.
+    process_one would have done had the event reached it.
+
+    Also stamps the ``sourceSpecificRecoveredIncidents`` diagnostic onto the
+    event itself when incidents were recovered (folded in here from the
+    three call sites that used to repeat the same 4-line block).
+    Returns the recovered incident keys (possibly empty). The freshness
+    host is intentionally not returned — no caller has ever consumed it
+    (confirmed by grep across every call site before this change); a
+    caller that needs to know whether THIS event could plausibly have
+    changed the ledger can check ``event["source"]`` itself, which is
+    already in hand.
     """
-    host = record_daily_health_freshness(event, incident_state)
+    record_daily_health_freshness(event, incident_state)
     recovered: list[str] = []
     if str(event.get("source") or "") == "daily-health" and not is_incident_clear(event):
         recovered = close_recovered_daily_health_incidents(event, incident_state)
-    return host, recovered
+    if recovered:
+        diagnostics = event.setdefault("diagnostics", {})
+        if isinstance(diagnostics, dict):
+            diagnostics["sourceSpecificRecoveredIncidents"] = recovered
+    return recovered
 
 
 def critical_asset(event: dict[str, Any]) -> dict[str, Any]:
@@ -3828,8 +3845,21 @@ def collapse_storm_group(
         })
     manifest["digestOutboxPath"] = str(digest_path)
 
+    # Absorb the whole batch in memory, persist the absorbed
+    # state ONCE, and only then perform the terminal moves out of outbox/ —
+    # mirroring process_one's proven save-before-move pattern. Pre-fix the
+    # move for member N happened before ANY save, so a crash between "file
+    # moved" and "state saved" lost that member's freshness/closure for
+    # good (it is no longer in outbox/ for anything to reprocess). Absorb is
+    # idempotent, so a crash AFTER the save but before some moves is safe —
+    # restart just re-collapses the still-present survivors identically.
+    # The save itself is gated on an actual daily-health event having been
+    # absorbed, so a storm of non-daily-health alerts collapses without ever
+    # touching incident_state (no wasted read/write/fsync).
     collapsed = 0
     collapsed_entries: list[dict[str, Any]] = []
+    prepared: list[tuple[Path, Path, dict[str, Any]]] = []
+    state_changed = False
     for path, event in records:
         if not path.exists():
             append_dispatch_log(paths, {
@@ -3838,19 +3868,20 @@ def collapse_storm_group(
                 "sourcePath": str(path),
             })
             continue
-        # TRUTH-01: this member is about to leave outbox/ without ever
-        # reaching process_one() — absorb its freshness stamp and any
-        # incident closure its evidence carries now, or lose both for good.
-        recovered = absorb_daily_health_signal(event, incident_state)[1]
-        if recovered:
-            diagnostics = event.setdefault("diagnostics", {})
-            if isinstance(diagnostics, dict):
-                diagnostics["sourceSpecificRecoveredIncidents"] = recovered
+        absorb_daily_health_signal(event, incident_state)
+        if str(event.get("source") or "").startswith("daily-health"):
+            state_changed = True
         event = mark_collapsed(event, str(digest.get("id")), manifest_path)
         atomic_write_json(path, event)
         target = paths["storm_collapsed"] / (
             f"{path.name}.{safe_segment(str(digest.get('id')))}.{int(time.time())}.collapsed"
         )
+        prepared.append((path, target, event))
+
+    if state_changed:
+        save_incident_state(paths, incident_state)
+
+    for path, target, event in prepared:
         os.replace(path, target)
         collapsed += 1
         collapsed_entries.append({
@@ -3898,8 +3929,12 @@ def collapse_ready_storms(paths: dict[str, Path]) -> int:
     # every collapsed member absorbs freshness + incident-closure before it
     # leaves outbox/ — collapse_ready_storms runs before process_one ever
     # sees these events, and pre-fix that meant they never absorbed at all.
+    # Each collapse_storm_group() call now persists its OWN
+    # absorbed state before its OWN terminal moves, so no outer save is
+    # needed (or wanted — an outer save-once-at-the-end is exactly the
+    # ordering that let a crash mid-batch lose an already-moved member's
+    # stamp; see collapse_storm_group's docstring/comments for the fix).
     incident_state = load_incident_state(paths)
-    state_changed = False
     collapsed = 0
     for fingerprint, records in groups.items():
         remaining = sorted(records, key=lambda record: (record[2], str(record[0])))
@@ -3920,15 +3955,12 @@ def collapse_ready_storms(paths: dict[str, Path]) -> int:
                     [(path, event) for path, event, _ in cluster],
                     incident_state,
                 )
-                state_changed = True
                 clustered_paths = {path for path, _, _ in cluster}
                 remaining = [record for record in remaining if record[0] not in clustered_paths]
                 collapsed_window = True
                 break
             if not collapsed_window:
                 break
-    if state_changed:
-        save_incident_state(paths, incident_state)
     return collapsed
 
 
@@ -3958,6 +3990,85 @@ def move_suppressed_event(
     return suppressed_path
 
 
+def suppress_alerts_recovered_before_delivery(paths: dict[str, Path]) -> int:
+    """Retire queued alerts when a later clear proves recovery before delivery.
+
+    This closes the retry-ordering hole where a temporarily undeliverable alert
+    stays in ``outbox/``, its clear is orphan-suppressed, and the old alert pages
+    after service recovery. When an incident is already recorded as open, only
+    the undelivered duplicate alert is retired; its clear remains visible.
+    """
+    incident_state = load_incident_state(paths)
+    open_incidents = incident_state.get("openIncidents")
+    if not isinstance(open_incidents, dict):
+        open_incidents = {}
+
+    alerts_by_key: dict[str, list[tuple[Path, dict[str, Any], int]]] = {}
+    clears: list[tuple[Path, dict[str, Any], int]] = []
+    for path in sorted(paths["outbox"].glob("*.json")):
+        try:
+            event = read_json(path)
+        except Exception:
+            continue
+        epoch = event_created_epoch(event)
+        if epoch is None:
+            continue
+        if is_incident_alert(event):
+            alerts_by_key.setdefault(incident_key(event), []).append((path, event, epoch))
+        elif is_incident_clear(event) and ready(path, paths["quarantine"]):
+            clears.append((path, event, epoch))
+
+    suppressed = 0
+    for clear_path, clear_event, clear_epoch in sorted(clears, key=lambda row: (row[2], str(row[0]))):
+        key = incident_key(clear_event)
+        if not clear_path.exists():
+            continue
+        pending_alerts = [
+            record for record in alerts_by_key.get(key, [])
+            if record[0].exists()
+            and record[2] <= clear_epoch
+            and not ready(record[0], paths["quarantine"])
+        ]
+        if not pending_alerts:
+            continue
+
+        alert_ids: list[str] = []
+        for alert_path, alert_event, _alert_epoch in pending_alerts:
+            move_suppressed_event(
+                alert_path,
+                paths,
+                alert_event,
+                RECOVERED_BEFORE_DELIVERY_REASON,
+                "recovered_before_delivery_alert_suppressed",
+            )
+            alert_ids.append(str(alert_event.get("id") or "unknown"))
+            suppressed += 1
+
+        migrate_legacy_unqualified_incident(clear_event, incident_state)
+        clear_will_dispatch = isinstance(open_incidents.get(key), dict)
+        if not clear_will_dispatch:
+            move_suppressed_event(
+                clear_path,
+                paths,
+                clear_event,
+                RECOVERED_BEFORE_DELIVERY_REASON,
+                "recovered_before_delivery_clear_suppressed",
+            )
+            suppressed += 1
+        append_dispatch_log(paths, {
+            "type": "recovered_before_delivery",
+            "incidentKey": key,
+            "alertEventIds": alert_ids,
+            "clearEventId": clear_event.get("id"),
+            "clearCreatedAtEpoch": clear_epoch,
+            "clearWillDispatch": clear_will_dispatch,
+        })
+        alerts_by_key[key] = [
+            record for record in alerts_by_key.get(key, []) if record[0].exists()
+        ]
+    return suppressed
+
+
 def suppress_ready_recovery_duplicates(paths: dict[str, Path]) -> int:
     window = recovery_dedupe_window_seconds()
     groups: dict[str, list[tuple[Path, dict[str, Any], int]]] = {}
@@ -3975,14 +4086,18 @@ def suppress_ready_recovery_duplicates(paths: dict[str, Path]) -> int:
     if not groups:
         return 0
 
-    # TRUTH-01: the dedupe group key is machine/instance (recovery_identity);
-    # the freshness ledger keys on the relay remoteHost. A discarded duplicate
-    # can carry a distinct remoteHost from the kept sibling's, so its stamp is
-    # genuinely lost — not merely delayed — unless absorbed here before it
-    # leaves outbox/. Loaded lazily (only once a duplicate is actually found)
-    # to avoid a wasted read/write on the common no-duplicate cycle.
-    incident_state: dict[str, Any] | None = None
-    suppressed = 0
+    # First, identify every duplicate to suppress across all
+    # groups WITHOUT absorbing or moving yet. Barrier-clearing must still
+    # happen inline here (it depends on chronological scan order), but the
+    # actual freshness/closure absorption and terminal move are deferred to
+    # the two steps below so the whole batch's absorbed state can be persisted
+    # ONCE before any move — mirroring process_one's proven save-before-move
+    # pattern (TRUTH-01: the dedupe group key is machine/instance via
+    # recovery_identity, while the freshness ledger keys on the relay
+    # remoteHost, so a discarded duplicate can carry a distinct remoteHost
+    # from the kept sibling's — its stamp is genuinely lost, not merely
+    # delayed, unless absorbed here before it leaves outbox/).
+    duplicates: list[tuple[Path, dict[str, Any]]] = []
     for records in groups.values():
         kept_by_duplicate_fingerprint: dict[str, int] = {}
         for path, event, epoch in sorted(records, key=lambda record: (record[2], str(record[0]))):
@@ -4005,25 +4120,40 @@ def suppress_ready_recovery_duplicates(paths: dict[str, Path]) -> int:
             if first_epoch is not None and first_epoch <= epoch < first_epoch + window:
                 if not path.exists():
                     continue
-                if incident_state is None:
-                    incident_state = load_incident_state(paths)
-                recovered = absorb_daily_health_signal(event, incident_state)[1]
-                if recovered:
-                    diagnostics = event.setdefault("diagnostics", {})
-                    if isinstance(diagnostics, dict):
-                        diagnostics["sourceSpecificRecoveredIncidents"] = recovered
-                move_suppressed_event(
-                    path,
-                    paths,
-                    event,
-                    RECOVERY_DUPLICATE_SUPPRESSION_REASON,
-                    "recovery_duplicate_suppressed",
-                )
-                suppressed += 1
+                duplicates.append((path, event))
                 continue
             kept_by_duplicate_fingerprint[duplicate_fingerprint] = epoch
-    if incident_state is not None:
+
+    if not duplicates:
+        return 0
+
+    # Next, absorb the whole batch in memory, then persist ONCE — gated
+    # on an actual daily-health duplicate having been absorbed, so a batch
+    # of non-daily-health duplicates never touches incident_state (no
+    # wasted read/write/fsync). Loaded lazily (only once a duplicate is
+    # actually found) for the same reason.
+    incident_state = load_incident_state(paths)
+    state_changed = False
+    for _path, event in duplicates:
+        absorb_daily_health_signal(event, incident_state)
+        if str(event.get("source") or "").startswith("daily-health"):
+            state_changed = True
+    if state_changed:
         save_incident_state(paths, incident_state)
+
+    # Finally, the terminal moves, only now that any absorbed state is durable.
+    suppressed = 0
+    for path, event in duplicates:
+        if not path.exists():
+            continue
+        move_suppressed_event(
+            path,
+            paths,
+            event,
+            RECOVERY_DUPLICATE_SUPPRESSION_REASON,
+            "recovery_duplicate_suppressed",
+        )
+        suppressed += 1
     return suppressed
 
 
@@ -4513,12 +4643,9 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
     # instead of the FIFO-pruned suppressed/ archive. Shared with the pre-loop
     # terminal paths (storm-collapse, recovery-dedup) via absorb_daily_health_signal
     # (TRUTH-01) so a member consumed before ever reaching process_one still stamps
-    # freshness and closes any incident its evidence recovers.
-    _stamped_host, recovered = absorb_daily_health_signal(event, incident_state)
-    if recovered:
-        diagnostics = event.setdefault("diagnostics", {})
-        if isinstance(diagnostics, dict):
-            diagnostics["sourceSpecificRecoveredIncidents"] = recovered
+    # freshness and closes any incident its evidence recovers. absorb also stamps
+    # the sourceSpecificRecoveredIncidents diagnostic itself now.
+    absorb_daily_health_signal(event, incident_state)
     suppress_reason = should_suppress_send(event, incident_state)
     if suppress_reason:
         event = mark_suppressed(event, suppress_reason)
@@ -4601,6 +4728,14 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
 
         # --- F5: dead-letter if attempt cap exhausted ---
         if next_backoff(attempts) is None:
+            # Dead-letter is the one genuinely terminal
+            # stamp-loss path in this branch -- unlike the transient-transport
+            # and generic-retry sub-paths above (which requeue to outbox/ and
+            # self-heal by re-absorbing on the next cycle), a dead-lettered
+            # event is never reprocessed. The freshness/closure absorbed into
+            # incident_state at the top of process_one must be persisted
+            # before this terminal move, or it is lost for good.
+            save_incident_state(paths, incident_state)
             dead_path = move_to_dead_letter(claimed, paths, event, original_name_from_processing(claimed))
             append_dispatch_log(paths, {
                 "type": "dead_lettered",
@@ -4653,10 +4788,11 @@ def run_once(max_events: int) -> dict[str, Any]:
         # consumes members. Emits consolidated flap_storm alerts; members are
         # suppressed downstream in should_suppress_send via persisted flapState.
         flap_storms = flap_scan_outbox(paths)
+        recovered_before_delivery = suppress_alerts_recovered_before_delivery(paths)
         storm_collapsed = collapse_ready_storms(paths)
         processed = 0
         sent = 0
-        suppressed = test_provenance_suppressed + recovery_deduped
+        suppressed = test_provenance_suppressed + recovery_deduped + recovered_before_delivery
         failed = 0
         test_leak_dropped = 0
         last_error = None
@@ -4727,6 +4863,7 @@ def run_once(max_events: int) -> dict[str, Any]:
             testProvenanceSuppressed=test_provenance_suppressed,
             testProvenanceMetaAlerted=test_provenance_meta_alerted,
             recoveryDeduped=recovery_deduped,
+            recoveredBeforeDelivery=recovered_before_delivery,
             stormCollapsed=storm_collapsed,
             flapStorms=flap_storms,
             flapResolved=flap_resolved,
@@ -4748,6 +4885,7 @@ def run_once(max_events: int) -> dict[str, Any]:
             "testProvenanceSuppressed": test_provenance_suppressed,
             "testProvenanceMetaAlerted": test_provenance_meta_alerted,
             "recoveryDeduped": recovery_deduped,
+            "recoveredBeforeDelivery": recovered_before_delivery,
             "stormCollapsed": storm_collapsed,
             "flapStorms": flap_storms,
             "flapResolved": flap_resolved,

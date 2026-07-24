@@ -65,6 +65,10 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
     setDurability: vi.fn((_durability: unknown) => {}),
     bindGenerationOwnership: vi.fn((_resolve: () => unknown) => {}),
     getProviderId: vi.fn((): string => 'claude-cli'),
+    // Slice 3: applyRouteChangeAndRecycle's diff-gate reads the effective
+    // spawned effort on every live session — a real SessionManager always has
+    // it (session.ts), so the mock must too (default null = no static effort).
+    getSpawnedEffort: vi.fn((): string | null => null),
   };
 
   // NOTE: IOutboundQueue cannot be imported inside vi.hoisted() (runs before imports),
@@ -16392,18 +16396,20 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(status).toContain('Model: provider default (not configured)');
   });
 
-  it('B26: bare /model appends the catalogue affordance line; explicit /model status does not', async () => {
+  it('Slice 2: bare /model opens the drill Level-1 brand menu; explicit /model status shows the route readout', async () => {
     const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+    // Bare /model no longer prints status — it opens the drill (owner-ratified);
+    // status moved behind the explicit sub-verb, the (current) marker substitutes.
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
-    const bare = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
-    expect(bare).toBeDefined();
-    expect(bare).toContain('/model list — see what you can pick');
+    const bare = allReplies(sentMessages).join('\n');
+    expect(bare).toContain('*Pick a provider:*');
+    expect(bare).not.toContain('*Current route:*');
     mockQueue.enqueueText.mockClear();
     sentMessages.length = 0;
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status', messageId: 'msg-2' }));
-    const explicit = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
-    expect(explicit).toBeDefined();
-    expect(explicit).not.toContain('/model list — see what you can pick');
+    const explicit = allReplies(sentMessages).join('\n');
+    expect(explicit).toContain('*Current route:*');
+    expect(explicit).not.toContain('*Pick a provider:*');
   });
 
   it('B26: /model status keeps the fallback-entry model bare while a fallback window is live (existing behavior)', async () => {
