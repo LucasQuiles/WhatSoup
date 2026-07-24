@@ -41,7 +41,15 @@ describe('prepared statement caching', () => {
     // agentSessionRowAlreadyInStatusForProvider — the true-repeat-only guard
     // that lets a duplicate lifecycle close no-op instead of throwing — plus
     // the live maybe_sent scan above.)
-    expect(prepareSpy).toHaveBeenCalledTimes(114);
+    // (+1 vs 114, PRESTAGE-T4: getTurnRecoveryOriginalDeliveryStatus — the
+    // pre-claim duplicate-send guard's read of the ORIGINAL selected
+    // delivery's outbound status, called before a recovery job is claimed
+    // so the supervisor never claims-then-replays a job whose original send
+    // is still ambiguous. A distinct statement from the pre-existing
+    // maybe_sent diagnostics above; getTurnRecoverySourceProof, added later
+    // in the same packet, deliberately REUSES getTurnRecoverySourceInboundStatus
+    // instead of adding its own, so it does not also bump this count.)
+    expect(prepareSpy).toHaveBeenCalledTimes(115);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');
