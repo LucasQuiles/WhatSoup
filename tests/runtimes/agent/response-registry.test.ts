@@ -16,7 +16,7 @@ import {
   workflowForProviderText,
 } from '../../../src/runtimes/agent/response-registry.ts';
 
-// The 18 classes, hand-listed so the test fails if the union grows without the
+// The 19 classes, hand-listed so the test fails if the union grows without the
 // registry (and ALL_AGENT_FAILURE_CLASSES) keeping up.
 const EXPECTED_CLASSES: AgentFailureClass[] = [
   'provider_usage_limit',
@@ -33,6 +33,7 @@ const EXPECTED_CLASSES: AgentFailureClass[] = [
   'provider_auth_required',
   'provider_binary_missing',
   'provider_permission_denied',
+  'provider_state_locked',
   'mcp_transport_failure',
   'tool_handler_exception',
   'config_or_capability_missing',

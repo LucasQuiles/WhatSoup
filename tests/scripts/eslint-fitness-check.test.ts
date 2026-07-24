@@ -1,4 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { afterAll, describe, expect, it, vi } from 'vitest';
 
 import { fitnessRules } from '../../scripts/lib/fitness/registry.ts';
 // @ts-expect-error -- flat config is a .mjs module with no type declarations; expires 2026-12-31
@@ -61,10 +65,47 @@ describe('eslint fitness wrapper — exit semantics', () => {
       (i) => i.code === 'fitness/god-class' && i.filePath?.endsWith('runtime.ts'),
     );
     expect(godClass).toBeDefined();
+
+    // Non-vacuity: the real ring lints hundreds of files, so a pass is not a pass-over-nothing.
+    expect(result.filesLinted).toBeGreaterThan(100);
     // This spawns a real ESLint pass over the entire source tree. Under the
     // coverage-instrumented CI step (slower than the plain suite) with the
     // parallel vitest pool contending for CPU, the 60s budget was marginal and
     // flaked intermittently (observed on main too). 180s gives durable headroom
     // without masking a genuine hang.
   }, 180_000);
+});
+
+describe('eslint fitness wrapper — refuses a scan of zero files', () => {
+  const temps: string[] = [];
+  afterAll(() => temps.forEach((d) => rmSync(d, { recursive: true, force: true })));
+
+  it('is INCONCLUSIVE (exit 2), never a pass, when the fitness globs match no files', async () => {
+    // `errorOnUnmatchedPattern: false` means a valid config with zero matching files yields a
+    // clean pass unless refused — the fail-open shape. A throwaway root with a trivial-but-valid
+    // flat config and no src/scripts/tests reaches exactly that state (a wrong root instead
+    // fail-closes at config load, exit 1 — this pins the subtler zero-files case).
+    const { run, runEslintFitness } = await import('../../scripts/eslint-fitness-check.ts');
+    const dir = mkdtempSync(join(tmpdir(), 'eslint-fitness-empty-'));
+    temps.push(dir);
+    writeFileSync(join(dir, 'eslint.config.fitness.mjs'), 'export default [];\n');
+
+    const scan = await runEslintFitness(dir);
+    expect(scan.filesLinted).toBe(0);
+
+    const savedExit = process.exitCode;
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      process.exitCode = 0;
+      await run([], dir, {} as NodeJS.ProcessEnv);
+      expect(process.exitCode, 'a zero-file lint must not pass').toBe(2);
+      expect(errSpy.mock.calls.flat().join(' ')).toMatch(/INCONCLUSIVE/i);
+      expect(logSpy.mock.calls.flat().join(' ')).not.toMatch(/passed/i);
+    } finally {
+      process.exitCode = savedExit;
+      errSpy.mockRestore();
+      logSpy.mockRestore();
+    }
+  }, 60_000);
 });

@@ -24,7 +24,14 @@ const DEPLOY_SCRIPT_REL = 'deploy/scripts/whatsoup-bot-errors-deploy.sh';
 
 /**
  * Parse the `FILES=( ... )` bash array out of the deployer script and return
- * the path component (text before the first `:`) of every pin entry.
+ * every pin path in it.
+ *
+ * Each entry is a quoted bare path (e.g. `"deploy/scripts/foo.py"`) -- the
+ * expected sha256 for each is resolved at the deployer's runtime from
+ * deploy/bot-errors-runtime-manifest.json (the single source of truth),
+ * not embedded here. Splitting on the first `:` is still correct and kept
+ * for robustness against a legacy or hand-edited `"path:sha256"` entry,
+ * but no current entry has a `:` suffix to split off.
  */
 function parseDeployPinPaths(scriptText: string): string[] {
   const open = scriptText.indexOf('FILES=(');
@@ -42,8 +49,6 @@ function parseDeployPinPaths(scriptText: string): string[] {
     if (line.length === 0) {
       continue;
     }
-    // Each entry is a quoted "path:sha256". Strip surrounding quotes, take the
-    // path component (before the first ':').
     const unquoted = line.replace(/^["']/, '').replace(/["']$/, '');
     const pinPath = unquoted.split(':')[0]?.trim();
     if (pinPath) {

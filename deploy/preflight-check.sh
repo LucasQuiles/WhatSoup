@@ -122,7 +122,8 @@ else
   # export (2026-07-16: WhatSoup-release-ee35101f shipped to four hosts without
   # one) makes every host flag release-drift forever and leaves the deployed
   # bytes unverifiable against any recorded plan. Fail closed before restart.
-  if [ ! -f "$REPO_ROOT/.whatsoup-release-manifest.json" ]; then
+  RELEASE_MANIFEST_PATH="$REPO_ROOT/.whatsoup-release-manifest.json"
+  if [ ! -f "$RELEASE_MANIFEST_PATH" ]; then
     {
       echo "PREFLIGHT-FAIL: REFUSING TO START — release export lacks .whatsoup-release-manifest.json."
       echo "  The manifest is written by the snapshot pipeline (scripts/release-snapshot-plan.ts)."
@@ -131,6 +132,42 @@ else
     } >&2
     exit 3
   fi
+
+  # Existence alone does not prove trustworthiness: a truncated/corrupted file
+  # or one that is valid JSON but missing required manifest fields would pass
+  # the `-f` check above yet cannot back a drift comparison. Reuse the exact
+  # parser the drift checker uses (scripts/release-snapshot-plan.ts) so this
+  # gate and drift detection never disagree about what counts as a valid
+  # manifest. Resolved relative to SCRIPT_DIR (same pattern as
+  # PROBE_TS/INSTANCE_CHECK_TS below) rather than a separately-configurable
+  # path. Note this is NOT an isolation boundary: a real release export is a
+  # full self-contained copy of the tracked tree, so this validator IS the
+  # release's own copy — it does not protect against a release that shipped a
+  # tampered validator alongside a tampered manifest.
+  RELEASE_MANIFEST_VALIDATOR="$(dirname "$SCRIPT_DIR")/scripts/release-snapshot-plan.ts"
+  if [ ! -f "$RELEASE_MANIFEST_VALIDATOR" ]; then
+    echo "PREFLIGHT-ERROR: manifest validator not found: $RELEASE_MANIFEST_VALIDATOR" >&2
+    exit 1
+  fi
+  set +e
+  manifest_validation_out="$(
+    "$NODE" \
+      --disable-warning=ExperimentalWarning \
+      --experimental-strip-types \
+      "$RELEASE_MANIFEST_VALIDATOR" --validate-manifest "$RELEASE_MANIFEST_PATH" 2>&1
+  )"
+  manifest_validation_rc=$?
+  set -e
+  if [ "$manifest_validation_rc" -ne 0 ]; then
+    {
+      echo "PREFLIGHT-FAIL: REFUSING TO START — release manifest is malformed."
+      echo "  $RELEASE_MANIFEST_PATH exists but does not parse as a valid release manifest."
+      printf '%s\n' "$manifest_validation_out" | sed 's/^/    /'
+      echo "  Fix: re-export the release through the snapshot pipeline (scripts/release-snapshot-plan.ts)."
+    } >&2
+    exit 3
+  fi
+  echo "PREFLIGHT-OK: release manifest present and schema-valid" >&2
 fi
 
 if [ -f "$REPO_ROOT/package-lock.json" ] && [ ! -d "$REPO_ROOT/node_modules" ]; then

@@ -1088,6 +1088,20 @@ export function run(argv: string[] = process.argv.slice(2), cwd: string = proces
     return historyIssues;
   }
 
+  // Non-vacuity floor for the release-hygiene mode, which is whole-tree (git ls-files
+  // intersected with a fixed list) rather than diff-scoped. Zero tracked matches means the
+  // scope resolved to an empty/wrong tree, and "0 issues over 0 files" must not read as a pass.
+  // Gated on mode: staged/branch-diff scan a diff, where an empty set is legitimately nothing.
+  if (args.mode === 'release-hygiene' && trackedFiles(cwd, releaseHygieneFiles).length === 0) {
+    console.error(
+      `repo hygiene guard: INCONCLUSIVE — none of the ${releaseHygieneFiles.length} release-hygiene ` +
+        `file(s) are tracked under ${cwd}. A release-hygiene scan over an empty tree certifies ` +
+        'nothing, which is not a pass.',
+    );
+    process.exitCode = 2;
+    return [];
+  }
+
   const issues = args.mode === 'commit-msg'
     ? scanCommitMessage(readFileSync(args.messageFile ?? '', 'utf8'))
     : args.mode === 'release-hygiene'

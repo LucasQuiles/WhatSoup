@@ -6,13 +6,24 @@ import type { Database } from '../../core/database.ts';
  * turns; it never carries tool, mutation, or authority state (capability-
  * preserved routing: changing model route never changes capability).
  *
- * Keying is the composite (chat_jid, sender_jid) — never chat-wide — so one
- * group member's preference can never bleed onto another sender in the same
- * chat. The store itself is key-agnostic: callers MUST pass the canonical
- * keys from preference-keys.ts (conversation identity + normalized sender),
- * never raw wire JIDs, which alias under LID↔PN resolution. Rows are ephemeral by default: `expires_at` is set for this_thread
- * scope and NULL only for sticky (explicit-confirmation) pins; expired rows
- * are both ignored on read and DELETED by pruneExpired.
+ * Keying is the composite (chat_jid, sender_jid) — never chat-wide — so the
+ * PRIMARY KEY and every WRITE (setPreference/recordRoutePreference) stay
+ * per-sender: each pin durably records who set it, and the row-per-sender
+ * shape is retained as the D13a audit trail. The store itself is key-agnostic:
+ * callers MUST pass the canonical keys from preference-keys.ts (conversation
+ * identity + normalized sender), never raw wire JIDs, which alias under
+ * LID↔PN resolution. Rows are ephemeral by default: `expires_at` is set for
+ * this_thread scope and NULL only for sticky (explicit-confirmation) pins;
+ * expired rows are both ignored on read and DELETED by pruneExpired.
+ *
+ * READ is chat-scoped, last-writer-wins (D13/D13a, 2026-07-20, zero
+ * destructive migration): `getLatestChatPreference` and `clearChatPreference`
+ * collapse the per-sender rows into one chat-wide view at the runtime layer —
+ * the newest non-expired row across every sender in the chat wins, and a
+ * clear removes the whole conversation's rows. `getPreference`/
+ * `clearPreference` keep their original per-sender contract unchanged (still
+ * used by the write-dedup check and exported for callers that need exact
+ * (chat, sender) semantics).
  */
 
 const PREFERENCE_INTENTS = [
@@ -135,43 +146,42 @@ export function setPreference(db: Database, p: ChatModelPreference): void {
     );
 }
 
+const PREFERENCE_COLUMNS =
+  `chat_jid, sender_jid, intent, requested_provider, scope, pin_strict, fallback_permitted, updated_at, expires_at,
+   requested_model, validated_provider, model_pin_verified`;
+
+interface PreferenceRow {
+  chat_jid: unknown;
+  sender_jid: unknown;
+  intent: unknown;
+  requested_provider: unknown;
+  scope: unknown;
+  pin_strict: unknown;
+  fallback_permitted: unknown;
+  updated_at: unknown;
+  expires_at: unknown;
+  requested_model: unknown;
+  validated_provider: unknown;
+  model_pin_verified: unknown;
+}
+
 /**
- * Load one sender's preference, or null when absent, expired, or corrupt.
- *
- * Fail-safe validation mirrors fallback-state-db: SQLite affinity means a
+ * Row → object mapping + fail-safe validation, shared by every reader
+ * (getPreference, getLatestChatPreference). SQLite affinity means a
  * corrupted row can hold wrong-typed or out-of-contract values; any such row
- * reads back as null (treated as "no preference" — the safe default route)
- * rather than propagating garbage into route resolution.
+ * maps to null (treated as "no preference" — the safe default route) rather
+ * than propagating garbage into route resolution. Validation mirrors
+ * fallback-state-db.
+ *
+ * chatJid/senderJid are read FROM THE ROW, not a caller-supplied arg — this
+ * is what lets getLatestChatPreference (which selects by chat only) report
+ * the row's real sender_jid as the D13a audit trail. For getPreference,
+ * which queries by exact (chat_jid, sender_jid), row.chat_jid/row.sender_jid
+ * are always equal to the args it queried with, so this is behavior-
+ * preserving there.
  */
-export function getPreference(
-  db: Database,
-  chatJid: string,
-  senderJid: string,
-  now: number = Date.now(),
-): ChatModelPreference | null {
-  const row = db.raw
-    .prepare(
-      `SELECT chat_jid, sender_jid, intent, requested_provider, scope, pin_strict, fallback_permitted, updated_at, expires_at,
-              requested_model, validated_provider, model_pin_verified
-       FROM chat_model_preference WHERE chat_jid = ? AND sender_jid = ?`,
-    )
-    .get(chatJid, senderJid) as
-    | {
-        chat_jid: unknown;
-        sender_jid: unknown;
-        intent: unknown;
-        requested_provider: unknown;
-        scope: unknown;
-        pin_strict: unknown;
-        fallback_permitted: unknown;
-        updated_at: unknown;
-        expires_at: unknown;
-        requested_model: unknown;
-        validated_provider: unknown;
-        model_pin_verified: unknown;
-      }
-    | undefined;
-  if (!row) return null;
+function rowToPreference(row: PreferenceRow, now: number): ChatModelPreference | null {
+  if (typeof row.chat_jid !== 'string' || typeof row.sender_jid !== 'string') return null;
   if (typeof row.intent !== 'string' || !INTENTS.has(row.intent)) return null;
   if (typeof row.scope !== 'string' || !SCOPES.has(row.scope)) return null;
   if (row.requested_provider !== null && typeof row.requested_provider !== 'string') return null;
@@ -199,8 +209,8 @@ export function getPreference(
     return null; // a live model pin must carry a verified/unverified bit
   }
   return {
-    chatJid,
-    senderJid,
+    chatJid: row.chat_jid,
+    senderJid: row.sender_jid,
     intent: row.intent as PreferenceIntent,
     requestedProvider: row.requested_provider as string | null,
     scope: row.scope as PreferenceScope,
@@ -214,6 +224,47 @@ export function getPreference(
   };
 }
 
+/**
+ * Load one sender's preference, or null when absent, expired, or corrupt.
+ * Exact (chat_jid, sender_jid) match — never chat-wide.
+ */
+export function getPreference(
+  db: Database,
+  chatJid: string,
+  senderJid: string,
+  now: number = Date.now(),
+): ChatModelPreference | null {
+  const row = db.raw
+    .prepare(`SELECT ${PREFERENCE_COLUMNS} FROM chat_model_preference WHERE chat_jid = ? AND sender_jid = ?`)
+    .get(chatJid, senderJid) as PreferenceRow | undefined;
+  return row ? rowToPreference(row, now) : null;
+}
+
+/**
+ * Load the LATEST non-expired preference for a chat, across every sender
+ * (D13/D13a read-collapse — chat-scoped, last-writer-wins). The per-sender
+ * rows underneath are unchanged; this is a READ view over them. The
+ * returned senderJid comes from the winning row itself — the real sender
+ * who set the active pin — which is the D13a audit trail, for free.
+ */
+export function getLatestChatPreference(
+  db: Database,
+  chatJid: string,
+  now: number = Date.now(),
+): ChatModelPreference | null {
+  const row = db.raw
+    .prepare(
+      `SELECT ${PREFERENCE_COLUMNS} FROM chat_model_preference
+       WHERE chat_jid = ? AND (expires_at IS NULL OR expires_at > ?)
+       ORDER BY updated_at DESC LIMIT 1`,
+    )
+    .get(chatJid, now) as PreferenceRow | undefined;
+  // Belt and suspenders: the SQL predicate above already excludes expired
+  // rows, but rowToPreference's `expires_at <= now` check is the authority
+  // (same boundary, same semantics as getPreference) — it runs regardless.
+  return row ? rowToPreference(row, now) : null;
+}
+
 /** Remove one sender's preference (`/reset`). Idempotent — clearing an
  *  absent row is a no-op, so a doubled /reset cannot error or spam. */
 export function clearPreference(db: Database, chatJid: string, senderJid: string): void {
@@ -222,8 +273,108 @@ export function clearPreference(db: Database, chatJid: string, senderJid: string
     .run(chatJid, senderJid);
 }
 
+/** Remove EVERY sender's preference for a chat (D13 chat-scoped clear,
+ *  pairs with getLatestChatPreference's chat-scoped read) — a reset clears
+ *  the conversation's active pin regardless of who set it. Idempotent. */
+export function clearChatPreference(db: Database, chatJid: string): void {
+  db.raw.prepare(`DELETE FROM chat_model_preference WHERE chat_jid = ?`).run(chatJid);
+}
+
 /** Delete (not merely ignore) every expired row. Sticky rows (expires_at
  *  NULL) are never pruned — they clear only via /reset. */
 export function pruneExpired(db: Database, now: number = Date.now()): void {
   db.raw.prepare(`DELETE FROM chat_model_preference WHERE expires_at IS NOT NULL AND expires_at <= ?`).run(now);
+}
+
+/**
+ * `promoteToSticky` typed outcomes (Q-CANARY model-pin `keep` contract,
+ * 2026-07-23). The DB helper owns the atomic predicate and returns one of
+ * these; the runtime layer only maps the result to an event/receipt — it
+ * never re-derives eligibility or re-decides the actor policy itself.
+ */
+export type PromoteOutcome = 'promoted' | 'already_sticky' | 'expired' | 'superseded' | 'actor_mismatch' | 'absent';
+
+export interface PromoteToStickyResult {
+  outcome: PromoteOutcome;
+  /** The relevant row (post-write for `promoted`, as-read otherwise). Null
+   *  for `absent`/`expired`/`superseded` — there is nothing safe to surface. */
+  preference: ChatModelPreference | null;
+}
+
+/** Latest row for a chat across every sender, WITHOUT the expiry filter that
+ *  getLatestChatPreference/rowToPreference apply — internal to
+ *  promoteToSticky, which needs to tell "nothing was ever pinned" (absent)
+ *  apart from "a pin existed but lapsed" (expired) before deciding. Never
+ *  used for route resolution. */
+function latestRowIncludingExpired(db: Database, chatJid: string): PreferenceRow | undefined {
+  return db.raw
+    .prepare(`SELECT ${PREFERENCE_COLUMNS} FROM chat_model_preference WHERE chat_jid = ? ORDER BY updated_at DESC LIMIT 1`)
+    .get(chatJid) as PreferenceRow | undefined;
+}
+
+/**
+ * Compare-and-set promotion of the confirmed receipt (the active preference
+ * row IS the receipt — no parallel pending-confirmation state) to a
+ * permanent, sticky pin.
+ *
+ * `nowMs` is the caller's chosen eligibility instant — pass the inbound's
+ * own receive time (`IncomingMessage.timestamp`), never delayed processing
+ * time, so provider-queue pressure cannot turn an on-time `keep` into an
+ * "expired" refusal it would not have earned at receive time.
+ *
+ * Actor policy: only the sender who set the chat's current winning
+ * preference may confirm it (the safest match to the existing per-sender
+ * write audit — GAP-CHECK's "any group member may promote" finding).
+ * `confirmingSenderJid` MUST already be the canonicalized senderKey
+ * (preferenceKeys) — the same form every writer stores, so this comparison
+ * never false-mismatches on a LID/PN alias of the same person.
+ *
+ * The write is a single atomic UPDATE gated on `updated_at` matching the
+ * exact row just read: if the row moved between read and write (a fresh
+ * /model pin, a /reset, a second `keep`, any concurrent writer), zero rows
+ * are affected and the promotion is rejected as `superseded` rather than
+ * resurrecting whatever is there now. `scope='sticky'` and `expires_at=NULL`
+ * are set together in the same statement — the store's own invariant
+ * (`scope=sticky ⇔ expires_at IS NULL`, see the module doc above) can never
+ * be split across two writes.
+ */
+export function promoteToSticky(
+  db: Database,
+  chatJid: string,
+  confirmingSenderJid: string,
+  nowMs: number,
+): PromoteToStickyResult {
+  const raw = latestRowIncludingExpired(db, chatJid);
+  if (!raw) return { outcome: 'absent', preference: null };
+
+  const isExpired = typeof raw.expires_at === 'number' && raw.expires_at <= nowMs;
+  if (isExpired) return { outcome: 'expired', preference: null };
+
+  const winning = rowToPreference(raw, nowMs);
+  // A row that exists, is not expired-per-the-clause-above, yet still fails
+  // shape validation is corrupt (F12 cross-field contract, wrong-typed
+  // affinity, …) — rowToPreference already maps that to null. Treat it the
+  // same as "nothing valid to confirm" rather than risk building a
+  // ChatModelPreference from an out-of-contract row.
+  if (winning === null) return { outcome: 'absent', preference: null };
+
+  if (winning.senderJid !== confirmingSenderJid) {
+    return { outcome: 'actor_mismatch', preference: winning };
+  }
+  if (winning.expiresAt === null) {
+    return { outcome: 'already_sticky', preference: winning };
+  }
+
+  const updatedAt = Date.now();
+  const result = db.raw
+    .prepare(
+      `UPDATE chat_model_preference
+         SET scope = 'sticky', expires_at = NULL, updated_at = ?
+       WHERE chat_jid = ? AND sender_jid = ? AND updated_at = ?`,
+    )
+    .run(updatedAt, winning.chatJid, winning.senderJid, winning.updatedAt);
+  if (result.changes !== 1) {
+    return { outcome: 'superseded', preference: null };
+  }
+  return { outcome: 'promoted', preference: { ...winning, scope: 'sticky', expiresAt: null, updatedAt } };
 }

@@ -13,9 +13,11 @@ import { readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
   PROVIDER_IDS,
+  executionModeForProvider,
   isProviderId,
   type ProviderId,
 } from '../../../../src/runtimes/agent/providers/index.ts';
+import { brandOf, resolveBrandProvider } from '../../../../src/runtimes/agent/providers/provider-brand.ts';
 
 describe('Provider ID registry (#447)', () => {
   it('exposes the 6 canonical provider IDs as a frozen array', () => {
@@ -34,6 +36,17 @@ describe('Provider ID registry (#447)', () => {
     for (const id of PROVIDER_IDS) {
       expect(isProviderId(id)).toBe(true);
     }
+  });
+
+  it('maps every canonical provider to one explicit lifecycle mode', () => {
+    expect(Object.fromEntries(PROVIDER_IDS.map((id) => [id, executionModeForProvider(id)]))).toEqual({
+      'claude-cli': 'persistent_session',
+      'codex-cli': 'persistent_session',
+      'gemini-cli': 'persistent_session',
+      'opencode-cli': 'spawn_per_turn',
+      'openai-api': 'managed_loop',
+      'anthropic-api': 'managed_loop',
+    });
   });
 
   it('isProviderId returns false for unknown / mistyped IDs', () => {
@@ -84,6 +97,25 @@ describe('Provider ID registry (#447)', () => {
       if (patterns === null) continue;
       const matched = patterns.some((p) => files.some((f) => p.test(f)));
       expect(matched, `expected an impl file for provider "${id}"`).toBe(true);
+    }
+  });
+
+  it('every canonical provider has a brand mapping (drill Level-1 anti-drift)', () => {
+    // The `/model` two-level drill builds Level-1 from routablePinTargets(),
+    // which returns PROVIDER_IDS-typed ids, then groups them via brandOf
+    // (provider-brand.ts). A canonical provider WITHOUT a brand entry would
+    // return null and be silently skipped by listBrands — routable, reachable
+    // via `/model list` + `/model <id>`, but INVISIBLE in the drill menu with
+    // no error. Pin the brand map to PROVIDER_IDS in the same lockstep this
+    // file already enforces for impl files, so "add a provider" can't silently
+    // drop it from the drill. Add the brand-map step to providers/index.ts's
+    // "Add a new provider" checklist alongside this assertion.
+    for (const id of PROVIDER_IDS) {
+      const brand = brandOf(id);
+      expect(brand, `provider "${id}" is missing a brand mapping (would vanish from the /model drill Level-1)`).not.toBeNull();
+      // And that brand must resolve back to a concrete provider (the inverse
+      // BRAND_PROVIDER_ORDER entry exists too) when this id is routable.
+      expect(resolveBrandProvider(brand!, [id]), `brand "${brand}" for "${id}" does not resolve to a provider`).not.toBeNull();
     }
   });
 });

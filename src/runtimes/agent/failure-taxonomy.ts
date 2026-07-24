@@ -16,6 +16,7 @@ export type AgentFailureClass =
   | 'provider_auth_required'
   | 'provider_binary_missing'
   | 'provider_permission_denied'
+  | 'provider_state_locked'
   | 'mcp_transport_failure'
   | 'tool_handler_exception'
   | 'config_or_capability_missing'
@@ -97,6 +98,21 @@ const PROVIDER_FAILURE_KIND_PRESENCE: Record<ProviderFailureKind, true> = {
 };
 export const PROVIDER_FAILURE_KINDS: readonly ProviderFailureKind[] =
   Object.keys(PROVIDER_FAILURE_KIND_PRESENCE) as ProviderFailureKind[];
+
+/**
+ * Conservative classifier for a provider's local SQLite state store being
+ * locked. Generic account/workspace "locked" text is deliberately excluded.
+ */
+export function isProviderStateLockedMessage(message: string): boolean {
+  const lower = message.toLowerCase();
+  if (lower.includes('database is locked')) return true;
+  const sqliteContext = lower.includes('sqlite') || lower.includes('effect/sql');
+  return sqliteContext && (
+    lower.includes('locktimeouterror')
+    || lower.includes('sqlite_busy')
+    || lower.includes('busy timeout')
+  );
+}
 
 /**
  * SSOT registry of the terminal limit-name tokens the agent provider CLI emits.
@@ -909,6 +925,7 @@ export function isFallbackEligibleForFailureClass(
     case 'provider_policy_block':
     case 'provider_binary_missing':
     case 'provider_permission_denied':
+    case 'provider_state_locked':
     case 'provider_auth_required':
     case 'mcp_transport_failure':
     case 'tool_handler_exception':
@@ -937,6 +954,7 @@ function classifyFailureClass(input: AgentFailureInput, message: string): AgentF
   if (isProviderAuthRequiredMessage(message)) return 'provider_auth_required';
   if (isProviderModelUnavailableMessage(message)) return 'provider_model_unavailable';
   if (isProviderPolicyBlockMessage(message)) return 'provider_policy_block';
+  if (isProviderStateLockedMessage(message)) return 'provider_state_locked';
 
   if (input.error instanceof WhatSoupError) {
     switch (input.error.code) {

@@ -233,6 +233,11 @@ export class ToolRegistry {
   // loop-lag sampling alone cannot reveal it.
   private readonly inFlightCalls = new Map<number, { tool: string; startedAt: number }>();
   private nextCallId = 0;
+  // QR-017 / #1976: transient group tag applied by withModule() to any tool
+  // registered inside the bracket. Set only for the synchronous span of a
+  // withModule() call, so there is no cross-registration bleed. Pure taxonomy
+  // metadata — it never affects listTools() output or call() authorization.
+  private currentGroup: string | undefined;
 
   /** Oldest in-flight tool call's age + pending count (#1753 rem-2). */
   getInFlightCallStats(now: number = Date.now()): McpLivenessSnapshot {
@@ -307,8 +312,39 @@ export class ToolRegistry {
     if (this.tools.has(tool.name)) {
       throw new Error(`Tool already registered: ${tool.name}`);
     }
+    // QR-017 / #1976: stamp the active withModule() group, in place, without
+    // overriding a group the declaration already carries (??=). This is a
+    // metadata tag only — nothing downstream reads it yet; listTools() and
+    // call() are byte-for-byte unaffected.
+    if (tool.group === undefined && this.currentGroup !== undefined) {
+      tool.group = this.currentGroup;
+    }
     this.tools.set(tool.name, tool);
-    log.info({ tool: tool.name }, 'tool registered');
+    log.info({ tool: tool.name, group: tool.group }, 'tool registered');
+  }
+
+  /**
+   * Run a synchronous registration block under a group tag (QR-017 / #1976
+   * progressive-disclosure taxonomy). Every tool `register()`ed inside `fn`
+   * that does not already declare a `group` is stamped with `name`. The tag
+   * is restored to
+   * its prior value on exit — including when `fn` throws — so nested and
+   * sequential brackets stay isolated and a throwing module cannot leak its
+   * group onto later registrations.
+   *
+   * This is a pure metadata/observability layer: it changes neither
+   * listTools() advertisement nor call() authorization. Registration is
+   * synchronous (registerAllTools runs the whole bracket before yielding), so
+   * the transient `currentGroup` is safe from async interleaving.
+   */
+  withModule(name: string, fn: () => void): void {
+    const previous = this.currentGroup;
+    this.currentGroup = name;
+    try {
+      fn();
+    } finally {
+      this.currentGroup = previous;
+    }
   }
 
   /**

@@ -861,11 +861,15 @@ describe('durability.ts uncovered-branch coverage', () => {
       toolCallsRecovered: 5, toolCallsReplayed: 6, toolCallsQuarantined: 7, sessionsRestored: 8,
     });
     const row = db.raw.prepare(
-      'SELECT trigger, inbound_replayed, outbound_quarantined, sessions_restored FROM recovery_runs ORDER BY id DESC LIMIT 1',
+      'SELECT trigger, inbound_replayed, outbound_quarantined, sessions_restored, status, completed_at FROM recovery_runs ORDER BY id DESC LIMIT 1',
     ).get() as any;
     expect(row.trigger).toBe('unit_test');
     expect(row.inbound_replayed).toBe(1);
     expect(row.outbound_quarantined).toBe(4);
     expect(row.sessions_restored).toBe(8);
+    // #1789 companion fix: completed_at is stamped at insert, so status must
+    // agree — a 'started' row with completed_at already set is self-contradictory.
+    expect(row.status).toBe('completed');
+    expect(row.completed_at).not.toBeNull();
   });
 });

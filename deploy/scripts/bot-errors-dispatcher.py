@@ -721,8 +721,29 @@ def record_daily_health_freshness(event: dict[str, Any], incident_state: dict[st
     FIFO-pruned suppressed/ archive — decoupling liveness from a garbage-collected
     directory, the root cause of the mass "cadence stale" false positives. The host
     key is the shared canonical key so the write and the watchdog lookup cannot
-    drift. Returns the host recorded, or ``None`` when the event is not daily-health
-    or no host can be derived (the watchdog then falls back to a file scan).
+    drift. Returns the host recorded, or ``None`` when the event is not daily-health,
+    no host can be derived, or the event's own observation time cannot be trusted
+    (the watchdog then falls back to a file scan).
+
+    The stamp uses the event's own ``createdAt`` as the observation time — never
+    the dispatch wall-clock (TRUTH-01) — so a backlogged event processed long
+    after it was produced does not read as "just seen". Fails closed: a missing
+    or malformed ``createdAt`` records nothing rather than manufacturing
+    freshness from "now", and never clobbers a prior good stamp.
+
+    Monotonic: a stamp is written only when the event's observation time is
+    STRICTLY newer than the host's current ledger entry (an absent or corrupt
+    entry counts as -infinity, i.e. always write). Event-own-time semantics
+    make this a real edge that dispatch-wall-clock stamping never had — real
+    time only moves forward, but a backlogged file surfacing out of order, a
+    delayed replay, or storm-collapse/dedupe absorbing members out of
+    creation order can all present a genuinely OLDER event after a fresher
+    one already stamped the ledger. Without this guard that would rewind the
+    ledger and manufacture a false "cadence stale" alert for a host that is
+    actually live — the same failure class this fix closes, reopened through
+    a new seam. Returns ``None`` (no write) both when the event cannot be
+    attributed to a host/time at all, and when it can but loses to an
+    already-fresher stamp.
     """
     source = str(event.get("source") or "")
     if not source.startswith("daily-health"):
@@ -730,11 +751,18 @@ def record_daily_health_freshness(event: dict[str, Any], incident_state: dict[st
     host = daily_health_host_from_payload(event)
     if not host:
         return None
+    observed_epoch = event_created_epoch(event)
+    if observed_epoch is None:
+        return None
     ledger = incident_state.setdefault("dailyHealthFreshness", {})
     if not isinstance(ledger, dict):
         ledger = {}
         incident_state["dailyHealthFreshness"] = ledger
-    ledger[host] = {"lastSeenAt": int(time.time()), "lastSeenIso": now_iso()}
+    existing = ledger.get(host)
+    existing_last_seen = existing.get("lastSeenAt") if isinstance(existing, dict) else None
+    if isinstance(existing_last_seen, int) and observed_epoch <= existing_last_seen:
+        return None
+    ledger[host] = {"lastSeenAt": observed_epoch, "lastSeenIso": iso_from_epoch(observed_epoch)}
     return host
 
 
@@ -1268,6 +1296,48 @@ def close_recovered_daily_health_incidents(event: dict[str, Any], incident_state
     for recovered_key in recovered:
         open_incidents.pop(recovered_key, None)
         last_sent.pop(recovered_key, None)
+    return recovered
+
+
+def absorb_daily_health_signal(event: dict[str, Any], incident_state: dict[str, Any]) -> list[str]:
+    """Stamp freshness and (when applicable) close recovered incidents for a
+    daily-health event, regardless of which terminal path actually consumes
+    it (TRUTH-01).
+
+    ``process_one()`` is not the only place a daily-health event can end its
+    life: ``collapse_ready_storms()`` and ``suppress_ready_recovery_
+    duplicates()`` both remove ready events from outbox/ before the main
+    per-event loop ever reaches ``process_one()``. Pre-fix, only the
+    process_one path called ``record_daily_health_freshness()`` /
+    ``close_recovered_daily_health_incidents()``, so a storm-collapsed or
+    recovery-deduped member silently lost both its liveness stamp and any
+    incident recovery its evidence carried. This helper is the single call
+    site all three paths share, so the behavior cannot drift between them.
+
+    Freshness always runs first and independently (it has its own source/
+    host/observation-time gates in ``record_daily_health_freshness``).
+    Closure mirrors process_one's own gate — exact source ``"daily-health"``
+    and not a clear-type event — so behavior at each call site matches what
+    process_one would have done had the event reached it.
+
+    Also stamps the ``sourceSpecificRecoveredIncidents`` diagnostic onto the
+    event itself when incidents were recovered (folded in here from the
+    three call sites that used to repeat the same 4-line block).
+    Returns the recovered incident keys (possibly empty). The freshness
+    host is intentionally not returned — no caller has ever consumed it
+    (confirmed by grep across every call site before this change); a
+    caller that needs to know whether THIS event could plausibly have
+    changed the ledger can check ``event["source"]`` itself, which is
+    already in hand.
+    """
+    record_daily_health_freshness(event, incident_state)
+    recovered: list[str] = []
+    if str(event.get("source") or "") == "daily-health" and not is_incident_clear(event):
+        recovered = close_recovered_daily_health_incidents(event, incident_state)
+    if recovered:
+        diagnostics = event.setdefault("diagnostics", {})
+        if isinstance(diagnostics, dict):
+            diagnostics["sourceSpecificRecoveredIncidents"] = recovered
     return recovered
 
 
@@ -3691,6 +3761,7 @@ def collapse_storm_group(
     paths: dict[str, Path],
     key: tuple[str, int],
     records: list[tuple[Path, dict[str, Any]]],
+    incident_state: dict[str, Any],
 ) -> int:
     fingerprint, requested_start = key
     window = storm_window_seconds()
@@ -3770,8 +3841,21 @@ def collapse_storm_group(
         })
     manifest["digestOutboxPath"] = str(digest_path)
 
+    # Absorb the whole batch in memory, persist the absorbed
+    # state ONCE, and only then perform the terminal moves out of outbox/ —
+    # mirroring process_one's proven save-before-move pattern. Pre-fix the
+    # move for member N happened before ANY save, so a crash between "file
+    # moved" and "state saved" lost that member's freshness/closure for
+    # good (it is no longer in outbox/ for anything to reprocess). Absorb is
+    # idempotent, so a crash AFTER the save but before some moves is safe —
+    # restart just re-collapses the still-present survivors identically.
+    # The save itself is gated on an actual daily-health event having been
+    # absorbed, so a storm of non-daily-health alerts collapses without ever
+    # touching incident_state (no wasted read/write/fsync).
     collapsed = 0
     collapsed_entries: list[dict[str, Any]] = []
+    prepared: list[tuple[Path, Path, dict[str, Any]]] = []
+    state_changed = False
     for path, event in records:
         if not path.exists():
             append_dispatch_log(paths, {
@@ -3780,11 +3864,20 @@ def collapse_storm_group(
                 "sourcePath": str(path),
             })
             continue
+        absorb_daily_health_signal(event, incident_state)
+        if str(event.get("source") or "").startswith("daily-health"):
+            state_changed = True
         event = mark_collapsed(event, str(digest.get("id")), manifest_path)
         atomic_write_json(path, event)
         target = paths["storm_collapsed"] / (
             f"{path.name}.{safe_segment(str(digest.get('id')))}.{int(time.time())}.collapsed"
         )
+        prepared.append((path, target, event))
+
+    if state_changed:
+        save_incident_state(paths, incident_state)
+
+    for path, target, event in prepared:
         os.replace(path, target)
         collapsed += 1
         collapsed_entries.append({
@@ -3825,6 +3918,19 @@ def collapse_ready_storms(paths: dict[str, Path]) -> int:
         fingerprint = storm_fingerprint(event)
         groups.setdefault(fingerprint, []).append((path, event, created_epoch(event)))
 
+    if not groups:
+        return 0
+
+    # TRUTH-01: loaded once up front and threaded into collapse_storm_group so
+    # every collapsed member absorbs freshness + incident-closure before it
+    # leaves outbox/ — collapse_ready_storms runs before process_one ever
+    # sees these events, and pre-fix that meant they never absorbed at all.
+    # Each collapse_storm_group() call now persists its OWN
+    # absorbed state before its OWN terminal moves, so no outer save is
+    # needed (or wanted — an outer save-once-at-the-end is exactly the
+    # ordering that let a crash mid-batch lose an already-moved member's
+    # stamp; see collapse_storm_group's docstring/comments for the fix).
+    incident_state = load_incident_state(paths)
     collapsed = 0
     for fingerprint, records in groups.items():
         remaining = sorted(records, key=lambda record: (record[2], str(record[0])))
@@ -3843,6 +3949,7 @@ def collapse_ready_storms(paths: dict[str, Path]) -> int:
                     paths,
                     (fingerprint, start_epoch),
                     [(path, event) for path, event, _ in cluster],
+                    incident_state,
                 )
                 clustered_paths = {path for path, _, _ in cluster}
                 remaining = [record for record in remaining if record[0] not in clustered_paths]
@@ -3893,7 +4000,21 @@ def suppress_ready_recovery_duplicates(paths: dict[str, Path]) -> int:
             continue
         groups.setdefault(recovery_episode_fingerprint(event), []).append((path, event, created_epoch(event)))
 
-    suppressed = 0
+    if not groups:
+        return 0
+
+    # First, identify every duplicate to suppress across all
+    # groups WITHOUT absorbing or moving yet. Barrier-clearing must still
+    # happen inline here (it depends on chronological scan order), but the
+    # actual freshness/closure absorption and terminal move are deferred to
+    # the two steps below so the whole batch's absorbed state can be persisted
+    # ONCE before any move — mirroring process_one's proven save-before-move
+    # pattern (TRUTH-01: the dedupe group key is machine/instance via
+    # recovery_identity, while the freshness ledger keys on the relay
+    # remoteHost, so a discarded duplicate can carry a distinct remoteHost
+    # from the kept sibling's — its stamp is genuinely lost, not merely
+    # delayed, unless absorbed here before it leaves outbox/).
+    duplicates: list[tuple[Path, dict[str, Any]]] = []
     for records in groups.values():
         kept_by_duplicate_fingerprint: dict[str, int] = {}
         for path, event, epoch in sorted(records, key=lambda record: (record[2], str(record[0]))):
@@ -3916,16 +4037,40 @@ def suppress_ready_recovery_duplicates(paths: dict[str, Path]) -> int:
             if first_epoch is not None and first_epoch <= epoch < first_epoch + window:
                 if not path.exists():
                     continue
-                move_suppressed_event(
-                    path,
-                    paths,
-                    event,
-                    RECOVERY_DUPLICATE_SUPPRESSION_REASON,
-                    "recovery_duplicate_suppressed",
-                )
-                suppressed += 1
+                duplicates.append((path, event))
                 continue
             kept_by_duplicate_fingerprint[duplicate_fingerprint] = epoch
+
+    if not duplicates:
+        return 0
+
+    # Next, absorb the whole batch in memory, then persist ONCE — gated
+    # on an actual daily-health duplicate having been absorbed, so a batch
+    # of non-daily-health duplicates never touches incident_state (no
+    # wasted read/write/fsync). Loaded lazily (only once a duplicate is
+    # actually found) for the same reason.
+    incident_state = load_incident_state(paths)
+    state_changed = False
+    for _path, event in duplicates:
+        absorb_daily_health_signal(event, incident_state)
+        if str(event.get("source") or "").startswith("daily-health"):
+            state_changed = True
+    if state_changed:
+        save_incident_state(paths, incident_state)
+
+    # Finally, the terminal moves, only now that any absorbed state is durable.
+    suppressed = 0
+    for path, event in duplicates:
+        if not path.exists():
+            continue
+        move_suppressed_event(
+            path,
+            paths,
+            event,
+            RECOVERY_DUPLICATE_SUPPRESSION_REASON,
+            "recovery_duplicate_suppressed",
+        )
+        suppressed += 1
     return suppressed
 
 
@@ -4412,15 +4557,12 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
     # suppress/send branch — all three downstream paths that persist incident_state
     # (suppress, send-success) then carry it, and the high-frequency info cadence is
     # always suppressed (and thus always saved). The watchdog reads this ledger
-    # instead of the FIFO-pruned suppressed/ archive.
-    record_daily_health_freshness(event, incident_state)
-
-    if str(event.get("source") or "") == "daily-health" and not is_incident_clear(event):
-        recovered = close_recovered_daily_health_incidents(event, incident_state)
-        if recovered:
-            diagnostics = event.setdefault("diagnostics", {})
-            if isinstance(diagnostics, dict):
-                diagnostics["sourceSpecificRecoveredIncidents"] = recovered
+    # instead of the FIFO-pruned suppressed/ archive. Shared with the pre-loop
+    # terminal paths (storm-collapse, recovery-dedup) via absorb_daily_health_signal
+    # (TRUTH-01) so a member consumed before ever reaching process_one still stamps
+    # freshness and closes any incident its evidence recovers. absorb also stamps
+    # the sourceSpecificRecoveredIncidents diagnostic itself now.
+    absorb_daily_health_signal(event, incident_state)
     suppress_reason = should_suppress_send(event, incident_state)
     if suppress_reason:
         event = mark_suppressed(event, suppress_reason)
@@ -4503,6 +4645,14 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
 
         # --- F5: dead-letter if attempt cap exhausted ---
         if next_backoff(attempts) is None:
+            # Dead-letter is the one genuinely terminal
+            # stamp-loss path in this branch -- unlike the transient-transport
+            # and generic-retry sub-paths above (which requeue to outbox/ and
+            # self-heal by re-absorbing on the next cycle), a dead-lettered
+            # event is never reprocessed. The freshness/closure absorbed into
+            # incident_state at the top of process_one must be persisted
+            # before this terminal move, or it is lost for good.
+            save_incident_state(paths, incident_state)
             dead_path = move_to_dead_letter(claimed, paths, event, original_name_from_processing(claimed))
             append_dispatch_log(paths, {
                 "type": "dead_lettered",

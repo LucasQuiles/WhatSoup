@@ -11,7 +11,12 @@ describe('renderHelp (registry-derived, W1-T5)', () => {
   });
   it('includes routing aliases only when nlRouting is on', () => {
     expect(renderHelp({ nlRouting: true })).toContain('/model');
+    expect(renderHelp({ nlRouting: false })).not.toContain('/model');
+  });
+
+  it('D11: /why is gone from the registry — never appears in the list, either flag state', () => {
     expect(renderHelp({ nlRouting: false })).not.toContain('/why');
+    expect(renderHelp({ nlRouting: true })).not.toContain('/why');
   });
   it('list shows the BOLD command name and no placeholder (placeholders live in detail)', () => {
     // Bold/backtick nesting conflict: a placeholder inside *bold* cannot also be
@@ -74,15 +79,40 @@ describe('B21-B /help fixes (RED-first)', () => {
   });
 
   it('#2: routing-alias detail renders local semantics ONLY when nlRouting is on', () => {
-    // Flag off, /model|/why|/reset FORWARD (byte-identical-off, D7) — so
+    // Flag off, /model|/reset FORWARD (byte-identical-off, D7) — so
     // /help must not describe local-routing semantics the command won't have.
     // (B23 refines the flag-off wording to an honest pass-through note — see
     // the B23 describe below — but the D7 no-local-semantics bar is unchanged.)
     const on = renderHelpDetail('model', { nlRouting: true });
-    expect(on).toContain('`/model [status|list|default|strongest|fastest|provider-id]`'); // B26: list verb
+    expect(on).toContain('`/model [status|list|strongest|fastest|provider-id]`'); // B26: list verb; D12 dropped default
     const off = renderHelpDetail('model', { nlRouting: false });
     expect(off).not.toContain('`/model [status');
     expect(renderHelpDetail('reset', { nlRouting: true })).toContain('`/reset`');
+  });
+
+  it('C3/D15: strongest|fastest are hidden from BOTH the /model list line and the /model detail when tiersConfigured is false', () => {
+    const list = renderHelp({ nlRouting: true, tiersConfigured: false });
+    expect(list).toContain('/model');
+    expect(list).not.toContain('strongest');
+    expect(list).not.toContain('fastest');
+    expect(list).toContain('pin provider-id');
+
+    const detail = renderHelpDetail('model', { nlRouting: true, tiersConfigured: false });
+    expect(detail).toContain('`/model [status|list|provider-id]`');
+    expect(detail).not.toContain('strongest');
+    expect(detail).not.toContain('fastest');
+  });
+
+  it('C3/D15: tiersConfigured defaults to true — every existing caller (omitting it) keeps showing the verbs', () => {
+    const list = renderHelp({ nlRouting: true });
+    expect(list).toContain('strongest|fastest|provider-id');
+    const detail = renderHelpDetail('model', { nlRouting: true });
+    expect(detail).toContain('strongest|fastest|provider-id');
+  });
+
+  it('C3/D15: tiersConfigured:true renders the verbs explicitly (byte-identical to the default)', () => {
+    const list = renderHelp({ nlRouting: true, tiersConfigured: true });
+    expect(list).toContain('strongest|fastest|provider-id');
   });
 
   it('#3: detail arg is normalized — case, leading slash, first token only', () => {
@@ -121,7 +151,7 @@ describe('B23 UX polish — honest alias-off /help detail', () => {
     // is dishonest about a command that demonstrably does something. The
     // alias-off branch must name the pass-through instead, while STILL not
     // rendering the local semantics the flag disables.
-    for (const alias of ['model', 'why', 'reset']) {
+    for (const alias of ['model', 'reset']) {
       const off = renderHelpDetail(alias, { nlRouting: false });
       expect(off).toContain(`\`/${alias}\` is not active here`);
       expect(off).toContain('passed through to the agent');
@@ -140,7 +170,7 @@ describe('B23 UX polish — honest alias-off /help detail', () => {
   it('alias detail with nlRouting ON is untouched by the B23 wording', () => {
     const on = renderHelpDetail('model', { nlRouting: true });
     expect(on).not.toContain('is not active here');
-    expect(on).toContain('`/model [status|list|default|strongest|fastest|provider-id]`'); // B26: list verb
+    expect(on).toContain('`/model [status|list|strongest|fastest|provider-id]`'); // B26: list verb; D12 dropped default
   });
 });
 
@@ -159,7 +189,7 @@ describe('B26 /help model-catalogue guidance (registry-derived, no hand-rolled l
 
   it('/help model detail carries the catalogue verb and the pin guidance', () => {
     const detail = renderHelpDetail('model', { nlRouting: true });
-    expect(detail).toContain('`/model [status|list|default|strongest|fastest|provider-id]`');
+    expect(detail).toContain('`/model [status|list|strongest|fastest|provider-id]`'); // D12 dropped default
     expect(detail).toContain('/model list — see what you can pick');
   });
 

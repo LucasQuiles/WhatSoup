@@ -941,6 +941,23 @@ instead of leaving the turn indefinitely processing. A symlink-protected
 startup to fail with a bounded non-secret configuration error; it does not
 continue with an unwritten MCP configuration or an implicit agent.
 
+OpenCode processes in one WhatSoup runtime share OpenCode's local SQLite state.
+WhatSoup therefore serializes OpenCode turn and model-usability `run` process
+lifetimes across chats and probes in that runtime, including the post-result or
+post-timeout cleanup interval through the child's `close` event. Waiting does
+not publish provider-turn ownership or assert typing. A wait
+that reaches 30 seconds emits the warning source
+`provider_execution_queue_pressure`; the source clears only when both the active
+lease and FIFO queue are empty. `GET /health` exposes the process-local snapshot
+at `runtime.agent.providerExecution`: `active`, `pending`, `oldestWaitMs`,
+`totalWaits`, `maxPending`, `lastWaitMs`, `abortedWaits`, and `pressureActive`.
+Sustained pressure degrades runtime health. This gate is process-local: separately
+launched OpenCode commands or another WhatSoup process using the same XDG data
+directory are not serialized and remain an explicit operational limitation.
+SQLite/LockTimeout crash text is classified as `provider_state_locked` in the
+existing crash, heal, and respawn evidence; generic account or workspace "locked"
+messages do not match.
+
 **Routing and auth (API providers):** `openai-api` / `anthropic-api` consume
 `baseUrl` directly as the endpoint of the managed HTTP loop (default
 `https://api.openai.com/v1` for `openai-api`), so any OpenAI-compatible
@@ -1639,6 +1656,7 @@ All migration sources are in `src/core/database.ts` unless noted otherwise.
 | 42 | Adds the historical operator catch-up delivery-proof views, closure validation, unique closure index, and proof-anchor retention contract. This source is byte-for-byte locked to the migration already applied on deployed Q databases and must never be rewritten in place (`src/core/database-migration-42.ts`). |
 | 43 | Forward-repairs historical schema 42 by normalizing closure uniqueness, materializing immutable proof witnesses, hardening proof-anchor retention, and preserving exact idempotent closure receipts. It accepts the exact original deployed schema-42 shape and the attested hardened artifact while rejecting partial, drifted, ambiguous, unwitnessed, or orphaned state. A historical `selected_corroborated` closure is grandfathered only as an immutable witness and replay blocker; later corroboration cannot authorize a new irreversible closure. Operational tooling uses the exported read-only canonical-schema attestation before closure (`src/core/database-migration-43.ts`). |
 | 44 | Adds `total_cache_read_tokens`/`last_compact_cache_read_tokens` to `agent_sessions` (idempotent ALTERs, no-op if `agent_sessions` is absent). Splits the token-accounting semantics: `total_input_tokens` now accumulates only genuinely-new input (base + cache_creation) per turn; `total_cache_read_tokens` accumulates the cache-read portion separately (a repeated re-read of prior context, not new consumption — previously conflated into `total_input_tokens`, inflating it ~O(turns²) on long conversations). No backfill: historical rows keep their old (inflated) `total_input_tokens` value with `total_cache_read_tokens = 0` for that history. |
+| 45 | recovery_runs.status column — first-class terminal-failure status (DEFAULT 'started', terminal 'completed'/'failed') with backfill (completed_at IS NOT NULL → 'completed'); wires finalize→'completed' / recordIncomplete→'failed' (`src/core/database-migration-45.ts`, #1789) |
 
 Recovery plans, runs, disposition links, delivery corroboration, and closure witnesses are retained
 as an indefinite audit ledger. There is currently no TTL or destructive pruning contract for these

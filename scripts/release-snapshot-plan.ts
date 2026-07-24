@@ -99,6 +99,15 @@ export interface ReleaseSnapshotDriftReport {
   issues: ReleaseSnapshotDriftIssue[];
 }
 
+export type ReleaseManifestValidationErrorKind = 'missing' | 'unreadable' | 'invalid-json' | 'invalid-schema';
+
+export interface ReleaseManifestValidationReport {
+  check: 'manifest-validation';
+  ok: boolean;
+  manifestPath: string;
+  error?: { kind: ReleaseManifestValidationErrorKind; message: string };
+}
+
 export interface CreateReleaseSnapshotPlanOptions {
   sourceRoot: string;
   sourceRef: string;
@@ -119,6 +128,7 @@ interface ParsedArgs {
   rollbackRoot?: string;
   checkRelease?: string;
   manifestPath?: string;
+  validateManifest?: string;
   sourceRef: string;
   buildTime: string;
   json: boolean;
@@ -441,6 +451,55 @@ export function createReleaseSnapshotDriftReport(releasePath: string, manifestPa
   };
 }
 
+/**
+ * Standalone manifest validity check, distinct from `createReleaseSnapshotDriftReport`
+ * (which also compares the manifest against the release's actual files/hashes).
+ * This is the cheap gate the restart-safety preflight runs before trusting a
+ * release export: does `.whatsoup-release-manifest.json` exist, parse as JSON,
+ * and satisfy the manifest schema? It reuses `parseReleaseSnapshotManifest` so
+ * "valid" never diverges between this gate and drift detection.
+ */
+export function validateReleaseManifestFile(manifestPath: string): ReleaseManifestValidationReport {
+  const absoluteManifestPath = requireAbsolute('validate-manifest', manifestPath);
+
+  const fail = (kind: ReleaseManifestValidationErrorKind, message: string): ReleaseManifestValidationReport => ({
+    check: 'manifest-validation',
+    ok: false,
+    manifestPath: absoluteManifestPath,
+    error: { kind, message },
+  });
+
+  if (!existsSync(absoluteManifestPath)) {
+    return fail('missing', `release manifest not found: ${absoluteManifestPath}`);
+  }
+
+  // Read and parse are split into separate try/catch blocks so a read
+  // failure (permission denied, I/O error) is never misreported as
+  // 'invalid-json' -- the two have different causes and different
+  // remediations (a permissions fix vs. re-exporting the release).
+  let raw: string;
+  try {
+    raw = readFileSync(absoluteManifestPath, 'utf8');
+  } catch (error) {
+    return fail('unreadable', `release manifest could not be read: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(raw);
+  } catch (error) {
+    return fail('invalid-json', `release manifest is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  try {
+    parseReleaseSnapshotManifest(payload);
+  } catch (error) {
+    return fail('invalid-schema', `release manifest failed schema validation: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  return { check: 'manifest-validation', ok: true, manifestPath: absoluteManifestPath };
+}
+
 function git(cwd: string, args: string[]): string {
   const proc = spawnSync('git', ['-C', cwd, ...args], {
     encoding: 'utf8',
@@ -477,6 +536,7 @@ function parseArgs(argv: string[]): ParsedArgs {
       options.rollbackRoot = next();
     } else if (arg === '--check-release') options.checkRelease = next();
     else if (arg === '--manifest') options.manifestPath = next();
+    else if (arg === '--validate-manifest') options.validateManifest = next();
     else if (arg === '--source-ref') {
       planningOnlyFlags.add(arg);
       options.sourceRef = next();
@@ -485,10 +545,16 @@ function parseArgs(argv: string[]): ParsedArgs {
       options.buildTime = next();
     } else if (arg === '--json') options.json = true;
     else if (arg === '--help' || arg === '-h') {
-      throw new Error('Usage: scripts/release-snapshot-plan.ts --release-root /absolute/path [--release-name name] [--rollback-root /absolute/path] [--source-ref HEAD] [--build-time iso] [--json]\n       scripts/release-snapshot-plan.ts --check-release /absolute/path [--manifest /absolute/path] [--json]');
+      throw new Error('Usage: scripts/release-snapshot-plan.ts --release-root /absolute/path [--release-name name] [--rollback-root /absolute/path] [--source-ref HEAD] [--build-time iso] [--json]\n       scripts/release-snapshot-plan.ts --check-release /absolute/path [--manifest /absolute/path] [--json]\n       scripts/release-snapshot-plan.ts --validate-manifest /absolute/path [--json]');
     } else {
       throw new Error(`unknown argument: ${arg}`);
     }
+  }
+  if (options.validateManifest) {
+    if (planningOnlyFlags.size > 0 || options.checkRelease || options.manifestPath) {
+      throw new Error('--validate-manifest cannot be combined with any other flag except --json');
+    }
+    return options;
   }
   if (options.checkRelease) {
     if (planningOnlyFlags.size > 0) {
@@ -503,8 +569,24 @@ function parseArgs(argv: string[]): ParsedArgs {
   return options;
 }
 
-export function run(argv: string[] = process.argv.slice(2), cwd = process.cwd()): ReleaseSnapshotPlan | ReleaseSnapshotDriftReport {
+export function run(
+  argv: string[] = process.argv.slice(2),
+  cwd = process.cwd(),
+): ReleaseSnapshotPlan | ReleaseSnapshotDriftReport | ReleaseManifestValidationReport {
   const options = parseArgs(argv);
+  if (options.validateManifest) {
+    const report = validateReleaseManifestFile(options.validateManifest);
+    if (options.json) {
+      console.log(JSON.stringify(report, null, 2));
+    } else if (report.ok) {
+      console.log(`release manifest is valid: ${report.manifestPath}`);
+    } else {
+      console.error(`release manifest is invalid: ${report.manifestPath}`);
+      console.error(`${report.error?.kind}: ${report.error?.message}`);
+    }
+    if (!report.ok) process.exitCode = 1;
+    return report;
+  }
   if (options.checkRelease) {
     const report = createReleaseSnapshotDriftReport(options.checkRelease, options.manifestPath);
     if (options.json) {
