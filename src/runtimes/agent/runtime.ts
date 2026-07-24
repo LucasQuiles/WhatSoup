@@ -37,7 +37,7 @@ import {
   withHandoffPrefix as withHandoffPrefixImpl,
   flushPendingHandoffNotice as flushPendingHandoffNoticeImpl,
 } from './handoff-notice-prefix.ts';
-import { sanitizeProviderPreviewText } from './provider-preview-sanitizer.ts';
+import { providerPreview } from './provider-preview-sanitizer.ts';
 import { formatContextLines } from './context-lines.ts';
 import { redactHandoffPii } from './handoff-pii-redactor.ts';
 import { seamForProvider } from './handoff-seam-routing.ts';
@@ -2205,7 +2205,7 @@ export class AgentRuntime implements Runtime {
         chatJid: queue.targetChatJid,
         reason: decision.reason,
         satisfiesReplyGuarantee: decision.satisfiesReplyGuarantee,
-        textPreview: sanitizeProviderPreviewText(text).slice(0, 200),
+        textPreview: providerPreview(text, 200),
       },
       'assistant_text egress gate suppressed non-user-facing text',
     );
@@ -2241,7 +2241,7 @@ export class AgentRuntime implements Runtime {
           {
             chatJid: queue.targetChatJid,
             inboundSeq,
-            textPreview: sanitizeProviderPreviewText(text).slice(0, 200),
+            textPreview: providerPreview(text, 200),
           },
           'send_verification text without origin-chat outbound — reply guarantee stays armed',
         );

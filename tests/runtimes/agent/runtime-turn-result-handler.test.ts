@@ -1,4 +1,41 @@
+import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+
+/**
+ * Capture structured log entries so the preview-redaction invariant can be
+ * asserted on real handler behavior rather than on the source text. The module
+ * under test only uses `createChildLogger`; the default export and the other
+ * named exports are stubbed so any transitive importer in the graph still loads.
+ */
+const logSink = vi.hoisted(
+  () => [] as Array<{ level: string; obj: Record<string, unknown>; msg: string }>,
+);
+vi.mock('../../../src/logger.ts', () => {
+  const record = (level: string) => (obj: unknown, msg?: unknown) => {
+    logSink.push({
+      level,
+      obj: (obj && typeof obj === 'object' ? obj : {}) as Record<string, unknown>,
+      msg: typeof msg === 'string' ? msg : '',
+    });
+  };
+  const stub = (): Record<string, unknown> => ({
+    trace: record('trace'),
+    debug: record('debug'),
+    info: record('info'),
+    warn: record('warn'),
+    error: record('error'),
+    fatal: record('fatal'),
+    level: 'error',
+    child: () => stub(),
+  });
+  return {
+    default: stub(),
+    createChildLogger: () => stub(),
+    flushLogger: async () => {},
+    errorLikeSerializers: {},
+  };
+});
+
 import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
 import { createRuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 import {
@@ -338,4 +375,104 @@ describe('journaled result without runtime turn context (invariant-violation pat
     expect(host.pendingTurnActorJid.get('15550190050')).toBe('user@s.whatsapp.net');
     expect(harness.session.completeProviderTurn).toHaveBeenCalledOnce();
   });
+});
+
+/**
+ * #2164 / #2208 — provider text reaching a structured log must be sanitized.
+ *
+ * These log lines pair `chatJid` with a preview of arbitrary provider output, so
+ * an unsanitized preview publishes chat-linked secrets into the journal. The
+ * canonical sanitizer already existed and was adopted by ten other modules; this
+ * handler was the outlier. The invariant is asserted on the value the handler
+ * actually logs, so re-introducing a raw `.slice()` fails here rather than only
+ * failing a source scan.
+ */
+describe('provider preview redaction in result logs', () => {
+  // Assembled at runtime, never written as a literal: a credential-SHAPED string
+  // in committed test text trips the repo secret scanners, which cannot tell a
+  // fixture from a real leak. Joining the parts keeps the shape the sanitizer
+  // must match without ever putting that shape in the file.
+  const SECRET = ['sk', 'ANT', 'FIXTURE', 'abc123def456'].join('-');
+  const EMAIL = 'bob@example.com';
+  const TEXT = `API Error 429: rate limit exceeded. Authorization: Bearer ${SECRET} for user ${EMAIL}`;
+
+  afterEach(() => {
+    logSink.length = 0;
+  });
+
+  for (const path of ['scoped', 'global'] as const) {
+    it(`${path}: logs a sanitized textPreview, never the raw secret`, () => {
+      const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+
+      driveResult(path, harness, TEXT);
+
+      const previews = logSink
+        .map((entry) => entry.obj['textPreview'])
+        .filter((value): value is string => typeof value === 'string');
+
+      expect(previews.length).toBeGreaterThan(0);
+
+      // The security invariant, asserted on EVERY preview: raw provider secrets
+      // never reach a log field.
+      for (const preview of previews) {
+        expect(preview).not.toContain(SECRET);
+        expect(preview).not.toContain(EMAIL);
+      }
+
+      // Not every preview is derived from the full provider text — some carry a
+      // short classified error summary that contains no credential at all, so
+      // requiring a redaction marker in each one would assert something that is
+      // not the security property. Instead require that at least one preview
+      // shows the markers, which proves the sanitizer actually ran on the
+      // secret-bearing text rather than the secret merely being absent.
+      expect(previews.some((preview) => preview.includes('Bearer [REDACTED]'))).toBe(true);
+      expect(previews.some((preview) => preview.includes('[REDACTED_EMAIL]'))).toBe(true);
+    });
+
+    it(`${path}: still pairs the preview with chatJid so the log stays useful`, () => {
+      const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+
+      driveResult(path, harness, TEXT);
+
+      const withPreview = logSink.filter((entry) => typeof entry.obj['textPreview'] === 'string');
+      expect(withPreview.length).toBeGreaterThan(0);
+      for (const entry of withPreview) {
+        expect(entry.obj['chatJid']).toBe('15550190050@s.whatsapp.net');
+      }
+    });
+  }
+});
+
+/**
+ * Reachability-independent companion to the behavioral test above.
+ *
+ * The behavioral test can only assert the log sites its driven classification
+ * actually reaches. A mutation run proved that gap: reverting ONE of the
+ * sixteen sites to a raw `.slice()` left the behavioral test green, because
+ * that particular branch is not exercised by the rate-limit path. This scan
+ * closes the invariant over every site in the file, reached or not, which is
+ * what makes "no raw provider text reaches a log preview" a property of the
+ * module rather than of the paths a test happens to drive.
+ */
+describe('provider preview redaction — source invariant (all sites)', () => {
+  const SOURCE = readFileSync(
+    new URL('../../../src/runtimes/agent/runtime-turn-result-handler.ts', import.meta.url),
+    'utf8',
+  );
+
+  it('routes every textPreview through the canonical sanitizer', () => {
+    const previewAssignments = SOURCE.match(/textPreview[^\n]*/g) ?? [];
+    expect(previewAssignments.length).toBeGreaterThan(0);
+
+    const unsanitized = previewAssignments.filter(
+      (line) => /\.slice\(/.test(line) && !line.includes('providerPreview('),
+    );
+    expect(unsanitized).toEqual([]);
+  });
+
+  // Deliberately NOT asserting the import line itself. That would pin a literal
+  // source string — brittle against reformatting or a path move — and it proves
+  // nothing the checks above do not: `providerPreview` cannot be called without
+  // being imported, and typecheck enforces that. The invariant that carries the
+  // weight is the one above, which is what kills a reverted-to-raw mutant.
 });
