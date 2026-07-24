@@ -27,14 +27,16 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "9dd0bed46557c60017dbcc04ab959f3a39b7d0c2c473626c9d407a10294b820f",
+      "sha256": "b8712ed75fde6d437291a163ed879e13ed6c93a743df4d6d69daf36e0d9b070a",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
         "whatsapp_auth_bond_local_failure",
         "sourceSpecificRecoveredIncidents",
         "event_line(\"incident_key\", incident_key(event))",
-        "redacted_state_text"
+        "redacted_state_text",
+        "suppress_alerts_recovered_before_delivery",
+        "recovered_before_delivery"
       ]
     },
     {
