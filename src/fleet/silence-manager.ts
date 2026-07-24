@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync, chmodSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { createChildLogger } from '../logger.ts';
@@ -45,7 +46,24 @@ function saveRules(rules: SilenceRule[]): void {
   if (!existsSync(CONFIG_DIR)) {
     mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
   }
-  writeFileSync(SILENCES_FILE, JSON.stringify(rules, null, 2) + '\n', { mode: 0o600 });
+  // Temp-file + atomic rename: a crash or disk-full mid-write must never truncate
+  // the live silences file (loadRules would return [] and silently drop all active
+  // silences). Matches the pattern in alert-throttle-store.ts and token-storage.ts.
+  // See #2166.
+  const payload = JSON.stringify(rules, null, 2) + '\n';
+  const tmpFile = join(CONFIG_DIR, `.fleet-silences.${process.pid}.${randomUUID()}.tmp`);
+  try {
+    writeFileSync(tmpFile, payload, { mode: 0o600 });
+    renameSync(tmpFile, SILENCES_FILE);
+    chmodSync(SILENCES_FILE, 0o600);
+  } catch (err) {
+    try {
+      unlinkSync(tmpFile);
+    } catch {
+      // best-effort cleanup of a failed temp write
+    }
+    throw err;
+  }
 }
 
 export function isInstanceSilenced(name: string): boolean {

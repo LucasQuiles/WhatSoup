@@ -1,7 +1,7 @@
 // tests/fleet/silence-manager.test.ts
 // Verifies that silence-manager distinguishes missing files (silent) from corrupt
 // files (warn with path + error).
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -213,5 +213,50 @@ describe('silence-manager corrupt-file handling', () => {
     expect(isInstanceSilenced('primary-line')).toBe(true);
     expect(isInstanceSilenced('expired-line')).toBe(false);
     expect(isInstanceSilenced('missing-line')).toBe(false);
+  });
+
+  it('writes the silences file atomically — no temp leftovers, private mode (#2166)', async () => {
+    const { addSilence } = await importManager();
+
+    addSilence('primary-line', 30, 'maintenance window', 'operator');
+
+    // The temp file must have been renamed away — no .tmp leftovers in CONFIG_DIR.
+    const leftovers = readdirSync(configDir()).filter((entry) => entry.includes('.tmp'));
+    expect(leftovers).toEqual([]);
+
+    // The live file must be valid JSON (not truncated) with a private mode.
+    const raw = readFileSync(silencesFile(), 'utf-8');
+    expect(JSON.parse(raw)).toBeInstanceOf(Array);
+    expect(statSync(silencesFile()).mode & 0o777).toBe(0o600);
+  });
+
+  it('preserves the prior silences file if the temp write fails (atomic rename guarantees no truncation — #2166)', async () => {
+    // Seed a valid prior file.
+    mkdirSync(configDir(), { recursive: true });
+    const priorRule = {
+      instance: 'prior-line',
+      until: new Date(Date.now() + 60_000).toISOString(),
+      reason: 'prior',
+      silencedBy: 'operator',
+      createdAt: new Date().toISOString(),
+    };
+    writeFileSync(silencesFile(), JSON.stringify([priorRule]), { mode: 0o600 });
+
+    // Sabotage writeFileSync so the temp write fails — rename must never fire.
+    const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
+    vi.doMock('node:fs', () => ({
+      ...actualFs,
+      writeFileSync: vi.fn(() => {
+        throw Object.assign(new Error('simulated disk full'), { code: 'ENOSPC' });
+      }),
+    }));
+    const { addSilence } = await importManager();
+
+    expect(() => addSilence('new-line', 5, 'test', 'operator')).toThrow(/disk full/);
+
+    // The prior file is byte-identical — never truncated by a failed write.
+    expect(readFileSync(silencesFile(), 'utf-8')).toBe(JSON.stringify([priorRule]));
+    // No temp leftovers.
+    expect(readdirSync(configDir()).filter((e) => e.includes('.tmp'))).toEqual([]);
   });
 });
