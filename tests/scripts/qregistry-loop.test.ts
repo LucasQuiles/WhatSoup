@@ -16,6 +16,7 @@ import {
   prepareWorkerStaging,
   redactForWorker,
   resolveCheckerPath,
+  resolveMemoryMcpRoot,
   resolveSafeExporterPath,
   run,
   safeExportScanFindings,
@@ -605,4 +606,85 @@ describe('qregistry-loop dispatch serialization', () => {
     const aSummary = readSummary(stateA);
     expect(aSummary.dispatch).toBe(true); // A completed its dispatch
   }, 25_000);
+});
+
+// --- QR-022/#1978 pin: worker memory-mcp root === dispatch lock root -------
+//
+// The dispatch lock and the worker's memory-mcp plugin used to agree on a
+// root only by both independently defaulting the same way; nothing pinned
+// them together. These tests prove resolveMemoryMcpRoot is the single source
+// both draw from: (1) it is allowlisted for passthrough, and (2) the ocw
+// child process dispatchWorker spawns actually receives it, for both an
+// explicit override and the bare-HOME default.
+
+describe('qregistry worker env pins to the dispatch-lock memory-mcp root', () => {
+  it('allowlists OPENCODE_MEMORY_MCP_ROOT for child-process passthrough', () => {
+    const childEnv = buildChildEnv(
+      { HOME: '/home/q', PATH: '/usr/bin', OPENCODE_MEMORY_MCP_ROOT: '/tmp/mroot' },
+      {},
+    );
+    expect(childEnv.OPENCODE_MEMORY_MCP_ROOT).toBe('/tmp/mroot');
+  });
+
+  it('pins the dispatched ocw worker to the same root dispatchLockPath resolves (explicit override)', () => {
+    const fx = makeDispatchFixture('qr-dispatch-envpin-explicit-');
+    const bin = path.join(fx.base, 'bin');
+    mkdirSync(bin, { recursive: true });
+    const capturedRoot = path.join(fx.base, 'ocw-memory-root.txt');
+    // Falsifier: if dispatchWorker stopped setting OPENCODE_MEMORY_MCP_ROOT
+    // (or set a different value than the lock's root), this file would be
+    // empty/absent or mismatch fx.memRoot, and the assertion below goes red.
+    writeExecutable(
+      path.join(bin, 'ocw'),
+      `#!/bin/sh\nprintf '%s' "$OPENCODE_MEMORY_MCP_ROOT" > "${capturedRoot}"\nexit 0\n`,
+    );
+    writeExecutable(path.join(bin, 'ocw-health'), '#!/bin/sh\nexit 0\n');
+
+    const env = {
+      ...process.env,
+      PATH: `${bin}:/usr/bin:/bin`,
+      PYTHON: 'python3',
+      OPENCODE_MEMORY_MCP_ROOT: fx.memRoot,
+    };
+    const status = run(
+      ['--repo', fx.repo, '--checker', fx.checker, '--safe-exporter', fx.exporter, '--force', '--max-workers', '1'],
+      env,
+    );
+
+    expect(status).toBe(0);
+    const lockRoot = path.dirname(dispatchLockPath(env));
+    expect(lockRoot).toBe(fx.memRoot); // sanity: fixture's lock root is the override
+    expect(lockRoot).toBe(resolveMemoryMcpRoot(env));
+    expect(existsSync(capturedRoot)).toBe(true);
+    expect(readFileSync(capturedRoot, 'utf8')).toBe(lockRoot);
+  });
+
+  it('pins the dispatched ocw worker to the same root dispatchLockPath resolves (default, HOME-derived)', () => {
+    const fx = makeDispatchFixture('qr-dispatch-envpin-default-');
+    const bin = path.join(fx.base, 'bin');
+    mkdirSync(bin, { recursive: true });
+    const capturedRoot = path.join(fx.base, 'ocw-memory-root.txt');
+    writeExecutable(
+      path.join(bin, 'ocw'),
+      `#!/bin/sh\nprintf '%s' "$OPENCODE_MEMORY_MCP_ROOT" > "${capturedRoot}"\nexit 0\n`,
+    );
+    writeExecutable(path.join(bin, 'ocw-health'), '#!/bin/sh\nexit 0\n');
+
+    const fakeHome = path.join(fx.base, 'fake-home');
+    mkdirSync(fakeHome, { recursive: true });
+    const env: NodeJS.ProcessEnv = { ...process.env, HOME: fakeHome, PATH: `${bin}:/usr/bin:/bin`, PYTHON: 'python3' };
+    delete env.OPENCODE_MEMORY_MCP_ROOT; // force the HOME-derived default path
+
+    const status = run(
+      ['--repo', fx.repo, '--checker', fx.checker, '--safe-exporter', fx.exporter, '--force', '--max-workers', '1'],
+      env,
+    );
+
+    expect(status).toBe(0);
+    const lockRoot = path.dirname(dispatchLockPath(env));
+    expect(lockRoot).toBe(path.join(fakeHome, '.local', 'share', 'opencode', 'memory-mcp'));
+    expect(lockRoot).toBe(resolveMemoryMcpRoot(env));
+    expect(existsSync(capturedRoot)).toBe(true);
+    expect(readFileSync(capturedRoot, 'utf8')).toBe(lockRoot);
+  });
 });
