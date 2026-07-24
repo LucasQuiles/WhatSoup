@@ -224,6 +224,7 @@ export function recordRouteModelPin(
   senderKey: string,
   providerId: string,
   model: string,
+  effort: string | null = null,
 ): 'set' | 'refreshed' | 'sticky_kept' {
   const now = Date.now();
   const existing = getPreference(port.db, chatKey, senderKey, now);
@@ -231,7 +232,11 @@ export function recordRouteModelPin(
     existing &&
     existing.intent === 'provider_specific' &&
     existing.requestedProvider === providerId &&
-    existing.requestedModel === model
+    existing.requestedModel === model &&
+    // Slice 3: effort is part of the pin's dedup identity — re-pinning the
+    // SAME model at a DIFFERENT effort is a genuine change (falls through to
+    // a fresh 'set' + re-verify + recycle), never a no-op 'refreshed'.
+    (existing.requestedEffort ?? null) === effort
   ) {
     if (existing.expiresAt !== null) {
       setPreference(port.db, { ...existing, updatedAt: now, expiresAt: now + PREFERENCE_TTL_MS });
@@ -252,6 +257,7 @@ export function recordRouteModelPin(
     requestedModel: model,
     validatedProvider: providerId,
     modelPinVerified: false,
+    requestedEffort: effort,
   });
   port.emitRouteEventChecked({
     event: 'model_preference_set',
@@ -560,9 +566,10 @@ async function pinConfiguredModelEntry(
   },
   providerId: string,
   modelId: string,
+  effort: string | null = null,
 ): Promise<void> {
   const { chatJid, senderJid, perChatMapKey, chatKey, senderKey } = ctx;
-  const outcome = recordRouteModelPin(port, chatJid, chatKey, senderKey, providerId, modelId);
+  const outcome = recordRouteModelPin(port, chatJid, chatKey, senderKey, providerId, modelId, effort);
   if (outcome === 'refreshed') {
     port.sendDirect(chatJid, echoReconfirmOutcome(
       port, chatJid, senderJid, perChatMapKey, modelId,
