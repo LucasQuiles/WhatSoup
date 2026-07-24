@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  rmSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -74,6 +82,28 @@ describe('runProcessTmpCleanup', () => {
 
     expect(result).toEqual({ deleted: 1, skipped: 0, bytesFreed: 14 });
     expect(existsSync(staleDir)).toBe(false);
+  });
+
+  it('counts a removed symlink itself, not bytes behind its target', () => {
+    const root = makeRoot();
+    const targetRoot = makeRoot();
+    const staleDir = join(root, 'stale-with-symlink');
+    const externalTarget = makeFile(targetRoot, 'external-target', 'x'.repeat(4_096));
+    mkdirSync(staleDir);
+    const inner = makeFile(staleDir, 'inner', 'x');
+    const link = join(staleDir, 'external-link');
+    symlinkSync(externalTarget, link);
+    const expectedBytesFreed = 1 + lstatSync(link).size;
+    const staleAge = DEFAULT_PROCESS_TMP_RETENTION.maxAgeMs + 10_000;
+    setAge(externalTarget, staleAge);
+    setAge(inner, staleAge);
+    setAge(staleDir, staleAge);
+
+    const result = runProcessTmpCleanup(root, DEFAULT_PROCESS_TMP_RETENTION.maxAgeMs);
+
+    expect(result).toEqual({ deleted: 1, skipped: 0, bytesFreed: expectedBytesFreed });
+    expect(existsSync(staleDir)).toBe(false);
+    expect(existsSync(externalTarget)).toBe(true);
   });
 
   it('preserves a directory with a recently-touched child (in-use temp)', () => {

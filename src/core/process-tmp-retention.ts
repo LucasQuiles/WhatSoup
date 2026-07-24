@@ -1,4 +1,4 @@
-import { readdirSync, rmSync, statSync, unlinkSync } from 'node:fs';
+import { lstatSync, readdirSync, rmSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { createChildLogger } from '../logger.ts';
 
@@ -72,7 +72,7 @@ function directorySizeBytes(dir: string): number {
       if (entry.isDirectory()) {
         total += directorySizeBytes(fullPath);
       } else {
-        total += statSync(fullPath).size;
+        total += lstatSync(fullPath).size;
       }
     } catch {
       // race — ignore
