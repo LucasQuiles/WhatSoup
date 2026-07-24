@@ -274,6 +274,9 @@ jobs:
       - name: BOT ERRORS sentinel coverage and deployer mutation gate
         run: bash deploy/scripts/run-sentinel-tests.sh
 
+      - name: BOT ERRORS full behavioral suite gate
+        run: bash deploy/scripts/run-bot-errors-full-suite.sh
+
       - name: Harness maintenance manifest guard
         run: npm run guard:harness-maintenance
 

@@ -244,6 +244,28 @@ and end with an alphanumeric character. Exit code 2 on violation.
 | `bot-errors-q-loop.py` | The hub's agent loop driver. |
 | `retire-outbound-quarantine.py` | Operator tool: retires one reviewed `quarantined` row in an instance's `outbound_ops` table (`--db`, `--instance`, `--op-id`, `--reason`), backing up the DB first and flipping the op to `failed_permanent`/`is_terminal=1`. When that was the last quarantined op it shells out to `bot-errors-emit.py` to emit a BOT ERRORS clear event. Supports `--dry-run` (no writes, reports whether a clear would fire), `--no-backup`, `--no-emit`, and `--emit-script`. |
 
+## Test suites + CI gates
+
+Two independent pytest-runner scripts gate `deploy/scripts/tests/` in `quality.yml`, and
+they answer different questions — neither replaces the other:
+
+| Script | Question it answers | quality.yml step |
+|--------|---------------------|-------------------|
+| `run-sentinel-tests.sh` | Do the pin/selfcheck/sentinel/gui-session-monitor modules hold their 98%-branch-coverage floor, plus the deployer/installer static+mutation guards and the runtime-receipt gate? | "BOT ERRORS sentinel coverage and deployer mutation gate" |
+| `run-bot-errors-full-suite.sh` | Does every test in `deploy/scripts/tests/` still pass — the full dispatcher behavioral suites (`open_renotify_suppression`, `transient_tiering`, the `f5`/`f7`/`f11`/`f12`/... fault-taxonomy suites, `autoclose_honesty`, `inhibition`, `daily_health_freshness_ledger`, and everything else, ~59 files) — not just the curated coverage-floor subset? | "BOT ERRORS full behavioral suite gate" |
+
+Before `run-bot-errors-full-suite.sh` existed, the dispatcher behavioral suites ran in NO
+CI gate at all: `run-sentinel-tests.sh` only ever exercised the six coverage-floor modules
+above, so a regression in, say, `open_renotify_suppression` or `transient_tiering` could
+merge through `quality.yml` undetected — dispatcher.py was protected in CI only by static
+guards (runtime-manifest/critical-surface/simulation-matrix/fleet-bot-hardening-parity),
+never by running its own behavioral tests. `run-bot-errors-full-suite.sh` closes that gap
+by directory-collecting `deploy/scripts/tests/` with no `--cov` flags (it is a blanket
+regression net, not a coverage-floor gate, so a newly added `test_bot_errors_*.py` file is
+swept in automatically with no script edit required). Wall-clock cost: roughly +25s on top
+of the existing curated gate (measured on origin/main, `1330 passed in ~15-25s` depending
+on cache warmth).
+
 ## Canonical source for this import (diff matrix)
 
 Source of truth chosen = **newest copies** per the corrections plan. The local Mac
