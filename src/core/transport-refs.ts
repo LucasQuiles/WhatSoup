@@ -2,6 +2,9 @@
 
 import { isE164Wire } from '../lib/phone.ts';
 
+/** E.164 phone shape shared across transport identity surfaces. */
+export { E164_RE } from '../lib/phone.ts';
+
 /** Transport library / protocol family. */
 export type ChannelKind =
   | 'whatsapp'
