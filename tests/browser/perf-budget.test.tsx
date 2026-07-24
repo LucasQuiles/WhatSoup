@@ -104,10 +104,10 @@ vi.mock('../../console/src/components/AddLineWizard', () => ({ default: () => nu
 import SoupKitchen from '../../console/src/pages/SoupKitchen';
 
 const toastValue: ToastContextValue = {
-  toast: () => {},
-  success: () => {},
-  error: () => {},
-  info: () => {},
+  toast: () => 0,
+  success: () => 0,
+  error: () => 0,
+  info: () => 0,
   dismiss: () => {},
   clear: () => {},
 };
