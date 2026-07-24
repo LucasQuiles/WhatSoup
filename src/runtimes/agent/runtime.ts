@@ -72,6 +72,7 @@ import {
   getSessionTokenSnapshot,
   markSessionCompacted,
 } from './session-db.ts';
+import { reconcileResidentSessionStatuses } from './resident-session-reconciler.ts';
 import {
   ensureFallbackStateSchema,
   saveFallbackState,
@@ -1694,10 +1695,8 @@ export class AgentRuntime implements Runtime {
       return proactiveResumeBlockedConversationKeys;
     }
 
+    const residentRowIds = reconcileResidentSessionStatuses(this.db, this.chatSessions.values());
     const classified = classifyActiveSessions(this.db, this.durability);
-    const residentRowIds = new Set([...this.chatSessions.values()]
-      .map((manager) => manager.getDbRowId())
-      .filter((rowId): rowId is number => rowId !== null));
     for (const session of classified) {
       if (residentRowIds.has(session.id)) {
         log.warn(

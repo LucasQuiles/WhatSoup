@@ -134,6 +134,12 @@ Bounds resident per-chat agent sessions so a long-running instance does not accu
 
 `per_chat`/sandboxed-per-chat instances also run a DB-level zombie-session sweep, cross-referencing `agent_sessions` rows against `session_checkpoints` and PID ownership (`classifyActiveSessions`). Sessions the classifier cannot confidently place land in its 'ambiguous' bucket and are left running; the two knobs below give that bucket an escape hatch so an init-failure session that never checkpointed does not stay `active` forever (#1756).
 
+Before each classifier pass, a current-process resident manager may repair its exact
+`agent_sessions` row only when the row is `orphaned` and an active checkpoint still
+matches its workspace, provider session, and (for persistent providers) process ID.
+Suspended rows, rows in `ended`, `completed`, `crashed`, or `resume_failed`, and
+rows with any checkpoint mismatch are never reactivated.
+
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `WHATSOUP_ZOMBIE_SWEEP_MS` | integer (ms) | `1800000` (30m) | How often the zombie-session classifier re-runs after startup. |

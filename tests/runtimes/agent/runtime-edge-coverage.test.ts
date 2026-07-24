@@ -162,6 +162,7 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   incrementMessageCount: vi.fn(),
   updateSessionId: vi.fn(),
   updateSessionStatus: vi.fn(),
+  restoreOrphanedResidentSessionStatus: vi.fn(() => 'already_active'),
   getActiveSession: vi.fn(() => null),
   backfillWorkspaceKeys: vi.fn(),
   markOrphaned: vi.fn(),
@@ -720,6 +721,48 @@ describe('AgentRuntime edge coverage', () => {
     expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ id: 42, providerSessionId: 'ses-resident' }),
       'skipping zombie-session disposition for current-process resident manager',
+    );
+  });
+
+  it('reconciles resident persistence before classifying active rows', async () => {
+    const runtime = makeRuntime({ sessionScope: 'per_chat' });
+    const state = view(runtime);
+    const session = makeSession();
+    session.getDbRowId.mockReturnValue(42 as never);
+    session.getProviderId.mockReturnValue('opencode-cli' as never);
+    session.getStatus.mockReturnValue({
+      active: true,
+      pid: null,
+      sessionId: 'ses-resident',
+      startedAt: null,
+      messageCount: 2,
+      lastMessageAt: null,
+      turnInFlight: false,
+      durableFailureClosed: false,
+    } as never);
+    state.chatSessions.set('resident', session);
+    runtime.setDurability({} as never);
+    const { restoreOrphanedResidentSessionStatus } = await import('../../../src/runtimes/agent/session-db.ts');
+    const { classifyActiveSessions } = await import('../../../src/runtimes/agent/session-classifier.ts');
+    const order: string[] = [];
+    vi.mocked(restoreOrphanedResidentSessionStatus).mockImplementationOnce(() => {
+      order.push('reconcile');
+      return 'already_active';
+    });
+    vi.mocked(classifyActiveSessions).mockImplementationOnce(() => {
+      order.push('classify');
+      return [];
+    });
+
+    await state.sweepStaleAgentSessions();
+
+    expect(order).toEqual(['reconcile', 'classify']);
+    expect(restoreOrphanedResidentSessionStatus).toHaveBeenCalledWith(
+      expect.anything(),
+      42,
+      'ses-resident',
+      'opencode-cli',
+      undefined,
     );
   });
 
