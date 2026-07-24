@@ -82,6 +82,20 @@ describe('PassiveRuntime', () => {
     expect(mockDurability.completeInbound).not.toHaveBeenCalled();
   });
 
+  it('handleMessage completes inbound lifecycle when inboundSeq is 0 (#2193 falsy-trap)', async () => {
+    // #2193: the old `if (msg.inboundSeq)` truthiness check skipped seq=0,
+    // a valid SQLite sequence number. The fix uses `!= null`.
+    const runtime = new PassiveRuntime(mockDb as any, mockConnection as any, mockConfig);
+    const mockDurability = {
+      completeInbound: vi.fn(),
+      setDurability: vi.fn(),
+    } as unknown as DurabilityEngine;
+    runtime.setDurability(mockDurability);
+
+    await runtime.handleMessage({ messageId: 'test', inboundSeq: 0 } as any);
+    expect(mockDurability.completeInbound).toHaveBeenCalledWith(0, 'passive_instance');
+  });
+
   describe('start() and shutdown()', () => {
     let tmpDir: string;
     let db: Database;

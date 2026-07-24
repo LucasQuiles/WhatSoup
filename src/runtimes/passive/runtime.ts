@@ -63,7 +63,10 @@ export class PassiveRuntime implements Runtime {
     // Passive runtime does not process messages.
     // Ingest pipeline short-circuits before calling this (see ingest.ts).
     // Defensive: if called directly, complete the inbound lifecycle.
-    if (this.durability && msg.inboundSeq) {
+    // #2193: use != null, not truthiness — inboundSeq of 0 is a valid sequence
+    // number (SQLite autoincrement starts at 1 but journalInbound can return 0
+    // for recovery rows) and must not be skipped.
+    if (this.durability && msg.inboundSeq != null) {
       this.durability.completeInbound(msg.inboundSeq, 'passive_instance');
     }
   }
