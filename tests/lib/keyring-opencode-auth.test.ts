@@ -83,6 +83,11 @@ describe('opencode auth.json credential fallback (BE-G3)', () => {
   });
 
   describe('lookupCredential terminal fallback', () => {
+    it('resolves the Kimi key from the live OpenCode auth shape', () => {
+      writeAuth({ kimi: { type: 'api', key: 'kimi-from-opencode' } });
+      expect(lookupCredential('kimi', { skipEnv: true })).toBe('kimi-from-opencode');
+    });
+
     it('resolves an opencode provider key when env/keyring/file-store all miss', () => {
       writeAuth({ minimax: { type: 'api', key: 'mm-from-opencode' } });
       expect(lookupCredential('minimax')).toBe('mm-from-opencode');

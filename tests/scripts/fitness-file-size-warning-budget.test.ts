@@ -73,6 +73,12 @@ const EXPECTED_FILE_SIZE_WARNING_FILES = [
   // 2000-line arch.file-size warn budget (~2076). Grandfathered per the project
   // norm for large core files; a durability.ts slice is a separate follow-up.
   'src/core/durability.ts',
+  // #2051's turn-recovery health evidence + degraded-cause classification
+  // additions took this file to ~2007 lines, just over the 2000-line
+  // arch.file-size warn budget. The new logic is cohesive with the poller's
+  // existing evidence-gathering responsibility; grandfathered per the project
+  // norm for large core files (cf. database.ts/durability.ts above).
+  'src/fleet/health-poller.ts',
   'src/runtimes/agent/runtime.ts',
   'src/runtimes/agent/session.ts',
   'src/transport/connection.ts',

@@ -56,6 +56,8 @@ export interface AuthBondSnapshot {
   creds: AuthBondFileSnapshot;
   meHash: string | null;
   treeHash: string | null;
+  fileCount: number | null;
+  totalBytes: number | null;
   backup: AuthBondBackupSnapshot;
   issues: string[];
 }
@@ -100,6 +102,7 @@ interface AuthBondGuardOptions {
   instanceName: string;
   now?: () => Date;
   keepBackups?: number;
+  maxHistoryFiles?: number;
   autoRestore?: boolean;
   captureAttempts?: number;
   captureRetryDelayMs?: number;
@@ -108,6 +111,7 @@ interface AuthBondGuardOptions {
 }
 
 const DEFAULT_KEEP_BACKUPS = 96;
+const DEFAULT_MAX_HISTORY_FILES = 100_000;
 const DEFAULT_CAPTURE_ATTEMPTS = 3;
 const DEFAULT_CAPTURE_RETRY_DELAY_MS = 75;
 const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
@@ -204,12 +208,15 @@ function walkAuthFiles(root: string): string[] {
   return out.sort();
 }
 
-function hashAuthTree(authDir: string): string | null {
+function inspectAuthTree(authDir: string): { treeHash: string; fileCount: number; totalBytes: number } | null {
   if (!existsSync(authDir)) return null;
   const hasher = createHash('sha256');
-  for (const path of walkAuthFiles(authDir)) {
+  const paths = walkAuthFiles(authDir);
+  let totalBytes = 0;
+  for (const path of paths) {
     const rel = relative(authDir, path);
     const st = lstatSync(path);
+    totalBytes += st.size;
     hasher.update(rel);
     hasher.update('\0');
     hasher.update(modeString(st.mode));
@@ -219,7 +226,7 @@ function hashAuthTree(authDir: string): string | null {
     hasher.update(readFileSync(path));
     hasher.update('\0');
   }
-  return hasher.digest('hex');
+  return { treeHash: hasher.digest('hex'), fileCount: paths.length, totalBytes };
 }
 
 function copyPrivateTree(src: string, dst: string): void {
@@ -361,7 +368,7 @@ function authTreeValidationError(
     return `${prefix} creds.json identity mismatch`;
   }
 
-  const treeHash = hashAuthTree(authDir);
+  const treeHash = inspectAuthTree(authDir)?.treeHash ?? null;
   if (!treeHash) return `${prefix} auth tree is unreadable`;
   if (expected.treeHash && treeHash !== expected.treeHash) {
     return `${prefix} auth tree hash mismatch`;
@@ -399,6 +406,7 @@ export class AuthBondGuard {
   private readonly instanceName: string;
   private readonly now: () => Date;
   private readonly keepBackups: number;
+  private readonly maxHistoryFiles: number;
   private readonly autoRestore: boolean;
   private readonly captureAttempts: number;
   private readonly captureRetryDelayMs: number;
@@ -423,6 +431,7 @@ export class AuthBondGuard {
     this.instanceName = safeName(options.instanceName);
     this.now = options.now ?? (() => new Date());
     this.keepBackups = options.keepBackups ?? DEFAULT_KEEP_BACKUPS;
+    this.maxHistoryFiles = Math.max(2, options.maxHistoryFiles ?? DEFAULT_MAX_HISTORY_FILES);
     this.autoRestore = options.autoRestore ?? process.env['WHATSOUP_AUTH_BOND_AUTO_RESTORE'] !== '0';
     this.captureAttempts = Math.max(1, options.captureAttempts ?? DEFAULT_CAPTURE_ATTEMPTS);
     this.captureRetryDelayMs = Math.max(0, options.captureRetryDelayMs ?? DEFAULT_CAPTURE_RETRY_DELAY_MS);
@@ -482,12 +491,15 @@ export class AuthBondGuard {
       }
     }
 
+    const tree = status === 'present' ? inspectAuthTree(this.authDir) : null;
     return {
       status,
       authDir,
       creds,
       meHash,
-      treeHash: status === 'present' ? hashAuthTree(this.authDir) : null,
+      treeHash: tree?.treeHash ?? null,
+      fileCount: tree?.fileCount ?? null,
+      totalBytes: tree?.totalBytes ?? null,
       backup: this.backupSnapshot(),
       issues,
     };
@@ -578,7 +590,7 @@ export class AuthBondGuard {
       this.lastCaptureAt = createdAt.toISOString();
       this.lastCaptureReason = reason;
       this.lastCaptureError = null;
-      this.pruneHistory();
+      this.pruneHistory(snapshot.fileCount);
       return { ok: true, snapshot: this.inspect(), captured: true, deferred: false, path: target, error: null };
     } catch (err) {
       if (tmp) rmSync(tmp, { recursive: true, force: true });
@@ -824,8 +836,12 @@ export class AuthBondGuard {
     }
   }
 
-  private pruneHistory(): void {
+  private pruneHistory(snapshotFileCount: number | null): void {
     if (this.keepBackups <= 0 || !existsSync(this.historyRoot)) return;
+    const fileBound = snapshotFileCount && snapshotFileCount > 0
+      ? Math.max(2, Math.floor(this.maxHistoryFiles / snapshotFileCount))
+      : this.keepBackups;
+    const retainedBackups = Math.min(this.keepBackups, fileBound);
     const entries = readdirSync(this.historyRoot)
       .filter(name => !isHistoryStagingDirName(name))
       .map(name => join(this.historyRoot, name))
@@ -838,7 +854,7 @@ export class AuthBondGuard {
       })
       .sort()
       .reverse();
-    for (const stale of entries.slice(this.keepBackups)) {
+    for (const stale of entries.slice(retainedBackups)) {
       rmSync(stale, { recursive: true, force: true });
     }
   }

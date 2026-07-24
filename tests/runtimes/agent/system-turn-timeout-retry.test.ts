@@ -166,6 +166,7 @@ type RuntimeView = {
     count(scopeKey: string): number;
     blockingCount(scopeKey: string): number;
     peek(scopeKey: string): { lease: SystemTurnLeaseToken } | null;
+    activateDeadline(lease: SystemTurnLeaseToken): boolean;
   };
   setOwnedPerChatSession(mapKey: string, session: object): void;
   markSystemTurn(
@@ -199,6 +200,7 @@ function seedOwnedSystemTurn(purpose: SystemTurnPurpose = 'fresh_session_context
   rv.sessionEventToolScopes.set(session, toolScopeKey);
   rv.chatQueues.set(mapKey, makeFakeQueue(mapKey));
   const lease = rv.markSystemTurn(session, mapKey, purpose, mapKey);
+  rv.pendingSystemResults.activateDeadline(lease);
   return { rv, mapKey, session, toolScopeKey, lease };
 }
 

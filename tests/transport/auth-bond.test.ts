@@ -734,6 +734,41 @@ describe('AuthBondGuard', () => {
     expect(existsSync(first.path!)).toBe(false);
   });
 
+  it('caps retained history by auth-tree file pressure even when count retention is larger', () => {
+    const root = makeRoot();
+    const authDir = join(root, 'auth');
+    const stateRoot = join(root, 'state');
+    let now = new Date('2026-06-09T12:00:00Z');
+    writeAuth(authDir, '15550100040:1@s.whatsapp.net');
+    writeFileSync(join(authDir, 'sender-key-a.json'), JSON.stringify({ keyData: 'a' }));
+
+    const guard = new AuthBondGuard({
+      authDir,
+      stateRoot,
+      instanceName: 'file-pressure-prune-bot',
+      keepBackups: 96,
+      maxHistoryFiles: 5,
+      now: () => now,
+    });
+
+    const first = guard.capture('connection-open');
+    expect(first.ok).toBe(true);
+
+    now = new Date('2026-06-09T12:01:00Z');
+    writeFileSync(join(authDir, 'sender-key-a.json'), JSON.stringify({ keyData: 'b' }));
+    expect(guard.capture('creds-update').ok).toBe(true);
+
+    now = new Date('2026-06-09T12:02:00Z');
+    writeFileSync(join(authDir, 'sender-key-a.json'), JSON.stringify({ keyData: 'c' }));
+    const third = guard.capture('creds-update');
+
+    expect(third.ok).toBe(true);
+    expect(third.snapshot.fileCount).toBe(3);
+    const history = readdirSync(join(stateRoot, 'auth-bond-backups', 'file-pressure-prune-bot', 'history'));
+    expect(history).toHaveLength(2);
+    expect(existsSync(first.path!)).toBe(false);
+  });
+
   it('excludes in-flight temp backup directories from retention pruning', () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');

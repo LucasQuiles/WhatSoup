@@ -53,7 +53,11 @@ const {
 
   const mockSession = {
     spawnSession: vi.fn(async () => {}),
-    sendTurn: vi.fn(async () => {}),
+    sendTurn: vi.fn(async (_text: string) => {}),
+    sendTurnAtProviderBoundary: vi.fn(async (text: string, onReady?: () => void) => {
+      onReady?.();
+      await mockSession.sendTurn(text);
+    }),
     handleNew: vi.fn(async () => {}),
     getStatus: vi.fn(() => ({ active: false, pid: null as number | null, sessionId: null as string | null, startedAt: null as string | null, messageCount: 0, lastMessageAt: null as string | null })),
     shutdown: vi.fn(async () => {}),
@@ -793,6 +797,52 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       admitPendingSystemResult(state, mapKey, 'respawn_continuation');
       // success path clears the prior respawn-failed alert
       expect(mockClearAlertSource).toHaveBeenCalledWith('test', 'agent_respawn_failed');
+    });
+
+    it('does not clear respawn failure until the continuation crosses the provider gate', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as PollRuntimeState;
+      const mapKey = dmJid;
+      seedPerChatSession(state, mapKey);
+      mockSession.getStatus
+        .mockReturnValueOnce({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null })
+        .mockReturnValue({ active: true, pid: 321, sessionId: 'sess-gated', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null });
+
+      let admit!: () => void;
+      const admitted = new Promise<void>((resolve) => { admit = resolve; });
+      mockSession.sendTurnAtProviderBoundary.mockImplementationOnce(async (text: string, onReady?: () => void) => {
+        await admitted;
+        onReady?.();
+        await mockSession.sendTurn(text);
+      });
+
+      state.handlePerChatCrash(mapKey, dmJid, {
+        ...currentCrashIdentity(runtime, mapKey),
+        exitCode: 1,
+        signal: null,
+        sessionId: 'sess-gated',
+        dbRowId: 12,
+      });
+      await vi.advanceTimersByTimeAsync(62_000);
+
+      expect(mockSession.sendTurnAtProviderBoundary).toHaveBeenCalledWith(
+        expect.stringContaining('session resumed after crash'),
+        expect.any(Function),
+      );
+      expect(mockClearAlertSource).not.toHaveBeenCalledWith('test', 'agent_respawn_failed');
+
+      // A global provider queue can legitimately exceed both old 240s retry
+      // windows. Queue time must not quarantine the session before admission.
+      await vi.advanceTimersByTimeAsync(600_000);
+      expect(mockSession.shutdown).not.toHaveBeenCalled();
+      expect(mockClearAlertSource).not.toHaveBeenCalledWith('test', 'agent_respawn_failed');
+
+      admit();
+      await vi.waitFor(() => {
+        expect(mockClearAlertSource).toHaveBeenCalledWith('test', 'agent_respawn_failed');
+      });
     });
 
     it('injects missed messages before the continuation turn when any arrived during the crash window (~7447-7449)', async () => {
