@@ -24,112 +24,43 @@ TDD: written BEFORE implementation. Verifies:
 from __future__ import annotations
 
 import contextlib
-import importlib.util
-import os
-import sys
 import time
-from pathlib import Path
-from typing import Any
 from unittest.mock import patch
 
-import pytest
-
-# ---------------------------------------------------------------------------
-# Module loader (mirrors test_bot_errors_collector_backoff.py style)
-# ---------------------------------------------------------------------------
-
-_SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-collector.py"
-
-
-def _load_module(extra_env: dict[str, str] | None = None):
-    """Load the collector module with env vars active during exec_module."""
-    env_backup: dict[str, str | None] = {}
-    if extra_env:
-        for k, v in extra_env.items():
-            env_backup[k] = os.environ.get(k)
-            os.environ[k] = v
-    try:
-        spec = importlib.util.spec_from_file_location("bot_errors_collector", _SCRIPT)
-        mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
-        return mod
-    finally:
-        if extra_env:
-            for k, orig in env_backup.items():
-                if orig is None:
-                    os.environ.pop(k, None)
-                else:
-                    os.environ[k] = orig
-
-
-@pytest.fixture()
-def tmp_state(tmp_path: Path):
-    state_dir = tmp_path / "bot-errors"
-    outbox_dir = tmp_path / "outbox"
-    state_dir.mkdir(mode=0o700)
-    outbox_dir.mkdir(mode=0o700)
-    return state_dir, outbox_dir
-
-
-@contextlib.contextmanager
-def _env(state_dir: Path, outbox_dir: Path, extra: dict[str, str] | None = None):
-    env_map = {
-        "BOT_ERRORS_STATE_DIR": str(state_dir),
-        "BOT_ERRORS_OUTBOX_DIR": str(outbox_dir),
-        "BOT_ERRORS_TAILSCALE_STATUS_COMMAND": "",
-    }
-    if extra:
-        env_map.update(extra)
-    backup = {k: os.environ.get(k) for k in env_map}
-    for k, v in env_map.items():
-        os.environ[k] = v
-    try:
-        yield
-    finally:
-        for k, orig in backup.items():
-            if orig is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = orig
-
-
-def _load_mod_with_dirs(state_dir: Path, outbox_dir: Path, extra_env: dict[str, str] | None = None):
-    env = {
-        "BOT_ERRORS_STATE_DIR": str(state_dir),
-        "BOT_ERRORS_OUTBOX_DIR": str(outbox_dir),
-        "BOT_ERRORS_TAILSCALE_STATUS_COMMAND": "",
-    }
-    if extra_env:
-        env.update(extra_env)
-    return _load_module(extra_env=env)
-
-
-class FakeCollectorClock:
-    def __init__(self, start: int):
-        self.now = start
-
-    def time(self) -> float:
-        return float(self.now)
-
-    def advance(self, seconds: int) -> None:
-        self.now += seconds
-
-    def set(self, value: int) -> None:
-        self.now = value
+# Shared module loader / tmp_state fixture / env-scoping / run_once defaults /
+# outbox inspection helpers -- extracted to conftest.py (HD-11b review battery
+# 3) after being byte-for-byte duplicated across this file,
+# test_bot_errors_collector_backoff.py, and
+# test_bot_errors_collector_reachability.py. tmp_state itself needs no import
+# -- pytest resolves it from conftest.py by fixture-parameter name.
+#
+# _patched_collector_clock is intentionally NOT imported from conftest --
+# this file's version additionally mocks time.time_ns() (see docstring
+# below), which is genuinely test-specific and kept local rather than folded
+# into the shared base version other collector test files use.
+from conftest import (
+    _env,
+    _load_mod_with_dirs,
+    _run_once_defaults,
+    _all_outbox_events,
+    _outbox_by_source,
+    FakeCollectorClock,
+)
 
 
 @contextlib.contextmanager
 def _patched_collector_clock(mod, clock: FakeCollectorClock):
     # time.time_ns() feeds emit_collector_capture_escalation_event's event id,
     # which in turn is the tail of the outbox filename local_outbox_path()
-    # builds -- and _outbox_by_source() (below) sorts by filename to recover
-    # emission order. Left unmocked, every call returns the same memoized
-    # MagicMock repr (identical across the whole test), so two events sharing
-    # source/instance/remote (e.g. two collector_remote_unreachable alerts
-    # either side of a clear) can't be told apart by filename order even
-    # though they were emitted at genuinely different simulated times. A
-    # monotonic counter tied to the fake clock keeps ids -- and therefore
-    # file/emission order -- faithful to simulated time.
+    # builds -- and _outbox_by_source() (imported above) sorts by filename to
+    # recover emission order. Left unmocked, every call returns the same
+    # memoized MagicMock repr (identical across the whole test), so two
+    # events sharing source/instance/remote (e.g. two
+    # collector_remote_unreachable alerts either side of a clear) can't be
+    # told apart by filename order even though they were emitted at
+    # genuinely different simulated times. A monotonic counter tied to the
+    # fake clock keeps ids -- and therefore file/emission order -- faithful
+    # to simulated time.
     _time_ns_counter = [0]
 
     def _fake_time_ns() -> int:
@@ -142,41 +73,6 @@ def _patched_collector_clock(mod, clock: FakeCollectorClock):
         mock_time.strftime = time.strftime
         mock_time.gmtime = time.gmtime
         yield
-
-
-def _run_once_defaults(mod, remotes: list[str], **kwargs):
-    defaults = dict(
-        best_effort_remotes=set(),
-        max_events=5,
-        timeout=5,
-        lease_seconds=30,
-        remote_sla=9999,
-        alert_cooldown=900,
-        recovery_successes=2,
-    )
-    defaults.update(kwargs)
-    return mod.run_once(remotes, **defaults)
-
-
-def _all_outbox_events(outbox_dir: Path) -> list[dict[str, Any]]:
-    import json
-
-    events = []
-    for p in sorted(outbox_dir.glob("*.json")):
-        try:
-            ev = json.loads(p.read_text())
-        except Exception:
-            continue
-        events.append(ev)
-    return events
-
-
-def _outbox_by_source(outbox_dir: Path) -> dict[str, list[dict[str, Any]]]:
-    by_source: dict[str, list[dict[str, Any]]] = {}
-    for ev in _all_outbox_events(outbox_dir):
-        s = ev.get("source", "_unknown")
-        by_source.setdefault(s, []).append(ev)
-    return by_source
 
 
 ESCALATION_SOURCE = "collector_remote_unreachable"

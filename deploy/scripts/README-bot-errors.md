@@ -268,6 +268,14 @@ bounded by the dispatcher's existing flap-storm machinery
 trips per 600s, collapses into one storm digest) rather than by holding this
 event open across a real recovery.
 
+One implication worth flagging for on-call: because `collector_remote_unreachable`
+(threshold 2) and `relay_host_down` (threshold 3) are different sources —
+and therefore different dispatcher incident keys — **one persistently dead
+remote opens two separate incidents**, not one. This is intentional (each
+signal has its own threshold/confirmation semantics, per above), but it
+means the notification count for a single dead host is 2, not 1; don't
+read the second page as a different host.
+
 ## Canonical source for this import (diff matrix)
 
 Source of truth chosen = **newest copies** per the corrections plan. The local Mac

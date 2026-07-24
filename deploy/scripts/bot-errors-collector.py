@@ -1868,51 +1868,107 @@ def relay_event(remote_host: str, remote_root: str, record: dict[str, Any]) -> P
     return path
 
 
-def emit_relay_host_state_event(remote: str, kind: str, evidence: str, state: dict[str, Any], best_effort: bool = False) -> None:
-    """Write a relay_host_down or relay_host_recovered outbox event (ENTRY/EXIT only).
+def _emit_collector_outbox_event(
+    remote: str,
+    source: str,
+    event_type: str,
+    severity: str,
+    summary: str,
+    evidence: str,
+    log_type: str,
+    extra_diagnostics: dict[str, Any] | None = None,
+) -> str:
+    """Shared low-level constructor for collector-minted outbox events (ENTRY/EXIT
+    only). Used by both emit_relay_host_state_event (relay_host_down/recovered)
+    and emit_collector_capture_escalation_event (collector_remote_unreachable) --
+    extracted during HD-11b review to close a DRY gap AND fix an id-truncation
+    collision (below) in both emitters at once, rather than fixing it in one and
+    leaving the other's copy stale. Writes via atomic_write_json directly, NOT
+    through enqueue_meta_alert, so these unconditional state transitions emit
+    with no cooldown gate and contribute no open-alert tracking.
 
-    Uses atomic_write_json directly — does NOT go through enqueue_meta_alert so that
-    it emits unconditionally (no cooldown gate) and contributes no open-alert tracking.
+    instance="bot-errors-collector" + diagnostics.remote are load-bearing:
+    dispatcher.py's incident_source() qualifies collector-minted events by
+    diagnostics.remote precisely when instance == "bot-errors-collector" --
+    that is what keeps per-remote incidents (e.g. two different unreachable
+    remotes, or a remote's down-state vs a DIFFERENT remote's) on separate
+    incident keys instead of colliding. Both fields are set unconditionally
+    here so no caller can accidentally omit them.
+
+    id ordering (time_ns/pid first, event_type + remote last) is deliberate,
+    not cosmetic (found + RED-proven during HD-11b): local_outbox_path()
+    truncates this id via safe_segment() at 80 chars and sorts outbox
+    filenames lexicographically on the resulting name. A long remote
+    ("host:/long/path") embedded before the numeric suffix can truncate away
+    the very fields that make two events distinguishable -- two genuinely
+    different events for the same remote would then collide on an identical
+    filename and the second atomic_write_json silently overwrites the first
+    (event loss). A text field (event_type: "alert"/"clear") sorting before
+    the numeric time_ns also breaks filename-order-as-emission-order for two
+    events sharing source/instance/created (same real-world second). Putting
+    time_ns/pid first and the remote last means truncation can only ever
+    clip the least-important trailing text.
+
+    Returns the event id.
     """
     host, _remote_root = parse_remote(remote)
-    # Pattern I: a best-effort host going down is expected, not a crash — info, not a page.
-    if kind == "relay_host_down" and not (best_effort and best_effort_info_tier_enabled()):
-        severity = "warning"
-    else:
-        severity = "info"
-    # time_ns + pid keep the id (and thus the outbox filename) unique even when
-    # two state events for the same remote/kind land within the same wall second.
-    event_id = f"collector-{safe_segment(remote)}-{kind}-{time.time_ns()}-{os.getpid()}"
+    diagnostics: dict[str, Any] = {
+        "remote": remote,
+        "host": host,
+        "queue": str(state_root() / "outbox"),
+        "logHints": [str(state_root() / "logs/collector.jsonl")],
+        "collectorLog": str(state_root() / "logs/collector.jsonl"),
+    }
+    if extra_diagnostics:
+        diagnostics.update(extra_diagnostics)
+    event_id = f"collector-{time.time_ns()}-{os.getpid()}-{event_type}-{safe_segment(remote)}"
     event = {
         "schemaVersion": 1,
         "id": event_id,
-        "eventType": "alert",
+        "eventType": event_type,
         "severity": severity,
         "createdAt": now_iso(),
         "machine": socket.gethostname(),
         "platform": sys.platform,
         "instance": "bot-errors-collector",
-        "source": kind,
-        "summary": f"BOT ERRORS collector relay host {kind.replace('_', ' ')}: {remote}",
+        "source": source,
+        "summary": summary,
         "evidence": redact_collector_text(evidence),
         "process": {"pid": os.getpid(), "cwd": os.getcwd(), "argv": sys.argv},
-        "diagnostics": {
-            "remote": remote,
-            "host": host,
-            "queue": str(state_root() / "outbox"),
-            "logHints": [str(state_root() / "logs/collector.jsonl")],
-            "collectorLog": str(state_root() / "logs/collector.jsonl"),
-        },
+        "diagnostics": diagnostics,
         "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
     }
     path = local_outbox_path(event, "collector")
     atomic_write_json(path, event)
     append_log({
-        "type": kind,
+        "type": log_type,
         "remote": remote,
         "eventId": event_id,
         "evidence": redact_collector_text(evidence),
     })
+    return event_id
+
+
+def emit_relay_host_state_event(remote: str, kind: str, evidence: str, state: dict[str, Any], best_effort: bool = False) -> None:
+    """Write a relay_host_down or relay_host_recovered outbox event (ENTRY/EXIT only).
+
+    Delegates envelope construction to _emit_collector_outbox_event (shared
+    with emit_collector_capture_escalation_event).
+    """
+    # Pattern I: a best-effort host going down is expected, not a crash — info, not a page.
+    if kind == "relay_host_down" and not (best_effort and best_effort_info_tier_enabled()):
+        severity = "warning"
+    else:
+        severity = "info"
+    _emit_collector_outbox_event(
+        remote,
+        source=kind,
+        event_type="alert",
+        severity=severity,
+        summary=f"BOT ERRORS collector relay host {kind.replace('_', ' ')}: {remote}",
+        evidence=evidence,
+        log_type=kind,
+    )
 
 
 def emit_collector_capture_escalation_event(
@@ -1928,62 +1984,20 @@ def emit_collector_capture_escalation_event(
 ) -> None:
     """Write a collector_remote_unreachable alert/clear outbox event (ENTRY/EXIT only).
 
-    Mirrors emit_relay_host_state_event's construction pattern (unconditional
-    outbox write, no cooldown gate, no open-alert bookkeeping) but is a
-    genuinely distinct, independently-tunable signal: default threshold=2
+    Delegates envelope construction to _emit_collector_outbox_event (shared
+    with emit_relay_host_state_event), but is a genuinely distinct,
+    independently-tunable signal: default threshold=2
     (BOT_ERRORS_COLLECTOR_FAILURE_ESCALATE_THRESHOLD) fires earlier than
     RELAY_BACKOFF_FAILURE_THRESHOLD=3's relay_host_down, and — unlike
     relay_host_down/relay_host_recovered, which both use eventType="alert" —
     emits a real eventType="clear" on recovery so the dispatcher's standard
     clear-pop path (mark_incident_sent) closes the incident directly.
-
-    instance="bot-errors-collector" + diagnostics.remote are load-bearing:
-    dispatcher.py's incident_source() qualifies collector-minted events by
-    diagnostics.remote precisely when instance == "bot-errors-collector",
-    which is what keeps two different unreachable remotes on separate
-    incident keys (no cross-remote false-clear). Do not drop either field.
     """
-    host, remote_root = parse_remote(remote)
+    _, remote_root = parse_remote(remote)
     severity = "warning" if event_type == "alert" else "info"
-    # time_ns comes FIRST (right after a short fixed prefix), event_type and
-    # remote LAST -- two things depend on this ordering:
-    #  (1) local_outbox_path() runs safe_segment() on this id, which silently
-    #      truncates to 80 chars. A long remote ("host:/long/path") embedded
-    #      before the numeric suffix can push the id past that limit,
-    #      truncating away the very fields that make two events
-    #      distinguishable -- two genuinely different escalation events for
-    #      the same remote would then collide on the identical filename and
-    #      the second atomic_write_json silently overwrites the first (event
-    #      loss, the exact class this packet exists to close).
-    #  (2) local_outbox_path()'s filename sorts lexicographically; a text
-    #      field ("alert"/"clear") placed before the numeric time_ns would
-    #      group all alerts before all clears regardless of real emission
-    #      order. time_ns first keeps filename order == emission order for
-    #      any reader that lists the outbox directory sorted.
-    # Source is deliberately NOT repeated here -- it's already its own
-    # filename segment in local_outbox_path().
-    event_id = (
-        f"collector-{time.time_ns()}-{os.getpid()}-{event_type}-{safe_segment(remote)}"
-    )
     redacted_last_error = (
         redact_collector_text(last_error)[:FAILURE_RETENTION_DETAIL_MAX_CHARS] if last_error else None
     )
-    diagnostics: dict[str, Any] = {
-        "remote": remote,
-        "host": host,
-        "remoteRoot": remote_root,
-        "queue": str(state_root() / "outbox"),
-        "logHints": [str(state_root() / "logs/collector.jsonl")],
-        "collectorLog": str(state_root() / "logs/collector.jsonl"),
-        # Always present (possibly null) so a reader never has to distinguish
-        # "never succeeded" from "field omitted".
-        "consecutiveFailures": consecutive_failures,
-        "thresholdConfigured": threshold,
-        "errorClass": error_class,
-        "lastSuccessAgeSeconds": last_success_age_seconds,
-    }
-    if reachability_diagnosis_value:
-        diagnostics["reachabilityDiagnosis"] = reachability_diagnosis_value
     evidence_parts = [f"remote={remote}"]
     if consecutive_failures is not None:
         evidence_parts.append(f"consecutive_failures={consecutive_failures}")
@@ -2000,34 +2014,31 @@ def emit_collector_capture_escalation_event(
         evidence_parts.append(f"reachability_diagnosis={reachability_diagnosis_value}")
     evidence_parts.append(f"collector_log={state_root() / 'logs/collector.jsonl'}")
     evidence = "\n".join(evidence_parts)
-    event = {
-        "schemaVersion": 1,
-        "id": event_id,
-        "eventType": event_type,
-        "severity": severity,
-        "createdAt": now_iso(),
-        "machine": socket.gethostname(),
-        "platform": sys.platform,
-        "instance": "bot-errors-collector",
-        "source": COLLECTOR_CAPTURE_ESCALATION_SOURCE,
-        "summary": (
+    extra_diagnostics: dict[str, Any] = {
+        "remoteRoot": remote_root,
+        # Always present (possibly null) so a reader never has to distinguish
+        # "never succeeded" from "field omitted".
+        "consecutiveFailures": consecutive_failures,
+        "thresholdConfigured": threshold,
+        "errorClass": error_class,
+        "lastSuccessAgeSeconds": last_success_age_seconds,
+    }
+    if reachability_diagnosis_value:
+        extra_diagnostics["reachabilityDiagnosis"] = reachability_diagnosis_value
+    _emit_collector_outbox_event(
+        remote,
+        source=COLLECTOR_CAPTURE_ESCALATION_SOURCE,
+        event_type=event_type,
+        severity=severity,
+        summary=(
             f"BOT ERRORS collector cannot capture remote outbox: {remote}"
             if event_type == "alert"
             else f"BOT ERRORS collector remote capture recovered: {remote}"
         ),
-        "evidence": redact_collector_text(evidence),
-        "process": {"pid": os.getpid(), "cwd": os.getcwd(), "argv": sys.argv},
-        "diagnostics": diagnostics,
-        "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
-    }
-    path = local_outbox_path(event, "collector")
-    atomic_write_json(path, event)
-    append_log({
-        "type": f"{COLLECTOR_CAPTURE_ESCALATION_SOURCE}_{event_type}",
-        "remote": remote,
-        "eventId": event_id,
-        "evidence": redact_collector_text(evidence),
-    })
+        evidence=evidence,
+        log_type=f"{COLLECTOR_CAPTURE_ESCALATION_SOURCE}_{event_type}",
+        extra_diagnostics=extra_diagnostics,
+    )
 
 
 def run_once(
