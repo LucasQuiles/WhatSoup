@@ -21,6 +21,12 @@ class Extractor(Protocol):
     def extract(self, snapshot: SourceSnapshot) -> ExtractedSession: ...
 
 
+def optional_timestamp(value: object) -> str | None:
+    if value is None:
+        return None
+    return normalize_timestamp(value)
+
+
 def normalize_timestamp(value: object) -> str:
     if not isinstance(value, str) or not value:
         raise QseshError("QS-E-SOURCE-SCHEMA", phase="extractor-timestamp")
