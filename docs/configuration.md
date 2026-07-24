@@ -130,6 +130,7 @@ Bounds resident per-chat agent sessions so a long-running instance does not accu
 | `WHATSOUP_SESSION_IDLE_MS` | integer (ms) | `3600000` (1h) | Idle threshold: a resident session with no message for longer than this is suspended on the next sweep. Setting this below ~35 min can suspend a session shortly after a long (multi-minute) turn completes, since idle is measured from the turn's last message. |
 | `WHATSOUP_SESSION_SWEEP_MS` | integer (ms) | `600000` (10m) | How often the idle-session sweep runs. |
 | `WHATSOUP_MAX_SESSIONS` | integer | `12` | LRU ceiling on concurrent resident sessions. When exceeded, the longest-idle evictable sessions are suspended down toward the cap even if still within `WHATSOUP_SESSION_IDLE_MS`, bounding memory under a burst of many active chats. |
+| `WHATSOUP_LONG_OP_CEILING_MS` | integer (ms) | `7200000` (2h) | Hard bound on liveness-gated kill deferrals (`src/runtimes/agent/session.ts` `LONG_OP_CEILING_MS`). When the stalled-operation kill or the hard turn watchdog fires but the provider's process tree shows CPU progress (a long browser-automation / bash / MCP step, not a hang — see `tree-liveness.ts`), the kill is deferred and the timer re-arms; this ceiling, measured from the first fire of the quiet stretch, is the point past which the kill proceeds regardless. Raise it on instances that legitimately run very long automation jobs. Parsed as a positive integer (invalid/≤0 → default). |
 | `WHATSOUP_SESSION_MIN_RESIDENCY_MS` | integer (ms) | `300000` (5m) | Anti-thrash floor: a freshly-spawned session is never suspended until it has lived at least this long, preventing evict→respawn churn under a burst. |
 
 `per_chat`/sandboxed-per-chat instances also run a DB-level zombie-session sweep, cross-referencing `agent_sessions` rows against `session_checkpoints` and PID ownership (`classifyActiveSessions`). Sessions the classifier cannot confidently place land in its 'ambiguous' bucket and are left running; the two knobs below give that bucket an escape hatch so an init-failure session that never checkpointed does not stay `active` forever (#1756).
@@ -1204,11 +1205,15 @@ When deploying an instance config that uses `fallbackProvider` or `fallbacks` to
 | `shared` | One shared session, multiple users welcomed. | Any valid access mode. |
 | `per_chat` | One isolated agent-provider session per chat. | Any valid access mode. |
 
-`/new` replaces the current session only when the target scope is idle. A journaled user
-inbound, a processing or queued runtime turn (including synthetic jobs without an inbound
-sequence), or a shared/single turn in flight causes the command to reply
-`A response is still in progress. Send /new again after it finishes.` The current manager,
-queue, and terminal evidence owner are left intact; retry `/new` after that turn finalizes.
+`/new` on an idle scope replaces the current session in place. When the target scope has a
+turn in flight — a journaled user inbound, a processing or queued runtime turn (including
+synthetic jobs without an inbound sequence), or a shared/single turn — `/new` now **interrupts
+it**: the in-flight turn is aborted and terminalized through the same teardown `/kill-session`
+uses (turn abort → durable turn finalization → session shutdown), the session is discarded,
+and the reply is `*Interrupted the running task — starting new session* ✓`. A fresh session
+spawns on the chat's next message. This makes `/new` the user-facing cancel for runaway long
+jobs; the admitted turn still reaches a terminal transaction, so durability evidence is never
+orphaned by the interrupt.
 
 #### `agentOptions.sandbox`
 

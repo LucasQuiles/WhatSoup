@@ -62,6 +62,7 @@ import type {
   ProviderExecutionLease,
 } from './provider-execution-gate.ts';
 import { shortHash } from '../../lib/short-hash.ts';
+import { assessTreeLiveness } from './tree-liveness.ts';
 
 const log = createChildLogger('session-manager');
 
@@ -88,6 +89,26 @@ export const WATCHDOG_HARD_MS  = 1_800_000; // 30 min — SIGKILL
 // Grace after a tool stalls before we SIGKILL the hung stream-json provider. Unlike
 // WATCHDOG_HARD_MS this is NOT reset by inbound messages (see recoverStalledOperation).
 export const STALLED_OP_KILL_GRACE_MS = 180_000; // 3 min after a tool stalls
+
+// ─── Long-operation liveness gate ───────────────────────────────────────────
+// Stream silence is NOT proof of a hang: long browser-automation, bash, and MCP
+// steps legitimately block the provider's event stream for many minutes while
+// the process tree underneath does real work. Before the stalled-op kill or the
+// hard watchdog terminates a child provider, its tree's CPU progress is assessed
+// (tree-liveness.ts); a working tree gets its deadline extended instead of a
+// SIGKILL. Extensions are bounded by LONG_OP_CEILING_MS from the first
+// stall/watchdog fire of the turn, so a spinning-but-CPU-burning tree still
+// cannot run forever. Ceiling is env-tunable per instance for automation-heavy
+// deployments (WHATSOUP_LONG_OP_CEILING_MS).
+function positiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw?.trim()) return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+export const LONG_OP_CEILING_MS = positiveIntEnv('WHATSOUP_LONG_OP_CEILING_MS', 7_200_000); // 2 h
+/** Floor between successive "long step still running" chat notices. */
+export const LONG_OP_NOTICE_MIN_INTERVAL_MS = 600_000; // 10 min
 
 /** Human-readable display name for each supported provider. */
 export const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
@@ -181,6 +202,8 @@ export interface SessionManagerOptions {
   onResumeFailed?: () => void;
   onCrash?: (info: SessionCrashInfo) => void;
   notifyUser?: (msg: string) => void;
+  /** Test seam: overrides the CPU-progress assessor used by the liveness-gated kill paths. */
+  treeLivenessAssessor?: typeof assessTreeLiveness;
   cwd?: string;
   configRoot?: string;
   configSystemPrompt?: string;
@@ -629,6 +652,10 @@ export class SessionManager {
    * falls back to a direct messenger.send call.
    */
   private readonly notifyUser: ((msg: string) => void) | undefined;
+  private readonly treeLivenessAssessor: typeof assessTreeLiveness;
+  /** First stall/watchdog fire of the current quiet stretch — anchors LONG_OP_CEILING_MS. */
+  private longOpGateStartedAt: number | null = null;
+  private longOpLastNoticeAt = 0;
 
   private lastCrashNotifiedAt: number | null = null;
   private static readonly CRASH_NOTIFY_COOLDOWN_MS = 60_000;
@@ -665,6 +692,7 @@ export class SessionManager {
     this.onResumeFailed = opts.onResumeFailed;
     this.onCrash = opts.onCrash;
     this.notifyUser = opts.notifyUser;
+    this.treeLivenessAssessor = opts.treeLivenessAssessor ?? assessTreeLiveness;
     this.configuredCwd = opts.cwd;
     this.configRoot = opts.configRoot;
     this.configSystemPrompt = opts.configSystemPrompt;
@@ -1950,6 +1978,9 @@ export class SessionManager {
   tickWatchdog(): void {
     if (!this.active || (this.child === null && this.managedProviderSession === null)) return;
     this.clearStalledOpKill(); // provider progress cancels the stalled-op kill (NOT cleared by inbound nudges)
+    // Real stream events also close the current quiet stretch: the long-op ceiling
+    // anchors to the NEXT stall/watchdog fire, not to one from a finished step.
+    this.longOpGateStartedAt = null;
     this.clearTurnWatchdog();
     this.armWatchdog();
   }
@@ -1981,22 +2012,83 @@ export class SessionManager {
   }
 
   /**
-   * SIGKILL a provider whose tool stalled past STALLED_OP_KILL_GRACE_MS. The exit handler
-   * then emits the crash notice and the runtime auto-respawns on the next message.
+   * SIGKILL a provider whose tool stalled past STALLED_OP_KILL_GRACE_MS — unless the
+   * provider's process tree shows CPU progress (long tool call, not a hang), in which
+   * case the kill timer re-arms for another grace window, bounded by LONG_OP_CEILING_MS.
+   * On a genuine kill the exit handler emits the crash notice and the runtime
+   * auto-respawns on the next message.
    */
   private handleStalledOpKill(toolId: string, toolName: string): void {
     this.stalledOpKill = null;
     if (!this.active || this.child === null) return;
-    log.warn(
-      { sessionId: this.sessionId, pid: this.child.pid, toolId, toolName, reason: 'stalled_operation' },
-      'stalled-operation kill fired — SIGKILL hung provider',
-    );
-    this.notifyUser?.('_A tool call stalled and was terminated. Send your message again to retry._');
     const child = this.child;
-    this.markIntentionalKill(child, 'SIGKILL', 'stalled_operation');
-    void this.killChildTree(child, 'SIGKILL').catch((err) => {
-      log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap stalled provider process tree');
+    void this.runLivenessGatedKill({
+      child,
+      reason: 'stalled_operation',
+      rearm: () => {
+        this.stalledOpKill = setTimeout(() => this.handleStalledOpKill(toolId, toolName), STALLED_OP_KILL_GRACE_MS);
+      },
+      kill: () => {
+        log.warn(
+          { sessionId: this.sessionId, pid: child.pid, toolId, toolName, reason: 'stalled_operation' },
+          'stalled-operation kill fired — SIGKILL hung provider',
+        );
+        this.notifyUser?.('_A tool call stalled and was terminated. Send your message again to retry._');
+        this.markIntentionalKill(child, 'SIGKILL', 'stalled_operation');
+        void this.killChildTree(child, 'SIGKILL').catch((err) => {
+          log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap stalled provider process tree');
+        });
+      },
     });
+  }
+
+  /**
+   * Liveness gate shared by the stalled-op kill and the hard watchdog: a quiet event
+   * stream alone must not kill a provider whose process tree is demonstrably working
+   * (heavy browser automation / long bash / long MCP steps — the ana-bot LCP TRACKER
+   * SIGKILL/exit-143 heal class). Assessment failure (tree gone, `ps` unusable) is
+   * treated as no-exoneration: the kill proceeds exactly as before this gate existed.
+   */
+  private async runLivenessGatedKill(args: {
+    child: ReturnType<typeof spawn>;
+    reason: 'stalled_operation' | 'turn_watchdog';
+    rearm: () => void;
+    kill: () => void;
+  }): Promise<void> {
+    const now = Date.now();
+    if (this.longOpGateStartedAt === null) this.longOpGateStartedAt = now;
+    const gateElapsed = now - this.longOpGateStartedAt;
+    const rootPid = args.child.pid;
+    if (gateElapsed < LONG_OP_CEILING_MS && typeof rootPid === 'number') {
+      let verdict: Awaited<ReturnType<typeof assessTreeLiveness>> = null;
+      try {
+        verdict = await this.treeLivenessAssessor(rootPid);
+      } catch (err) {
+        log.debug({ err, rootPid, reason: args.reason }, 'tree liveness assessment failed — proceeding with kill');
+      }
+      // The assessment awaited: the world may have moved (turn completed, session
+      // recycled, a newer kill armed). Only act if this child is still the live one.
+      if (!this.active || this.child !== args.child) return;
+      if (verdict?.alive) {
+        log.info(
+          { rootPid, reason: args.reason, gateElapsedMs: gateElapsed, cpuDeltaMs: verdict.cpuDeltaMs, pidChurn: verdict.pidChurn, pidCount: verdict.pidCount },
+          'kill deferred — provider tree shows CPU progress (long-running step, not a hang)',
+        );
+        if (now - this.longOpLastNoticeAt >= LONG_OP_NOTICE_MIN_INTERVAL_MS) {
+          this.longOpLastNoticeAt = now;
+          const minutes = Math.max(1, Math.round(gateElapsed / 60_000));
+          this.notifyUser?.(`_Long-running step still active (~${minutes} min in) — continuing. Send /new to interrupt._`);
+        }
+        args.rearm();
+        return;
+      }
+    } else if (gateElapsed >= LONG_OP_CEILING_MS) {
+      log.warn(
+        { rootPid: rootPid ?? null, reason: args.reason, gateElapsedMs: gateElapsed, ceilingMs: LONG_OP_CEILING_MS },
+        'long-operation ceiling reached — killing despite possible CPU progress',
+      );
+    }
+    args.kill();
   }
 
   /** Record that this manager is about to kill `child` on purpose. Cleared by the exit handler. */
@@ -2082,14 +2174,21 @@ export class SessionManager {
     if (this.managedProviderSession !== null) return;
 
     if (this.child === null) return;
-    log.warn({ sessionId: this.sessionId, pid: this.child?.pid, reason: 'turn_watchdog' }, 'turn watchdog fired — killing stalled Claude process');
-    // This notice is the ONLY user-facing message for a reap: the intent marker below
-    // suppresses the generic crash notice (and the operator page) in the exit handler.
-    this.notifyUser?.(terminationNotice);
     const child = this.child;
-    this.markIntentionalKill(child, 'SIGKILL', 'idle_watchdog');
-    void this.killChildTree(child, 'SIGKILL').catch((err) => {
-      log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap watchdog provider process tree');
+    void this.runLivenessGatedKill({
+      child,
+      reason: 'turn_watchdog',
+      rearm: () => this.armWatchdog(managedProviderSession, managedProviderGeneration),
+      kill: () => {
+        log.warn({ sessionId: this.sessionId, pid: child.pid, reason: 'turn_watchdog' }, 'turn watchdog fired — killing stalled Claude process');
+        // This notice is the ONLY user-facing message for a reap: the intent marker below
+        // suppresses the generic crash notice (and the operator page) in the exit handler.
+        this.notifyUser?.(terminationNotice);
+        this.markIntentionalKill(child, 'SIGKILL', 'idle_watchdog');
+        void this.killChildTree(child, 'SIGKILL').catch((err) => {
+          log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap watchdog provider process tree');
+        });
+      },
     });
   }
 

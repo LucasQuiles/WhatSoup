@@ -3965,28 +3965,83 @@ export class AgentRuntime implements Runtime {
       }
       try {
         switch (classified.command) {
-          case 'new':
-            // A local reset cannot erase the immutable evidence owner of an
-            // admitted user turn. Ask the caller to retry once that turn has
-            // reached its terminal transaction.
-            this.assertNoActiveUserTurn(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY);
+          case 'new': {
+            // /new is the user's natural interrupt. It used to 409-bounce while a
+            // turn was in flight ("A response is still in progress") — which made a
+            // runaway long job un-cancelable: the interrupt was blocked by the very
+            // turn it was meant to stop (ana-bot LCP TRACKER complaint, 2026-07-24).
+            // A mid-turn /new now performs the PROVEN kill-session teardown first
+            // (turn abort + durable turn terminalization + session shutdown) so the
+            // admitted turn still reaches a terminal transaction — the invariant the
+            // old assert protected — and then proceeds as a clean reset. Idle /new
+            // is unchanged.
+            const scopeKeyForNew = perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY;
+            const interruptingTurn = this.isTurnInFlight(scopeKeyForNew);
+            let interruptFinalizationError: unknown = null;
+            if (interruptingTurn) {
+              log.warn({
+                chatJid,
+                sessionScope: this.sessionScope,
+                scopeKey: scopeKeyForNew,
+              }, '/new received mid-turn — interrupting in-flight task via kill-session-equivalent teardown');
+              if (this.sessionScope === 'per_chat') {
+                const interruptedSession = this.chatSessions.get(perChatMapKey!);
+                this.chatQueues.get(perChatMapKey!)?.abortTurn();
+                try {
+                  await this.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(perChatMapKey!);
+                } catch (err) {
+                  interruptFinalizationError = err;
+                  log.error({ err, mapKey: perChatMapKey }, '/new interrupt: runtime turn queue teardown failed');
+                }
+                if (interruptedSession) {
+                  this.deleteOwnedPerChatSession(perChatMapKey!, interruptedSession);
+                  this.chatQueues.delete(perChatMapKey!);
+                  this.cleanupPerChatState(perChatMapKey!);
+                  await interruptedSession.shutdown(false);
+                }
+              } else {
+                this.getActiveQueue()?.abortTurn();
+                this.operationTracker?.shutdown();
+                this.operationTracker = null;
+                this.cleanupGlobalAutoCompactState();
+                if (this.session) {
+                  await this.session.shutdown(false);
+                }
+                this.session = null;
+                this.queue = null;
+                this.activeChatJid = null;
+                // The durable row terminalizes through the abort/rejection machinery;
+                // the in-memory markers must not outlive the teardown or the runtime
+                // reads "turn in progress" forever — the exact un-cancelable wedge
+                // this interrupt path exists to fix.
+                this.currentInboundSeq = undefined;
+                this.currentTurnChatJid = null;
+              }
+            }
             // Capture session ref before branches may delete it from the map.
             // In per_chat mode, this.session is NOT reliable (shared field race),
-            // so we look up the correct session from the per-chat maps.
-            const sessionForNew = this.sessionScope === 'per_chat'
-              ? this.chatSessions.get(perChatMapKey!)
-              : this.session;
+            // so we look up the correct session from the per-chat maps. After an
+            // interrupt the session is deliberately gone — a fresh one spawns on
+            // the next message, exactly like the post-kill-session state.
+            const sessionForNew = interruptingTurn
+              ? undefined
+              : this.sessionScope === 'per_chat'
+                ? this.chatSessions.get(perChatMapKey!)
+                : this.session;
             log.info({
               chatJid,
               sessionScope: this.sessionScope,
               shared: this.shared,
               sandboxPerChat: this.sandboxPerChat,
+              interruptedTurn: interruptingTurn,
             }, 'resetting session and queue for /new');
             if (this.sessionScope === 'per_chat') {
-              if (!sessionForNew) {
+              if (!sessionForNew && !interruptingTurn) {
                 throw new Error(`No owned per-chat session found for /new at "${perChatMapKey!}"`);
               }
-              await this.resetOwnedPerChatSession(perChatMapKey!, chatJid, sessionForNew);
+              if (sessionForNew) {
+                await this.resetOwnedPerChatSession(perChatMapKey!, chatJid, sessionForNew);
+              }
             } else {
               // Abort the old queue — clears timers and typing heartbeat before discarding.
               this.getQueueForChat(chatJid)?.abortTurn();
@@ -4019,8 +4074,18 @@ export class AgentRuntime implements Runtime {
             // Reset turn flag — stale value from the old session must not suppress the
             // _(no response)_ fallback if the first new-session turn has no visible text.
             this.turnHadVisibleOutput = false;
-            this.sendDirect(chatJid, '*Starting new session* ✓');
+            this.sendDirect(
+              chatJid,
+              interruptingTurn
+                ? `*Interrupted the running task — starting new session* ✓${
+                  interruptFinalizationError === null
+                    ? ''
+                    : '\n_⚠️ some in-flight turns could not be finalized — see logs_'
+                }`
+                : '*Starting new session* ✓',
+            );
             break;
+          }
 
           case 'status': {
             // Look up session from per-chat maps (not the shared field) to avoid race.

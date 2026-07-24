@@ -2594,7 +2594,7 @@ describe('AgentRuntime', () => {
     expect(enqueuedTexts.some((t) => t.includes('new session'))).toBe(true);
   });
 
-  it('rejects /new without resetting singleton state while a user turn is active', async () => {
+  it('interrupts the active singleton turn on /new instead of bouncing (LCP un-cancelable-job fix)', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
@@ -2606,22 +2606,25 @@ describe('AgentRuntime', () => {
     state.currentInboundSeq = 77;
     state.currentTurnChatJid = 'test@s.whatsapp.net';
     mockSession.handleNew.mockClear();
-    mockQueue.abortTurn.mockClear();
+    mockSession.shutdown.mockClear();
 
-    // Admin sender: exercises the turn-active rejection, not the admin gate
+    // Admin sender: exercises the mid-turn interrupt, not the admin gate
     // (single mode requires admin for /new since W1-T3's RULING).
     await sendAndDrain(runtime, makeMsg({ content: '/new', inboundSeq: 78, senderJid: '15550100001@s.whatsapp.net' }));
 
+    // The in-flight turn is torn down (kill-session-equivalent), not deferred to.
+    expect(mockSession.shutdown).toHaveBeenCalledWith(false);
+    // Session is gone after an interrupt — a fresh one spawns on the next message.
     expect(mockSession.handleNew).not.toHaveBeenCalled();
-    expect(mockQueue.abortTurn).not.toHaveBeenCalled();
-    expect(state.currentInboundSeq).toBe(77);
-    expect(state.currentTurnChatJid).toBe('test@s.whatsapp.net');
-    expect(mockQueue.enqueueText).toHaveBeenCalledWith(
-      expect.stringContaining('still in progress'),
-    );
+    // The in-memory turn markers must not outlive the teardown (the wedge class).
+    expect(state.currentInboundSeq).toBe(undefined);
+    expect(state.currentTurnChatJid).toBe(null);
+    const enqueuedTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
+    expect(enqueuedTexts.some((t) => t.includes('Interrupted the running task'))).toBe(true);
+    expect(enqueuedTexts.some((t) => t.includes('still in progress'))).toBe(false);
   });
 
-  it('rejects /new without deleting per-chat turn ownership while a user turn is active', async () => {
+  it('interrupts per-chat turn ownership on /new instead of bouncing', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
@@ -2631,19 +2634,24 @@ describe('AgentRuntime', () => {
     };
     await runtime.start();
     state.perChatInboundSeqQueue.set('test@s.whatsapp.net', [81]);
-    mockQueue.abortTurn.mockClear();
+    mockSession.shutdown.mockClear();
 
     await sendAndDrain(runtime, makeMsg({ content: '/new', inboundSeq: 82 }));
 
-    expect(mockQueue.abortTurn).not.toHaveBeenCalled();
-    expect(state.perChatInboundSeqQueue.get('test@s.whatsapp.net')).toEqual([81]);
-    expect(state.chatSessions.has('test@s.whatsapp.net')).toBe(true);
-    expect(mockQueue.enqueueText).toHaveBeenCalledWith(
-      expect.stringContaining('still in progress'),
-    );
+    // The owned per-chat session is torn down and unmapped (kill-session-equivalent);
+    // a fresh session spawns on the chat's next message.
+    expect(state.chatSessions.has('test@s.whatsapp.net')).toBe(false);
+    // The interrupt deletes the chat's outbound queue, so the ack rides the
+    // messenger fallback (sendDirect's no-queue branch) — assert both surfaces.
+    const ackTexts = [
+      ...mockQueue.enqueueText.mock.calls.map((args) => args[0] as string),
+      ...(messenger.sendMessage as ReturnType<typeof vi.fn>).mock.calls.map((args) => args[1] as string),
+    ];
+    expect(ackTexts.some((t) => t.includes('Interrupted the running task'))).toBe(true);
+    expect(ackTexts.some((t) => t.includes('still in progress'))).toBe(false);
   });
 
-  it('rejects /new while an unsequenced synthetic per-chat turn owns the runtime queue', async () => {
+  it('interrupts an unsequenced synthetic per-chat turn owning the runtime queue on /new', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
@@ -2701,11 +2709,16 @@ describe('AgentRuntime', () => {
 
       await sendAndDrain(runtime, makeMsg({ content: '/new' }));
 
-      expect(mockQueue.abortTurn).not.toHaveBeenCalled();
-      expect(mockSession.shutdown).not.toHaveBeenCalled();
-      expect(mockQueue.enqueueText).toHaveBeenCalledWith(
-        expect.stringContaining('still in progress'),
-      );
+      // Queue ownership alone is active-turn proof — /new interrupts it now
+      // (teardown + terminalization) instead of bouncing. The interrupt deletes
+      // the chat's outbound queue, so the ack rides the messenger fallback.
+      expect(mockSession.shutdown).toHaveBeenCalledWith(false);
+      const ackTexts = [
+        ...mockQueue.enqueueText.mock.calls.map((args) => args[0] as string),
+        ...(messenger.sendMessage as ReturnType<typeof vi.fn>).mock.calls.map((args) => args[1] as string),
+      ];
+      expect(ackTexts.some((t) => t.includes('Interrupted the running task'))).toBe(true);
+      expect(ackTexts.some((t) => t.includes('still in progress'))).toBe(false);
     } finally {
       releaseSend();
       if (previousMemory === undefined) delete mutableConfig.memory;
@@ -2714,7 +2727,7 @@ describe('AgentRuntime', () => {
     await state.perChatTurnQueues.get('test@s.whatsapp.net')?.idle();
   });
 
-  it('rejects /new while the shared runtime queue still owns a turn after flag handoff', async () => {
+  it('interrupts /new-blocking shared-queue ownership after flag handoff instead of bouncing', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'test', { shared: true });
@@ -2764,11 +2777,12 @@ describe('AgentRuntime', () => {
         senderJid: '15550100001@s.whatsapp.net',
       }));
 
-      expect(mockQueue.abortTurn).not.toHaveBeenCalled();
+      // Residual queue ownership is still an active turn — /new interrupts it.
+      expect(mockSession.shutdown).toHaveBeenCalledWith(false);
       expect(mockSession.handleNew).not.toHaveBeenCalled();
-      expect(mockQueue.enqueueText).toHaveBeenCalledWith(
-        expect.stringContaining('still in progress'),
-      );
+      const enqueuedTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
+      expect(enqueuedTexts.some((t) => t.includes('Interrupted the running task'))).toBe(true);
+      expect(enqueuedTexts.some((t) => t.includes('still in progress'))).toBe(false);
     } finally {
       releaseSend();
     }
