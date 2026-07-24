@@ -167,6 +167,175 @@ describe('runCycle', () => {
     });
   });
 
+  it('does not deliver a mute_expire alert when no sink is configured (backward compatible)', async () => {
+    const { baselines, events, mutes, runtimeState } = setup();
+    runtimeState.set('prev_cycle_iso', '2026-05-09T09:00:00.000Z');
+    mutes.create({
+      host: 'scope-a',
+      domain: 'change',
+      expires_at: '2026-05-09T09:30:00.000Z',
+      reason: 'planned maintenance ended',
+      created_by: 'operator',
+    });
+
+    const result = await runCycle({
+      collectors: [],
+      scopes: [],
+      baselines,
+      events,
+      mutes,
+      runtimeState,
+      evaluatorFor,
+      now: () => new Date('2026-05-09T10:00:00.000Z'),
+    });
+
+    expect(result.deliverySucceededCount).toBe(0);
+    expect(result.deliveryFailedCount).toBe(0);
+    expect(events.queryByKind('alert_delivery_succeeded')).toHaveLength(0);
+  });
+
+  it('delivers a mute_expire alert to the configured sink exactly once, correlated with the drift it was suppressing', async () => {
+    const { baselines, events, mutes, runtimeState } = setup();
+    baseline(baselines, 'fixture.ports', 'scope-a', { p: 1 });
+    const muteId = mutes.create({
+      host: 'scope-a',
+      domain: 'exposure',
+      expires_at: '2026-05-08T11:00:00.000Z',
+      reason: 'planned maintenance',
+      created_by: 'operator',
+    });
+    const collector = new FixtureCollector({
+      id: 'fixture.ports',
+      docs: { 'scope-a': { fields: { p: 2 }, captured_at: NOW.toISOString() } },
+    });
+    const sink: Sink = {
+      name: 'whatsoup',
+      isDurableLog: false,
+      deliver: vi.fn(async () => ({ ok: true, channel: 'whatsoup' })),
+    };
+
+    await runCycle({
+      collectors: [collector],
+      scopes: ['scope-a'],
+      baselines,
+      events,
+      mutes,
+      runtimeState,
+      evaluatorFor,
+      now: () => NOW,
+      sinks: [sink],
+    });
+
+    const muted = events.queryByKind('drift_muted');
+    expect(muted).toHaveLength(1);
+    expect(muted[0]?.payload).toMatchObject({ mute_id: muteId });
+    expect(sink.deliver).not.toHaveBeenCalled();
+    const suppressedCorrelationId = muted[0]!.correlation_id;
+
+    const afterExpiry = new Date('2026-05-08T11:30:00.000Z');
+    const result = await runCycle({
+      collectors: [],
+      scopes: [],
+      baselines,
+      events,
+      mutes,
+      runtimeState,
+      evaluatorFor,
+      now: () => afterExpiry,
+      sinks: [sink],
+    });
+
+    expect(sink.deliver).toHaveBeenCalledTimes(1);
+    expect(result.deliverySucceededCount).toBe(1);
+    expect(result.deliveryFailedCount).toBe(0);
+    const delivered = events.queryByKind('alert_delivery_succeeded');
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]?.correlation_id).toBe(suppressedCorrelationId);
+  });
+
+  it('delivers a mute_expire alert with a fresh correlation id when the mute never suppressed anything', async () => {
+    const { baselines, events, mutes, runtimeState } = setup();
+    runtimeState.set('prev_cycle_iso', '2026-05-09T09:00:00.000Z');
+    mutes.create({
+      host: 'scope-b',
+      domain: 'exposure',
+      expires_at: '2026-05-09T09:30:00.000Z',
+      reason: 'unused mute',
+      created_by: 'operator',
+    });
+    const sink: Sink = {
+      name: 'whatsoup',
+      isDurableLog: false,
+      deliver: vi.fn(async () => ({ ok: true, channel: 'whatsoup' })),
+    };
+
+    const result = await runCycle({
+      collectors: [],
+      scopes: [],
+      baselines,
+      events,
+      mutes,
+      runtimeState,
+      evaluatorFor,
+      now: () => new Date('2026-05-09T10:00:00.000Z'),
+      sinks: [sink],
+    });
+
+    expect(sink.deliver).toHaveBeenCalledTimes(1);
+    expect(result.deliverySucceededCount).toBe(1);
+    const delivered = events.queryByKind('alert_delivery_succeeded');
+    const muteExpireEvent = events.queryByKind('mute_expire')[0];
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]?.correlation_id).toBe(muteExpireEvent?.correlation_id);
+  });
+
+  it('does not re-deliver a mute_expire alert on a later cycle for the same already-expired mute (no duplicate page burst)', async () => {
+    const { baselines, events, mutes, runtimeState } = setup();
+    runtimeState.set('prev_cycle_iso', '2026-05-09T09:00:00.000Z');
+    mutes.create({
+      host: 'scope-a',
+      domain: 'change',
+      expires_at: '2026-05-09T09:30:00.000Z',
+      reason: 'planned maintenance ended',
+      created_by: 'operator',
+    });
+    const sink: Sink = {
+      name: 'whatsoup',
+      isDurableLog: false,
+      deliver: vi.fn(async () => ({ ok: true, channel: 'whatsoup' })),
+    };
+
+    await runCycle({
+      collectors: [],
+      scopes: [],
+      baselines,
+      events,
+      mutes,
+      runtimeState,
+      evaluatorFor,
+      now: () => new Date('2026-05-09T10:00:00.000Z'),
+      sinks: [sink],
+    });
+
+    expect(sink.deliver).toHaveBeenCalledTimes(1);
+
+    const result = await runCycle({
+      collectors: [],
+      scopes: [],
+      baselines,
+      events,
+      mutes,
+      runtimeState,
+      evaluatorFor,
+      now: () => new Date('2026-05-09T11:00:00.000Z'),
+      sinks: [sink],
+    });
+
+    expect(sink.deliver).toHaveBeenCalledTimes(1);
+    expect(result.deliverySucceededCount).toBe(0);
+    expect(events.queryByKind('alert_delivery_succeeded')).toHaveLength(1);
+  });
+
   it('passes deployment role context into the evaluator', async () => {
     const { baselines, events, mutes } = setup();
     const fields = { runtime_type: 'passive', role: 'support', provider_env: {} };
