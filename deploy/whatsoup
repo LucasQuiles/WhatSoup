@@ -56,7 +56,7 @@ keyring_lookup() {
       fi
       ;;
     *)
-      if ! keyring_value="$(timeout 3s secret-tool lookup service "$service" "$@" 2>/dev/null)"; then
+      if ! keyring_value="$(whatsoup_run_bounded 3 secret-tool lookup service "$service" "$@" 2>/dev/null)"; then
         keyring_value=""
       fi
       ;;
@@ -91,6 +91,10 @@ if ! NODE="$(whatsoup_resolve_node "$REPO_ROOT")"; then
 fi
 # shellcheck source=deploy/lib/read-private-health-token.sh
 . "$SCRIPT_DIR/lib/read-private-health-token.sh"
+# Credential-store probes must be bounded on BOTH platforms; `timeout(1)` is not
+# present on stock macOS (see deploy/lib/bounded-exec.sh).
+# shellcheck source=deploy/lib/bounded-exec.sh
+. "$SCRIPT_DIR/lib/bounded-exec.sh"
 
 DATABASE_BOOTSTRAP_TS="$REPO_ROOT/src/database-compatibility-bootstrap.ts"
 if [ -L "$DATABASE_BOOTSTRAP_TS" ]; then

@@ -2,6 +2,11 @@
 set -uo pipefail
 INSTANCE="${1:?Usage: heal-notify.sh <instance-name>}"
 
+# Credential-store probes must be bounded on BOTH platforms; `timeout(1)` is not
+# present on stock macOS (see deploy/lib/bounded-exec.sh).
+# shellcheck source=deploy/lib/bounded-exec.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/bounded-exec.sh"
+
 # Config root mirrors src/fleet/paths.ts: ${XDG_CONFIG_HOME:-~/.config}/whatsoup/instances/<name>/
 INSTANCE_CONFIG_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}/whatsoup/instances/${INSTANCE}"
 
@@ -40,10 +45,10 @@ if [ -f "$TOKENS_ENV" ]; then
         | head -1 | cut -d= -f2- | tr -d '[:space:]') || TOKEN=""
 fi
 if [ -z "$TOKEN" ]; then
-    TOKEN=$(secret-tool lookup service whatsoup-health-token user "$INSTANCE" 2>/dev/null || echo "")
+    TOKEN=$(whatsoup_run_bounded 3 secret-tool lookup service whatsoup-health-token user "$INSTANCE" 2>/dev/null || echo "")
 fi
 if [ -z "$TOKEN" ]; then
-    TOKEN=$(secret-tool lookup service whatsoup_health 2>/dev/null || echo "")
+    TOKEN=$(whatsoup_run_bounded 3 secret-tool lookup service whatsoup_health 2>/dev/null || echo "")
 fi
 
 if [ -n "$TOKEN" ]; then

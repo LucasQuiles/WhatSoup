@@ -11,6 +11,11 @@ if [[ -z "${BASH_VERSION:-}" ]]; then
   exit 1
 fi
 
+# Credential-store probes must be bounded on BOTH platforms; `timeout(1)` is not
+# present on stock macOS (see deploy/lib/bounded-exec.sh).
+# shellcheck source=deploy/lib/bounded-exec.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/bounded-exec.sh"
+
 INSTANCES_DIR="${HOME}/.config/whatsoup/instances"
 MIRROR_KEYRING=0
 ROTATE=0
@@ -81,7 +86,7 @@ mirror_to_keyring() {
   case "$(uname -s)" in
     Darwin)
       command -v security >/dev/null 2>&1 || return 1
-      security add-generic-password \
+      whatsoup_run_bounded 5 security add-generic-password \
         -U \
         -s "whatsoup-health-token" \
         -a "$instance_name" \
@@ -89,7 +94,7 @@ mirror_to_keyring() {
       ;;
     *)
       command -v secret-tool >/dev/null 2>&1 || return 1
-      printf '%s' "$token" | secret-tool store \
+      printf '%s' "$token" | whatsoup_run_bounded 5 secret-tool store \
         --label "WhatSoup Health Token ($instance_name)" \
         service "whatsoup-health-token" \
         user "$instance_name"
