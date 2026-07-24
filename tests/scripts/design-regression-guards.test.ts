@@ -229,7 +229,10 @@ describe('design-regression.sh guard contracts', () => {
     // doesn't drift this pin (the registry file is the SSOT).
     const registryCount = (readFileSync(resolve(process.cwd(), 'console/eslint-waivers.yaml'), 'utf8').match(/^  - id: WVR-/gm) ?? []).length;
     expect(check15).toContain(`Registered waivers: ${registryCount}`);
-    expect(check15).toContain('Registered waivers: 8');
+    // Independent literal so the derived pin above can't pass vacuously against
+    // an empty/unparsed registry. 9 = the v3.5 set after b-11 retired
+    // WVR-005/006 with their subjects (T5 b-13 integration).
+    expect(check15).toContain('Registered waivers: 9');
     expect(check15).toContain('Untagged disable directives: 0');
     expect(check15).toContain('Unknown source waiver ids: 0');
     expect(check15).toContain('Stale registry TS/TSX scopes: 0');

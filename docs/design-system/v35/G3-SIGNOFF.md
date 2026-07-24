@@ -70,25 +70,69 @@ no-infinite-animation sanctioned set = `ambient-disc` only.
 
 ## 5. Residual items (explicit, not blocking)
 
-1. **Merges pending (owner decisions)** — #2030, #2059, #2086, #2094, #2096,
-   #2099, #2108, #2112, #2119, #2125, #2131, #2140, #2143 (+ #2098 already
-   merged). Merge order recommendation: b-01 → b-02 → surfaces in any order →
-   b-09a → b-10 → b-11 → b-12. The integration worktree above is the exact
-   preview of the merged result.
+1. **Merge path — one integration PR, not thirteen.** Superseded by §7: the
+   bead PRs stay the reviewed record; `feat/console-v35-integration` is the
+   single merge to main.
 2. **§1 perf budgets** are provisional — the b-12 lane flips to blocking
    (`PERF_LANE_ENFORCE=1`) on owner sign-off of `19-performance-budget.md` §1.
-3. **Reduced-motion harness debt** — the browser suite's
-   `context.reducedMotion: 'reduce'` is inert in the current provider version
-   (probe-proven in b-10); the vitest page wrapper exposes no per-test media
-   emulation. Own bead; ceremony/motion contracts are source+computed pinned
-   meanwhile.
-4. **Deferred perf legs** — 200-line mount + event-storm frame cost need a
-   fixture-fed headless harness (recorded in the lane output).
-5. **Ops surface** remains v3-era (no mockup, no bead) with the metrics tab
-   absorbed; a v3.5 Ops restyle would need a mockup first.
+   This is the one gate that stays open by design; it is an owner numeric
+   decision, not an engineering residual.
+3. ~~**Reduced-motion harness debt**~~ — CLOSED by #2158: the provider option is
+   `contextOptions` at the factory level (`instances[].context` was a key the
+   provider never read). The removal law is computed-proof with reduce actually
+   active; the failure class is recorded in `qa-hardening.md`.
+4. ~~**Deferred perf legs**~~ — CLOSED in #2143: 200-row mount + 10-event storm
+   frame cost land as real Chromium budget tests through the Profiler's
+   `actualDuration`, inside the existing CI lanes.
+5. **Ops surface** — remains v3-era with the metrics tab absorbed. Tracked as
+   bead **b-14** (mockup first, then restyle); it is the last surface that has
+   not been through the v3.5 language.
 
 ## 6. Gate verdict
 
 All computable gate criteria PASS on the integrated tree. G3 sign-off is
-recommended **conditional on the owner merge decisions in §5.1** — the merged
-main will be byte-equivalent to the validated integration worktree.
+recommended **conditional on the owner merge decision in §7** — the merged main
+will be byte-equivalent to the validated integration branch.
+
+## 7. Post-gate: the merge path (integration re-run, 2026-07-24)
+
+The gate above ran against a local worktree that was never pushed. That left a
+structural problem for landing: main squash-merges, and the eleven surface
+branches are stacked on b-02, so every squash landing rewrites the base of the
+next PR. #2030 (b-01) merging proved it — #2059 went `DIRTY` immediately, on the
+two additive doc registries, and each later merge would have re-conflicted the
+same way (12 more conflict walls, serialized behind owner merges).
+
+Resolution, in two parts:
+
+- **#2059 restored to mergeable** — main merged into b-02 with the doc-registry
+  union resolved by taking the branch side (verified line-by-line as a strict
+  superset of main's b-01 squash; no main-side content dropped). The full
+  pre-push gate ran green on the result.
+- **`feat/console-v35-integration`** — branched off current main and assembling
+  all thirteen bead branches plus #2158, with every conflict resolved
+  mechanically (additive union, framed union for renumbered headings, line-wise
+  3-way for the route table, deletion union for the retired stub rows). This is
+  the single PR to main; the bead PRs remain the review record.
+
+**Three defects the re-assembly surfaced, all fixed at the root:**
+
+| Defect | Why no branch could see it | Fix |
+|---|---|---|
+| `const Metrics = lazy(() => import('./pages/Metrics'))` resurrected against the page file b-09a deleted | the lazy-import block unions additively; only the assembled tree has both the b-09a deletion and another branch's import list | import removed; `ops-metrics-tab.test.ts` already pins the absence |
+| `SurfaceStub` survived as a dead import, and `app.test.tsx`'s stub table degraded to an **empty loop** — a vacuously passing test | each branch removed only its own row; the last removal emptied the table without failing | stub module deleted; table replaced with a graduation pin (5 routes render their surface, none renders the placeholder), falsified by re-shadowing `/agents` |
+| duplicate `§` numbering across the spec docs (4× `## 12.` in tokens-v3, 8× `## 5.` in the addendum) | each bead numbered against its own base | renumbered sequentially with every in-body Spec-SSOT cross-reference repointed |
+
+**Flagged convergence closed.** b-03's fleet-local transport map and b-07's
+console-wide `transport-identity.ts` both carried the same mapping; both PRs
+flagged that one must absorb the other once both landed. The shared mapping and
+copy now live once in `lib/transport-identity.ts`, with `fleet/channel-kind.ts`
+extending it for the fleet-only silhouettes and keeping the shape-mandatory
+Baileys fallback. Direction chosen so the inbox glyph set stays pinned to its
+own mockup SSOT. **Enforcement effect:** `channel-kind.ts` drops out of *both*
+hygiene allowlists (`no-whatsapp-copy-in-generic-ui`,
+`no-health-whatsapp-key-read`) — each rule now admits one file instead of two —
+and the merge-duplicated allowlist entries (4× per rule) collapse to one. 30 new
+pins cover every raw spelling the pre-convergence map resolved, the
+honest-vs-shape fallback split, and a tripwire that fails if the fleet map ever
+re-rolls transport copy or the legacy key read.
