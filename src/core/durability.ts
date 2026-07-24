@@ -707,12 +707,19 @@ export class DurabilityEngine {
       getLastRecoveryRunCompletedAt: prepare(
         `SELECT completed_at FROM recovery_runs ORDER BY id DESC LIMIT 1`,
       ),
+      // #1789 companion fix: this INSERT sets completed_at at write time but
+      // (until now) never set status, so under migration 45's
+      // status DEFAULT 'started' a row born here was self-contradictory —
+      // already completed_at-stamped while reading status='started' forever.
+      // logRecoveryRun() is a synchronous, single-statement aggregate-stats
+      // log (no separate "start" phase to record), so 'completed' is correct
+      // at insert time, not a later transition.
       insertRecoveryRun: prepare(`
         INSERT INTO recovery_runs
           (trigger, inbound_replayed, outbound_reconciled, outbound_replayed,
            outbound_quarantined, tool_calls_recovered, tool_calls_replayed,
-           tool_calls_quarantined, sessions_restored, completed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+           tool_calls_quarantined, sessions_restored, completed_at, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), 'completed')
       `),
       selectNow: prepare(`SELECT datetime('now') AS now`),
     };

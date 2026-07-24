@@ -107,6 +107,7 @@ const requiredPackageScripts = {
     'npm run guard:test-integrity:required',
     'npm run guard:boundaries',
     'npm run guard:fail-closed-gate',
+    'npm run guard:durability-writer',
     'npm run guard:service-units',
     'npm run guard:insecure-tempfile',
     'npm run guard:no-destructive-git',
