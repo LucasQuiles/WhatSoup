@@ -1044,9 +1044,12 @@ sqlite3 $DB \
 ```bash
 DB=~/.local/share/whatsoup/instances/sandbox-agent/bot.db
 
-# Incomplete recovery runs are unresolved durable evidence, not successful runs
+# Incomplete recovery runs are unresolved durable evidence, not successful runs.
+# status='failed' is durable recovery debt; status='running' with completed_at
+# NULL after a crash means even the failed receipt itself could not be written
+# (see docs/durability.md §5.3).
 sqlite3 $DB \
-  "SELECT id, trigger, recovery_plan_id, started_at, notes
+  "SELECT id, trigger, status, error_kind, error_message, recovery_plan_id, started_at, notes
    FROM recovery_runs WHERE completed_at IS NULL ORDER BY id DESC;"
 
 # Inbound events — messages currently being processed
@@ -1065,7 +1068,7 @@ sqlite3 $DB \
 
 # Recent recovery runs
 sqlite3 $DB \
-  "SELECT trigger, inbound_replayed, outbound_reconciled, outbound_replayed,
+  "SELECT trigger, status, inbound_replayed, outbound_reconciled, outbound_replayed,
           outbound_quarantined, tool_calls_quarantined, completed_at
    FROM recovery_runs ORDER BY id DESC LIMIT 5;"
 

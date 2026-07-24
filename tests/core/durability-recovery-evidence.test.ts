@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
-import { DurabilityRecoveryEvidence } from '../../src/core/durability-recovery-evidence.ts';
+import { createRecoveryStats, DurabilityRecoveryEvidence } from '../../src/core/durability-recovery-evidence.ts';
 import { ReplyGuaranteeManager } from '../../src/core/reply-guarantee.ts';
 import {
   toTurnFinalizationPersistence,
@@ -110,12 +110,15 @@ describe('durable recovery evidence ordering', () => {
     expect(recoveryRunId).toEqual(expect.any(Number));
     if (recoveryRunId == null) throw new Error('Expected a durable recovery run identity');
     expect(db.raw.prepare(`
-      SELECT id, recovery_plan_id, completed_at
+      SELECT id, recovery_plan_id, completed_at, status, error_kind, error_message
       FROM recovery_runs WHERE id = ?
     `).get(recoveryRunId)).toEqual({
       id: recoveryRunId,
       recovery_plan_id: stats.recoveryPlanId,
       completed_at: expect.any(String),
+      status: 'completed',
+      error_kind: null,
+      error_message: null,
     });
     expect(engine.getHealthStats().openRecoveries).toBe(1);
   });
@@ -236,13 +239,17 @@ describe('durable recovery evidence ordering', () => {
       'primary recovery mutation denied',
       'incomplete receipt denied',
     ]);
+    // The incomplete-receipt UPDATE (which would have set status = 'failed')
+    // was itself denied atomically, so status never advances past its
+    // 'running' default — it must NOT read as 'failed' when the failure
+    // could not actually be persisted.
     expect(db.raw.prepare(`
-      SELECT completed_at, notes
+      SELECT completed_at, notes, status
       FROM recovery_runs
       WHERE trigger = 'pre_connect'
       ORDER BY id DESC
       LIMIT 1
-    `).get()).toEqual({ completed_at: null, notes: null });
+    `).get()).toEqual({ completed_at: null, notes: null, status: 'running' });
   });
 
   it('leaves post-connect recovery incomplete and never clears quarantine after a mutation failure', () => {
@@ -295,18 +302,30 @@ describe('durable recovery evidence ordering', () => {
 
     expect(recover).toThrow('no such table: inbound_disposition_links');
     const run = db.raw.prepare(`
-      SELECT completed_at, notes
+      SELECT completed_at, notes, status, error_kind, error_message
       FROM recovery_runs
       WHERE trigger = ?
       ORDER BY id DESC
       LIMIT 1
-    `).get(trigger) as { completed_at: string | null; notes: string | null };
+    `).get(trigger) as {
+      completed_at: string | null;
+      notes: string | null;
+      status: string;
+      error_kind: string | null;
+      error_message: string | null;
+    };
     expect(run.completed_at).toBeNull();
     expect(JSON.parse(run.notes ?? 'null')).toEqual({
       status: 'incomplete',
       failedPhases: ['count_open_recoveries'],
       openRecoveries: null,
     });
+    // The status column and the notes JSON's own "status" key are distinct:
+    // the column is the durable, queryable outcome; the notes blob is a
+    // free-text summary. A real end-to-end failure lands both consistently.
+    expect(run.status).toBe('failed');
+    expect(run.error_kind).toBe('count_open_recoveries');
+    expect(run.error_message).toBe('no such table: inbound_disposition_links');
     expect(gateQuarantineClear).not.toHaveBeenCalled();
   });
 
@@ -633,5 +652,63 @@ describe('durable recovery evidence ordering', () => {
       FROM turn_delivery_corroboration
       WHERE terminal_record_id = ?
     `).get(terminalRecordId)).toEqual({ count: 0 });
+  });
+
+  it('status distinguishes a running, a completed, and a failed recovery run (#1786)', () => {
+    const evidence = new DurabilityRecoveryEvidence(db);
+
+    const runningReceipt = evidence.start('pre_connect_recovery', 'status-running', 'status probe: running');
+    expect(db.raw.prepare(`
+      SELECT status, error_kind, error_message, completed_at
+      FROM recovery_runs WHERE id = ?
+    `).get(runningReceipt.recoveryRunId)).toEqual({
+      status: 'running',
+      error_kind: null,
+      error_message: null,
+      completed_at: null,
+    });
+
+    const completedReceipt = evidence.start(
+      'pre_connect_recovery', 'status-completed', 'status probe: completed',
+    );
+    evidence.finalize(completedReceipt, createRecoveryStats(completedReceipt));
+    expect(db.raw.prepare(`
+      SELECT status, error_kind, error_message
+      FROM recovery_runs WHERE id = ?
+    `).get(completedReceipt.recoveryRunId)).toEqual({
+      status: 'completed',
+      error_kind: null,
+      error_message: null,
+    });
+    expect(db.raw.prepare(
+      'SELECT completed_at FROM recovery_runs WHERE id = ?',
+    ).get(completedReceipt.recoveryRunId)).toEqual({ completed_at: expect.any(String) });
+
+    const failedReceipt = evidence.start('pre_connect_recovery', 'status-failed', 'status probe: failed');
+    evidence.recordIncomplete(
+      failedReceipt,
+      createRecoveryStats(failedReceipt),
+      JSON.stringify({ status: 'incomplete', failedPhases: ['probe_phase'], openRecoveries: 0 }),
+      'probe_phase',
+      'synthetic probe failure',
+    );
+    expect(db.raw.prepare(`
+      SELECT status, error_kind, error_message, completed_at
+      FROM recovery_runs WHERE id = ?
+    `).get(failedReceipt.recoveryRunId)).toEqual({
+      status: 'failed',
+      error_kind: 'probe_phase',
+      error_message: 'synthetic probe failure',
+      completed_at: null,
+    });
+
+    // All three are visibly distinct outcomes, not shades of the same
+    // "completed_at IS NULL" ambiguity migration 45 replaced.
+    const statuses = [runningReceipt, completedReceipt, failedReceipt].map((receipt) => (
+      db.raw.prepare('SELECT status FROM recovery_runs WHERE id = ?')
+        .get(receipt.recoveryRunId) as { status: string }
+    ).status);
+    expect(statuses).toEqual(['running', 'completed', 'failed']);
+    expect(new Set(statuses).size).toBe(3);
   });
 });

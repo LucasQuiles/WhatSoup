@@ -41,7 +41,7 @@ function cleanup(...paths: string[]): void {
   }
 }
 
-const ALL_MIGRATION_VERSIONS = Array.from({ length: 44 }, (_, i) => i + 1);
+const ALL_MIGRATION_VERSIONS = Array.from({ length: 45 }, (_, i) => i + 1);
 
 /**
  * Raw migration 1 SQL — extracted verbatim from database.ts.
@@ -1401,6 +1401,148 @@ describe('Test 10 — WAL mode and busy_timeout are set before migrations run', 
     // Accept 'wal' or 'memory' — both are valid for in-memory DBs
     expect(['wal', 'memory']).toContain(row.journal_mode);
     db.close();
+  });
+});
+
+// ─── recovery_runs status contract (migration 45, #1786) ──────────────────────
+
+describe('recovery_runs status/error_kind/error_message migration contract', () => {
+  let dbPath: string;
+
+  afterEach(() => cleanup(dbPath));
+
+  it('migration 45 backfills historical outcomes and a fresh DB converges to the same schema', () => {
+    dbPath = tmpFile();
+
+    // Build a real pre-#1786 database: fully migrated, then roll back exactly
+    // migration 45 so recovery_runs is back to its historical shape (no
+    // status/error_kind/error_message) while everything else stays at head.
+    {
+      const seed = new Database(dbPath);
+      seed.open();
+      seed.close();
+    }
+    const raw = new DatabaseSync(dbPath);
+    raw.exec(`
+      DELETE FROM schema_migrations WHERE version = 45;
+      ALTER TABLE recovery_runs DROP COLUMN status;
+      ALTER TABLE recovery_runs DROP COLUMN error_kind;
+      ALTER TABLE recovery_runs DROP COLUMN error_message;
+    `);
+    // Historical rows spanning what recovery_runs could previously represent:
+    // a completed run, a genuinely failed run whose incomplete notes were
+    // durably recorded, and a crash so total the incomplete receipt itself
+    // never got written (notes NULL too). Before migration 45 the latter two
+    // were both just "completed_at IS NULL" — indistinguishable from each
+    // other and, per docs/durability.md §5.3, never an in-progress run.
+    raw.exec(`
+      INSERT INTO recovery_runs (trigger, completed_at, notes)
+        VALUES ('pre_connect', datetime('now'), '{"openRecoveries":0}');
+      INSERT INTO recovery_runs (trigger, completed_at, notes)
+        VALUES ('pre_connect', NULL, '{"status":"incomplete","failedPhases":["promote_sending_outbound"],"openRecoveries":0}');
+      INSERT INTO recovery_runs (trigger, completed_at, notes)
+        VALUES ('post_connect', NULL, NULL);
+    `);
+    raw.close();
+
+    const migrated = new Database(dbPath);
+    migrated.open();
+    try {
+      expect(migrated.raw.prepare(`
+        SELECT version FROM schema_migrations WHERE version = 45
+      `).get()).toEqual({ version: 45 });
+
+      const rows = migrated.raw.prepare(`
+        SELECT trigger, completed_at, status, error_kind, error_message
+        FROM recovery_runs ORDER BY id
+      `).all() as Array<{
+        trigger: string;
+        completed_at: string | null;
+        status: string;
+        error_kind: string | null;
+        error_message: string | null;
+      }>;
+      expect(rows).toEqual([
+        {
+          trigger: 'pre_connect', completed_at: expect.any(String),
+          status: 'completed', error_kind: null, error_message: null,
+        },
+        {
+          trigger: 'pre_connect', completed_at: null,
+          status: 'failed', error_kind: null, error_message: null,
+        },
+        {
+          trigger: 'post_connect', completed_at: null,
+          status: 'failed', error_kind: null, error_message: null,
+        },
+      ]);
+
+      const statusCol = (
+        migrated.raw.prepare("PRAGMA table_info('recovery_runs')").all() as Array<{
+          name: string;
+          notnull: number;
+          dflt_value: string | null;
+        }>
+      ).find((c) => c.name === 'status');
+      expect(statusCol?.notnull, 'status must be NOT NULL').toBe(1);
+      expect(statusCol?.dflt_value, "status must default to 'running'").toBe("'running'");
+
+      // The failure vocabulary is enforced at the DB layer.
+      expect(() => {
+        migrated.raw.prepare(
+          "INSERT INTO recovery_runs (trigger, status) VALUES ('pre_connect', 'bogus')",
+        ).run();
+      }).toThrow(/CHECK constraint failed/);
+      expect(() => {
+        migrated.raw.prepare(
+          "INSERT INTO recovery_runs (trigger, status) VALUES ('pre_connect', 'failed')",
+        ).run();
+      }).not.toThrow();
+
+      const migratedSql = (migrated.raw.prepare(`
+        SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'recovery_runs'
+      `).get() as { sql: string }).sql;
+
+      const fresh = new Database(':memory:');
+      fresh.open();
+      try {
+        const freshSql = (fresh.raw.prepare(`
+          SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'recovery_runs'
+        `).get() as { sql: string }).sql;
+        expect(migratedSql, 'a migrated DB must converge to the same recovery_runs schema as a fresh one').toBe(freshSql);
+      } finally {
+        fresh.close();
+      }
+    } finally {
+      migrated.close();
+    }
+  });
+
+  it('migration 45 is idempotent: reopening a DB that already has the columns does not throw or duplicate them', () => {
+    dbPath = tmpFile();
+    {
+      const db = new Database(dbPath);
+      db.open();
+      db.close();
+    }
+    {
+      const raw = new DatabaseSync(dbPath);
+      raw.prepare('DELETE FROM schema_migrations WHERE version = 45').run();
+      raw.close();
+    }
+
+    const db2 = new Database(dbPath);
+    expect(() => db2.open()).not.toThrow();
+
+    const cols = db2.raw.prepare("PRAGMA table_info('recovery_runs')").all() as Array<{ name: string }>;
+    for (const name of ['status', 'error_kind', 'error_message']) {
+      expect(cols.filter((c) => c.name === name), `${name} must appear exactly once`).toHaveLength(1);
+    }
+    expect(db2.raw.prepare(
+      'SELECT version FROM schema_migrations WHERE version = 45',
+    ).get()).toEqual({ version: 45 });
+
+    db2.close();
   });
 });
 

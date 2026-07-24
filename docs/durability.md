@@ -200,12 +200,15 @@ Queries `inbound_events` with `processing_status = 'processing'`. For each:
 - If a terminal op exists (e.g., in `maybe_sent`): leave in `processing` — post-connect recovery will resolve the outbound op and may complete the inbound event normally.
 
 Before any recovery phase mutates state, pre-connect recovery appends a `recovery_plans` row and an
-open `recovery_runs` row with trigger `pre_connect`. Summary statistics and the current open-recovery
-count are finalized only after every phase succeeds. If any phase, counter, alert-evidence write, or
-receipt finalization fails, the run remains open (`completed_at IS NULL`), its bounded `notes` records
-`status: "incomplete"` and the failed phase names, and the primary error is rethrown. Mutations made by
-earlier successful phases remain durable and are owned by that incomplete receipt for the next
-recovery attempt; partial recovery is never reported as complete.
+open `recovery_runs` row (`status = 'running'`) with trigger `pre_connect`. Summary statistics and the
+current open-recovery count are finalized only after every phase succeeds. If any phase, counter,
+alert-evidence write, or receipt finalization fails, the row is durably marked `status = 'failed'`
+(`error_kind`/`error_message` record the first failed phase and its message) while `completed_at` stays
+NULL, its bounded `notes` records `status: "incomplete"` and the failed phase names, and the primary
+error is rethrown. Mutations made by earlier successful phases remain durable and are owned by that
+failed receipt for the next recovery attempt; partial recovery is never reported as complete. In the
+rare case where even the failed-receipt write is itself denied (e.g. a hostile trigger), the row is left
+at its `'running'` default rather than falsely marked `'failed'` — see §5.3.
 
 ### 4.2 Post-Connect Recovery (`postConnectRecovery`)
 
@@ -489,9 +492,15 @@ ORDER BY t.id DESC;
 
 `recovery_runs` records every invocation of both `preConnectRecovery()` and
 `postConnectRecovery()` (triggers `pre_connect` and `post_connect`). Each run is linked to its
-append-only `recovery_plans` owner. A non-null `completed_at` is a success receipt; a null
-`completed_at` with structured incomplete notes is durable recovery debt and must not be interpreted
-as an in-progress process merely because the service is currently running.
+append-only `recovery_plans` owner. The row starts `status = 'running'`; a non-null `completed_at`
+alongside `status = 'completed'` is a success receipt, and `status = 'failed'` (with `error_kind`/
+`error_message`) is durable recovery debt — it must not be interpreted as an in-progress process
+merely because the service is currently running. Before migration 45 (#1786), a failed run and an
+in-progress one were both just `completed_at IS NULL`; `status` makes the two distinguishable at the
+row level instead of requiring a `notes` JSON parse. A row can still be seen at `status = 'running'`
+after a crash if even the failed-receipt write itself could not be persisted (see the pre-connect
+recovery description above) — that is the one case `completed_at IS NULL` alone remains ambiguous
+with a genuinely active run.
 
 **Useful queries:**
 
@@ -500,6 +509,7 @@ as an in-progress process merely because the service is currently running.
 SELECT
   id,
   trigger,
+  status,
   started_at,
   completed_at,
   outbound_reconciled,
@@ -510,6 +520,12 @@ SELECT
 FROM recovery_runs
 ORDER BY id DESC
 LIMIT 20;
+
+-- Failed recovery runs, with their classification and message
+SELECT id, trigger, started_at, error_kind, error_message
+FROM recovery_runs
+WHERE status = 'failed'
+ORDER BY id DESC;
 
 -- Any recovery run that quarantined something (warrants attention)
 SELECT *
@@ -797,6 +813,9 @@ invocation. The row is created open, then updated exactly once with success or i
 | `started_at` | TEXT | Row insertion timestamp (defaults to `now`). |
 | `completed_at` | TEXT | Success timestamp. `NULL` means the run is incomplete or was interrupted. |
 | `trigger` | TEXT NOT NULL | `pre_connect` or `post_connect`. |
+| `status` | TEXT NOT NULL | `'running'` (default, on insert), `'completed'` (set with `completed_at`), or `'failed'` (durable recovery debt; see §5.3 for the one case that can still be seen at `'running'` after a crash). Added by migration 45 (#1786). |
+| `error_kind` | TEXT | Set only when `status = 'failed'`: the first failed phase name (e.g. `count_open_recoveries`, `finalize_recovery_run`). `NULL` otherwise. Added by migration 45. |
+| `error_message` | TEXT | Set only when `status = 'failed'`: the primary error's message. `NULL` otherwise. Added by migration 45. |
 | `recovery_plan_id` | TEXT FK | Append-only plan that owns this run and its disposition/corroboration evidence. |
 | `inbound_replayed` | INTEGER | Count of inbound events re-queued for replay. |
 | `outbound_reconciled` | INTEGER | Count of `maybe_sent` and `submitted` ops processed (found + not-found combined). |
@@ -806,7 +825,7 @@ invocation. The row is created open, then updated exactly once with success or i
 | `tool_calls_replayed` | INTEGER | Count of tool calls marked `replayed`. |
 | `tool_calls_quarantined` | INTEGER | Count of tool calls quarantined. |
 | `sessions_restored` | INTEGER | Reserved. Currently always 0. |
-| `notes` | TEXT | Bounded JSON summary. Successful runs record `openRecoveries`; failed runs record `status: "incomplete"`, failed phase names, and the last available open-recovery count. |
+| `notes` | TEXT | Bounded JSON summary. Successful runs record `openRecoveries`; failed runs record `status: "incomplete"`, failed phase names, and the last available open-recovery count. (This is a free-text JSON key named `status`, distinct from — and coexisting with — the durable `status` column above.) |
 
 Recovery runs and their linked plans, dispositions, corroboration, and closure witnesses are retained
 indefinitely as audit evidence. There is no supported direct-delete or TTL path. Archive/capacity work

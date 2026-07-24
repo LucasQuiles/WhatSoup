@@ -776,6 +776,7 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [42, runMigration42],
   [43, runMigration43],
   [44, runMigration44],
+  [45, runMigration45],
 ]);
 
 if (Math.max(...MIGRATIONS.keys()) !== CURRENT_SCHEMA_MIGRATION) {
@@ -1162,6 +1163,47 @@ function runMigration44(db: DatabaseSync): void {
   }
   if (!cols.some((c) => c.name === 'last_compact_cache_read_tokens')) {
     db.exec('ALTER TABLE agent_sessions ADD COLUMN last_compact_cache_read_tokens INTEGER DEFAULT 0');
+  }
+}
+
+// #1786: recovery_runs could only express its outcome through completed_at
+// (non-NULL = success) plus a free-text notes JSON blob — a genuinely failed
+// run and a run interrupted mid-recovery (e.g. by a crash before the
+// incomplete receipt itself could be written, see the double-failure path in
+// durability-recovery-evidence.ts) were both just "completed_at IS NULL",
+// indistinguishable from each other and, without reading docs/durability.md
+// §5.3, easy to mistake for still-in-progress. status gives the row an
+// explicit, queryable outcome; error_kind/error_message mirror the
+// trigger_runs/sweep_runs convention (src/core/substrate/schema.ts) for a
+// failure's classification and message.
+function runMigration45(db: DatabaseSync): void {
+  const table = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'recovery_runs'")
+    .get() as { name: string } | undefined;
+  if (!table) return;
+
+  const cols = db.prepare("PRAGMA table_info('recovery_runs')").all() as Array<{ name: string }>;
+  const names = new Set(cols.map((c) => c.name));
+
+  if (!names.has('status')) {
+    db.exec(`
+      ALTER TABLE recovery_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'running'
+        CHECK (status IN ('running', 'completed', 'failed'))
+    `);
+    // Every pre-existing row was just stamped 'running' by the ALTER's
+    // DEFAULT regardless of its true outcome. completed_at is the existing
+    // success receipt (docs/durability.md §5.3): non-NULL means the run
+    // finished; NULL is durable recovery debt, never an in-progress run
+    // (migrations only run at startup, before any new recovery cycle can
+    // begin) — so it backfills to 'failed', not 'running'.
+    db.exec(`UPDATE recovery_runs SET status = 'completed' WHERE completed_at IS NOT NULL`);
+    db.exec(`UPDATE recovery_runs SET status = 'failed' WHERE completed_at IS NULL`);
+  }
+  if (!names.has('error_kind')) {
+    db.exec('ALTER TABLE recovery_runs ADD COLUMN error_kind TEXT');
+  }
+  if (!names.has('error_message')) {
+    db.exec('ALTER TABLE recovery_runs ADD COLUMN error_message TEXT');
   }
 }
 

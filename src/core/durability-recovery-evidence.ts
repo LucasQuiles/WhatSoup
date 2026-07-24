@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { createChildLogger } from '../logger.ts';
+import { errorMessage } from '../lib/error-message.ts';
 import type { Database } from './database.ts';
 import { withTransaction } from './db-tx.ts';
 
@@ -98,6 +99,7 @@ export class DurabilityRecoveryEvidence {
             tool_calls_quarantined = ?,
             sessions_restored = ?,
             notes = ?,
+            status = 'completed',
             completed_at = datetime('now')
         WHERE id = ? AND recovery_plan_id = ? AND completed_at IS NULL
       `),
@@ -111,7 +113,10 @@ export class DurabilityRecoveryEvidence {
             tool_calls_replayed = ?,
             tool_calls_quarantined = ?,
             sessions_restored = ?,
-            notes = ?
+            notes = ?,
+            status = 'failed',
+            error_kind = ?,
+            error_message = ?
         WHERE id = ? AND recovery_plan_id = ? AND completed_at IS NULL
       `),
       insertPendingDisposition: prepare(`
@@ -237,6 +242,8 @@ export class DurabilityRecoveryEvidence {
     receipt: RecoveryReceipt,
     stats: RecoveryStats,
     notes: string,
+    errorKind: string | null = null,
+    errorMsg: string | null = null,
   ): void {
     const result = this.statements.recordIncompleteRecoveryRun.run(
       stats.inboundReplayed,
@@ -248,6 +255,8 @@ export class DurabilityRecoveryEvidence {
       stats.toolCallsQuarantined,
       stats.sessionsRestored,
       notes,
+      errorKind,
+      errorMsg,
       receipt.recoveryRunId,
       receipt.recoveryPlanId,
     );
@@ -379,6 +388,8 @@ class DurabilityRecoveryRun {
         this.receipt,
         this.stats,
         JSON.stringify({ status: 'incomplete', failedPhases, openRecoveries }),
+        failedPhases[0] ?? null,
+        errorMessage(primaryError),
       );
     } catch (receiptFailure) {
       const receiptError = receiptFailure instanceof Error
