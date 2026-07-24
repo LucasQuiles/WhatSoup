@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { SQLITE_BUSY_TIMEOUT_PRAGMA } from '../lib/sqlite-constants.ts';
+import { queryAll, queryOne } from '../lib/db-query.ts';
 import { createChildLogger } from '../logger.ts';
 
 const log = createChildLogger('fleet:db-reader');
@@ -229,7 +230,13 @@ export class FleetDbReader {
   /** Get chat list grouped by conversation_key, ordered by last message time. */
   getChats(name: string, dbPath: string, opts: { limit: number; offset: number }): DbResult<ChatSummary[]> {
     return this.query(name, dbPath, (db) => {
-      const rows = db.prepare(`
+      const rows = queryAll<{
+        conversation_key: string;
+        sender_name: string | null;
+        message_count: number;
+        last_message_at: number | null;
+        is_group: number;
+      }>(db, `
         SELECT
           m.conversation_key,
           m.sender_name,
@@ -242,7 +249,7 @@ export class FleetDbReader {
         GROUP BY m.conversation_key
         ORDER BY last_message_at DESC
         LIMIT ? OFFSET ?
-      `).all(opts.limit, opts.offset) as any[];
+      `, opts.limit, opts.offset);
 
       return rows.map((r) => ({
         conversationKey: r.conversation_key,
@@ -303,7 +310,7 @@ export class FleetDbReader {
       if (opts.beforePk != null) params.push(opts.beforePk);
       params.push(opts.limit);
 
-      return db.prepare(`
+      return queryAll<MessageRow>(db, `
         SELECT pk, conversation_key, chat_jid, sender_jid, sender_name,
                message_id, content, content_type, timestamp, is_from_me, raw_message
         FROM messages m
@@ -315,21 +322,28 @@ export class FleetDbReader {
               AND m2.timestamp = m.timestamp
               AND m2.is_from_me = m.is_from_me
               AND m2.deleted_at IS NULL
-          )
+            )
         ORDER BY m.pk DESC
         LIMIT ?
-      `).all(...params) as unknown as MessageRow[];
+      `, ...params);
     });
   }
 
   /** Get access list entries, newest first. */
   getAccessList(name: string, dbPath: string): DbResult<AccessEntry[]> {
     return this.query(name, dbPath, (db) => {
-      const rows = db.prepare(`
+      const rows = queryAll<{
+        subject_type: string;
+        subject_id: string;
+        status: string;
+        display_name: string | null;
+        requested_at: string;
+        decided_at: string | null;
+      }>(db, `
         SELECT subject_type, subject_id, status, display_name, requested_at, decided_at
         FROM access_list
         ORDER BY requested_at DESC
-      `).all() as any[];
+      `);
 
       return rows.map((r) => ({
         subjectType: r.subject_type,
@@ -408,7 +422,7 @@ export class FleetDbReader {
       const matchQuery = buildSafeFtsMatchQuery(opts.query);
 
       if (opts.conversationKey) {
-        return db.prepare(`
+        return queryAll<MessageRow>(db, `
           SELECT m.pk, m.conversation_key, m.chat_jid, m.sender_jid, m.sender_name,
                  m.message_id, m.content, m.content_type, m.timestamp, m.is_from_me, m.raw_message
           FROM messages_fts fts
@@ -418,9 +432,9 @@ export class FleetDbReader {
             AND m.conversation_key = ?
           ORDER BY m.timestamp DESC
           LIMIT ?
-        `).all(matchQuery, opts.conversationKey, opts.limit) as unknown as MessageRow[];
+        `, matchQuery, opts.conversationKey, opts.limit);
       }
-      return db.prepare(`
+      return queryAll<MessageRow>(db, `
         SELECT m.pk, m.conversation_key, m.chat_jid, m.sender_jid, m.sender_name,
                m.message_id, m.content, m.content_type, m.timestamp, m.is_from_me, m.raw_message
         FROM messages_fts fts
@@ -429,7 +443,7 @@ export class FleetDbReader {
           AND m.deleted_at IS NULL
         ORDER BY m.timestamp DESC
         LIMIT ?
-      `).all(matchQuery, opts.limit) as unknown as MessageRow[];
+      `, matchQuery, opts.limit);
     });
   }
 
@@ -657,13 +671,13 @@ export class FleetDbReader {
     if (messageIds.length === 0) return { ok: true, data: [] };
     return this.query(name, dbPath, (db) => {
       const placeholders = messageIds.map(() => '?').join(', ');
-      return db.prepare(`
+      return queryAll<FeedMessageRow>(db, `
         SELECT pk, conversation_key, chat_jid, sender_jid, sender_name,
                message_id, content, content_type, timestamp, is_from_me
         FROM messages
         WHERE message_id IN (${placeholders})
           AND deleted_at IS NULL
-      `).all(...messageIds) as unknown as FeedMessageRow[];
+      `, ...messageIds);
     });
   }
 
@@ -679,7 +693,7 @@ export class FleetDbReader {
     const isFromMe = direction === 'outbound' ? 1 : 0;
     const windowSec = 5;
     return this.query(name, dbPath, (db) => {
-      return db.prepare(`
+      return queryAll<FeedMessageRow>(db, `
         SELECT pk, conversation_key, chat_jid, sender_jid, sender_name,
                message_id, content, content_type, timestamp, is_from_me
         FROM messages
@@ -687,32 +701,26 @@ export class FleetDbReader {
           AND timestamp BETWEEN ? AND ?
         ORDER BY ABS(timestamp - ?) ASC
         LIMIT ?
-      `).all(
+      `,
         conversationKey, isFromMe,
         aroundTimestamp - windowSec, aroundTimestamp + windowSec,
         aroundTimestamp, limit,
-      ) as unknown as FeedMessageRow[];
+      );
     });
   }
 
   /** Get summary stats for an instance database. */
   getSummaryStats(name: string, dbPath: string): DbResult<DbStats> {
     return this.query(name, dbPath, (db) => {
-      const msgCount =
-        (db.prepare('SELECT COUNT(*) as c FROM messages WHERE deleted_at IS NULL').get() as any)
-          ?.c ?? 0;
+      const msgCount = queryOne<{ c: number }>(db, 'SELECT COUNT(*) as c FROM messages WHERE deleted_at IS NULL')?.c ?? 0;
       const chatCount =
-        (db.prepare(
-          'SELECT COUNT(DISTINCT conversation_key) as c FROM messages WHERE deleted_at IS NULL',
-        ).get() as any)?.c ?? 0;
+        queryOne<{ c: number }>(db, 'SELECT COUNT(DISTINCT conversation_key) as c FROM messages WHERE deleted_at IS NULL')?.c ?? 0;
 
       // access_list may not exist in older schemas
       let pendingAccess = 0;
       try {
         pendingAccess =
-          (db.prepare(
-            "SELECT COUNT(*) as c FROM access_list WHERE status = 'pending'",
-          ).get() as any)?.c ?? 0;
+          queryOne<{ c: number }>(db, "SELECT COUNT(*) as c FROM access_list WHERE status = 'pending'")?.c ?? 0;
       } catch {
         /* table doesn't exist */
       }
