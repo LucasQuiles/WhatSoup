@@ -1,6 +1,10 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
+import {
+  SQLITE_BUSY_TIMEOUT_MS,
+  SQLITE_BUSY_TIMEOUT_PRAGMA,
+} from '../lib/sqlite-constants.ts';
 import { dirname, resolve } from 'node:path';
 import { CURRENT_SCHEMA_MIGRATION } from './database-schema-version.ts';
 import {
@@ -1404,7 +1408,7 @@ export class Database {
           sqliteFileUri(this.expectedIdentity.canonicalPath, 'ro'),
           {
             readOnly: true,
-            timeout: 5000,
+            timeout: SQLITE_BUSY_TIMEOUT_MS,
             enableForeignKeyConstraints: false,
           },
         );
@@ -1464,7 +1468,9 @@ export class Database {
       const writerPath = this.expectedIdentity
         ? sqliteFileUri(this.expectedIdentity.canonicalPath, 'rw')
         : dbPath;
-      this.db = new DatabaseSync(writerPath, { timeout: 5000 });
+      this.db = new DatabaseSync(writerPath, {
+        timeout: SQLITE_BUSY_TIMEOUT_MS,
+      });
       this.connectionClosed = false;
     } catch (err) {
       const rejection = databaseWriteCompatibilityError(this.dbPath, err);
@@ -1499,7 +1505,7 @@ export class Database {
     }
 
     try {
-      this.db.exec('PRAGMA busy_timeout = 5000');
+      this.db.exec(SQLITE_BUSY_TIMEOUT_PRAGMA);
       this.db.exec('PRAGMA foreign_keys = ON');
     } catch (err) {
       const rejection = databaseWriteCompatibilityError(this.dbPath, err);
