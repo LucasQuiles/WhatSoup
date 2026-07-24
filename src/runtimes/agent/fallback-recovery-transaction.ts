@@ -3,12 +3,6 @@ import type { PrimaryModelUsabilityResult } from './providers/primary-model-usab
 
 // DUR-02 canary freshness bound, generous over the probe's 15s CLI deadline (primary-model-usability-adapters.ts) since the result is consumed synchronously right after.
 const MAX_EVIDENCE_AGE_MS = 60_000;
-// DUR-02: past T * this multiple, re-alerting every T would repeat forever — the ceiling alert carries `ceiling=true` and no more fire this episode (window still extends).
-const STALL_CEILING_MULTIPLE = (() => {
-  const raw = Number(process.env['WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE']);
-  if (!Number.isFinite(raw) || raw <= 0) return 10;
-  return Math.min(Math.max(Math.trunc(raw), 1), 1000);
-})();
 
 /**
  * FallbackRecoveryTransaction (DUR-02).
@@ -24,20 +18,29 @@ const STALL_CEILING_MULTIPLE = (() => {
  *
  * This module does not re-probe. It evaluates the SAME probe result already
  * produced by the existing probe (unchanged, not rebuilt here) and decides
- * whether that result is a trustworthy canary for the instance-default
+ * whether that result is trustworthy validation for the instance-default
  * scope's revert. Pure: no I/O, no alert emission, no state mutation —
  * runtime.ts applies the decision and owns every side effect.
  *
- * "Canary" = the probe result, validated on three axes, never trusted as a
- * bare boolean ("never on the probe alone"):
- *   - status is actually `usable` (not just truthy from a stub/edge case);
- *   - it targets the ACTUAL primary (provider/model match) — a misdirected
- *     or stale-target result can never pass as evidence for THIS revert;
- *   - it is FRESH (checkedAt within `maxEvidenceAgeMs` of evaluation time) —
- *     a queued/delayed evaluation must not manufacture freshness it lacks.
- * All three must hold, or the transaction does not commit and both
- * incidents (`provider_fallback_activated`, `fallback_recovery_stalled`)
- * stay open — matching "a failed canary keeps both open."
+ * TERMINOLOGY (post-quality-pass A2 honest re-scope — see
+ * artifacts/execution/PRESTAGE-DUR02-fallback-recovery-transaction.md for the
+ * recorded rationale): the probe is validated on three axes, never trusted as
+ * a bare boolean ("never on the probe alone") — status is actually `usable`
+ * (not just truthy from a stub/edge case), it targets the ACTUAL primary
+ * (provider/model match — a misdirected or stale-target result can never
+ * pass as evidence for THIS revert), and it is FRESH (checkedAt within
+ * `maxEvidenceAgeMs` of evaluation time — a queued/delayed evaluation must
+ * not manufacture freshness it lacks). This is `probeValidated`, a genuine
+ * PRE-REVERT check — it is NOT a post-revert canary (a real turn actually
+ * succeeding through the reverted route), which this module cannot produce
+ * because it never runs after the flip. The receipt says so honestly
+ * (`postRevertCanary: 'not_run'`); runtime.ts tracks the real post-revert
+ * confirmation separately via `recordTurnCapabilitySuccess` and defers the
+ * `provider_fallback_activated` clear to that event, not to this receipt.
+ * `fallback_recovery_stalled` clears on the validated probe alone — that
+ * incident is honestly about probe cadence, not about primary health, so a
+ * validated probe genuinely resolves it. All three axes must hold, or the
+ * transaction does not commit and both incidents stay open.
  *
  * The transaction is instance-scoped only: it never reads or writes
  * chat_model_preference, so a chat holding its own strict pin (Kimi/GLM/
@@ -80,7 +83,13 @@ export interface FallbackRecoveryReceipt {
   from: { provider: string; model: string | null };
   to: { provider: string; model: string | null };
   evidence: { provider: string; model: string | null; status: PrimaryModelUsabilityResult['status']; checkedAt: number };
-  canary: 'passed';
+  /** The pre-revert probe passed all three validation axes — a real check,
+   *  not a rubber stamp. NOT a claim that a post-revert turn ran. */
+  probeValidated: true;
+  /** Always 'not_run' at receipt-creation time (immutable — this receipt is
+   *  never mutated after the fact). The real post-revert confirmation is
+   *  tracked separately by runtime.ts and reported in its OWN clear event. */
+  postRevertCanary: 'not_run';
   probeAttemptsAtTransition: number;
 }
 
@@ -116,7 +125,8 @@ export function evaluateFallbackRecoveryTransaction(
       from: { provider: ctx.fallbackProvider, model: ctx.fallbackModel },
       to: { provider: ctx.primaryProvider, model: ctx.primaryModel },
       evidence: { provider: evidence.provider, model: evidence.model, status: evidence.status, checkedAt: evidence.checkedAt },
-      canary: 'passed',
+      probeValidated: true,
+      postRevertCanary: 'not_run',
       probeAttemptsAtTransition: ctx.probeAttemptsAtTransition,
     },
   };
@@ -140,19 +150,13 @@ export function formatFallbackRecoveryReceiptEvidence(receipt: FallbackRecoveryR
     `evidence_provider=${alertEvidenceValue(receipt.evidence.provider)}`,
     `evidence_model=${alertEvidenceValue(receipt.evidence.model)}`,
     `checked_at=${new Date(receipt.evidence.checkedAt).toISOString()}`,
-    `canary=${receipt.canary}`,
+    `probe_validated=${receipt.probeValidated}`,
+    `post_revert_canary=${receipt.postRevertCanary}`,
     `probe_attempts=${receipt.probeAttemptsAtTransition}`,
   ].join(' ');
 }
 
-export interface FallbackRecoveryProbeContext {
-  instanceName: string;
-  primaryProvider: string;
-  primaryModel: string | null;
-  fallbackProvider: string;
-  fallbackModel: string | null;
-  probeAttemptsAtTransition: number;
-}
+export type FallbackRecoveryProbeContext = Omit<FallbackRecoveryContext, 'now' | 'maxEvidenceAgeMs'>;
 
 /**
  * Runs `probe` once and evaluates the transaction against its result — the
@@ -198,10 +202,12 @@ export interface StallAlertPlan {
  * (marking the ceiling hit distinctly), then stop — repeating an
  * indistinguishable alert forever past a known, indefinite stall is exactly
  * the noise this exists to prevent. The window keeps extending regardless.
+ * `threshold`/`ceilingMultiple` are caller-supplied (not env globals here) so
+ * this stays pure over its own policy inputs — see runtime.ts for the env-clamp.
  */
-export function stallAlertPlan(attempts: number, threshold: number): StallAlertPlan {
-  const ceilingAttempts = threshold * STALL_CEILING_MULTIPLE;
-  const isThresholdMultiple = attempts === threshold || (attempts > threshold && (attempts - threshold) % threshold === 0);
+export function stallAlertPlan(attempts: number, threshold: number, ceilingMultiple: number): StallAlertPlan {
+  const ceilingAttempts = threshold * ceilingMultiple;
+  const isThresholdMultiple = attempts >= threshold && attempts % threshold === 0;
   return {
     emit: isThresholdMultiple && attempts <= ceilingAttempts,
     ceiling: attempts === ceilingAttempts,

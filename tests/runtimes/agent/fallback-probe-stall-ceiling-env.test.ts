@@ -2,13 +2,12 @@
  * WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE env tunability
  * (DUR-02 bounded escalation).
  *
- * Beyond T * ceilingMultiple consecutive failed extension probes, the alert
- * AT the ceiling carries `ceiling=true` and no FURTHER re-alerts fire for the
- * rest of the episode — repeating an indistinguishable alert forever is
- * exactly what the ceiling exists to stop. Threshold '3' is the SMALLEST
- * value the clamp accepts as-is (WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD
- * floors at 3 — see fallback-probe-stall-env.test.ts); ceiling multiple 2
- * keeps this cheap: ceiling attempts = 6.
+ * S5 (QUALITY-PASS-2120-transaction.md): the cadence table (T, 2T, ceiling,
+ * post-ceiling silence) is now covered by pure `stallAlertPlan` unit tests in
+ * fallback-recovery-transaction.test.ts, since threshold/ceilingMultiple are
+ * ordinary parameters, not module-hidden env globals. This file is now ONLY
+ * the thin env-clamp check: does runtime.ts actually read the env var and
+ * pass the resulting value through to a real ceiling alert end-to-end.
  *
  * Harness mirrors fallback-probe-stall-env.test.ts (module-level constants
  * read at import time via vi.hoisted, own forked worker).
@@ -127,50 +126,22 @@ describe('AgentRuntime — probe stall escalation ceiling env clamping', () => {
     vi.useRealTimers();
   });
 
-  it('re-alerts at T(3) and 2T(6, the ceiling — marked ceiling=true), then stops repeating past the ceiling', async () => {
+  it('WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE=2 with threshold=3 reaches ceiling=true at attempt 6, end to end through real timers', async () => {
     const runtime = makeRuntime();
     const v = runtime as unknown as FallbackView;
     v.probePrimaryProviderRecovered = vi.fn(() => false);
     v.activateProviderFallback(new Date(Date.now() + 1000), 'auth-required'); // clamps to +1 min
 
-    await vi.advanceTimersByTimeAsync(60 * 1000 + 1); // attempt 1
-    expect(stallAlerts()).toHaveLength(0);
+    for (let attempt = 1; attempt < 6; attempt++) {
+      await vi.advanceTimersByTimeAsync(attempt === 1 ? 60 * 1000 + 1 : RECHECK_MS);
+    }
+    expect(v.fallbackProbeAttempts).toBe(5);
+    expect(stallAlerts().some((c) => (c[3] as string).includes('ceiling=true'))).toBe(false);
 
-    await vi.advanceTimersByTimeAsync(RECHECK_MS); // attempt 2
-    expect(stallAlerts()).toHaveLength(0);
-
-    await vi.advanceTimersByTimeAsync(RECHECK_MS); // attempt 3 = T
-    expect(v.fallbackProbeAttempts).toBe(3);
-    const atT = stallAlerts();
-    expect(atT).toHaveLength(1);
-    const [, , , evidenceAtT] = atT[0] as [string, string, string, string];
-    expect(evidenceAtT).toContain('attempts=3');
-    expect(evidenceAtT).not.toContain('ceiling=true');
-
-    await vi.advanceTimersByTimeAsync(RECHECK_MS); // attempt 4 — not a multiple of T
-    await vi.advanceTimersByTimeAsync(RECHECK_MS); // attempt 5 — not a multiple of T
-    expect(stallAlerts()).toHaveLength(1);
-
-    await vi.advanceTimersByTimeAsync(RECHECK_MS); // attempt 6 = 2T = ceiling
+    await vi.advanceTimersByTimeAsync(RECHECK_MS); // attempt 6 = 2 * 3 = the configured ceiling
     expect(v.fallbackProbeAttempts).toBe(6);
-    const atCeiling = stallAlerts();
-    expect(atCeiling).toHaveLength(2);
-    const [, , , evidenceAtCeiling] = atCeiling[1] as [string, string, string, string];
-    expect(evidenceAtCeiling).toContain('ceiling=true');
-    expect(evidenceAtCeiling).toContain('attempts=6');
-
-    // Attempts 7, 8, 9 (=3T, still a threshold multiple but past the
-    // ceiling): no further re-alerts — the ceiling alert already marked the
-    // state change, repeating it forever would be exactly the noise DUR-02
-    // forbids.
-    await vi.advanceTimersByTimeAsync(RECHECK_MS); // attempt 7
-    await vi.advanceTimersByTimeAsync(RECHECK_MS); // attempt 8
-    await vi.advanceTimersByTimeAsync(RECHECK_MS); // attempt 9 = 3T
-    expect(v.fallbackProbeAttempts).toBe(9);
-    expect(stallAlerts()).toHaveLength(2);
-
-    // The window still extends — the ceiling surfaces the state change, it
-    // never strands the instance on a dead primary.
-    expect((v as unknown as { fallbackWindow: { activeUntil: number | null } }).fallbackWindow.activeUntil).not.toBeNull();
+    const atCeiling = stallAlerts().at(-1) as [string, string, string, string];
+    expect(atCeiling[3]).toContain('ceiling=true');
+    expect(atCeiling[3]).toContain('attempts=6');
   });
 });

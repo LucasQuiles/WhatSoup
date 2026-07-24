@@ -10,6 +10,7 @@ import { describe, it, expect } from 'vitest';
 import {
   evaluateFallbackRecoveryTransaction,
   formatFallbackRecoveryReceiptEvidence,
+  stallAlertPlan,
   type FallbackRecoveryContext,
   type FallbackRecoveryEvidence,
 } from '../../../src/runtimes/agent/fallback-recovery-transaction.ts';
@@ -52,7 +53,8 @@ describe('evaluateFallbackRecoveryTransaction', () => {
       from: { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
       to: { provider: 'claude-cli', model: 'claude-opus-4-8[1m]' },
       evidence: { provider: 'claude-cli', model: 'claude-opus-4-8[1m]', status: 'usable', checkedAt: NOW - 1_000 },
-      canary: 'passed',
+      probeValidated: true,
+      postRevertCanary: 'not_run',
       probeAttemptsAtTransition: 7,
     });
   });
@@ -87,6 +89,20 @@ describe('evaluateFallbackRecoveryTransaction', () => {
       ctx({ primaryModel: null }),
     );
     expect(decision.commit).toBe(true);
+  });
+
+  it('H8: accepts a null observed model even when the primary DOES pin a model — leniency for probe adapters that cannot attribute a model', () => {
+    const decision = evaluateFallbackRecoveryTransaction(
+      evidence({ model: null }),
+      ctx({ primaryModel: 'claude-opus-4-8[1m]' }),
+    );
+    expect(decision.commit).toBe(true);
+    if (!decision.commit) throw new Error('unreachable');
+    // The receipt still reports the PRIMARY'S pinned model on the `to` side —
+    // the leniency is about not REJECTING on a null observation, not about
+    // losing the configured target.
+    expect(decision.receipt.to.model).toBe('claude-opus-4-8[1m]');
+    expect(decision.receipt.evidence.model).toBeNull();
   });
 
   it('rejects stale evidence beyond maxEvidenceAgeMs — a cached usable sample cannot commit a later transition', () => {
@@ -127,7 +143,8 @@ describe('formatFallbackRecoveryReceiptEvidence', () => {
     expect(text).toContain('evidence_provider=claude-cli');
     expect(text).toContain('evidence_model=claude-opus-4-8[1m]');
     expect(text).toContain(`checked_at=${new Date(NOW - 1_000).toISOString()}`);
-    expect(text).toContain('canary=passed');
+    expect(text).toContain('probe_validated=true');
+    expect(text).toContain('post_revert_canary=not_run');
     expect(text).toContain('probe_attempts=7');
   });
 
@@ -141,5 +158,39 @@ describe('formatFallbackRecoveryReceiptEvidence', () => {
     expect(text).not.toContain('=null');
     expect(text).toContain('to_model=unknown');
     expect(text).toContain('evidence_model=unknown');
+  });
+});
+
+describe('stallAlertPlan (S5: threshold/ceilingMultiple are parameters, not module globals)', () => {
+  const T = 12;
+  const CEILING_MULTIPLE = 10; // production default
+
+  it('does not emit below the threshold', () => {
+    expect(stallAlertPlan(1, T, CEILING_MULTIPLE)).toEqual({ emit: false, ceiling: false });
+    expect(stallAlertPlan(T - 1, T, CEILING_MULTIPLE)).toEqual({ emit: false, ceiling: false });
+  });
+
+  it('emits at T, not at T+1', () => {
+    expect(stallAlertPlan(T, T, CEILING_MULTIPLE)).toEqual({ emit: true, ceiling: false });
+    expect(stallAlertPlan(T + 1, T, CEILING_MULTIPLE)).toEqual({ emit: false, ceiling: false });
+  });
+
+  it('emits at every subsequent multiple of T (2T, 3T, ...) below the ceiling', () => {
+    expect(stallAlertPlan(2 * T, T, CEILING_MULTIPLE)).toEqual({ emit: true, ceiling: false });
+    expect(stallAlertPlan(3 * T, T, CEILING_MULTIPLE)).toEqual({ emit: true, ceiling: false });
+  });
+
+  it('emits at the ceiling multiple with ceiling=true', () => {
+    expect(stallAlertPlan(CEILING_MULTIPLE * T, T, CEILING_MULTIPLE)).toEqual({ emit: true, ceiling: true });
+  });
+
+  it('does not emit past the ceiling — no repeating an indistinguishable alert forever', () => {
+    expect(stallAlertPlan((CEILING_MULTIPLE + 1) * T, T, CEILING_MULTIPLE)).toEqual({ emit: false, ceiling: false });
+    expect(stallAlertPlan((CEILING_MULTIPLE + 3) * T, T, CEILING_MULTIPLE)).toEqual({ emit: false, ceiling: false });
+  });
+
+  it('a ceiling multiple of 1 makes the FIRST alert also the ceiling', () => {
+    expect(stallAlertPlan(T, T, 1)).toEqual({ emit: true, ceiling: true });
+    expect(stallAlertPlan(2 * T, T, 1)).toEqual({ emit: false, ceiling: false });
   });
 });

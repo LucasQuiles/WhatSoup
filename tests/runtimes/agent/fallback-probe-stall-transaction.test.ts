@@ -1,18 +1,19 @@
 /**
- * FallbackRecoveryTransaction wiring into AgentRuntime (DUR-02).
+ * FallbackRecoveryTransaction wiring into AgentRuntime (DUR-02, post-quality-
+ * pass A2/H5/A3 honest re-scope — QUALITY-PASS-2120-transaction.md).
  *
- * The decisive falsifier this file exists for: a stall state — a probe has
- * succeeded (recovered=true), `fallbackProbeAttempts > 0`, and the instance
- * had previously raised a `fallback_recovery_stalled` alert — must, in ONE
- * transaction, (1) revert the route, (2) clear BOTH the activation incident
- * AND the stall incident (the live CATEGORY-C defect: the stall incident was
- * never cleared anywhere in the codebase before this change), (3) persist an
- * immutable receipt carrying the reused usability evidence, and (4) reset
- * `fallbackProbeAttempts` only AFTER that receipt is durably emitted. A
- * manual/window-elapsed deactivation (no probe-confirmed receipt) must NOT
- * clear the stall incident — that would be a false "recovery confirmed"
- * claim. A strictly-pinned chat must remain on its own pin after an
- * instance-default revert.
+ * A2: the probe-confirmed revert clears `fallback_recovery_stalled`
+ * immediately (that incident is honestly about probe cadence — a validated
+ * probe genuinely resolves it) but does NOT immediately claim the primary is
+ * confirmed serving: `provider_fallback_activated` stays open until the
+ * FIRST real post-revert turn succeeds (`recordTurnCapabilitySuccess`, not in
+ * a fallback window) — the honest post-revert canary this design can
+ * actually produce. A failing first post-revert turn leaves it open (no
+ * false clear). H5: the stall incident's clear is gated on
+ * `fallbackProbeAttempts >= threshold` at deactivation time — true for ANY
+ * reason (not just a probe-confirmed receipt), so an admin-disable mid-stall
+ * no longer stalls the incident open forever. A strictly-pinned chat remains
+ * on its own pin after an instance-default revert.
  *
  * Harness mirrors fallback-probe-stall.test.ts (fake timers, mocked
  * emitAlert, mocked credential/binary preflights, instance-level probe spy).
@@ -166,6 +167,8 @@ type FallbackView = {
   ): unknown;
   deactivateProviderFallback(reason: string): void;
   resolveRouteForTurn(chatJid: string, actorJid?: string): { provider: string; model: string | undefined; source: string };
+  recordTurnCapabilitySuccess(isUserTurnResult: boolean): void;
+  recordTurnCapabilityFailure(isUserTurnResult: boolean, errorClass: string): void;
 };
 
 function view(runtime: AgentRuntime): FallbackView {
@@ -205,7 +208,7 @@ describe('AgentRuntime — FallbackRecoveryTransaction wiring', () => {
     }
   });
 
-  it('dual-clears BOTH fallback_recovery_stalled and provider_fallback_activated on a probe-confirmed revert past the stall threshold', async () => {
+  it('A2: probe-confirmed revert past the stall threshold clears fallback_recovery_stalled immediately but DEFERS provider_fallback_activated', async () => {
     const runtime = makeRuntime(realDb);
     const v = view(runtime);
     const probe = vi.fn(probeImpl(unusableEvidence));
@@ -221,10 +224,48 @@ describe('AgentRuntime — FallbackRecoveryTransaction wiring', () => {
 
     expect(v.effectiveProvider).toBe('claude-cli');
     expect(clearsFor('fallback_recovery_stalled')).toHaveLength(1);
+    // Not yet — no real post-revert turn has happened.
+    expect(clearsFor('provider_fallback_activated')).toHaveLength(0);
+  });
+
+  it('A2: a FAILING first post-revert turn keeps provider_fallback_activated OPEN — no false clear', async () => {
+    const runtime = makeRuntime(realDb);
+    const v = view(runtime);
+    const probe = vi.fn(probeImpl(unusableEvidence));
+    await enterExtensionPhase(v, probe);
+    probe.mockImplementation(probeImpl(usableEvidence));
+    await vi.advanceTimersByTimeAsync(RECHECK_MS);
+    expect(v.effectiveProvider).toBe('claude-cli');
+    expect(clearsFor('provider_fallback_activated')).toHaveLength(0);
+
+    v.recordTurnCapabilityFailure(true, 'unknown-terminal');
+
+    expect(clearsFor('provider_fallback_activated')).toHaveLength(0);
+  });
+
+  it('A2: the FIRST successful post-revert turn clears provider_fallback_activated (the honest post-revert canary)', async () => {
+    const runtime = makeRuntime(realDb);
+    const v = view(runtime);
+    const probe = vi.fn(probeImpl(unusableEvidence));
+    await enterExtensionPhase(v, probe);
+    probe.mockImplementation(probeImpl(usableEvidence));
+    await vi.advanceTimersByTimeAsync(RECHECK_MS);
+    expect(v.effectiveProvider).toBe('claude-cli');
+    expect(clearsFor('provider_fallback_activated')).toHaveLength(0);
+
+    v.recordTurnCapabilitySuccess(true);
+
+    const cleared = clearsFor('provider_fallback_activated');
+    expect(cleared).toHaveLength(1);
+    const [, , evidence] = cleared[0] as [string, string, string];
+    expect(evidence).toContain('post-revert-turn-success');
+
+    // Idempotent: a SECOND success turn does not re-clear (pending already resolved).
+    v.recordTurnCapabilitySuccess(true);
     expect(clearsFor('provider_fallback_activated')).toHaveLength(1);
   });
 
-  it('probe-only (recovered=true but no confirmed canary) never reaches the clear — commit requires the full evaluated decision', async () => {
+  it('probe-only (recovered=true but no validated evidence) never reaches the clear — commit requires the full evaluated decision', async () => {
     // Regression guard for "never on the probe alone": a mismatched-target
     // evidence sample must NOT revert or clear anything, even though a naive
     // boolean read of a legacy probe would have been truthy.
@@ -265,7 +306,8 @@ describe('AgentRuntime — FallbackRecoveryTransaction wiring', () => {
     // assertion runs) did not lose the count — it was captured into the
     // receipt first.
     expect(evidence).toContain('probe_attempts=2');
-    expect(evidence).toContain('canary=passed');
+    expect(evidence).toContain('probe_validated=true');
+    expect(evidence).toContain('post_revert_canary=not_run');
     expect(evidence).toContain('from_provider=opencode-cli');
     expect(evidence).toContain('to_provider=claude-cli');
     expect(evidence).toContain('evidence_status=usable');
@@ -291,17 +333,19 @@ describe('AgentRuntime — FallbackRecoveryTransaction wiring', () => {
     probe.mockImplementation(probeImpl(usableEvidence));
     await vi.advanceTimersByTimeAsync(RECHECK_MS);
 
+    // The receipt-driven stall-clear fires (crash-safe ordering under test);
+    // the activation clear is now deferred to a post-revert turn (A2), so it
+    // is correctly absent here regardless of ordering.
     expect(clearsFor('fallback_recovery_stalled')).toHaveLength(1);
-    expect(clearsFor('provider_fallback_activated')).toHaveLength(1);
     expect(alertsFor('provider_fallback_reverted')).toHaveLength(1);
   });
 
-  it('a manual deactivation never clears fallback_recovery_stalled — no receipt means no "recovery confirmed" claim', async () => {
+  it('a manual deactivation BEFORE the stall threshold never clears fallback_recovery_stalled — nothing was ever open', async () => {
     const runtime = makeRuntime(realDb);
     const v = view(runtime);
     const probe = vi.fn(probeImpl(unusableEvidence));
     await enterExtensionPhase(v, probe);
-    await vi.advanceTimersByTimeAsync(RECHECK_MS);
+    await vi.advanceTimersByTimeAsync(RECHECK_MS); // attempts=2, well under STALL_THRESHOLD=12
 
     v.deactivateProviderFallback('admin-disabled');
 
@@ -310,7 +354,31 @@ describe('AgentRuntime — FallbackRecoveryTransaction wiring', () => {
     const reverted = alertsFor('provider_fallback_reverted');
     expect(reverted).toHaveLength(1);
     const [, , , evidence] = reverted[0] as [string, string, string, string];
-    expect(evidence).not.toContain('canary=passed');
+    expect(evidence).not.toContain('probe_validated=');
+  });
+
+  it('H5: an admin-disable AFTER the stall alert fired clears fallback_recovery_stalled with HONEST "unconfirmed/abandoned" evidence — no receipt, no false "recovery confirmed" claim', async () => {
+    const runtime = makeRuntime(realDb);
+    const v = view(runtime);
+    const probe = vi.fn(probeImpl(unusableEvidence));
+    await enterExtensionPhase(v, probe);
+    for (let attempt = 2; attempt <= STALL_THRESHOLD; attempt++) {
+      await vi.advanceTimersByTimeAsync(RECHECK_MS);
+    }
+    expect(alertsFor('fallback_recovery_stalled')).toHaveLength(1);
+
+    v.deactivateProviderFallback('admin-disabled');
+
+    const cleared = clearsFor('fallback_recovery_stalled');
+    expect(cleared).toHaveLength(1);
+    const [, , clearEvidence] = cleared[0] as [string, string, string];
+    expect(clearEvidence).toContain('reason=admin-disabled');
+    expect(clearEvidence).toContain('recovery=unconfirmed');
+    expect(clearEvidence).toContain('episode=abandoned');
+    expect(clearEvidence).not.toContain('probe_validated=');
+
+    // Immediate on admin-disabled — no receipt, no deferred confirmation wait.
+    expect(clearsFor('provider_fallback_activated')).toHaveLength(1);
   });
 
   it('a strictly-pinned chat is unaffected by an instance-default revert — resolveRouteForTurn still honors the pin', async () => {
