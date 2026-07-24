@@ -597,6 +597,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     delete cfgAny().nlRoutingEventsDir;
     delete cfgAny().agentFallbacks;
     delete cfgAny().agentProvider;
+    delete cfgAny().agentProviderDataPolicy;
     delete cfgAny().agentProviderConfig;
     vi.useRealTimers();
     const fs = await import('node:fs');
@@ -616,6 +617,27 @@ describe('NL routing handlers (nlRouting flag)', () => {
     if (cfgAny().nlRouting === true) ensurePrefSchema?.(routingDb);
     return { runtime, sentMessages };
   }
+
+  it('passes a frozen route policy from production turn resolution into SessionManager', async () => {
+    cfgAny().agentProviderDataPolicy = 'trusted';
+    const { runtime } = makeRoutingRuntime();
+
+    await sendAndDrain(runtime, makeMsg({
+      chatJid: CHAT,
+      senderJid: SENDER_A,
+      content: 'hello',
+    }));
+
+    const opts = capturedSessionManagerOptsRef.current as unknown as {
+      routePolicy?: Record<string, unknown>;
+    } | null;
+    expect(opts?.routePolicy).toMatchObject({
+      provider: 'claude-cli',
+      dataPolicy: 'trusted',
+      pinnedProvider: null,
+    });
+    expect(Object.isFrozen(opts?.routePolicy)).toBe(true);
+  });
 
   function allReplies(sentMessages: Array<{ jid: string; text: string }>): string[] {
     return [

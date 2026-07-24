@@ -99,6 +99,10 @@ const EXPECTED_FILE_SIZE_WARNING_FILES = [
   // Hang-hardening regressions reuse this suite's shared agent-runtime harness;
   // extracting them would duplicate the setup, so the cohesive suite is grandfathered.
   'tests/runtimes/agent/runtime-edge-coverage.test.ts',
+  // Exact inconclusive-checkpoint finalization reuses the coordinator suite's
+  // shared database/runtime/durability harness, taking it from 1992 to 2033
+  // lines. Extracting one case would duplicate that integration setup.
+  'tests/runtimes/agent/runtime-terminal-coordinator-integration.test.ts',
   'tests/runtimes/agent/runtime.test.ts',
   'tests/runtimes/agent/session.test.ts',
   'tests/runtimes/chat/providers/pinecone.test.ts',

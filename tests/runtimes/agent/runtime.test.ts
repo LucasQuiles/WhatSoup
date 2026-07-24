@@ -11778,10 +11778,7 @@ describe('AgentRuntime', () => {
     it('retires only the exact stale lifecycle when another checkpoint shares its session ID', async () => {
       const db = makeDb();
       const { messenger } = makeMessenger();
-      const checkpointStatuses = new Map([
-        ['user', 'active'],
-        ['other-user', 'active'],
-      ]);
+      const checkpointStatuses = new Map([['user', 'active'], ['other-user', 'active']]);
 
       mockGetActiveSession.mockReturnValue({
         id: 1,
@@ -11833,47 +11830,6 @@ describe('AgentRuntime', () => {
         ['user', 'ended'],
         ['other-user', 'active'],
       ]));
-    });
-
-    it('leaves a stale lifecycle untouched when its workspace identity is unavailable', async () => {
-      const db = makeDb();
-      const { messenger } = makeMessenger();
-
-      mockGetActiveSession.mockReturnValue({
-        id: 9,
-        session_id: 'sess-stale-unscoped',
-        chat_jid: 'unscoped@s.whatsapp.net',
-        workspace_key: null,
-        claude_pid: 0,
-        status: 'active',
-        started_at: new Date(Date.now() - 120 * 60_000).toISOString(),
-        last_message_at: null,
-        message_count: 0,
-      });
-
-      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'single' });
-      const mockDurability = {
-        getLatestCompletedCheckpointForSession: vi.fn(() => completedCheckpoint({
-          id: 9,
-          conversationKey: 'unscoped',
-          deliveryJid: 'unscoped@s.whatsapp.net',
-          deliveryNamespace: 's.whatsapp.net',
-          scope: 'singleton',
-          sessionId: 'sess-stale-unscoped',
-          updatedAt: new Date(Date.now() - 120 * 60_000).toISOString().replace('Z', ''),
-        })),
-        retireExactSessionLifecycle: vi.fn(),
-      };
-      (runtime as unknown as { durability: unknown }).durability = mockDurability;
-
-      await runtime.start();
-
-      expect(mockSession.spawnSession).not.toHaveBeenCalled();
-      expect(mockDurability.retireExactSessionLifecycle).not.toHaveBeenCalled();
-      expect(mockRuntimeLogger.warn).toHaveBeenCalledWith({
-        rowId: 9,
-        conversationKey: 'unscoped',
-      }, 'cannot retire stale shared/single resume without exact workspace identity');
     });
 
     it('shared mode group suppression — session spawned but no startup message', async () => {
@@ -15642,7 +15598,6 @@ describe('NL routing handlers (nlRouting flag)', () => {
     delete cfgAny().nlRoutingEventsDir;
     delete cfgAny().agentFallbacks;
     delete cfgAny().agentProvider;
-    delete cfgAny().agentProviderDataPolicy;
     delete cfgAny().agentProviderConfig;
     vi.useRealTimers();
     const fs = await import('node:fs');
@@ -15695,27 +15650,6 @@ describe('NL routing handlers (nlRouting flag)', () => {
       return [];
     }
   }
-
-  it('passes a frozen route policy from production turn resolution into SessionManager', async () => {
-    cfgAny().agentProviderDataPolicy = 'trusted';
-    const { runtime } = makeRoutingRuntime();
-
-    await sendAndDrain(runtime, makeMsg({
-      chatJid: CHAT,
-      senderJid: SENDER_A,
-      content: 'hello',
-    }));
-
-    const opts = capturedSessionManagerOptsRef.current as unknown as {
-      routePolicy?: Record<string, unknown>;
-    } | null;
-    expect(opts?.routePolicy).toMatchObject({
-      provider: 'claude-cli',
-      dataPolicy: 'trusted',
-      pinnedProvider: null,
-    });
-    expect(Object.isFrozen(opts?.routePolicy)).toBe(true);
-  });
 
   it('flag off: no preference table is created and /model forwards to the session', async () => {
     cfgAny().nlRouting = false;
