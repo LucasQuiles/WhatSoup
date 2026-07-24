@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  rmSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -61,14 +69,71 @@ describe('runProcessTmpCleanup', () => {
     expect(existsSync(recentFile)).toBe(true);
   });
 
-  it('skips directories inside process tmp', () => {
+  it('recursively removes a stale directory (orphaned browser/profile temp) and counts its bytes', () => {
     const root = makeRoot();
-    mkdirSync(join(root, 'nested'));
+    const staleDir = join(root, 'com.google.Chrome.chrome_url_fetcher_.stale');
+    mkdirSync(staleDir);
+    const inner = makeFile(staleDir, 'blob', 'chrome-scratch'); // 14 bytes
+    // Age both the dir and its contents past maxAge.
+    setAge(inner, DEFAULT_PROCESS_TMP_RETENTION.maxAgeMs + 10_000);
+    setAge(staleDir, DEFAULT_PROCESS_TMP_RETENTION.maxAgeMs + 10_000);
+
+    const result = runProcessTmpCleanup(root, DEFAULT_PROCESS_TMP_RETENTION.maxAgeMs);
+
+    expect(result).toEqual({ deleted: 1, skipped: 0, bytesFreed: 14 });
+    expect(existsSync(staleDir)).toBe(false);
+  });
+
+  it('counts a removed symlink itself, not bytes behind its target', () => {
+    const root = makeRoot();
+    const targetRoot = makeRoot();
+    const staleDir = join(root, 'stale-with-symlink');
+    const externalTarget = makeFile(targetRoot, 'external-target', 'x'.repeat(4_096));
+    mkdirSync(staleDir);
+    const inner = makeFile(staleDir, 'inner', 'x');
+    const link = join(staleDir, 'external-link');
+    symlinkSync(externalTarget, link);
+    const expectedBytesFreed = 1 + lstatSync(link).size;
+    const staleAge = DEFAULT_PROCESS_TMP_RETENTION.maxAgeMs + 10_000;
+    setAge(externalTarget, staleAge);
+    setAge(inner, staleAge);
+    setAge(staleDir, staleAge);
+
+    const result = runProcessTmpCleanup(root, DEFAULT_PROCESS_TMP_RETENTION.maxAgeMs);
+
+    expect(result).toEqual({ deleted: 1, skipped: 0, bytesFreed: expectedBytesFreed });
+    expect(existsSync(staleDir)).toBe(false);
+    expect(existsSync(externalTarget)).toBe(true);
+  });
+
+  it('preserves a directory with a recently-touched child (in-use temp)', () => {
+    const root = makeRoot();
+    const liveDir = join(root, 'playwright_chromiumdev_profile-live');
+    mkdirSync(liveDir);
+    const oldInner = makeFile(liveDir, 'old', 'x');
+    const freshInner = makeFile(liveDir, 'fresh', 'y');
+    // Directory + one child are old, but a live browser just touched a file.
+    setAge(liveDir, DEFAULT_PROCESS_TMP_RETENTION.maxAgeMs + 10_000);
+    setAge(oldInner, DEFAULT_PROCESS_TMP_RETENTION.maxAgeMs + 10_000);
+    setAge(freshInner, 1_000);
 
     const result = runProcessTmpCleanup(root, DEFAULT_PROCESS_TMP_RETENTION.maxAgeMs);
 
     expect(result).toEqual({ deleted: 0, skipped: 0, bytesFreed: 0 });
-    expect(existsSync(join(root, 'nested'))).toBe(true);
+    expect(existsSync(liveDir)).toBe(true);
+  });
+
+  it('preserves a wholly-recent directory', () => {
+    const root = makeRoot();
+    const recentDir = join(root, 'recent');
+    mkdirSync(recentDir);
+    setAge(makeFile(recentDir, 'file', 'z'), 1_000);
+    setAge(recentDir, 1_000);
+
+    const result = runProcessTmpCleanup(root, DEFAULT_PROCESS_TMP_RETENTION.maxAgeMs);
+
+    expect(result).toEqual({ deleted: 0, skipped: 0, bytesFreed: 0 });
+    expect(existsSync(recentDir)).toBe(true);
   });
 
   it('returns zeros when the process tmp directory does not exist', () => {
