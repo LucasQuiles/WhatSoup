@@ -8,6 +8,7 @@ import { splitInputTokenUsage, type AgentEvent } from './stream-parser.ts';
 import { classifyProviderFailure } from './failure-taxonomy.ts';
 import type { IOutboundQueue } from './outbound-queue.ts';
 import { TurnQueue, type QueuedTurn, type TurnRejectReason } from './turn-queue.ts';
+import { TurnQueueHaltLatch, type TurnQueueHaltHealth } from './turn-queue-halt-latch.ts';
 import type { SessionManager } from './session.ts';
 import { config } from '../../config.ts';
 import { collectRuntimeTurnAnswerEvidence } from './runtime-turn-finalization.ts';
@@ -140,6 +141,7 @@ export interface RuntimeTurnCoordinatorPort {
 
 export class RuntimeTurnCoordinator {
   private readonly host: RuntimeTurnCoordinatorPort;
+  private readonly turnQueueHalts = new TurnQueueHaltLatch();
   private readonly activeFinalizations = new Map<string, Promise<FinalizeRuntimeTurnResult>>();
   private readonly cancelledUndispatchedTurnIds = new Set<string>();
   private readonly undispatchedCrashFinalizations = new Map<string, Promise<void>>();
@@ -155,6 +157,16 @@ export class RuntimeTurnCoordinator {
   constructor(host: RuntimeTurnCoordinatorPort) {
     this.host = host;
   }
+
+turnQueueHaltHealth(
+  sessionScope: 'single' | 'shared' | 'per_chat',
+): TurnQueueHaltHealth {
+  return this.turnQueueHalts.snapshot(sessionScope, this.host.turnQueue.isHalted);
+}
+
+rekeyPerChatTurnQueueHaltScope(fromScopeKey: string, toScopeKey: string): void {
+  this.turnQueueHalts.rekey(fromScopeKey, toScopeKey);
+}
 
 runtimeTurnContext(mapKey?: string): RuntimeTurnContext | null {
   return mapKey === undefined
@@ -1034,6 +1046,10 @@ enqueuePerChatRuntimeTurn(mapKey: string, turn: QueuedTurn): boolean {
     this.finalizeRejectedRuntimeTurn(turn, 'queue_closed');
     return false;
   }
+  if (this.turnQueueHalts.has(mapKey)) {
+    this.finalizeRejectedRuntimeTurn(turn, 'queue_halted');
+    return false;
+  }
   let queue = this.host.perChatTurnQueues.get(mapKey);
   if (!queue) {
     const queueKey = { value: mapKey };
@@ -1047,6 +1063,9 @@ enqueuePerChatRuntimeTurn(mapKey: string, turn: QueuedTurn): boolean {
         );
       },
       onProcessorError: (failed, error) => this.finalizePerChatProcessorError(queueKey.value, failed, error),
+      onHalt: () => {
+        this.turnQueueHalts.halt(queueKey.value);
+      },
     });
     queue.setProcessor((queued: QueuedTurn) => this.processPerChatTurn(queueKey, queued));
     this.host.perChatTurnQueues.set(mapKey, queue);

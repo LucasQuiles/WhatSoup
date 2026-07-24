@@ -1408,6 +1408,42 @@ describe('GET /health', () => {
     db2.close();
   });
 
+  it.each([
+    ['degraded', 200],
+    ['unhealthy', 503],
+  ] as const)(
+    'classifies a %s halted turn queue with the exact turn_queue_halted cause',
+    async (runtimeStatus, expectedHttpStatus) => {
+      db.close();
+      const db2 = makeDb();
+      const fakeAgentRuntime = {
+        getHealthSnapshot: () => ({
+          status: runtimeStatus,
+          details: {
+            active: true,
+            turnQueueHalted: true,
+            turnQueueHaltedScopes: runtimeStatus === 'degraded' ? 2 : 1,
+          },
+        }),
+        getFallbackState: () => null,
+      };
+      const deps = makeDeps(db2, {
+        instanceType: 'agent',
+        runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+      });
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      ({ server, port } = await buildTestServer(deps));
+
+      const { status, body } = await httpReq(port, '/health', 'GET');
+      expect(status).toBe(expectedHttpStatus);
+      const json = JSON.parse(body);
+      expect(json.status).toBe(runtimeStatus);
+      expect(json.degradation_causes).toEqual(['turn_queue_halted']);
+      expect(json.runtime.agent.turnQueueHalted).toBe(true);
+      db2.close();
+    },
+  );
+
   it('threads #1392 modelUsableStale/modelUsableCheckedAt into runtime.agent and top-level turn_capability (F1)', async () => {
     // Regression for the half-deployed #1392: the freshness fields were exposed on
     // instance.turnCapability (via getFallbackState) but dropped from the core/health.ts

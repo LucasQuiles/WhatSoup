@@ -36,6 +36,7 @@ export interface TurnQueueOpts {
   maxDepth?: number;
   onReject?: (turn: QueuedTurn, reason: TurnRejectReason) => void;
   onProcessorError?: (turn: QueuedTurn, error: unknown) => void | Promise<void>;
+  onHalt?: () => void;
 }
 
 export class TurnQueue {
@@ -49,11 +50,13 @@ export class TurnQueue {
   private readonly maxDepth: number;
   private readonly onReject?: (turn: QueuedTurn, reason: TurnRejectReason) => void;
   private readonly onProcessorError?: (turn: QueuedTurn, error: unknown) => void | Promise<void>;
+  private readonly onHalt?: () => void;
 
   constructor(opts?: TurnQueueOpts) {
     this.maxDepth = opts?.maxDepth ?? Infinity;
     this.onReject = opts?.onReject;
     this.onProcessorError = opts?.onProcessorError;
+    this.onHalt = opts?.onHalt;
   }
 
   setProcessor(fn: (turn: QueuedTurn) => Promise<void>): void {
@@ -110,6 +113,10 @@ export class TurnQueue {
     return this.halted ? this.haltError : undefined;
   }
 
+  get isHalted(): boolean {
+    return this.halted;
+  }
+
   /**
    * Returns a Promise that resolves when the queue is empty and no turn is
    * being processed. Useful in tests to await full drain.
@@ -147,8 +154,7 @@ export class TurnQueue {
         } catch (err) {
           log.warn({ err, chatJid: turn.chatJid }, 'turn processor error — finalizing before queue advance');
           if (!this.onProcessorError) {
-            this.halted = true;
-            this.haltError = err;
+            this.halt(err);
             log.error(
               { err, chatJid: turn.chatJid },
               'turn processor has no failure finalizer — queue halted',
@@ -158,8 +164,7 @@ export class TurnQueue {
           try {
             await this.onProcessorError(turn, err);
           } catch (finalizationError) {
-            this.halted = true;
-            this.haltError = finalizationError;
+            this.halt(finalizationError);
             log.error(
               { err: finalizationError, chatJid: turn.chatJid },
               'turn processor finalization failed — queue halted',
@@ -173,5 +178,12 @@ export class TurnQueue {
     } finally {
       this.processing = false;
     }
+  }
+
+  private halt(error: unknown): void {
+    if (this.halted) return;
+    this.halted = true;
+    this.haltError = error;
+    this.onHalt?.();
   }
 }

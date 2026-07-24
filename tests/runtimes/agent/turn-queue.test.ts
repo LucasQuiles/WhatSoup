@@ -239,6 +239,28 @@ describe('TurnQueue', () => {
     expect(queue.haltedError).toBe(processorError);
   });
 
+  it('exposes content-free halt state and signals the transition exactly once', async () => {
+    const haltTransitions: string[] = [];
+    const queue = new TurnQueue({
+      onHalt: () => haltTransitions.push('halted'),
+    });
+    const processorError = new Error('private terminal failure');
+
+    expect(queue.isHalted).toBe(false);
+    queue.setProcessor(async () => {
+      throw processorError;
+    });
+    queue.enqueue(makeTurn({ text: 'fails' }));
+
+    await expect(queue.idle()).rejects.toBe(processorError);
+    expect(queue.isHalted).toBe(true);
+    expect(haltTransitions).toEqual(['halted']);
+
+    expect(queue.enqueue(makeTurn({ text: 'rejected-after-halt' }))).toBe(false);
+    expect(queue.isHalted).toBe(true);
+    expect(haltTransitions).toEqual(['halted']);
+  });
+
   it('awaits processor-error finalization before advancing the FIFO', async () => {
     const errorFinalized = deferred();
     const order: string[] = [];

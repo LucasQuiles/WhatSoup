@@ -1511,6 +1511,9 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         const value = runtimeDetails?.[key];
         return typeof value === 'number' && Number.isFinite(value) && value > 0;
       };
+      const turnQueueHalted =
+        agentRuntimeStatus !== null
+        && runtimeDetails?.['turnQueueHalted'] === true;
       if (positiveRuntimeCounter('recentCrashes')) addDegradationCause('agent_recent_crashes');
       if (agentRuntimeStatus === 'degraded' && runtimeDetails?.['active'] === false) {
         addDegradationCause('agent_session_inactive');
@@ -1533,16 +1536,18 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       if (runtimeProviderExecution?.['pressureActive'] === true) {
         addDegradationCause('provider_execution_pressure');
       }
+      if (turnQueueHalted) addDegradationCause('turn_queue_halted');
       if (
         agentRuntimeStatus === 'degraded'
         && !fallbackWindowActive
         && !degradationCauses.some((cause) => cause.startsWith('agent_')
           || cause === 'turn_finalization_degraded'
           || cause === 'turn_recovery_degraded'
-          || cause === 'provider_execution_pressure')
+          || cause === 'provider_execution_pressure'
+          || cause === 'turn_queue_halted')
       ) {
         addDegradationCause('agent_runtime_degraded_unclassified');
-      } else if (agentRuntimeStatus === 'unhealthy') {
+      } else if (agentRuntimeStatus === 'unhealthy' && !turnQueueHalted) {
         addDegradationCause('agent_runtime_unhealthy');
       }
       if (status !== 'healthy' && degradationCauses.length === 0) {

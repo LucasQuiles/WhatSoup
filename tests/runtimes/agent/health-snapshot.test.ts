@@ -11,8 +11,13 @@ import type { ProviderExecutionGate } from '../../../src/runtimes/agent/provider
 
 // ── Hoisted mocks ───────────────────────────────────────────────────────────
 
-const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
+const { mockSession, mockQueue, capturedOnEventRef, capturedTurnQueues } = vi.hoisted(() => {
   const capturedOnEventRef: { current: ((event: AgentEvent) => void) | null } = { current: null };
+  const capturedTurnQueues: Array<{
+    enqueue: ReturnType<typeof vi.fn>;
+    halt: () => void;
+    isHalted: boolean;
+  }> = [];
 
   const mockSession = {
     spawnSession: vi.fn(async () => {}),
@@ -55,7 +60,7 @@ const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
     setDurability: vi.fn(),
   };
 
-  return { mockSession, mockQueue, capturedOnEventRef };
+  return { mockSession, mockQueue, capturedOnEventRef, capturedTurnQueues };
 });
 
 // ── Module mocks ────────────────────────────────────────────────────────────
@@ -190,11 +195,27 @@ vi.mock('../../../src/mcp/register-all.ts', () => ({
 
 vi.mock('../../../src/runtimes/agent/turn-queue.ts', () => {
   class TurnQueue {
-    enqueue = vi.fn();
+    private halted = false;
+    private readonly onHalt?: () => void;
+    activeTurn = null;
+    enqueue = vi.fn(() => true);
     drain = vi.fn();
     clear = vi.fn();
     setProcessor = vi.fn();
+    closeAndTakePendingTurns = vi.fn(() => []);
     get pending() { return 0; }
+    get isHalted() { return this.halted; }
+
+    constructor(opts?: { onHalt?: () => void }) {
+      this.onHalt = opts?.onHalt;
+      capturedTurnQueues.push(this);
+    }
+
+    halt(): void {
+      if (this.halted) return;
+      this.halted = true;
+      this.onHalt?.();
+    }
   }
   return { TurnQueue };
 });
@@ -306,12 +327,33 @@ function expectedProviderExecutionDetails(): Record<string, unknown> {
   };
 }
 
+function expectedTurnQueueDetails(): Record<string, unknown> {
+  return {
+    turnQueueHalted: false,
+    turnQueueHaltedScopes: 0,
+  };
+}
+
+function makeQueuedTurn(text: string) {
+  return {
+    sourceMessageId: `wamid-${text}`,
+    conversationKey: 'private-conversation',
+    chatJid: '15550190099@s.whatsapp.net',
+    senderJid: '15550190099@s.whatsapp.net',
+    senderName: null,
+    text,
+    isGroup: false,
+    contentType: 'text' as const,
+  };
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
   let runtime: AgentRuntime;
 
   beforeEach(() => {
+    capturedTurnQueues.length = 0;
     mockSession.getStatus.mockReturnValue({
       active: false,
       pid: null,
@@ -366,6 +408,7 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         turnFinalizationRetryAttempts: 0,
         turnFinalizationRetryRecoveries: 0,
         turnFinalizationRetryExhaustions: 0,
+        ...expectedTurnQueueDetails(),
         ...expectedProviderExecutionDetails(),
         ...expectedTurnRecoveryDetails(),
         ...expectedFallbackDetails(),
@@ -396,6 +439,7 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         turnFinalizationRetryAttempts: 0,
         turnFinalizationRetryRecoveries: 0,
         turnFinalizationRetryExhaustions: 0,
+        ...expectedTurnQueueDetails(),
         ...expectedProviderExecutionDetails(),
         ...expectedTurnRecoveryDetails(),
         ...expectedFallbackDetails(),
@@ -447,6 +491,38 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
   it('snapshot has a valid status string', () => {
     const snapshot = runtime.getHealthSnapshot();
     expect(['healthy', 'degraded', 'unhealthy']).toContain(snapshot.status);
+  });
+
+  it('latches a delayed per-chat halt across queue deletion and scope rekey', async () => {
+    const coordinator = (runtime as unknown as {
+      runtimeTurnCoordinator: {
+        enqueuePerChatRuntimeTurn: (scopeKey: string, turn: ReturnType<typeof makeQueuedTurn>) => boolean;
+        terminalizePerChatTurnQueueForKill: (scopeKey: string) => Promise<void>;
+        rekeyPerChatTurnQueueHaltScope: (fromScopeKey: string, toScopeKey: string) => void;
+      };
+    }).runtimeTurnCoordinator;
+    const lidScope = 'private-conversation@lid';
+    const canonicalScope = '15550190099@s.whatsapp.net';
+
+    expect(coordinator.enqueuePerChatRuntimeTurn(lidScope, makeQueuedTurn('first'))).toBe(true);
+    const queue = capturedTurnQueues.at(-1)!;
+    await coordinator.terminalizePerChatTurnQueueForKill(lidScope);
+    queue.halt();
+    coordinator.rekeyPerChatTurnQueueHaltScope(lidScope, canonicalScope);
+    const queueCount = capturedTurnQueues.length;
+
+    expect(coordinator.enqueuePerChatRuntimeTurn(canonicalScope, makeQueuedTurn('replacement'))).toBe(false);
+    expect(capturedTurnQueues).toHaveLength(queueCount);
+    const snapshot = runtime.getHealthSnapshot();
+    expect(snapshot).toMatchObject({
+      status: 'degraded',
+      details: {
+        turnQueueHalted: true,
+        turnQueueHaltedScopes: 1,
+      },
+    });
+    expect(JSON.stringify(snapshot.details)).not.toContain(lidScope);
+    expect(JSON.stringify(snapshot.details)).not.toContain('terminal failure');
   });
 
   it('recordTurnCapabilitySuccess refreshes primaryModelUsability, clearing staleness (#1884 follow-up)', () => {
@@ -505,9 +581,40 @@ describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
         turnFinalizationRetryAttempts: 0,
         turnFinalizationRetryRecoveries: 0,
         turnFinalizationRetryExhaustions: 0,
+        ...expectedTurnQueueDetails(),
         ...expectedProviderExecutionDetails(),
         ...expectedTurnRecoveryDetails(),
         ...expectedFallbackDetails(),
+      },
+    });
+  });
+
+  it('reports a halted shared turn queue as unhealthy', () => {
+    capturedTurnQueues.length = 0;
+    const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', {
+      sessionScope: 'shared',
+    });
+    capturedTurnQueues.at(-1)!.halt();
+
+    expect(runtime.getHealthSnapshot()).toMatchObject({
+      status: 'unhealthy',
+      details: {
+        turnQueueHalted: true,
+        turnQueueHaltedScopes: 1,
+      },
+    });
+  });
+
+  it('does not report the inactive turn queue in single mode', () => {
+    capturedTurnQueues.length = 0;
+    const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test');
+    capturedTurnQueues.at(-1)!.halt();
+
+    expect(runtime.getHealthSnapshot()).toMatchObject({
+      status: 'healthy',
+      details: {
+        turnQueueHalted: false,
+        turnQueueHaltedScopes: 0,
       },
     });
   });
