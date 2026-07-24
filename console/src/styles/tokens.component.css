@@ -66,6 +66,87 @@
   --tracking-kpi: 0.1em;         /* kpi label tracking (mockup .kpi .k) */
   --tracking-fleet-head: 0.08em; /* table head + heartbeat label tracking (mockup th/.hbl) */
   --tracking-badge: 0.04em;      /* state pill tracking (mockup .badge) */
+  /* ═══ v3.5 Agents surface geometry (T5 b-04; mockup agents.html SSOT) ═══ */
+  --agents-pagerow-gap: 14px;    /* surface h1 row item gap (mockup header gap) */
+  --agents-pagerow-pad: 14px 22px 12px; /* surface h1 row padding (mockup header padding) */
+  --agents-roster-w: 300px;      /* roster column width (mockup .wrap grid) */
+  --agents-roster-pad: 14px 12px; /* roster column padding (mockup .roster) */
+  --agents-roster-gap: 8px;      /* roster card stack gap (mockup .roster) */
+  --agents-detail-pad: 18px 22px; /* detail pane padding (mockup .detail) */
+  --agents-detail-gap: 14px;     /* detail pane stack gap (mockup .detail) */
+  --agents-acard-pad: 12px;      /* roster card padding (mockup .acard) */
+  --agents-acard-radius: 10px;   /* roster card radius (mockup .acard) */
+  --agents-acard-gap: 10px;      /* roster card top-row gap (mockup .acard .top) */
+  --agents-acard-meta-mt: 10px;  /* roster card meta margin-top (mockup .acard .meta) */
+  --agents-acard-hover-lift: 2px; /* roster card hover lift (mockup .acard:hover) */
+  --agents-panel-gap: 14px;      /* detail panel grid gap (mockup .grid) */
+  --agents-panel-radius: 10px;   /* detail panel radius (mockup .panel) */
+  --agents-panelhead-pad: 11px 14px; /* panel header padding (mockup .panel-h) */
+  --agents-panelhead-gap: 8px;   /* panel header gap (mockup .panel-h) */
+  --agents-panelbody-pad: 12px 14px; /* panel body padding (mockup .panel-b) */
+  --agents-dhead-gap: 16px;      /* detail head gap (mockup .dhead) */
+  --agents-dhead-gap-sm: 10px;   /* detail head title-row gap (mockup h2 row) */
+  --agents-avatar-xs: 22px;      /* instance-row avatar slot floor (12-agent-identity §2 xs) */
+  --agents-avatar-md: 34px;      /* roster card avatar (§2 md; mockup .acard .av) */
+  --agents-avatar-md-radius: 8px; /* roster card avatar radius (mockup .acard .av) */
+  --agents-avatar-xl: 56px;      /* detail head avatar (§2 xl; mockup .dhead .av) */
+  --agents-avatar-xl-radius: 14px; /* detail head avatar radius (mockup .dhead .av) */
+  --agents-stat: 8px;            /* presence shape size (mockup .acard .stat; §4) */
+  --agents-swapbar-pad: 8px 12px; /* brain swapbar padding (mockup .swapbar) */
+  --agents-swapbar-gap: 10px;    /* brain swapbar gap (mockup .swapbar) */
+  --agents-swapbar-mt: 10px;     /* brain swapbar margin-top (mockup .panel-b) */
+  --agents-tgl-w: 32px;          /* tool toggle track width (mockup .tgl) */
+  --agents-tgl-h: 18px;          /* tool toggle track height (mockup .tgl) */
+  --agents-tgl-knob: 14px;       /* tool toggle knob (mockup .tgl::after) */
+  --agents-tgl-inset: 2px;       /* tool toggle knob inset (mockup .tgl::after) */
+  --agents-tgl-travel: 14px;     /* tool toggle knob travel = track w − knob − 2×inset (mockup) */
+  --agents-trow-gap: 10px;       /* tool row gap (mockup .trow) */
+  --agents-lrow-gap: 10px;       /* assigned-line row gap (mockup .lrow) */
+  --agents-grant-box: 18px;      /* grant chip box (mockup .g) */
+  --agents-grant-radius: 5px;    /* grant chip radius (mockup .g) */
+  --agents-irow-gap: 8px;        /* instance row gap (mockup .irow) */
+  --agents-irow-who: 86px;       /* instance row name column (mockup .irow .who) */
+  --agents-irow-ago: 46px;       /* instance row age column (mockup .irow .ago) */
+  --agents-ibtn-pad: 5px 10px;   /* instance action padding (mockup .ibtn) */
+  --agents-ibtn-radius: 5px;     /* instance action radius (mockup .ibtn) */
+  --agents-chip-gap: 6px;        /* skills chip gap (mockup .chips) */
+  --agents-chip-pad: 4px 10px;   /* skills chip padding (mockup .chip) */
+  --agents-mstat-gap: 8px;       /* memory stat grid gap (mockup .mem-stats) */
+  --agents-mstat-pad: 8px 10px;  /* memory stat padding (mockup .mstat) */
+  --agents-mstat-radius: 8px;    /* memory stat radius (mockup .mstat) */
+  --agents-mrow-t-w: 38px;       /* memory row time column (mockup .mrow .t) */
+  --agents-crumb-mt: 6px;        /* header crumb margin-top (mockup .crumb) */
+  --agents-icon-search: 13px;    /* search glyph box (mockup .search svg) */
+  --agents-icon-meta: 12px;      /* roster meta glyph box (mockup .acard .meta svg) */
+  --agents-icon-line: 14px;      /* assigned-line glyph box (mockup .lrow svg) */
+  --agents-search-icon-stroke: 1.6; /* search glyph stroke width (mockup) */
+  --agents-soul-mt: 2px;         /* detail soul margin-top (mockup .dhead .soul) */
+  --agents-sub-mt: 6px;          /* detail sub margin-top (mockup .dhead .sub) */
+  --agents-dhead-actions-gap: 8px; /* detail head action cluster gap (mockup) */
+  --agents-pill-gap: 6px;        /* presence pill gap (mockup .pill) */
+  --agents-pill-pad: 3px 10px;   /* presence pill padding (mockup .pill) */
+  --agents-kv-gap: 12px;         /* brain kv column gap (mockup .kv) */
+  --agents-kv-pad-y: 5px;        /* brain kv row vertical padding (mockup .kv) */
+  --agents-trow-pad-y: 6px;      /* tool row vertical padding (mockup .trow) */
+  --agents-lrow-pad-y: 7px;      /* assigned-line row vertical padding (mockup .lrow) */
+  --agents-irow-pad-y: 6px;      /* instance row vertical padding (mockup .irow) */
+  --agents-irow-st: 6px;         /* instance status dot (mockup .irow .st) */
+  --agents-integ-st: 6px;        /* integration status dot (mockup .integ .st) */
+  --agents-integ-gap: 8px;       /* integration row gap (mockup .integ) */
+  --agents-integ-pad-y: 4px;     /* integration row vertical padding (mockup .integ) */
+  --agents-inote-mt: 8px;        /* instances footnote margin-top (documented deviation) */
+  --agents-mstats-mb: 8px;       /* memory stat grid margin-bottom (mockup .mem-stats) */
+  --agents-mstat-v-mt: 2px;      /* memory stat value margin-top (mockup .mstat .v) */
+  --agents-empty-pad-y: 6px;     /* honest-empty vertical padding (documented deviation) */
+  --agents-roster-empty-pad: 12px 4px; /* roster empty padding (documented deviation) */
+  --agents-presence-bw: 1.5px;   /* hollow presence outline width (§4: ≥1.5px stroke) */
+  --agents-search-pad: 8px 12px; /* roster/memory search padding (mockup .search) */
+  --agents-search-gap: 8px;      /* search box gap (mockup .search) */
+  --agents-search-radius: 8px;   /* search box radius (mockup .search) */
+  --agents-search-mb: 6px;       /* roster search margin-bottom (mockup .search) */
+  --tracking-agents-kind: 0.06em; /* roster card kind caps tracking (mockup .acard .kind) */
+  --tracking-agents-crumb: 0.1em; /* header crumb caps tracking (mockup .crumb) */
+  --tracking-agents-mstat: 0.08em; /* memory stat caps tracking (mockup .mstat .k) */
   /* ═══ Element sizes — from design spec §2 ═══ */
   --dot-table: 8px;          /* status dot in tables */
   --dot-feed: 6px;           /* status dot in feeds */

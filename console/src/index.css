@@ -17,3 +17,5 @@
 @import "./styles/chrome.css";
 /* v3.5 Fleet surface (T5 b-03) — mockup fleet.html SSOT. */
 @import "./styles/fleet.css";
+/* v3.5 Agents surface (T5 b-04) — mockup agents.html SSOT. */
+@import "./styles/agents.css";

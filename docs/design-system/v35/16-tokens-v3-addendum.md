@@ -76,6 +76,20 @@ product h1 voice, Bricolage, identical in every mockup). Fleet *layout* never
 reads chrome tokens: the surface h1 row takes its own `--fleet-pagerow-*`
 (mockup `header` literals — same values by SSOT, independently owned) so a chrome
 header change cannot shift the fleet surface.
+## 5. Agents surface geometry (`--agents-*`, T5 b-04)
+
+Component-register geometry for the Agents surface, all traced to
+`mockups/agents.html` and `12-agent-identity.md` §§1–4: roster column and card
+geometry, avatar size slots (md/xl + radii — fills consume `--agent-hue-0..7`
+per §2, never inline palettes), presence shape size (§4 aliases), detail pane +
+panel grid, swapbar, tool toggle, grant chip, instance/memory/search geometry,
+and caps tracking tokens. The stacking breakpoint is the mockup's own 1000px —
+NOT the chrome/fleet 1100px (SSOT difference, browser-pinned). Spec SSOT:
+`tokens-v3.md` §13. Same pattern as b-02/b-03: raw mockup dimensions land in
+the token block once; `agents.css` consumes `var()` only. Shared *laws*
+(`--chrome-micro-radius`, `--chrome-pill-radius`, `--tracking-chrome-title`)
+are consumed by design; agents layout never reads chrome tokens. Half-step
+tokens (`--sp-*h`, DD-9 retirement queue) are not consumed.
 
 ## 6. Acceptance gate
 

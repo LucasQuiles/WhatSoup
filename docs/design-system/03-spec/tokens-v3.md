@@ -689,3 +689,51 @@ live here, dimension-allowlisted, so the fleet stylesheet
 
 Half-step tokens (`--sp-*h`, DD-9 retirement queue) are not consumed by the Fleet
 surface.
+
+## 13. v3.5 agents geometry (docs/design-system/v35/mockups/agents.html, landed b-04)
+
+Component-tier `--agents-*` dimension + tracking tokens in
+`console/src/styles/tokens.component.css`, single `:root` scope (theme-independent
+geometry; parity count unaffected). The mockup literals are the visual SSOT — they
+live here, dimension-allowlisted, so the agents stylesheet
+(`console/src/styles/agents.css`) consumes `var()` only.
+
+- **Page row** — `--agents-pagerow-gap` 14px / `--agents-pagerow-pad` 14px 22px 12px
+  (surface h1 row, mockup `header` literals — same rhythm as the global header,
+  independently owned), `--tracking-agents-crumb` 0.1em (ROSTER / NAME caps).
+- **Roster** — `--agents-roster-w` 300px + pad/gap; `.agents-acard` geometry
+  (`--agents-acard-pad/-radius/-gap/-meta-mt/-hover-lift`), search box
+  (`--agents-search-*`), kind caps `--tracking-agents-kind` 0.06em.
+- **Avatar slots (12-agent-identity §2)** — `--agents-avatar-md` 34px/8px radius
+  (roster card), `--agents-avatar-xl` 56px/14px radius (detail head),
+  `--agents-avatar-xs` 22px (instance-row floor); fills consume `--agent-hue-0..7`
+  (avatar fills only, §A gate).
+- **Presence (§4)** — `--agents-stat` 8px shape; live disc / paused diamond /
+  draft hollow square / deactivated recessed outline, colors from the
+  `--presence-*` aliases, never avatar fill.
+- **Detail** — `--agents-detail-pad`/`--agents-detail-gap`,
+  `--agents-dhead-gap(-sm)`, panel geometry (`--agents-panel-*`), kv/swapbar
+  (`--agents-swapbar-*`), tool toggle (`--agents-tgl-w/h/knob/inset`),
+  assigned-line rows + grant chip (`--agents-grant-box` 18px), instance rows
+  (`--agents-irow-who` 86px / `--agents-irow-ago` 46px / `--agents-ibtn-*`),
+  skills chips, memory stats (`--agents-mstat-*`, `--tracking-agents-mstat`),
+  `--agents-mrow-t-w` 38ch-class memory rows. Micro-geometry (burndown-class
+  literals, all mockup-traced): `--agents-crumb-mt`, `--agents-icon-search/-meta/
+  -line`, `--agents-search-icon-stroke`, `--agents-soul-mt`, `--agents-sub-mt`,
+  `--agents-dhead-actions-gap`, `--agents-pill-gap/-pad`, `--agents-kv-gap/-pad-y`,
+  `--agents-trow-pad-y`, `--agents-lrow-pad-y`, `--agents-irow-pad-y/-st`,
+  `--agents-tgl-travel` (knob travel = track − knob − 2×inset),
+  `--agents-integ-gap/-pad-y/-st`, `--agents-inote-mt`, `--agents-mstats-mb`,
+  `--agents-mstat-v-mt`, `--agents-empty-pad-y`, `--agents-roster-empty-pad`,
+  `--agents-presence-bw` 1.5px (§4 hollow-stroke floor). Font SIZES ride the
+  `--text-*` scale + `--type-display` composite (weight/leading raw, fleet
+  idiom); hairlines are `var(--bw)`; avatar ink is `--agent-avatar-ink`.
+- **Stacking breakpoint is the mockup's own** — agents.html `@media
+  (max-width:1000px)` stacks `.agents-wrap` and `.agents-grid`; NOT the
+  chrome/fleet 1100px idiom (pinned in viewport-matrix at 999/1000/1001).
+- **Shared laws consumed by design** (same ruling as b-03): `--chrome-micro-radius`
+  + `--chrome-pill-radius` (badge.md shape family), `--tracking-chrome-title`
+  (product h1 voice). Agents *layout* never reads chrome tokens.
+
+Half-step tokens (`--sp-*h`, DD-9 retirement queue) are not consumed by the Agents
+surface.
