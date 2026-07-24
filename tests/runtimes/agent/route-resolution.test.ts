@@ -14,6 +14,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
+  applyRouteEffort,
   isPinnedModelEligible,
   resolveRoute,
   type RouteInputs,
@@ -143,6 +144,7 @@ describe('resolveRoute precedence', () => {
       model: undefined,
       source: 'preference',
       reasonCode: 'user_pin',
+      effort: null,
     });
   });
 
@@ -253,6 +255,7 @@ describe('resolveRoute precedence', () => {
       model: undefined,
       source: 'preference',
       reasonCode: 'user_pin',
+      effort: null,
     });
   });
 
@@ -341,5 +344,52 @@ describe('isPinnedModelEligible', () => {
     ['provider mismatch', { ...verifiedPin, validatedProvider: 'codex-cli' }, entries, true],
   ])('rejects %s', (_label, candidate, configured, credentialed) => {
     expect(isPinnedModelEligible(candidate, configured, () => credentialed)).toBe(false);
+  });
+});
+
+describe('Slice 3 — reasoning-effort on the route', () => {
+  it('an eligible claude-cli model pin carries its requestedEffort as route.effort', () => {
+    const d = resolveRoute(inputs({
+      pref: pref({ intent: 'provider_specific', requestedProvider: 'claude-cli', requestedEffort: 'high' }),
+      pinnedProviderEligible: true,
+    }));
+    expect(d.source).toBe('preference');
+    expect(d.effort).toBe('high');
+  });
+
+  it('a pin with no effort override sets route.effort=null (not undefined)', () => {
+    const d = resolveRoute(inputs({
+      pref: pref({ intent: 'provider_specific', requestedProvider: 'claude-cli' }),
+      pinnedProviderEligible: true,
+    }));
+    expect(d.effort).toBeNull();
+  });
+
+  it('the default route (no pin) carries no effort', () => {
+    expect(resolveRoute(inputs()).effort).toBeUndefined();
+  });
+
+  describe('applyRouteEffort', () => {
+    it('overrides claude-cli providerConfig.effort with a non-empty pin effort (base not mutated)', () => {
+      const base = { effort: 'low', permissionMode: 'default' };
+      const out = applyRouteEffort(base, { provider: 'claude-cli', effort: 'xhigh' });
+      expect(out).toEqual({ effort: 'xhigh', permissionMode: 'default' });
+      expect(base.effort).toBe('low'); // pure — original untouched
+    });
+
+    it('leaves a non-claude provider untouched (opencode ignores --effort)', () => {
+      const base = { baseUrl: 'x' };
+      expect(applyRouteEffort(base, { provider: 'opencode-cli', effort: 'high' })).toBe(base);
+    });
+
+    it('a null/absent effort keeps the base static effort (no override — hybrid semantics)', () => {
+      const base = { effort: 'medium' };
+      expect(applyRouteEffort(base, { provider: 'claude-cli', effort: null })).toBe(base);
+      expect(applyRouteEffort(base, { provider: 'claude-cli' })).toBe(base);
+    });
+
+    it('undefined base + a pin effort yields a config carrying just the effort', () => {
+      expect(applyRouteEffort(undefined, { provider: 'claude-cli', effort: 'high' })).toEqual({ effort: 'high' });
+    });
   });
 });
