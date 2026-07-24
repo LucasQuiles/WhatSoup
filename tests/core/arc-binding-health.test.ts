@@ -63,6 +63,16 @@ describe('readArcBindingHealth', () => {
     });
   });
 
+  it('fails closed when the source-anchored checkout is unavailable', () => {
+    const explicitRoot = repoWithArcToml('');
+
+    expect(resolveArcRepoRoot({}, null)).toBeNull();
+    expect(resolveArcRepoRoot(
+      { WHATSOUP_REPO_ROOT: explicitRoot },
+      null,
+    )).toBeNull();
+  });
+
   it('loads safe ARC metadata from generated arc.toml', () => {
     const root = repoWithArcToml([
       'arc_version = "0.1.0"',

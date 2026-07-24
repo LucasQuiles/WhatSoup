@@ -2,7 +2,17 @@ import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const SOURCE_REPO_ROOT = realpathSync(fileURLToPath(new URL('../..', import.meta.url)));
+function resolveSourceRepoRoot(): string | null {
+  try {
+    const moduleUrl = new URL(import.meta.url);
+    if (moduleUrl.protocol !== 'file:') return null;
+    return realpathSync(fileURLToPath(new URL('../..', moduleUrl)));
+  } catch {
+    return null;
+  }
+}
+
+const SOURCE_REPO_ROOT = resolveSourceRepoRoot();
 
 export interface ArcBindingHealthLoaded {
   loaded: true;
@@ -23,9 +33,10 @@ export type ArcBindingHealth = ArcBindingHealthLoaded | ArcBindingHealthMissing;
 
 export function resolveArcRepoRoot(
   env: { WHATSOUP_REPO_ROOT?: string } = process.env,
-  reviewedRoot = SOURCE_REPO_ROOT,
+  reviewedRoot: string | null = SOURCE_REPO_ROOT,
 ): string | null {
   try {
+    if (reviewedRoot === null) return null;
     const canonicalReviewedRoot = realpathSync(reviewedRoot);
     const explicitRoot = env.WHATSOUP_REPO_ROOT?.trim();
     if (!explicitRoot) return canonicalReviewedRoot;
