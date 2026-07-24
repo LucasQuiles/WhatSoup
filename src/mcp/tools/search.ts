@@ -7,6 +7,7 @@ import { resolveConversationKey } from '../types.ts';
 import type { Database } from '../../core/database.ts';
 import { type MessageRow, rowToMessage } from '../../core/messages.ts';
 import { buildSafeFtsMatchQuery } from '../../fleet/db-reader.ts';
+import { escapeSqlLikePattern } from '../../lib/sql-like.ts';
 
 const SQLITE_READ_LIMIT_MAX = 1000;
 const SqliteReadLimitSchema = z.number().int().positive().max(SQLITE_READ_LIMIT_MAX);
@@ -128,15 +129,15 @@ function makeSearchContacts(db: Database): ToolDeclaration {
     handler: async (params) => {
       const { query, limit = 20 } = SearchContactsSchema.parse(params);
 
-      const likeParam = `%${query}%`;
+      const likeParam = `%${escapeSqlLikePattern(query)}%`;
       const rows = db.raw
         .prepare(
           `SELECT *
            FROM contacts
-           WHERE display_name LIKE ?
-              OR notify_name LIKE ?
-              OR canonical_phone LIKE ?
-              OR jid LIKE ?
+           WHERE display_name LIKE ? ESCAPE '\\'
+              OR notify_name LIKE ? ESCAPE '\\'
+              OR canonical_phone LIKE ? ESCAPE '\\'
+              OR jid LIKE ? ESCAPE '\\'
            ORDER BY last_seen_at DESC
            LIMIT ?`,
         )
