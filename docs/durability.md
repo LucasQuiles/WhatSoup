@@ -884,3 +884,92 @@ before the throw, so a failed cycle is no longer invisible to anything reading `
 (`src/runtimes/chat/runtime.ts`) derives `degraded` from `lastRunAt` staleness, so a persistently
 failing cycle must keep tripping that staleness window rather than reading healthy forever while
 failure rows accumulate.
+
+---
+
+## 7. Durable Background Work (Work Ledger + Results Outbox)
+
+Sections 1–6 make *turns* durable. This section covers the other loss class: **in-session
+background workers** — agent-spawned subagents, background bash, CI babysitters — which live
+inside the provider child's process tree.
+
+### 7.1 The loss class
+
+A background worker historically had no registration row, wrote its results to the parent's
+stdout/memory, and depended on the parent's turn for delivery. So the parent's death was total:
+the process tree died with it and finished work was stranded — pushed branches with no chat
+notice, completed analyses never delivered, "the chat just stops".
+
+That is not hypothetical. A production instance's heal reports show a 30-minute-cadence
+`crash__signal_SIGKILL_exit_none` wave across the night of 07-22→23 (23:32, 00:02, 00:33, 01:03,
+01:33, 02:03, 02:38, 03:08, 03:38, 04:09) plus 07-24 10:07Z — the hard watchdog serially
+executing long agentic runs.
+
+PR #2226's liveness gate stops the *false-positive* kills (a working tree is no longer mistaken
+for a hung one). It does nothing for a genuine death. This is the durability half.
+
+### 7.2 `background_work` — the Work Ledger
+
+A sanctioned worker is REGISTERED at spawn, which binds it to a `conversation_key` (canonical,
+alias-stable chat identity) instead of to its parent session's lifetime. A lease plus an optional
+`parent_pid` turn "is the parent still alive?" into a deterministic query rather than an inference.
+
+States: `registered → running → completed | failed`, with `orphaned` as the sweep's verdict on
+running work whose lease expired. The sweep only **relabels** — it never kills or re-runs — so a
+merely-slow worker that later renews or completes is not destroyed.
+
+`worker_kind` is CHECK-constrained (currently `agent_subagent` only). An unsanctioned kind fails
+loudly at write time instead of quietly creating an unmanaged class of worker.
+
+### 7.3 `work_results` — the Results Outbox
+
+Workers MUST write results here — a durable summary plus an optional artifact reference — never
+only to parent stdout. An independent delivery daemon drains the outbox, so delivery no longer
+depends on any session being alive.
+
+`completeBackgroundWork()` writes the terminal state and the outbox row in **one transaction**.
+That atomicity is the durability guarantee: there is no window where the ledger reads "completed"
+with no result, nor one where a result exists for work still marked running. A process that dies
+mid-call rolls back entirely and the row stays `running`, which the orphan sweep then collects —
+rather than the work silently reading as done with nothing to show.
+
+`delivery_dedupe_key` is UNIQUE, which is what makes at-least-once delivery safe to retry (the
+bot-errors dispatcher discipline). Claiming a result flips `pending → delivering` and bumps the
+attempt counter in one transaction, so two daemon ticks cannot deliver the same row twice.
+
+### 7.4 Delivery honesty (`recovered`, `produced_at`)
+
+A result produced by an orphaned worker and delivered later is, by construction, a statement about
+the past. Section 5 and the alert-ordering findings record what happens when that goes unmarked:
+reachability alerts not revalidated at delivery, digest retries not episode-fenced, a
+clear-before-open leaving an incident falsely open — all cases where a stale delivery read as a
+false claim about *now*.
+
+So the schema records both facts and `describeResultStaleness()` renders them:
+
+| Condition | Prefix |
+|---|---|
+| `recovered = 1` | `[recovered result · produced <age> ago]` — always, with age |
+| age ≥ `STALE_DELIVERY_NOTICE_MS` (5 min) | `[delayed result · produced <age> ago]` |
+| fresh, live parent | *(no qualifier)* |
+
+`recovered` is **derived, never passed in**: it is true exactly when the work had already been
+swept to `orphaned` before finishing. Letting a caller assert it would make it a claim rather than
+an observation.
+
+### 7.5 Re-adoption posture
+
+Orphan detection is **notify-first** by owner ruling (2026-07-24): a detected orphan delivers its
+results and notifies the originating chat, but does **not** auto-spawn an orchestrator to continue
+the work. Fully autonomous re-adoption is a deliberate later decision, not a default.
+
+### 7.6 Staging
+
+- **PR1a (this change)** — migration 46 + `src/core/background-work-store.ts` + tests, including a
+  real `kill -9` test that SIGKILLs a child which registered work, then asserts the registration
+  survived, the sweep marks it orphaned, and a late result is marked `recovered`.
+- **PR1b** (#2279) — registration write-path at the worker spawn sites + the delivery daemon.
+  Until it lands, `src/core/background-work-store.ts` is intentionally unwired and is declared in
+  `TRACKED_UNREACHABLE` (`tests/scripts/orphan-reachability-guard.test.ts`) so the gap stays
+  visible rather than silent.
+- **PR3** — CLI shim so operator-side scripts can register, plus the runbook.
