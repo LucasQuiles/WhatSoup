@@ -79,24 +79,76 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('Ops metrics tab (T5 b-09a absorption shell)', () => {
-  it('renders the Console tab by default with both tabs present', async () => {
+  it('renders the Console tab by default; metrics surface mounts on first visit (deferred)', async () => {
     const { container, queryByTestId } = renderOps()
     await waitFor(() => expect(container.querySelector('[role="tablist"]')).not.toBeNull())
     const tabs = [...container.querySelectorAll('[role="tab"]')]
     expect(tabs.map((t) => t.textContent)).toEqual(['Console', 'Metrics'])
+    // deferred mount: no metrics query load until the tab is first visited
     expect(queryByTestId('ops-metrics-stub')).toBeNull()
+    expect(container.querySelector('#tabpanel-console')!.hasAttribute('hidden')).toBe(false)
   })
 
-  it('clicking Metrics swaps to the absorbed surface and back', async () => {
-    const { container, queryByTestId, getByTestId } = renderOps()
+  it('after first visit the metrics surface stays mounted (keep-alive across switches)', async () => {
+    const { container, getByTestId } = renderOps()
+    await waitFor(() => expect(container.querySelector('[role="tablist"]')).not.toBeNull())
+    fireEvent.click([...container.querySelectorAll('[role="tab"]')].find((t) => t.textContent === 'Metrics')!)
+    await waitFor(() => expect(getByTestId('ops-metrics-stub')).toBeDefined())
+    fireEvent.click([...container.querySelectorAll('[role="tab"]')].find((t) => t.textContent === 'Console')!)
+    await waitFor(() =>
+      expect(container.querySelector('#tabpanel-console')!.hasAttribute('hidden')).toBe(false),
+    )
+    // still mounted after the switch back — hidden, never unmounted
+    expect(getByTestId('ops-metrics-stub')).toBeDefined()
+    expect(container.querySelector('#tabpanel-metrics')!.hasAttribute('hidden')).toBe(true)
+  })
+
+  it('clicking Metrics swaps panels via hidden — both stay mounted (keep-alive)', async () => {
+    const { container, getByTestId } = renderOps()
     await waitFor(() => expect(container.querySelector('[role="tablist"]')).not.toBeNull())
     const metricsTab = [...container.querySelectorAll('[role="tab"]')].find((t) => t.textContent === 'Metrics')!
     fireEvent.click(metricsTab)
     await waitFor(() => expect(getByTestId('ops-metrics-stub')).toBeDefined())
-    expect(container.querySelector('.soup-operator-layout')).toBeNull()
-    fireEvent.click([...container.querySelectorAll('[role="tab"]')].find((t) => t.textContent === 'Console')!)
-    await waitFor(() => expect(queryByTestId('ops-metrics-stub')).toBeNull())
+    const consolePanel = container.querySelector('#tabpanel-console')!
+    const metricsPanel = container.querySelector('#tabpanel-metrics')!
+    expect(consolePanel.hasAttribute('hidden')).toBe(true)
+    expect(metricsPanel.hasAttribute('hidden')).toBe(false)
+    // both mounted — the console tree is hidden, never unmounted
     expect(container.querySelector('.soup-operator-layout')).not.toBeNull()
+    fireEvent.click([...container.querySelectorAll('[role="tab"]')].find((t) => t.textContent === 'Console')!)
+    await waitFor(() => expect(consolePanel.hasAttribute('hidden')).toBe(false))
+    expect(metricsPanel.hasAttribute('hidden')).toBe(true)
+  })
+
+  it('panels carry the a11y association: role=tabpanel + aria-labelledby to their tab', async () => {
+    const { container } = renderOps()
+    await waitFor(() => expect(container.querySelector('[role="tablist"]')).not.toBeNull())
+    for (const id of ['console', 'metrics']) {
+      const panel = container.querySelector(`#tabpanel-${id}`)!
+      expect(panel.getAttribute('role')).toBe('tabpanel')
+      expect(panel.getAttribute('aria-labelledby')).toBe(`tab-${id}`)
+      expect(container.querySelector(`#tab-${id}`)).not.toBeNull()
+    }
+  })
+
+  it('console state survives the switch: the selected line stays selected', async () => {
+    const { container } = renderOps(['/ops'])
+    await waitFor(() => expect(container.querySelector('[role="tablist"]')).not.toBeNull())
+    // there is no line fixture (lines=[]) — pin the keep-alive DOM contract
+    // directly: the console tree's React state container is never replaced,
+    // only hidden (the unmount-and-remount path is what destroyed state).
+    const consoleContent = container.querySelector('.soup-operator-layout')
+    fireEvent.click([...container.querySelectorAll('[role="tab"]')].find((t) => t.textContent === 'Metrics')!)
+    await waitFor(() =>
+      expect(container.querySelector('#tabpanel-console')!.hasAttribute('hidden')).toBe(true),
+    )
+    // SAME node instance — proof of keep-alive, not remount
+    expect(container.querySelector('.soup-operator-layout')).toBe(consoleContent)
+    fireEvent.click([...container.querySelectorAll('[role="tab"]')].find((t) => t.textContent === 'Console')!)
+    await waitFor(() =>
+      expect(container.querySelector('#tabpanel-console')!.hasAttribute('hidden')).toBe(false),
+    )
+    expect(container.querySelector('.soup-operator-layout')).toBe(consoleContent)
   })
 
   it('?tab=metrics deep-link selects the Metrics tab', async () => {

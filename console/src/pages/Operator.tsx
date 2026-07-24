@@ -78,14 +78,20 @@ export default function Operator() {
   const [opsTab, setOpsTab] = useState<'console' | 'metrics'>(
     tabParam === 'metrics' ? 'metrics' : 'console',
   )
+  // Deferred mount: the metrics surface (and its query load) mounts on first
+  // visit, then stays mounted (keep-alive) so its state survives switches.
+  const [metricsVisited, setMetricsVisited] = useState(tabParam === 'metrics')
   const [lastParam, setLastParam] = useState(tabParam)
   if (tabParam !== lastParam) {
     setLastParam(tabParam)
-    setOpsTab(tabParam === 'metrics' ? 'metrics' : 'console')
+    const next = tabParam === 'metrics' ? 'metrics' : 'console'
+    setOpsTab(next)
+    if (next === 'metrics') setMetricsVisited(true)
   }
   const changeTab = (id: string) => {
     const tab = id === 'metrics' ? 'metrics' : 'console'
     setOpsTab(tab)
+    if (tab === 'metrics') setMetricsVisited(true)
     setLastParam(tab === 'metrics' ? 'metrics' : null)
     setSearchParams(tab === 'metrics' ? { tab: 'metrics' } : {}, { replace: true })
   }
@@ -141,9 +147,15 @@ export default function Operator() {
         <Tab id="console">Console</Tab>
         <Tab id="metrics">Metrics</Tab>
       </Tabs>
-      {opsTab === 'metrics' ? (
-        <OpsMetrics />
-      ) : (
+      {/* Keep-alive panels: BOTH stay mounted (state survives the switch);
+          the inactive one is hidden. Each panel associates to its tab. */}
+      <div
+        role="tabpanel"
+        id="tabpanel-console"
+        aria-labelledby="tab-console"
+        hidden={opsTab !== 'console'}
+        className="flex-1 flex flex-col min-h-0 overflow-hidden"
+      >
     <div
       className="soup-operator-layout flex-1 flex min-h-0 overflow-hidden gap-[var(--sp-3)]"
     >
@@ -413,7 +425,16 @@ export default function Operator() {
         />
       </Suspense>
     </div>
-      )}
+      </div>
+      <div
+        role="tabpanel"
+        id="tabpanel-metrics"
+        aria-labelledby="tab-metrics"
+        hidden={opsTab !== 'metrics'}
+        className="flex-1 flex flex-col min-h-0 overflow-hidden"
+      >
+        {metricsVisited ? <OpsMetrics /> : null}
+      </div>
     </motion.div>
   )
 }
