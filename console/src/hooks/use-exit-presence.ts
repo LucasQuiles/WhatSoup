@@ -5,16 +5,17 @@
  *   Phase: 'open' | 'closing', plus unmounted (mounted=false).
  *
  *   On open true→false:
- *     1. Read getComputedStyle(shell).animationDuration.
- *     2. If empty / 0 → unmount synchronously (instant path, C-B5-1).
- *     3. Otherwise → phase → 'closing'; unmount on FIRST of:
+ *     1. Retain the previously-present shell and render phase="closing".
+ *     2. Read getComputedStyle(shell).animationDuration.
+ *     3. If empty / 0 → unmount immediately (instant path, C-B5-1).
+ *     4. Otherwise unmount on FIRST of:
  *        (a) animationend on the shell (C-B5-6 guarded).
  *        (b) fallback timer: computed duration + FALLBACK_BUFFER_MS.
  *
  *   On open false→true (re-open during closing):
  *     The open=false effect cleanup cancels any in-flight timer/listener.
- *     open=true renders force phase='open' immediately, then the open effect
- *     clears the stale closing dwell bit before the next close cycle.
+ *     open=true forces phase='open' immediately, then records the shell as
+ *     present for the next close cycle.
  *
  *   Instant path (C-B5-1):
  *     jsdom: no stylesheet → empty animationDuration → instant synchronous unmount.
@@ -23,7 +24,7 @@
  *
  *   No stale closing phase on re-open:
  *     mounted and phase both key off open=true first. The reopened shell cannot
- *     render data-state="closing" while the cleanup-state reset is committing.
+ *     render data-state="closing" while prior callbacks are being cancelled.
  *
  *   StrictMode safe: effects have symmetric cleanup. No module-level state.
  *
@@ -33,7 +34,7 @@
  *
  * C-B5-9 (duration-stub seam): tests set inline animation-duration on the shell element.
  */
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import type { RefObject } from 'react';
 
 // ---------------------------------------------------------------------------
@@ -73,32 +74,37 @@ export function useExitPresence(
   shellRef: RefObject<HTMLElement | null>,
   animName: string,
 ): UseExitPresenceResult {
-  // closingActive tracks the deferred-unmount dwell.
-  // ONLY set to true on close; reset to false when the dwell ends or open resumes.
-  // open=true renders derive phase from open first, then the open effect clears
-  // any stale dwell bit after the open=false cleanup has cancelled callbacks.
-  const [closingActive, setClosingActive] = useState(false);
+  // Presence starts with the controlled open state. On a true→false transition,
+  // the prior true value retains the shell for the closing render so the effect
+  // can inspect its exit animation instead of losing shellRef before it runs.
+  const [present, setPresent] = useState(open);
 
   const animNameRef = useRef(animName);
   useEffect(() => {
     animNameRef.current = animName;
   });
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (open) {
       // Re-open (or initial mount): the previous open=false effect cleanup has
       // already cancelled any in-flight timer/listener before this effect runs.
-      // Clear the stale dwell bit so a later zero-duration close can unmount.
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- waiver:WVR-015 reopen must clear stale close dwell after callbacks are cancelled; expires 2026-12-31
-      setClosingActive(false);
+      // Record presence so the next falling edge retains this shell.
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- waiver:WVR-015 presence must follow controlled reopen after callbacks are cancelled; expires 2026-12-31
+      setPresent(true);
       return;
     }
+
+    // Initial open=false (or a completed close) has no shell to retain.
+    if (!present) return;
 
     // open became false.
     const shell = shellRef.current;
 
-    // No shell → already not mounted (closingActive=false → not mounted since open=false).
-    if (!shell) return;
+    // No shell → complete the close rather than retaining phantom presence.
+    if (!shell) {
+      setPresent(false);
+      return;
+    }
 
     // Read current animation duration.
     // jsdom: '' → 0 → instant path (C-B5-1).
@@ -106,11 +112,9 @@ export function useExitPresence(
 
     if (initialDuration === 0) {
       // Instant path: no closing dwell.
+      setPresent(false);
       return;
     }
-
-    // Closing dwell: enter the closing phase.
-    setClosingActive(true);
 
     let cancelled = false;
     let timerId: ReturnType<typeof setTimeout> | null = null;
@@ -120,7 +124,7 @@ export function useExitPresence(
       cancelled = true;
       if (timerId !== null) clearTimeout(timerId);
       shell!.removeEventListener('animationend', handleAnimationEnd);
-      setClosingActive(false);
+      setPresent(false);
     }
 
     function handleAnimationEnd(e: AnimationEvent) {
@@ -146,19 +150,18 @@ export function useExitPresence(
       cancelAnimationFrame(rafId);
       if (timerId !== null) clearTimeout(timerId);
       shell.removeEventListener('animationend', handleAnimationEnd);
-      // Note: we do NOT call setClosingActive(false) in cleanup here.
-      // On re-open, the open=true effect clears it after this cleanup has
-      // cancelled callbacks. On unmount, the component is gone anyway.
+      // Cleanup cancels callbacks but does not clear presence. A re-open owns
+      // the shell through open=true; a completed exit clears it in unmount().
       // StrictMode cleanup/re-setup: the second setup resets cancellation state.
     };
-  }, [open, shellRef]);
+  }, [open, present, shellRef]);
 
-  // Derive mounted from open (primary) and closingActive (dwell).
-  // open=true → always mounted regardless of closingActive.
-  // open=false + closingActive=true → mounted (dwell).
-  // open=false + closingActive=false → not mounted.
-  const mounted = open || closingActive;
-  const phase: ExitPhase = open ? 'open' : closingActive ? 'closing' : 'open';
+  // Derive mounted from open (primary) and retained presence (dwell).
+  // open=true → always mounted regardless of retained presence.
+  // open=false + present=true → mounted (dwell).
+  // open=false + present=false → not mounted.
+  const mounted = open || present;
+  const phase: ExitPhase = open ? 'open' : present ? 'closing' : 'open';
 
   return { mounted, phase };
 }

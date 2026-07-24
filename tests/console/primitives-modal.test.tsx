@@ -556,12 +556,8 @@ describe('Modal — exit presence: closing phase with stubbed duration (C-B5-6)'
     // Phase → closing; element still mounted with data-state="closing".
     await act(async () => {})
     const closingShell = document.querySelector('.soup-modal-shell')
-    if (closingShell) {
-      // If the hook detected a duration it enters the closing phase.
-      expect(closingShell.getAttribute('data-state')).toBe('closing')
-    }
-    // Note: if jsdom's rAF fires synchronously the unmount may have already
-    // occurred before this check — both outcomes are valid for the jsdom path.
+    expect(closingShell).not.toBeNull()
+    expect(closingShell!.getAttribute('data-state')).toBe('closing')
   })
 
   it('animationend on the shell with matching animationName → unmounts', async () => {
@@ -583,11 +579,10 @@ describe('Modal — exit presence: closing phase with stubbed duration (C-B5-6)'
     await act(async () => {})
 
     // Fire animationend on the shell with matching name → triggers unmount.
+    const closingShell = document.querySelector('.soup-modal-shell')
+    expect(closingShell).not.toBeNull()
     await act(async () => {
-      const closingShell = document.querySelector('.soup-modal-shell')
-      if (closingShell) {
-        fireEvent.animationEnd(closingShell, { animationName: 'soup-modal-shell-out' })
-      }
+      fireEvent.animationEnd(closingShell!, { animationName: 'soup-modal-shell-out' })
     })
 
     await act(async () => {})
@@ -617,17 +612,14 @@ describe('Modal — exit presence: closing phase with stubbed duration (C-B5-6)'
     await act(async () => {})
 
     const closingShell = document.querySelector('.soup-modal-shell')
-    if (closingShell) {
-      // Fire animationend from the CHILD element — must NOT unmount the shell.
-      const child = closingShell.querySelector('[data-testid="child-anim"]') as HTMLElement
-      if (child) {
-        await act(async () => {
-          fireEvent.animationEnd(child, { animationName: 'soup-modal-shell-out', bubbles: true })
-        })
-        // Shell should still be present (child animationend does not satisfy the guard).
-        expect(document.querySelector('.soup-modal-shell')).not.toBeNull()
-      }
-    }
+    expect(closingShell).not.toBeNull()
+    const child = closingShell!.querySelector('[data-testid="child-anim"]')
+    expect(child).not.toBeNull()
+    await act(async () => {
+      fireEvent.animationEnd(child!, { animationName: 'soup-modal-shell-out', bubbles: true })
+    })
+    // Shell should still be present (child animationend does not satisfy the guard).
+    expect(document.querySelector('.soup-modal-shell')).not.toBeNull()
   })
 
   it('INCONCLUSIVE: animationName guard is browser-only (jsdom AnimationEvent is unavailable)', () => {
@@ -635,7 +627,7 @@ describe('Modal — exit presence: closing phase with stubbed duration (C-B5-6)'
     // Event where e.animationName is undefined. The hook's conditional guard
     // (`e.animationName !== undefined && e.animationName !== expected`) skips the
     // animationName check when undefined, making the "wrong name" pin impossible in jsdom.
-    // This behavior is proven in the browser lane (tests/browser-motion/b5-exit-motion.test.tsx).
+    // This behavior is proven in the browser lane (tests/browser-motion/b5-motion-policy.test.tsx).
     // The structural assertion: the guard code path exists in the hook source.
     expect(typeof window.AnimationEvent).toBe('undefined')
   })
