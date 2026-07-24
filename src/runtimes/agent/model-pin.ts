@@ -43,7 +43,7 @@ import {
 } from './model-catalogue-render.ts';
 import { brandOf, listBrands } from './providers/provider-brand.ts';
 import { renderBrandLevel, renderEffortLevel, renderModelLevel, prettyEffortLabel, type RenderedLevel } from './model-drilldown-render.ts';
-import { nativeReasoningControl, type ReasoningControl } from './reasoning-control.ts';
+import { nativeReasoningControl, providerConfigEffort, type ReasoningControl } from './reasoning-control.ts';
 import {
   fallbackReconfirmationOutcome,
   fallbackRouteLabel,
@@ -396,7 +396,7 @@ export function applyRouteChangeAndRecycle(
   // recycles so the new effort takes (E10); an unchanged effective effort
   // (e.g. a pin whose override equals the static config) stays a no-op (F3, no
   // over-recycle).
-  const nextEffort = (port.routeSessionProviderConfig(next)?.['effort'] as string | undefined) ?? null;
+  const nextEffort = providerConfigEffort(port.routeSessionProviderConfig(next));
   if (
     session.getProviderId() === next.provider &&
     session.getModelRef() === next.model &&
@@ -893,30 +893,24 @@ export async function handleModelCommand(
       return;
     }
     if (pick.entry.kind === 'model') {
-      // Slice 3: a model with native reasoning control (claude-cli today)
-      // opens Level-3 to pick an effort instead of pinning immediately; a model
-      // without control pins the leaf directly (drill leaf-pin, unchanged).
+      // Slice 3: a model with native reasoning control (claude-cli today) opens
+      // Level-3 to pick an effort instead of pinning immediately.
       const control = nativeReasoningControl(pick.entry.provider, pick.entry.model);
       if (control) {
         sendModelDrillEffortLevel(port, chatJid, senderJid, pick.entry.provider, pick.entry.model, control);
         return;
       }
-      await pinConfiguredModelEntry(
-        port,
-        { chatJid, senderJid, perChatMapKey, chatKey, senderKey },
-        pick.entry.provider,
-        pick.entry.model,
-      );
-      return;
     }
-    // Slice 3 — Level-3 (effort) pick → pin the model AT that effort through the
-    // shared sink (effort null = the "Default (no override)" row, clears any pin).
+    // Both remaining arms pin through the SAME sink, differing only in effort: a
+    // Level-2 model with no reasoning control pins the leaf at no effort (drill
+    // leaf-pin, unchanged), and a Level-3 pick pins AT its effort (null = the
+    // "Default (no override)" row, which clears any pin).
     await pinConfiguredModelEntry(
       port,
       { chatJid, senderJid, perChatMapKey, chatKey, senderKey },
       pick.entry.provider,
       pick.entry.model,
-      pick.entry.effort,
+      pick.entry.kind === 'effort' ? pick.entry.effort : null,
     );
     return;
   }

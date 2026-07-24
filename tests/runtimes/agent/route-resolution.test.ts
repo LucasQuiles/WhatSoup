@@ -20,6 +20,8 @@ import {
   type RouteInputs,
 } from '../../../src/runtimes/agent/route-resolution.ts';
 import type { ChatModelPreference } from '../../../src/runtimes/agent/chat-preference-db.ts';
+import { nativeReasoningControl } from '../../../src/runtimes/agent/reasoning-control.ts';
+import { PROVIDER_IDS } from '../../../src/runtimes/agent/providers/index.ts';
 
 function pref(overrides: Partial<ChatModelPreference> = {}): ChatModelPreference {
   return {
@@ -394,6 +396,20 @@ describe('Slice 3 — reasoning-effort on the route', () => {
 
     it('undefined base + a pin effort yields a config carrying just the effort', () => {
       expect(applyRouteEffort(undefined, { provider: 'claude-cli', effort: 'high' })).toEqual({ effort: 'high' });
+    });
+
+    // Drift pin (not a claude-cli restatement): the provider set that OPENS a
+    // Level-3 effort menu must be EXACTLY the set whose spawn config accepts an
+    // effort. Asserted across every provider id, because the divergence that
+    // matters is silent and user-visible in the worst direction — offer levels,
+    // persist the pick, echo "high reasoning", then drop the value before spawn.
+    // This is what makes Phase-2's second effort provider one edit, not two.
+    it('menu capability and spawn application agree for every provider id', () => {
+      for (const provider of PROVIDER_IDS) {
+        const offersEffortMenu = nativeReasoningControl(provider, 'any-model') !== null;
+        const appliesEffortAtSpawn = applyRouteEffort({}, { provider, effort: 'high' })?.['effort'] === 'high';
+        expect(appliesEffortAtSpawn, `provider ${provider}`).toBe(offersEffortMenu);
+      }
     });
   });
 });

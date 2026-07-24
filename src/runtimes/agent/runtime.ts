@@ -8435,13 +8435,15 @@ export class AgentRuntime implements Runtime {
    * applyRouteEffort folds a claude-cli effort pin over the static effort.
    */
   private routeSessionProviderConfig(route: RouteDecision): Record<string, unknown> | undefined {
-    if (route.source !== 'preference' || route.provider === this.agentProvider) {
-      return applyRouteEffort(this.sessionProviderConfig(), route);
-    }
     // Match the fallback path (effectiveProviderConfig): a provider with no
     // config of its own inherits the agent's providerConfig — including the
     // budget cap — instead of spawning with providerConfig=undefined (R2).
-    return applyRouteEffort(fallbackProviderConfigFor(route.provider, this.agentProvider, this.agentProviderConfig) ?? this.agentProviderConfig, route);
+    const base = route.source !== 'preference' || route.provider === this.agentProvider
+      ? this.sessionProviderConfig()
+      : (fallbackProviderConfigFor(route.provider, this.agentProvider, this.agentProviderConfig) ?? this.agentProviderConfig);
+    // ONE effort application point — a future third base branch cannot silently
+    // skip the wrap (an effort pinned and echoed, then dropped before spawn).
+    return applyRouteEffort(base, route);
   }
 
   /** Spawn-time route bookkeeping: pin-blocked notice (once per transition) + route events. */

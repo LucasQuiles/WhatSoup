@@ -33,6 +33,7 @@ import {
 } from './providers/child-env.ts';
 import { ProviderBudget, type BudgetConfig } from './providers/budget.ts';
 import { watchdogHardMsForProvider } from './providers/watchdog-policy.ts';
+import { providerConfigEffort } from './reasoning-control.ts';
 import type { ProviderMcpBridge, ProviderSession } from './providers/types.ts';
 import { OpenAIApiProvider } from './providers/openai-api.ts';
 import { AnthropicApiProvider } from './providers/anthropic-api.ts';
@@ -402,9 +403,8 @@ function resolveProviderArgs(
       const settingSources = typeof providerConfig?.['settingSources'] === 'string'
         ? ['--setting-sources', providerConfig['settingSources']]
         : [];
-      const effort = typeof providerConfig?.['effort'] === 'string'
-        ? ['--effort', providerConfig['effort']]
-        : [];
+      const effortLevel = providerConfigEffort(providerConfig);
+      const effort = effortLevel ? ['--effort', effortLevel] : [];
       const agents = providerConfig?.['agents'];
       const agentArgs = agents === undefined || agents === ''
         ? []
@@ -2783,13 +2783,14 @@ export class SessionManager {
 
   /**
    * Reasoning effort this session was actually spawned with (null = none /
-   * provider default). Reads the resolved `providerConfig.effort` the child
-   * was launched from — the same value session.ts threads to `--effort` — so
-   * the pin/recycle diff compares the EFFECTIVE spawned effort, never a raw
-   * pin override that a static config may already satisfy (Slice 3).
+   * provider default). Shares providerConfigEffort with the `--effort` argv
+   * builder, so "reports exactly what spawn threaded" holds BY CONSTRUCTION
+   * rather than by two guards agreeing — letting the pin/recycle diff compare
+   * the EFFECTIVE spawned effort, never a raw pin override that a static
+   * config may already satisfy (Slice 3).
    */
   getSpawnedEffort(): string | null {
-    return typeof this.providerConfig?.['effort'] === 'string' ? this.providerConfig['effort'] : null;
+    return providerConfigEffort(this.providerConfig);
   }
 
   /**

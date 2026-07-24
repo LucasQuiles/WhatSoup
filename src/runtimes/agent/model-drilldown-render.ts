@@ -16,7 +16,7 @@ export interface RenderedLevel {
 }
 
 /** The Level-3 "no override" row label — pinning it clears any effort pin. */
-export const DEFAULT_EFFORT_LABEL = 'Default (no override)';
+const DEFAULT_EFFORT_LABEL = 'Default (no override)';
 
 /**
  * Plain display label for a reasoning-effort level. The internal ids are the
@@ -94,16 +94,18 @@ export function renderEffortLevel(
   control: ReasoningControl,
   currentEffort?: string | null,
 ): RenderedLevel {
-  const entries: DrillEntry[] = [
-    ...control.options.map((effort): DrillEntry => ({
-      kind: 'effort', label: prettyEffortLabel(effort), provider, model, effort,
+  // Narrowed to the 'effort' arm (not bare DrillEntry) so `entry.effort` below
+  // needs no runtime `kind` re-check — every row here is built as one.
+  const entries: Extract<DrillEntry, { kind: 'effort' }>[] = [
+    ...control.options.map((effort) => ({
+      kind: 'effort' as const, label: prettyEffortLabel(effort), provider, model, effort,
     })),
     { kind: 'effort', label: DEFAULT_EFFORT_LABEL, provider, model, effort: null },
   ];
 
   const active = currentEffort ?? null;
   const lines = entries.map((entry, i) => {
-    const current = entry.kind === 'effort' && entry.effort === active ? ' (current)' : '';
+    const current = entry.effort === active ? ' (current)' : '';
     return `${i + 1}. ${entry.label}${current}`;
   });
 

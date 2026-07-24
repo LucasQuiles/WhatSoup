@@ -882,12 +882,13 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(reply).not.toContain('new sessions still use claude-cli (haiku-fast)');
     });
 
-    // Slice 3 (layer 4 — apply). The effort INPUT path (menu Level-3 / one-shot
-    // `/model N M K`) lands in the next slice; these isolate the apply seam the
-    // input will drive: routeSessionProviderConfig folds a route's effort pin
-    // into the spawn config, and the recycle diff treats an effort-only change
-    // as a genuine change. RED-first: on the pre-Slice-3 code both the config
-    // carries no `effort` and the diff misses it (returns 'noop').
+    // Slice 3 (layer 4 — apply). The menu Level-3 input path now ships too (its
+    // own tests live below); the one-shot `/model N M K` form is the remaining
+    // deferral. These isolate the apply seam both inputs drive:
+    // routeSessionProviderConfig folds a route's effort pin into the spawn
+    // config, and the recycle diff treats an effort-only change as a genuine
+    // change. RED-first: on the pre-Slice-3 code both the config carries no
+    // `effort` and the diff misses it (returns 'noop').
     describe('Slice 3 — route effort applies to the spawn config + recycle diff', () => {
       type RSPC = { routeSessionProviderConfig: (r: Record<string, unknown>) => Record<string, unknown> | undefined };
       type ARCR = { applyRouteChangeAndRecycle: (c: string, s: string, m: string | undefined) => string };

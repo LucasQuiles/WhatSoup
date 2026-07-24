@@ -1,4 +1,5 @@
 import type { ChatModelPreference } from './chat-preference-db.ts';
+import { providerHasNativeReasoningControl } from './reasoning-control.ts';
 import {
   FALLBACK_MODEL_REQUIRED_PROVIDER_IDS,
   type AgentFallbackEntry,
@@ -179,9 +180,12 @@ export function resolveRoute(i: RouteInputs): RouteDecision {
 
 /**
  * Slice 3 — thread a route's reasoning-effort override into the provider
- * config the session spawns with. Only claude-cli consumes `--effort`
- * (session.ts resolveProviderArgs reads providerConfig.effort); every other
- * provider ignores it, so the base is returned untouched.
+ * config the session spawns with. Only a provider with native reasoning control
+ * consumes an effort flag (claude-cli's `--effort`, read by session.ts
+ * resolveProviderArgs); every other provider ignores it, so the base is
+ * returned untouched. The provider set is NOT re-tested here — it is read from
+ * reasoning-control.ts, the same SSOT the Level-3 menu gates on, so a menu that
+ * offers levels and a spawn that honors them cannot disagree.
  *
  * A per-chat effort PIN (a non-empty `route.effort`) OVERRIDES the static
  * `providerConfig.effort` for that spawn. A route with no effort override
@@ -194,11 +198,8 @@ export function applyRouteEffort(
   base: Record<string, unknown> | undefined,
   route: Pick<RouteDecision, 'provider' | 'effort'>,
 ): Record<string, unknown> | undefined {
-  if (route.provider !== 'claude-cli') return base;
-  if (typeof route.effort === 'string' && route.effort.length > 0) {
-    return { ...(base ?? {}), effort: route.effort };
-  }
-  return base;
+  if (!providerHasNativeReasoningControl(route.provider) || !route.effort) return base;
+  return { ...(base ?? {}), effort: route.effort };
 }
 
 export function isPinnedModelEligible(
