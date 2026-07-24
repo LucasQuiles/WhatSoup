@@ -653,6 +653,8 @@ export class SessionManager {
    */
   private readonly notifyUser: ((msg: string) => void) | undefined;
   private readonly treeLivenessAssessor: typeof assessTreeLiveness;
+  /** Monotonic stream-progress token used to invalidate awaited liveness reads. */
+  private livenessProgressEpoch = 0;
   /** First stall/watchdog fire of the current quiet stretch — anchors LONG_OP_CEILING_MS. */
   private longOpGateStartedAt: number | null = null;
   private longOpLastNoticeAt = 0;
@@ -1977,6 +1979,7 @@ export class SessionManager {
    */
   tickWatchdog(): void {
     if (!this.active || (this.child === null && this.managedProviderSession === null)) return;
+    this.livenessProgressEpoch += 1;
     this.clearStalledOpKill(); // provider progress cancels the stalled-op kill (NOT cleared by inbound nudges)
     // Real stream events also close the current quiet stretch: the long-op ceiling
     // anchors to the NEXT stall/watchdog fire, not to one from a finished step.
@@ -2025,8 +2028,11 @@ export class SessionManager {
     void this.runLivenessGatedKill({
       child,
       reason: 'stalled_operation',
-      rearm: () => {
-        this.stalledOpKill = setTimeout(() => this.handleStalledOpKill(toolId, toolName), STALLED_OP_KILL_GRACE_MS);
+      rearm: (maxDelayMs) => {
+        this.stalledOpKill = setTimeout(
+          () => this.handleStalledOpKill(toolId, toolName),
+          Math.min(STALLED_OP_KILL_GRACE_MS, maxDelayMs),
+        );
       },
       kill: () => {
         log.warn(
@@ -2052,14 +2058,16 @@ export class SessionManager {
   private async runLivenessGatedKill(args: {
     child: ReturnType<typeof spawn>;
     reason: 'stalled_operation' | 'turn_watchdog';
-    rearm: () => void;
+    rearm: (maxDelayMs: number) => void;
     kill: () => void;
   }): Promise<void> {
-    const now = Date.now();
-    if (this.longOpGateStartedAt === null) this.longOpGateStartedAt = now;
-    const gateElapsed = now - this.longOpGateStartedAt;
+    const assessmentStartedAt = Date.now();
+    if (this.longOpGateStartedAt === null) this.longOpGateStartedAt = assessmentStartedAt;
+    const gateStartedAt = this.longOpGateStartedAt;
+    const gateElapsed = assessmentStartedAt - gateStartedAt;
     const rootPid = args.child.pid;
     if (gateElapsed < LONG_OP_CEILING_MS && typeof rootPid === 'number') {
+      const assessmentEpoch = this.livenessProgressEpoch;
       let verdict: Awaited<ReturnType<typeof assessTreeLiveness>> = null;
       try {
         verdict = await this.treeLivenessAssessor(rootPid);
@@ -2069,17 +2077,28 @@ export class SessionManager {
       // The assessment awaited: the world may have moved (turn completed, session
       // recycled, a newer kill armed). Only act if this child is still the live one.
       if (!this.active || this.child !== args.child) return;
+      if (this.livenessProgressEpoch !== assessmentEpoch) return;
+      const decisionAt = Date.now();
+      const decisionElapsed = decisionAt - gateStartedAt;
+      if (decisionElapsed >= LONG_OP_CEILING_MS) {
+        log.warn(
+          { rootPid, reason: args.reason, gateElapsedMs: decisionElapsed, ceilingMs: LONG_OP_CEILING_MS },
+          'long-operation ceiling reached — killing despite possible CPU progress',
+        );
+        args.kill();
+        return;
+      }
       if (verdict?.alive) {
         log.info(
-          { rootPid, reason: args.reason, gateElapsedMs: gateElapsed, cpuDeltaMs: verdict.cpuDeltaMs, pidChurn: verdict.pidChurn, pidCount: verdict.pidCount },
+          { rootPid, reason: args.reason, gateElapsedMs: decisionElapsed, cpuDeltaMs: verdict.cpuDeltaMs, pidChurn: verdict.pidChurn, pidCount: verdict.pidCount },
           'kill deferred — provider tree shows CPU progress (long-running step, not a hang)',
         );
-        if (now - this.longOpLastNoticeAt >= LONG_OP_NOTICE_MIN_INTERVAL_MS) {
-          this.longOpLastNoticeAt = now;
-          const minutes = Math.max(1, Math.round(gateElapsed / 60_000));
+        if (decisionAt - this.longOpLastNoticeAt >= LONG_OP_NOTICE_MIN_INTERVAL_MS) {
+          this.longOpLastNoticeAt = decisionAt;
+          const minutes = Math.max(1, Math.round(decisionElapsed / 60_000));
           this.notifyUser?.(`_Long-running step still active (~${minutes} min in) — continuing. Send /new to interrupt._`);
         }
-        args.rearm();
+        args.rearm(LONG_OP_CEILING_MS - decisionElapsed);
         return;
       }
     } else if (gateElapsed >= LONG_OP_CEILING_MS) {
@@ -2134,13 +2153,14 @@ export class SessionManager {
   private armWatchdog(
     managedProviderSession = this.managedProviderSession,
     managedProviderGeneration = this.managedProviderGeneration,
+    delayMs = watchdogHardMsForProvider(this.provider),
   ): void {
     // Only the hard backstop remains — soft/warn probes are replaced by the operation tracker.
     // The timeout honors the provider's descriptor (API providers: 10 min; CLI providers: 30 min)
     // instead of a single hardcoded constant (L1-F1).
     const watchdog = setTimeout(
       () => this.handleWatchdogHard(managedProviderSession, managedProviderGeneration, watchdog),
-      watchdogHardMsForProvider(this.provider),
+      delayMs,
     );
     this.watchdogHard = watchdog;
   }
@@ -2178,7 +2198,11 @@ export class SessionManager {
     void this.runLivenessGatedKill({
       child,
       reason: 'turn_watchdog',
-      rearm: () => this.armWatchdog(managedProviderSession, managedProviderGeneration),
+      rearm: (maxDelayMs) => this.armWatchdog(
+        managedProviderSession,
+        managedProviderGeneration,
+        Math.min(watchdogHardMsForProvider(this.provider), maxDelayMs),
+      ),
       kill: () => {
         log.warn({ sessionId: this.sessionId, pid: child.pid, reason: 'turn_watchdog' }, 'turn watchdog fired — killing stalled Claude process');
         // This notice is the ONLY user-facing message for a reap: the intent marker below

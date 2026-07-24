@@ -22,7 +22,7 @@ const log = createChildLogger('runtime-new-command');
  * stays opaque here — every session operation the command needs is a host
  * closure, so this module never imports the session manager.
  */
-export interface NewCommandHost<TSession> {
+export interface NewCommandHost<TSession, TTeardown> {
   chatJid: string;
   sessionScope: 'single' | 'shared' | 'per_chat';
   shared: boolean;
@@ -33,12 +33,13 @@ export interface NewCommandHost<TSession> {
   // per_chat scope surface
   getPerChatSession(): TSession | undefined;
   abortPerChatQueue(): void;
-  terminalizePerChatTurnQueueForKill(): Promise<void>;
-  disposePerChatSession(session: TSession): Promise<void>;
+  disposePerChatSession(session: TSession, teardown: TTeardown): Promise<void>;
   resetOwnedPerChatSession(session: TSession): Promise<void>;
   // single/shared scope surface
   getSingleSession(): TSession | null;
   abortActiveQueue(): void;
+  terminalizeTurnForInterrupt(): Promise<TTeardown>;
+  retireTurnQueueAfterInterrupt(teardown: TTeardown): Promise<void>;
   shutdownOperationTracker(): void;
   cleanupGlobalAutoCompactState(): void;
   shutdownSingleSession(session: TSession): Promise<void>;
@@ -53,9 +54,10 @@ export interface NewCommandHost<TSession> {
 }
 
 /** Execute /new: interrupt an in-flight turn if one exists, then reset. */
-export async function runNewCommand<TSession>(host: NewCommandHost<TSession>): Promise<void> {
+export async function runNewCommand<TSession, TTeardown>(
+  host: NewCommandHost<TSession, TTeardown>,
+): Promise<void> {
   const interruptingTurn = host.isTurnInFlight();
-  let interruptFinalizationError: unknown = null;
   if (interruptingTurn) {
     log.warn({
       chatJid: host.chatJid,
@@ -65,23 +67,34 @@ export async function runNewCommand<TSession>(host: NewCommandHost<TSession>): P
     if (host.sessionScope === 'per_chat') {
       const interruptedSession = host.getPerChatSession();
       host.abortPerChatQueue();
+      let teardown: TTeardown;
       try {
-        await host.terminalizePerChatTurnQueueForKill();
+        teardown = await host.terminalizeTurnForInterrupt();
       } catch (err) {
-        interruptFinalizationError = err;
         log.error({ err, mapKey: host.perChatMapKey }, '/new interrupt: runtime turn queue teardown failed');
+        throw err;
       }
       if (interruptedSession !== undefined) {
-        await host.disposePerChatSession(interruptedSession);
+        await host.disposePerChatSession(interruptedSession, teardown);
+      } else {
+        await host.retireTurnQueueAfterInterrupt(teardown);
       }
     } else {
       host.abortActiveQueue();
+      let teardown: TTeardown;
+      try {
+        teardown = await host.terminalizeTurnForInterrupt();
+      } catch (err) {
+        log.error({ err, scopeKey: host.scopeKey }, '/new interrupt: runtime turn teardown failed');
+        throw err;
+      }
       host.shutdownOperationTracker();
       host.cleanupGlobalAutoCompactState();
       const singleSession = host.getSingleSession();
       if (singleSession !== null) {
         await host.shutdownSingleSession(singleSession);
       }
+      await host.retireTurnQueueAfterInterrupt(teardown);
       // The durable row terminalizes through the abort/rejection machinery; the
       // in-memory markers must not outlive the teardown or the runtime reads
       // "turn in progress" forever — the exact un-cancelable wedge this
@@ -136,11 +149,7 @@ export async function runNewCommand<TSession>(host: NewCommandHost<TSession>): P
   host.clearTurnHadVisibleOutput();
   host.sendDirect(
     interruptingTurn
-      ? `*Interrupted the running task — starting new session* ✓${
-        interruptFinalizationError === null
-          ? ''
-          : '\n_⚠️ some in-flight turns could not be finalized — see logs_'
-      }`
+      ? '*Interrupted the running task — starting new session* ✓'
       : '*Starting new session* ✓',
   );
 }

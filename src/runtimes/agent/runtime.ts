@@ -131,6 +131,13 @@ import {
   type ModelPinPort,
   type RouteRecycleOutcome,
 } from './model-pin.ts';
+import { RouteRecycleLifecycle } from './route-recycle-lifecycle.ts';
+import {
+  runKillSessionCommand,
+  runSessionsCommand,
+  shutdownOwnedSessions,
+  type RuntimeSessionLifecycleHost,
+} from './runtime-session-lifecycle.ts';
 import {
   resolveExecutingActor as resolveExecutingActorForPort,
   derivePerChatSocketPath as derivePerChatSocketPathForPort,
@@ -149,7 +156,6 @@ import {
 } from './chat-transport.ts';
 import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
-import { formatChatRefForOwner } from '../../core/chat-display-name.ts';
 import { bulletedSection, savedPreferenceLine } from './owner-render-format.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
 import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
@@ -189,11 +195,13 @@ import {
 } from './runtime-turn-result-handler.ts';
 import {
   RuntimeTurnCoordinator,
+  RUNTIME_TURN_SHUTDOWN_FINALIZATION_TIMEOUT_MS,
   type PerChatRuntimeScopeRef,
   type RuntimeTurnAfterTerminalAction,
   type RuntimeTurnCompletion,
   type RuntimeTurnCoordinatorPort,
   type RuntimeTurnPostEffects,
+  type RuntimeTurnQueueTeardown,
   type RuntimeTurnSourceSnapshot,
 } from './runtime-turn-coordinator.ts';
 import { TurnCapabilityTracker, type TurnCapabilityErrorClass } from './turn-capability-tracker.ts';
@@ -1435,15 +1443,22 @@ export class AgentRuntime implements Runtime {
       const runtimeQueue = this.perChatTurnQueues.get(scopeKey);
       return (
         (this.perChatInboundSeqQueue.get(scopeKey)?.length ?? 0) > 0
+        || (this.perChatRuntimeTurnContexts.get(scopeKey)?.length ?? 0) > 0
+        || this.perChatRuntimeTurnCompletions.has(scopeKey)
         || runtimeQueue?.isProcessing === true
         || (runtimeQueue?.pending ?? 0) > 0
+        || this.runtimeTurnCoordinator.hasPerChatTeardownPending(scopeKey)
       );
     }
     return (
       this.currentInboundSeq !== undefined
       || this.currentTurnChatJid !== null
+      || this.currentRuntimeTurnContext !== null
+      || this.pendingSingletonRuntimeTurnContext !== null
+      || this.currentRuntimeTurnCompletion !== null
       || this.turnQueue.isProcessing
       || this.turnQueue.pending > 0
+      || this.runtimeTurnCoordinator.hasGlobalTeardownPending()
     );
   }
 
@@ -1820,16 +1835,13 @@ export class AgentRuntime implements Runtime {
   private perChatRuntimeTurnContexts = new Map<string, RuntimeTurnContext[]>();
   private perChatRuntimeTurnCompletions = new Map<string, RuntimeTurnCompletion>();
   private readonly perChatRuntimeTurnScopeRefs = new Map<string, PerChatRuntimeScopeRef>();
-  /** One FIFO per chat: provider dispatch N+1 waits for turn N's durable outcome. */
   private perChatTurnQueues = new Map<string, TurnQueue>();
-  /**
-   * Task G (D14): scope keys (per-chat mapKey, or GLOBAL_TOOL_SCOPE_KEY for
-   * single/shared) whose live session recycle was deferred because a turn
-   * was in flight at pin time. Consumed at the next turn-idle boundary — the
-   * top of ensureSessionAndQueueSync, which every inbound message reaches
-   * BEFORE any turn dispatch (see consumePendingRecycleIfIdle).
-   */
-  private pendingRecycle = new Set<string>();
+  /** Deferred and in-progress live-route recycle ownership by scope key. */
+  private readonly routeRecycleLifecycle = new RouteRecycleLifecycle<SessionManager>();
+  private pendingRecycle = this.routeRecycleLifecycle.pending;
+  private recyclePromises = this.routeRecycleLifecycle.promises;
+  private recycleOwners = this.routeRecycleLifecycle.owners;
+  private recycleFailures = this.routeRecycleLifecycle.failures;
   /** Mutable callback key for a queue that may be re-keyed from LID to phone JID. */
   private readonly perChatTurnQueueKeys = new WeakMap<TurnQueue, PerChatRuntimeScopeRef>();
   /** The sole shared/singleton user turn whose provider result is still unresolved. */
@@ -1842,9 +1854,8 @@ export class AgentRuntime implements Runtime {
   private readonly turnRecoverySupervisor: TurnRecoverySupervisor;
   private readonly runtimeTurnHost: RuntimeTurnCoordinatorPort & RuntimeResultHandlerPort;
   private readonly runtimeTurnCoordinator: RuntimeTurnCoordinator;
-  /** Host object backing model-pin.ts / model-catalogue-render.ts (the `/model` surface). */
   private readonly modelPinHost: ModelPinPort;
-  /** Host object backing chat-transport.ts (per-chat actor socket + queue/tracker resolution). */
+  private readonly sessionLifecycleHost: RuntimeSessionLifecycleHost<SessionManager, RuntimeTurnQueueTeardown>;
   private readonly chatTransportHost: ChatTransportPort;
   private readonly runtimeTurnAfterTerminal = new Map<string, RuntimeTurnAfterTerminalAction>();
   private readonly recoveryManagerId = randomUUID();
@@ -1866,6 +1877,8 @@ export class AgentRuntime implements Runtime {
   /** Exact-source teardowns for terminal results that could not be safely attributed. */
   private readonly rejectedTerminalTeardowns = new WeakMap<SessionManager, Promise<boolean>>();
   private readonly activeMessageHandlers = new Set<Promise<void>>();
+  private readonly routeRecycleCommandWork = this.routeRecycleLifecycle.commandWork;
+  private readonly routeRecyclePublicationWork = this.routeRecycleLifecycle.publicationWork;
   private shutdownRequested = false;
 
   // Startup notification deferred until after WA connects
@@ -2413,19 +2426,11 @@ export class AgentRuntime implements Runtime {
     this.registerAllTools();
     this.catalogueSnapshot = createCatalogueSnapshotCache();
 
-    this.turnQueue = new TurnQueue({
-      maxDepth: config.agentMaxQueueDepth,
-      onReject: (turn, reason) => {
-        this.finalizeRejectedRuntimeTurn(turn, reason);
-        log.warn({ chatJid: turn.chatJid, senderJid: turn.senderJid, reason },
-          'turn rejected — agent queue full');
-      },
-      onProcessorError: (turn, error) => this.finalizeSharedProcessorError(turn, error),
-    });
-    this.turnQueue.setProcessor((turn) => this.processTurn(turn));
+    this.turnQueue = this.createGlobalTurnQueue();
     this.runtimeTurnHost = this.createRuntimeTurnHost();
     this.runtimeTurnCoordinator = new RuntimeTurnCoordinator(this.runtimeTurnHost);
     this.modelPinHost = this.createModelPinHost();
+    this.sessionLifecycleHost = this.createSessionLifecycleHost();
     this.chatTransportHost = this.createChatTransportHost();
 
     // Subscribe to poll vote events for AskUserQuestion → Poll bridge
@@ -2440,12 +2445,28 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  /**
-   * Host object for the extracted `/model` surface (model-pin.ts,
-   * model-catalogue-render.ts) — same shape as createRuntimeTurnHost: readonly
-   * state is captured by value, the four fields recycleLiveSession mutates are
-   * get/set pairs, and every collaborator is a bound delegate.
-   */
+  private createGlobalTurnQueue(): TurnQueue {
+    const turnQueue = new TurnQueue({
+      maxDepth: config.agentMaxQueueDepth,
+      onReject: (turn, reason) => {
+        this.finalizeRejectedRuntimeTurn(turn, reason);
+        log.warn({ chatJid: turn.chatJid, senderJid: turn.senderJid, reason },
+          'turn rejected — agent queue full');
+      },
+      onProcessorError: (turn, error) => this.finalizeSharedProcessorError(turn, error),
+    });
+    turnQueue.setProcessor((turn) => this.processTurn(turn));
+    return turnQueue;
+  }
+
+  private replaceGlobalTurnQueue(expected: TurnQueue): void {
+    if (this.turnQueue !== expected) {
+      throw new Error('Cannot replace a superseded singleton/shared runtime TurnQueue');
+    }
+    this.turnQueue = this.createGlobalTurnQueue();
+  }
+
+  /** Narrow host for model-pin.ts and model-catalogue-render.ts. */
   private createModelPinHost(): ModelPinPort {
     const runtime = this;
     return {
@@ -2459,6 +2480,10 @@ export class AgentRuntime implements Runtime {
       catalogueSnapshot: runtime.catalogueSnapshot,
       nlRoutingTiers: config.nlRoutingTiers,
       pendingRecycle: runtime.pendingRecycle,
+      recyclePromises: runtime.recyclePromises,
+      recycleOwners: runtime.recycleOwners,
+      recycleFailures: runtime.recycleFailures,
+      routeRecycleLifecycle: runtime.routeRecycleLifecycle,
       chatSessions: runtime.chatSessions,
       chatQueues: runtime.chatQueues,
       modelCatalogueListFn: runtime.modelCatalogueListFn,
@@ -2489,6 +2514,49 @@ export class AgentRuntime implements Runtime {
       renderRouteStatus: (chatJid, senderJid) => runtime.renderRouteStatus(chatJid, senderJid),
       loadRouteView: (chatJid, senderJid) => runtime.loadRouteView(chatJid, senderJid),
       completeLocalInbound: (inboundSeq) => { if (inboundSeq !== undefined) runtime.durability?.completeInbound(inboundSeq, 'local_command_handled'); },
+    };
+  }
+
+  private createSessionLifecycleHost(): RuntimeSessionLifecycleHost<SessionManager, RuntimeTurnQueueTeardown> {
+    const runtime = this;
+    return {
+      db: runtime.db,
+      instanceName: runtime.instanceName,
+      sessionScope: runtime.sessionScope,
+      get chatSessions() { return runtime.chatSessions; },
+      getSession: () => runtime.session,
+      getActiveChatJid: () => runtime.activeChatJid,
+      resolvePerChatMapKey: (chatJid) => runtime.resolvePerChatMapKey(chatJid),
+      sendDirect: (chatJid, text, force) => runtime.sendDirect(chatJid, text, force),
+      abortPerChatQueue: (mapKey) => runtime.chatQueues.get(mapKey)?.abortTurn({ preserveEvidence: true }),
+      terminalizePerChatTurn: (mapKey) =>
+        runtime.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(mapKey),
+      retirePerChatTurn: (teardown) =>
+        runtime.runtimeTurnCoordinator.retirePerChatTurnQueueAfterKill(teardown),
+      deletePerChatSessionAndQueue: (mapKey, session) => {
+        runtime.deleteOwnedPerChatSession(mapKey, session);
+        runtime.chatQueues.delete(mapKey);
+      },
+      cleanupPerChatState: (mapKey) => runtime.cleanupPerChatState(mapKey),
+      getGlobalInterruptChatJid: () => runtime.getGlobalInterruptChatJid(),
+      abortGlobalInterruptQueue: () =>
+        runtime.getGlobalInterruptQueue()?.abortTurn({ preserveEvidence: true }),
+      terminalizeGlobalTurn: () =>
+        runtime.runtimeTurnCoordinator.terminalizeGlobalTurnForReset(),
+      shutdownOperationTracker: () => {
+        runtime.operationTracker?.shutdown();
+        runtime.operationTracker = null;
+      },
+      cleanupGlobalAutoCompactState: () => runtime.cleanupGlobalAutoCompactState(),
+      retireGlobalTurn: (teardown) =>
+        runtime.runtimeTurnCoordinator.retireGlobalTurnQueueAfterReset(teardown),
+      clearGlobalSessionRefs: () => {
+        runtime.session = null;
+        runtime.queue = null;
+        runtime.activeChatJid = null;
+        runtime.currentInboundSeq = undefined;
+        runtime.currentTurnChatJid = null;
+      },
     };
   }
 
@@ -2557,7 +2625,8 @@ export class AgentRuntime implements Runtime {
       perChatRuntimeTurnContexts: runtime.perChatRuntimeTurnContexts,
       perChatRuntimeTurnCompletions: runtime.perChatRuntimeTurnCompletions,
       perChatRuntimeTurnScopeRefs: runtime.perChatRuntimeTurnScopeRefs,
-      turnQueue: runtime.turnQueue,
+      get turnQueue() { return runtime.turnQueue; },
+      replaceGlobalTurnQueue: (expected) => runtime.replaceGlobalTurnQueue(expected),
       perChatTurnQueues: runtime.perChatTurnQueues,
       perChatTurnQueueKeys: runtime.perChatTurnQueueKeys,
       perChatExecActorQueue: runtime.perChatExecActorQueue,
@@ -2971,10 +3040,7 @@ export class AgentRuntime implements Runtime {
           // the flag under the dead lidKey and silently drop the recycle
           // (the pin still applies on the next fresh spawn, so this is
           // non-destructive either way — but cheap to carry correctly).
-          if (this.pendingRecycle.has(lidKey)) {
-            this.pendingRecycle.delete(lidKey);
-            this.pendingRecycle.add(canonical);
-          }
+          this.routeRecycleLifecycle.rekeyScope(lidKey, canonical);
           // Migrate auto-compact cooldown/last-success/rapid-rearm/measure state
           // from the LID key onto the canonical JID (silent timers, boundary set,
           // and in-flight waiters are intentionally left untouched, as before).
@@ -3699,15 +3765,37 @@ export class AgentRuntime implements Runtime {
     if (this.shutdownRequested) {
       return Promise.reject(new Error('Agent runtime is shutting down; new turns are not accepted'));
     }
-    const processing = this.handleMessageInner(msg);
+    const initialClassification = msg.content === null
+      ? null
+      : classifyInput(msg.content, { routingAliases: config.nlRouting });
+    const tracksRouteRecycle = (
+      initialClassification?.type === 'local'
+      && (
+        initialClassification.command === 'model'
+        || initialClassification.command === 'reset'
+      )
+    );
+    const processing = this.handleMessageInner(msg, tracksRouteRecycle);
     this.activeMessageHandlers.add(processing);
+    if (tracksRouteRecycle) {
+      const scopeKey = this.sessionScope === 'per_chat'
+        ? this.resolvePerChatMapKey(msg.chatJid)
+        : GLOBAL_TOOL_SCOPE_KEY;
+      this.routeRecycleLifecycle.trackRouteCommand(processing, scopeKey);
+    }
     void processing.finally(() => {
       this.activeMessageHandlers.delete(processing);
+      if (tracksRouteRecycle) {
+        this.routeRecycleLifecycle.untrackRouteCommand(processing);
+      }
     }).catch(() => {});
     return processing;
   }
 
-  private async handleMessageInner(msg: IncomingMessage): Promise<void> {
+  private async handleMessageInner(
+    msg: IncomingMessage,
+    awaitQueuedRouteCommand = false,
+  ): Promise<void> {
     // Process media messages (transcription, text extraction, etc.) before routing.
     // For text messages this is a no-op. For all other types we attempt to convert
     // to a plain-text representation suitable for the stream-json agent protocol.
@@ -3820,7 +3908,7 @@ export class AgentRuntime implements Runtime {
       log.warn({ err, messageId: msg.messageId }, 'inline extractor hook failed (continuing)');
     }
 
-    this.turnChain = this.turnChain
+    const queuedWork = this.turnChain
       .then(() => this._handleMessageInner(msg))
       .catch((err) => {
         log.error(
@@ -3839,6 +3927,12 @@ export class AgentRuntime implements Runtime {
         // Notify user of failure
         this.sendDirect(msg.chatJid, 'Something went wrong processing that message. Try again?');
       });
+    const recycleScopeKey = this.sessionScope === 'per_chat'
+      ? this.resolvePerChatMapKey(msg.chatJid)
+      : GLOBAL_TOOL_SCOPE_KEY;
+    this.routeRecycleLifecycle.trackPublication(queuedWork, recycleScopeKey);
+    this.turnChain = queuedWork;
+    if (awaitQueuedRouteCommand) await queuedWork;
   }
 
   private async _handleMessageInner(msg: IncomingMessage): Promise<void> {
@@ -3876,6 +3970,12 @@ export class AgentRuntime implements Runtime {
     // the pre-fix path (validator-warned, F11).
     if (!this.usesPerChatActorSocket()) {
       this.globalSocketServer?.updateActorJid(msg.senderJid);
+    }
+    const recycleScopeKey = this.sessionScope === 'per_chat'
+      ? perChatMapKey!
+      : GLOBAL_TOOL_SCOPE_KEY;
+    if (this.routeRecycleLifecycle.isPendingOrRunning(recycleScopeKey)) {
+      await consumePendingRecycleIfIdleForPort(this.modelPinHost, recycleScopeKey);
     }
     if (this.sandboxPerChat) {
       await this.ensureSessionAndQueue(chatJid, msg.senderJid);
@@ -3968,7 +4068,7 @@ export class AgentRuntime implements Runtime {
         switch (classified.command) {
           case 'new':
             // Extracted leaf collaborator: runtime-new-command.ts owns the control flow.
-            await runNewCommand<SessionManager>({
+            await runNewCommand<SessionManager, RuntimeTurnQueueTeardown>({
               chatJid,
               sessionScope: this.sessionScope,
               shared: this.shared,
@@ -3977,18 +4077,25 @@ export class AgentRuntime implements Runtime {
               perChatMapKey: perChatMapKey ?? null,
               isTurnInFlight: () => this.isTurnInFlight(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY),
               getPerChatSession: () => this.chatSessions.get(perChatMapKey!),
-              abortPerChatQueue: () => this.chatQueues.get(perChatMapKey!)?.abortTurn(),
-              terminalizePerChatTurnQueueForKill: () =>
-                this.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(perChatMapKey!),
-              disposePerChatSession: async (session) => {
+              abortPerChatQueue: () => this.chatQueues.get(perChatMapKey!)
+                ?.abortTurn({ preserveEvidence: true }),
+              disposePerChatSession: async (session, teardown) => {
+                await session.shutdown(false);
+                await this.runtimeTurnCoordinator.retirePerChatTurnQueueAfterKill(teardown);
                 this.deleteOwnedPerChatSession(perChatMapKey!, session);
                 this.chatQueues.delete(perChatMapKey!);
                 this.cleanupPerChatState(perChatMapKey!);
-                await session.shutdown(false);
               },
               resetOwnedPerChatSession: (session) => this.resetOwnedPerChatSession(perChatMapKey!, chatJid, session),
               getSingleSession: () => this.session,
-              abortActiveQueue: () => this.getActiveQueue()?.abortTurn(),
+              abortActiveQueue: () => this.getGlobalInterruptQueue()
+                ?.abortTurn({ preserveEvidence: true }),
+              terminalizeTurnForInterrupt: () => this.sessionScope === 'per_chat'
+                ? this.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(perChatMapKey!)
+                : this.runtimeTurnCoordinator.terminalizeGlobalTurnForReset(),
+              retireTurnQueueAfterInterrupt: (teardown) => this.sessionScope === 'per_chat'
+                ? this.runtimeTurnCoordinator.retirePerChatTurnQueueAfterKill(teardown)
+                : this.runtimeTurnCoordinator.retireGlobalTurnQueueAfterReset(teardown),
               shutdownOperationTracker: () => { this.operationTracker?.shutdown(); this.operationTracker = null; },
               cleanupGlobalAutoCompactState: () => this.cleanupGlobalAutoCompactState(),
               shutdownSingleSession: (session) => session.shutdown(false),
@@ -4118,7 +4225,7 @@ export class AgentRuntime implements Runtime {
             // Task G: /reset undoes just as immediately as a pin applies —
             // recycle back toward the default route (idle now, or deferred to
             // the next message if a turn is in flight).
-            this.applyRouteChangeAndRecycle(chatJid, msg.senderJid, perChatMapKey);
+            await this.applyRouteChangeAndRecycle(chatJid, msg.senderJid, perChatMapKey);
             break;
           }
 
@@ -4137,152 +4244,16 @@ export class AgentRuntime implements Runtime {
           }
 
           case 'sessions': {
-            // #1774: the per-session token figures below read total_input_tokens
-            // uncompensated — they now show genuinely-new input, not the old
-            // inflated (cache-read-inclusive) total. This display has no
-            // budget/quota semantics, so the smaller, honest number is a
-            // straight improvement.
-            const entries: string[] = [];
-            let idx = 1;
-            // b28 r2c: the row whose conversation key matches the chat that sent
-            // /sessions is labelled "Current session" instead of its resolved
-            // name — derived through the same canonical key the runtime dispatches
-            // on, so lid vs pn presentation cannot cause a miss.
-            const requestingKey = this.sessionScope === 'per_chat'
-              ? this.resolvePerChatMapKey(chatJid)
-              : null;
-            if (this.sessionScope === 'per_chat') {
-              for (const [mapKey, sess] of this.chatSessions) {
-                const st = sess.getStatus();
-                if (!st.active) continue;
-                const isGrp = isGroupConversationKey(mapKey);
-                const label = isGrp ? 'Group' : 'DM';
-                const ageStr = st.startedAt ? formatAge(st.startedAt) : '?';
-                const dbRowId = sess.getDbRowId();
-                let tkStr = '0';
-                if (dbRowId !== null) {
-                  const tokenRow = this.db.raw.prepare(
-                    'SELECT total_input_tokens, total_output_tokens FROM agent_sessions WHERE id = ?'
-                  ).get(dbRowId) as { total_input_tokens: number | null; total_output_tokens: number | null } | undefined;
-                  if (tokenRow) {
-                    const tkTotal = (tokenRow.total_input_tokens ?? 0) + (tokenRow.total_output_tokens ?? 0);
-                    tkStr = tkTotal > 1000 ? `${(tkTotal / 1000).toFixed(1)}k` : String(tkTotal);
-                  }
-                }
-                // B23 owner ruling: render the resolved chat name (alias →
-                // group subject/chat name → contact name → formatted phone),
-                // raw key only as last resort. Local DB reads only — cheap.
-                // b28 r2c: the requesting chat's own row reads "Current session".
-                const identifier = mapKey === requestingKey
-                  ? 'Current session'
-                  : formatChatRefForOwner(this.db, mapKey);
-                entries.push(`${idx}. ${identifier} (${label}) — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
-                idx++;
-              }
-            } else {
-              const st = this.session?.getStatus();
-              if (st?.active) {
-                const ageStr = st.startedAt ? formatAge(st.startedAt) : '?';
-                const dbRowId = this.session?.getDbRowId() ?? null;
-                let tkStr = '0';
-                if (dbRowId !== null) {
-                  const tokenRow = this.db.raw.prepare(
-                    'SELECT total_input_tokens, total_output_tokens FROM agent_sessions WHERE id = ?'
-                  ).get(dbRowId) as { total_input_tokens: number | null; total_output_tokens: number | null } | undefined;
-                  if (tokenRow) {
-                    const tkTotal = (tokenRow.total_input_tokens ?? 0) + (tokenRow.total_output_tokens ?? 0);
-                    tkStr = tkTotal > 1000 ? `${(tkTotal / 1000).toFixed(1)}k` : String(tkTotal);
-                  }
-                }
-                // b28 r2c: when /sessions is sent from the active chat itself,
-                // the single row reads "Current session". Canonicalize BOTH
-                // sides — the request may present as @lid while activeChatJid is
-                // stored as the pn (or vice versa).
-                const requestIsActiveChat = this.activeChatJid !== null
-                  && canonicalizeChatJid(chatJid, this.db) === canonicalizeChatJid(this.activeChatJid, this.db);
-                const identifier = requestIsActiveChat
-                  ? 'Current session'
-                  : (this.activeChatJid ? formatChatRefForOwner(this.db, this.activeChatJid) : 'unknown');
-                entries.push(`1. ${identifier} — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
-              }
-            }
-            const sessionsText = entries.length > 0
-              ? `*Active Sessions (${entries.length})*\n\n${entries.join('\n')}\n\n/kill-session <number> to terminate`
-              : '_No active sessions._';
-            this.sendDirect(chatJid, sessionsText, true);
+            runSessionsCommand(this.sessionLifecycleHost, chatJid);
             break;
           }
 
           case 'kill-session': {
-            // B25 F4: strict integer parse — parseInt('2x') === 2 silently
-            // accepted trailing garbage and killed a session the admin never
-            // named. Digits only, everywhere.
-            const rawIdxArg = (classified.args ?? '').trim();
-            const targetIdx = /^\d+$/.test(rawIdxArg) ? Number(rawIdxArg) : NaN;
-            if (!Number.isInteger(targetIdx) || targetIdx < 1) {
-              this.sendDirect(chatJid, '_Usage: /kill-session <number>_\nRun /sessions first to see the list.', true);
-              break;
-            }
-            if (this.sessionScope === 'per_chat') {
-              const activeSessions = [...this.chatSessions.entries()].filter(([, s]) => s.getStatus().active);
-              if (targetIdx > activeSessions.length) {
-                this.sendDirect(chatJid, `_Invalid session number. ${activeSessions.length} active._`, true);
-                break;
-              }
-              const [mapKey, targetSession] = activeSessions[targetIdx - 1];
-              this.chatQueues.get(mapKey)?.abortTurn();
-              // The runtime TurnQueue owns the turn processor and is NOT part of
-              // cleanupPerChatState. Left behind, the next inbound turn for this
-              // chat queues behind a processor whose session is gone, never
-              // reaches spawnSession, and the chat deadlocks.
-              let killFinalizationError: unknown = null;
-              try {
-                await this.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(mapKey);
-              } catch (err) {
-                killFinalizationError = err;
-                log.error({ err, mapKey }, 'kill-session: runtime turn queue teardown failed');
-              }
-              this.deleteOwnedPerChatSession(mapKey, targetSession);
-              this.chatQueues.delete(mapKey);
-              this.cleanupPerChatState(mapKey);
-              await targetSession.shutdown(false);
-              const killLabel = isGroupConversationKey(mapKey) ? 'Group' : 'DM';
-              const killSuffix = killFinalizationError === null
-                ? ''
-                : '\n_⚠️ some in-flight turns could not be finalized — see logs_';
-              // B23: same name resolution as the /sessions list above.
-              this.sendDirect(chatJid, `_Session killed: ${formatChatRefForOwner(this.db, mapKey)} (${killLabel})_${killSuffix}`, true);
-            } else {
-              if (!this.session?.getStatus().active) {
-                this.sendDirect(chatJid, '_No active session to kill._', true);
-                break;
-              }
-              // B25 F4: the parsed index was IGNORED here — any N>=1 killed
-              // the lone session. Exactly one session exists in this scope,
-              // so only index 1 is valid; mirror per_chat's invalid reply.
-              if (targetIdx !== 1) {
-                this.sendDirect(chatJid, '_Invalid session number. 1 active._', true);
-                break;
-              }
-              // Capture the chat identity BEFORE teardown nulls it — the ack
-              // must prove which chat died (same choke point as /sessions).
-              const killedRef = this.activeChatJid;
-              this.getActiveQueue()?.abortTurn();
-              this.operationTracker?.shutdown();
-              this.operationTracker = null;
-              this.cleanupGlobalAutoCompactState();
-              await this.session.shutdown(false);
-              this.session = null;
-              this.queue = null;
-              this.activeChatJid = null;
-              this.sendDirect(
-                chatJid,
-                killedRef
-                  ? `_Session killed: ${formatChatRefForOwner(this.db, killedRef)}_`
-                  : '_Session killed._',
-                true,
-              );
-            }
+            await runKillSessionCommand(
+              this.sessionLifecycleHost,
+              chatJid,
+              classified.args ?? '',
+            );
             break;
           }
 
@@ -4962,6 +4933,9 @@ export class AgentRuntime implements Runtime {
       if (this.sandboxPerChat) {
         await this.ensureSessionAndQueue(chatJid, actorJid);
       } else {
+        if (this.routeRecycleLifecycle.isPendingOrRunning(mapKey)) {
+          await consumePendingRecycleIfIdleForPort(this.modelPinHost, mapKey);
+        }
         this.ensureSessionAndQueueSync(chatJid, mapKey, actorJid);
       }
       const currentMapKey = scopeRef?.value ?? mapKey;
@@ -7363,6 +7337,7 @@ export class AgentRuntime implements Runtime {
   async shutdown(): Promise<void> {
     const shutdownFailures: unknown[] = [];
     const failedPerChatSessions = new Map<string, SessionManager>();
+    const recycleShutdownSkipOwners = new Set<SessionManager>();
     let singletonSessionShutdownFailed = false;
     let preserveRuntimeTurnState = false;
     this.shutdownRequested = true;
@@ -7373,6 +7348,7 @@ export class AgentRuntime implements Runtime {
       sandboxPerChat: this.sandboxPerChat,
     }, 'AgentRuntime shutting down');
     const startedAt = Date.now();
+    const shutdownDeadlineAt = startedAt + RUNTIME_TURN_SHUTDOWN_FINALIZATION_TIMEOUT_MS;
 
     if (this.controlSessionTimeout) {
       clearTimeout(this.controlSessionTimeout);
@@ -7433,7 +7409,7 @@ export class AgentRuntime implements Runtime {
     this.autoCompact.shutdown();
 
     try {
-      await this.runtimeTurnCoordinator.finalizeActiveRuntimeTurnsForShutdown();
+      await this.runtimeTurnCoordinator.finalizeActiveRuntimeTurnsForShutdown(shutdownDeadlineAt);
     } catch (err) {
       shutdownFailures.push(err);
       preserveRuntimeTurnState = true;
@@ -7441,7 +7417,11 @@ export class AgentRuntime implements Runtime {
     }
     this.pendingSystemResults.clear();
     if (!preserveRuntimeTurnState) {
-      const messageHandlers = await Promise.allSettled([...this.activeMessageHandlers]);
+      const messageHandlers = await Promise.allSettled(
+        [...this.activeMessageHandlers].filter(
+          (handler) => !this.routeRecycleCommandWork.has(handler),
+        ),
+      );
       const rejectedMessageHandlers = messageHandlers.filter(
         (item): item is PromiseRejectedResult => item.status === 'rejected',
       );
@@ -7454,6 +7434,31 @@ export class AgentRuntime implements Runtime {
       }
     }
 
+    try {
+      await this.routeRecycleLifecycle.awaitForShutdown(shutdownDeadlineAt);
+    } catch (err) {
+      shutdownFailures.push(err);
+      preserveRuntimeTurnState = true;
+      log.error({ err }, 'route recycle lifecycles did not quiesce during shutdown');
+      for (const session of this.routeRecycleLifecycle.retainedOwners((scopeKey) =>
+        scopeKey === GLOBAL_TOOL_SCOPE_KEY ? this.session ?? undefined : this.chatSessions.get(scopeKey)
+      )) {
+        recycleShutdownSkipOwners.add(session);
+      }
+    }
+    const recycleFailures = this.routeRecycleLifecycle.takeFailures();
+    if (recycleFailures.length > 0) {
+      preserveRuntimeTurnState = true;
+      for (const failure of recycleFailures) {
+        recycleShutdownSkipOwners.add(failure.session);
+        shutdownFailures.push(failure.error);
+      }
+      log.error(
+        { failureCount: recycleFailures.length },
+        'route recycle lifecycle failed during shutdown',
+      );
+    }
+
     // Shutdown per_chat sessions
     let perChatKeys: Set<string> | null = null;
     if (this.sessionScope === 'per_chat') {
@@ -7462,45 +7467,16 @@ export class AgentRuntime implements Runtime {
         ...this.chatQueues.keys(),
         ...this.imageCoalesce.buffers.keys(),
       ]);
-      // #1755: shut the per_chat sessions down CONCURRENTLY. Each session.shutdown()
-      // touches only its own per-session state, synchronous (event-loop-serialized)
-      // SQLite on its own rows, and its own distinct process tree — so the kill-grace
-      // waits OVERLAP instead of stacking linearly against the service manager's stop
-      // timeout (the observed cause of SIGTERM-timeout SIGKILLs). Each task captures
-      // its own error so the batch never rejects; runtime state (shutdownFailures,
-      // failedPerChatSessions) is reconciled sequentially AFTER settle, never
-      // mutated concurrently. Per-chat outcome + duration is logged for attribution.
-      const perChatOutcomes = await Promise.all(
-        [...this.chatSessions].map(async ([chatJid, session]) => {
-          const startedAt = Date.now();
-          try {
-            await session.shutdown();
-            return { chatJid, session, err: null as unknown, durationMs: Date.now() - startedAt };
-          } catch (err) {
-            return { chatJid, session, err, durationMs: Date.now() - startedAt };
-          }
-        }),
-      );
-      for (const { chatJid, session, err, durationMs } of perChatOutcomes) {
-        if (err !== null) {
-          shutdownFailures.push(err);
-          failedPerChatSessions.set(chatJid, session);
-          log.warn({ err, chatJid, durationMs }, 'per_chat session shutdown failed');
-        } else {
-          log.debug({ chatJid, durationMs }, 'per_chat session shutdown ok');
-        }
-      }
     }
-
-    if (this.session && this.sessionScope !== 'per_chat') {
-      try {
-        await this.session.shutdown();
-      } catch (err) {
-        shutdownFailures.push(err);
-        singletonSessionShutdownFailed = true;
-        log.warn({ err, instanceName: this.instanceName }, 'session shutdown failed');
-      }
+    const ownedSessionShutdown = await shutdownOwnedSessions(
+      this.sessionLifecycleHost,
+      recycleShutdownSkipOwners,
+    );
+    shutdownFailures.push(...ownedSessionShutdown.failures);
+    for (const [mapKey, session] of ownedSessionShutdown.failedPerChatSessions) {
+      failedPerChatSessions.set(mapKey, session);
     }
+    singletonSessionShutdownFailed = ownedSessionShutdown.singletonSessionShutdownFailed;
 
     // Session shutdown can synchronously surface a final result or failure.
     // Drain those records while their queues, FIFO maps, and reply guarantee
@@ -7703,6 +7679,19 @@ export class AgentRuntime implements Runtime {
       return jid ? (this.outboundQueues.get(jid) ?? null) : null;
     }
     return this.queue;
+  }
+
+  private getGlobalInterruptChatJid(): string | null {
+    return this.currentRuntimeTurnContext?.identity.deliveryJid
+      ?? this.pendingSingletonRuntimeTurnContext?.identity.deliveryJid
+      ?? this.turnQueue.activeTurn?.chatJid
+      ?? this.currentTurnChatJid
+      ?? (this.turnQueue.isProcessing ? null : this.activeChatJid);
+  }
+
+  private getGlobalInterruptQueue(): IOutboundQueue | null {
+    const chatJid = this.getGlobalInterruptChatJid();
+    return chatJid === null ? this.getActiveQueue() : this.getQueueForChat(chatJid);
   }
 
   private resolvePerChatMapKey(chatJid: string): string {
@@ -8562,11 +8551,11 @@ export class AgentRuntime implements Runtime {
    * private method (rather than inlining the port call at each site) because
    * /reset and the recycle characterization suite both reach it by name.
    */
-  private applyRouteChangeAndRecycle(
+  private async applyRouteChangeAndRecycle(
     chatJid: string,
     senderJid: string,
     perChatMapKey: string | undefined,
-  ): RouteRecycleOutcome {
+  ): Promise<RouteRecycleOutcome> {
     return applyRouteChangeAndRecycleForPort(this.modelPinHost, chatJid, senderJid, perChatMapKey);
   }
 
@@ -11011,10 +11000,6 @@ export class AgentRuntime implements Runtime {
     // boundary a busy-time pin deferred to. Detaching here (only when truly
     // idle) makes the per_chat/single checks below see no session and
     // respawn fresh via createSessionManager, which re-resolves the route.
-    consumePendingRecycleIfIdleForPort(
-      this.modelPinHost,
-      this.sessionScope === 'per_chat' ? initialMapKey : GLOBAL_TOOL_SCOPE_KEY,
-    );
     if (this.sessionScope === 'per_chat') {
       // per_chat: independent session + queue per canonical chat key
       if (!this.chatSessions.has(initialMapKey)) {
