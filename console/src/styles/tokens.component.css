@@ -200,6 +200,62 @@
   --tracking-skills-fsec: 0.1em; /* filter section caps tracking (mockup .fsec) */
   --tracking-skills-src: 0.06em; /* source badge caps tracking (mockup .src) */
   --tracking-skills-compat: 0.06em; /* compat label caps tracking (mockup .compat .lbl) */
+  /* ═══ v3.5 Dream Lab surface geometry (T5 b-06; mockup dream-lab.html SSOT) ═══ */
+  --dream-pagerow-gap: 14px;     /* surface h1 row item gap (mockup header gap) */
+  --dream-pagerow-pad: 14px 22px 12px; /* surface h1 row padding (mockup header padding) */
+  --dream-qpill-gap: 7px;        /* queued pill gap (mockup .qpill) */
+  --dream-qpill-pad: 5px 12px;   /* queued pill padding (mockup .qpill) */
+  --dream-queue-w: 340px;        /* queue rail width (mockup .wrap grid) */
+  --dream-queue-pad: 14px 12px;  /* queue rail padding (mockup .queue) */
+  --dream-queue-gap: 8px;        /* queue card stack gap (mockup .queue) */
+  --dream-qhead-pad: 4px 6px 8px; /* queue section head padding (mockup .qhead) */
+  --dream-qhead-mt: 8px;         /* queue section head margin-top (mockup inline) */
+  --dream-fstrip-pad: 8px 10px;  /* filters strip padding (mockup .fstrip) */
+  --dream-fstrip-gap: 8px;       /* filters strip gap (mockup .fstrip) */
+  --dream-fstrip-radius: 8px;    /* filters strip radius (mockup .fstrip) */
+  --dream-dcard-pad: 12px;       /* dream card padding (mockup .dcard) */
+  --dream-dcard-radius: 10px;    /* dream card radius (mockup .dcard) */
+  --dream-dcard-gap: 9px;        /* dream card top-row gap (mockup .dcard .top) */
+  --dream-dcard-hover-lift: 2px; /* dream card hover lift (mockup .dcard:hover) */
+  --dream-dcard-why-mt: 8px;     /* dream card rationale margin-top (mockup .dcard .why) */
+  --dream-dcard-when-mt: 8px;    /* dream card timestamp margin-top (mockup .dcard .when) */
+  --dream-avatar-sm: 26px;       /* dream card avatar (12-agent-identity §2 sm; mockup .dcard .av) */
+  --dream-avatar-sm-radius: 7px; /* dream card avatar radius (§2; mockup) */
+  --dream-avatar-lg: 44px;       /* review head avatar (§2 lg; mockup .rhead .av) */
+  --dream-avatar-lg-radius: 11px; /* review head avatar radius (§2; mockup) */
+  --dream-dtag-pad: 3px 7px;     /* dream type tag padding (mockup .dtag) */
+  --dream-review-pad: 18px 22px; /* review pane padding (mockup .review) */
+  --dream-review-gap: 14px;      /* review pane stack gap (mockup .review) */
+  --dream-rhead-gap: 14px;       /* review head gap (mockup .rhead) */
+  --dream-rhead-meta-mt: 4px;    /* review head meta margin-top (mockup .rhead .meta) */
+  --dream-panel-radius: 10px;    /* review panel radius (mockup .panel) */
+  --dream-panelhead-pad: 11px 14px; /* panel header padding (mockup .panel-h) */
+  --dream-panelhead-gap: 8px;    /* panel header gap (mockup .panel-h) */
+  --dream-panelbody-pad: 14px;   /* panel body padding (mockup .panel-b) */
+  --dream-diff-maxw: 72ch;       /* diff column cap (mockup .diff — acceptance item) */
+  --dream-diff-line-pad: 3px 8px; /* diff line padding (mockup .diff .line) */
+  --dream-diff-line-radius: 5px; /* diff line radius (mockup .diff .line) */
+  --dream-diff-sec-m: 10px 0 4px; /* diff section margin (mockup .diff .sec) */
+  --dream-rationale-pad: 12px 14px; /* rationale block padding (mockup .rationale) */
+  --dream-rationale-gap: 10px;   /* rationale block gap (mockup .rationale) */
+  --dream-rationale-radius: 10px; /* rationale block radius (mockup .rationale) */
+  --dream-rationale-maxw: 68ch;  /* rationale quote column cap (mockup .rationale p) */
+  --dream-impact-gap: 16px;      /* impact columns gap (mockup .impact) */
+  --dream-impact-k-mb: 6px;      /* impact key margin-bottom (mockup .impact .k) */
+  --dream-actions-gap: 10px;     /* decision actions gap (mockup .actions) */
+  --dream-actions-note-mt: -6px; /* actions note tuck (mockup .actions-note) */
+  --dream-hrow-pad-y: 7px;       /* history row vertical padding (mockup .hrow) */
+  --dream-hrow-gap: 10px;        /* history row gap (mockup .hrow) */
+  --dream-hst-pad: 2px 7px;      /* history state pill padding (mockup .hrow .st) */
+  --dream-hwhen-pad: 2px 8px;    /* history when pill padding (mockup .hrow .when) */
+  --dream-dcard-what-mt: 1px;  /* dream card summary margin-top (mockup .dcard .what) */
+  --dream-hist-pad-y: 4px;     /* history block vertical padding (mockup .hist) */
+  --dream-impact-col-minw: 140px; /* impact column min width (documented deviation — wrap guard) */
+  --dream-empty-pad-y: 6px;    /* honest-empty vertical padding (documented deviation) */
+  --tracking-dream-qhead: 0.1em; /* queue section head caps tracking (mockup .qhead) */
+  --tracking-dream-dtag: 0.05em; /* dream type tag caps tracking (mockup .dtag) */
+  --tracking-dream-diff-sec: 0.08em; /* diff section caps tracking (mockup .diff .sec) */
+  --tracking-dream-impact-k: 0.08em; /* impact key caps tracking (mockup .impact .k) */
   /* ═══ Element sizes — from design spec §2 ═══ */
   --dot-table: 8px;          /* status dot in tables */
   --dot-feed: 6px;           /* status dot in feeds */

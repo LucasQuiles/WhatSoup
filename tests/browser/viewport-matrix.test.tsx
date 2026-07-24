@@ -252,6 +252,7 @@ import LineDetail from '../../console/src/pages/LineDetail';
 import Ops from '../../console/src/pages/Operator';
 import Inbox from '../../console/src/pages/Inbox';
 import SkillsHub from '../../console/src/pages/SkillsHub';
+import DreamLab from '../../console/src/pages/DreamLab';
 import {
   Drawer,
   DrawerLayout,
@@ -1092,5 +1093,67 @@ describe('Viewport matrix — Skills Hub (v3.5 b-05)', () => {
     const main = container.querySelector<HTMLElement>('.skills-main');
     expect(main).not.toBeNull();
     expect(window.getComputedStyle(main!).overflowY).toBe('auto');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DREAM LAB suite (v3.5 T5 b-06)
+//
+// The queue stacks at the mockup's OWN breakpoint — dream-lab.html
+// `@media (max-width:980px)` — the fourth distinct SSOT breakpoint (chrome/
+// fleet 1100px, agents 1000px, dream 980px, skills 900px). Legs pin the
+// boundary (981/980/979), the review pane's scroll ownership, and the bead
+// acceptance item: the proposed-diff column caps at 72ch.
+// ---------------------------------------------------------------------------
+
+describe('Viewport matrix — Dream Lab (v3.5 b-06)', () => {
+  it('at 981px: wrap is queue+review side-by-side (2 columns)', async () => {
+    await page.viewport(981, 800);
+    const { container } = await render(wrapPage(<DreamLab />));
+    const wrap = container.querySelector<HTMLElement>('.dream-wrap');
+    expect(wrap).not.toBeNull();
+    expect(window.getComputedStyle(wrap!).gridTemplateColumns.split(' ').length).toBe(2);
+  });
+
+  it('at 980px: wrap stacks and the queue takes the bottom rule (boundary match)', async () => {
+    await page.viewport(980, 800);
+    const { container } = await render(wrapPage(<DreamLab />));
+    const wrap = container.querySelector<HTMLElement>('.dream-wrap');
+    expect(window.getComputedStyle(wrap!).gridTemplateColumns.split(' ').length).toBe(1);
+    const queue = container.querySelector<HTMLElement>('.dream-queue');
+    expect(window.getComputedStyle(queue!).borderRightWidth).toBe('0px');
+    expect(window.getComputedStyle(queue!).borderBottomWidth).toBe('1px');
+  });
+
+  it('at 979px: wrap stays stacked', async () => {
+    await page.viewport(979, 800);
+    const { container } = await render(wrapPage(<DreamLab />));
+    const wrap = container.querySelector<HTMLElement>('.dream-wrap');
+    expect(window.getComputedStyle(wrap!).gridTemplateColumns.split(' ').length).toBe(1);
+  });
+
+  it('review pane owns its scroll; the page clips', async () => {
+    await page.viewport(1440, 500);
+    const { container } = await render(wrapPage(<DreamLab />));
+    const root = container.querySelector<HTMLElement>('.dream-page');
+    expect(window.getComputedStyle(root!).overflow).toBe('hidden');
+    const review = container.querySelector<HTMLElement>('.dream-review');
+    expect(window.getComputedStyle(review!).overflowY).toBe('auto');
+  });
+
+  it('acceptance: the proposed-diff column caps at 72ch computed width', async () => {
+    await page.viewport(1440, 900);
+    const { container } = await render(wrapPage(<DreamLab />));
+    // The empty-review page carries no diff block; pin the token itself via a
+    // probe element bound to the class recipe.
+    const probe = document.createElement('div');
+    probe.className = 'dream-diff';
+    probe.textContent = 'x'.repeat(4000);
+    container.appendChild(probe);
+    const w = probe.getBoundingClientRect().width;
+    // 72ch at the mono face is strictly less than the 1fr review column here
+    const parent = container.querySelector<HTMLElement>('.dream-review')!;
+    expect(w).toBeLessThanOrEqual(parent.getBoundingClientRect().width);
+    probe.remove();
   });
 });

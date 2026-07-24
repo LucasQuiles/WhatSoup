@@ -101,6 +101,20 @@ toolbar, result cards (icon box, source badge, actions), compat strip + cells
 Spec SSOT: `tokens-v3.md` §14. Same pattern as b-02…b-04: raw mockup
 dimensions land in the token block once; `skills.css` consumes `var()` only.
 Half-step tokens (`--sp-*h`, DD-9 retirement queue) are not consumed.
+## 5. Dream Lab surface geometry (`--dream-*`, T5 b-06)
+
+Component-register geometry for the Dream Lab surface, all traced to
+`mockups/dream-lab.html` and `12-agent-identity.md` §2: page-row rhythm +
+queued pill, queue rail (340px) with dream cards, filters strip, history rows,
+avatar slots (sm 26px / lg 44px — fills consume `--agent-hue-*` per §2, the ✦
+rationale accent is `--agent-dream`), review pane (rhead, rationale capped
+68ch, **diff capped 72ch — the bead acceptance item**, impact columns,
+decision actions). The stacking breakpoint is the mockup's own 980px — the
+fourth distinct SSOT breakpoint (chrome/fleet 1100px, agents 1000px, dream
+980px, skills 900px). Spec SSOT: `tokens-v3.md` §15. Same pattern as
+b-02…b-05: raw mockup dimensions land in the token block once; `dream.css`
+consumes `var()` only. Half-step tokens (`--sp-*h`, DD-9 retirement queue) are
+not consumed.
 
 ## 6. Acceptance gate
 

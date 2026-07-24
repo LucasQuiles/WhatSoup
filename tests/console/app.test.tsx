@@ -199,8 +199,8 @@ describe('App renders — v3.5 route shells (T5 b-02)', () => {
   it('stub surfaces render the honest placeholder naming their bead', async () => {
     // T5 b-04: /agents graduated off the stub onto the real v3.5 surface.
     // T5 b-05: /skills graduated off the stub onto the real v3.5 surface.
+    // T5 b-06: /dream-lab graduated off the stub onto the real v3.5 surface.
     const cases: Array<[string, string, string]> = [
-      ['/dream-lab', 'Dream Lab', 'b-06'],
       ['/deployments', 'Deployments', 'b-08'],
       ['/settings', 'Settings', 'b-09'],
     ];

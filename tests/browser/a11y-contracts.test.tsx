@@ -81,6 +81,13 @@ vi.mock('../../console/src/pages/SkillsHub', () => ({
   default: () => <section aria-label="Skills Hub route"><h1>Skills Hub</h1></section>,
 }));
 
+// T5 b-06: /dream-lab graduated off SurfaceStub onto the real surface — mock
+// it like the other graduated pages (landmark law is pinned app-shell-wide;
+// the surface's own contracts live in tests/console/dream-lab.test.tsx).
+vi.mock('../../console/src/pages/DreamLab', () => ({
+  default: () => <section aria-label="Dream Lab route"><h1>Dream Lab</h1></section>,
+}));
+
 // ChatPicker reaches lib/api for async contact search. Stub it so the browser
 // network sentinel remains quiet.
 vi.mock('../../console/src/lib/api', () => ({
