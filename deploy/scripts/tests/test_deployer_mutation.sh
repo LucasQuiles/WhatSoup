@@ -293,4 +293,65 @@ if grep -qE '"[^"]+:[0-9a-f]{64}"' "$D"; then
   fail "FILES=() still embeds a hand-maintained sha256 -- SSOT collapse incomplete"
 fi
 
+# ROLLBACK MANIFEST INDEPENDENCE: rollback and rollback-lkg must succeed even
+# when deploy/bot-errors-runtime-manifest.json is corrupt or entirely
+# missing -- an emergency restore's ground truth is the backup directory
+# (bare paths, structurally verified), not the manifest's expected hashes. A
+# 3am operator must never be blocked from rolling back by an unrelated
+# manifest problem. Pre-fix this hard-failed on the manifest read before
+# ever touching the backup; post-fix rollback/rollback-lkg never attempt to
+# resolve MANAGED_FILES at all.
+corrupt_manifest="$tmp/corrupt-manifest.json"
+printf 'not valid json\n' > "$corrupt_manifest"
+missing_manifest="$tmp/does-not-exist-manifest.json"
+
+rb_backup="$tmp/rollback-independence-backup"
+copy_manifest_files "$PWD" "$rb_backup"
+: > "$rb_backup/.was-absent"
+
+rb_root="$tmp/rollback-independence-runtime"
+prepare_current_root "$rb_root"
+printf 'tampered\n' >> "$rb_root/deploy/scripts/bot-errors-emit.py"
+if ! BOT_ERRORS_RUNTIME_MANIFEST_PATH="$corrupt_manifest" bash "$D" rollback "$rb_root" "$rb_backup" > "$tmp/rollback-corrupt-manifest.log" 2>&1; then
+  cat "$tmp/rollback-corrupt-manifest.log"
+  fail "rollback failed with a corrupted manifest -- must be manifest-independent"
+fi
+grep -q "ROLLBACK_OK" "$tmp/rollback-corrupt-manifest.log" || {
+  cat "$tmp/rollback-corrupt-manifest.log"
+  fail "rollback with a corrupted manifest did not report ROLLBACK_OK"
+}
+diff "$rb_root/deploy/scripts/bot-errors-emit.py" "$PWD/deploy/scripts/bot-errors-emit.py" > /dev/null \
+  || fail "rollback with a corrupted manifest did not restore correct bytes"
+
+rb2_root="$tmp/rollback-independence-missing-manifest-runtime"
+prepare_current_root "$rb2_root"
+printf 'tampered\n' >> "$rb2_root/deploy/scripts/bot-errors-emit.py"
+if ! BOT_ERRORS_RUNTIME_MANIFEST_PATH="$missing_manifest" bash "$D" rollback "$rb2_root" "$rb_backup" > "$tmp/rollback-missing-manifest.log" 2>&1; then
+  cat "$tmp/rollback-missing-manifest.log"
+  fail "rollback failed with a missing manifest -- must be manifest-independent"
+fi
+grep -q "ROLLBACK_OK" "$tmp/rollback-missing-manifest.log" || {
+  cat "$tmp/rollback-missing-manifest.log"
+  fail "rollback with a missing manifest did not report ROLLBACK_OK"
+}
+
+rblkg_backup="$tmp/rollback-lkg-independence-backup"
+copy_manifest_files "$PWD" "$rblkg_backup"
+: > "$rblkg_backup/.was-absent"
+
+rblkg_root="$tmp/rollback-lkg-independence-runtime"
+prepare_current_root "$rblkg_root"
+printf '%s\n' "$rblkg_backup" > "$tmp/.bot-errors-last-known-good-rollback-lkg-independence-runtime"
+printf 'tampered\n' >> "$rblkg_root/deploy/scripts/bot-errors-emit.py"
+if ! BOT_ERRORS_RUNTIME_MANIFEST_PATH="$corrupt_manifest" bash "$D" rollback-lkg "$rblkg_root" > "$tmp/rollback-lkg-corrupt-manifest.log" 2>&1; then
+  cat "$tmp/rollback-lkg-corrupt-manifest.log"
+  fail "rollback-lkg failed with a corrupted manifest -- must be manifest-independent"
+fi
+grep -q "ROLLBACK_LKG_OK" "$tmp/rollback-lkg-corrupt-manifest.log" || {
+  cat "$tmp/rollback-lkg-corrupt-manifest.log"
+  fail "rollback-lkg with a corrupted manifest did not report ROLLBACK_LKG_OK"
+}
+diff "$rblkg_root/deploy/scripts/bot-errors-emit.py" "$PWD/deploy/scripts/bot-errors-emit.py" > /dev/null \
+  || fail "rollback-lkg with a corrupted manifest did not restore correct bytes"
+
 echo "DEPLOYER_MUTATION_PASS"

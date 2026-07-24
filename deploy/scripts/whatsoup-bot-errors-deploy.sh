@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# whatsoup-bot-errors-deploy.sh — reversible materialize of the 10 bot-errors runtime
-# files (pinned to current origin/main content) into a host's TRUE bot-errors root.
+# whatsoup-bot-errors-deploy.sh — reversible materialize of the 12 bot-errors runtime
+# files into a host's TRUE bot-errors root. Expected per-file hashes are resolved at
+# startup from deploy/bot-errors-runtime-manifest.json (the single source of truth) --
+# not embedded in this script.
 #
 #   deploy:       whatsoup-bot-errors-deploy.sh deploy       <root> <staging-dir>
 #   verify:       whatsoup-bot-errors-deploy.sh verify       <root>
@@ -8,10 +10,14 @@
 #   rollback-lkg: whatsoup-bot-errors-deploy.sh rollback-lkg <root>
 #   pin:          whatsoup-bot-errors-deploy.sh pin          <manifest.json> <ledger.json> <head_sha>
 #
-# Fail-closed: any sha mismatch or smoke failure exits non-zero. Backup is taken BEFORE
-# any write so rollback is always possible. Does NOT touch git or restart services.
-# Writes are confined to <root> plus a sibling rollback-backup directory. Restart of
-# com.bot-errors.* units is a separate, explicit step.
+# Fail-closed: any sha mismatch or smoke failure exits non-zero for deploy/verify.
+# rollback/rollback-lkg are exempt from the runtime-manifest lookup (an emergency
+# restore's ground truth is the backup directory, not the manifest) and instead
+# fail-closed on structural completeness (every managed path present, no symlinks)
+# plus the same smoke check. Backup is taken BEFORE any write so rollback is always
+# possible. Does NOT touch git or restart services. Writes are confined to <root>
+# plus a sibling rollback-backup directory. Restart of com.bot-errors.* units is a
+# separate, explicit step.
 set -euo pipefail
 
 MODE="${1:?usage: deploy|verify|rollback|rollback-lkg|pin ...}"
@@ -157,6 +163,26 @@ do_verify() {
   return $fail
 }
 
+verify_paths_present() {
+  # Manifest-independent structural check: every managed path exists at the
+  # given root and is not reached through a symlink -- the same path set
+  # do_verify() checks, but with no byte/hash comparison and therefore no
+  # dependency on MANAGED_FILES (which requires a readable runtime
+  # manifest). Used by rollback/rollback-lkg, which must keep working even
+  # when the manifest is corrupt or missing: the backup directory is the
+  # ground truth for an emergency restore, not the manifest, and a 3am
+  # operator should never be blocked from rolling back by an unrelated
+  # manifest problem.
+  local fail=0 r="$1"
+  for path in "${FILES[@]}"; do
+    local f="$r/$path"
+    if ! assert_no_symlink_path "$r" "$path"; then fail=1; continue; fi
+    if [[ ! -f "$f" ]]; then echo "  MISSING  $path"; fail=1; continue; fi
+    echo "  PRESENT  $path"
+  done
+  return $fail
+}
+
 smoke_redaction() {
   # Prove the deployed F10 module actually redacts an authorization-assignment secret.
   local r="$1"
@@ -230,16 +256,19 @@ write_last_known_good_pointer() {
 }
 
 is_managed_path() {
-  local candidate="$1" entry path
-  for entry in "${MANAGED_FILES[@]}"; do
-    path="${entry%%:*}"
+  # Path-membership only -- deliberately checks the bare FILES list, not
+  # MANAGED_FILES, so it works whether or not the runtime manifest resolved
+  # (its only callers, require_backup_dir()/rollback/rollback-lkg, must not
+  # depend on that).
+  local candidate="$1" path
+  for path in "${FILES[@]}"; do
     [[ "$candidate" == "$path" ]] && return 0
   done
   return 1
 }
 
 require_backup_dir() {
-  local root="$1" bkdir="$2" root_parent root_abs backup_abs absent_path entry local_path
+  local root="$1" bkdir="$2" root_parent root_abs backup_abs absent_path local_path
   [ -n "$bkdir" ] || { echo "FATAL: backup dir missing"; return 3; }
   [ -d "$bkdir" ] || { echo "FATAL: backup dir not found: $bkdir"; return 3; }
   [ -f "$bkdir/.was-absent" ] || { echo "FATAL: backup missing .was-absent ledger: $bkdir"; return 3; }
@@ -254,8 +283,7 @@ require_backup_dir() {
     [[ -z "$absent_path" ]] && continue
     is_managed_path "$absent_path" || { echo "FATAL: backup .was-absent contains unmanaged path: $absent_path"; return 3; }
   done < "$bkdir/.was-absent"
-  for entry in "${MANAGED_FILES[@]}"; do
-    local_path="${entry%%:*}"
+  for local_path in "${FILES[@]}"; do
     assert_no_symlink_path "$bkdir" "$local_path" || { echo "FATAL: backup path is unsafe"; return 3; }
   done
 }
@@ -300,8 +328,12 @@ prune_verified_backups() {
 # pin mode operates on an arbitrary caller-supplied manifest/ledger pair (see
 # below) and never touches MANAGED_FILES, so it is exempt from this lookup --
 # it must keep working even if deploy/bot-errors-runtime-manifest.json is
-# absent or mid-edit.
-if [[ "$MODE" != "pin" ]]; then
+# absent or mid-edit. rollback and rollback-lkg are exempt for the same
+# reason: an emergency restore's ground truth is the backup directory (bare
+# paths, verified structurally via verify_paths_present()), not the
+# manifest's expected hashes -- a corrupt/missing manifest must never block
+# a 3am rollback.
+if [[ "$MODE" != "pin" && "$MODE" != "rollback" && "$MODE" != "rollback-lkg" ]]; then
   if [[ -n "${BOT_ERRORS_RUNTIME_MANIFEST_PATH:-}" ]]; then
     # Test/operator override -- lets a caller point at an alternate manifest
     # (e.g. a disposable copy in a test tmpdir) without touching the real
@@ -377,12 +409,10 @@ case "$MODE" in
     require_backup_dir "$ROOT" "$BKDIR" || exit 3
     echo "== rollback $ROOT from $BKDIR =="
     echo "== rollback target safety =="
-    for entry in "${MANAGED_FILES[@]}"; do
-      local_path="${entry%%:*}"
+    for local_path in "${FILES[@]}"; do
       assert_no_symlink_path "$ROOT" "$local_path" || { echo "FATAL: target path is unsafe"; exit 3; }
     done
-    for entry in "${MANAGED_FILES[@]}"; do
-      local_path="${entry%%:*}"
+    for local_path in "${FILES[@]}"; do
       if [[ -f "$BKDIR/$local_path" ]]; then mkdir -p "$(dirname "$ROOT/$local_path")"; cp -p "$BKDIR/$local_path" "$ROOT/$local_path"; fi
     done
     # delete files that were absent before deploy
@@ -398,9 +428,9 @@ case "$MODE" in
     require_backup_dir "$ROOT" "$BKDIR" || exit 3
     echo "== rollback last_known_good $ROOT from $BKDIR =="
     echo "LAST_KNOWN_GOOD_POINTER=$LKG_POINTER"
-    if do_verify "$BKDIR" && smoke_redaction "$BKDIR"; then
+    if verify_paths_present "$BKDIR" && smoke_redaction "$BKDIR"; then
       bash "$0" rollback "$ROOT" "$BKDIR"
-      do_verify "$ROOT" && smoke_redaction "$ROOT" && echo "ROLLBACK_LKG_OK backup=$BKDIR" || { echo "ROLLBACK_LKG_VERIFY_FAIL"; exit 4; }
+      verify_paths_present "$ROOT" && smoke_redaction "$ROOT" && echo "ROLLBACK_LKG_OK backup=$BKDIR" || { echo "ROLLBACK_LKG_VERIFY_FAIL"; exit 4; }
     else
       echo "FATAL: last_known_good backup does not verify clean: $BKDIR"
       exit 3
