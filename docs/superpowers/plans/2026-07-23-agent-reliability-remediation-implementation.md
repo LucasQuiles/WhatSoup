@@ -57,6 +57,14 @@ conflicted in generated work-index files, which were regenerated from their
 reconciled trees. Queue and suspend must still refresh after provider actor
 isolation merges, as required by the merge order below.
 
+Dry merge-tree checks across the three recorded heads found no code conflict.
+Actor/queue and actor/suspend conflict only in the generated work index;
+queue/suspend additionally conflict in the generated public-surface registry.
+After each preceding pull request lands, the next branch must merge the new
+`main`, regenerate those registries, and rerun its complete gate. The current
+independent green heads are not evidence that the later landing refresh can be
+skipped.
+
 Each reconciliation cycle ran verification, gap analysis, a falsifiable
 integration hypothesis, duplication review, and architecture/fitness
 simplification. One queue push attempt was inconclusive because a locally
